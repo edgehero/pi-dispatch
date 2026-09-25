@@ -21,7 +21,7 @@ import { cronFingerprint } from "./fingerprint.mjs";
 import { makeHostRegistry } from "./host-registry.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { createWorker, JOB_TIMEOUT_MS } from "./index.mjs";
-import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, jobUserRefusal, makeDaemonFactsReader, makeJobUserResolver, resolveImageUser } from "./job-user.mjs";
+import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, jobUserRefusal, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
 import { makeCollectChain } from "./outbox.mjs";
 import { containerPackagePaths, readStageManifest } from "./packages.mjs";
 import { makeCleanup, makeForgePreparers, makePrepareWorkspace } from "./prepare.mjs";
@@ -1252,12 +1252,18 @@ export async function startWorker(
 				const venue = resolveBackendName(job, config.defaultBackend);
 				if (venue !== DEFAULT_BACKEND) return { user: null, home: null };
 				const endpoint = observed?.endpoint ?? (await resolveDockerEndpointFn());
-				const { decision, socket } = observed?.jobUser ?? (await resolveJobUser({ endpoint, key: dockerEndpointState(endpoint) }));
+				const { decision, socket, facts } = observed?.jobUser ?? (await resolveJobUser({ endpoint, key: dockerEndpointState(endpoint) }));
 				if (jobUserLogKey(decision) !== jobUserSaid) {
 					jobUserSaid = jobUserLogKey(decision);
 					log("job_user", { mode: decision.mode, user: decision.user, cause: decision.cause, reason: decision.reason });
 				}
-				return resolveImageUser(decision, { capabilities, euid: jobUserIdentity.euid, egid: jobUserIdentity.egid, socket });
+				const chosen = resolveImageUser(decision, { capabilities, euid: jobUserIdentity.euid, egid: jobUserIdentity.egid, socket });
+				// Issue #355: whether this job's own mounts carry `:Z`, from the SAME facts and endpoint the user was decided
+				// from, so one job's two answers cannot come from two reads. Only on a path that runs (a refusal or an
+				// undecidable daemon runs nothing), and only when true: every host this does not apply to keeps the answer
+				// shape, and so the argv, it had before.
+				if (chosen.refused || chosen.unavailable) return chosen;
+				return relabelsPrivateMounts(facts, endpoint, jobUserIdentity.platform) ? { ...chosen, relabel: true } : chosen;
 			},
 			// Completed-only, so a policy or infra exit leaves the canonical transcript byte-identical and a
 			// retry starts from what the first attempt did (CONST-RETRY-INFRA-ONLY).

@@ -76,12 +76,15 @@ export function parseDaemonFacts(output) {
 		if (Array.isArray(body.ServerErrors) && body.ServerErrors.length > 0) return { unreachable: true };
 		if (body.host && typeof body.host === "object") {
 			const rootless = body.host.security?.rootless;
+			const selinux = body.host.security?.selinuxEnabled;
 			const path = body.host.remoteSocket?.path;
 			return { facts: {
 				shape: "podman",
 				podman: true,
 				os: typeof body.host.os === "string" ? body.host.os : null,
 				rootless: typeof rootless === "boolean" ? rootless : null,
+				// Issue #355. Podman's own shape says it outright, so a missing or odd value is no fact rather than `false`.
+				selinux: typeof selinux === "boolean" ? selinux : null,
 				userns: false,
 				bounds: null,
 				serviceIsRemote: typeof body.host.serviceIsRemote === "boolean" ? body.host.serviceIsRemote : null,
@@ -100,6 +103,10 @@ export function parseDaemonFacts(output) {
 				podman,
 				os: typeof body.OperatingSystem === "string" ? body.OperatingSystem : null,
 				rootless: named("rootless"),
+				// Issue #355, measured through rootful Podman 5.8.1's compat API on an enforcing Fedora 44 host:
+				// `["name=seccomp,profile=default","name=selinux"]`. Docker Engine with `selinux-enabled` says the same word,
+				// and that route is out of scope, so this fact alone decides nothing (`relabelsPrivateMounts`).
+				selinux: named("selinux"),
 				userns: named("userns"),
 				bounds: podman ? null : { pids: body.PidsLimit === true, memory: body.MemoryLimit === true },
 				serviceIsRemote: null,
@@ -109,6 +116,31 @@ export function parseDaemonFacts(output) {
 		}
 	}
 	return null;
+}
+
+/**
+ * Whether a job's OWN bind mounts carry `:Z` (issue #355): `true` only for a Podman daemon that reports SELinux, reached
+ * through an endpoint on this host, from a Linux worker. Measured on an enforcing Fedora 44 host (rootful Podman 5.8.1,
+ * container-selinux 2.247.0): every unlabelled bind source is denied to the container, `ls` included, with or without
+ * `:ro`, so every job on the documented Podman route failed at `/job` before it spent anything.
+ *
+ * ONE function, read by the job path, doctor and the sandbox, so the three cannot disagree about when a mount is
+ * relabelled. Each condition is a measured boundary rather than caution:
+ *   - Podman only. Docker Engine with `selinux-enabled` reports the same `name=selinux` and was not measured, so its
+ *     argv stays exactly what it was (out of scope, named in the design entry).
+ *   - `selinux === true` only: `null` (a shape that did not say) is not a reason to relabel anything.
+ *   - `endpoint.local === true` only: bind sources are the DAEMON's paths, and on another machine this worker's job
+ *     directories are not what gets relabelled.
+ *   - a Linux worker only: a Podman machine on macOS or Windows reports its Linux VM's SELinux while the bind sources are
+ *     the host's own files shared into that VM, a route nobody measured with `:Z`.
+ *
+ * WHICH mounts is `containerSpec`'s business, not this function's: only the directories the worker creates per job.
+ * `:Z` is PRIVATE (a per-container MCS pair), which is exactly right for a directory one container ever sees, and
+ * measured to lock every other container out of what it relabels. So an operator's local folder and the shared global
+ * overlay are NEVER relabelled; doctor names the `semanage fcontext` fix for those instead.
+ */
+export function relabelsPrivateMounts(facts, endpoint, platform = process.platform) {
+	return platform === "linux" && facts?.podman === true && facts?.selinux === true && endpoint?.local === true;
 }
 
 /**

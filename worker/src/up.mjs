@@ -83,10 +83,13 @@ const EGRESS_RUN_ARGS = [
 	"unless-stopped",
 	"--network",
 	"pi-dispatch-egress-out",
+	// `z` for the same measured reason as the compose file's mounts (issue #355): on an SELinux-enforcing host squid
+	// cannot read an unlabelled config and crash-loops; `z` (shared, never `Z`) relabels the one file so any container
+	// may read it, and is a no-op where SELinux is off.
 	"-v",
-	"./deploy/egress-proxy.conf:/etc/squid/squid.conf:ro",
+	"./deploy/egress-proxy.conf:/etc/squid/squid.conf:ro,z",
 	"-v",
-	"./egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro",
+	"./egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro,z",
 	"ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029",
 ];
 

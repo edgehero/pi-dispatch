@@ -1155,3 +1155,40 @@ test("jobToJobIsolation reads a malformed PI_EGRESS as unreadable, not off, and 
 	assert.equal(ran.ok, true, "a proxy state doctor did not read is not a proxy seen down");
 	assert.ok(unknownProxy.calls.some((a) => a.includes(PEER_SCRIPT)));
 });
+
+// --- issue #355: SELinux relabelling, as a job's --------------------------------------------------------------------
+
+const vOf = (args) => args.filter((_a, i) => args[i - 1] === "-v");
+const RELABELLED = [`${FIXTURE.jobDir}:/job:ro,Z`, `${FIXTURE.workspace}:/workspace:Z`, `${FIXTURE.outboxDir}:/outbox:Z`, `${FIXTURE.sessionDir}:/session:Z`, `${FIXTURE.globalPiDir}:/opt/pi-global:ro`];
+
+test("with relabel every probe argv carries :Z on the fixture's own mounts, and the global fixture never (#355)", () => {
+	const built = [
+		liveProbeRunArgs({ image: "pi-job:x", name: "p", fixture: FIXTURE, sleepSeconds: 90, relabel: true }),
+		pinningProbeRunArgs({ name: "pin", nonce: "n", fixture: FIXTURE, relabel: true }),
+		ephemeralRunArgs({ image: "pi-job:x", name: "e", fixture: FIXTURE, nonce: "n", run: 1, relabel: true }),
+		peerRunArgs({ image: "pi-job:x", name: "peer", fixture: FIXTURE, network: "net", nonce: "n", seconds: 5, relabel: true }),
+	];
+	for (const args of built) assert.deepEqual(vOf(args), RELABELLED);
+});
+
+test("without relabel every probe argv is the one it always was (#355)", () => {
+	const plain = [`${FIXTURE.jobDir}:/job:ro`, `${FIXTURE.workspace}:/workspace`, `${FIXTURE.outboxDir}:/outbox`, `${FIXTURE.sessionDir}:/session`, `${FIXTURE.globalPiDir}:/opt/pi-global:ro`];
+	assert.deepEqual(vOf(liveProbeRunArgs({ image: "pi-job:x", name: "p", fixture: FIXTURE, sleepSeconds: 90 })), plain);
+	assert.deepEqual(liveProbeRunArgs({ image: "pi-job:x", name: "p", fixture: FIXTURE, sleepSeconds: 90, relabel: false }), liveProbeRunArgs({ image: "pi-job:x", name: "p", fixture: FIXTURE, sleepSeconds: 90 }));
+});
+
+test("a live run threads relabel into every container it starts, peers included, and never onto the global fixture (#355)", async () => {
+	const docker = fakeDocker();
+	const result = await runLiveProbes(probeArgs(docker, { egress: LIVE_EGRESS, relabel: true, ...instant() }));
+	assert.equal(result.ran, true);
+	const runs = docker.calls.filter((a) => a[0] === "run");
+	assert.ok(runs.length >= 5, "the probe, the pin, two ephemeral runs and the peers");
+	for (const args of runs) {
+		const v = vOf(args);
+		assert.equal(v.length, 5, args.join(" "));
+		for (const m of v) assert.equal(m.endsWith(":/opt/pi-global:ro") ? !/Z$/.test(m) : /(:|,)Z$/.test(m), true, m);
+	}
+	const plain = fakeDocker();
+	await runLiveProbes(probeArgs(plain, { egress: LIVE_EGRESS, ...instant() }));
+	assert.ok(!plain.calls.filter((a) => a[0] === "run").some((a) => vOf(a).some((m) => /Z$/.test(m))), "no relabel, no :Z anywhere");
+});

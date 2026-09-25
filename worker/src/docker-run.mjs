@@ -213,7 +213,16 @@ export function dockerArgsFromSpec(spec) {
 	// `-v` and its value stay TWO argv elements rather than one `--volume=` token. Not cosmetic: the mount
 	// assertions across this suite extract mounts by adjacency (`args[i - 1] === "-v"`), so collapsing the
 	// pair would make those filters return nothing and turn several exact-array checks vacuously green.
-	for (const m of spec.mounts ?? []) args.push("-v", `${m.host}:${m.container}${m.readOnly ? ":ro" : ""}`);
+	//
+	// The option list after the container path is `ro`, `Z`, or `ro,Z` (issue #355): one list, comma-joined, which is
+	// how both the docker CLI and Podman read it. `Z` only for a mount the spec marks `relabel: "private"`, so a spec
+	// without that field renders exactly the strings it always did. Anything else in that field is refused rather than
+	// dropped, because a mount that silently lost its label fails in the container with nothing pointing back here.
+	for (const m of spec.mounts ?? []) {
+		if (m.relabel !== undefined && m.relabel !== "private") throw new Error(`docker run: refusing a mount relabel other than "private": ${JSON.stringify(m.relabel)}`);
+		const options = [...(m.readOnly ? ["ro"] : []), ...(m.relabel === "private" ? ["Z"] : [])];
+		args.push("-v", `${m.host}:${m.container}${options.length > 0 ? `:${options.join(",")}` : ""}`);
+	}
 
 	args.push(spec.image);
 	return args;

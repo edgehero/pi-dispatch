@@ -14,6 +14,15 @@
 #
 # On rootful Podman, run the same commands with the real docker CLI pointed at Podman's socket through a docker
 # context (docs/podman.md). Measured with the egress profile on Podman 5.8.2; podman-docker is not the supported route.
+# Measured again on a real host (issue #355): Podman 5.8.1 on Fedora 44 with SELinux enforcing, netavark on nftables
+# and health checks run by systemd timers. The proxy reached healthy with the `z` labels below and no manual help.
+#
+# Why `z` on the single config files below: with SELinux enforcing, a bind mount carries its host label into the
+# container, and a file under a checkout is not container_file_t, so the container may not read it. Measured on
+# Fedora 44, squid crash-looped with "Unable to open configuration file: /etc/squid/squid.conf: (13) Permission
+# denied". `z` (shared, lower case) relabels that one file container_file_t so any container may read it, and is a
+# no-op where SELinux is off. Never `Z`: that label is private to one container, so it would lock the other
+# services out of the same file. The host's own tools, the worker included, run unconfined and still read it.
 
 services:
   valkey:
@@ -58,7 +67,8 @@ services:
     # invisible in here until the container restarts, and the worker's own pre-spend check is what
     # keeps a spent one-shot from running again in the meantime. A restart picks up the current file.
     volumes:
-      - ../triggers.json:/config/triggers.json:ro
+      # `z` for the SELinux reason at the top of this file: unlabelled, the receiver cannot read it on an enforcing host.
+      - ../triggers.json:/config/triggers.json:ro,z
     # Loopback only, like Valkey's port above: the operator's reverse proxy or tunnel (TLS, public
     # hostname) is what faces the internet -- never this port raw. Assumes the in-container default
     # RECEIVER_PORT=3000; if your .env overrides it, adjust the right-hand side to match.
@@ -99,12 +109,14 @@ services:
     # name and the two literals would disagree -- silently, and only on a deployment that renamed nothing.
     container_name: pi-dispatch-egress-proxy
     volumes:
-      # The RULES, shipped and not edited. Relative paths resolve against THIS FILE's directory.
-      - ./egress-proxy.conf:/etc/squid/squid.conf:ro
+      # The RULES, shipped and not edited. Relative paths resolve against THIS FILE's directory. Both mounts
+      # here carry `z` for the SELinux reason at the top of this file: without it squid crash-loops on an
+      # enforcing host, unable to open its own configuration.
+      - ./egress-proxy.conf:/etc/squid/squid.conf:ro,z
       # The LIST, yours. `pi-dispatch init` scaffolds it next to your .env; it is create-only, so a re-run
       # never clobbers an edited allowlist. Mounting a path that does not exist makes Docker create it as a
       # DIRECTORY and squid then fails confusingly, which is why init writes it first.
-      - ../egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro
+      - ../egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro,z
     networks:
       - egress-out
     restart: unless-stopped

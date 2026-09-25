@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync, readdirSync } from "node:fs";
-import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "../src/container-spec.mjs";
+import { CONTAINER_HOME, SHIPPED_IMAGE_UID, transfersFromSpec } from "../src/container-spec.mjs";
 import { buildDockerRunArgs, containerSpec, DOCKER_EXTRA_ALLOWED, DOCKER_EXTRA_FORBIDDEN, dockerArgsFromSpec, ISOLATION_FLAGS } from "../src/docker-run.mjs";
 
 const base = {
@@ -366,4 +366,64 @@ test("the cidfile is a builder-owned field: its own token before dockerExtra, ab
 		assert.throws(() => containerSpec({ ...base, cidFile: bad }), /refusing a cidfile/, JSON.stringify(bad));
 		assert.throws(() => dockerArgsFromSpec({ ...containerSpec(base), cidFile: bad }), /refusing a cidfile/, `hand-built ${JSON.stringify(bad)}`);
 	}
+});
+
+// --- issue #355: SELinux relabelling of the worker's own per-job mounts -----------------------------------------
+
+test("with relabel, /job, /outbox and /session are relabelled private, /workspace only when the worker owns it, /opt/pi-global never", () => {
+	const all = { ...base, sessionDir: "/s", globalPiDir: "/g" };
+	assert.deepEqual(containerSpec({ ...all, relabel: true, workspaceOwned: true }).mounts, [
+		{ host: "/srv/jobs/abc/job", container: "/job", readOnly: true, relabel: "private" },
+		{ host: "/srv/jobs/abc/workspace", container: "/workspace", readOnly: false, relabel: "private" },
+		{ host: "/srv/jobs/abc/outbox", container: "/outbox", readOnly: false, relabel: "private" },
+		{ host: "/s", container: "/session", readOnly: false, relabel: "private" },
+		{ host: "/g", container: "/opt/pi-global", readOnly: true },
+	]);
+	// A local job: /workspace is the operator's folder, which a private label would take from every other container.
+	assert.deepEqual(containerSpec({ ...all, relabel: true, workspaceOwned: false }).mounts[1], { host: "/srv/jobs/abc/workspace", container: "/workspace", readOnly: false });
+	assert.deepEqual(containerSpec({ ...all, relabel: true }).mounts[1], { host: "/srv/jobs/abc/workspace", container: "/workspace", readOnly: false }, "not owned unless the caller says so");
+});
+
+test("with relabel, the argv spells :ro,Z, :Z and a bare overlay, with -v and its value still two elements", () => {
+	const args = buildDockerRunArgs({ ...base, sessionDir: "/s", globalPiDir: "/g", relabel: true, workspaceOwned: true });
+	const i = args.indexOf("/srv/jobs/abc/job:/job:ro,Z");
+	assert.deepEqual(args.slice(i - 1, i + 1), ["-v", "/srv/jobs/abc/job:/job:ro,Z"]);
+	assert.deepEqual(args.filter((_a, n) => args[n - 1] === "-v"), [
+		"/srv/jobs/abc/job:/job:ro,Z",
+		"/srv/jobs/abc/workspace:/workspace:Z",
+		"/srv/jobs/abc/outbox:/outbox:Z",
+		"/s:/session:Z",
+		"/g:/opt/pi-global:ro",
+	]);
+	assert.ok(args.includes("/srv/jobs/abc/workspace:/workspace:Z"));
+	assert.ok(!args.some((a) => /:z$|,z$/.test(a)), "never the shared form, which would open a job's directory to every container");
+	const local = buildDockerRunArgs({ ...base, relabel: true, workspaceOwned: false });
+	assert.ok(local.includes("/srv/jobs/abc/workspace:/workspace"), "an operator's folder is mounted exactly as before");
+});
+
+test("without relabel the argv is byte-identical to one built before issue #355, whatever workspaceOwned says", () => {
+	const all = { ...base, sessionDir: "/s", globalPiDir: "/g", user: "1234:1234", network: "n", cidFile: "/srv/jobs/abc/job.cid" };
+	const before = buildDockerRunArgs(all);
+	assert.deepEqual(buildDockerRunArgs({ ...all, relabel: false }), before);
+	assert.deepEqual(buildDockerRunArgs({ ...all, relabel: false, workspaceOwned: true }), before);
+	assert.ok(!before.some((a) => a.endsWith(":Z") || a.endsWith(",Z")));
+	assert.deepEqual(containerSpec({ ...all, workspaceOwned: true }).mounts, containerSpec(all).mounts, "no relabel key at all, not a null one");
+	for (const m of containerSpec({ ...all, relabel: false }).mounts) assert.equal("relabel" in m, false, m.container);
+});
+
+test("relabel and workspaceOwned are booleans, and a hand-built mount may carry only the private relabel", () => {
+	for (const bad of ["true", 1, null]) {
+		assert.throws(() => containerSpec({ ...base, relabel: bad }), /relabel must be a boolean/, JSON.stringify(bad));
+		assert.throws(() => containerSpec({ ...base, relabel: true, workspaceOwned: bad }), /workspaceOwned must be a boolean/, JSON.stringify(bad));
+	}
+	const spec = containerSpec(base);
+	for (const relabel of ["shared", "z", "Z", true]) {
+		const bad = { ...spec, mounts: [{ host: "/w", container: "/workspace", readOnly: false, relabel }] };
+		assert.throws(() => dockerArgsFromSpec(bad), /relabel other than "private"/, JSON.stringify(relabel));
+	}
+});
+
+test("a copying runtime's transfers carry no relabel: the label is a bind-mount option, not a file property", () => {
+	const spec = containerSpec({ ...base, relabel: true, workspaceOwned: true });
+	for (const t of transfersFromSpec(spec)) assert.equal("relabel" in t, false, t.container);
 });

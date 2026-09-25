@@ -357,6 +357,28 @@ test("a job user without HOME=/home/pi is refused before docker is ever spawned 
 	}
 });
 
+test("relabel reaches the argv: a local job's own dirs carry :Z and its folder never does; a forge job's clone does (issue #355)", { skip }, async () => {
+	const local = {};
+	await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn(local) })({ job: JOB, prepared: { ...PREPARED, outboxDir: "/host/jobs/j1/outbox" }, name: "j1", signal: new AbortController().signal, relabel: true });
+	const mounts = (args) => args.filter((_a, i) => args[i - 1] === "-v");
+	assert.deepEqual(mounts(local.args), ["/host/jobs/j1:/job:ro,Z", "/host/folder:/workspace", "/host/jobs/j1/outbox:/outbox:Z"], "workspaceOwned false for a local job: the operator's folder keeps its own label");
+	const forge = {};
+	const githubJob = { kind: "github", provider: "anthropic", model: "m", maxTurns: 5, repo: "o/r" };
+	await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn(forge) })({ job: githubJob, token: "ghs_x", prepared: { workspace: "/host/jobs/j2/workspace", jobDir: "/host/jobs/j2" }, name: "j2", signal: new AbortController().signal, relabel: true });
+	assert.deepEqual(mounts(forge.args), ["/host/jobs/j2:/job:ro,Z", "/host/jobs/j2/workspace:/workspace:Z"], "workspaceOwned true for a forge job: its workspace is the worker's own clone");
+});
+
+test("no relabel, or anything but true, builds the argv it always did (issue #355)", { skip }, async () => {
+	const runWith = async (extra) => {
+		const rec = {};
+		await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn(rec) })({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal, ...extra });
+		return rec.args;
+	};
+	const before = await runWith({});
+	assert.ok(before.includes("/host/jobs/j1:/job:ro"));
+	for (const relabel of [false, "true", 1]) assert.deepEqual(await runWith({ relabel }), before, JSON.stringify(relabel));
+});
+
 // --- issue #345: a container that outlived its docker run -------------------------------------------------------
 
 const CID = "d".repeat(64);

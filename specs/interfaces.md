@@ -520,6 +520,7 @@ refactor apart.
   | `/job` (or `/job/prompt.md`) denies the job user (`EACCES`/`EPERM`), e.g. a `0700` job dir owned by another uid on a daemon that enforces bind-mount ownership | pre-spend `access(2)` on `/job` beside the mount asserts, and the prompt read | `2` / `job-inputs-unreadable`: deterministic, pre-spend, and it names the uid; before it, a prompt job reported "missing job input", a command job never read `prompt.md` at all, and the loader's `existsSync` gate dropped the job's trigger skills without a word while the job spent |
   | `/session` denies the job user | the session mount assert asks the directory's access code BEFORE existence | `2` / `config`, "session mount is not accessible to the job user" (no longer misreported as "did not land"); `config` rather than `job-inputs-unreadable` because the transcript mount is not a job input and its other refusals already say `config` |
   | `/opt/pi-global` (the operator's overlay) or a staged package root denies the job user | the same access check, and the package-path assert | `2` / `job-inputs-unreadable`; before it the loader's `existsSync` gates dropped the overlay silently and a package root read as "does not exist" |
+  | `/workspace` denies the job user READ or traverse (issue #355), e.g. an operator's local folder not labelled for containers on an SELinux-enforcing host, which is denied whatever its mode bits say | the same pre-spend access check, `R_OK` and `X_OK`, after `/job` and `/opt/pi-global` | `2` / `job-inputs-unreadable`, naming `/workspace`; before it the job ran and spent with an agent that could not read its own repository. A `/workspace` it can read and not WRITE is not refused: `workspace_not_writable` stays advisory below, because a read-only review of such a folder is a legitimate job |
 
   Beside them the runner logs **advisory** lines that change no exit code, because each describes a job that
   runs today and may be doing what its trigger wants: `workspace_not_writable`, `outbox_not_writable`,
@@ -676,7 +677,10 @@ refactor apart.
   behind `/job` is a `0700` `mkdtemp` owned by the worker, so the job's uid must BE the worker's on a daemon that
   enforces bind-mount ownership (`--user`, issue #341), or the daemon must ignore ownership (Docker Desktop);
   otherwise the runner refuses the job before any spend as `job-inputs-unreadable`
-  (`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`).
+  (`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`). On an SELinux-enforcing Podman host the ownership is not enough:
+  the directory must also carry a label a container may read, which the worker gives its own per-job directories
+  with `:Z` (`INT-CONTAINER-RUNTIME-CONTRACT`, issue #355). A local job's `/workspace` and the overlay are the
+  operator's to label, and the runner refuses a job that cannot read either, pre-spend, as `job-inputs-unreadable`.
   ```
   /job/prompt.md          task text (issue/PR payload, or the operator-supplied task), plus the
                           trigger's `run.instructions` in the envelope above the data region, if set
@@ -951,6 +955,18 @@ refactor apart.
     configured), and `/session:rw` — the last only when a trigger armed `run.resume` and the worker
     resolved a key (`INT-SESSION-STORE-CONTRACT`). `/session` is a **per-job** directory under the job's
     own dir; the shared store is never bind-mounted into anything.
+  - **The SELinux relabel option (issue #355).** Where `relabelsPrivateMounts` holds (a Podman daemon that reports
+    SELinux, `name=selinux` or `host.security.selinuxEnabled`, on an endpoint on this host, from a Linux worker), the
+    mounts the worker makes for this one job carry Podman's PRIVATE relabel option `Z`, in the same option list as
+    `ro`: `-v <job>:/job:ro,Z`, `-v <outbox>:/outbox:Z`, `-v <session>:/session:Z`, and `-v <ws>:/workspace:Z` only
+    when the workspace is the worker's own (a forge job's clone, a sandbox's retained workspace, `doctor --live`'s
+    fixture), never a local job's folder. `/opt/pi-global` is NEVER relabelled. `-v` and its value stay two argv
+    elements. Where the rule does not hold, Docker Engine with `selinux-enabled` included, the argv is byte-identical
+    to one built before the option existed: the spec's mount objects gain no key, and the builder refuses any
+    `relabel` value but `"private"`. Why private and never shared (`:z`), and why never an operator's folder, is
+    `DES-PODMAN-THROUGH-ITS-DOCKER-API`: measured on an enforcing Fedora 44 host, an unlabelled source is denied to
+    the container outright, `:z` would open a job's directory to every container, and `:Z` locks every other
+    container out of what it relabels.
   - **A conformance item, and it belongs on the "fails silently or late" list above**: an image must
     declare its pi version as the `dev.pi-dispatch.pi-version` LABEL and its runner must honour
     `PI_SESSION_FILE`. An image that declares no version never resumes, which is the safe direction; one
@@ -1257,7 +1273,8 @@ refactor apart.
     env would have met it for real.
   - Mounts: `/job:ro`, `/workspace:rw`, — **local jobs only** — `/outbox:rw`, and — **only when
     `PI_GLOBAL_PI_DIR` is configured** — `/opt/pi-global:ro` — delivered by host bind mounts
-    (`-v <hostPath>:<containerPath>`, per `DES-WORKER-ON-HOST` and `worker/src/docker-run.mjs`): the worker
+    (`-v <hostPath>:<containerPath>`, with `Z` in the option list where the SELinux relabel bullet above applies,
+    per `DES-WORKER-ON-HOST` and `worker/src/docker-run.mjs`): the worker
     runs on the host and binds the per-job inputs dir, the workspace folder, the outbox dir, and the operator's
     global pi overlay directly. `/opt/pi-global` is the operator's own `~/.pi/agent` subset — custom models, global
     skills, a global persona, and (fourth) the **staged pi packages** under `packages/<dir>/`, which ride this same
@@ -1557,7 +1574,10 @@ sibling rather than an extension of the GitHub one for the same reason.
     the stamp decides from the CLI's own ids; an undecidable daemon refuses (`job-user-unknown`); so do an
     unmappable daemon or group (`job-user-unmappable`), a retained image without `anyUid`
     (`job-image-any-uid-unsupported`) and one that cannot be inspected (`job-user-image`), and a run from before
-    the stamp opened as root refuses in its own words, since that root is the shell's and not the worker's. All of
+    the stamp opened as root refuses in its own words, since that root is the shell's and not the worker's. Where
+    `relabelsPrivateMounts` holds, the run's retained `/job`, `/outbox` and `/session` and its retained workspace
+    carry `:Z` (`INT-CONTAINER-RUNTIME-CONTRACT`, issue #355), the workspace because a sandbox's is always the
+    retained worker-owned copy; the overlay never does. All of
     this happens before any network is created.
   - **Mounts**: the retained per-job directory at `/job:ro` and its workspace at `/workspace:rw` — the
     same two the run itself had, from the same paths. **No `/outbox`** (nothing to chain: no agent),
@@ -1769,7 +1789,9 @@ is its only entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`)
     a job has it and nothing where it does not, still with no `-e`, not even HOME, since the probe runs no pi) and
     `extraFlags: ["-d", "--entrypoint", "sleep"]`, then the sleep seconds after the image. Through `extraFlags`
     it adds exactly those three flags and that argument; every member of `ISOLATION_FLAGS`, `--memory` and
-    `--cpus` reach it by construction. The sleep is DERIVED from the step bound (the four steps that need the
+    `--cpus` reach it by construction. Where `relabelsPrivateMounts` holds (issue #355), doctor passes the same
+    `relabel` a job would get, with the fixture's workspace counted as the worker's own, so the fixture's `/job`,
+    `/workspace`, `/outbox` and `/session` carry `:Z` exactly as a job's would and its `/opt/pi-global` never does. The sleep is DERIVED from the step bound (the four steps that need the
     container alive since issue #345 added the mountinfo read, at 20 seconds each, plus 30), never a literal.
   - **Fixtures, not the operator's folders, in a JOB'S modes.** One directory from `mkdtemp` under `jobsDirPath(env)`,
     the same derivation `loadConfig` reads `jobsDir` from, `realpath`ed, with an EMPTY subdirectory for every
@@ -4632,3 +4654,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-23 | Issue #379, items 1-4. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, three clauses. (1) What counts as ATTACHED is two questions for the boot reaper, and it asks both: the daemon's own `.Containers` and then `ps -a --filter network=`, with any member outside `ENDPOINT_LISTED_STATES` keeping the network as `container-attached-not-running`, and a membership question the daemon will not answer keeping it as `containers-unreadable`. (2) Every canary line doctor can print is one frozen table (`CANARY_LINES`), each check carries the shape and params it was built from, and `docs/egress.md`'s first column is GENERATED from it -- replacing a test that counted occurrences of a label prefix in source, which could not see four spellings of the same site and could go false red on a comment. (3) The canary's own `network create` and `network connect` now go through the BOUNDED runner, and `created` is decided by exit 0 or a null the runner attributes to the TIMEOUT rather than to a launch failure, so a create the bound killed is cleaned up while an unlaunchable docker prints no removal instruction for a network that never existed. **`INT-LIVE-PROBE-CONTRACT` UNCHANGED, checked**: its own sweep, names and bounds are untouched; this changes the canary's sibling, not it. **`INT-SANDBOX-CONTRACT` UNCHANGED, checked**: `pi-sandbox-` stays outside the reaped namespace and no session network is asked about. **Code evidence**: worker/src/backend-local.mjs -> reapNetwork, ENDPOINT_LISTED_STATES, endpointShown, quotedShown; worker/src/doctor.mjs -> CANARY_LINES, canaryCheck, liveRunVia. |
 | 2026-09-23 | Issue #388. **No contract changed.** The 2026-09-07 row rendered TRUNCATED, losing about 1,260 characters after `env?.[name] `: the `\|\|` in a code span ended the Change cell. Escaped as `\|\|`, which GitHub renders as a literal `\|\|` inside the span (checked against its markdown API rather than assumed), and the row's claims are untouched. `.github/scripts/revision-row-check.mjs` now fails the build on any revision row that does not render as two cells. |
 | 2026-09-23 | Issue #390. **`INT-SESSION-STORE-CONTRACT` AMENDED**, and a token joins the promote path's closed enum: `transcript-diverted`. The write edge had no answer to an A, B, A on the key directory -- swap a link in, let the copy, the rename and the venue sentinel land in it, swap the real directory back -- because both of its identity re-checks compare the DIRECTORY, and by the time the second one runs the shape is right again. Measured with a deterministic probe: `{"promoted":true,"reason":"promoted","bytes":60}` with the transcript in the attacker's directory and the real key holding only `pi-version`, `resume-chain` and `venue`, so the next job cold-starts as `absent` while the record says the work was promoted. The repair compares the inode `rename` PRESERVED on the transcript against what the canonical name holds after it, which is a fact the directory comparison cannot see. It is DETECTION and not prevention, like its neighbour: the bytes are already gone, and what changes is that the record stops claiming otherwise. The sidecar writes after the rename deliberately get no equivalent check -- the transcript's own identity is what decides whether the promotion landed, and a sidecar written elsewhere is covered by the same refusal. **Precondition unchanged**: write access to `PI_SESSIONS_DIR`, which is what the whole store concedes. **`DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` UNCHANGED, checked**: the key is still a derived hash, which is exactly what makes the path precomputable and therefore what this defends. **Code evidence**: `worker/src/session-store.mjs` -> `promoteSession`, `readIdentity`. |
+| 2026-09-25 | Issue #355. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED** with the SELinux relabel option: where `relabelsPrivateMounts` holds (Podman reporting SELinux, an endpoint on this host, a Linux worker) the mounts the worker makes for one job carry Podman's PRIVATE `Z` in the same option list as `ro` (`-v <job>:/job:ro,Z`, `/outbox:Z`, `/session:Z`, and `/workspace:Z` only for a worker-owned workspace), `/opt/pi-global` never, and everywhere else the argv is byte-identical to before, Docker Engine with `selinux-enabled` included. Measured on 2026-09-25 on Fedora 44 (kernel 6.19.10, SELinux enforcing, container-selinux 2.247.0, systemd 259.5, cgroup v2, rootful Podman 5.8.1, netavark 1.17.2 on nftables, crun 1.27, conmon 2.2.1, docker-cli 29.7.2 through a docker context): every unlabelled bind source was denied to the container, `:ro` or not, so every job stopped at `/job` before spending; `:Z` works and locks every other container out of what it relabels, which is why it is never put on an operator's folder. The second Mounts bullet names the option where it lists the `-v` shape. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: one row, `/workspace` denying READ or traverse is `2` / `job-inputs-unreadable` pre-spend, naming the path; `workspace_not_writable` stays advisory, and the three existing rows and every code are unchanged. **`INT-CONTAINER-JOB-INPUTS` AMENDED**, one sentence: on an SELinux Podman host ownership is not enough, the label must be one a container may read, which the worker gives its own directories and the operator gives a local folder and the overlay. **`INT-SANDBOX-CONTRACT` and `INT-LIVE-PROBE-CONTRACT` AMENDED**, one sentence each: the sandbox and `doctor --live` follow the same rule through the same builder, each counting its workspace as the worker's own. **UNCHANGED, checked**: `INT-EGRESS-POLICY-CONTRACT` (netavark's nftables driver measured to hold `egress` and `jobToJobIsolation` with nothing changed), the flags list and `ISOLATION_FLAGS` (the relabel is a mount option, not a flag), `INT-SESSION-STORE-CONTRACT` (the store is still never mounted; only the per-job copy is relabelled), and the image conformance checklist. |

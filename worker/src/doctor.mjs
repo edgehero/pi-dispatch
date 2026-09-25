@@ -75,7 +75,7 @@ import { runLiveProbes } from "./live-probes.mjs";
 import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
-import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FIX, makeDaemonFactsReader, makeJobUserResolver, resolveImageUser } from "./job-user.mjs";
+import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FIX, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
 // The OAuth-suffix rule and the variable it selects live in their own import-free module so the worker
 // can share them: doctor NAMES a variable and env-allowlist WRITES one, and they must never differ.
@@ -813,6 +813,13 @@ export async function collectChecks(env, seams) {
 	checks.push(...backendChecks(env, { endpoint, daemon, fs: seams.observationFs }));
 	checks.push(...jobUser.checks);
 	if (facts) facts.jobUser = jobUser.forLive;
+	// Issue #355: the same answer, kept for `--live`, which decides from it whether its probes' own mounts carry `:Z`.
+	if (facts) facts.daemon = jobUser.daemon;
+	// Issue #355: on a Podman host that confines containers with SELinux, the directories a job mounts that the worker
+	// did NOT make, which it therefore never relabels. Read from the same facts and endpoint as the line above.
+	if (relabelsPrivateMounts(jobUser.daemon?.answered ? jobUser.daemon.facts : null, endpoint, seams.jobUserIdentity?.platform ?? seams.platform)) {
+		checks.push(...(await selinuxLabelChecks({ folders, overlay: env.PI_GLOBAL_PI_DIR || null, spawn: seams.spawn })));
+	}
 
 	// The receiver itself, when the triggers file names ANY forge (issue #80). Only forge deliveries need
 	// the receiver at all, so a cron/local-only deployment gets no receiver noise here. WARNS rather than
@@ -3953,6 +3960,64 @@ export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCod
 	return { checks, forLive, daemon };
 }
 
+/** The two SELinux types a container may read a bind mount under without it being relabelled (container-selinux). */
+const CONTAINER_READABLE_TYPES = new Set(["container_file_t", "container_ro_file_t"]);
+
+/**
+ * The SELinux label checks (issue #355), for a host where `relabelsPrivateMounts` holds. Exported for the tests.
+ *
+ * The worker relabels only what it makes per job (`:Z`). An operator's local folder and the global overlay are NEVER
+ * relabelled, by decision: `:Z` would take the folder from every other container (measured) and replace a label the
+ * operator chose, and the overlay is shared by every job. Measured on an enforcing Fedora 44 host: an unlabelled source
+ * (`user_home_t`, `var_t`, `user_tmp_t`) is denied to the container outright, so each such directory is a job refused
+ * before it spends (`job-inputs-unreadable`), not a worker that cannot boot, which is why the line is ⚠. The fix is the
+ * one measured to make a directory readable to every container: a `container_file_t` rule plus `restorecon`.
+ *
+ * READ, never inferred: `stat --format=%C` through doctor's bounded runner. A `stat` that did not answer (not GNU
+ * coreutils, a directory this shell cannot reach, no label at all) is a quiet "not checked" line, never a warning:
+ * the runner's own refusal names the path if a job meets it, and a false alarm here would send an operator to relabel
+ * a folder that was fine. A readable type with MCS categories is a directory some container relabelled PRIVATE, which
+ * locks every other container out (measured), so it is treated like an unlabelled one.
+ */
+export async function selinuxLabelChecks({ folders = [], overlay = null, spawn }) {
+	const checks = [{ ok: true, label: "SELinux: jobs' own directories are relabelled for SELinux (:Z); a local folder and the global overlay never are" }];
+	const targets = [...folders.map((dir) => ({ dir, what: "local folder", refused: "every job in it is refused before it spends" })), ...(overlay ? [{ dir: overlay, what: "global overlay", refused: "every job is refused before it spends" }] : [])];
+	for (const { dir, what, refused } of targets) {
+		const answer = await runCmdCapture(spawn, "stat", ["--format=%C", "--", dir], { stdoutOnly: true });
+		const context = answer.code === 0 ? parseSelinuxContext(answer.output) : null;
+		if (!context) {
+			checks.push({ ok: true, label: `SELinux: the label of the ${what} ${dir} was not checked (stat did not answer with one)` });
+			continue;
+		}
+		if (CONTAINER_READABLE_TYPES.has(context.type) && !context.categories) {
+			checks.push({ ok: true, label: `SELinux: the ${what} ${dir} is labelled ${context.type}, which a container can read` });
+			continue;
+		}
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `SELinux: the ${what} ${dir} is labelled ${context.type}${context.categories ? " with a private category pair (another container's :Z)" : ""}, which a job container is denied -- ${refused}`,
+			fix: `label it for containers once: \`semanage fcontext -a -t container_file_t ${shellQuote(`${dir}(/.*)?`)} && restorecon -R ${shellQuote(dir)}\` (as root). pi-dispatch never relabels this directory itself, because a private label would lock every other container out of it`,
+		});
+	}
+	return checks;
+}
+
+/** `{ type, categories }` from one `user:role:type:level` line, or `null` for anything else (no label, "?", noise). */
+function parseSelinuxContext(output) {
+	const line = String(output ?? "").trim();
+	if (line.includes("\n")) return null;
+	const parts = line.split(":");
+	if (parts.length < 4 || !/^[a-z0-9_]+$/.test(parts[2])) return null;
+	// The level is everything after the type (`s0`, or `s0:c123,c456` for a private one), so it is re-joined.
+	return { type: parts[2], categories: /c\d/.test(parts.slice(3).join(":")) };
+}
+
+/** A path as one POSIX shell word: bare when it is plain, else single-quoted with an embedded quote closed and reopened. */
+function shellQuote(value) {
+	return /^[A-Za-z0-9._\/-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 /** The runtime identity line (issue #345), or `null` when the daemon did not answer: display only, never a decision. */
 function runtimeLine(daemon) {
 	if (!daemon?.answered || !daemon.facts) return null;
@@ -4053,6 +4118,9 @@ export async function liveChecks(env, seams, facts) {
 		isAlive,
 		announce: (line) => out(`\nread back on local: ${line}\n`),
 		user: jobUser.user ?? null,
+		// Issue #355: `:Z` on the probe's own mounts exactly where a job's would carry it, from the same daemon answer and
+		// endpoint the job-user line was decided from. The fixture's global directory is never relabelled, like a job's.
+		relabel: relabelsPrivateMounts(facts.daemon?.answered ? facts.daemon.facts : null, facts.endpoint, ids.platform ?? seams.platform),
 		// root can remove whatever a job leaves, and a sudo'd doctor is not the worker, so there is no owner to compare.
 		euid: ids.euid === 0 ? undefined : ids.euid,
 		// The removal wait's clock (issue #344), seamed so a test never waits out a real deadline.

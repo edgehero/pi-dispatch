@@ -36,6 +36,30 @@ test("the job-inputs check covers the operator overlay too, and an absent overla
 	assert.doesNotThrow(() => assertJobInputsReadable(["/job", "/opt/pi-global"], { accessCode: codes({ "/opt/pi-global": "ENOENT" }) }));
 });
 
+test("run-job refuses an UNREADABLE /workspace pre-spend, and an unwritable one stays advisory (issue #355)", async () => {
+	// Measured on Fedora 44 with SELinux enforcing: an operator's local folder not labelled container_file_t is
+	// unreadable in the container, and before this the job spent with an agent that could not read its repository.
+	// Source pin for the call list (run-job.mjs has no seam to run it in-process), bound to the constant's value so
+	// renaming WORKSPACE to another path cannot pass.
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	const call = src.match(/assertJobInputsReadable\(\[([^\]]*)\]\)/);
+	assert.ok(call, "run-job must call assertJobInputsReadable with a literal list");
+	assert.ok(call[1].split(",").map((s) => s.trim()).includes("WORKSPACE"), "/workspace must be in the pre-spend readable list");
+	const { WORKSPACE } = await import("../src/loader.mjs");
+	assert.equal(WORKSPACE, "/workspace");
+	// Behaviour of that list: a read denial on /workspace alone refuses and names the path.
+	const list = ["/job", "/opt/pi-global", WORKSPACE];
+	assert.throws(
+		() => assertJobInputsReadable(list, { accessCode: codes({ "/workspace": "EACCES" }), uid: 1234 }),
+		(e) => e.piDispatchExit === 2 && e.piDispatchReason === "job-inputs-unreadable" && /: \/workspace$/.test(e.message),
+	);
+	// Readable but not writable: the read check passes and the advisory still carries it.
+	const writeDenied = (path, mode) => (path === "/workspace" && (mode & constants.W_OK) ? "EACCES" : null);
+	assert.doesNotThrow(() => assertJobInputsReadable(list, { accessCode: writeDenied }), "a read-only review of an unwritable folder is a legitimate job");
+	const advisories = mountAdvisories({ env: { HOME: "/home/pi" }, uid: 1234, accessCode: writeDenied });
+	assert.ok(advisories.some(([event, fields]) => event === "workspace_not_writable" && fields.path === "/workspace"));
+});
+
 test("a staged package root the job user may not enter is named as unreadable, before existence is asked", () => {
 	let existsAsked = false;
 	assert.throws(

@@ -227,7 +227,7 @@ test("run-job checks /job for every job and logs the mount advisories before any
 	// before getAgentDir/AuthStorage, because pi swallows the auth-lock failure and the line is the only record;
 	// (3) they are logged, never thrown, so nothing that runs today gains an exit.
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
-	assert.match(src, /assertJobInputsReadable\(\[JOB_DIR, GLOBAL_PI_DIR\]\);/, "both the job inputs and the operator overlay");
+	assert.match(src, /assertJobInputsReadable\(\[JOB_DIR, GLOBAL_PI_DIR, WORKSPACE\]\);/, "the job inputs, the operator overlay and the workspace");
 	assert.ok(src.indexOf("assertSessionMountReady(cfg.sessionFile)") < src.indexOf("assertJobInputsReadable([JOB_DIR"));
 	assert.ok(
 		src.indexOf("assertJobInputsReadable([JOB_DIR") < src.indexOf("const prompt = cfg.command"),

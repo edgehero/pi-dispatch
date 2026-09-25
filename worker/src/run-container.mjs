@@ -54,7 +54,10 @@ export function makeRunContainer({
 }) {
 	// async so a synchronous throw (e.g. buildContainerEnv on an unconfigured provider) surfaces as
 	// a rejection, uniformly awaitable by the processor and by tests.
-	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null }) {
+	// `relabel` (issue #355) is the processor's, off the same job-user answer as `user`: true where the daemon confines
+	// containers with SELinux, so the worker's own per-job mounts carry `:Z`. Defaults off, so a caller that predates it
+	// builds exactly the argv it always did.
+	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null }; // killed before it could start
 		// Issue #341. `user` and `home` travel as a PAIR: a uid with no passwd entry in the image gets `HOME=/` from
 		// Docker and `HOME=/workspace` from Podman (measured), so a `--user` without this HOME is refused here rather
@@ -148,6 +151,12 @@ export function makeRunContainer({
 			network, // REQ-EGRESS-ALLOWLIST: null when no policy is armed, and the flag is then absent
 			user, // issue #341: the worker's own "<uid>:<gid>" on a daemon that enforces bind-mount ownership, else null
 			cidFile, // issue #345: where the CLI writes this attempt's container ID, read below when the run exits "never started"
+			// Issue #355. `=== true`, so only the processor's boolean re-owns anything. The workspace is relabelled only when the
+			// worker made it: a forge job's is its own clone under the job dir, a local job's IS the operator's folder, which a
+			// private label would take from every other container and from the operator's own labelling. Decided by kind, the
+			// same fact the preparers branch on, rather than by where the path happens to sit.
+			relabel: relabel === true,
+			workspaceOwned: job?.kind !== "local",
 		});
 
 		// REQ-EGRESS-ALLOWLIST. This job's own --internal network, created here rather than at boot because

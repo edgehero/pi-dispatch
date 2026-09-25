@@ -41,7 +41,7 @@ const { makeDockerEndpointResolver } = await load("worker/src/backend-local.mjs"
 const { buildDockerRunArgs } = await load("worker/src/docker-run.mjs");
 const { CONTAINER_HOME } = await load("worker/src/container-spec.mjs");
 const { makeImagePreflight } = await load("worker/src/image-preflight.mjs");
-const { makeDaemonFactsReader, makeJobUserResolver, resolveImageUser } = await load("worker/src/job-user.mjs");
+const { makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } = await load("worker/src/job-user.mjs");
 const { makeCleanup, makeForgePreparers, makePrepareWorkspace } = await load("worker/src/prepare.mjs");
 const { prepareGithubWorkspace } = await load("worker/src/prepare-github.mjs");
 const { makeSessionStore } = await load("worker/src/session-store.mjs");
@@ -64,7 +64,11 @@ say(`node ${process.versions.node}, uid ${euid}:${egid}, ${image} declares anyUi
 // --- 2. the decision, from the real facts -------------------------------------------------------------------------
 const endpoint = await makeDockerEndpointResolver()();
 assert.equal(endpoint.local, true, `the docker endpoint must be local (${endpoint.reason})`);
-const { decision, socket } = await makeJobUserResolver({ readFacts: makeDaemonFactsReader() })({ endpoint, key: "e2e" });
+const { decision, socket, daemon } = await makeJobUserResolver({ readFacts: makeDaemonFactsReader() })({ endpoint, key: "e2e" });
+// Issue #355: on Podman with SELinux enforcing, the worker relabels its own per-job mounts (`:Z`) and never an
+// operator's folder. Decided from the same answer the worker decides from; false on Docker and wherever SELinux is off,
+// where every argv below is the one this script always built.
+const relabel = relabelsPrivateMounts(daemon?.answered ? daemon.facts : null, endpoint);
 assert.equal(decision.mode, "worker", JSON.stringify(decision));
 assert.equal(decision.user, `${euid}:${egid}`);
 const img = await makeImagePreflight({ image })({});
@@ -76,7 +80,7 @@ const identity = { platform: process.platform, release: osRelease(), euid, egid 
 const doctored = await jobUserChecks({}, { spawn, cwd: process.cwd(), home: homedir(), fileExists: existsSync, platform: process.platform, jobUserIdentity: identity }, { endpoint, dockerCode: 0, imageCode: 0, jobImage: image });
 assert.deepEqual(doctored.forLive, { run: true, user: jobUser.user }, JSON.stringify(doctored));
 assert.ok(doctored.checks.some((c) => c.ok && c.label.includes(`uid:gid ${jobUser.user}`)), doctored.checks.map((c) => c.label).join("\n"));
-say(`decided --user=${jobUser.user} with HOME=${jobUser.home} (socket gid ${socket?.gid ?? "unread"}), and doctor decides the same`);
+say(`decided --user=${jobUser.user} with HOME=${jobUser.home} (socket gid ${socket?.gid ?? "unread"}), and doctor decides the same${relabel ? "; SELinux: the job's own mounts are relabelled" : ""}`);
 
 // --- 3. real workspaces: a forge clone cold and then resumed, and a local folder ----------------------------------
 const scratch = mkdtempSync(join(tmpdir(), "pd-e2e-"));
@@ -136,6 +140,9 @@ git(folder, "add", "notes.md");
 git(folder, "commit", "-q", "-m", "local");
 const local = await prepareWorkspace({ kind: "local", folder, task: "e2e" }, null, { queueJobId: "local-e2e", jobUser });
 assert.ok(local.outboxDir, "the local job has an outbox");
+// The workspace is the worker's own clone for a forge job and the operator's folder for a local one, the rule
+// run-container.mjs applies; only the first is ever relabelled.
+const owned = (prepared) => prepared !== local && prepared.workspace !== folder;
 say(`prepared a forge clone cold (${forge.session.reason}), the same job resumed (${resumed.session.reason}), and a local folder, each under its own 0700 job dir`);
 
 // --- 4. every mount, used as the job user, and /job still read-only to its owner ----------------------------------
@@ -158,10 +165,25 @@ const MOUNT_SCRIPT = [
 ].join("\n");
 const docker = (args) => spawnSync("docker", args, { encoding: "utf8" });
 const shellArgs = (prepared, name, user, script) => [
-	...buildDockerRunArgs({ image, name, workspace: prepared.workspace, jobDir: prepared.jobDir, outboxDir: prepared.outboxDir, sessionDir: prepared.session?.hostDir, network: "none", user, env: user ? { HOME: CONTAINER_HOME } : {}, extraFlags: ["--entrypoint", "sh"] }),
+	...buildDockerRunArgs({ image, name, workspace: prepared.workspace, jobDir: prepared.jobDir, outboxDir: prepared.outboxDir, sessionDir: prepared.session?.hostDir, network: "none", user, env: user ? { HOME: CONTAINER_HOME } : {}, extraFlags: ["--entrypoint", "sh"], relabel, workspaceOwned: owned(prepared) }),
 	"-c",
 	script,
 ];
+// The real runner, defined here because the SELinux control below runs it before section 5 does.
+const RUNNER_ENV = { PI_PROVIDER: "anthropic", PI_MODEL: "claude-sonnet-4-5-20250929", PI_MAX_TURNS: "1" };
+const runner = (prepared, name, user) =>
+	docker(buildDockerRunArgs({ image, name, workspace: prepared.workspace, jobDir: prepared.jobDir, outboxDir: prepared.outboxDir, network: "none", user, env: user ? { ...RUNNER_ENV, HOME: CONTAINER_HOME } : RUNNER_ENV, relabel, workspaceOwned: owned(prepared) }));
+// Under SELinux the operator's folder needs the label the docs tell an operator to give it, which pi-dispatch never
+// applies itself. FIRST the negative control: unlabelled, the real runner refuses before any spend, naming the path.
+if (relabel) {
+	const refused = runner(local, `pd-e2e-unlabelled-${process.pid}`, jobUser.user);
+	assert.equal(refused.status, 2, `an unlabelled local folder: ${refused.stdout}${refused.stderr}`);
+	assert.match(`${refused.stdout}${refused.stderr}`, /job-inputs-unreadable/, "the runner refuses an unreadable /workspace pre-spend");
+	assert.match(`${refused.stdout}${refused.stderr}`, /\/workspace/, "and names it");
+	// chcon rather than semanage: the same type, applied to this scratch folder only and gone with it.
+	execFileSync("chcon", ["-R", "-t", "container_file_t", folder]);
+	say("an unlabelled local folder was refused job-inputs-unreadable, and labelled container_file_t for the rest");
+}
 for (const [label, prepared] of [["forge", forge], ["resumed", resumed], ["local", local]]) {
 	const r = docker(shellArgs(prepared, `pd-e2e-mounts-${label}-${process.pid}`, jobUser.user, MOUNT_SCRIPT));
 	assert.equal(r.status, 0, `${label}: ${r.stdout}${r.stderr}`);
@@ -198,9 +220,6 @@ controls.ran++;
 say("a resumed transcript was staged into the 0700 session dir, read there by the job user, and refused to the image's own user");
 
 // --- 5. the real runner: as the job user it reaches the auth check; as the image's user it cannot read /job --------
-const RUNNER_ENV = { PI_PROVIDER: "anthropic", PI_MODEL: "claude-sonnet-4-5-20250929", PI_MAX_TURNS: "1" };
-const runner = (prepared, name, user) =>
-	docker(buildDockerRunArgs({ image, name, workspace: prepared.workspace, jobDir: prepared.jobDir, outboxDir: prepared.outboxDir, network: "none", user, env: user ? { ...RUNNER_ENV, HOME: CONTAINER_HOME } : RUNNER_ENV }));
 function runnerRows(prepared, label) {
 	const ok = runner(prepared, `pd-e2e-runner-${label}-${process.pid}`, jobUser.user);
 	assert.equal(ok.status, 2, `${label}: ${ok.stdout}${ok.stderr}`);
@@ -233,7 +252,7 @@ assert.equal(existsSync(tight.jobDir), false);
 say("umask 077 changes nothing for the job user");
 
 // --- 8. doctor --live, run as this user, reads the same answer back -------------------------------------------------
-const facts = { endpoint, dockerCode: 0, imageCode: 0, jobImage: image, triggerImages: [], egress: { armed: false, results: [] }, jobUser: doctored.forLive };
+const facts = { endpoint, dockerCode: 0, imageCode: 0, jobImage: image, triggerImages: [], egress: { armed: false, results: [] }, jobUser: doctored.forLive, daemon };
 const liveFs = { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync };
 const checks = await liveChecks({ PI_JOBS_DIR: jobsDir, PI_EGRESS: "0" }, { spawn, liveFs, jobUserIdentity: { euid } }, facts);
 const failed = checks.filter((c) => !c.ok && !c.warn);

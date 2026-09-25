@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { BACKENDS, DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, effectiveWord, meets } from "../src/backends.mjs";
+import { buildDockerRunArgs } from "../src/docker-run.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, JOB_USER_FIX, jobUserRefusal } from "../src/job-user.mjs";
 
 // docs/podman.md's property table restates two derivable sources, so it is BOLTED to them (CLAUDE.md: a hand-written
@@ -153,6 +154,91 @@ test("the entry-points table covers the same six setups, and a refused column on
 			// "as doctor" says "whatever the doctor row says", which is only true of the row that really does that.
 			if (cell === "as doctor") assert.equal(row[0], "`pi-dispatch up`", `${row[0]} cannot defer to doctor`);
 			if (/`[a-z-]+`/.test(cell)) assert.ok(cell.includes(`\`${setup.refusal}\``), `${row[0]} on ${setup.header} names another cause`);
+		}
+	}
+});
+
+// The real-host table (issue #355). Its rows are measurements, which no source can derive, so what is pinned is the
+// part that CAN drift silently: the markers, the four-word Result vocabulary, each row's version and date shape, the
+// rows by name, and the two `argv:` words, which restate what the argv builder and the compose file emit. A word
+// the builder does not produce is a page telling an operator to expect a flag no job carries.
+const HOST_ROWS = Object.freeze([
+	"SELinux: the worker's own per-job mounts",
+	"SELinux: an operator's local folder, unlabelled",
+	"SELinux: the global overlay, unlabelled",
+	"SELinux: SecurityOptions carries name=selinux",
+	"nftables: egress reaches the provider and denies an unlisted host",
+	"nftables: jobToJobIsolation",
+	"Health checks under systemd",
+	"SELinux: the compose file's config mounts",
+	"Setup step 2, the socket for the worker's group",
+]);
+
+function hostTable() {
+	const start = doc.indexOf("<!-- PODMAN-HOST-ROWS -->");
+	const end = doc.indexOf("<!-- /PODMAN-HOST-ROWS -->");
+	assert.ok(start >= 0 && end > start, "the real-host table is between its markers");
+	const rows = doc
+		.slice(start, end)
+		.split("\n")
+		.filter((line) => line.startsWith("|"))
+		.map((line) => line.split("|").slice(1, -1).map((cell) => cell.trim()));
+	const [header, separator, ...body] = rows;
+	assert.match(separator.join(""), /^-+$/);
+	assert.deepEqual(header, ["Row", "Result", "Podman", "Date"]);
+	return body.map(([row, result, podman, date]) => ({ row, result, podman, date }));
+}
+
+test("the real-host table names its rows, speaks the four-word vocabulary, and dates every row (#355)", () => {
+	const body = hostTable();
+	assert.deepEqual(body.map((r) => r.row), [...HOST_ROWS]);
+	for (const { row, result, podman, date } of body) {
+		assert.match(result, /^(measured|refused: \S.*|argv: :\S+|doc: \S.*)$/, `${row}: ${result}`);
+		assert.match(podman, /^\d+\.\d+\.\d+$/, `${row}: a Podman version, not ${podman}`);
+		// An ISO calendar date that is a real day: `Date` rolls 2026-02-30 over to March, so the round trip catches it.
+		assert.match(date, /^\d{4}-\d{2}-\d{2}$/, `${row}: ${date}`);
+		assert.equal(new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10), date, `${row}: ${date} is not a calendar day`);
+	}
+});
+
+// The `argv:` word of the per-job row, derived from the builder rather than copied. Built both ways on purpose: with
+// `relabel` every mount the worker makes carries exactly the word's options on top of its own `ro`, the overlay
+// carries none, and without it no mount carries any (the byte-identical promise for every other daemon).
+test("the per-job row's argv word is what the job argv builder emits with relabel on (#355)", () => {
+	const row = hostTable().find((r) => r.row === HOST_ROWS[0]);
+	const word = /^argv: :(\S+)$/.exec(row.result)?.[1];
+	assert.ok(word, row.result);
+	const base = { image: "pi-job:test", name: "pi-job-doc", env: {}, jobDir: "/j", workspace: "/w", outboxDir: "/o", sessionDir: "/s", globalPiDir: "/g" };
+	const options = (args) => {
+		const byContainer = {};
+		args.forEach((arg, i) => {
+			if (args[i - 1] !== "-v") return;
+			const [, container, opts = ""] = arg.split(":");
+			byContainer[container] = opts === "" ? [] : opts.split(",");
+		});
+		return byContainer;
+	};
+	const on = options(buildDockerRunArgs({ ...base, relabel: true, workspaceOwned: true }));
+	assert.deepEqual(on, { "/job": ["ro", word], "/workspace": [word], "/outbox": [word], "/session": [word], "/opt/pi-global": ["ro"] });
+	assert.ok(buildDockerRunArgs({ ...base, relabel: true, workspaceOwned: true }).includes(`/j:/job:ro,${word}`), "the /job mount is one `-v` value, `ro` first");
+	// A local job's workspace is the operator's folder, and is never relabelled.
+	assert.deepEqual(options(buildDockerRunArgs({ ...base, relabel: true }))["/workspace"], []);
+	const off = options(buildDockerRunArgs(base));
+	assert.deepEqual(off, { "/job": ["ro"], "/workspace": [], "/outbox": [], "/session": [], "/opt/pi-global": ["ro"] });
+});
+
+// The compose row's word, against both copies of the compose file (they are a pinned mirror, but this reads each so a
+// failure names the one that moved). The three single config files a service reads carry exactly that option list.
+test("the compose row's argv word is what the compose file's config mounts carry (#355)", () => {
+	const row = hostTable().find((r) => r.row === "SELinux: the compose file's config mounts");
+	const word = /^argv: :(\S+)$/.exec(row.result)?.[1];
+	assert.ok(word, row.result);
+	for (const path of ["../../deploy/docker-compose.yml", "../deploy/docker-compose.yml"]) {
+		const compose = readFileSync(new URL(path, import.meta.url), "utf8");
+		for (const target of ["/etc/squid/squid.conf", "/etc/pi-dispatch/allowlist.conf", "/config/triggers.json"]) {
+			const mount = compose.split("\n").map((line) => line.trim()).find((line) => line.startsWith("- ") && line.includes(`:${target}`));
+			assert.ok(mount, `${path} mounts ${target}`);
+			assert.equal(mount.slice(mount.indexOf(`:${target}`) + target.length + 1), `:${word}`, `${path}: ${mount}`);
 		}
 	}
 });

@@ -1694,6 +1694,31 @@ test("the user the gate decided is the user that runs, and prepare stamps it for
 	assert.deepEqual(prepOpts.jobUser, { user: "1234:1234", home: "/home/pi" });
 });
 
+test("the gate's relabel reaches runContainer as a boolean, and only a true one relabels (issue #355)", async () => {
+	for (const [answer, want] of [
+		[{ user: "1234:1234", home: "/home/pi", relabel: true }, true],
+		[{ user: null, home: null, relabel: true }, true],
+		[{ user: "1234:1234", home: "/home/pi" }, false],
+		[{ user: null, home: null, relabel: "true" }, false],
+	]) {
+		let ran = null;
+		let prepOpts = null;
+		const { deps: d } = deps({
+			jobUserPreflight: async () => answer,
+			prepareWorkspace: async (_j, _t, opts) => ((prepOpts = opts), { workspaceDir: "/w", jobDir: "/j" }),
+			runContainer: async (ctx) => ((ran = ctx), { code: 0, aborted: false }),
+		});
+		await runJob(ghJob, d);
+		assert.equal(ran.relabel, want, JSON.stringify(answer));
+		assert.equal(ran.user, answer.user);
+		assert.deepEqual(prepOpts.jobUser, { user: answer.user, home: answer.home }, "the sandbox stamp stays the uid only: a sandbox re-reads its own daemon");
+	}
+	let plain = null;
+	const { deps: d } = deps({ runContainer: async (ctx) => ((plain = ctx), { code: 0, aborted: false }) });
+	await runJob(ghJob, d);
+	assert.equal(plain.relabel, false, "a wiring without the gate relabels nothing");
+});
+
 test("a wiring without the gate runs every job as the image's own user, exactly as before", async () => {
 	let ran = null;
 	const { deps: d } = deps({ runContainer: async (ctx) => ((ran = ctx), { code: 0, aborted: false }) });

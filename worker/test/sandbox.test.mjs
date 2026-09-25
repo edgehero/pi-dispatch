@@ -573,6 +573,52 @@ describe("decideSandboxJobUser", () => {
 	});
 });
 
+// --- issue #355: SELinux relabelling, by the job path's rule ----------------------------------------------------
+
+const sandboxMounts = (args) => args.filter((_a, i) => args[i - 1] === "-v");
+
+test("buildSandboxRunArgs: relabel puts :Z on the retained job dir and, only when owned, on the workspace (#355)", () => {
+	const shape = { image: "i", name: "pi-sandbox-1", workspace: "/s/1/workspace", jobDir: "/s/1" };
+	assert.deepEqual(sandboxMounts(buildSandboxRunArgs({ ...shape, relabel: true, workspaceOwned: true })), ["/s/1:/job:ro,Z", "/s/1/workspace:/workspace:Z"]);
+	assert.deepEqual(sandboxMounts(buildSandboxRunArgs({ ...shape, relabel: true, workspaceOwned: false })), ["/s/1:/job:ro,Z", "/s/1/workspace:/workspace"]);
+	assert.deepEqual(buildSandboxRunArgs({ ...shape, relabel: false, workspaceOwned: true }), buildSandboxRunArgs(shape), "no relabel: the argv it always was");
+});
+
+test("openSandbox relabels a retained clone but never a local run's own folder (#355)", async () => {
+	const relabelled = async (manifest) => {
+		let launchedWith = null;
+		await openSandbox({ ...session, ...openable(manifest), egress: { armed: false, proxy: "p" }, spawnNetwork: recordingDocker([]), resolveJobUser: async () => ({ user: null, home: null, relabel: true }), launch: async ({ args }) => ((launchedWith = args), { code: 0 }) });
+		return sandboxMounts(launchedWith);
+	};
+	assert.deepEqual(await relabelled({ kind: "github", workspace: "/s/gh-1/workspace" }), ["/s/gh-1:/job:ro,Z", "/s/gh-1/workspace:/workspace:Z"]);
+	assert.deepEqual(await relabelled({ kind: "local", workspace: "/home/op/repo" }), ["/s/gh-1:/job:ro,Z", "/home/op/repo:/workspace"], "the operator's folder keeps its own label");
+	assert.deepEqual(await relabelled({ kind: "github", workspace: "/s/gh-10/workspace" }), ["/s/gh-1:/job:ro,Z", "/s/gh-10/workspace:/workspace"], "a sibling whose name only starts the same is not inside");
+	let plain = null;
+	await openSandbox({ ...session, ...openable({ workspace: "/s/gh-1/workspace" }), egress: { armed: false, proxy: "p" }, spawnNetwork: recordingDocker([]), launch: async ({ args }) => ((plain = args), { code: 0 }) });
+	assert.deepEqual(sandboxMounts(plain), ["/s/gh-1:/job:ro", "/s/gh-1/workspace:/workspace"], "no relabel from the resolver, none in the argv");
+});
+
+describe("decideSandboxJobUser relabel (#355)", () => {
+	const LOCAL = { local: true, context: "podman", endpoint: "unix:///run/podman/podman.sock", reason: null, transient: false };
+	const factsWith = (over) => async () => ({ answered: true, facts: { shape: "docker", podman: true, os: "fedora", rootless: false, selinux: true, userns: false, bounds: null, serviceIsRemote: null, remoteSocketPath: null, ...over } });
+	const base = { platform: "linux", release: "6.19.10", resolveEndpoint: async () => LOCAL, stat: () => ({ uid: 0, gid: 2375 }), imageCapabilities: async () => ({ ok: true, capabilities: ["anyUid"] }), euid: 1234, egid: 1234 };
+
+	test("this CLI's own local Podman with SELinux relabels, in worker mode and for a uid-1001 run", async () => {
+		assert.deepEqual(await decideSandboxJobUser({ ...base, readFacts: factsWith({}), manifest: { image: "pi-job:x" } }), { user: "1234:1234", home: "/home/pi", relabel: true });
+		assert.deepEqual(await decideSandboxJobUser({ ...base, readFacts: factsWith({}), manifest: { image: "pi-job:x", jobUser: { user: null, home: null } } }), { user: null, home: null, relabel: true });
+	});
+
+	test("docker with selinux, Podman without it, and a remote endpoint answer as they always did", async () => {
+		assert.deepEqual(await decideSandboxJobUser({ ...base, readFacts: factsWith({ podman: false, bounds: { pids: true, memory: true } }), manifest: { image: "pi-job:x" } }), { user: "1234:1234", home: "/home/pi" });
+		assert.deepEqual(await decideSandboxJobUser({ ...base, readFacts: factsWith({ selinux: false }), manifest: { image: "pi-job:x" } }), { user: "1234:1234", home: "/home/pi" });
+		assert.deepEqual(await decideSandboxJobUser({ ...base, readFacts: factsWith({}), resolveEndpoint: async () => ({ ...LOCAL, local: false }), manifest: { image: "pi-job:x" } }), { user: null, home: null });
+		// podman-docker resolves no endpoint, and its own shape still decides the uid: the socket it names is not the
+		// endpoint this CLI observed on this host, so nothing is relabelled.
+		const shim = async () => ({ answered: true, facts: { shape: "podman", podman: true, os: "linux", rootless: false, selinux: true, userns: false, bounds: null, serviceIsRemote: false, remoteSocketPath: "/run/podman/podman.sock" } });
+		assert.deepEqual(await decideSandboxJobUser({ ...base, readFacts: shim, resolveEndpoint: async () => ({ local: null, context: null, endpoint: null, reason: "unparseable", transient: false }), manifest: { image: "pi-job:x" } }), { user: "1234:1234", home: "/home/pi" });
+	});
+});
+
 // --- the session-network sweep (issue #337) ----------------------------------------------------------
 
 /** A fake daemon: `nets` maps a network name to its attached endpoint NAMES; `rm` refuses while any remain. */

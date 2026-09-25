@@ -114,7 +114,8 @@ export async function runJob(job, deps) {
 		observationPreflight = async () => ({ ok: true }),
 		// Issue #341: which uid this job's container runs as. `(job, { capabilities, observed }) =>` `{ user, home }`
 		// (`user` null = the image's own USER), `{ refused, cause }` or `{ unavailable, reason }`. The default runs
-		// every job as the image's user, exactly as before, so a wiring that omits it changes nothing.
+		// every job as the image's user, exactly as before, so a wiring that omits it changes nothing. A non-refused answer
+		// may also carry `relabel: true` (issue #355), which reaches `runContainer` beside the user it was decided with.
 		jobUserPreflight = async () => ({ user: null, home: null }),
 		// (session, { piVersion, context }) => { promoted, reason, bytes }. Promotes this job's transcript back into
 		// the store, on a COMPLETED exit only. Never throws. The default is a no-op so a wiring that omits
@@ -787,7 +788,7 @@ export async function runJob(job, deps) {
 		}
 
 		// The user the gate above decided is the user that runs: one answer, never two call sites that agree.
-		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached } = await runContainer({ job, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null });
+		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached } = await runContainer({ job, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true });
 		containerRan = true;
 		log("container_exit", { exitCode: code, aborted, ...(detached === true ? { detached: true } : {}) });
 

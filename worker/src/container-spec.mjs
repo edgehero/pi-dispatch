@@ -112,6 +112,11 @@ export function assertJobUser(user) {
  * @param user       "<uid>:<gid>" the job runs as (issue #341), or null for the image's own USER. Portable: it says WHO
  *                   runs the box, which a non-docker runtime must honour too.
  * @param extraFlags raw docker flags for the few callers that need them (the sandbox's -i -t --entrypoint bash)
+ * @param relabel    true where the daemon confines containers with SELinux (`relabelsPrivateMounts`, issue #355): the
+ *                   worker's own per-job mounts then carry `relabel: "private"`. Portable: it says WHICH host paths the
+ *                   runtime may re-own for this one container, which a non-docker runtime must honour or refuse.
+ * @param workspaceOwned true when `workspace` is the worker's own per-job directory (a forge job's clone, a sandbox's
+ *                   retained copy), false when it is the operator's folder. Read only when `relabel` is true.
  */
 export function containerSpec({
 	image,
@@ -128,22 +133,36 @@ export function containerSpec({
 	user = null,
 	cidFile = null,
 	extraFlags = [],
+	relabel = false,
+	workspaceOwned = false,
 }) {
 	if (!image) throw new Error("docker run: image is required");
 	assertJobUser(user);
 	assertCidFile(cidFile);
 	if (!name) throw new Error("docker run: container name is required");
 	if (!workspace) throw new Error("docker run: workspace mount is required");
+	// Booleans, strictly: a truthy string from a caller that forwarded an option bag must not re-own host directories.
+	if (typeof relabel !== "boolean") throw new Error(`docker run: relabel must be a boolean; got ${typeof relabel}`);
+	if (typeof workspaceOwned !== "boolean") throw new Error(`docker run: workspaceOwned must be a boolean; got ${typeof workspaceOwned}`);
 
+	// Issue #355. A SPREAD rather than a `relabel: null` field, so a spec built without it has mount objects byte-identical
+	// to every one built before this feature existed. PRIVATE, never shared: each of these directories is made for this
+	// one container, and the shared form (`:z`) would leave it readable by every other container on the host, which is
+	// the job-to-job reach the per-job directory exists to deny.
+	const own = relabel ? { relabel: "private" } : {};
 	const mounts = [];
 	// The WHOLE /job dir is read-only (INT-CONTAINER-JOB-INPUTS): it holds prompt.md and pi/, and
 	// the agent cannot rewrite any of it. /workspace is the only writable mount.
-	if (jobDir) mounts.push({ host: jobDir, container: "/job", readOnly: true });
-	mounts.push({ host: workspace, container: "/workspace", readOnly: false });
+	if (jobDir) mounts.push({ host: jobDir, container: "/job", readOnly: true, ...own });
+	// A local job's /workspace IS the operator's folder, and `:Z` would re-own it for this one container: measured, a
+	// second container mounting it afterwards is denied, and the label an operator chose is gone. So only a workspace the
+	// worker made is relabelled; an operator's folder needs the `semanage fcontext` fix doctor names, and the runner
+	// refuses one it cannot read before any spend.
+	mounts.push({ host: workspace, container: "/workspace", readOnly: false, ...(workspaceOwned ? own : {}) });
 	// Local jobs get a writable /outbox host bind, the same host-bind mechanism as /workspace
 	// (DES-WORKER-ON-HOST). github jobs pass no outboxDir, so the request channel does not exist for
 	// them -- an untrusted issue author cannot chain (INT-OUTBOX-CONTRACT).
-	if (outboxDir) mounts.push({ host: outboxDir, container: "/outbox", readOnly: false });
+	if (outboxDir) mounts.push({ host: outboxDir, container: "/outbox", readOnly: false, ...own });
 
 	// This job's OWN copy of its session transcript (REQ-RESUMABLE-SESSION, INT-SESSION-STORE-CONTRACT).
 	// Writable, because pi appends to it as the agent works -- and per-job, exactly like jobDir, which is
@@ -152,11 +171,14 @@ export function containerSpec({
 	// read and rewrite every other branch's and every other repository's transcripts, which is not a
 	// weakening of that constraint but its inversion. Absent unless the trigger armed run.resume AND a key
 	// resolved, so an unarmed job's argv is byte-identical to one built before this feature existed.
-	if (sessionDir) mounts.push({ host: sessionDir, container: CONTAINER_SESSION_DIR, readOnly: false });
+	if (sessionDir) mounts.push({ host: sessionDir, container: CONTAINER_SESSION_DIR, readOnly: false, ...own });
 
 	// The operator's global pi overlay (REQ-GLOBAL-PI-OVERLAY): custom models, global skills, a global
 	// persona, layered UNDER each repo's own .pi/. Read-only -- it is operator-authored deploy-time config,
 	// the same trust class as the baked floor, but the agent still must not rewrite it. Both job kinds.
+	// NEVER relabelled (issue #355): every job mounts this one directory, so a private label would lock each job out of
+	// it in turn, and a shared one would re-own an operator's directory on every run. It needs the operator's
+	// `semanage fcontext` fix, which doctor names.
 	if (globalPiDir) mounts.push({ host: globalPiDir, container: CONTAINER_GLOBAL_PI_DIR, readOnly: true });
 
 	return {

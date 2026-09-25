@@ -2202,6 +2202,31 @@ test("a job on another venue never reaches the job-user decision, and a changed 
 	assert.deepEqual(said.map((l) => [l.mode, l.cause]), [["unmappable", "rootless"]], "a boot that read unknown is not left as the last word, and the same answer twice is said once");
 });
 
+test("the per-job gate carries relabel: true from a local Podman daemon with SELinux, and nothing otherwise (issue #355)", { skip }, async () => {
+	const endpoint = { local: true, context: "podman", endpoint: "unix:///run/pd-test/podman.sock", reason: null, transient: false };
+	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
+	const stat = () => ({ uid: 0, gid: 2375 });
+	const start = (over, identity = LINUX_ID(1234)) =>
+		runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), readDaemonFacts: DOCKER_FACTS(over), jobUserIdentity: { ...identity, stat }, resolveDockerEndpoint: async () => endpoint });
+	const podman = await start({ podman: true, selinux: true, bounds: null });
+	assert.deepEqual(await podman.captured.deps.jobUserPreflight(job, { capabilities: ["anyUid"], observed: { ok: true, endpoint } }), { user: "1234:1234", home: "/home/pi", relabel: true });
+	// The image-mode path relabels too: uid 1001 needs no --user, and its mounts are denied just the same.
+	const shipped = await start({ podman: true, selinux: true, bounds: null }, LINUX_ID(1001));
+	assert.deepEqual(await shipped.captured.deps.jobUserPreflight(job, { capabilities: [], observed: { ok: true, endpoint } }), { user: null, home: null, relabel: true });
+	// A refusal runs nothing, so it carries no relabel.
+	assert.deepEqual(await podman.captured.deps.jobUserPreflight(job, { capabilities: [], observed: { ok: true, endpoint } }), { refused: "job-image-any-uid-unsupported", cause: "any-uid-unsupported" });
+	// The endpoint THIS job observed decides: the same daemon behind an endpoint not on this host relabels nothing.
+	const far = { ...endpoint, local: false, endpoint: "tcp://10.0.0.5:2376" };
+	assert.deepEqual(await podman.captured.deps.jobUserPreflight(job, { capabilities: ["anyUid"], observed: { ok: true, endpoint: far } }), { user: null, home: null });
+	for (const [label, over] of [
+		["docker with selinux, out of scope", { selinux: true }],
+		["podman without selinux", { podman: true, selinux: false, bounds: null }],
+	]) {
+		const other = await start(over);
+		assert.deepEqual(await other.captured.deps.jobUserPreflight(job, { capabilities: ["anyUid"], observed: { ok: true, endpoint } }), { user: "1234:1234", home: "/home/pi" }, label);
+	}
+});
+
 test("PI_FORWARD_ENV=HOME on a worker that runs jobs under --user is said at boot", { skip }, async () => {
 	const { logs } = await runStart({
 		env: { PI_FORWARD_ENV: "HOME" },

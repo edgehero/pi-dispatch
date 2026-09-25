@@ -1468,12 +1468,31 @@ adversarial passes did.
     (measured), but the docker CLI refuses the flag and a containers.conf `userns = "keep-id"` is invisible in
     `docker info`. *Closes when* a native `podman` backend passes `--userns=keep-id` per container and its
     conformance harness reads the job user back (issue #354 carries the measurements).
-  - **SELinux in enforcing mode, netavark's nftables firewall driver, and health checks under systemd.** Unmeasured
-    together (issue #355), because each needs a real host rather than a nested lab: a bind mount without a `:z` or
-    `:Z` label may be unreadable in the container; the lab's kernel refuses netavark's nft rules, so every network
-    reading here is from the iptables driver; and with no systemd a container's health check never runs on its own,
-    so the proxy's status stays `starting` until `podman healthcheck run` is asked for by hand. *Closes when* each is
-    measured on an enforcing Fedora or RHEL host with systemd, with the argv changed if it must be.
+  - **SELinux in enforcing mode, netavark's nftables firewall driver, and health checks under systemd: MEASURED
+    2026-09-25 (issue #355), and narrowed to the one route nobody measured.** The close condition this bullet set
+    ("measured on an enforcing Fedora or RHEL host with systemd, with the argv changed if it must be") is met for
+    Podman, on a Fedora 44 host: kernel 6.19.10, SELinux enforcing (selinux-policy 43.3, container-selinux
+    2.247.0), systemd 259.5, cgroup v2, rootful Podman 5.8.1 behind `podman.socket`, netavark 1.17.2 on its nftables
+    driver (`Using nftables firewall driver`, rules in `table inet netavark`), aardvark-dns 1.17.0, crun 1.27,
+    conmon 2.2.1, and Fedora's docker-cli 29.7.2 and docker-compose 5.5.1 through a docker context, as worker uid 1234.
+    - **nftables: holds, nothing changed.** `doctor --live` with `PI_EGRESS` armed read `egress` (the provider
+      answered keylessly, an unlisted host was denied) and `jobToJobIsolation` (none of the peer's two names and one
+      address reachable) back as holding.
+    - **Health checks under systemd: hold, nothing changed.** The compose proxy reached `healthy` in about 35 s with
+      no manual `podman healthcheck run`, its log shows the check on schedule, and `systemctl list-timers` lists the
+      transient timer; Valkey was healthy in 10 s.
+    - **SELinux: did NOT hold, and the argv changed.** Every unlabelled bind source was denied to the container,
+      `ls` included, with or without `:ro` (`user_tmp_t`, `user_home_t`, `var_lib_t`, `var_t` alike), so every job on
+      the supported route stopped at `/job` with exit 2 before spending, and the compose proxy crash-looped on its
+      own config. The worker now puts `:Z` on the mounts it makes per job, on Podman only, never on an operator's
+      local folder or the global overlay, which get doctor's `semanage fcontext` fix and the runner's pre-spend
+      refusal instead; the compose config mounts carry `:ro,z` (`DES-PODMAN-THROUGH-ITS-DOCKER-API`,
+      `INT-CONTAINER-RUNTIME-CONTRACT`).
+    - **What is left, and why it stays here**: Docker Engine with `selinux-enabled`. It reports the same
+      `name=selinux`, the decision gates the relabel on Podman, and nothing about that route was measured, so its
+      argv is unchanged; if it confines a job the way Podman did, the runner's `/job` check stops that job at exit 2
+      before any spend.
+      *Closes when* measured on a Docker Engine host with SELinux enforcing, with the gate widened if it must be.
   - **`podman machine` and Podman Desktop** on macOS and Windows. Unmeasured: the daemon runs in a VM and the bind
     sources are the host's, as on Docker Desktop, but whether ownership is mapped is not known. *Closes when*
     measured with `doctor --live` on each.
@@ -1485,8 +1504,8 @@ adversarial passes did.
     two differ in what a job costs.
     *Closes when* measured on a host configured that way, with the exit code and the run record recorded.
 - **What bounds it meanwhile**: an unmeasured daemon still gets every refusal the facts support, the runner's `/job`
-  check stops a job whose inputs are unreadable before any provider spend, and `doctor --live` reads the
-  declarations back on request.
+  check (and since issue #355 its `/workspace` read check) stops a job whose inputs are unreadable before any
+  provider spend, and `doctor --live` reads the declarations back on request.
 
 ## OQ-038 — The `/dispatch` panel resolves sandbox settings from its OWN environment and cannot see the deployment's
 
@@ -1647,3 +1666,4 @@ adversarial passes did.
 | 2026-09-22 | Issue #375. **`OQ-007` AMENDED** with one event name and one shape that MOVED between the two greps, and it is the naming rule from #337 applied rather than an exception to it: the session reaper now leaves an entry that is not a real directory and says `session_not_reaped {key, reason}`, a VERDICT from a look that succeeded, where `session_reaper_skipped` stays what it has been, the name for something a pass could not establish. Its sibling `sandbox_network_not_reaped` is the shape this follows. Worth the row on its own: a stray FILE in the store used to reach the per-entry catch as an ENOTDIR and appear under `session_reaper_skipped` on every pass, so this narrows that grep as well as widening the verdict one. **`OQ-037` UNCHANGED, checked**: rootless Podman is unaffected, since every file in a key directory is still worker-written. **Code evidence**: `worker/src/session-store.mjs` -> `reapSessions`. |
 | 2026-09-23 | Issue #382. **`OQ-035` AMENDED**, in its Position bullet: the control-byte class is written ONCE, in `admin/src/panel.mjs`, and every renderer substitutes through it -- `scrubReason` included. The bullet said "stripped" where the operation is a SUBSTITUTION, which is the distinction the whole issue turns on: `clip` deletes and the record cells substitute, so a pane composing with `clip` clipped one column narrower than its twin for the same record. `clip` still deletes, deliberately and for a pinned reason (`LINE_INPUT_CURSOR`'s sentinels are in the same class), and `clipData` is the composition data paths use. What the belt is no longer asked to do alone: a GATE now runs over every finished pane line, so a field that reaches a pane without a belt is still substituted before it is printed. The validator question this could have been read as raising is settled in `DES-ONE-SHOT-DISARM-IN-THE-FILE` rather than here, because a refusal at that writer leaves a one-shot armed and costs a second paid run. |
 | 2026-09-24 | Issue #402. **`OQ-035` AMENDED**, in the same Position bullet issue #382 corrected: the renderer's control-byte class is no longer C0 + DEL + C1. It draws its line at INTERPRETED against COMPOSING, so the bidi controls, the invisible break characters (U+200B, U+2060 and the word joiner range, U+FEFF, U+00AD, U+180E) and the line and paragraph separators are in it, while U+200D, U+200C and the variation selectors are deliberately out because they compose the character beside them. **The `failedReason` belt moves with it, and that is why this row exists**: `scrubReason` shares the class, exactly as #382 recorded, so widening the renderer widened this belt again. Nothing observable moves for the same reason as last time -- a `failedReason` is a worker throw's message decoded as UTF-8 and this project produces none carrying a bidi control -- but a contract that moves without a row is the gap this rule exists to close. **The validator is UNCHANGED, checked**: `triggers.mjs` still refuses on C0 + DEL, and widening it was rejected for the reason `DES-ONE-SHOT-DISARM-IN-THE-FILE` already records, that a refusal at that writer leaves a one-shot armed and costs a second paid run. **Code evidence**: admin/src/panel.mjs -> interpreted, mapInterpreted, scrubControls, hasControls; admin/test/control-bytes.test.mjs. |
+| 2026-09-25 | Issue #355. **`OQ-037` AMENDED, narrowed not closed, status stays `OPEN`**: its SELinux, nftables and systemd bullet is MEASURED on a real Fedora 44 host (kernel 6.19.10, SELinux enforcing, container-selinux 2.247.0, systemd 259.5, cgroup v2, rootful Podman 5.8.1, netavark 1.17.2 on its nftables driver, aardvark-dns 1.17.0, crun 1.27, conmon 2.2.1, docker-cli 29.7.2 and compose 5.5.1 from Fedora, worker uid 1234). nftables and health checks under systemd hold with nothing changed (`doctor --live` read `egress` and `jobToJobIsolation` back; the compose proxy went `healthy` in about 35 s on its own transient timer). SELinux did NOT hold: every unlabelled bind source was denied, `:ro` or not, so every job on the supported route stopped at `/job` before spending and the compose proxy crash-looped on its own config; the argv changed (`:Z` on the worker's own per-job mounts, on Podman only; `:ro,z` on the compose config mounts) and an operator's folder or overlay gets doctor's `semanage fcontext` fix and a pre-spend runner refusal instead of a relabel. **What stays in the bullet** is Docker Engine with `selinux-enabled`, out of scope and unmeasured, with its own close condition. The entry's other bullets (rootless Podman and issue #354, `podman machine` and Podman Desktop, OrbStack and Colima, `userns = "auto"`) are **UNCHANGED, checked**, and **What bounds it meanwhile** gains the runner's `/workspace` read check. **`OQ-036` UNCHANGED, checked**: `:Z` changes a label on the worker's own per-job directories, not the uid a job runs as, so nothing that entry's residual rests on moves. |

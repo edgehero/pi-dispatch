@@ -5516,3 +5516,112 @@ test("doctor: removing a regular-file guard REDDENS this file instead of hanging
 	assert.equal(r.error?.code, undefined, `doctor RETURNED rather than blocking on the FIFO; if this is ETIMEDOUT a regular-file guard is missing. stderr: ${r.stderr}`);
 	assert.match(String(r.stdout), /EXITED:\d/, `the child ran doctor to completion; stderr: ${r.stderr}`);
 });
+
+// --- issue #355: SELinux labels on the directories the worker never relabels ------------------------------------
+
+// Measured through rootful Podman 5.8.1's compat API on an enforcing Fedora 44 host (SecurityOptions verbatim).
+const PODMAN_SELINUX_INFO = JSON.stringify({ ServerVersion: "5.8.1", OperatingSystem: "fedora", SecurityOptions: ["name=seccomp,profile=default", "name=selinux"], PidsLimit: true, MemoryLimit: true, CpuCfsQuota: false, ProductLicense: "Apache-2.0" });
+const statPlan = (answers) => Object.fromEntries(Object.entries(answers).map(([dir, answer]) => [`stat --format=%C -- ${dir}`, answer]));
+
+test("the SELinux label check: user_home_t warns with the semanage fix, container_file_t passes, an unanswered stat is quiet (#355)", async () => {
+	const { selinuxLabelChecks } = await import("../src/doctor.mjs");
+	const calls = [];
+	const spawn = fakeSpawn(
+		statPlan({
+			"/home/op/repo": { code: 0, output: "unconfined_u:object_r:user_home_t:s0\n" },
+			"/srv/labelled": { code: 0, output: "system_u:object_r:container_file_t:s0\n" },
+			"/srv/private": { code: 0, output: "system_u:object_r:container_file_t:s0:c12,c345\n" },
+			"/srv/unreadable": { code: 1, output: "stat: cannot statx '/srv/unreadable': Permission denied\n" },
+			"/srv/nolabel": { code: 0, output: "?\n" },
+			"/srv/failed": { code: 1, output: "system_u:object_r:container_file_t:s0\n" },
+			"/srv/pi's overlay": { code: 0, output: "unconfined_u:object_r:var_t:s0\n" },
+		}),
+		calls,
+	);
+	const checks = await selinuxLabelChecks({ folders: ["/home/op/repo", "/srv/labelled", "/srv/private", "/srv/unreadable", "/srv/nolabel", "/srv/failed"], overlay: "/srv/pi's overlay", spawn });
+	const byDir = (dir) => checks.find((c) => c.label.includes(` ${dir} `));
+	assert.deepEqual([checks[0].ok, checks[0].label], [true, "SELinux: jobs' own directories are relabelled for SELinux (:Z); a local folder and the global overlay never are"]);
+	const home = byDir("/home/op/repo");
+	assert.deepEqual([home.ok, home.warn], [false, true], "a per-job refusal, never a boot one");
+	assert.match(home.label, /the local folder \/home\/op\/repo is labelled user_home_t, which a job container is denied -- every job in it is refused before it spends/);
+	assert.ok(home.fix.includes("semanage fcontext -a -t container_file_t '/home/op/repo(/.*)?' && restorecon -R /home/op/repo"), home.fix);
+	assert.deepEqual([byDir("/srv/labelled").ok, byDir("/srv/labelled").warn], [true, undefined]);
+	assert.match(byDir("/srv/labelled").label, /is labelled container_file_t, which a container can read/);
+	const priv = byDir("/srv/private");
+	assert.deepEqual([priv.ok, priv.warn], [false, true], "another container's :Z locks every other one out");
+	assert.match(priv.label, /with a private category pair/);
+	for (const dir of ["/srv/unreadable", "/srv/nolabel", "/srv/failed"]) {
+		const quiet = byDir(dir);
+		assert.deepEqual([quiet.ok, quiet.warn, quiet.fix], [true, undefined, undefined], dir);
+		assert.match(quiet.label, /was not checked \(stat did not answer with one\)/, dir);
+	}
+	const overlay = checks.find((c) => c.label.includes("global overlay /srv/pi's overlay"));
+	assert.deepEqual([overlay.ok, overlay.warn], [false, true]);
+	assert.match(overlay.label, /labelled var_t, which a job container is denied -- every job is refused before it spends/);
+	assert.ok(overlay.fix.includes(`semanage fcontext -a -t container_file_t '/srv/pi'\\''s overlay(/.*)?' && restorecon -R '/srv/pi'\\''s overlay'`), overlay.fix);
+	assert.deepEqual(calls.map((c) => [c.cmd, ...c.args]).at(0), ["stat", "--format=%C", "--", "/home/op/repo"], "one stat per directory, the path after --");
+	assert.equal(calls.length, 7);
+});
+
+test("doctor runs the label check only where relabelling applies: local Podman with SELinux on Linux, nothing at all elsewhere (#355)", async () => {
+	const overlay = tempDir("pi-selinux-overlay-");
+	for (const [label, body, ids, applies] of [
+		["podman with selinux", PODMAN_SELINUX_INFO, LINUX_ID(1001), true],
+		["docker with selinux, out of scope", JSON.stringify({ ...JSON.parse(ROOTFUL_INFO), SecurityOptions: ["name=seccomp,profile=builtin", "name=selinux"] }), LINUX_ID(1001), false],
+		["podman without selinux", PODMAN_COMPAT_INFO, LINUX_ID(1001), false],
+		["a Podman machine on macOS", PODMAN_SELINUX_INFO, { platform: "darwin", release: "24.6.0", euid: 501, egid: 20 }, false],
+	]) {
+		const { out, text } = capture();
+		const calls = [];
+		const plan = statPlan({ [overlay]: { code: 0, output: "unconfined_u:object_r:user_tmp_t:s0\n" }, "/srv/repo": { code: 0, output: "unconfined_u:object_r:var_t:s0\n" } });
+		await runDoctor(ghEnv({ PI_GLOBAL_PI_DIR: overlay, PI_TRIGGERS_FILE: triggersFile() }), { ...ghDeps(out, { ...plan, ...infoPlan(body), ...green }, calls), jobUserIdentity: ids, stat: socketStat, observationFs: noHostFiles });
+		const stats = calls.filter((c) => c.cmd === "stat");
+		if (applies) {
+			assert.match(text(), /✓ SELinux: jobs' own directories are relabelled for SELinux \(:Z\)/, label);
+			assert.match(text(), new RegExp(`⚠ SELinux: the global overlay ${overlay.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} is labelled user_tmp_t`), label);
+			assert.match(text(), /⚠ SELinux: the local folder \/srv\/repo is labelled var_t, which a job container is denied/, `${label}: every local trigger's folder`);
+			assert.match(text(), /semanage fcontext -a -t container_file_t '\/srv\/repo\(\/\.\*\)\?' && restorecon -R \/srv\/repo/, label);
+			assert.equal(stats.length, 2, label);
+		} else {
+			assert.doesNotMatch(text(), /SELinux:/, label);
+			assert.equal(stats.length, 0, `${label}: no stat is ever spawned`);
+		}
+	}
+});
+
+test("doctor --live relabels its probes' own mounts from the same daemon answer, and never the global fixture (#355)", async () => {
+	const env = liveEnv();
+	const base = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: [], egress: { armed: false, results: [] }, jobUser: { run: true, user: null } };
+	const podman = { answered: true, facts: parseDaemonFacts(PODMAN_SELINUX_INFO).facts };
+	const runsOf = async (facts, ids = LINUX_1001) => {
+		const calls = [];
+		await liveChecks(env, { spawn: fakeSpawn({ ...liveOk(), ...green }, calls), liveFs, isAlive: () => false, pid: 1, nonce: "n", jobUserIdentity: ids, ...instantClock() }, facts);
+		return calls.filter((c) => c.cmd === "docker" && c.args[0] === "run").map((c) => c.args.filter((_a, i) => c.args[i - 1] === "-v"));
+	};
+	const relabelled = await runsOf({ ...base, daemon: podman });
+	assert.ok(relabelled.length >= 3, "the probe, the pin and the ephemeral runs");
+	for (const v of relabelled) {
+		assert.deepEqual(v.map((m) => m.slice(m.indexOf(":") + 1)), ["/job:ro,Z", "/workspace:Z", "/outbox:Z", "/session:Z", "/opt/pi-global:ro"]);
+	}
+	for (const [label, facts, ids] of [
+		["no daemon answer kept", base, LINUX_1001],
+		["docker with selinux", { ...base, daemon: { answered: true, facts: { ...podman.facts, podman: false } } }, LINUX_1001],
+		["a Podman machine on macOS", { ...base, daemon: podman }, { ...LINUX_1001, platform: "darwin" }],
+	]) {
+		const runs = await runsOf(facts, ids);
+		assert.ok(runs.length >= 3, `${label}: the probes ran`);
+		for (const v of runs) assert.ok(!v.some((m) => /Z$/.test(m)), label);
+	}
+});
+
+test("doctor --live reads relabel from the collection's own daemon answer, end to end (#355)", async () => {
+	for (const [label, body, want] of [["podman with selinux", PODMAN_SELINUX_INFO, true], ["docker", ROOTFUL_INFO, false]]) {
+		const { out } = capture();
+		const calls = [];
+		await runDoctor(liveEnv(), { ...ghDeps(out, { ...liveOk(), ...infoPlan(body), ...green }, calls), live: true, liveFs, jobUserIdentity: LINUX_1001, stat: socketStat, observationFs: noHostFiles, isAlive: () => false, pid: 7, nonce: "n" });
+		const probe = calls.find((c) => c.cmd === "docker" && c.args[0] === "run" && c.args.includes("sleep"));
+		assert.ok(probe, `${label}: the probe ran`);
+		assert.equal(probe.args.some((a) => a.endsWith(":/job:ro,Z")), want, label);
+		assert.equal(probe.args.some((a) => a.endsWith(":/job:ro")), !want, label);
+	}
+});

@@ -9,6 +9,7 @@ import {
 	makeDaemonFactsReader,
 	makeJobUserResolver,
 	parseDaemonFacts,
+	relabelsPrivateMounts,
 	resolveImageUser,
 	socketFacts,
 } from "../src/job-user.mjs";
@@ -48,7 +49,7 @@ test("the facts read is one bounded `docker info --format={{json .}}`", () => {
 });
 
 test("parseDaemonFacts reads the Docker shape: OS, rootless and userns markers, pid and memory bounds, never CPU", () => {
-	assert.deepEqual(facts("dockerRootful"), { shape: "docker", podman: false, os: "Alpine Linux v3.21 (containerized)", rootless: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null, serverVersion: "27.5.1" });
+	assert.deepEqual(facts("dockerRootful"), { shape: "docker", podman: false, os: "Alpine Linux v3.21 (containerized)", rootless: false, selinux: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null, serverVersion: "27.5.1" });
 	assert.equal(facts("dockerRootless").rootless, true);
 	assert.deepEqual(facts("dockerRootless").bounds, { pids: false, memory: false });
 	assert.equal(facts("dockerRemap").userns, true);
@@ -61,7 +62,7 @@ test("a Podman-served body gets no bounds, from ProductLicense alone or from Pod
 	assert.equal(facts("podmanCompatRootful").podman, true);
 	assert.equal(facts("podmanCompatRootful").bounds, null, "Podman hard-codes PidsLimit and derives MemoryLimit from the root controllers");
 	assert.equal(facts("podmanCompatRootless").rootless, true);
-	assert.deepEqual(facts("shimRootful"), { shape: "podman", podman: true, os: "linux", rootless: false, userns: false, bounds: null, serviceIsRemote: true, remoteSocketPath: "unix:///run/podman/podman.sock", serverVersion: null }, "the trimmed shim fixture carries no version");
+	assert.deepEqual(facts("shimRootful"), { shape: "podman", podman: true, os: "linux", rootless: false, selinux: null, userns: false, bounds: null, serviceIsRemote: true, remoteSocketPath: "unix:///run/podman/podman.sock", serverVersion: null }, "the trimmed shim fixture carries no version");
 	assert.equal(facts("shimRootless").remoteSocketPath, "/run/user/1234/podman/podman.sock");
 	// Only a unix path is kept, because only a unix path is ever statted.
 	for (const remote of ["ssh://core:hunter2@10.0.0.5:22/run/podman/podman.sock", "tcp://127.0.0.1:8080", "unix://relative", "run/podman.sock", ""]) {
@@ -70,6 +71,46 @@ test("a Podman-served body gets no bounds, from ProductLicense alone or from Pod
 	}
 	assert.equal(facts("desktop").podman, false);
 	assert.equal(facts("dockerRootful").podman, false);
+});
+
+// Issue #355. Measured through rootful Podman 5.8.1's compat API on an enforcing Fedora 44 host (SecurityOptions verbatim).
+const PODMAN_SELINUX_OPTIONS = ["name=seccomp,profile=default", "name=selinux"];
+
+test("parseDaemonFacts reads SELinux in the Docker shape: the measured name=selinux, its absence, and no substring", () => {
+	const body = (SecurityOptions) => JSON.stringify({ ...BODY.podmanCompatRootful, ServerVersion: "5.8.1", SecurityOptions });
+	assert.equal(parseDaemonFacts(body(PODMAN_SELINUX_OPTIONS)).facts.selinux, true);
+	assert.equal(parseDaemonFacts(body(["name=seccomp,profile=default"])).facts.selinux, false, "no marker, measured on the SELinux-off lab");
+	assert.equal(parseDaemonFacts(body(undefined)).facts.selinux, false, "a body with no SecurityOptions says nothing enables it");
+	assert.equal(parseDaemonFacts(body(["name=selinuxish", "profile=name=selinux"])).facts.selinux, false, "a whole comma-separated part, never a substring");
+	assert.equal(facts("dockerRootful").selinux, false);
+});
+
+test("parseDaemonFacts reads SELinux in Podman's own shape: selinuxEnabled true, false, or no fact at all", () => {
+	const shim = (security) => parseDaemonFacts(JSON.stringify({ host: { ...BODY.shimRootful.host, security } })).facts.selinux;
+	assert.equal(shim({ rootless: false, selinuxEnabled: true }), true);
+	assert.equal(shim({ rootless: false, selinuxEnabled: false }), false);
+	assert.equal(shim({ rootless: false }), null, "absent is not false");
+	assert.equal(shim({ rootless: false, selinuxEnabled: "true" }), null, "a string is not a boolean");
+});
+
+test("relabelsPrivateMounts: Podman AND SELinux AND a local endpoint AND a Linux worker, nothing less", () => {
+	const podmanSelinux = { podman: true, selinux: true };
+	const local = { local: true };
+	assert.equal(relabelsPrivateMounts(podmanSelinux, local, "linux"), true);
+	assert.equal(relabelsPrivateMounts(parseDaemonFacts(JSON.stringify({ ...BODY.podmanCompatRootful, SecurityOptions: PODMAN_SELINUX_OPTIONS })).facts, LOCAL, "linux"), true, "the measured body");
+	for (const [label, f, e, platform] of [
+		["docker with selinux (out of scope)", { podman: false, selinux: true }, local, "linux"],
+		["podman without selinux", { podman: true, selinux: false }, local, "linux"],
+		["podman, selinux unknown", { podman: true, selinux: null }, local, "linux"],
+		["a remote endpoint", podmanSelinux, { local: false }, "linux"],
+		["an unresolved endpoint", podmanSelinux, { local: null }, "linux"],
+		["no endpoint", podmanSelinux, undefined, "linux"],
+		["no facts", null, local, "linux"],
+		["a Podman machine on macOS", podmanSelinux, local, "darwin"],
+		["a Podman machine on Windows", podmanSelinux, local, "win32"],
+	]) {
+		assert.equal(relabelsPrivateMounts(f, e, platform), false, label);
+	}
 });
 
 test("parseDaemonFacts scans from the last line, skips junk, and returns null for neither shape", () => {

@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { release as osRelease } from "node:os";
+import { isAbsolute, relative } from "node:path";
 import { promisify } from "node:util";
 import { execDockerBounded, makeDockerEndpointResolver } from "./backend-local.mjs";
 import { DEFAULT_BACKEND, UNATTRIBUTED_BACKEND } from "./backends.mjs";
@@ -8,7 +9,7 @@ import { configError } from "./config.mjs";
 import { assertJobUser, CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { buildDockerRunArgs } from "./docker-run.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
-import { decideJobUser, JOB_USER_FIX, makeDaemonFactsReader, resolveImageUser, socketFacts } from "./job-user.mjs";
+import { decideJobUser, JOB_USER_FIX, makeDaemonFactsReader, relabelsPrivateMounts, resolveImageUser, socketFacts } from "./job-user.mjs";
 import { NETWORK_SUFFIX, createJobNetwork, egressArmed, egressEnv, egressProxyName, networkEndpoints, networkExists, networkNameFor, removeJobNetwork, removeNetworkOrSay } from "./egress.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
 import { readManifest } from "./sandbox-store.mjs";
@@ -92,8 +93,10 @@ function inPortRange(n) {
  * @param egressEnv    the proxy variables that go with it, or {} when no policy is armed
  * @param user         "<uid>:<gid>" the run had (issue #341), or null for the image's own USER
  * @param home         CONTAINER_HOME beside `user`, and required with it
+ * @param relabel      true where the job's own mounts carried `:Z` (issue #355), so the retained ones do again
+ * @param workspaceOwned true when `workspace` is the retained clone (the worker's own), false for an operator's folder
  */
-export function buildSandboxRunArgs({ image, name, workspace, jobDir, publish = [], term, idleSeconds = 0, network = null, egressEnv: proxyEnv = {}, user = null, home = null }) {
+export function buildSandboxRunArgs({ image, name, workspace, jobDir, publish = [], term, idleSeconds = 0, network = null, egressEnv: proxyEnv = {}, user = null, home = null, relabel = false, workspaceOwned = false }) {
 	// Issue #341: the job path's pairing, for the same measured reason (a uid with no passwd entry gets HOME=/ or
 	// HOME=/workspace), so a sandbox shell as that uid can write its own home.
 	if (user !== null && home !== CONTAINER_HOME) {
@@ -117,6 +120,11 @@ export function buildSandboxRunArgs({ image, name, workspace, jobDir, publish = 
 		name,
 		workspace,
 		jobDir,
+		// Issue #355: the job path's rule, by the same builder. The retained job dir is relabelled again for this one
+		// container (the run that labelled it is gone); the workspace only when it is the retained clone, never an
+		// operator's folder, which a private label would take away from every other container.
+		relabel,
+		workspaceOwned,
 		// The terminal's two variables, and neither is a credential. TERM so the shell renders; TMOUT so a
 		// forgotten session closes itself. HOME beside `--user` and the proxy variables below are the rest.
 		// `buildDockerRunArgs` skips undefined, so an unset TERM or a disabled idle timeout emits nothing rather than
@@ -536,7 +544,7 @@ export async function openSandbox({
 	running = listRunningSandboxes,
 	launch = launchSandbox,
 	spawnNetwork = spawn,
-	// Issue #341: `({ manifest }) => { user, home } | { refused, message }`. Seamed like `launch`, so no test decides
+	// Issue #341: `({ manifest }) => { user, home, relabel? } | { refused, message }` (`relabel`, issue #355, only ever true). Seamed like `launch`, so no test decides
 	// a sandbox's user against a real daemon.
 	resolveJobUser = decideSandboxJobUser,
 	beforeLaunch = () => {},
@@ -606,6 +614,11 @@ export async function openSandbox({
 		egressEnv: egressEnv({ proxy: egress?.proxy, armed: egress?.armed === true }),
 		user: jobUser?.user ?? null,
 		home: jobUser?.home ?? null,
+		relabel: jobUser?.relabel === true,
+		// By containment, the rule `rebaseWorkspace` already moves the retained clone by: a workspace inside the retained
+		// job dir is the worker's own clone, one outside it is the operator's folder. Not by the manifest's `kind`, so a run
+		// retained before a preparer moved its clone is still judged by where the files actually are.
+		workspaceOwned: isInsideDir(resolved.manifest.dir, resolved.manifest.workspace),
 	});
 	await beforeLaunch({ resolved, args, network });
 
@@ -699,6 +712,9 @@ export async function decideSandboxJobUser({
 		: daemon?.answered ? daemon.facts.remoteSocketPath : null;
 	const socket = socketFacts(socketPath, stat ? { stat } : {});
 	const decision = decideJobUser({ platform, release, ...identity, endpoint, daemon, socket });
+	// Issue #355: this CLI's own daemon facts, the same read the uid came from, decide whether the shell's mounts carry
+	// `:Z`. Added to the answer only when true, so every host it does not apply to returns the shape it always did.
+	const relabel = relabelsPrivateMounts(daemon?.answered ? daemon.facts : null, endpoint, platform) ? { relabel: true } : {};
 	// A run from before the stamp, opened with sudo: the root here is this shell's, not the worker's, so the worker's
 	// fix text would send the operator to change the wrong thing.
 	if (decision.cause === "worker-is-root" && (stamp === undefined || stamp === null)) {
@@ -709,7 +725,7 @@ export async function decideSandboxJobUser({
 	if (decision.mode === "unknown") {
 		return { refused: "job-user-unknown", message: `which uid the sandbox may run as could not be decided (${decision.reason}); is the docker daemon running?` };
 	}
-	if (decision.mode === "image") return { user: null, home: null };
+	if (decision.mode === "image") return { user: null, home: null, ...relabel };
 	const needsImage = identity.euid !== SHIPPED_IMAGE_UID;
 	const caps = needsImage ? await imageCapabilities(manifest?.image) : { ok: true, capabilities: [] };
 	if (needsImage && !caps?.ok) {
@@ -720,7 +736,14 @@ export async function decideSandboxJobUser({
 		return { refused: chosen.refused, message: `the retained image ${manifest?.image} does not declare anyUid, so it cannot run as the uid that owns this run's files (issue #341)` };
 	}
 	if (chosen.refused) return { refused: chosen.refused, message: `${JOB_USER_FIX[chosen.cause] ?? "the job user could not be decided"} (issue #341)` };
-	return { user: chosen.user, home: chosen.home };
+	return { user: chosen.user, home: chosen.home, ...relabel };
+}
+
+/** Is `inner` a path strictly beneath `outer`? Both host paths from the manifest; `relative` so a separator is never assumed. */
+function isInsideDir(outer, inner) {
+	if (typeof outer !== "string" || typeof inner !== "string" || outer === "" || inner === "") return false;
+	const rel = relative(outer, inner);
+	return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
 /**

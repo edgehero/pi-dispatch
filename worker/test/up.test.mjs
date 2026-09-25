@@ -593,8 +593,8 @@ const EGRESS_NET = ["network", "create", "pi-dispatch-egress-out"];
 const EGRESS_RUN = [
 	"run", "-d", "--name", "pi-dispatch-egress-proxy", "--restart", "unless-stopped",
 	"--network", "pi-dispatch-egress-out",
-	"-v", "./deploy/egress-proxy.conf:/etc/squid/squid.conf:ro",
-	"-v", "./egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro",
+	"-v", "./deploy/egress-proxy.conf:/etc/squid/squid.conf:ro,z",
+	"-v", "./egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro,z",
 	"ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029",
 ];
 

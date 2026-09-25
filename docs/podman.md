@@ -20,8 +20,9 @@ the supported one. `docs/backends.md` explains the words used below.
 
 Refused for the same reason on either runtime: **rootless Docker** (`rootless`) and **a Docker daemon with
 userns-remap** (`userns-remap`), both of which map container uids away from the worker's, exactly as rootless Podman
-does. Podman never reports `name=userns` (measured: the compat API's `SecurityOptions` carries `name=seccomp` and,
-when rootless, `name=rootless`, and never `name=userns`), so a rootful Podman configured with `userns = "auto"`
+does. Podman never reports `name=userns` (measured: the compat API's `SecurityOptions` carries `name=seccomp`,
+`name=selinux` on a host with SELinux enabled, and `name=rootless` when rootless, and never `name=userns`; on an
+enforcing Fedora 44 host it is `["name=seccomp,profile=default","name=selinux"]`), so a rootful Podman configured with `userns = "auto"`
 is not refused by name. What a job does there is **unmeasured** (`OQ-037`): the container either fails to create,
 because `--user` names a uid outside the namespace Podman allocated, or it starts and the runner's own `/job` check
 stops it at exit 2 (`job-inputs-unreadable`). Those two differ in what they cost a job, so the page does not claim
@@ -106,10 +107,11 @@ Degraded, never refused unless a `PI_BACKEND_FLOOR` asks for the word:
 
 ## Setup (rootful Podman, the supported route)
 
-Steps 1 to 3 are the documented route on a systemd host, and they are the part of this page the lab could not
-exercise: its Podman ran as a bare `podman system service` with a hand-made socket group, because a container has no
-systemd. Step 5's docker context is a recommendation rather than a measurement, for the reason the step itself
-gives. Everything else from step 4 down was measured.
+Steps 1 to 3 are the documented route on a systemd host, which the nested lab could not exercise (its Podman ran as
+a bare `podman system service` with a hand-made socket group, because a container has no systemd). They were
+followed literally on a Fedora 44 host on 2026-09-25: step 1 works as written, step 2 did not give the worker the
+socket until the `tmpfiles.d` override it now carries, and step 3 was measured with Fedora's own packages. Steps 4
+to 8 were measured in the lab, and steps 5 to 8 again on that host.
 
 1. **Start Podman's socket as root:** `sudo systemctl enable --now podman.socket`. It listens on
    `/run/podman/podman.sock`, owned by root.
@@ -127,15 +129,36 @@ gives. Everything else from step 4 down was measured.
    SocketGroup=podman
    ```
 
-   Then `sudo systemctl daemon-reload && sudo systemctl restart podman.socket` (editing the drop-in changes nothing
-   until the unit is restarted), `sudo usermod -aG podman <worker account>`, and log in again. Two rules about that
+   `systemctl edit` needs a terminal (without one it says `Cannot edit units interactively if not on a tty`); from a
+   script, pipe the same three lines into `sudo systemctl edit --stdin podman.socket`. Then
+   `sudo systemctl daemon-reload && sudo systemctl restart podman.socket` (editing the drop-in changes nothing
+   until the unit is restarted), `sudo usermod -aG podman <worker account>`, and log in again.
+
+   **The socket's directory needs the group too.** Podman's own `/usr/lib/tmpfiles.d/podman.conf` creates
+   `/run/podman` as `0700 root root`, so a group on the socket inside it reaches nobody. Measured on Fedora 44 with
+   Podman 5.8.1: after every step above and a fresh login, the worker still got `Permission denied` on the socket, and
+   `ausearch -m avc` was empty, so this is file modes, not SELinux. Override that one line, so it holds after a reboot:
+
+   ```sh
+   sed 's|^D! /run/podman 0700 root root$|D! /run/podman 0710 root podman|' /usr/lib/tmpfiles.d/podman.conf \
+     | sudo tee /etc/tmpfiles.d/podman.conf >/dev/null
+   sudo chgrp podman /run/podman && sudo chmod 0710 /run/podman    # the same, now, without a reboot
+   ```
+
+   A file in `/etc/tmpfiles.d` replaces the vendor file of the same name whole, which is why this is a copy with one
+   line changed rather than that line alone. `0710` lets the group reach the socket by its name and list nothing.
+   Measured: the worker reached the socket at once, and again after a reboot.
+
+   Two rules about that
    group: it must not be the account's PRIMARY group, because a job runs with the worker's primary group and the
    worker refuses one that can reach the socket (`docker-group`); and do not give the worker the socket by making it
    the socket's OWNER (a `SocketUser=` override), because a socket owned by the worker's own uid is what a rootless
    daemon looks like, and the worker refuses it as `rootless`.
 3. **Install the real docker CLI and its compose plugin** (`docker-ce-cli` and `docker-compose-plugin` from Docker's
    repository), not `podman-docker`. If `podman-docker` is installed, remove it first: it owns `/usr/bin/docker`, so
-   the two packages conflict over that path.
+   the two packages conflict over that path. Fedora's own `docker-cli` and `docker-compose` packages work too
+   (measured on Fedora 44: docker-cli 29.7.2 and compose 5.5.1, installed with `--setopt=install_weak_deps=False`,
+   which pulled in no daemon and no `docker.service`).
 4. **Remove Podman's default mounts** so `mountSet` holds: `sudo sh -c ': > /etc/containers/mounts.conf'`. The file
    must exist and be EMPTY. Leave `volumes`, `mounts`, `devices` and `hooks_dir` unset in containers.conf and its
    drop-ins, and install no OCI hooks, or the worker gives `mountSet` no credit. Two more conditions it checks: the
@@ -150,25 +173,85 @@ gives. Everything else from step 4 down was measured.
 
    A context rather than `DOCKER_HOST`, so the worker, the CLI you type into and the panel all resolve the same
    daemon. `DOCKER_HOST` set in one environment and not another is how two of them end up on different daemons.
-   Either works for the daemon itself: every measurement on this page was taken with `DOCKER_HOST` set, and nothing
-   failed for it, `credentialTransit` included. The context is about the three surfaces agreeing with each other.
+   Either works for the daemon itself: the lab's measurements were taken with `DOCKER_HOST` set and the Fedora 44
+   host's through this context, and nothing failed for either, `credentialTransit` included. The context is about the
+   three surfaces agreeing with each other.
 6. **Load the job image and name it as Podman stores it.** `docker pull ghcr.io/edgehero/pi-job:latest`, then set
    `PI_JOB_IMAGE` to the name `docker images` shows for it.
-7. **Start the stack the same way you would on Docker.** The compose file is unchanged:
+7. **Start the stack the same way you would on Docker.** It is the same compose file:
    `docker compose -f deploy/docker-compose.yml up -d` for Valkey, and `--profile egress` as well if you use the
-   egress policy. Podman serves it through the same Docker API, and compose v2 needs no adaptation (measured with
-   v2.33.0). `podman compose` is not a second implementation: it executes whatever compose provider it finds, which
-   on a host set up this way is that same binary, and it says so on stderr. Unchanged means unchanged, not
-   duplicable: the file fixes the proxy's container name, the egress network's name and Valkey's published port, so
-   one host runs one of these stacks (true on Docker too).
+   egress policy. Podman serves it through the same Docker API, and compose needs no adaptation (measured with
+   v2.33.0 in the lab and 5.5.1 on Fedora 44). Its config mounts carry `:ro,z` for an SELinux host (see SELinux
+   below), which does nothing where SELinux is off. `podman compose` is not a second implementation: it executes
+   whatever compose provider it finds, which on a host set up this way is that same binary, and it says so on stderr.
+   One file for both daemons is not one file for two stacks: it fixes the proxy's container name, the egress
+   network's name and Valkey's published port, so one host runs one of these stacks (true on Docker too).
 8. **Run `pi-dispatch up`, then `pi-dispatch doctor --live`.** doctor names the runtime (`local: the daemon is Podman
    5.8.2, through its Docker API`), and `--live` reads the declarations back off real containers on this daemon.
+   On an SELinux host, read the next section before the first job.
+
+## SELinux
+
+With SELinux enforcing (stock Fedora and RHEL), a bind mount keeps its host label, and a container may only use files
+labelled for containers. Measured on Fedora 44 with rootful Podman 5.8.1 and container-selinux 2.247.0
+(2026-09-25): every unlabelled source was denied to the container, `ls` included, with or without `:ro`, whether it
+sat under `/tmp` (`user_tmp_t`), under a home directory (`user_home_t`), under `/var/lib` (`var_lib_t`) or under
+`/srv` (`var_t`). Before this release every job on the supported route therefore stopped at `/job` before it spent
+anything, and `.github/scripts/job-user-e2e.mjs` failed for a jobs directory under `/tmp` and under `$HOME` alike
+(`ls: cannot open directory '/job': Permission denied`).
+
+Two mount options fix that, and they are not interchangeable (both measured):
+
+- `:z` relabels the source `container_file_t`, shared, so every container may use it.
+- `:Z` relabels it with a category pair private to one container (`container_file_t:s0:c542,c700`). A second
+  container that mounts the same folder afterwards is denied.
+
+**What the worker does.** When the daemon is Podman, reports SELinux (`name=selinux`), is on this host, and the worker
+runs on Linux, the directories the worker makes for one job carry `:Z`: `/job` (`:ro,Z`), `/outbox`, `/session`, and
+`/workspace` when it is the worker's own (a forge job's clone). Private is right for a directory one container ever
+sees, and it keeps each job's inputs out of every other container. On any other daemon the argv is exactly what it
+was. `pi-dispatch doctor --live` and `pi-dispatch sandbox` follow the same rule: the probe's fixture and a sandbox's
+retained workspace are the worker's own, so they carry `:Z` too.
+
+**What it never relabels, and what you do instead.** A local trigger's folder is yours, and `PI_GLOBAL_PI_DIR` (the
+overlay mounted at `/opt/pi-global`) is mounted into every job. `:Z` on either would take it from every other
+container, the next job included, and `:z` would replace a label you chose on every run. So neither is relabelled,
+and each needs a label once, as root:
+
+```sh
+semanage fcontext -a -t container_file_t '/srv/repo(/.*)?'
+restorecon -R /srv/repo
+```
+
+Measured: after that the folder is readable and writable in a container with no mount option, and readable with
+`:ro`. `semanage` records a rule, so the label survives a full relabel of the filesystem, which a bare `chcon` does
+not.
+
+`pi-dispatch doctor` checks this where it applies. It prints a ✓ line saying jobs' own directories are relabelled
+(`:Z`), and reads the label of every local trigger's folder and of `PI_GLOBAL_PI_DIR` with `stat --format=%C`. A type
+other than `container_file_t` or `container_ro_file_t`, or one carrying a private category pair (some container's
+`:Z`), is a ⚠ naming the folder and the fix above; a label it cannot read is a "not checked" line, never a warning. A
+job that meets such a folder anyway is refused before it spends: the runner checks that it can read `/job`,
+`/opt/pi-global` and `/workspace`, and exits 2 as `job-inputs-unreadable`, naming the path. A `/workspace` the job
+can read but not write still runs, with the advisory `workspace_not_writable`, because a read-only review of such a
+folder is a legitimate job.
+
+The compose file's config mounts (`egress-proxy.conf`, `egress-allowlist.conf`, `triggers.json`), and the two the
+proxy `pi-dispatch up` starts gets, carry `:ro,z`:
+shared, because they are single files the services read, not a job's directory. Measured: without it squid
+crash-looped with `FATAL: Unable to open configuration file: /etc/squid/squid.conf: (13) Permission denied`; with it
+the proxy reached `healthy`.
+
+Docker Engine with `selinux-enabled` is out of scope. It reports the same `name=selinux`, but the worker adds `:Z`
+on Podman only, so the argv there is what it always was, and nothing about that route was measured.
 
 ## Property table
 
 Each cell is the word a job gets, or the refusal. "Observed" means the worker checks it at boot and before each job.
 Measured on Podman 5.8.2 (netavark 1.17.2, aardvark-dns 1.17.1, crun 1.27.1, conmon 2.2.1, Fedora 42) and Docker
-Engine 27.5.1, in nested labs, and re-run against this page on 2026-09-21.
+Engine 27.5.1, in nested labs, and re-run against this page on 2026-09-21. On the Fedora 44 host (Podman 5.8.1,
+2026-09-25) `doctor --live` read `isolation`'s bounds, `imagePinning`, `nonRoot`, `egress` and `jobToJobIsolation`
+back as holding; see "Measured on a real host" for what else was measured there.
 
 <!-- PODMAN-PROPERTY-TABLE -->
 | Property | Docker Engine, rootful | Podman rootful | Podman rootless, keep-id | Podman rootless | podman-docker, rootful | podman-docker, rootless |
@@ -225,8 +308,17 @@ which of these you are in.
 
 ## Health checks need systemd
 
-Podman schedules a container's health check with a transient systemd timer, so on a host with no systemd (a
-container, a minimal image) nothing ever runs one. Measured in the lab, where PID 1 is not systemd: the compose
+Podman schedules a container's health check with a transient systemd timer, so it runs on a systemd host and nowhere
+else.
+
+**On a systemd host the status is live.** Measured on Fedora 44 with systemd 259.5 (2026-09-25): after
+`docker compose --profile egress up -d` the proxy reached `healthy` in about 35 s with no manual
+`podman healthcheck run`, its health log shows the check running on its own 30 s schedule (a first
+`Connection refused` while squid started, then exit 0), and `systemctl list-timers` lists the transient
+`<container id>-<hash>.timer`. Valkey reached `healthy` in 10 s. doctor's `Egress proxy health` line is then a
+current answer.
+
+**Without systemd nothing ever runs one** (a container, a minimal image). Measured in the lab, where PID 1 is not systemd: the compose
 file's Valkey, six days up and declaring a 10 s interval, reports `starting` with an empty log, because the check
 has never run. The squid proxy beside it reports `healthy` off a single log entry from the day the lab was built,
 when the check was run by hand; a second `podman healthcheck run` adds a second entry and nothing else moves it.
@@ -236,8 +328,7 @@ start is where every container on such a host stays.
 So on such a host the status Podman stores is whatever the last manual run left, and doctor prints that stored word:
 `Egress proxy health: starting` as a warning where no check has run, and a `healthy` that may be days old where one
 has. Read it as the last answer, not a live one. The worker's egress gate reads only whether the proxy is running,
-so no job is refused for a health status. On a normal systemd host the timer runs and the status is live, which is
-`OQ-037`'s unmeasured row (issue #355).
+so no job is refused for a health status, on either kind of host.
 
 ## exitCodes on Podman
 
@@ -260,13 +351,66 @@ The worker reads the container's exit code through the docker CLI, and four Podm
   and retries the job as `container-detached` without refunding it. A service still down after 10 s cannot be asked
   to stop it, and the container then keeps its name until it exits.
 
+## Measured on a real host
+
+What the nested lab could not answer, measured on a Fedora 44 host (issue #355). Each row's Result is one of four
+words: `measured` (it holds as this page describes it, with nothing changed), `argv: <option>` (it holds with that
+mount option, which the argv or the compose file now carries), `refused: <reason>` (a job there is refused before it
+spends, with that reason), or `doc: <what changed>` (it holds once the setup step this page now gives is followed).
+`worker/test/podman-doc.test.mjs` pins the vocabulary, and pins the two `argv:` words to what the job argv builder
+and the compose file actually say.
+
+<!-- PODMAN-HOST-ROWS -->
+| Row | Result | Podman | Date |
+|---|---|---|---|
+| SELinux: the worker's own per-job mounts | argv: :Z | 5.8.1 | 2026-09-25 |
+| SELinux: an operator's local folder, unlabelled | refused: job-inputs-unreadable | 5.8.1 | 2026-09-25 |
+| SELinux: the global overlay, unlabelled | refused: job-inputs-unreadable | 5.8.1 | 2026-09-25 |
+| SELinux: SecurityOptions carries name=selinux | measured | 5.8.1 | 2026-09-25 |
+| nftables: egress reaches the provider and denies an unlisted host | measured | 5.8.1 | 2026-09-25 |
+| nftables: jobToJobIsolation | measured | 5.8.1 | 2026-09-25 |
+| Health checks under systemd | measured | 5.8.1 | 2026-09-25 |
+| SELinux: the compose file's config mounts | argv: :ro,z | 5.8.1 | 2026-09-25 |
+| Setup step 2, the socket for the worker's group | doc: /run/podman tmpfiles override | 5.8.1 | 2026-09-25 |
+<!-- /PODMAN-HOST-ROWS -->
+
+The host: Fedora 44, kernel 6.19.10, SELinux enforcing (selinux-policy 43.3, container-selinux 2.247.0), systemd
+259.5, cgroup v2 with the systemd cgroup manager, rootful Podman 5.8.1 behind `podman.socket`, netavark 1.17.2 using
+its nftables firewall driver (its log says `Using nftables firewall driver`, and the rules are in `table inet
+netavark`), aardvark-dns 1.17.0, crun 1.27, conmon 2.2.1, and Fedora's docker-cli 29.7.2 and docker-compose 5.5.1
+through a docker context, as an unprivileged worker account (uid 1234). A Lima virtual machine on a Mac, so a whole
+Fedora with its own kernel and systemd, not a container.
+
+What each row rests on:
+
+- **The SELinux rows**: a `docker run --user=1234:1234` of the job image against folders under `/tmp`, a home
+  directory, `/var/lib` and `/srv`, each with no option, `:ro`, `:z` and `:Z`, the labels read before and after; the
+  job-user end-to-end script and `doctor --live` failing at `/job` on the worker before this release; and a folder
+  labelled with `semanage fcontext` then read and written with no option. The per-job row's `:Z` and the two refused
+  rows are this release's worker and runner, run on that host against an image built from them:
+  `.github/scripts/podman-host-check.mjs` passed every check, the job-user end-to-end script included, for a jobs
+  directory under `/tmp` and under a home directory, and `doctor --live` read every property back as holding once
+  `/etc/containers/mounts.conf` was emptied (Setup covers that file).
+- **The nftables rows**: `pi-dispatch doctor --live` with `PI_EGRESS` armed and the allowlist `pi-dispatch init`
+  writes: the provider answered through the proxy with no key, an unlisted host was denied, and a job network's peer
+  was unreachable by its container name, its hostname and its address (`enotfound`, `enotfound`, `enetunreach`) while it answered
+  itself before and after.
+- **Health checks** and **the compose file's config mounts**: the compose egress profile brought up from scratch, with
+  the health log and `systemctl list-timers` read, first as the file was (squid crash-looping) and then with `:ro,z`.
+- **Setup step 2**: steps 1 to 3 of Setup followed literally, then the `tmpfiles.d` override, then a reboot.
+
+To add a row or re-measure one, run `.github/scripts/podman-host-check.mjs` on an enforcing SELinux host with systemd,
+as the worker's account, from the deployment directory. It refuses to record anything unless SELinux is enforcing,
+systemd is running, netavark uses nftables and cgroups are v2, and it prints the rows that held in this table's
+shape, ready to paste between the markers.
+
 ## Not measured
 
-SELinux in enforcing mode, netavark's nftables firewall driver, systemd-run health checks, `podman machine` on macOS
-or Windows, Podman Desktop, Docker Desktop for Linux, OrbStack and Colima. Each is unmeasured, not refused, except
-Docker Desktop on Linux outside WSL, which is refused from its vendor documentation (`desktop-linux-userns`).
-`OQ-037` tracks what would close each; issue #355 tracks measuring the first three on a real host, and issue #354 the
-native `podman` backend that rootless Podman would need.
+`podman machine` on macOS or Windows, Podman Desktop, Docker Desktop for Linux, OrbStack and Colima. Each is
+unmeasured, not refused, except Docker Desktop on Linux outside WSL, which is refused from its vendor documentation
+(`desktop-linux-userns`). `OQ-037` tracks what would close each, and issue #354 the native `podman` backend that
+rootless Podman would need. Docker Engine with `selinux-enabled` is out of scope and unmeasured: the worker relabels
+job mounts on Podman only, so a job there gets the argv it always did.
 
 ## How this was measured
 
@@ -277,12 +421,15 @@ last commit before this page and the one that carries every line of worker code 
 worker code). Rows that nesting can distort (rootless cgroup bounds) were labelled lab-limited and not relied on.
 The
 lab was configured with netavark's iptables firewall driver, because the LinuxKit kernel rejects its nftables rules,
-and with `cgroup_manager = "cgroupfs"` and a file event logger, because it has no systemd; a real Fedora host uses
-nftables, systemd cgroups and journald, which is `OQ-037`'s unmeasured row. Those three settings are carried over
-from the lab's build rather than re-read this round.
+and with `cgroup_manager = "cgroupfs"` and a file event logger, because it has no systemd. Those three settings are
+carried over from the lab's build rather than re-read this round. A real Fedora host uses nftables, systemd cgroups
+and journald, and that was measured separately on 2026-09-25, on a Fedora 44 host with SELinux enforcing: see
+"Measured on a real host", which lists its versions. It left `firewall_driver` unset in containers.conf, and netavark
+chose nftables on its own.
 
-Every sentence above that says "measured" was re-run on 2026-09-21 against this page, one command log per claim, and
-the decisive output is quoted in the closing comment on issue #345, where it stays readable after the lab is gone.
+Every sentence above that says "measured" of the lab was re-run on 2026-09-21 against this page, one command log per
+claim, and the decisive output is quoted in the closing comment on issue #345, where it stays readable after the lab
+is gone. The Fedora 44 host's measurements were taken on 2026-09-25 for issue #355, which carries their command logs.
 The one exception is the lost API service under exitCodes, which says so where it stands: it was measured when the
 behaviour was found, and re-running it means killing a daemon mid-job.
 What the lab could not answer says "unmeasured" instead, and every refusal quoted here is pinned to the worker's own

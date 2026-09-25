@@ -4511,7 +4511,10 @@ a tunnel.
   - **An `observedBy` observation for `localFolders`**: permanent warning noise, and a word is the wrong
     instrument for "every job fails".
 - **Residuals**:
-  - NFS root_squash and SELinux are caught only at run time or by the read-back.
+  - NFS root_squash is caught only at run time or by the read-back. SELinux no longer is, on Podman (issue #355):
+    the worker relabels the directories it makes per job (`:Z`), doctor names an operator's local folder or overlay
+    whose label a container cannot read, and the runner refuses a job that cannot read `/workspace` before it spends
+    (`DES-PODMAN-THROUGH-ITS-DOCKER-API`). Docker Engine with `selinux-enabled` is still caught only at run time.
   - Supplementary groups are dropped under `--user`.
   - Unmeasured setups: Docker Desktop on Linux (refused from its vendor docs), Docker Desktop on WSL2 (falls
     through), OrbStack, Colima.
@@ -4609,7 +4612,44 @@ a tunnel.
     override and read back from mountinfo (`runtimeAddsNoMounts`); and a lost API service leaves a container running
     while the CLI exits 125, so the run's cidfile finds and stops it (`container-detached`).
   - **The compose file's egress profile** (Valkey and the squid proxy) runs unchanged through the real docker CLI.
+- **SELinux, nftables and systemd, measured on a real host (issue #355)**. Fedora 44 (kernel 6.19.10), SELinux
+  enforcing (selinux-policy 43.3, container-selinux 2.247.0), systemd 259.5, cgroup v2, rootful Podman 5.8.1 behind
+  `podman.socket`, netavark 1.17.2 on its nftables driver, aardvark-dns 1.17.0, crun 1.27, conmon 2.2.1, Fedora's
+  docker-cli 29.7.2 and docker-compose 5.5.1 through a docker context, worker uid 1234; 2026-09-25.
+  - **nftables holds unchanged**: `doctor --live` read `egress` and `jobToJobIsolation` back (a peer's two names
+    `enotfound`, its address `enetunreach`). **Health checks under systemd hold unchanged**: the compose proxy went
+    `healthy` in about 35 s on its own transient timer, with no manual run.
+  - **SELinux did not hold.** The compat API reports it (`SecurityOptions`
+    `["name=seccomp,profile=default","name=selinux"]`), and every unlabelled bind source is denied to the container,
+    `ls` included, with or without `:ro`: `user_tmp_t`, `user_home_t`, `var_lib_t` and `var_t` alike. So every job on
+    this route stopped at `/job` with exit 2 before spending (`job-user-e2e.mjs` for jobs dirs under `/tmp` and
+    `$HOME`; `doctor --live`'s `localFolders`), and the compose proxy crash-looped unable to open `squid.conf`. `:z`
+    relabels a source `container_file_t` (shared); `:Z` relabels it with a private category pair and then locks every
+    other container out of it; a `semanage fcontext -a -t container_file_t` rule plus `restorecon` makes a folder
+    usable by every container with no option.
+  - **The decision**: `relabelsPrivateMounts(facts, endpoint)` in `job-user.mjs` holds for a Podman daemon that
+    reports SELinux (`selinux`, a new daemon fact read from `name=selinux` in the Docker shape and
+    `host.security.selinuxEnabled` in Podman's own), on an endpoint on this host, from a Linux worker. One function,
+    read by the job path, doctor and the sandbox. Where it holds, `containerSpec` marks the mounts the worker makes
+    per job `relabel: "private"` and the builder renders them `:Z` (`/job:ro,Z`, `/outbox`, `/session`, and
+    `/workspace` only when the worker owns it: a forge clone, a sandbox's retained workspace, doctor's fixture). An
+    operator's local folder and `/opt/pi-global` are NEVER relabelled; doctor reads their labels
+    (`stat --format=%C`) and warns with the `semanage fcontext` fix, and the runner refuses a job whose `/workspace`
+    it cannot read, pre-spend, as `job-inputs-unreadable`. Without the relabel every argv is byte-identical to
+    before. The compose file's three single-file config mounts carry `:ro,z`.
 - **Rejected**:
+  - **`:z` (shared) on a job's own directories**: every container on the host could then read every job's inputs and
+    transcript while it runs, which is the job-to-job reach the per-job `0700` directory exists to deny
+    (`CONST-ISOLATION-CONTAINER-PER-JOB`).
+  - **Relabelling an operator's local folder or the overlay**: `:Z` takes the folder from every other container
+    (measured: a second container is denied), the next job on the same folder included, and `:z` would overwrite a
+    label the operator chose on every run. The operator's one-time `semanage` rule is the measured fix, and doctor
+    names it.
+  - **`--security-opt label=disable` for job containers**: it would make every mount work by removing SELinux's
+    confinement of the agent, a layer the host gave us for free, to fix a labelling problem.
+  - **Relabelling on Docker Engine with `selinux-enabled` too**: it reports the same `name=selinux`, but nothing about
+    that route was measured, and the rule this entry follows is to change the argv only where a measurement says it
+    must.
   - **`podman-docker` as a supported route.** It resolves no docker context, so the endpoint observation that gates
     `credentialTransit` never holds and `doctor --live` never runs; it prints a banner on stderr that a merged parser
     misreads (doctor's parsers now read stdout only); and it renders Podman's own `docker info` shape. Named by
@@ -4627,8 +4667,13 @@ a tunnel.
   - **A boot probe container to tell keep-id apart from plain rootless** (`userns = "keep-id"` in containers.conf
     changes nothing `docker info` shows): `CONST-ISOLATION-CONTAINER-PER-JOB` rejects probing at boot or per job.
 - **Residuals**:
-  - SELinux in enforcing mode, netavark's nftables driver, systemd-run health checks, `podman machine`, Podman
-    Desktop, OrbStack and Colima are unmeasured (`OQ-037`; issues #354 and #355 carry what would close each).
+  - `podman machine`, Podman Desktop, OrbStack, Colima and Docker Engine with `selinux-enabled` are unmeasured
+    (`OQ-037`; issue #354 carries the native backend). SELinux enforcing, netavark's nftables driver and systemd-run
+    health checks were measured on a real host (issue #355, above).
+  - An operator's local folder or overlay that is not labelled for containers refuses every job that mounts it, at
+    the runner's pre-spend check, until the operator adds the `semanage` rule; doctor names it beforehand, but only
+    for folders `triggers.json` names and for `PI_GLOBAL_PI_DIR`. The relabel and the refusals were read back on
+    that host with an image built from this change (`.github/scripts/podman-host-check.mjs`, every row held).
   - On Podman's attached path a container that cannot start arrives as exit 1 rather than 126 or 127 (measured for a
     missing and a non-executable entrypoint, with and without `--init`: `--init` only changes the message from
     `unable to upgrade to tcp, received 500` to catatonit's), so it is retried as an infrastructure failure rather
@@ -4636,9 +4681,11 @@ a tunnel.
   - Podman schedules health checks with a transient systemd timer, which a host without systemd never runs (measured:
     a compose Valkey six days up reports `starting` with an empty log, while the proxy beside it reports `healthy`
     off one hand-run check). doctor prints the stored status, so there it is the last answer rather than a live one.
-    The worker's egress gate reads only `Running`, so no job is refused for it (issue #355).
+    On a systemd host the timer runs and the status is live (measured, issue #355). The worker's egress gate reads
+    only `Running`, so no job is refused for it on either.
   - A rootful Podman with `userns = "auto"` never reports `name=userns` (measured: the compat API's
-    `SecurityOptions` carries `name=seccomp` and, rootless, `name=rootless`, never `name=userns`), so it decides
+    `SecurityOptions` carries `name=seccomp`, `name=selinux` where SELinux is enabled and, rootless, `name=rootless`,
+    never `name=userns`), so it decides
     `worker` and passes `--user`. What a job does there is UNMEASURED and the two candidates differ in cost: the
     container fails to create, because the uid is outside the namespace Podman allocated (refunded only if the CLI
     reports that as never-started), or it starts and the runner's `/job` check stops it at exit 2
@@ -4647,8 +4694,13 @@ a tunnel.
   `podmanOnThisHost`; `worker/src/job-user.mjs` -> `parseDaemonFacts` (`PODMAN_PRODUCT_LICENSE`);
   `worker/src/run-container.mjs` -> `stopDetached`; `worker/src/doctor.mjs` -> the runtime line;
   `worker/src/live-probes.mjs` -> `MOUNTINFO_ALLOWED_EXACT`; `docs/podman.md`; `worker/test/podman-doc.test.mjs`
+  · issue #355: `worker/src/job-user.mjs` -> `relabelsPrivateMounts`, `parseDaemonFacts` (`selinux`);
+  `worker/src/container-spec.mjs` -> `containerSpec` (`relabel`, `workspaceOwned`); `worker/src/docker-run.mjs` ->
+  `dockerArgsFromSpec`; `worker/src/doctor.mjs` -> `selinuxLabelChecks`; `image/runner/run-job.mjs` ->
+  `assertJobInputsReadable`; `deploy/docker-compose.yml`; `.github/scripts/podman-host-check.mjs`
 - **Traces to**: `DES-CONTAINER-BACKEND-REGISTRY`, `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`,
-  `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-LIVE-PROBE-CONTRACT`, `OQ-036`, `OQ-037`
+  `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-LIVE-PROBE-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`,
+  `CONST-ISOLATION-CONTAINER-PER-JOB`, `OQ-036`, `OQ-037`
 
 ## Revision History
 
@@ -4792,3 +4844,4 @@ a tunnel.
 | 2026-09-25 | Issue #417. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: a cluster that BEGINS with a zero-width character is MATCHED to the pinned renderer, where the entry said it was filed rather than matched. pi-tui 0.80.7 computes a cluster's base after stripping leading non-printing characters and then counts that base again, so `panel.mjs` under-counted, the direction that overflows a pane. **The issue under-described its own defect**, measured: it is not only a string's start (thirty-one spacing marks start a cluster anywhere, so already-scrubbed Myanmar text drew a 24-column frame at 33) and not only four tails (thirteen prepended format characters double any following code point in U+FF00-U+FFEF but U+FFA0, a two-column one included). The stepper now yields the base and the part of the leader run inside its cluster as one step, asking `Intl.Segmenter` with the renderer's arguments whether the run starts a cluster; `box`, `frame`, the line editor and `renderRuns` measure where the text is drawn; a styled line is also measured piece by piece because the overlay compositor segments each piece alone. Bounding was rejected because the substitution class has no notion of position and would rewrite content. New sweeps in `width.test.mjs` pin the renderer-derived counts literally (2,684 leaders, 242 tails, 13,545 and 3,273 doubled forms, 6,446 breaking predecessors, 26 regional indicators). The review pass that gated it found a memo keyed without the start of a string (an under-count, reproduced in the LIST pane), an editor that lost its cursor highlight on ordinary Thai and trimmed quadratically, and a cursor cell reserved one column wide that pushed a two-column character out of the window; all four are fixed and pinned. A further round found the editor's trim separating a Thai tone mark from its letter, a bundle that took a mark belonging to the previous letter, and a cursor inside a step that rounded FORWARD onto the step after it: it now names its own step, which is where an insert lands. Residuals stated in the entry. **UNCHANGED, checked**: `OQ-035` (the class itself is untouched), `REQ-TOPOLOGY-GRAPH`, `REQ-INSIGHTS-HTML-EXPORT`, the constitution. **Code evidence**: admin/src/panel.mjs -> widthSteps, leaderStep, contextOf, countLater, box, makeLineInput; admin/src/style.mjs -> visibleLen, frame; admin/src/render.mjs -> renderRuns, afterSpace; admin/test/width.test.mjs. |
 | 2026-09-25 | Issue #418. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the insights artifact sizes and cuts its labels in estimated columns and never through a character. `graph-html.mjs` sized chips as `LABEL_X + label.length * CHAR_W + 12` and both it and `insights-html.mjs` cut about forty fields with `t.slice(0, max)`: a CJK name ran out of its chip, and an odd-prefixed emoji value left raw lone surrogates in the page and their escaped text in the embedded JSON. **Correction to the issue's own route**: it suggested reaching for `panel.mjs`, but `graph-html.mjs` loads nothing by design, so it carries `labelColumns`, an over-estimate held to the panel's table by a sweep (never narrower on 1,112,064 code points and 2,224,128 pairs, exactly equal on 185,319 code points, pinned; never below the code-unit count, so no label regresses), plus `clip` (a code-unit cap that gives up half a pair), `clipColumns` (a cut between grapheme clusters, two columns for the ellipsis after a wide character) and `drawnColumns` (the width that cut leaves); the insights page reuses them, and cuts a plan chip's text to its capped rect. The review pass measured an emoji at 17 to 19px in a browser, past two columns, so an emoji counts three; found that counting a mark as nothing regressed Indic labels; and found cuts that kept the surrogate pair but split a flag or a family, so every cut ends between clusters (`panel.mjs` gains `cutUnits` for the model's caps) and both page sinks make strings well-formed. A missed feeder was fixed at its source: `findLoopHints` cut a hint with a code-unit `{0,60}`. Pages of printable ASCII byte-identical to `main` on every fixture, except a plan chip whose text used to run past its rect. Residuals named in the entry. **UNCHANGED, checked**: `REQ-INSIGHTS-HTML-EXPORT`, `REQ-TOPOLOGY-GRAPH`, `DES-GRAPH-EDGE-DERIVATION`. **Code evidence**: admin/src/graph-html.mjs -> labelColumns, clip, clipColumns, drawnColumns, chipLabel, chipWidth, computeSkillGroup, groupTitle; admin/src/insights-html.mjs -> layoutBarList, barListSvg; admin/src/graph-model.mjs -> findLoopHints, clipName, parseSkillMeta; admin/src/panel.mjs -> cutUnits; admin/test/graph-html.test.mjs; admin/test/insights-html.test.mjs. |
 | 2026-09-25 | Issue #422. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the residuals #418 stated (labels the column estimate cannot size) are closed by MEASURING at view time rather than by widening the estimate. **Why not a wider table**: the page's font is the viewer's system stack (`-apple-system`, `Segoe UI`, Roboto and on), so a table measured in one browser on one OS is another's guess, and a table that covered wide Latin letters would move every ASCII chip; a measurement in the page is exact wherever it runs. **Why not a chip that grows**: the layout, the column pitch and every wire are computed ahead of time from the chip widths, so a chip grown in the browser would need the wires rerouted there too; the page only ever shortens a label, never moves a shape. **What changed**: `graph-html.mjs` exports `FIT_JS` (the insights page runs it ahead of `PAGE_JS`, inside a try), which measures each left-anchored label against the box the markup already gives it and cuts on grapheme boundaries, by halving, with a measured ellipsis (a right-to-left mark after it when the cut ends right to left), adding a title of the drawn text where the group shows no tooltip; a label's box is the rect that HOLDS it before any rect after it, because bounding a chip label at its output port cut ordinary names a second time; the forge and unreachable group titles put their caveat first, since the page cuts from the end, and a forge group is at least as wide as its caveat; a loop hint's box ends at the ring wire; the cron re-arm label is fitted by the page to its loop's drawn width (a builder budget in columns cut weekday lists that fitted), its wire marked `gcron` for it; one right-to-left table serves the builder's cut and the page's, leaving the Arabic-Indic digits out; `findLoopHints` trims whole clusters through the new `panel.mjs` `trimClusters`, so a Prepend keeps the space it joined. **Unchanged**: the static estimate (`labelColumns`, its sweep and every chip width), so ASCII scenes are byte-identical except the two reordered titles, the `gcron` class and a forge group narrower than its caveat, and a page with its script off is the page it was. **Measured** by the new local gate `.github/scripts/label-fit-check.mjs` in headless Chrome, with a probe written apart from the fit: 29 corpus labels ran past a bound with the fit stripped and none with it, no needless cut, no cron pattern cut, and no label that fitted changed on a plain or a realistic ASCII page. `docs/images/graph-view.png` re-shot from the worked example (PR #196's fixture) so the forge title shows its new order. `REQ-INSIGHTS-HTML-EXPORT` UNCHANGED, checked (the artifact binds no port and loads nothing; the fit reads only the page's own DOM); `REQ-TOPOLOGY-GRAPH` UNCHANGED, checked (every fact it names is still on the page: (e2)'s record-derived repo list, now after the caveat, may be cut from a narrow group's drawn title and keeps its whole text in the title the cut adds, and (f)'s rule that a truncation says so is kept by the ellipsis); `DES-GRAPH-EDGE-DERIVATION` UNCHANGED, checked (no edge or label vocabulary moves). Code evidence: `graph-html.mjs` `FIT_JS` (`fitLabels`, `loopWidth`), `groupTitle`, `forgeTitleMinWidth` (in `layoutNormalized`), `endsRightToLeft` (`RTL_STRONG`), `clipColumns`, `drawnColumns`, `wireSvg` (`gcron`); `insights-html.mjs` script assembly; `graph-model.mjs` `findLoopHints`; `panel.mjs` `trimClusters`. |
+| 2026-09-25 | Issue #355. **`DES-PODMAN-THROUGH-ITS-DOCKER-API` AMENDED** with what a real host measured, on 2026-09-25: Fedora 44 (kernel 6.19.10), SELinux enforcing (selinux-policy 43.3, container-selinux 2.247.0), systemd 259.5, cgroup v2, rootful Podman 5.8.1, netavark 1.17.2 on its nftables driver, aardvark-dns 1.17.0, crun 1.27, conmon 2.2.1, Fedora's docker-cli 29.7.2 and docker-compose 5.5.1 through a docker context, worker uid 1234. nftables and health checks under systemd hold with nothing changed, and their residuals say so. **SELinux did not hold**: every unlabelled bind source was denied to the container, `:ro` or not, so every job on the supported route stopped at `/job` with exit 2 before spending, and the compose proxy crash-looped unable to read `squid.conf`. The entry now records the decision (`relabelsPrivateMounts`: Podman, SELinux reported, an endpoint on this host, a Linux worker; `:Z` on the mounts the worker makes per job; never on an operator's local folder or the overlay, which get doctor's `semanage fcontext` warning and the runner's pre-spend `/workspace` refusal; `:ro,z` on the compose file's three config mounts) and four rejected alternatives (shared `:z` on job directories, relabelling an operator's folder, `--security-opt label=disable`, relabelling on Docker Engine with `selinux-enabled`, which stays out of scope and unmeasured). The residuals lose SELinux, nftables and systemd from the unmeasured list, gain Docker Engine with `selinux-enabled`, and gain the unlabelled-folder refusal. **`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST` AMENDED** in one residual: SELinux is no longer caught only at run time on Podman; NFS root_squash still is. **UNCHANGED, checked**: `DES-CONTAINER-BACKEND-REGISTRY` (no table word moves: the relabel changes no declaration or observation), `DES-WORKER-ON-HOST` (still host bind mounts), and `CONST-ISOLATION-CONTAINER-PER-JOB`, whose Acceptance enumerates mount PATHS and their `ro`/`rw` modes; `:Z` adds neither a path nor write access, so the enumeration stays true as written. **Read back on that host with an image built from this change**: `.github/scripts/podman-host-check.mjs` passed every check and all nine table rows held, the job-user end-to-end script included for a jobs directory under `/tmp` and under a home directory; the proxy `pi-dispatch up` starts (`worker/src/up.mjs`) carries the same `:ro,z` as the compose file. |

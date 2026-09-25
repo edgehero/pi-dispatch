@@ -106,37 +106,41 @@ export function liveFixture(root) {
  * job user a job on this host would get (issue #341). `user` rides the builder's own field, so the probe is `--user`
  * exactly where a job is; there is still no `-e`, not even HOME, because the probe runs no pi and reads no home.
  */
-function probeOptions({ image, name, fixture, user = null }) {
-	return { image, name, env: {}, network: "none", user, ...fixture };
+//
+// `relabel` (issue #355) is a job's too: where a job's own mounts carry `:Z`, so do the probe's, because a probe mounted
+// the way no job is would read back a container no job gets. The fixture is doctor's own directory, so its workspace
+// is relabelled like a forge job's clone (`workspaceOwned`); its global overlay directory never is, exactly as a job's.
+function probeOptions({ image, name, fixture, user = null, relabel = false }) {
+	return { image, name, env: {}, network: "none", user, relabel: relabel === true, workspaceOwned: true, ...fixture };
 }
 
 /** The probe container's argv: the job builder's, detached, with `sleep <derived seconds>` as its whole program. */
-export function liveProbeRunArgs({ image, name, fixture, sleepSeconds = liveSleepSeconds(), user = null }) {
-	return [...buildDockerRunArgs({ ...probeOptions({ image, name, fixture, user }), extraFlags: ["-d", "--entrypoint", "sleep"] }), String(sleepSeconds)];
+export function liveProbeRunArgs({ image, name, fixture, sleepSeconds = liveSleepSeconds(), user = null, relabel = false }) {
+	return [...buildDockerRunArgs({ ...probeOptions({ image, name, fixture, user, relabel }), extraFlags: ["-d", "--entrypoint", "sleep"] }), String(sleepSeconds)];
 }
 
 /**
  * The pinning probe's argv: the job builder's, detached, against an image this host does not have. Detached so a
  * container that WAS created prints the ID it is removed by; with `--pull=never` in the builder none should be.
  */
-export function pinningProbeRunArgs({ name, nonce, fixture, user = null }) {
-	return buildDockerRunArgs({ ...probeOptions({ image: absentImageRef(nonce), name, fixture, user }), extraFlags: ["-d"] });
+export function pinningProbeRunArgs({ name, nonce, fixture, user = null, relabel = false }) {
+	return buildDockerRunArgs({ ...probeOptions({ image: absentImageRef(nonce), name, fixture, user, relabel }), extraFlags: ["-d"] });
 }
 
 /**
  * One ephemeral run's argv (issue #344): the job builder's, detached, running EPHEMERAL_SCRIPT with the nonce and the
  * run's number. The same NAME both times, because "a job id run twice" is the question.
  */
-export function ephemeralRunArgs({ image, name, fixture, nonce, run, user = null }) {
-	return [...buildDockerRunArgs({ ...probeOptions({ image, name, fixture, user }), extraFlags: ["-d", "--entrypoint", "sh"] }), "-c", EPHEMERAL_SCRIPT, "sh", nonce, String(run)];
+export function ephemeralRunArgs({ image, name, fixture, nonce, run, user = null, relabel = false }) {
+	return [...buildDockerRunArgs({ ...probeOptions({ image, name, fixture, user, relabel }), extraFlags: ["-d", "--entrypoint", "sh"] }), "-c", EPHEMERAL_SCRIPT, "sh", nonce, String(run)];
 }
 
 /**
  * One peer's argv (issue #344): the job builder's, detached, on its OWN job network, running PEER_SCRIPT, which answers
  * every connection with the nonce for `seconds`. Built with `network` set exactly as a job with egress armed is.
  */
-export function peerRunArgs({ image, name, fixture, network, nonce, seconds = liveSleepSeconds(), user = null }) {
-	return [...buildDockerRunArgs({ ...probeOptions({ image, name, fixture, user }), network, extraFlags: ["-d", "--entrypoint", "node"] }), "--eval", PEER_SCRIPT, nonce, String(PEER_PORT), String(seconds)];
+export function peerRunArgs({ image, name, fixture, network, nonce, seconds = liveSleepSeconds(), user = null, relabel = false }) {
+	return [...buildDockerRunArgs({ ...probeOptions({ image, name, fixture, user, relabel }), network, extraFlags: ["-d", "--entrypoint", "node"] }), "--eval", PEER_SCRIPT, nonce, String(PEER_PORT), String(seconds)];
 }
 
 /**
@@ -576,6 +580,7 @@ export async function runLiveProbes({
 	announce = () => {},
 	stepTimeoutMs = LIVE_STEP_TIMEOUT_MS,
 	user = null,
+	relabel = false,
 	euid = undefined,
 	now = () => Date.now(),
 	delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -669,13 +674,13 @@ export async function runLiveProbes({
 		}
 
 		// --- the reading container: mounts, status, writes ---
-		const reading = await start("probe container", names.probe, liveProbeRunArgs({ image, name: names.probe, fixture, sleepSeconds: liveSleepSeconds(stepTimeoutMs), user }));
+		const reading = await start("probe container", names.probe, liveProbeRunArgs({ image, name: names.probe, fixture, sleepSeconds: liveSleepSeconds(stepTimeoutMs), user, relabel }));
 		const probeId = reading.entry.id;
 		if (reading.result?.code !== 0 || probeId === null) {
 			return { ran: false, reason: "the probe container did not start, so nothing was read back", verdicts: [], notes, swept };
 		}
 
-		const expected = containerSpec(probeOptions({ image, name: names.probe, fixture, user })).mounts;
+		const expected = containerSpec(probeOptions({ image, name: names.probe, fixture, user, relabel })).mounts;
 		const inspected = await step(["inspect", "--format={{json .Mounts}}", probeId]);
 		// Issue #345: the mount table as the container itself sees it, by a constant `cat`, for what `.Mounts` does not list.
 		const mountinfo = await step(["exec", probeId, "cat", "/proc/self/mountinfo"]);
@@ -709,7 +714,7 @@ export async function runLiveProbes({
 		await release(reading.entry);
 
 		// --- the pinning container: an image this host does not have ---
-		const pinning = await start("pinning container", names.pin, pinningProbeRunArgs({ name: names.pin, nonce, fixture, user }));
+		const pinning = await start("pinning container", names.pin, pinningProbeRunArgs({ name: names.pin, nonce, fixture, user, relabel }));
 		const after = await step(["image", "inspect", absentImageRef(nonce)]);
 		const stillAbsent = after?.code === 0 ? false : typeof after?.code === "number" ? true : null;
 		const imagePinning = imagePinningVerdict({ code: pinning.result?.code, output: `${pinning.result?.stdout ?? ""}${pinning.result?.stderr ?? ""}`, stillAbsent });
@@ -717,7 +722,7 @@ export async function runLiveProbes({
 
 		// --- the ephemeral pair (issue #344): one name, two runs, each waited on until it is gone ---
 		const runEphemeral = async (n) => {
-			const { result, entry } = await start(`ephemeral container (run ${n})`, names.ephemeral, ephemeralRunArgs({ image, name: names.ephemeral, fixture, nonce, run: n, user }));
+			const { result, entry } = await start(`ephemeral container (run ${n})`, names.ephemeral, ephemeralRunArgs({ image, name: names.ephemeral, fixture, nonce, run: n, user, relabel }));
 			const started = result?.code === 0 && entry.id !== null;
 			// A HELD NAME is the daemon refusing the create for the name, in its own words (measured: Docker "Conflict. ...
 			// is already in use", Podman "that name is already in use"). Not a listed container: after the first run was
@@ -766,7 +771,7 @@ export async function runLiveProbes({
 						} catch {
 							break;
 						}
-						const { result, entry } = await start(`${key} container`, names[key], peerRunArgs({ image, name: names[key], fixture: peerFixture, network: networkOf[key], nonce, seconds: liveSleepSeconds(stepTimeoutMs), user }));
+						const { result, entry } = await start(`${key} container`, names[key], peerRunArgs({ image, name: names[key], fixture: peerFixture, network: networkOf[key], nonce, seconds: liveSleepSeconds(stepTimeoutMs), user, relabel }));
 						peers.push(entry);
 						if (result?.code !== 0 || entry.id === null) break;
 						ids[key] = entry.id;

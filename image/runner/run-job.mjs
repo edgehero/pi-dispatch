@@ -71,7 +71,12 @@ async function main() {
 	assertSessionMountReady(cfg.sessionFile);
 	// Same moment, same exit code, and for EVERY job, command jobs included (issue #341): a job user that cannot
 	// traverse /job loses its trigger skills without a word and would otherwise spend anyway.
-	assertJobInputsReadable([JOB_DIR, GLOBAL_PI_DIR]);
+	// /workspace joins the list for READ only (issue #355). On an SELinux-enforcing host, an operator's local folder
+	// that is not labelled container_file_t is unreadable in the container whatever its mode bits say (measured on
+	// Fedora 44), and before this the job ran and spent with an agent that could not read its own repository.
+	// UNWRITABLE stays advisory (mountAdvisories below): "a read-only review of a folder the job user cannot write
+	// is a legitimate job", so only a workspace the job cannot even read is refused here.
+	assertJobInputsReadable([JOB_DIR, GLOBAL_PI_DIR, WORKSPACE]);
 	// Offline is a property of the RUNNER, not of whoever started it. Set before the loader is built,
 	// because the loader is what resolves package sources: with offline off, an unresolved source is a
 	// live `npm install` at agent runtime, from inside the job, against a network the job's own input
