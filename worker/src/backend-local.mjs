@@ -66,11 +66,18 @@ export const ENDPOINT_LISTED_STATES = new Set(["running", "paused"]);
  * `pi-job-<jobId>`. The name a running job answers to, for `docker stop` on the 30-minute timeout, for the
  * per-job egress network derived from it, and for the reaper's filter.
  *
- * Not sanitised here: BullMQ ids are already `[A-Za-z0-9._-]`, and the one place a job id comes from
- * anywhere else (a sandbox) goes through `sanitizeJobId` under its own prefix.
+ * Sanitised to the runtimes' own name rule, `[a-zA-Z0-9][a-zA-Z0-9_.-]*` (docker's `RestrictedNameChars`, and
+ * Podman's, measured), every other character becoming `_`, as `sanitizeJobId` does for file names. It said here that
+ * BullMQ ids are already that shape, and a cron job's is not: the job scheduler mints `repeat:<schedulerId>:<millis>`,
+ * so `pi-job-repeat:...` was refused at create (exit 125, measured on Podman 5.8.1) and so was its `-net` network, and
+ * every cron job ended `container-never-started` before it ever ran (issue #435). The prefix supplies the first
+ * character. Deterministic, because every path that must find the container again (the timeout's stop, the cancel,
+ * the network, the log sink) asks this function for the name rather than deriving it. Not injective: `repeat:a:1`
+ * and a literal `repeat_a_1` share a name. BullMQ ids are unique per queue and no producer here mints an id with `_`
+ * where a scheduler id has `:`, so it is a residual rather than a collision anything reaches.
  */
 export function jobContainerName(jobId) {
-	return `${JOB_NAME_PREFIX}${jobId}`;
+	return `${JOB_NAME_PREFIX}${String(jobId).replace(/[^A-Za-z0-9._-]/g, "_")}`;
 }
 
 /**
@@ -334,12 +341,10 @@ function escapedPoint(point) {
  * `^pi-job-.*-net$`, so an operator's `pi-job-runner_default` had its CONTAINER reaped and its NETWORK left
  * standing. Two answers to "what is ours" is the defect; which answer to keep is the decision, and the
  * container half cannot be the one that moves. After a crash nothing distinguishes our `pi-job-<id>` from
- * any other name under the prefix, and a charset rule does not separate them either. The ids that reach
- * `jobContainerName` are BullMQ's, which that function's own comment records as already `[A-Za-z0-9._-]` and
- * deliberately does NOT re-sanitise, so `runner_default` and `runner-db-1` are both shapes a real job id can
- * take. (An earlier version of this paragraph credited `sanitizeJobId`, which governs the SANDBOX namespace
- * and is not in this path; the conclusion survives because both charsets carry `_` and `-`.) There is no
- * stricter rule available that is also TRUE, so the halves agree by widening the network one.
+ * any other name under the prefix, and a charset rule does not separate them either. `jobContainerName` maps a
+ * job id onto `[A-Za-z0-9._-]` (since issue #435, when a cron id's `:` was found to be refused by the runtime), so
+ * `runner_default` and `runner-db-1` are both shapes a real job's name can take. There is no stricter rule
+ * available that is also TRUE, so the halves agree by widening the network one.
  *
  * WHAT THAT COSTS, stated rather than buried in a test diff: a network called `pi-job-mine-net-backup`, or
  * `pi-job-runner_default`, is now removed by the boot reaper. Their CONTAINERS always were. `SECURITY.md`

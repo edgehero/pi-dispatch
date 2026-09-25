@@ -23,6 +23,16 @@ test("the namespace is one fact, and the producer builds names from it", () => {
 	assert.equal(JOB_NAME_PREFIX, "pi-job-");
 	assert.equal(jobContainerName("abc123"), "pi-job-abc123");
 	assert.ok(jobContainerName("x").startsWith(JOB_NAME_PREFIX));
+	// Issue #435: a cron job's id is the job scheduler's `repeat:<schedulerId>:<millis>`, which the runtime refuses as
+	// a name (exit 125, measured on Podman 5.8.1; docker's rule is the same), and so every cron job never started.
+	// Every other id this worker sees is already of that shape and comes through unchanged.
+	const RUNTIME_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
+	assert.equal(jobContainerName("repeat:nightly:1790361600000"), "pi-job-repeat_nightly_1790361600000");
+	for (const id of ["repeat:nightly:1790361600000", "repeat:a b/c:1", "local-9f3a", "gh-1", "4f1c2d3e-aaaa-bbbb-cccc-0123456789ab", "x.y_z-1"]) {
+		assert.match(jobContainerName(id), RUNTIME_NAME, id);
+		assert.match(networkNameFor(jobContainerName(id)), RUNTIME_NAME, `${id} network`);
+	}
+	for (const id of ["local-9f3a", "gh-1", "4f1c2d3e-aaaa-bbbb-cccc-0123456789ab"]) assert.equal(jobContainerName(id), `pi-job-${id}`, id);
 	// The sandbox names itself OUTSIDE this namespace on purpose, so a worker restart cannot tear down a
 	// shell an operator is sitting in. A prefix that became a prefix of the sandbox's would silently break
 	// that, and it is the one relationship between the two strings that matters.
@@ -730,9 +740,8 @@ test("both halves of the reaper give ONE answer to `what is ours` (#360)", () =>
 	const ours = [
 		jobContainerName("gh-1"),
 		networkNameFor(jobContainerName("gh-1")),
-		// The shapes a REAL job id can take, which is why no charset rule separates an operator's name from a
-		// job's: `jobContainerName` does not sanitise, and BullMQ's ids are already `[A-Za-z0-9._-]`, so `_`
-		// and `-` are both legal. (`sanitizeJobId` governs the SANDBOX namespace and is not in this path.)
+		// The shapes a REAL job's name can take, which is why no charset rule separates an operator's name from a
+		// job's: `jobContainerName` maps an id onto `[A-Za-z0-9._-]` (#435), where `_` and `-` are both legal.
 		"pi-job-runner_default",
 		"pi-job-runner-db-1",
 		// WIDENED BY #360, and this is the row that can destroy an operator's object: our exact shape with
