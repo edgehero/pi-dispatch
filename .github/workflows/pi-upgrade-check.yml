@@ -526,8 +526,10 @@ jobs:
               "$IMAGE_REF" 2>&1) || true
             echo "$out" | grep -q '"event":"exit"' \
               || { echo "$out" | tail -20; echo "::error::the runner did not run to its exit line ($*), so this run proves nothing either way."; exit 1; }
+            last_exit=$(echo "$out" | grep '"event":"exit"' | tail -1)
           }
           run_runner -e NODE_USE_ENV_PROXY=1
+          armed_exit=$last_exit
           armed=$(docker logs "$PROXY" 2>&1)
           run_runner
           control=$(docker logs "$PROXY" 2>&1)
@@ -537,8 +539,10 @@ jobs:
           docker rm -f "$PROXY" >/dev/null
           docker network rm "$NET" >/dev/null
           echo "$armed"
+          # The runner's own exit line says WHY when it is not the proxy: on an SELinux host, for one, an unlabelled /job
+          # stops the runner at `job-inputs-unreadable` before any request (a local rerun there needs `:Z` on the mount).
           echo "$armed" | grep -qx "CONNECT api.anthropic.com:443" \
-            || { echo "::error::with egress armed the runner's provider call never reached the proxy; every egress-armed job dies at its first turn."; exit 1; }
+            || { echo "$armed_exit"; echo "::error::with egress armed the runner's provider call never reached the proxy (its exit line is above); every egress-armed job dies at its first turn."; exit 1; }
           [ "$control" = "$armed" ] \
             || { echo "::error::the control run without NODE_USE_ENV_PROXY reached the proxy too, so the armed run proves nothing about the restore."; exit 1; }
           echo "OK: the armed runner's provider call went through the proxy, and the unarmed one did not"
