@@ -47,6 +47,12 @@ const CORPUS = {
   flags: (cp(0x1f1ef, 0x1f1f5)).repeat(6),
   keycap: (cp(0x31, 0xfe0f, 0x20e3)).repeat(6),
   family: (cp(0x1f469, 0x200d, 0x1f469, 0x200d, 0x1f467)).repeat(5),
+  arabic: [cp(0x0645, 0x0631, 0x062d, 0x0628, 0x0627), cp(0x0628, 0x0627, 0x0644, 0x0639, 0x0627, 0x0644, 0x0645)].join(" ").repeat(3),
+  hebrew: [cp(0x05e9, 0x05dc, 0x05d5, 0x05dd), cp(0x05e2, 0x05d5, 0x05dc, 0x05dd)].join(" ").repeat(3),
+  zalgo: ("e" + cp(0x301, 0x302, 0x303, 0x304, 0x306, 0x307, 0x308)).repeat(14),
+  devanagari: cp(0x0915, 0x094d, 0x0937, 0x0924, 0x094d, 0x0930, 0x091c, 0x094d, 0x091e).repeat(3),
+  wideW: "W".repeat(40),
+  longflag: "x".repeat(50) + cp(0x1f1ef, 0x1f1f5),
 };
 const NAMES = Object.keys(CORPUS);
 const LONG_FOLDER = "/srv/" + "a-very-long-deployment-folder-name".repeat(3);
@@ -59,8 +65,10 @@ function model(corpus, folder, cron) {
     name: `${k}-${corpus[k]}`, isSub: false, group: null, aiTrigger: i % 2 === 0, meta: null, mentions: [],
     loops: i === 0 ? [{ hint: `until ${corpus.malayalam}${corpus.wide}` }] : [], unread: false,
   }));
-  skills.push({ name: `grp${corpus.wide}`, isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], unread: false });
-  skills.push({ name: `grp${corpus.wide}/${corpus.tamil}`, isSub: true, group: `grp${corpus.wide}`, aiTrigger: false, meta: null, mentions: [], unread: false });
+  // A skill group whose name, sub chips and loop hints all run long: the titles the builder never cuts.
+  const group = `a-very-long-skill-group-name-${corpus.wide}`;
+  skills.push({ name: group, isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], unread: false, loops: [{ hint: `until ${corpus.wide}` }, { hint: `repeat ${corpus.cuneiform}` }] });
+  for (const sub of ["s1", `s2${corpus.mmm}`, corpus.arabic]) skills.push({ name: `${group}/${sub}`, isSub: true, group, aiTrigger: false, meta: null, mentions: [], unread: false });
   const triggers = NAMES.map((k, i) => ({
     type: "cron", index: i, id: `${k}${corpus[k]}`, pattern: i === 0 ? cron : "*/5 * * * *", folder,
     flow: `${k}-${corpus[k]}`, model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false,
@@ -84,7 +92,7 @@ function model(corpus, folder, cron) {
 function fold(corpus) {
   const flows = NAMES.map((k, i) => ({
     flow: `${k}-${corpus[k]}`, flowKey: k, runs: i + 1, tokens: 1000 * (i + 1),
-    cost: i % 3 === 0 ? usd(0, "plan", { planId: `plan-${corpus[k]}` }) : usd(0.25 * (i + 1), "metered"), apiEquiv: null,
+    cost: i % 3 === 0 ? usd(0, "plan", { planId: `plan-${corpus[k]}` }) : usd(0.25 * (i + 1), "metered"), apiEquiv: usd(1234567.891 * (i + 1), "metered"),
   }));
   return {
     window: { fromMs: Date.parse("2026-07-20T00:00:00.000Z"), toMs: Date.parse("2026-08-01T00:00:00.000Z"), days: 12, firstRunMs: Date.parse("2026-07-29T10:00:00.000Z") },
@@ -99,10 +107,13 @@ function fold(corpus) {
   };
 }
 
-// The probe measures what the page drew, against boxes defined independently of the fit: the rect in the same
-// group that holds the label's start, the root svg's own width, and every other label's box (a collision).
+// The probe measures what the page drew, written apart from the fit rather than borrowed from it: for every
+// left-anchored label, the rect in its group that holds its start, the nearest rect after it in its band, the
+// next left-anchored label on its line, and the outermost svg's own box. A cut label also reports how wide the
+// text the builder drew would be, so a cut that was not needed shows.
 const PROBE = `<script>
 (function () {
+  function num(el, name) { var v = parseFloat(el.getAttribute(name)); return v === v ? v : 0; }
   function report() {
     var out = [];
     var parents = [];
@@ -113,21 +124,42 @@ const PROBE = `<script>
       if (a !== null && a !== "start") continue;
       var len = t.getComputedTextLength();
       if (!(len > 0)) continue;
-      var x = parseFloat(t.getAttribute("x")) || 0;
-      var y = parseFloat(t.getAttribute("y")) || 0;
-      var edge = null;
+      var x = num(t, "x");
+      var y = num(t, "y");
+      var holds = null;
+      var after = null;
+      var next = null;
       var kids = t.parentNode.children;
       for (var j = 0; j < kids.length; j++) {
         var k = kids[j];
-        if (k.localName !== "rect") continue;
-        var rx = parseFloat(k.getAttribute("x")) || 0, ry = parseFloat(k.getAttribute("y")) || 0;
-        var rw = parseFloat(k.getAttribute("width")) || 0, rh = parseFloat(k.getAttribute("height")) || 0;
-        if (rx <= x && x < rx + rw && ry <= y && y <= ry + rh && rw > 20) { if (edge === null || rx + rw < edge) edge = rx + rw; }
+        if (k.localName === "rect") {
+          var rx = num(k, "x"), ry = num(k, "y"), rw = num(k, "width"), rh = num(k, "height");
+          if (y < ry || y > ry + rh) continue;
+          if (rx <= x && x < rx + rw && rw > 20) { if (holds === null || rx + rw < holds) holds = rx + rw; }
+          else if (rx > x) { if (after === null || rx < after) after = rx; }
+        } else if (k !== t && k.localName === "text" && num(k, "y") === y && num(k, "x") > x) {
+          var ka = k.getAttribute("text-anchor");
+          if (ka === null || ka === "start") { if (next === null || num(k, "x") < next) next = num(k, "x"); }
+        }
       }
-      var node = t.firstChild ? t.firstChild.nodeValue : "";
+      var root = t.ownerSVGElement;
+      while (root && root.ownerSVGElement) root = root.ownerSVGElement;
+      var br = t.getBoundingClientRect();
+      var sr = root.getBoundingClientRect();
+      var drawnLen = null;
+      if (typeof t.fitFull === "string") {
+        var cur = t.firstChild.nodeValue;
+        t.firstChild.nodeValue = t.fitFull;
+        drawnLen = t.getComputedTextLength();
+        t.firstChild.nodeValue = cur;
+      }
       var pi = parents.indexOf(t.parentNode);
       if (pi < 0) { parents.push(t.parentNode); pi = parents.length - 1; }
-      out.push({ text: node, x: x, y: y, end: x + len, edge: edge, parent: pi });
+      var titled = false;
+      for (var c = 0; c < t.children.length; c++) if (t.children[c].localName === "title") titled = true;
+      out.push({ text: t.firstChild ? t.firstChild.nodeValue : "", x: x, y: y, end: x + len, holds: holds, after: after, next: next, parent: pi,
+        box: [br.left, br.top, br.right, br.bottom], svgLeft: sr.left, svgRight: sr.right, drawn: t.fitFull || null,
+        drawnEnd: drawnLen === null ? null : x + drawnLen, titled: titled, tipped: t.parentNode.getAttribute("data-tip") !== null || / gnode /.test(" " + (t.parentNode.getAttribute("class") || "") + " ") });
     }
     document.getElementById("fitout").textContent = JSON.stringify(out);
   }
@@ -135,8 +167,8 @@ const PROBE = `<script>
 })();
 </script>`;
 
-function page(corpus, withFit, folder = LONG_FOLDER, cron = LONG_CRON) {
-  let html = buildInsightsHtml({ graph: buildGraphModel(model(corpus, folder, cron)), fold: fold(corpus), costsUnreachable: null, window: "30d", costByTrigger: {}, budget: null }, { now: NOW });
+function page(graph, fitFold, withFit) {
+  let html = buildInsightsHtml({ graph, fold: fitFold, costsUnreachable: null, window: "30d", costByTrigger: {}, budget: null }, { now: NOW });
   if (!withFit) {
     if (!html.includes(FIT_JS)) throw new Error("the page does not carry FIT_JS verbatim");
     html = html.replace(FIT_JS, "");
@@ -151,6 +183,8 @@ function measure(html) {
       const url = `http://127.0.0.1:${server.address().port}/`;
       const args = ["-e", "alarm 60; exec @ARGV", CHROME, "--headless", "--disable-gpu", "--no-first-run", "--window-size=1400,1000", "--virtual-time-budget=5000", "--dump-dom", url];
       const child = spawn("perl", args, { stdio: ["ignore", "pipe", "ignore"] });
+      // Decoded as one stream: a character split across two chunks decoded apart reads as garbage.
+      child.stdout.setEncoding("utf8");
       let dom = "";
       child.stdout.on("data", (d) => { dom += d; });
       child.on("close", () => {
@@ -164,48 +198,113 @@ function measure(html) {
   });
 }
 
-function overflows(rows) {
-  const bad = [];
-  for (const r of rows) {
-    if (r.edge !== null && r.end > r.edge + 0.5) bad.push(`past its box by ${(r.end - r.edge).toFixed(1)}px: ${JSON.stringify(r.text)}`);
-  }
-  const byLine = new Map();
-  for (const r of rows) {
-    const key = `${r.parent}|${r.y}`;
-    if (!byLine.has(key)) byLine.set(key, []);
-    byLine.get(key).push(r);
-  }
-  for (const line of byLine.values()) {
-    line.sort((a, b) => a.x - b.x);
-    for (let i = 1; i < line.length; i++) {
-      if (line[i - 1].end > line[i].x + 0.5) bad.push(`runs into the next label by ${(line[i - 1].end - line[i].x).toFixed(1)}px: ${JSON.stringify(line[i - 1].text)}`);
+// Rounding slack for "runs past", and the margin the fit keeps before a bound (FIT_JS's PAD): a label that ends
+// inside that margin is one the fit cuts by design, so it counts as needing the cut.
+const PAD = 0.5;
+const FIT_MARGIN = 2;
+function problems(r) {
+  const out = [];
+  if (r.holds !== null && r.end > r.holds + PAD) out.push(`runs past its box by ${(r.end - r.holds).toFixed(1)}px`);
+  if (r.holds === null && r.after !== null && r.end > r.after + PAD) out.push(`runs into the rect after it by ${(r.end - r.after).toFixed(1)}px`);
+  if (r.next !== null && r.end > r.next + PAD) out.push(`runs into the next label by ${(r.end - r.next).toFixed(1)}px`);
+  if (r.box[2] > r.svgRight + PAD) out.push(`runs past its svg by ${(r.box[2] - r.svgRight).toFixed(1)}px`);
+  return out;
+}
+
+function overlaps(rows) {
+  const out = [];
+  for (let i = 0; i < rows.length; i++) {
+    for (let j = i + 1; j < rows.length; j++) {
+      if (rows[i].parent === rows[j].parent) continue;
+      const a = rows[i].box;
+      const b = rows[j].box;
+      const ox = Math.min(a[2], b[2]) - Math.max(a[0], b[0]);
+      const oy = Math.min(a[3], b[3]) - Math.max(a[1], b[1]);
+      if (ox > 1 && oy > 3) out.push(`${JSON.stringify(rows[i].text)} overlaps ${JSON.stringify(rows[j].text)} (${ox.toFixed(1)}x${oy.toFixed(1)}px)`);
     }
   }
-  return bad;
+  return out;
+}
+
+function findings(rows) {
+  const out = [];
+  for (const r of rows) for (const p of problems(r)) out.push(`${p}: ${JSON.stringify(r.text)}`);
+  return [...out, ...overlaps(rows)];
+}
+
+// A cut the fit made although the text the builder drew fitted every bound the probe knows: a needless cut.
+function needless(rows) {
+  return rows.filter((r) => r.drawn !== null && r.drawnEnd !== null && problems({ ...r, end: r.drawnEnd + FIT_MARGIN }).length === 0)
+    .map((r) => `cut although ${JSON.stringify(r.drawn)} fitted: ${JSON.stringify(r.text)}`);
+}
+
+// A label the fit changed that had nothing wrong with it on the same page without the fit.
+function changedWhole(fittedRows, strippedRows) {
+  if (fittedRows.length !== strippedRows.length) return [`${strippedRows.length} labels became ${fittedRows.length}`];
+  return fittedRows.flatMap((r, i) => (r.text === strippedRows[i].text || problems({ ...strippedRows[i], end: strippedRows[i].end + FIT_MARGIN }).length > 0 ? [] : [`${JSON.stringify(strippedRows[i].text)} became ${JSON.stringify(r.text)}`]));
+}
+
+// A title missing from a cut label that shows no tooltip of its own, or present on one that does.
+function titles(rows) {
+  return rows.filter((r) => r.drawn !== null && r.text !== r.drawn && r.titled === r.tipped).map((r) => `${r.tipped ? "a title on a tipped label" : "no title on a cut label"}: ${JSON.stringify(r.text)}`);
+}
+
+// An ordinary deployment in plain ASCII: names as long as real ones get, a forge group with two repos, a common
+// cron. Nothing on it should be cut that fitted, and the forge caveat must survive whatever is cut.
+function realistic() {
+  const names = ["summarize-meetings", "memory-maintenance", "monthly-summary", "weekly-mwm", "WWW-MIGRATION", "customer-website-deploy"];
+  const folder = "/home/someone/projects/customer-website";
+  return {
+    triggers: {
+      triggers: [
+        ...names.map((n, i) => ({ type: "cron", index: i, id: n, pattern: i === 0 ? "0 9 * * MON,TUE,WED,THU,FRI" : "0 3 * * *", folder, flow: n, model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false })),
+        { type: "label", index: names.length, any: ["ai"], all: [], none: [], flow: "triage", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" },
+      ],
+    },
+    schedulers: names.map((n, i) => ({ key: n, name: n, pattern: i === 0 ? "0 9 * * MON,TUE,WED,THU,FRI" : "0 3 * * *", every: null, next: "2026-08-12T03:00:00.000Z", overdueMs: null })),
+    folderSkills: { [folder]: { head: "abc1234def", truncated: false, unreachable: null, skills: names.map((n) => ({ name: n, isSub: false, group: null, aiTrigger: true, meta: null, mentions: [], unread: false, loops: [] })) } },
+    injectedSkills: {},
+    overlaySkills: { skills: [], truncated: false, unreachable: null },
+    stagedSkills: { skills: [], unenumerable: [], truncated: false },
+    forgeRepos: { github: ["acme-corp/customer-website", "acme-corp/billing-service"] },
+    cronStats: { byId: {} },
+    runJoin: { byIndex: {}, unattributed: 0 },
+    chainEdges: { edges: [], refusals: {}, truncated: false },
+    caps: { chainDepthMax: 1, chainMaxPerJob: 2, windowDays: 30 },
+    nowMs: NOW,
+  };
 }
 
 const ascii = Object.fromEntries(NAMES.map((k) => [k, "x"]));
-const [fitted, unfitted, asciiFitted, asciiUnfitted] = await Promise.all([
-  measure(page(CORPUS, true)),
-  measure(page(CORPUS, false)),
-  measure(page(ascii, true, "/srv/site", "0 3 * * *")),
-  measure(page(ascii, false, "/srv/site", "0 3 * * *")),
+const corpusGraph = buildGraphModel(model(CORPUS, LONG_FOLDER, LONG_CRON));
+const plainGraph = buildGraphModel(model(ascii, "/srv/site", "0 3 * * *"));
+const realGraph = buildGraphModel(realistic());
+const [fitted, stripped, plainFitted, plainStripped, realFitted, realStripped] = await Promise.all([
+  measure(page(corpusGraph, fold(CORPUS), true)),
+  measure(page(corpusGraph, fold(CORPUS), false)),
+  measure(page(plainGraph, fold(ascii), true)),
+  measure(page(plainGraph, fold(ascii), false)),
+  measure(page(realGraph, fold(ascii), true)),
+  measure(page(realGraph, fold(ascii), false)),
 ]);
 
-const withFit = overflows(fitted);
-const withoutFit = overflows(unfitted);
-// A plain ASCII page, the page nearly every deployment draws: nothing on it overflows, so the fit must leave every
-// label exactly as the builder wrote it.
-const asciiChanged = asciiFitted.length !== asciiUnfitted.length
-  ? [`${asciiUnfitted.length} labels became ${asciiFitted.length}`]
-  : asciiFitted.flatMap((r, i) => (r.text === asciiUnfitted[i].text ? [] : [`${JSON.stringify(asciiUnfitted[i].text)} became ${JSON.stringify(r.text)}`]));
-const asciiOverflows = overflows(asciiUnfitted);
-
-console.log(`labels measured: ${fitted.length} (corpus), ${asciiFitted.length} (ascii)`);
-console.log(`overflows with the fit stripped: ${withoutFit.length}`);
-console.log(`overflows with the fit: ${withFit.length}`);
-for (const line of withFit) console.log(`  ${line}`);
-console.log(`ascii labels the fit changed: ${asciiChanged.length} (the plain page overflows ${asciiOverflows.length} without it)`);
-for (const line of asciiChanged) console.log(`  ${line}`);
-if (withoutFit.length === 0) console.log("NOTE: the corpus overflowed nothing without the fit, so this run proves nothing");
-process.exitCode = withFit.length === 0 && asciiChanged.length === 0 && asciiOverflows.length === 0 && withoutFit.length > 0 ? 0 : 1;
+const report = (name, list) => {
+  console.log(`${name}: ${list.length}`);
+  for (const line of list) console.log(`  ${line}`);
+  return list.length;
+};
+console.log(`labels measured: ${fitted.length} (corpus), ${plainFitted.length} (plain ascii), ${realFitted.length} (realistic ascii)`);
+console.log(`corpus overflows with the fit stripped: ${findings(stripped).length} (for comparison)`);
+let bad = 0;
+bad += report("corpus overflows with the fit", findings(fitted));
+bad += report("corpus needless cuts", needless(fitted));
+bad += report("corpus titles wrong", titles(fitted));
+bad += report("plain ascii labels changed", changedWhole(plainFitted, plainStripped));
+bad += report("plain ascii overflows either way", [...findings(plainStripped), ...findings(plainFitted)]);
+bad += report("realistic ascii labels changed that fitted", changedWhole(realFitted, realStripped));
+bad += report("realistic ascii overflows with the fit", findings(realFitted));
+bad += report("realistic ascii needless cuts", needless(realFitted));
+const caveat = realFitted.some((r) => r.text.includes("unverifiable from this host"));
+if (!caveat) { console.log("the forge caveat is gone from the realistic page"); bad++; }
+if (findings(stripped).length === 0) { console.log("NOTE: the corpus overflowed nothing without the fit, so this run proves nothing"); bad++; }
+process.exitCode = bad === 0 ? 0 : 1;

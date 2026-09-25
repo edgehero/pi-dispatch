@@ -270,8 +270,8 @@ test("the page carries the group visuals and the forge scope line", () => {
   assert.ok(out.includes(">⟳</text>"), "the loop marker glyph renders");
   assert.ok(out.includes("until the report renders…"), "the clipped hint text renders beside the marker");
   assert.ok(
-    out.includes("github · ran against acme/website, acme/api · forge · unverifiable from this host"),
-    "forge groups state their record-derived repo scope and keep the unverifiable note",
+    out.includes(">github · forge · unverifiable from this host · ran against acme/website, acme/api</text>"),
+    "forge groups keep the unverifiable note and state their record-derived repo scope AFTER it: the page cuts a title from its end, and the repo list is what may go (issue #422)",
   );
 
   // Empty repos leave the label exactly as before -- absence of history must not invent scope.
@@ -280,6 +280,13 @@ test("the page carries the group visuals and the forge scope line", () => {
   const bare = pageOf(buildGraphModel(inputs));
   assert.ok(bare.includes("github · forge · unverifiable from this host"));
   assert.ok(!bare.includes("ran against"));
+});
+
+test("an unreachable folder's title names why before where, so a cut takes the path (issue #422)", () => {
+  const inputs = CANNED();
+  inputs.folderSkills["/srv/site"] = { ...inputs.folderSkills["/srv/site"], unreachable: "folder unreadable", skills: [] };
+  const out = pageOf(buildGraphModel(inputs));
+  assert.match(out, />folder unreadable · [^<]*site<\/text>/, "the reason first, then the folder");
 });
 
 // ---- 5. state twins ----
@@ -766,6 +773,7 @@ test("narrow punctuation costs what it did, and a flow name's half pair is not q
 // The code points are spelled as numbers so the file stays ASCII where the width table needs them.
 const cps = (...points) => String.fromCodePoint(...points);
 const ELLIPSIS = cps(0x2026);
+const RLM = cps(0x200f);
 
 function textNode(value) {
   return { nodeType: 3, nodeValue: value };
@@ -782,6 +790,7 @@ function el(localName, attrs = {}, ...kids) {
     get firstChild() { return this.childNodes[0] ?? null; },
     getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attrs, name) ? String(this.attrs[name]) : null; },
     appendChild(child) { child.parentNode = this; this.childNodes.push(child); return child; },
+    removeChild(child) { this.childNodes = this.childNodes.filter((c) => c !== child); child.parentNode = null; return child; },
     get textContent() { return this.childNodes.map((c) => (c.nodeType === 3 ? c.nodeValue : c.textContent)).join(""); },
     set textContent(value) { this.childNodes = [textNode(value)]; },
   };
@@ -805,9 +814,9 @@ function docOf(...roots) {
 }
 
 // Widths per code point: ASCII 6, M 12, the ellipsis 14 (what Chrome draws at 14px), a Malayalam letter 18,
-// a cuneiform sign 65, anything else 14. Half a surrogate pair measures nothing, so a cut through a pair would
-// always fit and could not hide behind the width of the half it left.
-const WIDTHS = new Map([[0x4d, 12], [0x2026, 14], [0x0d15, 18], [0x1242b, 65]]);
+// a cuneiform sign 65, the right-to-left mark 0, anything else 14. Half a surrogate pair measures nothing, so a
+// cut through a pair would always fit and could not hide behind the width of the half it left.
+const WIDTHS = new Map([[0x4d, 12], [0x2026, 14], [0x0d15, 18], [0x1242b, 65], [0x200f, 0]]);
 const widthOf = (s, scale = 1) => [...s].reduce((sum, ch) => {
   const cp = ch.codePointAt(0);
   if (cp >= 0xd800 && cp <= 0xdfff) return sum;
@@ -819,32 +828,45 @@ const fitLabels = new Function(`${FIT_JS}\nreturn fitLabels;`)();
 const noSegmenterFit = new Function("Intl", `${FIT_JS}\nreturn fitLabels;`)({});
 
 // A trigger chip as nodeSvg draws it: the chip rect (no x), the glyph (centred, never fitted), the label at 38,
-// the output port straddling the right edge.
+// the output port straddling the right edge, and the runs line under the chip.
 function chip(label, w = 160) {
   return el("g", { class: "gnode" },
     el("rect", { width: w, height: 30 }),
     el("text", { x: 15, y: 20, "text-anchor": "middle" }, "G"),
     el("text", { x: 38, y: 20 }, label),
-    el("rect", { x: w - 5, y: 10, width: 10, height: 10 }));
+    el("rect", { x: w - 5, y: 10, width: 10, height: 10 }),
+    el("text", { x: 16, y: 41 }, "41 runs"));
 }
+const label = (c) => c.children[2];
 
 test("the page fits a label to its box by measuring it, and leaves one that fits alone (#422)", () => {
-  // The chip's text box ends at the port (155), 6px of padding before it: 111px for the label.
+  // The chip's text box is the chip (the port straddling its edge is not the label's box): 160 - 38 - 2 = 120px.
   const wide = chip("MMMMMMMMMMMMMM");
   const fits = chip("build-report-a" + ELLIPSIS);
-  const doc = docOf(wide, fits);
-  fitLabels(doc, measureBy());
-  const label = (c) => c.children[2];
-  assert.equal(label(wide).firstChild.nodeValue, "MMMMMMMM" + ELLIPSIS, "eight M's and a measured ellipsis, 110px of 111");
+  const spaced = chip("abcdefghijklmnop qrstuvwxyz");
+  fitLabels(docOf(wide, fits, spaced), measureBy());
+  assert.equal(label(wide).firstChild.nodeValue, "MMMMMMMM" + ELLIPSIS, "eight M's and a measured ellipsis, 110px of 120");
   assert.equal(label(fits).firstChild.nodeValue, "build-report-a" + ELLIPSIS, "98px fits: the builder's cut is kept");
   assert.equal(label(fits).children.length, 0, "and nothing is added to it");
   assert.equal(label(wide).children.length, 0, "a chip shows its own tooltip, so no title is added");
-  // A cut that lands just after a space does not end the label on it.
-  const spaced = chip("abcdefghijklmno pqrstuvwxyz");
-  fitLabels(docOf(spaced), measureBy());
-  assert.equal(label(spaced).firstChild.nodeValue, "abcdefghijklmno" + ELLIPSIS);
-  // The glyph is centred and is never measured, whatever its width.
-  assert.equal(wide.children[1].firstChild.nodeValue, "G");
+  assert.equal(label(spaced).firstChild.nodeValue, "abcdefghijklmnop" + ELLIPSIS, "a cut just after a space does not end on it");
+});
+
+test("the fit's edges: exactly full, a box it cannot use, a centred glyph, a line below its rect (#422)", () => {
+  // 120px exactly is a fit, 121 is not.
+  const exact = chip("x");
+  const over = chip("x");
+  // A label that starts at the chip's right edge has no room at all: it is left as drawn, never cut to an ellipsis.
+  const cramped = el("g", {}, el("rect", { width: 40, height: 30 }), el("text", { x: 38, y: 20 }, "abc"));
+  const glyph = chip("x");
+  const doc = docOf(exact, over, cramped, glyph);
+  const widths = new Map([[label(exact), 120], [label(over), 121], [cramped.children[1], 500], [glyph.children[1], 500], [glyph.children[4], 500]]);
+  fitLabels(doc, (t) => widths.get(t) ?? widthOf(t.firstChild.nodeValue));
+  assert.equal(label(exact).firstChild.nodeValue, "x", "a label exactly as wide as its box stays");
+  assert.equal(label(over).firstChild.nodeValue, ELLIPSIS, "one pixel more is cut");
+  assert.equal(cramped.children[1].firstChild.nodeValue, "abc", "no room at all: left alone");
+  assert.equal(glyph.children[1].firstChild.nodeValue, "G", "a centred glyph is never fitted, however wide");
+  assert.equal(glyph.children[4].firstChild.nodeValue, "41 runs", "the runs line sits below the chip's band: no box, never cut");
 });
 
 test("the ellipsis is measured, not budgeted: a Malayalam label and a cuneiform one (#422)", () => {
@@ -852,67 +874,110 @@ test("the ellipsis is measured, not budgeted: a Malayalam label and a cuneiform 
   const cuneiform = chip(cps(0x1242b).repeat(3));
   const lone = chip(cps(0x1242b).repeat(3), 100);
   fitLabels(docOf(malayalam, cuneiform, lone), measureBy());
-  // 111px: five letters at 18 and the 14px ellipsis is 104; six would be 122.
-  assert.equal(malayalam.children[2].firstChild.nodeValue, cps(0x0d15).repeat(5) + ELLIPSIS);
-  assert.equal(cuneiform.children[2].firstChild.nodeValue, cps(0x1242b) + ELLIPSIS, "65 + 14 fits, 130 + 14 does not");
+  // 120px: five letters at 18 and the 14px ellipsis is 104; six would be 122.
+  assert.equal(label(malayalam).firstChild.nodeValue, cps(0x0d15).repeat(5) + ELLIPSIS);
+  assert.equal(label(cuneiform).firstChild.nodeValue, cps(0x1242b) + ELLIPSIS, "65 + 14 fits, 130 + 14 does not");
   // A box too small for a single sign keeps the ellipsis alone rather than running out of the chip.
-  assert.equal(lone.children[2].firstChild.nodeValue, ELLIPSIS);
+  assert.equal(label(lone).firstChild.nodeValue, ELLIPSIS);
 });
 
 test("a cut keeps whole clusters, with the segmenter and without it (#422)", () => {
   const flags = cps(0x1f1ef, 0x1f1f5).repeat(8);
   const family = cps(0x1f469, 0x200d, 0x1f469, 0x200d, 0x1f467).repeat(4);
   const rockets = cps(0x1f680).repeat(10);
-  const cases = [chip(flags), chip(family), chip(rockets)];
+  const cases = [chip(flags), chip(family)];
   fitLabels(docOf(...cases), measureBy());
-  const [f, fam] = cases.map((c) => c.children[2].firstChild.nodeValue);
+  const [f, fam] = cases.map((c) => label(c).firstChild.nodeValue);
   assert.match(f, new RegExp(`^(?:${cps(0x1f1ef, 0x1f1f5)})+${ELLIPSIS}$`, "u"), "flags are dropped whole, never half a pair of indicators");
   assert.match(fam, new RegExp(`^(?:${cps(0x1f469, 0x200d, 0x1f469, 0x200d, 0x1f467)})+${ELLIPSIS}$`, "u"), "a family is dropped whole");
   // Without Intl.Segmenter the cut falls back to code points, which still never splits a surrogate pair.
   const bare = chip(rockets);
   noSegmenterFit(docOf(bare), measureBy());
-  assert.equal(bare.children[2].firstChild.nodeValue, cps(0x1f680).repeat(6) + ELLIPSIS, "six rockets at 14 and the ellipsis: 98px");
+  assert.equal(label(bare).firstChild.nodeValue, cps(0x1f680).repeat(7) + ELLIPSIS, "seven rockets at 14 and the ellipsis: 112px");
 });
 
-test("a title that is never cut in the builder is cut here and gains a title of its full text (#422)", () => {
+test("a title that is never cut in the builder is cut here and gains a title of the text drawn (#422)", () => {
   const full = "/srv/a-very-long-deployment-folder-name-that-runs-on";
   const group = el("g", { class: "ggroup" }, el("rect", { x: 0, y: 0, width: 200, height: 100 }), el("text", { x: 8, y: 18 }, full));
   const doc = docOf(group);
   fitLabels(doc, measureBy());
   const text = group.children[1];
-  // 200 - 8 - 6 = 186px: 28 ASCII characters and the ellipsis.
-  assert.equal(text.firstChild.nodeValue, full.slice(0, 28) + ELLIPSIS);
+  // 200 - 8 - 2 = 190px: 29 ASCII characters and the ellipsis.
+  assert.equal(text.firstChild.nodeValue, full.slice(0, 29) + ELLIPSIS);
   assert.equal(text.children.length, 1, "one title");
   assert.equal(text.children[0].localName, "title");
   assert.equal(text.children[0].ns, "http://www.w3.org/2000/svg");
   assert.equal(text.children[0].textContent, full);
-  // A second pass (the fonts arriving) starts again from the full text: nothing doubled, one title kept.
+  // A second pass (the fonts arriving) starts again from the text drawn: nothing doubled, one title kept.
   fitLabels(doc, measureBy(1.25));
-  assert.equal(text.firstChild.nodeValue, full.slice(0, 22) + ELLIPSIS, "recut from the full text at the new measure");
+  assert.equal(text.firstChild.nodeValue, full.slice(0, 23) + ELLIPSIS, "recut from the full text at the new measure");
   assert.equal(text.children.length, 1, "still exactly one title");
-  assert.equal(text.textContent, full.slice(0, 22) + ELLIPSIS + full, "the drawn text and the title, nothing else");
-  // And back: a measure under which the full text fits restores it.
+  assert.equal(text.textContent, full.slice(0, 23) + ELLIPSIS + full, "the drawn text and the title, nothing else");
+  // And back: a measure under which the full text fits restores it and drops the title the fit added.
   fitLabels(doc, measureBy(0.5));
   assert.equal(text.firstChild.nodeValue, full);
+  assert.equal(text.children.length, 0, "the title goes with the cut");
 });
 
 test("a breakdown row: the label stops at the bar, a value after it is never cut, a row without a bar stops at its value (#422)", () => {
-  const label = "a-long-flow-name-that-runs-into-the-bar-column";
+  const long = "a-long-flow-name-that-runs-into-the-bar-column";
   const row = el("g", { "data-tip": "0" },
-    el("text", { x: 0, y: 14 }, label),
+    el("text", { x: 0, y: 14 }, long),
     el("rect", { x: 150, y: 5, width: 50, height: 11 }),
     el("text", { x: 206, y: 14 }, "$1.25"));
   const bare = el("g", { "data-tip": "1" },
-    el("text", { x: 0, y: 36 }, label),
+    el("text", { x: 0, y: 36 }, long),
     el("text", { x: 150, y: 36 }, "$0 (unrated)"));
-  const hidden = el("g", { class: "ggroup" }, el("rect", { width: 100, height: 40 }), el("text", { x: 8, y: 18 }, label));
-  fitLabels(docOf(row, bare, hidden), (t) => (t === hidden.children[1] ? 0 : widthOf(t.firstChild.nodeValue)));
-  // 150 - 0 - 6 = 144px: 21 characters and the ellipsis (140px; 22 would be 146).
-  assert.equal(row.children[0].firstChild.nodeValue, label.slice(0, 21) + ELLIPSIS);
+  // Neither a label on another line nor a centred one on the same line bounds a label.
+  const loose = el("g", { "data-tip": "2" },
+    el("text", { x: 0, y: 58 }, long),
+    el("text", { x: 100, y: 70 }, "below"),
+    el("text", { x: 100, y: 58, "text-anchor": "middle" }, "centred"));
+  const hidden = el("g", { class: "ggroup" }, el("rect", { width: 100, height: 40 }), el("text", { x: 8, y: 18 }, long));
+  const nested = el("g", { class: "ggroup" }, el("rect", { width: 100, height: 40 }), el("text", { x: 8, y: 18 }, el("tspan", {}, long)));
+  const nan = el("g", { class: "ggroup" }, el("rect", { width: 100, height: 40 }), el("text", { x: 8, y: 18 }, long));
+  const endless = el("g", { class: "ggroup" }, el("rect", { width: 100, height: 40 }), el("text", { x: 8, y: 18 }, long));
+  fitLabels(docOf(row, bare, loose, hidden, nested, nan, endless), (t) => {
+    if (t === hidden.children[1]) return 0;
+    if (t === nan.children[1]) return Number.NaN;
+    if (t === endless.children[1]) return Number.POSITIVE_INFINITY;
+    return widthOf(t.firstChild.nodeValue);
+  });
+  // 150 - 0 - 2 = 148px: 22 characters and the ellipsis (146px; 23 would be 152).
+  assert.equal(row.children[0].firstChild.nodeValue, long.slice(0, 22) + ELLIPSIS);
   assert.equal(row.children[2].firstChild.nodeValue, "$1.25", "a value drawn after its bar has no box to be cut to");
-  assert.equal(bare.children[0].firstChild.nodeValue, label.slice(0, 21) + ELLIPSIS, "the next label on the line bounds it");
+  assert.equal(bare.children[0].firstChild.nodeValue, long.slice(0, 22) + ELLIPSIS, "the next label on the line bounds it");
   assert.equal(row.children[0].children.length, 0, "a row that shows its own tooltip gets no title");
-  assert.equal(hidden.children[1].firstChild.nodeValue, label, "a text measured at 0 is hidden, and is left alone");
+  assert.equal(loose.children[0].firstChild.nodeValue, long, "no rect and no left-anchored label on its line: no box");
+  assert.equal(hidden.children[1].firstChild.nodeValue, long, "a text measured at 0 is hidden, and is left alone");
+  assert.equal(nested.children[1].children[0].firstChild.nodeValue, long, "a text whose first child is an element is left alone");
+  assert.equal(nan.children[1].firstChild.nodeValue, long, "a measure that is not a number cuts nothing");
+  assert.equal(endless.children[1].firstChild.nodeValue, long, "nor does one that is not finite: it would cut to the ellipsis alone");
+});
+
+test("a right-to-left cut keeps its ellipsis in its own run, and a failure fits nothing but breaks nothing (#422)", () => {
+  const hebrew = el("g", { class: "ggroup" }, el("rect", { width: 100, height: 40 }), el("text", { x: 8, y: 18 }, cps(0x05d0).repeat(20)));
+  const mixed = el("g", { class: "ggroup" }, el("rect", { width: 100, height: 40 }), el("text", { x: 8, y: 18 }, cps(0x05d0).repeat(3) + "abcdefghijklmnopqrst"));
+  const after = el("g", { class: "ggroup" }, el("rect", { width: 100, height: 40 }), el("text", { x: 8, y: 18 }, "M".repeat(20)));
+  const broken = el("g", { class: "ggroup" }, el("rect", { width: 100, height: 40 }), el("text", { x: 8, y: 18 }, "M".repeat(20)));
+  fitLabels(docOf(broken, hebrew, mixed, after), (t) => {
+    if (t === broken.children[1]) throw new Error("measure failed");
+    return widthOf(t.firstChild.nodeValue);
+  });
+  // 100 - 8 - 2 = 90px: five letters at 14 and the ellipsis, then the mark that keeps the ellipsis in the run.
+  assert.equal(hebrew.children[1].firstChild.nodeValue, cps(0x05d0).repeat(5) + ELLIPSIS + RLM);
+  assert.ok(!mixed.children[1].firstChild.nodeValue.endsWith(RLM), "a cut that ends on a Latin letter needs no mark");
+  assert.equal(broken.children[1].firstChild.nodeValue, "M".repeat(20), "the label whose measure threw is left as drawn");
+  assert.equal(after.children[1].firstChild.nodeValue, "M".repeat(6) + ELLIPSIS, "and the labels after it are still fitted");
+});
+
+test("a very long label is cut in a handful of measures, not one per character (#422)", () => {
+  const group = el("g", { class: "ggroup" }, el("rect", { width: 400, height: 40 }), el("text", { x: 8, y: 18 }, "x".repeat(20000)));
+  let calls = 0;
+  fitLabels(docOf(group), (t) => { calls++; return widthOf(t.firstChild.nodeValue); });
+  // 400 - 8 - 2 = 390px: 62 characters and the ellipsis.
+  assert.equal(group.children[1].firstChild.nodeValue, "x".repeat(62) + ELLIPSIS);
+  assert.ok(calls <= 20, `halving the cut: ${calls} measures for 20,000 characters`);
 });
 
 test("FIT_JS runs before the page script and holds none of the words the page pins ban (#422)", () => {
@@ -925,20 +990,25 @@ test("FIT_JS runs before the page script and holds none of the words the page pi
   assert.ok(at < page.indexOf(PAGE_JS), "ahead of the page script, in the one script element");
 });
 
-test("a long cron pattern under its chip is cut to the chip's width, a common one is not (#422)", () => {
+test("a long cron pattern under its loop is cut to the loop's span with a title, a common one is not (#422)", () => {
   const withPattern = (pattern) => {
     const base = CANNED();
     const triggers = base.triggers.triggers.map((t, i) => (i === 0 ? { ...t, pattern } : t));
     const schedulers = base.schedulers.map((s) => ({ ...s, pattern }));
     return pageOf(buildGraphModel({ ...base, triggers: { triggers }, schedulers }));
   };
-  const common = withPattern("*/5 * * * *");
-  assert.ok(common.includes(">*/5 * * * *</text>"), "a common pattern is drawn whole");
-  const long = "0 0,5,10,15,20,25,30,35,40,45,50,55 * * *";
+  // Weekday lists are what real crons look like, and each draws at about 5px a character in the 10px font.
+  for (const common of ["*/5 * * * *", "0 9 * * MON,TUE,WED,THU,FRI", "0 0,15,30,45 8-18 * * MON-FRI"]) {
+    assert.ok(withPattern(common).includes(`>${common}</text>`), `${JSON.stringify(common)} is drawn whole`);
+  }
+  // The span of a 160px chip's loop, 160 + 2 * 18, at 6px a column: 31 columns, a longer pattern is cut.
+  const at = "0 1,2,3,4,5,6,7,8,9,10,11 * * *";
+  assert.equal(at.length, 31);
+  assert.ok(withPattern(at).includes(`>${at}</text>`), "31 columns fit");
+  const long = at + "1";
   const page = withPattern(long);
-  assert.ok(!page.includes(`>${long}</text>`), "a pattern wider than its chip is not drawn whole");
-  const drawn = /text-anchor="middle" font-size="10" fill="[^"]+">([^<]*\u2026)<\/text>/u.exec(page);
-  assert.ok(drawn, "it is drawn cut, with an ellipsis");
-  assert.ok(long.startsWith(drawn[1].slice(0, -1)), "the start of the pattern");
-  assert.equal(drawn[1], long.slice(0, 24) + "\u2026", "within the 160px chip's 25 columns, its ellipsis included");
+  const drawn = /text-anchor="middle" font-size="10" fill="[^"]+">([^<]*)<title>([^<]*)<\/title><\/text>/u.exec(page);
+  assert.ok(drawn, "it is drawn cut, with a title");
+  assert.equal(drawn[1], long.slice(0, 30) + ELLIPSIS, "within 31 columns, its ellipsis included");
+  assert.equal(drawn[2], long, "and the title carries the whole pattern, which nothing else on the page shows");
 });

@@ -15,6 +15,7 @@ import {
   fmtCost,
   makeLineInput,
   LINE_INPUT_CURSOR,
+  trimClusters,
 } from "../src/panel.mjs";
 
 test("panel.mjs is pure: no fs, no require, no node:fs import", () => {
@@ -299,4 +300,18 @@ test("makeLineInput marks the cursor cell with the sentinels only when focused; 
   assert.equal(clip(focused, 6), unfocused, "clip strips the sentinels down to the exact plain render");
   const long = makeLineInput("abcdefghij");
   assert.equal(clip(long.render(6), 6).length, 6, "a windowed focused render is still exactly width after the strip");
+});
+
+test("trimClusters drops whitespace-only clusters at either end and never trims inside one (issue #422)", () => {
+  const prepend = String.fromCharCode(0x0600);
+  const acute = String.fromCharCode(0x0301);
+  // A Prepend joins the space after it into its own cluster, so that space stays.
+  assert.equal(trimClusters(`  until 1${prepend} `), `until 1${prepend} `);
+  // A space carrying a combining mark is a cluster that draws something: kept, at either end.
+  assert.equal(trimClusters(` ${acute}x `), ` ${acute}x`);
+  assert.equal(trimClusters(`x ${acute}`), `x ${acute}`);
+  // Plain whitespace clusters go, runs of them too, and the inside is untouched.
+  assert.equal(trimClusters(" \t repeat  now \n "), "repeat  now");
+  assert.equal(trimClusters("   "), "");
+  assert.equal(trimClusters(""), "");
 });
