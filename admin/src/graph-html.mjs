@@ -253,8 +253,10 @@ const NARROW_PUNCTUATION = /[\u2000-\u2013\u2016-\u202f\u2032-\u206f]/u;
  * `labelColumns` alone was one column short of the budget the cut had allowed for. ASCII is unchanged.
  */
 export function drawnColumns(label) {
-  const n = labelColumns(label);
-  return label.endsWith("\u2026") && [...label].some((ch) => charColumns(ch) >= 2) ? n + 1 : n;
+  // The right-to-left mark a cut may carry after its ellipsis draws nothing, so it neither counts nor hides the ellipsis.
+  const bare = label.endsWith(RLM) ? label.slice(0, -1) : label;
+  const n = labelColumns(bare);
+  return bare.endsWith("\u2026") && [...bare].some((ch) => charColumns(ch) >= 2) ? n + 1 : n;
 }
 
 // The browser draws whole clusters, so a label is cut on cluster boundaries. A global, not a module.
@@ -273,6 +275,28 @@ const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
  * wider than 8px (Malayalam, Myanmar, Tamil, Thai, and runs of wide Latin letters in a proportional font
  * too), which this estimate counts at one column each.
  */
+// Where a cut ends right to left (issue #422). A neutral ellipsis after a right-to-left run joins the left-to-right
+// paragraph and is drawn beside the run's FIRST word, where a reader of that script starts, so a cut that ends right to
+// left carries a right-to-left mark after its ellipsis. The ranges are the strong right-to-left characters of the Hebrew
+// and Arabic blocks and their presentation forms, with the Arabic-script characters the bidi algorithm reads as numbers
+// or number formats left out (U+0600-0605, the Arabic-Indic digits and separators U+0660-066C, the extended digits
+// U+06F0-06F9, U+08E2): a mark after those put the ellipsis in the middle of the number. A Latin, Greek or Cyrillic
+// letter ends the scan left to right; digits and punctuation decide nothing. ONE table, read here by the builder's cut and
+// written into FIT_JS for the page's, so the two cannot disagree.
+const RTL_STRONG = [[0x0590, 0x05ff], [0x0606, 0x065f], [0x066d, 0x06ef], [0x06fa, 0x08e1], [0x08e3, 0x08ff], [0xfb1d, 0xfdff], [0xfe70, 0xfefe]];
+const LTR_STRONG = [[0x41, 0x5a], [0x61, 0x7a], [0xc0, 0x24f], [0x370, 0x52f]];
+const RLM = String.fromCharCode(0x200f);
+
+function endsRightToLeft(s) {
+  const within = (c, table) => table.some(([lo, hi]) => c >= lo && c <= hi);
+  for (let i = s.length - 1; i >= 0; i--) {
+    const c = s.charCodeAt(i);
+    if (within(c, RTL_STRONG)) return true;
+    if (within(c, LTR_STRONG)) return false;
+  }
+  return false;
+}
+
 export function clipColumns(s, max) {
   const t = String(s);
   if (labelColumns(t) <= max) return t;
@@ -302,7 +326,7 @@ export function clipColumns(s, max) {
     out += segment;
     taken += 1;
   }
-  return `${out}\u2026`;
+  return `${out}\u2026${endsRightToLeft(out) ? RLM : ""}`;
 }
 
 /**
@@ -541,7 +565,11 @@ function layoutNormalized(norm) {
     const size = layoutGroup(g, wires, skillGroups);
     g.x = 0;
     g.y = groupY;
-    g.w = size.w;
+    // A forge group's title leads with the caveat that nothing on this host can verify it (issue #422), and the page
+    // cuts a title that runs past its box. A group with no flow column (a command-only forge trigger) sits at its
+    // minimum width, too narrow for that caveat, so the box is widened to hold it: the label and the caveat at 7px a
+    // column of the 11px title font, which over-counts it. The repo list after the caveat may still be cut.
+    g.w = g.kind === "forge" ? Math.max(size.w, forgeTitleMinWidth(g)) : size.w;
     g.h = size.h;
     for (const p of g.members) {
       p.x += g.x;
@@ -853,11 +881,6 @@ function routeWire(w) {
     w.d = `M ${fmt(x1)} ${fmt(y1)} C ${fmt(x1 + LOOP_OFF)} ${fmt(y1)}, ${fmt(x1 + LOOP_OFF)} ${fmt(yb)}, ${fmt(x1)} ${fmt(yb)} L ${fmt(x2)} ${fmt(yb)} C ${fmt(x2 - LOOP_OFF)} ${fmt(yb)}, ${fmt(x2 - LOOP_OFF)} ${fmt(y2)}, ${fmt(x2)} ${fmt(y2)}`;
     w.labelX = f.x + f.w / 2;
     w.labelY = yb + 12;
-    // The label is centred under the loop and never had a box (issue #422): a long cron pattern ran past
-    // it on both sides. Its budget is the loop's span (the chip and the two control offsets) at 6px a
-    // column, which over-counts the 10px label font (about 5px a character), so a pattern is cut only
-    // when it is clearly too long; taken here because the chip is gone from the wire once routing ends.
-    w.labelMax = Math.floor((f.w + 2 * LOOP_OFF - 8) / 6);
     return;
   }
   if (w.back) {
@@ -980,13 +1003,21 @@ function buildTip(n, flags, groupLabel, nowMs) {
   return lines.join("\n");
 }
 
+// The forge caveat's own words, one literal for the title and the width that must hold it.
+const FORGE_CAVEAT = "forge · unverifiable from this host";
+const TITLE_COL_W = 7;
+
+function forgeTitleMinWidth(g) {
+  return Math.ceil((8 + labelColumns(`${g.label} · ${FORGE_CAVEAT}`) * TITLE_COL_W + 8) / GRID) * GRID;
+}
+
 function groupTitle(g, fullPaths) {
   if (g.kind === "forge") {
     // The unverifiable note before the record-derived scope (issue #422): the page cuts a title that runs
     // past its group from the END, and the list of repos history names is the part that may go, never
     // the caveat that nothing on this host can say more.
     const scope = Array.isArray(g.repos) && g.repos.length > 0 ? ` · ran against ${g.repos.join(", ")}` : "";
-    return `${g.label} · forge · unverifiable from this host${scope}`;
+    return `${g.label} · ${FORGE_CAVEAT}${scope}`;
   }
   const name = fullPaths === true && typeof g.path === "string" && g.path !== "" ? g.path : g.label;
   // Unreachable, the reason first for the same reason: a long path may be cut, why the folder shows no
@@ -1086,10 +1117,11 @@ function wireStyle(w) {
 
 function wireSvg(w, nowMs) {
   const s = wireStyle(w);
-  const parts = [`<g class="gwire" id="${w.id}">`];
+  // A cron re-arm wire says so in its class (issue #422): its pattern is centred under the loop with no box of its own,
+  // and the page's fit measures it against the loop it labels, which only the page can do exactly.
+  const parts = [`<g class="${w.kind === "cron-rearm" ? "gwire gcron" : "gwire"}" id="${w.id}">`];
   parts.push(`<path d="${w.d}" fill="none" stroke="${s.stroke}" stroke-width="${fmt(s.width)}"${s.dash !== null ? ` stroke-dasharray="${s.dash}"` : ""}/>`);
   let label = null;
-  let whole = null;
   let fill = PAGE_DIM;
   if (w.kind === "observed" && w.edge.count !== null) {
     // Recency beside the count when the fold recorded it: relTime against the injected instant,
@@ -1101,15 +1133,10 @@ function wireSvg(w, nowMs) {
     label = "mention";
     fill = w.edge.strong ? PAGE_ACCENT : WIRE_POTENTIAL;
   } else if (w.kind === "cron-rearm" && w.edge.label !== null) {
-    // Whole when it fits; otherwise cut a column short, because the cut appends its ellipsis past its budget,
-    // and the whole pattern rides a title: nothing else on the page shows it (the chip cuts it too).
-    const max = typeof w.labelMax === "number" ? w.labelMax : null;
-    label = max === null || drawnColumns(w.edge.label) <= max ? w.edge.label : clipColumns(w.edge.label, max - 1);
-    if (label !== w.edge.label) whole = w.edge.label;
+    label = w.edge.label;
     fill = CHIP_FILL.cron;
   }
-  const title = whole !== null ? `<title>${escapeHtml(whole)}</title>` : "";
-  if (label !== null) parts.push(`<text x="${fmt(w.labelX)}" y="${fmt(w.labelY)}" text-anchor="middle" font-size="10" fill="${fill}">${escapeHtml(label)}${title}</text>`);
+  if (label !== null) parts.push(`<text x="${fmt(w.labelX)}" y="${fmt(w.labelY)}" text-anchor="middle" font-size="10" fill="${fill}">${escapeHtml(label)}</text>`);
   parts.push("</g>");
   return parts.join("");
 }
@@ -1210,10 +1237,10 @@ export function bannersHtml(norm) {
  * after it (a bar-list label's bar or chip) bound it at its left edge. A chip's output port is such a
  * rect and must NOT bound its label: a name the builder cut at fourteen columns ends a few pixels under
  * the port, as it always has, and bounding it there cut ordinary names a second time. The next left-
- * anchored text on the same baseline bounds it too. The nearest bound wins, 2px are kept, and a text no
- * bound reaches (a value drawn after its bar) is left alone. Centred texts are skipped: they are glyphs,
- * counts and wire labels, and the one of those that can run long, the cron re-arm pattern, is cut by
- * the builder.
+ * anchored text on the same baseline bounds it too. A loop hint's box ends at the ring wire, inside its skill
+ * group's edge. The nearest bound wins, 2px are kept, and a text no bound reaches (a value drawn after its bar)
+ * is left alone. Centred texts are glyphs, counts and wire labels and are skipped, except the one that can run
+ * long: a cron re-arm pattern, centred under the loop it labels, is fitted to that loop's drawn width.
  *
  * A text that is cut gains a title holding the text the builder drew, unless it already has one or its
  * group shows a tooltip of its own; that text is kept on the element, so a second pass (fonts arriving
@@ -1232,6 +1259,8 @@ function fitLabels(doc, measure) {
   var ELLIPSIS = String.fromCharCode(0x2026);
   var RLM = String.fromCharCode(0x200f);
   var PAD = 2;
+  var RING_TOP = ${SG_CHIP_Y + NODE_H / 2};
+  var RING_INSET = ${SG_RING};
   var graphemes = typeof Intl === "object" && typeof Intl.Segmenter === "function"
     ? new Intl.Segmenter(void 0, { granularity: "grapheme" }) : null;
   function num(el, name) {
@@ -1254,6 +1283,7 @@ function fitLabels(doc, measure) {
     var tx = num(t, "x");
     var ty = num(t, "y");
     var holds = null;
+    var holdsTop = 0;
     var after = null;
     var next = null;
     for (var i = 0; i < siblings.length; i++) {
@@ -1263,12 +1293,15 @@ function fitLabels(doc, measure) {
         if (ty < ry || ty > ry + num(k, "height")) continue;
         var rx = num(k, "x");
         var rw = num(k, "width");
-        if (rx <= tx && tx < rx + rw) { if (holds === null || rx + rw < holds) holds = rx + rw; }
+        if (rx <= tx && tx < rx + rw) { if (holds === null || rx + rw < holds) { holds = rx + rw; holdsTop = ry; } }
         else if (tx < rx) { if (after === null || rx < after) after = rx; }
       } else if (k !== t && k.localName === "text" && leftAnchored(k) && num(k, "y") === ty && num(k, "x") > tx) {
         if (next === null || num(k, "x") < next) next = num(k, "x");
       }
     }
+    // A loop hint's box ends at the ring wire, drawn RING_INSET inside the skill group's right edge from the chip's
+    // midline down; the group's title sits above that line and has the whole width.
+    if (holds !== null && hasClass(t.parentNode, "sgroup") && ty > holdsTop + RING_TOP) holds -= RING_INSET;
     var bound = holds !== null ? holds : after;
     if (next !== null && (bound === null || next < bound)) bound = next;
     return bound;
@@ -1288,14 +1321,18 @@ function fitLabels(doc, measure) {
     }
     return out;
   }
-  // The direction of the last strongly directional character: Hebrew, Arabic, Syriac, Thaana, NKo and
-  // the scripts after them to U+08FF, and the Hebrew and Arabic presentation forms, read right to left;
-  // a Latin, Greek or Cyrillic letter reads left to right; digits and punctuation decide nothing.
+  // The direction a cut ends in: the builder's own table (RTL_STRONG, LTR_STRONG above this string), written in.
+  var RTL_STRONG = ${JSON.stringify(RTL_STRONG)};
+  var LTR_STRONG = ${JSON.stringify(LTR_STRONG)};
+  function within(c, table) {
+    for (var j = 0; j < table.length; j++) if (c >= table[j][0] && c <= table[j][1]) return true;
+    return false;
+  }
   function endsRightToLeft(s) {
     for (var i = s.length - 1; i >= 0; i--) {
       var c = s.charCodeAt(i);
-      if ((c >= 0x0590 && c <= 0x08ff) || (c >= 0xfb1d && c <= 0xfdff) || (c >= 0xfe70 && c <= 0xfefe)) return true;
-      if ((c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a) || (c >= 0xc0 && c <= 0x24f) || (c >= 0x370 && c <= 0x52f)) return false;
+      if (within(c, RTL_STRONG)) return true;
+      if (within(c, LTR_STRONG)) return false;
     }
     return false;
   }
@@ -1304,12 +1341,31 @@ function fitLabels(doc, measure) {
     for (var i = 0; i < list.length; i++) if (list[i].localName === "title") return list[i];
     return null;
   }
+  // A cron re-arm pattern is centred under the loop it labels, so its box is the loop's own drawn width.
+  function loopWidth(t) {
+    if (!hasClass(t.parentNode, "gcron") || t.getAttribute("text-anchor") !== "middle") return null;
+    var list = kids(t.parentNode);
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].localName === "path" && typeof list[i].getBBox === "function") {
+        var b = list[i].getBBox();
+        return b && b.width > 0 ? b.width : null;
+      }
+    }
+    return null;
+  }
   function fit(t) {
     var node = t.firstChild;
-    if (!node || node.nodeType !== 3 || !leftAnchored(t)) return;
-    var right = boxRight(t);
-    if (right === null) return;
-    var avail = right - num(t, "x") - PAD;
+    if (!node || node.nodeType !== 3) return;
+    var avail;
+    if (leftAnchored(t)) {
+      var right = boxRight(t);
+      if (right === null) return;
+      avail = right - num(t, "x") - PAD;
+    } else {
+      var loop = loopWidth(t);
+      if (loop === null) return;
+      avail = loop - 2 * PAD;
+    }
     if (!(avail > 0)) return;
     var drawn = typeof t.fitFull === "string" ? t.fitFull : node.nodeValue;
     node.nodeValue = drawn;
@@ -1322,8 +1378,10 @@ function fitLabels(doc, measure) {
       return;
     }
     t.fitFull = drawn;
-    // The builder's own ellipsis goes first, or a cut would keep it and add a second one.
-    var base = drawn.charAt(drawn.length - 1) === ELLIPSIS ? drawn.slice(0, -1) : drawn;
+    // The builder's own ellipsis (and the mark after it on a right-to-left cut) goes first, or a cut would keep it and
+    // add a second one.
+    var base = drawn.charAt(drawn.length - 1) === RLM ? drawn.slice(0, -1) : drawn;
+    if (base.charAt(base.length - 1) === ELLIPSIS) base = base.slice(0, -1);
     var parts = clusters(base);
     function show(n) {
       while (n > 0 && /^\\s+$/.test(parts[n - 1])) n--;
@@ -1341,6 +1399,9 @@ function fitLabels(doc, measure) {
       if (show(mid)) lo = mid;
       else hi = mid - 1;
     }
+    // Width is not quite monotone in Arabic: a letter added can turn the one before it into a narrower joining form, so
+    // a longer start may fit where a shorter one did not. A few steps past the halving's answer find those.
+    for (var up = lo + 1; up <= lo + 3 && up <= parts.length - 1; up++) if (show(up)) lo = up;
     show(lo);
     var p = t.parentNode;
     if (titleOf(t) === null && !hasClass(p, "gnode") && !(p.getAttribute && p.getAttribute("data-tip") !== null)) {
@@ -1352,7 +1413,10 @@ function fitLabels(doc, measure) {
   }
   var texts = doc.getElementsByTagName("text");
   for (var i = 0; i < texts.length; i++) {
-    try { fit(texts[i]); } catch (e) { /* this label stays as drawn; the next one is still fitted */ }
+    try { fit(texts[i]); } catch (e) {
+      // This label goes back to the text the builder drew; the next one is still fitted.
+      if (typeof texts[i].fitFull === "string" && texts[i].firstChild) texts[i].firstChild.nodeValue = texts[i].fitFull;
+    }
   }
 }
 if (typeof document === "object" && document !== null && document.getElementsByTagName) {
@@ -1361,7 +1425,9 @@ if (typeof document === "object" && document !== null && document.getElementsByT
       try { fitLabels(document, function (t) { return t.getComputedTextLength(); }); } catch (e) { /* the labels stay as drawn */ }
     }
     run();
-    if (document.fonts && document.fonts.ready && typeof document.fonts.ready.then === "function") document.fonts.ready.then(run);
+    // Again once web fonts arrive, only when some were still loading: on a page of thousands of labels a pass is
+    // hundreds of milliseconds, and a second one for fonts already in place bought nothing.
+    if (document.fonts && document.fonts.status !== "loaded" && document.fonts.ready && typeof document.fonts.ready.then === "function") document.fonts.ready.then(run);
   })();
 }
 `;

@@ -73,7 +73,10 @@ A local folder group is headed by its `run.folder`, shown as a basename unless y
 opt-in. A forge group's triggers name no repository in
 `triggers.json` (routing belongs to the forge app installation), so the group instead lists the
 repositories its **recorded runs** actually hit in the window, labelled as record-derived: history
-answering a question configuration cannot.
+answering a question configuration cannot. The title leads with `forge · unverifiable from this host`
+and the list follows it, because the page shortens a title that runs past its box from the end: the
+caveat always shows, and a list too long for the group ends in an ellipsis with the whole title on
+hover. Any label the page shortens that way keeps its full text on hover.
 
 ## Run attribution
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildGraphScene, clip, clipColumns, FIT_JS, GRAPH_HTML_KINDS, GLYPH, labelColumns, PAGE_JS } from "../src/graph-html.mjs";
+import { buildGraphScene, clip, clipColumns, drawnColumns, FIT_JS, GRAPH_HTML_KINDS, GLYPH, labelColumns, PAGE_JS } from "../src/graph-html.mjs";
 import { columnsOf } from "../src/panel.mjs";
 import { buildInsightsHtml } from "../src/insights-html.mjs";
 import { buildGraphModel, findLoopHints, GRAPH_EDGE_KINDS, GRAPH_NODE_KINDS, parseSkillMeta } from "../src/graph-model.mjs";
@@ -990,25 +990,112 @@ test("FIT_JS runs before the page script and holds none of the words the page pi
   assert.ok(at < page.indexOf(PAGE_JS), "ahead of the page script, in the one script element");
 });
 
-test("a long cron pattern under its loop is cut to the loop's span with a title, a common one is not (#422)", () => {
+test("a cron pattern is drawn whole by the builder and fitted to its loop by the page (#422)", () => {
   const withPattern = (pattern) => {
     const base = CANNED();
     const triggers = base.triggers.triggers.map((t, i) => (i === 0 ? { ...t, pattern } : t));
     const schedulers = base.schedulers.map((s) => ({ ...s, pattern }));
     return pageOf(buildGraphModel({ ...base, triggers: { triggers }, schedulers }));
   };
-  // Weekday lists are what real crons look like, and each draws at about 5px a character in the 10px font.
-  for (const common of ["*/5 * * * *", "0 9 * * MON,TUE,WED,THU,FRI", "0 0,15,30,45 8-18 * * MON-FRI"]) {
-    assert.ok(withPattern(common).includes(`>${common}</text>`), `${JSON.stringify(common)} is drawn whole`);
-  }
-  // The span of a 160px chip's loop, 160 + 2 * 18, at 6px a column: 31 columns, a longer pattern is cut.
-  const at = "0 1,2,3,4,5,6,7,8,9,10,11 * * *";
-  assert.equal(at.length, 31);
-  assert.ok(withPattern(at).includes(`>${at}</text>`), "31 columns fit");
-  const long = at + "1";
+  // The builder cuts no pattern: a 6px column over-counts a 10px font that draws about 5px a character, so a
+  // budget in columns cut patterns that fitted their loop. It marks the wire so the page can measure instead.
+  const long = "0 0,6,12,18 * * MON,TUE,WED,THU,FRI,SAT,SUN";
   const page = withPattern(long);
-  const drawn = /text-anchor="middle" font-size="10" fill="[^"]+">([^<]*)<title>([^<]*)<\/title><\/text>/u.exec(page);
-  assert.ok(drawn, "it is drawn cut, with a title");
-  assert.equal(drawn[1], long.slice(0, 30) + ELLIPSIS, "within 31 columns, its ellipsis included");
-  assert.equal(drawn[2], long, "and the title carries the whole pattern, which nothing else on the page shows");
+  assert.ok(page.includes(`>${long}</text>`), "drawn whole");
+  assert.match(page, /<g class="gwire gcron" id="w\d+">/, "the cron re-arm wire is marked for the fit");
+  assert.equal((page.match(/class="gwire gcron"/g) ?? []).length, 2, "one per cron trigger in the canned deployment, and no other wire");
+  // In the page: the box is the loop path's drawn width, 2px kept each side.
+  const loop = (width) => {
+    const path = Object.assign(el("path", {}), { getBBox: () => ({ width }) });
+    return el("g", { class: "gwire gcron" }, path, el("text", { x: 80, y: 70, "text-anchor": "middle" }, long));
+  };
+  const narrow = loop(124);
+  const wide = loop(400);
+  const plain = el("g", { class: "gwire" }, Object.assign(el("path", {}), { getBBox: () => ({ width: 10 }) }), el("text", { x: 80, y: 70, "text-anchor": "middle" }, "(3x)"));
+  fitLabels(docOf(narrow, wide, plain), measureBy());
+  // 124 - 4 = 120px: sixteen characters and the ellipsis would be 110, but the sixteenth is a space, which a cut never
+  // ends on, and the M after it is 12 wide (122).
+  assert.equal(narrow.children[1].firstChild.nodeValue, long.slice(0, 15) + ELLIPSIS);
+  assert.equal(narrow.children[1].children[0].textContent, long, "the whole pattern rides a title, since nothing else shows it");
+  assert.equal(wide.children[1].firstChild.nodeValue, long, "a loop wide enough draws it whole");
+  assert.equal(plain.children[1].firstChild.nodeValue, "(3x)", "any other centred wire label is never fitted, however short its wire");
+});
+
+test("a loop hint stops at the ring wire, the skill group's title at its edge (#422)", () => {
+  // A skill group box at x 0, 226 wide: the ring runs 10px inside its right edge from the chip's midline (y 41) down.
+  const hint = "until every open pull request is merged";
+  const title = "a-skill-group-title-that-runs-longer";
+  const sg = el("g", { class: "sgroup" },
+    el("rect", { x: 0, y: 0, width: 226, height: 160 }),
+    el("text", { x: 8, y: 16 }, title),
+    el("rect", { x: 22, y: 70, width: 40, height: 40 }),
+    el("text", { x: 68, y: 94 }, hint));
+  fitLabels(docOf(sg), measureBy());
+  // The title has the whole width, 226 - 8 - 2 = 216px, and it is exactly 216: the ring does not bound it.
+  assert.equal(sg.children[1].firstChild.nodeValue, title, "216px fits the title row");
+  // The hint stops at the ring: 216 - 68 - 2 = 146px, 22 characters and the ellipsis; the 22nd is a space, which a
+  // cut never ends on.
+  assert.equal(sg.children[3].firstChild.nodeValue, hint.slice(0, 21) + ELLIPSIS);
+});
+
+test("a forge group is wide enough for its caveat, even with no flow column (#422)", () => {
+  // A forge trigger that runs a command has no flow chip, so its group sat at the minimum width, where the page cut
+  // the caveat that nothing on this host can verify it.
+  const inputs = CANNED();
+  inputs.triggers = { triggers: [{ type: "label", index: 0, any: ["ai"], all: [], none: [], command: "deploy", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "forgejo" }] };
+  inputs.schedulers = [];
+  inputs.forgeRepos = {};
+  const scene = buildGraphScene(buildGraphModel(inputs), { now: NOW });
+  const forge = scene.layout.groups.find((g) => g.kind === "forge");
+  assert.ok(forge, "a forge group");
+  const title = "forgejo · forge · unverifiable from this host";
+  assert.ok(scene.svgBody.includes(`>${title}</text>`));
+  // 8 + 45 columns at 7px + 8, on the 20px grid: 340.
+  assert.equal(forge.w, 340);
+  assert.ok(forge.w >= 8 + labelColumns(title) * 7 + 8, "the box holds the caveat at 7px a column");
+});
+
+test("the right-to-left mark: after Hebrew or Arabic letters, never after Arabic-Indic digits, and in the builder's cut too (#422)", () => {
+  const box = (text) => el("g", { class: "ggroup" }, el("rect", { width: 100, height: 40 }), el("text", { x: 8, y: 18 }, text));
+  // U+0661-0666: the bidi algorithm reads them as a number, not as right-to-left letters, so a Latin label ending in
+  // them is cut left to right; a mark after them put the ellipsis in the middle of the number.
+  const digits = box("report " + cps(0x0661, 0x0662, 0x0663, 0x0664, 0x0665, 0x0666).repeat(3));
+  const arabic = box(cps(0x0645, 0x0631, 0x062d, 0x0628, 0x0627).repeat(4));
+  fitLabels(docOf(digits, arabic), measureBy());
+  assert.ok(!digits.children[1].firstChild.nodeValue.endsWith(RLM), "no mark after digits that follow a Latin word");
+  assert.ok(digits.children[1].firstChild.nodeValue.endsWith(ELLIPSIS));
+  assert.ok(arabic.children[1].firstChild.nodeValue.endsWith(ELLIPSIS + RLM), "a mark after Arabic letters");
+  // The builder's own cut carries the same mark, and it costs no column.
+  const hebrew = cps(0x05d0).repeat(30);
+  assert.equal(clipColumns(hebrew, 10), cps(0x05d0).repeat(10) + ELLIPSIS + RLM);
+  assert.equal(drawnColumns(clipColumns(hebrew, 10)), 11, "the mark draws nothing, so it costs no column and leaves the ellipsis seen");
+  assert.equal(clipColumns("abcdefghijklmnop", 10), "abcdefghij" + ELLIPSIS, "and none on a Latin cut");
+});
+
+test("the halving finds the longest start that fits, even where a longer start draws narrower (#422)", () => {
+  // Arabic joining can make a longer start narrower. Widths of "abcdef" cut after 0..5 clusters, with the ellipsis.
+  const widths = [14, 30, 40, 70, 35, 90];
+  const t = el("text", { x: 8, y: 18 }, "abcdef");
+  const g = el("g", { class: "ggroup" }, el("rect", { width: 60, height: 40 }), t);
+  fitLabels(docOf(g), (x) => {
+    const v = x.firstChild.nodeValue;
+    return v === "abcdef" ? 200 : widths[v.length - 1];
+  });
+  // 60 - 8 - 2 = 50px: the halving alone lands on two clusters (40); four (35) fit too.
+  assert.equal(t.firstChild.nodeValue, "abcd" + ELLIPSIS);
+  // Dropping the last cluster alone is enough here: the whole start but one is kept.
+  const last = chip("aaaaaaaaaa" + cps(0x1242b));
+  fitLabels(docOf(last), measureBy());
+  assert.equal(label(last).firstChild.nodeValue, "aaaaaaaaaa" + ELLIPSIS, "ten letters kept, only the sign dropped");
+});
+
+test("a measure that fails part way through a cut leaves the label as the builder drew it (#422)", () => {
+  const g = el("g", { class: "ggroup" }, el("rect", { width: 100, height: 40 }), el("text", { x: 8, y: 18 }, "M".repeat(20)));
+  let calls = 0;
+  fitLabels(docOf(g), (t) => {
+    calls++;
+    if (calls === 3) throw new Error("measure failed");
+    return widthOf(t.firstChild.nodeValue);
+  });
+  assert.equal(g.children[1].firstChild.nodeValue, "M".repeat(20));
 });

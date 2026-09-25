@@ -121,9 +121,18 @@ const PROBE = `<script>
     for (var i = 0; i < texts.length; i++) {
       var t = texts[i];
       var a = t.getAttribute("text-anchor");
-      if (a !== null && a !== "start") continue;
       var len = t.getComputedTextLength();
       if (!(len > 0)) continue;
+      // A centred label under a cron loop: its drawn box against the loop path's drawn box.
+      if (a === "middle" && / gcron /.test(" " + (t.parentNode.getAttribute("class") || "") + " ")) {
+        var loop = t.parentNode.querySelector("path").getBBox();
+        var tb = t.getBBox();
+        out.push({ text: t.firstChild.nodeValue, x: tb.x, y: num(t, "y"), end: tb.x + tb.width, holds: loop.x + loop.width, after: null, next: null,
+          parent: -1 - i, box: [0, 0, 0, 0], svgLeft: 0, svgRight: 1, drawn: t.fitFull || null, drawnEnd: null, titled: t.querySelector("title") !== null,
+          tipped: false, left: tb.x, loopLeft: loop.x });
+        continue;
+      }
+      if (a !== null && a !== "start") continue;
       var x = num(t, "x");
       var y = num(t, "y");
       var holds = null;
@@ -208,6 +217,7 @@ function problems(r) {
   if (r.holds === null && r.after !== null && r.end > r.after + PAD) out.push(`runs into the rect after it by ${(r.end - r.after).toFixed(1)}px`);
   if (r.next !== null && r.end > r.next + PAD) out.push(`runs into the next label by ${(r.end - r.next).toFixed(1)}px`);
   if (r.box[2] > r.svgRight + PAD) out.push(`runs past its svg by ${(r.box[2] - r.svgRight).toFixed(1)}px`);
+  if (r.loopLeft !== undefined && r.left < r.loopLeft - PAD) out.push(`runs past its loop on the left by ${(r.loopLeft - r.left).toFixed(1)}px`);
   return out;
 }
 
@@ -253,15 +263,19 @@ function titles(rows) {
 // cron. Nothing on it should be cut that fitted, and the forge caveat must survive whatever is cut.
 function realistic() {
   const names = ["summarize-meetings", "memory-maintenance", "monthly-summary", "weekly-mwm", "WWW-MIGRATION", "customer-website-deploy"];
+  // Real cron shapes: weekday lists with hour and minute lists, each measured to fit a 160px chip's loop.
+  const patterns = ["0 9 * * MON,TUE,WED,THU,FRI", "0 0,2,4,6,8,10,12,14,16,18,20,22 * * *", "*/10 9-17 * * MON,TUE,WED,THU,FRI", "0,30 8-18 * * MON,TUE,WED,THU,FRI", "0 0,6,12,18 * * MON,TUE,WED,THU,FRI", "0 3 * * *"];
   const folder = "/home/someone/projects/customer-website";
   return {
     triggers: {
       triggers: [
-        ...names.map((n, i) => ({ type: "cron", index: i, id: n, pattern: i === 0 ? "0 9 * * MON,TUE,WED,THU,FRI" : "0 3 * * *", folder, flow: n, model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false })),
+        ...names.map((n, i) => ({ type: "cron", index: i, id: n, pattern: patterns[i], folder, flow: n, model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false })),
         { type: "label", index: names.length, any: ["ai"], all: [], none: [], flow: "triage", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" },
+        // A forge trigger that runs a command has no flow column: its group sits at the minimum width.
+        { type: "label", index: names.length + 1, any: ["deploy"], all: [], none: [], command: "deploy", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "forgejo" },
       ],
     },
-    schedulers: names.map((n, i) => ({ key: n, name: n, pattern: i === 0 ? "0 9 * * MON,TUE,WED,THU,FRI" : "0 3 * * *", every: null, next: "2026-08-12T03:00:00.000Z", overdueMs: null })),
+    schedulers: names.map((n, i) => ({ key: n, name: n, pattern: patterns[i], every: null, next: "2026-08-12T03:00:00.000Z", overdueMs: null })),
     folderSkills: { [folder]: { head: "abc1234def", truncated: false, unreachable: null, skills: names.map((n) => ({ name: n, isSub: false, group: null, aiTrigger: true, meta: null, mentions: [], unread: false, loops: [] })) } },
     injectedSkills: {},
     overlaySkills: { skills: [], truncated: false, unreachable: null },
@@ -279,14 +293,13 @@ const ascii = Object.fromEntries(NAMES.map((k) => [k, "x"]));
 const corpusGraph = buildGraphModel(model(CORPUS, LONG_FOLDER, LONG_CRON));
 const plainGraph = buildGraphModel(model(ascii, "/srv/site", "0 3 * * *"));
 const realGraph = buildGraphModel(realistic());
-const [fitted, stripped, plainFitted, plainStripped, realFitted, realStripped] = await Promise.all([
-  measure(page(corpusGraph, fold(CORPUS), true)),
-  measure(page(corpusGraph, fold(CORPUS), false)),
-  measure(page(plainGraph, fold(ascii), true)),
-  measure(page(plainGraph, fold(ascii), false)),
-  measure(page(realGraph, fold(ascii), true)),
-  measure(page(realGraph, fold(ascii), false)),
-]);
+// One browser at a time: six at once on a busy machine left a page unrendered inside Chrome's own time budget.
+const fitted = await measure(page(corpusGraph, fold(CORPUS), true));
+const stripped = await measure(page(corpusGraph, fold(CORPUS), false));
+const plainFitted = await measure(page(plainGraph, fold(ascii), true));
+const plainStripped = await measure(page(plainGraph, fold(ascii), false));
+const realFitted = await measure(page(realGraph, fold(ascii), true));
+const realStripped = await measure(page(realGraph, fold(ascii), false));
 
 const report = (name, list) => {
   console.log(`${name}: ${list.length}`);
@@ -304,7 +317,10 @@ bad += report("plain ascii overflows either way", [...findings(plainStripped), .
 bad += report("realistic ascii labels changed that fitted", changedWhole(realFitted, realStripped));
 bad += report("realistic ascii overflows with the fit", findings(realFitted));
 bad += report("realistic ascii needless cuts", needless(realFitted));
-const caveat = realFitted.some((r) => r.text.includes("unverifiable from this host"));
-if (!caveat) { console.log("the forge caveat is gone from the realistic page"); bad++; }
+// Both forge groups, the github one with repos and the command-only forgejo one at the minimum width, keep the caveat.
+for (const forge of ["github", "forgejo"]) {
+  if (!realFitted.some((r) => r.text.startsWith(`${forge} · forge · unverifiable from this host`))) { console.log(`the ${forge} group's caveat is gone from the realistic page`); bad++; }
+}
+bad += report("realistic ascii cron patterns cut", realFitted.filter((r) => r.loopLeft !== undefined && r.drawn !== null).map((r) => JSON.stringify(r.drawn)));
 if (findings(stripped).length === 0) { console.log("NOTE: the corpus overflowed nothing without the fit, so this run proves nothing"); bad++; }
 process.exitCode = bad === 0 ? 0 : 1;
