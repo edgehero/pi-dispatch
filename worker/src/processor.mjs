@@ -339,6 +339,14 @@ export async function runJob(job, deps) {
 		// container's bounds) and `mountSet` (the runtime observed adding no mounts), read here from the same
 		// `docker info` the job user is decided from, cached per endpoint once it answers, so this read now contacts the
 		// daemon (after the endpoint check, which still refuses without it).
+		// One refusal, reached from two places (the venue's own answer below, or the job user decided after the image
+		// probe). Fixed text per cause class: the cause and anything the runtime said go to the operator's log, never a
+		// forge comment.
+		const refuseJobUserUnmappable = async (cause) => {
+			await comment(job, JOB_USER_COMMENTS[cause] ?? JOB_USER_COMMENTS.default);
+			log("refused_job_user_unmappable", { cause: cause ?? null });
+			return { outcome: "policy", reason: "job-user-unmappable", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		};
 		const observed = await observationPreflight(job);
 		if (observed?.refused) {
 			// Fixed text per observation: the endpoint (an internal host name or address) and the evidence go to the
@@ -368,6 +376,12 @@ export async function runJob(job, deps) {
 			const localVenue = resolveBackendName(job, blessedBackends[0]) === DEFAULT_BACKEND;
 			throw new InfraRetry(localVenue ? "docker CLI or daemon unavailable, an observation the floor needs could not run" : "the container runtime or its CLI is unavailable, an observation the floor needs could not run", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 		}
+
+		// A venue that already knows no uid can run a job there says so HERE, before the image preflight asks that same
+		// runtime (issue #354): behind it, a runtime that is not there is retried as unavailable and one that answers
+		// without the image is refused as `job-image-missing`, both the wrong fix. Only an answer no image can change
+		// comes this way; the per-image half (`anyUid`) stays below, after the probe that reads it.
+		if (observed?.jobUserRefused?.refused === "job-user-unmappable") return refuseJobUserUnmappable(observed.jobUserRefused.cause);
 
 		// The job image must exist on THIS host before anything else happens. Free, determinate and
 		// credential-less, so it precedes the mint, the clone and the reservation: a host that cannot run the
@@ -474,13 +488,7 @@ export async function runJob(job, deps) {
 		// daemon, userns-remap, a root worker) nothing runs. After the image probe because the answer needs its
 		// `anyUid` capability, and still FREE: one cached `docker info` per endpoint, no mint, no clone, no reserve.
 		const jobUser = await jobUserPreflight(job, { capabilities: img.capabilities ?? [], observed });
-		if (jobUser?.refused === "job-user-unmappable") {
-			// Fixed text per cause class: the cause and anything the runtime said go to the operator's log, never a forge
-			// comment.
-			await comment(job, JOB_USER_COMMENTS[jobUser.cause] ?? JOB_USER_COMMENTS.default);
-			log("refused_job_user_unmappable", { cause: jobUser.cause ?? null });
-			return { outcome: "policy", reason: "job-user-unmappable", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
-		}
+		if (jobUser?.refused === "job-user-unmappable") return refuseJobUserUnmappable(jobUser.cause);
 		if (jobUser?.refused === "job-image-any-uid-unsupported") {
 			// The image ref is operator config, the same PII class as the refusals above.
 			await comment(

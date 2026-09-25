@@ -180,13 +180,15 @@ export function podmanArgsFromSpec(spec) {
 }
 
 /**
- * The namespaces and inheritances a rootless Podman argv pins, because Podman (unlike dockerd) lets the account's own
- * containers.conf set every container's defaults for them: `pidns`, `ipcns`, `utsns`, `cgroupns`, `env_host` and
- * `http_proxy`. Measured on Podman 5.8.1 with a user containers.conf of `pidns = "host"` and `env_host = true`: an
+ * The namespaces and inheritances a rootless Podman argv pins, because the account's own containers.conf can set every
+ * container's defaults for them: `pidns`, `ipcns`, `utsns`, `cgroupns`, `env_host` and `http_proxy`. (dockerd's
+ * daemon.json can default the cgroup and IPC modes too, and the docker argv pins neither: a gap older than this venue.) Measured on Podman 5.8.1 with a user containers.conf of `pidns = "host"` and `env_host = true`: an
  * unpinned job ran outside its own PID namespace and received the worker's environment (the provider key with it);
  * with these flags it got its own namespaces and nothing. `http_proxy` is on by default, which copies the worker's proxy
  * variables into every job. A job's network is pinned the same way where it has none of its own (`--network=private`,
- * Podman's word for the rootless default), or `netns = "host"` would put it on the host's.
+ * Podman's word for the rootless default), or `netns = "host"` would put it on the host's. What cannot be pinned is
+ * that network's OPTIONS: containers.conf `pasta_options` are appended to the command line's, so one that maps host
+ * loopback reaches such a job (measured), a named residual (issue #428).
  */
 export const PODMAN_PINNED_FLAGS = Object.freeze(["--pid=private", "--ipc=private", "--uts=private", "--cgroupns=private", "--env-host=false", "--http-proxy=false"]);
 

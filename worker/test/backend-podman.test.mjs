@@ -380,3 +380,57 @@ test("the podman jobUserPreflight decides from the observed read, reads podman i
 	const late = bundle({ readInfo: async () => ({ answered: false, reason: "timeout", transient: true }) });
 	assert.deepEqual(await late.jobUserPreflight(JOB, { capabilities: ["anyUid"] }), { unavailable: true, reason: "timeout" });
 });
+
+// Through the PROCESSOR, whose order is observation, image, job user: a refused identity must win over the image
+// preflight, which asks the same Podman. Before it did, a missing podman under a floor was retried forever as
+// "unavailable" and a rootful one without the image in its store was refused as `job-image-missing`.
+test("through the processor, a refused podman identity is refused before the image preflight can misname it (#354)", { skip }, async () => {
+	const { runJob, InfraRetry } = await import("../src/processor.mjs");
+	const enoent = () => { throw Object.assign(new Error("absent"), { code: "ENOENT" }); };
+	const noFiles = { statSync: enoent, readFileSync: enoent, readdirSync: enoent };
+	// `image` inspect answers present (with anyUid) or absent; with no podman at all every spawn fails to launch.
+	const podmanSpawn = (mode) => (_bin, args) => {
+		const c = new EventEmitter();
+		c.stdout = new EventEmitter();
+		c.stdout.setEncoding = () => {};
+		c.stderr = new EventEmitter();
+		c.kill = () => {};
+		queueMicrotask(() => {
+			if (mode === "no-podman") return c.emit("error", Object.assign(new Error("spawn podman ENOENT"), { code: "ENOENT" }));
+			if (args[0] === "image" && mode === "present") c.stdout.emit("data", "sha256:abc|1.0||anyUid\n");
+			c.emit("close", args[0] === "image" && mode !== "present" ? 1 : 0);
+		});
+		return c;
+	};
+	const run = async (readInfo, mode, backendFloor) => {
+		const b = mod.makePodmanBackend({ image: "pi-job:x", readInfo, platform: "linux", euid: 1234, egid: 1234, fs: noFiles, home: "/home/op", env: {}, backendFloor, log: () => {}, spawnFn: podmanSpawn(mode) });
+		let reserved = 0;
+		const redis = { incr: async () => (reserved++, 1), decr: async () => 0, expire: async () => {}, get: async () => null };
+		const deps = {
+			redis, caps: { day: 10, week: null, month: null }, softHoldPct: null, blessedBackends: ["local", "podman"],
+			mintToken: async () => "tok", isDefaultBranchProtected: async () => true, prepareWorkspace: async () => ({ workspaceDir: "/w", jobDir: "/j" }),
+			runContainer: async () => { throw new Error("the container ran"); }, collectChain: async () => ({}), cleanup: async () => {}, comment: async () => {}, log: () => {},
+			observationPreflight: b.observationPreflight, jobUserPreflight: b.jobUserPreflight, imagePreflight: b.imagePreflight, egressPreflight: b.egressPreflight, now: new Date("2026-07-16T10:00:00Z"),
+		};
+		try {
+			const res = await runJob({ kind: "local", backend: "podman", provider: "anthropic", model: "m", maxTurns: 5 }, deps);
+			return { reason: res.reason, reserved };
+		} catch (error) {
+			return { threw: error instanceof InfraRetry ? "retry" : error.message, reserved };
+		}
+	};
+	const notFound = async () => ({ answered: false, reason: "podman-not-found", transient: false });
+	const floor = { mountSet: ENFORCED, credentialTransit: ENFORCED, isolation: ENFORCED };
+	for (const [label, readInfo, mode, backendFloor] of [
+		["no podman, floored", notFound, "no-podman", floor],
+		["no podman, no floor", notFound, "no-podman", {}],
+		["rootful, image absent from its store, floored", async () => answered({ rootless: false }), "absent", floor],
+		["rootful, image absent, no floor", async () => answered({ rootless: false }), "absent", {}],
+		["rootful, image present, floored", async () => answered({ rootless: false }), "present", floor],
+		["remote, image absent, floored", async () => answered({ serviceIsRemote: true }), "absent", floor],
+	]) assert.deepEqual(await run(readInfo, mode, backendFloor), { reason: "job-user-unmappable", reserved: 0 }, label);
+	// A usable identity still meets its floor first, and an undecided read is still retried, never refused.
+	assert.deepEqual(await run(async () => answered({ controllers: ["io"] }), "present", floor), { reason: "backend-floor-unobserved", reserved: 0 });
+	assert.deepEqual(await run(async () => ({ answered: false, reason: "timeout", transient: true }), "present", floor), { threw: "retry", reserved: 0 });
+	assert.deepEqual(await run(async () => answered(), "absent", {}), { reason: "job-image-missing", reserved: 0 }, "and a usable venue's missing image is the image's");
+});

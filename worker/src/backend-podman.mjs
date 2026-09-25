@@ -518,9 +518,13 @@ export function makePodmanBackend(opts = {}) {
 		const read = await info();
 		// The identity FIRST, from this same read, as at boot. A venue whose job user is refused (rootful, remote, no
 		// podman) fails the observations too, and judging them first told every job naming it to fix a mounts.conf or
-		// delegate controllers when the one fix is its identity's. Passed through as ok, so `jobUserPreflight` refuses it
-		// with that cause; an undecided read (`unknown`) is still judged here and is retried, never refused.
-		if (decidePodmanJobUser({ platform, euid, egid, read }).mode === "unmappable") return { ok: true, podman: read };
+		// delegate controllers when the one fix is its identity's. Handed back as `jobUserRefused`, which the processor
+		// acts on BEFORE its image preflight: that preflight asks the same Podman, so behind it a missing podman was
+		// retried forever and a rootful one without the image in its store was blamed on the image. No image can change
+		// an unmappable answer (`resolvePodmanImageUser` refuses it before reading any capability). An undecided read
+		// (`unknown`) is still judged here and is retried, never refused.
+		const decision = decidePodmanJobUser({ platform, euid, egid, read });
+		if (decision.mode === "unmappable") return { ok: true, podman: read, jobUserRefused: { refused: "job-user-unmappable", cause: decision.cause } };
 		const observed = observePodman({ read, fs, home, env, euid });
 		if (podmanObservationKey(observed) !== observedSaid) {
 			observedSaid = podmanObservationKey(observed);
