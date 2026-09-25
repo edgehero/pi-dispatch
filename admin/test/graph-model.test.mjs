@@ -332,6 +332,17 @@ test("findLoopHints reads iteration phrases from the BODY, never the frontmatter
   assert.deepEqual(findLoopHints(null), []);
 });
 
+test("a loop hint is trimmed by whole clusters: a Prepend keeps the space it joined (issue #422)", () => {
+  // U+0600 is a Prepend character: it joins the character AFTER it into one cluster, a space included. A
+  // code-unit trim took that space out of the cluster and left the Prepend bare at the end of the hint.
+  const prepend = String.fromCharCode(0x0600);
+  assert.deepEqual(findLoopHints(`x until 1${prepend} `), [{ hint: `until 1${prepend} ` }]);
+  assert.deepEqual(findLoopHints(`x until 1${prepend} y`), [{ hint: `until 1${prepend} y` }], "mid-hint it was always kept");
+  // Whitespace that is a cluster of its own still goes, at the end and in a run.
+  assert.deepEqual(findLoopHints("x until done   \n"), [{ hint: "until done" }]);
+  assert.deepEqual(findLoopHints("x repeat  now \t"), [{ hint: "repeat  now" }]);
+});
+
 test("triggerCosts is a node FACT: the mapped typed cost rides its trigger node, absence is null (issue #175)", () => {
   const withCosts = buildGraphModel({
     ...CANNED(),

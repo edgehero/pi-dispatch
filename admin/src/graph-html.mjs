@@ -853,6 +853,10 @@ function routeWire(w) {
     w.d = `M ${fmt(x1)} ${fmt(y1)} C ${fmt(x1 + LOOP_OFF)} ${fmt(y1)}, ${fmt(x1 + LOOP_OFF)} ${fmt(yb)}, ${fmt(x1)} ${fmt(yb)} L ${fmt(x2)} ${fmt(yb)} C ${fmt(x2 - LOOP_OFF)} ${fmt(yb)}, ${fmt(x2 - LOOP_OFF)} ${fmt(y2)}, ${fmt(x2)} ${fmt(y2)}`;
     w.labelX = f.x + f.w / 2;
     w.labelY = yb + 12;
+    // The label is centred under the chip and never had a box (issue #422): a long cron pattern ran past
+    // the chip on both sides. Its budget is the chip's width at 6px a column of the 10px label font, taken
+    // here because the chip is gone from the wire once routing ends; a common pattern is far inside it.
+    w.labelMax = Math.floor((f.w - 8) / 6);
     return;
   }
   if (w.back) {
@@ -1092,7 +1096,9 @@ function wireSvg(w, nowMs) {
     label = "mention";
     fill = w.edge.strong ? PAGE_ACCENT : WIRE_POTENTIAL;
   } else if (w.kind === "cron-rearm" && w.edge.label !== null) {
-    label = w.edge.label;
+    // Whole when it fits; otherwise cut a column short, because the cut appends its ellipsis past its budget.
+    const max = typeof w.labelMax === "number" ? w.labelMax : null;
+    label = max === null || drawnColumns(w.edge.label) <= max ? w.edge.label : clipColumns(w.edge.label, max - 1);
     fill = CHIP_FILL.cron;
   }
   if (label !== null) parts.push(`<text x="${fmt(w.labelX)}" y="${fmt(w.labelY)}" text-anchor="middle" font-size="10" fill="${fill}">${escapeHtml(label)}</text>`);
@@ -1185,6 +1191,127 @@ export function bannersHtml(norm) {
 // sit inside one), and with three hard rules the tests pin: no fetching of any kind, no markup
 // assembly on the client (textContent only), and the clock read spelled without the static
 // accessor this module's purity regex bans.
+/**
+ * The view-time label fit (issue #422). The static estimate above sizes every chip in COLUMNS, and a
+ * column cannot see a Tamil letter drawn at 18px, a cuneiform sign at 65px, a run of wide Latin
+ * letters, the 14px ellipsis after a narrow cut, or the titles that are never cut at all. The page
+ * can: this script measures each drawn label with the browser's own font and, where one runs past
+ * its box, shortens it on grapheme boundaries with a MEASURED ellipsis. Geometry never moves (the
+ * layout, the wires and the SVG bytes are the static builder's), a label only ever gets shorter, and
+ * a page with its script off is exactly the static page.
+ *
+ * The box is read from the markup, never from an attribute emitted for it (ASCII scenes stay byte-for-
+ * byte what they were): a rect sibling whose vertical band holds the baseline and which either holds
+ * the text's x (its right edge bounds the text) or starts after it (its left edge does), and the next
+ * left-anchored text on the same baseline. The nearest bound wins, 6px of padding is kept, and a text
+ * no bound reaches is left alone. Centred texts are skipped: they are glyphs, counts and wire labels,
+ * and the one of those that can run long, the cron re-arm pattern, is cut by the builder.
+ *
+ * A text that is cut gains a title holding its full text, unless it already has one or its group
+ * shows a tooltip of its own; the full text is kept on the element, so a second pass (fonts arriving
+ * late) starts again from it. Written for any engine the page targets: no template strings, no
+ * block-scoped declarations, and none of the words the page-level pins ban.
+ */
+export const FIT_JS = `
+function fitLabels(doc, measure) {
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var ELLIPSIS = String.fromCharCode(0x2026);
+  var PAD = 6;
+  var graphemes = typeof Intl === "object" && typeof Intl.Segmenter === "function"
+    ? new Intl.Segmenter(void 0, { granularity: "grapheme" }) : null;
+  function num(el, name) {
+    var v = parseFloat(el.getAttribute(name));
+    return v === v ? v : 0;
+  }
+  function leftAnchored(el) {
+    var a = el.getAttribute("text-anchor");
+    return a === null || a === "" || a === "start";
+  }
+  function hasClass(el, name) {
+    var c = el && el.getAttribute ? el.getAttribute("class") : null;
+    return typeof c === "string" && (" " + c + " ").indexOf(" " + name + " ") >= 0;
+  }
+  function boxRight(t) {
+    var p = t.parentNode;
+    if (!p || !p.children) return null;
+    var tx = num(t, "x");
+    var ty = num(t, "y");
+    var bound = null;
+    for (var i = 0; i < p.children.length; i++) {
+      var k = p.children[i];
+      var edge = null;
+      if (k.localName === "rect") {
+        var ry = num(k, "y");
+        if (ty < ry || ty > ry + num(k, "height")) continue;
+        var rx = num(k, "x");
+        var rw = num(k, "width");
+        if (rx <= tx && tx < rx + rw) edge = rx + rw;
+        else if (tx < rx) edge = rx;
+      } else if (k !== t && k.localName === "text" && leftAnchored(k) && num(k, "y") === ty && num(k, "x") > tx) {
+        edge = num(k, "x");
+      }
+      if (edge !== null && (bound === null || edge < bound)) bound = edge;
+    }
+    return bound;
+  }
+  function clusters(s) {
+    var out = [];
+    if (graphemes !== null) {
+      var it = graphemes.segment(s)[Symbol.iterator]();
+      for (var r = it.next(); !r.done; r = it.next()) out.push(r.value.segment);
+      return out;
+    }
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      var n = i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
+      if (c >= 0xd800 && c <= 0xdbff && n >= 0xdc00 && n <= 0xdfff) { out.push(s.slice(i, i + 2)); i++; }
+      else out.push(s.charAt(i));
+    }
+    return out;
+  }
+  function titleOf(t) {
+    for (var i = 0; i < t.children.length; i++) if (t.children[i].localName === "title") return t.children[i];
+    return null;
+  }
+  function fit(t) {
+    var node = t.firstChild;
+    if (!node || node.nodeType !== 3 || !leftAnchored(t)) return;
+    var right = boxRight(t);
+    if (right === null) return;
+    var avail = right - num(t, "x") - PAD;
+    if (!(avail > 0)) return;
+    var full = typeof t.fitFull === "string" ? t.fitFull : node.nodeValue;
+    node.nodeValue = full;
+    if (!(measure(t) > avail)) return;
+    t.fitFull = full;
+    var base = full.charAt(full.length - 1) === ELLIPSIS ? full.slice(0, -1) : full;
+    var parts = clusters(base);
+    var n = parts.length;
+    while (n > 0) {
+      n--;
+      while (n > 0 && /^\\s+$/.test(parts[n - 1])) n--;
+      node.nodeValue = parts.slice(0, n).join("") + ELLIPSIS;
+      if (measure(t) <= avail) break;
+    }
+    var p = t.parentNode;
+    if (titleOf(t) === null && !hasClass(p, "gnode") && !(p.getAttribute && p.getAttribute("data-tip") !== null)) {
+      var title = doc.createElementNS(SVG_NS, "title");
+      title.textContent = full;
+      t.appendChild(title);
+    }
+  }
+  var texts = doc.getElementsByTagName("text");
+  for (var i = 0; i < texts.length; i++) fit(texts[i]);
+}
+if (typeof document === "object" && document !== null && document.getElementsByTagName) {
+  (function () {
+    function run() { fitLabels(document, function (t) { return t.getComputedTextLength(); }); }
+    run();
+    if (document.fonts && document.fonts.ready && typeof document.fonts.ready.then === "function") document.fonts.ready.then(run);
+  })();
+}
+`;
+
 export const PAGE_JS = `
 (function () {
   "use strict";

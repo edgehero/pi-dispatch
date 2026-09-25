@@ -788,6 +788,21 @@ export function cutUnits(s, n) {
   return out;
 }
 
+/**
+ * `s` without the whitespace-only grapheme clusters at either end (issue #422). `.trim()` counts code units, so
+ * the space a Prepend character (U+0600) had joined into its own cluster was cut out of that cluster, leaving
+ * the Prepend bare at the end of a loop hint. Here a cluster is dropped whole or kept whole.
+ */
+export function trimClusters(s) {
+  const parts = [];
+  for (const { segment } of GRAPHEMES.segment(String(s))) parts.push(segment);
+  let start = 0;
+  let end = parts.length;
+  while (start < end && /^\s+$/u.test(parts[start])) start++;
+  while (end > start && /^\s+$/u.test(parts[end - 1])) end--;
+  return parts.slice(start, end).join("");
+}
+
 /** `clip` to `w`, then right-pad with spaces to exactly `w` COLUMNS (issue #401: not `.length`). */
 export function pad(line, w) {
   const width = Math.max(0, Math.trunc(w) || 0);

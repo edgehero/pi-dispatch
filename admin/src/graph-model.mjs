@@ -11,7 +11,7 @@ import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 // Pure-to-pure: `panel.mjs` is the admin's no-I/O module and owns the one answer to "how do you cut a
 // string without leaving half a character behind" (issue #401), and a character is a whole cluster
 // (issue #418), not only a whole surrogate pair.
-import { cutUnits } from "./panel.mjs";
+import { cutUnits, trimClusters } from "./panel.mjs";
 
 // One frontmatter value line: `key: value`, an optional surrounding double quote, single-line only.
 // The same block-isolation discipline as flow-gate.mjs's aiTriggerAllows, and deliberately NOT a YAML
@@ -127,14 +127,15 @@ export function findLoopHints(text) {
     // `[^.\n]{0,60}` counts code units, so a hint can end inside a character: on half a surrogate pair,
     // which the page carried into the embedded JSON as the escaped text of one, or inside a flag or a
     // family (issue #418). So the match is re-cut at the last cluster boundary, asking the text that
-    // follows it where its last cluster ends, and trimmed after that, or a cut after a space kept it.
+    // follows it where its last cluster ends, and trimmed after that, or a cut after a space kept it. The trim
+    // drops whole clusters (issue #422): a code-unit trim took the space out of a Prepend's cluster.
     // A repeat is skipped before it is cut: a body of thousands of identical phrases paid a segmenter
     // pass for each one only to throw it away.
     const raw = match[0].trim().toLowerCase();
     if (seen.has(raw)) continue;
     seen.add(raw);
     const tail = body.slice(match.index, match.index + match[0].length + 32);
-    const hint = cutUnits(tail, match[0].length).trim();
+    const hint = trimClusters(cutUnits(tail, match[0].length));
     const key = hint.toLowerCase();
     if (seen.has(key) && key !== raw) continue;
     seen.add(key);

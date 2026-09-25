@@ -8,6 +8,7 @@
  *
  * Dependency posture: exactly two imports, both pure. graph-html.mjs is the scene/escaping/theme
  * source of truth (buildGraphScene lays out the topology; PAGE_JS owns pan/zoom/tooltip/selection;
+ * FIT_JS shortens, at view time, a drawn label the static estimate let run past its box, issue #422;
  * PAGE_THEME is the palette; `clip`, `clipColumns` and `drawnColumns` are the one answer to how a
  * string is cut and sized on these pages, issue #418), and panel.mjs is THE money renderer -- fmtCost/fmtUsd are the only
  * functions allowed to turn a dollar into text, because the typed-cost class system is what keeps an
@@ -21,7 +22,7 @@
  * and the posture test bans that whole reference syntax as a substring.
  */
 
-import { buildGraphScene, clip, clipColumns, drawnColumns, escapeHtml, embedJson, fmt, PAGE_JS, legendHtml, bannersHtml, PAGE_THEME } from "./graph-html.mjs";
+import { buildGraphScene, clip, clipColumns, drawnColumns, escapeHtml, embedJson, fmt, FIT_JS, PAGE_JS, legendHtml, bannersHtml, PAGE_THEME } from "./graph-html.mjs";
 import { fmtCost, fmtUsd } from "./panel.mjs";
 
 // Must equal costs.mjs's COST_CLASSES; the parity test compares the two literals. Duplicated rather
@@ -1236,7 +1237,7 @@ export function buildInsightsHtml(payload, { now, fullPaths } = {}) {
     `<style>${INSIGHTS_CSS}</style>`,
     "<body>",
     ...bodyParts,
-    `<script>\n"use strict";\nvar GENERATED_AT = ${fmt(scene.nowMs)};\nvar GRAPH = ${embedJson(scene.graphData)};\nvar INSIGHTS = ${embedJson({ tips })};\n${PAGE_JS}${INSIGHTS_JS}</script>`,
+    `<script>\n"use strict";\nvar GENERATED_AT = ${fmt(scene.nowMs)};\nvar GRAPH = ${embedJson(scene.graphData)};\nvar INSIGHTS = ${embedJson({ tips })};\n${FIT_JS}${PAGE_JS}${INSIGHTS_JS}</script>`,
     "</body>",
   ].join("\n");
 }

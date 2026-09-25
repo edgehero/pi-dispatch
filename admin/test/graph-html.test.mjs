@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildGraphScene, clip, clipColumns, GRAPH_HTML_KINDS, GLYPH, labelColumns, PAGE_JS } from "../src/graph-html.mjs";
+import { buildGraphScene, clip, clipColumns, FIT_JS, GRAPH_HTML_KINDS, GLYPH, labelColumns, PAGE_JS } from "../src/graph-html.mjs";
 import { columnsOf } from "../src/panel.mjs";
 import { buildInsightsHtml } from "../src/insights-html.mjs";
 import { buildGraphModel, findLoopHints, GRAPH_EDGE_KINDS, GRAPH_NODE_KINDS, parseSkillMeta } from "../src/graph-model.mjs";
@@ -743,7 +743,9 @@ test("the width a chip is sized by, the HEAD it names and the frontmatter it quo
 
 test("narrow punctuation costs what it did, and a flow name's half pair is not quoted into a tooltip (#418)", () => {
   // A curly quote or a thin space is one column, as its code unit was: counting it as two cut labels a
-  // code-unit count had left whole, and a few that fitted on the old page overflowed.
+  // code-unit count had left whole, and a few that fitted on the old page overflowed. The nine M's still
+  // draw wider than nine columns; the static estimate lets them through and the page's own fit, which
+  // measures, is what shortens them (issue #422, pinned below).
   assert.equal(clipColumns("MMMMMMMMM\u2019\u2019\u2019", 14), "MMMMMMMMM\u2019\u2019\u2019");
   assert.equal(clipColumns("AAAAAAAAAAAAAAAAAAA\u2019", 20), "AAAAAAAAAAAAAAAAAAA\u2019");
   assert.equal(labelColumns("\u2018\u201c\u2013\u2022\u2009\u202f\u2026"), 7);
@@ -755,4 +757,188 @@ test("narrow punctuation costs what it did, and a flow name's half pair is not q
   const page = pageOf(model);
   assert.doesNotMatch(page, /\\\\ud[89ab][0-9a-f]{2}/i, "no escaped half pair in the tooltip text");
   assert.doesNotMatch(page, /\\ud[89ab][0-9a-f]{2}(?!\\ud[c-f])/i, "nor in the embedded JSON");
+});
+
+// ---- the view-time label fit (issue #422) ----
+
+// A DOM just large enough for FIT_JS: element children apart from text nodes, attributes read as strings, a
+// textContent that includes a title child the way the browser's does, and getElementsByTagName in document order.
+// The code points are spelled as numbers so the file stays ASCII where the width table needs them.
+const cps = (...points) => String.fromCodePoint(...points);
+const ELLIPSIS = cps(0x2026);
+
+function textNode(value) {
+  return { nodeType: 3, nodeValue: value };
+}
+
+function el(localName, attrs = {}, ...kids) {
+  const node = {
+    nodeType: 1,
+    localName,
+    attrs: { ...attrs },
+    childNodes: [],
+    parentNode: null,
+    get children() { return this.childNodes.filter((c) => c.nodeType === 1); },
+    get firstChild() { return this.childNodes[0] ?? null; },
+    getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attrs, name) ? String(this.attrs[name]) : null; },
+    appendChild(child) { child.parentNode = this; this.childNodes.push(child); return child; },
+    get textContent() { return this.childNodes.map((c) => (c.nodeType === 3 ? c.nodeValue : c.textContent)).join(""); },
+    set textContent(value) { this.childNodes = [textNode(value)]; },
+  };
+  for (const kid of kids) node.appendChild(typeof kid === "string" ? textNode(kid) : kid);
+  return node;
+}
+
+function docOf(...roots) {
+  const top = el("svg", {}, ...roots);
+  const walk = (node, tag, out) => {
+    for (const c of node.children) {
+      if (c.localName === tag) out.push(c);
+      walk(c, tag, out);
+    }
+    return out;
+  };
+  return {
+    getElementsByTagName: (tag) => walk(top, tag, []),
+    createElementNS: (ns, name) => Object.assign(el(name), { ns }),
+  };
+}
+
+// Widths per code point: ASCII 6, M 12, the ellipsis 14 (what Chrome draws at 14px), a Malayalam letter 18,
+// a cuneiform sign 65, anything else 14. Half a surrogate pair measures nothing, so a cut through a pair would
+// always fit and could not hide behind the width of the half it left.
+const WIDTHS = new Map([[0x4d, 12], [0x2026, 14], [0x0d15, 18], [0x1242b, 65]]);
+const widthOf = (s, scale = 1) => [...s].reduce((sum, ch) => {
+  const cp = ch.codePointAt(0);
+  if (cp >= 0xd800 && cp <= 0xdfff) return sum;
+  return sum + scale * (WIDTHS.get(cp) ?? (cp < 0x80 ? 6 : 14));
+}, 0);
+const measureBy = (scale = 1) => (t) => widthOf(t.firstChild.nodeValue, scale);
+
+const fitLabels = new Function(`${FIT_JS}\nreturn fitLabels;`)();
+const noSegmenterFit = new Function("Intl", `${FIT_JS}\nreturn fitLabels;`)({});
+
+// A trigger chip as nodeSvg draws it: the chip rect (no x), the glyph (centred, never fitted), the label at 38,
+// the output port straddling the right edge.
+function chip(label, w = 160) {
+  return el("g", { class: "gnode" },
+    el("rect", { width: w, height: 30 }),
+    el("text", { x: 15, y: 20, "text-anchor": "middle" }, "G"),
+    el("text", { x: 38, y: 20 }, label),
+    el("rect", { x: w - 5, y: 10, width: 10, height: 10 }));
+}
+
+test("the page fits a label to its box by measuring it, and leaves one that fits alone (#422)", () => {
+  // The chip's text box ends at the port (155), 6px of padding before it: 111px for the label.
+  const wide = chip("MMMMMMMMMMMMMM");
+  const fits = chip("build-report-a" + ELLIPSIS);
+  const doc = docOf(wide, fits);
+  fitLabels(doc, measureBy());
+  const label = (c) => c.children[2];
+  assert.equal(label(wide).firstChild.nodeValue, "MMMMMMMM" + ELLIPSIS, "eight M's and a measured ellipsis, 110px of 111");
+  assert.equal(label(fits).firstChild.nodeValue, "build-report-a" + ELLIPSIS, "98px fits: the builder's cut is kept");
+  assert.equal(label(fits).children.length, 0, "and nothing is added to it");
+  assert.equal(label(wide).children.length, 0, "a chip shows its own tooltip, so no title is added");
+  // A cut that lands just after a space does not end the label on it.
+  const spaced = chip("abcdefghijklmno pqrstuvwxyz");
+  fitLabels(docOf(spaced), measureBy());
+  assert.equal(label(spaced).firstChild.nodeValue, "abcdefghijklmno" + ELLIPSIS);
+  // The glyph is centred and is never measured, whatever its width.
+  assert.equal(wide.children[1].firstChild.nodeValue, "G");
+});
+
+test("the ellipsis is measured, not budgeted: a Malayalam label and a cuneiform one (#422)", () => {
+  const malayalam = chip(cps(0x0d15).repeat(10));
+  const cuneiform = chip(cps(0x1242b).repeat(3));
+  const lone = chip(cps(0x1242b).repeat(3), 100);
+  fitLabels(docOf(malayalam, cuneiform, lone), measureBy());
+  // 111px: five letters at 18 and the 14px ellipsis is 104; six would be 122.
+  assert.equal(malayalam.children[2].firstChild.nodeValue, cps(0x0d15).repeat(5) + ELLIPSIS);
+  assert.equal(cuneiform.children[2].firstChild.nodeValue, cps(0x1242b) + ELLIPSIS, "65 + 14 fits, 130 + 14 does not");
+  // A box too small for a single sign keeps the ellipsis alone rather than running out of the chip.
+  assert.equal(lone.children[2].firstChild.nodeValue, ELLIPSIS);
+});
+
+test("a cut keeps whole clusters, with the segmenter and without it (#422)", () => {
+  const flags = cps(0x1f1ef, 0x1f1f5).repeat(8);
+  const family = cps(0x1f469, 0x200d, 0x1f469, 0x200d, 0x1f467).repeat(4);
+  const rockets = cps(0x1f680).repeat(10);
+  const cases = [chip(flags), chip(family), chip(rockets)];
+  fitLabels(docOf(...cases), measureBy());
+  const [f, fam] = cases.map((c) => c.children[2].firstChild.nodeValue);
+  assert.match(f, new RegExp(`^(?:${cps(0x1f1ef, 0x1f1f5)})+${ELLIPSIS}$`, "u"), "flags are dropped whole, never half a pair of indicators");
+  assert.match(fam, new RegExp(`^(?:${cps(0x1f469, 0x200d, 0x1f469, 0x200d, 0x1f467)})+${ELLIPSIS}$`, "u"), "a family is dropped whole");
+  // Without Intl.Segmenter the cut falls back to code points, which still never splits a surrogate pair.
+  const bare = chip(rockets);
+  noSegmenterFit(docOf(bare), measureBy());
+  assert.equal(bare.children[2].firstChild.nodeValue, cps(0x1f680).repeat(6) + ELLIPSIS, "six rockets at 14 and the ellipsis: 98px");
+});
+
+test("a title that is never cut in the builder is cut here and gains a title of its full text (#422)", () => {
+  const full = "/srv/a-very-long-deployment-folder-name-that-runs-on";
+  const group = el("g", { class: "ggroup" }, el("rect", { x: 0, y: 0, width: 200, height: 100 }), el("text", { x: 8, y: 18 }, full));
+  const doc = docOf(group);
+  fitLabels(doc, measureBy());
+  const text = group.children[1];
+  // 200 - 8 - 6 = 186px: 28 ASCII characters and the ellipsis.
+  assert.equal(text.firstChild.nodeValue, full.slice(0, 28) + ELLIPSIS);
+  assert.equal(text.children.length, 1, "one title");
+  assert.equal(text.children[0].localName, "title");
+  assert.equal(text.children[0].ns, "http://www.w3.org/2000/svg");
+  assert.equal(text.children[0].textContent, full);
+  // A second pass (the fonts arriving) starts again from the full text: nothing doubled, one title kept.
+  fitLabels(doc, measureBy(1.25));
+  assert.equal(text.firstChild.nodeValue, full.slice(0, 22) + ELLIPSIS, "recut from the full text at the new measure");
+  assert.equal(text.children.length, 1, "still exactly one title");
+  assert.equal(text.textContent, full.slice(0, 22) + ELLIPSIS + full, "the drawn text and the title, nothing else");
+  // And back: a measure under which the full text fits restores it.
+  fitLabels(doc, measureBy(0.5));
+  assert.equal(text.firstChild.nodeValue, full);
+});
+
+test("a breakdown row: the label stops at the bar, a value after it is never cut, a row without a bar stops at its value (#422)", () => {
+  const label = "a-long-flow-name-that-runs-into-the-bar-column";
+  const row = el("g", { "data-tip": "0" },
+    el("text", { x: 0, y: 14 }, label),
+    el("rect", { x: 150, y: 5, width: 50, height: 11 }),
+    el("text", { x: 206, y: 14 }, "$1.25"));
+  const bare = el("g", { "data-tip": "1" },
+    el("text", { x: 0, y: 36 }, label),
+    el("text", { x: 150, y: 36 }, "$0 (unrated)"));
+  const hidden = el("g", { class: "ggroup" }, el("rect", { width: 100, height: 40 }), el("text", { x: 8, y: 18 }, label));
+  fitLabels(docOf(row, bare, hidden), (t) => (t === hidden.children[1] ? 0 : widthOf(t.firstChild.nodeValue)));
+  // 150 - 0 - 6 = 144px: 21 characters and the ellipsis (140px; 22 would be 146).
+  assert.equal(row.children[0].firstChild.nodeValue, label.slice(0, 21) + ELLIPSIS);
+  assert.equal(row.children[2].firstChild.nodeValue, "$1.25", "a value drawn after its bar has no box to be cut to");
+  assert.equal(bare.children[0].firstChild.nodeValue, label.slice(0, 21) + ELLIPSIS, "the next label on the line bounds it");
+  assert.equal(row.children[0].children.length, 0, "a row that shows its own tooltip gets no title");
+  assert.equal(hidden.children[1].firstChild.nodeValue, label, "a text measured at 0 is hidden, and is left alone");
+});
+
+test("FIT_JS runs before the page script and holds none of the words the page pins ban (#422)", () => {
+  for (const word of ["import", "NaN", "undefined", "Infinity", "innerHTML", "fetch", "src=", "url(", "<script", "<svg", "<g", "`", "${"]) {
+    assert.ok(!FIT_JS.includes(word), `FIT_JS does not contain ${JSON.stringify(word)}`);
+  }
+  const page = pageOf(buildGraphModel(CANNED()));
+  const at = page.indexOf(FIT_JS);
+  assert.ok(at > 0, "the page carries the fit verbatim");
+  assert.ok(at < page.indexOf(PAGE_JS), "ahead of the page script, in the one script element");
+});
+
+test("a long cron pattern under its chip is cut to the chip's width, a common one is not (#422)", () => {
+  const withPattern = (pattern) => {
+    const base = CANNED();
+    const triggers = base.triggers.triggers.map((t, i) => (i === 0 ? { ...t, pattern } : t));
+    const schedulers = base.schedulers.map((s) => ({ ...s, pattern }));
+    return pageOf(buildGraphModel({ ...base, triggers: { triggers }, schedulers }));
+  };
+  const common = withPattern("*/5 * * * *");
+  assert.ok(common.includes(">*/5 * * * *</text>"), "a common pattern is drawn whole");
+  const long = "0 0,5,10,15,20,25,30,35,40,45,50,55 * * *";
+  const page = withPattern(long);
+  assert.ok(!page.includes(`>${long}</text>`), "a pattern wider than its chip is not drawn whole");
+  const drawn = /text-anchor="middle" font-size="10" fill="[^"]+">([^<]*\u2026)<\/text>/u.exec(page);
+  assert.ok(drawn, "it is drawn cut, with an ellipsis");
+  assert.ok(long.startsWith(drawn[1].slice(0, -1)), "the start of the pattern");
+  assert.equal(drawn[1], long.slice(0, 24) + "\u2026", "within the 160px chip's 25 columns, its ellipsis included");
 });
