@@ -46,11 +46,24 @@ anywhere, but the declaration lands here.
   egressPreflight,  // free: is the egress policy serviceable here?
   stopContainer,    // stop a running job by name (the 30-minute timeout, and shutdown)
   reap,             // boot sweep: clear strays, and say whether you ENUMERATED
+
+  // OPTIONAL. Leave either out and your venue gets the answer every non-local venue has always had.
+  observationPreflight,   // free: does this host still show what your `observedBy` words need?
+  jobUserPreflight,       // free: which uid this job's container runs as
 }
 ```
 
 `worker/src/backend-local.mjs` is the worked example, though note that `makeLocalBackend` is a factory for
 *that* backend: it takes the five functions and sets the rest itself. Your adapter builds the whole object.
+`local`'s two optional preflights are added beside that factory in `start.mjs`, because they read this host's
+docker CLI and the job-user decision built there.
+
+The two optional members are optional for a reason: an adapter written against the five functions keeps
+working, unchanged. Absent, `observationPreflight` admits every job and `jobUserPreflight` runs the image's own
+`USER`. The one exception is a venue whose table entry names an `observedBy`: its words hold only while
+something is observed, so the worker refuses to boot with that venue registered and no `observationPreflight`
+to observe it. A venue that carries one is dispatched to it per job, through the registry, exactly like the
+five required functions.
 
 ### What each function must return
 
@@ -65,6 +78,8 @@ worse.
 | `stopContainer` | `(name, job)` | anything. It is not awaited for its value: the abort's effect arrives through the container's own exit. |
 | `reap` | nothing | `{ reaped: true }` only if you ENUMERATED. See below. |
 | `containerName` | the job id | the name `stopContainer` will be given |
+| `observationPreflight` (optional) | the job | `{ ok: true }` to admit, `{ refused: true, message, observations }` when a floor needs an observation this host does not show (`message` goes to the operator's log only; `observations` names which, from the closed list), `{ unavailable: true, reason }` when it could not be read yet (retried). Anything carried beside `ok` is handed to `jobUserPreflight` as `observed`. |
+| `jobUserPreflight` (optional) | `(job, { capabilities, observed })` | `{ user, home }` (`user` null means the image's own `USER`), `{ refused: "job-user-unmappable", cause }` or `{ refused: "job-image-any-uid-unsupported" }` to refuse, `{ unavailable: true, reason }` to retry. |
 
 ## What a backend declares
 
@@ -267,8 +282,8 @@ The harness cannot detect that. A green run is not a conformant backend.
 
 ## Registering it
 
-Pass your bundle to `startWorker` as an extra backend. It is registered after `local`, and its own `reap`
-joins the boot sweep automatically. Its first argument is the environment, and the backends ride the second:
+Pass your bundle to `startWorker` as an extra backend. It is registered after `local` (which is built only
+while `PI_BACKENDS` blesses it), and its own `reap` joins the boot sweep automatically. Its first argument is the environment, and the backends ride the second:
 
 ```js
 import { startWorker } from "./worker/src/start.mjs"; // from a checkout of this repository
@@ -302,7 +317,7 @@ which is the thing the paragraph above refuses on purpose. Nobody has asked for 
 
 ```js
 makeBackendRegistry({
-  bundles: [localBackend, ...extraBackends],
+  bundles: [localBackend, ...extraBackends],   // localBackend only while PI_BACKENDS blesses it
   defaultName: config.defaultBackend,
   blessed: config.backends,   // refuses a name PI_BACKENDS blesses but nothing builds
   reaps: backendReaps,        // refuses a venue with no boot reaper
@@ -313,7 +328,17 @@ Both cross-checks fire at boot rather than at the first pickup, so a venue you b
 or registered without a reaper, is a startup error rather than a job that fails hours later.
 
 Then an operator blesses it with `PI_BACKENDS=local,mine` (which requires the table entry from step 1) and
-a trigger selects it with `run.backend`.
+a trigger selects it with `run.backend`. `local` is not required: `PI_BACKENDS=mine` alone is a deployment whose
+every unflagged trigger runs on `mine`. Such a worker asks this host's docker CLI nothing at boot: not which
+endpoint it resolves, not its daemon's facts, not its image, and neither the container reaper nor the sandbox
+sweep runs against it. Two things follow that are worth knowing before you do it:
+
+- **The boot sweep of this host's scope claims does not run** without `local`. That sweep frees a claim only once
+  the host is proven to hold no job containers, and a host that dropped `local` may still hold Docker ones from
+  before, which no other venue's reaper lists. A stale claim then waits out its TTL instead.
+- **Retained sandbox directories are not swept** without `local`, because the sweep first asks the docker CLI
+  which sandboxes are open, and deleting a directory under an open shell is the mistake it exists to avoid. The
+  worker logs `sandbox_reaper_skipped` naming why, at boot and on every periodic sweep.
 
 ## What is deliberately not yours to decide
 

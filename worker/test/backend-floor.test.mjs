@@ -237,18 +237,24 @@ test("a floor naming a switched-off control REFUSES BOOT, and doctor says which 
 	assert.match(await doctorText({ PI_EGRESS: "0", PI_BACKEND_FLOOR: "egress=enforced" }), /✗ PI_BACKEND_FLOOR asks for egress=enforced, which PI_EGRESS has switched off/);
 });
 
-test("PI_BACKENDS always includes the backend an unflagged trigger runs on", () => {
-	// A trigger that names no venue runs on `backends[0]`, and the processor refuses a job whose named
-	// backend is not in this list -- so a set that dropped the default would refuse every unflagged trigger
-	// on a deployment that never asked for that. The refusal cannot be reached through the parser while
-	// `local` is the only name (an unknown name is rejected first), so what is pinned here is the INVARIANT
-	// it protects, which stays meaningful when a second backend arrives.
-	for (const raw of [undefined, "", "   ", "local", " local , local "]) {
-		assert.ok(parseBackendList(raw).includes(DEFAULT_BACKEND), `${JSON.stringify(raw)} must still include ${DEFAULT_BACKEND}`);
-	}
-	// And the guard is present rather than merely intended, so removing it fails here rather than silently.
+test("PI_BACKENDS need not include local, and its FIRST entry is the default (#354)", () => {
+	// MOVED DELIBERATELY. This test used to pin the guard that refused a set without `local`, on the reasoning that
+	// an unflagged trigger is dispatched to the default. It is dispatched to `backends[0]`, whatever that names, and
+	// the registry refuses at boot a default it does not hold; the operator decided `PI_BACKENDS=podman` alone is a
+	// deployment. `known` stands in for a table with a second entry, which this build does not have yet.
+	const known = ["local", "podman"];
+	assert.deepEqual(parseBackendList("podman", { known }), ["podman"], "a set without local parses");
+	assert.deepEqual(parseBackendList(" podman , local , podman ", { known }), ["podman", "local"], "deduped, order kept, so the default is the first named");
+	assert.deepEqual(parseBackendList("local,podman", { known }), ["local", "podman"]);
+	// Unset is still `[local]`: an operator who never heard of the variable keeps what they had.
+	for (const raw of [undefined, "", "   "]) assert.deepEqual(parseBackendList(raw, { known }), [DEFAULT_BACKEND]);
+	// The seam narrows what is known, never widens the refusal away: an unknown name is still refused, by name.
+	assert.throws(() => parseBackendList("vapour", { known }), /unknown backend "vapour" \(known: local, podman\)/);
+	// And without the seam, the real table: `local` is its only entry, so a set without it cannot be written yet.
+	assert.throws(() => parseBackendList("podman"), /unknown backend "podman"/);
+	// The guard is GONE rather than merely unreachable, so reinstating it fails here rather than silently.
 	const src = readFileSync(new URL("../src/backends.mjs", import.meta.url), "utf8");
-	assert.match(src, /PI_BACKENDS must include .*: a trigger that names no backend is dispatched there/);
+	assert.doesNotMatch(src, /PI_BACKENDS must include/);
 });
 
 test("arming egress on the real deployment still boots", () => {

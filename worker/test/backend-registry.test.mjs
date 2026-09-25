@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BACKEND_NOT_REGISTERED, makeBackendRegistry, reapAll, resolveBackendName } from "../src/backend-registry.mjs";
+import { BACKEND_NOT_REGISTERED, OPTIONAL_PREFLIGHT_DEFAULTS, makeBackendRegistry, reapAll, resolveBackendName } from "../src/backend-registry.mjs";
 import { containerSpec, copyDowngrades, transfersFromSpec } from "../src/container-spec.mjs";
 
 const bundle = (name, calls = []) => ({
@@ -292,4 +292,53 @@ test("neverStartedExits and containerName are ON the registry, not reached for a
 	assert.deepEqual(reg.neverStartedExits({ id: "j" }), [125], "the default venue answers for an unflagged job");
 	assert.equal(reg.containerName({ id: "j", backend: "far" }), "far-j");
 	assert.equal(reg.containerName({ id: "j" }), "pi-job-j");
+});
+
+test("the two OPTIONAL preflights: absent gives the non-local answers, present is dispatched per venue (#354)", async () => {
+	// Optional so an adapter written against the five-function contract keeps working unchanged. Absent is not a guess:
+	// it is exactly what every venue but `local` got while both were `start.mjs` closures.
+	const asked = [];
+	const mine = {
+		...bundle("mine"),
+		observationPreflight: async (job) => (asked.push(["obs", job.id]), { refused: true, message: "m", observations: [] }),
+		jobUserPreflight: async (job, opts) => (asked.push(["user", job.id, opts?.capabilities]), { user: "7:7", home: "/h" }),
+	};
+	const reg = makeBackendRegistry({ bundles: [bundle("plain"), mine], defaultName: "plain" });
+	assert.deepEqual(await reg.observationPreflight({ id: "a" }), { ok: true }, "a venue with none admits");
+	assert.deepEqual(await reg.jobUserPreflight({ id: "a" }, { capabilities: [] }), { user: null, home: null }, "and runs the image's own USER");
+	assert.deepEqual(await reg.observationPreflight({ id: "b", backend: "mine" }), { refused: true, message: "m", observations: [] });
+	assert.deepEqual(await reg.jobUserPreflight({ id: "b", backend: "mine" }, { capabilities: ["anyUid"] }), { user: "7:7", home: "/h" });
+	assert.deepEqual(asked, [["obs", "b"], ["user", "b", ["anyUid"]]], "the job and its options reach the venue's own member");
+	// The defaults are the processor's own, so an omitted registry and an omitted member agree.
+	assert.deepEqual(OPTIONAL_PREFLIGHT_DEFAULTS.observationPreflight(), { ok: true });
+	assert.deepEqual(OPTIONAL_PREFLIGHT_DEFAULTS.jobUserPreflight(), { user: null, home: null });
+	// A fresh object each call: a caller that decorates the answer must not decorate every later venue's.
+	assert.notEqual(OPTIONAL_PREFLIGHT_DEFAULTS.jobUserPreflight(), OPTIONAL_PREFLIGHT_DEFAULTS.jobUserPreflight());
+	// An unregistered name is still the registry's refusal, never waved through by the absent answer.
+	assert.throws(() => reg.observationPreflight({ backend: "nope" }), (err) => err.code === BACKEND_NOT_REGISTERED);
+	assert.throws(() => reg.jobUserPreflight({ backend: "nope" }), (err) => err.code === BACKEND_NOT_REGISTERED);
+});
+
+test("an optional preflight that is present but not callable is refused at BOOT (#354)", () => {
+	for (const fn of ["observationPreflight", "jobUserPreflight"]) {
+		for (const bad of [true, "yes", {}, null]) {
+			assert.throws(
+				() => makeBackendRegistry({ bundles: [{ ...bundle("local"), [fn]: bad }], defaultName: "local" }),
+				new RegExp(`"local" has a ${fn} that is not a function`),
+				`${fn}: ${JSON.stringify(bad)}`,
+			);
+		}
+	}
+	// Absent is fine, which is the whole point of optional.
+	assert.doesNotThrow(() => makeBackendRegistry({ bundles: [bundle("local")], defaultName: "local" }));
+});
+
+test("a registry of ONLY a non-local venue builds and dispatches (#354)", async () => {
+	// `local` is no longer mandatory: nothing in the registry names it.
+	const calls = [];
+	const reg = makeBackendRegistry({ bundles: [bundle("podman", calls)], defaultName: "podman", blessed: ["podman"], reaps: { podman: async () => ({ reaped: true }) } });
+	await reg.imagePreflight({ id: "j" });
+	assert.deepEqual(calls.map((c) => c[0]), ["podman"]);
+	assert.deepEqual(await reg.observationPreflight({ id: "j" }), { ok: true });
+	assert.equal(reg.reaps.length, 1);
 });

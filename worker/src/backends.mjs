@@ -506,7 +506,13 @@ export const BACKENDS = Object.freeze(
 
 export const BACKEND_NAMES = Object.freeze(Object.keys(BACKENDS));
 
-/** The default, and the name a deployment that has never heard of this table is running. */
+/**
+ * The default, and the name a deployment that has never heard of this table is running: what `PI_BACKENDS`
+ * means when it is unset. NOT "a venue every deployment holds": since issue #354 a deployment may bless a list
+ * without `local`, and its default is then that list's first entry (`config.defaultBackend`). Code that means
+ * the local adapter by name, rather than the unset default, compares against this same word on purpose and
+ * says so where it does.
+ */
 export const DEFAULT_BACKEND = "local";
 
 /**
@@ -519,6 +525,13 @@ export const DEFAULT_BACKEND = "local";
  * `PI_BACKENDS[0]`, which a deployment can change; reading an unstamped transcript as "whatever the default
  * is now" would hand a local transcript to a remote venue the day `PI_BACKENDS` lists that venue first. The
  * past does not move when the configuration does.
+ *
+ * STILL `local` ON A HOST THAT NO LONGER BLESSES IT (issue #354), and that is the rule rather than an oversight.
+ * Such a host's default is another venue, so an unstamped transcript there matches no venue it runs and the key
+ * cold-starts once as `venue-changed`, then carries the new venue's stamp. Resolving absence to the default
+ * instead would resume a Docker-written transcript in a container another runtime built, on the strength of a
+ * stamp that was never written: the one thing the stamp exists to refuse. A sandbox manifest with no key is
+ * likewise a `local` run, reopened only through the local adapter's own CLI.
  */
 export const UNATTRIBUTED_BACKEND = "local";
 
@@ -569,7 +582,8 @@ export function shortfall(name, want = {}) {
 
 /**
  * `PI_BACKENDS` -- which backends this deployment blesses, comma separated. Unset means `[local]`, which is
- * what every deployment that has never heard of this table is already running.
+ * what every deployment that has never heard of this table is already running. Set, any non-empty list of
+ * known names is a deployment, `local` or not; its first entry is the default.
  *
  * ENV-ONLY, never the settings overlay and never the deployment pointer, on `config.mjs`'s rule for
  * `PI_SECRET_RESOLVER_ROOTS`: "a bound that can be widened from the surface it bounds is not a bound". The
@@ -583,26 +597,30 @@ export function shortfall(name, want = {}) {
  * Throws a plain Error; `config.mjs` re-tags it as a config error, which is `egressArmed`'s arrangement and
  * for its reason: this module imports nothing, so it cannot reach for that tagger itself.
  */
-export function parseBackendList(raw) {
+export function parseBackendList(raw, { known = BACKEND_NAMES } = {}) {
 	const names = (raw ?? "")
 		.split(",")
 		.map((s) => s.trim())
 		.filter((s) => s.length > 0);
 	if (names.length === 0) return [DEFAULT_BACKEND];
 	for (const name of names) {
-		if (!Object.hasOwn(BACKENDS, name)) {
-			throw new Error(`PI_BACKENDS names an unknown backend ${JSON.stringify(name)} (known: ${BACKEND_NAMES.join(", ")})`);
+		// `known` is a TEST seam, and the only reason it exists: while `local` is the table's one entry, a list
+		// without it cannot be written through the real table, so the rule below could not be driven. Every
+		// production caller passes nothing and gets the table's own names.
+		if (!known.includes(name)) {
+			throw new Error(`PI_BACKENDS names an unknown backend ${JSON.stringify(name)} (known: ${known.join(", ")})`);
 		}
 	}
-	// Deduplicated, order preserved: the first entry is what a deployment means by "the default one".
-	const unique = [...new Set(names)];
-	// The DEFAULT backend must stay in the set. A trigger that names no venue is dispatched to
-	// `backends[0]`, and the boot registry refuses a default it does not hold -- so a set excluding it would
-	// describe a deployment whose unflagged triggers, which is nearly all of them, have nowhere to run.
-	if (!unique.includes(DEFAULT_BACKEND)) {
-		throw new Error(`PI_BACKENDS must include ${JSON.stringify(DEFAULT_BACKEND)}: a trigger that names no backend is dispatched there, so a set without it leaves every unflagged trigger nowhere to run`);
-	}
-	return unique;
+	// Deduplicated, order preserved: the first entry is what a deployment means by "the default one", and it is
+	// where a trigger that names no venue is dispatched.
+	//
+	// `local` IS NOT REQUIRED (issue #354, the operator's decision: `PI_BACKENDS=podman` alone is a deployment). The
+	// guard that stood here refused any set without it, on the reasoning that an unflagged trigger is dispatched to
+	// the default and the default had to be `local`. It never had to: unflagged triggers go to `backends[0]`,
+	// whatever it names, and the boot registry refuses a default it does not hold, so a set whose first entry is
+	// built is runnable with or without `local` in it. What the guard actually did was force a host with no Docker
+	// to spawn `docker` at every boot for a venue it would never use.
+	return [...new Set(names)];
 }
 
 /**

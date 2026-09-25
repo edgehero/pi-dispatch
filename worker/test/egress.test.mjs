@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
-import { DEFAULT_EGRESS_PROXY, createJobNetwork, createJobNetworkWith, egressArmed, egressEnv, egressProxyUrl, makeEgressPreflight, networkAbsentInDaemonWords, networkEndpoints, networkNameFor, removeJobNetwork, removeJobNetworkWith, removeNetworkOrSay } from "../src/egress.mjs";
+import { DEFAULT_EGRESS_PROXY, createJobNetwork, createJobNetworkWith, egressArmed, egressEnv, egressProxyUrl, makeEgressPreflight, networkAbsentInDaemonWords, networkEndpoints, networkExists, networkNameFor, removeJobNetwork, removeJobNetworkWith, removeNetworkOrSay } from "../src/egress.mjs";
 
 // No skip guard, deliberately: like image-preflight.mjs this module imports nothing but
 // node:child_process, and it decides whether a budget slot is spent. A money gate must not have
@@ -277,4 +277,57 @@ test("`detached` names what actually happened, never what was attempted (#357)",
 	};
 	const out = await removeNetworkOrSay(run, { network: "n", detach: ["went", "stuck"] });
 	assert.deepEqual(out.detached, ["went"], "the one that did not detach is not claimed");
+});
+
+// --- issue #354: the runtime binary seam, and Podman's answers -------------------------------------------------------
+
+test("bin names every spawn of the job-path network helpers and the egress preflight, and defaults to docker (#354)", async () => {
+	for (const [seam, want] of [[{ bin: "podman" }, "podman"], [{}, "docker"]]) {
+		const calls = [];
+		const spawnFn = fakeSpawn(calls, { network: 0, inspect: 1, info: 0 });
+		assert.equal(await createJobNetwork(spawnFn, { network: "pi-job-1-net", ...seam }), true);
+		await removeJobNetwork(spawnFn, { network: "pi-job-1-net", ...seam });
+		assert.equal(await networkExists(spawnFn, "pi-job-1-net", seam), true);
+		assert.deepEqual(await makeEgressPreflight({ armed: true, spawnFn, ...seam })(), { proxyMissing: DEFAULT_EGRESS_PROXY });
+		assert.equal(calls.length, 7, "create, connect, disconnect, rm, inspect, and the preflight's inspect and info");
+		assert.deepEqual([...new Set(calls.map((c) => c.cmd))], [want], JSON.stringify(seam));
+	}
+	// networkExists keeps its two-argument call shape for every existing caller.
+	const calls = [];
+	await networkExists(fakeSpawn(calls, { network: 0 }), "n");
+	assert.equal(calls[0].cmd, "docker");
+});
+
+test("removeNetworkOrSay spells the operator's command with the venue's binary (#354)", async () => {
+	const run = async (args) => (args[1] === "rm" ? { code: 1, stdout: "", stderr: "has active endpoints" } : { code: 1, stdout: "", stderr: "Cannot connect" });
+	assert.equal((await removeNetworkOrSay(run, { network: "n", bin: "podman" })).command, "podman network rm n");
+	assert.equal((await removeNetworkOrSay(run, { network: "n" })).command, "docker network rm n");
+});
+
+test("networkEndpoints reads Podman's lowercase name, and a member with neither key is UNREADABLE, never absent (#354)", async () => {
+	const answer = (stdout) => networkEndpoints(async () => ({ code: 0, stdout, stderr: "" }), "n");
+	// Measured on Podman 5.8.1: `{{json .Containers}}` renders each member with a lowercase `name`.
+	assert.deepEqual(await answer('{"c0ffee":{"name":"pi-job-a","interfaces":{}},"beef":{"name":"pi-dispatch-egress-proxy"}}'), { ok: true, absent: false, names: ["pi-job-a", "pi-dispatch-egress-proxy"] });
+	assert.deepEqual(await answer('{"a":{"Name":"docker-member"},"b":{"name":"podman-member"}}'), { ok: true, absent: false, names: ["docker-member", "podman-member"] });
+	assert.deepEqual(await answer('{"a":{"Name":"both","name":"lower"}}'), { ok: true, absent: false, names: ["both"] }, "docker's key first");
+	assert.deepEqual(await answer("{}"), { ok: true, absent: false, names: [] }, "Podman's empty network is still empty");
+	// A member this parser cannot name is still a member. Filtering it out would hand every caller an empty list, and
+	// an empty list is the licence to detach and remove.
+	for (const body of ['{"a":{}}', '{"a":{"Name":""}}', '{"a":{"name":""}}', '{"a":{"Name":7}}', '{"a":null}', '{"a":{"Name":"x"},"b":{"id":"y"}}', '{"a":"pi-job-a"}']) {
+		assert.deepEqual(await answer(body), { ok: false, names: [], absent: false }, body);
+	}
+	// The one case where a non-string under `Name` still names the member: Podman's key beside it.
+	assert.deepEqual(await answer('{"a":{"Name":null,"name":"x"}}'), { ok: true, absent: false, names: ["x"] });
+});
+
+test("Podman's 'is not connected to network' disconnect wording is NOT the network being gone (#354)", () => {
+	// Measured on Podman 5.8.1: disconnecting a container from an EXISTING network it is not on exits 125 ending in
+	// `network not found`. The network is there, so reading this as absence would skip or misreport its removal.
+	const wording = "Error: container pi-dispatch-egress-proxy is not connected to network pi-job-x-net: network not found";
+	assert.equal(networkAbsentInDaemonWords({ code: 125, stdout: "", stderr: wording }), false);
+	assert.equal(networkAbsentInDaemonWords({ code: 125, stdout: wording, stderr: "" }), false, "on either stream");
+	assert.equal(networkAbsentInDaemonWords({ code: 125, stdout: "", stderr: wording.toUpperCase() }), false, "in any case, like the rule it excludes from");
+	// Podman's measured wordings for a network that really is absent still read as absent.
+	assert.equal(networkAbsentInDaemonWords({ code: 125, stdout: "", stderr: "Error: unable to find network with name or ID pi-job-x-net: network not found" }), true, "inspect");
+	assert.equal(networkAbsentInDaemonWords({ code: 1, stdout: "", stderr: "Error: unable to find network with name or ID pi-job-x-net: network not found" }), true, "rm");
 });

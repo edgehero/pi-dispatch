@@ -1,4 +1,5 @@
 import { DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, DOCKER_NEVER_STARTED_EXITS, RUNTIME_ADDS_NO_MOUNTS } from "./backends.mjs";
+import { resolveBackendName } from "./backend-registry.mjs";
 import { lstatSync } from "node:fs";
 import { checkTokenCap, recordTokenSpend, releaseBudget, reserveBudget } from "./budget.mjs";
 import { configError } from "./config.mjs";
@@ -15,6 +16,15 @@ export const OBSERVATION_COMMENT = Object.freeze({
 	[DAEMON_APPLIES_BOUNDS]: "the container runtime is not observed applying a container's pid and memory bounds",
 	[RUNTIME_ADDS_NO_MOUNTS]: "the container runtime is not observed adding no mounts of its own to a job container",
 });
+
+/**
+ * The forge comment's reason when a floor refusal names no observation this build has words for (issue #354): a
+ * venue other than `local` that named none, or named one outside `OBSERVATIONS`. Venue-neutral on purpose. The
+ * fallback used to be the docker endpoint's sentence, which is right only for `local`, whose preflight is the one
+ * that could ever refuse without naming what it missed; told to a job on another runtime it blames a CLI that job
+ * never touched. Not a key of `OBSERVATION_COMMENT`, which is pinned to the closed list one-for-one.
+ */
+export const OBSERVATION_COMMENT_UNNAMED = "the venue this job runs on did not confirm a guarantee the floor requires";
 
 /**
  * The job orchestration. Deliberately a pure-ish function over INJECTED side-effecting deps, so
@@ -305,8 +315,11 @@ export async function runJob(job, deps) {
 			// Fixed text per observation: the endpoint (an internal host name or address) and the evidence go to the
 			// operator's log, never to a forge comment. "Not observed" rather than "not on this host", because a CLI that
 			// could not be asked for a determinate reason (no docker on PATH, a context that does not exist) refuses too.
-			const missed = Array.isArray(observed.observations) && observed.observations.length > 0 ? observed.observations : [DOCKER_ENDPOINT_LOCAL];
-			const why = missed.map((o) => OBSERVATION_COMMENT[o] ?? OBSERVATION_COMMENT[DOCKER_ENDPOINT_LOCAL]);
+			// A refusal naming nothing keeps the endpoint's words on `local` only (#278); elsewhere it is the neutral
+			// sentence, and so is a name this build has no words for, on any venue (issue #354).
+			const onLocal = resolveBackendName(job, blessedBackends[0]) === DEFAULT_BACKEND;
+			const missed = Array.isArray(observed.observations) && observed.observations.length > 0 ? observed.observations : [onLocal ? DOCKER_ENDPOINT_LOCAL : null];
+			const why = missed.map((o) => (Object.hasOwn(OBSERVATION_COMMENT, o ?? "") ? OBSERVATION_COMMENT[o] : OBSERVATION_COMMENT_UNNAMED));
 			await comment(job, `Refused: this deployment's PI_BACKEND_FLOOR requires a guarantee this host is not observed to provide right now (${[...new Set(why)].join("; ")}). Not run.`);
 			log("refused_backend_floor_unobserved", { message: observed.message });
 			return {
@@ -321,7 +334,7 @@ export async function runJob(job, deps) {
 			};
 		}
 		if (observed?.unavailable) {
-			throw new InfraRetry("docker CLI or daemon unavailable, an observation the floor needs could not run", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			throw new InfraRetry("the container runtime or its CLI is unavailable, an observation the floor needs could not run", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 		}
 
 		// The job image must exist on THIS host before anything else happens. Free, determinate and

@@ -114,33 +114,37 @@ function probeOptions({ image, name, fixture, user = null, relabel = false }) {
 	return { image, name, env: {}, network: "none", user, relabel: relabel === true, workspaceOwned: true, ...fixture };
 }
 
+// `buildArgs` (issue #354) is the RUNTIME's job builder, never a second one: each probe below is built by whichever
+// builder that venue's jobs are, so a podman venue's probe carries its `--userns=keep-id` exactly where its jobs do.
+// The default is docker's, so every argv here is byte-for-byte what it was.
+
 /** The probe container's argv: the job builder's, detached, with `sleep <derived seconds>` as its whole program. */
-export function liveProbeRunArgs({ image, name, fixture, sleepSeconds = liveSleepSeconds(), user = null, relabel = false }) {
-	return [...buildDockerRunArgs({ ...probeOptions({ image, name, fixture, user, relabel }), extraFlags: ["-d", "--entrypoint", "sleep"] }), String(sleepSeconds)];
+export function liveProbeRunArgs({ image, name, fixture, sleepSeconds = liveSleepSeconds(), user = null, relabel = false, buildArgs = buildDockerRunArgs }) {
+	return [...buildArgs({ ...probeOptions({ image, name, fixture, user, relabel }), extraFlags: ["-d", "--entrypoint", "sleep"] }), String(sleepSeconds)];
 }
 
 /**
  * The pinning probe's argv: the job builder's, detached, against an image this host does not have. Detached so a
  * container that WAS created prints the ID it is removed by; with `--pull=never` in the builder none should be.
  */
-export function pinningProbeRunArgs({ name, nonce, fixture, user = null, relabel = false }) {
-	return buildDockerRunArgs({ ...probeOptions({ image: absentImageRef(nonce), name, fixture, user, relabel }), extraFlags: ["-d"] });
+export function pinningProbeRunArgs({ name, nonce, fixture, user = null, relabel = false, buildArgs = buildDockerRunArgs }) {
+	return buildArgs({ ...probeOptions({ image: absentImageRef(nonce), name, fixture, user, relabel }), extraFlags: ["-d"] });
 }
 
 /**
  * One ephemeral run's argv (issue #344): the job builder's, detached, running EPHEMERAL_SCRIPT with the nonce and the
  * run's number. The same NAME both times, because "a job id run twice" is the question.
  */
-export function ephemeralRunArgs({ image, name, fixture, nonce, run, user = null, relabel = false }) {
-	return [...buildDockerRunArgs({ ...probeOptions({ image, name, fixture, user, relabel }), extraFlags: ["-d", "--entrypoint", "sh"] }), "-c", EPHEMERAL_SCRIPT, "sh", nonce, String(run)];
+export function ephemeralRunArgs({ image, name, fixture, nonce, run, user = null, relabel = false, buildArgs = buildDockerRunArgs }) {
+	return [...buildArgs({ ...probeOptions({ image, name, fixture, user, relabel }), extraFlags: ["-d", "--entrypoint", "sh"] }), "-c", EPHEMERAL_SCRIPT, "sh", nonce, String(run)];
 }
 
 /**
  * One peer's argv (issue #344): the job builder's, detached, on its OWN job network, running PEER_SCRIPT, which answers
  * every connection with the nonce for `seconds`. Built with `network` set exactly as a job with egress armed is.
  */
-export function peerRunArgs({ image, name, fixture, network, nonce, seconds = liveSleepSeconds(), user = null, relabel = false }) {
-	return [...buildDockerRunArgs({ ...probeOptions({ image, name, fixture, user, relabel }), network, extraFlags: ["-d", "--entrypoint", "node"] }), "--eval", PEER_SCRIPT, nonce, String(PEER_PORT), String(seconds)];
+export function peerRunArgs({ image, name, fixture, network, nonce, seconds = liveSleepSeconds(), user = null, relabel = false, buildArgs = buildDockerRunArgs }) {
+	return [...buildArgs({ ...probeOptions({ image, name, fixture, user, relabel }), network, extraFlags: ["-d", "--entrypoint", "node"] }), "--eval", PEER_SCRIPT, nonce, String(PEER_PORT), String(seconds)];
 }
 
 /**
@@ -420,15 +424,20 @@ export function localFoldersVerdict({ code, stdout, hostRead, nonce, hostOwner =
  * refused (nonzero), the daemon said `No such image`, docker did NOT try a pull (`Unable to find image` is the
  * CLI's announcement of one), and the image is still absent afterwards. A refusal in words this check does not
  * know is "not read back" rather than a pass.
+ *
+ * Issue #354: rootless Podman 5.8.1 refuses the same `--pull=never` run with `Error: <ref>: image not known` (exit
+ * 125, measured), so those words are the absent-image refusal too; without them every podman venue would abstain
+ * here forever. Podman announces a pull as `Trying to pull <ref>...`, which fails like docker's announcement does:
+ * a pull attempted and then refused is still not pinning. Any other refusal still abstains.
  */
 export function imagePinningVerdict({ code, output, stillAbsent }) {
 	const text = String(output ?? "");
 	if (code === null || code === undefined) return notReadBack("imagePinning", "the pinning probe did not run");
 	if (code === 0) return verdict("imagePinning", false, "a container started from an image this host does not have");
-	if (/Unable to find image/i.test(text)) return verdict("imagePinning", false, "docker tried to pull an image this host does not have");
+	if (/Unable to find image|Trying to pull/i.test(text)) return verdict("imagePinning", false, "docker tried to pull an image this host does not have");
 	if (stillAbsent === false) return verdict("imagePinning", false, "an image this host did not have is present after the run");
 	if (stillAbsent !== true) return notReadBack("imagePinning", "whether the image is still absent could not be read");
-	if (!/No such image/i.test(text)) return notReadBack("imagePinning", "docker refused the run with a message this check does not recognise");
+	if (!/No such image|image not known/i.test(text)) return notReadBack("imagePinning", "docker refused the run with a message this check does not recognise");
 	return verdict("imagePinning", true, "an absent image was refused without a pull");
 }
 
@@ -585,16 +594,24 @@ export async function runLiveProbes({
 	now = () => Date.now(),
 	delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 	removalDeadlineMs = LIVE_REMOVAL_DEADLINE_MS,
+	// Issue #354, the runtime seams. `buildArgs` is the venue's job builder (see the four builders above); `bin` is the
+	// CLI `run` spawns, used here only to NAME the commands a note tells the operator to run, since `run` is the
+	// caller's and already knows its binary. `isLocal` is the gate on both endpoint reads: docker's is the observed
+	// endpoint, a podman venue's is `serviceIsRemote === false`, which has no `.local` to read. The gate still decides
+	// on the value it is handed and must answer exactly `true`; anything else runs nothing.
+	buildArgs = buildDockerRunArgs,
+	bin = "docker",
+	isLocal = (observed) => observed?.local === true,
 }) {
 	const notRun = (reason) => ({ ran: false, reason, verdicts: [], notes: [], swept: [] });
-	const notLocal = notRun("this shell's docker CLI is not observed to point at this host, so bind paths and .Mounts would describe another machine; nothing was run");
-	if (endpoint?.local !== true) return notLocal;
-	if (dockerReachable !== true) return notRun("the Docker daemon did not answer, so no container was run");
+	const notLocal = notRun(`this shell's ${bin} CLI is not observed to point at this host, so bind paths and .Mounts would describe another machine; nothing was run`);
+	if (isLocal(endpoint) !== true) return notLocal;
+	if (dockerReachable !== true) return notRun(`the ${bin === "docker" ? "Docker" : bin} daemon did not answer, so no container was run`);
 	if (imagePresent !== true) return notRun(`the job image ${image} is not present, so no container was run`);
 	// ASKED AGAIN, immediately before the first command. The answer above came from the start of doctor's run, and
 	// prompts and slow checks sit between the two; a `docker context use` in that window would otherwise send every
 	// read below to another machine and report it as this one (the per-job re-read in `start.mjs`, for the same reason).
-	if (typeof resolveEndpoint === "function" && (await resolveEndpoint())?.local !== true) return notLocal;
+	if (typeof resolveEndpoint === "function" && isLocal(await resolveEndpoint()) !== true) return notLocal;
 
 	const names = liveNames(pid, nonce);
 	const notes = [];
@@ -610,7 +627,7 @@ export async function runLiveProbes({
 			(peersWanted ? `, and ${names.peer1} and ${names.peer2} on their own --internal networks ${networkOf.peer1} and ${networkOf.peer2}, with ${proxy} attached to both` : "") +
 			`, with a fixture under ${jobsDir}; all of them are removed when the read-back ends, as is anything an interrupted earlier run left`,
 	);
-	const swept = [...sweepStaleFixtures({ jobsDir, pid, fs, isAlive }), ...(await sweepStaleContainers({ step, pid, isAlive })), ...(await sweepStaleNetworks({ step, pid, isAlive, notes }))];
+	const swept = [...sweepStaleFixtures({ jobsDir, pid, fs, isAlive }), ...(await sweepStaleContainers({ step, pid, isAlive })), ...(await sweepStaleNetworks({ step, pid, isAlive, notes, bin }))];
 
 	const owned = [];
 	const networks = [];
@@ -628,7 +645,7 @@ export async function runLiveProbes({
 		entry.done = true;
 		if (entry.id !== null) {
 			const removed = await step(["rm", "-f", entry.id]);
-			if (removed?.code !== 0) notes.push(`the ${entry.what} ${entry.id.slice(0, 12)} could not be removed: docker rm -f ${entry.id}`);
+			if (removed?.code !== 0) notes.push(`the ${entry.what} ${entry.id.slice(0, 12)} could not be removed: ${bin} rm -f ${entry.id}`);
 		} else {
 			// No ID came back. The name carries this run's pid and nonce, so no other run's container can answer to it;
 			// usually there is nothing by that name and docker says so, which is not worth a line.
@@ -643,7 +660,8 @@ export async function runLiveProbes({
 		// updates when a third runtime words it differently. The call sequence is byte-for-byte what it was:
 		// disconnect the proxy, `network rm` without `-f`, and on a failure one `network inspect` whose answer
 		// decides between silence and a note.
-		const outcome = await removeNetworkOrSay(step, { network: entry.name, detach: [proxy] });
+		// `bin` only spells the command a note tells the operator to type (issue #354); `step` already knows its binary.
+		const outcome = await removeNetworkOrSay(step, { network: entry.name, detach: [proxy], bin });
 		if (!outcome.removed) notes.push(`the network ${entry.name} could not be removed: ${outcome.command}`);
 	};
 	const makeFixture = (base) => {
@@ -674,7 +692,7 @@ export async function runLiveProbes({
 		}
 
 		// --- the reading container: mounts, status, writes ---
-		const reading = await start("probe container", names.probe, liveProbeRunArgs({ image, name: names.probe, fixture, sleepSeconds: liveSleepSeconds(stepTimeoutMs), user, relabel }));
+		const reading = await start("probe container", names.probe, liveProbeRunArgs({ image, name: names.probe, fixture, sleepSeconds: liveSleepSeconds(stepTimeoutMs), user, relabel, buildArgs }));
 		const probeId = reading.entry.id;
 		if (reading.result?.code !== 0 || probeId === null) {
 			return { ran: false, reason: "the probe container did not start, so nothing was read back", verdicts: [], notes, swept };
@@ -714,7 +732,7 @@ export async function runLiveProbes({
 		await release(reading.entry);
 
 		// --- the pinning container: an image this host does not have ---
-		const pinning = await start("pinning container", names.pin, pinningProbeRunArgs({ name: names.pin, nonce, fixture, user, relabel }));
+		const pinning = await start("pinning container", names.pin, pinningProbeRunArgs({ name: names.pin, nonce, fixture, user, relabel, buildArgs }));
 		const after = await step(["image", "inspect", absentImageRef(nonce)]);
 		const stillAbsent = after?.code === 0 ? false : typeof after?.code === "number" ? true : null;
 		const imagePinning = imagePinningVerdict({ code: pinning.result?.code, output: `${pinning.result?.stdout ?? ""}${pinning.result?.stderr ?? ""}`, stillAbsent });
@@ -722,7 +740,7 @@ export async function runLiveProbes({
 
 		// --- the ephemeral pair (issue #344): one name, two runs, each waited on until it is gone ---
 		const runEphemeral = async (n) => {
-			const { result, entry } = await start(`ephemeral container (run ${n})`, names.ephemeral, ephemeralRunArgs({ image, name: names.ephemeral, fixture, nonce, run: n, user, relabel }));
+			const { result, entry } = await start(`ephemeral container (run ${n})`, names.ephemeral, ephemeralRunArgs({ image, name: names.ephemeral, fixture, nonce, run: n, user, relabel, buildArgs }));
 			const started = result?.code === 0 && entry.id !== null;
 			// A HELD NAME is the daemon refusing the create for the name, in its own words (measured: Docker "Conflict. ...
 			// is already in use", Podman "that name is already in use"). Not a listed container: after the first run was
@@ -771,7 +789,7 @@ export async function runLiveProbes({
 						} catch {
 							break;
 						}
-						const { result, entry } = await start(`${key} container`, names[key], peerRunArgs({ image, name: names[key], fixture: peerFixture, network: networkOf[key], nonce, seconds: liveSleepSeconds(stepTimeoutMs), user, relabel }));
+						const { result, entry } = await start(`${key} container`, names[key], peerRunArgs({ image, name: names[key], fixture: peerFixture, network: networkOf[key], nonce, seconds: liveSleepSeconds(stepTimeoutMs), user, relabel, buildArgs }));
 						peers.push(entry);
 						if (result?.code !== 0 || entry.id === null) break;
 						ids[key] = entry.id;
@@ -889,7 +907,7 @@ export async function sweepStaleContainers({ step, pid, isAlive }) {
  * is detached, each one named in what is reported, and the network is removed WITHOUT `-f`. One that stays is a note
  * carrying the command, never silence.
  */
-export async function sweepStaleNetworks({ step, pid, isAlive, notes = [] }) {
+export async function sweepStaleNetworks({ step, pid, isAlive, notes = [], bin = "docker" }) {
 	const listed = await step(["network", "ls", "--filter", `name=${LIVE_PREFIX}`, "--format", "{{.Name}}"]);
 	if (listed?.code !== 0) return [];
 	const swept = [];
@@ -917,7 +935,7 @@ export async function sweepStaleNetworks({ step, pid, isAlive, notes = [] }) {
 		// Every endpoint detached is SAID, the proxy included: a container this sweep did not make may be among them.
 		const detached = attached.length > 0 ? ` (after detaching ${attached.join(", ")})` : "";
 		if ((await step(["network", "rm", name]))?.code === 0) swept.push(`network ${name}${detached}`);
-		else notes.push(`the stale network ${name}${detached} could not be removed: docker network rm ${name}`);
+		else notes.push(`the stale network ${name}${detached} could not be removed: ${bin} network rm ${name}`);
 	}
 	return swept;
 }

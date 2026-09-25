@@ -418,7 +418,9 @@ export function sandboxVenueRefusal({ jobId, manifest }) {
 	if (venue === DEFAULT_BACKEND) return null;
 	return {
 		refused: "venue-unreachable",
-		message: `${jobId} ran on the ${JSON.stringify(venue)} backend, not on this host's docker daemon — a sandbox opens a shell here against the retained directory, so it cannot reproduce that run. Open it on the venue that ran it.`,
+		// Names BOTH venues (issue #354). "Not on this host's docker daemon" was true only while every venue but `local`
+		// was elsewhere; a second runtime on this same host makes it read as a claim about where the run happened.
+		message: `${jobId} ran on the ${JSON.stringify(venue)} backend, and a sandbox opens a shell only through the ${JSON.stringify(DEFAULT_BACKEND)} backend (this host's docker CLI) against the retained directory, so it cannot reproduce that run. Open it on the venue that ran it.`,
 	};
 }
 

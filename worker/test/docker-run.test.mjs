@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync, readdirSync } from "node:fs";
-import { CONTAINER_HOME, SHIPPED_IMAGE_UID, transfersFromSpec } from "../src/container-spec.mjs";
-import { insideDir } from "../src/docker-run.mjs";
-import { buildDockerRunArgs, containerSpec, DOCKER_EXTRA_ALLOWED, DOCKER_EXTRA_FORBIDDEN, dockerArgsFromSpec, ISOLATION_FLAGS } from "../src/docker-run.mjs";
+import { assertUserns, CONTAINER_HOME, SHIPPED_IMAGE_UID, transfersFromSpec, USERNS_MODES } from "../src/container-spec.mjs";
+import { buildDockerRunArgs, buildPodmanRunArgs, containerSpec, DOCKER_EXTRA_ALLOWED, DOCKER_EXTRA_FORBIDDEN, dockerArgsFromSpec, insideDir, ISOLATION_FLAGS, podmanArgsFromSpec } from "../src/docker-run.mjs";
 
 const base = {
 	image: "pi-job:pinned",
@@ -427,6 +426,108 @@ test("relabel and workspaceOwned are booleans, and a hand-built mount may carry 
 test("a copying runtime's transfers carry no relabel: the label is a bind-mount option, not a file property", () => {
 	const spec = containerSpec({ ...base, relabel: true, workspaceOwned: true });
 	for (const t of transfersFromSpec(spec)) assert.equal("relabel" in t, false, t.container);
+});
+
+// --- issue #354: the userns field, and the podman argv that shares the docker builder -------------------------------
+
+test("userns is a closed field: null by default, \"keep-id\" accepted, every other spelling refused", () => {
+	assert.equal(containerSpec(base).userns, null, "present and null, the runtime's own default");
+	assert.equal(containerSpec({ ...base, userns: undefined }).userns, null, "one spelling of the default");
+	assert.equal(containerSpec({ ...base, userns: "keep-id" }).userns, "keep-id");
+	assert.deepEqual([...USERNS_MODES], ["keep-id"]);
+	assert.ok(Object.isFrozen(USERNS_MODES));
+	for (const bad of ["host", "auto", "nomap", "keep-id:uid=0", "ns:/proc/1/ns/user", "KEEP-ID", " keep-id", "", true, 1, { toString: () => "keep-id" }]) {
+		assert.throws(() => containerSpec({ ...base, userns: bad }), /refusing a userns/, JSON.stringify(String(bad)));
+		assert.throws(() => assertUserns(bad), /refusing a userns/);
+	}
+	assert.doesNotThrow(() => assertUserns(null));
+	assert.doesNotThrow(() => assertUserns(undefined));
+});
+
+test("the docker builder REFUSES a spec with a userns: the docker CLI rejects --userns=keep-id, and dropping it would change who the job is", () => {
+	assert.throws(() => buildDockerRunArgs({ ...base, user: "1234:1234", userns: "keep-id" }), /refusing a spec with userns "keep-id"/);
+	for (const bad of ["keep-id", "host", ""]) {
+		assert.throws(() => dockerArgsFromSpec({ ...containerSpec({ ...base, user: "1234:1234" }), userns: bad }), /refusing a spec with userns/, JSON.stringify(bad));
+	}
+	// A hand-built spec that predates the field asked for nothing, and builds exactly what it always did.
+	const { userns, ...legacy } = containerSpec(base);
+	assert.equal(userns, null);
+	assert.deepEqual(dockerArgsFromSpec(legacy), buildDockerRunArgs(base));
+});
+
+test("the podman argv, literally: --userns=keep-id immediately after --user=, then the cidfile, dockerExtra, env, mounts and the image", () => {
+	const args = buildPodmanRunArgs({
+		image: "pi-job:pinned",
+		env: { A: "1" },
+		jobDir: "/j",
+		workspace: "/j/workspace",
+		name: "pi-job-1",
+		network: "pi-job-1-net",
+		user: "1234:1234",
+		cidFile: "/j.cid",
+		relabel: true,
+		workspaceOwned: true,
+	});
+	assert.deepEqual(args, [
+		"run",
+		"--name=pi-job-1",
+		"--pull=never",
+		"--rm",
+		"--init",
+		"--cap-drop=ALL",
+		"--security-opt",
+		"no-new-privileges",
+		"--pids-limit=512",
+		"--shm-size=1g",
+		"--memory=4g",
+		"--cpus=2",
+		"--network=pi-job-1-net",
+		"--user=1234:1234",
+		"--userns=keep-id",
+		"--cidfile=/j.cid",
+		"-e",
+		"A=1",
+		"-v",
+		"/j:/job:ro,Z",
+		"-v",
+		"/j/workspace:/workspace:Z",
+		"pi-job:pinned",
+	]);
+	assert.equal(args.filter((a) => a.startsWith("--userns")).length, 1);
+});
+
+test("the podman argv is the docker argv plus one token: one private builder, so the boundary cannot drift between runtimes", () => {
+	const shapes = [
+		{ ...base, user: "1234:1234" },
+		{ ...base, user: "1234:1234", sessionDir: "/s", globalPiDir: "/g", network: "n", cidFile: "/c.cid", relabel: true, workspaceOwned: true },
+		{ image: "i", name: "pi-sandbox-1", workspace: "/w", jobDir: "/j", user: "1:1", extraFlags: ["-i", "-t", "--entrypoint", "bash"] },
+	];
+	for (const s of shapes) {
+		const podman = buildPodmanRunArgs(s);
+		const at = podman.indexOf("--userns=keep-id");
+		assert.equal(podman[at - 1], `--user=${s.user}`);
+		assert.deepEqual([...podman.slice(0, at), ...podman.slice(at + 1)], buildDockerRunArgs(s), JSON.stringify(s));
+	}
+	// The same refusals reach the podman path: they live in the shared body, not in the docker wrapper.
+	assert.throws(() => buildPodmanRunArgs({ ...base, user: "1:1", extraFlags: ["--userns=host"] }), /supersede the isolation boundary/);
+	assert.throws(() => buildPodmanRunArgs({ ...base, user: "1:1", extraFlags: ["--privileged"] }), /supersede the isolation boundary/);
+	assert.throws(() => podmanArgsFromSpec({ ...containerSpec({ ...base, user: "1:1", userns: "keep-id" }), isolated: false }), /not isolated/);
+	assert.throws(() => podmanArgsFromSpec({ ...containerSpec({ ...base, user: "1:1", userns: "keep-id" }), user: "0:0" }), /refusing a job user/);
+	assert.ok(DOCKER_EXTRA_FORBIDDEN.includes("--userns"), "a dockerExtra repeat could otherwise supersede keep-id");
+});
+
+test("the podman builder refuses a spec without keep-id, and keep-id without a job user (/job would be unreadable)", () => {
+	assert.throws(() => buildPodmanRunArgs(base), /no job user/, "user absent");
+	assert.throws(() => buildPodmanRunArgs({ ...base, user: null }), /no job user/);
+	assert.throws(() => podmanArgsFromSpec(containerSpec({ ...base, user: "1234:1234" })), /userns is not "keep-id": null/);
+	assert.throws(() => podmanArgsFromSpec({ ...containerSpec({ ...base, user: "1234:1234" }), userns: "host" }), /userns is not "keep-id"/);
+	assert.throws(() => podmanArgsFromSpec(null), /userns is not "keep-id"/);
+	assert.throws(() => podmanArgsFromSpec({ ...containerSpec({ ...base, userns: "keep-id" }) }), /no job user/);
+	// An opts bag cannot talk the podman path out of keep-id: the wrapper sets it last.
+	for (const userns of [null, "host"]) {
+		const args = buildPodmanRunArgs({ ...base, user: "1234:1234", userns });
+		assert.deepEqual(args.filter((a) => a.startsWith("--userns")), ["--userns=keep-id"], JSON.stringify(userns));
+	}
 });
 
 test("insideDir: strictly inside, failing closed on anything else (issue #355)", () => {

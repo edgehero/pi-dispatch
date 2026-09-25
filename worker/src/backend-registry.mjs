@@ -50,6 +50,30 @@ export async function reapAll(reaps = [], { log = () => {} } = {}) {
 export const BACKEND_NOT_REGISTERED = "BACKEND_NOT_REGISTERED";
 
 /**
+ * The per-venue preflights a bundle MAY carry (issue #354), each with what a venue that carries none answers.
+ *
+ * OPTIONAL, not in the required list, because requiring them would break every adapter written against the
+ * five-function contract `docs/backends.md` publishes, and because the absent answer is not a guess: it is what
+ * every non-local venue got before this, when both were `start.mjs` closures that returned exactly these for
+ * any venue but `local`. `observationPreflight` admits (nothing about this host is observed for a venue with no
+ * `observedBy`), and `jobUserPreflight` runs the image's own USER. Kept equal to the processor's own defaults for
+ * those two deps, so a wiring that omits the registry and one whose venue omits the member agree.
+ *
+ * What absence cannot be is SAFE for a venue whose table entry is observation-gated: that venue's words would
+ * then hold with nothing observing them. `start.mjs` refuses such a bundle at boot, because this module cannot
+ * read the table (it imports only the redactor).
+ */
+export const OPTIONAL_PREFLIGHT_DEFAULTS = Object.freeze({
+	observationPreflight: () => ({ ok: true }),
+	jobUserPreflight: () => ({ user: null, home: null }),
+});
+
+/** The venue's own member when it carries one, else the absent answer, as a promise either way. */
+async function optionalPreflight(bundle, fn, ...args) {
+	return typeof bundle[fn] === "function" ? bundle[fn](...args) : OPTIONAL_PREFLIGHT_DEFAULTS[fn]();
+}
+
+/**
  * The NAME of the venue a job resolves to: its own `run.backend`, else the deployment default.
  *
  * ONE DERIVATION FOR DISPATCH AND FOR EVERY STORE THAT RECORDS A VENUE (issue #277). The registry dispatches
@@ -129,6 +153,12 @@ export function makeBackendRegistry({ bundles = [], defaultName, blessed = null,
 			// exactly the case the list exists to refund.
 			throw new Error(`backend registry: ${JSON.stringify(bundle.name)} must declare neverStartedExits as an array of integers ([] if it normalises to container-never-started itself)`);
 		}
+		// OPTIONAL, but a present one must be callable (issue #354). Absent is a real answer, today's non-local
+		// behaviour (see `OPTIONAL_PREFLIGHT_DEFAULTS`); a truthy non-function is a typo'd adapter, and admitting it would
+		// land as a TypeError on the pre-spend path at the first pickup, the failure the required list above exists for.
+		for (const fn of Object.keys(OPTIONAL_PREFLIGHT_DEFAULTS)) {
+			if (bundle[fn] !== undefined && typeof bundle[fn] !== "function") throw new Error(`backend registry: ${JSON.stringify(bundle.name)} has a ${fn} that is not a function`);
+		}
 		byName.set(bundle.name, bundle);
 	}
 	if (byName.size === 0) throw new Error("backend registry: at least one backend must be registered");
@@ -188,6 +218,11 @@ export function makeBackendRegistry({ bundles = [], defaultName, blessed = null,
 		runContainer: (args) => backendFor(args?.job).runContainer(args),
 		imagePreflight: (job) => backendFor(job).imagePreflight(job),
 		egressPreflight: (job) => backendFor(job).egressPreflight(job),
+		// The two OPTIONAL per-venue preflights (issue #354), dispatched through the same resolution as every
+		// required one, so an unregistered name still throws BACKEND_NOT_REGISTERED rather than being waved
+		// through by a default. A venue that carries none gets the answer the processor's own defaults give.
+		observationPreflight: (job) => optionalPreflight(backendFor(job), "observationPreflight", job),
+		jobUserPreflight: (job, opts) => optionalPreflight(backendFor(job), "jobUserPreflight", job, opts),
 		stopContainer: (name, job) => backendFor(job).stopContainer(name, job),
 		// ON THE SURFACE, not reached for through `backendFor` by a call site. Both are per-job backend
 		// FACTS rather than functions, and an earlier draft left them off: the wiring rebuilt

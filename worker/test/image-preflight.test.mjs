@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
-import { FIELD_SEP, makeImagePreflight, resolveJobImage } from "../src/image-preflight.mjs";
+import { FIELD_SEP, makeImagePreflight, normalizeImageId, resolveJobImage } from "../src/image-preflight.mjs";
 
 // No skip guard, deliberately: unlike run-container.mjs this module imports nothing but node:child_process,
 // and it decides whether a budget slot is spent. A money gate must not have skippable tests.
@@ -278,4 +278,25 @@ test("the FORGE refusal still outranks the replica one on a non-github replica j
 	const r = await preflight({ kind: "azure", replica: 2, replicas: 2 });
 	assert.equal(r.forgeUnsupported, "pi-job:latest", "the forge gate answers first");
 	assert.equal("replicaUnsupported" in r, false);
+});
+
+// --- issue #354: the runtime binary seam, and one spelling of an image id ---------------------------------------------
+
+test("bin names BOTH probes, the inspect and the info that disambiguates it, and defaults to docker (#354)", async () => {
+	for (const [seam, want] of [[{ bin: "podman" }, "podman"], [{}, "docker"]]) {
+		const calls = [];
+		const preflight = makeImagePreflight({ image: "i", spawnFn: fakeSpawn(calls, { image: 125, info: 0 }), ...seam });
+		assert.deepEqual(await preflight({}), { missing: "i" });
+		assert.deepEqual(calls.map((c) => [c.cmd, c.args[0]]), [[want, "image"], [want, "info"]]);
+	}
+});
+
+test("Podman's bare-hex image id is published in docker's sha256: spelling, and nothing else is rewritten (#354)", async () => {
+	const hex = "a".repeat(64);
+	const preflight = makeImagePreflight({ image: "i", bin: "podman", spawnFn: fakeSpawn([], { image: 0 }, `${hex}${FIELD_SEP}0.80.7\n`) });
+	assert.equal((await preflight({})).imageDigest, `sha256:${hex}`, "a podman host and a docker host running one image must agree");
+	assert.equal(normalizeImageId(`sha256:${hex}`), `sha256:${hex}`, "docker's own form is untouched");
+	for (const other of ["a".repeat(63), "a".repeat(65), "A".repeat(64), `sha512:${hex}`, "abc", null]) {
+		assert.equal(normalizeImageId(other), other, JSON.stringify(other));
+	}
 });

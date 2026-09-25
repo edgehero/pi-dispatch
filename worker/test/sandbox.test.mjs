@@ -200,6 +200,10 @@ test("resolveSandbox refuses a run from a venue this host did not run, ahead of 
 	const far = resolve({ ...manifest, backend: "far", image: null }, () => false);
 	assert.equal(far.refused, "venue-unreachable");
 	assert.match(far.message, /"far"/);
+	// Both venues by name (issue #354): the one that ran it, and the one a sandbox opens through. "Not on this host's
+	// docker daemon" read as a claim about WHERE the run happened, which a second runtime on this host makes false.
+	assert.match(far.message, /ran on the "far" backend, and a sandbox opens a shell only through the "local" backend \(this host's docker CLI\)/);
+	assert.doesNotMatch(far.message, /not on this host/);
 	// A workspace that happens to exist at the same path here must not let it through either.
 	assert.equal(resolve({ ...manifest, backend: "far" }).refused, "venue-unreachable");
 	// A name this build does not know is not a venue this host holds.

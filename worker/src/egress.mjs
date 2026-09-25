@@ -183,14 +183,15 @@ export function egressEnv({ proxy = DEFAULT_EGRESS_PROXY, armed }) {
  * party, which is not a thing to do before every job on every deployment. `doctor` does it once, when
  * asked. What is left unproven is stated where an operator reads it rather than implied away.
  */
-export function makeEgressPreflight({ proxy = DEFAULT_EGRESS_PROXY, armed = false, spawnFn = spawn } = {}) {
+export function makeEgressPreflight({ proxy = DEFAULT_EGRESS_PROXY, armed = false, spawnFn = spawn, bin = "docker" } = {}) {
+	// Issue #354: `bin` is the venue's CLI, for both probes, so the proxy is looked for where the job will run.
 	return async function egressPreflight() {
 		if (!armed) return { ok: true };
-		const probe = await runDocker(spawnFn, ["inspect", "--format={{.State.Running}}", proxy], true);
+		const probe = await runDocker(spawnFn, ["inspect", "--format={{.State.Running}}", proxy], true, bin);
 		if (probe.code === 0) {
 			return probe.stdout.trim() === "true" ? { ok: true, proxy } : { proxyStopped: proxy };
 		}
-		if ((await runDocker(spawnFn, ["info"])).code === 0) return { proxyMissing: proxy };
+		if ((await runDocker(spawnFn, ["info"], false, bin)).code === 0) return { proxyMissing: proxy };
 		return { unavailable: proxy };
 	};
 }
@@ -205,8 +206,10 @@ export function makeEgressPreflight({ proxy = DEFAULT_EGRESS_PROXY, armed = fals
  * moments ago, with these flags. `doctor` reads back the proxy's own attachments, where an operator's
  * hand-built estate is what is being checked.
  */
-export async function createJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRESS_PROXY }) {
-	return createJobNetworkWith((args) => runDocker(spawnFn, args), { network, proxy });
+export async function createJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRESS_PROXY, bin = "docker" }) {
+	// `bin` (issue #354) is the venue's CLI: the network, the proxy's attachment and the container that joins it must all
+	// live in ONE runtime, or the job's `--network=` names a network its daemon has never heard of.
+	return createJobNetworkWith((args) => runDocker(spawnFn, args, false, bin), { network, proxy });
 }
 
 /**
@@ -229,8 +232,8 @@ export async function createJobNetworkWith(docker, { network, proxy = DEFAULT_EG
  * Whether a network by this name exists. `false` when docker says no or cannot be asked; callers use it only
  * to explain a failure they already have, never to decide to remove anything.
  */
-export async function networkExists(spawnFn, network) {
-	return (await runDocker(spawnFn, ["network", "inspect", network])).code === 0;
+export async function networkExists(spawnFn, network, { bin = "docker" } = {}) {
+	return (await runDocker(spawnFn, ["network", "inspect", network], false, bin)).code === 0;
 }
 
 /**
@@ -241,8 +244,8 @@ export async function networkExists(spawnFn, network) {
  * `<container>-net` one this builds, detaching what is attached first since issue #357) and never for a sandbox
  * (`pi-sandbox-`); a sandbox's next open of the same run refuses and names it for removal.
  */
-export async function removeJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRESS_PROXY }) {
-	return removeJobNetworkWith((args) => runDocker(spawnFn, args), { network, proxy });
+export async function removeJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRESS_PROXY, bin = "docker" }) {
+	return removeJobNetworkWith((args) => runDocker(spawnFn, args, false, bin), { network, proxy });
 }
 
 /**
@@ -275,12 +278,21 @@ export function networkAbsentInDaemonWords(result) {
 	// with no `code` at all is a runner that answered something this rule cannot read: both are NO ANSWER,
 	// and no answer is never absence.
 	if (typeof result?.code !== "number" || result.code === 0) return false;
-	return /network (?:\S+ )?not found/i.test(`${result.stdout ?? ""}${result.stderr ?? ""}`);
+	const text = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+	// Podman's `network disconnect` of a container NOT on an EXISTING network ends in the same `network not found`
+	// (exit 125, measured on 5.8.1: `... is not connected to network X: network not found`). The network is there; the
+	// membership is not. Read as absence, a caller would skip the `rm` of a network that still exists, or report one
+	// gone that is not, so that wording is excluded before the match, wherever it appears in the output.
+	if (/is not connected to network/i.test(text)) return false;
+	return /network (?:\S+ )?not found/i.test(text);
 }
 
 /**
- * The endpoint NAMES attached to a network, as `{ ok, names, absent }`. `.Name` reads on Docker AND Podman
- * (measured, issue #344).
+ * The endpoint NAMES attached to a network, as `{ ok, names, absent }`. The template's `.Containers` reads on Docker AND
+ * Podman (measured, issue #344), but the JSON it renders does not: Docker's members carry `Name`, Podman's `name` (5.8.1,
+ * measured under issue #354). Either is read; a member with NEITHER as a non-empty string makes the whole answer
+ * UNREADABLE (`ok: false`), never "nothing attached", because every caller treats an empty list as licence to detach
+ * and remove, and a member this parser cannot name is still a member.
  *
  * WHAT "ATTACHED" MEANS HERE, measured end to end on docker 27.4.0 rather than assumed. This lists RUNNING
  * endpoints only. A running member is listed and `network rm` fails "has active endpoints"; the SAME member
@@ -311,7 +323,14 @@ export async function networkEndpoints(docker, network) {
 		// otherwise read as "no endpoints", which makes every caller's guard vacuous rather than cautious.
 		// Netavark's rendering is unmeasured, so this is the direction to be wrong in.
 		if (parsed === null || typeof parsed !== "object") return { ok: false, names: [], absent: false };
-		return { ok: true, absent: false, names: Object.values(parsed).map((c) => String(c?.Name ?? "")).filter(Boolean) };
+		const names = [];
+		for (const c of Object.values(parsed)) {
+			// `Name` first, the docker key, then Podman's `name`. A non-string or empty value under either is not a name.
+			const name = [c?.Name, c?.name].find((v) => typeof v === "string" && v !== "");
+			if (name === undefined) return { ok: false, names: [], absent: false };
+			names.push(name);
+		}
+		return { ok: true, absent: false, names };
 	} catch {
 		return { ok: false, names: [], absent: false };
 	}
@@ -335,7 +354,7 @@ export async function networkEndpoints(docker, network) {
  * error text is never surfaced, because a docker error can repeat a `DOCKER_HOST` with credentials in it
  * (issue #339).
  */
-export async function removeNetworkOrSay(docker, { network, detach = [], stillClear = async () => true }) {
+export async function removeNetworkOrSay(docker, { network, detach = [], stillClear = async () => true, bin = "docker" }) {
 	// `stillClear` is the OTHER kind of parameter, and naming the difference is what keeps `detach` explicit.
 	// `detach` names WHICH endpoints go, which every caller decides differently, so a default there would hide
 	// a decision. `stillClear` decides NOTHING about the target: it is the caller's own guard, re-asked
@@ -391,7 +410,8 @@ export async function removeNetworkOrSay(docker, { network, detach = [], stillCl
 	// race that attached something between the inspect and the rm -- is said, with the command.
 	const inspected = await runWith(docker, ["network", "inspect", network]);
 	if (networkAbsentInDaemonWords(inspected)) return { removed: true, absent: true, detached, command: null };
-	return { removed: false, absent: false, detached, command: `docker network rm ${network}` };
+	// `bin` (issue #354) only spells the command an operator is told to type; the runner is the caller's, already bound.
+	return { removed: false, absent: false, detached, command: `${bin} network rm ${network}` };
 }
 
 /** One step through a caller's runner, as `{ code: null }` when it throws. */
@@ -409,11 +429,11 @@ async function runWith(docker, args) {
  * binary is no answer. Same shape as image-preflight.mjs's own runDocker and doctor's runCmd, so all
  * three agree on what "present" means.
  */
-function runDocker(spawnFn, args, capture = false) {
+function runDocker(spawnFn, args, capture = false, bin = "docker") {
 	return new Promise((resolve) => {
 		let child;
 		try {
-			child = spawnFn("docker", args, { stdio: capture ? ["ignore", "pipe", "ignore"] : "ignore" });
+			child = spawnFn(bin, args, { stdio: capture ? ["ignore", "pipe", "ignore"] : "ignore" });
 		} catch {
 			resolve({ code: null, stdout: "" });
 			return;

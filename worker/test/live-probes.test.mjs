@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { READ_BACK_BY_A_LIVE_PROBE } from "../src/backend-conformance.mjs";
 import { JOB_NAME_PREFIX } from "../src/backend-local.mjs";
-import { ISOLATION_FLAGS } from "../src/docker-run.mjs";
+import { ISOLATION_FLAGS, buildDockerRunArgs } from "../src/docker-run.mjs";
 import {
 	absentImageRef,
 	awaitRemoved,
@@ -1191,4 +1191,136 @@ test("a live run threads relabel into every container it starts, peers included,
 	const plain = fakeDocker();
 	await runLiveProbes(probeArgs(plain, { egress: LIVE_EGRESS, ...instant() }));
 	assert.ok(!plain.calls.filter((a) => a[0] === "run").some((a) => vOf(a).some((m) => /Z$/.test(m))), "no relabel, no :Z anywhere");
+});
+
+// --- the runtime seams (issue #354) ------------------------------------------------------------------------------
+
+// A builder that is visibly not docker's: it records what it was given and marks its argv, so a probe built by any
+// other builder (docker's default, a hand-written one) is told apart by its first element.
+const markingBuilder = () => {
+	const given = [];
+	const buildArgs = (opts) => (given.push(opts), ["run", "--marked-by-the-venue", `--name=${opts.name}`, ...(opts.extraFlags ?? []), opts.image]);
+	return { given, buildArgs };
+};
+
+test("each of the four probe builders builds with the buildArgs it is given, with the job's options, and docker's by default (#354)", () => {
+	const kinds = [
+		(b) => liveProbeRunArgs({ image: "pi-job:x", name: "p", fixture: FIXTURE, sleepSeconds: 90, user: "1234:1234", relabel: true, ...b }),
+		(b) => pinningProbeRunArgs({ name: "pin", nonce: "n", fixture: FIXTURE, user: "1234:1234", relabel: true, ...b }),
+		(b) => ephemeralRunArgs({ image: "pi-job:x", name: "e", fixture: FIXTURE, nonce: "n", run: 1, user: "1234:1234", relabel: true, ...b }),
+		(b) => peerRunArgs({ image: "pi-job:x", name: "peer", fixture: FIXTURE, network: "net", nonce: "n", seconds: 5, user: "1234:1234", relabel: true, ...b }),
+	];
+	for (const build of kinds) {
+		const { given, buildArgs } = markingBuilder();
+		const args = build({ buildArgs });
+		assert.equal(args[1], "--marked-by-the-venue", args.join(" "));
+		assert.equal(given.length, 1);
+		// The options are the job's, whoever builds them: no env, the job user, relabel, every fixture mount.
+		assert.deepEqual(given[0].env, {});
+		assert.equal(given[0].user, "1234:1234");
+		assert.equal(given[0].relabel, true);
+		assert.equal(given[0].workspace, FIXTURE.workspace);
+		assert.equal(given[0].globalPiDir, FIXTURE.globalPiDir);
+		assert.equal(given[0].extraFlags[0], "-d");
+		// The default is docker's builder, byte for byte: the explicit default and no argument agree.
+		assert.deepEqual(build({}), build({ buildArgs: undefined }));
+		assert.ok(build({}).includes("--pull=never"), "docker's builder by default");
+		assert.ok(!build({}).includes("--marked-by-the-venue"));
+	}
+	const { given, buildArgs } = markingBuilder();
+	peerRunArgs({ image: "i", name: "peer", fixture: FIXTURE, network: "net-7", nonce: "n", buildArgs });
+	assert.equal(given[0].network, "net-7", "a peer's own network reaches the venue's builder");
+});
+
+test("runLiveProbes builds every container with the venue's buildArgs, and docker's when none is given (#354)", async () => {
+	const docker = fakeDocker();
+	const given = [];
+	// The fake daemon routes by what an argv contains, so this builder keeps docker's argv and only marks it.
+	const marking = (opts) => (given.push(opts), ["--marked-by-the-venue", ...buildDockerRunArgs(opts)]);
+	const run = async (args) => docker.run(args[0] === "--marked-by-the-venue" ? args.slice(1) : args);
+	const calls = [];
+	const result = await runLiveProbes(probeArgs(docker, { run: async (args) => (calls.push(args), run(args)), buildArgs: marking, egress: LIVE_EGRESS }));
+	assert.equal(result.ran, true);
+	const runs = calls.filter((a) => a[0] === "--marked-by-the-venue");
+	assert.equal(runs.length, given.length);
+	assert.deepEqual(given.map((o) => o.name), ["pi-dispatch-live-probe-4242-n0nce", "pi-dispatch-live-pin-4242-n0nce", "pi-dispatch-live-ephemeral-4242-n0nce", "pi-dispatch-live-ephemeral-4242-n0nce", "pi-dispatch-live-peer1-4242-n0nce", "pi-dispatch-live-peer2-4242-n0nce"], "the probe, the pin, both ephemeral runs and both peers");
+	assert.ok(!calls.some((a) => a[0] === "run"), "no container is built by any other builder");
+	const plain = fakeDocker();
+	await runLiveProbes(probeArgs(plain, { egress: LIVE_EGRESS }));
+	assert.ok(plain.calls.filter((a) => a[0] === "run").length >= 6, "with no buildArgs every container is docker's `run` argv, as before");
+});
+
+test("the local gate is injectable: a venue with no .local passes its own predicate, on both reads, and only true runs (#354)", async () => {
+	// A podman venue's endpoint has no `.local`; its gate is `serviceIsRemote === false`.
+	const podmanish = { serviceIsRemote: false };
+	const isLocal = (e) => e?.serviceIsRemote === false;
+	const ran = await runLiveProbes(probeArgs(fakeDocker(), { endpoint: podmanish, isLocal }));
+	assert.equal(ran.ran, true, "the injected gate admits it");
+	const defaultGate = fakeDocker();
+	const refusedByDefault = await runLiveProbes(probeArgs(defaultGate, { endpoint: podmanish }));
+	assert.equal(refusedByDefault.ran, false, "docker's gate reads .local, and this endpoint has none");
+	assert.deepEqual(defaultGate.calls, []);
+	// The re-read goes through the same gate: a venue gone remote since the collection runs nothing.
+	const switched = fakeDocker();
+	const reread = await runLiveProbes(probeArgs(switched, { endpoint: podmanish, isLocal, resolveEndpoint: async () => ({ serviceIsRemote: true }) }));
+	assert.equal(reread.ran, false);
+	assert.deepEqual(switched.calls, []);
+	assert.equal((await runLiveProbes(probeArgs(fakeDocker(), { endpoint: podmanish, isLocal, resolveEndpoint: async () => podmanish }))).ran, true, "and one still local on the re-read runs");
+	// The default gate is docker's as it was, and exact: a truthy `.local` that is not `true` is not local.
+	for (const endpoint of [{ local: 1 }, { local: "true" }]) {
+		const d = fakeDocker();
+		assert.equal((await runLiveProbes(probeArgs(d, { endpoint }))).ran, false, JSON.stringify(endpoint));
+		assert.deepEqual(d.calls, []);
+	}
+	// Exactly true: a truthy non-boolean answer is not "local".
+	for (const answer of [1, "yes", {}, null, undefined, false]) {
+		const d = fakeDocker();
+		assert.equal((await runLiveProbes(probeArgs(d, { isLocal: () => answer }))).ran, false, String(answer));
+		assert.deepEqual(d.calls, []);
+	}
+});
+
+test("bin names the runtime in what the operator is told to run, and docker's words are unchanged by default (#354)", async () => {
+	const failingRm = fakeDocker({ rm: async () => ({ code: 1, stdout: "", stderr: "" }) });
+	const result = await runLiveProbes(probeArgs(failingRm, { bin: "podman" }));
+	assert.match(result.notes[0], new RegExp(`: podman rm -f ${ID}$`));
+	assert.ok(!result.notes.some((n) => /docker rm/.test(n)));
+	assert.match((await runLiveProbes(probeArgs(fakeDocker(), { bin: "podman", endpoint: { local: false } }))).reason, /this shell's podman CLI is not observed/);
+	assert.match((await runLiveProbes(probeArgs(fakeDocker(), { endpoint: { local: false } }))).reason, /this shell's docker CLI is not observed/);
+	assert.match((await runLiveProbes(probeArgs(fakeDocker(), { bin: "podman", dockerReachable: false }))).reason, /^the podman daemon did not answer/);
+	assert.match((await runLiveProbes(probeArgs(fakeDocker(), { dockerReachable: false }))).reason, /^the Docker daemon did not answer/);
+	const stays = async (args) => (args[1] === "ls" ? { code: 0, stdout: "pi-dispatch-live-peer1-100-abc123-net" } : args[1] === "inspect" ? { code: 0, stdout: "{}" } : { code: args[1] === "rm" ? 1 : 0, stdout: "" });
+	const notes = [];
+	await sweepStaleNetworks({ step: stays, pid: 300, isAlive: () => false, notes, bin: "podman" });
+	assert.deepEqual(notes, ["the stale network pi-dispatch-live-peer1-100-abc123-net could not be removed: podman network rm pi-dispatch-live-peer1-100-abc123-net"]);
+	// And runLiveProbes hands its bin to that sweep.
+	const staleNet = fakeDocker({
+		"network-ls": async () => ({ code: 0, stdout: "pi-dispatch-live-peer1-100-abc123-net\n", stderr: "" }),
+		"network-inspect": async () => ({ code: 0, stdout: "{}", stderr: "" }),
+		"network-rm": async () => ({ code: 1, stdout: "", stderr: "" }),
+	});
+	// A peer network of this run's own that stays: its note is the shared egress rule's, spelled with this bin.
+	const peerStays = fakeDocker({ "network-rm": async () => ({ code: 1, stdout: "", stderr: "" }), "network-inspect": async () => ({ code: 0, stdout: "[]", stderr: "" }) });
+	const own = await runLiveProbes(probeArgs(peerStays, { bin: "podman", egress: LIVE_EGRESS }));
+	assert.ok(own.notes.some((n) => /could not be removed: podman network rm pi-dispatch-live-peer1-4242-n0nce/.test(n)), own.notes.join("\n"));
+	assert.ok(!own.notes.some((n) => /docker network rm/.test(n)), own.notes.join("\n"));
+	const swept = await runLiveProbes(probeArgs(staleNet, { bin: "podman" }));
+	assert.ok(swept.notes.includes("the stale network pi-dispatch-live-peer1-100-abc123-net could not be removed: podman network rm pi-dispatch-live-peer1-100-abc123-net"), swept.notes.join("\n"));
+});
+
+test("imagePinning holds on Podman's absent-image refusal too, and a Podman pull attempt or unknown words never pass (#354)", () => {
+	// Measured, rootless Podman 5.8.1, `--pull=never` against an absent reference: exit 125 and these words.
+	const podman = "Error: pi-dispatch-live-probe.invalid/absent:n: image not known\n";
+	assert.equal(imagePinningVerdict({ code: 125, output: podman, stillAbsent: true }).ok, true);
+	assert.equal(imagePinningVerdict({ code: 125, output: podman, stillAbsent: false }).ok, false, "still the image-present failure");
+	assert.equal(imagePinningVerdict({ code: 125, output: podman, stillAbsent: null }).warn, true);
+	assert.equal(imagePinningVerdict({ code: 0, output: podman, stillAbsent: true }).ok, false);
+	const pulled = imagePinningVerdict({ code: 125, output: `Trying to pull pi-dispatch-live-probe.invalid/absent:n...\n${podman}`, stillAbsent: true });
+	assert.equal(pulled.ok, false);
+	assert.notEqual(pulled.warn, true, "a pull attempted is a failure, not an unread");
+	for (const other of ["Error: pi-dispatch-live-probe.invalid/absent:n: image unknown\n", "Error: short-name resolution enforced\n", "Error: image not found\n"]) {
+		const v = imagePinningVerdict({ code: 125, output: other, stillAbsent: true });
+		assert.equal(v.ok, false, other);
+		assert.equal(v.warn, true, `${other}: words this check does not know abstain`);
+	}
 });

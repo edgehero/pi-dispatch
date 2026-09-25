@@ -614,3 +614,68 @@ test("each step of the detached check is retried while it fails, and every try g
 	assert.deepEqual(down.calls.slice(-2).map(([step]) => step), ["stop", "rm"], "once past the deadline, one stop and one rm");
 	assert.deepEqual([mod.DETACHED_CHECK_TIMEOUT_MS, mod.DETACHED_MIN_STEP_MS], [10_000, 5_000]);
 });
+
+// --- issue #354: the runtime binary seam ------------------------------------------------------------------------------
+
+/** Records EVERY spawn's binary and argv; a `run` exits `runCode` after writing `CID` to its cidfile, the rest answer 0. */
+function binRecorder({ runCode, fs, psState = "running" }) {
+	const calls = [];
+	const spawnFn = (cmd, args) => {
+		calls.push({ cmd, args });
+		const child = new EventEmitter();
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		child.kill = () => {};
+		queueMicrotask(() => {
+			if (args[0] === "run") {
+				const cidFile = args.find((a) => a.startsWith("--cidfile="))?.slice("--cidfile=".length);
+				if (cidFile) fs.files[cidFile] = CID;
+				child.emit("close", runCode);
+				return;
+			}
+			if (args[0] === "ps") child.stdout.emit("data", `${CID} ${psState}\n`);
+			child.emit("close", 0);
+		});
+		return child;
+	};
+	return { spawnFn, calls };
+}
+
+test("bin names EVERY job-path spawn: the run, the job network both ways and the detached check, and buildArgs builds the argv (#354)", { skip }, async () => {
+	const { buildPodmanRunArgs } = await import("../src/docker-run.mjs");
+	const { CONTAINER_HOME } = await import("../src/container-spec.mjs");
+	const drive = async (seam) => {
+		const fs = cidFs();
+		const rec = binRecorder({ runCode: 125, fs });
+		const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: rec.spawnFn, fs, egress: true, neverStartedExits: [125], detachedCheck: instantCheck(), ...seam });
+		const result = await runContainer({ job: JOB, prepared: PREPARED, name: "pi-job-j1", signal: new AbortController().signal, user: "1234:1234", home: CONTAINER_HOME });
+		return { result, calls: rec.calls };
+	};
+	const podman = await drive({ bin: "podman", buildArgs: buildPodmanRunArgs });
+	assert.equal(podman.result.detached, true, "the check ran to its end: ps listed it running, so it was stopped");
+	const verbs = podman.calls.map((c) => `${c.args[0]} ${c.args[1] ?? ""}`.trim());
+	for (const verb of ["network create", "network connect", "ps -a", "stop", "rm -f", "network disconnect", "network rm"]) {
+		assert.ok(verbs.some((v) => v.startsWith(verb)), `the ${verb} step ran, so its binary is pinned below`);
+	}
+	assert.deepEqual([...new Set(podman.calls.map((c) => c.cmd))], ["podman"], "no step fell back to docker");
+	const run = podman.calls.find((c) => c.args[0] === "run").args;
+	assert.equal(run[run.indexOf("--user=1234:1234") + 1], "--userns=keep-id", "the injected builder made the argv");
+	// The defaults are the local venue's, unchanged.
+	const local = await drive({});
+	assert.deepEqual([...new Set(local.calls.map((c) => c.cmd))], ["docker"]);
+	assert.ok(!local.calls.find((c) => c.args[0] === "run").args.some((a) => a.startsWith("--userns")));
+});
+
+test("stopDetached hands bin to its step runner, and defaults to docker (#354)", { skip }, async () => {
+	const seen = [];
+	const run = async (_spawn, args, _bound, bin) => {
+		seen.push(bin);
+		return args[0] === "ps" ? psOf("running") : { code: 0, stdout: "" };
+	};
+	const check = { ...instantCheck(), run };
+	assert.equal(await mod.stopDetached({ spawnFn: null, cidFile: "/c", fs: cidFs({ "/c": CID }), bin: "podman", ...check }), true);
+	assert.deepEqual(seen, ["podman", "podman", "podman"]);
+	seen.length = 0;
+	await mod.stopDetached({ spawnFn: null, cidFile: "/c", fs: cidFs({ "/c": CID }), ...check });
+	assert.deepEqual(seen, ["docker", "docker", "docker"]);
+});

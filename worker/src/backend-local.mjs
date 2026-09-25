@@ -178,9 +178,11 @@ export const LOCAL_NEVER_STARTED_EXITS = DOCKER_NEVER_STARTED_EXITS;
  * 137. An adapter implements "stop this job" however its runtime spells it and the classification is
  * unchanged.
  */
-export function makeStopContainer({ exec = execDocker } = {}) {
+export function makeStopContainer({ exec = execDocker, bin = "docker" } = {}) {
+	// Issue #354: `bin` is the venue's CLI. A stop sent to a runtime other than the one that runs the job answers "no such
+	// container" while the job runs on, which is the unstoppable runaway this function exists to rule out.
 	return async function stopContainer(name) {
-		return exec("docker", ["stop", "-t", "5", name]);
+		return exec(bin, ["stop", "-t", "5", name]);
 	};
 }
 
@@ -383,7 +385,10 @@ export function isJobNamespace(name) {
  * for containers that may still be running and let another host start more alongside them. That is a spend
  * overrun rather than a tidy-up, which is why the catch below returns false rather than swallowing.
  */
-export function makeReaper({ log, exec = execDocker }) {
+export function makeReaper({ log, exec = execDocker, bin = "docker" }) {
+	// Issue #354: every spawn below names `bin`, the venue's CLI, so a podman venue's reaper enumerates, removes and
+	// sweeps in the store its jobs actually ran in. A mixed pass (listing under one binary, removing under another) would
+	// report `reaped: true` for a host whose containers it never saw, and the scope-claim sweep spends on that answer.
 	// The SAME injected `exec`, as a NON-THROWING `{ code, stdout, stderr }` step. Two things fall out and both
 	// are load-bearing. It is the shape `networkEndpoints` and `removeNetworkOrSay` need -- the "not found" rule
 	// reads both streams, and with `--format` the daemon puts that wording on stderr with stdout empty (measured
@@ -395,7 +400,7 @@ export function makeReaper({ log, exec = execDocker }) {
 	// conservative direction: this host cannot claim it holds nothing while it could not finish looking.
 	const step = async (args) => {
 		try {
-			const { stdout, stderr } = await exec("docker", args);
+			const { stdout, stderr } = await exec(bin, args);
 			return { code: 0, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") };
 		} catch (err) {
 			// `promisify(execFile)` rejects with the exit code on `.code` and what the CLI printed on
@@ -485,7 +490,7 @@ export function makeReaper({ log, exec = execDocker }) {
 		if (attached.length > 0) return log("network_not_reaped", { network, reason: "container-attached-not-running", containers: attached.slice(0, 5), more: attached.length > 5 ? attached.length - 5 : 0 });
 		// The parked proxy is detached too: it is attached to this network and `.Containers` does not list it,
 		// so without naming it here the `rm` would fail "has active endpoints" on a member nothing detached.
-		const outcome = await removeNetworkOrSay(step, { network, detach: [...names, ...parked.filter((name) => name === DEFAULT_EGRESS_PROXY)] });
+		const outcome = await removeNetworkOrSay(step, { network, detach: [...names, ...parked.filter((name) => name === DEFAULT_EGRESS_PROXY)], bin });
 		if (outcome.absent) return;
 		// `detached` is named rather than counted: one of them may be something this worker never attached.
 		if (outcome.removed) return log("reaped_network", { network, detached: outcome.detached });
@@ -494,7 +499,7 @@ export function makeReaper({ log, exec = execDocker }) {
 
 	return async function reap() {
 		try {
-			const { stdout } = await exec("docker", ["ps", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", "{{.Names}}"]);
+			const { stdout } = await exec(bin, ["ps", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", "{{.Names}}"]);
 			// ANCHORED, because `--filter name=` is a SUBSTRING match: it also returns an operator's own
 			// `my-pi-job-notes`, which this sweep would then `rm -f`. Measured on docker 27.4.0 by creating
 			// exactly that name and watching it come back in the listing. The filter stays as the cheap
@@ -504,7 +509,7 @@ export function makeReaper({ log, exec = execDocker }) {
 				.map((n) => n.trim())
 				.filter(isJobNamespace);
 			for (const name of names) {
-				await exec("docker", ["rm", "-f", name]);
+				await exec(bin, ["rm", "-f", name]);
 				log("reaped_container", { name });
 			}
 			// REQ-EGRESS-ALLOWLIST: the per-job networks those containers were on. Swept AFTER the containers,
@@ -515,7 +520,7 @@ export function makeReaper({ log, exec = execDocker }) {
 			//
 			// A crashed worker is the case this exists for: `runContainer`'s own finally removes the network
 			// on every ordinary path, so anything still here outlived a process that did not get to run it.
-			const { stdout: nets } = await exec("docker", ["network", "ls", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", "{{.Name}}"]);
+			const { stdout: nets } = await exec(bin, ["network", "ls", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", "{{.Name}}"]);
 			// Same substring hazard, and worse here: this sweep DETACHES before it removes, so a foreign
 			// network that merely contains `pi-job-` would have its endpoints stripped. THE SAME PREDICATE as
 			// the container loop above, which is the fix for #360 item 7: this used to be an anchored
@@ -729,7 +734,7 @@ export function classifyEndpointFailure({ error = null, code = null } = {}) {
  * (`retention-sweep.mjs` records the same). A separate timer settles the promise regardless, kills with
  * SIGKILL and destroys the pipes. REF'D, because at boot nothing else may be holding the event loop.
  */
-export function execDockerBounded(args, { timeoutMs = 5000, execFileFn = execFile, maxBuffer = 64 * 1024 } = {}) {
+export function execDockerBounded(args, { timeoutMs = 5000, execFileFn = execFile, maxBuffer = 64 * 1024, bin = "docker" } = {}) {
 	return new Promise((resolve) => {
 		let settled = false;
 		let child = null;
@@ -753,7 +758,7 @@ export function execDockerBounded(args, { timeoutMs = 5000, execFileFn = execFil
 		try {
 			// No `env`: the endpoint that matters is the one the job's own `docker run` will use, and that spawn
 			// inherits this process's environment. Passing an env here would ask about a different CLI.
-			child = execFileFn("docker", [...args], { killSignal: "SIGKILL", maxBuffer }, (err, stdout) => {
+			child = execFileFn(bin, [...args], { killSignal: "SIGKILL", maxBuffer }, (err, stdout) => {
 				finish({ code: err ? (typeof err.code === "number" ? err.code : null) : 0, stdout: String(stdout ?? ""), error: err ?? null });
 			});
 		} catch (err) {

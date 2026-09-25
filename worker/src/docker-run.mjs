@@ -44,8 +44,8 @@ export const ISOLATION_FLAGS = [
 ];
 
 /**
- * HOW Docker spells it. The only consumer of a spec today, and the local backend's translation step:
- * a second backend implements this function's job against its own runtime and shares everything above it.
+ * HOW Docker spells it, and the local backend's translation step. Since issue #354 `podmanArgsFromSpec` below is the
+ * second, and it shares this function's body rather than copying it.
  */
 /**
  * Flags a `dockerExtra` may not carry, because docker resolves a repeated option LAST-WINS and this array
@@ -148,6 +148,42 @@ export const DOCKER_EXTRA_ALLOWED = Object.freeze({
 });
 
 export function dockerArgsFromSpec(spec) {
+	// Issue #354. REFUSED, never dropped: the docker CLI rejects `--userns=keep-id` client-side (exit 125, measured in
+	// issue #345), and silently omitting it would run the job under the daemon's own mapping, where the "<uid>:<gid>"
+	// the caller chose for bind-mount ownership names a different host identity. `undefined` is a hand-built spec that
+	// predates the field, which asked for nothing.
+	if (spec?.userns !== null && spec?.userns !== undefined) {
+		throw new Error(`docker run: refusing a spec with userns ${JSON.stringify(spec.userns)}: the docker CLI has no --userns=keep-id, and only a podman venue builds one`);
+	}
+	return argsFromSpec(spec, { userns: null });
+}
+
+/**
+ * HOW rootless Podman spells the same box (issue #354): `dockerArgsFromSpec`'s argv with `--userns=keep-id` immediately
+ * after `--user=`, from ONE private builder, so the boundary flags, the `dockerExtra` allow-list and the mount rendering
+ * cannot drift between the two runtimes. Podman accepts every other token here as docker does (`--pull=never`,
+ * `--cidfile`, `-v host:ctr:ro,Z`: measured on 5.8.1).
+ *
+ * `keep-id` is REQUIRED, and so is a user. Without keep-id a rootless container's uid N is the host's subordinate uid, so
+ * a job run as the worker's uid cannot read `/job`. With keep-id and NO `--user`, the container runs as the IMAGE's user
+ * with the worker's gid only as a supplementary group, and `/job` is unreadable again (both measured on Fedora 44,
+ * Podman 5.8.1). Either argv would start, spend its slot and fail inside the container, so both are refused here.
+ */
+export function podmanArgsFromSpec(spec) {
+	if (spec?.userns !== "keep-id") {
+		throw new Error(`podman run: refusing a spec whose userns is not "keep-id": ${JSON.stringify(spec?.userns ?? null)} (a rootless job without it cannot read its own mounts)`);
+	}
+	if (spec.user === null || spec.user === undefined) {
+		throw new Error("podman run: refusing a keep-id spec with no job user: the image's own user would run with /job unreadable");
+	}
+	return argsFromSpec(spec, { userns: "keep-id" });
+}
+
+/**
+ * The shared body of both builders. `userns` is the caller's, never the spec's: each public builder has already decided
+ * what its runtime may say, and reading the spec here would let a docker argv carry a flag its CLI refuses.
+ */
+function argsFromSpec(spec, { userns }) {
 	// The builder CANNOT DECLINE the boundary. `containerSpec` cannot produce anything but `true`, so this
 	// only ever fires on a hand-built spec -- and a hand-built spec that forgot the field is exactly the
 	// case that must fail loudly rather than quietly emit a container with no isolation flags at all.
@@ -198,6 +234,8 @@ export function dockerArgsFromSpec(spec) {
 	if (spec.network) args.push(`--network=${spec.network}`);
 	// null => ABSENT, so a job the image's own USER runs has an argv byte-identical to one built before issue #341.
 	if (spec.user) args.push(`--user=${spec.user}`);
+	// Issue #354: IMMEDIATELY after `--user=`, which it qualifies, and before `dockerExtra`, where `--userns` is refused.
+	if (userns) args.push(`--userns=${userns}`);
 	// null => ABSENT, so every argv but a job's is byte-identical to one built before issue #345. BEFORE `dockerExtra`, and
 	// `--cidfile` is refused there, so no later token can move where the ID lands and turn the detached check off.
 	if (spec.cidFile) args.push(`--cidfile=${spec.cidFile}`);
@@ -238,6 +276,15 @@ export function dockerArgsFromSpec(spec) {
  */
 export function buildDockerRunArgs(opts) {
 	return dockerArgsFromSpec(containerSpec(opts));
+}
+
+/**
+ * The `podman run` argv (excluding the leading "podman"), issue #354. `userns` is not the caller's to choose: a podman
+ * job runs keep-id or not at all (see `podmanArgsFromSpec`), so an opts bag carrying another value is overridden rather
+ * than read. A null `user` is refused by the builder, before anything spawns.
+ */
+export function buildPodmanRunArgs(opts) {
+	return podmanArgsFromSpec(containerSpec({ ...opts, userns: "keep-id" }));
 }
 
 /**

@@ -309,13 +309,18 @@ export async function startWorker(
 		// tests in `start-wiring.test.mjs` were reported as not existing at all -- no name, no count, exit 0 --
 		// because this function's log line went through the same channel the runner needed (issue #266).
 		write = (chunk) => process.stdout.write(chunk),
+		// Issue #354: the configuration loader, a seam for ONE reason. `local` is no longer mandatory in
+		// `PI_BACKENDS`, but it is still the only name the backend table holds, so a deployment without it cannot be
+		// written through the real loader until a second venue lands, and the boot it would take could not be tested.
+		loadConfig: loadConfigFn = loadConfig,
 		makeAuth = makeGitHubAuth,
 		makeHost = makeGitHubHost,
 		createWorkerFn = createWorker,
 		makeReaper: makeReaperFn = makeReaper,
 		makeBackendRegistry: makeBackendRegistryFn = makeBackendRegistry,
-		// Additional backend bundles, in registration order after `local`. The deployment still decides which
-		// are BLESSED (PI_BACKENDS) and which is default; this only says which exist.
+		// Additional backend bundles, in registration order after `local` (which is built only while blessed,
+		// issue #354). The deployment still decides which are BLESSED (PI_BACKENDS) and which is default; this only
+		// says which exist.
 		extraBackends = [],
 		makeLogSink: makeLogSinkFn = makeLogSink,
 		makeRecordWriter: makeRecordWriterFn = makeRecordWriter,
@@ -356,7 +361,28 @@ export async function startWorker(
 		authResolveTimeoutMs = AUTH_RESOLVE_TIMEOUT_MS,
 	} = {},
 ) {
-	const config = loadConfig(env);
+	const config = loadConfigFn(env);
+	// Issue #354: whether this deployment blesses the local adapter (its name is `DEFAULT_BACKEND`, the word
+	// `makeLocalBackend` stamps on its bundle). `local` stopped being mandatory in `PI_BACKENDS`, and every read
+	// below that asks THIS HOST'S DOCKER CLI something is a read about that one venue: its endpoint, its daemon's
+	// facts, its image, its reaper, its sandboxes. With `local` unblessed none of them runs, so a host without
+	// Docker never spawns `docker` at boot for a venue it will never use, and a floor naming an observation only
+	// `local` makes cannot hold such a worker at exit 1 forever. Everything is byte-identical while it is blessed.
+	const localBlessed = config.backends.includes(DEFAULT_BACKEND);
+	// Issue #354: an ABSENT `observationPreflight` admits every job, which is the right answer only for a venue whose
+	// words hold without observing anything. A venue whose table entry names an `observedBy` and carries no preflight
+	// would have those words hold with nothing looking, and a floor naming one would pass on capability alone: the
+	// believed-in control `unarmedFloor` was written against. The registry cannot read the table, so it is refused
+	// here, and HERE rather than beside the registry: this runs before anything is spawned or connected, so the refusal
+	// leaves nothing open behind it. Only the extra bundles need it; `local`'s is built below carrying its preflight.
+	for (const bundle of extraBackends) {
+		// A string name only: `backendFor(undefined)` answers with the table's default, and a nameless bundle is the
+		// registry's refusal to make, with its own message.
+		const gated = typeof bundle?.name === "string" ? Object.keys(backendFor(bundle.name)?.observedBy ?? {}) : [];
+		if (gated.length > 0 && typeof bundle?.observationPreflight !== "function") {
+			throw new Error(`backend ${JSON.stringify(bundle.name)} declares ${gated.join(", ")} as held only while observed, and carries no observationPreflight to observe them`);
+		}
+	}
 	// `host` sits AFTER the spread, so it is authoritative rather than overridable (issue #57). No call
 	// site can know better than this closure which process wrote a line, and one that passed `host` would
 	// be lying by construction -- verified: none does. This is also why the stamp lives ONLY here. Every
@@ -404,20 +430,26 @@ export async function startWorker(
 	// daemon is the operator's call. With one asking for `enforced`, it refuses: a floor is not met by capability
 	// alone. A TRANSIENT failure to ask (a timeout, a spawn out of resources) throws untagged, exit 1, so the
 	// supervisor retries; everything else is a config error, exit 2.
-	const bootEndpoint = await resolveDockerEndpointFn();
-	logDockerEndpoint(log, bootEndpoint);
-	const [endpointRefusal] = observationRefusals({
-		backends: config.backends,
-		backendFloor: config.backendFloor,
-		observations: { [DOCKER_ENDPOINT_LOCAL]: bootEndpoint.local === true },
-		evidence: { [DOCKER_ENDPOINT_LOCAL]: dockerEndpointEvidence(bootEndpoint) },
-		// The daemon has not been read yet; the runtime observations are checked once it has (issue #345).
-		only: [DOCKER_ENDPOINT_LOCAL],
-	});
-	if (endpointRefusal) throw bootEndpoint.local === null && bootEndpoint.transient ? new Error(endpointRefusal) : configError(endpointRefusal);
+	//
+	// Issue #354: judged for `local` ALONE, not for every blessed venue. These are observations of this host's docker
+	// CLI and its daemon, which mean nothing for another venue's words: a venue with its own `observedBy` brings its own
+	// boot read. Byte-identical today, when `local` is the one venue the table has.
+	const bootEndpoint = localBlessed ? await resolveDockerEndpointFn() : null;
+	if (bootEndpoint) {
+		logDockerEndpoint(log, bootEndpoint);
+		const [endpointRefusal] = observationRefusals({
+			backends: [DEFAULT_BACKEND],
+			backendFloor: config.backendFloor,
+			observations: { [DOCKER_ENDPOINT_LOCAL]: bootEndpoint.local === true },
+			evidence: { [DOCKER_ENDPOINT_LOCAL]: dockerEndpointEvidence(bootEndpoint) },
+			// The daemon has not been read yet; the runtime observations are checked once it has (issue #345).
+			only: [DOCKER_ENDPOINT_LOCAL],
+		});
+		if (endpointRefusal) throw bootEndpoint.local === null && bootEndpoint.transient ? new Error(endpointRefusal) : configError(endpointRefusal);
+	}
 	// The per-job read (below, `observationPreflight`) logs only when the answer CHANGES from the last one, so a
 	// deliberate, standing redirect writes one line at boot rather than one per job.
-	let endpointSeen = dockerEndpointState(bootEndpoint);
+	let endpointSeen = bootEndpoint ? dockerEndpointState(bootEndpoint) : null;
 
 	// Issue #341: WHO job containers run as on this daemon (`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`). Decided
 	// from facts, never a probe container, cached per endpoint state. Bounded like the boot image read, because a
@@ -429,27 +461,36 @@ export async function startWorker(
 	// Issue #345: a floor that needs a DAEMON observation waits the facts read's own bound (plus a margin), not the image
 	// read's 5 s: a busy host's `docker info` is the slow read, and a floor this boot met from the table before would
 	// otherwise exit 1 on every restart of a healthy daemon.
-	const bootJobUser = await settleWithin(
-		resolveJobUser({ endpoint: bootEndpoint, key: endpointSeen }).catch(() => null),
-		bootFactsBoundMs(config),
-		null,
-	);
-	const bootDecision = bootJobUser?.decision ?? { mode: "unknown", user: null, cause: null, reason: "boot-read-timeout" };
-	log("job_user", { mode: bootDecision.mode, user: bootDecision.user, cause: bootDecision.cause, reason: bootDecision.reason });
+	// Issue #354: `null` throughout with `local` unblessed. There is no local job to decide a user for, so nothing is
+	// read, nothing is said, and the boot line carries `jobUser: null` rather than a decision about a daemon nobody asked.
+	const bootJobUser = bootEndpoint
+		? await settleWithin(
+				resolveJobUser({ endpoint: bootEndpoint, key: endpointSeen }).catch(() => null),
+				bootFactsBoundMs(config),
+				null,
+			)
+		: null;
+	const bootDecision = bootEndpoint ? (bootJobUser?.decision ?? { mode: "unknown", user: null, cause: null, reason: "boot-read-timeout" }) : null;
+	if (bootDecision) log("job_user", { mode: bootDecision.mode, user: bootDecision.user, cause: bootDecision.cause, reason: bootDecision.reason });
 	// Said again whenever a job's decision differs from the last one said, so a boot that read `unknown` (a daemon still
 	// starting) and a later answer that refuses every job are never separated by silence.
-	let jobUserSaid = jobUserLogKey(bootDecision);
+	let jobUserSaid = bootDecision ? jobUserLogKey(bootDecision) : null;
 
 	// Issue #345: the RUNTIME observations, from that same facts read and this host's files, checked against the floor
 	// the way the endpoint was above: `isolation` holds only while the daemon is observed applying a container's bounds,
 	// `mountSet` only while the runtime is observed adding no mounts of its own. Without a floor naming either, this is
 	// words (worker_started, and doctor). A refusal resting only on a read that did not answer (a daemon still starting,
 	// the boot bound) throws untagged, exit 1, so the supervisor retries; one resting on an answer is a config error.
-	const bootObserved = observeHost({ endpoint: bootEndpoint, daemon: bootJobUser?.daemon ?? { answered: false, reason: "boot-read-timeout", transient: true }, fs: observationFs });
-	const bootObservedArgs = { backends: config.backends, backendFloor: config.backendFloor, observations: bootObserved.observations, evidence: bootObserved.evidence };
-	const [runtimeRefusal] = observationRefusals(bootObservedArgs);
-	if (runtimeRefusal) throw observationRefusalIsTransient(bootObservedArgs) ? new Error(runtimeRefusal) : configError(runtimeRefusal);
-	let runtimeObservedSaid = runtimeObservationKey(bootObserved);
+	// Issue #354: for `local` alone, like the endpoint above, and not at all with `local` unblessed. This is the site that
+	// would otherwise hold a worker without `local` at exit 1 forever: a floor naming `isolation` against observations
+	// nobody made reads as unanswered, which is the transient arm, which the supervisor retries without end.
+	const bootObserved = bootEndpoint ? observeHost({ endpoint: bootEndpoint, daemon: bootJobUser?.daemon ?? { answered: false, reason: "boot-read-timeout", transient: true }, fs: observationFs }) : null;
+	if (bootObserved) {
+		const bootObservedArgs = { backends: [DEFAULT_BACKEND], backendFloor: config.backendFloor, observations: bootObserved.observations, evidence: bootObserved.evidence };
+		const [runtimeRefusal] = observationRefusals(bootObservedArgs);
+		if (runtimeRefusal) throw observationRefusalIsTransient(bootObservedArgs) ? new Error(runtimeRefusal) : configError(runtimeRefusal);
+	}
+	let runtimeObservedSaid = bootObserved ? runtimeObservationKey(bootObserved) : null;
 
 	const bootRefusal = jobUserBootRefusal(bootDecision, config.defaultBackend);
 	if (bootRefusal) throw configError(bootRefusal);
@@ -633,8 +674,22 @@ export async function startWorker(
 		// and a forgotten one is INVISIBLE, because `reapAll` is conservative over the reapers it is handed
 		// rather than over the venues that exist. A bundle already carries its own `reap`, so taking it from
 		// there is one place. `local`'s is built here because its bundle cannot exist yet.
-		backendReaps = { [DEFAULT_BACKEND]: makeReaperFn({ log }), ...Object.fromEntries(extraBackends.map((b) => [b?.name, b?.reap])) };
-		reaped = (await reapAll(Object.values(backendReaps), { log }))?.reaped === true;
+		// Issue #354: `local`'s only while it is blessed, since its bundle is built only then and the registry refuses a
+		// boot reaper for a venue it does not hold.
+		backendReaps = { ...(localBlessed ? { [DEFAULT_BACKEND]: makeReaperFn({ log }) } : {}), ...Object.fromEntries(extraBackends.map((b) => [b?.name, b?.reap])) };
+		const swept = (await reapAll(Object.values(backendReaps), { log }))?.reaped === true;
+		// PROVEN FOR THE WHOLE HOST, or not at all (issue #354). `reapAll` is conservative over the reapers it is
+		// handed, and two gaps sit outside that. A BLESSED venue with no reaper here is refused by the registry, but
+		// only further down, after the scope sweep has already acted on this answer. And a host without `local` can
+		// still hold `pi-job-` containers under Docker, from before `local` was dropped from PI_BACKENDS, that no
+		// blessed venue's reaper lists: "every blessed venue enumerated" is then true while this host is not shown
+		// clean. The scope sweep is an optimisation over the TTL, so declining it costs one TTL of a stale claim, never
+		// a slot; claiming it would free slots for containers that may still be running. A venue that can prove the
+		// Docker side too (a read-only listing) is what lifts the second gap, and it is not this change.
+		reaped = swept && localBlessed && config.backends.every((name) => typeof backendReaps[name] === "function");
+		// Its own event, said once at boot: the sweeper's `scope_claims_sweep_skipped` says only that the reap did not
+		// prove the host, and this is the one case where every reaper answered and the host is still not proven.
+		if (swept && !reaped) log("host_reap_unproven", { reason: localBlessed ? "a blessed backend has no boot reaper" : "local is not blessed, so no reaper lists this host's docker containers" });
 	} catch (err) {
 		log("reaper_skipped", { reason: scrubCredentials(err?.message) });
 	}
@@ -668,12 +723,22 @@ export async function startWorker(
 		reapSandboxes = makeSandboxReaperFn({
 			sandboxDir: config.sandboxDir,
 			retentionHours: config.sandboxRetentionHours,
-			listRunning: listRunningSandboxes,
+			// Issue #354: the sandbox is the local adapter's (its launcher is this host's docker CLI), so with `local`
+			// unblessed this asks nothing. It THROWS rather than answering `[]`: an empty list reads as "no shell is
+			// open" and the pass would delete retained directories under any sandbox still open from before `local`
+			// was dropped, while a throw makes the reaper skip the pass and say so, every boot and every tick. The
+			// cost is retention that does not run on such a host, named in the log rather than paid by a live shell.
+			listRunning: localBlessed
+				? listRunningSandboxes
+				: async () => {
+						throw new Error("local is not blessed, so this host's docker CLI is not asked which sandboxes are open");
+					},
 			// Issue #337: the session networks a died-mid-session process left. Unconditional on `PI_EGRESS`,
 			// on the boot reaper's own precedent (it lists `pi-job-` networks whatever the posture) and for a
 			// sharper reason: a deployment that has turned the policy OFF is exactly where the leftovers are
-			// guaranteed dead, since nothing is making new ones.
-			sweepNetworks: makeSandboxNetworkSweeperFn(),
+			// guaranteed dead, since nothing is making new ones. Not built with `local` unblessed (issue #354): the
+			// pass above never reaches it, and the real one's default runner is the docker CLI.
+			...(localBlessed ? { sweepNetworks: makeSandboxNetworkSweeperFn() } : {}),
 			log,
 		});
 		await reapSandboxes();
@@ -880,16 +945,27 @@ export async function startWorker(
 	// ONE preflight instance, constructed once and shared: `start-wiring.test.mjs` pins that, and the
 	// reason is the module's own -- the tag the preflight checked has to be the tag `docker run` is
 	// handed, and two constructions are two chances for that to stop being true.
-	const imagePreflight = makeImagePreflightFn({ image: config.jobImage });
+	// Issue #354: built only while `local` is blessed, since it IS local's (`docker image inspect`). Without `local` the
+	// boot read below asks the default venue's own preflight instead, the one its jobs will be gated on.
+	const imagePreflight = localBlessed ? makeImagePreflightFn({ image: config.jobImage }) : null;
 	// BOUNDED, because `.catch()` cannot rescue a promise that never settles: `runDocker` resolves only on
 	// the child's `close` or `error` and has no timeout of its own, so a wedged daemon would hang boot
 	// here. This read is a nicety -- a digest for the boot line and the registry -- and a nicety may
 	// never be able to stop a worker starting. The per-JOB preflight keeps its unbounded wait, where a
 	// wedged daemon is the job's problem and the 30-minute job timeout already covers it.
-	const bootImage = await settleWithin(imagePreflight({}).catch(() => ({})), BOOT_IMAGE_TIMEOUT_MS, {});
+	// Without `local` (issue #354) the default venue's own preflight, under the same bound and the same swallow: a
+	// nicety that throws synchronously must not stop a boot either, hence the `then`. None at all reads as no digest.
+	const defaultVenueImageRead = () => {
+		const read = extraBackends.find((b) => b?.name === config.defaultBackend)?.imagePreflight;
+		return Promise.resolve()
+			.then(() => (typeof read === "function" ? read({}) : {}))
+			.then((answer) => answer ?? {})
+			.catch(() => ({}));
+	};
+	const bootImage = await settleWithin(imagePreflight ? imagePreflight({}).catch(() => ({})) : defaultVenueImageRead(), BOOT_IMAGE_TIMEOUT_MS, {});
 	// Issue #341: say it at boot, not only as a refusal on every job. The deployment's default image cannot run as
 	// this worker's uid on this daemon, so every local job that uses it will be refused pre-spend.
-	if (bootDecision.mode === "worker" && bootImage.ok) {
+	if (bootDecision?.mode === "worker" && bootImage.ok) {
 		const planned = resolveImageUser(bootDecision, { capabilities: bootImage.capabilities ?? [], euid: jobUserIdentity.euid, egid: jobUserIdentity.egid, socket: bootJobUser?.socket ?? null });
 		if (planned.refused === "job-image-any-uid-unsupported") log("job_image_any_uid_unsupported", { image: config.jobImage });
 		else if (planned.refused) log("job_user_group_refused", { cause: planned.cause });
@@ -936,6 +1012,77 @@ export async function startWorker(
 	});
 
 
+	// `local`'s two optional preflights (issue #354: they were `deps` closures, and are now the bundle's own members,
+	// dispatched per venue by the registry). Bodies unchanged.
+	//
+	// Issue #278: the docker endpoint read AGAIN before each job's spend, because a `docker context use`
+	// after boot redirects every later job, and a preflight that answered once at boot would give a
+	// wrong decision all day (the image preflight is not cached for the same reason). Only for a venue
+	// whose declaration is observation-gated on it, and only a refusal under a floor that needs it.
+	// Issue #345: the runtime observations come from the same per-job read, in the same place: the facts the job user is
+	// decided from (cached per endpoint state, so no second daemon call) and this host's Podman files, re-read per job
+	// because an operator creating the empty mounts.conf override must not need a restart.
+	const localObservationPreflight = async (job) => {
+		const venue = resolveBackendName(job, config.defaultBackend);
+		if (Object.keys(backendFor(venue)?.observedBy ?? {}).length === 0) return { ok: true };
+		const endpoint = await resolveDockerEndpointFn();
+		const state = dockerEndpointState(endpoint);
+		if (state !== endpointSeen) {
+			endpointSeen = state;
+			logDockerEndpoint(log, endpoint, { changed: true });
+		}
+		// The endpoint refusal FIRST, from the CLI's own configuration only, as boot does: a floor that distrusts this
+		// endpoint must not wait on, or send the CLI's own TLS client credentials to, the daemon behind it.
+		const endpointArgs = {
+			backends: [venue],
+			backendFloor: config.backendFloor,
+			observations: { [DOCKER_ENDPOINT_LOCAL]: endpoint.local === true },
+			evidence: { [DOCKER_ENDPOINT_LOCAL]: dockerEndpointEvidence(endpoint) },
+			only: [DOCKER_ENDPOINT_LOCAL],
+		};
+		const [endpointRefusal] = observationRefusals(endpointArgs);
+		if (endpointRefusal) {
+			if (endpoint.local === null && endpoint.transient) return { unavailable: true, reason: endpoint.reason };
+			return { refused: true, message: endpointRefusal, observations: [DOCKER_ENDPOINT_LOCAL] };
+		}
+		const jobUser = await resolveJobUser({ endpoint, key: state });
+		const observed = observeHost({ endpoint, daemon: jobUser.daemon, fs: observationFs });
+		if (runtimeObservationKey(observed) !== runtimeObservedSaid) {
+			runtimeObservedSaid = runtimeObservationKey(observed);
+			log("runtime_observed", { daemonAppliesBounds: observed.observations.daemonAppliesBounds, runtimeAddsNoMounts: observed.observations.runtimeAddsNoMounts, changed: true });
+		}
+		const args = {
+			backends: [venue],
+			backendFloor: config.backendFloor,
+			observations: observed.observations,
+			evidence: { [DOCKER_ENDPOINT_LOCAL]: dockerEndpointEvidence(endpoint), ...observed.evidence },
+		};
+		const [refusal] = observationRefusals(args);
+		if (!refusal) return { ok: true, endpoint, jobUser };
+		const missed = [...new Set(unobservedFloor(args.backends, args.backendFloor, args.observations).map((m) => m.observedBy))];
+		if (observationRefusalIsTransient(args)) return { unavailable: true, reason: observed.reasons[missed[0]] ?? "unknown" };
+		return { refused: true, message: refusal, observations: missed };
+	};
+	// Issue #341: the job user, for a job on the `local` venue only (its containers are this host's docker
+	// CLI's). The endpoint is the one `observationPreflight` just read, so one job's two decisions agree.
+	const localJobUserPreflight = async (job, { capabilities = [], observed } = {}) => {
+		const venue = resolveBackendName(job, config.defaultBackend);
+		if (venue !== DEFAULT_BACKEND) return { user: null, home: null };
+		const endpoint = observed?.endpoint ?? (await resolveDockerEndpointFn());
+		const { decision, socket, facts } = observed?.jobUser ?? (await resolveJobUser({ endpoint, key: dockerEndpointState(endpoint) }));
+		if (jobUserLogKey(decision) !== jobUserSaid) {
+			jobUserSaid = jobUserLogKey(decision);
+			log("job_user", { mode: decision.mode, user: decision.user, cause: decision.cause, reason: decision.reason });
+		}
+		const chosen = resolveImageUser(decision, { capabilities, euid: jobUserIdentity.euid, egid: jobUserIdentity.egid, socket });
+		// Issue #355: whether this job's own mounts carry `:Z`, from the SAME facts and endpoint the user was decided
+		// from, so one job's two answers cannot come from two reads. Only on a path that runs (a refusal or an
+		// undecidable daemon runs nothing), and only when true: every host this does not apply to keeps the answer
+		// shape, and so the argv, it had before.
+		if (chosen.refused || chosen.unavailable) return chosen;
+		return relabelsPrivateMounts(facts, endpoint, jobUserIdentity.platform) ? { ...chosen, relabel: true } : chosen;
+	};
+
 	// #227: WHERE this job's container runs. The three functions that decide whether a container may start and
 	// then start it -- two pre-spend gates and the launcher -- bundled into one value with a completeness
 	// check, so the set has a name instead of being three unrelated `deps` keys. Byte-identical to passing them individually -- the same three functions reach the same three keys,
@@ -945,46 +1092,57 @@ export async function startWorker(
 	// Assigned key by key below rather than spread, because the bundle also carries `name` and `declares`,
 	// and `deps` is the processor's namespace: a spread would put a backend's name into it under a key the
 	// processor is free to mean something else by.
-	const localBackend = makeLocalBackend({
-		// #227. The two the earlier slices deferred, now real seams. `reap` keeps its tri-state: the boot
-		// sweep below only sweeps this host's scope claims once the reaper has PROVEN this host holds no
-		// job containers, and an unproven answer must never free a slot.
-		stopContainer: makeStopContainer(),
-		reap: backendReaps[DEFAULT_BACKEND],
-		// One deployment default, two consumers, adjacent by construction: the preflight that refuses a missing
-		// image BEFORE the budget slot, and the factory that puts it in the argv. Both resolve a trigger's own
-		// `run.image` through the same resolveJobImage, so the image that was checked is the image that runs.
-		// Nothing is memoised (see its construction above): `docker image inspect` costs ~tens of ms against a
-		// container run of minutes, and a cache would be wrong in both directions -- an operator who builds the
-		// image mid-day would stay refused, one who removes it would stay admitted. Contrast the staged-package
-		// manifest, correctly read once at boot because it is deploy-time state under a :ro mount.
-		imagePreflight,
-		// REQ-EGRESS-ALLOWLIST, and built here for the same reason the image preflight is: one deployment
-		// value, one place, so the gate that checks the proxy and the runner that attaches to its network
-		// cannot disagree about which proxy is meant. Nothing is memoised here either -- an operator who
-		// starts the proxy mid-day must not stay refused, and one who stops it must not stay admitted.
-		// Unarmed it spawns nothing at all, so a deployment without a policy pays for none of this.
-		egressPreflight: makeEgressPreflightFn({ proxy: config.egressProxy, armed: config.egress }),
-		runContainer: makeRunContainerFn({
-			image: config.jobImage,
-			hostEnv: env,
-			egress: config.egress, // REQ-EGRESS-ALLOWLIST: the per-job network and the proxy variables
-			egressProxy: config.egressProxy,
-			openJobLog,
-			globalPiDir: config.globalPiDir, // REQ-GLOBAL-PI-OVERLAY: :ro overlay mount when configured
-			allowGlobalExtensions: config.allowGlobalExtensions,
-			// REQ-GLOBAL-PI-OVERLAY: staged package paths; every job receives them unless its trigger set
-			// packages:false. A RESOLVER, not the array: the factory is still constructed exactly once, only
-			// the value it reads became a call, so a re-stage takes effect on the next job without a restart.
-			packagePaths: getPackagePaths,
-			forwardEnv: config.forwardEnv,
-			authFromPi: config.authFromPi, // source the provider key from ~/.pi/agent/auth.json when env has none
-			// Self-hosted instance URLs, keyed by forge. A MAP rather than one scalar per forge: the table says
-			// which variable each lands in, so a forge with no self-hosted concept simply has no entry, and
-			// adding one does not widen this signature again.
-			forgeHosts: { gitlab: config.gitlab?.apiUrl ?? null, forgejo: config.forgejo?.apiUrl ?? null, azure: config.azure?.orgUrl ?? null },
-		}),
-	});
+	//
+	// Issue #354: built ONLY while `local` is blessed. Built unconditionally, as it was while PI_BACKENDS had to include
+	// it, it would be a registered venue this deployment never chose, whose reaper the boot map must then carry and
+	// whose reads spawn `docker` on a host that may have none. The two optional preflights ride on the bundle rather
+	// than through `makeLocalBackend`, whose completeness check treats every member it takes as required.
+	const localBackend = localBlessed
+		? {
+				...makeLocalBackend({
+					// #227. The two the earlier slices deferred, now real seams. `reap` keeps its tri-state: the boot
+					// sweep below only sweeps this host's scope claims once the reaper has PROVEN this host holds no
+					// job containers, and an unproven answer must never free a slot.
+					stopContainer: makeStopContainer(),
+					reap: backendReaps[DEFAULT_BACKEND],
+					// One deployment default, two consumers, adjacent by construction: the preflight that refuses a missing
+					// image BEFORE the budget slot, and the factory that puts it in the argv. Both resolve a trigger's own
+					// `run.image` through the same resolveJobImage, so the image that was checked is the image that runs.
+					// Nothing is memoised (see its construction above): `docker image inspect` costs ~tens of ms against a
+					// container run of minutes, and a cache would be wrong in both directions -- an operator who builds the
+					// image mid-day would stay refused, one who removes it would stay admitted. Contrast the staged-package
+					// manifest, correctly read once at boot because it is deploy-time state under a :ro mount.
+					imagePreflight,
+					// REQ-EGRESS-ALLOWLIST, and built here for the same reason the image preflight is: one deployment
+					// value, one place, so the gate that checks the proxy and the runner that attaches to its network
+					// cannot disagree about which proxy is meant. Nothing is memoised here either -- an operator who
+					// starts the proxy mid-day must not stay refused, and one who stops it must not stay admitted.
+					// Unarmed it spawns nothing at all, so a deployment without a policy pays for none of this.
+					egressPreflight: makeEgressPreflightFn({ proxy: config.egressProxy, armed: config.egress }),
+					runContainer: makeRunContainerFn({
+						image: config.jobImage,
+						hostEnv: env,
+						egress: config.egress, // REQ-EGRESS-ALLOWLIST: the per-job network and the proxy variables
+						egressProxy: config.egressProxy,
+						openJobLog,
+						globalPiDir: config.globalPiDir, // REQ-GLOBAL-PI-OVERLAY: :ro overlay mount when configured
+						allowGlobalExtensions: config.allowGlobalExtensions,
+						// REQ-GLOBAL-PI-OVERLAY: staged package paths; every job receives them unless its trigger set
+						// packages:false. A RESOLVER, not the array: the factory is still constructed exactly once, only
+						// the value it reads became a call, so a re-stage takes effect on the next job without a restart.
+						packagePaths: getPackagePaths,
+						forwardEnv: config.forwardEnv,
+						authFromPi: config.authFromPi, // source the provider key from ~/.pi/agent/auth.json when env has none
+						// Self-hosted instance URLs, keyed by forge. A MAP rather than one scalar per forge: the table says
+						// which variable each lands in, so a forge with no self-hosted concept simply has no entry, and
+						// adding one does not widen this signature again.
+						forgeHosts: { gitlab: config.gitlab?.apiUrl ?? null, forgejo: config.forgejo?.apiUrl ?? null, azure: config.azure?.orgUrl ?? null },
+					}),
+				}),
+				observationPreflight: localObservationPreflight,
+				jobUserPreflight: localJobUserPreflight,
+			}
+		: null;
 
 	// #227. WHICH backend runs which job, and the one place that decides. One bundle today, so every
 	// resolution returns it -- but the mechanism is real, so `run.backend` stops being a validated label and
@@ -998,7 +1156,7 @@ export async function startWorker(
 		// what lets a wiring test prove `startWorker` actually CONNECTS the registry to the processor --
 		// six mutations reverting that connection survived the whole suite, which is the same shape as the
 		// bug that shipped: invisible while there is one venue.
-		bundles: [localBackend, ...extraBackends],
+		bundles: [...(localBackend ? [localBackend] : []), ...extraBackends],
 		defaultName: config.defaultBackend,
 		// Cross-checked at boot rather than discovered at the first pickup: a name PI_BACKENDS blesses but
 		// nothing builds passes both the loader and the pre-spend gate, and a venue with no boot reaper is
@@ -1198,73 +1356,11 @@ export async function startWorker(
 			},
 			imagePreflight: backends.imagePreflight,
 			egressPreflight: backends.egressPreflight,
-			// Issue #278: the docker endpoint read AGAIN before each job's spend, because a `docker context use`
-			// after boot redirects every later job, and a preflight that answered once at boot would give a
-			// wrong decision all day (the image preflight is not cached for the same reason). Only for a venue
-			// whose declaration is observation-gated on it, and only a refusal under a floor that needs it.
-			// Issue #345: the runtime observations come from the same per-job read, in the same place: the facts the job user is
-			// decided from (cached per endpoint state, so no second daemon call) and this host's Podman files, re-read per job
-			// because an operator creating the empty mounts.conf override must not need a restart.
-			observationPreflight: async (job) => {
-				const venue = resolveBackendName(job, config.defaultBackend);
-				if (Object.keys(backendFor(venue)?.observedBy ?? {}).length === 0) return { ok: true };
-				const endpoint = await resolveDockerEndpointFn();
-				const state = dockerEndpointState(endpoint);
-				if (state !== endpointSeen) {
-					endpointSeen = state;
-					logDockerEndpoint(log, endpoint, { changed: true });
-				}
-				// The endpoint refusal FIRST, from the CLI's own configuration only, as boot does: a floor that distrusts this
-				// endpoint must not wait on, or send the CLI's own TLS client credentials to, the daemon behind it.
-				const endpointArgs = {
-					backends: [venue],
-					backendFloor: config.backendFloor,
-					observations: { [DOCKER_ENDPOINT_LOCAL]: endpoint.local === true },
-					evidence: { [DOCKER_ENDPOINT_LOCAL]: dockerEndpointEvidence(endpoint) },
-					only: [DOCKER_ENDPOINT_LOCAL],
-				};
-				const [endpointRefusal] = observationRefusals(endpointArgs);
-				if (endpointRefusal) {
-					if (endpoint.local === null && endpoint.transient) return { unavailable: true, reason: endpoint.reason };
-					return { refused: true, message: endpointRefusal, observations: [DOCKER_ENDPOINT_LOCAL] };
-				}
-				const jobUser = await resolveJobUser({ endpoint, key: state });
-				const observed = observeHost({ endpoint, daemon: jobUser.daemon, fs: observationFs });
-				if (runtimeObservationKey(observed) !== runtimeObservedSaid) {
-					runtimeObservedSaid = runtimeObservationKey(observed);
-					log("runtime_observed", { daemonAppliesBounds: observed.observations.daemonAppliesBounds, runtimeAddsNoMounts: observed.observations.runtimeAddsNoMounts, changed: true });
-				}
-				const args = {
-					backends: [venue],
-					backendFloor: config.backendFloor,
-					observations: observed.observations,
-					evidence: { [DOCKER_ENDPOINT_LOCAL]: dockerEndpointEvidence(endpoint), ...observed.evidence },
-				};
-				const [refusal] = observationRefusals(args);
-				if (!refusal) return { ok: true, endpoint, jobUser };
-				const missed = [...new Set(unobservedFloor(args.backends, args.backendFloor, args.observations).map((m) => m.observedBy))];
-				if (observationRefusalIsTransient(args)) return { unavailable: true, reason: observed.reasons[missed[0]] ?? "unknown" };
-				return { refused: true, message: refusal, observations: missed };
-			},
-			// Issue #341: the job user, for a job on the `local` venue only (its containers are this host's docker
-			// CLI's). The endpoint is the one `observationPreflight` just read, so one job's two decisions agree.
-			jobUserPreflight: async (job, { capabilities = [], observed } = {}) => {
-				const venue = resolveBackendName(job, config.defaultBackend);
-				if (venue !== DEFAULT_BACKEND) return { user: null, home: null };
-				const endpoint = observed?.endpoint ?? (await resolveDockerEndpointFn());
-				const { decision, socket, facts } = observed?.jobUser ?? (await resolveJobUser({ endpoint, key: dockerEndpointState(endpoint) }));
-				if (jobUserLogKey(decision) !== jobUserSaid) {
-					jobUserSaid = jobUserLogKey(decision);
-					log("job_user", { mode: decision.mode, user: decision.user, cause: decision.cause, reason: decision.reason });
-				}
-				const chosen = resolveImageUser(decision, { capabilities, euid: jobUserIdentity.euid, egid: jobUserIdentity.egid, socket });
-				// Issue #355: whether this job's own mounts carry `:Z`, from the SAME facts and endpoint the user was decided
-				// from, so one job's two answers cannot come from two reads. Only on a path that runs (a refusal or an
-				// undecidable daemon runs nothing), and only when true: every host this does not apply to keeps the answer
-				// shape, and so the argv, it had before.
-				if (chosen.refused || chosen.unavailable) return chosen;
-				return relabelsPrivateMounts(facts, endpoint, jobUserIdentity.platform) ? { ...chosen, relabel: true } : chosen;
-			},
+			// Issue #354: both are the VENUE's, dispatched through the registry like the two gates above, so a job on a
+			// venue that carries neither gets the processor's own defaults and never asks this host's docker CLI anything.
+			// `local`'s are the closures built beside its bundle below, unchanged.
+			observationPreflight: backends.observationPreflight,
+			jobUserPreflight: backends.jobUserPreflight,
 			// Completed-only, so a policy or infra exit leaves the canonical transcript byte-identical and a
 			// retry starts from what the first attempt did (CONST-RETRY-INFRA-ONLY).
 			promoteSession: sessionStore.promoteSession,
@@ -1500,12 +1596,13 @@ export async function startWorker(
 			queue: "pi-jobs",
 			// Issue #278: the service's OWN answer to which daemon its jobs go to. `doctor` reads its caller's
 			// shell, and a service's EnvironmentFile or a systemd User= can resolve differently.
-			dockerContext: bootEndpoint.context,
-			dockerEndpointLocal: bootEndpoint.local,
-			jobUser: { mode: bootDecision.mode, user: bootDecision.user, cause: bootDecision.cause }, // issue #341
+			// Issue #354: all five null with `local` unblessed, where this host's docker CLI was not asked.
+			dockerContext: bootEndpoint ? bootEndpoint.context : null,
+			dockerEndpointLocal: bootEndpoint ? bootEndpoint.local : null,
+			jobUser: bootDecision ? { mode: bootDecision.mode, user: bootDecision.user, cause: bootDecision.cause } : null, // issue #341
 			// Issue #345: whether this daemon is observed applying a container's bounds and adding no mounts of its own; null = not read.
-			daemonAppliesBounds: bootObserved.observations.daemonAppliesBounds,
-			runtimeAddsNoMounts: bootObserved.observations.runtimeAddsNoMounts,
+			daemonAppliesBounds: bootObserved ? bootObserved.observations.daemonAppliesBounds : null,
+			runtimeAddsNoMounts: bootObserved ? bootObserved.observations.runtimeAddsNoMounts : null,
 			host: config.workerName, // issue #57; `log` stamps it on every line, and the boot line names it where an operator looks first
 			imageDigest: bootImage.imageDigest ?? null, // two hosts on two builds of one tag used to emit byte-identical boot lines
 			concurrency: bootConcurrency, // the slot count the Worker is actually constructed with (overlay may raise/lower it)

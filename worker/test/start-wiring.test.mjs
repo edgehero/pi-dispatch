@@ -78,7 +78,25 @@ function fakeHost(overrides = {}) {
 const enoent = (path) => Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
 const NO_HOST_FILES = { statSync: (p) => { throw enoent(p); }, readFileSync: (p) => { throw enoent(p); }, readdirSync: (p) => { throw enoent(p); } };
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs } = {}) {
+/**
+ * A venue other than `local` with the five required functions and NEITHER optional preflight (issue #354), so a job on it
+ * gets the registry's absent answers. `spawned` records every call, which is how a test proves nothing here ran.
+ */
+function OTHER_VENUE(name, { spawned = [], reap = async () => ({ reaped: true }), ...extra } = {}) {
+	return {
+		name,
+		neverStartedExits: [],
+		containerName: (id) => `${name}-${id}`,
+		runContainer: async () => (spawned.push(`${name}:runContainer`), { code: 0 }),
+		imagePreflight: async () => (spawned.push(`${name}:imagePreflight`), { ok: true, imageDigest: `sha256:${name}`, piVersion: "0.0.0-test" }),
+		egressPreflight: async () => (spawned.push(`${name}:egressPreflight`), { ok: true }),
+		stopContainer: async () => spawned.push(`${name}:stopContainer`),
+		reap,
+		...extra,
+	};
+}
+
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -209,6 +227,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			observationFs: observationFs ?? NO_HOST_FILES,
 			...(makeBackendRegistry ? { makeBackendRegistry } : {}),
 			...(extraBackends ? { extraBackends } : {}),
+			...(loadConfig ? { loadConfig } : {}),
 			...(makeRetentionSweep ? { makeRetentionSweep } : {}),
 			...(makeHostRegistry ? { makeHostRegistry } : {}),
 			...(makeScopeClaimSweeper ? { makeScopeClaimSweeper } : {}),
@@ -2185,6 +2204,9 @@ test("a job on another venue never reaches the job-user decision, and a changed 
 		readDaemonFacts: async () => (reads++, answer),
 		jobUserIdentity: { ...LINUX_ID(1234), stat: () => ({ uid: 0, gid: 2375 }) },
 		resolveDockerEndpoint: async () => endpoint,
+		// Issue #354: the other venue is REGISTERED, as every venue a job can reach past the blessed gate is. The job-user
+		// decision is now the venue's own optional member, dispatched by the registry, and this one carries none.
+		extraBackends: [OTHER_VENUE("far")],
 	});
 	assert.equal(logs.filter((l) => l.event === "job_user").length, 1);
 	const mark = bootLines.length;
@@ -2488,4 +2510,133 @@ test("all FOUR live-edit watches apply the boot-race rule, not just the one with
 		// every boot reloads: measured, a mismatched pair logs a reload and a Valkey reconcile on EVERY start.
 		assert.match(worker, new RegExp(`recording\\("${key}", config\\.${key === "triggers" ? "triggersFile" : key + "File"}\\)`), `${key}'s baseline is captured from its own file`);
 	}
+});
+
+// ── issue #354: `local` is no longer mandatory ─────────────────────────────────────────────────────────
+
+/** The real loader with its backend facts replaced: `local` is the table's one entry, so no env can omit it yet. */
+async function configWith(overrides) {
+	const { loadConfig } = await import("../src/config.mjs");
+	return (env) => ({ ...loadConfig(env), ...overrides });
+}
+
+/** A seam that FAILS the test if called: the proof that a boot without `local` asks this host's docker CLI nothing. */
+const forbidden = (what, seen) => (...args) => {
+	seen.push(what);
+	throw new Error(`${what} must not be called with local unblessed (${JSON.stringify(args).slice(0, 80)})`);
+};
+
+test("a deployment WITHOUT local boots on its own venue, and asks this host's docker CLI nothing (#354)", { skip }, async () => {
+	const seen = [];
+	const spawned = [];
+	let registryArgs = null;
+	const swept = [];
+	const { captured, logs, imagePreflightCalls, runContainerCalls, sandboxReaperCalls } = await runStart({
+		env: { PI_WORKER_NAME: "no-docker-1", VALKEY_URL },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		// A floor naming an observation only `local` makes. With `local` blessed and unobserved this is the unanswered,
+		// transient arm, exit 1 forever; without it there is nothing of local's to observe.
+		loadConfig: await configWith({ backends: ["far"], defaultBackend: "far", backendFloor: { isolation: "enforced", mountSet: "enforced", credentialTransit: "enforced" } }),
+		extraBackends: [OTHER_VENUE("far", { spawned })],
+		resolveDockerEndpoint: forbidden("resolveDockerEndpoint", seen),
+		readDaemonFacts: forbidden("readDaemonFacts", seen),
+		makeReaper: forbidden("makeReaper", seen),
+		makeScopeClaimSweeper: () => async (opts) => (swept.push(opts), { swept: 0, skipped: !opts.reaped }),
+		makeBackendRegistry: (args) => {
+			registryArgs = args;
+			return realRegistry(args);
+		},
+	});
+	assert.deepEqual(seen, [], "no endpoint read, no daemon facts, no local reaper");
+	assert.equal(imagePreflightCalls.length, 0, "local's image preflight is not even constructed");
+	assert.equal(runContainerCalls.length, 0, "nor its runContainer");
+	assert.deepEqual(registryArgs.bundles.map((b) => b.name), ["far"], "no local bundle is registered");
+	assert.deepEqual(Object.keys(registryArgs.reaps), ["far"], "and no local boot reaper, which the registry would refuse");
+	assert.equal(registryArgs.defaultName, "far");
+
+	// The boot image read asks the DEFAULT venue's own preflight, the one its jobs are gated on.
+	assert.deepEqual(spawned, ["far:imagePreflight"]);
+	const started = logs.find((l) => l.event === "worker_started");
+	assert.equal(started.imageDigest, "sha256:far");
+	for (const key of ["dockerContext", "dockerEndpointLocal", "jobUser", "daemonAppliesBounds", "runtimeAddsNoMounts"]) {
+		assert.equal(started[key], null, `${key} is null: this host's docker CLI was not asked`);
+	}
+	assert.ok(!logs.some((l) => l.event === "job_user"), "no job-user decision is said about a daemon nobody asked");
+
+	// The sandbox reaper is built, but its liveness listing refuses rather than answering "none open", and its
+	// docker-backed network sweeper is not built at all.
+	assert.equal(sandboxReaperCalls.length, 1);
+	await assert.rejects(() => sandboxReaperCalls[0].listRunning(), /local is not blessed/);
+	assert.equal(sandboxReaperCalls[0].sweepNetworks, undefined);
+
+	// Every reaper answered, and the host is still not proven: Docker containers from before may remain.
+	assert.deepEqual(swept, [{ reaped: false }]);
+	assert.equal(logs.find((l) => l.event === "host_reap_unproven")?.reason, "local is not blessed, so no reaper lists this host's docker containers");
+
+	// Per job: the venue carries neither optional preflight, so it gets the processor's own defaults, dispatched.
+	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
+	assert.deepEqual(await captured.deps.observationPreflight(job), { ok: true });
+	assert.deepEqual(await captured.deps.jobUserPreflight(job, { capabilities: [], observed: { ok: true } }), { user: null, home: null });
+	assert.deepEqual(seen, [], "and still nothing of local's is asked");
+});
+
+test("with local blessed, a blessed venue with NO boot reaper never lets the scope sweep run (#354)", { skip }, async () => {
+	// The registry refuses a blessed-but-unbuilt venue, but only AFTER the scope sweep has acted on the reap: `reapAll`
+	// is conservative over the reapers it is HANDED, and a venue that handed none was proven by nobody. The registry's
+	// own cross-check is switched off here so the boot completes and the sweep's input can be read.
+	const swept = [];
+	const { logs } = await runStart({
+		env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		loadConfig: await configWith({ backends: ["local", "ghost"], defaultBackend: "local" }),
+		makeReaper: () => async () => ({ reaped: true }),
+		makeScopeClaimSweeper: () => async (opts) => (swept.push(opts), { swept: 0, skipped: !opts.reaped }),
+		makeBackendRegistry: (args) => realRegistry({ ...args, blessed: null }),
+	});
+	assert.deepEqual(swept, [{ reaped: false }], "every reaper handed over enumerated, and the host is still unproven");
+	assert.equal(logs.find((l) => l.event === "host_reap_unproven")?.reason, "a blessed backend has no boot reaper");
+});
+
+test("a venue whose words are observation-gated must carry an observationPreflight, or boot refuses (#354)", { skip }, async () => {
+	// `local`'s table entry names `observedBy`. A bundle claiming that name with no preflight would have those words hold
+	// with nothing observing them; the absent answer admits every job.
+	const base = {
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		loadConfig: await configWith({ backends: ["far"], defaultBackend: "far" }),
+	};
+	await assert.rejects(
+		() => runStart({ ...base, extraBackends: [OTHER_VENUE("far"), OTHER_VENUE("local")] }),
+		/backend "local" declares isolation, mountSet, credentialTransit as held only while observed, and carries no observationPreflight/,
+	);
+	// Carrying one, it boots, and a job on it is dispatched to that member.
+	const asked = [];
+	const { captured } = await runStart({
+		...base,
+		extraBackends: [OTHER_VENUE("far"), OTHER_VENUE("local", { observationPreflight: async (job) => (asked.push(job.backend), { ok: true, mine: true }) })],
+	});
+	assert.deepEqual(await captured.deps.observationPreflight({ backend: "local" }), { ok: true, mine: true });
+	assert.deepEqual(asked, ["local"]);
+});
+
+test("with local blessed, the preflights are local's own members and a job naming another venue gets that venue's answer (#354)", { skip }, async () => {
+	let reads = 0;
+	const { captured } = await runStart({
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		readDaemonFacts: async () => (reads++, { answered: true, facts: { shape: "docker", podman: false, os: "Test Linux", rootless: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null } }),
+		extraBackends: [OTHER_VENUE("far", { jobUserPreflight: async () => ({ user: "4242:4242", home: "/far" }) })],
+		makeBackendRegistry: (args) => {
+			const bundle = args.bundles.find((b) => b.name === "local");
+			assert.equal(typeof bundle.observationPreflight, "function", "local carries its observation preflight");
+			assert.equal(typeof bundle.jobUserPreflight, "function", "and its job-user preflight");
+			return realRegistry(args);
+		},
+	});
+	const atBoot = reads;
+	assert.deepEqual(await captured.deps.jobUserPreflight({ backend: "far" }, { capabilities: [] }), { user: "4242:4242", home: "/far" }, "a venue's own member answers for its jobs");
+	assert.deepEqual(await captured.deps.observationPreflight({ backend: "far" }), { ok: true }, "and one it does not carry is the absent answer");
+	assert.equal(reads, atBoot, "neither asked this host's daemon anything");
 });

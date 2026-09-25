@@ -770,3 +770,34 @@ test("a network under the prefix without the `-net` suffix is now swept, and tha
 	]);
 	assert.ok(!state.has("pi-job-mine-net-backup") && !state.has("pi-job-runner_default"), "both are gone");
 });
+
+// --- issue #354: the runtime binary seam ------------------------------------------------------------------------------
+
+test("makeStopContainer and makeReaper spawn the venue's binary for EVERY step, and default to docker (#354)", async () => {
+	for (const [seam, want] of [[{ bin: "podman" }, "podman"], [{}, "docker"]]) {
+		const daemon = fakeDockerExec({ containers: ["pi-job-a"], nets: { "pi-job-a-net": ["pi-dispatch-egress-proxy"] } });
+		const bins = [];
+		const exec = (cmd, args) => {
+			bins.push(cmd);
+			return daemon.exec(cmd, args);
+		};
+		const { log } = reaperLog();
+		assert.deepEqual(await makeReaper({ log, exec, ...seam })(), { reaped: true });
+		// The pass covered every verb the reaper has, so the binary below is pinned for each of them.
+		for (const verb of ["ps --filter", "rm -f pi-job-a", "network ls", "network inspect", "ps -a", "network disconnect", "network rm"]) {
+			assert.ok(daemon.calls.some((c) => c.startsWith(verb)), verb);
+		}
+		assert.deepEqual([...new Set(bins)], [want], JSON.stringify(seam));
+		const stops = [];
+		await makeStopContainer({ exec: async (cmd, args) => stops.push([cmd, ...args]), ...seam })("pi-job-a");
+		assert.deepEqual(stops, [[want, "stop", "-t", "5", "pi-job-a"]]);
+	}
+});
+
+test("execDockerBounded runs the binary it is given, and docker by default (#354)", async () => {
+	const seen = [];
+	const execFileFn = (cmd, _args, _opts, cb) => (seen.push(cmd), queueMicrotask(() => cb(null, "", "")), {});
+	await execDockerBounded(["info"], { execFileFn, bin: "podman" });
+	await execDockerBounded(["info"], { execFileFn });
+	assert.deepEqual(seen, ["podman", "docker"]);
+});

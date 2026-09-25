@@ -6,7 +6,7 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { CANARY_LINES, CANARY_PROBE_SLUGS, ENV_FILE_READABLE_KEYS, RUN_TIMEOUTS, backendChecks, collectChecks, defaultPromptFn, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, runDoctor } from "../src/doctor.mjs";
+import { CANARY_LINES, CANARY_PROBE_SLUGS, ENV_FILE_READABLE_KEYS, RUN_TIMEOUTS, backendChecks, collectChecks, defaultPromptFn, dockerRunVia, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, runDoctor } from "../src/doctor.mjs";
 import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS } from "../src/init.mjs";
 import { EGRESS_CANARY_NET_PREFIX, egressCanaryProbe } from "../src/egress.mjs";
 import { JOB_USER_FIX, parseDaemonFacts } from "../src/job-user.mjs";
@@ -5694,4 +5694,33 @@ test("doctor --live reads relabel from the collection's own daemon answer, end t
 		assert.equal(probe.args.some((a) => a.endsWith(":/job:ro,Z")), want, label);
 		assert.equal(probe.args.some((a) => a.endsWith(":/job:ro")), !want, label);
 	}
+});
+
+test("doctor's two docker runners spawn the bin they are given, and docker when none is (#354)", async () => {
+	const { EventEmitter } = await import("node:events");
+	const spawned = [];
+	// A child that prints its binary and exits 0, so what each runner resolves shows the spawn it made.
+	const spawn = (cmd, args) => {
+		spawned.push([cmd, ...args]);
+		const child = new EventEmitter();
+		child.stdout = new PassThrough();
+		child.stderr = new PassThrough();
+		child.kill = () => {};
+		setImmediate(() => {
+			child.stdout.end(`${cmd}\n`);
+			child.stderr.end();
+			setImmediate(() => child.emit("close", 0, null));
+		});
+		return child;
+	};
+	assert.equal((await dockerRunVia(spawn)(["version"])).stdout, "docker\n");
+	assert.equal((await dockerRunVia(spawn, 1000)(["version"])).stdout, "docker\n");
+	assert.equal((await dockerRunVia(spawn, 1000, { bin: "podman" })(["version"])).stdout, "podman\n");
+	assert.equal((await liveRunVia(spawn)(["ps"], { timeoutMs: 1000 })).stdout, "docker\n");
+	const live = await liveRunVia(spawn, { bin: "podman" })(["ps"], { timeoutMs: 1000 });
+	assert.deepEqual([live.code, live.stdout, live.ended], [0, "podman\n", "close"]);
+	assert.deepEqual(spawned, [["docker", "version"], ["docker", "version"], ["podman", "version"], ["docker", "ps"], ["podman", "ps"]]);
+	// Every caller in doctor still names no bin, so every spawn doctor makes through them is docker's, as before.
+	const doctorSource = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8");
+	assert.doesNotMatch(doctorSource, /(?<!function )(?:docker|live)RunVia\(spawn[^)\n]*\{ bin/, "no call site in doctor passes a bin yet");
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ABSENT, ASSERTED, BACKENDS, BACKEND_NAMES, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATION_FIX, OBSERVATIONS, RUNTIME_ADDS_NO_MOUNTS, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, declarationOf, effectiveWord, isDeclaration, isProperty, meets, shortfall } from "../src/backends.mjs";
+import { ABSENT, ASSERTED, BACKENDS, BACKEND_NAMES, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATION_FIX, OBSERVATIONS, RUNTIME_ADDS_NO_MOUNTS, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, declarationOf, effectiveWord, isDeclaration, isProperty, meets, parseBackendList, shortfall } from "../src/backends.mjs";
 
 test("the table is a LEAF -- it imports nothing", () => {
 	// `forges.mjs`'s reason, and it is why doctor and the config loader can read a declaration without
@@ -41,6 +41,18 @@ test("an artifact that names no venue was produced on a LOCAL one, which the tab
 	assert.equal(UNATTRIBUTED_BACKEND, "local");
 	assert.ok(Object.hasOwn(BACKENDS, UNATTRIBUTED_BACKEND));
 	assert.equal(BACKENDS[UNATTRIBUTED_BACKEND].remote, false);
+});
+
+test("an unattributed artifact stays LOCAL where local is not even blessed, and never follows the default (#354)", () => {
+	// Once `PI_BACKENDS` may omit `local`, a host's default can be another venue. Absence is a fact about the past (it
+	// predates venue attribution, when `local` was all there was), so it stays `local` and such a host cold-starts that
+	// key once as `venue-changed` (`session-store.test.mjs` drives that with a non-local default). Deriving it from the
+	// parsed list would resume a Docker-written transcript under another runtime on a stamp never written.
+	const known = ["local", "podman"];
+	assert.equal(parseBackendList("podman", { known })[0], "podman", "the default follows the list");
+	assert.equal(UNATTRIBUTED_BACKEND, "local", "the past does not");
+	const store = readFileSync(new URL("../src/session-store.mjs", import.meta.url), "utf8");
+	assert.match(store, /return err\?\.code === "ENOENT" \? UNATTRIBUTED_BACKEND : null;/, "the store reads absence as the constant, not as its defaultBackend");
 });
 
 test("every backend name fits the charset a venue stamp relies on (#277)", () => {

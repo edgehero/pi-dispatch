@@ -51,6 +51,11 @@ export function makeRunContainer({
 	neverStartedExits = DOCKER_NEVER_STARTED_EXITS,
 	fs = { readFileSync, rmSync },
 	detachedCheck = {}, // the clock and bounds `stopDetached` takes, a seam so a test does not wait out a real 10 s
+	// Issue #354: the runtime's CLI and its argv builder, a PAIR. Every spawn below names `bin` -- the run, the job
+	// network's create and teardown, the detached check -- so a podman venue cannot run its container under one binary
+	// and look for it (or remove its network) under another. The defaults are the local venue's, byte-identical.
+	bin = "docker",
+	buildArgs = buildDockerRunArgs,
 }) {
 	// async so a synchronous throw (e.g. buildContainerEnv on an unconfigured provider) surfaces as
 	// a rejection, uniformly awaitable by the processor and by tests.
@@ -133,7 +138,7 @@ export function makeRunContainer({
 			// an unremovable stale file makes the run itself fail to start, which is reported as that
 		}
 
-		const args = buildDockerRunArgs({
+		const args = buildArgs({
 			// Same split as packagePaths above: the per-job value off `job`, the deployment value off the closure,
 			// so a trigger can name its own toolchain (INT-TRIGGERS-FILE-CONTRACT). Resolved through the SAME
 			// function the pre-spend preflight uses (image-preflight.mjs), so the tag that was checked is the tag
@@ -168,7 +173,7 @@ export function makeRunContainer({
 		//
 		// A failure to build it is INFRA, not policy: nothing has been spent, a retry may well succeed, and
 		// `container-never-started` is literally true, so the reservation is given back (processor.mjs).
-		if (network && !(await createJobNetwork(spawnFn, { network, proxy: egressProxy }))) {
+		if (network && !(await createJobNetwork(spawnFn, { network, proxy: egressProxy, bin }))) {
 			throw new InfraRetry("container-never-started", { reason: "container-never-started" });
 		}
 
@@ -177,7 +182,7 @@ export function makeRunContainer({
 		const sink = openJobLog(name);
 
 		const run = new Promise((resolve, reject) => {
-			const child = spawnFn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+			const child = spawnFn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
 			// A throwing sink.write is swallowed so a misbehaving sink cannot break the tee or hang the run.
 			const tee = (chunk) => {
 				onOutput(chunk);
@@ -225,12 +230,12 @@ export function makeRunContainer({
 			const result = await run;
 			// Issue #345: an exit that says "never started" is checked against the cidfile BEFORE the network goes, so a
 			// container found running is stopped while its network still exists. Only when the worker did not abort it.
-			if (!result.aborted && (neverStartedExits ?? []).includes(result.code) && (await stopDetached({ spawnFn, cidFile, fs, ...detachedCheck }))) {
+			if (!result.aborted && (neverStartedExits ?? []).includes(result.code) && (await stopDetached({ spawnFn, cidFile, fs, bin, ...detachedCheck }))) {
 				return { ...result, detached: true };
 			}
 			return result;
 		} finally {
-			if (network) await removeJobNetwork(spawnFn, { network, proxy: egressProxy });
+			if (network) await removeJobNetwork(spawnFn, { network, proxy: egressProxy, bin });
 			try {
 				fs.rmSync(cidFile, { force: true });
 			} catch {
@@ -267,7 +272,7 @@ export const DETACHED_MIN_STEP_MS = 5_000;
  * but never below `minStepMs`, so the step that runs at the deadline (a `stop` that waited out its grace period, then the
  * `rm -f`) still has time to reach the daemon. Worst case: the deadline plus two of those.
  */
-export async function stopDetached({ spawnFn, cidFile, fs, timeoutMs = DETACHED_CHECK_TIMEOUT_MS, minStepMs = DETACHED_MIN_STEP_MS, now = () => Date.now(), delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), retryMs = 500, run = dockerStep }) {
+export async function stopDetached({ spawnFn, cidFile, fs, timeoutMs = DETACHED_CHECK_TIMEOUT_MS, minStepMs = DETACHED_MIN_STEP_MS, now = () => Date.now(), delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), retryMs = 500, run = dockerStep, bin = "docker" }) {
 	let id;
 	try {
 		id = String(fs.readFileSync(cidFile, "utf8")).trim();
@@ -279,7 +284,7 @@ export async function stopDetached({ spawnFn, cidFile, fs, timeoutMs = DETACHED_
 	// One step, asked again while it fails and the check's own deadline has not passed; each try is bounded by what is left.
 	const step = async (args) => {
 		for (;;) {
-			const result = await run(spawnFn, args, Math.max(minStepMs, deadline - now()));
+			const result = await run(spawnFn, args, Math.max(minStepMs, deadline - now()), bin);
 			if (result.code === 0 || now() + retryMs >= deadline) return result;
 			await delay(retryMs);
 		}
@@ -297,12 +302,12 @@ export async function stopDetached({ spawnFn, cidFile, fs, timeoutMs = DETACHED_
 	return true;
 }
 
-/** One bounded docker step: `{ code, stdout }`, `code: null` when it could not run or overran. Never throws. */
-function dockerStep(spawnFn, args, timeoutMs) {
+/** One bounded CLI step under `bin`: `{ code, stdout }`, `code: null` when it could not run or overran. Never throws. */
+function dockerStep(spawnFn, args, timeoutMs, bin = "docker") {
 	return new Promise((resolve) => {
 		let child;
 		try {
-			child = spawnFn("docker", args, { stdio: ["ignore", "pipe", "ignore"] });
+			child = spawnFn(bin, args, { stdio: ["ignore", "pipe", "ignore"] });
 		} catch {
 			resolve({ code: null, stdout: "" });
 			return;

@@ -82,6 +82,23 @@ export function assertJobUser(user) {
 }
 
 /**
+ * The user-namespace modes a spec may ask for (issue #354): `null`, the runtime's default, or `"keep-id"`, which maps the
+ * worker's own uid and gid to the SAME ids inside a rootless Podman container, so a job run as the worker's own
+ * "<uid>:<gid>" owns its bind mounts exactly as the worker does. A CLOSED set, and refused rather than passed through,
+ * because the value reaches an argv as one token and every other spelling Podman accepts (`host`, `auto`, `nomap`, a
+ * path to another process's namespace) changes which uids a job can reach on the host.
+ */
+export const USERNS_MODES = Object.freeze(["keep-id"]);
+
+/** Throws unless `userns` is null/undefined or a member of `USERNS_MODES` (issue #354). */
+export function assertUserns(userns) {
+	if (userns === null || userns === undefined) return;
+	if (typeof userns !== "string" || !USERNS_MODES.includes(userns)) {
+		throw new Error(`container spec: refusing a userns other than null or ${USERNS_MODES.map((m) => JSON.stringify(m)).join(", ")}: ${JSON.stringify(userns)}`);
+	}
+}
+
+/**
  * WHAT the box is, with no Docker vocabulary in it.
  *
  * Split from the argv builder so the description of a container exists as a VALUE before it becomes one
@@ -111,6 +128,10 @@ export function assertJobUser(user) {
  *                   docker default bridge, which is what every job did before that requirement existed
  * @param user       "<uid>:<gid>" the job runs as (issue #341), or null for the image's own USER. Portable: it says WHO
  *                   runs the box, which a non-docker runtime must honour too.
+ * @param userns     null (the runtime's own default) or "keep-id" (issue #354): how the job user's ids map to the host's.
+ *                   Portable in meaning, but only one runtime spells it: `dockerArgsFromSpec` REFUSES a non-null one,
+ *                   because the docker CLI rejects `--userns=keep-id` client-side (exit 125, measured in issue #345), and
+ *                   dropping it instead would run the job under a uid mapping nobody asked for.
  * @param extraFlags raw docker flags for the few callers that need them (the sandbox's -i -t --entrypoint bash)
  * @param relabel    true where the daemon confines containers with SELinux (`relabelsPrivateMounts`, issue #355): the
  *                   worker's own per-job mounts then carry `relabel: "private"`. Portable: it says WHICH host paths the
@@ -131,6 +152,7 @@ export function containerSpec({
 	cpus = "2",
 	network = null,
 	user = null,
+	userns = null,
 	cidFile = null,
 	extraFlags = [],
 	relabel = false,
@@ -138,6 +160,7 @@ export function containerSpec({
 }) {
 	if (!image) throw new Error("docker run: image is required");
 	assertJobUser(user);
+	assertUserns(userns);
 	assertCidFile(cidFile);
 	if (!name) throw new Error("docker run: container name is required");
 	if (!workspace) throw new Error("docker run: workspace mount is required");
@@ -188,6 +211,10 @@ export function containerSpec({
 		cpus,
 		network,
 		user,
+		// Issue #354. Always present and `null` by default (the parameter default turns an `undefined` into it, so a spec
+		// has ONE spelling of "the runtime's default"), beside `user` because it qualifies it: the same "<uid>:<gid>" names
+		// a different host identity under a different mapping.
+		userns,
 		// Issue #345: where the runtime writes the container ID once it creates one, so a CLI that exits as if nothing
 		// started (a lost API connection) can be told apart from a container that runs on without it. null = absent.
 		cidFile,

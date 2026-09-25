@@ -48,7 +48,9 @@ export function resolveJobImage(job, defaultImage) {
  * `unavailable` and retry; if it comes up between them we report `missing` on an image that is genuinely
  * absent. Nothing is cached, deliberately -- see the note at the call site in start.mjs.
  */
-export function makeImagePreflight({ image, spawnFn = spawn }) {
+export function makeImagePreflight({ image, spawnFn = spawn, bin = "docker" }) {
+	// Issue #354: `bin` is the venue's CLI. Both probes go through it, because a `podman image inspect` answered by one
+	// store and an `info` answered by another daemon would tell "absent" from "unavailable" about two different hosts.
 	return async function imagePreflight(job) {
 		const wanted = resolveJobImage(job, image);
 		// --format keeps docker from serialising the whole image manifest to a pipe we ignore.
@@ -70,7 +72,7 @@ export function makeImagePreflight({ image, spawnFn = spawn }) {
 		// HARD_RULES.md whose rule 3 hard-codes `pi/issue-<n>` -- and that is the SYSTEM prompt, which the
 		// model treats as authoritative. Both replicas would converge on one branch and the feature would
 		// become the push race it exists to avoid, with nothing in the run record saying so.
-		const probe = await runDocker(spawnFn, ["image", "inspect", `--format={{.Id}}${FIELD_SEP}${PI_VERSION_TEMPLATE}${FIELD_SEP}${FORGES_TEMPLATE}${FIELD_SEP}${CAPABILITIES_TEMPLATE}`, wanted], true);
+		const probe = await runDocker(bin, spawnFn, ["image", "inspect", `--format={{.Id}}${FIELD_SEP}${PI_VERSION_TEMPLATE}${FIELD_SEP}${FORGES_TEMPLATE}${FIELD_SEP}${CAPABILITIES_TEMPLATE}`, wanted], true);
 		if (probe.code === 0) {
 			const [piVersion, forges, capabilities, imageDigest] = parseLabels(probe.stdout);
 			const kind = job?.kind;
@@ -110,7 +112,7 @@ export function makeImagePreflight({ image, spawnFn = spawn }) {
 			// this preflight; an image that declares nothing reads as [].
 			return { ok: true, image: wanted, piVersion, imageDigest, capabilities: capabilities ?? [] };
 		}
-		if ((await runDocker(spawnFn, ["info"])).code === 0) return { missing: wanted };
+		if ((await runDocker(bin, spawnFn, ["info"])).code === 0) return { missing: wanted };
 		return { unavailable: wanted };
 	};
 }
@@ -151,11 +153,22 @@ function parseLabels(stdout) {
 	// string had four fields and was thrown away until issue #57, which needs it to answer "are these two
 	// hosts running the same image?" -- a question `OQ-012` records as unanswerable and which turns out to
 	// cost nothing to answer, because the inspect that would have asked it already runs.
-	const imageDigest = label(parts[0]);
+	const imageDigest = normalizeImageId(label(parts[0]));
 	const piVersion = label(parts[1]);
 	// A label that is present but parses to nothing usable is treated as ABSENT rather than as an empty
 	// list -- on `forges` the latter would refuse every job on an image whose label was merely malformed.
 	return [piVersion, list(parts[2]), list(parts[3]), imageDigest];
+}
+
+/**
+ * One spelling of an image id across runtimes (issue #354): Podman's `{{.Id}}` is the bare 64-hex digest where docker's
+ * carries `sha256:` (both measured). The id is published to the fleet registry and compared host against host by
+ * `doctor`, so without this a podman host and a docker host running one image would disagree on every read. ONLY the
+ * exact bare form gains the prefix; anything else passes through untouched, so a string this rule does not recognise is
+ * never made to look like a digest it is not.
+ */
+export function normalizeImageId(id) {
+	return typeof id === "string" && /^[0-9a-f]{64}$/.test(id) ? `sha256:${id}` : id;
 }
 
 /** One comma-separated label value as a non-empty array, or `null` when it declares nothing usable. */
@@ -182,11 +195,11 @@ function label(raw) {
  * answer "did the daemon reply", and piping output we would not read is how a probe becomes a place a
  * large payload can arrive.
  */
-function runDocker(spawnFn, args, capture = false) {
+function runDocker(bin, spawnFn, args, capture = false) {
 	return new Promise((resolve) => {
 		let child;
 		try {
-			child = spawnFn("docker", args, { stdio: capture ? ["ignore", "pipe", "ignore"] : "ignore" });
+			child = spawnFn(bin, args, { stdio: capture ? ["ignore", "pipe", "ignore"] : "ignore" });
 		} catch {
 			resolve({ code: null, stdout: "" });
 			return;

@@ -4119,13 +4119,15 @@ function uidOf(name, passwd) {
 /**
  * The endpoint resolver's `run` seam over doctor's own spawn (#278), so the tests' fake spawn answers it. Bounded
  * like the worker's runner: a CLI that does not answer is killed and reported as a timeout rather than awaited.
+ * `bin` (issue #354) is the runtime CLI it spawns, so a podman venue's reads go through the same bounded runner;
+ * every caller today passes none and spawns `docker` exactly as before.
  */
-function dockerRunVia(spawn, timeoutMs = 5000) {
+export function dockerRunVia(spawn, timeoutMs = 5000, { bin = "docker" } = {}) {
 	return (args) =>
 		new Promise((resolve) => {
 			let child;
 			try {
-				child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+				child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
 			} catch (err) {
 				resolve({ code: null, stdout: "", error: err });
 				return;
@@ -4309,13 +4311,15 @@ export const RUN_TIMEOUTS = Object.freeze({ cmd: 30_000, pull: 600_000 });
  * object, reading both as "it may exist" cries wolf on every host without docker installed and turns this
  * file's own ENOENT test red. So `ended` says which: `"error"` (never launched), `"timeout"` (killed by the
  * bound), or `"close"` (the child exited, and `code` is its own).
+ *
+ * `bin` (issue #354): the runtime CLI, `docker` unless a caller names another, as `dockerRunVia`'s.
  */
-function liveRunVia(spawn) {
+export function liveRunVia(spawn, { bin = "docker" } = {}) {
 	return (args, { timeoutMs }) =>
 		new Promise((resolve) => {
 			let child;
 			try {
-				child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+				child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
 			} catch {
 				resolve({ code: null, stdout: "", stderr: "", ended: "error" });
 				return;

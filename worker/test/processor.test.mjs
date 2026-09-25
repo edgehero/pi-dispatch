@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, OBSERVATIONS, RUNTIME_ADDS_NO_MOUNTS } from "../src/backends.mjs";
 import { test } from "node:test";
 import { scopeKeyPrefix } from "../src/scoped-limits.mjs";
-import { InfraRetry, runJob, OBSERVATION_COMMENT } from "../src/processor.mjs";
+import { InfraRetry, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED } from "../src/processor.mjs";
 
 /** A fake redis whose counter we can preset, to force over/under budget. `decrCalls` spies
  *  releaseBudget, so tests assert the slot is (or is not) given back and never double-released.
@@ -773,6 +773,32 @@ test("a floor refusal's forge comment names each missed observation in fixed wor
 	assert.doesNotMatch(texts[0], /docker CLI is not observed sending|Podman|mounts\.conf/, "neither the endpoint's reason nor the evidence reaches a forge comment");
 	await runJob(ghJob, commentOn(undefined));
 	assert.ok(texts[1].includes(OBSERVATION_COMMENT[DOCKER_ENDPOINT_LOCAL]), "a preflight that names no observation keeps the endpoint's words (#278)");
+});
+
+test("a floor refusal naming no known observation blames the docker endpoint on local ONLY (#354)", async () => {
+	// The endpoint's sentence is right for `local`, whose preflight is the one that could refuse without naming what it
+	// missed. Told to a job on another runtime it blames a CLI that job never touched.
+	const texts = [];
+	const run = (job, observations, blessedBackends) =>
+		runJob(job, deps({ blessedBackends, observationPreflight: async () => ({ refused: true, message: "floor", observations }), comment: async (_j, t) => texts.push(t), log: () => {} }).deps);
+	// A named non-local venue, and a deployment whose DEFAULT is non-local with a job naming none: both neutral.
+	await run({ ...ghJob, backend: "podman" }, undefined, ["local", "podman"]);
+	await run(ghJob, [], ["podman"]);
+	for (const text of texts) {
+		assert.ok(text.includes(OBSERVATION_COMMENT_UNNAMED), text);
+		assert.ok(!text.includes(OBSERVATION_COMMENT[DOCKER_ENDPOINT_LOCAL]), "no docker CLI is blamed for a venue that has none");
+	}
+	// An observation this build has no words for is the neutral sentence on ANY venue, local included, never the
+	// endpoint's by default.
+	texts.length = 0;
+	await run(ghJob, ["podmanBoundsDelegated"], ["local"]);
+	assert.ok(texts[0].includes(OBSERVATION_COMMENT_UNNAMED) && !texts[0].includes(OBSERVATION_COMMENT[DOCKER_ENDPOINT_LOCAL]), texts[0]);
+	// A prototype key is not a known observation either.
+	texts.length = 0;
+	await run(ghJob, ["toString"], ["local"]);
+	assert.ok(texts[0].includes(OBSERVATION_COMMENT_UNNAMED), texts[0]);
+	// And the neutral sentence is not one of the closed list's, which stays pinned one-for-one.
+	assert.ok(!Object.values(OBSERVATION_COMMENT).includes(OBSERVATION_COMMENT_UNNAMED));
 });
 
 test("the endpoint gate runs AHEAD of the image and egress preflights, which talk to the daemon it is about (#278)", async () => {
