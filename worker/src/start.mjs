@@ -1171,7 +1171,17 @@ export async function startWorker(
 		});
 	} catch (err) {
 		const opened = [registry, runtimeQueue, ...(cronQueue !== runtimeQueue ? [cronQueue] : [])];
-		await Promise.allSettled(opened.map((handle) => Promise.resolve().then(() => handle?.close?.())));
+		// Bounded, then forced: a queue whose connection came up closes by sending QUIT and awaiting the reply, and against a
+		// server that stopped answering that wait never ends (measured through a stalling proxy), so the refusal itself would
+		// never travel. Five seconds covers the host registry's own bounded close; whatever is still open is disconnected.
+		await settleWithin(Promise.allSettled(opened.map((handle) => Promise.resolve().then(() => handle?.close?.()))), 5_000);
+		for (const handle of opened) {
+			try {
+				handle?.disconnect?.();
+			} catch {
+				// a handle with nothing left to drop
+			}
+		}
 		redis.disconnect();
 		throw err;
 	}
