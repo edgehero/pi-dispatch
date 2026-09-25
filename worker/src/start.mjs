@@ -1148,22 +1148,30 @@ export async function startWorker(
 	// resolution returns it -- but the mechanism is real, so `run.backend` stops being a validated label and
 	// the abort path can reach a venue it did not build. `config.backends[0]` is the deployment's default,
 	// and the registry refuses a default it does not hold rather than discovering it at the first pickup.
-	const backends = makeBackendRegistryFn({
-		// #227. A SEAM, not a literal. `docs/backends.md` tells an adapter author to register their bundle
-		// here, and until this was injectable that instruction described code nobody could run: the array
-		// was hard-coded, so a venue could pass the conformance suite, get a table entry and be blessed in
-		// PI_BACKENDS, and then be refused at boot as blessed-but-unbuilt with nowhere to put it. It is also
-		// what lets a wiring test prove `startWorker` actually CONNECTS the registry to the processor --
-		// six mutations reverting that connection survived the whole suite, which is the same shape as the
-		// bug that shipped: invisible while there is one venue.
-		bundles: [...(localBackend ? [localBackend] : []), ...extraBackends],
-		defaultName: config.defaultBackend,
-		// Cross-checked at boot rather than discovered at the first pickup: a name PI_BACKENDS blesses but
-		// nothing builds passes both the loader and the pre-spend gate, and a venue with no boot reaper is
-		// swept by nothing while still reporting the host as proven clean.
-		blessed: config.backends,
-		reaps: backendReaps,
-	});
+	// A refusal here comes AFTER the Redis client above exists, so it is released before the refusal travels: an unreleased
+	// client keeps the event loop alive, and a worker that refused to boot would hang instead of exiting.
+	let backends;
+	try {
+		backends = makeBackendRegistryFn({
+			// #227. A SEAM, not a literal. `docs/backends.md` tells an adapter author to register their bundle
+			// here, and until this was injectable that instruction described code nobody could run: the array
+			// was hard-coded, so a venue could pass the conformance suite, get a table entry and be blessed in
+			// PI_BACKENDS, and then be refused at boot as blessed-but-unbuilt with nowhere to put it. It is also
+			// what lets a wiring test prove `startWorker` actually CONNECTS the registry to the processor --
+			// six mutations reverting that connection survived the whole suite, which is the same shape as the
+			// bug that shipped: invisible while there is one venue.
+			bundles: [...(localBackend ? [localBackend] : []), ...extraBackends],
+			defaultName: config.defaultBackend,
+			// Cross-checked at boot rather than discovered at the first pickup: a name PI_BACKENDS blesses but
+			// nothing builds passes both the loader and the pre-spend gate, and a venue with no boot reaper is
+			// swept by nothing while still reporting the host as proven clean.
+			blessed: config.backends,
+			reaps: backendReaps,
+		});
+	} catch (err) {
+		redis.disconnect();
+		throw err;
+	}
 
 	// The auxiliary handles the shutdown closes after the worker drains (`index.mjs` -> shutdown). A NAMED
 	// array rather than the literal it used to be, because up to three of its members do not exist yet: the

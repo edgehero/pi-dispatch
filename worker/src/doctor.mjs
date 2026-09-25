@@ -74,7 +74,7 @@ import { EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, egressArmed, egre
 import { runLiveProbes } from "./live-probes.mjs";
 import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
-import { makeImagePreflight } from "./image-preflight.mjs";
+import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FIX, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
 // The OAuth-suffix rule and the variable it selects live in their own import-free module so the worker
@@ -1210,7 +1210,7 @@ export async function collectChecks(env, seams) {
 	// extra docker call whose answer nothing reads.
 	const imageDigest =
 		peers.length > 0 && imageCode === 0
-			? (await runCmdCapture(spawn, "docker", ["image", "inspect", "--format={{.Id}}", jobImage], { stdoutOnly: true })).output.trim() || null
+			? normalizeImageId((await runCmdCapture(spawn, "docker", ["image", "inspect", "--format={{.Id}}", jobImage], { stdoutOnly: true })).output.trim()) || null
 			: null;
 	if (peers.length > 0) {
 		const mine = workerNameOf(env);

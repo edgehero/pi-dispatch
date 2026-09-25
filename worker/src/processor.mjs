@@ -334,7 +334,10 @@ export async function runJob(job, deps) {
 			};
 		}
 		if (observed?.unavailable) {
-			throw new InfraRetry("the container runtime or its CLI is unavailable, an observation the floor needs could not run", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			// The local venue's words stay what they were (they are its log line and BullMQ's failedReason); another venue
+			// is not docker's to name.
+			const localVenue = resolveBackendName(job, blessedBackends[0]) === DEFAULT_BACKEND;
+			throw new InfraRetry(localVenue ? "docker CLI or daemon unavailable, an observation the floor needs could not run" : "the container runtime or its CLI is unavailable, an observation the floor needs could not run", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 		}
 
 		// The job image must exist on THIS host before anything else happens. Free, determinate and

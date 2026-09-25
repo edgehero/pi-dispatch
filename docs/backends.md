@@ -79,7 +79,7 @@ worse.
 | `reap` | nothing | `{ reaped: true }` only if you ENUMERATED. See below. |
 | `containerName` | the job id | the name `stopContainer` will be given |
 | `observationPreflight` (optional) | the job | `{ ok: true }` to admit, `{ refused: true, message, observations }` when a floor needs an observation this host does not show (`message` goes to the operator's log only; `observations` names which, from the closed list), `{ unavailable: true, reason }` when it could not be read yet (retried). Anything carried beside `ok` is handed to `jobUserPreflight` as `observed`. |
-| `jobUserPreflight` (optional) | `(job, { capabilities, observed })` | `{ user, home }` (`user` null means the image's own `USER`), `{ refused: "job-user-unmappable", cause }` or `{ refused: "job-image-any-uid-unsupported" }` to refuse, `{ unavailable: true, reason }` to retry. |
+| `jobUserPreflight` (optional) | `(job, { capabilities, observed })` | `{ user, home }` (`user` null means the image's own `USER`), plus `relabel: true` where the job's own mounts must carry a private SELinux label (the processor hands it to `runContainer`), `{ refused: "job-user-unmappable", cause }` or `{ refused: "job-image-any-uid-unsupported" }` to refuse, `{ unavailable: true, reason }` to retry. |
 
 ## What a backend declares
 

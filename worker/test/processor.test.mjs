@@ -825,6 +825,14 @@ test("an endpoint that could not be read for a transient reason is retried, not 
 	assert.equal(redis.incrCalls, 0);
 });
 
+test("the retry's words: docker's on the local venue, as they always were, and the runtime's on any other (#354)", async () => {
+	// The message is the job_failed log line and BullMQ's failedReason, so the local venue's must not move.
+	const { deps: local } = deps({ redis: fakeRedis(), observationPreflight: async () => ({ unavailable: true, reason: "timeout" }) });
+	await assert.rejects(() => runJob(ghJob, local), (err) => err.message === "docker CLI or daemon unavailable, an observation the floor needs could not run");
+	const { deps: far } = deps({ redis: fakeRedis(), blessedBackends: ["local", "far"], observationPreflight: async () => ({ unavailable: true, reason: "timeout" }) });
+	await assert.rejects(() => runJob({ ...ghJob, backend: "far" }, far), (err) => err.message === "the container runtime or its CLI is unavailable, an observation the floor needs could not run");
+});
+
 test("a proxy that exists but is STOPPED is its own reason, because the fix is a different one", async () => {
 	const redis = fakeRedis();
 	const { deps: d } = deps({ redis, egressPreflight: async () => ({ proxyStopped: "pi-dispatch-egress-proxy" }) });
