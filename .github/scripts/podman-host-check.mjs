@@ -293,7 +293,7 @@ fromDoctor("D-localFolders", /^read back on local: localFolders holds/, "localFo
 // Not one line of doctor's may be a failure: a check this script does not name (mountSet, ephemeral, isolation, a label
 // line) failing is as much a failure of the host as one it does.
 const doctorFailures = doctorLines.filter((line) => line[0] === FAIL_MARK);
-record("D-clean", doctor.code !== null && doctorFailures.length === 0, doctorFailures.length === 0 ? "doctor --live printed no failing line" : doctorFailures.join(" | "));
+record("D-clean", doctor.code === 0 && doctorFailures.length === 0, doctorFailures.length === 0 ? "doctor --live printed no failing line" : doctorFailures.join(" | "));
 
 // --- 9. egress rows doctor does not cover, on a job-shaped network ----------------------------------------------------
 const network = `${tag}-net`;

@@ -5539,7 +5539,7 @@ test("the SELinux label check: user_home_t warns with the semanage fix, containe
 		}),
 		calls,
 	);
-	const checks = await selinuxLabelChecks({ folders: ["/home/op/repo", "/srv/labelled", "/srv/readonly", "/srv/private", "/srv/unreadable", "/srv/nolabel", "/srv/failed"], overlay: "/srv/pi's overlay", spawn, realpath: (dir) => dir });
+	const checks = await selinuxLabelChecks({ folders: ["/home/op/repo", "/srv/labelled", "/srv/readonly", "/srv/private", "/srv/unreadable", "/srv/nolabel", "/srv/failed"], overlay: "/srv/pi's overlay", spawn, lstat: () => ({ isSymbolicLink: () => false }) });
 	const byDir = (dir) => checks.find((c) => c.label.includes(` ${dir} `));
 	assert.deepEqual([checks[0].ok, checks[0].label], [true, "SELinux: jobs' own directories are relabelled for SELinux (:Z); a local folder and the global overlay never are"]);
 	const home = byDir("/home/op/repo");
@@ -5560,7 +5560,9 @@ test("the SELinux label check: user_home_t warns with the semanage fix, containe
 	const overlay = checks.find((c) => c.label.includes("global overlay /srv/pi's overlay"));
 	assert.deepEqual([overlay.ok, overlay.warn], [false, true]);
 	assert.match(overlay.label, /labelled var_t, which a job container is denied -- every job is refused before it spends/);
-	assert.ok(overlay.fix.includes(`semanage fcontext -a -t container_file_t '/srv/pi'\\''s overlay(/.*)?' && restorecon -R '/srv/pi'\\''s overlay'`), overlay.fix);
+	// A space in the rule is a hex escape (semanage refuses one written plainly or backslashed, measured); restorecon takes
+	// the path as it is.
+	assert.ok(overlay.fix.includes(`semanage fcontext -a -t container_file_t '/srv/pi'\\''s\\x20overlay(/.*)?' && restorecon -R '/srv/pi'\\''s overlay'`), overlay.fix);
 	assert.deepEqual(calls.map((c) => [c.cmd, ...c.args]).at(0), ["stat", "-L", "--format=%C", "--", "/home/op/repo"], "one stat per directory, through a link, the path after --");
 	assert.equal(calls.length, 8);
 });
@@ -5568,11 +5570,21 @@ test("the SELinux label check: user_home_t warns with the semanage fix, containe
 test("the SELinux label check reads through a symlinked folder and names the directory it points at, escaped for semanage (#355)", async () => {
 	const { selinuxLabelChecks } = await import("../src/doctor.mjs");
 	const calls = [];
-	const spawn = fakeSpawn(statPlan({ "/home/op/proj": { code: 0, output: "unconfined_u:object_r:var_t:s0\n" } }), calls);
-	const checks = await selinuxLabelChecks({ folders: ["/home/op/proj"], spawn, realpath: () => "/srv/my.proj+1" });
-	const warned = checks.find((c) => c.warn);
-	assert.match(warned.label, /the local folder \/home\/op\/proj \(a link to \/srv\/my\.proj\+1\) is labelled var_t/);
-	assert.ok(warned.fix.includes("semanage fcontext -a -t container_file_t '/srv/my\\.proj\\+1(/.*)?' && restorecon -R '/srv/my.proj+1'"), warned.fix);
+	const spawn = fakeSpawn(statPlan({ "/home/op/proj": { code: 0, output: "unconfined_u:object_r:var_t:s0\n" }, "/home/op/plain": { code: 0, output: "unconfined_u:object_r:user_home_t:s0\n" }, repo: { code: 0, output: "unconfined_u:object_r:user_home_t:s0\n" } }), calls);
+	// Only the folder's own link is followed: /home/op/plain is not a link, and even where /home is a link to /var/home
+	// its rule stays on /home (semanage refuses the /var/home one for its equivalence rule, measured).
+	const links = { "/home/op/proj": "../../srv/my.proj+1 (x)[y]" };
+	const checks = await selinuxLabelChecks({ folders: ["/home/op/proj", "/home/op/plain", "repo"], spawn, lstat: (dir) => ({ isSymbolicLink: () => dir in links }), readlink: (dir) => links[dir] });
+	const warned = checks.find((c) => c.warn && c.label.includes("/home/op/proj"));
+	assert.match(warned.label, /the local folder \/home\/op\/proj \(a link to \/srv\/my\.proj\+1 \(x\)\[y\]\) is labelled var_t/);
+	assert.ok(warned.fix.includes("semanage fcontext -a -t container_file_t '/srv/my\\.proj\\+1\\x20\\(x\\)\\[y\\](/.*)?' && restorecon -R '/srv/my.proj+1 (x)[y]'"), warned.fix);
+	const plain = checks.find((c) => c.warn && c.label.includes("/home/op/plain"));
+	assert.ok(!plain.label.includes("a link"), "a folder that is not a link is not called one");
+	assert.ok(plain.fix.includes("'/home/op/plain(/.*)?'") || plain.fix.includes("/home/op/plain(/.*)?"), plain.fix);
+	// A relative run.folder is named as configured and its rule is made absolute, never called a link.
+	const relative = checks.find((c) => c.warn && c.label.includes("local folder repo "));
+	assert.ok(!relative.label.includes("a link"), relative.label);
+	assert.match(relative.fix, /semanage fcontext -a -t container_file_t '?\/[^ ]*\/repo\(\/\.\*\)\?'?/, relative.fix);
 	assert.match(warned.fix, /virt_use_nfs/, "names the mounts restorecon cannot relabel");
 	assert.deepEqual(calls[0].args, ["-L", "--format=%C", "--", "/home/op/proj"]);
 });

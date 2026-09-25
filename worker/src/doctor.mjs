@@ -49,9 +49,9 @@
  * containers, networks and fixture are named before they exist and removed when it ends; it is judged by the same failed/ok rule and carries
  * no fixAction, because what a failed read-back points at is the image or the runtime.
  */
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir, release as osRelease, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, delimiter, posix, win32 } from "node:path";
+import { dirname, isAbsolute, join, delimiter, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -3975,14 +3975,17 @@ const CONTAINER_READABLE_TYPES = new Set(["container_file_t", "container_ro_file
  *
  * READ, never inferred: `stat -L --format=%C` through doctor's bounded runner. `-L` because a local folder may be a
  * symlink (prepare-local treats one as ordinary) and a container reads what the link points at, whose label is the one
- * that matters; the fix names that resolved directory too, since a rule on the link's own path changes nothing a
- * container reads. The rule's path is escaped as the regular expression `semanage fcontext` reads it as. A `stat` that did not answer (not GNU
+ * that matters; the fix names the directory the link points at, since a rule on the link's own path changes nothing a
+ * container reads. Only the folder's OWN link is followed, never its parents': where `/home` is itself a link to
+ * `/var/home` (Fedora Atomic, CoreOS, RHEL for Edge) semanage refuses a rule on the resolved `/var/home/...` path for
+ * its equivalence rule and wants the `/home/...` one (measured). The rule's path is escaped as the regular expression
+ * `semanage fcontext` reads it as, whitespace as a hex escape because it refuses a literal or backslashed space. A `stat` that did not answer (not GNU
  * coreutils, a directory this shell cannot reach, no label at all) is a quiet "not checked" line, never a warning:
  * the runner's own refusal names the path if a job meets it, and a false alarm here would send an operator to relabel
  * a folder that was fine. A readable type with MCS categories is a directory some container relabelled PRIVATE, which
  * locks every other container out (measured), so it is treated like an unlabelled one.
  */
-export async function selinuxLabelChecks({ folders = [], overlay = null, spawn, realpath = realpathSync }) {
+export async function selinuxLabelChecks({ folders = [], overlay = null, spawn, lstat = lstatSync, readlink = readlinkSync }) {
 	const checks = [{ ok: true, label: "SELinux: jobs' own directories are relabelled for SELinux (:Z); a local folder and the global overlay never are" }];
 	const targets = [...folders.map((dir) => ({ dir, what: "local folder", refused: "every job in it is refused before it spends" })), ...(overlay ? [{ dir: overlay, what: "global overlay", refused: "every job is refused before it spends" }] : [])];
 	for (const { dir, what, refused } of targets) {
@@ -3996,13 +3999,16 @@ export async function selinuxLabelChecks({ folders = [], overlay = null, spawn, 
 			checks.push({ ok: true, label: `SELinux: the ${what} ${dir} is labelled ${context.type}, which a container can read` });
 			continue;
 		}
-		let real = dir;
+		let real = resolve(dir);
+		let via = "";
 		try {
-			real = realpath(dir);
+			if (lstat(dir).isSymbolicLink()) {
+				real = resolve(dirname(real), readlink(dir));
+				via = ` (a link to ${real})`;
+			}
 		} catch {
-			// unresolvable here: the configured path is the best name there is
+			// unreadable here: the configured path, made absolute, is the best name there is
 		}
-		const via = real !== dir ? ` (a link to ${real})` : "";
 		checks.push({
 			ok: false,
 			warn: true,
@@ -4025,7 +4031,9 @@ function parseSelinuxContext(output) {
 
 /** A path as the regular expression `semanage fcontext` matches it as: every metacharacter escaped, `/` left alone. */
 function escapeFcontextPath(path) {
-	return path.replace(/[.*+?^$()[\]{}|\\]/g, "\\$&");
+	// Whitespace as a two-digit hex escape: semanage refuses a space written plainly or backslashed ("File specification
+	// can not include spaces"), and accepts the hex form (measured on container-selinux 2.247.0).
+	return path.replace(/[.*+?^$()[\]{}|\\]/g, "\\$&").replace(/\s/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`);
 }
 
 /** A path as one POSIX shell word: bare when it is plain, else single-quoted with an embedded quote closed and reopened. */

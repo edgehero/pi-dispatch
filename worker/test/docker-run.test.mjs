@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID, transfersFromSpec } from "../src/container-spec.mjs";
+import { insideDir } from "../src/docker-run.mjs";
 import { buildDockerRunArgs, containerSpec, DOCKER_EXTRA_ALLOWED, DOCKER_EXTRA_FORBIDDEN, dockerArgsFromSpec, ISOLATION_FLAGS } from "../src/docker-run.mjs";
 
 const base = {
@@ -426,4 +427,12 @@ test("relabel and workspaceOwned are booleans, and a hand-built mount may carry 
 test("a copying runtime's transfers carry no relabel: the label is a bind-mount option, not a file property", () => {
 	const spec = containerSpec({ ...base, relabel: true, workspaceOwned: true });
 	for (const t of transfersFromSpec(spec)) assert.equal("relabel" in t, false, t.container);
+});
+
+test("insideDir: strictly inside, failing closed on anything else (issue #355)", () => {
+	assert.equal(insideDir("/j/job-1", "/j/job-1/workspace"), true);
+	assert.equal(insideDir("/j/job-1/", "/j//job-1/workspace/"), true, "separators normalised");
+	for (const [outer, inner] of [["/j/job-1", "/j/job-1"], ["/j/job-1", "/j/job-10/workspace"], ["/j/job-1", "/j/elsewhere"], ["/j/job-1", "/j/job-1/../x"], [undefined, "/j/job-1/workspace"], ["/j/job-1", undefined], ["", "/x"], [null, null]]) {
+		assert.equal(insideDir(outer, inner), false, JSON.stringify([outer, inner]));
+	}
 });

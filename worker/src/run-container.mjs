@@ -153,11 +153,10 @@ export function makeRunContainer({
 			cidFile, // issue #345: where the CLI writes this attempt's container ID, read below when the run exits "never started"
 			// Issue #355. `=== true`, so only the processor's boolean re-owns anything. The workspace is relabelled only when the
 			// worker made it: a forge job's is its own clone under the job dir, a local job's IS the operator's folder, which a
-			// private label would take from every other container and from the operator's own labelling. Decided by kind, the
-			// same fact the preparers branch on, rather than by where the path happens to sit.
+			// private label would take from every other container and from the operator's own labelling.
 			relabel: relabel === true,
-			// Relabelled only when it is the worker's own clone: not a local job's (the operator's folder), and inside this
-			// job's own directory, so a kind added later that works on a folder in place fails closed rather than relabelling it.
+			// Both facts, the kind the preparers branch on AND containment in this job's own directory, so a kind added later
+			// that works on a folder in place fails closed rather than relabelling it.
 			workspaceOwned: job?.kind !== "local" && insideDir(prepared.jobDir, prepared.workspace),
 		});
 

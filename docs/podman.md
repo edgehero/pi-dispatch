@@ -112,7 +112,8 @@ a bare `podman system service` with a hand-made socket group, because a containe
 host on 2026-09-25 steps 1 and 2 were followed literally: step 1 works as written, and step 2 did not give the worker
 the socket until the `tmpfiles.d` override it now carries. Step 3 was done with Fedora's own packages in place of
 Docker's. Steps 4 to 8 were measured in the lab; on that host steps 4, 5 and 7 were followed as written, the image
-was pulled with root's `podman pull` in place of step 6's `docker pull`, and step 8 was not run.
+was pulled with root's `podman pull` in place of step 6's `docker pull`, and of step 8 `pi-dispatch doctor --live` was run
+and `pi-dispatch up` was not.
 
 1. **Start Podman's socket as root:** `sudo systemctl enable --now podman.socket`. It listens on
    `/run/podman/podman.sock`, owned by root.
@@ -229,9 +230,14 @@ Measured: after that the folder is readable and writable in a container with no 
 not.
 
 `pi-dispatch doctor` checks this where it applies. It prints a ✓ line saying jobs' own directories are relabelled
-(`:Z`), and reads the label of every local trigger's folder and of `PI_GLOBAL_PI_DIR` with `stat --format=%C`. A type
+(`:Z`), and reads the label of every local trigger's folder and of `PI_GLOBAL_PI_DIR` with `stat -L --format=%C`, through a
+folder that is itself a symlink to the directory it points at (its parents' links are not followed, so a rule under a
+`/home` that links to `/var/home` stays on `/home`, which is the one semanage accepts there). A type
 other than `container_file_t` or `container_ro_file_t`, or one carrying a private category pair (some container's
-`:Z`), is a ⚠ naming the folder and the fix above; a label it cannot read is a "not checked" line, never a warning. A
+`:Z`), is a ⚠ naming the folder and the fix above; a label it cannot read is a "not checked" line, never a warning.
+On an NFS, CIFS or FUSE mount, or one mounted with `context=`, the label comes from the mount and `restorecon` cannot
+change it; there the container's access is the `virt_use_nfs`, `virt_use_samba` or `virt_use_fusefs` boolean, or the
+mount's own context, and the warning says so. A
 job that meets such a folder anyway is refused before it spends: the runner checks that it can read `/job`,
 `/opt/pi-global` and `/workspace`, and exits 2 as `job-inputs-unreadable`, naming the path. A `/workspace` the job
 can read but not write still runs, with the advisory `workspace_not_writable`, because a read-only review of such a

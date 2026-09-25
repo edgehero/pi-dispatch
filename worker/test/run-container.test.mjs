@@ -373,6 +373,11 @@ test("relabel reaches the argv: a local job's own dirs carry :Z and its folder n
 		await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn(outside) })({ job: githubJob, token: "ghs_x", prepared: { workspace, jobDir: "/host/jobs/j2" }, name: "j3", signal: new AbortController().signal, relabel: true });
 		assert.ok(mounts(outside.args).includes(`${workspace}:/workspace`), `${workspace}: not the job's own, so never relabelled`);
 	}
+	// And the kind still counts on its own: a local job whose folder happens to sit inside its job dir is an operator's
+	// folder all the same.
+	const inside = { args: null };
+	await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn(inside) })({ job: JOB, prepared: { workspace: "/host/jobs/j4/folder", jobDir: "/host/jobs/j4" }, name: "j4", signal: new AbortController().signal, relabel: true });
+	assert.ok(mounts(inside.args).includes("/host/jobs/j4/folder:/workspace"), "a local job's folder is never relabelled");
 });
 
 test("no relabel, or anything but true, builds the argv it always did (issue #355)", { skip }, async () => {
