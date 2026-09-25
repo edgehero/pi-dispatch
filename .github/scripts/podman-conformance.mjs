@@ -31,6 +31,12 @@
  * uid 1001, the image's own uid, where the files would be readable without keep-id and the run would prove less than
  * it says. Exit 0 when everything held, 1 when anything failed or was not read, 2 when the host is not one this can
  * run on.
+ *
+ * WHAT A PASS DOES NOT COVER. The exit-code probes run first, on an image built FROM the job image, so they pay the
+ * first keep-id copy of the shared layers and the read-back always starts warm: its `PODMAN_FIRST_START_TIMEOUT_MS`
+ * bound is never reached cold here. That bound was measured cold through `pi-dispatch doctor --live` instead (32.5 s
+ * on a freshly squashed image, against 4.2 s warm). And the egress canary is this script's own request, not the
+ * runner's provider call, so it proves the network and the allowlist but not that the runner uses the proxy.
  */
 
 import { spawn } from "node:child_process";
