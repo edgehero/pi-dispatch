@@ -29,8 +29,14 @@ const DIRS = ["image/runner/test", "worker/test", "receiver/test", "admin/test"]
 /**
  * `worker/test/wiring.test.mjs` leaves a handle alive for ~30s, so at a 30s cap its FILE wrapper trips and
  * reports a spurious `cancelled 1`. That is a property of the file, not of this check, and 60s clears it.
+ *
+ * The cap applies to a whole FILE in the child run, and the width sweeps in `admin/test` are the heaviest files
+ * the suite has (`width-leaders` alone is about 18s on a laptop). This check runs them two at a time and eight
+ * files at once, alphabetically, so the three sweeps share a batch, and on a CI runner `width-leaders` outran
+ * 90s three runs in a row, reporting `tests 1, cancelled 1`, which this check then misread as lost frames.
+ * 300s leaves them room; a file that still outruns it is named as a timeout below, never as lost results.
  */
-const TIMEOUT_MS = 90_000;
+const TIMEOUT_MS = 300_000;
 
 /** How many files run at once. The suite is ~55s wall clock; this runs it twice, so keep it parallel. */
 const CONCURRENCY = 8;
@@ -51,7 +57,7 @@ function counts(tap) {
 		const m = tap.match(new RegExp(`^# ${key} (\\d+)$`, "m"));
 		return m ? Number(m[1]) : null;
 	};
-	return { tests: n("tests"), skipped: n("skipped") };
+	return { tests: n("tests"), skipped: n("skipped"), cancelled: n("cancelled") };
 }
 
 const files = DIRS.flatMap((d) => {
@@ -84,6 +90,12 @@ for (let i = 0; i < files.length; i += CONCURRENCY) {
 		// so here than to let a null compare equal to a null.
 		if (child.tests === null || inProc.tests === null) {
 			mismatches.push(`${file}: no test count reported (child=${child.tests}, in-process=${inProc.tests})`);
+			continue;
+		}
+		// A child whose FILE outran the cap reports one cancelled test and nothing else: that is a timeout, whose
+		// fix is a faster file or a larger cap, not the out-of-band stdout writer this check exists to find.
+		if (child.tests === 1 && child.cancelled === 1 && inProc.tests !== 1) {
+			mismatches.push(`${file}: the \`node --test\` run was cancelled at the ${TIMEOUT_MS / 1000}s file cap, so its count is not a count (the in-process runner ran ${inProc.tests})`);
 			continue;
 		}
 		if (child.tests !== inProc.tests) {
