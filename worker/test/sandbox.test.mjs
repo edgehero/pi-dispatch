@@ -215,6 +215,13 @@ test("resolveSandbox refuses a run from a venue this host did not run, ahead of 
 		assert.equal(r.refused, "venue-unreachable", JSON.stringify(backend));
 		assert.match(r.message, /names no backend/);
 	}
+	// The native podman venue runs on THIS host (issue #354), and a sandbox is still refused there, in podman's own words:
+	// "open it on the venue that ran it" would send the operator after a sandbox that venue does not have.
+	const podman = resolve({ ...manifest, backend: "podman" });
+	assert.equal(podman.refused, "venue-unreachable");
+	assert.match(podman.message, /ran on the "podman" backend \(this worker account's rootless podman\), and a sandbox does not open on that venue yet/);
+	assert.doesNotMatch(podman.message, /Open it on the venue that ran it/);
+	assert.match(far.message, /Open it on the venue that ran it/, "another venue keeps its own sentence");
 	// Held means the local adapter by name.
 	assert.equal(resolve({ ...manifest, backend: "local" }).refused, undefined);
 	assert.equal(sandboxVenueRefusal({ jobId: "j1", manifest: { ...manifest, backend: "local" } }), null);

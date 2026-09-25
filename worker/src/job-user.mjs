@@ -145,9 +145,10 @@ export function relabelsPrivateMounts(facts, endpoint, platform = process.platfo
 
 /**
  * A version string fit for doctor's display line (issue #345), or `null`. Display only, never a decision: validated to a
- * short run of version characters so a daemon's answer cannot put anything else on an operator's terminal.
+ * short run of version characters so a daemon's answer cannot put anything else on an operator's terminal. Exported for
+ * the podman venue's `podman info` read (issue #354), so the two runtimes' versions pass one filter.
  */
-function displayVersion(value) {
+export function displayVersion(value) {
 	return typeof value === "string" && /^[0-9A-Za-z.+~_-]{1,40}$/.test(value) ? value : null;
 }
 

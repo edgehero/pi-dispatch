@@ -1,7 +1,8 @@
 # Container backends
 
-A **backend** is where a job's container gets built. There is one today, `local`, which is the Docker daemon
-on the worker's own host and is what every deployment has always used.
+A **backend** is where a job's container gets built. There are two today: `local`, which is the Docker daemon
+on the worker's own host and is what every deployment has always used, and `podman`, which is this worker
+account's own rootless Podman on the same host (issue #354, [`docs/podman.md`](podman.md)).
 
 This page is the contract. If you are adding a venue, everything you need is here: you should not have to
 read the worker's source.
@@ -56,7 +57,9 @@ anywhere, but the declaration lands here.
 `worker/src/backend-local.mjs` is the worked example, though note that `makeLocalBackend` is a factory for
 *that* backend: it takes the five functions and sets the rest itself. Your adapter builds the whole object.
 `local`'s two optional preflights are added beside that factory in `start.mjs`, because they read this host's
-docker CLI and the job-user decision built there.
+docker CLI and the job-user decision built there. `worker/src/backend-podman.mjs` is the second example, and the
+closer one for a new runtime: `makePodmanBackend` builds the whole bundle, both optional preflights included, from
+the same parts with the runtime's binary and argv builder swapped in.
 
 The two optional members are optional for a reason: an adapter written against the five functions keeps
 working, unchanged. Absent, `observationPreflight` admits every job and `jobUserPreflight` runs the image's own
@@ -116,7 +119,17 @@ ones adapters get wrong:
   `observedBy: { credentialTransit: "dockerEndpointLocal" }`. That observation is a fact about this host's
   docker CLI, so an entry for a remote venue leaves `observedBy` out and declares its own word.
 - **Podman**: rootful Podman through its Docker API is the `local` backend, with the differences
-  [`docs/podman.md`](podman.md) measures. Rootless Podman is refused.
+  [`docs/podman.md`](podman.md) measures. Rootless Podman is the `podman` backend, its own table entry: the
+  worker runs the `podman` CLI as its own account and each job as that account's uid with `--userns=keep-id`.
+  Rootless Podman through its Docker API is still refused.
+- **`podman` declares every word `enforced`**, three of them only while observed from `podman info` and this
+  account's Podman files: `isolation` (`podmanBoundsDelegated`: cgroup v2 with the pids, memory and cpu
+  controllers delegated, since without delegation rootless Podman accepts the bounds and applies none),
+  `mountSet` (`podmanAddsNoMounts`: the mounts.conf that applies is empty and nothing else adds a mount) and
+  `credentialTransit` (`podmanServiceLocal`: `serviceIsRemote` is false). `nonRoot` is `enforced` there, where
+  `local` only asserts it, because the argv always carries the worker's own non-zero uid and keep-id maps it
+  unchanged, whatever the image's `USER` says. `egress` and `jobToJobIsolation` are armed by `PI_EGRESS` as on
+  `local`.
 - **`local`'s `isolation` and `mountSet` are `enforced` only while observed too** (issue #345). `isolation` needs
   the daemon to report that it applies pid and memory bounds, and to be neither rootless nor Podman, whose Docker
   API reports those booleans whether or not they apply (`daemonAppliesBounds`). `mountSet` needs the runtime to add
@@ -148,7 +161,7 @@ ones adapters get wrong:
     is conditional, and the condition is real rather than decorative: it happens while `local` is the default
     venue (`BOOT_REFUSING_JOB_USER_CAUSES` in `worker/src/job-user.mjs`, read by `jobUserBootRefusal` in
     `start.mjs`), and a deployment whose default venue was elsewhere would boot and refuse each local job
-    instead. `local` is the only venue this build has, so every deployment today gets the exit.
+    instead. With `PI_BACKENDS=podman,local`, for one, the default is `podman`, and these refuse each local job.
   - **Refuses each job**: `runtime-unreadable`, `root-group`, `docker-group`, `any-uid-unsupported`. The
     worker boots, and each local job returns a policy refusal naming the cause. The first of those is a
     daemon whose answer cannot be read at all, which is not the same as one that has not answered yet.
@@ -164,6 +177,21 @@ ones adapters get wrong:
   `pi-dispatch doctor` names the answer for the shell it runs in, and `pi-dispatch doctor --live` runs its
   probe as that user and reads it back. An adapter for another runtime answers the same question in its own
   terms.
+
+- **`podman`'s job user is decided from `podman info`**, and the answer is always the worker's own
+  `<uid>:<gid>` with keep-id, or a refusal. Its texts are its own, in `PODMAN_JOB_USER_FIX`
+  (`worker/src/backend-podman.mjs`), and when each fires is the same shape as above, with `podman` in `local`'s
+  place (`podmanBootRefusal` in `start.mjs`):
+
+  <!-- worker/test/backends-doc.test.mjs GENERATES these two lines too, from `PODMAN_JOB_USER_FIX` and
+       `podmanBootRefusal`, listing only the causes `local` does not already name above. -->
+  - **Stops the boot while `podman` is the default venue**: `podman-platform`, `podman-not-found`, `podman-remote`, `podman-rootful`.
+  - **Refuses each job on `podman`**: `podman-unreadable`.
+
+  The three names the venue shares with the lists above (the root worker, the gid-0 primary group and the image
+  without `anyUid`) fire at the same point on `podman` as on `local`, with the venue's own text. An unanswered
+  `podman info` is in neither list, exactly as above: `unknown`, never kept, and a job picked up meanwhile is
+  retried.
 
 ## A declaration is not a claim that the property holds
 
@@ -275,6 +303,14 @@ is observed pointing at this host. Its verdicts are about that fixture and `PI_J
 folders or the images your triggers name, and doctor prints those limits beside a green result.
 `worker/src/live-probes.mjs` is the worked example of a `readBack`: its verdicts are the shape the harness takes.
 
+**`podman`'s read-back is the same probes through its own runtime**: `runLiveProbes` with the podman CLI, the
+podman argv builder and `serviceIsRemote === false` as its local gate, from `pi-dispatch doctor --live` on a host
+that blesses the venue, `egress` excepted: doctor's egress canary runs on docker only, and says so. `.github/scripts/podman-conformance.mjs` is the whole harness run against the real
+`makePodmanBackend` bundle, as the worker account on a rootless Podman host: its `probe` drives the bundle's own
+`runContainer` with an image built from the job image, its `withBrokenEnumeration` is the reaper with a binary
+that does not exist, and its `readBack` is those probes with an egress canary of its own. Unlike the harness, it
+fails when any of the eight is not read back.
+
 **The probes are your own code, and that is a real limit.** How you make a container exit 2, or make an
 enumeration fail, cannot be written generically, so those checks verify what your probe REPORTS. A probe
 that fabricates its answer instead of routing through your `runContainer` will pass while proving nothing.
@@ -304,8 +340,8 @@ reason about. An adapter that already has to land a declaration here loses nothi
 The code itself can still live anywhere.
 
 Issue #342 asked for this to be decided alongside the Podman route rather than after it, and it is: issue
-#354's `podman` backend is specified in-tree, declaring its own words in the backend table and implementing
-the adapter contract on this page, so it needs no export and nothing here blocks it.
+#354's `podman` backend is in-tree, declaring its own words in the backend table and implementing the adapter
+contract on this page, so it needed no export and nothing here blocked it.
 
 Reopening this needs two things, not one, and the second is the harder. An export would let an
 npm-installed operator CALL `startWorker`, and it would still leave them unable to register anything:
@@ -329,7 +365,8 @@ or registered without a reaper, is a startup error rather than a job that fails 
 
 Then an operator blesses it with `PI_BACKENDS=local,mine` (which requires the table entry from step 1) and
 a trigger selects it with `run.backend`. `local` is not required: `PI_BACKENDS=mine` alone is a deployment whose
-every unflagged trigger runs on `mine`. Such a worker asks this host's docker CLI nothing at boot: not which
+every unflagged trigger runs on `mine`, and `PI_BACKENDS=podman` is the rootless Podman deployment. Such a worker
+asks this host's docker CLI nothing at boot: not which
 endpoint it resolves, not its daemon's facts, not its image, and neither the container reaper nor the sandbox
 sweep runs against it. Two things follow that are worth knowing before you do it:
 

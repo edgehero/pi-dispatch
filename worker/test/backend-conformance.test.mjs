@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import { READ_BACK_BY_A_LIVE_PROBE, UNVERIFIED_BY_THIS_HARNESS, runBackendConformance } from "../src/backend-conformance.mjs";
 import { makeLocalBackend } from "../src/backend-local.mjs";
@@ -323,4 +324,83 @@ test("a read-back that does not hold passes against a backend that declares the 
 	const f = findings(r, "isolation")[0];
 	assert.equal(f.ok, true);
 	assert.match(f.detail, /does not claim/);
+});
+
+// Issue #354: the REAL podman bundle, built by `makePodmanBackend` from the shipped factories, driven through the harness
+// with a fake `podman` child in place of the CLI. It imports run-container, which imports pi-ai, so it skips below the
+// node floor as run-container's own tests do (and CI, requiring worker tests, runs it).
+let podman;
+let podmanImportError;
+try {
+	podman = await import("../src/backend-podman.mjs");
+} catch (error) {
+	podmanImportError = error;
+}
+if (!podman && process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS === "1") {
+	throw new Error(`the podman conformance test is REQUIRED here but backend-podman could not import.\n${podmanImportError}`);
+}
+const podmanSkip = podman ? false : `backend-podman could not import (${podmanImportError?.message ?? "unknown"}); CI runs this`;
+
+/**
+ * A fake `podman`: every spawn is recorded; `run` exits with whatever the probe set and, for a worker stop, aborts the
+ * job's signal first (the stop landing while the container runs); `ps` and `network ls` answer empty, or `ps` fails when
+ * the enumeration is to be broken.
+ */
+function fakePodmanCli({ brokenPs = false } = {}) {
+	const state = { calls: [], exit: 0, abort: null };
+	const spawnFn = (cmd, args) => {
+		state.calls.push([cmd, ...args]);
+		const child = new EventEmitter();
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		child.kill = () => {};
+		const code = args[0] === "run" ? state.exit : args[0] === "ps" && brokenPs ? 125 : 0;
+		queueMicrotask(() => {
+			if (args[0] === "run" && state.abort) state.abort();
+			child.emit("close", code);
+		});
+		return child;
+	};
+	return { state, spawnFn };
+}
+
+function realPodmanBundle(fake) {
+	return podman.makePodmanBackend({
+		image: "pi-job:x",
+		hostEnv: { ANTHROPIC_API_KEY: "sk-real" },
+		onOutput: () => {},
+		readInfo: async () => ({ answered: false, reason: "not-asked", transient: true }),
+		platform: "linux",
+		euid: 1234,
+		egid: 1234,
+		home: "/home/op",
+		env: {},
+		spawnFn: fake.spawnFn,
+	});
+}
+
+test("the REAL podman bundle passes the harness's shape, declaration, exit, abort and reaper checks with a fake podman (#354)", { skip: podmanSkip }, async () => {
+	const fake = fakePodmanCli();
+	const backend = realPodmanBundle(fake);
+	// The probe drives the bundle's OWN runContainer (the real makeRunContainer, podman argv and all) to the exit the
+	// harness asks for; a worker stop is the signal aborted while the container runs, as index.mjs's onAbort does.
+	const probe = async (b, { exitCode, aborted = false }) => {
+		const ac = new AbortController();
+		fake.state.exit = exitCode;
+		fake.state.abort = aborted ? () => ac.abort() : null;
+		return b.runContainer({ job: { id: "j1", kind: "local", provider: "anthropic", model: "m", maxTurns: 5 }, prepared: { workspace: "/host/folder", jobDir: "/host/jobs/j1" }, name: "pi-job-j1", signal: ac.signal, user: "1234:1234", home: "/home/pi" });
+	};
+	const withBrokenEnumeration = async () => realPodmanBundle(fakePodmanCli({ brokenPs: true })).reap();
+	const r = await runBackendConformance(backend, { probe, withBrokenEnumeration });
+	assert.equal(r.ok, true, `podman failed: ${JSON.stringify(r.findings.filter((f) => !f.ok))}`);
+	for (const check of ["shape", "declaration", "readOnlyJobInputs", "exitCodes", "abortable", "reap"]) {
+		assert.ok(findings(r, check).length > 0 && findings(r, check).every((f) => f.ok && !f.unverifiable), check);
+	}
+	// And it was podman that ran, every time, keep-id as the worker's uid.
+	const runs = fake.state.calls.filter((c) => c[1] === "run");
+	assert.equal(runs.length, 8, "six exit codes and two 137s");
+	for (const call of fake.state.calls) assert.equal(call[0], "podman", call.join(" "));
+	for (const run of runs) assert.ok(run.includes("--userns=keep-id") && run.includes("--user=1234:1234"));
+	// The read-back is the live conformance script's (a real container); offline, all eight abstain rather than pass.
+	for (const property of READ_BACK_BY_A_LIVE_PROBE) assert.equal(findings(r, property)[0].unverifiable, true, property);
 });

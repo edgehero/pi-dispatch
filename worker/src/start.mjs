@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync, statSync, watch } from "node:fs";
-import { release as osRelease } from "node:os";
+import { homedir, release as osRelease } from "node:os";
 import { dirname, basename, join } from "node:path";
 import { configError, loadConfig } from "./config.mjs";
 import { makeRedisClient, parseConnection } from "./connection.mjs";
@@ -40,7 +40,8 @@ import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue } from "./queue.mjs";
 import { endpointShown, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
-import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, backendFor, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
+import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
+import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_INFO_TIMEOUT_MS, cachedPodmanInfo, decidePodmanJobUser, makePodmanBackend, makePodmanInfoReader, makePodmanReaper, observePodman, podmanJobUserRefusal, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { observeHost, runtimeObservationKey } from "./runtime-observations.mjs";
 
 import { makeRunContainer } from "./run-container.mjs";
@@ -309,9 +310,9 @@ export async function startWorker(
 		// tests in `start-wiring.test.mjs` were reported as not existing at all -- no name, no count, exit 0 --
 		// because this function's log line went through the same channel the runner needed (issue #266).
 		write = (chunk) => process.stdout.write(chunk),
-		// Issue #354: the configuration loader, a seam for ONE reason. `local` is no longer mandatory in
-		// `PI_BACKENDS`, but it is still the only name the backend table holds, so a deployment without it cannot be
-		// written through the real loader until a second venue lands, and the boot it would take could not be tested.
+		// Issue #354: the configuration loader, a seam for ONE reason: a test venue that is not in the backend table (an
+		// injected `extraBackends` bundle) cannot be written through the real loader, which refuses a name it does not know.
+		// The table's own venues (`local`, and `podman` since part 2) go through the real loader.
 		loadConfig: loadConfigFn = loadConfig,
 		makeAuth = makeGitHubAuth,
 		makeHost = makeGitHubHost,
@@ -341,10 +342,18 @@ export async function startWorker(
 		// Issue #341: the one `docker info` the job-user decision reads, and the process facts it reads beside it.
 		// Seams for the same reason as the endpoint: a wiring test decides what the daemon and the process say.
 		readDaemonFacts: readDaemonFactsFn = makeDaemonFactsReader(),
-		jobUserIdentity = { platform: process.platform, release: osRelease(), euid: process.geteuid?.(), egid: process.getegid?.() },
+		// `home` (issue #354) is the account whose rootless Podman runs the podman venue's jobs: its own mounts.conf and
+		// containers.conf are read from there. Absent in a test's identity, it falls to the observation's own default.
+		jobUserIdentity = { platform: process.platform, release: osRelease(), euid: process.geteuid?.(), egid: process.getegid?.(), home: homedir() },
 		// Issue #345: the host files the runtime-mounts observation reads (Podman's mounts.conf and containers.conf). A seam so
 		// a wiring test never reads this machine's /etc.
 		observationFs = { statSync, readFileSync, readdirSync },
+		// Issue #354: the podman venue's three boot collaborators, each a seam for the endpoint's reason: the real ones spawn
+		// `podman`, and a wiring test must decide what `podman info` says, what the reaper lists and what the bundle is
+		// built from. Constructing the default reader spawns nothing; only a call does, and only while `podman` is blessed.
+		readPodmanInfo: readPodmanInfoFn = makePodmanInfoReader(),
+		makePodmanReaper: makePodmanReaperFn = makePodmanReaper,
+		makePodmanBackend: makePodmanBackendFn = makePodmanBackend,
 		makeGitLabAuth: makeGitLabAuthFn = makeGitLabAuth,
 		makeGitLabHost: makeGitLabHostFn = makeGitLabHost,
 		makeForgejoAuth: makeForgejoAuthFn = makeForgejoAuth,
@@ -369,6 +378,10 @@ export async function startWorker(
 	// Docker never spawns `docker` at boot for a venue it will never use, and a floor naming an observation only
 	// `local` makes cannot hold such a worker at exit 1 forever. Everything is byte-identical while it is blessed.
 	const localBlessed = config.backends.includes(DEFAULT_BACKEND);
+	// The same split for the native podman venue (issue #354, `DES-PODMAN-NATIVE-ROOTLESS-BACKEND`): its `podman info`
+	// read, its reaper and its bundle exist only while it is blessed, so a deployment that never chose it spawns no
+	// `podman` and pays nothing for it being in the table.
+	const podmanBlessed = config.backends.includes(PODMAN_BACKEND);
 	// Issue #354: an ABSENT `observationPreflight` admits every job, which is the right answer only for a venue whose
 	// words hold without observing anything. A venue whose table entry names an `observedBy` and carries no preflight
 	// would have those words hold with nothing looking, and a floor naming one would pass on capability alone: the
@@ -433,7 +446,7 @@ export async function startWorker(
 	//
 	// Issue #354: judged for `local` ALONE, not for every blessed venue. These are observations of this host's docker
 	// CLI and its daemon, which mean nothing for another venue's words: a venue with its own `observedBy` brings its own
-	// boot read. Byte-identical today, when `local` is the one venue the table has.
+	// boot read (the podman venue's is below, judged for `podman` alone the same way).
 	const bootEndpoint = localBlessed ? await resolveDockerEndpointFn() : null;
 	if (bootEndpoint) {
 		logDockerEndpoint(log, bootEndpoint);
@@ -494,6 +507,40 @@ export async function startWorker(
 
 	const bootRefusal = jobUserBootRefusal(bootDecision, config.defaultBackend);
 	if (bootRefusal) throw configError(bootRefusal);
+
+	// Issue #354: the podman venue's ONE facts read, `podman info --format json`, at boot, where local's reads are and for
+	// their reasons: free, before forge auth, the reaper and Valkey, so a refusal here stops a process that built nothing.
+	// Wrapped once in `cachedPodmanInfo` and the SAME wrapper is handed to the bundle below, so an answer read here is the
+	// one the first job is decided from rather than a second spawn. Bounded twice: the reader's own timeout (docker info's
+	// 15 s, reused) and this fuse two seconds past it, because a spawn that never settles has no timeout to fire.
+	const podmanInfo = podmanBlessed ? cachedPodmanInfo(readPodmanInfoFn) : null;
+	const bootPodmanRead = podmanInfo
+		? await settleWithin(
+				Promise.resolve()
+					.then(() => podmanInfo())
+					.catch(() => ({ answered: false, reason: "spawn-failed", transient: true })),
+				PODMAN_INFO_TIMEOUT_MS + 2_000,
+				{ answered: false, reason: "boot-read-timeout", transient: true },
+			)
+		: null;
+	const bootPodmanDecision = bootPodmanRead ? decidePodmanJobUser({ platform: jobUserIdentity.platform, euid: jobUserIdentity.euid, egid: jobUserIdentity.egid, read: bootPodmanRead }) : null;
+	// The IDENTITY verdict first, before the observations, and unlike `local`'s order on purpose: a rootful or remote
+	// Podman also fails the observations (the mounts check reads a rootless user's files, the service one its remoteness),
+	// and a floor refusal naming `podmanAddsNoMounts` would send the operator after a mounts.conf when the fix is the
+	// account Podman runs as. Only when `podman` is the DEFAULT venue, as `jobUserBootRefusal` for `local`: with it merely
+	// blessed, the jobs that name it are refused one by one and the default venue's still run.
+	const podmanRefusal = podmanBootRefusal(bootPodmanDecision, config.defaultBackend);
+	if (podmanRefusal) throw configError(podmanRefusal);
+	// The podman venue's own observations, judged for `podman` ALONE, as the endpoint and the daemon's are for `local`
+	// alone: each venue's words are earned by its own reads, and judging one venue's answers over every blessed venue
+	// would read the other's observations as unanswered, which is the transient arm, exit 1 on every restart. Same split
+	// as `local`'s: a refusal resting only on a read that did not answer is untagged (retried), one on an answer tagged.
+	const bootPodmanObserved = bootPodmanRead ? observePodman({ read: bootPodmanRead, fs: observationFs, home: jobUserIdentity.home, env, euid: jobUserIdentity.euid }) : null;
+	if (bootPodmanObserved) {
+		const podmanObservedArgs = { backends: [PODMAN_BACKEND], backendFloor: config.backendFloor, observations: bootPodmanObserved.observations, evidence: bootPodmanObserved.evidence };
+		const [podmanObservationRefusal] = observationRefusals(podmanObservedArgs);
+		if (podmanObservationRefusal) throw observationRefusalIsTransient(podmanObservedArgs) ? new Error(podmanObservationRefusal) : configError(podmanObservationRefusal);
+	}
 
 	// The forge a job belongs to is resolved PER JOB from `job.kind`, not bound once for the process.
 	// Each entry is `{ auth, host }`: `auth` is get-token's `{ mintToken, selfId, source }` (null when that
@@ -676,7 +723,13 @@ export async function startWorker(
 		// there is one place. `local`'s is built here because its bundle cannot exist yet.
 		// Issue #354: `local`'s only while it is blessed, since its bundle is built only then and the registry refuses a
 		// boot reaper for a venue it does not hold.
-		backendReaps = { ...(localBlessed ? { [DEFAULT_BACKEND]: makeReaperFn({ log }) } : {}), ...Object.fromEntries(extraBackends.map((b) => [b?.name, b?.reap])) };
+		// Issue #354: podman's the same way and for the same reason, `makeReaper` with `bin: "podman"`, so the sweep lists
+		// the store this account's jobs actually ran in. Docker's listing says nothing about it, and the reverse.
+		backendReaps = {
+			...(localBlessed ? { [DEFAULT_BACKEND]: makeReaperFn({ log }) } : {}),
+			...(podmanBlessed ? { [PODMAN_BACKEND]: makePodmanReaperFn({ log }) } : {}),
+			...Object.fromEntries(extraBackends.map((b) => [b?.name, b?.reap])),
+		};
 		const swept = (await reapAll(Object.values(backendReaps), { log }))?.reaped === true;
 		// PROVEN FOR THE WHOLE HOST, or not at all (issue #354). `reapAll` is conservative over the reapers it is
 		// handed, and two gaps sit outside that. A BLESSED venue with no reaper here is refused by the registry, but
@@ -948,6 +1001,39 @@ export async function startWorker(
 	// Issue #354: built only while `local` is blessed, since it IS local's (`docker image inspect`). Without `local` the
 	// boot read below asks the default venue's own preflight instead, the one its jobs will be gated on.
 	const imagePreflight = localBlessed ? makeImagePreflightFn({ image: config.jobImage }) : null;
+	// Issue #354: the podman bundle, built only while `podman` is blessed, from the SAME deployment inputs local's
+	// runContainer is handed below (one image, one overlay, one forward list, one egress posture: a venue must not quietly
+	// run a different job than the one configured), plus what only this venue reads: the cached `podman info` the boot
+	// read above already asked, the floor its per-job observation preflight judges, the boot-built reaper, and the
+	// process's identity and host files, through the same seams local's decisions read. Built HERE rather than beside
+	// local's, because the boot image read just below asks the default venue's own preflight when that venue is podman.
+	const podmanBackend = podmanBlessed
+		? makePodmanBackendFn({
+				image: config.jobImage,
+				hostEnv: env,
+				egress: config.egress,
+				egressProxy: config.egressProxy,
+				openJobLog,
+				globalPiDir: config.globalPiDir,
+				allowGlobalExtensions: config.allowGlobalExtensions,
+				packagePaths: getPackagePaths,
+				forwardEnv: config.forwardEnv,
+				authFromPi: config.authFromPi,
+				forgeHosts: { gitlab: config.gitlab?.apiUrl ?? null, forgejo: config.forgejo?.apiUrl ?? null, azure: config.azure?.orgUrl ?? null },
+				backendFloor: config.backendFloor,
+				reap: backendReaps[PODMAN_BACKEND],
+				readInfo: podmanInfo,
+				platform: jobUserIdentity.platform,
+				euid: jobUserIdentity.euid,
+				egid: jobUserIdentity.egid,
+				fs: observationFs,
+				home: jobUserIdentity.home,
+				env,
+				log,
+			})
+		: null;
+	// Every bundle this boot built beside local's, in registration order: the podman one first, then the injected ones.
+	const builtBackends = [...(podmanBackend ? [podmanBackend] : []), ...extraBackends];
 	// BOUNDED, because `.catch()` cannot rescue a promise that never settles: `runDocker` resolves only on
 	// the child's `close` or `error` and has no timeout of its own, so a wedged daemon would hang boot
 	// here. This read is a nicety -- a digest for the boot line and the registry -- and a nicety may
@@ -956,7 +1042,7 @@ export async function startWorker(
 	// Without `local` (issue #354) the default venue's own preflight, under the same bound and the same swallow: a
 	// nicety that throws synchronously must not stop a boot either, hence the `then`. None at all reads as no digest.
 	const defaultVenueImageRead = () => {
-		const read = extraBackends.find((b) => b?.name === config.defaultBackend)?.imagePreflight;
+		const read = builtBackends.find((b) => b?.name === config.defaultBackend)?.imagePreflight;
 		return Promise.resolve()
 			.then(() => (typeof read === "function" ? read({}) : {}))
 			.then((answer) => answer ?? {})
@@ -970,6 +1056,15 @@ export async function startWorker(
 		if (planned.refused === "job-image-any-uid-unsupported") log("job_image_any_uid_unsupported", { image: config.jobImage });
 		else if (planned.refused) log("job_user_group_refused", { cause: planned.cause });
 		if (planned.user && config.forwardEnv.includes("HOME")) log("forward_env_home_overridden", { reason: "HOME is set beside --user" });
+	}
+	// Issue #354: the same boot sentence for a podman DEFAULT venue, whose image was read from this account's own store
+	// just above. Only as the default: with `local` the default, `bootImage` is docker's copy of the tag, which says
+	// nothing about the one in the podman store. `backend` names the venue, since `local`'s lines carry none.
+	if (config.defaultBackend === PODMAN_BACKEND && bootPodmanDecision?.mode === "worker" && bootImage.ok) {
+		const planned = resolvePodmanImageUser(bootPodmanDecision, { capabilities: bootImage.capabilities ?? [], euid: jobUserIdentity.euid, egid: jobUserIdentity.egid });
+		if (planned.refused === "job-image-any-uid-unsupported") log("job_image_any_uid_unsupported", { image: config.jobImage, backend: PODMAN_BACKEND });
+		else if (planned.refused) log("job_user_group_refused", { cause: planned.cause, backend: PODMAN_BACKEND });
+		if (planned.user && config.forwardEnv.includes("HOME")) log("forward_env_home_overridden", { reason: "HOME is set beside --user", backend: PODMAN_BACKEND });
 	}
 	// Resolved once: `Intl` is not free, and this value cannot change without a restart.
 	const hostTz = Intl.DateTimeFormat().resolvedOptions().timeZone ?? "";
@@ -1161,7 +1256,7 @@ export async function startWorker(
 			// what lets a wiring test prove `startWorker` actually CONNECTS the registry to the processor --
 			// six mutations reverting that connection survived the whole suite, which is the same shape as the
 			// bug that shipped: invisible while there is one venue.
-			bundles: [...(localBackend ? [localBackend] : []), ...extraBackends],
+			bundles: [...(localBackend ? [localBackend] : []), ...builtBackends],
 			defaultName: config.defaultBackend,
 			// Cross-checked at boot rather than discovered at the first pickup: a name PI_BACKENDS blesses but
 			// nothing builds passes both the loader and the pre-spend gate, and a venue with no boot reaper is
@@ -1624,6 +1719,14 @@ export async function startWorker(
 			// Issue #345: whether this daemon is observed applying a container's bounds and adding no mounts of its own; null = not read.
 			daemonAppliesBounds: bootObserved ? bootObserved.observations.daemonAppliesBounds : null,
 			runtimeAddsNoMounts: bootObserved ? bootObserved.observations.runtimeAddsNoMounts : null,
+			// Issue #354: the podman venue's own boot answers, all null with `podman` unblessed (no `podman info` was asked):
+			// the version it reported, whether it is rootless and whose uid its jobs run as, and its three observations.
+			podmanVersion: bootPodmanRead?.answered ? bootPodmanRead.info.version : null,
+			podmanRootless: bootPodmanRead?.answered ? bootPodmanRead.info.rootless : null,
+			podmanJobUser: bootPodmanDecision ? { mode: bootPodmanDecision.mode, user: bootPodmanDecision.user, cause: bootPodmanDecision.cause, reason: bootPodmanDecision.reason } : null,
+			podmanBoundsDelegated: bootPodmanObserved ? bootPodmanObserved.observations[PODMAN_BOUNDS_DELEGATED] : null,
+			podmanAddsNoMounts: bootPodmanObserved ? bootPodmanObserved.observations[PODMAN_ADDS_NO_MOUNTS] : null,
+			podmanServiceLocal: bootPodmanObserved ? bootPodmanObserved.observations[PODMAN_SERVICE_LOCAL] : null,
 			host: config.workerName, // issue #57; `log` stamps it on every line, and the boot line names it where an operator looks first
 			imageDigest: bootImage.imageDigest ?? null, // two hosts on two builds of one tag used to emit byte-identical boot lines
 			concurrency: bootConcurrency, // the slot count the Worker is actually constructed with (overlay may raise/lower it)
@@ -1659,12 +1762,24 @@ export async function startWorker(
 }
 
 /**
- * The boot refusal text for a job-user decision, or `null` to boot. Exported so the branch a build with one venue
- * cannot reach (a default venue other than `local`) is still pinned.
+ * The boot refusal text for a job-user decision, or `null` to boot. Exported so its default-venue branch is pinned on the
+ * predicate as well as end to end (a podman default reaches it since issue #354 part 2, and must not refuse on local's causes).
  */
 export function jobUserBootRefusal(decision, defaultBackend) {
 	if (decision?.mode !== "unmappable" || !BOOT_REFUSING_JOB_USER_CAUSES.has(decision.cause)) return null;
 	return defaultBackend === DEFAULT_BACKEND ? jobUserRefusal(decision) : null;
+}
+
+/**
+ * The boot refusal text for a podman job-user decision, or `null` to boot (issue #354): an identity cause no podman job
+ * can get past (`PODMAN_BOOT_REFUSING_CAUSES`), and only while `podman` is the DEFAULT venue, `jobUserBootRefusal`'s rule.
+ * Kept apart from that function rather than merged into it, because the two venues' causes share a name
+ * (`worker-is-root`) and not a remedy, and each venue's text comes from its own map.
+ */
+export function podmanBootRefusal(decision, defaultBackend) {
+	if (defaultBackend !== PODMAN_BACKEND) return null;
+	if (decision?.mode !== "unmappable" || !PODMAN_BOOT_REFUSING_CAUSES.has(decision.cause)) return null;
+	return podmanJobUserRefusal(decision);
 }
 
 /** What makes two job-user decisions the same for the `job_user` log line. */

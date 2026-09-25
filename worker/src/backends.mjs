@@ -2,9 +2,10 @@
  * THE BACKEND TABLE -- the one place that says where a job's container can run, and what each place is
  * ABLE to guarantee (issue #227).
  *
- * A backend is where the box is built. Today there is one, `local`, which is the Docker daemon on the
- * worker's own host and is what every deployment has always used. The table exists so a second one can be
- * added without reading the worker's source, and so that adding one cannot quietly weaken a control.
+ * A backend is where the box is built. `local` is the Docker daemon on the worker's own host and is what
+ * every deployment has always used; since issue #354 `podman` is the worker account's own rootless Podman.
+ * The table exists so another can be added without reading the worker's source, and so that adding one
+ * cannot quietly weaken a control.
  *
  * This module imports NOTHING, deliberately, for `forges.mjs`'s reason: it is a leaf, and `doctor`, the
  * config loader and (later) the receiver all need to read a declaration without pulling the Docker
@@ -362,6 +363,33 @@ export const DAEMON_APPLIES_BOUNDS = "daemonAppliesBounds";
 export const RUNTIME_ADDS_NO_MOUNTS = "runtimeAddsNoMounts";
 
 /**
+ * The observation that a ROOTLESS Podman applies a job container's pid, memory and cpu bounds (issue #354), from the one
+ * `podman info --format json` read the podman venue's job user is decided from: cgroup v2, with `pids`, `memory` and
+ * `cpu` among the controllers systemd delegated to this user. Without delegation rootless Podman accepts `--pids-limit`
+ * and `--memory` and applies nothing (measured on Podman 5.8.1, Fedora 44: `--cgroups=disabled` exits 0 and the bounds
+ * read back `max`), so the word rests on the delegation being OBSERVED, and a `cgroups` key in a containers.conf this
+ * user's Podman reads withholds it. `pi-dispatch doctor --live` reads `pids.max` and `memory.max` back off a container.
+ */
+export const PODMAN_BOUNDS_DELEGATED = "podmanBoundsDelegated";
+
+/**
+ * The observation that this worker account's rootless Podman adds no mounts of its own to a job container (issue #354):
+ * the mounts.conf that wins (the user's `~/.config/containers/mounts.conf` when it exists, which OVERRIDES
+ * `/etc/containers/mounts.conf`, measured) is empty, no containers.conf this user's Podman reads sets `volumes`,
+ * `mounts`, `devices` or `hooks_dir`, no OCI hook is installed and FIPS mode is off (`runtime-observations.mjs`,
+ * `observePodman`).
+ */
+export const PODMAN_ADDS_NO_MOUNTS = "podmanAddsNoMounts";
+
+/**
+ * The observation that the podman CLI this worker spawns runs its containers in-process on this host rather than through
+ * a remote service (issue #354): `podman info` reports `host.serviceIsRemote: false`. `CONTAINER_HOST`, `--remote` or a
+ * `containers.conf` service destination turn it `true` (measured), and a remote service is where the provider key and
+ * the per-job forge token would travel as `-e NAME=VALUE`.
+ */
+export const PODMAN_SERVICE_LOCAL = "podmanServiceLocal";
+
+/**
  * The closed list of observations a backend's `observedBy` may name, each with what it means. Closed for the
  * reason `PROPERTIES` is: a typo in a table entry must not become an observation nobody makes, which would
  * degrade a word forever with nothing saying why.
@@ -370,6 +398,9 @@ export const OBSERVATIONS = Object.freeze({
 	[DOCKER_ENDPOINT_LOCAL]: "the docker endpoint this host's docker CLI resolves is on this host",
 	[DAEMON_APPLIES_BOUNDS]: "the daemon reports that it applies a container's pid and memory bounds, and is neither rootless nor Podman",
 	[RUNTIME_ADDS_NO_MOUNTS]: "the container runtime adds no mounts of its own to a job container",
+	[PODMAN_BOUNDS_DELEGATED]: "this worker's rootless Podman runs on cgroup v2 with the pids, memory and cpu controllers delegated to it, and no containers.conf it reads sets `cgroups`",
+	[PODMAN_ADDS_NO_MOUNTS]: "this worker's rootless Podman adds no mounts of its own to a job container",
+	[PODMAN_SERVICE_LOCAL]: "the podman CLI this worker spawns runs containers on this host, not through a remote service",
 });
 
 /** What to do about each observation that a floor needed and did not get, keyed like `OBSERVATIONS` and pinned to it. */
@@ -377,6 +408,9 @@ export const OBSERVATION_FIX = Object.freeze({
 	[DOCKER_ENDPOINT_LOCAL]: "Point the docker CLI back at this host (DOCKER_HOST, DOCKER_CONTEXT or `docker context use`), or lower that entry to `asserted` if the redirect is deliberate.",
 	[DAEMON_APPLIES_BOUNDS]: "Run jobs on a rootful Docker Engine that reports PidsLimit and MemoryLimit, or lower that entry to `asserted`: on Podman and rootless daemons `pi-dispatch doctor --live` reads pids.max and memory.max off a real container instead.",
 	[RUNTIME_ADDS_NO_MOUNTS]: "On Podman, create an empty /etc/containers/mounts.conf and remove any `volumes` or `mounts` key from containers.conf, or lower that entry to `asserted`.",
+	[PODMAN_BOUNDS_DELEGATED]: "Delegate the cpu, memory and pids controllers to the worker account on cgroup v2 (a systemd `Delegate=` drop-in for user@.service), remove any `cgroups` key from its containers.conf, or lower that entry to `asserted`: `pi-dispatch doctor --live` reads pids.max and memory.max off a real container.",
+	[PODMAN_ADDS_NO_MOUNTS]: "As the worker account, create an empty ~/.config/containers/mounts.conf (or, when it has none, an empty /etc/containers/mounts.conf), remove any `volumes`, `mounts`, `devices` or `hooks_dir` key from every containers.conf it reads and any OCI hook, or lower that entry to `asserted`.",
+	[PODMAN_SERVICE_LOCAL]: "Unset CONTAINER_HOST and any containers.conf service destination for the worker account so `podman info` reports serviceIsRemote false, or lower that entry to `asserted`.",
 });
 
 const BACKENDS_TABLE = {
@@ -484,7 +518,83 @@ const BACKENDS_TABLE = {
 			credentialTransit: DOCKER_ENDPOINT_LOCAL,
 		},
 	},
+	podman: {
+		/**
+		 * The worker account's own ROOTLESS Podman, driven through the real `podman` CLI (issue #354,
+		 * `DES-PODMAN-NATIVE-ROOTLESS-BACKEND`). Not `local` pointed at Podman: that route goes through Podman's Docker
+		 * API and keeps `local`'s words. This one runs `podman run` itself, always as the worker's own `<euid>:<egid>`
+		 * under `--userns=keep-id`, and REFUSES what it was not measured on: a rootful Podman (keep-id there is not
+		 * refused, and adds supplementary group 0, measured), a remote service, a root worker, and any platform but
+		 * Linux (`backend-podman.mjs`, `decidePodmanJobUser`). Every word below was measured on rootless Podman 5.8.1,
+		 * Fedora 44, 2026-09-25.
+		 */
+		describe: "this worker account's own rootless Podman, through the podman CLI",
+		// The containers run on this host, as this account. A remote service is refused rather than declared remote, so
+		// the venue is never one; `credentialTransit`'s observation is what notices a CLI that tries.
+		remote: false,
+		declares: {
+			// The same `ISOLATION_FLAGS` through the same builder (`buildPodmanRunArgs` shares `argsFromSpec`), read back on
+			// a live rootless container: CapEff 0, NoNewPrivs 1, seccomp 2, pids.max 512, memory.max 4 GiB. AND ONLY WHILE
+			// OBSERVED: the bounds are cgroup v2's, and a user without the controllers delegated accepts the flags and
+			// applies nothing, so the word is earned by `podmanBoundsDelegated`.
+			isolation: ENFORCED,
+			// `--rm` leads ISOLATION_FLAGS and the name carries the job id; measured, `--rm` removes the container (and its
+			// cidfile) when it exits.
+			ephemeral: ENFORCED,
+			// The same `containerSpec` mount list. AND ONLY WHILE OBSERVED: rootless Podman mounts what the winning
+			// mounts.conf lists (`/run/secrets` on Fedora and RHEL by default), invisible in `.Mounts`, so the word is earned
+			// by `podmanAddsNoMounts`. Nothing is relabelled but the job's own per-job directories (`:Z`).
+			mountSet: ENFORCED,
+			// CAPABILITY, gated by PI_EGRESS, as on `local`: a per-job `--internal` network and the proxy attached to it.
+			// Measured rootless: an `--internal` network reaches NOTHING on the host (its IP, host.containers.internal,
+			// 10.0.2.2 and the gateway all fail), and a proxy started on a NAMED bridge network under the same rootless
+			// Podman can be `network connect`ed to it (a pasta or slirp4netns one cannot: exit 125).
+			egress: ENFORCED,
+			// Same switch: the job and the proxy are the only endpoints on an `--internal` network. Measured, a peer on
+			// another job's network is unreachable (ENOTFOUND / ENETUNREACH).
+			jobToJobIsolation: ENFORCED,
+			// `--pull=never` in ISOLATION_FLAGS; measured, an absent image exits 125 "image not known" with no lookup.
+			imagePinning: ENFORCED,
+			// `spawn` on the CLI, and a payload's exit N reaches `close` as N (measured). The one residual, named in the
+			// design entry and not normalised: with `--init`, an entrypoint catatonit cannot exec exits 1, which only its
+			// stderr tells from a payload's own exit 1, so it retries as infra.
+			exitCodes: ENFORCED,
+			// `podman stop -t 5` on the name, and the abort FLAG is the discriminator, as on `local`.
+			abortable: ENFORCED,
+			// `-v <host>:/job:ro`: the kernel's, and the bundle says it binds.
+			readOnlyJobInputs: ENFORCED,
+			// ENFORCED here where `local` can only assert it, because the ARGV supplies the uid on every job: `--user
+			// <euid>:<egid>` beside `--userns=keep-id`, which the builder refuses to emit without a user and refuses for a
+			// uid or gid of 0 (`assertJobUser`). A root worker and a rootful Podman are refused before any spawn, so the uid
+			// inside is the worker's own unprivileged one on the host (measured rootless: runs as 1234, no root group).
+			nonRoot: ENFORCED,
+			// The same resolver, record and comment code as `local`; where the values go is `credentialTransit`'s.
+			secretsCustody: ENFORCED,
+			// ENFORCED, AND ONLY WHILE OBSERVED, for `local`'s reason with Podman's knob: `CONTAINER_HOST`, `--remote` or a
+			// service destination in containers.conf send the run, and its `-e` values, to a service elsewhere. The worker
+			// asks `podman info` whether the service is remote, and the word is earned by `podmanServiceLocal`.
+			credentialTransit: ENFORCED,
+			// A bind mount of the operator's folder, as on `local`, never relabelled (on an SELinux host it needs the
+			// `semanage fcontext` doctor names), and writable because the job runs as the account that owns it.
+			localFolders: ENFORCED,
+		},
+		// Nothing asserted: every word above is this worker's own argv or an observation of this host.
+		asserts: {},
+		// Podman's OWN observations, never `local`'s: those read `docker info` and the docker CLI's endpoint, which say
+		// nothing about the podman CLI's rootless store.
+		observedBy: {
+			isolation: PODMAN_BOUNDS_DELEGATED,
+			mountSet: PODMAN_ADDS_NO_MOUNTS,
+			credentialTransit: PODMAN_SERVICE_LOCAL,
+		},
+	},
 };
+
+/**
+ * The podman venue's name (issue #354): the table key, the bundle's `name` and what `PI_BACKENDS` spells, one constant so
+ * the adapter, the boot wiring and doctor cannot disagree about it.
+ */
+export const PODMAN_BACKEND = "podman";
 
 /**
  * FROZEN, deeply. `makeLocalBackend` hands `BACKENDS[name].declares` out on the bundle it returns, so
@@ -604,9 +714,9 @@ export function parseBackendList(raw, { known = BACKEND_NAMES } = {}) {
 		.filter((s) => s.length > 0);
 	if (names.length === 0) return [DEFAULT_BACKEND];
 	for (const name of names) {
-		// `known` is a TEST seam, and the only reason it exists: while `local` is the table's one entry, a list
-		// without it cannot be written through the real table, so the rule below could not be driven. Every
-		// production caller passes nothing and gets the table's own names.
+		// `known` is a TEST seam: it was added while `local` was the table's one entry, when a list without it could not
+		// be written through the real table (since issue #354 `podman` can). Every production caller passes nothing and
+		// gets the table's own names.
 		if (!known.includes(name)) {
 			throw new Error(`PI_BACKENDS names an unknown backend ${JSON.stringify(name)} (known: ${known.join(", ")})`);
 		}

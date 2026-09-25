@@ -1,16 +1,18 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { DEFAULT_BACKEND } from "../src/backends.mjs";
+import { PODMAN_JOB_USER_FIX } from "../src/backend-podman.mjs";
+import { DEFAULT_BACKEND, PODMAN_BACKEND } from "../src/backends.mjs";
 import { JOB_USER_FIX } from "../src/job-user.mjs";
-import { jobUserBootRefusal } from "../src/start.mjs";
+import { jobUserBootRefusal, podmanBootRefusal } from "../src/start.mjs";
 
 // `docs/backends.md` names WHEN each job-user refusal fires, which is a restatement of a derivable source, so it is
 // BOLTED to that source (CLAUDE.md: a hand-written table is derived or pinned, never trusted). Until this file there
 // was NO test reading that page at all, which is why its own refusal sentence had drifted to naming seven of the
 // code's eight causes in six clauses, omitting `runtime-unreadable` entirely.
 //
-// THIS FILE GENERATES THE TWO LINES AND REQUIRES THEM VERBATIM. It does not parse them back out of the page, and
+// THIS FILE GENERATES THE LIST LINES AND REQUIRES THEM VERBATIM (two for `local`, two since issue #354 for
+// `podman`). It does not parse them back out of the page, and
 // that is the whole design rather than a detail. The first version did parse: it found a marked block, pulled the
 // backticked names out of it and compared the sets. An adversarial review got ELEVEN wrong pages past it; the lists
 // were genuinely derived, but nothing pinned WHICH TEXT was being read. It was hardened, and the second pass got ten
@@ -65,6 +67,18 @@ const listLine = (label, causes) => `- **${label}**: ${causes.map((cause) => `\`
 /** The two lines this build says the page must carry, in `JOB_USER_FIX`'s own order so there is one canonical form. */
 const EXPECTED = [listLine("Stops the boot", CAUSES.filter(stopsBoot)), listLine("Refuses each job", CAUSES.filter((cause) => !stopsBoot(cause)))];
 
+// The `podman` venue's causes (issue #354), generated the same way and for the same reason: `PODMAN_JOB_USER_FIX` for
+// the names, `podmanBootRefusal(decision, "podman")` for which heading each belongs under. Only the causes `local`'s two
+// lines do not already name, so the page-wide count-once rule below still holds; the shared names get their own test,
+// which checks what the page says about them (they fire at the same point on both venues) against both functions.
+const PODMAN_ONLY = Object.keys(PODMAN_JOB_USER_FIX).filter((cause) => !Object.hasOwn(JOB_USER_FIX, cause));
+const PODMAN_SHARED = Object.keys(PODMAN_JOB_USER_FIX).filter((cause) => Object.hasOwn(JOB_USER_FIX, cause));
+const podmanStopsBoot = (cause) => podmanBootRefusal({ mode: "unmappable", cause }, PODMAN_BACKEND) !== null;
+const PODMAN_EXPECTED = [
+	listLine(`Stops the boot while \`${PODMAN_BACKEND}\` is the default venue`, PODMAN_ONLY.filter(podmanStopsBoot)),
+	listLine(`Refuses each job on \`${PODMAN_BACKEND}\``, PODMAN_ONLY.filter((cause) => !podmanStopsBoot(cause))),
+];
+
 test("the page carries the two cause lists this build generates, verbatim (#357)", () => {
 	// Matched against TRIMMED LINES of the visible page, which is what makes a hiding place useless: a link
 	// reference definition or a table cell is not a line beginning `- **`, a name spelled with a non-breaking
@@ -72,7 +86,7 @@ test("the page carries the two cause lists this build generates, verbatim (#357)
 	// prose after the full stop.
 	assert.ok(!VISIBLE.includes("<!--"), "docs/backends.md has an unclosed HTML comment, which hides what follows it");
 	const lines = VISIBLE.split("\n").map((line) => line.trim());
-	for (const want of EXPECTED) {
+	for (const want of [...EXPECTED, ...PODMAN_EXPECTED]) {
 		const found = lines.filter((line) => line.startsWith(want));
 		assert.equal(found.length, 1, `docs/backends.md must carry exactly this line, exactly once:\n${want}`);
 	}
@@ -83,8 +97,23 @@ test("each cause is named once on the whole page, so no sentence can reassign on
 	// somewhere else on the page passed it, and so did moving the block's own end marker. Counted in the BACKTICKED
 	// form, which is what avoids the collision that made an honest page fail -- `job-image-any-uid-unsupported` is
 	// the id the code uses for the per-image refusal and contains `any-uid-unsupported` as a bare substring.
-	for (const cause of CAUSES) {
+	for (const cause of new Set([...CAUSES, ...PODMAN_ONLY])) {
 		assert.equal(VISIBLE.split(`\`${cause}\``).length - 1, 1, `${cause} is named once on the page, in its own list`);
+	}
+});
+
+// The page's one sentence about the causes the two venues SHARE says they "fire at the same point on `podman` as on
+// `local`". That is a claim two functions can answer, so it is asked of them rather than trusted: each shared cause
+// stops a boot on its venue exactly when it stops one on the other, each as its own default. The count is pinned too,
+// because the sentence names them as three, in prose, without the backticked names the rule above counts.
+test("the causes both venues name fire at the same point on each (#354)", () => {
+	assert.equal(PODMAN_SHARED.length, 3, "the page names three shared causes");
+	for (const cause of PODMAN_SHARED) {
+		assert.equal(podmanStopsBoot(cause), stopsBoot(cause), cause);
+	}
+	// And neither function answers for the other's venue, which is what "with `podman` in `local`'s place" means.
+	for (const cause of Object.keys(PODMAN_JOB_USER_FIX)) {
+		assert.equal(podmanBootRefusal({ mode: "unmappable", cause }, DEFAULT_BACKEND), null, cause);
 	}
 });
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ABSENT, ASSERTED, BACKENDS, BACKEND_NAMES, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATION_FIX, OBSERVATIONS, RUNTIME_ADDS_NO_MOUNTS, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, declarationOf, effectiveWord, isDeclaration, isProperty, meets, parseBackendList, shortfall } from "../src/backends.mjs";
+import { ABSENT, ASSERTED, BACKENDS, BACKEND_NAMES, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, declarationOf, effectiveWord, isDeclaration, isProperty, meets, parseBackendList, shortfall } from "../src/backends.mjs";
 
 test("the table is a LEAF -- it imports nothing", () => {
 	// `forges.mjs`'s reason, and it is why doctor and the config loader can read a declaration without
@@ -306,7 +306,7 @@ test("every observedBy names a property and an observation from the closed list 
 
 test("isolation and mountSet are ENFORCED only while the runtime is OBSERVED providing them (#345)", () => {
 	assert.deepEqual({ ...BACKENDS.local.observedBy }, { isolation: DAEMON_APPLIES_BOUNDS, mountSet: RUNTIME_ADDS_NO_MOUNTS, credentialTransit: DOCKER_ENDPOINT_LOCAL });
-	assert.deepEqual(Object.keys(OBSERVATIONS), [DOCKER_ENDPOINT_LOCAL, DAEMON_APPLIES_BOUNDS, RUNTIME_ADDS_NO_MOUNTS]);
+	assert.deepEqual(Object.keys(OBSERVATIONS), [DOCKER_ENDPOINT_LOCAL, DAEMON_APPLIES_BOUNDS, RUNTIME_ADDS_NO_MOUNTS, PODMAN_BOUNDS_DELEGATED, PODMAN_ADDS_NO_MOUNTS, PODMAN_SERVICE_LOCAL]);
 	assert.deepEqual(Object.keys(OBSERVATION_FIX), Object.keys(OBSERVATIONS), "every observation has its own remedy, and no remedy names an observation that does not exist");
 	assert.ok(Object.isFrozen(OBSERVATION_FIX));
 	for (const [property, observation] of [["isolation", DAEMON_APPLIES_BOUNDS], ["mountSet", RUNTIME_ADDS_NO_MOUNTS]]) {
@@ -316,4 +316,35 @@ test("isolation and mountSet are ENFORCED only while the runtime is OBSERVED pro
 			assert.equal(effectiveWord("local", property, seen), ASSERTED, `${property} degrades for ${JSON.stringify(seen)}`);
 		}
 	}
+});
+
+test("the podman venue declares every word ENFORCED, three of them only while podman's OWN observations hold (#354)", () => {
+	// Pinned word by word, so a word moved without its reason fails here beside the entry's comments. Each rests on a
+	// measurement on rootless Podman 5.8.1 (DES-PODMAN-NATIVE-ROOTLESS-BACKEND); `nonRoot` is the one that differs from
+	// local, because this venue's argv always supplies the worker's own non-zero uid.
+	assert.equal(PODMAN_BACKEND, "podman");
+	assert.ok(BACKEND_NAMES.includes(PODMAN_BACKEND));
+	const entry = BACKENDS[PODMAN_BACKEND];
+	assert.equal(entry.remote, false, "a remote service is refused, never declared");
+	for (const property of PROPERTY_NAMES) assert.equal(entry.declares[property], ENFORCED, property);
+	assert.deepEqual({ ...entry.asserts }, {}, "nothing asserted, so nothing names an asserter");
+	assert.deepEqual({ ...entry.observedBy }, { isolation: PODMAN_BOUNDS_DELEGATED, mountSet: PODMAN_ADDS_NO_MOUNTS, credentialTransit: PODMAN_SERVICE_LOCAL });
+	// Podman's observations are its own: local's read `docker info` and the docker CLI's endpoint, which say nothing about
+	// the podman CLI's rootless store, and podman's say nothing about a Docker daemon.
+	for (const observation of Object.values(entry.observedBy)) assert.equal(Object.values(BACKENDS.local.observedBy).includes(observation), false, observation);
+	const all = { [PODMAN_BOUNDS_DELEGATED]: true, [PODMAN_ADDS_NO_MOUNTS]: true, [PODMAN_SERVICE_LOCAL]: true };
+	for (const [property, observation] of Object.entries(entry.observedBy)) {
+		assert.equal(effectiveWord(PODMAN_BACKEND, property, all), ENFORCED, property);
+		for (const seen of [{ ...all, [observation]: false }, { ...all, [observation]: null }, {}, { [DOCKER_ENDPOINT_LOCAL]: true, [DAEMON_APPLIES_BOUNDS]: true, [RUNTIME_ADDS_NO_MOUNTS]: true }]) {
+			assert.equal(effectiveWord(PODMAN_BACKEND, property, seen), ASSERTED, `${property} degrades for ${JSON.stringify(seen)}`);
+		}
+	}
+	assert.equal(effectiveWord(PODMAN_BACKEND, "nonRoot", {}), ENFORCED, "not observation-gated");
+	assert.deepEqual(shortfall(PODMAN_BACKEND, { nonRoot: ENFORCED }), [], "the floor local cannot meet, podman can");
+	for (const observation of [PODMAN_BOUNDS_DELEGATED, PODMAN_ADDS_NO_MOUNTS, PODMAN_SERVICE_LOCAL]) {
+		assert.ok(OBSERVATIONS[observation].length > 40, observation);
+		assert.match(OBSERVATION_FIX[observation], /or lower that entry to `asserted`/, observation);
+	}
+	assert.ok(Object.isFrozen(entry) && Object.isFrozen(entry.declares) && Object.isFrozen(entry.asserts) && Object.isFrozen(entry.observedBy));
+	assert.deepEqual(parseBackendList("podman"), ["podman"], "PI_BACKENDS=podman alone is a deployment through the real table");
 });

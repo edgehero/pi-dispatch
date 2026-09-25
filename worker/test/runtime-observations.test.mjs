@@ -5,7 +5,12 @@ import {
 	ESCAPED_KEY,
 	FIPS_ENABLED_PATH,
 	MOUNT_KEY,
+	MOUNT_KEY_SAYS,
 	PODMAN_HOOKS_DIRS,
+	confFilesIn,
+	confKeyFinding,
+	fipsFinding,
+	hooksFinding,
 	observeBounds,
 	observeHost,
 	observeRuntimeMounts,
@@ -163,4 +168,21 @@ test("MOUNT_KEY finds a volumes or mounts key in every TOML spelling, and nothin
 	assert.equal(ESCAPED_KEY.test('"volum\\u0065s" = []'), true, "an escaped key is refused, not decoded");
 	for (const text of ['label = "a\\b"', '# "x\\y" = 1', 'volumes = ["C:\\x"]']) assert.equal(ESCAPED_KEY.test(text), false, JSON.stringify(text));
 	assert.deepEqual([...PODMAN_HOOKS_DIRS], ["/usr/share/containers/oci/hooks.d", "/etc/containers/oci/hooks.d"]);
+});
+
+test("the file helpers the podman venue shares read files by the rootful observation's rule (#354)", () => {
+	// Exported so the rootless observation cannot drift from this one's reading: a drop-in directory is listed sorted and
+	// `.conf` only, a directory that exists and cannot be listed withholds credit, a missing file is simply not read.
+	const fs = hostFs({ "/a.conf": "x = 1\n", "/d/10-b.conf": '[containers]\nvolumes = ["/srv:/srv"]\n', "/d/05-a.conf": "" }, { "/d": ["10-b.conf", "readme", "05-a.conf"], "/locked": "EACCES" });
+	assert.deepEqual(confFilesIn(fs, { files: ["/a.conf"], dirs: ["/missing", "/d"] }), { files: ["/a.conf", "/d/05-a.conf", "/d/10-b.conf"] });
+	assert.deepEqual(confFilesIn(fs, { files: [], dirs: ["/locked"] }), { finding: { value: false, evidence: "/locked could not be read (EACCES)" } });
+	assert.deepEqual(confKeyFinding(fs, ["/nope.conf", "/a.conf", "/d/05-a.conf", "/d/10-b.conf"], { key: MOUNT_KEY, says: MOUNT_KEY_SAYS }), { value: false, evidence: `/d/10-b.conf ${MOUNT_KEY_SAYS}` });
+	assert.equal(confKeyFinding(fs, ["/a.conf"], { key: MOUNT_KEY, says: MOUNT_KEY_SAYS }), null);
+	assert.deepEqual(confKeyFinding(hostFs({ "/e.conf": { error: "EIO" } }), ["/e.conf"], { key: MOUNT_KEY, says: MOUNT_KEY_SAYS }), { value: false, evidence: "/e.conf could not be read (EIO)" });
+	assert.equal(fipsFinding(hostFs()), null, "no FIPS file is FIPS off");
+	assert.equal(fipsFinding(hostFs({ [FIPS_ENABLED_PATH]: "0\n" })), null);
+	assert.equal(fipsFinding(hostFs({ [FIPS_ENABLED_PATH]: "1\n" })).value, false);
+	assert.equal(fipsFinding(hostFs({ [FIPS_ENABLED_PATH]: { error: "EACCES" } })).value, false);
+	assert.equal(hooksFinding(hostFs({}, { [PODMAN_HOOKS_DIRS[0]]: ["README"] })), null);
+	assert.match(hooksFinding(hostFs({}, { [PODMAN_HOOKS_DIRS[1]]: ["x.json"] })).evidence, /holds an OCI hook/);
 });

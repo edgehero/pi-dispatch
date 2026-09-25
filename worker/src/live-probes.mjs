@@ -354,15 +354,19 @@ export function mountEntriesOf(mountinfo) {
  * read it, `null` when the read failed. `.Mounts` is the daemon's own list, and a runtime can mount things into every
  * container that it never lists there (rootful Podman's `/run/secrets`, measured), so a mount point inside the container
  * that is neither declared nor on the runtime's own short list fails `runtime-mount`.
+ *
+ * `bin` (issue #354) names the CLI whose `inspect` was read, in the words only: a podman venue's verdict saying "docker
+ * inspect" would send an operator to a daemon that never saw the container. Docker's words are the default, so every
+ * local verdict is byte-for-byte what it was.
  */
-export function mountSetVerdict(inspectOutput, { expected, home = null, sessionsDir = null, mountinfo = undefined }) {
+export function mountSetVerdict(inspectOutput, { expected, home = null, sessionsDir = null, mountinfo = undefined, bin = "docker" }) {
 	let mounts;
 	try {
 		mounts = JSON.parse(String(inspectOutput ?? "").trim());
 	} catch {
-		return notReadBack("mountSet", "docker inspect did not return the mounts as JSON");
+		return notReadBack("mountSet", `${bin} inspect did not return the mounts as JSON`);
 	}
-	if (!Array.isArray(mounts)) return notReadBack("mountSet", "docker inspect did not return a mount list");
+	if (!Array.isArray(mounts)) return notReadBack("mountSet", `${bin} inspect did not return a mount list`);
 	const failures = [];
 	const byDestination = new Map(mounts.map((m) => [m?.Destination, m]));
 	for (const want of expected) {
@@ -376,6 +380,9 @@ export function mountSetVerdict(inspectOutput, { expected, home = null, sessions
 		const source = String(m?.Source ?? "");
 		const under = (dir) => source !== "" && (source === dir || dir.startsWith(`${source.replace(/\/+$/, "")}/`));
 		if (/docker\.sock$/.test(source) || /docker\.sock$/.test(String(m?.Destination ?? ""))) failures.push(`the docker socket is mounted (${m?.Destination})`);
+		// Issue #354: Podman's API socket is the same key to the same house (rootless, the worker account's whole store and
+		// every container it runs), so it is refused on sight wherever it appears, on either venue.
+		else if (/podman\.sock$/.test(source) || /podman\.sock$/.test(String(m?.Destination ?? ""))) failures.push(`the podman socket is mounted (${m?.Destination})`);
 		if (home && (source === "/" || under(home))) failures.push(`${m?.Destination} mounts the home directory or an ancestor of it`);
 		if (sessionsDir && source !== "" && (source === sessionsDir || source.startsWith(`${sessionsDir.replace(/\/+$/, "")}/`) || under(sessionsDir))) failures.push(`${m?.Destination} mounts the shared session store or an ancestor of it`);
 	}
@@ -383,15 +390,15 @@ export function mountSetVerdict(inspectOutput, { expected, home = null, sessions
 	const declaredList = `${expected.map((m) => `${m.container}${m.readOnly ? ":ro" : ""}`).join(", ")} and nothing else`;
 	if (mountinfo === undefined) return verdict("mountSet", true, declaredList);
 	const entries = mountinfo === null ? [] : mountEntriesOf(mountinfo);
-	if (entries.length === 0) return notReadBack("mountSet", `docker inspect lists ${declaredList}, but /proc/self/mountinfo could not be read inside the container, so a mount the runtime adds without listing it was not checked`);
+	if (entries.length === 0) return notReadBack("mountSet", `${bin} inspect lists ${declaredList}, but /proc/self/mountinfo could not be read inside the container, so a mount the runtime adds without listing it was not checked`);
 	const underTree = (point) => MOUNTINFO_ALLOWED_TREES.some((tree) => point === tree || point.startsWith(`${tree}/`));
 	const allowed = ({ point, fstype }) => declared.has(point) || MOUNTINFO_ALLOWED_EXACT.includes(point) || (underTree(point) && !MOUNTINFO_HOST_FILESYSTEM.test(fstype));
 	// Printable only: a mount point is the container's text, and a verdict detail reaches the operator's terminal.
 	const extra = [...new Set(entries.filter((e) => !allowed(e)).map((e) => e.point))].map((p) => p.replace(/[^\x20-\x7e]/g, "?"));
 	if (extra.length > 0) {
-		return verdict("mountSet", false, `${extra.join(", ")} ${extra.length === 1 ? "is" : "are"} mounted inside the container, and neither docker inspect nor the job lists ${extra.length === 1 ? "it" : "them"}`, { cause: "runtime-mount" });
+		return verdict("mountSet", false, `${extra.join(", ")} ${extra.length === 1 ? "is" : "are"} mounted inside the container, and neither ${bin} inspect nor the job lists ${extra.length === 1 ? "it" : "them"}`, { cause: "runtime-mount" });
 	}
-	return verdict("mountSet", true, `${declaredList}, in docker inspect and in /proc/self/mountinfo`);
+	return verdict("mountSet", true, `${declaredList}, in ${bin} inspect and in /proc/self/mountinfo`);
 }
 
 /**
@@ -428,16 +435,17 @@ export function localFoldersVerdict({ code, stdout, hostRead, nonce, hostOwner =
  * Issue #354: rootless Podman 5.8.1 refuses the same `--pull=never` run with `Error: <ref>: image not known` (exit
  * 125, measured), so those words are the absent-image refusal too; without them every podman venue would abstain
  * here forever. Podman announces a pull as `Trying to pull <ref>...`, which fails like docker's announcement does:
- * a pull attempted and then refused is still not pinning. Any other refusal still abstains.
+ * a pull attempted and then refused is still not pinning. Any other refusal still abstains. `bin` names the CLI in the
+ * details only (docker's by default, so local's are unchanged); the words recognised are both runtimes' either way.
  */
-export function imagePinningVerdict({ code, output, stillAbsent }) {
+export function imagePinningVerdict({ code, output, stillAbsent, bin = "docker" }) {
 	const text = String(output ?? "");
 	if (code === null || code === undefined) return notReadBack("imagePinning", "the pinning probe did not run");
 	if (code === 0) return verdict("imagePinning", false, "a container started from an image this host does not have");
-	if (/Unable to find image|Trying to pull/i.test(text)) return verdict("imagePinning", false, "docker tried to pull an image this host does not have");
+	if (/Unable to find image|Trying to pull/i.test(text)) return verdict("imagePinning", false, `${bin} tried to pull an image this host does not have`);
 	if (stillAbsent === false) return verdict("imagePinning", false, "an image this host did not have is present after the run");
 	if (stillAbsent !== true) return notReadBack("imagePinning", "whether the image is still absent could not be read");
-	if (!/No such image|image not known/i.test(text)) return notReadBack("imagePinning", "docker refused the run with a message this check does not recognise");
+	if (!/No such image|image not known/i.test(text)) return notReadBack("imagePinning", `${bin} refused the run with a message this check does not recognise`);
 	return verdict("imagePinning", true, "an absent image was refused without a pull");
 }
 
@@ -446,11 +454,15 @@ export function imagePinningVerdict({ code, output, stillAbsent }) {
  * must reach the provider and one that must not reach an unlisted host. `results` is `[{ want, reached }]` from the
  * canary's `readBack`; anything short of both readings -- the policy off, the proxy down, the canary skipped -- is
  * "not read back", never a pass.
+ *
+ * `unread` (issue #354) replaces the missing-readings reason for a caller that knows why there are none: doctor's canary
+ * runs on docker only, so a podman venue's read-back has no readings, and "see the egress lines above" would send the
+ * operator to lines about another runtime's proxy. Absent, the reason is what it always was.
  */
-export function egressVerdict({ armed, results }) {
+export function egressVerdict({ armed, results, unread = null }) {
 	if (armed === null) return notReadBack("egress", "PI_EGRESS could not be read (see the .env check above)");
 	if (armed !== true) return notReadBack("egress", "PI_EGRESS is off, so there is no policy to read back");
-	if (!Array.isArray(results) || results.length < 2) return notReadBack("egress", "the egress canary did not run both probes (see the egress lines above)");
+	if (!Array.isArray(results) || results.length < 2) return notReadBack("egress", unread ?? "the egress canary did not run both probes (see the egress lines above)");
 	// A WRONG reading fails first, whatever else is missing: an unlisted host that was reached is a finding even when
 	// the provider probe did not run, and reporting it as merely unread would pass doctor over it.
 	const wrong = results.filter((r) => typeof r.reached === "boolean" && r.reached !== r.want);
@@ -464,13 +476,14 @@ export function egressVerdict({ armed, results }) {
  * longer lists it. `first`/`second` are `{ started, id, removal: { state, ms } }` (`state` one of `gone`, `exited`
  * (still listed, stopped, past the deadline), `present` (still listed, not stopped), `unanswered`), plus `nameHeld` on
  * the second when its run was refused while a container held the name; `markers` are what each run left in the
- * workspace. A finding needs positive evidence; anything that did not run to an answer is not read back.
+ * workspace. A finding needs positive evidence; anything that did not run to an answer is not read back. `bin` names the
+ * CLI whose `ps` was polled, in the words only (issue #354).
  */
-export function ephemeralVerdict({ first, second, markers = {}, nonce }) {
+export function ephemeralVerdict({ first, second, markers = {}, nonce, bin = "docker" }) {
 	const deadline = `${LIVE_REMOVAL_DEADLINE_MS / 1000} s`;
 	const unfinished = (which, run) => {
 		if (run?.removal?.state === "present") return notReadBack("ephemeral", `the ${which} run was still listed and not stopped after ${deadline}, so its removal was not seen`);
-		if (run?.removal?.state === "unanswered") return notReadBack("ephemeral", `docker ps did not answer while the ${which} run was being waited on`);
+		if (run?.removal?.state === "unanswered") return notReadBack("ephemeral", `${bin} ps did not answer while the ${which} run was being waited on`);
 		return null;
 	};
 	if (!first?.started) return notReadBack("ephemeral", "the first ephemeral run did not start");
@@ -497,16 +510,20 @@ export function ephemeralVerdict({ first, second, markers = {}, nonce }) {
  * routing); peer1 reached the proxy (a network that reaches nothing blocks everything); and peer2 answered itself
  * both before the attempt (else a refused connection may be a listener not yet up, which is the opposite of a block)
  * and after it (so it stayed up throughout).
+ *
+ * `bin` (issue #354) names the runtime in the words only. Unarmed, a podman job is on podman's default network, which
+ * rootless is not a bridge at all (pasta), so the other runtime says "default network" rather than borrowing docker's
+ * noun; docker's sentence is unchanged.
  */
-export function jobToJobIsolationVerdict({ armed, proxyRunning, networksCreated, peersStarted, proxyTarget, peerTargets = [], peerAddresses = [], fromPeer1 = new Map(), controlBefore = new Map(), controlAfter = new Map() }) {
+export function jobToJobIsolationVerdict({ bin = "docker", armed, proxyRunning, networksCreated, peersStarted, proxyTarget, peerTargets = [], peerAddresses = [], fromPeer1 = new Map(), controlBefore = new Map(), controlAfter = new Map() }) {
 	if (armed === null) return notReadBack("jobToJobIsolation", "PI_EGRESS could not be read (see the .env check above)");
-	if (armed !== true) return notReadBack("jobToJobIsolation", "PI_EGRESS is off, so jobs share docker's default bridge by design and there is no per-job network to read back");
+	if (armed !== true) return notReadBack("jobToJobIsolation", `PI_EGRESS is off, so jobs share ${bin === "docker" ? "docker's default bridge" : `${bin}'s default network`} by design and there is no per-job network to read back`);
 	if (proxyRunning === false) return notReadBack("jobToJobIsolation", "the egress proxy is not running, so no job-shaped network could be built");
 	if (networksCreated !== true) return notReadBack("jobToJobIsolation", "the peer networks could not be created");
 	if (peersStarted !== true) return notReadBack("jobToJobIsolation", "a peer container did not start");
 	const reached = peerTargets.filter((t) => fromPeer1.get(t) === "reached");
 	if (reached.length > 0) return verdict("jobToJobIsolation", false, `one job reached another across their own networks, at ${reached.join(", ")}`, { cause: "reached" });
-	if (peerAddresses.length === 0) return notReadBack("jobToJobIsolation", "docker inspect gave peer2 no address on its network, so only names could be tried and a name proves nothing about routing");
+	if (peerAddresses.length === 0) return notReadBack("jobToJobIsolation", `${bin} inspect gave peer2 no address on its network, so only names could be tried and a name proves nothing about routing`);
 	if (peerTargets.some((t) => !fromPeer1.has(t)) || !fromPeer1.has(proxyTarget)) return notReadBack("jobToJobIsolation", "the connection attempt did not answer for every target");
 	if (!["connected", "reached"].includes(fromPeer1.get(proxyTarget))) return notReadBack("jobToJobIsolation", `peer1 could not reach the proxy (${fromPeer1.get(proxyTarget)}), so an unreached peer proves nothing`);
 	// Keyed by the addresses peer1 was given, never by whatever the control printed: a control that answered one of
@@ -588,6 +605,9 @@ export async function runLiveProbes({
 	isAlive,
 	announce = () => {},
 	stepTimeoutMs = LIVE_STEP_TIMEOUT_MS,
+	// The bound on each container START alone, the step bound unless a venue needs more: rootless Podman's first keep-id
+	// run of an image copies its layers to the mapped ids, which took 27 s for the job image (measured; later runs 0.15 s).
+	startTimeoutMs = stepTimeoutMs,
 	user = null,
 	relabel = false,
 	euid = undefined,
@@ -634,7 +654,7 @@ export async function runLiveProbes({
 	const start = async (what, name, args) => {
 		const entry = { what, name, id: null, done: false };
 		owned.push(entry);
-		const result = await step(args);
+		const result = await run(args, { timeoutMs: startTimeoutMs });
 		// The ID is taken whenever one was printed, whatever the exit: a CLI killed or timed out after the create can
 		// leave a container that never started, which `--rm` does not remove.
 		entry.id = containerIdOf(result);
@@ -702,7 +722,7 @@ export async function runLiveProbes({
 		const inspected = await step(["inspect", "--format={{json .Mounts}}", probeId]);
 		// Issue #345: the mount table as the container itself sees it, by a constant `cat`, for what `.Mounts` does not list.
 		const mountinfo = await step(["exec", probeId, "cat", "/proc/self/mountinfo"]);
-		const mountSet = inspected?.code === 0 ? mountSetVerdict(inspected.stdout, { expected, home, sessionsDir, mountinfo: mountinfo?.code === 0 ? mountinfo.stdout : null }) : notReadBack("mountSet", "docker inspect did not answer");
+		const mountSet = inspected?.code === 0 ? mountSetVerdict(inspected.stdout, { expected, home, sessionsDir, mountinfo: mountinfo?.code === 0 ? mountinfo.stdout : null, bin }) : notReadBack("mountSet", `${bin} inspect did not answer`);
 
 		const statusRun = await step(["exec", probeId, "sh", "-c", STATUS_SCRIPT]);
 		const status = statusRun?.code === 0 ? parseStatus(statusRun.stdout) : null;
@@ -735,7 +755,7 @@ export async function runLiveProbes({
 		const pinning = await start("pinning container", names.pin, pinningProbeRunArgs({ name: names.pin, nonce, fixture, user, relabel, buildArgs }));
 		const after = await step(["image", "inspect", absentImageRef(nonce)]);
 		const stillAbsent = after?.code === 0 ? false : typeof after?.code === "number" ? true : null;
-		const imagePinning = imagePinningVerdict({ code: pinning.result?.code, output: `${pinning.result?.stdout ?? ""}${pinning.result?.stderr ?? ""}`, stillAbsent });
+		const imagePinning = imagePinningVerdict({ code: pinning.result?.code, output: `${pinning.result?.stdout ?? ""}${pinning.result?.stderr ?? ""}`, stillAbsent, bin });
 		await release(pinning.entry);
 
 		// --- the ephemeral pair (issue #344): one name, two runs, each waited on until it is gone ---
@@ -762,12 +782,12 @@ export async function runLiveProbes({
 				return null;
 			}
 		};
-		const ephemeral = ephemeralVerdict({ first, second, markers: { first: marker(1), second: marker(2) }, nonce });
+		const ephemeral = ephemeralVerdict({ first, second, markers: { first: marker(1), second: marker(2) }, nonce, bin });
 
 		// --- the peers (issue #344): two job networks, two peers, one attempt each way ---
-		let jobToJobIsolation = jobToJobIsolationVerdict({ armed: egress?.armed, proxyRunning: egress?.proxyRunning });
+		let jobToJobIsolation = jobToJobIsolationVerdict({ bin, armed: egress?.armed, proxyRunning: egress?.proxyRunning });
 		if (peersWanted) {
-			const reading = { armed: true, proxyRunning: egress?.proxyRunning, networksCreated: false, peersStarted: false };
+			const reading = { bin, armed: true, proxyRunning: egress?.proxyRunning, networksCreated: false, peersStarted: false };
 			const peerNetworks = [];
 			const peers = [];
 			try {

@@ -59,6 +59,83 @@ export const ESCAPED_KEY = /^(?!\s*#).*?["'][^"'\n]*\\[^"'\n]*["']\s*=/m;
 /** OCI hook directories Podman runs every `*.json` hook from (container-libs pkg/config); a hook can mount into a container. */
 export const PODMAN_HOOKS_DIRS = Object.freeze(["/usr/share/containers/oci/hooks.d", "/etc/containers/oci/hooks.d"]);
 
+/** What a containers.conf matching `MOUNT_KEY` is said to do, the evidence `observeRuntimeMounts` has always given. */
+export const MOUNT_KEY_SAYS = "sets a volumes, mounts, devices or hooks_dir key, which Podman applies to every container";
+
+/**
+ * One host file's text, as `{ text }`, or `{ missing, error }` when it could not be read. Exported (issue #354) so the
+ * rootless podman venue's observations read files by the one rule the rootful ones do.
+ */
+export function readHostFile(fs, path) {
+	try {
+		return { text: fs.readFileSync(path, "utf8") };
+	} catch (error) {
+		return { missing: error?.code === "ENOENT", error: error?.code ?? "error" };
+	}
+}
+
+/**
+ * FIPS mode as a finding: `{ value: false, evidence }` when it is on or its file cannot be read, `null` when it is off or
+ * the kernel has no such file. FIPS mode mounts the host's crypto policy into every Podman container, rootful or not.
+ */
+export function fipsFinding(fs) {
+	const fips = readHostFile(fs, FIPS_ENABLED_PATH);
+	if (!fips.missing && fips.text === undefined) return { value: false, evidence: `${FIPS_ENABLED_PATH} could not be read (${fips.error})` };
+	if (String(fips.text ?? "").trim() === "1") return { value: false, evidence: "FIPS mode is on, and Podman then mounts the host's crypto policy into every container" };
+	return null;
+}
+
+/**
+ * The containers.conf files Podman would read from `files` and every `*.conf` in `dirs` (sorted per directory, missing
+ * directories skipped), as `{ files }`, or `{ finding }` when a directory exists and cannot be listed: a drop-in nobody
+ * could see must withhold credit, not read as none.
+ */
+export function confFilesIn(fs, { files = [], dirs = [] }) {
+	const out = [...files];
+	for (const dir of dirs) {
+		let entries;
+		try {
+			entries = fs.readdirSync(dir);
+		} catch (error) {
+			if (error?.code === "ENOENT") continue;
+			return { finding: { value: false, evidence: `${dir} could not be read (${error?.code ?? "error"})` } };
+		}
+		for (const entry of [...entries].sort()) if (String(entry).endsWith(".conf")) out.push(`${dir}/${entry}`);
+	}
+	return { files: out };
+}
+
+/**
+ * The first of `files` that sets a key `key` matches (`says` completes the sentence naming it), or holds an escaped key
+ * this check cannot decode, or exists and cannot be read, as `{ value: false, evidence }`; `null` when none does. A
+ * missing file is simply not read, which is how Podman treats it too.
+ */
+export function confKeyFinding(fs, files, { key, says }) {
+	for (const file of files) {
+		const got = readHostFile(fs, file);
+		if (got.missing) continue;
+		if (got.text === undefined) return { value: false, evidence: `${file} could not be read (${got.error})` };
+		if (key.test(got.text)) return { value: false, evidence: `${file} ${says}` };
+		if (ESCAPED_KEY.test(got.text)) return { value: false, evidence: `${file} has an escaped key, which this check does not decode` };
+	}
+	return null;
+}
+
+/** An installed OCI hook (any `*.json` in `PODMAN_HOOKS_DIRS`) as `{ value: false, evidence }`, else `null`. */
+export function hooksFinding(fs, dirs = PODMAN_HOOKS_DIRS) {
+	for (const dir of dirs) {
+		let entries;
+		try {
+			entries = fs.readdirSync(dir);
+		} catch (error) {
+			if (error?.code === "ENOENT") continue;
+			return { value: false, evidence: `${dir} could not be read (${error?.code ?? "error"})` };
+		}
+		if ([...entries].some((entry) => String(entry).endsWith(".json"))) return { value: false, evidence: `${dir} holds an OCI hook, which can mount into every container` };
+	}
+	return null;
+}
+
 /**
  * A daemon read that gave no facts, as an observation: `null` (not answered, so a floor retries) for a transient
  * failure, and `false` (answered, so a floor refuses) for a determinate one: a clean `docker info` exit that parses to no
@@ -100,16 +177,8 @@ export function observeRuntimeMounts(daemon, { fs, sameHost }) {
 	// Rootless Podman reads the user's own ~/.config/containers/mounts.conf before these, which a host check does not read.
 	if (daemon.facts.rootless === true) return { value: false, evidence: "the daemon is rootless Podman, which reads the user's own mounts.conf first" };
 	if (sameHost !== true) return { value: false, evidence: "the daemon is Podman on another machine, whose mounts.conf this host cannot read" };
-	const read = (path) => {
-		try {
-			return { text: fs.readFileSync(path, "utf8") };
-		} catch (error) {
-			return { missing: error?.code === "ENOENT", error: error?.code ?? "error" };
-		}
-	};
-	const fips = read(FIPS_ENABLED_PATH);
-	if (!fips.missing && fips.text === undefined) return { value: false, evidence: `${FIPS_ENABLED_PATH} could not be read (${fips.error})` };
-	if (String(fips.text ?? "").trim() === "1") return { value: false, evidence: "FIPS mode is on, and Podman then mounts the host's crypto policy into every container" };
+	const fips = fipsFinding(fs);
+	if (fips) return fips;
 	let size;
 	try {
 		size = fs.statSync(PODMAN_MOUNTS_CONF).size;
@@ -117,34 +186,12 @@ export function observeRuntimeMounts(daemon, { fs, sameHost }) {
 		return { value: false, evidence: error?.code === "ENOENT" ? `${PODMAN_MOUNTS_CONF} does not exist, so Podman mounts the default list (/run/secrets on Fedora and RHEL)` : `${PODMAN_MOUNTS_CONF} could not be read (${error?.code ?? "error"})` };
 	}
 	if (size !== 0) return { value: false, evidence: `${PODMAN_MOUNTS_CONF} is not empty, so Podman mounts what it lists` };
-	const files = [...PODMAN_CONTAINERS_CONF_FILES];
-	for (const dir of PODMAN_CONTAINERS_CONF_DIRS) {
-		let entries;
-		try {
-			entries = fs.readdirSync(dir);
-		} catch (error) {
-			if (error?.code === "ENOENT") continue;
-			return { value: false, evidence: `${dir} could not be read (${error?.code ?? "error"})` };
-		}
-		for (const entry of [...entries].sort()) if (String(entry).endsWith(".conf")) files.push(`${dir}/${entry}`);
-	}
-	for (const file of files) {
-		const got = read(file);
-		if (got.missing) continue;
-		if (got.text === undefined) return { value: false, evidence: `${file} could not be read (${got.error})` };
-		if (MOUNT_KEY.test(got.text)) return { value: false, evidence: `${file} sets a volumes, mounts, devices or hooks_dir key, which Podman applies to every container` };
-		if (ESCAPED_KEY.test(got.text)) return { value: false, evidence: `${file} has an escaped key, which this check does not decode` };
-	}
-	for (const dir of PODMAN_HOOKS_DIRS) {
-		let entries;
-		try {
-			entries = fs.readdirSync(dir);
-		} catch (error) {
-			if (error?.code === "ENOENT") continue;
-			return { value: false, evidence: `${dir} could not be read (${error?.code ?? "error"})` };
-		}
-		if ([...entries].some((entry) => String(entry).endsWith(".json"))) return { value: false, evidence: `${dir} holds an OCI hook, which can mount into every container` };
-	}
+	const listed = confFilesIn(fs, { files: PODMAN_CONTAINERS_CONF_FILES, dirs: PODMAN_CONTAINERS_CONF_DIRS });
+	if (listed.finding) return listed.finding;
+	const conf = confKeyFinding(fs, listed.files, { key: MOUNT_KEY, says: MOUNT_KEY_SAYS });
+	if (conf) return conf;
+	const hooks = hooksFinding(fs);
+	if (hooks) return hooks;
 	return { value: true, evidence: `${PODMAN_MOUNTS_CONF} is empty, no containers.conf sets volumes, mounts, devices or hooks, and no OCI hook is installed` };
 }
 

@@ -1,0 +1,133 @@
+# The native `podman` venue's conformance run (issue #354), on a real rootless Podman.
+#
+# `.github/scripts/podman-conformance.mjs` builds the REAL `podman` bundle and runs the backend conformance harness
+# against it, reading the eight container properties back off live containers and failing on any it could not read.
+# It has to run as an unprivileged account with its own rootless Podman, which a runner's default user is not set up
+# to be, so this job makes one: `pdjob`, uid 1234 (the uid the Fedora lab measured with, and not the image's own
+# 1001, so keep-id is what makes the job's files readable), with subordinate ids, linger and its systemd user
+# instance, the job image loaded into ITS store and the egress proxy running under ITS Podman on a named bridge
+# network, exactly as docs/podman.md tells an operator to set one up.
+#
+# ADVISORY, and in a workflow of its own so that no required context changes (CLAUDE.md lists the five that are
+# required, all from pi-upgrade-check.yml). Ubuntu 24.04 ships Podman 4.9, one major behind the 5.8.1 the venue was
+# measured on, so a red run here is a finding to read before it is a defect to fix; promoting it to required is a
+# follow-up. The pull_request trigger is UNFILTERED for pi-upgrade-check.yml's reason: a check that reports only
+# for some PRs cannot later be made required without first becoming one that reports for all of them.
+
+name: podman conformance
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "worker/src/**"
+      - "image/**"
+      - "deploy/egress-proxy.conf"
+      - ".github/scripts/podman-conformance.mjs"
+      - ".github/workflows/podman-conformance.yml"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    name: the rootless podman venue holds its declarations (advisory)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      PDJOB: pdjob
+      PDJOB_UID: "1234"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Build the job image
+        run: docker build -f image/Dockerfile -t pi-job:ci .
+
+      # netavark and aardvark-dns give a rootless named network its DNS, which is how a job reaches the proxy by name;
+      # catatonit is what `--init` runs as PID 1; uidmap carries newuidmap. Installed explicitly rather than assumed
+      # from the runner image, so a missing one fails here rather than as a confusing verdict later.
+      - name: Install rootless Podman's parts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman uidmap netavark aardvark-dns catatonit slirp4netns
+          podman --version
+
+      # Ubuntu 24.04 forbids unprivileged user namespaces through AppArmor by default, and rootless Podman is one.
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Create the worker account, with subordinate ids, linger and delegated controllers
+        run: |
+          sudo useradd --create-home --uid "$PDJOB_UID" --user-group --shell /bin/bash "$PDJOB"
+          if ! grep -q "^$PDJOB:" /etc/subuid; then sudo usermod --add-subuids 200000-265535 "$PDJOB"; fi
+          if ! grep -q "^$PDJOB:" /etc/subgid; then sudo usermod --add-subgids 200000-265535 "$PDJOB"; fi
+          grep "^$PDJOB:" /etc/subuid /etc/subgid
+          # The venue credits `isolation` only while cpu, memory and pids are delegated; docs/podman.md's drop-in.
+          sudo mkdir -p /etc/systemd/system/user@.service.d
+          printf '[Service]\nDelegate=cpu cpuset io memory pids\n' | sudo tee /etc/systemd/system/user@.service.d/delegate.conf
+          sudo systemctl daemon-reload
+          sudo loginctl enable-linger "$PDJOB"
+          sudo systemctl start "user@$PDJOB_UID.service"
+          cat "/sys/fs/cgroup/user.slice/user-$PDJOB_UID.slice/user@$PDJOB_UID.service/cgroup.controllers"
+
+      # Every later step runs as the account through this one wrapper: its runtime directory and its user bus, so
+      # Podman uses the systemd cgroup manager in the account's own delegated tree, as it would under a unit with
+      # `User=` and linger. The checkout is copied into the account's home, since the runner's home is not readable
+      # to other users; node_modules comes with it. The `cd` happens AS the account, inside the sudo, because the
+      # runner's own user cannot enter a home directory created 0750.
+      - name: Hand the checkout to the worker account
+        run: |
+          sudo cp -a "$GITHUB_WORKSPACE" "/home/$PDJOB/repo"
+          sudo chown -R "$PDJOB:" "/home/$PDJOB/repo"
+          nodedir="$(dirname "$(command -v node)")"
+          sudo tee /usr/local/bin/as-pdjob > /dev/null <<EOF
+          #!/bin/sh
+          exec sudo -u $PDJOB -H env XDG_RUNTIME_DIR=/run/user/$PDJOB_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$PDJOB_UID/bus PATH=$nodedir:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin sh -c 'cd /home/$PDJOB/repo && exec "\$@"' as-pdjob "\$@"
+          EOF
+          sudo chmod 0755 /usr/local/bin/as-pdjob
+          cat /usr/local/bin/as-pdjob
+          as-pdjob podman info --format json
+
+      - name: Load the job image into the account's own store
+        run: |
+          docker save pi-job:ci | as-pdjob podman load
+          # The name this store gives it, which is what the worker account's PI_JOB_IMAGE has to say.
+          name="$(as-pdjob podman image inspect --format '{{index .RepoTags 0}}' pi-job:ci)"
+          echo "loaded as $name"
+          echo "PI_JOB_IMAGE=$name" >> "$GITHUB_ENV"
+
+      - name: Start the egress proxy under the account's Podman, on a named bridge network
+        run: |
+          as-pdjob mkdir -p "/home/$PDJOB/deploy"
+          as-pdjob sh -c "cd /home/$PDJOB/deploy && node /home/$PDJOB/repo/worker/src/cli.mjs init"
+          image="$(sed -n 's/^ *image: *\(ubuntu\/squid@sha256:[0-9a-f]\{64\}\) *$/\1/p' deploy/docker-compose.yml)"
+          test -n "$image"
+          as-pdjob podman network create pi-dispatch-egress-out
+          as-pdjob podman run -d --name pi-dispatch-egress-proxy --network pi-dispatch-egress-out \
+            -v "/home/$PDJOB/repo/deploy/egress-proxy.conf:/etc/squid/squid.conf:ro,z" \
+            -v "/home/$PDJOB/deploy/egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro,z" \
+            "docker.io/$image"
+          for i in $(seq 1 60); do
+            if as-pdjob podman exec pi-dispatch-egress-proxy bash -c 'exec 3<>/dev/tcp/127.0.0.1/3128' 2>/dev/null; then
+              echo "the proxy is listening"
+              exit 0
+            fi
+            sleep 2
+          done
+          as-pdjob podman logs pi-dispatch-egress-proxy
+          exit 1
+
+      - name: Run the conformance harness against the real podman bundle
+        run: as-pdjob env PI_JOB_IMAGE="$PI_JOB_IMAGE" node .github/scripts/podman-conformance.mjs

@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { release as osRelease } from "node:os";
 import { promisify } from "node:util";
 import { execDockerBounded, makeDockerEndpointResolver } from "./backend-local.mjs";
-import { DEFAULT_BACKEND, UNATTRIBUTED_BACKEND } from "./backends.mjs";
+import { DEFAULT_BACKEND, PODMAN_BACKEND, UNATTRIBUTED_BACKEND } from "./backends.mjs";
 import { configError } from "./config.mjs";
 import { assertJobUser, CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { buildDockerRunArgs, insideDir } from "./docker-run.mjs";
@@ -416,6 +416,16 @@ export function sandboxVenueRefusal({ jobId, manifest }) {
 		return { refused: "venue-unreachable", message: `the manifest for ${jobId} names no backend, so this host cannot tell whether the run happened here` };
 	}
 	if (venue === DEFAULT_BACKEND) return null;
+	// The native `podman` venue runs on THIS host, so "open it on the venue that ran it" would send the operator looking
+	// for a sandbox that venue does not have (issue #354: a sandbox on it is a follow-up, refused until then). Its own
+	// sentence names the runtime, and why the docker launcher is not a stand-in: the run's container was built by this
+	// user's rootless podman, with keep-id and its own store, and a docker shell over its directory reproduces none of it.
+	if (venue === PODMAN_BACKEND) {
+		return {
+			refused: "venue-unreachable",
+			message: `${jobId} ran on the ${JSON.stringify(PODMAN_BACKEND)} backend (this worker account's rootless podman), and a sandbox does not open on that venue yet: it opens a shell only through the ${JSON.stringify(DEFAULT_BACKEND)} backend (this host's docker CLI), which would not reproduce that run. Inspect the retained directory directly instead.`,
+		};
+	}
 	return {
 		refused: "venue-unreachable",
 		// Names BOTH venues (issue #354). "Not on this host's docker daemon" was true only while every venue but `local`

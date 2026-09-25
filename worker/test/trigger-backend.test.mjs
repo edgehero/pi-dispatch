@@ -43,7 +43,7 @@ test("a name this BUILD does not know is refused at load, and the message says w
 	// list is not, so the refusal points at PI_BACKENDS rather than pretending to have checked it.
 	assert.throws(
 		() => parse([cron({ backend: "vapour" })]),
-		(err) => /is not a backend this build knows \(known: local\)/.test(err.message) && /PI_BACKENDS/.test(err.message),
+		(err) => /is not a backend this build knows \(known: local, podman\)/.test(err.message) && /PI_BACKENDS/.test(err.message),
 	);
 });
 

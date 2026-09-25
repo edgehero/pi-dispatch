@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { makeBackendRegistry as realRegistry } from "../src/backend-registry.mjs";
+import { makePodmanBackend as realPodmanBackend } from "../src/backend-podman.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // start.mjs imports index.mjs (bullmq), connection.mjs (ioredis), and the octokit-backed auth/host
@@ -79,6 +80,17 @@ const enoent = (path) => Object.assign(new Error(`ENOENT: ${path}`), { code: "EN
 const NO_HOST_FILES = { statSync: (p) => { throw enoent(p); }, readFileSync: (p) => { throw enoent(p); }, readdirSync: (p) => { throw enoent(p); } };
 
 /**
+ * `podman info` as `makePodmanInfoReader` answers it (issue #354): a healthy rootless Podman on cgroup v2 with the three
+ * controllers delegated, unless a test overrides a fact. `answer` replaces the whole answer (an unanswered read).
+ */
+function PODMAN_INFO(over = {}, { answer, calls } = {}) {
+	return async () => {
+		calls?.push("podman info");
+		return answer ?? { answered: true, info: { rootless: true, serviceIsRemote: false, selinux: false, cgroupVersion: "v2", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1", ...over } };
+	};
+}
+
+/**
  * A venue other than `local` with the five required functions and NEITHER optional preflight (issue #354), so a job on it
  * gets the registry's absent answers. `spawned` records every call, which is how a test proves nothing here ran.
  */
@@ -96,7 +108,7 @@ function OTHER_VENUE(name, { spawned = [], reap = async () => ({ reaped: true })
 	};
 }
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -196,6 +208,23 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 	// `process.stdout.write`. Under `node --test` the child process serialises its results over that same
 	// stdout, so holding a replacement across this `await` swallowed the runner's result frames: three tests
 	// in this file were reported as never existing -- no name, no count, exit 0 (issue #266).
+	// Issue #354: the podman venue's bundle is the REAL one, so what the wiring hands it is what a job gets, with its two
+	// spawning edges replaced: the image preflight answers like local's fake above, and every other podman spawn throws, so
+	// a wiring test can never start one. `podmanBackendCalls` records the options boot handed it.
+	const podmanBackendCalls = [];
+	const podmanBackend =
+		makePodmanBackend ??
+		((opts) => {
+			podmanBackendCalls.push(opts);
+			return realPodmanBackend({
+				...opts,
+				makeImagePreflight: (args) => (imagePreflightCalls.push({ ...args, podman: true }), async () => bootImage ?? { ok: true }),
+				spawnFn: () => {
+					throw new Error("a wiring test must never spawn podman");
+				},
+			});
+		});
+
 	const from = bootLines.length;
 	let captured;
 	let booted = false;
@@ -225,6 +254,11 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			jobUserIdentity: jobUserIdentity ?? { platform: "linux", release: "6.8.0-test", euid: 1001, egid: 1001 },
 			// Issue #345: never this machine's /etc. A host with none of Podman's files unless a test says otherwise.
 			observationFs: observationFs ?? NO_HOST_FILES,
+			// Issue #354: never the real `podman info` under test. A healthy rootless Podman unless a test says otherwise; only
+			// a boot that blesses `podman` ever asks.
+			readPodmanInfo: readPodmanInfo ?? PODMAN_INFO(),
+			makePodmanReaper: makePodmanReaper ?? (() => async () => ({ reaped: true })),
+			makePodmanBackend: podmanBackend,
 			...(makeBackendRegistry ? { makeBackendRegistry } : {}),
 			...(extraBackends ? { extraBackends } : {}),
 			...(loadConfig ? { loadConfig } : {}),
@@ -301,7 +335,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 	const logs = parseLines(bootLines.slice(from));
 	// Expose the registration map under both names: `handlers` for the completed/failed handler tests,
 	// `registered` for the scheduler stall-guard test. Same object, one capture path.
-	return { captured, stopCalls, deps: captured?.deps, logs, handlers: registered, registered, logSinkCalls, recordWriterCalls, logReaperCalls, sandboxReaperCalls, runContainerCalls, imagePreflightCalls, secretsResolverCalls };
+	return { captured, stopCalls, deps: captured?.deps, logs, handlers: registered, registered, logSinkCalls, recordWriterCalls, logReaperCalls, sandboxReaperCalls, runContainerCalls, imagePreflightCalls, secretsResolverCalls, podmanBackendCalls };
 }
 
 // Capture the JSON log lines a synchronous fn emits through the injected writer.
@@ -2124,8 +2158,8 @@ test("a rootless daemon or a root worker refuses to BOOT when local is the defau
 });
 
 test("only an identity verdict refuses at boot, and only while local is the default venue", { skip: skipNoModule }, async () => {
-	// Pinned on the predicate, because this build's backends table holds `local` alone and no config can make another
-	// venue the default: the branch is unreachable end to end until a second venue exists, and must not rot meanwhile.
+	// Pinned on the predicate, and end to end since issue #354 part 2 (a podman default beside a rootless docker boots:
+	// see the podman boot-refusal test below).
 	for (const cause of ["rootless", "userns-remap", "worker-is-root", "desktop-linux-userns"]) {
 		assert.match(mod.jobUserBootRefusal({ mode: "unmappable", cause }, "local"), /^Refused: /, cause);
 		assert.equal(mod.jobUserBootRefusal({ mode: "unmappable", cause }, "far"), null, `${cause}: local blessed but not default boots`);
@@ -2675,4 +2709,238 @@ test("with local blessed, the preflights are local's own members and a job namin
 	assert.deepEqual(await captured.deps.jobUserPreflight({ backend: "far" }, { capabilities: [] }), { user: "4242:4242", home: "/far" }, "a venue's own member answers for its jobs");
 	assert.deepEqual(await captured.deps.observationPreflight({ backend: "far" }), { ok: true }, "and one it does not carry is the absent answer");
 	assert.equal(reads, atBoot, "neither asked this host's daemon anything");
+});
+
+// ── issue #354 part 2: the native podman venue at boot ─────────────────────────────────────────────────────
+
+const PODMAN_ID = { platform: "linux", release: "6.8.0-test", euid: 1234, egid: 1234, home: "/home/pdjob" };
+/** The one file that earns `podmanAddsNoMounts`: this account's own mounts.conf override, empty. */
+const PODMAN_FILES = hostFiles({ "/home/pdjob/.config/containers/mounts.conf": "" });
+const PODMAN_KEYS = ["podmanVersion", "podmanRootless", "podmanJobUser", "podmanBoundsDelegated", "podmanAddsNoMounts", "podmanServiceLocal"];
+
+test("podman unblessed: no podman info, no podman reaper, no podman bundle, and the boot line's podman keys are null (#354)", { skip }, async () => {
+	const seen = [];
+	let registryArgs = null;
+	const { logs, podmanBackendCalls } = await runStart({
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		readPodmanInfo: forbidden("readPodmanInfo", seen),
+		makePodmanReaper: forbidden("makePodmanReaper", seen),
+		makeBackendRegistry: (args) => ((registryArgs = args), realRegistry(args)),
+	});
+	assert.deepEqual(seen, []);
+	assert.equal(podmanBackendCalls.length, 0);
+	assert.deepEqual(registryArgs.bundles.map((b) => b.name), ["local"]);
+	const started = logs.find((l) => l.event === "worker_started");
+	for (const key of PODMAN_KEYS) assert.equal(started[key], null, key);
+});
+
+test("podman as the only venue: one podman info at boot shared with the first job, its reaper and bundle registered, its facts on the boot line (#354)", { skip }, async () => {
+	const calls = [];
+	const seen = [];
+	let registryArgs = null;
+	const podmanReap = async () => ({ reaped: true });
+	const { captured, logs, podmanBackendCalls, imagePreflightCalls } = await runStart({
+		env: { PI_BACKENDS: "podman", PI_BACKEND_FLOOR: "isolation=enforced,mountSet=enforced,credentialTransit=enforced", PI_JOB_IMAGE: "pi-job:ci" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		jobUserIdentity: PODMAN_ID,
+		observationFs: PODMAN_FILES,
+		readPodmanInfo: PODMAN_INFO({}, { calls }),
+		makePodmanReaper: () => podmanReap,
+		bootImage: { ok: true, image: "pi-job:ci", imageDigest: "sha256:pod", piVersion: "0.80.7", capabilities: ["anyUid"] },
+		resolveDockerEndpoint: forbidden("resolveDockerEndpoint", seen),
+		readDaemonFacts: forbidden("readDaemonFacts", seen),
+		makeReaper: forbidden("makeReaper", seen),
+		makeBackendRegistry: (args) => ((registryArgs = args), realRegistry(args)),
+	});
+	assert.deepEqual(seen, [], "nothing of local's is asked");
+	assert.deepEqual(registryArgs.bundles.map((b) => b.name), ["podman"]);
+	assert.equal(registryArgs.defaultName, "podman");
+	assert.deepEqual(Object.keys(registryArgs.reaps), ["podman"]);
+	assert.equal(registryArgs.reaps.podman, podmanReap, "the boot-built podman reaper is the one the registry holds");
+	assert.equal(registryArgs.bundles[0].reap, podmanReap, "and the one the bundle carries");
+
+	// What boot handed the bundle: the deployment's own inputs, the floor, and the podman identity and files.
+	assert.equal(podmanBackendCalls.length, 1);
+	const opts = podmanBackendCalls[0];
+	assert.equal(opts.image, "pi-job:ci");
+	assert.deepEqual(opts.backendFloor, { isolation: "enforced", mountSet: "enforced", credentialTransit: "enforced" });
+	assert.deepEqual([opts.platform, opts.euid, opts.egid, opts.home], ["linux", 1234, 1234, "/home/pdjob"]);
+	assert.equal(opts.fs, PODMAN_FILES);
+	assert.equal(typeof opts.packagePaths, "function", "a resolver, as local's runContainer gets");
+
+	// The boot image read asked podman's own preflight, the one podman jobs are gated on.
+	assert.deepEqual(imagePreflightCalls.map((c) => [c.image, c.bin, c.podman]), [["pi-job:ci", "podman", true]]);
+	const started = logs.find((l) => l.event === "worker_started");
+	assert.equal(started.imageDigest, "sha256:pod");
+	assert.equal(started.podmanVersion, "5.8.1");
+	assert.equal(started.podmanRootless, true);
+	assert.deepEqual(started.podmanJobUser, { mode: "worker", user: "1234:1234", cause: null, reason: null });
+	assert.deepEqual([started.podmanBoundsDelegated, started.podmanAddsNoMounts, started.podmanServiceLocal], [true, true, true]);
+	for (const key of ["dockerContext", "dockerEndpointLocal", "jobUser", "daemonAppliesBounds", "runtimeAddsNoMounts"]) assert.equal(started[key], null, key);
+	assert.ok(!logs.some((l) => l.event === "job_image_any_uid_unsupported"), "the image declares anyUid");
+
+	// Per job, through the registry: the floor holds on the SAME cached read, and the job runs as the worker's uid.
+	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
+	const observed = await captured.deps.observationPreflight(job);
+	assert.equal(observed.ok, true, JSON.stringify(observed));
+	assert.deepEqual(await captured.deps.jobUserPreflight(job, { capabilities: ["anyUid"], observed }), { user: "1234:1234", home: "/home/pi", relabel: false });
+	assert.deepEqual(calls, ["podman info"], "one podman info for the boot and the job together");
+});
+
+test("a podman default whose image lacks anyUid is said at boot, with the venue named (#354)", { skip }, async () => {
+	const { logs } = await runStart({
+		env: { PI_BACKENDS: "podman", PI_FORWARD_ENV: "HOME" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		jobUserIdentity: PODMAN_ID,
+		bootImage: { ok: true, image: "pi-job:latest", capabilities: [] },
+	});
+	assert.deepEqual(logs.find((l) => l.event === "job_image_any_uid_unsupported"), { event: "job_image_any_uid_unsupported", image: "pi-job:latest", backend: "podman", host: logs[0].host });
+	// uid 1001 is the image's own: no anyUid needed, so nothing is said, and HOME beside --user is.
+	const own = await runStart({ env: { PI_BACKENDS: "podman", PI_FORWARD_ENV: "HOME" }, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), jobUserIdentity: { ...PODMAN_ID, euid: 1001, egid: 1001 }, bootImage: { ok: true, capabilities: [] } });
+	assert.ok(!own.logs.some((l) => l.event === "job_image_any_uid_unsupported"));
+	assert.equal(own.logs.find((l) => l.event === "forward_env_home_overridden")?.backend, "podman");
+	// With local the default, docker's copy of the tag says nothing about the podman store: not said.
+	const localDefault = await runStart({ env: { PI_BACKENDS: "local,podman" }, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), jobUserIdentity: PODMAN_ID, bootImage: { ok: true, capabilities: [] } });
+	assert.ok(!localDefault.logs.some((l) => l.event === "job_image_any_uid_unsupported" && l.backend === "podman"));
+});
+
+test("a podman default refuses to BOOT on every identity cause, tagged, before anything is built; merely blessed it boots (#354)", { skip: skipNoModule }, async () => {
+	for (const [label, readPodmanInfo, jobUserIdentity, pattern] of [
+		["rootful", PODMAN_INFO({ rootless: false }), PODMAN_ID, /podman is not rootless for this account/],
+		["remote", PODMAN_INFO({ serviceIsRemote: true }), PODMAN_ID, /through a remote service/],
+		["not-found", PODMAN_INFO({}, { answer: { answered: false, reason: "podman-not-found", transient: false } }), PODMAN_ID, /no podman CLI was found/],
+		["root", PODMAN_INFO(), { ...PODMAN_ID, euid: 0, egid: 0 }, /the worker runs as root/],
+		["platform", PODMAN_INFO(), { ...PODMAN_ID, platform: "darwin" }, /runs only on Linux/],
+	]) {
+		const order = [];
+		const makeAuth = async () => (order.push("makeAuth"), { mintToken: async () => "tok", selfId: 1, source: "gh" });
+		await assert.rejects(
+			() => runStart({ env: { PI_BACKENDS: "podman" }, readPodmanInfo, jobUserIdentity, order, makeAuth, makeHost: () => fakeHost(), makePodmanReaper: () => (order.push("makePodmanReaper"), async () => ({ reaped: true })) }),
+			(err) => err.piDispatchConfig === true && pattern.test(err.message) && /\(issue #354\)/.test(err.message),
+			label,
+		);
+		assert.deepEqual(order, [], `${label}: before forge auth, the reaper and the worker`);
+	}
+	// The identity verdict comes BEFORE the observations: a rootful Podman fails the mounts observation too, and a floor
+	// refusal naming mounts.conf would send the operator after the wrong fix.
+	await assert.rejects(
+		() => runStart({ env: { PI_BACKENDS: "podman", PI_BACKEND_FLOOR: "mountSet=enforced" }, readPodmanInfo: PODMAN_INFO({ rootless: false }), jobUserIdentity: PODMAN_ID, observationFs: PODMAN_FILES }),
+		(err) => err.piDispatchConfig === true && /podman is not rootless for this account/.test(err.message) && !/mountSet/.test(err.message),
+	);
+	// Blessed beside a default `local`, a rootful Podman boots: its jobs are refused one by one, local's still run.
+	const { logs } = await runStart({ env: { PI_BACKENDS: "local,podman" }, readPodmanInfo: PODMAN_INFO({ rootless: false }), jobUserIdentity: PODMAN_ID, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
+	assert.deepEqual(logs.find((l) => l.event === "worker_started").podmanJobUser, { mode: "unmappable", user: null, cause: "podman-rootful", reason: null });
+	// And the reverse: with podman the default, local's identity causes do not refuse the boot (local's rule, end to end).
+	const localRootless = await runStart({ env: { PI_BACKENDS: "podman,local" }, readDaemonFacts: DOCKER_FACTS({ rootless: true }), jobUserIdentity: PODMAN_ID, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
+	assert.equal(localRootless.logs.find((l) => l.event === "worker_started").jobUser.cause, "rootless");
+	// A transient unanswered read is `unknown`, never a boot exit, even as the default.
+	const slow = await runStart({ env: { PI_BACKENDS: "podman" }, readPodmanInfo: PODMAN_INFO({}, { answer: { answered: false, reason: "timeout", transient: true } }), jobUserIdentity: PODMAN_ID, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
+	const slowStarted = slow.logs.find((l) => l.event === "worker_started");
+	assert.deepEqual(slowStarted.podmanJobUser, { mode: "unknown", user: null, cause: null, reason: "timeout" });
+	assert.deepEqual([slowStarted.podmanVersion, slowStarted.podmanRootless, slowStarted.podmanBoundsDelegated], [null, null, null]);
+});
+
+test("podmanBootRefusal: only a boot-refusing cause, and only while podman is the default venue (#354)", { skip: skipNoModule }, () => {
+	for (const cause of ["podman-platform", "podman-not-found", "podman-remote", "podman-rootful", "worker-is-root"]) {
+		assert.match(mod.podmanBootRefusal({ mode: "unmappable", cause }, "podman"), /^Refused: .*\(issue #354\)\.$/, cause);
+		assert.equal(mod.podmanBootRefusal({ mode: "unmappable", cause }, "local"), null, `${cause}: podman blessed but not default boots`);
+	}
+	for (const decision of [{ mode: "unmappable", cause: "podman-unreadable" }, { mode: "unmappable", cause: "root-group" }, { mode: "unknown", reason: "timeout" }, { mode: "worker", user: "1234:1234" }, null]) {
+		assert.equal(mod.podmanBootRefusal(decision, "podman"), null, JSON.stringify(decision));
+	}
+	// Local's rule does not answer for podman's causes, and podman's does not for local's.
+	assert.equal(mod.jobUserBootRefusal({ mode: "unmappable", cause: "podman-rootful" }, "podman"), null);
+	assert.equal(mod.podmanBootRefusal({ mode: "unmappable", cause: "rootless" }, "podman"), null);
+});
+
+test("a floor naming a podman observation refuses to BOOT on a missed one, tagged when answered, untagged when the read did not answer (#354)", { skip: skipNoModule }, async () => {
+	const base = { jobUserIdentity: PODMAN_ID, observationFs: PODMAN_FILES, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() };
+	const order = [];
+	await assert.rejects(
+		() => runStart({ ...base, env: { PI_BACKENDS: "podman", PI_BACKEND_FLOOR: "isolation=enforced" }, readPodmanInfo: PODMAN_INFO({ controllers: ["memory", "pids"] }), order, makePodmanReaper: () => (order.push("makePodmanReaper"), async () => ({ reaped: true })) }),
+		(err) => err.piDispatchConfig === true && /podman: isolation=enforced/.test(err.message) && /cpu cgroup controller is not delegated/.test(err.message),
+	);
+	assert.deepEqual(order, [], "before the reaper and the worker");
+	// Blessed but NOT the default, it is still judged: the floor is over every blessed venue.
+	await assert.rejects(
+		() => runStart({ ...base, env: { PI_BACKENDS: "local,podman", PI_BACKEND_FLOOR: "mountSet=enforced" }, observationFs: NO_HOST_FILES, readPodmanInfo: PODMAN_INFO() }),
+		(err) => err.piDispatchConfig === true && /podman: mountSet=enforced/.test(err.message),
+	);
+	// A read that did not answer is the supervisor's retry, never a config error that strands the unit. (Blessed beside
+	// local, so the identity verdict cannot refuse first: `unknown` is never a boot exit anyway.)
+	await assert.rejects(
+		() => runStart({ ...base, env: { PI_BACKENDS: "local,podman", PI_BACKEND_FLOOR: "credentialTransit=enforced" }, readPodmanInfo: PODMAN_INFO({}, { answer: { answered: false, reason: "timeout", transient: true } }) }),
+		(err) => err.piDispatchConfig !== true && /podman info was not read \(timeout\)/.test(err.message),
+	);
+});
+
+test("each venue's boot observations are judged for that venue alone, so local and podman blessed together boot under a full floor (#354, M14)", { skip }, async () => {
+	// PR #425's surviving mutant: judging local's observations over EVERY blessed venue reads podman's observedBy names
+	// as unanswered in local's map, the transient arm, exit 1 on every restart. And the reverse for podman's.
+	const floor = "isolation=enforced,mountSet=enforced,credentialTransit=enforced";
+	const { logs } = await runStart({
+		env: { PI_BACKENDS: "local,podman", PI_BACKEND_FLOOR: floor },
+		jobUserIdentity: PODMAN_ID,
+		observationFs: PODMAN_FILES,
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+	});
+	const started = logs.find((l) => l.event === "worker_started");
+	assert.deepEqual([started.daemonAppliesBounds, started.runtimeAddsNoMounts, started.dockerEndpointLocal], [true, true, true], "local's own observations hold");
+	assert.deepEqual([started.podmanBoundsDelegated, started.podmanAddsNoMounts, started.podmanServiceLocal], [true, true, true], "and podman's");
+});
+
+test("the boot line carries each podman observation under its own key (#354)", { skip }, async () => {
+	// Three different answers, so a key reading another observation's value cannot pass: bounds withheld (no cpu
+	// controller), mounts credited (the empty override), service local. No floor, so nothing refuses.
+	const { logs } = await runStart({
+		env: { PI_BACKENDS: "local,podman" },
+		jobUserIdentity: PODMAN_ID,
+		observationFs: PODMAN_FILES,
+		readPodmanInfo: PODMAN_INFO({ controllers: ["memory", "pids"] }),
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+	});
+	const started = logs.find((l) => l.event === "worker_started");
+	assert.deepEqual([started.podmanBoundsDelegated, started.podmanAddsNoMounts, started.podmanServiceLocal], [false, true, true]);
+	const noOverride = await runStart({ env: { PI_BACKENDS: "local,podman" }, jobUserIdentity: PODMAN_ID, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
+	const s2 = noOverride.logs.find((l) => l.event === "worker_started");
+	assert.deepEqual([s2.podmanBoundsDelegated, s2.podmanAddsNoMounts, s2.podmanServiceLocal], [true, false, true]);
+});
+
+test("a backend registry refusal releases every handle boot opened before it, not only the raw client (#354)", { skip }, async () => {
+	// The registry refuses AFTER the job queue, the host queue and the host registry's heartbeat exist, and createWorker
+	// has not been handed them, so neither the product's shutdown nor this harness's teardown can reach them. Before this
+	// fix only `redis` was released: the refusal surfaced and the FILE hung (a mutant dropping podman's boot reaper
+	// found it). The registry's close is pinned here; the queues' is this file ending at all.
+	const { makeHostRegistry } = await import("../src/host-registry.mjs");
+	let registryClosed = false;
+	await assert.rejects(
+		() =>
+			runStart({
+				env: { PI_BACKENDS: "podman", PI_WORKER_NAME: "refused-1", VALKEY_URL },
+				jobUserIdentity: PODMAN_ID,
+				makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+				makeHost: () => fakeHost(),
+				makeBackendRegistry: () => {
+					throw new Error("registry refused this boot");
+				},
+				makeHostRegistry: (args) => {
+					const real = makeHostRegistry(args);
+					return {
+						...real,
+						close: async () => {
+							registryClosed = true;
+							await real.close();
+						},
+					};
+				},
+			}),
+		/registry refused this boot/,
+		"the refusal travels, not a teardown error",
+	);
+	assert.equal(registryClosed, true);
 });

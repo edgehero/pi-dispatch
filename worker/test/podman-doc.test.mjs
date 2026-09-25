@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { BACKENDS, DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, effectiveWord, meets } from "../src/backends.mjs";
+import { PODMAN_JOB_USER_FIX, podmanJobUserRefusal } from "../src/backend-podman.mjs";
+import { BACKENDS, DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, PODMAN_BACKEND, PROPERTIES, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, effectiveWord, meets } from "../src/backends.mjs";
 import { buildDockerRunArgs } from "../src/docker-run.mjs";
+import { DEFAULT_EGRESS_PROXY } from "../src/egress.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, JOB_USER_FIX, jobUserRefusal } from "../src/job-user.mjs";
+import { sandboxVenueRefusal } from "../src/sandbox.mjs";
+import { podmanBootRefusal } from "../src/start.mjs";
 
 // docs/podman.md's property table restates two derivable sources, so it is BOLTED to them (CLAUDE.md: a hand-written
 // table is derived or pinned, never trusted): its rows are the backend table's properties in order, and its Docker
@@ -35,15 +39,18 @@ import { BOOT_REFUSING_JOB_USER_CAUSES, JOB_USER_FIX, jobUserRefusal } from "../
 
 const doc = readFileSync(new URL("../../docs/podman.md", import.meta.url), "utf8");
 
-// The six setups, in the order both of the page's tables use them, with what the worker observes on each. A column
-// with `refusal` runs no job at all, so its cells are the refusal rather than a word.
+// The seven setups, in the order both of the page's tables use them, with what the worker observes on each. A column
+// with `refusal` runs no job at all, so its cells are the refusal rather than a word. The first six are the `local`
+// venue on each runtime; the seventh is a venue of its own (issue #354), marked `native`, whose column is the
+// `podman` table entry itself rather than a measurement capped by `local`'s words.
 const SETUPS = Object.freeze([
 	{ header: "Docker Engine, rootful", observations: { [DOCKER_ENDPOINT_LOCAL]: true, [DAEMON_APPLIES_BOUNDS]: true, [RUNTIME_ADDS_NO_MOUNTS]: true } },
 	{ header: "Podman rootful", observations: { [DOCKER_ENDPOINT_LOCAL]: true, [DAEMON_APPLIES_BOUNDS]: false, [RUNTIME_ADDS_NO_MOUNTS]: true } },
-	{ header: "Podman rootless, keep-id", refusal: "rootless" },
-	{ header: "Podman rootless", refusal: "rootless" },
+	{ header: "Podman rootless, keep-id, Docker API", refusal: "rootless" },
+	{ header: "Podman rootless, Docker API", refusal: "rootless" },
 	{ header: "podman-docker, rootful", observations: { [DOCKER_ENDPOINT_LOCAL]: false, [DAEMON_APPLIES_BOUNDS]: false, [RUNTIME_ADDS_NO_MOUNTS]: true } },
 	{ header: "podman-docker, rootless", refusal: "rootless" },
+	{ header: "podman (native, rootless)", native: PODMAN_BACKEND },
 ]);
 
 function propertyTable() {
@@ -77,13 +84,14 @@ test("its Docker Engine column is what `local` declares, word for word (#345)", 
 // The teeth. A cell must say exactly what its setup's observations earn, which is at most what `local` declares
 // (`effectiveWord` never raises a word). `isolation: enforced` on any Podman column dies here, because
 // `observeBounds` returns false for every Podman daemon, and the `meets` check below names that case separately
-// so the failure says which of the two rules a cell broke.
+// so the failure says which of the two rules a cell broke. The native column is the next test's.
 test("every Podman cell is a word its own setup could actually earn, or its refusal (#345)", () => {
 	const { body } = propertyTable();
 	for (const row of body) {
 		const property = row[0];
 		for (const [index, setup] of SETUPS.entries()) {
 			const cell = row[index + 1];
+			if (setup.native) continue;
 			if (setup.refusal) {
 				assert.equal(cell, `refused: ${setup.refusal}`, `${property} on ${setup.header}`);
 				assert.ok(BOOT_REFUSING_JOB_USER_CAUSES.has(setup.refusal), setup.refusal);
@@ -94,6 +102,36 @@ test("every Podman cell is a word its own setup could actually earn, or its refu
 			assert.ok(meets(BACKENDS.local.declares[property], word), `${property} on ${setup.header} claims more than local declares`);
 			assert.equal(word, effectiveWord("local", property, setup.observations), `${property} on ${setup.header}`);
 		}
+	}
+});
+
+// The native venue's column (issue #354), DERIVED from its own table entry the way the Docker Engine column is from
+// `local`'s. Three parts of each cell are the table's, so each is pinned: the leading word is what the entry declares
+// with every observation holding (`effectiveWord`, so a word the worker could never print there fails); a word that
+// holds only while observed must say what it falls to otherwise, which is `effectiveWord` with nothing observed; and a
+// word a switch arms must name the switch, so the capability is never printed bare as a posture. The rest of the cell
+// is prose about a measurement and stays unpinned.
+test("the native podman column is what the `podman` table entry declares, observed and armed (#354)", () => {
+	const { body } = propertyTable();
+	const index = SETUPS.findIndex((setup) => setup.native === PODMAN_BACKEND);
+	const entry = BACKENDS[PODMAN_BACKEND];
+	const allObserved = Object.fromEntries(Object.values(entry.observedBy).map((observation) => [observation, true]));
+	for (const row of body) {
+		const [property] = row;
+		const cell = row[index + 1];
+		const word = effectiveWord(PODMAN_BACKEND, property, allObserved);
+		assert.equal(word, entry.declares[property], `${property}: every observation holding earns the declared word`);
+		assert.equal(/^(enforced|asserted|absent)\b/.exec(cell)?.[1], word, `${property} on the native column: ${cell}`);
+		const unobserved = effectiveWord(PODMAN_BACKEND, property, {});
+		if (Object.hasOwn(entry.observedBy, property)) {
+			assert.notEqual(unobserved, word, `${property} is observation-gated, so nothing observed must lower it`);
+			assert.ok(cell.endsWith(`, else ${unobserved}`), `${property}: an observed word says what it is otherwise (${cell})`);
+		} else {
+			assert.doesNotMatch(cell, /\belse\b/, `${property} is not observation-gated, so it falls to nothing (${cell})`);
+		}
+		const armedBy = PROPERTIES[property].armedBy;
+		if (armedBy) assert.ok(cell.includes(`(${armedBy})`), `${property}: the switch that arms it is named (${cell})`);
+		else assert.doesNotMatch(cell, /PI_EGRESS/, `${property} is armed by nothing (${cell})`);
 	}
 });
 
@@ -119,7 +157,7 @@ test("the page quotes every refusal the worker can print, verbatim (#345)", () =
 	assert.deepEqual([...covered].sort(), Object.keys(JOB_USER_FIX).sort());
 });
 
-// The entry-points table is the same six setups in the same order, so it is pinned to the same list. Its cells are
+// The entry-points table is the same seven setups in the same order, so it is pinned to the same list. Its cells are
 // prose rather than declaration words, but a column whose jobs are all refused may only say so: an entry point that
 // claims to run something there would be a page that contradicts its own property table.
 const REFUSED_ENTRY_POINT = /^(refused `[a-z-]+`|✗ `[a-z-]+`|not run\b.*|as doctor|unmeasured\b.*)$/;
@@ -127,7 +165,12 @@ const REFUSED_ENTRY_POINT = /^(refused `[a-z-]+`|✗ `[a-z-]+`|not run\b.*|as do
 // The rows, by name, so a row cannot be dropped, renamed or invented while the count stays right.
 const ENTRY_POINTS = Object.freeze(["worker", "`pi-dispatch doctor`", "`pi-dispatch doctor --live`", "`pi-dispatch sandbox`", "`pi-dispatch up`", "`docker compose --profile egress`"]);
 
-test("the entry-points table covers the same six setups, and a refused column only refuses (#345)", () => {
+// The native venue's column is neither: its jobs run, and exactly one entry point refuses them. That one is not a
+// sentence to trust either, so it is asked of the code: a retained run stamped with the venue is refused by the
+// sandbox's own venue rule. Every other row of the column must not claim a refusal it does not get.
+const NATIVE_REFUSED_ENTRY_POINTS = Object.freeze(["`pi-dispatch sandbox`"]);
+
+test("the entry-points table covers the same seven setups, and a refused column only refuses (#345)", () => {
 	const start = doc.indexOf("## Entry points");
 	const end = doc.indexOf("##", start + 3);
 	const rows = doc
@@ -143,6 +186,15 @@ test("the entry-points table covers the same six setups, and a refused column on
 	for (const row of body) {
 		for (const [index, setup] of SETUPS.entries()) {
 			const cell = row[index + 1];
+			if (setup.native) {
+				if (NATIVE_REFUSED_ENTRY_POINTS.includes(row[0])) {
+					assert.match(cell, /^refused\b/, `${row[0]} on ${setup.header}: ${cell}`);
+					assert.ok(sandboxVenueRefusal({ jobId: "j", manifest: { backend: setup.native } }), `the sandbox really refuses a ${setup.native} run`);
+				} else {
+					assert.doesNotMatch(cell, /refus|✗/, `${row[0]} on ${setup.header} claims a refusal it does not get`);
+				}
+				continue;
+			}
 			if (!setup.refusal) {
 				// The rule has to run both ways, or a supported column can quietly claim it is refused.
 				assert.doesNotMatch(cell, /refus|✗/, `${row[0]} on ${setup.header} claims a refusal it does not get`);
@@ -156,6 +208,51 @@ test("the entry-points table covers the same six setups, and a refused column on
 			if (/`[a-z-]+`/.test(cell)) assert.ok(cell.includes(`\`${setup.refusal}\``), `${row[0]} on ${setup.header} names another cause`);
 		}
 	}
+});
+
+// The native venue's refusals (issue #354), pinned the way the block above is, and one step further: each heading's
+// TIMING is derived as well. The block above leaves its headings' "(at boot ...)" clauses unpinned, and this file's
+// header says why a regex over them would be worse than nothing; here the clause is BUILT from `podmanBootRefusal`,
+// the function the boot calls, so there is one correct heading tail per cause and the page has it or does not.
+const NATIVE_BOOT = "(at boot when podman is the default venue, else per job)";
+const NATIVE_PER_JOB = "(per job)";
+
+test("the page quotes every refusal the podman venue can print, and when each fires (#354)", () => {
+	const start = doc.indexOf("<!-- PODMAN-NATIVE-REFUSALS -->");
+	const end = doc.indexOf("<!-- /PODMAN-NATIVE-REFUSALS -->");
+	assert.ok(start >= 0 && end > start, "the native refusal block is between its markers");
+	const lines = doc.slice(start, end).split("\n");
+	const byText = new Map(Object.keys(PODMAN_JOB_USER_FIX).map((cause) => [podmanJobUserRefusal(cause), cause]));
+	const covered = new Set();
+	lines.forEach((line, i) => {
+		if (!line.startsWith("Refused:")) return;
+		const cause = byText.get(line);
+		assert.ok(cause, `not a text the podman venue prints: ${line}`);
+		assert.ok(!covered.has(cause), `quoted twice: ${cause}`);
+		covered.add(cause);
+		const heading = lines[i - 1] ?? "";
+		const stopsBoot = podmanBootRefusal({ mode: "unmappable", cause }, PODMAN_BACKEND) !== null;
+		assert.ok(heading.startsWith("# "), `${cause} has a heading line above it`);
+		assert.ok(heading.endsWith(stopsBoot ? NATIVE_BOOT : NATIVE_PER_JOB), `${cause}: ${heading}`);
+	});
+	assert.deepEqual([...covered].sort(), Object.keys(PODMAN_JOB_USER_FIX).sort());
+});
+
+// The proxy command the native setup gives restates two things the worker and the compose file already say: the
+// name the worker attaches to every job network, and the digest the compose file pins. Both drift silently in prose
+// (a digest bumped in one file only), so both are read off their sources.
+test("the native setup's proxy is the compose file's image, under the name the worker attaches (#354)", () => {
+	const start = doc.indexOf("<!-- PODMAN-NATIVE-PROXY -->");
+	const end = doc.indexOf("<!-- /PODMAN-NATIVE-PROXY -->");
+	assert.ok(start >= 0 && end > start, "the proxy command is between its markers");
+	const block = doc.slice(start, end);
+	const compose = readFileSync(new URL("../../deploy/docker-compose.yml", import.meta.url), "utf8");
+	const image = /^\s*image:\s*(ubuntu\/squid@sha256:[0-9a-f]{64})\s*$/m.exec(compose)?.[1];
+	assert.ok(image, "the compose file pins the proxy by digest");
+	// Fully qualified for Podman, whose short-name resolution may refuse or prompt where Docker assumes docker.io.
+	assert.ok(block.includes(` docker.io/${image}\n`), `the command runs docker.io/${image}`);
+	assert.equal(block.split("sha256:").length - 1, 1, "one image, one digest");
+	assert.match(block, new RegExp(`--name ${DEFAULT_EGRESS_PROXY} `), "the name the worker attaches to each job network");
 });
 
 // The real-host table (issue #355). Its rows are measurements, which no source can derive, so what is pinned is the

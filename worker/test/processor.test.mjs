@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, OBSERVATIONS, RUNTIME_ADDS_NO_MOUNTS } from "../src/backends.mjs";
+import { DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS } from "../src/backends.mjs";
 import { test } from "node:test";
 import { scopeKeyPrefix } from "../src/scoped-limits.mjs";
 import { InfraRetry, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED } from "../src/processor.mjs";
@@ -791,7 +791,8 @@ test("a floor refusal naming no known observation blames the docker endpoint on 
 	// An observation this build has no words for is the neutral sentence on ANY venue, local included, never the
 	// endpoint's by default.
 	texts.length = 0;
-	await run(ghJob, ["podmanBoundsDelegated"], ["local"]);
+	// (`podmanBoundsDelegated` was this line's example until issue #354 part 2 gave it words; a made-up name now.)
+	await run(ghJob, ["someFutureObservation"], ["local"]);
 	assert.ok(texts[0].includes(OBSERVATION_COMMENT_UNNAMED) && !texts[0].includes(OBSERVATION_COMMENT[DOCKER_ENDPOINT_LOCAL]), texts[0]);
 	// A prototype key is not a known observation either.
 	texts.length = 0;
@@ -835,6 +836,57 @@ test("the retry's words: docker's on the local venue, as they always were, and t
 	const { deps: farDefault } = deps({ redis: fakeRedis(), blessedBackends: ["far"], observationPreflight: async () => ({ unavailable: true, reason: "timeout" }) });
 	assert.equal(ghJob.backend, undefined);
 	await assert.rejects(() => runJob(ghJob, farDefault), (err) => err.message === "the container runtime or its CLI is unavailable, an observation the floor needs could not run");
+});
+
+test("a podman job's floor refusal names podman's own observations in fixed words, never docker's (#354)", async () => {
+	const texts = [];
+	const { deps: d } = deps({
+		blessedBackends: ["local", "podman"],
+		observationPreflight: async () => ({ refused: true, message: "floor ... /home/pdjob/.config/containers/mounts.conf ... unix:///run/user/1234/podman", observations: [PODMAN_BOUNDS_DELEGATED, PODMAN_ADDS_NO_MOUNTS, PODMAN_SERVICE_LOCAL] }),
+		comment: async (_j, t) => texts.push(t),
+		log: () => {},
+	});
+	const r = await runJob({ ...ghJob, backend: "podman" }, d);
+	assert.equal(r.reason, "backend-floor-unobserved");
+	for (const o of [PODMAN_BOUNDS_DELEGATED, PODMAN_ADDS_NO_MOUNTS, PODMAN_SERVICE_LOCAL]) assert.ok(texts[0].includes(OBSERVATION_COMMENT[o]), `${o}: ${texts[0]}`);
+	assert.doesNotMatch(texts[0], /docker|mounts\.conf|\/home\/|unix:/, "no docker word, and none of the evidence, reaches a forge comment");
+});
+
+test("the image and egress retries name the venue's runtime: docker's words on local byte-identical, podman's on podman (#354)", async () => {
+	// The message is the job_failed log line and BullMQ's failedReason. "docker unavailable" on a host with no docker
+	// sends the operator after the wrong daemon.
+	const retry = async (job, blessedBackends, gate) => {
+		const { deps: d } = deps({ redis: fakeRedis(), blessedBackends, ...(gate === "image" ? { imagePreflight: async () => ({ unavailable: "pi-job:latest" }) } : { egressPreflight: async () => ({ unavailable: true }) }) });
+		try {
+			await runJob(job, d);
+		} catch (err) {
+			assert.ok(err instanceof InfraRetry, String(err));
+			return err.message;
+		}
+		assert.fail("the gate must throw a retry");
+	};
+	assert.equal(await retry(ghJob, ["local"], "image"), "docker unavailable, image preflight could not run");
+	assert.equal(await retry(ghJob, ["local"], "egress"), "docker unavailable, egress preflight could not run");
+	assert.equal(await retry({ ...ghJob, backend: "podman" }, ["local", "podman"], "image"), "podman unavailable, image preflight could not run");
+	assert.equal(await retry(ghJob, ["podman"], "egress"), "podman unavailable, egress preflight could not run", "the DEFAULT venue's runtime for a job naming none");
+	assert.equal(await retry({ ...ghJob, backend: "far" }, ["local", "far"], "image"), "the container runtime is unavailable, image preflight could not run");
+	assert.equal(await retry({ ...ghJob, backend: "toString" }, ["local", "toString"], "egress"), "the container runtime is unavailable, egress preflight could not run", "a prototype key is not a runtime");
+});
+
+test("an egress-proxy refusal on the podman venue names the rootless-podman remedy, not the docker compose profile (#354)", async () => {
+	const texts = [];
+	const run = async (job, blessedBackends, egress) => {
+		const { deps: d } = deps({ blessedBackends, egressPreflight: async () => egress, comment: async (_j, t) => texts.push(t), log: () => {} });
+		return runJob(job, d);
+	};
+	await run(ghJob, ["local"], { proxyMissing: "pi-dispatch-egress-proxy" });
+	assert.ok(texts[0].includes("Start it with `docker compose -f deploy/docker-compose.yml --profile egress up -d`, or set PI_EGRESS=0"), texts[0]);
+	const r = await run({ ...ghJob, backend: "podman" }, ["local", "podman"], { proxyStopped: "pi-dispatch-egress-proxy" });
+	assert.equal(r.reason, "egress-proxy-stopped");
+	assert.ok(texts[1].includes("Start it under the worker account's own rootless podman, on a named bridge network (docs/podman.md), or set PI_EGRESS=0"), texts[1]);
+	assert.doesNotMatch(texts[1], /docker compose/);
+	await run(ghJob, ["podman"], { proxyMissing: "p" });
+	assert.match(texts[2], /rootless podman/, "the default venue's remedy for a job naming none");
 });
 
 test("a proxy that exists but is STOPPED is its own reason, because the fix is a different one", async () => {

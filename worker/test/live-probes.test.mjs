@@ -1324,3 +1324,68 @@ test("imagePinning holds on Podman's absent-image refusal too, and a Podman pull
 		assert.equal(v.warn, true, `${other}: words this check does not know abstain`);
 	}
 });
+
+// --- issue #354 part 2: the verdicts' runtime words -------------------------------------------------------------------
+
+test("each verdict that names the runtime names the one it was given, and docker's words when none is (#354)", () => {
+	const inspect = mounts([["/job", false], ["/workspace", true]]);
+	const mountinfo = "1 0 0:1 / /job ro - overlay overlay ro\n2 0 0:2 / /workspace rw - overlay overlay rw\n";
+	// Docker's sentences, byte-for-byte, with no bin and with bin docker: the local venue's output does not move.
+	for (const bin of [undefined, "docker"]) {
+		const opt = bin ? { bin } : {};
+		assert.equal(mountSetVerdict("not json", { expected: EXPECTED, ...opt }).detail, "not read back: docker inspect did not return the mounts as JSON");
+		assert.equal(mountSetVerdict("{}", { expected: EXPECTED, ...opt }).detail, "not read back: docker inspect did not return a mount list");
+		assert.equal(mountSetVerdict(inspect, { expected: EXPECTED, mountinfo, ...opt }).detail, "/job:ro, /workspace and nothing else, in docker inspect and in /proc/self/mountinfo");
+		assert.match(mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: null, ...opt }).detail, /^not read back: docker inspect lists /);
+		assert.match(mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: `${mountinfo}3 0 0:3 / /run/secrets rw - tmpfs tmpfs rw\n`, ...opt }).detail, /neither docker inspect nor the job lists it$/);
+		assert.equal(imagePinningVerdict({ code: 125, output: "Unable to find image", stillAbsent: true, ...opt }).detail, "docker tried to pull an image this host does not have");
+		assert.equal(imagePinningVerdict({ code: 125, output: "something else", stillAbsent: true, ...opt }).detail, "not read back: docker refused the run with a message this check does not recognise");
+		assert.equal(jobToJobIsolationVerdict({ armed: false, ...opt }).detail, "not read back: PI_EGRESS is off, so jobs share docker's default bridge by design and there is no per-job network to read back");
+		assert.equal(jobToJobIsolationVerdict({ armed: true, networksCreated: true, peersStarted: true, peerTargets: ["p:1"], ...opt }).detail, "not read back: docker inspect gave peer2 no address on its network, so only names could be tried and a name proves nothing about routing");
+		assert.equal(ephemeralVerdict({ first: { started: true, id: "a", removal: { state: "unanswered" } }, nonce: "n", ...opt }).detail, "not read back: docker ps did not answer while the first run was being waited on");
+	}
+	const bin = "podman";
+	assert.equal(mountSetVerdict("not json", { expected: EXPECTED, bin }).detail, "not read back: podman inspect did not return the mounts as JSON");
+	assert.equal(mountSetVerdict("{}", { expected: EXPECTED, bin }).detail, "not read back: podman inspect did not return a mount list");
+	assert.equal(mountSetVerdict(inspect, { expected: EXPECTED, mountinfo, bin }).detail, "/job:ro, /workspace and nothing else, in podman inspect and in /proc/self/mountinfo");
+	assert.match(mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: null, bin }).detail, /^not read back: podman inspect lists /);
+	assert.match(mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: `${mountinfo}3 0 0:3 / /run/secrets rw - tmpfs tmpfs rw\n`, bin }).detail, /neither podman inspect nor the job lists it$/);
+	assert.equal(imagePinningVerdict({ code: 125, output: "Trying to pull x...", stillAbsent: true, bin }).detail, "podman tried to pull an image this host does not have");
+	assert.equal(imagePinningVerdict({ code: 125, output: "something else", stillAbsent: true, bin }).detail, "not read back: podman refused the run with a message this check does not recognise");
+	assert.equal(imagePinningVerdict({ code: 125, output: "Error: x: image not known", stillAbsent: true, bin }).ok, true);
+	assert.equal(jobToJobIsolationVerdict({ armed: false, bin }).detail, "not read back: PI_EGRESS is off, so jobs share podman's default network by design and there is no per-job network to read back");
+	assert.equal(jobToJobIsolationVerdict({ armed: true, networksCreated: true, peersStarted: true, peerTargets: ["p:1"], bin }).detail, "not read back: podman inspect gave peer2 no address on its network, so only names could be tried and a name proves nothing about routing");
+	assert.equal(ephemeralVerdict({ first: { started: true, id: "a", removal: { state: "unanswered" } }, nonce: "n", bin }).detail, "not read back: podman ps did not answer while the first run was being waited on");
+});
+
+test("mountSet refuses Podman's API socket on sight, as it does docker's (#354)", () => {
+	for (const [source, destination] of [["/run/user/1234/podman/podman.sock", "/var/run/x"], ["/tmp/f/x", "/run/podman/podman.sock"]]) {
+		const got = mountSetVerdict(mounts([["/job", false], ["/workspace", true], [destination, true, source]]), { expected: EXPECTED });
+		assert.equal(got.ok, false);
+		assert.match(got.detail, new RegExp(`the podman socket is mounted \\(${destination.replace(/\./g, "\\.")}\\)`));
+	}
+	const docker = mountSetVerdict(mounts([["/job", false], ["/workspace", true], ["/var/run/docker.sock", true, "/var/run/docker.sock"]]), { expected: EXPECTED });
+	assert.match(docker.detail, /the docker socket is mounted \(\/var\/run\/docker\.sock\)/);
+	assert.doesNotMatch(docker.detail, /podman socket/, "one socket, one sentence");
+});
+
+test("egressVerdict says the caller's reason for having no readings, and its own otherwise (#354)", () => {
+	assert.equal(egressVerdict({ armed: true, results: [], unread: "the canary runs on docker only" }).detail, "not read back: the canary runs on docker only");
+	assert.equal(egressVerdict({ armed: true, results: [] }).detail, "not read back: the egress canary did not run both probes (see the egress lines above)");
+	assert.equal(egressVerdict({ armed: false, results: [], unread: "x" }).detail, "not read back: PI_EGRESS is off, so there is no policy to read back", "off outranks the caller's reason");
+});
+
+test("a container START has its own bound, the step bound unless a venue asks for more (#354)", async () => {
+	// Rootless Podman's first keep-id run of an image copies its layers (27 s for the job image, measured), past the
+	// 20 s step bound, so the read-back gives starts their own bound and every other step keeps the step bound.
+	const bounds = async (over) => {
+		const docker = fakeDocker();
+		const seen = [];
+		await runLiveProbes(probeArgs(docker, { ...over, run: (args, opts) => (seen.push([args[0], opts?.timeoutMs]), docker.run(args, opts)) }));
+		return seen;
+	};
+	const longer = await bounds({ startTimeoutMs: 9000 });
+	assert.ok(longer.some(([verb]) => verb === "run"), "some container was started");
+	for (const [verb, ms] of longer) assert.equal(ms, verb === "run" ? 9000 : 1000, `${verb} ran with ${ms}`);
+	for (const [verb, ms] of await bounds({})) assert.equal(ms, 1000, `${verb}: by default a start is bounded like any step`);
+});

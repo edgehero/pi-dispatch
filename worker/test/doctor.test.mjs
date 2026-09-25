@@ -6,10 +6,12 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { CANARY_LINES, CANARY_PROBE_SLUGS, ENV_FILE_READABLE_KEYS, RUN_TIMEOUTS, backendChecks, collectChecks, defaultPromptFn, dockerRunVia, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, runDoctor } from "../src/doctor.mjs";
+import { CANARY_LINES, CANARY_PROBE_SLUGS, ENV_FILE_READABLE_KEYS, RUN_TIMEOUTS, backendChecks, collectChecks, defaultPromptFn, dockerRunVia, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, runDoctor } from "../src/doctor.mjs";
 import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS } from "../src/init.mjs";
 import { EGRESS_CANARY_NET_PREFIX, egressCanaryProbe } from "../src/egress.mjs";
 import { JOB_USER_FIX, parseDaemonFacts } from "../src/job-user.mjs";
+import { OBSERVATION_FIX } from "../src/backends.mjs";
+import { PODMAN_JOB_USER_FIX } from "../src/backend-podman.mjs";
 import { underOsTempDir } from "../src/config.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -5731,7 +5733,289 @@ test("doctor's two docker runners spawn the bin they are given, and docker when 
 	const live = await liveRunVia(spawn, { bin: "podman" })(["ps"], { timeoutMs: 1000 });
 	assert.deepEqual([live.code, live.stdout, live.ended], [0, "podman\n", "close"]);
 	assert.deepEqual(spawned, [["docker", "version"], ["docker", "version"], ["podman", "version"], ["docker", "ps"], ["podman", "ps"]]);
-	// Every caller in doctor still names no bin, so every spawn doctor makes through them is docker's, as before.
+	// Issue #354 part 2: the call sites that name a bin are the podman venue's three (its info read in the section and
+	// again before --live, and --live's runner), and each names podman; every other spawn doctor makes through them is
+	// docker's, as before.
 	const doctorSource = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8");
-	assert.doesNotMatch(doctorSource, /(?<!function )(?:docker|live)RunVia\(spawn[^)\n]*\{ bin/, "no call site in doctor passes a bin yet");
+	const named = [...doctorSource.matchAll(/(?<!function )(?:docker|live)RunVia\(spawn[^)\n]*\{ bin: ([^ }]+)/g)].map((m) => m[1]);
+	assert.deepEqual(named, ['"podman"', '"podman"', '"podman"'], "only the podman venue's reads name a bin, and they name podman");
+});
+
+// --- issue #354 part 2: the podman venue ------------------------------------------------------------------------------
+
+// `podman info --format json` as rootless Podman 5.8.1 on Fedora 44 answers it (measured), reduced to the keys read.
+const PODMAN_INFO = (over = {}, security = {}) =>
+	JSON.stringify({ host: { security: { rootless: true, selinuxEnabled: false, ...security }, serviceIsRemote: false, cgroupVersion: "v2", cgroupControllers: ["cpuset", "cpu", "io", "memory", "pids"], ...over }, version: { Version: "5.8.1" } });
+// The worker account's own mounts.conf, empty: the documented override that earns podmanAddsNoMounts.
+const PODMAN_HOME = "/home/op";
+const podmanFs = { ...noHostFiles, statSync: (p) => (p === `${PODMAN_HOME}/.config/containers/mounts.conf` ? { size: 0 } : noHostFiles.statSync(p)) };
+// A podman host that answers everything, docker absent altogether. "docker" LAST, so it catches every docker call.
+const podmanPlan = ({ info = PODMAN_INFO(), capabilities = "anyUid", image = true, proxy = "true" } = {}) => ({
+	"podman info": { code: 0, output: `${info}\n` },
+	"podman image inspect --format={{.Id}}": image ? { code: 0, output: `abc|0.80.7||${capabilities}\n` } : { code: 125, output: "" },
+	"podman inspect --format={{.State.Running}}": proxy === null ? { code: 125, output: "" } : { code: 0, output: `${proxy}\n` },
+	docker: "enoent",
+});
+const podmanEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", PI_BACKENDS: "podman", PI_EGRESS: "0", ...extra });
+const podmanDeps = (out, plan, calls, extra = {}) => ({ ...ghDeps(out, plan, calls), home: PODMAN_HOME, observationFs: podmanFs, jobUserIdentity: LINUX_ID(1234), ...extra });
+
+test("PI_BACKENDS=podman: the docker lines warn as used by no job, and the podman section reads this account's Podman (#354)", async () => {
+	const { out, text } = capture();
+	const calls = [];
+	const code = await runDoctor(podmanEnv(), podmanDeps(out, podmanPlan(), calls));
+	assert.equal(code, 0, text());
+	assert.match(text(), /⚠ Docker daemon reachable -- not used by any job \(PI_BACKENDS does not list local\)\n {4}→ nothing to do for jobs: no venue this deployment runs uses docker/);
+	assert.match(text(), /⚠ Job image present \(pi-job:latest\) -- not used by any job \(PI_BACKENDS does not list local\)/);
+	assert.match(text(), /✓ podman: `podman info` answered as this account \(Podman 5\.8\.1, rootless, this host's own\)/);
+	assert.match(text(), /✓ podman: cgroup v2 controllers are delegated to this account \(cpuset, cpu, io, memory, pids\)/);
+	assert.match(text(), /✓ podman: SELinux does not confine containers here, so nothing a job mounts is relabelled/);
+	assert.match(text(), /✓ podman: job image present in this account's Podman store \(pi-job:latest\)/);
+	assert.match(text(), /✓ podman: jobs run as uid:gid 1234:1234 \(passed as --user, with --userns=keep-id\) with HOME=\/home\/pi/);
+	assert.doesNotMatch(text(), /podman: \w+ is ASSERTED/, "every observation holds, so the backend section says nothing of them");
+	assert.doesNotMatch(text(), /^. local: /m, "no local job-user line on a deployment that runs no local job");
+	assert.equal(calls.filter((c) => c.cmd === "podman" && c.args[0] === "info").length, 1, "one podman info, shared by the decision, the observations and the line");
+	assert.ok(!calls.some((c) => c.cmd === "docker" && c.args[0] === "run"), "no docker container is started for a deployment that runs none");
+	// --fix offers no pull into docker's store, where no job of this deployment looks.
+	const asked = [];
+	const fixing = capture();
+	await runDoctor(podmanEnv(), { ...podmanDeps(fixing.out, podmanPlan(), []), fix: true, promptFn: async (question) => (asked.push(question), false) });
+	assert.doesNotMatch(fixing.text(), /fix available: Job image present|docker pull/, "no pull offered");
+});
+
+test("a deployment that does not bless podman spawns no podman and prints no podman line (#354)", async () => {
+	for (const PI_BACKENDS of [undefined, "local", "nonsense"]) {
+		const { out, text } = capture();
+		const calls = [];
+		await runDoctor({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", ...(PI_BACKENDS ? { PI_BACKENDS } : {}) }, { ...ghDeps(out, { ...podmanPlan(), ...green }, calls) });
+		assert.ok(!calls.some((c) => c.cmd === "podman"), `${PI_BACKENDS}: no podman spawn`);
+		assert.doesNotMatch(text(), /podman:|not used by any job/, `${PI_BACKENDS}: the docker lines are what they were`);
+	}
+});
+
+test("a podman venue refusal is ✗ where podman is the default venue and ⚠ where it is not, with its own fix (#354)", async () => {
+	for (const [label, plan, ids, cause] of [
+		["rootful", podmanPlan({ info: PODMAN_INFO({}, { rootless: false }) }), LINUX_ID(1234), "podman-rootful"],
+		["remote", podmanPlan({ info: PODMAN_INFO({ serviceIsRemote: true }) }), LINUX_ID(1234), "podman-remote"],
+		["root worker", podmanPlan(), LINUX_ID(0), "worker-is-root"],
+		["no podman", "no podman", LINUX_ID(1234), "podman-not-found"],
+		["macOS", podmanPlan(), { platform: "darwin", euid: 501, egid: 20 }, "podman-platform"],
+	]) {
+		for (const PI_BACKENDS of ["podman", "local,podman"]) {
+			const { out, text } = capture();
+			const calls = [];
+			const deps = podmanDeps(out, plan === "no podman" ? { docker: "enoent" } : plan, calls, { jobUserIdentity: ids });
+			// No podman on PATH is what node's spawn says: an error with code ENOENT, which the fake's "enoent" does not carry.
+			if (plan === "no podman") {
+				const base = deps.spawn;
+				deps.spawn = (cmd, ...rest) => {
+					if (cmd === "podman") throw Object.assign(new Error("spawn podman ENOENT"), { code: "ENOENT" });
+					return base(cmd, ...rest);
+				};
+			}
+			const code = await runDoctor(podmanEnv({ PI_BACKENDS }), deps);
+			const boot = PI_BACKENDS === "podman";
+			const mark = boot ? "✗" : "⚠";
+			const tail = boot ? "a worker running as this account refuses to boot" : "every podman job is refused";
+			assert.ok(text().includes(`${mark} podman: no job can run on this venue (${cause}) -- ${tail}\n    → ${PODMAN_JOB_USER_FIX[cause]}\n`), `${label} ${PI_BACKENDS}:\n${text()}`);
+			if (boot) assert.equal(code, 1, `${label}: a boot refusal fails doctor`);
+			assert.doesNotMatch(text(), /podman: jobs run as|podman: job image/, `${label}: nothing past the refusal is read`);
+			if (label === "macOS") assert.ok(!calls.some((c) => c.cmd === "podman"), "off Linux podman is not even asked");
+		}
+	}
+});
+
+test("the podman job image is read from THIS account's store, and its anyUid rule is the podman venue's (#354)", async () => {
+	const run = async (plan, ids = LINUX_ID(1234)) => {
+		const { out, text } = capture();
+		const code = await runDoctor(podmanEnv(), podmanDeps(out, plan, [], { jobUserIdentity: ids }));
+		return { code, text: text() };
+	};
+	const absent = await run(podmanPlan({ image: false }));
+	assert.equal(absent.code, 1);
+	assert.match(absent.text, /✗ podman: job image is not in this account's Podman store \(pi-job:latest\)\n {4}→ pull or load it AS THE WORKER'S ACCOUNT, since rootless Podman keeps one image store per account: podman pull ghcr\.io\/edgehero\/pi-job:latest && podman tag/);
+	assert.match(absent.text, /✓ podman: jobs run as uid:gid 1234:1234 \(passed as --user, with --userns=keep-id\) with HOME=\/home\/pi, once the job image is in this account's store and declares anyUid/);
+	const noAnyUid = await run(podmanPlan({ capabilities: "replicas" }));
+	assert.match(noAnyUid.text, /⚠ podman: every job on pi-job:latest is refused as this uid \(job-image-any-uid-unsupported\)\n {4}→ the job image does not declare `anyUid`[^\n]*which the podman venue always uses/);
+	assert.equal(noAnyUid.code, 0, "a per-job refusal warns, as the worker boots and refuses each job");
+	const imageUid = await run(podmanPlan({ capabilities: "replicas" }), LINUX_ID(1001));
+	assert.match(imageUid.text, /✓ podman: jobs run as uid:gid 1001:1001 \(passed as --user, with --userns=keep-id\)/, "uid 1001 is the image's own, anyUid or not");
+});
+
+test("with egress armed the podman proxy is read under podman, and the docker egress checks do not run for a podman-only deployment (#354)", async () => {
+	const run = async (proxy) => {
+		const { out, text } = capture();
+		const calls = [];
+		const code = await runDoctor(podmanEnv({ PI_EGRESS: "1" }), podmanDeps(out, podmanPlan({ proxy }), calls));
+		return { code, text: text(), calls };
+	};
+	const up = await run("true");
+	assert.match(up.text, /✓ podman: egress proxy running under this account's Podman \(pi-dispatch-egress-proxy\)/);
+	assert.match(up.text, /⚠ podman: the egress allowlist is not read back on this venue -- doctor's egress canary runs on docker only/);
+	assert.doesNotMatch(up.text, /Egress (policy|proxy)/, "docker's egress lines are about a proxy no job here is wired to");
+	assert.deepEqual(up.calls.find((c) => c.cmd === "podman" && c.args[0] === "inspect")?.args, ["inspect", "--format={{.State.Running}}", "pi-dispatch-egress-proxy"]);
+	const down = await run(null);
+	assert.equal(down.code, 1);
+	assert.match(down.text, /✗ podman: egress proxy is not under this account's Podman \(pi-dispatch-egress-proxy\)\n {4}→ start it as the worker's account, under the same rootless Podman, on a named bridge network/);
+	const stopped = await run("false");
+	assert.match(stopped.text, /✗ podman: egress proxy is stopped under this account's Podman/);
+	assert.doesNotMatch(stopped.text, /allowlist is not read back/, "only said beside a running proxy");
+});
+
+test("the backend section judges the podman venue's words on its own observations, never the docker daemon's (#354)", () => {
+	const observed = (observations, read = { answered: true }) => ({
+		observations: { podmanBoundsDelegated: true, podmanAddsNoMounts: true, podmanServiceLocal: true, ...observations },
+		evidence: { podmanBoundsDelegated: "the pids cgroup controller is not delegated", podmanAddsNoMounts: "mounts evidence", podmanServiceLocal: "podman info reports serviceIsRemote true" },
+		read,
+	});
+	const env = { PI_BACKENDS: "podman" };
+	const find = (checks, property) => checks.find((c) => c.label.startsWith(`podman: ${property} is ASSERTED`));
+	// A docker daemon that reads as Podman-compat is given too: its answer must not speak for the podman venue.
+	const daemon = { answered: true, facts: parseDaemonFacts(PODMAN_COMPAT_INFO).facts };
+	const bounds = backendChecks(env, { daemon, fs: noHostFiles, podman: observed({ podmanBoundsDelegated: false }) });
+	assert.deepEqual([find(bounds, "isolation").ok, find(bounds, "isolation").warn], [false, true]);
+	assert.equal(find(bounds, "isolation").label, "podman: isolation is ASSERTED by this account's Podman setup, not enforced: the pids cgroup controller is not delegated");
+	assert.equal(find(bounds, "isolation").fix, OBSERVATION_FIX.podmanBoundsDelegated);
+	assert.equal(find(bounds, "mountSet"), undefined, "mounts observed, so quiet, whatever the docker daemon's files say");
+	const remote = backendChecks(env, { fs: noHostFiles, podman: observed({ podmanServiceLocal: false }) });
+	assert.match(find(remote, "credentialTransit").label, /credentialTransit is ASSERTED by the operator, not enforced: podman info reports serviceIsRemote true/);
+	const unread = backendChecks(env, { fs: noHostFiles, podman: observed({ podmanBoundsDelegated: null }, { answered: false, reason: "timeout", transient: true }) });
+	assert.match(find(unread, "isolation").fix, /fix what stops `podman info` answering for the worker's account/);
+	for (const read of [{ answered: false, reason: "podman-not-found", transient: false }, null]) {
+		const quiet = backendChecks(env, { daemon, fs: noHostFiles, podman: observed({ podmanBoundsDelegated: false, podmanAddsNoMounts: false, podmanServiceLocal: false }, read) });
+		assert.equal(quiet.find((c) => /is ASSERTED/.test(c.label)), undefined, `${read?.reason ?? "never read"}: the podman section's refusal line is the whole story`);
+	}
+	// The floor judges the same observations, and names the podman remedy only.
+	const floor = backendChecks({ ...env, PI_BACKEND_FLOOR: "isolation=enforced" }, { fs: noHostFiles, podman: observed({ podmanBoundsDelegated: false }) }).find((c) => /PI_BACKEND_FLOOR/.test(c.label));
+	assert.deepEqual([floor.ok, floor.warn], [false, undefined]);
+	assert.match(floor.label, /isolation=enforced \(podman provides it only while this worker's rootless Podman runs on cgroup v2/);
+	assert.ok(floor.fix.startsWith(OBSERVATION_FIX.podmanBoundsDelegated), floor.fix);
+	const held = backendChecks({ ...env, PI_BACKEND_FLOOR: "isolation=enforced,credentialTransit=enforced" }, { fs: noHostFiles, podman: observed({}) });
+	assert.ok(held.some((c) => c.ok && /PI_BACKEND_FLOOR holds/.test(c.label)));
+});
+
+// The --live answers for the podman venue: local's, spoken by `podman`, with the probe running as the worker's uid.
+const podmanLiveOk = () => Object.fromEntries(Object.entries(liveOk({ uid: "1234" })).map(([k, v]) => [k.replace(/^docker /, "podman "), v]));
+
+test("doctor --live on podman reads the eight back through podman, as the worker's uid, with keep-id (#354)", async () => {
+	const env = liveEnv({ PI_BACKENDS: "podman" });
+	const { out, text } = capture();
+	const calls = [];
+	const code = await runDoctor(env, { ...podmanDeps(out, { ...podmanLiveOk(), ...podmanPlan() }, calls), live: true, liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n", ...instantClock() });
+	assert.equal(code, 0, text());
+	const probe = calls.find((c) => c.args[0] === "run" && c.args.includes("sleep"));
+	assert.equal(probe.cmd, "podman", "the probe runs under podman");
+	assert.ok(probe.args.includes("--user=1234:1234") && probe.args.includes("--userns=keep-id"), `the podman builder's argv: ${probe.args.join(" ")}`);
+	assert.ok(!calls.some((c) => c.cmd === "docker" && c.args.some((a) => String(a).includes("pi-dispatch-live"))), "nothing of the read-back touches docker");
+	assert.equal(calls.filter((c) => c.cmd === "podman" && c.args[0] === "info").length, 2, "podman info is read by the collection AND again right before the probe");
+	for (const property of ["isolation", "ephemeral", "mountSet", "imagePinning", "nonRoot", "localFolders"]) {
+		assert.match(text(), new RegExp(`✓ read back on podman: ${property} holds`));
+	}
+	assert.match(text(), /✓ read back on podman: mountSet holds \([^)]*in podman inspect and in \/proc\/self\/mountinfo\)/);
+	assert.match(text(), /✓ read back on podman: the probe ran as uid 1234, the job user this host decides \(1234:1234\)/);
+	assert.match(text(), /⚠ read back on podman: jobToJobIsolation not read back: PI_EGRESS is off, so jobs share podman's default network by design/);
+	assert.match(text(), /✓ read back on podman: limits of this read-back -- /);
+	assert.doesNotMatch(text(), /read back on local|DOCKER_CONTENT_TRUST/);
+	assert.deepEqual(readdirSync(env.PI_JOBS_DIR), [], "the fixture is removed");
+});
+
+test("doctor --live on podman runs nothing when podman is re-read as remote, or a podman job would be refused (#354)", async () => {
+	let reads = 0;
+	const flips = { ...podmanLiveOk(), ...podmanPlan(), "podman info": () => ({ code: 0, output: `${PODMAN_INFO(++reads > 1 ? { serviceIsRemote: true } : {})}\n` }) };
+	const { out, text } = capture();
+	const calls = [];
+	await runDoctor(liveEnv({ PI_BACKENDS: "podman" }), { ...podmanDeps(out, flips, calls), live: true, liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n" });
+	assert.ok(!calls.some((c) => c.args.some((a) => String(a).includes("pi-dispatch-live"))), "no probe after the re-read");
+	assert.match(text(), /⚠ read back on podman: not run -- this shell's podman CLI is not observed to point at this host/);
+	const refused = capture();
+	const refusedCalls = [];
+	await runDoctor(liveEnv({ PI_BACKENDS: "podman" }), { ...podmanDeps(refused.out, { ...podmanLiveOk(), ...podmanPlan({ capabilities: "" }) }, refusedCalls), live: true, liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n" });
+	assert.match(refused.text(), /⚠ read back on podman: not run -- a podman job is refused as this uid \(any-uid-unsupported\), so a probe would read back a container no job gets\n {4}→ fix the podman job-user line above first/);
+	assert.ok(!refusedCalls.some((c) => c.args.some((a) => String(a).includes("pi-dispatch-live"))));
+});
+
+test("doctor --live with both venues blessed reads back each on its own runtime, local's lines unchanged (#354)", async () => {
+	const env = liveEnv({ PI_BACKENDS: "local,podman" });
+	const { out, text } = capture();
+	const calls = [];
+	// uid 1001: the image's own, so both venues' probes run as it and one fake container answers both.
+	const liveBoth = { ...liveOk(), ...Object.fromEntries(Object.entries(liveOk()).map(([k, v]) => [k.replace(/^docker /, "podman "), v])) };
+	const { docker: _everyDocker, ...podmanOnly } = podmanPlan();
+	const code = await runDoctor(env, { ...podmanDeps(out, { ...liveBoth, ...podmanOnly, ...infoPlan(ROOTFUL_INFO), ...green }, calls), live: true, liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n", ...instantClock() });
+	assert.equal(code, 0, text());
+	assert.match(text(), /✓ read back on local: mountSet holds \([^)]*in docker inspect and in \/proc\/self\/mountinfo\)/);
+	assert.match(text(), /✓ read back on podman: mountSet holds \([^)]*in podman inspect and in \/proc\/self\/mountinfo\)/);
+	assert.match(text(), /⚠ read back on local: jobToJobIsolation not read back: PI_EGRESS is off, so jobs share docker's default bridge by design/);
+	assert.ok(text().indexOf("read back on local: limits") < text().indexOf("read back on podman: starting"), "local's read-back first, then podman's");
+	assert.ok(calls.some((c) => c.cmd === "docker" && c.args[0] === "run" && c.args.includes("sleep")) && calls.some((c) => c.cmd === "podman" && c.args[0] === "run" && c.args.includes("sleep")));
+});
+
+test("a failed read-back on podman names podman's commands and the podman venue's declared word (#354)", async () => {
+	const { out, text } = capture();
+	// The pinning probe STARTED (a pull or a wrapper), and PID 1 ran as the image's uid rather than the worker's.
+	const plan = { ...podmanLiveOk(), "podman run --name=pi-dispatch-live-pin-": { code: 0, output: `${"e".repeat(64)}\n` }, [`podman exec ${LIVE_ID} sh -c cat /proc/1/status`]: { code: 0, output: LIVE_STATUS("1001") }, ...podmanPlan() };
+	const code = await runDoctor(liveEnv({ PI_BACKENDS: "podman" }), { ...podmanDeps(out, plan, []), live: true, liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n", ...instantClock() });
+	assert.equal(code, 1);
+	assert.match(text(), /✗ read back on podman: imagePinning does NOT hold -- declared enforced, observed: a container started from an image this host does not have\n {4}→ the daemon ran or pulled an image this host does not have -- check for a podman CLI plugin or wrapper that rewrites `podman run`\n/);
+	assert.match(text(), /✗ read back on podman: the probe ran as uid 1001, not the decided job user 1234:1234\n {4}→ podman did not apply --user with --userns=keep-id as the worker passes it/);
+});
+
+test("the podman SELinux line follows the relabel rule, and an unreported SELinux warns (#354)", async () => {
+	const run = async (security) => {
+		const { out, text } = capture();
+		const calls = [];
+		await runDoctor(podmanEnv(), podmanDeps(out, podmanPlan({ info: PODMAN_INFO({}, security) }), calls));
+		return { text: text(), calls };
+	};
+	const on = await run({ selinuxEnabled: true });
+	assert.match(on.text, /✓ podman: SELinux confines containers here, so a job's own directories are relabelled \(:Z\) and your local folders are not: the SELinux label lines below read those/);
+	assert.match(on.text, /✓ SELinux: jobs' own directories are relabelled for SELinux \(:Z\)/, "and the label lines it names are there");
+	const unreported = await run({ selinuxEnabled: "yes" });
+	assert.doesNotMatch(unreported.text, /✓ SELinux: jobs' own directories/, "no relabel, so no label lines");
+	assert.match(unreported.text, /⚠ podman: whether SELinux confines containers here was not reported, so nothing a job mounts is relabelled\n {4}→ on an SELinux host an unlabelled job directory is unreadable/);
+});
+
+test("a podman-only deployment on a host that also has docker: no docker container, no gh token handed to one, the docker lines warn (#354)", async () => {
+	const { out, text } = capture();
+	const calls = [];
+	const { docker: _everyDocker, ...podmanOnly } = podmanPlan();
+	const plan = { ...podmanOnly, ...green, "gh auth status": { code: 0, output: ghStatusOutput }, "gh auth token": { code: 0, output: "gho_x\n" } };
+	const code = await runDoctor(podmanEnv({ PI_EGRESS: "1", GITHUB_AUTH_SOURCE: "gh" }), podmanDeps(out, plan, calls));
+	assert.equal(code, 0, text());
+	assert.match(text(), /✓ Docker daemon reachable -- not used by any job \(PI_BACKENDS does not list local\)/, "a pass stays a pass, and says no job uses it");
+	assert.match(text(), /✓ Job image present \(pi-job:latest\) -- not used by any job/);
+	assert.ok(!calls.some((c) => c.cmd === "docker" && ["run", "network"].includes(c.args[0])), "no canary and no in-image probe on docker");
+	assert.doesNotMatch(text(), /in-image gh auth|Egress (policy|proxy)|^. local: /m);
+});
+
+test("doctor --live on podman with egress armed builds the peers' job networks under podman, and says egress was not read back and why (#354)", async () => {
+	const env = liveEnv({ PI_EGRESS: "1", PI_BACKENDS: "podman" });
+	const toPodman = (plan) => Object.fromEntries(Object.entries(plan).map(([k, v]) => [k.replace(/^docker /, "podman "), v]));
+	const info = JSON.parse(PODMAN_INFO()).host;
+	const facts = {
+		jobImage: "pi-job:latest",
+		triggerImages: [],
+		podman: { run: true, user: "1234:1234", relabel: false, info: { rootless: true, serviceIsRemote: info.serviceIsRemote, selinux: false }, imagePresent: true, egress: { armed: true, proxy: "pi-dispatch-egress-proxy", proxyRunning: true } },
+	};
+	const seams = (plan) => ({ spawn: fakeSpawn({ ...toPodman(liveOk({ uid: "1234" })), ...toPodman(livePeersOk(plan)), ...podmanPlan(), "podman network": 0 }), liveFs: liveFsAs(1234), isAlive: () => false, pid: 1, nonce: "n", jobUserIdentity: LINUX_ID(1234), ...instantClock() });
+	const held = await podmanLiveChecks(env, seams({}), facts);
+	assert.ok(held.some((c) => c.ok && /^read back on podman: jobToJobIsolation holds \(peer1 reached the proxy/.test(c.label)), held.map((c) => c.label).join("\n"));
+	assert.ok(held.some((c) => c.warn && c.label === "read back on podman: egress not read back: doctor's egress canary runs on docker only, so the allowlist was not read back on podman (the proxy line above is what was read)"));
+	assert.match(held.at(-1).label, /jobToJobIsolation tried one pair of peers on this account's Podman job networks/);
+	const noAddress = await podmanLiveChecks(env, { ...seams({}), spawn: fakeSpawn({ ...toPodman(liveOk({ uid: "1234" })), ...toPodman(livePeersOk({})), "podman inspect --format={{json .NetworkSettings.Networks}}": { code: 1, output: "" }, ...podmanPlan(), "podman network": 0 }) }, facts);
+	assert.ok(noAddress.some((c) => c.warn && /jobToJobIsolation not read back: podman inspect gave peer2 no address/.test(c.label)), noAddress.map((c) => c.label).join("\n"));
+});
+
+test("the podman bounds line is said only when the controllers are delegated (#354)", async () => {
+	const { out, text } = capture();
+	await runDoctor(podmanEnv(), podmanDeps(out, podmanPlan({ info: PODMAN_INFO({ cgroupControllers: ["cpu", "memory"] }) }), []));
+	assert.doesNotMatch(text(), /podman: cgroup v2 controllers are delegated/);
+	assert.match(text(), /⚠ podman: isolation is ASSERTED by this account's Podman setup, not enforced: the pids cgroup controller is not delegated/);
+});
+
+test("the pinning and ephemeral read-backs on podman name podman in what they could not read (#354)", async () => {
+	const { out, text } = capture();
+	const plan = { ...podmanLiveOk(), "podman run --name=pi-dispatch-live-pin-": { code: 125, output: "Error: something new\n" }, "podman ps -a --no-trunc --filter id=": { code: 125, output: "" }, ...podmanPlan() };
+	await runDoctor(liveEnv({ PI_BACKENDS: "podman" }), { ...podmanDeps(out, plan, []), live: true, liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n", ...instantClock() });
+	assert.match(text(), /⚠ read back on podman: imagePinning not read back: podman refused the run with a message this check does not recognise/);
+	assert.match(text(), /⚠ read back on podman: ephemeral not read back: podman ps did not answer while the first run was being waited on/);
 });

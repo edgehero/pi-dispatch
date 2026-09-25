@@ -1,4 +1,4 @@
-import { DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, DOCKER_NEVER_STARTED_EXITS, RUNTIME_ADDS_NO_MOUNTS } from "./backends.mjs";
+import { DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, DOCKER_NEVER_STARTED_EXITS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS } from "./backends.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { lstatSync } from "node:fs";
 import { checkTokenCap, recordTokenSpend, releaseBudget, reserveBudget } from "./budget.mjs";
@@ -15,6 +15,11 @@ export const OBSERVATION_COMMENT = Object.freeze({
 	[DOCKER_ENDPOINT_LOCAL]: "the docker CLI is not observed sending containers to a daemon on this host, so the job's credentials could cross a network the deployment does not own",
 	[DAEMON_APPLIES_BOUNDS]: "the container runtime is not observed applying a container's pid and memory bounds",
 	[RUNTIME_ADDS_NO_MOUNTS]: "the container runtime is not observed adding no mounts of its own to a job container",
+	// Issue #354: the podman venue's three, in the same fixed register. No path, no controller list and no service URL:
+	// those are the evidence, which goes to the operator's log only.
+	[PODMAN_BOUNDS_DELEGATED]: "the worker's rootless Podman is not observed having the cgroup controllers that apply a container's pid and memory bounds",
+	[PODMAN_ADDS_NO_MOUNTS]: "the worker's rootless Podman is not observed adding no mounts of its own to a job container",
+	[PODMAN_SERVICE_LOCAL]: "the podman CLI is not observed running containers on this host rather than through a remote service, so the job's credentials could cross a network the deployment does not own",
 });
 
 /**
@@ -82,6 +87,30 @@ const JOB_USER_COMMENTS = Object.freeze({
 	default: "Refused: the worker host's container runtime cannot give this job a non-root user that can read and write its own files. Not run.",
 	"runtime-unreadable": "Refused: the worker host's container runtime answered in a form the worker cannot read, so which user this job may run as is unknown. Not run.",
 });
+
+/**
+ * The runtime a venue's own preflights talk to, named in a retry's words (issue #354). The message is the job_failed log
+ * line and BullMQ's failedReason, so `local`'s stays byte-identical ("docker unavailable, ..."), the native podman venue
+ * names podman (an operator reading "docker unavailable" on a host with no docker would chase the wrong daemon), and a
+ * venue this build has no runtime word for gets the neutral phrase rather than a guess. `Object.hasOwn`, so a venue
+ * named like a prototype key is not a runtime.
+ */
+const VENUE_RUNTIME = Object.freeze({ [DEFAULT_BACKEND]: "docker", [PODMAN_BACKEND]: "podman" });
+
+function runtimeUnavailable(venue, gate) {
+	return Object.hasOwn(VENUE_RUNTIME, venue) ? `${VENUE_RUNTIME[venue]} unavailable, ${gate} could not run` : `the container runtime is unavailable, ${gate} could not run`;
+}
+
+/**
+ * The remedy an egress-proxy refusal's comment names. The compose profile starts the proxy on the DOCKER daemon, which a
+ * job on the native podman venue cannot reach: rootless podman's `--internal` network reaches nothing on the host
+ * (measured, issue #354), so its proxy must run under the SAME rootless podman on a named bridge network, which is what
+ * docs/podman.md sets up. Every other venue keeps the words it had.
+ */
+function egressProxyFix(venue) {
+	if (venue === PODMAN_BACKEND) return "Start it under the worker account's own rootless podman, on a named bridge network (docs/podman.md)";
+	return "Start it with `docker compose -f deploy/docker-compose.yml --profile egress up -d`";
+}
 
 export async function runJob(job, deps) {
 	const {
@@ -437,7 +466,7 @@ export async function runJob(job, deps) {
 			// retries (CONST-RETRY-INFRA-ONLY). `container-never-started` is literally true here, and it reuses
 			// the refund path below: a no-op pre-reserve, and still honest if this gate ever moves.
 			// provider/model attribute even this pre-container death; no usage -- nothing ran to emit one.
-			throw new InfraRetry("docker unavailable, image preflight could not run", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			throw new InfraRetry(runtimeUnavailable(resolveBackendName(job, blessedBackends[0]), "image preflight"), { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 		}
 
 		// Issue #341: WHO runs the container. On a daemon that enforces bind-mount ownership the job must run as the
@@ -522,7 +551,7 @@ export async function runJob(job, deps) {
 		if (egress.proxyMissing || egress.proxyStopped) {
 			const proxy = egress.proxyMissing ?? egress.proxyStopped;
 			const state = egress.proxyMissing ? "is not on this host" : "is not running";
-			await comment(job, `Refused: this deployment runs jobs behind an egress policy and its allowlist proxy "${proxy}" ${state}, so the job could not reach the provider and would burn its budget slot proving it. Start it with \`docker compose -f deploy/docker-compose.yml --profile egress up -d\`, or set PI_EGRESS=0 to run without an egress policy. Not run.`);
+			await comment(job, `Refused: this deployment runs jobs behind an egress policy and its allowlist proxy "${proxy}" ${state}, so the job could not reach the provider and would burn its budget slot proving it. ${egressProxyFix(resolveBackendName(job, blessedBackends[0]))}, or set PI_EGRESS=0 to run without an egress policy. Not run.`);
 			// The proxy's NAME is operator-authored deployment config, never payload -- the same PII class as
 			// the image ref on the refusal above.
 			log(egress.proxyMissing ? "refused_egress_proxy_missing" : "refused_egress_proxy_stopped", { proxy });
@@ -541,7 +570,7 @@ export async function runJob(job, deps) {
 			// The daemon did not answer, so this is indeterminate rather than a refusal -- the same
 			// determinate/indeterminate split the image preflight draws one gate up, and thrown for the same
 			// reason. Pre-reserve, so the refund below is a no-op and still honest if this gate ever moves.
-			throw new InfraRetry("docker unavailable, egress preflight could not run", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			throw new InfraRetry(runtimeUnavailable(resolveBackendName(job, blessedBackends[0]), "egress preflight"), { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 		}
 
 		// REQ-RESUMABLE-SESSION's one fail-CLOSED case. Everything else in that feature fails OPEN and

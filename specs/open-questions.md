@@ -1438,10 +1438,12 @@ adversarial passes did.
     primary gid is refused);
   - **the worker's own `0600` files inside a mounted local folder are readable to the job** (already true on
     Docker Desktop, whose file sharing maps every uid);
-  - **rootless Docker and rootless Podman are refused rather than supported.** The only uid that can use the
-    mounts there is container root, which `nonRoot` forbids. Rootless Podman with `userns="keep-id"` in
-    containers.conf works through its Docker API (measured), but every fact the decision reads is the same as
-    plain rootless, so it is refused too;
+  - **rootless Docker, and rootless Podman through its Docker API, are refused rather than supported.** The only
+    uid that can use the mounts there is container root, which `nonRoot` forbids. Rootless Podman with
+    `userns="keep-id"` in containers.conf works through its Docker API (measured), but every fact the decision reads
+    is the same as plain rootless, so it is refused too. Since issue #354 rootless Podman is served by the native
+    `podman` venue instead (`DES-PODMAN-NATIVE-ROOTLESS-BACKEND`), and there too the job runs as the worker's own uid,
+    with `--userns=keep-id`, so everything in this entry applies to it unchanged;
   - **a rootful Podman host that keeps the default subscription mounts** gives every job a `/run/secrets` mount
     carrying the host's subscription files where they exist (`/etc/rhsm` readable, measured) unless
     `/etc/containers/mounts.conf` is empty. Since issue #345 this is observed rather than only documented:
@@ -1455,19 +1457,32 @@ adversarial passes did.
   - Nothing a trigger or a model can set moves the uid (it is the worker's own, and `run.secrets` and
     `PI_FORWARD_ENV` cannot override HOME).
 - **What would close it**: a distinct job uid the worker can still clean up after (ACLs, or a helper that
-  owns the job dirs), or rootless isolation that keeps a non-root container uid mapped to a dedicated host uid
-  (Podman keep-id through a native `podman` backend). Neither is built.
+  owns the job dirs), or rootless isolation that keeps a non-root container uid mapped to a dedicated host uid.
+  Neither is built. The native `podman` backend (issue #354) was expected to be the second and is not: keep-id maps
+  the worker's own uid into the container, so a job there has exactly the reach this entry describes. Running the
+  worker under an account that exists only for it (`deploy/worker.service`'s `User=`) is still what narrows it.
 
 ## OQ-037: Podman and the other daemons beyond the rootful Docker API route
 
 - **Status**: **OPEN** (issue #345).
 - **Position**: rootful Podman through its Docker API is supported and measured (`DES-PODMAN-THROUGH-ITS-DOCKER-API`).
   What is not settled, each with what would close it:
-  - **Rootless Podman.** Refused, because the only uid that can use the job's `0700` directories there is container
-    root. `--userns=keep-id` would map the worker's uid into the container and does work through the podman CLI
-    (measured), but the docker CLI refuses the flag and a containers.conf `userns = "keep-id"` is invisible in
-    `docker info`. *Closes when* a native `podman` backend passes `--userns=keep-id` per container and its
-    conformance harness reads the job user back (issue #354 carries the measurements).
+  - **Rootless Podman: CLOSED 2026-09-25 (issue #354).** Through its Docker API it is still refused, because the only
+    uid that can use the job's `0700` directories there is container root, the docker CLI refuses `--userns=keep-id`,
+    and a containers.conf `userns = "keep-id"` is invisible in `docker info`. The close condition this bullet set is
+    met by the native `podman` venue (`DES-PODMAN-NATIVE-ROOTLESS-BACKEND`): it passes `--userns=keep-id` with the
+    worker's own `--user` on every job's argv, refuses a rootful or remote Podman, a root worker and a non-Linux host
+    by name, and `.github/scripts/podman-conformance.mjs` runs the conformance harness against the real bundle and
+    reads the eight container properties back, the job user included, failing on any that is not read back. Measured
+    on Fedora 44 with rootless Podman 5.8.1 as uid 1234.
+    The run on 2026-09-25, against an image built from this change, PASSED: every check held and all eight read-back
+    properties were read back off live containers (`CapBnd 0`, `NoNewPrivs 1`, `pids.max` 512, `memory.max` 4 GiB;
+    two ephemeral runs gone in 55 and 42 ms; the mount set exactly `/job:ro`, `/workspace`, `/outbox`, `/session`,
+    `/opt/pi-global:ro`; the provider reached and an unlisted host refused; a peer unreachable by name and address; an
+    absent image refused without a pull; `Uid 1234`; every mount written and read back as 1234), and PID 1 ran as the
+    account's own uid. The first attempt, on an image this account had never run with keep-id, failed at the probe's
+    start: that first run copies the image's layers to the mapped ids (27.1 s measured, then 0.15 s), longer than the
+    read-back's 20 s step bound, so container starts on this venue now have their own 120 s bound.
   - **SELinux in enforcing mode, netavark's nftables firewall driver, and health checks under systemd: MEASURED
     2026-09-25 (issue #355), and narrowed to the one route nobody measured.** The close condition this bullet set
     ("measured on an enforcing Fedora or RHEL host with systemd, with the argv changed if it must be") is met for
@@ -1667,3 +1682,4 @@ adversarial passes did.
 | 2026-09-23 | Issue #382. **`OQ-035` AMENDED**, in its Position bullet: the control-byte class is written ONCE, in `admin/src/panel.mjs`, and every renderer substitutes through it -- `scrubReason` included. The bullet said "stripped" where the operation is a SUBSTITUTION, which is the distinction the whole issue turns on: `clip` deletes and the record cells substitute, so a pane composing with `clip` clipped one column narrower than its twin for the same record. `clip` still deletes, deliberately and for a pinned reason (`LINE_INPUT_CURSOR`'s sentinels are in the same class), and `clipData` is the composition data paths use. What the belt is no longer asked to do alone: a GATE now runs over every finished pane line, so a field that reaches a pane without a belt is still substituted before it is printed. The validator question this could have been read as raising is settled in `DES-ONE-SHOT-DISARM-IN-THE-FILE` rather than here, because a refusal at that writer leaves a one-shot armed and costs a second paid run. |
 | 2026-09-24 | Issue #402. **`OQ-035` AMENDED**, in the same Position bullet issue #382 corrected: the renderer's control-byte class is no longer C0 + DEL + C1. It draws its line at INTERPRETED against COMPOSING, so the bidi controls, the invisible break characters (U+200B, U+2060 and the word joiner range, U+FEFF, U+00AD, U+180E) and the line and paragraph separators are in it, while U+200D, U+200C and the variation selectors are deliberately out because they compose the character beside them. **The `failedReason` belt moves with it, and that is why this row exists**: `scrubReason` shares the class, exactly as #382 recorded, so widening the renderer widened this belt again. Nothing observable moves for the same reason as last time -- a `failedReason` is a worker throw's message decoded as UTF-8 and this project produces none carrying a bidi control -- but a contract that moves without a row is the gap this rule exists to close. **The validator is UNCHANGED, checked**: `triggers.mjs` still refuses on C0 + DEL, and widening it was rejected for the reason `DES-ONE-SHOT-DISARM-IN-THE-FILE` already records, that a refusal at that writer leaves a one-shot armed and costs a second paid run. **Code evidence**: admin/src/panel.mjs -> interpreted, mapInterpreted, scrubControls, hasControls; admin/test/control-bytes.test.mjs. |
 | 2026-09-25 | Issue #355. **`OQ-037` AMENDED, narrowed not closed, status stays `OPEN`**: its SELinux, nftables and systemd bullet is MEASURED on a real Fedora 44 host (kernel 6.19.10, SELinux enforcing, container-selinux 2.247.0, systemd 259.5, cgroup v2, rootful Podman 5.8.1, netavark 1.17.2 on its nftables driver, aardvark-dns 1.17.0, crun 1.27, conmon 2.2.1, docker-cli 29.7.2 and compose 5.5.1 from Fedora, worker uid 1234). nftables and health checks under systemd hold with nothing changed (`doctor --live` read `egress` and `jobToJobIsolation` back; the compose proxy went `healthy` in about 35 s on its own transient timer). SELinux did NOT hold: every unlabelled bind source was denied, `:ro` or not, so every job on the supported route stopped at `/job` before spending and the compose proxy crash-looped on its own config; the argv changed (`:Z` on the worker's own per-job mounts, on Podman only; `:ro,z` on the compose config mounts) and an operator's folder or overlay gets doctor's `semanage fcontext` fix and a pre-spend runner refusal instead of a relabel. **What stays in the bullet** is Docker Engine with `selinux-enabled`, out of scope and unmeasured, with its own close condition. The entry's other bullets (rootless Podman and issue #354, `podman machine` and Podman Desktop, OrbStack and Colima, `userns = "auto"`) are **UNCHANGED, checked**, and **What bounds it meanwhile** gains the runner's `/workspace` read check. **`OQ-036` UNCHANGED, checked**: `:Z` changes a label on the worker's own per-job directories, not the uid a job runs as, so nothing that entry's residual rests on moves. |
+| 2026-09-25 | Issue #354, part 2 (the `podman` venue). **`OQ-037` AMENDED, one bullet CLOSED, status stays `OPEN`**: its rootless Podman bullet is closed by the native `podman` venue, which passes `--userns=keep-id` with the worker's own `--user` on every job's argv, refuses a rootful or remote Podman, a root worker and a non-Linux host by name, and is read back by `.github/scripts/podman-conformance.mjs`, which runs the conformance harness against the real bundle and fails on any of the eight read-back properties it could not read. The bullet carries that run's result. Through the Docker API rootless Podman is still refused, for the reasons the bullet always gave. The other bullets (Docker Engine with `selinux-enabled`, `podman machine`, OrbStack and Colima, `userns = "auto"`) are untouched. **`OQ-036` AMENDED**: its rootless bullet now says rootless Podman is served by the native venue and runs as the worker's own uid there too, so everything the entry concedes applies unchanged; and "Neither is built" is kept with the reason the native venue is not the second closure it expected: keep-id maps the worker's OWN uid into the container, not a dedicated one. Status unchanged. |
