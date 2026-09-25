@@ -342,10 +342,19 @@ test("the podman observationPreflight judges the floor on podman's observations,
 	assert.deepEqual(refused.observations, [PODMAN_BOUNDS_DELEGATED]);
 	assert.match(refused.message, /podman: isolation=enforced holds only while this worker's rootless Podman runs on cgroup v2/);
 	assert.match(refused.message, /Delegate the cpu, memory and pids controllers/);
-	const remote = await bundle({ backendFloor: floor, readInfo: async () => answered({ serviceIsRemote: true }) }).observationPreflight(JOB);
-	assert.deepEqual(remote.observations, [PODMAN_SERVICE_LOCAL]);
 	assert.deepEqual(await bundle({ backendFloor: floor, readInfo: async () => ({ answered: false, reason: "timeout", transient: true }) }).observationPreflight(JOB), { unavailable: true, reason: "timeout" });
-	assert.equal((await bundle({ backendFloor: floor, readInfo: async () => ({ answered: false, reason: "podman-not-found", transient: false }) }).observationPreflight(JOB)).refused, true, "no podman is determinate");
+	// A refused identity is passed through to jobUserPreflight, which names the one fix, rather than refused here with a
+	// floor fix that is not it. Every unmappable row, each of which misses a floored observation too.
+	for (const [label, opts, cause] of [
+		["remote", { readInfo: async () => answered({ serviceIsRemote: true }) }, "podman-remote"],
+		["rootful", { readInfo: async () => answered({ rootless: false }) }, "podman-rootful"],
+		["no podman", { readInfo: async () => ({ answered: false, reason: "podman-not-found", transient: false }) }, "podman-not-found"],
+	]) {
+		const b = bundle({ backendFloor: { ...floor, mountSet: ENFORCED }, ...opts });
+		const observed = await b.observationPreflight(JOB);
+		assert.equal(observed.ok, true, `${label}: not refused by the floor`);
+		assert.deepEqual(await b.jobUserPreflight(JOB, { capabilities: ["anyUid"], observed }), { refused: "job-user-unmappable", cause }, label);
+	}
 	// No floor: nothing observed can refuse, and the read still rides along for the job user.
 	const plain = await bundle({ readInfo: async () => answered({ controllers: [] }) }).observationPreflight(JOB);
 	assert.equal(plain.ok, true);

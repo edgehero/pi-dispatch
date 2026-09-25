@@ -345,6 +345,11 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    or the worker gives `mountSet` no credit (`podmanAddsNoMounts`). Leave `CONTAINERS_CONF` and
    `CONTAINERS_CONF_OVERRIDE` unset for the worker too: with either set, the files the worker reads are not the ones
    Podman reads, so it credits neither `isolation` nor `mountSet`.
+   Leave `pasta_options` and `network_cmd_options` without a host-loopback mapping (`--map-host-loopback`,
+   `allow_host_loopback=true`), and `annotations` without `run.oci.keep_original_groups`. Nothing observes either yet
+   (issue #428), and the argv cannot pin the first back: Podman appends containers.conf's network options to the
+   command line's, so a loopback mapping there gives every job without egress the host's `127.0.0.1` services, a
+   local Valkey among them (measured). The namespaces, `env_host` and `http_proxy` it can pin, and does.
 5. **The job image, in this account's own store.** A rootless account does not see root's images or another
    user's: `podman pull ghcr.io/edgehero/pi-job:latest` as the account, then set `PI_JOB_IMAGE` to the name
    `podman images` shows. `--pull=never` resolves a short name such as `pi-job:latest` to `localhost/pi-job:latest`

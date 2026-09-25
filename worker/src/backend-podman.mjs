@@ -516,6 +516,11 @@ export function makePodmanBackend(opts = {}) {
 	// not answer (a retry, never a refusal). `podman` carries the read so the job user is decided from the same answer.
 	const observationPreflight = async () => {
 		const read = await info();
+		// The identity FIRST, from this same read, as at boot. A venue whose job user is refused (rootful, remote, no
+		// podman) fails the observations too, and judging them first told every job naming it to fix a mounts.conf or
+		// delegate controllers when the one fix is its identity's. Passed through as ok, so `jobUserPreflight` refuses it
+		// with that cause; an undecided read (`unknown`) is still judged here and is retried, never refused.
+		if (decidePodmanJobUser({ platform, euid, egid, read }).mode === "unmappable") return { ok: true, podman: read };
 		const observed = observePodman({ read, fs, home, env, euid });
 		if (podmanObservationKey(observed) !== observedSaid) {
 			observedSaid = podmanObservationKey(observed);
