@@ -6,7 +6,7 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { CANARY_LINES, CANARY_PROBE_SLUGS, ENV_FILE_READABLE_KEYS, RUN_TIMEOUTS, backendChecks, collectChecks, defaultPromptFn, dockerRunVia, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, runDoctor } from "../src/doctor.mjs";
+import { CANARY_LINES, CANARY_PROBE_SLUGS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RUN_TIMEOUTS, backendChecks, collectChecks, defaultPromptFn, dockerRunVia, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, runDoctor } from "../src/doctor.mjs";
 import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS } from "../src/init.mjs";
 import { EGRESS_CANARY_NET_PREFIX, egressCanaryProbe } from "../src/egress.mjs";
 import { JOB_USER_FIX, parseDaemonFacts } from "../src/job-user.mjs";
@@ -2911,6 +2911,9 @@ test("doctor: an armed policy with a running proxy reports it, and proves the pa
 	assert.ok(run, "the end-to-end probe runs a container");
 	assert.equal(run.args[run.args.indexOf("--entrypoint") + 1], "node");
 	assert.ok(run.args.includes("NODE_USE_ENV_PROXY=1"), "the probe sets the flag the runner depends on");
+	// And it takes the RUNNER's path to the network, not a plain fetch that never loads pi (issue #427).
+	assert.equal(run.args.at(-1), egressCanaryScript("https://api.anthropic.com/v1/messages"));
+	assert.ok(run.args.at(-1).includes(`import(${JSON.stringify(EGRESS_CANARY_RUNNER_MODULE)}).then(m=>m.loadPiThenRestore()`));
 	assert.ok(run.args.includes("--pull=never"), "doctor never fetches an image to run a probe");
 	// Credential-free by construction: nothing is passed, because a 401 from an unauthenticated request
 	// proves the whole path.
@@ -4031,6 +4034,35 @@ test("an egress probe that did not RUN is reported as not run, and never passes 
 	assert.ok(checks.some((c) => /Egress policy probe for an unlisted host did not run \(docker run exited 125\)/.test(c.label) && c.warn === true));
 	assert.ok(!checks.some((c) => /denies an unlisted host/.test(c.label)));
 	assert.deepEqual(checks.filter((c) => c.readBack).map((c) => c.readBack.reached), [true, null]);
+});
+
+test("a job image whose runner predates issue #427 is named once, and neither direction is read as the policy", async () => {
+	const calls = [];
+	const plan = { ...green, "docker run --rm --name pi-dispatch-egress-probe-provider": EGRESS_CANARY_STALE_RUNNER };
+	const checks = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, collectSeams(plan, { spawn: fakeSpawn(plan, calls) }));
+	const stale = checks.filter((c) => /runner predates issue #427/.test(c.label));
+	assert.equal(stale.length, 1);
+	assert.equal(stale[0].warn, true);
+	assert.match(stale[0].fix, /built after issue #427/);
+	assert.ok(calls.some((c) => c.args.some((a) => /egress-probe-provider/.test(a))), "the provider probe ran");
+	assert.ok(!calls.some((c) => c.args.some((a) => /egress-probe-unlisted/.test(a))), "the deny probe is not run: its block would be the network's, not the policy's");
+	assert.ok(!checks.some((c) => /reaches the provider|denies an unlisted host|did not run/.test(c.label)));
+	assert.deepEqual(checks.filter((c) => c.readBack).map((c) => c.readBack.reached), [null]);
+	assert.ok(calls.some((c) => c.args.slice(0, 2).join(" ") === "network rm"), "and the canary network is still removed");
+});
+
+test("the canary script's exits are real: 4 for a runner without the module, 3 for a blocked request, 5 for a failed load", () => {
+	const dir = tempDir("pi-canary-script-");
+	const run = (modulePath) => spawnSync(process.execPath, ["-e", egressCanaryScript("http://pi-dispatch-427.invalid/").replace(JSON.stringify(EGRESS_CANARY_RUNNER_MODULE), JSON.stringify(modulePath))], { encoding: "utf8", timeout: 30_000 });
+	assert.equal(run(join(dir, "absent.mjs")).status, EGRESS_CANARY_STALE_RUNNER);
+	writeFileSync(join(dir, "ok.mjs"), "export async function loadPiThenRestore() { return true; }\n");
+	const blocked = run(join(dir, "ok.mjs"));
+	assert.equal(blocked.status, 3, blocked.stdout + blocked.stderr);
+	assert.match(blocked.stdout, /^blocked /);
+	writeFileSync(join(dir, "throws.mjs"), "export async function loadPiThenRestore() { throw new Error(\"no pi\"); }\n");
+	const broken = run(join(dir, "throws.mjs"));
+	assert.equal(broken.status, 5, "a runner that cannot load pi is no reading, never a block");
+	assert.match(broken.stdout, /^error no pi/);
 });
 
 test("the egress canary's deny probe asks for a host that RESOLVES, under a per-process name", async () => {

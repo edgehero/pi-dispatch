@@ -37,6 +37,11 @@ import { spawn } from "node:child_process";
  *     never reached the runner. Measured against the real provider through this proxy: 401 in 269ms.
  *     Hence a hostname allowlist and no address rule anywhere, which is the mechanism OQ-004's close
  *     condition actually names.
+ *     BUT THAT WAS MEASURED WITHOUT PI LOADED (issue #427). The pinned pi 0.80.7 depends on npm `undici`
+ *     8.5.0, whose load replaces the global dispatcher the flag installs with one that ignores the proxy
+ *     variables, so in the runner the provider call went direct and every egress-armed job died at its first
+ *     turn. The runner now re-installs an env-proxy dispatcher after loading pi
+ *     (image/runner/src/env-proxy.mjs), and doctor's canary takes that same path instead of a plain fetch.
  */
 
 /**

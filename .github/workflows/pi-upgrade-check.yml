@@ -494,6 +494,47 @@ jobs:
             || { echo "::error::control run did not fail on the prompt -- the ordering claim is unproven."; exit 1; }
           echo "OK: staged-package refusal precedes the job-input read"
 
+      # --- REQ-EGRESS-ALLOWLIST (issue #427) ---
+      # With egress armed the REAL runner's provider call must go through the proxy. It did not: loading pi replaced the
+      # env-proxy dispatcher NODE_USE_ENV_PROXY installs, so every egress-armed job went direct and died on its internal
+      # network, while every canary stayed green, because each was a plain fetch that never loads pi. This runs the
+      # entrypoint itself, with a key that is not a key, on an --internal network whose only other member is a stub
+      # proxy that logs each CONNECT and refuses it: nothing leaves the runner, and nothing is spent. The control run
+      # without NODE_USE_ENV_PROXY must reach no proxy at all, which is what shows the first run's CONNECT is the
+      # runner's restore and not the environment alone. Measured before the fix: the armed run's CONNECT never came.
+      - name: "RUNNER: with egress armed, the provider call goes through the proxy (issue #427)"
+        run: |
+          NET=pd-runner-proxy-check
+          PROXY=pd-runner-stub-proxy
+          docker network create --internal "$NET" >/dev/null
+          docker run -d --name "$PROXY" --network "$NET" --entrypoint node "$IMAGE_REF" -e '
+            require("http").createServer((q, s) => s.writeHead(405).end()).on("connect", (q, sock) => {
+              console.log("CONNECT " + q.url);
+              sock.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+            }).listen(3128);' >/dev/null
+          JOB=$(mktemp -d)
+          echo "Reply with the single word ok." > "$JOB/prompt.md"
+          chmod -R a+rX "$JOB"
+          run_runner() {
+            docker run --rm --network "$NET" -v "$JOB:/job:ro" \
+              -e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+              -e ANTHROPIC_API_KEY=sk-ant-not-a-real-key \
+              -e HTTPS_PROXY="http://$PROXY:3128" -e HTTP_PROXY="http://$PROXY:3128" -e NO_PROXY=localhost,127.0.0.1 "$@" \
+              "$IMAGE_REF" >/dev/null 2>&1 || true
+          }
+          run_runner -e NODE_USE_ENV_PROXY=1
+          armed=$(docker logs "$PROXY" 2>&1)
+          run_runner
+          control=$(docker logs "$PROXY" 2>&1)
+          docker rm -f "$PROXY" >/dev/null
+          docker network rm "$NET" >/dev/null
+          echo "$armed"
+          echo "$armed" | grep -qx "CONNECT api.anthropic.com:443" \
+            || { echo "::error::with egress armed the runner's provider call never reached the proxy; every egress-armed job dies at its first turn."; exit 1; }
+          [ "$control" = "$armed" ] \
+            || { echo "::error::the control run without NODE_USE_ENV_PROXY reached the proxy too, so the armed run proves nothing about the restore."; exit 1; }
+          echo "OK: the armed runner's provider call went through the proxy, and the unarmed one did not"
+
       # --- INT-TRIGGERS-FILE-CONTRACT (run.excludeTools, issue #291) ---
       # A name the pinned pi would silently ignore must be refused BEFORE any spend, in-container too:
       # pi consults excludeTools only through a Set filter, so an unknown name is a no-op with no

@@ -3010,6 +3010,25 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, endpoint }) {
 /** The canary's two probe directions. ONE list: the loop names its containers from it and the sweep matches on it. */
 export const CANARY_PROBE_SLUGS = Object.freeze(["provider", "unlisted"]);
 
+/** Where the job image's runner keeps the module its own provider call goes through (issue #427). */
+export const EGRESS_CANARY_RUNNER_MODULE = "/app/image/runner/src/env-proxy.mjs";
+/** The canary's exit code for an image whose runner predates that module. */
+export const EGRESS_CANARY_STALE_RUNNER = 4;
+
+/**
+ * The canary's in-container script: the RUNNER's path to the network, then one request. It was a plain `fetch`, which
+ * proved the operator's image honours NODE_USE_ENV_PROXY and nothing about the runner: loading pi takes that proxy
+ * away again, and a plain `fetch` never loads pi, so this line read "reaches the provider" while every egress-armed job
+ * went direct and died at its first turn (issue #427). Now it loads pi exactly as the runner does and lets the runner's
+ * own module restore the proxy. Exit 0 reached, 3 blocked, 4 a runner without that module (it cannot use the proxy at
+ * all, so neither direction is a reading of the policy), anything else not run. The URL rides argv, not the spawn env,
+ * and the difference from the in-image `gh` probe is deliberate: that one carries a TOKEN, which must never be visible
+ * in `ps`. This carries a public hostname, so argv is the honest place for it.
+ */
+export function egressCanaryScript(url) {
+	return `import(${JSON.stringify(EGRESS_CANARY_RUNNER_MODULE)}).then(m=>m.loadPiThenRestore(),()=>process.exit(${EGRESS_CANARY_STALE_RUNNER})).then(()=>fetch(${JSON.stringify(url)},{method:"POST"}).then(r=>{console.log("reached",r.status);process.exit(0)},e=>{console.log("blocked",e.cause?.code??e.message);process.exit(3)}),e=>{console.log("error",e.message);process.exit(5)})`;
+}
+
 /**
  * The bound on one canary docker step. Shorter than the 30 s the PROBES get, because these are `network`
  * calls that either answer at once or are wedged, and the teardown must not be the slow part of a doctor run.
@@ -3132,9 +3151,9 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 
 	// The end-to-end probe, and the only place in this codebase that proves the policy rather than
 	// inspecting it. Two containers, on a throwaway network built exactly like a job's, gated on the image
-	// being present because it uses the job image's own node -- which is the point: it proves the operator's
-	// OWN image honours NODE_USE_ENV_PROXY, the property a stale image would silently lack and the one
-	// whose absence turns the whole policy into an outage.
+	// being present because it uses the job image's own node and runner -- which is the point: it proves the
+	// operator's OWN image's runner sends its provider call through the proxy, the property a stale image would
+	// silently lack and the one whose absence turns the whole policy into an outage (`egressCanaryScript`, #427).
 	//
 	// Credential-free by construction: `api.anthropic.com` answers 401 to an unauthenticated request, so
 	// reaching the provider and being refused for the key proves the entire path and costs nothing. That is
@@ -3210,11 +3229,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 				"node",
 				jobImage,
 				"-e",
-				// The URL rides ARGV, not the spawn env, and the difference from the in-image `gh` probe is
-				// deliberate: that one carries a TOKEN, which must never be visible in `ps`. This carries a
-				// public hostname, so argv is the honest place for it -- an operator reading `ps` during a
-				// doctor run can see exactly which host is being probed.
-				`fetch(${JSON.stringify(url)},{method:"POST"}).then(r=>{console.log("reached",r.status);process.exit(0)},e=>{console.log("blocked",e.cause?.code??e.message);process.exit(3)})`,
+				egressCanaryScript(url),
 			]);
 			// The script exits 0 (reached) or 3 (blocked). Anything else is the container not running it -- a name clash,
 			// the image, the daemon -- which is no reading at all, and must not pass for a deny.
@@ -3227,6 +3242,18 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 			// nothing of ours to remove. Harmless either way today (`docker rm -f <missing>` exits 0, measured),
 			// and written out because the conflation it removes is the one this item is about.
 			if (probe.code === null && probe.ended !== "error") unfinished.push(egressCanaryProbe(slug, pid));
+			// Said ONCE and the second probe not run: the unlisted host's "blocked" would come from the internal network
+			// refusing a runner that never tried the proxy, which reads exactly like a policy that denies it.
+			if (probe.code === EGRESS_CANARY_STALE_RUNNER) {
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `Egress policy: not proved, because the job image's runner predates issue #427 and sends its provider call around the proxy, so with egress armed every job fails at its first turn`,
+					fix: `use a job image built after issue #427 (ghcr.io/edgehero/pi-job:latest, or rebuild yours FROM it), or set PI_EGRESS=0 until you can`,
+					readBack: { property: "egress", want, reached: null },
+				});
+				break;
+			}
 			if (probe.code !== 0 && probe.code !== 3) {
 				checks.push({
 					ok: false,

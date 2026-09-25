@@ -173,6 +173,23 @@ The worker now sets all four itself, in the closed map, so arming the policy can
 the policy is armed, `PI_FORWARD_ENV` refuses those four names at boot: a forwarded value would point every job
 at a proxy of your own and would read exactly like the control working.
 
+**And then loading pi took the proxy away (issue #427).** Every measurement above was of `fetch` and the SDK
+on their own, never after pi was loaded, which is the runner's case. The pinned pi (0.80.7) depends on npm
+`undici` 8.5.0, and loading it replaces the global dispatcher the flag installs with one that ignores the proxy
+variables. In the job image, on an internal network with the proxy attached:
+
+| | |
+|---|---|
+| plain `fetch`, all four variables | `401` from the provider, through the proxy |
+| the same `fetch` after `import("@earendil-works/pi-coding-agent")` | `ENOTFOUND`, straight to DNS |
+
+So with egress armed every job went direct and died at its first turn with `Connection error.`. pi's own CLI
+repairs this when it starts, and the runner does not start pi through its CLI. The runner now installs an
+env-proxy dispatcher itself, from pi's own `undici`, right after pi is loaded, and only when
+`NODE_USE_ENV_PROXY=1`. `pi-dispatch doctor`'s canary now loads pi and uses the runner's module the same way.
+Before, it was a plain `fetch` and stayed green through all of this. On a job image built before the fix, the
+canary says the runner predates issue #427, rather than reporting a policy result.
+
 ## What this does not buy you
 
 An allowlist bounds **where** an induced agent can send your environment. It does not prevent it. Your
