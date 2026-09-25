@@ -5,7 +5,9 @@
  *   - COLOR IS APPLIED POST-LAYOUT. Every width/padding decision is made on PLAIN text; color is the last
  *     transform. pi's overlay host measures each returned line with the ANSI-aware `visibleWidth` and
  *     appends its own SGR reset, so post-layout color adds 0 to the measured width and cannot disturb
- *     framing or the `width:"75%"` overlay clamp.
+ *     framing or the `width:"75%"` overlay clamp -- with one exception issue #417 found: the compositor
+ *     segments each run between two colour codes on its own, so a colour code in front of a mark can
+ *     start a cluster there. `visibleLen` measures a styled line both ways for that reason.
  *   - This module is OVERLAY-ONLY. `render.mjs`/`panel.mjs` deliberately stay plain because they also feed
  *     `pi.sendMessage` (the model-visible channel) and the untrusted `.log` tail's `clipData` gate.
  *     Nothing here is imported by those paths; the dependency runs one way (this module imports panel's
@@ -32,9 +34,10 @@ export function stripAnsi(s) {
 /**
  * Visible COLUMN count of a (possibly colored) string -- not its code-unit length (issue #401).
  *
- * Through `panel.mjs`'s table, so the framed pane and the monochrome one measure the same string the same
+ * Through `panel.mjs`'s table, so the framed pane and the monochrome one measure the same TEXT the same
  * way. They draw the same geometry, and a width rule that holds in one and not the other is how a frame
- * ends up ten columns wider than the line above it.
+ * ends up ten columns wider than the line above it. A styled line can measure one column wider than its
+ * plain text, and only where a colour code stands in front of a mark (issue #417, below).
  */
 export function visibleLen(s) {
   const plain = columnsOf(stripAnsi(s));
@@ -273,7 +276,7 @@ export function frame(styler, { title = "", width = 40, lines = [], footer = nul
   // a line beginning with a cluster the renderer counts wider at the start of a string is drawn after that
   // space, not at column 0, so it is padded where it stands. Byte-identical for every other line.
   const side = (content) => B(G.v) + content + " " + B(G.v);
-  const body = (line) => side(padVisible(styler, " " + line, inner + 1));
+  const body = (line) => side(padVisible(styler, " " + (line ?? ""), inner + 1));
   const rule = () => B(G.ml + G.h.repeat(w - 2) + G.mr);
 
   for (const line of lines) {

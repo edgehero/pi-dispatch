@@ -135,8 +135,8 @@ export function renderRuns(runs) {
   // CJK character there shifted every later column of that row against the rows around it.
   // AND IN CONTEXT (issue #417): no cell is drawn at column 0. pi draws this message inside a box with one
   // column of padding and the cells are joined by two spaces, so each is measured after a space. A cell
-  // that begins with a cluster the renderer counts wider at the start of a string (`\u102c\uff9e`, a
-  // Myanmar vowel sign and a halfwidth mark) would otherwise shift every later column of its row.
+  // that begins with a cluster the renderer counts wider at the start of a string than after a space
+  // (`\u0301\uff9e` is 2 there and 1 here) would otherwise shift every later column of its row.
   const widths = headers.map((h, i) => Math.max(columnsOf(h), ...rows.map((row) => afterSpace(row[i]))));
   const fmt = (cells) => cells.map((v, i) => pad(" " + v, widths[i] + 1).slice(1)).join("  ").trimEnd();
   return [fmt(headers), ...rows.map(fmt)].join("\n");

@@ -526,8 +526,8 @@ function* widthSteps(s) {
  * pinned in `width.test.mjs` go red at that upgrade rather than drifting.
  *
  * NOT ONLY AT THE START OF A STRING, which is what the issue first said. Thirty-one spacing marks (the
- * Myanmar vowel signs among them) are `\p{M}` without being grapheme SpacingMarks, so each one STARTS a
- * cluster wherever it stands, and thirteen prepended format characters (U+0600 among them) take any
+ * Myanmar vowel signs among them) are `\p{M}` but neither grapheme Extend nor SpacingMark, so each one
+ * STARTS a cluster wherever it stands, and thirteen prepended format characters (U+0600 among them) take any
  * following character into their cluster, which can double a TWO-column base. So whether the run starts a
  * cluster is asked of `Intl.Segmenter`, with the renderer's own arguments, rather than of a list: the same
  * runtime segments both, so the two cannot disagree about where a cluster starts.
@@ -547,18 +547,31 @@ function leaderStep(chars, i) {
   // for U+2028 and U+2029, which ARE breaks and draw a column, so nothing else here would catch them.
   // Removing this check changes no answer, only the cost: it is a performance path, and a mutant that
   // deletes it is equivalent.
+  //
+  // ONE DOCUMENTED UNDER-COUNT SURVIVES THIS STEP, because no step can see it: one of the fifteen
+  // prepended letters followed by U+FFA0 is a cluster the renderer counts one wider, with no leader in it.
+  // No drawn path keeps U+FFA0 (the substitution class takes it), so it lives in raw text only.
   if (prev !== "" && JOINS.test(run) && !interpreted(prev)) return null;
-  // ONE CODE POINT OF CONTEXT IS ENOUGH. Whether a break falls before the run depends only on the class of
+  // ONE CODE POINT OF CONTEXT IS ENOUGH, and only its CLASS. Whether a break falls before the run depends on
   // the code point in front of it (no base here is a pictographic, a regional indicator or a conjunct
-  // consonant, the rules that look further back).
-  const key = prev + run + base;
+  // consonant, the rules that look further back), and among printing characters only a control, a
+  // prepended letter and the Hangul jamo and syllables change the answer. Every other one is segmented as
+  // `a`, which is what makes the memo below a memo: keyed on the character itself, a line that varied the
+  // character in front of each run defeated it, 94 ms to count 100 KB against 6.5 ms before this step.
+  const ctx = contextOf(prev);
+  // THE START OF A STRING IS ITS OWN KEY. A review pass poisoned the first version, which keyed on
+  // `prev + run + base`: after an emoji form `prev` is U+FE0F, so "U+FE0F in front of a run" and "a run
+  // that begins with U+FE0F at the start of a string" were one key with opposite answers, and whichever
+  // was measured first answered for both, an under-count by one after the other order.
+  const key = (ctx === "" ? "^" : "~" + ctx) + run + base;
   let doubled = key.length <= LEADER_MEMO_KEY ? leaderMemo.get(key) : undefined;
   if (doubled === undefined) {
+    const probe = ctx + run + base;
     let last = "";
-    for (const { segment } of GRAPHEMES.segment(key)) last = segment;
+    for (const { segment } of GRAPHEMES.segment(probe)) last = segment;
     // Doubled when the base's cluster holds something IN FRONT of the base and does not reach back to
-    // `prev`: the last segment is always a suffix of the key, so both are length comparisons.
-    doubled = last.length > base.length && last.length <= key.length - prev.length ? countLater(last) : -1;
+    // the context: the last segment is always a suffix of the probe, so both are length comparisons.
+    doubled = last.length > base.length && last.length <= probe.length - ctx.length ? countLater(last) : -1;
     if (key.length <= LEADER_MEMO_KEY) {
       // A BOUNDED MEMO, because an adversarial line defeats the fast path above with a run per character:
       // `"\u102c\uff9e".repeat(50000)` took 101 ms to count without it and 16 ms with it (7 ms before this
@@ -570,6 +583,31 @@ function leaderStep(chars, i) {
   if (doubled < 0) return null;
   return { step: { text: run + base, cols: 2 * (WIDE.test(base) ? 2 : 1) + doubled }, next: k + 1 };
 }
+
+/**
+ * The code point that stands in for `prev` when asking where a cluster starts: itself where its class
+ * changes the answer, `a` for every other printing character.
+ *
+ * THE DIRECTION OF A WRONG ANSWER HERE IS SAFE, which is why a short list is acceptable: `a` breaks before
+ * a run at least as often as any printing character does, so a character wrongly segmented as `a` can only
+ * make a cluster START here that did not, and a start is what doubles a base. That is an over-count. The
+ * characters that break MORE often than `a` (the controls and the line and paragraph separators) are kept
+ * as themselves, and so are the ones that JOIN more often: the fifteen prepended letters, which take the
+ * next character into their cluster whatever it is, Hangul, whose fillers are zero-width jamo, and the five
+ * Kirat Rai vowel signs Unicode 16 made vowel jamo for the same rule (the sweep found those). The
+ * predecessor sweep in `width.test.mjs` runs every character there is through three leader shapes, so a
+ * missing entry fails there as an over-count with a name.
+ */
+function contextOf(prev) {
+  if (prev === "" || KEEPS_CONTEXT.test(prev) || !PRINTS.test(prev)) return prev;
+  return "a";
+}
+const PRINTS = /^[\p{L}\p{N}\p{P}\p{S}\p{Zs}]$/u;
+const KEEPS_CONTEXT = new RegExp(
+  "^[\\u1100-\\u11ff\\ua960-\\ua97f\\ud7b0-\\ud7ff\\uac00-\\ud7a3\\u0d4e\\u{111c2}\\u{111c3}\\u{113d1}" +
+    "\\u{1193f}\\u{11941}\\u{11a3a}\\u{11a84}-\\u{11a89}\\u{11d46}\\u{11f02}\\u{16d63}\\u{16d67}-\\u{16d6a}]$",
+  "u",
+);
 
 // The renderer's own add-set: the code points its second walk over a cluster counts again.
 const DOUBLED = /[\uff00-\uffef\u0e33\u0eb3]/u;
@@ -745,7 +783,7 @@ export function box({ title = "", sections = [], footer, width = 40 } = {}) {
   // begins with a cluster the renderer counts wider on its own -- `\u0301\uff9e` is 2 at the start of a
   // string and 1 after a space -- was padded as though it stood at column 0 and drew one column short.
   // Padding `" " + text` to one more column is byte-identical for every other line.
-  const framed = (text) => `${active.v}${pad(" " + text, inner + 1)} ${active.v}`;
+  const framed = (text) => `${active.v}${pad(" " + (text ?? ""), inner + 1)} ${active.v}`;
   const rule = () => active.ml + active.h.repeat(w - 2) + active.mr;
 
   sections.forEach((section, i) => {
@@ -1018,10 +1056,14 @@ export function makeLineInput(initial = "") {
       let ci = offs.findIndex((o) => o >= cursor);
       if (ci < 0) ci = steps.length;
       // THE RESERVED CELL MOVES THE WINDOW'S START, not its length: the window is `w` columns wide, and
-      // the cursor is kept at most `w - 1` columns past the start so its own cell is always inside it.
+      // the cursor is kept far enough from its start that its own cell is always inside it. The cell is as
+      // wide as the step under the cursor, not one column: reserving one let a head of `w - 1` columns
+      // push a two-column character under the cursor out of the window, and the cursor was drawn as a
+      // blank after it (issue #417's review, which checked the cursor cell for the first time).
+      const reserve = ci < steps.length ? Math.max(1, steps[ci].cols) : 1;
       let start = ci;
       let back = 0;
-      while (start > 0 && back + steps[start - 1].cols <= w - 1) {
+      while (start > 0 && back + steps[start - 1].cols <= w - reserve) {
         start -= 1;
         back += steps[start].cols;
       }
@@ -1035,22 +1077,41 @@ export function makeLineInput(initial = "") {
       // THE WINDOW IS MEASURED WHERE IT IS DRAWN, after the prompt's space (issue #417). The steps above
       // were counted inside the WHOLE value, and a window can start where the whole value had no cluster
       // start: after a prepended letter such as U+0D4E, `\u102c\uff9e` is 1 column inside the value and 2
-      // once the letter is outside the window. So the shown text is re-measured after a printing column,
-      // which is the contract this editor now states, and trimmed until it fits: past the cursor first,
-      // then from the front, so the cursor's own cell is never the one given up.
-      const shown = (a, b) => columnsOf(" " + textOf(a, b)) - 1;
-      while (start < end && shown(start, end) + (ci < end ? 0 : 1) > w) {
-        if (end - 1 > ci) end -= 1;
-        else start += 1;
+      // once the letter is outside the window. So the shown text is re-measured after a printing column.
+      //
+      // AND PIECE BY PIECE, because the styler colours the prompt and wraps the cursor cell in inverse
+      // video, and the renderer's overlay compositor segments each run between two colour codes on its
+      // own: a review pass measured ordinary Thai (`\u0e19\u0e49\u0e33`, the cursor on its first letter)
+      // one column wider there, and the frame then stripped the colour to fit, cursor highlight included.
+      // The larger of the two readings is the width, which draws short in the other one, never past it.
+      const drawn = (a, b) => {
+        const text = textOf(a, b);
+        const joined = columnsOf(" " + text) - 1;
+        if (!focused) return Math.max(joined, columnsOf(text));
+        if (ci >= b) return Math.max(joined, columnsOf(text)) + 1;
+        return Math.max(joined, columnsOf(textOf(a, ci)) + columnsOf(steps[ci].text) + columnsOf(textOf(ci + 1, b)));
+      };
+      // Trimmed until it fits: past the cursor first, then from the front, so the cursor's own cell is
+      // never the one given up. A step that draws nothing is skipped rather than re-measured -- taking it
+      // away cannot narrow anything, and re-measuring after each one made a pasted run of marks behind the
+      // cursor QUADRATIC (16,000 of them took ten seconds to render).
+      while (start < end && drawn(start, end) > w) {
+        if (end - 1 > ci) {
+          end -= 1;
+          while (end - 1 > ci && steps[end - 1].cols === 0) end -= 1;
+        } else {
+          start += 1;
+          while (start < ci && steps[start].cols === 0) start += 1;
+        }
       }
       const head = textOf(start, Math.min(ci, end));
-      if (!focused) return textOf(start, end) + " ".repeat(Math.max(0, w - shown(start, end)));
+      if (!focused) return textOf(start, end) + " ".repeat(Math.max(0, w - drawn(start, end)));
       // The cursor wraps a WHOLE step, never one half of a pair and never half a keycap, and sits on a
       // space once it is past the last step the window shows.
       const onStep = ci < end;
       const under = onStep ? steps[ci].text : " ";
       const tail = onStep ? textOf(ci + 1, end) : "";
-      const fill = Math.max(0, w - shown(start, end) - (onStep ? 0 : 1));
+      const fill = Math.max(0, w - drawn(start, end));
       return head + LINE_INPUT_CURSOR[0] + under + LINE_INPUT_CURSOR[1] + tail + " ".repeat(fill);
     },
   };

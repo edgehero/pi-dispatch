@@ -558,11 +558,11 @@ test("the editor's value never admits half a character, through any door (#401)"
 });
 
 test("a lone surrogate cannot reach the drawn line and break a cluster (#401)", async () => {
-  // THE LAST VARIANT, and it is the same mechanism as #417 (now matched) with a different leader. The renderer treats a
-  // lone surrogate as a cluster BREAK, then computes the next cluster's base after skipping it and counts
-  // that base twice. So an orphan the count had already removed was still in the text handed to the
-  // renderer, and it made the renderer measure a line wider than we did: measured at 12 columns here and
-  // 24 there, with a 24-column pane drawing at 36.
+  // THE LAST VARIANT, and it is the same mechanism as #417 (now matched) with a different leader. The renderer
+  // treats a lone surrogate as a cluster BREAK, then computes the next cluster's base after skipping it and
+  // counts that base twice. So an orphan the count had already removed was still in the text handed to the
+  // renderer, and it made the renderer measure a line wider than we did: measured at 12 columns here and 24
+  // there, with a 24-column pane drawing at 36.
   //
   // `clip` used to return its input unchanged when it fitted. It steps the fitted line too now, which makes
   // the rule this module states -- half a character is removed where text ENTERS -- true of the text rather
@@ -659,19 +659,26 @@ test("whatever stands in front of a leader cluster, the table never measures it 
     if (cp >= 0xd800 && cp <= 0xdfff) continue;
     if (cp === 0x7f || (cp >= 0x80 && cp <= 0x9f)) continue;
     const p = String.fromCodePoint(cp);
-    const s = p + "\u0301\uff9e";
-    const ours = columnsOf(s);
-    const theirs = visibleWidth(s);
     swept += 1;
-    assert.ok(ours >= theirs, `${JSON.stringify(s)}: we say ${ours}, the renderer draws ${theirs}`);
-    // THE TWO DECLARED OVER-COUNTS: an unassigned predecessor (the table's one-column guess), and a
-    // regional indicator, which the renderer draws as two columns WHATEVER follows it in its cluster.
-    if (ours !== theirs) {
-      const flag = cp >= 0x1f1e6 && cp <= 0x1f1ff;
-      if (flag) flags += 1;
-      assert.ok(flag || !/\p{Assigned}/u.test(p), `${JSON.stringify(s)} over-counts after an assigned character for no stated reason`);
+    // FOUR LEADER SHAPES, one per way a predecessor can matter: a mark that joins anything printing, a
+    // mark that starts a cluster wherever it stands, a prepended format character, and a Hangul filler,
+    // which joins a Hangul jamo in front of it and nothing else. `panel.mjs` asks the segmenter about a
+    // STAND-IN for most predecessors, so this is the sweep that shows the stand-in is never narrower: a
+    // character wrongly stood in for fails here, by name.
+    for (const leader of ["\u0301\uff9e", "\u102c\uff9e", "\u0600\uff01", "\u1160\uff9e"]) {
+      const s = p + leader;
+      const ours = columnsOf(s);
+      const theirs = visibleWidth(s);
+      assert.ok(ours >= theirs, `${JSON.stringify(s)}: we say ${ours}, the renderer draws ${theirs}`);
+      // THE TWO DECLARED OVER-COUNTS: an unassigned predecessor (the table's one-column guess), and a
+      // regional indicator, which the renderer draws as two columns WHATEVER follows it in its cluster.
+      if (ours !== theirs) {
+        const flag = cp >= 0x1f1e6 && cp <= 0x1f1ff;
+        if (flag && leader === "\u0301\uff9e") flags += 1;
+        assert.ok(flag || !/\p{Assigned}/u.test(p), `${JSON.stringify(s)} over-counts after an assigned character for no stated reason`);
+      }
+      if (leader === "\u0301\uff9e" && theirs === visibleWidth(p) + 2) breakers += 1;
     }
-    if (theirs === visibleWidth(p) + 2) breakers += 1;
   }
   assert.equal(swept, 1111999, "every predecessor there is");
   assert.equal(breakers, 6446, "the predecessors after which the renderer starts a doubled cluster");
@@ -691,7 +698,9 @@ test("longer leader runs and longer tails agree with the renderer too (#417)", a
       for (const run of [z + other, other + z]) {
         for (const t of ["\uff9e", "\u0e33", "\uff01"]) {
           for (const after of ["", "\uff9f", "a", "\u0301\uff9e"]) {
-            for (const prefix of ["", "a"]) {
+            // The last two put a zero-width character that doubles nothing, and then a printing one, in
+            // front: a run flag that the printing character failed to reset under-counted both.
+            for (const prefix of ["", "a", "\u0301a", "e\u0301 x"]) {
               const s = prefix + run + t + after;
               assert.equal(columnsOf(s), visibleWidth(s), `${JSON.stringify(s)}: we say ${columnsOf(s)}, the renderer draws ${visibleWidth(s)}`);
               forms += 1;
@@ -701,7 +710,7 @@ test("longer leader runs and longer tails agree with the renderer too (#417)", a
       }
     }
   }
-  assert.equal(forms, 772992, "every form was measured");
+  assert.equal(forms, 1545984, "every form was measured");
 });
 
 test("a cut never separates a leader from the base it doubles (#417)", async () => {
@@ -739,9 +748,10 @@ test("a pane holding leader clusters measures exactly its width, in our terms an
     "plain ascii line",
   ];
   for (const w of [8, 9, 10, 24, 40, 80]) {
+    const footer = "\u0301\uff9exyz";
     const panes = [
-      ["box", box({ title: "t", sections: [{ lines }], width: w })],
-      ["frame", frame(styler, { title: "t", width: w, lines })],
+      ["box", box({ title: "t", sections: [{ lines }], footer, width: w })],
+      ["frame", frame(styler, { title: "t", width: w, lines, footer })],
     ];
     for (const [name, pane] of panes) {
       for (const line of pane) {
@@ -752,23 +762,43 @@ test("a pane holding leader clusters measures exactly its width, in our terms an
   }
 });
 
-test("the line editor's window draws exactly its width after the prompt (#417)", async () => {
+test("the line editor's window draws exactly its width after the prompt, whole and piece by piece (#417)", async () => {
   const visibleWidth = await loadVisibleWidth();
   assert.equal(typeof visibleWidth, "function");
-  // THE PROMPT IS PART OF THE MEASURE: the editor is drawn after `/ `, so that is where it is checked. The
-  // third value is the one whole-value step sums get wrong: U+0D4E is a prepended letter, so inside the
-  // value it takes the Myanmar mark into its own cluster, and once the window starts after it the mark
-  // leads a cluster of its own and the halfwidth mark behind it draws two.
-  const values = ["ab\u0301\uff9ecd\u102c\uffe0ef", "\u102c\uff9e".repeat(6), "\u0d4e\u102c\uff9exy", "\u0301\uff9e\u0e48\u0e33gh"];
-  const strip = (s) => s.split(LINE_INPUT_CURSOR[0]).join("").split(LINE_INPUT_CURSOR[1]).join("");
+  // TWO READINGS, because the editor is drawn two ways at once. The terminal reads the whole line after the
+  // `/ ` prompt, and the overlay compositor reads each run between two colour codes on its own -- the
+  // styler colours the prompt and wraps the cursor cell in inverse video -- so the head, the cursor cell and
+  // the tail are each measured from their own first column there. Neither may pass the width, and the
+  // larger is exactly the width. The third value is the one whole-value step sums get wrong (U+0D4E is a
+  // prepended letter, so windowing it away makes the Myanmar mark lead a cluster of its own), and the fifth
+  // is ordinary Thai, whose tail after a cursor on its first letter begins with a tone mark.
+  const values = ["ab\u0301\uff9ecd\u102c\uffe0ef", "\u102c\uff9e".repeat(6), "\u0d4e\u102c\uff9exy", "\u0301\uff9e\u0e48\u0e33gh", "\u0e19\u0e49\u0e33abc"];
+  const [open, close] = LINE_INPUT_CURSOR;
   for (const v of values) {
     const ed = makeLineInput(v);
     ed.home();
     for (let pos = 0; pos <= v.length; pos++) {
       for (let w = 1; w <= 16; w++) {
         for (const focused of [true, false]) {
-          const drawn = strip(ed.render(w, { focused }));
-          assert.equal(visibleWidth("/ " + drawn), w + 2, `${JSON.stringify(v)} cursor ${ed.cursor()} width ${w} focused ${focused}: ${JSON.stringify(drawn)}`);
+          const out = ed.render(w, { focused });
+          const where = `${JSON.stringify(v)} cursor ${ed.cursor()} width ${w} focused ${focused}: ${JSON.stringify(out)}`;
+          const plain = out.split(open).join("").split(close).join("");
+          const whole = visibleWidth("/ " + plain) - 2;
+          const pieces = focused
+            ? out.split(open).flatMap((part) => part.split(close)).reduce((n, part) => n + visibleWidth(part), 0)
+            : visibleWidth(plain);
+          assert.ok(whole <= w && pieces <= w, `${where} draws ${whole} whole and ${pieces} in pieces`);
+          assert.equal(Math.max(whole, pieces), w, where);
+          // AND THE CURSOR CELL IS THE CURSOR'S CHARACTER: trimming gives up the tail first and the head
+          // second, never the cell the caller moved the cursor to. A cursor inside a step names the step
+          // after it (a step is at most three code units), which is the editor's own rounding rule.
+          if (focused && ed.cursor() < ed.value().length && w >= 2) {
+            const under = out.slice(out.indexOf(open) + 1, out.indexOf(close));
+            // Inside the LAST step it rounds to the end of the value, where the cursor is a blank cell.
+            const rest = ed.value().slice(ed.cursor());
+            const ok = under === " " ? rest.length <= 2 : rest.indexOf(under) >= 0 && rest.indexOf(under) < 3;
+            assert.ok(ok, `${where}: the cursor sits on ${JSON.stringify(under)}`);
+          }
         }
       }
       ed.right();
@@ -831,4 +861,50 @@ test("an adversarial line of leader clusters is still cheap to count and cut (#4
   assert.equal(columnsOf(hostile), 100000, "every pair is a doubled cluster");
   const ratio = best(() => { columnsOf(hostile); clip(hostile, 80); }) / best(() => { columnsOf(plain); clip(plain, 80); });
   assert.ok(ratio < 6, `the hostile line costs ${ratio.toFixed(1)} times a plain one`);
+});
+
+test("the leader memo answers each context for itself, whichever is measured first (#417)", async () => {
+  const visibleWidth = await loadVisibleWidth();
+  assert.equal(typeof visibleWidth, "function");
+  // A POISONED MEMO, measured by a review pass. After an emoji form the character in front of a run is
+  // U+FE0F, and a run can also BEGIN with U+FE0F at the start of a string; the first memo keyed both the
+  // same, so the first one measured answered for the other, and the start-of-string shape came out one
+  // column short. Both orders, both zero-width tails of a step (an emoji form and a keycap).
+  for (const [after, start] of [
+    ["\u00a9\ufe0f\u0903\uff9e", "\ufe0f\u0903\uff9e"],
+    ["#\ufe0f\u20e3\u093f\u0e33", "\u20e3\u093f\u0e33"],
+  ]) {
+    for (const order of [[after, start], [start, after]]) {
+      for (const s of order) assert.ok(columnsOf(s) >= visibleWidth(s), `${JSON.stringify(s)}: we say ${columnsOf(s)}, the renderer draws ${visibleWidth(s)}`);
+    }
+    assert.equal(columnsOf(start), visibleWidth(start), `${JSON.stringify(start)} at the start of a string is exact`);
+  }
+});
+
+test("a styled line measures the larger of its whole and its pieces, never the smaller (#417)", async () => {
+  const tui = await loadRenderer();
+  assert.ok(tui, "pi-tui must load");
+  const ESC = String.fromCharCode(27);
+  const red = (t) => `${ESC}[31m${t}${ESC}[39m`;
+  // The first is wider WHOLE (the leading mark is its own cluster there and a piece's first column is not
+  // where it stands), the second wider in PIECES (the colour code makes the mark lead a cluster). Either
+  // reading alone under-counts one of them.
+  for (const line of ["\u0301" + red("\uff9e") + "xyz", "id " + red("\u0301\uff9exyz")]) {
+    const whole = tui.visibleWidth(line);
+    const pieces = line.split(/\u001b\[[0-9;]*m/).reduce((n, piece) => n + tui.visibleWidth(piece), 0);
+    assert.equal(visibleLen(line), Math.max(whole, pieces), `${JSON.stringify(line)}: whole ${whole}, pieces ${pieces}`);
+  }
+});
+
+test("the line editor stays linear on a pasted run of marks behind the cursor (#417)", () => {
+  // THE TRIM LOOP RE-MEASURED THE WINDOW ONCE PER STEP IT GAVE UP, and a mark gives up no width, so a
+  // run of them behind the cursor made each render quadratic: 16,000 marks took ten seconds, measured.
+  // Now about 5 ms; a ceiling of half a second cannot flake and still catches the quadratic shape.
+  const ed = makeLineInput("\u0d4e\u102c\uff9ebb" + "\u0301".repeat(16000));
+  ed.home();
+  for (let k = 0; k < 4; k++) ed.right();
+  const t0 = performance.now();
+  ed.render(3);
+  const ms = performance.now() - t0;
+  assert.ok(ms < 500, `rendered in ${Math.round(ms)} ms`);
 });
