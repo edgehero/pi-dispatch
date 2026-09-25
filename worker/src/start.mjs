@@ -1148,8 +1148,9 @@ export async function startWorker(
 	// resolution returns it -- but the mechanism is real, so `run.backend` stops being a validated label and
 	// the abort path can reach a venue it did not build. `config.backends[0]` is the deployment's default,
 	// and the registry refuses a default it does not hold rather than discovering it at the first pickup.
-	// A refusal here comes AFTER the Redis client above exists, so it is released before the refusal travels: an unreleased
-	// client keeps the event loop alive, and a worker that refused to boot would hang instead of exiting.
+	// A refusal here comes AFTER boot opened the Redis client, the runtime and cron queues and the host registry, so all of
+	// them are released before the refusal travels: any one left open keeps the event loop alive, and a worker that refused
+	// to boot would hang instead of exiting (measured against a real Valkey: two sockets held past 30 s).
 	let backends;
 	try {
 		backends = makeBackendRegistryFn({
@@ -1169,6 +1170,8 @@ export async function startWorker(
 			reaps: backendReaps,
 		});
 	} catch (err) {
+		const opened = [registry, runtimeQueue, ...(cronQueue !== runtimeQueue ? [cronQueue] : [])];
+		await Promise.allSettled(opened.map((handle) => Promise.resolve().then(() => handle?.close?.())));
 		redis.disconnect();
 		throw err;
 	}

@@ -4497,6 +4497,17 @@ test("doctor parses the proxy's state and this host's image id from stdout only,
 	assert.ok(!same.some((c) => /digest differs/.test(c.label)), "the banner is not read as part of the id");
 });
 
+test("doctor compares this host's image id in the fleet's form: a bare id Podman prints matches a peer's sha256: one (#354)", async () => {
+	// Podman's {{.Id}} has no `sha256:` prefix (measured on 5.8.1); the image preflight a peer publishes from adds it.
+	const hex = "a".repeat(64);
+	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+	const plan = { ...EGRESS_OK, "docker info": 0, "docker image inspect --format={{.Id}}": { code: 0, output: `${hex}\n` }, "docker image": 0 };
+	const same = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, collectSeams(plan, { nodeVersion: "22.19.0", readHosts: async () => ({ hosts: [{ name: "mini2", tz, imageDigest: `sha256:${hex}` }] }) }));
+	assert.ok(!same.some((c) => /digest differs/.test(c.label)), same.map((c) => c.label).join("\n"));
+	const other = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, collectSeams(plan, { nodeVersion: "22.19.0", readHosts: async () => ({ hosts: [{ name: "mini2", tz, imageDigest: `sha256:${"b".repeat(64)}` }] }) }));
+	assert.ok(other.some((c) => /digest differs/.test(c.label)), "a different id still differs");
+});
+
 test("doctor with no docker binary passes that answer to the floor check, so it says the worker refuses rather than retries (#345)", async () => {
 	const { out, text } = capture();
 	await runDoctor(ghEnv({ PI_BACKEND_FLOOR: "isolation=enforced" }), { ...ghDeps(out, { docker: "enoent" }), observationFs: noHostFiles });

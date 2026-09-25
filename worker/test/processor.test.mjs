@@ -831,6 +831,10 @@ test("the retry's words: docker's on the local venue, as they always were, and t
 	await assert.rejects(() => runJob(ghJob, local), (err) => err.message === "docker CLI or daemon unavailable, an observation the floor needs could not run");
 	const { deps: far } = deps({ redis: fakeRedis(), blessedBackends: ["local", "far"], observationPreflight: async () => ({ unavailable: true, reason: "timeout" }) });
 	await assert.rejects(() => runJob({ ...ghJob, backend: "far" }, far), (err) => err.message === "the container runtime or its CLI is unavailable, an observation the floor needs could not run");
+	// A job naming no venue runs on the DEFAULT one, which need not be local.
+	const { deps: farDefault } = deps({ redis: fakeRedis(), blessedBackends: ["far"], observationPreflight: async () => ({ unavailable: true, reason: "timeout" }) });
+	assert.equal(ghJob.backend, undefined);
+	await assert.rejects(() => runJob(ghJob, farDefault), (err) => err.message === "the container runtime or its CLI is unavailable, an observation the floor needs could not run");
 });
 
 test("a proxy that exists but is STOPPED is its own reason, because the fix is a different one", async () => {

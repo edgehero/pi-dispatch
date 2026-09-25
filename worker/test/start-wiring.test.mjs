@@ -2526,6 +2526,42 @@ const forbidden = (what, seen) => (...args) => {
 	throw new Error(`${what} must not be called with local unblessed (${JSON.stringify(args).slice(0, 80)})`);
 };
 
+test("a registry that refuses at boot releases every handle boot opened, so the refusing worker can exit (#354)", { skip }, async () => {
+	// The refusal arrives after boot opened the Redis client, the runtime queue, the host's own cron queue (a declared name)
+	// and the host registry. Any one left open keeps the event loop alive, and the CLI waits for it to empty, so a worker
+	// that refused to boot never exited (measured against a real Valkey).
+	const { makeHostRegistry } = await import("../src/host-registry.mjs");
+	const sockets = () => process.getActiveResourcesInfo().filter((r) => r === "TCPSocketWrap").length;
+	const before = sockets();
+	let closed = 0;
+	await assert.rejects(
+		() =>
+			runStart({
+				env: { PI_WORKER_NAME: "refuses-at-registry", VALKEY_URL },
+				makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+				makeHost: () => fakeHost(),
+				makeHostRegistry: (args) => {
+					const real = makeHostRegistry(args);
+					return {
+						...real,
+						close: async (...rest) => {
+							closed++;
+							return real.close(...rest);
+						},
+					};
+				},
+				makeBackendRegistry: () => {
+					throw new Error("refused by the registry (test)");
+				},
+			}),
+		/refused by the registry \(test\)/,
+	);
+	assert.equal(closed, 1, "the host registry is closed");
+	// Sockets close asynchronously after quit/disconnect; give them a moment, then nothing boot opened may remain.
+	for (let i = 0; i < 40 && sockets() > before; i++) await new Promise((r) => setTimeout(r, 50));
+	assert.ok(sockets() <= before, `no socket boot opened is left: ${sockets()} now, ${before} before`);
+});
+
 test("a deployment WITHOUT local boots on its own venue, and asks this host's docker CLI nothing (#354)", { skip }, async () => {
 	const seen = [];
 	const spawned = [];
