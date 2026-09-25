@@ -402,9 +402,10 @@ export function clipData(line, w) {
  *   - one for everything else, including an unassigned code point, because guessing wider on an unknown is
  *     how a rule starts breaking the panes it was added to fix.
  *
- * WHAT IT IS HELD TO, in `width.test.mjs`: two sweeps, one of every code point there is and one of every
- * character followed by U+FE0F and by a keycap, asserting that this never measures NARROWER than the
- * renderer and that every place it measures wider is a declared departure. The pair sweep is there because
+ * WHAT IT IS HELD TO, in `width.test.mjs`: sweeps of every code point there is, of every character
+ * followed by U+FE0F and by a keycap, and (issue #417) of every zero-width character followed by every code
+ * point the renderer counts twice, asserting that this never measures NARROWER than the renderer and that
+ * every place it measures wider is a declared departure. The pair sweep is there because
  * a first version CLAIMED it and shipped a six-entry list instead, and the hole was one selector further
  * along: a keycap measured 1 against the renderer's 2.
  *
@@ -423,7 +424,12 @@ export function clipData(line, w) {
  * measured four more, and found the one case that went the other way -- a keycap, at 1 against 2 -- which
  * is fixed above rather than listed here, because an under-count is the direction that overflows a pane.
  *
- * Every remaining case over-counts, so every one draws SHORT inside its border rather than through it.
+ * Every remaining case over-counts, so every one draws SHORT inside its border rather than through it, with
+ * one exception stated at `leaderStep`: a prepended letter followed by U+FFA0, which no drawn path keeps.
+ *
+ * A COUNT IS A COUNT OF A LINE. Whether a cluster starts depends on what stands in front of it (issue #417),
+ * so a string is measured as though it began a line, and a caller that draws it after something measures
+ * it there: the frames pad from their own space, the line editor from its prompt's.
  * Terminals disagree with each other on all of them, which is why no width table in this project will
  * settle them; a grapheme-aware count needs `Intl.Segmenter` and a terminal that agrees.
  */
@@ -457,12 +463,27 @@ function* widthSteps(s) {
   // raw input, in the safe direction, because the renderer measures the orphan as a sequence break and we
   // measure the text we are about to hand it.
   const chars = dropOrphans([...String(s ?? "")]);
+  // TRUE ONLY WHILE INSIDE A RUN OF PLAIN ZERO-WIDTH STEPS, so a leader run is judged once, at its first
+  // member. It is a flag and not a look at `chars[i - 1]`, and a review pass measured why: an emoji-form
+  // step and a keycap END in a zero-width code point (U+FE0F, U+20E3), so asking the previous character
+  // skipped every leader run that followed one, and `("\u00a9\ufe0f\u102c\uff9e").repeat(10)` drew 30
+  // columns in a 24-column box.
+  let inRun = false;
   for (let i = 0; i < chars.length; i++) {
     const ch = chars[i];
     if (ZERO_WIDTH.test(ch)) {
+      const lead = inRun ? null : leaderStep(chars, i);
+      if (lead) {
+        yield lead.step;
+        i = lead.next - 1;
+        inRun = false;
+        continue;
+      }
+      inRun = true;
       yield { text: ch, cols: 0 };
       continue;
     }
+    inRun = false;
     if (WIDE.test(ch)) {
       yield { text: ch, cols: 2 };
       continue;
@@ -487,6 +508,91 @@ function* widthSteps(s) {
     }
     yield { text: ch, cols: 1 };
   }
+}
+
+/**
+ * A CLUSTER THAT BEGINS WITH SOMETHING THAT DRAWS NOTHING, which the pinned renderer counts WIDER than its
+ * parts (issue #417). The renderer finds a cluster's base AFTER stripping its leading non-printing code
+ * points, and then walks the cluster again from its second code unit adding a column for every code point
+ * in U+FF00-U+FFEF and for U+0E33 / U+0EB3. When the cluster began with a mark or a format character, the
+ * base is one of the code points that second walk visits, so it is counted twice: `\u0301\uff9e` draws 2,
+ * and summing the steps said 1. An under-count is the direction that runs a line past its pane.
+ *
+ * MATCHED, NOT BOUNDED. The other answer was to substitute a leading mark with nothing to attach to, and it
+ * needs a notion of POSITION the substitution class does not have: every cell and every piece between two
+ * colour codes is scrubbed on its own, so "leading" there is not "leading" on the drawn line, and `clip`
+ * deletes the class rather than substituting it. Matching changes no content. The cost is that a future
+ * renderer which stops double counting makes this an OVER-count, the safe direction, and the literal counts
+ * pinned in `width.test.mjs` go red at that upgrade rather than drifting.
+ *
+ * NOT ONLY AT THE START OF A STRING, which is what the issue first said. Thirty-one spacing marks (the
+ * Myanmar vowel signs among them) are `\p{M}` without being grapheme SpacingMarks, so each one STARTS a
+ * cluster wherever it stands, and thirteen prepended format characters (U+0600 among them) take any
+ * following character into their cluster, which can double a TWO-column base. So whether the run starts a
+ * cluster is asked of `Intl.Segmenter`, with the renderer's own arguments, rather than of a list: the same
+ * runtime segments both, so the two cannot disagree about where a cluster starts.
+ *
+ * Returns the whole run and its base as ONE step, so no cut can separate them, or null when nothing is
+ * doubled and the run steps as zero-width code points as before.
+ */
+function leaderStep(chars, i) {
+  let k = i;
+  while (k < chars.length && ZERO_WIDTH.test(chars[k])) k += 1;
+  const base = chars[k];
+  if (base === undefined || !DOUBLED.test(base)) return null;
+  const run = chars.slice(i, k).join("");
+  const prev = i > 0 ? chars[i - 1] : "";
+  // THE ORDINARY CASE NEVER REACHES THE SEGMENTER: a nonspacing or enclosing mark, or a joiner, after a
+  // character that is not a break always extends that character's cluster. `interpreted(prev)` is there
+  // for U+2028 and U+2029, which ARE breaks and draw a column, so nothing else here would catch them.
+  // Removing this check changes no answer, only the cost: it is a performance path, and a mutant that
+  // deletes it is equivalent.
+  if (prev !== "" && JOINS.test(run) && !interpreted(prev)) return null;
+  // ONE CODE POINT OF CONTEXT IS ENOUGH. Whether a break falls before the run depends only on the class of
+  // the code point in front of it (no base here is a pictographic, a regional indicator or a conjunct
+  // consonant, the rules that look further back).
+  const key = prev + run + base;
+  let doubled = key.length <= LEADER_MEMO_KEY ? leaderMemo.get(key) : undefined;
+  if (doubled === undefined) {
+    let last = "";
+    for (const { segment } of GRAPHEMES.segment(key)) last = segment;
+    // Doubled when the base's cluster holds something IN FRONT of the base and does not reach back to
+    // `prev`: the last segment is always a suffix of the key, so both are length comparisons.
+    doubled = last.length > base.length && last.length <= key.length - prev.length ? countLater(last) : -1;
+    if (key.length <= LEADER_MEMO_KEY) {
+      // A BOUNDED MEMO, because an adversarial line defeats the fast path above with a run per character:
+      // `"\u102c\uff9e".repeat(50000)` took 101 ms to count without it and 16 ms with it (7 ms before this
+      // step existed). Cleared rather than evicted: the keys are short and repeat within one line.
+      if (leaderMemo.size >= LEADER_MEMO_SIZE) leaderMemo.clear();
+      leaderMemo.set(key, doubled);
+    }
+  }
+  if (doubled < 0) return null;
+  return { step: { text: run + base, cols: 2 * (WIDE.test(base) ? 2 : 1) + doubled }, next: k + 1 };
+}
+
+// The renderer's own add-set: the code points its second walk over a cluster counts again.
+const DOUBLED = /[\uff00-\uffef\u0e33\u0eb3]/u;
+// A run made ONLY of these always extends the cluster before it (every Mn and Me is grapheme Extend).
+const JOINS = /^[\p{Mn}\p{Me}\u200c\u200d]+$/u;
+// The renderer's segmenter, with the renderer's arguments. A global, not a dependency.
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const leaderMemo = new Map();
+const LEADER_MEMO_SIZE = 4096;
+const LEADER_MEMO_KEY = 16;
+
+/**
+ * U+FFA0 inside a doubled cluster, after its first code point, is one more column to the renderer's second
+ * walk and nothing to this table's (it is a filler that draws alone as nothing).
+ */
+function countLater(segment) {
+  let n = 0;
+  let first = true;
+  for (const c of segment) {
+    if (!first && c === "\uffa0") n += 1;
+    first = false;
+  }
+  return n;
 }
 
 /** Drop every unpaired surrogate from a character array. Half a pair reaches a terminal as U+FFFD at best. */
@@ -635,7 +741,11 @@ export function box({ title = "", sections = [], footer, width = 40 } = {}) {
   const topFill = Math.max(0, w - 2 - 1 - columnsOf(titleText)); // corners + one leading `h`
   lines.push(active.tl + active.h + titleText + active.h.repeat(topFill) + active.tr);
 
-  const framed = (text) => `${active.v} ${pad(text, inner)} ${active.v}`;
+  // MEASURED FROM THE FRAME'S OWN SPACE, because that is where it is drawn (issue #417). A body line that
+  // begins with a cluster the renderer counts wider on its own -- `\u0301\uff9e` is 2 at the start of a
+  // string and 1 after a space -- was padded as though it stood at column 0 and drew one column short.
+  // Padding `" " + text` to one more column is byte-identical for every other line.
+  const framed = (text) => `${active.v}${pad(" " + text, inner + 1)} ${active.v}`;
   const rule = () => active.ml + active.h.repeat(w - 2) + active.mr;
 
   sections.forEach((section, i) => {
@@ -822,7 +932,8 @@ function charAfter(s, at) {
  * keeps every transition a plain value-in/value-out step a test can drive directly.
  *
  * `render(width, { focused })` windows the value around the cursor when it outgrows `width - 1` (the
- * cursor needs one cell past the last character) and always returns exactly `width` visible columns;
+ * cursor needs one cell past the last character) and always returns exactly `width` visible columns when
+ * drawn after a printing column, which is where the prompt puts it (issue #417);
  * when focused, the cursor cell is wrapped in `LINE_INPUT_CURSOR` (see above).
  */
 export function makeLineInput(initial = "") {
@@ -921,14 +1032,25 @@ export function makeLineInput(initial = "") {
         end += 1;
       }
       const textOf = (a, b) => steps.slice(a, b).map((step) => step.text).join("");
+      // THE WINDOW IS MEASURED WHERE IT IS DRAWN, after the prompt's space (issue #417). The steps above
+      // were counted inside the WHOLE value, and a window can start where the whole value had no cluster
+      // start: after a prepended letter such as U+0D4E, `\u102c\uff9e` is 1 column inside the value and 2
+      // once the letter is outside the window. So the shown text is re-measured after a printing column,
+      // which is the contract this editor now states, and trimmed until it fits: past the cursor first,
+      // then from the front, so the cursor's own cell is never the one given up.
+      const shown = (a, b) => columnsOf(" " + textOf(a, b)) - 1;
+      while (start < end && shown(start, end) + (ci < end ? 0 : 1) > w) {
+        if (end - 1 > ci) end -= 1;
+        else start += 1;
+      }
       const head = textOf(start, Math.min(ci, end));
-      if (!focused) return pad(textOf(start, end), w);
+      if (!focused) return textOf(start, end) + " ".repeat(Math.max(0, w - shown(start, end)));
       // The cursor wraps a WHOLE step, never one half of a pair and never half a keycap, and sits on a
       // space once it is past the last step the window shows.
       const onStep = ci < end;
       const under = onStep ? steps[ci].text : " ";
       const tail = onStep ? textOf(ci + 1, end) : "";
-      const fill = Math.max(0, w - columnsOf(head + (onStep ? under : "") + tail) - (onStep ? 0 : 1));
+      const fill = Math.max(0, w - shown(start, end) - (onStep ? 0 : 1));
       return head + LINE_INPUT_CURSOR[0] + under + LINE_INPUT_CURSOR[1] + tail + " ".repeat(fill);
     },
   };

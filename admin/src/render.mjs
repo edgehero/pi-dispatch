@@ -112,6 +112,11 @@ export function renderStatus(queue, { heldCount, cronNext } = {}) {
   return [`Queue: ${state}`, `  ${line}${breakdown}`, `  workers: ${workers}${named}`].join("\n");
 }
 
+/** The column count of `v` drawn after a space, which is where every cell of `renderRuns` is drawn. */
+function afterSpace(v) {
+  return columnsOf(" " + v) - 1;
+}
+
 /** Render the run history as aligned columns; a null field is "-", an unreachable/empty set degrades. */
 export function renderRuns(runs) {
   if (runs && runs.unreachable) return `Runs: unreachable (${cell(runs.unreachable)})`;
@@ -128,8 +133,12 @@ export function renderRuns(runs) {
   // COLUMNS, not code units (issue #401), and this table is the MODEL-visible channel rather than a pane.
   // `target` is `local:<basename>` for a local run, so an operator's own folder name reaches it, and one
   // CJK character there shifted every later column of that row against the rows around it.
-  const widths = headers.map((h, i) => Math.max(columnsOf(h), ...rows.map((row) => columnsOf(row[i]))));
-  const fmt = (cells) => cells.map((v, i) => pad(v, widths[i])).join("  ").trimEnd();
+  // AND IN CONTEXT (issue #417): no cell is drawn at column 0. pi draws this message inside a box with one
+  // column of padding and the cells are joined by two spaces, so each is measured after a space. A cell
+  // that begins with a cluster the renderer counts wider at the start of a string (`\u102c\uff9e`, a
+  // Myanmar vowel sign and a halfwidth mark) would otherwise shift every later column of its row.
+  const widths = headers.map((h, i) => Math.max(columnsOf(h), ...rows.map((row) => afterSpace(row[i]))));
+  const fmt = (cells) => cells.map((v, i) => pad(" " + v, widths[i] + 1).slice(1)).join("  ").trimEnd();
   return [fmt(headers), ...rows.map(fmt)].join("\n");
 }
 

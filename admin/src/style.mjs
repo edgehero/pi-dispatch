@@ -37,7 +37,16 @@ export function stripAnsi(s) {
  * ends up ten columns wider than the line above it.
  */
 export function visibleLen(s) {
-  return columnsOf(stripAnsi(s));
+  const plain = columnsOf(stripAnsi(s));
+  // A STYLED LINE IS ALSO MEASURED PIECE BY PIECE, and the larger answer wins (issue #417). The renderer's
+  // overlay compositor cuts a line with a slicer that segments each run BETWEEN two escape codes on its
+  // own, so a mark right after a colour code starts a cluster there even though it does not in the whole
+  // string: a framed line measured to fit, and the compositor's own count dropped its right border. Only a
+  // line that carries a code can differ, so a plain line pays nothing.
+  if (plain === 0 || !String(s ?? "").includes("\u001b")) return plain;
+  let pieces = 0;
+  for (const piece of String(s).split(ANSI)) pieces += columnsOf(piece);
+  return Math.max(plain, pieces);
 }
 
 /** A no-op theme: `fg`/`bg`/`bold`/… return the text unchanged. Used in tests and when no TUI theme exists. */
@@ -260,17 +269,21 @@ export function frame(styler, { title = "", width = 40, lines = [], footer = nul
   const topFill = Math.max(0, w - 2 - 1 - styler.visibleLen(titleText));
   out.push(B(G.tl + G.h) + styler.bold(styler.fg("accent", titleText)) + B(G.h.repeat(topFill) + G.tr));
 
-  const side = (content) => B(G.v) + " " + content + " " + B(G.v);
+  // The body is measured FROM THE FRAME'S OWN SPACE, the same repair as `panel.mjs`'s `box` (issue #417):
+  // a line beginning with a cluster the renderer counts wider at the start of a string is drawn after that
+  // space, not at column 0, so it is padded where it stands. Byte-identical for every other line.
+  const side = (content) => B(G.v) + content + " " + B(G.v);
+  const body = (line) => side(padVisible(styler, " " + line, inner + 1));
   const rule = () => B(G.ml + G.h.repeat(w - 2) + G.mr);
 
   for (const line of lines) {
     if (line === RULE) out.push(rule());
-    else out.push(side(padVisible(styler, line, inner)));
+    else out.push(body(line));
   }
 
   if (footer !== null && footer !== undefined) {
     out.push(rule());
-    out.push(side(padVisible(styler, footer, inner)));
+    out.push(body(footer));
   }
 
   out.push(B(G.bl + G.h.repeat(w - 2) + G.br));
