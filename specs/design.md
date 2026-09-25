@@ -4730,7 +4730,11 @@ a tunnel.
   own ROOTLESS Podman on the worker's host, driven by the `podman` CLI the worker spawns itself. Every job runs as
   the worker's own `<euid>:<egid>` with `--userns=keep-id` and `HOME=/home/pi`, from `buildPodmanRunArgs`, which
   shares `argsFromSpec` with the docker builder, so every member of `ISOLATION_FLAGS` reaches it and `--userns=keep-id`
-  sits right after `--user=`. The run, the stop, the reaper, the image and egress preflights and the job networks are
+  sits right after `--user=`, followed by the namespaces and inheritances Podman lets the account's own containers.conf
+  default for every container and dockerd does not (`PODMAN_PINNED_FLAGS`: `--pid`, `--ipc`, `--uts` and `--cgroupns`
+  private, `--env-host=false`, `--http-proxy=false`), and `--network=private` for a job with no network of its own.
+  Measured with a user containers.conf of `pidns = "host"` and `env_host = true`: an unpinned job ran outside its own
+  PID namespace and received the worker's environment, the provider key with it; pinned, neither. The run, the stop, the reaper, the image and egress preflights and the job networks are
   the `local` venue's own factories with `bin: "podman"` (issue #354's first part, the seams). The venue decides from
   one bounded `podman info --format json`, never from a container, kept once it answers (rootlessness, remoteness
   and delegation are the account's and the process's, fixed for a worker's life) while the files the observations

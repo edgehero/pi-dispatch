@@ -180,6 +180,17 @@ export function podmanArgsFromSpec(spec) {
 }
 
 /**
+ * The namespaces and inheritances a rootless Podman argv pins, because Podman (unlike dockerd) lets the account's own
+ * containers.conf set every container's defaults for them: `pidns`, `ipcns`, `utsns`, `cgroupns`, `env_host` and
+ * `http_proxy`. Measured on Podman 5.8.1 with a user containers.conf of `pidns = "host"` and `env_host = true`: an
+ * unpinned job ran outside its own PID namespace and received the worker's environment (the provider key with it);
+ * with these flags it got its own namespaces and nothing. `http_proxy` is on by default, which copies the worker's proxy
+ * variables into every job. A job's network is pinned the same way where it has none of its own (`--network=private`,
+ * Podman's word for the rootless default), or `netns = "host"` would put it on the host's.
+ */
+export const PODMAN_PINNED_FLAGS = Object.freeze(["--pid=private", "--ipc=private", "--uts=private", "--cgroupns=private", "--env-host=false", "--http-proxy=false"]);
+
+/**
  * The shared body of both builders. `userns` is the caller's, never the spec's: each public builder has already decided
  * what its runtime may say, and reading the spec here would let a docker argv carry a flag its CLI refuses.
  */
@@ -232,10 +243,11 @@ function argsFromSpec(spec, { userns }) {
 	// before this feature existed. Same shape as the sessionDir/outboxDir/globalPiDir mounts below.
 	const args = ["run", `--name=${spec.name}`, ...ISOLATION_FLAGS, `--memory=${spec.memory}`, `--cpus=${spec.cpus}`];
 	if (spec.network) args.push(`--network=${spec.network}`);
+	else if (userns) args.push("--network=private");
 	// null => ABSENT, so a job the image's own USER runs has an argv byte-identical to one built before issue #341.
 	if (spec.user) args.push(`--user=${spec.user}`);
 	// Issue #354: IMMEDIATELY after `--user=`, which it qualifies, and before `dockerExtra`, where `--userns` is refused.
-	if (userns) args.push(`--userns=${userns}`);
+	if (userns) args.push(`--userns=${userns}`, ...PODMAN_PINNED_FLAGS);
 	// null => ABSENT, so every argv but a job's is byte-identical to one built before issue #345. BEFORE `dockerExtra`, and
 	// `--cidfile` is refused there, so no later token can move where the ID lands and turn the detached check off.
 	if (spec.cidFile) args.push(`--cidfile=${spec.cidFile}`);

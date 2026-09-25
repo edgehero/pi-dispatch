@@ -536,7 +536,10 @@ export async function startWorker(
 	// would read the other's observations as unanswered, which is the transient arm, exit 1 on every restart. Same split
 	// as `local`'s: a refusal resting only on a read that did not answer is untagged (retried), one on an answer tagged.
 	const bootPodmanObserved = bootPodmanRead ? observePodman({ read: bootPodmanRead, fs: observationFs, home: jobUserIdentity.home, env, euid: jobUserIdentity.euid }) : null;
-	if (bootPodmanObserved) {
+	// Not judged at all when the venue's identity is already refused (it is then merely blessed, or the refusal above would
+	// have stopped the boot): every job naming it is refused by that cause, and a floor refusal here would stop the whole
+	// worker, the default venue's jobs included, with a fix (delegate controllers, empty a mounts.conf) that is not the one.
+	if (bootPodmanObserved && bootPodmanDecision?.mode !== "unmappable") {
 		const podmanObservedArgs = { backends: [PODMAN_BACKEND], backendFloor: config.backendFloor, observations: bootPodmanObserved.observations, evidence: bootPodmanObserved.evidence };
 		const [podmanObservationRefusal] = observationRefusals(podmanObservedArgs);
 		if (podmanObservationRefusal) throw observationRefusalIsTransient(podmanObservedArgs) ? new Error(podmanObservationRefusal) : configError(podmanObservationRefusal);

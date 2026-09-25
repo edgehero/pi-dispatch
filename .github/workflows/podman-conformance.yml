@@ -88,13 +88,16 @@ jobs:
       # to other users; node_modules comes with it. The `cd` happens AS the account, inside the sudo, because the
       # runner's own user cannot enter a home directory created 0750.
       - name: Hand the checkout to the worker account
+        # `env -i`: the runner's own XDG_CONFIG_HOME survived `sudo -H` and podman, as pdjob, then read the runner's
+        # containers config (`stat /home/runner/.config/containers/storage.conf: permission denied`). Every step that
+        # needs a variable passes it explicitly through `env NAME=...` after the wrapper.
         run: |
           sudo cp -a "$GITHUB_WORKSPACE" "/home/$PDJOB/repo"
           sudo chown -R "$PDJOB:" "/home/$PDJOB/repo"
           nodedir="$(dirname "$(command -v node)")"
           sudo tee /usr/local/bin/as-pdjob > /dev/null <<EOF
           #!/bin/sh
-          exec sudo -u $PDJOB -H env XDG_RUNTIME_DIR=/run/user/$PDJOB_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$PDJOB_UID/bus PATH=$nodedir:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin sh -c 'cd /home/$PDJOB/repo && exec "\$@"' as-pdjob "\$@"
+          exec sudo -u $PDJOB -H env -i HOME=/home/$PDJOB USER=$PDJOB LOGNAME=$PDJOB XDG_CONFIG_HOME=/home/$PDJOB/.config XDG_RUNTIME_DIR=/run/user/$PDJOB_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$PDJOB_UID/bus PATH=$nodedir:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin sh -c 'cd /home/$PDJOB/repo && exec "\$@"' as-pdjob "\$@"
           EOF
           sudo chmod 0755 /usr/local/bin/as-pdjob
           cat /usr/local/bin/as-pdjob

@@ -2833,6 +2833,10 @@ test("a podman default refuses to BOOT on every identity cause, tagged, before a
 	// Blessed beside a default `local`, a rootful Podman boots: its jobs are refused one by one, local's still run.
 	const { logs } = await runStart({ env: { PI_BACKENDS: "local,podman" }, readPodmanInfo: PODMAN_INFO({ rootless: false }), jobUserIdentity: PODMAN_ID, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
 	assert.deepEqual(logs.find((l) => l.event === "worker_started").podmanJobUser, { mode: "unmappable", user: null, cause: "podman-rootful", reason: null });
+	// Even under a floor the rootful Podman's observations cannot meet: its identity refusal is what its jobs get, and the
+	// worker is not stopped with a mounts.conf fix that is not the one.
+	const floored = await runStart({ env: { PI_BACKENDS: "local,podman", PI_BACKEND_FLOOR: "mountSet=enforced" }, readPodmanInfo: PODMAN_INFO({ rootless: false }), jobUserIdentity: PODMAN_ID, observationFs: PODMAN_FILES, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
+	assert.equal(floored.logs.find((l) => l.event === "worker_started").podmanJobUser.cause, "podman-rootful");
 	// And the reverse: with podman the default, local's identity causes do not refuse the boot (local's rule, end to end).
 	const localRootless = await runStart({ env: { PI_BACKENDS: "podman,local" }, readDaemonFacts: DOCKER_FACTS({ rootless: true }), jobUserIdentity: PODMAN_ID, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
 	assert.equal(localRootless.logs.find((l) => l.event === "worker_started").jobUser.cause, "rootless");

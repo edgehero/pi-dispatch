@@ -967,6 +967,11 @@ refactor apart.
     `DES-PODMAN-THROUGH-ITS-DOCKER-API`: measured on an enforcing Fedora 44 host, an unlabelled source is denied to
     the container outright, `:z` would open a job's directory to every container, and `:Z` locks every other
     container out of what it relabels.
+  - **The pinned namespaces (issue #354).** The Podman builder follows `--userns=keep-id` with `--pid=private`,
+    `--ipc=private`, `--uts=private`, `--cgroupns=private`, `--env-host=false` and `--http-proxy=false`, and gives a job
+    with no network of its own `--network=private`: rootless Podman takes each of these from the account's own
+    containers.conf when the argv says nothing (measured: `pidns = "host"` and `env_host = true` there put an unpinned
+    job in the host's PID namespace with the worker's environment). None of them can be re-set through `dockerExtra`.
   - **The user-namespace field (issue #354, the seam for a native Podman backend).** The spec carries `userns`,
     `null` by default or the closed value `"keep-id"`. The docker builder (`dockerArgsFromSpec`) refuses any value
     but `null`, because the docker CLI rejects `--userns=keep-id` client-side (exit 125, measured in #345), so a

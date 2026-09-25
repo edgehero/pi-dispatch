@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { assertUserns, CONTAINER_HOME, SHIPPED_IMAGE_UID, transfersFromSpec, USERNS_MODES } from "../src/container-spec.mjs";
-import { buildDockerRunArgs, buildPodmanRunArgs, containerSpec, DOCKER_EXTRA_ALLOWED, DOCKER_EXTRA_FORBIDDEN, dockerArgsFromSpec, insideDir, ISOLATION_FLAGS, podmanArgsFromSpec } from "../src/docker-run.mjs";
+import { buildDockerRunArgs, buildPodmanRunArgs, containerSpec, DOCKER_EXTRA_ALLOWED, DOCKER_EXTRA_FORBIDDEN, dockerArgsFromSpec, insideDir, ISOLATION_FLAGS, PODMAN_PINNED_FLAGS, podmanArgsFromSpec } from "../src/docker-run.mjs";
 
 const base = {
 	image: "pi-job:pinned",
@@ -484,6 +484,12 @@ test("the podman argv, literally: --userns=keep-id immediately after --user=, th
 		"--network=pi-job-1-net",
 		"--user=1234:1234",
 		"--userns=keep-id",
+		"--pid=private",
+		"--ipc=private",
+		"--uts=private",
+		"--cgroupns=private",
+		"--env-host=false",
+		"--http-proxy=false",
 		"--cidfile=/j.cid",
 		"-e",
 		"A=1",
@@ -496,7 +502,7 @@ test("the podman argv, literally: --userns=keep-id immediately after --user=, th
 	assert.equal(args.filter((a) => a.startsWith("--userns")).length, 1);
 });
 
-test("the podman argv is the docker argv plus one token: one private builder, so the boundary cannot drift between runtimes", () => {
+test("the podman argv is the docker argv plus keep-id and the pinned namespaces: one private builder, so the boundary cannot drift between runtimes", () => {
 	const shapes = [
 		{ ...base, user: "1234:1234" },
 		{ ...base, user: "1234:1234", sessionDir: "/s", globalPiDir: "/g", network: "n", cidFile: "/c.cid", relabel: true, workspaceOwned: true },
@@ -506,7 +512,13 @@ test("the podman argv is the docker argv plus one token: one private builder, so
 		const podman = buildPodmanRunArgs(s);
 		const at = podman.indexOf("--userns=keep-id");
 		assert.equal(podman[at - 1], `--user=${s.user}`);
-		assert.deepEqual([...podman.slice(0, at), ...podman.slice(at + 1)], buildDockerRunArgs(s), JSON.stringify(s));
+		assert.deepEqual(podman.slice(at + 1, at + 1 + PODMAN_PINNED_FLAGS.length), [...PODMAN_PINNED_FLAGS], "the pinned namespaces follow keep-id");
+		// A job with no network of its own is pinned to Podman's private default; one with a network keeps its own.
+		const docker = buildDockerRunArgs(s);
+		const net = podman.indexOf("--network=private");
+		assert.equal(net !== -1, !s.network, JSON.stringify(s));
+		const stripped = podman.filter((a, i) => i !== net && (i < at || i > at + PODMAN_PINNED_FLAGS.length));
+		assert.deepEqual(stripped, docker, JSON.stringify(s));
 	}
 	// The same refusals reach the podman path: they live in the shared body, not in the docker wrapper.
 	assert.throws(() => buildPodmanRunArgs({ ...base, user: "1:1", extraFlags: ["--userns=host"] }), /supersede the isolation boundary/);
@@ -514,6 +526,10 @@ test("the podman argv is the docker argv plus one token: one private builder, so
 	assert.throws(() => podmanArgsFromSpec({ ...containerSpec({ ...base, user: "1:1", userns: "keep-id" }), isolated: false }), /not isolated/);
 	assert.throws(() => podmanArgsFromSpec({ ...containerSpec({ ...base, user: "1:1", userns: "keep-id" }), user: "0:0" }), /refusing a job user/);
 	assert.ok(DOCKER_EXTRA_FORBIDDEN.includes("--userns"), "a dockerExtra repeat could otherwise supersede keep-id");
+	assert.deepEqual([...PODMAN_PINNED_FLAGS], ["--pid=private", "--ipc=private", "--uts=private", "--cgroupns=private", "--env-host=false", "--http-proxy=false"]);
+	for (const flag of ["--pid", "--ipc", "--uts", "--cgroupns", "--network", "--env-host", "--http-proxy"]) {
+		assert.throws(() => buildPodmanRunArgs({ ...base, user: "1:1", extraFlags: [`${flag}=host`] }), /supersede|not allowed|refus/i, `${flag} cannot be re-set by dockerExtra`);
+	}
 });
 
 test("the podman builder refuses a spec without keep-id, and keep-id without a job user (/job would be unreadable)", () => {
