@@ -29,7 +29,7 @@ const GRID = 20; // widths snap to the 20px grid, like the editor
 // left-to-right layout invariant (source right edge before target left edge) could not be promised.
 // Node-RED instead measures the label on a canvas; there is no DOM here, so labels are clipped.
 const NODE_MAX_W = 160;
-const CHAR_W = 8; // 14px per COLUMN (see labelColumns); over-estimating keeps text inside the chip
+const CHAR_W = 8; // 8px per COLUMN at the 14px label font (see labelColumns); over-estimating keeps text inside the chip
 const LABEL_X = 38; // label x, past the 30px icon column and its divider
 const CHIP_MAX_COLS = 14; // what fits at NODE_MAX_W: (160 - 38 - 10) / CHAR_W
 const RANK_PITCH = 180; // fixed column pitch
@@ -147,8 +147,9 @@ export function escapeHtml(s) {
 // break out of the script element, and U+2028/2029 become escapes because they are line
 // terminators to a JS parser while being invisible to JSON.
 export function embedJson(value) {
-  // And the same for every string in the embedded JSON, which would otherwise carry the escaped text of
-  // a half pair (issue #418).
+  // And the same for every string VALUE in the embedded JSON, which would otherwise carry the escaped
+  // text of a half pair (issue #418). Keys are not rewritten: every key this page embeds is minted here
+  // (`n0`, a tip index), never data.
   return JSON.stringify(value, (_k, v) => (typeof v === "string" ? v.toWellFormed() : v))
     .replace(/</g, "\\u003c")
     .replace(/\u2028/g, "\\u2028")

@@ -45,8 +45,9 @@ function frontmatterValue(block, key) {
   let value = m[1].trim();
   if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1);
   if (value === "") return null;
-  // The cap is a CHARACTER cap, not a width, so a code-unit slice is the right shape here -- but it can
-  // still land between the halves of an astral pair, and half a pair is not a character (issue #401).
+  // The cap is a CHARACTER cap, not a width, so a code-unit count is the right shape here -- but a slice
+  // can land between the halves of an astral pair (issue #401), or inside a flag or a family, and neither
+  // half is a character (issue #418), so the cut ends between clusters.
   return value.length > META_VALUE_MAX_CHARS ? `${cutUnits(value, META_VALUE_MAX_CHARS)}\u2026` : value;
 }
 

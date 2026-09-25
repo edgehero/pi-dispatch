@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { buildGraphScene, clip, clipColumns, GRAPH_HTML_KINDS, GLYPH, labelColumns, PAGE_JS } from "../src/graph-html.mjs";
 import { columnsOf } from "../src/panel.mjs";
 import { buildInsightsHtml } from "../src/insights-html.mjs";
-import { buildGraphModel, findLoopHints, GRAPH_EDGE_KINDS, GRAPH_NODE_KINDS } from "../src/graph-model.mjs";
+import { buildGraphModel, findLoopHints, GRAPH_EDGE_KINDS, GRAPH_NODE_KINDS, parseSkillMeta } from "../src/graph-model.mjs";
 
 const NOW = 1770000000000;
 
@@ -657,8 +657,8 @@ test("a sub chip and a loop hint are cut in columns too, and ASCII ones are unch
 test("the column cut at its edges: odd budgets, a zero-width character at the cut, mixed widths (#418)", () => {
   // An ODD budget, where one column is left over for a narrow ellipsis and not for a wide one.
   assert.equal(clipColumns("a\u4f1a\u793e\u306e\u30b9\u30ad\u30eb\u540d\u524d", 14), "a\u4f1a\u793e\u306e\u30b9\u30ad\u30eb\u2026");
-  // A cluster that draws nothing at the cut is given up WITH the character before it, or the wide
-  // character it follows keeps a place the ellipsis needed.
+  // A zero-width space at the cut is a column of its own here (a format character is never free in this
+  // estimate), so the cut after the sixth CJK character is where the ellipsis's two columns start.
   assert.equal(clipColumns("\u4f1a\u793e\u306e\u30b9\u30ad\u30eb\u540d\u200bxyz", 14), "\u4f1a\u793e\u306e\u30b9\u30ad\u30eb\u2026");
   // The first cluster that does not fit ENDS the cut: a narrower one after it is not taken instead.
   assert.equal(clipColumns("aaaaaaaaaaaaa\u4f1abb", 14), "aaaaaaaaaaaaa\u2026");
@@ -719,4 +719,24 @@ test("half a pair that ARRIVED in the data never reaches the page either (#418)"
   const page = pageOf(model);
   assert.doesNotMatch(page, /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/, "no raw half pair");
   assert.doesNotMatch(page, /\\ud[89ab][0-9a-f]{2}(?!\\ud[c-f])/i, "and no escaped one");
+});
+
+test("the width a chip is sized by, the HEAD it names and the frontmatter it quotes, at their edges (#418)", () => {
+  // A chip is sized for what the cut DRAWS: two columns for its ellipsis after a wide character, which a
+  // width built from the label's own count left one column short. 38 + 9 * 8 + 12 on the 20px grid.
+  const chip = chipsOf(["a\u4f1a\u793e\u{1f468}\u200d\u{1f469}\u200d\u{1f467}"]).nodes.find((n) => n.label.startsWith("a\u4f1a"));
+  assert.equal(chip.label, "a\u4f1a\u793e\u2026");
+  assert.equal(chip.w, 120, "the ellipsis's second column is in the width");
+  // A joiner and a combining mark each count the code unit they take: never free on this page.
+  assert.equal(labelColumns("\u200d"), 1);
+  assert.equal(labelColumns("\u0301"), 1);
+  // The HEAD keeps whole characters: the half an emoji would leave is dropped at the cut, not turned
+  // into a replacement character by the sink that makes strings well-formed.
+  const page = pageOf(buildGraphModel({ ...CANNED(), folderSkills: { "/srv/site": { ...CANNED().folderSkills["/srv/site"], head: "abcdef\u{1f600}" } } }));
+  assert.ok(page.includes("HEAD abcdef<") || page.includes("HEAD abcdef\""), "the HEAD is cut before the emoji");
+  assert.ok(!page.includes("\ufffd"), "and nothing on the page is a replacement character");
+  // A frontmatter value is cut between clusters at its 120-unit cap: fourteen whole families, not a
+  // fifteenth that ends in a joiner and half a pair.
+  const meta = parseSkillMeta(`---\nname: x\ndescription: d${"\u{1f468}\u200d\u{1f469}\u200d\u{1f467}".repeat(20)}\n---\nbody`);
+  assert.equal(meta.description, "d" + "\u{1f468}\u200d\u{1f469}\u200d\u{1f467}".repeat(14) + "\u2026");
 });

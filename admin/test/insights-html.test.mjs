@@ -724,6 +724,11 @@ test("a list label and a plan chip are sized in columns (#418)", () => {
   // rect and past the SVG. Five and twelve emoji at three columns and the two-column ellipsis, at 6px.
   const long = buildInsightsHtml({ ...CANNED_PAYLOAD(), fold: { ...CANNED_FOLD(), byFlow: [{ flow: "fix", flowKey: "fix", cost: usd(0, "plan", { planId: "\u{1f600}".repeat(20) }), runs: 1 }] } }, { now: NOW });
   assert.match(long, new RegExp(`<rect x="150" y="3" width="270" height="15" rx="7"[^>]*/><text x="157" y="[0-9.]+" font-size="10" fill="[^"]+">plan:${"\u{1f600}".repeat(12)}\u2026</text>`, "u"));
+  // AT THE CAP: a plan chip that fits its capped rect is left exactly as it was (forty-three columns is
+  // 270px of a 272px rect), and one column more is cut.
+  const plan = (id) => buildInsightsHtml({ ...CANNED_PAYLOAD(), fold: { ...CANNED_FOLD(), byFlow: [{ flow: "fix", flowKey: "fix", cost: usd(0, "plan", { planId: id }), runs: 1 }] } }, { now: NOW });
+  assert.match(plan("p".repeat(38)), new RegExp(`width="270" height="15" rx="7"[^>]*/><text[^>]*>plan:${"p".repeat(38)}</text>`));
+  assert.match(plan("p".repeat(39)), new RegExp(`width="270" height="15" rx="7"[^>]*/><text[^>]*>plan:${"p".repeat(37)}\u2026</text>`, "u"));
   const ascii = layoutBarList([{ label: "a-label-that-is-longer-than-twenty", cost: null, runs: 0 }], { width: 430 })[0];
   assert.equal(ascii.labelText, "a-label-that-is-long\u2026", "an ASCII label is cut exactly where it was");
 });

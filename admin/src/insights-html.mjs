@@ -8,7 +8,7 @@
  *
  * Dependency posture: exactly two imports, both pure. graph-html.mjs is the scene/escaping/theme
  * source of truth (buildGraphScene lays out the topology; PAGE_JS owns pan/zoom/tooltip/selection;
- * PAGE_THEME is the palette; `clip`, `clipColumns` and `labelColumns` are the one answer to how a
+ * PAGE_THEME is the palette; `clip`, `clipColumns` and `drawnColumns` are the one answer to how a
  * string is cut and sized on these pages, issue #418), and panel.mjs is THE money renderer -- fmtCost/fmtUsd are the only
  * functions allowed to turn a dollar into text, because the typed-cost class system is what keeps an
  * estimate structurally distinguishable behind every figure on this page. costs.mjs is deliberately
@@ -847,10 +847,12 @@ function barListSvg(rows, aria, tips) {
     parts.push(`<text x="0" y="${fmt(base)}" font-size="11" fill="${PAGE_THEME.fg}">${escapeHtml(row.labelText)}</text>`);
     if (row.chipText !== null) {
       // The chip's rect is capped at the list's edge, so its TEXT is cut to what the capped rect holds
-      // (issue #418): a long plan id ran past the rect and past the SVG itself. One column less than the
-      // cap, because the cut appends its ellipsis past the budget it is given.
+      // (issue #418): a long plan id ran past the rect and past the SVG itself. A text that FITS the
+      // capped rect is left alone, so a chip that fitted before is byte-for-byte what it was; one that does
+      // not is cut a column short of the cap, because the cut appends its ellipsis past its budget.
       const room = LIST_W - bx - 8;
-      const chipText = clipColumns(row.chipText, Math.floor((room - 12) / 6) - 1);
+      const fits = Math.floor((room - 12) / 6);
+      const chipText = drawnColumns(row.chipText) <= fits ? row.chipText : clipColumns(row.chipText, fits - 1);
       const cw = Math.min(drawnColumns(chipText) * 6 + 12, room);
       parts.push(`<rect x="${fmt(bx)}" y="${fmt(row.y + 3)}" width="${fmt(cw)}" height="15" rx="7" fill="none" stroke="${PAGE_THEME.chipStroke}"/>`);
       parts.push(`<text x="${fmt(bx + 7)}" y="${fmt(base)}" font-size="10" fill="${PAGE_THEME.dim}">${escapeHtml(chipText)}</text>`);
