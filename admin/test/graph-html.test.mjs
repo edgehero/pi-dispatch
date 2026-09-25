@@ -1065,6 +1065,13 @@ test("the right-to-left mark: after Hebrew or Arabic letters, never after Arabic
   assert.ok(!digits.children[1].firstChild.nodeValue.endsWith(RLM), "no mark after digits that follow a Latin word");
   assert.ok(digits.children[1].firstChild.nodeValue.endsWith(ELLIPSIS));
   assert.ok(arabic.children[1].firstChild.nodeValue.endsWith(ELLIPSIS + RLM), "a mark after Arabic letters");
+  // U+08E2, the Arabic disputed end of ayah, is a number format to the bidi algorithm: a Latin label ending in it is cut
+  // left to right, and the mark moved the ellipsis 20px (measured). It is a Prepend, so a grapheme cut never ends on
+  // one; the code-point fallback can, which is where this is pinned.
+  const sign = box("report ab" + cps(0x08e2).repeat(30));
+  noSegmenterFit(docOf(sign), measureBy());
+  assert.ok(sign.children[1].firstChild.nodeValue.includes(cps(0x08e2) + ELLIPSIS), "the cut does end on U+08E2");
+  assert.ok(!sign.children[1].firstChild.nodeValue.endsWith(RLM), "no mark after U+08E2");
   // The builder's own cut carries the same mark, and it costs no column.
   const hebrew = cps(0x05d0).repeat(30);
   assert.equal(clipColumns(hebrew, 10), cps(0x05d0).repeat(10) + ELLIPSIS + RLM);

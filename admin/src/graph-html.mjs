@@ -279,8 +279,9 @@ const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 // paragraph and is drawn beside the run's FIRST word, where a reader of that script starts, so a cut that ends right to
 // left carries a right-to-left mark after its ellipsis. The ranges are the strong right-to-left characters of the Hebrew
 // and Arabic blocks and their presentation forms, with the Arabic-script characters the bidi algorithm reads as numbers
-// or number formats left out (U+0600-0605, the Arabic-Indic digits and separators U+0660-066C, the extended digits
-// U+06F0-06F9, U+08E2): a mark after those put the ellipsis in the middle of the number. A Latin, Greek or Cyrillic
+// or number formats left out (U+0600-0605, the Arabic-Indic digits and separators U+0660-066C, U+08E2): a mark after
+// those moved the ellipsis between the word and the number (measured in Chrome). The extended digits U+06F0-06F9 are
+// European numbers to the bidi algorithm, where the mark changes nothing, and are left out too. A Latin, Greek or Cyrillic
 // letter ends the scan left to right; digits and punctuation decide nothing. ONE table, read here by the builder's cut and
 // written into FIT_JS for the page's, so the two cannot disagree.
 const RTL_STRONG = [[0x0590, 0x05ff], [0x0606, 0x065f], [0x066d, 0x06ef], [0x06fa, 0x08e1], [0x08e3, 0x08ff], [0xfb1d, 0xfdff], [0xfe70, 0xfefe]];

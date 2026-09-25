@@ -56,7 +56,9 @@ const CORPUS = {
 };
 const NAMES = Object.keys(CORPUS);
 const LONG_FOLDER = "/srv/" + "a-very-long-deployment-folder-name".repeat(3);
-const LONG_CRON = "0 0,5,10,15,20,25,30,35,40,45,50,55 * * *";
+// Every hour listed: about 340px at the 10px label font, far past the loop under a 160px chip (about 187px drawn), so the
+// page's cron fit has something to cut. A pattern that fits its loop (the realistic page's) must not be touched.
+const LONG_CRON = `0 ${Array.from({ length: 24 }, (_, h) => h).join(",")} * * *`;
 
 const usd = (n, cls, over = {}) => ({ usd: n, class: cls, floor: false, ...over });
 
@@ -312,6 +314,11 @@ let bad = 0;
 bad += report("corpus overflows with the fit", findings(fitted));
 bad += report("corpus needless cuts", needless(fitted));
 bad += report("corpus titles wrong", titles(fitted));
+// The corpus cron pattern runs past its loop without the fit, and the fit cuts it and gives it a title.
+const cronCut = fitted.filter((r) => r.loopLeft !== undefined && r.drawn !== null && r.titled);
+const cronOver = stripped.filter((r) => r.loopLeft !== undefined && problems(r).length > 0);
+if (cronOver.length === 0) { console.log("the corpus cron pattern did not run past its loop without the fit, so the cron fit was not exercised"); bad++; }
+if (cronCut.length === 0) { console.log("the fit cut no cron pattern with a title on the corpus page"); bad++; }
 bad += report("plain ascii labels changed", changedWhole(plainFitted, plainStripped));
 bad += report("plain ascii overflows either way", [...findings(plainStripped), ...findings(plainFitted)]);
 bad += report("realistic ascii labels changed that fitted", changedWhole(realFitted, realStripped));
