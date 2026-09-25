@@ -49,7 +49,7 @@
  * containers, networks and fixture are named before they exist and removed when it ends; it is judged by the same failed/ok rule and carries
  * no fixAction, because what a failed read-back points at is the image or the runtime.
  */
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir, release as osRelease, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, delimiter, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -3975,17 +3975,20 @@ const CONTAINER_READABLE_TYPES = new Set(["container_file_t", "container_ro_file
  *
  * READ, never inferred: `stat -L --format=%C` through doctor's bounded runner. `-L` because a local folder may be a
  * symlink (prepare-local treats one as ordinary) and a container reads what the link points at, whose label is the one
- * that matters; the fix names the directory the link points at, since a rule on the link's own path changes nothing a
- * container reads. Only the folder's OWN link is followed, never its parents': where `/home` is itself a link to
- * `/var/home` (Fedora Atomic, CoreOS, RHEL for Edge) semanage refuses a rule on the resolved `/var/home/...` path for
- * its equivalence rule and wants the `/home/...` one (measured). The rule's path is escaped as the regular expression
- * `semanage fcontext` reads it as, whitespace as a hex escape because it refuses a literal or backslashed space. A `stat` that did not answer (not GNU
+ * that matters. The fix names the directory restorecon will actually meet: the folder resolved through EVERY link (its
+ * own, a chain of them, or a linked parent, each of which left a rule on the configured path matching nothing,
+ * measured), then mapped back through the policy's path equivalences (`file_contexts.subs_dist` and `.subs`, e.g.
+ * `/var/home /home`), because semanage refuses a rule on the aliased side of one and names the other (measured for
+ * /var/home, /var/opt and /var/roothome). That is the rule semanage itself applies. The rule's path is escaped as the
+ * regular expression semanage reads it as, whitespace as a hex escape because it refuses a literal or backslashed
+ * space ("File specification can not include spaces", semanage from policycoreutils-python-utils 3.11, measured). A `stat` that did not answer (not GNU
  * coreutils, a directory this shell cannot reach, no label at all) is a quiet "not checked" line, never a warning:
  * the runner's own refusal names the path if a job meets it, and a false alarm here would send an operator to relabel
  * a folder that was fine. A readable type with MCS categories is a directory some container relabelled PRIVATE, which
  * locks every other container out (measured), so it is treated like an unlabelled one.
  */
-export async function selinuxLabelChecks({ folders = [], overlay = null, spawn, lstat = lstatSync, readlink = readlinkSync }) {
+export async function selinuxLabelChecks({ folders = [], overlay = null, spawn, realpath = realpathSync, readFile = readFileSync }) {
+	const aliases = fcontextAliases(readFile);
 	const checks = [{ ok: true, label: "SELinux: jobs' own directories are relabelled for SELinux (:Z); a local folder and the global overlay never are" }];
 	const targets = [...folders.map((dir) => ({ dir, what: "local folder", refused: "every job in it is refused before it spends" })), ...(overlay ? [{ dir: overlay, what: "global overlay", refused: "every job is refused before it spends" }] : [])];
 	for (const { dir, what, refused } of targets) {
@@ -3999,16 +4002,15 @@ export async function selinuxLabelChecks({ folders = [], overlay = null, spawn, 
 			checks.push({ ok: true, label: `SELinux: the ${what} ${dir} is labelled ${context.type}, which a container can read` });
 			continue;
 		}
-		let real = resolve(dir);
-		let via = "";
+		const configured = resolve(dir);
+		let resolved = configured;
 		try {
-			if (lstat(dir).isSymbolicLink()) {
-				real = resolve(dirname(real), readlink(dir));
-				via = ` (a link to ${real})`;
-			}
+			resolved = realpath(configured);
 		} catch {
-			// unreadable here: the configured path, made absolute, is the best name there is
+			// unresolvable here: the configured path, made absolute, is the best name there is
 		}
+		const real = unaliasFcontextPath(resolved, aliases);
+		const via = real !== configured ? ` (resolved to ${real})` : "";
 		checks.push({
 			ok: false,
 			warn: true,
@@ -4033,7 +4035,43 @@ function parseSelinuxContext(output) {
 function escapeFcontextPath(path) {
 	// Whitespace as a two-digit hex escape: semanage refuses a space written plainly or backslashed ("File specification
 	// can not include spaces"), and accepts the hex form (measured on container-selinux 2.247.0).
-	return path.replace(/[.*+?^$()[\]{}|\\]/g, "\\$&").replace(/\s/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`);
+	// ASCII whitespace only: a two-digit escape cannot spell a code point past U+00FF, and those were not measured.
+	return path.replace(/[.*+?^$()[\]{}|\\]/g, "\\$&").replace(/[\t\n\v\f\r ]/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`);
+}
+
+/**
+ * The policy's path equivalences, `[alias, original]` pairs from `file_contexts.subs_dist` and the local `.subs`, for the
+ * policy /etc/selinux/config names (default `targeted`). Unreadable files give none: the fix then names the resolved
+ * path, which is right wherever no equivalence applies.
+ */
+function fcontextAliases(readFile) {
+	let policy = "targeted";
+	try {
+		policy = /^SELINUXTYPE=(\S+)/m.exec(readFile("/etc/selinux/config", "utf8"))?.[1] ?? policy;
+	} catch {}
+	const pairs = [];
+	for (const name of ["file_contexts.subs_dist", "file_contexts.subs"]) {
+		let text = "";
+		try {
+			text = readFile(`/etc/selinux/${policy}/contexts/files/${name}`, "utf8");
+		} catch {
+			continue;
+		}
+		for (const line of text.split("\n")) {
+			const fields = line.trim().split(/\s+/);
+			if (fields.length === 2 && !fields[0].startsWith("#") && fields[0].startsWith("/") && fields[1].startsWith("/")) pairs.push(fields);
+		}
+	}
+	return pairs;
+}
+
+/** `path` with the longest equivalence alias it starts with replaced by that alias's original, on a separator boundary. */
+function unaliasFcontextPath(path, aliases) {
+	let best = null;
+	for (const [alias, original] of aliases) {
+		if ((path === alias || path.startsWith(`${alias}/`)) && (best === null || alias.length > best[0].length)) best = [alias, original];
+	}
+	return best === null ? path : `${best[1]}${path.slice(best[0].length)}`;
 }
 
 /** A path as one POSIX shell word: bare when it is plain, else single-quoted with an embedded quote closed and reopened. */

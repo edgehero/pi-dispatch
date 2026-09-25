@@ -5539,7 +5539,7 @@ test("the SELinux label check: user_home_t warns with the semanage fix, containe
 		}),
 		calls,
 	);
-	const checks = await selinuxLabelChecks({ folders: ["/home/op/repo", "/srv/labelled", "/srv/readonly", "/srv/private", "/srv/unreadable", "/srv/nolabel", "/srv/failed"], overlay: "/srv/pi's overlay", spawn, lstat: () => ({ isSymbolicLink: () => false }) });
+	const checks = await selinuxLabelChecks({ folders: ["/home/op/repo", "/srv/labelled", "/srv/readonly", "/srv/private", "/srv/unreadable", "/srv/nolabel", "/srv/failed"], overlay: "/srv/pi's overlay", spawn, realpath: (dir) => dir, readFile: noSelinuxFiles });
 	const byDir = (dir) => checks.find((c) => c.label.includes(` ${dir} `));
 	assert.deepEqual([checks[0].ok, checks[0].label], [true, "SELinux: jobs' own directories are relabelled for SELinux (:Z); a local folder and the global overlay never are"]);
 	const home = byDir("/home/op/repo");
@@ -5567,26 +5567,61 @@ test("the SELinux label check: user_home_t warns with the semanage fix, containe
 	assert.equal(calls.length, 8);
 });
 
-test("the SELinux label check reads through a symlinked folder and names the directory it points at, escaped for semanage (#355)", async () => {
+// No policy files: no equivalences, and nothing read from this machine's /etc.
+const noSelinuxFiles = () => {
+	throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+};
+
+test("the SELinux label check names the directory restorecon meets: through every link, then back through the policy's equivalences (#355)", async () => {
 	const { selinuxLabelChecks } = await import("../src/doctor.mjs");
+	const folders = ["/home/op/linked", "/home/op/chain", "/home/op/plink/repo", "/home/op/plain", "/home/op/aliased", "/home/op/sp ace"];
+	const answers = Object.fromEntries(folders.map((dir) => [dir, { code: 0, output: "unconfined_u:object_r:var_t:s0\n" }]));
 	const calls = [];
-	const spawn = fakeSpawn(statPlan({ "/home/op/proj": { code: 0, output: "unconfined_u:object_r:var_t:s0\n" }, "/home/op/plain": { code: 0, output: "unconfined_u:object_r:user_home_t:s0\n" }, repo: { code: 0, output: "unconfined_u:object_r:user_home_t:s0\n" } }), calls);
-	// Only the folder's own link is followed: /home/op/plain is not a link, and even where /home is a link to /var/home
-	// its rule stays on /home (semanage refuses the /var/home one for its equivalence rule, measured).
-	const links = { "/home/op/proj": "../../srv/my.proj+1 (x)[y]" };
-	const checks = await selinuxLabelChecks({ folders: ["/home/op/proj", "/home/op/plain", "repo"], spawn, lstat: (dir) => ({ isSymbolicLink: () => dir in links }), readlink: (dir) => links[dir] });
-	const warned = checks.find((c) => c.warn && c.label.includes("/home/op/proj"));
-	assert.match(warned.label, /the local folder \/home\/op\/proj \(a link to \/srv\/my\.proj\+1 \(x\)\[y\]\) is labelled var_t/);
-	assert.ok(warned.fix.includes("semanage fcontext -a -t container_file_t '/srv/my\\.proj\\+1\\x20\\(x\\)\\[y\\](/.*)?' && restorecon -R '/srv/my.proj+1 (x)[y]'"), warned.fix);
-	const plain = checks.find((c) => c.warn && c.label.includes("/home/op/plain"));
-	assert.ok(!plain.label.includes("a link"), "a folder that is not a link is not called one");
-	assert.ok(plain.fix.includes("'/home/op/plain(/.*)?'") || plain.fix.includes("/home/op/plain(/.*)?"), plain.fix);
-	// A relative run.folder is named as configured and its rule is made absolute, never called a link.
-	const relative = checks.find((c) => c.warn && c.label.includes("local folder repo "));
-	assert.ok(!relative.label.includes("a link"), relative.label);
-	assert.match(relative.fix, /semanage fcontext -a -t container_file_t '?\/[^ ]*\/repo\(\/\.\*\)\?'?/, relative.fix);
-	assert.match(warned.fix, /virt_use_nfs/, "names the mounts restorecon cannot relabel");
-	assert.deepEqual(calls[0].args, ["-L", "--format=%C", "--", "/home/op/proj"]);
+	const spawn = fakeSpawn(statPlan(answers), calls);
+	// Measured shapes, each of which left a rule matching nothing when only the folder's own link was followed: a link, a
+	// chain of two, a folder under a linked parent; and a link into /var/opt, which semanage refuses for its equivalence
+	// rule '/var/opt /opt' and wants on /opt.
+	const resolved = {
+		"/home/op/linked": "/srv/my.proj+1 (x)[y]",
+		"/home/op/chain": "/srv/chained",
+		"/home/op/plink/repo": "/srv/plink/repo",
+		"/home/op/aliased": "/var/opt/tool",
+	};
+	const files = {
+		"/etc/selinux/config": "SELINUX=enforcing\nSELINUXTYPE=targeted\n",
+		"/etc/selinux/targeted/contexts/files/file_contexts.subs_dist": "# comment\n/var/home /home\n/var/opt /opt\n/var/opt/deep /elsewhere\n",
+		"/etc/selinux/targeted/contexts/files/file_contexts.subs": "/srv/plink /srv/pl\n",
+	};
+	const readFile = (path) => {
+		if (path in files) return files[path];
+		throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+	};
+	const checks = await selinuxLabelChecks({ folders, spawn, realpath: (dir) => resolved[dir] ?? dir, readFile });
+	const of = (dir) => checks.find((c) => c.warn && c.label.includes(`local folder ${dir} `));
+	assert.match(of("/home/op/linked").label, /\(resolved to \/srv\/my\.proj\+1 \(x\)\[y\]\) is labelled var_t/);
+	assert.ok(of("/home/op/linked").fix.includes("semanage fcontext -a -t container_file_t '/srv/my\\.proj\\+1\\x20\\(x\\)\\[y\\](/.*)?' && restorecon -R '/srv/my.proj+1 (x)[y]'"), of("/home/op/linked").fix);
+	assert.ok(of("/home/op/chain").fix.includes("'/srv/chained(/.*)?'") || of("/home/op/chain").fix.includes(" /srv/chained(/.*)?"), "a chain names its last target, not the middle link");
+	// The local .subs is read too: /srv/plink is an alias of /srv/pl there.
+	assert.ok(of("/home/op/plink/repo").fix.includes("/srv/pl/repo(/.*)?"), of("/home/op/plink/repo").fix);
+	assert.match(of("/home/op/plink/repo").label, /resolved to \/srv\/pl\/repo/);
+	// The longest alias wins, on a separator boundary.
+	assert.ok(of("/home/op/aliased").fix.includes("/opt/tool(/.*)?"), of("/home/op/aliased").fix);
+	const plain = of("/home/op/plain");
+	assert.ok(!plain.label.includes("resolved to"), "a folder that resolves to itself says nothing more");
+	assert.ok(of("/home/op/sp ace").fix.includes("'/home/op/sp\\x20ace(/.*)?' && restorecon -R '/home/op/sp ace'"), of("/home/op/sp ace").fix);
+	assert.deepEqual(calls[0].args, ["-L", "--format=%C", "--", "/home/op/linked"]);
+	// A relative folder is named as configured and its rule made absolute.
+	const rel = await selinuxLabelChecks({ folders: ["repo"], spawn: fakeSpawn(statPlan({ repo: { code: 0, output: "unconfined_u:object_r:user_home_t:s0\n" } }), []), realpath: (dir) => dir, readFile: noSelinuxFiles });
+	const relWarn = rel.find((c) => c.warn);
+	assert.ok(!relWarn.label.includes("resolved to"), "made absolute is not resolved elsewhere: nothing more to say");
+	assert.match(relWarn.fix, /semanage fcontext -a -t container_file_t '?\/[^ ']*\/repo\(\/\.\*\)\?'?/);
+	assert.match(relWarn.fix, /virt_use_nfs/, "names the mounts restorecon cannot relabel");
+	// The default resolver is the real one: a real symlink on this machine is followed without any seam.
+	const target = tempDir("pi-selinux-target-");
+	const link = join(tempDir("pi-selinux-link-"), "folder");
+	symlinkSync(target, link);
+	const real = await selinuxLabelChecks({ folders: [link], spawn: fakeSpawn(statPlan({ [link]: { code: 0, output: "unconfined_u:object_r:var_t:s0\n" } }), []), readFile: noSelinuxFiles });
+	assert.ok(real.find((c) => c.warn).label.includes(`resolved to ${realpathSync(target)}`), real.find((c) => c.warn).label);
 });
 
 test("doctor runs the label check only where relabelling applies: local Podman with SELinux on Linux, nothing at all elsewhere (#355)", async () => {

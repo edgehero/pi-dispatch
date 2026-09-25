@@ -4634,7 +4634,7 @@ a tunnel.
     per job `relabel: "private"` and the builder renders them `:Z` (`/job:ro,Z`, `/outbox`, `/session`, and
     `/workspace` only when the worker owns it: a forge clone, a sandbox's retained workspace, doctor's fixture). An
     operator's local folder and `/opt/pi-global` are NEVER relabelled; doctor reads their labels
-    (`stat --format=%C`) and warns with the `semanage fcontext` fix, and the runner refuses a job whose `/workspace`
+    (`stat -L --format=%C`, the fix naming the fully resolved directory mapped back through the policy's path equivalences) and warns with the `semanage fcontext` fix, and the runner refuses a job whose `/workspace`
     it cannot read, pre-spend, as `job-inputs-unreadable`. Without the relabel every argv is byte-identical to
     before. The compose file's three single-file config mounts carry `:ro,z`.
 - **Rejected**:

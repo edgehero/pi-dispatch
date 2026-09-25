@@ -230,14 +230,16 @@ Measured: after that the folder is readable and writable in a container with no 
 not.
 
 `pi-dispatch doctor` checks this where it applies. It prints a ✓ line saying jobs' own directories are relabelled
-(`:Z`), and reads the label of every local trigger's folder and of `PI_GLOBAL_PI_DIR` with `stat -L --format=%C`, through a
-folder that is itself a symlink to the directory it points at (its parents' links are not followed, so a rule under a
-`/home` that links to `/var/home` stays on `/home`, which is the one semanage accepts there). A type
+(`:Z`), and reads the label of every local trigger's folder and of `PI_GLOBAL_PI_DIR` with `stat -L --format=%C`. Its fix names
+the directory `restorecon` actually meets: the folder resolved through every link (its own, a chain, or a linked
+parent; a rule on the configured path matched nothing in each case, measured), then mapped back through the policy's
+path equivalences in `file_contexts.subs_dist` and `.subs`, because `semanage` refuses a rule on the aliased side of
+one (measured for `/var/home /home`, `/var/opt /opt` and `/var/roothome`). A type
 other than `container_file_t` or `container_ro_file_t`, or one carrying a private category pair (some container's
 `:Z`), is a ⚠ naming the folder and the fix above; a label it cannot read is a "not checked" line, never a warning.
 On an NFS, CIFS or FUSE mount, or one mounted with `context=`, the label comes from the mount and `restorecon` cannot
-change it; there the container's access is the `virt_use_nfs`, `virt_use_samba` or `virt_use_fusefs` boolean, or the
-mount's own context, and the warning says so. A
+change it; the container-selinux booleans `virt_use_nfs`, `virt_use_samba` and `virt_use_fusefs`, or the mount's own
+context, are what decide there. The warning says so; none of those was measured here. A
 job that meets such a folder anyway is refused before it spends: the runner checks that it can read `/job`,
 `/opt/pi-global` and `/workspace`, and exits 2 as `job-inputs-unreadable`, naming the path. A `/workspace` the job
 can read but not write still runs, with the advisory `workspace_not_writable`, because a read-only review of such a
