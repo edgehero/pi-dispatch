@@ -8,7 +8,8 @@
  *
  * Dependency posture: exactly two imports, both pure. graph-html.mjs is the scene/escaping/theme
  * source of truth (buildGraphScene lays out the topology; PAGE_JS owns pan/zoom/tooltip/selection;
- * PAGE_THEME is the palette), and panel.mjs is THE money renderer -- fmtCost/fmtUsd are the only
+ * PAGE_THEME is the palette; `clip`, `clipColumns` and `labelColumns` are the one answer to how a
+ * string is cut and sized on these pages, issue #418), and panel.mjs is THE money renderer -- fmtCost/fmtUsd are the only
  * functions allowed to turn a dollar into text, because the typed-cost class system is what keeps an
  * estimate structurally distinguishable behind every figure on this page. costs.mjs is deliberately
  * NOT loaded: it reaches into the worker for its day bucketing, and one worker coupling would drag
@@ -20,7 +21,7 @@
  * and the posture test bans that whole reference syntax as a substring.
  */
 
-import { buildGraphScene, escapeHtml, embedJson, fmt, PAGE_JS, legendHtml, bannersHtml, PAGE_THEME } from "./graph-html.mjs";
+import { buildGraphScene, clip, clipColumns, drawnColumns, escapeHtml, embedJson, fmt, PAGE_JS, legendHtml, bannersHtml, PAGE_THEME } from "./graph-html.mjs";
 import { fmtCost, fmtUsd } from "./panel.mjs";
 
 // Must equal costs.mjs's COST_CLASSES; the parity test compares the two literals. Duplicated rather
@@ -88,11 +89,6 @@ function posInt(v) {
 
 function strOr(v, fallback) {
   return typeof v === "string" && v !== "" ? v : fallback;
-}
-
-function clip(s, max) {
-  const t = String(s);
-  return t.length > max ? `${t.slice(0, max)}…` : t;
 }
 
 function cmpStr(a, b) {
@@ -498,7 +494,9 @@ export function layoutBarList(rows, { width } = {}) {
       y: i * LIST_ROW_H,
       barW,
       chipText,
-      labelText: clip(label, 20),
+      // COLUMNS, cut between clusters (issue #418): the label column is a fixed 150px, and a cut by
+      // code units let twenty CJK characters run into the bars beside them.
+      labelText: clipColumns(label, 20),
       valueText: fmtCost(c),
       cls,
       nodeId: typeof r.nodeId === "string" && /^n\d+$/.test(r.nodeId) ? r.nodeId : null,
@@ -848,9 +846,14 @@ function barListSvg(rows, aria, tips) {
     const bx = LIST_LABEL_W;
     parts.push(`<text x="0" y="${fmt(base)}" font-size="11" fill="${PAGE_THEME.fg}">${escapeHtml(row.labelText)}</text>`);
     if (row.chipText !== null) {
-      const cw = Math.min(row.chipText.length * 6 + 12, LIST_W - bx - 8);
+      // The chip's rect is capped at the list's edge, so its TEXT is cut to what the capped rect holds
+      // (issue #418): a long plan id ran past the rect and past the SVG itself. One column less than the
+      // cap, because the cut appends its ellipsis past the budget it is given.
+      const room = LIST_W - bx - 8;
+      const chipText = clipColumns(row.chipText, Math.floor((room - 12) / 6) - 1);
+      const cw = Math.min(drawnColumns(chipText) * 6 + 12, room);
       parts.push(`<rect x="${fmt(bx)}" y="${fmt(row.y + 3)}" width="${fmt(cw)}" height="15" rx="7" fill="none" stroke="${PAGE_THEME.chipStroke}"/>`);
-      parts.push(`<text x="${fmt(bx + 7)}" y="${fmt(base)}" font-size="10" fill="${PAGE_THEME.dim}">${escapeHtml(row.chipText)}</text>`);
+      parts.push(`<text x="${fmt(bx + 7)}" y="${fmt(base)}" font-size="10" fill="${PAGE_THEME.dim}">${escapeHtml(chipText)}</text>`);
     } else if (row.barW !== null) {
       if (row.cls === "metered") {
         parts.push(`<rect x="${fmt(bx)}" y="${fmt(row.y + 5)}" width="${fmt(row.barW)}" height="11" rx="2" fill="${PAGE_THEME.accent}"/>`);

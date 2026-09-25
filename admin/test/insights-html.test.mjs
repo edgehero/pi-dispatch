@@ -684,3 +684,46 @@ test("a pre-#242 payload (no scoped key) and an invalid limits file both state t
   const page = buildInsightsHtml(p, { now: NOW });
   assert.ok(page.includes("scoped limits: file invalid"), "an invalid file is a stated absence, not a silent gap");
 });
+
+// ---- issue #418: no half character reaches the page, and labels are cut in columns ----
+
+test("no field of the page carries half a character, raw or escaped into the embedded JSON (#418)", () => {
+  // THE INJECTION: an odd prefix and a run of emoji appended to every free-text field of the topology
+  // input and of the fold, so that every even code-unit cap on the page lands between the halves of a
+  // pair. Before issue #418 the page carried dozens of raw lone surrogates and the embedded JSON the
+  // escaped text of as many more, which a scan of the page text alone cannot see.
+  const tail = "x" + "\u{1f600}".repeat(100);
+  const FREE = /^(name|label|flow|flowKey|hint|description|model|provider|key|planId|id|vendor|command|package|scope|target|childFlow|parentFlow|per|unit|any|all)$/;
+  const inject = (o) => {
+    if (Array.isArray(o)) return o.map((v) => (typeof v === "string" ? v + tail : inject(v)));
+    if (o && typeof o === "object") {
+      const out = {};
+      for (const [k, v] of Object.entries(o)) out[k] = typeof v === "string" && FREE.test(k) ? v + tail : FREE.test(k) && Array.isArray(v) ? v.map((s) => (typeof s === "string" ? s + tail : inject(s))) : inject(v);
+      return out;
+    }
+    return o;
+  };
+  const payload = { ...CANNED_PAYLOAD(), graph: buildGraphModel(inject(CANNED())), fold: inject(CANNED_FOLD()) };
+  const page = buildInsightsHtml(payload, { now: NOW });
+  assert.ok(page.includes("\u{1f600}"), "the injection reached the page, or this test checks nothing");
+  const raw = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+  assert.doesNotMatch(page, raw, "no raw half character");
+  const escaped = /\\ud[89ab][0-9a-f]{2}(?!\\ud[c-f][0-9a-f]{2})|(?<!\\ud[89ab][0-9a-f]{2})\\ud[c-f][0-9a-f]{2}/i;
+  assert.doesNotMatch(page, escaped, "and no escaped one in the embedded JSON");
+});
+
+test("a list label and a plan chip are sized in columns (#418)", () => {
+  // The label column is a fixed 150px at 11px: twenty CJK characters ran into the bars beside them.
+  const [row] = layoutBarList([{ label: "\u4f1a\u793e\u306e\u30ea\u30dd\u30b8\u30c8\u30ea\u540d\u524d\u30c6\u30b9\u30c8", cost: usd(0, "plan", { planId: "\u4f1a\u793e\u30d7\u30e9\u30f3" }), runs: 1 }], { width: 430 });
+  assert.equal(row.labelText, "\u4f1a\u793e\u306e\u30ea\u30dd\u30b8\u30c8\u30ea\u540d\u2026", "cut to twenty columns, the ellipsis costing two");
+  assert.equal(row.chipText, "plan:\u4f1a\u793e\u30d7\u30e9\u30f3");
+  // The chip's width is drawn from its text: 5 + 5 * 2 columns at 6px, plus 12 (it was 72, by code units).
+  const page = buildInsightsHtml({ ...CANNED_PAYLOAD(), fold: { ...CANNED_FOLD(), byFlow: [{ flow: "fix", flowKey: "fix", cost: usd(0, "plan", { planId: "\u4f1a\u793e\u30d7\u30e9\u30f3" }), runs: 1 }] } }, { now: NOW });
+  assert.match(page, /<rect x="150" y="3" width="102" height="15" rx="7"/, "the plan chip is 102px wide");
+  // A plan id too long for the chip's capped rect is cut to what the rect holds: the text ran past the
+  // rect and past the SVG. Five and twelve emoji at three columns and the two-column ellipsis, at 6px.
+  const long = buildInsightsHtml({ ...CANNED_PAYLOAD(), fold: { ...CANNED_FOLD(), byFlow: [{ flow: "fix", flowKey: "fix", cost: usd(0, "plan", { planId: "\u{1f600}".repeat(20) }), runs: 1 }] } }, { now: NOW });
+  assert.match(long, new RegExp(`<rect x="150" y="3" width="270" height="15" rx="7"[^>]*/><text x="157" y="[0-9.]+" font-size="10" fill="[^"]+">plan:${"\u{1f600}".repeat(12)}\u2026</text>`, "u"));
+  const ascii = layoutBarList([{ label: "a-label-that-is-longer-than-twenty", cost: null, runs: 0 }], { width: 430 })[0];
+  assert.equal(ascii.labelText, "a-label-that-is-long\u2026", "an ASCII label is cut exactly where it was");
+});

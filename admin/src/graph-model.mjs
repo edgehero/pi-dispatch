@@ -9,8 +9,9 @@
 // issue #92 lesson) without breaking this module's purity -- nothing here spawns or reads anything.
 import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 // Pure-to-pure: `panel.mjs` is the admin's no-I/O module and owns the one answer to "how do you cut a
-// string without leaving half a character behind" (issue #401).
-import { dropLoneSurrogate } from "./panel.mjs";
+// string without leaving half a character behind" (issue #401), and a character is a whole cluster
+// (issue #418), not only a whole surrogate pair.
+import { cutUnits } from "./panel.mjs";
 
 // One frontmatter value line: `key: value`, an optional surrounding double quote, single-line only.
 // The same block-isolation discipline as flow-gate.mjs's aiTriggerAllows, and deliberately NOT a YAML
@@ -46,7 +47,7 @@ function frontmatterValue(block, key) {
   if (value === "") return null;
   // The cap is a CHARACTER cap, not a width, so a code-unit slice is the right shape here -- but it can
   // still land between the halves of an astral pair, and half a pair is not a character (issue #401).
-  return value.length > META_VALUE_MAX_CHARS ? `${dropLoneSurrogate(value.slice(0, META_VALUE_MAX_CHARS))}…` : value;
+  return value.length > META_VALUE_MAX_CHARS ? `${cutUnits(value, META_VALUE_MAX_CHARS)}\u2026` : value;
 }
 
 // A mention is "strong" when it sits near chaining vocabulary -- the outbox protocol's own words.
@@ -122,7 +123,12 @@ export function findLoopHints(text) {
   let match;
   LOOP_HINT_RE.lastIndex = 0;
   while ((match = LOOP_HINT_RE.exec(body)) !== null && hints.length < LOOP_HINT_MAX) {
-    const hint = match[0].trim();
+    // `[^.\n]{0,60}` counts code units, so a hint can end inside a character: on half a surrogate pair,
+    // which the page carried into the embedded JSON as the escaped text of one, or inside a flag or a
+    // family (issue #418). So the match is re-cut at the last cluster boundary, asking the text that
+    // follows it where its last cluster ends, and trimmed after that, or a cut after a space kept it.
+    const tail = body.slice(match.index, match.index + match[0].length + 32);
+    const hint = cutUnits(tail, match[0].length).trim();
     const key = hint.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
@@ -672,5 +678,5 @@ function basenameOf(path) {
 /** Clip an arbitrary (possibly hostile) flow string for node display; the honest badge needs the name. */
 function clipName(name) {
   const s = String(name);
-  return s.length > 64 ? `${dropLoneSurrogate(s.slice(0, 64))}…` : s;
+  return s.length > 64 ? `${cutUnits(s, 64)}\u2026` : s;
 }

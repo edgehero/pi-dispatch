@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildGraphScene, GRAPH_HTML_KINDS, GLYPH, PAGE_JS } from "../src/graph-html.mjs";
+import { buildGraphScene, clip, clipColumns, GRAPH_HTML_KINDS, GLYPH, labelColumns, PAGE_JS } from "../src/graph-html.mjs";
+import { columnsOf } from "../src/panel.mjs";
 import { buildInsightsHtml } from "../src/insights-html.mjs";
-import { buildGraphModel, GRAPH_EDGE_KINDS, GRAPH_NODE_KINDS } from "../src/graph-model.mjs";
+import { buildGraphModel, findLoopHints, GRAPH_EDGE_KINDS, GRAPH_NODE_KINDS } from "../src/graph-model.mjs";
 
 const NOW = 1770000000000;
 
@@ -552,4 +553,170 @@ test("a missing or invalid triggers file banners on the live page", () => {
 
   const invalid = pageOf(buildGraphModel({ triggers: { invalid: "bad json" } }));
   assert.ok(invalid.includes("triggers file invalid: bad json"));
+});
+
+// ---- issue #418: chips are sized and cut in columns, and never through a character ----
+
+test("the chip width estimate is never narrower than the panel's table, on every code point and pair (#418)", () => {
+  // THE PARITY WIRE a `from` clause would otherwise be: this module loads nothing, so it carries its own
+  // estimate, and the panel's table (itself swept against the renderer) holds it. One-sided on purpose:
+  // an over-count makes a chip too wide, an under-count lets its text run out of it. String-level parity
+  // is deliberately NOT claimed -- `\u0e48\u0e33` is 2 columns to the panel only because the terminal
+  // renderer counts a cluster's base twice, which is not a glyph width.
+  let swept = 0;
+  let equal = 0;
+  let pairs = 0;
+  let pairsEqual = 0;
+  for (let cp = 0; cp <= 0x10ffff; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue;
+    const ch = String.fromCodePoint(cp);
+    swept += 1;
+    assert.ok(labelColumns(ch) >= columnsOf(ch), `U+${cp.toString(16)}: ${labelColumns(ch)} against ${columnsOf(ch)}`);
+    if (labelColumns(ch) === columnsOf(ch)) equal += 1;
+    for (const s of [ch + "\ufe0f", ch + "\ufe0f\u20e3"]) {
+      pairs += 1;
+      assert.ok(labelColumns(s) >= columnsOf(s), `${JSON.stringify(s)}: ${labelColumns(s)} against ${columnsOf(s)}`);
+      if (labelColumns(s) === columnsOf(s)) pairsEqual += 1;
+    }
+  }
+  assert.equal(swept, 1112064, "every code point outside the surrogates");
+  assert.equal(pairs, 2224128, "and each with U+FE0F and as a keycap");
+  // EXACT where the two agree, pinned, because "answer 2 for everything" also satisfies the sweep.
+  assert.equal(equal, 185239, "code points estimated at exactly the panel's width");
+  // None: U+FE0F counts the code unit it takes here and nothing in the panel's table, on purpose (a mark
+  // is never free in this estimate), so every pair is estimated wider than the terminal draws it.
+  assert.equal(pairsEqual, 0, "pairs estimated at exactly the panel's width");
+});
+
+/** A one-folder topology holding these skill names, laid out the way production lays it out. */
+function chipsOf(names, loops = {}) {
+  const model = buildGraphModel({
+    ...CANNED(),
+    triggers: { triggers: [] },
+    folderSkills: {
+      "/srv/x": {
+        head: "abc",
+        truncated: false,
+        unreachable: null,
+        skills: names.map((name) => ({ name, isSub: name.includes("/"), group: name.includes("/") ? name.split("/")[0] : null, aiTrigger: false, meta: null, mentions: [], unread: false, loops: loops[name] ?? [] })),
+      },
+    },
+  });
+  return layoutOf(model);
+}
+
+test("a chip is sized by columns and cut between clusters, and an ASCII chip is unchanged (#418)", () => {
+  const byLabel = new Map(chipsOf([
+    "\u4f1a\u793e\u306e\u30b9\u30ad\u30eb",
+    "\u4f1a\u793e\u306e\u30b9\u30ad\u30eb\u540d\u524d\u30c6\u30b9\u30c8\u3067\u3059",
+    "\u{1f600}".repeat(9),
+    "\u{1f1ef}\u{1f1f5}".repeat(9),
+    "1\ufe0f\u20e3".repeat(9),
+    "\u{1f469}\u200d\u{1f469}\u200d\u{1f467}".repeat(9),
+    "build-report-and-more",
+    "\u4f1a\u793e\u306e\u30b9\u30ad",
+  ]).nodes.map((n) => [n.label, n.w]));
+  // Sized for what it draws: six CJK characters were a 100px chip, the minimum, and drew about 84px of
+  // text past a 38px label start.
+  assert.equal(byLabel.get("\u4f1a\u793e\u306e\u30b9\u30ad\u30eb"), 160, "a CJK name gets the chip its glyphs need");
+  // A cut that keeps a wide character spends two columns on the ellipsis: a browser draws it at about
+  // 14px, and seven emoji and an ellipsis ended three pixels past a full chip.
+  assert.equal(byLabel.get("\u4f1a\u793e\u306e\u30b9\u30ad\u30eb\u2026"), 160, "a long CJK name is cut to six characters and the ellipsis");
+  // An emoji is three columns: a browser draws one at 17 to 19px at this size, past two columns' 16,
+  // and the selector or joiner in a sequence counts the code unit it takes.
+  assert.equal(byLabel.get("\u{1f600}".repeat(4) + "\u2026"), 160, "a run of emoji is cut to four");
+  // Between clusters: a flag, a keycap and a family are each one glyph and are kept or dropped whole.
+  assert.equal(byLabel.get("\u{1f1ef}\u{1f1f5}".repeat(2) + "\u2026"), 160, "no half flag");
+  assert.equal(byLabel.get("1\ufe0f\u20e3".repeat(3) + "\u2026"), 160, "no keycap without its key");
+  assert.equal(byLabel.get("\u{1f469}\u200d\u{1f469}\u200d\u{1f467}\u2026"), 160, "no family without its child");
+  // And a chip NARROWER than the cap is sized for what it holds: ten columns, 38 + 10 * 8 + 12 on the
+  // 20px grid.
+  assert.equal(byLabel.get("\u4f1a\u793e\u306e\u30b9\u30ad"), 140, "five CJK characters take a 140px chip");
+  // An ASCII cut is what it always was: fourteen characters and the ellipsis.
+  assert.equal(byLabel.get("build-report-a\u2026"), 160, "an ASCII name is cut exactly where it was");
+});
+
+test("a sub chip and a loop hint are cut in columns too, and ASCII ones are unchanged (#418)", () => {
+  const layout = chipsOf(["grp", "grp/a-long-ascii-sub-skill-name", "loopy"], {
+    loopy: [{ hint: "until \u4f1a\u793e\u306e\u30b9\u30ad\u30eb\u540d\u524d\u30c6\u30b9\u30c8\u3067\u3059" }],
+  });
+  const sub = layout.nodes.find((n) => n.label.startsWith("grp/"));
+  // 131 is what the sub chip measured before issue #418: `U+2026` counts one column, like the character
+  // it replaced in the old code-unit count, so an ASCII page does not move a pixel.
+  assert.equal(sub.label, "grp/a-long-ascii\u2026");
+  assert.equal(sub.w, 131, "the ASCII sub chip is the width it always was");
+  // A CJK sub chip is cut to what its 11px text can hold and sized for it: sixteen code units were
+  // twelve CJK characters in a chip sized for seventeen narrow ones.
+  const cjk = chipsOf(["grp", "grp/\u4f1a\u793e\u306e\u30b9\u30ad\u30eb\u540d\u524d\u30c6\u30b9\u30c8\u3067\u3059"]).nodes.find((n) => n.label.startsWith("grp/"));
+  assert.equal(cjk.label, "grp/\u4f1a\u793e\u306e\u30b9\u30ad\u2026");
+  assert.equal(cjk.w, 124, "twelve pixels of padding and sixteen columns at seven, the ellipsis costing two");
+  const hint = layout.skillGroups.find((s) => s.label === "loopy").markers[0].hint;
+  assert.equal(hint, "until \u4f1a\u793e\u306e\u30b9\u30ad\u30eb\u540d\u524d\u2026", "the hint is cut at 24 columns, the ellipsis costing two after a wide character");
+});
+
+test("the column cut at its edges: odd budgets, a zero-width character at the cut, mixed widths (#418)", () => {
+  // An ODD budget, where one column is left over for a narrow ellipsis and not for a wide one.
+  assert.equal(clipColumns("a\u4f1a\u793e\u306e\u30b9\u30ad\u30eb\u540d\u524d", 14), "a\u4f1a\u793e\u306e\u30b9\u30ad\u30eb\u2026");
+  // A cluster that draws nothing at the cut is given up WITH the character before it, or the wide
+  // character it follows keeps a place the ellipsis needed.
+  assert.equal(clipColumns("\u4f1a\u793e\u306e\u30b9\u30ad\u30eb\u540d\u200bxyz", 14), "\u4f1a\u793e\u306e\u30b9\u30ad\u30eb\u2026");
+  // The first cluster that does not fit ENDS the cut: a narrower one after it is not taken instead.
+  assert.equal(clipColumns("aaaaaaaaaaaaa\u4f1abb", 14), "aaaaaaaaaaaaa\u2026");
+  // A trigger chip is cut the same way as a skill chip.
+  const model = buildGraphModel({
+    ...CANNED(),
+    triggers: { triggers: [{ type: "cron", index: 0, id: "\u4f1a\u793e\u306e\u591c\u9593\u30d3\u30eb\u30c9\u51e6\u7406", pattern: "0 3 * * *", folder: "/srv/site", flow: "build-report", model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false }] },
+  });
+  const trigger = layoutOf(model).nodes.find((n) => n.kind === "trigger");
+  assert.equal(trigger.label, "\u4f1a\u793e\u306e\u591c\u9593\u30d3\u2026", "a trigger's chip label is cut in columns too");
+});
+
+test("a data cap never leaves half a character, and neither does the folder's HEAD (#418)", () => {
+  // `clip` is a CHARACTER cap, by code unit as it always was, but a cap that lands between the two
+  // halves of an astral character now gives up the half.
+  const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+  // Both ends of the surrogate range, not only the middle of it.
+  for (const astral of ["\u{1f600}", "\u{10000}", "\u{10ffff}"]) {
+    for (let n = 1; n <= 12; n++) assert.doesNotMatch(clip("x" + astral.repeat(10), n), lone, `a cap at ${n} of ${JSON.stringify(astral)}`);
+  }
+  assert.equal(clip("abcdef", 3), "abc\u2026", "an ASCII cap is unchanged");
+  assert.equal(clipColumns("abc", 3), "abc", "a label that fits is returned as it is");
+  const page = pageOf(buildGraphModel({ ...CANNED(), folderSkills: { "/srv/site": { ...CANNED().folderSkills["/srv/site"], head: "abcdef\u{1f600}" } } }));
+  assert.doesNotMatch(page, lone, "a HEAD cut to seven units keeps no half character");
+  // AND AT THE SOURCE: a loop hint is cut by the phrase scan's own `{0,60}`, which counts code units, so
+  // a hint of emoji ended on half of one before the page ever saw it.
+  for (let k = 40; k <= 60; k++) {
+    for (const { hint } of findLoopHints("until " + "\u{1f600}".repeat(k))) assert.doesNotMatch(hint, lone, `a hint of ${k} emoji`);
+  }
+  // The half goes before the trim, or a hint cut just after a space keeps the space.
+  assert.deepEqual(findLoopHints("until " + "\u{1f600}".repeat(28) + "x \u{1f600}\u{1f600}"), [{ hint: "until " + "\u{1f600}".repeat(28) + "x" }]);
+});
+
+test("a cut keeps whole clusters, not only whole surrogate pairs, in every cutter on the page (#418)", () => {
+  // A regional indicator alone, a joiner at the end, or a tag sequence without its cancel tag: half a
+  // character that is not half a surrogate pair, which repairing the surrogate alone left in a tooltip.
+  const broken = (s) => /(^|[^\u{1f1e6}-\u{1f1ff}])(?:[\u{1f1e6}-\u{1f1ff}]{2})*[\u{1f1e6}-\u{1f1ff}](?![\u{1f1e6}-\u{1f1ff}])|\u200d$|\u200d\u2026$/u.test(s);
+  const flags = "x" + "\u{1f1f3}\u{1f1f1}".repeat(20);
+  const family = "x" + "\u{1f468}\u200d\u{1f469}\u200d\u{1f467}".repeat(10);
+  for (let n = 1; n <= 40; n++) {
+    assert.ok(!broken(clip(flags, n)), `clip of flags at ${n}: ${JSON.stringify(clip(flags, n))}`);
+    assert.ok(!broken(clip(family, n)), `clip of a family at ${n}: ${JSON.stringify(clip(family, n))}`);
+  }
+  // At the model's own caps: a flow name, and a loop hint the phrase scan cut inside a family.
+  const hints = findLoopHints("until " + "\u{1f468}\u200d\u{1f469}\u200d\u{1f467}".repeat(10) + " done");
+  assert.ok(hints.length === 1 && !/\u200d$/u.test(hints[0].hint), JSON.stringify(hints));
+  // And no chip label drops its old reach for a script whose marks draw: a Devanagari name is cut at the
+  // same seven syllables a code-unit cap cut it at, not later.
+  assert.equal(clipColumns("\u0915\u093e".repeat(10), 14), "\u0915\u093e".repeat(7) + "\u2026");
+  // A CRLF is one cluster of two narrow characters, not a wide one: the ASCII cut is where it was.
+  assert.equal(clipColumns("a\r\n" + "b".repeat(29), 20), "a\r\n" + "b".repeat(17) + "\u2026");
+});
+
+test("half a pair that ARRIVED in the data never reaches the page either (#418)", () => {
+  // Not a cut at all: a record or a trigger field that already holds a lone surrogate. Both sinks, the
+  // markup and the embedded JSON, make every string well-formed on the way out.
+  const model = buildGraphModel({ ...CANNED(), triggers: { triggers: [{ ...CANNED().triggers.triggers[1], any: ["ai\ud83d"] }] } });
+  const page = pageOf(model);
+  assert.doesNotMatch(page, /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/, "no raw half pair");
+  assert.doesNotMatch(page, /\\ud[89ab][0-9a-f]{2}(?!\\ud[c-f])/i, "and no escaped one");
 });

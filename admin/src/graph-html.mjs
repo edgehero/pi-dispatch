@@ -29,9 +29,9 @@ const GRID = 20; // widths snap to the 20px grid, like the editor
 // left-to-right layout invariant (source right edge before target left edge) could not be promised.
 // Node-RED instead measures the label on a canvas; there is no DOM here, so labels are clipped.
 const NODE_MAX_W = 160;
-const CHAR_W = 8; // 14px label estimate; over-estimating keeps text inside the chip
+const CHAR_W = 8; // 14px per COLUMN (see labelColumns); over-estimating keeps text inside the chip
 const LABEL_X = 38; // label x, past the 30px icon column and its divider
-const CHIP_MAX_CHARS = 14; // what fits at NODE_MAX_W: (160 - 38 - 10) / CHAR_W
+const CHIP_MAX_COLS = 14; // what fits at NODE_MAX_W: (160 - 38 - 10) / CHAR_W
 const RANK_PITCH = 180; // fixed column pitch
 const ROW_GAP = 26; // vertical gap between rows (leaves room for the status line under a chip)
 const GROUP_PAD_L = 20;
@@ -138,14 +138,18 @@ export const GLYPH = Object.freeze({
 // into markup goes through this, operator-authored or not, because "charset-bound upstream" is an
 // assumption and an entity is a guarantee.
 export function escapeHtml(s) {
-  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  // WELL-FORMED FIRST (issue #418): half a surrogate pair that arrived in the data would otherwise reach
+  // the page as it came, and a cut is not the only way to get one.
+  return String(s).toWellFormed().replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 // JSON destined for the inline script: `<` becomes < so no value can spell `</script>` and
 // break out of the script element, and U+2028/2029 become escapes because they are line
 // terminators to a JS parser while being invisible to JSON.
 export function embedJson(value) {
-  return JSON.stringify(value)
+  // And the same for every string in the embedded JSON, which would otherwise carry the escaped text of
+  // a half pair (issue #418).
+  return JSON.stringify(value, (_k, v) => (typeof v === "string" ? v.toWellFormed() : v))
     .replace(/</g, "\\u003c")
     .replace(/\u2028/g, "\\u2028")
     .replace(/\u2029/g, "\\u2029");
@@ -170,9 +174,127 @@ function strOr(v, fallback) {
   return typeof v === "string" && v !== "" ? v : fallback;
 }
 
-function clip(s, max) {
+/**
+ * A CHARACTER cap for a data field (a tooltip line, a description), never a width: the cut is by code
+ * unit, as it always was, but half a surrogate pair is not a character (issue #418). A cap that landed
+ * between the halves of an emoji left a bare high surrogate in the page, and in the embedded JSON as the
+ * escaped text of one. Exported for the insights page, which caps its own fields with the same rule.
+ */
+export function clip(s, max) {
   const t = String(s);
-  return t.length > max ? `${t.slice(0, max)}…` : t;
+  return t.length > max ? `${wholeUnits(t, max)}\u2026` : t;
+}
+
+/**
+ * The longest start of `s` of at most `n` code units that ends BETWEEN clusters: never half a surrogate
+ * pair, and never half a flag, a keycap without its key, or a family without its last member, which a
+ * repair of the surrogate alone still left in a tooltip.
+ */
+function wholeUnits(s, n) {
+  let out = "";
+  for (const { segment } of GRAPHEMES.segment(s)) {
+    if (out.length + segment.length > n) break;
+    out += segment;
+  }
+  return out;
+}
+
+/**
+ * THE WIDTH OF A LABEL, in columns of CHAR_W pixels (issue #418). Chips were sized by `.length`, a code
+ * unit count used as a glyph count: a CJK skill name draws about twice the width its chip was sized
+ * for, and ran out of it.
+ *
+ * AN ESTIMATE THAT NEVER UNDER-COUNTS, not a measurement. There is no DOM here, and this module loads
+ * nothing, so the panel's width table cannot be reached; it is not the right measure anyway, because an
+ * SVG draws glyphs, not terminal cells. Three for an emoji (a pictographic or emoji-presentation code
+ * point past ASCII, which a browser draws wider than two columns), two for U+20E3, the code units it
+ * takes for a mark, a format character, anything else before U+1100 and U+2026 (the ellipsis every cut
+ * appends), and two for everything else: never less than the code-unit count chips were sized by.
+ * Held to the panel's table by a sweep in `graph-html.test.mjs`, the parity wire that a `from` clause
+ * would otherwise be: on every code point and every pair with U+FE0F, never narrower than the terminal
+ * width the panel measures. Measured in a browser at 14px: a CJK glyph is 13.9px, inside two columns,
+ * and an emoji 17.4 to 19.4px depending on the page's scale, inside three. What it does NOT cover is
+ * stated where the chips are cut.
+ */
+export function labelColumns(s) {
+  let n = 0;
+  for (const ch of String(s)) n += charColumns(ch);
+  return n;
+}
+
+function charColumns(ch) {
+  const cp = ch.codePointAt(0);
+  // A keycap's enclosing mark: the key is drawn at least as wide as an emoji.
+  if (cp === 0x20e3) return 2;
+  // AN EMOJI IS WIDER THAN TWO COLUMNS in a browser: measured at 17.4 to 19.4px at 14px depending on
+  // the page's scale, past the 16px two columns allow, so seven of them ran out of a full chip.
+  if (cp > 0x7f && /\p{Extended_Pictographic}|\p{Emoji_Presentation}/u.test(ch)) return 3;
+  // A MARK OR A FORMAT CHARACTER IS NOT FREE HERE, though a terminal draws most as nothing: a browser
+  // draws a spacing vowel sign, an enclosing mark and several format characters with an advance of their
+  // own, and counting them as nothing made Devanagari, Bengali and Myanmar labels that fitted when chips
+  // were sized by code units overflow once sized by this. So no code point ever counts below the code
+  // units it takes, which is the old sizing, and a label can only get a WIDER chip than it had.
+  if (/\p{M}|\p{Cf}/u.test(ch)) return ch.length;
+  if (cp < 0x1100 || cp === 0x2026) return ch.length;
+  return 2;
+}
+
+/**
+ * The columns a label DRAWS once it has been through `clipColumns`: that cut spends two columns on its
+ * ellipsis after a wide character and `labelColumns` counts the ellipsis as one, so a width built from
+ * `labelColumns` alone was one column short of the budget the cut had allowed for. ASCII is unchanged.
+ */
+export function drawnColumns(label) {
+  const n = labelColumns(label);
+  return label.endsWith("\u2026") && [...label].some((ch) => charColumns(ch) >= 2) ? n + 1 : n;
+}
+
+// The browser draws whole clusters, so a label is cut on cluster boundaries. A global, not a module.
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/**
+ * The first `max` COLUMNS of a label, cut between clusters, with an ellipsis when anything was cut.
+ *
+ * BY CLUSTER, not by code point: a code-point walk cut a flag into half a flag, a keycap into its base,
+ * and a family emoji into one of its members. AND THE ELLIPSIS COSTS TWO COLUMNS once the cut keeps a
+ * wide character: a browser draws it at about 14px, not 8, so seven emoji and an ellipsis ended three
+ * pixels past a full-width chip. An ASCII cut keeps its fourteen characters, so ASCII pages are
+ * byte-identical to what they were.
+ *
+ * WHAT IT STILL DOES NOT COVER, stated rather than hidden: scripts before U+1100 whose glyphs draw much
+ * wider than 8px (Malayalam, Myanmar, Tamil, Thai, and runs of wide Latin letters in a proportional font
+ * too), which this estimate counts at one column each.
+ */
+export function clipColumns(s, max) {
+  const t = String(s);
+  if (labelColumns(t) <= max) return t;
+  const kept = [];
+  let used = 0;
+  let wide = false;
+  for (const { segment } of GRAPHEMES.segment(t)) {
+    const cols = labelColumns(segment);
+    if (used + cols > max) break;
+    kept.push(cols);
+    used += cols;
+    // WIDE means a character that draws wide, not a cluster of two narrow ones: a CRLF is one cluster
+    // of two columns, and counting it as wide cut an ASCII label one character shorter than it was.
+    if ([...segment].some((c) => charColumns(c) >= 2)) wide = true;
+  }
+  let keep = kept.length;
+  if (wide) {
+    while (keep > 0 && used > max - 1) {
+      keep -= 1;
+      used -= kept[keep];
+    }
+  }
+  let out = "";
+  let taken = 0;
+  for (const { segment } of GRAPHEMES.segment(t)) {
+    if (taken === keep) break;
+    out += segment;
+    taken += 1;
+  }
+  return `${out}\u2026`;
 }
 
 /**
@@ -335,12 +457,12 @@ function cmpStr(a, b) {
 // ---- layout ----
 
 function chipLabel(n) {
-  if (n.kind === "trigger") return clip(n.label ?? n.onType ?? "trigger", CHIP_MAX_CHARS);
-  return clip(n.name ?? "(unnamed)", CHIP_MAX_CHARS);
+  if (n.kind === "trigger") return clipColumns(n.label ?? n.onType ?? "trigger", CHIP_MAX_COLS);
+  return clipColumns(n.name ?? "(unnamed)", CHIP_MAX_COLS);
 }
 
 function chipWidth(label) {
-  const raw = LABEL_X + label.length * CHAR_W + 12;
+  const raw = LABEL_X + drawnColumns(label) * CHAR_W + 12;
   const snapped = Math.ceil(raw / GRID) * GRID;
   return Math.min(NODE_MAX_W, Math.max(NODE_MIN_W, snapped));
 }
@@ -613,14 +735,14 @@ function computeSkillGroup(p, loops, subs) {
   let cy = SG_CHIP_Y + NODE_H + 14;
   const markers = [];
   for (const l of loops.slice(0, 3)) {
-    markers.push({ x: SG_CHIP_X, y: cy, w: SG_MARKER, h: SG_MARKER, hint: clip(l.hint, SG_HINT_CHARS), hintX: SG_CHIP_X + SG_MARKER + 6, hintY: cy + 24 });
+    markers.push({ x: SG_CHIP_X, y: cy, w: SG_MARKER, h: SG_MARKER, hint: clipColumns(l.hint, SG_HINT_CHARS), hintX: SG_CHIP_X + SG_MARKER + 6, hintY: cy + 24 });
     cy += SG_MARKER + 8;
   }
   const subPlaced = [];
   for (const s of subs) {
-    const label = clip(s.node.name ?? "(sub)", 16);
+    const label = clipColumns(s.node.name ?? "(sub)", 16);
     s.label = label;
-    s.w = Math.min(140, Math.max(80, 12 + label.length * 7));
+    s.w = Math.min(140, Math.max(80, 12 + drawnColumns(label) * 7));
     s.h = SUB_CHIP_H;
     s.nested = true;
     subPlaced.push({ p: s, x: SG_CHIP_X, y: cy });
@@ -854,7 +976,7 @@ function groupTitle(g, fullPaths) {
   }
   const name = fullPaths === true && typeof g.path === "string" && g.path !== "" ? g.path : g.label;
   if (g.unreachable !== null && g.unreachable !== undefined && g.unreachable !== "") return `${name} · ${g.unreachable}`;
-  if (g.head !== null && g.head !== undefined && g.head !== "") return `${name} · HEAD ${String(g.head).slice(0, 7)}`;
+  if (g.head !== null && g.head !== undefined && g.head !== "") return `${name} \u00b7 HEAD ${wholeUnits(String(g.head), 7)}`;
   return name;
 }
 

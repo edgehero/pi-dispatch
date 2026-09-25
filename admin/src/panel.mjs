@@ -772,6 +772,22 @@ export function dropLoneSurrogate(s) {
   return last >= 0xd800 && last <= 0xdbff ? s.slice(0, -1) : s;
 }
 
+/**
+ * The longest start of `s` of at most `n` CODE UNITS that ends between grapheme clusters (issue #418).
+ *
+ * For a cap that is a character count rather than a width, the frontmatter's and a flow name's in
+ * `graph-model.mjs`: `dropLoneSurrogate` after a code-unit slice repaired half a surrogate pair and still
+ * left half a flag, a keycap without its key, or a family ending in a joiner.
+ */
+export function cutUnits(s, n) {
+  let out = "";
+  for (const { segment } of GRAPHEMES.segment(String(s))) {
+    if (out.length + segment.length > n) break;
+    out += segment;
+  }
+  return out;
+}
+
 /** `clip` to `w`, then right-pad with spaces to exactly `w` COLUMNS (issue #401: not `.length`). */
 export function pad(line, w) {
   const width = Math.max(0, Math.trunc(w) || 0);
