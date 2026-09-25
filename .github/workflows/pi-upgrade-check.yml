@@ -516,8 +516,9 @@ jobs:
           echo "Reply with the single word ok." > "$JOB/prompt.md"
           chmod -R a+rX "$JOB"
           # Bounded, and it must reach the runner's own exit line: a container that never started (125, a name
-          # clash, the image) or a runner that stopped before its first turn would otherwise read as "no CONNECT",
-          # which the control below would take for success.
+          # clash, the image) or a runner that hung would otherwise read as "no CONNECT", which the control below
+          # would take for success. A runner that refused before its first turn still prints an exit line; the two
+          # runs differ only in NODE_USE_ENV_PROXY, so such a refusal would silence the armed run too and fail above.
           run_runner() {
             out=$(timeout 300 docker run --rm --network "$NET" -v "$JOB:/job:ro" \
               -e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \

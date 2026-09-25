@@ -184,7 +184,8 @@ const withBrokenEnumeration = () => makeReaper({ log: () => {}, bin: `pi-dispatc
  * The egress readings `egressVerdict` takes, from two containers on a job-shaped network under this account's Podman:
  * `createJobNetworkWith` builds it exactly as a job's is built (`--internal`, then the proxy attached), one probe must
  * reach the provider through the proxy and one must not reach an unlisted host. doctor's canary does the same on
- * docker; this is that method, not its code, because doctor's is written against the docker CLI.
+ * docker, and since issue #427 takes the runner's own route (pi loaded, then the runner's proxy restore); this is its
+ * older method with a plain `fetch`, not its code, because doctor's is written against the docker CLI (issue #431).
  */
 async function egressCanary() {
 	if (armed !== true) return { results: [], proxyRunning: null };

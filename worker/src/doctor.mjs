@@ -3252,7 +3252,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 				checks.push({
 					ok: false,
 					warn: true,
-					label: `Egress policy: not proved, because the job image has no ${EGRESS_CANARY_RUNNER_MODULE}: its runner predates issue #427, whose provider call goes around the proxy so that with egress armed every job fails at its first turn, or the image is not built from this project's`,
+					label: `Egress policy: not proved, because the job image could not find ${EGRESS_CANARY_RUNNER_MODULE} (or an import of it): its runner predates issue #427, whose provider call goes around the proxy so that with egress armed every job fails at its first turn, or the image is not built from this project's`,
 					fix: `use a job image built after issue #427 (ghcr.io/edgehero/pi-job:latest, or rebuild yours FROM it), or set PI_EGRESS=0 until you can`,
 					readBack: { property: "egress", want, reached: null },
 				});

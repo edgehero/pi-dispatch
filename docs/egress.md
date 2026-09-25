@@ -130,7 +130,7 @@ generator.
 
 The two policy lines each run a throwaway container on a throwaway network, using **your job image's own node and
 its runner's own module** (pi loaded, then the runner's proxy restore, issue #427), so they prove the route your jobs'
-provider calls take. (Before #427 they used a plain `fetch`, which never loads pi and stayed green while every job
+provider calls take once the runner has called that module; that it does, before its first request, is checked in CI. (Before #427 they used a plain `fetch`, which never loads pi and stayed green while every job
 failed.) They cost nothing: `api.anthropic.com` answers `401` to an
 unauthenticated request, so reaching the provider and being refused for the key proves the whole path
 without spending a token. The deny probe asks for `example.com`, a host that resolves and answers, so a proxy
@@ -190,7 +190,7 @@ repairs this when it starts, and the runner does not start pi through its CLI. T
 env-proxy dispatcher itself, from pi's own `undici`, right after pi is loaded, and only when
 `NODE_USE_ENV_PROXY=1`. `pi-dispatch doctor`'s canary now loads pi and uses the runner's module the same way.
 Before, it was a plain `fetch` and stayed green through all of this. On a job image built before the fix, the
-canary says the image has no such module, rather than reporting a policy result. That the runner's entrypoint
+canary says the image cannot find that module, rather than reporting a policy result. That the runner's entrypoint
 calls the module, before its first request, is checked in CI, where the job image's contract job runs the real
 entrypoint against a stub proxy.
 
