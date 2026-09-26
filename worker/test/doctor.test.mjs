@@ -761,6 +761,9 @@ test("doctor: the in-image probe passes the token via the spawn env, never argv"
 	const run = calls.find((c) => c.cmd === "docker" && c.args[0] === "run" && c.args.includes("gh"));
 	assert.ok(run, "the in-image probe spawned docker run");
 	assert.equal(run.args[run.args.indexOf("--entrypoint") + 1], "gh", "the image entrypoint is overridden to gh");
+	// Exact (issue #433 review round 1): the podman venue's pins ride only the podman probe; docker's CLI has no
+	// containers.conf defaults to pin, and a podman-only flag here would make docker refuse the probe.
+	assert.deepEqual(run.args, ["run", "--rm", "--pull=never", "-e", "GH_TOKEN", "-e", "GITHUB_TOKEN", "--entrypoint", "gh", "pi-job:latest", "auth", "status"]);
 	// value-less -e flags: only the names appear in argv, the values ride the spawn env
 	assert.deepEqual(run.args.filter((_, i) => run.args[i - 1] === "-e"), ["GH_TOKEN", "GITHUB_TOKEN"]);
 	assert.ok(!run.args.some((a) => a.includes("gho_fake_mint_123")), "the token never enters argv");
@@ -5807,15 +5810,16 @@ const podmanEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY
 const podmanDeps = (out, plan, calls, extra = {}) => ({ ...ghDeps(out, plan, calls), home: PODMAN_HOME, observationFs: podmanFs, jobUserIdentity: LINUX_ID(1234), ...extra });
 
 // Issue #433: a deployment that blesses BOTH venues keeps doctor's output byte for byte. Captured from main at 98f2857,
-// before the podman-only change, in three shapes: every docker read green (with a trigger-named image, the gh probe, the
-// egress canary and a peer to compare digests with), docker absent under --fix with every offer declined, and a docker
-// daemon that answered with the job image missing. The temp paths a run makes are the only thing replaced.
+// before the podman-only change, in four shapes: every docker read green (with a trigger-named image, the gh probe, the
+// egress canary and a peer to compare digests with), docker absent under --fix with every offer declined, a docker
+// daemon that answered with the job image missing, and (review round 1) the podman store without the job image under
+// --fix with every offer ACCEPTED, where main offers and runs nothing. The temp paths a run makes are the only thing replaced.
 const mixedPinRun = async (scenario) => {
 	const triggers = triggersFile(undefined, "my-python:1.2.0");
 	const cwd = tempDir("pi-mixed-pin-cwd-");
 	const jobs = tempDir("pi-mixed-pin-jobs-");
 	const env = podmanEnv({ PI_BACKENDS: "local,podman", PI_WORKER_NAME: "mini1", PI_TRIGGERS_FILE: triggers, PI_JOBS_DIR: jobs, ...(scenario === "green" ? { PI_EGRESS: "1", GITHUB_AUTH_SOURCE: "gh" } : {}) });
-	const { docker: _absent, ...podmanOnly } = podmanPlan();
+	const { docker: _absent, ...podmanOnly } = podmanPlan({ image: scenario !== "podmanMissing" });
 	const plan =
 		scenario === "absent"
 			? podmanPlan()
@@ -5834,7 +5838,7 @@ const mixedPinRun = async (scenario) => {
 	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 	const { out, text } = capture();
 	const calls = [];
-	const code = await runDoctor(env, podmanDeps(out, plan, calls, { cwd, agentDir: NO_AGENT_DIR, readHosts: async () => ({ hosts: [{ name: "mini2", tz, imageDigest: "sha256:bbbb" }] }), ...(scenario === "absent" ? { fix: true, promptFn: async () => false } : {}) }));
+	const code = await runDoctor(env, podmanDeps(out, plan, calls, { cwd, agentDir: NO_AGENT_DIR, readHosts: async () => ({ hosts: [{ name: "mini2", tz, imageDigest: "sha256:bbbb" }] }), ...(scenario === "absent" ? { fix: true, promptFn: async () => false } : {}), ...(scenario === "podmanMissing" ? { fix: true, promptFn: async () => true } : {}) }));
 	return { code, calls, text: text().replaceAll(triggers, "<triggers>").replaceAll(cwd, "<cwd>").replaceAll(jobs, "<jobs>").replaceAll(tz, "<tz>") };
 };
 // The em dashes some of these lines carry are the output's own (labels older than this change), written as escapes.
@@ -5986,12 +5990,65 @@ const MIXED_PIN = {
 			"",
 		].join("\n"),
 	},
+	podmanMissing: {
+		code: 1,
+		text: [
+			"✓ Node ≥ 22.19 (have 22.19.0)",
+			"✓ .env present",
+			"✓ Docker daemon reachable",
+			"✓ Job image present (pi-job:latest)",
+			"⚠ Trigger flow \"review\" resolves in NO tier visible here (cron \"nightly\")",
+			"    → checked: staged packages; not checkable here: repo (/srv/repo is not readable as a git repo here) -- commit .pi/skills/review/SKILL.md, add the skill to run.skillsDir or the overlay skills/, or stage a package shipping it; a job of this trigger runs without the flow it names (the runner logs flow_not_loaded) and still exits 0",
+			"✓ Trigger job image present (my-python:1.2.0)",
+			"✓ Jobs run on: local, podman (a trigger that names none runs on local; run.backend selects)",
+			"⚠ local: isolation is ASSERTED by the daemon, not enforced: the daemon answered in a shape nothing here reads (unparseable)",
+			"    → the pid and memory bounds in the job argv are the daemon's to apply, and it is not observed applying them: `pi-dispatch doctor --live` reads pids.max and memory.max off a real container on this daemon. The worker logs its own answer at boot (worker_started.daemonAppliesBounds)",
+			"⚠ local: mountSet is ASSERTED by the container runtime's configuration, not enforced: the daemon answered in a shape nothing here reads (unparseable)",
+			"    → Podman mounts what its mounts.conf and containers.conf list into every job container, invisible to docker inspect: create an empty /etc/containers/mounts.conf and remove any volumes or mounts key. The worker logs its own answer at boot (worker_started.runtimeAddsNoMounts)",
+			"⚠ local: egress CAN be enforced here, but PI_EGRESS is off, so this deployment is not getting it",
+			"    → arm PI_EGRESS to get it (the job reaches only what the allowlist proxy permits (CONST-EGRESS-POLICY-IN-THE-ARGV))",
+			"⚠ local: jobToJobIsolation CAN be enforced here, but PI_EGRESS is off, so this deployment is not getting it",
+			"    → arm PI_EGRESS to get it (two jobs cannot reach each other, structurally rather than by policy)",
+			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or on a daemon that enforces bind-mount ownership and a worker uid other than 1001 the worker's own non-zero uid passed as `--user`, not enforced by it",
+			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
+			"⚠ podman: egress CAN be enforced here, but PI_EGRESS is off, so this deployment is not getting it",
+			"    → arm PI_EGRESS to get it (the job reaches only what the allowlist proxy permits (CONST-EGRESS-POLICY-IN-THE-ARGV))",
+			"⚠ podman: jobToJobIsolation CAN be enforced here, but PI_EGRESS is off, so this deployment is not getting it",
+			"    → arm PI_EGRESS to get it (two jobs cannot reach each other, structurally rather than by policy)",
+			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
+			"⚠ local: which uid a job runs as could not be read from the daemon's answer (runtime-unreadable) -- every local job is refused",
+			"    → the docker CLI answered `docker info` with something no rule can read, so which uid a job may run as is unknown; point the real docker CLI at a Docker or Podman daemon",
+			"✓ podman: `podman info` answered as this account (Podman 5.8.1, rootless, this host's own)",
+			"✓ podman: cgroup v2 controllers are delegated to this account (cpuset, cpu, io, memory, pids), so a job's pid, memory and cpu bounds are applied",
+			"✓ podman: SELinux does not confine containers here, so nothing a job mounts is relabelled",
+			"✗ podman: job image is not in this account's Podman store (pi-job:latest)",
+			"    → pull or load it AS THE WORKER'S ACCOUNT, since rootless Podman keeps one image store per account: podman pull ghcr.io/edgehero/pi-job:latest && podman tag ghcr.io/edgehero/pi-job:latest pi-job:latest (or `docker save pi-job:latest | podman load`) -- jobs run with --pull=never, so the worker never fetches it",
+			"✓ podman: jobs run as uid:gid 1234:1234 (passed as --user, with --userns=keep-id) with HOME=/home/pi, once the job image is in this account's store and declares anyUid",
+			"✓ Valkey reachable (redis://127.0.0.1:6379)",
+			"✓ Fleet: 2 workers (mini1, mini2)",
+			"⚠ Job image digest differs from the other host",
+			"    → rebuild or re-pull so every host runs the same image; digests are identical only when both hosts pulled one tag from one registry, so two local builds differ legitimately",
+			"✓ Provider key set (anthropic: ANTHROPIC_API_KEY)",
+			"⚠ PI_PAUSE_WINDOWS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped pauses cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h \u2014 re-open one with `pi-dispatch sandbox <jobId>`",
+			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
+			"",
+			"doctor: some checks failed \u2014 fix the above, then re-run.",
+			"",
+		].join("\n"),
+	},
 };
 test("a deployment that blesses local and podman prints exactly what it printed before issue #433 (#433)", async () => {
 	for (const [scenario, want] of Object.entries(MIXED_PIN)) {
 		const got = await mixedPinRun(scenario);
 		assert.equal(got.text, want.text, `${scenario}: the mixed deployment's output moved`);
 		assert.equal(got.code, want.code, `${scenario}: exit code`);
+		// Round 1 (D1): with local listed, a podman store without the image gets no `--fix` pull, even when every offer
+		// would be accepted; the output above already shows no offer, and nothing was run either.
+		assert.deepEqual(got.calls.filter((c) => c.args[0] === "pull"), [], `${scenario}: no pull ran`);
 	}
 });
 
@@ -6295,7 +6352,9 @@ test("a podman-only deployment on a host that also has docker: docker is not ask
 	// The probe runs where this deployment's jobs start, with docker's argv, the token only in the spawn env.
 	const probes = calls.filter((c) => c.cmd === "podman" && c.args[0] === "run");
 	assert.equal(probes.length, 1, "one probe");
-	assert.deepEqual(probes[0].args, ["run", "--rm", "--pull=never", "-e", "GH_TOKEN", "-e", "GITHUB_TOKEN", "--entrypoint", "gh", "pi-job:latest", "auth", "status"]);
+	// Review round 1: with the podman venue's pins, written out rather than imported, so a probe that drops one fails here.
+	// Without `--env-host=false` an account's `env_host = true` would copy doctor's whole environment into the container.
+	assert.deepEqual(probes[0].args, ["run", "--rm", "--pull=never", "--pid=private", "--ipc=private", "--uts=private", "--cgroupns=private", "--env-host=false", "--http-proxy=false", "-e", "GH_TOKEN", "-e", "GITHUB_TOKEN", "--entrypoint", "gh", "pi-job:latest", "auth", "status"]);
 	assert.equal(probes[0].opts?.env?.GH_TOKEN, "gho_x");
 	assert.ok(!probes[0].args.some((a) => a.includes("gho_x")), "never in argv");
 	assert.match(text(), /⚠ GITHUB_AUTH_SOURCE=gh forwards[^\n]*\n[^\n]*\n✓ podman: gh authenticates inside the job image \(pi-job:latest\)\n/);
@@ -6397,6 +6456,60 @@ test("podman-only: a trigger-named image is asked of this account's Podman store
 		assert.deepEqual(asked, [cli], `${PI_BACKENDS} run.backend=${backend}: ${r.text}`);
 		assert.match(r.text, cli === "podman" ? /✓ podman: trigger job image present in this account's Podman store \(my-python:1\.2\.0\)/ : /✓ Trigger job image present \(my-python:1\.2\.0\)/);
 	}
+});
+
+test("podman-only: trigger images are not asked of a Podman store that did not answer for the default image (#433)", async () => {
+	// The section's own `podman info` answers; the image preflight's disambiguating second one does not, so the store's
+	// answer about the default image is "unavailable", and asking it about a trigger's image would be noise on top.
+	let infos = 0;
+	const calls = [];
+	const { out, text } = capture();
+	await runDoctor(
+		podmanEnv({ PI_TRIGGERS_FILE: triggersFile(undefined, "my-python:1.2.0") }),
+		podmanDeps(out, { "podman image inspect my-python:1.2.0": 0, ...podmanPlan({ image: false }), "podman info": () => (++infos === 1 ? { code: 0, output: `${PODMAN_INFO()}\n` } : { code: 125, output: "" }) }, calls),
+	);
+	assert.match(text(), /⚠ podman: whether the job image is in this account's Podman store could not be read \(pi-job:latest\)/);
+	assert.ok(!calls.some((c) => c.args.includes("my-python:1.2.0")), "no trigger image asked of a store that did not answer");
+	assert.doesNotMatch(text(), /trigger job image/);
+});
+
+test("podman-only: the `--fix` podman pull runs under the LONG bound, not the default one (#433)", async () => {
+	// docker's pull pin, for the podman pull: by the clock, since the bound is not in the argv.
+	const checks = await collectChecks(podmanEnv(), { ...podmanDeps(() => {}, podmanPlan({ image: false }), []), cwd: tempDir("pi-433-bound-"), readHosts: async () => ({ hosts: [] }), agentDir: NO_AGENT_DIR, runTimeouts: FAST_TIMEOUTS });
+	const image = checks.find((c) => c.label === "podman: job image is not in this account's Podman store (pi-job:latest)");
+	assert.ok(image?.fixAction, "the podman image line offers the pull");
+	const began = Date.now();
+	const res = await image.fixAction.run({ spawn: fakeSpawn({ "podman pull": "hang", podman: 0 }) });
+	const took = Date.now() - began;
+	assert.equal(res.ok, false);
+	assert.match(res.note, /podman pull did not finish within/);
+	assert.ok(took >= FAST_TIMEOUTS.pull - 5, `waited ${took}ms, which is the PULL bound (${FAST_TIMEOUTS.pull}) and not the default (${FAST_TIMEOUTS.cmd})`);
+});
+
+test("a trigger whose run.backend names a venue PI_BACKENDS does not list fails doctor, in both directions (#433)", async () => {
+	const run = async (env, plan, backend) => {
+		const { out, text } = capture();
+		const code = await runDoctor({ ...env, PI_TRIGGERS_FILE: triggersFile(undefined, undefined, { backend }) }, podmanDeps(out, plan, []));
+		return { code, text: text() };
+	};
+	const onPodman = await run(podmanEnv(), podmanPlan(), "local");
+	assert.equal(onPodman.code, 1);
+	assert.ok(onPodman.text.includes('✗ run.backend "local" is not in PI_BACKENDS (podman), so every job of cron "nightly" is refused (backend-unblessed)\n    → add local to PI_BACKENDS, or change run.backend on that trigger to a venue PI_BACKENDS lists -- the worker refuses each such job before it spends\n'), onPodman.text);
+	const onLocal = await run({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0" }, { ...green }, "podman");
+	assert.ok(onLocal.text.includes('✗ run.backend "podman" is not in PI_BACKENDS (local), so every job of cron "nightly" is refused (backend-unblessed)'), onLocal.text);
+	// A blessed venue says nothing, on either kind of deployment.
+	for (const [env, plan, backend] of [
+		[podmanEnv(), podmanPlan(), "podman"],
+		[podmanEnv({ PI_BACKENDS: "local,podman" }), { ...green, ...podmanPlan() }, "local"],
+		[podmanEnv({ PI_BACKENDS: "local,podman" }), { ...green, ...podmanPlan() }, "podman"],
+	]) {
+		assert.doesNotMatch((await run(env, plan, backend)).text, /backend-unblessed/, `${env.PI_BACKENDS} ${backend}`);
+	}
+	// An unparseable PI_BACKENDS is the backend section's failure, not a verdict on every trigger: doctor otherwise reads
+	// it as the unset default (local alone), against which "podman" would be judged unblessed by a guessed list.
+	const unparsed = await run(podmanEnv({ PI_BACKENDS: "local,nonsense" }), { ...green, ...podmanPlan() }, "podman");
+	assert.match(unparsed.text, /✗ backend configuration does not parse/);
+	assert.doesNotMatch(unparsed.text, /backend-unblessed/);
 });
 
 test("podman-only: Valkey's fix points at the podman route, and --fix never runs docker for it (#433)", async () => {

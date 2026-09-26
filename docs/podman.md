@@ -372,8 +372,10 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
 5. **The job image, in this account's own store.** A rootless account does not see root's images or another
    user's: `podman pull ghcr.io/edgehero/pi-job:latest` as the account, then set `PI_JOB_IMAGE` to the name
    `podman images` shows. `--pull=never` resolves a short name such as `pi-job:latest` to `localhost/pi-job:latest`
-   with no registry lookup (measured). For the default image, `pi-dispatch doctor --fix` run as the account offers
-   exactly that: `podman pull ghcr.io/edgehero/pi-job:latest`, then `podman tag` to `pi-job:latest`. The image must declare `anyUid` unless the account is uid 1001; releases
+   with no registry lookup (measured). With `PI_BACKENDS=podman` and `PI_JOB_IMAGE` left unset, `pi-dispatch doctor
+   --fix` run as the account offers the pull for you: `podman pull ghcr.io/edgehero/pi-job:latest`, then `podman tag`
+   to `pi-job:latest`, which is the default `PI_JOB_IMAGE`, so there is nothing to set. It offers nothing while
+   `local` is also listed, or for a `PI_JOB_IMAGE` you chose. The image must declare `anyUid` unless the account is uid 1001; releases
    since issue #341 do.
 6. **The egress proxy, under the same rootless Podman, on a named bridge network.** The worker attaches the proxy to
    each job's `--internal` network by name, and only a container on a named network can be attached: measured, a
@@ -412,7 +414,10 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    here runs on Docker`, and the podman section's image line is the image check (✗ while the job image is not in
    this account's store). A trigger's `run.image` is looked for in the store of the venue that trigger runs on
    (`run.backend`, else the first venue in `PI_BACKENDS`), and the in-image `gh auth status` check runs through
-   `podman` once the job image is in this account's store and a podman job could run there.
+   `podman` once the job image is in this account's store and a podman job could run there, with the venue's pinned
+   flags, so an `env_host = true` in containers.conf copies nothing of doctor's environment into it. A trigger whose
+   `run.backend` names a venue `PI_BACKENDS` does not list fails doctor with that trigger named: the worker refuses
+   every one of its jobs (`backend-unblessed`).
 
 On an SELinux host, the worker's own per-job directories carry `:Z` exactly as on the Docker API route, decided from
 `podman info`'s `selinuxEnabled`, and an operator's local folder and `PI_GLOBAL_PI_DIR` need the one-time
