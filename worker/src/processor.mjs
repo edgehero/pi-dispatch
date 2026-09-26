@@ -399,7 +399,8 @@ export async function runJob(job, deps) {
 		// refused for not being known, which is a different sentence. A read that failed for a moment (`transient`) is
 		// infrastructure, so it throws and is retried, pre-reserve, exactly like an unanswered observation.
 		if (observed?.podmanConfRefused?.transient) {
-			throw new InfraRetry("the podman venue's containers.conf could not be read just now, so whether it widens a job is not known", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			// `evidence` names the file (`<path> could not be read (<errno>)`), so the retry says which one.
+			throw new InfraRetry(`the podman venue's containers.conf could not be read just now, so whether it widens a job is not known (${observed.podmanConfRefused.evidence ?? "no file named"})`, { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 		}
 		if (observed?.podmanConfRefused) {
 			await comment(

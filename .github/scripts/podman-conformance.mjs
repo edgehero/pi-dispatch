@@ -147,6 +147,7 @@ async function awaitRunning(name, ms = 60_000) {
 // Set when the venue refuses the probe outright, so the summary says that ONE thing and stops: every later check would
 // report a consequence of it (an unread uid, probes that never ran) as if it were a finding of its own.
 let venueRefused = null;
+let venueTransient = false;
 
 /** The harness's `probe`: one real job container through the bundle, exiting `exitCode` or stopped by the worker. */
 async function probe(bundle, { exitCode, aborted = false }) {
@@ -164,7 +165,8 @@ async function probe(bundle, { exitCode, aborted = false }) {
 	// it, and the processor refuses on either before the image preflight. A probe past them would read back a container
 	// no real job gets.
 	if (observed.jobUserRefused || observed.podmanConfRefused) {
-		venueRefused = `observationPreflight refused the probe: ${JSON.stringify({ jobUserRefused: observed.jobUserRefused, podmanConfRefused: observed.podmanConfRefused })}`;
+		venueTransient = observed.podmanConfRefused?.transient === true && !observed.jobUserRefused;
+		venueRefused = `observationPreflight ${venueTransient ? "could not decide" : "refused"} the probe: ${JSON.stringify({ jobUserRefused: observed.jobUserRefused, podmanConfRefused: observed.podmanConfRefused })}`;
 		throw new Error(venueRefused);
 	}
 	const img = await bundle.imagePreflight(job);
@@ -284,7 +286,9 @@ try {
 
 // --- the summary: every finding, then what this run adds to the harness's own verdict ---
 if (venueRefused) {
-	console.log(`\nFAILED: the podman venue refuses every job on this host, so nothing below it was measured.\n  - ${venueRefused}`);
+	// A transient conf read is a retry the worker would make, not a refusal of every job, so it is worded as what it is.
+	const lead = venueTransient ? "the podman venue could not read this account's containers.conf just now (a worker would retry the job)" : "the podman venue refuses every job on this host";
+	console.log(`\nFAILED: ${lead}, so nothing below it was measured.\n  - ${venueRefused}`);
 	process.exit(1);
 }
 const failures = [];

@@ -1854,9 +1854,9 @@ test("a podman conf that could not be read whole is refused without claiming it 
 	assert.equal(unread.r.reason, "podman-conf-widens-job");
 	assert.match(unread.texts[0], /could not be read in full, or is written in a form the worker does not decode, so whether it lets a job's container reach more than this venue allows is not known/);
 	assert.doesNotMatch(unread.texts[0], /configuration lets a job's container reach more/, "an unread conf is not said to widen");
-	const busy = await run({ reason: "podman-conf-widens-job", key: null, message: "Not read yet: ...", transient: true });
+	const busy = await run({ reason: "podman-conf-widens-job", key: null, message: "Not read yet: ...", transient: true, evidence: "/etc/containers/containers.conf could not be read (EMFILE)" });
 	assert.ok(busy.error instanceof InfraRetry, "a transient read is infrastructure: thrown, so the queue retries it");
-	assert.equal(busy.error.message, "the podman venue's containers.conf could not be read just now, so whether it widens a job is not known");
+	assert.equal(busy.error.message, "the podman venue's containers.conf could not be read just now, so whether it widens a job is not known (/etc/containers/containers.conf could not be read (EMFILE))");
 	assert.deepEqual([busy.texts.length, busy.incr], [0, 0], "no comment, nothing reserved");
 });
 

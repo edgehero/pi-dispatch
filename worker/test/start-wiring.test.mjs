@@ -2924,6 +2924,22 @@ test("podmanConfBootRefusal: only while podman is the default venue and its iden
 	assert.equal(mod.podmanConfBootRefusal(worker, "podman", { ...files, fs: NO_HOST_FILES }), null, "a clean account boots");
 });
 
+test("local's observation preflight retries a host file read that failed for a moment, naming the file (#428)", { skip: skipNoModule }, async () => {
+	// Boots clean, then the hooks directory starts failing with EMFILE, as a host running out of descriptors would.
+	let failing = false;
+	const base = hostFiles({ "/etc/containers/mounts.conf": "" });
+	const fs = {
+		...base,
+		readdirSync: (p) => {
+			if (failing && p === "/etc/containers/oci/hooks.d") throw Object.assign(new Error("EMFILE"), { code: "EMFILE" });
+			return base.readdirSync(p);
+		},
+	};
+	const { captured } = await runStart({ env: { PI_BACKEND_FLOOR: "mountSet=enforced" }, readDaemonFacts: PODMAN_FACTS(), observationFs: fs, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
+	failing = true;
+	assert.deepEqual(await captured.deps.observationPreflight({ id: "j1", kind: "local" }), { unavailable: true, reason: "file-unread", message: "/etc/containers/oci/hooks.d could not be read (EMFILE)" });
+});
+
 test("podmanBootRefusal: only a boot-refusing cause, and only while podman is the default venue (#354)", { skip: skipNoModule }, () => {
 	for (const cause of ["podman-platform", "podman-not-found", "podman-remote", "podman-rootful", "worker-is-root"]) {
 		assert.match(mod.podmanBootRefusal({ mode: "unmappable", cause }, "podman"), /^Refused: .*\(issue #354\)\.$/, cause);

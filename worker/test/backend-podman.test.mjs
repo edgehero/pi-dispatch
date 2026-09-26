@@ -416,6 +416,10 @@ test("a podman observation's host file read failing for a moment is not answered
 		assert.equal(busy.reasons[PODMAN_ADDS_NO_MOUNTS], "file-unread", label);
 		assert.equal(observe(answered(), fs("EACCES")).observations[PODMAN_ADDS_NO_MOUNTS], false, `${label} EACCES`);
 	}
+	// The bounds observation reads the same chain (for a cgroups key); its transient null carries the same reason.
+	const chainBusy = observe(answered(), fakeFs({ files: { [USER_MOUNTS]: "" }, errors: { "/etc/containers/containers.conf": "EMFILE" } }));
+	assert.equal(chainBusy.observations[PODMAN_BOUNDS_DELEGATED], null);
+	assert.equal(chainBusy.reasons[PODMAN_BOUNDS_DELEGATED], "file-unread");
 	// Through the bundle: a floor naming mountSet is retried with the file named, never refused, never "unknown".
 	const out = await bundle({ fs: mountsFailing("EMFILE"), backendFloor: { mountSet: ENFORCED } }).observationPreflight(JOB);
 	assert.deepEqual(out, { unavailable: true, reason: "file-unread", message: `${USER_MOUNTS} could not be read (EMFILE)` });
@@ -558,7 +562,7 @@ test("the podman observationPreflight hands a widening containers.conf back as a
 	assert.equal(late.unavailable, undefined);
 	// A conf that could not be read for a moment rides the same field marked `transient`, for the processor to retry.
 	const busy = await bundle({ fs: fakeFs({ files: { [USER_MOUNTS]: "" }, errors: { "/etc/containers/containers.conf": "EMFILE" } }) }).observationPreflight(JOB);
-	assert.deepEqual([busy.podmanConfRefused?.transient, busy.podmanConfRefused?.key], [true, null]);
+	assert.deepEqual([busy.podmanConfRefused?.transient, busy.podmanConfRefused?.key, busy.podmanConfRefused?.evidence], [true, null, "/etc/containers/containers.conf could not be read (EMFILE)"]);
 });
 
 test("the podman jobUserPreflight decides from the observed read, reads podman info once, and logs changes only", { skip }, async () => {

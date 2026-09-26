@@ -221,6 +221,9 @@ test("confKeyFinding withholds credit on a non-ASCII character or a multi-line s
 		assert.equal(at(`# ${String.fromCharCode(code)}\n`)?.spelling, "non-ascii", `U+${code.toString(16).toUpperCase().padStart(4, "0")}`);
 	}
 	assert.equal(at("# \u007f\n"), null, "DEL is ASCII");
+	// A line holding BOTH is named for its non-ASCII character, the rule `unreadSpelling` states.
+	assert.equal(at(`label = """caf\u00e9\n"""\n`)?.spelling, "non-ascii");
+	assert.match(at(`label = """caf\u00e9\n"""\n`).evidence, /line 1 has a non-ASCII character/);
 	// A file that sets a real key AND has a non-ASCII comment is named for the KEY, which is the actionable fix.
 	assert.deepEqual(at('# caf\u00e9\n[containers]\nvolumes = ["/:/host"]\n'), { value: false, evidence: `/c.conf ${MOUNT_KEY_SAYS}` });
 	// A plain-ASCII file with a single-quoted string, a double-quoted one and a commented key still passes.

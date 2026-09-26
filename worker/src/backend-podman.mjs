@@ -638,7 +638,7 @@ export function makePodmanBackend(opts = {}) {
 		// ahead of the image preflight and every spend. Re-read per job, so removing the key needs no restart.
 		const widened = podmanConfWidening({ fs, home, env, euid });
 		// A transient read rides the same field with `transient: true`, which the processor retries rather than refuses.
-		if (widened) return { ok: true, podman: read, podmanConfRefused: { reason: PODMAN_CONF_WIDENS_JOB, key: widened.key, message: podmanConfRefusal(widened), ...(widened.transient ? { transient: true } : {}) } };
+		if (widened) return { ok: true, podman: read, podmanConfRefused: { reason: PODMAN_CONF_WIDENS_JOB, key: widened.key, message: podmanConfRefusal(widened), ...(widened.transient ? { transient: true, evidence: widened.evidence } : {}) } };
 		const observed = observePodman({ read, fs, home, env, euid });
 		if (podmanObservationKey(observed) !== observedSaid) {
 			observedSaid = podmanObservationKey(observed);

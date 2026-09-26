@@ -3812,7 +3812,7 @@ export function backendChecks(env, { endpoint = null, daemon = null, fs = { stat
 						ok: false,
 						warn: true,
 						label: `${name}: ${property} is ASSERTED by ${by}, not enforced: ${podman.evidence?.[d.observedBy] ?? "not observed"}`,
-						fix: unread ? `nothing shows whether ${OBSERVATIONS[d.observedBy]}; fix what stops \`podman info\` answering for the worker's account, then re-run doctor` : OBSERVATION_FIX[d.observedBy],
+						fix: !unread ? OBSERVATION_FIX[d.observedBy] : podman.reasons?.[d.observedBy] === "file-unread" ? fileUnreadFix(OBSERVATIONS[d.observedBy]) : `nothing shows whether ${OBSERVATIONS[d.observedBy]}; fix what stops \`podman info\` answering for the worker's account, then re-run doctor`,
 					});
 					continue;
 				}
@@ -3829,7 +3829,9 @@ export function backendChecks(env, { endpoint = null, daemon = null, fs = { stat
 					warn: true,
 					label: `${name}: ${property} is ASSERTED by ${bounds ? "the daemon" : "the container runtime's configuration"}, not enforced: ${observed.evidence[d.observedBy] ?? "not observed"}`,
 					fix: unread
-						? `nothing shows whether ${OBSERVATIONS[d.observedBy]}; fix what stops the daemon answering, then re-run doctor. The worker logs its own answer at boot (worker_started.${d.observedBy})`
+						? observed.reasons?.[d.observedBy] === "file-unread"
+							? `${fileUnreadFix(OBSERVATIONS[d.observedBy])}. The worker logs its own answer at boot (worker_started.${d.observedBy})`
+							: `nothing shows whether ${OBSERVATIONS[d.observedBy]}; fix what stops the daemon answering, then re-run doctor. The worker logs its own answer at boot (worker_started.${d.observedBy})`
 						: bounds
 							? `the pid and memory bounds in the job argv are the daemon's to apply, and it is not observed applying them: \`pi-dispatch doctor --live\` reads pids.max and memory.max off a real container on this daemon. The worker logs its own answer at boot (worker_started.${d.observedBy})`
 							: `Podman mounts what its mounts.conf and containers.conf list into every job container, invisible to docker inspect: create an empty /etc/containers/mounts.conf and remove any volumes or mounts key. The worker logs its own answer at boot (worker_started.${d.observedBy})`,
@@ -4065,6 +4067,15 @@ function dockerUnlessLocal(localUsed, check) {
 
 /** The podman venue's observations (issue #354), which only its own `podman info` and this account's files answer. */
 const PODMAN_OBSERVATIONS = new Set([PODMAN_BOUNDS_DELEGATED, PODMAN_ADDS_NO_MOUNTS, PODMAN_SERVICE_LOCAL]);
+
+/**
+ * The fix for an observation left unanswered by a HOST FILE that could not be read for a moment (`reason:
+ * "file-unread"`, issue #428), where the runtime itself answered: the label above already names the file, so this says
+ * what that means and that the worker retries, rather than sending the operator after a daemon that is fine.
+ */
+function fileUnreadFix(what) {
+	return `nothing shows whether ${what}, because the file named above could not be read just now (the runtime itself answered); a job the floor needs it for is retried rather than refused, so if this recurs, fix what the host ran out of (file descriptors, memory, a failing disk), then re-run doctor`;
+}
 
 /**
  * The podman venue's section (issue #354, DES-PODMAN-NATIVE-ROOTLESS-BACKEND): ONE bounded `podman info` as this shell's

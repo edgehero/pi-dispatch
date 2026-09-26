@@ -5910,6 +5910,26 @@ test("a widening containers.conf is a podman venue refusal: ✗ where podman is 
 	assert.match(live.text(), /⚠ read back on podman: not run -- a podman job is refused here \(podman-conf-widens-job\)[^\n]*\n {4}→ fix the podman containers\.conf line above first/);
 });
 
+test("doctor names a host file read that failed for a moment as that, not as a runtime that did not answer, on both venues (#428)", async () => {
+	// podman: the account's own mounts.conf stat fails with EMFILE; podman info answered.
+	const mountsPath = `${PODMAN_HOME}/.config/containers/mounts.conf`;
+	const emfile = (p) => {
+		throw Object.assign(new Error(`EMFILE: ${p}`), { code: "EMFILE" });
+	};
+	const { out, text } = capture();
+	await runDoctor(podmanEnv(), podmanDeps(out, podmanPlan(), [], { observationFs: { ...podmanFs, statSync: (p) => (p === mountsPath ? emfile(p) : podmanFs.statSync(p)) } }));
+	assert.match(text(), new RegExp(`⚠ podman: mountSet is ASSERTED by this account's Podman setup, not enforced: ${mountsPath.replaceAll(".", "\\.")} could not be read \\(EMFILE\\)\\n {4}→ nothing shows whether [^\\n]*because the file named above could not be read just now \\(the runtime itself answered\\); a job the floor needs it for is retried`));
+	assert.doesNotMatch(text(), /fix what stops `podman info` answering/);
+	// local, on a rootful Podman's Docker API: the hooks directory read fails with EMFILE; the daemon answered.
+	const endpoint = { local: true, context: "podman", endpoint: "unix:///run/podman/podman.sock" };
+	const daemon = { answered: true, facts: parseDaemonFacts(PODMAN_COMPAT_INFO).facts };
+	const fs = { ...withOverride, readdirSync: (p) => (p === "/etc/containers/oci/hooks.d" ? emfile(p) : withOverride.readdirSync(p)) };
+	const line = backendChecks({}, { endpoint, daemon, fs }).find((c) => c.label.startsWith("local: mountSet is ASSERTED"));
+	assert.match(line.label, /not enforced: \/etc\/containers\/oci\/hooks\.d could not be read \(EMFILE\)/);
+	assert.match(line.fix, /because the file named above could not be read just now \(the runtime itself answered\); a job the floor needs it for is retried/);
+	assert.doesNotMatch(line.fix, /fix what stops the daemon answering/);
+});
+
 test("the podman job image is read from THIS account's store, and its anyUid rule is the podman venue's (#354)", async () => {
 	const run = async (plan, ids = LINUX_ID(1234)) => {
 		const { out, text } = capture();
