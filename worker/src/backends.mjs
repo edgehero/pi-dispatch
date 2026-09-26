@@ -741,6 +741,27 @@ export function parseBackendList(raw, { known = BACKEND_NAMES } = {}) {
 }
 
 /**
+ * Which venues run jobs here (issue #354), from the same parse the worker boots with. An unparseable PI_BACKENDS reads as
+ * the unset default, `local` alone, so every docker line is exactly what it always was and only the backend section,
+ * which reports the parse, fails on it: guessing another venue from a list the worker refuses would be doctor inventing
+ * a deployment.
+ *
+ * Lives here rather than in doctor (where it started) since issue #430: `up` asks the same question to decide whether to
+ * drive docker, podman or both, and two copies of "which venues does this list bless" is two answers to one question.
+ * A caller that must REFUSE on an unparseable list (`service install`, which would otherwise install a docker-shaped
+ * unit for a deployment that meant podman) calls `parseBackendList` itself first.
+ */
+export function venuesOf(env) {
+	let blessed;
+	try {
+		blessed = parseBackendList(env?.PI_BACKENDS);
+	} catch {
+		blessed = [DEFAULT_BACKEND];
+	}
+	return { localUsed: blessed.includes(DEFAULT_BACKEND), podmanUsed: blessed.includes(PODMAN_BACKEND), podmanDefault: blessed[0] === PODMAN_BACKEND };
+}
+
+/**
  * `PI_BACKEND_FLOOR` -- the minimum every blessed backend must declare, as `property=word` pairs, comma
  * separated. Example: `egress=enforced,nonRoot=asserted`. Unset means no floor.
  *

@@ -335,7 +335,9 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
 2. **Linger**, so the account's runtime directory and its systemd user instance exist without anyone logged in:
    `sudo loginctl enable-linger <account>`. Measured: with linger, a system unit running as that account
    (`deploy/worker.service` with `User=` set to it) runs `podman` with or without `XDG_RUNTIME_DIR` in its
-   environment, since Podman then falls back to `/run/user/<uid>`.
+   environment, since Podman then falls back to `/run/user/<uid>`. That hand-written system unit still works, but
+   `pi-dispatch service install` installs this venue's worker in USER scope (it refuses `--system` here, step 6),
+   and linger is then also what starts the user manager, and with it the worker and the Quadlet units, at boot.
 3. **cgroup v2 with the controllers delegated.** `podman info --format '{{.Host.CgroupControllers}}'` must list `cpu`,
    `memory` and `pids`. Fedora delegates all of them to user sessions (measured: `cpuset cpu io memory pids`); where a
    distribution does not, a drop-in for `user@.service` with `Delegate=cpu cpuset io memory pids` does. Leave `cgroups`
@@ -377,11 +379,53 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    to `pi-job:latest`, which is the default `PI_JOB_IMAGE`, so there is nothing to set. It offers nothing while
    `local` is also listed, or for a `PI_JOB_IMAGE` you chose. The image must declare `anyUid` unless the account is uid 1001; releases
    since issue #341 do.
-6. **The egress proxy, under the same rootless Podman, on a named bridge network.** The worker attaches the proxy to
-   each job's `--internal` network by name, and only a container on a named network can be attached: measured, a
-   container on Podman's default rootless network (pasta or slirp4netns) is refused with `"pasta" is not supported:
-   invalid network mode`. The compose file is docker-only, so start it by hand, from the directory holding your
-   `.env` and the `egress-allowlist.conf` that `pi-dispatch init` wrote, with `egress-proxy.conf` from `deploy/`:
+6. **The egress proxy and Valkey, as Quadlet units in this account's user manager.** Put `PI_BACKENDS=podman` in
+   `.env` first (step 8), then from the deployment folder run `pi-dispatch up`, which pulls the job image into this
+   account's store and offers the stack, or `pi-dispatch service install`, which installs the same units beside the
+   worker's own and orders the worker after them. Both use one installer: it writes four files from `deploy/` into
+   `~/.config/containers/systemd/` (`pi-dispatch-valkey.network`, `pi-dispatch-valkey.container`, and while the
+   egress policy is armed `pi-dispatch-egress-out.network` and `pi-dispatch-egress-proxy.container`), runs
+   `systemctl --user daemon-reload`, and starts `pi-dispatch-valkey.service` and `pi-dispatch-egress-proxy.service`.
+   `up` shows every one of those lines before it asks, and `--yes` runs exactly those lines.
+
+   What was measured, on the Fedora 44 host with Podman 5.8.1:
+   - The units get exactly the names the worker attaches by: `ContainerName=` and `NetworkName=` add no `systemd-`
+     prefix, and `Network=pi-dispatch-egress-out.network` resolves to that network.
+   - `systemctl --user enable` is refused for a generated unit ("transient or generated"). Nothing here enables
+     one: the generator reads each file's own `[Install] WantedBy=default.target`.
+   - **After a reboot, with linger on** (step 2), the units were active 25 s after boot with nobody logged in.
+     **With linger off they did not start at all.** `service install` and `up` read
+     `loginctl show-user <account> -p Linger` afterwards and warn when it is off. Do not check with
+     `systemctl --machine=<account>@ --user status`: measured, that probe itself starts the user manager, and the
+     units with it.
+   - **Restarting the proxy drops every per-job network it was on.** The generated unit runs `podman run --replace
+     --rm`, so `systemctl --user restart pi-dispatch-egress-proxy` makes a new container, and the job networks the
+     worker had connected to the old one are gone from it. A job started afterwards connects the new proxy and is
+     fine; a job already running has lost its only route out for the rest of that run. Restart the proxy when no job
+     is running (`pi-dispatch pause`, wait, restart, `pi-dispatch resume`).
+
+   Which parts are installed: Valkey only when `PI_BACKENDS` does not list `local` (with `local`, docker's Valkey is
+   the queue, as before) and nothing already listens on `127.0.0.1:6379`; the proxy only while the policy is armed
+   and `PI_EGRESS_PROXY` is unset or names `pi-dispatch-egress-proxy`. A different name is your own proxy, and neither
+   command installs a unit for it, because the unit's `--replace` would remove your container of that name.
+   `service install` reads these keys from `.env`, the file the unit loads, not from your shell and not from an
+   `--env-setup` script. It refuses `--system` on this venue: the units belong to this account's user manager, which
+   a system unit cannot order itself after, so install in user scope with linger on. `service uninstall` stops and
+   removes the units and keeps the `pi-dispatch-valkey-data` volume and the networks; `service status` lists each
+   unit and whether it is active. Every `.container` sets `Network=` explicitly (Valkey on a bridge network of its
+   own), because a containers.conf `netns = "host"` puts a container started without one into the host's network
+   namespace (measured), where Valkey's `127.0.0.1` port mapping would mean nothing.
+
+   Not measured yet, and said so rather than implied: Valkey on its own bridge network with its port published on
+   `127.0.0.1`, the proxy's exec-form health check, and the timeout and restart keys the units carry. The measurement
+   above ran Valkey with no `Network=` and a plain health check. `.github/workflows/deploy-lint.yml` runs Podman 4.9's
+   generator in dry-run over the rendered files, so a key 4.9 does not know fails there.
+
+   The proxy needs a named bridge network: the worker attaches it to each job's `--internal` network by name, and
+   measured, a container on Podman's default rootless network (pasta or slirp4netns) is refused with `"pasta" is not
+   supported: invalid network mode`. To start it by hand instead of as a unit (it will not come back after a reboot),
+   from the directory holding your `.env` and the `egress-allowlist.conf` that `pi-dispatch init` wrote, with
+   `egress-proxy.conf` from `deploy/`:
 
    <!-- PODMAN-NATIVE-PROXY -->
    ```sh
@@ -396,13 +440,15 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    The image is the compose file's, by the same digest, and `:ro,z` is there for SELinux as in the compose file.
    Measured from a job's `--internal` network: the proxy answers by name, and nothing on the host does (the host's
    own addresses, `host.containers.internal` and the gateway all refuse or are unreachable), which is stricter than
-   the Docker API route, where a host service listening on `0.0.0.0` answers a job. Bringing the proxy back after a
-   reboot was not measured.
-7. **Valkey** is unchanged and can run anywhere the worker reaches through `VALKEY_URL`. `pi-dispatch up` and the
-   compose file are docker-only, so on a host without Docker run it another way (a distribution package, or a
-   container under this account with its port published on `127.0.0.1`). Without `local` in `PI_BACKENDS`,
-   doctor's fix for an unreachable Valkey points here, and `doctor --fix` offers no `docker run` for it.
-8. **`PI_BACKENDS=podman`** in `.env`, then start the worker, and run `pi-dispatch doctor` and
+   the Docker API route, where a host service listening on `0.0.0.0` answers a job. The unit in the previous
+   paragraphs is what brings it back after a reboot.
+7. **Valkey** can still run anywhere the worker reaches through `VALKEY_URL`. The Quadlet unit in step 6 is the
+   default on a host without Docker; a Valkey you already run (a distribution package, say) is left alone as long as
+   it listens on `127.0.0.1:6379` before `up` or `service install` looks. The compose file is docker-only. Without
+   `local` in `PI_BACKENDS`, doctor's fix for an unreachable Valkey points at `up` and `service install`, and
+   `doctor --fix` offers no `docker run` for it.
+8. **`PI_BACKENDS=podman`** in `.env` (the setup wizard, `/dispatch setup`, writes it when you choose rootless Podman
+   at its runtime step), then start the worker, and run `pi-dispatch doctor` and
    `pi-dispatch doctor --live` as the same account. doctor's podman section checks that `podman info` answered, that
    the service is rootless and not remote, that the controllers are delegated, whether SELinux relabelling applies,
    that the job image is in this account's store, and, with the egress policy armed, that the proxy is running under
@@ -480,8 +526,10 @@ own folder is never relabelled and needs the `semanage fcontext` label from the 
 
 ### What the venue does not do yet
 
-- **`pi-dispatch up`, the compose file and the setup wizard are docker-only.** A follow-up issue; steps 6 and 7 above
-  are the manual equivalent.
+- **The compose file is docker-only**, and the setup wizard explains rather than runs its receiver answer on this
+  venue. `pi-dispatch up`, `pi-dispatch service install` and the wizard start the stack as Quadlet units (step 6).
+- **A proxy restart is not repaired for jobs already running**: the worker does not re-attach their networks to the
+  new container (step 6).
 - **Exit 1 from a container that never started.** The job argv carries `--init`, so a missing or non-executable
   entrypoint arrives as exit 1 with catatonit's `failed to exec pid1` on stderr (measured), which a job's own process
   could print too. It is retried as an infrastructure failure and not refunded, exactly as on the Docker API route.
@@ -548,8 +596,8 @@ How each column is known:
 | `pi-dispatch doctor` | names Docker Engine | names Podman through its Docker API; `isolation` asserted, `mountSet` per the override | ✗ `rootless` | ✗ `rootless` | ⚠ names podman-docker and the context fix | ✗ `rootless` | names the podman venue: `podman info`, rootless, not remote, controllers, the image in this account's store; without `local`, runs no docker |
 | `pi-dispatch doctor --live` | reads the declarations back | reads the declarations back | not run (a local job is refused) | not run | not run (the endpoint is not observed on this host) | not run | reads the declarations back on podman, `egress` excepted |
 | `pi-dispatch sandbox` | opens as the run's own uid | opens as the run's own uid | refused `rootless` | refused `rootless` | opens as the run's own uid (unmeasured) | refused `rootless` | opens as the opening account's uid with `--userns=keep-id` through `podman`, where `PI_BACKENDS` names podman; a run recorded as another uid does not open |
-| `pi-dispatch up` | runs doctor at the end | runs doctor at the end | as doctor | as doctor | as doctor | as doctor | docker-only (a follow-up); the native venue's setup steps instead |
-| `docker compose --profile egress` | runs unchanged | runs unchanged through the real docker CLI | unmeasured (a job is refused anyway) | unmeasured (a job is refused anyway) | unmeasured | unmeasured | docker-only; the proxy runs under this account's podman instead |
+| `pi-dispatch up` | runs doctor at the end | runs doctor at the end | as doctor | as doctor | as doctor | as doctor | pulls the job image into this account's store, starts Valkey and the proxy as Quadlet units (setup step 6), then runs doctor |
+| `docker compose --profile egress` | runs unchanged | runs unchanged through the real docker CLI | unmeasured (a job is refused anyway) | unmeasured (a job is refused anyway) | unmeasured | unmeasured | docker-only; the proxy runs as this account's Quadlet unit instead |
 
 None of this is Podman's: which refusals stop a worker booting, which refuse each job, and what a job that cannot
 be decided yet does instead are the job-user rule's, the same on every daemon, and

@@ -34,6 +34,12 @@ const MIRRORED_DEPLOY = [
 	// mounts it, and the operator's own list lives in the deployment folder where `init` scaffolds it.
 	"egress-proxy.conf",
 	"nssm-install.cmd",
+	// The podman venue's stack as Quadlet units (issue #430): installed by `service install` and `up` from the SHIPPED
+	// copies, so an npm install needs them exactly as a checkout has them.
+	"pi-dispatch-egress-out.network",
+	"pi-dispatch-egress-proxy.container",
+	"pi-dispatch-valkey.container",
+	"pi-dispatch-valkey.network",
 	"receiver.service",
 	"worker-env-wrapper.cmd",
 	"worker-env-wrapper.sh",

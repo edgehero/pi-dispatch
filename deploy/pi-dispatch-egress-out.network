@@ -1,0 +1,10 @@
+# Quadlet network for the egress proxy's route out on the native rootless `podman` venue (issue #430,
+# docs/podman.md): the compose file's `egress-out` network, named exactly as there.
+#
+# Installed with pi-dispatch-egress-proxy.container, only while the egress policy is armed. Podman's generator turns
+# it into pi-dispatch-egress-out-network.service, which the proxy's unit requires. NetworkName= gives the network
+# exactly this name (measured on Podman 5.8.1). Only the proxy is ever on it: job containers live on their own
+# per-job `--internal` networks, which the WORKER creates and attaches the proxy to by name.
+
+[Network]
+NetworkName=pi-dispatch-egress-out

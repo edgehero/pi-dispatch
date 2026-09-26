@@ -11,6 +11,9 @@
 #   - com.pi-dispatch.worker.plist : `xmllint --noout` proves the plist is well-formed XML. plutil is
 #     macOS-only, so xmllint (libxml2-utils) is the Linux stand-in for well-formedness.
 #   - worker-env-wrapper.sh : `sh -n` is a POSIX shell parse check (no execution).
+#   - the Quadlet templates (pi-dispatch-*.container / .network, issue #430) : rendered by the real planner, then
+#     Podman 4.9's own generator in `-dryrun` mode (the `quadlet` job below). The planner is in the path filter for
+#     that reason: it is half of what the generator is fed.
 #
 # The `.cmd` wrappers (worker-env-wrapper.cmd, nssm-install.cmd) have no practical Linux linter and are
 # not checked here -- deliberately, rather than with a flaky approximation.
@@ -26,10 +29,12 @@ on:
     branches: [main]
     paths:
       - "deploy/**"
+      - "worker/src/podman-stack.mjs"
       - ".github/workflows/deploy-lint.yml"
   pull_request:
     paths:
       - "deploy/**"
+      - "worker/src/podman-stack.mjs"
       - ".github/workflows/deploy-lint.yml"
   workflow_dispatch:
 
@@ -73,3 +78,56 @@ jobs:
           sh -n deploy/worker-env-wrapper.sh \
             || { echo "::error::deploy/worker-env-wrapper.sh has a shell syntax error."; exit 1; }
           echo "OK: worker-env-wrapper.sh parses"
+
+  quadlet:
+    # The podman venue's Quadlet templates (issue #430), put through Podman's own generator in dry-run mode, rendered
+    # first by the real planner (worker/src/podman-stack.mjs) so what is checked is what `service install` writes.
+    # ubuntu-24.04 PINNED, not -latest: it ships Podman 4.9.3, the oldest Podman the templates claim to support, with
+    # the generator at /usr/libexec/podman/quadlet. A key 4.9 does not know is exactly the defect this exists to catch.
+    name: deploy/ Quadlet templates generate on Podman 4.9
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+
+      - name: Install podman (for its quadlet generator; nothing is run)
+        run: sudo apt-get update && sudo apt-get install -y podman && podman --version
+
+      - name: Render the templates and dry-run the generator
+        run: |
+          set -eu
+          units="$RUNNER_TEMP/quadlet"
+          mkdir -p "$units"
+          # A deployment folder the planner accepts, with the allowlist the proxy mounts.
+          deploy="$RUNNER_TEMP/deploy"
+          mkdir -p "$deploy" && : > "$deploy/egress-allowlist.conf"
+          node --input-type=module -e "
+            import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+            import { basename, join, resolve } from 'node:path';
+            import { planStack } from './worker/src/podman-stack.mjs';
+            const plan = planStack({ components: { valkey: true, proxy: true }, templatesDir: resolve('worker/deploy'), deployDir: process.argv[1], home: '/nonexistent', fs: { readFileSync, existsSync } });
+            if (plan.error) { console.error(plan.error); process.exit(1); }
+            for (const f of plan.files) writeFileSync(join(process.argv[2], basename(f.path)), f.text);
+          " "$deploy" "$units"
+          ls -l "$units"
+          QUADLET_UNIT_DIRS="$units" /usr/libexec/podman/quadlet -dryrun -user > generated.txt 2> quadlet.log || { cat quadlet.log; echo "::error::quadlet refused a template"; exit 1; }
+          cat quadlet.log generated.txt
+          if grep -Eiq 'unsupported|error|invalid' quadlet.log; then
+            echo "::error::quadlet reported a problem with a template. See the log above."
+            exit 1
+          fi
+          # What the worker relies on by name, read off the generated units rather than the templates.
+          for needle in \
+            'ExecStart=/usr/bin/podman network create --ignore pi-dispatch-valkey' \
+            'ExecStart=/usr/bin/podman network create --ignore pi-dispatch-egress-out' \
+            '--name pi-dispatch-valkey ' \
+            '--name pi-dispatch-egress-proxy ' \
+            '--network pi-dispatch-valkey' \
+            '--network pi-dispatch-egress-out' \
+            '--publish 127.0.0.1:6379:6379'; do
+            grep -qF -- "$needle" generated.txt || { echo "::error::generated units lack: $needle"; exit 1; }
+          done
+          echo "OK: every Quadlet template generates on $(podman --version)"

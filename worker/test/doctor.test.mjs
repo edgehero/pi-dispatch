@@ -6607,7 +6607,7 @@ test("podman-only: Valkey's fix points at the podman route, and --fix never runs
 	const calls = [];
 	const asked = [];
 	await runDoctor(podmanEnv(), { ...podmanDeps(out, podmanPlan(), calls, { probeValkey: async () => false }), fix: true, promptFn: async (q) => (asked.push(q), true) });
-	assert.match(text(), /✗ Valkey reachable \(redis:\/\/127\.0\.0\.1:6379\)\n {4}→ start Valkey under this account's Podman, or from a distribution package, as docs\/podman\.md describes\n/);
+	assert.match(text(), /✗ Valkey reachable \(redis:\/\/127\.0\.0\.1:6379\)\n {4}→ run `pi-dispatch up` \(or `pi-dispatch service install`\) as this account: on the podman venue both start Valkey as a Quadlet unit under its Podman \(docs\/podman\.md, setup step 6\); a Valkey you run yourself, a distribution package say, works too\n/);
 	assert.doesNotMatch(text(), /docker compose|docker run|fix available: Valkey/);
 	assert.deepEqual(asked, []);
 	assert.deepEqual(calls.filter((c) => c.cmd === "docker"), []);

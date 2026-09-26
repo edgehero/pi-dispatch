@@ -5,11 +5,13 @@
  * Division of labor, deliberately: the WORKER's CLI (`up`, `service`, `setup github`) stays the one
  * place host mutations happen -- the wizard only sequences those commands, attached to the operator's
  * terminal, with a confirm in front of each spawn showing the exact command. The wizard's OWN writes
- * are four files, each tame: the deployment dir's private `package.json` (never clobbered), the
+ * are five files, each tame: the deployment dir's private `package.json` (never clobbered), the
  * deployment pointer (via `writePointer`'s validating normalizer), one appended trigger entry (via the
- * validated, atomic `writeTriggers`), and -- only on the compose answer to the trigger-edge step -- a
- * `docker-compose.yml` COPIED create-only out of the installed runtime's own `deploy/`. Secrets are
- * never touched: the provider-key step is a notice naming the file, nothing more.
+ * validated, atomic `writeTriggers`), -- only on the compose answer to the trigger-edge step -- a
+ * `docker-compose.yml` COPIED create-only out of the installed runtime's own `deploy/`, and -- only on the
+ * podman answer to the runtime step (issue #430) -- one `PI_BACKENDS=podman` line in the deployment's
+ * `.env`, through the worker's own never-clobber writer. Secrets are never touched: the provider-key
+ * step is a notice naming the file, nothing more.
  *
  * Every step is declinable and a decline CONTINUES to the next step (converge-style, like `up` itself):
  * an operator who already ran half the quickstart by hand skips the steps that are done. Two exceptions,
@@ -37,6 +39,10 @@ import {
   writePointer,
 } from "./deployment-pointer.mjs";
 import { readQueueState, resolvePaths, writeTriggers } from "./read-model.mjs";
+// The worker's own answers to "which venues does this list bless" and "set this .env key unless the operator already
+// did" (issue #430): one parse and one never-clobber writer, never a second copy of either in the admin.
+import { venuesOf } from "@edgehero/pi-dispatch/backends";
+import { readEnvAssignments, updateEnvFile } from "@edgehero/pi-dispatch/env-file";
 // buildTriggerEntry is index.ts's on x run matrix -- the SAME builder the dialogs and the LLM tool use,
 // so the wizard's first trigger has exactly their shape. The import is circular on paper (index.ts
 // lazy-imports this module from its /dispatch handler and statically imports registerNudge below), but
@@ -311,6 +317,100 @@ export function dockerHint(platform: string): string {
 }
 
 /**
+ * The podman counterpart of probeDocker (issue #430), asked only when the operator chose the podman venue: ONE
+ * bounded `podman info` that also says whether this account's Podman is rootless, because a rootful one is refused by
+ * the venue at every job, and learning that after an npm install and an `up` is the waste step 3 exists to prevent.
+ * Four outcomes:
+ *   `{ ok: true }`          -- podman answered and says rootless
+ *   `{ missing: true }`     -- no `podman` on PATH
+ *   `{ rootful: true }`     -- podman answered and is not rootless for this account
+ *   `{ daemonDown: why }`   -- the CLI ran and did not answer usefully
+ * The full check (remote service, controllers, the worker's own uid) is `up`'s and doctor's: the same rule the
+ * worker boots with. This step is, like the docker one, a better message earlier and never the enforcement.
+ */
+export function probePodman(
+  execFn: any = execFileSync,
+): { ok: true } | { missing: true } | { rootful: true } | { daemonDown: string } {
+  try {
+    const out = String(
+      execFn("podman", ["info", "--format", "{{.Host.Security.Rootless}}"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: DOCKER_PROBE_TIMEOUT_MS,
+      }) ?? "",
+    ).trim();
+    if (out === "true") return { ok: true };
+    if (out === "false") return { rootful: true };
+    return { daemonDown: `\`podman info\` did not say whether it is rootless` };
+  } catch (err: any) {
+    if (err?.code === "ENOENT" || err?.errno === "ENOENT") return { missing: true };
+    if (typeof err?.status === "number") return { daemonDown: `\`podman info\` exited ${err.status}` };
+    return { daemonDown: err?.message ?? String(err) };
+  }
+}
+
+/** Where to get a usable rootless Podman. Vendor text only, for dockerHint's reason; the venue runs only on Linux. */
+export function podmanHint(platform: string): string {
+  if (platform !== "linux") {
+    return "the podman venue runs only on Linux (it refuses other hosts as podman-platform); use Docker here instead.";
+  }
+  return "Linux: install Podman from your distribution's own packages and follow the rootless setup in docs/podman.md (subordinate ids, linger, delegated cgroup controllers), as the account the worker will run as.";
+}
+
+/** The answer on the docker gate that switches this run to the podman venue. Linux only: nowhere else runs it. */
+const USE_PODMAN = "Use rootless Podman instead";
+
+/**
+ * Does this deployment already mean the podman venue without docker? From the wizard's own env or, on a re-run, the
+ * deployment's `.env` (the file the service reads). Only a list WITHOUT `local` counts: with `local` in it docker is
+ * the host's runtime and the docker gate is the right question, exactly as `up` decides.
+ */
+function podmanPreferred(env: any, dir: string, fs: any): boolean {
+  const fromEnv = venuesOf({ PI_BACKENDS: env?.PI_BACKENDS });
+  if (fromEnv.podmanUsed && !fromEnv.localUsed) return true;
+  try {
+    const found: any = readEnvAssignments(String(fs.readFileSync(join(dir, ".env"), "utf8")), ["PI_BACKENDS"], { loader: "systemd" });
+    const value = found.PI_BACKENDS?.plain ? found.PI_BACKENDS.value : undefined;
+    const fromFile = venuesOf({ PI_BACKENDS: value });
+    return fromFile.podmanUsed && !fromFile.localUsed;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Step 3 on the podman venue: the same bounded Re-check loop as ensureDocker, with podman's own verdicts. A rootful
+ * Podman gets its own sentence: it is installed and answering, and still the wrong thing for this venue.
+ */
+async function ensurePodman(ui: any, notify: Notify, { platform, probePodmanFn }: any): Promise<boolean> {
+  for (let round = 1; ; round++) {
+    const probe = platform === "linux" ? probePodmanFn() : { daemonDown: "not Linux" };
+    if (probe.ok) return true;
+    const why = probe.missing
+      ? "no `podman` on PATH"
+      : probe.rootful
+        ? "podman answers, but not rootless for this account, and the podman venue refuses a rootful Podman"
+        : `podman is not answering (${probe.daemonDown})`;
+    notify?.(`podman check: ${why}. ${podmanHint(platform)}`, "warning");
+    if (round >= DOCKER_PROBE_ROUNDS) {
+      notify?.(
+        `podman still not ready after ${DOCKER_PROBE_ROUNDS} checks: stopping setup before anything was installed. Re-run /dispatch setup once \`podman info\` answers.`,
+        "error",
+      );
+      return false;
+    }
+    const choice = await ui.select("Podman is not ready", ["Re-check", "Continue anyway", "Stop"]);
+    if (choice === "Re-check") continue;
+    if (choice === "Continue anyway") {
+      notify?.("continuing without a podman answer: `up` runs the venue's own checks and refuses there if it is still not usable", "info");
+      return true;
+    }
+    notify?.("setup stopped before anything was installed: re-run /dispatch setup when podman is ready", "info");
+    return false;
+  }
+}
+
+/**
  * Step 3's body: docker is the one host prerequisite every later step leans on, so it is asked about
  * BEFORE anything is downloaded. `up` already refuses on its own when docker is missing (up.mjs:85-95,
  * the same `docker version` gate) -- this step adds no enforcement, it moves the SAME verdict earlier and
@@ -321,10 +421,10 @@ export function dockerHint(platform: string): string {
  * run, so a wizard driven by a stuck answer source cannot spin), "Continue anyway" continues, "Stop"
  * (and a cancelled dialog, and the exhausted bound) returns false having spawned nothing at all.
  */
-async function ensureDocker(ui: any, notify: Notify, { platform, probeDockerFn }: any): Promise<boolean> {
+async function ensureDocker(ui: any, notify: Notify, { platform, probeDockerFn }: any): Promise<"docker" | "podman" | false> {
   for (let round = 1; ; round++) {
     const probe = probeDockerFn();
-    if (probe.ok) return true;
+    if (probe.ok) return "docker";
     const why = probe.missing
       ? "no `docker` on PATH"
       : `docker is installed but not answering (${probe.daemonDown})`;
@@ -338,14 +438,20 @@ async function ensureDocker(ui: any, notify: Notify, { platform, probeDockerFn }
       );
       return false;
     }
-    const choice = await ui.select("Docker is not ready", ["Re-check", "Continue anyway", "Stop"]);
+    // On Linux a host without docker has a second answer since issue #430: the podman venue. Offered HERE, where docker
+    // has just failed, rather than as a question every run asks, so a docker host's wizard is exactly what it was.
+    const choice = await ui.select(
+      "Docker is not ready",
+      platform === "linux" ? ["Re-check", USE_PODMAN, "Continue anyway", "Stop"] : ["Re-check", "Continue anyway", "Stop"],
+    );
     if (choice === "Re-check") continue;
+    if (choice === USE_PODMAN) return "podman";
     if (choice === "Continue anyway") {
       // Deliberately permitted: `up` runs its own docker checks and refuses on its own, so this step is
       // a BETTER MESSAGE EARLIER, never the enforcement. An operator installing docker in the next
       // window over -- or driving a daemon this probe cannot see -- must not be locked out by our probe.
       notify?.("continuing without a docker answer — `up` runs its own docker checks and refuses there if it is still missing", "info");
-      return true;
+      return "docker";
     }
     notify?.("setup stopped before anything was installed — re-run /dispatch setup when docker is ready", "info");
     return false;
@@ -452,6 +558,7 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
     listRepoSkillsFn = listRepoSkills,
     existsSyncFn = (p: string) => fs.existsSync(p),
     probeDockerFn = probeDocker,
+    probePodmanFn = probePodman,
     initialDetection,
   } = deps;
   const ui = ctx?.ui;
@@ -499,7 +606,19 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   // Placed AFTER the dir step (so a Stop here still leaves the operator's chosen dir created and named,
   // which is harmless and idempotent) and BEFORE the install: the point is to spend nobody's bandwidth
   // on a host where `up` cannot work anyway.
-  if (!(await ensureDocker(ui, notify, { platform, probeDockerFn }))) return;
+  //
+  // Which runtime (issue #430): the podman venue when the deployment already says so (PI_BACKENDS without `local`), or
+  // when the operator picks it at a failed docker gate on Linux. Everything after this reads `runtime`.
+  let runtime: "docker" | "podman";
+  if (podmanPreferred(env, dir, fs)) {
+    if (!(await ensurePodman(ui, notify, { platform, probePodmanFn }))) return;
+    runtime = "podman";
+  } else {
+    const chosen = await ensureDocker(ui, notify, { platform, probeDockerFn });
+    if (!chosen) return;
+    if (chosen === "podman" && !(await ensurePodman(ui, notify, { platform, probePodmanFn }))) return;
+    runtime = chosen;
+  }
 
   // ── (4) install the pinned runtime ─────────────────────────────────────────────────────────────
   if (readInstalledVersion(fs, runtimeDir) === RUNTIME_VERSION) {
@@ -546,8 +665,15 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   // NEVER `--yes`: up's per-mutation y/N prompts ARE the host-mutation consents (docker pull, docker
   // run). The wizard's confirm approves STARTING the pass; auto-accepting the child's gates would
   // collapse per-action consent into one blanket yes the operator never gave.
+  //
+  // On podman, `up` runs with PI_BACKENDS=podman in ITS environment, because `up` reads its own environment and the
+  // `.env` line below does not exist yet: init, inside this very `up`, is what scaffolds `.env`. The line is written
+  // afterwards, for the SERVICE, which reads only the file.
+  const upEnv = runtime === "podman" && !venuesOf({ PI_BACKENDS: env?.PI_BACKENDS }).podmanUsed ? { ...env, PI_BACKENDS: "podman" } : env;
+  const podmanUpText = `Run in ${dir}:\n  ${upEnv !== env ? "PI_BACKENDS=podman " : ""}${execPath} ${cliPath} up\n\nup shows each podman and systemctl action (the job image, then Valkey and the egress proxy as Quadlet units) and asks y/N before it: nothing is auto-accepted.`;
   const okUp = await ui.confirm(
     "Bring the deployment up",
+    runtime === "podman" ? podmanUpText :
     `Run in ${dir}:\n  ${execPath} ${cliPath} up\n\nup shows each docker action and asks y/N before it — nothing is auto-accepted.`,
   );
   if (!okUp) {
@@ -558,7 +684,7 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
       argv0: execPath,
       args: [cliPath, "up"],
       cwd: dir,
-      env,
+      env: upEnv,
     });
     if (res.error || res.code !== 0) {
       // up's own exit code mirrors doctor's verdict, so a nonzero here usually means "something is
@@ -568,6 +694,9 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
       if (choice !== "Continue anyway") return;
     }
   }
+
+  // ── (5b) the podman venue, recorded where the service reads it ────────────────────────────────
+  if (runtime === "podman") recordPodmanVenue(dir, fs, notify, platform);
 
   // ── (6) the deployment pointer ─────────────────────────────────────────────────────────────────
   // The four cwd-default files need pointing because resolvePaths defaults them to "./", which is right
@@ -666,7 +795,7 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   // Credentials (step 9) mint the App; they do not make a delivery arrive. This step closes that gap,
   // which was previously left to the README: a receiver UNIT, a receiver CONTAINER, or polling (no
   // public URL at all). Every answer -- including Skip -- continues to the next step.
-  await offerTriggerEdge(dir, ctx, ui, notify, { fs, platform, env, execPath, cliPath, runAttachedFn });
+  await offerTriggerEdge(dir, ctx, ui, notify, { fs, platform, env, execPath, cliPath, runAttachedFn, runtime });
 
   // ── (11) a first trigger for the repo pi is sitting in ──────────────────────────────────────────
   // Offered only when ctx.cwd names an existing directory: the trigger's folder is the one hard
@@ -711,7 +840,7 @@ async function offerTriggerEdge(
   ctx: any,
   ui: any,
   notify: Notify,
-  { fs, platform, env, execPath, cliPath, runAttachedFn }: any,
+  { fs, platform, env, execPath, cliPath, runAttachedFn, runtime = "docker" }: any,
 ): Promise<void> {
   const choice = await ui.select("How should GitHub events reach the queue?", [
     EDGE_SERVICE,
@@ -764,6 +893,17 @@ async function offerTriggerEdge(
       cwd: dir,
       env,
     });
+    return;
+  }
+
+  if (choice === EDGE_COMPOSE && runtime === "podman") {
+    // Kept in the list so the answers read the same on every host, and explained rather than attempted: the compose
+    // file drives docker, which this host was set up without, and its receiver would also start a SECOND Valkey beside
+    // the Quadlet one. The receiver unit (the first answer) runs on the host and needs no container runtime at all.
+    notify?.(
+      `the receiver container needs docker compose, and this deployment runs on rootless Podman without docker. Install the receiver as a service instead (it needs no container runtime): node ${cliPath} service install --receiver  (in ${dir}), after installing ${RECEIVER_PKG}@${RECEIVER_VERSION} there`,
+      "info",
+    );
     return;
   }
 
@@ -823,6 +963,33 @@ async function offerTriggerEdge(
     `trigger edge left for later — all three ways stay open from ${dir}: \`service install --receiver\` (a receiver unit on this host), \`docker compose --profile receiver up -d\` (a receiver container), or \`npx @edgehero/pi-dispatch-receiver poll\` (no public URL at all). Local cron triggers need none of them.`,
     "info",
   );
+}
+
+/**
+ * Step 5b's body: the one `.env` line the podman answer implies, `PI_BACKENDS=podman`, written through the worker's
+ * never-clobber writer so a value the operator set survives. Only into a `.env` that exists (init, inside `up`, makes
+ * it): inventing one would stop init from ever scaffolding the real file. Without this line `service install` reads
+ * the default list, `local`, and installs a docker worker on a host that has no docker.
+ */
+function recordPodmanVenue(dir: string, fs: any, notify: Notify, platform: string): void {
+  const envPath = join(dir, ".env");
+  if (!fs.existsSync(envPath)) {
+    notify?.(`no ${envPath} yet (\`up\` runs init, which writes it): add PI_BACKENDS=podman to it before \`service install\`, which reads only that file`, "warning");
+    return;
+  }
+  try {
+    if (updateEnvFile(envPath, "PI_BACKENDS", "podman", { fs, platform }).changed) {
+      notify?.(`PI_BACKENDS=podman written into ${envPath}: the worker and \`service install\` read the podman venue from there`, "info");
+      return;
+    }
+    const found: any = readEnvAssignments(String(fs.readFileSync(envPath, "utf8")), ["PI_BACKENDS"], { loader: "systemd" });
+    const value = found.PI_BACKENDS?.plain ? found.PI_BACKENDS.value : undefined;
+    if (!venuesOf({ PI_BACKENDS: value }).podmanUsed) {
+      notify?.(`${envPath} already sets PI_BACKENDS to something without podman; left untouched (setup never overwrites a key you set). Add podman to it yourself if this deployment is meant to run there`, "warning");
+    }
+  } catch (err: any) {
+    notify?.(`could not write PI_BACKENDS into ${envPath}: ${err?.message ?? err}. Add PI_BACKENDS=podman yourself before \`service install\``, "error");
+  }
 }
 
 /**

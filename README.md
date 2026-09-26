@@ -554,7 +554,10 @@ the boot reaper would treat the other's containers as strays. Honesty notes: on 
 service is login-scoped, because Docker Desktop is; and a policy refusal (exit 2) never relaunches, on
 any OS, so no supervisor loops against a paid provider. If a secrets manager owns your credentials,
 `--env-setup <path>` renders a unit that sources your own setup script and then execs the worker, so a
-policy refusal still exits 2 instead of reading as a crash ([`docs/secrets.md`](docs/secrets.md)). The
+policy refusal still exits 2 instead of reading as a crash ([`docs/secrets.md`](docs/secrets.md)). On the
+rootless Podman venue (`PI_BACKENDS=podman` in `.env`), `install` also installs Valkey and the egress proxy as
+Quadlet units in your user manager and orders the worker after them; `up` offers the same units
+([`docs/podman.md`](docs/podman.md)). The
 templates remain hand-editable examples if you prefer to adapt them directly.
 
 Steer the running worker without stopping it, from any terminal:
@@ -588,7 +591,7 @@ pi install npm:@edgehero/pi-dispatch-admin   # then, in pi:  /dispatch
 
 **No deployment yet? The console builds one.** When `/dispatch` finds nothing (no config, no env, queue
 unreachable) it takes you straight into **`/dispatch setup`**, described in the Quickstart above: an
-opening choice, a deployment folder, the pinned runtime, a Docker check, `pi-dispatch up` in your
+opening choice, a deployment folder, the pinned runtime, a Docker check (or rootless Podman, on Linux), `pi-dispatch up` in your
 terminal, an optional worker service, an optional trigger edge (receiver service, compose profile, or
 the polling command), and an optional first trigger for this repo. Every step asks first and can be
 declined; nothing is written into your repo, and no credential passes through a dialog. Setup writes a

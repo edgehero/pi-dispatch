@@ -1,0 +1,16 @@
+# Quadlet network for Valkey on the native rootless `podman` venue (issue #430, docs/podman.md).
+#
+# `pi-dispatch service install` (user scope, with podman in PI_BACKENDS) and `pi-dispatch up` copy this file
+# unchanged into ~/.config/containers/systemd/, where Podman's systemd generator turns it into
+# pi-dispatch-valkey-network.service. NetworkName= gives the network exactly this name, with no `systemd-` prefix
+# (measured on Podman 5.8.1).
+#
+# Why Valkey gets a bridge network of its own rather than no Network= at all: a containers.conf that sets
+# `netns = "host"` puts a container started WITHOUT a network option into the host's network namespace (measured),
+# where the port mapping below means nothing and Valkey would listen on every host interface. An explicit Network=
+# is the only thing that wins over that key. `Network=pasta` would also win, but Podman 4.9 (Ubuntu 24.04) defaults
+# to slirp4netns and ships without passt on some hosts, so a named bridge is the one spelling both 4.9 and 5.x run.
+# Its own network, not the proxy's: nothing on the egress side has any business reaching the queue.
+
+[Network]
+NetworkName=pi-dispatch-valkey

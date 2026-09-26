@@ -1859,7 +1859,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   doctor [--fix] [--live]` (preflight; offered fixes; the backend declarations read back off short-lived real
   containers), `pi-dispatch up [--yes]` (the consented sequence: default-image pull+tag, loopback Valkey start,
   scaffold, preflight) — and shall never perform an unshown host mutation, never touch an existing config
-  value, and never spend a token. **`up` also fills EMPTY keys in an existing `.env`** (issue #357), which
+  value, and never spend a token. **On the native `podman` venue** (issue #430) the same sequence puts the image
+  into the account's own Podman store and starts Valkey and the egress proxy as Quadlet units through the installer
+  `service install` uses, shown line for line before consent, and runs no docker command at all when `PI_BACKENDS`
+  does not list `local` (`DES-PODMAN-STACK-AS-QUADLET-UNITS`).
+  **`up` also fills EMPTY keys in an existing `.env`** (issue #357), which
   is the one mutation it makes without a prompt and is bounded to exactly that: the file must already
   exist, so `init`'s create-only rule is untouched; a key with any value is left alone, so "never touch an
   existing config value" holds key by key; and no value it writes is a capability, a credential or a
@@ -2180,6 +2184,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-27 | Issue #430. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, one sentence: on the native `podman` venue `up` pulls the default image into the account's own Podman store and starts Valkey and the egress proxy as Quadlet units through the installer `service install` uses, showing every write and command before consent and never running docker for a list without `local`. The contract is unchanged in kind: every host mutation is shown first, `--yes` waives consent and never visibility, a declined step continues, and `.env` is filled only where empty (the wizard's `PI_BACKENDS=podman` line goes through the same never-clobber writer). **`REQ-EGRESS-ALLOWLIST` UNCHANGED, checked**: the podman proxy is the compose digest (a test holds them equal) with the same two mounts. |
 | 2026-09-27 | Issue #433. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, the Why's prompted tier: on a deployment whose `PI_BACKENDS` does not list `local`, `doctor --fix` offers the deployment's own default image as a podman pull and tag into this account's store (the store the podman venue's jobs start from, and the line that is that deployment's image check), and does not offer the loopback Valkey's `docker run`, since doctor spawns no docker there at all. The tiers themselves are unchanged: the image is still only the deployment default, never a trigger-named one, and still prompted with a default of No. Statement and Acceptance UNCHANGED, checked: `up` is untouched by this change, and no acceptance names a docker line of doctor's. |
 | 2026-09-26 | Issue #429. **`REQ-RESURRECTABLE-SANDBOX` AMENDED**, the Acceptance only: a run is refused when its venue has no sandbox launcher or when the opener's own `PI_BACKENDS` does not bless it, where it used to be refused for any venue but `local`; a `podman` run on a host that blesses podman opens through the `podman` CLI only, as the opening account under keep-id. The Scope's "a venue this host holds" is UNCHANGED, checked: it already said held rather than local, and "held" is now the launcher and the blessing. **`REQ-EGRESS-ALLOWLIST` UNCHANGED, checked**: a podman sandbox joins the same kind of `--internal` session network with egress on, created in podman, and names `--network=private` with it off. |
 | 2026-09-26 | Issue #428, review round 2. **`REQ-EGRESS-ALLOWLIST` AMENDED**, the Acceptance again: an unlisted request costs no DNS query, REVERSE included. The allowlist ACL did a PTR lookup for every unlisted IP-literal request (measured), a second DNS channel out of the same class as round 1's; it is now `dstdomain -n`. The Statement is UNCHANGED, checked. |

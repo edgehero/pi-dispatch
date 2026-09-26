@@ -27,7 +27,9 @@ Both exist because getting them wrong is silent.
 The Valkey volume is `pi-dispatch-valkey-data` when you started it with `pi-dispatch up`, and
 `valkey-data` (Compose prefixes it with the project name) when you started it with
 `deploy/docker-compose.yml`. Both run with `--appendonly yes`, so the queue already survives a
-reboot on its own.
+reboot on its own. On the rootless Podman venue the Quadlet unit (`pi-dispatch-valkey.service`) uses the same
+`pi-dispatch-valkey-data` volume in that account's own store: in step 4 below, stop it with
+`systemctl --user stop pi-dispatch-valkey` and run the copy with `podman` in place of `docker`.
 
 ### The settings overlay is the one that fails quietly
 

@@ -17,7 +17,8 @@ pi-dispatch doctor
 
 **If you are upgrading**, that is the step. Until the proxy is up, every job is refused pre-spend naming it
 and naming that command: loud, free (no budget slot, no tokens), and reversible in one line with
-`PI_EGRESS=0` if you want the old posture back. `pi-dispatch up` offers to start it, and `doctor` fails
+`PI_EGRESS=0` if you want the old posture back. `pi-dispatch up` offers to start it (on the rootless Podman venue,
+as a Quadlet unit that comes back at boot: [`podman.md`](podman.md)), and `doctor` fails
 until it is running, so both commands you already run say it before a single job does.
 
 ## The hosts, and they are yours

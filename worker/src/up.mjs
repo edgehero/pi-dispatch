@@ -14,6 +14,12 @@
  *     file happens to name" (the same reasoning as jobs running with --pull=never).
  *   - no secrets printed: the generated WEBHOOK_SECRET is announced, never echoed.
  *
+ * The native rootless `podman` venue (issue #430): when PI_BACKENDS lists podman, `up` also gates on the venue's own
+ * `podman info` rule, pulls the default image into this account's Podman store, and installs Valkey and the egress
+ * proxy as Quadlet units through the installer `service install` uses (podman-stack.mjs), after init. When the list
+ * does not name `local`, nothing here runs docker at all. The docker path of a deployment that blesses `local` is
+ * unchanged, byte for byte.
+ *
  * Converge-style, not transactional: a declined or failed step is reported and the pass continues, so
  * one flaky pull does not hide the doctor report that says what else is missing. Exit code mirrors
  * doctor's: 0 unless the docker daemon was unreachable up front (nothing else can be probed, so up
@@ -22,11 +28,20 @@
 import { randomBytes } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
 import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync as readPackageFile } from "node:fs";
 import { connect as netConnect } from "node:net";
-import { join, posix, win32 } from "node:path";
+import { homedir, userInfo } from "node:os";
+import { dirname, join, posix, resolve, win32 } from "node:path";
+import { fileURLToPath } from "node:url";
+import { makePodmanInfoReader, decidePodmanJobUser, podmanJobUserRefusal } from "./backend-podman.mjs";
+import { venuesOf } from "./backends.mjs";
 import { logsDirPath, settingsFilePath } from "./config.mjs";
-import { egressArmed as egressArmedFn } from "./egress.mjs";
+import { DEFAULT_EGRESS_PROXY, egressArmed as egressArmedFn, egressProxyName } from "./egress.mjs";
 import { envKeyIsBlank, updateEnvFile } from "./env-file.mjs";
+import { applyStack, describeAction, lingerNote, planStack, readLinger, stackComponents } from "./podman-stack.mjs";
+
+// The shipped Quadlet templates, module-relative like service.mjs's: worker/deploy in a checkout, <pkg>/deploy under npm.
+const TEMPLATES_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "deploy");
 
 // The one image up may ever fetch, and the local name jobs run under. Literal on purpose (not
 // env.PI_JOB_IMAGE): an operator who pointed PI_JOB_IMAGE elsewhere has outgrown the quickstart, and
@@ -35,6 +50,10 @@ const UPSTREAM_IMAGE = "ghcr.io/edgehero/pi-job:latest";
 const LOCAL_IMAGE = "pi-job:latest";
 const PULL_ARGS = ["pull", UPSTREAM_IMAGE];
 const TAG_ARGS = ["tag", UPSTREAM_IMAGE, LOCAL_IMAGE];
+// The same two, into THIS account's rootless store (issue #430): a rootless Podman sees neither root's images nor
+// docker's. Podman's CLI takes the same argv, and `podman tag` of the short name makes `localhost/pi-job:latest`, which
+// `--pull=never` resolves `pi-job:latest` to with no registry lookup (measured, docs/podman.md step 5).
+const PODMAN_EXISTS_ARGS = ["image", "exists", LOCAL_IMAGE];
 
 // deploy/docker-compose.yml's Valkey service, reproduced as one docker run: same image, AOF on
 // (REQ-QUEUE-BURST-NO-DROP), bound to localhost only (the queue is not a public surface), same
@@ -134,13 +153,38 @@ export async function runUp(argv = [], deps = {}) {
 		// assert whichever account ran it.
 		logsDirPathFn = logsDirPath,
 		settingsFilePathFn = settingsFilePath,
+		// The podman venue's seams (issue #430). The info read is the venue's own bounded reader, so `up` asks exactly
+		// the question the worker asks at boot; the ids are the ones the job-user rule judges.
+		readPodmanInfo = makePodmanInfoReader(),
+		euid = typeof process.geteuid === "function" ? process.geteuid() : null,
+		egid = typeof process.getegid === "function" ? process.getegid() : null,
+		home = homedir(),
+		// env-internal USER: whose linger `up` reads after starting the podman stack, the login already running it (the
+		// same reading as service.mjs's, which names the account its units run as).
+		user = env.USER || userInfo().username,
+		templatesDir = TEMPLATES_DIR,
+		// The shipped Quadlet templates are the package's files, read for real even where `fs` is a test's fake of the
+		// deployment folder; injectable so a test can hand in its own.
+		readTemplate = (name) => readPackageFile(join(templatesDir, name), "utf8"),
+		mkdir = mkdirSync,
 	} = deps;
 	let { runInitFn, runDoctorFn } = deps;
 	const yes = argv.includes("--yes");
 	const summary = [];
 
+	// Which runtimes this pass drives (issue #430). With `local` blessed (which the unset default is) everything below
+	// is exactly what it always was, and a list that also names podman adds the podman steps after the docker ones. A
+	// list WITHOUT `local` never touches docker at all: such a host may have no docker, and asking it would only fail.
+	const venues = venuesOf(env);
+	const dockerUsed = venues.localUsed;
+	//
+	// The docker lines below keep their original text and indentation, the `else` and the unbraced block included, so
+	// that the diff of issue #430 shows the docker path as the byte-identical thing its tests pin it to be.
+	if (!dockerUsed) out("pi-dispatch up: one pass over the quickstart for the podman venue; every podman and systemctl action asks first (--yes accepts)\n\n");
+	else
 	out("pi-dispatch up — one pass over the quickstart; every docker action asks first (--yes accepts)\n\n");
 
+	if (dockerUsed) {
 	// (a) docker binary + daemon, before anything is offered: every mutation below runs through the
 	// docker CLI, so with the daemon down the prompts would only collect consent for failures.
 	// Distinguishes not-on-PATH from daemon-down exactly as doctor does (spawn error vs nonzero exit).
@@ -204,6 +248,25 @@ export async function runUp(argv = [], deps = {}) {
 		} else {
 			out("✓ started Valkey (container pi-dispatch-valkey, AOF on, bound to 127.0.0.1)\n");
 			summary.push(["valkey", "started container pi-dispatch-valkey (durable: --appendonly yes, restart unless-stopped)"]);
+		}
+	}
+	}
+
+	// (a2)(b2) the podman venue: its gate and its job image, in this account's own store (issue #430). `podmanReady`
+	// is what lets the stack step below run at all.
+	let podmanReady = false;
+	if (venues.podmanUsed) {
+		const gate = await podmanGate({ readPodmanInfo, platform, euid, egid, out });
+		if (!gate.ok) {
+			summary.push(["podman", `NOT ready: ${gate.why}`]);
+			if (!dockerUsed) {
+				out("\nup: cannot continue without a usable rootless Podman: fix the above, then re-run `pi-dispatch up`.\n");
+				return 1;
+			}
+			out("  the docker steps above are unaffected; the podman steps below are skipped\n");
+		} else {
+			podmanReady = true;
+			await podmanImageStep({ spawn, out, yes, prompt, summary });
 		}
 	}
 
@@ -375,7 +438,20 @@ export async function runUp(argv = [], deps = {}) {
 	// AFTER init, deliberately: init has just scaffolded egress-allowlist.conf, and starting a proxy whose
 	// allowlist file does not exist gets a directory created by docker where a file belonged and a squid
 	// that fails confusingly. If the file is still missing, this step declines itself and says which file.
-	if (egressArmedFn(env)) {
+	const proxyName = egressProxyName(env);
+	if (dockerUsed && egressArmedFn(env) && proxyName !== DEFAULT_EGRESS_PROXY) {
+		// PI_EGRESS_PROXY names the operator's own proxy (issue #430). This step used to look for, and offer to start, the
+		// shipped name whatever that key said, so it could report a proxy present that no job attaches to, or start one
+		// beside the one the worker actually uses. It now asks about the name the worker attaches by and starts nothing:
+		// that container is the operator's, and the shipped command below would not produce it.
+		if ((await runCmd(spawn, "docker", ["inspect", "--format={{.State.Running}}", proxyName])) === 0) {
+			out(`\n✓ Egress proxy present (${proxyName}, named by PI_EGRESS_PROXY)\n`);
+			summary.push(["egress", `${proxyName} (PI_EGRESS_PROXY) present, left untouched`]);
+		} else {
+			out(`\n✗ PI_EGRESS_PROXY names ${proxyName}, and docker has no container of that name. up starts only the shipped ${DEFAULT_EGRESS_PROXY}, so start ${proxyName} yourself\n`);
+			summary.push(["egress", `${proxyName} (PI_EGRESS_PROXY) not found; every job is refused pre-spend until it runs`]);
+		}
+	} else if (dockerUsed && egressArmedFn(env)) {
 		if ((await runCmd(spawn, "docker", ["inspect", "--format={{.State.Running}}", "pi-dispatch-egress-proxy"])) === 0) {
 			out("\n✓ Egress proxy already present (pi-dispatch-egress-proxy)\n");
 			summary.push(["egress", "proxy already present — left untouched"]);
@@ -398,6 +474,13 @@ export async function runUp(argv = [], deps = {}) {
 			out("skipped — start it later with `docker compose -f deploy/docker-compose.yml --profile egress up -d`\n");
 			summary.push(["egress", "skipped (declined) — every job is refused pre-spend until the proxy is up (PI_EGRESS=0 opts out)"]);
 		}
+	}
+
+	// (e3) the podman venue's stack: Valkey and, while the policy is armed, the proxy, as Quadlet units through the SAME
+	// installer `pi-dispatch service install` uses (issue #430). After init for the reason (e2) gives: the proxy mounts
+	// the allowlist init scaffolds.
+	if (podmanReady) {
+		await podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, fs, probeTcp, cwd, home, user, templatesDir, readTemplate, mkdir });
 	}
 
 	// (f) doctor — always, verbatim: up converges what it can, doctor is the judge of what remains
@@ -444,6 +527,125 @@ Next:
       queue your first job from another terminal
 `);
 	return doctorCode;
+}
+
+/**
+ * The podman venue's gate: the same `podman info` read and the same ordered job-user rule the worker boots with
+ * (`decidePodmanJobUser`), so `up` cannot pass a host the worker then refuses, or refuse one it would run. Printed in
+ * the worker's own refusal words.
+ */
+async function podmanGate({ readPodmanInfo, platform, euid, egid, out }) {
+	let read;
+	try {
+		read = await readPodmanInfo();
+	} catch {
+		read = { answered: false, reason: "spawn-failed", transient: true };
+	}
+	const decision = decidePodmanJobUser({ platform, euid, egid, read });
+	if (decision.mode === "worker") {
+		out(`✓ rootless Podman answering (podman jobs run as ${decision.user}, with --userns=keep-id)\n`);
+		return { ok: true };
+	}
+	const why = decision.mode === "unmappable" ? podmanJobUserRefusal(decision) : `podman info did not answer (${decision.reason}); check that \`podman info --format json\` works as this account.`;
+	out(`✗ podman venue not usable here\n    → ${why}\n`);
+	return { ok: false, why };
+}
+
+/** The default job image into this account's Podman store, mirroring the docker step (b) line for line. */
+async function podmanImageStep({ spawn, out, yes, prompt, summary }) {
+	if ((await runCmd(spawn, "podman", PODMAN_EXISTS_ARGS)) === 0) {
+		out(`✓ Job image present in this account's Podman store (${LOCAL_IMAGE})\n`);
+		summary.push(["podman job image", `already present (${LOCAL_IMAGE})`]);
+		return;
+	}
+	const accepted = await consent(
+		`The default job image (${LOCAL_IMAGE}) is not in this account's Podman store. up would run:`,
+		[`podman ${PULL_ARGS.join(" ")}`, `podman ${TAG_ARGS.join(" ")}`],
+		{ yes, out, prompt },
+	);
+	if (!accepted) {
+		out("skipped: pull it later with the two commands above\n");
+		summary.push(["podman job image", "skipped (declined): jobs run with --pull=never, so nothing fetches it later"]);
+	} else if ((await runStreamed(spawn, "podman", PULL_ARGS, out)) !== 0) {
+		out("✗ podman pull failed: continuing; doctor below will re-check the image\n");
+		summary.push(["podman job image", "pull FAILED: re-run `pi-dispatch up`, or pull by hand"]);
+	} else if ((await runStreamed(spawn, "podman", TAG_ARGS, out)) !== 0) {
+		out("✗ podman tag failed: continuing; doctor below will re-check the image\n");
+		summary.push(["podman job image", `pulled, but tagging as ${LOCAL_IMAGE} FAILED: re-run the tag command by hand`]);
+	} else {
+		out(`✓ pulled and tagged ${LOCAL_IMAGE} in this account's Podman store\n`);
+		summary.push(["podman job image", `pulled ${UPSTREAM_IMAGE} and tagged it ${LOCAL_IMAGE}`]);
+	}
+}
+
+/**
+ * The podman venue's stack step. Decides what is missing the way the docker steps do (a listener on 6379 is left
+ * alone, a proxy that exists is left alone), then plans the Quadlet files with `planStack`, shows `plan.actions`, and on
+ * consent hands those same objects to `applyStack`: what runs is literally what was shown.
+ */
+async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, fs, probeTcp, cwd, home, user, templatesDir, readTemplate, mkdir }) {
+	const armed = egressArmedFn(env);
+	let includeValkey = false;
+	if (!venues.localUsed) {
+		if (await probeTcp("127.0.0.1", 6379)) {
+			const ps = await runCmdCapture(spawn, "podman", ["ps", "--filter", "name=pi-dispatch-valkey", "--format", "{{.Names}}"]);
+			const ours = ps.code === 0 && ps.output.split("\n").map((l) => l.trim()).includes("pi-dispatch-valkey");
+			out(`\n✓ something is listening on 6379, assuming your Valkey${ours ? " (it is the pi-dispatch-valkey container)" : ""}\n`);
+			summary.push(["valkey", ours ? "container pi-dispatch-valkey already running" : "port 6379 already has a listener, left alone"]);
+		} else {
+			includeValkey = true;
+		}
+	}
+	const components = stackComponents({ venues, env, includeValkey, armed });
+	for (const note of components.notes) out(`\n⚠ ${note}\n`);
+	if (components.proxy) {
+		if ((await runCmd(spawn, "podman", ["inspect", "--format={{.State.Running}}", DEFAULT_EGRESS_PROXY])) === 0) {
+			out(`\n✓ Egress proxy already present under this account's Podman (${DEFAULT_EGRESS_PROXY})\n`);
+			summary.push(["egress (podman)", "proxy already present, left untouched"]);
+			components.proxy = false;
+		} else if (!fs.existsSync(join(cwd, "egress-allowlist.conf"))) {
+			out("\n✗ the egress policy is on but egress-allowlist.conf is not here, not starting a proxy with no allowlist\n");
+			summary.push(["egress (podman)", "skipped: no egress-allowlist.conf in this folder; run `pi-dispatch init` here, then `up` again"]);
+			components.proxy = false;
+		}
+	}
+	if (!components.valkey && !components.proxy) return;
+	const plan = planStack({ components, templatesDir, deployDir: cwd, home, fs, readTemplate });
+	if (plan.error) {
+		out(`\n✗ ${plan.error}\n`);
+		summary.push(["podman stack", `NOT installed: ${plan.error}`]);
+		return;
+	}
+	const changed = plan.files.filter((f) => f.state === "changed");
+	if (changed.length > 0) {
+		// up has no --force, and a file someone edited is theirs until they say otherwise (init's contract).
+		out(`\n✗ ${changed.map((f) => f.path).join(", ")} differs from what this version renders, left untouched\n`);
+		summary.push(["podman stack", "NOT installed: a Quadlet file differs; `pi-dispatch service install --force` replaces it"]);
+		return;
+	}
+	const parts = [components.valkey ? "Valkey" : null, components.proxy ? "the egress proxy" : null].filter(Boolean).join(" and ");
+	const accepted = await consent(
+		`${parts} ${components.valkey && components.proxy ? "are" : "is"} not running under this account's Podman. up would install ${components.valkey && components.proxy ? "them" : "it"} as Quadlet units in your user manager (the same installer \`pi-dispatch service install\` uses; systemd brings them back at boot while linger is on):`,
+		plan.actions.map(describeAction),
+		{ yes, out, prompt },
+	);
+	const row = components.valkey && components.proxy ? "podman stack" : components.valkey ? "valkey" : "egress (podman)";
+	if (!accepted) {
+		out("skipped: `pi-dispatch service install` installs the same units with the worker\n");
+		summary.push([row, `skipped (declined): ${components.valkey ? "the queue needs Valkey before `pi-dispatch worker` can drain" : "every podman job is refused pre-spend until the proxy is up (PI_EGRESS=0 opts out)"}`]);
+		return;
+	}
+	// The fs seam gains mkdir here only: up's own writes (`.env`) never needed one, and the Quadlet directory usually
+	// does not exist on a fresh account.
+	const applied = await applyStack(plan, { fs: { ...fs, mkdirSync: fs.mkdirSync ?? mkdir }, run: (cmd, args) => runStreamed(spawn, cmd, args, out) });
+	if (!applied.ok) {
+		out(`✗ ${applied.failed} failed: continuing; doctor below will re-check. \`journalctl --user -u ${plan.start.join(" -u ")}\` has the details\n`);
+		summary.push([row, `install FAILED at: ${applied.failed}`]);
+		return;
+	}
+	out(`✓ started ${plan.start.join(" ")}\n`);
+	summary.push([row, `installed as Quadlet units and started (${plan.start.join(", ")})`]);
+	out(lingerNote(await readLinger(user, (cmd, args) => runCmdCapture(spawn, cmd, args)), user));
 }
 
 /**

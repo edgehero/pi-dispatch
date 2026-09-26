@@ -68,7 +68,7 @@ import { copySkillTree } from "./copy-tree.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { GIT_READ_FLAGS } from "./git-hardening.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
-import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor } from "./backends.mjs";
+import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, observePodman, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { PODMAN_PINNED_FLAGS, buildPodmanRunArgs } from "./docker-run.mjs";
 import { observeHost } from "./runtime-observations.mjs";
@@ -1330,7 +1330,7 @@ export async function collectChecks(env, seams) {
 		// Issue #433: without `local`, docker is not this deployment's runtime and may not be installed at all, so neither the
 		// compose file nor a `docker run` is offered. The words hold before and after the setup commands learn Podman: the
 		// podman guide says how to start Valkey under the account, whichever command does it.
-		fix: localUsed ? "docker compose -f deploy/docker-compose.yml up -d" : "start Valkey under this account's Podman, or from a distribution package, as docs/podman.md describes",
+		fix: localUsed ? "docker compose -f deploy/docker-compose.yml up -d" : "run `pi-dispatch up` (or `pi-dispatch service install`) as this account: on the podman venue both start Valkey as a Quadlet unit under its Podman (docs/podman.md, setup step 6); a Valkey you run yourself, a distribution package say, works too",
 		// Prompt tier, and only for a LOOPBACK url (the shipped default): starting a local container cannot
 		// make a remote VALKEY_URL reachable, so a pointed-elsewhere deployment keeps the plain fix line
 		// rather than an offer that would mask the real problem. The argv mirrors the compose file's
@@ -4200,22 +4200,6 @@ export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCod
 		}
 	}
 	return { checks, forLive, daemon };
-}
-
-/**
- * Which venues run jobs here (issue #354), from the same parse the worker boots with. An unparseable PI_BACKENDS reads as
- * the unset default, `local` alone, so every docker line is exactly what it always was and only the backend section,
- * which reports the parse, fails on it: guessing another venue from a list the worker refuses would be doctor inventing
- * a deployment.
- */
-function venuesOf(env) {
-	let blessed;
-	try {
-		blessed = parseBackendList(env.PI_BACKENDS);
-	} catch {
-		blessed = [DEFAULT_BACKEND];
-	}
-	return { localUsed: blessed.includes(DEFAULT_BACKEND), podmanUsed: blessed.includes(PODMAN_BACKEND), podmanDefault: blessed[0] === PODMAN_BACKEND };
 }
 
 /** The podman venue's observations (issue #354), which only its own `podman info` and this account's files answer. */

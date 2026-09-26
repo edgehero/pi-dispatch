@@ -1,0 +1,46 @@
+# Quadlet unit for the egress policy's allowlist proxy on the native rootless `podman` venue (REQ-EGRESS-ALLOWLIST,
+# issue #430, docs/podman.md): deploy/docker-compose.yml's `egress-proxy` service, for a host whose jobs run under
+# this account's own rootless Podman.
+#
+# Installed by `pi-dispatch service install` (user scope, with podman in PI_BACKENDS and PI_EGRESS armed) and by
+# `pi-dispatch up`. Unlike the Valkey unit this one is RENDERED: the two /opt/pi-dispatch paths below are
+# placeholders, replaced with the package's own shipped egress-proxy.conf and with the deployment folder's
+# egress-allowlist.conf. Never `systemctl --user enable` it (a generated unit refuses that); the [Install] section is
+# read by the generator itself.
+#
+# A RESTART DROPS EVERY PER-JOB NETWORK (measured on Podman 5.8.1). The generated unit runs `podman run --replace
+# --rm`, so `systemctl --user restart` makes a NEW container, and the per-job `--internal` networks the worker had
+# connected to the old one are gone from it. A job started afterwards connects the new proxy at its start and is
+# fine; a job already running when the proxy restarts has lost its only route out for the rest of that run.
+
+[Unit]
+Description=pi-dispatch egress allowlist proxy (rootless Podman, Quadlet)
+
+[Container]
+# The compose file's digest, fully qualified. A test holds the two equal: this container IS the allowlist, so a
+# digest bumped in one file only would give the two venues two different policies.
+Image=docker.io/ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029
+# The name the worker attaches to each job network. A deployment that sets PI_EGRESS_PROXY to another name runs its
+# own proxy, and neither `service install` nor `up` installs this unit for it: `--replace` would otherwise remove
+# whatever container of that name the operator runs.
+ContainerName=pi-dispatch-egress-proxy
+Network=pi-dispatch-egress-out.network
+# The RULES (shipped) and the LIST (yours). `z` for the SELinux reason the compose file records: unlabelled, squid
+# cannot read its own configuration on an enforcing host and crash-loops. Shared `z`, never private `Z`, as there:
+# on a host that also runs the compose proxy the same allowlist file is mounted by both.
+Volume=/opt/pi-dispatch/deploy/egress-proxy.conf:/etc/squid/squid.conf:ro,z
+Volume=/opt/pi-dispatch/egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro,z
+# The exec form, a JSON array, for the reason the compose file gives: a plain string runs under /bin/sh, which on
+# this image is dash, where /dev/tcp does not exist and the check would fail forever while squid serves.
+HealthCmd=["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3128"]
+HealthInterval=30s
+HealthTimeout=3s
+HealthRetries=3
+HealthStartPeriod=10s
+
+[Service]
+TimeoutStartSec=900
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

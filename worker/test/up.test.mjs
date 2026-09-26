@@ -50,7 +50,7 @@ const SECRET = "cafef00d".repeat(8);
 
 // Everything injected, everything recorded. `files` seeds the in-memory fs (path → text); the fake
 // init deliberately creates nothing, so a test that wants a .env after init seeds it up front.
-function harness({ plan = {}, listening = true, answers = [], files = {}, doctorCode = 0, argv = [], env = { PI_PROVIDER: "anthropic" }, cwd = "/deploy", platform = "linux", logsDirPathFn, settingsFilePathFn } = {}) {
+function harness({ plan = {}, listening = true, answers = [], files = {}, doctorCode = 0, argv = [], env = { PI_PROVIDER: "anthropic" }, cwd = "/deploy", platform = "linux", logsDirPathFn, settingsFilePathFn, extra = {} } = {}) {
 	const calls = [];
 	const promptCalls = [];
 	const initCalls = [];
@@ -101,6 +101,7 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 			doctorOpts.push(opts);
 			return doctorCode;
 		},
+		...extra,
 	};
 	return { run: () => runUp(argv, deps), deps, calls, promptCalls, initCalls, doctorCalls, doctorOpts, store, text: () => buf.join("") };
 }
@@ -659,4 +660,121 @@ test("up: a declined proxy prompt runs nothing, and the summary says what that c
 	await h.run();
 	assert.ok(!h.calls.some((c) => c.args[0] === "run" && c.args.includes("pi-dispatch-egress-proxy")));
 	assert.match(h.text(), /every job is refused pre-spend until the proxy is up/);
+});
+
+// ---------------------------------------------------------------------------------------------------
+// The podman venue (issue #430): with PI_BACKENDS naming podman and not local, `up` drives rootless Podman and the
+// SAME Quadlet installer `service install` uses, and never runs docker. The info read is injected as the venue's own
+// reader shape, so the gate is the worker's `decidePodmanJobUser` and nothing re-implemented here.
+// ---------------------------------------------------------------------------------------------------
+
+const QDIR = "/home/op/.config/containers/systemd";
+const rootless = async () => ({ answered: true, info: { rootless: true, serviceIsRemote: false, selinux: false } });
+const podmanExtra = (over = {}) => ({ readPodmanInfo: rootless, euid: 1234, egid: 1234, home: "/home/op", user: "op", mkdir: () => {}, ...over });
+
+test("up on podman: --yes runs exactly the lines it showed, installs the Quadlet stack, and never spawns docker", async () => {
+	const h = harness({
+		env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "podman" },
+		plan: { "podman image exists": 1, "podman pull": 0, "podman tag": 0, "podman inspect": 1, systemctl: 0, "loginctl show-user": { code: 0, output: "Linger=no\n" } },
+		listening: false,
+		argv: ["--yes"],
+		files: { "/deploy/egress-allowlist.conf": "api.anthropic.com\n" },
+		extra: podmanExtra(),
+	});
+	assert.equal(await h.run(), 0);
+	assert.ok(!h.calls.some((c) => c.cmd === "docker"), "a podman-only deployment never asks docker anything");
+	const text = h.text();
+	// What was shown: the consent block's indented lines after the Quadlet intro.
+	const from = text.indexOf("as Quadlet units in your user manager");
+	const block = text.slice(from, text.indexOf("--yes: accepted", from));
+	const shown = block.split("\n").slice(1).filter((l) => l.startsWith("  ")).map((l) => l.trim());
+	const ran = [];
+	for (const c of h.calls) if (c.cmd === "systemctl") ran.push([c.cmd, ...c.args].join(" "));
+	const written = [...h.store.keys()].filter((p) => p.startsWith(QDIR)).map((p) => `write ${p}`);
+	assert.deepEqual(shown, [...written, ...ran], "shown then run: the same lines, in the same order");
+	assert.deepEqual(ran, ["systemctl --user daemon-reload", "systemctl --user start pi-dispatch-valkey.service pi-dispatch-egress-proxy.service"]);
+	assert.equal(written.length, 4);
+	assert.ok(!ran.some((l) => / enable /.test(l)), "a generated unit is never enabled");
+	assert.deepEqual(h.calls.filter((c) => c.cmd === "podman" && c.args[0] !== "inspect").map((c) => c.args), [
+		["image", "exists", "pi-job:latest"],
+		["pull", "ghcr.io/edgehero/pi-job:latest"],
+		["tag", "ghcr.io/edgehero/pi-job:latest", "pi-job:latest"],
+	]);
+	assert.match(text, /⚠ linger is OFF for op/);
+	assert.match(text, /sudo loginctl enable-linger op/);
+	assert.match(text, /podman stack\s+installed as Quadlet units and started/);
+});
+
+test("up on podman: a rootful Podman stops up with the worker's own refusal, having run and written nothing", async () => {
+	const h = harness({
+		env: { PI_BACKENDS: "podman" },
+		listening: false,
+		argv: ["--yes"],
+		extra: podmanExtra({ readPodmanInfo: async () => ({ answered: true, info: { rootless: false, serviceIsRemote: false } }) }),
+	});
+	assert.equal(await h.run(), 1);
+	assert.match(h.text(), /podman is not rootless for this account/);
+	assert.equal(h.calls.length, 0);
+	assert.equal(h.initCalls.length, 0, "stops before init, like the docker gate");
+	assert.equal(h.doctorCalls.length, 0);
+});
+
+test("up on podman: declining the stack runs nothing and writes no Quadlet file", async () => {
+	const h = harness({
+		env: { PI_BACKENDS: "podman", PI_EGRESS: "0" },
+		plan: { "podman image exists": 0 },
+		listening: false,
+		answers: [""],
+		extra: podmanExtra(),
+	});
+	assert.equal(await h.run(), 0);
+	assert.equal(h.promptCalls.length, 1);
+	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)));
+	assert.ok(!h.calls.some((c) => c.cmd === "systemctl"));
+	assert.match(h.text(), /valkey\s+skipped \(declined\)/);
+});
+
+test("up on podman: a listener on 6379 is left alone, as on docker", async () => {
+	const h = harness({
+		env: { PI_BACKENDS: "podman", PI_EGRESS: "0" },
+		plan: { "podman image exists": 0, "podman ps": { code: 0, output: "pi-dispatch-valkey\n" } },
+		listening: true,
+		extra: podmanExtra(),
+	});
+	assert.equal(await h.run(), 0);
+	assert.equal(h.promptCalls.length, 0);
+	assert.match(h.text(), /container pi-dispatch-valkey already running/);
+});
+
+test("up on local,podman: the docker steps are unchanged, then podman's image and proxy; Valkey stays docker's", async () => {
+	const h = harness({
+		env: { PI_BACKENDS: "local,podman" },
+		plan: { ...green, "docker inspect": 0, "podman image exists": 0, "podman inspect": 1, systemctl: 0, "loginctl show-user": { code: 0, output: "Linger=yes\n" } },
+		listening: true,
+		argv: ["--yes"],
+		files: { "/deploy/egress-allowlist.conf": "x\n" },
+		extra: podmanExtra(),
+	});
+	assert.equal(await h.run(), 0);
+	assert.deepEqual(h.calls.slice(0, 3).map((c) => [c.cmd, ...c.args]), [
+		["docker", "version"],
+		["docker", "image", "inspect", "pi-job:latest"],
+		["docker", "ps", "--filter", "name=pi-dispatch-valkey", "--format", "{{.Names}}"],
+	]);
+	assert.ok(![...h.store.keys()].some((p) => p.endsWith("pi-dispatch-valkey.container")), "no second Valkey on a docker host");
+	assert.ok(h.store.has(`${QDIR}/pi-dispatch-egress-proxy.container`), "podman jobs still need podman's own proxy");
+	assert.ok(h.calls.some((c) => c.cmd === "systemctl" && c.args.join(" ") === "--user start pi-dispatch-egress-proxy.service"));
+});
+
+test("up on docker: PI_EGRESS_PROXY is the name up looks for, and it never starts the shipped proxy in its place", async () => {
+	const h = harness({
+		env: { PI_EGRESS_PROXY: "my-squid" },
+		plan: { ...green, "docker inspect": 1 },
+		listening: true,
+		files: { "/deploy/egress-allowlist.conf": "x\n" },
+	});
+	assert.equal(await h.run(), 0);
+	assert.ok(h.calls.some((c) => c.args.join(" ") === "inspect --format={{.State.Running}} my-squid"));
+	assert.ok(!h.calls.some((c) => c.args[0] === "run" || c.args[0] === "network"), "nothing started");
+	assert.match(h.text(), /PI_EGRESS_PROXY names my-squid, and docker has no container of that name/);
 });

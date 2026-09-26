@@ -1148,3 +1148,111 @@ test("nudge: any configured signal — env sextet, pointer file, cwd scaffold �
   withScaffold.handler({ type: "session_start", reason: "startup" }, withScaffold.ctx);
   assert.equal(withScaffold.notes.length, 0, "a cwd scaffold suppresses the nudge");
 });
+
+// ── the podman venue (issue #430) ───────────────────────────────────────────────────────────────────
+
+test("probePodman: asks podman info for the rootless flag and sorts rootless, rootful, missing and not answering", () => {
+  let asked;
+  assert.deepEqual(
+    mod.probePodman((bin, args) => {
+      asked = [bin, ...args];
+      return "true\n";
+    }),
+    { ok: true },
+  );
+  assert.deepEqual(asked, ["podman", "info", "--format", "{{.Host.Security.Rootless}}"]);
+  assert.deepEqual(mod.probePodman(() => "false\n"), { rootful: true });
+  assert.deepEqual(mod.probePodman(() => { throw Object.assign(new Error("x"), { code: "ENOENT" }); }), { missing: true });
+  assert.match(mod.probePodman(() => { throw Object.assign(new Error("x"), { status: 125 }); }).daemonDown, /exited 125/);
+});
+
+test("wizard: PI_BACKENDS=podman asks podman, never docker, runs up with it, and records it in the deployment's .env", async () => {
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  let dockerProbes = 0;
+  let podmanProbes = 0;
+  const { ui, notes } = wizardUi({
+    select: ["Guided setup", "Skip", "Skip"], // intent, worker, trigger edge: no runtime gate on a green podman
+    input: [dir],
+    confirm: [true, false, false], // up accepted; pointer, github declined
+  });
+  const { deps, attached } = wizardDeps({
+    env: { PI_DISPATCH_DEPLOYMENT_FILE: join(tempDir("admin-setup-ptr-"), "pointer.json"), PI_BACKENDS: "podman" },
+    probeDockerFn: () => {
+      dockerProbes++;
+      return { ok: true };
+    },
+    probePodmanFn: () => {
+      podmanProbes++;
+      return { ok: true };
+    },
+    runAttachedFn: async (_ctx, opts) => {
+      attached.push(opts);
+      // What init inside `up` does: scaffold .env with the key commented out.
+      writeFileSync(join(dir, ".env"), "# PI_BACKENDS=\n");
+      return { code: 0 };
+    },
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.equal(dockerProbes, 0, "a podman deployment is never asked about docker");
+  assert.equal(podmanProbes, 1);
+  assert.equal(attached[0].env.PI_BACKENDS, "podman", "up itself runs the podman venue");
+  assert.match(readFileSync(join(dir, ".env"), "utf8"), /^PI_BACKENDS=podman$/m, "the service reads the venue from the file");
+  assert.ok(notes.some((n) => /PI_BACKENDS=podman written into/.test(n.m)));
+});
+
+test("wizard: on Linux a failed docker gate offers rootless Podman, and choosing it runs up with PI_BACKENDS=podman", async () => {
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  const { ui, seen } = wizardUi({
+    select: ["Guided setup", "Use rootless Podman instead", "Skip", "Skip"], // intent, DOCKER GATE, worker, trigger edge
+    input: [dir],
+    confirm: [true, false, false],
+  });
+  const { deps, attached } = wizardDeps({
+    platform: "linux",
+    probeDockerFn: () => ({ missing: true }),
+    probePodmanFn: () => ({ ok: true }),
+    runAttachedFn: async (_ctx, opts) => {
+      attached.push(opts);
+      writeFileSync(join(dir, ".env"), "WEBHOOK_SECRET=x\n");
+      return { code: 0 };
+    },
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  const gate = seen.select.find((s) => /Docker is not ready/.test(s.title));
+  assert.deepEqual(gate.options, ["Re-check", "Use rootless Podman instead", "Continue anyway", "Stop"]);
+  assert.match(seen.confirm[0].message, /PI_BACKENDS=podman .* up/, "the exact command, with the variable it runs under");
+  assert.equal(attached[0].env.PI_BACKENDS, "podman");
+  assert.match(readFileSync(join(dir, ".env"), "utf8"), /^PI_BACKENDS=podman$/m);
+});
+
+test("wizard: a rootful Podman is named as the wrong kind, and Stop ends setup having spawned nothing", async () => {
+  const dir = emptyDir();
+  const { ui, notes } = wizardUi({ select: ["Guided setup", "Stop"], input: [dir], confirm: [] });
+  const { deps, attached } = wizardDeps({
+    env: { PI_DISPATCH_DEPLOYMENT_FILE: join(tempDir("admin-setup-ptr-"), "pointer.json"), PI_BACKENDS: "podman" },
+    probePodmanFn: () => ({ rootful: true }),
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.equal(attached.length, 0);
+  assert.ok(notes.some((n) => n.t === "warning" && /not rootless for this account/.test(n.m) && /docs\/podman\.md/.test(n.m)));
+});
+
+test("wizard: the compose receiver is explained, not attempted, on the podman venue", async () => {
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  const { ui, notes } = wizardUi({
+    select: ["Guided setup", "Skip", "Run the receiver with docker compose"],
+    input: [dir],
+    confirm: [false, false, false],
+  });
+  const { deps, attached } = wizardDeps({
+    env: { PI_DISPATCH_DEPLOYMENT_FILE: join(tempDir("admin-setup-ptr-"), "pointer.json"), PI_BACKENDS: "podman" },
+    probePodmanFn: () => ({ ok: true }),
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.ok(!existsSync(join(dir, "docker-compose.yml")), "no compose file copied");
+  assert.ok(!attached.some((a) => a.argv0 === "docker"), "docker never spawned");
+  assert.ok(notes.some((n) => /needs docker compose, and this deployment runs on rootless Podman/.test(n.m)));
+});

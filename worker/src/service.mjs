@@ -42,10 +42,15 @@
  */
 import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { connect as netConnect } from "node:net";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { parseBackendList, venuesOf } from "./backends.mjs";
+import { egressArmed } from "./egress.mjs";
+import { readEnvAssignments } from "./env-file.mjs";
+import { ALL_QUADLET_FILES, ALLOWLIST_PLACEHOLDER, PROXY_CONF_PLACEHOLDER, QUADLET_FILES, applyStack, describeAction, lingerNote, planStack, quadletDir, readLinger, stackComponents, workerUnitDeps } from "./podman-stack.mjs";
 
 // src/ is where this module lives in BOTH layouts (worker/src in a checkout,
 // node_modules/@edgehero/pi-dispatch/src under npm). Deploy templates resolve one level up from it
@@ -81,6 +86,7 @@ export const TEMPLATE_PINS = {
 		"EnvironmentFile=/opt/pi-dispatch/.env", // → <deployDir>/.env — the operator's .env lives beside the units, never inside the package
 		"\nUser=pi\n", // the DIRECTIVE line (the header comment also says User=pi mid-line, hence the \n anchors): stripped for --user scope; rewritten to the invoking user for --system
 		"WantedBy=multi-user.target", // → default.target in user scope (multi-user.target never runs there)
+		"\nWants=network-online.target\n", // the anchor the podman venue's Wants=/After= on its Quadlet units go after (issue #430), user scope only
 		// Byte-for-byte survivors — semantics the render must not lose:
 		"RestartPreventExitStatus=2", // EXIT_POLICY is never restarted (a retry loop is a bill)
 		"StartLimitIntervalSec=60",
@@ -132,6 +138,27 @@ export const TEMPLATE_PINS = {
 	// a unit that starts fine and ignores the operator's secrets manager.
 	"worker-env-wrapper.sh": ["PI_ENV_SETUP"],
 	"worker-env-wrapper.cmd": ["PI_ENV_SETUP"],
+	// The podman venue's stack as Quadlet units (issue #430, podman-stack.mjs). Three are copied verbatim, so what is
+	// pinned is what the worker and the installer rely on by NAME: the container and network names the worker attaches
+	// by, the unit names the worker unit Wants=, the loopback-only port, and an explicit Network= in every .container
+	// (a containers.conf `netns = "host"` would otherwise put it in the host namespace, measured).
+	"pi-dispatch-valkey.network": ["NetworkName=pi-dispatch-valkey"],
+	"pi-dispatch-valkey.container": [
+		"ContainerName=pi-dispatch-valkey",
+		"Network=pi-dispatch-valkey.network",
+		"PublishPort=127.0.0.1:6379:6379",
+		"Volume=pi-dispatch-valkey-data:/data",
+		"Exec=valkey-server --appendonly yes",
+		"WantedBy=default.target",
+	],
+	"pi-dispatch-egress-out.network": ["NetworkName=pi-dispatch-egress-out"],
+	"pi-dispatch-egress-proxy.container": [
+		`Volume=${PROXY_CONF_PLACEHOLDER}:/etc/squid/squid.conf:ro,z`, // → the PACKAGE's shipped egress-proxy.conf (templatesDir), never <deployDir>/deploy, which an npm install does not have
+		`Volume=${ALLOWLIST_PLACEHOLDER}:/etc/pi-dispatch/allowlist.conf:ro,z`, // → <deployDir>/egress-allowlist.conf, the list `init` scaffolds
+		"ContainerName=pi-dispatch-egress-proxy",
+		"Network=pi-dispatch-egress-out.network",
+		"WantedBy=default.target",
+	],
 };
 
 /**
@@ -289,6 +316,9 @@ export async function runService(argv = [], deps = {}) {
 		sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
 		now = () => Date.now(),
 		queue = null, // test seam; production builds one lazily in doRestart from VALKEY_URL
+		// Is anything on 127.0.0.1:6379? Asked only on a podman deployment, to decide whether the Quadlet Valkey is
+		// wanted (issue #430); the same plain TCP connect `up` uses, for up's reason.
+		probeTcp = defaultProbeTcp,
 	} = deps;
 
 	let values, positionals;
@@ -351,6 +381,7 @@ export async function runService(argv = [], deps = {}) {
 		sleep,
 		now,
 		queue,
+		probeTcp,
 		which: values.receiver ? "receiver" : "worker",
 		scope: platform === "linux" && values.system ? "system" : "user",
 		force: values.force,
@@ -376,7 +407,7 @@ export async function runService(argv = [], deps = {}) {
 			return doRender(ctx);
 		case "install":
 			// --print is implied for render and opt-in here: see what will be written, then write it.
-			if (values.print) doRender(ctx);
+			if (values.print) await doRender(ctx);
 			return doInstall(ctx);
 		case "uninstall":
 			return doUninstall(ctx);
@@ -524,7 +555,7 @@ function composeEnvSetupExec(setup, argv) {
  * known literals (see TEMPLATE_PINS); everything else — RestartPreventExitStatus=2, the StartLimit
  * crash-loop bound, KillSignal, TimeoutStopSec — passes through byte-for-byte.
  */
-function renderLinuxUnit(ctx) {
+function renderLinuxUnit(ctx, stackUnits = []) {
 	const template = ctx.which === "receiver" ? "receiver.service" : "worker.service";
 	// The ExecStart line is replaced WHOLE, not path-by-path: the template's script path is relative
 	// to a repo-root WorkingDirectory that only a checkout has. The rendered unit points at absolute
@@ -562,6 +593,10 @@ function renderLinuxUnit(ctx) {
 		// symlink into a .wants/ directory no user-instance boot ever walks — enabled but never
 		// started. default.target is the user manager's boot target.
 		unit = unit.replace("WantedBy=multi-user.target", "WantedBy=default.target");
+		// The podman venue's Quadlet units (issue #430), which live in this same user manager, so the worker can be
+		// ordered after them. Nothing is added when there are none, which keeps every other render byte-identical.
+		const deps = workerUnitDeps(stackUnits);
+		if (deps) unit = unit.replace("\nWants=network-online.target\n", () => `\nWants=network-online.target\n${deps}`);
 	} else {
 		unit = unit.replace(/^User=pi$/m, () => `User=${ctx.user}`);
 	}
@@ -666,7 +701,91 @@ function nssmSequence(ctx) {
 	};
 }
 
-function doRender(ctx) {
+/**
+ * The keys the podman stack decision reads, and where it reads them: the deployment's `.env`, the file the unit's
+ * `EnvironmentFile=` loads, read the way systemd reads it. NOT this shell's environment: nothing in this project loads
+ * `.env` into a process (docs/secrets.md), so a shell that exports PI_BACKENDS=podman says nothing about what the
+ * SERVICE will run, and installing Quadlet units off it would stand up a stack for a worker that then runs docker. A
+ * key an `--env-setup` script exports is invisible here for the same reason, which docs/podman.md says.
+ */
+const STACK_KEYS = ["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY"];
+
+/**
+ * Does this worker deployment run the podman venue, per the `.env` its unit loads? `{ used: false }`, `{ error }`,
+ * or `{ used: true, venues, env }`. Only the worker has a stack: the receiver runs no job and needs no Podman.
+ */
+function podmanVenue(ctx) {
+	if (ctx.which !== "worker") return { used: false };
+	const envPath = join(ctx.deployDir, ".env");
+	const fileKeys = {};
+	if (ctx.fs.existsSync(envPath)) {
+		let text;
+		try {
+			text = String(ctx.fs.readFileSync(envPath, "utf8"));
+		} catch (err) {
+			return { error: `cannot read ${envPath} to learn whether this deployment runs the podman venue: ${err?.message}` };
+		}
+		const found = readEnvAssignments(text, STACK_KEYS, { loader: "systemd" });
+		for (const key of STACK_KEYS) {
+			const read = found[key];
+			if (!read) continue;
+			// A line whose value this reader cannot vouch for is refused rather than guessed at: guessing "no podman"
+			// installs a docker-shaped unit for a podman deployment, and guessing "podman" the opposite.
+			if (!read.plain) return { error: `${envPath} line ${read.line} assigns ${key} in a form this command cannot read the way systemd's EnvironmentFile= will, so whether this deployment runs the podman venue is unknown. Write it as a plain ${key}=value line` };
+			fileKeys[key] = read.value;
+		}
+	}
+	// Refused here, unlike doctor's venuesOf, which reads an unparseable list as `local`: doctor then reports the parse,
+	// but an install that guessed would write a unit and a stack for a deployment the worker refuses to boot.
+	try {
+		parseBackendList(fileKeys.PI_BACKENDS);
+	} catch (err) {
+		return { error: `${envPath}: ${err.message}` };
+	}
+	const venues = venuesOf(fileKeys);
+	if (!venues.podmanUsed) return { used: false };
+	return { used: true, venues, env: fileKeys };
+}
+
+/**
+ * The refusal for the podman venue in SYSTEM scope. Not "podman cannot run under a system unit": a system unit with
+ * `User=` runs rootless Podman fine (measured, docs/podman.md step 2). The stack is the problem. Its Quadlet units
+ * belong to the account's own user manager, and a system unit cannot `Wants=`/`After=` a unit of another manager, so
+ * the worker would race its own queue at every boot; and installing them means writing into a user's config from a
+ * command whose system-scope doctrine is to write nothing. User scope with linger does both properly.
+ */
+function refusePodmanSystemScope(ctx) {
+	return fail(
+		ctx.err,
+		`PI_BACKENDS in ${join(ctx.deployDir, ".env")} lists podman, and the podman venue's stack (Valkey, the egress proxy) runs as Quadlet units in the worker account's OWN user manager, which a system unit cannot order itself after. Install in user scope (drop --system) with linger on:  sudo loginctl enable-linger ${ctx.user}\nOr keep a hand-written system unit and start the stack by hand (docs/podman.md, steps 6 and 7).`,
+	);
+}
+
+/**
+ * The podman venue's stack for this install: which parts, rendered, with the actions that install them. `{ error }`
+ * for what cannot be installed, else `{ components, plan, notes }`. The Valkey rule differs from `up`'s on purpose:
+ * `up` starts what is not running, while an install also keeps (and orders the worker after) a Valkey unit an
+ * earlier run already installed, even though that Valkey is now the thing listening.
+ */
+async function podmanStackFor(ctx, venue) {
+	let armed;
+	try {
+		armed = egressArmed(venue.env);
+	} catch (err) {
+		return { error: `${join(ctx.deployDir, ".env")}: ${err.message}` };
+	}
+	const installed = ctx.fs.existsSync(join(quadletDir(ctx.home), QUADLET_FILES.valkey.file));
+	const includeValkey = venue.venues.localUsed ? false : installed || !(await ctx.probeTcp("127.0.0.1", 6379));
+	const components = stackComponents({ venues: venue.venues, env: venue.env, includeValkey, armed });
+	if (!venue.venues.localUsed && !includeValkey) {
+		components.notes.push("something already listens on 127.0.0.1:6379 and no Quadlet Valkey is installed, so none is added: that listener is taken to be your Valkey, as `up` does");
+	}
+	const plan = planStack({ components, templatesDir: ctx.templatesDir, deployDir: ctx.deployDir, home: ctx.home, fs: ctx.fs });
+	if (plan.error) return { error: plan.error };
+	return { components, plan, notes: components.notes };
+}
+
+async function doRender(ctx) {
 	if (ctx.which === "receiver" && !ctx.receiverStart) return refuseMissingReceiver(ctx);
 	const paths = unitPaths(ctx);
 	if (ctx.platform === "darwin") {
@@ -683,8 +802,18 @@ function doRender(ctx) {
 		return 0;
 	}
 	if (ctx.platform === "linux") {
+		const venue = podmanVenue(ctx);
+		if (venue.error) return fail(ctx.err, venue.error);
+		let stack = null;
+		if (venue.used) {
+			if (ctx.scope === "system") return refusePodmanSystemScope(ctx);
+			stack = await podmanStackFor(ctx, venue);
+			if (stack.error) return fail(ctx.err, stack.error);
+		}
 		ctx.out(`# → ${paths.installPath}\n`);
-		ctx.out(renderLinuxUnit(ctx));
+		ctx.out(renderLinuxUnit(ctx, stack?.plan.start ?? []));
+		for (const f of stack?.plan.files ?? []) ctx.out(`\n# → ${f.path} (Quadlet, podman venue)\n${f.text}`);
+		for (const note of stack?.notes ?? []) ctx.out(`# note: ${note}\n`);
 		return 0;
 	}
 	const { service, commands } = nssmSequence(ctx);
@@ -713,9 +842,22 @@ async function doInstall(ctx) {
 		}
 	}
 
-	if (ctx.platform === "darwin") return installDarwin(ctx, paths);
-	if (ctx.platform === "linux") return ctx.scope === "system" ? installLinuxSystem(ctx, paths) : installLinuxUser(ctx, paths);
-	return installWindows(ctx);
+	const venue = podmanVenue(ctx);
+	if (venue.error) return fail(ctx.err, venue.error);
+	if (ctx.platform === "darwin" || ctx.platform === "win32") {
+		const code = ctx.platform === "darwin" ? await installDarwin(ctx, paths) : await installWindows(ctx);
+		// Said, never silently skipped: the venue refuses every host that is not Linux (podman-platform), so there is
+		// no stack to install here, and a deployment listing it should know why nothing about Podman happened.
+		if (code === 0 && venue.used) ctx.out("note: PI_BACKENDS lists podman, and the podman venue runs only on Linux (it refuses this host as podman-platform), so no podman stack was installed here\n");
+		return code;
+	}
+	if (ctx.scope === "system") return venue.used ? refusePodmanSystemScope(ctx) : installLinuxSystem(ctx, paths);
+	let stack = null;
+	if (venue.used) {
+		stack = await podmanStackFor(ctx, venue);
+		if (stack.error) return fail(ctx.err, stack.error);
+	}
+	return installLinuxUser(ctx, paths, stack);
 }
 
 async function installDarwin(ctx, paths) {
@@ -756,12 +898,36 @@ async function installDarwin(ctx, paths) {
 	return 0;
 }
 
-async function installLinuxUser(ctx, paths) {
+async function installLinuxUser(ctx, paths, stack = null) {
 	if (ctx.fs.existsSync(paths.installPath) && !ctx.force) {
 		return fail(ctx.err, `${paths.installPath} already exists — pass --force to replace it (same non-clobber contract as init)`);
 	}
+	if (stack) {
+		// Every refusal BEFORE anything is written, so a refused install leaves the host exactly as it was.
+		const changed = stack.plan.files.filter((f) => f.state === "changed");
+		if (changed.length > 0 && !ctx.force) {
+			return fail(ctx.err, `${changed.map((f) => f.path).join(", ")} already ${changed.length === 1 ? "exists" : "exist"} with other content than this version renders. Pass --force to replace ${changed.length === 1 ? "it" : "them"} (same non-clobber contract as the unit itself)`);
+		}
+		const allowlist = join(ctx.deployDir, "egress-allowlist.conf");
+		if (stack.components.proxy && !ctx.fs.existsSync(allowlist)) {
+			return fail(ctx.err, `the egress policy is on, and ${allowlist} does not exist: a proxy unit mounting a missing file makes Podman create a DIRECTORY there and squid fail confusingly. Run \`pi-dispatch init\` in ${ctx.deployDir} first (it never overwrites), or set PI_EGRESS=0 in .env to opt out of the policy`);
+		}
+		for (const note of stack.notes) ctx.out(`note: ${note}\n`);
+		if (stack.plan.actions.length > 0) {
+			// Shown, then done: the same lines `up` asks consent for, carried out by the same function.
+			ctx.out(`podman venue (PI_BACKENDS in .env): its stack, as Quadlet units in ${stack.plan.dir}:\n`);
+			for (const action of stack.plan.actions) ctx.out(`  ${describeAction(action)}\n`);
+			const applied = await applyStack(stack.plan, { fs: ctx.fs, run: (cmd, args) => run(ctx, cmd, args) });
+			if (!applied.ok) {
+				return fail(
+					ctx.err,
+					`${applied.failed} failed (${applied.code === null ? applied.message ?? "command not found" : `exit ${applied.code}`}), so the worker unit was NOT installed: it would only start against a missing queue or proxy. \`systemctl --user status ${stack.plan.start.join(" ")}\` and \`journalctl --user -u <unit>\` have the details; fix it, then re-run this install`,
+				);
+			}
+		}
+	}
 	ctx.fs.mkdirSync(dirname(paths.installPath), { recursive: true });
-	ctx.fs.writeFileSync(paths.installPath, renderLinuxUnit(ctx));
+	ctx.fs.writeFileSync(paths.installPath, renderLinuxUnit(ctx, stack?.plan.start ?? []));
 	const reload = await run(ctx, "systemctl", ["--user", "daemon-reload"]);
 	if (reload === null) return fail(ctx.err, `systemctl not found — is this a systemd host? The unit is written at ${paths.installPath}`);
 	const enable = await run(ctx, "systemctl", ["--user", "enable", "--now", paths.name]);
@@ -769,6 +935,14 @@ async function installLinuxUser(ctx, paths) {
 		return fail(ctx.err, `systemctl --user enable --now ${paths.name} failed (exit ${enable}) — the unit is written at ${paths.installPath}; \`systemctl --user status ${paths.name}\` has the details`);
 	}
 	ctx.out(`installed ${paths.name} → ${paths.installPath} (enabled and started in your user manager)\n`);
+	if (stack) {
+		if (stack.plan.start.length > 0) ctx.out(`started ${stack.plan.start.join(" ")} (Quadlet units: never enabled, the generator reads their own [Install] section); ${paths.name} Wants= and is After= them\n`);
+		// A WARNING, not a refusal, like the note below it: a worker that runs only while its operator is logged in is a
+		// real (desktop) deployment. But on this venue linger is also what brings the queue and the proxy back, and it
+		// was measured both ways, so the line says which of the two this host is rather than the general caution.
+		ctx.out(lingerNote(await readLinger(ctx.user, (cmd, args) => runCapture(ctx, cmd, args)), ctx.user));
+		return 0;
+	}
 	// Without linger a user manager only runs while a session exists — fine on a desktop, a silent
 	// no-worker-after-reboot on a headless box. Say so instead of letting the operator find out.
 	ctx.out(`note: user units run while you have a session. For a headless host that must start at boot:  sudo loginctl enable-linger ${ctx.user}\n`);
@@ -831,6 +1005,14 @@ async function doUninstall(ctx) {
 		return 0;
 	}
 	const userPath = ctx.platform === "darwin" ? paths.installPath : paths.userPath;
+	// The podman venue's Quadlet units (issue #430), removed with the worker, or on their own when `up` installed them
+	// and no worker unit was ever written. Decided by what EXISTS, not by today's PI_BACKENDS: an operator who dropped
+	// podman from the list still has the units, and they are still this tool's to remove.
+	const quadlets = ctx.platform === "linux" && ctx.which === "worker" && ctx.scope === "user" ? ALL_QUADLET_FILES.filter((q) => ctx.fs.existsSync(join(quadletDir(ctx.home), q.file))) : [];
+	if (!ctx.fs.existsSync(userPath) && quadlets.length > 0 && !ctx.fs.existsSync(paths.systemPath)) {
+		await removeQuadlets(ctx, quadlets);
+		return 0;
+	}
 	if (!ctx.fs.existsSync(userPath)) {
 		// Say where it looked — both scopes — and if the unit turns out to live in ROOT scope, print
 		// the removal commands instead of touching them (the same never-root doctrine as install).
@@ -853,7 +1035,22 @@ async function doUninstall(ctx) {
 	ctx.fs.unlinkSync(userPath);
 	await run(ctx, "systemctl", ["--user", "daemon-reload"]);
 	ctx.out(`uninstalled ${paths.name} (disabled, stopped, unit removed)\n`);
+	if (quadlets.length > 0) await removeQuadlets(ctx, quadlets);
 	return 0;
+}
+
+/**
+ * Stop and remove the podman venue's Quadlet units. `stop`, never `disable`: a generated unit cannot be disabled any
+ * more than enabled, and removing its file plus a daemon-reload is what unlinks it from default.target. The Valkey
+ * volume and the two networks are deliberately LEFT: the volume holds the queue's wait-list, and a re-install that
+ * found it gone would have dropped every waiting job on an uninstall nobody meant as a purge.
+ */
+async function removeQuadlets(ctx, quadlets) {
+	const units = quadlets.filter((q) => q.file.endsWith(".container")).map((q) => q.unit);
+	if (units.length > 0) await run(ctx, "systemctl", ["--user", "stop", ...units]); // already-stopped is fine
+	for (const q of quadlets) ctx.fs.unlinkSync(join(quadletDir(ctx.home), q.file));
+	await run(ctx, "systemctl", ["--user", "daemon-reload"]);
+	ctx.out(`removed the podman venue's Quadlet units (${quadlets.map((q) => q.file).join(", ")}); the pi-dispatch-valkey-data volume and the networks are kept, remove them with podman if you mean to\n`);
 }
 
 /** Informational only — reports every scope it knows about and always exits 0. */
@@ -891,6 +1088,16 @@ async function doStatus(ctx) {
 	const systemHits = [paths.systemPath, ...(ctx.which === "worker" ? ["/etc/systemd/system/worker.service"] : [])].filter((p) => ctx.fs.existsSync(p));
 	ctx.out(systemHits.length ? `system scope: ${systemHits.join(", ")} EXISTS — not managed by this tool\n` : "system scope: none\n");
 	reportEnvSetup(ctx, [paths.userPath, ...systemHits]);
+	// The podman venue's Quadlet units, one line each, and nothing at all where there are none, so the output of every
+	// other deployment is byte-identical to before issue #430.
+	if (ctx.which === "worker") {
+		for (const q of ALL_QUADLET_FILES) {
+			const path = join(quadletDir(ctx.home), q.file);
+			if (!ctx.fs.existsSync(path)) continue;
+			const active = await runCapture(ctx, "systemctl", ["--user", "is-active", q.unit]);
+			ctx.out(`quadlet: ${path} (${q.unit}): ${active.code === null ? "systemctl not found" : active.output.trim() || "unknown"}\n`);
+		}
+	}
 	return 0;
 }
 
@@ -1027,6 +1234,20 @@ function fail(err, message) {
 /** Re-join an argv for display; quote what cmd.exe would split (spaces) or what is a path (backslashes). */
 function quoteArgs(args) {
 	return args.map((a) => (a.includes(" ") || a.includes("\\") ? `"${a}"` : a)).join(" ");
+}
+
+/** Is anything listening on host:port? up.mjs's probe, for up.mjs's reason: a plain connect, no protocol. */
+function defaultProbeTcp(host, port, timeoutMs = 1500) {
+	return new Promise((resolvePromise) => {
+		const socket = netConnect({ host, port });
+		const done = (result) => {
+			socket.destroy();
+			resolvePromise(result);
+		};
+		socket.setTimeout(timeoutMs, () => done(false));
+		socket.on("connect", () => done(true));
+		socket.on("error", () => done(false));
+	});
 }
 
 /** Exit code of a spawned command; null when it could not launch (not on PATH) — the up.mjs pattern. */

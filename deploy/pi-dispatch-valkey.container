@@ -1,0 +1,40 @@
+# Quadlet unit for Valkey on the native rootless `podman` venue (issue #430, docs/podman.md): the same component
+# deploy/docker-compose.yml's `valkey` service and `pi-dispatch up`'s docker path start, for a host that runs jobs
+# under this account's own rootless Podman instead of a docker daemon.
+#
+# Installed by `pi-dispatch service install` (user scope, with podman in PI_BACKENDS) and by `pi-dispatch up`, which
+# copy it unchanged into ~/.config/containers/systemd/. Podman's systemd generator turns it into
+# pi-dispatch-valkey.service. Never `systemctl --user enable` it: a generated unit refuses that ("transient or
+# generated"); the [Install] section below is read by the generator itself, which links it into default.target
+# (measured on Podman 5.8.1: with linger on it came up 25 s after a reboot with nobody logged in).
+#
+# Fully qualified image names throughout: under short-name enforcement a unit cannot answer the prompt a short
+# name raises, so `valkey/valkey:8` could fail to start where Docker quietly assumed docker.io.
+
+[Unit]
+Description=pi-dispatch Valkey (the job queue; rootless Podman, Quadlet)
+
+[Container]
+Image=docker.io/valkey/valkey:8
+ContainerName=pi-dispatch-valkey
+# EXPLICIT, see pi-dispatch-valkey.network for why a container here must never rely on the default network.
+Network=pi-dispatch-valkey.network
+# Bound to localhost only, as in the compose file: the queue is not a public surface. The worker reaches it at
+# redis://127.0.0.1:6379, the default VALKEY_URL.
+PublishPort=127.0.0.1:6379:6379
+# The same named volume `pi-dispatch up` creates on docker, so the wait-list survives a restart and a reboot.
+Volume=pi-dispatch-valkey-data:/data
+# AOF on: the wait-list must survive a reboot (REQ-QUEUE-BURST-NO-DROP).
+Exec=valkey-server --appendonly yes
+HealthCmd=valkey-cli ping
+HealthInterval=10s
+HealthTimeout=3s
+HealthRetries=5
+
+[Service]
+# The first start pulls the image, which can outlast systemd's default 90 s start timeout on a slow link.
+TimeoutStartSec=900
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
