@@ -1404,18 +1404,25 @@ test("a 16 KB provider error body keeps the exit-2 label: the runner caps the ex
 	// head (where `code` and `reason` sit) falls out of the tail and the record says runner-policy. The
 	// runner's own capExitMessage is imported here (outcome.mjs has no imports of its own), so this test
 	// exercises the function run-job.mjs calls, through the real sink.
-	const { capExitMessage } = await import("../../image/runner/src/outcome.mjs");
-	const outcome = { code: 2, reason: "provider-auth-refused", message: `403 <html><body>${"Forbidden. ".repeat(1500)}</body></html>` };
-	assert.ok(outcome.message.length > 16000);
-	// The rest of the line as run-job.mjs builds it, with a full-width ledger so the budget is not flattered.
-	const models = Array.from({ length: 8 }, (_, i) => ({ provider: "anthropic", model: `model-${i}`, calls: 9, input: 123456, output: 23456, cacheRead: 3456, cacheWrite: 456, cacheWrite1h: 0, reasoning: 0, total: 150824, cost: 1.234567, unpriced: 0 }));
+	const { capExitMessage, EXIT_MESSAGE_MAX_CHARS } = await import("../../image/runner/src/outcome.mjs");
+	assert.equal(EXIT_MESSAGE_MAX_CHARS, 2000, "the literal is pinned here too: this test's margin is measured against it");
+
+	// The rest of the line as run-job.mjs builds it, at its WORST CASE, so the budget is not flattered:
+	// the maximal ledger usage-meter.test.mjs builds (8 named rows of 64-character provider and model ids
+	// plus the folded "other" row, 8-digit counts everywhere), every tokens key at 8 digits, the context
+	// block, the longest session reason, and the longest job-id shape (a cron id).
+	const wide = (prefix, i) => `${prefix}-${i}`.padEnd(64, "x");
+	const N = 99_999_999;
+	const row = (provider, model) => ({ provider, model, calls: N, input: N, output: N, cacheRead: N, cacheWrite: N, cacheWrite1h: N, reasoning: N, total: N, cost: 99_999.99, unpriced: N });
 	const rest = {
-		turns: 12,
-		tokens: { input: 1, output: 2, total: 3, cost: 0.1, metered: true, rootTotal: 3, otherTotal: 0, looseTotal: 0, sessions: 1, calls: 9, unresolved: 0, unpriced: 0 },
-		usage: { v: 1, piAi: "0.80.7", truncated: 0, models },
-		session: { resumed: false, reason: "disabled" },
+		turns: 4096,
+		tokens: { input: N, output: N, total: N, cost: 99_999.99, metered: true, rootTotal: N, otherTotal: N, looseTotal: N, sessions: N, calls: N, unresolved: N, unpriced: N },
+		usage: { v: 1, piAi: "88.88.88", truncated: 1, models: [...Array.from({ length: 8 }, (_, i) => row(wide("provider", i), wide("model", i))), row("other", "other")] },
+		context: { tokens: N, window: N },
+		session: { resumed: false, reason: "resume-chain-too-long" },
 	};
-	const line = (fields) => `\n${JSON.stringify({ event: "exit", jobId: "gh-big", ...fields, ...rest })}\n`;
+	const jobId = "repeat:very-long-schedule-name:1767225600000";
+	const line = (fields) => `\n${JSON.stringify({ event: "exit", jobId, ...fields, ...rest })}\n`;
 
 	const drive = async (exitText) => {
 		const fs = makeFakeFs({ stream: makeFakeStream() });
@@ -1427,7 +1434,16 @@ test("a 16 KB provider error body keeps the exit-2 label: the runner caps the ex
 		return (await jobLog.close()).exitReason;
 	};
 
-	assert.equal(await drive(line(capExitMessage(outcome))), "provider-auth-refused");
-	// The premise, so this test cannot pass for a reason other than the cap: uncapped, the label is lost.
-	assert.equal(await drive(line(outcome)), null);
+	// An HTML page, and the body that escapes worst: every control byte serializes to six characters.
+	for (const body of [`<html><body>${'<p class="x">Forbidden.</p>\n'.repeat(600)}</body></html>`, "\u0001".repeat(16000)]) {
+		const outcome = { code: 2, reason: "provider-auth-refused", message: `403 ${body}` };
+		assert.ok(outcome.message.length > 16000);
+		const capped = line(capExitMessage(outcome));
+		// 8 KiB is the tail; the line must stay under 6 KiB of it, so a later field (a ledger column, a new
+		// exit-line key) has 2 KiB to grow into before the label is at risk again.
+		assert.ok(capped.length <= 6 * 1024, `the worst-case capped exit line is ${capped.length} characters`);
+		assert.equal(await drive(capped), "provider-auth-refused");
+		// The premise, so this test cannot pass for a reason other than the cap: uncapped, the label is lost.
+		assert.equal(await drive(line(outcome)), null);
+	}
 });
