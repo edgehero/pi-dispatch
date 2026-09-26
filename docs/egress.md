@@ -49,7 +49,7 @@ than everything else combined.
 | | |
 |---|---|
 | One `--internal` network **per job** | `pi-job-<id>-net`, created at job start and removed at job end. Holds exactly two endpoints: the container and the proxy. If the worker dies before it can remove one, the next boot removes it, detaching whatever is still on it first, and says so in the log if it cannot. |
-| One long-lived proxy | `pi-dispatch-egress-proxy`, squid, hostname filtering on `CONNECT` to port 443. Publishes no port. |
+| One long-lived proxy | `pi-dispatch-egress-proxy`, squid, hostname filtering on `CONNECT` to port 443, and never to this host's own loopback or link-local addresses, whatever a listed name resolves to (issue #428). Publishes no port. |
 | One upstream network | `pi-dispatch-egress-out`. Only the proxy is on it. |
 
 **Per job, not one shared network**, and that is the part worth understanding. A shared network is a shared

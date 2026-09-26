@@ -68,7 +68,7 @@ import { copySkillTree } from "./copy-tree.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { GIT_READ_FLAGS } from "./git-hardening.mjs";
 import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor } from "./backends.mjs";
-import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, observePodman, resolvePodmanImageUser } from "./backend-podman.mjs";
+import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, observePodman, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { buildPodmanRunArgs } from "./docker-run.mjs";
 import { observeHost } from "./runtime-observations.mjs";
 import { endpointShown, makeDockerEndpointResolver, quotedShown } from "./backend-local.mjs";
@@ -4114,6 +4114,19 @@ export async function podmanChecks(env, seams, { jobImage }) {
 			fix: PODMAN_JOB_USER_FIX[decision.cause] ?? JOB_USER_FIX[decision.cause] ?? "see DES-PODMAN-NATIVE-ROOTLESS-BACKEND",
 		});
 		return { checks, observed, relabel: false, forLive: notRun(`a podman job is refused here (${decision.cause}), so a probe would read back a container no job gets`) };
+	}
+	// Issue #428: the account's containers.conf, read from the files the worker reads, by the worker's own function, so the
+	// line cannot say something the worker does not do. Severity by the boot rule, as the identity line above: ✗ where a
+	// worker with `podman` as its default venue refuses to boot, ⚠ where it boots and refuses each podman job. No spawn.
+	const widened = podmanConfWidening({ fs: observationFs, home, env, euid: ids.euid });
+	if (widened) {
+		checks.push({
+			ok: false,
+			...(podmanDefault ? {} : { warn: true }),
+			label: `podman: no job can run on this venue (${widened.cause}): ${widened.evidence}${podmanDefault ? " -- a worker running as this account refuses to boot" : " -- every podman job is refused"}`,
+			fix: podmanConfFix(widened),
+		});
+		return { checks, observed, relabel: false, forLive: notRun(`a podman job is refused here (${widened.cause}), so a probe would read back a container no job gets`) };
 	}
 	if (decision.mode !== "worker") {
 		checks.push({ ok: false, warn: true, label: `podman: which uid a job runs as could not be decided (${decision.reason})`, fix: "the worker retries every podman job until it can decide; fix what stops `podman info` answering for the worker's account, then re-run doctor" });

@@ -187,8 +187,10 @@ export function podmanArgsFromSpec(spec) {
  * with these flags it got its own namespaces and nothing. `http_proxy` is on by default, which copies the worker's proxy
  * variables into every job. A job's network is pinned the same way where it has none of its own (`--network=private`,
  * Podman's word for the rootless default), or `netns = "host"` would put it on the host's. What cannot be pinned is
- * that network's OPTIONS: containers.conf `pasta_options` are appended to the command line's, so one that maps host
- * loopback reaches such a job (measured), a named residual (issue #428).
+ * that network's OPTIONS: containers.conf `pasta_options` come before the command line's in pasta's argv, and a conf
+ * `-T <port>` survives even `--network=pasta:--map-host-loopback,none` (measured), so no flag here could close it. It is
+ * REFUSED instead, not left open: the venue refuses to run while the account's containers.conf sets `pasta_options`,
+ * `network_cmd_options` or `annotations` at all (`podmanConfWidening` in backend-podman.mjs, issue #428).
  */
 export const PODMAN_PINNED_FLAGS = Object.freeze(["--pid=private", "--ipc=private", "--uts=private", "--cgroupns=private", "--env-host=false", "--http-proxy=false"]);
 

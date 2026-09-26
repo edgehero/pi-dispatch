@@ -250,6 +250,119 @@ test("podmanAddsNoMounts reads every containers.conf a rootless Podman reads, ho
 	assert.equal(observe(answered(), fakeFs({ files: { [USER_MOUNTS]: "" }, errors: { "/etc/containers/containers.conf.d": "EACCES" } })).observations[PODMAN_ADDS_NO_MOUNTS], false, "a drop-in directory nobody could list withholds credit");
 });
 
+// --- issue #428: a containers.conf key that widens every job refuses the venue ------------------------------------
+
+const WIDENING_KEYS = ["pasta_options", "network_cmd_options", "annotations"];
+// Every file and drop-in directory `podmanConfFiles` names for uid 1234 and HOME /home/op: the vendor and /etc files and
+// directories, the rootless drop-ins without and with the uid, and the user's own file and drop-in directory.
+const CONF_FILES = ["/usr/share/containers/containers.conf", "/etc/containers/containers.conf", `${HOME}/.config/containers/containers.conf`];
+const CONF_DIRS = [
+	"/usr/share/containers/containers.conf.d",
+	"/etc/containers/containers.conf.d",
+	"/usr/share/containers/containers.rootless.conf.d",
+	"/etc/containers/containers.rootless.conf.d",
+	"/usr/share/containers/containers.rootless.conf.d/1234",
+	"/etc/containers/containers.rootless.conf.d/1234",
+	`${HOME}/.config/containers/containers.conf.d`,
+];
+const widening = (fs, over = {}) => mod.podmanConfWidening({ fs, home: HOME, env: {}, euid: 1234, ...over });
+const confAt = (path, text, dir = null) => fakeFs({ files: { [path]: text }, dirs: dir ? { [dir]: [path.slice(dir.length + 1)] } : {} });
+// What each key looks like where it was measured widening a job (M0, Fedora 44, Podman 5.8.1).
+const MEASURED = {
+	pasta_options: '[network]\npasta_options = ["--map-host-loopback", "169.254.1.2"]\n',
+	network_cmd_options: '[engine]\nnetwork_cmd_options = ["allow_host_loopback=true"]\n',
+	annotations: '[containers]\nannotations = ["run.oci.keep_original_groups=1"]\n',
+};
+
+test("podmanConfWidening refuses each widening key in every containers.conf a rootless Podman reads (#428)", { skip }, () => {
+	for (const key of WIDENING_KEYS) {
+		for (const path of CONF_FILES) {
+			const found = widening(confAt(path, MEASURED[key]));
+			assert.deepEqual([found?.cause, found?.key], ["podman-conf-widens-job", key], `${key} in ${path}`);
+			assert.match(found.evidence, new RegExp(`^${path.replaceAll(".", "\\.")} sets ${key}, which`), `${key} in ${path}`);
+		}
+		for (const dir of CONF_DIRS) {
+			const found = widening(confAt(`${dir}/99-test.conf`, MEASURED[key], dir));
+			assert.equal(found?.key, key, `${key} in ${dir}`);
+			assert.ok(found.evidence.startsWith(`${dir}/99-test.conf sets ${key}, which`), found.evidence);
+		}
+	}
+	// XDG_CONFIG_HOME moves the user's own file and drop-ins, as Podman's GetConfigHome does.
+	assert.equal(widening(confAt("/xdg/containers/containers.conf", MEASURED.pasta_options), { env: { XDG_CONFIG_HOME: "/xdg" } })?.key, "pasta_options");
+	assert.equal(widening(confAt("/xdg/containers/containers.conf.d/1.conf", MEASURED.annotations, "/xdg/containers/containers.conf.d"), { env: { XDG_CONFIG_HOME: "/xdg" } })?.key, "annotations");
+	// The first file in Podman's reading order is the one named, as for every other conf finding.
+	const both = fakeFs({ files: { "/etc/containers/containers.conf": MEASURED.annotations, [`${HOME}/.config/containers/containers.conf`]: MEASURED.pasta_options } });
+	assert.equal(widening(both).key, "annotations");
+	// A clean host, and the measured Fedora default (every key commented out), pass.
+	assert.equal(widening(fakeFs()), null);
+	assert.equal(widening(confAt("/usr/share/containers/containers.conf", '[containers]\n#annotations = []\n[engine]\n#network_cmd_options = []\n[network]\n#pasta_options = []\n# pasta_options = ["--map-gw"]\n')), null);
+});
+
+test("podmanConfWidening matches every TOML spelling of a key and nothing that merely contains one (#428)", { skip }, () => {
+	const at = (text) => widening(confAt(`${HOME}/.config/containers/containers.conf`, text))?.key ?? null;
+	for (const [text, key] of [
+		['[network]\nPASTA_OPTIONS = ["--map-gw"]\n', "pasta_options"],
+		['[network]\nPasta_Options=["-T","6379"]\n', "pasta_options"],
+		['[network]\n"pasta_options" = ["--map-gw"]\n', "pasta_options"],
+		["[engine]\n'network_cmd_options' = ['allow_host_loopback=true']\n", "network_cmd_options"],
+		['network.pasta_options = ["--map-gw"]\n', "pasta_options"],
+		['NETWORK.PASTA_OPTIONS = ["--map-gw"]\n', "pasta_options"],
+		['engine.network_cmd_options = ["allow_host_loopback=true"]\n', "network_cmd_options"],
+		['network = { pasta_options = ["--map-gw"] }\n', "pasta_options"],
+		['containers = {annotations=["run.oci.keep_original_groups=1"]}\n', "annotations"],
+		['containers = { env = ["A=1"], annotations = ["x=1"] }\n', "annotations"],
+		// containers.conf's append syntax, in the array and as a table: the key is still set.
+		['[network]\npasta_options = ["--map-gw", {append = true}]\n', "pasta_options"],
+		['[network]\npasta_options = {append = true, value = ["--map-gw"]}\n', "pasta_options"],
+		['[network]\n   pasta_options   =   []\n', "pasta_options"],
+		// Any value refuses, the empty one too: presence is the rule, since no argv takes any value back.
+		["[containers]\nannotations = []\n", "annotations"],
+		// A `#` inside a string earlier on the line is not a comment (MOUNT_KEY's measured rule).
+		['[containers]\nenv = ["X=#"]\nannotations = ["a=b"]\n', "annotations"],
+	]) assert.equal(at(text), key, text);
+	for (const text of [
+		'# pasta_options = ["--map-gw"]\n',
+		'   #annotations = ["run.oci.keep_original_groups=1"]\n',
+		'\t# network.pasta_options = ["--map-gw"]\n',
+		"my_pasta_options_x = 1\n",
+		"pasta_optionsx = 1\n",
+		"pod_annotations = 1\n",
+		"network_cmd_options_extra = 1\n",
+		'default_rootless_network_cmd = "slirp4netns"\n',
+		'network_cmd_path = "/usr/bin/slirp4netns"\n',
+		'[containers]\nenv = ["annotations"]\n',
+	]) assert.equal(at(text), null, text);
+});
+
+test("podmanConfWidening refuses what it cannot read whole, with no key and a determinate reason (#428)", { skip }, () => {
+	const noKey = (found, pattern, label) => {
+		assert.equal(found?.cause, "podman-conf-widens-job", label);
+		assert.equal(found.key, null, label);
+		assert.match(found.evidence, pattern, label);
+	};
+	// An escaped key TOML decodes to the name, which no pattern here sees through: refused, not decoded.
+	noKey(widening(confAt(`${HOME}/.config/containers/containers.conf`, '[network]\n"pasta\\u005foptions" = ["--map-gw"]\n')), /has an escaped key/, "escaped");
+	for (const name of ["CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE"]) noKey(widening(fakeFs(), { env: { [name]: "/tmp/c.conf" } }), new RegExp(`^${name} is set`), name);
+	noKey(widening(fakeFs({ files: { "/etc/containers/containers.conf": "" }, errors: { "/etc/containers/containers.conf": "EACCES" } })), /containers\.conf could not be read \(EACCES\)/, "unreadable file");
+	noKey(widening(fakeFs({ errors: { "/etc/containers/containers.conf.d": "EACCES" } })), /containers\.conf\.d could not be read \(EACCES\)/, "unlistable directory");
+	noKey(widening(fakeFs(), { home: null }), /home is not known/, "no home");
+	noKey(widening(fakeFs(), { euid: undefined }), /uid is not known/, "no uid");
+});
+
+test("the podman conf refusal names the file and key, says to remove it, and names the trade-off (#428)", { skip }, () => {
+	const found = widening(confAt(`${HOME}/.config/containers/containers.conf`, MEASURED.pasta_options));
+	assert.equal(
+		mod.podmanConfRefusal(found),
+		"Refused: /home/op/.config/containers/containers.conf sets pasta_options, which Podman hands to the pasta behind every job's network, where a host-loopback mapping (--map-host-loopback, --map-gw, -T) gives the job this host's 127.0.0.1 services; remove that key from that file, then restart this account's containers on a bridge network (the egress proxy among them), since the rootless network they share keeps the options it started with: the podman venue refuses any containers.conf this account's Podman reads that sets pasta_options, network_cmd_options or annotations, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers (a pasta MTU, say) goes on their own command line (--network=pasta:...) or Quadlet unit instead, not account-wide (issue #428).",
+	);
+	assert.equal(mod.podmanConfRefusal(found), `Refused: ${found.evidence}; ${mod.podmanConfFix(found)} (issue #428).`);
+	for (const key of WIDENING_KEYS) assert.match(mod.podmanConfRefusal(widening(confAt("/etc/containers/containers.conf", MEASURED[key]))), new RegExp(`^Refused: /etc/containers/containers\\.conf sets ${key}, which .*; remove that key from that file`));
+	const unread = widening(fakeFs(), { env: { CONTAINERS_CONF: "/x" } });
+	assert.match(mod.podmanConfRefusal(unread), /^Refused: CONTAINERS_CONF is set, .*; the podman venue must read every containers\.conf .* unset the variable for the worker's account \(issue #428\)\.$/);
+	assert.equal(mod.PODMAN_CONF_WIDENS_JOB, "podman-conf-widens-job");
+	assert.ok(!Object.hasOwn(mod.PODMAN_JOB_USER_FIX, mod.PODMAN_CONF_WIDENS_JOB), "a venue refusal, not a job-user cause");
+});
+
 test("podmanServiceLocal holds only for serviceIsRemote false", { skip }, () => {
 	assert.equal(observe(answered()).observations[PODMAN_SERVICE_LOCAL], true);
 	assert.equal(observe(answered({ serviceIsRemote: true })).observations[PODMAN_SERVICE_LOCAL], false);
@@ -361,6 +474,31 @@ test("the podman observationPreflight judges the floor on podman's observations,
 	assert.equal(plain.podman.info.controllers.length, 0);
 });
 
+test("the podman observationPreflight hands a widening containers.conf back as a venue refusal, per job (#428)", { skip }, async () => {
+	const path = `${HOME}/.config/containers/containers.conf`;
+	const files = { [USER_MOUNTS]: "", [path]: MEASURED.pasta_options };
+	const fs = fakeFs({ files });
+	const floor = { isolation: ENFORCED, credentialTransit: ENFORCED, mountSet: ENFORCED };
+	const b = bundle({ fs, backendFloor: floor });
+	const observed = await b.observationPreflight(JOB);
+	assert.equal(observed.ok, true);
+	assert.equal(observed.refused, undefined, "not a floor refusal: it fires with no floor at all");
+	assert.deepEqual(observed.podmanConfRefused, { reason: "podman-conf-widens-job", key: "pasta_options", message: mod.podmanConfRefusal(mod.podmanConfWidening({ fs, home: HOME, env: {}, euid: 1234 })) });
+	assert.deepEqual((await bundle({ fs }).observationPreflight(JOB)).podmanConfRefused?.key, "pasta_options", "and with no floor");
+	// Re-read per job: removing the key admits the next job with no restart.
+	files[path] = "[network]\n";
+	assert.deepEqual(Object.keys(await b.observationPreflight(JOB)), ["ok", "podman"]);
+	// A refused identity names its own fix first; the conf is not judged behind it.
+	files[path] = MEASURED.annotations;
+	const rootful = await bundle({ fs, readInfo: async () => answered({ rootless: false }) }).observationPreflight(JOB);
+	assert.equal(rootful.jobUserRefused?.cause, "podman-rootful");
+	assert.equal(rootful.podmanConfRefused, undefined);
+	// Determinate whatever the info read said: a transient read still refuses on the files, never retries.
+	const late = await bundle({ fs, backendFloor: floor, readInfo: async () => ({ answered: false, reason: "timeout", transient: true }) }).observationPreflight(JOB);
+	assert.equal(late.podmanConfRefused?.key, "annotations");
+	assert.equal(late.unavailable, undefined);
+});
+
 test("the podman jobUserPreflight decides from the observed read, reads podman info once, and logs changes only", { skip }, async () => {
 	let reads = 0;
 	const logs = [];
@@ -402,8 +540,10 @@ test("through the processor, a refused podman identity is refused before the ima
 		});
 		return c;
 	};
-	const run = async (readInfo, mode, backendFloor) => {
-		const b = mod.makePodmanBackend({ image: "pi-job:x", readInfo, platform: "linux", euid: 1234, egid: 1234, fs: noFiles, home: "/home/op", env: {}, backendFloor, log: () => {}, spawnFn: podmanSpawn(mode) });
+	const spawned = [];
+	const run = async (readInfo, mode, backendFloor, fs = noFiles) => {
+		const spawnFn = podmanSpawn(mode);
+		const b = mod.makePodmanBackend({ image: "pi-job:x", readInfo, platform: "linux", euid: 1234, egid: 1234, fs, home: "/home/op", env: {}, backendFloor, log: () => {}, spawnFn: (bin, args, o) => (spawned.push(args), spawnFn(bin, args, o)) });
 		let reserved = 0;
 		const redis = { incr: async () => (reserved++, 1), decr: async () => 0, expire: async () => {}, get: async () => null };
 		const deps = {
@@ -433,4 +573,18 @@ test("through the processor, a refused podman identity is refused before the ima
 	assert.deepEqual(await run(async () => answered({ controllers: ["io"] }), "present", floor), { reason: "backend-floor-unobserved", reserved: 0 });
 	assert.deepEqual(await run(async () => ({ answered: false, reason: "timeout", transient: true }), "present", floor), { threw: "retry", reserved: 0 });
 	assert.deepEqual(await run(async () => answered(), "absent", {}), { reason: "job-image-missing", reserved: 0 }, "and a usable venue's missing image is the image's");
+	// Issue #428: a widening containers.conf is refused as the venue's own answer, RETURNED (never a retry), before the
+	// image preflight asks podman anything, with the image present and no floor, and with a floor and a read still due.
+	const widened = fakeFs({ files: { [`${HOME}/.config/containers/containers.conf`]: MEASURED.network_cmd_options } });
+	for (const [label, readInfo, backendFloor] of [
+		["no floor", async () => answered(), {}],
+		["floored", async () => answered(), floor],
+		["floored, podman info not answered yet", async () => ({ answered: false, reason: "timeout", transient: true }), floor],
+	]) {
+		spawned.length = 0;
+		assert.deepEqual(await run(readInfo, "present", backendFloor, widened), { reason: "podman-conf-widens-job", reserved: 0 }, label);
+		assert.deepEqual(spawned, [], `${label}: no podman spawn, the image inspect included`);
+	}
+	// And the rootful identity still names its fix first on the same files.
+	assert.deepEqual(await run(async () => answered({ rootless: false }), "present", floor, widened), { reason: "job-user-unmappable", reserved: 0 });
 });
