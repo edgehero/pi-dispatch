@@ -334,3 +334,9 @@ test("a podman run opened from a panel that blesses podman runs through podman a
   assert.deepEqual(judged[0].backendFloor, { isolation: "enforced" }, "the panel's own floor reaches the podman judge");
   assert.match(written.join(""), /could not start podman: spawn podman ENOENT/);
 });
+
+test("a pre-attribution run in a panel without local names PI_BACKENDS, not a missing record (#429 review)", () => {
+  const info = mod.readSandboxInfo({ sandboxDir: retainedRoot({}), sandboxRetentionHours: 24 }, "gh-1", { now: () => NOW, env: { PI_BACKENDS: "podman" } });
+  assert.equal(info.retained, false);
+  assert.equal(info.reason, "not reopenable here (PI_BACKENDS lacks local)");
+});

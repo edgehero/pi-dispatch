@@ -25,7 +25,7 @@ import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, jobUserRefusal,
 import { makeCollectChain } from "./outbox.mjs";
 import { containerPackagePaths, readStageManifest } from "./packages.mjs";
 import { makeCleanup, makeForgePreparers, makePrepareWorkspace } from "./prepare.mjs";
-import { combineSandboxNetworkSweepers, listRunningSandboxesOn, makeSandboxNetworkSweeper, sandboxLauncher, sandboxVenues } from "./sandbox.mjs";
+import { listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatch } from "./sandbox.mjs";
 import { makeRetentionSweep } from "./retention-sweep.mjs";
 import { makeSandboxReaper } from "./sandbox-store.mjs";
 import { makeSessionStore } from "./session-store.mjs";
@@ -329,6 +329,9 @@ export async function startWorker(
 		makeLogReaper: makeLogReaperFn = makeLogReaper,
 		makeSandboxReaper: makeSandboxReaperFn = makeSandboxReaper,
 		makeSandboxNetworkSweeper: makeSandboxNetworkSweeperFn = makeSandboxNetworkSweeper,
+		// Issue #429: the one call that asks a runtime which sandboxes are open, seamed so a wiring test can drive the real
+		// sandbox reaper against a real retention root without spawning docker or podman.
+		listRunningSandboxes: listRunningSandboxesFn = listRunningSandboxes,
 		makeRetentionSweep: makeRetentionSweepFn = makeRetentionSweep,
 		makeRunContainer: makeRunContainerFn = makeRunContainer,
 		makeSecretsResolver: makeSecretsResolverFn = makeSecretsResolver,
@@ -776,43 +779,32 @@ export async function startWorker(
 
 	// REQ-RESURRECTABLE-SANDBOX: sweep retained per-job directories past their window, so what `cleanup`
 	// kept for re-opening stays bounded. Third in the row and deliberately its own sweep -- a different
-	// retention policy, a different PII class, and one thing neither sibling needs: it asks docker which
-	// sandboxes are live first, because an operator's shell can outlive a worker restart by design and
+	// retention policy, a different PII class, and one thing neither sibling needs: it asks the container runtimes
+	// which sandboxes are live first, because an operator's shell can outlive a worker restart by design and
 	// deleting a bind mount underneath it is a confusing failure with a boring cause. Same double-wrap.
 	// Held for the periodic sweep, same as the log reaper above. Safe to re-run on a timer without any
 	// state carried between calls: `makeSandboxReaper` declares `running` INSIDE its returned function and
 	// re-issues `listRunning` every call, so a docker outage costs one interval of retention overshoot
 	// rather than latching the sweep off until the next boot.
 	let reapSandboxes = async () => {};
-	// Issue #429: every blessed venue a sandbox opens on (`local` through docker, `podman` through this account's rootless
-	// podman), in `PI_BACKENDS` order. The same list `sandboxVenueRefusal` admits by, so no sandbox can be open in a
-	// runtime this sweep does not ask.
-	const sandboxRuntimes = sandboxVenues(config.backends);
 	try {
+		// Issue #429, as corrected by its review: which sandboxes are open is asked PER RETAINED RUN, of the runtime that
+		// run's manifest records, never of the runtimes this worker blesses. The opener's blessing is the OPENER's
+		// `PI_BACKENDS` and routinely differs from the worker's (`OQ-038`), so a blessed-list listing let a podman-only
+		// worker delete a local run's directory under a docker shell an operator had just opened. A runtime that cannot
+		// answer holds its own runs this pass and nothing else, so a stale docker CLI does not stop a podman sweep, and a
+		// run naming no venue with a launcher is held. `blessed` only adds runtimes to the network sweep; a host that
+		// blesses neither and retains nothing from either spawns neither CLI.
+		const watch = makeSandboxRuntimeWatch({ sandboxDir: config.sandboxDir, blessed: config.backends, list: listRunningSandboxesFn, makeSweeper: makeSandboxNetworkSweeperFn, log });
 		reapSandboxes = makeSandboxReaperFn({
 			sandboxDir: config.sandboxDir,
 			retentionHours: config.sandboxRetentionHours,
-			// Issue #354, widened by #429: the runtimes asked are the blessed sandbox venues, so with `local` unblessed this
-			// asks docker nothing. With NONE blessed it THROWS rather than answering `[]`: an empty list reads as "no shell
-			// is open" and the pass would delete retained directories under any sandbox still open from before, while a
-			// throw makes the reaper skip the pass and say so, every boot and every tick. With some blessed, the listing is
-			// theirs alone, and one of them failing throws too (`listRunningSandboxesOn`). RESIDUAL, stated: a docker
-			// sandbox left open from before `local` was dropped (the worker restarted with a narrower PI_BACKENDS under a
-			// live shell) is not in a podman-only listing, so its directory can expire under it. The CLI and the panel
-			// refuse to OPEN a run on an unblessed venue, so only a shell that predates the change can be in that state.
-			listRunning:
-				sandboxRuntimes.length > 0
-					? listRunningSandboxesOn({ venues: sandboxRuntimes })
-					: async () => {
-							throw new Error("local is not blessed, and neither is any other venue a sandbox opens on, so no container runtime on this host is asked which sandboxes are open");
-						},
-			// Issue #337: the session networks a died-mid-session process left, one sweeper PER sandbox venue (issue #429),
-			// each listing and removing in its own runtime. Unconditional on `PI_EGRESS`, on the boot reaper's own
+			listRunning: watch.listRunning,
+			// Issue #337: the session networks a died-mid-session process left, one sweeper per runtime present (issue
+			// #429), each listing and removing in its own runtime. Unconditional on `PI_EGRESS`, on the boot reaper's own
 			// precedent (it lists `pi-job-` networks whatever the posture) and for a sharper reason: a deployment that has
 			// turned the policy OFF is exactly where the leftovers are guaranteed dead, since nothing is making new ones.
-			// Not built with no sandbox venue blessed (issue #354): the pass above never reaches it. One venue hands the
-			// reaper that venue's sweeper itself, so a `local` host's wiring is what it always was.
-			...(sandboxRuntimes.length > 0 ? { sweepNetworks: combineSandboxNetworkSweepers(sandboxRuntimes.map((venue) => makeSandboxNetworkSweeperFn({ bin: sandboxLauncher(venue).bin }))) } : {}),
+			sweepNetworks: watch.sweepNetworks,
 			log,
 		});
 		await reapSandboxes();

@@ -1630,9 +1630,11 @@ blesses** (issue #429), not "any venue declaring `remote: false`": a non-remote 
 that and be reopened under one of these two. The blessing is read from the OPENER's process (the CLI's
 `loadConfig`, the panel's own environment through `sandboxVenuePolicy`), never a deployment's `.env` (`OQ-038`),
 and it defaults to `local` alone as `PI_BACKENDS` does, so an opener that sets nothing refuses and admits exactly
-what it did before #429. It is required for two reasons: a host that leaves a venue out has said it does not run
-that runtime, and the retention reaper asks only the blessed runtimes which sandboxes are open, so a sandbox in an
-unblessed one is invisible to the sweep that deletes its directory. A name this build does not know is refused. A
+what it did before #429. It is required because a shell that leaves a venue out has said it does not run that
+runtime. It is NOT what protects an open shell from the retention sweep, which an earlier version of this entry
+claimed and a review refuted by reproduction: the opener's `PI_BACKENDS` and the worker's routinely differ, so the
+sweep asks, per retained run, the runtime that run's manifest records (below). A name this build does not know is
+refused. A
 manifest with no `backend` key predates venue attribution and reads as `local`; a key that is present but
 not a non-empty string is refused, because a venue that was never known is not a local one. This REPLACES
 a deployment-wide refusal (every sandbox refused when any blessed venue was remote), which the command
@@ -1673,9 +1675,10 @@ sibling rather than an extension of the GitHub one for the same reason.
     unanswered read). Then `anyUid` in this account's store unless the uid is 1001, and a primary group of 0.
     `:Z` follows `podman info`'s `selinuxEnabled`, as a job's does. All of it before any network is created.
   - **Adds exactly**: `-i -t --entrypoint bash`, and `-p 127.0.0.1:<host>:<container>` per `--publish`. When the
-    run had a job user (issue #341) also `--user=<uid>:<gid>` and `-e HOME=/home/pi`: the uid comes from the
-    manifest's `jobUser` stamp, because that uid owns the retained files (so `sudo pi-dispatch sandbox` reopens a
-    run as its own user), while the daemon rows (rootless, userns-remap, Docker Desktop on Linux) are this CLI's
+    run had a job user (issue #341) also `--user=<uid>:<gid>` and `-e HOME=/home/pi`: on `local` the uid comes from
+    the manifest's `jobUser` stamp, because that uid owns the retained files (so `sudo pi-dispatch sandbox` reopens a
+    `local` run as its own user; on `podman` the uid is always the opening account's, `sudo` is refused and a stamp
+    naming another uid refuses, per the bullet above), while the daemon rows (rootless, userns-remap, Docker Desktop on Linux) are this CLI's
     own. A malformed stamp refuses (`job-user-stamp-invalid`) rather than reading as absent; a run from before
     the stamp decides from the CLI's own ids; an undecidable daemon refuses (`job-user-unknown`); so do an
     unmappable daemon or group (`job-user-unmappable`), a retained image without `anyUid`
@@ -1751,8 +1754,9 @@ sibling rather than an extension of the GitHub one for the same reason.
     ```
     `jobUser` (issue #341) is the job user the run had, and a sandbox reads it for IDENTITY only: `null` means
     nothing decided one (a bare wiring), so the sandbox decides from the CLI's own ids; `{ "user": null, "home":
-    null }` is the image's own user, reopened without `--user`; `{ "user": "<uid>:<gid>", "home": "/home/pi" }`
-    reopens as that uid. A stamp that is not an object, has no `user` key, has a `user` that is not a non-root
+    null }` is the image's own user, reopened without `--user` on `local` and REFUSED on `podman`, where no run has it;
+    `{ "user": "<uid>:<gid>", "home": "/home/pi" }` reopens as that uid on `local`, and on `podman` only when it is the
+    opening account's own. A stamp that is not an object, has no `user` key, has a `user` that is not a non-root
     `<uid>:<gid>`, or has a `home` that does not match its `user`, refuses `job-user-stamp-invalid`. A manifest
     from before the key decides like `null`.
     `image` is resolved through `resolveJobImage` — the same function the pre-spend preflight and
@@ -1782,15 +1786,21 @@ sibling rather than an extension of the GitHub one for the same reason.
     not arrive as the same empty array in front of a `rm -rf`. A failed lookup skips the whole sweep — one
     sweep, not the feature: the lookup is re-issued on every tick and the reaper holds no state between
     calls, so a docker outage costs one interval of retention overshoot rather than latching it off.
-    Since issue #429 it asks EVERY blessed venue a sandbox opens on, each through its own CLI
-    (`listRunningSandboxesOn`), and one that cannot be asked throws for the whole listing: a docker outage
-    beside an answering podman must not read as "none of docker's are open". With no such venue blessed the
-    listing throws and the pass is skipped, as it was with `local` unblessed.
+    Since issue #429 the question is asked PER RETAINED RUN (`makeSandboxRuntimeWatch`): of the runtime the run's
+    manifest records (its launcher's `bin`; a manifest with no `backend` key is `local`'s), never of the runtimes
+    the worker blesses, because the opener's `PI_BACKENDS` is the opener's and routinely differs from the
+    worker's (`OQ-038`); a first version asked the worker's blessed runtimes, and a podman-only worker deleted a
+    local run's directory under a docker shell opened from a shell with no `PI_BACKENDS`. A runtime that cannot
+    answer (no CLI, a daemon that is down, any error) HOLDS its own runs this pass and nothing else, so a stale
+    docker CLI does not stop a podman sweep; a run whose manifest names a venue with no launcher is held too; and
+    each is said (`sandbox_reaper_skipped`, `runtime-unanswered` or `venue-unknown`). A directory whose manifest
+    cannot be read is not held, since nothing can open it. Only an unreadable retention root throws and skips the
+    pass.
   - **The same sweep reclaims the session NETWORK, on the directory's clock** (issue #337). After the
     directory pass, `reapSandboxes` hands an injected `sweepNetworks` the ids it must keep and a closure that
-    re-reads the retained directories; one sweeper per blessed sandbox venue, each listing, inspecting and
-    removing in its own runtime (`combineSandboxNetworkSweepers`, issue #429; a single venue hands the reaper
-    its sweeper unchanged). INJECTED rather than imported, because `sandbox.mjs` imports
+    re-reads the retained directories; one sweeper per runtime PRESENT (one a blessed venue names, or one a
+    retained run recorded in that pass's listing), each listing, inspecting and removing in its own runtime, and
+    one failing does not stop the other (`combineSandboxNetworkSweepers`, issue #429). INJECTED rather than imported, because `sandbox.mjs` imports
     `readManifest` from `sandbox-store.mjs` and the other direction would be a cycle; it also keeps
     `sandbox-store.mjs` docker-free in its own tests. The sweeper lists `pi-sandbox-` networks and parses each against the
     shape `networkNameFor` builds, because `--filter name=` is a SUBSTRING match and the listing is therefore
@@ -4813,3 +4823,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-26 | Issue #428, review round 1. **`INT-EGRESS-POLICY-CONTRACT` AMENDED** again, the rules bullet and the carries-everything sentence: the first rule is now `http_access deny allowed to_host_local`, because a bare `deny to_host_local` made squid resolve EVERY name a job asked for, listed or not (measured with debug_options 78,3), a DNS channel out of every egress-armed job on every venue; `::/128` joins the list; the rule is stated as covering only FIXED addresses (`--map-host-loopback <address>`, slirp4netns's `cidr=` and `--map-gw` move the host); and "there is no address-based rule anywhere" becomes "no address-based rule ALLOWS anything", which the previous row left contradicting its own bullet. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED** again, the pinned-namespaces bullet: `env` joins the refused keys, and so does a file spelled so the check cannot read it. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: a transient conf read is retried, never recorded as `podman-conf-widens-job`. |
 | 2026-09-26 | Issue #428, review round 2. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the allowlist bullet: the ACL is `dstdomain -n`, since without `-n` squid reverse-resolved every unlisted IP-literal request (a PTR query per literal, measured), a DNS channel of the same class as round 1's; with it the request's host is compared as written, so a literal is refused unless the list names that literal. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: a host file read failing for a moment is a retry (`container-never-started` on the thrown attempt), never a new reason. |
 | 2026-09-26 | Issue #429. **`INT-SANDBOX-CONTRACT` AMENDED**: LOCAL-ONLY becomes THE HOST'S BLESSED VENUES. A sandbox reopens a run in the runtime that ran it, through `SANDBOX_LAUNCHERS` (`local` with the docker CLI and `buildDockerRunArgs`, `podman` with the `podman` CLI and `buildPodmanRunArgs`, the pairs each job bundle is built with), and only where the opener's own `PI_BACKENDS` blesses that venue; the default is `local` alone, so an opener that sets nothing refuses and admits what it did. Every runtime step goes through the run's venue's CLI: the running asks, the network's creation and removal, the launch, and the lines an operator reads (`podman attach`). On `podman` the argv is a podman job's (keep-id, `--user`, `PODMAN_PINNED_FLAGS`, and a network flag always, `--network=private` with egress off), the shell runs as the opening account, a stamp naming another uid is refused rather than reopened as that uid, and the venue is refused for what a job is, in the job's order, through the job's own function (`judgePodmanVenue`): identity, `podman-conf-widens-job`, then the observations against the opener's `PI_BACKEND_FLOOR`. The retention sweep asks every blessed sandbox runtime which sandboxes are open and fails closed when one cannot answer, and sweeps each runtime's session networks with that runtime's CLI. The acceptance names both flag arrays. The `local` argv is byte-identical to before, pinned by literals. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no job flag moved; the sandbox reuses the podman builder as it is. **`INT-EGRESS-POLICY-CONTRACT` UNCHANGED, checked**: the per-sandbox network keeps its name and its `--internal` creation, now in the run's runtime. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: a sandbox's refusals (`backend-floor` and `podman-unobserved`, new, and `podman-conf-widens-job`, the job's own token reused) are returned to the operator who opened it and are never written to a run record. |
+| 2026-09-26 | Issue #429, review round 1. **`INT-SANDBOX-CONTRACT` AMENDED, and one claim is a CORRECTION**. The previous row said the retention sweep asks every blessed sandbox runtime which sandboxes are open, and the entry justified requiring the opener's blessing by "a sandbox in an unblessed one is invisible to the sweep". Both rested on the opener's `PI_BACKENDS` being the worker's, which `OQ-038` says it routinely is not, and a review reproduced the harm: a worker blessing podman alone asked only podman, while a shell with no `PI_BACKENDS` opened a local run under docker, and the pass deleted that run's directory under the shell. The sweep now asks, PER RETAINED RUN, the runtime that run's manifest records (`makeSandboxRuntimeWatch`), whatever either side blesses; a runtime that cannot answer holds its own runs this pass and nothing else, a run on a venue with no launcher is held, and each is said. The network sweep visits the runtimes present (blessed, or recorded by a retained run). Two stamp clauses are corrected to `local`'s: `sudo` reopening a run as its own user, and a `{ user: null }` stamp reopened without `--user`, are `local` behaviour; `podman` refuses both. The podman `publish-needs-egress-off` refusal is kept with a truthful reason, measured: Podman DOES publish on an `--internal` network. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the new `sandbox_reaper_skipped` reasons (`runtime-unanswered`, `venue-unknown`) are worker log tokens, not record fields. |

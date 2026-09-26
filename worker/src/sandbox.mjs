@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { release as osRelease } from "node:os";
 import { promisify } from "node:util";
 import { execDockerBounded, makeDockerEndpointResolver } from "./backend-local.mjs";
@@ -12,7 +13,7 @@ import { makeImagePreflight } from "./image-preflight.mjs";
 import { decideJobUser, JOB_USER_FIX, makeDaemonFactsReader, relabelsPrivateMounts, resolveImageUser, socketFacts } from "./job-user.mjs";
 import { NETWORK_SUFFIX, createJobNetwork, egressArmed, egressEnv, egressProxyName, networkEndpoints, networkExists, networkNameFor, removeJobNetwork, removeNetworkOrSay } from "./egress.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
-import { readManifest } from "./sandbox-store.mjs";
+import { SANDBOX_MANIFEST, readManifest } from "./sandbox-store.mjs";
 
 /**
  * sandbox.mjs -- the operator session's container shape (INT-SANDBOX-CONTRACT).
@@ -228,7 +229,8 @@ export function buildSandboxRunArgs({ venue = DEFAULT_BACKEND, image, name, work
  */
 export async function listRunningSandboxes({ execFn = exec, bin = "docker" } = {}) {
 	// `bin` (issue #429) is ONE runtime's CLI: a podman sandbox is invisible to `docker ps` and the reverse, so the
-	// caller asks each venue it can open sandboxes on (`listRunningSandboxesOn`). `--format {{.Names}}` reads on both.
+	// retention reaper asks the runtime each retained run records (`makeSandboxRuntimeWatch`), and `--list` each blessed
+	// one. `--format {{.Names}}` reads on both.
 	const { stdout } = await execFn(bin, ["ps", "--filter", `name=${SANDBOX_NAME_PREFIX}`, "--format", "{{.Names}}"], { timeout: 5000 });
 	return stdout
 		.split("\n")
@@ -238,23 +240,91 @@ export async function listRunningSandboxes({ execFn = exec, bin = "docker" } = {
 }
 
 /**
- * The union of the running sandboxes across `venues` (issue #429), as `listRunningSandboxes` answers for one: the job
- * ids, and a THROW when ANY runtime could not be asked. Not a partial union: the reaper deletes directories, and a
- * docker outage beside an answering podman would otherwise read as "none of docker's sandboxes are open", which is the
- * blind sweep `listRunningSandboxes` throws to prevent. One runtime down therefore skips the whole pass, on that
- * function's rule. Asked one after another rather than together: each is bounded on its own, and the order is the
- * blessed order, so a log line reads the same on every tick.
+ * What the retention reaper asks before it deletes anything, and which runtimes its network sweep visits: `{
+ * listRunning, sweepNetworks }` for `makeSandboxReaper` (issue #429, review round 1).
+ *
+ * PER RETAINED RUN, NEVER PER DEPLOYMENT. For each retained directory it reads the venue the run's manifest records
+ * and asks THAT venue's runtime (its launcher's `bin`) which sandboxes are open, and `listRunning` answers the ids the
+ * pass must HOLD: every id a runtime reports open, every retained run whose runtime could not answer (no CLI, a daemon
+ * that is down, a timeout, any error), and every run whose manifest names a venue with no launcher (null, empty or
+ * unknown). Held means kept this pass, directory and network both; the next pass asks again.
+ *
+ * WHY NOT THE WORKER'S `PI_BACKENDS`, which the first version of this used and a review refuted by reproduction: the
+ * opener's blessing comes from the OPENER's environment (`sandboxVenueRefusal`), the reaper's from the worker's, and
+ * `OQ-038` records that the two routinely differ. A worker with `PI_BACKENDS=podman` asked only podman, while an
+ * operator shell with no `PI_BACKENDS` (so `local` alone) opened a run retained earlier under docker, and the pass
+ * found nothing open and deleted the directory under the shell. The runtime a run opens in is a property of the RUN,
+ * so the question is asked of the run.
+ *
+ * FAIL CLOSED PER DIRECTORY, not per pass: a stale docker CLI with no daemon holds the docker runs and nothing else, so
+ * a podman-only host still sweeps its podman runs, and a host with no docker CLI at all asks docker only if a retained
+ * run says it ran there. A manifest with no `backend` key predates venue attribution and ran on `local`, which is how
+ * `sandboxVenueRefusal` opens it, so docker is asked for it rather than holding it forever. A directory whose manifest
+ * cannot be read at all is not held: nothing can open it (`resolveSandbox` refuses it as absent), and the reaper's own
+ * `no-manifest` rule decides it, as it always did. THROWS only when the retention root itself cannot be listed, which
+ * skips the whole pass, on `listRunningSandboxes`' rule.
+ *
+ * THE NETWORK SWEEP visits the runtimes that are PRESENT: those a blessed venue names, plus those a retained run
+ * recorded in this pass's listing, one sweeper per runtime, built once and combined so one failing does not stop the
+ * other. A host that blesses neither `local` nor `podman` and retains nothing from either spawns neither CLI, which is
+ * the promise `start.mjs` makes for a host without Docker. RESIDUAL, stated: a docker session network whose run is no
+ * longer retained, on a host that no longer blesses `local`, is not visited, so it outlives its run; it holds nothing.
+ *
+ * Every log line is the family's `sandbox_reaper_skipped` (`OQ-007`'s one grep) with a fixed reason token and no CLI
+ * text: `venue-unknown` per held directory, `runtime-unanswered` per runtime with the number of directories it held.
  */
-export function listRunningSandboxesOn({ venues = [], list = listRunningSandboxes } = {}) {
-	return async function listRunning() {
-		const ids = new Set();
-		for (const venue of venues) {
-			const launcher = sandboxLauncher(venue);
-			if (!launcher) throw new Error(`listRunningSandboxesOn: no sandbox launcher for venue ${JSON.stringify(venue)}`);
-			for (const id of await list({ bin: launcher.bin })) ids.add(id);
+export function makeSandboxRuntimeWatch({ sandboxDir, blessed = [], fs = { readdirSync, readFileSync }, list = listRunningSandboxes, makeSweeper = makeSandboxNetworkSweeper, log = () => {} } = {}) {
+	const blessedBins = new Set(sandboxVenues(blessed).map((venue) => sandboxLauncher(venue).bin));
+	// Launcher-table order, so the asks and the log lines read the same on every pass.
+	const allBins = [...new Set(Object.values(SANDBOX_LAUNCHERS).map((l) => l.bin))];
+	let present = new Set(blessedBins);
+	const sweepers = new Map();
+	async function listRunning() {
+		let names;
+		try {
+			names = fs.readdirSync(sandboxDir);
+		} catch (err) {
+			if (err?.code !== "ENOENT") throw err;
+			names = [];
 		}
-		return [...ids];
-	};
+		const byBin = new Map();
+		const held = new Set();
+		for (const name of names) {
+			let manifest;
+			try {
+				manifest = JSON.parse(fs.readFileSync(join(sandboxDir, name, SANDBOX_MANIFEST), "utf8"));
+			} catch {
+				continue;
+			}
+			const launcher = sandboxLauncher(sandboxVenueOf(manifest));
+			if (!launcher) {
+				held.add(name);
+				log("sandbox_reaper_skipped", { entry: name, reason: "venue-unknown" });
+				continue;
+			}
+			if (!byBin.has(launcher.bin)) byBin.set(launcher.bin, []);
+			byBin.get(launcher.bin).push(name);
+		}
+		present = new Set([...blessedBins, ...byBin.keys()]);
+		for (const bin of allBins) {
+			const entries = byBin.get(bin);
+			if (!entries) continue;
+			try {
+				for (const id of await list({ bin })) held.add(id);
+			} catch {
+				for (const entry of entries) held.add(entry);
+				log("sandbox_reaper_skipped", { reason: "runtime-unanswered", runtime: bin, held: entries.length });
+			}
+		}
+		return [...held];
+	}
+	async function sweepNetworks(args) {
+		const bins = allBins.filter((bin) => present.has(bin));
+		if (bins.length === 0) return { swept: [], notes: [] };
+		for (const bin of bins) if (!sweepers.has(bin)) sweepers.set(bin, makeSweeper({ bin }));
+		return combineSandboxNetworkSweepers(bins.map((bin) => sweepers.get(bin)))(args);
+	}
+	return { listRunning, sweepNetworks };
 }
 
 /**
@@ -519,12 +589,13 @@ export function combineSandboxNetworkSweepers(sweepers) {
  *
  * HELD MEANS A VENUE THIS FILE HAS A LAUNCHER FOR (`SANDBOX_LAUNCHERS`: `local` through the docker CLI, `podman`
  * through this account's rootless podman), AND ONE `blessed` NAMES (issue #429). `blessed` is `PI_BACKENDS` as the
- * CALLER's process reads it: the CLI's `loadConfig`, the panel's own environment (`sandboxVenuePolicy`). Two reasons
- * for requiring the blessing, and the second is the sharp one. A host that does not bless a venue has said it does not
- * run that runtime, so reopening a run there spawns a CLI the operator took out of service. And the retention reaper
- * asks only the BLESSED venues which sandboxes are open (`start.mjs`), so a sandbox opened in an unblessed runtime is
- * one the reaper cannot see, whose retained directory it can delete under the open shell. It defaults to `local` alone,
- * which is what `PI_BACKENDS` unset means, so a caller from before issue #429 refuses and admits exactly as it did.
+ * CALLER's process reads it: the CLI's `loadConfig`, the panel's own environment (`sandboxVenuePolicy`). A shell whose
+ * `PI_BACKENDS` does not bless a venue has said it does not run that runtime, so reopening a run there would spawn a CLI
+ * that environment took out of service. It is NOT what keeps an open shell's directory from the retention reaper, and
+ * an earlier version of this comment said it was: the opener's `PI_BACKENDS` and the worker's routinely differ
+ * (`OQ-038`), so the reaper asks the runtime each retained run records instead, whatever either blesses
+ * (`makeSandboxRuntimeWatch`). It defaults to `local` alone, which is what `PI_BACKENDS` unset means, so a caller from
+ * before issue #429 refuses and admits exactly as it did.
  *
  * Not "any venue declaring `remote: false`": a future non-remote venue on a third runtime would pass that and be
  * reopened under one of these two, reproducing a run from a runtime it never ran in. Such a venue must add its own
@@ -731,12 +802,20 @@ export async function openSandbox({
 	// determinate refusal must not cost a round trip. And BEFORE `beforeLaunch`, which is where the CLI prints
 	// `published: ...`: one line later and it would print the false line and then refuse.
 	if (resolved.publish.length > 0 && egress.armed === true) {
-		// Podman's `--internal` binds nothing either (the flag is the same, and so is the refusal); what differs is where
-		// the shell lands with the policy off, which on podman is the job's own `--network=private`, not a bridge.
+		// THE REASON DIFFERS BY RUNTIME, and the first version of this said the same thing of both, which a review measured
+		// false (Podman 5.8.1, rootless, pasta): podman DOES publish on an `--internal` network, binding the host's
+		// 127.0.0.1 and answering. The refusal stays on podman anyway, for the posture rather than the port: the flag is
+		// documented as an egress-off feature on every venue, and an armed session is the one whose network is meant to
+		// reach nothing but the proxy, so a published port there would be a second path in that no policy names. Where
+		// the shell lands with the policy off differs too: the job's own `--network=private` on podman, a bridge on docker.
 		const lands = bin === "podman" ? "this account's rootless podman's private network (`--network=private`, as a job with egress off)" : "docker's default bridge";
+		const why =
+			bin === "podman"
+				? "this sandbox joins an `--internal` network, the session network the policy is meant to confine to its proxy, and podman would publish a host port into it anyway (it binds 127.0.0.1 there, measured), a path in that no policy names; a published port is an egress-off feature on every venue"
+				: "this sandbox joins an `--internal` network, where docker accepts `-p`, exits 0 and binds no host port, so the flag would name a port that is not there";
 		return {
 			refused: "publish-needs-egress-off",
-			message: `\`--publish\` is refused while the egress policy is armed: this sandbox joins an \`--internal\` network, where ${bin} accepts \`-p\`, exits 0 and binds no host port, so the flag would name a port that is not there. Open this one with \`PI_EGRESS=0\` in the environment you run this from, and know what that buys: the shell lands on ${lands}, with the whole internet`,
+			message: `\`--publish\` is refused while the egress policy is armed: ${why}. Open this one with \`PI_EGRESS=0\` in the environment you run this from, and know what that buys: the shell lands on ${lands}, with the whole internet`,
 		};
 	}
 

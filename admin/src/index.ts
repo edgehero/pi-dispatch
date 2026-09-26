@@ -1802,19 +1802,22 @@ export function readSandboxInfo(paths: any, jobId: string, { now = Date.now, env
   }
   const refusal = sandboxSyncRefusal({ jobId, manifest, blessed: policy.blessed });
   if (refusal) {
-    const named = typeof manifest.backend === "string" && manifest.backend !== "";
+    // The venue the refusal itself read: a manifest with no `backend` key is a `local` run from before attribution,
+    // so in a shell whose PI_BACKENDS leaves `local` out its cause is that variable, not a missing record.
+    const venue = sandboxVenueOf(manifest);
+    const named = typeof venue === "string" && venue !== "";
     // A venue this build CAN open, left out of this shell's PI_BACKENDS: the one reason here an operator fixes in
     // their own shell, so it says which variable. Kept under the pane's 53 columns.
-    const unblessed = named && sandboxLauncher(manifest.backend) !== null;
+    const unblessed = named && sandboxLauncher(venue) !== null;
     const reason =
       refusal.refused === "no-image"
         ? "not reopenable (the manifest names no image)"
         : refusal.refused === "workspace-gone"
           ? "not reopenable (the workspace has moved or been deleted)"
           : unblessed
-            ? `not reopenable here (PI_BACKENDS lacks ${manifest.backend})`
+            ? `not reopenable here (PI_BACKENDS lacks ${venue})`
             : named
-              ? `not reopenable here (ran on ${manifest.backend})`
+              ? `not reopenable here (ran on ${venue})`
               : "not reopenable (no venue recorded)";
     return { retained: false, reason };
   }

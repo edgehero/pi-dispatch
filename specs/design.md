@@ -4032,7 +4032,7 @@ a tunnel.
   collide with the runner's own channel (`INT-RUNNER-EXIT-CODE-PROTOCOL`), and the worker resolved that
   collision by ASSUMING the runtime is docker -- silently wrong for any venue where 125 is a real runner
   exit, and invisible while there was one runtime. An adapter declares its own set or normalises itself.
-- **The sandbox is declared LOCAL-ONLY, and refuses PER JOB (#277).** `buildSandboxRunArgs` is a second
+- **The sandbox is declared LOCAL-ONLY, and refuses PER JOB (#277); since #429, THE HOST'S VENUES.** `buildSandboxRunArgs` is a second
   container producer outside the `runContainer` seam, hard-wired to this host's docker CLI, and it reopens a
   retained job directory whose `manifest.workspace` is a path on THIS machine. For a job that ran elsewhere
   that path either does not exist or reproduces a run from the wrong host, silently. `INT-SANDBOX-CONTRACT`
@@ -4052,7 +4052,7 @@ a tunnel.
   Three stores now do, all from `resolveBackendName` (`run.backend`, else `PI_BACKENDS[0]`, absent meaning
   the key is absent): the run record's `backend` (an audit, written for refusals too), the session store's
   `venue` stamp (a gate: a transcript resumes only in the venue that wrote it), and the sandbox manifest's
-  `backend` (a gate: a sandbox reopens only a local run). Each store records the RESOLVED name, never the raw
+  `backend` (a gate: a sandbox reopens a run only in the venue that ran it, `local` or, since #429, `podman`). Each store records the RESOLVED name, never the raw
   field, because the raw field is absent for nearly every trigger and would mean "whatever the default was
   that day". An artifact with no venue predates attribution and reads as the literal `local`
   (`UNATTRIBUTED_BACKEND`), never as the deployment default, which can move. The venue is a session SIDECAR
@@ -4964,9 +4964,11 @@ a tunnel.
   - `pi-dispatch up`, the compose file and the setup wizard are docker-only, so the proxy and Valkey are started by
     hand (`docs/podman.md`); bringing the proxy back after a reboot is unmeasured. The sandbox is no longer a residual
     (issue #429): it opens on this venue. What was not measured about it on a rootless host is its own residual:
-    `-p 127.0.0.1:<h>:<c>` beside `--network=private`, `podman attach` after the detach sequence, and the session
-    network sweep's `{{.State}}` words on Podman (`SWEEPABLE_CONTAINER_STATES` holds a leftover back rather than
-    guessing, the safe direction).
+    `podman attach` after the detach sequence, the session network sweep's `{{.State}}` words on Podman
+    (`SWEEPABLE_CONTAINER_STATES` holds a leftover back rather than guessing, the safe direction), and a sandbox
+    opened from a login whose `XDG_RUNTIME_DIR` is not the worker service's, whose container rootless `podman ps`
+    in the worker would not list. A published port beside `--network=private` WAS measured (5.8.1): Podman prints
+    that the mappings were discarded, and the port is published on 127.0.0.1 and answers.
   - `pi-dispatch doctor --live` on this venue does not read `egress` back: doctor's canary runs on docker only, so it
     says the allowlist was not read back, and `.github/scripts/podman-conformance.mjs` runs a canary of its own.
   - The job still runs as the worker's own uid, so a container escape lands as the worker's account: this venue
@@ -4979,7 +4981,7 @@ a tunnel.
   `makePodmanReaper`, `PODMAN_JOB_USER_FIX`, `PODMAN_BOOT_REFUSING_CAUSES`; `worker/src/start.mjs` ->
   `podmanBootRefusal`; `worker/src/doctor.mjs` -> `podmanChecks`, `podmanLiveChecks`; `worker/src/live-probes.mjs`;
   `worker/src/sandbox.mjs` -> `SANDBOX_LAUNCHERS`, `sandboxVenueRefusal`, `decideSandboxJobUser` (its podman
-  branch), `listRunningSandboxesOn`, `combineSandboxNetworkSweepers`; `worker/src/backend-podman.mjs` ->
+  branch), `makeSandboxRuntimeWatch`, `combineSandboxNetworkSweepers`; `worker/src/backend-podman.mjs` ->
   `judgePodmanVenue`;
   `docs/podman.md`; `worker/test/podman-doc.test.mjs`; `.github/scripts/podman-conformance.mjs`;
   `.github/workflows/podman-conformance.yml`
@@ -5143,3 +5145,4 @@ a tunnel.
 | 2026-09-26 | Issue #428, review round 2. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**: the transient-read rule of round 1 covered only the conf chain, while the same observations' sibling reads (the user's and the system `mounts.conf`, the OCI hook directories, the FIPS file) still turned `EMFILE` into a floor refusal that dropped the job; `unreadFileFinding` is now the one rule for every host file an observation reads, on both venues, and a file-read `null` carries `reason: "file-unread"`, so the retry names the path instead of "the container runtime or its CLI is unavailable". A spelling refusal names its line and kind, and its remedy drops the clauses that do not apply; the transient remedy says a job is retried ONCE (the queue's two attempts), not until it reads. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` UNCHANGED, checked**: the allowlist ACL's `-n` (INT-EGRESS-POLICY-CONTRACT) changes how a name is compared, not the network design. |
 | 2026-09-27 | Issue #428, review round 3. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**, wording only: doctor's fix for an observation left unanswered by a host file read that failed for a moment (`reason: "file-unread"`) now says the runtime answered and the job is retried, on both venues, instead of "fix what stops `podman info`" or "the daemon" answering; the transient containers.conf retry names its file. No decision changed. |
 | 2026-09-27 | Issue #429. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**: `pi-dispatch sandbox` leaves the residual list. A run on this venue reopens through the `podman` CLI with a podman job's argv (keep-id, `--user`, `PODMAN_PINNED_FLAGS`, a network flag always), as the account that opens it, and is refused for what a job is refused for in the job's order, through `judgePodmanVenue`, the function the bundle's `observationPreflight` now answers through as well, so the two cannot drift apart. What was not measured about the sandbox on a rootless host (a published port beside `--network=private`, `podman attach` after a detach, Podman's `{{.State}}` words in the network sweep) is named as its own residual instead. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**, the sandbox bullet: widened from the local adapter to a launcher table of the venues that run on this host, admitted only where the opener's `PI_BACKENDS` blesses the venue; rejected are reading `bin` off built bundles (the CLI and the panel never build one) and admitting by `remote: false`. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked**: still a fresh container per session, now in the run's own runtime. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` UNCHANGED, checked**: the session network is the same shape, created and swept in the run's runtime. |
+| 2026-09-27 | Issue #429, review round 1. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**, its residuals: a published port beside `--network=private` is now MEASURED (Podman warns the mappings were discarded, and the port answers on 127.0.0.1), and a sandbox opened from another `XDG_RUNTIME_DIR` is named as unmeasured. The code evidence names `makeSandboxRuntimeWatch` where it named `listRunningSandboxesOn`, which is gone. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**, two phrases that still said the sandbox reopens only a local run. **CORRECTION** to this file's previous row's premise, recorded here rather than by editing it: the retention sweep does not ask the worker's blessed runtimes (see `INT-SANDBOX-CONTRACT`'s row for the refuted reasoning). |

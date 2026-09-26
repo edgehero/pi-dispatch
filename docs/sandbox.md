@@ -104,7 +104,8 @@ you need to push from inside a sandbox, authenticate yourself — `gh auth login
 A sandbox lands on **the network your egress setting gives a job**, whether you open it from the CLI or from
 the panel. By default that is its own `--internal` network whose only other member is the allowlist proxy, with no
 route off this host (`docs/egress.md` says what that does and does not bound); with `PI_EGRESS=0` it is Docker's
-default bridge and the whole internet, which is what `SECURITY.md` discloses. The setting is read from the
+default bridge and the whole internet (for a run on the podman venue, the job's own `--network=private`, which
+reaches the internet too), which is what `SECURITY.md` discloses. The setting is read from the
 environment of whatever opens the sandbox: the shell you run
 `pi-dispatch sandbox` in, or the environment pi was started in for the panel. Neither reads your
 deployment's `.env`, so if you set `PI_EGRESS` or `PI_EGRESS_PROXY` only there, export them where you open
@@ -113,8 +114,9 @@ sandboxes too (otherwise the sandbox is refused rather than guessed at, and the 
 **The panel now shows you which posture it would use, before you press `b`.** RUN_DETAIL's sandbox block
 carries two more lines, `egress on via <proxy>` (or `egress off (docker's default bridge)`, `egress off
 (podman's private network)` for a run on the podman venue, or `egress unreadable`) and `read from this shell, not the deployment`. The parenthetical on the off state is not
-decoration: `PI_EGRESS=0` omits `--network` entirely, so the shell lands on the default bridge and the
-whole internet, which "off" on its own reads as the opposite of. The second is the part that matters: the panel reports what IT resolved,
+decoration: on docker `PI_EGRESS=0` omits `--network` entirely, so the shell lands on the default bridge and
+the whole internet, which "off" on its own reads as the opposite of (on podman it names `--network=private`,
+which reaches the internet as well). The second is the part that matters: the panel reports what IT resolved,
 and it has no way to see what your deployment's `.env` sets, so the two can disagree and only you can
 tell. The same is true of the other sandbox settings the panel resolves from its own environment, which
 `OQ-038` records in full: the retention window it reports, the idle timeout your shell gets, which
@@ -215,7 +217,9 @@ session that ends in a closed laptop still keeps the workspace.
   the account you run the command as, and as root it is refused; open such a run as the worker's account. A
   rootless daemon, userns-remap or Docker Desktop on Linux is refused with the reason. A run on the native
   podman venue is the exception to `sudo -E`: keep-id maps the account that runs `podman`, and the run's image
-  is in that account's own store, so it opens only as the account the worker runs as (`docs/podman.md`).
+  is in that account's own store, so it opens only as the account the worker runs as, in a login with the same
+  `XDG_RUNTIME_DIR` as the worker's service: rootless `podman ps` lists only its own runtime directory's containers,
+  so a sandbox opened from another is one the worker's retention sweep cannot see is open (`docs/podman.md`).
 - **Sandbox *containers* are not reaped by the worker.** They are named `pi-sandbox-*`, outside the
   `pi-job-*` filter the boot reaper uses, precisely so a worker restart cannot kill a shell you are
   sitting in. The cost is that stopping a forgotten one is yours: `docker stop pi-sandbox-<jobId>` (or

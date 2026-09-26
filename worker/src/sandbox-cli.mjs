@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { parseArgs } from "node:util";
 import { loadConfig } from "./config.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
-import { launchSandbox, listRunningSandboxes, openSandbox, parsePublish, sandboxContainerName, sandboxLauncher, sandboxVenueRefusal, sandboxVenues } from "./sandbox.mjs";
+import { launchSandbox, listRunningSandboxes, openSandbox, parsePublish, sandboxContainerName, sandboxLauncher, sandboxVenueOf, sandboxVenueRefusal, sandboxVenues } from "./sandbox.mjs";
 import { listSandboxes, pinSandbox } from "./sandbox-store.mjs";
 
 /**
@@ -157,11 +157,15 @@ function renderList({ config, live, out, now }) {
 		// time left on something re-openable (#277): the list answers "what can I open", and the venue says why not.
 		// A venue this command CAN open that this environment's PI_BACKENDS leaves out (issue #429) says which variable,
 		// because it is the one cause here an operator fixes in their own shell.
+		// Judged on the venue the refusal itself read (`sandboxVenueOf`): a manifest with no `backend` key is a `local`
+		// run from before attribution, so in a shell whose PI_BACKENDS leaves out `local` its cause is that variable,
+		// not a missing record.
+		const venue = sandboxVenueOf(row);
 		const state = sandboxVenueRefusal({ jobId: row.jobId, manifest: row, blessed: config.backends })
-			? typeof row.backend === "string" && row.backend !== ""
-				? sandboxLauncher(row.backend)
-					? `not here (PI_BACKENDS lacks ${row.backend})`
-					: `not here (ran on ${row.backend})`
+			? typeof venue === "string" && venue !== ""
+				? sandboxLauncher(venue)
+					? `not here (PI_BACKENDS lacks ${venue})`
+					: `not here (ran on ${venue})`
 				: "not openable (no venue recorded)"
 			: live.has(sanitizeJobId(row.jobId))
 				? "RUNNING"

@@ -202,7 +202,8 @@ export function pinSandbox({ sandboxDir, jobId, pinDays, fs = defaultFs, now = (
  *
  * `listRunning` yields the JOB IDS of live sandboxes -- ids, not container names, so this module needs to
  * know nothing about how a container is named and the two files stay acyclic. It defaults to none, so an
- * unwired reaper still sweeps; start.mjs injects the docker-backed one.
+ * unwired reaper still sweeps; start.mjs injects `makeSandboxRuntimeWatch`'s, which answers the ids to HOLD this
+ * pass: those each retained run's own runtime reports open, and those whose runtime could not answer (issue #429).
  */
 export function makeSandboxReaper({
 	sandboxDir,

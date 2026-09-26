@@ -5,7 +5,7 @@ import { describe, test } from "node:test";
 import { ISOLATION_FLAGS, PODMAN_PINNED_FLAGS, buildDockerRunArgs, buildPodmanRunArgs } from "../src/docker-run.mjs";
 import { WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
 import { MINTED_TOKEN_VARS } from "../src/forges.mjs";
-import { SANDBOX_LAUNCHERS, SANDBOX_NAME_PREFIX, SANDBOX_NETWORK_SHAPE, buildSandboxRunArgs, combineSandboxNetworkSweepers, decideSandboxJobUser, launchSandbox, listRunningSandboxes, listRunningSandboxesOn, makeSandboxNetworkSweeper, openSandbox, parsePublish, resolveSandbox, sandboxContainerName, sandboxEgress, sandboxLauncher, sandboxVenuePolicy, sandboxVenueRefusal, sandboxVenues } from "../src/sandbox.mjs";
+import { SANDBOX_LAUNCHERS, SANDBOX_NAME_PREFIX, SANDBOX_NETWORK_SHAPE, buildSandboxRunArgs, combineSandboxNetworkSweepers, decideSandboxJobUser, launchSandbox, listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatch, openSandbox, parsePublish, resolveSandbox, sandboxContainerName, sandboxEgress, sandboxLauncher, sandboxVenuePolicy, sandboxVenueRefusal, sandboxVenues } from "../src/sandbox.mjs";
 import { networkNameFor } from "../src/egress.mjs";
 
 const base = {
@@ -1110,6 +1110,10 @@ test("a podman sandbox's own lines name podman: attach, the leftover network, th
 	const refusedPublish = await openSandbox(publish.opts);
 	assert.equal(refusedPublish.refused, "publish-needs-egress-off");
 	assert.match(refusedPublish.message, /private network \(`--network=private`/);
+	// On podman the reason is the posture, not a port that is not there: podman DOES bind on an `--internal` network
+	// (measured on 5.8.1), so docker's sentence would be false here.
+	assert.doesNotMatch(refusedPublish.message, /binds no host port/);
+	assert.match(refusedPublish.message, /podman would publish a host port into it anyway/);
 
 	// The hook is told the runtime, which is how the CLI and the panel say `podman attach` after a detach.
 	let runtime = null;
@@ -1135,26 +1139,103 @@ test("launchSandbox spawns the bin it is handed, and docker when handed none (#4
 	assert.deepEqual(calls, ["podman run x", "docker run y"]);
 });
 
-test("listRunningSandboxes asks the bin it is handed, and the union across venues fails CLOSED (#429)", async () => {
+test("listRunningSandboxes asks the bin it is handed (#429)", async () => {
 	const asked = [];
-	const exec = (answers) => async (bin, args) => (asked.push([bin, ...args.slice(0, 1)].join(" ")), answers[bin]());
-	assert.deepEqual(await listRunningSandboxes({ bin: "podman", execFn: exec({ podman: () => ({ stdout: "pi-sandbox-p-1\n" }) }) }), ["p-1"]);
-	assert.deepEqual(asked, ["podman ps"]);
-
-	const list = (answers) => (o) => listRunningSandboxes({ ...o, execFn: exec(answers) });
-	const both = listRunningSandboxesOn({ venues: ["local", "podman"], list: list({ docker: () => ({ stdout: "pi-sandbox-d-1\npi-sandbox-both\n" }), podman: () => ({ stdout: "pi-sandbox-p-1\npi-sandbox-both\n" }) }) });
-	assert.deepEqual((await both()).sort(), ["both", "d-1", "p-1"]);
-	// One runtime down is NOT "none of its sandboxes are open": the reaper deletes directories on this answer.
-	const podmanDown = listRunningSandboxesOn({ venues: ["local", "podman"], list: list({ docker: () => ({ stdout: "pi-sandbox-d-1\n" }), podman: () => { throw new Error("podman down"); } }) });
-	await assert.rejects(podmanDown, /podman down/);
-	const dockerDown = listRunningSandboxesOn({ venues: ["local", "podman"], list: list({ docker: () => { throw new Error("docker down"); }, podman: () => ({ stdout: "" }) }) });
-	await assert.rejects(dockerDown, /docker down/);
-	// Only the venues handed in are asked.
-	asked.length = 0;
-	await listRunningSandboxesOn({ venues: ["podman"], list: list({ podman: () => ({ stdout: "" }) }) })();
+	const execFn = async (bin, args) => (asked.push([bin, args[0]].join(" ")), { stdout: "pi-sandbox-p-1\n" });
+	assert.deepEqual(await listRunningSandboxes({ bin: "podman", execFn }), ["p-1"]);
 	assert.deepEqual(asked, ["podman ps"]);
 	assert.deepEqual(sandboxVenues(["far", "podman", "local"]), ["podman", "local"], "blessed order, launcher venues only");
 	assert.deepEqual(sandboxVenues(undefined), []);
+});
+
+/** A retention root on a fake fs: `runs` maps a directory name to its manifest object, or to a string for bad JSON. */
+function retainedFs(runs, { rootError = null } = {}) {
+	return {
+		readdirSync: (dir) => {
+			if (rootError) throw Object.assign(new Error(rootError), { code: rootError });
+			assert.equal(dir, "/sbx");
+			return Object.keys(runs);
+		},
+		readFileSync: (path) => {
+			const name = path.split("/").at(-2);
+			const m = runs[name];
+			return typeof m === "string" ? m : JSON.stringify(m);
+		},
+	};
+}
+
+describe("makeSandboxRuntimeWatch: the retention reaper asks the runtime EACH RUN recorded (#429 review)", () => {
+	const runs = {
+		"d-live": { backend: "local" },
+		"d-idle": { backend: "local" },
+		"old-1": { jobId: "old-1" }, // no key: predates attribution, and ran on local
+		"p-live": { backend: "podman" },
+		"p-idle": { backend: "podman" },
+		"far-1": { backend: "far" },
+		"null-1": { backend: null },
+		"broken": "{not json",
+	};
+	const answering = (answers, asked = []) => async ({ bin }) => {
+		asked.push(bin);
+		const a = answers[bin];
+		if (a instanceof Error) throw a;
+		return a;
+	};
+
+	test("holds what each runtime reports open, and every run on a venue with no launcher, whatever the worker blesses", async () => {
+		for (const blessed of [["podman"], ["local"], ["local", "podman"], ["far"]]) {
+			const asked = [];
+			const logs = [];
+			const watch = makeSandboxRuntimeWatch({ sandboxDir: "/sbx", blessed, fs: retainedFs(runs), list: answering({ docker: ["d-live", "elsewhere"], podman: ["p-live"] }, asked), log: (e, f) => logs.push([e, f]) });
+			const held = new Set(await watch.listRunning());
+			assert.deepEqual([...held].sort(), ["d-live", "elsewhere", "far-1", "null-1", "p-live"].sort(), JSON.stringify(blessed));
+			// The reproduction the review ran: a podman-only worker must still ask DOCKER for a local run's shell.
+			assert.deepEqual(asked, ["docker", "podman"], `each runtime a retained run records is asked, once (${blessed})`);
+			assert.deepEqual(logs.filter(([, f]) => f.reason === "venue-unknown").map(([, f]) => f.entry).sort(), ["far-1", "null-1"]);
+		}
+	});
+
+	test("a runtime that cannot answer holds ITS runs and nothing else, so the other still sweeps", async () => {
+		for (const failing of ["docker", "podman"]) {
+			const logs = [];
+			const answers = { docker: [], podman: [] };
+			answers[failing] = Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" });
+			const watch = makeSandboxRuntimeWatch({ sandboxDir: "/sbx", fs: retainedFs(runs), list: answering(answers), log: (e, f) => logs.push(f) });
+			const held = new Set(await watch.listRunning());
+			const own = failing === "docker" ? ["d-live", "d-idle", "old-1"] : ["p-live", "p-idle"];
+			const other = failing === "docker" ? ["p-live", "p-idle"] : ["d-live", "d-idle", "old-1"];
+			for (const id of own) assert.ok(held.has(id), `${failing} down holds ${id}`);
+			for (const id of other) assert.ok(!held.has(id), `${failing} down does not hold ${id}`);
+			assert.deepEqual(logs.find((f) => f.reason === "runtime-unanswered"), { reason: "runtime-unanswered", runtime: failing, held: own.length });
+		}
+	});
+
+	test("a runtime no retained run recorded is never asked, and only an unreadable ROOT throws", async () => {
+		const asked = [];
+		const podmanOnly = makeSandboxRuntimeWatch({ sandboxDir: "/sbx", blessed: ["podman"], fs: retainedFs({ "p-1": { backend: "podman" } }), list: answering({ podman: [] }, asked) });
+		assert.deepEqual(await podmanOnly.listRunning(), []);
+		assert.deepEqual(asked, ["podman"], "a host with no local run never runs docker");
+		const empty = makeSandboxRuntimeWatch({ sandboxDir: "/sbx", fs: retainedFs({}, { rootError: "ENOENT" }), list: () => assert.fail("nothing to ask about") });
+		assert.deepEqual(await empty.listRunning(), []);
+		const walled = makeSandboxRuntimeWatch({ sandboxDir: "/sbx", fs: retainedFs({}, { rootError: "EACCES" }) });
+		await assert.rejects(walled.listRunning(), /EACCES/);
+	});
+
+	test("the network sweep visits the runtimes PRESENT: blessed ones and ones a retained run recorded, each built once", async () => {
+		const made = [];
+		const makeSweeper = ({ bin }) => (made.push(bin), async () => ({ swept: [{ network: `pi-sandbox-${bin}-net`, detached: [] }], notes: [] }));
+		const none = makeSandboxRuntimeWatch({ sandboxDir: "/sbx", blessed: ["far"], fs: retainedFs({}), list: answering({}), makeSweeper });
+		await none.listRunning();
+		assert.deepEqual(await none.sweepNetworks({}), { swept: [], notes: [] });
+		assert.deepEqual(made, [], "a host blessing neither and retaining nothing from either spawns neither CLI");
+
+		const podman = makeSandboxRuntimeWatch({ sandboxDir: "/sbx", blessed: ["podman"], fs: retainedFs({ "d-1": { backend: "local" } }), list: answering({ docker: [] }), makeSweeper });
+		assert.deepEqual((await podman.sweepNetworks({})).swept.map((x) => x.network), ["pi-sandbox-podman-net"], "blessed before any listing");
+		await podman.listRunning();
+		assert.deepEqual((await podman.sweepNetworks({})).swept.map((x) => x.network), ["pi-sandbox-docker-net", "pi-sandbox-podman-net"], "and docker once a retained run says it ran there");
+		await podman.sweepNetworks({});
+		assert.deepEqual(made, ["podman", "docker"], "each sweeper built once");
+	});
 });
 
 test("each venue's network sweeper runs in its own runtime, and the combination keeps both answers (#429)", async () => {
@@ -1249,6 +1330,11 @@ describe("decideSandboxJobUser on the podman venue (#429)", () => {
 		assert.match(undelegated.message, /PI_BACKEND_FLOOR asks for something this host is not observed to provide/);
 		assert.ok((await decideSandboxJobUser({ ...base, backendFloor: floor, manifest: stamped })).user, "a delegated host passes the same floor");
 		assert.ok((await decideSandboxJobUser({ ...base, readInfo: answered({ controllers: ["cpu"] }), manifest: stamped })).user, "no floor, nothing observed refuses");
+		// A miss that rests only on a read that did not answer is its own token, not the floor's: the fix is to make
+		// podman answer, not to change the host.
+		const unread = await decideSandboxJobUser({ ...base, backendFloor: floor, readInfo: async () => ({ answered: false, reason: "timeout", transient: true }), manifest: stamped });
+		assert.equal(unread.refused, "podman-unobserved");
+		assert.match(unread.message, /did not answer \(timeout\)/);
 	});
 
 	test("a run of another account, sudo, macOS and a malformed stamp refuse before anything is created", async () => {

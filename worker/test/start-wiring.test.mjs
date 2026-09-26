@@ -6,6 +6,7 @@ import { makeBackendRegistry as realRegistry } from "../src/backend-registry.mjs
 import { makePodmanBackend as realPodmanBackend } from "../src/backend-podman.mjs";
 import { RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { makeSandboxReaper as realSandboxReaper } from "../src/sandbox-store.mjs";
 
 // start.mjs imports index.mjs (bullmq), connection.mjs (ioredis), and the octokit-backed auth/host
 // modules, so this skips below the node floor / without deps and runs in CI, where
@@ -109,7 +110,7 @@ function OTHER_VENUE(name, { spawned = [], reap = async () => ({ reaped: true })
 	};
 }
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -261,6 +262,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			makePodmanReaper: makePodmanReaper ?? (() => async () => ({ reaped: true })),
 			makePodmanBackend: podmanBackend,
 			...(makeBackendRegistry ? { makeBackendRegistry } : {}),
+			...(listRunningSandboxes ? { listRunningSandboxes } : {}),
 			...(extraBackends ? { extraBackends } : {}),
 			...(loadConfig ? { loadConfig } : {}),
 			...(makeRetentionSweep ? { makeRetentionSweep } : {}),
@@ -859,7 +861,8 @@ test("sandbox: the retention sweep runs BEFORE the worker drains, and is handed 
 			order.push("reapSandboxes");
 		};
 	};
-	const madeSweeper = async () => ({ swept: [], notes: [] });
+	let sweeperRan = 0;
+	const madeSweeper = async () => (sweeperRan++, { swept: [], notes: [] });
 	const { deps } = await runStart({
 		env: { PI_SANDBOX_DIR: "/tmp/pi-sbx", PI_SANDBOX_RETENTION_HOURS: "6", PI_JOB_IMAGE: "pi-job:pinned" },
 		makeAuth,
@@ -880,7 +883,11 @@ test("sandbox: the retention sweep runs BEFORE the worker drains, and is handed 
 	// green. At runtime it would surface only as a `sandbox_reaper_skipped` line reading "swept is not
 	// iterable", which is the line a dozen ordinary faults also produce. The reaper defaults this dep to a
 	// no-op as well, so an unwired one sweeps directories and is SILENT rather than broken.
-	assert.equal(reaperArgs.sweepNetworks, madeSweeper, "the reaper is handed the sweeper, not the factory that makes it");
+	// Since issue #429 the reaper is handed the runtime watch's sweep, which builds one sweeper per runtime present and
+	// runs it: so it is asked BEHAVIOURALLY that the factory's result is what runs, not merely that something callable
+	// was handed over.
+	assert.deepEqual(await reaperArgs.sweepNetworks({}), { swept: [], notes: [] }, "the reaper's sweep runs the factory's sweeper");
+	assert.equal(sweeperRan, 1, "and it was the factory's own sweeper that ran");
 	assert.equal(typeof deps.cleanup, "function", "teardown is the retention-aware closure, not the bare rm");
 });
 
@@ -2611,7 +2618,8 @@ test("a deployment WITHOUT local boots on its own venue, and asks this host's do
 	let registryArgs = null;
 	const swept = [];
 	const { captured, logs, imagePreflightCalls, runContainerCalls, sandboxReaperCalls } = await runStart({
-		env: { PI_WORKER_NAME: "no-docker-1", VALKEY_URL },
+		env: { PI_WORKER_NAME: "no-docker-1", VALKEY_URL, PI_SANDBOX_DIR: tempDir("no-docker-sbx-") },
+		listRunningSandboxes: forbidden("listRunningSandboxes", seen),
 		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
 		makeHost: () => fakeHost(),
 		// A floor naming an observation only `local` makes. With `local` blessed and unobserved this is the unanswered,
@@ -2643,11 +2651,12 @@ test("a deployment WITHOUT local boots on its own venue, and asks this host's do
 	}
 	assert.ok(!logs.some((l) => l.event === "job_user"), "no job-user decision is said about a daemon nobody asked");
 
-	// The sandbox reaper is built, but its liveness listing refuses rather than answering "none open", and its
-	// docker-backed network sweeper is not built at all.
+	// The sandbox reaper is built, and with nothing retained it asks no runtime (issue #429: it asks, per retained run,
+	// the runtime that run recorded), and its network sweep visits none, since neither runtime is blessed or recorded.
 	assert.equal(sandboxReaperCalls.length, 1);
-	await assert.rejects(() => sandboxReaperCalls[0].listRunning(), /local is not blessed/);
-	assert.equal(sandboxReaperCalls[0].sweepNetworks, undefined);
+	assert.deepEqual(await sandboxReaperCalls[0].listRunning(), []);
+	assert.deepEqual(await sandboxReaperCalls[0].sweepNetworks({}), { swept: [], notes: [] });
+	assert.deepEqual(seen, [], "no runtime was asked which sandboxes are open");
 
 	// Every reaper answered, and the host is still not proven: Docker containers from before may remain.
 	assert.deepEqual(swept, [{ reaped: false }]);
@@ -3042,31 +3051,67 @@ test("a backend registry refusal releases every handle boot opened before it, no
 	assert.equal(registryClosed, true);
 });
 
-test("the sandbox reaper asks and sweeps every blessed sandbox runtime, each through its own CLI (#429)", { skip }, async () => {
+test("the sandbox reaper holds a directory its OWN runtime reports open, whatever the worker blesses (#429 review)", { skip }, async () => {
+	// THE REPRODUCTION, driven through the real wiring and the real `makeSandboxReaper` on a real retention root: a
+	// worker blessing podman alone, a local run retained earlier and reopened under docker from a shell with no
+	// PI_BACKENDS. Every directory here is past its window, so only the runtime answers keep one.
+	const base = { makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), jobUserIdentity: PODMAN_ID, observationFs: PODMAN_FILES, readPodmanInfo: PODMAN_INFO({}), bootImage: { ok: true, capabilities: ["anyUid"] }, makeSandboxReaper: realSandboxReaper };
+	const seed = () => {
+		const root = tempDir("wired-sbx-");
+		const old = "2020-01-01T00:00:00.000Z";
+		for (const [id, backend] of [["d-live", "local"], ["d-idle", "local"], ["p-live", "podman"], ["p-idle", "podman"]]) {
+			mkdirSync(join(root, id), { recursive: true });
+			writeFileSync(join(root, id, "manifest.json"), JSON.stringify({ jobId: id, kind: "github", image: "pi-job:x", backend, workspace: join(root, id), createdAt: old, keepUntil: null }));
+		}
+		return root;
+	};
+	const left = (root) => ["d-live", "d-idle", "p-live", "p-idle"].filter((id) => { try { return readFileSync(join(root, id, "manifest.json")) && true; } catch { return false; } });
+	const sweeper = () => async () => ({ swept: [], notes: [] });
+	const run = async (backends, answers) => {
+		const root = seed();
+		const asked = [];
+		await runStart({
+			...base,
+			env: { PI_BACKENDS: backends, PI_SANDBOX_DIR: root, PI_SANDBOX_RETENTION_HOURS: "1" },
+			makeSandboxNetworkSweeper: sweeper,
+			listRunningSandboxes: async ({ bin }) => {
+				asked.push(bin);
+				const a = answers[bin];
+				if (a instanceof Error) throw a;
+				return a;
+			},
+		});
+		return { left: left(root), asked };
+	};
+
+	for (const backends of ["podman", "local", "local,podman"]) {
+		// Both runtimes answer: each live directory is held by ITS runtime, and each idle one is swept.
+		const both = await run(backends, { docker: ["d-live"], podman: ["p-live"] });
+		assert.deepEqual(both.left, ["d-live", "p-live"], `${backends}: live kept, idle swept`);
+		assert.deepEqual(both.asked, ["docker", "podman"], `${backends}: each run's own runtime is asked`);
+		// Docker down (a stale CLI, no daemon): its runs are held, and podman's idle one is still swept.
+		const dockerDown = await run(backends, { docker: new Error("Cannot connect to the Docker daemon"), podman: ["p-live"] });
+		assert.deepEqual(dockerDown.left, ["d-live", "d-idle", "p-live"], `${backends}: docker down holds docker's runs only`);
+		// Podman absent: the reverse.
+		const podmanGone = await run(backends, { docker: ["d-live"], podman: Object.assign(new Error("spawn podman ENOENT"), { code: "ENOENT" }) });
+		assert.deepEqual(podmanGone.left, ["d-live", "p-live", "p-idle"], `${backends}: podman absent holds podman's runs only`);
+	}
+});
+
+test("the sandbox network sweep visits each runtime present, built through the seam (#429)", { skip }, async () => {
 	const base = { makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), jobUserIdentity: PODMAN_ID, observationFs: PODMAN_FILES, readPodmanInfo: PODMAN_INFO({}), bootImage: { ok: true, capabilities: ["anyUid"] } };
-	// The sweeper factory records the runtime each sweeper is built for; each sweeper answers with its runtime's network.
 	const factory = (made) => (opts) => {
 		made.push(opts?.bin);
 		return async () => ({ swept: [{ network: `pi-sandbox-${opts?.bin}-net`, detached: [] }], notes: [] });
 	};
-
-	// podman alone: podman's sweeper, handed over as itself, and a listing that is a function rather than a refusal.
-	const podmanOnly = [];
-	let podmanArgs;
-	await runStart({ ...base, env: { PI_BACKENDS: "podman" }, makeSandboxNetworkSweeper: factory(podmanOnly), makeSandboxReaper: (args) => ((podmanArgs = args), async () => {}) });
-	assert.deepEqual(podmanOnly, ["podman"], "no docker sweeper on a host that does not bless local");
-	assert.deepEqual(await podmanArgs.sweepNetworks({}), { swept: [{ network: "pi-sandbox-podman-net", detached: [] }], notes: [] });
-	assert.equal(typeof podmanArgs.listRunning, "function");
-
-	// Both: one sweeper per runtime, in PI_BACKENDS order, combined so each pass sweeps both.
-	const both = [];
-	let bothArgs;
-	await runStart({ ...base, env: { PI_BACKENDS: "local,podman" }, makeSandboxNetworkSweeper: factory(both), makeSandboxReaper: (args) => ((bothArgs = args), async () => {}) });
-	assert.deepEqual(both, ["docker", "podman"]);
-	assert.deepEqual((await bothArgs.sweepNetworks({})).swept.map((s) => s.network), ["pi-sandbox-docker-net", "pi-sandbox-podman-net"]);
-
-	// local alone: its sweeper is built for docker, exactly as before.
-	const localOnly = [];
-	await runStart({ ...base, env: {}, makeSandboxNetworkSweeper: factory(localOnly), makeSandboxReaper: () => async () => {} });
-	assert.deepEqual(localOnly, ["docker"]);
+	const sweepOf = async (backends) => {
+		const made = [];
+		let args;
+		await runStart({ ...base, env: { PI_BACKENDS: backends, PI_SANDBOX_DIR: tempDir("net-sbx-") }, makeSandboxNetworkSweeper: factory(made), makeSandboxReaper: (a) => ((args = a), async () => {}) });
+		const swept = (await args.sweepNetworks({})).swept.map((s) => s.network);
+		return { made, swept };
+	};
+	assert.deepEqual(await sweepOf("podman"), { made: ["podman"], swept: ["pi-sandbox-podman-net"] });
+	assert.deepEqual(await sweepOf("local,podman"), { made: ["docker", "podman"], swept: ["pi-sandbox-docker-net", "pi-sandbox-podman-net"] });
+	assert.deepEqual(await sweepOf("local"), { made: ["docker"], swept: ["pi-sandbox-docker-net"] });
 });

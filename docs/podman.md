@@ -435,6 +435,17 @@ the account that opens it (keep-id maps that account, and the run's image is in 
 the account the worker runs as, never with `sudo`; and a run recorded as another uid is refused rather than reopened as
 one.
 
+`--publish` works with egress off, and says something alarming while it does: Podman prints `Port mappings have been
+discarded because "private" network namespace mode does not support them`, yet the port IS published on
+`127.0.0.1` and answers (measured on Podman 5.8.1; pasta holds the listener). With egress armed `--publish` is
+refused, as on docker, though for a different reason: Podman would bind the port on the session's `--internal`
+network (measured), a way into the one network the policy means to confine.
+
+Open the sandbox as the account the worker runs as, in a login that resolves the same `XDG_RUNTIME_DIR` (a systemd
+user session for that account, as the worker's own service has). Rootless `podman ps` lists only the calling
+account's containers in its own runtime directory, so a sandbox opened with a different runtime directory is one the
+worker's retention sweep cannot see is open (not yet measured; the sweep holds a run only when its runtime says so).
+
 On an SELinux host the retained job directory and the retained clone carry `:Z`, decided from `podman info`'s
 `selinuxEnabled` as a job's are, so the shell reads them under `container_file_t` the way the job did; a local run's
 own folder is never relabelled and needs the `semanage fcontext` label from the SELinux section.
@@ -508,7 +519,7 @@ How each column is known:
 | worker | runs jobs as `--user` | runs jobs as `--user` | refused `rootless` | refused `rootless` | runs jobs as `--user`; `credentialTransit` asserted | refused `rootless` | runs jobs as the worker's uid, with `--userns=keep-id` |
 | `pi-dispatch doctor` | names Docker Engine | names Podman through its Docker API; `isolation` asserted, `mountSet` per the override | ✗ `rootless` | ✗ `rootless` | ⚠ names podman-docker and the context fix | ✗ `rootless` | names the podman venue: `podman info`, rootless, not remote, controllers, the image in this account's store |
 | `pi-dispatch doctor --live` | reads the declarations back | reads the declarations back | not run (a local job is refused) | not run | not run (the endpoint is not observed on this host) | not run | reads the declarations back on podman, `egress` excepted |
-| `pi-dispatch sandbox` | opens as the run's own uid | opens as the run's own uid | refused `rootless` | refused `rootless` | opens as the run's own uid (unmeasured) | refused `rootless` | opens as the run's own uid with `--userns=keep-id` through `podman`, where `PI_BACKENDS` names podman |
+| `pi-dispatch sandbox` | opens as the run's own uid | opens as the run's own uid | refused `rootless` | refused `rootless` | opens as the run's own uid (unmeasured) | refused `rootless` | opens as the opening account's uid with `--userns=keep-id` through `podman`, where `PI_BACKENDS` names podman; a run recorded as another uid does not open |
 | `pi-dispatch up` | runs doctor at the end | runs doctor at the end | as doctor | as doctor | as doctor | as doctor | docker-only (a follow-up); the native venue's setup steps instead |
 | `docker compose --profile egress` | runs unchanged | runs unchanged through the real docker CLI | unmeasured (a job is refused anyway) | unmeasured (a job is refused anyway) | unmeasured | unmeasured | docker-only; the proxy runs under this account's podman instead |
 

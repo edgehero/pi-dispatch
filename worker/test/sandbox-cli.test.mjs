@@ -343,3 +343,11 @@ test("--list asks EVERY blessed sandbox runtime, and one that cannot answer cost
 	await runSandbox(["--list"], { env: envWith(root, { PI_BACKENDS: "podman" }), deps: capture({ running: async (o) => (podmanOnly.push(o?.bin), []) }).deps });
 	assert.deepEqual(podmanOnly, ["podman"]);
 });
+
+test("--list names PI_BACKENDS, not a missing record, for a pre-attribution run in a shell without local (#429 review)", async () => {
+	const { root } = retained(); // no `backend` key: a local run from before venues were recorded
+	const c = capture();
+	await runSandbox(["--list"], { env: envWith(root, { PI_BACKENDS: "podman" }), deps: c.deps });
+	assert.match(c.text(), /not here \(PI_BACKENDS lacks local\)/);
+	assert.doesNotMatch(c.text(), /no venue recorded/);
+});

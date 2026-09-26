@@ -180,8 +180,8 @@ that names both hosts.
 
 ### 3. Do not share the sandbox directory
 
-`PI_SANDBOX_DIR` must be per host. The sandbox reaper asks the *local* docker which sandboxes are live
-before deleting anything, so on a shared directory one host cannot see that another's sandbox is in use,
+`PI_SANDBOX_DIR` must be per host. The sandbox reaper asks *this host's* container runtime (docker for a
+`local` run, this account's Podman for a `podman` one) which sandboxes are live before deleting anything, so on a shared directory one host cannot see that another's sandbox is in use,
 and will delete a directory an operator is working inside once it is past retention.
 
 **Nothing detects this for you.** It is a rule you have to follow, and it is stated here rather than

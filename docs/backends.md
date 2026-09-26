@@ -374,12 +374,12 @@ sweep runs against it. Two things follow that are worth knowing before you do it
 - **The boot sweep of this host's scope claims does not run** without `local`. That sweep frees a claim only once
   the host is proven to hold no job containers, and a host that dropped `local` may still hold Docker ones from
   before, which no other venue's reaper lists. A stale claim then waits out its TTL instead.
-- **Retained sandbox directories are swept only through a runtime a sandbox opens on**: `local` (the docker CLI) or
-  `podman` (this account's rootless Podman). The sweep first asks each blessed one which sandboxes are open, and
-  deleting a directory under an open shell is the mistake it exists to avoid, so with neither blessed it does not
-  run and the worker logs `sandbox_reaper_skipped` naming why, at boot and on every periodic sweep. A docker
-  sandbox left open from before `local` was dropped is not in a podman-only listing; close it before you drop
-  `local`.
+- **Retained sandbox directories are swept per run, whatever `PI_BACKENDS` says.** Before it deletes a directory the
+  sweep asks the runtime that run's record names (the docker CLI for a `local` run, this account's Podman for a
+  `podman` one) whether a sandbox is open on it, because the shell you open a sandbox from reads its own
+  `PI_BACKENDS`, which need not be the worker's. A runtime that cannot answer (no CLI, a daemon that is down) keeps
+  its own runs for that pass and nothing else, and the worker logs `sandbox_reaper_skipped` naming the runtime; so a
+  host without Docker still sweeps its podman runs, and asks docker only for a run that says it ran there.
 
 ## What is deliberately not yours to decide
 
