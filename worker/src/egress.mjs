@@ -35,8 +35,9 @@ import { spawn } from "node:child_process";
  *     the container env is a CLOSED allowlist, and the recipe's `PI_FORWARD_ENV` line names
  *     HTTPS_PROXY/HTTP_PROXY/NO_PROXY and NOT `NODE_USE_ENV_PROXY`, so the flag was set on the host and
  *     never reached the runner. Measured against the real provider through this proxy: 401 in 269ms.
- *     Hence a hostname allowlist and no address rule anywhere, which is the mechanism OQ-004's close
- *     condition actually names.
+ *     Hence a hostname allowlist and no address rule that allows anything, which is the mechanism OQ-004's
+ *     close condition actually names (the proxy's one address rule only denies this host's loopback and
+ *     link-local addresses, issue #428).
  *     BUT THAT WAS MEASURED WITHOUT PI LOADED (issue #427). The pinned pi 0.80.7 depends on npm `undici`
  *     8.5.0, whose load replaces the global dispatcher the flag installs with one that ignores the proxy
  *     variables, so in the runner the provider call went direct and every egress-armed job died at its first

@@ -81,7 +81,7 @@ worse.
 | `stopContainer` | `(name, job)` | anything. It is not awaited for its value: the abort's effect arrives through the container's own exit. |
 | `reap` | nothing | `{ reaped: true }` only if you ENUMERATED. See below. |
 | `containerName` | the job id | the name `stopContainer` will be given |
-| `observationPreflight` (optional) | the job | `{ ok: true }` to admit, `{ refused: true, message, observations }` when a floor needs an observation this host does not show (`message` goes to the operator's log only; `observations` names which, from the closed list), `{ unavailable: true, reason }` when it could not be read yet (retried). Anything carried beside `ok` is handed to `jobUserPreflight` as `observed`. Beside `ok`, `jobUserRefused: { refused: "job-user-unmappable", cause }` refuses the job before the image preflight, for a venue that already knows no uid can run there whatever the image (the `podman` venue uses it: its image probe asks the same runtime and would otherwise misname the fault). |
+| `observationPreflight` (optional) | the job | `{ ok: true }` to admit, `{ refused: true, message, observations }` when a floor needs an observation this host does not show (`message` goes to the operator's log only; `observations` names which, from the closed list), `{ unavailable: true, reason }` when it could not be read yet (retried). Anything carried beside `ok` is handed to `jobUserPreflight` as `observed`. Beside `ok`, `jobUserRefused: { refused: "job-user-unmappable", cause }` refuses the job before the image preflight, for a venue that already knows no uid can run there whatever the image (the `podman` venue uses it: its image probe asks the same runtime and would otherwise misname the fault), and so does `podmanConfRefused: { reason, key, message }`, the `podman` venue's refusal of a widening containers.conf (`podman-conf-widens-job`, issue #428). |
 | `jobUserPreflight` (optional) | `(job, { capabilities, observed })` | `{ user, home }` (`user` null means the image's own `USER`), plus `relabel: true` where the job's own mounts must carry a private SELinux label (the processor hands it to `runContainer`), `{ refused: "job-user-unmappable", cause }` or `{ refused: "job-image-any-uid-unsupported" }` to refuse, `{ unavailable: true, reason }` to retry. |
 
 ## What a backend declares
@@ -191,7 +191,8 @@ ones adapters get wrong:
   The three names the venue shares with the lists above (the root worker, the gid-0 primary group and the image
   without `anyUid`) fire at the same point on `podman` as on `local`, with the venue's own text. An unanswered
   `podman info` is in neither list, exactly as above: `unknown`, never kept, and a job picked up meanwhile is
-  retried.
+  retried. Apart from the job user, the venue also refuses while a containers.conf its account reads sets
+  `pasta_options`, `network_cmd_options`, `annotations` or `env`, at the same two points (issue #428, docs/podman.md step 4).
 
 ## A declaration is not a claim that the property holds
 

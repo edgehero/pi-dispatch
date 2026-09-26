@@ -27,7 +27,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { JOB_NAME_PREFIX, execDockerBounded, jobContainerName, makeReaper, makeStopContainer } from "./backend-local.mjs";
-import { BACKENDS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
+import { BACKENDS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_CONF_WIDENS_JOB, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { buildPodmanRunArgs } from "./docker-run.mjs";
 import { makeEgressPreflight } from "./egress.mjs";
@@ -248,6 +248,93 @@ function observePodmanBounds(info, { fs, home, env, euid }) {
 	const conf = confKeyFinding(fs, listed.files, { key: CGROUPS_KEY, says: "sets a cgroups key, which can run every container outside its cgroup with its bounds unapplied" });
 	if (conf) return conf;
 	return { value: true, evidence: "rootless Podman on cgroup v2 with the pids, memory and cpu controllers delegated, and no containers.conf sets cgroups" };
+}
+
+/**
+ * A containers.conf key that WIDENS what a job reaches, and that no flag on the job's own command line takes back (issue
+ * #428, measured on Fedora 44, rootless Podman 5.8.1, pasta, 2026-09-26):
+ *   - `pasta_options`: Podman puts these BEFORE its own options in pasta's argv, for the job's `--network=private` AND for
+ *     the rootless netns pasta behind every bridge network (a job's own non-internal bridge, the egress proxy's). Mapping
+ *     the host's loopback (`--map-host-loopback 169.254.1.2`, `--map-gw`) handed an egress-off job, a bridged job and the
+ *     proxy the host's 127.0.0.1 services, the job queue's Valkey among them; `-T 6379` made the job's own
+ *     127.0.0.1:6379 the host's, and Podman then drops its own `-T none`.
+ *   - `network_cmd_options`: slirp4netns's (`allow_host_loopback=true` under `default_rootless_network_cmd="slirp4netns"`,
+ *     the rootless default before Podman 5, which was not measured) opened the same three through 10.0.2.2.
+ *   - `annotations`: `run.oci.keep_original_groups=1` kept the account's supplementary groups inside the job, and a
+ *     root:podman 0640 host file mounted into it became readable. `dockerExtra` refuses the flag; the conf set it anyway.
+ *   - `env`, in any table: `[engine] env` is Podman's OWN environment, and `CONTAINERS_CONF_OVERRIDE` there made it read
+ *     a containers.conf this check never reads (measured: pasta then got `--map-host-loopback`), as `CONTAINERS_CONF`,
+ *     `XDG_CONFIG_HOME` or `HOME` could; `[containers] env` adds variables to every job past the worker's own closed
+ *     environment. Both are account-wide and no argv takes them back. `env_host` is NOT this key (the pattern ends at
+ *     `env`), and needs no refusal: `--env-host=false` is in `PODMAN_PINNED_FLAGS`.
+ * REFUSED ON PRESENCE, whatever the value, as `CGROUPS_KEY` is, and for a stronger reason: no argv pins it back. Rejected:
+ * pinning `--network=pasta:--map-host-loopback,none` (pasta takes the last mapping, so it cancels the first two, but a
+ * conf `-T` survives it, measured); a per-job bridge for an egress-off job (the shared rootless netns pasta reads the
+ * same options, measured open); a floor observation (with egress off no declared property covers what a job reaches on
+ * the host, so no floor would ever ask on the deployments at risk); and judging the options' VALUES (an allowlist of
+ * pasta flags is a parser for another program's argv, and the next release's flag is the one it misses). An egress-armed
+ * job on its `--internal` network was closed in every row (no default route, and `--cap-drop=ALL` means it cannot add
+ * one), but the venue is refused whatever `PI_EGRESS` says: `annotations` widens a job whatever its network, and the
+ * proxy's own bridge takes the same pasta options (open under the loopback mappings, measured). Matched as `MOUNT_KEY` is: any letter case, bare or
+ * quoted, dotted (`network.pasta_options`) or in an inline table, never on a whole-line comment, never inside a longer
+ * key name. The one capture group is the key, so the refusal names the key it found.
+ */
+export const WIDENING_KEY = /^(?!\s*#).*?(?:^|[\s.{,"'])["']?(pasta_options|network_cmd_options|annotations|env)["']?\s*=/im;
+
+/** What each widening key does, completing the sentence that names the file it was found in. */
+const WIDENING_KEY_SAYS = Object.freeze({
+	pasta_options: "sets pasta_options, which Podman hands to the pasta behind every job's network, where a host-loopback mapping (--map-host-loopback, --map-gw, -T) gives the job this host's 127.0.0.1 services",
+	network_cmd_options: "sets network_cmd_options, which Podman hands to slirp4netns behind every job's network, where allow_host_loopback=true gives the job this host's 127.0.0.1 services",
+	annotations: "sets annotations, which Podman adds to every container, where run.oci.keep_original_groups=1 keeps this account's supplementary groups inside the job",
+	env: "sets env, which under [engine] is Podman's own environment (where CONTAINERS_CONF_OVERRIDE, CONTAINERS_CONF, XDG_CONFIG_HOME or HOME moves which containers.conf it reads) and under [containers] adds variables to every job",
+});
+
+// The cause a widening containers.conf refuses the venue under, defined in the leaf (backends.mjs) and re-exported here.
+export { PODMAN_CONF_WIDENS_JOB };
+
+/**
+ * A containers.conf this account's Podman reads that widens what a job reaches, as `{ cause, key, evidence }`, else
+ * `null` (issue #428). Read over `podmanConfFiles`, the chain the observations read, per call, so removing the key needs
+ * no restart. `key` is null when no key was found but the chain could not be read whole: `CONTAINERS_CONF` or
+ * `CONTAINERS_CONF_OVERRIDE` set, an unknown home or uid, a file or drop-in directory that exists and cannot be read, or
+ * a spelling this check does not decode (an escaped key, a non-ASCII character, a multi-line string). Each of those
+ * REFUSES too, on the observations' rule (a drop-in nobody could see must not read as none), and is DETERMINATE: a retry
+ * reads the same bytes. The one exception is a read that failed for a moment (`TRANSIENT_READ_ERRORS`: out of
+ * descriptors, an I/O error), which comes back with `transient: true` and is retried, never refused, on
+ * `observationRefusalIsTransient`'s rule. `podman info` is not an input.
+ */
+export function podmanConfWidening({ fs, home, env, euid }) {
+	const listed = podmanConfFiles({ fs, home, env, euid });
+	let key = null;
+	const found =
+		listed.finding ??
+		confKeyFinding(fs, listed.files, {
+			key: WIDENING_KEY,
+			says: (match) => {
+				key = match[1].toLowerCase();
+				return WIDENING_KEY_SAYS[key];
+			},
+		});
+	if (!found) return null;
+	return found.value === null ? { cause: PODMAN_CONF_WIDENS_JOB, key: null, evidence: found.evidence, transient: true } : { cause: PODMAN_CONF_WIDENS_JOB, key, evidence: found.evidence };
+}
+
+/**
+ * The operator text for a `podmanConfWidening` finding: the boot refusal, doctor's fix and the per-job log line, never a
+ * forge comment (it names a host path). Names the file and key, says to remove it, and names the trade-off: a setting an
+ * operator wanted account-wide (a pasta MTU, say) now goes on their own containers' command line instead.
+ */
+export function podmanConfRefusal(found) {
+	return `${found?.transient ? "Not read yet" : "Refused"}: ${found?.evidence ?? "the containers.conf chain was not read"}; ${podmanConfFix(found)} (issue #428).`;
+}
+
+/** The remedy half of `podmanConfRefusal`, alone, for doctor's fix line. */
+export function podmanConfFix(found) {
+	return found?.key
+		? "remove that key from that file, then restart this account's containers on a bridge network (the egress proxy among them), since the rootless network they share keeps the options it started with: the podman venue refuses any containers.conf this account's Podman reads that sets pasta_options, network_cmd_options, annotations or env, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers (a pasta MTU, say) goes on their own command line (--network=pasta:...) or Quadlet unit instead, not account-wide"
+		: found?.transient
+			? "the read failed for a moment, not for a reason in the file; the worker retries each podman job until it can read it, and a boot exits to be restarted"
+			: "the podman venue must read every containers.conf this account's Podman reads to know that none sets pasta_options, network_cmd_options, annotations or env; make it readable, spell the file in ASCII without escapes or multi-line strings, or unset the variable for the worker's account";
 }
 
 /**
@@ -514,6 +601,8 @@ export function makePodmanBackend(opts = {}) {
 	// The floor's podman half, per job and pre-spend, shaped exactly like `local`'s: `{ ok: true, podman }`, `{ refused,
 	// message, observations }` for an answered miss, `{ unavailable, reason }` when the miss rests only on a read that did
 	// not answer (a retry, never a refusal). `podman` carries the read so the job user is decided from the same answer.
+	// Beside `ok`, a refused identity rides as `jobUserRefused` and a widening containers.conf as `podmanConfRefused`
+	// (`{ reason, key, message }`, issue #428); the processor refuses either before its image preflight.
 	const observationPreflight = async () => {
 		const read = await info();
 		// The identity FIRST, from this same read, as at boot. A venue whose job user is refused (rootful, remote, no
@@ -525,6 +614,13 @@ export function makePodmanBackend(opts = {}) {
 		// (`unknown`) is still judged here and is retried, never refused.
 		const decision = decidePodmanJobUser({ platform, euid, egid, read });
 		if (decision.mode === "unmappable") return { ok: true, podman: read, jobUserRefused: { refused: "job-user-unmappable", cause: decision.cause } };
+		// Then the account's own containers.conf (issue #428), before the floor: it refuses whatever the floor says, since
+		// with egress off no declared property covers what the job reaches on the host, so a floor could never ask for it
+		// on the deployments at risk. Handed back like `jobUserRefused` and for its reason, so the processor refuses it
+		// ahead of the image preflight and every spend. Re-read per job, so removing the key needs no restart.
+		const widened = podmanConfWidening({ fs, home, env, euid });
+		// A transient read rides the same field with `transient: true`, which the processor retries rather than refuses.
+		if (widened) return { ok: true, podman: read, podmanConfRefused: { reason: PODMAN_CONF_WIDENS_JOB, key: widened.key, message: podmanConfRefusal(widened), ...(widened.transient ? { transient: true } : {}) } };
 		const observed = observePodman({ read, fs, home, env, euid });
 		if (podmanObservationKey(observed) !== observedSaid) {
 			observedSaid = podmanObservationKey(observed);

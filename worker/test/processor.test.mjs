@@ -1733,6 +1733,66 @@ test("the job-user gate sits after the image probe and before the credential gat
 	assert.ok(!calls.includes("prepare") && !calls.includes("run-container") && !calls.some((c) => c.startsWith("mint:")));
 });
 
+// --- issue #428: a podman account whose containers.conf widens every job ------------------------------------------
+
+test("a widening podman containers.conf is a venue refusal that RETURNS before the image probe, the mint and the reserve (#428)", async () => {
+	const order = [];
+	const texts = [];
+	const logged = [];
+	const redis = fakeRedis();
+	const message = "Refused: /home/op/.config/containers/containers.conf sets pasta_options, ...; remove that key (issue #428).";
+	const { deps: d, calls } = deps({
+		redis,
+		observationPreflight: async () => (order.push("observation"), { ok: true, podman: { answered: true }, podmanConfRefused: { reason: "podman-conf-widens-job", key: "pasta_options", message } }),
+		imagePreflight: async () => (order.push("image"), { ok: true, image: "pi-job:x", capabilities: ["anyUid"] }),
+		egressPreflight: async () => (order.push("egress"), { ok: true }),
+		jobUserPreflight: async () => (order.push("job-user"), { user: "1234:1234", home: "/home/pi" }),
+		comment: async (_j, t) => texts.push(t),
+		log: (e, f) => logged.push([e, f]),
+	});
+	// Resolved, never rejected: a thrown refusal would be retried by the queue forever (CONST-RETRY-INFRA-ONLY).
+	const r = await runJob(ghJob, d);
+	assert.deepEqual(order, ["observation"], "nothing after the observation ran, the image probe included");
+	assert.equal(r.outcome, "policy");
+	assert.equal(r.reason, "podman-conf-widens-job");
+	assert.equal(r.budgetReserved, false);
+	assert.equal(redis.incrCalls, 0);
+	assert.ok(!calls.includes("prepare") && !calls.includes("run-container") && !calls.some((c) => c.startsWith("mint:")));
+	assert.equal(texts.length, 1);
+	assert.match(texts[0], /^Refused: the worker host's Podman configuration lets a job's container reach more than this venue allows/);
+	assert.doesNotMatch(texts[0], /\/home\/|pasta_options|containers\.conf/, "the host path and the key go to the log, never the forge");
+	assert.deepEqual(logged.find(([e]) => e === "refused_podman_conf_widens_job"), ["refused_podman_conf_widens_job", { key: "pasta_options", message }]);
+});
+
+test("a podman conf that could not be read whole is refused without claiming it widens; one read failing for a moment is retried (#428)", async () => {
+	const run = async (podmanConfRefused) => {
+		const texts = [];
+		const redis = fakeRedis();
+		const { deps: d, calls } = deps({
+			redis,
+			observationPreflight: async () => ({ ok: true, podmanConfRefused }),
+			imagePreflight: async () => {
+				throw new Error("the image preflight ran");
+			},
+			comment: async (_j, t) => texts.push(t),
+			log: () => {},
+		});
+		try {
+			return { r: await runJob(ghJob, d), texts, incr: redis.incrCalls, calls };
+		} catch (error) {
+			return { error, texts, incr: redis.incrCalls, calls };
+		}
+	};
+	const unread = await run({ reason: "podman-conf-widens-job", key: null, message: "Refused: CONTAINERS_CONF is set, ..." });
+	assert.equal(unread.r.reason, "podman-conf-widens-job");
+	assert.match(unread.texts[0], /could not be read in full, so whether it lets a job's container reach more than this venue allows is not known/);
+	assert.doesNotMatch(unread.texts[0], /configuration lets a job's container reach more/, "an unread conf is not said to widen");
+	const busy = await run({ reason: "podman-conf-widens-job", key: null, message: "Not read yet: ...", transient: true });
+	assert.ok(busy.error instanceof InfraRetry, "a transient read is infrastructure: thrown, so the queue retries it");
+	assert.equal(busy.error.message, "the podman venue's containers.conf could not be read just now, so whether it widens a job is not known");
+	assert.deepEqual([busy.texts.length, busy.incr], [0, 0], "no comment, nothing reserved");
+});
+
 test("an unmappable job user comments fixed text and logs the cause; an image without anyUid is named in the comment", async () => {
 	for (const [refusal, reason, pattern, event] of [
 		[{ refused: "job-user-unmappable", cause: "docker-group" }, "job-user-unmappable", /cannot give this job a non-root user/, "refused_job_user_unmappable"],

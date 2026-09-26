@@ -280,7 +280,8 @@ argv every other job gets, from the same builder, with `--userns=keep-id` right 
 
 The venue decides from one `podman info --format json`, never from a probe container. It asks, in this order,
 whether the host is Linux, whether `podman info` answered, whether the service is remote, whether it is rootless,
-and whether the worker is root; then, per job, whether the worker's primary group is gid 0 and whether the image
+and whether the worker is root; then whether a containers.conf the account reads widens a job (step 4 below); then,
+per job, whether the worker's primary group is gid 0 and whether the image
 declares `anyUid`. These are its refusals, verbatim from `worker/src/backend-podman.mjs`, and a test pins each line
 and each heading's timing to the code:
 
@@ -309,6 +310,9 @@ Refused: the worker's primary group is gid 0, and a podman job runs with that gr
 
 # a job image without anyUid, and a worker that is not uid 1001 (per job)
 Refused: the job image does not declare `anyUid` (`dev.pi-dispatch.capabilities`), so it cannot run as this worker's own uid, which the podman venue always uses; rebuild it from a release that has this feature, or run the worker as uid 1001 (issue #354).
+
+# a containers.conf the account reads that sets pasta_options, network_cmd_options, annotations or env, here the user's own (at boot when podman is the default venue, else per job)
+Refused: /home/pdjob/.config/containers/containers.conf sets pasta_options, which Podman hands to the pasta behind every job's network, where a host-loopback mapping (--map-host-loopback, --map-gw, -T) gives the job this host's 127.0.0.1 services; remove that key from that file, then restart this account's containers on a bridge network (the egress proxy among them), since the rootless network they share keeps the options it started with: the podman venue refuses any containers.conf this account's Podman reads that sets pasta_options, network_cmd_options, annotations or env, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers (a pasta MTU, say) goes on their own command line (--network=pasta:...) or Quadlet unit instead, not account-wide (issue #428).
 ```
 <!-- /PODMAN-NATIVE-REFUSALS -->
 
@@ -344,12 +348,26 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    and `hooks_dir` unset in every containers.conf the account reads, install no OCI hooks, and keep FIPS mode off,
    or the worker gives `mountSet` no credit (`podmanAddsNoMounts`). Leave `CONTAINERS_CONF` and
    `CONTAINERS_CONF_OVERRIDE` unset for the worker too: with either set, the files the worker reads are not the ones
-   Podman reads, so it credits neither `isolation` nor `mountSet`.
-   Leave `pasta_options` and `network_cmd_options` without a host-loopback mapping (`--map-host-loopback`,
-   `allow_host_loopback=true`), and `annotations` without `run.oci.keep_original_groups`. Nothing observes either yet
-   (issue #428), and the argv cannot pin the first back: Podman appends containers.conf's network options to the
-   command line's, so a loopback mapping there gives every job without egress the host's `127.0.0.1` services, a
-   local Valkey among them (measured). The namespaces, `env_host` and `http_proxy` it can pin, and does.
+   Podman reads, so the worker refuses the whole venue (below), and so it does when a containers.conf or a drop-in
+   directory exists and cannot be read.
+   Leave `pasta_options`, `network_cmd_options`, `annotations` and `env` unset in every containers.conf the account
+   reads, whatever you would set them to: while any of them is present the worker refuses the venue (issue #428), at
+   boot when `podman` is the default venue and each podman job otherwise, as `podman-conf-widens-job`, naming the
+   file and the key, and `pi-dispatch doctor` says the same. Write the files in plain ASCII with no `"""` or `'''`
+   multi-line strings, or they are refused too: such spellings were measured hiding a key from this check while
+   Podman honoured it. A read that fails for a moment (out of file descriptors, an I/O error) is retried, not
+   refused. Measured on Fedora 44 with Podman 5.8.1: a host-loopback
+   mapping there (`--map-host-loopback`, `--map-gw`, `-T <port>`, or slirp4netns's `allow_host_loopback=true`) gave
+   a job without egress, a job on its own bridge and the egress proxy's network the host's `127.0.0.1` services, a
+   local Valkey among them, `run.oci.keep_original_groups=1` kept the account's groups inside the job, and
+   `[engine] env = ["CONTAINERS_CONF_OVERRIDE=..."]` made Podman read a file the worker never reads. No flag
+   on the job's command line takes those options back (Podman puts them first, and a `-T` survives any pin), which
+   is why the key's presence is refused rather than its value judged. The cost: a setting you wanted for every
+   container of the account, a pasta MTU say, goes on those containers' own command line
+   (`--network=pasta:...`) or Quadlet unit instead. After removing a key, restart the account's containers on a
+   bridge network, the egress proxy among them: the rootless network they share keeps the options it started with,
+   and the worker reads the files, not that live network, so it admits the next job as soon as the key is gone.
+   The namespaces, `env_host` and `http_proxy` the argv can pin, and does.
 5. **The job image, in this account's own store.** A rootless account does not see root's images or another
    user's: `podman pull ghcr.io/edgehero/pi-job:latest` as the account, then set `PI_JOB_IMAGE` to the name
    `podman images` shows. `--pull=never` resolves a short name such as `pi-job:latest` to `localhost/pi-job:latest`

@@ -49,7 +49,7 @@ than everything else combined.
 | | |
 |---|---|
 | One `--internal` network **per job** | `pi-job-<id>-net`, created at job start and removed at job end. Holds exactly two endpoints: the container and the proxy. If the worker dies before it can remove one, the next boot removes it, detaching whatever is still on it first, and says so in the log if it cannot. |
-| One long-lived proxy | `pi-dispatch-egress-proxy`, squid, hostname filtering on `CONNECT` to port 443. Publishes no port. |
+| One long-lived proxy | `pi-dispatch-egress-proxy`, squid, hostname filtering on `CONNECT` to port 443, and a listed name that resolves to one of this host's fixed loopback or link-local addresses (or slirp4netns's `10.0.2.2`) is refused (issue #428). A host mapped to another address (pasta's `--map-host-loopback <address>` or `--map-gw`, slirp4netns's `cidr=`) is not covered here; on the `podman` venue the worker refuses the containers.conf that would do that. Publishes no port. |
 | One upstream network | `pi-dispatch-egress-out`. Only the proxy is on it. |
 
 **Per job, not one shared network**, and that is the part worth understanding. A shared network is a shared
@@ -209,8 +209,10 @@ And it does not hide **this host** from the job. `--internal` stops the network 
 itself, but its gateway is still the host, so a service listening on `0.0.0.0` there answers a job container
 that dials the gateway address. Measured on Docker 27.5.1 and on rootful Podman 5.8.2 alike: a listener on
 `0.0.0.0:9999` answered from inside a job, while one bound to `127.0.0.1` gave `ECONNREFUSED`, as did a port
-with nothing behind it. That loopback binding, not `--internal`, is what keeps a job out of your queue, which
-is why `deploy/docker-compose.yml` publishes Valkey on `127.0.0.1:6379` and never on `0.0.0.0`. Bind your own
+with nothing behind it. That loopback binding, not `--internal`, is what keeps a job out of your queue, as long
+as nothing maps the host's loopback into a container's network; on the native `podman` venue an account's
+containers.conf can, and the worker refuses the venue while it does (issue #428, docs/podman.md step 4). That is
+why `deploy/docker-compose.yml` publishes Valkey on `127.0.0.1:6379` and never on `0.0.0.0`. Bind your own
 host services the same way, or put the firewall layer in the appendix below them.
 
 ## How this was verified
