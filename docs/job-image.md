@@ -125,7 +125,9 @@ the loader flags carry the posture you expect. Running a container can observe b
    trust posture you chose, so fetching it stays yours.
 2. **Name it** in `triggers.json` as `run.image`.
 3. **Check it**: `pi-dispatch doctor` lists every distinct image your triggers name, fails on one that is
-   not present, and warns on one whose entrypoint does not look like the runner.
+   not present, and warns on one whose entrypoint does not look like the runner. It looks in the store the
+   trigger's jobs start from: the Docker daemon's for `local`, and this account's own Podman store for the
+   `podman` venue ([podman.md](podman.md)).
 
 If the image is missing when a job is picked up, the job is refused **before** it costs anything — no
 credential minted, no repo cloned, no budget slot burned — and the refusal names the tag.

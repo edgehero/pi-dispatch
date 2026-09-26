@@ -820,7 +820,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   top; `cancel` names one job id and stops exactly that job, `DES-CANCEL-VIA-REDIS-REQUEST-KEY`).
   **Create-only, contractually non-destructive**: `init` (idempotent scaffolds; an existing file is
   never touched). **Consented host mutations**: `up` and `doctor --fix` — each concrete action (a
-  docker pull of the deployment's *own default* image, a loopback Valkey start, an overlay
+  docker pull of the deployment's *own default* image, or on a deployment without `local` a podman pull into this
+  account's own store (issue #433), a loopback Valkey start (docker, and only while `local` is listed), an overlay
   `auth.json` delete, an `import-pi` restage) is shown verbatim and runs only on an explicit y/N
   accept, defaulting to No, including on non-TTY stdin. **Shown but not prompted**, a tier `up` alone
   occupies (issue #357): filling a key that has NO VALUE in a `.env` that already exists. Every such
@@ -4845,6 +4846,25 @@ a tunnel.
   this venue through the `podman` CLI (issue #429; `INT-SANDBOX-CONTRACT`), with a podman job's argv, as the opening
   account under keep-id, and refused for what a job is refused for through the job's own `judgePodmanVenue`, in the
   job's order; `pi-dispatch up`, the compose file and the setup wizard stay docker-only, a follow-up issue. No CI job is required of it; `.github/workflows/podman-conformance.yml` is advisory.
+  `pi-dispatch doctor` on a deployment whose `PI_BACKENDS` does not list `local` (issue #433) spawns NO `docker`
+  command: no `docker info`, no endpoint read, and no image inspect of the default image, a trigger-named one or the
+  fleet's. "Not asked" is its own value (`dockerRun` is `null`, apart from an asked-and-absent `code: null`), so no
+  docker verdict is derived from a command that never ran, and the backend section is handed no endpoint and no
+  daemon answer. One ✓ line says so (`Docker: not checked -- PI_BACKENDS lists no docker venue (local), so no job here
+  runs on Docker`). The podman section's image line is then THE image check: ✗ while the job image is not in this
+  account's store, and `doctor --fix` offers `podman pull ghcr.io/edgehero/pi-job:latest && podman tag
+  ghcr.io/edgehero/pi-job:latest pi-job:latest` under docker's rules (prompt tier, the deployment default only, never
+  for a store that did not answer), since Podman stores that tag as `localhost/pi-job:latest` and `--pull=never`
+  resolves the short name to it. A trigger-named image is asked of the runtime its trigger's jobs start on, by the
+  worker's own rule (`resolveBackendName`: `run.backend`, else the first entry of `PI_BACKENDS`), so a podman-routed
+  one is read with `podman image inspect` whether or not `local` is listed, and only once the section has read the
+  default image in the same store. The in-image `gh auth status` probe runs through `podman` with docker's own argv
+  (`ghProbeArgs`) once the section has read the image there, decided a job may run and seen the service as this
+  host's own (`serviceIsRemote: false`), podman's answer to the question docker's endpoint read answers for the token.
+  The fleet's image id is the one that image read returned, which is the id a worker without `local` publishes.
+  Valkey's fix names `docs/podman.md` and no `docker run` is offered. A deployment listing `local` prints what it
+  printed before, pinned byte for byte for `local,podman`, except that a podman-routed trigger's image is no longer
+  asked of docker.
 - **Why**: rootless Podman was the one common runtime the worker refused outright (`OQ-037`), and the refusal was a
   limitation rather than a verdict: only keep-id gives a job the uid that owns its `0700` directories, and it is a
   per-container flag the docker CLI refuses and `docker info` cannot see. Measured on 2026-09-25 on Fedora 44
@@ -4956,6 +4976,13 @@ a tunnel.
   - **Normalising the attached exit 1 to never-started**: the catatonit line is the only sign, it is on stderr where
     a job's own process could print it, and the run's output is not attributed per job at the factory. A rewrite on
     that evidence would refund a job that spent.
+  - **doctor's docker lines kept on a deployment without `local`, relabelled "not used by any job"** (what issue #354
+    shipped, replaced by issue #433): an operator who never installed Docker read a warning about it on every run,
+    and a host that did have it was asked about a store no job of the deployment starts from. The relabel also kept
+    `docker info` as the source of the backend section's daemon answer on a deployment that has no docker venue.
+  - **`doctor --fix` starting Valkey with a `podman run` of the docker argv** (issue #433): Podman has no daemon to
+    bring a `--restart` container back after a reboot (podman-run(1) sends that to a systemd unit), so the fix
+    would report success and leave a queue that is gone after the next boot.
 - **Residuals**:
   - A container that never started because its entrypoint is missing or not executable arrives as exit 1 and is
     retried as infrastructure, not refunded, exactly as on the Docker API route.
@@ -4979,11 +5006,15 @@ a tunnel.
     does not close `OQ-036`, it moves rootless Podman onto the same footing as rootful.
   - A transcript with no venue stamp is `local`'s (`UNATTRIBUTED_BACKEND`), so on a host that moves from `local` to
     `podman` such a key cold-starts once as `venue-changed`.
+  - doctor's in-image `gh auth status` probe runs on ONE venue per run: docker while `local` is listed, podman only
+    without it (issue #433), so a mixed deployment's podman image is not probed for gh. One hand-off of the operator's
+    token per run was preferred to one per venue.
 - **Code evidence**: `worker/src/backends.mjs` -> the `podman` entry, `PODMAN_BOUNDS_DELEGATED`,
   `PODMAN_ADDS_NO_MOUNTS`, `PODMAN_SERVICE_LOCAL`; `worker/src/backend-podman.mjs` -> `parsePodmanInfo`,
   `makePodmanInfoReader`, `observePodman`, `decidePodmanJobUser`, `resolvePodmanImageUser`, `makePodmanBackend`,
   `makePodmanReaper`, `PODMAN_JOB_USER_FIX`, `PODMAN_BOOT_REFUSING_CAUSES`; `worker/src/start.mjs` ->
-  `podmanBootRefusal`; `worker/src/doctor.mjs` -> `podmanChecks`, `podmanLiveChecks`; `worker/src/live-probes.mjs`;
+  `podmanBootRefusal`; `worker/src/doctor.mjs` -> `podmanChecks`, `podmanLiveChecks`, `collectChecks` (the
+  `dockerRun === null` branches, `ghProbeArgs`, `PODMAN_JOB_IMAGE_PULL`, issue #433); `worker/src/live-probes.mjs`;
   `worker/src/sandbox.mjs` -> `SANDBOX_LAUNCHERS`, `sandboxVenueRefusal`, `decideSandboxJobUser` (its podman
   branch), `makeSandboxRuntimeWatch`, `combineSandboxNetworkSweepers`; `worker/src/backend-podman.mjs` ->
   `judgePodmanVenue`;
@@ -5151,3 +5182,4 @@ a tunnel.
 | 2026-09-27 | Issue #429. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**: `pi-dispatch sandbox` leaves the residual list. A run on this venue reopens through the `podman` CLI with a podman job's argv (keep-id, `--user`, `PODMAN_PINNED_FLAGS`, a network flag always), as the account that opens it, and is refused for what a job is refused for in the job's order, through `judgePodmanVenue`, the function the bundle's `observationPreflight` now answers through as well, so the two cannot drift apart. What was not measured about the sandbox on a rootless host (a published port beside `--network=private`, `podman attach` after a detach, Podman's `{{.State}}` words in the network sweep) is named as its own residual instead. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**, the sandbox bullet: widened from the local adapter to a launcher table of the venues that run on this host, admitted only where the opener's `PI_BACKENDS` blesses the venue; rejected are reading `bin` off built bundles (the CLI and the panel never build one) and admitting by `remote: false`. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked**: still a fresh container per session, now in the run's own runtime. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` UNCHANGED, checked**: the session network is the same shape, created and swept in the run's runtime. |
 | 2026-09-27 | Issue #429, review round 1. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**, its residuals: a published port beside `--network=private` is now MEASURED (Podman warns the mappings were discarded, and the port answers on 127.0.0.1), and a sandbox opened from another `XDG_RUNTIME_DIR` is named as unmeasured. The code evidence names `makeSandboxRuntimeWatch` where it named `listRunningSandboxesOn`, which is gone. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**, two phrases that still said the sandbox reopens only a local run. **CORRECTION** to this file's previous row's premise, recorded here rather than by editing it: the retention sweep does not ask the worker's blessed runtimes (see `INT-SANDBOX-CONTRACT`'s row for the refuted reasoning). |
 | 2026-09-27 | Issue #429, review round 2. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**: the store hazard is measured and CLOSED rather than a residual (another HOME, XDG_DATA_HOME or storage.conf is another store, whose `podman ps -a` answers empty; a podman run records its store, the sandbox refuses another and the sweep holds the run), the `XDG_RUNTIME_DIR` residual is struck as measured harmless, and the podman job user now carries the store it was decided in beside the user (`store`), which the processor hands to prepare as `podmanStore`. The job path's venue judgement is unchanged, checked: `judgePodmanVenue` carries every #428 addition (the transient conf read, `unavailableFor`, `file-unread`), and the bundle's `observationPreflight` answers through it; 4,800 input combinations compared equal against `main`'s own preflight, and a focused test pins the equivalence. **`DES-CONTAINER-BACKEND-REGISTRY` UNCHANGED, checked.** |
+| 2026-09-27 | Issue #433. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**: its Decision gains doctor's behaviour on a deployment without `local`. No `docker` command is spawned there at all (no `docker info`, no endpoint read, no image inspect of the default, a trigger-named or the fleet's image), "not asked" is a value of its own that every consumer branches on, and one ✓ line says Docker was not checked and why. The podman section's image line becomes the image check, with a prompt-tier `doctor --fix` pull into this account's store for the deployment default; a trigger-named image is asked of the runtime its trigger routes to (`resolveBackendName`), with or without `local`; the in-image gh probe runs through `podman` with docker's argv behind the section's own gates (image read, job admitted, `serviceIsRemote: false`); the fleet id is the section's own read; Valkey's fix names `docs/podman.md`. Two Rejected bullets (the #354 relabelled docker lines, and a `podman run` Valkey fix) and one Residual (the gh probe runs on one venue per run). **`DES-CLI-SURFACE` AMENDED**, the consented-mutation list: the default-image pull may be a podman pull into the account's store on a deployment without `local`, and the Valkey start is docker's and offered only while `local` is listed. The never tier is unchanged: a trigger-named image still gets no offer on either runtime, pinned for podman by a doctrine test. A `local,podman` deployment's output is pinned byte for byte against the output captured before the change, in three shapes (all green, docker absent under `--fix`, the docker image missing); the one intended difference for such a deployment, a podman-routed trigger's image asked of Podman rather than docker, is outside those shapes and pinned on its own. **`DES-CONTAINER-BACKEND-REGISTRY` UNCHANGED, checked**: nothing in the worker moved, and doctor's routing reads the worker's own `resolveBackendName`. **`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST` UNCHANGED, checked**: the local job-user section was already not run without `local`. |

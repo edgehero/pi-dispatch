@@ -67,6 +67,7 @@ import { PACKAGES_SUBDIR, readStagedSkills, readStageManifest } from "./packages
 import { copySkillTree } from "./copy-tree.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { GIT_READ_FLAGS } from "./git-hardening.mjs";
+import { resolveBackendName } from "./backend-registry.mjs";
 import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, observePodman, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { buildPodmanRunArgs } from "./docker-run.mjs";
@@ -88,6 +89,19 @@ const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
 
 // gh login scopes that reach well past what a job should ever hold — called out by name in the fix line.
 const BROAD_SCOPES = ["admin:org", "delete_repo", "workflow"];
+
+// The podman venue's pull of the deployment's default job image into this account's store (issue #433): the fix line's
+// words and `--fix`'s prompt, one string so the two cannot name different commands.
+const PODMAN_JOB_IMAGE_PULL = "podman pull ghcr.io/edgehero/pi-job:latest && podman tag ghcr.io/edgehero/pi-job:latest pi-job:latest";
+
+// The fix for a trigger-named image without the runner entrypoint, one sentence for either runtime (issue #433).
+const TRIGGER_IMAGE_ENTRYPOINT_FIX = "build your job image FROM this repo's image/Dockerfile so it keeps /entrypoint.sh -- an image without the runner can exit 0 without ever starting the agent, and the queue records that as success (docs/job-image.md)";
+
+// The in-image gh probe's argv after the runtime's name, shared by docker and podman (issue #433) so the two cannot
+// drift: the token rides value-less `-e` flags, which the CLI fills from the spawn env, so it never enters argv
+// (visible in `ps`) and never reaches doctor's output. Not the job builder's argv: the probe asks whether the image's gh
+// can reach the forge with this token, which is a question about the image and the network, not about a job's bounds.
+const ghProbeArgs = (image) => ["run", "--rm", "--pull=never", "-e", "GH_TOKEN", "-e", "GITHUB_TOKEN", "--entrypoint", "gh", image, "auth", "status"];
 
 // The loopback Valkey, as one docker argv. Mirrors deploy/docker-compose.yml exactly: AOF on (the
 // wait-list must survive a reboot, REQ-QUEUE-BURST-NO-DROP), bound to 127.0.0.1 only (the queue is not a
@@ -533,16 +547,28 @@ export async function collectChecks(env, seams) {
 	// deployment's environment come from. [] unless a seam is configured (issue #216).
 	checks.push(...(await envSetupChecks(env, seams)));
 
+	// Issue #354: which venues run jobs here. An unparseable PI_BACKENDS reads as the unset default, so every docker line
+	// below is exactly what it always was, and the backend section is what fails on it (the worker refuses to boot).
+	const { localUsed, podmanUsed, podmanDefault } = venuesOf(env);
 	// THE FIRST DOCKER CALL OF THE RUN, which is why it was the one that hung (issue #397): a daemon that
 	// accepts the connection and never answers held doctor here, before it had printed anything. Bounded
 	// now, and the three outcomes are three different sentences, because telling someone whose daemon is
 	// WEDGED to install Docker is worse than saying nothing.
-	const dockerRun = await runCmd(spawn, "docker", ["info"], runTimeouts.cmd);
-	const dockerCode = dockerRun.code;
-	// Issue #354: which venues run jobs here. An unparseable PI_BACKENDS reads as the unset default, so every docker line
-	// below is exactly what it always was, and the backend section is what fails on it (the worker refuses to boot).
-	const { localUsed, podmanUsed } = venuesOf(env);
-	checks.push(dockerUnlessLocal(localUsed, {
+	//
+	// Issue #433: and ASKED ONLY where a job runs on docker. Without `local` in PI_BACKENDS, docker is not spawned at all
+	// (no `info`, no endpoint read, no image inspect of any kind), and `dockerRun` is `null`, which means NOT ASKED. It is
+	// kept apart from `code: null`, which means ASKED AND NOT FOUND, because the two are opposite facts: every consumer
+	// below branches on `null` (or on `localUsed`) rather than deriving a docker verdict from a command that never ran.
+	// Rejected: running `docker info` anyway and softening what it said, which is what #354 shipped (each docker line
+	// relabelled "not used by any job"). An operator who never installed Docker read a warning about it on every run, and
+	// a host that did have it was asked about a store no job of the deployment looks in.
+	const dockerRun = localUsed ? await runCmd(spawn, "docker", ["info"], runTimeouts.cmd) : null;
+	const dockerCode = dockerRun === null ? null : dockerRun.code;
+	if (dockerRun === null) {
+		// ✓, because nothing is wrong: the one line that says docker was deliberately left alone, and why. The podman
+		// section's own lines (its `podman info`, the image in this account's store) are this deployment's runtime checks.
+		checks.push({ ok: true, label: "Docker: not checked -- PI_BACKENDS lists no docker venue (local), so no job here runs on Docker" });
+	} else checks.push({
 		ok: dockerCode === 0,
 		label: dockerRun.ended === "timeout" ? `Docker daemon reachable (no answer in ${Math.round(runTimeouts.cmd / 1000)}s)` : "Docker daemon reachable",
 		fix:
@@ -551,18 +577,21 @@ export async function collectChecks(env, seams) {
 				: dockerRun.ended === "error"
 					? "install Docker — `docker` was not found on PATH"
 					: "start Docker (the daemon is not responding)",
-	}));
+	});
 	// Issue #278: which daemon THIS SHELL's docker CLI resolves, read once and used twice -- by the in-image gh
 	// probe below, which would otherwise send the operator's gh token to it, and by the backend section's
 	// credentialTransit line. Through the worker's own resolver, so doctor and the worker cannot disagree about
 	// what an answer means; only the runner differs, because doctor's spawn is a seam.
-	const endpoint = await makeDockerEndpointResolver({ run: dockerRunVia(spawn) })();
+	// Issue #433: not read without `local`. `null` is the backend section's own "not given" (nothing observed, nothing
+	// credited), and every other reader of it (the gh probe, the egress canary, the job user, `--live` on local) is itself
+	// gated on `localUsed`.
+	const endpoint = localUsed ? await makeDockerEndpointResolver({ run: dockerRunVia(spawn) })() : null;
 
 	// Read once, used twice, so the triggers file is parsed a single time: `images` drives the per-trigger
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { requiring, waiting, waitProfiles, waitAfters, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, skillsDirs, forges, repositories, flows, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd);
+	const { requiring, waiting, waitProfiles, waitAfters, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, skillsDirs, forges, repositories, flows, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd);
 	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
@@ -579,10 +608,11 @@ export async function collectChecks(env, seams) {
 		});
 	}
 
-	// Only meaningful if docker itself responds; otherwise the image check is noise on top of a down daemon.
-	const imageRun = dockerCode === 0 ? await runCmd(spawn, "docker", ["image", "inspect", jobImage], runTimeouts.cmd) : { code: null, ended: "error" };
-	const imageCode = imageRun.code;
-	checks.push(dockerUnlessLocal(localUsed, {
+	// Only meaningful if docker itself responds; otherwise the image check is noise on top of a down daemon. Issue #433:
+	// and never without `local`, where the podman section's line (the image in THIS ACCOUNT'S store) is the image check.
+	const imageRun = dockerRun === null ? null : dockerCode === 0 ? await runCmd(spawn, "docker", ["image", "inspect", jobImage], runTimeouts.cmd) : { code: null, ended: "error" };
+	const imageCode = imageRun === null ? null : imageRun.code;
+	if (imageRun !== null) checks.push({
 		ok: imageCode === 0,
 		// A timeout says the DAEMON did not answer, not that the image is absent: the fix for the second is
 		// a pull, and for the first a pull would hang exactly as this did.
@@ -617,7 +647,7 @@ export async function collectChecks(env, seams) {
 					},
 				}
 			: {}),
-	}));
+	});
 
 	// REQ-PER-TRIGGER-SKILLS (issue #60). Every distinct `run.skillsDir`, checked BEFORE anything fires,
 	// because the worker's own gate for these refuses at job time -- correct, but at 03:00 in a log nobody
@@ -759,23 +789,56 @@ export async function collectChecks(env, seams) {
 	//      that never started the agent. Warn, never fail: an operator MAY legitimately ship a wrapper
 	//      entrypoint that execs the runner, and a ✗ here is reserved for certainties.
 	// A deployment with no run.image anywhere adds no lines at all, so its output is byte-identical.
-	for (const img of dockerCode === 0 ? images.filter((i) => i !== jobImage) : []) {
-		const run = await runCmd(spawn, "docker", ["image", "inspect", img], runTimeouts.cmd);
-		const code = run.code;
-		checks.push(dockerUnlessLocal(localUsed, {
-			ok: code === 0,
-			label: run.ended === "timeout" ? `Trigger job image present (${img}) -- the daemon did not answer` : `Trigger job image present (${img})`,
-			fix: `docker pull ${img} (or build it) -- a trigger names it in run.image, and jobs run with --pull=never, so the worker never fetches it at job time`,
-		}));
-		if (code !== 0) continue;
-		const entry = await runCmdCapture(spawn, "docker", ["image", "inspect", "--format={{json .Config.Entrypoint}}", img]);
-		if (entry.code === 0 && !entry.output.includes("entrypoint.sh")) {
-			checks.push(dockerUnlessLocal(localUsed, {
-				ok: false,
-				warn: true,
-				label: `${img} does not appear to carry the pi-dispatch runner entrypoint`,
-				fix: "build your job image FROM this repo's image/Dockerfile so it keeps /entrypoint.sh -- an image without the runner can exit 0 without ever starting the agent, and the queue records that as success (docs/job-image.md)",
-			}));
+	//
+	// Issue #433: each image is asked of the runtime its triggers' jobs START on, which is knowable here: a job runs on its
+	// trigger's run.backend, or on the deployment default (PI_BACKENDS' first entry), by the worker's own rule
+	// (`resolveBackendName`). A podman job starts from THIS ACCOUNT'S Podman store, so that is where its image is looked
+	// for; asking docker would answer about a store no such job reads, and on a podman-only host would spawn a runtime the
+	// deployment never asked for. Every route that is not podman stays docker's, exactly as before (a third venue's own
+	// image check is that venue's change), so a deployment whose triggers all run on local prints what it always did.
+	// The podman venue's own image read gates its half as `docker info` gates docker's: not asked on top of a runtime that
+	// did not answer, off Linux, or past a refusal of every podman job, all of which end the podman section before it.
+	const defaultVenue = podmanDefault ? PODMAN_BACKEND : DEFAULT_BACKEND;
+	const podmanRouted = new Set(imageRoutes.filter((r) => resolveBackendName(r, defaultVenue) === PODMAN_BACKEND).map((r) => r.image));
+	const dockerRouted = new Set(imageRoutes.filter((r) => resolveBackendName(r, defaultVenue) !== PODMAN_BACKEND).map((r) => r.image));
+	// Issue #354: the podman venue's own reads. Taken HERE, ahead of the per-trigger images (issue #433), because its read
+	// of the default image is what gates their podman half; its lines are still printed after the backend section, where
+	// they always were, so moving the read changed the order of spawns and not a byte of output.
+	const podman = podmanUsed ? await podmanChecks(env, seams, { jobImage }) : null;
+	for (const img of images.filter((i) => i !== jobImage)) {
+		if (dockerRun !== null && dockerCode === 0 && dockerRouted.has(img)) {
+			const run = await runCmd(spawn, "docker", ["image", "inspect", img], runTimeouts.cmd);
+			const code = run.code;
+			checks.push({
+				ok: code === 0,
+				label: run.ended === "timeout" ? `Trigger job image present (${img}) -- the daemon did not answer` : `Trigger job image present (${img})`,
+				fix: `docker pull ${img} (or build it) -- a trigger names it in run.image, and jobs run with --pull=never, so the worker never fetches it at job time`,
+			});
+			if (code === 0) {
+				const entry = await runCmdCapture(spawn, "docker", ["image", "inspect", "--format={{json .Config.Entrypoint}}", img]);
+				if (entry.code === 0 && !entry.output.includes("entrypoint.sh")) {
+					checks.push({
+						ok: false,
+						warn: true,
+						label: `${img} does not appear to carry the pi-dispatch runner entrypoint`,
+						fix: TRIGGER_IMAGE_ENTRYPOINT_FIX,
+					});
+				}
+			}
+		}
+		if (podman?.imagesReadable === true && podmanRouted.has(img)) {
+			const run = await runCmd(spawn, "podman", ["image", "inspect", img], runTimeouts.cmd);
+			// No fixAction on either runtime: a trigger-named image is a per-flow trust posture (the never tier above).
+			checks.push({
+				ok: run.code === 0,
+				label: run.ended === "timeout" ? `podman: trigger job image present in this account's Podman store (${img}) -- podman did not answer` : `podman: trigger job image present in this account's Podman store (${img})`,
+				fix: `pull, load or build it AS THE WORKER'S ACCOUNT, since rootless Podman keeps one image store per account: podman pull ${img} (or \`docker save ${img} | podman load\`) -- a trigger names it in run.image, and jobs run with --pull=never, so the worker never fetches it at job time`,
+			});
+			if (run.code !== 0) continue;
+			const entry = await runCmdCapture(spawn, "podman", ["image", "inspect", "--format={{json .Config.Entrypoint}}", img]);
+			if (entry.code === 0 && !entry.output.includes("entrypoint.sh")) {
+				checks.push({ ok: false, warn: true, label: `podman: ${img} does not appear to carry the pi-dispatch runner entrypoint`, fix: TRIGGER_IMAGE_ENTRYPOINT_FIX });
+			}
 		}
 	}
 
@@ -810,9 +873,8 @@ export async function collectChecks(env, seams) {
 	// `mountSet` are observed, so the backend section and the job-user section speak from one read. Printed after them.
 	// Issue #354: every line it prints is `local: ...`, about a venue this deployment may not run; without local, none.
 	const jobUser = localUsed ? await jobUserChecks(env, seams, { endpoint, dockerCode, imageCode, jobImage }) : { checks: [], forLive: { run: true, user: null }, daemon: null };
-	// Issue #354: the podman venue's own reads, BEFORE the backend lines for the same reason as the job user's above: its
-	// observations are what the podman rows of the backend section and the floor judge.
-	const podman = podmanUsed ? await podmanChecks(env, seams, { jobImage }) : null;
+	// Issue #354: the podman venue's own reads (taken above, with the per-trigger images) are BEFORE the backend lines for
+	// the same reason as the job user's: its observations are what the podman rows of the backend section and the floor judge.
 	// No docker binary at all is an ANSWER for the observations, as it is for the worker (exit 2 under a floor, not a retry).
 	// A daemon that did not ANSWER is the opposite class, and telling them apart is the whole point of `ended`
 	// (issue #397): `docker-not-found` is DETERMINATE in `runtime-observations` -- it resolves to `value: false`,
@@ -820,13 +882,17 @@ export async function collectChecks(env, seams) {
 	// is fine. A timeout resolves to `value: null` instead, which is the transient class `backendChecks` already
 	// has the right sentence for ("fix what stops the daemon answering"; the worker exits 1 so the supervisor
 	// retries). Before this arm existed both landed on the determinate one, byte-identically.
+	// Issue #433: `null` where docker was not asked, which is the backend section's "not given": no local row is printed
+	// on such a deployment, and nothing here reads a docker answer out of a command that never ran.
 	const daemon =
 		jobUser.daemon ??
-		(dockerRun.ended === "timeout"
-			? { answered: false, reason: "docker-no-answer", transient: true }
-			: dockerCode === null
-				? { answered: false, reason: "docker-not-found", transient: true }
-				: null);
+		(dockerRun === null
+			? null
+			: dockerRun.ended === "timeout"
+				? { answered: false, reason: "docker-no-answer", transient: true }
+				: dockerCode === null
+					? { answered: false, reason: "docker-not-found", transient: true }
+					: null);
 	checks.push(...backendChecks(env, { endpoint, daemon, fs: seams.observationFs, ...(podman ? { podman: podman.observed } : {}) }));
 	checks.push(...jobUser.checks);
 	if (podman) checks.push(...podman.checks);
@@ -1148,8 +1214,22 @@ export async function collectChecks(env, seams) {
 	// containers, stale image) fails jobs mid-run, not at submit. Only meaningful when docker and the image
 	// are green; otherwise it is noise on top of the failures already reported above. Issue #354: and only where a job
 	// runs on docker at all. On a deployment without `local` it would hand the operator's gh token to a container in a
-	// store no job starts from, to answer a question about an image no job uses; the podman venue's image is not probed.
-	if (localUsed && dockerCode === 0 && imageCode === 0) {
+	// store no job starts from, to answer a question about an image no job uses.
+	//
+	// Issue #433: a deployment without `local` asks it of the podman venue instead, where its jobs start: the job image in
+	// this account's store, through `podman`, with the same argv (`ghProbeArgs`). Only once the podman section has read
+	// the image there, decided a job may run, and seen the service as this host's own (`serviceIsRemote: false`), which
+	// is podman's answer to the question docker's endpoint read answers below: the token must not ride to another
+	// machine. A deployment with `local` probes on docker exactly as before, and only there: one hand-off of the token per
+	// doctor run, not one per venue, and that deployment's output unchanged.
+	const ghProbeBin = localUsed
+		? dockerCode === 0 && imageCode === 0
+			? "docker"
+			: null
+		: podman?.forLive?.run === true && podman.forLive.imagePresent === true && podman.forLive.info?.serviceIsRemote === false
+			? "podman"
+			: null;
+	if (ghProbeBin !== null) {
 		if (ghSource === "app") {
 			checks.push({ ok: true, label: "in-image gh auth: skipped (GITHUB_AUTH_SOURCE=app mints per-job)" });
 		} else {
@@ -1162,7 +1242,7 @@ export async function collectChecks(env, seams) {
 				const patVar = env.GITHUB_PAT_VAR ?? "GITHUB_PAT"; // config.mjs's patVar default, read directly
 				token = (env[patVar] ?? "").trim(); // absent → skip; loadConfig fails loud at worker boot anyway
 			}
-			if (token && endpoint.local !== true) {
+			if (token && ghProbeBin === "docker" && endpoint.local !== true) {
 				// NOT RUN on a daemon that is not observed on this host (#278). The probe hands the operator's own gh
 				// token -- full scope and non-expiring by default -- to `docker run -e`, and on a redirected CLI that
 				// token rides to another machine. A check must not do the thing the credentialTransit line warns
@@ -1174,21 +1254,17 @@ export async function collectChecks(env, seams) {
 					fix: "point the docker CLI at this host and re-run doctor to check it",
 				});
 			} else if (token) {
-				// Value-less `-e` flags: docker forwards GH_TOKEN/GITHUB_TOKEN from the spawn env, so the
+				// Value-less `-e` flags: the CLI forwards GH_TOKEN/GITHUB_TOKEN from the spawn env, so the
 				// token value never enters argv (visible in `ps`) and never reaches doctor's output.
-				const probe = await runCmdCapture(
-					spawn,
-					"docker",
-					["run", "--rm", "--pull=never", "-e", "GH_TOKEN", "-e", "GITHUB_TOKEN", "--entrypoint", "gh", jobImage, "auth", "status"],
-					{ env: { ...env, GH_TOKEN: token, GITHUB_TOKEN: token } },
-				);
+				const probe = await runCmdCapture(spawn, ghProbeBin, ghProbeArgs(jobImage), { env: { ...env, GH_TOKEN: token, GITHUB_TOKEN: token } });
+				const where = ghProbeBin === "podman" ? "podman: " : "";
 				checks.push({
 					ok: probe.code === 0,
 					warn: true,
 					label:
 						probe.code === 0
-							? `gh authenticates inside the job image (${jobImage})`
-							: `gh cannot authenticate inside the job image (${jobImage})`,
+							? `${where}gh authenticates inside the job image (${jobImage})`
+							: `${where}gh cannot authenticate inside the job image (${jobImage})`,
 					fix: "check network egress from containers or rebuild/pull the job image -- jobs that use gh will fail mid-run",
 				});
 			}
@@ -1198,12 +1274,17 @@ export async function collectChecks(env, seams) {
 	checks.push({
 		ok: await probeValkey(valkeyUrl),
 		label: `Valkey reachable (${valkeyUrl})`,
-		fix: "docker compose -f deploy/docker-compose.yml up -d",
+		// Issue #433: without `local`, docker is not this deployment's runtime and may not be installed at all, so neither the
+		// compose file nor a `docker run` is offered. The words hold before and after the setup commands learn Podman: the
+		// podman guide says how to start Valkey under the account, whichever command does it.
+		fix: localUsed ? "docker compose -f deploy/docker-compose.yml up -d" : "start Valkey under this account's Podman, or from a distribution package, as docs/podman.md describes",
 		// Prompt tier, and only for a LOOPBACK url (the shipped default): starting a local container cannot
 		// make a remote VALKEY_URL reachable, so a pointed-elsewhere deployment keeps the plain fix line
 		// rather than an offer that would mask the real problem. The argv mirrors the compose file's
-		// semantics exactly (VALKEY_RUN above).
-		...(/^redis:\/\/(127\.0\.0\.1|localhost)(:6379)?\/?$/.test(valkeyUrl)
+		// semantics exactly (VALKEY_RUN above). Issue #433: and only with `local`. A `podman run` of the same argv
+		// was rejected: Podman has no daemon to bring a `--restart` container back after a reboot (podman-run(1) sends
+		// that to a systemd unit), so the fix would report success and leave a queue that is gone after the next boot.
+		...(localUsed && /^redis:\/\/(127\.0\.0\.1|localhost)(:6379)?\/?$/.test(valkeyUrl)
 			? {
 					fixAction: {
 						tier: "prompt",
@@ -1231,10 +1312,16 @@ export async function collectChecks(env, seams) {
 	// Read only when there is a peer to compare against. Every line below is gated on a peer existing, and
 	// the SUBPROCESS has to be too: otherwise every `doctor` run on every single-host deployment spawns an
 	// extra docker call whose answer nothing reads.
+	// Issue #433: without `local`, the id the podman section's own image read already returned, and no spawn: a worker
+	// without `local` publishes exactly that one (its default venue's preflight, `start.mjs`), so it is the id to compare.
 	const imageDigest =
-		peers.length > 0 && imageCode === 0
-			? normalizeImageId((await runCmdCapture(spawn, "docker", ["image", "inspect", "--format={{.Id}}", jobImage], { stdoutOnly: true })).output.trim()) || null
-			: null;
+		peers.length === 0
+			? null
+			: localUsed
+				? imageCode === 0
+					? normalizeImageId((await runCmdCapture(spawn, "docker", ["image", "inspect", "--format={{.Id}}", jobImage], { stdoutOnly: true })).output.trim()) || null
+					: null
+				: (podman?.imageDigest ?? null);
 	if (peers.length > 0) {
 		const mine = workerNameOf(env);
 		checks.push({ ok: true, label: `Fleet: ${peers.length + 1} worker${peers.length === 0 ? "" : "s"} (${[mine, ...peers.map((h) => h.name)].sort().join(", ")})` });
@@ -2658,7 +2745,7 @@ function readScopedLimitFacts(env, fileExists) {
 }
 
 function readTriggerFacts(env, fileExists, cwd) {
-	const none = { requiring: 0, waiting: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], skillsDirs: [], forges: [], repositories: [], flows: [], parseError: null, path: null };
+	const none = { requiring: 0, waiting: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], skillsDirs: [], forges: [], repositories: [], flows: [], parseError: null, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -2729,6 +2816,9 @@ function readTriggerFacts(env, fileExists, cwd) {
 			].sort(),
 			optingOut: triggers.filter((t) => t.run.packages === false).length,
 			images: [...new Set(triggers.map((t) => t.run.image).filter((i) => typeof i === "string"))].sort(),
+			// Issue #433: each image with the venue its trigger names (undefined: the deployment default), so the image is
+			// asked of the runtime its jobs start on. The worker's own shape (`{ backend }`), for `resolveBackendName`.
+			imageRoutes: triggers.filter((t) => typeof t.run.image === "string").map((t) => ({ image: t.run.image, backend: t.run.backend })),
 			// REQ-PER-TRIGGER-SKILLS. The distinct host directories the file names, deduped like `images`,
 			// because the checks below cost a filesystem walk each and two triggers sharing a directory are one
 			// question.
@@ -4051,20 +4141,6 @@ function venuesOf(env) {
 	return { localUsed: blessed.includes(DEFAULT_BACKEND), podmanUsed: blessed.includes(PODMAN_BACKEND), podmanDefault: blessed[0] === PODMAN_BACKEND };
 }
 
-/**
- * A docker check as it reads on a deployment that runs no job on docker (issue #354): never a ✗ (a miss is a ⚠, a pass
- * stays ✓), labelled as used by no job, with no fix offered. A ✗ for a docker daemon no job uses would fail doctor on a
- * podman-only host for a runtime that host may not even have, and a `--fix` pull into docker's store would put an image
- * where no job looks. Kept rather than
- * dropped, because an operator who meant to list `local` learns it here and not from the first job's venue refusal.
- * Returns the check unchanged while `local` is blessed, so that deployment's output is byte-identical.
- */
-function dockerUnlessLocal(localUsed, check) {
-	if (localUsed) return check;
-	const { fixAction: _unused, ...rest } = check;
-	return { ...rest, warn: true, label: `${check.label} -- not used by any job (PI_BACKENDS does not list local)`, fix: "nothing to do for jobs: no venue this deployment runs uses docker. Add local to PI_BACKENDS if you meant jobs to run there" };
-}
-
 /** The podman venue's observations (issue #354), which only its own `podman info` and this account's files answer. */
 const PODMAN_OBSERVATIONS = new Set([PODMAN_BOUNDS_DELEGATED, PODMAN_ADDS_NO_MOUNTS, PODMAN_SERVICE_LOCAL]);
 
@@ -4092,7 +4168,7 @@ function fileUnreadFix(what) {
  * what was seen, so this section prints the bounds line only when they hold.
  */
 export async function podmanChecks(env, seams, { jobImage }) {
-	const { spawn, home = safeHomeDir(), jobUserIdentity: ids = {}, observationFs = { statSync, readFileSync, readdirSync } } = seams;
+	const { spawn, home = safeHomeDir(), jobUserIdentity: ids = {}, observationFs = { statSync, readFileSync, readdirSync }, runTimeouts = RUN_TIMEOUTS } = seams;
 	const platform = ids.platform ?? seams.platform;
 	const { podmanDefault } = venuesOf(env);
 	const readInfo = makePodmanInfoReader({ run: dockerRunVia(spawn, PODMAN_INFO_TIMEOUT_MS, { bin: "podman" }) });
@@ -4168,15 +4244,40 @@ export async function podmanChecks(env, seams, { jobImage }) {
 
 	// The job image, in THIS ACCOUNT'S store: rootless Podman keeps one per account, so an image docker, root or another
 	// account holds is not one a job here can start from (and `--pull=never` fetches nothing). The worker's own preflight.
+	//
+	// Issue #433: on a deployment without `local` this is THE image check (docker's is not asked), so it carries the same
+	// `--fix` offer docker's line does, under the same rules: the prompt tier, only for the deployment default (an
+	// overridden PI_JOB_IMAGE is the operator's trust choice, which pulling ghcr's image would not satisfy), and only for
+	// an answered miss, never for a store that did not answer. Into THIS shell's account's store, which is the store the
+	// line reads and the one a worker running as this account starts jobs from. `pi-job:latest` is tagged as is: Podman
+	// stores it as `localhost/pi-job:latest`, and `--pull=never` resolves the short name to exactly that (docs/podman.md).
 	const image = await makeImagePreflight({ image: jobImage, spawnFn: spawn, bin: "podman" })({});
 	const imagePresent = image?.ok === true;
+	// The per-trigger images are asked of this store only when it answered for the default one (issue #433).
+	const imagesReadable = imagePresent || image?.missing !== undefined;
+	const imageDigest = imagePresent ? (image.imageDigest ?? null) : null;
 	if (imagePresent) {
 		checks.push({ ok: true, label: `podman: job image present in this account's Podman store (${jobImage})` });
 	} else if (image?.missing) {
 		checks.push({
 			ok: false,
 			label: `podman: job image is not in this account's Podman store (${jobImage})`,
-			fix: `pull or load it AS THE WORKER'S ACCOUNT, since rootless Podman keeps one image store per account: ${jobImage === "pi-job:latest" ? "podman pull ghcr.io/edgehero/pi-job:latest && podman tag ghcr.io/edgehero/pi-job:latest pi-job:latest" : `podman pull ${jobImage}`} (or \`docker save ${jobImage} | podman load\`) -- jobs run with --pull=never, so the worker never fetches it`,
+			fix: `pull or load it AS THE WORKER'S ACCOUNT, since rootless Podman keeps one image store per account: ${jobImage === "pi-job:latest" ? PODMAN_JOB_IMAGE_PULL : `podman pull ${jobImage}`} (or \`docker save ${jobImage} | podman load\`) -- jobs run with --pull=never, so the worker never fetches it`,
+			...(jobImage === "pi-job:latest"
+				? {
+						fixAction: {
+							tier: "prompt",
+							describe: PODMAN_JOB_IMAGE_PULL,
+							run: async ({ spawn: fixSpawn }) => {
+								// The PULL bound, as docker's: a cold pull of the job image is minutes of real work.
+								const pulled = await runCmd(fixSpawn, "podman", ["pull", "ghcr.io/edgehero/pi-job:latest"], runTimeouts.pull);
+								if (pulled.code !== 0) return { ok: false, note: pulled.ended === "timeout" ? `podman pull did not finish within ${Math.round(runTimeouts.pull / 60000)} minutes` : "podman pull failed" };
+								if ((await runCmd(fixSpawn, "podman", ["tag", "ghcr.io/edgehero/pi-job:latest", "pi-job:latest"], runTimeouts.cmd)).code !== 0) return { ok: false, note: "podman tag failed" };
+								return { ok: true };
+							},
+						},
+					}
+				: {}),
 		});
 	} else {
 		checks.push({ ok: false, warn: true, label: `podman: whether the job image is in this account's Podman store could not be read (${jobImage})`, fix: "`podman image inspect` and `podman info` did not answer; fix that, then re-run doctor" });
@@ -4194,7 +4295,7 @@ export async function podmanChecks(env, seams, { jobImage }) {
 				label: chosen.refused === "job-image-any-uid-unsupported" ? `podman: every job on ${jobImage} is refused as this uid (${chosen.refused})` : `podman: every podman job is refused as this uid (${cause})`,
 				fix: PODMAN_JOB_USER_FIX[cause] ?? JOB_USER_FIX[cause] ?? "see DES-PODMAN-NATIVE-ROOTLESS-BACKEND",
 			});
-			return { checks, observed, relabel, forLive: notRun(`a podman job is refused as this uid (${cause}), so a probe would read back a container no job gets`) };
+			return { checks, observed, relabel, imagesReadable, imageDigest, forLive: notRun(`a podman job is refused as this uid (${cause}), so a probe would read back a container no job gets`) };
 		}
 		user = chosen.user;
 		checks.push({ ok: true, label: `podman: jobs run as uid:gid ${chosen.user} (passed as --user, with --userns=keep-id) with HOME=${chosen.home}` });
@@ -4229,7 +4330,7 @@ export async function podmanChecks(env, seams, { jobImage }) {
 	}
 
 	forLive = { run: true, user, relabel, info, imagePresent, egress: { armed, proxy, proxyRunning } };
-	return { checks, observed, relabel, forLive };
+	return { checks, observed, relabel, imagesReadable, imageDigest, forLive };
 }
 
 /** The two SELinux types a container may read a bind mount under without it being relabelled (container-selinux). */

@@ -372,7 +372,8 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
 5. **The job image, in this account's own store.** A rootless account does not see root's images or another
    user's: `podman pull ghcr.io/edgehero/pi-job:latest` as the account, then set `PI_JOB_IMAGE` to the name
    `podman images` shows. `--pull=never` resolves a short name such as `pi-job:latest` to `localhost/pi-job:latest`
-   with no registry lookup (measured). The image must declare `anyUid` unless the account is uid 1001; releases
+   with no registry lookup (measured). For the default image, `pi-dispatch doctor --fix` run as the account offers
+   exactly that: `podman pull ghcr.io/edgehero/pi-job:latest`, then `podman tag` to `pi-job:latest`. The image must declare `anyUid` unless the account is uid 1001; releases
    since issue #341 do.
 6. **The egress proxy, under the same rootless Podman, on a named bridge network.** The worker attaches the proxy to
    each job's `--internal` network by name, and only a container on a named network can be attached: measured, a
@@ -397,7 +398,8 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    reboot was not measured.
 7. **Valkey** is unchanged and can run anywhere the worker reaches through `VALKEY_URL`. `pi-dispatch up` and the
    compose file are docker-only, so on a host without Docker run it another way (a distribution package, or a
-   container under this account with its port published on `127.0.0.1`).
+   container under this account with its port published on `127.0.0.1`). Without `local` in `PI_BACKENDS`,
+   doctor's fix for an unreachable Valkey points here, and `doctor --fix` offers no `docker run` for it.
 8. **`PI_BACKENDS=podman`** in `.env`, then start the worker, and run `pi-dispatch doctor` and
    `pi-dispatch doctor --live` as the same account. doctor's podman section checks that `podman info` answered, that
    the service is rootless and not remote, that the controllers are delegated, whether SELinux relabelling applies,
@@ -405,6 +407,12 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    this Podman. `--live` reads the declarations back off real containers and says it read them back on podman,
    except `egress`: doctor's egress canary runs on docker only, so on this venue doctor says the allowlist was not
    read back. `.github/scripts/podman-conformance.mjs` reads it, with a canary of its own under this account's Podman.
+   With `PI_BACKENDS=podman` (no `local`), doctor runs no `docker` command at all, so a host without Docker reads
+   no Docker failure: one line says `Docker: not checked -- PI_BACKENDS lists no docker venue (local), so no job
+   here runs on Docker`, and the podman section's image line is the image check (✗ while the job image is not in
+   this account's store). A trigger's `run.image` is looked for in the store of the venue that trigger runs on
+   (`run.backend`, else the first venue in `PI_BACKENDS`), and the in-image `gh auth status` check runs through
+   `podman` once the job image is in this account's store and a podman job could run there.
 
 On an SELinux host, the worker's own per-job directories carry `:Z` exactly as on the Docker API route, decided from
 `podman info`'s `selinuxEnabled`, and an operator's local folder and `PI_GLOBAL_PI_DIR` need the one-time
@@ -530,7 +538,7 @@ How each column is known:
 | Entry point | Docker Engine, rootful | Podman rootful | Podman rootless, keep-id, Docker API | Podman rootless, Docker API | podman-docker, rootful | podman-docker, rootless | podman (native, rootless) |
 |---|---|---|---|---|---|---|---|
 | worker | runs jobs as `--user` | runs jobs as `--user` | refused `rootless` | refused `rootless` | runs jobs as `--user`; `credentialTransit` asserted | refused `rootless` | runs jobs as the worker's uid, with `--userns=keep-id` |
-| `pi-dispatch doctor` | names Docker Engine | names Podman through its Docker API; `isolation` asserted, `mountSet` per the override | ✗ `rootless` | ✗ `rootless` | ⚠ names podman-docker and the context fix | ✗ `rootless` | names the podman venue: `podman info`, rootless, not remote, controllers, the image in this account's store |
+| `pi-dispatch doctor` | names Docker Engine | names Podman through its Docker API; `isolation` asserted, `mountSet` per the override | ✗ `rootless` | ✗ `rootless` | ⚠ names podman-docker and the context fix | ✗ `rootless` | names the podman venue: `podman info`, rootless, not remote, controllers, the image in this account's store; without `local`, runs no docker |
 | `pi-dispatch doctor --live` | reads the declarations back | reads the declarations back | not run (a local job is refused) | not run | not run (the endpoint is not observed on this host) | not run | reads the declarations back on podman, `egress` excepted |
 | `pi-dispatch sandbox` | opens as the run's own uid | opens as the run's own uid | refused `rootless` | refused `rootless` | opens as the run's own uid (unmeasured) | refused `rootless` | opens as the opening account's uid with `--userns=keep-id` through `podman`, where `PI_BACKENDS` names podman; a run recorded as another uid does not open |
 | `pi-dispatch up` | runs doctor at the end | runs doctor at the end | as doctor | as doctor | as doctor | as doctor | docker-only (a follow-up); the native venue's setup steps instead |

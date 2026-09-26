@@ -2068,8 +2068,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   verbatim and runs only on an explicit accept (y/N, default No, No on non-TTY), because "pulled onto
   that host yourself" (`SECURITY.md`) is a trust property the consent keypress preserves and a silent
   bootstrap would erase. Fix tiers are closed sets (`DES-CLI-SURFACE`): silent = init's create-only
-  scaffolds + `mkdir` of env-declared paths; prompted = the deployment's own default image, the
-  loopback Valkey, an overlay `auth.json` delete, an `import-pi` restage under its own gates; never =
+  scaffolds + `mkdir` of env-declared paths; prompted = the deployment's own default image (into this
+  account's Podman store instead of docker's on a deployment without `local`, issue #433), the
+  loopback Valkey (while `local` is listed), an overlay `auth.json` delete, an `import-pi` restage under its own gates; never =
   malformed-config rewrites, triggers/pause-windows/scoped-limits content, trigger-named images,
   semantic env guesses, an env-setup script's mode or location. `up` may set `WEBHOOK_SECRET` in a scaffolded
   `.env` **only when the key is empty** — a generated secret is never printed and an operator's value
@@ -2179,6 +2180,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-27 | Issue #433. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, the Why's prompted tier: on a deployment whose `PI_BACKENDS` does not list `local`, `doctor --fix` offers the deployment's own default image as a podman pull and tag into this account's store (the store the podman venue's jobs start from, and the line that is that deployment's image check), and does not offer the loopback Valkey's `docker run`, since doctor spawns no docker there at all. The tiers themselves are unchanged: the image is still only the deployment default, never a trigger-named one, and still prompted with a default of No. Statement and Acceptance UNCHANGED, checked: `up` is untouched by this change, and no acceptance names a docker line of doctor's. |
 | 2026-09-26 | Issue #429. **`REQ-RESURRECTABLE-SANDBOX` AMENDED**, the Acceptance only: a run is refused when its venue has no sandbox launcher or when the opener's own `PI_BACKENDS` does not bless it, where it used to be refused for any venue but `local`; a `podman` run on a host that blesses podman opens through the `podman` CLI only, as the opening account under keep-id. The Scope's "a venue this host holds" is UNCHANGED, checked: it already said held rather than local, and "held" is now the launcher and the blessing. **`REQ-EGRESS-ALLOWLIST` UNCHANGED, checked**: a podman sandbox joins the same kind of `--internal` session network with egress on, created in podman, and names `--network=private` with it off. |
 | 2026-09-26 | Issue #428, review round 2. **`REQ-EGRESS-ALLOWLIST` AMENDED**, the Acceptance again: an unlisted request costs no DNS query, REVERSE included. The allowlist ACL did a PTR lookup for every unlisted IP-literal request (measured), a second DNS channel out of the same class as round 1's; it is now `dstdomain -n`. The Statement is UNCHANGED, checked. |
 | 2026-09-26 | Issue #428, review round 1. **`REQ-EGRESS-ALLOWLIST` AMENDED**, the Acceptance again: the address deny covers this host's FIXED loopback and link-local addresses (a host mapped elsewhere is the podman venue's refusal to close, not the proxy's), and the proxy resolves no unlisted name, since the first form of the rule resolved every name asked for (measured), a DNS channel out. The Statement is UNCHANGED, checked. |
