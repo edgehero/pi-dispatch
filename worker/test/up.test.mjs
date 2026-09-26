@@ -37,8 +37,9 @@ function fakeSpawn(plan, calls = []) {
 				handlers.error?.(new Error(`spawn ${cmd} ENOENT`));
 				return;
 			}
-			const { code, output } = typeof outcome === "object" && outcome !== null ? outcome : { code: outcome, output: "" };
+			const { code, output, stderr } = typeof outcome === "object" && outcome !== null ? outcome : { code: outcome, output: "" };
 			if (output) child.stdout.handlers.data?.(output);
+			if (stderr) child.stderr.handlers.data?.(stderr);
 			handlers.close?.(code);
 		});
 		return child;
@@ -51,6 +52,13 @@ const SECRET = "cafef00d".repeat(8);
 // Everything injected, everything recorded. `files` seeds the in-memory fs (path → text); the fake
 // init deliberately creates nothing, so a test that wants a .env after init seeds it up front.
 function harness({ plan = {}, listening = true, answers = [], files = {}, doctorCode = 0, argv = [], env = { PI_PROVIDER: "anthropic" }, cwd = "/deploy", platform = "linux", logsDirPathFn, settingsFilePathFn, extra = {} } = {}) {
+	// The podman tests (those that inject a podman info reader) get what a real login has unless they say otherwise: a
+	// user manager to talk to (XDG_RUNTIME_DIR, round 2 E8) and a podman that answers "no such container" for the two
+	// names the stack would claim (E3: any other failure now refuses).
+	if (extra.readPodmanInfo) {
+		if (!("XDG_RUNTIME_DIR" in env) && !extra.noBus) env = { ...env, XDG_RUNTIME_DIR: "/run/user/1234" };
+		if (!Object.keys(plan).some((k) => k.startsWith("podman container inspect"))) plan = { "podman container inspect": { code: 125, stderr: "Error: no such container pi-dispatch-valkey\n" }, ...plan };
+	}
 	const calls = [];
 	const promptCalls = [];
 	const initCalls = [];
@@ -690,10 +698,10 @@ test("up on podman: --yes runs exactly the lines it showed, installs the Quadlet
 	const shown = block.split("\n").slice(1).filter((l) => l.startsWith("  ")).map((l) => l.trim());
 	const ran = [];
 	for (const c of h.calls) if (c.cmd === "systemctl") ran.push([c.cmd, ...c.args].join(" "));
-	const written = [...h.store.keys()].filter((p) => p.startsWith(QDIR)).map((p) => `write ${p}`);
+	const written = [...h.store.keys()].filter((p) => p.startsWith(QDIR) || p === "/home/op/.config/pi-dispatch/egress-proxy.conf").map((p) => `write ${p}`);
 	assert.deepEqual(shown, [...written, ...ran], "shown then run: the same lines, in the same order");
 	assert.deepEqual(ran, ["systemctl --user daemon-reload", "systemctl --user start pi-dispatch-valkey.service pi-dispatch-egress-proxy.service"]);
-	assert.equal(written.length, 4);
+	assert.equal(written.length, 5, "four units and the account-owned copy of the rules");
 	assert.ok(!ran.some((l) => / enable /.test(l)), "a generated unit is never enabled");
 	assert.deepEqual(h.calls.filter((c) => c.cmd === "podman" && c.args[0] !== "inspect" && c.args[0] !== "container").map((c) => c.args), [
 		["image", "exists", "pi-job:latest"],
@@ -799,11 +807,16 @@ test("D2: PI_BACKENDS=podman in the deployment's .env drives the podman pass, as
 	assert.match(h.text(), /export the same PI_BACKENDS there first/, "the closing lines say how a hand-run worker gets the venue");
 });
 
-test("D2: this shell wins where it sets a key, and a disagreement with .env is said out loud", async () => {
+test("E5: a shell and a .env that disagree on a venue key stop up before anything runs, naming both and which to change", async () => {
 	const h = harness({ env: { PI_BACKENDS: "local" }, plan: green, listening: true, files: { "/deploy/.env": "PI_BACKENDS=podman\n" } });
-	assert.equal(await h.run(), 0);
-	assert.ok(h.calls.some((c) => c.cmd === "docker"));
-	assert.match(h.text(), /⚠ PI_BACKENDS is "local" in this shell and "podman" in \/deploy\/\.env: this pass uses the shell's, and the service will run the file's/);
+	assert.equal(await h.run(), 1);
+	assert.match(h.text(), /PI_BACKENDS is local in this shell and podman in \/deploy\/\.env\. up would drive the shell's venue while the service runs the file's/);
+	assert.match(h.text(), /change \/deploy\/\.env \(what the service reads\), or unset the key in this shell/);
+	assert.equal(h.calls.length, 0);
+	assert.equal(h.initCalls.length, 0);
+	// Agreement, or a key only one side sets, is no conflict: the shell's value is then simply the file's.
+	const same = harness({ env: { PI_BACKENDS: "local" }, plan: green, listening: true, files: { "/deploy/.env": "PI_BACKENDS=local\n" } });
+	assert.equal(await same.run(), 0);
 });
 
 test("D2/D6: a .env line the loaders read differently stops up before anything runs", async () => {
@@ -881,20 +894,14 @@ test("M13: on podman an armed policy with no allowlist starts no proxy and says 
 	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)));
 });
 
-test("D7/M12: a podman info that has not answered is the worker's retry, not its refusal: up warns and carries on", async () => {
-	const h = harness({
-		env: { PI_BACKENDS: "podman", PI_EGRESS: "0" },
-		plan: podmanPlan(),
-		listening: true,
-		extra: podmanExtra({ readPodmanInfo: async () => ({ answered: false, reason: "timeout", transient: true }) }),
-	});
-	assert.equal(await h.run(), 0);
-	assert.match(h.text(), /⚠ podman venue not decided yet/);
-	assert.ok(h.calls.some((c) => c.cmd === "podman" && c.args.join(" ") === "image exists pi-job:latest"), "the pass went on");
-	assert.equal(h.doctorCalls.length, 1);
-	// Unreadable is a per-job verdict at the worker too (not in its boot-refusing set), so the same holds.
-	const unreadable = harness({ env: { PI_BACKENDS: "podman", PI_EGRESS: "0" }, plan: podmanPlan(), listening: true, extra: podmanExtra({ readPodmanInfo: async () => ({ answered: false, reason: "unparseable", transient: false }) }) });
-	assert.equal(await unreadable.run(), 0);
+test("E7: up stops on a podman info that did not answer, stricter than the worker on purpose, and says so", async () => {
+	for (const read of [{ answered: false, reason: "timeout", transient: true }, { answered: false, reason: "unparseable", transient: false }]) {
+		const h = harness({ env: { PI_BACKENDS: "podman", PI_EGRESS: "0" }, plan: podmanPlan(), listening: true, extra: podmanExtra({ readPodmanInfo: async () => read }) });
+		assert.equal(await h.run(), 1, read.reason);
+		assert.match(h.text(), /✗ podman venue not answering/);
+		assert.match(h.text(), /up stops here although the worker would only retry this per job: it will not install units for a Podman it could not see/);
+		assert.equal(h.calls.length, 0, "no podman command without a timeout runs after it");
+	}
 });
 
 test("M32: the gate judges the worker's own ids: as root, up refuses exactly as the worker's boot does", async () => {
@@ -934,4 +941,85 @@ test("M30: a deployment path the proxy's Volume= cannot carry is reported by up,
 	assert.equal(await h.run(), 0);
 	assert.match(h.text(), /podman stack\s+NOT installed: the egress proxy's Quadlet unit would mount/);
 	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)));
+});
+
+// ---------------------------------------------------------------------------------------------------
+// Review round 2 (issue #430)
+// ---------------------------------------------------------------------------------------------------
+
+const PODMAN_WARN = "time=\"2026-09-27T10:00:00Z\" level=warning msg=\"The cgroupv2 manager is set to systemd but there is no systemd user session available\"\n";
+
+test("E2: a running proxy is read off stdout, so podman's stderr warnings cannot make `true` unequal", async () => {
+	const h = harness({
+		env: { PI_BACKENDS: "podman" },
+		plan: podmanPlan({ "podman inspect": { code: 0, output: "true\n", stderr: PODMAN_WARN } }),
+		listening: true,
+		argv: ["--yes"],
+		files: { "/deploy/egress-allowlist.conf": "x\n" },
+		extra: podmanExtra(),
+	});
+	assert.equal(await h.run(), 0);
+	assert.match(h.text(), /Egress proxy already present under this account's Podman/);
+	// And our own label with a warning beside it is ours.
+	const own = harness({
+		env: { PI_BACKENDS: "podman", PI_EGRESS: "0" },
+		plan: podmanPlan({ "podman container inspect": { code: 0, output: "pi-dispatch-valkey.service\n", stderr: PODMAN_WARN } }),
+		listening: false,
+		argv: ["--yes"],
+		extra: podmanExtra(),
+	});
+	assert.equal(await own.run(), 0);
+	assert.ok(own.calls.some((c) => c.cmd === "systemctl" && c.args[1] === "start"), "installed, not refused as foreign");
+});
+
+test("E3: up installs nothing when podman cannot say whether a container exists", async () => {
+	const h = harness({
+		env: { PI_BACKENDS: "podman", PI_EGRESS: "0" },
+		plan: podmanPlan({ "podman container inspect": { code: 125, stderr: "Error: database is locked\n" } }),
+		listening: false,
+		argv: ["--yes"],
+		extra: podmanExtra(),
+	});
+	assert.equal(await h.run(), 0);
+	assert.match(h.text(), /podman stack\s+NOT installed: podman did not say whether the containers exist/);
+	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)));
+	assert.ok(!h.calls.some((c) => c.cmd === "systemctl"));
+});
+
+test("E8: up with no user manager reachable writes nothing and names the remedy", async () => {
+	const h = harness({ env: { PI_BACKENDS: "podman", PI_EGRESS: "0" }, plan: podmanPlan(), listening: false, argv: ["--yes"], extra: podmanExtra({ noBus: true, euid: 1234 }) });
+	assert.equal(await h.run(), 0);
+	assert.match(h.text(), /as under `sudo -iu op`/);
+	assert.match(h.text(), /XDG_RUNTIME_DIR=\/run\/user\/1234/);
+	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)), "no file left behind that nothing loaded");
+	assert.ok(!h.calls.some((c) => c.cmd === "systemctl"));
+});
+
+test("E6/R31: the .env is read with the platform's loader, and off Linux a line it reads differently never stops up", async () => {
+	const file = { "/deploy/.env": "export PI_BACKENDS=podman\n" };
+	const linux = harness({ env: {}, plan: green, files: file });
+	assert.equal(await linux.run(), 1, "systemd ignores `export`: which venue the service runs is unknown");
+	// The macOS wrapper sources the file, so `export` IS the assignment there: the podman venue, refused on this host.
+	const mac = harness({ env: {}, platform: "darwin", plan: green, files: file, extra: podmanExtra() });
+	await mac.run();
+	assert.match(mac.text(), /the podman venue runs only on Linux/);
+	// A line that loader cannot read off Linux: noted, and up goes on with the shell's venue.
+	const odd = harness({ env: {}, platform: "darwin", plan: green, listening: true, files: { "/deploy/.env": "PI_BACKENDS =podman\n" } });
+	assert.equal(await odd.run(), 0);
+	assert.match(odd.text(), /off Linux the podman venue refuses this host anyway, so this pass reads the venue from this shell/);
+});
+
+test("nit: an unreadable .env is said, not silently replaced by the shell's venue", async () => {
+	const h = harness({ env: {}, plan: green, listening: true, files: { "/deploy/.env": "x" } });
+	h.deps.fs.readFileSync = (p) => {
+		if (p === "/deploy/.env") throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+		throw new Error(`ENOENT: ${p}`);
+	};
+	await h.run();
+	assert.match(h.text(), /\/deploy\/\.env could not be read \(EACCES: permission denied\), so PI_BACKENDS, PI_EGRESS and PI_EGRESS_PROXY come from this shell alone/);
+});
+
+test("R25: the docker path never asks the passwd database, so an account with no entry and no USER still runs up", async () => {
+	const h = harness({ env: {}, plan: green, listening: true, extra: { userInfoFn: () => { throw new Error("ENOENT: no such user"); } } });
+	assert.equal(await h.run(), 0);
 });

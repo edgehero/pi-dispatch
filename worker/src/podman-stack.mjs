@@ -21,9 +21,9 @@
  * This module decides and describes; it spawns only through the `run` seam it is handed and writes only through the
  * `fs` seam, so `service` and `up` each keep their own spawn helpers and their own tests' fakes.
  */
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DEFAULT_EGRESS_PROXY, egressProxyName } from "./egress.mjs";
-import { envFileHazard, readEnvAssignments } from "./env-file.mjs";
+import { envFileHazard, openQuoteLine, readEnvAssignments } from "./env-file.mjs";
 
 /**
  * The Quadlet files, in the order they are shown and written. `unit` is the service the generator makes of each; the
@@ -43,6 +43,19 @@ export const ALL_QUADLET_FILES = Object.freeze(Object.values(QUADLET_FILES));
 /** The two placeholders the proxy's template carries, and what each becomes (TEMPLATE_PINS in service.mjs pins both). */
 export const PROXY_CONF_PLACEHOLDER = "/opt/pi-dispatch/deploy/egress-proxy.conf";
 export const ALLOWLIST_PLACEHOLDER = "/opt/pi-dispatch/egress-allowlist.conf";
+
+/**
+ * Where the proxy's RULES are mounted from: an account-owned COPY of the package's `egress-proxy.conf`, never the
+ * package file itself (issue #430 review round 2, E1). The mount carries `z`, which relabels the file, and rootless
+ * Podman cannot relabel a file this account does not own: measured on Fedora 44 with the package installed by
+ * `sudo npm i -g` under /usr/local/lib/node_modules, the unit failed with `lsetxattr ... operation not permitted`,
+ * exit 126. A copy under this account's own config directory can always be relabelled, and is written, compared and
+ * forced exactly like the Quadlet files (a planned write, shown before it happens). Not the deployment folder: that
+ * is the operator's and may be shared with another account; this file belongs to the account whose Podman mounts it.
+ */
+export function proxyConfCopyPath(home) {
+	return join(home, ".config", "pi-dispatch", "egress-proxy.conf");
+}
 
 /**
  * Where the user's Quadlet files live. ALWAYS `~/.config/containers/systemd`, deliberately not `$XDG_CONFIG_HOME`
@@ -101,7 +114,7 @@ export function planStack({ components, templatesDir, deployDir, home, fs, readT
 	const picked = [];
 	if (components.valkey) picked.push(QUADLET_FILES.valkeyNetwork, QUADLET_FILES.valkey);
 	if (components.proxy) picked.push(QUADLET_FILES.egressNetwork, QUADLET_FILES.proxy);
-	const conf = join(templatesDir, "egress-proxy.conf");
+	const conf = proxyConfCopyPath(home);
 	const allowlist = join(deployDir, "egress-allowlist.conf");
 	if (components.proxy) {
 		for (const p of [conf, allowlist]) {
@@ -127,16 +140,32 @@ export function planStack({ components, templatesDir, deployDir, home, fs, readT
 			}
 			state = current === text ? "same" : "changed";
 		}
-		return { path, text, unit, state };
+		// `restarts`: the unit a CHANGE to this file must restart. A .container file restarts its own unit; a .network file
+		// restarts nothing, because its unit runs `podman network create --ignore`, which cannot change an existing
+		// network, so restarting the container over it would cost the proxy's per-job networks and apply nothing.
+		return { path, text, unit, state, restarts: file.endsWith(".container") ? unit : null };
 	});
+	if (components.proxy) {
+		// The account-owned copy of the rules (E1), placed before the proxy's unit so it exists when the unit starts.
+		// squid reads it only at start, so a changed copy restarts the proxy, as a changed unit file does.
+		const text = String(readTemplate("egress-proxy.conf"));
+		let state = "new";
+		if (fs.existsSync(conf)) {
+			let current = null;
+			try {
+				current = String(fs.readFileSync(conf, "utf8"));
+			} catch {
+				// Unreadable reads as changed, as for the unit files.
+			}
+			state = current === text ? "same" : "changed";
+		}
+		files.splice(files.length - 1, 0, { path: conf, text, unit: null, state, restarts: QUADLET_FILES.proxy.unit });
+	}
 	const containers = files.filter((f) => f.path.endsWith(".container"));
 	const start = containers.map((f) => f.unit);
-	// A container whose OWN file changed is RESTARTED, not started: `start` on an active unit is a no-op, so a replaced
-	// file would otherwise change nothing until the next reboot while the command said it was done. Only the
-	// .container file counts. A changed .network file cannot change an existing network (its unit runs
-	// `podman network create --ignore`), so restarting the container over it would cost the proxy's per-job networks
-	// and apply nothing.
-	const restart = containers.filter((f) => f.state === "changed").map((f) => f.unit);
+	// A unit whose file changed is RESTARTED, not started: `start` on an active unit is a no-op, so a replaced file
+	// would otherwise change nothing until the next reboot while the command said it was done.
+	const restart = start.filter((u) => files.some((f) => f.state === "changed" && f.restarts === u));
 	const fresh = start.filter((u) => !restart.includes(u));
 	const actions = [];
 	for (const f of files) if (f.state !== "same") actions.push({ kind: "write", path: f.path });
@@ -165,19 +194,50 @@ export function proxyRestartWarning(plan) {
  * that started it from the `PODMAN_SYSTEMD_UNIT` variable the generated unit sets (the auto-update mechanism reads
  * the same label).
  *
- * `runCapture(cmd, args)` resolves `{ code, output }`. A non-zero exit is "no such container". Returns
- * `[{ container, unit, label }]`, empty when nothing would be replaced that is not already ours.
+ * `runQuery(cmd, args)` resolves `{ code, stdout, stderr }`, the two streams SEPARATE (round 2, E2): podman prints
+ * warnings on stderr on an ordinary account ("cgroupv2 manager is set to systemd but there is no systemd user session
+ * available", "/ is not a shared mount"), and a merged capture made our own containers read as foreign. Only stdout
+ * is the label.
+ *
+ * FAILS CLOSED (round 2, E3). podman exits 125 for a container that does not exist AND for a store it cannot open
+ * ("database is locked"), so a non-zero exit is "absent" only when stderr says no such container or object; any other
+ * failure means the state is not known, and a caller must not run a `--replace` into it.
+ *
+ * Returns `{ found: [{ container, unit, label }], unknown: [{ container, detail }] }`.
  */
-export async function foreignContainers(plan, runCapture) {
+export async function foreignContainers(plan, runQuery) {
 	const found = [];
+	const unknown = [];
 	for (const q of [QUADLET_FILES.valkey, QUADLET_FILES.proxy]) {
 		if (!plan.start.includes(q.unit)) continue;
-		const res = await runCapture("podman", ["container", "inspect", "--format", '{{index .Config.Labels "PODMAN_SYSTEMD_UNIT"}}', q.container]);
-		if (res.code !== 0) continue;
-		const label = String(res.output ?? "").trim();
-		if (label !== q.unit) found.push({ container: q.container, unit: q.unit, label });
+		const res = await runQuery("podman", ["container", "inspect", "--format", '{{index .Config.Labels "PODMAN_SYSTEMD_UNIT"}}', q.container]);
+		if (res.code === 0) {
+			const label = String(res.stdout ?? "").trim();
+			if (label !== q.unit) found.push({ container: q.container, unit: q.unit, label });
+			continue;
+		}
+		if (res.code !== null && /no such (container|object)/i.test(String(res.stderr ?? ""))) continue;
+		unknown.push({ container: q.container, detail: res.code === null ? "podman could not be run" : `podman container inspect exited ${res.code} without saying the container does not exist` });
 	}
-	return found;
+	return { found, unknown };
+}
+
+/** The refusal for containers whose state could not be read. Not forceable: `--replace` into an unknown is a guess. */
+export function unknownContainerRefusal(unknown) {
+	return `whether ${unknown.map((u) => u.container).join(" and ")} already ${unknown.length === 1 ? "exists" : "exist"} could not be read (${unknown.map((u) => u.detail).join("; ")}). The unit's podman run --replace would remove whatever is there, so nothing is installed until podman answers: check \`podman ps -a\` as this account, then re-run`;
+}
+
+/**
+ * The refusal when this process cannot reach its own user manager (round 2, E8, measured). `sudo -iu <account>` is the
+ * natural way to act as a dedicated account and gives neither XDG_RUNTIME_DIR nor a session bus, so every
+ * `systemctl --user` fails with "Failed to connect to user scope bus"; checked BEFORE anything is written, so a
+ * refused run leaves no Quadlet file behind that nothing loaded. `null` when either is set.
+ */
+export function userBusRefusal({ env, user, euid }) {
+	// env-internal XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: how systemctl --user finds the user manager; set by a login.
+	if (env?.XDG_RUNTIME_DIR || env?.DBUS_SESSION_BUS_ADDRESS) return null;
+	const uid = Number.isInteger(euid) ? euid : "<uid>";
+	return `this shell has no user manager to talk to (neither XDG_RUNTIME_DIR nor DBUS_SESSION_BUS_ADDRESS is set, as under \`sudo -iu ${user}\`), so \`systemctl --user\` would fail after the files were written. Run it from a real login as ${user}, or \`machinectl shell ${user}@\`, or, while ${user}'s manager is running (linger on), \`sudo -iu ${user} env XDG_RUNTIME_DIR=/run/user/${uid} pi-dispatch ...\``;
 }
 
 /** The refusal for `foreignContainers`' answer, naming both ways out. */
@@ -199,22 +259,35 @@ export const STACK_KEYS = Object.freeze(["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_
 
 export function readStackKeys(text, { loader = "systemd", path = ".env" } = {}) {
 	const lines = String(text ?? "").split("\n").map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
-	const mention = new RegExp(`(?:^|[^A-Za-z0-9_])(${STACK_KEYS.join("|")})(?![A-Za-z0-9_])`);
-	const exact = new RegExp(`^[ \\t]*(${STACK_KEYS.join("|")})=`);
-	let mentioned = null;
+	// A line TOUCHES a key when the key is its leading word, `export ` allowed: that is where a loader could read an
+	// assignment of it. A key name inside another key's value (`PI_ENV_SETUP=/opt/PI_BACKENDS.sh`) touches nothing.
+	const touches = new RegExp(`^[ \\t]*(?:export[ \\t]+)?(${STACK_KEYS.join("|")})(?![A-Za-z0-9_])`);
+	// `export K=v` is an assignment only to a loader that SOURCES the file (the macOS wrapper); systemd ignores it.
+	const exact = new RegExp(`^[ \\t]*${loader === "shell" ? "(?:export[ \\t]+)?" : ""}(${STACK_KEYS.join("|")})=`);
+	// A `#` line is a comment to every loader. A `;` line (a comment to systemd's EnvironmentFile=) needs no rule of its
+	// own: its leading word is `;`, never a key, so it touches nothing and is not refused (the round 2 nit).
+	const comment = /^[ \t]*#/;
+	let touched = null;
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
-		if (/^[ \t]*#/.test(line)) continue;
-		const m = mention.exec(line);
+		if (comment.test(line)) continue;
+		const m = touches.exec(line);
 		if (!m) continue;
-		mentioned ??= { key: m[1], line: i + 1 };
+		touched ??= { key: m[1], line: i + 1 };
 		if (!exact.test(line)) {
-			return { error: `${path} line ${i + 1} mentions ${m[1]} in a form other than a plain ${m[1]}=value line, which the loaders do not agree on (systemd sets \`${m[1]} =x\` and ignores \`export ${m[1]}=x\`; the shells do the opposite). Whether this deployment runs the podman venue is therefore unknown: write it as a plain ${m[1]}=value line` };
+			return { error: `${path} line ${i + 1} assigns ${m[1]} in a form other than a plain ${m[1]}=value line, which the loaders do not agree on (systemd sets \`${m[1]} =x\` and ignores \`export ${m[1]}=x\`; the shells do the opposite). Whether this deployment runs the podman venue is therefore unknown: write it as a plain ${m[1]}=value line` };
 		}
 	}
-	if (mentioned && envFileHazard(text, { loader }) !== null) {
-		const at = envFileHazard(text, { loader }).line;
-		return { error: `${path} line ${at} is one this command cannot read (an open quote, a continuation, or a line that runs), and the file assigns ${mentioned.key}, so what the service reads for it is unknown. Fix that line first` };
+	if (touched) {
+		// A value that OPENS with a quote not closed on its line continues across lines in systemd's parser too
+		// (round 2, E4: systemd's test-env-file.c, env_file_6), so a key line below it may be part of that value. The
+		// general reader models systemd as never continuing a quote, which is right for a quote opened mid-value and
+		// wrong for this one, so the venue decision refuses the file rather than trusting it.
+		const open = loader === "cmd" ? null : openQuoteLine(text);
+		const hazard = open ?? envFileHazard(text, { loader })?.line ?? null;
+		if (hazard !== null) {
+			return { error: `${path} line ${hazard} is one this command cannot read (a quoted value that continues onto the next line, a continuation, or a line that runs), and the file assigns ${touched.key}, so what the service reads for it is unknown. Fix that line first` };
+		}
 	}
 	const found = readEnvAssignments(text, STACK_KEYS, { loader });
 	const keys = {};
@@ -226,7 +299,6 @@ export function readStackKeys(text, { loader = "systemd", path = ".env" } = {}) 
 	}
 	return { keys };
 }
-
 
 /** The shown form of one action. `applyStack` runs the same objects these lines were made from. */
 export function describeAction(action) {
@@ -242,7 +314,7 @@ export async function applyStack(plan, { fs, run }) {
 	for (const action of plan.actions) {
 		if (action.kind === "write") {
 			try {
-				fs.mkdirSync(plan.dir, { recursive: true });
+				fs.mkdirSync(dirname(action.path), { recursive: true });
 				fs.writeFileSync(action.path, byPath.get(action.path).text);
 			} catch (err) {
 				return { ok: false, failed: describeAction(action), code: null, message: err?.message };

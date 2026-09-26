@@ -4,7 +4,8 @@
 #
 # Installed by `pi-dispatch service install` (user scope, with podman in PI_BACKENDS and PI_EGRESS armed) and by
 # `pi-dispatch up`. Unlike the Valkey unit this one is RENDERED: the two /opt/pi-dispatch paths below are
-# placeholders, replaced with the package's own shipped egress-proxy.conf and with the deployment folder's
+# placeholders, replaced with an account-owned copy of the package's egress-proxy.conf (written beside this account's
+# config, because `z` cannot relabel a root-owned package file: measured, exit 126) and with the deployment folder's
 # egress-allowlist.conf. Never `systemctl --user enable` it (a generated unit refuses that); the [Install] section is
 # read by the generator itself.
 #
@@ -12,6 +13,9 @@
 # --rm`, so `systemctl --user restart` makes a NEW container, and the per-job `--internal` networks the worker had
 # connected to the old one are gone from it. A job started afterwards connects the new proxy at its start and is
 # fine; a job already running when the proxy restarts has lost its only route out for the rest of that run.
+#
+# A STOP TAKES 10 s: squid does not exit on SIGTERM, so systemd waits out podman's stop timeout, kills it, and the
+# unit ends `failed` with exit 137 (measured). Harmless; `pi-dispatch service uninstall` clears the failed state.
 
 [Unit]
 Description=pi-dispatch egress allowlist proxy (rootless Podman, Quadlet)

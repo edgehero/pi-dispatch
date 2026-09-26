@@ -40,8 +40,8 @@ import { PODMAN_BOOT_REFUSING_CAUSES, makePodmanInfoReader, decidePodmanJobUser,
 import { venuesOf } from "./backends.mjs";
 import { logsDirPath, settingsFilePath } from "./config.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed as egressArmedFn, egressProxyName } from "./egress.mjs";
-import { envKeyIsBlank, updateEnvFile } from "./env-file.mjs";
-import { STACK_KEYS, applyStack, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, readLinger, readStackKeys, stackComponents } from "./podman-stack.mjs";
+import { envKeyIsBlank, envValueShown, updateEnvFile } from "./env-file.mjs";
+import { STACK_KEYS, applyStack, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal } from "./podman-stack.mjs";
 
 // The shipped Quadlet templates, module-relative like service.mjs's: worker/deploy in a checkout, <pkg>/deploy under npm.
 const TEMPLATES_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "deploy");
@@ -166,6 +166,7 @@ export async function runUp(argv = [], deps = {}) {
 		// it. Resolved LAZILY (`userName` below), never as a default here: `userInfo()` throws for a uid with no passwd
 		// entry, and the docker path, which never asks, must not die of it.
 		user,
+		userInfoFn = userInfo,
 		templatesDir = TEMPLATES_DIR,
 		// The shipped Quadlet templates are the package's files, read for real even where `fs` is a test's fake of the
 		// deployment folder; injectable so a test can hand in its own.
@@ -176,21 +177,21 @@ export async function runUp(argv = [], deps = {}) {
 	const yes = argv.includes("--yes");
 	const summary = [];
 	// env-internal USER: the login running `up`, only ever read on the podman path (see the `user` seam above).
-	const userName = () => user ?? (env.USER || userInfo().username);
+	const userName = () => user ?? (env.USER || userInfoFn().username);
 
 	// The venue keys, from the same place `service install` reads them (issue #430 review, D2). Nothing loads `.env`
 	// into a process, so `up` used to decide the venue from this shell alone: an operator who followed the docs and put
-	// PI_BACKENDS=podman in `.env` got the docker pass, and the service they installed next got podman. THIS SHELL WINS
-	// where it sets a key (the same precedence the doctor layering below uses, and what the wizard relies on when it
-	// runs `up` with PI_BACKENDS=podman before init has written `.env`); `.env` fills the keys the shell leaves unset; a
-	// disagreement is printed, because the service will run the file's value. A `.env` line touching one of these keys
-	// that the loaders read differently stops `up` before anything runs, as `service install` refuses.
-	const venue = deploymentVenueEnv({ env, fs, envPath: join(cwd, ".env") });
+	// PI_BACKENDS=podman in `.env` got the docker pass, and the service they installed next got podman. A key the shell
+	// sets and the file does not is taken from the shell (what the wizard relies on when it runs `up` with
+	// PI_BACKENDS=podman before init has written `.env`); `.env` fills the keys the shell leaves unset; a key BOTH set
+	// differently stops `up` (round 2, E5), because the service will run the file's value. A `.env` line touching one
+	// of these keys that the loaders read differently stops `up` before anything runs, as `service install` refuses.
+	const venue = deploymentVenueEnv({ env, fs, envPath: join(cwd, ".env"), platform });
 	if (venue.error) {
 		out(`✗ ${venue.error}\n\nup: cannot tell which venue this deployment runs: fix the above, then re-run \`pi-dispatch up\`.\n`);
 		return 1;
 	}
-	for (const line of venue.disagreements) out(`⚠ ${line}\n`);
+	for (const line of venue.notes) out(`⚠ ${line}\n`);
 	const venueEnv = venue.env;
 
 	// Which runtimes this pass drives (issue #430). With `local` blessed (which the unset default is) everything below
@@ -278,7 +279,7 @@ export async function runUp(argv = [], deps = {}) {
 	let podmanReady = false;
 	if (venues.podmanUsed) {
 		const gate = await podmanGate({ readPodmanInfo, platform, euid, egid, out });
-		if (gate.refused) {
+		if (!gate.ok) {
 			summary.push(["podman", `NOT ready: ${gate.why}`]);
 			if (!dockerUsed) {
 				out("\nup: cannot continue without a usable rootless Podman: fix the above, then re-run `pi-dispatch up`.\n");
@@ -286,7 +287,6 @@ export async function runUp(argv = [], deps = {}) {
 			}
 			out("  the docker steps above are unaffected; the podman steps below are skipped\n");
 		} else {
-			if (!gate.ok) summary.push(["podman", `not decided yet: ${gate.why}`]);
 			podmanReady = true;
 			await podmanImageStep({ spawn, out, yes, prompt, summary });
 		}
@@ -502,7 +502,7 @@ export async function runUp(argv = [], deps = {}) {
 	// installer `pi-dispatch service install` uses (issue #430). After init for the reason (e2) gives: the proxy mounts
 	// the allowlist init scaffolds.
 	if (podmanReady) {
-		await podmanStackStep({ env: venueEnv, venues, spawn, out, yes, prompt, summary, fs, probeTcp, cwd, home, user: userName(), templatesDir, readTemplate, mkdir });
+		await podmanStackStep({ env: venueEnv, venues, spawn, out, yes, prompt, summary, fs, probeTcp, cwd, home, user: userName(), euid, templatesDir, readTemplate, mkdir });
 	}
 
 	// (f) doctor — always, verbatim: up converges what it can, doctor is the judge of what remains
@@ -566,34 +566,48 @@ Next:
  * `{ error }`. `env` is the whole environment with the file's keys filled in; `fromFile` is only what the file
  * supplied, for doctor's layering; `disagreements` names each key both set differently.
  */
-function deploymentVenueEnv({ env, fs, envPath }) {
+function deploymentVenueEnv({ env, fs, envPath, platform }) {
 	let keys = {};
+	const notes = [];
+	// The loader of the file on THIS platform, as service.mjs reads it (round 2, E6): systemd's EnvironmentFile= on
+	// Linux, the sh wrapper on macOS, the cmd wrapper on Windows. Off Linux the venue refuses the host anyway, so a
+	// line that platform's loader reads differently is noted and never stops `up`.
+	const linux = platform === "linux";
+	const loader = linux ? "systemd" : platform === "darwin" ? "shell" : "cmd";
 	if (fs.existsSync(envPath)) {
 		let text = null;
 		try {
 			text = String(fs.readFileSync(envPath, "utf8"));
-		} catch {
-			// Unreadable: the later .env steps say so in their own words; the venue then comes from the shell alone.
+		} catch (err) {
+			// Said rather than silent (round 2 nit): the venue then comes from this shell alone.
+			notes.push(`${envPath} could not be read (${err?.message}), so PI_BACKENDS, PI_EGRESS and PI_EGRESS_PROXY come from this shell alone`);
 		}
 		if (text !== null) {
-			const read = readStackKeys(text, { loader: "systemd", path: envPath });
-			if (read.error) return { error: read.error };
-			keys = read.keys;
+			const read = readStackKeys(text, { loader, path: envPath });
+			if (read.error && linux) return { error: read.error };
+			if (read.error) notes.push(`${read.error}; off Linux the podman venue refuses this host anyway, so this pass reads the venue from this shell`);
+			else keys = read.keys;
 		}
 	}
 	const merged = { ...env };
 	const fromFile = {};
-	const disagreements = [];
+	const conflicts = [];
 	for (const key of STACK_KEYS) {
 		if (!Object.hasOwn(keys, key)) continue;
 		if (typeof env[key] === "string") {
-			if (env[key] !== keys[key]) disagreements.push(`${key} is ${JSON.stringify(env[key])} in this shell and ${JSON.stringify(keys[key])} in ${envPath}: this pass uses the shell's, and the service will run the file's`);
+			if (env[key] !== keys[key]) conflicts.push(`${key} is ${envValueShown(env[key])} in this shell and ${envValueShown(keys[key])} in ${envPath}`);
 			continue;
 		}
 		merged[key] = keys[key];
 		fromFile[key] = keys[key];
 	}
-	return { env: merged, fromFile, disagreements };
+	// A KNOWN disagreement is a refusal (round 2, E5), not a warning: this pass would stand up one venue's stack and the
+	// service installed next would run the other. The file is what the service runs, so it is the one to change unless
+	// the shell's value was a one-off.
+	if (conflicts.length > 0) {
+		return { error: `${conflicts.join("; ")}. up would drive the shell's venue while the service runs the file's. Make them agree: change ${envPath} (what the service reads), or unset the key in this shell` };
+	}
+	return { env: merged, fromFile, notes };
 }
 
 /**
@@ -613,17 +627,19 @@ async function podmanGate({ readPodmanInfo, platform, euid, egid, out }) {
 		out(`✓ rootless Podman answering (podman jobs run as ${decision.user}, with --userns=keep-id)\n`);
 		return { ok: true };
 	}
-	// Parity with the worker's BOOT (issue #430 review, D7): only the causes that stop a worker booting stop `up`. A
-	// podman info that timed out, or one nothing could read, is a verdict the worker defers to each job rather than
-	// refusing at boot, so `up` warns and carries on; the image and stack steps then answer for themselves.
+	// The worker's boot-refusing causes stop `up` in the worker's own words. `up` is DELIBERATELY STRICTER than the
+	// worker on the rest (round 2, E7, which reverses round 1's D7): a podman info that timed out or that nothing could
+	// read is a per-job retry at the worker, but `up` is about to install units and run podman commands that have no
+	// timeout of their own, for a Podman it could not see. A wedged podman would hang the pass, and a REMOTE podman
+	// whose info merely timed out would get local Quadlet units. So only an answered, usable info continues.
 	if (decision.mode === "unmappable" && PODMAN_BOOT_REFUSING_CAUSES.has(decision.cause)) {
 		const why = podmanJobUserRefusal(decision);
 		out(`✗ podman venue not usable here\n    → ${why}\n`);
-		return { ok: false, refused: true, why };
+		return { ok: false, why };
 	}
-	const why = decision.mode === "unmappable" ? podmanJobUserRefusal(decision) : `podman info did not answer (${decision.reason}); check that \`podman info --format json\` works as this account.`;
-	out(`⚠ podman venue not decided yet (the worker would retry this, not refuse it at boot)\n    → ${why}\n`);
-	return { ok: false, refused: false, why };
+	const why = `${decision.mode === "unmappable" ? podmanJobUserRefusal(decision) : `podman info did not answer (${decision.reason}).`} up stops here although the worker would only retry this per job: it will not install units for a Podman it could not see. Check that \`podman info --format json\` answers as this account, then re-run.`;
+	out(`✗ podman venue not answering\n    → ${why}\n`);
+	return { ok: false, why };
 }
 
 /** The default job image into this account's Podman store, mirroring the docker step (b) line for line. */
@@ -658,13 +674,13 @@ async function podmanImageStep({ spawn, out, yes, prompt, summary }) {
  * alone, a proxy that exists is left alone), then plans the Quadlet files with `planStack`, shows `plan.actions`, and on
  * consent hands those same objects to `applyStack`: what runs is literally what was shown.
  */
-async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, fs, probeTcp, cwd, home, user, templatesDir, readTemplate, mkdir }) {
+async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, fs, probeTcp, cwd, home, user, euid, templatesDir, readTemplate, mkdir }) {
 	const armed = egressArmedFn(env);
 	let includeValkey = false;
 	if (!venues.localUsed) {
 		if (await probeTcp("127.0.0.1", 6379)) {
-			const ps = await runCmdCapture(spawn, "podman", ["ps", "--filter", "name=pi-dispatch-valkey", "--format", "{{.Names}}"]);
-			const ours = ps.code === 0 && ps.output.split("\n").map((l) => l.trim()).includes("pi-dispatch-valkey");
+			const ps = await runCmdQuery(spawn, "podman", ["ps", "--filter", "name=pi-dispatch-valkey", "--format", "{{.Names}}"]);
+			const ours = ps.code === 0 && ps.stdout.split("\n").map((l) => l.trim()).includes("pi-dispatch-valkey");
 			out(`\n✓ something is listening on 6379, assuming your Valkey${ours ? " (it is the pi-dispatch-valkey container)" : ""}\n`);
 			summary.push(["valkey", ours ? "container pi-dispatch-valkey already running" : "port 6379 already has a listener, left alone"]);
 		} else {
@@ -677,8 +693,9 @@ async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, 
 		// RUNNING, read off the output: `podman inspect` exits 0 for an EXITED container too and prints `false`
 		// (measured), so the exit code alone called a stopped hand-started proxy "present" and offered nothing, which is
 		// exactly the upgrade this step exists for. A stopped one is offered the unit, under the foreign-container rule.
-		const inspect = await runCmdCapture(spawn, "podman", ["inspect", "--format={{.State.Running}}", DEFAULT_EGRESS_PROXY]);
-		if (inspect.code === 0 && inspect.output.trim() === "true") {
+		// stdout ALONE (round 2, E2): podman's stderr warnings on an ordinary account would otherwise make `true` unequal.
+		const inspect = await runCmdQuery(spawn, "podman", ["inspect", "--format={{.State.Running}}", DEFAULT_EGRESS_PROXY]);
+		if (inspect.code === 0 && inspect.stdout.trim() === "true") {
 			out(`\n✓ Egress proxy already present under this account's Podman (${DEFAULT_EGRESS_PROXY})\n`);
 			summary.push(["egress (podman)", "proxy already present, left untouched"]);
 			components.proxy = false;
@@ -704,7 +721,21 @@ async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, 
 	}
 	// The shared installer's foreign-container rule (D3): a container of a unit's name that the unit does not own would
 	// be removed by the unit's `podman run --replace`. up has no --force, so it names both ways out and installs nothing.
-	const foreign = await foreignContainers(plan, (cmd, args) => runCmdCapture(spawn, cmd, args));
+	// No user manager to talk to (`sudo -iu`, measured): said before anything is written (round 2, E8).
+	const bus = plan.actions.length > 0 ? userBusRefusal({ env, user, euid }) : null;
+	if (bus) {
+		out(`\n✗ ${bus}\n`);
+		summary.push(["podman stack", "NOT installed: no user manager reachable from this shell"]);
+		return;
+	}
+	const containers = await foreignContainers(plan, (cmd, args) => runCmdQuery(spawn, cmd, args));
+	if (containers.unknown.length > 0) {
+		const why = unknownContainerRefusal(containers.unknown);
+		out(`\n✗ ${why}\n`);
+		summary.push(["podman stack", "NOT installed: podman did not say whether the containers exist"]);
+		return;
+	}
+	const foreign = containers.found;
 	if (foreign.length > 0) {
 		const why = foreignContainerRefusal(foreign, { forceHint: "run `pi-dispatch service install --force`, which replaces it and says so" });
 		out(`\n✗ ${why}\n`);
@@ -732,6 +763,7 @@ async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, 
 		return;
 	}
 	out(`✓ started ${plan.start.join(" ")}\n`);
+	// `up` never restarts (it refuses a changed file above), so everything it started it started fresh.
 	summary.push([row, `installed as Quadlet units and started (${plan.start.join(", ")})`]);
 	out(lingerNote(await readLinger(user, (cmd, args) => runCmdCapture(spawn, cmd, args)), user));
 }
@@ -789,6 +821,28 @@ function runStreamed(spawn, cmd, args, out) {
 		child.stderr?.on("data", (d) => out(String(d)));
 		child.on("error", () => resolve(null));
 		child.on("close", (code) => resolve(code));
+	});
+}
+
+/**
+ * Like runCmdCapture with the streams SEPARATE, for a podman query whose answer is stdout alone (round 2, E2): podman
+ * prints warnings on stderr on ordinary accounts, and a merged capture made `true` and our own label unequal.
+ */
+function runCmdQuery(spawn, cmd, args) {
+	return new Promise((resolve) => {
+		let child;
+		try {
+			child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+		} catch {
+			resolve({ code: null, stdout: "", stderr: "" });
+			return;
+		}
+		let stdout = "";
+		let stderr = "";
+		child.stdout?.on("data", (d) => (stdout += d));
+		child.stderr?.on("data", (d) => (stderr += d));
+		child.on("error", () => resolve({ code: null, stdout, stderr }));
+		child.on("close", (code) => resolve({ code, stdout, stderr }));
 	});
 }
 

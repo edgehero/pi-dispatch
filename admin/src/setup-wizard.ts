@@ -42,7 +42,10 @@ import { readQueueState, resolvePaths, writeTriggers } from "./read-model.mjs";
 // The worker's own answers to "which venues does this list bless" and "set this .env key unless the operator already
 // did" (issue #430): one parse and one never-clobber writer, never a second copy of either in the admin.
 import { venuesOf } from "@edgehero/pi-dispatch/backends";
-import { readEnvAssignments, updateEnvFile } from "@edgehero/pi-dispatch/env-file";
+import { updateEnvFile } from "@edgehero/pi-dispatch/env-file";
+// The venue keys read exactly as `service install` and `up` read them (issue #430 review round 2, E4): the general
+// reader takes a line inside a quoted value that systemd continues for an assignment, and this one refuses that file.
+import { readStackKeys } from "@edgehero/pi-dispatch/podman-stack";
 // buildTriggerEntry is index.ts's on x run matrix -- the SAME builder the dialogs and the LLM tool use,
 // so the wizard's first trigger has exactly their shape. The import is circular on paper (index.ts
 // lazy-imports this module from its /dispatch handler and statically imports registerNudge below), but
@@ -368,14 +371,28 @@ const USE_PODMAN = "Use rootless Podman instead";
 function podmanPreferred(env: any, dir: string, fs: any): boolean {
   const fromEnv = venuesOf({ PI_BACKENDS: env?.PI_BACKENDS });
   if (fromEnv.podmanUsed && !fromEnv.localUsed) return true;
+  const file = deploymentBackends(dir, fs);
+  if (!("value" in file)) return false;
+  const fromFile = venuesOf({ PI_BACKENDS: file.value });
+  return fromFile.podmanUsed && !fromFile.localUsed;
+}
+
+/**
+ * What the deployment's `.env` says about PI_BACKENDS, read as `service install` reads it: `{ absent: true }` when the
+ * file or the key is not there, `{ value }`, or `{ unreadable }` with the reader's reason.
+ */
+function deploymentBackends(dir: string, fs: any): { absent: true } | { value: string } | { unreadable: string } {
+  const envPath = join(dir, ".env");
+  let text: string;
   try {
-    const found: any = readEnvAssignments(String(fs.readFileSync(join(dir, ".env"), "utf8")), ["PI_BACKENDS"], { loader: "systemd" });
-    const value = found.PI_BACKENDS?.plain ? found.PI_BACKENDS.value : undefined;
-    const fromFile = venuesOf({ PI_BACKENDS: value });
-    return fromFile.podmanUsed && !fromFile.localUsed;
-  } catch {
-    return false;
+    if (!fs.existsSync(envPath)) return { absent: true };
+    text = String(fs.readFileSync(envPath, "utf8"));
+  } catch (err: any) {
+    return { unreadable: `${envPath} could not be read: ${err?.message ?? err}` };
   }
+  const read: any = readStackKeys(text, { loader: "systemd", path: envPath });
+  if (read.error) return { unreadable: read.error };
+  return typeof read.keys.PI_BACKENDS === "string" ? { value: read.keys.PI_BACKENDS } : { absent: true };
 }
 
 /**
@@ -619,6 +636,24 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
     if (chosen === "podman" && !(await ensurePodman(ui, notify, { platform, probePodmanFn }))) return;
     runtime = chosen;
   }
+  // The podman answer meets a deployment whose `.env` already says otherwise (round 2, E5): a re-run over a docker
+  // deployment, where the operator picked rootless Podman at the docker gate. Setup never overwrites a key the operator
+  // set, so going on would run `up` for podman while the service it installs next reads `local` from the file. It stops
+  // here, before anything is downloaded, with the one edit that resolves it.
+  const fileBackends = deploymentBackends(dir, fs);
+  if (runtime === "podman") {
+    if ("unreadable" in fileBackends) {
+      notify?.(`${fileBackends.unreadable}. Setup stops before anything is installed: fix that line (a plain PI_BACKENDS=podman), then re-run /dispatch setup`, "error");
+      return;
+    }
+    if ("value" in fileBackends && !venuesOf({ PI_BACKENDS: fileBackends.value }).podmanUsed) {
+      notify?.(
+        `${join(dir, ".env")} sets PI_BACKENDS=${fileBackends.value}, which does not list podman, and setup never overwrites a key you set. Change it to PI_BACKENDS=podman (or add podman to the list), then re-run /dispatch setup. Nothing was installed`,
+        "error",
+      );
+      return;
+    }
+  }
 
   // ── (4) install the pinned runtime ─────────────────────────────────────────────────────────────
   if (readInstalledVersion(fs, runtimeDir) === RUNTIME_VERSION) {
@@ -666,11 +701,20 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   // run). The wizard's confirm approves STARTING the pass; auto-accepting the child's gates would
   // collapse per-action consent into one blanket yes the operator never gave.
   //
-  // On podman, `up` runs with PI_BACKENDS=podman in ITS environment, because `up` reads its own environment and the
-  // `.env` line below does not exist yet: init, inside this very `up`, is what scaffolds `.env`. The line is written
-  // afterwards, for the SERVICE, which reads only the file.
-  const upEnv = runtime === "podman" && !venuesOf({ PI_BACKENDS: env?.PI_BACKENDS }).podmanUsed ? { ...env, PI_BACKENDS: "podman" } : env;
-  const podmanUpText = `Run in ${dir}:\n  ${upEnv !== env ? "PI_BACKENDS=podman " : ""}${execPath} ${cliPath} up\n\nup shows each podman and systemctl action (the job image, then Valkey and the egress proxy as Quadlet units) and asks y/N before it: nothing is auto-accepted.`;
+  // On podman, `up` decides the venue from its own environment where that sets PI_BACKENDS and from the deployment's
+  // `.env` otherwise, and refuses when the two disagree. So: when `.env` already assigns PI_BACKENDS (it lists podman,
+  // or setup stopped above), `up` gets NO PI_BACKENDS of its own and reads the file, as the service will; when it does
+  // not (a fresh folder, where init inside this very `up` scaffolds `.env`), `up` runs with PI_BACKENDS=podman, and the
+  // line is written into `.env` afterwards for the SERVICE, which reads only the file.
+  const fileAssigns = runtime === "podman" && "value" in fileBackends;
+  const withoutBackends = (e: any) => {
+    const { PI_BACKENDS: _dropped, ...rest } = e ?? {};
+    return rest;
+  };
+  const upAddsBackends = runtime === "podman" && !fileAssigns && !venuesOf({ PI_BACKENDS: env?.PI_BACKENDS }).podmanUsed;
+  const upEnv =
+    runtime !== "podman" ? env : fileAssigns ? (typeof env?.PI_BACKENDS === "string" ? withoutBackends(env) : env) : upAddsBackends ? { ...env, PI_BACKENDS: "podman" } : env;
+  const podmanUpText = `Run in ${dir}:\n  ${upAddsBackends ? "PI_BACKENDS=podman " : ""}${execPath} ${cliPath} up\n\nup shows each podman and systemctl action (the job image, then Valkey and the egress proxy as Quadlet units) and asks y/N before it: nothing is auto-accepted.`;
   const okUp = await ui.confirm(
     "Bring the deployment up",
     runtime === "podman" ? podmanUpText :
@@ -982,9 +1026,10 @@ function recordPodmanVenue(dir: string, fs: any, notify: Notify, platform: strin
       notify?.(`PI_BACKENDS=podman written into ${envPath}: the worker and \`service install\` read the podman venue from there`, "info");
       return;
     }
-    const found: any = readEnvAssignments(String(fs.readFileSync(envPath, "utf8")), ["PI_BACKENDS"], { loader: "systemd" });
-    const value = found.PI_BACKENDS?.plain ? found.PI_BACKENDS.value : undefined;
-    if (!venuesOf({ PI_BACKENDS: value }).podmanUsed) {
+    const file = deploymentBackends(dir, fs);
+    if ("unreadable" in file) {
+      notify?.(`${file.unreadable}. Make it a plain PI_BACKENDS=podman before \`service install\``, "warning");
+    } else if (!venuesOf({ PI_BACKENDS: "value" in file ? file.value : undefined }).podmanUsed) {
       notify?.(`${envPath} already sets PI_BACKENDS to something without podman; left untouched (setup never overwrites a key you set). Add podman to it yourself if this deployment is meant to run there`, "warning");
     }
   } catch (err: any) {

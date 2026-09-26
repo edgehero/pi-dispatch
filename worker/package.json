@@ -45,6 +45,7 @@
     "./exit-code": "./src/exit-code.mjs",
     "./git-hardening": "./src/git-hardening.mjs",
     "./env-file": "./src/env-file.mjs",
+    "./podman-stack": "./src/podman-stack.mjs",
     "./flow-gate": "./src/flow-gate.mjs",
     "./materialize": "./src/materialize.mjs",
     "./open-browser": "./src/open-browser.mjs",

@@ -507,8 +507,13 @@ function quoteSpans(bare, loader) {
 	// PER LOADER, because the two POSIX loaders do different things with the same file, and one answer for
 	// both was wrong for whichever one it was not written for. Measured on systemd 252:
 	//
-	//   a quote does NOT continue across lines. `OTHER='a'b'` reads as `ab'` and the NEXT line is read as an
-	//   ordinary assignment, where every shell swallows it.
+	//   a quote opened MID-value does not continue across lines: `OTHER='a'b'` reads as `ab'` and the NEXT line
+	//   is read as an ordinary assignment, where every shell swallows it. CORRECTED (issue #430 review round 2):
+	//   the earlier wording said no quote continues, and that is wrong for a quote that OPENS the value, which
+	//   systemd's own parser continues across newlines until it closes (test-env-file.c, env_file_6). This scanner
+	//   still models only the mid-value case, so its systemd reading can take a line inside such a value for an
+	//   assignment. `openQuoteLine` below names that shape, and the podman venue's key reader refuses on it; doctor's
+	//   readings through this function do not yet, a known residual.
 	//   a trailing backslash DOES continue, in both.
 	//   a line it cannot parse is IGNORED -- `unset K`, `cat <<EOF`, `if false; then`, `OTHER=${NOPE?boom}`
 	//   and `OTHER=(` are all inert to systemd, and all of them RUN in a sourcing shell.
@@ -711,6 +716,25 @@ export function envValueShown(value) {
 	const v = String(value ?? "");
 	if (!QUOTED_CONTROL.test(v)) return v;
 	return JSON.stringify(v).replace(new RegExp(QUOTED_CONTROL.source, "g"), (c) => "\\u" + c.codePointAt(0).toString(16).padStart(4, "0"));
+}
+
+/**
+ * The first line whose assignment VALUE opens with a quote that the same line does not close, or `null` (issue #430
+ * review round 2). systemd continues such a value onto the following lines until the quote closes, and so do the
+ * shells, so a line below it may be part of that value rather than an assignment. Deliberately simple: a `"` closes
+ * only when not escaped by a backslash, a `'` closes at the next `'`, and nothing else is modelled, because every
+ * caller treats a hit as "cannot vouch" rather than trying to read past it.
+ */
+export function openQuoteLine(text) {
+	const lines = String(text ?? "").split("\n").map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
+	for (let i = 0; i < lines.length; i++) {
+		const m = /^[ \t]*(?:export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*(["'])(.*)$/.exec(lines[i]);
+		if (!m) continue;
+		const [, q, rest] = m;
+		const closed = q === "'" ? rest.includes("'") : /(^|[^\\])(\\\\)*"/.test(rest);
+		if (!closed) return i + 1;
+	}
+	return null;
 }
 
 /**

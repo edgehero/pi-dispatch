@@ -49,7 +49,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { parseBackendList, venuesOf } from "./backends.mjs";
 import { egressArmed } from "./egress.mjs";
-import { ALL_QUADLET_FILES, ALLOWLIST_PLACEHOLDER, PROXY_CONF_PLACEHOLDER, QUADLET_FILES, applyStack, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, proxyRestartWarning, quadletDir, readLinger, readStackKeys, stackComponents, workerUnitDeps } from "./podman-stack.mjs";
+import { ALL_QUADLET_FILES, ALLOWLIST_PLACEHOLDER, PROXY_CONF_PLACEHOLDER, QUADLET_FILES, applyStack, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, proxyConfCopyPath, proxyRestartWarning, quadletDir, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal, workerUnitDeps } from "./podman-stack.mjs";
 
 // src/ is where this module lives in BOTH layouts (worker/src in a checkout,
 // node_modules/@edgehero/pi-dispatch/src under npm). Deploy templates resolve one level up from it
@@ -78,6 +78,10 @@ function resolveReceiverStart() {
  * worker/test/service.test.mjs asserts each one is still present in the real deploy/ file, so an edit
  * to a template that would break the render fails the build instead of shipping a broken `service`.
  */
+// The two worker-template literals a podman render rewrites (issue #430), spelled once for the pin table and the render.
+const WORKER_DESCRIPTION = "Description=pi-dispatch worker (drains the job queue on the host; launches job containers via docker)";
+const WORKER_VALKEY_COMMENT = "# Valkey must be reachable (docker compose -f deploy/docker-compose.yml up -d), but it is a separate\n# unit/container -- not ordered here since it may be remote.\n";
+
 export const TEMPLATE_PINS = {
 	"worker.service": [
 		"ExecStart=/usr/bin/node worker/src/cli.mjs worker", // the WHOLE line → `<execPath> <cliPath> worker` (cli.mjs sits beside this module in src/ in both layouts)
@@ -86,6 +90,8 @@ export const TEMPLATE_PINS = {
 		"\nUser=pi\n", // the DIRECTIVE line (the header comment also says User=pi mid-line, hence the \n anchors): stripped for --user scope; rewritten to the invoking user for --system
 		"WantedBy=multi-user.target", // → default.target in user scope (multi-user.target never runs there)
 		"\nWants=network-online.target\n", // the anchor the podman venue's Wants=/After= on its Quadlet units go after (issue #430), user scope only
+		"Description=pi-dispatch worker (drains the job queue on the host; launches job containers via docker)", // → names rootless podman on a podman deployment (issue #430)
+		"# Valkey must be reachable (docker compose -f deploy/docker-compose.yml up -d), but it is a separate\n# unit/container -- not ordered here since it may be remote.\n", // → says it IS ordered, when the Quadlet Valkey is installed
 		// Byte-for-byte survivors — semantics the render must not lose:
 		"RestartPreventExitStatus=2", // EXIT_POLICY is never restarted (a retry loop is a bill)
 		"StartLimitIntervalSec=60",
@@ -152,7 +158,7 @@ export const TEMPLATE_PINS = {
 	],
 	"pi-dispatch-egress-out.network": ["NetworkName=pi-dispatch-egress-out"],
 	"pi-dispatch-egress-proxy.container": [
-		`Volume=${PROXY_CONF_PLACEHOLDER}:/etc/squid/squid.conf:ro,z`, // → the PACKAGE's shipped egress-proxy.conf (templatesDir), never <deployDir>/deploy, which an npm install does not have
+		`Volume=${PROXY_CONF_PLACEHOLDER}:/etc/squid/squid.conf:ro,z`, // → the account-owned COPY of the package's egress-proxy.conf (~/.config/pi-dispatch/egress-proxy.conf, podman-stack.mjs proxyConfCopyPath), because `z` cannot relabel a root-owned package file (measured)
 		`Volume=${ALLOWLIST_PLACEHOLDER}:/etc/pi-dispatch/allowlist.conf:ro,z`, // → <deployDir>/egress-allowlist.conf, the list `init` scaffolds
 		"ContainerName=pi-dispatch-egress-proxy",
 		"Network=pi-dispatch-egress-out.network",
@@ -554,7 +560,7 @@ function composeEnvSetupExec(setup, argv) {
  * known literals (see TEMPLATE_PINS); everything else — RestartPreventExitStatus=2, the StartLimit
  * crash-loop bound, KillSignal, TimeoutStopSec — passes through byte-for-byte.
  */
-function renderLinuxUnit(ctx, stackUnits = []) {
+function renderLinuxUnit(ctx, stackUnits = [], venues = null) {
 	const template = ctx.which === "receiver" ? "receiver.service" : "worker.service";
 	// The ExecStart line is replaced WHOLE, not path-by-path: the template's script path is relative
 	// to a repo-root WorkingDirectory that only a checkout has. The rendered unit points at absolute
@@ -596,6 +602,15 @@ function renderLinuxUnit(ctx, stackUnits = []) {
 		// ordered after them. Nothing is added when there are none, which keeps every other render byte-identical.
 		const deps = workerUnitDeps(stackUnits);
 		if (deps) unit = unit.replace("\nWants=network-online.target\n", () => `\nWants=network-online.target\n${deps}`);
+		// The template's own words, made true for a podman deployment (round 2 nit): its Description says jobs launch
+		// via docker, and its comment says Valkey is not ordered here. Both anchors are TEMPLATE_PINS.
+		if (venues?.podmanUsed) {
+			const runtime = venues.localUsed ? "docker and rootless podman" : "rootless podman";
+			unit = unit.replace(WORKER_DESCRIPTION, () => `Description=pi-dispatch worker (drains the job queue on the host; launches job containers via ${runtime})`);
+			if (stackUnits.includes(QUADLET_FILES.valkey.unit)) {
+				unit = unit.replace(WORKER_VALKEY_COMMENT, () => "# Valkey is the podman venue's Quadlet unit in this same user manager, so the worker is ordered after it\n# (the Wants=/After= lines `pi-dispatch service install` added below).\n");
+			}
+		}
 	} else {
 		unit = unit.replace(/^User=pi$/m, () => `User=${ctx.user}`);
 	}
@@ -779,7 +794,7 @@ async function podmanStackFor(ctx, venue) {
 	}
 	const plan = planStack({ components, templatesDir: ctx.templatesDir, deployDir: ctx.deployDir, home: ctx.home, fs: ctx.fs });
 	if (plan.error) return { error: plan.error };
-	return { components, plan, notes: components.notes };
+	return { components, plan, notes: components.notes, venues: venue.venues };
 }
 
 async function doRender(ctx) {
@@ -808,7 +823,7 @@ async function doRender(ctx) {
 			if (stack.error) return fail(ctx.err, stack.error);
 		}
 		ctx.out(`# → ${paths.installPath}\n`);
-		ctx.out(renderLinuxUnit(ctx, stack?.plan.start ?? []));
+		ctx.out(renderLinuxUnit(ctx, stack?.plan.start ?? [], stack?.venues ?? null));
 		for (const f of stack?.plan.files ?? []) ctx.out(`\n# → ${f.path} (Quadlet, podman venue)\n${f.text}`);
 		for (const note of stack?.notes ?? []) ctx.out(`# note: ${note}\n`);
 		return 0;
@@ -850,11 +865,16 @@ async function doInstall(ctx) {
 	}
 	if (ctx.scope === "system") return venue.used ? refusePodmanSystemScope(ctx) : installLinuxSystem(ctx, paths);
 	let stack = null;
+	let foreign = [];
 	if (venue.used) {
 		stack = await podmanStackFor(ctx, venue);
 		if (stack.error) return fail(ctx.err, stack.error);
+		// Every stack refusal first, the unit's own among them, so installLinuxUser's unit check never fires alone.
+		const refused = await stackRefusal(ctx, paths, stack);
+		if (refused.error) return fail(ctx.err, refused.error);
+		foreign = refused.foreign;
 	}
-	return installLinuxUser(ctx, paths, stack);
+	return installLinuxUser(ctx, paths, stack, foreign);
 }
 
 async function installDarwin(ctx, paths) {
@@ -895,26 +915,44 @@ async function installDarwin(ctx, paths) {
 	return 0;
 }
 
-async function installLinuxUser(ctx, paths, stack = null) {
+/**
+ * Every reason the podman venue's stack refuses an install, gathered BEFORE anything is written (round 2, E9): the
+ * worker unit existing used to be the only thing said, so an operator re-ran with --force and then met a replaced
+ * container and a restarted proxy nobody had mentioned. `--force` is consent to exactly the list printed here. Three
+ * reasons are not forceable: a missing allowlist, a container whose state could not be read, and no user manager.
+ * Returns `{ error }` or `{ foreign }` (the foreign containers --force will replace, for the warnings).
+ */
+async function stackRefusal(ctx, paths, stack) {
+	const blocking = [];
+	const forceable = [];
+	if (ctx.fs.existsSync(paths.installPath)) forceable.push(`${paths.installPath} already exists (same non-clobber contract as init); --force replaces it`);
+	const changed = stack.plan.files.filter((f) => f.state === "changed");
+	if (changed.length > 0) forceable.push(`${changed.map((f) => f.path).join(", ")} already ${changed.length === 1 ? "exists" : "exist"} with other content than this version renders; --force replaces ${changed.length === 1 ? "it" : "them"} and restarts ${(stack.plan.restart ?? []).join(" ") || "nothing"}${proxyRestartWarning(stack.plan) ? ` (${proxyRestartWarning(stack.plan)})` : ""}`);
+	const allowlist = join(ctx.deployDir, "egress-allowlist.conf");
+	if (stack.components.proxy && !ctx.fs.existsSync(allowlist)) {
+		blocking.push(`the egress policy is on, and ${allowlist} does not exist: a proxy unit mounting a missing file makes Podman create a DIRECTORY there and squid fail confusingly. Run \`pi-dispatch init\` in ${ctx.deployDir} first (it never overwrites), or set PI_EGRESS=0 in .env to opt out of the policy`);
+	}
+	const bus = stack.plan.actions.length > 0 ? userBusRefusal({ env: ctx.env, user: ctx.user, euid: ctx.euid }) : null;
+	if (bus) blocking.push(bus);
+	// A container of the unit's name that the unit does not own would be removed by its `podman run --replace`
+	// (issue #430 review): refused unless --force says to replace it, and then said out loud.
+	const containers = await foreignContainers(stack.plan, (cmd, args) => runQuery(ctx, cmd, args));
+	const foreign = containers.found;
+	if (containers.unknown.length > 0) blocking.push(unknownContainerRefusal(containers.unknown));
+	if (foreign.length > 0) forceable.push(foreignContainerRefusal(foreign, { forceHint: "pass --force to let the Quadlet unit replace it" }));
+	if (blocking.length > 0 || (forceable.length > 0 && !ctx.force)) {
+		const lines = [...blocking, ...(ctx.force ? [] : forceable)];
+		const tail = blocking.length === 0 ? "\n--force accepts every item above at once." : forceable.length > 0 && !ctx.force ? "\nThe first fixed by hand; --force accepts the rest." : "";
+		return { error: `${lines.length === 1 ? lines[0] : `nothing installed, for these reasons:\n${lines.map((l) => `  - ${l}`).join("\n")}`}${lines.length > 1 ? tail : ""}` };
+	}
+	return { foreign };
+}
+
+async function installLinuxUser(ctx, paths, stack = null, foreign = []) {
 	if (ctx.fs.existsSync(paths.installPath) && !ctx.force) {
 		return fail(ctx.err, `${paths.installPath} already exists — pass --force to replace it (same non-clobber contract as init)`);
 	}
 	if (stack) {
-		// Every refusal BEFORE anything is written, so a refused install leaves the host exactly as it was.
-		const changed = stack.plan.files.filter((f) => f.state === "changed");
-		if (changed.length > 0 && !ctx.force) {
-			return fail(ctx.err, `${changed.map((f) => f.path).join(", ")} already ${changed.length === 1 ? "exists" : "exist"} with other content than this version renders. Pass --force to replace ${changed.length === 1 ? "it" : "them"} (same non-clobber contract as the unit itself)`);
-		}
-		const allowlist = join(ctx.deployDir, "egress-allowlist.conf");
-		if (stack.components.proxy && !ctx.fs.existsSync(allowlist)) {
-			return fail(ctx.err, `the egress policy is on, and ${allowlist} does not exist: a proxy unit mounting a missing file makes Podman create a DIRECTORY there and squid fail confusingly. Run \`pi-dispatch init\` in ${ctx.deployDir} first (it never overwrites), or set PI_EGRESS=0 in .env to opt out of the policy`);
-		}
-		// A container of the unit's name that the unit does not own would be removed by its `podman run --replace`
-		// (issue #430 review): refused unless --force says to replace it, and then said out loud.
-		const foreign = await foreignContainers(stack.plan, (cmd, args) => runCapture(ctx, cmd, args));
-		if (foreign.length > 0 && !ctx.force) {
-			return fail(ctx.err, foreignContainerRefusal(foreign, { forceHint: "pass --force to let the Quadlet unit replace it" }));
-		}
 		for (const note of stack.notes) ctx.out(`note: ${note}\n`);
 		for (const f of foreign) {
 			ctx.out(`⚠ --force: ${f.container} is not managed by ${f.unit} and will be REPLACED by it${f.unit === QUADLET_FILES.proxy.unit ? "; every job running right now loses the per-job network it had on that proxy" : ""}\n`);
@@ -935,7 +973,7 @@ async function installLinuxUser(ctx, paths, stack = null) {
 		}
 	}
 	ctx.fs.mkdirSync(dirname(paths.installPath), { recursive: true });
-	ctx.fs.writeFileSync(paths.installPath, renderLinuxUnit(ctx, stack?.plan.start ?? []));
+	ctx.fs.writeFileSync(paths.installPath, renderLinuxUnit(ctx, stack?.plan.start ?? [], stack?.venues ?? null));
 	const reload = await run(ctx, "systemctl", ["--user", "daemon-reload"]);
 	if (reload === null) return fail(ctx.err, `systemctl not found — is this a systemd host? The unit is written at ${paths.installPath}`);
 	const enable = await run(ctx, "systemctl", ["--user", "enable", "--now", paths.name]);
@@ -1063,7 +1101,14 @@ async function removeQuadlets(ctx, quadlets) {
 	const units = quadlets.filter((q) => q.file.endsWith(".container")).map((q) => q.unit);
 	if (units.length > 0) await run(ctx, "systemctl", ["--user", "stop", ...units]); // already-stopped is fine
 	for (const q of quadlets) ctx.fs.unlinkSync(join(quadletDir(ctx.home), q.file));
+	// The account-owned copy of the proxy's rules (E1) goes with its unit.
+	const conf = proxyConfCopyPath(ctx.home);
+	if (ctx.fs.existsSync(conf)) ctx.fs.unlinkSync(conf);
 	await run(ctx, "systemctl", ["--user", "daemon-reload"]);
+	// squid ignores SIGTERM, so its stop takes systemd's 10 s and ends in SIGKILL, exit 137, and the unit is left
+	// `failed` (measured): after the file is gone `systemctl --user list-units` would show a not-found failed unit
+	// forever. reset-failed clears it; a unit that is not failed is fine.
+	if (units.length > 0) await run(ctx, "systemctl", ["--user", "reset-failed", ...units]);
 	ctx.out(`removed the podman venue's Quadlet units (${quadlets.map((q) => q.file).join(", ")}); the pi-dispatch-valkey-data volume and the networks are kept, remove them with podman if you mean to\n`);
 }
 
@@ -1276,6 +1321,28 @@ function run(ctx, cmd, args) {
 		}
 		child.on("error", () => resolvePromise(null));
 		child.on("close", (code) => resolvePromise(code));
+	});
+}
+
+/**
+ * Like runCapture() with the two streams SEPARATE, for a query whose answer is stdout alone (round 2, E2): podman
+ * prints warnings on stderr on ordinary accounts, and merged into the answer they made a label read as someone else's.
+ */
+function runQuery(ctx, cmd, args) {
+	return new Promise((resolvePromise) => {
+		let child;
+		try {
+			child = ctx.spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+		} catch {
+			resolvePromise({ code: null, stdout: "", stderr: "" });
+			return;
+		}
+		let stdout = "";
+		let stderr = "";
+		child.stdout?.on("data", (d) => (stdout += d));
+		child.stderr?.on("data", (d) => (stderr += d));
+		child.on("error", () => resolvePromise({ code: null, stdout, stderr }));
+		child.on("close", (code) => resolvePromise({ code, stdout, stderr }));
 	});
 }
 

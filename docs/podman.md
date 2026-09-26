@@ -331,7 +331,11 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
 1. **A dedicated account with subordinate ids.** Rootless Podman needs a range in `/etc/subuid` and `/etc/subgid` for
    the account (`grep <account> /etc/subuid /etc/subgid`). `useradd` adds one for an ordinary account and none for a
    `--system` one; where it is missing, `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 <account>`
-   and then `podman system migrate`. The worker must not run as root: the venue refuses it.
+   and then `podman system migrate`. The worker must not run as root: the venue refuses it. Act as the account through a
+   real login (or `machinectl shell <account>@`), not `sudo -iu <account>`: that gives no `XDG_RUNTIME_DIR` and no
+   user bus, so every `systemctl --user` fails (measured), and `up` and `service install` refuse to write the stack's
+   units there, naming this remedy. While the account's manager runs (linger on),
+   `sudo -iu <account> env XDG_RUNTIME_DIR=/run/user/<uid> pi-dispatch ...` works too.
 2. **Linger**, so the account's runtime directory and its systemd user instance exist without anyone logged in:
    `sudo loginctl enable-linger <account>`. Measured: with linger, a system unit running as that account
    (`deploy/worker.service` with `User=` set to it) runs `podman` with or without `XDG_RUNTIME_DIR` in its
@@ -387,17 +391,27 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    egress policy is armed `pi-dispatch-egress-out.network` and `pi-dispatch-egress-proxy.container`), runs
    `systemctl --user daemon-reload`, and starts `pi-dispatch-valkey.service` and `pi-dispatch-egress-proxy.service`.
    `up` shows every one of those lines before it asks, and `--yes` runs exactly those lines. Both read `PI_BACKENDS`,
-   `PI_EGRESS` and `PI_EGRESS_PROXY` from `.env`. `up` lets your shell win where it sets one of the three (and says so
-   when the two disagree, since the service runs the file's value); `service install` reads the file alone. A line
-   touching one of them that the loaders read differently (`PI_BACKENDS =podman`, `export PI_BACKENDS=podman`, a `$`
-   in the value) stops both: write it as a plain `PI_BACKENDS=podman`.
+   `PI_EGRESS` and `PI_EGRESS_PROXY` from `.env`. `up` also takes a key your shell sets that `.env` does not, and
+   REFUSES when the two set one differently, naming both, because it would stand up one venue while the service ran
+   the other; `service install` reads the file alone. A line touching one of them that the loaders read differently
+   (`PI_BACKENDS =podman`, `export PI_BACKENDS=podman`, a `$` in the value, or a key line under a quoted value that
+   opens on an earlier line and continues) stops both: write it as a plain `PI_BACKENDS=podman`.
+
+   The proxy's rules are mounted from `~/.config/pi-dispatch/egress-proxy.conf`, a copy of the package's own
+   `egress-proxy.conf` that the installer writes (shown, compared and forced like the unit files). Never the package
+   file itself: the mount's `z` relabels what it mounts, and measured on Fedora 44 with the package installed by
+   `sudo npm i -g`, rootless Podman could not relabel the root-owned file (`lsetxattr ... operation not permitted`,
+   exit 126) and the unit failed. A copy this account owns can always be relabelled. A changed copy restarts the
+   proxy, since squid reads it only at start.
 
    A container that already has a unit's name and was not started by that unit (the hand-started proxy below, or an
    older setup's Valkey) is never replaced silently: the unit's `podman run --replace` would remove it, and a proxy
    takes every running job's per-job network with it. Both commands say so and install nothing; remove it yourself
-   (`podman rm -f pi-dispatch-egress-proxy`), or let `service install --force` replace it. `service install --force`
-   over a Quadlet file that changed RESTARTS that unit (a `start` would do nothing to a running one) and warns first
-   when that unit is the proxy.
+   (`podman rm -f pi-dispatch-egress-proxy`), or let `service install --force` replace it. A podman that cannot say
+   whether such a container exists (anything but "no such container", a locked store say) installs nothing, `--force`
+   or not. `service install --force` over a Quadlet file that changed RESTARTS that unit (a `start` would do nothing to
+   a running one) and warns first when that unit is the proxy. `service install` lists every reason it refuses at once
+   (the worker unit existing, a changed file, a foreign container), so `--force` accepts exactly what it printed.
 
    What was measured, on the Fedora 44 host with Podman 5.8.1:
    - The units get exactly the names the worker attaches by: `ContainerName=` and `NetworkName=` add no `systemd-`
@@ -422,18 +436,22 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    `service install` reads these keys from `.env`, the file the unit loads, not from your shell and not from an
    `--env-setup` script. It refuses `--system` on this venue: the units belong to this account's user manager, which
    a system unit cannot order itself after, so install in user scope with linger on. `service uninstall` stops and
-   removes the units and keeps the `pi-dispatch-valkey-data` volume and the networks; `service status` lists each
+   removes the units and the rules copy, clears their failed state, and keeps the `pi-dispatch-valkey-data` volume and
+   the networks; `service status` lists each
    unit and whether it is active. Every `.container` sets `Network=` explicitly (Valkey on a bridge network of its
    own), because a containers.conf `netns = "host"` puts a container started without one into the host's network
    namespace (measured), where Valkey's `127.0.0.1` port mapping would mean nothing.
 
-   Not measured yet, and said so rather than implied: Valkey on its own bridge network with its port published on
-   `127.0.0.1`, the proxy's exec-form health check running, the timeout and restart keys the units carry, the
-   `PODMAN_SYSTEMD_UNIT` label the foreign-container check reads, and the shared `z` relabel of the package's own
-   `egress-proxy.conf` when the package is a root-owned global npm install (relabelling a file this account does not
-   own may be refused). The measurement above ran Valkey with no `Network=` and a plain health check.
-   `.github/workflows/deploy-lint.yml` runs Podman 4.9.3's generator in dry-run over the rendered files: it accepts
-   all four, and passes the health check through as the JSON array it is.
+   Measured again on 2026-09-27, on the same host, with these units as they ship: Valkey on its own bridge network,
+   published on `127.0.0.1:6379` and healthy; the proxy's exec-form health check running under a systemd timer and
+   reaching healthy; each container labelled `PODMAN_SYSTEMD_UNIT=<its unit>`, which the foreign-container check
+   reads; a real job reaching the provider through the proxy; reboots with and without linger; uninstall. Not
+   exercised: `Restart=` and `TimeoutStartSec=` doing their work. `.github/workflows/deploy-lint.yml` runs Podman
+   4.9.3's generator in dry-run over the rendered files: it accepts all four, and passes the health check through as
+   the JSON array it is.
+
+   A proxy stop takes 10 s: squid does not exit on SIGTERM, so systemd waits out podman's stop timeout, kills it, and
+   the unit ends `failed` with exit 137 (measured). Harmless; `service uninstall` clears the failed state.
 
    The proxy needs a named bridge network: the worker attaches it to each job's `--internal` network by name, and
    measured, a container on Podman's default rootless network (pasta or slirp4netns) is refused with `"pasta" is not

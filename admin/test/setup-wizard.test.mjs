@@ -1295,3 +1295,43 @@ test("M14: a PI_BACKENDS the operator already set without podman is left untouch
   assert.equal(readFileSync(join(dir, ".env"), "utf8"), "PI_BACKENDS=local\n", "never clobbered");
   assert.ok(notes.some((n) => n.t === "warning" && /already sets PI_BACKENDS to something without podman; left untouched/.test(n.m)));
 });
+
+test("E5: rootless Podman chosen over a .env that sets PI_BACKENDS without podman stops setup, never clobbers, and names the edit", async () => {
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  writeFileSync(join(dir, ".env"), "PI_BACKENDS=local\n");
+  const { ui, notes } = wizardUi({ select: ["Guided setup", "Use rootless Podman instead"], input: [dir], confirm: [] });
+  const { deps, attached } = wizardDeps({ platform: "linux", probeDockerFn: () => ({ missing: true }), probePodmanFn: () => ({ ok: true }) });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.equal(attached.length, 0, "up never ran");
+  assert.equal(readFileSync(join(dir, ".env"), "utf8"), "PI_BACKENDS=local\n");
+  assert.ok(notes.some((n) => n.t === "error" && /sets PI_BACKENDS=local, which does not list podman/.test(n.m) && /Change it to PI_BACKENDS=podman/.test(n.m)));
+});
+
+test("E5: a .env that already lists podman is what up reads: the wizard hands up no PI_BACKENDS of its own", async () => {
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  writeFileSync(join(dir, ".env"), "PI_BACKENDS=podman\n");
+  const { ui, seen } = wizardUi({ select: ["Guided setup", "Skip", "Skip"], input: [dir], confirm: [true, false, false] });
+  const { deps, attached } = wizardDeps({
+    env: { PI_DISPATCH_DEPLOYMENT_FILE: join(tempDir("admin-setup-ptr-"), "pointer.json"), PI_BACKENDS: "local,podman" },
+    probePodmanFn: () => ({ ok: true }),
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.equal(attached[0].env.PI_BACKENDS, undefined, "the shell's list would conflict with the file's, and up refuses a conflict");
+  assert.doesNotMatch(seen.confirm[0].message, /PI_BACKENDS=podman /);
+});
+
+test("E4: a .env whose venue line sits inside a quoted value systemd continues is refused, not read", async () => {
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  writeFileSync(join(dir, ".env"), "NOTE='see\nPI_BACKENDS=podman\n'\n");
+  const { ui, notes } = wizardUi({ select: ["Guided setup"], input: [dir], confirm: [] });
+  const { deps, attached } = wizardDeps({
+    env: { PI_DISPATCH_DEPLOYMENT_FILE: join(tempDir("admin-setup-ptr-"), "pointer.json"), PI_BACKENDS: "podman" },
+    probePodmanFn: () => ({ ok: true }),
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.equal(attached.length, 0);
+  assert.ok(notes.some((n) => n.t === "error" && /a quoted value that continues onto the next line/.test(n.m)));
+});

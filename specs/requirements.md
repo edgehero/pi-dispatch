@@ -1864,7 +1864,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `service install` uses, shown line for line before consent, and runs no docker command at all when `PI_BACKENDS`
   does not list `local` (`DES-PODMAN-STACK-AS-QUADLET-UNITS`). `up` reads `PI_BACKENDS`, `PI_EGRESS` and
   `PI_EGRESS_PROXY` from this shell where it sets them and otherwise from the deployment's `.env`, the file
-  `service install` reads, and never replaces a container it did not start.
+  `service install` reads, refuses when the two set one differently, and never replaces a container it did not
+  start.
   **`up` also fills EMPTY keys in an existing `.env`** (issue #357), which
   is the one mutation it makes without a prompt and is bounded to exactly that: the file must already
   exist, so `init`'s create-only rule is untouched; a key with any value is left alone, so "never touch an
@@ -2186,6 +2187,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-27 | Issue #430, review round 2. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, one clause: `up` refuses when this shell and the deployment's `.env` set a venue key differently, where round 1 only warned, since it would otherwise stand up one venue while the service ran the other. A refusal still runs nothing, so the consent contract is UNCHANGED, checked. |
 | 2026-09-27 | Issue #430, review round 1. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, one sentence: `up` decides the venue from this shell where it sets a venue key and otherwise from the deployment's `.env` (the file `service install` reads), and never replaces a container it did not start. The consent contract is UNCHANGED, checked: every host mutation is still shown first, and a refusal runs nothing. |
 | 2026-09-27 | Issue #430. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, one sentence: on the native `podman` venue `up` pulls the default image into the account's own Podman store and starts Valkey and the egress proxy as Quadlet units through the installer `service install` uses, showing every write and command before consent and never running docker for a list without `local`. The contract is unchanged in kind: every host mutation is shown first, `--yes` waives consent and never visibility, a declined step continues, and `.env` is filled only where empty (the wizard's `PI_BACKENDS=podman` line goes through the same never-clobber writer). **`REQ-EGRESS-ALLOWLIST` UNCHANGED, checked**: the podman proxy is the compose digest (a test holds them equal) with the same two mounts. |
 | 2026-09-27 | Issue #433. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, the Why's prompted tier: on a deployment whose `PI_BACKENDS` does not list `local`, `doctor --fix` offers the deployment's own default image as a podman pull and tag into this account's store (the store the podman venue's jobs start from, and the line that is that deployment's image check), and does not offer the loopback Valkey's `docker run`, since doctor spawns no docker there at all. The tiers themselves are unchanged: the image is still only the deployment default, never a trigger-named one, and still prompted with a default of No. Statement and Acceptance UNCHANGED, checked: `up` is untouched by this change, and no acceptance names a docker line of doctor's. |
