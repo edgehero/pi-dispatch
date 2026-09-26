@@ -1525,7 +1525,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   a running proxy, every job's argv carries `--network=pi-job-<jobId>-net` and its env carries all four proxy
   variables; a job reaching a listed host succeeds and one reaching an unlisted host is refused by the proxy
   rather than by the agent, as is one reaching a listed name that resolves to one of this host's fixed loopback
-  or link-local addresses (issue #428), while an unlisted name is never resolved by the proxy at all; and the network is removed when the container exits, or, where a worker died
+  or link-local addresses (issue #428), while a request the proxy refuses as unlisted costs no DNS query at all,
+  forward for a name or reverse for an IP literal; and the network is removed when the container exits, or, where a worker died
   before it could, by the next boot's reaper, which detaches what is still attached and otherwise names the
   network it could not remove in the log rather than leaving it silently forever (issue #357). Given a proxy that is
   absent or stopped, the job returns `outcome: "policy"` with `budgetReserved: false` and reason
@@ -2175,6 +2176,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-26 | Issue #428, review round 2. **`REQ-EGRESS-ALLOWLIST` AMENDED**, the Acceptance again: an unlisted request costs no DNS query, REVERSE included. The allowlist ACL did a PTR lookup for every unlisted IP-literal request (measured), a second DNS channel out of the same class as round 1's; it is now `dstdomain -n`. The Statement is UNCHANGED, checked. |
 | 2026-09-26 | Issue #428, review round 1. **`REQ-EGRESS-ALLOWLIST` AMENDED**, the Acceptance again: the address deny covers this host's FIXED loopback and link-local addresses (a host mapped elsewhere is the podman venue's refusal to close, not the proxy's), and the proxy resolves no unlisted name, since the first form of the rule resolved every name asked for (measured), a DNS channel out. The Statement is UNCHANGED, checked. |
 | 2026-09-26 | Issue #428. **`REQ-EGRESS-ALLOWLIST` AMENDED**, the Acceptance only: a listed name that resolves to this host's loopback or link-local addresses is refused by the proxy too. The proxy's first rule now denies those destinations (and slirp4netns's `10.0.2.2`), because on rootless Podman an account's containers.conf can map the host's loopback into the proxy's own network (measured). The Statement is UNCHANGED, checked: "nothing else beyond this host" bounds what lies OUTSIDE this host, and what a job reaches on the host itself stays the residual `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` names; the deny narrows the proxy's side of it, and the podman venue's refusal of a widening containers.conf (`DES-PODMAN-NATIVE-ROOTLESS-BACKEND`) is the closure. No other requirement names the podman venue, so none changes. |
 | 2026-09-26 | Issue #437, review round 1. **`REQ-JOB-STATUS-COMMENTS` AMENDED** in its #437 clause: the `provider-auth-refused` sentence covers a refusal of access as well as of the credential ("Stopped: the AI provider refused this worker's credentials or access (HTTP 401 or 403). The operator needs to check the provider key and what it is allowed to use. Not retried."), since a 403 is often a key that works but may not use that model or route. Still fixed and path-free. **`REQ-OPERATOR-FAILURE-NOTIFICATION` UNCHANGED, checked**: the hook still fires once per paid policy terminal; its reason set is now derived from the runner's named reasons, which changes no member. |

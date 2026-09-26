@@ -182,7 +182,7 @@ test("the file helpers the podman venue shares read files by the rootful observa
 	assert.equal(confKeyFinding(fs, ["/a.conf"], { key: MOUNT_KEY, says: MOUNT_KEY_SAYS }), null);
 	// Issue #428: EIO is a moment, not the file, so it is NOT ANSWERED (`null`, retried); EACCES is the file's own
 	// permissions and stays a withheld credit (`false`), the precedent.
-	assert.deepEqual(confKeyFinding(hostFs({ "/e.conf": { error: "EIO" } }), ["/e.conf"], { key: MOUNT_KEY, says: MOUNT_KEY_SAYS }), { value: null, evidence: "/e.conf could not be read (EIO)" });
+	assert.deepEqual(confKeyFinding(hostFs({ "/e.conf": { error: "EIO" } }), ["/e.conf"], { key: MOUNT_KEY, says: MOUNT_KEY_SAYS }), { value: null, evidence: "/e.conf could not be read (EIO)", reason: "file-unread" });
 	assert.deepEqual(confKeyFinding(hostFs({ "/e.conf": { error: "EACCES" } }), ["/e.conf"], { key: MOUNT_KEY, says: MOUNT_KEY_SAYS }), { value: false, evidence: "/e.conf could not be read (EACCES)" });
 	assert.equal(fipsFinding(hostFs()), null, "no FIPS file is FIPS off");
 	assert.equal(fipsFinding(hostFs({ [FIPS_ENABLED_PATH]: "0\n" })), null);
@@ -209,8 +209,20 @@ test("confKeyFinding withholds credit on a non-ASCII character or a multi-line s
 		["u2029", 'containers = { env = ["a\u2029# "], volumes = ["/:/host"] }\n'],
 		["a byte-order mark", '\ufeff[containers]\n'],
 	]) {
-		assert.deepEqual(at(text), { value: false, evidence: "/c.conf has a non-ASCII character or a multi-line string, which this check does not decode" }, label);
+		const found = at(text);
+		assert.equal(found?.value, false, label);
+		assert.match(found.evidence, /^\/c\.conf line \d+ has (a non-ASCII character|a multi-line string \(""" or '''\)), which this check does not decode$/, label);
 	}
+	// Round 2: the evidence names the FIRST offending line and which of the two it is, so the operator is sent to it.
+	assert.deepEqual(at('[containers]\nlog_driver = "journald"\ntz = "caf\u00e9"\n'), { value: false, evidence: "/c.conf line 3 has a non-ASCII character, which this check does not decode", spelling: "non-ascii" });
+	assert.deepEqual(at('[containers]\nlabel = """\nx\n"""\n'), { value: false, evidence: `/c.conf line 2 has a multi-line string (""" or '''), which this check does not decode`, spelling: "multi-line" });
+	// Every U+0080 to U+00FF character is non-ASCII too, not only the measured ones (a Latin-1 byte read as UTF-8).
+	for (let code = 0x80; code <= 0xff; code++) {
+		assert.equal(at(`# ${String.fromCharCode(code)}\n`)?.spelling, "non-ascii", `U+${code.toString(16).toUpperCase().padStart(4, "0")}`);
+	}
+	assert.equal(at("# \u007f\n"), null, "DEL is ASCII");
+	// A file that sets a real key AND has a non-ASCII comment is named for the KEY, which is the actionable fix.
+	assert.deepEqual(at('# caf\u00e9\n[containers]\nvolumes = ["/:/host"]\n'), { value: false, evidence: `/c.conf ${MOUNT_KEY_SAYS}` });
 	// A plain-ASCII file with a single-quoted string, a double-quoted one and a commented key still passes.
 	assert.equal(at('[containers]\n# volumes = ["/:/host"]\nlog_driver = "journald"\ntz = \'local\'\n'), null);
 	assert.ok(UNREAD_SPELLING.test("\u017f") && UNREAD_SPELLING.test('"""') && UNREAD_SPELLING.test("\'\'\'") && !UNREAD_SPELLING.test("~ \t\r\n"));
@@ -219,11 +231,29 @@ test("confKeyFinding withholds credit on a non-ASCII character or a multi-line s
 test("a conf read that fails for a moment is NOT ANSWERED (null), one that fails for a reason in the file withholds credit (#428)", () => {
 	assert.deepEqual([...TRANSIENT_READ_ERRORS].sort(), ["EAGAIN", "EBUSY", "EINTR", "EIO", "EMFILE", "ENFILE", "ENOMEM", "ESTALE", "ETIMEDOUT", "EWOULDBLOCK"]);
 	for (const code of TRANSIENT_READ_ERRORS) {
-		assert.deepEqual(confKeyFinding(hostFs({ "/c.conf": { error: code } }), ["/c.conf"], { key: MOUNT_KEY, says: MOUNT_KEY_SAYS }), { value: null, evidence: `/c.conf could not be read (${code})` }, `file ${code}`);
-		assert.deepEqual(confFilesIn(hostFs({}, { "/d": code }), { dirs: ["/d"] }), { finding: { value: null, evidence: `/d could not be read (${code})` } }, `dir ${code}`);
+		assert.deepEqual(confKeyFinding(hostFs({ "/c.conf": { error: code } }), ["/c.conf"], { key: MOUNT_KEY, says: MOUNT_KEY_SAYS }), { value: null, evidence: `/c.conf could not be read (${code})`, reason: "file-unread" }, `file ${code}`);
+		assert.deepEqual(confFilesIn(hostFs({}, { "/d": code }), { dirs: ["/d"] }), { finding: { value: null, evidence: `/d could not be read (${code})`, reason: "file-unread" } }, `dir ${code}`);
 	}
 	for (const code of ["EACCES", "EPERM", "ENOTDIR", "ELOOP", "EISDIR", "EXDEV_UNKNOWN"]) {
 		assert.equal(confKeyFinding(hostFs({ "/c.conf": { error: code } }), ["/c.conf"], { key: MOUNT_KEY, says: MOUNT_KEY_SAYS }).value, false, `file ${code}`);
 		assert.equal(confFilesIn(hostFs({}, { "/d": code }), { dirs: ["/d"] }).finding.value, false, `dir ${code}`);
 	}
+});
+
+// Round 2 of the #428 review: the transient rule is the ONE rule for every file an observation reads, not only the conf
+// chain. Each sibling read with EMFILE is not answered (null, reason file-unread); with EACCES it stays a refusal.
+test("every host file an observation reads is not answered on a transient error, the siblings of the conf chain included (#428)", () => {
+	const rootfulPodman = podman();
+	const sameHost = { local: true, endpoint: "unix:///run/podman/podman.sock" };
+	for (const [code, value] of [["EMFILE", null], ["EIO", null], ["EACCES", false]]) {
+		const fips = fipsFinding(hostFs({ [FIPS_ENABLED_PATH]: { error: code } }));
+		assert.deepEqual(fips, value === null ? { value: null, evidence: `${FIPS_ENABLED_PATH} could not be read (${code})`, reason: "file-unread" } : { value: false, evidence: `${FIPS_ENABLED_PATH} could not be read (${code})` }, `fips ${code}`);
+		assert.equal(hooksFinding(hostFs({}, { [PODMAN_HOOKS_DIRS[1]]: code })).value, value, `hooks ${code}`);
+		const mounts = observeRuntimeMounts(rootfulPodman, { fs: hostFs({ [PODMAN_MOUNTS_CONF]: { error: code } }), sameHost: true });
+		assert.equal(mounts.value, value, `mounts.conf ${code}`);
+		const host = observeHost({ endpoint: sameHost, daemon: rootfulPodman, fs: hostFs({ [PODMAN_MOUNTS_CONF]: { error: code } }) });
+		assert.equal(host.observations[RUNTIME_ADDS_NO_MOUNTS], value, `observeHost ${code}`);
+		if (value === null) assert.equal(host.reasons[RUNTIME_ADDS_NO_MOUNTS], "file-unread", "the retry names a file, not the daemon");
+	}
+	assert.equal(observeRuntimeMounts(rootfulPodman, { fs: hostFs({ [PODMAN_MOUNTS_CONF]: "" }), sameHost: true }).value, true, "and a clean host still earns it");
 });

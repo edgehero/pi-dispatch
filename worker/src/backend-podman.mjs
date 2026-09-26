@@ -34,7 +34,7 @@ import { makeEgressPreflight } from "./egress.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { DAEMON_FACTS_TIMEOUT_MS, displayVersion } from "./job-user.mjs";
 import { makeRunContainer } from "./run-container.mjs";
-import { MOUNT_KEY, MOUNT_KEY_SAYS, PODMAN_HOOKS_DIRS, confFilesIn, confKeyFinding, fipsFinding, hooksFinding } from "./runtime-observations.mjs";
+import { MOUNT_KEY, MOUNT_KEY_SAYS, PODMAN_HOOKS_DIRS, confFilesIn, confKeyFinding, fipsFinding, hooksFinding, unreadFileFinding } from "./runtime-observations.mjs";
 
 /** The one facts read. JSON, not a template: a template field one Podman lacks is an error, a missing key is `null`. */
 export const PODMAN_INFO_ARGS = Object.freeze(["info", "--format", "json"]);
@@ -217,7 +217,7 @@ function observePodmanMounts({ fs, home, env, euid }) {
 			size = fs.statSync(path).size;
 		} catch (error) {
 			if (error?.code === "ENOENT") continue;
-			return { value: false, evidence: `${path} could not be read (${error?.code ?? "error"})` };
+			return unreadFileFinding(path, error?.code ?? "error");
 		}
 		winner = { path, size };
 		break;
@@ -316,7 +316,8 @@ export function podmanConfWidening({ fs, home, env, euid }) {
 			},
 		});
 	if (!found) return null;
-	return found.value === null ? { cause: PODMAN_CONF_WIDENS_JOB, key: null, evidence: found.evidence, transient: true } : { cause: PODMAN_CONF_WIDENS_JOB, key, evidence: found.evidence };
+	if (found.value === null) return { cause: PODMAN_CONF_WIDENS_JOB, key: null, evidence: found.evidence, transient: true };
+	return { cause: PODMAN_CONF_WIDENS_JOB, key, evidence: found.evidence, ...(found.spelling ? { spelling: found.spelling } : {}) };
 }
 
 /**
@@ -333,8 +334,10 @@ export function podmanConfFix(found) {
 	return found?.key
 		? "remove that key from that file, then restart this account's containers on a bridge network (the egress proxy among them), since the rootless network they share keeps the options it started with: the podman venue refuses any containers.conf this account's Podman reads that sets pasta_options, network_cmd_options, annotations or env, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers (a pasta MTU, say) goes on their own command line (--network=pasta:...) or Quadlet unit instead, not account-wide"
 		: found?.transient
-			? "the read failed for a moment, not for a reason in the file; the worker retries each podman job until it can read it, and a boot exits to be restarted"
-			: "the podman venue must read every containers.conf this account's Podman reads to know that none sets pasta_options, network_cmd_options, annotations or env; make it readable, spell the file in ASCII without escapes or multi-line strings, or unset the variable for the worker's account";
+			? "the read failed for a moment, not for a reason in the file; a job refused this way is retried once (the queue's second attempt) and a boot exits to be restarted, so if it recurs, fix what the host ran out of (file descriptors, memory, a failing disk)"
+			: found?.spelling
+				? `rewrite ${found.spelling === "escaped" ? "that key without a backslash escape" : "that line in plain ASCII with no \"\"\" or ''' multi-line string"}: this check reads a containers.conf only in plain ASCII with plain keys, since a non-ASCII case fold, a multi-line string or an escape was measured hiding a key from it that Podman honoured, and it refuses what it cannot read rather than guess`
+				: "the podman venue must read every containers.conf this account's Podman reads to know that none sets pasta_options, network_cmd_options, annotations or env; make that file or directory readable by the worker's account, or unset the variable for it";
 }
 
 /**
@@ -368,8 +371,23 @@ export function observePodman({ read, fs = { statSync, readFileSync, readdirSync
 	return {
 		observations: { [PODMAN_BOUNDS_DELEGATED]: bounds.value, [PODMAN_ADDS_NO_MOUNTS]: mounts.value, [PODMAN_SERVICE_LOCAL]: service.value },
 		evidence: { [PODMAN_BOUNDS_DELEGATED]: bounds.evidence, [PODMAN_ADDS_NO_MOUNTS]: mounts.evidence, [PODMAN_SERVICE_LOCAL]: service.evidence },
-		reasons: {},
+		// With an answered read, a `null` here is a host file that could not be read for a moment (`unreadFileFinding`),
+		// and its reason says so, so the retry names a file rather than "unknown".
+		reasons: {
+			...(bounds.value === null ? { [PODMAN_BOUNDS_DELEGATED]: bounds.reason ?? "file-unread" } : {}),
+			...(mounts.value === null ? { [PODMAN_ADDS_NO_MOUNTS]: mounts.reason ?? "file-unread" } : {}),
+		},
 	};
+}
+
+/**
+ * An observation miss that rests on a read that did not answer, as the preflight's `{ unavailable, reason }`, plus
+ * `message` (the evidence, which names the path) when that read was a HOST FILE, so the retry's words say which file
+ * rather than blaming the runtime. Shared with `local`'s preflight in start.mjs.
+ */
+export function unavailableFor(observed, name) {
+	const reason = observed?.reasons?.[name] ?? "unknown";
+	return reason === "file-unread" ? { unavailable: true, reason, message: observed?.evidence?.[name] ?? null } : { unavailable: true, reason };
 }
 
 /** The three podman answers as one string, so a caller logs them only when they change. */
@@ -630,7 +648,7 @@ export function makePodmanBackend(opts = {}) {
 		const [refusal] = observationRefusals(args);
 		if (!refusal) return { ok: true, podman: read };
 		const missed = [...new Set(unobservedFloor(args.backends, args.backendFloor, args.observations).map((m) => m.observedBy))];
-		if (observationRefusalIsTransient(args)) return { unavailable: true, reason: observed.reasons[missed[0]] ?? "unknown" };
+		if (observationRefusalIsTransient(args)) return unavailableFor(observed, missed[0]);
 		return { refused: true, message: refusal, observations: missed };
 	};
 

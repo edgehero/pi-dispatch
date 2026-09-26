@@ -144,6 +144,10 @@ async function awaitRunning(name, ms = 60_000) {
 	return false;
 }
 
+// Set when the venue refuses the probe outright, so the summary says that ONE thing and stops: every later check would
+// report a consequence of it (an unread uid, probes that never ran) as if it were a finding of its own.
+let venueRefused = null;
+
 /** The harness's `probe`: one real job container through the bundle, exiting `exitCode` or stopped by the worker. */
 async function probe(bundle, { exitCode, aborted = false }) {
 	probes += 1;
@@ -159,7 +163,10 @@ async function probe(bundle, { exitCode, aborted = false }) {
 	// `ok: true` is not admission on its own: a refused identity and a widening containers.conf (issue #428) ride beside
 	// it, and the processor refuses on either before the image preflight. A probe past them would read back a container
 	// no real job gets.
-	if (observed.jobUserRefused || observed.podmanConfRefused) throw new Error(`observationPreflight refused the probe: ${JSON.stringify({ jobUserRefused: observed.jobUserRefused, podmanConfRefused: observed.podmanConfRefused })}`);
+	if (observed.jobUserRefused || observed.podmanConfRefused) {
+		venueRefused = `observationPreflight refused the probe: ${JSON.stringify({ jobUserRefused: observed.jobUserRefused, podmanConfRefused: observed.podmanConfRefused })}`;
+		throw new Error(venueRefused);
+	}
 	const img = await bundle.imagePreflight(job);
 	if (!img?.ok) throw new Error(`imagePreflight did not admit the probe image: ${JSON.stringify(img)}`);
 	const who = await bundle.jobUserPreflight(job, { capabilities: img.capabilities ?? [], observed });
@@ -276,6 +283,10 @@ try {
 }
 
 // --- the summary: every finding, then what this run adds to the harness's own verdict ---
+if (venueRefused) {
+	console.log(`\nFAILED: the podman venue refuses every job on this host, so nothing below it was measured.\n  - ${venueRefused}`);
+	process.exit(1);
+}
 const failures = [];
 console.log(`\npodman conformance, ${PODMAN_BACKEND} venue, Podman ${read.info.version ?? "(version not reported)"}, as uid:gid ${decision.user}${decision.relabel ? ", SELinux relabel on" : ""}`);
 for (const f of report.findings) {

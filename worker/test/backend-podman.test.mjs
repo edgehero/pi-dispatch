@@ -369,12 +369,20 @@ test("podmanConfWidening refuses what it cannot read whole, with no key and a de
 		["multi-line literal", "network = { default_subnet = '''\n#''', pasta_options = [\"-T\",\"6379\"] }\n"],
 		["u2028", 'network = { default_subnet = "a\u2028# ", pasta_options = ["-T","6379"] }\n'],
 		["u2029", 'network = { default_subnet = "a\u2029# ", pasta_options = ["-T","6379"] }\n'],
-	]) noKey(widening(confAt(`${HOME}/.config/containers/containers.conf`, text)), /has a non-ASCII character or a multi-line string/, label);
+	]) {
+		const found = widening(confAt(`${HOME}/.config/containers/containers.conf`, text));
+		noKey(found, /line \d has (a non-ASCII character|a multi-line string)/, label);
+		// The remedy names the spelling and nothing else: no "make it readable", no "unset the variable".
+		assert.match(mod.podmanConfFix(found), /^rewrite that line in plain ASCII with no """ or ''' multi-line string: /, label);
+		assert.doesNotMatch(mod.podmanConfFix(found), /readable|unset the variable/, label);
+	}
+	const escapedFix = mod.podmanConfFix(widening(confAt(`${HOME}/.config/containers/containers.conf`, '[network]\n"pasta\\u005foptions" = []\n')));
+	assert.match(escapedFix, /^rewrite that key without a backslash escape: /);
 	// A transient read is neither a key nor a refusal: it comes back `transient`, and its text says it will be retried.
 	for (const code of ["EMFILE", "ENFILE", "EIO", "EAGAIN"]) {
 		const file = widening(fakeFs({ files: { "/etc/containers/containers.conf": "" }, errors: { "/etc/containers/containers.conf": code } }));
 		assert.deepEqual([file.key, file.transient], [null, true], code);
-		assert.match(mod.podmanConfRefusal(file), /^Not read yet: .* could not be read \(\w+\); the read failed for a moment/, code);
+		assert.match(mod.podmanConfRefusal(file), /^Not read yet: .* could not be read \(\w+\); the read failed for a moment, not for a reason in the file; a job refused this way is retried once \(the queue's second attempt\)/, code);
 		assert.equal(widening(fakeFs({ errors: { "/etc/containers/containers.conf.d": code } })).transient, true, `dir ${code}`);
 	}
 	for (const code of ["EACCES", "EPERM", "ENOTDIR", "ELOOP"]) {
@@ -391,9 +399,27 @@ test("the podman conf refusal names the file and key, says to remove it, and nam
 	assert.equal(mod.podmanConfRefusal(found), `Refused: ${found.evidence}; ${mod.podmanConfFix(found)} (issue #428).`);
 	for (const key of WIDENING_KEYS) assert.match(mod.podmanConfRefusal(widening(confAt("/etc/containers/containers.conf", MEASURED[key]))), new RegExp(`^Refused: /etc/containers/containers\\.conf sets ${key}, which .*; remove that key from that file`));
 	const unread = widening(fakeFs(), { env: { CONTAINERS_CONF: "/x" } });
-	assert.match(mod.podmanConfRefusal(unread), /^Refused: CONTAINERS_CONF is set, .*; the podman venue must read every containers\.conf .* unset the variable for the worker's account \(issue #428\)\.$/);
+	assert.match(mod.podmanConfRefusal(unread), /^Refused: CONTAINERS_CONF is set, .*; the podman venue must read every containers\.conf .* make that file or directory readable by the worker's account, or unset the variable for it \(issue #428\)\.$/);
 	assert.equal(mod.PODMAN_CONF_WIDENS_JOB, "podman-conf-widens-job");
 	assert.ok(!Object.hasOwn(mod.PODMAN_JOB_USER_FIX, mod.PODMAN_CONF_WIDENS_JOB), "a venue refusal, not a job-user cause");
+});
+
+// Round 2 of the #428 review: the podman observations' sibling file reads follow the transient rule too, and a null
+// they produce carries a reason naming a file, so the per-job retry says which file instead of blaming the runtime.
+test("a podman observation's host file read failing for a moment is not answered, and the retry names the file (#428)", { skip }, async () => {
+	const mountsFailing = (code) => fakeFs({ files: { [USER_MOUNTS]: "" }, errors: { [USER_MOUNTS]: code } });
+	const hooksFailing = (code) => fakeFs({ files: { [USER_MOUNTS]: "" }, errors: { "/etc/containers/oci/hooks.d": code } });
+	const fipsFailing = (code) => fakeFs({ files: { [USER_MOUNTS]: "", "/proc/sys/crypto/fips_enabled": "0" }, errors: { "/proc/sys/crypto/fips_enabled": code } });
+	for (const [label, fs] of [["user mounts.conf", mountsFailing], ["hooks dir", hooksFailing], ["fips file", fipsFailing]]) {
+		const busy = observe(answered(), fs("EMFILE"));
+		assert.equal(busy.observations[PODMAN_ADDS_NO_MOUNTS], null, `${label} EMFILE`);
+		assert.equal(busy.reasons[PODMAN_ADDS_NO_MOUNTS], "file-unread", label);
+		assert.equal(observe(answered(), fs("EACCES")).observations[PODMAN_ADDS_NO_MOUNTS], false, `${label} EACCES`);
+	}
+	// Through the bundle: a floor naming mountSet is retried with the file named, never refused, never "unknown".
+	const out = await bundle({ fs: mountsFailing("EMFILE"), backendFloor: { mountSet: ENFORCED } }).observationPreflight(JOB);
+	assert.deepEqual(out, { unavailable: true, reason: "file-unread", message: `${USER_MOUNTS} could not be read (EMFILE)` });
+	assert.deepEqual(mod.unavailableFor({ reasons: { x: "timeout" }, evidence: { x: "e" } }, "x"), { unavailable: true, reason: "timeout" }, "a daemon read keeps its own words");
 });
 
 test("podmanServiceLocal holds only for serviceIsRemote false", { skip }, () => {

@@ -5882,6 +5882,13 @@ test("a widening containers.conf is a podman venue refusal: ✗ where podman is 
 			assert.deepEqual(calls.filter((c) => c.cmd === "podman").map((c) => c.args[0]), ["info"], "the files are read, podman is asked nothing more");
 		}
 	}
+	// The ⚠ is not a failure: with podman merely blessed and local's own lines green, doctor exits 0 (review round 2
+	// saw exit 1 in the loop above; that came from the fixture's absent docker, local's two ✗ lines, not from this one).
+	const blessed = capture();
+	const blessedCode = await runDoctor(podmanEnv({ PI_BACKENDS: "local,podman" }), podmanDeps(blessed.out, { ...green, ...podmanPlan() }, [], { observationFs: withConf("pasta_options = []\n") }));
+	assert.ok(blessed.text().includes("⚠ podman: no job can run on this venue (podman-conf-widens-job)"), blessed.text());
+	assert.deepEqual(blessed.text().split("\n").filter((l) => l.startsWith("✗")), [], blessed.text());
+	assert.equal(blessedCode, 0, "a ⚠ line does not fail doctor");
 	// A clean conf says nothing of it.
 	const { out, text: said } = capture();
 	await runDoctor(podmanEnv(), podmanDeps(out, podmanPlan(), [], { observationFs: withConf("[network]\n# pasta_options = []\n") }));

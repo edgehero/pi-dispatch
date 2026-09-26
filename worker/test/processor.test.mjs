@@ -1852,7 +1852,7 @@ test("a podman conf that could not be read whole is refused without claiming it 
 	};
 	const unread = await run({ reason: "podman-conf-widens-job", key: null, message: "Refused: CONTAINERS_CONF is set, ..." });
 	assert.equal(unread.r.reason, "podman-conf-widens-job");
-	assert.match(unread.texts[0], /could not be read in full, so whether it lets a job's container reach more than this venue allows is not known/);
+	assert.match(unread.texts[0], /could not be read in full, or is written in a form the worker does not decode, so whether it lets a job's container reach more than this venue allows is not known/);
 	assert.doesNotMatch(unread.texts[0], /configuration lets a job's container reach more/, "an unread conf is not said to widen");
 	const busy = await run({ reason: "podman-conf-widens-job", key: null, message: "Not read yet: ...", transient: true });
 	assert.ok(busy.error instanceof InfraRetry, "a transient read is infrastructure: thrown, so the queue retries it");
@@ -1942,4 +1942,14 @@ test("a wiring without the gate runs every job as the image's own user, exactly 
 	await runJob(ghJob, d);
 	assert.equal(ran.user, null);
 	assert.equal(ran.home, null);
+});
+
+test("an observation that could not read a host file for a moment is retried with the file named, not a runtime outage (#428)", async () => {
+	const redis = fakeRedis();
+	const { deps: d } = deps({ redis, observationPreflight: async () => ({ unavailable: true, reason: "file-unread", message: "/home/op/.config/containers/mounts.conf could not be read (EMFILE)" }), log: () => {} });
+	await assert.rejects(
+		() => runJob(ghJob, d),
+		(e) => e instanceof InfraRetry && e.message === "a host file an observation the floor needs could not be read just now (/home/op/.config/containers/mounts.conf could not be read (EMFILE))",
+	);
+	assert.equal(redis.incrCalls, 0);
 });

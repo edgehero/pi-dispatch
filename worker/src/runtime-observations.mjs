@@ -68,6 +68,20 @@ export const ESCAPED_KEY = /^(?!\s*#).*?["'][^"'\n]*\\[^"'\n]*["']\s*=/m;
 export const UNREAD_SPELLING = /[^\x00-\x7f]|"""|'''/;
 
 /**
+ * The first line (1-based, split on `\n` only, as TOML counts lines) holding an `UNREAD_SPELLING`, as `{ line, kind }`
+ * with `kind` `"non-ascii"` or `"multi-line"` (a line holding both is named for its non-ASCII character), or `null`.
+ * So a refusal can say WHERE, and which of the two, rather than send an operator through the whole file.
+ */
+export function unreadSpelling(text) {
+	const lines = String(text).split("\n");
+	for (let i = 0; i < lines.length; i++) {
+		if (/[^\x00-\x7f]/.test(lines[i])) return { line: i + 1, kind: "non-ascii" };
+		if (/"""|'''/.test(lines[i])) return { line: i + 1, kind: "multi-line" };
+	}
+	return null;
+}
+
+/**
  * The read errors that say nothing about the file, only about this moment (issue #428): out of descriptors or memory,
  * an I/O error, a busy or stale mount, an interrupted or timed-out call. A conf file or drop-in directory that fails
  * with one of these is NOT ANSWERED (`null`, so a floor retries and the podman venue's refusal retries) rather than
@@ -77,9 +91,14 @@ export const UNREAD_SPELLING = /[^\x00-\x7f]|"""|'''/;
  */
 export const TRANSIENT_READ_ERRORS = new Set(["EMFILE", "ENFILE", "EIO", "EAGAIN", "EWOULDBLOCK", "EBUSY", "ENOMEM", "EINTR", "ETIMEDOUT", "ESTALE"]);
 
-/** A conf file or directory that could not be read, as a finding: `null` for a transient code, else `false`. */
-function unreadFinding(path, code) {
-	return { value: TRANSIENT_READ_ERRORS.has(code) ? null : false, evidence: `${path} could not be read (${code})` };
+/**
+ * A host file or directory an observation could not read, as a finding: `null` for a transient code, carrying
+ * `reason: "file-unread"` so the retry names a file rather than a daemon, else `false`. The ONE rule for every file an
+ * observation reads (round 2 of the #428 review: the conf chain had it and its sibling reads, mounts.conf, the hooks
+ * directories and the FIPS file, still turned EMFILE into a floor refusal that dropped the job).
+ */
+export function unreadFileFinding(path, code) {
+	return TRANSIENT_READ_ERRORS.has(code) ? { value: null, evidence: `${path} could not be read (${code})`, reason: "file-unread" } : { value: false, evidence: `${path} could not be read (${code})` };
 }
 
 /** OCI hook directories Podman runs every `*.json` hook from (container-libs pkg/config); a hook can mount into a container. */
@@ -106,7 +125,7 @@ export function readHostFile(fs, path) {
  */
 export function fipsFinding(fs) {
 	const fips = readHostFile(fs, FIPS_ENABLED_PATH);
-	if (!fips.missing && fips.text === undefined) return { value: false, evidence: `${FIPS_ENABLED_PATH} could not be read (${fips.error})` };
+	if (!fips.missing && fips.text === undefined) return unreadFileFinding(FIPS_ENABLED_PATH, fips.error);
 	if (String(fips.text ?? "").trim() === "1") return { value: false, evidence: "FIPS mode is on, and Podman then mounts the host's crypto policy into every container" };
 	return null;
 }
@@ -124,7 +143,7 @@ export function confFilesIn(fs, { files = [], dirs = [] }) {
 			entries = fs.readdirSync(dir);
 		} catch (error) {
 			if (error?.code === "ENOENT") continue;
-			return { finding: unreadFinding(dir, error?.code ?? "error") };
+			return { finding: unreadFileFinding(dir, error?.code ?? "error") };
 		}
 		for (const entry of [...entries].sort()) if (String(entry).endsWith(".conf")) out.push(`${dir}/${entry}`);
 	}
@@ -142,11 +161,12 @@ export function confKeyFinding(fs, files, { key, says }) {
 	for (const file of files) {
 		const got = readHostFile(fs, file);
 		if (got.missing) continue;
-		if (got.text === undefined) return unreadFinding(file, got.error);
+		if (got.text === undefined) return unreadFileFinding(file, got.error);
 		const match = key.exec(got.text);
 		if (match) return { value: false, evidence: `${file} ${typeof says === "function" ? says(match) : says}` };
-		if (ESCAPED_KEY.test(got.text)) return { value: false, evidence: `${file} has an escaped key, which this check does not decode` };
-		if (UNREAD_SPELLING.test(got.text)) return { value: false, evidence: `${file} has a non-ASCII character or a multi-line string, which this check does not decode` };
+		if (ESCAPED_KEY.test(got.text)) return { value: false, evidence: `${file} has an escaped key, which this check does not decode`, spelling: "escaped" };
+		const unread = unreadSpelling(got.text);
+		if (unread) return { value: false, evidence: `${file} line ${unread.line} has ${unread.kind === "non-ascii" ? "a non-ASCII character" : "a multi-line string (\"\"\" or ''')"}, which this check does not decode`, spelling: unread.kind };
 	}
 	return null;
 }
@@ -159,7 +179,7 @@ export function hooksFinding(fs, dirs = PODMAN_HOOKS_DIRS) {
 			entries = fs.readdirSync(dir);
 		} catch (error) {
 			if (error?.code === "ENOENT") continue;
-			return { value: false, evidence: `${dir} could not be read (${error?.code ?? "error"})` };
+			return unreadFileFinding(dir, error?.code ?? "error");
 		}
 		if ([...entries].some((entry) => String(entry).endsWith(".json"))) return { value: false, evidence: `${dir} holds an OCI hook, which can mount into every container` };
 	}
@@ -213,7 +233,8 @@ export function observeRuntimeMounts(daemon, { fs, sameHost }) {
 	try {
 		size = fs.statSync(PODMAN_MOUNTS_CONF).size;
 	} catch (error) {
-		return { value: false, evidence: error?.code === "ENOENT" ? `${PODMAN_MOUNTS_CONF} does not exist, so Podman mounts the default list (/run/secrets on Fedora and RHEL)` : `${PODMAN_MOUNTS_CONF} could not be read (${error?.code ?? "error"})` };
+		if (error?.code !== "ENOENT") return unreadFileFinding(PODMAN_MOUNTS_CONF, error?.code ?? "error");
+		return { value: false, evidence: `${PODMAN_MOUNTS_CONF} does not exist, so Podman mounts the default list (/run/secrets on Fedora and RHEL)` };
 	}
 	if (size !== 0) return { value: false, evidence: `${PODMAN_MOUNTS_CONF} is not empty, so Podman mounts what it lists` };
 	const listed = confFilesIn(fs, { files: PODMAN_CONTAINERS_CONF_FILES, dirs: PODMAN_CONTAINERS_CONF_DIRS });
@@ -255,7 +276,7 @@ export function observeHost({ endpoint, daemon, fs }) {
 		reasons: {
 			...(endpointAnswer === null ? { [DOCKER_ENDPOINT_LOCAL]: endpoint?.reason ?? "unknown" } : {}),
 			...(bounds.value === null ? { [DAEMON_APPLIES_BOUNDS]: daemon?.reason ?? "not-read" } : {}),
-			...(mounts.value === null ? { [RUNTIME_ADDS_NO_MOUNTS]: daemon?.reason ?? "not-read" } : {}),
+			...(mounts.value === null ? { [RUNTIME_ADDS_NO_MOUNTS]: mounts.reason ?? daemon?.reason ?? "not-read" } : {}),
 		},
 	};
 }

@@ -380,7 +380,9 @@ export async function runJob(job, deps) {
 			// The local venue's words stay what they were (they are its log line and BullMQ's failedReason); another venue
 			// is not docker's to name.
 			const localVenue = resolveBackendName(job, blessedBackends[0]) === DEFAULT_BACKEND;
-			throw new InfraRetry(localVenue ? "docker CLI or daemon unavailable, an observation the floor needs could not run" : "the container runtime or its CLI is unavailable, an observation the floor needs could not run", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			// A host FILE that could not be read for a moment (issue #428) is named as that, never as a runtime outage.
+			const why = typeof observed.message === "string" && observed.message !== "" ? `a host file an observation the floor needs could not be read just now (${observed.message})` : localVenue ? "docker CLI or daemon unavailable, an observation the floor needs could not run" : "the container runtime or its CLI is unavailable, an observation the floor needs could not run";
+			throw new InfraRetry(why, { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 		}
 
 		// A venue that already knows no uid can run a job there says so HERE, before the image preflight asks that same
@@ -404,7 +406,7 @@ export async function runJob(job, deps) {
 				job,
 				observed.podmanConfRefused.key
 					? "Refused: the worker host's Podman configuration lets a job's container reach more than this venue allows (the host's own services or the worker account's groups), so the operator must change it before podman jobs run. Not run."
-					: "Refused: the worker host's Podman configuration could not be read in full, so whether it lets a job's container reach more than this venue allows is not known, and the operator must fix that before podman jobs run. Not run.",
+					: "Refused: the worker host's Podman configuration could not be read in full, or is written in a form the worker does not decode, so whether it lets a job's container reach more than this venue allows is not known, and the operator must fix that before podman jobs run. Not run.",
 			);
 			log("refused_podman_conf_widens_job", { key: observed.podmanConfRefused.key ?? null, message: observed.podmanConfRefused.message });
 			return { outcome: "policy", reason: PODMAN_CONF_WIDENS_JOB, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried

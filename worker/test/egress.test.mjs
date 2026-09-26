@@ -354,4 +354,7 @@ test("the proxy denies a listed name resolving to this host's loopback or link-l
 	assert.deepEqual(listed.sort(), ["0.0.0.0/32", "10.0.2.2/32", "127.0.0.0/8", "169.254.0.0/16", "::/128", "::1", "fe80::/10"].sort());
 	// The ACL is defined before the line that uses it (squid refuses an unknown ACL name at parse).
 	assert.ok(lines.indexOf(acl[0]) < lines.indexOf(access[0]));
+	// And the allowlist itself is read with `-n`: without it squid reverse-resolves every unlisted IP-literal request, a
+	// PTR query into a zone the job picks (measured, round 2).
+	assert.deepEqual(lines.filter((line) => /^acl allowed\s/.test(line)), ['acl allowed dstdomain -n "/etc/pi-dispatch/allowlist.conf"']);
 });
