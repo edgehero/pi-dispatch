@@ -28,8 +28,15 @@ The Valkey volume is `pi-dispatch-valkey-data` when you started it with `pi-disp
 `valkey-data` (Compose prefixes it with the project name) when you started it with
 `deploy/docker-compose.yml`. Both run with `--appendonly yes`, so the queue already survives a
 reboot on its own. On the rootless Podman venue the Quadlet unit (`pi-dispatch-valkey.service`) uses the same
-`pi-dispatch-valkey-data` volume in that account's own store: in step 4 below, stop it with
-`systemctl --user stop pi-dispatch-valkey` and run the copy with `podman` in place of `docker`.
+`pi-dispatch-valkey-data` volume in that account's own store. The unit runs its container with `--rm`, so there is no
+stopped container to `docker start` again; step 6 starts the unit instead. For step 4, as that account,
+```bash
+systemctl --user stop pi-dispatch-valkey
+podman run --rm -v pi-dispatch-valkey-data:/data -v "$PWD":/backup:z docker.io/library/alpine \
+  tar czf /backup/valkey.tgz -C /data .
+```
+The image name is fully qualified because rootless Podman may refuse or prompt on a short one, and `:z` lets the
+container write into this directory on an SELinux-enforcing host.
 
 ### The settings overlay is the one that fails quietly
 
@@ -102,7 +109,8 @@ all, so a copy taken mid-run can catch a partial one. Stopping first is what buy
    record's age from its `mtime` and never from anything in its filename, so a copy that resets
    timestamps resurrects records the retention window had already retired, and they then live a
    second full window.
-6. **Start again in reverse**: Valkey, worker, receiver, panel.
+6. **Start again in reverse**: Valkey, worker, receiver, panel. On the rootless Podman venue Valkey is
+   `systemctl --user start pi-dispatch-valkey` (the unit makes a new container on the same volume).
 
 ## Restoring
 

@@ -49,8 +49,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { parseBackendList, venuesOf } from "./backends.mjs";
 import { egressArmed } from "./egress.mjs";
-import { readEnvAssignments } from "./env-file.mjs";
-import { ALL_QUADLET_FILES, ALLOWLIST_PLACEHOLDER, PROXY_CONF_PLACEHOLDER, QUADLET_FILES, applyStack, describeAction, lingerNote, planStack, quadletDir, readLinger, stackComponents, workerUnitDeps } from "./podman-stack.mjs";
+import { ALL_QUADLET_FILES, ALLOWLIST_PLACEHOLDER, PROXY_CONF_PLACEHOLDER, QUADLET_FILES, applyStack, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, proxyRestartWarning, quadletDir, readLinger, readStackKeys, stackComponents, workerUnitDeps } from "./podman-stack.mjs";
 
 // src/ is where this module lives in BOTH layouts (worker/src in a checkout,
 // node_modules/@edgehero/pi-dispatch/src under npm). Deploy templates resolve one level up from it
@@ -702,45 +701,43 @@ function nssmSequence(ctx) {
 }
 
 /**
- * The keys the podman stack decision reads, and where it reads them: the deployment's `.env`, the file the unit's
- * `EnvironmentFile=` loads, read the way systemd reads it. NOT this shell's environment: nothing in this project loads
- * `.env` into a process (docs/secrets.md), so a shell that exports PI_BACKENDS=podman says nothing about what the
- * SERVICE will run, and installing Quadlet units off it would stand up a stack for a worker that then runs docker. A
- * key an `--env-setup` script exports is invisible here for the same reason, which docs/podman.md says.
- */
-const STACK_KEYS = ["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY"];
-
-/**
  * Does this worker deployment run the podman venue, per the `.env` its unit loads? `{ used: false }`, `{ error }`,
  * or `{ used: true, venues, env }`. Only the worker has a stack: the receiver runs no job and needs no Podman.
+ *
+ * The keys come from the deployment's `.env`, the file the unit's `EnvironmentFile=` loads, read the way that loader
+ * reads it (`readStackKeys`, shared with `up`). NOT this shell's environment: nothing in this project loads `.env` into
+ * a process (docs/secrets.md), so a shell that exports PI_BACKENDS=podman says nothing about what the SERVICE will
+ * run, and installing Quadlet units off it would stand up a stack for a worker that then runs docker. A key an
+ * `--env-setup` script exports is invisible here for the same reason, which docs/podman.md says.
+ *
+ * On macOS and Windows the answer decides only a NOTE (the venue runs only on Linux, so there is no stack to
+ * install), so it is read with that platform's own loader (the wrapper sources the file with sh; the cmd wrapper
+ * splits it) and a file it cannot read there is not a refusal: refusing an install over a key that could change
+ * nothing about it would be a refusal with no remedy.
  */
 function podmanVenue(ctx) {
 	if (ctx.which !== "worker") return { used: false };
 	const envPath = join(ctx.deployDir, ".env");
-	const fileKeys = {};
+	const linux = ctx.platform === "linux";
+	let fileKeys = {};
 	if (ctx.fs.existsSync(envPath)) {
 		let text;
 		try {
 			text = String(ctx.fs.readFileSync(envPath, "utf8"));
 		} catch (err) {
+			if (!linux) return { used: false };
 			return { error: `cannot read ${envPath} to learn whether this deployment runs the podman venue: ${err?.message}` };
 		}
-		const found = readEnvAssignments(text, STACK_KEYS, { loader: "systemd" });
-		for (const key of STACK_KEYS) {
-			const read = found[key];
-			if (!read) continue;
-			// A line whose value this reader cannot vouch for is refused rather than guessed at: guessing "no podman"
-			// installs a docker-shaped unit for a podman deployment, and guessing "podman" the opposite.
-			if (!read.plain) return { error: `${envPath} line ${read.line} assigns ${key} in a form this command cannot read the way systemd's EnvironmentFile= will, so whether this deployment runs the podman venue is unknown. Write it as a plain ${key}=value line` };
-			fileKeys[key] = read.value;
-		}
+		const read = readStackKeys(text, { loader: linux ? "systemd" : ctx.platform === "darwin" ? "shell" : "cmd", path: envPath });
+		if (read.error) return linux ? { error: read.error } : { used: false };
+		fileKeys = read.keys;
 	}
 	// Refused here, unlike doctor's venuesOf, which reads an unparseable list as `local`: doctor then reports the parse,
 	// but an install that guessed would write a unit and a stack for a deployment the worker refuses to boot.
 	try {
 		parseBackendList(fileKeys.PI_BACKENDS);
 	} catch (err) {
-		return { error: `${envPath}: ${err.message}` };
+		return linux ? { error: `${envPath}: ${err.message}` } : { used: false };
 	}
 	const venues = venuesOf(fileKeys);
 	if (!venues.podmanUsed) return { used: false };
@@ -912,7 +909,18 @@ async function installLinuxUser(ctx, paths, stack = null) {
 		if (stack.components.proxy && !ctx.fs.existsSync(allowlist)) {
 			return fail(ctx.err, `the egress policy is on, and ${allowlist} does not exist: a proxy unit mounting a missing file makes Podman create a DIRECTORY there and squid fail confusingly. Run \`pi-dispatch init\` in ${ctx.deployDir} first (it never overwrites), or set PI_EGRESS=0 in .env to opt out of the policy`);
 		}
+		// A container of the unit's name that the unit does not own would be removed by its `podman run --replace`
+		// (issue #430 review): refused unless --force says to replace it, and then said out loud.
+		const foreign = await foreignContainers(stack.plan, (cmd, args) => runCapture(ctx, cmd, args));
+		if (foreign.length > 0 && !ctx.force) {
+			return fail(ctx.err, foreignContainerRefusal(foreign, { forceHint: "pass --force to let the Quadlet unit replace it" }));
+		}
 		for (const note of stack.notes) ctx.out(`note: ${note}\n`);
+		for (const f of foreign) {
+			ctx.out(`⚠ --force: ${f.container} is not managed by ${f.unit} and will be REPLACED by it${f.unit === QUADLET_FILES.proxy.unit ? "; every job running right now loses the per-job network it had on that proxy" : ""}\n`);
+		}
+		const restartWarning = proxyRestartWarning(stack.plan);
+		if (restartWarning) ctx.out(`⚠ ${restartWarning}\n`);
 		if (stack.plan.actions.length > 0) {
 			// Shown, then done: the same lines `up` asks consent for, carried out by the same function.
 			ctx.out(`podman venue (PI_BACKENDS in .env): its stack, as Quadlet units in ${stack.plan.dir}:\n`);
@@ -936,7 +944,13 @@ async function installLinuxUser(ctx, paths, stack = null) {
 	}
 	ctx.out(`installed ${paths.name} → ${paths.installPath} (enabled and started in your user manager)\n`);
 	if (stack) {
-		if (stack.plan.start.length > 0) ctx.out(`started ${stack.plan.start.join(" ")} (Quadlet units: never enabled, the generator reads their own [Install] section); ${paths.name} Wants= and is After= them\n`);
+		// Said as it happened: `start` on a unit already active is a no-op, so a unit whose file this run replaced was
+		// RESTARTED (planStack), and the line names which is which rather than calling everything "started".
+		const restarted = stack.plan.restart ?? [];
+		const started = stack.plan.start.filter((u) => !restarted.includes(u));
+		if (started.length > 0) ctx.out(`started ${started.join(" ")} (Quadlet units: never enabled, the generator reads their own [Install] section; a unit already running is left as it is)\n`);
+		if (restarted.length > 0) ctx.out(`restarted ${restarted.join(" ")}, whose Quadlet file this install replaced\n`);
+		if (stack.plan.start.length > 0) ctx.out(`${paths.name} Wants= and is After= ${stack.plan.start.join(" ")}\n`);
 		// A WARNING, not a refusal, like the note below it: a worker that runs only while its operator is logged in is a
 		// real (desktop) deployment. But on this venue linger is also what brings the queue and the proxy back, and it
 		// was measured both ways, so the line says which of the two this host is rather than the general caution.

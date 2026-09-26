@@ -18,7 +18,10 @@
  * `podman info` rule, pulls the default image into this account's Podman store, and installs Valkey and the egress
  * proxy as Quadlet units through the installer `service install` uses (podman-stack.mjs), after init. When the list
  * does not name `local`, nothing here runs docker at all. The docker path of a deployment that blesses `local` is
- * unchanged, byte for byte.
+ * unchanged, with one correction: the egress step looks for the proxy PI_EGRESS_PROXY names rather than the shipped
+ * name, and starts nothing in place of an overriding one. The venue keys (PI_BACKENDS, PI_EGRESS, PI_EGRESS_PROXY)
+ * come from this shell when it sets them and otherwise from the deployment's `.env`, the file `service install`
+ * reads, so the two entry points decide the venue from the same place (`deploymentVenueEnv`).
  *
  * Converge-style, not transactional: a declined or failed step is reported and the pass continues, so
  * one flaky pull does not hide the doctor report that says what else is missing. Exit code mirrors
@@ -33,12 +36,12 @@ import { connect as netConnect } from "node:net";
 import { homedir, userInfo } from "node:os";
 import { dirname, join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
-import { makePodmanInfoReader, decidePodmanJobUser, podmanJobUserRefusal } from "./backend-podman.mjs";
+import { PODMAN_BOOT_REFUSING_CAUSES, makePodmanInfoReader, decidePodmanJobUser, podmanJobUserRefusal } from "./backend-podman.mjs";
 import { venuesOf } from "./backends.mjs";
 import { logsDirPath, settingsFilePath } from "./config.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed as egressArmedFn, egressProxyName } from "./egress.mjs";
 import { envKeyIsBlank, updateEnvFile } from "./env-file.mjs";
-import { applyStack, describeAction, lingerNote, planStack, readLinger, stackComponents } from "./podman-stack.mjs";
+import { STACK_KEYS, applyStack, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, readLinger, readStackKeys, stackComponents } from "./podman-stack.mjs";
 
 // The shipped Quadlet templates, module-relative like service.mjs's: worker/deploy in a checkout, <pkg>/deploy under npm.
 const TEMPLATES_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "deploy");
@@ -159,9 +162,10 @@ export async function runUp(argv = [], deps = {}) {
 		euid = typeof process.geteuid === "function" ? process.geteuid() : null,
 		egid = typeof process.getegid === "function" ? process.getegid() : null,
 		home = homedir(),
-		// env-internal USER: whose linger `up` reads after starting the podman stack, the login already running it (the
-		// same reading as service.mjs's, which names the account its units run as).
-		user = env.USER || userInfo().username,
+		// Whose linger `up` reads after starting the podman stack: the login already running it, as service.mjs reads
+		// it. Resolved LAZILY (`userName` below), never as a default here: `userInfo()` throws for a uid with no passwd
+		// entry, and the docker path, which never asks, must not die of it.
+		user,
 		templatesDir = TEMPLATES_DIR,
 		// The shipped Quadlet templates are the package's files, read for real even where `fs` is a test's fake of the
 		// deployment folder; injectable so a test can hand in its own.
@@ -171,11 +175,28 @@ export async function runUp(argv = [], deps = {}) {
 	let { runInitFn, runDoctorFn } = deps;
 	const yes = argv.includes("--yes");
 	const summary = [];
+	// env-internal USER: the login running `up`, only ever read on the podman path (see the `user` seam above).
+	const userName = () => user ?? (env.USER || userInfo().username);
+
+	// The venue keys, from the same place `service install` reads them (issue #430 review, D2). Nothing loads `.env`
+	// into a process, so `up` used to decide the venue from this shell alone: an operator who followed the docs and put
+	// PI_BACKENDS=podman in `.env` got the docker pass, and the service they installed next got podman. THIS SHELL WINS
+	// where it sets a key (the same precedence the doctor layering below uses, and what the wizard relies on when it
+	// runs `up` with PI_BACKENDS=podman before init has written `.env`); `.env` fills the keys the shell leaves unset; a
+	// disagreement is printed, because the service will run the file's value. A `.env` line touching one of these keys
+	// that the loaders read differently stops `up` before anything runs, as `service install` refuses.
+	const venue = deploymentVenueEnv({ env, fs, envPath: join(cwd, ".env") });
+	if (venue.error) {
+		out(`✗ ${venue.error}\n\nup: cannot tell which venue this deployment runs: fix the above, then re-run \`pi-dispatch up\`.\n`);
+		return 1;
+	}
+	for (const line of venue.disagreements) out(`⚠ ${line}\n`);
+	const venueEnv = venue.env;
 
 	// Which runtimes this pass drives (issue #430). With `local` blessed (which the unset default is) everything below
 	// is exactly what it always was, and a list that also names podman adds the podman steps after the docker ones. A
 	// list WITHOUT `local` never touches docker at all: such a host may have no docker, and asking it would only fail.
-	const venues = venuesOf(env);
+	const venues = venuesOf(venueEnv);
 	const dockerUsed = venues.localUsed;
 	//
 	// The docker lines below keep their original text and indentation, the `else` and the unbraced block included, so
@@ -257,7 +278,7 @@ export async function runUp(argv = [], deps = {}) {
 	let podmanReady = false;
 	if (venues.podmanUsed) {
 		const gate = await podmanGate({ readPodmanInfo, platform, euid, egid, out });
-		if (!gate.ok) {
+		if (gate.refused) {
 			summary.push(["podman", `NOT ready: ${gate.why}`]);
 			if (!dockerUsed) {
 				out("\nup: cannot continue without a usable rootless Podman: fix the above, then re-run `pi-dispatch up`.\n");
@@ -265,6 +286,7 @@ export async function runUp(argv = [], deps = {}) {
 			}
 			out("  the docker steps above are unaffected; the podman steps below are skipped\n");
 		} else {
+			if (!gate.ok) summary.push(["podman", `not decided yet: ${gate.why}`]);
 			podmanReady = true;
 			await podmanImageStep({ spawn, out, yes, prompt, summary });
 		}
@@ -438,8 +460,8 @@ export async function runUp(argv = [], deps = {}) {
 	// AFTER init, deliberately: init has just scaffolded egress-allowlist.conf, and starting a proxy whose
 	// allowlist file does not exist gets a directory created by docker where a file belonged and a squid
 	// that fails confusingly. If the file is still missing, this step declines itself and says which file.
-	const proxyName = egressProxyName(env);
-	if (dockerUsed && egressArmedFn(env) && proxyName !== DEFAULT_EGRESS_PROXY) {
+	const proxyName = egressProxyName(venueEnv);
+	if (dockerUsed && egressArmedFn(venueEnv) && proxyName !== DEFAULT_EGRESS_PROXY) {
 		// PI_EGRESS_PROXY names the operator's own proxy (issue #430). This step used to look for, and offer to start, the
 		// shipped name whatever that key said, so it could report a proxy present that no job attaches to, or start one
 		// beside the one the worker actually uses. It now asks about the name the worker attaches by and starts nothing:
@@ -451,7 +473,7 @@ export async function runUp(argv = [], deps = {}) {
 			out(`\n✗ PI_EGRESS_PROXY names ${proxyName}, and docker has no container of that name. up starts only the shipped ${DEFAULT_EGRESS_PROXY}, so start ${proxyName} yourself\n`);
 			summary.push(["egress", `${proxyName} (PI_EGRESS_PROXY) not found; every job is refused pre-spend until it runs`]);
 		}
-	} else if (dockerUsed && egressArmedFn(env)) {
+	} else if (dockerUsed && egressArmedFn(venueEnv)) {
 		if ((await runCmd(spawn, "docker", ["inspect", "--format={{.State.Running}}", "pi-dispatch-egress-proxy"])) === 0) {
 			out("\n✓ Egress proxy already present (pi-dispatch-egress-proxy)\n");
 			summary.push(["egress", "proxy already present — left untouched"]);
@@ -480,7 +502,7 @@ export async function runUp(argv = [], deps = {}) {
 	// installer `pi-dispatch service install` uses (issue #430). After init for the reason (e2) gives: the proxy mounts
 	// the allowlist init scaffolds.
 	if (podmanReady) {
-		await podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, fs, probeTcp, cwd, home, user, templatesDir, readTemplate, mkdir });
+		await podmanStackStep({ env: venueEnv, venues, spawn, out, yes, prompt, summary, fs, probeTcp, cwd, home, user: userName(), templatesDir, readTemplate, mkdir });
 	}
 
 	// (f) doctor — always, verbatim: up converges what it can, doctor is the judge of what remains
@@ -509,6 +531,10 @@ export async function runUp(argv = [], deps = {}) {
 	for (const [key, value] of Object.entries(wrote)) {
 		if (typeof env[key] !== "string") layered[key] = value;
 	}
+	// The venue keys `.env` supplied (D2), by the same env-wins rule, so doctor judges the venue this pass drove.
+	for (const [key, value] of Object.entries(venue.fromFile)) {
+		if (typeof env[key] !== "string") layered[key] = value;
+	}
 	const doctorCode = await runDoctorFn(layered, { out });
 
 	// (g) the summary: what ran, what was skipped, what was already there — then the two commands
@@ -526,7 +552,48 @@ Next:
   pi-dispatch run ./my-project --task "add type hints to utils.py"
       queue your first job from another terminal
 `);
+	// A worker run BY HAND reads only its shell, so on the podman venue it needs the list exported; the service reads
+	// `.env` itself. Printed only there, so every other deployment's closing text is unchanged.
+	if (venues.podmanUsed) {
+		out("  (podman venue: a worker started by hand reads only its shell, so export the same PI_BACKENDS there first, or run it as a service with `pi-dispatch service install`, which reads .env)\n");
+	}
 	return doctorCode;
+}
+
+/**
+ * The venue keys this pass decides with (D2): this shell's value where it sets one, else the deployment `.env`'s, read
+ * with `readStackKeys` exactly as `service install` reads them. Returns `{ env, fromFile, disagreements }` or
+ * `{ error }`. `env` is the whole environment with the file's keys filled in; `fromFile` is only what the file
+ * supplied, for doctor's layering; `disagreements` names each key both set differently.
+ */
+function deploymentVenueEnv({ env, fs, envPath }) {
+	let keys = {};
+	if (fs.existsSync(envPath)) {
+		let text = null;
+		try {
+			text = String(fs.readFileSync(envPath, "utf8"));
+		} catch {
+			// Unreadable: the later .env steps say so in their own words; the venue then comes from the shell alone.
+		}
+		if (text !== null) {
+			const read = readStackKeys(text, { loader: "systemd", path: envPath });
+			if (read.error) return { error: read.error };
+			keys = read.keys;
+		}
+	}
+	const merged = { ...env };
+	const fromFile = {};
+	const disagreements = [];
+	for (const key of STACK_KEYS) {
+		if (!Object.hasOwn(keys, key)) continue;
+		if (typeof env[key] === "string") {
+			if (env[key] !== keys[key]) disagreements.push(`${key} is ${JSON.stringify(env[key])} in this shell and ${JSON.stringify(keys[key])} in ${envPath}: this pass uses the shell's, and the service will run the file's`);
+			continue;
+		}
+		merged[key] = keys[key];
+		fromFile[key] = keys[key];
+	}
+	return { env: merged, fromFile, disagreements };
 }
 
 /**
@@ -546,9 +613,17 @@ async function podmanGate({ readPodmanInfo, platform, euid, egid, out }) {
 		out(`✓ rootless Podman answering (podman jobs run as ${decision.user}, with --userns=keep-id)\n`);
 		return { ok: true };
 	}
+	// Parity with the worker's BOOT (issue #430 review, D7): only the causes that stop a worker booting stop `up`. A
+	// podman info that timed out, or one nothing could read, is a verdict the worker defers to each job rather than
+	// refusing at boot, so `up` warns and carries on; the image and stack steps then answer for themselves.
+	if (decision.mode === "unmappable" && PODMAN_BOOT_REFUSING_CAUSES.has(decision.cause)) {
+		const why = podmanJobUserRefusal(decision);
+		out(`✗ podman venue not usable here\n    → ${why}\n`);
+		return { ok: false, refused: true, why };
+	}
 	const why = decision.mode === "unmappable" ? podmanJobUserRefusal(decision) : `podman info did not answer (${decision.reason}); check that \`podman info --format json\` works as this account.`;
-	out(`✗ podman venue not usable here\n    → ${why}\n`);
-	return { ok: false, why };
+	out(`⚠ podman venue not decided yet (the worker would retry this, not refuse it at boot)\n    → ${why}\n`);
+	return { ok: false, refused: false, why };
 }
 
 /** The default job image into this account's Podman store, mirroring the docker step (b) line for line. */
@@ -599,7 +674,11 @@ async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, 
 	const components = stackComponents({ venues, env, includeValkey, armed });
 	for (const note of components.notes) out(`\n⚠ ${note}\n`);
 	if (components.proxy) {
-		if ((await runCmd(spawn, "podman", ["inspect", "--format={{.State.Running}}", DEFAULT_EGRESS_PROXY])) === 0) {
+		// RUNNING, read off the output: `podman inspect` exits 0 for an EXITED container too and prints `false`
+		// (measured), so the exit code alone called a stopped hand-started proxy "present" and offered nothing, which is
+		// exactly the upgrade this step exists for. A stopped one is offered the unit, under the foreign-container rule.
+		const inspect = await runCmdCapture(spawn, "podman", ["inspect", "--format={{.State.Running}}", DEFAULT_EGRESS_PROXY]);
+		if (inspect.code === 0 && inspect.output.trim() === "true") {
 			out(`\n✓ Egress proxy already present under this account's Podman (${DEFAULT_EGRESS_PROXY})\n`);
 			summary.push(["egress (podman)", "proxy already present, left untouched"]);
 			components.proxy = false;
@@ -621,6 +700,15 @@ async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, 
 		// up has no --force, and a file someone edited is theirs until they say otherwise (init's contract).
 		out(`\n✗ ${changed.map((f) => f.path).join(", ")} differs from what this version renders, left untouched\n`);
 		summary.push(["podman stack", "NOT installed: a Quadlet file differs; `pi-dispatch service install --force` replaces it"]);
+		return;
+	}
+	// The shared installer's foreign-container rule (D3): a container of a unit's name that the unit does not own would
+	// be removed by the unit's `podman run --replace`. up has no --force, so it names both ways out and installs nothing.
+	const foreign = await foreignContainers(plan, (cmd, args) => runCmdCapture(spawn, cmd, args));
+	if (foreign.length > 0) {
+		const why = foreignContainerRefusal(foreign, { forceHint: "run `pi-dispatch service install --force`, which replaces it and says so" });
+		out(`\n✗ ${why}\n`);
+		summary.push(["podman stack", `NOT installed: ${foreign.map((f) => f.container).join(", ")} exists and is not the Quadlet unit's`]);
 		return;
 	}
 	const parts = [components.valkey ? "Valkey" : null, components.proxy ? "the egress proxy" : null].filter(Boolean).join(" and ");

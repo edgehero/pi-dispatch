@@ -5062,11 +5062,32 @@ a tunnel.
     container is the operator's own proxy, and a Quadlet of that name would `podman run --replace` it away, so
     neither command installs one and both say why. `up`'s docker egress step follows the same rule since this
     issue: it used to inspect and offer to start the shipped name whatever `PI_EGRESS_PROXY` said.
-  - **Where the answer comes from.** `service install` reads `PI_BACKENDS`, `PI_EGRESS` and `PI_EGRESS_PROXY` from
-    the deployment's `.env`, the file the unit's `EnvironmentFile=` loads, read the way systemd reads it, and never
-    from the shell running the command (nothing loads `.env` into a process, so a shell export says nothing about
-    what the service runs). A line it cannot read that way, an unparseable list, or an unparseable `PI_EGRESS`
-    refuses the install before anything is written. `up` reads its own environment, as it always has.
+  - **Where the answer comes from.** Both commands read `PI_BACKENDS`, `PI_EGRESS` and `PI_EGRESS_PROXY` from the
+    deployment's `.env` with one reader (`readStackKeys`), the way systemd's `EnvironmentFile=` reads it.
+    `service install` reads the file alone, never the shell running it (nothing loads `.env` into a process, so a
+    shell export says nothing about what the service runs). `up` lets its shell win where it sets a key, the
+    precedence its doctor layering already uses and the one the wizard needs when it runs `up` with
+    `PI_BACKENDS=podman` before init has written `.env`, fills the rest from the file, and prints any disagreement,
+    since the service runs the file's value. Before review round 1 `up` read only its shell, so the documented
+    "put it in `.env`, run `up`" gave the docker pass. A line touching one of the keys that the loaders read
+    differently refuses both commands before anything runs: `PI_BACKENDS =podman` is set by systemd and yields no
+    record, `export PI_BACKENDS=podman` the opposite, a value with `$` or quotes the shells expand, and a record of
+    none of these would otherwise read as "no podman" and install a docker-shaped worker. An unparseable list or
+    `PI_EGRESS` refuses too. On macOS and Windows the answer decides only a note, so it is read with that platform's
+    loader and never refuses.
+  - **A container the unit does not own is never replaced silently.** A Quadlet container unit runs
+    `podman run --replace`, which removes any container of its name: a hand-started proxy (the by-hand route
+    `docs/podman.md` still gives) with every job's per-job network on it. The shared installer asks each container
+    of the plan for its `PODMAN_SYSTEMD_UNIT` label; one that does not name our unit is foreign, `service install`
+    refuses unless `--force` (and then says it replaces it), and `up`, which has no `--force`, installs nothing and
+    names both ways out. `up` reads a running proxy from `{{.State.Running}}`'s OUTPUT: an exited container prints
+    `false` with exit 0 (measured), and the exit code alone called a stopped hand-started proxy present.
+  - **A replaced file restarts its unit.** `--force` over a changed `.container` file restarts that unit, because
+    `start` on an active unit does nothing, and warns first when it is the proxy. A changed `.network` file restarts
+    nothing: its unit runs `podman network create --ignore`, which cannot change an existing network.
+  - **The gate is the worker's boot, not stricter.** `up` stops only on `PODMAN_BOOT_REFUSING_CAUSES`; a
+    `podman info` that timed out or that nothing could read is a per-job verdict at the worker, so `up` warns and
+    carries on.
   - **System scope refuses** on a podman deployment, with the reason: the units belong to the account's user
     manager, which a system unit cannot `Wants=`/`After=`, and system scope's doctrine is that this tool writes
     nothing. A system unit with `User=` still runs rootless Podman (measured, `DES-PODMAN-NATIVE-ROOTLESS-BACKEND`),
@@ -5103,18 +5124,23 @@ a tunnel.
     route out for the rest of that run. The worker does not re-attach (a re-attach loop is a second writer on the
     proxy's networks beside the per-job create and remove), so the advice is not to restart the proxy under running
     jobs.
-  - Valkey on its own bridge network with `PublishPort=127.0.0.1:6379:6379`, the exec-form `HealthCmd` of the proxy,
-    the `Health*` interval keys, `TimeoutStartSec=` and `Restart=` are not measured on a host; the M0 measurement
-    ran Valkey with no `Network=` and a plain `HealthCmd`. The keys are all present in Podman 4.9.3's generator
-    source, and the deploy-lint `quadlet` job runs that generator in dry-run over the rendered files.
-  - A path the proxy's `Volume=` cannot carry (a colon, whitespace, `%`, a quote, a backslash, a control byte) is
-    refused rather than escaped, because none of the escapes was measured.
+  - Valkey on its own bridge network with `PublishPort=127.0.0.1:6379:6379`, the exec-form `HealthCmd` of the proxy
+    running, the `Health*` interval keys, `TimeoutStartSec=` and `Restart=` are not measured on a host; the M0
+    measurement ran Valkey with no `Network=` and a plain `HealthCmd`. Podman 4.9.3's generator accepts all four files
+    (the deploy-lint `quadlet` job, which caught that 4.9 writes `--name=X` where 5.8 writes `--name X`).
+  - The `PODMAN_SYSTEMD_UNIT` label the foreign-container rule reads is Podman's auto-update mechanism, not measured
+    here on a Quadlet container.
+  - The proxy mounts the PACKAGE's `egress-proxy.conf` with the shared `z` relabel. Under a root-owned global npm
+    install the worker account does not own that file, and relabelling it may be refused; unmeasured.
+  - A path the proxy's `Volume=` cannot carry (a colon, whitespace, `%`, `$`, a quote, a backslash, a control byte)
+    is refused rather than escaped, because none of the escapes was measured.
   - A key an `--env-setup` script exports is invisible to the install's decision (`DES-SERVICE-ENV-SETUP-SEAM`):
     `PI_BACKENDS` must be in `.env` for `service install` to see it.
 - **Code evidence**: `worker/src/podman-stack.mjs` -> `stackComponents`, `planStack`, `applyStack`,
-  `describeAction`, `workerUnitDeps`, `readLinger`, `lingerNote`; `worker/src/service.mjs` -> `podmanVenue`,
+  `describeAction`, `workerUnitDeps`, `readLinger`, `lingerNote`, `readStackKeys`, `foreignContainers`,
+  `proxyRestartWarning`; `worker/src/service.mjs` -> `podmanVenue`,
   `podmanStackFor`, `refusePodmanSystemScope`, `installLinuxUser`, `removeQuadlets`, `TEMPLATE_PINS`;
-  `worker/src/up.mjs` -> `podmanGate`, `podmanImageStep`, `podmanStackStep`; `worker/src/backends.mjs` ->
+  `worker/src/up.mjs` -> `deploymentVenueEnv`, `podmanGate`, `podmanImageStep`, `podmanStackStep`; `worker/src/backends.mjs` ->
   `venuesOf`; `deploy/pi-dispatch-*.container`, `deploy/pi-dispatch-*.network`;
   `worker/test/podman-stack.test.mjs`; `.github/workflows/deploy-lint.yml` (the `quadlet` job)
 - **Traces to**: `DES-PODMAN-NATIVE-ROOTLESS-BACKEND`, `REQ-DEPLOYMENT-BOOTSTRAP`, `DES-FIRST-RUN-SETUP-WIZARD`,
@@ -5282,3 +5308,4 @@ a tunnel.
 | 2026-09-27 | Issue #433, review round 2. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**, one word in the Decision: the unblessed-venue line is about triggers this host SERVES. On a fleet a cron trigger placed on another machine (`folder-absent`) got the ✗ and failed doctor on a host that never schedules it; the rule and its fleet wording live in `INT-TRIGGERS-FILE-CONTRACT` (amended in its own file). Also pinned: a webhook trigger is named by its position in the file, in that line and in the flow-resolution line, which share one `triggerLabel`. |
 | 2026-09-27 | Issue #433, review round 3. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**, the same sentence as round 2's: "a trigger this host serves" becomes "a cron trigger this host's worker schedules, or any forge trigger", which is what the code now judges (`INT-TRIGGERS-FILE-CONTRACT` has the rule and the correction). |
 | 2026-09-27 | Issue #430. **NEW `DES-PODMAN-STACK-AS-QUADLET-UNITS`**: the native podman venue's Valkey and egress proxy become four shipped Quadlet files, installed by one planner that `service install` (user scope) and `up` both call; install writes, daemon-reloads and starts, never enables (measured: a generated unit refuses enable, and the generator honours its own `[Install]`). The entry records which parts are installed and why (Valkey only without `local`, the proxy only while armed and only under the default name), where the answer is read (the `.env` the unit loads, never the shell), the system-scope refusal and its reason, linger as a measured warning, the explicit `Network=` in every container, and the measured restart-drops-networks residual. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED** in its decision and its residuals: `up` and the wizard are no longer docker-only, the reboot question is answered by measurement, and the compose file alone stays docker-only. **`DES-FIRST-RUN-SETUP-WIZARD` AMENDED**: the pre-check becomes runtime-aware, the podman branch writes `PI_BACKENDS=podman` into `.env` after `up`, and the compose receiver is explained rather than attempted there. **`DES-SERVICE-ENV-SETUP-SEAM` AMENDED**, one parenthesis: an `--env-setup` script's keys are invisible to that decision. **`DES-CONCURRENCY-3` UNCHANGED, checked**: the other-scope worker refusal runs before any stack work. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` UNCHANGED, checked**: the per-job network design is the same; only who starts the proxy on this venue moved. **`DES-WORKER-ON-HOST` UNCHANGED, checked**. Rebased onto issue #433: doctor's fix for an unreachable Valkey on a deployment without `local` now names `pi-dispatch up` and `service install`, which install it, rather than only pointing at docs/podman.md. |
+| 2026-09-27 | Issue #430, review round 1. **`DES-PODMAN-STACK-AS-QUADLET-UNITS` AMENDED**. `up` now reads the three venue keys from the deployment's `.env` through the reader `service install` uses, with its shell winning where set and any disagreement printed; before, it read its shell alone, so the documented `.env` route gave the docker pass. Both commands refuse a `.env` line touching a venue key in a form the loaders read differently (`PI_BACKENDS =podman`, `export`, a `$` value), which used to read as "no podman". NEW rule in the shared installer: a container of a unit's name without our `PODMAN_SYSTEMD_UNIT` label is foreign and is never replaced silently (`service install` refuses unless `--force`, `up` installs nothing). `up` reads a running proxy from the inspect output, not its exit code (an exited container exits 0). `--force` over a changed `.container` restarts that unit and warns for the proxy. `up`'s podman gate stops only on the worker's boot-refusing causes. `$` joins the refused path characters; the residuals gain the label and the `z` relabel of a root-owned package file, and record that Podman 4.9.3's generator accepts the files. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` UNCHANGED, checked**. |

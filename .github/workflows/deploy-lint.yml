@@ -119,15 +119,19 @@ jobs:
             echo "::error::quadlet reported a problem with a template. See the log above."
             exit 1
           fi
-          # What the worker relies on by name, read off the generated units rather than the templates.
+          # What the worker relies on by name, read off the generated units rather than the templates. Extended
+          # regexes, because the two generators spell an option differently: Podman 4.9.3 writes `--name=X` and
+          # `--network=X` (run 36275999554), 5.8.1 writes `--name X` (the M0-b measurement). Either is one argv word
+          # pair to podman, so both are accepted and nothing else is.
           for needle in \
-            'ExecStart=/usr/bin/podman network create --ignore pi-dispatch-valkey' \
-            'ExecStart=/usr/bin/podman network create --ignore pi-dispatch-egress-out' \
-            '--name pi-dispatch-valkey ' \
-            '--name pi-dispatch-egress-proxy ' \
-            '--network pi-dispatch-valkey' \
-            '--network pi-dispatch-egress-out' \
-            '--publish 127.0.0.1:6379:6379'; do
-            grep -qF -- "$needle" generated.txt || { echo "::error::generated units lack: $needle"; exit 1; }
+            'ExecStart=/usr/bin/podman network create --ignore pi-dispatch-valkey$' \
+            'ExecStart=/usr/bin/podman network create --ignore pi-dispatch-egress-out$' \
+            '--name[= ]pi-dispatch-valkey ' \
+            '--name[= ]pi-dispatch-egress-proxy ' \
+            '--network[= ]pi-dispatch-valkey ' \
+            '--network[= ]pi-dispatch-egress-out ' \
+            '--publish[= ]127\.0\.0\.1:6379:6379 ' \
+            '--health-cmd[= ]"\[\\"bash\\",'; do
+            grep -qE -- "$needle" generated.txt || { echo "::error::generated units lack: $needle"; exit 1; }
           done
           echo "OK: every Quadlet template generates on $(podman --version)"

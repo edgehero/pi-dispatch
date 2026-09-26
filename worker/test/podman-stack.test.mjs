@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_EGRESS_PROXY } from "../src/egress.mjs";
-import { ALL_QUADLET_FILES, QUADLET_FILES, planStack, quadletDir, stackComponents } from "../src/podman-stack.mjs";
+import { ALL_QUADLET_FILES, QUADLET_FILES, planStack, quadletDir, readStackKeys, stackComponents } from "../src/podman-stack.mjs";
 import { runService } from "../src/service.mjs";
 
 /**
@@ -126,7 +126,7 @@ test("planStack: the proxy's two mounts become the package's conf and the deploy
 });
 
 test("planStack: a deployment path a Quadlet Volume= cannot carry is refused, not escaped", () => {
-	for (const bad of ["/srv/pi deploy", "/srv/pi:deploy", "/srv/pi%deploy"]) {
+	for (const bad of ["/srv/pi deploy", "/srv/pi:deploy", "/srv/pi%deploy", "/srv/pi${HOME}deploy", "/srv/pi$Xdeploy"]) {
 		const plan = planStack({ components: { valkey: false, proxy: true }, templatesDir: DEPLOY_DIR, deployDir: bad, home: HOME, fs: realReadFs() });
 		assert.match(plan.error ?? "", /cannot carry/, bad);
 	}
@@ -172,7 +172,7 @@ function fakeSpawn(plan, calls) {
 
 const PODMAN_ENV = "PI_BACKENDS=podman\n";
 
-function svc({ argv = ["install"], files = {}, plan = {}, listening = false, env = {} } = {}) {
+function svc({ argv = ["install"], files = {}, plan = {}, listening = false, env = {}, platform = "linux", cwd = DEPLOY_AT } = {}) {
 	const calls = [];
 	const out = [];
 	const err = [];
@@ -180,16 +180,18 @@ function svc({ argv = ["install"], files = {}, plan = {}, listening = false, env
 	const writes = [];
 	const deps = {
 		env,
-		platform: "linux",
+		platform,
 		euid: 1234,
 		execPath: "/fake/node",
-		cwd: DEPLOY_AT,
+		cwd,
 		moduleDir: WORKER_SRC,
 		resolveReceiver: () => "/fake/receiver/start.mjs",
 		home: HOME,
 		user: "tester",
 		tmp: "/faketmp",
-		spawn: fakeSpawn({ "loginctl show-user": { code: 0, output: "Linger=yes\n" }, ...plan }, calls),
+		// The test's own plan FIRST: the fake takes the first matching prefix, so a longer key a test adds must come
+		// before the defaults' shorter one.
+		spawn: fakeSpawn({ ...plan, ...Object.fromEntries(Object.entries({ "loginctl show-user": { code: 0, output: "Linger=yes\n" }, "podman container inspect": 125 }).filter(([k]) => !(k in plan))) }, calls),
 		out: (s) => out.push(s),
 		err: (s) => err.push(s),
 		probeTcp: async () => listening,
@@ -211,7 +213,10 @@ test("service install (user scope, podman in .env, egress armed): writes the Qua
 	const h = svc({ files: { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "api.anthropic.com\n" } });
 	assert.equal(await h.run(), 0, h.errText());
 	for (const q of ALL_QUADLET_FILES) assert.ok(h.store.has(join(QDIR, q.file)), `${q.file} written into ${QDIR}`);
+	const LABEL = '{{index .Config.Labels "PODMAN_SYSTEMD_UNIT"}}';
 	assert.deepEqual(h.calls, [
+		["podman", "container", "inspect", "--format", LABEL, "pi-dispatch-valkey"],
+		["podman", "container", "inspect", "--format", LABEL, "pi-dispatch-egress-proxy"],
 		["systemctl", "--user", "daemon-reload"],
 		["systemctl", "--user", "start", "pi-dispatch-valkey.service", "pi-dispatch-egress-proxy.service"],
 		["systemctl", "--user", "daemon-reload"],
@@ -352,4 +357,120 @@ test("service status lists each installed Quadlet unit with its state, and nothi
 
 test("quadletDir is ~/.config/containers/systemd whatever this shell's XDG_CONFIG_HOME says", () => {
 	assert.equal(quadletDir(HOME), QDIR);
+});
+
+// ---------------------------------------------------------------------------------------------------
+// Review round 1 (issue #430): the defects and the gaps each mutation survived
+// ---------------------------------------------------------------------------------------------------
+
+const LABEL = '{{index .Config.Labels "PODMAN_SYSTEMD_UNIT"}}';
+const NO_EGRESS = `${PODMAN_ENV}PI_EGRESS=0\n`;
+
+test("D3: service install refuses a container of the unit's name the unit does not own, and --force replaces it saying so", async () => {
+	const foreign = { "podman container inspect --format": { code: 0, output: "<no value>\n" } };
+	const h = svc({ files: { [ENV_PATH]: NO_EGRESS }, plan: foreign });
+	assert.equal(await h.run(), 1);
+	assert.match(h.errText(), /pi-dispatch-valkey already exists under this account's Podman and is not managed by the Quadlet unit/);
+	assert.match(h.errText(), /podman rm -f pi-dispatch-valkey/);
+	assert.match(h.errText(), /pass --force/);
+	assert.deepEqual(h.writes, [], "refused before anything is written");
+	assert.ok(!h.calls.some((c) => c[0] === "systemctl"));
+	const forced = svc({ argv: ["install", "--force"], files: { [ENV_PATH]: NO_EGRESS }, plan: foreign });
+	assert.equal(await forced.run(), 0);
+	assert.match(forced.text(), /⚠ --force: pi-dispatch-valkey is not managed by pi-dispatch-valkey\.service and will be REPLACED by it/);
+	// A container the unit started carries the unit's label: that one is ours, and nothing is refused.
+	const ours = svc({ files: { [ENV_PATH]: NO_EGRESS }, plan: { "podman container inspect --format": { code: 0, output: "pi-dispatch-valkey.service\n" } } });
+	assert.equal(await ours.run(), 0);
+	assert.deepEqual(ours.calls[0], ["podman", "container", "inspect", "--format", LABEL, "pi-dispatch-valkey"]);
+});
+
+test("D3: a hand-started proxy is foreign too, and --force warns that running jobs lose their per-job networks", async () => {
+	const plan = { "podman container inspect --format {{index .Config.Labels \"PODMAN_SYSTEMD_UNIT\"}} pi-dispatch-egress-proxy": { code: 0, output: "\n" } };
+	const h = svc({ files: { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "x\n" }, plan });
+	assert.equal(await h.run(), 1);
+	assert.match(h.errText(), /pi-dispatch-egress-proxy already exists/);
+	const forced = svc({ argv: ["install", "--force"], files: { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "x\n" }, plan });
+	assert.equal(await forced.run(), 0);
+	assert.match(forced.text(), /every job running right now loses the per-job network it had on that proxy/);
+});
+
+test("D5: --force over a changed .container RESTARTS that unit (start is a no-op on an active one), and warns for the proxy", async () => {
+	const planned = planStack({ components: { valkey: true, proxy: true }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs() });
+	const files = { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "x\n", [join(QDIR, QUADLET_FILES.valkey.file)]: planned.files[1].text };
+	for (const f of planned.files) files[f.path] = f.text;
+	files[join(QDIR, QUADLET_FILES.proxy.file)] = "[Container]\nImage=old\n";
+	const h = svc({ argv: ["install", "--force"], files, listening: true });
+	assert.equal(await h.run(), 0, h.errText());
+	assert.deepEqual(h.calls.filter((c) => c[0] === "systemctl").slice(0, 3), [
+		["systemctl", "--user", "daemon-reload"],
+		["systemctl", "--user", "start", "pi-dispatch-valkey.service"],
+		["systemctl", "--user", "restart", "pi-dispatch-egress-proxy.service"],
+	]);
+	assert.match(h.text(), /⚠ restarting pi-dispatch-egress-proxy\.service makes a NEW proxy container/);
+	assert.match(h.text(), /^restarted pi-dispatch-egress-proxy\.service, whose Quadlet file this install replaced$/m);
+	assert.match(h.text(), /^started pi-dispatch-valkey\.service /m);
+	// A changed .network file alone restarts nothing: its unit only runs `network create --ignore`.
+	const netOnly = planStack({ components: { valkey: true, proxy: false }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs({ [join(QDIR, QUADLET_FILES.valkeyNetwork.file)]: "[Network]\n" }) });
+	assert.deepEqual(netOnly.restart, []);
+});
+
+test("M19: every file unchanged still daemon-reloads before the start", () => {
+	const first = planStack({ components: { valkey: true, proxy: false }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs() });
+	const same = Object.fromEntries(first.files.map((f) => [f.path, f.text]));
+	const again = planStack({ components: { valkey: true, proxy: false }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs(same) });
+	assert.deepEqual(again.actions, [
+		{ kind: "run", argv: ["systemctl", "--user", "daemon-reload"] },
+		{ kind: "run", argv: ["systemctl", "--user", "start", "pi-dispatch-valkey.service"] },
+	]);
+});
+
+test("D6/M15: a stack key in any form the loaders disagree on refuses the install, never reads as 'no podman'", async () => {
+	for (const text of [
+		"PI_BACKENDS =podman\n", // systemd sets it, and it produces no record
+		"export PI_BACKENDS=podman\n", // the shells set it, systemd ignores it
+		"PI_BACKENDS=$X\n", // expanded by the shells only
+		"FOO=a\\\nPI_BACKENDS=podman\n", // the line above continues into this one
+		"PI_EGRESS = 0\nPI_BACKENDS=podman\n",
+	]) {
+		const h = svc({ files: { [ENV_PATH]: text } });
+		assert.equal(await h.run(), 1, JSON.stringify(text));
+		assert.match(h.errText(), /whether this deployment runs the podman venue is|so what the service reads for it is unknown/i, text);
+		assert.deepEqual(h.writes, [], text);
+		assert.deepEqual(h.calls, [], text);
+	}
+	// A file-level hazard refuses once a key is assigned at all, and is nobody's business when none is. The shells'
+	// loader shows it (systemd 252 reads the lines after an open quote as lines, measured in env-file.mjs).
+	assert.match(readStackKeys("PI_BACKENDS=podman\nFOO='open\n", { loader: "shell" }).error, /line 2 is one this command cannot read/);
+	assert.deepEqual(readStackKeys("FOO='open\n", { loader: "shell" }).keys, {});
+	// A comment mentioning a key is not a line of the file, and a plain assignment reads.
+	assert.deepEqual(readStackKeys("# PI_BACKENDS=podman is how\nPI_BACKENDS=podman\n").keys, { PI_BACKENDS: "podman" });
+	assert.deepEqual(readStackKeys("PI_EGRESS_PROXY=my-squid\n").keys, { PI_EGRESS_PROXY: "my-squid" });
+});
+
+test("M16: on macOS and Windows a .env listing podman installs the platform's unit and SAYS no podman stack was installed", async () => {
+	const mac = svc({ platform: "darwin", files: { [ENV_PATH]: PODMAN_ENV }, plan: { launchctl: 0 } });
+	assert.equal(await mac.run(), 0, mac.errText());
+	assert.match(mac.text(), /PI_BACKENDS lists podman, and the podman venue runs only on Linux/);
+	assert.ok(!mac.writes.some((p) => p.startsWith(QDIR)));
+	const win = svc({ platform: "win32", files: { [ENV_PATH]: PODMAN_ENV }, plan: { "nssm status": 3, nssm: 0 } });
+	assert.equal(await win.run(), 0, win.errText());
+	assert.match(win.text(), /the podman venue runs only on Linux/);
+	// And an unreadable line there refuses nothing: the answer could only ever change a note.
+	const odd = svc({ platform: "darwin", files: { [ENV_PATH]: "PI_BACKENDS =podman\n" }, plan: { launchctl: 0 } });
+	assert.equal(await odd.run(), 0);
+});
+
+test("M29: a deployment path the proxy's Volume= cannot carry refuses the install before anything runs", async () => {
+	const at = "/srv/pi deploy";
+	const h = svc({ cwd: at, files: { [`${at}/.env`]: PODMAN_ENV, [`${at}/egress-allowlist.conf`]: "x\n" } });
+	assert.equal(await h.run(), 1);
+	assert.match(h.errText(), /cannot carry a colon, whitespace/);
+	assert.deepEqual(h.writes, []);
+	assert.deepEqual(h.calls, []);
+});
+
+test("M33: service render prints the stack's notes, not only install", async () => {
+	const h = svc({ argv: ["render"], files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS_PROXY=my-squid\n` } });
+	assert.equal(await h.run(), 0);
+	assert.match(h.text(), /^# note: PI_EGRESS_PROXY names my-squid, your own proxy/m);
 });

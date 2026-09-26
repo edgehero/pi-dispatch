@@ -23,6 +23,7 @@
  */
 import { join } from "node:path";
 import { DEFAULT_EGRESS_PROXY, egressProxyName } from "./egress.mjs";
+import { envFileHazard, readEnvAssignments } from "./env-file.mjs";
 
 /**
  * The Quadlet files, in the order they are shown and written. `unit` is the service the generator makes of each; the
@@ -31,9 +32,9 @@ import { DEFAULT_EGRESS_PROXY, egressProxyName } from "./egress.mjs";
  */
 export const QUADLET_FILES = Object.freeze({
 	valkeyNetwork: Object.freeze({ file: "pi-dispatch-valkey.network", unit: "pi-dispatch-valkey-network.service" }),
-	valkey: Object.freeze({ file: "pi-dispatch-valkey.container", unit: "pi-dispatch-valkey.service" }),
+	valkey: Object.freeze({ file: "pi-dispatch-valkey.container", unit: "pi-dispatch-valkey.service", container: "pi-dispatch-valkey" }),
 	egressNetwork: Object.freeze({ file: "pi-dispatch-egress-out.network", unit: "pi-dispatch-egress-out-network.service" }),
-	proxy: Object.freeze({ file: "pi-dispatch-egress-proxy.container", unit: "pi-dispatch-egress-proxy.service" }),
+	proxy: Object.freeze({ file: "pi-dispatch-egress-proxy.container", unit: "pi-dispatch-egress-proxy.service", container: DEFAULT_EGRESS_PROXY }),
 });
 
 /** Every Quadlet file this project ships, for uninstall and status, which act on what exists rather than on a plan. */
@@ -56,11 +57,12 @@ export function quadletDir(home) {
 /**
  * Characters a path may not carry into a Quadlet `Volume=`. Each is a real parse on the way to `podman run`: `:`
  * splits the volume spec itself; whitespace splits the `RequiresMountsFor=` list Quadlet adds for every absolute
- * source; `%` is a systemd specifier there; quotes and backslashes are systemd's quoting; control bytes end the line.
+ * source; `%` is a systemd specifier there; `$` is expanded by systemd in the generated `ExecStart=` (`${X}` and
+ * `$X` alike); quotes and backslashes are systemd's quoting; control bytes end the line.
  * Refused rather than escaped: none of the escapes was measured, and a unit that fails at boot is the worst place to
  * find out.
  */
-const UNSAFE_VOLUME_PATH = /[:\s%"'\\\x00-\x1f\x7f]/;
+const UNSAFE_VOLUME_PATH = /[:\s%$"'\\\x00-\x1f\x7f]/;
 
 /**
  * What the stack for this deployment should hold, and why each part is or is not in it. Pure: every fact is a
@@ -104,7 +106,7 @@ export function planStack({ components, templatesDir, deployDir, home, fs, readT
 	if (components.proxy) {
 		for (const p of [conf, allowlist]) {
 			if (UNSAFE_VOLUME_PATH.test(p)) {
-				return { error: `the egress proxy's Quadlet unit would mount ${JSON.stringify(p)}, and a Quadlet Volume= cannot carry a colon, whitespace, %, a quote, a backslash or a control byte in a path (each is split or expanded on the way to podman run). Move the deployment folder, or start the proxy by hand (docs/podman.md)` };
+				return { error: `the egress proxy's Quadlet unit would mount ${JSON.stringify(p)}, and a Quadlet Volume= cannot carry a colon, whitespace, %, $, a quote, a backslash or a control byte in a path (each is split or expanded on the way to podman run). Move the deployment folder, or start the proxy by hand (docs/podman.md)` };
 			}
 		}
 	}
@@ -127,17 +129,104 @@ export function planStack({ components, templatesDir, deployDir, home, fs, readT
 		}
 		return { path, text, unit, state };
 	});
-	const start = files.filter((f) => f.path.endsWith(".container")).map((f) => f.unit);
+	const containers = files.filter((f) => f.path.endsWith(".container"));
+	const start = containers.map((f) => f.unit);
+	// A container whose OWN file changed is RESTARTED, not started: `start` on an active unit is a no-op, so a replaced
+	// file would otherwise change nothing until the next reboot while the command said it was done. Only the
+	// .container file counts. A changed .network file cannot change an existing network (its unit runs
+	// `podman network create --ignore`), so restarting the container over it would cost the proxy's per-job networks
+	// and apply nothing.
+	const restart = containers.filter((f) => f.state === "changed").map((f) => f.unit);
+	const fresh = start.filter((u) => !restart.includes(u));
 	const actions = [];
 	for (const f of files) if (f.state !== "same") actions.push({ kind: "write", path: f.path });
 	if (files.length > 0) {
 		// daemon-reload even when every file is unchanged: a file written by an earlier run that failed before its own
 		// reload is otherwise invisible to the manager, and the reload is idempotent.
 		actions.push({ kind: "run", argv: ["systemctl", "--user", "daemon-reload"] });
-		actions.push({ kind: "run", argv: ["systemctl", "--user", "start", ...start] });
+		if (fresh.length > 0) actions.push({ kind: "run", argv: ["systemctl", "--user", "start", ...fresh] });
+		if (restart.length > 0) actions.push({ kind: "run", argv: ["systemctl", "--user", "restart", ...restart] });
 	}
-	return { dir, files, start, actions };
+	return { dir, files, start, restart, actions };
 }
+
+/** The measured cost of restarting the proxy, said wherever a plan restarts it. */
+export function proxyRestartWarning(plan) {
+	if (!plan.restart?.includes(QUADLET_FILES.proxy.unit)) return null;
+	return `restarting ${QUADLET_FILES.proxy.unit} makes a NEW proxy container (measured: the unit runs podman run --replace --rm), so a job running right now loses its only route out for the rest of that run. Pause first if one is (pi-dispatch pause, wait for active jobs, then pi-dispatch resume)`;
+}
+
+/**
+ * Containers this plan would REPLACE without owning them (issue #430 review). A Quadlet container unit runs
+ * `podman run --replace`, which removes any container of the same name, running or not: a proxy started by hand from
+ * docs/podman.md, with every job's per-job network on it, would vanish without a word. One rule for both commands and
+ * both containers: a container of the unit's name that does not carry the `PODMAN_SYSTEMD_UNIT` label naming OUR unit
+ * is someone else's, and the caller refuses unless told to replace it. Podman labels a container with the unit
+ * that started it from the `PODMAN_SYSTEMD_UNIT` variable the generated unit sets (the auto-update mechanism reads
+ * the same label).
+ *
+ * `runCapture(cmd, args)` resolves `{ code, output }`. A non-zero exit is "no such container". Returns
+ * `[{ container, unit, label }]`, empty when nothing would be replaced that is not already ours.
+ */
+export async function foreignContainers(plan, runCapture) {
+	const found = [];
+	for (const q of [QUADLET_FILES.valkey, QUADLET_FILES.proxy]) {
+		if (!plan.start.includes(q.unit)) continue;
+		const res = await runCapture("podman", ["container", "inspect", "--format", '{{index .Config.Labels "PODMAN_SYSTEMD_UNIT"}}', q.container]);
+		if (res.code !== 0) continue;
+		const label = String(res.output ?? "").trim();
+		if (label !== q.unit) found.push({ container: q.container, unit: q.unit, label });
+	}
+	return found;
+}
+
+/** The refusal for `foreignContainers`' answer, naming both ways out. */
+export function foreignContainerRefusal(found, { forceHint }) {
+	const names = found.map((f) => f.container).join(" and ");
+	return `${names} already ${found.length === 1 ? "exists" : "exist"} under this account's Podman and ${found.length === 1 ? "is" : "are"} not managed by the Quadlet ${found.length === 1 ? "unit" : "units"} (started by hand, or by an older setup). The unit's podman run --replace would remove ${found.length === 1 ? "it" : "them"} without asking, and a proxy takes every running job's per-job network with it. Remove ${found.length === 1 ? "it" : "them"} yourself (podman rm -f ${found.map((f) => f.container).join(" ")}), or ${forceHint}`;
+}
+
+/**
+ * The three stack keys as a deployment's `.env` assigns them, for the loader that reads that file (issue #430 review,
+ * D6). `{ keys }` (only keys the file assigns), or `{ error }` when a line touching one of them is in a form this
+ * reader cannot vouch for. A key with NO record is not proof of no assignment: `PI_BACKENDS =podman` is set by
+ * systemd 252 (measured, see env-file.mjs's ASSIGNMENT) and produces no record here, `export PI_BACKENDS=podman` is
+ * ignored by systemd and set by the shells, and a line inside a multi-line quote belongs to the value above it. Any
+ * such line, or any file-level hazard while a key is mentioned at all, refuses: guessing "no podman" installs a
+ * docker-shaped worker for a podman deployment, and the opposite guess a stack for a docker one.
+ */
+export const STACK_KEYS = Object.freeze(["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY"]);
+
+export function readStackKeys(text, { loader = "systemd", path = ".env" } = {}) {
+	const lines = String(text ?? "").split("\n").map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
+	const mention = new RegExp(`(?:^|[^A-Za-z0-9_])(${STACK_KEYS.join("|")})(?![A-Za-z0-9_])`);
+	const exact = new RegExp(`^[ \\t]*(${STACK_KEYS.join("|")})=`);
+	let mentioned = null;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		if (/^[ \t]*#/.test(line)) continue;
+		const m = mention.exec(line);
+		if (!m) continue;
+		mentioned ??= { key: m[1], line: i + 1 };
+		if (!exact.test(line)) {
+			return { error: `${path} line ${i + 1} mentions ${m[1]} in a form other than a plain ${m[1]}=value line, which the loaders do not agree on (systemd sets \`${m[1]} =x\` and ignores \`export ${m[1]}=x\`; the shells do the opposite). Whether this deployment runs the podman venue is therefore unknown: write it as a plain ${m[1]}=value line` };
+		}
+	}
+	if (mentioned && envFileHazard(text, { loader }) !== null) {
+		const at = envFileHazard(text, { loader }).line;
+		return { error: `${path} line ${at} is one this command cannot read (an open quote, a continuation, or a line that runs), and the file assigns ${mentioned.key}, so what the service reads for it is unknown. Fix that line first` };
+	}
+	const found = readEnvAssignments(text, STACK_KEYS, { loader });
+	const keys = {};
+	for (const key of STACK_KEYS) {
+		const read = found[key];
+		if (!read) continue;
+		if (!read.plain) return { error: `${path} line ${read.line} assigns ${key} in a form this command cannot read the way the service's loader will ($, quotes, spaces or a backslash in the value), so whether this deployment runs the podman venue is unknown. Write it as a plain ${key}=value line` };
+		keys[key] = read.value;
+	}
+	return { keys };
+}
+
 
 /** The shown form of one action. `applyStack` runs the same objects these lines were made from. */
 export function describeAction(action) {

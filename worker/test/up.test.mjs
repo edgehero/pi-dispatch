@@ -695,7 +695,7 @@ test("up on podman: --yes runs exactly the lines it showed, installs the Quadlet
 	assert.deepEqual(ran, ["systemctl --user daemon-reload", "systemctl --user start pi-dispatch-valkey.service pi-dispatch-egress-proxy.service"]);
 	assert.equal(written.length, 4);
 	assert.ok(!ran.some((l) => / enable /.test(l)), "a generated unit is never enabled");
-	assert.deepEqual(h.calls.filter((c) => c.cmd === "podman" && c.args[0] !== "inspect").map((c) => c.args), [
+	assert.deepEqual(h.calls.filter((c) => c.cmd === "podman" && c.args[0] !== "inspect" && c.args[0] !== "container").map((c) => c.args), [
 		["image", "exists", "pi-job:latest"],
 		["pull", "ghcr.io/edgehero/pi-job:latest"],
 		["tag", "ghcr.io/edgehero/pi-job:latest", "pi-job:latest"],
@@ -777,4 +777,161 @@ test("up on docker: PI_EGRESS_PROXY is the name up looks for, and it never start
 	assert.ok(h.calls.some((c) => c.args.join(" ") === "inspect --format={{.State.Running}} my-squid"));
 	assert.ok(!h.calls.some((c) => c.args[0] === "run" || c.args[0] === "network"), "nothing started");
 	assert.match(h.text(), /PI_EGRESS_PROXY names my-squid, and docker has no container of that name/);
+});
+
+// ---------------------------------------------------------------------------------------------------
+// Review round 1 (issue #430): the defects and the gaps each mutation survived
+// ---------------------------------------------------------------------------------------------------
+
+const podmanPlan = (over = {}) => ({ "podman image exists": 0, "podman ps": { code: 0, output: "" }, systemctl: 0, "loginctl show-user": { code: 0, output: "Linger=yes\n" }, ...over });
+
+test("D2: PI_BACKENDS=podman in the deployment's .env drives the podman pass, as it drives service install", async () => {
+	const h = harness({
+		env: { PI_PROVIDER: "anthropic" },
+		plan: podmanPlan(),
+		listening: true,
+		files: { "/deploy/.env": "PI_BACKENDS=podman\nPI_EGRESS=0\n" },
+		extra: podmanExtra(),
+	});
+	assert.equal(await h.run(), 0);
+	assert.ok(!h.calls.some((c) => c.cmd === "docker"), "the .env's venue, not the docker default");
+	assert.equal(h.doctorCalls[0].PI_BACKENDS, "podman", "doctor judges the venue this pass drove");
+	assert.match(h.text(), /export the same PI_BACKENDS there first/, "the closing lines say how a hand-run worker gets the venue");
+});
+
+test("D2: this shell wins where it sets a key, and a disagreement with .env is said out loud", async () => {
+	const h = harness({ env: { PI_BACKENDS: "local" }, plan: green, listening: true, files: { "/deploy/.env": "PI_BACKENDS=podman\n" } });
+	assert.equal(await h.run(), 0);
+	assert.ok(h.calls.some((c) => c.cmd === "docker"));
+	assert.match(h.text(), /⚠ PI_BACKENDS is "local" in this shell and "podman" in \/deploy\/\.env: this pass uses the shell's, and the service will run the file's/);
+});
+
+test("D2/D6: a .env line the loaders read differently stops up before anything runs", async () => {
+	const h = harness({ env: {}, plan: green, files: { "/deploy/.env": "PI_BACKENDS =podman\n" } });
+	assert.equal(await h.run(), 1);
+	assert.match(h.text(), /cannot tell which venue this deployment runs/);
+	assert.equal(h.calls.length, 0);
+	assert.equal(h.initCalls.length, 0);
+});
+
+test("D4: an EXITED proxy prints false with exit 0, and is offered the unit rather than called present", async () => {
+	const h = harness({
+		env: { PI_BACKENDS: "podman" },
+		plan: podmanPlan({ "podman inspect": { code: 0, output: "false\n" } }),
+		listening: true,
+		argv: ["--yes"],
+		files: { "/deploy/egress-allowlist.conf": "x\n" },
+		extra: podmanExtra(),
+	});
+	assert.equal(await h.run(), 0);
+	assert.ok(h.store.has(`${QDIR}/pi-dispatch-egress-proxy.container`), "the stopped proxy's replacement was installed");
+});
+
+test("M7: a RUNNING proxy (true) is left alone and nothing is planned for it", async () => {
+	const h = harness({
+		env: { PI_BACKENDS: "podman" },
+		plan: podmanPlan({ "podman inspect": { code: 0, output: "true\n" } }),
+		listening: true,
+		argv: ["--yes"],
+		files: { "/deploy/egress-allowlist.conf": "x\n" },
+		extra: podmanExtra(),
+	});
+	assert.equal(await h.run(), 0);
+	assert.match(h.text(), /Egress proxy already present under this account's Podman/);
+	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)));
+	assert.ok(!h.calls.some((c) => c.cmd === "systemctl"));
+});
+
+test("D3: up installs nothing over a container of the unit's name that the unit does not own", async () => {
+	const h = harness({
+		env: { PI_BACKENDS: "podman" },
+		plan: podmanPlan({ "podman inspect": { code: 0, output: "false\n" }, "podman container inspect": { code: 0, output: "<no value>\n" } }),
+		listening: true,
+		argv: ["--yes"],
+		files: { "/deploy/egress-allowlist.conf": "x\n" },
+		extra: podmanExtra(),
+	});
+	assert.equal(await h.run(), 0);
+	assert.match(h.text(), /pi-dispatch-egress-proxy already exists under this account's Podman and is not managed by the Quadlet unit/);
+	assert.match(h.text(), /pi-dispatch service install --force/);
+	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)));
+	assert.ok(!h.calls.some((c) => c.cmd === "systemctl"));
+});
+
+test("M6: up never overwrites a Quadlet file that differs from what it renders", async () => {
+	const edited = `${QDIR}/pi-dispatch-valkey.container`;
+	const h = harness({
+		env: { PI_BACKENDS: "podman", PI_EGRESS: "0" },
+		plan: podmanPlan(),
+		listening: false,
+		argv: ["--yes"],
+		files: { [edited]: "[Container]\nImage=mine\n" },
+		extra: podmanExtra(),
+	});
+	assert.equal(await h.run(), 0);
+	assert.equal(h.store.get(edited), "[Container]\nImage=mine\n");
+	assert.match(h.text(), /podman stack\s+NOT installed: a Quadlet file differs/);
+	assert.ok(!h.calls.some((c) => c.cmd === "systemctl"));
+});
+
+test("M13: on podman an armed policy with no allowlist starts no proxy and says which file", async () => {
+	const h = harness({ env: { PI_BACKENDS: "podman" }, plan: podmanPlan({ "podman inspect": 1 }), listening: true, argv: ["--yes"], extra: podmanExtra() });
+	assert.equal(await h.run(), 0);
+	assert.match(h.text(), /egress-allowlist\.conf is not here, not starting a proxy with no allowlist/);
+	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)));
+});
+
+test("D7/M12: a podman info that has not answered is the worker's retry, not its refusal: up warns and carries on", async () => {
+	const h = harness({
+		env: { PI_BACKENDS: "podman", PI_EGRESS: "0" },
+		plan: podmanPlan(),
+		listening: true,
+		extra: podmanExtra({ readPodmanInfo: async () => ({ answered: false, reason: "timeout", transient: true }) }),
+	});
+	assert.equal(await h.run(), 0);
+	assert.match(h.text(), /⚠ podman venue not decided yet/);
+	assert.ok(h.calls.some((c) => c.cmd === "podman" && c.args.join(" ") === "image exists pi-job:latest"), "the pass went on");
+	assert.equal(h.doctorCalls.length, 1);
+	// Unreadable is a per-job verdict at the worker too (not in its boot-refusing set), so the same holds.
+	const unreadable = harness({ env: { PI_BACKENDS: "podman", PI_EGRESS: "0" }, plan: podmanPlan(), listening: true, extra: podmanExtra({ readPodmanInfo: async () => ({ answered: false, reason: "unparseable", transient: false }) }) });
+	assert.equal(await unreadable.run(), 0);
+});
+
+test("M32: the gate judges the worker's own ids: as root, up refuses exactly as the worker's boot does", async () => {
+	const h = harness({ env: { PI_BACKENDS: "podman" }, listening: true, extra: podmanExtra({ euid: 0, egid: 0 }) });
+	assert.equal(await h.run(), 1);
+	assert.match(h.text(), /the worker runs as root/);
+	assert.equal(h.calls.length, 0);
+});
+
+test("M17/M28: on local,podman a refused podman gate leaves the docker pass whole and installs no podman stack", async () => {
+	const h = harness({
+		env: { PI_BACKENDS: "local,podman" },
+		plan: { ...green, "docker inspect": 0 },
+		listening: true,
+		argv: ["--yes"],
+		files: { "/deploy/egress-allowlist.conf": "x\n" },
+		extra: podmanExtra({ readPodmanInfo: async () => ({ answered: true, info: { rootless: false, serviceIsRemote: false } }) }),
+	});
+	assert.equal(await h.run(), 0);
+	assert.match(h.text(), /the docker steps above are unaffected; the podman steps below are skipped/);
+	assert.ok(h.calls.some((c) => c.cmd === "docker" && c.args[0] === "version"));
+	assert.ok(!h.calls.some((c) => c.cmd === "podman"), "no podman step after a refused gate");
+	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)));
+	assert.equal(h.initCalls.length, 1);
+});
+
+test("M30: a deployment path the proxy's Volume= cannot carry is reported by up, and nothing is installed", async () => {
+	const h = harness({
+		env: { PI_BACKENDS: "podman" },
+		plan: podmanPlan({ "podman inspect": 1 }),
+		listening: true,
+		argv: ["--yes"],
+		cwd: "/srv/pi deploy",
+		files: { "/srv/pi deploy/egress-allowlist.conf": "x\n" },
+		extra: podmanExtra(),
+	});
+	assert.equal(await h.run(), 0);
+	assert.match(h.text(), /podman stack\s+NOT installed: the egress proxy's Quadlet unit would mount/);
+	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)));
 });

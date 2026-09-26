@@ -1256,3 +1256,42 @@ test("wizard: the compose receiver is explained, not attempted, on the podman ve
   assert.ok(!attached.some((a) => a.argv0 === "docker"), "docker never spawned");
   assert.ok(notes.some((n) => /needs docker compose, and this deployment runs on rootless Podman/.test(n.m)));
 });
+
+test("M21: a re-run finds the podman venue in the deployment's .env when the wizard's own env says nothing", async () => {
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  writeFileSync(join(dir, ".env"), "PI_BACKENDS=podman\n");
+  let dockerProbes = 0;
+  let podmanProbes = 0;
+  const { ui } = wizardUi({ select: ["Guided setup", "Skip", "Skip"], input: [dir], confirm: [false, false, false] });
+  const { deps } = wizardDeps({
+    probeDockerFn: () => {
+      dockerProbes++;
+      return { ok: true };
+    },
+    probePodmanFn: () => {
+      podmanProbes++;
+      return { ok: true };
+    },
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.equal(dockerProbes, 0);
+  assert.equal(podmanProbes, 1);
+});
+
+test("M14: a PI_BACKENDS the operator already set without podman is left untouched, and the wizard says so", async () => {
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  const { ui, notes } = wizardUi({ select: ["Guided setup", "Skip", "Skip"], input: [dir], confirm: [true, false, false] });
+  const { deps } = wizardDeps({
+    env: { PI_DISPATCH_DEPLOYMENT_FILE: join(tempDir("admin-setup-ptr-"), "pointer.json"), PI_BACKENDS: "podman" },
+    probePodmanFn: () => ({ ok: true }),
+    runAttachedFn: async () => {
+      writeFileSync(join(dir, ".env"), "PI_BACKENDS=local\n");
+      return { code: 0 };
+    },
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.equal(readFileSync(join(dir, ".env"), "utf8"), "PI_BACKENDS=local\n", "never clobbered");
+  assert.ok(notes.some((n) => n.t === "warning" && /already sets PI_BACKENDS to something without podman; left untouched/.test(n.m)));
+});

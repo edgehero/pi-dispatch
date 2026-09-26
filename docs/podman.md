@@ -386,7 +386,18 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    `~/.config/containers/systemd/` (`pi-dispatch-valkey.network`, `pi-dispatch-valkey.container`, and while the
    egress policy is armed `pi-dispatch-egress-out.network` and `pi-dispatch-egress-proxy.container`), runs
    `systemctl --user daemon-reload`, and starts `pi-dispatch-valkey.service` and `pi-dispatch-egress-proxy.service`.
-   `up` shows every one of those lines before it asks, and `--yes` runs exactly those lines.
+   `up` shows every one of those lines before it asks, and `--yes` runs exactly those lines. Both read `PI_BACKENDS`,
+   `PI_EGRESS` and `PI_EGRESS_PROXY` from `.env`. `up` lets your shell win where it sets one of the three (and says so
+   when the two disagree, since the service runs the file's value); `service install` reads the file alone. A line
+   touching one of them that the loaders read differently (`PI_BACKENDS =podman`, `export PI_BACKENDS=podman`, a `$`
+   in the value) stops both: write it as a plain `PI_BACKENDS=podman`.
+
+   A container that already has a unit's name and was not started by that unit (the hand-started proxy below, or an
+   older setup's Valkey) is never replaced silently: the unit's `podman run --replace` would remove it, and a proxy
+   takes every running job's per-job network with it. Both commands say so and install nothing; remove it yourself
+   (`podman rm -f pi-dispatch-egress-proxy`), or let `service install --force` replace it. `service install --force`
+   over a Quadlet file that changed RESTARTS that unit (a `start` would do nothing to a running one) and warns first
+   when that unit is the proxy.
 
    What was measured, on the Fedora 44 host with Podman 5.8.1:
    - The units get exactly the names the worker attaches by: `ContainerName=` and `NetworkName=` add no `systemd-`
@@ -417,13 +428,17 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    namespace (measured), where Valkey's `127.0.0.1` port mapping would mean nothing.
 
    Not measured yet, and said so rather than implied: Valkey on its own bridge network with its port published on
-   `127.0.0.1`, the proxy's exec-form health check, and the timeout and restart keys the units carry. The measurement
-   above ran Valkey with no `Network=` and a plain health check. `.github/workflows/deploy-lint.yml` runs Podman 4.9's
-   generator in dry-run over the rendered files, so a key 4.9 does not know fails there.
+   `127.0.0.1`, the proxy's exec-form health check running, the timeout and restart keys the units carry, the
+   `PODMAN_SYSTEMD_UNIT` label the foreign-container check reads, and the shared `z` relabel of the package's own
+   `egress-proxy.conf` when the package is a root-owned global npm install (relabelling a file this account does not
+   own may be refused). The measurement above ran Valkey with no `Network=` and a plain health check.
+   `.github/workflows/deploy-lint.yml` runs Podman 4.9.3's generator in dry-run over the rendered files: it accepts
+   all four, and passes the health check through as the JSON array it is.
 
    The proxy needs a named bridge network: the worker attaches it to each job's `--internal` network by name, and
    measured, a container on Podman's default rootless network (pasta or slirp4netns) is refused with `"pasta" is not
-   supported: invalid network mode`. To start it by hand instead of as a unit (it will not come back after a reboot),
+   supported: invalid network mode`. To start it by hand instead of as a unit (it will not come back after a reboot,
+   and `up` and `service install` will then refuse to install the unit over it until you remove it),
    from the directory holding your `.env` and the `egress-allowlist.conf` that `pi-dispatch init` wrote, with
    `egress-proxy.conf` from `deploy/`:
 
