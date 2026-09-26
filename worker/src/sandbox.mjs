@@ -241,43 +241,54 @@ export async function listRunningSandboxes({ execFn = exec, bin = "docker" } = {
 
 /**
  * What the retention reaper asks before it deletes anything, and which runtimes its network sweep visits: `{
- * listRunning, sweepNetworks }` for `makeSandboxReaper` (issue #429, review round 1).
+ * listRunning, sweepNetworks }` for `makeSandboxReaper` (issue #429, review rounds 1 and 2).
  *
  * PER RETAINED RUN, NEVER PER DEPLOYMENT. For each retained directory it reads the venue the run's manifest records
  * and asks THAT venue's runtime (its launcher's `bin`) which sandboxes are open, and `listRunning` answers the ids the
- * pass must HOLD: every id a runtime reports open, every retained run whose runtime could not answer (no CLI, a daemon
- * that is down, a timeout, any error), and every run whose manifest names a venue with no launcher (null, empty or
- * unknown). Held means kept this pass, directory and network both; the next pass asks again.
+ * pass must HOLD: every id a runtime reports open, and every retained run whose runtime could not answer (no CLI, a
+ * daemon that is down, a timeout, any error). Held means kept this pass, directory and network both; the next pass asks
+ * again.
  *
  * WHY NOT THE WORKER'S `PI_BACKENDS`, which the first version of this used and a review refuted by reproduction: the
  * opener's blessing comes from the OPENER's environment (`sandboxVenueRefusal`), the reaper's from the worker's, and
  * `OQ-038` records that the two routinely differ. A worker with `PI_BACKENDS=podman` asked only podman, while an
- * operator shell with no `PI_BACKENDS` (so `local` alone) opened a run retained earlier under docker, and the pass
- * found nothing open and deleted the directory under the shell. The runtime a run opens in is a property of the RUN,
- * so the question is asked of the run.
+ * operator shell with no `PI_BACKENDS` opened a run retained earlier under docker, and the pass deleted the directory
+ * under the shell. The runtime a run opens in is a property of the RUN, so the question is asked of the run.
+ *
+ * A RUN THIS CANNOT PLACE is asked of EVERY runtime present (review round 2): a manifest that cannot be read or parsed
+ * right now (an `EMFILE`, a rewrite caught mid-write) and one naming a venue with no launcher. Such a run is held when
+ * any runtime present cannot answer or reports it open, and swept only once every one has answered "not open". Skipping
+ * it was the defect: the reaper's own expiry then re-read the manifest, found it unreadable, and deleted a directory an
+ * open sandbox was using with no runtime asked. Holding it forever was the other wrong answer, since nothing would ever
+ * sweep it. With no runtime present at all there is nothing on this host that could hold it open.
+ *
+ * A PODMAN RUN RECORDS ITS STORE (`podmanStore`, `podman info`'s graphRoot) and is held while the podman this asks uses
+ * another, or cannot say which it uses (review round 2, measured on Podman 5.8.1): rootless `podman ps -a` over another
+ * store (another HOME, XDG_DATA_HOME or storage.conf) answers exit 0 with an EMPTY list, which read as "not open" and
+ * deleted the directory under a sandbox opened from that store. The store is read once per pass, only when a podman run
+ * recorded one. A run from before the key is asked as it always was.
  *
  * FAIL CLOSED PER DIRECTORY, not per pass: a stale docker CLI with no daemon holds the docker runs and nothing else, so
  * a podman-only host still sweeps its podman runs, and a host with no docker CLI at all asks docker only if a retained
  * run says it ran there. A manifest with no `backend` key predates venue attribution and ran on `local`, which is how
- * `sandboxVenueRefusal` opens it, so docker is asked for it rather than holding it forever. A directory whose manifest
- * cannot be read at all is not held: nothing can open it (`resolveSandbox` refuses it as absent), and the reaper's own
- * `no-manifest` rule decides it, as it always did. THROWS only when the retention root itself cannot be listed, which
- * skips the whole pass, on `listRunningSandboxes`' rule.
+ * `sandboxVenueRefusal` opens it, so docker is asked for it. THROWS only when the retention root itself cannot be
+ * listed, which skips the whole pass, on `listRunningSandboxes`' rule.
  *
- * THE NETWORK SWEEP visits the runtimes that are PRESENT: those a blessed venue names, plus those a retained run
- * recorded in this pass's listing, one sweeper per runtime, built once and combined so one failing does not stop the
- * other. A host that blesses neither `local` nor `podman` and retains nothing from either spawns neither CLI, which is
- * the promise `start.mjs` makes for a host without Docker. RESIDUAL, stated: a docker session network whose run is no
- * longer retained, on a host that no longer blesses `local`, is not visited, so it outlives its run; it holds nothing.
+ * THE NETWORK SWEEP visits every runtime that has been PRESENT since this worker started: one a blessed venue names, or
+ * one a retained run has recorded in any pass. Cumulative on purpose, so the network of the LAST run a runtime held is
+ * still visited after that run's directory is gone. One sweeper per runtime, built once, and one failing does not stop
+ * the other. A host that blesses neither `local` nor `podman` and has retained nothing from either spawns neither CLI,
+ * which is the promise `start.mjs` makes for a host without Docker.
  *
  * Every log line is the family's `sandbox_reaper_skipped` (`OQ-007`'s one grep) with a fixed reason token and no CLI
- * text: `venue-unknown` per held directory, `runtime-unanswered` per runtime with the number of directories it held.
+ * text and no path: `runtime-unanswered` per runtime with the number of directories it held, and `podman-store-mismatch`
+ * per directory held for its store.
  */
-export function makeSandboxRuntimeWatch({ sandboxDir, blessed = [], fs = { readdirSync, readFileSync }, list = listRunningSandboxes, makeSweeper = makeSandboxNetworkSweeper, log = () => {} } = {}) {
+export function makeSandboxRuntimeWatch({ sandboxDir, blessed = [], fs = { readdirSync, readFileSync }, list = listRunningSandboxes, readPodmanStore = defaultPodmanStore, makeSweeper = makeSandboxNetworkSweeper, log = () => {} } = {}) {
 	const blessedBins = new Set(sandboxVenues(blessed).map((venue) => sandboxLauncher(venue).bin));
 	// Launcher-table order, so the asks and the log lines read the same on every pass.
 	const allBins = [...new Set(Object.values(SANDBOX_LAUNCHERS).map((l) => l.bin))];
-	let present = new Set(blessedBins);
+	const present = new Set(blessedBins);
 	const sweepers = new Map();
 	async function listRunning() {
 		let names;
@@ -288,32 +299,50 @@ export function makeSandboxRuntimeWatch({ sandboxDir, blessed = [], fs = { readd
 			names = [];
 		}
 		const byBin = new Map();
-		const held = new Set();
+		const unplaced = [];
+		const stores = [];
 		for (const name of names) {
 			let manifest;
 			try {
 				manifest = JSON.parse(fs.readFileSync(join(sandboxDir, name, SANDBOX_MANIFEST), "utf8"));
 			} catch {
+				unplaced.push(name);
 				continue;
 			}
 			const launcher = sandboxLauncher(sandboxVenueOf(manifest));
 			if (!launcher) {
-				held.add(name);
-				log("sandbox_reaper_skipped", { entry: name, reason: "venue-unknown" });
+				unplaced.push(name);
 				continue;
 			}
 			if (!byBin.has(launcher.bin)) byBin.set(launcher.bin, []);
 			byBin.get(launcher.bin).push(name);
+			if (launcher.bin === "podman" && typeof manifest?.podmanStore === "string") stores.push([name, manifest.podmanStore]);
 		}
-		present = new Set([...blessedBins, ...byBin.keys()]);
+		for (const bin of byBin.keys()) present.add(bin);
+		const held = new Set();
+		// Every runtime present is asked when a run could not be placed; otherwise only the runtimes a run recorded.
 		for (const bin of allBins) {
-			const entries = byBin.get(bin);
-			if (!entries) continue;
+			const entries = byBin.get(bin) ?? [];
+			const asked = entries.length > 0 || (unplaced.length > 0 && present.has(bin));
+			if (!asked) continue;
 			try {
 				for (const id of await list({ bin })) held.add(id);
 			} catch {
-				for (const entry of entries) held.add(entry);
-				log("sandbox_reaper_skipped", { reason: "runtime-unanswered", runtime: bin, held: entries.length });
+				for (const entry of [...entries, ...unplaced]) held.add(entry);
+				log("sandbox_reaper_skipped", { reason: "runtime-unanswered", runtime: bin, held: entries.length + unplaced.length });
+			}
+		}
+		if (stores.length > 0) {
+			let current = null;
+			try {
+				current = await readPodmanStore();
+			} catch {
+				current = null;
+			}
+			for (const [name, recorded] of stores) {
+				if (current === recorded || held.has(name)) continue;
+				held.add(name);
+				log("sandbox_reaper_skipped", { entry: name, reason: "podman-store-mismatch" });
 			}
 		}
 		return [...held];
@@ -322,9 +351,15 @@ export function makeSandboxRuntimeWatch({ sandboxDir, blessed = [], fs = { readd
 		const bins = allBins.filter((bin) => present.has(bin));
 		if (bins.length === 0) return { swept: [], notes: [] };
 		for (const bin of bins) if (!sweepers.has(bin)) sweepers.set(bin, makeSweeper({ bin }));
-		return combineSandboxNetworkSweepers(bins.map((bin) => sweepers.get(bin)))(args);
+		return combineSandboxNetworkSweepers(bins.map((bin) => ({ runtime: bin, sweep: sweepers.get(bin) })))(args);
 	}
 	return { listRunning, sweepNetworks };
+}
+
+/** The store this account's Podman uses right now, from one bounded `podman info`, or null when it cannot say. */
+async function defaultPodmanStore() {
+	const read = await makePodmanInfoReader()();
+	return read?.answered === true ? (read.info?.graphRoot ?? null) : null;
 }
 
 /**
@@ -389,6 +424,15 @@ function containerHolds(stdout, id) {
 		if (!SWEEPABLE_CONTAINER_STATES.has(String(state ?? "").trim().toLowerCase())) return true;
 	}
 	return false;
+}
+
+/** Whether `ps -a`'s output holds a container of ours for `id` by its WHOLE name, in a finished state only. */
+function containerFinished(stdout, id) {
+	const mine = `${SANDBOX_NAME_PREFIX}${id}`;
+	return String(stdout ?? "")
+		.split("\n")
+		.map((line) => line.trim().split("\t"))
+		.some(([name, state]) => name === mine && SWEEPABLE_CONTAINER_STATES.has(String(state ?? "").trim().toLowerCase()));
 }
 
 /**
@@ -542,7 +586,21 @@ export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime
 			}
 			if (outcome.absent) continue;
 			if (outcome.removed) swept.push({ network: name, detached: outcome.detached });
-			else notes.push({ network: name, reason: "rm-failed", detached: outcome.detached });
+			else {
+				// Podman keeps an EXITED container attached to its network (measured on 5.8.1: `network rm` then fails every
+				// pass, and the network is never reaped). So on a failed `rm` only, this run's OWN container, by its whole
+				// name and only in a finished state, is removed and the `rm` tried once more. Only on the failure path, so a
+				// pass that removes the network first time issues exactly the commands it always did; never `-f`, never a
+				// container in any other state, never another name (`containerFinished`'s whole-name rule).
+				const own = `${SANDBOX_NAME_PREFIX}${id}`;
+				const look = await run(["ps", "-a", "--filter", `name=${own}`, "--format", "{{.Names}}\t{{.State}}"]);
+				let retried = false;
+				if (look?.code === 0 && containerFinished(look.stdout, id) && (await run(["rm", own]))?.code === 0) {
+					retried = (await run(["network", "rm", name]))?.code === 0;
+				}
+				if (retried) swept.push({ network: name, detached: outcome.detached, removedContainer: own });
+				else notes.push({ network: name, reason: "rm-failed", detached: outcome.detached });
+			}
 			// Between networks, for `retention-sweep.mjs`'s reason: this loop runs on a timer beside draining
 			// jobs, and `index.mjs` runs with `maxStalledCount: 0` against BullMQ's 30s lock.
 			await new Promise((resolve) => setImmediate(resolve));
@@ -552,29 +610,29 @@ export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime
 }
 
 /**
- * One sweep over every venue's session networks (issue #429): each sweeper's `{ swept, notes }` concatenated, in the
- * order given, and `failed` when ANY runtime's listing failed. A single sweeper is returned as it is, so a host with
- * one sandbox venue hands the reaper exactly the function it always did.
+ * One sweep over every runtime's session networks (issue #429): `entries` is `[{ runtime, sweep }]`, each sweeper's `{
+ * swept, notes }` concatenated in order, and a listing that failed recorded as `{ reason, runtime }` in `failures`, EVERY
+ * one and not only the first (review round 2), so the reaper's log names which runtime did not answer. `failed` stays
+ * the first reason, for a caller that reads only that.
  *
- * Every sweeper is given the SAME `running`, `keep`, `retained` and `blocked`: the union of every runtime's running
- * ids is conservative in the one direction that matters (an id open in either runtime keeps its network in both), and
- * `keep` is filled by each sweeper's own fresh read, which only ever adds. One runtime's failed listing does not stop
- * the other's pass: nothing it would remove depends on the failed runtime, whose own networks are simply not candidates
- * this pass, and the failure is still said.
+ * Every sweeper is given the SAME `running`, `keep`, `retained` and `blocked`: the union of what every runtime holds is
+ * conservative in the one direction that matters (an id held in either runtime keeps its network in both), and `keep`
+ * is filled by each sweeper's own fresh read, which only ever adds. One runtime's failed listing does not stop the
+ * other's pass: nothing it would remove depends on the failed runtime, whose own networks are simply not candidates
+ * this pass.
  */
-export function combineSandboxNetworkSweepers(sweepers) {
-	if (sweepers.length === 1) return sweepers[0];
+export function combineSandboxNetworkSweepers(entries) {
 	return async function sweepSandboxNetworks(args) {
 		const swept = [];
 		const notes = [];
-		let failed = null;
-		for (const sweep of sweepers) {
+		const failures = [];
+		for (const { runtime, sweep } of entries) {
 			const outcome = await sweep(args);
 			swept.push(...(outcome?.swept ?? []));
 			notes.push(...(outcome?.notes ?? []));
-			failed ??= outcome?.failed ?? null;
+			if (outcome?.failed) failures.push({ reason: outcome.failed, runtime });
 		}
-		return failed ? { swept, notes, failed } : { swept, notes };
+		return failures.length > 0 ? { swept, notes, failed: failures[0].reason, failures } : { swept, notes };
 	};
 }
 
@@ -1046,14 +1104,33 @@ async function decidePodmanSandboxJobUser({
 	const info = await readInfo();
 	const judged = judgePodmanVenue({ read: info, platform, euid, egid, backendFloor, ...(fs ? { fs } : {}), ...(home ? { home } : {}), ...(env ? { env } : {}) });
 	if (judged.jobUserRefused) return { refused: "job-user-unmappable", message: `${PODMAN_JOB_USER_FIX[judged.jobUserRefused.cause] ?? "the job user could not be decided"} (issue #354)` };
+	// A containers.conf that could not be read JUST NOW (issue #428's transient rule) is a job's retry; a sandbox has no
+	// queue to retry through, so it is refused in its own words, naming the file, and the operator tries again.
+	if (judged.podmanConfRefused?.transient) {
+		return { refused: "podman-conf-unread", message: `the podman venue's containers.conf could not be read just now, so whether it widens this sandbox is not known (${judged.podmanConfRefused.evidence ?? "no file named"}); try again` };
+	}
 	if (judged.podmanConfRefused) return { refused: PODMAN_CONF_WIDENS_JOB, message: judged.podmanConfRefused.message };
 	if (judged.unavailable) {
-		return { refused: "podman-unobserved", message: `PI_BACKEND_FLOOR asks for what only an answered \`podman info\` shows, and it did not answer (${judged.reason}); is podman answering \`podman info\` as this account?` };
+		// `file-unread` names the host file that could not be read (issue #428), which is the operator's to fix or retry.
+		const what = judged.reason === "file-unread" && judged.message ? judged.message : `it did not answer (${judged.reason})`;
+		return { refused: "podman-unobserved", message: `PI_BACKEND_FLOOR asks for what only an answered \`podman info\` and this host's podman files show, and ${what}; try again, and check \`podman info\` answers as this account` };
 	}
 	if (judged.refused) return { refused: "backend-floor", message: judged.message };
 	const decision = decidePodmanJobUser({ platform, euid, egid, read: info });
 	if (decision.mode !== "worker") {
 		return { refused: "job-user-unknown", message: `which uid the sandbox may run as could not be decided (${decision.reason ?? decision.cause}); is podman answering \`podman info\` as this account?` };
+	}
+	// THE STORE (issue #429, review round 2, measured on Podman 5.8.1): another HOME, XDG_DATA_HOME or storage.conf is
+	// another container store, where the run's image is absent and, sharper, where this sandbox's container would be one
+	// the worker's `podman ps` cannot see, so the retention sweep would read "not open" and delete the directory under
+	// it. A run that recorded its store opens only under that store. A run from before the key opens as it did.
+	const recorded = typeof manifest?.podmanStore === "string" ? manifest.podmanStore : null;
+	const current = info?.answered === true ? (info.info?.graphRoot ?? null) : null;
+	if (recorded !== null && current !== recorded) {
+		return {
+			refused: "podman-store-mismatch",
+			message: `this run's container store is ${recorded}, and the podman you are running uses ${current ?? "a store it did not report"}; open it as the account the worker runs as, with the worker's HOME and XDG_DATA_HOME (and no storage.conf of your own), so the worker's retention sweep can see the sandbox is open (issue #429)`,
+		};
 	}
 	if (read.stamped && read.user !== decision.user) {
 		const ran = read.user === null ? "as the image's own user, which no podman run does" : `as ${read.user}`;

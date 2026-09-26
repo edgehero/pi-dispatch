@@ -88,6 +88,10 @@ export function retainJobDir(prepared, { sandboxDir, fs = defaultFs, log = () =>
 			// Issue #341: the job user the run had (`{ user, home }`, `user` null = the image's own USER), or null when
 			// nothing decided one. The sandbox reuses it for IDENTITY only and still checks the daemon itself.
 			jobUser: meta.jobUser ?? null,
+			// Issue #429: a podman run's container store (`podman info` graphRoot). Written only when known, so every
+			// other manifest is the shape it always was. A sandbox refuses to open under another store, and the sweep
+			// holds the run while the podman it asks uses another, because that podman's `ps` answers empty (measured).
+			...(typeof meta.podmanStore === "string" ? { podmanStore: meta.podmanStore } : {}),
 			workspace: rebaseWorkspace(prepared.workspace, jobDir, dest),
 			createdAt: new Date(now()).toISOString(),
 			keepUntil: null,
@@ -182,10 +186,20 @@ export function pinSandbox({ sandboxDir, jobId, pinDays, fs = defaultFs, now = (
 	if (!manifest) return { pinned: false, reason: "absent" };
 	const keepUntil = new Date(now() + pinDays * DAY_MS).toISOString();
 	const { dir, ...body } = manifest;
+	// ATOMIC (issue #429 review): a temp file beside it, then a rename over it. `writeFileSync` on the manifest itself
+	// truncates first, and for that window every reader (the retention sweep, `--list`, the panel, an open) sees a
+	// manifest that does not parse, which the sweep used to read as "no manifest, delete it". A rename is all or nothing.
+	const tmp = join(dir, `.${SANDBOX_MANIFEST}.${process.pid}.${now()}.tmp`);
 	try {
-		fs.writeFileSync(join(dir, SANDBOX_MANIFEST), `${JSON.stringify({ ...body, keepUntil }, null, 2)}\n`, { mode: 0o600 });
+		fs.writeFileSync(tmp, `${JSON.stringify({ ...body, keepUntil }, null, 2)}\n`, { mode: 0o600 });
+		fs.renameSync(tmp, join(dir, SANDBOX_MANIFEST));
 		return { pinned: true, keepUntil };
 	} catch (err) {
+		try {
+			fs.rmSync(tmp, { force: true });
+		} catch {
+			// nothing left to try
+		}
 		return { pinned: false, reason: err?.message ?? "write-failed" };
 	}
 }
@@ -330,10 +344,13 @@ export function makeSandboxReaper({
 					throw err;
 				}
 			};
-			const { swept, notes, failed } = await sweepNetworks({ running, keep, retained, blocked });
+			const { swept, notes, failed, failures } = await sweepNetworks({ running, keep, retained, blocked });
 			for (const s of swept) log("reaped_sandbox_network", s);
 			for (const n of notes) log("sandbox_network_not_reaped", n);
-			if (failed) log("sandbox_reaper_skipped", { reason: failed });
+			// One line per runtime whose listing failed, naming it (issue #429), where a sweeper that knows its runtime
+			// says so; a bare `failed` from a single sweeper keeps the line it always had.
+			if (Array.isArray(failures) && failures.length > 0) for (const f of failures) log("sandbox_reaper_skipped", { reason: f.reason, runtime: f.runtime });
+			else if (failed) log("sandbox_reaper_skipped", { reason: failed });
 		} catch (err) {
 			log("sandbox_reaper_skipped", { reason: scrubCredentials(err?.message ?? "network-sweep-failed") });
 		}

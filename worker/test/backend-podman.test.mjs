@@ -41,7 +41,7 @@ function infoBody(over = {}) {
 }
 // An escape byte built at run time: a literal one in source survives a copy and paste and then does not.
 const ESC = String.fromCharCode(27);
-const INFO = () => ({ rootless: true, serviceIsRemote: false, selinux: true, cgroupVersion: "v2", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1" });
+const INFO = () => ({ rootless: true, serviceIsRemote: false, selinux: true, cgroupVersion: "v2", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1", graphRoot: "/home/op/.local/share/containers/storage" });
 const answered = (over = {}) => ({ answered: true, info: { ...INFO(), ...over } });
 
 /**
@@ -82,9 +82,11 @@ test("parsePodmanInfo reads the measured shape and nothing else", { skip }, () =
 	}
 	// Every field null when absent or the wrong type: a missing `rootless` is never read as rootless, nor a missing
 	// `serviceIsRemote` as local.
-	assert.deepEqual(mod.parsePodmanInfo(JSON.stringify({ host: {} })), { rootless: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, controllers: null, version: null });
+	assert.deepEqual(mod.parsePodmanInfo(JSON.stringify({ host: {} })), { rootless: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, controllers: null, version: null, graphRoot: null });
 	const odd = mod.parsePodmanInfo(infoBody({ host: { serviceIsRemote: "false", security: { rootless: 1, selinuxEnabled: "true" }, cgroupVersion: `v2${ESC}[2J`, cgroupControllers: ["pids", 7, "memory\n", "cpu"] }, version: { Version: `5.8.1${ESC}]0;x` } }));
-	assert.deepEqual(odd, { rootless: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, controllers: ["pids", "cpu"], version: null });
+	assert.deepEqual(odd, { rootless: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, controllers: ["pids", "cpu"], version: null, graphRoot: "/home/op/.local/share/containers/storage" });
+	// The store is a path or nothing: a relative one, a non-string or one carrying a control byte is no fact.
+	for (const graphRoot of ["relative/path", 7, `/home/op${ESC}[2J`, ""]) assert.equal(mod.parsePodmanInfo(JSON.stringify({ host: {}, store: { graphRoot } })).graphRoot, null, JSON.stringify(graphRoot));
 });
 
 test("makePodmanInfoReader asks `podman info --format json` and classifies each failure (#354)", { skip }, async () => {
@@ -570,8 +572,12 @@ test("the podman jobUserPreflight decides from the observed read, reads podman i
 	const logs = [];
 	const b = bundle({ readInfo: async () => (reads++, answered()), log: (event, fields) => logs.push([event, fields]) });
 	const observed = await b.observationPreflight(JOB);
-	assert.deepEqual(await b.jobUserPreflight(JOB, { capabilities: ["anyUid"], observed }), { user: "1234:1234", home: CONTAINER_HOME, relabel: true });
-	assert.deepEqual(await b.jobUserPreflight(JOB, { capabilities: ["anyUid"] }), { user: "1234:1234", home: CONTAINER_HOME, relabel: true });
+	// `store` (issue #429): the container store the run lives in rides beside the user, so the retained run records it.
+	const STORE = "/home/op/.local/share/containers/storage";
+	assert.deepEqual(await b.jobUserPreflight(JOB, { capabilities: ["anyUid"], observed }), { user: "1234:1234", home: CONTAINER_HOME, relabel: true, store: STORE });
+	assert.deepEqual(await b.jobUserPreflight(JOB, { capabilities: ["anyUid"] }), { user: "1234:1234", home: CONTAINER_HOME, relabel: true, store: STORE });
+	const unstored = bundle({ readInfo: async () => answered({ graphRoot: null }) });
+	assert.deepEqual(await unstored.jobUserPreflight(JOB, { capabilities: ["anyUid"] }), { user: "1234:1234", home: CONTAINER_HOME, relabel: true }, "no store reported, none carried");
 	await b.observationPreflight(JOB);
 	assert.equal(reads, 1, "one podman info for the worker's life once it answers");
 	assert.deepEqual(logs.map(([e]) => e), ["podman_observed", "job_user"], "each said once while it does not change");
@@ -673,10 +679,18 @@ test("the bundle's observationPreflight answers exactly what judgePodmanVenue an
 		["undelegated", answered({ controllers: ["cpu"] }), clean(), floor],
 		["unanswered", { answered: false, reason: "timeout", transient: true }, clean(), floor],
 		["no floor", answered({ controllers: [] }), clean(), {}],
+		// #428's transient rules, which the extraction must carry: a conf chain that could not be read just now rides
+		// `podmanConfRefused.transient` with its evidence, and a mounts file that could not be read is `file-unread`
+		// with the file named.
+		["conf busy", answered(), fakeFs({ files: { [USER_MOUNTS]: "" }, errors: { "/etc/containers/containers.conf": "EMFILE" } }), floor],
+		["mounts busy", answered(), fakeFs({ files: { [USER_MOUNTS]: "" }, errors: { [USER_MOUNTS]: "EIO" } }), { mountSet: ENFORCED }],
+		["conf unreadable for good", answered(), fakeFs({ files: { [USER_MOUNTS]: "" }, errors: { "/etc/containers/containers.conf": "EACCES" } }), floor],
 	];
 	for (const [label, read, fs, backendFloor] of cases) {
 		const job = await bundle({ readInfo: async () => read, fs, backendFloor }).observationPreflight(JOB);
 		const judged = mod.judgePodmanVenue({ read, platform: "linux", euid: 1234, egid: 1234, fs, home: HOME, env: {}, backendFloor });
 		assert.deepEqual(judged, job, label);
 	}
+	const busy = mod.judgePodmanVenue({ read: answered(), platform: "linux", euid: 1234, egid: 1234, fs: fakeFs({ files: { [USER_MOUNTS]: "" }, errors: { "/etc/containers/containers.conf": "EMFILE" } }), home: HOME, env: {} });
+	assert.equal(busy.podmanConfRefused?.transient, true, "the transient arm is really exercised above");
 });

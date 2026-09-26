@@ -1759,6 +1759,10 @@ sibling rather than an extension of the GitHub one for the same reason.
     opening account's own. A stamp that is not an object, has no `user` key, has a `user` that is not a non-root
     `<uid>:<gid>`, or has a `home` that does not match its `user`, refuses `job-user-stamp-invalid`. A manifest
     from before the key decides like `null`.
+    `podmanStore` (issue #429, a `podman` run only, written only when known) is the container store the run's
+    container lived in, `podman info`'s `store.graphRoot`. A sandbox opens the run only under that store
+    (`podman-store-mismatch` otherwise, naming both), and the retention sweep holds the run while the podman it asks
+    uses another store; a manifest without the key opens and is asked as before.
     `image` is resolved through `resolveJobImage` — the same function the pre-spend preflight and
     `run-container.mjs` use — so the tag that was checked, the tag that ran and the tag re-opened are one
     answer rather than three call sites that agree by luck. `backend` is resolved through
@@ -1783,24 +1787,33 @@ sibling rather than an extension of the GitHub one for the same reason.
     most likely to be large.
   - **The sweep asks the runtimes first.** `listRunningSandboxes` yields the job ids of live sandboxes and
     **throws** when docker cannot be reached, because "none are running" and "I could not find out" must
-    not arrive as the same empty array in front of a `rm -rf`. A failed lookup skips the whole sweep — one
-    sweep, not the feature: the lookup is re-issued on every tick and the reaper holds no state between
-    calls, so a docker outage costs one interval of retention overshoot rather than latching it off.
+    not arrive as the same empty array in front of a `rm -rf`. What a failed lookup costs is bounded to one
+    pass: the lookup is re-issued on every tick and the reaper holds no state between calls, so a runtime
+    outage costs one interval of retention overshoot for the runs it holds rather than latching anything off.
     Since issue #429 the question is asked PER RETAINED RUN (`makeSandboxRuntimeWatch`): of the runtime the run's
     manifest records (its launcher's `bin`; a manifest with no `backend` key is `local`'s), never of the runtimes
     the worker blesses, because the opener's `PI_BACKENDS` is the opener's and routinely differs from the
     worker's (`OQ-038`); a first version asked the worker's blessed runtimes, and a podman-only worker deleted a
     local run's directory under a docker shell opened from a shell with no `PI_BACKENDS`. A runtime that cannot
     answer (no CLI, a daemon that is down, any error) HOLDS its own runs this pass and nothing else, so a stale
-    docker CLI does not stop a podman sweep; a run whose manifest names a venue with no launcher is held too; and
-    each is said (`sandbox_reaper_skipped`, `runtime-unanswered` or `venue-unknown`). A directory whose manifest
-    cannot be read is not held, since nothing can open it. Only an unreadable retention root throws and skips the
-    pass.
+    docker CLI does not stop a podman sweep. A run it cannot PLACE (a manifest that cannot be read or parsed right
+    now, or one naming a venue with no launcher) is asked of EVERY runtime present, held while any cannot answer or
+    reports it open, and swept once all have answered "not open": skipping it let the reaper's own expiry read the
+    unreadable manifest as "no manifest" and delete a directory under an open sandbox (review round 2, reproduced),
+    and holding it forever would never sweep it. A `podman` run whose manifest records its store (`podmanStore`) is
+    held while the podman asked uses another store or cannot say which, because another store's `podman ps -a`
+    answers exit 0 and empty (measured on 5.8.1). Each hold is said (`sandbox_reaper_skipped`, `runtime-unanswered`
+    with the runtime, or `podman-store-mismatch` with the entry, never a path). Only an unreadable retention root
+    throws and skips the pass. A pin rewrites the manifest atomically (a temp file renamed over it), so no reader
+    sees a truncated one.
   - **The same sweep reclaims the session NETWORK, on the directory's clock** (issue #337). After the
     directory pass, `reapSandboxes` hands an injected `sweepNetworks` the ids it must keep and a closure that
-    re-reads the retained directories; one sweeper per runtime PRESENT (one a blessed venue names, or one a
-    retained run recorded in that pass's listing), each listing, inspecting and removing in its own runtime, and
-    one failing does not stop the other (`combineSandboxNetworkSweepers`, issue #429). INJECTED rather than imported, because `sandbox.mjs` imports
+    re-reads the retained directories; one sweeper per runtime PRESENT since the worker started (one a blessed
+    venue names, or one any pass found a retained run of; cumulative, so the last run's network is still visited
+    after its directory is gone), each listing, inspecting and removing in its own runtime; one failing does not
+    stop the other, and each failure is logged with its runtime (`combineSandboxNetworkSweepers`, issue #429). On
+    a failed `network rm` only, this run's OWN container in a finished state is removed and the `rm` tried once
+    more, because Podman keeps an exited container attached (measured). INJECTED rather than imported, because `sandbox.mjs` imports
     `readManifest` from `sandbox-store.mjs` and the other direction would be a cycle; it also keeps
     `sandbox-store.mjs` docker-free in its own tests. The sweeper lists `pi-sandbox-` networks and parses each against the
     shape `networkNameFor` builds, because `--filter name=` is a SUBSTRING match and the listing is therefore
@@ -4824,3 +4837,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-26 | Issue #428, review round 2. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the allowlist bullet: the ACL is `dstdomain -n`, since without `-n` squid reverse-resolved every unlisted IP-literal request (a PTR query per literal, measured), a DNS channel of the same class as round 1's; with it the request's host is compared as written, so a literal is refused unless the list names that literal. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: a host file read failing for a moment is a retry (`container-never-started` on the thrown attempt), never a new reason. |
 | 2026-09-26 | Issue #429. **`INT-SANDBOX-CONTRACT` AMENDED**: LOCAL-ONLY becomes THE HOST'S BLESSED VENUES. A sandbox reopens a run in the runtime that ran it, through `SANDBOX_LAUNCHERS` (`local` with the docker CLI and `buildDockerRunArgs`, `podman` with the `podman` CLI and `buildPodmanRunArgs`, the pairs each job bundle is built with), and only where the opener's own `PI_BACKENDS` blesses that venue; the default is `local` alone, so an opener that sets nothing refuses and admits what it did. Every runtime step goes through the run's venue's CLI: the running asks, the network's creation and removal, the launch, and the lines an operator reads (`podman attach`). On `podman` the argv is a podman job's (keep-id, `--user`, `PODMAN_PINNED_FLAGS`, and a network flag always, `--network=private` with egress off), the shell runs as the opening account, a stamp naming another uid is refused rather than reopened as that uid, and the venue is refused for what a job is, in the job's order, through the job's own function (`judgePodmanVenue`): identity, `podman-conf-widens-job`, then the observations against the opener's `PI_BACKEND_FLOOR`. The retention sweep asks every blessed sandbox runtime which sandboxes are open and fails closed when one cannot answer, and sweeps each runtime's session networks with that runtime's CLI. The acceptance names both flag arrays. The `local` argv is byte-identical to before, pinned by literals. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no job flag moved; the sandbox reuses the podman builder as it is. **`INT-EGRESS-POLICY-CONTRACT` UNCHANGED, checked**: the per-sandbox network keeps its name and its `--internal` creation, now in the run's runtime. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: a sandbox's refusals (`backend-floor` and `podman-unobserved`, new, and `podman-conf-widens-job`, the job's own token reused) are returned to the operator who opened it and are never written to a run record. |
 | 2026-09-26 | Issue #429, review round 1. **`INT-SANDBOX-CONTRACT` AMENDED, and one claim is a CORRECTION**. The previous row said the retention sweep asks every blessed sandbox runtime which sandboxes are open, and the entry justified requiring the opener's blessing by "a sandbox in an unblessed one is invisible to the sweep". Both rested on the opener's `PI_BACKENDS` being the worker's, which `OQ-038` says it routinely is not, and a review reproduced the harm: a worker blessing podman alone asked only podman, while a shell with no `PI_BACKENDS` opened a local run under docker, and the pass deleted that run's directory under the shell. The sweep now asks, PER RETAINED RUN, the runtime that run's manifest records (`makeSandboxRuntimeWatch`), whatever either side blesses; a runtime that cannot answer holds its own runs this pass and nothing else, a run on a venue with no launcher is held, and each is said. The network sweep visits the runtimes present (blessed, or recorded by a retained run). Two stamp clauses are corrected to `local`'s: `sudo` reopening a run as its own user, and a `{ user: null }` stamp reopened without `--user`, are `local` behaviour; `podman` refuses both. The podman `publish-needs-egress-off` refusal is kept with a truthful reason, measured: Podman DOES publish on an `--internal` network. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the new `sandbox_reaper_skipped` reasons (`runtime-unanswered`, `venue-unknown`) are worker log tokens, not record fields. |
+| 2026-09-27 | Issue #429, review round 2. **`INT-SANDBOX-CONTRACT` AMENDED**, three defects and two corrections. (1) A retained run whose manifest could not be read, or named a venue with no launcher, was skipped by the runtime watch and then deleted by the reaper's own `no-manifest` expiry under an open sandbox (reproduced with a transient read and with a pin's in-place rewrite): such a run is now asked of every runtime present, held while any cannot answer or reports it open, and swept once all say "not open". The pin rewrites the manifest atomically. (2) Another container STORE answers an empty `podman ps -a` with exit 0 (measured on 5.8.1), and the sweep deleted a directory under a sandbox opened from one: the manifest gains `podmanStore`, the sandbox refuses another store (`podman-store-mismatch`), and the sweep holds a run while its podman uses another store or cannot say. A different `XDG_RUNTIME_DIR` was measured harmless. (3) On a failed `network rm`, this run's own finished container is removed and the `rm` retried once, since Podman keeps an exited container attached (measured). CORRECTED: the previous rows' "a directory whose manifest cannot be read is not held" and the `venue-unknown` log token, both gone; and "a failed lookup skips the whole sweep", which the per-run rule had already made untrue. The network sweep's runtimes are now cumulative since start, and each network-listing failure is logged with its runtime. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the new `podmanStore` is a sandbox manifest field, never a run record's. |

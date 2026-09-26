@@ -441,10 +441,15 @@ discarded because "private" network namespace mode does not support them`, yet t
 refused, as on docker, though for a different reason: Podman would bind the port on the session's `--internal`
 network (measured), a way into the one network the policy means to confine.
 
-Open the sandbox as the account the worker runs as, in a login that resolves the same `XDG_RUNTIME_DIR` (a systemd
-user session for that account, as the worker's own service has). Rootless `podman ps` lists only the calling
-account's containers in its own runtime directory, so a sandbox opened with a different runtime directory is one the
-worker's retention sweep cannot see is open (not yet measured; the sweep holds a run only when its runtime says so).
+Open the sandbox as the account the worker runs as, with the worker's CONTAINER STORAGE: the same `HOME`, the same
+`XDG_DATA_HOME` (or none, as the worker's service has) and no `storage.conf` of your own. Measured on Podman 5.8.1: a
+rootless Podman with another `HOME` or `XDG_DATA_HOME` uses another store, and `podman ps -a` there answers with an
+empty list and exit 0, so a sandbox opened from it is one the worker's retention sweep read as not open, and it deleted
+the retained directory under the open shell. So the worker records each podman run's store (`podman info`'s
+`graphRoot`) in the retained manifest; `pi-dispatch sandbox` refuses to open the run under another store
+(`podman-store-mismatch`, naming both paths), and the sweep holds the run while the podman it asks uses another store
+or cannot say which. A different `XDG_RUNTIME_DIR` was measured harmless: Podman takes the runtime directory from its
+own database, or fails, which the sweep treats as a runtime that did not answer.
 
 On an SELinux host the retained job directory and the retained clone carry `:Z`, decided from `podman info`'s
 `selinuxEnabled` as a job's are, so the shell reads them under `container_file_t` the way the job did; a local run's

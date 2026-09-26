@@ -3056,22 +3056,24 @@ test("the sandbox reaper holds a directory its OWN runtime reports open, whateve
 	// worker blessing podman alone, a local run retained earlier and reopened under docker from a shell with no
 	// PI_BACKENDS. Every directory here is past its window, so only the runtime answers keep one.
 	const base = { makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), jobUserIdentity: PODMAN_ID, observationFs: PODMAN_FILES, readPodmanInfo: PODMAN_INFO({}), bootImage: { ok: true, capabilities: ["anyUid"] }, makeSandboxReaper: realSandboxReaper };
-	const seed = () => {
+	const seed = (podmanStore) => {
 		const root = tempDir("wired-sbx-");
 		const old = "2020-01-01T00:00:00.000Z";
 		for (const [id, backend] of [["d-live", "local"], ["d-idle", "local"], ["p-live", "podman"], ["p-idle", "podman"]]) {
 			mkdirSync(join(root, id), { recursive: true });
-			writeFileSync(join(root, id, "manifest.json"), JSON.stringify({ jobId: id, kind: "github", image: "pi-job:x", backend, workspace: join(root, id), createdAt: old, keepUntil: null }));
+			const store = backend === "podman" && podmanStore ? { podmanStore } : {};
+			writeFileSync(join(root, id, "manifest.json"), JSON.stringify({ jobId: id, kind: "github", image: "pi-job:x", backend, ...store, workspace: join(root, id), createdAt: old, keepUntil: null }));
 		}
 		return root;
 	};
 	const left = (root) => ["d-live", "d-idle", "p-live", "p-idle"].filter((id) => { try { return readFileSync(join(root, id, "manifest.json")) && true; } catch { return false; } });
 	const sweeper = () => async () => ({ swept: [], notes: [] });
-	const run = async (backends, answers) => {
-		const root = seed();
+	const run = async (backends, answers, { podmanStore, graphRoot = "/home/op/.local/share/containers/storage" } = {}) => {
+		const root = seed(podmanStore);
 		const asked = [];
-		await runStart({
+		const { logs } = await runStart({
 			...base,
+			readPodmanInfo: PODMAN_INFO({ graphRoot }),
 			env: { PI_BACKENDS: backends, PI_SANDBOX_DIR: root, PI_SANDBOX_RETENTION_HOURS: "1" },
 			makeSandboxNetworkSweeper: sweeper,
 			listRunningSandboxes: async ({ bin }) => {
@@ -3081,7 +3083,7 @@ test("the sandbox reaper holds a directory its OWN runtime reports open, whateve
 				return a;
 			},
 		});
-		return { left: left(root), asked };
+		return { left: left(root), asked, skipped: logs.filter((l) => l.event === "sandbox_reaper_skipped").map(({ event, host, ...f }) => f) };
 	};
 
 	for (const backends of ["podman", "local", "local,podman"]) {
@@ -3092,9 +3094,18 @@ test("the sandbox reaper holds a directory its OWN runtime reports open, whateve
 		// Docker down (a stale CLI, no daemon): its runs are held, and podman's idle one is still swept.
 		const dockerDown = await run(backends, { docker: new Error("Cannot connect to the Docker daemon"), podman: ["p-live"] });
 		assert.deepEqual(dockerDown.left, ["d-live", "d-idle", "p-live"], `${backends}: docker down holds docker's runs only`);
+		// And the worker's own log says which runtime held what (through start.mjs's own `log`).
+		assert.deepEqual(dockerDown.skipped, [{ reason: "runtime-unanswered", runtime: "docker", held: 2 }], `${backends}: the hold is said`);
 		// Podman absent: the reverse.
 		const podmanGone = await run(backends, { docker: ["d-live"], podman: Object.assign(new Error("spawn podman ENOENT"), { code: "ENOENT" }) });
 		assert.deepEqual(podmanGone.left, ["d-live", "p-live", "p-idle"], `${backends}: podman absent holds podman's runs only`);
+		// A podman run whose recorded store is not this worker's podman store: held and said (review round 2, measured:
+		// that podman's `ps` answers empty for another store), while the one in the same store sweeps as usual.
+		const moved = await run(backends, { docker: ["d-live"], podman: [] }, { podmanStore: "/home/op/.local/share/containers/storage", graphRoot: "/home/other/.local/share/containers/storage" });
+		assert.deepEqual(moved.left, ["d-live", "p-live", "p-idle"], `${backends}: another store holds the podman runs`);
+		assert.deepEqual(moved.skipped.map((f) => f.reason), ["podman-store-mismatch", "podman-store-mismatch"]);
+		const same = await run(backends, { docker: ["d-live"], podman: ["p-live"] }, { podmanStore: "/home/op/.local/share/containers/storage" });
+		assert.deepEqual(same.left, ["d-live", "p-live"], `${backends}: the same store sweeps as before`);
 	}
 });
 

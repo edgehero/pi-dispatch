@@ -91,6 +91,12 @@ export function parsePodmanInfo(stdout) {
 		cgroupVersion: typeof host.cgroupVersion === "string" && /^v[0-9]{1,2}$/.test(host.cgroupVersion) ? host.cgroupVersion : null,
 		controllers,
 		version: displayVersion(body.version?.Version),
+		// Issue #429: the container STORE this account's Podman uses (`store.graphRoot`), which moves with HOME,
+		// XDG_DATA_HOME or a storage.conf. Rootless `podman ps -a` over another store answers exit 0 with an EMPTY list
+		// (measured, Podman 5.8.1), so a sandbox opened with another store is invisible to the retention sweep; the
+		// sandbox and the sweep compare it with the one a run recorded. An absolute path with no control character, else
+		// no fact.
+		graphRoot: typeof body.store?.graphRoot === "string" && body.store.graphRoot.length <= 4096 && /^\/[^\u0000-\u001f\u007f]*$/.test(body.store.graphRoot) ? body.store.graphRoot : null,
 	};
 }
 
@@ -684,7 +690,11 @@ export function makePodmanBackend(opts = {}) {
 			jobUserSaid = said;
 			log("job_user", { backend: PODMAN_BACKEND, mode: decision.mode, user: decision.user, cause: decision.cause, reason: decision.reason });
 		}
-		return resolvePodmanImageUser(decision, { capabilities, euid, egid });
+		const chosen = resolvePodmanImageUser(decision, { capabilities, euid, egid });
+		// Issue #429: the store this job's container lives in rides beside its user, so a retained run records it and a
+		// sandbox or the retention sweep can tell another store's empty answer from "not open".
+		const store = read?.answered === true ? read.info?.graphRoot : null;
+		return chosen.user && typeof store === "string" ? { ...chosen, store } : chosen;
 	};
 
 	return {

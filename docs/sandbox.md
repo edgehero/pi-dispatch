@@ -217,9 +217,9 @@ session that ends in a closed laptop still keeps the workspace.
   the account you run the command as, and as root it is refused; open such a run as the worker's account. A
   rootless daemon, userns-remap or Docker Desktop on Linux is refused with the reason. A run on the native
   podman venue is the exception to `sudo -E`: keep-id maps the account that runs `podman`, and the run's image
-  is in that account's own store, so it opens only as the account the worker runs as, in a login with the same
-  `XDG_RUNTIME_DIR` as the worker's service: rootless `podman ps` lists only its own runtime directory's containers,
-  so a sandbox opened from another is one the worker's retention sweep cannot see is open (`docs/podman.md`).
+  is in that account's own store, so it opens only as the account the worker runs as, with the worker's container
+  storage (the same `HOME` and `XDG_DATA_HOME`, no `storage.conf` of your own). Another store's `podman ps` answers
+  empty (measured), so the run records its store and the sandbox refuses another one (`docs/podman.md`).
 - **Sandbox *containers* are not reaped by the worker.** They are named `pi-sandbox-*`, outside the
   `pi-job-*` filter the boot reaper uses, precisely so a worker restart cannot kill a shell you are
   sitting in. The cost is that stopping a forgotten one is yours: `docker stop pi-sandbox-<jobId>` (or

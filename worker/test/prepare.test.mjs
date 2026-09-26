@@ -299,6 +299,9 @@ test("a prepared job carries the stamp cleanup needs to retain it (REQ-RESURRECT
 		assert.deepEqual(stamped.sandbox.jobUser, { user: "1234:1234", home: "/home/pi" });
 		const imageUser = await prepareWorkspace({ kind: "github", repo: "a/b" }, "tok", { queueJobId: "gh-11", jobUser: { user: null, home: null } });
 		assert.deepEqual(imageUser.sandbox.jobUser, { user: null, home: null }, "the image's own user is stamped too, as a decision rather than an absence");
+		// Issue #429: a podman run's store rides the stamp; nothing else carries the key.
+		assert.equal((await prepareWorkspace({ kind: "github", repo: "a/b" }, "tok", { queueJobId: "gh-12", podmanStore: "/home/op/.local/share/containers/storage" })).sandbox.podmanStore, "/home/op/.local/share/containers/storage");
+		assert.equal(Object.hasOwn(stamped.sandbox, "podmanStore"), false);
 		// #277: the venue is resolved exactly as the registry dispatches it, so a trigger's own run.backend wins.
 		assert.equal((await prepareWorkspace({ kind: "github", repo: "a/b", backend: "far" }, "tok", { queueJobId: "gh-9" })).sandbox.backend, "far");
 		// No default wired (a DI seam) stamps a null venue, which the sandbox refuses -- never a guessed local.

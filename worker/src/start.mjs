@@ -793,9 +793,16 @@ export async function startWorker(
 		// `PI_BACKENDS` and routinely differs from the worker's (`OQ-038`), so a blessed-list listing let a podman-only
 		// worker delete a local run's directory under a docker shell an operator had just opened. A runtime that cannot
 		// answer holds its own runs this pass and nothing else, so a stale docker CLI does not stop a podman sweep, and a
-		// run naming no venue with a launcher is held. `blessed` only adds runtimes to the network sweep; a host that
-		// blesses neither and retains nothing from either spawns neither CLI.
-		const watch = makeSandboxRuntimeWatch({ sandboxDir: config.sandboxDir, blessed: config.backends, list: listRunningSandboxesFn, makeSweeper: makeSandboxNetworkSweeperFn, log });
+		// run it cannot place (an unreadable manifest, a venue with no launcher) is asked of every runtime present.
+		// `blessed` only adds runtimes to the network sweep; a host that blesses neither and retains nothing from either
+		// spawns neither CLI.
+		// The store a podman run recorded is compared with THIS worker's podman store (review round 2): the cached boot
+		// read when podman is blessed, else one read through the same seam, asked only when a podman run recorded one.
+		const readPodmanStore = async () => {
+			const read = await (podmanInfo ?? readPodmanInfoFn)();
+			return read?.answered === true ? (read.info?.graphRoot ?? null) : null;
+		};
+		const watch = makeSandboxRuntimeWatch({ sandboxDir: config.sandboxDir, blessed: config.backends, list: listRunningSandboxesFn, readPodmanStore, makeSweeper: makeSandboxNetworkSweeperFn, log });
 		reapSandboxes = makeSandboxReaperFn({
 			sandboxDir: config.sandboxDir,
 			retentionHours: config.sandboxRetentionHours,

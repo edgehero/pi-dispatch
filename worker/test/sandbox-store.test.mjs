@@ -32,7 +32,9 @@ function fakeFs({ files = {}, failOn = null } = {}) {
 		renameSync(from, to) {
 			if (failOn === "rename") throw new Error("EXDEV: cross-device link");
 			calls.renamed.push([from, to]);
-			files[to] = "<dir>";
+			// A rename carries what it names: a directory's marker (as the retention rename always was here), or a
+			// file's CONTENT, which is how the pin's atomic manifest rewrite lands (issue #429).
+			files[to] = files[from] ?? "<dir>";
 			delete files[from];
 		},
 		rmSync(p) {
@@ -162,6 +164,11 @@ test("the job user the run had is written to the manifest, null when nothing dec
 	const stamped = retainJobDir(prepared({ sandbox: { jobId: "gh-1", kind: "github", image: "pi-job:latest", backend: "local", jobUser: { user: "1234:1234", home: "/home/pi" } } }), { sandboxDir: "/sbx", fs, now: () => Date.parse("2026-08-01T10:00:00Z") });
 	assert.deepEqual(stamped.jobUser, { user: "1234:1234", home: "/home/pi" });
 	assert.deepEqual(JSON.parse(fs.files["/sbx/gh-1/manifest.json"]).jobUser, { user: "1234:1234", home: "/home/pi" }, "on disk, where the sandbox reads it");
+
+	// Issue #429: a podman run's container store is recorded, and only when known.
+	const podman = fakeFs({ files: { "/jobs/job-xyz": "<dir>" } });
+	assert.equal(retainJobDir(prepared({ sandbox: { jobId: "gh-4", kind: "github", image: "pi-job:latest", backend: "podman", podmanStore: "/home/op/.local/share/containers/storage" } }), { sandboxDir: "/sbx", fs: podman, now: () => Date.parse("2026-08-01T10:00:00Z") }).podmanStore, "/home/op/.local/share/containers/storage");
+	assert.equal(Object.hasOwn(stamped, "podmanStore"), false, "every other manifest keeps its shape");
 
 	const bare = fakeFs({ files: { "/jobs/job-xyz": "<dir>" } });
 	assert.equal(retainJobDir(prepared(), { sandboxDir: "/sbx", fs: bare }).jobUser, null, "no decision is null, which the sandbox reads as 'decide from this shell'");
@@ -568,4 +575,38 @@ test("a listing that did not answer is the sweep's FAULT, not a verdict about a 
 		sweepNetworks: async () => ({ swept: [], notes: [], failed: "network-list-failed" }),
 	})();
 	assert.deepEqual(logged, [["sandbox_reaper_skipped", { reason: "network-list-failed" }]]);
+});
+
+test("a pin rewrites the manifest ATOMICALLY: a temp file renamed over it, never a truncate in place (#429 review)", () => {
+	// A reader between a truncate and the write saw a manifest that did not parse, and the retention sweep read that
+	// as "no manifest, delete it" under an open shell. So the manifest path is only ever written by a rename.
+	const fs = fakeFs({ files: { "/sbx/gh-1/manifest.json": JSON.stringify({ jobId: "gh-1", backend: "podman", createdAt: "2026-08-01T00:00:00Z" }) } });
+	const writes = [];
+	const write = fs.writeFileSync;
+	fs.writeFileSync = (p, body, opts) => (writes.push(p), write(p, body, opts));
+	const at = Date.parse("2026-08-01T12:00:00Z");
+	assert.equal(pinSandbox({ sandboxDir: "/sbx", jobId: "gh-1", pinDays: 7, fs, now: () => at }).pinned, true);
+	assert.ok(writes.length === 1 && writes[0] !== "/sbx/gh-1/manifest.json" && writes[0].startsWith("/sbx/gh-1/."), `written beside it, never over it: ${writes}`);
+	assert.deepEqual(fs.calls.renamed.at(-1), [writes[0], "/sbx/gh-1/manifest.json"]);
+	assert.equal(JSON.parse(fs.files["/sbx/gh-1/manifest.json"]).keepUntil, new Date(at + 7 * DAY).toISOString());
+	assert.ok(!(writes[0] in fs.files), "no temp file is left");
+	// A rename that fails leaves the old manifest whole and removes the temp file.
+	const failing = fakeFs({ failOn: "rename", files: { "/sbx/gh-2/manifest.json": JSON.stringify({ jobId: "gh-2", createdAt: "2026-08-01T00:00:00Z" }) } });
+	assert.equal(pinSandbox({ sandboxDir: "/sbx", jobId: "gh-2", pinDays: 7, fs: failing, now: () => at }).pinned, false);
+	assert.equal(JSON.parse(failing.files["/sbx/gh-2/manifest.json"]).keepUntil, undefined);
+	assert.deepEqual(Object.keys(failing.files).filter((k) => k.includes(".tmp")), []);
+});
+
+test("each network-listing failure is logged with its runtime, and a bare `failed` keeps its old line (#429 review)", async () => {
+	const at = Date.parse("2026-08-01T12:00:00Z");
+	const run = async (outcome) => {
+		const logs = [];
+		await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs: fakeFs({ files: { "/sbx": "<dir>" } }), now: () => at, log: (e, f) => logs.push([e, f]), sweepNetworks: async () => outcome })();
+		return logs.filter(([e]) => e === "sandbox_reaper_skipped").map(([, f]) => f);
+	};
+	assert.deepEqual(await run({ swept: [], notes: [], failed: "network-list-failed", failures: [{ reason: "network-list-failed", runtime: "docker" }, { reason: "network-list-failed", runtime: "podman" }] }), [
+		{ reason: "network-list-failed", runtime: "docker" },
+		{ reason: "network-list-failed", runtime: "podman" },
+	]);
+	assert.deepEqual(await run({ swept: [], notes: [], failed: "network-list-failed" }), [{ reason: "network-list-failed" }]);
 });

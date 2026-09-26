@@ -380,6 +380,10 @@ sweep runs against it. Two things follow that are worth knowing before you do it
   `PI_BACKENDS`, which need not be the worker's. A runtime that cannot answer (no CLI, a daemon that is down) keeps
   its own runs for that pass and nothing else, and the worker logs `sandbox_reaper_skipped` naming the runtime; so a
   host without Docker still sweeps its podman runs, and asks docker only for a run that says it ran there.
+  The other side of that: a `local` run (or one retained before venues were recorded, which is `local`'s) kept on a
+  host that no longer has a docker CLI or daemon is held on every pass, because nothing can say whether a sandbox is
+  open on it. Once you know none is, remove it by hand: `pi-dispatch sandbox --list` shows its id, and
+  `rm -rf "$PI_SANDBOX_DIR/<jobId>"` removes it (`PI_SANDBOX_DIR` defaults to `<PI_JOBS_DIR>/sandboxes`).
 
 ## What is deliberately not yours to decide
 

@@ -1909,6 +1909,17 @@ test("the user the gate decided is the user that runs, and prepare stamps it for
 	assert.equal(ran.user, "1234:1234");
 	assert.equal(ran.home, "/home/pi");
 	assert.deepEqual(prepOpts.jobUser, { user: "1234:1234", home: "/home/pi" });
+	assert.equal(Object.hasOwn(prepOpts, "podmanStore"), false, "no store from the gate, none handed on");
+	// Issue #429: a podman gate's store reaches prepare, so the retained run records the store its container lived in.
+	let storedOpts = null;
+	const { deps: p } = deps({
+		jobUserPreflight: async () => ({ user: "1234:1234", home: "/home/pi", store: "/home/op/.local/share/containers/storage" }),
+		prepareWorkspace: async (_j, _t, opts) => ((storedOpts = opts), { workspaceDir: "/w", jobDir: "/j" }),
+		runContainer: async () => ({ code: 0, aborted: false }),
+	});
+	await runJob(ghJob, p);
+	assert.equal(storedOpts.podmanStore, "/home/op/.local/share/containers/storage");
+	assert.deepEqual(storedOpts.jobUser, { user: "1234:1234", home: "/home/pi" }, "the stamp stays the uid only");
 });
 
 test("the gate's relabel reaches runContainer as a boolean, and only a true one relabels (issue #355)", async () => {
