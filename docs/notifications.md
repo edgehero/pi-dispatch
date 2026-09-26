@@ -18,7 +18,8 @@ failure comment exists on the issue", REQ-JOB-STATUS-COMMENTS):
 |---|---|
 | the 30-minute kill timer (or a worker shutdown) stopped the run | `Stopped: the worker ended this run before it finished ... Not retried.` |
 | the operator cancelled the run (`pi-dispatch cancel`) | `Stopped: the operator cancelled this run. ... Not retried.` |
-| the run ended inside the container (turn or token budget, an in-container config refusal, exit 2) | `Stopped: the run ended inside the container before finishing ... Not retried.` |
+| the run ended inside the container (turn or token budget, an in-container config refusal, exit 2), for every runner reason except the one below | `Stopped: the run ended inside the container before finishing ... Not retried.` |
+| the AI provider answered 401 or 403 to the key (exit 2, reason `provider-auth-refused`): a bad or revoked key, or a key that may not use this model or route | `Stopped: the AI provider refused this worker's credentials or access (HTTP 401 or 403). The operator needs to check the provider key and what it is allowed to use. Not retried.` |
 | the FINAL infrastructure failure (retries exhausted, a stalled worker's job, an internal error) | `Failed: an error stopped this job and it will not be retried further. Ask the operator to check the worker log.` |
 
 What deliberately does NOT comment here:
@@ -53,7 +54,8 @@ arguments:
 - `outcome` is `failed` (final infrastructure failure) or `policy` (a worker abort or an in-container
   policy stop).
 - `reason` is a fixed token, never a message: `worker-abort`, `runner-policy`, `provider-auth-refused`
-  (the AI provider answered 401 or 403 to the worker's key, so every job fails until the key is fixed),
+  (the AI provider answered 401 or 403: the key is bad, revoked, or not allowed this model or route, and
+  every job fails the same way until the operator fixes it),
   `container-never-started`, `container-detached`, `secret-resolver-unreachable`, any other fixed token a failure legitimately
   carries, or `infra` when it carried none. Anything message-shaped is flattened to `infra` before it can
   reach your argv.

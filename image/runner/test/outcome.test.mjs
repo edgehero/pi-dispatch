@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import {
+	capExitMessage,
 	classifyStopReason,
 	classifyThrow,
 	configError,
 	decideExit,
 	EXIT_COMPLETED,
 	EXIT_INFRA,
+	EXIT_MESSAGE_MAX_CHARS,
 	EXIT_POLICY,
+	loadRetryPredicate,
 	providerAuthRefused,
 	STOP_REASONS,
 } from "../src/outcome.mjs";
@@ -156,6 +160,12 @@ test("configError's optional reason rides classifyThrow onto the exit line; the 
 
 // --- issue #437: a provider's refusal of the credential is policy, not infra ---
 
+// pi-ai's retry predicate is injected; here it is faked so the SHAPE list is tested on its own. The real
+// predicate runs against real provider output in pinned-api.test.mjs's loopback table.
+const NOT_TRANSIENT = () => false;
+const TRANSIENT = () => true;
+const err = (errorMessage) => ({ stopReason: "error", errorMessage });
+
 // The shapes the pinned pi-ai actually produces (the loopback table in pinned-api.test.mjs proves
 // each one), with 401 AND 403 for every form, so dropping either status from any entry fails here.
 const AUTH_REFUSED = [
@@ -163,6 +173,8 @@ const AUTH_REFUSED = [
 	'403 {"type":"error","error":{"type":"permission_error","message":"denied"}}',
 	'401: {"message":"Incorrect API key provided","code":"invalid_api_key"}',
 	'403: {"message":"Incorrect API key provided","code":"invalid_api_key"}',
+	"401 Unauthorized: bad token (unauthorized)",
+	"403 Forbidden: bad token (unauthorized)",
 	'OpenAI API error (401): {"message":"Incorrect API key provided"}',
 	'OpenAI API error (403): {"message":"Incorrect API key provided"}',
 	'Azure OpenAI API error (401): {"message":"Incorrect API key provided"}',
@@ -173,7 +185,8 @@ const AUTH_REFUSED = [
 
 // Each of these would be a FALSE refusal under a looser rule, and a false refusal drops real work: a
 // transient failure recorded as not-retried. The unanchored, prefix-free and status-in-the-body cases are
-// the ones a bare /401|403/ would get wrong.
+// the ones a bare /401|403/ would get wrong. The three prefixed literals each appear AFTER position 0
+// once, so dropping the `^` from any one of them fails here.
 const NOT_AUTH_REFUSED = [
 	"4010 x",
 	"4031: x",
@@ -187,34 +200,109 @@ const NOT_AUTH_REFUSED = [
 	"OpenAI API error (429): slow down",
 	"Some API error (401): not a proved prefix",
 	'{"error":{"code":401,"message":"API key not valid.","status":"UNAUTHENTICATED"}}',
+	'502: {"detail":"OpenAI API error (401): upstream"}',
+	'400: {"detail":"Azure OpenAI API error (403): upstream"}',
+	'400: {"detail":"Mistral API error (401): upstream"}',
+	"AccessDeniedException: 403: denied",
+	"Your authentication token is invalid.",
 ];
 
 test("a provider's 401/403 refusal of the credential exits 2 as provider-auth-refused, never retried", () => {
 	for (const errorMessage of AUTH_REFUSED) {
-		assert.equal(providerAuthRefused(errorMessage), true, errorMessage);
-		const outcome = classifyStopReason({ stopReason: "error", errorMessage });
+		assert.equal(providerAuthRefused(err(errorMessage), NOT_TRANSIENT), true, errorMessage);
+		const outcome = classifyStopReason(err(errorMessage), NOT_TRANSIENT);
 		assert.deepEqual(outcome, { code: EXIT_POLICY, reason: "provider-auth-refused", message: errorMessage }, errorMessage);
 	}
 });
 
 test("anything that is not a proved refusal shape stays retryable infra", () => {
 	for (const errorMessage of NOT_AUTH_REFUSED) {
-		assert.equal(providerAuthRefused(errorMessage), false, String(errorMessage));
-		const outcome = classifyStopReason({ stopReason: "error", errorMessage });
+		assert.equal(providerAuthRefused(err(errorMessage), NOT_TRANSIENT), false, String(errorMessage));
+		const outcome = classifyStopReason(err(errorMessage), NOT_TRANSIENT);
 		assert.deepEqual(outcome, { code: EXIT_INFRA, reason: "error", message: errorMessage }, String(errorMessage));
 	}
-	// A non-string never throws: the terminal message is pi's, not ours.
-	for (const value of [null, 401, {}, ["401 x"]]) assert.equal(providerAuthRefused(value), false);
+	// A non-message never throws: the terminal message is pi's, not ours.
+	for (const value of [null, undefined, 401, {}, { errorMessage: 401 }, { errorMessage: ["401 x"] }]) {
+		assert.equal(providerAuthRefused(value, NOT_TRANSIENT), false);
+	}
+});
+
+test("a refusal shape pi-ai calls retryable is NOT a refusal -- a gateway's transient 403 keeps retrying", () => {
+	const shaped = err('403: {"message":"Provider returned error","code":403,"metadata":{"raw":"upstream connect error"}}');
+	assert.deepEqual(classifyStopReason(shaped, TRANSIENT), { code: EXIT_INFRA, reason: "error", message: shaped.errorMessage });
+	// The predicate receives the terminal message itself, which is the argument pi's own session passes it.
+	const seen = [];
+	providerAuthRefused(shaped, (message) => (seen.push(message), false));
+	assert.deepEqual(seen, [shaped]);
+	// No predicate, a non-boolean answer, or one that throws: the runner cannot tell transient from
+	// determinate, so it retries -- the false determinate is the costlier error.
+	for (const isRetryable of [null, undefined, "yes", () => undefined, () => 0, () => { throw new Error("boom"); }]) {
+		assert.equal(providerAuthRefused(err("401 invalid x-api-key"), isRetryable), false, String(isRetryable));
+		assert.equal(classifyStopReason(err("401 invalid x-api-key"), isRetryable).code, EXIT_INFRA);
+	}
+	// The predicate is consulted only for a shape match: a 429 is never asked about, whatever it would say.
+	let asked = 0;
+	providerAuthRefused(err("429 rate limited"), () => (asked++, false));
+	assert.equal(asked, 0);
 });
 
 test("only an error stopReason can be a refusal, and budget aborts still win over it", () => {
-	const refusal = { stopReason: "error", errorMessage: "401 invalid x-api-key" };
-	assert.equal(classifyStopReason({ stopReason: "stop", errorMessage: "401 x" }).code, EXIT_COMPLETED);
-	assert.equal(decideExit({ budgetAborted: true, budgetTurns: 3, tokenAborted: false, terminal: refusal }).reason, "turn_budget");
-	assert.equal(decideExit({ budgetAborted: false, tokenAborted: true, terminal: refusal }).reason, "token_budget");
+	const refusal = err("401 invalid x-api-key");
+	const isRetryable = NOT_TRANSIENT;
+	assert.equal(classifyStopReason({ stopReason: "stop", errorMessage: "401 x" }, isRetryable).code, EXIT_COMPLETED);
+	assert.equal(decideExit({ budgetAborted: true, budgetTurns: 3, tokenAborted: false, terminal: refusal, isRetryable }).reason, "turn_budget");
+	assert.equal(decideExit({ budgetAborted: false, tokenAborted: true, terminal: refusal, isRetryable }).reason, "token_budget");
+	assert.equal(decideExit({ budgetAborted: false, tokenAborted: false, terminal: refusal, isRetryable }).reason, "provider-auth-refused");
+	// decideExit without the predicate keeps every provider error retryable, as it was before #437.
+	assert.equal(decideExit({ budgetAborted: false, tokenAborted: false, terminal: refusal }).reason, "error");
 	// A handler-driven command turn gets the terminal's real verdict, refusal included; a thrown handler still wins.
-	assert.equal(decideExit({ budgetAborted: false, tokenAborted: false, terminal: refusal, command: { failed: false } }).reason, "provider-auth-refused");
-	assert.equal(decideExit({ budgetAborted: false, tokenAborted: false, terminal: refusal, command: { failed: true } }).reason, "command-error");
+	assert.equal(decideExit({ budgetAborted: false, tokenAborted: false, terminal: refusal, command: { failed: false }, isRetryable }).reason, "provider-auth-refused");
+	assert.equal(decideExit({ budgetAborted: false, tokenAborted: false, terminal: refusal, command: { failed: true }, isRetryable }).reason, "command-error");
 	// classifyThrow is unchanged: a thrown 401 string is not the stopReason channel.
 	assert.equal(classifyThrow(new Error("401 invalid x-api-key")).code, EXIT_INFRA);
+});
+
+test("loadRetryPredicate prefers the meter's accepted module, then the candidates in order, and never throws", async () => {
+	const fromMeter = () => false;
+	const fromCandidate = () => true;
+	assert.equal(await loadRetryPredicate({ module: { isRetryableAssistantError: fromMeter }, candidates: [{ url: "x" }], load: async () => ({ isRetryableAssistantError: fromCandidate }) }), fromMeter);
+	const loaded = [];
+	const load = async (url) => {
+		loaded.push(url);
+		if (url === "broken") throw new Error("ENOENT");
+		if (url === "empty") return {};
+		return { isRetryableAssistantError: fromCandidate };
+	};
+	assert.equal(await loadRetryPredicate({ module: null, candidates: [{ url: "broken" }, { url: "empty" }, { url: "good" }], load }), fromCandidate);
+	assert.deepEqual(loaded, ["broken", "empty", "good"]);
+	assert.equal(await loadRetryPredicate({ module: {}, candidates: [], load }), null);
+	assert.equal(await loadRetryPredicate(), null);
+});
+
+test("capExitMessage bounds the exit line's message and marks the cut; shorter outcomes pass through untouched", () => {
+	const short = { code: 2, reason: "provider-auth-refused", message: "401 x" };
+	assert.equal(capExitMessage(short), short);
+	const exact = { code: 1, reason: "error", message: "y".repeat(EXIT_MESSAGE_MAX_CHARS) };
+	assert.equal(capExitMessage(exact), exact);
+	const long = { code: 2, reason: "provider-auth-refused", message: `403 ${"<p>x</p>".repeat(2000)}` };
+	const capped = capExitMessage(long);
+	assert.equal(capped.code, 2);
+	assert.equal(capped.reason, "provider-auth-refused");
+	assert.ok(capped.message.startsWith(long.message.slice(0, EXIT_MESSAGE_MAX_CHARS)));
+	assert.ok(capped.message.endsWith(`... [truncated ${long.message.length - EXIT_MESSAGE_MAX_CHARS} chars]`));
+	assert.ok(capped.message.length < EXIT_MESSAGE_MAX_CHARS + 40);
+	assert.equal(long.message.length, 4 + 16000, "the input is not mutated");
+	for (const outcome of [{ code: 0, reason: "stop" }, { code: 2, reason: "x", message: 5 }, null, undefined]) assert.equal(capExitMessage(outcome), outcome);
+});
+
+test("run-job.mjs caps every exit line and hands decideExit the pinned retry predicate", () => {
+	// Both are wiring the unit tests above cannot see: an exit line that bypasses the cap loses the label
+	// host-side on a big body, and a decideExit call without isRetryable silently turns #437 off.
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	const exitLines = src.match(/log\("exit", \{[^\n]*/g) ?? [];
+	assert.equal(exitLines.length, 2, "the runner has two exit-line paths (the decided outcome and the preflight throw)");
+	assert.match(exitLines[0], /\.\.\.capExitMessage\(outcome\)/, "the decided outcome's exit line must be capped");
+	assert.match(src, /const capped = capExitMessage\(outcome\);\s*log\("exit", \{ code: capped\.code, reason: capped\.reason, message: capped\.message \}\)/, "the throw path's exit line must be capped");
+	assert.match(src, /loadRetryPredicate\(\{ module: usageMeter\.ok \? usageMeter\.module : null, candidates: resolvePiAiCompat\(\) \}\)/);
+	assert.match(src, /decideExit\(\{[\s\S]*?\n\t\tisRetryable,\n\t\}\);/, "decideExit must receive isRetryable");
 });

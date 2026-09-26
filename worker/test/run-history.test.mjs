@@ -1397,3 +1397,37 @@ test("every RUNNER_POLICY_REASONS member is a literal the runner itself writes (
 	}
 	assert.ok(runnerSrc.includes('reason: "provider-auth-refused"'), "the runner's issue #437 literal moved");
 });
+
+test("a 16 KB provider error body keeps the exit-2 label: the runner caps the exit line's message before the 8 KiB tail sees it", async () => {
+	// Issue #437 review. The runner writes the terminal errorMessage onto the exit line, and the worker
+	// reads that line from the LAST 8 KiB of stdout. An HTML 403 page is easily 15 KB; uncapped, the line's
+	// head (where `code` and `reason` sit) falls out of the tail and the record says runner-policy. The
+	// runner's own capExitMessage is imported here (outcome.mjs has no imports of its own), so this test
+	// exercises the function run-job.mjs calls, through the real sink.
+	const { capExitMessage } = await import("../../image/runner/src/outcome.mjs");
+	const outcome = { code: 2, reason: "provider-auth-refused", message: `403 <html><body>${"Forbidden. ".repeat(1500)}</body></html>` };
+	assert.ok(outcome.message.length > 16000);
+	// The rest of the line as run-job.mjs builds it, with a full-width ledger so the budget is not flattered.
+	const models = Array.from({ length: 8 }, (_, i) => ({ provider: "anthropic", model: `model-${i}`, calls: 9, input: 123456, output: 23456, cacheRead: 3456, cacheWrite: 456, cacheWrite1h: 0, reasoning: 0, total: 150824, cost: 1.234567, unpriced: 0 }));
+	const rest = {
+		turns: 12,
+		tokens: { input: 1, output: 2, total: 3, cost: 0.1, metered: true, rootTotal: 3, otherTotal: 0, looseTotal: 0, sessions: 1, calls: 9, unresolved: 0, unpriced: 0 },
+		usage: { v: 1, piAi: "0.80.7", truncated: 0, models },
+		session: { resumed: false, reason: "disabled" },
+	};
+	const line = (fields) => `\n${JSON.stringify({ event: "exit", jobId: "gh-big", ...fields, ...rest })}\n`;
+
+	const drive = async (exitText) => {
+		const fs = makeFakeFs({ stream: makeFakeStream() });
+		const jobLog = makeLogSink({ logsDir: "/logs", enabled: false, fs })("gh-big");
+		jobLog.write(Buffer.from("agent noise\n".repeat(200)));
+		// Delivered in 4 KiB chunks, the way a pipe hands stdout over.
+		const bytes = Buffer.from(exitText);
+		for (let at = 0; at < bytes.length; at += 4096) jobLog.write(bytes.subarray(at, at + 4096));
+		return (await jobLog.close()).exitReason;
+	};
+
+	assert.equal(await drive(line(capExitMessage(outcome))), "provider-auth-refused");
+	// The premise, so this test cannot pass for a reason other than the cap: uncapped, the label is lost.
+	assert.equal(await drive(line(outcome)), null);
+});

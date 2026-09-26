@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { makeBackendRegistry as realRegistry } from "../src/backend-registry.mjs";
 import { makePodmanBackend as realPodmanBackend } from "../src/backend-podman.mjs";
+import { RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // start.mjs imports index.mjs (bullmq), connection.mjs (ioredis), and the octokit-backed auth/host
@@ -1952,10 +1953,14 @@ test("PI_ON_FAILURE fires for the paid terminals only: terminal-failed and polic
 
 	assert.equal((await fired(() => handlers.completed({ id: "j2" }, { outcome: "policy", reason: "worker-abort" }))).length, 1, "the 30-minute kill pages");
 	assert.equal((await fired(() => handlers.completed({ id: "j3" }, { outcome: "policy", reason: "runner-policy" }))).length, 1, "an in-container stop pages");
-	// Issue #437: a bad provider key needs the operator and fails every job until they act, so it pages -- once.
-	const refused = await fired(() => handlers.completed({ id: "j3b" }, { outcome: "policy", reason: "provider-auth-refused" }));
-	assert.equal(refused.length, 1, "a provider credential refusal pages exactly once");
-	assert.equal(refused[0].jobId, "j3b");
+	// Issue #437: every named runner reason is an exit 2 that paged as runner-policy before it had a label,
+	// so each still pages -- once. Iterated from the set itself, so a new member is covered here unasked.
+	for (const reason of RUNNER_POLICY_REASONS) {
+		const refused = await fired(() => handlers.completed({ id: `j3-${reason}` }, { outcome: "policy", reason }));
+		assert.equal(refused.length, 1, `${reason} pages exactly once`);
+		assert.equal(refused[0].jobId, `j3-${reason}`);
+	}
+	assert.ok(RUNNER_POLICY_REASONS.has("provider-auth-refused"));
 	assert.equal((await fired(() => handlers.completed({ id: "j4" }, { outcome: "completed" }))).length, 0, "a completion pages nobody");
 	assert.equal((await fired(() => handlers.completed({ id: "j5" }, { outcome: "policy", reason: "over-budget" }))).length, 0, "a free pre-spend refusal already comments; a delivery storm must not page");
 	assert.equal((await fired(() => handlers.completed({ id: "j6" }, { outcome: "policy", reason: "operator-cancel" }))).length, 0, "the operator initiated it; a push saying what they just did is noise");

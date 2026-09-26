@@ -47,7 +47,7 @@ import { observeHost, runtimeObservationKey } from "./runtime-observations.mjs";
 import { makeRunContainer } from "./run-container.mjs";
 import { resolveProviderCredential } from "./env-allowlist.mjs";
 import { makeSecretsResolver } from "./secrets.mjs";
-import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, sanitizeJobId } from "./run-history.mjs";
+import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, RUNNER_POLICY_REASONS, sanitizeJobId } from "./run-history.mjs";
 import { makeRunMirror } from "./run-mirror.mjs";
 import { effectiveSettings, readOverlay } from "./runtime-settings.mjs";
 import { authoredCron, loadSchedules, servedSchedules } from "./schedules.mjs";
@@ -1343,13 +1343,15 @@ export async function startWorker(
 	const onFailure = config.onFailure
 		? makeOnFailure({ command: config.onFailure, timeoutMs: config.onFailureTimeoutMs, host: config.workerName ?? "", hostEnv: env, log })
 		: null;
-	// Which POLICY reasons page the operator. Paid terminals only: worker-abort, runner-policy and
-	// provider-auth-refused cost a container and ended wrong, and the last (issue #437) is a bad provider
-	// key, which nothing but the operator can fix and which fails every job until they do. Excluded on purpose: `completed` and every pre-spend refusal (free, and
+	// Which POLICY reasons page the operator. Paid terminals only: worker-abort, runner-policy and every
+	// named runner reason cost a container and ended wrong. The runner's named reasons are SPREAD from
+	// RUNNER_POLICY_REASONS rather than listed, because each is an exit 2 that would have paged as
+	// runner-policy before it got its own label, and a label must not be the thing that silences a page;
+	// provider-auth-refused (issue #437) is the case in point, a refusal only the operator can fix. Excluded on purpose: `completed` and every pre-spend refusal (free, and
 	// each already comments -- a delivery storm against a spent cap must not page anyone), and
 	// `operator-cancel`, because the operator initiated it and a push telling them what they just did is
 	// noise with a pager attached.
-	const HOOK_POLICY_REASONS = new Set(["worker-abort", "runner-policy", "provider-auth-refused"]);
+	const HOOK_POLICY_REASONS = new Set(["worker-abort", "runner-policy", ...RUNNER_POLICY_REASONS]);
 	// The infra-terminal sentence (issue #288). FIXED, never err.message: the message classes that reach
 	// a failedReason carry host paths and library words (the #310 record), and for a local job this text
 	// lands verbatim in the service log through the adapter's stdout fallthrough. The worker log already

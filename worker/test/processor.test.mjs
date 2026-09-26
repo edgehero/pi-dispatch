@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS } from "../src/backends.mjs";
 import { test } from "node:test";
 import { scopeKeyPrefix } from "../src/scoped-limits.mjs";
-import { InfraRetry, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED } from "../src/processor.mjs";
-import { buildRecord } from "../src/run-history.mjs";
+import { readFileSync } from "node:fs";
+import { InfraRetry, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED, TERMINAL_COMMENTS } from "../src/processor.mjs";
+import { buildRecord, RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
 
 /** A fake redis whose counter we can preset, to force over/under budget. `decrCalls` spies
  *  releaseBudget, so tests assert the slot is (or is not) given back and never double-released.
@@ -168,12 +169,32 @@ test("exit 2 with the runner's provider-auth-refused reason returns that reason,
 	assert.equal(r.exitCode, 2);
 	assert.equal(r.budgetReserved, true, "the container ran; the slot stays counted as runner-policy's does");
 	assert.equal(posted.length, 1, "exactly one comment per terminal");
-	assert.match(posted[0], /refused this worker's credentials \(HTTP 401 or 403\)/);
+	assert.equal(posted[0], "Stopped: the AI provider refused this worker's credentials or access (HTTP 401 or 403). The operator needs to check the provider key and what it is allowed to use. Not retried.");
 	assert.match(posted[0], /Not retried\./);
 	assert.ok(!/[/\\]/.test(posted[0]), "fixed and path-free: no provider message, no path");
 	const record = buildRecord({ job: { id: "gh-1", name: "github", data: ghJob, attemptsMade: 0 }, result: r, startedAt: null, endedAt: null });
 	assert.equal(record.outcome, "policy");
 	assert.equal(record.reason, "provider-auth-refused");
+});
+
+test("every RUNNER_POLICY_REASONS member has its own fixed comment and pages the operator", async () => {
+	// The set is the one list; these are its two lookups, each of which fails QUIETLY on a missing member:
+	// the comment would post `undefined`, and the hook would stay silent on a paid terminal.
+	assert.ok(RUNNER_POLICY_REASONS.size > 0);
+	for (const reason of RUNNER_POLICY_REASONS) {
+		const sentence = TERMINAL_COMMENTS[reason];
+		assert.equal(typeof sentence, "string", `${reason} has no TERMINAL_COMMENTS row`);
+		assert.notEqual(sentence, TERMINAL_COMMENTS["runner-policy"], `${reason} must say something the generic stop does not`);
+		assert.match(sentence, /^Stopped: .* Not retried\.$/);
+		assert.ok(!/[/\\]/.test(sentence), "fixed and path-free");
+		const posted = [];
+		const { deps: d } = deps({ runContainer: async () => ({ code: 2, aborted: false, exitReason: reason }), comment: async (_j, t) => posted.push(t) });
+		assert.equal((await runJob(ghJob, d)).reason, reason);
+		assert.deepEqual(posted, [sentence]);
+	}
+	// The hook set is DERIVED from the same set, so a new member pages without a second edit.
+	const start = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
+	assert.match(start, /const HOOK_POLICY_REASONS = new Set\(\["worker-abort", "runner-policy", \.\.\.RUNNER_POLICY_REASONS\]\);/);
 });
 
 test("the exit-line reason never moves a job between classes: exit 1 with a forged provider-auth-refused is still InfraRetry", async () => {

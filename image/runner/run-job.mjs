@@ -18,11 +18,13 @@ import {
 } from "./src/config.mjs";
 import { buildLoadedResourceLoader, GLOBAL_PI_DIR, JOB_PI_DIR, TRIGGER_SKILLS_DIR, WORKSPACE } from "./src/loader.mjs";
 import {
+	capExitMessage,
 	captureTerminal,
 	classifyThrow,
 	configError,
 	decideExit,
 	EXIT_INFRA,
+	loadRetryPredicate,
 } from "./src/outcome.mjs";
 import { restoreEnvProxyDispatcher } from "./src/env-proxy.mjs";
 import { countPackageResources, findShadowedSkills, isFlowLoaded, owningRoot } from "./src/packages.mjs";
@@ -35,7 +37,7 @@ import { attachTurnBudget } from "./src/turn-budget.mjs";
 // copies of that package are installed and a plain specifier binds the HOISTED one, which pi does not
 // use -- the meter would register, report success, and count nothing. pinned-api.test.mjs guards this
 // file against exactly that string.
-import { createUsageMeter, installProcessUsageMeter } from "./src/usage-meter.mjs";
+import { createUsageMeter, installProcessUsageMeter, resolvePiAiCompat } from "./src/usage-meter.mjs";
 
 const JOB_DIR = "/job";
 const PROMPT_PATH = `${JOB_DIR}/prompt.md`;
@@ -254,6 +256,11 @@ async function main() {
 		},
 	});
 	const usageMeter = await installProcessUsageMeter({ modelRegistry, meter, log });
+	// pi-ai's own transient-error predicate, from the copy the meter just accepted (issue #437): a 401/403
+	// shape pi calls retryable (a gateway's "Provider returned error", an HTML "please retry" page) is not
+	// a refusal of the credential. Without it every provider error stays retryable, so say so on the log.
+	const isRetryable = await loadRetryPredicate({ module: usageMeter.ok ? usageMeter.module : null, candidates: resolvePiAiCompat() });
+	if (!isRetryable) log("retry_predicate_unavailable", {});
 
 	({ session } = await createAgentSession({
 		cwd: WORKSPACE,
@@ -395,6 +402,7 @@ async function main() {
 		terminal,
 		// Null for every prompt job, so their decision tree is byte-identical to before run.command.
 		command: cfg.command ? { failed: commandFailed } : null,
+		isRetryable,
 	});
 	// `metered: true` on the process-wide snapshot is what tells the daily token counter that this
 	// total includes every in-process session, not just the root's turns.
@@ -418,7 +426,9 @@ async function main() {
 	// `usage` is, so an exit line with nothing to say stays byte-identical to what every existing consumer
 	// already parses -- and the host gate reads that absence as "no measurement" rather than as zero.
 	const context = Number.isFinite(contextUsage?.tokens) && Number.isFinite(contextUsage?.contextWindow) && contextUsage.contextWindow > 0 ? { tokens: contextUsage.tokens, window: contextUsage.contextWindow } : null;
-	log("exit", { ...outcome, turns: budget.state.turns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason } });
+	// capExitMessage: a provider's error body is unbounded, and the worker reads this line from a bounded
+	// tail, so an uncapped message can push `code` and `reason` out of what the host ever sees.
+	log("exit", { ...capExitMessage(outcome), turns: budget.state.turns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason } });
 	return outcome.code;
 }
 
@@ -432,6 +442,7 @@ main()
 	})
 	.catch((error) => {
 		const outcome = classifyThrow(error);
-		log("exit", { code: outcome.code, reason: outcome.reason, message: outcome.message });
+		const capped = capExitMessage(outcome);
+		log("exit", { code: capped.code, reason: capped.reason, message: capped.message });
 		process.exitCode = outcome.code ?? EXIT_INFRA;
 	});
