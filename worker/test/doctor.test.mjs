@@ -5861,6 +5861,33 @@ test("a podman venue refusal is ✗ where podman is the default venue and ⚠ wh
 	}
 });
 
+test("a widening containers.conf is a podman venue refusal: ✗ where podman is the default, ⚠ where not, naming the file and key, with no extra spawn (#428)", async () => {
+	const confPath = `${PODMAN_HOME}/.config/containers/containers.conf`;
+	const withConf = (text) => ({ ...podmanFs, readFileSync: (p) => (p === confPath ? text : podmanFs.readFileSync(p)) });
+	for (const [key, text] of [
+		["pasta_options", '[network]\npasta_options = ["--map-gw"]\n'],
+		["network_cmd_options", '[engine]\nnetwork_cmd_options = ["allow_host_loopback=true"]\n'],
+		["annotations", '[containers]\nannotations = ["run.oci.keep_original_groups=1"]\n'],
+	]) {
+		for (const PI_BACKENDS of ["podman", "local,podman"]) {
+			const { out, text: said } = capture();
+			const calls = [];
+			const code = await runDoctor(podmanEnv({ PI_BACKENDS }), podmanDeps(out, podmanPlan(), calls, { observationFs: withConf(text) }));
+			const boot = PI_BACKENDS === "podman";
+			const line = `${boot ? "✗" : "⚠"} podman: no job can run on this venue (podman-conf-widens-job): ${confPath} sets ${key}, which `;
+			assert.ok(said().includes(line), `${key} ${PI_BACKENDS}:\n${said()}`);
+			assert.match(said(), new RegExp(`${boot ? "a worker running as this account refuses to boot" : "every podman job is refused"}\n {4}→ remove that key from that file, then restart this account's containers on a bridge network`));
+			if (boot) assert.equal(code, 1, `${key}: a boot refusal fails doctor`);
+			assert.doesNotMatch(said(), /podman: jobs run as|podman: job image/, `${key}: nothing past the refusal is read`);
+			assert.deepEqual(calls.filter((c) => c.cmd === "podman").map((c) => c.args[0]), ["info"], "the files are read, podman is asked nothing more");
+		}
+	}
+	// A clean conf says nothing of it.
+	const { out, text: said } = capture();
+	await runDoctor(podmanEnv(), podmanDeps(out, podmanPlan(), [], { observationFs: withConf("[network]\n# pasta_options = []\n") }));
+	assert.doesNotMatch(said(), /podman-conf-widens-job/);
+});
+
 test("the podman job image is read from THIS account's store, and its anyUid rule is the podman venue's (#354)", async () => {
 	const run = async (plan, ids = LINUX_ID(1234)) => {
 		const { out, text } = capture();

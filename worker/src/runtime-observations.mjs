@@ -108,14 +108,16 @@ export function confFilesIn(fs, { files = [], dirs = [] }) {
 /**
  * The first of `files` that sets a key `key` matches (`says` completes the sentence naming it), or holds an escaped key
  * this check cannot decode, or exists and cannot be read, as `{ value: false, evidence }`; `null` when none does. A
- * missing file is simply not read, which is how Podman treats it too.
+ * missing file is simply not read, which is how Podman treats it too. `says` may be a function of the match (issue #428),
+ * for a key set whose members each do something different, so the sentence names the one that was found.
  */
 export function confKeyFinding(fs, files, { key, says }) {
 	for (const file of files) {
 		const got = readHostFile(fs, file);
 		if (got.missing) continue;
 		if (got.text === undefined) return { value: false, evidence: `${file} could not be read (${got.error})` };
-		if (key.test(got.text)) return { value: false, evidence: `${file} ${says}` };
+		const match = key.exec(got.text);
+		if (match) return { value: false, evidence: `${file} ${typeof says === "function" ? says(match) : says}` };
 		if (ESCAPED_KEY.test(got.text)) return { value: false, evidence: `${file} has an escaped key, which this check does not decode` };
 	}
 	return null;

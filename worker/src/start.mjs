@@ -41,7 +41,7 @@ import { hostQueueName, makeQueue } from "./queue.mjs";
 import { endpointShown, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
 import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
-import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_INFO_TIMEOUT_MS, cachedPodmanInfo, decidePodmanJobUser, makePodmanBackend, makePodmanInfoReader, makePodmanReaper, observePodman, podmanJobUserRefusal, resolvePodmanImageUser } from "./backend-podman.mjs";
+import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_INFO_TIMEOUT_MS, cachedPodmanInfo, decidePodmanJobUser, makePodmanBackend, makePodmanInfoReader, makePodmanReaper, observePodman, podmanConfRefusal, podmanConfWidening, podmanJobUserRefusal, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { observeHost, runtimeObservationKey } from "./runtime-observations.mjs";
 
 import { makeRunContainer } from "./run-container.mjs";
@@ -531,6 +531,13 @@ export async function startWorker(
 	// blessed, the jobs that name it are refused one by one and the default venue's still run.
 	const podmanRefusal = podmanBootRefusal(bootPodmanDecision, config.defaultBackend);
 	if (podmanRefusal) throw configError(podmanRefusal);
+	// Issue #428: the account's containers.conf, next, under the same rule (only while `podman` is the default venue; merely
+	// blessed, each podman job is refused and the default venue's still run). A VENUE refusal rather than a floor
+	// observation: with egress off no declared property covers what a job reaches on the host, so a floor would never
+	// fire on the deployments at risk. Read from this host's files with no daemon, so it is determinate whatever the info
+	// read said, and tagged (exit 2): a restart reads the same bytes. After the identity, whose fix comes first.
+	const podmanConfRefusalText = podmanConfBootRefusal(bootPodmanDecision, config.defaultBackend, { fs: observationFs, home: jobUserIdentity.home, env, euid: jobUserIdentity.euid });
+	if (podmanConfRefusalText) throw configError(podmanConfRefusalText);
 	// The podman venue's own observations, judged for `podman` ALONE, as the endpoint and the daemon's are for `local`
 	// alone: each venue's words are earned by its own reads, and judging one venue's answers over every blessed venue
 	// would read the other's observations as unanswered, which is the transient arm, exit 1 on every restart. Same split
@@ -1783,6 +1790,17 @@ export function podmanBootRefusal(decision, defaultBackend) {
 	if (defaultBackend !== PODMAN_BACKEND) return null;
 	if (decision?.mode !== "unmappable" || !PODMAN_BOOT_REFUSING_CAUSES.has(decision.cause)) return null;
 	return podmanJobUserRefusal(decision);
+}
+
+/**
+ * The boot refusal text for a widening containers.conf on the podman venue (issue #428), or `null` to boot: only while
+ * `podman` is the DEFAULT venue, `podmanBootRefusal`'s rule, and not when the identity is already refused (that refusal
+ * names the fix that comes first, and with `podman` merely blessed its jobs are refused one by one anyway).
+ */
+export function podmanConfBootRefusal(decision, defaultBackend, files) {
+	if (defaultBackend !== PODMAN_BACKEND || !decision || decision.mode === "unmappable") return null;
+	const widened = podmanConfWidening(files);
+	return widened ? podmanConfRefusal(widened) : null;
 }
 
 /** What makes two job-user decisions the same for the `job_user` log line. */

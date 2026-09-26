@@ -382,6 +382,16 @@ export async function runJob(job, deps) {
 		// without the image is refused as `job-image-missing`, both the wrong fix. Only an answer no image can change
 		// comes this way; the per-image half (`anyUid`) stays below, after the probe that reads it.
 		if (observed?.jobUserRefused?.refused === "job-user-unmappable") return refuseJobUserUnmappable(observed.jobUserRefused.cause);
+		// Issue #428: the podman venue's account sets a containers.conf key that widens what every job reaches (the host's
+		// loopback services, the account's groups) and no argv takes back. A VENUE refusal, not a floor miss: with egress
+		// off no declared property covers what a job reaches on the host, so a floor would never ask on the deployments at
+		// risk. Determinate (the account's own files), so a RETURN (CONST-RETRY-INFRA-ONLY), here for the identity's reason:
+		// ahead of the image preflight and every spend. The file and key go to the operator's log; the comment is fixed.
+		if (observed?.podmanConfRefused) {
+			await comment(job, "Refused: the worker host's Podman configuration lets a job's container reach more than this venue allows (the host's own services or the worker account's groups), so the operator must change it before podman jobs run. Not run.");
+			log("refused_podman_conf_widens_job", { key: observed.podmanConfRefused.key ?? null, message: observed.podmanConfRefused.message });
+			return { outcome: "policy", reason: "podman-conf-widens-job", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
 
 		// The job image must exist on THIS host before anything else happens. Free, determinate and
 		// credential-less, so it precedes the mint, the clone and the reservation: a host that cannot run the

@@ -2850,6 +2850,56 @@ test("a podman default refuses to BOOT on every identity cause, tagged, before a
 	assert.deepEqual([slowStarted.podmanVersion, slowStarted.podmanRootless, slowStarted.podmanBoundsDelegated], [null, null, null]);
 });
 
+test("a podman default whose account's containers.conf widens a job refuses to BOOT, tagged, before anything is built; merely blessed it boots (#428)", { skip: skipNoModule }, async () => {
+	const widened = (_key, text) => hostFiles({ "/home/pdjob/.config/containers/mounts.conf": "", "/home/pdjob/.config/containers/containers.conf": text });
+	const auth = { makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() };
+	for (const [key, text] of [
+		["pasta_options", '[network]\npasta_options = ["-T", "6379"]\n'],
+		["network_cmd_options", '[engine]\nnetwork_cmd_options = ["allow_host_loopback=true"]\n'],
+		["annotations", '[containers]\nannotations = ["run.oci.keep_original_groups=1"]\n'],
+	]) {
+		const order = [];
+		const makeAuth = async () => (order.push("makeAuth"), { mintToken: async () => "tok", selfId: 1, source: "gh" });
+		await assert.rejects(
+			// No floor at all: this is the venue's own refusal, not a floor's.
+			() => runStart({ env: { PI_BACKENDS: "podman" }, readPodmanInfo: PODMAN_INFO(), jobUserIdentity: PODMAN_ID, observationFs: widened(key, text), order, makeAuth, makeHost: () => fakeHost(), makePodmanReaper: () => (order.push("makePodmanReaper"), async () => ({ reaped: true })) }),
+			(err) => err.piDispatchConfig === true && err.message.startsWith(`Refused: /home/pdjob/.config/containers/containers.conf sets ${key}, which `) && /remove that key from that file/.test(err.message) && /\(issue #428\)\.$/.test(err.message),
+			key,
+		);
+		assert.deepEqual(order, [], `${key}: before forge auth, the reaper and the worker`);
+	}
+	// A podman info that has not answered yet does not delay it: the files are read with no daemon, so it is still tagged.
+	await assert.rejects(
+		() => runStart({ env: { PI_BACKENDS: "podman" }, readPodmanInfo: PODMAN_INFO({}, { answer: { answered: false, reason: "timeout", transient: true } }), jobUserIdentity: PODMAN_ID, observationFs: widened("annotations", "annotations = []\n"), ...auth }),
+		(err) => err.piDispatchConfig === true && /sets annotations/.test(err.message),
+	);
+	// The identity refusal names its fix first.
+	await assert.rejects(
+		() => runStart({ env: { PI_BACKENDS: "podman" }, readPodmanInfo: PODMAN_INFO({ rootless: false }), jobUserIdentity: PODMAN_ID, observationFs: widened("annotations", "annotations = []\n"), ...auth }),
+		(err) => err.piDispatchConfig === true && /podman is not rootless/.test(err.message) && !/annotations/.test(err.message),
+	);
+	// Merely blessed beside a default local, the worker boots, and the podman bundle refuses each podman job.
+	const { logs, captured } = await runStart({ env: { PI_BACKENDS: "local,podman" }, readPodmanInfo: PODMAN_INFO(), jobUserIdentity: PODMAN_ID, observationFs: widened("pasta_options", "pasta_options = []\n"), ...auth });
+	assert.ok(logs.some((l) => l.event === "worker_started"));
+	const observed = await captured.deps.observationPreflight({ id: "j1", kind: "local", backend: "podman" });
+	assert.equal(observed.podmanConfRefused?.reason, "podman-conf-widens-job");
+	assert.match(observed.podmanConfRefused.message, /^Refused: \/home\/pdjob\/\.config\/containers\/containers\.conf sets pasta_options/);
+	// A clean conf boots as the default.
+	const clean = await runStart({ env: { PI_BACKENDS: "podman" }, readPodmanInfo: PODMAN_INFO(), jobUserIdentity: PODMAN_ID, observationFs: PODMAN_FILES, ...auth });
+	assert.ok(clean.logs.some((l) => l.event === "worker_started"));
+});
+
+test("podmanConfBootRefusal: only while podman is the default venue and its identity is not already refused (#428)", { skip: skipNoModule }, () => {
+	const files = { fs: hostFiles({ "/home/pdjob/.config/containers/containers.conf": "pasta_options = []\n" }), home: "/home/pdjob", env: {}, euid: 1234 };
+	const worker = { mode: "worker", user: "1234:1234" };
+	assert.match(mod.podmanConfBootRefusal(worker, "podman", files), /^Refused: .* sets pasta_options, .*\(issue #428\)\.$/);
+	assert.match(mod.podmanConfBootRefusal({ mode: "unknown", reason: "timeout" }, "podman", files), /sets pasta_options/, "an unanswered info read does not wave it through");
+	assert.equal(mod.podmanConfBootRefusal(worker, "local", files), null, "blessed but not default boots");
+	assert.equal(mod.podmanConfBootRefusal({ mode: "unmappable", cause: "podman-rootful" }, "podman", files), null, "the identity's own refusal comes first");
+	assert.equal(mod.podmanConfBootRefusal(null, "podman", files), null, "podman not blessed: nothing read");
+	assert.equal(mod.podmanConfBootRefusal(worker, "podman", { ...files, fs: NO_HOST_FILES }), null, "a clean account boots");
+});
+
 test("podmanBootRefusal: only a boot-refusing cause, and only while podman is the default venue (#354)", { skip: skipNoModule }, () => {
 	for (const cause of ["podman-platform", "podman-not-found", "podman-remote", "podman-rootful", "worker-is-root"]) {
 		assert.match(mod.podmanBootRefusal({ mode: "unmappable", cause }, "podman"), /^Refused: .*\(issue #354\)\.$/, cause);

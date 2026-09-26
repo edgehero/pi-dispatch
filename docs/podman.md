@@ -345,11 +345,19 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    or the worker gives `mountSet` no credit (`podmanAddsNoMounts`). Leave `CONTAINERS_CONF` and
    `CONTAINERS_CONF_OVERRIDE` unset for the worker too: with either set, the files the worker reads are not the ones
    Podman reads, so it credits neither `isolation` nor `mountSet`.
-   Leave `pasta_options` and `network_cmd_options` without a host-loopback mapping (`--map-host-loopback`,
-   `allow_host_loopback=true`), and `annotations` without `run.oci.keep_original_groups`. Nothing observes either yet
-   (issue #428), and the argv cannot pin the first back: Podman appends containers.conf's network options to the
-   command line's, so a loopback mapping there gives every job without egress the host's `127.0.0.1` services, a
-   local Valkey among them (measured). The namespaces, `env_host` and `http_proxy` it can pin, and does.
+   Leave `pasta_options`, `network_cmd_options` and `annotations` unset in every containers.conf the account reads,
+   whatever you would set them to: while any of the three is present the worker refuses the venue (issue #428), at
+   boot when `podman` is the default venue and each podman job otherwise, as `podman-conf-widens-job`, naming the
+   file and the key, and `pi-dispatch doctor` says the same. Measured on Fedora 44 with Podman 5.8.1: a host-loopback
+   mapping there (`--map-host-loopback`, `--map-gw`, `-T <port>`, or slirp4netns's `allow_host_loopback=true`) gave
+   a job without egress, a job on its own bridge and the egress proxy's network the host's `127.0.0.1` services, a
+   local Valkey among them, and `run.oci.keep_original_groups=1` kept the account's groups inside the job. No flag
+   on the job's command line takes those options back (Podman puts them first, and a `-T` survives any pin), which
+   is why the key's presence is refused rather than its value judged. The cost: a setting you wanted for every
+   container of the account, a pasta MTU say, goes on those containers' own command line
+   (`--network=pasta:...`) or Quadlet unit instead. After removing a key, restart the account's containers on a
+   bridge network, the egress proxy among them: the rootless network they share keeps the options it started with.
+   The namespaces, `env_host` and `http_proxy` the argv can pin, and does.
 5. **The job image, in this account's own store.** A rootless account does not see root's images or another
    user's: `podman pull ghcr.io/edgehero/pi-job:latest` as the account, then set `PI_JOB_IMAGE` to the name
    `podman images` shows. `--pull=never` resolves a short name such as `pi-job:latest` to `localhost/pi-job:latest`
