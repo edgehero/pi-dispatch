@@ -467,6 +467,46 @@ export function resolvePodmanImageUser(decision, { capabilities = [], euid, egid
 }
 
 /**
+ * The venue half of a podman job's pre-spend preflight, over one info read (`read`, `readInfo()`'s answer), shaped
+ * exactly as the bundle's `observationPreflight` answers: `{ ok: true, podman }`, `{ refused, message, observations }`
+ * for an answered floor miss, `{ unavailable, reason }` when the miss rests only on a read that did not answer. Beside
+ * `ok`, a refused identity rides as `jobUserRefused` and a widening containers.conf as `podmanConfRefused` (`{ reason,
+ * key, message }`, issue #428); the processor refuses either before its image preflight.
+ *
+ * EXPORTED AND SHARED (issue #429) because a sandbox opened on this venue must be refused for exactly what a job is
+ * refused for, in the same order, and "the same order" is a property a second copy loses first. The bundle wraps it
+ * with its own log line (`onObserved`, called once per judgement that reached the observations) and nothing else.
+ *
+ * ORDER, and each step is before the next for a reason:
+ *   1. the IDENTITY, from this same read. A venue whose job user is refused (rootful, remote, no podman) fails the
+ *      observations too, and judging them first told every job naming it to fix a mounts.conf or delegate controllers
+ *      when the one fix is its identity's. Handed back as `jobUserRefused`, which the processor acts on BEFORE its
+ *      image preflight: that preflight asks the same Podman, so behind it a missing podman was retried forever and a
+ *      rootful one without the image in its store was blamed on the image. No image can change an unmappable answer
+ *      (`resolvePodmanImageUser` refuses it before reading any capability). An undecided read (`unknown`) is still
+ *      judged here and is retried, never refused.
+ *   2. the account's own containers.conf (issue #428), before the floor: it refuses whatever the floor says, since
+ *      with egress off no declared property covers what the job reaches on the host, so a floor could never ask for it
+ *      on the deployments at risk. Re-read per call, so removing the key needs no restart.
+ *   3. the observations against `backendFloor`.
+ */
+export function judgePodmanVenue({ read, platform = process.platform, euid, egid, fs = { statSync, readFileSync, readdirSync }, home = homedir(), env = process.env, backendFloor = {}, onObserved = () => {} } = {}) {
+	const decision = decidePodmanJobUser({ platform, euid, egid, read });
+	if (decision.mode === "unmappable") return { ok: true, podman: read, jobUserRefused: { refused: "job-user-unmappable", cause: decision.cause } };
+	const widened = podmanConfWidening({ fs, home, env, euid });
+	// A transient read rides the same field with `transient: true`, which the processor retries rather than refuses.
+	if (widened) return { ok: true, podman: read, podmanConfRefused: { reason: PODMAN_CONF_WIDENS_JOB, key: widened.key, message: podmanConfRefusal(widened), ...(widened.transient ? { transient: true, evidence: widened.evidence } : {}) } };
+	const observed = observePodman({ read, fs, home, env, euid });
+	onObserved(observed);
+	const args = { backends: [PODMAN_BACKEND], backendFloor, observations: observed.observations, evidence: observed.evidence };
+	const [refusal] = observationRefusals(args);
+	if (!refusal) return { ok: true, podman: read };
+	const missed = [...new Set(unobservedFloor(args.backends, args.backendFloor, args.observations).map((m) => m.observedBy))];
+	if (observationRefusalIsTransient(args)) return unavailableFor(observed, missed[0]);
+	return { refused: true, message: refusal, observations: missed };
+}
+
+/**
  * A `promisify(execFile)`-shaped runner over a `spawn`-shaped one: resolves `{ stdout, stderr }` on exit 0, rejects with
  * `{ code, stdout, stderr }` otherwise, so the reaper and the stop can be driven by the same fake child a test hands the
  * run. A spawn `error` (no binary) rejects with that error, as `execFile` does.
@@ -616,41 +656,25 @@ export function makePodmanBackend(opts = {}) {
 	let observedSaid = null;
 	let jobUserSaid = null;
 
-	// The floor's podman half, per job and pre-spend, shaped exactly like `local`'s: `{ ok: true, podman }`, `{ refused,
-	// message, observations }` for an answered miss, `{ unavailable, reason }` when the miss rests only on a read that did
-	// not answer (a retry, never a refusal). `podman` carries the read so the job user is decided from the same answer.
-	// Beside `ok`, a refused identity rides as `jobUserRefused` and a widening containers.conf as `podmanConfRefused`
-	// (`{ reason, key, message }`, issue #428); the processor refuses either before its image preflight.
-	const observationPreflight = async () => {
-		const read = await info();
-		// The identity FIRST, from this same read, as at boot. A venue whose job user is refused (rootful, remote, no
-		// podman) fails the observations too, and judging them first told every job naming it to fix a mounts.conf or
-		// delegate controllers when the one fix is its identity's. Handed back as `jobUserRefused`, which the processor
-		// acts on BEFORE its image preflight: that preflight asks the same Podman, so behind it a missing podman was
-		// retried forever and a rootful one without the image in its store was blamed on the image. No image can change
-		// an unmappable answer (`resolvePodmanImageUser` refuses it before reading any capability). An undecided read
-		// (`unknown`) is still judged here and is retried, never refused.
-		const decision = decidePodmanJobUser({ platform, euid, egid, read });
-		if (decision.mode === "unmappable") return { ok: true, podman: read, jobUserRefused: { refused: "job-user-unmappable", cause: decision.cause } };
-		// Then the account's own containers.conf (issue #428), before the floor: it refuses whatever the floor says, since
-		// with egress off no declared property covers what the job reaches on the host, so a floor could never ask for it
-		// on the deployments at risk. Handed back like `jobUserRefused` and for its reason, so the processor refuses it
-		// ahead of the image preflight and every spend. Re-read per job, so removing the key needs no restart.
-		const widened = podmanConfWidening({ fs, home, env, euid });
-		// A transient read rides the same field with `transient: true`, which the processor retries rather than refuses.
-		if (widened) return { ok: true, podman: read, podmanConfRefused: { reason: PODMAN_CONF_WIDENS_JOB, key: widened.key, message: podmanConfRefusal(widened), ...(widened.transient ? { transient: true, evidence: widened.evidence } : {}) } };
-		const observed = observePodman({ read, fs, home, env, euid });
-		if (podmanObservationKey(observed) !== observedSaid) {
-			observedSaid = podmanObservationKey(observed);
-			log("podman_observed", { ...observed.observations, changed: true });
-		}
-		const args = { backends: [PODMAN_BACKEND], backendFloor, observations: observed.observations, evidence: observed.evidence };
-		const [refusal] = observationRefusals(args);
-		if (!refusal) return { ok: true, podman: read };
-		const missed = [...new Set(unobservedFloor(args.backends, args.backendFloor, args.observations).map((m) => m.observedBy))];
-		if (observationRefusalIsTransient(args)) return unavailableFor(observed, missed[0]);
-		return { refused: true, message: refusal, observations: missed };
-	};
+	// The floor's podman half, per job and pre-spend: `judgePodmanVenue` over this job's read, with the observation line
+	// logged only when the answer CHANGES. The judgement itself is shared with a sandbox opened on this venue (issue #429).
+	const observationPreflight = async () =>
+		judgePodmanVenue({
+			read: await info(),
+			platform,
+			euid,
+			egid,
+			fs,
+			home,
+			env,
+			backendFloor,
+			onObserved: (observed) => {
+				if (podmanObservationKey(observed) !== observedSaid) {
+					observedSaid = podmanObservationKey(observed);
+					log("podman_observed", { ...observed.observations, changed: true });
+				}
+			},
+		});
 
 	const jobUserPreflight = async (_job, { capabilities = [], observed } = {}) => {
 		const read = observed?.podman ?? (await info());

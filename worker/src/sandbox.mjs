@@ -3,10 +3,11 @@ import { existsSync } from "node:fs";
 import { release as osRelease } from "node:os";
 import { promisify } from "node:util";
 import { execDockerBounded, makeDockerEndpointResolver } from "./backend-local.mjs";
-import { DEFAULT_BACKEND, PODMAN_BACKEND, UNATTRIBUTED_BACKEND } from "./backends.mjs";
+import { PODMAN_CONF_WIDENS_JOB, PODMAN_JOB_USER_FIX, decidePodmanJobUser, judgePodmanVenue, makePodmanInfoReader, resolvePodmanImageUser } from "./backend-podman.mjs";
+import { DEFAULT_BACKEND, PODMAN_BACKEND, UNATTRIBUTED_BACKEND, parseBackendFloor, parseBackendList } from "./backends.mjs";
 import { configError } from "./config.mjs";
 import { assertJobUser, CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
-import { buildDockerRunArgs, insideDir } from "./docker-run.mjs";
+import { buildDockerRunArgs, buildPodmanRunArgs, insideDir } from "./docker-run.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { decideJobUser, JOB_USER_FIX, makeDaemonFactsReader, relabelsPrivateMounts, resolveImageUser, socketFacts } from "./job-user.mjs";
 import { NETWORK_SUFFIX, createJobNetwork, egressArmed, egressEnv, egressProxyName, networkEndpoints, networkExists, networkNameFor, removeJobNetwork, removeNetworkOrSay } from "./egress.mjs";
@@ -16,10 +17,12 @@ import { readManifest } from "./sandbox-store.mjs";
 /**
  * sandbox.mjs -- the operator session's container shape (INT-SANDBOX-CONTRACT).
  *
- * A SECOND container shape, deliberately not a second copy of the first. The argv comes from
- * `buildDockerRunArgs` through its `extraFlags` seam, so `ISOLATION_FLAGS`, `--memory` and `--cpus` reach
- * this container BY CONSTRUCTION: a future change to the boundary cannot land on job containers and miss
- * this one, which is the whole reason for reusing the builder rather than writing a leaner argv here.
+ * A SECOND container shape, deliberately not a second copy of the first. The argv comes from the run's VENUE's own
+ * job builder (`buildDockerRunArgs` on `local`, `buildPodmanRunArgs` on `podman`, `SANDBOX_LAUNCHERS` below) through
+ * its `extraFlags` seam, so `ISOLATION_FLAGS`, `--memory` and `--cpus` (and on podman keep-id and
+ * `PODMAN_PINNED_FLAGS`) reach this container BY CONSTRUCTION: a future change to the boundary cannot land on job
+ * containers and miss this one, which is the whole reason for reusing the builder rather than writing a leaner argv
+ * here.
  *
  * What differs from a job, and every difference is the point:
  *   - `-i -t --entrypoint bash`. `INT-CONTAINER-RUNTIME-CONTRACT` says "No TTY (`-it` absent)" and stays
@@ -37,6 +40,52 @@ import { readManifest } from "./sandbox-store.mjs";
  */
 
 const exec = promisify(execFile);
+
+/**
+ * The venues a sandbox opens on, and how each one spells its container (issue #429): the CLI every spawn for that
+ * venue goes through, and the job argv builder the session's argv is built by. Keyed by the venue name the manifest
+ * records, so a run is reopened ONLY in the runtime that ran it: a podman run under docker would reproduce none of it
+ * (another store, no keep-id, another uid map), and the reverse is as wrong.
+ *
+ * A TABLE rather than a `bin` read off the backend bundles, and that alternative was the obvious one: the bundles are
+ * built by the worker at boot, and the CLI and the admin panel never build them (they would construct a
+ * `runContainer`, a reaper and a `podman info` reader to open a shell). What the sandbox needs from a venue is two
+ * facts, and both are the same values the bundles are built with (`bin: "podman"` and `buildPodmanRunArgs` in
+ * `makePodmanBackend`); `sandbox.test.mjs` pins the pairing. A venue not in this table has no sandbox, by
+ * construction: nothing here can reopen a run under a runtime it did not run in.
+ *
+ * Not "any venue declaring `remote: false`": a future non-remote venue on a third runtime would pass that and be
+ * reopened under one of these two. Such a venue must add its own row, deliberately.
+ */
+export const SANDBOX_LAUNCHERS = Object.freeze({
+	[DEFAULT_BACKEND]: Object.freeze({ bin: "docker", build: buildDockerRunArgs }),
+	[PODMAN_BACKEND]: Object.freeze({ bin: "podman", build: buildPodmanRunArgs }),
+});
+
+/** The launcher for `venue`, or null. `Object.hasOwn`, so `"toString"` is not a venue. */
+export function sandboxLauncher(venue) {
+	return typeof venue === "string" && Object.hasOwn(SANDBOX_LAUNCHERS, venue) ? SANDBOX_LAUNCHERS[venue] : null;
+}
+
+/**
+ * The blessed venues a sandbox can open on, in `PI_BACKENDS` order: the venues this host both runs and has a launcher
+ * for. The retention reaper asks each one which sandboxes are open, and `--list` draws its RUNNING column from them.
+ */
+export function sandboxVenues(blessed) {
+	return (Array.isArray(blessed) ? blessed : []).filter((venue) => sandboxLauncher(venue) !== null);
+}
+
+/**
+ * `{ blessed, backendFloor }` as a sandbox opened from `env` sees them, through the worker's own two parsers. For the
+ * admin panel, which deliberately never calls `loadConfig`; the CLI has the parsed config already. THROWS on a
+ * malformed `PI_BACKENDS` or `PI_BACKEND_FLOOR`, exactly as the worker refuses to boot on one: a typo must never read
+ * as "podman is not blessed" (a refusal an operator then chases in the wrong place) or as "no floor" (a podman sandbox
+ * opened without the observations the deployment asks for). Read from THIS process's environment and never a
+ * deployment's `.env`, which `OQ-038` records for the panel.
+ */
+export function sandboxVenuePolicy(env) {
+	return { blessed: parseBackendList(env?.PI_BACKENDS), backendFloor: parseBackendFloor(env?.PI_BACKEND_FLOOR) };
+}
 
 /**
  * The name namespace, and it is load-bearing. The boot reaper filters `name=pi-job-`
@@ -79,8 +128,10 @@ function inPortRange(n) {
 }
 
 /**
- * Build the `docker run` argv for one operator session (excluding the leading "docker").
+ * Build the `run` argv for one operator session (excluding the leading "docker" or "podman").
  *
+ * @param venue        the venue the run used (`SANDBOX_LAUNCHERS`); its builder builds this argv. Defaults to
+ *                     `local`, so every caller from before issue #429 gets the argv it always did, byte for byte.
  * @param image        the image the original run used, from its manifest
  * @param name         `pi-sandbox-<jobId>`
  * @param workspace    host path mounted /workspace:rw -- the retained clone, or the operator's own folder
@@ -95,7 +146,11 @@ function inPortRange(n) {
  * @param relabel      true where the job's own mounts carried `:Z` (issue #355), so the retained ones do again
  * @param workspaceOwned true when `workspace` is the retained clone (the worker's own), false for an operator's folder
  */
-export function buildSandboxRunArgs({ image, name, workspace, jobDir, publish = [], term, idleSeconds = 0, network = null, egressEnv: proxyEnv = {}, user = null, home = null, relabel = false, workspaceOwned = false }) {
+export function buildSandboxRunArgs({ venue = DEFAULT_BACKEND, image, name, workspace, jobDir, publish = [], term, idleSeconds = 0, network = null, egressEnv: proxyEnv = {}, user = null, home = null, relabel = false, workspaceOwned = false }) {
+	// Thrown, not defaulted to docker: a caller naming a venue this file has no launcher for is assembling a session
+	// in a runtime nobody chose, which is the one mistake the table exists to make impossible.
+	const launcher = sandboxLauncher(venue);
+	if (!launcher) throw new Error(`buildSandboxRunArgs: no sandbox launcher for venue ${JSON.stringify(venue)} (have ${Object.keys(SANDBOX_LAUNCHERS).join(", ")})`);
 	// Issue #341: the job path's pairing, for the same measured reason (a uid with no passwd entry gets HOME=/ or
 	// HOME=/workspace), so a sandbox shell as that uid can write its own home.
 	if (user !== null && home !== CONTAINER_HOME) {
@@ -113,7 +168,12 @@ export function buildSandboxRunArgs({ image, name, workspace, jobDir, publish = 
 	if (publish.length > 0 && network !== null) {
 		throw new Error(`buildSandboxRunArgs: a published port cannot be paired with a session network (${network}) -- every network this project puts a session on is created --internal, where docker accepts -p and binds nothing`);
 	}
-	return buildDockerRunArgs({
+	// The venue's own JOB builder, so on podman `--userns=keep-id`, `PODMAN_PINNED_FLAGS` and, with no session network,
+	// `--network=private` arrive exactly as a job's do. The last one is load-bearing rather than tidy: a containers.conf
+	// `netns = "host"` puts a container launched with no `--network` on the host's network namespace (measured under
+	// issue #354), so a podman sandbox with egress off must name its network as a job does. `buildPodmanRunArgs` also
+	// refuses a null `user`, which `decideSandboxJobUser`'s podman branch never answers.
+	return launcher.build({
 		user,
 		image,
 		name,
@@ -145,8 +205,8 @@ export function buildSandboxRunArgs({ image, name, workspace, jobDir, publish = 
 			// beside `--user`, and, when a policy is armed, four about the network.
 			...proxyEnv,
 		},
-		// Ahead of the env and the mounts, and well ahead of the image, which buildDockerRunArgs keeps as
-		// the final positional. `--entrypoint` also clears the image's CMD; this repo's Dockerfile sets
+		// Ahead of the env and the mounts, and well ahead of the image, which the builder keeps as
+		// the final positional. The same four tokens on both venues, through the same `dockerExtra` allow-list. `--entrypoint` also clears the image's CMD; this repo's Dockerfile sets
 		// none, so `bash` runs bare and `-it` makes it interactive, in the baked WORKDIR as the baked
 		// non-root USER, or as `user` when the run had one.
 		extraFlags: ["-i", "-t", "--entrypoint", "bash", ...publish],
@@ -166,8 +226,10 @@ export function buildSandboxRunArgs({ image, name, workspace, jobDir, publish = 
  * TIMED, unlike the boot container reaper's own `docker ps`: an unreachable daemon does not fail the CLI
  * fast, it blocks, and this call sits in front of a worker that has not started draining yet.
  */
-export async function listRunningSandboxes({ execFn = exec } = {}) {
-	const { stdout } = await execFn("docker", ["ps", "--filter", `name=${SANDBOX_NAME_PREFIX}`, "--format", "{{.Names}}"], { timeout: 5000 });
+export async function listRunningSandboxes({ execFn = exec, bin = "docker" } = {}) {
+	// `bin` (issue #429) is ONE runtime's CLI: a podman sandbox is invisible to `docker ps` and the reverse, so the
+	// caller asks each venue it can open sandboxes on (`listRunningSandboxesOn`). `--format {{.Names}}` reads on both.
+	const { stdout } = await execFn(bin, ["ps", "--filter", `name=${SANDBOX_NAME_PREFIX}`, "--format", "{{.Names}}"], { timeout: 5000 });
 	return stdout
 		.split("\n")
 		.map((n) => n.trim())
@@ -176,15 +238,37 @@ export async function listRunningSandboxes({ execFn = exec } = {}) {
 }
 
 /**
- * The sweep's docker runner: bounded, both streams, never throws. `execDockerBounded` already settles on its
+ * The union of the running sandboxes across `venues` (issue #429), as `listRunningSandboxes` answers for one: the job
+ * ids, and a THROW when ANY runtime could not be asked. Not a partial union: the reaper deletes directories, and a
+ * docker outage beside an answering podman would otherwise read as "none of docker's sandboxes are open", which is the
+ * blind sweep `listRunningSandboxes` throws to prevent. One runtime down therefore skips the whole pass, on that
+ * function's rule. Asked one after another rather than together: each is bounded on its own, and the order is the
+ * blessed order, so a log line reads the same on every tick.
+ */
+export function listRunningSandboxesOn({ venues = [], list = listRunningSandboxes } = {}) {
+	return async function listRunning() {
+		const ids = new Set();
+		for (const venue of venues) {
+			const launcher = sandboxLauncher(venue);
+			if (!launcher) throw new Error(`listRunningSandboxesOn: no sandbox launcher for venue ${JSON.stringify(venue)}`);
+			for (const id of await list({ bin: launcher.bin })) ids.add(id);
+		}
+		return [...ids];
+	};
+}
+
+/**
+ * The sweep's runner for one runtime: bounded, both streams, never throws. `execDockerBounded` already settles on its
  * own timer and kills with SIGKILL, which matters here for the reason `retention-sweep.mjs` records -- this
  * loop runs on a timer beside draining jobs, and `execFile`'s own `timeout` only signals and then still waits
  * for `close`, so a CLI wedged on a dead socket never settles. Its rejection carries `stderr` on the error,
  * which the "network is not there" rule needs and the bounded shape does not surface on its own.
  */
-async function boundedDocker(args) {
-	const { code, stdout, error } = await execDockerBounded(args, { timeoutMs: 10_000 });
-	return { code, stdout: String(stdout ?? ""), stderr: String(error?.stderr ?? "") };
+function boundedRuntime(bin) {
+	return async function bounded(args) {
+		const { code, stdout, error } = await execDockerBounded(args, { timeoutMs: 10_000, bin });
+		return { code, stdout: String(stdout ?? ""), stderr: String(error?.stderr ?? "") };
+	};
 }
 
 /**
@@ -274,7 +358,12 @@ function missingRetained() {
  * Returns `{ swept, notes }` rather than logging, so the reaper owns the log vocabulary and this stays a
  * pure-ish function over its runner.
  */
-export function makeSandboxNetworkSweeper({ run = boundedDocker } = {}) {
+export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime(bin) } = {}) {
+	// `bin` (issue #429) is the one runtime this sweeper lists, inspects and removes in: a sweep that listed under one
+	// CLI and removed under another would be the mixed venue every `bin` seam comment warns about. One sweeper per venue
+	// a sandbox can open on (`combineSandboxNetworkSweepers`). Podman's `ps -a` renders `{{.State}}` and `network
+	// inspect` renders `.Containers` too (the second measured under issue #354); its state WORDS are this file's stated
+	// residual, below.
 	return async function sweepSandboxNetworks({ running = new Set(), keep = new Set(), retained = missingRetained, blocked = new Set() } = {}) {
 		// CANDIDATES FIRST, then every piece of evidence that protects one. The order is the point, not an
 		// accident of writing: a network is created BEFORE the container that joins it and AFTER the directory
@@ -368,7 +457,7 @@ export function makeSandboxNetworkSweeper({ run = boundedDocker } = {}) {
 				}
 				return true;
 			};
-			const outcome = await removeNetworkOrSay(run, { network: name, detach: names, stillClear });
+			const outcome = await removeNetworkOrSay(run, { network: name, detach: names, stillClear, bin });
 			if (outcome.aborted) {
 				// `restored`/`lost` rather than `detached`: an endpoint put back was not removed by this pass,
 				// and one that could not be put back is off a network someone may be using, which is the half an
@@ -393,45 +482,86 @@ export function makeSandboxNetworkSweeper({ run = boundedDocker } = {}) {
 }
 
 /**
+ * One sweep over every venue's session networks (issue #429): each sweeper's `{ swept, notes }` concatenated, in the
+ * order given, and `failed` when ANY runtime's listing failed. A single sweeper is returned as it is, so a host with
+ * one sandbox venue hands the reaper exactly the function it always did.
+ *
+ * Every sweeper is given the SAME `running`, `keep`, `retained` and `blocked`: the union of every runtime's running
+ * ids is conservative in the one direction that matters (an id open in either runtime keeps its network in both), and
+ * `keep` is filled by each sweeper's own fresh read, which only ever adds. One runtime's failed listing does not stop
+ * the other's pass: nothing it would remove depends on the failed runtime, whose own networks are simply not candidates
+ * this pass, and the failure is still said.
+ */
+export function combineSandboxNetworkSweepers(sweepers) {
+	if (sweepers.length === 1) return sweepers[0];
+	return async function sweepSandboxNetworks(args) {
+		const swept = [];
+		const notes = [];
+		let failed = null;
+		for (const sweep of sweepers) {
+			const outcome = await sweep(args);
+			swept.push(...(outcome?.swept ?? []));
+			notes.push(...(outcome?.notes ?? []));
+			failed ??= outcome?.failed ?? null;
+		}
+		return failed ? { swept, notes, failed } : { swept, notes };
+	};
+}
+
+/**
  * Whether a retained run can be re-opened HERE, judged by the venue it ran in (issue #277). `null` when it
  * can, else `{ refused, message }`. Exported for the admin panel, which asks before advertising the key.
  *
- * WHY THIS IS PER JOB. A sandbox opens a shell on THIS host's docker daemon against the job's retained
- * directory, so it can reproduce only a run whose container was built here. The check used to be
- * deployment-wide (refuse every sandbox when any blessed venue was remote) because the command takes a job
- * id and could not learn its venue; the manifest now records it, and the answer belongs to the job.
+ * WHY THIS IS PER JOB. A sandbox opens a shell on THIS host, in the runtime the job ran in, against the job's retained
+ * directory, so it can reproduce only a run whose container was built here. The check used to be deployment-wide
+ * (refuse every sandbox when any blessed venue was remote) because the command takes a job id and could not learn its
+ * venue; the manifest now records it, and the answer belongs to the job.
  *
- * HELD MEANS THE LOCAL ADAPTER, by name. The launcher below is hard-wired to this host's docker CLI, which is
- * exactly the `local` bundle (its name is `DEFAULT_BACKEND`). Not "any venue declaring `remote: false`": a
- * future non-remote venue on another runtime would pass that and be reopened under docker, reproducing a
- * run from a runtime it never ran in. Such a venue must widen this deliberately.
+ * HELD MEANS A VENUE THIS FILE HAS A LAUNCHER FOR (`SANDBOX_LAUNCHERS`: `local` through the docker CLI, `podman`
+ * through this account's rootless podman), AND ONE `blessed` NAMES (issue #429). `blessed` is `PI_BACKENDS` as the
+ * CALLER's process reads it: the CLI's `loadConfig`, the panel's own environment (`sandboxVenuePolicy`). Two reasons
+ * for requiring the blessing, and the second is the sharp one. A host that does not bless a venue has said it does not
+ * run that runtime, so reopening a run there spawns a CLI the operator took out of service. And the retention reaper
+ * asks only the BLESSED venues which sandboxes are open (`start.mjs`), so a sandbox opened in an unblessed runtime is
+ * one the reaper cannot see, whose retained directory it can delete under the open shell. It defaults to `local` alone,
+ * which is what `PI_BACKENDS` unset means, so a caller from before issue #429 refuses and admits exactly as it did.
+ *
+ * Not "any venue declaring `remote: false`": a future non-remote venue on a third runtime would pass that and be
+ * reopened under one of these two, reproducing a run from a runtime it never ran in. Such a venue must add its own
+ * launcher row, deliberately.
  *
  * A MANIFEST WITH NO `backend` KEY predates venue attribution and ran on `local` (`UNATTRIBUTED_BACKEND`).
  * A key that is PRESENT but not a name is refused: `typeof` first, because the table's `backendFor(null)`
  * returns `local`, and a null stamp means the venue was never known, not that it was local.
  */
-export function sandboxVenueRefusal({ jobId, manifest }) {
-	const venue = Object.hasOwn(manifest ?? {}, "backend") ? manifest.backend : UNATTRIBUTED_BACKEND;
+export function sandboxVenueRefusal({ jobId, manifest, blessed = [DEFAULT_BACKEND] }) {
+	const venue = sandboxVenueOf(manifest);
 	if (typeof venue !== "string" || venue === "") {
 		return { refused: "venue-unreachable", message: `the manifest for ${jobId} names no backend, so this host cannot tell whether the run happened here` };
 	}
-	if (venue === DEFAULT_BACKEND) return null;
-	// The native `podman` venue runs on THIS host, so "open it on the venue that ran it" would send the operator looking
-	// for a sandbox that venue does not have (issue #354: a sandbox on it is a follow-up, refused until then). Its own
-	// sentence names the runtime, and why the docker launcher is not a stand-in: the run's container was built by this
-	// user's rootless podman, with keep-id and its own store, and a docker shell over its directory reproduces none of it.
-	if (venue === PODMAN_BACKEND) {
+	const launcher = sandboxLauncher(venue);
+	const held = Array.isArray(blessed) && blessed.includes(venue);
+	if (launcher && held) return null;
+	if (launcher) {
+		// A venue this file CAN open, on a host (as this process reads it) that does not bless it. The fix is an
+		// environment, and it is named with where it is read: the CLI and the panel read `PI_BACKENDS` from the process
+		// they run in, never from a deployment's `.env`, and "set it where you run this" is the whole remedy.
 		return {
 			refused: "venue-unreachable",
-			message: `${jobId} ran on the ${JSON.stringify(PODMAN_BACKEND)} backend (this worker account's rootless podman), and a sandbox does not open on that venue yet: it opens a shell only through the ${JSON.stringify(DEFAULT_BACKEND)} backend (this host's docker CLI), which would not reproduce that run. Inspect the retained directory directly instead.`,
+			message: `${jobId} ran on the ${JSON.stringify(venue)} backend, which PI_BACKENDS in this process's environment does not bless (it reads ${JSON.stringify((Array.isArray(blessed) ? blessed : []).join(","))}), so no sandbox opens on it here: a sandbox opens only on a venue this host blesses, through that venue's own CLI (${launcher.bin}). Set PI_BACKENDS where you run this as the worker's is set; it is read from this environment, not from the deployment's .env.`,
 		};
 	}
 	return {
 		refused: "venue-unreachable",
-		// Names BOTH venues (issue #354). "Not on this host's docker daemon" was true only while every venue but `local`
-		// was elsewhere; a second runtime on this same host makes it read as a claim about where the run happened.
-		message: `${jobId} ran on the ${JSON.stringify(venue)} backend, and a sandbox opens a shell only through the ${JSON.stringify(DEFAULT_BACKEND)} backend (this host's docker CLI) against the retained directory, so it cannot reproduce that run. Open it on the venue that ran it.`,
+		// Names BOTH sides (issue #354): the venue that ran it, and the venues a sandbox opens through. "Not on this host's
+		// docker daemon" was true only while every venue but `local` was elsewhere.
+		message: `${jobId} ran on the ${JSON.stringify(venue)} backend, and a sandbox opens a shell only through a venue it has a launcher for on this host (${Object.entries(SANDBOX_LAUNCHERS).map(([name, l]) => `${JSON.stringify(name)} through the ${l.bin} CLI`).join(", ")}) against the retained directory, so it cannot reproduce that run. Open it on the venue that ran it.`,
 	};
+}
+
+/** The venue a retained manifest records: its `backend` key when present (whatever it holds), else `UNATTRIBUTED_BACKEND`. */
+export function sandboxVenueOf(manifest) {
+	return Object.hasOwn(manifest ?? {}, "backend") ? manifest.backend : UNATTRIBUTED_BACKEND;
 }
 
 /**
@@ -470,8 +600,8 @@ export function sandboxVenueRefusal({ jobId, manifest }) {
  * happens to exist at the same path on this host would otherwise pass and silently reproduce the wrong
  * run.
  */
-export function sandboxSyncRefusal({ jobId, manifest, fileExists = existsSync }) {
-	const venue = sandboxVenueRefusal({ jobId, manifest });
+export function sandboxSyncRefusal({ jobId, manifest, fileExists = existsSync, blessed }) {
+	const venue = sandboxVenueRefusal({ jobId, manifest, blessed });
 	if (venue) return venue;
 	if (!manifest?.image) {
 		return { refused: "no-image", message: `the manifest for ${jobId} names no image, so the sandbox cannot reproduce the run` };
@@ -493,7 +623,7 @@ export function sandboxSyncRefusal({ jobId, manifest, fileExists = existsSync })
  * `doctor` sets: a bare "not found" for a run the operator watched finish ten minutes ago is the least
  * useful thing this could say.
  */
-export function resolveSandbox({ jobId, sandboxDir, retentionHours, publish = [], fs, fileExists = existsSync }) {
+export function resolveSandbox({ jobId, sandboxDir, retentionHours, publish = [], fs, fileExists = existsSync, blessed }) {
 	if (!jobId) return { refused: "no-job-id", message: "a job id is required (see `pi-dispatch sandbox --list`)" };
 
 	const manifest = readManifest({ sandboxDir, jobId, ...(fs ? { fs } : {}) });
@@ -505,10 +635,12 @@ export function resolveSandbox({ jobId, sandboxDir, retentionHours, publish = []
 	// The venue BEFORE the image and the workspace (#277): for a run from another venue those two are the
 	// symptoms, and the first refusal an operator reads should be the cause. A workspace that happens to
 	// exist at the same path on this host would otherwise pass and silently reproduce the wrong run.
-	const refusal = sandboxSyncRefusal({ jobId, manifest, fileExists });
+	const refusal = sandboxSyncRefusal({ jobId, manifest, fileExists, blessed });
 	if (refusal) return refusal;
 
-	return { manifest, name: sandboxContainerName(jobId), publish };
+	// `venue` is the one the refusal above admitted, so it always has a launcher: every later step of the session reads
+	// its runtime from this one answer rather than re-deriving it from the manifest.
+	return { manifest, name: sandboxContainerName(jobId), publish, venue: sandboxVenueOf(manifest) };
 }
 
 /**
@@ -535,14 +667,21 @@ export function sandboxEgress(env) {
  * In order: `resolveSandbox` (every refusal, the venue one included) -> the already-running refusal ->
  * the argv, with this session's own network and proxy variables when armed -> `beforeLaunch`, the caller's
  * hook to print or pin once the session is known to be openable -> create the network (a network already
- * under this name is REFUSED and named, never removed) -> launch -> ask docker again, and remove the network
+ * under this name is REFUSED and named, never removed) -> launch -> ask the runtime again, and remove the network
  * in a finally unless the sandbox is still running. Returns `{ refused, message }`, or `{ code, error }` from
- * the launch, with `detached: true` when docker still lists the sandbox as running after the shell returned
+ * the launch, with `detached: true` when the runtime still lists the sandbox as running after the shell returned
  * (its network is left in place).
  * THROWS when `egress.armed` is not a boolean.
  *
  * NOT here, deliberately: the terminal check and `--publish` parsing, which are about the CLI's own
  * arguments, and the pin, which only the CLI offers (it runs in `beforeLaunch`).
+ *
+ * EVERY RUNTIME STEP IS THE RUN'S VENUE'S (issue #429): the running asks, the job-user decision, the argv builder, the
+ * network's creation and removal and the launch all go through `SANDBOX_LAUNCHERS[resolved.venue]`, decided once by
+ * `resolveSandbox`. `running` is called with `{ bin }` and `launch` with `{ args, bin }`, and `beforeLaunch` is handed
+ * `runtime` so a caller's own lines (`docker attach`, `podman attach`) name the CLI that ran it. `blessed` and
+ * `backendFloor` are `PI_BACKENDS` and `PI_BACKEND_FLOOR` as the caller's process reads them; the first decides which
+ * venues open at all, the second what a podman sandbox's observations must show, exactly as for a job.
  */
 export async function openSandbox({
 	jobId,
@@ -561,14 +700,18 @@ export async function openSandbox({
 	beforeLaunch = () => {},
 	fs,
 	fileExists,
+	blessed,
+	backendFloor = {},
 }) {
 	// The posture is REQUIRED, and a boolean. Every other part of this function defaults safely; this one would
 	// default to the open bridge, which is the dropped part this function exists to stop a caller dropping.
 	if (typeof egress?.armed !== "boolean") {
 		throw new Error("openSandbox: egress.armed must be a boolean -- a caller that does not say whether egress is armed must not get the default bridge");
 	}
-	const resolved = resolveSandbox({ jobId, sandboxDir, retentionHours, publish, ...(fs ? { fs } : {}), ...(fileExists ? { fileExists } : {}) });
+	const resolved = resolveSandbox({ jobId, sandboxDir, retentionHours, publish, blessed, ...(fs ? { fs } : {}), ...(fileExists ? { fileExists } : {}) });
 	if (resolved.refused) return resolved;
+	// Admitted by `resolveSandbox`, so never null here.
+	const { bin } = sandboxLauncher(resolved.venue);
 
 	// `--publish` AND AN ARMED POLICY ARE OPPOSITE DIRECTIONS, and docker resolves the contradiction SILENTLY
 	// (issue #362). An armed policy puts this shell on its own `--internal` network, and a container attached
@@ -588,9 +731,12 @@ export async function openSandbox({
 	// determinate refusal must not cost a round trip. And BEFORE `beforeLaunch`, which is where the CLI prints
 	// `published: ...`: one line later and it would print the false line and then refuse.
 	if (resolved.publish.length > 0 && egress.armed === true) {
+		// Podman's `--internal` binds nothing either (the flag is the same, and so is the refusal); what differs is where
+		// the shell lands with the policy off, which on podman is the job's own `--network=private`, not a bridge.
+		const lands = bin === "podman" ? "this account's rootless podman's private network (`--network=private`, as a job with egress off)" : "docker's default bridge";
 		return {
 			refused: "publish-needs-egress-off",
-			message: `\`--publish\` is refused while the egress policy is armed — this sandbox joins an \`--internal\` network, where docker accepts \`-p\`, exits 0 and binds no host port, so the flag would name a port that is not there. Open this one with \`PI_EGRESS=0\` in the environment you run this from, and know what that buys: the shell lands on docker's default bridge, with the whole internet`,
+			message: `\`--publish\` is refused while the egress policy is armed: this sandbox joins an \`--internal\` network, where ${bin} accepts \`-p\`, exits 0 and binds no host port, so the flag would name a port that is not there. Open this one with \`PI_EGRESS=0\` in the environment you run this from, and know what that buys: the shell lands on ${lands}, with the whole internet`,
 		};
 	}
 
@@ -598,15 +744,19 @@ export async function openSandbox({
 	// "could not ask"; here an unanswered ask costs only the early refusal (docker refuses a second container
 	// under the same name anyway) and, after the launch, is treated as "not running" so the network is removed.
 	const id = sanitizeJobId(jobId);
-	const ask = () => Promise.resolve().then(() => running()).then((ids) => ({ answered: true, live: new Set(ids) }), () => ({ answered: false, live: new Set() }));
+	// Asked of the run's OWN runtime (issue #429): a podman sandbox is not in `docker ps`, so asking docker would call
+	// every podman session "not running", refuse nothing and tear a detached one's network down.
+	const ask = () => Promise.resolve().then(() => running({ bin })).then((ids) => ({ answered: true, live: new Set(ids) }), () => ({ answered: false, live: new Set() }));
 	const before = await ask();
 	if (before.live.has(id)) {
-		return { refused: "already-running", message: `a sandbox for ${jobId} is already running — attach to it with \`docker attach ${resolved.name}\`, or exit it first` };
+		return { refused: "already-running", message: `a sandbox for ${jobId} is already running; attach to it with \`${bin} attach ${resolved.name}\`, or exit it first` };
 	}
 
 	// Issue #341: WHO the shell runs as, before anything is created. The daemon is this CLI's own; the uid is the
 	// run's, off its manifest, because that uid owns the retained files.
-	const jobUser = await resolveJobUser({ manifest: resolved.manifest });
+	// The venue rides along (issue #429): a podman run is decided by the podman rules, from `podman info`, and refused
+	// for what a podman job is refused for (`judgePodmanVenue`), before any network or container exists.
+	const jobUser = await resolveJobUser({ manifest: resolved.manifest, venue: resolved.venue, backendFloor });
 	if (jobUser?.refused) return { refused: jobUser.refused, message: jobUser.message };
 
 	// REQ-EGRESS-ALLOWLIST: this session's own network, exactly like a job's, named off its own container so the
@@ -614,6 +764,7 @@ export async function openSandbox({
 	// shell an operator is sitting in.
 	const network = egress?.armed === true ? networkNameFor(resolved.name) : null;
 	const args = buildSandboxRunArgs({
+		venue: resolved.venue,
 		image: resolved.manifest.image,
 		name: resolved.name,
 		workspace: resolved.manifest.workspace,
@@ -631,12 +782,14 @@ export async function openSandbox({
 		// retained before a preparer moved its clone is still judged by where the files actually are.
 		workspaceOwned: insideDir(resolved.manifest.dir, resolved.manifest.workspace),
 	});
-	await beforeLaunch({ resolved, args, network });
+	await beforeLaunch({ resolved, args, network, runtime: bin });
 
 	// No pre-spend gate here, deliberately: that is a MONEY gate and a sandbox spends nothing. A missing proxy
 	// fails at network creation, in front of an operator at a terminal, which is the one place a late failure
 	// is cheap.
-	if (network && !(await createJobNetwork(spawnNetwork, { network, proxy: egress.proxy }))) {
+	// In the run's runtime (issue #429): the network, the proxy's attachment and the container that joins it must all
+	// live in ONE runtime, or `--network=` names a network the launching CLI has never heard of.
+	if (network && !(await createJobNetwork(spawnNetwork, { network, proxy: egress.proxy, bin }))) {
 		// A network ALREADY under this name is refused and named, never removed. It is either left by an earlier
 		// session whose process died before its `finally` (a closed terminal, a SIGHUP -- pi's own handler exits
 		// without unwinding), or a detached sandbox's that has since exited, or the network of an open of this
@@ -647,20 +800,23 @@ export async function openSandbox({
 		// can carry a different one (a changed PI_EGRESS_PROXY, or two environments that disagree).
 		// `createJobNetwork` rolls back a network it built itself, so one still present was almost always not
 		// built here; the exception is a rollback whose own remove failed, which these commands also clear.
-		if (await networkExists(spawnNetwork, network)) {
+		if (await networkExists(spawnNetwork, network, { bin })) {
 			return {
 				refused: "egress-network-exists",
-				message: `the egress network ${network} already exists -- left by an earlier session of ${jobId} that did not clean up, or one opening right now. If \`pi-dispatch sandbox --list\` shows no sandbox running for it, disconnect whatever is attached and remove it: \`for c in $(docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' ${network}); do docker network disconnect -f ${network} "$c"; done; docker network rm ${network}\``,
+				message: `the egress network ${network} already exists -- left by an earlier session of ${jobId} that did not clean up, or one opening right now. If \`pi-dispatch sandbox --list\` shows no sandbox running for it, disconnect whatever is attached and remove it: \`for c in $(${bin} network inspect -f '{{range .Containers}}{{.Name}} {{end}}' ${network}); do ${bin} network disconnect -f ${network} "$c"; done; ${bin} network rm ${network}\``,
 			};
 		}
+		// Where the proxy comes from differs by venue: the compose file is docker-only, and on podman the proxy is
+		// started by hand under this account's podman (docs/podman.md).
+		const start = bin === "podman" ? "it runs under this account's rootless podman, started as docs/podman.md shows" : "`docker compose -f deploy/docker-compose.yml --profile egress up -d`";
 		return {
 			refused: "egress-network-failed",
-			message: `could not create the egress network ${network} -- is the proxy running? \`docker compose -f deploy/docker-compose.yml --profile egress up -d\`. The egress setting is read from this process's environment (PI_EGRESS, PI_EGRESS_PROXY); a deployment that sets them only in its .env must export them where you run this.`,
+			message: `could not create the egress network ${network} -- is the proxy running? ${start}. The egress setting is read from this process's environment (PI_EGRESS, PI_EGRESS_PROXY); a deployment that sets them only in its .env must export them where you run this.`,
 		};
 	}
 	let detached = false;
 	try {
-		const { code, error } = await launch({ args });
+		const { code, error } = await launch({ args, bin });
 		// DETACHED, not exited: docker's detach sequence (Ctrl-P Ctrl-Q) returns with the container still running.
 		// Tearing the network down then would strip the proxy from a live sandbox, so `docker attach` reopens a
 		// shell with no egress at all. Leave it. An unanswered ask is NOT detached: the network is torn down, as it
@@ -670,7 +826,7 @@ export async function openSandbox({
 		if (network && !error && code === 0) detached = (await ask()).live.has(id);
 		return { code: code ?? null, error: error ?? null, ...(detached ? { detached: true } : {}) };
 	} finally {
-		if (network && !detached) await removeJobNetwork(spawnNetwork, { network, proxy: egress.proxy });
+		if (network && !detached) await removeJobNetwork(spawnNetwork, { network, proxy: egress.proxy, bin });
 	}
 }
 
@@ -684,8 +840,40 @@ export async function openSandbox({
  *
  * A stamp that is present but malformed is REFUSED, never read as "no stamp": the manifest is host-written, so a
  * bad shape means something else wrote it. A run from before the stamp existed decides from the CLI's own ids.
+ *
+ * `venue` (issue #429) picks the rules: a `podman` run is decided by `decidePodmanSandboxJobUser` below, from `podman
+ * info`, and everything after this line is `local`'s, unchanged.
  */
-export async function decideSandboxJobUser({
+export async function decideSandboxJobUser(opts = {}) {
+	if (opts?.venue === PODMAN_BACKEND) return decidePodmanSandboxJobUser(opts);
+	return decideLocalSandboxJobUser(opts);
+}
+
+const MALFORMED_STAMP = Object.freeze({ refused: "job-user-stamp-invalid", message: "the run's recorded job user is malformed, so the uid that owns its files is unknown; re-run the job instead" });
+
+/**
+ * The manifest's `jobUser` stamp, read: `{ malformed: true }`, `{ stamped: false }` (no stamp: a run from before it,
+ * or a bare wiring), `{ stamped: true, user: null }` (the image's own user) or `{ stamped: true, user, uid, gid }`.
+ * One reader for both venues, so a shape one refuses the other cannot quietly accept.
+ */
+function readJobUserStamp(stamp) {
+	if (stamp === undefined || stamp === null) return { stamped: false };
+	if (typeof stamp !== "object" || !("user" in stamp)) return { malformed: true };
+	if (stamp.user === null) {
+		if (stamp.home !== null && stamp.home !== undefined) return { malformed: true };
+		return { stamped: true, user: null };
+	}
+	try {
+		assertJobUser(stamp.user);
+	} catch {
+		return { malformed: true };
+	}
+	if (stamp.home !== CONTAINER_HOME) return { malformed: true };
+	const [uid, gid] = stamp.user.split(":").map(Number);
+	return { stamped: true, user: stamp.user, uid, gid };
+}
+
+async function decideLocalSandboxJobUser({
 	manifest,
 	platform = process.platform,
 	release = osRelease(),
@@ -698,24 +886,9 @@ export async function decideSandboxJobUser({
 } = {}) {
 	if (platform === "darwin" || platform === "win32") return { user: null, home: null };
 	const stamp = manifest?.jobUser;
-	let identity = { euid, egid };
-	if (stamp !== undefined && stamp !== null) {
-		const malformed = { refused: "job-user-stamp-invalid", message: "the run's recorded job user is malformed, so the uid that owns its files is unknown; re-run the job instead" };
-		if (typeof stamp !== "object" || !("user" in stamp)) return malformed;
-		if (stamp.user === null) {
-			if (stamp.home !== null && stamp.home !== undefined) return malformed;
-			identity = { euid: SHIPPED_IMAGE_UID, egid: SHIPPED_IMAGE_UID };
-		} else {
-			try {
-				assertJobUser(stamp.user);
-			} catch {
-				return malformed;
-			}
-			if (stamp.home !== CONTAINER_HOME) return malformed;
-			const [uid, gid] = stamp.user.split(":").map(Number);
-			identity = { euid: uid, egid: gid };
-		}
-	}
+	const read = readJobUserStamp(stamp);
+	if (read.malformed) return { ...MALFORMED_STAMP };
+	const identity = !read.stamped ? { euid, egid } : read.user === null ? { euid: SHIPPED_IMAGE_UID, egid: SHIPPED_IMAGE_UID } : { euid: read.uid, egid: read.gid };
 	const endpoint = await resolveEndpoint();
 	const daemon = endpoint?.local === false ? { answered: false, reason: "not-read", transient: true } : await readFacts();
 	const socketPath = endpoint?.local === true && typeof endpoint.endpoint === "string" && endpoint.endpoint.startsWith("unix://")
@@ -751,6 +924,80 @@ export async function decideSandboxJobUser({
 }
 
 /**
+ * Which uid a sandbox of a `podman` run runs as (issue #429), as `{ user, home, relabel? }` or `{ refused, message }`.
+ * ALWAYS a user, as a podman job always has one: keep-id without `--user` runs the image's user with `/job` unreadable
+ * (measured under issue #354), and `buildPodmanRunArgs` refuses the argv outright.
+ *
+ * THE UID IS THE ACCOUNT THAT OPENS IT, and it must be the run's. keep-id maps the host uid of the account running
+ * `podman` into the container, and rootless Podman's store (the retained image with it) is that account's own. So,
+ * unlike `local`, the stamp cannot choose another uid: a sandbox opened as another account would run as a uid that does
+ * not own the retained files, from a store that may not hold the image. A stamp naming another uid is REFUSED with the
+ * account to use, never "fixed" by passing the stamp's uid, which keep-id would map to a subordinate id that owns
+ * nothing on the host. No stamp (a run from before it) decides from this process's ids, as `local` does.
+ *
+ * REFUSED FOR WHAT A JOB IS REFUSED FOR, IN THE JOB'S ORDER, by the job's own function (`judgePodmanVenue`): the
+ * identity (not Linux, no podman, a remote service, rootful), then a containers.conf that widens a container
+ * (`podman-conf-widens-job`, issue #428: its `pasta_options` reach a sandbox's network exactly as a job's, and its
+ * `annotations` its groups), then the observations against `backendFloor`. A sandbox spends nothing, and these are
+ * still not money gates: they are what the venue IS, and a shell over an agent-written workspace on a venue a job
+ * would be refused on is the reach a sandbox exists not to widen. All of it before any network or container exists.
+ *
+ * sudo is refused FIRST, before `podman info` is asked: root's Podman is rootful and is not the worker's, so the
+ * worker's fix text for a root worker would send the operator to change the wrong thing.
+ */
+async function decidePodmanSandboxJobUser({
+	manifest,
+	platform = process.platform,
+	euid = process.geteuid?.(),
+	egid = process.getegid?.(),
+	backendFloor = {},
+	readInfo = makePodmanInfoReader(),
+	imageCapabilities = (image) => makeImagePreflight({ image, bin: "podman" })({}),
+	fs,
+	home,
+	env,
+} = {}) {
+	const read = readJobUserStamp(manifest?.jobUser);
+	if (read.malformed) return { ...MALFORMED_STAMP };
+	// Before any spawn: nothing podman could say changes it, and on macOS the CLI may well be a `podman machine` client.
+	if (platform !== "linux") return { refused: "job-user-unmappable", message: `${PODMAN_JOB_USER_FIX["podman-platform"]} (issue #354)` };
+	if (euid === 0) {
+		return { refused: "job-user-unmappable", message: "a sandbox on the podman venue opens under the rootless Podman of the account that runs it, and root's is neither rootless nor the worker's; open it as the worker's own account (issue #429)" };
+	}
+	const info = await readInfo();
+	const judged = judgePodmanVenue({ read: info, platform, euid, egid, backendFloor, ...(fs ? { fs } : {}), ...(home ? { home } : {}), ...(env ? { env } : {}) });
+	if (judged.jobUserRefused) return { refused: "job-user-unmappable", message: `${PODMAN_JOB_USER_FIX[judged.jobUserRefused.cause] ?? "the job user could not be decided"} (issue #354)` };
+	if (judged.podmanConfRefused) return { refused: PODMAN_CONF_WIDENS_JOB, message: judged.podmanConfRefused.message };
+	if (judged.unavailable) {
+		return { refused: "podman-unobserved", message: `PI_BACKEND_FLOOR asks for what only an answered \`podman info\` shows, and it did not answer (${judged.reason}); is podman answering \`podman info\` as this account?` };
+	}
+	if (judged.refused) return { refused: "backend-floor", message: judged.message };
+	const decision = decidePodmanJobUser({ platform, euid, egid, read: info });
+	if (decision.mode !== "worker") {
+		return { refused: "job-user-unknown", message: `which uid the sandbox may run as could not be decided (${decision.reason ?? decision.cause}); is podman answering \`podman info\` as this account?` };
+	}
+	if (read.stamped && read.user !== decision.user) {
+		const ran = read.user === null ? "as the image's own user, which no podman run does" : `as ${read.user}`;
+		return {
+			refused: "job-user-unmappable",
+			message: `this run ran ${ran}, and a sandbox on the podman venue runs as the account that opens it (${decision.user}) under keep-id, in that account's own Podman store; open it as the account the worker runs as (issue #429)`,
+		};
+	}
+	const caps = euid !== SHIPPED_IMAGE_UID ? await imageCapabilities(manifest?.image) : { ok: true, capabilities: [] };
+	if (euid !== SHIPPED_IMAGE_UID && !caps?.ok) {
+		return { refused: "job-user-image", message: `the retained image ${manifest?.image} could not be inspected in this account's podman store, so whether it runs as another uid is unknown` };
+	}
+	const chosen = resolvePodmanImageUser(decision, { capabilities: caps?.capabilities ?? [], euid, egid });
+	if (chosen.refused === "job-image-any-uid-unsupported") {
+		return { refused: chosen.refused, message: `the retained image ${manifest?.image} does not declare anyUid, so it cannot run as this account's uid, which the podman venue always uses (issue #354)` };
+	}
+	if (chosen.refused) return { refused: chosen.refused, message: `${PODMAN_JOB_USER_FIX[chosen.cause] ?? "the job user could not be decided"} (issue #354)` };
+	if (chosen.unavailable) return { refused: "job-user-unknown", message: `which uid the sandbox may run as could not be decided (${chosen.reason}); is podman answering \`podman info\` as this account?` };
+	// `relabel` on podman is `podman info`'s SELinux fact, the rule a podman job's own mounts follow (issue #355).
+	return { user: chosen.user, home: chosen.home, ...(chosen.relabel === true ? { relabel: true } : {}) };
+}
+
+/**
  * Launch one operator session, attached to the caller's terminal, and resolve its exit code.
  *
  * `spawn`, never `spawnSync`, and `stdio: "inherit"`: the same shape pi itself uses to hand the terminal
@@ -760,9 +1007,11 @@ export async function decideSandboxJobUser({
  * The caller owns the terminal around this: the CLI simply has one, and the admin panel brackets the call
  * with `tui.stop()`/`tui.start()`.
  */
-export function launchSandbox({ args, spawnFn = spawn }) {
+export function launchSandbox({ args, bin = "docker", spawnFn = spawn }) {
+	// `bin` (issue #429) is the run's venue's CLI, handed in by `openSandbox`; the default keeps a caller from before it
+	// on docker, which is what that caller built its argv for.
 	return new Promise((resolve) => {
-		const child = spawnFn("docker", args, { stdio: "inherit" });
+		const child = spawnFn(bin, args, { stdio: "inherit" });
 		child.on("error", (err) => resolve({ code: null, error: err }));
 		child.on("close", (code) => resolve({ code }));
 	});

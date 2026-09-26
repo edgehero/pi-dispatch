@@ -3041,3 +3041,32 @@ test("a backend registry refusal releases every handle boot opened before it, no
 	);
 	assert.equal(registryClosed, true);
 });
+
+test("the sandbox reaper asks and sweeps every blessed sandbox runtime, each through its own CLI (#429)", { skip }, async () => {
+	const base = { makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), jobUserIdentity: PODMAN_ID, observationFs: PODMAN_FILES, readPodmanInfo: PODMAN_INFO({}), bootImage: { ok: true, capabilities: ["anyUid"] } };
+	// The sweeper factory records the runtime each sweeper is built for; each sweeper answers with its runtime's network.
+	const factory = (made) => (opts) => {
+		made.push(opts?.bin);
+		return async () => ({ swept: [{ network: `pi-sandbox-${opts?.bin}-net`, detached: [] }], notes: [] });
+	};
+
+	// podman alone: podman's sweeper, handed over as itself, and a listing that is a function rather than a refusal.
+	const podmanOnly = [];
+	let podmanArgs;
+	await runStart({ ...base, env: { PI_BACKENDS: "podman" }, makeSandboxNetworkSweeper: factory(podmanOnly), makeSandboxReaper: (args) => ((podmanArgs = args), async () => {}) });
+	assert.deepEqual(podmanOnly, ["podman"], "no docker sweeper on a host that does not bless local");
+	assert.deepEqual(await podmanArgs.sweepNetworks({}), { swept: [{ network: "pi-sandbox-podman-net", detached: [] }], notes: [] });
+	assert.equal(typeof podmanArgs.listRunning, "function");
+
+	// Both: one sweeper per runtime, in PI_BACKENDS order, combined so each pass sweeps both.
+	const both = [];
+	let bothArgs;
+	await runStart({ ...base, env: { PI_BACKENDS: "local,podman" }, makeSandboxNetworkSweeper: factory(both), makeSandboxReaper: (args) => ((bothArgs = args), async () => {}) });
+	assert.deepEqual(both, ["docker", "podman"]);
+	assert.deepEqual((await bothArgs.sweepNetworks({})).swept.map((s) => s.network), ["pi-sandbox-docker-net", "pi-sandbox-podman-net"]);
+
+	// local alone: its sweeper is built for docker, exactly as before.
+	const localOnly = [];
+	await runStart({ ...base, env: {}, makeSandboxNetworkSweeper: factory(localOnly), makeSandboxReaper: () => async () => {} });
+	assert.deepEqual(localOnly, ["docker"]);
+});

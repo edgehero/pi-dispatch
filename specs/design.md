@@ -4040,7 +4040,13 @@ a tunnel.
   records the venue, and `sandboxVenueRefusal` inside `resolveSandbox` refuses a run whose venue is not the
   local adapter, for the CLI and the panel alike. The deployment-wide predicate it replaced refused every
   sandbox when any blessed venue was remote, was never applied by the panel, and could say nothing honest
-  once the manifest names the venue.
+  once the manifest names the venue. **Widened by issue #429 to the venues that run on this host**: a
+  launcher table (`SANDBOX_LAUNCHERS`) pairs each such venue with the CLI and job builder its bundle is built
+  with (`local`: docker and `buildDockerRunArgs`; `podman`: podman and `buildPodmanRunArgs`), and a run opens
+  only in its own venue's runtime and only where the opener's `PI_BACKENDS` blesses that venue. Rejected:
+  reading `bin` off the built bundles, which the CLI and the panel never build (it would construct a
+  `runContainer`, a reaper and an info reader to open a shell); and admitting by `remote: false`, which a
+  third non-remote runtime would pass and be reopened under one of these two.
 - **Attribution is the other half of selection (#277).** Selection had a ladder -- unknown names refused at
   load, unblessed names pre-spend, near misses at load -- and nothing recorded which venue a job actually got.
   Three stores now do, all from `resolveBackendName` (`run.backend`, else `PI_BACKENDS[0]`, absent meaning
@@ -4835,9 +4841,10 @@ a tunnel.
   ahead of its image probe): a rootful, remote or absent Podman misses a floored observation too, and judging that
   first told each job to fix a mounts.conf or delegate controllers, and at boot stopped a worker whose default venue
   was fine; the image probe asks the same Podman, so behind it an absent one was retried forever and a rootful one
-  without the image in its store was refused as `job-image-missing`. `pi-dispatch sandbox` refuses a
-  run on this venue by name, and `pi-dispatch up`, the compose file and the setup wizard stay docker-only: both are
-  follow-up issues. No CI job is required of it; `.github/workflows/podman-conformance.yml` is advisory.
+  without the image in its store was refused as `job-image-missing`. `pi-dispatch sandbox` reopens a run on
+  this venue through the `podman` CLI (issue #429; `INT-SANDBOX-CONTRACT`), with a podman job's argv, as the opening
+  account under keep-id, and refused for what a job is refused for through the job's own `judgePodmanVenue`, in the
+  job's order; `pi-dispatch up`, the compose file and the setup wizard stay docker-only, a follow-up issue. No CI job is required of it; `.github/workflows/podman-conformance.yml` is advisory.
 - **Why**: rootless Podman was the one common runtime the worker refused outright (`OQ-037`), and the refusal was a
   limitation rather than a verdict: only keep-id gives a job the uid that owns its `0700` directories, and it is a
   per-container flag the docker CLI refuses and `docker info` cannot see. Measured on 2026-09-25 on Fedora 44
@@ -4954,9 +4961,12 @@ a tunnel.
     retried as infrastructure, not refunded, exactly as on the Docker API route.
   - Only Fedora 44 with Podman 5.8.1 was measured; the advisory CI job runs Ubuntu 24.04's Podman 4.9. Podman
     machine and any other non-Linux host are refused rather than measured.
-  - `pi-dispatch sandbox` is refused on this venue, and `pi-dispatch up`, the compose file and the setup wizard are
-    docker-only, so the proxy and Valkey are started by hand (`docs/podman.md`); bringing the proxy back after a
-    reboot is unmeasured.
+  - `pi-dispatch up`, the compose file and the setup wizard are docker-only, so the proxy and Valkey are started by
+    hand (`docs/podman.md`); bringing the proxy back after a reboot is unmeasured. The sandbox is no longer a residual
+    (issue #429): it opens on this venue. What was not measured about it on a rootless host is its own residual:
+    `-p 127.0.0.1:<h>:<c>` beside `--network=private`, `podman attach` after the detach sequence, and the session
+    network sweep's `{{.State}}` words on Podman (`SWEEPABLE_CONTAINER_STATES` holds a leftover back rather than
+    guessing, the safe direction).
   - `pi-dispatch doctor --live` on this venue does not read `egress` back: doctor's canary runs on docker only, so it
     says the allowlist was not read back, and `.github/scripts/podman-conformance.mjs` runs a canary of its own.
   - The job still runs as the worker's own uid, so a container escape lands as the worker's account: this venue
@@ -4968,7 +4978,9 @@ a tunnel.
   `makePodmanInfoReader`, `observePodman`, `decidePodmanJobUser`, `resolvePodmanImageUser`, `makePodmanBackend`,
   `makePodmanReaper`, `PODMAN_JOB_USER_FIX`, `PODMAN_BOOT_REFUSING_CAUSES`; `worker/src/start.mjs` ->
   `podmanBootRefusal`; `worker/src/doctor.mjs` -> `podmanChecks`, `podmanLiveChecks`; `worker/src/live-probes.mjs`;
-  `worker/src/sandbox.mjs` -> `sandboxVenueRefusal`;
+  `worker/src/sandbox.mjs` -> `SANDBOX_LAUNCHERS`, `sandboxVenueRefusal`, `decideSandboxJobUser` (its podman
+  branch), `listRunningSandboxesOn`, `combineSandboxNetworkSweepers`; `worker/src/backend-podman.mjs` ->
+  `judgePodmanVenue`;
   `docs/podman.md`; `worker/test/podman-doc.test.mjs`; `.github/scripts/podman-conformance.mjs`;
   `.github/workflows/podman-conformance.yml`
 - **Traces to**: `DES-CONTAINER-BACKEND-REGISTRY`, `DES-PODMAN-THROUGH-ITS-DOCKER-API`,
@@ -5130,3 +5142,4 @@ a tunnel.
 | 2026-09-26 | Issue #428, review round 1, five defects found by an adversarial pass. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**: (1) `env` joins the refused keys, since `[engine] env = ["CONTAINERS_CONF_OVERRIDE=..."]` made Podman read a conf the worker never reads (measured: pasta got `--map-host-loopback`; the mounts and cgroups observations were defeated the same way) and `[containers] env` adds variables to every job; `env_host` is a different key, pinned by `--env-host=false`, and does not match. (2) Three spellings Podman honours hid a key from every conf pattern (Go case folding of U+017F, a multi-line string holding a `#` line, U+2028 or U+2029 inside a string), so the SHARED `confKeyFinding` now withholds credit from any file with a non-ASCII character or a `"""`/`'''` string (`UNREAD_SPELLING`), covering `MOUNT_KEY` and `CGROUPS_KEY` too; the stock Fedora 44 file and containers/common v0.57.4's (Ubuntu 24.04's source) are plain ASCII with none. (3) A read that fails for a moment (`TRANSIENT_READ_ERRORS`) is no longer a permanent refusal that drops the job: it is retried, per job as an infrastructure throw and at boot as exit 1, and an observation over the same helpers reads it as unanswered; every other errno stays determinate. The entry's "no transient arm" sentence is corrected. (4) The proxy deny's rejected-alternative bullet overclaimed: after a key is removed the next job IS admitted while the shared rootless namespace, and so the proxy's network, may still carry the old options until every bridge container restarts; the text now says so, and that the worker reads the conf, not the live pasta argv (a follow-up). (5) The forge comment for a chain that could not be read no longer says the configuration widens a job. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED** again, its loopback residual: the deny names `allowed` first, so an unlisted name is never resolved (a bare `dst` rule was a DNS channel out, measured), and covers only fixed addresses. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: `podmanConfRefused` may carry `transient: true`, which the processor throws. |
 | 2026-09-26 | Issue #428, review round 2. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**: the transient-read rule of round 1 covered only the conf chain, while the same observations' sibling reads (the user's and the system `mounts.conf`, the OCI hook directories, the FIPS file) still turned `EMFILE` into a floor refusal that dropped the job; `unreadFileFinding` is now the one rule for every host file an observation reads, on both venues, and a file-read `null` carries `reason: "file-unread"`, so the retry names the path instead of "the container runtime or its CLI is unavailable". A spelling refusal names its line and kind, and its remedy drops the clauses that do not apply; the transient remedy says a job is retried ONCE (the queue's two attempts), not until it reads. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` UNCHANGED, checked**: the allowlist ACL's `-n` (INT-EGRESS-POLICY-CONTRACT) changes how a name is compared, not the network design. |
 | 2026-09-27 | Issue #428, review round 3. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**, wording only: doctor's fix for an observation left unanswered by a host file read that failed for a moment (`reason: "file-unread"`) now says the runtime answered and the job is retried, on both venues, instead of "fix what stops `podman info`" or "the daemon" answering; the transient containers.conf retry names its file. No decision changed. |
+| 2026-09-27 | Issue #429. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**: `pi-dispatch sandbox` leaves the residual list. A run on this venue reopens through the `podman` CLI with a podman job's argv (keep-id, `--user`, `PODMAN_PINNED_FLAGS`, a network flag always), as the account that opens it, and is refused for what a job is refused for in the job's order, through `judgePodmanVenue`, the function the bundle's `observationPreflight` now answers through as well, so the two cannot drift apart. What was not measured about the sandbox on a rootless host (a published port beside `--network=private`, `podman attach` after a detach, Podman's `{{.State}}` words in the network sweep) is named as its own residual instead. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**, the sandbox bullet: widened from the local adapter to a launcher table of the venues that run on this host, admitted only where the opener's `PI_BACKENDS` blesses the venue; rejected are reading `bin` off built bundles (the CLI and the panel never build one) and admitting by `remote: false`. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked**: still a fresh container per session, now in the run's own runtime. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` UNCHANGED, checked**: the session network is the same shape, created and swept in the run's runtime. |

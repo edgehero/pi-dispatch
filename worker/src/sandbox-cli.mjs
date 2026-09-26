@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { parseArgs } from "node:util";
 import { loadConfig } from "./config.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
-import { launchSandbox, listRunningSandboxes, openSandbox, parsePublish, sandboxContainerName, sandboxVenueRefusal } from "./sandbox.mjs";
+import { launchSandbox, listRunningSandboxes, openSandbox, parsePublish, sandboxContainerName, sandboxLauncher, sandboxVenueRefusal, sandboxVenues } from "./sandbox.mjs";
 import { listSandboxes, pinSandbox } from "./sandbox-store.mjs";
 
 /**
@@ -51,7 +51,21 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 	// A docker that cannot be reached costs a column, never the command: `listRunningSandboxes` throws so
 	// the REAPER can tell "none" from "could not ask", and these callers only draw a marker. Asked only
 	// where it is used, and never before the arguments are known good -- a typo should not shell out.
-	const liveSandboxes = async () => new Set(await running().catch(() => []));
+	//
+	// EVERY runtime a sandbox can open on here (issue #429), each asked on its own and each degrading on its own: a
+	// podman that cannot be asked must not blank docker's column, and the reverse. `running({ bin })` is the same seam
+	// `openSandbox` asks with, so one fake answers both.
+	const liveSandboxes = async () => {
+		const live = new Set();
+		for (const venue of sandboxVenues(config.backends)) {
+			for (const id of await Promise.resolve()
+				.then(() => running({ bin: sandboxLauncher(venue).bin }))
+				.catch(() => [])) {
+				live.add(id);
+			}
+		}
+		return live;
+	};
 
 	if (values.list) {
 		return renderList({ config, live: await liveSandboxes(), out, now });
@@ -78,6 +92,10 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 	// refusal (the per-job venue refusal included, which replaced a deployment-wide one this command used to
 	// apply on its own), the already-running refusal, this session's egress network and its teardown. The
 	// panel assembled the same session from parts and dropped the network; one function is what stops that.
+	// The run's venue's CLI, learned when the session is known to be openable, so the lines after the shell name the
+	// runtime that ran it (`podman attach`, not `docker attach`). Stays "docker" only for a failure before that point,
+	// which never reaches those lines.
+	let runtime = "docker";
 	const result = await openSandbox({
 		jobId,
 		sandboxDir: config.sandboxDir,
@@ -92,7 +110,11 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 		launch,
 		spawnNetwork,
 		...(resolveJobUser ? { resolveJobUser } : {}),
-		beforeLaunch: ({ resolved }) => {
+		// Issue #429: which venues open here, and what a podman sandbox's observations must show, as the worker reads them.
+		blessed: config.backends,
+		backendFloor: config.backendFloor,
+		beforeLaunch: ({ resolved, runtime: cli }) => {
+			runtime = cli;
 			// Pin BEFORE the shell, not after: the operator asked to keep this one, and a session that ends in a
 			// crashed terminal or a closed laptop lid must not be the reason the pin never landed.
 			if (values.pin) {
@@ -106,8 +128,8 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 		},
 	});
 	if (result.refused) return fail(err, result.message);
-	if (result.error) return fail(err, `could not start docker: ${result.error.message}`);
-	if (result.detached) out(`detached: ${sandboxContainerName(jobId)} is still running with its egress network, which is left in place after it exits -- \`docker attach ${sandboxContainerName(jobId)}\` to return\n`);
+	if (result.error) return fail(err, `could not start ${runtime}: ${result.error.message}`);
+	if (result.detached) out(`detached: ${sandboxContainerName(jobId)} is still running with its egress network, which is left in place after it exits -- \`${runtime} attach ${sandboxContainerName(jobId)}\` to return\n`);
 	return result.code ?? 0;
 }
 
@@ -133,9 +155,13 @@ function renderList({ config, live, out, now }) {
 		const kind = String(row.kind ?? "?").padEnd(8);
 		// A run this host cannot re-open is still listed (it is still retained and still swept), but not as
 		// time left on something re-openable (#277): the list answers "what can I open", and the venue says why not.
-		const state = sandboxVenueRefusal({ jobId: row.jobId, manifest: row })
+		// A venue this command CAN open that this environment's PI_BACKENDS leaves out (issue #429) says which variable,
+		// because it is the one cause here an operator fixes in their own shell.
+		const state = sandboxVenueRefusal({ jobId: row.jobId, manifest: row, blessed: config.backends })
 			? typeof row.backend === "string" && row.backend !== ""
-				? `not here (ran on ${row.backend})`
+				? sandboxLauncher(row.backend)
+					? `not here (PI_BACKENDS lacks ${row.backend})`
+					: `not here (ran on ${row.backend})`
 				: "not openable (no venue recorded)"
 			: live.has(sanitizeJobId(row.jobId))
 				? "RUNNING"

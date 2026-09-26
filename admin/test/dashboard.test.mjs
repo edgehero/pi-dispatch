@@ -1097,6 +1097,13 @@ test("RUN_DETAIL renders an OFF and an UNREADABLE egress posture differently (#3
   assert.match(offOut, /egress off \(docker's default bridge\)/, "off means the default bridge, not no network at all, and saying only `off` reads as the opposite");
   assert.doesNotMatch(offOut, /egress on/);
 
+  // A run on the podman venue lands on its job's own `--network=private` with egress off, not a bridge (#429).
+  const podman = await openRunDetail({ sandboxInfo: () => ({ retained: true, expiresIn: "3h", runtime: "podman", egress: { armed: false, proxy: "pi-dispatch-egress-proxy", source: "this shell" } }), launchSandbox: async () => {} });
+  const podmanOut = stripAnsi(podman.render(80).join("\n"));
+  await podman.dispose();
+  assert.match(podmanOut, /egress off \(podman's private network\)/);
+  assert.doesNotMatch(podmanOut, /default bridge/);
+
   // A blank or whitespace-only PI_EGRESS_PROXY: `egressProxyName` falls back with `||`, so an empty one
   // gets the default and a whitespace one does not. Unsaid, the line read `egress on via` and stopped.
   const blank = await openRunDetail({ sandboxInfo: () => ({ retained: true, expiresIn: "3h", egress: { armed: true, proxy: "   ", source: "this shell" } }), launchSandbox: async () => {} });

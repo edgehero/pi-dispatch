@@ -165,10 +165,11 @@ const REFUSED_ENTRY_POINT = /^(refused `[a-z-]+`|✗ `[a-z-]+`|not run\b.*|as do
 // The rows, by name, so a row cannot be dropped, renamed or invented while the count stays right.
 const ENTRY_POINTS = Object.freeze(["worker", "`pi-dispatch doctor`", "`pi-dispatch doctor --live`", "`pi-dispatch sandbox`", "`pi-dispatch up`", "`docker compose --profile egress`"]);
 
-// The native venue's column is neither: its jobs run, and exactly one entry point refuses them. That one is not a
-// sentence to trust either, so it is asked of the code: a retained run stamped with the venue is refused by the
-// sandbox's own venue rule. Every other row of the column must not claim a refusal it does not get.
-const NATIVE_REFUSED_ENTRY_POINTS = Object.freeze(["`pi-dispatch sandbox`"]);
+// The native venue's column is neither: its jobs run, and since issue #429 no entry point refuses them outright (the
+// sandbox, the last one that did, opens on the venue where this shell's PI_BACKENDS blesses it). Kept as a list so a
+// future refusal is added deliberately, with the same code check the sandbox row had; empty, every row of the column
+// must not claim a refusal it does not get.
+const NATIVE_REFUSED_ENTRY_POINTS = Object.freeze([]);
 
 test("the entry-points table covers the same seven setups, and a refused column only refuses (#345)", () => {
 	const start = doc.indexOf("## Entry points");
@@ -192,6 +193,14 @@ test("the entry-points table covers the same seven setups, and a refused column 
 					assert.ok(sandboxVenueRefusal({ jobId: "j", manifest: { backend: setup.native } }), `the sandbox really refuses a ${setup.native} run`);
 				} else {
 					assert.doesNotMatch(cell, /refus|✗/, `${row[0]} on ${setup.header} claims a refusal it does not get`);
+				}
+				// The sandbox row's claim is asked of the code both ways (issue #429): a retained run stamped with the venue
+				// opens where PI_BACKENDS blesses it, and is refused where it does not, which the cell must say.
+				if (row[0] === "`pi-dispatch sandbox`") {
+					assert.equal(sandboxVenueRefusal({ jobId: "j", manifest: { backend: setup.native }, blessed: [setup.native] }), null, `the sandbox opens a ${setup.native} run where it is blessed`);
+					assert.ok(sandboxVenueRefusal({ jobId: "j", manifest: { backend: setup.native } }), `and not where PI_BACKENDS leaves it out`);
+					assert.match(cell, /`PI_BACKENDS`/, "the cell names the variable the sandbox opens by");
+					assert.match(cell, /keep-id/, "and the user rule it opens under");
 				}
 				continue;
 			}

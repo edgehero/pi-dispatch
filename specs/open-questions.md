@@ -1541,7 +1541,14 @@ adversarial passes did.
   CLI agree with each other even when neither agrees with the deployment: `PI_EGRESS` and
   `PI_EGRESS_PROXY` (what the shell can reach), `PI_SANDBOX_DIR` (which retained directories it can see at
   all), `PI_SANDBOX_RETENTION_HOURS` (the window it reports, and `0` makes it report retention off),
-  `PI_SANDBOX_IDLE_MINUTES` (the `TMOUT` the shell gets) and **`DOCKER_HOST`**.
+  `PI_SANDBOX_IDLE_MINUTES` (the `TMOUT` the shell gets) and **`DOCKER_HOST`**. Since issue #429 also
+  **`PI_BACKENDS`** (which venues a sandbox opens on at all) and **`PI_BACKEND_FLOOR`** (what a podman
+  sandbox's observations must show), through `sandboxVenuePolicy`, the worker's own two parsers. Both are
+  capability-shaped and pointer-INELIGIBLE for the reason the three below are. The panel is SAFE rather than
+  informed here: a panel started without `PI_BACKENDS` sees `local` alone, so a `podman` run is not offered
+  (`not reopenable here (PI_BACKENDS lacks podman)`) and is refused if `b` is reached, and it is never launched
+  under docker, because the launcher is the run's own venue's and an unblessed venue is refused before anything is
+  asked. A malformed value refuses rather than reading as `local` alone or as no floor.
 - **`DOCKER_HOST` is the sharpest of them and it is NOT the one that got a line.** #337's own Podman
   section names it: a Podman deployment points `DOCKER_HOST` at Podman's socket, and a panel that reads it
   from its own process opens the sandbox on a **different daemon** than the worker's jobs ran on. The
@@ -1607,10 +1614,10 @@ adversarial passes did.
   resolver, the daemon-facts reader and the image preflight, so that refusal is decided from the manifest
   alone. A well-formed stamp does reach the daemon, which is a cost of moving the whole function rather than
   a property of the refusal. The reason is at its declaration too.
-- **Out of scope here, and named so it does not disappear with #337**: the sandbox launcher is hard-wired
-  to the docker CLI and `sandboxVenueRefusal` reopens only the `local` adapter by name, which belongs to
-  `#354` (a native podman backend). This row is about what the panel can SEE, not about which runtimes it
-  can drive.
+- **Out of scope here, and named so it does not disappear with #337**: which runtimes the panel can drive.
+  That was the docker CLI alone until issue #429, which gave the sandbox a launcher per venue (`local` through
+  docker, `podman` through this account's podman); a `podman` run's session no longer reads `DOCKER_HOST` at all.
+  This row is about what the panel can SEE, not about which runtimes it can drive.
 - **What would RESOLVE it**: a deployment-owned answer the panel can read without a capability grant --
   the worker writing its resolved sandbox posture into the run record or a sibling file the panel already
   reads, so the panel reports the DEPLOYMENT's setting and names its own only when they differ. That is a
@@ -1690,3 +1697,4 @@ adversarial passes did.
 | 2026-09-25 | Issue #355. **`OQ-037` AMENDED, narrowed not closed, status stays `OPEN`**: its SELinux, nftables and systemd bullet is MEASURED on a real Fedora 44 host (kernel 6.19.10, SELinux enforcing, container-selinux 2.247.0, systemd 259.5, cgroup v2, rootful Podman 5.8.1, netavark 1.17.2 on its nftables driver, aardvark-dns 1.17.0, crun 1.27, conmon 2.2.1, docker-cli 29.7.2 and compose 5.5.1 from Fedora, worker uid 1234). nftables and health checks under systemd hold with nothing changed (`doctor --live` read `egress` and `jobToJobIsolation` back; the compose proxy went `healthy` in about 35 s on its own transient timer). SELinux did NOT hold: every unlabelled bind source was denied, `:ro` or not, so every job on the supported route stopped at `/job` before spending and the compose proxy crash-looped on its own config; the argv changed (`:Z` on the worker's own per-job mounts, on Podman only; `:ro,z` on the compose config mounts) and an operator's folder or overlay gets doctor's `semanage fcontext` fix and a pre-spend runner refusal instead of a relabel. **What stays in the bullet** is Docker Engine with `selinux-enabled`, out of scope and unmeasured, with its own close condition. The entry's other bullets (rootless Podman and issue #354, `podman machine` and Podman Desktop, OrbStack and Colima, `userns = "auto"`) are **UNCHANGED, checked**, and **What bounds it meanwhile** gains the runner's `/workspace` read check. **`OQ-036` UNCHANGED, checked**: `:Z` changes a label on the worker's own per-job directories, not the uid a job runs as, so nothing that entry's residual rests on moves. |
 | 2026-09-25 | Issue #354, part 2 (the `podman` venue). **`OQ-037` AMENDED, one bullet CLOSED, status stays `OPEN`**: its rootless Podman bullet is closed by the native `podman` venue, which passes `--userns=keep-id` with the worker's own `--user` on every job's argv, refuses a rootful or remote Podman, a root worker and a non-Linux host by name, and is read back by `.github/scripts/podman-conformance.mjs`, which runs the conformance harness against the real bundle and fails on any of the eight read-back properties it could not read. The bullet carries that run's result. Through the Docker API rootless Podman is still refused, for the reasons the bullet always gave. The other bullets (Docker Engine with `selinux-enabled`, `podman machine`, OrbStack and Colima, `userns = "auto"`) are untouched. **`OQ-036` AMENDED**: its rootless bullet now says rootless Podman is served by the native venue and runs as the worker's own uid there too, so everything the entry concedes applies unchanged; and "Neither is built" is kept with the reason the native venue is not the second closure it expected: keep-id maps the worker's OWN uid into the container, not a dedicated one. Status unchanged. |
 | 2026-09-25 | Issue #427. **`OQ-004` AMENDED**, an update under the #202 refutation: that refutation measured the SDK and `fetch` without pi loaded, and loading the pinned pi's npm `undici` replaces the flag's dispatcher, so the original observation was right about the outcome for a third cause. The runner now restores the proxy itself, and the row's status is UNCHANGED, checked. |
+| 2026-09-26 | Issue #429. **`OQ-038` AMENDED**, two bullets, status stays `WATCH`: the panel now also reads `PI_BACKENDS` and `PI_BACKEND_FLOOR` from its own environment (through `sandboxVenuePolicy`, the worker's own parsers), both capability-shaped and pointer-ineligible like `PI_EGRESS`, and the row records why that is SAFE without being informed: a panel without `PI_BACKENDS` sees `local` alone, so a `podman` run is neither offered nor launched under docker, and a malformed value refuses. The out-of-scope bullet is updated rather than deleted: the launcher is no longer docker-only, and a `podman` session reads no `DOCKER_HOST`. What would resolve the row is unchanged. **`OQ-037` UNCHANGED, checked**: nothing about the rootful and Docker API routes moves. **`OQ-036` UNCHANGED, checked**: a podman sandbox runs as the opening account, which is the worker's own, on the same footing as a job. |

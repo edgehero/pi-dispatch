@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
-import { ISOLATION_FLAGS } from "../src/docker-run.mjs";
+import { ISOLATION_FLAGS, PODMAN_PINNED_FLAGS, buildDockerRunArgs, buildPodmanRunArgs } from "../src/docker-run.mjs";
 import { WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
 import { MINTED_TOKEN_VARS } from "../src/forges.mjs";
-import { SANDBOX_NAME_PREFIX, SANDBOX_NETWORK_SHAPE, buildSandboxRunArgs, decideSandboxJobUser, listRunningSandboxes, makeSandboxNetworkSweeper, openSandbox, parsePublish, resolveSandbox, sandboxContainerName, sandboxEgress, sandboxVenueRefusal } from "../src/sandbox.mjs";
+import { SANDBOX_LAUNCHERS, SANDBOX_NAME_PREFIX, SANDBOX_NETWORK_SHAPE, buildSandboxRunArgs, combineSandboxNetworkSweepers, decideSandboxJobUser, launchSandbox, listRunningSandboxes, listRunningSandboxesOn, makeSandboxNetworkSweeper, openSandbox, parsePublish, resolveSandbox, sandboxContainerName, sandboxEgress, sandboxLauncher, sandboxVenuePolicy, sandboxVenueRefusal, sandboxVenues } from "../src/sandbox.mjs";
 import { networkNameFor } from "../src/egress.mjs";
 
 const base = {
@@ -200,9 +200,9 @@ test("resolveSandbox refuses a run from a venue this host did not run, ahead of 
 	const far = resolve({ ...manifest, backend: "far", image: null }, () => false);
 	assert.equal(far.refused, "venue-unreachable");
 	assert.match(far.message, /"far"/);
-	// Both venues by name (issue #354): the one that ran it, and the one a sandbox opens through. "Not on this host's
-	// docker daemon" read as a claim about WHERE the run happened, which a second runtime on this host makes false.
-	assert.match(far.message, /ran on the "far" backend, and a sandbox opens a shell only through the "local" backend \(this host's docker CLI\)/);
+	// Both sides by name (issue #354): the venue that ran it, and the venues a sandbox opens through, which since issue
+	// #429 are every row of the launcher table, each with its CLI.
+	assert.match(far.message, /ran on the "far" backend, and a sandbox opens a shell only through a venue it has a launcher for on this host \("local" through the docker CLI, "podman" through the podman CLI\)/);
 	assert.doesNotMatch(far.message, /not on this host/);
 	// A workspace that happens to exist at the same path here must not let it through either.
 	assert.equal(resolve({ ...manifest, backend: "far" }).refused, "venue-unreachable");
@@ -215,13 +215,25 @@ test("resolveSandbox refuses a run from a venue this host did not run, ahead of 
 		assert.equal(r.refused, "venue-unreachable", JSON.stringify(backend));
 		assert.match(r.message, /names no backend/);
 	}
-	// The native podman venue runs on THIS host (issue #354), and a sandbox is still refused there, in podman's own words:
-	// "open it on the venue that ran it" would send the operator after a sandbox that venue does not have.
+	// The native podman venue (issue #429) opens WHEN THIS PROCESS BLESSES IT, and is refused otherwise in words that
+	// name the variable and where it is read: the default is `PI_BACKENDS` unset, which is `local` alone.
 	const podman = resolve({ ...manifest, backend: "podman" });
 	assert.equal(podman.refused, "venue-unreachable");
-	assert.match(podman.message, /ran on the "podman" backend \(this worker account's rootless podman\), and a sandbox does not open on that venue yet/);
+	assert.match(podman.message, /ran on the "podman" backend, which PI_BACKENDS in this process's environment does not bless \(it reads "local"\)/);
+	assert.match(podman.message, /through that venue's own CLI \(podman\)/);
+	assert.match(podman.message, /read from this environment, not from the deployment's \.env/);
 	assert.doesNotMatch(podman.message, /Open it on the venue that ran it/);
 	assert.match(far.message, /Open it on the venue that ran it/, "another venue keeps its own sentence");
+	assert.equal(sandboxVenueRefusal({ jobId: "j1", manifest: { ...manifest, backend: "podman" }, blessed: ["podman"] }), null);
+	assert.equal(sandboxVenueRefusal({ jobId: "j1", manifest: { ...manifest, backend: "podman" }, blessed: ["local", "podman"] }), null);
+	// And `local` is held by the same rule: a host whose PI_BACKENDS leaves it out has said it does not run docker, and
+	// its retention reaper does not ask docker which sandboxes are open.
+	const localUnblessed = sandboxVenueRefusal({ jobId: "j1", manifest: { ...manifest, backend: "local" }, blessed: ["podman"] });
+	assert.equal(localUnblessed?.refused, "venue-unreachable");
+	assert.match(localUnblessed.message, /"local" backend, which PI_BACKENDS .* does not bless \(it reads "podman"\)/);
+	assert.equal(sandboxVenueRefusal({ jobId: "j1", manifest, blessed: ["podman"] })?.refused, "venue-unreachable", "an unstamped run is local's, and refused where local is not blessed");
+	// A venue with no launcher is refused however it is blessed.
+	assert.equal(sandboxVenueRefusal({ jobId: "j1", manifest: { ...manifest, backend: "far" }, blessed: ["far", "local", "podman"] })?.refused, "venue-unreachable");
 	// Held means the local adapter by name.
 	assert.equal(resolve({ ...manifest, backend: "local" }).refused, undefined);
 	assert.equal(sandboxVenueRefusal({ jobId: "j1", manifest: { ...manifest, backend: "local" } }), null);
@@ -229,15 +241,28 @@ test("resolveSandbox refuses a run from a venue this host did not run, ahead of 
 	assert.equal(sandboxVenueRefusal({ jobId: "j1", manifest }), null);
 });
 
-test("held means the local adapter BY NAME, pinned in the source because no behaviour can tell it apart yet (#277)", () => {
-	// While `local` is the table's only entry, "venue === DEFAULT_BACKEND" and "backendFor(venue).remote === false"
-	// answer identically for every string, so no behavioural test can catch a swap to the second -- which the
-	// design rejects, because a future non-remote venue on another runtime would then be reopened under docker.
-	// The relation is pinned here as text rather than manufactured as behaviour.
+test("held means a venue with a LAUNCHER, by name, never by `remote: false` (#277, #429)", () => {
+	// "has a launcher row" and "backendFor(venue).remote === false" answer identically for every venue the table holds
+	// today (local and podman are the two non-remote venues), so no behavioural test can catch a swap to the second --
+	// which the design rejects, because a future non-remote venue on a third runtime would then be reopened under one of
+	// these two. The relation is pinned here as text rather than manufactured as behaviour.
 	const src = readFileSync(new URL("../src/sandbox.mjs", import.meta.url), "utf8");
 	const body = src.slice(src.indexOf("export function sandboxVenueRefusal"), src.indexOf("export function resolveSandbox"));
-	assert.match(body, /if \(venue === DEFAULT_BACKEND\) return null;/);
+	assert.match(body, /const launcher = sandboxLauncher\(venue\);/);
+	assert.match(body, /if \(launcher && held\) return null;/);
 	assert.doesNotMatch(body, /\.remote/);
+	// The table is exactly the two runtimes, each paired with the CLI and builder its job bundle is built with, so a
+	// sandbox's argv and spawns are a job's on the same venue (`makePodmanBackend` passes `bin: "podman"` beside
+	// `buildArgs: buildPodmanRunArgs`; `local`'s defaults are docker and `buildDockerRunArgs`).
+	assert.deepEqual(Object.keys(SANDBOX_LAUNCHERS).sort(), ["local", "podman"]);
+	assert.equal(SANDBOX_LAUNCHERS.local.bin, "docker");
+	assert.equal(SANDBOX_LAUNCHERS.local.build, buildDockerRunArgs);
+	assert.equal(SANDBOX_LAUNCHERS.podman.bin, "podman");
+	assert.equal(SANDBOX_LAUNCHERS.podman.build, buildPodmanRunArgs);
+	const podmanSrc = readFileSync(new URL("../src/backend-podman.mjs", import.meta.url), "utf8");
+	assert.match(podmanSrc, /bin: "podman",\n\t\tbuildArgs: buildPodmanRunArgs,/, "the job bundle pairs the same two");
+	assert.equal(sandboxLauncher("toString"), null);
+	assert.equal(sandboxLauncher(null), null);
 });
 
 test("resolveSandbox yields the manifest and the container name when the run is intact", () => {
@@ -940,4 +965,323 @@ test("a shell that is OPEN keeps its network even with no retained directory lef
 	assert.deepEqual(out, { swept: [], notes: [] }, "nothing swept and nothing to report");
 	assert.ok(!d.calls.some((c) => c.startsWith("network disconnect") || c.startsWith("network rm")), "and it is not even inspected");
 	assert.deepEqual(d.state.get("pi-sandbox-orphaned-net"), ["pi-dispatch-egress-proxy"]);
+});
+
+// --- issue #429: the sandbox on the native podman venue --------------------------------------------------------------
+
+test("the LOCAL sandbox argv is byte-identical to the one before issue #429 (pinned as literals)", () => {
+	// Literals rather than a second call through the builder: a test comparing the builder to itself cannot see the
+	// venue table change what `local` builds. Captured from the tree before the change, both shapes.
+	const full = { image: "pi-job:pinned", name: "pi-sandbox-gh-1", workspace: "/s/gh-1/workspace", jobDir: "/s/gh-1", term: "xterm-256color", idleSeconds: 1800, user: "1234:1234", home: "/home/pi", relabel: true, workspaceOwned: true, network: "pi-sandbox-gh-1-net", egressEnv: { HTTPS_PROXY: "http://p:3128" } };
+	const expected = ["run", "--name=pi-sandbox-gh-1", "--pull=never", "--rm", "--init", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--pids-limit=512", "--shm-size=1g", "--memory=4g", "--cpus=2", "--network=pi-sandbox-gh-1-net", "--user=1234:1234", "-i", "-t", "--entrypoint", "bash", "-e", "TERM=xterm-256color", "-e", "TMOUT=1800", "-e", "HOME=/home/pi", "-e", "HTTPS_PROXY=http://p:3128", "-v", "/s/gh-1:/job:ro,Z", "-v", "/s/gh-1/workspace:/workspace:Z", "pi-job:pinned"];
+	assert.deepEqual(buildSandboxRunArgs(full), expected);
+	assert.deepEqual(buildSandboxRunArgs({ ...full, venue: "local" }), expected, "naming the venue changes nothing");
+	const published = { image: "pi-job:pinned", name: "pi-sandbox-gh-1", workspace: "/w", jobDir: "/j", publish: ["-p", "127.0.0.1:3000:3000"] };
+	assert.deepEqual(buildSandboxRunArgs(published), ["run", "--name=pi-sandbox-gh-1", "--pull=never", "--rm", "--init", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--pids-limit=512", "--shm-size=1g", "--memory=4g", "--cpus=2", "-i", "-t", "--entrypoint", "bash", "-p", "127.0.0.1:3000:3000", "-v", "/j:/job:ro", "-v", "/w:/workspace", "pi-job:pinned"]);
+});
+
+const podmanShape = { venue: "podman", image: "pi-job:pinned", name: "pi-sandbox-gh-1", workspace: "/s/gh-1/workspace", jobDir: "/s/gh-1", term: "xterm", idleSeconds: 1800, user: "1234:1234", home: "/home/pi", workspaceOwned: true };
+
+test("a podman sandbox carries the job's whole boundary: ISOLATION_FLAGS, PODMAN_PINNED_FLAGS, keep-id, --user and a NAMED network (#429)", () => {
+	for (const [label, over, network] of [
+		["egress off", {}, "--network=private"],
+		["egress armed", { network: "pi-sandbox-gh-1-net", egressEnv: { HTTPS_PROXY: "http://p:3128" } }, "--network=pi-sandbox-gh-1-net"],
+	]) {
+		const args = buildSandboxRunArgs({ ...podmanShape, ...over });
+		// Both arrays IMPORTED, never retyped, for the reason the local test gives.
+		for (const flag of ISOLATION_FLAGS) assert.ok(args.includes(flag), `${label}: missing isolation flag ${flag}`);
+		for (const flag of PODMAN_PINNED_FLAGS) assert.ok(args.includes(flag), `${label}: missing pinned flag ${flag}`);
+		assert.ok(args.includes("--userns=keep-id"), `${label}: keep-id`);
+		assert.ok(args.includes("--user=1234:1234") && args.includes("HOME=/home/pi"), `${label}: --user with HOME beside it`);
+		// EXACTLY ONE network flag, and it is named: a containers.conf `netns = "host"` puts a container launched with
+		// none on the host's network namespace (measured under issue #354).
+		assert.deepEqual(args.filter((a) => a.startsWith("--network")), [network], label);
+		assert.ok(args.includes("-i") && args.includes("-t"), `${label}: interactive`);
+		assert.equal(args[args.indexOf("--entrypoint") + 1], "bash", label);
+		assert.ok(args.includes("--memory=4g") && args.includes("--cpus=2"), label);
+		assert.equal(args.at(-1), "pi-job:pinned", `${label}: the image is still last`);
+		// And it IS the podman job builder's argv for the same spec, so nothing here can drift from a job's.
+		assert.deepEqual(args, buildPodmanRunArgs({ image: "pi-job:pinned", name: "pi-sandbox-gh-1", workspace: "/s/gh-1/workspace", jobDir: "/s/gh-1", user: "1234:1234", relabel: false, workspaceOwned: true, network: over.network ?? null, env: { TERM: "xterm", TMOUT: "1800", HOME: "/home/pi", ...(over.egressEnv ?? {}) }, extraFlags: ["-i", "-t", "--entrypoint", "bash"] }), label);
+	}
+	// No credential reaches it either.
+	const s = buildSandboxRunArgs(podmanShape).join(" ");
+	for (const name of [...MINTED_TOKEN_VARS, ...WORKER_ONLY_SECRET_VARS, "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]) assert.ok(!s.includes(name), name);
+	// SELinux: `:Z` on the retained job dir and the retained clone, by the job path's rule.
+	assert.deepEqual(sandboxMounts(buildSandboxRunArgs({ ...podmanShape, relabel: true })), ["/s/gh-1:/job:ro,Z", "/s/gh-1/workspace:/workspace:Z"]);
+	// A published port with the policy off rides beside the named private network.
+	const published = buildSandboxRunArgs({ ...podmanShape, publish: ["-p", "127.0.0.1:3000:3000"] });
+	assert.ok(published.includes("--network=private") && published.includes("127.0.0.1:3000:3000"));
+});
+
+test("buildSandboxRunArgs refuses a venue with no launcher, and podman without a user (#429)", () => {
+	assert.throws(() => buildSandboxRunArgs({ ...podmanShape, venue: "far" }), /no sandbox launcher for venue "far"/);
+	assert.throws(() => buildSandboxRunArgs({ ...podmanShape, venue: "toString" }), /no sandbox launcher/);
+	assert.throws(() => buildSandboxRunArgs({ ...podmanShape, user: null, home: null }), /no job user/);
+});
+
+/** A spawn that records `<bin> <args>` for EVERY runtime and answers each with `codeFor(bin, args)` (0 by default). */
+function recordingRuntime(calls, codeFor = () => 0) {
+	return (bin, args) => {
+		calls.push([bin, ...args].join(" "));
+		const child = new EventEmitter();
+		queueMicrotask(() => child.emit("close", codeFor(bin, args)));
+		return child;
+	};
+}
+
+const podmanSession = (over = {}) => {
+	const calls = [];
+	const asked = [];
+	const judged = [];
+	const spawn = recordingRuntime(calls);
+	return {
+		calls,
+		asked,
+		judged,
+		opts: {
+			...session,
+			...openable({ backend: "podman", workspace: "/s/gh-1/workspace" }),
+			blessed: ["podman"],
+			backendFloor: { isolation: "enforced" },
+			egress: { armed: true, proxy: "pi-dispatch-egress-proxy" },
+			running: async (o) => (asked.push(o?.bin), []),
+			resolveJobUser: async (o) => (judged.push(o), { user: "1234:1234", home: "/home/pi", relabel: true }),
+			spawnNetwork: spawn,
+			// The REAL launcher over the same recording spawn, so the bin it is handed is the bin that is spawned.
+			launch: (o) => launchSandbox({ ...o, spawnFn: spawn }),
+			...over,
+		},
+	};
+};
+
+test("a podman sandbox never spawns docker: its asks, network, launch and teardown all go through podman (#429)", async () => {
+	const { calls, asked, judged, opts } = podmanSession();
+	const result = await openSandbox(opts);
+	assert.deepEqual(result, { code: 0, error: null });
+	assert.deepEqual(asked, ["podman", "podman"], "both running asks are podman's");
+	assert.ok(calls.length > 0 && calls.every((c) => c.startsWith("podman ")), `nothing but podman: ${calls.join(" | ")}`);
+	assert.deepEqual(calls.slice(0, 2), ["podman network create --internal pi-sandbox-gh-1-net", "podman network connect pi-sandbox-gh-1-net pi-dispatch-egress-proxy"]);
+	const run = calls.find((c) => c.startsWith("podman run "));
+	assert.ok(run.includes("--userns=keep-id") && run.includes("--network=pi-sandbox-gh-1-net") && run.includes("/s/gh-1/workspace:/workspace:Z"), run);
+	assert.deepEqual(calls.slice(-2), ["podman network disconnect -f pi-sandbox-gh-1-net pi-dispatch-egress-proxy", "podman network rm pi-sandbox-gh-1-net"]);
+	// The job-user decision is handed the venue and this process's floor, so it can refuse what a job would be.
+	assert.equal(judged[0].venue, "podman");
+	assert.deepEqual(judged[0].backendFloor, { isolation: "enforced" });
+
+	// Egress off: no network at all, and still podman's argv with its own named private network.
+	const off = podmanSession({ egress: { armed: false, proxy: "p" } });
+	await openSandbox(off.opts);
+	assert.equal(off.calls.length, 1);
+	assert.match(off.calls[0], /^podman run .*--network=private /);
+});
+
+test("a local sandbox never spawns podman, and hands its asks docker's bin (#429)", async () => {
+	const calls = [];
+	const asked = [];
+	const spawn = recordingRuntime(calls);
+	const judged = [];
+	await openSandbox({ ...session, ...openable(), egress: { armed: true, proxy: "p" }, running: async (o) => (asked.push(o?.bin), []), resolveJobUser: async (o) => (judged.push(o.venue), { user: null, home: null }), spawnNetwork: spawn, launch: (o) => launchSandbox({ ...o, spawnFn: spawn }) });
+	assert.deepEqual(asked, ["docker", "docker"]);
+	assert.deepEqual(judged, ["local"]);
+	assert.ok(calls.every((c) => c.startsWith("docker ")), calls.join(" | "));
+	assert.ok(calls.some((c) => c.startsWith("docker run ")));
+	assert.ok(!calls.some((c) => c.includes("keep-id")));
+});
+
+test("a podman sandbox's own lines name podman: attach, the leftover network, the proxy (#429)", async () => {
+	const busy = podmanSession({ running: async () => ["gh-1"] });
+	const r = await openSandbox(busy.opts);
+	assert.equal(r.refused, "already-running");
+	assert.match(r.message, /`podman attach pi-sandbox-gh-1`/);
+
+	const exists = podmanSession({ spawnNetwork: recordingRuntime([], (_bin, args) => (args[1] === "create" ? 1 : 0)) });
+	const left = await openSandbox(exists.opts);
+	assert.equal(left.refused, "egress-network-exists");
+	assert.match(left.message, /\$\(podman network inspect .*podman network disconnect -f .*; podman network rm pi-sandbox-gh-1-net/);
+	assert.doesNotMatch(left.message, /docker/);
+
+	const noProxy = podmanSession({ spawnNetwork: recordingRuntime([], (_bin, args) => (args[1] === "connect" || args[1] === "inspect" ? 1 : 0)) });
+	const failed = await openSandbox(noProxy.opts);
+	assert.equal(failed.refused, "egress-network-failed");
+	assert.match(failed.message, /rootless podman, started as docs\/podman\.md shows/);
+	assert.doesNotMatch(failed.message, /docker compose/);
+
+	const publish = podmanSession({ publish: ["-p", "127.0.0.1:3000:3000"] });
+	const refusedPublish = await openSandbox(publish.opts);
+	assert.equal(refusedPublish.refused, "publish-needs-egress-off");
+	assert.match(refusedPublish.message, /private network \(`--network=private`/);
+
+	// The hook is told the runtime, which is how the CLI and the panel say `podman attach` after a detach.
+	let runtime = null;
+	const told = podmanSession({ egress: { armed: false, proxy: "p" }, beforeLaunch: (o) => (runtime = o.runtime) });
+	await openSandbox(told.opts);
+	assert.equal(runtime, "podman");
+});
+
+test("an UNBLESSED podman run is refused before anything is asked, and never launched under docker (#429)", async () => {
+	for (const blessed of [undefined, ["local"], ["local", "far"]]) {
+		const { calls, asked, judged, opts } = podmanSession({ blessed });
+		const r = await openSandbox(opts);
+		assert.equal(r.refused, "venue-unreachable", JSON.stringify(blessed));
+		assert.match(r.message, /PI_BACKENDS in this process's environment does not bless/);
+		assert.deepEqual([calls, asked, judged], [[], [], []], "no spawn, no ask, no job-user decision");
+	}
+});
+
+test("launchSandbox spawns the bin it is handed, and docker when handed none (#429)", async () => {
+	const calls = [];
+	await launchSandbox({ args: ["run", "x"], bin: "podman", spawnFn: recordingRuntime(calls) });
+	await launchSandbox({ args: ["run", "y"], spawnFn: recordingRuntime(calls) });
+	assert.deepEqual(calls, ["podman run x", "docker run y"]);
+});
+
+test("listRunningSandboxes asks the bin it is handed, and the union across venues fails CLOSED (#429)", async () => {
+	const asked = [];
+	const exec = (answers) => async (bin, args) => (asked.push([bin, ...args.slice(0, 1)].join(" ")), answers[bin]());
+	assert.deepEqual(await listRunningSandboxes({ bin: "podman", execFn: exec({ podman: () => ({ stdout: "pi-sandbox-p-1\n" }) }) }), ["p-1"]);
+	assert.deepEqual(asked, ["podman ps"]);
+
+	const list = (answers) => (o) => listRunningSandboxes({ ...o, execFn: exec(answers) });
+	const both = listRunningSandboxesOn({ venues: ["local", "podman"], list: list({ docker: () => ({ stdout: "pi-sandbox-d-1\npi-sandbox-both\n" }), podman: () => ({ stdout: "pi-sandbox-p-1\npi-sandbox-both\n" }) }) });
+	assert.deepEqual((await both()).sort(), ["both", "d-1", "p-1"]);
+	// One runtime down is NOT "none of its sandboxes are open": the reaper deletes directories on this answer.
+	const podmanDown = listRunningSandboxesOn({ venues: ["local", "podman"], list: list({ docker: () => ({ stdout: "pi-sandbox-d-1\n" }), podman: () => { throw new Error("podman down"); } }) });
+	await assert.rejects(podmanDown, /podman down/);
+	const dockerDown = listRunningSandboxesOn({ venues: ["local", "podman"], list: list({ docker: () => { throw new Error("docker down"); }, podman: () => ({ stdout: "" }) }) });
+	await assert.rejects(dockerDown, /docker down/);
+	// Only the venues handed in are asked.
+	asked.length = 0;
+	await listRunningSandboxesOn({ venues: ["podman"], list: list({ podman: () => ({ stdout: "" }) }) })();
+	assert.deepEqual(asked, ["podman ps"]);
+	assert.deepEqual(sandboxVenues(["far", "podman", "local"]), ["podman", "local"], "blessed order, launcher venues only");
+	assert.deepEqual(sandboxVenues(undefined), []);
+});
+
+test("each venue's network sweeper runs in its own runtime, and the combination keeps both answers (#429)", async () => {
+	// The default runner is bound to the bin: asserted through the one thing the sweeper prints, its `network ls`.
+	const docker = fakeNetDaemon({ nets: { "pi-sandbox-d-net": [] } });
+	const podman = fakeNetDaemon({ nets: { "pi-sandbox-p-net": [] } });
+	const combined = combineSandboxNetworkSweepers([makeSandboxNetworkSweeper({ run: docker.run }), makeSandboxNetworkSweeper({ bin: "podman", run: podman.run })]);
+	const out = await combined({ retained: () => [] });
+	assert.deepEqual(out.swept.map((s) => s.network), ["pi-sandbox-d-net", "pi-sandbox-p-net"]);
+	assert.ok(!docker.calls.some((c) => c.includes("pi-sandbox-p")), "docker never touches podman's network");
+	assert.ok(!podman.calls.some((c) => c.includes("pi-sandbox-d")), "and the reverse");
+	// One runtime's listing failing is said, and the other's pass still runs.
+	const failing = fakeNetDaemon({ fail: { "network ls": "cannot connect" } });
+	const podman2 = fakeNetDaemon({ nets: { "pi-sandbox-p-net": [] } });
+	const half = await combineSandboxNetworkSweepers([makeSandboxNetworkSweeper({ run: failing.run }), makeSandboxNetworkSweeper({ bin: "podman", run: podman2.run })])({ retained: () => [] });
+	assert.equal(half.failed, "network-list-failed");
+	assert.deepEqual(half.swept.map((s) => s.network), ["pi-sandbox-p-net"]);
+	// A single sweeper is handed back as itself, so a one-venue host's reaper gets exactly what it always did.
+	const only = makeSandboxNetworkSweeper({ run: docker.run });
+	assert.equal(combineSandboxNetworkSweepers([only]), only);
+	// And the default runner of a podman sweeper spawns podman: pinned in the source, since running it would spawn.
+	const src = readFileSync(new URL("../src/sandbox.mjs", import.meta.url), "utf8");
+	assert.match(src, /export function makeSandboxNetworkSweeper\(\{ bin = "docker", run = boundedRuntime\(bin\) \} = \{\}\)/);
+	assert.match(src, /execDockerBounded\(args, \{ timeoutMs: 10_000, bin \}\)/);
+});
+
+test("sandboxVenuePolicy reads PI_BACKENDS and PI_BACKEND_FLOOR as the worker does, and throws on a typo (#429)", () => {
+	assert.deepEqual(sandboxVenuePolicy({}), { blessed: ["local"], backendFloor: {} });
+	assert.deepEqual(sandboxVenuePolicy({ PI_BACKENDS: "podman,local", PI_BACKEND_FLOOR: "isolation=enforced" }), { blessed: ["podman", "local"], backendFloor: { isolation: "enforced" } });
+	assert.throws(() => sandboxVenuePolicy({ PI_BACKENDS: "podmn" }), /unknown backend/);
+	assert.throws(() => sandboxVenuePolicy({ PI_BACKEND_FLOOR: "isolation" }));
+	assert.equal(sandboxLauncher("podman").bin, "podman");
+});
+
+describe("decideSandboxJobUser on the podman venue (#429)", () => {
+	const HOME = "/home/op";
+	const USER_MOUNTS = `${HOME}/.config/containers/mounts.conf`;
+	const USER_CONF = `${HOME}/.config/containers/containers.conf`;
+	/** A host fs: `files` maps a path to its text, everything else is ENOENT. */
+	const hostFs = (files = { [USER_MOUNTS]: "" }) => {
+		const miss = (path) => {
+			throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
+		};
+		return {
+			statSync: (path) => (Object.hasOwn(files, path) ? { size: Buffer.byteLength(files[path]) } : miss(path)),
+			readFileSync: (path) => (Object.hasOwn(files, path) ? files[path] : miss(path)),
+			readdirSync: (path) => miss(path),
+		};
+	};
+	const INFO = { rootless: true, serviceIsRemote: false, selinux: true, cgroupVersion: "v2", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1" };
+	const answered = (over = {}) => async () => ({ answered: true, info: { ...INFO, ...over } });
+	const base = { venue: "podman", platform: "linux", euid: 1234, egid: 1234, home: HOME, env: {}, fs: hostFs(), readInfo: answered(), imageCapabilities: async () => ({ ok: true, capabilities: ["anyUid"] }) };
+	const stamped = { image: "pi-job:x", jobUser: { user: "1234:1234", home: "/home/pi" } };
+
+	test("the run's own account opens it as its uid, with keep-id's user and SELinux's relabel", async () => {
+		assert.deepEqual(await decideSandboxJobUser({ ...base, manifest: stamped }), { user: "1234:1234", home: "/home/pi", relabel: true });
+		assert.deepEqual(await decideSandboxJobUser({ ...base, readInfo: answered({ selinux: false }), manifest: stamped }), { user: "1234:1234", home: "/home/pi" });
+		// No stamp: this process's ids, as `local` decides a run from before the stamp.
+		assert.deepEqual(await decideSandboxJobUser({ ...base, manifest: { image: "pi-job:x" } }), { user: "1234:1234", home: "/home/pi", relabel: true });
+	});
+
+	test("refused for what a podman JOB is refused for: rootful, remote, no podman", async () => {
+		const rootful = await decideSandboxJobUser({ ...base, readInfo: answered({ rootless: false }), manifest: stamped });
+		assert.equal(rootful.refused, "job-user-unmappable");
+		assert.match(rootful.message, /podman is not rootless for this account/);
+		const remote = await decideSandboxJobUser({ ...base, readInfo: answered({ serviceIsRemote: true }), manifest: stamped });
+		assert.match(remote.message, /remote service/);
+		const none = await decideSandboxJobUser({ ...base, readInfo: async () => ({ answered: false, reason: "podman-not-found", transient: false }), manifest: stamped });
+		assert.match(none.message, /no podman CLI was found/);
+		const slow = await decideSandboxJobUser({ ...base, readInfo: async () => ({ answered: false, reason: "timeout", transient: true }), manifest: stamped });
+		assert.equal(slow.refused, "job-user-unknown");
+	});
+
+	test("a containers.conf that widens a job refuses the sandbox too, as podman-conf-widens-job (#428)", async () => {
+		for (const text of ['[network]\npasta_options = ["--map-host-loopback", "169.254.1.2"]\n', '[containers]\nannotations = ["run.oci.keep_original_groups=1"]\n']) {
+			const r = await decideSandboxJobUser({ ...base, fs: hostFs({ [USER_MOUNTS]: "", [USER_CONF]: text }), manifest: stamped });
+			assert.equal(r.refused, "podman-conf-widens-job", text);
+			assert.match(r.message, /^Refused: .*containers\.conf sets (pasta_options|annotations)/);
+		}
+		// With no floor at all, as a job is.
+		const r = await decideSandboxJobUser({ ...base, backendFloor: {}, fs: hostFs({ [USER_MOUNTS]: "", [USER_CONF]: "[network]\npasta_options = []\n" }), manifest: stamped });
+		assert.equal(r.refused, "podman-conf-widens-job");
+		// A refused identity names its own fix first, exactly as for a job.
+		const both = await decideSandboxJobUser({ ...base, readInfo: answered({ rootless: false }), fs: hostFs({ [USER_MOUNTS]: "", [USER_CONF]: "[network]\npasta_options = []\n" }), manifest: stamped });
+		assert.equal(both.refused, "job-user-unmappable");
+	});
+
+	test("the observations are judged against the floor exactly as a job's are", async () => {
+		const floor = { isolation: "enforced" };
+		const undelegated = await decideSandboxJobUser({ ...base, backendFloor: floor, readInfo: answered({ controllers: ["cpu"] }), manifest: stamped });
+		assert.equal(undelegated.refused, "backend-floor");
+		assert.match(undelegated.message, /PI_BACKEND_FLOOR asks for something this host is not observed to provide/);
+		assert.ok((await decideSandboxJobUser({ ...base, backendFloor: floor, manifest: stamped })).user, "a delegated host passes the same floor");
+		assert.ok((await decideSandboxJobUser({ ...base, readInfo: answered({ controllers: ["cpu"] }), manifest: stamped })).user, "no floor, nothing observed refuses");
+	});
+
+	test("a run of another account, sudo, macOS and a malformed stamp refuse before anything is created", async () => {
+		const other = await decideSandboxJobUser({ ...base, manifest: { image: "pi-job:x", jobUser: { user: "1300:1300", home: "/home/pi" } } });
+		assert.equal(other.refused, "job-user-unmappable");
+		assert.match(other.message, /ran as 1300:1300, .* runs as the account that opens it \(1234:1234\) under keep-id/);
+		const image = await decideSandboxJobUser({ ...base, manifest: { image: "pi-job:x", jobUser: { user: null, home: null } } });
+		assert.match(image.message, /as the image's own user, which no podman run does/);
+		let read = 0;
+		const counting = async () => (read++, { answered: true, info: INFO });
+		const sudo = await decideSandboxJobUser({ ...base, euid: 0, egid: 0, readInfo: counting, manifest: stamped });
+		assert.match(sudo.message, /open it as the worker's own account/);
+		const mac = await decideSandboxJobUser({ ...base, platform: "darwin", readInfo: counting, manifest: stamped });
+		assert.match(mac.message, /runs only on Linux/);
+		assert.equal(read, 0, "neither asks podman");
+		assert.equal((await decideSandboxJobUser({ ...base, manifest: { image: "pi-job:x", jobUser: "1234:1234" } })).refused, "job-user-stamp-invalid");
+	});
+
+	test("the retained image must declare anyUid in THIS account's store, unless the uid is the image's own", async () => {
+		const bare = await decideSandboxJobUser({ ...base, imageCapabilities: async () => ({ ok: true, capabilities: [] }), manifest: stamped });
+		assert.equal(bare.refused, "job-image-any-uid-unsupported");
+		const gone = await decideSandboxJobUser({ ...base, imageCapabilities: async () => ({ missing: "pi-job:x" }), manifest: stamped });
+		assert.equal(gone.refused, "job-user-image");
+		const own = { image: "pi-job:x", jobUser: { user: "1001:1001", home: "/home/pi" } };
+		assert.deepEqual(await decideSandboxJobUser({ ...base, euid: 1001, egid: 1001, imageCapabilities: async () => ({ ok: true, capabilities: [] }), manifest: own }), { user: "1001:1001", home: "/home/pi", relabel: true });
+		const rootGroup = await decideSandboxJobUser({ ...base, egid: 0, manifest: { image: "pi-job:x" } });
+		assert.equal(rootGroup.refused, "job-user-unmappable");
+	});
+
+	test("a local run is still decided by the local rules, never by podman info", async () => {
+		let asked = false;
+		const r = await decideSandboxJobUser({ platform: "darwin", readInfo: async () => ((asked = true), { answered: true, info: INFO }), manifest: stamped });
+		assert.deepEqual(r, { user: null, home: null });
+		assert.equal(asked, false);
+	});
 });

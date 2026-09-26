@@ -49,6 +49,7 @@ test("a local run, and one retained before venues were recorded, are still re-op
     pinned: false,
     expiresIn: "23h",
     egress: { armed: false, proxy: "pi-dispatch-egress-proxy", source: "this shell" },
+    runtime: "docker",
   });
   const old = { sandboxDir: retainedRoot({}), sandboxRetentionHours: 24 };
   assert.equal(mod.readSandboxInfo(old, "gh-1", { now: () => NOW, env: {} }).retained, true);
@@ -274,4 +275,62 @@ test("the sandbox session's own terminal writes are scrubbed, manifest image inc
 	// PER LINE and not by deleting them: the messages carry deliberate newlines, and turning those into
 	// spaces would run five separate notices together.
 	assert.ok(all.split("\n").length > 1, "and the writer's own line breaks survive the scrub");
+});
+
+// --- issue #429: a run on the native podman venue ---------------------------------------------------------------
+
+test("the panel offers a podman run only where ITS OWN PI_BACKENDS blesses podman, and says which variable (#429)", () => {
+  const paths = { sandboxDir: retainedRoot({ backend: "podman" }), sandboxRetentionHours: 24 };
+  // OQ-038: the panel reads PI_BACKENDS from the environment pi was started in. Without it that is `local` alone.
+  const unset = mod.readSandboxInfo(paths, "gh-1", { now: () => NOW, env: {} });
+  assert.equal(unset.retained, false);
+  assert.equal(unset.reason, "not reopenable here (PI_BACKENDS lacks podman)");
+  const blessed = mod.readSandboxInfo(paths, "gh-1", { now: () => NOW, env: { PI_BACKENDS: "podman" } });
+  assert.equal(blessed.retained, true);
+  assert.equal(blessed.runtime, "podman", "so the pane can say where an egress-off shell lands");
+  const typo = mod.readSandboxInfo(paths, "gh-1", { now: () => NOW, env: { PI_BACKENDS: "podmn" } });
+  assert.equal(typo.retained, false);
+  assert.match(typo.reason, /unreadable here/);
+  // A far venue keeps its own words: no launcher, so no variable would help.
+  assert.match(mod.readSandboxInfo({ sandboxDir: retainedRoot({ backend: "far" }), sandboxRetentionHours: 24 }, "gh-1", { now: () => NOW, env: { PI_BACKENDS: "podman" } }).reason, /ran on far/);
+});
+
+test("a podman run pressed from a panel WITHOUT podman blessed is refused, and nothing is spawned under docker (#429)", async () => {
+  const paths = { sandboxDir: retainedRoot({ backend: "podman" }), sandboxRetentionHours: 24, sandboxIdleMinutes: 30 };
+  const bins = [];
+  const { io, written, docker, launched } = panelIo({ launch: async (o) => (bins.push(o.bin), { code: 0 }) });
+  await mod.openSandboxSession(paths, "gh-1", io);
+  assert.match(written.join(""), /cannot open a sandbox for gh-1: .*"podman" backend, which PI_BACKENDS in this process's environment does not bless/);
+  assert.deepEqual([launched, bins, docker], [[], [], []], "no launch, no network, under any runtime");
+
+  const typo = panelIo({ env: { PI_BACKENDS: "podmn" } });
+  await mod.openSandboxSession(paths, "gh-1", typo.io);
+  assert.match(typo.written.join(""), /unknown backend "podmn"/);
+  assert.deepEqual(typo.launched, []);
+});
+
+test("a podman run opened from a panel that blesses podman runs through podman alone (#429)", async () => {
+  const paths = { sandboxDir: retainedRoot({ backend: "podman" }), sandboxRetentionHours: 24, sandboxIdleMinutes: 30 };
+  const spawned = [];
+  const bins = [];
+  const judged = [];
+  const { io, launched, written } = panelIo({
+    env: { PI_BACKENDS: "local,podman", PI_BACKEND_FLOOR: "isolation=enforced" },
+    running: async (o) => (bins.push(`running:${o?.bin}`), []),
+    launch: async (o) => (bins.push(`launch:${o.bin}`), launched.push(o.args), { code: null, error: new Error("spawn podman ENOENT") }),
+    resolveJobUser: async (o) => (judged.push(o), { user: "1234:1234", home: "/home/pi" }),
+    spawnNetwork: (cmd, args) => {
+      spawned.push(`${cmd} ${args.join(" ")}`);
+      const child = new EventEmitter();
+      queueMicrotask(() => child.emit("close", 0));
+      return child;
+    },
+  });
+  await mod.openSandboxSession(paths, "gh-1", io);
+  assert.deepEqual(bins, ["running:podman", "launch:podman"]);
+  assert.ok(spawned.length > 0 && spawned.every((c) => c.startsWith("podman ")), spawned.join(" | "));
+  assert.ok(launched[0].includes("--userns=keep-id") && launched[0].includes("--user=1234:1234"));
+  assert.equal(judged[0].venue, "podman");
+  assert.deepEqual(judged[0].backendFloor, { isolation: "enforced" }, "the panel's own floor reaches the podman judge");
+  assert.match(written.join(""), /could not start podman: spawn podman ENOENT/);
 });

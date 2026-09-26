@@ -660,3 +660,23 @@ test("through the processor, a refused podman identity is refused before the ima
 		assert.deepEqual(spawned, [], `${code}: no podman spawn`);
 	}
 });
+
+test("the bundle's observationPreflight answers exactly what judgePodmanVenue answers, the sandbox's judge (#429)", { skip }, async () => {
+	// A sandbox on this venue is refused through `judgePodmanVenue`, and a job through the bundle: the same answer for
+	// the same inputs is what "refused for what a job is refused for" means, so it is asked across every arm.
+	const floor = { isolation: ENFORCED, credentialTransit: ENFORCED, mountSet: ENFORCED };
+	const conf = `${HOME}/.config/containers/containers.conf`;
+	const cases = [
+		["clean", answered(), clean(), floor],
+		["rootful", answered({ rootless: false }), clean(), floor],
+		["widened", answered(), fakeFs({ files: { [USER_MOUNTS]: "", [conf]: MEASURED.annotations } }), floor],
+		["undelegated", answered({ controllers: ["cpu"] }), clean(), floor],
+		["unanswered", { answered: false, reason: "timeout", transient: true }, clean(), floor],
+		["no floor", answered({ controllers: [] }), clean(), {}],
+	];
+	for (const [label, read, fs, backendFloor] of cases) {
+		const job = await bundle({ readInfo: async () => read, fs, backendFloor }).observationPreflight(JOB);
+		const judged = mod.judgePodmanVenue({ read, platform: "linux", euid: 1234, egid: 1234, fs, home: HOME, env: {}, backendFloor });
+		assert.deepEqual(judged, job, label);
+	}
+});

@@ -374,9 +374,12 @@ sweep runs against it. Two things follow that are worth knowing before you do it
 - **The boot sweep of this host's scope claims does not run** without `local`. That sweep frees a claim only once
   the host is proven to hold no job containers, and a host that dropped `local` may still hold Docker ones from
   before, which no other venue's reaper lists. A stale claim then waits out its TTL instead.
-- **Retained sandbox directories are not swept** without `local`, because the sweep first asks the docker CLI
-  which sandboxes are open, and deleting a directory under an open shell is the mistake it exists to avoid. The
-  worker logs `sandbox_reaper_skipped` naming why, at boot and on every periodic sweep.
+- **Retained sandbox directories are swept only through a runtime a sandbox opens on**: `local` (the docker CLI) or
+  `podman` (this account's rootless Podman). The sweep first asks each blessed one which sandboxes are open, and
+  deleting a directory under an open shell is the mistake it exists to avoid, so with neither blessed it does not
+  run and the worker logs `sandbox_reaper_skipped` naming why, at boot and on every periodic sweep. A docker
+  sandbox left open from before `local` was dropped is not in a podman-only listing; close it before you drop
+  `local`.
 
 ## What is deliberately not yours to decide
 
@@ -385,10 +388,11 @@ sweep runs against it. Two things follow that are worth knowing before you do it
 - **`PI_BACKEND_FLOOR` bounds you.** An operator can require a minimum of every blessed backend, and a floor
   naming a switched-off control, or a guarantee this host is not observed to provide, refuses at boot (and,
   for an observation, before each job).
-- **The sandbox is local-only, per job.** `pi-dispatch sandbox` and the panel open a shell on this host's
-  daemon against a retained job directory, so a run whose retained record names another backend is refused
-  by name. That refusal is per run, not per deployment: blessing a remote venue does not stop local runs
-  from reopening.
+- **The sandbox runs on this host, per job.** `pi-dispatch sandbox` and the panel open a shell against a
+  retained job directory in the runtime that ran it, and only `local` and `podman` have a launcher, so a run
+  whose retained record names another backend is refused by name, as is one on a venue the shell's own
+  `PI_BACKENDS` does not bless. That refusal is per run, not per deployment: blessing a remote venue does not
+  stop local runs from reopening. Your adapter supplies nothing for it, and gets no sandbox.
 - **Every job's venue is recorded, and your adapter supplies nothing for it.** The run record's `backend`,
   the session store's venue stamp and the sandbox manifest all record the venue the registry resolved, so a
   job that landed on the wrong venue shows it, and a resumed transcript is refused to a venue that did not

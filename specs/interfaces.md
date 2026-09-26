@@ -1614,36 +1614,64 @@ contract governs the argv of one container, this governs the estate that argv jo
 
 ## INT-SANDBOX-CONTRACT
 
-**LOCAL-ONLY, PER JOB (issues #227, #277).** A sandbox opens a shell on THIS host's docker daemon against
-the job's retained directory, so it cannot reach a job that ran in another venue: `manifest.workspace` is a
-path on this machine, which for such a job either does not exist or exists and reproduces a run from the
-wrong host, silently. `buildSandboxRunArgs` is a second container producer outside the `runContainer` seam
-and is hard-wired to the local CLI. **The manifest records the venue the job resolved to, and
-`resolveSandbox` refuses a run whose venue this host does not hold, by name** (`venue-unreachable`) and
-AHEAD of the image and workspace checks, whose failures would otherwise be the symptom reported instead of
-the cause. Both entry points, the CLI and the admin panel's RUN_DETAIL, reach it through `openSandbox`
-(below), so the refusal holds for both; the panel also asks `sandboxVenueRefusal` before it advertises the
-key. **Held means the local adapter by name** (`DEFAULT_BACKEND`, the local bundle's own
-name), not "any venue declaring `remote: false`": the launcher is the docker CLI, so a non-remote venue on
-another runtime would pass that and be reopened under docker. A name this build does not know is refused. A
+**THE HOST'S BLESSED VENUES, PER JOB (issues #227, #277, #429).** A sandbox opens a shell on THIS host, in the
+runtime the job ran in, against the job's retained directory, so it cannot reach a job that ran in another venue:
+`manifest.workspace` is a path on this machine, which for such a job either does not exist or exists and reproduces
+a run from the wrong host, silently. `buildSandboxRunArgs` is a second container producer outside the
+`runContainer` seam, and it launches through a table of the venues that run on this host, `SANDBOX_LAUNCHERS`:
+`local` through the docker CLI with `buildDockerRunArgs`, `podman` through this account's `podman` CLI with
+`buildPodmanRunArgs`, the same CLI and builder each venue's job bundle is built with. **The manifest records the
+venue the job resolved to, and `resolveSandbox` refuses a run whose venue this host does not hold, by name**
+(`venue-unreachable`) and AHEAD of the image and workspace checks, whose failures would otherwise be the symptom
+reported instead of the cause. Both entry points, the CLI and the admin panel's RUN_DETAIL, reach it through
+`openSandbox` (below), so the refusal holds for both; the panel also asks `sandboxVenueRefusal` before it
+advertises the key. **Held means a venue with a launcher row, by name, that the opener's own `PI_BACKENDS`
+blesses** (issue #429), not "any venue declaring `remote: false`": a non-remote venue on a third runtime would pass
+that and be reopened under one of these two. The blessing is read from the OPENER's process (the CLI's
+`loadConfig`, the panel's own environment through `sandboxVenuePolicy`), never a deployment's `.env` (`OQ-038`),
+and it defaults to `local` alone as `PI_BACKENDS` does, so an opener that sets nothing refuses and admits exactly
+what it did before #429. It is required for two reasons: a host that leaves a venue out has said it does not run
+that runtime, and the retention reaper asks only the blessed runtimes which sandboxes are open, so a sandbox in an
+unblessed one is invisible to the sweep that deletes its directory. A name this build does not know is refused. A
 manifest with no `backend` key predates venue attribution and reads as `local`; a key that is present but
 not a non-empty string is refused, because a venue that was never known is not a local one. This REPLACES
 a deployment-wide refusal (every sandbox refused when any blessed venue was remote), which the command
 needed only while it could not learn a job's venue, and which the panel never applied.
 
-**operator → docker daemon.** A SIBLING of `INT-CONTAINER-RUNTIME-CONTRACT`, never an amendment to it.
+**Every runtime step is the run's venue's** (issue #429): the running asks (`listRunningSandboxes` with that
+venue's `bin`), the job-user decision, the argv, the session network's creation, the launch and the network's
+removal, and the operator lines (`podman attach`, the leftover network's commands). A `podman` run is never
+launched under docker and a `local` run never under podman.
+
+**operator → container runtime** (the docker daemon for `local`, this account's rootless Podman for `podman`). A SIBLING of `INT-CONTAINER-RUNTIME-CONTRACT`, never an amendment to it.
 That contract governs the container the harness launches against untrusted input and says **"No TTY
 (`-it` absent)"**; this one governs a container an operator launches with no agent in it. IDs are
 permanent addresses, and the repo has made this call once already — `INT-GITLAB-PAYLOAD-SUBSET` is a
 sibling rather than an extension of the GitHub one for the same reason.
 
 - **Contract**:
-  - **The argv is built by the SAME builder.** `buildSandboxRunArgs` calls `buildDockerRunArgs` through
-    its `extraFlags` seam, so `ISOLATION_FLAGS`, `--memory` and `--cpus` reach this container **by
-    construction**: `--pull=never --rm --init --cap-drop=ALL --security-opt no-new-privileges
-    --pids-limit=512 --shm-size=1g --memory=4g --cpus=2`. This is the load-bearing sentence of the whole
-    contract. A leaner hand-written argv here would be a second place for the boundary to live, and the
-    copy that did not get the next flag would be the one nobody was looking at.
+  - **The argv is built by the SAME builder as the venue's jobs.** `buildSandboxRunArgs` calls the venue's
+    job builder (`buildDockerRunArgs` on `local`, `buildPodmanRunArgs` on `podman`) through its `extraFlags`
+    seam, so `ISOLATION_FLAGS`, `--memory` and `--cpus` reach this container **by construction**:
+    `--pull=never --rm --init --cap-drop=ALL --security-opt no-new-privileges --pids-limit=512 --shm-size=1g
+    --memory=4g --cpus=2`. On `podman` the same builder adds what it adds to a job: `--user=<uid>:<gid>`,
+    `--userns=keep-id` and `PODMAN_PINNED_FLAGS`, and a network flag ALWAYS, the session's own network with
+    egress on and `--network=private` with it off, because a containers.conf `netns = "host"` puts a container
+    launched with no `--network` on the host's network namespace. This is the load-bearing sentence of the
+    whole contract. A leaner hand-written argv here would be a second place for the boundary to live, and the
+    copy that did not get the next flag would be the one nobody was looking at. The `local` argv is
+    byte-identical to the one before #429, pinned by literals.
+  - **On `podman`, who the shell runs as and what refuses it** (issue #429). Always the OPENING account's
+    `<euid>:<egid>` with `HOME=/home/pi`, never the image's user: keep-id maps the account that runs `podman`,
+    and the retained image is in that account's own store. A stamp naming another uid, or the image's own user,
+    is refused (`job-user-unmappable`) with the account to use, never reopened as that uid; `sudo` and any
+    platform but Linux are refused before `podman info` is asked. Then, by the job's own function
+    (`judgePodmanVenue`, which the bundle's `observationPreflight` also answers through) and in the job's order:
+    an unmappable identity (no podman, a remote service, rootful), a containers.conf that sets
+    `pasta_options`, `network_cmd_options` or `annotations` (`podman-conf-widens-job`), and observations that
+    miss the opener's `PI_BACKEND_FLOOR` (`backend-floor`, or `podman-unobserved` when the miss rests on an
+    unanswered read). Then `anyUid` in this account's store unless the uid is 1001, and a primary group of 0.
+    `:Z` follows `podman info`'s `selinuxEnabled`, as a job's does. All of it before any network is created.
   - **Adds exactly**: `-i -t --entrypoint bash`, and `-p 127.0.0.1:<host>:<container>` per `--publish`. When the
     run had a job user (issue #341) also `--user=<uid>:<gid>` and `-e HOME=/home/pi`: the uid comes from the
     manifest's `jobUser` stamp, because that uid owns the retained files (so `sudo pi-dispatch sandbox` reopens a
@@ -1749,14 +1777,20 @@ sibling rather than an extension of the GitHub one for the same reason.
     about an append-once log file. An operator working inside a resurrected sandbox writes into the
     directory, so mtime would keep moving and the window would never close — for exactly the directories
     most likely to be large.
-  - **The sweep asks docker first.** `listRunningSandboxes` yields the job ids of live sandboxes and
+  - **The sweep asks the runtimes first.** `listRunningSandboxes` yields the job ids of live sandboxes and
     **throws** when docker cannot be reached, because "none are running" and "I could not find out" must
     not arrive as the same empty array in front of a `rm -rf`. A failed lookup skips the whole sweep — one
     sweep, not the feature: the lookup is re-issued on every tick and the reaper holds no state between
     calls, so a docker outage costs one interval of retention overshoot rather than latching it off.
+    Since issue #429 it asks EVERY blessed venue a sandbox opens on, each through its own CLI
+    (`listRunningSandboxesOn`), and one that cannot be asked throws for the whole listing: a docker outage
+    beside an answering podman must not read as "none of docker's are open". With no such venue blessed the
+    listing throws and the pass is skipped, as it was with `local` unblessed.
   - **The same sweep reclaims the session NETWORK, on the directory's clock** (issue #337). After the
     directory pass, `reapSandboxes` hands an injected `sweepNetworks` the ids it must keep and a closure that
-    re-reads the retained directories. INJECTED rather than imported, because `sandbox.mjs` imports
+    re-reads the retained directories; one sweeper per blessed sandbox venue, each listing, inspecting and
+    removing in its own runtime (`combineSandboxNetworkSweepers`, issue #429; a single venue hands the reaper
+    its sweeper unchanged). INJECTED rather than imported, because `sandbox.mjs` imports
     `readManifest` from `sandbox-store.mjs` and the other direction would be a cycle; it also keeps
     `sandbox-store.mjs` docker-free in its own tests. The sweeper lists `pi-sandbox-` networks and parses each against the
     shape `networkNameFor` builds, because `--filter name=` is a SUBSTRING match and the listing is therefore
@@ -1810,7 +1844,10 @@ sibling rather than an extension of the GitHub one for the same reason.
   `DES-SANDBOX-IS-A-FRESH-CONTAINER`
 - **Acceptance**: The sandbox argv contains every member of `ISOLATION_FLAGS` (asserted against the
   imported array, not a copy), contains `-i`, `-t` and `--entrypoint bash`, ends with the image, and
-  contains no member of `MINTED_TOKEN_VARS` and no provider key variable. The container name contains no
+  contains no member of `MINTED_TOKEN_VARS` and no provider key variable. On `podman` it also contains every
+  member of `PODMAN_PINNED_FLAGS` (imported likewise), `--userns=keep-id`, `--user=` and exactly one `--network=`
+  whether or not egress is armed, and is spawned by `podman` alone: a podman session spawns no `docker` and a local
+  one no `podman`, network, launch and teardown included. The container name contains no
   `pi-job-`. `--publish 3000` yields `127.0.0.1:3000:3000` and an explicit bind address is refused, which is about the
   ARGV and stays true; with an egress network in the same argv that pairing is refused twice, by
   `openSandbox` returning `publish-needs-egress-off` before it creates or asks anything, and by
@@ -1838,8 +1875,8 @@ sibling rather than an extension of the GitHub one for the same reason.
   `--network=pi-sandbox-<jobId>-net` and the four proxy variables, and **still no credential** -- a proxy
   URL is not one, and `buildContainerEnv` is still not reused here. Given `PI_EGRESS=0`, the argv is
   byte-identical to one built before `REQ-EGRESS-ALLOWLIST` existed. Given a manifest whose `backend` names a
-  venue other than `local`, or names nothing, `resolveSandbox` refuses it as `venue-unreachable` before the
-  image and workspace checks, the CLI exits 1 naming the venue (or saying none is recorded) and launches
+  venue with no sandbox launcher, one the opener's `PI_BACKENDS` does not bless, or nothing, `resolveSandbox`
+  refuses it as `venue-unreachable` before the image and workspace checks, and before anything is spawned, the CLI exits 1 naming the venue (or saying none is recorded) and launches
   nothing, the panel's `readSandboxInfo` reports it not re-openable, and `--list` shows it without time left; given a manifest with
   no `backend` key, it resolves as a local run did before. Given the admin panel's RUN_DETAIL entry point
   with egress armed, the argv carries `--network=pi-sandbox-<jobId>-net` and the proxy variables, the network
@@ -4775,3 +4812,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-26 | Issue #428. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, the pinned-namespaces bullet: the network's options are no longer an open residual but refused, since no argv pins them (a conf `-T` survives `pasta:--map-host-loopback,none`, measured); a containers.conf setting `pasta_options`, `network_cmd_options` or `annotations` refuses every podman job as `podman-conf-widens-job` and the boot where `podman` is the default. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the rules bullet: the proxy's first rule now denies loopback, link-local and `10.0.2.2` destinations, as defence in depth. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `podman-conf-widens-job` joins the `reason` enum, under `outcome: "policy"` with `budgetReserved: false`; no new outcome. **`INT-LIVE-PROBE-CONTRACT` UNCHANGED, checked**: doctor reads the conf files with no spawn, and a refused venue runs no live probe, as for an identity refusal. |
 | 2026-09-26 | Issue #428, review round 1. **`INT-EGRESS-POLICY-CONTRACT` AMENDED** again, the rules bullet and the carries-everything sentence: the first rule is now `http_access deny allowed to_host_local`, because a bare `deny to_host_local` made squid resolve EVERY name a job asked for, listed or not (measured with debug_options 78,3), a DNS channel out of every egress-armed job on every venue; `::/128` joins the list; the rule is stated as covering only FIXED addresses (`--map-host-loopback <address>`, slirp4netns's `cidr=` and `--map-gw` move the host); and "there is no address-based rule anywhere" becomes "no address-based rule ALLOWS anything", which the previous row left contradicting its own bullet. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED** again, the pinned-namespaces bullet: `env` joins the refused keys, and so does a file spelled so the check cannot read it. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: a transient conf read is retried, never recorded as `podman-conf-widens-job`. |
 | 2026-09-26 | Issue #428, review round 2. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the allowlist bullet: the ACL is `dstdomain -n`, since without `-n` squid reverse-resolved every unlisted IP-literal request (a PTR query per literal, measured), a DNS channel of the same class as round 1's; with it the request's host is compared as written, so a literal is refused unless the list names that literal. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: a host file read failing for a moment is a retry (`container-never-started` on the thrown attempt), never a new reason. |
+| 2026-09-26 | Issue #429. **`INT-SANDBOX-CONTRACT` AMENDED**: LOCAL-ONLY becomes THE HOST'S BLESSED VENUES. A sandbox reopens a run in the runtime that ran it, through `SANDBOX_LAUNCHERS` (`local` with the docker CLI and `buildDockerRunArgs`, `podman` with the `podman` CLI and `buildPodmanRunArgs`, the pairs each job bundle is built with), and only where the opener's own `PI_BACKENDS` blesses that venue; the default is `local` alone, so an opener that sets nothing refuses and admits what it did. Every runtime step goes through the run's venue's CLI: the running asks, the network's creation and removal, the launch, and the lines an operator reads (`podman attach`). On `podman` the argv is a podman job's (keep-id, `--user`, `PODMAN_PINNED_FLAGS`, and a network flag always, `--network=private` with egress off), the shell runs as the opening account, a stamp naming another uid is refused rather than reopened as that uid, and the venue is refused for what a job is, in the job's order, through the job's own function (`judgePodmanVenue`): identity, `podman-conf-widens-job`, then the observations against the opener's `PI_BACKEND_FLOOR`. The retention sweep asks every blessed sandbox runtime which sandboxes are open and fails closed when one cannot answer, and sweeps each runtime's session networks with that runtime's CLI. The acceptance names both flag arrays. The `local` argv is byte-identical to before, pinned by literals. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no job flag moved; the sandbox reuses the podman builder as it is. **`INT-EGRESS-POLICY-CONTRACT` UNCHANGED, checked**: the per-sandbox network keeps its name and its `--internal` creation, now in the run's runtime. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: a sandbox's refusals (`backend-floor` and `podman-unobserved`, new, and `podman-conf-widens-job`, the job's own token reused) are returned to the operator who opened it and are never written to a run record. |

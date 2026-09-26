@@ -2582,7 +2582,9 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
       const named = proxyName(sandbox.egress.proxy);
       // "egress off" alone reads as "no network at all", and it is the opposite: `PI_EGRESS=0` omits
       // `--network` entirely, so the shell lands on docker's default bridge with the whole internet.
-      const posture = sandbox.egress.malformed ? "egress unreadable" : sandbox.egress.armed ? `egress on via ${named}` : "egress off (docker's default bridge)";
+      // On the podman venue (issue #429) an egress-off shell gets the job's own `--network=private`, not a bridge.
+      const offLands = sandbox.runtime === "podman" ? "podman's private network" : "docker's default bridge";
+      const posture = sandbox.egress.malformed ? "egress unreadable" : sandbox.egress.armed ? `egress on via ${named}` : `egress off (${offLands})`;
       out.push(kv("", posture, sandbox.egress.malformed ? "error" : "text"));
       out.push(kv("", "read from this shell, not the deployment", "dim"));
     }

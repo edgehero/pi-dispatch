@@ -1697,8 +1697,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   that removed its directory has run, `docker network ls` no longer lists that run's session network; given
   a run whose container exists but has never started, that network is kept and the worker log names it. Given a job that persisted a
   session, no transcript exists anywhere under the retention root. Given a run whose manifest names a venue
-  other than `local`, both the CLI and the panel refuse to open it, naming the venue, and `--list` does not
-  show it as re-openable; given a run retained before venues were recorded, it opens as before.
+  the sandbox has no launcher for (any but `local` and `podman`), or one the opener's own `PI_BACKENDS` does not
+  bless, both the CLI and the panel refuse to open it, naming the venue, and `--list` does not show it as
+  re-openable; given a run retained before venues were recorded, it opens as a `local` run does. Given a `podman`
+  run on a host whose `PI_BACKENDS` names podman, it opens through the `podman` CLI and nothing else, as the
+  opening account's uid under `--userns=keep-id` (issue #429).
 
 ## REQ-REPLICA-RUNS
 
@@ -2176,6 +2179,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-26 | Issue #429. **`REQ-RESURRECTABLE-SANDBOX` AMENDED**, the Acceptance only: a run is refused when its venue has no sandbox launcher or when the opener's own `PI_BACKENDS` does not bless it, where it used to be refused for any venue but `local`; a `podman` run on a host that blesses podman opens through the `podman` CLI only, as the opening account under keep-id. The Scope's "a venue this host holds" is UNCHANGED, checked: it already said held rather than local, and "held" is now the launcher and the blessing. **`REQ-EGRESS-ALLOWLIST` UNCHANGED, checked**: a podman sandbox joins the same kind of `--internal` session network with egress on, created in podman, and names `--network=private` with it off. |
 | 2026-09-26 | Issue #428, review round 2. **`REQ-EGRESS-ALLOWLIST` AMENDED**, the Acceptance again: an unlisted request costs no DNS query, REVERSE included. The allowlist ACL did a PTR lookup for every unlisted IP-literal request (measured), a second DNS channel out of the same class as round 1's; it is now `dstdomain -n`. The Statement is UNCHANGED, checked. |
 | 2026-09-26 | Issue #428, review round 1. **`REQ-EGRESS-ALLOWLIST` AMENDED**, the Acceptance again: the address deny covers this host's FIXED loopback and link-local addresses (a host mapped elsewhere is the podman venue's refusal to close, not the proxy's), and the proxy resolves no unlisted name, since the first form of the rule resolved every name asked for (measured), a DNS channel out. The Statement is UNCHANGED, checked. |
 | 2026-09-26 | Issue #428. **`REQ-EGRESS-ALLOWLIST` AMENDED**, the Acceptance only: a listed name that resolves to this host's loopback or link-local addresses is refused by the proxy too. The proxy's first rule now denies those destinations (and slirp4netns's `10.0.2.2`), because on rootless Podman an account's containers.conf can map the host's loopback into the proxy's own network (measured). The Statement is UNCHANGED, checked: "nothing else beyond this host" bounds what lies OUTSIDE this host, and what a job reaches on the host itself stays the residual `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` names; the deny narrows the proxy's side of it, and the podman venue's refusal of a widening containers.conf (`DES-PODMAN-NATIVE-ROOTLESS-BACKEND`) is the closure. No other requirement names the podman venue, so none changes. |

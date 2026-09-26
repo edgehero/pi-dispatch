@@ -123,7 +123,7 @@ import { COSTS_WINDOWS, costsSinceMs, foldCosts, foldTriggerCosts, repoOfTarget,
 import { getPricedModel, isZeroRated, listPricedModels, piAiVersion, reprice } from "@edgehero/pi-dispatch/pricing";
 import { clipData, scrubControls, scrubControlsPerLine, setGlyphs } from "./panel.mjs";
 import { gateDialogs } from "./dialog-gate.mjs";
-import { openSandbox, sandboxEgress, sandboxSyncRefusal } from "@edgehero/pi-dispatch/sandbox";
+import { openSandbox, sandboxEgress, sandboxLauncher, sandboxSyncRefusal, sandboxVenueOf, sandboxVenuePolicy } from "@edgehero/pi-dispatch/sandbox";
 import { readManifest } from "@edgehero/pi-dispatch/sandbox-store";
 import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf } from "./render.mjs";
 import { makeDashboard, createDashboardDeps } from "./dashboard.ts";
@@ -1788,26 +1788,45 @@ export function readSandboxInfo(paths: any, jobId: string, { now = Date.now, env
   // The MESSAGE is this pane's own, not the refusal's: `resolveSandbox` names the workspace path, and
   // the rule here is a retention state and never a path, because a manifest path embeds an account name
   // on Windows and this view renders beside PII-free record fields.
-  const refusal = sandboxSyncRefusal({ jobId, manifest });
+  //
+  // WHICH VENUES OPEN HERE is this shell's `PI_BACKENDS` (issue #429), read through the worker's own parser exactly as
+  // `openSandboxSession` will read it when `b` is pressed, and never the deployment's (`OQ-038`). A panel started
+  // without it sees `local` alone, so a podman run is NOT offered here rather than offered and then launched under
+  // docker: the launcher is the run's own venue's, and an unblessed venue is refused before anything is asked. A
+  // malformed value is its own state, as a malformed `PI_EGRESS` is: the key press would refuse, so neither is offered.
+  let policy;
+  try {
+    policy = sandboxVenuePolicy(env);
+  } catch {
+    return { retained: false, reason: "not reopenable (PI_BACKENDS or PI_BACKEND_FLOOR unreadable here)" };
+  }
+  const refusal = sandboxSyncRefusal({ jobId, manifest, blessed: policy.blessed });
   if (refusal) {
     const named = typeof manifest.backend === "string" && manifest.backend !== "";
+    // A venue this build CAN open, left out of this shell's PI_BACKENDS: the one reason here an operator fixes in
+    // their own shell, so it says which variable. Kept under the pane's 53 columns.
+    const unblessed = named && sandboxLauncher(manifest.backend) !== null;
     const reason =
       refusal.refused === "no-image"
         ? "not reopenable (the manifest names no image)"
         : refusal.refused === "workspace-gone"
           ? "not reopenable (the workspace has moved or been deleted)"
-          : named
-            ? `not reopenable here (ran on ${manifest.backend})`
-            : "not reopenable (no venue recorded)";
+          : unblessed
+            ? `not reopenable here (PI_BACKENDS lacks ${manifest.backend})`
+            : named
+              ? `not reopenable here (ran on ${manifest.backend})`
+              : "not reopenable (no venue recorded)";
     return { retained: false, reason };
   }
+  // The runtime `b` would open this run in, so the pane can say where an egress-off shell lands (issue #429).
+  const runtime = sandboxLauncher(sandboxVenueOf(manifest))?.bin ?? "docker";
   const keepUntil = Date.parse(manifest.keepUntil ?? "");
   const createdAt = Date.parse(manifest.createdAt ?? "");
   const until = Number.isFinite(keepUntil) ? keepUntil : createdAt + paths.sandboxRetentionHours * 3600000;
   const egress = sandboxEgressPosture(env);
-  if (!Number.isFinite(until)) return { retained: true, egress };
+  if (!Number.isFinite(until)) return { retained: true, egress, runtime };
   const hours = Math.max(0, Math.round((until - now()) / 3600000));
-  return { retained: true, pinned: Number.isFinite(keepUntil), expiresIn: hours < 48 ? `${hours}h` : `${Math.round(hours / 24)}d`, egress };
+  return { retained: true, pinned: Number.isFinite(keepUntil), expiresIn: hours < 48 ? `${hours}h` : `${Math.round(hours / 24)}d`, egress, runtime };
 }
 
 /**
@@ -1863,13 +1882,21 @@ export async function openSandboxSession(paths: any, jobId: string, io: any = {}
   const pause = io.pause ?? pauseForMessage;
   const env = io.env ?? process.env;
   let egress;
+  // Issue #429: which venues open here and the floor a podman sandbox's observations must meet, from THIS process's
+  // environment through the worker's own parsers, as `readSandboxInfo` read them. A malformed value refuses rather
+  // than reading as "local only" or "no floor", for `sandboxEgress`'s reason.
+  let policy;
   try {
     egress = sandboxEgress(env);
+    policy = sandboxVenuePolicy(env);
   } catch (err: any) {
     write(`\ncannot open a sandbox for ${jobId}: ${err?.message}\n`);
     await pause();
     return;
   }
+  // The runtime the run's venue launches through, learned in `beforeLaunch`; "docker" only before that point, where
+  // no line below reads it.
+  let runtime = "docker";
   const result = await openSandbox({
     jobId,
     sandboxDir: paths.sandboxDir,
@@ -1882,7 +1909,10 @@ export async function openSandboxSession(paths: any, jobId: string, io: any = {}
     ...(io.launch ? { launch: io.launch } : {}),
     ...(io.spawnNetwork ? { spawnNetwork: io.spawnNetwork } : {}),
     ...(io.resolveJobUser ? { resolveJobUser: io.resolveJobUser } : {}),
-    beforeLaunch: ({ resolved }: any) => {
+    blessed: policy.blessed,
+    backendFloor: policy.backendFloor,
+    beforeLaunch: ({ resolved, runtime: cli }: any) => {
+      runtime = cli ?? runtime;
       write(`\nopening ${resolved.name} — image ${resolved.manifest.image}\n`);
       write("no credentials are set in this container. exit the shell to return to the panel.\n\n");
     },
@@ -1897,7 +1927,7 @@ export async function openSandboxSession(paths: any, jobId: string, io: any = {}
     await pause();
   }
   if (result.error) {
-    write(`\ncould not start docker: ${result.error.message}\n`);
+    write(`\ncould not start ${runtime}: ${result.error.message}\n`);
     await pause();
   }
   // THE THREE CODES A RUNTIME USES TO REFUSE, which used to redraw over themselves in silence (#337

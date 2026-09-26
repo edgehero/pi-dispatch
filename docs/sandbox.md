@@ -23,13 +23,16 @@ line docker printed.
 The command **needs a terminal**: it opens an interactive shell, so from a pipe, a TTY-less script or CI it
 refuses by name before anything else, rather than letting docker fail with "the input device is not a
 TTY". And if a sandbox for that id is **already running**, both the CLI and the panel refuse and point at
-it: `docker attach pi-sandbox-<jobId>`, or exit that one first.
+it: `docker attach pi-sandbox-<jobId>` (`podman attach` for a run on the podman venue), or exit that one first.
 
-A run from another backend does not open here. A sandbox is a shell on this host's Docker daemon, so the
-retained record says which backend ran the job, and a run that did not run on `local` is refused by name,
-from the CLI and the panel alike (the panel does not offer `b` for it, and `--list` shows it as `not here`).
-Open it on the venue that ran it. A run retained before backends were recorded ran locally and opens as it
-always did.
+A sandbox reopens a run **in the runtime that ran it**. The retained record says which backend ran the job: a
+`local` run opens through this host's docker CLI, and a run on the native `podman` venue through this account's
+rootless Podman, with that venue's own flags (`--userns=keep-id`, `--user`, the pinned namespaces) and its own
+refusals (`docs/podman.md`, "The sandbox on this venue"). Either opens only where `PI_BACKENDS`, read from the
+shell you run the command or the panel from, names that venue; a run from any other backend, or from one this
+shell does not bless, is refused by name from the CLI and the panel alike (the panel does not offer `b` for it,
+and `--list` shows it as `not here`). Open it on the venue that ran it. A run retained before backends were
+recorded ran locally and opens as it always did.
 
 ## What is preserved, and what is not
 
@@ -108,8 +111,8 @@ deployment's `.env`, so if you set `PI_EGRESS` or `PI_EGRESS_PROXY` only there, 
 sandboxes too (otherwise the sandbox is refused rather than guessed at, and the refusal says so).
 
 **The panel now shows you which posture it would use, before you press `b`.** RUN_DETAIL's sandbox block
-carries two more lines, `egress on via <proxy>` (or `egress off (docker's default bridge)`, or `egress
-unreadable`) and `read from this shell, not the deployment`. The parenthetical on the off state is not
+carries two more lines, `egress on via <proxy>` (or `egress off (docker's default bridge)`, `egress off
+(podman's private network)` for a run on the podman venue, or `egress unreadable`) and `read from this shell, not the deployment`. The parenthetical on the off state is not
 decoration: `PI_EGRESS=0` omits `--network` entirely, so the shell lands on the default bridge and the
 whole internet, which "off" on its own reads as the opposite of. The second is the part that matters: the panel reports what IT resolved,
 and it has no way to see what your deployment's `.env` sets, so the two can disagree and only you can
@@ -210,12 +213,16 @@ session that ends in a closed laptop still keeps the workspace.
   uid and readable only by it, so open the sandbox as the worker's account, or with `sudo -E`: the uid the
   run recorded is used either way. A run retained before this was recorded has no uid on file, so it opens as
   the account you run the command as, and as root it is refused; open such a run as the worker's account. A
-  rootless daemon, userns-remap or Docker Desktop on Linux is refused with the reason.
+  rootless daemon, userns-remap or Docker Desktop on Linux is refused with the reason. A run on the native
+  podman venue is the exception to `sudo -E`: keep-id maps the account that runs `podman`, and the run's image
+  is in that account's own store, so it opens only as the account the worker runs as (`docs/podman.md`).
 - **Sandbox *containers* are not reaped by the worker.** They are named `pi-sandbox-*`, outside the
   `pi-job-*` filter the boot reaper uses, precisely so a worker restart cannot kill a shell you are
-  sitting in. The cost is that stopping a forgotten one is yours: `docker stop pi-sandbox-<jobId>`. The
-  retained **directories** are swept, and by a separate reaper: it deletes the ones past their window,
-  skipping any id whose container is live so a mount is never pulled out from under a shell. It runs at
+  sitting in. The cost is that stopping a forgotten one is yours: `docker stop pi-sandbox-<jobId>` (or
+  `podman stop`). The retained **directories** are swept, and by a separate reaper: it deletes the ones past
+  their window, skipping any id whose container is live so a mount is never pulled out from under a shell.
+  It asks every blessed runtime a sandbox opens on (docker for `local`, podman for `podman`), and one that
+  does not answer skips the whole pass rather than sweeping as though none of its sandboxes were open. It runs at
   every worker boot and then every `PI_SWEEP_INTERVAL_HOURS` while the worker is up (24 by default; set
   `0` for the boot-only behaviour, where a worker that never restarts never sweeps). Three things follow.
   The window is a **floor** rather than a ceiling: a directory dies on the first sweep after its window

@@ -235,10 +235,10 @@ test("a pinned row reads as pinned, and a plain one counts down the window", asy
 	assert.match(c2.text(), /24h left/);
 });
 
-test("the sandbox is LOCAL-ONLY PER JOB: a run from another venue is refused by name, a local one opens (#227, #277)", async () => {
-	// `buildSandboxRunArgs` is a SECOND container producer, outside the `runContainer` seam and hard-wired to
-	// this host's docker CLI, and `manifest.workspace` is a path on THIS machine. The refusal used to be
-	// deployment-wide because the command could not learn a job's venue; the manifest records it now.
+test("the sandbox is PER JOB: a run from a venue with no launcher here is refused by name, a local one opens (#227, #277, #429)", async () => {
+	// `buildSandboxRunArgs` is a SECOND container producer, outside the `runContainer` seam, with a launcher only for
+	// the venues that run on this host (`local`, `podman`), and `manifest.workspace` is a path on THIS machine. The
+	// refusal used to be deployment-wide because the command could not learn a job's venue; the manifest records it now.
 	const far = retained({ backend: "far" });
 	let launched = false;
 	const c = capture({ launch: async () => ((launched = true), { code: 0 }) });
@@ -277,4 +277,69 @@ test("a detached shell says the sandbox is still running and that its network is
 	const c = capture({ running: async () => (asks++ === 0 ? [] : ["gh-1"]) });
 	assert.equal(await runSandbox(["gh-1"], { env: envWith(root), deps: c.deps }), 0);
 	assert.match(c.text(), /detached: pi-sandbox-gh-1 is still running with its egress network, which is left in place after it exits/);
+});
+
+// --- issue #429: the podman venue ---------------------------------------------------------------------------------
+
+test("a podman run opens through podman when PI_BACKENDS blesses it, and every line after names podman (#429)", async () => {
+	const { root } = retained({ backend: "podman" });
+	const launches = [];
+	const asks = [];
+	const judged = [];
+	let n = 0;
+	const c = capture({
+		running: async (o) => (asks.push(o?.bin), n++ === 0 ? [] : ["gh-1"]),
+		launch: async (o) => (launches.push(o.bin), { code: 0 }),
+		resolveJobUser: async (o) => (judged.push(o), { user: "1234:1234", home: "/home/pi" }),
+	});
+	assert.equal(await runSandbox(["gh-1"], { env: envWith(root, { PI_BACKENDS: "podman", PI_BACKEND_FLOOR: "isolation=enforced" }), deps: c.deps }), 0);
+	assert.deepEqual(launches, ["podman"]);
+	assert.deepEqual(asks, ["podman", "podman"]);
+	assert.equal(judged[0].venue, "podman");
+	assert.deepEqual(judged[0].backendFloor, { isolation: "enforced" }, "the CLI's own parsed floor reaches the podman judge");
+	assert.match(c.text(), /`podman attach pi-sandbox-gh-1` to return/);
+
+	const failed = capture({ launch: async () => ({ code: null, error: new Error("spawn podman ENOENT") }), resolveJobUser: async () => ({ user: "1234:1234", home: "/home/pi" }) });
+	assert.equal(await runSandbox(["gh-1"], { env: envWith(root, { PI_BACKENDS: "podman", PI_EGRESS: "0" }), deps: failed.deps }), 1);
+	assert.match(failed.errText(), /could not start podman: spawn podman ENOENT/);
+});
+
+test("a podman run is refused where PI_BACKENDS does not bless it, and --list says which variable (#429)", async () => {
+	const { root } = retained({ backend: "podman" });
+	let launched = false;
+	const c = capture({ launch: async () => ((launched = true), { code: 0 }) });
+	assert.equal(await runSandbox(["gh-1"], { env: envWith(root), deps: c.deps }), 1);
+	assert.match(c.errText(), /"podman" backend, which PI_BACKENDS in this process's environment does not bless/);
+	assert.equal(launched, false, "never launched under docker instead");
+
+	const list = capture();
+	await runSandbox(["--list"], { env: envWith(root), deps: list.deps });
+	assert.match(list.text(), /not here \(PI_BACKENDS lacks podman\)/);
+});
+
+test("--list asks EVERY blessed sandbox runtime, and one that cannot answer costs only its own sandboxes (#429)", async () => {
+	const { root } = retained({ jobId: "gh-1", backend: "podman" });
+	mkdirSync(join(root, "gh-2", "workspace"), { recursive: true });
+	writeFileSync(join(root, "gh-2", "manifest.json"), JSON.stringify({ jobId: "gh-2", kind: "github", image: "pi-job:latest", backend: "local", workspace: join(root, "gh-2", "workspace"), createdAt: new Date().toISOString(), keepUntil: null }));
+	const asked = [];
+	const both = capture({ running: async (o) => (asked.push(o?.bin), o?.bin === "podman" ? ["gh-1"] : ["gh-2"]) });
+	await runSandbox(["--list"], { env: envWith(root, { PI_BACKENDS: "local,podman" }), deps: both.deps });
+	assert.deepEqual(asked, ["docker", "podman"]);
+	assert.match(both.text(), /gh-1\s+github\s+RUNNING/);
+	assert.match(both.text(), /gh-2\s+github\s+RUNNING/);
+
+	const dockerDown = capture({
+		running: async (o) => {
+			if (o?.bin === "docker") throw new Error("docker down");
+			return ["gh-1"];
+		},
+	});
+	await runSandbox(["--list"], { env: envWith(root, { PI_BACKENDS: "local,podman" }), deps: dockerDown.deps });
+	assert.match(dockerDown.text(), /gh-1\s+github\s+RUNNING/, "podman's column survives docker being down");
+	assert.doesNotMatch(dockerDown.text(), /gh-2\s+github\s+RUNNING/);
+
+	// Only blessed runtimes are asked: a podman-only host never runs `docker ps` for a column.
+	const podmanOnly = [];
+	await runSandbox(["--list"], { env: envWith(root, { PI_BACKENDS: "podman" }), deps: capture({ running: async (o) => (podmanOnly.push(o?.bin), []) }).deps });
+	assert.deepEqual(podmanOnly, ["podman"]);
 });
