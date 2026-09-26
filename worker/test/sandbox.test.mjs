@@ -7,6 +7,7 @@ import { WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
 import { MINTED_TOKEN_VARS } from "../src/forges.mjs";
 import { SANDBOX_LAUNCHERS, SANDBOX_NAME_PREFIX, SANDBOX_NETWORK_SHAPE, buildSandboxRunArgs, combineSandboxNetworkSweepers, decideSandboxJobUser, launchSandbox, listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatch, openSandbox, parsePublish, resolveSandbox, sandboxContainerName, sandboxEgress, sandboxLauncher, sandboxVenuePolicy, sandboxVenueRefusal, sandboxVenues } from "../src/sandbox.mjs";
 import { networkNameFor } from "../src/egress.mjs";
+import { makeSandboxReaper } from "../src/sandbox-store.mjs";
 
 const base = {
 	image: "pi-job:pinned",
@@ -1149,8 +1150,9 @@ test("listRunningSandboxes asks the bin it is handed (#429)", async () => {
 });
 
 /** A retention root on a fake fs: `runs` maps a directory name to its manifest object, or to a string for bad JSON. */
-function retainedFs(runs, { rootError = null } = {}) {
+function retainedFs(runs, { rootError = null, readError = {} } = {}) {
 	return {
+		lstatSync: () => ({ isDirectory: () => true }),
 		readdirSync: (dir) => {
 			if (rootError) throw Object.assign(new Error(rootError), { code: rootError });
 			assert.equal(dir, "/sbx");
@@ -1158,6 +1160,7 @@ function retainedFs(runs, { rootError = null } = {}) {
 		},
 		readFileSync: (path) => {
 			const name = path.split("/").at(-2);
+			if (readError[name]) throw Object.assign(new Error(readError[name]), { code: readError[name] });
 			const m = runs[name];
 			return typeof m === "string" ? m : JSON.stringify(m);
 		},
@@ -1214,12 +1217,15 @@ describe("makeSandboxRuntimeWatch: the retention reaper asks the runtime EACH RU
 		assert.deepEqual((await makeSandboxRuntimeWatch({ sandboxDir: "/sbx", fs, readPodmanStore: async () => STORE, list: answering({ docker: [], podman: [] }) }).listRunning()), []);
 		// One reports it open: held.
 		assert.ok((await makeSandboxRuntimeWatch({ sandboxDir: "/sbx", fs, readPodmanStore: async () => STORE, list: answering({ docker: [], podman: ["broken"] }) }).listRunning()).includes("broken"));
-		// Any runtime present that cannot answer: held, every one of them.
+		// Any runtime present that cannot answer: held, every one of them, and the log's count includes them.
 		for (const failing of ["docker", "podman"]) {
 			const answers = { docker: [], podman: [] };
 			answers[failing] = new Error("down");
-			const held = await makeSandboxRuntimeWatch({ sandboxDir: "/sbx", fs, readPodmanStore: async () => STORE, list: answering(answers) }).listRunning();
+			const logs = [];
+			const held = await makeSandboxRuntimeWatch({ sandboxDir: "/sbx", fs, readPodmanStore: async () => STORE, list: answering(answers), log: (e, f) => logs.push(f) }).listRunning();
 			for (const id of unplaced) assert.ok(held.includes(id), `${failing} down holds ${id}`);
+			const own = failing === "docker" ? 3 : 3; // d-live d-idle old-1, or p-live p-idle p-old
+			assert.equal(logs.find((f) => f.reason === "runtime-unanswered")?.held, own + unplaced.length, `${failing}: held counts the unplaced runs`);
 		}
 		// Present means blessed or recorded: with only unplaced runs and podman blessed, podman alone is asked.
 		const asked = [];
@@ -1477,4 +1483,99 @@ describe("decideSandboxJobUser on the podman venue (#429)", () => {
 		assert.deepEqual(r, { user: null, home: null });
 		assert.equal(asked, false);
 	});
+});
+
+// --- review round 3: one read per directory decides the whole pass -----------------------------------------------
+
+describe("the reaper and the watch decide on ONE manifest read per directory (#429 review round 3)", () => {
+	const STORE = "/home/w/.local/share/containers/storage";
+	const OLD = "2026-01-01T00:00:00.000Z";
+	const NOW = Date.parse("2026-09-27T00:00:00.000Z");
+	/** A real-shaped retention root on a fake fs, counting reads per manifest; `flaky` maps a name to its first read's errno. */
+	const rootWith = (runs, flaky = {}) => {
+		const files = { "/sbx": "<dir>" };
+		for (const [id, m] of Object.entries(runs)) {
+			files[`/sbx/${id}`] = "<dir>";
+			if (m !== null) files[`/sbx/${id}/manifest.json`] = typeof m === "string" ? m : JSON.stringify(m);
+		}
+		const reads = {};
+		const removed = [];
+		const fs = {
+			lstatSync: (p) => {
+				if (!(p in files)) throw Object.assign(new Error(p), { code: "ENOENT" });
+				return { isDirectory: () => files[p] === "<dir>" };
+			},
+			readdirSync: (p) => Object.keys(files).filter((k) => k.startsWith(`${p}/`) && !k.slice(p.length + 1).includes("/")).map((k) => k.slice(p.length + 1)),
+			readFileSync: (p) => {
+				const id = p.split("/").at(-2);
+				reads[id] = (reads[id] ?? 0) + 1;
+				if (flaky[id] && reads[id] === 1) throw Object.assign(new Error(flaky[id]), { code: flaky[id] });
+				if (!(p in files)) throw Object.assign(new Error(p), { code: "ENOENT" });
+				return files[p];
+			},
+			rmSync: (p) => {
+				removed.push(p.split("/").at(-1));
+				for (const k of Object.keys(files)) if (k === p || k.startsWith(`${p}/`)) delete files[k];
+			},
+		};
+		return { fs, reads, removed };
+	};
+	const pass = async ({ fs }, { list = async () => [], store = STORE } = {}) => {
+		const logs = [];
+		const watch = makeSandboxRuntimeWatch({ sandboxDir: "/sbx", fs, list, readPodmanStore: async () => store, makeSweeper: () => async () => ({ swept: [], notes: [] }), log: (e, f) => logs.push(f) });
+		await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 1, fs, now: () => NOW, listRunning: watch.listRunning, sweepNetworks: watch.sweepNetworks, log: (e, f) => logs.push(f) })();
+		return logs;
+	};
+
+	test("a manifest read that fails for a moment HOLDS the run, whatever the runtimes say (D2 reproduced)", async () => {
+		// The store hold used to be skipped on a transient read, and expiry's second read then succeeded and deleted it.
+		for (const code of ["EMFILE", "EIO", "EAGAIN"]) {
+			const root = rootWith({ "p-open": { backend: "podman", podmanStore: STORE, createdAt: OLD } }, { "p-open": code });
+			const logs = await pass(root, { store: "/srv/new/storage" });
+			assert.deepEqual(root.removed, [], `${code}: held`);
+			assert.deepEqual(logs.filter((f) => f.reason === "manifest-unread"), [{ entry: "p-open", reason: "manifest-unread" }], `${code}: said once`);
+			assert.equal(root.reads["p-open"], 1, `${code}: ONE read decides the pass`);
+		}
+		// The next pass reads again and, the store differing, still holds; the same store and nothing open sweeps it.
+		const root = rootWith({ "p-open": { backend: "podman", podmanStore: STORE, createdAt: OLD } }, { "p-open": "EMFILE" });
+		await pass(root);
+		assert.deepEqual(root.removed, [], "first pass: held for the transient read");
+		await pass(root);
+		assert.deepEqual(root.removed, ["p-open"], "second pass: read, same store, not open: swept");
+	});
+
+	test("every directory is read exactly once per pass, and expiry decides on that same read", async () => {
+		const root = rootWith({ "d-1": { backend: "local", createdAt: OLD }, "p-1": { backend: "podman", podmanStore: STORE, createdAt: OLD }, bad: "{", none: null });
+		await pass(root, { list: async ({ bin }) => (bin === "docker" ? ["d-1"] : []) });
+		assert.deepEqual(root.reads, { "d-1": 1, "p-1": 1, bad: 1, none: 1 });
+		assert.deepEqual(root.removed.sort(), ["bad", "none", "p-1"], "held by its runtime: d-1; the rest expire on their one read");
+	});
+
+	test("ENOENT keeps the no-manifest rule without asking anyone; a parse error is asked of every runtime present", async () => {
+		const asked = [];
+		const root = rootWith({ none: null });
+		await pass(root, { list: async ({ bin }) => (asked.push(bin), []) });
+		assert.deepEqual([root.removed, asked], [["none"], []]);
+		const bad = rootWith({ bad: "{", "p-1": { backend: "podman", createdAt: new Date(NOW).toISOString() } });
+		await pass(bad, { list: async ({ bin }) => (bin === "podman" ? ["bad"] : []) });
+		assert.deepEqual(bad.removed, [], "a runtime reports it open: held");
+	});
+});
+
+test("the finished-container repair matches THIS run by its whole name, never a sibling the filter also returns (#429 review round 3)", async () => {
+	// `--filter name=pi-sandbox-gh-1` also returns `pi-sandbox-gh-12` (unanchored). A sibling that is exited must not be
+	// read as this run finished: this run's own container is `created`, mid-launch, and nothing may be removed.
+	const d = fakeNetDaemon({ nets: { "pi-sandbox-gh-1-net": [] }, containers: { "pi-sandbox-gh-12": "exited", "pi-sandbox-gh-1": "created" } });
+	const calls = [];
+	let asks = 0;
+	const run = async (args) => {
+		calls.push(args.join(" "));
+		// The guard answers clear (the container is created after it), then the repair's look sees both containers.
+		if (args[0] === "ps") return asks++ === 0 ? { code: 0, stdout: "", stderr: "" } : d.run(args);
+		if (args.slice(0, 2).join(" ") === "network rm") return { code: 2, stdout: "", stderr: "in use" };
+		return d.run(args);
+	};
+	const out = await makeSandboxNetworkSweeper({ bin: "podman", run })({ retained: () => [] });
+	assert.deepEqual(out.notes.map((n) => n.reason), ["rm-failed"]);
+	assert.ok(!calls.some((c) => /^rm /.test(c)), `nothing removed: ${calls.join(" | ")}`);
 });

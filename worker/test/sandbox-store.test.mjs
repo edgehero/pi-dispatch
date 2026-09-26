@@ -9,14 +9,27 @@ const DAY = 86400000;
  * A fake fs recording every mutation, so retention can be asserted without a disk. Paths are plain
  * strings keyed into one map; `files` holds written contents and `dirs` the removed/renamed history.
  */
-function fakeFs({ files = {}, failOn = null } = {}) {
-	const calls = { removed: [], renamed: [], made: [] };
+function fakeFs({ files = {}, failOn = null, owners = {}, as = { uid: 1234, gid: 1234 } } = {}) {
+	const calls = { removed: [], renamed: [], made: [], chowned: [], chmodded: [] };
+	// `owners` maps a path to `{ uid, gid, mode }`; a path this fake creates is owned by `as` with mode 0644 (a umask).
+	const meta = { ...owners };
 	return {
 		calls,
 		files,
+		meta,
 		lstatSync(p) {
 			if (!(p in files)) throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
-			return { isDirectory: () => files[p] === "<dir>" };
+			const m = meta[p] ?? { uid: as.uid, gid: as.gid, mode: 0o600 };
+			return { isDirectory: () => files[p] === "<dir>", uid: m.uid, gid: m.gid, mode: 0o100000 | m.mode };
+		},
+		chownSync(p, uid, gid) {
+			if (failOn === "chown" || (as.uid !== 0 && uid !== as.uid)) throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+			calls.chowned.push([p, uid, gid]);
+			meta[p] = { ...(meta[p] ?? { mode: 0o644 }), uid, gid };
+		},
+		chmodSync(p, mode) {
+			calls.chmodded.push([p, mode]);
+			meta[p] = { ...(meta[p] ?? { uid: as.uid, gid: as.gid }), mode };
 		},
 		mkdirSync(p, opts) {
 			calls.made.push({ p, mode: opts?.mode });
@@ -35,6 +48,8 @@ function fakeFs({ files = {}, failOn = null } = {}) {
 			// A rename carries what it names: a directory's marker (as the retention rename always was here), or a
 			// file's CONTENT, which is how the pin's atomic manifest rewrite lands (issue #429).
 			files[to] = files[from] ?? "<dir>";
+			if (meta[from]) meta[to] = meta[from];
+			delete meta[from];
 			delete files[from];
 		},
 		rmSync(p) {
@@ -43,7 +58,9 @@ function fakeFs({ files = {}, failOn = null } = {}) {
 		},
 		writeFileSync(p, body, opts) {
 			if (failOn === "write") throw new Error("ENOSPC");
+			if (opts?.flag === "wx" && p in files) throw Object.assign(new Error(`EEXIST: ${p}`), { code: "EEXIST" });
 			files[p] = body;
+			if (!(p in meta)) meta[p] = { uid: as.uid, gid: as.gid, mode: 0o644 };
 			calls.made.push({ p, mode: opts?.mode });
 		},
 	};
@@ -609,4 +626,35 @@ test("each network-listing failure is logged with its runtime, and a bare `faile
 		{ reason: "network-list-failed", runtime: "podman" },
 	]);
 	assert.deepEqual(await run({ swept: [], notes: [], failed: "network-list-failed" }), [{ reason: "network-list-failed" }]);
+});
+
+test("a pin keeps the manifest's OWNER and MODE, even as root, and refuses rather than hand it to another account (#429 review round 3)", () => {
+	// Reproduced: `sudo -E pi-dispatch sandbox --pin` renamed a root-owned temp file over the worker's manifest, the
+	// worker could not read it, and its sweep deleted the run as manifest-less once the shell exited.
+	const at = Date.parse("2026-08-01T12:00:00Z");
+	const path = "/sbx/gh-1/manifest.json";
+	const body = JSON.stringify({ jobId: "gh-1", backend: "podman", createdAt: "2026-08-01T00:00:00Z" });
+	const worker = { uid: 1234, gid: 1234, mode: 0o600 };
+
+	const root = fakeFs({ files: { [path]: body }, owners: { [path]: worker }, as: { uid: 0, gid: 0 } });
+	assert.equal(pinSandbox({ sandboxDir: "/sbx", jobId: "gh-1", pinDays: 7, fs: root, now: () => at, euid: 0 }).pinned, true);
+	assert.deepEqual(root.meta[path], worker, "sudo's pin leaves the worker's own 0600 manifest");
+	assert.equal(root.calls.chowned.length, 1);
+
+	const own = fakeFs({ files: { [path]: body }, owners: { [path]: worker }, as: { uid: 1234, gid: 1234 } });
+	assert.equal(pinSandbox({ sandboxDir: "/sbx", jobId: "gh-1", pinDays: 7, fs: own, now: () => at, euid: 1234 }).pinned, true);
+	assert.deepEqual(own.meta[path], worker, "the worker's own pin: mode 0600, owner unchanged");
+
+	// Another unprivileged account cannot keep the owner, so the pin is refused and the manifest untouched.
+	const other = fakeFs({ files: { [path]: body }, owners: { [path]: worker }, as: { uid: 1300, gid: 1300 } });
+	const refused = pinSandbox({ sandboxDir: "/sbx", jobId: "gh-1", pinDays: 7, fs: other, now: () => at, euid: 1300 });
+	assert.equal(refused.pinned, false);
+	assert.deepEqual(other.meta[path], worker);
+	assert.equal(JSON.parse(other.files[path]).keepUntil, undefined);
+	assert.deepEqual(Object.keys(other.files).filter((k) => k.includes(".tmp")), [], "no temp file is left");
+
+	// A temp path that already exists is never written through (`wx`).
+	const planted = fakeFs({ files: { [path]: body, [`/sbx/gh-1/.manifest.json.${process.pid}.${at}.tmp`]: "planted" }, owners: { [path]: worker } });
+	assert.equal(pinSandbox({ sandboxDir: "/sbx", jobId: "gh-1", pinDays: 7, fs: planted, now: () => at, euid: 1234 }).pinned, false);
+	assert.equal(planted.files[`/sbx/gh-1/.manifest.json.${process.pid}.${at}.tmp`], "planted", "the planted file is not removed either");
 });

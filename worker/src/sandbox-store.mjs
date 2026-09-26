@@ -1,7 +1,8 @@
-import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { sanitizeJobId } from "./run-history.mjs";
 import { scrubCredentials } from "./redact.mjs";
+import { TRANSIENT_READ_ERRORS } from "./runtime-observations.mjs";
 
 /**
  * sandbox-store.mjs -- the host side of a resurrectable sandbox (REQ-RESURRECTABLE-SANDBOX,
@@ -39,7 +40,7 @@ export const SANDBOX_MANIFEST = "manifest.json";
 const HOUR_MS = 3600000;
 const DAY_MS = 86400000;
 
-const defaultFs = { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync };
+const defaultFs = { chmodSync, chownSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync };
 
 /**
  * Retain one finished job's directory, or delete it.
@@ -181,24 +182,48 @@ export function listSandboxes({ sandboxDir, fs = defaultFs }) {
  * is how a directory holding a full repository clone per run becomes unbounded, and the acceptance this
  * feature was written against says retention stays swept.
  */
-export function pinSandbox({ sandboxDir, jobId, pinDays, fs = defaultFs, now = () => Date.now() }) {
+export function pinSandbox({ sandboxDir, jobId, pinDays, fs = defaultFs, now = () => Date.now(), euid = process.geteuid?.() }) {
 	const manifest = readManifest({ sandboxDir, jobId, fs });
 	if (!manifest) return { pinned: false, reason: "absent" };
 	const keepUntil = new Date(now() + pinDays * DAY_MS).toISOString();
 	const { dir, ...body } = manifest;
 	// ATOMIC (issue #429 review): a temp file beside it, then a rename over it. `writeFileSync` on the manifest itself
 	// truncates first, and for that window every reader (the retention sweep, `--list`, the panel, an open) sees a
-	// manifest that does not parse, which the sweep used to read as "no manifest, delete it". A rename is all or nothing.
+	// manifest that does not parse. A rename is all or nothing.
+	//
+	// AND THE FILE KEEPS ITS IDENTITY (review round 3, reproduced): a rename puts the TEMP file's owner and mode in
+	// place, so `sudo -E pi-dispatch sandbox --pin` left a root-owned 0600 manifest the worker could not read, and the
+	// worker's sweep deleted the run as manifest-less after the shell exited. So the manifest is stat'ed first and the
+	// temp file given its uid, gid and mode before the rename. `chown` only succeeds as root; as anyone else it is
+	// EPERM, which is harmless exactly when this process already owns the file (the temp file is then the same owner),
+	// and otherwise the pin is refused rather than handing the manifest to another account. The temp file is created
+	// with `wx`, so an existing path (a planted symlink, a leftover) is never written through.
+	const target = join(dir, SANDBOX_MANIFEST);
 	const tmp = join(dir, `.${SANDBOX_MANIFEST}.${process.pid}.${now()}.tmp`);
+	let created = false;
 	try {
-		fs.writeFileSync(tmp, `${JSON.stringify({ ...body, keepUntil }, null, 2)}\n`, { mode: 0o600 });
-		fs.renameSync(tmp, join(dir, SANDBOX_MANIFEST));
+		const original = fs.lstatSync(target);
+		const mode = Number.isInteger(original?.mode) ? original.mode & 0o777 : 0o600;
+		fs.writeFileSync(tmp, `${JSON.stringify({ ...body, keepUntil }, null, 2)}\n`, { mode, flag: "wx" });
+		created = true;
+		if (Number.isInteger(original?.uid) && Number.isInteger(original?.gid)) {
+			try {
+				fs.chownSync(tmp, original.uid, original.gid);
+			} catch (err) {
+				if (!(err?.code === "EPERM" && euid === original.uid)) throw err;
+			}
+		}
+		// Explicit, since `writeFileSync`'s mode is filtered through the umask.
+		fs.chmodSync(tmp, mode);
+		fs.renameSync(tmp, target);
 		return { pinned: true, keepUntil };
 	} catch (err) {
-		try {
-			fs.rmSync(tmp, { force: true });
-		} catch {
-			// nothing left to try
+		if (created) {
+			try {
+				fs.rmSync(tmp, { force: true });
+			} catch {
+				// nothing left to try
+			}
 		}
 		return { pinned: false, reason: err?.message ?? "write-failed" };
 	}
@@ -235,16 +260,6 @@ export function makeSandboxReaper({
 }) {
 	return async function reapSandboxes() {
 		if (!sandboxDir) return;
-		let running = new Set();
-		try {
-			running = new Set(await listRunning());
-		} catch (err) {
-			// Could not ask docker. Sweeping blind risks pulling a mount out from under a live shell, so
-			// skip this sweep entirely: a directory kept one boot too long is the cheaper mistake.
-			log("sandbox_reaper_skipped", { reason: scrubCredentials(err?.message ?? "running-lookup-failed") });
-			return;
-		}
-
 		let names;
 		try {
 			names = fs.readdirSync(sandboxDir);
@@ -264,6 +279,24 @@ export function makeSandboxReaper({
 				return;
 			}
 			names = [];
+		}
+
+		// ONE READ DECIDES (issue #429, review round 3). Every retained directory's manifest is read ONCE per pass, here,
+		// and that one result is what the runtime watch places the run by AND what expiry decides on. Two reads let a
+		// pass decide on one and delete on another: a read that failed for the watch (skipping a hold) and succeeded
+		// for expiry, or the reverse, deleted a directory under an open sandbox (reproduced twice). So the listing
+		// comes first now, then the reads, then the question to the runtimes, handed the reads.
+		const reads = new Map();
+		for (const name of names) reads.set(name, readRetained(fs, join(sandboxDir, name)));
+
+		let running = new Set();
+		try {
+			running = new Set(await listRunning({ names, reads }));
+		} catch (err) {
+			// Could not ask docker. Sweeping blind risks pulling a mount out from under a live shell, so
+			// skip this sweep entirely: a directory kept one boot too long is the cheaper mistake.
+			log("sandbox_reaper_skipped", { reason: scrubCredentials(err?.message ?? "running-lookup-failed") });
+			return;
 		}
 
 		const at = now();
@@ -297,7 +330,15 @@ export function makeSandboxReaper({
 					continue;
 				}
 				if (running.has(name)) continue; // an operator is inside it
-				const verdict = expiry(dir, fs, at, cutoff);
+				// A manifest that could not be read FOR A MOMENT (`TRANSIENT_READ_ERRORS`: EMFILE, EIO and the rest) is
+				// HELD this pass, full stop: no runtime answer can release it, because nothing about the run is known,
+				// not even which runtime to ask. The next pass reads it again. Said once per directory per pass.
+				const read = reads.get(name);
+				if (read?.transient) {
+					log("sandbox_reaper_skipped", { entry: name, reason: "manifest-unread" });
+					continue;
+				}
+				const verdict = expiry(read, at, cutoff);
 				if (!verdict.expired) continue;
 				removing = true;
 				fs.rmSync(dir, { recursive: true, force: true });
@@ -365,16 +406,42 @@ export function makeSandboxReaper({
  * the base window while it lasts, and an unparseable `keepUntil` is treated as no pin rather than as
  * forever -- the direction that stays bounded.
  */
-function expiry(dir, fs, at, cutoff) {
-	let manifest;
-	try {
-		manifest = JSON.parse(fs.readFileSync(join(dir, SANDBOX_MANIFEST), "utf8"));
-	} catch {
-		return { expired: true, reason: "no-manifest" };
-	}
+function expiry(read, at, cutoff) {
+	// The pass's one read (`readRetained`). ENOENT, a manifest that does not parse, and one that cannot be read for
+	// good are all "no manifest", as they always were: nothing can open such a run (`resolveSandbox` refuses it). The
+	// runtime watch has already asked every runtime present about the last two, so a shell open on one is held above.
+	if (!Object.hasOwn(read ?? {}, "manifest")) return { expired: true, reason: "no-manifest" };
+	const manifest = read.manifest;
 	const keepUntil = Date.parse(manifest?.keepUntil ?? "");
 	if (Number.isFinite(keepUntil)) return keepUntil <= at ? { expired: true, reason: "pin-expired" } : { expired: false };
 	const createdAt = Date.parse(manifest?.createdAt ?? "");
 	if (!Number.isFinite(createdAt)) return { expired: true, reason: "no-created-at" };
 	return createdAt < cutoff ? { expired: true, reason: "window" } : { expired: false };
+}
+
+/**
+ * One retained entry's manifest, read once for the whole pass: `{ manifest }`, `{ absent: true }` (no manifest file, or
+ * not a directory at all), `{ transient: true, code }` (a read that failed for a moment, `TRANSIENT_READ_ERRORS`),
+ * `{ unparsed: true }` (the file does not parse) or `{ unreadable: true, code }` (any other failure, EACCES say).
+ * `lstat` FIRST, as the pass itself does: a symlink planted here must not be followed to read a host file.
+ */
+export function readRetained(fs, dir) {
+	try {
+		if (!fs.lstatSync(dir).isDirectory()) return { absent: true };
+	} catch (err) {
+		return TRANSIENT_READ_ERRORS.has(err?.code) ? { transient: true, code: err.code } : { absent: true };
+	}
+	let text;
+	try {
+		text = fs.readFileSync(join(dir, SANDBOX_MANIFEST), "utf8");
+	} catch (err) {
+		if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return { absent: true };
+		if (TRANSIENT_READ_ERRORS.has(err?.code)) return { transient: true, code: err.code };
+		return { unreadable: true, code: err?.code ?? null };
+	}
+	try {
+		return { manifest: JSON.parse(text) };
+	} catch {
+		return { unparsed: true };
+	}
 }

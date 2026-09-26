@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { release as osRelease } from "node:os";
 import { promisify } from "node:util";
@@ -13,7 +13,7 @@ import { makeImagePreflight } from "./image-preflight.mjs";
 import { decideJobUser, JOB_USER_FIX, makeDaemonFactsReader, relabelsPrivateMounts, resolveImageUser, socketFacts } from "./job-user.mjs";
 import { NETWORK_SUFFIX, createJobNetwork, egressArmed, egressEnv, egressProxyName, networkEndpoints, networkExists, networkNameFor, removeJobNetwork, removeNetworkOrSay } from "./egress.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
-import { SANDBOX_MANIFEST, readManifest } from "./sandbox-store.mjs";
+import { readManifest, readRetained } from "./sandbox-store.mjs";
 
 /**
  * sandbox.mjs -- the operator session's container shape (INT-SANDBOX-CONTRACT).
@@ -284,31 +284,40 @@ export async function listRunningSandboxes({ execFn = exec, bin = "docker" } = {
  * text and no path: `runtime-unanswered` per runtime with the number of directories it held, and `podman-store-mismatch`
  * per directory held for its store.
  */
-export function makeSandboxRuntimeWatch({ sandboxDir, blessed = [], fs = { readdirSync, readFileSync }, list = listRunningSandboxes, readPodmanStore = defaultPodmanStore, makeSweeper = makeSandboxNetworkSweeper, log = () => {} } = {}) {
+export function makeSandboxRuntimeWatch({ sandboxDir, blessed = [], fs = { lstatSync, readdirSync, readFileSync }, list = listRunningSandboxes, readPodmanStore = defaultPodmanStore, makeSweeper = makeSandboxNetworkSweeper, log = () => {} } = {}) {
 	const blessedBins = new Set(sandboxVenues(blessed).map((venue) => sandboxLauncher(venue).bin));
 	// Launcher-table order, so the asks and the log lines read the same on every pass.
 	const allBins = [...new Set(Object.values(SANDBOX_LAUNCHERS).map((l) => l.bin))];
 	const present = new Set(blessedBins);
 	const sweepers = new Map();
-	async function listRunning() {
-		let names;
-		try {
-			names = fs.readdirSync(sandboxDir);
-		} catch (err) {
-			if (err?.code !== "ENOENT") throw err;
-			names = [];
+	async function listRunning(pass = {}) {
+		// The reaper's ONE read per directory (`pass.reads`, review round 3): the watch places each run by exactly the
+		// read expiry will decide on. Standing alone (no pass handed in) it lists and reads for itself, the same way.
+		let names = pass?.names;
+		let reads = pass?.reads;
+		if (!Array.isArray(names) || !(reads instanceof Map)) {
+			try {
+				names = fs.readdirSync(sandboxDir);
+			} catch (err) {
+				if (err?.code !== "ENOENT") throw err;
+				names = [];
+			}
+			reads = new Map(names.map((name) => [name, readRetained(fs, join(sandboxDir, name))]));
 		}
 		const byBin = new Map();
 		const unplaced = [];
 		const stores = [];
 		for (const name of names) {
-			let manifest;
-			try {
-				manifest = JSON.parse(fs.readFileSync(join(sandboxDir, name, SANDBOX_MANIFEST), "utf8"));
-			} catch {
+			const read = reads.get(name);
+			// A transient failure is the REAPER's hold, whatever any runtime says (nothing about the run is known), and
+			// an absent manifest is its `no-manifest` rule: neither is a question for a runtime. A manifest that does not
+			// parse, or cannot be read for good, is a run this cannot place.
+			if (!read || read.transient || read.absent) continue;
+			if (!Object.hasOwn(read, "manifest")) {
 				unplaced.push(name);
 				continue;
 			}
+			const manifest = read.manifest;
 			const launcher = sandboxLauncher(sandboxVenueOf(manifest));
 			if (!launcher) {
 				unplaced.push(name);

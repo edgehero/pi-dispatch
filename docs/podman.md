@@ -430,10 +430,11 @@ The shell's container is a job's on this venue, by the same builder: `--userns=k
 and `--network=private` with it off, so a `netns = "host"` default cannot put it on the host's. It is refused for what
 a job on this venue is refused for, in the same order and by the same check: not Linux, no `podman`, a remote
 service, rootful Podman, a containers.conf that sets `pasta_options`, `network_cmd_options` or `annotations`
-(`podman-conf-widens-job`), and a `PI_BACKEND_FLOOR` the observations miss. Two more are the sandbox's own: it runs as
-the account that opens it (keep-id maps that account, and the run's image is in that account's store), so open it as
-the account the worker runs as, never with `sudo`; and a run recorded as another uid is refused rather than reopened as
-one.
+(`podman-conf-widens-job`, or `podman-conf-unread` when a containers.conf could not be read just now: try again), and a
+`PI_BACKEND_FLOOR` the observations miss. Then the sandbox's own: it runs as the account that opens it (keep-id maps
+that account, and the run's image is in that account's store), so open it as the account the worker runs as, never
+with `sudo`; a run opened under another container store is refused (`podman-store-mismatch`, below); and a run
+recorded as another uid is refused rather than reopened as one.
 
 `--publish` works with egress off, and says something alarming while it does: Podman prints `Port mappings have been
 discarded because "private" network namespace mode does not support them`, yet the port IS published on
@@ -450,6 +451,13 @@ the retained directory under the open shell. So the worker records each podman r
 (`podman-store-mismatch`, naming both paths), and the sweep holds the run while the podman it asks uses another store
 or cannot say which. A different `XDG_RUNTIME_DIR` was measured harmless: Podman takes the runtime directory from its
 own database, or fails, which the sweep treats as a runtime that did not answer.
+
+If the worker's own `HOME` or `XDG_DATA_HOME` changes, every podman run retained before the change recorded the old
+store, and the sweep holds each one on every pass (`sandbox_reaper_skipped` with `podman-store-mismatch`), because
+the new store's `podman ps` cannot say whether a sandbox is open on it. Once you know none is, remove them by hand,
+as for a local run on a host without docker (`docs/backends.md`): `pi-dispatch sandbox --list` shows their ids, and
+`rm -rf "$PI_SANDBOX_DIR/<jobId>"` removes each. A retained directory whose manifest could not be read for a moment
+(EMFILE, EIO) is held for that pass too (`manifest-unread`) and read again on the next.
 
 On an SELinux host the retained job directory and the retained clone carry `:Z`, decided from `podman info`'s
 `selinuxEnabled` as a job's are, so the shell reads them under `container_file_t` the way the job did; a local run's

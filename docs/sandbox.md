@@ -219,7 +219,12 @@ session that ends in a closed laptop still keeps the workspace.
   podman venue is the exception to `sudo -E`: keep-id maps the account that runs `podman`, and the run's image
   is in that account's own store, so it opens only as the account the worker runs as, with the worker's container
   storage (the same `HOME` and `XDG_DATA_HOME`, no `storage.conf` of your own). Another store's `podman ps` answers
-  empty (measured), so the run records its store and the sandbox refuses another one (`docs/podman.md`).
+  empty (measured), so the run records its store and the sandbox refuses another one (`podman-store-mismatch`;
+  `docs/podman.md` lists the podman refusals in order, `podman-conf-unread` among them).
+- **A pin keeps the manifest the worker's.** `--pin` rewrites the manifest by renaming a new file over it, with the
+  old one's owner and mode, so `sudo -E pi-dispatch sandbox --pin` does not leave a root-owned manifest the worker
+  cannot read; a pin that cannot keep the owner is refused. A manifest that cannot be read for a moment holds its
+  directory for that sweep pass (`manifest-unread` in the worker log) rather than reading as missing.
 - **Sandbox *containers* are not reaped by the worker.** They are named `pi-sandbox-*`, outside the
   `pi-job-*` filter the boot reaper uses, precisely so a worker restart cannot kill a shell you are
   sitting in. The cost is that stopping a forgotten one is yours: `docker stop pi-sandbox-<jobId>` (or
