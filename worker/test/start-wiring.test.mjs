@@ -2884,6 +2884,20 @@ test("a podman default whose account's containers.conf widens a job refuses to B
 	const observed = await captured.deps.observationPreflight({ id: "j1", kind: "local", backend: "podman" });
 	assert.equal(observed.podmanConfRefused?.reason, "podman-conf-widens-job");
 	assert.match(observed.podmanConfRefused.message, /^Refused: \/home\/pdjob\/\.config\/containers\/containers\.conf sets pasta_options/);
+	// A conf read that failed for a moment is the supervisor's retry (untagged, exit 1), never a config error (exit 2)
+	// that strands the unit; one the account cannot read is a config error.
+	const failing = (code) => ({ ...PODMAN_FILES, readFileSync: (p) => (p === "/etc/containers/containers.conf" ? (() => { throw Object.assign(new Error(code), { code }); })() : PODMAN_FILES.readFileSync(p)) });
+	for (const code of ["EMFILE", "EIO"]) {
+		await assert.rejects(
+			() => runStart({ env: { PI_BACKENDS: "podman" }, readPodmanInfo: PODMAN_INFO(), jobUserIdentity: PODMAN_ID, observationFs: failing(code), ...auth }),
+			(err) => err.piDispatchConfig !== true && err.message.startsWith("Not read yet: /etc/containers/containers.conf could not be read"),
+			code,
+		);
+	}
+	await assert.rejects(
+		() => runStart({ env: { PI_BACKENDS: "podman" }, readPodmanInfo: PODMAN_INFO(), jobUserIdentity: PODMAN_ID, observationFs: failing("EACCES"), ...auth }),
+		(err) => err.piDispatchConfig === true && /could not be read \(EACCES\)/.test(err.message),
+	);
 	// A clean conf boots as the default.
 	const clean = await runStart({ env: { PI_BACKENDS: "podman" }, readPodmanInfo: PODMAN_INFO(), jobUserIdentity: PODMAN_ID, observationFs: PODMAN_FILES, ...auth });
 	assert.ok(clean.logs.some((l) => l.event === "worker_started"));
@@ -2892,8 +2906,9 @@ test("a podman default whose account's containers.conf widens a job refuses to B
 test("podmanConfBootRefusal: only while podman is the default venue and its identity is not already refused (#428)", { skip: skipNoModule }, () => {
 	const files = { fs: hostFiles({ "/home/pdjob/.config/containers/containers.conf": "pasta_options = []\n" }), home: "/home/pdjob", env: {}, euid: 1234 };
 	const worker = { mode: "worker", user: "1234:1234" };
-	assert.match(mod.podmanConfBootRefusal(worker, "podman", files), /^Refused: .* sets pasta_options, .*\(issue #428\)\.$/);
-	assert.match(mod.podmanConfBootRefusal({ mode: "unknown", reason: "timeout" }, "podman", files), /sets pasta_options/, "an unanswered info read does not wave it through");
+	assert.match(mod.podmanConfBootRefusal(worker, "podman", files).message, /^Refused: .* sets pasta_options, .*\(issue #428\)\.$/);
+	assert.equal(mod.podmanConfBootRefusal(worker, "podman", files).transient, false);
+	assert.match(mod.podmanConfBootRefusal({ mode: "unknown", reason: "timeout" }, "podman", files).message, /sets pasta_options/, "an unanswered info read does not wave it through");
 	assert.equal(mod.podmanConfBootRefusal(worker, "local", files), null, "blessed but not default boots");
 	assert.equal(mod.podmanConfBootRefusal({ mode: "unmappable", cause: "podman-rootful" }, "podman", files), null, "the identity's own refusal comes first");
 	assert.equal(mod.podmanConfBootRefusal(null, "podman", files), null, "podman not blessed: nothing read");

@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { PODMAN_JOB_USER_FIX, podmanJobUserRefusal } from "../src/backend-podman.mjs";
+import { PODMAN_JOB_USER_FIX, podmanConfRefusal, podmanConfWidening, podmanJobUserRefusal } from "../src/backend-podman.mjs";
 import { BACKENDS, DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, PODMAN_BACKEND, PROPERTIES, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, effectiveWord, meets } from "../src/backends.mjs";
 import { buildDockerRunArgs } from "../src/docker-run.mjs";
 import { DEFAULT_EGRESS_PROXY } from "../src/egress.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, JOB_USER_FIX, jobUserRefusal } from "../src/job-user.mjs";
 import { sandboxVenueRefusal } from "../src/sandbox.mjs";
-import { podmanBootRefusal } from "../src/start.mjs";
+import { podmanBootRefusal, podmanConfBootRefusal } from "../src/start.mjs";
 
 // docs/podman.md's property table restates two derivable sources, so it is BOLTED to them (CLAUDE.md: a hand-written
 // table is derived or pinned, never trusted): its rows are the backend table's properties in order, and its Docker
@@ -224,7 +224,28 @@ test("the page quotes every refusal the podman venue can print, and when each fi
 	const lines = doc.slice(start, end).split("\n");
 	const byText = new Map(Object.keys(PODMAN_JOB_USER_FIX).map((cause) => [podmanJobUserRefusal(cause), cause]));
 	const covered = new Set();
+	// Issue #428: the containers.conf refusal names a host path and a key, so its line is not one fixed text. It is
+	// rebuilt from the path and key the page quotes, through the worker's own function over a file holding that key, and
+	// its heading's timing from `podmanConfBootRefusal`, the function the boot calls.
+	let confQuoted = 0;
 	lines.forEach((line, i) => {
+		const conf = /^Refused: (\/\S+) sets (\w+), which /.exec(line);
+		if (conf) {
+			const [, path, key] = conf;
+			const text = `${key} = []\n`;
+			const missing = (p) => {
+				throw Object.assign(new Error(p), { code: "ENOENT" });
+			};
+			const home = path.replace(/\/\.config\/containers\/containers\.conf$/, "");
+			const files = { fs: { statSync: missing, readdirSync: missing, readFileSync: (p) => (p === path ? text : missing(p)) }, home, env: {}, euid: 1234 };
+			assert.equal(line, podmanConfRefusal(podmanConfWidening(files)), "the conf refusal is the worker's text for that path and key");
+			const heading = lines[i - 1] ?? "";
+			assert.ok(heading.startsWith("# "), "the conf refusal has a heading line above it");
+			const stopsBoot = podmanConfBootRefusal({ mode: "worker" }, PODMAN_BACKEND, files) !== null && podmanConfBootRefusal({ mode: "worker" }, "local", files) === null;
+			assert.ok(heading.endsWith(stopsBoot ? NATIVE_BOOT : NATIVE_PER_JOB), heading);
+			confQuoted += 1;
+			return;
+		}
 		if (!line.startsWith("Refused:")) return;
 		const cause = byText.get(line);
 		assert.ok(cause, `not a text the podman venue prints: ${line}`);
@@ -236,6 +257,7 @@ test("the page quotes every refusal the podman venue can print, and when each fi
 		assert.ok(heading.endsWith(stopsBoot ? NATIVE_BOOT : NATIVE_PER_JOB), `${cause}: ${heading}`);
 	});
 	assert.deepEqual([...covered].sort(), Object.keys(PODMAN_JOB_USER_FIX).sort());
+	assert.equal(confQuoted, 1, "the containers.conf refusal is quoted once (#428)");
 });
 
 // The proxy command the native setup gives restates two things the worker and the compose file already say: the

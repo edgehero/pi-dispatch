@@ -4097,7 +4097,8 @@ export async function podmanChecks(env, seams, { jobImage }) {
 			// the whole story.
 			{ observations: { [PODMAN_BOUNDS_DELEGATED]: null, [PODMAN_ADDS_NO_MOUNTS]: null, [PODMAN_SERVICE_LOCAL]: null }, evidence: {}, reasons: {}, read: null };
 	const checks = [];
-	const notRun = (reason) => ({ run: false, reason });
+	// `fix` names the line above that stops the read-back, so `--live` points at the conf refusal when that is the one.
+	const notRun = (reason, fix) => ({ run: false, reason, ...(fix ? { fix } : {}) });
 	let forLive = notRun("podman was not read");
 
 	if (info) {
@@ -4119,6 +4120,11 @@ export async function podmanChecks(env, seams, { jobImage }) {
 	// line cannot say something the worker does not do. Severity by the boot rule, as the identity line above: ✗ where a
 	// worker with `podman` as its default venue refuses to boot, ⚠ where it boots and refuses each podman job. No spawn.
 	const widened = podmanConfWidening({ fs: observationFs, home, env, euid: ids.euid });
+	if (widened?.transient) {
+		// A read that failed for a moment is the worker's retry, never its refusal, so it is ⚠ and says so.
+		checks.push({ ok: false, warn: true, label: `podman: whether this account's containers.conf widens a job could not be read just now: ${widened.evidence}`, fix: podmanConfFix(widened) });
+		return { checks, observed, relabel: false, forLive: notRun("this account's containers.conf could not be read just now, so whether a probe would match a job is not known", "fix the podman containers.conf line above first, then re-run `pi-dispatch doctor --live`") };
+	}
 	if (widened) {
 		checks.push({
 			ok: false,
@@ -4126,7 +4132,7 @@ export async function podmanChecks(env, seams, { jobImage }) {
 			label: `podman: no job can run on this venue (${widened.cause}): ${widened.evidence}${podmanDefault ? " -- a worker running as this account refuses to boot" : " -- every podman job is refused"}`,
 			fix: podmanConfFix(widened),
 		});
-		return { checks, observed, relabel: false, forLive: notRun(`a podman job is refused here (${widened.cause}), so a probe would read back a container no job gets`) };
+		return { checks, observed, relabel: false, forLive: notRun(`a podman job is refused here (${widened.cause}), so a probe would read back a container no job gets`, "fix the podman containers.conf line above first, then re-run `pi-dispatch doctor --live`") };
 	}
 	if (decision.mode !== "worker") {
 		checks.push({ ok: false, warn: true, label: `podman: which uid a job runs as could not be decided (${decision.reason})`, fix: "the worker retries every podman job until it can decide; fix what stops `podman info` answering for the worker's account, then re-run doctor" });
@@ -4555,7 +4561,7 @@ export async function podmanLiveChecks(env, seams, facts) {
 	const { spawn, out = () => {}, home = safeHomeDir(), liveFs, isAlive = defaultIsAlive, pid = process.pid, nonce = randomBytes(6).toString("hex"), jobUserIdentity: ids = {}, now, delay } = seams;
 	const podman = facts.podman;
 	if (podman.run === false) {
-		return [{ ok: false, warn: true, label: `read back on podman: not run -- ${podman.reason}`, fix: "fix the podman job-user line above first, then re-run `pi-dispatch doctor --live`" }];
+		return [{ ok: false, warn: true, label: `read back on podman: not run -- ${podman.reason}`, fix: podman.fix ?? "fix the podman job-user line above first, then re-run `pi-dispatch doctor --live`" }];
 	}
 	const readInfo = makePodmanInfoReader({ run: dockerRunVia(spawn, PODMAN_INFO_TIMEOUT_MS, { bin: "podman" }) });
 	const egress = { armed: podman.egress.armed, results: [], proxy: podman.egress.proxy, proxyRunning: podman.egress.proxyRunning, unread: PODMAN_EGRESS_UNREAD };

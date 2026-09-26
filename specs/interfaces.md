@@ -978,7 +978,8 @@ refactor apart.
     job in the host's PID namespace with the worker's environment). None of them can be re-set through `dockerExtra`.
     The network's OPTIONS are not pinned and cannot be (containers.conf `pasta_options` come before the command
     line's in pasta's argv, and a conf `-T` survives any pin), so they are REFUSED: while a containers.conf this
-    account's Podman reads sets `pasta_options`, `network_cmd_options` or `annotations`, whatever the value, the venue
+    account's Podman reads sets `pasta_options`, `network_cmd_options`, `annotations` or `env`, whatever the value,
+    or is spelled so the check cannot read it (non-ASCII, a multi-line string, an escaped key), the venue
     runs no job, refusing each pre-spend as `podman-conf-widens-job` and refusing the boot where `podman` is the
     default venue (`DES-PODMAN-NATIVE-ROOTLESS-BACKEND`, issue #428).
   - **The user-namespace field (issue #354, the seam for a native Podman backend).** The spec carries `userns`,
@@ -1065,8 +1066,9 @@ refactor apart.
     job-to-job **structurally impossible** instead, which is strictly stronger than what preceded it -- two
     job containers on the default bridge can reach each other by IP today, so this **removes** an adjacency
     rather than adding one. Measured cost: ~190ms to create and attach, ~260ms to detach and remove.
-    **The proxy carries EVERYTHING, including the provider call, and there is no address-based rule
-    anywhere.** The container env gains `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` **and `NODE_USE_ENV_PROXY=1`**,
+    **The proxy carries EVERYTHING, including the provider call, and no address-based rule ALLOWS
+    anything** (the one address rule, below, only denies this host's fixed loopback and link-local addresses,
+    issue #428). The container env gains `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` **and `NODE_USE_ENV_PROXY=1`**,
     all four in the closed map (never `PI_FORWARD_ENV`, which refuses those names at boot while the policy
     is armed). The fourth is the one that matters: without it the other three steer `git`, `gh`, `npm` and
     Chromium but not the runner's own provider call, because the Anthropic SDK resolves `globalThis.fetch`
@@ -1528,11 +1530,15 @@ contract governs the argv of one container, this governs the estate that argv jo
   - **The rules are `deploy/egress-proxy.conf`**, shipped and not edited, mirrored into `worker/deploy/`.
     The split is the security property: `http_access` ordering is what makes an allowlist an allowlist, a
     misordered rule silently allows everything, so the file an operator edits contains no ordering at all.
-    The FIRST rule denies this host's own loopback and link-local destinations (`127.0.0.0/8`, `0.0.0.0/32`,
-    `169.254.0.0/16`, slirp4netns's host alias `10.0.2.2/32`, `::1`, `fe80::/10`), whatever allowlisted name
-    resolves to them (issue #428): a rootless Podman account's containers.conf can map the host's loopback into the
-    proxy's own network. Defence in depth, not the closure: under pasta's `--map-gw` the host is reached at the
-    default gateway's address, which no fixed rule names, and the podman venue refuses such a conf outright.
+    The FIRST rule is `http_access deny allowed to_host_local`: a LISTED name that resolves to one of this host's
+    fixed loopback or link-local destinations (`127.0.0.0/8`, `0.0.0.0/32`, `169.254.0.0/16`, slirp4netns's host
+    alias `10.0.2.2/32`, `::1`, `::/128`, `fe80::/10`) is refused (issue #428): a rootless Podman account's
+    containers.conf can map the host's loopback into the proxy's own network. `allowed` comes first in that line
+    on purpose: squid stops at the first ACL that does not match, and `dst` resolves the name, so a bare
+    `deny to_host_local` resolved every name a job asked for, listed or not, which is a DNS channel out
+    (measured). Defence in depth, not the closure, and only for those fixed addresses: `--map-host-loopback
+    <address>`, slirp4netns's `cidr=` and pasta's `--map-gw` put the host at addresses no fixed rule names. The
+    closure is the podman venue's refusal of such a conf, which reads the conf and not the live network.
   - **The proxy image is digest-pinned**, and the `valkey/valkey:8` precedent one service over deliberately
     does not transfer: a floating tag on a queue breaks loudly and spends nothing, while this container **is
     the allowlist**, so a floating tag would let an upstream rebuild change what every job may reach with no
@@ -4708,3 +4714,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-25 | Issue #427. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, one sentence in its egress-network bullet: `NODE_USE_ENV_PROXY=1` is not enough inside the runner, because loading the pinned pi replaces the dispatcher it installs, so the runner re-installs an env-proxy dispatcher from pi's own `undici` right after pi is loaded. The four variables and the closed map are UNCHANGED, checked, and so is `INT-EGRESS-POLICY-CONTRACT`. |
 | 2026-09-25 | Issue #435. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, one sentence under the flags: the `<jobId>` in `--name=pi-job-<jobId>` and `--network=pi-job-<jobId>-net` is the job id mapped onto `[A-Za-z0-9._-]`, every other character becoming `_`. A cron job's id is the job scheduler's `repeat:<schedulerId>:<millis>`, which Podman refuses as a container or network name (exit 125, measured on 5.8.1; docker's rule is the same, not run), so no cron job had ever started a container. `INT-EGRESS-POLICY-CONTRACT`'s `pi-job-<id>-net` row is UNCHANGED, checked: the id it names is the same mapped one, and the reaper's prefix rule does not move. |
 | 2026-09-26 | Issue #428. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, the pinned-namespaces bullet: the network's options are no longer an open residual but refused, since no argv pins them (a conf `-T` survives `pasta:--map-host-loopback,none`, measured); a containers.conf setting `pasta_options`, `network_cmd_options` or `annotations` refuses every podman job as `podman-conf-widens-job` and the boot where `podman` is the default. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the rules bullet: the proxy's first rule now denies loopback, link-local and `10.0.2.2` destinations, as defence in depth. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `podman-conf-widens-job` joins the `reason` enum, under `outcome: "policy"` with `budgetReserved: false`; no new outcome. **`INT-LIVE-PROBE-CONTRACT` UNCHANGED, checked**: doctor reads the conf files with no spawn, and a refused venue runs no live probe, as for an identity refusal. |
+| 2026-09-26 | Issue #428, review round 1. **`INT-EGRESS-POLICY-CONTRACT` AMENDED** again, the rules bullet and the carries-everything sentence: the first rule is now `http_access deny allowed to_host_local`, because a bare `deny to_host_local` made squid resolve EVERY name a job asked for, listed or not (measured with debug_options 78,3), a DNS channel out of every egress-armed job on every venue; `::/128` joins the list; the rule is stated as covering only FIXED addresses (`--map-host-loopback <address>`, slirp4netns's `cidr=` and `--map-gw` move the host); and "there is no address-based rule anywhere" becomes "no address-based rule ALLOWS anything", which the previous row left contradicting its own bullet. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED** again, the pinned-namespaces bullet: `env` joins the refused keys, and so does a file spelled so the check cannot read it. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: a transient conf read is retried, never recorded as `podman-conf-widens-job`. |

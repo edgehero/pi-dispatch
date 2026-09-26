@@ -1,4 +1,4 @@
-import { DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, DOCKER_NEVER_STARTED_EXITS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS } from "./backends.mjs";
+import { DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, DOCKER_NEVER_STARTED_EXITS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_CONF_WIDENS_JOB, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS } from "./backends.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { lstatSync } from "node:fs";
 import { checkTokenCap, recordTokenSpend, releaseBudget, reserveBudget } from "./budget.mjs";
@@ -386,11 +386,22 @@ export async function runJob(job, deps) {
 		// loopback services, the account's groups) and no argv takes back. A VENUE refusal, not a floor miss: with egress
 		// off no declared property covers what a job reaches on the host, so a floor would never ask on the deployments at
 		// risk. Determinate (the account's own files), so a RETURN (CONST-RETRY-INFRA-ONLY), here for the identity's reason:
-		// ahead of the image preflight and every spend. The file and key go to the operator's log; the comment is fixed.
+		// ahead of the image preflight and every spend. The file and key go to the operator's log; the comment is fixed,
+		// and says the configuration widens a job only when a key was FOUND: a chain that could not be read whole is
+		// refused for not being known, which is a different sentence. A read that failed for a moment (`transient`) is
+		// infrastructure, so it throws and is retried, pre-reserve, exactly like an unanswered observation.
+		if (observed?.podmanConfRefused?.transient) {
+			throw new InfraRetry("the podman venue's containers.conf could not be read just now, so whether it widens a job is not known", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+		}
 		if (observed?.podmanConfRefused) {
-			await comment(job, "Refused: the worker host's Podman configuration lets a job's container reach more than this venue allows (the host's own services or the worker account's groups), so the operator must change it before podman jobs run. Not run.");
+			await comment(
+				job,
+				observed.podmanConfRefused.key
+					? "Refused: the worker host's Podman configuration lets a job's container reach more than this venue allows (the host's own services or the worker account's groups), so the operator must change it before podman jobs run. Not run."
+					: "Refused: the worker host's Podman configuration could not be read in full, so whether it lets a job's container reach more than this venue allows is not known, and the operator must fix that before podman jobs run. Not run.",
+			);
 			log("refused_podman_conf_widens_job", { key: observed.podmanConfRefused.key ?? null, message: observed.podmanConfRefused.message });
-			return { outcome: "policy", reason: "podman-conf-widens-job", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			return { outcome: "policy", reason: PODMAN_CONF_WIDENS_JOB, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 
 		// The job image must exist on THIS host before anything else happens. Free, determinate and

@@ -35,7 +35,8 @@ export const EMPTY_SCOPED_LIMITS = `${JSON.stringify({ version: 1, limits: [] },
  * in this file, whose empty form is inert. An empty allowlist is not inert, it is a deployment where every
  * job dies at its first turn, so the safe default here is the working minimum rather than nothing.
  *
- * The provider is an ordinary entry. There is no address-based rule and nothing is special about it: the
+ * The provider is an ordinary entry. No address-based rule allows it (the proxy's one address rule only denies this
+ * host's loopback and link-local addresses, issue #428), and nothing is special about it: the
  * proxy carries provider traffic like everything else, because the runner's own `fetch` follows the proxy
  * once NODE_USE_ENV_PROXY is set, which the worker sets (worker/src/egress.mjs).
  */

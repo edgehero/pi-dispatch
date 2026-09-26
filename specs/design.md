@@ -3450,9 +3450,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   close it, and shipping that recipe as code is already Rejected above. The loopback binding bounds it only while
   nothing maps the host's loopback into a container's network, and on the native `podman` venue an account's
   containers.conf can (issue #428, measured): that venue refuses such a conf outright
-  (`DES-PODMAN-NATIVE-ROOTLESS-BACKEND`), and `deploy/egress-proxy.conf` denies loopback, link-local and
-  slirp4netns's `10.0.2.2` destinations before any allow, as defence in depth. That deny is an address rule, and it
-  is not the one Rejected above: it only ever refuses, so it cannot go stale into permitting anything.
+  (`DES-PODMAN-NATIVE-ROOTLESS-BACKEND`), and `deploy/egress-proxy.conf` denies a listed name resolving to a fixed
+  loopback, link-local or slirp4netns `10.0.2.2` destination before any allow, as defence in depth. That deny is an
+  address rule, and it is not the one Rejected above: it only ever refuses, so it cannot go stale into permitting
+  anything. It names `allowed` before `to_host_local`, so an unlisted name is never resolved by the proxy at all
+  (a bare `dst` rule resolved every name asked for, a DNS channel out, measured).
 - **Traces to**: `REQ-EGRESS-ALLOWLIST`, `INT-EGRESS-POLICY-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`,
   `INT-SANDBOX-CONTRACT`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-RETRY-INFRA-ONLY`, `DES-WORKER-ON-HOST`, `DES-CONCURRENCY-3`, `DES-PER-TRIGGER-JOB-IMAGE`,
@@ -3948,8 +3950,8 @@ a tunnel.
   image preflight, because that preflight asks the same runtime and would otherwise misname the fault (the `podman`
   venue, `DES-PODMAN-NATIVE-ROOTLESS-BACKEND`). Beside it, and for the same reason, `podmanConfRefused` (`{ reason,
   key, message }`, issue #428): a venue refusal the processor returns as `podman-conf-widens-job` right after the
-  identity's, with a fixed comment and the file and key in the operator's log. A venue without either behaves
-  exactly as before.
+  identity's, with a fixed comment and the file and key in the operator's log, or, marked `transient: true` (a conf
+  read that failed for a moment), throws for a retry instead. A venue without either behaves exactly as before.
 - **`doctor` is what makes the declaration admissible at all.** A table of guarantees nothing ever prints is
   precisely the believed-in control `CONST-EGRESS-POLICY-IN-THE-ARGV` says is worse than a known-absent one,
   so the three words must stay told apart ON THE SCREEN: `enforced` is quiet, `asserted` renders as a
@@ -4750,18 +4752,28 @@ a tunnel.
   PID namespace and received the worker's environment, the provider key with it; pinned, neither. (dockerd's
   daemon.json can default the cgroup and IPC modes too, and the `local` argv pins neither: a gap older than this
   venue.) What the argv CANNOT pin is the network's options, so the venue REFUSES them instead (issue #428): while
-  any containers.conf this account's Podman reads sets `pasta_options`, `network_cmd_options` or `annotations`, with
-  any value, the worker refuses to boot with `podman` as its default venue, and refuses each podman job otherwise, as
+  any containers.conf this account's Podman reads sets `pasta_options`, `network_cmd_options`, `annotations` or `env`,
+  with any value, the worker refuses to boot with `podman` as its default venue, and refuses each podman job otherwise, as
   `podman-conf-widens-job`, a determinate policy refusal handed back by `observationPreflight` as `podmanConfRefused`
   and returned by the processor ahead of the image preflight and every spend (`podmanConfWidening`, `WIDENING_KEY`).
   It is read over the same chain as the observations' conf keys (the vendor and `/etc` files and `conf.d`
   directories, the rootless drop-ins with and without the uid, the user's own file and `conf.d`, `XDG_CONFIG_HOME`
   honoured), per job, so removing the key needs no restart, and matched the way `MOUNT_KEY` is (any case, quoted,
-  dotted, inline table, whole-line comments skipped, an escaped key refused). What it cannot read whole refuses too
-  and names why: `CONTAINERS_CONF` or `CONTAINERS_CONF_OVERRIDE` set, an unreadable file or drop-in directory, an
-  unknown home or uid. Every such read is of this host's own files with no daemon, so the refusal is determinate
-  and has no transient arm; `podman info` is not an input, and an identity refusal is still judged first, since its
-  fix comes first. `pi-dispatch doctor` prints it as the identity causes print: ✗ with `podman` the default venue, ⚠
+  dotted, inline table, whole-line comments skipped). What it cannot read whole refuses too and names why:
+  `CONTAINERS_CONF` or `CONTAINERS_CONF_OVERRIDE` set, an unreadable file or drop-in directory, an unknown home or
+  uid, and a spelling the pattern cannot see through, which is refused rather than decoded (`ESCAPED_KEY`, and
+  `UNREAD_SPELLING`: any non-ASCII character or `"""`/`'''` multi-line string in the file, since Go's case folding
+  matches `pa\u017fta_options`, a multi-line string can hold a line starting `#`, and U+2028 breaks a JS line, each
+  measured hiding a key Podman honoured; the stock Fedora 44 file and containers/common v0.57.4's are plain ASCII
+  with no multi-line string). That spelling rule lives in the shared `confKeyFinding`, so it holds for `MOUNT_KEY`
+  and `CGROUPS_KEY` too. `env` is refused because `[engine] env` is Podman's own environment, where
+  `CONTAINERS_CONF_OVERRIDE` made it read a conf this check never reads (measured: pasta then got
+  `--map-host-loopback`), and `[containers] env` adds variables to every job; `env_host` is a different key, pinned
+  by `--env-host=false`, and does not match. The reads are of this host's own files with no daemon, so a refusal is
+  determinate, except a read that failed for a moment (`TRANSIENT_READ_ERRORS`: `EMFILE`, `ENFILE`, `EIO`,
+  `EAGAIN`, `EBUSY`, `ENOMEM`, `EINTR`, `ETIMEDOUT`, `ESTALE`), which is retried like an unanswered observation, per
+  job and at boot (exit 1), never refused; every other errno stays determinate, so an unknown one fails closed.
+  `podman info` is not an input, and an identity refusal is still judged first, since its fix comes first. `pi-dispatch doctor` prints it as the identity causes print: ✗ with `podman` the default venue, ⚠
   otherwise, naming the file and the key, from the worker's own function and with no extra spawn. Measured on
   2026-09-26 (Fedora 44, rootless Podman 5.8.1, pasta, a Valkey bound to the host's `127.0.0.1:6379`):
   - `pasta_options = ["--map-host-loopback", "169.254.1.2"]` and `["--map-gw"]` let an egress-off job
@@ -4904,14 +4916,18 @@ a tunnel.
   - **Judging the values** rather than the keys' presence (issue #428): an allowlist of harmless pasta or slirp4netns
     flags is a parser for another program's argv, and the next release's flag is the one it misses. An operator
     who set `pasta_options` for an MTU sets it on those containers' own command line or Quadlet unit instead.
-  - **Relying on the egress proxy's address deny alone** (issue #428): `deploy/egress-proxy.conf` now denies
-    loopback, link-local and slirp4netns's `10.0.2.2` before any allow, because under a loopback mapping the proxy's
-    bridge reaches the host too and an allowlisted name could resolve there. It is defence in depth, not the
-    closure: under `--map-gw` pasta maps the host's default GATEWAY address to its loopback, which no fixed rule can
-    name, and the rule does nothing for an egress-off job, which has no proxy. The closure is the venue refusal: no
-    podman job runs while the account's conf sets any of the three keys, so none runs while a proxy under that
-    account could be on a widened network (after removing a key, the containers on a bridge network, the proxy
-    among them, must be restarted, since the shared rootless namespace keeps the options it started with).
+  - **Relying on the egress proxy's address deny alone** (issue #428): `deploy/egress-proxy.conf` now denies a
+    listed name that resolves to a fixed loopback, link-local or slirp4netns `10.0.2.2` destination
+    (`http_access deny allowed to_host_local`, `allowed` first so that no unlisted name is resolved), because under
+    a loopback mapping the proxy's bridge reaches the host too and an allowlisted name could resolve there. It is
+    defence in depth, not the closure, and covers only the fixed addresses: `--map-host-loopback <any address>`,
+    slirp4netns's `cidr=` and `--map-gw` (the default GATEWAY's address) put the host where no fixed rule can name
+    it, and the rule does nothing for an egress-off job, which has no proxy. The closure is the venue refusal, and
+    its limit is stated rather than hidden: it reads the CONF, not the live network. While a key is present no
+    podman job runs; once it is removed the next job is admitted, but the account's shared rootless network
+    namespace, and so the proxy's network, keeps the options it started with until every container on a bridge
+    network restarts (measured: the namespace's pasta argv is fixed at its start). The refusal's own text and
+    doctor's tell the operator to restart them; the worker does not read the live pasta argv back, a follow-up.
   - **Rootful Podman on this venue with keep-id**: Podman accepts it and adds root's group (measured), and rootful
     Podman is already served, as `local`.
   - **Normalising the attached exit 1 to never-started**: the catatonit line is the only sign, it is on stderr where
@@ -5093,3 +5109,4 @@ a tunnel.
 | 2026-09-25 | Issue #354, part 2, the final review round. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**, its optional-members bullet: `observationPreflight` may hand back `jobUserRefused`, which the processor refuses before the image preflight. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED** twice. The identity-first sentence now covers the image preflight too: the previous round's repair passed a refused identity through to `jobUserPreflight`, which the processor calls only after its image probe, and that probe asks the same Podman, so an absent podman under a floor was retried forever and a rootful one without the image in its store was refused as `job-image-missing` (both reproduced through `runJob`, and pinned there now). And the claim that an egress-armed job is unaffected by a loopback-mapping `pasta_options` is scoped to the job container and marked reasoned; whether the proxy behind the rootless network namespace inherits it is left to issue #428. |
 | 2026-09-25 | Issue #427. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED**, one parenthesis in the rejected address-rule alternative: once pi is loaded, the proxy carries the provider call only because the runner puts it back. The decision is UNCHANGED, checked. |
 | 2026-09-26 | Issue #428. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**: the network-options residual is DECIDED, refused rather than open. While any containers.conf this account's Podman reads sets `pasta_options`, `network_cmd_options` or `annotations`, whatever the value, the venue refuses (`podman-conf-widens-job`): at boot while `podman` is the default venue, per job before the image preflight and every spend otherwise, and in doctor as the identity causes are. The entry now carries the 2026-09-26 measurements (Fedora 44, Podman 5.8.1, pasta): the two loopback mappings opened an egress-off job, a job on its own non-internal bridge and the proxy's bridge to the host's `127.0.0.1` services, `-T 6379` opened the egress-off job's own loopback, slirp4netns's `allow_host_loopback=true` opened the same three, the keys were honoured from the user, `/etc` drop-in and per-uid rootless drop-in files, `keep_original_groups` made a `root:podman` `0640` file readable, and an egress-armed job on its `--internal` network was closed in every row (no default route, and `--cap-drop=ALL` cannot add one), with what was NOT measured said (job-to-job across two internal networks in this matrix, IPv6). Four rejected alternatives join the list: the argv pin `pasta:--map-host-loopback,none` (a conf `-T` survives it, measured), a per-job bridge (the shared rootless namespace takes the same options, measured open), a floor observation (with egress off no declared property covers host reach, so it would never fire where it matters), and judging values rather than presence; a fifth records the squid address deny as defence in depth, not the closure (`--map-gw` maps the gateway address, which no fixed rule names). **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**, its optional-members bullet: `observationPreflight` may also hand back `podmanConfRefused`. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED**, its loopback residual only: the loopback binding bounds the gateway only while nothing maps the host's loopback into a container's network, the podman venue now refuses a conf that can, and the proxy's new address deny is not the address ALLOW its Rejected list refuses (it only ever refuses, so it cannot go stale into permitting anything). The decision is UNCHANGED, checked. **`DES-PODMAN-THROUGH-ITS-DOCKER-API` UNCHANGED, checked**: rootful Podman through the Docker API reads no rootless account's containers.conf chain, and its job networks are docker-shaped. |
+| 2026-09-26 | Issue #428, review round 1, five defects found by an adversarial pass. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**: (1) `env` joins the refused keys, since `[engine] env = ["CONTAINERS_CONF_OVERRIDE=..."]` made Podman read a conf the worker never reads (measured: pasta got `--map-host-loopback`; the mounts and cgroups observations were defeated the same way) and `[containers] env` adds variables to every job; `env_host` is a different key, pinned by `--env-host=false`, and does not match. (2) Three spellings Podman honours hid a key from every conf pattern (Go case folding of U+017F, a multi-line string holding a `#` line, U+2028 or U+2029 inside a string), so the SHARED `confKeyFinding` now withholds credit from any file with a non-ASCII character or a `"""`/`'''` string (`UNREAD_SPELLING`), covering `MOUNT_KEY` and `CGROUPS_KEY` too; the stock Fedora 44 file and containers/common v0.57.4's (Ubuntu 24.04's source) are plain ASCII with none. (3) A read that fails for a moment (`TRANSIENT_READ_ERRORS`) is no longer a permanent refusal that drops the job: it is retried, per job as an infrastructure throw and at boot as exit 1, and an observation over the same helpers reads it as unanswered; every other errno stays determinate. The entry's "no transient arm" sentence is corrected. (4) The proxy deny's rejected-alternative bullet overclaimed: after a key is removed the next job IS admitted while the shared rootless namespace, and so the proxy's network, may still carry the old options until every bridge container restarts; the text now says so, and that the worker reads the conf, not the live pasta argv (a follow-up). (5) The forge comment for a chain that could not be read no longer says the configuration widens a job. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED** again, its loopback residual: the deny names `allowed` first, so an unlisted name is never resolved (a bare `dst` rule was a DNS channel out, measured), and covers only fixed addresses. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: `podmanConfRefused` may carry `transient: true`, which the processor throws. |

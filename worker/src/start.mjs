@@ -535,9 +535,11 @@ export async function startWorker(
 	// blessed, each podman job is refused and the default venue's still run). A VENUE refusal rather than a floor
 	// observation: with egress off no declared property covers what a job reaches on the host, so a floor would never
 	// fire on the deployments at risk. Read from this host's files with no daemon, so it is determinate whatever the info
-	// read said, and tagged (exit 2): a restart reads the same bytes. After the identity, whose fix comes first.
-	const podmanConfRefusalText = podmanConfBootRefusal(bootPodmanDecision, config.defaultBackend, { fs: observationFs, home: jobUserIdentity.home, env, euid: jobUserIdentity.euid });
-	if (podmanConfRefusalText) throw configError(podmanConfRefusalText);
+	// read said, and tagged (exit 2): a restart reads the same bytes. After the identity, whose fix comes first. The one
+	// exception is a read that failed for a moment (out of descriptors, an I/O error), which is untagged (exit 1) so the
+	// supervisor restarts it, as an unanswered observation is.
+	const podmanConfBoot = podmanConfBootRefusal(bootPodmanDecision, config.defaultBackend, { fs: observationFs, home: jobUserIdentity.home, env, euid: jobUserIdentity.euid });
+	if (podmanConfBoot) throw podmanConfBoot.transient ? new Error(podmanConfBoot.message) : configError(podmanConfBoot.message);
 	// The podman venue's own observations, judged for `podman` ALONE, as the endpoint and the daemon's are for `local`
 	// alone: each venue's words are earned by its own reads, and judging one venue's answers over every blessed venue
 	// would read the other's observations as unanswered, which is the transient arm, exit 1 on every restart. Same split
@@ -1793,14 +1795,15 @@ export function podmanBootRefusal(decision, defaultBackend) {
 }
 
 /**
- * The boot refusal text for a widening containers.conf on the podman venue (issue #428), or `null` to boot: only while
- * `podman` is the DEFAULT venue, `podmanBootRefusal`'s rule, and not when the identity is already refused (that refusal
- * names the fix that comes first, and with `podman` merely blessed its jobs are refused one by one anyway).
+ * The boot refusal for a widening containers.conf on the podman venue (issue #428), as `{ message, transient }`, or
+ * `null` to boot: only while `podman` is the DEFAULT venue, `podmanBootRefusal`'s rule, and not when the identity is
+ * already refused (that refusal names the fix that comes first, and with `podman` merely blessed its jobs are refused
+ * one by one anyway). `transient` is a read that failed for a moment, which the caller throws untagged.
  */
 export function podmanConfBootRefusal(decision, defaultBackend, files) {
 	if (defaultBackend !== PODMAN_BACKEND || !decision || decision.mode === "unmappable") return null;
 	const widened = podmanConfWidening(files);
-	return widened ? podmanConfRefusal(widened) : null;
+	return widened ? { message: podmanConfRefusal(widened), transient: widened.transient === true } : null;
 }
 
 /** What makes two job-user decisions the same for the `job_user` log line. */
