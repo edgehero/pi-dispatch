@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { test } from "node:test";
-import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, parseExitContext, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, sanitizeJobId } from "../src/run-history.mjs";
+import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, RUNNER_POLICY_REASONS, sanitizeJobId } from "../src/run-history.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 
 /**
@@ -1339,4 +1340,60 @@ test("a NON-github replica record carries replica/replicas AND the forge's own t
 	});
 	assert.equal(plain.replica, null);
 	assert.equal(plain.replicas, null);
+});
+
+// --- issue #437: the runner's exit-2 reason, a label inside exit 2 and never a class ---
+
+const exitLine = (fields) => `${JSON.stringify({ event: "exit", jobId: "gh-1", ...fields })}\n`;
+
+test("parseExitReason returns a closed-set reason only off a LAST exit line that itself says code 2", () => {
+	assert.equal(parseExitReason(exitLine({ code: 2, reason: "provider-auth-refused", message: "401 x" })), "provider-auth-refused");
+	// Noise after the exit line, and a docker prefix glued onto it, change nothing.
+	assert.equal(parseExitReason(`noise\n${exitLine({ code: 2, reason: "provider-auth-refused" })}trailing docker noise\n`), "provider-auth-refused");
+	assert.equal(parseExitReason(`2026-09-26T00:00:00Z ${exitLine({ code: 2, reason: "provider-auth-refused" })}`), "provider-auth-refused");
+	// Any other code on the line: the runner said something other than a policy refusal in its own words.
+	for (const code of [1, 0, "2", 2.5, null, undefined]) {
+		assert.equal(parseExitReason(exitLine({ code, reason: "provider-auth-refused" })), null, `code ${JSON.stringify(code)}`);
+	}
+	// A reason outside the closed set is unrepresentable here, including the runner's other exit-2 words.
+	for (const reason of ["turn_budget", "token_budget", "config", "aborted", "runner-policy", "Provider-Auth-Refused", "provider-auth-refused ", "", null, 2, { x: 1 }]) {
+		assert.equal(parseExitReason(exitLine({ code: 2, reason })), null, `reason ${JSON.stringify(reason)}`);
+	}
+	// Only the LAST exit event counts: an earlier refusal line is not what the runner exited on.
+	assert.equal(parseExitReason(exitLine({ code: 2, reason: "provider-auth-refused" }) + exitLine({ code: 2, reason: "turn_budget" })), null);
+	assert.equal(parseExitReason(exitLine({ code: 2, reason: "turn_budget" }) + exitLine({ code: 2, reason: "provider-auth-refused" })), "provider-auth-refused");
+});
+
+test("parseExitReason never throws and reads absence as null", () => {
+	for (const text of [undefined, null, 42, {}, "", "\n\n", "{not json", '{"event":"exit"', '{"event":"start","code":2,"reason":"provider-auth-refused"}']) {
+		assert.doesNotThrow(() => parseExitReason(text));
+		assert.equal(parseExitReason(text), null, JSON.stringify(text));
+	}
+});
+
+test("makeLogSink close reports exitReason even with raw logs disabled -- the label must not depend on the PII switch", async () => {
+	for (const enabled of [false, true]) {
+		const fs = makeFakeFs({ stream: makeFakeStream({ emitOn: "finish" }) });
+		const jobLog = makeLogSink({ logsDir: "/logs", enabled, fs })("gh-auth");
+		jobLog.write(Buffer.from(exitLine({ code: 2, reason: "provider-auth-refused", message: "401 invalid x-api-key" })));
+		const closed = await jobLog.close();
+		assert.equal(closed.exitReason, "provider-auth-refused", `enabled=${enabled}`);
+		assert.equal(fs.calls.createWriteStream, enabled ? 1 : 0);
+	}
+	const fs = makeFakeFs({ stream: makeFakeStream() });
+	const quiet = makeLogSink({ logsDir: "/logs", enabled: false, fs })("gh-none");
+	quiet.write(Buffer.from(exitLine({ code: 2, reason: "turn_budget" })));
+	assert.equal((await quiet.close()).exitReason, null);
+});
+
+test("every RUNNER_POLICY_REASONS member is a literal the runner itself writes (the worker cannot import the runner)", () => {
+	// The two packages ship separately: the runner lives in the job image, the worker on the host. A
+	// member renamed on one side only would leave the worker waiting for a word the runner never says,
+	// and every refusal would read as runner-policy again with nothing failing. So read the source.
+	const runnerSrc = readFileSync(new URL("../../image/runner/src/outcome.mjs", import.meta.url), "utf8");
+	assert.ok(RUNNER_POLICY_REASONS.size > 0);
+	for (const reason of RUNNER_POLICY_REASONS) {
+		assert.ok(runnerSrc.includes(`reason: "${reason}"`), `image/runner/src/outcome.mjs no longer emits reason "${reason}"`);
+	}
+	assert.ok(runnerSrc.includes('reason: "provider-auth-refused"'), "the runner's issue #437 literal moved");
 });

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -7,6 +8,7 @@ import { test } from "node:test";
 // the runner's OWN candidate resolver is deliberate: the layout fact it encodes is the thing that
 // breaks silently, so pin the function the runner actually calls rather than a copy of its reasoning.
 import { resolvePiAiCompat } from "../src/usage-meter.mjs";
+import { classifyStopReason } from "../src/outcome.mjs";
 
 /**
  * REQ-UPSTREAM-CONTRACT-TESTS -- assert against the PINNED ARTIFACT, not against HEAD.
@@ -582,4 +584,118 @@ test("allToolNames stays UN-exported from the package root -- the day pi exports
 	// should collapse onto the public export -- loudly, via this message, not by someone noticing.
 	assert.equal(typeof mod.allToolNames, "undefined", "pi now exports allToolNames from the root: prefer it over the factory derivation and the file-URL reach-in");
 	assert.equal(typeof mod.createToolDefinition, "undefined", "pi now exports createToolDefinition from the root: same retirement applies");
+});
+
+// ── Issue #437: a provider's refusal of the credential, driven through the pinned pi-ai ─────────────
+//
+// providerAuthRefused in src/outcome.mjs matches pi-ai's DISPLAY STRING, because that string is all the
+// runner is handed. A pin bump that reformats one provider's error would silently move a refusal back to
+// retryable (or, worse, a transient error to not-retried) with every unit test still green, since those
+// tests hold hand-written strings. So each api family is driven for real: a loopback server answers 401 and
+// 403 with that provider's own error JSON, the family's stream() runs against it with a dummy key, and the
+// terminal AssistantMessage goes through classifyStopReason exactly as the runner's would. Loopback only,
+// so it runs in the offline, no-API-key CI context this file is for.
+//
+// The modules are the `./api/<family>` public export of the NESTED pi-ai copy (the one pi itself
+// dispatches through, as resolvePiAiCompat encodes), reached as siblings of the compat url for the reason
+// the providers/all.js test above gives: a bare specifier would name the hoisted copy instead.
+
+/** Each family's realistic refusal body, keyed by the wire shape its SDK parses. */
+const AUTH_ERROR_BODIES = {
+	anthropic: (status) => ({
+		type: "error",
+		error: status === 401 ? { type: "authentication_error", message: "invalid x-api-key" } : { type: "permission_error", message: "Your API key does not have permission to use the specified resource." },
+	}),
+	openai: (status) => ({
+		error: status === 401
+			? { message: "Incorrect API key provided: dummy-key.", type: "invalid_request_error", param: null, code: "invalid_api_key" }
+			: { message: "You are not allowed to sample from this model", type: "invalid_request_error", param: null, code: null },
+	}),
+	google: (status) => ({
+		error: status === 401
+			? { code: 401, message: "API key not valid. Please pass a valid API key.", status: "UNAUTHENTICATED" }
+			: { code: 403, message: "Permission denied: Consumer has been suspended.", status: "PERMISSION_DENIED" },
+	}),
+};
+
+/**
+ * The CLOSED expected table. A row that changes class under a pin bump fails here with the observed
+ * message, which is the evidence needed to decide whether providerAuthRefused's list grows or shrinks.
+ * `residual-infra` rows are the accepted residual: the refusal is still retried until attempts run out.
+ */
+const AUTH_REFUSAL_TABLE = [
+	{ api: "anthropic-messages", provider: "anthropic", wire: "anthropic", path: "", expect: { 401: "provider-auth-refused", 403: "provider-auth-refused" } },
+	{ api: "openai-completions", provider: "openai", wire: "openai", path: "/v1", expect: { 401: "provider-auth-refused", 403: "provider-auth-refused" } },
+	{ api: "openai-responses", provider: "openai", wire: "openai", path: "/v1", expect: { 401: "provider-auth-refused", 403: "provider-auth-refused" } },
+	{ api: "azure-openai-responses", provider: "azure-openai-responses", wire: "openai", path: "/openai/v1", expect: { 401: "provider-auth-refused", 403: "provider-auth-refused" } },
+	{ api: "mistral-conversations", provider: "mistral", wire: "openai", path: "", expect: { 401: "provider-auth-refused", 403: "provider-auth-refused" } },
+	// Residual: @google/genai folds the whole JSON body into the message and pi-ai's formatProviderError
+	// then returns it unchanged, so the status sits inside a JSON object rather than at an anchored
+	// position. Matching into a provider's body is exactly the unanchored read providerAuthRefused refuses
+	// to make, so this row stays retryable by decision, and a pin bump that starts prefixing it fails here.
+	{ api: "google-generative-ai", provider: "google", wire: "google", path: "/v1beta", expect: { 401: "residual-infra", 403: "residual-infra" } },
+];
+
+test("every pinned api family's 401/403 lands in its expected exit class (loopback, no key)", { skip }, async () => {
+	const candidates = resolvePiAiCompat();
+	assert.ok(candidates.length > 0, "the runner must find at least one pi-ai compat candidate");
+
+	let answer = { status: 500, body: {} };
+	const requests = [];
+	const server = createServer((req, res) => {
+		requests.push(`${req.method} ${req.url}`);
+		req.resume();
+		req.on("end", () => {
+			res.writeHead(answer.status, { "content-type": "application/json" });
+			res.end(JSON.stringify(answer.body));
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const origin = `http://127.0.0.1:${server.address().port}`;
+
+	const observed = [];
+	try {
+		for (const row of AUTH_REFUSAL_TABLE) {
+			const moduleUrl = new URL(`./api/${row.api}.js`, candidates[0].url);
+			assert.ok(existsSync(fileURLToPath(moduleUrl)), `the pinned pi-ai no longer ships api/${row.api}.js -- re-derive its refusal shape`);
+			const api = await import(moduleUrl.href);
+			for (const status of [401, 403]) {
+				answer = { status, body: AUTH_ERROR_BODIES[row.wire](status) };
+				const before = requests.length;
+				const model = {
+					id: "pinned-probe",
+					name: "pinned-probe",
+					api: row.api,
+					provider: row.provider,
+					baseUrl: `${origin}${row.path}`,
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 1000,
+					maxTokens: 16,
+				};
+				const terminal = await api.stream(model, { messages: [{ role: "user", content: "hi", timestamp: 0 }] }, { apiKey: "dummy-key" }).result();
+				// The stub must actually have been asked: a family that errored before sending would produce
+				// a message that proves nothing about how the provider's refusal is formatted.
+				assert.ok(requests.length > before, `${row.api} ${status}: the family never reached the loopback stub`);
+				assert.equal(terminal.stopReason, "error", `${row.api} ${status}: expected stopReason "error", got ${terminal.stopReason}`);
+				const outcome = classifyStopReason(terminal);
+				const got = outcome.reason === "provider-auth-refused" ? "provider-auth-refused" : outcome.reason === "error" ? "residual-infra" : outcome.reason;
+				observed.push({ api: row.api, status, got, errorMessage: terminal.errorMessage });
+			}
+		}
+	} finally {
+		server.close();
+	}
+
+	for (const { api, status, got, errorMessage } of observed) {
+		const want = AUTH_REFUSAL_TABLE.find((row) => row.api === api).expect[status];
+		assert.equal(
+			got,
+			want,
+			`${api} ${status} now classifies as ${got} (errorMessage: ${JSON.stringify(errorMessage)}). The pinned pi-ai changed ` +
+				"how this provider formats a refusal: re-derive providerAuthRefused's closed list in src/outcome.mjs and this table together.",
+		);
+	}
+	assert.equal(observed.length, AUTH_REFUSAL_TABLE.length * 2, "every row must be driven for both statuses");
 });

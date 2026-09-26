@@ -52,13 +52,15 @@ arguments:
 
 - `outcome` is `failed` (final infrastructure failure) or `policy` (a worker abort or an in-container
   policy stop).
-- `reason` is a fixed token, never a message: `worker-abort`, `runner-policy`,
+- `reason` is a fixed token, never a message: `worker-abort`, `runner-policy`, `provider-auth-refused`
+  (the AI provider answered 401 or 403 to the worker's key, so every job fails until the key is fixed),
   `container-never-started`, `container-detached`, `secret-resolver-unreachable`, any other fixed token a failure legitimately
   carries, or `infra` when it carried none. Anything message-shaped is flattened to `infra` before it can
   reach your argv.
 - `host` is the worker's declared name, possibly empty.
 
-It fires for: the 30-minute kill, an in-container policy stop (exit 2), and the final infrastructure
+It fires for: the 30-minute kill, an in-container policy stop (exit 2, including a provider's refusal of
+the key), and the final infrastructure
 failure, including a job killed by a worker crash (the stall path fails it at the next pickup, and the
 observing worker fires the hook). It does NOT fire for completions, for free pre-spend refusals (they
 are free, they already comment, and a delivery storm against a spent cap must not page anyone), for

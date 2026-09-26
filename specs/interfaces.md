@@ -475,7 +475,7 @@ refactor apart.
   |---|---|---|
   | `0` | Agent completed — **including** concluding "I cannot fix this" | Success. Never retried |
   | `1` | Infrastructure failure (container died, network, provider 5xx/429) | Retryable |
-  | `2` | Budget or policy refusal (cap exhausted, turn budget hit, token budget hit) | Not retried |
+  | `2` | Budget or policy refusal (cap exhausted, turn budget hit, token budget hit, the provider refused the credential) | Not retried |
 
   **A worker-initiated termination overrides the numeric code.** When the worker itself stops the
   container — `docker stop` on the 30-minute timeout (`cancelJob`), on graceful shutdown, or on an
@@ -503,6 +503,7 @@ refactor apart.
   | `"Agent is already processing."` | **throws** (before the lifecycle try) | `1` — our bug |
   | Extension error in `before_agent_start` | **throws** (preflight) | `1` |
   | Provider 429 / 5xx / network death | `stopReason: "error"` | `1` — infra, retryable |
+  | **The provider refused the credential** (HTTP 401 / 403, issue #437) | `stopReason: "error"` whose `errorMessage` matches one of `providerAuthRefused`'s CLOSED anchored shapes: `401`/`403` followed by a space or `:` at position 0 (the Anthropic SDK's `${status} ${message}` and pi-ai's unprefixed `<status>: <body>`), or the fixed prefixes `OpenAI API error (401\|403): `, `Azure OpenAI API error (401\|403): ` and `Mistral API error (401\|403): ` | `2` / `provider-auth-refused`: the worker hands the container the same key on every attempt, so a retry pays for a container to rediscover the refusal. Each shape is proved against the pinned pi-ai by a loopback table (`image/runner/test/pinned-api.test.mjs`) that drives every family's own `stream()` into a 401 and a 403. **Residual, by decision**: `google-generative-ai` folds the raw JSON body into its message with no status at an anchored position, so its refusal still reads as `1` and retries until attempts run out; the table pins that row as residual so a pin bump that changes it fails. Anchoring is the point: an unanchored `401` would read `500 upstream said 401` or a proxy's `Proxy response (403) !== 200 when HTTP Tunneling` as a refusal and stop retrying a transient failure, the costlier of the two mistakes |
   | Our turn budget or timeout aborts | `stopReason: "aborted"` | `2` |
   | Our per-job **token budget** aborts | `stopReason: "aborted"` | `2` — `decideExit` intercepts it as `reason: "token_budget"` BEFORE the generic `"aborted"`, exactly as the turn budget is intercepted (`REQ-TOKEN-ACCOUNTING-AND-CAPS`) |
   | The **process-wide** token budget breaches mid-fanout (a subagent session's call trips it) | `stopReason: "aborted"` on the root — every later call **by any session** is answered with a synthetic aborted stream | `2` / `token_budget` — the same row as above by design: `decideExit` reads one `tokenAborted` flag and neither meter gets its own exit code, so an operator never has to learn which one fired |
@@ -547,6 +548,16 @@ refactor apart.
   (`parseExitTurns` / `parseExitTokens`) into the run record and **must not feed exit-code or retry
   classification** — that is this protocol's job. The catch-path exit line (a preflight throw, no session
   ran) omits both, so each parses to `null`.
+  **The exit line's `reason` is read for one purpose and cannot move a job between classes** (issue #437).
+  `parseExitReason` returns it only when it is a member of the worker's CLOSED `RUNNER_POLICY_REASONS`
+  (today exactly `provider-auth-refused`) AND the same, LAST exit line says `code: 2`; anything else is
+  `null`. The processor consults it only inside its container-exit-`2` branch, where it replaces the
+  `runner-policy` label and nothing else: **the container exit code alone decides the retry class**, so a
+  container exiting `1` while printing a refusal line is still an infra retry, and the worst a forged line
+  can do on a real `2` is swap one not-retried label for another from the closed set. Every other runner
+  reason (`turn_budget`, `token_budget`, `config`, `job-inputs-unreadable`, ...) still records as
+  `runner-policy`. The runner's literal and the worker's set are bolted by a worker test that reads
+  `image/runner/src/outcome.mjs`, since the worker cannot import the runner.
   **`tokens` gained eight keys with the process-wide meter** (`REQ-TOKEN-ACCOUNTING-AND-CAPS`), and **not
   one of them feeds classification either**: `metered` (`true` from the process-wide meter, `false` from
   the `subscribe()` fallback — the flag that tells a reader whether the total covers every in-process
@@ -3184,7 +3195,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|unprotected-branch|runner-policy|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|once-already-spent|scope-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|unprotected-branch|runner-policy|provider-auth-refused|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|once-already-spent|scope-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -3261,6 +3272,16 @@ validator rather than a second copy of it.
   keeps the raw `jobId`. `reason` is a fixed enum passed through from the terminal outcome — never
   free-form and never payload text — and `turns` is `null` when the container died before emitting the
   runner `exit` line.
+
+  **A container exit `2` records `runner-policy` unless the runner named a reason the worker keeps**
+  (issue #437). The one such reason today is `provider-auth-refused`: the provider answered 401 or 403 to
+  the credential. The parse rule is `parseExitReason`'s: scan the bounded stdout tail from the end, take
+  the LAST `exit` event, and return its `reason` only when that line's own `code` is `2` and the reason is
+  a member of the closed `RUNNER_POLICY_REASONS`; otherwise `null`, and never a throw. The tail is kept
+  whether or not `PI_CAPTURE_JOB_LOGS` writes the `.log`, so the label does not depend on the raw-log
+  switch. It only ever relabels an exit `2` (the exit code alone decides the retry class,
+  `INT-RUNNER-EXIT-CODE-PROTOCOL`), and it is a fixed token, so the record stays PII-free: the provider's
+  message on the same exit line is never read.
 
   `session.reason` reads as one flat list but has **three producers**, which is why a token can look
   unreachable from whichever half of the code you happen to be in. The enum has always been documented
@@ -4557,8 +4578,12 @@ this project never grows one.
   must be non-empty and no element may lead with a dash; `host` may honestly be `""`.
 - **Fires for the paid terminals only**: outcome `failed` at the TERMINAL failed event (`finishedOn`
   set -- BullMQ writes it on the non-retry branch alone, and the emit follows the move, so the guard
-  reads the queue's own decision), and outcome `policy` with reason `worker-abort` or `runner-policy` at
-  the completed event (policy RETURNS, so a failed-only mount would miss both). Never for completions,
+  reads the queue's own decision), and outcome `policy` with reason `worker-abort`, `runner-policy` or
+  `provider-auth-refused` at the completed event (policy RETURNS, so a failed-only mount would miss them).
+  `provider-auth-refused` (issue #437) is a container exit `2` whose runner named a provider's 401/403
+  refusal of the credential: it would have paged as `runner-policy` anyway, and it gets its own token
+  because a bad key needs the operator and fails every job until they act, which is the case this hook
+  exists for. It fits the reason shape, so it crosses into argv as itself. Never for completions,
   pre-spend refusals, retried attempts, or `operator-cancel`.
 - **At most once per job, best effort, and NOTHING flows back**: the hook cannot change an outcome
   (fired from listeners outside every deciding try, and `fire` never throws); its exit code and signal
@@ -4699,3 +4724,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-25 | Issue #354, part 2, the review round. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: a new bullet, the pinned namespaces. The Podman builder follows `--userns=keep-id` with `--pid`, `--ipc`, `--uts` and `--cgroupns` private, `--env-host=false` and `--http-proxy=false`, and gives a job with no network `--network=private`, none of which `dockerExtra` can re-set; the network's options are not pinned and cannot be (issue #428). `INT-LIVE-PROBE-CONTRACT` UNCHANGED, checked. |
 | 2026-09-25 | Issue #427. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, one sentence in its egress-network bullet: `NODE_USE_ENV_PROXY=1` is not enough inside the runner, because loading the pinned pi replaces the dispatcher it installs, so the runner re-installs an env-proxy dispatcher from pi's own `undici` right after pi is loaded. The four variables and the closed map are UNCHANGED, checked, and so is `INT-EGRESS-POLICY-CONTRACT`. |
 | 2026-09-25 | Issue #435. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, one sentence under the flags: the `<jobId>` in `--name=pi-job-<jobId>` and `--network=pi-job-<jobId>-net` is the job id mapped onto `[A-Za-z0-9._-]`, every other character becoming `_`. A cron job's id is the job scheduler's `repeat:<schedulerId>:<millis>`, which Podman refuses as a container or network name (exit 125, measured on 5.8.1; docker's rule is the same, not run), so no cron job had ever started a container. `INT-EGRESS-POLICY-CONTRACT`'s `pi-job-<id>-net` row is UNCHANGED, checked: the id it names is the same mapped one, and the reaper's prefix rule does not move. |
+| 2026-09-26 | Issue #437. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the stopReason table gains the provider-credential row (HTTP 401/403 as `stopReason: "error"` with an errorMessage matching one of `providerAuthRefused`'s CLOSED anchored shapes exits `2` / `provider-auth-refused`, not `1`), each shape proved against the pinned pi-ai by a loopback table that drives every family's own `stream()`; `google-generative-ai` is the named residual that still retries. The rule that new vocabulary rides `reason` under the existing codes stands and is what this uses. The telemetry paragraph gains the one exit-line field the worker reads for the outcome, and the rule that bounds it: the container exit code alone decides the retry class, and the parsed reason only picks a label inside exit `2`. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the `reason` enum gains `provider-auth-refused`, and the parse rule is stated (the LAST exit event, its own `code` must be `2`, its reason a member of the closed `RUNNER_POLICY_REASONS`, read from the tail kept whether or not raw logs are captured). **`INT-ON-FAILURE-HOOK-CONTRACT` AMENDED**: the paid policy terminals are `worker-abort`, `runner-policy` and `provider-auth-refused`; the shape guard is unchanged and the new token passes it. **Code evidence**: image/runner/src/outcome.mjs; image/runner/test/pinned-api.test.mjs; worker/src/run-history.mjs; worker/src/run-container.mjs; worker/src/processor.mjs; worker/src/start.mjs. |

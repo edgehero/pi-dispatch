@@ -6,7 +6,7 @@
  */
 export const EXIT_COMPLETED = 0; // agent ran -- INCLUDING concluding "I cannot fix this"
 export const EXIT_INFRA = 1; // retryable: provider 5xx/429, network, our own bug
-export const EXIT_POLICY = 2; // not retried: turn budget, cap, config error
+export const EXIT_POLICY = 2; // not retried: turn budget, cap, config error, provider refused the credential
 
 /** pi-ai@0.80.7 dist/types.d.ts:273 -- all five. Enumerated so "length" cannot hide in a default branch. */
 export const STOP_REASONS = ["stop", "length", "toolUse", "error", "aborted"];
@@ -114,6 +114,41 @@ export function decideExit({ budgetAborted, budgetTurns, tokenAborted, terminal,
 }
 
 /**
+ * The CLOSED list of errorMessage shapes that mean "the provider refused this credential" (issue #437).
+ *
+ * pi-ai hands the runner a display string, not the HTTP status, so a match on the string is the only
+ * tool available, exactly as for classifyThrow's preflight vocabulary. Every entry is ANCHORED at the
+ * start and names the status in a fixed position, because the alternative (a bare /401|403/ anywhere)
+ * would read "500 upstream said 401" or a proxy's "Proxy response (403) !== 200 when HTTP Tunneling" as a
+ * refusal and stop retrying a transient failure, which is the costlier mistake of the two: a missed
+ * refusal only pays for its retries, a false one drops real work. Each shape is PROVED against the pinned
+ * pi-ai by the loopback table in test/pinned-api.test.mjs, which is what lets a pin bump that changes a
+ * provider's format fail a test instead of silently moving a refusal back to retryable.
+ *
+ * - `401 {...}` / `403: {...}`: the Anthropic SDK formats `${status} ${message}`, and pi-ai's
+ *   formatProviderError without a prefix gives `<status>: <body>` (openai-completions,
+ *   openai-codex-responses). The lookahead is what keeps "4010 x" and "403x" out.
+ * - `OpenAI API error (401): ...`, `Azure OpenAI API error (401): ...`, `Mistral API error (401): ...`:
+ *   the fixed prefixes pi-ai's openai-responses, azure-openai-responses and mistral-conversations
+ *   compose. Literals, not a generic `^.* API error \(`, so a new provider joins by proof, not by shape.
+ *
+ * google-generative-ai is deliberately NOT here: at the pin its message is the raw JSON body with no
+ * status in a fixed position, so it stays retryable infra (the table records that row as residual).
+ */
+const PROVIDER_AUTH_REFUSED = [
+	/^(?:401|403)(?=[ :])/,
+	/^OpenAI API error \((?:401|403)\): /,
+	/^Azure OpenAI API error \((?:401|403)\): /,
+	/^Mistral API error \((?:401|403)\): /,
+];
+
+/** True when a terminal errorMessage is a provider's refusal of the credential. Never throws. */
+export function providerAuthRefused(errorMessage) {
+	if (typeof errorMessage !== "string") return false;
+	return PROVIDER_AUTH_REFUSED.some((pattern) => pattern.test(errorMessage));
+}
+
+/**
  * Map the terminal assistant message's stopReason to an exit code.
  *
  * `session.prompt()` returns Promise<void>, so there is nothing to inspect; the message
@@ -134,6 +169,13 @@ export function classifyStopReason(terminal) {
 			return { code: EXIT_POLICY, reason: "aborted" };
 
 		case "error":
+			// A provider that refused the credential (HTTP 401/403) refuses it again on every retry: the
+			// worker hands the container the same key each attempt, so retrying pays for a container to
+			// rediscover a determinate refusal (issue #437, CONST-RETRY-INFRA-ONLY). It rides the EXISTING
+			// policy code with its own reason, never a new exit code (INT-RUNNER-EXIT-CODE-PROTOCOL).
+			if (providerAuthRefused(terminal.errorMessage)) {
+				return { code: EXIT_POLICY, reason: "provider-auth-refused", message: terminal.errorMessage };
+			}
 			// Provider 5xx/429/network. Retryable -- this is what attempts: 2 is for.
 			return { code: EXIT_INFRA, reason: "error", message: terminal.errorMessage };
 

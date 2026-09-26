@@ -47,6 +47,16 @@ test("the hook receives exactly [jobId, outcome, reason, host], exec'd with no s
 	assert.deepEqual(Object.keys(seen.logs[0].f), ["jobId", "code", "detail"], "the pinned key set -- no message, no argv echo");
 });
 
+test("the provider-auth-refused policy reason crosses into argv as itself (issue #437)", async () => {
+	// It is the one runner-originated reason the hook names, so it must fit REASON_SHAPE rather than flatten to
+	// "infra": an operator's notifier that cannot tell a bad key from a flaky daemon pages the wrong fix.
+	const { fire, seen } = hook();
+	fire({ jobId: "gh-1", outcome: "policy", reason: "provider-auth-refused" });
+	await flush();
+	assert.deepEqual(seen.args, { path: "/opt/pi/notify.sh", args: ["gh-1", "policy", "provider-auth-refused", "mini"] });
+	assert.equal(seen.logs.length, 1, "fired once");
+});
+
 test("a message-shaped reason flattens to the fixed token infra before it can become argv", async () => {
 	const { fire, seen } = hook();
 	fire({ jobId: "gh-1", outcome: "failed", reason: "infra failure, container exit 1" });

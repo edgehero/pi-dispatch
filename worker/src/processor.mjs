@@ -6,6 +6,7 @@ import { configError } from "./config.mjs";
 import { scopeKeyPrefix } from "./scoped-limits.mjs";
 import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
+import { RUNNER_POLICY_REASONS } from "./run-history.mjs";
 
 /**
  * The forge comment's reason for each observation a floor refusal missed (issues #278 and #345), keyed like
@@ -79,6 +80,8 @@ const TERMINAL_COMMENTS = {
 	"worker-abort": "Stopped: the worker ended this run before it finished (the 30-minute job limit, or a worker shutdown). Partial work may exist. Not retried.",
 	"operator-cancel": "Stopped: the operator cancelled this run. Partial work may exist. Not retried.",
 	"runner-policy": "Stopped: the run ended inside the container before finishing (a turn or token budget, or an in-container configuration refusal). Partial work may exist. Not retried.",
+	// Issue #437. Names the cause but never the provider's own message, which may echo a key fragment.
+	"provider-auth-refused": "Stopped: the AI provider refused this worker's credentials (HTTP 401 or 403). The operator needs to check the provider key. Not retried.",
 };
 
 // Issue #341: the forge comments for a `job-user-unmappable` refusal, keyed by cause. Shorter than the operator
@@ -841,7 +844,7 @@ export async function runJob(job, deps) {
 		}
 
 		// The user the gate above decided is the user that runs: one answer, never two call sites that agree.
-		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached } = await runContainer({ job, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true });
+		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason } = await runContainer({ job, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true });
 		containerRan = true;
 		log("container_exit", { exitCode: code, aborted, ...(detached === true ? { detached: true } : {}) });
 
@@ -915,18 +918,28 @@ export async function runJob(job, deps) {
 					chainRefused: chain.refused,
 				};
 			}
-			case EXIT_POLICY:
+			case EXIT_POLICY: {
 				// A policy exit still ran a paid container, so it carries the ledger like the completed
 				// branch does -- the spend is real whichever way the runner classified itself.
 				// The comment is UNCONDITIONAL (issue #288 asked for "when the agent did not already comment
 				// its own refusal", and the discriminator already exists at the exit-code boundary): an agent
 				// that composed its own refusal exits 0 -- github-prompt.mjs instructs the status comment,
-				// including for "I cannot fix this" -- so exit 2 means it was cut off before that step. The
-				// runner's exit-line reason vocabulary stays unread; parsing it would be a real contract
-				// change buying a distinction the codes already draw. Residual: an agent that posted a status
-				// and THEN blew its turn budget yields one extra comment, bounded at one.
-				await comment(job, TERMINAL_COMMENTS["runner-policy"]);
-				return { outcome: "policy", reason: "runner-policy", exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true };
+				// including for "I cannot fix this" -- so exit 2 means it was cut off before that step.
+				// Residual: an agent that posted a status and THEN blew its turn budget yields one extra
+				// comment, bounded at one.
+				//
+				// The runner's exit-line reason is read for ONE purpose (issue #437): a provider that refused
+				// the credential needs an operator, not a wait, and "runner-policy" hid that behind budget
+				// wording. It picks a label INSIDE this branch and nothing else, which is why reading it is
+				// safe where reading it to classify would not be: `code` has already placed the job in the
+				// not-retried class, so a forged or stale line can at worst swap one not-retried label for
+				// another from the closed RUNNER_POLICY_REASONS set. The `code === 2` guard is redundant with
+				// the case label today and is kept so the label cannot follow this line if it is ever moved.
+				// Every other reason the runner gives still reads as runner-policy.
+				const reason = RUNNER_POLICY_REASONS.has(exitReason) && code === 2 ? exitReason : "runner-policy";
+				await comment(job, TERMINAL_COMMENTS[reason]);
+				return { outcome: "policy", reason, exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true };
+			}
 			case EXIT_INFRA:
 				// NO comment on any infra throw, here or in the catch: an InfraRetry may be retried and
 				// recover, and a flaky daemon must not post three comments for one recovery. Once-ness for
