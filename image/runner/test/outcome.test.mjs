@@ -8,6 +8,7 @@ import {
 	EXIT_COMPLETED,
 	EXIT_INFRA,
 	EXIT_POLICY,
+	providerAuthRefused,
 	STOP_REASONS,
 } from "../src/outcome.mjs";
 
@@ -151,4 +152,69 @@ test("configError's optional reason rides classifyThrow onto the exit line; the 
 	assert.equal(tagged.reason, "command-unregistered");
 	const plain = classifyThrow(configError("missing env"));
 	assert.deepEqual({ code: plain.code, reason: plain.reason }, { code: EXIT_POLICY, reason: "config" });
+});
+
+// --- issue #437: a provider's refusal of the credential is policy, not infra ---
+
+// The shapes the pinned pi-ai actually produces (the loopback table in pinned-api.test.mjs proves
+// each one), with 401 AND 403 for every form, so dropping either status from any entry fails here.
+const AUTH_REFUSED = [
+	'401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}',
+	'403 {"type":"error","error":{"type":"permission_error","message":"denied"}}',
+	'401: {"message":"Incorrect API key provided","code":"invalid_api_key"}',
+	'403: {"message":"Incorrect API key provided","code":"invalid_api_key"}',
+	'OpenAI API error (401): {"message":"Incorrect API key provided"}',
+	'OpenAI API error (403): {"message":"Incorrect API key provided"}',
+	'Azure OpenAI API error (401): {"message":"Incorrect API key provided"}',
+	'Azure OpenAI API error (403): {"message":"Incorrect API key provided"}',
+	'Mistral API error (401): {"error":{"message":"Incorrect API key provided"}}',
+	'Mistral API error (403): {"error":{"message":"Incorrect API key provided"}}',
+];
+
+// Each of these would be a FALSE refusal under a looser rule, and a false refusal drops real work: a
+// transient failure recorded as not-retried. The unanchored, prefix-free and status-in-the-body cases are
+// the ones a bare /401|403/ would get wrong.
+const NOT_AUTH_REFUSED = [
+	"4010 x",
+	"4031: x",
+	" 401 x",
+	"429 rate limited",
+	"500 upstream said 401",
+	"Connection error.",
+	"",
+	undefined,
+	"Proxy response (403) !== 200 when HTTP Tunneling",
+	"OpenAI API error (429): slow down",
+	"Some API error (401): not a proved prefix",
+	'{"error":{"code":401,"message":"API key not valid.","status":"UNAUTHENTICATED"}}',
+];
+
+test("a provider's 401/403 refusal of the credential exits 2 as provider-auth-refused, never retried", () => {
+	for (const errorMessage of AUTH_REFUSED) {
+		assert.equal(providerAuthRefused(errorMessage), true, errorMessage);
+		const outcome = classifyStopReason({ stopReason: "error", errorMessage });
+		assert.deepEqual(outcome, { code: EXIT_POLICY, reason: "provider-auth-refused", message: errorMessage }, errorMessage);
+	}
+});
+
+test("anything that is not a proved refusal shape stays retryable infra", () => {
+	for (const errorMessage of NOT_AUTH_REFUSED) {
+		assert.equal(providerAuthRefused(errorMessage), false, String(errorMessage));
+		const outcome = classifyStopReason({ stopReason: "error", errorMessage });
+		assert.deepEqual(outcome, { code: EXIT_INFRA, reason: "error", message: errorMessage }, String(errorMessage));
+	}
+	// A non-string never throws: the terminal message is pi's, not ours.
+	for (const value of [null, 401, {}, ["401 x"]]) assert.equal(providerAuthRefused(value), false);
+});
+
+test("only an error stopReason can be a refusal, and budget aborts still win over it", () => {
+	const refusal = { stopReason: "error", errorMessage: "401 invalid x-api-key" };
+	assert.equal(classifyStopReason({ stopReason: "stop", errorMessage: "401 x" }).code, EXIT_COMPLETED);
+	assert.equal(decideExit({ budgetAborted: true, budgetTurns: 3, tokenAborted: false, terminal: refusal }).reason, "turn_budget");
+	assert.equal(decideExit({ budgetAborted: false, tokenAborted: true, terminal: refusal }).reason, "token_budget");
+	// A handler-driven command turn gets the terminal's real verdict, refusal included; a thrown handler still wins.
+	assert.equal(decideExit({ budgetAborted: false, tokenAborted: false, terminal: refusal, command: { failed: false } }).reason, "provider-auth-refused");
+	assert.equal(decideExit({ budgetAborted: false, tokenAborted: false, terminal: refusal, command: { failed: true } }).reason, "command-error");
+	// classifyThrow is unchanged: a thrown 401 string is not the stopReason channel.
+	assert.equal(classifyThrow(new Error("401 invalid x-api-key")).code, EXIT_INFRA);
 });

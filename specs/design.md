@@ -4394,8 +4394,16 @@ a tunnel.
   (the prompt contract instructs it), so exit 2 means it was cut off before that step. The hook
   (`PI_ON_FAILURE`, `INT-ON-FAILURE-HOOK-CONTRACT`) is wait-check.mjs reduced further -- all stdio
   ignored, no verdict, no fault count, the reason shape-guarded at the spawn -- fired from the two
-  existing listener bodies for outcome `failed` (terminal) and policy `worker-abort`/`runner-policy`
-  (which RETURN, so a failed-only mount would miss exactly the paid terminals the feature exists for).
+  existing listener bodies for outcome `failed` (terminal) and policy `worker-abort`/`runner-policy`/
+  `provider-auth-refused` (which RETURN, so a failed-only mount would miss exactly the paid terminals the
+  feature exists for).
+  **Issue #437 adds one row, `provider-auth-refused`**: a container exit 2 whose runner named a provider's
+  401/403 refusal of the credential. Its sentence ("Stopped: the AI provider refused this worker's
+  credentials (HTTP 401 or 403). The operator needs to check the provider key. Not retried.") is fixed and
+  path-free like its siblings and never carries the provider's message, which may echo a key fragment.
+  The processor reads the label off the exit line through `parseExitReason` (the LAST exit event, its own
+  `code` must be 2, its reason a member of the closed `RUNNER_POLICY_REASONS`), and only inside its exit-2
+  branch, so every other runner reason still reads `runner-policy`.
 - **Rejected**, each with its why: an in-project transport (webhook/ntfy/Slack/mail: a dependency, a
   queue and a retry policy this layer has no business growing -- the argv IS the feature);
   comment-on-every-attempt (a flaky daemon posts three comments for one recovery); the hook receiving
@@ -4404,8 +4412,11 @@ a tunnel.
   comments (they discharge REQ-JOB-STATUS-COMMENTS' existing acceptance -- a default deployment must not
   violate the row); recordRun as the hook mount (fires on retried attempts and re-implements finality);
   the processor catch as the infra-comment site (misses the stall-kill and the wait-gate rethrow that
-  escapes above it); parsing the runner's exit-line reason vocabulary (a real contract change buying a
-  distinction the exit codes already draw); persisted crash-dedup state (comment is best-effort by
+  escapes above it); parsing the runner's exit-line reason vocabulary WHOLESALE (a real contract change
+  buying a distinction the exit codes already draw; issue #437 narrowed this rather than reversing it:
+  one closed token is read, it only relabels an exit 2 and never moves a job between retry classes, and
+  it earns its place because a bad provider key needs a different human action than a spent budget);
+  persisted crash-dedup state (comment is best-effort by
   contract, and a store to dedup a lost notification costs more than the loss).
 - **Residuals**: an agent that posts its own status and THEN blows its turn budget yields one extra
   comment, bounded at one; a whole-deployment death between the terminal transition and the listener
@@ -5038,3 +5049,4 @@ a tunnel.
 | 2026-09-25 | Issue #354, part 2, the review round. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED** three times. The argv pins what rootless Podman lets the account's containers.conf default (`PODMAN_PINNED_FLAGS`: `--pid`, `--ipc`, `--uts` and `--cgroupns` private, `--env-host=false`, `--http-proxy=false`, and `--network=private` for a job with no network), measured: `pidns = "host"` and `env_host = true` there had put an unpinned job in the host's PID namespace with the worker's environment. What cannot be pinned is named: `pasta_options` are appended to the command line's, so one mapping host loopback reaches an egress-off job (measured), and a containers.conf `keep_original_groups` annotation is unobserved; both are residuals, issue #428. And a refused identity is judged before the venue's observations, at boot and per job, because a floor refusal first named the wrong fix. The earlier sentence that dockerd cannot default these is corrected: daemon.json can default the cgroup and IPC modes, which the `local` argv does not pin either. `DES-PODMAN-THROUGH-ITS-DOCKER-API` and `DES-CONTAINER-BACKEND-REGISTRY` UNCHANGED, checked. |
 | 2026-09-25 | Issue #354, part 2, the final review round. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**, its optional-members bullet: `observationPreflight` may hand back `jobUserRefused`, which the processor refuses before the image preflight. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED** twice. The identity-first sentence now covers the image preflight too: the previous round's repair passed a refused identity through to `jobUserPreflight`, which the processor calls only after its image probe, and that probe asks the same Podman, so an absent podman under a floor was retried forever and a rootful one without the image in its store was refused as `job-image-missing` (both reproduced through `runJob`, and pinned there now). And the claim that an egress-armed job is unaffected by a loopback-mapping `pasta_options` is scoped to the job container and marked reasoned; whether the proxy behind the rootless network namespace inherits it is left to issue #428. |
 | 2026-09-25 | Issue #427. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED**, one parenthesis in the rejected address-rule alternative: once pi is loaded, the proxy carries the provider call only because the runner puts it back. The decision is UNCHANGED, checked. |
+| 2026-09-26 | Issue #437. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: `TERMINAL_COMMENTS` gains the `provider-auth-refused` row, the hook's paid policy set gains the same token, and the Rejected clause on parsing the runner's exit-line reason is NARROWED rather than reversed: wholesale parsing stays rejected, while one closed token is read, only inside the exit-2 branch, and never moves a job between retry classes. The alternative of a new exit code for a credential refusal was not taken, because `INT-RUNNER-EXIT-CODE-PROTOCOL` already says new vocabulary rides `reason` under the existing codes and the retry class a refusal needs is exactly `2`'s. **`DES-COMMAND-ENTRY-POINT` UNCHANGED, checked**: a handler-driven turn that ends in a provider refusal gets the terminal's verdict like any other, and a handler that threw still wins as `command-error`. **Code evidence**: worker/src/processor.mjs -> TERMINAL_COMMENTS and the exit-2 branch; worker/src/run-history.mjs -> parseExitReason; worker/src/start.mjs -> HOOK_POLICY_REASONS. |

@@ -10,7 +10,7 @@ import { InfraRetry } from "./processor.mjs";
 
 /**
  * The real `runContainer` the processor injects. Launches one job container and returns
- * `{ code, aborted, turns, tokens, session, usage, context }`, where `aborted` records whether the WORKER initiated the stop (docker stop on
+ * `{ code, aborted, turns, tokens, session, usage, context, exitReason }`, where `aborted` records whether the WORKER initiated the stop (docker stop on
  * the 30-min timeout or graceful shutdown), which the processor classifies as POLICY (no retry) per
  * INT-RUNNER-EXIT-CODE-PROTOCOL. The numeric `code` alone cannot say this: a worker SIGKILL and a
  * kernel OOM both surface as 137, so the abort FLAG -- not the code -- is the discriminator.
@@ -33,7 +33,7 @@ export function makeRunContainer({
 	image, // the DEPLOYMENT default (PI_JOB_IMAGE); a trigger's own run.image overrides it per job
 	hostEnv = process.env,
 	onOutput = (c) => process.stdout.write(c),
-	openJobLog = () => ({ write() {}, close: async () => ({ turns: null, tokens: null, session: null, usage: null, context: null }) }),
+	openJobLog = () => ({ write() {}, close: async () => ({ turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }) }),
 	spawnFn = spawn,
 	globalPiDir = null, // REQ-GLOBAL-PI-OVERLAY: operator's global pi overlay dir, mounted :ro; null = off
 	allowGlobalExtensions = true, // REQ-GLOBAL-PI-OVERLAY: the staged overlay's extensions load unless PI_GLOBAL_ALLOW_EXTENSIONS=0
@@ -63,7 +63,7 @@ export function makeRunContainer({
 	// containers with SELinux, so the worker's own per-job mounts carry `:Z`. Defaults off, so a caller that predates it
 	// builds exactly the argv it always did.
 	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false }) {
-		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null }; // killed before it could start
+		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
 		// Issue #341. `user` and `home` travel as a PAIR: a uid with no passwd entry in the image gets `HOME=/` from
 		// Docker and `HOME=/workspace` from Podman (measured), so a `--user` without this HOME is refused here rather
 		// than started. The builder does not insist, because `doctor --live`'s probes run `--user` with no environment.
@@ -201,25 +201,31 @@ export function makeRunContainer({
 			});
 			child.on("close", async (code) => {
 				const aborted = signal?.aborted === true; // capture BEFORE the await
-				// A rejecting sink.close is swallowed so a misbehaving sink cannot hang the run; turns/tokens/session/usage/context fall back to null.
+				// A rejecting sink.close is swallowed so a misbehaving sink cannot hang the run; turns/tokens/session/usage/context/exitReason fall back to null.
 				let turns = null;
 				let tokens = null;
 				let session = null;
 				let usage = null;
 				let context = null;
+				// Issue #437: the runner's exit-2 reason, already filtered by parseExitReason to the closed
+				// RUNNER_POLICY_REASONS set and to a line that itself said code 2. The processor still decides
+				// the retry class from `code` alone; this only picks the label inside exit 2.
+				let exitReason = null;
 				try {
 					// `context = null` is a DEFAULT rather than a plain destructure: an injected sink that
 					// predates the field returns no such key, and `undefined` would then reach the record's
 					// shape where every other absence is spelled `null`.
-					({ turns, tokens, session, usage, context = null } = await sink.close());
+					// `exitReason` defaults the same way, for the same reason.
+					({ turns, tokens, session, usage, context = null, exitReason = null } = await sink.close());
 				} catch {
 					turns = null;
 					tokens = null;
 					session = null;
 					usage = null;
 					context = null;
+					exitReason = null;
 				}
-				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context });
+				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason });
 			});
 		});
 

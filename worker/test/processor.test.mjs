@@ -3,6 +3,7 @@ import { DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, OBSERVATIONS, PODMAN_ADDS
 import { test } from "node:test";
 import { scopeKeyPrefix } from "../src/scoped-limits.mjs";
 import { InfraRetry, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED } from "../src/processor.mjs";
+import { buildRecord } from "../src/run-history.mjs";
 
 /** A fake redis whose counter we can preset, to force over/under budget. `decrCalls` spies
  *  releaseBudget, so tests assert the slot is (or is not) given back and never double-released.
@@ -150,6 +151,51 @@ test("worker-abort, operator-cancel and runner-policy each comment their own fix
 		assert.match(posted[0], needle, "each reason gets its own sentence, so the requester learns WHICH stop this was");
 		assert.match(posted[0], /Not retried\./);
 		assert.ok(!posted[0].includes("/"), "fixed and path-free: for a local job this text lands verbatim in a persistent service log");
+	}
+});
+
+// --- issue #437: a provider's refusal of the credential gets its own label inside exit 2 ---
+
+test("exit 2 with the runner's provider-auth-refused reason returns that reason, comments its own sentence, and records it", async () => {
+	const posted = [];
+	const { deps: d } = deps({
+		runContainer: async () => ({ code: 2, aborted: false, turns: 1, tokens: { total: 12 }, exitReason: "provider-auth-refused" }),
+		comment: async (_j, t) => posted.push(t),
+	});
+	const r = await runJob(ghJob, d);
+	assert.equal(r.outcome, "policy", "a determinate refusal RETURNS: never retried (CONST-RETRY-INFRA-ONLY)");
+	assert.equal(r.reason, "provider-auth-refused");
+	assert.equal(r.exitCode, 2);
+	assert.equal(r.budgetReserved, true, "the container ran; the slot stays counted as runner-policy's does");
+	assert.equal(posted.length, 1, "exactly one comment per terminal");
+	assert.match(posted[0], /refused this worker's credentials \(HTTP 401 or 403\)/);
+	assert.match(posted[0], /Not retried\./);
+	assert.ok(!/[/\\]/.test(posted[0]), "fixed and path-free: no provider message, no path");
+	const record = buildRecord({ job: { id: "gh-1", name: "github", data: ghJob, attemptsMade: 0 }, result: r, startedAt: null, endedAt: null });
+	assert.equal(record.outcome, "policy");
+	assert.equal(record.reason, "provider-auth-refused");
+});
+
+test("the exit-line reason never moves a job between classes: exit 1 with a forged provider-auth-refused is still InfraRetry", async () => {
+	const { deps: d, calls } = deps({ runContainer: async () => ({ code: 1, aborted: false, exitReason: "provider-auth-refused" }) });
+	await assert.rejects(() => runJob(ghJob, d), (e) => e instanceof InfraRetry && e.piDispatchRetry === true);
+	assert.ok(!calls.some((c) => c.startsWith("comment:")), "an infra attempt comments nothing, whatever its stdout claimed");
+	// And every other non-2 code the processor knows keeps its own class too.
+	for (const [code, aborted, want] of [[0, false, "completed"], [137, true, "policy"]]) {
+		const { deps: d2 } = deps({ runContainer: async () => ({ code, aborted, exitReason: "provider-auth-refused" }) });
+		const r = await runJob(ghJob, d2);
+		assert.equal(r.outcome, want);
+		assert.notEqual(r.reason, "provider-auth-refused", `exit ${code}: the label is exit-2-only`);
+	}
+});
+
+test("exit 2 with any reason outside the closed set, or none, stays runner-policy", async () => {
+	for (const exitReason of [undefined, null, "turn_budget", "runner-policy", "worker-abort", "PROVIDER-AUTH-REFUSED", "toString", "__proto__", 2]) {
+		const posted = [];
+		const { deps: d } = deps({ runContainer: async () => ({ code: 2, aborted: false, exitReason }), comment: async (_j, t) => posted.push(t) });
+		const r = await runJob(ghJob, d);
+		assert.equal(r.reason, "runner-policy", JSON.stringify(exitReason));
+		assert.match(posted[0], /ended inside the container/);
 	}
 });
 

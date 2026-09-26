@@ -1343,12 +1343,13 @@ export async function startWorker(
 	const onFailure = config.onFailure
 		? makeOnFailure({ command: config.onFailure, timeoutMs: config.onFailureTimeoutMs, host: config.workerName ?? "", hostEnv: env, log })
 		: null;
-	// Which POLICY reasons page the operator. Paid terminals only: worker-abort and runner-policy cost a
-	// container and ended wrong. Excluded on purpose: `completed` and every pre-spend refusal (free, and
+	// Which POLICY reasons page the operator. Paid terminals only: worker-abort, runner-policy and
+	// provider-auth-refused cost a container and ended wrong, and the last (issue #437) is a bad provider
+	// key, which nothing but the operator can fix and which fails every job until they do. Excluded on purpose: `completed` and every pre-spend refusal (free, and
 	// each already comments -- a delivery storm against a spent cap must not page anyone), and
 	// `operator-cancel`, because the operator initiated it and a push telling them what they just did is
 	// noise with a pager attached.
-	const HOOK_POLICY_REASONS = new Set(["worker-abort", "runner-policy"]);
+	const HOOK_POLICY_REASONS = new Set(["worker-abort", "runner-policy", "provider-auth-refused"]);
 	// The infra-terminal sentence (issue #288). FIXED, never err.message: the message classes that reach
 	// a failedReason carry host paths and library words (the #310 record), and for a local job this text
 	// lands verbatim in the service log through the adapter's stdout fallthrough. The worker log already
@@ -1593,7 +1594,7 @@ export async function startWorker(
 		// what tells a human a run did nothing. The container's own output already streams via
 		// runContainer's onOutput during the run.
 		// `reason` is a fixed enum (worker-abort | over-budget | unprotected-branch | runner-policy |
-		// job-image-missing), never
+		// provider-auth-refused | job-image-missing), never
 		// user content. Included only when present so success lines stay clean; a shutdown-aborted job logs
 		// { outcome: "policy", reason: "worker-abort" }, making a restart-dropped job visible.
 		// BOTH workers, or a cron job on the host queue produces no `job_completed` line at all -- and
@@ -1601,7 +1602,7 @@ export async function startWorker(
 		const allWorkers = [worker, ...(worker.hostWorker ? [worker.hostWorker] : [])];
 		for (const w of allWorkers) w.on("completed", (job, result) => {
 			log("job_completed", { jobId: job?.id, outcome: result?.outcome, ...(result?.reason ? { reason: result.reason } : {}) });
-			// The hook's POLICY half (issue #288): worker-abort and runner-policy RETURN, so they land here
+			// The hook's POLICY half (issue #288): worker-abort, runner-policy and provider-auth-refused RETURN, so they land here
 			// and never in the failed listener -- a failed-only mount would miss exactly the paid terminals
 			// the feature exists for. Folded into the existing listener body, never a second w.on: the
 			// start-wiring harness records ONE handler per event, and two would race the log line's pin.

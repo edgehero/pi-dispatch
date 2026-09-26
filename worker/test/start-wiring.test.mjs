@@ -1932,7 +1932,7 @@ test("a TERMINAL failed attempt comments ONCE through the real adapter; a retrie
 	assert.ok(!retried.some((l) => l.event === "comment" || l.event === "comment_failed"), "no adapter activity at all on a retried attempt");
 });
 
-test("PI_ON_FAILURE fires for the paid terminals only: terminal-failed and policy worker-abort/runner-policy, nothing else", { skip }, async () => {
+test("PI_ON_FAILURE fires for the paid terminals only: terminal-failed and policy worker-abort/runner-policy/provider-auth-refused, nothing else", { skip }, async () => {
 	// An unresolvable command still proves the THREADING (the on_failure line is the hook's own), while
 	// spawning nothing on a test machine.
 	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
@@ -1952,6 +1952,10 @@ test("PI_ON_FAILURE fires for the paid terminals only: terminal-failed and polic
 
 	assert.equal((await fired(() => handlers.completed({ id: "j2" }, { outcome: "policy", reason: "worker-abort" }))).length, 1, "the 30-minute kill pages");
 	assert.equal((await fired(() => handlers.completed({ id: "j3" }, { outcome: "policy", reason: "runner-policy" }))).length, 1, "an in-container stop pages");
+	// Issue #437: a bad provider key needs the operator and fails every job until they act, so it pages -- once.
+	const refused = await fired(() => handlers.completed({ id: "j3b" }, { outcome: "policy", reason: "provider-auth-refused" }));
+	assert.equal(refused.length, 1, "a provider credential refusal pages exactly once");
+	assert.equal(refused[0].jobId, "j3b");
 	assert.equal((await fired(() => handlers.completed({ id: "j4" }, { outcome: "completed" }))).length, 0, "a completion pages nobody");
 	assert.equal((await fired(() => handlers.completed({ id: "j5" }, { outcome: "policy", reason: "over-budget" }))).length, 0, "a free pre-spend refusal already comments; a delivery storm must not page");
 	assert.equal((await fired(() => handlers.completed({ id: "j6" }, { outcome: "policy", reason: "operator-cancel" }))).length, 0, "the operator initiated it; a push saying what they just did is noise");

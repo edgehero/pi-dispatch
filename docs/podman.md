@@ -251,8 +251,9 @@ context, are what decide there. The warning says so; none of those was measured 
 job that meets such a folder anyway is refused before it spends: the runner checks that it can read `/job`,
 `/opt/pi-global` and `/workspace`, and exits 2 as `job-inputs-unreadable`, naming the path. A `/workspace` the job
 can read but not write still runs, with the advisory `workspace_not_writable`, because a read-only review of such a
-folder is a legitimate job. The run record of such a refusal says `runner-policy`, as every reason the runner gives does;
-the worker's log carries its exit line, where `job-inputs-unreadable` and the path are named.
+folder is a legitimate job. The run record of such a refusal says `runner-policy`, as every runner reason does except
+`provider-auth-refused` (the one the record names itself); the worker's log carries its exit line, where
+`job-inputs-unreadable` and the path are named.
 
 `:Z` relabels a directory recursively on every run, so a forge job whose clone is large pays for relabelling it
 before the container starts. That cost was not measured.

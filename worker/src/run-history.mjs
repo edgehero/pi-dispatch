@@ -61,7 +61,7 @@ export function sanitizeJobId(id) {
  * END (a mid-write death) has no complete object and is skipped too. A fragment is never MISREAD as a
  * value: a broken one does not parse and an anchorless one is not repaired.
  *
- * NEVER throws, like the five scanners that call it.
+ * NEVER throws, like the six scanners that call it.
  */
 function parseTailLine(line) {
 	try {
@@ -90,7 +90,9 @@ function parseTailLine(line) {
  *
  * This is read-only telemetry: it MUST NEVER throw and MUST NOT feed exit-code or retry
  * classification -- that is the container exit code's job (INT-RUNNER-EXIT-CODE-PROTOCOL). Every parse
- * is guarded; a truncated or non-JSON line is skipped.
+ * is guarded; a truncated or non-JSON line is skipped. The one exit-line field that reaches the
+ * terminal outcome at all is `parseExitReason`'s, and it cannot move a job between retry classes: the
+ * container exit code alone decides the class, and that parsed reason only picks a label INSIDE exit 2.
  */
 export function parseExitTurns(text) {
 	if (typeof text !== "string") return null;
@@ -101,6 +103,40 @@ export function parseExitTurns(text) {
 		const parsed = parseTailLine(line);
 		if (parsed?.event !== "exit") continue;
 		return Number.isInteger(parsed?.turns) ? parsed.turns : null;
+	}
+	return null;
+}
+
+/**
+ * The runner's exit-2 reasons the worker names in the record and the status comment (issue #437). CLOSED
+ * and EXPORTED so the processor, the hook contract and the tests share one list. The runner writes its
+ * literal in `image/runner/src/outcome.mjs`, which the worker cannot import, so a test reads that source
+ * and requires every member here to appear there verbatim.
+ */
+export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused"]);
+
+/**
+ * The reason off the LAST runner exit line, or `null`: a member of `RUNNER_POLICY_REASONS` and only when
+ * that same line says `code: 2`. Scanned from the end exactly as `parseExitTurns` is, repairing a glued
+ * line through `parseTailLine`, and NEVER throws.
+ *
+ * Why this may reach the outcome when its five siblings may not: it cannot change the retry class. The
+ * processor consults it only inside its container-exit-2 branch, so a container that exits 1 while
+ * printing `{"event":"exit","code":2,"reason":"provider-auth-refused"}` is still InfraRetry, and the
+ * worst a forged line can do on a real exit 2 is swap one not-retried label for another from a closed
+ * set. The `code === 2` check on the line itself is what keeps a stale or mismatched line (a runner
+ * that said 1 in its own words) from naming the outcome. Only the LAST exit event counts, because an
+ * earlier one in the tail is not the one the runner exited on. A fixed enum, so the PII-free record stays so.
+ */
+export function parseExitReason(text) {
+	if (typeof text !== "string") return null;
+	const lines = text.split("\n");
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i].trim();
+		if (line === "") continue;
+		const parsed = parseTailLine(line);
+		if (parsed?.event !== "exit") continue;
+		return parsed?.code === 2 && RUNNER_POLICY_REASONS.has(parsed?.reason) ? parsed.reason : null;
 	}
 	return null;
 }
@@ -389,7 +425,7 @@ function rebuildUsage(u) {
  * path embeds the operator's OS account name.
  *
  * `reason` is a fixed enum passthrough (worker-abort | over-budget | unprotected-branch |
- * runner-policy | job-image-missing | egress-proxy-missing | ...), never free-form or payload text. `exitCode`, `turns`, and `budgetReserved`
+ * runner-policy | provider-auth-refused | job-image-missing | egress-proxy-missing | ...), never free-form or payload text. `exitCode`, `turns`, and `budgetReserved`
  * default to `null` when the outcome does not carry them, so the record shape is stable whether or not
  * the source reports those fields.
  */
@@ -579,7 +615,11 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 		}
 
 		async function close({ timeoutMs = 2000 } = {}) {
-			// Capture turns/tokens/session/usage/context from the tail first, so they survive even if the flush errors or times out.
+			// Capture turns/tokens/session/usage/context/exitReason from the tail first, so they survive even if the flush errors or times out.
+			// The tail accumulates whether or not `enabled` is set, which is what keeps exitReason in the record
+			// when raw logs are off: a label that vanished with log capture would make the record depend on an
+			// opt-in PII switch.
+			const exitReason = parseExitReason(tail);
 			const turns = parseExitTurns(tail);
 			const tokens = parseExitTokens(tail);
 			const session = parseExitSession(tail);
@@ -608,7 +648,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			} catch (err) {
 				log("log_sink_error", { jobId, reason: err?.message });
 			}
-			return { turns, tokens, session, usage, context };
+			return { turns, tokens, session, usage, context, exitReason };
 		}
 
 		return { write, close };
