@@ -77,7 +77,7 @@ function boundAfterAbort(run, signal, job, log, graceMs = ABORT_GRACE_MS) {
 				if (settled) return;
 				settled = true;
 				log("stop_did_not_take", { job: job.id, graceMs });
-				resolve({ code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null });
+				resolve({ code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null });
 			}, graceMs);
 			// A boot-blocking handle is not wanted here: the worker should be able to exit if everything else
 			// has finished, and this timer only matters while a job is still in flight.

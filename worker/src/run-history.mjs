@@ -109,9 +109,12 @@ export function parseExitTurns(text) {
 
 /**
  * The runner's exit-2 reasons the worker names in the record and the status comment (issue #437). CLOSED
- * and EXPORTED so the processor, the hook contract and the tests share one list. The runner writes its
- * literal in `image/runner/src/outcome.mjs`, which the worker cannot import, so a test reads that source
- * and requires every member here to appear there verbatim.
+ * and EXPORTED because three lookups key off it and each would fail quietly on a member it lacks: the
+ * processor comments `TERMINAL_COMMENTS[reason]` (a missing row posts `undefined`), start.mjs builds
+ * `HOOK_POLICY_REASONS` by spreading this set (so a member cannot be left unpaged), and parseExitReason
+ * below admits nothing else. A test requires a TERMINAL_COMMENTS row per member. The runner writes the
+ * literal in `image/runner/src/outcome.mjs`, which the shipped worker cannot import, so a test reads that
+ * source and requires every member here to appear there verbatim.
  */
 export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused"]);
 

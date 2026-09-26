@@ -76,12 +76,14 @@ export const OBSERVATION_COMMENT_UNNAMED = "the venue this job runs on did not c
 // at the scope-cap refusal). The completed path stays silent on purpose: exit 0 is where the AGENT'S own
 // status comment lives (the prompt contract instructs it, including for "I cannot fix this"), and exit 2
 // by construction means the agent was cut off before that step.
-const TERMINAL_COMMENTS = {
+// EXPORTED only so a test can hold every RUNNER_POLICY_REASONS member to a row here (issue #437 review).
+export const TERMINAL_COMMENTS = {
 	"worker-abort": "Stopped: the worker ended this run before it finished (the 30-minute job limit, or a worker shutdown). Partial work may exist. Not retried.",
 	"operator-cancel": "Stopped: the operator cancelled this run. Partial work may exist. Not retried.",
 	"runner-policy": "Stopped: the run ended inside the container before finishing (a turn or token budget, or an in-container configuration refusal). Partial work may exist. Not retried.",
-	// Issue #437. Names the cause but never the provider's own message, which may echo a key fragment.
-	"provider-auth-refused": "Stopped: the AI provider refused this worker's credentials (HTTP 401 or 403). The operator needs to check the provider key. Not retried.",
+	// Issue #437. Names the cause but never the provider's own message, which may echo a key fragment. "Or
+	// access" because a 403 is as often a key that works but may not use this model or route as a bad key.
+	"provider-auth-refused": "Stopped: the AI provider refused this worker's credentials or access (HTTP 401 or 403). The operator needs to check the provider key and what it is allowed to use. Not retried.",
 };
 
 // Issue #341: the forge comments for a `job-user-unmappable` refusal, keyed by cause. Shorter than the operator
@@ -219,7 +221,8 @@ export async function runJob(job, deps) {
 		mintToken,
 		isDefaultBranchProtected, // (job, token) => boolean; same reason -- the forge is the job's, not the process's
 		prepareWorkspace, // (job, token) => { workspaceDir, jobDir }  (clone+materialise+prompt)
-		// runContainer({ job, token, prepared, secrets, name, signal, user, home }) => { code, aborted, abortReason, turns, tokens, session, usage, context }.
+		// runContainer({ job, token, prepared, secrets, name, signal, user, home }) => { code, aborted, abortReason, turns, tokens, session, usage, context, exitReason }.
+		// `exitReason` (issue #437) is parseExitReason's closed-set label, read only inside the exit-2 branch.
 		// `user`/`home` are the job-user gate's answer (issue #341), null for the image's own USER.
 		// `secrets` is the resolved map from the gate above: values, already fetched, host-side. It MUST honour
 		// `signal`: stop the container on abort, and reject/exit promptly if `signal.aborted` is already
