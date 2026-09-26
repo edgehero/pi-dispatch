@@ -17,6 +17,8 @@ import {
 	PODMAN_CONTAINERS_CONF_DIRS,
 	PODMAN_CONTAINERS_CONF_FILES,
 	PODMAN_MOUNTS_CONF,
+	TRANSIENT_READ_ERRORS,
+	UNREAD_SPELLING,
 	podmanOnThisHost,
 	runtimeObservationKey,
 } from "../src/runtime-observations.mjs";
@@ -178,11 +180,50 @@ test("the file helpers the podman venue shares read files by the rootful observa
 	assert.deepEqual(confFilesIn(fs, { files: [], dirs: ["/locked"] }), { finding: { value: false, evidence: "/locked could not be read (EACCES)" } });
 	assert.deepEqual(confKeyFinding(fs, ["/nope.conf", "/a.conf", "/d/05-a.conf", "/d/10-b.conf"], { key: MOUNT_KEY, says: MOUNT_KEY_SAYS }), { value: false, evidence: `/d/10-b.conf ${MOUNT_KEY_SAYS}` });
 	assert.equal(confKeyFinding(fs, ["/a.conf"], { key: MOUNT_KEY, says: MOUNT_KEY_SAYS }), null);
-	assert.deepEqual(confKeyFinding(hostFs({ "/e.conf": { error: "EIO" } }), ["/e.conf"], { key: MOUNT_KEY, says: MOUNT_KEY_SAYS }), { value: false, evidence: "/e.conf could not be read (EIO)" });
+	// Issue #428: EIO is a moment, not the file, so it is NOT ANSWERED (`null`, retried); EACCES is the file's own
+	// permissions and stays a withheld credit (`false`), the precedent.
+	assert.deepEqual(confKeyFinding(hostFs({ "/e.conf": { error: "EIO" } }), ["/e.conf"], { key: MOUNT_KEY, says: MOUNT_KEY_SAYS }), { value: null, evidence: "/e.conf could not be read (EIO)" });
+	assert.deepEqual(confKeyFinding(hostFs({ "/e.conf": { error: "EACCES" } }), ["/e.conf"], { key: MOUNT_KEY, says: MOUNT_KEY_SAYS }), { value: false, evidence: "/e.conf could not be read (EACCES)" });
 	assert.equal(fipsFinding(hostFs()), null, "no FIPS file is FIPS off");
 	assert.equal(fipsFinding(hostFs({ [FIPS_ENABLED_PATH]: "0\n" })), null);
 	assert.equal(fipsFinding(hostFs({ [FIPS_ENABLED_PATH]: "1\n" })).value, false);
 	assert.equal(fipsFinding(hostFs({ [FIPS_ENABLED_PATH]: { error: "EACCES" } })).value, false);
 	assert.equal(hooksFinding(hostFs({}, { [PODMAN_HOOKS_DIRS[0]]: ["README"] })), null);
 	assert.match(hooksFinding(hostFs({}, { [PODMAN_HOOKS_DIRS[1]]: ["x.json"] })).evidence, /holds an OCI hook/);
+});
+
+// Issue #428: three spellings Podman's TOML reads as a key and these patterns do not. Refused in the SHARED helper, so
+// every conf key (MOUNT_KEY here, CGROUPS_KEY and WIDENING_KEY through the podman venue) withholds credit on them. Each
+// fixture is built from escapes, never a literal non-ASCII byte in this file.
+test("confKeyFinding withholds credit on a non-ASCII character or a multi-line string, which hide a key from the pattern (#428)", () => {
+	const at = (text) => confKeyFinding(hostFs({ "/c.conf": text }), ["/c.conf"], { key: MOUNT_KEY, says: MOUNT_KEY_SAYS });
+	for (const [label, text] of [
+		// Go's EqualFold folds U+017F LONG S to `s`; a JS /i regex does not, so `volume\u017f` is invisible to MOUNT_KEY.
+		["long s", '[containers]\n"volume\u017f" = ["/:/host"]\n'],
+		// A basic multi-line string whose content has a line starting `#`: the pattern skips that "comment" line and the
+		// key after it, while TOML reads one inline table.
+		["basic multi-line", 'containers = { env = ["""\n# """], volumes = ["/:/host"] }\n'],
+		["literal multi-line", "containers = { env = [\'\'\'\n#\'\'\'], volumes = [\"/:/host\"] }\n"],
+		// U+2028 and U+2029 are line breaks to a JS regex and ordinary characters to TOML.
+		["u2028", 'containers = { env = ["a\u2028# "], volumes = ["/:/host"] }\n'],
+		["u2029", 'containers = { env = ["a\u2029# "], volumes = ["/:/host"] }\n'],
+		["a byte-order mark", '\ufeff[containers]\n'],
+	]) {
+		assert.deepEqual(at(text), { value: false, evidence: "/c.conf has a non-ASCII character or a multi-line string, which this check does not decode" }, label);
+	}
+	// A plain-ASCII file with a single-quoted string, a double-quoted one and a commented key still passes.
+	assert.equal(at('[containers]\n# volumes = ["/:/host"]\nlog_driver = "journald"\ntz = \'local\'\n'), null);
+	assert.ok(UNREAD_SPELLING.test("\u017f") && UNREAD_SPELLING.test('"""') && UNREAD_SPELLING.test("\'\'\'") && !UNREAD_SPELLING.test("~ \t\r\n"));
+});
+
+test("a conf read that fails for a moment is NOT ANSWERED (null), one that fails for a reason in the file withholds credit (#428)", () => {
+	assert.deepEqual([...TRANSIENT_READ_ERRORS].sort(), ["EAGAIN", "EBUSY", "EINTR", "EIO", "EMFILE", "ENFILE", "ENOMEM", "ESTALE", "ETIMEDOUT", "EWOULDBLOCK"]);
+	for (const code of TRANSIENT_READ_ERRORS) {
+		assert.deepEqual(confKeyFinding(hostFs({ "/c.conf": { error: code } }), ["/c.conf"], { key: MOUNT_KEY, says: MOUNT_KEY_SAYS }), { value: null, evidence: `/c.conf could not be read (${code})` }, `file ${code}`);
+		assert.deepEqual(confFilesIn(hostFs({}, { "/d": code }), { dirs: ["/d"] }), { finding: { value: null, evidence: `/d could not be read (${code})` } }, `dir ${code}`);
+	}
+	for (const code of ["EACCES", "EPERM", "ENOTDIR", "ELOOP", "EISDIR", "EXDEV_UNKNOWN"]) {
+		assert.equal(confKeyFinding(hostFs({ "/c.conf": { error: code } }), ["/c.conf"], { key: MOUNT_KEY, says: MOUNT_KEY_SAYS }).value, false, `file ${code}`);
+		assert.equal(confFilesIn(hostFs({}, { "/d": code }), { dirs: ["/d"] }).finding.value, false, `dir ${code}`);
+	}
 });

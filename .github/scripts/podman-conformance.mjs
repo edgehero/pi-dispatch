@@ -156,6 +156,10 @@ async function probe(bundle, { exitCode, aborted = false }) {
 	// The job user the bundle itself decides, through the same two preflights the processor calls, in its order.
 	const observed = await bundle.observationPreflight(job);
 	if (!observed?.ok) throw new Error(`observationPreflight did not admit the probe: ${JSON.stringify(observed)}`);
+	// `ok: true` is not admission on its own: a refused identity and a widening containers.conf (issue #428) ride beside
+	// it, and the processor refuses on either before the image preflight. A probe past them would read back a container
+	// no real job gets.
+	if (observed.jobUserRefused || observed.podmanConfRefused) throw new Error(`observationPreflight refused the probe: ${JSON.stringify({ jobUserRefused: observed.jobUserRefused, podmanConfRefused: observed.podmanConfRefused })}`);
 	const img = await bundle.imagePreflight(job);
 	if (!img?.ok) throw new Error(`imagePreflight did not admit the probe image: ${JSON.stringify(img)}`);
 	const who = await bundle.jobUserPreflight(job, { capabilities: img.capabilities ?? [], observed });

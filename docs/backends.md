@@ -192,7 +192,7 @@ ones adapters get wrong:
   without `anyUid`) fire at the same point on `podman` as on `local`, with the venue's own text. An unanswered
   `podman info` is in neither list, exactly as above: `unknown`, never kept, and a job picked up meanwhile is
   retried. Apart from the job user, the venue also refuses while a containers.conf its account reads sets
-  `pasta_options`, `network_cmd_options` or `annotations`, at the same two points (issue #428, docs/podman.md step 4).
+  `pasta_options`, `network_cmd_options`, `annotations` or `env`, at the same two points (issue #428, docs/podman.md step 4).
 
 ## A declaration is not a claim that the property holds
 

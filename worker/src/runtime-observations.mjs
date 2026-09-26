@@ -56,6 +56,32 @@ export const MOUNT_KEY = /^(?!\s*#).*?(?:^|[\s.{,"'])["']?(?:volumes|mounts|devi
  */
 export const ESCAPED_KEY = /^(?!\s*#).*?["'][^"'\n]*\\[^"'\n]*["']\s*=/m;
 
+/**
+ * A file this check cannot read the way Podman's TOML decoder does, on any line, comment or not (issue #428): a non-ASCII
+ * character or a multi-line string opener. Each was measured bypassing the key patterns while Podman honoured the key:
+ * Go's case folding matches `"pa\u017fta_options"` (a LONG S) to `pasta_options` where a JS `/i` does not; a `"""` or
+ * `'''` string whose content has a line starting `#` reads here as a comment and there as a string, so a key after it
+ * on the same TOML line is hidden; and U+2028 or U+2029 inside a string is a line break to a JS regex and not to TOML.
+ * Refused outright rather than decoded, as `ESCAPED_KEY` is: a stock containers.conf is plain ASCII with no multi-line
+ * string (Fedora 44's, and containers/common v0.57.4's, which Ubuntu 24.04 packages), so the rule costs nothing real.
+ */
+export const UNREAD_SPELLING = /[^\x00-\x7f]|"""|'''/;
+
+/**
+ * The read errors that say nothing about the file, only about this moment (issue #428): out of descriptors or memory,
+ * an I/O error, a busy or stale mount, an interrupted or timed-out call. A conf file or drop-in directory that fails
+ * with one of these is NOT ANSWERED (`null`, so a floor retries and the podman venue's refusal retries) rather than
+ * withheld (`false`, refused): refusing it turned a full descriptor table into a dropped job. Every other code
+ * (`EACCES`, `EPERM`, `ENOTDIR`, `ELOOP`, `EISDIR`, an unknown one) stays determinate, the precedent, because a retry
+ * reads the same permissions; listed this way round so an errno nobody thought of fails closed, not into a retry loop.
+ */
+export const TRANSIENT_READ_ERRORS = new Set(["EMFILE", "ENFILE", "EIO", "EAGAIN", "EWOULDBLOCK", "EBUSY", "ENOMEM", "EINTR", "ETIMEDOUT", "ESTALE"]);
+
+/** A conf file or directory that could not be read, as a finding: `null` for a transient code, else `false`. */
+function unreadFinding(path, code) {
+	return { value: TRANSIENT_READ_ERRORS.has(code) ? null : false, evidence: `${path} could not be read (${code})` };
+}
+
 /** OCI hook directories Podman runs every `*.json` hook from (container-libs pkg/config); a hook can mount into a container. */
 export const PODMAN_HOOKS_DIRS = Object.freeze(["/usr/share/containers/oci/hooks.d", "/etc/containers/oci/hooks.d"]);
 
@@ -98,7 +124,7 @@ export function confFilesIn(fs, { files = [], dirs = [] }) {
 			entries = fs.readdirSync(dir);
 		} catch (error) {
 			if (error?.code === "ENOENT") continue;
-			return { finding: { value: false, evidence: `${dir} could not be read (${error?.code ?? "error"})` } };
+			return { finding: unreadFinding(dir, error?.code ?? "error") };
 		}
 		for (const entry of [...entries].sort()) if (String(entry).endsWith(".conf")) out.push(`${dir}/${entry}`);
 	}
@@ -106,8 +132,9 @@ export function confFilesIn(fs, { files = [], dirs = [] }) {
 }
 
 /**
- * The first of `files` that sets a key `key` matches (`says` completes the sentence naming it), or holds an escaped key
- * this check cannot decode, or exists and cannot be read, as `{ value: false, evidence }`; `null` when none does. A
+ * The first of `files` that sets a key `key` matches (`says` completes the sentence naming it), or holds an escaped key,
+ * a non-ASCII character or a multi-line string this check cannot decode (`UNREAD_SPELLING`), or exists and cannot be
+ * read, as `{ value: false, evidence }` (`value: null` for a transient read error); `null` when none does. A
  * missing file is simply not read, which is how Podman treats it too. `says` may be a function of the match (issue #428),
  * for a key set whose members each do something different, so the sentence names the one that was found.
  */
@@ -115,10 +142,11 @@ export function confKeyFinding(fs, files, { key, says }) {
 	for (const file of files) {
 		const got = readHostFile(fs, file);
 		if (got.missing) continue;
-		if (got.text === undefined) return { value: false, evidence: `${file} could not be read (${got.error})` };
+		if (got.text === undefined) return unreadFinding(file, got.error);
 		const match = key.exec(got.text);
 		if (match) return { value: false, evidence: `${file} ${typeof says === "function" ? says(match) : says}` };
 		if (ESCAPED_KEY.test(got.text)) return { value: false, evidence: `${file} has an escaped key, which this check does not decode` };
+		if (UNREAD_SPELLING.test(got.text)) return { value: false, evidence: `${file} has a non-ASCII character or a multi-line string, which this check does not decode` };
 	}
 	return null;
 }

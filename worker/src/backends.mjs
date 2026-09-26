@@ -390,6 +390,13 @@ export const PODMAN_ADDS_NO_MOUNTS = "podmanAddsNoMounts";
 export const PODMAN_SERVICE_LOCAL = "podmanServiceLocal";
 
 /**
+ * The podman venue's refusal of an account containers.conf that widens every job (issue #428), and the run record's
+ * `reason` for a job it refuses. Here, in the leaf, rather than in backend-podman.mjs beside the check, so the processor
+ * can name it without importing the venue's module (which pulls in the run path and pi-ai).
+ */
+export const PODMAN_CONF_WIDENS_JOB = "podman-conf-widens-job";
+
+/**
  * The closed list of observations a backend's `observedBy` may name, each with what it means. Closed for the
  * reason `PROPERTIES` is: a typo in a table entry must not become an observation nobody makes, which would
  * degrade a word forever with nothing saying why.

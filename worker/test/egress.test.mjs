@@ -331,3 +331,27 @@ test("Podman's 'is not connected to network' disconnect wording is NOT the netwo
 	assert.equal(networkAbsentInDaemonWords({ code: 125, stdout: "", stderr: "Error: unable to find network with name or ID pi-job-x-net: network not found" }), true, "inspect");
 	assert.equal(networkAbsentInDaemonWords({ code: 1, stdout: "", stderr: "Error: unable to find network with name or ID pi-job-x-net: network not found" }), true, "rm");
 });
+
+// Issue #428: the proxy rules' address deny. Its ORDER is the property, twice over: before every allow, or a listed
+// name resolving to the host's loopback is let through; and with `allowed` BEFORE `to_host_local` in the line, or squid
+// resolves every name a job asks for, listed or not (`dst` resolves, and squid stops at the first ACL that fails), a
+// DNS channel out of an egress-armed job (measured with debug_options 78,3). Read off the shipped file, the worker's
+// mirror being pinned byte-identical elsewhere (publish.test.mjs).
+test("the proxy denies a listed name resolving to this host's loopback or link-local, first, and resolves no unlisted name (#428)", async () => {
+	const { readFileSync } = await import("node:fs");
+	const conf = readFileSync(new URL("../../deploy/egress-proxy.conf", import.meta.url), "utf8");
+	const lines = conf.split("\n").map((line) => line.trim()).filter((line) => line !== "" && !line.startsWith("#"));
+	const access = lines.filter((line) => line.startsWith("http_access "));
+	assert.equal(access[0], "http_access deny allowed to_host_local", "the address deny is the FIRST rule, `allowed` before `to_host_local`");
+	assert.equal(access.filter((line) => /\bto_host_local\b/.test(line)).length, 1, "and the only rule naming it");
+	const firstAllow = access.findIndex((line) => line.startsWith("http_access allow "));
+	assert.ok(firstAllow > 0, "an allow follows it");
+	assert.equal(access.at(-1), "http_access deny all");
+	const acl = lines.filter((line) => /^acl to_host_local\s/.test(line));
+	assert.equal(acl.length, 1, "one definition");
+	const listed = acl[0].split(/\s+/).slice(3);
+	assert.equal(acl[0].split(/\s+/)[2], "dst");
+	assert.deepEqual(listed.sort(), ["0.0.0.0/32", "10.0.2.2/32", "127.0.0.0/8", "169.254.0.0/16", "::/128", "::1", "fe80::/10"].sort());
+	// The ACL is defined before the line that uses it (squid refuses an unknown ACL name at parse).
+	assert.ok(lines.indexOf(acl[0]) < lines.indexOf(access[0]));
+});

@@ -5886,6 +5886,21 @@ test("a widening containers.conf is a podman venue refusal: ✗ where podman is 
 	const { out, text: said } = capture();
 	await runDoctor(podmanEnv(), podmanDeps(out, podmanPlan(), [], { observationFs: withConf("[network]\n# pasta_options = []\n") }));
 	assert.doesNotMatch(said(), /podman-conf-widens-job/);
+	// With a podman info that has not answered, the conf is still judged and said: the worker refuses on the files
+	// alone, so doctor must not wait on the job-user decision to say so.
+	const slow = capture();
+	await runDoctor(podmanEnv(), podmanDeps(slow.out, { ...podmanPlan(), "podman info": { code: 125, output: "Error: cannot connect\n" } }, [], { observationFs: withConf("pasta_options = []\n") }));
+	assert.ok(slow.text().includes(`✗ podman: no job can run on this venue (podman-conf-widens-job): ${confPath} sets pasta_options, which `), slow.text());
+	assert.doesNotMatch(slow.text(), /which uid a job runs as could not be decided/, "the conf line, not the undecided one");
+	// A conf read that failed for a moment is ⚠ and says it is retried, never the ✗ refusal.
+	const busy = capture();
+	const busyCode = await runDoctor(podmanEnv(), podmanDeps(busy.out, podmanPlan(), [], { observationFs: { ...podmanFs, readFileSync: (p) => (p === confPath ? (() => { throw Object.assign(new Error("EMFILE"), { code: "EMFILE" }); })() : podmanFs.readFileSync(p)) } }));
+	assert.match(busy.text(), /⚠ podman: whether this account's containers.conf widens a job could not be read just now: [^\n]*could not be read \(EMFILE\)\n {4}→ the read failed for a moment/);
+	assert.equal(busyCode, 0);
+	// `--live` names the conf line as the one to fix, not the job-user line (the reviewer's R3).
+	const live = capture();
+	await runDoctor(liveEnv({ PI_BACKENDS: "podman" }), { ...podmanDeps(live.out, { ...podmanLiveOk(), ...podmanPlan() }, [], { observationFs: withConf("annotations = []\n") }), live: true, liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n" });
+	assert.match(live.text(), /⚠ read back on podman: not run -- a podman job is refused here \(podman-conf-widens-job\)[^\n]*\n {4}→ fix the podman containers\.conf line above first/);
 });
 
 test("the podman job image is read from THIS account's store, and its anyUid rule is the podman venue's (#354)", async () => {
