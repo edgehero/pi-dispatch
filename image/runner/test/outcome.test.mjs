@@ -295,6 +295,42 @@ test("capExitMessage bounds the exit line's message and marks the cut; shorter o
 	for (const outcome of [{ code: 0, reason: "stop" }, { code: 2, reason: "x", message: 5 }, null, undefined]) assert.equal(capExitMessage(outcome), outcome);
 });
 
+test("the exit-line message budget is 2000 characters AS SERIALIZED, whatever the body escapes to", () => {
+	// The literal, pinned: every other test here derives from the constant, so a raised cap would pass them
+	// all while the worker's tail lost the label. worker/test/run-history.test.mjs measures the real line.
+	assert.equal(EXIT_MESSAGE_MAX_CHARS, 2000);
+	const escaped = (message) => JSON.stringify(message).length - 2;
+	// A quote or newline serializes to 2 characters and a control byte to 6: the budget is what the tail
+	// sees, so each of these must come out at or under 2000 escaped characters plus the marker.
+	for (const body of ['"'.repeat(5000), "\n".repeat(5000), "\u0001".repeat(5000), `403 ${'<a href="x">'.repeat(900)}`]) {
+		const capped = capExitMessage({ code: 2, reason: "provider-auth-refused", message: body }).message;
+		const kept = capped.slice(0, capped.lastIndexOf("... [truncated "));
+		assert.ok(escaped(kept) <= EXIT_MESSAGE_MAX_CHARS, `kept ${escaped(kept)} escaped chars`);
+		assert.ok(escaped(kept) > EXIT_MESSAGE_MAX_CHARS - 6, "and it spends the budget rather than stopping far short");
+		assert.ok(body.startsWith(kept));
+		assert.ok(capped.endsWith(`... [truncated ${body.length - kept.length} chars]`));
+	}
+	// A body at the budget raw but over it escaped is cut; one at the budget escaped is not.
+	assert.notEqual(capExitMessage({ message: '"'.repeat(1001) }).message, '"'.repeat(1001));
+	assert.equal(capExitMessage({ message: '"'.repeat(1000) }).message, '"'.repeat(1000));
+	// Whole code points only: an astral character is never split into a lone surrogate.
+	const astral = capExitMessage({ message: "\u{1F600}".repeat(3000) }).message;
+	const keptAstral = astral.slice(0, astral.lastIndexOf("... [truncated "));
+	assert.equal(keptAstral, "\u{1F600}".repeat(1000));
+	assert.equal(keptAstral.isWellFormed(), true);
+});
+
+test("run-job.mjs logs retry_predicate_unavailable when no pinned retry predicate loads", () => {
+	// The fail-open direction is safe (everything retries) but it silently turns #437 off, so the one
+	// signal an operator gets is this line. Pinned beside the loadRetryPredicate call it guards.
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	assert.match(
+		src,
+		/const isRetryable = await loadRetryPredicate\([^\n]*\);\n\tif \(!isRetryable\) log\("retry_predicate_unavailable", \{\}\);/,
+		"the null-predicate log line must follow the loadRetryPredicate call",
+	);
+});
+
 test("run-job.mjs caps every exit line and hands decideExit the pinned retry predicate", () => {
 	// Both are wiring the unit tests above cannot see: an exit line that bypasses the cap loses the label
 	// host-side on a big body, and a decideExit call without isRetryable silently turns #437 off.

@@ -199,19 +199,36 @@ export async function loadRetryPredicate({ module = null, candidates = [], load 
 }
 
 /**
- * The longest `message` an exit line carries (issue #437 review). The worker recovers the exit line from
- * the last 8 KiB of container stdout (worker/src/run-history.mjs, TAIL_CAP_BYTES), and a provider's
- * error body is unbounded: a 15 KB HTML 403 put in whole pushes the line's head, where `code` and
- * `reason` sit, out of that tail, and the record loses the label. 2000 characters keeps the line well
- * inside the tail beside the ledger's own ~5 KB worst case, and the marker says the text was cut.
+ * The most a `message` may add to an exit line, counted AS SERIALIZED (issue #437 review). The worker
+ * recovers the exit line from the last 8 KiB of container stdout (worker/src/run-history.mjs,
+ * TAIL_CAP_BYTES, which counts string characters), and a provider's error body is unbounded: a 15 KB
+ * HTML 403 put in whole pushes the line's head, where `code` and `reason` sit, out of that tail, and the
+ * record loses the label. The budget is spent on the JSON-escaped form, not on the raw string, because
+ * escaping is what the tail sees: a quote or a newline costs two characters and a control byte six, so a
+ * raw-length cap of 2000 let a body of control bytes serialize to 12000 and lose the label anyway.
+ * 2000 escaped characters plus the worst-case ledger, context and session keeps the whole line under
+ * 6 KiB, a 2 KiB margin inside the tail; worker/test/run-history.test.mjs measures exactly that line.
  */
 export const EXIT_MESSAGE_MAX_CHARS = 2000;
 
-/** The outcome with its `message` capped for the exit line. Every exit-line path goes through this. */
+/**
+ * The outcome with its `message` capped for the exit line. Every exit-line path goes through this.
+ * Cuts on whole code points, so an astral character is never split into a lone surrogate.
+ */
 export function capExitMessage(outcome) {
 	const message = outcome?.message;
-	if (typeof message !== "string" || message.length <= EXIT_MESSAGE_MAX_CHARS) return outcome;
-	return { ...outcome, message: `${message.slice(0, EXIT_MESSAGE_MAX_CHARS)}... [truncated ${message.length - EXIT_MESSAGE_MAX_CHARS} chars]` };
+	if (typeof message !== "string") return outcome;
+	// JSON.stringify adds the two enclosing quotes; they are not the message's to spend.
+	if (JSON.stringify(message).length - 2 <= EXIT_MESSAGE_MAX_CHARS) return outcome;
+	let kept = "";
+	let spent = 0;
+	for (const char of message) {
+		const cost = JSON.stringify(char).length - 2;
+		if (spent + cost > EXIT_MESSAGE_MAX_CHARS) break;
+		kept += char;
+		spent += cost;
+	}
+	return { ...outcome, message: `${kept}... [truncated ${message.length - kept.length} chars]` };
 }
 
 /**

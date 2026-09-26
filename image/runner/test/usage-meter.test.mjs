@@ -354,6 +354,10 @@ test("the worst-case exit line fits the worker's 8 KiB recovery tail with headro
 	// it. Maximal by construction: 9 distinct models with 64-char provider AND model ids (one folds),
 	// a model-less call to force the other row, 8-digit token counts everywhere, every session
 	// distinct. If this ever fails, shrink the cap in usage-meter.mjs; do not widen this number.
+	// The 5000 budgets THIS line only, which is a completed run's: no `message` and no `context` key. The
+	// full worst case (this ledger plus `context`, the longest session reason and the 2000-character capped
+	// message a provider-refusal exit carries) is measured against the tail in
+	// worker/test/run-history.test.mjs, which holds it under 6 KiB; that, not this number, is the headroom.
 	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root-0" });
 	const wide = (prefix, i) => `${prefix}-${i}`.padEnd(64, "x");
 	for (let i = 0; i < 9; i += 1) {
