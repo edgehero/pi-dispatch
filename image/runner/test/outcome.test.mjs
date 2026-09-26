@@ -318,6 +318,18 @@ test("the exit-line message budget is 2000 characters AS SERIALIZED, whatever th
 	const keptAstral = astral.slice(0, astral.lastIndexOf("... [truncated "));
 	assert.equal(keptAstral, "\u{1F600}".repeat(1000));
 	assert.equal(keptAstral.isWellFormed(), true);
+	// A lone surrogate escapes to 6 characters and U+2028 is kept raw by JSON.stringify; both are budgeted as serialized.
+	for (const body of ["\uD800".repeat(1000), "\u2028".repeat(3000)]) {
+		const capped = capExitMessage({ message: body }).message;
+		assert.ok(escaped(capped.slice(0, capped.lastIndexOf("... [truncated "))) <= EXIT_MESSAGE_MAX_CHARS);
+	}
+});
+
+test("capExitMessage never throws on a body whose escaped form would exceed the engine's string limit", () => {
+	// 100M control bytes escape to 600M characters, past V8's maximum string length: stringifying the whole
+	// message first threw a RangeError here, on the exit path, and lost the exit line itself.
+	const capped = capExitMessage({ code: 2, reason: "provider-auth-refused", message: "\u0001".repeat(100_000_000) });
+	assert.ok(capped.message.length < EXIT_MESSAGE_MAX_CHARS + 40);
 });
 
 test("run-job.mjs logs retry_predicate_unavailable when no pinned retry predicate loads", () => {

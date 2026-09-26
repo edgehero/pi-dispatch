@@ -218,17 +218,21 @@ export const EXIT_MESSAGE_MAX_CHARS = 2000;
 export function capExitMessage(outcome) {
 	const message = outcome?.message;
 	if (typeof message !== "string") return outcome;
-	// JSON.stringify adds the two enclosing quotes; they are not the message's to spend.
-	if (JSON.stringify(message).length - 2 <= EXIT_MESSAGE_MAX_CHARS) return outcome;
+	// Walk code points and stop at the budget, never stringifying the whole message: a body large enough
+	// would make that one call throw (V8's maximum string length), and a throw here, on the exit path,
+	// would lose the exit line itself. JSON.stringify adds the two enclosing quotes; they are not the
+	// message's to spend.
 	let kept = "";
 	let spent = 0;
 	for (const char of message) {
 		const cost = JSON.stringify(char).length - 2;
-		if (spent + cost > EXIT_MESSAGE_MAX_CHARS) break;
+		if (spent + cost > EXIT_MESSAGE_MAX_CHARS) {
+			return { ...outcome, message: `${kept}... [truncated ${message.length - kept.length} chars]` };
+		}
 		kept += char;
 		spent += cost;
 	}
-	return { ...outcome, message: `${kept}... [truncated ${message.length - kept.length} chars]` };
+	return outcome;
 }
 
 /**
