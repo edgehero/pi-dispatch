@@ -8,11 +8,14 @@
 # instance, the job image loaded into ITS store and the egress proxy running under ITS Podman on a named bridge
 # network, exactly as docs/podman.md tells an operator to set one up.
 #
-# ADVISORY, and in a workflow of its own so that no required context changes (CLAUDE.md lists the five that are
-# required, all from pi-upgrade-check.yml). Ubuntu 24.04 ships Podman 4.9, one major behind the 5.8.1 the venue was
-# measured on, so a red run here is a finding to read before it is a defect to fix; promoting it to required is a
-# follow-up. The pull_request trigger is UNFILTERED for pi-upgrade-check.yml's reason: a check that reports only
-# for some PRs cannot later be made required without first becoming one that reports for all of them.
+# REQUIRED on main since issue #432, the sixth required context and the only one outside pi-upgrade-check.yml
+# (CLAUDE.md lists all six). It ran advisory first, because Ubuntu 24.04 ships Podman 4.9, one major behind the 5.8.1
+# the venue was measured on, and was promoted after it had passed on every PR and main push of the podman follow-up
+# round (#428 to #437): 38 of 39 runs green, the one red a real defect on the branch that built the venue. A red run
+# here is still a finding to read before it is a defect to fix, but it now blocks the merge. The pull_request
+# trigger is UNFILTERED for pi-upgrade-check.yml's reason, and must stay so: a required check that never reports
+# blocks a merge forever.
+# Renaming the job below renames the required context, so a rename must be paired with a branch-protection update.
 
 name: podman conformance
 
@@ -37,7 +40,7 @@ permissions:
 
 jobs:
   conformance:
-    name: the rootless podman venue holds its declarations (advisory)
+    name: the rootless podman venue holds its declarations
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
