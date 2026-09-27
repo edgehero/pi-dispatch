@@ -457,7 +457,7 @@ store, and the sweep holds each one on every pass (`sandbox_reaper_skipped` with
 the new store's `podman ps` cannot say whether a sandbox is open on it. Once you know none is, remove them by hand,
 as for a local run on a host without docker (`docs/backends.md`): `pi-dispatch sandbox --list` shows their ids, and
 `rm -rf "$PI_SANDBOX_DIR/<jobId>"` removes each. A retained directory whose manifest could not be read for a moment
-(EMFILE, EIO) is held for that pass too (`manifest-unread`) and read again on the next.
+(EMFILE, EIO) is held on every pass it stays unreadable (`manifest-unread`, said each pass).
 
 On an SELinux host the retained job directory and the retained clone carry `:Z`, decided from `podman info`'s
 `selinuxEnabled` as a job's are, so the shell reads them under `container_file_t` the way the job did; a local run's

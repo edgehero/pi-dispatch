@@ -1224,7 +1224,9 @@ describe("makeSandboxRuntimeWatch: the retention reaper asks the runtime EACH RU
 			const logs = [];
 			const held = await makeSandboxRuntimeWatch({ sandboxDir: "/sbx", fs, readPodmanStore: async () => STORE, list: answering(answers), log: (e, f) => logs.push(f) }).listRunning();
 			for (const id of unplaced) assert.ok(held.includes(id), `${failing} down holds ${id}`);
-			const own = failing === "docker" ? 3 : 3; // d-live d-idle old-1, or p-live p-idle p-old
+			// Three runs of its own either way (d-live, d-idle, old-1 on docker; p-live, p-idle, p-old on podman).
+			const own = Object.values(runs).filter((m) => (m.backend ?? "local") === (failing === "docker" ? "local" : "podman")).length;
+			assert.equal(own, 3);
 			assert.equal(logs.find((f) => f.reason === "runtime-unanswered")?.held, own + unplaced.length, `${failing}: held counts the unplaced runs`);
 		}
 		// Present means blessed or recorded: with only unplaced runs and podman blessed, podman alone is asked.
@@ -1492,16 +1494,21 @@ describe("the reaper and the watch decide on ONE manifest read per directory (#4
 	const OLD = "2026-01-01T00:00:00.000Z";
 	const NOW = Date.parse("2026-09-27T00:00:00.000Z");
 	/** A real-shaped retention root on a fake fs, counting reads per manifest; `flaky` maps a name to its first read's errno. */
-	const rootWith = (runs, flaky = {}) => {
+	const rootWith = (runs, flaky = {}, { lstatFlaky = {}, links = [] } = {}) => {
 		const files = { "/sbx": "<dir>" };
 		for (const [id, m] of Object.entries(runs)) {
 			files[`/sbx/${id}`] = "<dir>";
 			if (m !== null) files[`/sbx/${id}/manifest.json`] = typeof m === "string" ? m : JSON.stringify(m);
 		}
+		for (const id of links) files[`/sbx/${id}`] = "<link>";
 		const reads = {};
 		const removed = [];
+		const lstats = {};
 		const fs = {
 			lstatSync: (p) => {
+				const id = p.split("/").at(-1);
+				lstats[id] = (lstats[id] ?? 0) + 1;
+				if (lstatFlaky[id] && lstats[id] === 1) throw Object.assign(new Error(lstatFlaky[id]), { code: lstatFlaky[id] });
 				if (!(p in files)) throw Object.assign(new Error(p), { code: "ENOENT" });
 				return { isDirectory: () => files[p] === "<dir>" };
 			},
@@ -1518,11 +1525,11 @@ describe("the reaper and the watch decide on ONE manifest read per directory (#4
 				for (const k of Object.keys(files)) if (k === p || k.startsWith(`${p}/`)) delete files[k];
 			},
 		};
-		return { fs, reads, removed };
+		return { fs, reads, removed, files };
 	};
-	const pass = async ({ fs }, { list = async () => [], store = STORE } = {}) => {
+	const pass = async ({ fs }, { list = async () => [], store = STORE, blessed = [] } = {}) => {
 		const logs = [];
-		const watch = makeSandboxRuntimeWatch({ sandboxDir: "/sbx", fs, list, readPodmanStore: async () => store, makeSweeper: () => async () => ({ swept: [], notes: [] }), log: (e, f) => logs.push(f) });
+		const watch = makeSandboxRuntimeWatch({ sandboxDir: "/sbx", blessed, fs, list, readPodmanStore: async () => store, makeSweeper: () => async () => ({ swept: [], notes: [] }), log: (e, f) => logs.push(f) });
 		await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 1, fs, now: () => NOW, listRunning: watch.listRunning, sweepNetworks: watch.sweepNetworks, log: (e, f) => logs.push(f) })();
 		return logs;
 	};
@@ -1544,21 +1551,87 @@ describe("the reaper and the watch decide on ONE manifest read per directory (#4
 		assert.deepEqual(root.removed, ["p-open"], "second pass: read, same store, not open: swept");
 	});
 
-	test("every directory is read exactly once per pass, and expiry decides on that same read", async () => {
+	test("every directory is read once to place it, and once more only at the point of deletion", async () => {
 		const root = rootWith({ "d-1": { backend: "local", createdAt: OLD }, "p-1": { backend: "podman", podmanStore: STORE, createdAt: OLD }, bad: "{", none: null });
 		await pass(root, { list: async ({ bin }) => (bin === "docker" ? ["d-1"] : []) });
-		assert.deepEqual(root.reads, { "d-1": 1, "p-1": 1, bad: 1, none: 1 });
+		assert.deepEqual(root.reads, { "d-1": 1, "p-1": 2, bad: 2, none: 2 }, "the held one is never re-read; each deleted one is confirmed fresh");
 		assert.deepEqual(root.removed.sort(), ["bad", "none", "p-1"], "held by its runtime: d-1; the rest expire on their one read");
 	});
 
 	test("ENOENT keeps the no-manifest rule without asking anyone; a parse error is asked of every runtime present", async () => {
+		// A runtime IS present (podman blessed), so "nobody was asked" is a property of ENOENT, not of an empty host.
 		const asked = [];
 		const root = rootWith({ none: null });
-		await pass(root, { list: async ({ bin }) => (asked.push(bin), []) });
-		assert.deepEqual([root.removed, asked], [["none"], []]);
+		await pass(root, { blessed: ["podman"], list: async ({ bin }) => (asked.push(bin), []) });
+		assert.deepEqual([root.removed, asked], [["none"], []], "no manifest file: swept, and no runtime asked about it");
+		const unplacedAsked = [];
+		await pass(rootWith({ bad: "{" }), { blessed: ["podman"], list: async ({ bin }) => (unplacedAsked.push(bin), []) });
+		assert.deepEqual(unplacedAsked, ["podman"], "while a parse error IS asked of the runtime present");
 		const bad = rootWith({ bad: "{", "p-1": { backend: "podman", createdAt: new Date(NOW).toISOString() } });
 		await pass(bad, { list: async ({ bin }) => (bin === "podman" ? ["bad"] : []) });
 		assert.deepEqual(bad.removed, [], "a runtime reports it open: held");
+	});
+
+	test("a pin landing while the runtimes are asked is honoured: the delete re-reads and holds (final review, reproduced)", async () => {
+		const root = rootWith({ "p-1": { jobId: "p-1", backend: "podman", podmanStore: STORE, createdAt: OLD, keepUntil: null } });
+		const logs = await pass(root, {
+			// A slow runtime: the operator pins the run while the pass waits on it.
+			list: async () => {
+				await new Promise((r) => setTimeout(r, 5));
+				root.files["/sbx/p-1/manifest.json"] = JSON.stringify({ jobId: "p-1", backend: "podman", podmanStore: STORE, createdAt: OLD, keepUntil: new Date(NOW + 7 * 86400000).toISOString() });
+				return [];
+			},
+		});
+		assert.deepEqual(root.removed, [], "the pinned run survives");
+		assert.deepEqual(logs.filter((f) => f.entry === "p-1").map((f) => f.reason), ["manifest-changed"]);
+	});
+
+	test("a directory REPLACED by a retry's fresh run while the runtimes are asked is not deleted on the old read", async () => {
+		const root = rootWith({ "gh-1": { jobId: "gh-1", backend: "local", createdAt: OLD, keepUntil: null } });
+		await pass(root, {
+			list: async () => {
+				await new Promise((r) => setTimeout(r, 5));
+				// BullMQ reused the id: the retry's retention removed the old tree and wrote a fresh manifest.
+				root.files["/sbx/gh-1/manifest.json"] = JSON.stringify({ jobId: "gh-1", backend: "local", createdAt: new Date(NOW).toISOString(), keepUntil: null });
+				return [];
+			},
+		});
+		assert.deepEqual(root.removed, [], "the fresh run survives");
+		// Unchanged, the same run expires as before: the fresh read is only a confirmation.
+		const plain = rootWith({ "gh-1": { jobId: "gh-1", backend: "local", createdAt: OLD, keepUntil: null } });
+		await pass(plain, { list: async () => (await new Promise((r) => setTimeout(r, 5)), []) });
+		assert.deepEqual(plain.removed, ["gh-1"]);
+	});
+
+	test("a fresh read that fails for a moment at the point of deletion holds too", async () => {
+		const root = rootWith({ "d-1": { backend: "local", createdAt: OLD } });
+		let n = 0;
+		const read = root.fs.readFileSync;
+		root.fs.readFileSync = (p) => {
+			if (++n === 2) throw Object.assign(new Error("EMFILE"), { code: "EMFILE" });
+			return read(p);
+		};
+		const logs = await pass(root);
+		assert.deepEqual(root.removed, []);
+		assert.deepEqual(logs.filter((f) => f.entry === "d-1").map((f) => f.reason), ["manifest-unread"]);
+	});
+
+	test("a TRANSIENT lstat holds the directory through the real deletion path, never reads as absent (M1)", async () => {
+		const root = rootWith({ "d-1": { backend: "local", createdAt: OLD } }, {}, { lstatFlaky: { "d-1": "EIO" } });
+		const logs = await pass(root);
+		assert.deepEqual(root.removed, [], "held, not swept as no-manifest");
+		assert.deepEqual(logs.filter((f) => f.entry === "d-1").map((f) => f.reason), ["manifest-unread"]);
+		assert.equal(root.reads["d-1"], undefined, "and nothing was read through an entry that could not be stat'ed");
+	});
+
+	test("a symlinked entry is never followed: no manifest is read through it (M2)", async () => {
+		const root = rootWith({}, {}, { links: ["evil"] });
+		const readThrough = [];
+		const read = root.fs.readFileSync;
+		root.fs.readFileSync = (p) => (readThrough.push(p), read(p));
+		await pass(root);
+		assert.deepEqual(readThrough, [], "the pass read nothing through the link");
+		assert.deepEqual(root.removed, ["evil"], "and the reaper removed the link itself as not-a-directory");
 	});
 });
 

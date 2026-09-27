@@ -340,6 +340,19 @@ export function makeSandboxReaper({
 				}
 				const verdict = expiry(read, at, cutoff);
 				if (!verdict.expired) continue;
+				// AND AGAIN AT THE POINT OF DELETION (final review of round 3, reproduced): the pass's read is taken BEFORE
+				// the runtimes are asked, which can take seconds per runtime, so a pin landing meanwhile, or a BullMQ retry
+				// replacing the directory with a fresh run, was deleted on the stale read. The one read still PLACES the
+				// run; the delete additionally needs a fresh read (lstat first) that is byte-for-byte the same manifest,
+				// so it is the same run under the same expiry inputs. A retained manifest carries its `createdAt` to the
+				// millisecond, so a retry's fresh run never matches. Anything else holds the directory this pass: a
+				// transient fresh read (`manifest-unread`), or a changed, pinned, replaced or newly unreadable one
+				// (`manifest-changed`); the next pass reads it again.
+				const fresh = readRetained(fs, dir);
+				if (fresh.transient || !sameRead(read, fresh)) {
+					log("sandbox_reaper_skipped", { entry: name, reason: fresh.transient ? "manifest-unread" : "manifest-changed" });
+					continue;
+				}
 				removing = true;
 				fs.rmSync(dir, { recursive: true, force: true });
 				log("reaped_sandbox", { entry: name, reason: verdict.reason });
@@ -433,15 +446,29 @@ export function readRetained(fs, dir) {
 	}
 	let text;
 	try {
-		text = fs.readFileSync(join(dir, SANDBOX_MANIFEST), "utf8");
+		text = String(fs.readFileSync(join(dir, SANDBOX_MANIFEST), "utf8"));
 	} catch (err) {
 		if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return { absent: true };
 		if (TRANSIENT_READ_ERRORS.has(err?.code)) return { transient: true, code: err.code };
 		return { unreadable: true, code: err?.code ?? null };
 	}
+	// `text` rides along so the delete can compare the pass's read with a fresh one byte for byte (`sameRead`).
 	try {
-		return { manifest: JSON.parse(text) };
+		return { manifest: JSON.parse(text), text };
 	} catch {
-		return { unparsed: true };
+		return { unparsed: true, text };
 	}
+}
+
+/**
+ * Whether two `readRetained` results are the same read: the same kind, and for a manifest (parsed or not) the same
+ * bytes. Two absences are the same, and so are two failures with the same errno; a transient failure never reaches here.
+ */
+function sameRead(a, b) {
+	if (a?.absent || b?.absent) return a?.absent === true && b?.absent === true;
+	// An unreadable file matches only the same failure (EACCES then EACCES): nothing changed between the reads, and a
+	// file that stays unreadable must still be swept once every runtime has said no sandbox is open on it.
+	if (a?.unreadable || b?.unreadable) return a?.unreadable === true && b?.unreadable === true && a.code === b.code;
+	if (typeof a?.text !== "string" || typeof b?.text !== "string") return false;
+	return a.text === b.text && Object.hasOwn(a, "manifest") === Object.hasOwn(b, "manifest");
 }

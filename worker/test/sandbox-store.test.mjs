@@ -644,6 +644,14 @@ test("a pin keeps the manifest's OWNER and MODE, even as root, and refuses rathe
 	const own = fakeFs({ files: { [path]: body }, owners: { [path]: worker }, as: { uid: 1234, gid: 1234 } });
 	assert.equal(pinSandbox({ sandboxDir: "/sbx", jobId: "gh-1", pinDays: 7, fs: own, now: () => at, euid: 1234 }).pinned, true);
 	assert.deepEqual(own.meta[path], worker, "the worker's own pin: mode 0600, owner unchanged");
+	// Whatever the mode is, it is kept (M12): an operator who made a manifest 0640 for a group still has 0640.
+	const shared = { uid: 1234, gid: 1234, mode: 0o640 };
+	const group = fakeFs({ files: { [path]: body }, owners: { [path]: shared }, as: { uid: 1234, gid: 1234 } });
+	assert.equal(pinSandbox({ sandboxDir: "/sbx", jobId: "gh-1", pinDays: 7, fs: group, now: () => at, euid: 1234 }).pinned, true);
+	assert.deepEqual(group.meta[path], shared);
+	const rootGroup = fakeFs({ files: { [path]: body }, owners: { [path]: shared }, as: { uid: 0, gid: 0 } });
+	assert.equal(pinSandbox({ sandboxDir: "/sbx", jobId: "gh-1", pinDays: 7, fs: rootGroup, now: () => at, euid: 0 }).pinned, true);
+	assert.deepEqual(rootGroup.meta[path], shared);
 
 	// Another unprivileged account cannot keep the owner, so the pin is refused and the manifest untouched.
 	const other = fakeFs({ files: { [path]: body }, owners: { [path]: worker }, as: { uid: 1300, gid: 1300 } });
