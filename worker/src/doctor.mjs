@@ -3033,6 +3033,23 @@ function canaryCheck(shape, params, venue = CANARY_DOCKER) {
 	return { ok: spec.tier === "ok", ...(spec.tier === "warn" ? { warn: true } : {}), label: `${venue.prefix}Egress canary: ${spec.label(carried)}`, ...(fix ? { fix: forRuntime(fix, venue.bin) } : {}), canary: { shape, params: carried } };
 }
 
+/**
+ * The argv that removes a canary probe container by name, per runtime (issue #431, review).
+ *
+ * podman's carries `--time=0`: its `rm -f` of a running container first waits the container's stop timeout, 10 s by
+ * default, before SIGKILL (measured 10.1 s on Podman 5.8.1, with its "resorting to SIGKILL" warning), which is the
+ * whole of `CANARY_STEP_TIMEOUT_MS`. So a wedged probe read as "could not be removed" and its network was kept, on
+ * exactly the path the removal exists for. `-t, --time` is in `podman rm` 4.9.3 (cmd/podman/containers/rm.go, "Seconds
+ * to wait for stop before killing the container", accepted only beside `--force`), the oldest Podman this project runs
+ * on in CI. Not a longer step bound instead: the teardown must not be the slow part of a doctor run, and a probe here
+ * is doctor's own throwaway container, so there is nothing a grace period could let it finish.
+ *
+ * docker's is what it always was: `docker rm -f` sends SIGKILL at once, and its argv is pinned byte for byte.
+ */
+function canaryProbeRemoval(bin, name) {
+	return bin === "podman" ? ["rm", "-f", "--time=0", name] : ["rm", "-f", name];
+}
+
 /** The docker venue's canary words: its CLI, and no prefix, which is every canary line as it was before issue #431. */
 const CANARY_DOCKER = Object.freeze({ bin: "docker", prefix: "" });
 /** The podman venue's (issue #431): its CLI, and the `podman: ` its section's lines all carry. */
@@ -3148,7 +3165,7 @@ async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, venue = C
 		const removed = [];
 		const stuck = [];
 		for (const endpoint of names.filter((n) => probeOf(ownerText).test(n))) {
-			if ((await run(["rm", "-f", endpoint]))?.code === 0) removed.push(endpoint);
+			if ((await run(canaryProbeRemoval(venue.bin, endpoint)))?.code === 0) removed.push(endpoint);
 			else stuck.push(endpoint);
 		}
 		// THE NETWORK IS THE ONLY HANDLE. Nothing in this project ever enumerates `pi-dispatch-egress-probe-`
@@ -3569,7 +3586,7 @@ export async function runEgressCanary({ run, bin = "docker", proxy, image, pid =
 		// run's `finally` or reported in the same run. A probe still standing is the same fact the sweep's
 		// `kept` line reports one run later, so it is reported with the same words, now rather than then.
 		const stuck = [];
-		for (const name of unfinished) if ((await docker(["rm", "-f", name])).code !== 0) stuck.push(name);
+		for (const name of unfinished) if ((await docker(canaryProbeRemoval(bin, name))).code !== 0) stuck.push(name);
 		// AND THE NETWORK IS THEN KEPT, because that is what the line says. Reusing the sweep's wording while
 		// removing the network anyway printed "the network is the only way left to find it" and then removed
 		// it in the same run -- both halves of the sentence false, and the page's own row for this shape says

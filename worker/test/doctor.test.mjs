@@ -6814,7 +6814,8 @@ test("the stale canary sweep works on podman: a dead run's leftover in this acco
 	const touched = calls.filter((c) => c.args.some((a) => String(a).includes("4242"))).map((c) => [c.cmd, ...c.args].join(" "));
 	assert.deepEqual(touched, [
 		`podman network inspect --format {{json .Containers}} ${leftover}`,
-		"podman rm -f pi-dispatch-egress-probe-unlisted-4242",
+		// `--time=0` (review F1): podman's `rm -f` otherwise waits the probe's 10 s stop timeout, the step bound itself.
+		"podman rm -f --time=0 pi-dispatch-egress-probe-unlisted-4242",
 		`podman network disconnect -f ${leftover} pi-dispatch-egress-proxy`,
 		`podman network rm ${leftover}`,
 	], "the name filter is unchanged and anchored, and the proxy is detached, never removed");
@@ -6824,7 +6825,7 @@ test("the stale canary sweep works on podman: a dead run's leftover in this acco
 	// The table's command-carrying lines name podman on this venue, and their fixes too.
 	const unlisted = await podmanLiveChecks(env, podmanEgressSeams({ [`podman network ls --filter name=${EGRESS_CANARY_NET_PREFIX}`]: { code: 125, output: "" } }), podmanEgressFacts({ proxyRunning: false }));
 	assert.ok(unlisted.some((c) => c.warn && c.label === `podman: Egress canary: leftovers from an EARLIER doctor run could not be listed: podman network ls --filter name=${EGRESS_CANARY_NET_PREFIX}`), unlisted.map((c) => c.label).join("\n"));
-	const kept = await podmanLiveChecks(env, podmanEgressSeams({ ...sweep, "podman rm -f pi-dispatch-egress-probe-unlisted-4242": 1 }), podmanEgressFacts({ proxyRunning: false }));
+	const kept = await podmanLiveChecks(env, podmanEgressSeams({ ...sweep, "podman rm -f --time=0 pi-dispatch-egress-probe-unlisted-4242": 1 }), podmanEgressFacts({ proxyRunning: false }));
 	const keptLine = kept.find((c) => c.canary?.shape === "kept");
 	assert.equal(keptLine.label, `podman: Egress canary: ${leftover} is kept, because the probe pi-dispatch-egress-probe-unlisted-4242 could not be removed and the network is the only way left to find it: podman rm -f pi-dispatch-egress-probe-unlisted-4242`);
 	const unproved = await podmanLiveChecks(env, podmanEgressSeams({ "podman network create": 1 }), podmanEgressFacts());
@@ -6845,6 +6846,39 @@ test("doctor --live on a podman-only deployment with egress armed: the canary's 
 	assert.match(text(), /✓ podman: Egress policy reaches the provider[^\n]*\n✓ podman: Egress policy denies an unlisted host[^\n]*\n/);
 	assert.ok(text().indexOf("✓ podman: Egress policy denies an unlisted host") < text().indexOf("✓ read back on podman: egress holds"));
 	assert.equal(calls.filter((c) => c.cmd === "podman" && c.args[0] === "info").length, 3, "the section's read, the canary's re-ask, and the read-back's");
+});
+
+test("a podman canary probe gets the first-start bound, and one the bound cut short is removed without podman's stop wait (#431)", async (t) => {
+	// The probe's bound is PODMAN_FIRST_START_TIMEOUT_MS, pinned as a NUMBER: a cold keep-id first start measured 27 to
+	// 32 s (29.4 s on the review VM), so docker's 30 s would read a healthy first run as a probe that did not run.
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const env = liveEnv({ PI_EGRESS: "1", PI_BACKENDS: "podman" });
+	const calls = [];
+	const pending = podmanLiveChecks(env, podmanEgressSeams({ [`${PODMAN_PROBE}provider`]: "hang", [`${PODMAN_PROBE}unlisted`]: 3 }, calls), podmanEgressFacts());
+	const probe = () => calls.find((c) => c.args[1] === "--name=pi-dispatch-egress-probe-provider-1");
+	for (let i = 0; i < 200 && !probe(); i++) await new Promise((r) => setImmediate(r));
+	assert.ok(probe(), "the provider probe started");
+	t.mock.timers.tick(119_999);
+	assert.deepEqual(probe().kills, [], "no kill short of 120 s");
+	t.mock.timers.tick(1);
+	assert.deepEqual(probe().kills, ["SIGKILL"], "at 120 s exactly, by the step runner's SIGKILL");
+	const checks = await pending;
+	assert.ok(checks.some((c) => c.label === "podman: Egress policy probe for the provider did not run (podman run did not finish)"), checks.map((c) => c.label).join("\n"));
+	// The teardown removes the probe the bound left behind, with podman's stop wait turned off (review F1), then the network.
+	const teardown = calls.filter((c) => (c.args[0] === "rm" && c.args.includes("pi-dispatch-egress-probe-provider-1")) || (c.args[0] === "network" && c.args[1] === "rm" && c.args[2] === "pi-dispatch-egress-doctor-1"));
+	assert.deepEqual(teardown.map((c) => [c.cmd, ...c.args].join(" ")), ["podman rm -f --time=0 pi-dispatch-egress-probe-provider-1", "podman network rm pi-dispatch-egress-doctor-1"]);
+});
+
+test("the podman canary runs PI_JOB_IMAGE, whatever it names (#431)", async () => {
+	const env = liveEnv({ PI_EGRESS: "1", PI_BACKENDS: "podman", PI_JOB_IMAGE: "registry.example.invalid/team/pi-job:7" });
+	const calls = [];
+	await podmanLiveChecks(env, podmanEgressSeams({ [`${PODMAN_PROBE}provider`]: 0, [`${PODMAN_PROBE}unlisted`]: 3 }, calls), { ...podmanEgressFacts(), jobImage: "registry.example.invalid/team/pi-job:7" });
+	const probes = calls.filter((c) => String(c.args[1]).startsWith("--name=pi-dispatch-egress-probe-"));
+	assert.equal(probes.length, 2);
+	for (const p of probes) {
+		assert.equal(p.args.at(-3), "registry.example.invalid/team/pi-job:7", p.args.join(" "));
+		assert.equal(p.args.includes("pi-job:latest"), false);
+	}
 });
 
 test("the podman canary's argv cannot be built weaker than a job's: no job user, no argv (#431)", () => {
@@ -6876,7 +6910,7 @@ test("the pinning and ephemeral read-backs on podman name podman in what they co
 // predates #427, and a provider probe the bound cut short. Captured from main at 26cef96, BEFORE the canary was
 // parameterised on a venue runner: the text and every spawn (runtime and argv), with the only per-run values (the
 // jobs directory and the fixture names under it) replaced. A docker canary that moved by one byte or one spawn lands here.
-const dockerCanaryPinRun = async (scenario) => {
+const dockerCanaryPinRun = async (scenario, t = null) => {
 	const env = liveEnv({ PI_EGRESS: "1" });
 	const cwd = tempDir("pi-canary-pin-cwd-");
 	const leftover = "pi-dispatch-egress-doctor-4242";
@@ -6891,9 +6925,26 @@ const dockerCanaryPinRun = async (scenario) => {
 	// Assigned, not spread: `green` already carries this key, and a spread keeps the FIRST key's place with the last value.
 	if (scenario === "stale") plan["docker run --rm --name pi-dispatch-egress-probe-provider"] = EGRESS_CANARY_STALE_RUNNER;
 	if (scenario === "unfinished") plan["docker run --rm --name pi-dispatch-egress-probe-provider"] = { code: null, output: "" };
+	// Issue #431, review: the two shapes `runCmdCapture` answers differently from the step runner, added to the pin
+	// (captured from main at a65d6d5 like the rest). A probe that never answers is ended by its 30 s bound, with the
+	// signal that runner sends; a probe whose CLI cannot launch still leaves its name for the teardown's `rm -f`.
+	if (scenario === "enoent") plan["docker run --rm --name pi-dispatch-egress-probe-provider"] = "enoent";
+	if (scenario === "hung") {
+		plan["docker run --rm --name pi-dispatch-egress-probe-provider"] = "hang";
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+	}
 	const { out, text } = capture();
 	const calls = [];
-	const code = await runDoctor(env, { ...ghDeps(out, plan, calls), cwd, home: "/home/op", agentDir: NO_AGENT_DIR, live: true, liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n", ...instantClock() });
+	const pending = runDoctor(env, { ...ghDeps(out, plan, calls), cwd, home: "/home/op", agentDir: NO_AGENT_DIR, live: true, liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n", ...instantClock() });
+	const probe = () => calls.find((c) => c.args[3] === "pi-dispatch-egress-probe-provider-7");
+	let killsBeforeBound = null;
+	if (scenario === "hung") {
+		for (let i = 0; i < 200 && !probe(); i++) await new Promise((r) => setImmediate(r));
+		t.mock.timers.tick(29_999);
+		killsBeforeBound = [...probe().kills];
+		t.mock.timers.tick(1);
+	}
+	const code = await pending;
 	const jobs = realpathSync(env.PI_JOBS_DIR);
 	const norm = (s) => String(s).replaceAll(jobs, "<jobs>").replaceAll(env.PI_JOBS_DIR, "<jobs>").replaceAll(cwd, "<cwd>").replace(/pi-dispatch-live-7-[A-Za-z0-9]{6}/g, "<fixture>");
 	// The in-container script is `egressCanaryScript`'s, which its own tests pin; here it is named, so the argv around it
@@ -6903,7 +6954,7 @@ const dockerCanaryPinRun = async (scenario) => {
 	// The collection's spawns, which is where the canary lives, exactly; the read-back's (runLiveProbes, which this
 	// change does not touch) by count.
 	const readBack = spawns.indexOf("docker ps -a --filter name=pi-dispatch-live- --format {{.ID}} {{.Names}}");
-	return { code, text: norm(text()), collection: spawns.slice(0, readBack), total: spawns.length };
+	return { code, text: norm(text()), collection: spawns.slice(0, readBack), total: spawns.length, killsBeforeBound, kills: probe()?.kills ?? null };
 };
 const DOCKER_CANARY_PIN = {
 	green: {
@@ -7110,12 +7161,163 @@ const DOCKER_CANARY_PIN = {
 			"",
 		].join("\n"),
 	},
+	hung: {
+		code: 0,
+		total: 51,
+		// The kills the provider probe got: none before its 30 s bound, then ONE, with no signal named (so the
+		// default SIGTERM), which is `runCmdCapture`'s. The step runner would send SIGKILL.
+		killsBeforeBound: [],
+		kills: [null],
+		collection: [
+			"docker info",
+			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
+			"docker image inspect pi-job:latest",
+			"docker network ls --filter name=pi-dispatch-egress-doctor- --format {{.Name}}",
+			"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242",
+			"docker rm -f pi-dispatch-egress-probe-unlisted-4242",
+			"docker network disconnect -f pi-dispatch-egress-doctor-4242 pi-dispatch-egress-proxy",
+			"docker network rm pi-dispatch-egress-doctor-4242",
+			"docker inspect --format={{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} pi-dispatch-egress-proxy",
+			"docker network create --internal pi-dispatch-egress-doctor-7",
+			"docker network connect pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
+			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
+			"docker run --rm --name pi-dispatch-egress-probe-unlisted-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(unlisted)>",
+			"docker rm -f pi-dispatch-egress-probe-provider-7",
+			"docker network disconnect -f pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
+			"docker network rm pi-dispatch-egress-doctor-7",
+			"docker info --format={{json .}}",
+			"gh auth status",
+			"gh auth token",
+			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
+		],
+		text: [
+			"✓ Node ≥ 22.19 (have 22.19.0)",
+			"✓ .env present",
+			"✓ Docker daemon reachable",
+			"✓ Job image present (pi-job:latest)",
+			"✓ Egress canary: removed pi-dispatch-egress-doctor-4242 (after removing pi-dispatch-egress-probe-unlisted-4242 and detaching pi-dispatch-egress-proxy), left by an EARLIER doctor run",
+			"✓ Egress proxy running (pi-dispatch-egress-proxy)",
+			"✓ Egress proxy health: healthy",
+			"⚠ Egress policy probe for the provider did not run (docker run did not finish)",
+			"    → re-run doctor; if it persists, run the job image by hand to see why a container on this network will not start",
+			"✓ Egress policy denies an unlisted host (the deny direction is the half an allowlist can silently lose)",
+			"✓ Jobs run on: local",
+			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or on a daemon that enforces bind-mount ownership and a worker uid other than 1001 the worker's own non-zero uid passed as `--user`, not enforced by it",
+			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
+			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
+			"✓ local: the daemon is Docker Engine 27.5.1",
+			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
+			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
+			"    → this token carries broad scopes (workflow) -- use a fine-grained PAT (GITHUB_AUTH_SOURCE=pat) or a GitHub App for per-job scoping -- see SECURITY.md",
+			"✓ Valkey reachable (redis://127.0.0.1:6379)",
+			"✓ Provider key set (anthropic: ANTHROPIC_API_KEY)",
+			"⚠ PI_PAUSE_WINDOWS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped pauses cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h \u2014 re-open one with `pi-dispatch sandbox <jobId>`",
+			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
+			"",
+			"read back on local: starting pi-dispatch-live-probe-7-n, pi-dispatch-live-pin-7-n and pi-dispatch-live-ephemeral-7-n (twice) from pi-job:latest (no environment, as the image's own user), and pi-dispatch-live-peer1-7-n and pi-dispatch-live-peer2-7-n on their own --internal networks pi-dispatch-live-peer1-7-n-net and pi-dispatch-live-peer2-7-n-net, with pi-dispatch-egress-proxy attached to both, with a fixture under <jobs>; all of them are removed when the read-back ends, as is anything an interrupted earlier run left",
+			"✓ read back on local: the probe ran as the job image's own user (uid 1001)",
+			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296)",
+			"✓ read back on local: ephemeral holds (two runs under one name each removed themselves (in 0 ms and 0 ms), and the second found nothing of the first)",
+			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
+			"⚠ read back on local: egress not read back: an egress probe did not run to an answer (see the egress lines above)",
+			"    → this property was not read back, which is not the same as holding: see the reason, fix it if you can, and re-run `pi-dispatch doctor --live`",
+			"✓ read back on local: jobToJobIsolation holds (peer1 reached the proxy and none of peer2's 3 name(s) and address(es) (pi-dispatch-live-peer2-7-n:47431 enetunreach, pi-dispatch-live-peer2-1-n:47431 enetunreach, 10.99.0.3:47431 enetunreach); peer2 answered itself before and after)",
+			"✓ read back on local: imagePinning holds (an absent image was refused without a pull)",
+			"✓ read back on local: nonRoot holds (Uid 1001 1001 1001 1001)",
+			"✓ read back on local: localFolders holds (every mount a job uses was used as the job user, and the files written inside /workspace, /outbox and /session were read back on the host, owned by this shell's uid 1001)",
+			"✓ read back on local: limits of this read-back -- every probe container runs a constant program (`sleep`, `sh` or `node`) in place of the job image's entrypoint; it ran as the image's own user, decided for this shell (uid 1001), and the worker service may run as another account; it wrote to a fixture folder, not to any folder of yours; it read back PI_JOB_IMAGE only; ephemeral ran two short-lived containers under one name, not two real jobs; jobToJobIsolation tried one pair of peers on this daemon's job networks, from the first to the second only, not every pair of jobs; secretsCustody and credentialTransit are not container properties",
+			"",
+			"doctor: ready. Start the worker with `pi-dispatch worker`.",
+			"",
+		].join("\n"),
+	},
+	enoent: {
+		code: 0,
+		total: 51,
+		// The kills the provider probe got: none before its 30 s bound, then ONE, with no signal named (so the
+		// A probe that never launched is never killed.
+		killsBeforeBound: null,
+		kills: [],
+		collection: [
+			"docker info",
+			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
+			"docker image inspect pi-job:latest",
+			"docker network ls --filter name=pi-dispatch-egress-doctor- --format {{.Name}}",
+			"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242",
+			"docker rm -f pi-dispatch-egress-probe-unlisted-4242",
+			"docker network disconnect -f pi-dispatch-egress-doctor-4242 pi-dispatch-egress-proxy",
+			"docker network rm pi-dispatch-egress-doctor-4242",
+			"docker inspect --format={{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} pi-dispatch-egress-proxy",
+			"docker network create --internal pi-dispatch-egress-doctor-7",
+			"docker network connect pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
+			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
+			"docker run --rm --name pi-dispatch-egress-probe-unlisted-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(unlisted)>",
+			"docker rm -f pi-dispatch-egress-probe-provider-7",
+			"docker network disconnect -f pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
+			"docker network rm pi-dispatch-egress-doctor-7",
+			"docker info --format={{json .}}",
+			"gh auth status",
+			"gh auth token",
+			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
+		],
+		text: [
+			"✓ Node ≥ 22.19 (have 22.19.0)",
+			"✓ .env present",
+			"✓ Docker daemon reachable",
+			"✓ Job image present (pi-job:latest)",
+			"✓ Egress canary: removed pi-dispatch-egress-doctor-4242 (after removing pi-dispatch-egress-probe-unlisted-4242 and detaching pi-dispatch-egress-proxy), left by an EARLIER doctor run",
+			"✓ Egress proxy running (pi-dispatch-egress-proxy)",
+			"✓ Egress proxy health: healthy",
+			"⚠ Egress policy probe for the provider did not run (docker run did not finish)",
+			"    → re-run doctor; if it persists, run the job image by hand to see why a container on this network will not start",
+			"✓ Egress policy denies an unlisted host (the deny direction is the half an allowlist can silently lose)",
+			"✓ Jobs run on: local",
+			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or on a daemon that enforces bind-mount ownership and a worker uid other than 1001 the worker's own non-zero uid passed as `--user`, not enforced by it",
+			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
+			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
+			"✓ local: the daemon is Docker Engine 27.5.1",
+			"✓ local: jobs run as the job image's own user (this shell is uid 1001, the image's own uid)",
+			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
+			"    → this token carries broad scopes (workflow) -- use a fine-grained PAT (GITHUB_AUTH_SOURCE=pat) or a GitHub App for per-job scoping -- see SECURITY.md",
+			"✓ Valkey reachable (redis://127.0.0.1:6379)",
+			"✓ Provider key set (anthropic: ANTHROPIC_API_KEY)",
+			"⚠ PI_PAUSE_WINDOWS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped pauses cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h \u2014 re-open one with `pi-dispatch sandbox <jobId>`",
+			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
+			"",
+			"read back on local: starting pi-dispatch-live-probe-7-n, pi-dispatch-live-pin-7-n and pi-dispatch-live-ephemeral-7-n (twice) from pi-job:latest (no environment, as the image's own user), and pi-dispatch-live-peer1-7-n and pi-dispatch-live-peer2-7-n on their own --internal networks pi-dispatch-live-peer1-7-n-net and pi-dispatch-live-peer2-7-n-net, with pi-dispatch-egress-proxy attached to both, with a fixture under <jobs>; all of them are removed when the read-back ends, as is anything an interrupted earlier run left",
+			"✓ read back on local: the probe ran as the job image's own user (uid 1001)",
+			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296)",
+			"✓ read back on local: ephemeral holds (two runs under one name each removed themselves (in 0 ms and 0 ms), and the second found nothing of the first)",
+			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
+			"⚠ read back on local: egress not read back: an egress probe did not run to an answer (see the egress lines above)",
+			"    → this property was not read back, which is not the same as holding: see the reason, fix it if you can, and re-run `pi-dispatch doctor --live`",
+			"✓ read back on local: jobToJobIsolation holds (peer1 reached the proxy and none of peer2's 3 name(s) and address(es) (pi-dispatch-live-peer2-7-n:47431 enetunreach, pi-dispatch-live-peer2-1-n:47431 enetunreach, 10.99.0.3:47431 enetunreach); peer2 answered itself before and after)",
+			"✓ read back on local: imagePinning holds (an absent image was refused without a pull)",
+			"✓ read back on local: nonRoot holds (Uid 1001 1001 1001 1001)",
+			"✓ read back on local: localFolders holds (every mount a job uses was used as the job user, and the files written inside /workspace, /outbox and /session were read back on the host, owned by this shell's uid 1001)",
+			"✓ read back on local: limits of this read-back -- every probe container runs a constant program (`sleep`, `sh` or `node`) in place of the job image's entrypoint; it ran as the image's own user, decided for this shell (uid 1001), and the worker service may run as another account; it wrote to a fixture folder, not to any folder of yours; it read back PI_JOB_IMAGE only; ephemeral ran two short-lived containers under one name, not two real jobs; jobToJobIsolation tried one pair of peers on this daemon's job networks, from the first to the second only, not every pair of jobs; secretsCustody and credentialTransit are not container properties",
+			"",
+			"doctor: ready. Start the worker with `pi-dispatch worker`.",
+			"",
+		].join("\n"),
+	},
 };
-test("docker's egress canary prints and spawns exactly what it did before it was parameterised on the venue (#431)", async () => {
+test("docker's egress canary prints and spawns exactly what it did before it was parameterised on the venue (#431)", async (t) => {
 	for (const [scenario, want] of Object.entries(DOCKER_CANARY_PIN)) {
-		const got = await dockerCanaryPinRun(scenario);
+		const got = await dockerCanaryPinRun(scenario, t);
 		assert.deepEqual(got.collection, want.collection, `${scenario}: the collection's spawns moved`);
 		assert.equal(got.text, want.text, `${scenario}: the output moved`);
 		assert.deepEqual([got.code, got.total], [want.code, want.total], `${scenario}: exit code and spawn count`);
+		// JSON has no `undefined`, so the capture wrote a signal-less kill as null.
+		if ("kills" in want) assert.deepEqual([got.killsBeforeBound, got.kills?.map((k) => k ?? null) ?? null], [want.killsBeforeBound, want.kills], `${scenario}: the probe's bound and its kill`);
 	}
 });
+
