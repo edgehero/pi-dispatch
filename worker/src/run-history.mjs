@@ -87,8 +87,9 @@ function parseTailLine(line) {
  * own lines. Only the decided-outcome exit line carries `turns` (`image/runner/run-job.mjs:431`); the
  * catch-path exit line (`:446`) omits it. The decided line's `retryTurns` (issue #449, pi's own
  * auto-retry turns, which the turn budget does not count) is not recovered here: it is diagnostic, read
- * from the container log, and the record's `turns` stays the budgeted count. Scan from the end and return the turns of the last `exit`
- * event that reports an integer count, repairing a glued line on the way (`parseTailLine`).
+ * from the container log, and the record's `turns` stays the budgeted count. Scan from the end and
+ * return the turns of the last `exit` event that reports an integer count, repairing a glued line on
+ * the way (`parseTailLine`).
  *
  * This is read-only telemetry: it MUST NEVER throw and MUST NOT feed exit-code or retry
  * classification -- that is the container exit code's job (INT-RUNNER-EXIT-CODE-PROTOCOL). Every parse

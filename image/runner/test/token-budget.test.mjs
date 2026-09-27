@@ -113,3 +113,23 @@ test("rejects a nonsensical cap rather than running unbounded", () => {
 		assert.throws(() => attachTokenBudget(fakeSession(), bad), /invalid PI_MAX_TOKENS/);
 	}
 });
+
+test("once breached, every later turn_start aborts again; onAbort still fires once", () => {
+	// Issue #455 gate round 1, A11. The breach aborts on a turn_end; when that turn failed with a retryable
+	// error pi retries it with a FRESH AbortController, and a queued follow-up starts a new run the same way,
+	// so the one abort never reaches the next run. Each such run opens with turn_start before its model call.
+	const session = fakeSession();
+	const logged = [];
+	attachTokenBudget(session, 100, { onAbort: (total) => logged.push(total) });
+	session.emit({ type: "turn_start" });
+	assert.equal(session.abortCalls, 0, "no abort before a breach");
+	session.emit({ type: "turn_end", message: { role: "assistant", stopReason: "error", usage: usage({ input: 5000, output: 1 }) } });
+	assert.equal(session.abortCalls, 1);
+	session.emit({ type: "auto_retry_start", attempt: 1, maxAttempts: 2, delayMs: 2000, errorMessage: "Overloaded" });
+	session.emit({ type: "agent_start" });
+	session.emit({ type: "turn_start" });
+	assert.equal(session.abortCalls, 2, "the retry's turn_start aborts again");
+	session.emit({ type: "turn_start" });
+	assert.equal(session.abortCalls, 3);
+	assert.deepEqual(logged, [5001], "the operator's line is written once");
+});

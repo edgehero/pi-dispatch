@@ -22,6 +22,9 @@
  *    synchronously first, so the signal is set the instant we call it. Do not await inside the
  *    listener.
  *
+ * The breach aborts ONCE per breach but re-aborts on every later turn_start (see the listener): pi can
+ * start a new run after an abort, with a fresh signal, and one abort does not reach it. onAbort fires once.
+ *
  * Usage is accumulated on turn_end ONLY. Each turn is a distinct billed API call, so summing the
  * per-turn usage yields the job's total billed tokens and cost. `agent_end` carries `messages[]`,
  * a terminal snapshot of those same messages -- accumulating it too would double-count.
@@ -42,6 +45,15 @@ export function attachTokenBudget(session, maxTokens, { onAbort } = {}) {
 	const state = { input: 0, output: 0, total: 0, cost: 0, aborted: false };
 
 	const unsubscribe = session.subscribe((event) => {
+		// Once breached, EVERY later turn_start aborts again (issue #455 gate, A11/A13). The breach abort lands
+		// on a turn_end, and one abort ends only the run in flight: when that turn failed with a retryable
+		// error pi retries it with a FRESH AbortController (_prepareRetry, then agent.continue()), and a
+		// queued follow-up starts a new run the same way (agent-session.js:732-733, :763-765). Each such
+		// run opens with a turn_start before its model call, so re-aborting there keeps the cap a cap.
+		if (event.type === "turn_start") {
+			if (state.aborted) void session.abort();
+			return;
+		}
 		if (event.type !== "turn_end") return;
 		const message = event.message;
 		if (message?.role !== "assistant" || !message.usage) return;

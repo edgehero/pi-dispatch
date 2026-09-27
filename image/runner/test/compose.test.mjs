@@ -47,9 +47,9 @@ test("decideExit: no terminal message and no abort is infra, not success", () =>
 
 test("decideExit's non-abort branch carries NO turns of its own -- the premise the source-guard rests on", () => {
 	// WHY the guard below exists: on the success path, `turns` reaches the exit log SOLELY from
-	// run-job.mjs's `log("exit", { ...outcome, turns: budget.state.turns })` spread. decideExit's
-	// non-abort branch returns classifyStopReason, which has no `turns` field (only the budget-abort
-	// branch carries one -- see "a blown budget wins" above). So if that spread ever dropped `turns`,
+	// run-job.mjs's `log("exit", { ...capExitMessage(outcome), turns: budget.state.turns, ... })`.
+	// decideExit's non-abort branch returns classifyStopReason, which has no `turns` field (only the
+	// budget-abort branch carries one -- see "a blown budget wins" above). So if that line ever dropped `turns`,
 	// nothing in outcome.mjs would put it back, and the worker's parseExitTurns (which requires a
 	// numeric `turns` on the exit line) would silently read null on every completed run.
 	const outcome = decideExit({ budgetAborted: false, terminal: { stopReason: "stop" } });

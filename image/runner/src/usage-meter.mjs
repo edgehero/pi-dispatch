@@ -18,7 +18,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
  * pi-coding-agent's agent-session.js calls compat's `streamSimple`, compat resolves the provider for
  * `model.api` out of that registry, and every session -- root or subagent -- goes through it. Metering
  * there counts calls, not turns, and `options.sessionId` (a declared field on pi-ai's StreamOptions)
- * reaches the provider, so per-session attribution comes free.
+ * reaches the provider, so per-session attribution comes free. A "call" (`calls`) is precisely a stream
+ * dispatch the meter observed (`observe()` in wrapProviderStreams), which includes one pi-ai then ended as
+ * aborted before sending anything (an abort signal already set when the turn started, say); a call the
+ * meter's own hard stop answered never reaches a provider and is not counted.
  *
  * Three traps this module is shaped around, all verified by runtime probe, none by reading source:
  *

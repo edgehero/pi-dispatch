@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { attachTurnBudget } from "../src/turn-budget.mjs";
-import { agentEnd, assistantError, assistantText, assistantToolUse, continuationTurn, nextTurn, promptTurn, retryTurn } from "./helpers/pi-retry-events.mjs";
+import { agentEnd, assistantError, assistantText, assistantToolUse, continuationTurn, nextTurn, promptTurn, retryTurn, toolsThenError, user } from "./helpers/pi-retry-events.mjs";
 
 /**
  * A stand-in for AgentSession that reproduces the two properties the budget depends on:
@@ -42,11 +42,16 @@ test("aborts once the turn count exceeds the maximum", () => {
 	assert.equal(budget.state.turns, 4);
 });
 
-test("abort fires exactly once even if more turns arrive", () => {
+test("every turn past the cap aborts again, while onAbort (the log line) fires once", () => {
+	// One abort ends the CURRENT run only. A queued follow-up makes pi start a new run with a fresh
+	// AbortController, so a budget that aborted once let that run go unbounded (the real-session pin in
+	// pinned-api.test.mjs drives it). Re-aborting each over-cap turn_start is what keeps it bounded.
 	const session = fakeSession();
-	attachTurnBudget(session, 1);
+	const logged = [];
+	attachTurnBudget(session, 1, { onAbort: (turns) => logged.push(turns) });
 	for (let i = 0; i < 5; i++) session.emit({ type: "turn_start" });
-	assert.equal(session.abortCalls, 1);
+	assert.equal(session.abortCalls, 4, "turns 2 through 5 are each past the cap");
+	assert.deepEqual(logged, [2], "the operator's line is written once, at the first breach");
 });
 
 test("the signal is set synchronously inside the listener", () => {
@@ -194,4 +199,66 @@ test("an abort that lands before the backoff does not stop pi's retry: its turn 
 	continuationTurn(emit, assistantText());
 	assert.equal(budget.state.turns, 2);
 	assert.equal(budget.state.retryTurns, 1);
+});
+
+test("a retry after the turn's tools RAN is a new turn and is counted: no laundering through a retry-shaped throw", () => {
+	// Gate round 1 of #455, A8: a listener throwing "fetch failed" on each tool result made pi retry turns
+	// that had already run their tools, and each retry called the model with fresh tool results. With the
+	// exemption unguarded that was 9 paid calls at --max-turns 1. Driven in the measured order.
+	const session = fakeSession();
+	const emit = (e) => session.emit(e);
+	const budget = attachTurnBudget(session, 1);
+	emit({ type: "agent_start" });
+	emit({ type: "turn_start" });
+	emit({ type: "message_start", message: user });
+	emit({ type: "message_end", message: user });
+	const failed = toolsThenError(emit);
+	agentEnd(emit, [failed], true);
+	emit({ type: "auto_retry_start", attempt: 1, maxAttempts: 2, delayMs: 2000, errorMessage: "fetch failed" });
+	emit({ type: "agent_start" });
+	emit({ type: "turn_start" });
+	assert.deepEqual({ turns: budget.state.turns, retryTurns: budget.state.retryTurns }, { turns: 2, retryTurns: 0 });
+	assert.equal(session.aborted, true, "the second real turn trips a budget of 1");
+});
+
+test("the tool guard is per turn: a later tool-free turn's retry is exempt again", () => {
+	// tool_execution_start in turn 1 must not disarm the exemption for a 429 on turn 2, which ran no tool.
+	const session = fakeSession();
+	const emit = (e) => session.emit(e);
+	const budget = attachTurnBudget(session, 2);
+	promptTurn(emit, assistantToolUse());
+	emit({ type: "tool_execution_start", toolCallId: "t1", toolName: "read", args: {} });
+	emit({ type: "tool_execution_end", toolCallId: "t1", toolName: "read", result: {}, isError: false });
+	nextTurn(emit, assistantError());
+	agentEnd(emit, [assistantError()], true);
+	retryTurn(emit, 1, assistantText());
+	assert.deepEqual({ turns: budget.state.turns, retryTurns: budget.state.retryTurns, aborted: budget.state.aborted }, { turns: 2, retryTurns: 1, aborted: false });
+});
+
+test("an exempt retry turn past the cap is still aborted: the budget is spent", () => {
+	const session = fakeSession();
+	const emit = (e) => session.emit(e);
+	attachTurnBudget(session, 1);
+	promptTurn(emit, assistantText());
+	nextTurn(emit, assistantError()); // turn 2: over the cap, aborted
+	const callsAfterBreach = session.abortCalls;
+	agentEnd(emit, [assistantError()], true);
+	retryTurn(emit, 1, assistantText());
+	assert.equal(session.abortCalls, callsAfterBreach + 1, "the retry's turn_start aborts again");
+});
+
+test("agent_settled clears an armed flag that no retry turn used, so the next prompt's first turn counts", () => {
+	// Measured at the pin: a retry-shaped throw after a CLEAN reply (a listener throwing on its turn_end)
+	// gets auto_retry_start, then agent.continue() throws "Cannot continue from message role: assistant":
+	// no turn_start, no auto_retry_end, only agent_settled. A later prompt on the same session must not
+	// inherit the exemption.
+	const session = fakeSession();
+	const emit = (e) => session.emit(e);
+	const budget = attachTurnBudget(session, 1);
+	promptTurn(emit, assistantText());
+	agentEnd(emit, [assistantError("fetch failed")], true);
+	emit({ type: "auto_retry_start", attempt: 1, maxAttempts: 2, delayMs: 2000, errorMessage: "fetch failed" });
+	emit({ type: "agent_settled" });
+	promptTurn(emit, assistantText());
+	assert.deepEqual({ turns: budget.state.turns, retryTurns: budget.state.retryTurns, aborted: budget.state.aborted }, { turns: 2, retryTurns: 0, aborted: true });
 });

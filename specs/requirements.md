@@ -69,21 +69,39 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   This bound is per-session by construction and is not claimed to be process-wide; the process-wide spend
   control is the token meter in `REQ-TOKEN-ACCOUNTING-AND-CAPS`.
 - **What counts** (issue #449): every `turn_start` **except the one that opens pi's own auto-retry of a
-  provider error**. `auto_retry_start` arms a flag, the next `turn_start` consumes it and is tallied as
-  `retryTurns` instead of `turns`, and `auto_retry_end` of either kind clears it, so a retry cancelled
-  mid-sleep by `abort()` cannot exempt the threshold-compaction or queued-message continuation that may
-  follow it. Before this, with `--max-turns 1` a single 429 counted twice (the failed turn, then pi's
-  retry of it) and the job ended `2` / `turn_budget`: policy, not retried, and paged, for a failure that is
-  transient by definition. **Auto-compaction continuations still count, deliberately**: the issue is about
-  retries, and a compaction continuation is a new paid call on a rewritten context, not a re-run of a
-  failed turn. The exit line carries `retryTurns` beside `turns` (`INT-RUNNER-EXIT-CODE-PROTOCOL`).
+  turn that ran no tool**. `auto_retry_start` arms a flag unless a `tool_execution_start` was seen since
+  the last `turn_start`; the next `turn_start` consumes it and is tallied as `retryTurns` instead of
+  `turns`; `auto_retry_end` of either kind and `agent_settled` clear it. The `auto_retry_end` clear means a
+  retry cancelled mid-sleep by `abort()` cannot exempt the threshold-compaction or queued-message
+  continuation that may follow it. The `agent_settled` clear covers a retry-shaped throw after a CLEAN
+  reply: pi emits `auto_retry_start`, then `agent.continue()` throws "Cannot continue from message role:
+  assistant", so no retry turn and no `auto_retry_end` follow. Before this, with `--max-turns 1` a single
+  429 counted twice (the failed turn, then pi's retry of it) and the job ended `2` / `turn_budget`: policy,
+  not retried, and paged, for a failure that is transient by definition.
+  **Why the tool guard** (issue #455 gate round 1): pi turns ANY exception thrown inside its loop into an
+  assistant `stopReason: "error"` message and retries it when the text matches its retry pattern ("fetch
+  failed", a timeout, a 5xx). An exception AFTER a turn's tools ran (a listener throwing on the tool
+  result's `message_end`, say) leaves the tool results in context, so pi's "retry" calls the model with
+  fresh tool results: a genuinely new turn. A successful reply also resets pi's retry counter, so the
+  unguarded exemption laundered turns without bound (9 paid calls measured at `--max-turns 1`).
+  **Auto-compaction continuations still count, deliberately, including the one that re-runs a turn.** An
+  overflow error with `willRetry` compacts and then re-sends the SAME turn, once per streak. It counts
+  even so: it is paid work on a rewritten context, and the issue is about pi's retries only. Under
+  `--max-turns 1` a first turn that overflows the context therefore ends `2` / `turn_budget` (not
+  retried), which is also the honest outcome, since the same prompt overflows the same context again.
+  **Every `turn_start` past the cap aborts, not only the first** (a pre-existing defect, fixed with #449).
+  One `session.abort()` ends only the run in flight: a queued follow-up makes pi start a new run with a
+  fresh `AbortController`, and a budget that aborted once let that run go on (7 paid calls measured at
+  `--max-turns 1`, on main too). The `turn_budget_exceeded` log line is still written once. The exit line
+  carries `retryTurns` beside `turns` (`INT-RUNNER-EXIT-CODE-PROTOCOL`).
   **The bound this keeps.** (1) `turn_start` fires BEFORE the model call, so the failed first turn of every
   error streak was already counted when its error arrived. (2) Retries within one streak are capped at
   `PI_RETRY_MAX` (pi's `maxRetries`, pinned by the runner), and an exhausted streak emits no
-  `auto_retry_start` at all. (3) A successful retry turn does the failed turn's work, and its tool calls
-  lead to the next `turn_start`, which is counted. So the counted turns still equal the real turns, and a
-  run makes at most `maxTurns * PI_RETRY_MAX` uncounted provider calls, every one of them metered by the
-  token budget (`REQ-TOKEN-ACCOUNTING-AND-CAPS`).
+  `auto_retry_start` at all. (3) A streak can be reset only by a reply whose tools then run, and the retry
+  of a turn whose tools ran is counted. So the counted turns still equal the real turns, and **at most
+  `maxTurns * PI_RETRY_MAX` retry calls go uncounted by this exemption**, every one of them metered by the
+  token budget (`REQ-TOKEN-ACCOUNTING-AND-CAPS`). Calls this budget never counted, before or after #449,
+  stay uncounted: compaction and branch-summarisation calls, and a subagent session's turns (Scope above).
 - **Why**: **pi has no max-turns, step-limit, or iteration cap of any kind.** The agent loop is a bare
   `while (true)` bounded only by an `AbortSignal`; the only control surface is `session.abort()`. The
   design document assumed pi provided this and listed it as "verify" — it does not, so we build it.
@@ -114,19 +132,29 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   returns false past `maxRetries` WITHOUT emitting, `:2074-2080` emits `auto_retry_start` only when it will
   retry · `:2090-2101` a sleep aborted by `abort()` (`:1147-1148` calls `abortRetry()`) emits
   `auto_retry_end{success:false}` and does not continue, after which `:760-765` may still continue for
-  compaction or queued messages · `:351-358` a successful assistant `message_end` emits
-  `auto_retry_end{success:true}`, which is after the retry's own `turn_start` · `:751-758` an exhausted
+  compaction or queued messages · `:351-358` an assistant `message_end` whose `stopReason` is anything but
+  `"error"` (an `aborted` one included) emits `auto_retry_end{success:true}`, which is after the retry's own
+  `turn_start` · `:739` emits `agent_settled` once the prompt's run chain is over · `:1507-1530` and
+  `:1674-1681` an overflow with `willRetry` compacts and re-sends the same turn · `:763-765` a queued
+  message starts a new run · pi-agent-core `dist/agent-loop.js:267/300/336` emit `tool_execution_start`
+  before every tool path (truncated, sequential, parallel) · `:751-758` an exhausted
   streak's final `auto_retry_end{success:false}` · `image/runner/src/config.mjs:56` `PI_RETRY_MAX`
   (default 2). Pinned by `image/runner/test/turn-budget.test.mjs` and `image/runner/test/outcome.test.mjs`,
   driving that order (`image/runner/test/helpers/pi-retry-events.mjs`), and against the REAL pinned
   `AgentSession` by `image/runner/test/pinned-api.test.mjs`: a loopback Anthropic stub answers a 429 then a
   text reply, and the test requires `auto_retry_start` strictly before the retry's `agent_start` and
-  `turn_start` and a budget of `turns: 1, retryTurns: 1`, so a pin bump that reorders them fails there
+  `turn_start` and a budget of `turns: 1, retryTurns: 1`, so a pin bump that reorders them fails there.
+  The same file drives, on the real session: a 429 forever (`turns: 1, retryTurns: 2`, no abort); a
+  retry-shaped throw after a tool ran (counted, aborted, one request); a queued follow-up after the abort
+  (re-aborted, one request); and the fallback token budget's breach on a failed turn (re-aborted at the
+  retry's `turn_start`, one request)
 - **Traces to**: `CONST-BUDGET-BEFORE-TOKENS`, `REQ-JOB-TIMEOUT-30M`, `REQ-UPSTREAM-CONTRACT-TESTS`
 - **Acceptance**: Given a flow that would exceed the turn maximum, the runner aborts at the threshold and
   exits with the policy code, not the infra code. Given `--max-turns 1` and a provider 429 that pi's own
   retry recovers from with a reply that calls no tool, the job exits `0` with `retryTurns: 1`; given a 429
-  that outlasts pi's retries, it exits `1` (infra, retried), not `2` / `turn_budget`.
+  that outlasts pi's retries, it exits `1` (infra, retried), not `2` / `turn_budget`. Given a retry-shaped
+  failure AFTER a turn's tools ran, pi's retry of it is a counted turn; and given a follow-up queued when
+  the budget aborts, the run pi starts for it is aborted too, before its model call.
 - **Open**: the default N is underived. It should come from `OQ-002`'s measurement plus a target
   cost-per-job. Until then it is a conservative knob, not an evidenced threshold.
 
@@ -2225,7 +2253,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
-| 2026-09-27 | Issue #449 (a retry turn is not a budget turn). **`REQ-RUNNER-TURN-BUDGET` AMENDED**: a new **What counts** bullet (every `turn_start` except the one opening pi's own auto-retry, which is tallied as `retryTurns`; compaction continuations still count, deliberately) with the bound argument (at most `maxTurns * PI_RETRY_MAX` uncounted provider calls, all token-metered), an evidence bullet citing the pinned 0.80.7 dist line by line and naming the real-`AgentSession` loopback pin in `pinned-api.test.mjs` that fails if a bump reorders `auto_retry_start` against the retry's `turn_start`, and two Acceptance sentences (a recovered 429 under `--max-turns 1` exits `0`; an unrecovered one exits `1`, not `turn_budget`). **`REQ-TOKEN-ACCOUNTING-AND-CAPS` UNCHANGED, checked**: every uncounted retry call is still metered by the process-wide token meter, which this bound relies on. |
+| 2026-09-27 | Issue #449 (a retry turn is not a budget turn), with PR #455's gate round 1 folded in. **`REQ-RUNNER-TURN-BUDGET` AMENDED**: a new **What counts** bullet (every `turn_start` except the one opening pi's own auto-retry of a turn that ran NO tool, tallied as `retryTurns`; the flag clears on `auto_retry_end` and on `agent_settled`), the tool guard's reason (a retry-shaped throw after a turn's tools ran is a new turn, and exempting it laundered 9 paid calls at `--max-turns 1`), the plain statement that compaction continuations still count including the overflow one that re-runs a turn and what that means under `--max-turns 1`, the bound restated as at most `maxTurns * PI_RETRY_MAX` retry calls uncounted BY THIS EXEMPTION (calls never counted before stay so), an evidence bullet citing the pinned 0.80.7 dist line by line and naming the real-`AgentSession` loopback pins in `pinned-api.test.mjs`, and two Acceptance sentences (a recovered 429 under `--max-turns 1` exits `0`; an unrecovered one exits `1`, not `turn_budget`). **Pre-existing defect fixed in the same entry**: every `turn_start` past the cap re-aborts (one abort ended only the run in flight, and a queued follow-up's new run went on, 7 paid calls at `--max-turns 1` on main); the fallback per-session token budget (`REQ-TOKEN-ACCOUNTING-AND-CAPS`, `image/runner/src/token-budget.mjs`) re-aborts every `turn_start` after its breach for the same reason, since pi retries a failed breaching turn with a fresh signal; the statement of that requirement is UNCHANGED, checked, and the process-wide meter's own brake already answered every later call. |
 | 2026-09-27 | Issue #431 (the `podman` venue reads `egress` back). **`REQ-EGRESS-ALLOWLIST` AMENDED**, the Why and the Acceptance: the proof that the policy works both ways, through the runner's own route, now also runs on the native `podman` venue, from `doctor --live` under the worker account's own Podman (where that venue's proxy is), with its probe containers built as a podman job's, and spawns no `docker` command there. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, one clause of the `--live` mutation sentence: on the podman venue the egress canary is among what `--live` runs, named before it starts and removed in the same run or by the next `--live`, the same shown tier. **UNCHANGED, checked**: `REQ-RESUMABLE-SESSION`, `REQ-RESURRECTABLE-SANDBOX` (no session or sandbox path is touched) and every job's pre-spend gate (the worker's egress preflight is untouched; the canary is doctor's). |
 | 2026-09-27 | Issue #430, review round 2. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, one clause: `up` refuses when this shell and the deployment's `.env` set a venue key differently, where round 1 only warned, since it would otherwise stand up one venue while the service ran the other. A refusal still runs nothing, so the consent contract is UNCHANGED, checked. |
 | 2026-09-27 | Issue #430, review round 1. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, one sentence: `up` decides the venue from this shell where it sets a venue key and otherwise from the deployment's `.env` (the file `service install` reads), and never replaces a container it did not start. The consent contract is UNCHANGED, checked: every host mutation is still shown first, and a refusal runs nothing. |

@@ -7,8 +7,9 @@
  *   an error or aborted stop emits turn_end then agent_end and returns (:107-110).
  * - pi-coding-agent dist/core/agent-session.js:327 decorates agent_end with `willRetry`; :732-733 loops
  *   `agent.continue()` while _handlePostAgentRun says so; _prepareRetry (:2062-2106) emits
- *   auto_retry_start (:2074-2080), sleeps, and returns true; a successful assistant message_end emits
- *   auto_retry_end{success:true} (:351-358), which is AFTER the retry's turn_start; an exhausted streak
+ *   auto_retry_start (:2074-2080), sleeps, and returns true; an assistant message_end whose stopReason is
+ *   anything but "error" (so an ABORTED one too) emits auto_retry_end{success:true} (:351-358), which is
+ *   AFTER the retry's turn_start; an exhausted streak
  *   emits no auto_retry_start (:2068-2071) and then auto_retry_end{success:false} (:751-758); a retry
  *   aborted mid-sleep emits auto_retry_end{success:false, finalError:"Retry cancelled"} and does not
  *   continue (:2090-2101).
@@ -33,7 +34,8 @@ export function assistantToolUse() {
 function turn(emit, message, { retrySucceeded = false } = {}) {
 	emit({ type: "message_start", message });
 	emit({ type: "message_end", message });
-	// agent-session.js:351-358: emitted from the message_end handler, before the loop's turn_end.
+	// agent-session.js:351-358: emitted from the message_end handler, before the loop's turn_end, for any
+	// stopReason but "error" (an aborted retry message included).
 	if (retrySucceeded) emit({ type: "auto_retry_end", success: true, attempt: 1 });
 	emit({ type: "turn_end", message, toolResults: [] });
 }
@@ -71,4 +73,27 @@ export function continuationTurn(emit, message) {
 	emit({ type: "agent_start" });
 	emit({ type: "turn_start" });
 	turn(emit, message);
+}
+
+/**
+ * A turn whose tools RAN and which then failed with a retry-shaped error (issue #455 gate, A8): pi turns
+ * an exception thrown after the tools (here, a listener throwing on the tool result's message_end) into an
+ * assistant error message, and retries it. Measured order at the pin: the assistant's tool call, then
+ * tool_execution_start/end (agent-loop.js:300/336), the tool result's message_start/end, the synthetic
+ * error message, turn_end. The caller has already emitted this turn's turn_start.
+ */
+export function toolsThenError(emit, errorMessage = "fetch failed") {
+	const call = assistantToolUse();
+	emit({ type: "message_start", message: call });
+	emit({ type: "message_end", message: call });
+	emit({ type: "tool_execution_start", toolCallId: "t1", toolName: "read", args: {} });
+	emit({ type: "tool_execution_end", toolCallId: "t1", toolName: "read", result: {}, isError: false });
+	const result = { role: "toolResult", toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "ran" }], isError: false };
+	emit({ type: "message_start", message: result });
+	emit({ type: "message_end", message: result });
+	const failed = assistantError(errorMessage);
+	emit({ type: "message_start", message: failed });
+	emit({ type: "message_end", message: failed });
+	emit({ type: "turn_end", message: failed, toolResults: [] });
+	return failed;
 }
