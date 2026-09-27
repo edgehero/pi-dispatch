@@ -810,7 +810,7 @@ test("D2: PI_BACKENDS=podman in the deployment's .env drives the podman pass, as
 test("E5: a shell and a .env that disagree on a venue key stop up before anything runs, naming both and which to change", async () => {
 	const h = harness({ env: { PI_BACKENDS: "local" }, plan: green, listening: true, files: { "/deploy/.env": "PI_BACKENDS=podman\n" } });
 	assert.equal(await h.run(), 1);
-	assert.match(h.text(), /PI_BACKENDS is local in this shell and podman in \/deploy\/\.env\. up would drive the shell's venue while the service runs the file's/);
+	assert.match(h.text(), /PI_BACKENDS is "local" in this shell and "podman" in \/deploy\/\.env\. up would drive the shell's venue while the service runs the file's/);
 	assert.match(h.text(), /change \/deploy\/\.env \(what the service reads\), or unset the key in this shell/);
 	assert.equal(h.calls.length, 0);
 	assert.equal(h.initCalls.length, 0);
@@ -1022,4 +1022,19 @@ test("nit: an unreadable .env is said, not silently replaced by the shell's venu
 test("R25: the docker path never asks the passwd database, so an account with no entry and no USER still runs up", async () => {
 	const h = harness({ env: {}, plan: green, listening: true, extra: { userInfoFn: () => { throw new Error("ENOENT: no such user"); } } });
 	assert.equal(await h.run(), 0);
+});
+
+test("D4 (round 3): shell and .env are compared as the worker reads them, and shown in quotes", async () => {
+	for (const shell of [" podman", "podman,podman", "podman "]) {
+		const h = harness({ env: { PI_BACKENDS: shell, PI_EGRESS: "0" }, plan: podmanPlan(), listening: true, files: { "/deploy/.env": "PI_BACKENDS=podman\nPI_EGRESS=0\n" }, extra: podmanExtra() });
+		assert.equal(await h.run(), 0, JSON.stringify(shell));
+		assert.doesNotMatch(h.text(), /in this shell and/);
+	}
+	// PI_EGRESS "" and "1" are both ON; PI_EGRESS_PROXY " " and unset are both the default name.
+	const egress = harness({ env: { PI_EGRESS: "", PI_EGRESS_PROXY: " " }, plan: green, listening: true, files: { "/deploy/.env": "PI_EGRESS=1\nPI_EGRESS_PROXY=pi-dispatch-egress-proxy\n" } });
+	assert.equal(await egress.run(), 0);
+	// A real disagreement, with an empty shell value made visible.
+	const empty = harness({ env: { PI_BACKENDS: "" }, plan: green, files: { "/deploy/.env": "PI_BACKENDS=podman\n" } });
+	assert.equal(await empty.run(), 1);
+	assert.match(empty.text(), /PI_BACKENDS is "" in this shell and "podman" in \/deploy\/\.env/);
 });

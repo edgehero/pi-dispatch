@@ -353,10 +353,12 @@ test("service uninstall stops (never disables) and removes the Quadlet units wit
 	for (const q of ALL_QUADLET_FILES) assert.ok(!h.store.has(join(QDIR, q.file)), `${q.file} removed`);
 	assert.ok(!h.store.has(CONF_COPY), "the account-owned copy of the rules goes with its unit");
 	assert.deepEqual(h.calls.slice(2), [
-		["systemctl", "--user", "stop", "pi-dispatch-valkey.service", "pi-dispatch-egress-proxy.service"],
+		// D2 (round 3, measured): the network units too, or a reinstall after `podman network rm` finds its network unit
+		// still "active (exited)" and the container fails with "network not found".
+		["systemctl", "--user", "stop", "pi-dispatch-valkey.service", "pi-dispatch-egress-proxy.service", "pi-dispatch-valkey-network.service", "pi-dispatch-egress-out-network.service"],
 		["systemctl", "--user", "daemon-reload"],
 		// E10 (measured): squid ignores SIGTERM, its stop ends 137 and `failed`; the failed state is cleared.
-		["systemctl", "--user", "reset-failed", "pi-dispatch-valkey.service", "pi-dispatch-egress-proxy.service"],
+		["systemctl", "--user", "reset-failed", "pi-dispatch-valkey.service", "pi-dispatch-egress-proxy.service", "pi-dispatch-valkey-network.service", "pi-dispatch-egress-out-network.service"],
 	]);
 	assert.match(h.text(), /volume and the networks are kept/);
 	// With no worker unit (up installed the stack alone), uninstall still removes what exists.
@@ -427,7 +429,7 @@ test("D5: --force over a changed .container RESTARTS that unit (start is a no-op
 		["systemctl", "--user", "restart", "pi-dispatch-egress-proxy.service"],
 	]);
 	assert.match(h.text(), /⚠ restarting pi-dispatch-egress-proxy\.service makes a NEW proxy container/);
-	assert.match(h.text(), /^restarted pi-dispatch-egress-proxy\.service, whose Quadlet file this install replaced$/m);
+	assert.match(h.text(), /^restarted pi-dispatch-egress-proxy\.service, because this install replaced \/home\/tester\/\.config\/containers\/systemd\/pi-dispatch-egress-proxy\.container$/m);
 	assert.match(h.text(), /^started pi-dispatch-valkey\.service \(Quadlet units/m, "the started line lists ONLY what was started (R28)");
 	// A changed .network file alone restarts nothing: its unit only runs `network create --ignore`.
 	const netOnly = planStack({ components: { valkey: true, proxy: false }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs({ [join(QDIR, QUADLET_FILES.valkeyNetwork.file)]: "[Network]\n" }) });
@@ -528,9 +530,18 @@ test("E3: an inspect that fails for any reason but 'no such container' refuses, 
 	assert.equal(await absent.run(), 0, absent.errText());
 });
 
-test("E4: a value that OPENS with a quote continues in systemd too, so a key line under it refuses the decision", () => {
-	const text = "NOTE='see\nPI_BACKENDS=podman\n'\n";
-	assert.match(readStackKeys(text).error, /line 1 is one this command cannot read \(a quoted value that continues onto the next line/);
+test("E4/D1: only a key line INSIDE a still-open quoted value is in doubt; a multi-line value that closes is ordinary", () => {
+	// A key swallowed by a value that opens with a quote and continues (systemd's env_file_6): refused, both lines named.
+	assert.match(readStackKeys("NOTE='see\nPI_BACKENDS=podman\n'\n").error, /line 2 \(PI_BACKENDS\) lies inside the quoted value that opens on line 1 and closes on line 3/);
+	// Never closed: every key after it is in doubt.
+	assert.match(readStackKeys("NOTE='see\nPI_BACKENDS=podman\n").error, /opens on line 1 and never closes/);
+	// An escaped `"` does not close a double-quoted value (the E4c mutant: `rest.includes('"')`).
+	assert.match(readStackKeys('K="a\\"\nPI_BACKENDS=podman\n').error, /line 2 \(PI_BACKENDS\) lies inside/);
+	assert.match(readStackKeys('K="a\\"\nPI_BACKENDS=podman\n').error, /GITHUB_APP_PRIVATE_KEY_PATH/);
+	// D1 (measured on systemd 259): the documented multi-line GitHub App key, with the venue key before AND after it.
+	const pem = 'GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\nabc=\n-----END RSA PRIVATE KEY-----"\n';
+	assert.deepEqual(readStackKeys(`PI_BACKENDS=podman\nPI_EGRESS=1\n${pem}GITHUB_APP_PRIVATE_KEY_PATH=\n`).keys, { PI_BACKENDS: "podman", PI_EGRESS: "1" });
+	assert.deepEqual(readStackKeys(`${pem}PI_BACKENDS=podman\n`).keys, { PI_BACKENDS: "podman" });
 	// A quote opened MID-value does not continue, and a closed one is ordinary.
 	assert.deepEqual(readStackKeys("NOTE=a'b\nPI_BACKENDS=podman\n").keys, { PI_BACKENDS: "podman" });
 	assert.deepEqual(readStackKeys("NOTE='a b'\nPI_BACKENDS=podman\n").keys, { PI_BACKENDS: "podman" });
@@ -613,4 +624,62 @@ test("R21/R22/R23: off Linux the .env is read with that platform's loader and ne
 	const typo = svc({ platform: "darwin", files: { [ENV_PATH]: "PI_BACKENDS=podmn\n" }, plan: { launchctl: 0 } });
 	assert.equal(await typo.run(), 0);
 	assert.doesNotMatch(typo.text(), /podman venue runs only on Linux/);
+});
+
+// ---------------------------------------------------------------------------------------------------
+// Review round 3 (issue #430)
+// ---------------------------------------------------------------------------------------------------
+
+test("D3: uninstall with no user manager refuses before touching anything, and a failed stop removes nothing", async () => {
+	const files = { [USER_UNIT]: "unit" };
+	for (const q of ALL_QUADLET_FILES) files[join(QDIR, q.file)] = "q";
+	const nobus = svc({ argv: ["uninstall"], env: {}, files });
+	assert.equal(await nobus.run(), 1);
+	assert.match(nobus.errText(), /neither XDG_RUNTIME_DIR nor DBUS_SESSION_BUS_ADDRESS is set/);
+	assert.deepEqual(nobus.calls, []);
+	assert.ok(nobus.store.has(USER_UNIT));
+	assert.doesNotMatch(nobus.text(), /uninstalled|removed/);
+	// The worker's disable failing: nothing removed, no success claimed.
+	const disableFails = svc({ argv: ["uninstall"], files, plan: { "systemctl --user disable": 1 } });
+	assert.equal(await disableFails.run(), 1);
+	assert.match(disableFails.errText(), /disable --now pi-dispatch-worker\.service failed \(exit 1\), so nothing was removed/);
+	assert.ok(disableFails.store.has(USER_UNIT));
+	assert.doesNotMatch(disableFails.text(), /uninstalled/);
+	// The stack's stop failing: its files stay, and the exit says so.
+	const stopFails = svc({ argv: ["uninstall"], files, plan: { "systemctl --user stop": 1 } });
+	assert.equal(await stopFails.run(), 1);
+	assert.match(stopFails.errText(), /systemctl --user stop .* failed \(exit 1\), so nothing was removed/);
+	for (const q of ALL_QUADLET_FILES) assert.ok(stopFails.store.has(join(QDIR, q.file)), q.file);
+	assert.doesNotMatch(stopFails.text(), /removed the podman venue/);
+});
+
+test("E8c: a DBUS_SESSION_BUS_ADDRESS alone is a reachable user manager", async () => {
+	const h = svc({ env: { DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1234/bus" }, files: { [ENV_PATH]: NO_EGRESS } });
+	assert.equal(await h.run(), 0, h.errText());
+});
+
+test("nit: the refusal's closing line counts the blocking reasons it names", async () => {
+	const files = { [ENV_PATH]: PODMAN_ENV, [USER_UNIT]: "old unit" };
+	const oneBlocking = svc({ files });
+	assert.equal(await oneBlocking.run(), 1);
+	assert.match(oneBlocking.errText(), /The first item must be fixed by hand; --force accepts the rest\./);
+	const twoBlocking = svc({ env: {}, files });
+	assert.equal(await twoBlocking.run(), 1);
+	assert.match(twoBlocking.errText(), /The first 2 items must be fixed by hand; --force accepts the rest\./);
+	const forcedTwo = svc({ env: {}, argv: ["install", "--force"], files });
+	assert.equal(await forcedTwo.run(), 1);
+	assert.match(forcedTwo.errText(), /Each must be fixed by hand; --force does not apply\./);
+});
+
+test("nit: a restart for the rules copy alone names that file, and render names the copy without printing it", async () => {
+	const planned = planStack({ components: { valkey: false, proxy: true }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs() });
+	const files = { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "x\n", ...Object.fromEntries(planned.files.map((f) => [f.path, f.text])) };
+	files[CONF_COPY] = "old rules\n";
+	const h = svc({ argv: ["install", "--force"], files, listening: true });
+	assert.equal(await h.run(), 0, h.errText());
+	assert.match(h.text(), new RegExp(`^restarted pi-dispatch-egress-proxy\\.service, because this install replaced ${CONF_COPY}$`, "m"));
+	const render = svc({ argv: ["render"], files: { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "x\n" } });
+	assert.equal(await render.run(), 0);
+	assert.match(render.text(), new RegExp(`# → ${CONF_COPY} \\(the egress proxy's rules: install copies the package's egress-proxy\\.conf here, unchanged\\)`));
+	assert.doesNotMatch(render.text(), /http_access/, "the squid configuration itself is not printed");
 });

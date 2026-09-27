@@ -394,8 +394,10 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    `PI_EGRESS` and `PI_EGRESS_PROXY` from `.env`. `up` also takes a key your shell sets that `.env` does not, and
    REFUSES when the two set one differently, naming both, because it would stand up one venue while the service ran
    the other; `service install` reads the file alone. A line touching one of them that the loaders read differently
-   (`PI_BACKENDS =podman`, `export PI_BACKENDS=podman`, a `$` in the value, or a key line under a quoted value that
-   opens on an earlier line and continues) stops both: write it as a plain `PI_BACKENDS=podman`.
+   (`PI_BACKENDS =podman`, `export PI_BACKENDS=podman`, a `$` in the value, or a key line INSIDE a quoted value that
+   opens on an earlier line and has not closed yet, which systemd reads as part of that value) stops both: write it as
+   a plain `PI_BACKENDS=podman`. A multi-line value that closes, such as the documented inline
+   `GITHUB_APP_PRIVATE_KEY="-----BEGIN ...-----"`, is fine with the key above or below it (measured on systemd 259).
 
    The proxy's rules are mounted from `~/.config/pi-dispatch/egress-proxy.conf`, a copy of the package's own
    `egress-proxy.conf` that the installer writes (shown, compared and forced like the unit files). Never the package
@@ -435,9 +437,10 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    command installs a unit for it, because the unit's `--replace` would remove your container of that name.
    `service install` reads these keys from `.env`, the file the unit loads, not from your shell and not from an
    `--env-setup` script. It refuses `--system` on this venue: the units belong to this account's user manager, which
-   a system unit cannot order itself after, so install in user scope with linger on. `service uninstall` stops and
-   removes the units and the rules copy, clears their failed state, and keeps the `pi-dispatch-valkey-data` volume and
-   the networks; `service status` lists each
+   a system unit cannot order itself after, so install in user scope with linger on. `service uninstall` stops the
+   container and network units, removes them and the rules copy, clears their failed state, and keeps the
+   `pi-dispatch-valkey-data` volume and the networks; it refuses without a user manager (as install does) and reports a
+   stop or disable that failed instead of claiming success; `service status` lists each
    unit and whether it is active. Every `.container` sets `Network=` explicitly (Valkey on a bridge network of its
    own), because a containers.conf `netns = "host"` puts a container started without one into the host's network
    namespace (measured), where Valkey's `127.0.0.1` port mapping would mean nothing.

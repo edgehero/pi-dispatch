@@ -23,7 +23,7 @@
  */
 import { dirname, join } from "node:path";
 import { DEFAULT_EGRESS_PROXY, egressProxyName } from "./egress.mjs";
-import { envFileHazard, openQuoteLine, readEnvAssignments } from "./env-file.mjs";
+import { envFileHazard, quotedRegions, readEnvAssignments } from "./env-file.mjs";
 
 /**
  * The Quadlet files, in the order they are shown and written. `unit` is the service the generator makes of each; the
@@ -159,7 +159,7 @@ export function planStack({ components, templatesDir, deployDir, home, fs, readT
 			}
 			state = current === text ? "same" : "changed";
 		}
-		files.splice(files.length - 1, 0, { path: conf, text, unit: null, state, restarts: QUADLET_FILES.proxy.unit });
+		files.splice(files.length - 1, 0, { path: conf, text, unit: null, state, restarts: QUADLET_FILES.proxy.unit, kind: "conf" });
 	}
 	const containers = files.filter((f) => f.path.endsWith(".container"));
 	const start = containers.map((f) => f.unit);
@@ -279,14 +279,26 @@ export function readStackKeys(text, { loader = "systemd", path = ".env" } = {}) 
 		}
 	}
 	if (touched) {
-		// A value that OPENS with a quote not closed on its line continues across lines in systemd's parser too
-		// (round 2, E4: systemd's test-env-file.c, env_file_6), so a key line below it may be part of that value. The
-		// general reader models systemd as never continuing a quote, which is right for a quote opened mid-value and
-		// wrong for this one, so the venue decision refuses the file rather than trusting it.
-		const open = loader === "cmd" ? null : openQuoteLine(text);
-		const hazard = open ?? envFileHazard(text, { loader })?.line ?? null;
+		// A value that OPENS with a quote continues across lines in systemd's parser until that quote closes (round 2,
+		// E4: systemd's test-env-file.c, env_file_6), so a key line INSIDE such a value is part of it, not an
+		// assignment, while the general reader takes it for one. Only a key line inside a still-open region is in doubt
+		// (round 3, D1): the documented multi-line GITHUB_APP_PRIVATE_KEY="-----BEGIN ...-----" closes, and a
+		// PI_BACKENDS above or below it reads normally (measured on systemd 259: the unit saw both). A quote that never
+		// closes runs to the end of the file, so every key line after it is in doubt.
+		if (loader !== "cmd") {
+			const regions = quotedRegions(text);
+			for (let i = 0; i < lines.length; i++) {
+				const m = touches.exec(lines[i]);
+				if (!m || comment.test(lines[i])) continue;
+				const inside = regions.find((r) => i + 1 > r.open && (r.close === null || i + 1 <= r.close));
+				if (inside) {
+					return { error: `${path} line ${i + 1} (${m[1]}) lies inside the quoted value that opens on line ${inside.open}${inside.close === null ? " and never closes" : ` and closes on line ${inside.close}`}, so the service reads it as part of that value, not as ${m[1]}. Close that quote on its own line, write the value's newlines as \\n escapes, or for a GitHub App key use GITHUB_APP_PRIVATE_KEY_PATH` };
+				}
+			}
+		}
+		const hazard = envFileHazard(text, { loader })?.line ?? null;
 		if (hazard !== null) {
-			return { error: `${path} line ${hazard} is one this command cannot read (a quoted value that continues onto the next line, a continuation, or a line that runs), and the file assigns ${touched.key}, so what the service reads for it is unknown. Fix that line first` };
+			return { error: `${path} line ${hazard} is one this command cannot read (an open quote, a continuation, or a line that runs), and the file assigns ${touched.key}, so what the service reads for it is unknown. Fix that line first` };
 		}
 	}
 	const found = readEnvAssignments(text, STACK_KEYS, { loader });

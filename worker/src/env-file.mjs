@@ -512,7 +512,7 @@ function quoteSpans(bare, loader) {
 	//   the earlier wording said no quote continues, and that is wrong for a quote that OPENS the value, which
 	//   systemd's own parser continues across newlines until it closes (test-env-file.c, env_file_6). This scanner
 	//   still models only the mid-value case, so its systemd reading can take a line inside such a value for an
-	//   assignment. `openQuoteLine` below names that shape, and the podman venue's key reader refuses on it; doctor's
+	//   assignment. `quotedRegions` below finds those values, and the podman venue's key reader refuses a key inside one; doctor's
 	//   readings through this function do not yet, a known residual.
 	//   a trailing backslash DOES continue, in both.
 	//   a line it cannot parse is IGNORED -- `unset K`, `cat <<EOF`, `if false; then`, `OTHER=${NOPE?boom}`
@@ -719,22 +719,41 @@ export function envValueShown(value) {
 }
 
 /**
- * The first line whose assignment VALUE opens with a quote that the same line does not close, or `null` (issue #430
- * review round 2). systemd continues such a value onto the following lines until the quote closes, and so do the
- * shells, so a line below it may be part of that value rather than an assignment. Deliberately simple: a `"` closes
- * only when not escaped by a backslash, a `'` closes at the next `'`, and nothing else is modelled, because every
- * caller treats a hit as "cannot vouch" rather than trying to read past it.
+ * The multi-line quoted values of this file, as `[{ open, close }]` (1-based lines; `close: null` when the quote never
+ * closes and the value runs to the end of the file). systemd's rule, and the shells' for these shapes: a value that
+ * OPENS with `"` continues to the next `"` not escaped by a backslash, one opening with `'` to the next `'`; a value
+ * closed on its own line is no region. Lines strictly after `open`, up to and including `close`, are part of the value.
+ * Issue #430 review round 3 replaced a rule that called every such value unreadable, which refused the documented
+ * multi-line GITHUB_APP_PRIVATE_KEY that systemd reads perfectly (measured on systemd 259).
  */
-export function openQuoteLine(text) {
+export function quotedRegions(text) {
 	const lines = String(text ?? "").split("\n").map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
+	const closeAt = (q, s) => {
+		if (q === "'") return s.indexOf("'");
+		for (let k = 0; k < s.length; k++) {
+			if (s[k] === "\\") k++;
+			else if (s[k] === '"') return k;
+		}
+		return -1;
+	};
+	const regions = [];
 	for (let i = 0; i < lines.length; i++) {
 		const m = /^[ \t]*(?:export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*(["'])(.*)$/.exec(lines[i]);
 		if (!m) continue;
 		const [, q, rest] = m;
-		const closed = q === "'" ? rest.includes("'") : /(^|[^\\])(\\\\)*"/.test(rest);
-		if (!closed) return i + 1;
+		if (closeAt(q, rest) !== -1) continue;
+		let close = null;
+		for (let k = i + 1; k < lines.length; k++) {
+			if (closeAt(q, lines[k]) !== -1) {
+				close = k + 1;
+				break;
+			}
+		}
+		regions.push({ open: i + 1, close });
+		if (close === null) break;
+		i = close - 1; // resume after the value; the loop's i++ lands on the line after `close`
 	}
-	return null;
+	return regions;
 }
 
 /**

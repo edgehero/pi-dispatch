@@ -112,7 +112,8 @@ function harness({
 	const store = new Map(Object.entries(files));
 	let clock = 0;
 	const deps = {
-		env: {},
+		// A login's user manager, which uninstall now requires before it touches anything (issue #430 round 3, D3).
+		env: { XDG_RUNTIME_DIR: "/run/user/501" },
 		platform,
 		euid,
 		execPath: "/fake/node/bin/node",

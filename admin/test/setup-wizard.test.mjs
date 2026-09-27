@@ -1333,5 +1333,5 @@ test("E4: a .env whose venue line sits inside a quoted value systemd continues i
   });
   await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
   assert.equal(attached.length, 0);
-  assert.ok(notes.some((n) => n.t === "error" && /a quoted value that continues onto the next line/.test(n.m)));
+  assert.ok(notes.some((n) => n.t === "error" && /lies inside the quoted value that opens on line 1/.test(n.m)));
 });

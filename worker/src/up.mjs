@@ -37,7 +37,7 @@ import { homedir, userInfo } from "node:os";
 import { dirname, join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PODMAN_BOOT_REFUSING_CAUSES, makePodmanInfoReader, decidePodmanJobUser, podmanJobUserRefusal } from "./backend-podman.mjs";
-import { venuesOf } from "./backends.mjs";
+import { parseBackendList, venuesOf } from "./backends.mjs";
 import { logsDirPath, settingsFilePath } from "./config.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed as egressArmedFn, egressProxyName } from "./egress.mjs";
 import { envKeyIsBlank, envValueShown, updateEnvFile } from "./env-file.mjs";
@@ -595,7 +595,9 @@ function deploymentVenueEnv({ env, fs, envPath, platform }) {
 	for (const key of STACK_KEYS) {
 		if (!Object.hasOwn(keys, key)) continue;
 		if (typeof env[key] === "string") {
-			if (env[key] !== keys[key]) conflicts.push(`${key} is ${envValueShown(env[key])} in this shell and ${envValueShown(keys[key])} in ${envPath}`);
+			// Compared as the worker READS them (round 3, D4), not as strings: ` podman` and `podman,podman` are the list
+			// `podman`, and refusing them sent an operator to reconcile two values that already agree.
+			if (venueKeyMeaning(key, env[key]) !== venueKeyMeaning(key, keys[key])) conflicts.push(`${key} is ${quotedShown(env[key])} in this shell and ${quotedShown(keys[key])} in ${envPath}`);
 			continue;
 		}
 		merged[key] = keys[key];
@@ -608,6 +610,27 @@ function deploymentVenueEnv({ env, fs, envPath, platform }) {
 		return { error: `${conflicts.join("; ")}. up would drive the shell's venue while the service runs the file's. Make them agree: change ${envPath} (what the service reads), or unset the key in this shell` };
 	}
 	return { env: merged, fromFile, notes };
+}
+
+/**
+ * What a venue key MEANS to the worker, for comparing two spellings of it: the parsed list for PI_BACKENDS, on or off
+ * for PI_EGRESS, the resolved name for PI_EGRESS_PROXY (trimmed; empty is the default name). A value the worker would
+ * refuse keeps its raw spelling, so two different unreadable values still disagree and the doctor below names them.
+ */
+function venueKeyMeaning(key, value) {
+	try {
+		if (key === "PI_BACKENDS") return `list:${parseBackendList(value).join(",")}`;
+		if (key === "PI_EGRESS") return `egress:${egressArmedFn({ PI_EGRESS: value }) ? "on" : "off"}`;
+		return `proxy:${egressProxyName({ PI_EGRESS_PROXY: String(value).trim() })}`;
+	} catch {
+		return `raw:${value}`;
+	}
+}
+
+/** A value shown in quotes, so a leading space or an empty value is visible; control characters escaped as ever. */
+function quotedShown(value) {
+	const shown = envValueShown(value);
+	return shown.startsWith('"') ? shown : `"${shown}"`;
 }
 
 /**

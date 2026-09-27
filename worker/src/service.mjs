@@ -824,7 +824,12 @@ async function doRender(ctx) {
 		}
 		ctx.out(`# → ${paths.installPath}\n`);
 		ctx.out(renderLinuxUnit(ctx, stack?.plan.start ?? [], stack?.venues ?? null));
-		for (const f of stack?.plan.files ?? []) ctx.out(`\n# → ${f.path} (Quadlet, podman venue)\n${f.text}`);
+		// The proxy's rules copy is named, not printed (round 3 nit): it is the package's egress-proxy.conf verbatim, and
+		// 4.7 KB of squid configuration under a "Quadlet" heading read as a unit file.
+		for (const f of stack?.plan.files ?? []) {
+			if (f.kind === "conf") ctx.out(`\n# → ${f.path} (the egress proxy's rules: install copies the package's egress-proxy.conf here, unchanged)\n`);
+			else ctx.out(`\n# → ${f.path} (Quadlet, podman venue)\n${f.text}`);
+		}
 		for (const note of stack?.notes ?? []) ctx.out(`# note: ${note}\n`);
 		return 0;
 	}
@@ -942,7 +947,9 @@ async function stackRefusal(ctx, paths, stack) {
 	if (foreign.length > 0) forceable.push(foreignContainerRefusal(foreign, { forceHint: "pass --force to let the Quadlet unit replace it" }));
 	if (blocking.length > 0 || (forceable.length > 0 && !ctx.force)) {
 		const lines = [...blocking, ...(ctx.force ? [] : forceable)];
-		const tail = blocking.length === 0 ? "\n--force accepts every item above at once." : forceable.length > 0 && !ctx.force ? "\nThe first fixed by hand; --force accepts the rest." : "";
+		// Worded from the counts, since both lists can hold several (round 3 nit): the blocking reasons come first.
+		const byHand = blocking.length === 1 ? "The first item must be fixed by hand" : `The first ${blocking.length} items must be fixed by hand`;
+		const tail = blocking.length === 0 ? "\n--force accepts every item above at once." : forceable.length > 0 && !ctx.force ? `\n${byHand}; --force accepts the rest.` : `\n${blocking.length === 1 ? "It" : "Each"} must be fixed by hand; --force does not apply.`;
 		return { error: `${lines.length === 1 ? lines[0] : `nothing installed, for these reasons:\n${lines.map((l) => `  - ${l}`).join("\n")}`}${lines.length > 1 ? tail : ""}` };
 	}
 	return { foreign };
@@ -987,7 +994,11 @@ async function installLinuxUser(ctx, paths, stack = null, foreign = []) {
 		const restarted = stack.plan.restart ?? [];
 		const started = stack.plan.start.filter((u) => !restarted.includes(u));
 		if (started.length > 0) ctx.out(`started ${started.join(" ")} (Quadlet units: never enabled, the generator reads their own [Install] section; a unit already running is left as it is)\n`);
-		if (restarted.length > 0) ctx.out(`restarted ${restarted.join(" ")}, whose Quadlet file this install replaced\n`);
+		// Named by the file that changed (round 3 nit): the proxy also restarts for its rules copy alone.
+		for (const unit of restarted) {
+			const changedFiles = stack.plan.files.filter((f) => f.state === "changed" && f.restarts === unit).map((f) => f.path);
+			ctx.out(`restarted ${unit}, because this install replaced ${changedFiles.join(" and ")}\n`);
+		}
 		if (stack.plan.start.length > 0) ctx.out(`${paths.name} Wants= and is After= ${stack.plan.start.join(" ")}\n`);
 		// A WARNING, not a refusal, like the note below it: a worker that runs only while its operator is logged in is a
 		// real (desktop) deployment. But on this venue linger is also what brings the queue and the proxy back, and it
@@ -1061,9 +1072,15 @@ async function doUninstall(ctx) {
 	// and no worker unit was ever written. Decided by what EXISTS, not by today's PI_BACKENDS: an operator who dropped
 	// podman from the list still has the units, and they are still this tool's to remove.
 	const quadlets = ctx.platform === "linux" && ctx.which === "worker" && ctx.scope === "user" ? ALL_QUADLET_FILES.filter((q) => ctx.fs.existsSync(join(quadletDir(ctx.home), q.file))) : [];
+	// No user manager to talk to (`sudo -iu`, round 3 D3, measured): every `systemctl --user` below would fail, and the
+	// old code ignored the exits, printed success with exit 0, and left the worker and the stack running with a
+	// dangling default.target.wants link. Refused before anything is touched, whenever this run would talk to it.
+	if (ctx.platform === "linux" && (ctx.fs.existsSync(userPath) || quadlets.length > 0)) {
+		const bus = userBusRefusal({ env: ctx.env, user: ctx.user, euid: ctx.euid });
+		if (bus) return fail(ctx.err, bus.replace("so `systemctl --user` would fail after the files were written", "so `systemctl --user` could stop and disable nothing"));
+	}
 	if (!ctx.fs.existsSync(userPath) && quadlets.length > 0 && !ctx.fs.existsSync(paths.systemPath)) {
-		await removeQuadlets(ctx, quadlets);
-		return 0;
+		return removeQuadlets(ctx, quadlets);
 	}
 	if (!ctx.fs.existsSync(userPath)) {
 		// Say where it looked — both scopes — and if the unit turns out to live in ROOT scope, print
@@ -1083,11 +1100,19 @@ async function doUninstall(ctx) {
 		ctx.out(`uninstalled ${paths.name} (booted out of gui/${ctx.euid}, plist removed)\n`);
 		return 0;
 	}
-	await run(ctx, "systemctl", ["--user", "disable", "--now", paths.name]); // not-enabled is fine
+	// A non-zero exit here is a unit that is still enabled or still running (round 3, D3): nothing is removed and nothing
+	// is claimed. `disable --now` on an installed unit that is merely not enabled exits 0.
+	const disabled = await run(ctx, "systemctl", ["--user", "disable", "--now", paths.name]);
+	if (disabled !== 0) {
+		return fail(ctx.err, `systemctl --user disable --now ${paths.name} failed (${disabled === null ? "systemctl not found" : `exit ${disabled}`}), so nothing was removed: the worker may still be running. \`systemctl --user status ${paths.name}\` has the details`);
+	}
 	ctx.fs.unlinkSync(userPath);
-	await run(ctx, "systemctl", ["--user", "daemon-reload"]);
+	const reload = await run(ctx, "systemctl", ["--user", "daemon-reload"]);
+	if (reload !== 0) {
+		return fail(ctx.err, `${paths.name} is disabled, stopped and its unit file removed, but systemctl --user daemon-reload failed (${reload === null ? "systemctl not found" : `exit ${reload}`}): run it yourself`);
+	}
 	ctx.out(`uninstalled ${paths.name} (disabled, stopped, unit removed)\n`);
-	if (quadlets.length > 0) await removeQuadlets(ctx, quadlets);
+	if (quadlets.length > 0) return removeQuadlets(ctx, quadlets);
 	return 0;
 }
 
@@ -1098,18 +1123,35 @@ async function doUninstall(ctx) {
  * found it gone would have dropped every waiting job on an uninstall nobody meant as a purge.
  */
 async function removeQuadlets(ctx, quadlets) {
-	const units = quadlets.filter((q) => q.file.endsWith(".container")).map((q) => q.unit);
-	if (units.length > 0) await run(ctx, "systemctl", ["--user", "stop", ...units]); // already-stopped is fine
+	// The network units too (round 3, D2, measured): left behind, they stay `active (exited)` in the manager, so after the
+	// `podman network rm` the message below suggests, a reinstall in the same manager lifetime found its network unit
+	// already "started" and the container failed with "network not found". Containers first, then their networks.
+	const containers = quadlets.filter((q) => q.file.endsWith(".container")).map((q) => q.unit);
+	const networks = quadlets.filter((q) => q.file.endsWith(".network")).map((q) => q.unit);
+	const units = [...containers, ...networks];
+	if (units.length > 0) {
+		// A unit that is already stopped stops with exit 0; a non-zero exit is a stop that did not happen (no manager, a
+		// unit that would not die), and removing the files under a running container would leave it running unmanaged
+		// while this command claimed it was gone (round 3, D3).
+		const stopped = await run(ctx, "systemctl", ["--user", "stop", ...units]);
+		if (stopped !== 0) {
+			return fail(ctx.err, `systemctl --user stop ${units.join(" ")} failed (${stopped === null ? "systemctl not found" : `exit ${stopped}`}), so nothing was removed: the containers may still be running. \`systemctl --user status ${units.join(" ")}\` has the details`);
+		}
+	}
 	for (const q of quadlets) ctx.fs.unlinkSync(join(quadletDir(ctx.home), q.file));
 	// The account-owned copy of the proxy's rules (E1) goes with its unit.
 	const conf = proxyConfCopyPath(ctx.home);
 	if (ctx.fs.existsSync(conf)) ctx.fs.unlinkSync(conf);
-	await run(ctx, "systemctl", ["--user", "daemon-reload"]);
+	const reload = await run(ctx, "systemctl", ["--user", "daemon-reload"]);
+	if (reload !== 0) {
+		return fail(ctx.err, `the Quadlet files are removed and their units stopped, but systemctl --user daemon-reload failed (${reload === null ? "systemctl not found" : `exit ${reload}`}): run it yourself so the manager forgets them`);
+	}
 	// squid ignores SIGTERM, so its stop takes systemd's 10 s and ends in SIGKILL, exit 137, and the unit is left
 	// `failed` (measured): after the file is gone `systemctl --user list-units` would show a not-found failed unit
-	// forever. reset-failed clears it; a unit that is not failed is fine.
+	// forever. reset-failed clears it. Its exit is not checked: a unit that never failed is already what it asks for.
 	if (units.length > 0) await run(ctx, "systemctl", ["--user", "reset-failed", ...units]);
 	ctx.out(`removed the podman venue's Quadlet units (${quadlets.map((q) => q.file).join(", ")}); the pi-dispatch-valkey-data volume and the networks are kept, remove them with podman if you mean to\n`);
+	return 0;
 }
 
 /** Informational only — reports every scope it knows about and always exits 0. */
