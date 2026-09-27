@@ -99,6 +99,25 @@ deployment. `doctor` does it once, when you ask.
 ✓ Egress policy denies an unlisted host (the deny direction is the half an allowlist can silently lose)
 ```
 
+### On the native `podman` venue
+
+A deployment whose `PI_BACKENDS` lists `podman` gets the same canary for that venue, run by
+`pi-dispatch doctor --live` under the worker account's own rootless Podman (issue #431), because that is where
+the proxy its jobs use lives and where their containers start. Its probe containers are built the way a podman
+job is (your uid as `--user`, `--userns=keep-id`, the venue's pinned flags, a job's proxy variables and HOME, no
+mount), so a pass is about what a job gets. Its lines carry the section's prefix and come before the read-back's:
+
+```
+✓ podman: Egress policy reaches the provider (api.anthropic.com answered, so the whole path works and no key was spent)
+✓ podman: Egress policy denies an unlisted host (the deny direction is the half an allowlist can silently lose)
+✓ read back on podman: egress holds (the provider was reached and an unlisted host was not)
+```
+
+A plain `pi-dispatch doctor` does not run it there: the first keep-id start of an image copies its layers, which
+takes half a minute, and `--live` is where this venue already starts job-shaped containers. It says so in one ⚠
+line pointing at `--live`. The leftover lines below apply on that venue too, with `podman` in place of `docker` and
+the same prefix, and a canary network a killed `--live` left behind is removed by the next `--live`.
+
 ### Lines about leftovers
 
 You may also see a line about a leftover. Those are the canary's own objects, `pi-dispatch-egress-doctor-<pid>`

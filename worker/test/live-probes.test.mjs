@@ -1369,10 +1369,12 @@ test("mountSet refuses Podman's API socket on sight, as it does docker's (#354)"
 	assert.doesNotMatch(docker.detail, /podman socket/, "one socket, one sentence");
 });
 
-test("egressVerdict says the caller's reason for having no readings, and its own otherwise (#354)", () => {
-	assert.equal(egressVerdict({ armed: true, results: [], unread: "the canary runs on docker only" }).detail, "not read back: the canary runs on docker only");
+test("egressVerdict with no readings points at the egress lines, and takes no caller's reason any more (#354, #431)", () => {
 	assert.equal(egressVerdict({ armed: true, results: [] }).detail, "not read back: the egress canary did not run both probes (see the egress lines above)");
-	assert.equal(egressVerdict({ armed: false, results: [], unread: "x" }).detail, "not read back: PI_EGRESS is off, so there is no policy to read back", "off outranks the caller's reason");
+	// Issue #431: the `unread` override existed for a podman venue with no canary of its own; that venue now runs one, so
+	// a caller's reason is ignored rather than trusted, and every venue's missing reading points at its own canary lines.
+	assert.equal(egressVerdict({ armed: true, results: [], unread: "the canary runs on docker only" }).detail, "not read back: the egress canary did not run both probes (see the egress lines above)");
+	assert.equal(egressVerdict({ armed: false, results: [] }).detail, "not read back: PI_EGRESS is off, so there is no policy to read back");
 });
 
 test("a container START has its own bound, the step bound unless a venue asks for more (#354)", async () => {

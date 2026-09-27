@@ -1515,7 +1515,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   its runner's own route to the network (pi loaded, then the runner's restore; issue #427) -- which also proves
   that image's runner module routes a request through the proxy, the property a stale one would silently lack.
   A plain `fetch` proved only the flag, and stayed green while every job failed. That the entrypoint actually
-  calls the module, early enough, is proved in CI instead (the job image contract job runs it).
+  calls the module, early enough, is proved in CI instead (the job image contract job runs it). On the native
+  `podman` venue the same proof runs under the worker account's own Podman, where that venue's proxy is, from
+  `doctor --live`, with its probe containers built as a podman job's (issue #431).
 - **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`,
   `CONST-TOKEN-SCOPED-PER-JOB`, `INT-EGRESS-POLICY-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`,
   `INT-SANDBOX-CONTRACT`, `REQ-DEPLOYMENT-BOOTSTRAP`, `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK`,
@@ -1533,7 +1535,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `egress-proxy-missing` or `egress-proxy-stopped`, `docker run` is never spawned, and the queue does not
   retry it. Given a daemon that does not answer, the job throws and IS retried. Given a configured
   deployment, `pi-dispatch doctor` reports the proxy's state and proves both directions of the policy
-  without spending a token, and no check it emits carries a `fixAction`.
+  without spending a token, and no check it emits carries a `fixAction`; on the `podman` venue `doctor --live`
+  proves both directions under this account's Podman and spawns no `docker` command (issue #431).
 
 ## REQ-RESUMABLE-SESSION
 
@@ -1913,7 +1916,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   the next run and named in a line saying what went: still the
   canary's own objects, named after the doctor PROCESS, touched only for a pid no longer alive and only on a
   daemon this host owns, so it is the same unprompted tier rather than a new one: typing the flag is the
-  approval, as it is for `sandbox`; its containers, the peer
+  approval, as it is for `sandbox`; on the `podman` venue the egress canary is one of the things `--live` runs
+  (issue #431), under the same rule, its network and probe containers named before any exists; its containers, the peer
   networks it makes when the egress policy is armed, and its fixture directory are named before any exists; and
   all are removed when the read ends, or by the next `--live` when that run was interrupted, which names what it
   removed (`INT-LIVE-PROBE-CONTRACT`). Nothing else reaches it: not `up`, not `--fix`, not the panel.
@@ -2187,6 +2191,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-27 | Issue #431 (the `podman` venue reads `egress` back). **`REQ-EGRESS-ALLOWLIST` AMENDED**, the Why and the Acceptance: the proof that the policy works both ways, through the runner's own route, now also runs on the native `podman` venue, from `doctor --live` under the worker account's own Podman (where that venue's proxy is), with its probe containers built as a podman job's, and spawns no `docker` command there. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, one clause of the `--live` mutation sentence: on the podman venue the egress canary is among what `--live` runs, named before it starts and removed in the same run or by the next `--live`, the same shown tier. **UNCHANGED, checked**: `REQ-RESUMABLE-SESSION`, `REQ-RESURRECTABLE-SANDBOX` (no session or sandbox path is touched) and every job's pre-spend gate (the worker's egress preflight is untouched; the canary is doctor's). |
 | 2026-09-27 | Issue #430, review round 2. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, one clause: `up` refuses when this shell and the deployment's `.env` set a venue key differently, where round 1 only warned, since it would otherwise stand up one venue while the service ran the other. A refusal still runs nothing, so the consent contract is UNCHANGED, checked. |
 | 2026-09-27 | Issue #430, review round 1. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, one sentence: `up` decides the venue from this shell where it sets a venue key and otherwise from the deployment's `.env` (the file `service install` reads), and never replaces a container it did not start. The consent contract is UNCHANGED, checked: every host mutation is still shown first, and a refusal runs nothing. |
 | 2026-09-27 | Issue #430. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, one sentence: on the native `podman` venue `up` pulls the default image into the account's own Podman store and starts Valkey and the egress proxy as Quadlet units through the installer `service install` uses, showing every write and command before consent and never running docker for a list without `local`. The contract is unchanged in kind: every host mutation is shown first, `--yes` waives consent and never visibility, a declined step continues, and `.env` is filled only where empty (the wizard's `PI_BACKENDS=podman` line goes through the same never-clobber writer). **`REQ-EGRESS-ALLOWLIST` UNCHANGED, checked**: the podman proxy is the compose digest (a test holds them equal) with the same two mounts. |

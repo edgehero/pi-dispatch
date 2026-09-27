@@ -3391,6 +3391,24 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     the directory); keying on the directories that SURVIVE the pass rather than the ones it started with; and
     widening the boot reaper's own filter to `pi-sandbox-`, which `DES-SANDBOX-IS-A-FRESH-CONTAINER` rejected
     and which the injected sweeper honours rather than reverses.
+- **One canary, on the runtime of the venue it reads** (issue #431). `doctor`'s canary (`runEgressCanary`) is one
+  function over a venue's bounded runner and its CLI's name, and three callers share it: docker's plain `doctor`,
+  the `podman` venue's `doctor --live` under the worker account's own rootless Podman, and
+  `.github/scripts/podman-conformance.mjs`. Its dead-pid sweep takes the same runner, so each runtime's leftovers are
+  listed and removed in that runtime's own namespace under the unchanged name filter. The point is WHICH proxy is
+  read: a podman job's network is joined to a proxy under the same rootless Podman, so docker's canary said nothing
+  about it, and the conformance script's own copy, a plain `fetch`, proved the network and the allowlist but not the
+  runner's route (#427's gap, a second time). On podman the probe containers are built by the podman job builder as
+  the job user (`egressCanaryProbeArgs`), with no mount; docker's argv is left exactly as it was and pinned against a
+  capture taken before the move. Rejected: a podman argv like docker's short one (the account's containers.conf
+  defaults what an argv does not pin, #428, so such a probe could carry doctor's environment or the host's proxy
+  variables and pass for a reason no job has); `PODMAN_PINNED_FLAGS` and the user added to that short argv (still a
+  second argv for a job-shaped container, which is the drift the builder exists to prevent); running the podman
+  canary on every plain `doctor` as docker's does (two cold keep-id starts, and `--live` is where this venue already
+  starts job-shaped containers, so the plain run points there instead); and a canary copy kept in the conformance
+  script. The earlier Rejected entry "the canary's dead-pid sweep in `--live`" still holds for docker and is not
+  reversed for podman: there the sweep sits with the only thing that makes the object, which is that entry's own
+  rule, and an operator who never types `--live` never has a podman canary network to accumulate.
 - **Rejected**:
   - *The `DOCKER-USER` host recipe as the shipped form.* It works. What it cannot be is **known**: the
     worker cannot report it in the run record, `doctor` cannot check it, a Docker upgrade that rewrites the
@@ -5017,8 +5035,12 @@ a tunnel.
     store (`podmanStore`, `podman info`'s graphRoot); the sandbox refuses another (`podman-store-mismatch`) and the
     sweep holds the run while its podman uses another or cannot say. A different `XDG_RUNTIME_DIR` was measured
     harmless (Podman takes it from its own database, or fails, which the sweep holds on).
-  - `pi-dispatch doctor --live` on this venue does not read `egress` back: doctor's canary runs on docker only, so it
-    says the allowlist was not read back, and `.github/scripts/podman-conformance.mjs` runs a canary of its own.
+  - `egress` is read back on this venue by `doctor --live` only (issue #431), not by a plain `doctor` as it is on
+    docker's: its canary is two job-shaped keep-id containers, whose first start of an image copies its layers, so a
+    plain run says in one ⚠ line that `--live` reads it. A canary network a killed `--live` left is therefore swept by
+    the next `--live` on this venue, never by a plain run. And the podman canary itself is UNMEASURED on a real host:
+    its probe argv, the provider reached and an unlisted host denied through a proxy under the same rootless Podman,
+    a stopped proxy reading as ✗, and a `kill -9` mid-canary swept on the rerun are all driven by fakes so far.
   - The job still runs as the worker's own uid, so a container escape lands as the worker's account: this venue
     does not close `OQ-036`, it moves rootless Podman onto the same footing as rootful.
   - A transcript with no venue stamp is `local`'s (`UNATTRIBUTED_BACKEND`), so on a host that moves from `local` to
@@ -5030,7 +5052,8 @@ a tunnel.
   `PODMAN_ADDS_NO_MOUNTS`, `PODMAN_SERVICE_LOCAL`; `worker/src/backend-podman.mjs` -> `parsePodmanInfo`,
   `makePodmanInfoReader`, `observePodman`, `decidePodmanJobUser`, `resolvePodmanImageUser`, `makePodmanBackend`,
   `makePodmanReaper`, `PODMAN_JOB_USER_FIX`, `PODMAN_BOOT_REFUSING_CAUSES`; `worker/src/start.mjs` ->
-  `podmanBootRefusal`; `worker/src/doctor.mjs` -> `podmanChecks`, `podmanLiveChecks`, `collectChecks` (the
+  `podmanBootRefusal`; `worker/src/doctor.mjs` -> `podmanChecks`, `podmanLiveChecks`, `runEgressCanary` and
+  `egressCanaryProbeArgs` (issue #431), `collectChecks` (the
   `dockerRun === null` branches, `ghProbeArgs`, `PODMAN_JOB_IMAGE_PULL`, issue #433); `worker/src/live-probes.mjs`;
   `worker/src/sandbox.mjs` -> `SANDBOX_LAUNCHERS`, `sandboxVenueRefusal`, `decideSandboxJobUser` (its podman
   branch), `makeSandboxRuntimeWatch`, `combineSandboxNetworkSweepers`; `worker/src/backend-podman.mjs` ->
@@ -5341,3 +5364,4 @@ a tunnel.
 | 2026-09-27 | Issue #430, review round 1. **`DES-PODMAN-STACK-AS-QUADLET-UNITS` AMENDED**. `up` now reads the three venue keys from the deployment's `.env` through the reader `service install` uses, with its shell winning where set and any disagreement printed; before, it read its shell alone, so the documented `.env` route gave the docker pass. Both commands refuse a `.env` line touching a venue key in a form the loaders read differently (`PI_BACKENDS =podman`, `export`, a `$` value), which used to read as "no podman". NEW rule in the shared installer: a container of a unit's name without our `PODMAN_SYSTEMD_UNIT` label is foreign and is never replaced silently (`service install` refuses unless `--force`, `up` installs nothing). `up` reads a running proxy from the inspect output, not its exit code (an exited container exits 0). `--force` over a changed `.container` restarts that unit and warns for the proxy. `up`'s podman gate stops only on the worker's boot-refusing causes. `$` joins the refused path characters; the residuals gain the label and the `z` relabel of a root-owned package file, and record that Podman 4.9.3's generator accepts the files. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` UNCHANGED, checked**. |
 | 2026-09-27 | Issue #430, review round 2 (both reviewers, and the whole stack run on the Fedora 44 host). **`DES-PODMAN-STACK-AS-QUADLET-UNITS` AMENDED**. Measured defects fixed: the proxy now mounts an account-owned copy of its rules, because `z` could not relabel a root-owned package file (exit 126); installs refuse before writing anything when no user manager is reachable (`sudo -iu`); uninstall clears the failed state a 10 s squid stop leaves. Found by reading: podman queries read stdout alone (stderr warnings made our own containers foreign) and fail closed on anything but "no such container"; a value opening with a quote continues in systemd, so the venue readers refuse a key line under one (the general reader's contrary claim in `env-file.mjs` is corrected and its remaining gap named); `up` REFUSES a shell/`.env` disagreement instead of warning, and the wizard stops rather than drive `up` into one; `up` reads `.env` with the platform's loader and never refuses off Linux; `up` stops on an unanswered `podman info`, stricter than the worker on purpose (reversing round 1's parity); `service install` shows every refusal reason at once. The residuals now record what the host run measured. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` UNCHANGED, checked**. |
 | 2026-09-27 | Issue #430, review round 3. **`DES-PODMAN-STACK-AS-QUADLET-UNITS` AMENDED**. The round-2 quote rule refused every value that opens with a quote and continues, which blocked the documented multi-line `GITHUB_APP_PRIVATE_KEY` (measured on systemd 259: the unit read both the key and `PI_BACKENDS`); the venue readers now find each such value's extent (`quotedRegions`: to the next unescaped `"`, or the next `'`) and refuse only a venue key line inside one still open, naming both lines. Uninstall stops the network units too (measured: left active, a reinstall after `podman network rm` failed), refuses without a user manager, and reports a failed stop or disable instead of claiming success. `up` compares shell and `.env` venue values as the worker parses them, not as strings, and quotes what it shows. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: the refusal it names now fires only on values that differ in meaning. |
+| 2026-09-27 | Issue #431 (the `podman` venue reads `egress` back). **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED**, one new bullet: one canary (`runEgressCanary`) over a venue's bounded runner and its CLI's name, shared by docker's plain `doctor`, the podman venue's `doctor --live` and the conformance script, with its dead-pid sweep per runtime under the unchanged name filter; on podman its probe containers are built by the podman job builder as the job user with no mount, and docker's argv and output are unchanged, pinned against a capture taken before the move. Four alternatives rejected and recorded (a short podman argv, the pins bolted onto it, the podman canary on every plain doctor, a copy kept in the conformance script), and the earlier Rejected "dead-pid sweep in `--live`" is checked against this rather than silently contradicted: it holds for docker, and on podman the sweep sits with the only thing that makes the object. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**, the residuals: "does not read `egress` back" is REMOVED, and what replaces it is narrower and stated: read back by `--live` only on this venue, a leftover swept only by the next `--live`, and the podman canary not yet measured on a real host; Code evidence gains `runEgressCanary` and `egressCanaryProbeArgs`. **`DES-CONTAINER-BACKEND-REGISTRY` UNCHANGED, checked**: no declaration word moves; `egress` stays `enforced` (`PI_EGRESS`) on the podman venue, and what changed is that doctor now reads it back there. **`DES-CLI-SURFACE` UNCHANGED, checked**: `doctor --live` stays on the operator-typed, shown, self-removing tier, and the podman canary's containers are announced before they start. |

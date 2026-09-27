@@ -12,8 +12,9 @@
  * #345), which only a job's never-started exit reads. There are four kinds: the READING container (`sleep`, then a
  * `cat /proc/self/mountinfo` and the status and write scripts), the PINNING container (an absent image), the EPHEMERAL
  * pair (two runs under one name, issue #344) and, only with the egress policy armed, two PEERS on their own
- * `--internal` job networks behind the proxy (issue #344). The egress canary in `doctor.mjs` is the one reading that
- * does NOT come from this module (its containers need the proxy's allowlist), folded in from its own `readBack`.
+ * `--internal` job networks behind the proxy (issue #344). The egress canary in `doctor.mjs` (`runEgressCanary`, run on
+ * each venue's own runtime since issue #431) is the one reading that does NOT come from this module (its containers need
+ * the proxy's allowlist), folded in from its own `readBack`.
  *
  * NO SPAWN OF ITS OWN. Every docker step goes through `run(args, { timeoutMs })`, every filesystem call through `fs`,
  * and every wait through `now`/`delay`, so the whole sequence -- the teardown on every failure path included -- is
@@ -455,14 +456,14 @@ export function imagePinningVerdict({ code, output, stillAbsent, bin = "docker" 
  * canary's `readBack`; anything short of both readings -- the policy off, the proxy down, the canary skipped -- is
  * "not read back", never a pass.
  *
- * `unread` (issue #354) replaces the missing-readings reason for a caller that knows why there are none: doctor's canary
- * runs on docker only, so a podman venue's read-back has no readings, and "see the egress lines above" would send the
- * operator to lines about another runtime's proxy. Absent, the reason is what it always was.
+ * Each venue hands in its OWN canary's readings: docker's from doctor's egress lines, the podman venue's from the canary
+ * its `--live` runs under Podman (issue #431), so "see the egress lines above" names lines about the proxy that venue's
+ * jobs use. The `unread` override issue #354 added for a podman venue with no canary is gone with that gap.
  */
-export function egressVerdict({ armed, results, unread = null }) {
+export function egressVerdict({ armed, results }) {
 	if (armed === null) return notReadBack("egress", "PI_EGRESS could not be read (see the .env check above)");
 	if (armed !== true) return notReadBack("egress", "PI_EGRESS is off, so there is no policy to read back");
-	if (!Array.isArray(results) || results.length < 2) return notReadBack("egress", unread ?? "the egress canary did not run both probes (see the egress lines above)");
+	if (!Array.isArray(results) || results.length < 2) return notReadBack("egress", "the egress canary did not run both probes (see the egress lines above)");
 	// A WRONG reading fails first, whatever else is missing: an unlisted host that was reached is a finding even when
 	// the provider probe did not run, and reporting it as merely unread would pass doctor over it.
 	const wrong = results.filter((r) => typeof r.reached === "boolean" && r.reached !== r.want);

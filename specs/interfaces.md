@@ -1472,14 +1472,15 @@ contract governs the argv of one container, this governs the estate that argv jo
     | per-sandbox network | `pi-sandbox-<jobId>-net` | the same, for an operator session (`INT-SANDBOX-CONTRACT`) |
     | live-probe peer networks | `pi-dispatch-live-peer<n>-<pid>-<nonce>-net` | the same, built by the same `createJobNetworkWith`, for `doctor --live`'s two peers only while it runs (`INT-LIVE-PROBE-CONTRACT`) |
     | upstream network | `pi-dispatch-egress-out` | an ordinary bridge; only the proxy is on it |
-    | doctor canary network | `pi-dispatch-egress-doctor-<pid>` | `--internal`, one per doctor PROCESS, built and removed inside one `egressChecks` run (`egressCanaryNetwork`) |
-    | doctor canary probes | `pi-dispatch-egress-probe-<slug>-<pid>` | `--rm`, one per direction on that network (`egressCanaryProbe`) |
+    | doctor canary network | `pi-dispatch-egress-doctor-<pid>` | `--internal`, one per doctor PROCESS, built and removed inside one `runEgressCanary` run (`egressCanaryNetwork`), on the runtime of the venue it reads: docker's on every `doctor` of a deployment with `local`, this account's Podman on `doctor --live` for the `podman` venue (issue #431) |
+    | doctor canary probes | `pi-dispatch-egress-probe-<slug>-<pid>` | `--rm`, one per direction on that network (`egressCanaryProbe`). On docker the canary's own short argv; on podman a JOB's, from the podman builder (`egressCanaryProbeArgs`): the job user, `--userns=keep-id`, `PODMAN_PINNED_FLAGS`, a job's egress variables and HOME, and no mount |
     | proxy component | `pi-dispatch-egress-proxy` | squid, `http_port 3128`, **no published port**. Overridable by `PI_EGRESS_PROXY`, and then the operator's own: `up` and `service install` look for the overriding name and start only the shipped one (issue #430). On the native `podman` venue it is the Quadlet unit `pi-dispatch-egress-proxy.service`, on the same-named upstream network. |
 
     **What is left behind, and what removes it** (issues #357, #350). Every network here is removed by the
     code that made it, in a `finally`. What that cannot cover is a process that DIED, and all four namespaces
     now have a sweep for it: a per-job network by the boot reaper, a canary network by the canary itself on its
-    next run, a peer network by `doctor --live` (`INT-LIVE-PROBE-CONTRACT`), and a **session** network by the
+    next run on the same runtime (for the `podman` venue's, the next `doctor --live` with the policy armed, since
+    that is the only thing that makes one; issue #431), a peer network by `doctor --live` (`INT-LIVE-PROBE-CONTRACT`), and a **session** network by the
     sandbox retention reaper (issue #337), which is a change from what this bullet said when it was written:
     a session network used to have no sweep at all.
 
@@ -2053,8 +2054,9 @@ is its only entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`)
       stayed up), and nothing accepted without the nonce. With `PI_EGRESS=0` it is not read back: jobs then share
       docker's default bridge by design.
     - `egress`: **the one reading this module does not make.** It needs the proxy's allowlist and a provider to
-      reach, so it is folded in from `doctor`'s egress canary, whose two probe checks carry a non-rendered
-      `readBack`. Both readings must be present and must be answers: the deny probe asks for `example.com`, a host
+      reach, so it is folded in from `doctor`'s egress canary (`runEgressCanary`) for the venue being read back,
+      whose two probe checks carry a non-rendered `readBack`: docker's from plain `doctor`'s egress lines, the
+      `podman` venue's from the canary its own read-back runs under this account's Podman (issue #431). Both readings must be present and must be answers: the deny probe asks for `example.com`, a host
       that resolves (a reserved `.example` name no proxy can reach read as denied behind an allow-everything
       proxy), and a probe container that did not run (any exit but the script's 0 or 3) is no reading. The policy
       off, the proxy down or a skipped canary is not read back.
@@ -2069,9 +2071,14 @@ is its only entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`)
     `serviceIsRemote === false` from `podman info` as the local gate in place of the docker endpoint read (asked again
     before the first command, as that is). The job user is the venue's own decision (`decidePodmanJobUser`), so every
     probe carries `--user=<euid>:<egid>` and `--userns=keep-id`, and nothing runs where that decision refuses a job.
-    Doctor labels the result as read back on podman. `egress` is not read back there: its reading comes from doctor's
-    egress canary, which runs on docker only, so on this venue it is always "not read back", said as such, and
-    `.github/scripts/podman-conformance.mjs` runs a canary of its own under the account's Podman instead. The verdicts
+    Doctor labels the result as read back on podman. `egress` IS read back there (issue #431): before the probes,
+    with the policy armed, the read-back asks `podman info` again, sweeps the canary networks a dead run left in this
+    account's Podman, and, with the proxy seen running and the image in this store, runs doctor's own canary
+    (`runEgressCanary`) under `podman`, its probe containers built by the podman builder as the job user, so the
+    reading is about the proxy this venue's jobs use and the argv they get. Its lines are printed before the
+    verdicts, prefixed `podman: `, and a plain `doctor` on this venue says the allowlist is read back by `--live`
+    rather than reading it. `.github/scripts/podman-conformance.mjs` runs the same canary instead of a copy of its
+    own. The verdicts
     are this module's, unchanged; the few whose detail
     named the docker CLI name the runtime they ran on, and their wording on `local` is byte-identical. The same
     verdicts are what `.github/scripts/podman-conformance.mjs` hands the harness as its `readBack`.
@@ -2115,7 +2122,12 @@ is its only entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`)
   list (`/run/secrets`, a lookalike such as `/devices`), mountSet fails `runtime-mount`; given `/proc/interrupts` or a
   `/sys` mask it holds; given a mountinfo read that failed, mountSet is not read back (issue #345). On the `podman`
   venue (issue #354), every probe argv also carries `--userns=keep-id` right after `--user=`; given a `podman info`
-  whose `serviceIsRemote` is anything but `false`, no podman command runs and no fixture is created.
+  whose `serviceIsRemote` is anything but `false`, no podman command runs and no fixture is created. On that venue
+  with the policy armed (issue #431), the canary's probe argv is the podman builder's with `--user=` the decided job
+  user, `--userns=keep-id` and every member of `PODMAN_PINNED_FLAGS`, and no `-v`; no docker command runs; a
+  provider reached and an unlisted host denied is `egress` held, an unlisted host reached fails it; given a podman
+  venue refusal, a service re-read as remote, or the policy off, no canary object is made; and a dead run's canary
+  network in this account's Podman is swept through `podman` under the same name filter.
 
 ## INT-WEBHOOK-PAYLOAD-SUBSET
 
@@ -4866,3 +4878,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-27 | Issue #433, review round 2. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED** again, the same sentence: doctor's unblessed-venue line judged every trigger against this host's `PI_BACKENDS`, and on a fleet failed a host that will never run a cron trigger whose folder is another machine's (the worker marks it `folder-absent` and does not schedule it). It now judges only triggers this host serves, by the worker's own decision (`loadSchedules` with the worker's fleet rule, `PI_WORKER_NAME` declared, then `servedSchedules`), not a copy of the folder rule; and with a declared name it says what this host does with a job it picks up, since a forge trigger's jobs reach the shared queue. A single host's wording, "every job", is unchanged, and so is its judgement of an absent folder, which there is the worker's boot refusal rather than placement. |
 | 2026-09-27 | Issue #433, review round 3, and a CORRECTION of round 2's sentence, which claimed only served triggers were judged and was false twice. (1) Round 2 ran the whole `loadSchedules` and read its throw as "judge everything", so on a fleet one served trigger's bad `run.skillsDir` brought back the ✗ for another machine's trigger. (2) doctor read `./triggers.json` by default, while the worker schedules cron only from a `PI_TRIGGERS_FILE` it was given, so a cron trigger no worker here runs was judged. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the same sentence: judged are a cron trigger this host's worker schedules (the variable set, and on a fleet its folder here, by the worker's own `cronPlacement`, now exported from `schedules.mjs` and used by `loadSchedules` itself) and every forge trigger. The worker's placement behaviour is UNCHANGED, checked: `cronPlacement` is the folder test `normalizeCronSchedule` already made, extracted, with a row-for-row test against the loader. |
 | 2026-09-27 | Issue #430. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the proxy component's row: a `PI_EGRESS_PROXY` override names the operator's own proxy, which `up` and `service install` look for by that name and never start in its place, and on the native `podman` venue the shipped proxy is a Quadlet unit on the same-named upstream network (`DES-PODMAN-STACK-AS-QUADLET-UNITS`). Every object name in the table is UNCHANGED, checked: the Quadlet files set `ContainerName=` and `NetworkName=` to exactly these names, and a test reads them off the templates. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no job argv changes. |
+| 2026-09-27 | Issue #431 (the `podman` venue reads `egress` back). **`INT-LIVE-PROBE-CONTRACT` AMENDED**, three places, and the podman bullet's "`egress` is not read back there ... always not read back" is REMOVED rather than qualified. (1) The `egress` verdict bullet: the readings come from the canary of the venue being read back, docker's from plain `doctor`, the podman venue's from the canary its read-back runs. (2) The podman bullet: with the policy armed the read-back re-asks `podman info`, sweeps the dead-pid canary networks in this account's Podman, and runs doctor's own `runEgressCanary` under `podman` with its probe containers built by the podman builder as the job user (the builder's isolation flags and bounds, `--user=`, `--userns=keep-id`, `PODMAN_PINNED_FLAGS`, a job's egress variables and HOME, no mount); its lines come before the verdicts, and the conformance script runs the same canary instead of its own plain `fetch`. (3) Acceptance gains the podman canary's argv, the absence of any docker spawn, both verdict directions, the three stops (a venue refusal, a remote service, the policy off) and the sweep. Why a JOB's argv and not docker's short one: the account's containers.conf can default what an argv does not pin (#428), so an unpinned probe could carry doctor's environment or the host's proxy variables, and a pass would then be about something no job gets. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the object table's two canary rows (built by `runEgressCanary`, on the runtime of the venue it reads; on podman a job's argv) and the "what is left behind" sentence: a podman canary network is swept by the next `doctor --live` on that venue, which is the only thing that makes one. The name prefixes, the anchored sweep test, never `-f`, and the docker canary's argv and output are UNCHANGED, the last pinned byte for byte against a capture taken before the move. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no job argv moves; the canary reuses the podman builder rather than amending it. **`INT-SANDBOX-CONTRACT` UNCHANGED, checked**: no sandbox name or network is touched, and the canary names stay outside `pi-sandbox-` and `pi-job-`. **Code evidence**: worker/src/doctor.mjs -> runEgressCanary, egressCanaryProbeArgs, sweepStaleCanaryNetworks, podmanLiveChecks, podmanChecks; worker/src/live-probes.mjs -> egressVerdict; .github/scripts/podman-conformance.mjs -> egressCanary. |

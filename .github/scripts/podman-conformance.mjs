@@ -14,8 +14,8 @@
  *   - `withBrokenEnumeration`: the same reaper factory with a binary that does not exist, so the enumeration really
  *     fails rather than being told to.
  *   - `readBack`: `runLiveProbes` with the podman runner, the podman argv builder and `serviceIsRemote === false` as
- *     its gate, exactly as `pi-dispatch doctor --live` runs it on this venue, plus an egress canary of this script's
- *     own under the same Podman (doctor's canary runs on docker only).
+ *     its gate, exactly as `pi-dispatch doctor --live` runs it on this venue, with doctor's own egress canary
+ *     (`runEgressCanary`, issue #431) under the same Podman, as `--live` runs it there.
  *
  * Run it AS THE WORKER'S ACCOUNT, with the job image in that account's own store, and with the worker STOPPED: the
  * harness calls the bundle's real `reap`, which removes every `pi-job-` container in this account's store, so this
@@ -35,8 +35,10 @@
  * WHAT A PASS DOES NOT COVER. The exit-code probes run first, on an image built FROM the job image, so they pay the
  * first keep-id copy of the shared layers and the read-back always starts warm: its `PODMAN_FIRST_START_TIMEOUT_MS`
  * bound is never reached cold here. That bound was measured cold through `pi-dispatch doctor --live` instead (32.5 s
- * on a freshly squashed image, against 4.2 s warm). And the egress canary is this script's own request, not the
- * runner's provider call, so it proves the network and the allowlist but not that the runner uses the proxy.
+ * on a freshly squashed image, against 4.2 s warm). The egress canary is doctor's (issue #431): it takes the runner's own
+ * route to the network (pi loaded, then the runner's proxy restore, #427) rather than a plain `fetch`, so it proves the
+ * route the runner's provider call takes, not only the network and the allowlist; what it still does not prove is that
+ * the runner's entrypoint calls that route early enough, which the image contract job runs the real entrypoint for.
  */
 
 import { spawn } from "node:child_process";
@@ -54,9 +56,9 @@ const { PODMAN_FIRST_START_TIMEOUT_MS, decidePodmanJobUser, makePodmanBackend, m
 const { makeReaper } = await load("worker/src/backend-local.mjs");
 const { READ_BACK_BY_A_LIVE_PROBE, UNVERIFIED_BY_THIS_HARNESS, runBackendConformance } = await load("worker/src/backend-conformance.mjs");
 const { SHIPPED_IMAGE_UID } = await load("worker/src/container-spec.mjs");
-const { liveRunVia } = await load("worker/src/doctor.mjs");
+const { liveRunVia, runEgressCanary } = await load("worker/src/doctor.mjs");
 const { buildPodmanRunArgs } = await load("worker/src/docker-run.mjs");
-const { EGRESS_PROXY_PORT, createJobNetworkWith, egressArmed, egressProxyName, removeNetworkOrSay } = await load("worker/src/egress.mjs");
+const { egressArmed, egressProxyName } = await load("worker/src/egress.mjs");
 const { runLiveProbes } = await load("worker/src/live-probes.mjs");
 
 const refuse = (why) => {
@@ -194,47 +196,21 @@ async function probe(bundle, { exitCode, aborted = false }) {
 const withBrokenEnumeration = () => makeReaper({ log: () => {}, bin: `pi-dispatch-conformance-no-such-podman-${nonce}` })();
 
 /**
- * The egress readings `egressVerdict` takes, from two containers on a job-shaped network under this account's Podman:
- * `createJobNetworkWith` builds it exactly as a job's is built (`--internal`, then the proxy attached), one probe must
- * reach the provider through the proxy and one must not reach an unlisted host. doctor's canary does the same on
- * docker, and since issue #427 takes the runner's own route (pi loaded, then the runner's proxy restore); this is its
- * older method with a plain `fetch`, not its code, because doctor's is written against the docker CLI (issue #431).
+ * The egress readings `egressVerdict` takes, from doctor's own canary (`runEgressCanary`, issue #431) under this
+ * account's Podman: a job-shaped `--internal` network with the proxy attached, and two probe containers built by the
+ * podman builder as a job's are, as the job user, running the runner's route to the network. This script carried a copy
+ * of its own until then, with a plain `fetch`, which proved the network and the allowlist and not the runner's route;
+ * the one canary now serves `doctor --live` and this run alike. Every line it prints that is not a pass is repeated
+ * here, since the harness only sees the readings.
  */
 async function egressCanary() {
 	if (armed !== true) return { results: [], proxyRunning: null };
 	const state = await podman(["inspect", "--format={{.State.Running}}", proxy]);
 	const proxyRunning = state.code === 0 && state.stdout.trim() === "true";
 	if (!proxyRunning) return { results: [], proxyRunning };
-	const network = `pi-dispatch-conformance-egress-${process.pid}-${nonce}-net`;
-	const results = [];
-	try {
-		if (!(await createJobNetworkWith(podman, { network, proxy }))) return { results, proxyRunning };
-		for (const [slug, url, want] of [["provider", "https://api.anthropic.com/v1/messages", true], ["unlisted", "https://example.com/", false]]) {
-			const ran = await podman([
-				"run",
-				"--rm",
-				"--name",
-				`pi-dispatch-conformance-egress-${slug}-${process.pid}-${nonce}`,
-				"--pull=never",
-				`--network=${network}`,
-				"-e",
-				`HTTPS_PROXY=http://${proxy}:${EGRESS_PROXY_PORT}`,
-				"-e",
-				"NODE_USE_ENV_PROXY=1",
-				"--entrypoint",
-				"node",
-				image,
-				"-e",
-				`fetch(${JSON.stringify(url)},{method:"POST"}).then(()=>process.exit(0),()=>process.exit(3))`,
-			]);
-			// 0 reached, 3 blocked; anything else is a container that did not run the script, which is no reading.
-			results.push({ want, reached: ran.code === 0 ? true : ran.code === 3 ? false : null });
-		}
-	} finally {
-		const removed = await removeNetworkOrSay(podman, { network, detach: [proxy], bin: "podman" });
-		if (!removed.removed) console.error(`podman-conformance: the canary network was not removed: ${removed.command}`);
-	}
-	return { results, proxyRunning };
+	const canary = await runEgressCanary({ run: liveRunVia(spawn, { bin: "podman" }), bin: "podman", proxy, image, pid: process.pid, user: decision.user });
+	for (const check of canary.checks) if (!check.ok) console.error(`podman-conformance: ${check.label}`);
+	return { results: canary.results, proxyRunning };
 }
 
 let ranAs = null;

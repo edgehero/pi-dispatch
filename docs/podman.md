@@ -489,8 +489,13 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    the service is rootless and not remote, that the controllers are delegated, whether SELinux relabelling applies,
    that the job image is in this account's store, and, with the egress policy armed, that the proxy is running under
    this Podman. `--live` reads the declarations back off real containers and says it read them back on podman,
-   except `egress`: doctor's egress canary runs on docker only, so on this venue doctor says the allowlist was not
-   read back. `.github/scripts/podman-conformance.mjs` reads it, with a canary of its own under this account's Podman.
+   `egress` included: with the policy armed it first runs doctor's egress canary under this account's Podman, two
+   containers built like a podman job (your uid as `--user`, `--userns=keep-id`, the venue's pinned flags, a job's
+   proxy variables) on a job-shaped `--internal` network with the proxy attached, one that must reach the provider
+   through the runner's own route and one that must not reach an unlisted host. Its lines start `podman: Egress`,
+   before the read-back's. A plain `pi-dispatch doctor` does not run it on this venue, and says so in a ⚠ line
+   pointing at `--live`. A canary network a killed `--live` left behind is removed by the next `--live`.
+   `.github/scripts/podman-conformance.mjs` runs the same canary.
    With `PI_BACKENDS=podman` (no `local`), doctor runs no `docker` command at all, so a host without Docker reads
    no Docker failure: one line says `Docker: not checked -- PI_BACKENDS lists no docker venue (local), so no job
    here runs on Docker`, and the podman section's image line is the image check (✗ while the job image is not in
@@ -630,7 +635,7 @@ How each column is known:
 |---|---|---|---|---|---|---|---|
 | worker | runs jobs as `--user` | runs jobs as `--user` | refused `rootless` | refused `rootless` | runs jobs as `--user`; `credentialTransit` asserted | refused `rootless` | runs jobs as the worker's uid, with `--userns=keep-id` |
 | `pi-dispatch doctor` | names Docker Engine | names Podman through its Docker API; `isolation` asserted, `mountSet` per the override | ✗ `rootless` | ✗ `rootless` | ⚠ names podman-docker and the context fix | ✗ `rootless` | names the podman venue: `podman info`, rootless, not remote, controllers, the image in this account's store; without `local`, runs no docker |
-| `pi-dispatch doctor --live` | reads the declarations back | reads the declarations back | not run (a local job is refused) | not run | not run (the endpoint is not observed on this host) | not run | reads the declarations back on podman, `egress` excepted |
+| `pi-dispatch doctor --live` | reads the declarations back | reads the declarations back | not run (a local job is refused) | not run | not run (the endpoint is not observed on this host) | not run | reads the declarations back on podman, `egress` through a canary under this account's Podman |
 | `pi-dispatch sandbox` | opens as the run's own uid | opens as the run's own uid | refused `rootless` | refused `rootless` | opens as the run's own uid (unmeasured) | refused `rootless` | opens as the opening account's uid with `--userns=keep-id` through `podman`, where `PI_BACKENDS` names podman; a run recorded as another uid does not open |
 | `pi-dispatch up` | runs doctor at the end | runs doctor at the end | as doctor | as doctor | as doctor | as doctor | pulls the job image into this account's store, starts Valkey and the proxy as Quadlet units (setup step 6), then runs doctor |
 | `docker compose --profile egress` | runs unchanged | runs unchanged through the real docker CLI | unmeasured (a job is refused anyway) | unmeasured (a job is refused anyway) | unmeasured | unmeasured | docker-only; the proxy runs as this account's Quadlet unit instead |

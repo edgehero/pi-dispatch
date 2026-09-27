@@ -306,10 +306,11 @@ folders or the images your triggers name, and doctor prints those limits beside 
 
 **`podman`'s read-back is the same probes through its own runtime**: `runLiveProbes` with the podman CLI, the
 podman argv builder and `serviceIsRemote === false` as its local gate, from `pi-dispatch doctor --live` on a host
-that blesses the venue, `egress` excepted: doctor's egress canary runs on docker only, and says so. `.github/scripts/podman-conformance.mjs` is the whole harness run against the real
+that blesses the venue, with `egress` from doctor's own egress canary run under the same Podman, its probe containers
+built as a podman job's (issue #431). `.github/scripts/podman-conformance.mjs` is the whole harness run against the real
 `makePodmanBackend` bundle, as the worker account on a rootless Podman host: its `probe` drives the bundle's own
 `runContainer` with an image built from the job image, its `withBrokenEnumeration` is the reaper with a binary
-that does not exist, and its `readBack` is those probes with an egress canary of its own. Unlike the harness, it
+that does not exist, and its `readBack` is those probes with that same canary. Unlike the harness, it
 fails when any of the eight is not read back.
 
 **The probes are your own code, and that is a real limit.** How you make a container exit 2, or make an
