@@ -38,20 +38,49 @@
  * The indexed TurnStartEvent exists only on the extension bus, which subscribe() is not.
  * So we count ourselves.
  *
- * This counts EVERY turn_start, including those pi emits for internal auto-retry and
- * auto-compaction continuations (each `agent.continue()` re-emits one). Deliberate and
- * conservative: the budget bounds total PAID turns, which is what protects spend -- a retry
- * storm eats the same budget, which is exactly the runaway we want capped.
+ * WHAT COUNTS (issue #449). Every turn_start counts EXCEPT the one that opens pi's own auto-retry of a
+ * provider error. pi emits turn_start BEFORE the model call (pi-agent-core agent-loop.js:49/67/89, the
+ * stream at :105), so the failed first turn of an error streak was already counted when the error
+ * arrived; its retry (`auto_retry_start`, then `agent.continue()` re-emitting agent_start and
+ * turn_start) re-does that same turn's work. Counting it too turned a one-turn job's 429 into a
+ * turn_budget policy stop, where it should have been a retried infra failure. So `auto_retry_start`
+ * arms a flag, the next turn_start consumes it and lands in `retryTurns` instead of `turns`, and
+ * `auto_retry_end` of EITHER kind clears it: a retry cancelled mid-sleep by abort() emits
+ * `auto_retry_end{success:false}` and returns without continuing (agent-session.js:2090-2101), and a
+ * compaction or queued-message continuation after it (agent-session.js:760-765) must not ride the flag
+ * uncounted. When retries are exhausted pi emits no `auto_retry_start` at all (agent-session.js:2068-2071).
+ *
+ * The bound this keeps: retries per error streak are capped at PI_RETRY_MAX (pi's maxRetries, pinned by
+ * the runner); a successful retry turn's tool calls lead to the next turn_start, which IS counted; so the
+ * counted turns still equal the real turns, and there are at most maxTurns * PI_RETRY_MAX uncounted
+ * provider calls, every one of them metered by the token budget.
+ *
+ * Auto-COMPACTION continuations still count, deliberately: the issue is about retries only, and a
+ * compaction continuation is a new paid call on a rewritten context, not a re-run of a failed turn.
  */
 export function attachTurnBudget(session, maxTurns, { onAbort } = {}) {
 	if (!Number.isInteger(maxTurns) || maxTurns < 1) {
 		throw new Error(`invalid PI_MAX_TURNS: ${maxTurns}`);
 	}
 
-	const state = { turns: 0, aborted: false };
+	const state = { turns: 0, retryTurns: 0, aborted: false };
+	let retryPending = false;
 
 	const unsubscribe = session.subscribe((event) => {
+		if (event.type === "auto_retry_start") {
+			retryPending = true;
+			return;
+		}
+		if (event.type === "auto_retry_end") {
+			retryPending = false;
+			return;
+		}
 		if (event.type === "turn_start") {
+			if (retryPending) {
+				retryPending = false;
+				state.retryTurns += 1;
+				return;
+			}
 			state.turns += 1;
 			if (state.turns > maxTurns && !state.aborted) {
 				state.aborted = true;

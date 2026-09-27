@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import {
 	capExitMessage,
+	captureTerminal,
 	classifyStopReason,
 	classifyThrow,
 	configError,
@@ -15,6 +16,8 @@ import {
 	providerAuthRefused,
 	STOP_REASONS,
 } from "../src/outcome.mjs";
+import { attachTurnBudget } from "../src/turn-budget.mjs";
+import { agentEnd, assistantError, assistantText, promptTurn, retryTurn } from "./helpers/pi-retry-events.mjs";
 
 // INT-RUNNER-EXIT-CODE-PROTOCOL. These two blocks are deliberately a PAIR: each catches
 // the failure the other's implementation causes. A try/catch-only runner exits 0 on every
@@ -353,4 +356,67 @@ test("run-job.mjs caps every exit line and hands decideExit the pinned retry pre
 	assert.match(src, /const capped = capExitMessage\(outcome\);\s*log\("exit", \{ code: capped\.code, reason: capped\.reason, message: capped\.message \}\)/, "the throw path's exit line must be capped");
 	assert.match(src, /loadRetryPredicate\(\{ module: usageMeter\.ok \? usageMeter\.module : null, candidates: resolvePiAiCompat\(\) \}\)/);
 	assert.match(src, /decideExit\(\{[\s\S]*?\n\t\tisRetryable,\n\t\}\);/, "decideExit must receive isRetryable");
+});
+
+/**
+ * Issue #449, end to end through the runner's own pieces: the turn budget, captureTerminal and decideExit
+ * wired to one bus the way run-job.mjs wires them, driven by pi's real retry order. With --max-turns 1 a
+ * provider 429 used to be counted twice (the failed turn, then pi's retry of it) and exited 2 turn_budget:
+ * policy, never retried, and paged. PI_RETRY_MAX is 2 here, the runner's default (src/config.mjs).
+ */
+function runOneTurnJob(drive) {
+	const listeners = [];
+	const session = {
+		subscribe(listener) {
+			listeners.push(listener);
+			return () => listeners.splice(listeners.indexOf(listener), 1);
+		},
+		async abort() {},
+	};
+	const emit = (event) => {
+		for (const l of listeners) l(event);
+	};
+	let terminal;
+	session.subscribe((event) => {
+		terminal = captureTerminal(terminal, event);
+	});
+	const budget = attachTurnBudget(session, 1);
+	drive(emit);
+	const outcome = decideExit({ budgetAborted: budget.state.aborted, budgetTurns: budget.state.turns, tokenAborted: false, terminal, isRetryable: () => true });
+	return { outcome, budget };
+}
+
+test("max-turns 1: a 429 that pi's retry recovers from exits 0, not turn_budget", () => {
+	const { outcome, budget } = runOneTurnJob((emit) => {
+		promptTurn(emit, assistantError());
+		agentEnd(emit, [assistantError()], true);
+		retryTurn(emit, 1, assistantText());
+		agentEnd(emit, [assistantText()], false);
+	});
+	assert.equal(outcome.code, EXIT_COMPLETED);
+	assert.equal(outcome.reason, "stop");
+	assert.deepEqual({ turns: budget.state.turns, retryTurns: budget.state.retryTurns }, { turns: 1, retryTurns: 1 });
+});
+
+test("max-turns 1: a 429 that outlasts pi's retries exits 1, a retried infra failure, not turn_budget", () => {
+	const { outcome, budget } = runOneTurnJob((emit) => {
+		promptTurn(emit, assistantError());
+		agentEnd(emit, [assistantError()], true);
+		retryTurn(emit, 1, assistantError());
+		agentEnd(emit, [assistantError()], true);
+		retryTurn(emit, 2, assistantError());
+		// Exhausted: no auto_retry_start, only the final end (agent-session.js:2068-2071, :751-758).
+		agentEnd(emit, [assistantError()], false);
+		emit({ type: "auto_retry_end", success: false, attempt: 2, finalError: "429 rate limited" });
+	});
+	assert.equal(outcome.code, EXIT_INFRA);
+	assert.equal(outcome.reason, "error");
+	assert.equal(budget.state.aborted, false);
+	assert.deepEqual({ turns: budget.state.turns, retryTurns: budget.state.retryTurns }, { turns: 1, retryTurns: 2 });
+});
+
+test("run-job.mjs puts the turn budget's retryTurns on the decided exit line beside turns", () => {
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	const decided = (src.match(/log\("exit", \{[^\n]*/g) ?? [])[0] ?? "";
+	assert.match(decided, /turns: budget\.state\.turns, retryTurns: budget\.state\.retryTurns,/);
 });

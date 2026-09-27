@@ -3,7 +3,10 @@
  *
  * ISOLATION BOUNDARY (read before touching the delimiter below):
  * The string this returns is written to /job/prompt.md and handed to session.prompt() as the USER
- * prompt — never a system prompt, never appendSystemPrompt (see image/runner/run-job.mjs:21,37,93).
+ * prompt: never a system prompt, never appendSystemPrompt. See image/runner/run-job.mjs:105 (read from
+ * /job/prompt.md) and :367 (`session.prompt(prompt)`), and image/runner/src/loader.mjs:366, whose
+ * appendSystemPromptOverride carries only the guardrails, the outbox protocol and the personas (why it
+ * overrides rather than discovers: :219-224).
  * That placement IS the control: issue/PR text is data because it enters as a user turn, after the
  * persona and the baked HARD_RULES system prompt, which the model treats as authoritative
  * (CONST-ISSUE-TEXT-IS-DATA). The `## Triggering …` heading and the code fence around the payload are

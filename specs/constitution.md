@@ -805,6 +805,13 @@ passing, on the record — issue #80.)
   `→ core/agent-session.ts:2628-2643 → _prepareRetry` (`delayMs = baseDelayMs * 2 ** (attempt-1)`) ·
   `→ agent-session.ts:647-659 → _willRetryAfterAgentEnd` · `→ agent-session.ts:161` (`auto_retry_start`
   carries `attempt`/`maxAttempts` — the runner can observe retries via `subscribe()`)
+- **Evidence (pinned 0.80.7 dist, issue #449)**: pi's own retry of a transient provider error must not be
+  turned into a determinate stop by the runner's turn budget, and before #449 it was: with `--max-turns 1`
+  a 429 exited `2` / `turn_budget` (policy, not retried) because the retry's `turn_start` was counted. The
+  runner now observes `auto_retry_start` (`dist/core/agent-session.js:2074-2080`, emitted only when a
+  retry will run, never past `maxRetries` at `:2067-2071`) and exempts the one `turn_start` it opens, so
+  a transient 429 stays exit `1` and is retried by the queue (`REQ-RUNNER-TURN-BUDGET`, whose bound keeps
+  at most `maxTurns * PI_RETRY_MAX` uncounted calls, every one token-metered)
 - **Traces to**: `INT-RUNNER-EXIT-CODE-PROTOCOL`, `CONST-BUDGET-BEFORE-TOKENS`, `REQ-RUNNER-TURN-BUDGET`
 - **Acceptance**: Given a runner exiting 0 after concluding no fix is possible, the queue records
   success and does not re-run. pi's own retry settings are set explicitly by the runner, not inherited.
@@ -945,6 +952,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-09-27 | Issue #449. **No article changed.** **`CONST-RETRY-INFRA-ONLY`**: a new evidence bullet, not an amendment of the rule: pi's own retry of a provider 429 was being turned into a determinate `turn_budget` stop under `--max-turns 1`, which broke this constraint in the direction of dropping a transient failure; the retry's `turn_start` is no longer a budget turn, so the 429 stays exit `1` and retried. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the uncounted retry calls stay bounded (at most `maxTurns * PI_RETRY_MAX`) and token-metered, so no spend path loses its bound. |
 | 2026-09-26 | Issue #428. **No article changed.** **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the podman venue's new refusal keeps a job's boundary the worker's own argv, since an account's containers.conf that widens what the argv cannot pin back (`pasta_options`, `network_cmd_options`, `annotations`) now stops the venue rather than quietly changing the container; no container is added, reused or probed for it (the check reads files). **`CONST-EGRESS-POLICY-IN-THE-ARGV` UNCHANGED, checked**: the egress-armed job's `--internal` network is still the argv's, and was measured closed to the host under every widening conf; the proxy's new loopback and link-local deny lives beside the allowlist in the shipped proxy rules, where the existing rules already live, and adds no third state, since it only refuses. **`CONST-RETRY-INFRA-ONLY`** is followed, not amended: the refusal is determinate and RETURNS. |
 | 2026-09-26 | Issue #437, review round 1. **`CONST-RETRY-INFRA-ONLY` statement UNCHANGED, checked**; its #437 note is corrected: the first commit read a gateway's transient 403 (OpenRouter's "Provider returned error", an HTML "please retry" page) as a refusal, which is this constraint broken in the expensive direction, so the refusal now also requires that pi-ai's own `isRetryableAssistantError` does not call the message transient. |
 | 2026-09-26 | Issue #437. **`CONST-RETRY-INFRA-ONLY` statement UNCHANGED, checked**; its notes gain the in-container case: a provider's 401/403 refusal of the credential is determinate by the entry's own hour-from-now test (every attempt carries the same key), so the runner now exits 2 as `provider-auth-refused` instead of exit 1, on a CLOSED list of anchored message shapes each proved against the pinned pi-ai, and a shape nobody has proved stays retryable because the false determinate is the costlier error. The check it states: a provider shape joins only with a row in the pinned loopback table. **`CONST-PI-VERSION-PINNED` UNCHANGED, checked**: the shapes are verified against the pinned 0.80.7 artifact by driving its own `stream()`, never against HEAD. |

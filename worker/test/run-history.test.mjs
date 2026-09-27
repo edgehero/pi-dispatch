@@ -1416,6 +1416,7 @@ test("a 16 KB provider error body keeps the exit-2 label: the runner caps the ex
 	const row = (provider, model) => ({ provider, model, calls: N, input: N, output: N, cacheRead: N, cacheWrite: N, cacheWrite1h: N, reasoning: N, total: N, cost: 99_999.99, unpriced: N });
 	const rest = {
 		turns: 4096,
+		retryTurns: 4096,
 		tokens: { input: N, output: N, total: N, cost: 99_999.99, metered: true, rootTotal: N, otherTotal: N, looseTotal: N, sessions: N, calls: N, unresolved: N, unpriced: N },
 		usage: { v: 1, piAi: "88.88.88", truncated: 1, models: [...Array.from({ length: 8 }, (_, i) => row(wide("provider", i), wide("model", i))), row("other", "other")] },
 		context: { tokens: N, window: N },

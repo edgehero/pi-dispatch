@@ -428,7 +428,7 @@ async function main() {
 	const context = Number.isFinite(contextUsage?.tokens) && Number.isFinite(contextUsage?.contextWindow) && contextUsage.contextWindow > 0 ? { tokens: contextUsage.tokens, window: contextUsage.contextWindow } : null;
 	// capExitMessage: a provider's error body is unbounded, and the worker reads this line from a bounded
 	// tail, so an uncapped message can push `code` and `reason` out of what the host ever sees.
-	log("exit", { ...capExitMessage(outcome), turns: budget.state.turns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason } });
+	log("exit", { ...capExitMessage(outcome), turns: budget.state.turns, retryTurns: budget.state.retryTurns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason } });
 	return outcome.code;
 }
 

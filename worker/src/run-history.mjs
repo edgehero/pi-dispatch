@@ -84,8 +84,10 @@ function parseTailLine(line) {
  * Recover the agent's turn count from buffered container stdout, or `null` if it is not reported.
  *
  * The stream interleaves docker/agent noise and other JSON events (`pi_auto_retry`) with the runner's
- * own lines. Only the success exit line carries `turns` (`image/runner/run-job.mjs:263`); the
- * catch-path exit line (`:277`) omits it. Scan from the end and return the turns of the last `exit`
+ * own lines. Only the decided-outcome exit line carries `turns` (`image/runner/run-job.mjs:431`); the
+ * catch-path exit line (`:446`) omits it. The decided line's `retryTurns` (issue #449, pi's own
+ * auto-retry turns, which the turn budget does not count) is not recovered here: it is diagnostic, read
+ * from the container log, and the record's `turns` stays the budgeted count. Scan from the end and return the turns of the last `exit`
  * event that reports an integer count, repairing a glued line on the way (`parseTailLine`).
  *
  * This is read-only telemetry: it MUST NEVER throw and MUST NOT feed exit-code or retry

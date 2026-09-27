@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,8 @@ import { test } from "node:test";
 // breaks silently, so pin the function the runner actually calls rather than a copy of its reasoning.
 import { resolvePiAiCompat } from "../src/usage-meter.mjs";
 import { classifyStopReason, loadRetryPredicate } from "../src/outcome.mjs";
+import { attachTurnBudget } from "../src/turn-budget.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
  * REQ-UPSTREAM-CONTRACT-TESTS -- assert against the PINNED ARTIFACT, not against HEAD.
@@ -769,4 +771,107 @@ test("each driven pi-ai chat family's 401/403 lands in its expected exit class, 
 	const known = types.match(/export type KnownApi = ([^;]+);/)?.[1].match(/"([^"]+)"/g)?.map((name) => name.slice(1, -1));
 	assert.deepEqual([...new Set(AUTH_REFUSAL_TABLE.map((row) => row.api))].sort(), [...known].sort(), "the table must hold one row per KnownApi family at the pin");
 	assert.match(types, /export type KnownImagesApi = "openrouter-images";/, "the images api set moved -- re-check whether any of it can end a chat turn");
+});
+
+/**
+ * Issue #449, against the REAL pinned AgentSession rather than a hand-written event order.
+ *
+ * The turn budget exempts the one turn_start that follows auto_retry_start, which is only right while pi
+ * emits auto_retry_start BEFORE the retry's agent.continue() (agent_start, turn_start). The fakes in
+ * turn-budget.test.mjs and outcome.test.mjs encode that order; this is what keeps them honest. A pin bump
+ * that reorders the two (or retries without auto_retry_start at all) makes a one-turn job's 429 a
+ * turn_budget policy stop again, and fails here first.
+ *
+ * Zero spend, no key, no network past loopback: a node:http stub speaks the Anthropic messages api (a 429,
+ * then a text reply with no tool call), the provider's baseUrl is pointed at it through a models.json
+ * override exactly as the operator overlay does in the runner, and the key is a runtime dummy. Built from
+ * the same public exports run-job.mjs uses, with pi's retry pinned the way the runner pins it (maxRetries
+ * 2 is PI_RETRY_MAX's default; the base delay is shortened so the backoff costs milliseconds). Resource
+ * discovery is switched off: it plays no part in the retry order, and a temp agentDir with no extensions,
+ * skills or context files keeps the host's own pi setup out of the run.
+ */
+test("pi emits auto_retry_start before the retry's own agent_start/turn_start, so a recovered 429 is one budget turn (loopback, no key)", { skip }, async () => {
+	const plan = ["429", "text"];
+	const requests = [];
+	const sse = (events) => events.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join("");
+	const server = createServer((req, res) => {
+		req.resume();
+		req.on("end", () => {
+			const what = plan[Math.min(requests.length, plan.length - 1)];
+			requests.push(`${req.method} ${req.url} -> ${what}`);
+			if (what === "429") {
+				res.writeHead(429, { "content-type": "application/json", "retry-after": "0" });
+				res.end(JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "rate limited (loopback stub)" } }));
+				return;
+			}
+			res.writeHead(200, { "content-type": "text/event-stream" });
+			res.end(sse([
+				["message_start", { type: "message_start", message: { id: "msg_stub", type: "message", role: "assistant", model: "stub", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } } }],
+				["content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }],
+				["content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } }],
+				["content_block_stop", { type: "content_block_stop", index: 0 }],
+				["message_delta", { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 2 } }],
+				["message_stop", { type: "message_stop" }],
+			]));
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+	let session;
+	try {
+		const agentDir = tempDir("pi-retry-agent-");
+		const cwd = tempDir("pi-retry-cwd-");
+		const modelsPath = join(agentDir, "models.json");
+		writeFileSync(modelsPath, JSON.stringify({ providers: { anthropic: { baseUrl: `http://127.0.0.1:${server.address().port}` } } }));
+		const authStorage = mod.AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey("anthropic", "dummy-key-loopback-only");
+		const modelRegistry = mod.ModelRegistry.create(authStorage, modelsPath);
+		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5-20250929");
+		assert.ok(model, "the pinned catalog no longer has the probe model -- pick another anthropic-messages model");
+		assert.equal(model.baseUrl, `http://127.0.0.1:${server.address().port}`, "the models.json override must route the provider to the stub");
+		const settingsManager = mod.SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 2, baseDelayMs: 5 } });
+		const resourceLoader = new mod.DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+		await resourceLoader.reload();
+		({ session } = await mod.createAgentSession({
+			cwd,
+			agentDir,
+			authStorage,
+			modelRegistry,
+			model,
+			settingsManager,
+			sessionManager: mod.SessionManager.inMemory(cwd),
+			resourceLoader,
+		}));
+
+		const order = [];
+		session.subscribe((event) => order.push(event.type === "agent_end" ? `agent_end:${event.willRetry}` : event.type));
+		const budget = attachTurnBudget(session, 1);
+		await session.prompt("say ok");
+
+		const retryAt = order.indexOf("auto_retry_start");
+		assert.ok(retryAt !== -1, `pi no longer emits auto_retry_start on a retried 429: ${order.join(",")}`);
+		assert.equal(order.filter((type) => type === "auto_retry_start").length, 1);
+		// What the budget's exemption rests on: the failed turn's end, then auto_retry_start, THEN the
+		// continuation's agent_start and turn_start, with no turn_start in between.
+		const retryTurnAt = order.indexOf("turn_start", retryAt);
+		assert.ok(order.indexOf("turn_start") < order.indexOf("agent_end:true"), "the failed turn opened before its agent_end");
+		assert.ok(order.indexOf("agent_end:true") < retryAt, `auto_retry_start must follow the failed run's agent_end{willRetry:true}: ${order.join(",")}`);
+		assert.ok(retryTurnAt > retryAt, `no turn_start after auto_retry_start: ${order.join(",")}`);
+		assert.ok(order.indexOf("agent_start", retryAt) > retryAt && order.indexOf("agent_start", retryAt) < retryTurnAt, `the retry's agent_start must fall between auto_retry_start and its turn_start: ${order.join(",")}`);
+		assert.equal(order.filter((type) => type === "turn_start").length, 2, `exactly the failed turn and its retry: ${order.join(",")}`);
+		assert.ok(order.indexOf("auto_retry_end") > retryTurnAt, "auto_retry_end{success:true} arrives after the retry turn started, so it cannot be what clears the flag first");
+
+		// The order is asserted first so a pi bump fails on the order message, and the budget second so a
+		// change to the budget fails on its own message rather than on the request count it causes.
+		assert.deepEqual(
+			{ turns: budget.state.turns, retryTurns: budget.state.retryTurns, aborted: budget.state.aborted },
+			{ turns: 1, retryTurns: 1, aborted: false },
+			"a recovered 429 under --max-turns 1 must be one budget turn and one retry turn, not a turn_budget stop",
+		);
+		assert.equal(requests.length, 2, `one 429 and one retried request must reach the stub: ${JSON.stringify(requests)}`);
+		assert.equal(session.messages.at(-1)?.stopReason, "stop", "the retried request's text reply ends the run");
+	} finally {
+		session?.dispose();
+		server.close();
+	}
 });
