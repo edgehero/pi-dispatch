@@ -202,11 +202,11 @@ const NOT_AUTH_REFUSED = [
 	"Proxy response (403) !== 200 when HTTP Tunneling",
 	"OpenAI API error (429): slow down",
 	"Some API error (401): not a proved prefix",
+	// Single-layer Google JSON is not a shape streaming produces (issue #451 reads only the double wrap).
 	'{"error":{"code":401,"message":"API key not valid.","status":"UNAUTHENTICATED"}}',
 	'502: {"detail":"OpenAI API error (401): upstream"}',
 	'400: {"detail":"Azure OpenAI API error (403): upstream"}',
 	'400: {"detail":"Mistral API error (401): upstream"}',
-	"AccessDeniedException: 403: denied",
 	"Your authentication token is invalid.",
 ];
 
@@ -263,6 +263,108 @@ test("only an error stopReason can be a refusal, and budget aborts still win ove
 	assert.equal(decideExit({ budgetAborted: false, tokenAborted: false, terminal: refusal, command: { failed: true }, isRetryable }).reason, "command-error");
 	// classifyThrow is unchanged: a thrown 401 string is not the stopReason channel.
 	assert.equal(classifyThrow(new Error("401 invalid x-api-key")).code, EXIT_INFRA);
+});
+
+// --- issue #451: the Google, Vertex and Bedrock refusal shapes, from the M0-d measurements ---
+
+// @google/genai's wrap of a text/event-stream error body, byte for byte as measured: Google pretty-prints
+// its body with two spaces and a final newline, and the SDK puts that TEXT in error.message with the HTTP
+// status and reason phrase beside it. The first literal below is the real answer to a bogus AI Studio key,
+// verbatim, which is what keeps this helper honest.
+const googleWrap = (inner, code, statusText) => JSON.stringify({ error: { message: `${JSON.stringify(inner, null, 2)}\n`, code, status: statusText } });
+const ERROR_INFO = "type.googleapis.com/google.rpc.ErrorInfo";
+const googleBody = (code, status, message, details) => ({ error: { code, message, status, ...(details ? { details } : {}) } });
+const REAL_GOOGLE_BOGUS_KEY = '{"error":{"message":"{\\n  \\"error\\": {\\n    \\"code\\": 400,\\n    \\"message\\": \\"API key not valid. Please pass a valid API key.\\",\\n    \\"status\\": \\"INVALID_ARGUMENT\\",\\n    \\"details\\": [\\n      {\\n        \\"@type\\": \\"type.googleapis.com/google.rpc.ErrorInfo\\",\\n        \\"reason\\": \\"API_KEY_INVALID\\",\\n        \\"domain\\": \\"googleapis.com\\",\\n        \\"metadata\\": {\\n          \\"service\\": \\"generativelanguage.googleapis.com\\"\\n        }\\n      },\\n      {\\n        \\"@type\\": \\"type.googleapis.com/google.rpc.LocalizedMessage\\",\\n        \\"locale\\": \\"en-US\\",\\n        \\"message\\": \\"API key not valid. Please pass a valid API key.\\"\\n      }\\n    ]\\n  }\\n}\\n","code":400,"status":"Bad Request"}}';
+const VERTEX_UNAUTHENTICATED = "Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.";
+const vertexBogusKey = (metadata) => googleWrap(googleBody(401, "UNAUTHENTICATED", VERTEX_UNAUTHENTICATED, [{ "@type": ERROR_INFO, reason: "ACCESS_TOKEN_TYPE_UNSUPPORTED", metadata }]), 401, "Unauthorized");
+const STREAM_JUNK = '{"_events":{"close":[null,null],"error":[null,null]},"_readableState":{"highWaterMark":65536,"buffer":[],"bufferIndex":0,"length":0,"pipes":[],"awaitDrainWriters":null},"_writableState":{"highWaterMark":65536,"length":0,"corked":0,"writelen":0,"bufferedIndex":0,"pendingcb":0},"allowHalfOpen":true,"_eventsCount":11}';
+
+const AUTH_REFUSED_451 = [
+	// Google: the real bogus AI Studio key (HTTP 400, refused by its ErrorInfo reason alone).
+	REAL_GOOGLE_BOGUS_KEY,
+	// Vertex: the real bogus api key, in BOTH metadata key orders Google sent to two identical requests.
+	vertexBogusKey({ method: "google.cloud.aiplatform.v1.PredictionService.StreamGenerateContent", service: "aiplatform.googleapis.com" }),
+	vertexBogusKey({ service: "aiplatform.googleapis.com", method: "google.cloud.aiplatform.v1.PredictionService.StreamGenerateContent" }),
+	// Each status alone, with no details, and each reason alone under a status that is not an auth status,
+	// so dropping any one token from either set fails here.
+	googleWrap(googleBody(401, "UNAUTHENTICATED", VERTEX_UNAUTHENTICATED), 401, "Unauthorized"),
+	googleWrap(googleBody(403, "PERMISSION_DENIED", "Permission denied: Consumer 'api_key:AIza' has been suspended."), 403, "Forbidden"),
+	googleWrap(googleBody(400, "INVALID_ARGUMENT", "x", [{ "@type": ERROR_INFO, reason: "API_KEY_INVALID" }]), 400, "Bad Request"),
+	googleWrap(googleBody(400, "INVALID_ARGUMENT", "x", [{ "@type": ERROR_INFO, reason: "ACCESS_TOKEN_TYPE_UNSUPPORTED" }]), 400, "Bad Request"),
+	// Bedrock: each measured exception name, on HTTP/1 ([object Object]) and HTTP/2 (the stream junk).
+	"UnrecognizedClientException: 403: [object Object]",
+	`UnrecognizedClientException: 403: ${STREAM_JUNK}`,
+	"AccessDeniedException: 403: [object Object]",
+	`AccessDeniedException: 403: ${STREAM_JUNK}`,
+	"ExpiredTokenException: 403: [object Object]",
+];
+
+const NOT_AUTH_REFUSED_451 = [
+	// Google quota, both wordings: pi calls the first non-transient ("billing"), and it is still infra.
+	googleWrap(googleBody(429, "RESOURCE_EXHAUSTED", "You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits."), 429, "Too Many Requests"),
+	googleWrap(googleBody(429, "RESOURCE_EXHAUSTED", "Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details."), 429, "Too Many Requests"),
+	// A bad payload: INVALID_ARGUMENT with no auth reason.
+	googleWrap(googleBody(400, "INVALID_ARGUMENT", 'Invalid JSON payload received. Unknown name "foo": Cannot find field.'), 400, "Bad Request"),
+	googleWrap(googleBody(500, "INTERNAL", "An internal error has occurred."), 500, "Internal Server Error"),
+	// UNAUTHENTICATED and API_KEY_INVALID present only INSIDE a string that is not error.status or a
+	// reason: a byte match reads these, a parse does not.
+	googleWrap(googleBody(400, "INVALID_ARGUMENT", 'upstream said "status": "UNAUTHENTICATED", reason API_KEY_INVALID'), 400, "Bad Request"),
+	googleWrap(googleBody(400, "INVALID_ARGUMENT", JSON.stringify({ error: { status: "UNAUTHENTICATED" } })), 400, "Bad Request"),
+	// The reason on a detail that is not an ErrorInfo, and an ErrorInfo whose reason is not in the set.
+	googleWrap(googleBody(400, "INVALID_ARGUMENT", "x", [{ "@type": "type.googleapis.com/google.rpc.LocalizedMessage", reason: "API_KEY_INVALID" }]), 400, "Bad Request"),
+	googleWrap(googleBody(400, "INVALID_ARGUMENT", "x", [{ "@type": ERROR_INFO, reason: "API_KEY_SERVICE_BLOCKED_x" }]), 400, "Bad Request"),
+	// The OUTER status is the HTTP reason phrase and is never read, whatever it says.
+	JSON.stringify({ error: { message: JSON.stringify(googleBody(500, "INTERNAL", "x")), code: 401, status: "UNAUTHENTICATED" } }),
+	// Not the SDK's wrap: no numeric code, a non-JSON inner text, trailing or leading bytes, an array.
+	JSON.stringify({ error: { message: JSON.stringify(googleBody(401, "UNAUTHENTICATED", "x")), status: "Unauthorized" } }),
+	JSON.stringify({ error: { message: "<html>401 UNAUTHENTICATED</html>", code: 401, status: "Unauthorized" } }),
+	`${googleWrap(googleBody(401, "UNAUTHENTICATED", "x"), 401, "Unauthorized")} trailing`,
+	` ${googleWrap(googleBody(401, "UNAUTHENTICATED", "x"), 401, "Unauthorized")}`,
+	`[${googleWrap(googleBody(401, "UNAUTHENTICATED", "x"), 401, "Unauthorized")}]`,
+	"text that merely mentions API_KEY_INVALID and UNAUTHENTICATED",
+	'500: {"error":{"status":"UNAUTHENTICATED","details":[{"reason":"API_KEY_INVALID"}]}}',
+	// Bedrock: the transient and non-credential prefixes pi-ai maps, a status AWS was not seen to send,
+	// and each anchor boundary.
+	"Throttling error: 429: [object Object]",
+	"Service unavailable: 503: [object Object]",
+	"Validation error: 400: [object Object]",
+	"UnrecognizedClientException: 401: [object Object]",
+	"AccessDeniedException: 4031: x",
+	"AccessDeniedException: 403 x",
+	" AccessDeniedException: 403: x",
+	"Error: AccessDeniedException: 403: x",
+	"ThrottlingException: 403: x",
+	// Google OAuth under Vertex ADC, a residual by decision: pinned library forms, but no loopback can
+	// drive the family's stream() into them (the first is the real answer, verbatim).
+	"invalid_grant: Invalid grant: account not found",
+	"invalid_client",
+	// Codex, by decision: the server's own sentence, no status on either transport.
+	"Could not parse your authentication token. Please try signing in again.",
+];
+
+test("issue #451: Google's parsed status or reason and Bedrock's exception prefix exit 2", () => {
+	// The helper rebuilds the measured bytes exactly, so the synthetic rows above are the real format.
+	const measured = googleWrap(googleBody(400, "INVALID_ARGUMENT", "API key not valid. Please pass a valid API key.", [
+		{ "@type": ERROR_INFO, reason: "API_KEY_INVALID", domain: "googleapis.com", metadata: { service: "generativelanguage.googleapis.com" } },
+		{ "@type": "type.googleapis.com/google.rpc.LocalizedMessage", locale: "en-US", message: "API key not valid. Please pass a valid API key." },
+	]), 400, "Bad Request");
+	assert.equal(measured, REAL_GOOGLE_BOGUS_KEY);
+	for (const errorMessage of AUTH_REFUSED_451) {
+		assert.equal(providerAuthRefused(err(errorMessage), NOT_TRANSIENT), true, errorMessage);
+		assert.deepEqual(classifyStopReason(err(errorMessage), NOT_TRANSIENT), { code: EXIT_POLICY, reason: "provider-auth-refused", message: errorMessage }, errorMessage);
+		// The retry-predicate guard covers every new shape: a message pi calls transient is never a refusal.
+		assert.equal(providerAuthRefused(err(errorMessage), TRANSIENT), false, errorMessage);
+	}
+});
+
+test("issue #451: the must-stay-infra shapes stay retryable infra, and a malformed body never throws", () => {
+	for (const errorMessage of NOT_AUTH_REFUSED_451) {
+		assert.equal(providerAuthRefused(err(errorMessage), NOT_TRANSIENT), false, errorMessage);
+		assert.deepEqual(classifyStopReason(err(errorMessage), NOT_TRANSIENT), { code: EXIT_INFRA, reason: "error", message: errorMessage }, errorMessage);
+	}
+	for (const errorMessage of ["{", "{}", '{"error":null}', '{"error":{"message":"{","code":401}}', '{"error":{"message":"null","code":401}}', '{"error":{"message":"{\\"error\\":{\\"details\\":[null,1,\\"x\\"]}}","code":401}}']) {
+		assert.equal(providerAuthRefused(err(errorMessage), NOT_TRANSIENT), false, errorMessage);
+	}
 });
 
 test("loadRetryPredicate prefers the meter's accepted module, then the candidates in order, and never throws", async () => {

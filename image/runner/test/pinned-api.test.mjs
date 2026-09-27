@@ -625,11 +625,6 @@ const OPENAI_BODY = (status) => JSON.stringify({
 		? { message: "Incorrect API key provided: dummy-key.", type: "invalid_request_error", param: null, code: "invalid_api_key" }
 		: { message: "You are not allowed to sample from this model", type: "invalid_request_error", param: null, code: null },
 });
-const GOOGLE_BODY = (status) => JSON.stringify({
-	error: status === 401
-		? { code: 401, message: "API key not valid. Please pass a valid API key.", status: "UNAUTHENTICATED" }
-		: { code: 403, message: "Permission denied: Consumer has been suspended.", status: "PERMISSION_DENIED" },
-});
 // Two 403s that are NOT refusals, and that pi-ai's predicate calls transient: OpenRouter's wrapper around
 // an upstream connection failure, and a gateway's HTML error page. Both match the bare status shape.
 const OPENROUTER_UPSTREAM_403 = JSON.stringify({ error: { message: "Provider returned error", code: 403, metadata: { raw: "upstream connect error or disconnect/reset before headers" } } });
@@ -637,14 +632,54 @@ const HTML_RETRY_403 = "<html><head><title>403 Forbidden</title></head><body>Ser
 
 const refusal = (status, body, type = JSON_TYPE, headers = {}) => ({ status, body, type, headers, expect: "provider-auth-refused" });
 const residual = (status, body, type = JSON_TYPE, headers = {}) => ({ status, body, type, headers, expect: "residual-infra" });
-const transient = (status, body, type) => ({ status, body, type, headers: {}, expect: "transient-infra" });
+const transient = (status, body, type, headers = {}) => ({ status, body, type, headers, expect: "transient-infra" });
+
+// Google answers a STREAMING error (pi-ai always streams) as text/event-stream with its JSON body pretty-
+// printed, two spaces and a final newline, and @google/genai wraps that text rather than parsing it
+// (issue #451, measured against the real endpoints in M0-d; an application/json stub produced a
+// single-layer message production never sees, so these cells no longer use one).
+const SSE_TYPE = "text/event-stream";
+const GOOGLE_ERROR_INFO = "type.googleapis.com/google.rpc.ErrorInfo";
+const GOOGLE_SSE_BODY = (code, status, message, details) => `${JSON.stringify({ error: { code, message, status, ...(details ? { details } : {}) } }, null, 2)}\n`;
+const GOOGLE_UNAUTHENTICATED = "Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.";
+const GOOGLE_CELLS = {
+	// A real bogus AI Studio key: HTTP 400, refused by its ErrorInfo reason.
+	apiKeyInvalid: GOOGLE_SSE_BODY(400, "INVALID_ARGUMENT", "API key not valid. Please pass a valid API key.", [{ "@type": GOOGLE_ERROR_INFO, reason: "API_KEY_INVALID", domain: "googleapis.com", metadata: { service: "generativelanguage.googleapis.com" } }]),
+	// A real bogus Vertex api key: HTTP 401 UNAUTHENTICATED, reason ACCESS_TOKEN_TYPE_UNSUPPORTED.
+	unauthenticated: GOOGLE_SSE_BODY(401, "UNAUTHENTICATED", GOOGLE_UNAUTHENTICATED, [{ "@type": GOOGLE_ERROR_INFO, reason: "ACCESS_TOKEN_TYPE_UNSUPPORTED", metadata: { method: "google.cloud.aiplatform.v1.PredictionService.StreamGenerateContent", service: "aiplatform.googleapis.com" } }]),
+	permissionDenied: GOOGLE_SSE_BODY(403, "PERMISSION_DENIED", "Permission denied: Consumer 'api_key:AIza' has been suspended."),
+	// Must stay infra. The quota wording carries "billing", which pi calls non-transient; infra by decision.
+	quota: GOOGLE_SSE_BODY(429, "RESOURCE_EXHAUSTED", "You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits."),
+	exhausted: GOOGLE_SSE_BODY(429, "RESOURCE_EXHAUSTED", "Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details."),
+	badPayload: GOOGLE_SSE_BODY(400, "INVALID_ARGUMENT", 'Invalid JSON payload received. Unknown name "foo": Cannot find field.'),
+	// UNAUTHENTICATED and API_KEY_INVALID only inside the message string: read by a byte match, not a parse.
+	nestedInString: GOOGLE_SSE_BODY(400, "INVALID_ARGUMENT", 'upstream said "status": "UNAUTHENTICATED", reason API_KEY_INVALID'),
+};
+const GOOGLE_ROW_CASES = [
+	refusal(400, GOOGLE_CELLS.apiKeyInvalid, SSE_TYPE),
+	refusal(401, GOOGLE_CELLS.unauthenticated, SSE_TYPE),
+	refusal(403, GOOGLE_CELLS.permissionDenied, SSE_TYPE),
+	residual(429, GOOGLE_CELLS.quota, SSE_TYPE),
+	transient(429, GOOGLE_CELLS.exhausted, SSE_TYPE),
+	residual(400, GOOGLE_CELLS.badPayload, SSE_TYPE),
+	residual(400, GOOGLE_CELLS.nestedInString, SSE_TYPE),
+];
+// Bedrock: pi-ai 0.80.7 loses AWS's message (it serializes the consumed response stream), so on HTTP/1
+// every message is `<prefix>: <status>: [object Object]`. Each cell pins that whole string, junk included:
+// the refusal rule reads only the prefix, and a pi-ai that fixes the upstream bug changes these cells,
+// which is the moment to re-read what the message now carries.
+const BEDROCK_ERROR_TYPE = (name) => ({ "x-amzn-errortype": `${name}:http://internal.amazon.com/coral/com.amazon.coral.service/` });
+const bedrockCell = (make, status, name, message, pinned) => ({ ...make(status, JSON.stringify({ message }), JSON_TYPE, BEDROCK_ERROR_TYPE(name)), pinned });
 
 /**
  * The CLOSED expected table, one row per api family of the pinned pi-ai (its KnownApi union is ten chat
  * families, plus the images api named below). A cell that changes class under a pin bump fails with the
  * observed message, which is the evidence needed to decide whether providerAuthRefused's list grows or
  * shrinks. `residual-infra` cells are the accepted residual: the refusal is still retried until attempts
- * run out. `transient-infra` cells are 403s that must never be read as a refusal.
+ * run out, or a must-stay-infra message pi calls non-transient that is not a refusal at all (a Google quota
+ * 429, a bad payload). `transient-infra` cells are errors that must never be read as a refusal. A cell
+ * with `pinned` also asserts the whole errorMessage, for a family whose rule deliberately reads only a
+ * prefix of it.
  *
  * Not driven, on purpose: `openrouter-images` is pi-ai's IMAGES api (generateImages), not a chat stream,
  * so its failure never becomes the terminal AssistantMessage the runner classifies.
@@ -670,30 +705,36 @@ const AUTH_REFUSAL_TABLE = [
 		api: "pi-messages", provider: "pi-relay", path: "",
 		cases: [401, 403].map((status) => refusal(status, JSON.stringify({ error: { message: "bad token", code: "unauthorized" } }))),
 	},
-	// Residual: @google/genai folds the whole JSON body into the message and pi-ai's formatProviderError
-	// then returns it unchanged, so the status sits inside a JSON object rather than at an anchored
-	// position. Matching into a provider's body is exactly the unanchored read providerAuthRefused refuses
-	// to make. (A real bogus Google key is HTTP 400 API_KEY_INVALID, which is not a 401/403 at all.)
-	{ api: "google-generative-ai", provider: "google", path: "/v1beta", cases: [residual(401, GOOGLE_BODY(401)), residual(403, GOOGLE_BODY(403))] },
-	// Residual, same SDK and the same raw-JSON message. An api key plus a custom baseUrl is the one route
-	// the stub can serve; ADC and a project would reach Google.
-	{ api: "google-vertex", provider: "google-vertex", path: "/v1", cases: [residual(401, GOOGLE_BODY(401)), residual(403, GOOGLE_BODY(403))] },
-	// Residual: formatBedrockError prefixes the SDK exception name, `AccessDeniedException: 403: ...`, so the
-	// status is not at position 0. HTTP/1.1 is forced because the stub is node:http and the SDK defaults to
-	// HTTP/2; the formatting is the same either way. The exception name rides x-amzn-errortype, as AWS sends it.
+	// @google/genai wraps Google's streamed body text as `{"error":{"message":"<body>","code":<http>,
+	// "status":"<reason phrase>"}}` and pi-ai passes it on unchanged; providerAuthRefused parses both
+	// layers (issue #451). The stub answers in the real format (M0-d stubsse matched the real bytes).
+	{ api: "google-generative-ai", provider: "google", path: "/v1beta", cases: GOOGLE_ROW_CASES },
+	// Same SDK, same wrap. An api key plus a custom baseUrl is the one route the stub can serve; ADC and a
+	// project would reach Google (the ADC token-endpoint shapes are pinned by the google-vertex ADC test below).
+	{ api: "google-vertex", provider: "google-vertex", path: "/v1", cases: GOOGLE_ROW_CASES },
+	// formatBedrockError names the exception, then the status: `AccessDeniedException: 403: ...`, and only
+	// that prefix is read (issue #451). HTTP/1.1 is forced because the stub is node:http and the SDK
+	// defaults to HTTP/2, where the lost body serializes as stream-internals JSON instead of [object Object]
+	// (M0-d); the prefix is the same either way. Real AWS answered 403 for each name, so each cell is a 403.
+	// The exception name rides x-amzn-errortype, as AWS sends it. The throttle cell costs the SDK's own
+	// retries (three requests) before it reaches pi-ai.
 	{
 		api: "bedrock-converse-stream", provider: "amazon-bedrock", path: "", options: { env: { AWS_REGION: "us-east-1", AWS_BEDROCK_FORCE_HTTP1: "1" } },
 		cases: [
-			residual(401, JSON.stringify({ message: "The security token included in the request is invalid." }), JSON_TYPE, { "x-amzn-errortype": "UnrecognizedClientException:http://internal.amazon.com/coral/com.amazon.coral.service/" }),
-			residual(403, JSON.stringify({ message: "User is not authorized to perform: bedrock:InvokeModelWithResponseStream" }), JSON_TYPE, { "x-amzn-errortype": "AccessDeniedException:http://internal.amazon.com/coral/com.amazon.bedrock/" }),
+			bedrockCell(refusal, 403, "UnrecognizedClientException", "The security token included in the request is invalid.", "UnrecognizedClientException: 403: [object Object]"),
+			bedrockCell(refusal, 403, "AccessDeniedException", "User is not authorized to perform: bedrock:InvokeModelWithResponseStream", "AccessDeniedException: 403: [object Object]"),
+			bedrockCell(refusal, 403, "ExpiredTokenException", "The security token included in the request is expired", "ExpiredTokenException: 403: [object Object]"),
+			bedrockCell(transient, 429, "ThrottlingException", "Too many requests, please wait before trying again.", "Throttling error: 429: [object Object]"),
 		],
 	},
-	// Residual: the codex family throws `new Error(info.friendlyMessage || info.message)` with no status at
-	// all, so formatProviderError returns the body's bare message. SSE transport and no in-family retry,
-	// so one request reaches the stub and the dummy token only has to carry an account id.
+	// Residual BY DECISION (issue #451): the codex family throws `new Error(info.friendlyMessage ||
+	// info.message)` with no status at all, and the real endpoint's 401 carried none on either transport
+	// (the websocket upgrade fails without one, then SSE). The only thing to match is the server's own
+	// sentence, which is a guess. SSE transport and no in-family retry, so one request reaches the stub and
+	// the dummy token only has to carry an account id. The message is the one the real endpoint sent.
 	{
 		api: "openai-codex-responses", provider: "openai-codex", path: "", options: { transport: "sse", maxRetries: 0, apiKey: dummyCodexToken() },
-		cases: [401, 403].map((status) => residual(status, JSON.stringify({ error: { message: "Your authentication token is invalid.", code: "invalid_token" } }))),
+		cases: [401, 403].map((status) => residual(status, JSON.stringify({ error: { message: "Could not parse your authentication token. Please try signing in again.", code: "invalid_token" } }))),
 	},
 ];
 
@@ -750,20 +791,28 @@ test("each driven pi-ai chat family's 401/403 lands in its expected exit class, 
 						: isRetryable(terminal)
 							? "transient-infra"
 							: "residual-infra";
-				observed.push({ api: row.api, status: cell.status, want: cell.expect, got, errorMessage: terminal.errorMessage });
+				observed.push({ api: row.api, status: cell.status, want: cell.expect, got, errorMessage: terminal.errorMessage, pinned: cell.pinned });
 			}
 		}
 	} finally {
 		server.close();
 	}
 
-	for (const { api, status, want, got, errorMessage } of observed) {
+	for (const { api, status, want, got, errorMessage, pinned } of observed) {
 		assert.equal(
 			got,
 			want,
 			`${api} ${status} now classifies as ${got} (errorMessage: ${JSON.stringify(errorMessage)}). The pinned pi-ai changed ` +
 				"how this provider formats a refusal, or what it calls transient: re-derive providerAuthRefused's closed list in src/outcome.mjs and this table together.",
 		);
+		if (pinned !== undefined) {
+			assert.equal(
+				errorMessage,
+				pinned,
+				`${api} ${status}: the whole message moved. For bedrock this is most likely pi-ai no longer losing AWS's message ` +
+					"(the upstream bug named in INT-RUNNER-EXIT-CODE-PROTOCOL): re-read what the message now carries before touching the prefix rule.",
+			);
+		}
 	}
 	assert.equal(observed.length, AUTH_REFUSAL_TABLE.reduce((n, row) => n + row.cases.length, 0), "every cell must be driven");
 	// The table covers the pinned KnownApi union exactly, so a family pi adds under a bump fails here
@@ -1000,4 +1049,65 @@ test("the fallback token budget re-aborts pi's retry of the breaching turn (loop
 	assert.equal(tokenBudget.aborted, true, "the failed call's usage breaches a cap of 100");
 	assert.ok(order.includes("auto_retry_start"), `the premise: pi retried the breaching turn anyway: ${order.join(",")}`);
 	assert.deepEqual(requests, ["errusage"], "the retried request is aborted before it reaches the provider");
+});
+
+test("google-vertex ADC: the pinned auth library's OAuth refusals keep their shapes and stay a retried residual (loopback, no key)", { skip }, async () => {
+	// Issue #451. Under ADC, google-vertex fails at Google's OAuth token endpoint before Vertex is reached,
+	// and the message is the auth library's, not pi-ai's: gtoken sets `${error}: ${error_description}` for a
+	// service account, gaxios throws the bare RFC 6749 code for an authorized_user refresh. M0-d measured
+	// both through pi-ai against the real endpoint, unchanged by pi-ai. The token URL is fixed to Google's,
+	// so the family's own stream() cannot be pointed at a stub, and that proof is what CONST-RETRY-INFRA-ONLY
+	// asks before a shape joins providerAuthRefused's list: these stay infra, a NAMED residual. This drives
+	// the SAME library copies pi-ai's @google/genai resolves, their fetch redirected to the loopback, so the
+	// residual's shapes are pinned: a bump that changes them, or pi-ai's verdict on them, fails here.
+	const { createRequire } = await import("node:module");
+	const { generateKeyPairSync } = await import("node:crypto");
+	const candidates = resolvePiAiCompat();
+	const isRetryable = await loadRetryPredicate({ candidates });
+	const fromGenai = createRequire(createRequire(candidates[0].url).resolve("@google/genai"));
+	const authLibrary = fromGenai("google-auth-library");
+	const { Gaxios } = createRequire(fromGenai.resolve("google-auth-library"))("gaxios");
+
+	let answer = { status: 500, body: {} };
+	const server = createServer((req, res) => {
+		req.resume();
+		req.on("end", () => {
+			res.writeHead(answer.status, { "content-type": JSON_TYPE });
+			res.end(JSON.stringify(answer.body));
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const tokenUrls = [];
+	const transporter = new Gaxios({
+		fetchImplementation: (url, init) => {
+			tokenUrls.push(String(url));
+			return fetch(`http://127.0.0.1:${server.address().port}/token`, init);
+		},
+	});
+	const privateKey = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" });
+	const credentials = {
+		service_account: { type: "service_account", client_email: "probe@pinned-probe.iam.gserviceaccount.com", private_key: privateKey },
+		authorized_user: { type: "authorized_user", client_id: "probe.apps.googleusercontent.com", client_secret: "probe", refresh_token: "1//probe" },
+	};
+	// The first and third are the exact messages M0-d saw from the real endpoint.
+	const cells = [
+		{ kind: "service_account", status: 400, body: { error: "invalid_grant", error_description: "Invalid grant: account not found" }, want: "invalid_grant: Invalid grant: account not found" },
+		{ kind: "service_account", status: 401, body: { error: "invalid_client", error_description: "The OAuth client was not found." }, want: "invalid_client: The OAuth client was not found." },
+		{ kind: "authorized_user", status: 401, body: { error: "invalid_client", error_description: "The OAuth client was not found." }, want: "invalid_client" },
+		{ kind: "authorized_user", status: 400, body: { error: "invalid_grant", error_description: "Bad Request" }, want: "invalid_grant" },
+	];
+	try {
+		for (const cell of cells) {
+			answer = cell;
+			const auth = new authLibrary.GoogleAuth({ credentials: credentials[cell.kind], scopes: ["https://www.googleapis.com/auth/cloud-platform"], clientOptions: { transporter } });
+			const message = await auth.getAccessToken().then(() => null, (error) => error.message);
+			assert.equal(message, cell.want, `${cell.kind} ${cell.body.error}: the pinned auth library reformatted its refusal`);
+			const terminal = { role: "assistant", stopReason: "error", errorMessage: message, content: [] };
+			assert.equal(isRetryable(terminal), false, `${cell.kind} ${cell.body.error}: pi-ai now calls this transient`);
+			assert.deepEqual(classifyStopReason(terminal, isRetryable), { code: 1, reason: "error", message }, `${cell.kind} ${cell.body.error}: the residual moved`);
+		}
+	} finally {
+		server.close();
+	}
+	assert.ok(tokenUrls.length >= cells.length && tokenUrls.every((url) => url === "https://oauth2.googleapis.com/token"), `the library asked ${JSON.stringify(tokenUrls)}, not Google's token endpoint`);
 });

@@ -83,7 +83,7 @@ export const TERMINAL_COMMENTS = {
 	"runner-policy": "Stopped: the run ended inside the container before finishing (a turn or token budget, or an in-container configuration refusal). Partial work may exist. Not retried.",
 	// Issue #437. Names the cause but never the provider's own message, which may echo a key fragment. "Or
 	// access" because a 403 is as often a key that works but may not use this model or route as a bad key.
-	"provider-auth-refused": "Stopped: the AI provider refused this worker's credentials or access (HTTP 401 or 403). The operator needs to check the provider key and what it is allowed to use. Not retried.",
+	"provider-auth-refused": "Stopped: the AI provider refused this worker's credentials or access (an authentication or permission error). The operator needs to check the provider key and what it is allowed to use. Not retried.",
 };
 
 // Issue #341: the forge comments for a `job-user-unmappable` refusal, keyed by cause. Shorter than the operator

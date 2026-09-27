@@ -169,7 +169,7 @@ test("exit 2 with the runner's provider-auth-refused reason returns that reason,
 	assert.equal(r.exitCode, 2);
 	assert.equal(r.budgetReserved, true, "the container ran; the slot stays counted as runner-policy's does");
 	assert.equal(posted.length, 1, "exactly one comment per terminal");
-	assert.equal(posted[0], "Stopped: the AI provider refused this worker's credentials or access (HTTP 401 or 403). The operator needs to check the provider key and what it is allowed to use. Not retried.");
+	assert.equal(posted[0], "Stopped: the AI provider refused this worker's credentials or access (an authentication or permission error). The operator needs to check the provider key and what it is allowed to use. Not retried.");
 	assert.match(posted[0], /Not retried\./);
 	assert.ok(!/[/\\]/.test(posted[0]), "fixed and path-free: no provider message, no path");
 	const record = buildRecord({ job: { id: "gh-1", name: "github", data: ghJob, attemptsMade: 0 }, result: r, startedAt: null, endedAt: null });
