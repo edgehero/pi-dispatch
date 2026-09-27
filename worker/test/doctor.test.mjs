@@ -712,7 +712,11 @@ test("doctor: a host where pi will not load warns instead of guessing a variable
 
 // GITHUB_AUTH_SOURCE=gh (the default) forwards the operator's full gh login into every token-carrying job
 // container (CONST-TOKEN-SCOPED-PER-JOB) — doctor surfaces the trade-off as a warning, never a failure.
-const ghDeps = (out, plan, calls, extra = {}) => ({ out, spawn: fakeSpawn(plan, calls), probeValkey: async () => true, fileExists: () => true, nodeVersion: "22.19.0", ...extra });
+// `readHosts` is injected, never the default: the default opens a real Valkey connection to VALKEY_URL (127.0.0.1:6379
+// when unset), so a test's output depended on whether something answered there. A host running its own Redis read an
+// empty registry and printed nothing; CI's release job, with nothing there, printed "Fleet: could not read the host
+// registry", and the exact-output pins that were captured on the first failed on the second.
+const ghDeps = (out, plan, calls, extra = {}) => ({ out, spawn: fakeSpawn(plan, calls), probeValkey: async () => true, readHosts: async () => ({ hosts: [] }), fileExists: () => true, nodeVersion: "22.19.0", ...extra });
 const ghEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", ...extra });
 
 test("doctor: default source gh warns with the login's scopes and names the broad ones", async () => {
