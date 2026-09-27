@@ -106,8 +106,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   error streak was already counted when its error arrived. (2) Retries within one streak are capped at
   `PI_RETRY_MAX` (pi's `maxRetries`, pinned by the runner), and an exhausted streak emits no
   `auto_retry_start` at all. (3) A streak can be reset only by a completed reply, and the retry of a
-  turn in which a reply completed or a tool ran is counted. So the counted turns still equal the real turns, and **at most
-  `maxTurns * PI_RETRY_MAX` retry calls go uncounted by this exemption**, every one of them metered by the
+  turn in which a reply completed or a tool ran is counted. So the counted turns still equal the real
+  turns, and **at most `maxTurns * PI_RETRY_MAX` retry calls go uncounted by this exemption**, every one of them metered by the
   token budget (`REQ-TOKEN-ACCOUNTING-AND-CAPS`). Calls this budget never counted, before or after #449,
   stay uncounted: compaction and branch-summarisation calls, and a subagent session's turns (Scope above).
 - **Why**: **pi has no max-turns, step-limit, or iteration cap of any kind.** The agent loop is a bare
