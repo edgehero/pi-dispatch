@@ -87,18 +87,21 @@ Two consequences worth internalising before you design anything:
   touched: the workspaces share the triggers schema and the queue.
 - CI runs the same suite with `PI_DISPATCH_REQUIRE_{LOADER,WORKER,RECEIVER}_TESTS=1` and a live Valkey, which
   is where the integration tests that skip locally actually execute.
-- **Five checks are REQUIRED on `main`** (issue #105), all from `pi-upgrade-check.yml`: `pins are exact
+- **Six checks are REQUIRED on `main`**. Five come from `pi-upgrade-check.yml` (issue #105): `pins are exact
   (CONST-PI-VERSION-PINNED)`, `no automatic merge (CONST-MERGE-NEVER-AUTOMATIC)`, `pinned assumptions still
   hold (offline, no API key)`, `the job image holds its contract`, `the admin extension survives latest pi
-  (canary)`. `enforce_admins` is **on**, so a red build is unmergeable by the owner too.
-  - That workflow's **`pull_request` trigger is deliberately unfiltered**. A required check that never
+  (canary)`. The sixth is `the rootless podman venue holds its declarations` from `podman-conformance.yml`
+  (issue #432; it ran advisory under #354 until it had passed on every PR of a round). `enforce_admins` is
+  **on**, so a red build is unmergeable by the owner too.
+  - Both workflows' **`pull_request` triggers are deliberately unfiltered**. A required check that never
     reports blocks a merge forever, and the old path filter meant a docs-only PR reported nothing at all.
-    Do not add `paths:` back to it. The `push:` filter is unaffected and stays.
-  - Three PR-reporting checks are deliberately **not** required. `host-pi mirrors survive latest pi (canary)`
-    is green-on-drift by design, so its red means pi failed to install (upstream flake, not a defect);
-    `deploy/ artifacts are syntactically valid` is still path-filtered to `deploy/**`, so requiring it
-    would deadlock every PR that does not touch `deploy/`; and `the rootless podman venue holds its declarations
-    (advisory)` (`podman-conformance.yml`, issue #354) is advisory until it has proven stable on the runners.
+    Do not add `paths:` to either. The `push:` filters are unaffected and stay.
+  - A job's `name:` IS its required context string: renaming either workflow's job renames the check, and
+    the branch protection must be updated in the same breath or every PR waits forever on the old name.
+  - Two PR-reporting checks are deliberately **not** required. `host-pi mirrors survive latest pi (canary)`
+    is green-on-drift by design, so its red means pi failed to install (upstream flake, not a defect); and
+    `deploy/ artifacts are syntactically valid` (with the Quadlet generator job beside it) is still
+    path-filtered to `deploy/**`, so requiring it would deadlock every PR that does not touch `deploy/`.
   - If Actions is down or a workflow file breaks, `main` is frozen. Escape hatch: `gh api -X DELETE
     repos/edgehero/pi-dispatch/branches/main/protection/enforce_admins`, merge, then `gh api -X POST` the
     same path to put it back.
