@@ -614,14 +614,16 @@ function deploymentVenueEnv({ env, fs, envPath, platform }) {
 
 /**
  * What a venue key MEANS to the worker, for comparing two spellings of it: the parsed list for PI_BACKENDS, on or off
- * for PI_EGRESS, the resolved name for PI_EGRESS_PROXY (trimmed; empty is the default name). A value the worker would
- * refuse keeps its raw spelling, so two different unreadable values still disagree and the doctor below names them.
+ * for PI_EGRESS, the resolved name for PI_EGRESS_PROXY exactly as egressProxyName resolves it (empty is the default
+ * name; NOT trimmed, because nothing that reads the name trims it, so " x" and "x" are different proxies to the worker
+ * and to podman). A value the worker would refuse keeps its raw spelling, so two different unreadable values still
+ * disagree and the doctor below names them.
  */
 function venueKeyMeaning(key, value) {
 	try {
 		if (key === "PI_BACKENDS") return `list:${parseBackendList(value).join(",")}`;
 		if (key === "PI_EGRESS") return `egress:${egressArmedFn({ PI_EGRESS: value }) ? "on" : "off"}`;
-		return `proxy:${egressProxyName({ PI_EGRESS_PROXY: String(value).trim() })}`;
+		return `proxy:${egressProxyName({ PI_EGRESS_PROXY: value })}`;
 	} catch {
 		return `raw:${value}`;
 	}

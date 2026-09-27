@@ -1030,9 +1030,16 @@ test("D4 (round 3): shell and .env are compared as the worker reads them, and sh
 		assert.equal(await h.run(), 0, JSON.stringify(shell));
 		assert.doesNotMatch(h.text(), /in this shell and/);
 	}
-	// PI_EGRESS "" and "1" are both ON; PI_EGRESS_PROXY " " and unset are both the default name.
-	const egress = harness({ env: { PI_EGRESS: "", PI_EGRESS_PROXY: " " }, plan: green, listening: true, files: { "/deploy/.env": "PI_EGRESS=1\nPI_EGRESS_PROXY=pi-dispatch-egress-proxy\n" } });
+	// PI_EGRESS "" and "1" are both ON; PI_EGRESS_PROXY "" is the default name, like the file's explicit default.
+	const egress = harness({ env: { PI_EGRESS: "", PI_EGRESS_PROXY: "" }, plan: green, listening: true, files: { "/deploy/.env": "PI_EGRESS=1\nPI_EGRESS_PROXY=pi-dispatch-egress-proxy\n" } });
 	assert.equal(await egress.run(), 0);
+	assert.doesNotMatch(egress.text(), /in this shell and/);
+	// A proxy name is NOT trimmed by anything that reads it, so a stray space is a different proxy and a disagreement.
+	for (const shell of [" ", "pi-dispatch-egress-proxy "]) {
+		const spaced = harness({ env: { PI_EGRESS_PROXY: shell }, plan: green, files: { "/deploy/.env": "PI_EGRESS_PROXY=pi-dispatch-egress-proxy\n" } });
+		assert.equal(await spaced.run(), 1, JSON.stringify(shell));
+		assert.match(spaced.text(), /PI_EGRESS_PROXY is "[^"]*" in this shell and "pi-dispatch-egress-proxy" in \/deploy\/\.env/);
+	}
 	// A real disagreement, with an empty shell value made visible.
 	const empty = harness({ env: { PI_BACKENDS: "" }, plan: green, files: { "/deploy/.env": "PI_BACKENDS=podman\n" } });
 	assert.equal(await empty.run(), 1);
