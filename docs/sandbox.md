@@ -232,9 +232,12 @@ session that ends in a closed laptop still keeps the workspace.
   `pi-job-*` filter the boot reaper uses, precisely so a worker restart cannot kill a shell you are
   sitting in. The cost is that stopping a forgotten one is yours: `docker stop pi-sandbox-<jobId>` (or
   `podman stop`). The retained **directories** are swept, and by a separate reaper: it deletes the ones past
-  their window, skipping any id whose container is live so a mount is never pulled out from under a shell.
-  It asks every blessed runtime a sandbox opens on (docker for `local`, podman for `podman`), and one that
-  does not answer skips the whole pass rather than sweeping as though none of its sandboxes were open. It runs at
+  their window, skipping any id whose container is live. For each retained run it asks the runtime that
+  run's manifest records (docker for `local`, podman for `podman`), and a runtime that does not answer
+  holds its own runs for that pass rather than sweeping as though none of their sandboxes were open. Two
+  narrow windows remain: a sandbox opened (without `--pin`) on a run already past its window while a sweep
+  is asking its runtime, and a pin that lands while a large directory is already being deleted, can both
+  lose the directory; pin a run before opening it late in its window. It runs at
   every worker boot and then every `PI_SWEEP_INTERVAL_HOURS` while the worker is up (24 by default; set
   `0` for the boot-only behaviour, where a worker that never restarts never sweeps). Three things follow.
   The window is a **floor** rather than a ceiling: a directory dies on the first sweep after its window
