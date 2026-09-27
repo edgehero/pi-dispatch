@@ -969,6 +969,28 @@ test("a queued follow-up after the budget aborts is aborted too: every over-cap 
 	assert.equal(toolRuns, 1);
 });
 
+test("a retry-shaped throw after a COMPLETED reply is not exempt: a queued follow-up is a counted turn (loopback, no key)", { skip }, async () => {
+	// Gate round 2 of #455, A14. A listener throwing "fetch failed" at a clean reply's turn_end (the same
+	// shape as ETIMEDOUT while persisting it) makes pi retry; agent.continue() from the reply then runs the
+	// queued follow-up as new work, with no tool before it. Unguarded: 6 paid calls at --max-turns 1.
+	let queued = false;
+	const { budget, requests, order } = await runLoopbackSession({
+		plan: ["text"],
+		onSession: (session) =>
+			session.subscribe((event) => {
+				if (event.type === "turn_start" && !queued) {
+					queued = true;
+					void session.followUp("keep going");
+				}
+				if (event.type === "turn_end" && event.message.stopReason === "stop") throw new Error("fetch failed");
+			}),
+	});
+	// The premise, so this cannot pass for another reason: pi did retry after the completed reply.
+	assert.ok(order.includes("auto_retry_start"), `pi no longer retries a retry-shaped throw after a clean reply: ${order.join(",")}`);
+	assert.deepEqual(budget, { turns: 2, retryTurns: 0, aborted: true }, "the follow-up's turn is the second real turn and trips the budget");
+	assert.deepEqual(requests, ["text"], "the aborted follow-up turn never reaches the provider");
+});
+
 test("the fallback token budget re-aborts pi's retry of the breaching turn (loopback, no key)", { skip }, async () => {
 	// Issue #455 gate round 1, A11. The per-session token budget (the fallback when the process-wide meter
 	// cannot install) aborts on the breaching turn's turn_end. When that turn FAILED with a retryable error,

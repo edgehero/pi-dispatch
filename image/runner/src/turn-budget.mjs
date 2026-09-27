@@ -39,13 +39,13 @@
  * So we count ourselves.
  *
  * WHAT COUNTS (issue #449). Every turn_start counts EXCEPT the one that opens pi's own auto-retry of a
- * turn that ran NO tool. pi emits turn_start BEFORE the model call (pi-agent-core agent-loop.js:49/67/89,
+ * turn that made NO progress: no tool ran and no reply completed. pi emits turn_start BEFORE the model call (pi-agent-core agent-loop.js:49/67/89,
  * the stream at :105), so the failed first turn of an error streak was already counted when the error
  * arrived; its retry (`auto_retry_start`, then `agent.continue()` re-emitting agent_start and
  * turn_start) re-sends that same turn's request. Counting it too turned a one-turn job's 429 into a
  * turn_budget policy stop, where it should have been a retried infra failure.
  *
- * The exemption is armed only when no tool executed since the last turn_start. pi turns ANY exception
+ * The exemption is armed only when the turn made no progress since the last turn_start. pi turns ANY exception
  * thrown inside its loop into an assistant `stopReason: "error"` message, and when that text matches its
  * retry pattern ("fetch failed", a timeout, a 5xx) the error is retried like a provider's. An exception
  * AFTER the turn's tools ran (a listener throwing on the tool result's message_end, say) fails the turn
@@ -53,9 +53,17 @@
  * genuinely new turn. A successful reply then resets pi's retry counter, so exempting it would launder
  * turns without bound (gate round 1 of #455 measured 9 paid calls at --max-turns 1). `tool_execution_start`
  * precedes every tool path at the pin (agent-loop.js:267/300/336, the truncated, sequential and parallel
- * runners), so it is the signal: set on it, cleared on every turn_start, read by `auto_retry_start`.
+ * runners), so it is one of the two signals.
  *
- * So `auto_retry_start` arms a flag unless a tool ran, the next turn_start consumes it and lands in
+ * The other is a COMPLETED reply (gate round 2 of #455, A14): an assistant message_end whose stopReason is
+ * not "error". A real provider error is the failed turn's ONLY assistant message, so a completed reply in
+ * the turn means the fault came after the work (a listener throwing at its turn_end, or ETIMEDOUT while
+ * persisting it). pi's retry then continues from that reply, and when a follow-up or steering message is
+ * queued, agent.continue() runs it as brand-new work in a turn_start that no tool preceded (6 paid calls
+ * measured at --max-turns 1). Either signal sets `turnProgressed`; every turn_start clears it; and
+ * `auto_retry_start` reads it.
+ *
+ * So `auto_retry_start` arms a flag unless the turn progressed, the next turn_start consumes it and lands in
  * `retryTurns` instead of `turns`, and `auto_retry_end` of EITHER kind clears it: a retry cancelled
  * mid-sleep by abort() emits `auto_retry_end{success:false}` and returns without continuing
  * (agent-session.js:2090-2101), and a compaction or queued-message continuation after it
@@ -65,11 +73,13 @@
  * retry-shaped throw AFTER a clean reply (a listener throwing on its turn_end, say) gets an
  * `auto_retry_start` whose `agent.continue()` then throws "Cannot continue from message role:
  * assistant", so no turn_start and no `auto_retry_end` follow, and the flag would otherwise exempt the
- * first turn of the NEXT prompt.
+ * first turn of the NEXT prompt. (That throw rejects session.prompt(), so the runner files it as exit 1,
+ * retried. Outside a test listener it is reachable only through a session-store infra fault such as
+ * ETIMEDOUT on persist, for which a retried infra failure is the right class.)
  *
  * The bound this keeps: retries per error streak are capped at PI_RETRY_MAX (pi's maxRetries, pinned by
- * the runner), and a streak can only be reset by a reply whose tools then run, which makes the next retry
- * a counted turn. So at most maxTurns * PI_RETRY_MAX retry calls go uncounted BY THIS EXEMPTION, every one
+ * the runner), and a streak can only be reset by a completed reply, which makes the next retry in that
+ * turn a counted one. So at most maxTurns * PI_RETRY_MAX retry calls go uncounted BY THIS EXEMPTION, every one
  * of them metered by the token budget. (Calls this module never counted, before or after #449, stay
  * uncounted: compaction and branch summarisation calls, and a subagent session's turns, see SCOPE above.)
  *
@@ -93,15 +103,19 @@ export function attachTurnBudget(session, maxTurns, { onAbort } = {}) {
 
 	const state = { turns: 0, retryTurns: 0, aborted: false };
 	let retryPending = false;
-	let toolRanThisTurn = false;
+	let turnProgressed = false;
 
 	const unsubscribe = session.subscribe((event) => {
 		if (event.type === "tool_execution_start") {
-			toolRanThisTurn = true;
+			turnProgressed = true;
+			return;
+		}
+		if (event.type === "message_end" && event.message?.role === "assistant" && event.message.stopReason !== "error") {
+			turnProgressed = true;
 			return;
 		}
 		if (event.type === "auto_retry_start") {
-			retryPending = !toolRanThisTurn;
+			retryPending = !turnProgressed;
 			return;
 		}
 		if (event.type === "auto_retry_end" || event.type === "agent_settled") {
@@ -109,7 +123,7 @@ export function attachTurnBudget(session, maxTurns, { onAbort } = {}) {
 			return;
 		}
 		if (event.type === "turn_start") {
-			toolRanThisTurn = false;
+			turnProgressed = false;
 			if (retryPending) {
 				retryPending = false;
 				state.retryTurns += 1;

@@ -262,3 +262,23 @@ test("agent_settled clears an armed flag that no retry turn used, so the next pr
 	promptTurn(emit, assistantText());
 	assert.deepEqual({ turns: budget.state.turns, retryTurns: budget.state.retryTurns, aborted: budget.state.aborted }, { turns: 2, retryTurns: 0, aborted: true });
 });
+
+test("a retry after a COMPLETED reply is counted: a fault after the work is not a re-run of it", () => {
+	// Gate round 2 of #455, A14, in the measured order: a clean text reply, then a retry-shaped throw at its
+	// turn_end (or ETIMEDOUT persisting it) becomes a second, synthetic error message in the same turn; pi
+	// retries, and agent.continue() from the reply runs a queued follow-up as brand-new work. No tool ran,
+	// so only the completed reply's message_end tells the budget this turn progressed.
+	const session = fakeSession();
+	const emit = (e) => session.emit(e);
+	const budget = attachTurnBudget(session, 1);
+	promptTurn(emit, assistantText());
+	const failed = assistantError("fetch failed");
+	emit({ type: "message_start", message: failed });
+	emit({ type: "message_end", message: failed });
+	emit({ type: "turn_end", message: failed, toolResults: [] });
+	agentEnd(emit, [failed], true);
+	emit({ type: "auto_retry_start", attempt: 1, maxAttempts: 2, delayMs: 2000, errorMessage: "fetch failed" });
+	emit({ type: "agent_start" });
+	emit({ type: "turn_start" });
+	assert.deepEqual({ turns: budget.state.turns, retryTurns: budget.state.retryTurns, aborted: budget.state.aborted }, { turns: 2, retryTurns: 0, aborted: true });
+});
