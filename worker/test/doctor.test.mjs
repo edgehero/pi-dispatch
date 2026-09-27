@@ -6512,6 +6512,45 @@ test("a trigger whose run.backend names a venue PI_BACKENDS does not list fails 
 	assert.doesNotMatch(unparsed.text, /backend-unblessed/);
 });
 
+test("on a fleet the unblessed-venue line judges only triggers this host serves, and says what this host does (#433)", async () => {
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0", PI_WORKER_NAME: "mini1" };
+	const deps = (out, calls, extra = {}) => ({ ...ghDeps(out, { ...green }, calls), agentDir: NO_AGENT_DIR, readHosts: async () => ({ hosts: [] }), ...extra });
+	// A cron trigger whose folder is another machine's: not scheduled here (the worker's own `folder-absent`), so this
+	// host's PI_BACKENDS says nothing about it, and doctor says nothing either.
+	const elsewhere = capture();
+	const code = await runDoctor({ ...env, PI_TRIGGERS_FILE: triggersFile(undefined, undefined, { backend: "podman", folder: "/srv/only-on-mini2" }) }, deps(elsewhere.out, [], { fileExists: (p) => p !== "/srv/only-on-mini2" }));
+	assert.doesNotMatch(elsewhere.text(), /backend-unblessed/, elsewhere.text());
+	assert.equal(code, 0, elsewhere.text());
+	// The same trigger with its folder HERE is served, and still fails, in the fleet's words.
+	const here = capture();
+	const hereCode = await runDoctor({ ...env, PI_TRIGGERS_FILE: triggersFile(undefined, undefined, { backend: "podman" }) }, deps(here.out, []));
+	assert.equal(hereCode, 1);
+	assert.ok(here.text().includes('✗ run.backend "podman" is not in this host\'s PI_BACKENDS (local), so a job of cron "nightly" that this host picks up is refused (backend-unblessed)\n    → add podman to this host\'s PI_BACKENDS, or change run.backend on that trigger to a venue PI_BACKENDS lists -- this host\'s worker refuses each such job it picks up before it spends\n'), here.text());
+	// Without a declared name there is no fleet: an absent folder is the worker's boot refusal, not placement, so the
+	// trigger is still judged, in the single host's words.
+	const single = capture();
+	const { PI_WORKER_NAME: _n, ...singleEnv } = env;
+	await runDoctor({ ...singleEnv, PI_TRIGGERS_FILE: triggersFile(undefined, undefined, { backend: "podman", folder: "/srv/only-on-mini2" }) }, deps(single.out, [], { fileExists: (p) => p !== "/srv/only-on-mini2" }));
+	assert.ok(single.text().includes('✗ run.backend "podman" is not in PI_BACKENDS (local), so every job of cron "nightly" is refused (backend-unblessed)'), single.text());
+});
+
+test("a webhook trigger is named by its position in the file, in the unblessed-venue line and the flow line alike (#433)", async () => {
+	const path = join(tempDir("pi-433-label-"), "triggers.json");
+	writeFileSync(
+		path,
+		JSON.stringify({
+			triggers: [
+				{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "review", task: "t" } },
+				{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "gitlab", flow: "fix", backend: "podman" } },
+			],
+		}),
+	);
+	const { out, text } = capture();
+	await runDoctor({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0", PI_TRIGGERS_FILE: path }, { ...ghDeps(out, { ...green }, []), agentDir: NO_AGENT_DIR, readHosts: async () => ({ hosts: [] }) });
+	assert.ok(text().includes('✗ run.backend "podman" is not in PI_BACKENDS (local), so every job of label trigger #1 is refused (backend-unblessed)'), text());
+	assert.match(text(), /⚠ Trigger flow "fix" resolves in NO tier visible here \(label trigger #1\)/);
+});
+
 test("podman-only: Valkey's fix points at the podman route, and --fix never runs docker for it (#433)", async () => {
 	const { out, text } = capture();
 	const calls = [];
