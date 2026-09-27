@@ -776,7 +776,7 @@ passing, on the record — issue #80.)
   true, which is why it is enforced in the loader rather than documented. A determinate refusal still
   exits 2 same-tick, untouched and unslowed.
   **A provider's refusal of the credential is policy, inside the container too (issue #437).** A provider
-  that answers 401 or 403 to the key refuses it again on every attempt, because the worker hands each
+  that refused the credential refuses it again on every attempt, because the worker hands each
   attempt the same key: the question above ("would the same job refuse identically an hour from now with
   nobody touching anything?") answers yes. Until #437 the runner mapped every `stopReason: "error"` to
   exit 1, so such a job was recorded `infra failure, container exit 1` and paid for a second container to
@@ -784,10 +784,13 @@ passing, on the record — issue #80.)
   CLOSED list of anchored shapes proved against the pinned pi-ai (`INT-RUNNER-EXIT-CODE-PROTOCOL`) AND
   pi-ai's own retry predicate does not call it transient, and both halves err toward retrying for the
   reason the host rule does: the expensive error is the false determinate, so a shape nobody has proved
-  (Google's OAuth token-endpoint codes under ADC, which no loopback can drive the family into; a status
-  merely quoted inside a body; a proxy's own 403) and a 403 that is a gateway
-  being down (the first commit's defect) both stay on the retryable side. The check: a new provider shape joins the list only
-  with a row in the pinned loopback table that drives that family's own `stream()` into the status.
+  (one never measured against the real endpoint, such as Google's `PERMISSION_DENIED`; one that also
+  names a transient case, such as Google's bare `UNAUTHENTICATED` or Google OAuth's `invalid_grant`
+  under ADC; a status merely quoted inside a body; a proxy's own 403) and a 403 that is a gateway being
+  down (the first commit's defect) both stay on the retryable side. The check: a new provider shape
+  joins the list only with a row in the pinned loopback table that drives that family's own `stream()`
+  into the status, and (since issue #451) only once it was measured against the real endpoint with a
+  real bogus credential.
 - **Evidence (upstream)**: `taskforcesh/bullmq @ v5.80.4 → src/commands/moveStalledJobsToWait-9.lua:76-97`
   — `local jobSchedulerId = rcall("HGET", jobKey, "rjk")` … `if rcall("EXISTS", schedulerKey) == 1 then
   isRepeatableJob = true`; then `if stalledCount > maxStalledJobCount and not isRepeatableJob then` —
@@ -956,7 +959,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
-| 2026-09-27 | Issue #451. **`CONST-RETRY-INFRA-ONLY` statement and check UNCHANGED, checked**; one example in its #437 note is corrected. The note named "Google's raw-JSON form" as a shape nobody had proved; issue #451 proved it (the table's Google cells now drive both google families' own `stream()` against the format the real endpoints send, and the rule parses that body), so the example now names what is still unproved: google-vertex's OAuth token-endpoint codes under ADC, whose fixed token URL no loopback can reach, and which stay on the retryable side by this very check (`INT-RUNNER-EXIT-CODE-PROTOCOL`). |
+| 2026-09-27 | Issue #451. **`CONST-RETRY-INFRA-ONLY` statement UNCHANGED, checked; its #437 note AMENDED** in three places. (1) "A provider that answers 401 or 403 to the key" becomes "a provider that refused the credential", since a Google 400 `API_KEY_INVALID` is now read as a refusal. (2) The unproved-shape examples: "Google's raw-JSON form" is no longer one (the table's Google cells drive both google families' own `stream()` against the format the real endpoints send, and the rule parses that body); the examples now name a shape never measured against the real endpoint (Google's `PERMISSION_DENIED`) and a code that also names a transient case (Google's bare `UNAUTHENTICATED`, which can say "Authentication backend unavailable, try again later"; Google OAuth's `invalid_grant` under ADC, a clock-skewed assertion or a propagating service account). A first draft said the ADC codes were unproved because no loopback could reach the token endpoint; review refuted that (an external_account credential names its own token URL, and a pinned test now drives the family's `stream()` through it), so the ground given is the true one. (3) The check gains its second half as practised since #451: a shape joins only once measured against the real endpoint with a real bogus credential, because the costly mistake is the false refusal (`INT-RUNNER-EXIT-CODE-PROTOCOL`). |
 | 2026-09-27 | Issue #449, with PR #455's gate rounds 1 and 2 folded in. **No article changed.** **`CONST-RETRY-INFRA-ONLY`**: a new evidence bullet, not an amendment of the rule: pi's own retry of a provider 429 was being turned into a determinate `turn_budget` stop under `--max-turns 1`, which broke this constraint in the direction of dropping a transient failure; the retry's `turn_start` is no longer a budget turn when the failed turn made no progress (no tool ran, no reply completed), so the 429 stays exit `1` and retried, while a retry after a tool or a completed reply stays counted (it is new work). The bound is stated as at most `maxTurns * PI_RETRY_MAX` retry calls uncounted by this exemption. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the job-count check still precedes the container; this change is in-run only. |
 | 2026-09-26 | Issue #428. **No article changed.** **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the podman venue's new refusal keeps a job's boundary the worker's own argv, since an account's containers.conf that widens what the argv cannot pin back (`pasta_options`, `network_cmd_options`, `annotations`) now stops the venue rather than quietly changing the container; no container is added, reused or probed for it (the check reads files). **`CONST-EGRESS-POLICY-IN-THE-ARGV` UNCHANGED, checked**: the egress-armed job's `--internal` network is still the argv's, and was measured closed to the host under every widening conf; the proxy's new loopback and link-local deny lives beside the allowlist in the shipped proxy rules, where the existing rules already live, and adds no third state, since it only refuses. **`CONST-RETRY-INFRA-ONLY`** is followed, not amended: the refusal is determinate and RETURNS. |
 | 2026-09-26 | Issue #437, review round 1. **`CONST-RETRY-INFRA-ONLY` statement UNCHANGED, checked**; its #437 note is corrected: the first commit read a gateway's transient 403 (OpenRouter's "Provider returned error", an HTML "please retry" page) as a refusal, which is this constraint broken in the expensive direction, so the refusal now also requires that pi-ai's own `isRetryableAssistantError` does not call the message transient. |

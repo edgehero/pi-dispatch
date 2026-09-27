@@ -54,8 +54,8 @@ arguments:
 - `outcome` is `failed` (final infrastructure failure) or `policy` (a worker abort or an in-container
   policy stop).
 - `reason` is a fixed token, never a message: `worker-abort`, `runner-policy`, `provider-auth-refused`
-  (the AI provider refused the key as an authentication or permission error: the key is bad, revoked, or not allowed this model or route, and
-  every job fails the same way until the operator fixes it),
+  (the AI provider refused the key as an authentication or permission error: the key is bad, revoked, or
+  not allowed this model or route, and every job fails the same way until the operator fixes it),
   `container-never-started`, `container-detached`, `secret-resolver-unreachable`, any other fixed token a failure legitimately
   carries, or `infra` when it carried none. Anything message-shaped is flattened to `infra` before it can
   reach your argv.

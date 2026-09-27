@@ -647,22 +647,32 @@ const GOOGLE_CELLS = {
 	apiKeyInvalid: GOOGLE_SSE_BODY(400, "INVALID_ARGUMENT", "API key not valid. Please pass a valid API key.", [{ "@type": GOOGLE_ERROR_INFO, reason: "API_KEY_INVALID", domain: "googleapis.com", metadata: { service: "generativelanguage.googleapis.com" } }]),
 	// A real bogus Vertex api key: HTTP 401 UNAUTHENTICATED, reason ACCESS_TOKEN_TYPE_UNSUPPORTED.
 	unauthenticated: GOOGLE_SSE_BODY(401, "UNAUTHENTICATED", GOOGLE_UNAUTHENTICATED, [{ "@type": GOOGLE_ERROR_INFO, reason: "ACCESS_TOKEN_TYPE_UNSUPPORTED", metadata: { method: "google.cloud.aiplatform.v1.PredictionService.StreamGenerateContent", service: "aiplatform.googleapis.com" } }]),
+	// PERMISSION_DENIED stays infra (never measured against a real endpoint; SERVICE_DISABLED asks to wait
+	// for an enable to propagate and retry, which pi's predicate does not read as transient).
 	permissionDenied: GOOGLE_SSE_BODY(403, "PERMISSION_DENIED", "Permission denied: Consumer 'api_key:AIza' has been suspended."),
+	serviceDisabled: GOOGLE_SSE_BODY(403, "PERMISSION_DENIED", "Generative Language API has not been used in project 1 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/generativelanguage.googleapis.com/overview?project=1 then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.", [{ "@type": GOOGLE_ERROR_INFO, reason: "SERVICE_DISABLED", domain: "googleapis.com", metadata: { consumer: "projects/1", service: "generativelanguage.googleapis.com" } }]),
 	// Must stay infra. The quota wording carries "billing", which pi calls non-transient; infra by decision.
 	quota: GOOGLE_SSE_BODY(429, "RESOURCE_EXHAUSTED", "You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits."),
 	exhausted: GOOGLE_SSE_BODY(429, "RESOURCE_EXHAUSTED", "Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details."),
 	badPayload: GOOGLE_SSE_BODY(400, "INVALID_ARGUMENT", 'Invalid JSON payload received. Unknown name "foo": Cannot find field.'),
 	// UNAUTHENTICATED and API_KEY_INVALID only inside the message string: read by a byte match, not a parse.
 	nestedInString: GOOGLE_SSE_BODY(400, "INVALID_ARGUMENT", 'upstream said "status": "UNAUTHENTICATED", reason API_KEY_INVALID'),
+	// UNAUTHENTICATED without a measured reason stays infra: the real bogus Vertex key's status and message
+	// minus its reason, and a hypothetical transient one pi's predicate does not read as transient.
+	unauthenticatedBare: GOOGLE_SSE_BODY(401, "UNAUTHENTICATED", GOOGLE_UNAUTHENTICATED),
+	backendUnavailable: GOOGLE_SSE_BODY(401, "UNAUTHENTICATED", "Authentication backend unavailable, try again later."),
 };
 const GOOGLE_ROW_CASES = [
 	refusal(400, GOOGLE_CELLS.apiKeyInvalid, SSE_TYPE),
 	refusal(401, GOOGLE_CELLS.unauthenticated, SSE_TYPE),
-	refusal(403, GOOGLE_CELLS.permissionDenied, SSE_TYPE),
+	residual(403, GOOGLE_CELLS.permissionDenied, SSE_TYPE),
+	residual(403, GOOGLE_CELLS.serviceDisabled, SSE_TYPE),
 	residual(429, GOOGLE_CELLS.quota, SSE_TYPE),
 	transient(429, GOOGLE_CELLS.exhausted, SSE_TYPE),
 	residual(400, GOOGLE_CELLS.badPayload, SSE_TYPE),
 	residual(400, GOOGLE_CELLS.nestedInString, SSE_TYPE),
+	residual(401, GOOGLE_CELLS.unauthenticatedBare, SSE_TYPE),
+	residual(401, GOOGLE_CELLS.backendUnavailable, SSE_TYPE),
 ];
 // Bedrock: pi-ai 0.80.7 loses AWS's message (it serializes the consumed response stream), so on HTTP/1
 // every message is `<prefix>: <status>: [object Object]`. Each cell pins that whole string, junk included:
@@ -709,21 +719,24 @@ const AUTH_REFUSAL_TABLE = [
 	// "status":"<reason phrase>"}}` and pi-ai passes it on unchanged; providerAuthRefused parses both
 	// layers (issue #451). The stub answers in the real format (M0-d stubsse matched the real bytes).
 	{ api: "google-generative-ai", provider: "google", path: "/v1beta", cases: GOOGLE_ROW_CASES },
-	// Same SDK, same wrap. An api key plus a custom baseUrl is the one route the stub can serve; ADC and a
-	// project would reach Google (the ADC token-endpoint shapes are pinned by the google-vertex ADC test below).
+	// Same SDK, same wrap, with an api key and a custom baseUrl. Under ADC the refusal comes from Google's
+	// OAuth token endpoint instead; those shapes are a residual, pinned by the google-vertex ADC tests below.
 	{ api: "google-vertex", provider: "google-vertex", path: "/v1", cases: GOOGLE_ROW_CASES },
-	// formatBedrockError names the exception, then the status: `AccessDeniedException: 403: ...`, and only
-	// that prefix is read (issue #451). HTTP/1.1 is forced because the stub is node:http and the SDK
+	// formatBedrockError names the exception, then the status: `UnrecognizedClientException: 403: ...`, and
+	// only that prefix is read (issue #451). HTTP/1.1 is forced because the stub is node:http and the SDK
 	// defaults to HTTP/2, where the lost body serializes as stream-internals JSON instead of [object Object]
-	// (M0-d); the prefix is the same either way. Real AWS answered 403 for each name, so each cell is a 403.
-	// The exception name rides x-amzn-errortype, as AWS sends it. The throttle cell costs the SDK's own
-	// retries (three requests) before it reaches pi-ai.
+	// (M0-d); the prefix is the same either way. UnrecognizedClientException is the one name real AWS sent
+	// for a bogus credential with a 403 (a bogus key and a bogus session token). AccessDeniedException
+	// (measured for a bogus bearer token, but also an intermittent cross-region SCP/IAM denial or a
+	// propagating fix, told apart only by the lost message) and ExpiredTokenException (never seen from real
+	// AWS) are residual cells. The exception name rides x-amzn-errortype, as AWS sends it. The throttle cell
+	// costs the SDK's own retries (three requests) before it reaches pi-ai.
 	{
 		api: "bedrock-converse-stream", provider: "amazon-bedrock", path: "", options: { env: { AWS_REGION: "us-east-1", AWS_BEDROCK_FORCE_HTTP1: "1" } },
 		cases: [
 			bedrockCell(refusal, 403, "UnrecognizedClientException", "The security token included in the request is invalid.", "UnrecognizedClientException: 403: [object Object]"),
-			bedrockCell(refusal, 403, "AccessDeniedException", "User is not authorized to perform: bedrock:InvokeModelWithResponseStream", "AccessDeniedException: 403: [object Object]"),
-			bedrockCell(refusal, 403, "ExpiredTokenException", "The security token included in the request is expired", "ExpiredTokenException: 403: [object Object]"),
+			bedrockCell(residual, 403, "AccessDeniedException", "User is not authorized to perform: bedrock:InvokeModelWithResponseStream", "AccessDeniedException: 403: [object Object]"),
+			bedrockCell(residual, 403, "ExpiredTokenException", "The security token included in the request is expired", "ExpiredTokenException: 403: [object Object]"),
 			bedrockCell(transient, 429, "ThrottlingException", "Too many requests, please wait before trying again.", "Throttling error: 429: [object Object]"),
 		],
 	},
@@ -738,7 +751,7 @@ const AUTH_REFUSAL_TABLE = [
 	},
 ];
 
-test("each driven pi-ai chat family's 401/403 lands in its expected exit class, transient 403s stay retryable (loopback, no key)", { skip }, async () => {
+test("each driven pi-ai chat family's credential refusal lands in its expected exit class, transient errors stay retryable (loopback, no key)", { skip }, async () => {
 	const candidates = resolvePiAiCompat();
 	assert.ok(candidates.length > 0, "the runner must find at least one pi-ai compat candidate");
 	const isRetryable = await loadRetryPredicate({ candidates });
@@ -1055,11 +1068,13 @@ test("google-vertex ADC: the pinned auth library's OAuth refusals keep their sha
 	// Issue #451. Under ADC, google-vertex fails at Google's OAuth token endpoint before Vertex is reached,
 	// and the message is the auth library's, not pi-ai's: gtoken sets `${error}: ${error_description}` for a
 	// service account, gaxios throws the bare RFC 6749 code for an authorized_user refresh. M0-d measured
-	// both through pi-ai against the real endpoint, unchanged by pi-ai. The token URL is fixed to Google's,
-	// so the family's own stream() cannot be pointed at a stub, and that proof is what CONST-RETRY-INFRA-ONLY
-	// asks before a shape joins providerAuthRefused's list: these stay infra, a NAMED residual. This drives
-	// the SAME library copies pi-ai's @google/genai resolves, their fetch redirected to the loopback, so the
-	// residual's shapes are pinned: a bump that changes them, or pi-ai's verdict on them, fails here.
+	// both through pi-ai against the real endpoint, unchanged by pi-ai. They stay infra, a NAMED residual,
+	// because the codes are not specific enough: invalid_grant also covers a clock-skewed JWT assertion and
+	// a service account still propagating, both transient, and a bare invalid_client is too generic. This
+	// drives the SAME library copies pi-ai's @google/genai resolves, their fetch redirected to the loopback
+	// (the service-account and authorized_user token URLs are fixed to Google's), so the residual's shapes
+	// are pinned: a bump that changes them, or pi-ai's verdict on them, fails here. The third form, the
+	// external_account one, goes through the family's own stream() in the next test.
 	const { createRequire } = await import("node:module");
 	const { generateKeyPairSync } = await import("node:crypto");
 	const candidates = resolvePiAiCompat();
@@ -1110,4 +1125,51 @@ test("google-vertex ADC: the pinned auth library's OAuth refusals keep their sha
 		server.close();
 	}
 	assert.ok(tokenUrls.length >= cells.length && tokenUrls.every((url) => url === "https://oauth2.googleapis.com/token"), `the library asked ${JSON.stringify(tokenUrls)}, not Google's token endpoint`);
+});
+
+test("google-vertex ADC, external_account: the family's own stream() turns a token-endpoint refusal into a retried residual (loopback, no key)", { skip }, async () => {
+	// Issue #451 gate round 1. An external_account credential names its own token_url, so the google-vertex
+	// family's real stream() can be driven to a loopback token endpoint in-process, no TLS. Its refusal is a
+	// third form, `Error code <code>: <description>` (google-auth-library's OAuth error parsing), and it
+	// stays infra with the other ADC shapes: a bump that changes the form or its verdict fails here.
+	const { writeFileSync } = await import("node:fs");
+	const candidates = resolvePiAiCompat();
+	const isRetryable = await loadRetryPredicate({ candidates });
+	const requests = [];
+	const server = createServer((req, res) => {
+		req.resume();
+		req.on("end", () => {
+			requests.push(`${req.method} ${req.url}`);
+			res.writeHead(400, { "content-type": JSON_TYPE });
+			res.end(JSON.stringify({ error: "invalid_grant", error_description: "The audience in ID Token does not match the expected audience." }));
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const dir = tempDir("pi-vertex-adc-");
+	writeFileSync(join(dir, "subject.txt"), "probe-subject-token");
+	writeFileSync(join(dir, "credentials.json"), JSON.stringify({
+		type: "external_account",
+		audience: "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/probe/providers/probe",
+		subject_token_type: "urn:ietf:params:oauth:token-type:jwt",
+		token_url: `http://127.0.0.1:${server.address().port}/v1/token`,
+		credential_source: { file: join(dir, "subject.txt") },
+	}));
+	let terminal;
+	try {
+		const api = await import(new URL("./api/google-vertex.js", candidates[0].url).href);
+		const model = {
+			id: "pinned-probe", name: "pinned-probe", api: "google-vertex", provider: "google-vertex", baseUrl: "",
+			reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000, maxTokens: 16,
+		};
+		terminal = await api.stream(model, { messages: [{ role: "user", content: "hi", timestamp: 0 }] }, {
+			project: "pinned-probe", location: "us-central1", env: { GOOGLE_APPLICATION_CREDENTIALS: join(dir, "credentials.json") },
+		}).result();
+	} finally {
+		server.close();
+	}
+	assert.deepEqual(requests, ["POST /v1/token"], "the family must have asked the loopback token endpoint, and only it");
+	assert.equal(terminal.stopReason, "error");
+	assert.equal(terminal.errorMessage, "Error code invalid_grant: The audience in ID Token does not match the expected audience.", "the external_account refusal form moved");
+	assert.equal(isRetryable(terminal), false, "pi-ai now calls the external_account refusal transient");
+	assert.deepEqual(classifyStopReason(terminal, isRetryable), { code: 1, reason: "error", message: terminal.errorMessage }, "the ADC residual moved");
 });

@@ -411,8 +411,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   this"); the WORKER authors every other terminal comment -- each pre-spend refusal (the ladder), the
   worker-abort/operator-cancel/runner-policy/provider-auth-refused stops (fixed sentences keyed by the
   reason token; `provider-auth-refused`, issue #437, is the exit-2 stop whose runner named a provider's
-  refusal of the credential or of access (an authentication or permission error, whatever its HTTP status), and its sentence tells the requester the operator must
-  check the provider key and what it is allowed to use), and the final infrastructure failure.
+  refusal of the credential or of access (an authentication or permission error, whatever its HTTP
+  status), and its sentence tells the requester the operator must check the provider key and what it is
+  allowed to use), and the final infrastructure failure.
   Once-ness for the infra class is BullMQ's own terminal decision
   (`finishedOn`, set only on the non-retry branch): a retried attempt comments nothing, so a flaky
   daemon cannot post three comments for one recovery, and the seam that reads it also covers the

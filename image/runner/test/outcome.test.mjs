@@ -276,6 +276,7 @@ const ERROR_INFO = "type.googleapis.com/google.rpc.ErrorInfo";
 const googleBody = (code, status, message, details) => ({ error: { code, message, status, ...(details ? { details } : {}) } });
 const REAL_GOOGLE_BOGUS_KEY = '{"error":{"message":"{\\n  \\"error\\": {\\n    \\"code\\": 400,\\n    \\"message\\": \\"API key not valid. Please pass a valid API key.\\",\\n    \\"status\\": \\"INVALID_ARGUMENT\\",\\n    \\"details\\": [\\n      {\\n        \\"@type\\": \\"type.googleapis.com/google.rpc.ErrorInfo\\",\\n        \\"reason\\": \\"API_KEY_INVALID\\",\\n        \\"domain\\": \\"googleapis.com\\",\\n        \\"metadata\\": {\\n          \\"service\\": \\"generativelanguage.googleapis.com\\"\\n        }\\n      },\\n      {\\n        \\"@type\\": \\"type.googleapis.com/google.rpc.LocalizedMessage\\",\\n        \\"locale\\": \\"en-US\\",\\n        \\"message\\": \\"API key not valid. Please pass a valid API key.\\"\\n      }\\n    ]\\n  }\\n}\\n","code":400,"status":"Bad Request"}}';
 const VERTEX_UNAUTHENTICATED = "Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.";
+const API_KEY_INVALID_BODY = googleBody(400, "INVALID_ARGUMENT", "x", [{ "@type": ERROR_INFO, reason: "API_KEY_INVALID" }]);
 const vertexBogusKey = (metadata) => googleWrap(googleBody(401, "UNAUTHENTICATED", VERTEX_UNAUTHENTICATED, [{ "@type": ERROR_INFO, reason: "ACCESS_TOKEN_TYPE_UNSUPPORTED", metadata }]), 401, "Unauthorized");
 const STREAM_JUNK = '{"_events":{"close":[null,null],"error":[null,null]},"_readableState":{"highWaterMark":65536,"buffer":[],"bufferIndex":0,"length":0,"pipes":[],"awaitDrainWriters":null},"_writableState":{"highWaterMark":65536,"length":0,"corked":0,"writelen":0,"bufferedIndex":0,"pendingcb":0},"allowHalfOpen":true,"_eventsCount":11}';
 
@@ -285,18 +286,14 @@ const AUTH_REFUSED_451 = [
 	// Vertex: the real bogus api key, in BOTH metadata key orders Google sent to two identical requests.
 	vertexBogusKey({ method: "google.cloud.aiplatform.v1.PredictionService.StreamGenerateContent", service: "aiplatform.googleapis.com" }),
 	vertexBogusKey({ service: "aiplatform.googleapis.com", method: "google.cloud.aiplatform.v1.PredictionService.StreamGenerateContent" }),
-	// Each status alone, with no details, and each reason alone under a status that is not an auth status,
-	// so dropping any one token from either set fails here.
-	googleWrap(googleBody(401, "UNAUTHENTICATED", VERTEX_UNAUTHENTICATED), 401, "Unauthorized"),
-	googleWrap(googleBody(403, "PERMISSION_DENIED", "Permission denied: Consumer 'api_key:AIza' has been suspended."), 403, "Forbidden"),
+	// Each reason alone under a status that is not an auth status, so dropping either fails here. The 403
+	// row is a measured reason under a 403, so dropping 403 from the outer-code set fails too.
 	googleWrap(googleBody(400, "INVALID_ARGUMENT", "x", [{ "@type": ERROR_INFO, reason: "API_KEY_INVALID" }]), 400, "Bad Request"),
 	googleWrap(googleBody(400, "INVALID_ARGUMENT", "x", [{ "@type": ERROR_INFO, reason: "ACCESS_TOKEN_TYPE_UNSUPPORTED" }]), 400, "Bad Request"),
-	// Bedrock: each measured exception name, on HTTP/1 ([object Object]) and HTTP/2 (the stream junk).
+	googleWrap(googleBody(403, "PERMISSION_DENIED", "x", [{ "@type": ERROR_INFO, reason: "API_KEY_INVALID" }]), 403, "Forbidden"),
+	// Bedrock: the one measured refusal name, on HTTP/1 ([object Object]) and HTTP/2 (the stream junk).
 	"UnrecognizedClientException: 403: [object Object]",
 	`UnrecognizedClientException: 403: ${STREAM_JUNK}`,
-	"AccessDeniedException: 403: [object Object]",
-	`AccessDeniedException: 403: ${STREAM_JUNK}`,
-	"ExpiredTokenException: 403: [object Object]",
 ];
 
 const NOT_AUTH_REFUSED_451 = [
@@ -306,6 +303,24 @@ const NOT_AUTH_REFUSED_451 = [
 	// A bad payload: INVALID_ARGUMENT with no auth reason.
 	googleWrap(googleBody(400, "INVALID_ARGUMENT", 'Invalid JSON payload received. Unknown name "foo": Cannot find field.'), 400, "Bad Request"),
 	googleWrap(googleBody(500, "INTERNAL", "An internal error has occurred."), 500, "Internal Server Error"),
+	// PERMISSION_DENIED is a residual: never measured against a real endpoint, and it has transient
+	// windows pi's predicate does not catch (the gate's adversary rows, verbatim in shape).
+	googleWrap(googleBody(403, "PERMISSION_DENIED", "Permission denied: Consumer 'api_key:AIza' has been suspended."), 403, "Forbidden"),
+	googleWrap(googleBody(403, "PERMISSION_DENIED", "Generative Language API has not been used in project 1 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/generativelanguage.googleapis.com/overview?project=1 then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.", [{ "@type": ERROR_INFO, reason: "SERVICE_DISABLED", domain: "googleapis.com" }]), 403, "Forbidden"),
+	googleWrap(googleBody(403, "PERMISSION_DENIED", "Permission 'aiplatform.endpoints.predict' denied on resource '//aiplatform.googleapis.com/projects/p/locations/us-central1/publishers/google/models/gemini-2.5-pro' (or it may not exist).", [{ "@type": ERROR_INFO, reason: "IAM_PERMISSION_DENIED", domain: "aiplatform.googleapis.com" }]), 403, "Forbidden"),
+	googleWrap(googleBody(403, "PERMISSION_DENIED", "The caller does not have permission"), 403, "Forbidden"),
+	// UNAUTHENTICATED alone is a residual: a status names a class, not a cause. The first is the real
+	// bogus Vertex key's status and message WITHOUT its reason; the second is a hypothetical transient
+	// UNAUTHENTICATED that pi's predicate does not read as transient.
+	googleWrap(googleBody(401, "UNAUTHENTICATED", VERTEX_UNAUTHENTICATED), 401, "Unauthorized"),
+	googleWrap(googleBody(401, "UNAUTHENTICATED", "Authentication backend unavailable, try again later."), 401, "Unauthorized"),
+	// A measured reason under an outer code outside the measured set (a 5xx, a 200) is not a refusal.
+	googleWrap(API_KEY_INVALID_BODY, 503, "Service Unavailable"),
+	googleWrap(API_KEY_INVALID_BODY, 200, "OK"),
+	googleWrap(googleBody(400, "INVALID_ARGUMENT", "x", [{ "@type": ERROR_INFO, reason: "API_KEY_INVALID" }]), 500, "Internal Server Error"),
+	// Only own fields are read: a `__proto__` key JSON.parse keeps as an own property carries nothing.
+	JSON.stringify({ error: { message: `{"error":{"__proto__":{"details":[{"@type":"${ERROR_INFO}","reason":"API_KEY_INVALID"}]}}}`, code: 400 } }),
+	JSON.stringify({ error: { message: `{"error":{"status":"X","details":[{"__proto__":{"@type":"${ERROR_INFO}","reason":"API_KEY_INVALID"}}]}}`, code: 400 } }),
 	// UNAUTHENTICATED and API_KEY_INVALID present only INSIDE a string that is not error.status or a
 	// reason: a byte match reads these, a parse does not.
 	googleWrap(googleBody(400, "INVALID_ARGUMENT", 'upstream said "status": "UNAUTHENTICATED", reason API_KEY_INVALID'), 400, "Bad Request"),
@@ -316,11 +331,11 @@ const NOT_AUTH_REFUSED_451 = [
 	// The OUTER status is the HTTP reason phrase and is never read, whatever it says.
 	JSON.stringify({ error: { message: JSON.stringify(googleBody(500, "INTERNAL", "x")), code: 401, status: "UNAUTHENTICATED" } }),
 	// Not the SDK's wrap: no numeric code, a non-JSON inner text, trailing or leading bytes, an array.
-	JSON.stringify({ error: { message: JSON.stringify(googleBody(401, "UNAUTHENTICATED", "x")), status: "Unauthorized" } }),
+	JSON.stringify({ error: { message: JSON.stringify(API_KEY_INVALID_BODY), status: "Bad Request" } }),
 	JSON.stringify({ error: { message: "<html>401 UNAUTHENTICATED</html>", code: 401, status: "Unauthorized" } }),
-	`${googleWrap(googleBody(401, "UNAUTHENTICATED", "x"), 401, "Unauthorized")} trailing`,
-	` ${googleWrap(googleBody(401, "UNAUTHENTICATED", "x"), 401, "Unauthorized")}`,
-	`[${googleWrap(googleBody(401, "UNAUTHENTICATED", "x"), 401, "Unauthorized")}]`,
+	`${googleWrap(API_KEY_INVALID_BODY, 400, "Bad Request")} trailing`,
+	` ${googleWrap(API_KEY_INVALID_BODY, 400, "Bad Request")}`,
+	`[${googleWrap(API_KEY_INVALID_BODY, 400, "Bad Request")}]`,
 	"text that merely mentions API_KEY_INVALID and UNAUTHENTICATED",
 	'500: {"error":{"status":"UNAUTHENTICATED","details":[{"reason":"API_KEY_INVALID"}]}}',
 	// Bedrock: the transient and non-credential prefixes pi-ai maps, a status AWS was not seen to send,
@@ -329,15 +344,28 @@ const NOT_AUTH_REFUSED_451 = [
 	"Service unavailable: 503: [object Object]",
 	"Validation error: 400: [object Object]",
 	"UnrecognizedClientException: 401: [object Object]",
+	// AccessDeniedException and ExpiredTokenException are residuals: the first also means an intermittent
+	// cross-region SCP/IAM denial or a propagating fix, told apart only by the message pi-ai loses; the
+	// second was never seen from real AWS.
+	"AccessDeniedException: 403: [object Object]",
+	`AccessDeniedException: 403: ${STREAM_JUNK}`,
+	"ExpiredTokenException: 403: [object Object]",
+	" UnrecognizedClientException: 403: x",
+	"Error: UnrecognizedClientException: 403: x",
+	"UnrecognizedClientException: 4031: x",
 	"AccessDeniedException: 4031: x",
 	"AccessDeniedException: 403 x",
 	" AccessDeniedException: 403: x",
 	"Error: AccessDeniedException: 403: x",
 	"ThrottlingException: 403: x",
-	// Google OAuth under Vertex ADC, a residual by decision: pinned library forms, but no loopback can
-	// drive the family's stream() into them (the first is the real answer, verbatim).
+	// Google OAuth under Vertex ADC, a residual: invalid_grant also covers a clock-skewed JWT assertion and
+	// a service account still propagating, and a bare invalid_client is too generic. The three forms: the
+	// service account's (the real answer, verbatim), the authorized_user's bare code, the external_account's.
 	"invalid_grant: Invalid grant: account not found",
+	"invalid_grant: Invalid JWT: Token must be a short-lived token (60 minutes) and in a reasonable timeframe. Check your iat and exp values in the JWT claim.",
 	"invalid_client",
+	"invalid_grant",
+	"Error code invalid_grant: The audience in ID Token does not match the expected audience.",
 	// Codex, by decision: the server's own sentence, no status on either transport.
 	"Could not parse your authentication token. Please try signing in again.",
 ];

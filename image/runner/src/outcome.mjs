@@ -136,43 +136,57 @@ export function decideExit({ budgetAborted, budgetTurns, tokenAborted, terminal,
  * - `OpenAI API error (401): ...`, `Azure OpenAI API error (401): ...`, `Mistral API error (401): ...`:
  *   the fixed prefixes pi-ai's openai-responses, azure-openai-responses and mistral-conversations
  *   compose. Literals, not a generic `^.* API error \(`, so a new provider joins by proof, not by shape.
- * - Google's gRPC status, read by PARSING, never by matching bytes (issue #451). google-generative-ai
+ * - Google's ErrorInfo reason, read by PARSING, never by matching bytes (issue #451). google-generative-ai
  *   and google-vertex stream, Google answers a streaming error as text/event-stream, and @google/genai
  *   (pinned 1.52.0 under pi-ai) JSON-parses an error body only for application/json, so it wraps Google's
  *   pretty-printed body TEXT as a string: `{"error":{"message":"<Google's JSON>","code":<http>,
  *   "status":"<reason phrase>"}}`, and pi-ai passes that on unchanged. The outer `status` is the HTTP
  *   reason phrase ("Unauthorized"); the real verdict is inside the string. Google's own key order moved
- *   between two identical requests (M0-d), so googleRpcAuthRefused parses both layers and reads two
- *   fields, nothing else: the inner `error.status` in GOOGLE_AUTH_STATUSES, or a `details[]` entry of
- *   type google.rpc.ErrorInfo whose `reason` is in GOOGLE_AUTH_REASONS. A status that only appears
- *   inside some other string (a message quoting `"status": "UNAUTHENTICATED"`) is never read. The
- *   single-layer application/json form is not read either: streaming never produces it (M0-d).
- * - `UnrecognizedClientException: 403: `, `AccessDeniedException: 403: `, `ExpiredTokenException: 403: `:
- *   bedrock-converse-stream, where pi-ai names the SDK exception and then the status. ONLY this prefix is
- *   stable: pi-ai 0.80.7 serializes the consumed response stream instead of AWS's message, so the rest is
- *   `[object Object]` on HTTP/1 and stream-internals JSON on HTTP/2 (an upstream bug, recorded and not
- *   read). AccessDeniedException is also IAM or model access denied, which is determinate too. Real AWS
- *   answered 403 for every one (M0-d); a status it was not seen to send stays infra.
+ *   between two identical requests (M0-d), so googleRpcAuthRefused parses both layers and reads only
+ *   OWN fields: the outer `code` in GOOGLE_AUTH_HTTP_CODES, then a `details[]` entry of type
+ *   google.rpc.ErrorInfo whose `reason` is in GOOGLE_AUTH_REASONS. A reason that only appears inside
+ *   some other string (a message quoting `API_KEY_INVALID`) is never read. The single-layer application/json form is not read
+ *   either: streaming never produces it (M0-d).
+ * - `UnrecognizedClientException: 403: `: bedrock-converse-stream, where pi-ai names the SDK exception and
+ *   then the status. It is what real AWS answered to a bogus access key and to a bogus session token
+ *   (M0-d). ONLY this prefix is stable: pi-ai 0.80.7 serializes the consumed response stream instead of
+ *   AWS's message, so the rest is `[object Object]` on HTTP/1 and stream-internals JSON on HTTP/2 (an
+ *   upstream bug, recorded and not read). A status real AWS was not seen to send stays infra.
  *
- * NOT here, by decision (INT-RUNNER-EXIT-CODE-PROTOCOL names each): openai-codex-responses carries no
- * status on either transport, only the server's own sentence, and matching prose is a guess. Google's
- * 429 RESOURCE_EXHAUSTED is quota, not a credential, even in the wording pi calls non-transient. And
- * google-vertex under ADC, whose refusal comes from Google's OAuth token endpoint as `invalid_grant: ...`
- * or a bare `invalid_client`: the forms are pinned library code (google-auth-library's gtoken and gaxios,
- * pinned-api.test.mjs drives both), but that endpoint's URL is fixed, so no loopback can drive the
- * family's own stream() into them, and CONST-RETRY-INFRA-ONLY admits a shape only with that proof.
+ * Admission rule: only a shape MEASURED against a real endpoint with a real bogus credential, because
+ * the costly mistake is a false refusal. NOT here, each a named residual in INT-RUNNER-EXIT-CODE-PROTOCOL:
+ * - openai-codex-responses: no status on either transport, only the server's own sentence; matching
+ *   prose is a guess.
+ * - Google's 429 RESOURCE_EXHAUSTED: quota, not a credential, even in the wording pi calls non-transient.
+ * - Google's gRPC status alone, UNAUTHENTICATED included: the status names a class, not a cause, and an
+ *   UNAUTHENTICATED body can say "Authentication backend unavailable, try again later", which pi's
+ *   predicate does not read as transient. Only the measured, credential-specific reasons are read; the
+ *   real bogus Vertex key carries one (ACCESS_TOKEN_TYPE_UNSUPPORTED) beside its UNAUTHENTICATED.
+ * - Google's 403 PERMISSION_DENIED: never measured against a real endpoint, and it has transient windows
+ *   pi's predicate does not catch (SERVICE_DISABLED says to wait for an enable to propagate and retry;
+ *   an IAM grant propagates too).
+ * - Bedrock's AccessDeniedException: measured for a bogus bearer token, but AWS also sends it for a
+ *   cross-region inference profile whose SCP or IAM does not allow every destination region
+ *   (intermittent) and for up to minutes after a Marketplace or IAM fix, and the message that would tell
+ *   them apart is the one pi-ai loses. ExpiredTokenException: never seen from real AWS (a bogus session
+ *   token answered UnrecognizedClientException).
+ * - google-vertex under ADC: Google's OAuth token endpoint answers `invalid_grant: <description>`
+ *   (gtoken, a service account), a bare `invalid_grant` / `invalid_client` (gaxios, an authorized_user
+ *   refresh), or `Error code invalid_grant: <description>` (an external_account token exchange).
+ *   invalid_grant also covers a clock-skewed JWT assertion and a service account still propagating,
+ *   both transient, and a bare invalid_client is too generic to read. pinned-api.test.mjs pins them.
  */
-// UNAUTHENTICATED is Google's 401 (a real bogus Vertex key). PERMISSION_DENIED is its 403: a suspended
-// key, an API or billing not enabled on the project, an IAM denial. None clears on a retry with the same
-// key, which is the test the 401/403 shapes above already pass.
-const GOOGLE_AUTH_STATUSES = new Set(["UNAUTHENTICATED", "PERMISSION_DENIED"]);
-// API_KEY_INVALID: a real bogus AI Studio key, which Google answers as HTTP 400 INVALID_ARGUMENT, so the
-// status alone would miss it. ACCESS_TOKEN_TYPE_UNSUPPORTED: a real bogus Vertex api key (401, and its
-// status already matches; listed because it is the measured reason, so a status change alone cannot drop it).
+// Google's HTTP statuses seen on the measured refusals: 400 (API_KEY_INVALID) and 401; 403 is kept so a
+// measured reason under a 403 still reads. Any other outer code (a 5xx, a 200) is never a refusal.
+const GOOGLE_AUTH_HTTP_CODES = new Set([400, 401, 403]);
+// The whole admitted Google set, each measured against a real endpoint with a real bogus credential and
+// each specific to the credential: API_KEY_INVALID (a bogus AI Studio key, HTTP 400 INVALID_ARGUMENT) and
+// ACCESS_TOKEN_TYPE_UNSUPPORTED (a bogus Vertex api key, HTTP 401 UNAUTHENTICATED).
 const GOOGLE_AUTH_REASONS = new Set(["API_KEY_INVALID", "ACCESS_TOKEN_TYPE_UNSUPPORTED"]);
 const GOOGLE_ERROR_INFO = "type.googleapis.com/google.rpc.ErrorInfo";
 
 const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+const own = (record, key) => (Object.hasOwn(record, key) ? record[key] : undefined);
 
 function parseJsonRecord(text) {
 	try {
@@ -186,13 +200,15 @@ function parseJsonRecord(text) {
 /** True for @google/genai's double-wrapped Google error whose inner body names a credential refusal. */
 function googleRpcAuthRefused(errorMessage) {
 	if (!errorMessage.startsWith("{")) return false;
-	const outer = parseJsonRecord(errorMessage)?.error;
-	if (!isRecord(outer) || typeof outer.message !== "string" || typeof outer.code !== "number") return false;
-	const inner = parseJsonRecord(outer.message)?.error;
+	const wrapper = parseJsonRecord(errorMessage);
+	const outer = wrapper && own(wrapper, "error");
+	if (!isRecord(outer) || typeof own(outer, "message") !== "string" || !GOOGLE_AUTH_HTTP_CODES.has(own(outer, "code"))) return false;
+	const body = parseJsonRecord(outer.message);
+	const inner = body && own(body, "error");
 	if (!isRecord(inner)) return false;
-	if (GOOGLE_AUTH_STATUSES.has(inner.status)) return true;
-	return Array.isArray(inner.details)
-		&& inner.details.some((detail) => isRecord(detail) && detail["@type"] === GOOGLE_ERROR_INFO && GOOGLE_AUTH_REASONS.has(detail.reason));
+	const details = own(inner, "details");
+	return Array.isArray(details)
+		&& details.some((detail) => isRecord(detail) && own(detail, "@type") === GOOGLE_ERROR_INFO && GOOGLE_AUTH_REASONS.has(own(detail, "reason")));
 }
 
 const PROVIDER_AUTH_REFUSED = [
@@ -200,7 +216,7 @@ const PROVIDER_AUTH_REFUSED = [
 	/^OpenAI API error \((?:401|403)\): /,
 	/^Azure OpenAI API error \((?:401|403)\): /,
 	/^Mistral API error \((?:401|403)\): /,
-	/^(?:UnrecognizedClientException|AccessDeniedException|ExpiredTokenException): 403: /,
+	/^UnrecognizedClientException: 403: /,
 	{ test: googleRpcAuthRefused },
 ];
 
@@ -313,7 +329,7 @@ export function classifyStopReason(terminal, isRetryable = null) {
 			return { code: EXIT_POLICY, reason: "aborted" };
 
 		case "error":
-			// A provider that refused the credential (HTTP 401/403) refuses it again on every retry: the
+			// A provider that refused the credential refuses it again on every retry: the
 			// worker hands the container the same key each attempt, so retrying pays for a container to
 			// rediscover a determinate refusal (issue #437, CONST-RETRY-INFRA-ONLY). It rides the EXISTING
 			// policy code with its own reason, never a new exit code (INT-RUNNER-EXIT-CODE-PROTOCOL).
