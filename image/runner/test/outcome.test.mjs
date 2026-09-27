@@ -395,6 +395,26 @@ test("issue #451: the must-stay-infra shapes stay retryable infra, and a malform
 	}
 });
 
+test("issue #451: only OWN fields are read, so a polluted Object.prototype cannot make a refusal", () => {
+	// Defense in depth: JSON.parse never produces inherited fields, so this only matters if other code
+	// pollutes Object.prototype. A plain read would then find an inherited `details`, or an inherited
+	// `reason` and `@type` on an empty detail, and read a bad payload as a credential refusal.
+	const noDetails = googleWrap(googleBody(400, "INVALID_ARGUMENT", "x"), 400, "Bad Request");
+	const emptyDetail = googleWrap(googleBody(400, "INVALID_ARGUMENT", "x", [{}]), 400, "Bad Request");
+	const keys = ["details", "reason", "@type"];
+	try {
+		Object.prototype.details = [{ "@type": ERROR_INFO, reason: "API_KEY_INVALID" }];
+		Object.prototype.reason = "API_KEY_INVALID";
+		Object.prototype["@type"] = ERROR_INFO;
+		assert.equal(providerAuthRefused(err(noDetails), NOT_TRANSIENT), false, "an inherited details array was read");
+		assert.equal(providerAuthRefused(err(emptyDetail), NOT_TRANSIENT), false, "an inherited reason and @type were read");
+	} finally {
+		for (const key of keys) delete Object.prototype[key];
+	}
+	// The same messages are refusals when the fields are really there, so the rows above are live.
+	assert.equal(providerAuthRefused(err(googleWrap(API_KEY_INVALID_BODY, 400, "Bad Request")), NOT_TRANSIENT), true);
+});
+
 test("loadRetryPredicate prefers the meter's accepted module, then the candidates in order, and never throws", async () => {
 	const fromMeter = () => false;
 	const fromCandidate = () => true;

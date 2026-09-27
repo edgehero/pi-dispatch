@@ -145,16 +145,17 @@ export function decideExit({ budgetAborted, budgetTurns, tokenAborted, terminal,
  *   between two identical requests (M0-d), so googleRpcAuthRefused parses both layers and reads only
  *   OWN fields: the outer `code` in GOOGLE_AUTH_HTTP_CODES, then a `details[]` entry of type
  *   google.rpc.ErrorInfo whose `reason` is in GOOGLE_AUTH_REASONS. A reason that only appears inside
- *   some other string (a message quoting `API_KEY_INVALID`) is never read. The single-layer application/json form is not read
- *   either: streaming never produces it (M0-d).
- * - `UnrecognizedClientException: 403: `: bedrock-converse-stream, where pi-ai names the SDK exception and
- *   then the status. It is what real AWS answered to a bogus access key and to a bogus session token
- *   (M0-d). ONLY this prefix is stable: pi-ai 0.80.7 serializes the consumed response stream instead of
- *   AWS's message, so the rest is `[object Object]` on HTTP/1 and stream-internals JSON on HTTP/2 (an
- *   upstream bug, recorded and not read). A status real AWS was not seen to send stays infra.
+ *   some other string (a message quoting `API_KEY_INVALID`) is never read. The single-layer
+ *   application/json form is not read either: streaming never produces it (M0-d).
+ * - `UnrecognizedClientException: 403: `: bedrock-converse-stream, where pi-ai names the SDK exception
+ *   and then the status. It is what real AWS answered to a bogus access key and to a bogus session
+ *   token (M0-d). ONLY this prefix is stable: pi-ai 0.80.7 serializes the consumed response stream
+ *   instead of AWS's message, so the rest is `[object Object]` on HTTP/1 and stream-internals JSON on
+ *   HTTP/2 (an upstream bug, recorded and not read). Any other status stays infra.
  *
  * Admission rule: only a shape MEASURED against a real endpoint with a real bogus credential, because
- * the costly mistake is a false refusal. NOT here, each a named residual in INT-RUNNER-EXIT-CODE-PROTOCOL:
+ * the costly mistake is a false refusal. NOT here, each a named residual in
+ * INT-RUNNER-EXIT-CODE-PROTOCOL:
  * - openai-codex-responses: no status on either transport, only the server's own sentence; matching
  *   prose is a guess.
  * - Google's 429 RESOURCE_EXHAUSTED: quota, not a credential, even in the wording pi calls non-transient.
@@ -186,6 +187,9 @@ const GOOGLE_AUTH_REASONS = new Set(["API_KEY_INVALID", "ACCESS_TOKEN_TYPE_UNSUP
 const GOOGLE_ERROR_INFO = "type.googleapis.com/google.rpc.ErrorInfo";
 
 const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+// Defense in depth: JSON.parse only ever makes own properties (even a "__proto__" key is an own data
+// property), so this matters only if other code pollutes Object.prototype, when a plain read would find
+// an inherited `reason` or `details` and call a transient error a refusal.
 const own = (record, key) => (Object.hasOwn(record, key) ? record[key] : undefined);
 
 function parseJsonRecord(text) {
