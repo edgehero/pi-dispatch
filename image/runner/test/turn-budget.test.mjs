@@ -248,14 +248,13 @@ test("an exempt retry turn past the cap is still aborted: the budget is spent", 
 });
 
 test("agent_settled clears an armed flag that no retry turn used, so the next prompt's first turn counts", () => {
-	// Measured at the pin: a retry-shaped throw after a CLEAN reply (a listener throwing on its turn_end)
-	// gets auto_retry_start, then agent.continue() throws "Cannot continue from message role: assistant":
-	// no turn_start, no auto_retry_end, only agent_settled. A later prompt on the same session must not
-	// inherit the exemption.
+	// A safeguard, not a measured path: once armed (a failed turn with no progress, then auto_retry_start),
+	// the flag must not outlive its prompt even if no retry turn_start and no auto_retry_end ever follow.
+	// A later prompt on the same session must not inherit the exemption.
 	const session = fakeSession();
 	const emit = (e) => session.emit(e);
 	const budget = attachTurnBudget(session, 1);
-	promptTurn(emit, assistantText());
+	promptTurn(emit, assistantError("fetch failed"));
 	agentEnd(emit, [assistantError("fetch failed")], true);
 	emit({ type: "auto_retry_start", attempt: 1, maxAttempts: 2, delayMs: 2000, errorMessage: "fetch failed" });
 	emit({ type: "agent_settled" });

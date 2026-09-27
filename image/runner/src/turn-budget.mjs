@@ -38,12 +38,12 @@
  * The indexed TurnStartEvent exists only on the extension bus, which subscribe() is not.
  * So we count ourselves.
  *
- * WHAT COUNTS (issue #449). Every turn_start counts EXCEPT the one that opens pi's own auto-retry of a
- * turn that made NO progress: no tool ran and no reply completed. pi emits turn_start BEFORE the model call (pi-agent-core agent-loop.js:49/67/89,
- * the stream at :105), so the failed first turn of an error streak was already counted when the error
- * arrived; its retry (`auto_retry_start`, then `agent.continue()` re-emitting agent_start and
- * turn_start) re-sends that same turn's request. Counting it too turned a one-turn job's 429 into a
- * turn_budget policy stop, where it should have been a retried infra failure.
+ * WHAT COUNTS (issue #449). Every turn_start counts EXCEPT the one that opens pi's own auto-retry of a turn
+ * that made NO progress: no tool ran and no reply completed. pi emits turn_start BEFORE the model call
+ * (pi-agent-core agent-loop.js:49/67/89, the stream at :105), so the failed first turn of an error streak was
+ * already counted when the error arrived; its retry (`auto_retry_start`, then `agent.continue()` re-emitting
+ * agent_start and turn_start) re-sends that same turn's request. Counting it too turned a one-turn job's 429
+ * into a turn_budget policy stop, where it should have been a retried infra failure.
  *
  * The exemption is armed only when the turn made no progress since the last turn_start. pi turns ANY exception
  * thrown inside its loop into an assistant `stopReason: "error"` message, and when that text matches its
@@ -69,13 +69,13 @@
  * (agent-session.js:2090-2101), and a compaction or queued-message continuation after it
  * (agent-session.js:760-765) must not ride the flag uncounted. When retries are exhausted pi emits no
  * `auto_retry_start` at all (agent-session.js:2068-2071). `agent_settled`, emitted when the prompt's
- * whole run chain is over (agent-session.js:739, `_emitAgentSettled` at :288-296), clears it too: a
- * retry-shaped throw AFTER a clean reply (a listener throwing on its turn_end, say) gets an
- * `auto_retry_start` whose `agent.continue()` then throws "Cannot continue from message role:
- * assistant", so no turn_start and no `auto_retry_end` follow, and the flag would otherwise exempt the
- * first turn of the NEXT prompt. (That throw rejects session.prompt(), so the runner files it as exit 1,
- * retried. Outside a test listener it is reachable only through a session-store infra fault such as
- * ETIMEDOUT on persist, for which a retried infra failure is the right class.)
+ * whole run chain is over (agent-session.js:739, `_emitAgentSettled` at :288-296), clears it too, as a
+ * safeguard: an armed flag must never outlive its prompt and exempt the first turn of the NEXT one. No
+ * path at the pin leaves it armed there (an armed flag means the failed turn made no progress, pi drops
+ * its error message, and continue() emits the turn_start that consumes it); the throw-after-a-clean-reply
+ * case is handled by the progress signal above. (That case, with nothing queued, makes continue() throw
+ * "Cannot continue from message role: assistant", which rejects session.prompt(): exit 1, retried, the
+ * right class for its likely cause, for example a session-store fault such as ETIMEDOUT on persist.)
  *
  * The bound this keeps: retries per error streak are capped at PI_RETRY_MAX (pi's maxRetries, pinned by
  * the runner), and a streak can only be reset by a completed reply, which makes the next retry in that
