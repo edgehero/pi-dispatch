@@ -80,6 +80,18 @@ export function servedSchedules(schedules) {
 	return { served, unserved };
 }
 
+/**
+ * WHERE a cron trigger runs, from this host's point of view (issue #57): `"here"` when its folder exists on this
+ * machine, `"elsewhere"` when it does not and this host is on a fleet (another machine's folder, not scheduled here),
+ * and `"refused"` when it does not and this host is alone (a typo the worker refuses to boot on). The rule and its
+ * reasons are `normalizeCronSchedule`'s, below, which is its first caller. Exported so `pi-dispatch doctor` asks the
+ * same question the same way (issue #433) rather than keeping a copy that could drift.
+ */
+export function cronPlacement(run, { existsSync = fsExistsSync, fleet = false } = {}) {
+	if (existsSync(run.folder)) return "here";
+	return fleet ? "elsewhere" : "refused";
+}
+
 function normalizeCronSchedule({ on, run }, path, existsSync, fleet) {
 	// The pure validator already guaranteed a non-empty, `:`-free, charset-valid, unique id and a
 	// well-formed pattern; folder existence is the one fs-dependent check it deferred to here.
@@ -97,8 +109,9 @@ function normalizeCronSchedule({ on, run }, path, existsSync, fleet) {
 	// -- so a single-host deployment with one typo'd folder would reap containers, prune history and delete
 	// sandboxes on every restart before refusing. Declaring a name is the operator saying "this is a
 	// fleet", it is known before anything runs, and it keeps a single-host deployment byte-identical.
-	if (!existsSync(run.folder)) {
-		if (!fleet) {
+	const placement = cronPlacement(run, { existsSync, fleet });
+	if (placement !== "here") {
+		if (placement === "refused") {
 			throw configError(`cron trigger "${on.id}": run.folder does not exist: ${run.folder} (${path})`);
 		}
 		// Not mine. Its skillsDir is not my business either: `isAbsolute` is OS-dependent, and judging

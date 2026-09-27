@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { loadSchedules } from "../src/schedules.mjs";
+import { cronPlacement, loadSchedules } from "../src/schedules.mjs";
 
 // loadSchedules selects the cron subset of the unified triggers file over injected fs -- no real
 // filesystem, no bullmq. The shared validator (triggers.test.mjs) owns the exhaustive validation cases;
@@ -182,4 +182,21 @@ test("a cron trigger's excludeTools reaches the scheduler data, and an unflagged
 	// narrowing the operator never wrote, the packages/github rule one block up.
 	const [plain] = load([CRON]);
 	assert.equal("excludeTools" in plain.data, false);
+});
+
+test("cronPlacement is the rule loadSchedules places by, row for row (issue #433: doctor asks the same function)", () => {
+	// The four rows, and what the worker's own loader does with each, so the exported predicate and the loader cannot
+	// part ways: doctor judges a trigger's venue by this predicate alone, and must judge exactly what the worker runs.
+	for (const [exists, fleet, placement] of [
+		[true, false, "here"],
+		[true, true, "here"],
+		[false, true, "elsewhere"],
+		[false, false, "refused"],
+	]) {
+		const existsSync = (p) => p !== "/proj" || exists;
+		assert.equal(cronPlacement(CRON.run, { existsSync, fleet }), placement, `exists=${exists} fleet=${fleet}`);
+		const run = () => loadSchedules(CONFIG, { readFileSync: () => JSON.stringify({ triggers: [CRON] }), existsSync, fleet });
+		if (placement === "refused") assert.throws(run, (e) => isConfigError(e) && e.message.includes("run.folder does not exist"));
+		else assert.equal(run()[0].unserved, placement === "elsewhere" ? "folder-absent" : undefined);
+	}
 });

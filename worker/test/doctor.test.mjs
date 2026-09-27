@@ -6551,6 +6551,57 @@ test("a webhook trigger is named by its position in the file, in the unblessed-v
 	assert.match(text(), /⚠ Trigger flow "fix" resolves in NO tier visible here \(label trigger #1\)/);
 });
 
+test("the unblessed-venue line judges only cron triggers this host's worker schedules: a sibling's bad skillsDir changes nothing (#433)", async () => {
+	// Review round 3, D1: on a fleet, one SERVED trigger with a skillsDir that is not there must not make doctor judge
+	// another machine's trigger. The skills-dir failure is still reported, by its own line.
+	const path = join(tempDir("pi-433-r3-"), "triggers.json");
+	writeFileSync(
+		path,
+		JSON.stringify({
+			triggers: [
+				{ on: { type: "cron", id: "mine", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/here", flow: "review", task: "t", skillsDir: "/srv/skills-missing" } },
+				{ on: { type: "cron", id: "theirs", pattern: "0 4 * * *" }, run: { kind: "local", folder: "/srv/only-on-mini2", flow: "review", task: "t", backend: "podman" } },
+			],
+		}),
+	);
+	const { out, text } = capture();
+	const fileExists = (p) => !["/srv/only-on-mini2", "/srv/skills-missing"].includes(p);
+	await runDoctor({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0", PI_WORKER_NAME: "mini1", PI_TRIGGERS_FILE: path }, { ...ghDeps(out, { ...green }, [], { fileExists }), agentDir: NO_AGENT_DIR, readHosts: async () => ({ hosts: [] }) });
+	assert.doesNotMatch(text(), /backend-unblessed/, text());
+	assert.match(text(), /✗ Trigger skills dir present \(\/srv\/skills-missing\)/);
+});
+
+test("without PI_TRIGGERS_FILE the worker schedules no cron, so no cron trigger is judged for its venue; a forge trigger still is (#433)", async () => {
+	// Review round 3, D2: doctor reads ./triggers.json by default (the receiver's default), but the worker schedules
+	// cron only from a PI_TRIGGERS_FILE it was given.
+	const cwd = tempDir("pi-433-r3-cwd-");
+	const triggers = [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "review", task: "t", backend: "podman" } }];
+	writeFileSync(join(cwd, "triggers.json"), JSON.stringify({ triggers }));
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0" };
+	const deps = (out) => ({ ...ghDeps(out, { ...green }, []), cwd, agentDir: NO_AGENT_DIR, readHosts: async () => ({ hosts: [] }) });
+	const unset = capture();
+	await runDoctor(env, deps(unset.out));
+	assert.match(unset.text(), /Trigger flow "review"/, "the file was read");
+	assert.doesNotMatch(unset.text(), /backend-unblessed/, unset.text());
+	// The same file named in PI_TRIGGERS_FILE is scheduled, so the same trigger is judged.
+	const named = capture();
+	await runDoctor({ ...env, PI_TRIGGERS_FILE: join(cwd, "triggers.json") }, deps(named.out));
+	assert.ok(named.text().includes('✗ run.backend "podman" is not in PI_BACKENDS (local), so every job of cron "nightly" is refused (backend-unblessed)'), named.text());
+	// A forge trigger in the default file keeps its judgement: the receiver reads that file and enqueues its jobs.
+	writeFileSync(join(cwd, "triggers.json"), JSON.stringify({ triggers: [...triggers, { on: { type: "label", any: ["pi:fix"] }, run: { kind: "gitlab", flow: "fix", backend: "podman" } }] }));
+	const forge = capture();
+	await runDoctor(env, deps(forge.out));
+	assert.ok(forge.text().includes('✗ run.backend "podman" is not in PI_BACKENDS (local), so every job of label trigger #1 is refused (backend-unblessed)'), forge.text());
+});
+
+test("doctor places a cron trigger by the worker's own predicate, not a copy (#433)", () => {
+	const doctorSource = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8");
+	const schedulesSource = readFileSync(new URL("../src/schedules.mjs", import.meta.url), "utf8");
+	assert.match(doctorSource, /^import \{ cronPlacement \} from "\.\/schedules\.mjs";$/m);
+	assert.match(schedulesSource, /const placement = cronPlacement\(run, \{ existsSync, fleet \}\);/, "the worker's loader places by the same function");
+	assert.doesNotMatch(doctorSource, /existsSync\(run\.folder\)|fileExists\(t\.run\.folder\)/, "and doctor keeps no folder rule of its own");
+});
+
 test("podman-only: Valkey's fix points at the podman route, and --fix never runs docker for it (#433)", async () => {
 	const { out, text } = capture();
 	const calls = [];

@@ -417,8 +417,9 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    `podman` once the job image is in this account's store and a podman job could run there, with the venue's pinned
    flags, so an `env_host = true` in containers.conf copies nothing of doctor's environment into it. A trigger whose
    `run.backend` names a venue `PI_BACKENDS` does not list fails doctor with that trigger named: the worker refuses
-   every one of its jobs (`backend-unblessed`). On a fleet only the triggers this host serves are judged, so a cron
-   trigger whose folder is on another machine is left to that machine's doctor.
+   every one of its jobs (`backend-unblessed`). A cron trigger is judged only when this host's worker schedules it:
+   `PI_TRIGGERS_FILE` is set, and on a fleet its folder is on this machine (another machine's is left to that
+   machine's doctor). Every forge trigger is judged.
 
 On an SELinux host, the worker's own per-job directories carry `:Z` exactly as on the Docker API route, decided from
 `podman info`'s `selinuxEnabled`, and an operator's local folder and `PI_GLOBAL_PI_DIR` need the one-time

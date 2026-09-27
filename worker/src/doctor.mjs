@@ -84,7 +84,7 @@ import { parseSecretProfiles } from "./secret-profiles.mjs";
 // can share them: doctor NAMES a variable and env-allowlist WRITES one, and they must never differ.
 import { OAUTH_KEY_RE, apiKeyVariable } from "./provider-key.mjs";
 import { parseTriggers } from "./triggers.mjs";
-import { loadSchedules, servedSchedules } from "./schedules.mjs";
+import { cronPlacement } from "./schedules.mjs";
 
 const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
 
@@ -815,9 +815,10 @@ export async function collectChecks(env, seams) {
 	// run is a certainty, not a caution. One line per venue, naming every trigger that asks for it. Said only when the list
 	// parses; an unparseable one is the backend section's ✗, and judging triggers against a guessed list would invent one.
 	//
-	// Review round 2: only triggers THIS HOST SERVES. On a fleet (PI_WORKER_NAME declared) a cron trigger whose folder is
-	// another machine's is not scheduled here at all (`served: false`, the worker's own placement decision), so this
-	// host's PI_BACKENDS says nothing about it; judging it failed doctor on a host that will never run it. And on a fleet
+	// Review rounds 2 and 3: only a cron trigger this host's worker schedules, and every forge trigger (`served`, from
+	// `readTriggerFacts`). A cron trigger the worker never schedules here (no PI_TRIGGERS_FILE, or another machine's
+	// folder on a fleet) says nothing about this host's PI_BACKENDS; judging it failed doctor on a host that will never
+	// run it. And on a fleet
 	// a forge trigger's jobs go to the shared queue, so what this host can promise is only what it does with a job it
 	// picks up: the wording says that, while a single host keeps "every job", which is true there.
 	const nameDeclared = Boolean(env.PI_WORKER_NAME);
@@ -2824,17 +2825,17 @@ function readTriggerFacts(env, fileExists, cwd) {
 		// fire" is answered by a spent row, and only the raw file still holds it. Safe unguarded:
 		// parseTriggers just accepted this same text, so JSON.parse cannot throw here.
 		const rawEntries = JSON.parse(text)?.triggers ?? [];
-		// Issue #433 review round 2: which cron triggers this host does NOT serve, by the worker's own decision
-		// (`loadSchedules` with the worker's `fleet` rule, PI_WORKER_NAME declared, then `servedSchedules`), over the same
-		// text and the same existence seam, rather than a second copy of the folder rule here. A throw is the single-host
-		// absent folder, where the worker refuses to BOOT: nothing is unserved then, so every trigger is still judged.
-		let unservedCron = new Set();
-		try {
-			const schedules = loadSchedules({ triggersFile: path }, { readFileSync: () => text, existsSync: fileExists, fleet: Boolean(env.PI_WORKER_NAME) });
-			unservedCron = new Set(servedSchedules(schedules).unserved.map((s) => s.schedulerId));
-		} catch {
-			unservedCron = new Set();
-		}
+		// Issue #433 review rounds 2 and 3: whether THIS HOST'S WORKER schedules a cron trigger, for the unblessed-venue
+		// line, by the worker's two conditions and nothing else. (a) The worker schedules cron only from a PI_TRIGGERS_FILE
+		// it was given (`config.triggersFile` is null without one, and `loadSchedules` then returns []), while doctor
+		// falls back to ./triggers.json for everything else it reads; so without the variable no cron trigger is judged.
+		// (b) Its placement, by the worker's own predicate (`cronPlacement`): judged unless it is `"elsewhere"`, another
+		// machine's folder on a fleet. A single host's absent folder is `"refused"`, the worker's boot refusal, and is
+		// still judged. Round 2 ran the whole `loadSchedules` instead and caught its throw as "judge everything", which let
+		// one served trigger's bad skillsDir bring back the false line for another machine's trigger: a predicate per
+		// trigger cannot be derailed by a sibling.
+		const fleet = Boolean(env.PI_WORKER_NAME);
+		const cronScheduledHere = (t) => env.PI_TRIGGERS_FILE !== undefined && cronPlacement(t.run, { existsSync: fileExists, fleet }) !== "elsewhere";
 		return {
 			onceArmed: rawEntries.filter((t) => t?.on?.once === true && t.on.disarmed === undefined).length,
 			onceSpent: rawEntries.filter((t) => t?.on?.disarmed !== undefined).length,
@@ -2893,7 +2894,7 @@ function readTriggerFacts(env, fileExists, cwd) {
 			// Issue #433 review round 1: every trigger that NAMES a venue, with the label the lines below name it by, so
 			// doctor can say which of them this deployment does not bless (the worker refuses each of their jobs).
 			namedBackends: triggers
-				.map((t, index) => ({ label: triggerLabel(t, index), backend: t.run.backend, served: !(t.on.type === "cron" && unservedCron.has(t.on.id)) }))
+				.map((t, index) => ({ label: triggerLabel(t, index), backend: t.run.backend, served: t.on.type !== "cron" || cronScheduledHere(t) }))
 				.filter((r) => typeof r.backend === "string"),
 			// REQ-PER-TRIGGER-SKILLS. The distinct host directories the file names, deduped like `images`,
 			// because the checks below cost a filesystem walk each and two triggers sharing a directory are one
