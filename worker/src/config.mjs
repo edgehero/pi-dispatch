@@ -125,10 +125,21 @@ function commaList(raw) {
  * `GITHUB_APP_PRIVATE_KEY_PATH` is deliberately NOT here: a path string with no mount behind it is inert
  * inside a container, and refusing harmless things is how a refusal stops being read.
  *
+ * `VALKEY_PASSWORD` (issue #468) is the queue's password. Whoever holds it can read every queued job (its task text,
+ * its repository), enqueue work this deployment's worker runs with its provider key and forge credentials, and delete
+ * the queue: the very thing the password was added to keep from another account on the host, and so no more a job
+ * container's than theirs.
+ *
  * Kept separate from `MINTED_TOKEN_VARS`, which is defined as "every name any forge's mint can write"
  * and derived from the forge table. This is not that, and folding it in would make that definition a lie.
  */
-export const WORKER_ONLY_SECRET_VARS = new Set(["GITHUB_APP_PRIVATE_KEY"]);
+export const WORKER_ONLY_SECRET_VARS = new Set(["GITHUB_APP_PRIVATE_KEY", "VALKEY_PASSWORD"]);
+
+/** Why each of `WORKER_ONLY_SECRET_VARS` stays in the worker, for the refusal that names it. */
+const WORKER_ONLY_WHY = Object.freeze({
+	GITHUB_APP_PRIVATE_KEY: "the App's signing key mints tokens for every repository the App is installed on",
+	VALKEY_PASSWORD: "the queue's password lets whoever holds it read, enqueue and delete this deployment's jobs",
+});
 
 /**
  * The proxy variables the egress policy writes into the closed container env (REQ-EGRESS-ALLOWLIST).
@@ -151,7 +162,7 @@ function forwardEnvList(raw, egressArmed = false) {
 	const workerOnly = names.filter((n) => WORKER_ONLY_SECRET_VARS.has(n));
 	if (workerOnly.length > 0) {
 		throw configError(
-			`PI_FORWARD_ENV must not forward ${workerOnly.join(", ")} -- the App's signing key mints tokens for every repository the App is installed on, and a job container is the last place it belongs (CONST-TOKEN-SCOPED-PER-JOB)`,
+			`PI_FORWARD_ENV must not forward ${workerOnly.join(", ")} -- ${workerOnly.map((n) => WORKER_ONLY_WHY[n]).join("; ")}, and a job container is the last place it belongs (CONST-TOKEN-SCOPED-PER-JOB)`,
 		);
 	}
 	const egress = egressArmed ? names.filter((n) => EGRESS_ENV_VARS.has(n)) : [];

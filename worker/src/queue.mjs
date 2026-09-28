@@ -1,5 +1,5 @@
 import { Queue } from "bullmq";
-import { assertJudgedConnection } from "./connection.mjs";
+import { assertJudgedConnection, onValkeyError } from "./connection.mjs";
 import { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId } from "./job-id.mjs";
 import { targetSeparator } from "./forges.mjs";
 import { PR_CLOSE_ACTIONS } from "./triggers.mjs";
@@ -71,7 +71,10 @@ export { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeli
 export function makeQueue(connection, { name = QUEUE } = {}) {
 	// Issue #464: only a connection `parseConnection` built, which judges and pins the Valkey it dials.
 	assertJudgedConnection(connection);
-	return new Queue(name, { connection });
+	const queue = new Queue(name, { connection });
+	// Issue #468: an error of this queue is one line, its message, never BullMQ's console.error of the whole object.
+	onValkeyError(queue, `queue ${name}`);
+	return queue;
 }
 
 /**

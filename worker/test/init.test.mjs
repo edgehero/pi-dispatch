@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runInit } from "../src/init.mjs";
@@ -61,12 +61,33 @@ test("init without a cwd .env.example falls back to the copy shipped with the pa
 	const dir = tmp();
 	const { out, text } = capture();
 
-	const code = runInit(dir, { out });
+	const code = runInit(dir, { out, newPassword: () => PASSWORD });
 
 	assert.equal(code, 0);
 	const packaged = readFileSync(fileURLToPath(new URL("../.env.example", import.meta.url)), "utf8");
-	assert.equal(readFileSync(join(dir, ".env"), "utf8"), packaged, ".env is the packaged worker/.env.example, byte for byte");
+	// Issue #468: byte for byte but for the one line init fills in, the deployment's own Valkey password.
+	assert.equal(readFileSync(join(dir, ".env"), "utf8"), packaged.replace("\n# VALKEY_PASSWORD=\n", `\nVALKEY_PASSWORD=${PASSWORD}\n`), ".env is the packaged worker/.env.example, byte for byte, with its password");
 	assert.match(text(), /created\s+\.env/, "the fallback still reports .env as created");
+});
+
+// Issue #468: a new .env carries the deployment's own Valkey password, is readable by this account alone, never shows
+// the value, and an existing one is left as it is (init's contract; `up` and `service install` add a missing password).
+const PASSWORD = "0f1e2d3c".repeat(8);
+test("init writes a new .env at mode 0600 with a generated VALKEY_PASSWORD it never prints, and never touches an existing one (#468)", () => {
+	const dir = tmp();
+	writeFileSync(join(dir, ".env.example"), "ANTHROPIC_API_KEY=\n# the password\n# VALKEY_PASSWORD=\n");
+	const { out, text } = capture();
+	assert.equal(runInit(dir, { out, newPassword: () => PASSWORD }), 0);
+	assert.equal(readFileSync(join(dir, ".env"), "utf8"), `ANTHROPIC_API_KEY=\n# the password\nVALKEY_PASSWORD=${PASSWORD}\n`);
+	if (process.platform !== "win32") assert.equal(statSync(join(dir, ".env")).mode & 0o777, 0o600, "readable by this account alone");
+	assert.ok(!text().includes(PASSWORD), "the value is never printed");
+	assert.match(text(), /created\s+\.env\s+from \.env\.example, mode 0600, with a generated VALKEY_PASSWORD \(value not shown\)/);
+	// A second run keeps the file, password and all: init never overwrites.
+	assert.equal(runInit(dir, { out: () => {}, newPassword: () => "f".repeat(64) }), 0);
+	assert.match(readFileSync(join(dir, ".env"), "utf8"), new RegExp(`^VALKEY_PASSWORD=${PASSWORD}$`, "m"));
+	// Every password init can generate reads back the same under every loader of the file (the hex rule, #447's writer).
+	const example = readFileSync(fileURLToPath(new URL("../.env.example", import.meta.url)), "utf8");
+	assert.match(example, /^# VALKEY_PASSWORD=$/m, "the shipped example carries the commented line init fills in");
 });
 
 test("init scaffolds an egress allowlist that WORKS, not an empty one", () => {
@@ -94,12 +115,14 @@ test("init never overwrites an edited allowlist", () => {
 
 // --- issue #453: the next steps follow the venue ------------------------------------------------------------------------
 
-// Byte for byte what init printed before #453, and still prints for every venue set that includes `local`.
+// Byte for byte what init printed before #453, and still prints for every venue set that includes `local` (step 2 names the
+// .env compose reads VALKEY_PASSWORD from since #468).
 const DOCKER_NEXT = `
 Next:
   1. docker pull ghcr.io/edgehero/pi-job:latest && docker tag ghcr.io/edgehero/pi-job:latest pi-job:latest
                                                         # the prebuilt job image (or build image/Dockerfile)
-  2. docker compose -f deploy/docker-compose.yml up -d  # the durable queue (Valkey)
+  2. docker compose --env-file .env -f deploy/docker-compose.yml up -d
+                                                        # the durable queue (Valkey, with the password init wrote)
   3. edit .env                                          # set ANTHROPIC_API_KEY (or your provider's key)
   4. pi-dispatch doctor                                 # verify Docker, Valkey, image, and key
   5. pi-dispatch worker                                 # drain the queue

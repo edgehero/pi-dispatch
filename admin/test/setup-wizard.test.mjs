@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import * as realFs from "node:fs";
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -75,6 +75,10 @@ function wizardDeps(overrides = {}) {
     homedirFn: () => tempDir("admin-setup-home-"),
     detectFn: async () => ({ state: "none", detail: "canned detection" }),
     probeDockerFn: () => ({ ok: true }),
+    // No `up` Valkey to hand over, and nothing on its volume, unless a test says so (never this host's docker).
+    dockerQueryFn: fakeDocker(),
+    // No Valkey is dialled: the owner marker is this folder's unless a test says otherwise.
+    claimOwnerFn: async (_url, folder) => ({ owner: folder, claimed: false }),
     runAttachedFn: async (_ctx, opts) => {
       attached.push(opts);
       return { code: 0 };
@@ -865,7 +869,9 @@ test("wizard: the edge's compose answer copies the runtime's compose file CREATE
   const runtimeDir = plantRuntime(dir, mod.RUNTIME_VERSION);
   mkdirSync(join(runtimeDir, "deploy"), { recursive: true });
   writeFileSync(join(runtimeDir, "deploy", "docker-compose.yml"), "# the runtime's own compose file\n");
-  const dest = join(dir, "docker-compose.yml");
+  writeFileSync(join(runtimeDir, "deploy", "egress-proxy.conf"), "# the runtime's own squid rules\n");
+  // Into <dir>/deploy/, the layout the file's relative paths are written for (the follow-up to issue #468).
+  const dest = join(dir, "deploy", "docker-compose.yml");
 
   const first = wizardUi(edgeAnswers(dir, EDGE_COMPOSE, [true])); // + the compose up confirm
   const rec = wizardDeps({
@@ -876,11 +882,19 @@ test("wizard: the edge's compose answer copies the runtime's compose file CREATE
   });
   await mod.runSetupWizard({}, tuiCtx(first.ui, repo), first.ui.notify, rec.deps);
   assert.equal(readFileSync(dest, "utf8"), "# the runtime's own compose file\n", "copied out of the installed runtime");
+  assert.equal(readFileSync(join(dir, "deploy", "egress-proxy.conf"), "utf8"), "# the runtime's own squid rules\n", "with the rules file its ./egress-proxy.conf names");
+  assert.ok(!existsSync(join(dir, "docker-compose.yml")), "never at the folder's top, where its ../ paths leave the folder");
   assert.equal(rec.attached.length, 1);
   assert.equal(rec.attached[0].argv0, "docker");
-  assert.deepEqual(rec.attached[0].args, ["compose", "-f", dest, "--profile", "receiver", "up", "-d"], "the opt-in receiver profile");
+  // The docs' own command, from the deployment folder: `--env-file .env` is where compose reads the Valkey's
+  // VALKEY_PASSWORD (issue #468), `-f deploy/docker-compose.yml` the file in the layout it is written for.
+  // `-p` keeps the project named after the folder, as the copy at its top was (PR #475's review).
+  const project = mod.composeProjectName(dir);
+  const args = ["compose", "-p", project, "--env-file", ".env", "-f", join("deploy", "docker-compose.yml"), "--profile", "receiver", "up", "-d"];
+  assert.deepEqual(rec.attached[0].args, args, "the opt-in receiver profile");
   assert.equal(rec.attached[0].cwd, dir);
-  assert.match(first.seen.confirm.at(-1).message, /--profile receiver up -d/, "the confirm shows the exact command");
+  assert.ok(first.seen.confirm.at(-1).message.includes(`docker ${args.join(" ")}`), "the confirm shows the exact command");
+  assert.equal(rec.attached[0].title, `docker ${args.join(" ")} (in ${dir})`, "the title is the argv that runs");
   assert.ok(reachedFirstTrigger(first.seen));
 
   // Second pass over the SAME dir: the operator may have edited that file, so it is never clobbered.
@@ -890,8 +904,45 @@ test("wizard: the edge's compose answer copies the runtime's compose file CREATE
   await mod.runSetupWizard({}, tuiCtx(second.ui, repo), second.ui.notify, rec2.deps);
   assert.equal(readFileSync(dest, "utf8"), "# MINE — edited by the operator\n", "create-only: an existing compose file survives");
   assert.ok(second.notes.some((n) => /already exists/.test(n.m) && /keeping yours/.test(n.m)), "and the skip is said out loud");
+  assert.ok(second.notes.some((n) => n.m.startsWith(`later: docker ${args.join(" ")}  (in ${dir})`)), "the skip hint is the argv that would have run");
   assert.equal(rec2.attached.length, 0, "a declined up spawns nothing");
   assert.ok(reachedFirstTrigger(second.seen));
+
+  // An earlier setup's copy at the folder's top is named as unused, never run and never removed.
+  writeFileSync(join(dir, "docker-compose.yml"), "# the old copy\n");
+  const third = wizardUi(edgeAnswers(dir, EDGE_COMPOSE, [false]));
+  await mod.runSetupWizard({}, tuiCtx(third.ui, repo), third.ui.notify, wizardDeps().deps);
+  assert.ok(third.notes.some((n) => n.t === "warning" && /is an earlier setup's copy: its \.\.\/ paths reach the folder above/.test(n.m) && n.m.includes(`It ran as compose project "${project}" (its volume ${project}_valkey-data), which the command below keeps with -p ${project}`)), "names the project and the volume it keeps");
+  assert.equal(readFileSync(join(dir, "docker-compose.yml"), "utf8"), "# the old copy\n");
+});
+
+// The follow-up to issue #468: the SHIPPED compose file, copied where the wizard copies it, names only paths inside the
+// deployment folder. Every relative path in it (env_file entries and bind-mount sources) is resolved against the written
+// file's own directory, as compose resolves them.
+test("wizard: every relative path in the compose file it writes resolves inside the deployment folder", async () => {
+  const repo = tempDir("admin-setup-repo-");
+  const dir = emptyDir();
+  const runtimeDir = plantRuntime(dir, mod.RUNTIME_VERSION);
+  mkdirSync(join(runtimeDir, "deploy"), { recursive: true });
+  const shipped = join(fileURLToPath(new URL("../../worker/deploy/", import.meta.url)));
+  for (const f of ["docker-compose.yml", "egress-proxy.conf"]) writeFileSync(join(runtimeDir, "deploy", f), readFileSync(join(shipped, f)));
+  const { ui } = wizardUi(edgeAnswers(dir, EDGE_COMPOSE, [false]));
+  await mod.runSetupWizard({}, tuiCtx(ui, repo), ui.notify, wizardDeps().deps);
+  const written = join(dir, "deploy", "docker-compose.yml");
+  const text = readFileSync(written, "utf8");
+  const code = text.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+  const rel = [];
+  for (const m of code.matchAll(/^\s*env_file:\s*(\S+)\s*$/gm)) rel.push(m[1]);
+  for (const m of code.matchAll(/^\s*-\s*"?(\.{1,2}\/[^:"\s]+):/gm)) rel.push(m[1]);
+  assert.deepEqual(rel.sort(), ["../.env", "../egress-allowlist.conf", "../triggers.json", "./egress-proxy.conf"], "the scan reaches every relative path the shipped file names");
+  const { resolve, dirname, sep } = await import("node:path");
+  for (const p of rel) {
+    const at = resolve(dirname(written), p);
+    assert.ok(at.startsWith(dir + sep), `${p} resolves to ${at}, outside ${dir}`);
+  }
+  // And each lands on what the deployment holds under that name.
+  assert.ok(existsSync(resolve(dirname(written), "./egress-proxy.conf")), "the rules file beside it");
+  assert.equal(resolve(dirname(written), "../.env"), join(dir, ".env"), "the .env `--env-file .env` names from the folder");
 });
 
 test("wizard: the edge's compose answer degrades when the runtime ships no compose file", async () => {
@@ -1481,4 +1532,248 @@ test("E4: a .env whose venue line sits inside a quoted value systemd continues i
   await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
   assert.equal(attached.length, 0);
   assert.ok(notes.some((n) => n.t === "error" && /lies inside the quoted value that opens on line 1/.test(n.m)));
+});
+
+// PR #475's review: compose names a project after the directory of its first file, so the copy in <dir>/deploy/ ran as
+// project "deploy" for every deployment, leaving the old project (and its volume) behind and colliding across folders.
+// `-p` is the folder's own name, normalised as compose normalises a directory name (measured with compose 2.31:
+// "My Deploy.v2_x" became project "mydeployv2_x"), which is what the old layout's copy ran as.
+test("wizard: the compose project name is the one the old layout's copy ran as (the folder's name, as compose normalises it)", () => {
+  for (const [dir, name] of [["/srv/pi-dispatch", "pi-dispatch"], ["/home/op/My Deploy.v2_x", "mydeployv2_x"], ["/srv/Prod_Queue", "prod_queue"], ["/srv/-lead", "lead"], ["/srv/..", "pi-dispatch"], ["/srv/ÜBER", "ber"]]) {
+    assert.equal(mod.composeProjectName(dir), name, dir);
+  }
+  assert.notEqual(mod.composeProjectName("/srv/a/deploy-parent"), "deploy", "never the deploy/ directory's name");
+});
+
+// PR #475's review: `up` (earlier in the wizard) runs pi-dispatch-valkey, which the worker drains; compose's own valkey
+// could not bind that port, or would be a second queue the receiver fills. The compose answer hands up's VOLUME to
+// compose's valkey, so both use one Valkey and one queue; round 2: images first, every exit checked, VALKEY_URL's port.
+function composeFolder({ envText = "" } = {}) {
+  const dir = emptyDir();
+  const rt = plantRuntime(dir, mod.RUNTIME_VERSION);
+  mkdirSync(join(rt, "deploy"), { recursive: true });
+  for (const f of ["docker-compose.yml", "egress-proxy.conf"]) writeFileSync(join(rt, "deploy", f), readFileSync(join(fileURLToPath(new URL("../../worker/deploy/", import.meta.url)), f)));
+  if (envText) writeFileSync(join(dir, ".env"), envText);
+  return dir;
+}
+/**
+ * The docker the hand-over asks (PR #475's review, round 3): `up` is "ours" (pi-dispatch-valkey labelled with `dir`'s real
+ * path), "legacy" (unlabelled, on `port`), "theirs" (another deployment's label), or absent; `volume` names what
+ * `docker ps -a --filter volume=` lists, `records` any other container's inspect answer.
+ */
+function fakeDocker({ dir = null, up = null, port = 6379, volume = null, records = {}, asked = [], volumeLabel = "mine" } = {}) {
+  const rec = (labels, p = port) => ({ code: 0, stdout: JSON.stringify([{ Name: "/pi-dispatch-valkey", Config: { Labels: labels }, HostConfig: { PortBindings: { "6379/tcp": [{ HostIp: "127.0.0.1", HostPort: String(p) }] } } }]), stderr: "" });
+  return (cmd, args) => {
+    asked.push([cmd, ...args].join(" "));
+    if (args[0] === "volume") {
+      // pi-dispatch-valkey-data's label (the volume gap): "mine" (this folder's, as up creates it), null (unlabelled), a
+      // folder, or "absent".
+      if (volumeLabel === "absent") return { code: 1, stdout: "", stderr: "Error: no such volume\n" };
+      const label = volumeLabel === "mine" ? (dir ? realpathSync(dir) : null) : volumeLabel;
+      return { code: 0, stdout: JSON.stringify([{ Name: "pi-dispatch-valkey-data", Labels: label ? { "com.pi-dispatch.deployment": label } : {} }]), stderr: "" };
+    }
+    if (args[0] === "ps") return { code: 0, stdout: (volume ?? (up ? ["pi-dispatch-valkey"] : [])).map((n) => `${n}\n`).join(""), stderr: "" };
+    const name = args.at(-1);
+    if (name === "pi-dispatch-valkey" && up === "ours") return rec({ "com.pi-dispatch.deployment": realpathSync(dir) });
+    if (name === "pi-dispatch-valkey" && up === "legacy") return rec({});
+    if (name === "pi-dispatch-valkey" && up === "theirs") return rec({ "com.pi-dispatch.deployment": "/srv/other" }, 16496);
+    if (records[name]) return records[name];
+    return { code: 1, stdout: "", stderr: `Error: No such container: ${name}\n` };
+  };
+}
+const recorder = (over = {}, codeOf = () => 0) => {
+  const rec = wizardDeps({ ...over, runAttachedFn: async (_ctx, opts) => (rec.attached.push(opts), { code: codeOf(opts) }) });
+  return rec;
+};
+
+test("wizard: the compose answer hands up's Valkey over to compose's (one volume, one queue): pull first, then stop, rm, compose", async () => {
+  const repo = tempDir("admin-setup-repo-");
+  const dir = composeFolder();
+  const project = mod.composeProjectName(dir);
+  const override = join(dir, "deploy", "docker-compose.valkey.yml");
+  const base = ["compose", "-p", project, "--env-file", ".env", "-f", "deploy/docker-compose.yml", "-f", "deploy/docker-compose.valkey.yml", "--profile", "receiver"];
+  const first = wizardUi(edgeAnswers(dir, EDGE_COMPOSE, [true]));
+  const rec = recorder({ dockerQueryFn: fakeDocker({ dir, up: "ours" }) });
+  await mod.runSetupWizard({}, tuiCtx(first.ui, repo), first.ui.notify, rec.deps);
+  const confirm = first.seen.confirm.at(-1).message;
+  assert.ok(confirm.includes(mod.VALKEY_HANDOVER_OVERRIDE.split("\n")[5]), "the confirm shows the override's contents");
+  assert.match(confirm, /docker stop pi-dispatch-valkey {3}\(a job running right now is interrupted\)\n {2}docker rm pi-dispatch-valkey/);
+  const pullBase = ["compose", "-p", project, "--env-file", ".env", "-f", "deploy/docker-compose.yml", "--profile", "receiver"];
+  assert.deepEqual(rec.attached.map((a) => [a.argv0, ...a.args]), [["docker", ...pullBase, "pull"], ["docker", "stop", "pi-dispatch-valkey"], ["docker", "rm", "pi-dispatch-valkey"], ["docker", ...base, "up", "-d"]], "the images while up's Valkey still serves (without the override, not yet written: compose refuses a missing -f, measured), then stop (its AOF written), rm, compose on the same volume");
+  assert.equal(rec.attached[0].env.PI_VALKEY_PORT, "6379", "compose's valkey on VALKEY_URL's port");
+  assert.equal(readFileSync(override, "utf8"), mod.VALKEY_HANDOVER_OVERRIDE);
+  assert.match(mod.VALKEY_HANDOVER_OVERRIDE, /^ {2}valkey:\n {4}volumes:\n {6}- pi-dispatch-valkey-data:\/data$/m);
+  assert.match(mod.VALKEY_HANDOVER_OVERRIDE, /^ {2}pi-dispatch-valkey-data:\n {4}external: true$/m);
+  // A later pass with no up container: the override stays in the command, nothing stopped, never rewritten.
+  writeFileSync(override, "# the operator's own edit\n");
+  const again = wizardUi(edgeAnswers(dir, EDGE_COMPOSE, [true]));
+  const rec2 = recorder({ dockerQueryFn: fakeDocker({ dir }) });
+  await mod.runSetupWizard({}, tuiCtx(again.ui, repo), again.ui.notify, rec2.deps);
+  assert.deepEqual(rec2.attached.map((a) => [a.argv0, ...a.args]), [["docker", ...base, "up", "-d"]]);
+  // Round 2: up's container back beside an existing override (up re-created it, measured) is handed over again, the
+  // override left as it is: whether up's Valkey runs decides it, never the override's presence.
+  const third = wizardUi(edgeAnswers(dir, EDGE_COMPOSE, [true]));
+  const rec3 = recorder({ dockerQueryFn: fakeDocker({ dir, up: "ours" }) });
+  await mod.runSetupWizard({}, tuiCtx(third.ui, repo), third.ui.notify, rec3.deps);
+  assert.deepEqual(rec3.attached.map((a) => a.args.at(-1)), ["pull", "pi-dispatch-valkey", "pi-dispatch-valkey", "-d"]);
+  assert.equal(readFileSync(override, "utf8"), "# the operator's own edit\n", "an existing override is never rewritten");
+});
+
+test("wizard: a hand-over publishes on VALKEY_URL's port, and a failed step says what runs and the way back (#475 round 2)", async () => {
+  const repo = tempDir("admin-setup-repo-");
+  // VALKEY_URL on 16495: compose's valkey is published there too, so the queue never moves off the worker's port.
+  const dir = composeFolder({ envText: "VALKEY_URL=redis://127.0.0.1:16495\n" });
+  const ui = wizardUi(edgeAnswers(dir, EDGE_COMPOSE, [true]));
+  const rec = recorder({ dockerQueryFn: fakeDocker({ dir, up: "ours" }) });
+  await mod.runSetupWizard({}, tuiCtx(ui.ui, repo), ui.ui.notify, rec.deps);
+  assert.ok(rec.attached.every((a) => a.args[0] !== "compose" || a.env.PI_VALKEY_PORT === "16495"), "every compose step on 16495");
+  assert.match(ui.seen.confirm.at(-1).message, /PI_VALKEY_PORT=16495 docker compose -p /);
+  // The pull fails: up's Valkey untouched, nothing written.
+  const d2 = composeFolder();
+  const u2 = wizardUi(edgeAnswers(d2, EDGE_COMPOSE, [true]));
+  const r2 = recorder({ dockerQueryFn: fakeDocker({ dir: d2, up: "ours" }) }, (o) => (o.args.at(-1) === "pull" ? 1 : 0));
+  await mod.runSetupWizard({}, tuiCtx(u2.ui, repo), u2.ui.notify, r2.deps);
+  assert.deepEqual(r2.attached.map((a) => a.args.at(-1)), ["pull"]);
+  assert.ok(!existsSync(join(d2, "deploy", "docker-compose.valkey.yml")));
+  assert.ok(u2.notes.some((n) => n.t === "error" && /pull failed; up's Valkey was left running and nothing else was done/.test(n.m)));
+  // Compose fails after the removal: the override is put back as it was found, and the way back is named.
+  const d3 = composeFolder();
+  const u3 = wizardUi(edgeAnswers(d3, EDGE_COMPOSE, [true]));
+  const r3 = recorder({ dockerQueryFn: fakeDocker({ dir: d3, up: "ours" }) }, (o) => (o.args.at(-1) === "-d" ? 1 : 0));
+  await mod.runSetupWizard({}, tuiCtx(u3.ui, repo), u3.ui.notify, r3.deps);
+  assert.ok(!existsSync(join(d3, "deploy", "docker-compose.valkey.yml")), "removed again, so `up` starts pi-dispatch-valkey, not compose's");
+  assert.ok(u3.notes.some((n) => n.t === "error" && /failed after up's Valkey was removed: NO Valkey runs now\. Its volume, pi-dispatch-valkey-data, and the queue in it are kept: `node .* up` \(in .*\) starts pi-dispatch-valkey on it again\./.test(n.m)));
+  // A failed stop starts nothing more and puts the override back.
+  const d4 = composeFolder();
+  const u4 = wizardUi(edgeAnswers(d4, EDGE_COMPOSE, [true]));
+  const r4 = recorder({ dockerQueryFn: fakeDocker({ dir: d4, up: "ours" }) }, (o) => (o.args[0] === "stop" ? 1 : 0));
+  await mod.runSetupWizard({}, tuiCtx(u4.ui, repo), u4.ui.notify, r4.deps);
+  assert.deepEqual(r4.attached.map((a) => a.args.at(-1) === "pull" ? "pull" : a.args[0]), ["pull", "stop"]);
+  assert.ok(!existsSync(join(d4, "deploy", "docker-compose.valkey.yml")));
+  // Declined: nothing runs, and the hint carries the whole of it, the override's contents included.
+  const d5 = composeFolder();
+  const u5 = wizardUi(edgeAnswers(d5, EDGE_COMPOSE, [false]));
+  const r5 = recorder({ dockerQueryFn: fakeDocker({ dir: d5, up: "ours" }) });
+  await mod.runSetupWizard({}, tuiCtx(u5.ui, repo), u5.ui.notify, r5.deps);
+  assert.equal(r5.attached.length, 0);
+  assert.ok(u5.notes.some((n) => n.m.startsWith("later: ") && n.m.includes(mod.VALKEY_HANDOVER_OVERRIDE) && /docker stop pi-dispatch-valkey && docker rm pi-dispatch-valkey; then /.test(n.m)));
+});
+
+// PR #475's review, round 3 (measured on Fedora: the hand-over, re-run in a folder whose override was on disk while
+// pi-dispatch-valkey was ANOTHER deployment's, stopped and removed that Valkey and cut its worker off). The hand-over acts
+// only on a pi-dispatch-valkey that is provably this deployment's, and never starts compose's valkey on the volume while
+// a container that is not this deployment's mounts it.
+test("wizard: the hand-over never stops, removes or mounts beside another deployment's Valkey (#475 round 3)", async () => {
+  const repo = tempDir("admin-setup-repo-");
+  const override = (d) => join(d, "deploy", "docker-compose.valkey.yml");
+  // The Fedora case: the override from an earlier hand-over, pi-dispatch-valkey another deployment's on the volume.
+  const d1 = composeFolder();
+  mkdirSync(join(d1, "deploy"), { recursive: true });
+  writeFileSync(override(d1), mod.VALKEY_HANDOVER_OVERRIDE);
+  const u1 = wizardUi(edgeAnswers(d1, EDGE_COMPOSE, [true]));
+  const r1 = recorder({ dockerQueryFn: fakeDocker({ dir: d1, up: "theirs" }) });
+  await mod.runSetupWizard({}, tuiCtx(u1.ui, repo), u1.ui.notify, r1.deps);
+  assert.equal(r1.attached.length, 0, "nothing pulled, stopped, removed or started");
+  assert.ok(u1.notes.some((n) => n.t === "error" && /^the receiver container was not started: pi-dispatch-valkey-data is mounted by pi-dispatch-valkey \(the deployment in \/srv\/other\), which is not this deployment's Valkey: a second Valkey on the same AOF would corrupt both queues/.test(n.m)), JSON.stringify(u1.notes));
+  // Without the override, compose's valkey keeps its own volume: the receiver starts, the other Valkey is named and left.
+  const d2 = composeFolder();
+  const u2 = wizardUi(edgeAnswers(d2, EDGE_COMPOSE, [true]));
+  const r2 = recorder({ dockerQueryFn: fakeDocker({ dir: d2, up: "theirs" }) });
+  await mod.runSetupWizard({}, tuiCtx(u2.ui, repo), u2.ui.notify, r2.deps);
+  assert.deepEqual(r2.attached.map((a) => a.args.at(-1)), ["-d"], "compose up only: no pull-for-hand-over, no stop, no rm");
+  assert.ok(!r2.attached.some((a) => a.args.includes("deploy/docker-compose.valkey.yml")));
+  assert.ok(!existsSync(override(d2)), "no override written");
+  assert.ok(u2.notes.some((n) => n.t === "warning" && /pi-dispatch-valkey is not this deployment's Valkey \(the deployment in \/srv\/other\), so it is never stopped, removed or reused from here; it is left running/.test(n.m)));
+  // Legacy, unlabelled: ours only on this deployment's VALKEY_URL port.
+  for (const [port, handed] of [[6379, true], [16496, false]]) {
+    const d = composeFolder();
+    const u = wizardUi(edgeAnswers(d, EDGE_COMPOSE, [true]));
+    const r = recorder({ dockerQueryFn: fakeDocker({ dir: d, up: "legacy", port }) });
+    await mod.runSetupWizard({}, tuiCtx(u.ui, repo), u.ui.notify, r.deps);
+    assert.equal(r.attached.some((a) => a.args[0] === "stop"), handed, `legacy on ${port}`);
+  }
+  // Ours, but another deployment's container also mounts the volume: refused before anything runs.
+  const d3 = composeFolder();
+  const u3 = wizardUi(edgeAnswers(d3, EDGE_COMPOSE, [true]));
+  const other = { code: 0, stdout: JSON.stringify([{ Name: "/b-valkey-1", Config: { Labels: { "com.docker.compose.project.working_dir": "/srv/b/deploy" } } }]), stderr: "" };
+  const r3 = recorder({ dockerQueryFn: fakeDocker({ dir: d3, up: "ours", volume: ["pi-dispatch-valkey", "b-valkey-1"], records: { "b-valkey-1": other } }) });
+  await mod.runSetupWizard({}, tuiCtx(u3.ui, repo), u3.ui.notify, r3.deps);
+  assert.equal(r3.attached.length, 0);
+  assert.ok(u3.notes.some((n) => n.t === "error" && /mounted by b-valkey-1 \(the compose project in \/srv\/b\/deploy\)/.test(n.m)));
+  // docker not answering is a refusal, never a guess.
+  const d4 = composeFolder();
+  const u4 = wizardUi(edgeAnswers(d4, EDGE_COMPOSE, [true]));
+  const r4 = recorder({ dockerQueryFn: () => ({ code: null, stdout: "", stderr: "" }) });
+  await mod.runSetupWizard({}, tuiCtx(u4.ui, repo), u4.ui.notify, r4.deps);
+  assert.equal(r4.attached.length, 0);
+  assert.ok(u4.notes.some((n) => n.t === "error" && /whether pi-dispatch-valkey is this deployment's could not be read/.test(n.m)));
+});
+
+// PR #475's review, round 3: the docs' plain compose command in the folder must publish where the worker dials.
+test("wizard: the compose answer writes PI_VALKEY_PORT into .env when VALKEY_URL's port is not 6379, never over a different value (#475 round 3)", async () => {
+  const repo = tempDir("admin-setup-repo-");
+  const d1 = composeFolder({ envText: "VALKEY_URL=redis://127.0.0.1:16495\n" });
+  const u1 = wizardUi(edgeAnswers(d1, EDGE_COMPOSE, [true]));
+  await mod.runSetupWizard({}, tuiCtx(u1.ui, repo), u1.ui.notify, recorder().deps);
+  assert.match(readFileSync(join(d1, ".env"), "utf8"), /^PI_VALKEY_PORT=16495$/m);
+  const d2 = composeFolder({ envText: "VALKEY_URL=redis://127.0.0.1:16495\nPI_VALKEY_PORT=16000\n" });
+  const u2 = wizardUi(edgeAnswers(d2, EDGE_COMPOSE, [true]));
+  await mod.runSetupWizard({}, tuiCtx(u2.ui, repo), u2.ui.notify, recorder().deps);
+  assert.equal(readFileSync(join(d2, ".env"), "utf8"), "VALKEY_URL=redis://127.0.0.1:16495\nPI_VALKEY_PORT=16000\n", "never overwritten");
+  assert.ok(u2.notes.some((n) => n.t === "warning" && /PI_VALKEY_PORT is 16000 in .*\.env, and VALKEY_URL's port is 16495/.test(n.m)));
+  const d3 = composeFolder({ envText: "VALKEY_URL=redis://127.0.0.1:6379\n" });
+  const u3 = wizardUi(edgeAnswers(d3, EDGE_COMPOSE, [true]));
+  await mod.runSetupWizard({}, tuiCtx(u3.ui, repo), u3.ui.notify, recorder().deps);
+  assert.doesNotMatch(readFileSync(join(d3, ".env"), "utf8"), /PI_VALKEY_PORT/);
+});
+
+// PR #475's review, the volume gap: the hand-over's volume keeps the rule `up` has. Another folder's label refuses; an
+// unlabelled volume no container of this deployment serves is adopted only after its own question; every compose start
+// on it checks the queue's pi-dispatch:owner marker, and another folder's stops compose's valkey again.
+test("wizard: pi-dispatch-valkey-data is used only when it is this folder's, an unlabelled one only after its own question, and the owner marker is checked (#475 volume gap)", async () => {
+  const repo = tempDir("admin-setup-repo-");
+  const withOverride = () => {
+    const d = composeFolder();
+    mkdirSync(join(d, "deploy"), { recursive: true });
+    writeFileSync(join(d, "deploy", "docker-compose.valkey.yml"), mod.VALKEY_HANDOVER_OVERRIDE);
+    return d;
+  };
+  // Another folder's label: refused, nothing run.
+  const d1 = withOverride();
+  const u1 = wizardUi(edgeAnswers(d1, EDGE_COMPOSE, [true]));
+  const r1 = recorder({ dockerQueryFn: fakeDocker({ dir: d1, volumeLabel: "/srv/a" }) });
+  await mod.runSetupWizard({}, tuiCtx(u1.ui, repo), u1.ui.notify, r1.deps);
+  assert.equal(r1.attached.length, 0);
+  assert.ok(u1.notes.some((n) => n.t === "error" && /pi-dispatch-valkey-data belongs to the deployment in \/srv\/a \(its label\), so this deployment never uses it/.test(n.m)));
+  // Unlabelled, declined: its own question names the risk; nothing run.
+  const d2 = withOverride();
+  const u2 = wizardUi(edgeAnswers(d2, EDGE_COMPOSE, [false]));
+  const r2 = recorder({ dockerQueryFn: fakeDocker({ dir: d2, volumeLabel: null }) });
+  await mod.runSetupWizard({}, tuiCtx(u2.ui, repo), u2.ui.notify, r2.deps);
+  assert.equal(r2.attached.length, 0);
+  assert.match(u2.seen.confirm.at(-1).message, /this volume holds a queue pi-dispatch cannot attribute to a folder/);
+  assert.ok(u2.notes.some((n) => n.t === "error" && /has no owner label and was not adopted/.test(n.m)));
+  // Unlabelled, adopted, and the marker is another folder's: compose's valkey is stopped again at once.
+  const d3 = withOverride();
+  const u3 = wizardUi(edgeAnswers(d3, EDGE_COMPOSE, [true, true]));
+  const r3 = recorder({ dockerQueryFn: fakeDocker({ dir: d3, volumeLabel: null }), claimOwnerFn: async () => ({ owner: "/srv/a", claimed: false }) });
+  await mod.runSetupWizard({}, tuiCtx(u3.ui, repo), u3.ui.notify, r3.deps);
+  assert.deepEqual(r3.attached.map((a) => a.args.slice(-2).join(" ")), ["up -d", "stop valkey"]);
+  assert.ok(u3.notes.some((n) => n.t === "error" && /the queue on pi-dispatch-valkey-data is the deployment's in \/srv\/a \(pi-dispatch:owner inside it\), not this one's: compose's valkey was stopped again at once/.test(n.m)));
+  // This folder's label: no question, the marker recorded after the start.
+  const d4 = withOverride();
+  const u4 = wizardUi(edgeAnswers(d4, EDGE_COMPOSE, [true]));
+  const claims = [];
+  const r4 = recorder({ dockerQueryFn: fakeDocker({ dir: d4 }), claimOwnerFn: async (url, folder) => (claims.push([url, folder]), { owner: folder, claimed: true }) });
+  await mod.runSetupWizard({}, tuiCtx(u4.ui, repo), u4.ui.notify, r4.deps);
+  assert.deepEqual(r4.attached.map((a) => a.args.at(-1)), ["-d"]);
+  assert.deepEqual(claims, [["redis://127.0.0.1:6379", realpathSync(d4)]]);
+  assert.ok(u4.notes.some((n) => /recorded pi-dispatch:owner=/.test(n.m)));
+  // The hand-over of this deployment's own pi-dispatch-valkey serving an unlabelled (pre-label) volume: no question.
+  const d5 = composeFolder();
+  const u5 = wizardUi(edgeAnswers(d5, EDGE_COMPOSE, [true]));
+  const r5 = recorder({ dockerQueryFn: fakeDocker({ dir: d5, up: "ours", volumeLabel: null }) });
+  await mod.runSetupWizard({}, tuiCtx(u5.ui, repo), u5.ui.notify, r5.deps);
+  assert.deepEqual(r5.attached.map((a) => a.args.at(-1)), ["pull", "pi-dispatch-valkey", "pi-dispatch-valkey", "-d"]);
+  assert.ok(!u5.seen.confirm.some((c) => /cannot attribute to a folder/.test(c.message)), "no adoption question");
 });

@@ -22,6 +22,8 @@ import {
   readStagedPackages,
   listRunIds,
   setQueuePaused,
+  killSwitchSet,
+  panelValkeyContext,
   writeSettings,
   writeTriggers,
   readPauseWindows,
@@ -2386,4 +2388,64 @@ test("panelEnv: a pointed .env in a folder another account can change is not rea
   assert.match(r.notice, /\.env is in a folder another account can change: .* with mode 0777/);
   chmodSync(dir, 0o700);
   assert.equal(panelEnv({ env: {}, pointerDir: dir, platform: "linux" }).env.VALKEY_URL, "redis://198.51.100.7:6379");
+});
+
+// PR #475's review, round 3, over issue #471's rule: the panel's `/dispatch pause|resume` took this process's
+// VALKEY_URL, ignored a disagreement with the deployment's .env, and printed the raw URL. It now has the CLI's rule, from
+// the one resolver both import (a pause pauses both, a resume refuses, every URL shown without its userinfo), over
+// `panelValkeyContext`: the pointer's folder only, read through issue #471's one reader and its trust rule.
+test("killSwitchSet: the CLI's kill-switch rule for the panel, over the pointer's .env read by #471's reader (#475 round 3)", async () => {
+  const dir = realpathSync(tempDir("admin-kill-"));
+  writeFileSync(join(dir, ".env"), `VALKEY_URL=redis://127.0.0.1:16495\nVALKEY_PASSWORD=${"ab".repeat(20)}\n`, { mode: 0o600 });
+  const calls = [];
+  const conns = [];
+  const setFn = async ({ url, paused, parseConnectionFn }) => (calls.push([url, paused]), conns.push(parseConnectionFn), { queues: ["pi-dispatch"] });
+  const stateFn = () => ({ deploymentDir: dir, owned: [] });
+  const env = { VALKEY_URL: "redis://:shellSecretNeverShown@127.0.0.1:16000" };
+  const p = await killSwitchSet({ paused: true, env, setFn, stateFn });
+  assert.deepEqual(calls, [["redis://:shellSecretNeverShown@127.0.0.1:16000", true], ["redis://127.0.0.1:16495", true]], "both, the pointer's folder's .env included");
+  assert.deepEqual(p.results.map((r) => r.shown), ["redis://127.0.0.1:16000", "redis://127.0.0.1:16495"]);
+  assert.equal(p.disagreement, `VALKEY_URL is redis://127.0.0.1:16000 in this shell and redis://127.0.0.1:16495 in ${join(dir, ".env")} (what the service uses)`);
+  assert.ok(!JSON.stringify(p.results.map((r) => r.shown)).includes("shellSecretNeverShown"));
+  // Each client takes the pointed-at deployment's credential (its folder's .env), not the cwd's.
+  assert.equal(conns[1]("redis://127.0.0.1:16495").password, "ab".repeat(20));
+  calls.length = 0;
+  const r = await killSwitchSet({ paused: false, env, setFn, stateFn });
+  assert.deepEqual(calls, [], "a refused resume changes nothing");
+  assert.match(r.refused, /resume would start jobs on one of them, so it resumes neither/);
+  assert.ok(!r.refused.includes("shellSecretNeverShown"));
+  // Agreement: one Valkey, resumed.
+  const one = await killSwitchSet({ paused: false, env: {}, setFn, stateFn });
+  assert.deepEqual(calls, [["redis://127.0.0.1:16495", false]]);
+  assert.equal(one.disagreement, null);
+  // The pointer's own layered VALKEY_URL is the wizard's snapshot, which the file outranks: not a disagreement.
+  calls.length = 0;
+  await killSwitchSet({ paused: true, env: { VALKEY_URL: "redis://127.0.0.1:16000" }, setFn, stateFn: () => ({ deploymentDir: dir, owned: ["VALKEY_URL"] }) });
+  assert.deepEqual(calls, [["redis://127.0.0.1:16495", true]]);
+});
+
+test("panelValkeyContext: the pointer's folder only, through #471's reader: nothing from a file another account can change, nothing with no pointer (#468 over #471)", () => {
+  const dir = realpathSync(tempDir("admin-ctx-"));
+  const PW = "cd".repeat(20);
+  writeFileSync(join(dir, ".env"), `VALKEY_URL=redis://127.0.0.1:16495\nVALKEY_PASSWORD=${PW}\nPI_VALKEY_SHARED=1\n`, { mode: 0o600 });
+  const ok = panelValkeyContext({ env: {}, pointerDir: dir });
+  assert.equal(ok.password.file, PW);
+  assert.equal(ok.url.file, "redis://127.0.0.1:16495");
+  assert.equal(ok.shared, true);
+  assert.equal(ok.error, null);
+  assert.equal(ok.envPath, join(dir, ".env"));
+  // No pointer: pi's environment alone, even with a .env in the cwd.
+  const none = panelValkeyContext({ env: { VALKEY_PASSWORD: "exported-by-the-operator" }, pointerDir: null });
+  assert.equal(none.password.file, null);
+  assert.equal(none.password.environment, "exported-by-the-operator");
+  assert.equal(none.envPath, null);
+  // A .env another account can write: no value taken (not the password either), and why is the context's error.
+  chmodSync(join(dir, ".env"), 0o666);
+  const open = panelValkeyContext({ env: {}, pointerDir: dir });
+  assert.equal(open.password.file, null);
+  assert.equal(open.url.file, null);
+  assert.match(open.error, /writable by every account/);
+  chmodSync(join(dir, ".env"), 0o600);
+  // What the pointer layered is not pi's own: the file is compared with an operator export only.
+  assert.equal(panelValkeyContext({ env: { VALKEY_URL: "redis://127.0.0.1:1" }, pointerDir: dir, owned: ["VALKEY_URL"] }).url.environment, null);
 });

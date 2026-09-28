@@ -961,7 +961,7 @@ test("an egress-proxy refusal on the podman venue names the rootless-podman reme
 		return runJob(job, d);
 	};
 	await run(ghJob, ["local"], { proxyMissing: "pi-dispatch-egress-proxy" });
-	assert.ok(texts[0].includes("Start it with `docker compose -f deploy/docker-compose.yml --profile egress up -d`, or set PI_EGRESS=0"), texts[0]);
+	assert.ok(texts[0].includes("Start it with `docker compose --env-file .env -f deploy/docker-compose.yml --profile egress up -d`, or set PI_EGRESS=0"), texts[0]);
 	const r = await run({ ...ghJob, backend: "podman" }, ["local", "podman"], { proxyStopped: "pi-dispatch-egress-proxy" });
 	assert.equal(r.reason, "egress-proxy-stopped");
 	assert.ok(texts[1].includes("Start it under the worker account's own rootless podman, on a named bridge network (docs/podman.md), or set PI_EGRESS=0"), texts[1]);

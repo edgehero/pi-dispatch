@@ -181,6 +181,9 @@ function layerPointer(env, fs) {
     ownedKeys.add(key);
     applied.push(key);
   }
+  // Issue #468: the panel's Valkey clients take VALKEY_PASSWORD (and PI_VALKEY_SHARED) from the POINTED-AT deployment's
+  // `.env` (`panelValkeyContext`, read-model.mjs, from `pointerState()` below, through issue #471's one reader). The
+  // pointer still carries no credential, and the password is never copied into the environment.
   return { applied };
 }
 

@@ -93,7 +93,9 @@ The same setup as plain commands. No clone needed:
 mkdir my-dispatch && cd my-dispatch
 npx @edgehero/pi-dispatch up   # one consented pass: pulls the job image, starts Valkey,
                                #   scaffolds the config files, fills in the .env lines that have
-                               #   no value yet, runs the doctor preflight.
+                               #   no value yet (VALKEY_PASSWORD among them: the queue's own
+                               #   password, so no other account on the host can read it),
+                               #   runs the doctor preflight.
                                #   Every docker action shows its command and asks first; the .env
                                #   lines are filled without a prompt, and never overwritten.
 #  edit .env and set your provider key. Already logged into pi with an API key? Leave it blank.
@@ -669,10 +671,15 @@ which is what it offers right after the credentials step):
 1. **Webhook receiver on the host** (lowest latency): `npx pi-dispatch-receiver` from your deployment
    folder, or `pi-dispatch service install --receiver` to run it as a user-level service. Your reverse
    proxy or tunnel does the public exposure.
-2. **Webhook receiver in a container**: `docker compose -f deploy/docker-compose.yml --profile receiver
+2. **Webhook receiver in a container**: `docker compose --env-file .env -f deploy/docker-compose.yml --profile receiver
    up -d` runs the prebuilt
    [`ghcr.io/edgehero/pi-dispatch-receiver`](https://github.com/edgehero/pi-dispatch/pkgs/container/pi-dispatch-receiver)
-   beside Valkey, triggers mounted read-only, no docker socket anywhere.
+   beside Valkey, triggers mounted read-only, no docker socket anywhere. In a folder `/dispatch setup` built, the
+   compose file sits in `deploy/` of that folder, and the command it runs names the folder's own project, `-p <folder
+   name>` (lower case, only letters, digits, `_` and `-`), and, where `pi-dispatch up` had already started the
+   deployment's Valkey, `-f deploy/docker-compose.valkey.yml`, which gives compose's Valkey that same volume so the
+   worker and the receiver share one queue. Run it the same way afterwards. Setup hands over only a
+   `pi-dispatch-valkey` that is this folder's, and refuses while another deployment's Valkey uses that volume.
 3. **No public URL at all**: `pi-dispatch-receiver poll` fetches issue events, comments and PRs over TLS
    with your own credential (conditional requests, nearly free against the rate limit). Same gates, same
    queue, about 60 seconds of latency, zero public surface. Pair with `setup github --no-webhook`. A

@@ -6,7 +6,8 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryProbeArgs, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, triggersPath } from "../src/doctor.mjs";
+import { CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryProbeArgs, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, triggersPath, valkeyPasswordUpgradeStep } from "../src/doctor.mjs";
+import { valkeyPasswordFor } from "../src/valkey-endpoint.mjs";
 import { serviceEnvFileOf } from "../src/service-env.mjs";
 import { VALKEY_SHARED_KEY as VALKEY_SHARED_NAME } from "../src/podman-stack.mjs";
 import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS } from "../src/init.mjs";
@@ -2397,7 +2398,9 @@ test("doctor: without --fix, a fixAction-bearing failure prints exactly the old 
 		text(),
 		/✗ Job image present \(pi-job:latest\)\n    → docker pull ghcr\.io\/edgehero\/pi-job:latest && docker tag ghcr\.io\/edgehero\/pi-job:latest pi-job:latest {2}\(or build image\/Dockerfile\)\n/,
 	);
-	assert.match(text(), /✗ Valkey reachable \(redis:\/\/127\.0\.0\.1:6379\)\n    → docker compose -f deploy\/docker-compose\.yml up -d\n/);
+	// Issue #468 with #471's rule: doctor starts no Valkey (its start needs the deployment's password in a child's
+	// environment); the fix line names `pi-dispatch up`.
+	assert.match(text(), /✗ Valkey reachable \(redis:\/\/127\.0\.0\.1:6379\)\n    → run `pi-dispatch up` in the deployment folder: it starts Valkey with the deployment's VALKEY_PASSWORD/);
 	assert.equal(prompts.length, 0, "no --fix, no prompt -- even with a promptFn injected");
 	assert.doesNotMatch(text(), /fix available|run this\?|skipped:|fixed:|re-check after fixes/);
 });
@@ -2413,13 +2416,10 @@ test("doctor --fix: declining every offer runs nothing and leaves the exit code 
 	assert.equal(code, 1, "warn-not-fail doctrine: offering fixes changes nothing about severity");
 	// The EXACT command is shown before each prompt -- consent is to a command, not to a vibe.
 	assert.match(text(), /fix available: Job image present \(pi-job:latest\)\n {4}\$ docker pull ghcr\.io\/edgehero\/pi-job:latest && docker tag ghcr\.io\/edgehero\/pi-job:latest pi-job:latest\n/);
-	assert.match(
-		text(),
-		/fix available: Valkey reachable \(redis:\/\/127\.0\.0\.1:6379\)\n {4}\$ docker run -d --name pi-dispatch-valkey --restart unless-stopped -p 127\.0\.0\.1:6379:6379 -v pi-dispatch-valkey-data:\/data valkey\/valkey:8 valkey-server --appendonly yes\n/,
-	);
+	// Issue #468 with #471's rule: no Valkey offer any more, only the image's.
+	assert.doesNotMatch(text(), /fix available: Valkey reachable/);
 	assert.match(text(), /skipped: Job image present \(pi-job:latest\)/);
-	assert.match(text(), /skipped: Valkey reachable/);
-	assert.deepEqual(prompts, ["run this? [y/N] ", "run this? [y/N] "]);
+	assert.deepEqual(prompts, ["run this? [y/N] "]);
 	assert.ok(!calls.some((c) => ["pull", "tag", "run"].includes(c.args[0])), "no spawn beyond the probes: a declined offer executes nothing");
 	assert.doesNotMatch(text(), /re-check after fixes/, "nothing ran, so nothing is re-checked");
 });
@@ -2480,46 +2480,22 @@ test("doctor --fix: the converge re-check reruns the probes once and reports gre
 	assert.equal(code, 0, "converge-to-green: the exit code judges the re-checked list by the same failed/ok logic");
 });
 
-test("doctor --fix: accepting the valkey offer runs the exact loopback docker run argv, and converges", async () => {
+// Issue #468 with issue #471's rule (PR #474): doctor hands no program anything from `.env`, and a Valkey `up` or
+// compose starts takes the deployment's VALKEY_PASSWORD from there, so `doctor --fix` starts no Valkey at all: the check
+// carries no offer, and its fix line names `pi-dispatch up`, which starts it with the password, labels its container and
+// volume with the folder, and asks before it uses a volume it cannot attribute.
+test("doctor --fix starts no Valkey: the unreachable check names `pi-dispatch up` and offers nothing (#468 over #471)", async () => {
 	const calls = [];
 	const { out, text } = capture();
+	const { fn: promptFn, calls: prompts } = promptRecorder(true);
 	const code = await runDoctor(
 		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat" },
-		{
-			out,
-			cwd: tmpdir(),
-			spawn: fakeSpawn({ ...EGRESS_OK, "docker info": 0, "docker image": 0, "docker run": 0 }, calls),
-			// Reachable exactly once the container has been started: the converge pass flips to ✓ only
-			// because the fix actually ran, not because fixing earns credit.
-			probeValkey: async () => calls.some((c) => c.cmd === "docker" && c.args[0] === "run" && c.args.includes("pi-dispatch-valkey")),
-			fileExists: () => true,
-			nodeVersion: "22.19.0",
-			fix: true,
-			promptFn: async () => true,
-		},
+		{ out, cwd: tmpdir(), spawn: fakeSpawn({ ...EGRESS_OK, "docker info": 0, "docker image": 0, "docker run": 0 }, calls), probeValkey: async () => false, fileExists: () => true, nodeVersion: "22.19.0", fix: true, promptFn },
 	);
-	// The VALKEY run, named explicitly: the egress checks run their own probe containers, so "the first
-	// docker run" stopped being a unique way to name this one.
-	const run = calls.find((c) => c.cmd === "docker" && c.args[0] === "run" && c.args.includes("pi-dispatch-valkey"));
-	assert.deepEqual(run.args, [
-		"run",
-		"-d",
-		"--name",
-		"pi-dispatch-valkey",
-		"--restart",
-		"unless-stopped",
-		"-p",
-		"127.0.0.1:6379:6379",
-		"-v",
-		"pi-dispatch-valkey-data:/data",
-		"valkey/valkey:8",
-		"valkey-server",
-		"--appendonly",
-		"yes",
-	]);
-	assert.match(text(), /fixed: Valkey reachable \(redis:\/\/127\.0\.0\.1:6379\)/);
-	assert.match(text(), /re-check after fixes/);
-	assert.equal(code, 0);
+	assert.equal(code, 1);
+	assert.ok(!calls.some((c) => c.cmd === "docker" && ["run", "volume", "start", "compose"].includes(c.args[0]) && c.args.join(" ").includes("valkey")), "nothing started for Valkey");
+	assert.deepEqual(prompts, [], "no offer to accept");
+	assert.match(text(), /✗ Valkey reachable \(redis:\/\/127\.0\.0\.1:6379\)\n    → run `pi-dispatch up` in the deployment folder: it starts Valkey with the deployment's VALKEY_PASSWORD \(or, in a folder \/dispatch setup handed to compose, compose's own: `docker compose -p <folder name> --env-file \.env -f deploy\/docker-compose\.yml -f deploy\/docker-compose\.valkey\.yml up -d valkey`\)\n/);
 });
 
 test("doctor prints which resume bounds are on, so an unset one is legible as a choice", async () => {
@@ -2744,7 +2720,6 @@ const ALLOWED_FIXACTIONS = [
 	[/^Job image present \(pi-job:latest\)$/, "prompt"],
 	// Issue #433: the podman venue's own image line, the image check of a deployment without `local`.
 	[/^podman: job image is not in this account's Podman store \(pi-job:latest\)$/, "prompt"],
-	[/^Valkey reachable \(redis:\/\/(127\.0\.0\.1|localhost)(:6379)?\/?\)$/, "prompt"],
 	[/^Overlay is credential-free \(no auth\.json\)$/, "prompt"],
 	[/^Staged packages manifest readable \(/, "prompt"],
 	[/^Staged packages present \(/, "prompt"],
@@ -2834,10 +2809,10 @@ test("doctor --fix doctrine: from a fully-broken env, no check outside the allow
 	const carried = assertFixActionDoctrine(checks);
 	// The fixture must actually reach every eligible check -- a triggers-parse regression swallowed to
 	// zeroes would otherwise hollow this pin out silently.
-	for (const expected of [/^\.env present$/, /^Job image present \(pi-job:latest\)$/, /^Valkey reachable/, /^Overlay is credential-free/, /^Staged packages present/, /^Session store does not exist/]) {
+	for (const expected of [/^\.env present$/, /^Job image present \(pi-job:latest\)$/, /^Overlay is credential-free/, /^Staged packages present/, /^Session store does not exist/]) {
 		assert.ok(carried.some((l) => expected.test(l)), `fixture failed to produce a fixAction for ${expected}`);
 	}
-	assert.equal(carried.length, 6, "exactly the eligible checks carry one, no more");
+	assert.equal(carried.length, 5, "exactly the eligible checks carry one, no more");
 	// The nevers, by name: each of these IS failing here and still gets no offer.
 	const never = (re, why) => {
 		const c = checks.find((x) => re.test(x.label));
@@ -5723,34 +5698,6 @@ test("doctor: a trigger image whose daemon did not answer says so too (#397)", a
 	assert.match(line.label, /my-python:1\.2\.0.*the daemon did not answer/, "and an unanswered read says so rather than reading as absent");
 });
 
-test("doctor: the valkey --fix `docker run` gets the PULL bound, because it may fetch an image (#397)", async () => {
-	// `docker run valkey/valkey:8` on a host that does not have that image PULLS it first, so this is the
-	// second fetching action and it needs the same bound as the job-image pull. Pinned by the clock, as a
-	// floor: on the default bound this would give up at `cmd`.
-	const cwd = scaffoldedCwd();
-	const checks = await collectChecks(
-		{ ...imgEnv(), VALKEY_URL: "redis://127.0.0.1:6379" },
-		{
-			cwd,
-			spawn: fakeSpawn(green),
-			probeValkey: async () => false,
-			fileExists: existsSync,
-			nodeVersion: "22.19.0",
-			platform: "linux",
-			home: tempDir("pi-397-valkey-"),
-			out: () => {},
-			runTimeouts: FAST_TIMEOUTS,
-		},
-	);
-	const valkey = checks.find((c) => c.fixAction?.describe?.startsWith("docker run"));
-	assert.ok(valkey, "the unreachable-valkey check offers the start");
-	const began = Date.now();
-	const res = await valkey.fixAction.run({ spawn: fakeSpawn({ docker: "hang" }), cwd, env: imgEnv() });
-	const took = Date.now() - began;
-	assert.equal(res.ok, false);
-	assert.ok(took >= FAST_TIMEOUTS.pull - 5, `waited ${took}ms, which is the PULL bound (${FAST_TIMEOUTS.pull}) and not the default (${FAST_TIMEOUTS.cmd})`);
-});
-
 test("doctor: a line the reader cannot model is said ONCE for the file, naming both keys (#396)", async () => {
 	// It was said once per KEY, inside the per-key loop, so one unreadable line produced two near-identical
 	// warnings differing only in which key they named. The fact is about the FILE, and nothing pinned the
@@ -7437,11 +7384,11 @@ test("podman-only: Valkey's fix points at the podman route, and --fix never runs
 	assert.doesNotMatch(text(), /docker compose|docker run|fix available: Valkey/);
 	assert.deepEqual(asked, []);
 	assert.deepEqual(calls.filter((c) => c.cmd === "docker"), []);
-	// With local blessed, the docker route is offered exactly as before.
+	// With local blessed, the docker route is named (issue #468 over #471: `pi-dispatch up`, never an offer doctor runs).
 	const mixed = capture();
 	await runDoctor(podmanEnv({ PI_BACKENDS: "local,podman" }), { ...podmanDeps(mixed.out, { ...green, ...podmanPlan() }, [], { probeValkey: async () => false }), fix: true, promptFn: async () => false });
-	assert.match(mixed.text(), /✗ Valkey reachable \(redis:\/\/127\.0\.0\.1:6379\)\n {4}→ docker compose -f deploy\/docker-compose\.yml up -d\n/);
-	assert.match(mixed.text(), /fix available: Valkey reachable/);
+	assert.match(mixed.text(), /✗ Valkey reachable \(redis:\/\/127\.0\.0\.1:6379\)\n {4}→ run `pi-dispatch up` in the deployment folder/);
+	assert.doesNotMatch(mixed.text(), /fix available: Valkey reachable/);
 });
 
 test("podman-only: the fleet digest is the podman store's own id, read with no docker spawn (#433)", async () => {
@@ -7989,7 +7936,7 @@ test("doctor's .env reads pass ONE allowlist and ONE loader mapping (#453 gate 3
 	// PR #466 gate round 2 added the GitHub auth source and App keys; issue #464 the jobs and sandbox dirs, and in its gate
 	// round 1 the Valkey opt-in, the TMPDIR the default jobs root lives under, and the worker's name.
 	// Issue #471: and every other key the service reads that doctor judges, the worker's and the receiver's.
-	assert.deepEqual([...SERVICE_ENV_KEYS], ["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY", "VALKEY_URL", "PI_VALKEY_SHARED", "PI_PROVIDER", "GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY", "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", "PI_WORKER_NAME", ...WORKER_SERVICE_KEYS, ...RECEIVER_SERVICE_KEYS, ...new Set(Object.values(CLI_SERVICE_KEYS).flat())]);
+	assert.deepEqual([...SERVICE_ENV_KEYS], ["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY", "VALKEY_URL", "PI_VALKEY_SHARED", "VALKEY_PASSWORD", "PI_VALKEY_PORT", "PI_PROVIDER", "GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY", "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", "PI_WORKER_NAME", ...WORKER_SERVICE_KEYS, ...RECEIVER_SERVICE_KEYS, ...new Set(Object.values(CLI_SERVICE_KEYS).flat())]);
 	for (const key of ["PI_JOB_IMAGE", "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "AZURE_ORG_URL", "AZURE_WEBHOOK_MODE", "WEBHOOK_SECRET", "RECEIVER_PORT", "GITHUB_PAT_VAR"]) {
 		assert.ok(SERVICE_ENV_KEYS.includes(key), `${key}, which issue #471 lists, is a service key`);
 	}
@@ -9363,7 +9310,7 @@ test("no program doctor starts receives an environment derived from .env values 
 
 	const marker = (k) => `from-env-${k.toLowerCase()}-${k.length}`;
 	const cliKeys = [...new Set(Object.values(CLI_SERVICE_KEYS).flat())];
-	const envText = [...cliKeys.map((k) => `${k}=/${marker(k)}`), "GITHUB_AUTH_SOURCE=pat", `GITHUB_PAT=${marker("PAT")}`, `WEBHOOK_SECRET=${marker("WH")}`, `PI_JOB_IMAGE=${marker("IMG")}:1`, "PI_BACKENDS=local,podman"].join("\n") + "\n";
+	const envText = [...cliKeys.map((k) => `${k}=/${marker(k)}`), "GITHUB_AUTH_SOURCE=pat", `GITHUB_PAT=${marker("PAT")}`, `WEBHOOK_SECRET=${marker("WH")}`, `PI_JOB_IMAGE=${marker("IMG")}:1`, "PI_BACKENDS=local,podman", `VALKEY_PASSWORD=${marker("VALKEYPW")}`].join("\n") + "\n";
 	for (const [shell, deps] of [
 		[ghEnv(), (out, calls, cwd) => ({ ...ghDeps(out, { ...green, "docker run": 0, "gh auth status": { code: 0, output: ghStatusOutput }, "gh auth token": { code: 0, output: "gho_shell\n" } }, calls), cwd, agentDir: NO_AGENT_DIR })],
 		[podmanEnv({ PI_BACKENDS: "local,podman" }), (out, calls, cwd) => podmanDeps(out, { ...podmanPlan(), ...green }, calls, { cwd })],
@@ -9381,7 +9328,10 @@ test("no program doctor starts receives an environment derived from .env values 
 		}
 		// Each CLI variable is named once, as not handed on; its value shown only for a path.
 		for (const k of cliKeys) assert.equal(r.text().split("\n").filter((l) => l.startsWith(`⚠ ${k} is set in `)).length, 1, `${k}: ${r.text()}`);
-		assert.doesNotMatch(r.text(), /from-env-gh_token|from-env-github_token|from-env-container_host|from-env-docker_host|from-env-docker_context|from-env-container_connection|from-env-gh_host|from-env-pat|from-env-wh/, "no endpoint, name or token value is printed");
+		assert.doesNotMatch(r.text(), /from-env-gh_token|from-env-github_token|from-env-container_host|from-env-docker_host|from-env-docker_context|from-env-container_connection|from-env-gh_host|from-env-pat|from-env-wh|from-env-valkeypw/, "no endpoint, name or token value is printed");
+		// Issue #468: the Valkey password is a service key, secret, named only: read as a service setting, never printed,
+		// and never handed to a child (the loop above), since doctor starts no Valkey.
+		assert.match(r.text(), /service settings read from [^\n]*VALKEY_PASSWORD/);
 		assert.match(r.text(), /⚠ XDG_CONFIG_HOME is set in [^\n]* \(\/from-env-xdg_config_home-15\)/, "a path's value is shown");
 		assert.doesNotMatch(r.text(), /service settings read from[^\n]*(CONTAINERS_CONF|DOCKER_HOST|GH_TOKEN)/, "a CLI variable is never listed as read");
 	}
@@ -9429,4 +9379,112 @@ test("this account's own unix socket in .env is no failure: named as not handed 
 	assert.match(r.text(), /^⚠ CONTAINER_HOST is set in /m);
 	assert.match(r.text(), /^⚠ DOCKER_HOST is set in /m);
 	assert.ok(!calls.some((c) => c.opts?.env?.CONTAINER_HOST || c.opts?.env?.DOCKER_HOST));
+});
+
+// PR #475's review, round 3: PI_VALKEY_PORT is where compose publishes its Valkey; one that disagrees with VALKEY_URL's
+// port (in .env, or this shell, which wins over --env-file) moves the queue off the worker's port on the next compose run.
+test("doctor flags a PI_VALKEY_PORT that disagrees with VALKEY_URL's port, in .env or this shell (#475 round 3)", async () => {
+	const dir = tempDir("doctor-valkey-port-");
+	writeFileSync(join(dir, ".env"), "VALKEY_URL=redis://127.0.0.1:16495\nPI_VALKEY_PORT=16000\n");
+	const run = async (env) => {
+		const { out, text } = capture();
+		await runDoctor({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", ...env }, { out, cwd: dir, spawn: fakeSpawn(green), probeValkey: async () => true, fileExists: () => true, nodeVersion: "22.19.0" });
+		return text();
+	};
+	const t1 = await run({});
+	assert.ok(t1.includes(`⚠ PI_VALKEY_PORT is 16000 in ${join(dir, ".env")}, and VALKEY_URL's port is 16495: compose publishes its Valkey on 16000, where the worker does not dial.`), t1);
+	const t2 = await run({ PI_VALKEY_PORT: "17000" });
+	assert.match(t2, /⚠ PI_VALKEY_PORT is 17000 in this shell, and VALKEY_URL's port is 16495/);
+	writeFileSync(join(dir, ".env"), "VALKEY_URL=redis://127.0.0.1:16495\nPI_VALKEY_PORT=16495\n");
+	assert.doesNotMatch(await run({}), /PI_VALKEY_PORT is/, "agreeing: nothing said");
+	writeFileSync(join(dir, ".env"), "VALKEY_URL=redis://valkey.internal:16495\nPI_VALKEY_PORT=16000\n");
+	assert.doesNotMatch(await run({}), /PI_VALKEY_PORT is/, "another host's port is not compose's");
+});
+
+const PW468 = "7a11ed0c".repeat(8);
+async function doctorAuth({ auth, open, passwordSet = false, env = {}, envFile = null, mode = 0o600 }) {
+	const cwd = scaffoldedCwd();
+	if (envFile !== null) writeFileSync(join(cwd, ".env"), envFile);
+	const asked = [];
+	const probed = [];
+	const { out, text } = capture();
+	const code = await runDoctor(
+		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", ...env },
+		{
+			out,
+			cwd,
+			spawn: fakeSpawn(green),
+			probeValkey: async (url) => (probed.push(url), true),
+			valkeyAuth: async (url, opts = {}) => (asked.push([url, opts.withoutPassword === true]), opts.withoutPassword ? { state: open, passwordSet: false } : { state: auth, passwordSet, from: passwordSet ? join(cwd, ".env") : null }),
+			nodeVersion: "22.19.0",
+			readEnvFile: (path) => readFileSync(path, "utf8"),
+			stat: (p) => (p.endsWith(".env") ? { mode: 0o100000 | mode } : statSync(p)),
+		},
+	);
+	return { code, text: text(), asked, probed };
+}
+
+test("doctor (#468): a Valkey that requires a password this deployment does not send, or refuses the one it sends, is a ✗ naming the key, never the value", async () => {
+	const none = await doctorAuth({ auth: "noauth" });
+	assert.equal(none.code, 1);
+	assert.match(none.text, /✗ Valkey \(redis:\/\/127\.0\.0\.1:6379\) answers, and requires a password this deployment does not send: the worker refuses to start on it \(exit 2\)\n\s+→ put VALKEY_PASSWORD=<that Valkey's password> in [^\n]*\.env \(for a Valkey shared with PI_VALKEY_SHARED=1, the password of the account that runs it\)/);
+	assert.doesNotMatch(none.text, /Valkey reachable/, "not \"unreachable\", and no offer to start a second one");
+	assert.deepEqual(none.probed, []);
+	const wrong = await doctorAuth({ auth: "wrongpass", passwordSet: true, envFile: `VALKEY_PASSWORD=${PW468}\n` });
+	assert.equal(wrong.code, 1);
+	assert.match(wrong.text, /✗ Valkey \(redis:\/\/127\.0\.0\.1:6379\) answers, and refuses the VALKEY_PASSWORD this deployment sends/);
+	assert.ok(!wrong.text.includes(PW468), "the value is never printed");
+});
+
+test("doctor (#468): a loopback Valkey that answers a client sending NO password is a warning with the upgrade step; one that requires it is a ✓", async () => {
+	const open = await doctorAuth({ auth: "ok", open: "ok" });
+	assert.match(open.text, /⚠ Valkey \(redis:\/\/127\.0\.0\.1:6379\) has no password: any local account can read, enqueue or delete this deployment's jobs \(VALKEY_PASSWORD is not set\)\n\s+→ run `pi-dispatch up`: it writes a VALKEY_PASSWORD into \.env and restarts pi-dispatch-valkey with it/);
+	assert.deepEqual(open.asked.map((a) => a[1]), [false, true], "asked as this deployment, then as a client with none");
+	const stale = await doctorAuth({ auth: "ok", open: "ok", passwordSet: true, envFile: `VALKEY_PASSWORD=${PW468}\n` });
+	assert.match(stale.text, /⚠ Valkey \(redis:\/\/127\.0\.0\.1:6379\) answers a client that sends no password, although VALKEY_PASSWORD is set: it was started before the password existed/);
+	const guarded = await doctorAuth({ auth: "ok", open: "noauth", passwordSet: true, envFile: `VALKEY_PASSWORD=${PW468}\n` });
+	assert.match(guarded.text, /✓ Valkey \(redis:\/\/127\.0\.0\.1:6379\) requires a password, and the one this deployment sends \(VALKEY_PASSWORD from [^\n]*\/\.env\) is accepted \(the value is not shown\)/, "names where the password came from");
+	for (const r of [open, stale, guarded]) assert.ok(!r.text.includes(PW468));
+	// Another machine's Valkey is the operator's own to secure: not judged.
+	const remote = await doctorAuth({ auth: "ok", open: "ok", env: { VALKEY_URL: "redis://queue.lan:6379" } });
+	assert.doesNotMatch(remote.text, /has no password|answers a client that sends no password/);
+	assert.equal(remote.asked.length, 1, "no second probe for a remote Valkey");
+	// The upgrade step names the command that restarts THIS venue's Valkey.
+	assert.match(valkeyPasswordUpgradeStep({ localUsed: false, podmanUsed: true }), /^run `pi-dispatch service install --force` as this account: it writes a VALKEY_PASSWORD into \.env, restarts the Quadlet Valkey with it \(the queue in its volume is kept\) and then the worker and the receiver$/);
+	assert.match(valkeyPasswordUpgradeStep({ localUsed: true, podmanUsed: false }), /docker compose --env-file \.env -f deploy\/docker-compose\.yml up -d/);
+});
+
+test("doctor (#468): a .env holding VALKEY_PASSWORD that others can read is a warning, and a value Valkey could not take is a ✗", async () => {
+	const wide = await doctorAuth({ auth: "ok", open: "noauth", passwordSet: true, envFile: `VALKEY_PASSWORD=${PW468}\n`, mode: 0o644 });
+	assert.match(wide.text, /⚠ [^\n]*\.env holds VALKEY_PASSWORD and is readable by every account on this host \(mode 644\)\n\s+→ chmod 600 [^\n]*\.env/);
+	const group = await doctorAuth({ auth: "ok", open: "noauth", passwordSet: true, envFile: `VALKEY_PASSWORD=${PW468}\n`, mode: 0o640 });
+	assert.match(group.text, /readable by its group \(mode 640\)/);
+	const tight = await doctorAuth({ auth: "ok", open: "noauth", passwordSet: true, envFile: `VALKEY_PASSWORD=${PW468}\n` });
+	assert.doesNotMatch(tight.text, /holds VALKEY_PASSWORD and is readable/);
+	const bad = await doctorAuth({ auth: "ok", open: "noauth", passwordSet: true, envFile: "VALKEY_PASSWORD=tooshort\n" });
+	assert.match(bad.text, /✗ [^\n]*\.env cannot be handed to Valkey: it is 8 characters long/);
+	assert.doesNotMatch(bad.text, /tooshort/);
+});
+
+// Issue #468 over issue #471's rule: doctor's own in-process client sends the RESOLVED password (this shell's, else the
+// file's, the file's to a loopback Valkey only), and no program doctor starts is handed it.
+test("doctor (#468 over #471): the AUTH check's context carries the resolved password, a disagreement never prints it, and no child is handed it", async () => {
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), `VALKEY_PASSWORD=${PW468}\n`);
+	const contexts = [];
+	const calls = [];
+	const run = async (env, url = "redis://127.0.0.1:6379") => {
+		const { out, text } = capture();
+		contexts.length = 0;
+		await runDoctor({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", VALKEY_URL: url, ...env }, { out, cwd, spawn: fakeSpawn(green, calls), probeValkey: async () => true, valkeyAuth: async (_u, opts = {}) => (contexts.push(opts.context), { state: opts.withoutPassword ? "noauth" : "ok", passwordSet: true, from: "x" }), nodeVersion: "22.19.0" });
+		return text();
+	};
+	await run({});
+	assert.equal(valkeyPasswordFor("redis://127.0.0.1:6379", contexts[0]).password, PW468, "the file's, to a loopback Valkey");
+	assert.equal(valkeyPasswordFor("redis://queue.lan:6379", contexts[0]).password, null, "never the file's to another host");
+	const both = await run({ VALKEY_PASSWORD: "shellside0123456789" });
+	assert.equal(valkeyPasswordFor("redis://127.0.0.1:6379", contexts[0]).password, "shellside0123456789", "this shell's where it sets one");
+	assert.match(both, /VALKEY_PASSWORD is set differently in this shell and in [^\n]*\.env \(neither value is shown\)/);
+	assert.ok(!both.includes(PW468) && !both.includes("shellside0123456789"), "neither value printed");
+	for (const c of calls) for (const v of Object.values(c.opts?.env ?? {})) assert.notEqual(String(v), PW468, `${c.cmd} ${c.args.join(" ")} was handed the file's password`);
 });

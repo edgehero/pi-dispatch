@@ -193,11 +193,33 @@ and `pi-dispatch up` was not.
 6. **Load the job image and name it as Podman stores it.** `docker pull ghcr.io/edgehero/pi-job:latest`, then set
    `PI_JOB_IMAGE` to the name `docker images` shows for it.
 7. **Start the stack the same way you would on Docker.** It is the same compose file:
-   `docker compose -f deploy/docker-compose.yml up -d` for Valkey, and `--profile egress` as well if you use the
+   `docker compose --env-file .env -f deploy/docker-compose.yml up -d` for Valkey, and `--profile egress` as well if you use the
    egress policy. Podman serves it through the same Docker API, and compose needs no adaptation (measured with
    v2.33.0 in the lab and 5.5.1 on Fedora 44). Its config mounts carry `:ro,z` for an SELinux host (see SELinux
    below), which does nothing where SELinux is off. `podman compose` is not a second implementation: it executes
    whatever compose provider it finds, which on a host set up this way is that same binary, and it says so on stderr.
+   `--env-file .env` is how compose reads the deployment's `VALKEY_PASSWORD` (issue #468) into the Valkey's
+   environment. Measured on Fedora 44 through root's Podman socket with compose 5.5.1: a first `up -d` from a `.env`
+   without the key started Valkey with no password as before; the same command after the key was added recreated the
+   container, which then answered `NOAUTH` to a client with no password and kept the key written before (the volume
+   is kept), and no command line on the host carried the password meanwhile.
+   In a folder `/dispatch setup` laid out (PR #475's review), the file sits in `deploy/` of that folder and every
+   command names the folder's project, `docker compose -p <folder name> ...`, since compose otherwise names the
+   project after `deploy/` and every such folder would share one. The name is the folder's, as compose normalises a
+   directory name: lower case, only letters, digits, `_` and `-`, no leading `_` or `-` ("My Deploy.v2" is
+   `mydeployv2`). Two edge cases: a folder whose name has none of those characters (all non-ASCII, "日本") gets
+   `pi-dispatch`, where compose itself would refuse the folder's name; and a `COMPOSE_PROJECT_NAME` in the folder's
+   `.env` named the project of an earlier setup's copy, which `-p` overrides, so set `-p` to that value if you
+   relied on it. Where `pi-dispatch up` had already started the deployment's Valkey, setup also writes
+   `deploy/docker-compose.valkey.yml`, which gives compose's Valkey that same volume (`pi-dispatch-valkey-data`); the
+   commands then carry `-f deploy/docker-compose.valkey.yml` too, and `up` itself starts compose's Valkey there. The
+   Valkey is published on `PI_VALKEY_PORT` (VALKEY_URL's port, 6379 unset), which `up` and setup write into `.env`
+   when it is not 6379. Neither ever stops, removes or starts beside a Valkey that is not this folder's: `up` labels
+   its `pi-dispatch-valkey` with the folder, and a container on `pi-dispatch-valkey-data` that another deployment
+   started makes both refuse, naming it (stop that deployment's Valkey first, or give this folder a Valkey of its own:
+   compose without the override keeps its own volume). The volume itself carries the folder that created it, and
+   the queue inside records it too (`pi-dispatch:owner`): another folder's is never used, and a volume from before the
+   label is used only after `up` asks (even under `--yes`), since its queue cannot be attributed to a folder.
    One file for both daemons is not one file for two stacks: it fixes the proxy's container name, the egress
    network's name and Valkey's published port, so one host runs one of these stacks (true on Docker too).
 8. **Run `pi-dispatch up`, then `pi-dispatch doctor --live`.** doctor names the runtime (`local: the daemon is Podman
@@ -1037,6 +1059,44 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
      `.env` is read with the same reader as the service's other keys: a line systemd reads differently (a lone CR, a
      NUL, invalid UTF-8) is named, and then only this account's own Valkey is used. `--force`
      does not take it: it replaces changed files, and taking another account's queue must never ride along with that.
+     A shared Valkey also takes its owner's password (below).
+   - **The password** (issue #468). The owner rule stops an accident; it does not stop another account that
+     connects on purpose, since every account on the host shares loopback, and a Valkey without a password let it
+     read the queued jobs (their task text, their repositories), enqueue work this account's worker runs with this
+     account's provider key, or delete the queue. So the Valkey this project starts has a password of its own,
+     `VALKEY_PASSWORD` in the deployment's `.env`. `pi-dispatch init` writes a new one (64 hex characters) into the
+     `.env` it creates, which it creates readable by the account alone (mode 0600); `service install` and `up` add
+     one to a deployment that has none, never over a value, and narrow the file to its owner. The value is never
+     printed: doctor and the worker's log say only whether one is set. Both commands copy it into
+     `~/.config/pi-dispatch/valkey.env` (0600, the one key), which the Quadlet unit reads
+     (`EnvironmentFile=%h/.config/pi-dispatch/valkey.env`); the container gets it in its ENVIRONMENT, and its start
+     command hands it to `valkey-server` as configuration on stdin (`valkey-server -`), written by the shell's own
+     `echo` to a 0600 temp file that is opened and deleted before the image's entrypoint runs. Never as
+     `--requirepass`: the image's PID 1 is `tini`, which keeps its whole command line for the life of the container,
+     and every account on the host read `--requirepass <password>` in `/proc/<pid>/cmdline` (measured on Podman 5.8.1
+     and 4.9.3; the image's `VALKEY_EXTRA_FLAGS` appends to that same command line). With the value empty or unset
+     the same command starts Valkey without one, as before. Copying the unit by hand? Create that file first
+     (`install -m 600 /dev/null ~/.config/pi-dispatch/valkey.env`, then one line `VALKEY_PASSWORD=<the .env's value>`):
+     the unit does not start without it. Every client sends the password through the one connection module: the
+     worker and the receiver from their environment (the service's loader puts the `.env` there), a CLI command run
+     in the deployment folder from its `.env`, the admin panel from the `.env` of the deployment its pointer names
+     (the pointer itself never holds it). Another account connecting without it gets `NOAUTH`, and a client of this
+     deployment that lacks it, or sends the wrong one, is refused as a configuration error naming
+     `VALKEY_PASSWORD`: the worker exits 2, `pi-dispatch run` and the receiver say so, doctor prints a ✗.
+   - **The upgrade** of a deployment installed before the password: `pi-dispatch service install --force` as the
+     account. It writes a password into `.env`, the password file and the new unit, restarts the Valkey with it
+     (the queue in the `pi-dispatch-valkey-data` volume is kept: the stop is a SIGTERM, on which Valkey writes its AOF
+     out), then restarts the worker and receiver units that were running, since they read the password only at
+     start. A job running at that moment is interrupted, so pause first (`pi-dispatch pause`, wait for active jobs,
+     then `resume`). `up` on this venue leaves a running Valkey alone, as it always has, so doctor names
+     `service install --force` as the step, and until then warns that the Valkey answers a client that sends no
+     password.
+   - **A shared Valkey** (`PI_VALKEY_SHARED=1`): put `VALKEY_PASSWORD=<that Valkey's password>` in the deployment's
+     `.env`; its owner gives it. `service install` and `up` generate none for a shared Valkey, since one made here
+     would reach no Valkey. Without it every command refuses, naming the missing password.
+   - An operator's own `VALKEY_URL` (another host, TLS, a managed Valkey with its password in the URL) is left as it
+     is: the URL's password wins, none is generated for it, and the `.env`'s `VALKEY_PASSWORD` is sent only to a
+     Valkey on this machine's loopback, never to one a shell's `VALKEY_URL` names elsewhere.
 
    A `VALKEY_URL` line in `.env` that the loaders may read differently is a ✗ of its own in doctor, which then contacts
    no Valkey at all (no reachability probe, no fleet read), since the default it would fall back to may be another
@@ -1052,7 +1112,7 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    account's first, else root's where root may hold it), and refuses another account's Valkey on every venue. Only
    whether root's is refused depends on the deployment (the environment's `PI_BACKENDS`, else the `.env` in the folder
    the command runs in). The receiver judges before it listens and exits 2 on a refusal. The compose file is docker-only. Without `local` in `PI_BACKENDS`, doctor's fix for an unreachable Valkey points at `up` and
-   `service install`, and `doctor --fix` offers no `docker run` for it.
+   `service install`, and `doctor --fix` offers no `docker run` for it (on no venue since issue #468: its Valkey needs the deployment's password in a child's environment, and doctor hands no program anything from `.env`).
 8. **`PI_BACKENDS=podman`** in `.env` (the setup wizard, `/dispatch setup`, writes it when you choose rootless Podman
    at its runtime step), then start the worker, and run `pi-dispatch doctor` and
    `pi-dispatch doctor --live` as the same account, from the deployment folder. doctor reads `PI_BACKENDS`,

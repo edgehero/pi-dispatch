@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_EGRESS_PROXY } from "../src/egress.mjs";
-import { ALL_QUADLET_FILES, DETACH_GATE_READ_MAX_BUFFER, DETACH_GATE_READ_TIMEOUT_MS, NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_NOW_FORMAT, detachBlockedSentence, makeDetachGate, runtimeFromFacts, QUADLET_FILES, managerEnvRefusal, unquoteShowEnvironment, planStack, podmanNeedsNetnsKeeper, quadletDir, readStackKeys, stackComponents, STACK_KEYS, decideValkey, describeRollBack, judgeValkeyListeners, listenerUids, pinnedValkeyUrl, reachedAddress, readSubuidRanges, readValkeyKeys, resolveWorkerValkey, rollBackWrites, subordinateUids, unplainCause, valkeyTarget } from "../src/podman-stack.mjs";
+import { ALL_QUADLET_FILES, DETACH_GATE_READ_MAX_BUFFER, DETACH_GATE_READ_TIMEOUT_MS, NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_NOW_FORMAT, detachBlockedSentence, makeDetachGate, runtimeFromFacts, QUADLET_FILES, managerEnvRefusal, unquoteShowEnvironment, planStack, podmanNeedsNetnsKeeper, quadletDir, readStackKeys, stackComponents, STACK_KEYS, decideValkey, describeRollBack, judgeValkeyListeners, listenerUids, pinnedValkeyUrl, reachedAddress, readSubuidRanges, readValkeyKeys, resolveWorkerValkey, rollBackWrites, subordinateUids, unplainCause, valkeyTarget, journalWrite, valkeyPasswordRestartWarning } from "../src/podman-stack.mjs";
 import { SYSTEMD_259_ENV_BYTES, SYSTEMD_259_ENV_FILES } from "./helpers/systemd-env-259.mjs";
 import { systemdEnvFile } from "./helpers/systemd-env-parse.mjs";
 import { runService } from "../src/service.mjs";
@@ -23,6 +23,9 @@ const HOME = "/home/tester";
 const QDIR = "/home/tester/.config/containers/systemd";
 const USER_UNIT = "/home/tester/.config/systemd/user/pi-dispatch-worker.service";
 const ENV_PATH = `${DEPLOY_AT}/.env`;
+// Issue #468: the password the harnesses generate, and where the Quadlet Valkey reads it.
+const TEST_PASSWORD = "0123456789abcdef".repeat(4);
+const VALKEY_ENV = "/home/tester/.config/pi-dispatch/valkey.env";
 const ALLOWLIST = `${DEPLOY_AT}/egress-allowlist.conf`;
 
 const template = (name) => readFileSync(join(DEPLOY_DIR, name), "utf8");
@@ -190,7 +193,10 @@ const realReadFs = (files = {}) => {
 test("stackComponents: Valkey only without local; the proxy only while armed and only under the default name; the keeper whenever armed", () => {
 	const podmanOnly = { localUsed: false, podmanUsed: true };
 	const mixed = { localUsed: true, podmanUsed: true };
-	assert.deepEqual(stackComponents({ venues: podmanOnly, env: {}, includeValkey: true, armed: true }), { valkey: true, proxy: true, keeper: true, notes: [], valkeyPort: 6379 });
+	assert.deepEqual(stackComponents({ venues: podmanOnly, env: {}, includeValkey: true, armed: true }), { valkey: true, proxy: true, keeper: true, notes: [], valkeyPort: 6379, valkeyPassword: null });
+	// Issue #468: the password rides with the Valkey, and never without it.
+	assert.equal(stackComponents({ venues: podmanOnly, env: {}, includeValkey: true, armed: false, valkeyPassword: TEST_PASSWORD }).valkeyPassword, TEST_PASSWORD);
+	assert.equal(stackComponents({ venues: mixed, env: {}, includeValkey: true, armed: false, valkeyPassword: TEST_PASSWORD }).valkeyPassword, null);
 	assert.equal(stackComponents({ venues: mixed, env: {}, includeValkey: true, armed: true }).valkey, false, "docker's Valkey owns the port when local is blessed");
 	assert.equal(stackComponents({ venues: mixed, env: {}, includeValkey: true, armed: true }).keeper, true, "podman jobs on a mixed host disconnect the proxy too");
 	const off = stackComponents({ venues: podmanOnly, env: {}, includeValkey: true, armed: false });
@@ -208,8 +214,11 @@ test("planStack: the proxy mounts an ACCOUNT-OWNED copy of the rules and the dep
 	const fs = realReadFs();
 	const plan = planStack({ components: { valkey: true, proxy: true }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs });
 	assert.equal(plan.dir, QDIR);
+	// Issue #468: the Valkey's 0600 password file sits right before its unit, which reads it at start.
 	assert.deepEqual(plan.files.map((f) => f.path), [
-		...[QUADLET_FILES.valkeyNetwork, QUADLET_FILES.valkey, QUADLET_FILES.egressNetwork].map((q) => join(QDIR, q.file)),
+		join(QDIR, QUADLET_FILES.valkeyNetwork.file),
+		VALKEY_ENV,
+		...[QUADLET_FILES.valkey, QUADLET_FILES.egressNetwork].map((q) => join(QDIR, q.file)),
 		CONF_COPY,
 		join(QDIR, QUADLET_FILES.proxy.file),
 	]);
@@ -303,10 +312,13 @@ function svc({ argv = ["install"], files = {}, plan = {}, listening = false, lis
 	const err = [];
 	const store = new Map(Object.entries(files));
 	const writes = [];
+	// Issue #468: file modes as the fake fs keeps them (the Valkey password file is written 0600, .env narrowed).
+	const modes = new Map();
 	const deps = {
 		env,
 		platform,
 		euid: 1234,
+		newPassword: () => TEST_PASSWORD,
 		execPath: "/fake/node",
 		cwd,
 		moduleDir: WORKER_SRC,
@@ -339,10 +351,11 @@ function svc({ argv = ["install"], files = {}, plan = {}, listening = false, lis
 				}
 				return store.has(p) ? store.get(p) : readFileSync(p, enc);
 			},
-			writeFileSync: (p, d) => {
+			writeFileSync: (p, d, opts) => {
 				writes.push(p);
 				// A stored Error for a path is one this account cannot write (issue #464's injected write failure).
 				if (failWrites.has(p)) throw failWrites.get(p);
+				if (!store.has(p)) modes.set(p, opts?.mode ?? 0o644);
 				store.set(p, d);
 			},
 			mkdirSync: () => {},
@@ -350,10 +363,24 @@ function svc({ argv = ["install"], files = {}, plan = {}, listening = false, lis
 				if (failUnlinks.has(p)) throw failUnlinks.get(p);
 				store.delete(p);
 			},
+			chmodSync: (p, m) => {
+				modes.set(p, m);
+			},
+			statSync: (p) => {
+				if (!store.has(p)) throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+				return { mode: 0o100000 | (modes.get(p) ?? 0o644), uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
+			},
+			renameSync: (from, to) => {
+				writes.push(to);
+				store.set(to, store.get(from));
+				modes.set(to, modes.get(from));
+				store.delete(from);
+				modes.delete(from);
+			},
 		},
 		...extra,
 	};
-	return { run: () => runService(argv, deps), calls, store, writes, text: () => out.join(""), errText: () => err.join(""), failWrites, failUnlinks, probed };
+	return { run: () => runService(argv, deps), calls, store, writes, modes, text: () => out.join(""), errText: () => err.join(""), failWrites, failUnlinks, probed };
 }
 
 test("service install (user scope, podman in .env, egress armed): writes the Quadlets, starts them (never enables), and the worker Wants/After them", async () => {
@@ -805,8 +832,11 @@ test("service install on podman: a write that fails puts back every file this ru
 	assert.equal(await h.run(), 1);
 	const valkey = join(QDIR, QUADLET_FILES.valkey.file);
 	const network = join(QDIR, QUADLET_FILES.valkeyNetwork.file);
-	assert.equal(h.errText(), `error: write ${USER_UNIT} failed (EACCES: permission denied, open '${USER_UNIT}'), so nothing was installed: rolled back what this run wrote (removed ${valkey}, ${network}); no file of this run remains. Fix it, then re-run this install\n`, "the refused unit write changed nothing, so only the stack's two files are named");
-	for (const p of [valkey, network, USER_UNIT]) assert.ok(!h.store.has(p), `${p} is gone`);
+	// Issue #468: the password this install generated into .env and the Valkey's password file are this run's too, and
+	// put back with the rest (.env to the bytes it had, the password file removed).
+	assert.equal(h.errText(), `error: write ${USER_UNIT} failed (EACCES: permission denied, open '${USER_UNIT}'), so nothing was installed: rolled back what this run wrote (removed ${valkey}, ${VALKEY_ENV}, ${network}; put back the earlier ${ENV_PATH}); no file of this run remains. Fix it, then re-run this install\n`, "the refused unit write changed nothing, so only the stack's files and .env are named");
+	for (const p of [valkey, network, VALKEY_ENV, USER_UNIT]) assert.ok(!h.store.has(p), `${p} is gone`);
+	assert.equal(h.store.get(ENV_PATH), `${PODMAN_ENV}PI_EGRESS=0\n`, ".env has no password line left from the failed run");
 	assert.deepEqual(h.calls.filter((c) => c[0] === "systemctl" && c[2] !== "show-environment"), [], "nothing was started or reloaded");
 });
 
@@ -821,8 +851,9 @@ test("service install --force on podman: a failed write puts back the files it r
 	assert.equal(h.store.get(valkey), "# an operator's edit\n", "the replaced file has its old bytes back");
 	assert.equal(h.store.get(USER_UNIT), "old unit\n");
 	assert.ok(h.store.has(network), "the one that could not be removed is still there");
-	assert.match(h.errText(), new RegExp(`\\(put back the earlier ${valkey.replaceAll(".", "\\.")}\\); these could NOT be put back and remain as this run wrote them: ${network.replaceAll(".", "\\.")} \\(EBUSY: resource busy\\)\\. Fix it`), "the refused write changed nothing, so it is not reported as left");
-	assert.deepEqual(h.calls.filter((c) => c[0] === "systemctl" && c[2] !== "show-environment"), []);
+	assert.match(h.errText(), new RegExp(`\\(removed ${VALKEY_ENV.replaceAll(".", "\\.")}; put back the earlier ${valkey.replaceAll(".", "\\.")}, ${ENV_PATH.replaceAll(".", "\\.")}\\); these could NOT be put back and remain as this run wrote them: ${network.replaceAll(".", "\\.")} \\(EBUSY: resource busy\\)\\. Fix it`), "the refused write changed nothing, so it is not reported as left");
+	// Issue #468: an installed Valkey getting a new password asks which clients run (read-only), and nothing else ran.
+	assert.deepEqual(h.calls.filter((c) => c[0] === "systemctl" && c[2] !== "show-environment" && c[2] !== "is-active"), []);
 });
 
 test("service install on podman: a stack command that fails puts back only the worker unit and names the stack files that remain (#464)", async () => {
@@ -832,7 +863,8 @@ test("service install on podman: a stack command that fails puts back only the w
 	const network = join(QDIR, QUADLET_FILES.valkeyNetwork.file);
 	assert.ok(!h.store.has(USER_UNIT), "the worker unit is not left behind");
 	assert.ok(h.store.has(valkey) && h.store.has(network), "the stack's files stay: its units run from them");
-	assert.match(h.errText(), new RegExp(`The stack files this run wrote remain, since its units run from them: ${network.replaceAll(".", "\\.")}, ${valkey.replaceAll(".", "\\.")}\\.`));
+	// Issue #468: .env keeps the password this run generated, and the password file stays with the unit that reads it.
+	assert.match(h.errText(), new RegExp(`The stack files this run wrote remain, since its units run from them: ${ENV_PATH.replaceAll(".", "\\.")}, ${network.replaceAll(".", "\\.")}, ${VALKEY_ENV.replaceAll(".", "\\.")}, ${valkey.replaceAll(".", "\\.")}\\.`));
 	assert.equal(h.calls.filter((c) => c.join(" ") === "systemctl --user daemon-reload").length, 2, "one reload before the start, one after the unit was put back");
 	// Gate round 1: the rollback here is of the worker unit only, so it never claims that no file of this run remains.
 	assert.doesNotMatch(h.errText(), /no file of this run remains/);
@@ -879,7 +911,7 @@ test("service install: an enable that fails after every write names the files th
 	assert.equal(await h.run(), 1);
 	const valkey = join(QDIR, QUADLET_FILES.valkey.file);
 	const network = join(QDIR, QUADLET_FILES.valkeyNetwork.file);
-	assert.ok(h.errText().endsWith(`(files this run wrote, which remain: ${network}, ${valkey}, ${USER_UNIT})\n`), h.errText());
+	assert.ok(h.errText().endsWith(`(files this run wrote, which remain: ${ENV_PATH}, ${network}, ${VALKEY_ENV}, ${valkey}, ${USER_UNIT})\n`), h.errText());
 });
 
 test("rollBackWrites: the FIRST record of a path is what is put back, and describeRollBack says what remains", () => {
@@ -1021,11 +1053,14 @@ test("D3: a hand-started proxy is foreign too, and --force warns that running jo
 });
 
 test("D5: --force over a changed .container RESTARTS that unit (start is a no-op on an active one), and warns for the proxy", async () => {
-	const planned = planStack({ components: { valkey: true, proxy: true, keeper: true }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs() });
-	const files = { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "x\n", [join(QDIR, QUADLET_FILES.valkey.file)]: planned.files[1].text };
+	// Issue #468: a deployment that already has its password, and a password file that already holds it, so only the
+	// proxy's file differs.
+	const planned = planStack({ components: { valkey: true, proxy: true, keeper: true, valkeyPassword: TEST_PASSWORD }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs() });
+	const files = { [ENV_PATH]: `${PODMAN_ENV}VALKEY_PASSWORD=${TEST_PASSWORD}\n`, [ALLOWLIST]: "x\n" };
 	for (const f of planned.files) files[f.path] = f.text;
 	files[join(QDIR, QUADLET_FILES.proxy.file)] = "[Container]\nImage=old\n";
 	const h = svc({ argv: ["install", "--force"], files, listening: true });
+	h.modes.set(VALKEY_ENV, 0o600);
 	assert.equal(await h.run(), 0, h.errText());
 	assert.deepEqual(h.calls.filter((c) => (c[0] === "systemctl" && c[2] !== "show-environment")).slice(0, 3), [
 		["systemctl", "--user", "daemon-reload"],
@@ -1043,7 +1078,9 @@ test("D5: --force over a changed .container RESTARTS that unit (start is a no-op
 test("planStack (#458): the keeper's two files follow the proxy's, the rules copy stays right before the proxy, and the keeper is started", () => {
 	const all = planStack({ components: { valkey: true, proxy: true, keeper: true }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs() });
 	assert.deepEqual(all.files.map((f) => f.path), [
-		...[QUADLET_FILES.valkeyNetwork, QUADLET_FILES.valkey, QUADLET_FILES.egressNetwork].map((q) => join(QDIR, q.file)),
+		join(QDIR, QUADLET_FILES.valkeyNetwork.file),
+		VALKEY_ENV,
+		...[QUADLET_FILES.valkey, QUADLET_FILES.egressNetwork].map((q) => join(QDIR, q.file)),
 		CONF_COPY,
 		...[QUADLET_FILES.proxy, QUADLET_FILES.keeperNetwork, QUADLET_FILES.keeper].map((q) => join(QDIR, q.file)),
 	]);
@@ -1703,4 +1740,122 @@ test("makeDetachGate reads ONCE per pass, an unanswered read included, and takes
 	// The clause each token becomes names the CLI.
 	assert.match(detachBlockedSentence("keeper-not-holding", "docker"), /rootless Podman 4\.x this shell's docker CLI reaches/);
 	assert.match(detachBlockedSentence("runtime-unreadable", "podman"), /this shell's podman CLI could not say which container runtime/);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Issue #468: the Quadlet Valkey's password
+// ---------------------------------------------------------------------------------------------------------------------
+
+test("planStack (#468): the Valkey's password file is planned 0600 before its unit, and a change or a wide mode restarts Valkey and only then its running clients", () => {
+	const components = { valkey: true, proxy: false, keeper: false, valkeyPassword: TEST_PASSWORD };
+	const fresh = planStack({ components, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs() });
+	const secret = fresh.files.find((f) => f.kind === "secret");
+	assert.deepEqual([secret.path, secret.mode, secret.state, secret.restarts, secret.unit], [VALKEY_ENV, 0o600, "new", "pi-dispatch-valkey.service", null]);
+	assert.match(secret.text, new RegExp(`^VALKEY_PASSWORD=${TEST_PASSWORD}$`, "m"));
+	assert.ok(fresh.files.indexOf(secret) < fresh.files.findIndex((f) => f.path.endsWith("pi-dispatch-valkey.container")), "written before the unit that reads it");
+	assert.equal(planStack({ components: { ...components, valkey: false }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs() }).files.some((f) => f.kind === "secret"), false, "no Valkey, no password file");
+	assert.equal(fresh.clientsRestarted.length, 0);
+	// An installed Valkey (its unit and password file on disk) whose password file now changes: Valkey restarts with it,
+	// then the running clients the caller named, which read VALKEY_PASSWORD only at start.
+	const unit = fresh.files.find((f) => f.path.endsWith("pi-dispatch-valkey.container"));
+	const net = fresh.files.find((f) => f.path.endsWith("pi-dispatch-valkey.network"));
+	const installed = (secretText, mode = 0o600) => {
+		const fs = realReadFs({ [unit.path]: unit.text, [net.path]: net.text, [VALKEY_ENV]: secretText });
+		fs.statSync = (p) => ({ mode: 0o100000 | (p === VALKEY_ENV ? mode : 0o644) });
+		return fs;
+	};
+	const clients = ["pi-dispatch-worker.service", "pi-dispatch-receiver.service"];
+	const upgrade = planStack({ components, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: installed("VALKEY_PASSWORD=\n"), restartAfterValkey: clients });
+	assert.deepEqual(upgrade.restart, ["pi-dispatch-valkey.service"]);
+	assert.deepEqual(upgrade.actions.slice(-2).map((a) => a.argv), [["systemctl", "--user", "restart", "pi-dispatch-valkey.service"], ["systemctl", "--user", "try-restart", ...clients]], "the clients after Valkey, never before");
+	assert.match(valkeyPasswordRestartWarning(upgrade), /^pi-dispatch-valkey\.service restarts with the password in \/home\/tester\/\.config\/pi-dispatch\/valkey\.env \(the queue in its volume is kept\), and pi-dispatch-worker\.service and pi-dispatch-receiver\.service restart after it to send that password\. A job running right now is interrupted: pause first/);
+	assert.ok(!valkeyPasswordRestartWarning(upgrade).includes(TEST_PASSWORD));
+	// The same password, the file 0600: nothing moves, no client is touched, nothing is said.
+	const same = planStack({ components, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: installed(secret.text), restartAfterValkey: clients });
+	assert.deepEqual([same.restart, same.clientsRestarted, valkeyPasswordRestartWarning(same)], [[], [], null]);
+	assert.ok(!same.actions.some((a) => a.kind === "write"));
+	// The same text in a file another account can read is rewritten (and narrowed): a password file must not stay wide.
+	const wide = planStack({ components, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: installed(secret.text, 0o644) });
+	assert.equal(wide.files.find((f) => f.kind === "secret").state, "changed");
+});
+
+test("journalWrite (#468): a file with a mode is narrowed BEFORE the new text goes in, and created with it", () => {
+	const ops = [];
+	const store = new Map([["/x/valkey.env", "VALKEY_PASSWORD=\n"]]);
+	const fs = { existsSync: (p) => store.has(p), readFileSync: (p) => store.get(p), writeFileSync: (p, d, o) => (ops.push(["write", p, o?.mode]), store.set(p, d)), chmodSync: (p, m) => ops.push(["chmod", p, m]) };
+	const journal = [];
+	journalWrite(fs, journal, "/x/valkey.env", `VALKEY_PASSWORD=${TEST_PASSWORD}\n`, { mode: 0o600 });
+	assert.deepEqual(ops, [["chmod", "/x/valkey.env", 0o600], ["write", "/x/valkey.env", 0o600], ["chmod", "/x/valkey.env", 0o600]]);
+	assert.deepEqual(journal, [{ path: "/x/valkey.env", existed: true, previous: "VALKEY_PASSWORD=\n" }]);
+	ops.length = 0;
+	journalWrite(fs, null, "/x/new.env", "V=1\n", { mode: 0o600 });
+	assert.deepEqual(ops, [["write", "/x/new.env", 0o600], ["chmod", "/x/new.env", 0o600]]);
+	ops.length = 0;
+	journalWrite(fs, null, "/x/unit", "u\n");
+	assert.deepEqual(ops, [["write", "/x/unit", undefined]], "a file without a mode is written as before");
+});
+
+test("service install on podman (#468): a deployment without a password gets one in .env (0600) and in the Valkey's 0600 file, never printed; render names the file only", async () => {
+	const h = svc({ files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\n` } });
+	assert.equal(await h.run(), 0, h.errText());
+	assert.equal(h.store.get(ENV_PATH), `${PODMAN_ENV}PI_EGRESS=0\nVALKEY_PASSWORD=${TEST_PASSWORD}\n`);
+	assert.equal(h.modes.get(ENV_PATH), 0o600, ".env narrowed to this account");
+	assert.match(h.store.get(VALKEY_ENV), new RegExp(`^VALKEY_PASSWORD=${TEST_PASSWORD}$`, "m"));
+	assert.equal(h.modes.get(VALKEY_ENV), 0o600);
+	assert.ok(h.writes.indexOf(VALKEY_ENV) < h.writes.indexOf(join(QDIR, QUADLET_FILES.valkey.file)), "the password file before the unit that reads it");
+	assert.match(h.text(), /^generated VALKEY_PASSWORD into \/srv\/pi-deploy\/\.env \(32 random bytes, hex; the value is not shown; the file is now readable by this account only\)$/m);
+	assert.ok(!h.text().includes(TEST_PASSWORD) && !h.errText().includes(TEST_PASSWORD), "the value is never printed");
+	// A second install finds it and keeps it: never generated over a value.
+	const again = svc({ argv: ["install", "--force"], files: { [ENV_PATH]: h.store.get(ENV_PATH), [VALKEY_ENV]: h.store.get(VALKEY_ENV), [join(QDIR, QUADLET_FILES.valkey.file)]: h.store.get(join(QDIR, QUADLET_FILES.valkey.file)), [join(QDIR, QUADLET_FILES.valkeyNetwork.file)]: h.store.get(join(QDIR, QUADLET_FILES.valkeyNetwork.file)) }, listening: true, extra: { newPassword: () => "f".repeat(64) } });
+	again.modes.set(VALKEY_ENV, 0o600);
+	assert.equal(await again.run(), 0, again.errText());
+	assert.match(again.store.get(ENV_PATH), new RegExp(`^VALKEY_PASSWORD=${TEST_PASSWORD}$`, "m"));
+	assert.doesNotMatch(again.text(), /generated VALKEY_PASSWORD/);
+	assert.ok(!again.calls.some((c) => c.join(" ").includes("restart")), "nothing about the password changed, so nothing restarts");
+	// render: the file is named, its value never shown, and nothing is written.
+	const r = svc({ argv: ["render"], files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\nVALKEY_PASSWORD=${TEST_PASSWORD}\n` } });
+	assert.equal(await r.run(), 0, r.errText());
+	assert.match(r.text(), /# → \/home\/tester\/\.config\/pi-dispatch\/valkey\.env \(mode 0600: VALKEY_PASSWORD for the Quadlet Valkey, from \.env or generated into it at install; the value is not shown\)/);
+	assert.ok(!r.text().includes(TEST_PASSWORD), "render never prints the password");
+	assert.deepEqual(r.writes, []);
+	assert.match(r.text(), /^EnvironmentFile=%h\/\.config\/pi-dispatch\/valkey\.env$/m, "the unit itself is printed as before");
+});
+
+test("service install on podman (#468): the upgrade of a Valkey that ran without a password restarts it with one, then the running worker and receiver", async () => {
+	// The pre-#468 install: its unit and network on disk (the old unit text), no password file, no VALKEY_PASSWORD.
+	const files = { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\n`, [join(QDIR, QUADLET_FILES.valkey.file)]: "[Container]\nExec=valkey-server --appendonly yes\n", [join(QDIR, QUADLET_FILES.valkeyNetwork.file)]: template(QUADLET_FILES.valkeyNetwork.file), [USER_UNIT]: "old\n" };
+	const h = svc({ argv: ["install", "--force"], files, listening: true, plan: { "systemctl --user is-active pi-dispatch-worker.service": { code: 0, output: "active\n" }, "systemctl --user is-active pi-dispatch-receiver.service": { code: 3, output: "inactive\n" } } });
+	assert.equal(await h.run(), 0, h.errText());
+	const sys = h.calls.filter((c) => c[0] === "systemctl" && !["show-environment", "is-active"].includes(c[2])).map((c) => c.slice(2).join(" "));
+	assert.deepEqual(sys.slice(0, 3), ["daemon-reload", "restart pi-dispatch-valkey.service", "try-restart pi-dispatch-worker.service"], "Valkey with its password first, then the one running client");
+	assert.match(h.text(), /⚠ pi-dispatch-valkey\.service restarts with the password in \/home\/tester\/\.config\/pi-dispatch\/valkey\.env \(the queue in its volume is kept\), and pi-dispatch-worker\.service restarts after it/);
+	assert.match(h.text(), /^restarted pi-dispatch-valkey\.service, because this install replaced \/home\/tester\/\.config\/pi-dispatch\/valkey\.env and \/home\/tester\/\.config\/containers\/systemd\/pi-dispatch-valkey\.container$/m);
+	assert.match(h.store.get(ENV_PATH), new RegExp(`^VALKEY_PASSWORD=${TEST_PASSWORD}$`, "m"));
+});
+
+test("service install on podman (#468): a shared or operator-owned Valkey gets no password generated, and a password Valkey could not take is refused before anything is written", async () => {
+	// Shared on purpose: another account's Valkey, its password that account's to give.
+	const shared = svc({ files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\nPI_VALKEY_SHARED=1\n` }, listening: true, listenerUid: 1235 });
+	assert.equal(await shared.run(), 0, shared.errText());
+	assert.doesNotMatch(shared.store.get(ENV_PATH), /VALKEY_PASSWORD/);
+	assert.ok(!shared.store.has(VALKEY_ENV));
+	// A remote VALKEY_URL: the operator's own, left as it is.
+	const remote = svc({ files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\nVALKEY_URL=redis://queue.lan:6379\n` } });
+	assert.equal(await remote.run(), 0, remote.errText());
+	assert.doesNotMatch(remote.store.get(ENV_PATH), /VALKEY_PASSWORD/);
+	// A value the start script cannot hand to Valkey (a space, a quote): refused, named, nothing written.
+	const bad = svc({ files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\nVALKEY_PASSWORD='not ok here'\n` } });
+	assert.equal(await bad.run(), 1);
+	assert.match(bad.errText(), /VALKEY_PASSWORD in \/srv\/pi-deploy\/\.env cannot be handed to Valkey: it has a character other than A-Z, a-z, 0-9, - and _/);
+	assert.ok(!bad.errText().includes("not ok here"));
+	assert.deepEqual(bad.writes, []);
+});
+
+test("service uninstall (#468): the Valkey's password file goes with its unit; the password stays in .env for a re-install", async () => {
+	const files = { [ENV_PATH]: `VALKEY_PASSWORD=${TEST_PASSWORD}\n`, [VALKEY_ENV]: `VALKEY_PASSWORD=${TEST_PASSWORD}\n` };
+	for (const q of [QUADLET_FILES.valkey, QUADLET_FILES.valkeyNetwork]) files[join(QDIR, q.file)] = "q";
+	const h = svc({ argv: ["uninstall"], files });
+	assert.equal(await h.run(), 0, h.errText());
+	assert.ok(!h.store.has(VALKEY_ENV));
+	assert.equal(h.store.get(ENV_PATH), `VALKEY_PASSWORD=${TEST_PASSWORD}\n`);
 });

@@ -117,7 +117,7 @@ function runtimeUnavailable(venue, gate) {
  */
 function egressProxyFix(venue) {
 	if (venue === PODMAN_BACKEND) return "Start it under the worker account's own rootless podman, on a named bridge network (docs/podman.md)";
-	return "Start it with `docker compose -f deploy/docker-compose.yml --profile egress up -d`";
+	return "Start it with `docker compose --env-file .env -f deploy/docker-compose.yml --profile egress up -d`";
 }
 
 export async function runJob(job, deps) {

@@ -38,14 +38,17 @@ import {
   reapplyDeploymentPointer,
   writePointer,
 } from "./deployment-pointer.mjs";
-import { DEPLOYMENT_SCAFFOLD_FILES, readQueueState, resolvePaths, writeTriggers } from "./read-model.mjs";
+import { DEPLOYMENT_SCAFFOLD_FILES, panelValkeyContext, readQueueState, resolvePaths, writeTriggers } from "./read-model.mjs";
 // The worker's own answers to "which venues does this list bless" and "set this .env key unless the operator already
 // did" (issue #430): one parse and one never-clobber writer, never a second copy of either in the admin.
 import { venuesOf } from "@edgehero/pi-dispatch/backends";
 import { envFileEditCheck, envFileEditRefusal, updateEnvFile } from "@edgehero/pi-dispatch/env-file";
 // The venue keys read exactly as `service install` and `up` read them (issue #430 review round 2, E4): the general
 // reader takes a line inside a quoted value that systemd continues for an assignment, and this one refuses that file.
-import { readStackKeys } from "@edgehero/pi-dispatch/podman-stack";
+import { readStackKeys, readValkeyKeys, valkeyTarget } from "@edgehero/pi-dispatch/podman-stack";
+import { COMPOSE_VALKEY_OVERRIDE, OWNER_MARKER_KEY, VALKEY_HANDOVER_OVERRIDE, VALKEY_PORT_KEY, adoptVolumeQuestion, composeArgs, composeHandoverPlan, composeProjectName, foreignMarkerRefusal, unadoptedVolumeRefusal, valkeyPortEnvDecision } from "@edgehero/pi-dispatch/valkey-auth";
+import { claimValkeyOwner } from "@edgehero/pi-dispatch/connection";
+import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
 // buildTriggerEntry is index.ts's on x run matrix -- the SAME builder the dialogs and the LLM tool use,
 // so the wizard's first trigger has exactly their shape. The import is circular on paper (index.ts
 // lazy-imports this module from its /dispatch handler and statically imports registerNudge below), but
@@ -289,6 +292,40 @@ const DOCKER_PROBE_TIMEOUT_MS = 10_000;
  * would freeze pi's render loop for as long as it hung. A timeout kill lands in the daemonDown branch,
  * which is exactly the right verdict for it.
  */
+// The folder's compose project and the hand-over override are the worker package's (valkey-auth.mjs), shared with
+// `pi-dispatch up`, which starts compose's Valkey in a folder this wizard handed over (PR #475's review).
+export { composeProjectName, VALKEY_HANDOVER_OVERRIDE };
+
+/**
+ * VALKEY_URL's port as the deployment's `.env` gives it (6379 unset, or for a URL this reader cannot use): the port
+ * compose's Valkey is published on (PI_VALKEY_PORT), so a hand-over never moves the queue off the port the worker
+ * dials (PR #475's review, measured: a 16495 deployment's queue went to 6379).
+ */
+export function composeValkeyPort(dir: string, fs: any): number {
+  try {
+    // Through issue #471's one reader (`deploymentServiceEnv`: one descriptor, nothing from a file another account can
+    // change), as the panel reads this folder's `.env`, never a second reader.
+    const read: any = deploymentServiceEnv({ env: {}, dir, keys: ["VALKEY_URL"], fs, platform: "linux" });
+    const target = valkeyTarget(read.fromFile.VALKEY_URL);
+    return target.error ? 6379 : target.port;
+  } catch {
+    return 6379;
+  }
+}
+
+/**
+ * One docker query for the hand-over's ownership questions (PR #475's review, round 3): `{ code, stdout, stderr }`, the
+ * shape `composeHandoverPlan` asks through. A docker that cannot be launched is `code: null`, which it never reads as ours.
+ */
+export function dockerQuery(cmd: string, args: string[], execFn: any = execFileSync): { code: number | null; stdout: string; stderr: string } {
+  try {
+    const stdout = execFn(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: DOCKER_PROBE_TIMEOUT_MS });
+    return { code: 0, stdout: String(stdout ?? ""), stderr: "" };
+  } catch (err: any) {
+    return { code: typeof err?.status === "number" ? err.status : null, stdout: String(err?.stdout ?? ""), stderr: String(err?.stderr ?? "") };
+  }
+}
+
 export function probeDocker(
   execFn: any = execFileSync,
 ): { ok: true } | { missing: true } | { daemonDown: string } {
@@ -593,6 +630,12 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
     existsSyncFn = (p: string) => fs.existsSync(p),
     probeDockerFn = probeDocker,
     probePodmanFn = probePodman,
+    // Whether `up`'s pi-dispatch-valkey container exists (the compose answer's hand-over; a seam for its test).
+    dockerQueryFn = dockerQuery,
+    // The volume gap (PR #475's review): the started Valkey's pi-dispatch:owner marker, recorded and read back through
+    // the project's one connection function with the deployment's credential; a seam so no test dials a Valkey.
+    // The context from that folder's `.env` through issue #471's one reader (`panelValkeyContext`), never a second reader.
+    claimOwnerFn = (url: string, folder: string, dir: string, env: any) => claimValkeyOwner(url, folder, { context: panelValkeyContext({ env, pointerDir: dir }) }),
     // The venue-key reading behind the wizard's own post-edit check (a seam for its test; see podmanWriteVerify).
     readBackFn = readStackKeys,
     initialDetection,
@@ -858,7 +901,7 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   // Credentials (step 9) mint the App; they do not make a delivery arrive. This step closes that gap,
   // which was previously left to the README: a receiver UNIT, a receiver CONTAINER, or polling (no
   // public URL at all). Every answer -- including Skip -- continues to the next step.
-  await offerTriggerEdge(dir, ctx, ui, notify, { fs, platform, env, execPath, cliPath, runAttachedFn, runtime });
+  await offerTriggerEdge(dir, ctx, ui, notify, { fs, platform, env, execPath, cliPath, runAttachedFn, runtime, dockerQueryFn, claimOwnerFn });
 
   // ── (11) a first trigger for the repo pi is sitting in ──────────────────────────────────────────
   // Offered only when ctx.cwd names an existing directory: the trigger's folder is the one hard
@@ -903,7 +946,7 @@ async function offerTriggerEdge(
   ctx: any,
   ui: any,
   notify: Notify,
-  { fs, platform, env, execPath, cliPath, runAttachedFn, runtime = "docker" }: any,
+  { fs, platform, env, execPath, cliPath, runAttachedFn, runtime = "docker", dockerQueryFn = dockerQuery, claimOwnerFn = async (_u: string, folder: string) => ({ owner: folder, claimed: false }) }: any,
 ): Promise<void> {
   const choice = await ui.select("How should GitHub events reach the queue?", [
     EDGE_SERVICE,
@@ -971,19 +1014,39 @@ async function offerTriggerEdge(
   }
 
   if (choice === EDGE_COMPOSE) {
-    // The compose file the RUNTIME ships (worker/deploy/docker-compose.yml, published in its `files`),
-    // copied beside the deployment's own config so `-f` names a stable path the operator can edit and
-    // keep. CREATE-ONLY, the import-pi.mjs:294 idiom the root package.json already follows: an operator
-    // who tuned their compose file must never lose it to a re-run of the wizard.
-    const src = join(runtimeDirFor(dir), "deploy", "docker-compose.yml");
-    const dest = join(dir, "docker-compose.yml");
-    if (fs.existsSync(dest)) {
-      notify?.(`${dest} already exists — keeping yours as it is (setup never overwrites a compose file you may have edited)`, "info");
-    } else {
+    // The compose file the RUNTIME ships (worker/deploy/docker-compose.yml, published in its `files`), copied into the
+    // deployment folder so `-f` names a stable path the operator can edit and keep. CREATE-ONLY, the import-pi.mjs:294
+    // idiom the root package.json already follows: an operator who tuned their compose file must never lose it to a
+    // re-run of the wizard.
+    //
+    // Into `<dir>/deploy/`, the layout the file is written for: its relative paths resolve against its OWN directory
+    // (the Compose spec, for `env_file` and bind mounts alike), and it names `../.env`, `../triggers.json`,
+    // `../egress-allowlist.conf` and `./egress-proxy.conf`. Copied to `<dir>/docker-compose.yml`, as it was until issue
+    // #468's follow-up, every `../` reached the folder ABOVE the deployment, so the receiver container read another
+    // directory's .env and triggers. Beside it goes the proxy's rules file its `./egress-proxy.conf` names, also
+    // create-only, so `--profile egress` finds it too. The command is then the one the docs give, run from `dir`:
+    // `docker compose --env-file .env -f deploy/docker-compose.yml ...`. Rewriting the paths on copy was the other way,
+    // rejected: a copy that differs from the shipped file cannot be compared with it or diffed against a newer one.
+    const deployDir = join(dir, "deploy");
+    const copies: Array<[string, string, boolean]> = [
+      [join(runtimeDirFor(dir), "deploy", "docker-compose.yml"), join(deployDir, "docker-compose.yml"), true],
+      [join(runtimeDirFor(dir), "deploy", "egress-proxy.conf"), join(deployDir, "egress-proxy.conf"), false],
+    ];
+    const dest = copies[0][1];
+    for (const [src, to, required] of copies) {
+      if (fs.existsSync(to)) {
+        notify?.(`${to} already exists: keeping yours as it is (setup never overwrites a file you may have edited)`, "info");
+        continue;
+      }
       try {
-        fs.copyFileSync(src, dest);
-        notify?.(`copied the runtime's compose file to ${dest}`, "info");
+        fs.mkdirSync(deployDir, { recursive: true });
+        fs.copyFileSync(src, to);
+        notify?.(`copied the runtime's ${src.split(/[\\/]/).pop()} to ${to}`, "info");
       } catch (err: any) {
+        if (!required) {
+          notify?.(`could not copy ${src}: ${err?.message ?? err}: only the egress profile needs it, not the receiver`, "warning");
+          continue;
+        }
         notify?.(
           `could not copy ${src}: ${err?.message ?? err} — the receiver profile needs that file; skipping this step (install the runtime first, or copy it by hand)`,
           "error",
@@ -991,24 +1054,163 @@ async function offerTriggerEdge(
         return;
       }
     }
-    // `--profile receiver` is what makes the receiver container OPT-IN: the same compose file's plain
-    // `up` is Valkey-only, which is what a worker-on-host deployment wants.
-    const args = ["compose", "-f", dest, "--profile", "receiver", "up", "-d"];
-    const ok = await ui.confirm(
-      "Start the receiver container",
-      `Run in ${dir}:\n  docker ${args.join(" ")}\n\nthe receiver profile reads ${join(dir, ".env")} — WEBHOOK_SECRET and the forge credentials must be in there, or the container refuses to boot.`,
-    );
-    if (!ok) {
-      notify?.(`later: docker ${args.join(" ")}  (in ${dir})`, "info");
+    // PR #475's review: the project is named after the FOLDER, as compose named the copy that sat at its top, since
+    // compose names a project after the directory of its first file and that is now `deploy/` for every deployment.
+    const project = composeProjectName(dir);
+    const legacy = join(dir, "docker-compose.yml");
+    if (fs.existsSync(legacy)) {
+      notify?.(
+        `${legacy} is an earlier setup's copy: its ../ paths reach the folder above ${dir}, so it is not used. It ran as compose project "${project}" (its volume ${project}_valkey-data), which the command below keeps with -p ${project}. ${dest} is the one to run; move any edits of yours there, then remove it`,
+        "warning",
+      );
+    }
+    // ONE Valkey for the worker and the receiver (PR #475's review). `up`, earlier in this wizard, started
+    // `pi-dispatch-valkey`, which is what the worker dials; compose's own `valkey` would then fail to bind that port,
+    // or, started, be a second Valkey the receiver (dialling `valkey:6379`) enqueues into while the worker drains the
+    // other. So while up's container EXISTS and is this deployment's (round 2: an override already on disk from an
+    // earlier pass is no reason to leave a second Valkey running; round 3: another deployment's is never touched), compose's valkey takes over up's VOLUME through an
+    // override (written once, create-only, then named in every command for this folder, `up`'s included): the images
+    // are pulled first, while up's Valkey still serves; then up's container is stopped (SIGTERM: the AOF is written out)
+    // and removed, and compose's valkey starts on the same data. Both are published on VALKEY_URL's port
+    // (PI_VALKEY_PORT). A compose that fails after the removal puts the override back as it found it and names the way
+    // back: `pi-dispatch up` starts pi-dispatch-valkey on its volume again.
+    // Rejected: pointing the containerised receiver at the host's Valkey, which is bound to 127.0.0.1 and so
+    // unreachable from a bridge network on Linux; and letting `up` skip its Valkey, which would ask the edge question
+    // before `up` and leave the worker without a queue until this step.
+    const override = join(dir, COMPOSE_VALKEY_OVERRIDE);
+    const hasOverride = fs.existsSync(override);
+    const port = composeValkeyPort(dir, fs);
+    // Round 3 of PR #475's review: up's container is handed over only when it is PROVABLY this deployment's (its label
+    // naming this folder, or, unlabelled, publishing this deployment's VALKEY_URL port), and nothing starts on its volume
+    // while a container that is not this deployment's mounts it; the rule is `composeHandoverPlan`, shared with a test on
+    // a real docker. Measured before it: this step stopped and removed ANOTHER deployment's pi-dispatch-valkey.
+    let real = dir;
+    try {
+      real = fs.realpathSync(dir);
+    } catch {
+      // Unresolvable: the folder as given.
+    }
+    const plan = await composeHandoverPlan({ dirs: [real, dir], port, override: hasOverride, query: (cmd: string, args: string[]) => dockerQueryFn(cmd, args) });
+    if (plan.refused) {
+      notify?.(`the receiver container was not started: ${plan.refused}`, "error");
       return;
     }
-    await runAttachedFn(ctx, {
-      title: `docker compose --profile receiver up -d — in ${dir}`,
-      argv0: "docker",
-      args,
-      cwd: dir,
-      env,
-    });
+    if (plan.note) notify?.(plan.note, "warning");
+    // An unlabelled pi-dispatch-valkey-data that no container of this deployment serves (the volume gap): its queue
+    // cannot be attributed, so compose's valkey starts on it only after this question, which nothing answers for the
+    // operator (the wizard never forwards --yes), and the marker then records the adoption.
+    if (plan.adopt && !(await ui.confirm("Adopt pi-dispatch-valkey-data?", adoptVolumeQuestion(real)))) {
+      notify?.(`the receiver container was not started: ${unadoptedVolumeRefusal()}`, "error");
+      return;
+    }
+    const handover = plan.handover;
+    const useOverride = hasOverride || handover;
+    const composeEnv = { ...env, [VALKEY_PORT_KEY]: String(port) };
+    const base = composeArgs({ project, override: useOverride });
+    // `--profile receiver` is what makes the receiver container OPT-IN: the same compose file's plain
+    // `up` is Valkey-only, which is what a worker-on-host deployment wants.
+    // `--env-file` names the deployment's .env for compose's own interpolation (issue #468): the Valkey in this file takes
+    // VALKEY_PASSWORD from it, and without it a compose run elsewhere started that Valkey with no password.
+    // Relative to `dir`, the cwd it runs in: exactly the command the docs give.
+    const args = [...base, "--profile", "receiver", "up", "-d"];
+    // The pull names the override only when it is ALREADY on disk: it runs before the override is written (the images do
+    // not depend on it), and compose refuses a -f that does not exist (measured on Fedora 44, compose 5.5.1: "compose
+    // file ... is invalid: ... no such file or directory", which stopped the hand-over at its first step).
+    const pull = [...composeArgs({ project, override: hasOverride }), "--profile", "receiver", "pull"];
+    const portPrefix = port !== 6379 ? `${VALKEY_PORT_KEY}=${port} ` : "";
+    const shown = `${portPrefix}docker ${args.join(" ")}`;
+    const shownPull = `${portPrefix}docker ${pull.join(" ")}`;
+    const writeLine = handover && !hasOverride ? `write ${override}:\n${VALKEY_HANDOVER_OVERRIDE.replace(/^/gm, "      ")}` : "";
+    const handoverLines = handover
+      ? `${shownPull}   (the images, while up's Valkey still serves)\n  ${writeLine ? `${writeLine}\n  ` : ""}docker stop pi-dispatch-valkey   (a job running right now is interrupted)\n  docker rm pi-dispatch-valkey\n  `
+      : "";
+    const ok = await ui.confirm(
+      "Start the receiver container",
+      `Run in ${dir}:\n  ${handoverLines}${shown}\n\nthe receiver profile reads ${join(dir, ".env")}: WEBHOOK_SECRET and the forge credentials must be in there, or the container refuses to boot.`,
+    );
+    if (!ok) {
+      // The whole of what would have run, the override's contents included, so it can be done by hand.
+      notify?.(`later: ${handover ? `${shownPull}; ${writeLine ? `write ${override} with:\n${VALKEY_HANDOVER_OVERRIDE}` : ""}docker stop pi-dispatch-valkey && docker rm pi-dispatch-valkey; then ` : ""}${shown}  (in ${dir})`, "info");
+      return;
+    }
+    // PI_VALKEY_PORT into .env where VALKEY_URL's port is not 6379 (round 3), so the docs' plain compose command in this
+    // folder publishes where the worker dials; a different value already there is named and never overwritten.
+    try {
+      const envPath = join(dir, ".env");
+      if (fs.existsSync(envPath)) {
+        // Read through issue #471's one reader; a line it could not read counts as a value (never written over).
+        const read: any = deploymentServiceEnv({ env: {}, dir, keys: [VALKEY_PORT_KEY], fs, platform: "linux" });
+        const found = read.fromFile[VALKEY_PORT_KEY] ?? (read.unread.length > 0 || read.hazardSkipped.length > 0 || read.untrusted ? "?" : undefined);
+        const decided: any = valkeyPortEnvDecision(found, port, { envPath });
+        if (decided.conflict) notify?.(decided.conflict, "warning");
+        else if (decided.write && updateEnvFile(envPath, VALKEY_PORT_KEY, decided.write, { fs, platform }).changed) notify?.(`wrote ${VALKEY_PORT_KEY}=${port} into ${envPath} (VALKEY_URL's port)`, "info");
+      }
+    } catch (err: any) {
+      notify?.(`${VALKEY_PORT_KEY} could not be written into .env: ${err?.message ?? err}; the commands below pass it themselves`, "warning");
+    }
+    const step = async (argv: string[], title: string, stepEnv = env) => {
+      const res = await runAttachedFn(ctx, { title: `${title} (in ${dir})`, argv0: "docker", args: argv, cwd: dir, env: stepEnv });
+      return !(res?.error || res?.code !== 0);
+    };
+    // After compose's valkey started on pi-dispatch-valkey-data: the queue's own pi-dispatch:owner, recorded where it
+    // is missing, checked where it is not; another folder's stops compose's valkey again at once.
+    const ownerMarker = async () => {
+      const r: any = await claimOwnerFn(`redis://127.0.0.1:${port}`, real, dir, env);
+      if (r?.error) {
+        notify?.(`compose's valkey started, but its ${OWNER_MARKER_KEY} could not be recorded or read (${r.error}), so whose queue it holds is unconfirmed; \`node ${cliPath} up\` (in ${dir}) checks it again`, "error");
+        return;
+      }
+      if (r.owner !== real && r.owner !== dir) {
+        const stopped = await step([...base, "stop", "valkey"], `docker ${[...base, "stop", "valkey"].join(" ")}`, composeEnv);
+        notify?.(`${foreignMarkerRefusal(r.owner)}: compose's valkey was ${stopped ? "stopped again at once" : "NOT stopped (the stop failed): stop it now"}`, "error");
+        return;
+      }
+      if (r.claimed) notify?.(`recorded ${OWNER_MARKER_KEY}=${real} in the queue on pi-dispatch-valkey-data`, "info");
+    };
+    if (handover) {
+      if (!(await step(pull, shownPull, composeEnv))) {
+        notify?.(`${shownPull} failed; up's Valkey was left running and nothing else was done`, "error");
+        return;
+      }
+      let wrote = false;
+      if (!hasOverride) {
+        try {
+          fs.writeFileSync(override, VALKEY_HANDOVER_OVERRIDE, { flag: "wx" });
+          wrote = true;
+        } catch (err: any) {
+          notify?.(`could not write ${override}: ${err?.message ?? err}; nothing was stopped, and the receiver was not started`, "error");
+          return;
+        }
+      }
+      const putBack = () => {
+        if (!wrote) return "";
+        try {
+          fs.unlinkSync(override);
+          return ` ${override} was removed again.`;
+        } catch {
+          return ` ${override} could not be removed: remove it before running \`pi-dispatch up\`.`;
+        }
+      };
+      if (!(await step(["stop", "pi-dispatch-valkey"], "docker stop pi-dispatch-valkey"))) {
+        notify?.(`docker stop pi-dispatch-valkey failed; up's Valkey runs as it was, and the receiver was not started.${putBack()}`, "error");
+        return;
+      }
+      if (!(await step(["rm", "pi-dispatch-valkey"], "docker rm pi-dispatch-valkey"))) {
+        notify?.(`docker rm pi-dispatch-valkey failed; up's Valkey is STOPPED. \`docker start pi-dispatch-valkey\` brings it back on its volume.${putBack()}`, "error");
+        return;
+      }
+      if (!(await step(args, shown, composeEnv))) {
+        notify?.(`${shown} failed after up's Valkey was removed: NO Valkey runs now. Its volume, pi-dispatch-valkey-data, and the queue in it are kept: \`node ${cliPath} up\` (in ${dir}) starts pi-dispatch-valkey on it again.${putBack()} Compose's own output above says why it failed`, "error");
+        return;
+      }
+      await ownerMarker();
+      return;
+    }
+    if (!(await step(args, shown, composeEnv))) {
+      notify?.(`${shown} failed; compose's own output above says why (another container on 127.0.0.1:${port} is the usual one)`, "error");
+      return;
+    }
+    if (useOverride) await ownerMarker();
     return;
   }
 

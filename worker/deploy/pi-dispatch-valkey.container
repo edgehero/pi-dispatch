@@ -3,7 +3,8 @@
 # under this account's own rootless Podman instead of a docker daemon.
 #
 # Installed by `pi-dispatch service install` (user scope, with podman in PI_BACKENDS) and by `pi-dispatch up`, which
-# copy it unchanged into ~/.config/containers/systemd/. Podman's systemd generator turns it into
+# copy it into ~/.config/containers/systemd/ unchanged but for a VALKEY_URL port other than 6379, with the password
+# file it reads beside it. Podman's systemd generator turns it into
 # pi-dispatch-valkey.service. Never `systemctl --user enable` it: a generated unit refuses that ("transient or
 # generated"); the [Install] section below is read by the generator itself, which links it into default.target
 # (measured on Podman 5.8.1: with linger on it came up 25 s after a reboot with nobody logged in).
@@ -24,9 +25,19 @@ Network=pi-dispatch-valkey.network
 PublishPort=127.0.0.1:6379:6379
 # The same named volume `pi-dispatch up` creates on docker, so the wait-list survives a restart and a reboot.
 Volume=pi-dispatch-valkey-data:/data
-# AOF on: the wait-list must survive a reboot (REQ-QUEUE-BURST-NO-DROP).
-Exec=valkey-server --appendonly yes
-HealthCmd=valkey-cli ping
+# The password (issue #468): VALKEY_PASSWORD from a 0600 file `service install` and `up` write from the deployment's
+# .env, into the container's ENVIRONMENT. Never `--requirepass` on a command line: the image's PID 1 is tini, which keeps
+# its whole argv for the life of the container, and any account on the host reads it in /proc/<pid>/cmdline (measured
+# on Podman 5.8.1 and 4.9.3). Quadlet also loads this file into the unit's own environment, where systemd would expand a
+# bare $VALKEY_PASSWORD in the command below into the password itself: every $ below is written $$ for that reason.
+EnvironmentFile=%h/.config/pi-dispatch/valkey.env
+# AOF on: the wait-list must survive a reboot (REQ-QUEUE-BURST-NO-DROP). The password reaches valkey-server as
+# configuration on stdin (`valkey-server -`), written by the shell's own echo builtin to a 0600 temp file that is opened
+# and deleted before the image's entrypoint runs; with VALKEY_PASSWORD empty it starts with none, as before.
+Exec=sh -c 'set -eu; if [ -n "$${VALKEY_PASSWORD:-}" ]; then umask 077; f=$$(mktemp); echo "requirepass $$VALKEY_PASSWORD" >"$$f"; exec 0<"$$f"; rm -f "$$f"; set -- -; else set --; fi; unset VALKEY_PASSWORD; exec docker-entrypoint.sh valkey-server "$$@" --appendonly yes'
+# Healthy only when Valkey answers PONG to this deployment's password (valkey-cli reads REDISCLI_AUTH from its
+# environment); a bare `valkey-cli ping` exits 0 on NOAUTH too.
+HealthCmd=if [ -n "$${VALKEY_PASSWORD:-}" ]; then REDISCLI_AUTH="$$VALKEY_PASSWORD"; export REDISCLI_AUTH; fi; valkey-cli ping | grep -q PONG
 HealthInterval=10s
 HealthTimeout=3s
 HealthRetries=5

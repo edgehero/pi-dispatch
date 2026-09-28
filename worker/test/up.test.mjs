@@ -5,16 +5,20 @@ import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { defaultPrompt, runUp, valkeyContainerPublishes } from "../src/up.mjs";
 import { NETNS_KEEPER_FORMAT } from "../src/podman-stack.mjs";
+import { VALKEY_HEALTH_SCRIPT, VALKEY_START_SCRIPT } from "../src/valkey-auth.mjs";
 
 // A fake `spawn`, mirroring doctor.test.mjs: plan keys are command-line prefixes ("docker version",
 // "docker image inspect", "docker pull", "docker tag", "docker ps", "docker volume", "docker run")
 // mapped to a canned exit code, a `{code, output}` pair, or "enoent" for a launch failure. Every spawn
 // is recorded into `calls` so tests can assert the EXACT argv of every host mutation.
-function fakeSpawn(plan, calls = []) {
+// `defaults` answers first where it has a key (the harness's docker ownership answers, only for prefixes the plan has
+// none of), read beside the plan rather than merged into a copy, so a test that edits its plan mid-run is still heard.
+function fakeSpawn(plan, calls = [], defaults = {}) {
 	return (cmd, args, opts) => {
 		const line = [cmd, ...args].join(" ");
-		const key = Object.keys(plan).find((k) => line.startsWith(k));
-		const outcome = plan[key];
+		const dkey = Object.keys(defaults).find((k) => line.startsWith(k));
+		const key = dkey ?? Object.keys(plan).find((k) => line.startsWith(k));
+		const outcome = dkey ? defaults[dkey] : plan[key];
 		calls.push({ cmd, args, opts });
 		const stream = () => ({
 			handlers: {},
@@ -49,6 +53,8 @@ function fakeSpawn(plan, calls = []) {
 
 // 64 hex chars, distinctive on purpose: the no-secret-in-output assertions grep for exactly this.
 const SECRET = "cafef00d".repeat(8);
+// Issue #468: the Valkey password `up` generates in these tests, as distinctive, for the same assertions.
+const PASSWORD = "5eca1ed0".repeat(8);
 
 // Everything injected, everything recorded. `files` seeds the in-memory fs (path → text); the fake
 // init deliberately creates nothing, so a test that wants a .env after init seeds it up front.
@@ -64,6 +70,14 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 		if (listening && !("/proc/net/tcp" in files)) files = { ...listenerFiles(1234), ...files };
 		extra = { lookup: async () => { throw Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" }); }, interfaces: () => ({}), runSync: () => null, ...extra };
 	}
+	// PR #475's review, round 3: docker answers the ownership questions up asks before it acts on a Valkey container or
+	// volume. Unless a test says otherwise: no pi-dispatch-valkey, and nothing mounts pi-dispatch-valkey-data.
+	const dockerDefaults = {};
+	const planned = (line) => Object.keys(plan).some((k) => line.startsWith(k) || k.startsWith(line));
+	if (!planned("docker container inspect pi-dispatch-valkey")) dockerDefaults["docker container inspect pi-dispatch-valkey"] = { code: 1, stderr: "Error: No such container: pi-dispatch-valkey\n" };
+	if (!planned("docker ps -a")) dockerDefaults["docker ps -a"] = { code: 0, output: "" };
+	// The volume gap (PR #475's review): no pi-dispatch-valkey-data yet, unless a test plans its own inspect answer.
+	if (!Object.keys(plan).some((k) => k.startsWith("docker volume inspect"))) dockerDefaults["docker volume inspect"] = { code: 1, stderr: "Error: no such volume\n" };
 	const calls = [];
 	const promptCalls = [];
 	const initCalls = [];
@@ -74,7 +88,7 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 	const store = new Map(Object.entries(files));
 	const deps = {
 		env,
-		spawn: fakeSpawn(plan, calls),
+		spawn: fakeSpawn(plan, calls, dockerDefaults),
 		out: (s) => buf.push(s),
 		prompt: (q) => {
 			promptCalls.push(q);
@@ -106,6 +120,7 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 		cwd,
 		platform,
 		randomHex: () => SECRET,
+		newPassword: () => PASSWORD,
 		// Resolved defaults, pinned rather than read off this host: `logsDirPath` calls the real
 		// `homedir()`, so without these the byte-exact `.env` assertions below would assert whose account
 		// ran the suite (issue #357).
@@ -129,19 +144,36 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 	return { run: () => runUp(argv, deps), deps, calls, promptCalls, initCalls, initOpts, doctorCalls, doctorOpts, store, text: () => buf.join("") };
 }
 
-const green = { "docker version": 0, "docker image inspect": 0, "docker ps": { code: 0, output: "pi-dispatch-valkey\n" } };
+// pi-dispatch-valkey is this deployment's: up's label names the harness's folder (PR #475's review, round 3).
+const green = { "docker version": 0, "docker image inspect": 0, "docker container inspect pi-dispatch-valkey": inspectRecord({ label: "/deploy" }) };
 
 // The exact host mutations up may ever run — asserted array-for-array below, because "shown then run"
 // only holds if what runs is literally what was shown.
 const PULL = ["pull", "ghcr.io/edgehero/pi-job:latest"];
 const TAG = ["tag", "ghcr.io/edgehero/pi-job:latest", "pi-job:latest"];
-const VOLUME = ["volume", "create", "pi-dispatch-valkey-data"];
+// Labelled with the deployment folder (the volume gap, PR #475's review): the harness's /deploy.
+const VOLUME = ["volume", "create", "--label", "com.pi-dispatch.deployment=/deploy", "pi-dispatch-valkey-data"];
+// Issue #468: the password as `-e VALKEY_PASSWORD` (its value in the spawn's environment, never here), and the start
+// script and health check that hand it to Valkey on stdin and REDISCLI_AUTH (valkey-auth.mjs pins those two strings to
+// the Quadlet unit and the compose file).
+// Round 3 of PR #475's review: labelled with the deployment folder (the harness's /deploy, which has no real path here).
 const VALKEY_RUN = [
-	"run", "-d", "--name", "pi-dispatch-valkey", "--restart", "unless-stopped",
-	"-p", "127.0.0.1:6379:6379", "-v", "pi-dispatch-valkey-data:/data",
-	"--health-cmd", "valkey-cli ping", "--health-interval", "10s", "--health-timeout", "3s", "--health-retries", "5",
-	"valkey/valkey:8", "valkey-server", "--appendonly", "yes",
+	"run", "-d", "--name", "pi-dispatch-valkey", "--label", "com.pi-dispatch.deployment=/deploy", "--restart", "unless-stopped",
+	"-p", "127.0.0.1:6379:6379", "-v", "pi-dispatch-valkey-data:/data", "-e", "VALKEY_PASSWORD",
+	"--health-cmd", VALKEY_HEALTH_SCRIPT, "--health-interval", "10s", "--health-timeout", "3s", "--health-retries", "5",
+	"valkey/valkey:8", "sh", "-c", VALKEY_START_SCRIPT,
 ];
+
+/**
+ * One `docker container inspect` answer (PR #475's review, round 3): a container with up's label, compose's working
+ * dir, or neither, publishing 6379 on `port`.
+ */
+function inspectRecord({ name = "pi-dispatch-valkey", label, workingDir, port = 6379 } = {}) {
+	const Labels = {};
+	if (label) Labels["com.pi-dispatch.deployment"] = label;
+	if (workingDir) Labels["com.docker.compose.project.working_dir"] = workingDir;
+	return { code: 0, output: JSON.stringify([{ Name: `/${name}`, Config: { Labels }, HostConfig: { PortBindings: { "6379/tcp": [{ HostIp: "127.0.0.1", HostPort: String(port) }] } } }]) };
+}
 
 test("up: everything already in place prompts for nothing and exits 0", async () => {
 	const h = harness({ plan: green, listening: true });
@@ -167,6 +199,11 @@ test("up: declined prompts run NOTHING and the summary says skipped", async () =
 	assert.deepEqual(h.calls.map((c) => c.args), [
 		["version"],
 		["image", "inspect", "pi-job:latest"],
+		// Round 3 of PR #475's review: whose pi-dispatch-valkey is (none here) and who mounts its volume, both read-only.
+		["container", "inspect", "pi-dispatch-valkey"],
+		["ps", "-a", "--filter", "volume=pi-dispatch-valkey-data", "--format", "{{.Names}}"],
+		// The volume gap (PR #475's review): whose pi-dispatch-valkey-data is (none yet), read-only.
+		["volume", "inspect", "pi-dispatch-valkey-data"],
 		["inspect", PROXY_INSPECT.slice("docker inspect ".length, -" pi-dispatch-egress-proxy".length), "pi-dispatch-egress-proxy"],
 	]);
 	assert.match(h.text(), /job image\s+skipped \(declined\)/);
@@ -185,13 +222,13 @@ test("up: --yes runs both docker action pairs with exactly the argv that was sho
 	const argvs = h.calls.map((c) => c.args);
 	assert.deepEqual(argvs.find((a) => a[0] === "pull"), PULL);
 	assert.deepEqual(argvs.find((a) => a[0] === "tag"), TAG);
-	assert.deepEqual(argvs.find((a) => a[0] === "volume"), VOLUME);
+	assert.deepEqual(argvs.find((a) => a[0] === "volume" && a[1] === "create"), VOLUME);
 	assert.deepEqual(argvs.find((a) => a[0] === "run"), VALKEY_RUN);
 	assert.ok(argvs.findIndex((a) => a[0] === "pull") < argvs.findIndex((a) => a[0] === "tag"), "pull before tag");
-	assert.ok(argvs.findIndex((a) => a[0] === "volume") < argvs.findIndex((a) => a[0] === "run"), "volume before run");
+	assert.ok(argvs.findIndex((a) => a[0] === "volume" && a[1] === "create") < argvs.findIndex((a) => a[0] === "run"), "volume before run");
 	// --yes waives consent, never visibility: the commands are still printed before they run.
 	assert.match(h.text(), /docker pull ghcr\.io\/edgehero\/pi-job:latest/);
-	assert.match(h.text(), /docker volume create pi-dispatch-valkey-data/);
+	assert.match(h.text(), /docker volume create --label com\.pi-dispatch\.deployment=\/deploy pi-dispatch-valkey-data/);
 });
 
 test("up: an image already present is never prompted for", async () => {
@@ -213,10 +250,18 @@ test("up: something listening on 6379 never prompts and never runs docker run", 
 });
 
 test("up: a foreign listener on 6379 is assumed but not claimed as ours", async () => {
-	const h = harness({ plan: { ...green, "docker ps": { code: 0, output: "" } }, listening: true });
+	const h = harness({ plan: { ...green, "docker container inspect pi-dispatch-valkey": { code: 1, stderr: "Error: No such container: pi-dispatch-valkey\n" } }, listening: true });
 	await h.run();
 	assert.match(h.text(), /assuming your Valkey/);
 	assert.doesNotMatch(h.text(), /it is the pi-dispatch-valkey container/);
+	// Round 3 of PR #475's review: a pi-dispatch-valkey another deployment's up labelled is not ours by its name, and one
+	// docker cannot describe is not ours either.
+	for (const [answer, said] of [[inspectRecord({ label: "/srv/other" }), /pi-dispatch-valkey is not this deployment's Valkey \(the deployment in \/srv\/other\), so it is never stopped, removed or reused from here/], [{ code: 125, stderr: "Cannot connect to the Docker daemon\n" }, null]]) {
+		const o = harness({ plan: { ...green, "docker container inspect pi-dispatch-valkey": answer }, listening: true });
+		await o.run();
+		assert.doesNotMatch(o.text(), /it is the pi-dispatch-valkey container/);
+		if (said) assert.match(o.text(), said);
+	}
 });
 
 test("up: init and doctor always run, even when every docker action was declined", async () => {
@@ -234,13 +279,16 @@ test("up: WEBHOOK_SECRET is generated into an empty .env and the value NEVER rea
 	const h = harness({ plan: green, files: { "/deploy/.env": "A=1\nWEBHOOK_SECRET=\n" } });
 	await h.run();
 	// The four path keys land beside it (issue #357), which four other files have promised for a year.
+	// Issue #468: and the deployment's Valkey password, generated like the webhook secret, never printed either.
 	assert.equal(
 		h.store.get("/deploy/.env"),
-		`A=1\nWEBHOOK_SECRET=${SECRET}\nPI_PAUSE_WINDOWS_FILE=/deploy/pause-windows.json\nPI_SCOPED_LIMITS_FILE=/deploy/scoped-limits.json\nPI_LOGS_DIR=/home/op/.pi-dispatch/logs\nPI_SETTINGS_FILE=/home/op/.pi-dispatch/settings.json\n`,
-		"the key was filled, the four paths appended, other lines untouched",
+		`A=1\nWEBHOOK_SECRET=${SECRET}\nPI_PAUSE_WINDOWS_FILE=/deploy/pause-windows.json\nPI_SCOPED_LIMITS_FILE=/deploy/scoped-limits.json\nPI_LOGS_DIR=/home/op/.pi-dispatch/logs\nPI_SETTINGS_FILE=/home/op/.pi-dispatch/settings.json\nVALKEY_PASSWORD=${PASSWORD}\n`,
+		"the key was filled, the four paths and the password appended, other lines untouched",
 	);
 	assert.ok(!h.text().includes(SECRET), "the secret value must never be printed");
+	assert.ok(!h.text().includes(PASSWORD), "the Valkey password must never be printed");
 	assert.match(h.text(), /generated WEBHOOK_SECRET/);
+	assert.match(h.text(), /generated VALKEY_PASSWORD into \.env/);
 });
 
 test("up: a key whose value is `\"\"` is named as EMPTY, not merely `already set` (#365)", async () => {
@@ -467,6 +515,7 @@ test("up edits a symlinked .env through the link, with the REAL fs seam (#357)",
 		prompt: async () => "n",
 		probeTcp: async () => true,
 		randomHex: () => SECRET,
+		newPassword: () => PASSWORD,
 		runInitFn: () => 0,
 		runDoctorFn: () => 0,
 	});
@@ -541,9 +590,9 @@ test("up hands its OWN doctor call what it just wrote, or it warns about what it
 
 test("up leaves every one of the four alone when the operator already set it (#357)", async () => {
 	const mine = ["PI_PAUSE_WINDOWS_FILE=/elsewhere/windows.json", "PI_SCOPED_LIMITS_FILE=/elsewhere/limits.json", "PI_LOGS_DIR=/var/log/pi", "PI_SETTINGS_FILE=/etc/pi/settings.json"].join("\n");
-	const h = harness({ plan: green, files: { "/deploy/.env": `${mine}\nWEBHOOK_SECRET=x\n` } });
+	const h = harness({ plan: green, files: { "/deploy/.env": `${mine}\nWEBHOOK_SECRET=x\nVALKEY_PASSWORD=${PASSWORD}\n` } });
 	await h.run();
-	assert.equal(h.store.get("/deploy/.env"), `${mine}\nWEBHOOK_SECRET=x\n`, "four keys, four chances to clobber, none taken");
+	assert.equal(h.store.get("/deploy/.env"), `${mine}\nWEBHOOK_SECRET=x\nVALKEY_PASSWORD=${PASSWORD}\n`, "four keys, four chances to clobber, none taken (and the password, #468)");
 	// And the layer must not put back what the operator overrode: `wrote` holds only keys that were empty.
 	assert.equal(h.doctorCalls[0].PI_LOGS_DIR, undefined, "an operator value stays the environment's business");
 	for (const key of ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE"]) {
@@ -739,10 +788,10 @@ test("up on podman: --yes runs exactly the lines it showed, installs the Quadlet
 	const shown = block.split("\n").slice(1).filter((l) => l.startsWith("  ")).map((l) => l.trim());
 	const ran = [];
 	for (const c of h.calls) if ((c.cmd === "systemctl" && c.args[1] !== "show-environment")) ran.push([c.cmd, ...c.args].join(" "));
-	const written = [...h.store.keys()].filter((p) => p.startsWith(QDIR) || p === "/home/op/.config/pi-dispatch/egress-proxy.conf").map((p) => `write ${p}`);
+	const written = [...h.store.keys()].filter((p) => p.startsWith(QDIR) || p === "/home/op/.config/pi-dispatch/egress-proxy.conf" || p === "/home/op/.config/pi-dispatch/valkey.env").map((p) => `write ${p}`);
 	assert.deepEqual(shown, [...written, ...ran], "shown then run: the same lines, in the same order");
 	assert.deepEqual(ran, ["systemctl --user daemon-reload", "systemctl --user start pi-dispatch-valkey.service pi-dispatch-egress-proxy.service pi-dispatch-netns-keeper.service"]);
-	assert.equal(written.length, 7, "six units (the keeper's two since #458) and the account-owned copy of the rules");
+	assert.equal(written.length, 8, "six units (the keeper's two since #458), the account-owned copy of the rules, and the Valkey's password file (#468)");
 	assert.ok(!ran.some((l) => / enable /.test(l)), "a generated unit is never enabled");
 	assert.deepEqual(h.calls.filter((c) => c.cmd === "podman" && c.args[0] !== "inspect" && c.args[0] !== "container").map((c) => c.args), [
 		["image", "exists", "pi-job:latest"],
@@ -928,10 +977,13 @@ test("up on local,podman: the docker steps are unchanged, then podman's image an
 		extra: podmanExtra(),
 	});
 	assert.equal(await h.run(), 0);
-	assert.deepEqual(h.calls.slice(0, 3).map((c) => [c.cmd, ...c.args]), [
+	// Issue #468: docker's Valkey step runs after init and the .env keys now (its password comes from .env), so the
+	// podman image step comes before it; the docker steps themselves are the ones they were.
+	assert.deepEqual(h.calls.slice(0, 4).map((c) => [c.cmd, ...c.args]), [
 		["docker", "version"],
 		["docker", "image", "inspect", "pi-job:latest"],
-		["docker", "ps", "--filter", "name=pi-dispatch-valkey", "--format", "{{.Names}}"],
+		["podman", "image", "exists", "pi-job:latest"],
+		["docker", "container", "inspect", "pi-dispatch-valkey"],
 	]);
 	assert.ok(![...h.store.keys()].some((p) => p.endsWith("pi-dispatch-valkey.container")), "no second Valkey on a docker host");
 	assert.ok(h.store.has(`${QDIR}/pi-dispatch-egress-proxy.container`), "podman jobs still need podman's own proxy");
@@ -1636,6 +1688,317 @@ test("up on podman: a stack command that fails names the files this run wrote, w
 		extra: podmanExtra(),
 	});
 	await h.run();
-	assert.match(h.text(), new RegExp(`Files this run wrote, which remain: ${QDIR.replaceAll(".", "\\.")}/pi-dispatch-valkey\\.network, ${QDIR.replaceAll(".", "\\.")}/pi-dispatch-valkey\\.container`));
+	assert.match(h.text(), new RegExp(`Files this run wrote, which remain: ${QDIR.replaceAll(".", "\\.")}/pi-dispatch-valkey\\.network, /home/op/\\.config/pi-dispatch/valkey\\.env, ${QDIR.replaceAll(".", "\\.")}/pi-dispatch-valkey\\.container`));
 	assert.ok(h.store.has(`${QDIR}/pi-dispatch-valkey.container`));
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Issue #468: the Valkey `up` starts gets the deployment's password, from .env, through the environment only
+// ---------------------------------------------------------------------------------------------------------------------
+
+test("up on docker (#468): a .env without a password gets one first, and docker's Valkey starts with it in the CLI's environment, never its argv", async () => {
+	const h = harness({ plan: { "docker version": 0, "docker image inspect": 0, "docker volume": 0, "docker run": 0 }, listening: false, argv: ["--yes"], files: { "/deploy/.env": "A=1\n" }, env: { PI_PROVIDER: "anthropic", VALKEY_PASSWORD: "a-shell-value-that-is-not-the-deployments" } });
+	assert.equal(await h.run(), 0);
+	assert.match(h.store.get("/deploy/.env"), new RegExp(`^VALKEY_PASSWORD=${PASSWORD}$`, "m"));
+	const run = h.calls.find((c) => c.cmd === "docker" && c.args[0] === "run");
+	assert.deepEqual(run.args, VALKEY_RUN);
+	assert.ok(!run.args.some((a) => a.includes(PASSWORD)), "on no argv");
+	assert.equal(run.opts.env.VALKEY_PASSWORD, PASSWORD, "the deployment's, in the docker CLI's environment (`-e VALKEY_PASSWORD` names it)");
+	assert.ok(!h.text().includes(PASSWORD));
+	assert.match(h.text(), /✓ started Valkey \(container pi-dispatch-valkey, AOF on, bound to 127\.0\.0\.1, with VALKEY_PASSWORD from \.env\)/);
+	// The password is decided before Valkey starts: the .env write comes first.
+	assert.ok(h.text().indexOf("generated VALKEY_PASSWORD") < h.text().indexOf("started Valkey"));
+	// A deployment that set its own: kept, and that one is what Valkey gets.
+	const mine = harness({ plan: { "docker version": 0, "docker image inspect": 0, "docker volume": 0, "docker run": 0 }, listening: false, argv: ["--yes"], files: { "/deploy/.env": `VALKEY_PASSWORD=${SECRET}\n` } });
+	await mine.run();
+	assert.equal(mine.store.get("/deploy/.env").match(/VALKEY_PASSWORD=/g).length, 1);
+	assert.equal(mine.calls.find((c) => c.args[0] === "run").opts.env.VALKEY_PASSWORD, SECRET);
+	// A shared Valkey or an operator's own: nothing generated, and the Valkey up would start gets none from a shell.
+	const shared = harness({ plan: { "docker version": 0, "docker image inspect": 0, "docker volume": 0, "docker run": 0 }, listening: false, argv: ["--yes"], files: { "/deploy/.env": "PI_VALKEY_SHARED=1\n" }, env: { VALKEY_PASSWORD: "x".repeat(20) } });
+	await shared.run();
+	assert.doesNotMatch(shared.store.get("/deploy/.env"), /VALKEY_PASSWORD/);
+	assert.equal(shared.calls.find((c) => c.args[0] === "run").opts.env.VALKEY_PASSWORD, undefined);
+	assert.match(shared.text(), /⚠ PI_VALKEY_SHARED=1 in \/deploy\/\.env: no VALKEY_PASSWORD is generated/);
+});
+
+test("up on docker (#468): our pi-dispatch-valkey answering without a password is offered a restart with it (stop, rm, run; the volume kept), and a declined or a foreign one is said", async () => {
+	const files = { "/deploy/.env": `VALKEY_PASSWORD=${SECRET}\n` };
+	const plan = { ...green, "docker stop": 0, "docker rm": 0, "docker run": 0 };
+	const h = harness({ plan, listening: true, argv: ["--yes"], files, extra: { probeValkeyAuth: async () => "ok" } });
+	assert.equal(await h.run(), 0);
+	const acts = h.calls.filter((c) => c.cmd === "docker" && ["stop", "rm", "run"].includes(c.args[0]));
+	assert.deepEqual(acts.map((c) => c.args), [["stop", "pi-dispatch-valkey"], ["rm", "pi-dispatch-valkey"], VALKEY_RUN], "stopped (SIGTERM: Valkey writes its AOF out), removed, run again; never rm -f, never the volume");
+	assert.equal(acts[2].opts.env.VALKEY_PASSWORD, SECRET);
+	assert.match(h.text(), /pi-dispatch-valkey answers without a password, and VALKEY_PASSWORD is set in \.env\. up would restart it with the password \(stopped first, so Valkey writes its AOF out; the pi-dispatch-valkey-data volume, and the queue in it, is kept\)\. A job running right now is interrupted, and the worker and the receiver get NOAUTH until they are restarted: pause first if a job runs \(pi-dispatch pause, wait for active jobs, then pi-dispatch resume after the restart\):/, "the consent says what the restart costs before it is given");
+	assert.match(h.text(), /✓ restarted Valkey with VALKEY_PASSWORD \(container pi-dispatch-valkey, same volume\)\. Restart the worker and the receiver now/);
+	assert.ok(!h.text().includes(SECRET));
+	// Declined: nothing runs, and the summary says what that leaves.
+	const no = harness({ plan, listening: true, answers: [""], files, extra: { probeValkeyAuth: async () => "ok" } });
+	await no.run();
+	assert.ok(!no.calls.some((c) => ["stop", "rm", "run"].includes(c.args[0])));
+	assert.match(no.text(), /pi-dispatch-valkey runs WITHOUT a password \(declined the restart with it\)/);
+	// Not ours (compose's, or a package's): never touched, the compose recreate named.
+	const foreign = harness({ plan: { ...plan, "docker container inspect pi-dispatch-valkey": { code: 1, stderr: "Error: No such container: pi-dispatch-valkey\n" } }, listening: true, argv: ["--yes"], files, extra: { probeValkeyAuth: async () => "ok" } });
+	await foreign.run();
+	assert.ok(!foreign.calls.some((c) => ["stop", "rm", "run"].includes(c.args[0])));
+	assert.match(foreign.text(), /⚠ the Valkey on 6379 answers without a password, and it is not a container up started, so up leaves it: restart it with VALKEY_PASSWORD from \.env \(compose: `docker compose --env-file \.env -f deploy\/docker-compose\.yml up -d`/);
+	// Round 3 of PR #475's review: a pi-dispatch-valkey is ours by up's label naming this folder, or, unlabelled, by
+	// publishing this deployment's VALKEY_URL port; another deployment's (its label, or an unlabelled one on another port)
+	// is never stopped, removed or run again, whatever its name.
+	for (const [answer, ours] of [[inspectRecord({}), true], [inspectRecord({ label: "/srv/other" }), false], [inspectRecord({ port: 16496 }), false], [inspectRecord({ label: "/deploy/../srv/other" }), false]]) {
+		const t = harness({ plan: { ...plan, "docker container inspect pi-dispatch-valkey": answer }, listening: true, argv: ["--yes"], files, extra: { probeValkeyAuth: async () => "ok" } });
+		await t.run();
+		assert.equal(t.calls.some((c) => ["stop", "rm", "run"].includes(c.args[0])), ours, JSON.stringify(answer));
+		if (!ours) assert.match(t.text(), /pi-dispatch-valkey is not this deployment's Valkey \(.*\), so it is never stopped, removed or reused from here/);
+	}
+	// Ours, but another deployment's Valkey mounts pi-dispatch-valkey-data: no restart (two valkey-servers on one AOF,
+	// measured), the container and the ways out named, and `up` fails.
+	const shared = harness({ plan: { ...plan, "docker ps -a": { code: 0, output: "pi-dispatch-valkey\nother-valkey-1\n" }, "docker container inspect other-valkey-1": inspectRecord({ name: "other-valkey-1", workingDir: "/srv/other/deploy", port: 16496 }) }, listening: true, argv: ["--yes"], files, extra: { probeValkeyAuth: async () => "ok" } });
+	assert.equal(await shared.run(), 1);
+	assert.ok(!shared.calls.some((c) => ["stop", "rm", "run"].includes(c.args[0])));
+	assert.match(shared.text(), /✗ pi-dispatch-valkey-data is mounted by other-valkey-1 \(the compose project in \/srv\/other\/deploy\), which is not this deployment's Valkey: a second Valkey on the same AOF would corrupt both queues, so none is started\. Stop that deployment's Valkey first if this folder should own the volume, or give this deployment a Valkey of its own/);
+	assert.match(shared.text(), /up: the Valkey container or volume named above is not this deployment's/);
+	assert.doesNotMatch(shared.text(), /skipped \(declined|skipped: start it later|declined the restart|skipped: until it restarts/, "a refusal, not a decline");
+	// The same refusal where compose recreates this folder's Valkey (a handed-over folder).
+	const hfiles = { ...files, "/deploy/deploy/docker-compose.valkey.yml": "# override\n" };
+	const hshared = harness({ plan: { ...plan, "docker compose": 0, "docker container inspect deploy-valkey-1": inspectRecord({ name: "deploy-valkey-1", workingDir: "/deploy/deploy" }), "docker ps -a": { code: 0, output: "deploy-valkey-1\nother-valkey-1\n" }, "docker container inspect other-valkey-1": inspectRecord({ name: "other-valkey-1", workingDir: "/srv/other/deploy", port: 16496 }) }, listening: true, argv: ["--yes"], files: hfiles, extra: { probeValkeyAuth: async () => "ok" } });
+	assert.equal(await hshared.run(), 1);
+	assert.ok(!hshared.calls.some((c) => ["compose", "stop", "rm", "run"].includes(c.args[0])));
+	assert.match(hshared.text(), /✗ pi-dispatch-valkey-data is mounted by other-valkey-1/);
+	assert.doesNotMatch(hshared.text(), /skipped \(declined|skipped: start it later|declined the restart|skipped: until it restarts/);
+	// Already protected (NOAUTH to a client with none): nothing offered.
+	const fine = harness({ plan, listening: true, argv: ["--yes"], files, extra: { probeValkeyAuth: async () => "noauth" } });
+	await fine.run();
+	assert.ok(!fine.calls.some((c) => ["stop", "rm", "run"].includes(c.args[0])));
+	assert.match(fine.text(), /valkey\s+container pi-dispatch-valkey already running/);
+});
+
+test("up on podman (#468): the Valkey it adds gets a password written into .env only once the plan is accepted, shown as a line of it, never valued", async () => {
+	const base = { env: { PI_BACKENDS: "podman", PI_EGRESS: "0" }, plan: { "podman image exists": 0, systemctl: 0, "loginctl show-user": { code: 0, output: "Linger=yes\n" } }, listening: false, files: { "/deploy/.env": "PI_BACKENDS=podman\n" }, extra: podmanExtra() };
+	const no = harness({ ...base, answers: [""] });
+	await no.run();
+	assert.doesNotMatch(no.store.get("/deploy/.env"), /VALKEY_PASSWORD/, "declined: no password written (the other keys `up` fills are unrelated)");
+	assert.match(no.text(), /^ {2}generate VALKEY_PASSWORD into \/deploy\/\.env \(32 random bytes, hex; the value is not shown\)$/m);
+	const yes = harness({ ...base, argv: ["--yes"] });
+	assert.equal(await yes.run(), 0);
+	assert.match(yes.store.get("/deploy/.env"), new RegExp(`\nVALKEY_PASSWORD=${PASSWORD}\n$`));
+	assert.match(yes.store.get("/home/op/.config/pi-dispatch/valkey.env"), new RegExp(`^VALKEY_PASSWORD=${PASSWORD}$`, "m"));
+	assert.ok(!yes.text().includes(PASSWORD));
+	// A password Valkey could not take stops the Valkey step and fails `up`, naming the key.
+	const bad = harness({ ...base, argv: ["--yes"], files: { "/deploy/.env": "PI_BACKENDS=podman\nVALKEY_PASSWORD=short\n" } });
+	assert.equal(await bad.run(), 1);
+	assert.match(bad.text(), /✗ VALKEY_PASSWORD in \/deploy\/\.env cannot be handed to Valkey: it is 5 characters long/);
+	assert.match(bad.text(), /up: VALKEY_PASSWORD in \.env cannot be handed to Valkey \(above\); fix it, then re-run `pi-dispatch up`\./);
+	assert.ok(![...bad.store.keys()].some((p) => p.startsWith(QDIR)));
+});
+
+// Issue #468 follow-up: docker's Valkey step used to probe and publish 6379 whatever VALKEY_URL said, so a deployment on
+// another port was offered a Valkey its worker never dialled, or had its own listener there ignored. The port is now
+// VALKEY_URL's, read as the service reads it (the podman step's reader since #464).
+test("up on docker: VALKEY_URL's port is the one probed and published; another host adds none; an IPv6 literal is refused", async () => {
+	const probed = [];
+	const h = harness({ plan: { "docker version": 0, "docker image inspect": 0, "docker volume": 0, "docker run": 0 }, listening: false, argv: ["--yes"], files: { "/deploy/.env": `VALKEY_URL=redis://127.0.0.1:16470\nVALKEY_PASSWORD=${PASSWORD}\n` }, extra: { probeTcp: async (host, port) => (probed.push(`${host}:${port}`), false) } });
+	assert.equal(await h.run(), 0);
+	assert.ok(probed.includes("127.0.0.1:16470") && !probed.includes("127.0.0.1:6379"), probed.join(" "));
+	const run = h.calls.find((c) => c.cmd === "docker" && c.args[0] === "run");
+	assert.equal(run.args[run.args.indexOf("-p") + 1], "127.0.0.1:16470:6379", "published on VALKEY_URL's port (the container still listens on 6379)");
+	assert.match(h.text(), /Nothing is listening on 127\.0\.0\.1:16470\. up would start Valkey/);
+	// This shell's VALKEY_URL counts where the file sets none, as for the service's other keys.
+	const shell = harness({ plan: { "docker version": 0, "docker image inspect": 0, "docker volume": 0, "docker run": 0 }, listening: false, argv: ["--yes"], files: { "/deploy/.env": `VALKEY_PASSWORD=${PASSWORD}\n` }, env: { VALKEY_URL: "redis://localhost:16471" } });
+	await shell.run();
+	const r2 = shell.calls.find((c) => c.args[0] === "run");
+	assert.equal(r2.args[r2.args.indexOf("-p") + 1], "127.0.0.1:16471:6379");
+	// A listener on that port is taken as the Valkey, named by its port.
+	const taken = harness({ plan: green, listening: true, files: { "/deploy/.env": `VALKEY_URL=redis://127.0.0.1:16472\nVALKEY_PASSWORD=${PASSWORD}\n` } });
+	await taken.run();
+	assert.match(taken.text(), /✓ something is listening on 16472, assuming your Valkey/);
+	// Another host: nothing started, nothing probed, said.
+	const remote = harness({ plan: { "docker version": 0, "docker image inspect": 0 }, listening: false, argv: ["--yes"], files: { "/deploy/.env": "VALKEY_URL=redis://queue.lan:6379\n" } });
+	assert.equal(await remote.run(), 0);
+	assert.ok(!remote.calls.some((c) => ["run", "volume"].includes(c.args[0])));
+	assert.match(remote.text(), /✓ VALKEY_URL names queue\.lan, not this host, so no Valkey is added here/);
+	// An [::1] URL cannot reach a Valkey published on 127.0.0.1: refused with the fix, and up fails.
+	const v6 = harness({ plan: { "docker version": 0, "docker image inspect": 0 }, listening: false, argv: ["--yes"], files: { "/deploy/.env": 'VALKEY_URL="redis://[::1]:6380"\n' } });
+	assert.equal(await v6.run(), 1);
+	assert.match(v6.text(), /✗ VALKEY_URL's host is ::1, and the Valkey up starts is published on 127\.0\.0\.1 only, so the worker would not reach it\. Write VALKEY_URL=redis:\/\/127\.0\.0\.1:6380/);
+	assert.ok(!v6.calls.some((c) => ["run", "volume"].includes(c.args[0])));
+	// A shell and a .env that disagree: the service runs the file's, so up adds nothing and says so.
+	const conflict = harness({ plan: { "docker version": 0, "docker image inspect": 0 }, listening: false, argv: ["--yes"], files: { "/deploy/.env": "VALKEY_URL=redis://127.0.0.1:16473\n" }, env: { VALKEY_URL: "redis://127.0.0.1:16474" } });
+	assert.equal(await conflict.run(), 1);
+	assert.match(conflict.text(), /✗ VALKEY_URL is "redis:\/\/127\.0\.0\.1:16474" in this shell and "redis:\/\/127\.0\.0\.1:16473" in \/deploy\/\.env/);
+});
+
+// PR #475's review, round 2: in a folder the setup wizard handed to compose (deploy/docker-compose.valkey.yml), `up`
+// used to `docker run` pi-dispatch-valkey beside compose's, and the wizard's next compose run failed to bind (measured).
+// It now starts compose's valkey with the folder's project and the override, on VALKEY_URL's port, and says a failure.
+// PR #475's review, round 3 (measured on Fedora: a second deployment's `up` ran pi-dispatch-valkey on the volume another
+// deployment's compose Valkey mounted, and both appended to one AOF): the plain start asks who mounts the volume first.
+test("up on docker never starts a Valkey on pi-dispatch-valkey-data beside another deployment's, and never replaces a pi-dispatch-valkey that is not its own (#475 round 3)", async () => {
+	const files = { "/deploy/.env": `VALKEY_URL=redis://127.0.0.1:16496\nVALKEY_PASSWORD=${PASSWORD}\n` };
+	const base = { "docker version": 0, "docker image inspect": 0, "docker volume": 0, "docker run": 0, "docker start": 0 };
+	// Another deployment's compose valkey on the volume: refused, named, nothing created or run, `up` fails.
+	const other = inspectRecord({ name: "a-valkey-1", workingDir: "/srv/a/deploy", port: 16495 });
+	const h = harness({ plan: { ...base, "docker ps -a": { code: 0, output: "a-valkey-1\n" }, "docker container inspect a-valkey-1": other }, listening: false, argv: ["--yes"], files });
+	assert.equal(await h.run(), 1);
+	assert.ok(!h.calls.some((c) => ["volume", "run", "stop", "rm", "start"].includes(c.args[0])), "nothing created, run, stopped or removed");
+	assert.match(h.text(), /✗ pi-dispatch-valkey-data is mounted by a-valkey-1 \(the compose project in \/srv\/a\/deploy\), which is not this deployment's Valkey: a second Valkey on the same AOF would corrupt both queues, so none is started\. Stop that deployment's Valkey first if this folder should own the volume, or give this deployment a Valkey of its own \(compose in this folder without deploy\/docker-compose\.valkey\.yml keeps its own volume\)/);
+	assert.match(h.text(), /up: the Valkey container or volume named above is not this deployment's \(or not attributed to it\), and up never stops, removes, reuses or starts beside one/);
+	// docker not answering who mounts it is a refusal too.
+	const dark = harness({ plan: { ...base, "docker ps -a": 1 }, listening: false, argv: ["--yes"], files });
+	assert.equal(await dark.run(), 1);
+	assert.ok(!dark.calls.some((c) => ["volume", "run"].includes(c.args[0])));
+	assert.match(dark.text(), /whether another Valkey mounts pi-dispatch-valkey-data could not be read \(docker ps -a --filter volume=pi-dispatch-valkey-data exited 1\)/);
+	// This deployment's own stopped container on the volume is not a reason to refuse; it is started as it is, never replaced.
+	const mine = inspectRecord({ label: "/deploy", port: 16496 });
+	const stopped = harness({ plan: { ...base, "docker ps -a": { code: 0, output: "pi-dispatch-valkey\n" }, "docker container inspect pi-dispatch-valkey": mine }, listening: false, argv: ["--yes"], files });
+	assert.equal(await stopped.run(), 0);
+	assert.ok(!stopped.calls.some((c) => ["volume", "run", "rm"].includes(c.args[0])));
+	assert.match(stopped.text(), /pi-dispatch-valkey is this deployment's and is not listening on 16496: `docker start pi-dispatch-valkey` starts it as it is/);
+	// Another deployment's pi-dispatch-valkey (its label, or unlabelled on another port), or one docker cannot describe:
+	// never replaced, and `up` fails, since a second container of that name cannot be started.
+	for (const answer of [inspectRecord({ label: "/srv/a", port: 16495 }), inspectRecord({ port: 16495 }), { code: 125, stderr: "Cannot connect to the Docker daemon\n" }]) {
+		const t = harness({ plan: { ...base, "docker container inspect pi-dispatch-valkey": answer }, listening: false, argv: ["--yes"], files });
+		assert.equal(await t.run(), 1, JSON.stringify(answer));
+		assert.ok(!t.calls.some((c) => ["volume", "run", "stop", "rm", "start"].includes(c.args[0])));
+		assert.match(t.text(), /a second container of that name cannot be started beside it/);
+	}
+});
+
+// PR #475's review, the volume gap (measured on Fedora: A's compose Valkey taken down left nothing on
+// pi-dispatch-valkey-data, and B's `up` started on A's queue). The volume carries its creator's label; another folder's
+// is never used; an unlabelled one only after a question --yes does not answer; and every start checks the queue's own
+// pi-dispatch:owner marker, recording it where it is missing.
+const volumeRecord = (label) => ({ code: 0, output: JSON.stringify([{ Name: "pi-dispatch-valkey-data", Labels: label ? { "com.pi-dispatch.deployment": label } : {} }]) });
+test("up on docker uses pi-dispatch-valkey-data only when it is this folder's: another's label refuses, an unlabelled one is asked about even under --yes, and the owner marker is checked on every start (#475 volume gap)", async () => {
+	const files = { "/deploy/.env": `VALKEY_URL=redis://127.0.0.1:16496\nVALKEY_PASSWORD=${PASSWORD}\n` };
+	const base = { "docker version": 0, "docker image inspect": 0, "docker volume create": 0, "docker run": 0, "docker stop": 0, "docker rm": 0 };
+	const acts = (h) => h.calls.filter((c) => c.cmd === "docker" && (["run", "stop", "rm"].includes(c.args[0]) || (c.args[0] === "volume" && c.args[1] === "create"))).map((c) => c.args[0] === "volume" ? "create" : c.args[0]);
+	// The gap: the volume is A's (its label), nothing mounts it: refused, nothing created or run, up fails.
+	const theirs = harness({ plan: { ...base, "docker volume inspect": volumeRecord("/srv/a") }, listening: false, argv: ["--yes"], files });
+	assert.equal(await theirs.run(), 1);
+	assert.deepEqual(acts(theirs), []);
+	assert.match(theirs.text(), /✗ pi-dispatch-valkey-data belongs to the deployment in \/srv\/a \(its label\), so this deployment never uses it: give this deployment a Valkey of its own .*, or run this from \/srv\/a/);
+	// Labelled for this folder: used as it is (no create), and the marker recorded.
+	const claims = [];
+	const mine = harness({ plan: { ...base, "docker volume inspect": volumeRecord("/deploy") }, listening: false, argv: ["--yes"], files, extra: { claimValkeyOwner: async (url, folder) => (claims.push([url, folder]), { owner: folder, claimed: true }) } });
+	assert.equal(await mine.run(), 0);
+	assert.deepEqual(acts(mine), ["run"]);
+	assert.deepEqual(claims, [["redis://127.0.0.1:16496", "/deploy"]], "the marker, on VALKEY_URL's port, for this folder");
+	assert.match(mine.text(), /✓ recorded pi-dispatch:owner=\/deploy in its queue/);
+	// Unlabelled: asked even under --yes, the risk named; no answer (a script's --yes) refuses.
+	const unl = { ...base, "docker volume inspect": volumeRecord(null) };
+	const no = harness({ plan: unl, listening: false, argv: ["--yes"], files });
+	assert.equal(await no.run(), 1);
+	assert.deepEqual(acts(no), []);
+	assert.equal(no.promptCalls.length, 1, "--yes did not answer it");
+	assert.match(no.promptCalls[0], /pi-dispatch-valkey-data exists without an owner label: this volume holds a queue pi-dispatch cannot attribute to a folder\. .*Adopt it for \/deploy\? \(asked even under --yes\) \[y\/N\] $/);
+	assert.match(no.text(), /✗ pi-dispatch-valkey-data has no owner label and was not adopted/);
+	// Adopted: no create (it exists), run, and the ownership recorded in the queue.
+	const adoptClaims = [];
+	const yes = harness({ plan: unl, listening: false, argv: ["--yes"], answers: ["y"], files, extra: { claimValkeyOwner: async (url, folder) => (adoptClaims.push(folder), { owner: folder, claimed: true }) } });
+	assert.equal(await yes.run(), 0);
+	assert.deepEqual(acts(yes), ["run"]);
+	assert.deepEqual(adoptClaims, ["/deploy"]);
+	assert.match(yes.text(), /up would start Valkey \(same semantics as deploy\/docker-compose\.yml\) on the adopted pi-dispatch-valkey-data/);
+	// A queue whose marker names another folder: what this pass started is stopped and removed at once, and up fails.
+	const marked = harness({ plan: unl, listening: false, argv: ["--yes"], answers: ["y"], files, extra: { claimValkeyOwner: async () => ({ owner: "/srv/a", claimed: false }) } });
+	assert.equal(await marked.run(), 1);
+	assert.deepEqual(acts(marked), ["run", "stop", "rm"]);
+	assert.match(marked.text(), /✗ the queue on pi-dispatch-valkey-data is the deployment's in \/srv\/a \(pi-dispatch:owner inside it\), not this one's: the Valkey this pass started on it was stopped again at once/);
+	assert.doesNotMatch(marked.text(), /✓ started Valkey/);
+	// A marker that cannot be read: up fails, saying so.
+	const dark = harness({ plan: { ...base }, listening: false, argv: ["--yes"], files, extra: { claimValkeyOwner: async () => ({ error: "Connection is closed." }) } });
+	assert.equal(await dark.run(), 1);
+	assert.match(dark.text(), /✗ Valkey was started, but its pi-dispatch:owner could not be recorded or read \(Connection is closed\.\)/);
+	assert.match(dark.text(), /up: the Valkey up started could not be asked whose queue it holds/);
+	// docker not answering whose the volume is: refused.
+	const blind = harness({ plan: { ...base, "docker volume inspect": { code: 125, stderr: "Cannot connect\n" } }, listening: false, argv: ["--yes"], files });
+	assert.equal(await blind.run(), 1);
+	assert.deepEqual(acts(blind), []);
+	assert.match(blind.text(), /whose pi-dispatch-valkey-data is could not be read/);
+});
+
+test("up's other starts on the volume keep the rule: compose's valkey in a handed-over folder asks about an unlabelled volume, the upgrade restart of this deployment's own container does not, and both check the marker (#475 volume gap)", async () => {
+	const files = { "/deploy/.env": `VALKEY_URL=redis://127.0.0.1:16495\nVALKEY_PASSWORD=${PASSWORD}\n`, "/deploy/deploy/docker-compose.valkey.yml": "# override\n" };
+	const composeUp = (h) => h.calls.filter((c) => c.args[0] === "compose").map((c) => c.args.slice(-2).join(" "));
+	const unl = { "docker version": 0, "docker image inspect": 0, "docker compose": 0, "docker volume inspect": volumeRecord(null) };
+	const no = harness({ plan: unl, listening: false, argv: ["--yes"], files });
+	assert.equal(await no.run(), 1);
+	assert.deepEqual(composeUp(no), [], "not adopted: compose's valkey not started");
+	const yes = harness({ plan: unl, listening: false, argv: ["--yes"], answers: ["y"], files, extra: { claimValkeyOwner: async () => ({ owner: "/srv/a", claimed: false }) } });
+	assert.equal(await yes.run(), 1);
+	assert.deepEqual(composeUp(yes), ["-d valkey", "stop valkey"], "started, then its marker named another folder: stopped at once");
+	const theirs = harness({ plan: { ...unl, "docker volume inspect": volumeRecord("/srv/a") }, listening: false, argv: ["--yes"], files });
+	assert.equal(await theirs.run(), 1);
+	assert.deepEqual(composeUp(theirs), []);
+	// The upgrade restart: this deployment's own pi-dispatch-valkey serves the unlabelled volume now, which attributes it;
+	// no question, and the marker is checked after the restart.
+	const rfiles = { "/deploy/.env": `VALKEY_PASSWORD=${SECRET}\n` };
+	const claims = [];
+	const restart = harness({ plan: { ...green, "docker stop": 0, "docker rm": 0, "docker run": 0, "docker volume inspect": volumeRecord(null) }, listening: true, argv: ["--yes"], files: rfiles, extra: { probeValkeyAuth: async () => "ok", claimValkeyOwner: async (url, folder) => (claims.push(folder), { owner: folder, claimed: true }) } });
+	assert.equal(await restart.run(), 0);
+	assert.equal(restart.promptCalls.length, 0);
+	assert.deepEqual(claims, ["/deploy"]);
+	const rtheirs = harness({ plan: { ...green, "docker stop": 0, "docker rm": 0, "docker run": 0, "docker volume inspect": volumeRecord("/srv/a") }, listening: true, argv: ["--yes"], files: rfiles, extra: { probeValkeyAuth: async () => "ok" } });
+	assert.equal(await rtheirs.run(), 1);
+	assert.ok(!rtheirs.calls.some((c) => ["stop", "rm", "run"].includes(c.args[0])), "another folder's volume: no restart");
+});
+
+// PR #475's review, round 3: PI_VALKEY_PORT lived only in the env up and the wizard hand compose, so the docs' plain
+// compose command in the folder published on 6379 while the worker dialled VALKEY_URL's port (measured).
+test("up on docker writes PI_VALKEY_PORT into .env when VALKEY_URL's port is not 6379, never over a different value (#475 round 3)", async () => {
+	const plan = { "docker version": 0, "docker image inspect": 0, "docker volume": 0, "docker run": 0 };
+	const h = harness({ plan, listening: false, argv: ["--yes"], files: { "/deploy/.env": `VALKEY_URL=redis://127.0.0.1:16470\nVALKEY_PASSWORD=${PASSWORD}\n` } });
+	assert.equal(await h.run(), 0);
+	assert.match(h.store.get("/deploy/.env"), /^PI_VALKEY_PORT=16470$/m);
+	assert.match(h.text(), /✓ wrote PI_VALKEY_PORT=16470 into \.env \(VALKEY_URL's port\)/);
+	// A different value is named and left.
+	const differ = harness({ plan, listening: false, argv: ["--yes"], files: { "/deploy/.env": `VALKEY_URL=redis://127.0.0.1:16470\nVALKEY_PASSWORD=${PASSWORD}\nPI_VALKEY_PORT=16000\n` } });
+	await differ.run();
+	assert.match(differ.store.get("/deploy/.env"), /^PI_VALKEY_PORT=16000$/m);
+	assert.doesNotMatch(differ.store.get("/deploy/.env"), /PI_VALKEY_PORT=16470/);
+	assert.match(differ.text(), /⚠ PI_VALKEY_PORT is 16000 in \/deploy\/\.env, and VALKEY_URL's port is 16470: compose publishes its Valkey on 16000, where the worker does not dial/);
+	// 6379, or another host: nothing written.
+	for (const url of ["redis://127.0.0.1:6379", "redis://valkey.internal:16470"]) {
+		const t = harness({ plan, listening: false, argv: ["--yes"], files: { "/deploy/.env": `VALKEY_URL=${url}\nVALKEY_PASSWORD=${PASSWORD}\n` } });
+		await t.run();
+		assert.doesNotMatch(t.store.get("/deploy/.env"), /PI_VALKEY_PORT/, url);
+	}
+});
+
+test("up on docker in a handed-over folder starts compose's valkey (-p, the override, PI_VALKEY_PORT) and reports a failure", async () => {
+	const files = { "/deploy/.env": `VALKEY_URL=redis://127.0.0.1:16495\nVALKEY_PASSWORD=${PASSWORD}\n`, "/deploy/deploy/docker-compose.valkey.yml": "# override\n" };
+	const composeUp = ["compose", "-p", "deploy", "--env-file", ".env", "-f", "deploy/docker-compose.yml", "-f", "deploy/docker-compose.valkey.yml", "up", "-d", "valkey"];
+	const h = harness({ plan: { "docker version": 0, "docker image inspect": 0, "docker compose": 0 }, listening: false, argv: ["--yes"], files });
+	assert.equal(await h.run(), 0);
+	const run = h.calls.find((c) => c.cmd === "docker" && c.args[0] === "compose");
+	assert.deepEqual(run.args, composeUp, "compose's valkey, the folder's project, the override");
+	assert.equal(run.opts.env.PI_VALKEY_PORT, "16495", "on VALKEY_URL's port");
+	assert.equal(run.opts.env.VALKEY_PASSWORD, PASSWORD);
+	assert.ok(!h.calls.some((c) => c.args[0] === "run" || (c.args[0] === "volume" && c.args[1] === "create")), "never a docker run of its own beside it");
+	assert.match(h.text(), /PI_VALKEY_PORT=16495 docker compose -p deploy --env-file \.env -f deploy\/docker-compose\.yml -f deploy\/docker-compose\.valkey\.yml up -d valkey/);
+	assert.match(h.text(), /✓ started compose's valkey \(project deploy, the pi-dispatch-valkey-data volume, 127\.0\.0\.1:16495\)/);
+	// A failure (the bind that measured round 2 swallowed) is said, and up exits non-zero on it.
+	const bad = harness({ plan: { "docker version": 0, "docker image inspect": 0, "docker compose": 1 }, listening: false, argv: ["--yes"], files });
+	assert.equal(await bad.run(), 1);
+	assert.match(bad.text(), /✗ compose could not start its valkey \(exit 1\): its own output above says why \(another container on 127\.0\.0\.1:16495 is the usual one/);
+	assert.match(bad.text(), /up: compose could not start this folder's Valkey \(above\); free the port it names, then re-run `pi-dispatch up`\./);
+	// Running and answering without a password: compose recreates it (never stop/rm/run).
+	// Ours by compose's own working-dir label: this folder's deploy/ (round 3 of PR #475's review).
+	const open = harness({ plan: { "docker version": 0, "docker image inspect": 0, "docker container inspect deploy-valkey-1": inspectRecord({ name: "deploy-valkey-1", workingDir: "/deploy/deploy", port: 16495 }), "docker compose": 0 }, listening: true, argv: ["--yes"], files, extra: { probeValkeyAuth: async () => "ok" } });
+	await open.run();
+	const acts = open.calls.filter((c) => c.cmd === "docker" && ["compose", "stop", "rm", "run"].includes(c.args[0]));
+	assert.deepEqual(acts.map((c) => c.args), [["compose", "-p", "deploy", "--env-file", ".env", "-f", "deploy/docker-compose.yml", "-f", "deploy/docker-compose.valkey.yml", "up", "-d", "--force-recreate", "valkey"]]);
+	// Round 3 of PR #475's review: compose's valkey here mounts pi-dispatch-valkey-data, so another deployment's container
+	// on that volume (stopped or not) refuses the start, named, and `up` fails; nothing is run.
+	const mounted = harness({ plan: { "docker version": 0, "docker image inspect": 0, "docker compose": 0, "docker ps -a": { code: 0, output: "pi-dispatch-valkey\n" }, "docker container inspect pi-dispatch-valkey": inspectRecord({ label: "/srv/b", port: 16496 }) }, listening: false, argv: ["--yes"], files });
+	assert.equal(await mounted.run(), 1);
+	assert.ok(!mounted.calls.some((c) => ["compose", "run", "stop", "rm"].includes(c.args[0])));
+	assert.match(mounted.text(), /✗ pi-dispatch-valkey-data is mounted by pi-dispatch-valkey \(the deployment in \/srv\/b\), which is not this deployment's Valkey/);
+	// A refusal is not a decline: nothing was asked (measured on Fedora, where it first read "skipped (declined)").
+	assert.doesNotMatch(mounted.text(), /skipped \(declined|skipped: start it later|declined the restart|skipped: until it restarts/);
+	// A folder without the override: every compose hint names the -p a wizard folder needs.
+	const plain = harness({ plan: { "docker version": 0, "docker image inspect": 0 }, listening: false, answers: [""], files: { "/deploy/.env": `VALKEY_PASSWORD=${PASSWORD}\n` } });
+	await plain.run();
+	assert.match(plain.text(), /skipped: start it later with `docker compose --env-file \.env -f deploy\/docker-compose\.yml up -d` \(in a folder \/dispatch setup laid out, with -p deploy after `compose`\)/);
 });

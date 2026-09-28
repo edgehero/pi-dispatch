@@ -137,7 +137,7 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
   prefer (its own bullet below states the consequences). One implementation detail, recorded because the code
   records it: Azure's constant-time compare returns early on a length mismatch, so the secret's **length**
   leaks even though its content does not.
-  The receiver may run **containerised** (`docker compose -f deploy/docker-compose.yml --profile receiver up`,
+  The receiver may run **containerised** (`docker compose --env-file .env -f deploy/docker-compose.yml --profile receiver up`,
   issue #82; the `-f` is load-bearing, because that file's relative paths resolve against `deploy/` and not
   your cwd). That changes none of the
   verification above: it is the same code, the container mounts `triggers.json` read-only and **no docker

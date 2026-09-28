@@ -54,6 +54,7 @@
     "./queue": "./src/queue.mjs",
     "./capabilities": "./src/capabilities.mjs",
     "./connection": "./src/connection.mjs",
+    "./valkey-auth": "./src/valkey-auth.mjs",
     "./job-id": "./src/job-id.mjs",
     "./forges": "./src/forges.mjs",
     "./backend-local": "./src/backend-local.mjs",

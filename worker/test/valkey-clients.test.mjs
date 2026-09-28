@@ -67,8 +67,11 @@ test("no file constructs a Valkey client except through connection.mjs' judged c
 	assert.deepEqual(offenders, [], "open Valkey only through parseConnection/makeRedisClient (worker/src/connection.mjs) and makeQueue; the receiver and the admin import them from @edgehero/pi-dispatch/connection");
 	// The two allowed BullMQ constructions assert the connection is judged right before they build on it.
 	const at = (path) => files.find((f) => f.path === path).code;
-	assert.match(at("worker/src/queue.mjs"), /assertJudgedConnection\(connection\);\s*return new Queue\(/);
+	assert.match(at("worker/src/queue.mjs"), /assertJudgedConnection\(connection\);\s*const queue = new Queue\(/);
 	assert.match(at("worker/src/index.mjs"), /assertJudgedConnection\(connection\);\s*worker = new Worker\(/);
+	// Issue #468: and each carries the one-line `error` listener, so BullMQ never prints the whole error object.
+	assert.match(at("worker/src/queue.mjs"), /const queue = new Queue\([^;]*\);\s*onValkeyError\(queue, /);
+	assert.match(at("worker/src/index.mjs"), /worker = new Worker\([\s\S]*?\}\);\s*onValkeyError\(worker, /);
 	// And connection.mjs' own client is built from parseConnection's options, never from a bare URL.
 	assert.match(at("worker/src/connection.mjs"), /return new Redis\(\{ \.\.\.parseConnection\(url,/);
 	assert.equal((at("worker/src/connection.mjs").match(/new Redis\(/g) ?? []).length, 1);
@@ -89,6 +92,33 @@ test("no file constructs a Valkey client except through connection.mjs' judged c
 	assert.equal(matches("the ioredis driver", "ioredisish"), false);
 	assert.equal(matches("an ioredis client constructor", "new Redis(url)"), true);
 	assert.equal(matches("a BullMQ Queue, QueueEvents or FlowProducer", "new Queue(name, { connection })"), true);
+});
+
+// Issue #468: the credential is part of the ONE connection function too. Every client of the project (the worker, the
+// CLI, the receiver, the admin panel, doctor) is built by parseConnection, so the password is attached there and nowhere
+// else, and VALKEY_PASSWORD is read from a process environment in one place (`valkeyClientContext`). A client that
+// took its own password, or a file that read the variable itself, would be a second rule for which password goes where.
+test("a Valkey client's password is attached by parseConnection alone, and VALKEY_PASSWORD is read from an environment in one place (#468)", () => {
+	// A client's options come from parseConnection (the bolt above holds every construction to connection.mjs); what
+	// could still carry a password of its own is a caller passing one IN (a `password:` in the arguments of
+	// parseConnection, makeRedisClient or makeQueue), or reading the variable itself and handing it on.
+	const passes = /\b(?:parseConnection|makeRedisClient|makeQueue|parseConnectionFn|redisFn|makeQueueFn)\([^;]*\bpassword\s*:/;
+	const reads = /\benv\.VALKEY_PASSWORD\b|\benv\[\s*(?:VALKEY_PASSWORD_KEY|"VALKEY_PASSWORD")\s*\]|process\.env\.VALKEY_PASSWORD\b/;
+	const files = sources();
+	const offenders = [];
+	for (const f of files) {
+		if (passes.test(f.code) && f.path !== "worker/src/connection.mjs") offenders.push(`${f.path}: passes a password to a client`);
+		if (reads.test(f.code) && f.path !== "worker/src/valkey-endpoint.mjs") offenders.push(`${f.path}: reads VALKEY_PASSWORD from an environment`);
+	}
+	assert.deepEqual(offenders, [], "attach the password in parseConnection (valkeyPasswordFor) and read it in valkeyClientContext");
+	// Non-vacuity: the one place each happens is where the rule says, in the shape the pattern looks for.
+	const at = (path) => files.find((f) => f.path === path).code;
+	assert.match(at("worker/src/connection.mjs"), /const \{ password \} = valkeyPasswordFor\(url, where, \{ withoutPassword \}\);[\s\S]*\.\.\.\(password \? \{ password \} : \{\}\)/);
+	assert.match(at("worker/src/valkey-endpoint.mjs"), reads);
+	for (const code of ["makeRedisClient(url, { password: x })", "parseConnection(u, { failFast: true, password: p })", "makeQueue({ ...c, password: pw })"]) assert.ok(passes.test(code), code);
+	for (const code of ["const p = env.VALKEY_PASSWORD;", 'env["VALKEY_PASSWORD"]', "process.env.VALKEY_PASSWORD", "env[VALKEY_PASSWORD_KEY]"]) assert.ok(reads.test(code), code);
+	assert.equal(reads.test("dockerEnv[VALKEY_PASSWORD_KEY] = pw"), false, "a spawn environment being SET is not a read");
+	assert.equal(passes.test("makeRedisClient(url, { failFast: true }); const x = { password: 1 }"), false, "only inside the call");
 });
 
 test("every connection parseConnection and makeRedisClient build is judged; makeQueue refuses any other (#464)", () => {

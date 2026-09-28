@@ -287,3 +287,15 @@ test("pointerState names the pointed folder and only the keys the layering wrote
   resetForTests();
   assert.deepEqual(pointerState(), { deploymentDir: null, owned: [] });
 });
+
+// Issue #468: the pointer names the deployment folder and carries no credential; the panel's Valkey clients take the
+// password from that folder's .env through issue #471's reader (`panelValkeyContext`, read-model.test.mjs), and nothing
+// is layered into the environment, where a model's shell would inherit it.
+test("the pointer never layers VALKEY_PASSWORD into the env, and names the folder the panel reads it from (#468)", () => {
+  resetForTests();
+  const env = envWith();
+  applyDeploymentPointer(env, { fs: fakeFs({ [P]: pointerJson({}) }) });
+  assert.equal(env.VALKEY_PASSWORD, undefined);
+  assert.equal(pointerState().deploymentDir, DIR);
+  resetForTests();
+});

@@ -875,7 +875,11 @@ export function envFileEditCheck(content, path, key, value, opts = {}) {
  * Mode: a .env at 0o600 (an operator who locked their secrets down) stays 0o600 — chmod on the tmp
  * BEFORE the rename, so no window exists where the secret-bearing file is wider than it was. Any
  * other mode is left to the platform default; this helper preserves a hardening choice, it does not
- * impose one.
+ * impose one, except where the caller says `narrow` (issue #468: the Valkey password goes only into a
+ * `.env` no other account can read, so its writers narrow the file to the owner's bits).
+ *
+ * The tmp is CREATED at 0o600 (issue #468): it holds every secret of the file, and created at the
+ * umask it was world-readable for the moment between the write and the chmod.
  */
 export function updateEnvFile(path, key, value, deps = {}) {
 	// `platform` is derived HERE rather than passed by each caller, which is what the first version got
@@ -883,7 +887,7 @@ export function updateEnvFile(path, key, value, deps = {}) {
 	// and the cmd wrapper kept the quotes, making the path the worker loads wrong behind a ✓ on the key
 	// that decides forge auth. A rendering rule that every writer of this file must remember is a rule one
 	// of them will forget.
-	const { fs = { readFileSync, writeFileSync, renameSync, statSync, chmodSync, realpathSync }, overwrite = false, platform = process.platform } = deps;
+	const { fs = { readFileSync, writeFileSync, renameSync, statSync, chmodSync, realpathSync }, overwrite = false, platform = process.platform, narrow = false } = deps;
 	// Every refusal is `planEnvEdit`'s (bytes first, never clobber, read back), made before anything is written.
 	const plan = planEnvEdit(fs.readFileSync(path), path, key, value, { overwrite, platform, verify: deps.verify });
 	if (plan.error) throw new Error(plan.error);
@@ -922,18 +926,20 @@ export function updateEnvFile(path, key, value, deps = {}) {
 		}
 	}
 	const tmp = `${target}.tmp`;
-	fs.writeFileSync(tmp, next);
+	fs.writeFileSync(tmp, next, { mode: 0o600 });
 	try {
 		// The operator's mode, whatever it is, not just 0600. `.env` holds WEBHOOK_SECRET and provider
 		// keys, and a rename from a fresh tmp lands at the process umask: 0640 and 0400 both came back
 		// 0644, world-readable, on the one file this project says must never reach a scrollback.
-		fs.chmodSync(tmp, fs.statSync(target).mode & 0o7777);
+		// `narrow` keeps only the owner's bits of it.
+		const mode = fs.statSync(target).mode & 0o7777;
+		fs.chmodSync(tmp, narrow ? mode & 0o7700 : mode);
 	} catch {
-		// The file vanished between read and write, or the fs cannot stat: leave the tmp's default
-		// mode rather than failing an edit that is otherwise sound.
+		// The file vanished between read and write, or the fs cannot stat: the tmp keeps the 0600 it was
+		// created with rather than failing an edit that is otherwise sound.
 	}
 	fs.renameSync(tmp, target);
-	return { changed: true };
+	return { changed: true, ...(narrow ? { narrowed: true } : {}) };
 }
 
 /**

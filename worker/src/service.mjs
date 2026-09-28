@@ -41,7 +41,7 @@
  * the rest of the config is broken.
  */
 import { spawn as nodeSpawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { connect as netConnect } from "node:net";
 import { homedir, networkInterfaces, tmpdir, userInfo } from "node:os";
@@ -51,7 +51,9 @@ import { parseArgs } from "node:util";
 import { parseBackendList, venuesOf } from "./backends.mjs";
 import { sharedShellIgnored } from "./deployment-venue.mjs";
 import { egressArmed, egressProxyName } from "./egress.mjs";
-import { ALL_QUADLET_FILES, ALLOWLIST_PLACEHOLDER, NETNS_KEEPER, NETNS_KEEPER_FORMAT, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, PROXY_CONF_PLACEHOLDER, QUADLET_FILES, applyStack, decideValkey, describeAction, passwdNameFrom, readSubuidRanges, readValkeyKeys, valkeySharedOn, VALKEY_SHARED_KEY, describeRollBack, journalWrite, rollBackWrites, foreignContainerRefusal, foreignContainers, lingerNote, planStack, proxyConfCopyPath, proxyRestartWarning, quadletDir, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal, workerUnitDeps } from "./podman-stack.mjs";
+import { updateEnvFile } from "./env-file.mjs";
+import { VALKEY_HEALTH_SCRIPT, VALKEY_PASSWORD_KEY, VALKEY_START_SCRIPT, dollarsDoubled, newValkeyPassword, valkeyPasswordDecision } from "./valkey-auth.mjs";
+import { ALL_QUADLET_FILES, ALLOWLIST_PLACEHOLDER, NETNS_KEEPER, NETNS_KEEPER_FORMAT, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, PROXY_CONF_PLACEHOLDER, QUADLET_FILES, applyStack, decideValkey, describeAction, passwdNameFrom, readSubuidRanges, readValkeyKeys, valkeySharedOn, VALKEY_SHARED_KEY, describeRollBack, journalWrite, rollBackWrites, foreignContainerRefusal, foreignContainers, lingerNote, planStack, proxyConfCopyPath, proxyRestartWarning, quadletDir, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal, valkeyEnvPath, valkeyPasswordRestartWarning, workerUnitDeps } from "./podman-stack.mjs";
 
 // src/ is where this module lives in BOTH layouts (worker/src in a checkout,
 // node_modules/@edgehero/pi-dispatch/src under npm). Deploy templates resolve one level up from it
@@ -82,7 +84,7 @@ function resolveReceiverStart() {
  */
 // The two worker-template literals a podman render rewrites (issue #430), spelled once for the pin table and the render.
 const WORKER_DESCRIPTION = "Description=pi-dispatch worker (drains the job queue on the host; launches job containers via docker)";
-const WORKER_VALKEY_COMMENT = "# Valkey must be reachable (docker compose -f deploy/docker-compose.yml up -d), but it is a separate\n# unit/container -- not ordered here since it may be remote.\n";
+const WORKER_VALKEY_COMMENT = "# Valkey must be reachable (docker compose --env-file .env -f deploy/docker-compose.yml up -d), but it is a separate\n# unit/container -- not ordered here since it may be remote.\n";
 
 export const TEMPLATE_PINS = {
 	"worker.service": [
@@ -93,7 +95,7 @@ export const TEMPLATE_PINS = {
 		"WantedBy=multi-user.target", // → default.target in user scope (multi-user.target never runs there)
 		"\nWants=network-online.target\n", // the anchor the podman venue's Wants=/After= on its Quadlet units go after (issue #430), user scope only
 		"Description=pi-dispatch worker (drains the job queue on the host; launches job containers via docker)", // → names rootless podman on a podman deployment (issue #430)
-		"# Valkey must be reachable (docker compose -f deploy/docker-compose.yml up -d), but it is a separate\n# unit/container -- not ordered here since it may be remote.\n", // → says it IS ordered, when the Quadlet Valkey is installed
+		"# Valkey must be reachable (docker compose --env-file .env -f deploy/docker-compose.yml up -d), but it is a separate\n# unit/container -- not ordered here since it may be remote.\n", // → says it IS ordered, when the Quadlet Valkey is installed
 		// Byte-for-byte survivors — semantics the render must not lose:
 		"RestartPreventExitStatus=2", // EXIT_POLICY is never restarted (a retry loop is a bill)
 		"StartLimitIntervalSec=60",
@@ -155,7 +157,12 @@ export const TEMPLATE_PINS = {
 		"Network=pi-dispatch-valkey.network",
 		"PublishPort=127.0.0.1:6379:6379",
 		"Volume=pi-dispatch-valkey-data:/data",
-		"Exec=valkey-server --appendonly yes",
+		// Issue #468: the password from a 0600 file into the container's environment, then to valkey-server as
+		// configuration on stdin, never on an argv (tini keeps its argv as PID 1, readable by every account). The two lines
+		// are pinned to the ONE copy of each script in valkey-auth.mjs, `$` written `$$` for systemd.
+		"EnvironmentFile=%h/.config/pi-dispatch/valkey.env",
+		`Exec=sh -c '${dollarsDoubled(VALKEY_START_SCRIPT)}'`,
+		`HealthCmd=${dollarsDoubled(VALKEY_HEALTH_SCRIPT)}`,
 		"WantedBy=default.target",
 	],
 	"pi-dispatch-egress-out.network": ["NetworkName=pi-dispatch-egress-out"],
@@ -336,7 +343,7 @@ export async function runService(argv = [], deps = {}) {
 		// this command. An operator changes it by running the command as someone else, not by declaring it.
 		user = env.USER || userInfo().username,
 		tmp = tmpdir(),
-		fs = { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync },
+		fs = { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, chmodSync, statSync, renameSync, realpathSync },
 		spawn = nodeSpawn,
 		out = (s) => process.stdout.write(s),
 		err = (s) => process.stderr.write(s),
@@ -354,6 +361,8 @@ export async function runService(argv = [], deps = {}) {
 		runSync = undefined,
 		// PR #463: how a path resolves through symlinks, for the manager-environment rule (a symlinked home).
 		realpath = (p) => realpathSync(p),
+		// Issue #468: how a new Valkey password is made (a test's seam; 32 random bytes, hex, never shown).
+		newPassword = newValkeyPassword,
 	} = deps;
 
 	let values, positionals;
@@ -421,6 +430,7 @@ export async function runService(argv = [], deps = {}) {
 		interfaces,
 		runSync,
 		realpath,
+		newPassword,
 		which: values.receiver ? "receiver" : "worker",
 		scope: platform === "linux" && values.system ? "system" : "user",
 		force: values.force,
@@ -848,8 +858,22 @@ async function podmanStackFor(ctx, venue, { readKeeper = false } = {}) {
 		envPath: join(ctx.deployDir, ".env"),
 	});
 	if (valkey.error) return { error: valkey.error };
-	const components = stackComponents({ venues: venue.venues, env: venue.env, includeValkey: valkey.include, armed, valkeyPort: valkey.port });
-	components.notes.push(...valkey.notes);
+	// Issue #468: the password the Quadlet Valkey starts with, when this install includes it: the deployment's own
+	// VALKEY_PASSWORD, or a new one this install writes into .env (never over a value), unless the Valkey is shared or
+	// the operator's own (`valkeyPasswordDecision`). Generated here, written by doInstall once nothing refuses; `render`
+	// writes nothing and shows the password file by its name alone.
+	let valkeyPassword = null;
+	let pendingPassword = null;
+	const passwordNotes = [];
+	if (valkey.include) {
+		const decided = valkeyPasswordDecision(venue.env, { envPath: join(ctx.deployDir, ".env") });
+		if (decided.error) return { error: decided.error };
+		if (decided.note) passwordNotes.push(decided.note);
+		if (decided.generate) pendingPassword = ctx.newPassword();
+		valkeyPassword = decided.password ?? pendingPassword;
+	}
+	const components = stackComponents({ venues: venue.venues, env: venue.env, includeValkey: valkey.include, armed, valkeyPort: valkey.port, valkeyPassword });
+	components.notes.push(...valkey.notes, ...passwordNotes);
 	// Gate round 2: the service reads PI_VALKEY_SHARED from .env alone, so a shell export says nothing; named, not honoured.
 	if (typeof ctx.env[VALKEY_SHARED_KEY] === "string") components.notes.push(sharedShellIgnored(ctx.env[VALKEY_SHARED_KEY], join(ctx.deployDir, ".env")));
 	// The keeper, read as `up` reads it (PR #463 final review), install only (render spawns nothing): a Quadlet keeper
@@ -861,9 +885,22 @@ async function podmanStackFor(ctx, venue, { readKeeper = false } = {}) {
 		const keeper = judgeNetnsKeeper(await runQuery(ctx, "podman", ["inspect", NETNS_KEEPER_FORMAT, NETNS_KEEPER]));
 		if (!keeper.holds) restartUnits = [QUADLET_FILES.keeper.unit];
 	}
-	const plan = planStack({ components, templatesDir: ctx.templatesDir, deployDir: ctx.deployDir, home: ctx.home, fs: ctx.fs, restartUnits });
+	let plan = planStack({ components, templatesDir: ctx.templatesDir, deployDir: ctx.deployDir, home: ctx.home, fs: ctx.fs, restartUnits });
 	if (plan.error) return { error: plan.error };
-	return { components, plan, notes: components.notes, venues: venue.venues, proxy: egressProxyName(venue.env), valkeyRefusal: valkey.refusal };
+	// Issue #468: a Valkey that already ran and now gets a new password (an upgrade from a deployment that had none) is one
+	// its running clients can no longer talk to, so the worker and the receiver units this account runs are restarted
+	// after it. Asked only then (install only; render spawns nothing), and only of units the manager says are active.
+	const secret = plan.files.find((f) => f.kind === "secret");
+	const valkeyFile = plan.files.find((f) => f.unit === QUADLET_FILES.valkey.unit && f.path.endsWith(".container"));
+	if (readKeeper && secret && secret.state !== "same" && valkeyFile && valkeyFile.state !== "new") {
+		const active = [];
+		for (const unit of ["pi-dispatch-worker.service", "pi-dispatch-receiver.service"]) {
+			const res = await runQuery(ctx, "systemctl", ["--user", "is-active", unit]);
+			if (res.code === 0 && String(res.stdout ?? "").trim() === "active") active.push(unit);
+		}
+		if (active.length > 0) plan = planStack({ components, templatesDir: ctx.templatesDir, deployDir: ctx.deployDir, home: ctx.home, fs: ctx.fs, restartUnits, restartAfterValkey: active });
+	}
+	return { components, plan, notes: components.notes, venues: venue.venues, proxy: egressProxyName(venue.env), valkeyRefusal: valkey.refusal, pendingPassword };
 }
 
 async function doRender(ctx) {
@@ -897,6 +934,8 @@ async function doRender(ctx) {
 		// 4.7 KB of squid configuration under a "Quadlet" heading read as a unit file.
 		for (const f of stack?.plan.files ?? []) {
 			if (f.kind === "conf") ctx.out(`\n# → ${f.path} (the egress proxy's rules: install copies the package's egress-proxy.conf here, unchanged)\n`);
+			// Issue #468: the password file is NAMED, never printed: render output lands in scrollbacks and bug reports.
+			else if (f.kind === "secret") ctx.out(`\n# → ${f.path} (mode 0600: ${VALKEY_PASSWORD_KEY} for the Quadlet Valkey, ${f.text.includes(`${VALKEY_PASSWORD_KEY}=\n`) ? "empty, so it starts without a password" : "from .env or generated into it at install; the value is not shown"})\n`);
 			else ctx.out(`\n# → ${f.path} (Quadlet, podman venue)\n${f.text}`);
 		}
 		for (const note of stack?.notes ?? []) ctx.out(`# note: ${note}\n`);
@@ -1061,6 +1100,14 @@ async function installLinuxUser(ctx, paths, stack = null, foreign = []) {
 		}
 	};
 	const writtenList = () => [...new Set(journal.map((e) => e.path))].join(", ") || "none";
+	if (stack?.pendingPassword) {
+		// Issue #468: the new Valkey password into .env first, journalled like every other file of this run, so a write
+		// that fails later puts .env back too. Never over a value (the writer's never-clobber), the file narrowed to this
+		// account alone, the value never shown.
+		const wrote = writeValkeyPassword(ctx, stack.pendingPassword, journal);
+		if (wrote.error) return fail(ctx.err, `${wrote.error}, so nothing was installed: ${describeRollBack(rollBackWrites(ctx.fs, journal))}`);
+		ctx.out(`generated ${VALKEY_PASSWORD_KEY} into ${wrote.path} (32 random bytes, hex; the value is not shown; the file is now readable by this account only)\n`);
+	}
 	if (stack) {
 		for (const note of stack.notes) ctx.out(`note: ${note}\n`);
 		for (const f of foreign) {
@@ -1068,6 +1115,8 @@ async function installLinuxUser(ctx, paths, stack = null, foreign = []) {
 		}
 		const restartWarning = proxyRestartWarning(stack.plan);
 		if (restartWarning) ctx.out(`⚠ ${restartWarning}\n`);
+		const passwordWarning = valkeyPasswordRestartWarning(stack.plan);
+		if (passwordWarning) ctx.out(`⚠ ${passwordWarning}\n`);
 		if (stack.plan.actions.length > 0) {
 			// Shown, then done: the same lines `up` asks consent for, carried out by the same function.
 			ctx.out(`podman venue (PI_BACKENDS in .env): its stack, as Quadlet units in ${stack.plan.dir}:\n`);
@@ -1110,9 +1159,13 @@ async function installLinuxUser(ctx, paths, stack = null, foreign = []) {
 		if (started.length > 0) ctx.out(`started ${started.join(" ")} (Quadlet units: never enabled, the generator reads their own [Install] section; a unit already running is left as it is)\n`);
 		// Named by the file that changed (round 3 nit): the proxy also restarts for its rules copy alone.
 		for (const unit of restarted) {
-			const changedFiles = stack.plan.files.filter((f) => f.state === "changed" && f.restarts === unit).map((f) => f.path);
-			ctx.out(`restarted ${unit}, because this install replaced ${changedFiles.join(" and ")}\n`);
+			// Issue #468: a file this install wrote NEW for a unit it restarts (the Valkey's first password file) is named too.
+			const changedFiles = stack.plan.files.filter((f) => f.state !== "same" && f.restarts === unit).map((f) => f.path);
+			// A unit restarted with its files unchanged (a keeper that did not hold, the proxy after it) says so rather than
+			// ending on "replaced " with nothing after it, as it did.
+			ctx.out(`restarted ${unit}, ${changedFiles.length > 0 ? `because this install replaced ${changedFiles.join(" and ")}` : "as the plan above says (its files are unchanged)"}\n`);
 		}
+		if ((stack.plan.clientsRestarted ?? []).length > 0) ctx.out(`restarted ${stack.plan.clientsRestarted.join(" ")} after it, so they send the new ${VALKEY_PASSWORD_KEY}\n`);
 		if (stack.plan.start.length > 0) ctx.out(`${paths.name} Wants= and is After= ${stack.plan.start.join(" ")}\n`);
 		// PR #463 round 3: a keeper started or restarted beside a proxy this install does not own (PI_EGRESS_PROXY naming
 		// the operator's own) leaves that proxy up since before the keeper; said, with its name.
@@ -1128,6 +1181,29 @@ async function installLinuxUser(ctx, paths, stack = null, foreign = []) {
 	// no-worker-after-reboot on a headless box. Say so instead of letting the operator find out.
 	ctx.out(`note: user units run while you have a session. For a headless host that must start at boot:  sudo loginctl enable-linger ${ctx.user}\n`);
 	return 0;
+}
+
+/**
+ * Write a new VALKEY_PASSWORD into the deployment's `.env` (issue #468) through the project's one `.env` writer, never
+ * over a value, the file narrowed to this account alone (`narrow`). Recorded in `journal` with the bytes that were there,
+ * so a later failure of the same install puts it back. `{ path }` or `{ error }`; the value is never in either.
+ */
+function writeValkeyPassword(ctx, password, journal) {
+	const envPath = join(ctx.deployDir, ".env");
+	let previous;
+	try {
+		previous = ctx.fs.readFileSync(envPath);
+	} catch (err) {
+		return { error: `${VALKEY_PASSWORD_KEY} could not be written into ${envPath}: it could not be read (${err?.message ?? err})` };
+	}
+	try {
+		const res = updateEnvFile(envPath, VALKEY_PASSWORD_KEY, password, { fs: ctx.fs, platform: ctx.platform, narrow: true });
+		if (!res.changed) return { error: `${VALKEY_PASSWORD_KEY} could not be written into ${envPath}: the file already assigns it (set while this install ran?). Re-run the install, which then uses that value` };
+	} catch (err) {
+		return { error: `${VALKEY_PASSWORD_KEY} could not be written into ${envPath}: ${err?.message ?? err}` };
+	}
+	journal.push({ path: envPath, existed: true, previous });
+	return { path: envPath };
 }
 
 async function installLinuxSystem(ctx, paths) {
@@ -1263,9 +1339,12 @@ async function removeQuadlets(ctx, quadlets) {
 		}
 	}
 	for (const q of quadlets) ctx.fs.unlinkSync(join(quadletDir(ctx.home), q.file));
-	// The account-owned copy of the proxy's rules (E1) goes with its unit.
+	// The account-owned copy of the proxy's rules (E1) goes with its unit, and the Valkey's password file with its unit
+	// (issue #468; the password itself stays in the deployment's .env, where a re-install finds it).
 	const conf = proxyConfCopyPath(ctx.home);
 	if (ctx.fs.existsSync(conf)) ctx.fs.unlinkSync(conf);
+	const valkeyEnv = valkeyEnvPath(ctx.home);
+	if (quadlets.some((q) => q.file === QUADLET_FILES.valkey.file) && ctx.fs.existsSync(valkeyEnv)) ctx.fs.unlinkSync(valkeyEnv);
 	const reload = await run(ctx, "systemctl", ["--user", "daemon-reload"]);
 	if (reload !== 0) {
 		return fail(ctx.err, `the Quadlet files are removed and their units stopped, but systemctl --user daemon-reload failed (${reload === null ? "systemctl not found" : `exit ${reload}`}): run it yourself so the manager forgets them`);
@@ -1423,8 +1502,9 @@ async function doRestart(ctx, values) {
 		// of the config (forge auth …) is broken, and failFast keeps a down Valkey an error in seconds
 		// instead of a hung restart. Lazy imports for the same reason cli.mjs uses them: `service`
 		// subcommands that never touch the queue must not load bullmq/ioredis.
-		const url = ctx.env.VALKEY_URL ?? "redis://127.0.0.1:6379";
-		const { parseConnection } = await import("./connection.mjs");
+		// This shell's VALKEY_URL, else the deployment .env's (PR #475's review), as every CLI verb reads it.
+		const { cliValkeyUrl, parseConnection } = await import("./connection.mjs");
+		const url = cliValkeyUrl(ctx.env, { cwd: ctx.deployDir, warn: (line) => ctx.err(line) });
 		const { makeQueue } = await import("./queue.mjs");
 		queue = makeQueue(parseConnection(url, { failFast: true }));
 	}

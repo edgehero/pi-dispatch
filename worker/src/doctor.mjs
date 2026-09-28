@@ -52,7 +52,7 @@
 import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { homedir, networkInterfaces, release as osRelease, tmpdir, userInfo } from "node:os";
-import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_START, STACK_KEYS, STARTED_AT_FORMAT, VALKEY_SHARED_KEY, judgeNetnsKeeper, judgeValkeyListeners, netnsKeeperRemedy, pinnedValkeyUrl, podmanNeedsNetnsKeeper, probeTcpAddress, readSubuidRanges, proxyRestartAdvice, readLinger, readValkeyKeys, valkeySharedOn } from "./podman-stack.mjs";
+import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_START, STACK_KEYS, STARTED_AT_FORMAT, VALKEY_SHARED_KEY, judgeNetnsKeeper, judgeValkeyListeners, netnsKeeperRemedy, pinnedValkeyUrl, podmanNeedsNetnsKeeper, probeTcpAddress, readSubuidRanges, proxyRestartAdvice, readLinger, readValkeyKeys, valkeySharedOn, valkeyTarget } from "./podman-stack.mjs";
 import { dirname, isAbsolute, join, delimiter, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
@@ -82,6 +82,8 @@ import { endpointShown, makeDockerEndpointResolver, quotedShown } from "./backen
 import { DEFAULT_EGRESS_PROXY, STOPPED_PROXY_STATES, EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, egressArmed, egressCanaryNetwork, egressCanaryProbe, egressEnv, egressProxyName, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { detachBlockedSentence, makeDetachGate, runtimeFromFacts } from "./netns-keeper.mjs";
 import { runLiveProbes } from "./live-probes.mjs";
+import { VALKEY_PASSWORD_KEY, VALKEY_PASSWORD_HOWTO, VALKEY_PORT_KEY, isLoopbackHost, valkeyPasswordProblem, valkeyPortConflict } from "./valkey-auth.mjs";
+import { urlShown, valkeyContextFromResolution, valkeyPasswordFor } from "./valkey-endpoint.mjs";
 import { SANDBOX_TOMBSTONE_STUCK_MS, isSandboxTombstone, sandboxTombstoneAge } from "./sandbox-store.mjs";
 import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
@@ -133,11 +135,6 @@ const TRIGGER_IMAGE_ENTRYPOINT_FIX = "build your job image FROM this repo's imag
 // such defaults to pin (its CLI forwards only what `-e` names), so its argv is what it always was.
 const ghProbeArgs = (image, bin) => ["run", "--rm", "--pull=never", ...(bin === "podman" ? PODMAN_PINNED_FLAGS : []), "-e", "GH_TOKEN", "-e", "GITHUB_TOKEN", "--entrypoint", "gh", image, "auth", "status"];
 
-// The loopback Valkey, as one docker argv. Mirrors deploy/docker-compose.yml exactly: AOF on (the
-// wait-list must survive a reboot, REQ-QUEUE-BURST-NO-DROP), bound to 127.0.0.1 only (the queue is not a
-// public surface), restart unless-stopped, data on a named volume. Container and volume names are
-// pi-dispatch-prefixed so compose's own `valkey`/`valkey-data` never collide with these.
-const VALKEY_RUN = ["run", "-d", "--name", "pi-dispatch-valkey", "--restart", "unless-stopped", "-p", "127.0.0.1:6379:6379", "-v", "pi-dispatch-valkey-data:/data", "valkey/valkey:8", "valkey-server", "--appendonly", "yes"];
 
 // Issue #471: `shellVars` is THIS shell's environment and is read in exactly the places a test pins (the venue and
 // service-key resolution, the agent dir default, and the environment handed to child processes). Every check judges
@@ -151,6 +148,10 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// in milliseconds; nothing else passes it.
 		runTimeouts = RUN_TIMEOUTS,
 		probeValkey = defaultProbeValkey,
+		// Issue #468: how the Valkey answers a credential, `{ state, passwordSet, from }` (connection.mjs' `valkeyAuthState`),
+		// in-process, through doctor's own client: no program is started and handed the password. Real only where the
+		// Valkey probe is, as the owner check: a test that injects `probeValkey` gets none unless it injects this too.
+		valkeyAuth,
 		readHosts = defaultReadHosts,
 		fileExists = existsSync,
 		nodeVersion = process.versions.node,
@@ -306,7 +307,17 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 				? (url, { shared, user, envPath, rootOk = false }) =>
 						judgeValkeyListeners({ url, probeTcp: probeTcpAddress, lookup: (host, opts) => dnsLookup(host, opts), fs: { readFileSync }, euid: process.geteuid?.(), user, shared, rootOk, ownerName: (uid) => ownerNameFromPasswd(passwd, uid), interfaces: networkInterfaces, envPath, subuids: readSubuidRanges({ user, euid: process.geteuid?.(), fs: { readFileSync } }) })
 				: null;
-	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const valkeyAuthSeam =
+		valkeyAuth !== undefined
+			? valkeyAuth
+			: deps.probeValkey === undefined
+				? async (url, { context, withoutPassword = false } = {}) => {
+						const { valkeyAuthState } = await import("./connection.mjs");
+						const sent = valkeyPasswordFor(url, context);
+						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
+					}
+				: null;
+	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -499,7 +510,7 @@ export const CLI_SERVICE_KEYS = Object.freeze({
 	gh: Object.freeze(["GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "GH_HOST", "XDG_CONFIG_HOME", "HOME"]),
 });
 const CLI_KEY_NAMES = [...new Set(Object.values(CLI_SERVICE_KEYS).flat())];
-export const SERVICE_ENV_KEYS = Object.freeze([...STACK_KEYS, "VALKEY_URL", VALKEY_SHARED_KEY, "PI_PROVIDER", ...GITHUB_SERVICE_KEYS, "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", "PI_WORKER_NAME", ...WORKER_SERVICE_KEYS, ...RECEIVER_SERVICE_KEYS, ...CLI_KEY_NAMES]);
+export const SERVICE_ENV_KEYS = Object.freeze([...STACK_KEYS, "VALKEY_URL", VALKEY_SHARED_KEY, VALKEY_PASSWORD_KEY, VALKEY_PORT_KEY, "PI_PROVIDER", ...GITHUB_SERVICE_KEYS, "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", "PI_WORKER_NAME", ...WORKER_SERVICE_KEYS, ...RECEIVER_SERVICE_KEYS, ...CLI_KEY_NAMES]);
 
 /** Issue #471 (gate round 1): what a service manager gives every service itself, so a `.env` need not carry it. */
 const AMBIENT_SERVICE_KEYS = Object.freeze(["TMPDIR", "TEMP", "XDG_RUNTIME_DIR", "HOME"]);
@@ -590,7 +601,7 @@ export const DOCTOR_SHELL_KEYS = Object.freeze({
 
 /** Issue #471: the service keys whose values a disagreement line never prints (set or unset only); URLs print as
  *  `urlShown` does. Every other key's two values are shown, quoted. */
-const SECRET_SERVICE_KEYS = new Set(["GH_TOKEN", "GITHUB_TOKEN", "GITHUB_APP_PRIVATE_KEY", "WEBHOOK_SECRET", "GITLAB_TOKEN", "GITLAB_WEBHOOK_SECRET", "FORGEJO_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_TOKEN", "AZURE_WEBHOOK_SECRET"]);
+const SECRET_SERVICE_KEYS = new Set([VALKEY_PASSWORD_KEY, "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_APP_PRIVATE_KEY", "WEBHOOK_SECRET", "GITLAB_TOKEN", "GITLAB_WEBHOOK_SECRET", "FORGEJO_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_TOKEN", "AZURE_WEBHOOK_SECRET"]);
 const URL_SERVICE_KEYS = new Set(["VALKEY_URL", "GITLAB_URL", "FORGEJO_URL", "AZURE_ORG_URL"]);
 
 /** `keys` narrowed to `SERVICE_ENV_KEYS` plus the provider's own key variables. */
@@ -1821,6 +1832,15 @@ export async function collectChecks(shellVars, seams) {
 	const valkeyUnresolved = ownerVerdict?.unresolved ? `VALKEY_URL's host ${ownerVerdict.unresolved} did not resolve here (${ownerVerdict.why}), so whose Valkey it reaches cannot be judged; the worker waits for it and retries` : null;
 	const valkeyRefused = Boolean(ownerVerdict?.refusal) || valkeyUnresolved !== null;
 	const valkeyTalkUrl = ownerVerdict?.chosen ? pinnedValkeyUrl(valkeyUrl, ownerVerdict.chosen).url : valkeyUrl;
+	// Issue #468: how that Valkey answers this deployment's credential, asked only where doctor talks to it at all, by
+	// doctor's own in-process client (issue #471's rule: no program doctor starts is handed anything from `.env`). The
+	// credential is the resolved one: this shell's VALKEY_PASSWORD, else the file's (for a loopback Valkey only, as every
+	// client sends it, `valkeyPasswordFor`), never printed.
+	const fileValue = (key) => service.fromFile[key] ?? service.disagreements.find((d) => d.key === key)?.file;
+	// This shell's side where it set the key, the file's where the resolution took it from there (sent to a loopback
+	// Valkey only), as every client sends it (`valkeyContextFromResolution`).
+	const valkeyContext = valkeyContextFromResolution({ service, envPath: serviceEnvFile?.path ?? join(cwd, ".env"), shared: sharedInFile, platform });
+	const valkeyAuthVerdict = !valkeyUnresolved && !valkeyRefused && !unreadValkey && seams.valkeyAuth ? await seams.valkeyAuth(valkeyTalkUrl, { context: valkeyContext }) : null;
 	if (valkeyUnresolved) {
 		checks.push({ ok: false, label: valkeyUnresolved, fix: "fix the name's resolution on this host, or write the address in VALKEY_URL" });
 	} else if (valkeyRefused) {
@@ -1831,37 +1851,44 @@ export async function collectChecks(shellVars, seams) {
 			label: `${unreadValkey}: doctor contacted no Valkey, since the default it would fall back to (${urlShown(valkeyUrl)}) is not what the service's worker is given, and on a shared host may be another account's`,
 			fix: "write that line so every loader reads it the same (the reason above says how), then re-run doctor",
 		});
+	} else if (valkeyAuthVerdict && (valkeyAuthVerdict.state === "noauth" || valkeyAuthVerdict.state === "wrongpass")) {
+		// Issue #468: a Valkey that refuses this deployment's credential answers, so "not reachable" would be the wrong
+		// sentence: it is the password, named by its key and where it came from, never its value.
+		checks.push({ ok: false, label: `Valkey (${urlShown(valkeyUrl)}) answers, and ${valkeyAuthVerdict.state === "noauth" ? "requires a password this deployment does not send" : `refuses the ${VALKEY_PASSWORD_KEY} this deployment sends`}: the worker refuses to start on it (exit 2)`, fix: valkeyAuthFix(valkeyAuthVerdict.state, { localUsed, podmanUsed, envPath: join(cwd, ".env") }) });
 	} else checks.push({
 		ok: await probeValkey(valkeyTalkUrl),
 		label: `Valkey reachable (${urlShown(valkeyUrl)})${fromFileNote(fileSays("VALKEY_URL"))}`,
-		// Issue #433: without `local`, docker is not this deployment's runtime and may not be installed at all, so neither the
-		// compose file nor a `docker run` is offered. The words hold before and after the setup commands learn Podman: the
-		// podman guide says how to start Valkey under the account, whichever command does it.
-		fix: localUsed ? "docker compose -f deploy/docker-compose.yml up -d" : "run `pi-dispatch up` (or `pi-dispatch service install`) as this account: on the podman venue both start Valkey as a Quadlet unit under its Podman (docs/podman.md, setup step 6); a Valkey you run yourself, a distribution package say, works too",
-		// Prompt tier, and only for a LOOPBACK url (the shipped default): starting a local container cannot
-		// make a remote VALKEY_URL reachable, so a pointed-elsewhere deployment keeps the plain fix line
-		// rather than an offer that would mask the real problem. The argv mirrors the compose file's
-		// semantics exactly (VALKEY_RUN above). Issue #433: and only with `local`. A `podman run` of the same argv
-		// was rejected: Podman has no daemon to bring a `--restart` container back after a reboot (podman-run(1) sends
-		// that to a systemd unit), so the fix would report success and leave a queue that is gone after the next boot.
-		...(localUsed && /^redis:\/\/(127\.0\.0\.1|localhost)(:6379)?\/?$/.test(valkeyUrl)
-			? {
-					fixAction: {
-						tier: "prompt",
-						describe: `docker ${VALKEY_RUN.join(" ")}`,
-						run: async ({ spawn }) =>
-							// The PULL bound: this `docker run` fetches the valkey image on a host that does not have it.
-							(await runCmd(spawn, "docker", VALKEY_RUN, runTimeouts.pull)).code === 0
-								? { ok: true }
-								: { ok: false, note: "docker run failed (is a container named pi-dispatch-valkey already present? `docker start pi-dispatch-valkey`)" },
-					},
-				}
-			: {}),
+		// Issue #433: without `local`, docker is not this deployment's runtime and may not be installed at all. Issue #468
+		// with issue #471's rule: doctor starts NO Valkey any more (its `--fix` offered a `docker run`, which since #468 needs
+		// the deployment's VALKEY_PASSWORD in the docker CLI's environment, and doctor hands no program anything from
+		// `.env`). It names the step: `pi-dispatch up`, which starts it with the password, labels its container and volume
+		// with this folder, and asks before it uses a volume it cannot attribute. The words hold on both venues.
+		fix: localUsed
+			? "run `pi-dispatch up` in the deployment folder: it starts Valkey with the deployment's VALKEY_PASSWORD (or, in a folder /dispatch setup handed to compose, compose's own: `docker compose -p <folder name> --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.valkey.yml up -d valkey`)"
+			: "run `pi-dispatch up` (or `pi-dispatch service install`) as this account: on the podman venue both start Valkey as a Quadlet unit under its Podman (docs/podman.md, setup step 6); a Valkey you run yourself, a distribution package say, works too",
 	});
+
+	// Round 3 of PR #475's review: PI_VALKEY_PORT is the port compose publishes its Valkey on, and VALKEY_URL's is the one
+	// the worker dials; a value that disagrees (in .env, or in this shell, which wins over --env-file) moves the queue off
+	// the worker's port on the next compose run (measured). A loopback VALKEY_URL only: another host's port is not compose's.
+	{
+		const target = valkeyTarget(valkeyUrl);
+		const portDisagreement = service.disagreements.find((d) => d.key === VALKEY_PORT_KEY);
+		const sources = [
+			...(typeof env[VALKEY_PORT_KEY] === "string" && env[VALKEY_PORT_KEY].trim() !== "" ? [[env[VALKEY_PORT_KEY].trim(), fileSays(VALKEY_PORT_KEY).length > 0 ? join(cwd, ".env") : "this shell"]] : []),
+			...(portDisagreement && portDisagreement.file.trim() !== "" ? [[portDisagreement.file.trim(), join(cwd, ".env")]] : []),
+		];
+		if (!target.error && isLoopbackHost(target.host)) {
+			for (const [value, where] of sources) {
+				if (value !== String(target.port)) checks.push({ ok: false, warn: true, label: valkeyPortConflict(value, target.port, where), fix: `${VALKEY_PORT_KEY}=${target.port} in ${join(cwd, ".env")} (and unset it in this shell if it is set there)` });
+			}
+		}
+	}
 
 	if (ownerVerdict?.heldBy) {
 		checks.push({ ok: true, label: `Valkey (${urlShown(valkeyUrl)}) answers from a listener of ${ownerVerdict.heldBy}${ownerVerdict.chosen ? `; the worker connects to ${ownerVerdict.chosen} only` : ""}` });
 	}
+	checks.push(...(await valkeyPasswordChecks({ verdict: valkeyAuthVerdict, context: valkeyContext, seams, valkeyUrl, valkeyTalkUrl, localUsed, podmanUsed, platform, statSeam, fileValue })));
 	for (const other of ownerVerdict?.elsewhere ?? []) {
 		checks.push({ ok: false, warn: true, label: `another account also listens on an address VALKEY_URL's host resolves to: ${other}. The worker connects only to the address judged this account's, so it never reaches that one`, fix: "nothing to change for this deployment; a client that resolves the name itself (`pi-dispatch run` from a shell) may still reach it, so prefer VALKEY_URL=redis://127.0.0.1:<port>" });
 	}
@@ -4670,6 +4697,72 @@ function runCmd(spawn, cmd, args, timeoutMs = RUN_TIMEOUTS.cmd) {
 }
 
 /**
+ * The step that gives a deployment's Valkey its password and restarts it with it (issue #468), per venue: the podman
+ * venue's Quadlet Valkey through `service install --force`, docker's through `up` (or compose's own recreate). Named,
+ * never run by doctor (issue #471's rule).
+ */
+export function valkeyPasswordUpgradeStep({ localUsed, podmanUsed }) {
+	if (podmanUsed && !localUsed) return "run `pi-dispatch service install --force` as this account: it writes a VALKEY_PASSWORD into .env, restarts the Quadlet Valkey with it (the queue in its volume is kept) and then the worker and the receiver";
+	return "run `pi-dispatch up`: it writes a VALKEY_PASSWORD into .env and restarts pi-dispatch-valkey with it (its volume, and the queue, is kept); a compose-started Valkey is recreated with `docker compose --env-file .env -f deploy/docker-compose.yml up -d`. Then restart the worker and the receiver so they send it";
+}
+
+/** The fix for a Valkey that refuses this deployment's credential (issue #468). */
+function valkeyAuthFix(state, { localUsed, podmanUsed, envPath }) {
+	if (state === "noauth") return `put ${VALKEY_PASSWORD_KEY}=<that Valkey's password> in ${envPath} (for a Valkey shared with PI_VALKEY_SHARED=1, the password of the account that runs it), then restart the worker and the receiver`;
+	return `${VALKEY_PASSWORD_KEY} in ${envPath} is not that Valkey's password. If you changed it, restart Valkey with it: ${valkeyPasswordUpgradeStep({ localUsed, podmanUsed })}`;
+}
+
+/**
+ * Doctor's password lines (issue #468), after the reachability line: whether this deployment's Valkey requires a
+ * password, said by whether one is SET and never by its value. A loopback Valkey that answers a client sending none is a
+ * warning with the upgrade step (any local account can read and feed that queue); a remote one is the operator's own and
+ * is not judged. A `.env` holding VALKEY_PASSWORD that other accounts can read is a warning too, and a value the start
+ * script could not hand to Valkey is a failure. The file's value comes from issue #471's one resolution (`fileValue`).
+ */
+async function valkeyPasswordChecks({ verdict, context, seams, valkeyUrl, valkeyTalkUrl, localUsed, podmanUsed, platform, statSeam, fileValue }) {
+	const checks = [];
+	const inFile = fileValue(VALKEY_PASSWORD_KEY);
+	if (typeof inFile === "string" && inFile !== "" && seams.serviceEnvFile) {
+		const problem = valkeyPasswordProblem(inFile);
+		if (problem) checks.push({ ok: false, label: `${VALKEY_PASSWORD_KEY} in ${seams.serviceEnvFile.path} cannot be handed to Valkey: ${problem}`, fix: VALKEY_PASSWORD_HOWTO });
+		if (platform !== "win32") {
+			let mode = null;
+			try {
+				mode = statSeam(seams.serviceEnvFile.path).mode;
+			} catch {
+				// Unreadable metadata: nothing is said about it.
+			}
+			if (typeof mode === "number" && (mode & 0o077) !== 0) {
+				checks.push({ ok: false, warn: true, label: `${seams.serviceEnvFile.path} holds ${VALKEY_PASSWORD_KEY} and is readable by ${(mode & 0o007) !== 0 ? "every account on this host" : "its group"} (mode ${(mode & 0o777).toString(8).padStart(3, "0")})`, fix: `chmod 600 ${seams.serviceEnvFile.path}` });
+			}
+		}
+	}
+	if (!verdict || verdict.state !== "ok" || !seams.valkeyAuth) return checks;
+	let host = "";
+	try {
+		host = new URL(valkeyUrl).hostname;
+	} catch {
+		return checks;
+	}
+	// A Valkey on another machine is the operator's own to secure; the threat this answers is another account on THIS one.
+	if (!isLoopbackHost(host)) return checks;
+	const open = await seams.valkeyAuth(valkeyTalkUrl, { context, withoutPassword: true });
+	const upgrade = valkeyPasswordUpgradeStep({ localUsed, podmanUsed });
+	if (open.state === "ok") {
+		checks.push(
+			verdict.passwordSet
+				? { ok: false, warn: true, label: `Valkey (${urlShown(valkeyUrl)}) answers a client that sends no password, although ${VALKEY_PASSWORD_KEY} is set: it was started before the password existed, and any local account can read, enqueue or delete this deployment's jobs`, fix: upgrade }
+				: { ok: false, warn: true, label: `Valkey (${urlShown(valkeyUrl)}) has no password: any local account can read, enqueue or delete this deployment's jobs (${VALKEY_PASSWORD_KEY} is not set)`, fix: upgrade },
+		);
+	} else if (open.state === "noauth") {
+		// The source named (PR #475's review): the environment, the .env, or the URL's own userinfo, never the value.
+		const source = verdict.from === "VALKEY_URL" ? "the password in VALKEY_URL" : verdict.from ? `${VALKEY_PASSWORD_KEY} from ${verdict.from}` : VALKEY_PASSWORD_KEY;
+		checks.push({ ok: true, label: `Valkey (${urlShown(valkeyUrl)}) requires a password, and the one this deployment sends (${source}) is accepted (the value is not shown)` });
+	}
+	return checks;
+}
+
+/**
  * Like runCmd but collects stdout+stderr into one combined string — gh moves its human output between
  * the two across versions, so callers get both. Resolves `{code, output}`; `code: null` when the command
  * could not be launched or overran the timeout (default 30s, so a hung docker daemon cannot stall doctor).
@@ -6188,23 +6281,9 @@ function userNameOf(seams) {
 	}
 }
 
-/**
- * A URL as doctor may print it (issue #453, gate round 3 and the re-review): scheme, host, port and database only,
- * never the userinfo (a password or a username that is a token), the query (`password=`, a token) or the fragment;
- * `<no host>` without a host, and `<unparseable URL>` when it does not parse, since then nothing can say where a
- * credential in it starts or ends.
- */
-export function urlShown(url) {
-	let parsed;
-	try {
-		parsed = new URL(String(url));
-	} catch {
-		return "<unparseable URL>";
-	}
-	// scheme://host:port/db and nothing else (round-cap re-review): no userinfo at all, no query, no fragment.
-	if (!parsed.hostname) return "<no host>";
-	return printable(`${parsed.protocol}//${parsed.host}${parsed.pathname && parsed.pathname !== "/" ? parsed.pathname : ""}`);
-}
+// `urlShown` (a URL as doctor may print it, never its userinfo, query or fragment) lives in valkey-endpoint.mjs since
+// PR #475's review, so the CLI, the panel and doctor print every Valkey URL through the one function.
+export { urlShown };
 
 /**
  * PI_JOB_IMAGE as the worker takes it and as doctor may hand it to a runtime (issue #471): `{ image, refused }`. The

@@ -175,6 +175,21 @@ test("forwardEnv refuses the App signing key -- worse in a container than the to
 	assert.deepEqual(loadConfig({ PI_FORWARD_ENV: "GITHUB_APP_PRIVATE_KEY_PATH" }).forwardEnv, ["GITHUB_APP_PRIVATE_KEY_PATH"]);
 });
 
+// Issue #468: the queue's password is the worker's alone, like the App's signing key: forwarded into a job container, it
+// would hand an agent reading adversarial issue text the power to read, enqueue and delete this deployment's jobs.
+test("forwardEnv refuses VALKEY_PASSWORD, and a trigger cannot bind that name either (#468)", async () => {
+	for (const bad of ["VALKEY_PASSWORD", "FOO,VALKEY_PASSWORD", "GITHUB_APP_PRIVATE_KEY,VALKEY_PASSWORD"]) {
+		assert.throws(
+			() => loadConfig({ PI_FORWARD_ENV: bad }),
+			(e) => e.piDispatchConfig === true && /must not forward .*VALKEY_PASSWORD -- .*the queue's password lets whoever holds it read, enqueue and delete this deployment's jobs, and a job container is the last place it belongs/.test(e.message),
+			`PI_FORWARD_ENV=${bad}`,
+		);
+	}
+	const { parseTriggers } = await import("../src/triggers.mjs");
+	const label = { on: { type: "label", any: ["pi:x"] }, run: { kind: "github", flow: "fix", secrets: { VALKEY_PASSWORD: "op://a/b/c" } } };
+	assert.throws(() => parseTriggers(JSON.stringify({ triggers: [label] }), "t.json"), /run\.secrets key "VALKEY_PASSWORD" is reserved/);
+});
+
 test("authFromPi defaults ON; only PI_AUTH_FROM_PI=0 forces env-only", () => {
 	assert.equal(loadConfig({}).authFromPi, true, "reusing the pi login is the default — no flag needed");
 	assert.equal(loadConfig({ PI_AUTH_FROM_PI: "1" }).authFromPi, true);

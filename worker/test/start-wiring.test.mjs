@@ -3332,6 +3332,23 @@ test("boot judges VALKEY_URL's owner before any Valkey contact, refuses as a con
 	assert.deepEqual([started.valkey, started.valkeyPinned], ["redis://valkey-name-never-resolves.invalid:1", "127.0.0.1:6399"]);
 });
 
+// Issue #468: the boot says whether this worker sends a Valkey password, and never the password; and a worker that has
+// one still runs against a Valkey that has none (an older deployment mid-upgrade): ioredis takes the server's "no password
+// configured" answer as a warning.
+test("boot logs whether it sends a Valkey password, never the value, and one it sends to a Valkey without a password still works (#468)", { skip }, async () => {
+	const pinnedUrl = process.env.VALKEY_TEST_URL;
+	const judged = async () => ({ url: pinnedUrl, servername: null, pinned: { address: "127.0.0.1", port: 6399, heldBy: "this account" }, notes: [] });
+	const none = await runStart({ env: {}, judgeValkey: judged });
+	const line = none.logs.find((l) => l.event === "valkey_password");
+	assert.deepEqual(Object.keys(line).sort(), ["event", "host", "set"], "whether one is set, and nothing else");
+	assert.equal(line.set, false);
+	const pw = "c0ffee00".repeat(8);
+	const withPw = await runStart({ env: { VALKEY_PASSWORD: pw }, judgeValkey: judged });
+	assert.equal(withPw.logs.find((l) => l.event === "valkey_password").set, true);
+	assert.ok(withPw.logs.some((l) => l.event === "worker_started"), "booted against a Valkey that has no password");
+	assert.ok(!JSON.stringify(withPw.logs).includes(pw), "the password is in no log line");
+});
+
 test("boot secures the account root for the two durable stores too, and a refusal there stops it before anything is built (#464)", { skip }, async () => {
 	const asked = [];
 	await runStart({ env: { PI_LOGS_DIR: "/t/pi-dispatch-501/logs", PI_SETTINGS_FILE: "/t/pi-dispatch-501/settings.json" }, ensureJobsDir: () => {}, ensureUnderAccountRoot: (p) => asked.push(p) });

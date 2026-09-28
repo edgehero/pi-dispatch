@@ -1344,7 +1344,10 @@ test("index.ts resolves paths and the worker name only through deploymentEnv (#4
   const src = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8").replace(/^\s*(\/\/|\*).*$/gm, "");
   const calls = [...src.matchAll(/\bresolvePaths\(/g)].map((m) => src.slice(m.index, m.index + 30));
   assert.deepEqual(calls.filter((c) => !c.startsWith("resolvePaths(deploymentEnv())")), [], "every resolvePaths call takes the resolved environment");
-  assert.ok(calls.length > 20, "and there are still the call sites there were");
+  // Two fewer since the rebase over issue #468: the pause and resume tools resolve their Valkeys through `killSwitchSet`
+  // (the CLI's rule over the pointer's `.env`, read by this issue's one reader), not through resolvePaths.
+  assert.ok(calls.length > 18, "and there are still the call sites there were");
+  assert.equal([...src.matchAll(/await killSwitchSet\(\{ paused/g)].length, 3, "the two tools and /dispatch pause|resume");
   assert.doesNotMatch(src, /process\.env\.PI_WORKER_NAME/);
   assert.match(src, /enqueueDispatchRun\(\{ folder, flow, task, aiInvoked: false, env: deploymentEnv\(\) \}\)/);
   assert.match(src, /aiInvoked: true,\n\s*env: deploymentEnv\(\),/);

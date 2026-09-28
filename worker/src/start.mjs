@@ -5,7 +5,7 @@ import { dirname, basename, join } from "node:path";
 import { configError, ensureJobsDir, ensureSandboxDir, ensureUnderAccountRoot, loadConfig } from "./config.mjs";
 import { passwdNameFrom, probeTcpAddress, readSubuidRanges, resolveWorkerValkey } from "./podman-stack.mjs";
 import { valkeyClientContext } from "./valkey-endpoint.mjs";
-import { makeRedisClient, parseConnection } from "./connection.mjs";
+import { authRefusalFor, makeRedisClient, onValkeyError, parseConnection, valkeyAuthState, valkeyPasswordFor } from "./connection.mjs";
 import { reconcileGated, reloadSchedules } from "./cron.mjs";
 import { makeGitHubAuth } from "./get-token.mjs";
 import { InfraRetry, NETNS_KEEPER_NOT_HOLDING } from "./processor.mjs";
@@ -443,6 +443,8 @@ export async function startWorker(
 	// Every client below connects through connection.mjs' JudgedConnector, which judges the (pinned) address again on
 	// each connect, as this boot judged it: root refused as the boot decided it, PI_VALKEY_SHARED from the deployment .env.
 	const valkeyContext = workerValkeyContext(valkey, env);
+	// Issue #468: whether this worker sends a password, and never the password: the only thing a log line may say of it.
+	log("valkey_password", { set: Boolean(valkeyPasswordFor(valkey.url, valkeyContext).password) });
 	const valkeyConn = (opts = {}) => parseConnection(valkey.url, { ...opts, servername: valkey.servername, context: valkeyContext });
 
 	// DES-CRON-VIA-BULLMQ-SCHEDULER: load and validate the triggers file with the operator present and
@@ -887,6 +889,9 @@ export async function startWorker(
 	// One raw Redis client, shared by the budget (via the worker) and the scheduler stall guard, so it is
 	// hoisted out of the createWorkerFn arg object.
 	const redis = makeRedisClient(valkey.url, { servername: valkey.servername, context: valkeyContext });
+	// Its errors as one message-only line (PR #475's review, round 2), like every Queue and Worker's: without a listener
+	// ioredis printed a stack per reconnect attempt.
+	onValkeyError(redis, "shared client");
 
 	// This host's own stale scope claims, gated on the reaper having having enumerated: the
 	// reaper is what establishes that this machine holds no `pi-job-*` containers, so a claim naming this
@@ -2038,7 +2043,7 @@ async function defaultJudgeValkey({ url, venues, env }) {
 	} catch {
 		// A uid with no passwd entry: its subordinate ranges are read by uid.
 	}
-	return resolveWorkerValkey({
+	const valkey = await resolveWorkerValkey({
 		url,
 		venues,
 		platform: process.platform,
@@ -2055,4 +2060,19 @@ async function defaultJudgeValkey({ url, venues, env }) {
 		subuids: readSubuidRanges({ user, euid, fs }),
 		configError,
 	});
+	await refuseValkeyAuth(valkey, env);
+	return valkey;
+}
+
+/**
+ * Issue #468: the worker's credential asked once at boot, on the judged address, before anything is built on it. A
+ * Valkey that requires a password this worker does not send (NOAUTH), or refuses the one it sends (WRONGPASS), is a
+ * configError (exit 2, not restarted into the same answer), naming VALKEY_PASSWORD and never its value: left to the
+ * clients, it was an endless stream of NOAUTH errors from a worker that looked alive. Nothing answering is left to the
+ * clients' own retries, as before. Exported for its test; `authState` is the seam.
+ */
+export async function refuseValkeyAuth(valkey, env, { cwd = process.cwd(), authState = valkeyAuthState } = {}) {
+	const context = workerValkeyContext(valkey, env, { cwd });
+	const { state } = await authState(valkey.url, { context, servername: valkey.servername ?? null });
+	if (state === "noauth" || state === "wrongpass") throw configError(authRefusalFor(state, valkey.url, context));
 }

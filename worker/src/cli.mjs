@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { loadConfig } from "./config.mjs";
-import { EXIT_POLICY } from "./exit-code.mjs";
+import { EXIT_POLICY, installRejectionPrinter } from "./exit-code.mjs";
 import { gitDirty } from "./git-dirty.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
 
@@ -139,7 +139,10 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		}
 
 		const config = loadConfig(env);
-		const { parseConnection } = await import("./connection.mjs");
+		const { cliValkeyUrl, parseConnection } = await import("./connection.mjs");
+		// PR #475's review: VALKEY_URL as the password is read, this shell's else the deployment .env's (a disagreement
+		// named), not the shell's alone: from the folder of a Valkey on another port, `run` dialled 6379.
+		const valkeyUrl = cliValkeyUrl(env);
 		const { makeQueue, enqueueLocalJob, hostQueueName } = await import("./queue.mjs");
 		// failFast: a one-shot enqueue must not hang forever if Valkey is down -- error clearly.
 		// Onto THIS host's queue when the deployment declares a name (issue #57). The folder was checked
@@ -148,9 +151,9 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		const hq = config.workerNameDeclared ? hostQueueName(config.workerName) : null;
 		// Issue #464 (gate round 3): judged before anything is sent, so a refused Valkey is said as the refusal it is, from
 		// any directory. Only a refusal stops here; nothing answering is the "could not reach" below.
-		const refused = await valkeyRefusal(config.valkeyUrl, env);
+		const refused = await valkeyRefusal(valkeyUrl, env);
 		if (refused) return fail(refused);
-		const queue = makeQueue(parseConnection(config.valkeyUrl, { failFast: true }), { ...(hq ? { name: hq } : {}) });
+		const queue = makeQueue(parseConnection(valkeyUrl, { failFast: true }), { ...(hq ? { name: hq } : {}) });
 		try {
 			// Absent flags stay absent (undefined) so the value resolves at job start against the
 			// settings overlay/env, not a default frozen here (INT-CONFIG-OVERLAY-CONTRACT).
@@ -167,7 +170,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 			});
 			write(`queued ${jobId} — folder ${folder}\nrun \`pi-dispatch worker\` to process it.\n`);
 		} catch (error) {
-			return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${config.valkeyUrl}: is it running? (docker compose up)\n  ${error.message}`);
+			return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${(await import("./connection.mjs")).urlShown(valkeyUrl)}: is it running? (docker compose up)\n  ${error.message}`);
 		} finally {
 			await queue.close().catch(() => {});
 		}
@@ -176,99 +179,147 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 
 	if (cmd === "pause" || cmd === "resume" || cmd === "status") {
 		// The kill switch reads ONLY VALKEY_URL, not the full loadConfig -- it must work even when
-		// GitHub auth is misconfigured, so an operator can always stop the queue.
-		const url = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
-		const { parseConnection, makeRedisClient } = await import("./connection.mjs");
-		const { fleetQueueNames, discoverHostQueues, unionQueueNames, makeQueue } = await import("./queue.mjs");
-		const { readLiveHosts } = await import("./host-registry.mjs");
-		// EVERY queue this deployment drains (issue #57), not just the shared one. This is the kill switch:
-		// pausing `pi-jobs` alone would stop forge deliveries while a named host's cron, chained children
-		// and manual runs kept spending -- and would print "paused" for having done it. That is the silent
-		// no-op the comment here already warned about for a mistyped name, arriving through a new door.
-		//
-		// Both reads fail OPEN -- between them an unreadable registry and an unreadable keyspace yield the
-		// shared queue alone, which is exactly what this command did before, so a Valkey blip can never make
-		// the kill switch refuse. But it fails open LOUDLY: a degraded read is NAMED in the output rather
-		// than left indistinguishable from a single-host success while a named host keeps spending.
-		// `readLiveHosts` RETURNS `{unreachable}` rather than rejecting, so `blind` is a branch on its
-		// value and the `.catch` below is only for a client that throws before it can answer.
-		const refused = await valkeyRefusal(url, env);
-		if (refused) return fail(refused);
-		const probe = makeRedisClient(url);
-		// Without this, a down Valkey dumps nine `[ioredis] Unhandled error event` traces before the one clean
-		// line -- the exact noise `defaultProbeValkey` exists to suppress.
-		probe.on?.("error", () => {});
-		// Both reads, concurrently, sharing one budget. The registry answers WHO IS LIVE; BullMQ's own meta
-		// keys answer WHICH QUEUES EXIST, and for a kill switch the second is the question that matters. A
-		// host whose registry writes fail for ninety seconds loses its row while its worker keeps draining,
-		// and a resume that misses a queue leaves it paused forever with no surface able to name it. A meta
-		// key outlives its worker; a registry row does not.
-		const [fleet, existing] = await Promise.all([
-			readLiveHosts(probe, { timeoutMs: FLEET_READ_TIMEOUT_MS }).catch((error) => ({ unreachable: error?.message ?? String(error) })),
-			discoverHostQueues(probe, { timeoutMs: FLEET_READ_TIMEOUT_MS }),
-		]);
-		probe.disconnect?.();
-		const blind = fleet?.unreachable ?? null;
-		const names = unionQueueNames(fleetQueueNames(fleet?.hosts), existing);
-		// The registry being unreadable no longer means we saw one queue: the keyspace scan may well have
-		// found them. Report the count we ACTED on, and name the degraded read separately.
-		const span = `${names.length > 1 ? ` [${names.length} queues]` : ""}${blind ? ` [registry unreadable: ${blind}]` : ""}`;
-		const queues = [];
-		try {
-			// Constructed INSIDE the try: `makeQueue` can throw on a malformed peer-written name, and a throw
-			// at index k > 0 would otherwise leak the k connections already opened.
-			for (const name of names) queues.push(makeQueue(parseConnection(url, { failFast: true }), { name }));
-			if (cmd === "pause" || cmd === "resume") {
-				const done = [];
-				try {
-					for (const q of queues) {
-						await (cmd === "pause" ? q.pause() : q.resume());
-						done.push(q.name);
-					}
-				} catch (error) {
-					// A mid-loop failure leaves the deployment HALF switched. Naming what did change is the whole
-					// difference between an operator who knows to finish the job and one who reads "unreachable"
-					// as "nothing happened" and walks away from a fleet with one host still spending.
-					return fail(`could not ${cmd} the whole deployment at ${url}\n  ${done.length > 0 ? `${cmd}d: ${done.join(", ")}` : "nothing changed"}\n  failed at: ${names[done.length]}\n  ${error.message}`);
-				}
-				write(cmd === "pause" ? `paused — worker will stop taking new jobs (jobs still enqueue)${span}\n` : `resumed${span}\n`);
-			} else {
-				// "paused" is included in the counts because jobs enqueued while paused land in the
-				// `paused` list, not `wait` -- omitting it would report backlog 0 in the exact state
-				// the pause switch creates. `pausedState` (the boolean) is named apart from the
-				// `paused` count `getJobCounts` returns, so the two do not collide in the output.
-				const states = await Promise.all(queues.map((q) => q.isPaused()));
-				const per = await Promise.all(queues.map((q) => q.getJobCounts("waiting", "active", "paused", "delayed", "failed")));
-				const counts = per.reduce((acc, c) => {
-					for (const [k, v] of Object.entries(c ?? {})) acc[k] = (acc[k] ?? 0) + (Number(v) || 0);
-					return acc;
-				}, {});
-				// Summed counts with a boolean from ONE queue would report a half-paused deployment as fully
-				// one or fully the other. `pausedPartial` is the third state, and the dangerous direction is
-				// the one it makes visible: pause ran while a host was invisible, so that host still spends.
-				const pausedState = states.every(Boolean);
-				const pausedPartial = !pausedState && states.some(Boolean);
-				const out = { pausedState, ...(pausedPartial ? { pausedPartial, pausedQueues: names.filter((_, i) => states[i]) } : {}), ...counts, ...(blind ? { fleet: blind } : {}) };
-				write(`${JSON.stringify(out)}\n`);
-			}
-		} catch (error) {
-			return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${url}: is it running? (docker compose up)\n  ${error.message}`);
-		} finally {
-			for (const q of queues) await q.close().catch(() => {});
+		// GitHub auth is misconfigured, so an operator can always stop the queue. Which VALKEY_URL (PR #475's review,
+		// rounds 1 and 2): `--valkey-url <url>` when the operator names one; else this shell's and the deployment .env's
+		// (the one resolver, `valkeyUrlFor`). When those two DISAGREE, a stale export must not make "paused" true of the
+		// wrong Valkey (measured: `pause` paused the shell's while the service's kept taking jobs), so the kill switch
+		// keeps its promise the safe way: `pause` pauses BOTH and says so, `status` shows both, and `resume`, which would
+		// START spending, refuses until the operator names which. Every URL is printed through `urlShown`: a password in
+		// one never reaches the terminal.
+		const { urlShown } = await import("./connection.mjs");
+		const picked = await killSwitchUrls(argv.slice(1), env);
+		if (picked.error) return fail(picked.error);
+		if (picked.positionals.length > 0) return fail(`pi-dispatch ${cmd} takes no argument but --valkey-url <url> (got ${picked.positionals.map((p) => JSON.stringify(p)).join(" ")})`);
+		if (picked.urls.length > 1) {
+			if (cmd === "resume") return fail(`${picked.disagreement}: resume would start jobs on one of them, so it names neither. Say which: pi-dispatch resume --valkey-url <url>`);
+			process.stderr.write(`warning: ${picked.disagreement}: ${cmd === "pause" ? "pausing both" : "showing both"}\n`);
 		}
-		return 0;
+		let code = 0;
+		for (const url of picked.urls) {
+			const label = picked.urls.length > 1 ? `[${urlShown(url)}] ` : "";
+			code = Math.max(code, await killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal }));
+		}
+		return code;
 	}
 
 	if (cmd === "cancel") {
 		// The kill switch's doctrine (issue #287): VALKEY_URL only, never loadConfig, so one misbehaving
-		// job can be stopped even when everything else about the deployment is misconfigured.
-		const url = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
+		// job can be stopped even when everything else about the deployment is misconfigured. On a shell/.env
+		// disagreement it refuses until the operator names which (PR #475's review): a job id belongs to one Valkey.
+		const picked = await killSwitchUrls(argv.slice(1), env);
+		if (picked.error) return fail(picked.error);
+		if (picked.positionals.length > 1) return fail(`pi-dispatch cancel takes one job id (got ${picked.positionals.map((p) => JSON.stringify(p)).join(" ")})`);
+		const jobId = picked.positionals[0];
+		if (picked.urls.length > 1) return fail(`${picked.disagreement}: a job lives in one of them. Say which: pi-dispatch cancel ${jobId ?? "<jobId>"} --valkey-url <url>`);
 		const { runCancel } = await import("./cancel-cli.mjs");
-		return runCancel(argv[1], url, { write });
+		return runCancel(jobId, picked.urls[0], { write });
 	}
 
 	write(`${USAGE}\n`);
 	return cmd ? 1 : 0;
+}
+
+/**
+ * The Valkey(s) a kill-switch verb acts on: the one rule of `killSwitchValkeyUrls` (valkey-endpoint.mjs), shared with the
+ * panel. The verb's own flags are parsed with parseArgs over what follows the verb (PR #475's review, round 3: a hand
+ * scan took `--valkey-url` for the job id in `cancel --valkey-url URL j1`). `{ urls, disagreement, positionals }` or
+ * `{ error }`; a note (a URL that matches neither side) is written to stderr.
+ */
+async function killSwitchUrls(args, env) {
+	let parsed;
+	try {
+		parsed = parseArgs({ args, allowPositionals: true, options: { "valkey-url": { type: "string" } } });
+	} catch (error) {
+		return { error: error.message };
+	}
+	const { killSwitchValkeyUrls } = await import("./connection.mjs");
+	const picked = killSwitchValkeyUrls({ env, flagUrl: parsed.values["valkey-url"] ?? null });
+	if (picked.error) return picked;
+	if (picked.note) process.stderr.write(`warning: ${picked.note}\n`);
+	return { ...picked, positionals: parsed.positionals };
+}
+
+/** One Valkey's pause, resume or status: every queue the deployment drains there (issue #57). Returns the exit code. */
+async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal }) {
+	const { parseConnection, makeRedisClient } = await import("./connection.mjs");
+	const { fleetQueueNames, discoverHostQueues, unionQueueNames, makeQueue } = await import("./queue.mjs");
+	const { readLiveHosts } = await import("./host-registry.mjs");
+	// EVERY queue this deployment drains (issue #57), not just the shared one. This is the kill switch:
+	// pausing `pi-jobs` alone would stop forge deliveries while a named host's cron, chained children
+	// and manual runs kept spending -- and would print "paused" for having done it. That is the silent
+	// no-op the comment here already warned about for a mistyped name, arriving through a new door.
+	//
+	// Both reads fail OPEN -- between them an unreadable registry and an unreadable keyspace yield the
+	// shared queue alone, which is exactly what this command did before, so a Valkey blip can never make
+	// the kill switch refuse. But it fails open LOUDLY: a degraded read is NAMED in the output rather
+	// than left indistinguishable from a single-host success while a named host keeps spending.
+	// `readLiveHosts` RETURNS `{unreachable}` rather than rejecting, so `blind` is a branch on its
+	// value and the `.catch` below is only for a client that throws before it can answer.
+	const refused = await valkeyRefusal(url, env);
+	if (refused) return fail(refused);
+	const probe = makeRedisClient(url);
+	// Without this, a down Valkey dumps nine `[ioredis] Unhandled error event` traces before the one clean
+	// line -- the exact noise `defaultProbeValkey` exists to suppress.
+	probe.on?.("error", () => {});
+	// Both reads, concurrently, sharing one budget. The registry answers WHO IS LIVE; BullMQ's own meta
+	// keys answer WHICH QUEUES EXIST, and for a kill switch the second is the question that matters. A
+	// host whose registry writes fail for ninety seconds loses its row while its worker keeps draining,
+	// and a resume that misses a queue leaves it paused forever with no surface able to name it. A meta
+	// key outlives its worker; a registry row does not.
+	const [fleet, existing] = await Promise.all([
+		readLiveHosts(probe, { timeoutMs: FLEET_READ_TIMEOUT_MS }).catch((error) => ({ unreachable: error?.message ?? String(error) })),
+		discoverHostQueues(probe, { timeoutMs: FLEET_READ_TIMEOUT_MS }),
+	]);
+	probe.disconnect?.();
+	const blind = fleet?.unreachable ?? null;
+	const names = unionQueueNames(fleetQueueNames(fleet?.hosts), existing);
+	// The registry being unreadable no longer means we saw one queue: the keyspace scan may well have
+	// found them. Report the count we ACTED on, and name the degraded read separately.
+	const span = `${names.length > 1 ? ` [${names.length} queues]` : ""}${blind ? ` [registry unreadable: ${blind}]` : ""}`;
+	const queues = [];
+	try {
+		// Constructed INSIDE the try: `makeQueue` can throw on a malformed peer-written name, and a throw
+		// at index k > 0 would otherwise leak the k connections already opened.
+		for (const name of names) queues.push(makeQueue(parseConnection(url, { failFast: true }), { name }));
+		if (cmd === "pause" || cmd === "resume") {
+			const done = [];
+			try {
+				for (const q of queues) {
+					await (cmd === "pause" ? q.pause() : q.resume());
+					done.push(q.name);
+				}
+			} catch (error) {
+				// A mid-loop failure leaves the deployment HALF switched. Naming what did change is the whole
+				// difference between an operator who knows to finish the job and one who reads "unreachable"
+				// as "nothing happened" and walks away from a fleet with one host still spending.
+				return fail(`could not ${cmd} the whole deployment at ${urlShown(url)}\n  ${done.length > 0 ? `${cmd}d: ${done.join(", ")}` : "nothing changed"}\n  failed at: ${names[done.length]}\n  ${error.message}`);
+			}
+			write(`${label}${cmd === "pause" ? `paused: worker will stop taking new jobs (jobs still enqueue)${span}` : `resumed${span}`}\n`);
+		} else {
+			// "paused" is included in the counts because jobs enqueued while paused land in the
+			// `paused` list, not `wait` -- omitting it would report backlog 0 in the exact state
+			// the pause switch creates. `pausedState` (the boolean) is named apart from the
+			// `paused` count `getJobCounts` returns, so the two do not collide in the output.
+			const states = await Promise.all(queues.map((q) => q.isPaused()));
+			const per = await Promise.all(queues.map((q) => q.getJobCounts("waiting", "active", "paused", "delayed", "failed")));
+			const counts = per.reduce((acc, c) => {
+				for (const [k, v] of Object.entries(c ?? {})) acc[k] = (acc[k] ?? 0) + (Number(v) || 0);
+				return acc;
+			}, {});
+			// Summed counts with a boolean from ONE queue would report a half-paused deployment as fully
+			// one or fully the other. `pausedPartial` is the third state, and the dangerous direction is
+			// the one it makes visible: pause ran while a host was invisible, so that host still spends.
+			const pausedState = states.every(Boolean);
+			const pausedPartial = !pausedState && states.some(Boolean);
+			const out = { ...(label ? { valkey: urlShown(url) } : {}), pausedState, ...(pausedPartial ? { pausedPartial, pausedQueues: names.filter((_, i) => states[i]) } : {}), ...counts, ...(blind ? { fleet: blind } : {}) };
+			write(`${JSON.stringify(out)}\n`);
+		}
+	} catch (error) {
+		return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${urlShown(url)}: is it running? (docker compose up)\n  ${error.message}`);
+	} finally {
+		for (const q of queues) await q.close().catch(() => {});
+	}
+	return 0;
 }
 
 function fail(message) {
@@ -287,6 +338,9 @@ export function entryExitCode(err) {
 
 // Entry point when run as a bin. Kept out of the exported main so tests can call main() directly.
 if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("cli.mjs")) {
+	// A promise nobody handled is printed as its message alone (PR #475's review): Node's own print shows the whole
+	// reason, which for a Valkey client's error could carry what it sent.
+	installRejectionPrinter();
 	main()
 		.then((code) => {
 			if (code) process.exitCode = code;

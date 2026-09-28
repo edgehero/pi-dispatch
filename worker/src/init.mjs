@@ -12,6 +12,8 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { parseBackendList, venuesOf } from "./backends.mjs";
 import { deploymentVenueEnv } from "./deployment-venue.mjs";
+import { setEnvKeyIfEmpty } from "./env-file.mjs";
+import { VALKEY_PASSWORD_KEY, newValkeyPassword } from "./valkey-auth.mjs";
 
 const EMPTY_TRIGGERS = `${JSON.stringify({ triggers: [] }, null, 2)}\n`;
 /**
@@ -70,7 +72,7 @@ registry.npmjs.org
  * shell it runs in.
  */
 export function runInit(cwd = process.cwd(), deps = {}) {
-	const { fs = { existsSync, copyFileSync, readFileSync, writeFileSync }, out = (s) => process.stdout.write(s), env = {}, platform = process.platform } = deps;
+	const { fs = { existsSync, copyFileSync, readFileSync, writeFileSync }, out = (s) => process.stdout.write(s), env = {}, platform = process.platform, newPassword = newValkeyPassword } = deps;
 	const results = [];
 
 	// .env from the example. Prefer the copy in cwd (the clone's repo root); fall back to the copy
@@ -85,8 +87,12 @@ export function runInit(cwd = process.cwd(), deps = {}) {
 		const source = fs.existsSync(cwdExample)
 			? cwdExample
 			: fileURLToPath(new URL("../.env.example", import.meta.url));
-		fs.copyFileSync(source, envPath);
-		results.push(["created", ".env", "from .env.example — set your provider key next"]);
+		// Issue #468: the new file carries this deployment's own Valkey password (the example's `# VALKEY_PASSWORD=` line
+		// filled in, never shown) and is created readable by this account alone: it holds that password and, soon, the
+		// provider key. `wx`: a file that appeared since the check above is never overwritten (init's contract).
+		const text = setEnvKeyIfEmpty(String(fs.readFileSync(source, "utf8")), VALKEY_PASSWORD_KEY, newPassword(), { platform });
+		fs.writeFileSync(envPath, text, { mode: 0o600, flag: "wx" });
+		results.push(["created", ".env", `from .env.example, mode 0600, with a generated ${VALKEY_PASSWORD_KEY} (value not shown): set your provider key next`]);
 	}
 
 	scaffold(fs, results, join(cwd, "triggers.json"), EMPTY_TRIGGERS, "empty triggers list");
@@ -143,7 +149,8 @@ export function nextSteps(venues = { localUsed: true, podmanUsed: false }, { pla
 Next:
   1. docker pull ghcr.io/edgehero/pi-job:latest && docker tag ghcr.io/edgehero/pi-job:latest pi-job:latest
                                                         # the prebuilt job image (or build image/Dockerfile)
-  2. docker compose -f deploy/docker-compose.yml up -d  # the durable queue (Valkey)
+  2. docker compose --env-file .env -f deploy/docker-compose.yml up -d
+                                                        # the durable queue (Valkey, with the password init wrote)
   3. edit .env                                          # set ANTHROPIC_API_KEY (or your provider's key)
   4. pi-dispatch doctor                                 # verify Docker, Valkey, image, and key
   5. pi-dispatch worker                                 # drain the queue

@@ -26,6 +26,7 @@ import { execFileSync } from "node:child_process";
 import { connect as netConnect } from "node:net";
 import { dirname, join } from "node:path";
 import { DEFAULT_EGRESS_PROXY, egressProxyName } from "./egress.mjs";
+import { VALKEY_PASSWORD_KEY, valkeyEnvFileText } from "./valkey-auth.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envFileSystemdHazard, envFileValueLines, quotedRegions, readEnvAssignments } from "./env-file.mjs";
 import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_NOW_FORMAT, STARTED_AT_FORMAT, NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_AFTER_PROXY_GRACE_MS, judgeNetnsKeeper, podmanNeedsNetnsKeeper, makeDetachGate, detachBlockedSentence, DETACH_GATE_READ_TIMEOUT_MS, DETACH_GATE_READ_MAX_BUFFER, runtimeFromFacts } from "./netns-keeper.mjs";
 
@@ -104,6 +105,19 @@ export const ALLOWLIST_PLACEHOLDER = "/opt/pi-dispatch/egress-allowlist.conf";
 export function proxyConfCopyPath(home) {
 	return join(home, ".config", "pi-dispatch", "egress-proxy.conf");
 }
+
+/**
+ * The file the Quadlet Valkey reads its password from (issue #468): `EnvironmentFile=%h/.config/pi-dispatch/valkey.env`
+ * in the shipped unit, so the template needs no rewrite, and systemd expands `%h` to this account's home in both lines
+ * Quadlet generates from it (measured on Podman 5.8.1 and 4.9.3). Mode 0600: it holds the password. Written, compared
+ * and restarted-for like the proxy's rules copy, never printed (`service render` names it only).
+ */
+export function valkeyEnvPath(home) {
+	return join(home, ".config", "pi-dispatch", "valkey.env");
+}
+
+/** The mode of `valkeyEnvPath`: this account alone may read it. */
+export const VALKEY_ENV_MODE = 0o600;
 
 /**
  * Where the user's Quadlet files live. ALWAYS `~/.config/containers/systemd`, deliberately not `$XDG_CONFIG_HOME`
@@ -638,7 +652,7 @@ export function probeTcpAddress(host, port, timeoutMs = 1500) {
  *            what Podman 4.9 turns into a dead route out. On every Podman version, since on 5.x it is one idle
  *            container (measured harmless on 5.8.1), and a rule with no version read in it cannot misread one.
  */
-export function stackComponents({ venues, env, includeValkey, armed, valkeyPort = DEFAULT_VALKEY_PORT }) {
+export function stackComponents({ venues, env, includeValkey, armed, valkeyPort = DEFAULT_VALKEY_PORT, valkeyPassword = null }) {
 	const notes = [];
 	const valkey = !venues.localUsed && includeValkey;
 	const keeper = armed === true;
@@ -648,7 +662,8 @@ export function stackComponents({ venues, env, includeValkey, armed, valkeyPort 
 		if (name === DEFAULT_EGRESS_PROXY) proxy = true;
 		else notes.push(`PI_EGRESS_PROXY names ${name}, your own proxy: the shipped ${DEFAULT_EGRESS_PROXY} unit is not installed for it, because its \`--replace\` would remove any container of that name. Keep ${name} running under this account's Podman yourself`);
 	}
-	return { valkey, proxy, keeper, notes, valkeyPort };
+	// Issue #468: the password the Quadlet Valkey starts with (null for none, which starts it without one, as before).
+	return { valkey, proxy, keeper, notes, valkeyPort, valkeyPassword: valkey ? valkeyPassword : null };
 }
 
 /**
@@ -659,7 +674,7 @@ export function stackComponents({ venues, env, includeValkey, armed, valkeyPort 
  * `state` is "new", "same" or "changed" against what is on disk, and `actions` is exactly what `applyStack` does,
  * in order: the caller shows these lines, and a test holds the two equal.
  */
-export function planStack({ components, templatesDir, deployDir, home, fs, readTemplate = (name) => fs.readFileSync(join(templatesDir, name), "utf8"), restartUnits = [] }) {
+export function planStack({ components, templatesDir, deployDir, home, fs, readTemplate = (name) => fs.readFileSync(join(templatesDir, name), "utf8"), restartUnits = [], restartAfterValkey = [] }) {
 	const dir = quadletDir(home);
 	const picked = [];
 	if (components.valkey) picked.push(QUADLET_FILES.valkeyNetwork, QUADLET_FILES.valkey);
@@ -717,6 +732,27 @@ export function planStack({ components, templatesDir, deployDir, home, fs, readT
 		}
 		files.splice(files.findIndex((f) => f.unit === QUADLET_FILES.proxy.unit), 0, { path: conf, text, unit: null, state, restarts: QUADLET_FILES.proxy.unit, kind: "conf" });
 	}
+	if (components.valkey) {
+		// Issue #468: the Valkey's password file, placed before its unit so it exists when the unit starts (its
+		// EnvironmentFile= is not optional). Valkey reads the password only at start, so a changed file restarts it, as a
+		// changed unit file does; the volume, and the queue in it, is kept across that restart. A file readable by anyone
+		// else counts as changed, so the write puts its mode back to 0600.
+		const path = valkeyEnvPath(home);
+		const text = valkeyEnvFileText(components.valkeyPassword);
+		let state = "new";
+		if (fs.existsSync(path)) {
+			let current = null;
+			let wide = false;
+			try {
+				current = String(fs.readFileSync(path, "utf8"));
+				wide = typeof fs.statSync === "function" && (fs.statSync(path).mode & 0o077) !== 0;
+			} catch {
+				// Unreadable reads as changed, as for the unit files.
+			}
+			state = current === text && !wide ? "same" : "changed";
+		}
+		files.splice(files.findIndex((f) => f.unit === QUADLET_FILES.valkey.unit), 0, { path, text, unit: null, state, restarts: QUADLET_FILES.valkey.unit, kind: "secret", mode: VALKEY_ENV_MODE });
+	}
 	const containers = files.filter((f) => f.path.endsWith(".container"));
 	const start = containers.map((f) => f.unit);
 	// A unit whose file changed is RESTARTED, not started: `start` on an active unit is a no-op, so a replaced file
@@ -743,7 +779,27 @@ export function planStack({ components, templatesDir, deployDir, home, fs, readT
 		if (fresh.length > 0) actions.push({ kind: "run", argv: ["systemctl", "--user", "start", ...fresh] });
 		if (restart.length > 0) actions.push({ kind: "run", argv: ["systemctl", "--user", "restart", ...restart] });
 	}
-	return { dir, files, start, restart, actions };
+	// Issue #468: a Valkey whose password this plan changes (a first password for a deployment that had none, most often)
+	// is one every running client of it can no longer talk to, since the worker and the receiver read VALKEY_PASSWORD at
+	// start. `restartAfterValkey` names those the caller found running; they are restarted after it (`try-restart`: one
+	// that stopped meanwhile stays stopped). A worker restart lets its in-flight job finish first (its SIGTERM drain).
+	const secret = files.find((f) => f.kind === "secret");
+	const clients = secret && secret.state !== "same" ? restartAfterValkey : [];
+	if (clients.length > 0) actions.push({ kind: "run", argv: ["systemctl", "--user", "try-restart", ...clients] });
+	return { dir, files, start, restart, actions, clientsRestarted: clients };
+}
+
+/**
+ * What a plan that sets Valkey's password costs, said wherever one does (issue #468): the Valkey restart, and the running
+ * clients restarted after it. Null when the plan leaves the password file as it is.
+ */
+export function valkeyPasswordRestartWarning(plan) {
+	const secret = plan.files?.find((f) => f.kind === "secret");
+	if (!secret || secret.state === "same") return null;
+	const valkeyMoves = (plan.restart ?? []).includes(QUADLET_FILES.valkey.unit);
+	if (!valkeyMoves) return null;
+	const clients = plan.clientsRestarted ?? [];
+	return `${QUADLET_FILES.valkey.unit} restarts with the password in ${secret.path} (the queue in its volume is kept)${clients.length > 0 ? `, and ${clients.join(" and ")} ${clients.length === 1 ? "restarts" : "restart"} after it to send that password` : ""}. A job running right now is interrupted: pause first if one is (pi-dispatch pause, wait for active jobs, then pi-dispatch resume)`;
 }
 
 /** The measured cost of restarting the proxy, said wherever a plan restarts it. */
@@ -1035,12 +1091,13 @@ export function readServiceKeys(content, keys, { loader = "systemd", path = ".en
 }
 
 /**
- * VALKEY_URL and PI_VALKEY_SHARED as a deployment's `.env` assigns them (issue #464), through `readServiceKeys`:
- * `service install`, `up`, the worker and every client judge the Valkey the SERVICE will use, so they read these where
- * the service does, and a line they cannot read is refused, naming what in it is the problem.
+ * VALKEY_URL, PI_VALKEY_SHARED and VALKEY_PASSWORD as a deployment's `.env` assigns them (issues #464 and #468), through
+ * `readServiceKeys`: `service install`, `up`, the worker and every client judge the Valkey the SERVICE will use and
+ * send the password the service will send, so they read these where the service does, and a line they cannot read is
+ * refused, naming what in it is the problem.
  */
 export function readValkeyKeys(content, { loader = "systemd", path = ".env" } = {}) {
-	const read = readServiceKeys(content, ["VALKEY_URL", VALKEY_SHARED_KEY], { loader, path });
+	const read = readServiceKeys(content, ["VALKEY_URL", VALKEY_SHARED_KEY, VALKEY_PASSWORD_KEY], { loader, path });
 	return read.error ? { error: `${read.error}, so which Valkey the worker uses is unknown` } : read;
 }
 
@@ -1086,7 +1143,7 @@ export async function applyStack(plan, { fs, run, journal = null, beforeRuns = n
 		if (action.kind === "write") {
 			try {
 				fs.mkdirSync(dirname(action.path), { recursive: true });
-				journalWrite(fs, journal, action.path, byPath.get(action.path).text);
+				journalWrite(fs, journal, action.path, byPath.get(action.path).text, { mode: byPath.get(action.path).mode });
 			} catch (err) {
 				return { ok: false, failed: describeAction(action), code: null, message: err?.message, ran };
 			}
@@ -1108,9 +1165,20 @@ export async function applyStack(plan, { fs, run, journal = null, beforeRuns = n
  * Write `text` to `path`, first recording in `journal` (when given) what was there: `{ path, existed, previous }`.
  * Recorded before the write so a write that fails part way is put back too.
  */
-export function journalWrite(fs, journal, path, text) {
+export function journalWrite(fs, journal, path, text, { mode } = {}) {
+	// Issue #468: a file with a `mode` (the Valkey's password file) is created with it, and an existing one is narrowed
+	// to it BEFORE the new text goes in, so the password is never in a file another account may read.
+	const write = () => {
+		if (mode === undefined) {
+			fs.writeFileSync(path, text);
+			return;
+		}
+		if (fs.existsSync(path)) fs.chmodSync(path, mode);
+		fs.writeFileSync(path, text, { mode });
+		fs.chmodSync(path, mode);
+	};
 	if (!journal) {
-		fs.writeFileSync(path, text);
+		write();
 		return;
 	}
 	let existed = false;
@@ -1122,7 +1190,7 @@ export function journalWrite(fs, journal, path, text) {
 	const entry = { path, existed, previous };
 	journal.push(entry);
 	try {
-		fs.writeFileSync(path, text);
+		write();
 	} catch (err) {
 		// A write refused before it touched the file (EACCES, EROFS at open) left nothing to put back, and a rollback that
 		// then tried to write the same path would fail the same way and report a file this run never changed. Dropped

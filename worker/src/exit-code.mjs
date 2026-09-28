@@ -86,3 +86,18 @@ export function decideWait(exitCode) {
 			return { verdict: "hold", fault: true }; // EXIT_INFRA and every unrecognised code
 	}
 }
+
+/**
+ * A process-level printer for a promise nobody handled (PR #475's review, round 2): Node prints such a rejection's
+ * reason WHOLE, and a Valkey client's error may carry what it sent (connection.mjs scrubs that at the source; this is
+ * the second line of defence for anything else). It prints the message alone and exits 1, which is what Node's own
+ * default does with an unhandled rejection: infra, restarted by the service manager, never a silent carry-on. Installed
+ * by the worker's CLI (every `pi-dispatch` verb, the worker among them) and the receiver's two entry points.
+ */
+export function installRejectionPrinter({ proc = process, write = (line) => process.stderr.write(line) } = {}) {
+	proc.on("unhandledRejection", (reason) => {
+		const message = reason instanceof Error ? reason.message : typeof reason === "string" ? reason : "a non-Error value";
+		write(`error: an unhandled rejection: ${message}\n`);
+		proc.exit(EXIT_INFRA);
+	});
+}

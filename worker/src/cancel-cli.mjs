@@ -54,9 +54,9 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 		(redisFn
 			? async () => null
 			: async (u) => {
-					const { judgeValkeyAtStart, valkeyClientContext } = await import("./connection.mjs");
+					const { judgeValkeyAtStart, defaultValkeyContext } = await import("./connection.mjs");
 					try {
-						await judgeValkeyAtStart(u, valkeyClientContext(), { waitMs: 0 });
+						await judgeValkeyAtStart(u, defaultValkeyContext(), { waitMs: 0 });
 						return null;
 					} catch (error) {
 						return error?.valkeyRefused ? error.message : null;
@@ -151,7 +151,7 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 			]);
 			clearTimeout(bound);
 		}
-		return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${url}: is it running? (docker compose up)\n  ${error.message}`);
+		return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${(await import("./connection.mjs")).urlShown(url)}: is it running? (docker compose up)\n  ${error.message}`);
 	} finally {
 		probe.disconnect?.();
 		for (const q of queues) await q.close().catch(() => {});

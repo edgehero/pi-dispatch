@@ -11,9 +11,15 @@ and a job whose policy cannot serve it is **refused before it costs anything**.
 What you have to do, once:
 
 ```bash
-docker compose -f deploy/docker-compose.yml --profile egress up -d
+docker compose --env-file .env -f deploy/docker-compose.yml --profile egress up -d
 pi-dispatch doctor
 ```
+
+In a folder `/dispatch setup` laid out, name the folder's project and, when setup wrote it, its Valkey override, so
+compose addresses the containers it already runs:
+`docker compose -p <folder name> --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.valkey.yml --profile egress up -d`
+(the project name rule, and its edge cases, are in [podman.md](podman.md), step 7). `pi-dispatch up` prints the
+command for its own folder.
 
 **If you are upgrading**, that is the step. Until the proxy is up, every job is refused pre-spend naming it
 and naming that command: loud, free (no budget slot, no tokens), and reversible in one line with

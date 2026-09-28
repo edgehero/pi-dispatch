@@ -41,10 +41,11 @@ import { PODMAN_BOOT_REFUSING_CAUSES, makePodmanInfoReader, decidePodmanJobUser,
 import { venuesOf } from "./backends.mjs";
 import { logsDirPath, settingsFilePath } from "./config.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed as egressArmedFn, egressProxyName } from "./egress.mjs";
-import { envKeyIsBlank, envValueShown, updateEnvFile } from "./env-file.mjs";
+import { envKeyIsBlank, envValueShown, readEnvAssignments, updateEnvFile } from "./env-file.mjs";
+import { COMPOSE_VALKEY_OVERRIDE, OWNER_MARKER_KEY, VALKEY_PASSWORD_KEY, VALKEY_PORT_KEY, adoptVolumeQuestion, composeArgs, composeProjectName, foreignContainerSentence, foreignMarkerRefusal, foreignVolumeLabelRefusal, foreignVolumeRefusal, foreignVolumeUsers, isLoopbackHost, newValkeyPassword, unadoptedVolumeRefusal, valkeyContainerOwner, valkeyDockerRunArgs, valkeyPasswordDecision, valkeyPortEnvDecision, valkeyVolumeCreateArgs, valkeyVolumeOwner } from "./valkey-auth.mjs";
 import { deploymentValkeyEnv, deploymentVenueEnv } from "./deployment-venue.mjs";
 import { EGRESS_PROXY_IMAGE, PROXY_STATE_FORMAT, jobNetworksOf, parseProxyState, shippedProxyDrift } from "./egress-proxy-state.mjs";
-import { DEFAULT_VALKEY_PORT, NETNS_KEEPER, NETNS_KEEPER_FORMAT, QUADLET_FILES, STACK_KEYS, applyStack, decideValkey, describeRollBack, passwdNameFrom, readSubuidRanges, rollBackWrites, valkeySharedOn, VALKEY_SHARED_KEY, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal } from "./podman-stack.mjs";
+import { DEFAULT_VALKEY_PORT, NETNS_KEEPER, NETNS_KEEPER_FORMAT, QUADLET_FILES, STACK_KEYS, applyStack, decideValkey, describeRollBack, passwdNameFrom, readSubuidRanges, rollBackWrites, valkeySharedOn, VALKEY_SHARED_KEY, readValkeyKeys, valkeyTarget, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal } from "./podman-stack.mjs";
 
 // The shipped Quadlet templates, module-relative like service.mjs's: worker/deploy in a checkout, <pkg>/deploy under npm.
 const TEMPLATES_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "deploy");
@@ -63,32 +64,13 @@ const PODMAN_EXISTS_ARGS = ["image", "exists", LOCAL_IMAGE];
 
 // deploy/docker-compose.yml's Valkey service, reproduced as one docker run: same image, AOF on
 // (REQ-QUEUE-BURST-NO-DROP), bound to localhost only (the queue is not a public surface), same
-// healthcheck, restart unless-stopped, and a named volume standing in for the compose volume.
-const VALKEY_VOLUME_ARGS = ["volume", "create", "pi-dispatch-valkey-data"];
-const VALKEY_RUN_ARGS = [
-	"run",
-	"-d",
-	"--name",
-	"pi-dispatch-valkey",
-	"--restart",
-	"unless-stopped",
-	"-p",
-	"127.0.0.1:6379:6379",
-	"-v",
-	"pi-dispatch-valkey-data:/data",
-	"--health-cmd",
-	"valkey-cli ping",
-	"--health-interval",
-	"10s",
-	"--health-timeout",
-	"3s",
-	"--health-retries",
-	"5",
-	"valkey/valkey:8",
-	"valkey-server",
-	"--appendonly",
-	"yes",
-];
+// healthcheck, restart unless-stopped, and a named volume standing in for the compose volume. Issue #468: its password
+// travels as `-e VALKEY_PASSWORD` with the value in the docker CLI's own environment, never on an argv, and reaches
+// valkey-server as configuration on stdin (valkey-auth.mjs holds the one copy of this argv; doctor's fix runs it too).
+// The upgrade (issue #468): a pi-dispatch-valkey container that answers without a password is stopped (SIGTERM, so
+// Valkey writes its AOF out), removed, and run again from the argv above. The volume, and the queue in it, is kept.
+const VALKEY_STOP_ARGS = ["stop", "pi-dispatch-valkey"];
+const VALKEY_RM_ARGS = ["rm", "pi-dispatch-valkey"];
 
 // deploy/docker-compose.yml's `egress` profile, reproduced as one docker run (REQ-EGRESS-ALLOWLIST):
 // same digest-pinned image, same two mounts, same explicit container name, same restart policy, on the
@@ -153,6 +135,14 @@ export async function runUp(argv = [], deps = {}) {
 		// only production caller, and the test that covered it attached the method to its own fake.
 		fs = { existsSync, readFileSync, writeFileSync, renameSync, statSync, chmodSync, realpathSync, unlinkSync },
 		probeTcp = defaultProbeTcp,
+		// Issue #468: whether the Valkey on 127.0.0.1:6379 answers a client that sends NO password ("ok" when it does),
+		// through the project's one connection function. Real only where the TCP probe is: a test that stands in for the
+		// host's listener answers this too, or gets "unknown".
+		probeValkeyAuth = deps.probeTcp === undefined ? (url) => defaultProbeValkeyAuth(url, { env, cwd: deps.cwd ?? process.cwd() }) : async () => "unknown",
+		// PR #475's review (the volume gap): record, then read back, the `pi-dispatch:owner` marker in a Valkey this pass
+		// started (connection.mjs' `claimValkeyOwner`). Real only where the TCP probe is, like the one above: a test that
+		// stands in for the host's listener answers this too, or gets "this folder".
+		claimValkeyOwner = deps.probeTcp === undefined ? (url, folder) => defaultClaimValkeyOwner(url, folder, { env, cwd: deps.cwd ?? process.cwd() }) : async (_url, folder) => ({ owner: folder, claimed: false }),
 		// Issue #464: VALKEY_URL's host resolved as the worker's client resolves it (every address), and which addresses
 		// are this host's, for the Valkey owner rule on the podman venue.
 		lookup = (host, opts) => dnsLookup(host, opts),
@@ -165,6 +155,9 @@ export async function runUp(argv = [], deps = {}) {
 		// Injected so tests can assert the secret never reaches output without fishing it back out of
 		// the written file. 32 bytes hex, matching doctor's `openssl rand -hex 32` fix line.
 		randomHex = () => randomBytes(32).toString("hex"),
+		// Issue #468: the Valkey password, made the same way (valkey-auth.mjs), injected so a test can hold it never
+		// reaches the output.
+		newPassword = newValkeyPassword,
 		// Injected for the path compare below, which has to fold case on Windows and must not on POSIX.
 		platform = process.platform,
 		// The two resolved defaults `up` pins, injected for the same reason the clock is elsewhere: they
@@ -272,35 +265,6 @@ export async function runUp(argv = [], deps = {}) {
 		}
 	}
 
-	// (c) Valkey. A bare TCP probe of the default bind, not a redis PING: dependency-free, and the
-	// honest claim is only "something is listening". If our own compose-named container is up, docker
-	// can say so; if a listener exists that we cannot name, up must NOT offer a second Valkey — the
-	// port is taken, and `docker run` would only fail after consent.
-	if (await probeTcp("127.0.0.1", 6379)) {
-		const ps = await runCmdCapture(spawn, "docker", ["ps", "--filter", "name=pi-dispatch-valkey", "--format", "{{.Names}}"]);
-		const ours = ps.code === 0 && ps.output.split("\n").map((l) => l.trim()).includes("pi-dispatch-valkey");
-		out(`✓ something is listening on 6379 — assuming your Valkey${ours ? " (it is the pi-dispatch-valkey container)" : ""}\n`);
-		summary.push(["valkey", ours ? "container pi-dispatch-valkey already running" : "port 6379 already has a listener — left alone"]);
-	} else {
-		const accepted = await consent(
-			"Nothing is listening on 127.0.0.1:6379. up would start Valkey (same semantics as deploy/docker-compose.yml):",
-			[`docker ${VALKEY_VOLUME_ARGS.join(" ")}`, `docker ${quoteArgs(VALKEY_RUN_ARGS)}`],
-			{ yes, out, prompt },
-		);
-		if (!accepted) {
-			out("skipped — start it later with `docker compose -f deploy/docker-compose.yml up -d`\n");
-			summary.push(["valkey", "skipped (declined) — the queue needs it before `pi-dispatch worker` can drain"]);
-		} else if (await runStreamed(spawn, "docker", VALKEY_VOLUME_ARGS, out) !== 0) {
-			out("✗ docker volume create failed — continuing; doctor below will re-check Valkey\n");
-			summary.push(["valkey", "volume create FAILED — `docker compose -f deploy/docker-compose.yml up -d` is the fallback"]);
-		} else if (await runStreamed(spawn, "docker", VALKEY_RUN_ARGS, out) !== 0) {
-			out("✗ docker run failed — continuing; doctor below will re-check Valkey\n");
-			summary.push(["valkey", "container start FAILED — `docker compose -f deploy/docker-compose.yml up -d` is the fallback"]);
-		} else {
-			out("✓ started Valkey (container pi-dispatch-valkey, AOF on, bound to 127.0.0.1)\n");
-			summary.push(["valkey", "started container pi-dispatch-valkey (durable: --appendonly yes, restart unless-stopped)"]);
-		}
-	}
 	}
 
 	// (a2)(b2) the podman venue: its gate and its job image, in this account's own store (issue #430). `podmanReady`
@@ -484,6 +448,236 @@ export async function runUp(argv = [], deps = {}) {
 		}
 	}
 
+	// (e0) VALKEY_PASSWORD (issue #468), where docker's Valkey is the queue: generated into .env when the deployment has
+	// none and runs a Valkey of its own on this host (`valkeyPasswordDecision`), never over a value, the file narrowed to
+	// this account, the value never printed. The podman venue's Valkey gets its password in the stack step below.
+	const dockerValkeyPassword = dockerUsed ? dockerValkeyPasswordStep({ fs, envPath, platform, out, summary, newPassword }) : null;
+
+	if (dockerUsed) {
+	// (c) Valkey. A bare TCP probe of the default bind, not a redis PING: dependency-free, and the
+	// honest claim is only "something is listening". If our own compose-named container is up, docker
+	// can say so; if a listener exists that we cannot name, up must NOT offer a second Valkey; the
+	// port is taken, and `docker run` would only fail after consent.
+	//
+	// AFTER init and the .env keys since issue #468, where it used to run first: the Valkey this step starts takes its
+	// password from `.env`, which a fresh folder has only once init has scaffolded it. The prompts keep their order
+	// (the image, then Valkey, then the egress proxy), since init and the .env keys ask nothing.
+	const dockerEnv = { ...env };
+	// The deployment's password, and never a shell's: the container must start with the one the service's clients send.
+	if (dockerValkeyPassword) dockerEnv[VALKEY_PASSWORD_KEY] = dockerValkeyPassword;
+	else delete dockerEnv[VALKEY_PASSWORD_KEY];
+	// WHERE, from VALKEY_URL as the service reads it (`deploymentValkeyEnv`, the podman step's reader since #464; read
+	// here, after init, so a fresh folder's scaffolded .env counts): its loopback port is probed and published. It was
+	// always 6379, so a deployment whose VALKEY_URL named another port was told "nothing is listening" and given a
+	// Valkey its worker never dialled, or had its own listener on that port ignored. Another host: nothing is added
+	// here. An IPv6 literal cannot reach a Valkey published on 127.0.0.1, so it is refused with the fix.
+	const dockerValkey = dockerValkeyWhere({ env, fs, envPath, platform });
+	for (const note of dockerValkey.notes) out(`⚠ ${note}\n`);
+	const vport = dockerValkey.port;
+	// THE rule (PR #475's review, round 3): a Valkey container or volume is this deployment's only when it is PROVABLY
+	// this deployment's (valkey-auth.mjs, `valkeyContainerIsOurs`): up's label naming this folder, compose's working dir
+	// here, or, for a legacy unlabelled pi-dispatch-valkey, this deployment's VALKEY_URL port. Anything else is never
+	// stopped, removed or reused, and no Valkey is started on the volume while one that is not ours mounts it.
+	let deployment = cwd;
+	try {
+		deployment = realpath(cwd);
+	} catch {
+		// Unresolvable: the folder as given.
+	}
+	const dirs = [deployment, cwd];
+	const query = (cmd, args) => runCmdQuery(spawn, cmd, args);
+	const VALKEY_RUN_ARGS = valkeyDockerRunArgs({ port: vport, deployment });
+	// Labelled with this folder when up creates it (the volume gap): a label cannot be added later.
+	const VALKEY_VOLUME_ARGS = valkeyVolumeCreateArgs(deployment);
+	// PI_VALKEY_PORT into .env where VALKEY_URL's port is not 6379 (round 3), so a plain compose run in this folder
+	// publishes where the worker dials; never over a different value, which is named instead.
+	if (!dockerValkey.error && !dockerValkey.remote) dockerValkeyPortStep({ fs, envPath, platform, port: vport, out, summary });
+	// Before any start on pi-dispatch-valkey-data: refused, named, while a container that is not ours mounts it.
+	const volumeClear = async () => {
+		const check = await foreignVolumeUsers({ dirs, port: vport, query });
+		if (!check.unknown && check.foreign.length === 0) return true;
+		valkeyRefused = "volume";
+		out(`✗ ${foreignVolumeRefusal(check)}\n`);
+		summary.push(["valkey", `NOT started: ${foreignVolumeRefusal(check)}`]);
+		return false;
+	};
+	// The volume's own owner (PR #475's review, the volume gap: with no container on it, a second deployment's `up` started
+	// on the first one's queue). Another folder's label: never used. No label (made before the label, or by hand): used
+	// only after a question that --yes does not answer, since that queue cannot be attributed; `servedByOurs` where this
+	// deployment's own container serves it now (the upgrade restart), which attributes it. Sets `volumeState`.
+	let volumeState = null;
+	const volumeUsable = async ({ servedByOurs = false } = {}) => {
+		const v = await valkeyVolumeOwner({ dirs, query });
+		const refuse = (why) => {
+			valkeyRefused = "volume";
+			out(`✗ ${why}\n`);
+			summary.push(["valkey", `NOT started: ${why}`]);
+			return false;
+		};
+		if (v.unknown) return refuse(`whose pi-dispatch-valkey-data is could not be read (${v.unknown}), so no Valkey is started on it`);
+		if (v.ours === false) return refuse(foreignVolumeLabelRefusal(v.owner));
+		if (v.unlabelled && !servedByOurs) {
+			out("\n");
+			if (!/^y(es)?$/i.test(String((await prompt(adoptVolumeQuestion(deployment))) ?? "").trim())) return refuse(unadoptedVolumeRefusal());
+			volumeState = "adopted";
+			return true;
+		}
+		volumeState = v.absent ? "absent" : v.unlabelled ? "served" : "ours";
+		return true;
+	};
+	// After every start on the volume: the queue's own `pi-dispatch:owner`, recorded where it is missing and checked where
+	// it is not. Another folder's stops what this pass just started, at once (`stop`), and fails up.
+	const ownerMarkerOk = async (stop) => {
+		const r = await claimValkeyOwner(`redis://127.0.0.1:${vport}`, deployment);
+		if (r.error) {
+			valkeyRefused = "marker";
+			out(`✗ Valkey was started, but its ${OWNER_MARKER_KEY} could not be recorded or read (${r.error}), so whose queue it holds is unconfirmed\n`);
+			summary.push(["valkey", `started, owner marker UNREAD: ${r.error}`]);
+			return false;
+		}
+		if (!dirs.includes(r.owner)) {
+			valkeyRefused = "volume";
+			const stopped = await stop();
+			out(`✗ ${foreignMarkerRefusal(r.owner)}: the Valkey this pass started on it was ${stopped ? "stopped again at once" : "NOT stopped (the stop failed): stop it now"}\n`);
+			summary.push(["valkey", `STOPPED: ${foreignMarkerRefusal(r.owner)}`]);
+			return false;
+		}
+		if (r.claimed) out(`✓ recorded ${OWNER_MARKER_KEY}=${deployment} in its queue\n`);
+		return true;
+	};
+	const stopRun = async () => (await runStreamed(spawn, "docker", VALKEY_STOP_ARGS, out)) === 0 && (await runStreamed(spawn, "docker", VALKEY_RM_ARGS, out)) === 0;
+	// A folder the setup wizard handed to compose (PR #475's review): its Valkey is compose's valkey, named by the folder's
+	// project and the override, published on VALKEY_URL's port through PI_VALKEY_PORT.
+	const handedOver = fs.existsSync(join(cwd, COMPOSE_VALKEY_OVERRIDE));
+	const project = composeProjectName(cwd);
+	const composeBase = composeArgs(handedOver ? { project, override: true } : {});
+	const composeEnv = { ...dockerEnv, [VALKEY_PORT_KEY]: String(vport) };
+	const ourName = handedOver ? `${project}-valkey-1` : "pi-dispatch-valkey";
+	const shownCompose = (args) => `${vport !== 6379 ? `${VALKEY_PORT_KEY}=${vport} ` : ""}docker ${quoteArgs(args)}`;
+	const composeNote = handedOver ? "" : ` (in a folder /dispatch setup laid out, with -p ${project} after \`compose\`)`;
+	let existing = null;
+	if (dockerValkey.error) {
+		valkeyRefused = "url";
+		out(`✗ ${dockerValkey.error}\n`);
+		summary.push(["valkey", `NOT added: ${dockerValkey.error}`]);
+	} else if (dockerValkey.remote) {
+		out(`✓ VALKEY_URL names ${dockerValkey.remote}, not this host, so no Valkey is added here\n`);
+		summary.push(["valkey", "VALKEY_URL names another host, nothing added here"]);
+	} else if (await probeTcp("127.0.0.1", vport)) {
+		const who = await valkeyContainerOwner(ourName, { dirs, port: vport, query });
+		const ours = who.ours === true;
+		out(`✓ something is listening on ${vport}, assuming your Valkey${ours ? ` (it is the ${ourName} container)` : ""}\n`);
+		if (who.ours === false) out(`⚠ ${foreignContainerSentence(ourName, who.owner)}\n`);
+		// Issue #468: a Valkey there that answers a client sending NO password, while this deployment has one, was started
+		// before the password existed (the upgrade of a deployment that had none). Ours is offered a restart with it; one
+		// we did not start is named, with the compose command that recreates the compose-started one.
+		const open = dockerValkeyPassword ? (await probeValkeyAuth(`redis://127.0.0.1:${vport}`)) === "ok" : false;
+		const cost = "A job running right now is interrupted, and the worker and the receiver get NOAUTH until they are restarted: pause first if a job runs (pi-dispatch pause, wait for active jobs, then pi-dispatch resume after the restart)";
+		if (open && ours && handedOver) {
+			// The wizard handed this folder's Valkey to compose (PR #475's review): compose recreates it with the password,
+			// on the same volume, where `docker run` would start a second one beside it.
+			const recreate = [...composeBase, "up", "-d", "--force-recreate", "valkey"];
+			const accepted = (await volumeClear()) && (await volumeUsable({ servedByOurs: true })) ? await consent(`${ourName} answers without a password, and ${VALKEY_PASSWORD_KEY} is set in .env. up would recreate it with the password (compose stops it first, so Valkey writes its AOF out; the pi-dispatch-valkey-data volume, and the queue in it, is kept). ${cost}:`, [shownCompose(recreate)], { yes, out, prompt }) : null;
+			if (accepted === null) {
+				// Refused above (`volumeClear` said why): nothing was asked, so nothing was declined.
+			} else if (!accepted) {
+				out(`skipped: until it restarts with ${VALKEY_PASSWORD_KEY}, any local account can reach this queue\n`);
+				summary.push(["valkey", `${ourName} runs WITHOUT a password (declined the restart with it); \`pi-dispatch up\` again offers it`]);
+			} else {
+				const code = await runStreamed(spawn, "docker", recreate, out, { env: composeEnv });
+				out(code === 0 ? `✓ recreated ${ourName} with ${VALKEY_PASSWORD_KEY} (same volume). Restart the worker and the receiver now so they send it\n` : `✗ compose could not recreate its valkey (exit ${code}): its own output above says why\n`);
+				if (code === 0) await ownerMarkerOk(async () => (await runStreamed(spawn, "docker", [...composeBase, "stop", "valkey"], out, { env: composeEnv })) === 0);
+				summary.push(["valkey", code === 0 ? `recreated ${ourName} with ${VALKEY_PASSWORD_KEY} (volume kept); restart the worker and the receiver` : `recreate with the password FAILED (exit ${code}); see compose's output`]);
+			}
+		} else if (open && ours) {
+			const accepted = (await volumeClear()) && (await volumeUsable({ servedByOurs: true })) ? await consent(
+				`pi-dispatch-valkey answers without a password, and ${VALKEY_PASSWORD_KEY} is set in .env. up would restart it with the password (stopped first, so Valkey writes its AOF out; the pi-dispatch-valkey-data volume, and the queue in it, is kept). ${cost}:`,
+				[`docker ${VALKEY_STOP_ARGS.join(" ")}`, `docker ${VALKEY_RM_ARGS.join(" ")}`, `docker ${quoteArgs(VALKEY_RUN_ARGS)}`],
+				{ yes, out, prompt },
+			) : null;
+			if (accepted === null) {
+				// Refused above (`volumeClear` said why).
+			} else if (!accepted) {
+				out(`skipped: until it restarts with ${VALKEY_PASSWORD_KEY}, any local account can reach this queue\n`);
+				summary.push(["valkey", `pi-dispatch-valkey runs WITHOUT a password (declined the restart with it); \`pi-dispatch up\` again offers it`]);
+			} else if (await runStreamed(spawn, "docker", VALKEY_STOP_ARGS, out) !== 0 || await runStreamed(spawn, "docker", VALKEY_RM_ARGS, out) !== 0) {
+				out("✗ stopping or removing pi-dispatch-valkey failed: it runs as it was, without a password; doctor below will re-check\n");
+				summary.push(["valkey", "restart with the password FAILED at stop/rm; pi-dispatch-valkey still runs without one"]);
+			} else if (await runStreamed(spawn, "docker", VALKEY_RUN_ARGS, out, { env: dockerEnv }) !== 0) {
+				out("✗ docker run failed after pi-dispatch-valkey was removed: no Valkey runs now; its volume is kept. Re-run `pi-dispatch up`\n");
+				summary.push(["valkey", "restart with the password FAILED at docker run: NO Valkey runs now (the volume is kept); re-run `pi-dispatch up`"]);
+			} else if (await ownerMarkerOk(stopRun)) {
+				out(`✓ restarted Valkey with ${VALKEY_PASSWORD_KEY} (container pi-dispatch-valkey, same volume). Restart the worker and the receiver now so they send it: \`pi-dispatch service restart\` (and \`pi-dispatch service restart --receiver\`), or restart them however you run them\n`);
+				summary.push(["valkey", `restarted pi-dispatch-valkey with ${VALKEY_PASSWORD_KEY} (volume kept); restart the worker and the receiver`]);
+			}
+		} else if (open) {
+			out(`⚠ the Valkey on ${vport} answers without a password, and it is not a container up started, so up leaves it: restart it with ${VALKEY_PASSWORD_KEY} from .env (compose: \`${shownCompose([...composeBase, "up", "-d"])}\`${composeNote}, which recreates it and keeps its volume)\n`);
+			summary.push(["valkey", `port ${vport} has a listener that answers WITHOUT a password, left alone: restart it with ${VALKEY_PASSWORD_KEY}`]);
+		} else {
+			summary.push(["valkey", ours ? `container ${ourName} already running` : `port ${vport} already has a listener, left alone`]);
+		}
+	} else if (handedOver) {
+		// The wizard handed this folder's Valkey to compose (PR #475's review): up starts THAT one, compose's valkey on
+		// up's old volume, with the folder's project and the override, never a `docker run` of its own beside it (measured:
+		// up re-created pi-dispatch-valkey on the same volume, and the wizard's next compose run then failed to bind).
+		const start = [...composeBase, "up", "-d", "valkey"];
+		const accepted = (await volumeClear()) && (await volumeUsable()) ? await consent(`Nothing is listening on 127.0.0.1:${vport}. This folder's Valkey is compose's (${COMPOSE_VALKEY_OVERRIDE}, written by /dispatch setup), so up would start it:`, [shownCompose(start)], { yes, out, prompt }) : null;
+		if (accepted === null) {
+			// Refused above (`volumeClear` said why): nothing was asked, so nothing was declined.
+		} else if (!accepted) {
+			out(`skipped: start it later with \`${shownCompose(start)}\`\n`);
+			summary.push(["valkey", "skipped (declined): the queue needs it before `pi-dispatch worker` can drain"]);
+		} else {
+			const code = await runStreamed(spawn, "docker", start, out, { env: composeEnv });
+			if (code === 0 && !(await ownerMarkerOk(async () => (await runStreamed(spawn, "docker", [...composeBase, "stop", "valkey"], out, { env: composeEnv })) === 0))) {
+				// Said above; nothing more to add.
+			} else if (code === 0) {
+				out(`✓ started compose's valkey (project ${project}, the pi-dispatch-valkey-data volume, 127.0.0.1:${vport})\n`);
+				summary.push(["valkey", `started compose's valkey (project ${project}, volume pi-dispatch-valkey-data)`]);
+			} else {
+				// Reported, never swallowed: compose prints why (a port another container holds, most often), and up exits
+				// non-zero on it.
+				valkeyRefused = "compose";
+				out(`✗ compose could not start its valkey (exit ${code}): its own output above says why (another container on 127.0.0.1:${vport} is the usual one: \`docker ps\` shows which)\n`);
+				summary.push(["valkey", `compose's valkey FAILED to start (exit ${code}); see compose's output`]);
+			}
+		}
+	} else if ((existing = await valkeyContainerOwner("pi-dispatch-valkey", { dirs, port: vport, query })) && !existing.absent) {
+		// A pi-dispatch-valkey that does not answer this deployment's port: this deployment's, stopped (started as it is,
+		// never replaced), or another's, never touched (PR #475's review, round 3), or one docker could not describe.
+		if (existing.ours) {
+			out(`⚠ pi-dispatch-valkey is this deployment's and is not listening on ${vport}: \`docker start pi-dispatch-valkey\` starts it as it is\n`);
+			summary.push(["valkey", "pi-dispatch-valkey exists (this deployment's) and is not running; `docker start pi-dispatch-valkey`"]);
+		} else {
+			valkeyRefused = "volume";
+			const why = existing.unknown ? `whether pi-dispatch-valkey is this deployment's could not be read (${existing.unknown})` : foreignContainerSentence("pi-dispatch-valkey", existing.owner);
+			out(`✗ ${why}, and a second container of that name cannot be started beside it. Give this deployment a Valkey of its own (compose in this folder, which names its container and volume after the folder's project)\n`);
+			summary.push(["valkey", `NOT started: ${why}`]);
+		}
+	} else if ((await volumeClear()) && (await volumeUsable())) {
+		// The volume is created (labelled) only where it does not exist; an adopted or labelled one is used as it is.
+		const creates = volumeState === "absent";
+		const accepted = await consent(
+			`Nothing is listening on 127.0.0.1:${vport}. up would start Valkey (same semantics as deploy/docker-compose.yml)${volumeState === "adopted" ? " on the adopted pi-dispatch-valkey-data" : ""}:`,
+			[...(creates ? [`docker ${quoteArgs(VALKEY_VOLUME_ARGS)}`] : []), `docker ${quoteArgs(VALKEY_RUN_ARGS)}`],
+			{ yes, out, prompt },
+		);
+		if (!accepted) {
+			out(`skipped: start it later with \`${shownCompose([...composeBase, "up", "-d"])}\`${composeNote}\n`);
+			summary.push(["valkey", "skipped (declined): the queue needs it before `pi-dispatch worker` can drain"]);
+		} else if (creates && await runStreamed(spawn, "docker", VALKEY_VOLUME_ARGS, out) !== 0) {
+			out("✗ docker volume create failed; continuing, doctor below will re-check Valkey\n");
+			summary.push(["valkey", `volume create FAILED; \`${shownCompose([...composeBase, "up", "-d"])}\` is the fallback`]);
+		} else if (await runStreamed(spawn, "docker", VALKEY_RUN_ARGS, out, { env: dockerEnv }) !== 0) {
+			out("✗ docker run failed; continuing, doctor below will re-check Valkey\n");
+			summary.push(["valkey", `container start FAILED; \`${shownCompose([...composeBase, "up", "-d"])}\` is the fallback`]);
+		} else if (await ownerMarkerOk(stopRun)) {
+			out(`✓ started Valkey (container pi-dispatch-valkey, AOF on, bound to 127.0.0.1, ${dockerValkeyPassword ? `with ${VALKEY_PASSWORD_KEY} from .env` : "WITHOUT a password: .env sets none"})\n`);
+			summary.push(["valkey", "started container pi-dispatch-valkey (durable: --appendonly yes, restart unless-stopped)"]);
+		}
+	}
+	}
+
 	// (e2) the egress policy's proxy, and ONLY when the operator has already armed it. up never invents
 	// operator policy -- the same doctrine that keeps it pulling this repo's own image and no other -- so a
 	// deployment that has not set PI_EGRESS hears nothing about this at all.
@@ -620,7 +814,7 @@ export async function runUp(argv = [], deps = {}) {
 				summary.push(["egress", "started pi-dispatch-egress-proxy on pi-dispatch-egress-out"]);
 			}
 		} else {
-			out("skipped — start it later with `docker compose -f deploy/docker-compose.yml --profile egress up -d`\n");
+			out(`skipped: start it later with \`${composeCommandFor(cwd, fs, ["--profile", "egress", "up", "-d"])}\`\n`);
 			summary.push(["egress", "skipped (declined) — every job is refused pre-spend until the proxy is up (PI_EGRESS=0 opts out)"]);
 		}
 	}
@@ -630,7 +824,7 @@ export async function runUp(argv = [], deps = {}) {
 	// the allowlist init scaffolds.
 	if (podmanReady) {
 		const stackState = { valkeyRefused: false };
-		await podmanStackStep({ env: venueEnv, valkeyKeys: valkeyKeys.env, state: stackState, venues, spawn, out, yes, prompt, summary, fs, probeTcp, lookup, interfaces, runSync, cwd, home, user: userName(), euid, templatesDir, readTemplate, mkdir, realpath });
+		await podmanStackStep({ env: venueEnv, valkeyKeys: valkeyKeys.env, state: stackState, venues, spawn, out, yes, prompt, summary, fs, probeTcp, lookup, interfaces, runSync, cwd, home, user: userName(), euid, newPassword, platform, templatesDir, readTemplate, mkdir, realpath });
 		valkeyRefused = stackState.valkeyRefused;
 	}
 
@@ -690,7 +884,19 @@ Next:
 	// says: a worker started now would take that queue's jobs, and an exit 0 read by a script or the wizard says ready.
 	if (valkeyRefused) {
 		// Worded per reason (gate round 2): an owner refusal and a URL the Quadlet Valkey cannot serve are different faults.
-		out(valkeyRefused === "owner" ? "\nup: the Valkey VALKEY_URL reaches is not this account's (above); give this account its own port, or opt in with PI_VALKEY_SHARED=1 in .env, then re-run `pi-dispatch up`.\n" : "\nup: VALKEY_URL cannot be served as it is written (above); fix it in .env, then re-run `pi-dispatch up`.\n");
+		out(
+			valkeyRefused === "owner"
+				? "\nup: the Valkey VALKEY_URL reaches is not this account's (above); give this account its own port, or opt in with PI_VALKEY_SHARED=1 in .env, then re-run `pi-dispatch up`.\n"
+				: valkeyRefused === "password"
+					? `\nup: ${VALKEY_PASSWORD_KEY} in .env cannot be handed to Valkey (above); fix it, then re-run \`pi-dispatch up\`.\n`
+					: valkeyRefused === "compose"
+						? "\nup: compose could not start this folder's Valkey (above); free the port it names, then re-run `pi-dispatch up`.\n"
+						: valkeyRefused === "marker"
+							? `\nup: the Valkey up started could not be asked whose queue it holds (${OWNER_MARKER_KEY}, above); check it answers, then re-run \`pi-dispatch up\`.\n`
+							: valkeyRefused === "volume"
+							? "\nup: the Valkey container or volume named above is not this deployment's (or not attributed to it), and up never stops, removes, reuses or starts beside one; take the way out it names, then re-run `pi-dispatch up`.\n"
+							: "\nup: VALKEY_URL cannot be served as it is written (above); fix it in .env, then re-run `pi-dispatch up`.\n",
+		);
 		return doctorCode !== 0 ? doctorCode : 1;
 	}
 	return doctorCode;
@@ -760,7 +966,7 @@ async function podmanImageStep({ spawn, out, yes, prompt, summary }) {
  * alone, a proxy that exists is left alone), then plans the Quadlet files with `planStack`, shows `plan.actions`, and on
  * consent hands those same objects to `applyStack`: what runs is literally what was shown.
  */
-async function podmanStackStep({ env, valkeyKeys = {}, state = {}, venues, spawn, out, yes, prompt, summary, fs, probeTcp, lookup, interfaces, runSync, cwd, home, user, euid, templatesDir, readTemplate, mkdir, realpath }) {
+async function podmanStackStep({ env, valkeyKeys = {}, state = {}, venues, spawn, out, yes, prompt, summary, fs, probeTcp, lookup, interfaces, runSync, cwd, home, user, euid, templatesDir, readTemplate, mkdir, realpath, newPassword = newValkeyPassword, platform = "linux" }) {
 	const armed = egressArmedFn(env);
 	let includeValkey = false;
 	let valkeyPort = DEFAULT_VALKEY_PORT;
@@ -807,7 +1013,38 @@ async function podmanStackStep({ env, valkeyKeys = {}, state = {}, venues, spawn
 			summary.push(["valkey", ours ? `container pi-dispatch-valkey already running on ${decided.port}` : `port ${decided.port} already has a listener, left alone`]);
 		}
 	}
-	const components = stackComponents({ venues, env, includeValkey, armed, valkeyPort });
+	// Issue #468: the password the Quadlet Valkey starts with, read from .env NOW (init, earlier in this pass, may have just
+	// written the file and a password into it): kept when set, generated when the Valkey this step adds is the
+	// deployment's own and it has none, written into .env only once the plan is accepted.
+	const envPath = join(cwd, ".env");
+	let valkeyPassword = null;
+	let pendingPassword = null;
+	if (includeValkey) {
+		let fileKeys = {};
+		let readError = null;
+		if (fs.existsSync(envPath)) {
+			try {
+				const read = readValkeyKeys(fs.readFileSync(envPath), { loader: "systemd", path: envPath });
+				if (read.error) readError = read.error;
+				else fileKeys = read.keys;
+			} catch (err) {
+				readError = `${envPath} could not be read (${err?.message ?? err})`;
+			}
+		}
+		const decided = readError ? { error: readError } : valkeyPasswordDecision({ ...valkeyKeys, ...fileKeys }, { envPath });
+		if (decided.error) {
+			state.valkeyRefused = "password";
+			out(`\n✗ ${decided.error}\n`);
+			summary.push(["valkey", `NOT added: ${decided.error}`]);
+			includeValkey = false;
+		} else {
+			if (decided.note) out(`\n⚠ ${decided.note}\n`);
+			if (decided.generate && fs.existsSync(envPath)) pendingPassword = newPassword();
+			else if (decided.generate) out(`\n⚠ no .env here, so the Valkey up adds has no password: run \`pi-dispatch init\` here, then \`pi-dispatch service install --force\`, which gives it one\n`);
+			valkeyPassword = decided.password ?? pendingPassword;
+		}
+	}
+	const components = stackComponents({ venues, env, includeValkey, armed, valkeyPort, valkeyPassword });
 	for (const note of components.notes) out(`\n⚠ ${note}\n`);
 	let keeperRestart = false;
 	if (components.proxy) {
@@ -898,7 +1135,7 @@ async function podmanStackStep({ env, valkeyKeys = {}, state = {}, venues, spawn
 	const several = named.length > 1;
 	const accepted = await consent(
 		`${parts} ${several ? "are" : "is"} not running under this account's Podman. up would install ${several ? "them" : "it"} as Quadlet units in your user manager (the same installer \`pi-dispatch service install\` uses; systemd brings them back at boot while linger is on):`,
-		plan.actions.map(describeAction),
+		[...(pendingPassword ? [`generate ${VALKEY_PASSWORD_KEY} into ${envPath} (32 random bytes, hex; the value is not shown)`] : []), ...plan.actions.map(describeAction)],
 		{ yes, out, prompt },
 	);
 	const row = several ? "podman stack" : components.valkey ? "valkey" : components.proxy ? "egress (podman)" : "netns keeper (podman)";
@@ -914,6 +1151,21 @@ async function podmanStackStep({ env, valkeyKeys = {}, state = {}, venues, spawn
 	// leaves the files its units run from, named.
 	const journal = [];
 	const stackFs = { ...fs, mkdirSync: fs.mkdirSync ?? mkdir, unlinkSync: fs.unlinkSync ?? unlinkSync };
+	if (pendingPassword) {
+		// Issue #468: the password into .env before any stack file, journalled with what was there, so a failed write
+		// below puts .env back with the rest. Never over a value; the file narrowed to this account; the value unshown.
+		let previous = null;
+		try {
+			previous = fs.readFileSync(envPath);
+			if (!updateEnvFile(envPath, VALKEY_PASSWORD_KEY, pendingPassword, { fs, platform, narrow: true }).changed) throw new Error("the file already assigns it");
+		} catch (err) {
+			out(`✗ ${VALKEY_PASSWORD_KEY} could not be written into ${envPath} (${err?.message ?? err}), so nothing was installed. Continuing; doctor below will re-check\n`);
+			summary.push([row, `NOT installed: ${VALKEY_PASSWORD_KEY} could not be written into .env`]);
+			return;
+		}
+		journal.push({ path: envPath, existed: true, previous });
+		out(`✓ generated ${VALKEY_PASSWORD_KEY} into .env (value not shown; .env is now readable by this account only)\n`);
+	}
 	const applied = await applyStack(plan, { fs: stackFs, run: (cmd, args) => runStreamed(spawn, cmd, args, out), journal });
 	if (!applied.ok) {
 		if (!applied.ran) {
@@ -970,9 +1222,128 @@ async function consent(intro, commands, { yes, out, prompt }) {
 	return /^y(es)?$/i.test(String(answer ?? "").trim());
 }
 
-/** Re-join an argv array for display, quoting the args that contain spaces (e.g. "valkey-cli ping"). */
+/**
+ * Re-join an argv array for display, quoting the args that contain spaces (e.g. "valkey-cli ping"). An arg with a
+ * double quote or a `$` in it (issue #468: the Valkey start script) is shown in single quotes, which is how a shell
+ * would take it unchanged; none of those args has a single quote of its own.
+ */
 function quoteArgs(args) {
-	return args.map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ");
+	return args.map((a) => (/["$]/.test(a) ? `'${a}'` : a.includes(" ") ? `"${a}"` : a)).join(" ");
+}
+
+/**
+ * Issue #468: the password docker's Valkey starts with, from the deployment's `.env` (`dockerValkeyPasswordStep`): kept
+ * when set, generated into the file when the deployment runs its own Valkey on this host and has none, null otherwise.
+ * Said on screen and in the summary without the value.
+ */
+function dockerValkeyPasswordStep({ fs, envPath, platform, out, summary, newPassword }) {
+	if (!fs.existsSync(envPath)) {
+		summary.push([VALKEY_PASSWORD_KEY, "no .env here, skipped (set it wherever your env lives); the Valkey up starts then has no password"]);
+		return null;
+	}
+	const loader = platform === "linux" ? "systemd" : platform === "darwin" ? "shell" : "cmd";
+	let keys;
+	try {
+		const read = readValkeyKeys(fs.readFileSync(envPath), { loader, path: envPath });
+		if (read.error) throw new Error(read.error);
+		keys = read.keys;
+	} catch (err) {
+		out(`\n✗ ${VALKEY_PASSWORD_KEY}: ${err?.message ?? err}\n`);
+		summary.push([VALKEY_PASSWORD_KEY, `NOT decided: ${err?.message ?? err}`]);
+		return null;
+	}
+	const decided = valkeyPasswordDecision(keys, { envPath });
+	if (decided.error) {
+		out(`\n✗ ${decided.error}\n`);
+		summary.push([VALKEY_PASSWORD_KEY, `NOT usable: ${decided.error}`]);
+		return null;
+	}
+	if (decided.note) {
+		out(`\n⚠ ${decided.note}\n`);
+		summary.push([VALKEY_PASSWORD_KEY, decided.note]);
+		return null;
+	}
+	if (!decided.generate) {
+		summary.push([VALKEY_PASSWORD_KEY, "already set, left untouched (value not shown)"]);
+		return decided.password;
+	}
+	const password = newPassword();
+	try {
+		if (!updateEnvFile(envPath, VALKEY_PASSWORD_KEY, password, { fs, platform, narrow: true }).changed) throw new Error("the file already assigns it");
+	} catch (err) {
+		out(`\n✗ ${VALKEY_PASSWORD_KEY} could not be written: ${err?.message ?? err}\n`);
+		summary.push([VALKEY_PASSWORD_KEY, `NOT written: ${err?.message ?? err}. The Valkey up starts then has no password`]);
+		return null;
+	}
+	out(`\n✓ generated ${VALKEY_PASSWORD_KEY} into .env (32 random bytes, hex; value not shown; .env is now readable by this account only)\n`);
+	summary.push([VALKEY_PASSWORD_KEY, "generated into .env (value not shown; Valkey requires it, and every client sends it)"]);
+	return password;
+}
+
+/**
+ * PI_VALKEY_PORT in .env (PR #475's review, round 3): written where VALKEY_URL's port is not 6379 and .env names none,
+ * a differing value named and left alone (`valkeyPortEnvDecision`).
+ */
+function dockerValkeyPortStep({ fs, envPath, platform, port, out, summary }) {
+	if (!fs.existsSync(envPath)) return;
+	const loader = platform === "linux" ? "systemd" : platform === "darwin" ? "shell" : "cmd";
+	let decided;
+	try {
+		const found = readEnvAssignments(fs.readFileSync(envPath), [VALKEY_PORT_KEY], { loader })[VALKEY_PORT_KEY];
+		decided = valkeyPortEnvDecision(found === undefined ? undefined : (found.value ?? "?"), port, { envPath });
+		if (decided.write && !updateEnvFile(envPath, VALKEY_PORT_KEY, decided.write, { fs, platform }).changed) throw new Error("the file already assigns it");
+	} catch (err) {
+		out(`\n✗ ${VALKEY_PORT_KEY} could not be written: ${err?.message ?? err}\n`);
+		summary.push([VALKEY_PORT_KEY, `NOT written: ${err?.message ?? err}`]);
+		return;
+	}
+	if (decided.conflict) {
+		out(`\n⚠ ${decided.conflict}\n`);
+		summary.push([VALKEY_PORT_KEY, decided.conflict]);
+	} else if (decided.write) {
+		out(`\n✓ wrote ${VALKEY_PORT_KEY}=${port} into .env (VALKEY_URL's port), so compose in this folder publishes its Valkey there\n`);
+		summary.push([VALKEY_PORT_KEY, `written: ${port} (VALKEY_URL's port)`]);
+	}
+}
+
+/**
+ * The compose command a message names for this folder (PR #475's review): the folder's project and the hand-over
+ * override where the wizard wrote one, else the docs' plain command with the note a wizard folder needs.
+ */
+function composeCommandFor(cwd, fs, tail) {
+	const handedOver = fs.existsSync(join(cwd, COMPOSE_VALKEY_OVERRIDE));
+	const project = composeProjectName(cwd);
+	const args = [...composeArgs(handedOver ? { project, override: true } : {}), ...tail];
+	return `docker ${args.join(" ")}${handedOver ? "" : `\` (in a folder /dispatch setup laid out, with -p ${project} after \`compose`}`;
+}
+
+/**
+ * Where docker's Valkey is, from VALKEY_URL as the service reads it (`deploymentValkeyEnv`): `{ port, notes }`, with
+ * `remote` for another host (nothing is added for it) or `error` for a URL the Valkey `up` starts could not serve.
+ */
+function dockerValkeyWhere({ env, fs, envPath, platform }) {
+	const read = deploymentValkeyEnv({ env, fs, envPath, platform });
+	if (read.error) return { port: 6379, notes: [], error: `${read.error}. up judges the Valkey the service will use, so it adds none` };
+	const url = read.env.VALKEY_URL;
+	const target = valkeyTarget(url);
+	if (target.error) return { port: 6379, notes: read.notes, error: `VALKEY_URL: ${target.error}` };
+	if (!isLoopbackHost(target.host)) return { port: target.port, notes: read.notes, remote: target.host };
+	if (target.host.includes(":")) {
+		return { port: target.port, notes: read.notes, error: `VALKEY_URL's host is ${target.host}, and the Valkey up starts is published on 127.0.0.1 only, so the worker would not reach it. Write VALKEY_URL=redis://127.0.0.1:${target.port}` };
+	}
+	return { port: target.port, notes: read.notes };
+}
+
+/** `claimValkeyOwner` (connection.mjs) with the deployment's credential, as every client of the project gets it. */
+async function defaultClaimValkeyOwner(url, folder, { env, cwd }) {
+	const { claimValkeyOwner, valkeyClientContext } = await import("./connection.mjs");
+	return claimValkeyOwner(url, folder, { context: valkeyClientContext({ env, cwd }) });
+}
+
+/** Whether the Valkey at `url` answers a client that sends no password: its `valkeyAuthState`, through connection.mjs. */
+async function defaultProbeValkeyAuth(url, { env, cwd }) {
+	const { valkeyAuthState, valkeyClientContext } = await import("./connection.mjs");
+	return (await valkeyAuthState(url, { withoutPassword: true, context: valkeyClientContext({ env, cwd }) })).state;
 }
 
 /** Exit code of a spawned command; null when it could not launch (not on PATH) — mirrors doctor. */
@@ -994,11 +1365,13 @@ function runCmd(spawn, cmd, args) {
  * Run a CONSENTED command with its stdout+stderr streamed to `out` as it happens — a docker pull's
  * progress is the operator's confirmation that the thing they approved is the thing running.
  */
-function runStreamed(spawn, cmd, args, out) {
+function runStreamed(spawn, cmd, args, out, { env } = {}) {
 	return new Promise((resolve) => {
 		let child;
 		try {
-			child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+			// `env` only where a value must reach the command without being on its argv (issue #468: `docker run -e
+			// VALKEY_PASSWORD` reads it from here); otherwise the child inherits this process's, as before.
+			child = spawn(cmd, args, env ? { stdio: ["ignore", "pipe", "pipe"], env } : { stdio: ["ignore", "pipe", "pipe"] });
 		} catch {
 			resolve(null);
 			return;

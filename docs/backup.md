@@ -92,9 +92,13 @@ all, so a copy taken mid-run can catch a partial one. Stopping first is what buy
    For `deploy/docker-compose.yml`, the service has no fixed container name and Compose prefixes the
    volume with the project name, so ask it:
    ```bash
-   docker compose -f deploy/docker-compose.yml stop valkey
+   docker compose --env-file .env -f deploy/docker-compose.yml stop valkey
    docker volume ls --filter name=valkey-data          # the prefixed name is what you tar
    ```
+   In a folder `/dispatch setup` laid out, add `-p <folder name>` after `compose` (and
+   `-f deploy/docker-compose.valkey.yml` when setup wrote that file): without it compose names the project `deploy`
+   and stops nothing of this folder's. Where that file exists, the Valkey's volume is `pi-dispatch-valkey-data`,
+   as for `pi-dispatch up` above.
 5. **Copy the files with `cp -a`.** The session store is listed separately and on purpose: it is the
    most PII bearing thing here, so it is never swept up by a wildcard. If yours lives under
    `~/.pi-dispatch/sessions`, which is what `docs/sessions.md` suggests, then copying that whole

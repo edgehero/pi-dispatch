@@ -27,7 +27,7 @@ If the recording is for **onboarding** rather than for the README, lead with `/d
 guided wizard is the front door now, and a panel that opens already configured is the payoff shot.
 
 Run against a deployment with a little state (a couple of triggers, a finished run or two) so the panel isn't
-empty — start the stack (`docker compose -f deploy/docker-compose.yml up -d`), queue one local job, let it
+empty: start the stack (`docker compose --env-file .env -f deploy/docker-compose.yml up -d`), queue one local job, let it
 finish, then record.
 
 ## Option A — vhs (recommended for a crisp GIF)

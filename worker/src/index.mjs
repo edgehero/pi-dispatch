@@ -1,5 +1,5 @@
 import { DelayedError, UnrecoverableError, Worker } from "bullmq";
-import { assertJudgedConnection } from "./connection.mjs";
+import { assertJudgedConnection, onValkeyError } from "./connection.mjs";
 import { jobContainerName } from "./backend-local.mjs";
 import { scrubCredentials } from "./redact.mjs";
 import { BACKEND_NOT_REGISTERED } from "./backend-registry.mjs";
@@ -927,6 +927,9 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			...(name ? { name } : {}),
 			...(limiter ? { limiter } : {}),
 		});
+		// Issue #468: an error of this worker is one line, its message, never BullMQ's console.error of the whole object
+		// (which carried a failed AUTH's password in `command.args` before connection.mjs scrubbed it).
+		onValkeyError(worker, `worker ${queueName}`);
 		workers.push(worker);
 	}
 

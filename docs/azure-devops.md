@@ -70,7 +70,7 @@ endpoint) answers 404 rather than 401, because an endpoint that answers is one y
 Add a `github` trigger later and both become required again, as they should.
 
 Then start it: `pi-dispatch-receiver` from your deployment folder, where `serve` is the default command, or
-the container profile instead (`docker compose -f deploy/docker-compose.yml --profile receiver up -d`); the
+the container profile instead (`docker compose --env-file .env -f deploy/docker-compose.yml --profile receiver up -d`); the
 README lays out the choice. The third way the README offers, `pi-dispatch-receiver poll`, cannot serve this
 forge: the poller reads api.github.com and has no Azure path at all.
 

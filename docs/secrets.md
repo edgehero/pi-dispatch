@@ -127,10 +127,18 @@ Everything else in `.env.example` is a dial, and dials are fine in plain sight.
 | The provider key | `ANTHROPIC_API_KEY` or your provider's own variable, per pi's table |
 | The forge credential | `GITHUB_PAT`, or the App trio (`GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY` or `GITHUB_APP_PRIVATE_KEY_PATH`), or `GITLAB_TOKEN` / `FORGEJO_TOKEN` / `AZURE_TOKEN`. `GITHUB_PAT_VAR` renames the first of those, for a manager that insists on its own key name |
 | The webhook secrets | `WEBHOOK_SECRET`, `GITLAB_WEBHOOK_SECRET`, `FORGEJO_WEBHOOK_SECRET`, `AZURE_WEBHOOK_SECRET` |
+| `VALKEY_PASSWORD` | the password of the Valkey pi-dispatch starts (issue #468); `init` writes it, `up` and `service install` add it when missing |
 | `VALKEY_URL` | only when it carries a password |
 
-The receiver is its own process with its own unit, and it needs the webhook secret and `VALKEY_URL` the
-same way. Everything on this page applies to it unchanged.
+The receiver is its own process with its own unit, and it needs the webhook secret, `VALKEY_URL` and
+`VALKEY_PASSWORD` the same way. Everything on this page applies to it unchanged.
+
+`VALKEY_PASSWORD` is a key of its own, never folded into `VALKEY_URL`: doctor prints that URL, the admin's
+deployment pointer stores it, and refusals quote it, so a password inside it would travel to all three. A
+manager-supplied environment works as for every other key here (the service's clients read it from their
+environment first); the file's own copy is read only for a Valkey on this machine's loopback, so a shell whose
+`VALKEY_URL` names another host never sends it there. The Valkey itself never receives it on a command line:
+see [podman.md](podman.md), step 7, for why and how.
 
 Two notes on names, because both are variables an operator can hold wrongly for a long time. `GITHUB_PAT_VAR`
 says which variable the PAT actually lives in (default `GITHUB_PAT`); the name you give is read verbatim and

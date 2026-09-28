@@ -32,7 +32,8 @@ import { HELD_SET, jobKey } from "@edgehero/pi-dispatch/wait-state";
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
 import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch/subscriptions";
-import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
+import { parseConnection, makeRedisClient, killSwitchValkeyUrls, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
+import { pointerState } from "./deployment-pointer.mjs";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { QUEUE, makeQueue, enqueueLocalJob, fleetQueueNames, hostQueueName, discoverHostQueues, unionQueueNames } from "@edgehero/pi-dispatch/queue";
 import { hostsIn, mergeRuns, readMirroredRuns } from "@edgehero/pi-dispatch/run-mirror";
@@ -310,6 +311,68 @@ export async function readFleetQueues({ url, redisFn = makeRedisClient, timeoutM
       // best-effort teardown
     }
   }
+}
+
+/**
+ * Issue #468 with issue #471's rule: where the panel's Valkey clients stand (`valkeyClientContext`'s shape), from the
+ * pointer's deployment folder ONLY, read through the one reader the panel has (`deploymentServiceEnv`, one descriptor,
+ * nothing from a file another account can change): its VALKEY_PASSWORD, PI_VALKEY_SHARED and PI_BACKENDS, and its
+ * VALKEY_URL beside pi's own. pi's own environment is taken without what the pointer layered into it (the pointer's
+ * VALKEY_URL is the wizard's snapshot of the file, which the file outranks), so a disagreement is between the operator's
+ * export and the file. No pointer: pi's environment alone, and no file. A file that could not be taken from is the
+ * context's `error`, as `valkeyClientContext` says one it could not read.
+ */
+export function panelValkeyContext({ env = process.env, pointerDir = null, owned = [], fs = nodeFs, platform = process.platform, uid = process.geteuid?.() } = {}) {
+  const own = {};
+  for (const [key, value] of Object.entries(env)) if (!owned.includes(key)) own[key] = value;
+  if (pointerDir === null) return valkeyContextFromKeys({ env: own, platform });
+  // The file's own values (resolved against an empty shell, so `fromFile` is exactly what the file says).
+  const res = deploymentServiceEnv({ env: {}, dir: pointerDir, keys: VALKEY_CONTEXT_KEYS, platform, fs, uid });
+  const error = res.untrusted
+    ? `${res.path} ${res.untrusted}`
+    : res.unreadable
+      ? `${res.path} could not be read (${res.unreadable})`
+      : res.hazardSkipped.length > 0
+        ? `${res.path} line ${res.hazard.line} ${res.hazard.what}`
+        : res.unread.length > 0
+          ? `${res.path} assigns ${res.unread.map((u) => `${u.key} (line ${u.line})`).join(", ")} in a form the service's loader may read differently`
+          : null;
+  return valkeyContextFromKeys({ env: own, envPath: res.path, fileKeys: res.fromFile, error, platform });
+}
+
+/**
+ * Make `panelValkeyContext`, from the pointer's current state, the context every Valkey client of this process gets
+ * when its caller names none (`useValkeyContext`), so no client of the panel reads a `.env` by any other way. Read per
+ * client, like `panelEnv`, so an edit to the file reaches the next command.
+ */
+export function installPanelValkeyContext({ env = process.env } = {}) {
+  useValkeyContext(() => {
+    const { deploymentDir, owned } = pointerState();
+    return panelValkeyContext({ env, pointerDir: deploymentDir, owned });
+  });
+}
+
+/**
+ * The panel's kill switch (PR #475's review, round 3): the CLI's rule, from the one resolver both import
+ * (`killSwitchValkeyUrls`), over `panelValkeyContext` (issue #471: the pointer's folder only, through the one reader).
+ * The panel used this process's VALKEY_URL alone, so a stale one paused a Valkey the worker does not drain and said
+ * "paused". When pi's own VALKEY_URL and the deployment .env's disagree, a PAUSE pauses both, and a RESUME, which would
+ * start spending, is refused until they agree. Returns `{ refused }`, or `{ results: [{ url, shown, res }],
+ * disagreement }` with each URL as `urlShown` prints it, never with its userinfo; every client sends the deployment's
+ * password by that same context.
+ */
+export async function killSwitchSet({ paused, env = process.env, setFn = setQueuePaused, resolveFn = killSwitchValkeyUrls, stateFn = pointerState, fs = nodeFs, uid = process.geteuid?.() } = {}) {
+  const { deploymentDir, owned } = stateFn();
+  const context = panelValkeyContext({ env, pointerDir: deploymentDir, owned, fs, uid });
+  const picked = resolveFn({ env, context });
+  if (picked.error) return { refused: picked.error };
+  if (picked.urls.length > 1 && !paused) {
+    return { refused: `${picked.disagreement}: resume would start jobs on one of them, so it resumes neither. Make them agree (the .env is what the service reads), or run: pi-dispatch resume --valkey-url <url>` };
+  }
+  const conn = { parseConnectionFn: (u, o = {}) => parseConnection(u, { ...o, context }), redisFn: (u, o = {}) => makeRedisClient(u, { ...o, context }) };
+  const results = [];
+  for (const url of picked.urls) results.push({ url, shown: urlShown(url), res: await setFn({ url, paused, ...conn }) });
+  return { results, disagreement: picked.urls.length > 1 ? picked.disagreement : null };
 }
 
 export async function setQueuePaused({ url, paused, makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {

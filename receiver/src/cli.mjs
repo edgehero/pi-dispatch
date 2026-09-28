@@ -13,7 +13,7 @@
  * Thin by design, mirroring worker/src/cli.mjs: recognise the command, lazy-import the real work.
  */
 
-import { EXIT_POLICY } from "@edgehero/pi-dispatch/exit-code";
+import { EXIT_POLICY, installRejectionPrinter } from "@edgehero/pi-dispatch/exit-code";
 
 const USAGE = `pi-dispatch-receiver — the always-on trigger edge: turns GitHub activity into queued jobs
 
@@ -76,6 +76,8 @@ export function entryExitCode(err) {
 // The error line mirrors start.mjs's own entry guard: `err.message` only -- never a secret or PII.
 // (start.mjs's guard keys on argv[1] ending in start.mjs, so importing it from here never double-boots.)
 if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("cli.mjs")) {
+	// An unhandled rejection is printed as its message alone (PR #475's review), never Node's print of the whole reason.
+	installRejectionPrinter();
 	main()
 		.then((code) => {
 			if (code) process.exitCode = code;

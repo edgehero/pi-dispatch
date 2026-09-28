@@ -1161,7 +1161,7 @@ export async function openSandbox({
 		}
 		// Where the proxy comes from differs by venue: the compose file is docker-only, and on podman the proxy is
 		// started by hand under this account's podman (docs/podman.md).
-		const start = bin === "podman" ? "it runs under this account's rootless podman, started as docs/podman.md shows" : "`docker compose -f deploy/docker-compose.yml --profile egress up -d`";
+		const start = bin === "podman" ? "it runs under this account's rootless podman, started as docs/podman.md shows" : "`docker compose --env-file .env -f deploy/docker-compose.yml --profile egress up -d`";
 		return {
 			refused: "egress-network-failed",
 			message: `could not create the egress network ${network} -- is the proxy running? ${start}. The egress setting is read from this process's environment (PI_EGRESS, PI_EGRESS_PROXY); a deployment that sets them only in its .env must export them where you run this.`,

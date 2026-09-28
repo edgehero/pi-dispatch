@@ -74,6 +74,8 @@ import {
   cancelHeldJob,
   listRunIds,
   setQueuePaused,
+  killSwitchSet,
+  installPanelValkeyContext,
   writeSettings,
   writeTriggers,
   writePauseWindows,
@@ -256,6 +258,9 @@ export default function admin(pi: ExtensionAPI): void {
     // Deliberately swallowed: applyDeploymentPointer degrades internally ({ ignored } + notice), so
     // anything reaching here is unexpected -- and still must not take the whole extension down.
   }
+  // Issue #468 over issue #471: every Valkey client of the panel takes its password (and its facts about the
+  // deployment's Valkey) from the pointer's folder through the one `.env` reader the panel has, never another.
+  installPanelValkeyContext();
 
   pi.registerCommand("dispatch", {
     // The operator-visible summary; a subcommand once went missing from it while USAGE carried it,
@@ -384,17 +389,20 @@ function registerTools(pi: ExtensionAPI): void {
     executionMode: "sequential",
     parameters: Type.Object({}),
     async execute() {
-      const paths = resolvePaths(deploymentEnv());
-      const res = await setQueuePaused({ url: paths.valkeyUrl, paused: true });
-      if (res.unreachable) {
-        throw new Error(`could not reach the queue at ${paths.valkeyUrl}: ${res.unreachable}`);
+      // The CLI's kill-switch rule (PR #475's review, round 3): both Valkeys when this process's VALKEY_URL and the
+      // deployment .env's disagree, every URL shown without its userinfo.
+      const set = await killSwitchSet({ paused: true });
+      if (set.refused) throw new Error(set.refused);
+      const lines = [];
+      for (const { shown, res } of set.results) {
+        const at = set.results.length > 1 ? ` at ${shown}` : "";
+        if (res.unreachable && !res.partial) throw new Error(`could not reach the queue at ${shown}: ${res.unreachable}`);
+        // A PARTIAL result is the dangerous one: some queues switched, one did not, and reporting a bare
+        // "paused" for it tells an operator the deployment is stopped while a host keeps spending.
+        if (res.partial) throw new Error(`paused ${res.partial.done.join(", ")}${at} but FAILED at ${res.partial.failed}: the deployment is half paused: ${res.partial.error}`);
+        lines.push(`paused${at}${res.queues.length > 1 ? ` (${res.queues.length} queues)` : ""}`);
       }
-      // A PARTIAL result is the dangerous one: some queues switched, one did not, and reporting a bare
-      // "paused" for it tells an operator the deployment is stopped while a host keeps spending.
-      if (res.partial) {
-        throw new Error(`paused ${res.partial.done.join(", ")} but FAILED at ${res.partial.failed} — the deployment is half paused: ${res.partial.error}`);
-      }
-      return toolText(`paused${res.queues.length > 1 ? ` (${res.queues.length} queues)` : ""}`);
+      return toolText(`${set.disagreement ? `${set.disagreement}: paused both. ` : ""}${lines.join("; ")}`);
     },
   });
 
@@ -405,10 +413,11 @@ function registerTools(pi: ExtensionAPI): void {
     executionMode: "sequential",
     parameters: Type.Object({}),
     async execute() {
-      const paths = resolvePaths(deploymentEnv());
-      const res = await setQueuePaused({ url: paths.valkeyUrl, paused: false });
-      if (res.unreachable) {
-        throw new Error(`could not reach the queue at ${paths.valkeyUrl}: ${res.unreachable}`);
+      const set = await killSwitchSet({ paused: false });
+      if (set.refused) throw new Error(set.refused);
+      const { shown, res } = set.results[0];
+      if (res.unreachable && !res.partial) {
+        throw new Error(`could not reach the queue at ${shown}: ${res.unreachable}`);
       }
       if (res.partial) {
         throw new Error(`resumed ${res.partial.done.join(", ")} but FAILED at ${res.partial.failed} — the deployment is half resumed: ${res.partial.error}`);
@@ -1372,26 +1381,36 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
     case "pause":
     case "resume": {
       const paused = sub === "pause";
-      const res = await setQueuePaused({ url: paths.valkeyUrl, paused });
-      if (res.unreachable) {
-        // A HALF switched deployment gets its own message. "Could not reach Valkey" reads as "nothing
-        // happened", and walking away from a fleet with one host stopped and another spending is the one
-        // outcome this switch exists to prevent.
-        notify?.(
-          res.partial
-            ? `${paused ? "paused" : "resumed"} ${res.partial.done.join(", ")} but FAILED at ${res.partial.failed} — the deployment is half ${paused ? "paused" : "resumed"}`
-            : `could not reach Valkey at ${paths.valkeyUrl} — is it running? (docker compose up)`,
-          "error",
-        );
+      // The CLI's kill-switch rule (PR #475's review, round 3): a pause pauses BOTH Valkeys when this process's
+      // VALKEY_URL and the deployment .env's disagree, a resume refuses then, and every URL is shown without userinfo.
+      const set = await killSwitchSet({ paused });
+      if (set.refused) {
+        notify?.(set.refused, "error");
         return;
       }
-      const span = res.blind ? ` (fleet unknown: ${res.blind}, only ${res.queues[0]})` : res.queues.length > 1 ? ` (${res.queues.length} queues)` : "";
-      notify?.(
-        paused
-          ? `paused — worker will stop taking new jobs (jobs still enqueue; durable, survives restart)${span}`
-          : `resumed${span}`,
-        "info",
-      );
+      if (set.disagreement) notify?.(`${set.disagreement}: pausing both`, "warning");
+      for (const { shown, res } of set.results) {
+        const at = set.results.length > 1 ? ` at ${shown}` : "";
+        if (res.unreachable) {
+          // A HALF switched deployment gets its own message. "Could not reach Valkey" reads as "nothing
+          // happened", and walking away from a fleet with one host stopped and another spending is the one
+          // outcome this switch exists to prevent.
+          notify?.(
+            res.partial
+              ? `${paused ? "paused" : "resumed"} ${res.partial.done.join(", ")}${at} but FAILED at ${res.partial.failed}: the deployment is half ${paused ? "paused" : "resumed"}`
+              : `could not reach Valkey at ${shown}: is it running? (docker compose up)`,
+            "error",
+          );
+          continue;
+        }
+        const span = res.blind ? ` (fleet unknown: ${res.blind}, only ${res.queues[0]})` : res.queues.length > 1 ? ` (${res.queues.length} queues)` : "";
+        notify?.(
+          paused
+            ? `paused${at}: worker will stop taking new jobs (jobs still enqueue; durable, survives restart)${span}`
+            : `resumed${at}${span}`,
+          "info",
+        );
+      }
       return;
     }
     case "set": {
