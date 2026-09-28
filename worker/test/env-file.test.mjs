@@ -2064,6 +2064,10 @@ test("#470: a line that names the key other than as a plain KEY= line is refused
 		// A caret in a name is an escape cmd removes on a line delayed expansion touches, and the value's `!` is enough:
 		// `WEBHOOK_SECRE^T=evil!` sets WEBHOOK_SECRET then (COMMUNITY, the phase model), so it is refused whatever the key.
 		["WEBHOOK_SECRET=old\nWEBHOOK_SECRE^T=evil!\n", "line 2 has a ^ before its first =, which cmd removes as an escape on a line delayed expansion touches (one with a !, the value's included), so the .cmd wrapper's set can read that name as another variable's. To fix it, remove the ^ from that line. Nothing was written"],
+		// A line with no = is all name to for /f, and the message says so rather than pointing at an = that is not there.
+		["WEBHOOK_SECRET=old\nWEBHOOK_SECRE^T\n", "line 2 has a ^ in its name (the whole line, since it has no =), which cmd removes as an escape on a line delayed expansion touches (one with a !, the value's included), so the .cmd wrapper's set can read that name as another variable's. To fix it, remove the ^ from that line. Nothing was written"],
+		["WEBHOOK_SECRET=old\nhi!\n", "line 2 has a ! in its name (the whole line, since it has no =), and with delayed expansion on (the registry's DelayedExpansion value) the .cmd wrapper's set can expand that into another variable's name. To fix it, remove the ! from that line. Nothing was written"],
+		["WEBHOOK_SECRET=old\ncaf\u00e9\n", "line 2 has a character outside ASCII in its name (the whole line, since it has no =), and how the .cmd wrapper's set folds the case of such a name (`\u0131` to I, `\u017f` to S) is not documented, so which variable that line sets cannot be confirmed. To fix it, spell the name in ASCII, or remove the line. Nothing was written"],
 		["A^B=1\nWEBHOOK_SECRET=old\n", "line 1 has a ^ before its first =, which cmd removes as an escape on a line delayed expansion touches (one with a !, the value's included), so the .cmd wrapper's set can read that name as another variable's. To fix it, remove the ^ from that line. Nothing was written"],
 		// A name outside ASCII: how set folds its case is not documented, and Unicode folds `ı` to I and `ſ` to S.
 		["WEBHOOK_SECRET=old\nWEBHOOK_\u017fECRET=evil\n", "line 2 has a character outside ASCII before its first =, and how the .cmd wrapper's set folds the case of such a name (`\u0131` to I, `\u017f` to S) is not documented, so which variable that line sets cannot be confirmed. To fix it, spell the name in ASCII, or remove the line. Nothing was written"],
@@ -2182,7 +2186,9 @@ function wrapperVariables(text, kind) {
 	if (kind === "sh") {
 		const code = text.split("\n").filter((l) => !/^[ \t]*#/.test(l)).join("\n");
 		add(new RegExp(`(?:^|[;&|({ \\t])${NAME}=`, "gm"), code);
-		add(new RegExp(`\\$\\{?${NAME}`, "g"), code);
+		add(new RegExp(`\\$\\{?#?${NAME}`, "g"), code);
+		// Inside `$(( ... ))` a bare identifier is a variable too (`$((retries + 1))`), so every name in one is collected.
+		for (const m of code.matchAll(/\$\(\(([^]*?)\)\)/g)) add(new RegExp(NAME, "g"), m[1]);
 		add(new RegExp(`\\b(?:read(?:[ \\t]+-r)?|export|unset|local|readonly|getopts[ \\t]+\\S+|for)[ \\t]+${NAME}`, "g"), code);
 		return found;
 	}
@@ -2207,7 +2213,7 @@ test("#470: WRAPPER_INTERNAL_KEYS is every variable each wrapper assigns or read
 	cmdNames.delete("CD");
 	assert.deepEqual([...cmdNames].sort(), [...WRAPPER_INTERNAL_KEYS.cmd].sort(), "the cmd wrapper's own variables");
 	// The scanner sees every form it claims to, so a later wrapper line in one of them cannot slip past it.
-	for (const [line, name] of [["x=1", "x"], ["read -r y", "y"], [': "${z:=d}"', "z"], ['echo "$w"', "w"], ["echo ${v#a}", "v"], ["export u", "u"], ["a=1; t=2", "t"]]) {
+	for (const [line, name] of [["x=1", "x"], ["read -r y", "y"], [': "${z:=d}"', "z"], ['echo "$w"', "w"], ["echo ${v#a}", "v"], ["export u", "u"], ["a=1; t=2", "t"], [': $((retries + 1)) "${#tag}"', "retries"], [': $((retries + 1)) "${#tag}"', "tag"], ["n=$((a*b))", "b"]]) {
 		assert.ok(wrapperVariables(`${line}\n`, "sh").has(name), `sh: ${line}`);
 	}
 	assert.equal(wrapperVariables("# q=1 $q\n", "sh").size, 0, "an sh comment names nothing");

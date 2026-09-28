@@ -241,9 +241,11 @@ function cmdReading(text, key) {
 		if (body === "" || body[0] === "#") continue;
 		const eq = body.indexOf("=");
 		const name = eq === -1 ? body : body.slice(0, eq);
-		if (name.includes("!")) note(n, "has a ! before its first =, and with delayed expansion on (the registry's DelayedExpansion value) the .cmd wrapper's set can expand that into another variable's name", "remove the ! from that line");
-		if (name.includes("^")) note(n, "has a ^ before its first =, which cmd removes as an escape on a line delayed expansion touches (one with a !, the value's included), so the .cmd wrapper's set can read that name as another variable's", "remove the ^ from that line");
-		if (/[^\x00-\x7f]/u.test(name.replace(/^[ \t\r\ufeff"]+|[ \t\r\ufeff"]+$/g, ""))) note(n, "has a character outside ASCII before its first =, and how the .cmd wrapper's set folds the case of such a name (`ı` to I, `ſ` to S) is not documented, so which variable that line sets cannot be confirmed", "spell the name in ASCII, or remove the line");
+		// Where the name is, said truthfully: a line with no `=` is ALL name to for /f (its %%B is empty).
+		const inName = eq === -1 ? "in its name (the whole line, since it has no =)" : "before its first =";
+		if (name.includes("!")) note(n, `has a ! ${inName}, and with delayed expansion on (the registry's DelayedExpansion value) the .cmd wrapper's set can expand that into another variable's name`, "remove the ! from that line");
+		if (name.includes("^")) note(n, `has a ^ ${inName}, which cmd removes as an escape on a line delayed expansion touches (one with a !, the value's included), so the .cmd wrapper's set can read that name as another variable's`, "remove the ^ from that line");
+		if (/[^\x00-\x7f]/u.test(name.replace(/^[ \t\r\ufeff"]+|[ \t\r\ufeff"]+$/g, ""))) note(n, `has a character outside ASCII ${inName}, and how the .cmd wrapper's set folds the case of such a name (\`ı\` to I, \`ſ\` to S) is not documented, so which variable that line sets cannot be confirmed`, "spell the name in ASCII, or remove the line");
 		if (/^[ \t"]*\//.test(name)) note(n, "starts with /, which the .cmd wrapper's set might read as its /A or /P switch", "remove the / at the start of that line");
 		const internal = envFileWrapperInternal(l, { loader: "cmd" });
 		if (internal !== null) note(n, WRAPPER_INTERNAL_WHAT(internal.name), WRAPPER_INTERNAL_FIX);
