@@ -719,8 +719,8 @@ test("valkeyVolumeOwner and the hand-over plan: another folder's label refuses, 
 	assert.ok((await valkeyVolumeOwner({ ...at, query: q({ code: 0, stdout: "x", stderr: "" }) })).unknown);
 	assert.deepEqual(await valkeyVolumeOwner({ ...at, query: q(vol({ [DEPLOYMENT_LABEL]: "/link/a" })) }), { ours: true, owner: "/link/a" });
 	assert.deepEqual(await valkeyVolumeOwner({ ...at, query: q(vol({ [DEPLOYMENT_LABEL]: "/real/a/deploy" })) }), { ours: false, owner: "/real/a/deploy" }, "exactly the folder");
-	assert.deepEqual(await valkeyVolumeOwner({ ...at, query: q(vol(null)) }), { unlabelled: true });
-	assert.deepEqual(await valkeyVolumeOwner({ ...at, query: q(vol({ [DEPLOYMENT_LABEL]: "" })) }), { unlabelled: true });
+	assert.deepEqual(await valkeyVolumeOwner({ ...at, query: q(vol(null)) }), { unlabelled: true, createdAt: null });
+	assert.deepEqual(await valkeyVolumeOwner({ ...at, query: q(vol({ [DEPLOYMENT_LABEL]: "" })) }), { unlabelled: true, createdAt: null });
 	// The plan: the volume's owner, only where compose's valkey would mount it.
 	const docker = (volume, up = null) => async (cmd, args) => {
 		if (args[0] === "volume") return volume;
@@ -730,7 +730,7 @@ test("valkeyVolumeOwner and the hand-over plan: another folder's label refuses, 
 	const plan = (volume, { override = true, up = null } = {}) => composeHandoverPlan({ dirs: ["/real/a"], port: 6379, override, query: docker(volume, up) });
 	assert.match((await plan(vol({ [DEPLOYMENT_LABEL]: "/real/b" }))).refused, /belongs to the deployment in \/real\/b \(its label\), so this deployment never uses it/);
 	assert.deepEqual(await plan(vol(null)), { handover: false, note: null, adopt: true });
-	assert.deepEqual(await plan(vol(null), { override: false, up: "ours" }), { handover: true, note: null }, "this deployment's own container serves it: no question");
+	assert.deepEqual(await plan(vol(null), { override: false, up: "ours" }), { handover: true, note: null }, "this deployment's own container serves it: no question (and no CreatedAt here, so nothing to record)");
 	assert.deepEqual(await plan(vol({ [DEPLOYMENT_LABEL]: "/real/a" })), { handover: false, note: null });
 	assert.match((await plan({ code: 125, stdout: "", stderr: "down" })).refused, /whose pi-dispatch-valkey-data is could not be read/);
 	assert.deepEqual(await plan(vol({ [DEPLOYMENT_LABEL]: "/real/b" }), { override: false }), { handover: false, note: null }, "not mounted: not asked");
@@ -757,4 +757,38 @@ test("claimValkeyOwner records pi-dispatch:owner once and reads it back: a secon
 	// Nothing answering: an error after the wait, never an owner.
 	const r = await claimValkeyOwner("redis://127.0.0.1:1", "/srv/a", { context, waitMs: 600, sleep: async () => {} });
 	assert.ok(r.error, JSON.stringify(r));
+});
+
+// PR #475's round-cap re-review: the adoption record and the unpublished owner check, as pure pieces.
+test("the adoption record matches exactly its volume, and the owner check runs with no network, no port and no password (#475 round-cap re-review)", async () => {
+	const { OWNER_CHECK_EXEC, ownerCheckAnswer, readVolumeRecord, valkeyOwnerCheckArgs, volumeRecordMatches, volumeRecordText } = await import("../src/valkey-auth.mjs");
+	const vol = { unlabelled: true, createdAt: "2026-09-01T10:00:00Z" };
+	const record = JSON.parse(volumeRecordText(vol));
+	assert.deepEqual(record, { name: VALKEY_VOLUME, createdAt: "2026-09-01T10:00:00Z" });
+	assert.equal(volumeRecordMatches(record, vol), true);
+	assert.equal(volumeRecordMatches(record, { ...vol, createdAt: "2026-09-02T10:00:00Z" }), false, "made again: another volume");
+	assert.equal(volumeRecordMatches(record, { unlabelled: true, createdAt: null }), false, "no CreatedAt from docker: nothing to match");
+	assert.equal(volumeRecordMatches({ ...record, name: "other" }, vol), false);
+	assert.equal(volumeRecordMatches(record, { ours: true, owner: "/x" }), false, "only an unlabelled volume");
+	assert.equal(volumeRecordMatches(null, vol), false);
+	const dir = tempDir("valkey-record-");
+	assert.equal(readVolumeRecord(dir, { existsSync, readFileSync }), null);
+	writeFileSync(join(dir, ".pi-dispatch-valkey-volume.json"), "not json");
+	assert.equal(readVolumeRecord(dir, { existsSync, readFileSync }), null, "unreadable: nothing taken from it");
+	const args = valkeyOwnerCheckArgs("/real/a");
+	assert.equal(args[args.indexOf("--network") + 1], "none");
+	assert.ok(!args.includes("-p") && !args.includes("-e") && !args.join(" ").includes("VALKEY_PASSWORD"));
+	assert.ok(args.includes("pi-dispatch-valkey-data:/data") && args.includes("--appendonly"));
+	assert.deepEqual(OWNER_CHECK_EXEC.slice(-2), ["GET", "pi-dispatch:owner"]);
+	assert.deepEqual(ownerCheckAnswer({ code: 0, stdout: "/real/a\n" }), { owner: "/real/a" });
+	assert.deepEqual(ownerCheckAnswer({ code: 0, stdout: "\n" }), { owner: "" });
+	assert.ok(ownerCheckAnswer({ code: 1, stdout: "(error) LOADING Valkey is loading the dataset in memory\n" }).retry);
+	assert.ok(ownerCheckAnswer({ code: 1, stdout: "Could not connect to Valkey at 127.0.0.1:6379: Connection refused\n" }).retry);
+	assert.ok(ownerCheckAnswer({ code: 0, stdout: "(error) NOAUTH Authentication required.\n" }).error);
+	assert.ok(ownerCheckAnswer({ code: 125, stderr: "Error: no such container\n" }).error);
+	// The hand-over plan: a recorded unlabelled volume needs no adoption; one served by up's own container is to be recorded.
+	const docker = (up) => async (cmd, a) => (a[0] === "volume" ? { code: 0, stdout: JSON.stringify([{ Name: VALKEY_VOLUME, CreatedAt: vol.createdAt, Labels: {} }]), stderr: "" } : a[0] === "ps" ? { code: 0, stdout: up ? "pi-dispatch-valkey\n" : "", stderr: "" } : up ? { code: 0, stdout: JSON.stringify([{ Name: "/pi-dispatch-valkey", Config: { Labels: { [DEPLOYMENT_LABEL]: "/real/a" } } }]), stderr: "" } : { code: 1, stdout: "", stderr: "Error: No such container" });
+	assert.deepEqual(await composeHandoverPlan({ dirs: ["/real/a"], port: 6379, override: true, query: docker(false), record }), { handover: false, note: null });
+	assert.deepEqual(await composeHandoverPlan({ dirs: ["/real/a"], port: 6379, override: true, query: docker(false) }), { handover: false, note: null, adopt: true });
+	assert.deepEqual(await composeHandoverPlan({ dirs: ["/real/a"], port: 6379, override: false, query: docker(true) }), { handover: true, note: null, record: { unlabelled: true, createdAt: vol.createdAt } });
 });

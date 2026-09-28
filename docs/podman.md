@@ -219,7 +219,9 @@ and `pi-dispatch up` was not.
    started makes both refuse, naming it (stop that deployment's Valkey first, or give this folder a Valkey of its own:
    compose without the override keeps its own volume). The volume itself carries the folder that created it, and
    the queue inside records it too (`pi-dispatch:owner`): another folder's is never used, and a volume from before the
-   label is used only after `up` asks (even under `--yes`), since its queue cannot be attributed to a folder.
+   label is used only after `up` asks (even under `--yes`), since its queue cannot be attributed to a folder; `up`
+   then reads whose queue it holds with a Valkey that has no network before publishing one, and records the adoption
+   in `.pi-dispatch-valkey-volume.json` (by the volume's creation time), so it does not ask about that volume again.
    One file for both daemons is not one file for two stacks: it fixes the proxy's container name, the egress
    network's name and Valkey's published port, so one host runs one of these stacks (true on Docker too).
 8. **Run `pi-dispatch up`, then `pi-dispatch doctor --live`.** doctor names the runtime (`local: the daemon is Podman

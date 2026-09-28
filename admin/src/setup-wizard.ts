@@ -45,8 +45,8 @@ import { venuesOf } from "@edgehero/pi-dispatch/backends";
 import { envFileEditCheck, envFileEditRefusal, updateEnvFile } from "@edgehero/pi-dispatch/env-file";
 // The venue keys read exactly as `service install` and `up` read them (issue #430 review round 2, E4): the general
 // reader takes a line inside a quoted value that systemd continues for an assignment, and this one refuses that file.
-import { readStackKeys, readValkeyKeys, valkeyTarget } from "@edgehero/pi-dispatch/podman-stack";
-import { COMPOSE_VALKEY_OVERRIDE, OWNER_MARKER_KEY, VALKEY_HANDOVER_OVERRIDE, VALKEY_PORT_KEY, adoptVolumeQuestion, composeArgs, composeHandoverPlan, composeProjectName, foreignMarkerRefusal, unadoptedVolumeRefusal, valkeyPortEnvDecision } from "@edgehero/pi-dispatch/valkey-auth";
+import { readStackKeys, valkeyTarget } from "@edgehero/pi-dispatch/podman-stack";
+import { COMPOSE_VALKEY_OVERRIDE, OWNER_MARKER_KEY, VALKEY_HANDOVER_OVERRIDE, VALKEY_PASSWORD_KEY, VALKEY_PORT_KEY, composeArgs, composeHandoverPlan, composeProjectName, VALKEY_VOLUME_RECORD, foreignMarkerRefusal, readVolumeRecord, valkeyPortEnvDecision, volumeRecordText } from "@edgehero/pi-dispatch/valkey-auth";
 import { claimValkeyOwner } from "@edgehero/pi-dispatch/connection";
 import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
 // buildTriggerEntry is index.ts's on x run matrix -- the SAME builder the dialogs and the LLM tool use,
@@ -1090,22 +1090,27 @@ async function offerTriggerEdge(
     } catch {
       // Unresolvable: the folder as given.
     }
-    const plan = await composeHandoverPlan({ dirs: [real, dir], port, override: hasOverride, query: (cmd: string, args: string[]) => dockerQueryFn(cmd, args) });
+    const plan = await composeHandoverPlan({ dirs: [real, dir], port, override: hasOverride, query: (cmd: string, args: string[]) => dockerQueryFn(cmd, args), record: readVolumeRecord(dir, fs) });
     if (plan.refused) {
       notify?.(`the receiver container was not started: ${plan.refused}`, "error");
       return;
     }
     if (plan.note) notify?.(plan.note, "warning");
-    // An unlabelled pi-dispatch-valkey-data that no container of this deployment serves (the volume gap): its queue
-    // cannot be attributed, so compose's valkey starts on it only after this question, which nothing answers for the
-    // operator (the wizard never forwards --yes), and the marker then records the adoption.
-    if (plan.adopt && !(await ui.confirm("Adopt pi-dispatch-valkey-data?", adoptVolumeQuestion(real)))) {
-      notify?.(`the receiver container was not started: ${unadoptedVolumeRefusal()}`, "error");
+    // An unlabelled pi-dispatch-valkey-data that no container of this deployment serves and this folder has no record of
+    // (the volume gap): its queue cannot be attributed. The wizard does not adopt it (PR #475's round-cap re-review):
+    // `pi-dispatch up` does, on a question `--yes` does not answer, reads the queue's owner marker with a Valkey that has
+    // no network before any is published, and records the adoption here, after which this step uses the volume.
+    if (plan.adopt) {
+      notify?.(`the receiver container was not started: pi-dispatch-valkey-data has no owner label and this folder has no record of adopting it (this volume holds a queue pi-dispatch cannot attribute to a folder). Run \`node ${cliPath} up\` in ${dir}: it asks whether to adopt it, checks whose queue it holds before starting anything on it, and records the answer; then run /dispatch setup again`, "error");
       return;
     }
     const handover = plan.handover;
     const useOverride = hasOverride || handover;
-    const composeEnv = { ...env, [VALKEY_PORT_KEY]: String(port) };
+    const composeEnv: any = { ...env, [VALKEY_PORT_KEY]: String(port) };
+    // Never a shell's VALKEY_PASSWORD (round-cap re-review, measured: compose prefers the environment over
+    // `--env-file .env`, so an exported one became the Valkey's password): the deployment's comes from `.env`, as `up`
+    // hands docker the deployment's and never the shell's.
+    delete composeEnv[VALKEY_PASSWORD_KEY];
     const base = composeArgs({ project, override: useOverride });
     // `--profile receiver` is what makes the receiver container OPT-IN: the same compose file's plain
     // `up` is Valkey-only, which is what a worker-on-host deployment wants.
@@ -1204,6 +1209,15 @@ async function offerTriggerEdge(
         return;
       }
       await ownerMarker();
+      // The volume up's own container served, unlabelled: recorded here (create-only, 0600), so a later `up` in this
+      // folder takes it as this deployment's without asking (round-cap re-review).
+      if (plan.record) {
+        try {
+          fs.writeFileSync(join(dir, VALKEY_VOLUME_RECORD), volumeRecordText(plan.record), { mode: 0o600, flag: "wx" });
+        } catch (err: any) {
+          if (err?.code !== "EEXIST") notify?.(`the volume could not be recorded in ${join(dir, VALKEY_VOLUME_RECORD)} (${err?.message ?? err}); a later \`up\` asks about it`, "warning");
+        }
+      }
       return;
     }
     if (!(await step(args, shown, composeEnv))) {

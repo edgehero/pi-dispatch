@@ -1570,7 +1570,7 @@ function fakeDocker({ dir = null, up = null, port = 6379, volume = null, records
       // folder, or "absent".
       if (volumeLabel === "absent") return { code: 1, stdout: "", stderr: "Error: no such volume\n" };
       const label = volumeLabel === "mine" ? (dir ? realpathSync(dir) : null) : volumeLabel;
-      return { code: 0, stdout: JSON.stringify([{ Name: "pi-dispatch-valkey-data", Labels: label ? { "com.pi-dispatch.deployment": label } : {} }]), stderr: "" };
+      return { code: 0, stdout: JSON.stringify([{ Name: "pi-dispatch-valkey-data", CreatedAt: "2026-09-01T10:00:00Z", Labels: label ? { "com.pi-dispatch.deployment": label } : {} }]), stderr: "" };
     }
     if (args[0] === "ps") return { code: 0, stdout: (volume ?? (up ? ["pi-dispatch-valkey"] : [])).map((n) => `${n}\n`).join(""), stderr: "" };
     const name = args.at(-1);
@@ -1730,7 +1730,7 @@ test("wizard: the compose answer writes PI_VALKEY_PORT into .env when VALKEY_URL
 // PR #475's review, the volume gap: the hand-over's volume keeps the rule `up` has. Another folder's label refuses; an
 // unlabelled volume no container of this deployment serves is adopted only after its own question; every compose start
 // on it checks the queue's pi-dispatch:owner marker, and another folder's stops compose's valkey again.
-test("wizard: pi-dispatch-valkey-data is used only when it is this folder's, an unlabelled one only after its own question, and the owner marker is checked (#475 volume gap)", async () => {
+test("wizard: pi-dispatch-valkey-data is used only when it is this folder's, an unlabelled one only once `up` adopted and recorded it, and the owner marker is checked (#475 volume gap, round-cap re-review)", async () => {
   const repo = tempDir("admin-setup-repo-");
   const withOverride = () => {
     const d = composeFolder();
@@ -1745,17 +1745,19 @@ test("wizard: pi-dispatch-valkey-data is used only when it is this folder's, an 
   await mod.runSetupWizard({}, tuiCtx(u1.ui, repo), u1.ui.notify, r1.deps);
   assert.equal(r1.attached.length, 0);
   assert.ok(u1.notes.some((n) => n.t === "error" && /pi-dispatch-valkey-data belongs to the deployment in \/srv\/a \(its label\), so this deployment never uses it/.test(n.m)));
-  // Unlabelled, declined: its own question names the risk; nothing run.
+  // Unlabelled, and this folder has no record of adopting it: the wizard does not adopt (round-cap re-review); it names
+  // `up`, which asks, reads the marker with an unpublished Valkey first, and records the answer. Nothing run.
   const d2 = withOverride();
-  const u2 = wizardUi(edgeAnswers(d2, EDGE_COMPOSE, [false]));
+  const u2 = wizardUi(edgeAnswers(d2, EDGE_COMPOSE, [true]));
   const r2 = recorder({ dockerQueryFn: fakeDocker({ dir: d2, volumeLabel: null }) });
   await mod.runSetupWizard({}, tuiCtx(u2.ui, repo), u2.ui.notify, r2.deps);
   assert.equal(r2.attached.length, 0);
-  assert.match(u2.seen.confirm.at(-1).message, /this volume holds a queue pi-dispatch cannot attribute to a folder/);
-  assert.ok(u2.notes.some((n) => n.t === "error" && /has no owner label and was not adopted/.test(n.m)));
-  // Unlabelled, adopted, and the marker is another folder's: compose's valkey is stopped again at once.
+  assert.ok(!u2.seen.confirm.some((c) => /Adopt/.test(c.title ?? "")), "no adoption question here");
+  assert.ok(u2.notes.some((n) => n.t === "error" && /this volume holds a queue pi-dispatch cannot attribute to a folder\)\. Run `node .* up` in .*: it asks whether to adopt it, checks whose queue it holds before starting anything on it, and records the answer/.test(n.m)), JSON.stringify(u2.notes));
+  // `up` adopted it and recorded its CreatedAt: the step uses it, and a marker naming another folder still stops it.
   const d3 = withOverride();
-  const u3 = wizardUi(edgeAnswers(d3, EDGE_COMPOSE, [true, true]));
+  writeFileSync(join(d3, ".pi-dispatch-valkey-volume.json"), '{"name":"pi-dispatch-valkey-data","createdAt":"2026-09-01T10:00:00Z"}\n');
+  const u3 = wizardUi(edgeAnswers(d3, EDGE_COMPOSE, [true]));
   const r3 = recorder({ dockerQueryFn: fakeDocker({ dir: d3, volumeLabel: null }), claimOwnerFn: async () => ({ owner: "/srv/a", claimed: false }) });
   await mod.runSetupWizard({}, tuiCtx(u3.ui, repo), u3.ui.notify, r3.deps);
   assert.deepEqual(r3.attached.map((a) => a.args.slice(-2).join(" ")), ["up -d", "stop valkey"]);
@@ -1776,4 +1778,23 @@ test("wizard: pi-dispatch-valkey-data is used only when it is this folder's, an 
   await mod.runSetupWizard({}, tuiCtx(u5.ui, repo), u5.ui.notify, r5.deps);
   assert.deepEqual(r5.attached.map((a) => a.args.at(-1)), ["pull", "pi-dispatch-valkey", "pi-dispatch-valkey", "-d"]);
   assert.ok(!u5.seen.confirm.some((c) => /cannot attribute to a folder/.test(c.message)), "no adoption question");
+  // ...and that volume, attributed by up's own container, is recorded here, 0600, so a later `up` needs no question.
+  assert.equal(readFileSync(join(d5, ".pi-dispatch-valkey-volume.json"), "utf8"), '{"name":"pi-dispatch-valkey-data","createdAt":"2026-09-01T10:00:00Z"}\n');
+  assert.equal(realFs.statSync(join(d5, ".pi-dispatch-valkey-volume.json")).mode & 0o777, 0o600);
+});
+
+// PR #475's round-cap re-review (measured: compose prefers the environment over `--env-file .env`, so a VALKEY_PASSWORD
+// exported in pi's shell became the Valkey's password): compose's steps get no VALKEY_PASSWORD from the environment.
+test("wizard: compose's steps are never handed the environment's VALKEY_PASSWORD, only PI_VALKEY_PORT (#475 round-cap re-review)", async () => {
+  const repo = tempDir("admin-setup-repo-");
+  const dir = composeFolder();
+  const ui = wizardUi(edgeAnswers(dir, EDGE_COMPOSE, [true]));
+  const rec = recorder({ dockerQueryFn: fakeDocker({ dir, up: "ours" }), env: { ...wizardDeps().deps.env, VALKEY_PASSWORD: "shell0exported0password0" } });
+  await mod.runSetupWizard({}, tuiCtx(ui.ui, repo), ui.ui.notify, rec.deps);
+  const compose = rec.attached.filter((a) => a.args[0] === "compose");
+  assert.ok(compose.length >= 2, "the pull and the up");
+  for (const a of compose) {
+    assert.equal(a.env.VALKEY_PASSWORD, undefined, `${a.args.at(-1)}: compose reads the deployment's from --env-file .env`);
+    assert.equal(a.env.PI_VALKEY_PORT, "6379");
+  }
 });

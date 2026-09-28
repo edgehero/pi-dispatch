@@ -42,7 +42,7 @@ import { venuesOf } from "./backends.mjs";
 import { logsDirPath, settingsFilePath } from "./config.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed as egressArmedFn, egressProxyName } from "./egress.mjs";
 import { envKeyIsBlank, envValueShown, readEnvAssignments, updateEnvFile } from "./env-file.mjs";
-import { COMPOSE_VALKEY_OVERRIDE, OWNER_MARKER_KEY, VALKEY_PASSWORD_KEY, VALKEY_PORT_KEY, adoptVolumeQuestion, composeArgs, composeProjectName, foreignContainerSentence, foreignMarkerRefusal, foreignVolumeLabelRefusal, foreignVolumeRefusal, foreignVolumeUsers, isLoopbackHost, newValkeyPassword, unadoptedVolumeRefusal, valkeyContainerOwner, valkeyDockerRunArgs, valkeyPasswordDecision, valkeyPortEnvDecision, valkeyVolumeCreateArgs, valkeyVolumeOwner } from "./valkey-auth.mjs";
+import { COMPOSE_VALKEY_OVERRIDE, OWNER_MARKER_KEY, VALKEY_PASSWORD_KEY, VALKEY_PORT_KEY, OWNER_CHECK_CONTAINER, OWNER_CHECK_EXEC, VALKEY_VOLUME_RECORD, adoptVolumeQuestion, composeArgs, ownerCheckAnswer, readVolumeRecord, valkeyOwnerCheckArgs, volumeRecordMatches, volumeRecordText, composeProjectName, foreignContainerSentence, foreignMarkerRefusal, foreignVolumeLabelRefusal, foreignVolumeRefusal, foreignVolumeUsers, isLoopbackHost, newValkeyPassword, unadoptedVolumeRefusal, valkeyContainerOwner, valkeyDockerRunArgs, valkeyPasswordDecision, valkeyPortEnvDecision, valkeyVolumeCreateArgs, valkeyVolumeOwner } from "./valkey-auth.mjs";
 import { deploymentValkeyEnv, deploymentVenueEnv } from "./deployment-venue.mjs";
 import { EGRESS_PROXY_IMAGE, PROXY_STATE_FORMAT, jobNetworksOf, parseProxyState, shippedProxyDrift } from "./egress-proxy-state.mjs";
 import { DEFAULT_VALKEY_PORT, NETNS_KEEPER, NETNS_KEEPER_FORMAT, QUADLET_FILES, STACK_KEYS, applyStack, decideValkey, describeRollBack, passwdNameFrom, readSubuidRanges, rollBackWrites, valkeySharedOn, VALKEY_SHARED_KEY, readValkeyKeys, valkeyTarget, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal } from "./podman-stack.mjs";
@@ -154,6 +154,8 @@ export async function runUp(argv = [], deps = {}) {
 		cwd = process.cwd(),
 		// Injected so tests can assert the secret never reaches output without fishing it back out of
 		// the written file. 32 bytes hex, matching doctor's `openssl rand -hex 32` fix line.
+		// The owner check's wait while its Valkey loads the queue (PR #475's round-cap re-review); a seam for its test.
+		sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
 		randomHex = () => randomBytes(32).toString("hex"),
 		// Issue #468: the Valkey password, made the same way (valkey-auth.mjs), injected so a test can hold it never
 		// reaches the output.
@@ -516,14 +518,61 @@ export async function runUp(argv = [], deps = {}) {
 		};
 		if (v.unknown) return refuse(`whose pi-dispatch-valkey-data is could not be read (${v.unknown}), so no Valkey is started on it`);
 		if (v.ours === false) return refuse(foreignVolumeLabelRefusal(v.owner));
+		// Adopted before (PR #475's round-cap re-review): the record in this folder names this very volume by its CreatedAt.
+		if (v.unlabelled && volumeRecordMatches(readVolumeRecord(cwd, fs), v)) {
+			volumeState = "recorded";
+			return true;
+		}
 		if (v.unlabelled && !servedByOurs) {
 			out("\n");
 			if (!/^y(es)?$/i.test(String((await prompt(adoptVolumeQuestion(deployment))) ?? "").trim())) return refuse(unadoptedVolumeRefusal());
+			// Whose queue it holds, read BEFORE any Valkey on it is published (round-cap re-review: a wrong `y` ran this
+			// deployment's Valkey on another's data for a second): a Valkey with no network loads it, and its marker is read
+			// through `docker exec`.
+			const check = await ownerPreCheck();
+			if (check.error) return refuse(`whose queue pi-dispatch-valkey-data holds could not be read before starting (${check.error}), so no Valkey is started on it`);
+			if (check.owner && !dirs.includes(check.owner)) return refuse(`${foreignMarkerRefusal(check.owner)}: read by a Valkey with no network, so no Valkey was published on it`);
+			recordVolume(v);
 			volumeState = "adopted";
 			return true;
 		}
+		// Served by this deployment's own container now (the upgrade restart), which attributes it: recorded too.
+		if (v.unlabelled && servedByOurs) recordVolume(v);
 		volumeState = v.absent ? "absent" : v.unlabelled ? "served" : "ours";
 		return true;
+	};
+	// The owner check itself: `valkeyOwnerCheckArgs` (no network, no port, no password), the marker read through
+	// `docker exec`, retried while the queue loads, and the container stopped and removed whatever it answered.
+	const ownerPreCheck = async () => {
+		out(`checking whose queue it holds first, with a Valkey that has no network:\n  docker ${valkeyOwnerCheckArgs(deployment).join(" ")}\n  docker ${OWNER_CHECK_EXEC.join(" ")}\n`);
+		if ((await runStreamed(spawn, "docker", valkeyOwnerCheckArgs(deployment), out)) !== 0) return { error: `its docker run failed (a leftover ${OWNER_CHECK_CONTAINER}? \`docker rm -f ${OWNER_CHECK_CONTAINER}\`)` };
+		try {
+			for (let i = 0; i < 40; i++) {
+				const a = ownerCheckAnswer(await runCmdQuery(spawn, "docker", OWNER_CHECK_EXEC));
+				if (!a.retry) return a;
+				await sleep(500);
+			}
+			return { error: "its Valkey did not answer within 20 s" };
+		} finally {
+			await runStreamed(spawn, "docker", ["stop", OWNER_CHECK_CONTAINER], out);
+			await runStreamed(spawn, "docker", ["rm", OWNER_CHECK_CONTAINER], out);
+		}
+	};
+	// The adoption's record (round-cap re-review): create-only, 0600, never over a different one.
+	const recordVolume = (v) => {
+		const path = join(cwd, VALKEY_VOLUME_RECORD);
+		// Nothing to record where docker gave no CreatedAt: the next `up` asks again.
+		if (typeof v.createdAt !== "string" || v.createdAt === "") return;
+		try {
+			if (fs.existsSync(path)) {
+				if (!volumeRecordMatches(readVolumeRecord(cwd, fs), v)) out(`⚠ ${path} names another pi-dispatch-valkey-data and is left as it is: this adoption is not recorded, so the next \`up\` asks again\n`);
+				return;
+			}
+			fs.writeFileSync(path, volumeRecordText(v), { mode: 0o600, flag: "wx" });
+			out(`✓ recorded the adopted volume (its CreatedAt) in ${path}, so a later \`up\` uses it without asking\n`);
+		} catch (err) {
+			out(`⚠ the adoption could not be recorded in ${path} (${err?.message ?? err}), so the next \`up\` asks again\n`);
+		}
 	};
 	// After every start on the volume: the queue's own `pi-dispatch:owner`, recorded where it is missing and checked where
 	// it is not. Another folder's stops what this pass just started, at once (`stop`), and fails up.

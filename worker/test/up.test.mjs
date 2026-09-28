@@ -42,7 +42,9 @@ function fakeSpawn(plan, calls = [], defaults = {}) {
 				handlers.error?.(new Error(`spawn ${cmd} ENOENT`));
 				return;
 			}
-			const { code, output, stderr } = typeof outcome === "object" && outcome !== null ? outcome : { code: outcome, output: "" };
+			// A FUNCTION outcome answers per call (the owner check's exec that first says LOADING).
+			const resolved = typeof outcome === "function" ? outcome(cmd, args) : outcome;
+			const { code, output, stderr } = typeof resolved === "object" && resolved !== null ? resolved : { code: resolved, output: "" };
 			if (output) child.stdout.handlers.data?.(output);
 			if (stderr) child.stderr.handlers.data?.(stderr);
 			handlers.close?.(code);
@@ -78,6 +80,8 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 	if (!planned("docker ps -a")) dockerDefaults["docker ps -a"] = { code: 0, output: "" };
 	// The volume gap (PR #475's review): no pi-dispatch-valkey-data yet, unless a test plans its own inspect answer.
 	if (!Object.keys(plan).some((k) => k.startsWith("docker volume inspect"))) dockerDefaults["docker volume inspect"] = { code: 1, stderr: "Error: no such volume\n" };
+	// The owner check before an adopted volume's Valkey is published (round-cap re-review): no marker, unless a test says.
+	if (!Object.keys(plan).some((k) => k.startsWith("docker exec"))) dockerDefaults["docker exec"] = { code: 0, output: "\n" };
 	const calls = [];
 	const promptCalls = [];
 	const initCalls = [];
@@ -1868,11 +1872,12 @@ test("up on docker never starts a Valkey on pi-dispatch-valkey-data beside anoth
 // pi-dispatch-valkey-data, and B's `up` started on A's queue). The volume carries its creator's label; another folder's
 // is never used; an unlabelled one only after a question --yes does not answer; and every start checks the queue's own
 // pi-dispatch:owner marker, recording it where it is missing.
-const volumeRecord = (label) => ({ code: 0, output: JSON.stringify([{ Name: "pi-dispatch-valkey-data", Labels: label ? { "com.pi-dispatch.deployment": label } : {} }]) });
+const volumeRecord = (label, createdAt = "2026-09-01T10:00:00Z") => ({ code: 0, output: JSON.stringify([{ Name: "pi-dispatch-valkey-data", CreatedAt: createdAt, Labels: label ? { "com.pi-dispatch.deployment": label } : {} }]) });
 test("up on docker uses pi-dispatch-valkey-data only when it is this folder's: another's label refuses, an unlabelled one is asked about even under --yes, and the owner marker is checked on every start (#475 volume gap)", async () => {
 	const files = { "/deploy/.env": `VALKEY_URL=redis://127.0.0.1:16496\nVALKEY_PASSWORD=${PASSWORD}\n` };
 	const base = { "docker version": 0, "docker image inspect": 0, "docker volume create": 0, "docker run": 0, "docker stop": 0, "docker rm": 0 };
-	const acts = (h) => h.calls.filter((c) => c.cmd === "docker" && (["run", "stop", "rm"].includes(c.args[0]) || (c.args[0] === "volume" && c.args[1] === "create"))).map((c) => c.args[0] === "volume" ? "create" : c.args[0]);
+	// The owner check's own container (round-cap re-review) is not one of these acts: its test is below.
+	const acts = (h) => h.calls.filter((c) => c.cmd === "docker" && !c.args.includes("pi-dispatch-valkey-ownercheck") && (["run", "stop", "rm"].includes(c.args[0]) || (c.args[0] === "volume" && c.args[1] === "create"))).map((c) => c.args[0] === "volume" ? "create" : c.args[0]);
 	// The gap: the volume is A's (its label), nothing mounts it: refused, nothing created or run, up fails.
 	const theirs = harness({ plan: { ...base, "docker volume inspect": volumeRecord("/srv/a") }, listening: false, argv: ["--yes"], files });
 	assert.equal(await theirs.run(), 1);
@@ -1921,7 +1926,7 @@ test("up on docker uses pi-dispatch-valkey-data only when it is this folder's: a
 test("up's other starts on the volume keep the rule: compose's valkey in a handed-over folder asks about an unlabelled volume, the upgrade restart of this deployment's own container does not, and both check the marker (#475 volume gap)", async () => {
 	const files = { "/deploy/.env": `VALKEY_URL=redis://127.0.0.1:16495\nVALKEY_PASSWORD=${PASSWORD}\n`, "/deploy/deploy/docker-compose.valkey.yml": "# override\n" };
 	const composeUp = (h) => h.calls.filter((c) => c.args[0] === "compose").map((c) => c.args.slice(-2).join(" "));
-	const unl = { "docker version": 0, "docker image inspect": 0, "docker compose": 0, "docker volume inspect": volumeRecord(null) };
+	const unl = { "docker version": 0, "docker image inspect": 0, "docker compose": 0, "docker run": 0, "docker stop": 0, "docker rm": 0, "docker volume inspect": volumeRecord(null) };
 	const no = harness({ plan: unl, listening: false, argv: ["--yes"], files });
 	assert.equal(await no.run(), 1);
 	assert.deepEqual(composeUp(no), [], "not adopted: compose's valkey not started");
@@ -2001,4 +2006,67 @@ test("up on docker in a handed-over folder starts compose's valkey (-p, the over
 	const plain = harness({ plan: { "docker version": 0, "docker image inspect": 0 }, listening: false, answers: [""], files: { "/deploy/.env": `VALKEY_PASSWORD=${PASSWORD}\n` } });
 	await plain.run();
 	assert.match(plain.text(), /skipped: start it later with `docker compose --env-file \.env -f deploy\/docker-compose\.yml up -d` \(in a folder \/dispatch setup laid out, with -p deploy after `compose`\)/);
+});
+
+// PR #475's round-cap re-review, two closes. (1) A wrong `y` ran this deployment's Valkey on another's data, published,
+// for about a second before the marker was read: the marker is now read FIRST, by a Valkey with no network and no port,
+// through `docker exec`. (2) An adopted legacy volume stayed unlabelled, so every later `up` asked again and `--yes`
+// refused: the adoption is recorded in the folder by the volume's CreatedAt, and that very volume is then this
+// deployment's without asking.
+test("up adopting an unlabelled volume reads its owner marker with an unpublished Valkey BEFORE any Valkey on it is published (#475 round-cap re-review)", async () => {
+	const files = { "/deploy/.env": `VALKEY_URL=redis://127.0.0.1:16496\nVALKEY_PASSWORD=${PASSWORD}\n` };
+	const base = { "docker version": 0, "docker image inspect": 0, "docker run": 0, "docker stop": 0, "docker rm": 0, "docker volume inspect": volumeRecord(null) };
+	const publishes = (c) => c.cmd === "docker" && c.args[0] === "run" && c.args.includes("-p");
+	const ok = harness({ plan: base, listening: false, argv: ["--yes"], answers: ["y"], files });
+	assert.equal(await ok.run(), 0);
+	const seq = ok.calls.filter((c) => c.cmd === "docker" && ["run", "exec", "stop", "rm"].includes(c.args[0])).map((c) => (publishes(c) ? "run published" : c.args[0] === "run" ? "run check" : `${c.args[0]} ${c.args[1]}`));
+	assert.deepEqual(seq, ["run check", "exec pi-dispatch-valkey-ownercheck", "stop pi-dispatch-valkey-ownercheck", "rm pi-dispatch-valkey-ownercheck", "run published"], "the marker read, the check gone, THEN the published one");
+	const check = ok.calls.find((c) => c.args[0] === "run" && c.args.includes("pi-dispatch-valkey-ownercheck"));
+	assert.ok(check.args.includes("--network") && check.args[check.args.indexOf("--network") + 1] === "none" && !check.args.includes("-p"), "no network, no published port");
+	assert.ok(!check.args.join(" ").includes(PASSWORD) && !check.args.includes("VALKEY_PASSWORD"), "and no password: nothing outside it can reach it");
+	assert.deepEqual(ok.calls.find((c) => c.args[0] === "exec").args, ["exec", "pi-dispatch-valkey-ownercheck", "valkey-cli", "GET", "pi-dispatch:owner"]);
+	// Another folder's marker: refused, and no Valkey on that data was ever published.
+	const theirs = harness({ plan: { ...base, "docker exec": { code: 0, output: "/srv/a\n" } }, listening: false, argv: ["--yes"], answers: ["y"], files });
+	assert.equal(await theirs.run(), 1);
+	assert.ok(!theirs.calls.some(publishes), "never published");
+	assert.deepEqual(theirs.calls.filter((c) => ["stop", "rm"].includes(c.args[0])).map((c) => c.args.join(" ")), ["stop pi-dispatch-valkey-ownercheck", "rm pi-dispatch-valkey-ownercheck"], "the check stopped and removed");
+	assert.match(theirs.text(), /✗ the queue on pi-dispatch-valkey-data is the deployment's in \/srv\/a \(pi-dispatch:owner inside it\), not this one's: read by a Valkey with no network, so no Valkey was published on it/);
+	assert.ok(!theirs.store.has("/deploy/.pi-dispatch-valkey-volume.json"), "nothing recorded");
+	// Still loading: asked again after a wait, then answered.
+	let n = 0;
+	const slept = [];
+	const loading = harness({ plan: { ...base, "docker exec": () => (n++ === 0 ? { code: 1, output: "(error) LOADING Valkey is loading the dataset in memory\n" } : { code: 0, output: "/deploy\n" }) }, listening: false, argv: ["--yes"], answers: ["y"], files, extra: { sleep: async (ms) => slept.push(ms) } });
+	assert.equal(await loading.run(), 0);
+	assert.deepEqual(slept, [500]);
+	// docker not answering the exec: refused, never published.
+	const dark = harness({ plan: { ...base, "docker exec": { code: 125, stderr: "Error: no such container\n" } }, listening: false, argv: ["--yes"], answers: ["y"], files });
+	assert.equal(await dark.run(), 1);
+	assert.ok(!dark.calls.some(publishes));
+	assert.match(dark.text(), /whose queue pi-dispatch-valkey-data holds could not be read before starting/);
+});
+
+test("up records an adopted volume by its CreatedAt, and that very volume is this deployment's without asking; a different one is asked about again (#475 round-cap re-review)", async () => {
+	const files = { "/deploy/.env": `VALKEY_URL=redis://127.0.0.1:16496\nVALKEY_PASSWORD=${PASSWORD}\n` };
+	const base = { "docker version": 0, "docker image inspect": 0, "docker run": 0, "docker stop": 0, "docker rm": 0, "docker volume inspect": volumeRecord(null, "2026-09-01T10:00:00Z") };
+	const first = harness({ plan: base, listening: false, argv: ["--yes"], answers: ["y"], files });
+	assert.equal(await first.run(), 0);
+	assert.equal(first.store.get("/deploy/.pi-dispatch-valkey-volume.json"), '{"name":"pi-dispatch-valkey-data","createdAt":"2026-09-01T10:00:00Z"}\n');
+	// Later, with --yes and nobody to answer: the recorded volume is used, no question, no owner check.
+	const later = harness({ plan: base, listening: false, argv: ["--yes"], files: { ...files, "/deploy/.pi-dispatch-valkey-volume.json": first.store.get("/deploy/.pi-dispatch-valkey-volume.json") } });
+	assert.equal(await later.run(), 0);
+	assert.equal(later.promptCalls.length, 0);
+	assert.ok(!later.calls.some((c) => c.args.includes("pi-dispatch-valkey-ownercheck")));
+	assert.ok(later.calls.some((c) => c.args[0] === "run" && c.args.includes("-p")));
+	// The volume made again (another CreatedAt): asked again, and --yes alone refuses; the record is never rewritten.
+	const again = harness({ plan: { ...base, "docker volume inspect": volumeRecord(null, "2026-09-20T08:00:00Z") }, listening: false, argv: ["--yes"], files: { ...files, "/deploy/.pi-dispatch-valkey-volume.json": first.store.get("/deploy/.pi-dispatch-valkey-volume.json") } });
+	assert.equal(await again.run(), 1);
+	assert.equal(again.promptCalls.length, 1);
+	const yes = harness({ plan: { ...base, "docker volume inspect": volumeRecord(null, "2026-09-20T08:00:00Z") }, listening: false, argv: ["--yes"], answers: ["y"], files: { ...files, "/deploy/.pi-dispatch-valkey-volume.json": first.store.get("/deploy/.pi-dispatch-valkey-volume.json") } });
+	assert.equal(await yes.run(), 0);
+	assert.match(yes.store.get("/deploy/.pi-dispatch-valkey-volume.json"), /2026-09-01T10:00:00Z/, "never over a different record");
+	assert.match(yes.text(), /names another pi-dispatch-valkey-data and is left as it is: this adoption is not recorded/);
+	// A labelled volume is never recorded (its label says it).
+	const labelled = harness({ plan: { ...base, "docker volume inspect": volumeRecord("/deploy") }, listening: false, argv: ["--yes"], files });
+	await labelled.run();
+	assert.ok(!labelled.store.has("/deploy/.pi-dispatch-valkey-volume.json"));
 });

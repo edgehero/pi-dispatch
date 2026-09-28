@@ -382,7 +382,7 @@ export function valkeyPortConflict(assigned, port, envPath = ".env") {
  *   - docker not answering is a refusal, never a guess.
  * The started Valkey's `pi-dispatch:owner` marker is the caller's to check (`claimValkeyOwner`, connection.mjs).
  */
-export async function composeHandoverPlan({ dirs, port, override, query }) {
+export async function composeHandoverPlan({ dirs, port, override, query, record = null }) {
 	const who = await valkeyContainerOwner("pi-dispatch-valkey", { dirs, port, query });
 	if (who.unknown) return { refused: `whether pi-dispatch-valkey is this deployment's could not be read (${who.unknown}), so nothing is stopped or started` };
 	const handover = who.ours === true;
@@ -395,7 +395,9 @@ export async function composeHandoverPlan({ dirs, port, override, query }) {
 		const volume = await valkeyVolumeOwner({ dirs, query });
 		if (volume.unknown) return { refused: `whose ${VALKEY_VOLUME} is could not be read (${volume.unknown}), so nothing is stopped or started` };
 		if (volume.ours === false) return { refused: foreignVolumeLabelRefusal(volume.owner) };
-		if (volume.unlabelled && !handover) return { handover, note, adopt: true };
+		if (volume.unlabelled && !handover && !volumeRecordMatches(record, volume)) return { handover, note, adopt: true };
+		// An unlabelled volume this deployment's own container serves: the caller records it (`volumeRecordText`).
+		if (volume.unlabelled && handover && typeof volume.createdAt === "string" && volume.createdAt !== "" && !volumeRecordMatches(record, volume)) return { handover, note, record: volume };
 	}
 	return { handover, note };
 }
@@ -427,7 +429,7 @@ export async function valkeyVolumeOwner({ dirs, query }) {
 		return { unknown: `docker volume inspect ${VALKEY_VOLUME} printed no record` };
 	}
 	const label = info?.Labels?.[DEPLOYMENT_LABEL];
-	if (typeof label !== "string" || label === "") return { unlabelled: true };
+	if (typeof label !== "string" || label === "") return { unlabelled: true, createdAt: typeof info?.CreatedAt === "string" ? info.CreatedAt : null };
 	return { ours: dirs.filter(Boolean).includes(label), owner: label };
 }
 
@@ -449,4 +451,63 @@ export function unadoptedVolumeRefusal() {
 /** The refusal for a Valkey whose owner marker names another folder. */
 export function foreignMarkerRefusal(owner) {
 	return `the queue on ${VALKEY_VOLUME} is the deployment's in ${owner} (${OWNER_MARKER_KEY} inside it), not this one's`;
+}
+
+/**
+ * The record of an adopted, unlabelled `pi-dispatch-valkey-data` (PR #475's round-cap re-review): a volume label cannot
+ * be added after creation, so an adopted legacy volume stayed unlabelled and every later `up` asked again, and `--yes`
+ * refused. On adoption `up` writes the volume's identity, its name and `CreatedAt` from `docker volume inspect`, to this
+ * file in the deployment folder (0600, create-only, never over a different record), and an unlabelled volume whose
+ * `CreatedAt` matches it is this deployment's without asking. A volume removed and made again has a new `CreatedAt`,
+ * so it is asked about again. Not a secret, and not in `.env`, which the service loads.
+ */
+export const VALKEY_VOLUME_RECORD = ".pi-dispatch-valkey-volume.json";
+
+/** The record's text for a volume `valkeyVolumeOwner` described. */
+export function volumeRecordText(volume) {
+	return `${JSON.stringify({ name: VALKEY_VOLUME, createdAt: volume.createdAt })}\n`;
+}
+
+/** The record in `dir`, parsed, or null (absent or unreadable: then nothing is taken from it). */
+export function readVolumeRecord(dir, fs) {
+	try {
+		const path = join(dir, VALKEY_VOLUME_RECORD);
+		if (!fs.existsSync(path)) return null;
+		const r = JSON.parse(String(fs.readFileSync(path, "utf8")));
+		return r && typeof r === "object" ? r : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Whether `record` names exactly this unlabelled volume (its name, and a `CreatedAt` docker gave). */
+export function volumeRecordMatches(record, volume) {
+	return Boolean(record && volume?.unlabelled && typeof volume.createdAt === "string" && volume.createdAt !== "" && record.name === VALKEY_VOLUME && record.createdAt === volume.createdAt);
+}
+
+/** The container that reads an unlabelled volume's `pi-dispatch:owner` before any Valkey on it is published. */
+export const OWNER_CHECK_CONTAINER = "pi-dispatch-valkey-ownercheck";
+
+/**
+ * The owner check's Valkey (PR #475's round-cap re-review): the volume's queue loaded by a Valkey with NO network at all
+ * (`--network none`, no published port) and no password (nothing outside the container can reach it), so its
+ * `pi-dispatch:owner` is read through `docker exec` before a Valkey anyone can reach runs on another deployment's data.
+ * AOF on, as always, so it loads the queue as the real one will; it is stopped (SIGTERM), never killed.
+ */
+export function valkeyOwnerCheckArgs(deployment) {
+	return ["run", "-d", "--name", OWNER_CHECK_CONTAINER, "--label", `${DEPLOYMENT_LABEL}=${deployment}`, "--network", "none", "-v", `${VALKEY_VOLUME}:/data`, "valkey/valkey:8", "valkey-server", "--appendonly", "yes"];
+}
+
+/** `docker exec` reading the marker inside the owner check's Valkey. */
+export const OWNER_CHECK_EXEC = ["exec", OWNER_CHECK_CONTAINER, "valkey-cli", "GET", OWNER_MARKER_KEY];
+
+/**
+ * What one `docker exec` of `OWNER_CHECK_EXEC` answered: `{ owner }` (a folder, or "" for none) or `{ retry }` while
+ * Valkey still loads or is not yet listening, or `{ error }`.
+ */
+export function ownerCheckAnswer(res) {
+	const text = `${res?.stdout ?? ""}${res?.stderr ?? ""}`.trim();
+	if (/LOADING|Could not connect|Connection refused|not running|is restarting/i.test(text)) return { retry: text || `exit ${res?.code}` };
+	if (res?.code !== 0 || /^\(error\)|^ERR\b|NOAUTH|WRONGPASS/.test(text)) return { error: text || `exit ${res?.code}` };
+	return { owner: String(res.stdout ?? "").trim() };
 }
