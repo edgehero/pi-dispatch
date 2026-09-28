@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { imageRefProblem } from "./image-ref.mjs";
 
 /**
  * Which image a job runs in, and whether it is on this host.
@@ -7,9 +8,9 @@ import { spawn } from "node:child_process";
  * `docker run` is handed. Both sides resolve through `resolveJobImage`, so there is one answer by
  * construction rather than by two call sites happening to match.
  *
- * This module imports nothing but `node:child_process` -- deliberately. `run-container.mjs` pulls in
- * `env-allowlist.mjs` and therefore `@earendil-works/pi-ai`, which is why its tests sit behind a
- * node-version skip guard. This is a money gate: it decides whether a budget slot is spent, so its tests
+ * This module imports nothing but `node:child_process` and the import-free `image-ref.mjs` -- deliberately.
+ * `run-container.mjs` pulls in `env-allowlist.mjs` and therefore `@earendil-works/pi-ai`, which is why its tests sit
+ * behind a node-version skip guard. This is a money gate: it decides whether a budget slot is spent, so its tests
  * must run everywhere, unconditionally.
  */
 
@@ -20,7 +21,16 @@ import { spawn } from "node:child_process";
  * is how that is guaranteed rather than hoped for.
  */
 export function resolveJobImage(job, defaultImage) {
-	return job?.image ?? defaultImage;
+	const image = job?.image ?? defaultImage;
+	// The one image rule (`image-ref.mjs`, issue #471 gate round 1), where every consumer resolves the image: a job queued
+	// with a value it refuses (enqueued before the rule reached the CLI, or by any other producer) is a config error here,
+	// which the processor refuses as `config-refused` before any spend, since the preflight resolves first. So no argv is
+	// ever handed a flag where the image belongs.
+	// A caller with no default and a job with none (`prepare.mjs`'s unwired stamp) resolves to nothing, as before.
+	if (image === null || image === undefined) return image;
+	const problem = imageRefProblem(image);
+	if (problem) throw Object.assign(new Error(`the job image ${problem.reason} (got ${JSON.stringify(image)})`), { piDispatchConfig: true });
+	return image;
 }
 
 /**

@@ -49,7 +49,7 @@
  * containers, networks and fixture are named before they exist and removed when it ends; it is judged by the same failed/ok rule and carries
  * no fixAction, because what a failed read-back points at is the image or the runtime.
  */
-import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
+import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { homedir, networkInterfaces, release as osRelease, tmpdir, userInfo } from "node:os";
 import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_START, STACK_KEYS, STARTED_AT_FORMAT, VALKEY_SHARED_KEY, judgeNetnsKeeper, judgeValkeyListeners, netnsKeeperRemedy, pinnedValkeyUrl, podmanNeedsNetnsKeeper, probeTcpAddress, readSubuidRanges, proxyRestartAdvice, readLinger, readValkeyKeys, valkeySharedOn } from "./podman-stack.mjs";
@@ -71,6 +71,8 @@ import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { GIT_READ_FLAGS } from "./git-hardening.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { deploymentVenueEnv, sharedShellIgnored } from "./deployment-venue.mjs";
+import { readDeploymentEnv, resolveServiceEnv, serviceEnvFileOf, serviceEnvLoader } from "./service-env.mjs";
+import { imageRefProblem } from "./image-ref.mjs";
 import { PROXY_STATE_FORMAT, parseProxyState, shippedProxyDrift } from "./egress-proxy-state.mjs";
 import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, observePodman, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
@@ -137,7 +139,10 @@ const ghProbeArgs = (image, bin) => ["run", "--rm", "--pull=never", ...(bin === 
 // pi-dispatch-prefixed so compose's own `valkey`/`valkey-data` never collide with these.
 const VALKEY_RUN = ["run", "-d", "--name", "pi-dispatch-valkey", "--restart", "unless-stopped", "-p", "127.0.0.1:6379:6379", "-v", "pi-dispatch-valkey-data:/data", "valkey/valkey:8", "valkey-server", "--appendonly", "yes"];
 
-export async function runDoctor(env = process.env, deps = {}) {
+// Issue #471: `shellVars` is THIS shell's environment and is read in exactly the places a test pins (the venue and
+// service-key resolution, the agent dir default, and the environment handed to child processes). Every check judges
+// `env`, the resolution, never `shellVars`.
+export async function runDoctor(shellVars = process.env, deps = {}) {
 	const {
 		cwd = process.cwd(),
 		out = (s) => process.stdout.write(s),
@@ -162,7 +167,7 @@ export async function runDoctor(env = process.env, deps = {}) {
 		// The operator's pi setup, compared against the staged overlay (issue #102). A seam because the
 		// default is a real path in the developer's home directory and the host comparison may spawn their
 		// package manager -- neither belongs in a unit test, and "no network, no Docker" is the same rule.
-		agentDir = agentDirFrom(env),
+		agentDir = agentDirFrom(shellVars),
 		// Where the service manager's units live, and which formats to read them in (issue #216). Seams
 		// rather than bare process.platform/homedir() because the --env-setup check has to be exercised
 		// for all three unit formats, and only one of them exists on whichever host runs the suite.
@@ -218,6 +223,11 @@ export async function runDoctor(env = process.env, deps = {}) {
 		// Issue #448: `systemctl show podman.service`, read only where the local daemon is rootful Podman on this host. A seam
 		// so a test decides what the unit says; absent, it spawns systemctl through `spawn`, as the docker reads do.
 		readPodmanService,
+		// Issue #471 (gate round 1): the account a `.env` and the paths it names must belong to (or root) before doctor lets
+		// a value in them steer anything. This process's own; a seam so a test can stand for another account's file.
+		trustUid = process.geteuid?.(),
+		// The deployment `.env`'s one read through one descriptor (`readDeploymentEnv`, gate round 2).
+		envFs = { realpathSync, lstatSync, openSync, fstatSync, readFileSync, closeSync },
 	} = deps;
 	// The facts a --live pass needs from the collection it follows (the endpoint read, docker and the image, the
 	// egress canary's readings), filled by collectChecks rather than re-probed.
@@ -237,30 +247,44 @@ export async function runDoctor(env = process.env, deps = {}) {
 	// A file that is there and cannot be read is said, as `up` says it (gate round 2): the venue then comes from this
 	// shell alone. An absent one (ENOENT) is simply absent.
 	const envPath = join(cwd, ".env");
-	let envText = null;
-	let envUnread = null;
-	try {
-		if (fileExists(envPath)) {
-			if (!statSync(envPath).isFile()) envUnread = "not a regular file";
-			// BYTES where the seam gives them (issue #447): what systemd refuses to load is judged before decoding.
-			else envText = readEnvFile(envPath);
-		}
-	} catch (err) {
-		if (err?.code !== "ENOENT") envUnread = err?.code ?? err?.message ?? "error";
-	}
+	// BYTES (issue #447): what systemd refuses to load is judged before decoding. Through ONE descriptor since gate round
+	// 2 (`readDeploymentEnv`, the panel's reader too): judged by `stat` and read by path, a folder another account could
+	// write swapped the file between the two.
+	const envRead = readDeploymentEnv({ dir: cwd, fs: envFs, uid: trustUid, names: { ownerName: (id) => ownerNameFromPasswd(passwd, id) ?? `uid ${id}`, groupName: (id) => groupNameFromGroup(envFs, id) } });
+	const envText = envRead.bytes;
+	const envUnread = envRead.unreadable;
+	// Issue #471 (gate round 1): a `.env` another account can write decides nothing doctor runs, connects to or writes.
+	// Measured: a CONTAINERS_CONF in it naming a containers.conf with a `conmon_path` made doctor's own `podman info` run
+	// that program. So from such a file no value is taken at all (the venue keys included), and that is a ✗: the service's
+	// loader has no such rule, so the deployment runs on a file someone else chose. The read above still happens, for the
+	// two-subject pause and limits reading (`envFileKeys`), which only decides what doctor SAYS.
+	const envUntrusted = envText !== null ? envRead.untrusted : null;
+	const envValues = envUntrusted ? null : envText;
 	let envTextUnused = envText !== null;
 	const readEnvFileShared = (path) => {
 		if (envTextUnused && path === envPath) {
 			envTextUnused = false;
 			return envText;
 		}
+		// The file the one read could not open is not opened a second time by another route.
+		if (envUnread && path === envPath) throw Object.assign(new Error(envUnread), { code: envUnread });
 		return readEnvFile(path);
 	};
 	const venueChecks = [];
-	if (envUnread) {
-		venueChecks.push({ ok: false, warn: true, label: `${envPath} could not be read (${envUnread}), so PI_BACKENDS, PI_EGRESS and PI_EGRESS_PROXY come from this shell alone`, fix: "make it a readable regular file, as the service's loader needs it to be" });
+	if (envUntrusted) {
+		venueChecks.push({
+			ok: false,
+			label: `${envPath} ${envUntrusted}, so doctor took no value from it and judged this shell's values (or the defaults): a value there steers what the service runs and connects to, and a file another account can write is that account's choice`,
+			fix: `make the file this account's and writable by it alone (chown to this account, chmod go-w), after reading what is in it; the service reads it as it is`,
+		});
 	}
-	const venue = deploymentVenueEnv({ env, fs: { existsSync: () => envText !== null, readFileSync: () => envText }, envPath, platform, command: "doctor", loader: serviceEnvLoader(platform), keys: serviceEnvKeys(STACK_KEYS) });
+	if (envUnread) {
+		venueChecks.push({ ok: false, warn: true, label: `${envPath} could not be read (${envUnread}), so PI_BACKENDS, PI_EGRESS and PI_EGRESS_PROXY come from this shell alone, as does every other service setting doctor judges (issue #471)`, fix: "make it a readable regular file, as the service's loader needs it to be" });
+	}
+	const venue = deploymentVenueEnv({ env: shellVars, fs: { existsSync: () => envValues !== null, readFileSync: () => envValues }, envPath, platform, command: "doctor", loader: serviceEnvLoader(platform), keys: serviceEnvKeys(STACK_KEYS) });
+	// The venue keys as decided above, beside this shell's other variables: what doctor hands a child process (`spawnEnv`)
+	// and resolves every other service key over (issue #471).
+	let venueEnv = shellVars;
 	if (venue.error) {
 		venueChecks.push({ ok: false, label: `which venue this deployment runs is unknown: ${venue.error}`, fix: "doctor judged this shell's values below; make the shell and the deployment's .env agree, then re-run doctor" });
 	} else {
@@ -268,7 +292,7 @@ export async function runDoctor(env = process.env, deps = {}) {
 		const read = Object.entries(venue.fromFile);
 		if (read.length > 0) {
 			venueChecks.push({ ok: true, label: `venue keys read from ${envPath} (${read.map(([key, value]) => `${key}=${quotedShown(value)}`).join(", ")}), as the service reads them: this shell does not set them` });
-			env = venue.env;
+			venueEnv = venue.env;
 		}
 	}
 	// The Valkey owner rule reads this host's sockets and probes its addresses, so it is real only where the Valkey probe
@@ -282,9 +306,16 @@ export async function runDoctor(env = process.env, deps = {}) {
 				? (url, { shared, user, envPath, rootOk = false }) =>
 						judgeValkeyListeners({ url, probeTcp: probeTcpAddress, lookup: (host, opts) => dnsLookup(host, opts), fs: { readFileSync }, euid: process.geteuid?.(), user, shared, rootOk, ownerName: (uid) => ownerNameFromPasswd(passwd, uid), interfaces: networkInterfaces, envPath, subuids: readSubuidRanges({ user, euid: process.geteuid?.(), fs: { readFileSync } }) })
 				: null;
-	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envText === null ? null : serviceEnvFileOf(envText, envPath, serviceEnvLoader(platform)) };
+	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
+	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
+	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
+	// value decides only what doctor judges in-process (reading files runs no code) and what it says.
+	seams.spawnEnv = shellVars;
+	seams.serviceEnv = resolveDoctorEnv(venueEnv, seams.serviceEnvFile);
+	const env = seams.serviceEnv.env;
 
-	let checks = await collectChecks(env, seams);
+	let checks = await collectChecks(venueEnv, seams);
 	let failed = render(checks, out);
 
 	if (fix) {
@@ -294,7 +325,7 @@ export async function runDoctor(env = process.env, deps = {}) {
 			// the fixes take" without bookkeeping about which probe fed which check. At most once,
 			// structurally -- the re-check never re-enters the fix pass, so a fix that did not take is
 			// reported still-failing rather than retried forever.
-			checks = await collectChecks(env, seams);
+			checks = await collectChecks(venueEnv, seams);
 			// Three counts, in `render`'s own tiers (PR #466 gate round 1): "N of M pass" counted every ⚠ as not passing,
 			// which read as failures on a run that then said "ready".
 			const passing = checks.filter((c) => c.ok).length;
@@ -425,32 +456,211 @@ function asText(content, enc) {
 export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"]);
 
 /**
- * The keys doctor takes from the deployment's `.env` as the SERVICE's values where its own shell sets none (issue
- * #453): the venue keys `up` and `service install` read, the Valkey the worker connects to, the provider, the GitHub
- * auth source and App keys (PR #466 gate round 2, `GITHUB_SERVICE_KEYS`), that provider's key variables (pi's own
- * names for it, passed in, and judged for presence only, never printed), and (issue #464) the jobs and sandbox dirs
- * and the TMPDIR the default jobs root lives under, whose owner doctor judges as the service's worker will meet them,
- * and PI_VALKEY_SHARED, the opt-in the Valkey owner check reads. ONE
- * structural allowlist: every `.env` value doctor acts on passes `serviceEnvKeys` first. Unlike
- * `ENV_FILE_READABLE_KEYS` these values steer what doctor does: which venue it judges and so which runtime it spawns,
- * which Valkey it connects to, and which fixes it offers.
+ * The keys doctor takes from the deployment's `.env` as the SERVICE's values (issue #453, and since issue #471 every key
+ * the service reads that doctor judges): the venue keys `up` and `service install` read, the Valkey the worker connects
+ * to, the provider, the GitHub auth source and App keys (PR #466 gate round 2, `GITHUB_SERVICE_KEYS`), that provider's
+ * key variables (pi's own names for it, passed in, and judged for presence only, never printed), the jobs and sandbox
+ * dirs and the TMPDIR the default jobs root lives under (issue #464), PI_VALKEY_SHARED, the opt-in the Valkey owner check
+ * reads, and (issue #471) the rest of the worker's settings doctor judges and the receiver's (`WORKER_SERVICE_KEYS`,
+ * `RECEIVER_SERVICE_KEYS`). ONE structural allowlist: every `.env` value doctor acts on passes `serviceEnvKeys` first,
+ * and `collectChecks` resolves each of them ONCE (`resolveServiceEnv`, shared with the admin panel), so no check reads
+ * a service key from this shell alone. Unlike `ENV_FILE_READABLE_KEYS` these values steer what doctor does: which
+ * venue it judges and so which runtime it spawns, which Valkey it connects to, which image it inspects and runs, and
+ * which fixes it offers; none of them reaches a spawned program's environment (PR #474's round cap). Each of those is judged before use as the worker judges
+ * it, or named and not used (`STEERING_SERVICE_KEYS`).
  */
 /** The GitHub App keys (PR #466 gate round 2): whose presence and format decide the app-auth lines, which FAIL where
  *  the worker's boot or its token mint would. Judged, never printed, beyond what those lines already print (the ids and
  *  the key's path, neither a secret); the inline key is only ever sniffed for its first bytes. */
 export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY"]);
-export const SERVICE_ENV_KEYS = Object.freeze([...STACK_KEYS, "VALKEY_URL", VALKEY_SHARED_KEY, "PI_PROVIDER", ...GITHUB_SERVICE_KEYS, "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", "PI_WORKER_NAME"]);
+/** Issue #471: the worker's settings doctor judges, which it read from this shell alone while the service read them from
+ *  `.env`. TEMP is TMPDIR's twin in the worker's temp root; PI_CODING_AGENT_DIR is where the worker reads auth.json. */
+export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "GITHUB_PAT_VAR", "TEMP"]);
+/** Issue #471: the receiver's keys doctor judges its boot by (the receiver's unit reads the same `.env`). */
+export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
+/**
+ * Issue #471 (follow-up): the variables the CLIs doctor spawns read from their environment, by the CLI that reads them.
+ * The worker starts podman, docker and gh with its OWN environment (no `env` option: `image-preflight.mjs`,
+ * `run-container.mjs`, `backend-podman.mjs`, `egress.mjs`, `get-token.mjs`), which under systemd includes `.env`, and
+ * its conf-chain checks (#428, #448) read that same environment. So a `.env` CONTAINERS_CONF, DOCKER_HOST or GH_CONFIG_DIR
+ * moves the SERVICE's runtime, and doctor, spawning with its shell's, judged another containers.conf chain, another
+ * daemon or another gh login. Each is a service key, resolved like the rest, and used where doctor judges IN-PROCESS
+ * (the containers.conf chain check reads CONTAINERS_CONF, CONTAINERS_CONF_OVERRIDE and XDG_CONFIG_HOME as the worker
+ * does). None is handed to a program doctor starts (PR #474's round cap): three rounds of rules for handing them on
+ * safely each had a hole (a flipped link, a missing tail under /tmp another account created in time, a socket held
+ * back that should not have been), and a spawn that never sees them has none. Each one the file sets gets its own ⚠
+ * (`cliNotHandedLines`): the podman, docker and gh probes describe this shell's view, not the service's.
+ */
+export const CLI_SERVICE_KEYS = Object.freeze({
+	// HOME since #448 (PR #473): rootful Podman's containers.conf chain, as `observeHost` and `observeRootfulConf` read
+	// it through podman-docker, includes `$HOME/.config`, so the service's HOME decides a chain doctor judges in-process.
+	podman: Object.freeze(["CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE", "CONTAINERS_STORAGE_CONF", "CONTAINERS_REGISTRIES_CONF", "CONTAINER_HOST", "CONTAINER_CONNECTION", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "HOME"]),
+	docker: Object.freeze(["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "HOME"]),
+	gh: Object.freeze(["GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "GH_HOST", "XDG_CONFIG_HOME", "HOME"]),
+});
+const CLI_KEY_NAMES = [...new Set(Object.values(CLI_SERVICE_KEYS).flat())];
+export const SERVICE_ENV_KEYS = Object.freeze([...STACK_KEYS, "VALKEY_URL", VALKEY_SHARED_KEY, "PI_PROVIDER", ...GITHUB_SERVICE_KEYS, "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", "PI_WORKER_NAME", ...WORKER_SERVICE_KEYS, ...RECEIVER_SERVICE_KEYS, ...CLI_KEY_NAMES]);
+
+/** Issue #471 (gate round 1): what a service manager gives every service itself, so a `.env` need not carry it. */
+const AMBIENT_SERVICE_KEYS = Object.freeze(["TMPDIR", "TEMP", "XDG_RUNTIME_DIR", "HOME"]);
+
+/**
+ * The worker unit installed for the deployment in `cwd` (its WorkingDirectory), as the path doctor read, else null.
+ * Read as the job-user check reads units (`installedUnitPaths`, `readUnitSeam`), for the shell-only line.
+ */
+function serviceUnitFor(seams, cwd) {
+	const { platform, home, fileExists, readUnit = (path) => readFileSync(path, "utf8") } = seams;
+	for (const { path, which } of installedUnitPaths(platform, home)) {
+		if (which !== "worker" || !fileExists(path)) continue;
+		try {
+			if (readUnitSeam(readUnit(path), platform).deployDir === cwd) return path;
+		} catch {}
+	}
+	return null;
+}
+
+/** The CLI variables that name a path, whose value a ⚠ may show; the rest (endpoints, names, tokens) it never shows. */
+const CLI_PATH_KEYS = Object.freeze(["CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE", "CONTAINERS_STORAGE_CONF", "CONTAINERS_REGISTRIES_CONF", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "DOCKER_CONFIG", "GH_CONFIG_DIR", "HOME"]);
+/** The ones the worker's containers.conf chain check reads, which doctor runs in-process on the resolved values. */
+const PODMAN_CHAIN_KEYS = Object.freeze(["CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE", "XDG_CONFIG_HOME", "HOME"]);
+
+/**
+ * Issue #471 (PR #474's round cap): one ⚠ per CLI variable the deployment `.env` sets, none of which doctor hands to a
+ * program it starts. Named always; the value shown only for a path (escaped), never for an endpoint, a connection or
+ * context name, or a token. Says that doctor's probes through that CLI describe this shell's view, and, for the keys
+ * the containers.conf chain check reads, that the check itself judged the file's value, in-process, as the worker does.
+ */
+export function cliNotHandedLines(service, envPath) {
+	return CLI_KEY_NAMES.filter((k) => Object.hasOwn(service.fromFile, k)).map((k) => {
+		const clis = Object.entries(CLI_SERVICE_KEYS).filter(([, ks]) => ks.includes(k)).map(([cli]) => cli);
+		const shown = CLI_PATH_KEYS.includes(k) ? ` (${envValueShown(service.fromFile[k])})` : "";
+		return {
+			ok: false,
+			warn: true,
+			label: `${k} is set in ${envPath}${shown}, and doctor hands nothing from that file to a program it starts, so its ${clis.join(" and ")} probes ran without it and describe this shell's view, not the service's${PODMAN_CHAIN_KEYS.includes(k) ? "; the containers.conf check below read it as the worker does" : ""}`,
+			// Not "export it and re-run" alone: what it names may be a program, and the lab's case was another account's.
+			fix: `the service's own ${clis.join(" and ")} uses it: check what ${k} names and who can change it, then, to see that view, run doctor from a shell that exports the same ${k}`,
+		};
+	});
+}
+
+/**
+ * Issue #471: the service keys whose value steers what doctor SPAWNS, CONNECTS TO or WRITES, and how a `.env` value of
+ * each is judged before doctor follows it. Every other service key only decides what a line says. A test holds every
+ * key here to the allowlist; a key added here says how it is judged, or it is not followed.
+ */
+export const STEERING_SERVICE_KEYS = Object.freeze({
+	PI_BACKENDS: "which runtime doctor spawns: judged by the worker's own list parser, a shell/.env disagreement a ✗ (deploymentVenueEnv)",
+	PI_EGRESS: "whether the egress canary runs: the worker's own reading, a disagreement a ✗ (deploymentVenueEnv)",
+	PI_EGRESS_PROXY: "which proxy container doctor inspects: the worker's own name resolution, a disagreement a ✗ (deploymentVenueEnv)",
+	VALKEY_URL: "which Valkey doctor connects to: the owner rule the worker applies at boot, and a line doctor cannot read makes it contact none",
+	PI_JOB_IMAGE: "the image doctor inspects and runs (the canary, the gh probe, --live): the worker's `||` default and the one image rule its boot applies (image-ref.mjs: blank, padded, a leading dash, a control character), a refused value named and not used",
+	GITHUB_AUTH_SOURCE: "whether doctor runs gh on this host: the worker's own three values",
+	GITHUB_PAT_VAR: "which variable is the service's PAT: resolved and never printed; set by the file (or its PAT only in the file), the in-image gh probe is not run, since no program doctor starts is handed anything from .env",
+	PI_GLOBAL_PI_DIR: "the directory `--fix` restages into and removes auth.json from (prompt tier, the command shown first): the worker's rule, unset or empty is off, set must exist",
+	PI_TRIGGERS_FILE: "the file whose images, repos and folders doctor probes: a regular file only, parsed by the worker's own parser before any of its values is used",
+	PI_SESSIONS_DIR: "the directory `--fix` creates: silent only for this shell's own value; a value from .env is offered at the prompt tier, shown first",
+	PI_JOBS_DIR: "where --live makes its fixture: the jobs dir owner rule the worker applies at boot (#464)",
+	PI_SANDBOX_DIR: "the retained-run count doctor reads: the same owner rule (#464)",
+	TMPDIR: "the default jobs root: the same owner rule (#464)",
+	TEMP: "TMPDIR's twin in the worker's temp root: the same owner rule (#464)",
+	CONTAINERS_CONF: "which containers.conf chain the conf-chain check judges, in-process, as the worker reads it (#428, #448); never handed to a program doctor starts",
+	CONTAINER_HOST: "which Podman service the SERVICE's podman talks to: never handed to doctor's podman, named in a ⚠",
+	DOCKER_HOST: "which daemon the SERVICE's docker talks to: never handed to doctor's docker, named in a ⚠",
+	GH_CONFIG_DIR: "which gh login the SERVICE's gh reads: never handed to doctor's gh, named in a ⚠",
+});
+
+/**
+ * Issue #471: the variables doctor reads from THIS shell on purpose, each with why, so the bolt test can tell a read
+ * that went back to the shell from one that was always meant to be there. A name read as `env.NAME` in doctor.mjs is in
+ * `SERVICE_ENV_KEYS` or here, never neither.
+ */
+export const DOCTOR_SHELL_KEYS = Object.freeze({
+	PI_ENV_SETUP: "the --env-setup script this shell was started under; the service's comes from its unit, which doctor reads back (envSetupChecks)",
+	XDG_DATA_HOME: "where THIS account's Podman keeps its store, which doctor inspects as this account",
+	DOCKER_CONTENT_TRUST: "a docker CLI setting of this shell, named for the --live probes this shell's CLI runs",
+	PI_PAUSE_WINDOWS_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS): the service judged from the file, this shell judged as itself",
+	PI_SCOPED_LIMITS_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS)",
+	[VALKEY_SHARED_KEY]: "read from .env ONLY (#464); a value in this shell is named as ignored",
+});
+
+/** Issue #471: the service keys whose values a disagreement line never prints (set or unset only); URLs print as
+ *  `urlShown` does. Every other key's two values are shown, quoted. */
+const SECRET_SERVICE_KEYS = new Set(["GH_TOKEN", "GITHUB_TOKEN", "GITHUB_APP_PRIVATE_KEY", "WEBHOOK_SECRET", "GITLAB_TOKEN", "GITLAB_WEBHOOK_SECRET", "FORGEJO_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_TOKEN", "AZURE_WEBHOOK_SECRET"]);
+const URL_SERVICE_KEYS = new Set(["VALKEY_URL", "GITLAB_URL", "FORGEJO_URL", "AZURE_ORG_URL"]);
 
 /** `keys` narrowed to `SERVICE_ENV_KEYS` plus the provider's own key variables. */
 export function serviceEnvKeys(keys, providerKeys = []) {
 	return keys.filter((k) => SERVICE_ENV_KEYS.includes(k) || providerKeys.includes(k));
 }
 
-/** The loader of the deployment's `.env` on this platform, as `service.mjs` renders it: systemd, the cmd wrapper, or a
- * sourcing shell everywhere else. ONE mapping for every `.env` read doctor makes. */
-export function serviceEnvLoader(platform) {
-	return platform === "linux" ? "systemd" : platform === "win32" ? "cmd" : "shell";
+/**
+ * Issue #471: every service key doctor judges, resolved ONCE by the service's rule (`resolveServiceEnv`): this shell's
+ * value where it sets one, else the deployment `.env`'s from a line the service's loader reads as written, a
+ * disagreement returned to be reported, and a line doctor cannot read named and never used. Not the venue keys, which
+ * `deploymentVenueEnv` decided with `up`'s own reader before this, nor PI_VALKEY_SHARED, which comes from `.env` alone.
+ * `extra` resolves keys whose NAMES are only known later (the provider's key variables, the PAT variable) by the same
+ * rule, into the same record, so each is said once with the rest.
+ */
+export function resolveDoctorEnv(venueEnv, file) {
+	const keys = serviceEnvKeys(SERVICE_ENV_KEYS.filter((k) => !STACK_KEYS.includes(k) && k !== VALKEY_SHARED_KEY));
+	const record = resolveServiceEnv({ env: venueEnv, file, keys });
+	// The venue keys only this shell sets (gate round 1): `deploymentVenueEnv` decided them, and says nothing of these.
+	record.shellOnly.unshift(...resolveServiceEnv({ env: venueEnv, file, keys: STACK_KEYS }).shellOnly);
+	record.extra = (names) => {
+		const more = resolveServiceEnv({ env: venueEnv, file, keys: names });
+		for (const k of ["disagreements", "unread", "hazardSkipped", "shellOnly"]) {
+			for (const item of more[k]) if (!record[k].some((have) => (have.key ?? have) === (item.key ?? item))) record[k].push(item);
+		}
+		return more;
+	};
+	return record;
 }
+
+/** Issue #471: one disagreement, in words that print no secret (`SECRET_SERVICE_KEYS`) and no URL's credentials. */
+function disagreementShown({ key, shell, file }, path) {
+	// A name outside the allowlist is one resolved later by name (the provider's key variables, the PAT): a credential.
+	let secret = SECRET_SERVICE_KEYS.has(key) || !SERVICE_ENV_KEYS.includes(key);
+	if (!secret && URL_SERVICE_KEYS.has(key)) {
+		const [a, b] = [urlShown(shell), urlShown(file)];
+		if (a !== b) return `${key} is ${quotedShown(a)} in this shell and ${quotedShown(b)} in ${path}`;
+		secret = true;
+	}
+	if (secret) return `${key} is set differently in this shell and in ${path} (neither value is shown)`;
+	return `${key} is ${quotedShown(shell)} in this shell and ${quotedShown(file)} in ${path}`;
+}
+
+/**
+ * Issue #471: what the service-key resolution has to say, as check lines: where the file supplied keys (one ✓, names
+ * only), where this shell and the file disagree (one ✗: doctor judged this shell's values, which a worker started by
+ * hand from this shell runs, while the service runs the file's), and a line doctor could not read (one ✗, the line
+ * named, its value unused). `said` is the keys another line already announces with its own source.
+ */
+function serviceEnvLines(service, path, { said = [] } = {}) {
+	const lines = [];
+	const read = Object.keys(service.fromFile).filter((k) => !said.includes(k));
+	if (read.length > 0) lines.push({ ok: true, label: `service settings read from ${path}, as the service reads them (this shell does not set them): ${read.join(", ")}` });
+	if (service.disagreements.length > 0) {
+		lines.push({
+			ok: false,
+			label: `this shell and ${path} disagree: ${service.disagreements.map((d) => disagreementShown(d, path)).join("; ")}. doctor judged this shell's values below, which a worker started by hand from this shell runs, while the service runs the file's`,
+			fix: `make them agree: change ${path} (what the service reads), or unset the key in this shell, then re-run doctor`,
+		});
+	}
+	const unread = service.unread.filter((u) => !u.skip);
+	if (unread.length > 0) {
+		lines.push({
+			ok: false,
+			label: `${path} assigns ${unread.map((u) => `${u.key} (line ${u.line})`).join(", ")} in a form the service's loader may read differently from doctor's reader (quotes, a $, a space), so doctor used none of those values and judged ${unread.every((u) => u.shellSet) ? "this shell's" : "this shell's values or the defaults"} instead: the service's own are unknown`,
+			fix: "write each value plainly (no quotes, $, backslash or space), or single-quote it, then re-run doctor",
+		});
+	}
+	return lines;
+}
+
+/** The loader of the deployment's `.env` on this platform (`service-env.mjs`, shared with the admin panel since issue
+ * #471). ONE mapping for every `.env` read doctor makes. */
+export { serviceEnvLoader };
 
 export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = statSync, platform = process.platform }) {
 	if (typeof readEnvFile !== "function" || !fileExists(path)) return {};
@@ -668,48 +878,53 @@ function loadVerdict(spec, rawPath, cwd, io, platform = process.platform) {
  * that grows a `fixAction` outside the allowed set, so the never tier stays a tested contract rather than
  * a comment.
  */
-export async function collectChecks(env, seams) {
-	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env), home = safeHomeDir(), underTemp = underOsTempDir, providerOracle = defaultProviderOracle, facts = null, readEnvFile = null, stat: statSeam = statSync, runTimeouts = RUN_TIMEOUTS } = seams;
-
-	const jobImage = env.PI_JOB_IMAGE ?? "pi-job:latest";
-	// Issue #453 (gate round 2): the keys the service takes from the deployment's `.env` and a shell running doctor does
-	// not, read with the service's own loader (`serviceEnvFile`, from runDoctor's one read), so the ladder's own
-	// `doctor` step judges the deployment it was told to build: VALKEY_URL and PI_PROVIDER here, the provider's key
-	// below. This shell wins where it sets one. A value is taken only from a plain line the loader reads as written.
+export async function collectChecks(shellVars, seams) {
+	// Issue #471: every service key resolved ONCE, before anything reads one: this shell's value where it sets one, else
+	// the deployment `.env`'s, read with the service's own loader (`serviceEnvFile`, from runDoctor's one read), a
+	// shell/.env disagreement and a line doctor cannot read each said below, never settled in silence. `env` is that
+	// resolution and is what every check judges; `shellVars` is read here and nowhere else in this function (a test pins
+	// it), so no check can go back to reading a service key from this shell alone. runDoctor resolves once for the run and
+	// hands the record over; a caller that does not (a test) gets the same resolution here.
 	const { serviceEnvFile = null } = seams;
-	// Issue #464 (gate round 3): the keys a hazard in the service's `.env` kept doctor from reading, said once below.
-	const hazardSkipped = new Set();
-	const fromServiceFile = (wanted, providerKeys = []) => {
-		if (!serviceEnvFile) return {};
-		const keys = serviceEnvKeys(wanted, providerKeys);
-		// The hardened reader's verdict on the file (`serviceEnvFileOf`): where it has a line the service's loader reads
-		// differently, or refuses to load, and spells one of these keys, no value is taken from it, and that is SAID
-		// (the ✗ at the end of this function), never read as "unset".
-		if (serviceEnvFile.hazard && keys.some((k) => serviceEnvFile.text.includes(k))) {
-			for (const k of keys) if (serviceEnvFile.text.includes(k) && env[k] === undefined) hazardSkipped.add(k);
-			return {};
-		}
-		const read = readEnvAssignments(serviceEnvFile.text, keys, { loader: serviceEnvFile.loader });
-		return Object.fromEntries(keys.filter((k) => env[k] === undefined && read[k]?.plain && typeof read[k].value === "string").map((k) => [k, read[k].value]));
-	};
-	const fileKeys = fromServiceFile(["VALKEY_URL", "PI_PROVIDER"]);
-	const valkeyUrl = env.VALKEY_URL ?? fileKeys.VALKEY_URL ?? "redis://127.0.0.1:6379";
+	const service = seams.serviceEnv ?? resolveDoctorEnv(shellVars, serviceEnvFile);
+	const env = service.env;
+	// What a child process is handed: this shell's environment, as before #471, so a value from `.env` (a token, a secret)
+	// never rides into a process doctor starts unless a check passes it by name.
+	const spawnEnv = seams.spawnEnv ?? shellVars;
+	// `agentDir` is the operator's OWN pi setup, the one `import-pi` stages from and the host side of the overlay comparison
+	// below (issue #471 checked): no worker reads it for the overlay, which is PI_GLOBAL_PI_DIR; `import-pi` runs in this
+	// shell and reads this shell's PI_CODING_AGENT_DIR, and the restage offer runs it with this shell's environment. So it
+	// is this shell's, never the file's. The one thing the worker does read there, auth.json, follows the resolution
+	// (`keyAgentDir`).
+	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(spawnEnv), readHostPiFn = readHostPi, home = safeHomeDir(), underTemp = underOsTempDir, providerOracle = defaultProviderOracle, facts = null, readEnvFile = null, stat: statSeam = statSync, runTimeouts = RUN_TIMEOUTS } = seams;
+
+	// The job image as the worker takes it (`config.mjs` `jobImageFrom`: `||`, so an empty value is the default, where
+	// doctor's `??` inspected an image named ""), and judged BEFORE doctor inspects or runs it (issue #471) by the one
+	// image rule the worker's boot applies (`image-ref.mjs`): a refused value is named and never handed to a runtime, and
+	// doctor judges the default in its place, and says so.
+	const { image: jobImage, refused: jobImageRefused } = jobImageOf(env);
 	// Issue #464 (gate round 1): a VALKEY_URL line in the service's `.env` that the loaders read differently (an unquoted
-	// [::1], say) gives `fileKeys` no value, so `valkeyUrl` above fell back to the default, while systemd hands the worker
-	// the line as written. Doctor then pinged 127.0.0.1:6379, which on a shared host is another account's Valkey
-	// (measured on pd-ubuntu: gx469's), and read that Valkey's fleet. Nothing below contacts a Valkey in that case; the
-	// line is named instead. Only when this shell sets no VALKEY_URL of its own, as for every other service key.
-	const valkeyLine = serviceEnvFile && env.VALKEY_URL === undefined ? readEnvAssignments(serviceEnvFile.text, ["VALKEY_URL"], { loader: serviceEnvFile.loader }).VALKEY_URL : undefined;
-	const unreadValkey = valkeyLine && !valkeyLine.plain ? readValkeyKeys(serviceEnvFile.text, { loader: serviceEnvFile.loader, path: serviceEnvFile.path }).error : null;
-	const provider = env.PI_PROVIDER ?? fileKeys.PI_PROVIDER ?? "anthropic";
-	// Issue #464 (gate round 1): this host's declared worker name, resolved ONCE, as for every other service key: this
-	// shell's value where it sets one, else the deployment `.env`'s, read by the service's own loader. Every reader
+	// [::1], say) gives no value, so `valkeyUrl` below would fall back to the default, while systemd hands the worker the
+	// line as written. Doctor then pinged 127.0.0.1:6379, which on a shared host is another account's Valkey (measured on
+	// pd-ubuntu: gx469's), and read that Valkey's fleet. Nothing below contacts a Valkey in that case; the line is named
+	// instead, by its own reader's words. Only when this shell sets no VALKEY_URL of its own, as for every other key.
+	const valkeyUnread = service.unread.find((u) => u.key === "VALKEY_URL" && !u.shellSet);
+	const unreadValkey = valkeyUnread ? readValkeyKeys(serviceEnvFile.text, { loader: serviceEnvFile.loader, path: serviceEnvFile.path }).error : null;
+	if (unreadValkey) valkeyUnread.skip = true;
+	const valkeyUrl = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
+	const provider = env.PI_PROVIDER ?? "anthropic";
+	// Issue #464 (gate round 1): this host's declared worker name, resolved with every other service key. Every reader
 	// below (the fleet line and its routing warning, the per-host backend wording, which cron triggers are scheduled
-	// here) uses this value and never `env.PI_WORKER_NAME`: read from the shell alone, a deployment whose `.env` names
-	// its worker was told host routing is off, and judged as a single host (measured on both lab VMs). A test holds the
-	// file to one read of the variable.
-	const declaredWorkerName = env.PI_WORKER_NAME ?? fromServiceFile(["PI_WORKER_NAME"]).PI_WORKER_NAME;
+	// here) uses this value: read from the shell alone, a deployment whose `.env` names its worker was told host routing
+	// is off, and judged as a single host (measured on both lab VMs).
+	const declaredWorkerName = env.PI_WORKER_NAME;
 	const fromFileNote = (keys) => (keys.length > 0 ? ` -- ${keys.join(" and ")} read from ${serviceEnvFile.path}, as the service reads it; this shell does not set ${keys.length === 1 ? "it" : "them"}` : "");
+	const fileSays = (...keys) => keys.filter((k) => Object.hasOwn(service.fromFile, k));
+	// Where the image came from, for the lines that judge it, and only when it is the file's (gate round 1): after a
+	// refusal the image judged is the default, which no file named.
+	const jobImageNote = jobImageRefused ? "" : fromFileNote(fileSays("PI_JOB_IMAGE"));
+	// The PAT variable the in-image probe took from the file, if it did (issue #471), for that line's note.
+	let patFromFile = null;
 
 	const checks = [];
 	checks.push(nodeCheck(nodeVersion));
@@ -750,6 +965,22 @@ export async function collectChecks(env, seams) {
 	// Where the venue keys came from (issue #453), beside the other answers to "where does this deployment's environment
 	// come from". Empty unless the file supplied a key, or the two disagree.
 	checks.push(...(seams.venueChecks ?? []));
+	// Issue #471: and where every other service key came from, beside them. The keys a line of their own already says the
+	// source of are left to that line. Counted, so a key resolved further down (the provider's key, the PAT) that adds a
+	// disagreement is said once at the end rather than lost.
+	const envPathShown = serviceEnvFile?.path ?? join(cwd, ".env");
+	// PR #474's round cap: each CLI variable the file sets, which no program doctor starts is handed.
+	checks.push(...cliNotHandedLines(service, envPathShown));
+	const saidAtTop = { disagreements: service.disagreements.length, unread: service.unread.length };
+	// A CLI variable is not listed as read: no program doctor starts used it, and its own ⚠ says so.
+	checks.push(...serviceEnvLines(service, envPathShown, { said: ["VALKEY_URL", "PI_PROVIDER", ...GITHUB_SERVICE_KEYS, "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", ...CLI_KEY_NAMES] }));
+	if (jobImageRefused) {
+		checks.push({
+			ok: false,
+			label: `PI_JOB_IMAGE is ${quotedShown(env.PI_JOB_IMAGE)}${fromFileNote(fileSays("PI_JOB_IMAGE"))}, and it ${jobImageRefused}: the worker refuses to boot on it (exit 2), so doctor ran and inspected nothing with it and judged the default ${jobImage} in its place`,
+			fix: "set PI_JOB_IMAGE to the image reference itself (no surrounding spaces or control characters, not starting with -), or unset it for pi-job:latest",
+		});
+	}
 
 	// Issue #354: which venues run jobs here. An unparseable PI_BACKENDS reads as the unset default, so every docker line
 	// below is exactly what it always was, and the backend section is what fails on it (the worker refuses to boot).
@@ -820,7 +1051,7 @@ export async function collectChecks(env, seams) {
 		ok: imageCode === 0,
 		// A timeout says the DAEMON did not answer, not that the image is absent: the fix for the second is
 		// a pull, and for the first a pull would hang exactly as this did.
-		label: imageRun.ended === "timeout" ? `Job image present (${jobImage}) -- the daemon did not answer` : `Job image present (${jobImage})`,
+		label: imageRun.ended === "timeout" ? `Job image present (${jobImage})${jobImageNote} -- the daemon did not answer` : `Job image present (${jobImage})${jobImageNote}`,
 		fix:
 			imageRun.ended === "timeout"
 				? "restart Docker first: this asked the same daemon that did not answer above, so whether the image is present is unknown rather than false"
@@ -1048,7 +1279,7 @@ export async function collectChecks(env, seams) {
 	// Issue #354: the podman venue's own reads. Taken HERE, ahead of the per-trigger images (issue #433), because its read
 	// of the default image is what gates their podman half; its lines are still printed after the backend section, where
 	// they always were, so moving the read changed the order of spawns and not a byte of output.
-	const podman = podmanUsed ? await podmanChecks(env, seams, { jobImage }) : null;
+	const podman = podmanUsed ? await podmanChecks(env, seams, { jobImage, jobImageNote }) : null;
 	for (const img of images.filter((i) => i !== jobImage)) {
 		if (dockerRun !== null && dockerCode === 0 && dockerRouted.has(img)) {
 			const run = await runCmd(spawn, "docker", ["image", "inspect", img], runTimeouts.cmd);
@@ -1207,7 +1438,7 @@ export async function collectChecks(env, seams) {
 				fix: "set GITLAB_TOKEN to a project or group access token with the `api` scope -- gitlab jobs cannot clone, comment, or resolve the actor's access level without it",
 			});
 		} else {
-			checks.push({ ok: true, label: `gitlab triggers configured (${env.GITLAB_URL ?? "https://gitlab.com"})` });
+			checks.push({ ok: true, label: `gitlab triggers configured (${urlShown(env.GITLAB_URL ?? "https://gitlab.com")})` });
 			// The scope an operator cannot narrow. Said out loud because it is the one place GitLab is
 			// weaker than the github App path and an operator should know which trade they made
 			// (CONST-TOKEN-SCOPED-PER-JOB). Issue #462: a FACT LINE, not a warning, because no change clears it (GitLab offers
@@ -1255,7 +1486,7 @@ export async function collectChecks(env, seams) {
 				fix: "set them in .env (.env.example documents each; docs/forgejo.md walks the webhook setup); FORGEJO_BOT_ID is also needed when FORGEJO_TOKEN is repository-scoped -- a scoped token cannot call GET /user to identify itself",
 			});
 		} else {
-			checks.push({ ok: true, label: `forgejo triggers configured (${env.FORGEJO_URL})` });
+			checks.push({ ok: true, label: `forgejo triggers configured (${urlShown(env.FORGEJO_URL)})` });
 		}
 	}
 
@@ -1285,7 +1516,7 @@ export async function collectChecks(env, seams) {
 				fix: "set them in .env (.env.example documents each; docs/azure-devops.md walks the service-hook setup)",
 			});
 		} else if (azModeOk) {
-			checks.push({ ok: true, label: `azure triggers configured (${env.AZURE_ORG_URL})` });
+			checks.push({ ok: true, label: `azure triggers configured (${urlShown(env.AZURE_ORG_URL)})` });
 		}
 	}
 
@@ -1318,10 +1549,9 @@ export async function collectChecks(env, seams) {
 	// `.env`, as VALKEY_URL and PI_PROVIDER are read above, so an app-auth ✗ judges the file the worker will load and not
 	// a shell that happens to lack it. Said once, by NAME.
 	// Each key read as `env.NAME` first, so the environment scan (env-docs.test.mjs) still sees every read.
-	const ghFile = fromServiceFile([...GITHUB_SERVICE_KEYS]);
-	const ghSource = env.GITHUB_AUTH_SOURCE ?? ghFile.GITHUB_AUTH_SOURCE ?? "gh"; // config.mjs's own default, read directly, no loadConfig
+	const ghSource = env.GITHUB_AUTH_SOURCE ?? "gh"; // config.mjs's own default, read directly, no loadConfig
 	// Only the keys that decide a line: the App keys matter only while app is the source.
-	const ghRead = Object.keys(ghFile).filter((k) => k === "GITHUB_AUTH_SOURCE" || ghSource === "app");
+	const ghRead = fileSays(...GITHUB_SERVICE_KEYS).filter((k) => k === "GITHUB_AUTH_SOURCE" || ghSource === "app");
 	if (ghRead.length > 0) checks.push({ ok: true, label: `GitHub auth settings read from ${serviceEnvFile.path}, as the service reads them (this shell does not set them): ${ghRead.join(", ")}` });
 	if (ghSource === "gh") {
 		// gh writes `auth status` to stdout or stderr depending on version — capture both combined.
@@ -1363,7 +1593,7 @@ export async function collectChecks(env, seams) {
 		// not have reached yet, and choosing GITHUB_AUTH_SOURCE=app is past that point. Unset, `loadGitHubAuth` refuses the
 		// worker's boot; set but not a number, the worker boots and every github job fails to mint its token. Only ever
 		// reached when app auth is the selected source.
-		const ids = { GITHUB_APP_ID: env.GITHUB_APP_ID ?? ghFile.GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID: env.GITHUB_APP_INSTALLATION_ID ?? ghFile.GITHUB_APP_INSTALLATION_ID };
+		const ids = { GITHUB_APP_ID: env.GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID: env.GITHUB_APP_INSTALLATION_ID };
 		for (const name of Object.keys(ids)) {
 			checks.push({
 				ok: numeric(ids[name]),
@@ -1381,8 +1611,8 @@ export async function collectChecks(env, seams) {
 		// file to stat on a value that only ever exists in this process's environment, and whoever supplies
 		// that environment owns its hygiene. What survives for both is the shape sniff, and the rule that
 		// nothing from the key reaches output.
-		const keyPath = env.GITHUB_APP_PRIVATE_KEY_PATH ?? ghFile.GITHUB_APP_PRIVATE_KEY_PATH;
-		const inlineKey = (env.GITHUB_APP_PRIVATE_KEY ?? ghFile.GITHUB_APP_PRIVATE_KEY ?? "").trim();
+		const keyPath = env.GITHUB_APP_PRIVATE_KEY_PATH;
+		const inlineKey = (env.GITHUB_APP_PRIVATE_KEY ?? "").trim();
 		// Blank counts as unset, as `loadGitHubAuth` trims it (PR #466 gate round 2): a path of spaces beside an inline key
 		// is not "both set", and alone it is "neither set".
 		const keyPathSet = (keyPath ?? "").trim() !== "";
@@ -1506,7 +1736,12 @@ export async function collectChecks(env, seams) {
 				// mint failed → skip: the status check above already warned that gh auth is broken
 			} else if (ghSource === "pat") {
 				const patVar = env.GITHUB_PAT_VAR ?? "GITHUB_PAT"; // config.mjs's patVar default, read directly
-				token = (env[patVar] ?? "").trim(); // absent → skip; loadConfig fails loud at worker boot anyway
+				// Issue #471: the PAT as the service reads it is resolved (a disagreement on it is said, by name), but the probe
+				// hands a program a token only from THIS shell (PR #474's round cap: nothing from `.env` reaches a spawn), so a
+				// PAT, or the name of its variable, that only the file supplies means the probe is not run, and that is said.
+				const pat = service.extra([patVar]);
+				patFromFile = Object.hasOwn(pat.fromFile, patVar) ? patVar : fileSays("GITHUB_PAT_VAR").length > 0 ? "GITHUB_PAT_VAR" : null;
+				token = patFromFile ? "" : (env[patVar] ?? "").trim(); // absent → skip; loadConfig fails loud at worker boot anyway
 			}
 			if (token && ghProbeBin === "docker" && endpoint.local !== true) {
 				// NOT RUN on a daemon that is not observed on this host (#278). The probe hands the operator's own gh
@@ -1529,7 +1764,7 @@ export async function collectChecks(env, seams) {
 				// variables) is what decides WHICH Podman and which store answer. The podman section read that service
 				// with this same environment, so a trimmed one could send the token to a service nothing here checked.
 				// An allowlist of what Podman needs was rejected for that reason: it is a list nothing derives.
-				const probe = await runCmdCapture(spawn, ghProbeBin, ghProbeArgs(jobImage, ghProbeBin), { env: { ...env, GH_TOKEN: token, GITHUB_TOKEN: token } });
+				const probe = await runCmdCapture(spawn, ghProbeBin, ghProbeArgs(jobImage, ghProbeBin), { env: { ...spawnEnv, GH_TOKEN: token, GITHUB_TOKEN: token } });
 				const where = ghProbeBin === "podman" ? "podman: " : "";
 				checks.push({
 					ok: probe.code === 0,
@@ -1539,6 +1774,14 @@ export async function collectChecks(env, seams) {
 							? `${where}gh authenticates inside the job image (${jobImage})`
 							: `${where}gh cannot authenticate inside the job image (${jobImage})`,
 					fix: "check network egress from containers or rebuild/pull the job image -- jobs that use gh will fail mid-run",
+				});
+			} else if (patFromFile) {
+				// The service's PAT is in `.env`, which hands no program anything (PR #474's round cap): named, not run.
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `in-image gh auth: not checked, because ${patFromFile} comes from ${serviceEnvFile?.path ?? join(cwd, ".env")} and doctor hands nothing from that file to a program it starts`,
+					fix: `to check it, run doctor from a shell that exports ${patFromFile === "GITHUB_PAT_VAR" ? "GITHUB_PAT_VAR and the variable it names" : patFromFile}`,
 				});
 			}
 		}
@@ -1579,7 +1822,7 @@ export async function collectChecks(env, seams) {
 		});
 	} else checks.push({
 		ok: await probeValkey(valkeyTalkUrl),
-		label: `Valkey reachable (${urlShown(valkeyUrl)})${fromFileNote(fileKeys.VALKEY_URL !== undefined ? ["VALKEY_URL"] : [])}`,
+		label: `Valkey reachable (${urlShown(valkeyUrl)})${fromFileNote(fileSays("VALKEY_URL"))}`,
 		// Issue #433: without `local`, docker is not this deployment's runtime and may not be installed at all, so neither the
 		// compose file nor a `docker run` is offered. The words hold before and after the setup commands learn Podman: the
 		// podman guide says how to start Valkey under the account, whichever command does it.
@@ -1713,10 +1956,17 @@ export async function collectChecks(env, seams) {
 	const oracle = await providerOracle();
 	// The key's presence only, from the file where this shell sets none of the provider's variables; never its value.
 	const keyCandidates = typeof oracle?.providerKeyCandidates === "function" ? oracle.providerKeyCandidates(provider) : [];
-	const keyFromFile = keyCandidates.some((name) => (env[name] ?? "") !== "") ? {} : fromServiceFile(keyCandidates, keyCandidates);
-	const keyCheck = providerKeyCheck({ provider, env: { ...env, ...keyFromFile }, agentDir, oracle, nodeOk: checks[0]?.ok });
+	// Resolved by the same rule as every service key (issue #471), with the names pi gives, and one more condition kept from
+	// #453: where this shell sets ANY of the provider's variables none is taken from the file, since pi reads the first
+	// present one and a blend of the two sources is a precedence neither the service nor a by-hand worker would see. A
+	// disagreement on one of them is said with the rest, never with its value.
+	const keyRes = service.extra(serviceEnvKeys(keyCandidates, keyCandidates));
+	const keyFromFile = keyCandidates.some((name) => (env[name] ?? "") !== "") ? {} : keyRes.fromFile;
+	// And auth.json where the SERVICE's worker reads it: the agent dir the file names, where this shell names none.
+	const keyAgentDir = fileSays("PI_CODING_AGENT_DIR").length > 0 ? agentDirFrom(env) : agentDir;
+	const keyCheck = providerKeyCheck({ provider, env: { ...env, ...keyFromFile }, agentDir: keyAgentDir, oracle, nodeOk: checks[0]?.ok });
 	const keyNamed = Object.keys(keyFromFile).filter((name) => keyCheck.label?.includes(`: ${name})`));
-	checks.push({ ...keyCheck, label: `${keyCheck.label}${fromFileNote([...(fileKeys.PI_PROVIDER !== undefined ? ["PI_PROVIDER"] : []), ...keyNamed])}` });
+	checks.push({ ...keyCheck, label: `${keyCheck.label}${fromFileNote([...fileSays("PI_PROVIDER"), ...keyNamed, ...(keyAgentDir !== agentDir ? ["PI_CODING_AGENT_DIR"] : [])])}` });
 
 
 	// REQ-GLOBAL-PI-OVERLAY: read the extensions opt-out through the WORKER's own parser, so doctor reports
@@ -1741,7 +1991,7 @@ export async function collectChecks(env, seams) {
 	const overlay = env.PI_GLOBAL_PI_DIR;
 	if (overlay) {
 		const dirOk = fileExists(overlay);
-		checks.push({ ok: dirOk, label: `Global overlay dir exists (${overlay})`, fix: "run `pi-dispatch import-pi`, or fix PI_GLOBAL_PI_DIR" });
+		checks.push({ ok: dirOk, label: `Global overlay dir exists (${envValueShown(overlay)})${fromFileNote(fileSays("PI_GLOBAL_PI_DIR"))}`, fix: "run `pi-dispatch import-pi`, or fix PI_GLOBAL_PI_DIR" });
 		if (dirOk) {
 			const overlayAuth = join(overlay, "auth.json");
 			checks.push({
@@ -1819,7 +2069,7 @@ export async function collectChecks(env, seams) {
 					run: async ({ spawn, out }) => {
 						const cli = fileURLToPath(new URL("./cli.mjs", import.meta.url));
 						// npm staging can be slow, so 10 minutes rather than runCmdCapture's default 30s.
-						const res = await runCmdCapture(spawn, process.execPath, [cli, "import-pi", "--with-packages", "--no-host-packages", "--to", overlay], { env, cwd, timeoutMs: 600000 });
+						const res = await runCmdCapture(spawn, process.execPath, [cli, "import-pi", "--with-packages", "--no-host-packages", "--to", overlay], { env: spawnEnv, cwd, timeoutMs: 600000 });
 						if (res.output) out(res.output);
 						return { ok: res.code === 0 };
 					},
@@ -1904,13 +2154,13 @@ export async function collectChecks(env, seams) {
 			// is a different consent class and it does not belong behind a y/N prompt.
 			const staged = readStageManifest({ globalPiDir: overlay, readFile: (p) => readFileSync(p, "utf8"), fileExists });
 			const stagedByName = new Map((staged?.packages ?? []).map((p) => [p.name, p]));
-			const hostPi = await readHostPi({
+			const hostPi = await readHostPiFn({
 				agentDir,
 				fs: { existsSync: fileExists, readFileSync, readdirSync, statSync },
 				// doctor's seam is `spawn`, host-pi's is an execFile-shaped call, so this adapts one to the
 				// other rather than giving doctor a second process seam to inject in tests.
 				exec: async (file, args) => {
-					const res = await runCmdCapture(spawn, file, args, { env, cwd, timeoutMs: 15000 });
+					const res = await runCmdCapture(spawn, file, args, { env: spawnEnv, cwd, timeoutMs: 15000 });
 					if (res.code !== 0) throw new Error(`${file} exited ${res.code ?? "without a code"}`);
 					return { stdout: res.output };
 				},
@@ -2122,16 +2372,22 @@ export async function collectChecks(env, seams) {
 			});
 		} else {
 			const exists = fileExists(sessionsDir);
+			// Issue #471: a store the deployment's `.env` names rather than this shell (resolved above).
+			const sessionsFromFile = fileSays("PI_SESSIONS_DIR").length > 0;
 			checks.push({
 				ok: exists,
-				label: `Session store ${exists ? "exists" : "does not exist"} (${sessionsDir})`,
-				fix: `create it: mkdir -p ${sessionsDir} && chmod 700 ${sessionsDir}`,
+				// Escaped (issue #471): a path out of the environment is constrained by nothing, and its ESC reached the terminal
+				// here, where every other path doctor prints goes through `envValueShown`.
+				label: `Session store ${exists ? "exists" : "does not exist"} (${envValueShown(sessionsDir)})${fromFileNote(fileSays("PI_SESSIONS_DIR"))}`,
+				fix: `create it: mkdir -p ${envValueShown(sessionsDir)} && chmod 700 ${envValueShown(sessionsDir)}`,
 				// Silent tier: setting PI_SESSIONS_DIR WAS the decision, and it has already been made -- the
 				// mkdir is the mechanical remainder, creates only the path the env var names, and 0700 is
 				// the mode the fix line already prescribes (transcripts are PII-bearing, host-only).
+				// PROMPT tier for a path doctor read from `.env` (issue #471): a value from a file doctor did not start in is
+				// never followed silently, so the directory it would create is shown and asked for, default No.
 				fixAction: {
-					tier: "silent",
-					describe: `mkdir -p ${sessionsDir} && chmod 700 ${sessionsDir}`,
+					tier: sessionsFromFile ? "prompt" : "silent",
+					describe: `mkdir -p ${envValueShown(sessionsDir)} && chmod 700 ${envValueShown(sessionsDir)}`,
 					run: async ({ mkdir, chmod }) => {
 						mkdir(sessionsDir, { recursive: true });
 						chmod(sessionsDir, 0o700);
@@ -2146,7 +2402,7 @@ export async function collectChecks(env, seams) {
 			// listed are the fact line right below.
 			checks.push({
 				ok: true,
-				label: `${resuming} trigger(s) persist agent transcripts to ${sessionsDir} -- PII-bearing, host-only, never committed: keep it outside every git repo, on a disk you would put issue text on (docs/sessions.md)`,
+				label: `${resuming} trigger(s) persist agent transcripts to ${envValueShown(sessionsDir)} -- PII-bearing, host-only, never committed: keep it outside every git repo, on a disk you would put issue text on (docs/sessions.md)`,
 			});
 			// Which of the four bounds are actually on, as a FACT LINE rather than a warning: how long a
 			// lineage may run is an operator's call, not a defect, and doctor's warnings are for things that
@@ -2160,7 +2416,7 @@ export async function collectChecks(env, seams) {
 			];
 			checks.push({
 				ok: true,
-				label: `Resume bounds: ${bounds.map(([name, value, fallback]) => `${name}=${value === undefined || value === "" ? fallback : value}`).join(", ")}`,
+				label: `Resume bounds: ${bounds.map(([name, value, fallback]) => `${name}=${value === undefined || value === "" ? fallback : envValueShown(value)}`).join(", ")}`,
 			});
 			// The one bound that can be set and still do nothing, and the operator cannot see it from here.
 			// Its measurement is reported by the JOB IMAGE's runner (INT-RUNNER-EXIT-CODE-PROTOCOL), so an
@@ -2175,7 +2431,7 @@ export async function collectChecks(env, seams) {
 			if (env.PI_SESSION_MAX_CONTEXT_PCT) {
 				checks.push({
 					ok: true,
-					label: `PI_SESSION_MAX_CONTEXT_PCT=${env.PI_SESSION_MAX_CONTEXT_PCT} needs a job image whose runner reports context usage: an older image reports none, and a bound with no measurement passes, so there it does nothing. Each run's record (${env.PI_LOGS_DIR || "the logs directory"}/<jobId>.json) carries session.reason, which names the gate that refused`,
+					label: `PI_SESSION_MAX_CONTEXT_PCT=${envValueShown(env.PI_SESSION_MAX_CONTEXT_PCT)} needs a job image whose runner reports context usage: an older image reports none, and a bound with no measurement passes, so there it does nothing. Each run's record (${env.PI_LOGS_DIR ? envValueShown(env.PI_LOGS_DIR) : "the logs directory"}/<jobId>.json) carries session.reason, which names the gate that refused`,
 				});
 			}
 		}
@@ -2508,13 +2764,11 @@ export async function collectChecks(env, seams) {
 
 	// Issue #464: the jobs dir is this account's to write. PI_JOBS_DIR, PI_SANDBOX_DIR and TMPDIR as the service reads them
 	// (TMPDIR in .env is a documented way out of a squatted default root, so doctor judges the root the service will use).
-	const dirKeys = fromServiceFile(["PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR"]);
-	const dirSettings = { ...env, ...dirKeys };
 	let dirRefused = false;
 	if (seams.jobsDirFs) {
 		const uid = seams.jobsDirUid;
 		const ownerName = (id) => ownerNameFromPasswd(seams.passwd, id);
-		const dirChecks = jobsDirChecks(dirSettings, { uid, fs: seams.jobsDirFs, ownerName, note: fromFileNote(Object.keys(dirKeys)) });
+		const dirChecks = jobsDirChecks(env, { uid, fs: seams.jobsDirFs, ownerName, note: fromFileNote(fileSays("PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", "TEMP")) });
 		dirRefused = dirChecks.some((c) => c.ok === false && !c.warn);
 		checks.push(...dirChecks);
 	}
@@ -2524,12 +2778,12 @@ export async function collectChecks(env, seams) {
 	// event.json, so issue text -- are sitting on disk, and how many. An operator who never opens a sandbox
 	// should still know they are being kept. Issue #462: not a warning either, since retention on is the default and
 	// nothing needs changing, so what each holds and how to turn it off live in the label (`ok: true` prints no fix).
-	// Issue #464 (gate round 1): the sandbox dir the SERVICE uses (`dirSettings`), and nothing at all after a ✗ above on the
+	// Issue #464 (gate round 1): the sandbox dir the SERVICE uses (`env`, resolved), and nothing at all after a ✗ above on the
 	// jobs dir, its root or the sandbox dir: that worker does not start, and a ✓ counting what sits in a directory another
 	// account made would read as this account's.
 	if (!dirRefused) {
 		const retentionHours = nonNegativeEnvInt(env.PI_SANDBOX_RETENTION_HOURS, 24);
-		const sandboxDir = dirSettings.PI_SANDBOX_DIR || defaultSandboxDir(dirSettings);
+		const sandboxDir = env.PI_SANDBOX_DIR || defaultSandboxDir(env);
 		// Counted in BOTH branches (gate round 1): a tombstone the worker cannot delete does not go away because retention
 		// was turned off, and turning it off is exactly when an operator expects the disk back.
 		const kept = countRetained(sandboxDir, fileExists);
@@ -2679,27 +2933,31 @@ export async function collectChecks(env, seams) {
 		}
 	}
 
-	if (hazardSkipped.size > 0) {
+	// Issue #471: what a key resolved above this point (the provider's variables, the PAT) added to the record.
+	checks.push(...serviceEnvLines({ fromFile: {}, disagreements: service.disagreements.slice(saidAtTop.disagreements), unread: service.unread.slice(saidAtTop.unread) }, envPathShown));
+	// Issue #471 (gate round 1): a key only this shell sets was taken in silence. Where a service for this folder is
+	// installed, it runs without that value (its unit loads the file, not this shell), so the keys are named, never their
+	// values. Not the ones a service manager gives every service itself (a temp dir, the runtime dir), which the file need
+	// not repeat. Advisory: the unit's --env-setup script may supply them, which doctor cannot run to find out.
+	// env-internal XDG_CONFIG_HOME: the XDG base directory the CLIs doctor starts read, compared here with its default only.
+	// Nor XDG_CONFIG_HOME at its own default (`~/.config`, which a login shell often exports): unset, every CLI that
+	// reads it falls back to that same directory, so the service runs with the same value (measured on pd-fedora: the
+	// named line otherwise flagged the default).
+	const shellOnly = service.shellOnly.filter((k) => !AMBIENT_SERVICE_KEYS.includes(k) && !(k === "XDG_CONFIG_HOME" && typeof home === "string" && env.XDG_CONFIG_HOME === join(home, ".config")));
+	const unit = shellOnly.length > 0 ? serviceUnitFor(seams, cwd) : null;
+	if (unit) {
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `${shellOnly.join(", ")} ${shellOnly.length === 1 ? "is" : "are"} set in this shell only: the service installed for this folder (${unit}) loads ${serviceEnvFile?.path ?? join(cwd, ".env")}, not this shell, so it runs without ${shellOnly.length === 1 ? "that value unless its --env-setup script sets it" : "those values unless its --env-setup script sets them"}, while doctor judged this shell's`,
+			fix: `put ${shellOnly.length === 1 ? "it" : "them"} in ${serviceEnvFile?.path ?? join(cwd, ".env")} if the service needs ${shellOnly.length === 1 ? "it" : "them"}, or unset ${shellOnly.length === 1 ? "it" : "them"} in this shell to judge what the service runs`,
+		});
+	}
+	if (service.hazardSkipped.length > 0) {
 		const { hazard } = serviceEnvFile;
-		checks.push({ ok: false, label: `${serviceEnvFile.path} line ${hazard.line} ${hazard.what}, so doctor read none of ${[...hazardSkipped].join(", ")} from it and judged this shell's values (or the defaults) instead: the service's own are unknown`, fix: hazard.fix });
+		checks.push({ ok: false, label: `${serviceEnvFile.path} line ${hazard.line} ${hazard.what}, so doctor read none of ${service.hazardSkipped.join(", ")} from it and judged this shell's values (or the defaults) instead: the service's own are unknown`, fix: hazard.fix });
 	}
 	return checks;
-}
-
-/**
- * The deployment `.env` as doctor judges the service by (issue #464, gate round 3): decoded from its BYTES with the
- * hardened reader, and `hazard` set to the first thing the service's loader reads differently from this reader, or
- * refuses to load (a NUL, invalid UTF-8, an environment too big to exec, a lone CR), as `{ line, what, fix }`, or null.
- */
-function serviceEnvFileOf(raw, path, loader) {
-	const { text, loadHazard } = decodeEnvFile(raw, { loader });
-	const h = loadHazard ?? envFileHazard(text, { loader });
-	let hazard = null;
-	if (h !== null) {
-		const shape = h.shape !== undefined ? SYSTEMD_HAZARD_SHAPES[h.shape] : null;
-		hazard = shape ? { line: h.line, what: `has ${shape.what}${h.detail ? ` (${h.detail})` : ""}`, fix: shape.fix } : { line: h.line, what: "is one this command cannot read the way the service's loader will (an open quote, a continuation, or a line that runs)", fix: "fix that line, then re-run doctor" };
-	}
-	return { text, path, loader, hazard };
 }
 
 /**
@@ -3214,7 +3472,7 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
 		// the receiver will not boot. An absent file still means "no triggers at all", exactly as before.
-		const path = env.PI_TRIGGERS_FILE ?? join(cwd, "triggers.json");
+		const path = triggersPath(env, cwd);
 		if (!fileExists(path)) return none;
 		// The same regular-file guard, for the same reason: this read is unbounded too, and a triggers path
 		// naming a FIFO hangs the command with no output and no timeout that can reach it.
@@ -3353,9 +3611,18 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
 	}
 }
 
-/** The triggers path doctor would have read, so a parse failure can name it. */
-function triggersPath(env, cwd) {
-	return env.PI_TRIGGERS_FILE ?? join(cwd, "triggers.json");
+/**
+ * The triggers file the worker reads, and the path a parse failure names. Unset is `./triggers.json` in the deployment
+ * folder (the receiver's default). A RELATIVE PI_TRIGGERS_FILE resolves against doctor's `cwd`, the deployment folder,
+ * exactly as the worker's own read does (issue #471): `loadSchedules` hands the value to `readFileSync` as written, so
+ * it lands under the process's working directory, which is the service's `WorkingDirectory=`, the deployment folder.
+ * Doctor resolved it against its own process's directory instead, so a `cwd` seam aimed elsewhere judged another file.
+ * An empty value stays empty: the worker refuses to boot on it (no such file), and doctor then finds no file either.
+ */
+export function triggersPath(env, cwd) {
+	const raw = env.PI_TRIGGERS_FILE;
+	if (raw === undefined) return join(cwd, "triggers.json");
+	return raw === "" || isAbsolute(raw) ? raw : resolve(cwd, raw);
 }
 
 /**
@@ -4922,7 +5189,7 @@ function fileUnreadFix(what) {
  * manager (issue #453): the backend section's isolation line carries it as evidence with its own fix, and the floor
  * line there carries the ✗, so a line here would only repeat both.
  */
-export async function podmanChecks(env, seams, { jobImage }) {
+export async function podmanChecks(env, seams, { jobImage, jobImageNote = "" }) {
 	const { spawn, home = safeHomeDir(), jobUserIdentity: ids = {}, observationFs = { statSync, readFileSync, readdirSync }, runTimeouts = RUN_TIMEOUTS } = seams;
 	const platform = ids.platform ?? seams.platform;
 	const { podmanDefault, localUsed } = venuesOf(env);
@@ -5059,7 +5326,7 @@ export async function podmanChecks(env, seams, { jobImage }) {
 	const imagesReadable = imagePresent || image?.missing !== undefined;
 	const imageDigest = imagePresent ? (image.imageDigest ?? null) : null;
 	if (imagePresent) {
-		checks.push({ ok: true, label: `podman: job image present in this account's Podman store (${jobImage})` });
+		checks.push({ ok: true, label: `podman: job image present in this account's Podman store (${jobImage})${jobImageNote}` });
 	} else if (image?.missing) {
 		checks.push({
 			ok: false,
@@ -5436,7 +5703,7 @@ export async function liveChecks(env, seams, facts) {
 	// endpoint the job-user line was decided from. The fixture's global directory is never relabelled, like a job's.
 	const relabel = relabelsPrivateMounts(facts.daemon?.answered ? facts.daemon.facts : null, facts.endpoint, ids.platform ?? seams.platform);
 	const result = await runLiveProbes({
-		image: facts.jobImage ?? env.PI_JOB_IMAGE ?? "pi-job:latest",
+		image: facts.jobImage ?? jobImageOf(env).image,
 		endpoint: facts.endpoint,
 		// Asked again right before the first probe command, through the same resolver as the collection's read.
 		resolveEndpoint: makeDockerEndpointResolver({ run: dockerRunVia(spawn) }),
@@ -5573,7 +5840,7 @@ export async function podmanLiveChecks(env, seams, facts) {
 	}
 	const readInfo = makePodmanInfoReader({ run: dockerRunVia(spawn, PODMAN_INFO_TIMEOUT_MS, { bin: "podman" }) });
 	const run = liveRunVia(spawn, { bin: "podman" });
-	const image = facts.jobImage ?? env.PI_JOB_IMAGE ?? "pi-job:latest";
+	const image = facts.jobImage ?? jobImageOf(env).image;
 	const canary = await podmanEgressCanary({ podman, readInfo, run, image, pid, isAlive, announce: (line) => out(`\nread back on podman: ${line}\n`) });
 	const egress = { armed: podman.egress.armed, results: canary.results, proxy: podman.egress.proxy, proxyRunning: podman.egress.proxyRunning, keeperBlocked: podman.egress.keeperBlocked ?? null };
 	const result = await runLiveProbes({
@@ -5816,6 +6083,19 @@ export function accountRootRefusal(root, { uid, fs, ownerName = () => null, what
 }
 
 /** An account's name from /etc/passwd text (the `passwd` seam), or null. */
+/** A group's name from /etc/group, read through `fs`, else `gid N` (for the trust wording, gate round 3). */
+function groupNameFromGroup(fs, gid) {
+	try {
+		for (const line of String(fs.readFileSync("/etc/group", "utf8")).split("\n")) {
+			const f = line.split(":");
+			if (f.length >= 3 && f[2] === String(gid) && f[0] !== "") return f[0];
+		}
+	} catch {
+		// No group file: the gid alone is named.
+	}
+	return `gid ${gid}`;
+}
+
 function ownerNameFromPasswd(passwd, uid) {
 	try {
 		for (const line of String(passwd?.() ?? "").split("\n")) {
@@ -5913,6 +6193,21 @@ export function urlShown(url) {
 	// scheme://host:port/db and nothing else (round-cap re-review): no userinfo at all, no query, no fragment.
 	if (!parsed.hostname) return "<no host>";
 	return printable(`${parsed.protocol}//${parsed.host}${parsed.pathname && parsed.pathname !== "/" ? parsed.pathname : ""}`);
+}
+
+/**
+ * PI_JOB_IMAGE as the worker takes it and as doctor may hand it to a runtime (issue #471): `{ image, refused }`. The
+ * worker's own default rule (`config.mjs`: `||`, so an empty value is pi-job:latest), then the refusals the worker's
+ * `run.image` validator (`triggers.mjs`) applies to the same positional, which docker would otherwise read as a flag or
+ * refuse only at each job's start: a blank or padded value, a leading dash, and a control character. A refused value is
+ * never used: `image` is then the default, and `refused` the reason, for the ✗ that names it.
+ */
+export function jobImageOf(env) {
+	const raw = env.PI_JOB_IMAGE;
+	if (typeof raw !== "string" || raw === "") return { image: "pi-job:latest", refused: null };
+	// The worker's own rule (`jobImageFrom`, the shared `image-ref.mjs`), which refuses these at boot.
+	const problem = imageRefProblem(raw);
+	return problem ? { image: "pi-job:latest", refused: problem.reason } : { image: raw, refused: null };
 }
 
 /** Text with every C0 and C1 control blanked, for a line another party's value reaches. */

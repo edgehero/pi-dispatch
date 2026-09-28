@@ -14,6 +14,7 @@ import { MINTED_TOKEN_VARS } from "./forges.mjs";
 import { SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS } from "./retention-sweep.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, parseWaitProfiles } from "./wait-for.mjs";
+import { imageRefProblem } from "./image-ref.mjs";
 
 export function configError(message) {
 	const error = new Error(message);
@@ -217,6 +218,19 @@ function refuseBackendShortfall(config) {
 	if (first) throw configError(first);
 }
 
+/**
+ * PI_JOB_IMAGE as the worker runs it (issue #471): unset or empty is pi-job:latest (`||`, so "" falls back), and any
+ * other value is judged by the one image rule `run.image` is (`image-ref.mjs`). A refused value is a config error at
+ * boot (exit 2), naming the key: before #471 a dash-leading value booted, and every job then handed the runtime a flag
+ * where the image belongs, after its budget slot was reserved.
+ */
+export function jobImageFrom(env) {
+	const image = env.PI_JOB_IMAGE || "pi-job:latest";
+	const problem = imageRefProblem(image);
+	if (problem) throw configError(`PI_JOB_IMAGE ${problem.reason} (got ${JSON.stringify(image)})`);
+	return image;
+}
+
 // The operator's global pi overlay dir (REQ-GLOBAL-PI-OVERLAY). Unset/empty = feature off. When set it
 // must EXIST at boot -- a typo pointing at nothing would silently drop the operator's whole setup on
 // every job, so fail loud like every other config error rather than degrade to nothing.
@@ -295,7 +309,7 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		maxTurns: positiveInt(env, "PI_MAX_TURNS", 30), // pi has no turn limit; we impose one
 		maxTokens: optionalBoundedInt(env, "PI_MAX_TOKENS", 1), // issue #25; null = per-job token budget disabled (lagging in-run backstop)
 		dailyTokenCap: optionalBoundedInt(env, "PI_DAILY_TOKEN_CAP", 1), // issue #25; null = daily token counter disabled (check-AFTER, host-side)
-		jobImage: env.PI_JOB_IMAGE || "pi-job:latest", // || (not ??) so an empty string falls back; "" is falsy and would throw inside buildDockerRunArgs AFTER a budget slot was reserved
+		jobImage: jobImageFrom(env), // || (not ??) so an empty string falls back; "" is falsy and would throw inside buildDockerRunArgs AFTER a budget slot was reserved
 		globalPiDir: resolveGlobalPiDir(env, fileExists), // REQ-GLOBAL-PI-OVERLAY: operator's ~/.pi/agent subset, :ro-mounted; null = off
 		allowGlobalExtensions: globalExtensionsEnabled(env), // REQ-GLOBAL-PI-OVERLAY: ON unless PI_GLOBAL_ALLOW_EXTENSIONS=0
 		// REQ-EGRESS-ALLOWLIST. `egress` gates the whole feature; `egressProxy` names the component the

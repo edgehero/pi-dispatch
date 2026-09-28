@@ -17,7 +17,7 @@
 
 import * as nodeFs from "node:fs";
 import { GIT_READ_FLAGS } from "@edgehero/pi-dispatch/git-hardening";
-import { join, delimiter, sep } from "node:path";
+import { join, delimiter, sep, isAbsolute, resolve as resolvePath } from "node:path";
 import { execFileSync } from "node:child_process";
 import { logsDirPath, defaultSandboxDir, defaultGraphDir, accountTempRoot, ensureAccountTempRoot, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
@@ -49,6 +49,9 @@ import { isForgeKind } from "@edgehero/pi-dispatch/forges";
 // supplies them bytes, never the other way around -- the dependency points read-model -> graph-model.
 import { parseSkillMeta, findSiblingMentions, findLoopHints, triggerMatchLabel } from "./graph-model.mjs";
 import { repoOfTarget } from "./costs.mjs";
+// Issue #471: the ONE resolver of a deployment's service keys, shared with `doctor` (the package boundary allows it: the
+// admin already takes its config helpers from the worker the same way).
+import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
 
 // Re-exported so the command layer reaches the key contract through the admin's single worker-coupling
 // funnel, never re-deriving the five known keys.
@@ -126,6 +129,63 @@ export function resolvePaths(env = process.env) {
     // PI_GRAPH_DIR, which is theirs to place.
     graphRoot: env.PI_GRAPH_DIR ? null : accountTempRoot(env),
   };
+}
+
+/**
+ * The four files `pi-dispatch init` scaffolds, whose presence together marks a directory as a deployment folder
+ * (`detectDeployment`'s "cwd" state). Spelled once. NOT a licence to read that folder's `.env` (issue #471, gate round
+ * 1): a repository can commit all four.
+ */
+export const DEPLOYMENT_SCAFFOLD_FILES = Object.freeze([".env", "triggers.json", "pause-windows.json", "subscriptions.json"]);
+
+/**
+ * Issue #471: the keys `resolvePaths` and the panel read that the deployment's SERVICE reads from its `.env`: paths,
+ * URLs and numbers, the worker's and receiver's own settings. The panel resolved every one of them from the environment
+ * pi was started in, so a deployment whose `.env` set PI_LOGS_DIR or VALKEY_URL showed another directory's history or
+ * another queue while the service ran its own (`OQ-038` recorded the sandbox half). NOT the capability-shaped keys:
+ * PI_BACKENDS, PI_BACKEND_FLOOR, PI_EGRESS, PI_EGRESS_PROXY, DOCKER_HOST and PI_DISPATCH_RUN_ROOTS stay this process's
+ * own on purpose (`OQ-038`, `INT-DEPLOYMENT-POINTER-CONTRACT`), and so do the panel's own settings (PI_DISPATCH_*).
+ */
+export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_GRAPH_DIR", "PI_WORKER_NAME", "TMPDIR", "TEMP"]);
+// Of those, the paths: a relative one in `.env` is relative to the service's working directory, the deployment folder.
+const PANEL_PATH_KEYS = new Set(["PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_GRAPH_DIR", "TMPDIR", "TEMP"]);
+
+/**
+ * Issue #471: the environment `resolvePaths` should see, by the rule `doctor` judges the service by
+ * (`resolveServiceEnv`): pi's own value where the operator exported one, else the deployment `.env`'s from a line the
+ * service's loader reads as written, else what the deployment pointer layered in. Returns `{ env, dir, notice }`.
+ *
+ * WHICH `.env` is decided before any value in it is used, since several steer what the panel connects to (VALKEY_URL)
+ * and writes (the triggers, settings, pause and limits files): the pointer's deployment folder, which the wizard wrote,
+ * and no other. With no pointer the panel reads its own environment exactly as before. Gate round 1 removed a second
+ * source, a cwd carrying init's four scaffold files: a repository can commit those four files, and pi started in it
+ * then took that repository's VALKEY_URL, triggers path and worker name (measured). A file another account can write
+ * is not read either (`envFileTrust`), and is said.
+ *
+ * `notice` is one line or undefined: a key pi's environment and the file set differently (named, never its value: a
+ * VALKEY_URL may carry a password), a line the panel could not read the way the service will (named, value unused), or
+ * a file it could not read or would not trust. The panel then uses pi's value, as a worker started from that shell
+ * would, and says the service runs the file's.
+ */
+export function panelEnv({ env = process.env, pointerDir = null, owned = [], fs = nodeFs, platform = process.platform, uid = process.geteuid?.() } = {}) {
+  const dir = pointerDir;
+  if (dir === null) return { env, dir: null, notice: undefined };
+  // pi's own environment WITHOUT what the pointer layered into it: an export outranks the file, the file the pointer.
+  const own = {};
+  for (const [key, value] of Object.entries(env)) if (!owned.includes(key)) own[key] = value;
+  const res = deploymentServiceEnv({ env: own, dir, keys: PANEL_SERVICE_KEYS, platform, fs, uid });
+  const out = res.env;
+  for (const [key, value] of Object.entries(res.fromFile)) {
+    if (PANEL_PATH_KEYS.has(key) && value !== "" && !isAbsolute(value)) out[key] = resolvePath(dir, value);
+  }
+  for (const key of owned) if (out[key] === undefined && env[key] !== undefined) out[key] = env[key];
+  const said = [];
+  if (res.unreadable) said.push(`${res.path} could not be read (${res.unreadable}), so the panel reads its settings from pi's environment alone`);
+  if (res.untrusted) said.push(`${res.path} ${res.untrusted}, so the panel takes nothing from it and reads its settings from pi's environment and the pointer alone`);
+  if (res.hazardSkipped.length > 0) said.push(`${res.path} line ${res.hazard.line} ${res.hazard.what}, so the panel read none of ${res.hazardSkipped.join(", ")} from it`);
+  if (res.unread.length > 0) said.push(`${res.path} assigns ${res.unread.map((u) => `${u.key} (line ${u.line})`).join(", ")} in a form the service's loader may read differently, so the panel used none of those values`);
+  if (res.disagreements.length > 0) said.push(`pi's environment and ${res.path} set ${res.disagreements.map((d) => d.key).join(", ")} differently: the panel uses pi's, the service runs the file's; make them agree`);
+  return { env: out, dir, notice: said.length > 0 ? said.join("; ") : undefined };
 }
 
 /**
@@ -421,7 +481,10 @@ export async function enqueueDispatchRun({
     // only one that can run it. Read straight from the environment rather than through the deployment
     // pointer, deliberately: the pointer carries PATHS and refuses capability grants, and a value that
     // decides WHICH HOST runs a job is closer to the second than the first.
-    const workerName = process.env.PI_WORKER_NAME;
+    // Issue #471: from the environment the caller resolved (`panelEnv`), which takes the deployment `.env`'s name where
+    // pi's environment has none, as the service's worker does: without it a folder only this machine holds went onto the
+    // shared queue, where any host could pop it. Never from the pointer, whose allowlist does not carry it.
+    const workerName = env.PI_WORKER_NAME;
     queue = makeQueueFn(parseConnectionFn(valkeyUrl, { failFast: true }), { ...(workerName ? { name: hostQueueName(workerName) } : {}) });
     const jobId = await enqueueLocalJob(queue, { folder, flow, task });
     return { ok: true, jobId };

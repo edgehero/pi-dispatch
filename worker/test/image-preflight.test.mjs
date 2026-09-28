@@ -29,6 +29,22 @@ function fakeSpawn(calls, plan, stdout = "") {
 	};
 }
 
+test("resolveJobImage refuses, as a config error, an image the one image rule refuses, whoever queued it (#471)", () => {
+	for (const bad of ["--privileged", " img", "img\u001b"]) {
+		assert.throws(() => resolveJobImage({ image: bad }, "pi-job:latest"), (e) => e.piDispatchConfig === true && /the job image must/.test(e.message), JSON.stringify(bad));
+	}
+	assert.throws(() => resolveJobImage({}, "-x"), (e) => e.piDispatchConfig === true, "the default too");
+	assert.equal(resolveJobImage({ image: "ok:1" }, "pi-job:latest"), "ok:1");
+	assert.equal(resolveJobImage({}, null), null, "no default and no job image stays nothing, as prepare's unwired stamp needs");
+});
+
+test("the image preflight refuses a queued bad image before it spawns anything (#471)", async () => {
+	const calls = [];
+	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: (...a) => (calls.push(a), null) });
+	await assert.rejects(() => preflight({ image: "--privileged" }), (e) => e.piDispatchConfig === true);
+	assert.equal(calls.length, 0, "no inspect was run with a flag where the image belongs");
+});
+
 test("resolveJobImage prefers the job's own image and falls back to the deployment default", () => {
 	assert.equal(resolveJobImage({ image: "my-python:1.2.0" }, "pi-job:latest"), "my-python:1.2.0");
 	assert.equal(resolveJobImage({}, "pi-job:latest"), "pi-job:latest", "a job that names none runs the deployment default");

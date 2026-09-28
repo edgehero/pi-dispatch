@@ -98,7 +98,7 @@ test("the logs viewer gates the file's own bytes, honours its width, and survive
   writeFileSync(join(dir, `${jobId}.log`), "line one\u001b[31m red\u0007\nline two\u009bCSI\n" + "x".repeat(200) + "\n");
   const view = fakeCtx({ withCustom: true });
   // THROUGH `process.env`, and this is the repair of a test that proved nothing. `dispatch` resolves its
-  // paths with `resolvePaths(process.env)` (index.ts) and never reads `ctx.env`, so the first version of
+  // paths from `process.env` (index.ts, through `deploymentEnv()` since #471) and never reads `ctx.env`, so the first version of
   // this test -- which passed only `ctx.env` -- landed on the NO-LOG branch every time: the `.log` written
   // above was never opened, and every per-line assertion below ran against a missing-file title and an
   // empty string. Two mutants that push the file's own lines raw survived the whole suite because of it.
@@ -1336,4 +1336,16 @@ test("the gated context follows pi when it swaps or invalidates its ui (#404)", 
   // And a STALE context throws through the gate, exactly as it does on the original.
   stale = true;
   assert.throws(() => gated.ui, /no longer active/, "the guard is preserved, not swallowed");
+});
+
+// Issue #471: every path the panel resolves, and the host-routing name, go through the deployment's .env resolution
+// (`deploymentEnv`, the worker's shared resolver), never through pi's environment alone.
+test("index.ts resolves paths and the worker name only through deploymentEnv (#471)", () => {
+  const src = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8").replace(/^\s*(\/\/|\*).*$/gm, "");
+  const calls = [...src.matchAll(/\bresolvePaths\(/g)].map((m) => src.slice(m.index, m.index + 30));
+  assert.deepEqual(calls.filter((c) => !c.startsWith("resolvePaths(deploymentEnv())")), [], "every resolvePaths call takes the resolved environment");
+  assert.ok(calls.length > 20, "and there are still the call sites there were");
+  assert.doesNotMatch(src, /process\.env\.PI_WORKER_NAME/);
+  assert.match(src, /enqueueDispatchRun\(\{ folder, flow, task, aiInvoked: false, env: deploymentEnv\(\) \}\)/);
+  assert.match(src, /aiInvoked: true,\n\s*env: deploymentEnv\(\),/);
 });

@@ -57,6 +57,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Type } from "typebox";
 import {
   resolvePaths,
+  panelEnv,
   readQueueState,
   readSchedulers,
   readBudget,
@@ -113,7 +114,7 @@ import { windowState } from "@edgehero/pi-dispatch/budget";
 // needs the pointed-at `deploymentDir` to find the deployment's installed runtime. readPointer stays pure
 // (it never stats that dir) -- the stat lives at the call site below, which is exactly where the pointer
 // module's documented purity says it belongs.
-import { applyDeploymentPointer, pointerPath, readPointer, takePointerNotice } from "./deployment-pointer.mjs";
+import { applyDeploymentPointer, pointerPath, pointerState, readPointer, takePointerNotice } from "./deployment-pointer.mjs";
 // The only fs use in this module: the skew notice reads one package.json through the wizard's own reader.
 // Everything else fs-shaped goes through read-model.mjs by design.
 import * as nodeFs from "node:fs";
@@ -171,6 +172,26 @@ let piVersionCheckDone = false;
  */
 let runtimeSkewNoticed = false;
 
+// Issue #471: the one line `panelEnv` has about the deployment's `.env` (a key pi's environment sets differently, a
+// line it could not read), drained by the next /dispatch like the pointer's notice, and said again only when it
+// changes, so a standing disagreement is one warning per session and not one per keystroke.
+let serviceEnvNoticePending: string | undefined;
+let serviceEnvNoticeShown: string | undefined;
+
+/**
+ * Issue #471: the environment every `resolvePaths` call and the host-routing name read: pi's own, with the deployment's
+ * `.env` filling what pi's does not set, by the rule doctor judges the service by (`panelEnv`, the worker's shared
+ * resolver). The deployment is the pointer's folder and nothing else (a repository pi starts in can commit init's
+ * scaffold, gate round 1); with no pointer, this is `process.env` exactly as before. Read per call, like
+ * `resolvePaths` itself, so an edit to `.env` reaches the next command without a restart.
+ */
+function deploymentEnv(): any {
+  const { deploymentDir, owned } = pointerState();
+  const { env, notice } = panelEnv({ env: process.env, pointerDir: deploymentDir, owned });
+  if (notice && notice !== serviceEnvNoticeShown) serviceEnvNoticePending = notice;
+  return env;
+}
+
 /** TEST-ONLY: arm the advisory directly (under the pinned devDep pi the natural computation is a no-op). */
 export function _setPiVersionAdvisoryForTests(message: string | undefined): void {
   piVersionAdvisory = message;
@@ -222,7 +243,7 @@ export default function admin(pi: ExtensionAPI): void {
   }
 
   // Layer the setup wizard's deployment pointer into process.env exactly once, before anything can call
-  // resolvePaths(process.env). Placement matters twice over: AFTER the capability probe, so a refused
+  // resolvePaths(deploymentEnv()). Placement matters twice over: AFTER the capability probe, so a refused
   // load stays a complete no-op (an extension that registers nothing must not mutate the env either);
   // and at the FACTORY top rather than inside the /dispatch handler, because resolvePaths runs
   // per-command AND per LLM tool call -- an operator who never types /dispatch but lets the model call
@@ -297,7 +318,7 @@ function registerTools(pi: ExtensionAPI): void {
       "Read-only. Reports pi-dispatch queue/worker state: paused flag, job counts, connected workers, today's budget use, schedulers, runtime settings overlay.",
     parameters: Type.Object({}),
     async execute() {
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       const [queue, budget, schedulers] = await Promise.all([
         readQueueState({ url: paths.valkeyUrl }),
         readBudget({ url: paths.valkeyUrl }),
@@ -318,7 +339,7 @@ function registerTools(pi: ExtensionAPI): void {
       jobId: Type.Optional(Type.String()),
     }),
     async execute(_toolCallId, params) {
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       if (params.jobId) return toolText(JSON.stringify(readRun({ logsDir: paths.logsDir, jobId: params.jobId })));
       // `{runs, hosts, mirror}` rather than a bare array (issue #57, Gap 3). The one deliberate tool-shape
       // change here, and this surface's own doctrine is the justification: typed dollars carry their
@@ -345,7 +366,7 @@ function registerTools(pi: ExtensionAPI): void {
       if (!COSTS_WINDOWS.includes(window)) {
         throw new Error(`unknown window '${window}' (7d|30d|mtd)`);
       }
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       const res = assembleCosts(paths, window, params.flow, params.repo);
       if (res.unreachable) throw new Error(`could not read the run history: ${res.unreachable}`);
       // The fold's dollars are TYPED `{ usd, class, floor, ... }` on purpose: the class rides beside every
@@ -363,7 +384,7 @@ function registerTools(pi: ExtensionAPI): void {
     executionMode: "sequential",
     parameters: Type.Object({}),
     async execute() {
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       const res = await setQueuePaused({ url: paths.valkeyUrl, paused: true });
       if (res.unreachable) {
         throw new Error(`could not reach the queue at ${paths.valkeyUrl}: ${res.unreachable}`);
@@ -384,7 +405,7 @@ function registerTools(pi: ExtensionAPI): void {
     executionMode: "sequential",
     parameters: Type.Object({}),
     async execute() {
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       const res = await setQueuePaused({ url: paths.valkeyUrl, paused: false });
       if (res.unreachable) {
         throw new Error(`could not reach the queue at ${paths.valkeyUrl}: ${res.unreachable}`);
@@ -413,6 +434,7 @@ function registerTools(pi: ExtensionAPI): void {
         flow: params.flow,
         task: params.task,
         aiInvoked: true,
+        env: deploymentEnv(),
       });
       if (res.refused) throw new Error(res.refused);
       if (res.unreachable) throw new Error(`could not reach the queue: ${res.unreachable}`);
@@ -431,7 +453,7 @@ function registerTools(pi: ExtensionAPI): void {
       "a disarmed entry still lists here but matches nothing until an operator deletes the key to re-arm it.",
     parameters: Type.Object({}),
     async execute() {
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       const t = readTriggers({ triggersPath: paths.triggersPath });
       const data = Array.isArray(t?.triggers)
         ? t.triggers.map((tr: any, index: number) => ({ index, ...tr }))
@@ -454,7 +476,7 @@ function registerTools(pi: ExtensionAPI): void {
       if (!KNOWN_KEYS.includes(params.key)) {
         throw new Error(`unknown key '${params.key}'. valid keys: ${KNOWN_KEYS.join(", ")}`);
       }
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       const view = readSettingsView({ settingsFile: paths.settingsFile });
       const oldVal = view?.overlay?.[params.key];
       const unset = params.value === undefined || params.value.trim() === "";
@@ -551,7 +573,7 @@ function registerTools(pi: ExtensionAPI): void {
         ctx,
         { title: `Add ${params.kind} trigger`, message: `Add to triggers.json:\n${JSON.stringify(entry)}` },
         () => {
-          const res = writeTriggers({ triggersPath: resolvePaths(process.env).triggersPath, mutate: (list: any[]) => [...list, entry] });
+          const res = writeTriggers({ triggersPath: resolvePaths(deploymentEnv()).triggersPath, mutate: (list: any[]) => [...list, entry] });
           if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
           return { applied: true, added: entry };
         },
@@ -571,7 +593,7 @@ function registerTools(pi: ExtensionAPI): void {
     executionMode: "sequential",
     parameters: Type.Object({ index: Type.Integer({ minimum: 0 }), flow: Type.String(), backend: Type.Optional(Type.String()) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       const list = triggerList(paths);
       const cur = list[params.index];
       if (!cur) throw new Error(`no trigger at index ${params.index} (have ${list.length})`);
@@ -614,7 +636,7 @@ function registerTools(pi: ExtensionAPI): void {
       "Use the index for dispatch_pause_edit / dispatch_pause_delete.",
     parameters: Type.Object({}),
     async execute() {
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       const p = readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath });
       const data = Array.isArray(p?.windows) ? p.windows.map((w: any, index: number) => ({ index, ...w })) : p;
       return toolText(JSON.stringify(data));
@@ -641,7 +663,7 @@ function registerTools(pi: ExtensionAPI): void {
       dateTo: Type.Optional(Type.String()),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       const w = buildPauseWindow(params);
       const result = await confirmedWrite(
         ctx,
@@ -665,7 +687,7 @@ function registerTools(pi: ExtensionAPI): void {
     executionMode: "sequential",
     parameters: Type.Object({ index: Type.Integer({ minimum: 0 }) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       const p = readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath });
       const list = Array.isArray(p?.windows) ? p.windows : [];
       const cur = list[params.index];
@@ -703,7 +725,7 @@ function registerTools(pi: ExtensionAPI): void {
       dateTo: Type.Optional(Type.String()),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       const p = readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath });
       const list = Array.isArray(p?.windows) ? p.windows : [];
       const cur = list[params.index];
@@ -743,7 +765,7 @@ function registerTools(pi: ExtensionAPI): void {
       "for local jobs is separate: it has no entry here and no switch anywhere.",
     parameters: Type.Object({}),
     async execute() {
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       const p = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
       if (!Array.isArray((p as any)?.limits)) return toolText(JSON.stringify(p));
       const counters = await readScopedBudget({ url: paths.valkeyUrl, limits: (p as any).limits });
@@ -763,7 +785,7 @@ function registerTools(pi: ExtensionAPI): void {
       "only waits appear here. Use the job id for dispatch_wait_cancel.",
     parameters: Type.Object({}),
     async execute() {
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       const held = await readHeldJobs({ url: paths.valkeyUrl });
       return toolText(JSON.stringify(held));
     },
@@ -782,7 +804,7 @@ function registerTools(pi: ExtensionAPI): void {
     executionMode: "sequential",
     parameters: Type.Object({ jobId: Type.String({ minLength: 1 }) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       const held = await readHeldJobs({ url: paths.valkeyUrl });
       if ((held as any).unreachable) throw new Error(`queue unreachable: ${(held as any).unreachable}`);
       const row = ((held as any).rows ?? []).find((r: any) => r.jobId === params.jobId);
@@ -819,7 +841,7 @@ function registerTools(pi: ExtensionAPI): void {
       concurrent: Type.Optional(Type.Integer({ minimum: 1 })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       const l = buildScopedLimit(params);
       const result = await confirmedWrite(
         ctx,
@@ -843,7 +865,7 @@ function registerTools(pi: ExtensionAPI): void {
     executionMode: "sequential",
     parameters: Type.Object({ index: Type.Integer({ minimum: 0 }) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       const p = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
       const list = Array.isArray((p as any)?.limits) ? (p as any).limits : [];
       const cur = list[params.index];
@@ -879,7 +901,7 @@ function registerTools(pi: ExtensionAPI): void {
       concurrent: Type.Optional(Type.Integer({ minimum: 1 })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       const p = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
       const list = Array.isArray((p as any)?.limits) ? (p as any).limits : [];
       const cur = list[params.index];
@@ -916,7 +938,7 @@ function registerTools(pi: ExtensionAPI): void {
     executionMode: "sequential",
     parameters: Type.Object({ index: Type.Integer({ minimum: 0 }) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(process.env);
+      const paths = resolvePaths(deploymentEnv());
       const list = triggerList(paths);
       const cur = list[params.index];
       if (!cur) throw new Error(`no trigger at index ${params.index} (have ${list.length})`);
@@ -1192,7 +1214,7 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
   const notify = ctx?.ui?.notify?.bind(ctx.ui);
   const tokens = args.trim().split(/\s+/).filter(Boolean);
   const sub = tokens[0] ?? "";
-  const paths = resolvePaths(process.env);
+  const paths = resolvePaths(deploymentEnv());
   // Glyph posture BEFORE any rendering: every /dispatch surface (the overlay, the insights surfaces)
   // draws through panel.mjs' active table, and this is the one funnel all subcommands pass through. The
   // dashboard's own styler opts in per instance (makeStyler's `ascii`, threaded from these same paths in
@@ -1204,6 +1226,12 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
   // never into model context.
   const pnote = takePointerNotice();
   if (pnote) notify?.(pnote, "warning");
+  // And the deployment `.env`'s (issue #471), resolved just above by `deploymentEnv()`.
+  if (serviceEnvNoticePending) {
+    notify?.(serviceEnvNoticePending, "warning");
+    serviceEnvNoticeShown = serviceEnvNoticePending;
+    serviceEnvNoticePending = undefined;
+  }
 
   // Drain the factory's version advisory the same way, once per process -- and at "info", not
   // "warning": a different-but-capable pi is a heads-up, not a defect (issue #96). Sits before the
@@ -1326,7 +1354,7 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
       }
       // Operator path (aiInvoked:false): ungated -- typing the command is the approval -- but the dirty
       // guard still fires inside enqueueDispatchRun. No spend knobs; provider/model/maxTurns resolve worker-side.
-      const res = await enqueueDispatchRun({ folder, flow, task, aiInvoked: false });
+      const res = await enqueueDispatchRun({ folder, flow, task, aiInvoked: false, env: deploymentEnv() });
       if (res.refused) {
         notify?.(res.refused, "error");
         return;
@@ -2439,7 +2467,7 @@ async function showLogs(logsDir: string, tokens: string[], ctx: any): Promise<vo
   // as "no captured log" (issue #57, Gap 3). One file read that the viewer would not otherwise do, on a
   // command an operator types by hand -- and only its `host` field is used.
   const record: any = readRun({ logsDir, jobId });
-  const tail = readLogTail({ logsDir, jobId, lines, host: record?.host ?? null, self: process.env.PI_WORKER_NAME ?? null });
+  const tail = readLogTail({ logsDir, jobId, lines, host: record?.host ?? null, self: deploymentEnv().PI_WORKER_NAME ?? null });
 
   const custom = ctx?.ui?.custom;
   if (typeof custom !== "function") {
@@ -2530,7 +2558,7 @@ function completeArguments(prefix: string) {
   }
   if (parts[0] === "logs" && parts.length === 2) {
     const partial = parts[1];
-    const ids = listRunIds({ logsDir: resolvePaths(process.env).logsDir });
+    const ids = listRunIds({ logsDir: resolvePaths(deploymentEnv()).logsDir });
     const items = ids
       .filter((id) => id.startsWith(partial))
       .map((id) => ({ value: `logs ${id}`, label: id }));

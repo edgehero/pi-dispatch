@@ -67,6 +67,10 @@ let notice;
 // re-apply after it rewrites the pointer.
 const ownedKeys = new Set();
 
+// The deployment folder the last layering named (issue #471): where the panel reads the deployment's own `.env`, the
+// file its service reads, through the worker's shared resolver (`panelEnv`, read-model.mjs). Null with no valid pointer.
+let pointedDir = null;
+
 /**
  * Where the pointer lives: `PI_DISPATCH_DEPLOYMENT_FILE`, defaulting to pi's own agent dir
  * (`PI_CODING_AGENT_DIR` or `~/.pi/agent` -- the repo's one established home-dir pattern, resolved the
@@ -169,6 +173,7 @@ function layerPointer(env, fs) {
     return { applied: [] };
   }
   if (res.absent) return { applied: [] };
+  pointedDir = res.pointer.deploymentDir;
   const applied = [];
   for (const [key, value] of Object.entries(res.pointer.env)) {
     if (env[key] !== undefined && !ownedKeys.has(key)) continue; // the operator's export always wins
@@ -210,6 +215,16 @@ export function reapplyDeploymentPointer(env = process.env, { fs = nodeFs } = {}
 }
 
 /**
+ * Issue #471: what the layering left for the panel's `.env` resolution: the pointer's deployment folder (null when no
+ * valid pointer was applied) and the keys this module wrote into the env, which the deployment's `.env` outranks, since
+ * the service reads that file and the pointer is only the wizard's snapshot of it. An operator's own export outranks
+ * both and is never in `owned`.
+ */
+export function pointerState() {
+  return { deploymentDir: pointedDir, owned: [...ownedKeys] };
+}
+
+/**
  * Return the retained one-line notice once, then clear it -- undefined when there is nothing to say.
  * The `/dispatch` handler drains this into `notify(..., "warning")`, which is the pointer's entire error
  * surface: one line, once, never a throw.
@@ -246,4 +261,5 @@ export function resetForTests() {
   appliedOnce = false;
   notice = undefined;
   ownedKeys.clear();
+  pointedDir = null;
 }

@@ -1058,8 +1058,10 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    `pi-dispatch doctor --live` as the same account, from the deployment folder. doctor reads `PI_BACKENDS`,
    `PI_EGRESS` and `PI_EGRESS_PROXY` as `up` and `service install` do: this shell's value where it sets one, else
    `.env`'s, and a line naming the file when it supplied one; a shell and a `.env` that set one differently is a ✗,
-   since the service runs the file (issue #453). It takes the service's `VALKEY_URL`, `PI_PROVIDER` and the provider
-   key's presence from `.env` the same way where this shell does not set them, and says so; it never prints a key. doctor's podman section checks that `podman info` answered, that
+   since the service runs the file (issue #453). It takes every other service setting it judges from `.env` the same
+   way where this shell does not set it (`VALKEY_URL`, `PI_PROVIDER`, the provider key's presence, and since issue #471
+   `PI_JOB_IMAGE`, `PI_TRIGGERS_FILE`, the dirs and the rest), and says so; a shell and a `.env` that set one
+   differently is a ✗ there too, a credential named without its value; it never prints a key. doctor's podman section checks that `podman info` answered, that
    the service is rootless and not remote, that a user manager runs with the controllers delegated and Podman puts
    containers under it (step 3), whether SELinux relabelling applies,
    that the job image is in this account's store, and, with the egress policy armed, that the proxy is running under

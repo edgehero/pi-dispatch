@@ -1,11 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
 import {
   resolvePaths,
+  panelEnv,
+  PANEL_SERVICE_KEYS,
+  DEPLOYMENT_SCAFFOLD_FILES,
   readQueueState,
   readSchedulers,
   readBudget,
@@ -2279,4 +2282,108 @@ test("excludeTools reaches the display record on ALL FIVE arms -- the backend-mi
   // fail-loud) rather than inventing a narrowing the job will not have.
   assert.equal(normalizeTriggerForDisplay({ on: { type: "label", any: ["x"] }, run: { kind: "github", flow: "f", excludeTools: "bash" } }).excludeTools, null);
   assert.equal(normalizeTriggerForDisplay({ on: { type: "label", any: ["x"] }, run: { kind: "github", flow: "f", excludeTools: [] } }).excludeTools, null);
+});
+
+// ---- issue #471: the panel reads the deployment's .env by the rule doctor judges the service by ----
+
+/** A folder carrying init's whole scaffold (so the panel may read its .env), with `envText` as that .env. */
+function scaffoldedDeployment(envText, tag = "pi-471-panel-") {
+  const dir = realpathSync(tempDir(tag));
+  for (const name of DEPLOYMENT_SCAFFOLD_FILES) writeFileSync(join(dir, name), name === ".env" ? envText : "{}\n");
+  return dir;
+}
+
+test("panelEnv: the pointed deployment's .env fills what pi's environment does not set, relative paths from the deployment folder (#471)", () => {
+  const dir = scaffoldedDeployment("PI_LOGS_DIR=logs\nVALKEY_URL=redis://127.0.0.1:16471\nPI_WORKER_NAME=mini1\nPI_BACKENDS=podman\nPI_DISPATCH_RUN_ROOTS=/everything\n");
+  const { env, notice } = panelEnv({ env: { HOME: "/h", PI_TRIGGERS_FILE: "/mine/triggers.json" }, pointerDir: dir, platform: "linux" });
+  assert.equal(env.PI_LOGS_DIR, join(dir, "logs"), "relative to the service's working directory, not pi's");
+  assert.equal(env.VALKEY_URL, "redis://127.0.0.1:16471");
+  assert.equal(env.PI_WORKER_NAME, "mini1");
+  assert.equal(env.PI_TRIGGERS_FILE, "/mine/triggers.json", "pi's own export wins");
+  assert.equal(env.HOME, "/h");
+  // Capability-shaped keys stay this process's own (OQ-038): never from the file.
+  assert.equal(env.PI_BACKENDS, undefined);
+  assert.equal(env.PI_DISPATCH_RUN_ROOTS, undefined);
+  assert.equal(notice, undefined);
+  const paths = resolvePaths(env);
+  assert.equal(paths.logsDir, join(dir, "logs"));
+  assert.equal(paths.valkeyUrl, "redis://127.0.0.1:16471");
+  for (const key of ["PI_BACKENDS", "PI_BACKEND_FLOOR", "PI_EGRESS", "PI_EGRESS_PROXY", "DOCKER_HOST", "PI_DISPATCH_RUN_ROOTS", "PI_DISPATCH_RUN_PER_HOUR"]) assert.ok(!PANEL_SERVICE_KEYS.includes(key), key);
+});
+
+test("panelEnv: with no pointer no .env is read, not even from a cwd carrying init's whole scaffold (#471, gate round 1)", () => {
+  // A repository can commit the four scaffold files; pi started in it took its VALKEY_URL, paths and worker name (c5).
+  const dir = scaffoldedDeployment("VALKEY_URL=redis://198.51.100.7:6379\nPI_TRIGGERS_FILE=/attacker.json\nPI_WORKER_NAME=evilhost\n", "pi-471-panel-repo-");
+  const env = { HOME: "/h" };
+  const r = panelEnv({ env, cwd: dir, platform: "linux" });
+  assert.equal(r.env, env, "pi's environment, untouched");
+  assert.equal(r.dir, null);
+  const paths = resolvePaths(r.env);
+  assert.equal(paths.valkeyUrl, "redis://127.0.0.1:6379");
+  assert.equal(r.env.PI_WORKER_NAME, undefined);
+  assert.notEqual(paths.triggersPath, "/attacker.json");
+});
+
+test("panelEnv: a pointed .env another account could write is not read, and is said (#471, gate round 1)", () => {
+  const dir = scaffoldedDeployment("VALKEY_URL=redis://198.51.100.7:6379\n", "pi-471-panel-open-");
+  chmodSync(join(dir, ".env"), 0o666);
+  const r = panelEnv({ env: {}, pointerDir: dir, platform: "linux" });
+  assert.equal(r.env.VALKEY_URL, undefined);
+  assert.match(r.notice, /\.env is owned by .* with mode 0666, writable by every account, so the panel takes nothing from it/);
+  assert.doesNotMatch(r.notice, /owned by uid \d/, "the owner by name, as doctor says it (gate round 3)");
+  chmodSync(join(dir, ".env"), 0o600);
+  const foreign = panelEnv({ env: {}, pointerDir: dir, platform: "linux", uid: 4242 });
+  assert.equal(foreign.env.VALKEY_URL, undefined, "another account's file");
+  assert.match(foreign.notice, /not by this account or root/);
+  assert.equal(panelEnv({ env: {}, pointerDir: dir, platform: "linux" }).env.VALKEY_URL, "redis://198.51.100.7:6379", "this account's, closed: read");
+});
+
+test("panelEnv: the pointer's folder is the deployment, and its .env outranks what the pointer layered, never an export (#471)", () => {
+  const dir = scaffoldedDeployment("PI_LOGS_DIR=/from/env/logs\n", "pi-471-panel-ptr-");
+  const other = realpathSync(tempDir("pi-471-panel-cwd-"));
+  const layered = { PI_LOGS_DIR: "/from/pointer/logs", PI_SETTINGS_FILE: "/from/pointer/settings.json" };
+  const r = panelEnv({ env: layered, pointerDir: dir, owned: ["PI_LOGS_DIR", "PI_SETTINGS_FILE"], platform: "linux" });
+  assert.equal(r.env.PI_LOGS_DIR, "/from/env/logs", "the service's file, over the wizard's snapshot of it");
+  assert.equal(r.env.PI_SETTINGS_FILE, "/from/pointer/settings.json", "the pointer still fills what the file does not set");
+  const exported = panelEnv({ env: { PI_LOGS_DIR: "/exported" }, pointerDir: dir, owned: [], platform: "linux" });
+  assert.ok(other, "a cwd elsewhere changes nothing");
+  assert.equal(exported.env.PI_LOGS_DIR, "/exported");
+  assert.match(exported.notice, /pi's environment and .* set PI_LOGS_DIR differently: the panel uses pi's, the service runs the file's/);
+});
+
+test("panelEnv: a disagreement and an unreadable line are said by name, never by value (#471)", () => {
+  const dir = scaffoldedDeployment("VALKEY_URL=redis://:file-password@127.0.0.1:6380\nPI_LOGS_DIR=/srv/$USER/logs\n");
+  const r = panelEnv({ env: { VALKEY_URL: "redis://:shell-password@127.0.0.1:6379" }, pointerDir: dir, platform: "linux" });
+  assert.equal(r.env.VALKEY_URL, "redis://:shell-password@127.0.0.1:6379", "pi's value, as a worker started from this shell would use");
+  assert.equal(r.env.PI_LOGS_DIR, undefined, "a line the loaders read differently is never used");
+  assert.match(r.notice, /assigns PI_LOGS_DIR \(line 2\) in a form the service's loader may read differently, so the panel used none of those values/);
+  assert.match(r.notice, /set VALKEY_URL differently/);
+  assert.doesNotMatch(r.notice, /password|\$USER/);
+});
+
+test("enqueueDispatchRun routes onto this host's queue by the worker name the resolved environment carries (#471)", async () => {
+  const { root, folder } = tempRootAndFolder("pi-471-enqueue-");
+  const names = [];
+  const { fakes } = dispatchFakes({
+    env: { VALKEY_URL: "redis://x", PI_DISPATCH_RUN_PER_HOUR: "3", PI_DISPATCH_RUN_ROOTS: root, PI_WORKER_NAME: "mini1" },
+    makeQueueFn: (_conn, opts) => {
+      names.push(opts?.name ?? null);
+      return { async add() { return {}; }, async close() {} };
+    },
+  });
+  const res = await enqueueDispatchRun({ folder, flow: "review", task: "t", aiInvoked: false, ...fakes });
+  assert.ok(res.ok, JSON.stringify(res));
+  assert.equal(names.length, 1);
+  assert.match(String(names[0]), /mini1/, "the name from the env the caller resolved, not process.env");
+});
+
+test("panelEnv: a pointed .env in a folder another account can change is not read, through the doctor's own reader (#471 gate 2)", () => {
+  const dir = scaffoldedDeployment("VALKEY_URL=redis://198.51.100.7:6379\n", "pi-471-panel-folder-");
+  chmodSync(join(dir, ".env"), 0o600);
+  chmodSync(dir, 0o777);
+  const r = panelEnv({ env: {}, pointerDir: dir, platform: "linux" });
+  assert.equal(r.env.VALKEY_URL, undefined);
+  assert.match(r.notice, /\.env is in a folder another account can change: .* with mode 0777/);
+  chmodSync(dir, 0o700);
+  assert.equal(panelEnv({ env: {}, pointerDir: dir, platform: "linux" }).env.VALKEY_URL, "redis://198.51.100.7:6379");
 });

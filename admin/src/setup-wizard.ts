@@ -38,7 +38,7 @@ import {
   reapplyDeploymentPointer,
   writePointer,
 } from "./deployment-pointer.mjs";
-import { readQueueState, resolvePaths, writeTriggers } from "./read-model.mjs";
+import { DEPLOYMENT_SCAFFOLD_FILES, readQueueState, resolvePaths, writeTriggers } from "./read-model.mjs";
 // The worker's own answers to "which venues does this list bless" and "set this .env key unless the operator already
 // did" (issue #430): one parse and one never-clobber writer, never a second copy of either in the admin.
 import { venuesOf } from "@edgehero/pi-dispatch/backends";
@@ -80,7 +80,8 @@ const RECEIVER_PKG = "@edgehero/pi-dispatch-receiver";
 
 /** The pointer marker file suffix and the four-file cwd scaffold signature, shared by detect + nudge. */
 const NUDGE_MARKER_BASENAME = "pi-dispatch-setup.nudged";
-const CWD_SCAFFOLD_FILES = [".env", "triggers.json", "pause-windows.json", "subscriptions.json"];
+// Spelled once in read-model.mjs since issue #471, where it also decides which cwd `.env` the panel may read.
+const CWD_SCAFFOLD_FILES = DEPLOYMENT_SCAFFOLD_FILES;
 
 /**
  * The env keys whose PRESENCE means "the operator pointed the admin at a deployment": the pointer

@@ -278,6 +278,29 @@ test("env overrides every field", () => {
 	assert.equal(c.jobsDir, "/srv/jobs");
 });
 
+// Issue #471: PI_JOB_IMAGE is judged at boot by the one image rule run.image is (image-ref.mjs), a config error (the
+// CLI's exit 2) naming the key; before #471 a dash-leading value booted and every job handed docker a flag.
+test("PI_JOB_IMAGE is refused at boot, naming the key, by the same rule run.image is (#471)", () => {
+	for (const bad of ["--privileged", " pi-job:latest", "pi-job:latest ", "   ", "pi\u001b[2Jjob"]) {
+		assert.throws(() => loadConfig({ PI_JOB_IMAGE: bad }), (e) => e.piDispatchConfig === true && /^PI_JOB_IMAGE must /.test(e.message), JSON.stringify(bad));
+	}
+	assert.equal(loadConfig({ PI_JOB_IMAGE: "" }).jobImage, "pi-job:latest", "empty is the default, as before");
+	assert.equal(loadConfig({}).jobImage, "pi-job:latest");
+	for (const ok of ["registry.internal:5000/team/img:1.2", "ghcr.io/org/img@sha256:abc", "img"]) assert.equal(loadConfig({ PI_JOB_IMAGE: ok }).jobImage, ok);
+});
+
+test("one image rule: run.image, PI_JOB_IMAGE and doctor refuse exactly the same values (#471)", async () => {
+	const { parseTriggers } = await import("../src/triggers.mjs");
+	const { jobImageOf } = await import("../src/doctor.mjs");
+	const trigger = (image) => JSON.stringify({ triggers: [{ on: { type: "cron", id: "n", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/r", flow: "f", task: "t", image } }] });
+	for (const value of ["--x", " a", "a ", "a\u0007b", "a\u009bb", "ok:1", "reg:5000/a/b@sha256:0"]) {
+		const worker = (() => { try { loadConfig({ PI_JOB_IMAGE: value }); return true; } catch { return false; } })();
+		const triggers = (() => { try { parseTriggers(trigger(value), "/t.json"); return true; } catch { return false; } })();
+		const doctor = jobImageOf({ PI_JOB_IMAGE: value }).refused === null;
+		assert.deepEqual([worker, triggers, doctor], [worker, worker, worker], `${JSON.stringify(value)}: worker ${worker}, run.image ${triggers}, doctor ${doctor}`);
+	}
+});
+
 test("a malformed integer is a config error, not a silent NaN", () => {
 	for (const bad of ["0", "-1", "3.5", "abc", "3x"]) {
 		assert.throws(() => loadConfig({ PI_CONCURRENCY: bad }), (e) => e.piDispatchConfig === true, `PI_CONCURRENCY=${bad}`);

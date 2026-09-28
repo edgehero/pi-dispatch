@@ -12,6 +12,7 @@ import {
   takePointerNotice,
   writePointer,
   resetForTests,
+  pointerState,
 } from "../src/deployment-pointer.mjs";
 
 /**
@@ -274,4 +275,15 @@ test("the allowlist is exactly the seven resolvePaths path/URL keys, and the ver
     "VALKEY_URL",
   ]);
   assert.equal(POINTER_VERSION, 1);
+});
+
+test("pointerState names the pointed folder and only the keys the layering wrote, for the panel's .env resolution (#471)", () => {
+  resetForTests();
+  assert.deepEqual(pointerState(), { deploymentDir: null, owned: [] }, "nothing applied, nothing to say");
+  const fs = fakeFs({ [P]: pointerJson({ PI_LOGS_DIR: join(DIR, "logs"), PI_TRIGGERS_FILE: join(DIR, "triggers.json") }) });
+  const env = envWith({ PI_TRIGGERS_FILE: "/operator/triggers.json" });
+  applyDeploymentPointer(env, { fs });
+  assert.deepEqual(pointerState(), { deploymentDir: DIR, owned: ["PI_LOGS_DIR"] }, "an operator export is never the pointer's");
+  resetForTests();
+  assert.deepEqual(pointerState(), { deploymentDir: null, owned: [] });
 });

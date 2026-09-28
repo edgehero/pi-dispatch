@@ -43,8 +43,8 @@ assume you might, which is the closest this project came to documenting it befor
 - `pi-dispatch up` says `no .env here — skipped (set it wherever your env lives)` rather than writing
   one.
 
-**One reader exists, and it is worth knowing exactly how narrow it is**, because the sentence above is
-the kind that quietly stops being true. `pi-dispatch doctor` reads the `.env` in its own working
+**Two readers exist, and it is worth knowing exactly how narrow the first is**, because the sentence
+above is the kind that quietly stops being true. `pi-dispatch doctor` reads the `.env` in its own working
 directory for **two keys**, `PI_PAUSE_WINDOWS_FILE` and `PI_SCOPED_LIMITS_FILE`, and the reason is that
 `pi-dispatch up` writes them there. Writing a line into `.env` configures the **service**, through the
 slots in the table above, and configures nothing about a shell you later type `pi-dispatch doctor` into.
@@ -66,6 +66,57 @@ The narrowing is the whole of the licence, and each half is load-bearing:
 - **doctor is not the worker**. The sentence at the top of this page is about the process that runs jobs,
   and it is still exactly true: `loadConfig` reads the environment, there is still no dotenv dependency,
   and `PI_ENV_SETUP` inside a `./.env` is still deliberately **not** honoured, which the test suite pins.
+
+**A second reader judges the service's own settings** (issues #453, #464 and #471). The service reads every
+setting from this file, so a doctor that took them from its own shell judged a deployment that was not running.
+doctor now resolves every service key it judges ONCE, by one rule it shares with the `/dispatch` panel
+(`worker/src/service-env.mjs`):
+
+- this shell's value where it sets one, because a worker started by hand from this shell runs with it;
+- else the `.env`'s, from a line the service's loader reads exactly as written, and said: a `✓ service settings
+  read from <path>` line names each key the file supplied (names, never values);
+- a key both set differently is a **✗** naming both values, and doctor then judges this shell's. A credential
+  (a token, a webhook secret, the App key, a provider key, the PAT) is named without either value, and a URL is
+  printed without its credentials. doctor cannot tell which of the two runs, so it fails until they agree;
+- a line the loaders read differently (a `$`, a quote, a space) is named with its line number and its value is
+  never used.
+
+Some of these values steer what doctor starts or connects to, and each is judged first, the way the worker
+judges it: `PI_JOB_IMAGE` by the worker's own default and its `run.image` refusals (a blank, padded or
+dash-leading value is named and never handed to docker), `VALKEY_URL` by the owner rule, and a session store
+named only in `.env` is offered by `doctor --fix` at the prompt tier instead of created silently. A relative
+`PI_TRIGGERS_FILE` is the deployment folder's, as the worker reads it. `PI_ENV_SETUP`, `XDG_DATA_HOME` and
+`DOCKER_CONTENT_TRUST` stay this shell's on purpose. The panel reads the same way, from the pointer's deployment
+folder only, never from a `.env` in the folder pi was started in (a repository can ship one), and says a
+disagreement once as a warning.
+
+**Nothing from `.env` reaches a program doctor starts.** Its podman, docker, gh and every other child run with
+the environment of the shell you started doctor in, exactly as before this reader existed. The service's own
+CLIs do read their variables from `.env` (`CONTAINERS_CONF` and its siblings, `CONTAINER_HOST`, `DOCKER_HOST`,
+`DOCKER_CONFIG`, `GH_CONFIG_DIR`, the gh token and the rest), so for each one the file sets doctor prints a ⚠
+naming it (its value only when it is a path): its probes through that CLI describe your shell's view, not the
+service's. Where the service's setting decides something doctor judges by READING files, doctor uses the file's
+value, in-process: the containers.conf chain check reads the chain `CONTAINERS_CONF`, `CONTAINERS_CONF_OVERRIDE`,
+`XDG_CONFIG_HOME` and (for rootful Podman) `HOME` select, as the worker does, and fails on a chain the worker would
+refuse. Reading a file runs
+no code. A PAT, or the `GITHUB_PAT_VAR` naming it, that only the file holds means the in-image `gh` probe is not
+run, and that is said. This is the simple rule the PR settled on after three rounds of rules for handing such
+values on safely each had a hole (a link flipped between check and use, a missing path another account created
+in time under `/tmp`, a socket held back that should not have been): a program that never sees them has none.
+
+**From a `.env` another account can change, nothing is taken at all.** The file is opened once and judged by that
+open file: it must belong to you or root and be writable by nobody else, and its folder, its real folder and
+every directory above them likewise (a root-owned sticky directory such as `/tmp` is the one exception, since
+there only an entry's owner can move it). Otherwise doctor fails naming the file or directory, its owner, mode
+and, for a group-writable one, its group (said as your own group when it has your name, which a umask 002 login
+makes: doctor still trusts only a file no group can write), and judges this shell's values alone; the panel says
+the same, with the owner's name, and reads none of it. Where a service unit is installed for the folder, doctor
+names the service keys only its own shell sets, since the service runs without them.
+
+**What remains is by design: a deployment folder is trusted exactly as far as the service trusts it.** The job
+image your own `.env` names is the image doctor's egress canary and in-image probes run, in containers built
+with the same pinned flags a job gets, as the service runs it; doctor checks the name against the worker's image
+rule first and hands the runtime nothing else from the file.
 
 ## What actually holds a secret
 

@@ -25,6 +25,7 @@
 
 import { BACKEND_NAMES, backendFor } from "./backends.mjs";
 import { EGRESS_ENV_VARS, WORKER_ONLY_SECRET_VARS, configError } from "./config.mjs";
+import { imageRefProblem } from "./image-ref.mjs";
 // SKILL_NAME_RE is the single-sourced skill charset (flow-gate exports it for exactly this reason:
 // materialize.mjs and the admin already import it, and a keep-in-sync copy would drift where a
 // traversal guard cannot). flow-gate's module body is import-inert, so this keeps parseTriggers pure.
@@ -523,15 +524,18 @@ function validateResumeFlag(run, at, path) {
 function validateImageRef(run, at, path) {
 	const image = run.image;
 	if (image === undefined) return undefined;
-	if (typeof image !== "string" || image.trim() === "") {
+	// The shared rule (`image-ref.mjs`, issue #471), so PI_JOB_IMAGE at boot and doctor refuse exactly what this does.
+	const problem = imageRefProblem(image);
+	if (problem?.code === "blank") {
 		throw configError(`${at}: run.image must be a non-empty string when present: ${path}`);
 	}
-	if (image !== image.trim()) {
+	if (problem?.code === "padded") {
 		throw configError(`${at}: run.image must not have leading or trailing whitespace (got ${JSON.stringify(image)}): ${path}`);
 	}
-	if (image.startsWith("-")) {
+	if (problem?.code === "dash") {
 		throw configError(`${at}: run.image must not start with "-" -- it is passed as the image positional in the docker argv, where a leading dash parses as a flag (got ${JSON.stringify(image)}): ${path}`);
 	}
+	if (problem) throw configError(`${at}: run.image ${problem.reason} (got ${JSON.stringify(image)}): ${path}`);
 	return image;
 }
 

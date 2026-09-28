@@ -5,6 +5,7 @@ import { parseArgs } from "node:util";
 import { loadConfig } from "./config.mjs";
 import { EXIT_POLICY } from "./exit-code.mjs";
 import { gitDirty } from "./git-dirty.mjs";
+import { imageRefProblem } from "./image-ref.mjs";
 
 /** How long the kill switch waits on the host registry before acting on the shared queue alone. */
 const FLEET_READ_TIMEOUT_MS = 2_000;
@@ -121,6 +122,12 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		const folder = positionals[0] && resolve(positionals[0]);
 		if (!folder || !existsSync(folder)) return fail(`folder not found: ${positionals[0] ?? "(none given)"}`);
 		if (!values.task) return fail("a --task is required");
+		// The one image rule (`image-ref.mjs`, issue #471 gate round 1), before anything is queued: a dash-leading `--image`
+		// was enqueued as it was and reached the runtime's argv as a flag at job start. Empty stays "the default", as below.
+		if (values.image) {
+			const problem = imageRefProblem(values.image);
+			if (problem) return fail(`--image ${problem.reason} (got ${JSON.stringify(values.image)})`);
+		}
 
 		// A local job edits the folder IN PLACE with no undo (SECURITY.md). Refuse a dirty working
 		// tree unless --force, so a bad run cannot mix with uncommitted work the operator can't

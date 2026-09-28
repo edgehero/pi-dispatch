@@ -86,6 +86,15 @@ test("run stops on the Valkey refusal before it enqueues anything (#464)", { ski
 	assert.deepEqual(asked, [process.env.VALKEY_TEST_URL]);
 });
 
+test("run --image refuses, before anything is queued, an image the one image rule refuses (#471)", async () => {
+	const dir = gitRepo({ dirty: false });
+	for (const bad of ["--privileged", " img", "img\u0007"]) {
+		// No VALKEY_URL is reachable here: the refusal comes before any connection is made.
+		const code = await main(["run", dir, "--task", "t", `--image=${bad}`, "--force"], { VALKEY_URL: "redis://127.0.0.1:1" }, { valkeyRefusal: async () => assert.fail("reached Valkey") });
+		assert.equal(code, 1, JSON.stringify(bad));
+	}
+});
+
 test("run --image enqueues against a real Valkey (the operator-at-the-terminal path for a per-trigger image)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL" }, async () => {
 	// The CLI is the operator-trusted path -- same class as the existing free-form --provider/--model -- and
 	// it is what lets an operator see the preflight refusal once, deliberately, instead of discovering it at

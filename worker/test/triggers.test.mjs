@@ -365,6 +365,13 @@ test('run.image starting with "-" is refused -- it would land where docker parse
 	);
 });
 
+test("run.image holding a control character is refused, by the one image rule PI_JOB_IMAGE shares (#471)", () => {
+	assert.throws(
+		() => parse([withRun(CRON, { image: "pi-job\u001b[2J:latest" })]),
+		(e) => isConfigError(e) && /run\.image must not hold a control character/.test(e.message),
+	);
+});
+
 test("a plausible-but-unbuildable image reference is ACCEPTED -- shape is docker's business, existence is the preflight's", () => {
 	// This test exists to PIN the decision not to regex the OCI reference grammar. A regex would refuse the
 	// rarer half of the problem (a malformed name) while missing the common half (a well-formed name for an
