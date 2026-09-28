@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { delimiter } from "node:path";
+import { chmodSync, existsSync, mkdirSync, statSync, symlinkSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import { test } from "node:test";
-import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, configError, defaultGraphDir, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, loadConfig, loadGitLabAuth, logsDirPath, normalizeAppPrivateKey, underOsTempDir } from "../src/config.mjs";
+import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, accountTempRoot, configError, defaultGraphDir, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, ensureAccountTempRoot, ensureJobsDir, ensureSandboxDir, ensureUnderAccountRoot, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, loadConfig, loadGitLabAuth, logsDirPath, normalizeAppPrivateKey, underOsTempDir } from "../src/config.mjs";
 import { FORGES, FORGE_KINDS } from "../src/forges.mjs";
 import { WAIT_INTERVAL_FLOOR_MS } from "../src/wait-for.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 test("loads conservative defaults with an empty-ish env", () => {
 	const c = loadConfig({});
@@ -40,9 +42,11 @@ test("defaultGraphDir is the worker-owned temp path, beside jobs/, never inside 
 	// ~/.pi-dispatch and left the regenerable artifact here, because the next `insights` rebuilds it.
 	// NOT logsDir on purpose: INT-RUN-HISTORY-FILE-CONTRACT names that directory's filename shape,
 	// and a stray .html beside the sidecars would widen a contract for a file that is not a record.
-	assert.equal(defaultGraphDir({ TMPDIR: "/t" }), "/t/pi-dispatch/graph");
-	assert.equal(defaultGraphDir({ TEMP: "C:\\Temp" }), "C:/Temp/pi-dispatch/graph", "backslashes normalise like the sibling defaults");
-	assert.equal(defaultGraphDir({}), "/tmp/pi-dispatch/graph");
+	// Issue #464: under the per-account root, `<tmp>/pi-dispatch-<uid>`, beside that account's jobs/.
+	assert.equal(defaultGraphDir({ TMPDIR: "/t" }, 1234), "/t/pi-dispatch-1234/graph");
+	assert.equal(defaultGraphDir({ TEMP: "C:\\Temp" }, null), "C:/Temp/pi-dispatch/graph", "backslashes normalise like the sibling defaults; no uid (Windows) keeps the plain name");
+	assert.equal(defaultGraphDir({}, 1234), "/tmp/pi-dispatch-1234/graph");
+	assert.equal(defaultGraphDir({}), `/tmp/pi-dispatch-${process.geteuid()}/graph`, "the default uid is this process's effective one");
 	assert.ok(!defaultGraphDir({}).includes("/logs"), "never inside the run-history directory");
 });
 
@@ -655,19 +659,22 @@ test("the durable defaults compose one state root under the home dir, in the sla
 	const dir = (p) => p.slice(0, p.lastIndexOf("/"));
 	assert.equal(dir(defaultSettingsFile({}, "/home/u")), dir(defaultLogsDir({}, "/home/u")));
 
-	// A home that cannot be named falls back to the OLD address. Deliberate, not a leak: the fallback is
-	// exactly what underOsTempDir detects, so doctor prints one line instead of failing silently.
+	// A home that cannot be named falls back to the temp dir. Deliberate, not a leak: the fallback is exactly what
+	// underOsTempDir detects, so doctor prints one line instead of failing silently. Since issue #464 it is the
+	// PER-ACCOUNT root, `<tmp>/pi-dispatch-<uid>`, not the shared `<tmp>/pi-dispatch` another account could own.
 	//
 	// The temp root is TRIMMED and stripped of its trailing separator, which the pre-#290 code did not do.
 	// macOS hands back a trailing slash, so the old default composed a `//` that then rode into doctor's
 	// copy-pasteable fix lines; and a WHITESPACE-only TMPDIR composed a RELATIVE path that would resolve
 	// against whatever cwd the worker was started in.
-	assert.equal(defaultLogsDir({ TMPDIR: "/var/T/" }, ""), "/var/T/pi-dispatch/logs");
-	assert.equal(defaultLogsDir({ TMPDIR: "   " }, ""), "/tmp/pi-dispatch/logs", "blank reads as absent, never as a relative root");
-	assert.equal(defaultLogsDir({ TMPDIR: "" }, ""), "/tmp/pi-dispatch/logs");
-	assert.equal(defaultLogsDir({ TEMP: "C:\\Temp" }, ""), "C:/Temp/pi-dispatch/logs");
-	assert.equal(defaultLogsDir({}, ""), "/tmp/pi-dispatch/logs", "the Linux shape, where TMPDIR is unset");
-	assert.equal(legacyTempStateDir({ TMPDIR: "/var/T/" }), "/var/T/pi-dispatch", "the migration hint and the fallback share one derivation");
+	assert.equal(defaultLogsDir({ TMPDIR: "/var/T/" }, "", 1234), "/var/T/pi-dispatch-1234/logs");
+	assert.equal(defaultLogsDir({ TMPDIR: "   " }, "", 1234), "/tmp/pi-dispatch-1234/logs", "blank reads as absent, never as a relative root");
+	assert.equal(defaultLogsDir({ TMPDIR: "" }, "", 1234), "/tmp/pi-dispatch-1234/logs");
+	assert.equal(defaultLogsDir({ TEMP: "C:\\Temp" }, "", null), "C:/Temp/pi-dispatch/logs", "no uid (Windows): the plain name");
+	assert.equal(defaultLogsDir({}, "", 1234), "/tmp/pi-dispatch-1234/logs", "the Linux shape, where TMPDIR is unset");
+	assert.equal(defaultSettingsFile({}, "", 1235), "/tmp/pi-dispatch-1235/settings.json", "a second homeless account gets its own");
+	assert.equal(defaultLogsDir({}, ""), `/tmp/pi-dispatch-${process.geteuid()}/logs`, "the default uid is this process's effective one");
+	assert.equal(legacyTempStateDir({ TMPDIR: "/var/T/" }), "/var/T/pi-dispatch", "the migration hint names the OLD shared address, not the fallback");
 
 	assert.ok(!defaultLogsDir({ TMPDIR: "/t" }, "/home/u").startsWith("/t"), "a home that exists beats TMPDIR");
 });
@@ -690,7 +697,7 @@ test("loadConfig, the sandbox default and doctor --live read ONE jobs-dir deriva
 	// doctor --live builds its fixture under jobsDirPath; a worker that derived the path on its own could disagree
 	// about an injected TMPDIR or PI_JOBS_DIR="" and the probe would read back a directory no job uses.
 	const env = { TMPDIR: "/injected/tmp" };
-	assert.equal(jobsDirPath(env), "/injected/tmp/pi-dispatch/jobs");
+	assert.equal(jobsDirPath(env), `/injected/tmp/pi-dispatch-${process.geteuid()}/jobs`, "per account (issue #464)");
 	assert.equal(loadConfig(env).jobsDir, jobsDirPath(env), "an injected TMPDIR now reaches loadConfig too");
 	assert.equal(defaultSandboxDir(env), `${jobsDirPath(env)}/sandboxes`);
 	assert.equal(jobsDirPath({ PI_JOBS_DIR: "/srv/jobs" }), "/srv/jobs");
@@ -772,4 +779,177 @@ test("the ceiling on one knob did not loosen the shared parser for the others", 
 	assert.equal(loadConfig({ PI_LOG_RETENTION_DAYS: "100000" }).logRetentionDays, 100000);
 	assert.equal(loadConfig({ PI_SESSIONS_TTL_DAYS: "99999" }).sessionsTtlDays, 99999);
 	assert.equal(loadConfig({ PI_SANDBOX_RETENTION_HOURS: "8760" }).sandboxRetentionHours, 8760);
+});
+
+// Issue #464: the default jobs dir is per account, and the worker makes it this account's or refuses it.
+test("accountTempRoot and the defaults under it are per account: <tmp>/pi-dispatch-<uid>, the plain name where there is no uid (#464)", () => {
+	assert.equal(accountTempRoot({ TMPDIR: "/t" }, 1234), "/t/pi-dispatch-1234");
+	assert.equal(accountTempRoot({ TMPDIR: "/t/" }, 1234), "/t/pi-dispatch-1234", "macOS's trailing slash is not doubled");
+	assert.equal(accountTempRoot({ TMPDIR: "  " }, 1234), "/tmp/pi-dispatch-1234", "a blank TMPDIR is absent, never a path at the root");
+	assert.equal(accountTempRoot({ TEMP: "C:\\Temp" }, null), "C:/Temp/pi-dispatch", "Windows: no uid, TEMP is per user already");
+	assert.equal(jobsDirPath({ TMPDIR: "/t" }, 1234), "/t/pi-dispatch-1234/jobs");
+	assert.equal(jobsDirPath({ TMPDIR: "/t" }, 1235), "/t/pi-dispatch-1235/jobs", "a second account gets a second dir");
+	assert.equal(defaultSandboxDir({ TMPDIR: "/t" }, 1234), "/t/pi-dispatch-1234/jobs/sandboxes");
+	assert.equal(jobsDirPath({ TMPDIR: "/t", PI_JOBS_DIR: "/srv/jobs" }, 1234), "/srv/jobs", "an explicit value still wins");
+	assert.equal(loadConfig({ TMPDIR: "/t" }).jobsDir, `/t/pi-dispatch-${process.geteuid()}/jobs`, "the worker reads the same derivation");
+});
+
+test("ensureJobsDir creates the account root and the jobs dir 0700, tightens a root this account owns, and leaves a PI_JOBS_DIR outside it alone (#464)", () => {
+	const tmp = tempDir("pi-464-ensure-");
+	const env = { TMPDIR: tmp };
+	const jobs = jobsDirPath(env);
+	ensureJobsDir(jobs, { env });
+	const root = accountTempRoot(env);
+	assert.equal(statSync(root).mode & 0o777, 0o700);
+	assert.equal(statSync(jobs).mode & 0o777, 0o700);
+	chmodSync(root, 0o755);
+	ensureJobsDir(jobs, { env });
+	assert.equal(statSync(root).mode & 0o777, 0o700, "a root this account owns with group or other bits is tightened");
+	const tmp2 = tempDir("pi-464-explicit-");
+	const explicit = join(tmp2, "jobs");
+	ensureJobsDir(explicit, { env: { TMPDIR: tmp2, PI_JOBS_DIR: explicit } });
+	assert.ok(statSync(explicit).isDirectory());
+	assert.ok(!existsSync(accountTempRoot({ TMPDIR: tmp2 })), "the account root is not made for a jobs dir outside it");
+});
+
+test("ensureJobsDir refuses a root or a jobs dir another account owns, and a root that is a symlink, as configErrors naming the fix (#464)", () => {
+	const fake = (entries) => ({
+		mkdirSync: () => {},
+		chmodSync: () => assert.fail("never chmod another account's directory"),
+		lstatSync: (p) => ({ uid: entries[p].uid, isDirectory: () => true, isSymbolicLink: () => entries[p].link === true }),
+		statSync: (p) => ({ uid: entries[p].uid, isDirectory: () => true }),
+	});
+	const env = { TMPDIR: "/t" };
+	assert.throws(() => ensureJobsDir("/t/pi-dispatch-501/jobs", { env, uid: 501, fs: fake({ "/t/pi-dispatch-501": { uid: 1270 } }) }), (err) => {
+		assert.equal(err.piDispatchConfig, true, "a configError: exit 2, never restarted into the same owner");
+		assert.equal(err.message, "/t/pi-dispatch-501 is owned by uid 1270, not by this account (uid 501): another account created /t/pi-dispatch-501 before this one; remove it as its owner or as root (sudo rm -rf /t/pi-dispatch-501), or set PI_JOBS_DIR in .env to a directory this account owns");
+		return true;
+	});
+	assert.throws(() => ensureJobsDir("/t/pi-dispatch-501/jobs", { env, uid: 501, fs: fake({ "/t/pi-dispatch-501": { uid: 501, link: true } }) }), /is not a directory \(a symlink or a file there is refused/);
+	assert.throws(
+		() => ensureJobsDir("/srv/jobs", { env: { ...env, PI_JOBS_DIR: "/srv/jobs" }, uid: 501, fs: fake({ "/srv/jobs": { uid: 1270 } }) }),
+		(err) => err.piDispatchConfig === true && err.message === "the jobs dir /srv/jobs is owned by uid 1270, not by this account (uid 501), and that account could replace a job's inputs: point PI_JOBS_DIR at a directory this account owns, or chown /srv/jobs to this account",
+	);
+	assert.doesNotThrow(() => ensureJobsDir("/t/pi-dispatch/jobs", { env, uid: null, fs: fake({}) }), "no uid (Windows): created, nothing judged");
+});
+
+test("ensureUnderAccountRoot secures the per-account root only for a path in it: the no-home durable stores as the jobs dir (#464)", () => {
+	const calls = [];
+	const fs = {
+		mkdirSync: (p, o) => calls.push(["mkdir", p, o?.mode]),
+		lstatSync: (p) => ({ uid: p === "/t/pi-dispatch-501" ? 1270 : 501, isDirectory: () => true, isSymbolicLink: () => false, mode: 0o40700 }),
+		statSync: () => ({ uid: 501, isDirectory: () => true }),
+		chmodSync: () => {},
+	};
+	const env = { TMPDIR: "/t" };
+	assert.throws(() => ensureUnderAccountRoot(defaultLogsDir(env, "", 501), { env, uid: 501, fs }), (err) => err.piDispatchConfig === true && /^\/t\/pi-dispatch-501 is owned by uid 1270/.test(err.message));
+	assert.deepEqual(calls, [], "lstat first: a root that already exists is judged, never mkdir'd");
+	assert.equal(ensureUnderAccountRoot("/home/u/.pi-dispatch/logs", { env, uid: 501, fs }), false, "a path outside the root is not judged");
+	assert.equal(ensureUnderAccountRoot("/t/pi-dispatch-5010/logs", { env, uid: 501, fs }), false, "a prefix of the name is not the root");
+	assert.equal(calls.length, 0);
+});
+
+// Gate round 1: a symlink squat under a sticky /tmp with fs.protected_symlinks on. Following another account's link
+// fails EACCES, and the old recursive mkdir followed it before any lstat, so the worker died with a raw EACCES (exit 1,
+// restarted forever) instead of refusing (exit 2). The fake models the kernel: anything that FOLLOWS the link throws.
+test("ensureAccountTempRoot lstats before it creates anything, and maps EACCES, EEXIST and a symlink to the clear refusal (#464)", () => {
+	const calls = [];
+	const eacces = (what) => Object.assign(new Error(`EACCES: permission denied, ${what}`), { code: "EACCES" });
+	const squat = {
+		mkdirSync: (p, o) => {
+			calls.push(["mkdir", p, o]);
+			if (p === "/t/pi-dispatch-501") throw eacces("mkdir '/t/pi-dispatch-501'");
+		},
+		statSync: () => {
+			throw eacces("stat");
+		},
+		lstatSync: (p) => {
+			calls.push(["lstat", p]);
+			return { uid: 1270, isDirectory: () => false, isSymbolicLink: () => true, mode: 0o120777 };
+		},
+		chmodSync: () => assert.fail("never chmod a squat"),
+	};
+	assert.throws(() => ensureAccountTempRoot("/t/pi-dispatch-501", { uid: 501, fs: squat }), (err) => {
+		assert.equal(err.piDispatchConfig, true, "a configError (exit 2 at boot, config-refused per job), never the raw EACCES");
+		assert.match(err.message, /^\/t\/pi-dispatch-501 is not a directory \(a symlink or a file there is refused/);
+		return true;
+	});
+	assert.deepEqual(calls, [["lstat", "/t/pi-dispatch-501"]], "the link is lstat'ed, never followed and never mkdir'd");
+
+	// Absent at the lstat, then the mkdir is refused (a name another account made in between, a sticky dir's rules).
+	const enoent = () => Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+	const refusedMkdir = { ...squat, lstatSync: () => { throw enoent(); } };
+	assert.throws(() => ensureAccountTempRoot("/t/pi-dispatch-501", { uid: 501, fs: refusedMkdir }), (err) => err.piDispatchConfig === true && /^\/t\/pi-dispatch-501 could not be created \(EACCES\): another account created/.test(err.message));
+
+	// Absent at the lstat, EEXIST at the mkdir (another account won the race): judged again, and refused on its owner.
+	let looks = 0;
+	const raced = {
+		mkdirSync: (p) => {
+			if (p === "/t/pi-dispatch-501") throw Object.assign(new Error("EEXIST"), { code: "EEXIST" });
+		},
+		lstatSync: () => {
+			looks += 1;
+			if (looks === 1) throw enoent();
+			return { uid: 1270, isDirectory: () => true, isSymbolicLink: () => false, mode: 0o40755 };
+		},
+		chmodSync: () => assert.fail("never chmod another account's directory"),
+	};
+	assert.throws(() => ensureAccountTempRoot("/t/pi-dispatch-501", { uid: 501, fs: raced }), (err) => err.piDispatchConfig === true && /is owned by uid 1270, not by this account \(uid 501\)/.test(err.message));
+	assert.equal(looks, 2);
+
+	// A root this account creates now: the temp dir made recursively, the root itself on its own and 0700.
+	const made = [];
+	let exists = false;
+	const fresh = {
+		mkdirSync: (p, o) => {
+			made.push([p, o?.recursive === true, o?.mode]);
+			if (p === "/t/pi-dispatch-501") exists = true;
+		},
+		lstatSync: () => {
+			if (!exists) throw enoent();
+			return { uid: 501, isDirectory: () => true, isSymbolicLink: () => false, mode: 0o40700 };
+		},
+		chmodSync: () => assert.fail("a fresh 0700 root needs no chmod"),
+	};
+	ensureAccountTempRoot("/t/pi-dispatch-501", { uid: 501, fs: fresh });
+	assert.deepEqual(made, [["/t", true, undefined], ["/t/pi-dispatch-501", false, 0o700]]);
+});
+
+test("ensureAccountTempRoot refuses a real symlink at the root, on the real filesystem, as a configError (#464)", () => {
+	const tmp = tempDir("pi-464-link-");
+	const elsewhere = join(tmp, "elsewhere");
+	mkdirSync(elsewhere, { mode: 0o700 });
+	const env = { TMPDIR: tmp };
+	symlinkSync(elsewhere, accountTempRoot(env));
+	assert.throws(() => ensureJobsDir(jobsDirPath(env), { env }), (err) => err.piDispatchConfig === true && /is not a directory \(a symlink/.test(err.message));
+	assert.ok(!existsSync(join(elsewhere, "jobs")), "nothing was created through the link");
+});
+
+// Gate round 1: an explicit PI_SANDBOX_DIR another account owns (a 0777 directory of its own) was used, and that
+// account swapped a retained workspace for one with its own manifest.
+test("ensureSandboxDir refuses a sandbox dir another account owns, secures the account root for the default, and leaves an absent one to the retention step (#464)", () => {
+	const enoent = () => Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+	const fake = (entries) => ({
+		mkdirSync: () => assert.fail("ensureSandboxDir creates no sandbox dir"),
+		chmodSync: () => {},
+		lstatSync: (p) => {
+			if (!entries[p]) throw enoent();
+			return { uid: entries[p].uid, isDirectory: () => true, isSymbolicLink: () => false, mode: 0o40700 };
+		},
+		statSync: (p) => {
+			if (!entries[p]) throw enoent();
+			return { uid: entries[p].uid, isDirectory: () => entries[p].file !== true };
+		},
+	});
+	const env = { TMPDIR: "/t", PI_SANDBOX_DIR: "/srv/sb" };
+	assert.throws(() => ensureSandboxDir("/srv/sb", { env, uid: 501, fs: fake({ "/srv/sb": { uid: 1270 } }) }), (err) => {
+		assert.equal(err.piDispatchConfig, true);
+		assert.equal(err.message, "the sandbox dir /srv/sb is owned by uid 1270, not by this account (uid 501), and that account could swap a retained workspace for one of its own: point PI_SANDBOX_DIR at a directory this account owns (or remove the line for the default), or chown /srv/sb to this account");
+		return true;
+	});
+	assert.throws(() => ensureSandboxDir("/srv/sb", { env, uid: 501, fs: fake({ "/srv/sb": { uid: 501, file: true } }) }), /the sandbox dir \/srv\/sb is not a directory/);
+	assert.doesNotThrow(() => ensureSandboxDir("/srv/sb", { env, uid: 501, fs: fake({ "/srv/sb": { uid: 501 } }) }));
+	assert.doesNotThrow(() => ensureSandboxDir("/srv/sb", { env, uid: 501, fs: fake({}) }), "absent: made 0700 by the retention step, which asks again");
+	assert.throws(() => ensureSandboxDir("/t/pi-dispatch-501/jobs/sandboxes", { env: { TMPDIR: "/t" }, uid: 501, fs: fake({ "/t/pi-dispatch-501": { uid: 1270 } }) }), /^Error: \/t\/pi-dispatch-501 is owned by uid 1270/, "the default's account root is judged first");
+	assert.doesNotThrow(() => ensureSandboxDir("/srv/sb", { env, uid: null, fs: fake({ "/srv/sb": { uid: 1270 } }) }), "no uid (Windows): nothing judged");
 });

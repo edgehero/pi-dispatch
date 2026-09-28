@@ -11,7 +11,7 @@ model, per repo, plan verdicts, and the graph with spend badged onto the trigger
 ```
 
 writes **one self-contained HTML file** to `<graph dir>/insights.html` (the same directory
-`PI_GRAPH_DIR` names, defaulting under the OS temp dir), prints its `file://` URL, and opens your
+`PI_GRAPH_DIR` names, defaulting to `<OS temp dir>/pi-dispatch-<uid>/graph`, one per account), prints its `file://` URL, and opens your
 browser. No server, no
 port, no external requests: the page is inline SVG/CSS/JS and works from the file system, over
 `scp`, or attached to a ticket. Re-running the command overwrites the same path atomically, so a

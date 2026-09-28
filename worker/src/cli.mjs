@@ -156,7 +156,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 			});
 			write(`queued ${jobId} — folder ${folder}\nrun \`pi-dispatch worker\` to process it.\n`);
 		} catch (error) {
-			return fail(`could not reach Valkey at ${config.valkeyUrl} — is it running? (docker compose up)\n  ${error.message}`);
+			return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${config.valkeyUrl}: is it running? (docker compose up)\n  ${error.message}`);
 		} finally {
 			await queue.close().catch(() => {});
 		}
@@ -239,7 +239,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 				write(`${JSON.stringify(out)}\n`);
 			}
 		} catch (error) {
-			return fail(`could not reach Valkey at ${url} — is it running? (docker compose up)\n  ${error.message}`);
+			return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${url}: is it running? (docker compose up)\n  ${error.message}`);
 		} finally {
 			for (const q of queues) await q.close().catch(() => {});
 		}

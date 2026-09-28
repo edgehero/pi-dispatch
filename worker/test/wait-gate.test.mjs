@@ -497,7 +497,7 @@ test("a gate-written record has the same key set as any other terminal record", 
 	const ordinary = buildRecord({ job, result: { outcome: "completed", reason: null, exitCode: 0, turns: 3, tokens: null, budgetReserved: true }, startedAt: "2026-08-30T12:00:00.000Z", endedAt: "2026-08-30T12:00:01.000Z" });
 	assert.deepEqual(Object.keys(gateRecord).sort(), Object.keys(ordinary).sort(), "same shape, whichever side of the try wrote it");
 	assert.equal(gateRecord.reason, "wait-profile-unknown");
-	assert.equal(gateRecord.attempt, 0, "a hold consumes no attempt, so the refusal that ends one records none");
+	assert.equal(gateRecord.attempt, 1, "a hold consumes no attempt, so the refusal that ends one is still the first attempt (1-based)");
 	assert.equal(gateRecord.target, "acme/web#7", "the id-only target, never a title");
 });
 

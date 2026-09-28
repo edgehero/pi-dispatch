@@ -1,7 +1,10 @@
 import { readdirSync, readFileSync, statSync, watch } from "node:fs";
-import { homedir, release as osRelease } from "node:os";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { homedir, networkInterfaces, release as osRelease, userInfo } from "node:os";
 import { dirname, basename, join } from "node:path";
-import { configError, loadConfig } from "./config.mjs";
+import { configError, ensureJobsDir, ensureSandboxDir, ensureUnderAccountRoot, loadConfig } from "./config.mjs";
+import { passwdNameFrom, probeTcpAddress, readSubuidRanges, resolveWorkerValkey } from "./podman-stack.mjs";
+import { valkeyClientContext } from "./valkey-endpoint.mjs";
 import { makeRedisClient, parseConnection } from "./connection.mjs";
 import { reconcileGated, reloadSchedules } from "./cron.mjs";
 import { makeGitHubAuth } from "./get-token.mjs";
@@ -372,6 +375,16 @@ export async function startWorker(
 		// property under test is that the bound EXISTS, and a test that proved it by waiting ten real
 		// seconds would be paid for on every run for the life of the file.
 		authResolveTimeoutMs = AUTH_RESOLVE_TIMEOUT_MS,
+		// Issue #464: the jobs dir, created and checked as this account's at boot. A seam so a wiring test decides it.
+		ensureJobsDir: ensureJobsDirFn = ensureJobsDir,
+		// Issue #464: the same rule for the two durable stores, which default into that root on an account with no home.
+		ensureUnderAccountRoot: ensureUnderAccountRootFn = ensureUnderAccountRoot,
+		// Issue #464 (gate round 1): the sandbox dir, refused at boot when another account owns it, as the jobs dir is.
+		ensureSandboxDir: ensureSandboxDirFn = ensureSandboxDir,
+		// Issue #464 (gate round 2): whose Valkey VALKEY_URL reaches, judged here, where the connection is made, and the
+		// literal address every Valkey client of this worker then connects to. A seam: the real one reads /proc, probes
+		// this host's addresses and resolves the name, none of which belongs in a wiring test.
+		judgeValkey = defaultJudgeValkey,
 	} = {},
 ) {
 	const config = loadConfigFn(env);
@@ -400,6 +413,13 @@ export async function startWorker(
 			throw new Error(`backend ${JSON.stringify(bundle.name)} declares ${gated.join(", ")} as held only while observed, and carries no observationPreflight to observe them`);
 		}
 	}
+	// Issue #464: the jobs dir is this account's, or the worker does not start. Before it built anything, and a
+	// `configError` (exit 2, never restarted) where another account owns it, since a restart meets the same owner: the
+	// shared `<tmp>/pi-dispatch/jobs` default let one account's jobs dir fail every other account's jobs with EACCES
+	// while the worker ran on. A failed mkdir is the fs error it is (exit 1).
+	ensureJobsDirFn(config.jobsDir, { env });
+	ensureSandboxDirFn(config.sandboxDir, { env });
+	for (const store of [config.logsDir, dirname(config.settingsFile)]) ensureUnderAccountRootFn(store, { env });
 	// `host` sits AFTER the spread, so it is authoritative rather than overridable (issue #57). No call
 	// site can know better than this closure which process wrote a line, and one that passed `host` would
 	// be lying by construction -- verified: none does. This is also why the stamp lives ONLY here. Every
@@ -407,6 +427,20 @@ export async function startWorker(
 	// injected log (`run_record_failed`, `wait_check`); a `host` added at any call site would break them,
 	// while one added inside this closure cannot reach them.
 	const log = (event, fields = {}) => write(`${JSON.stringify({ event, ...fields, host: config.workerName })}\n`);
+
+	// Issue #464 (gate round 2): the owner rule where the connection is made. `service install`, `up` and doctor judge
+	// the Valkey too, but a VALKEY_URL edited after they refused it, a 0.0.0.0 URL, or another account publishing on ::1
+	// after the install each reached another account's queue through an unjudged worker (measured on Fedora 44). So the
+	// worker judges it itself, before it contacts Valkey at all, with the same function (`resolveWorkerValkey`), and
+	// every client below connects to the judged literal address, never to a name resolved again later. A refusal is a
+	// configError (exit 2, not restarted into the same answer); nothing answering is a plain error (exit 1, restarted).
+	const valkey = await judgeValkey({ url: config.valkeyUrl, venues: { localUsed: localBlessed, podmanUsed: podmanBlessed }, env });
+	for (const note of valkey.notes ?? []) log("valkey_note", { note });
+	if (valkey.pinned) log("valkey_pinned", { address: valkey.pinned.address, port: valkey.pinned.port, heldBy: valkey.pinned.heldBy });
+	// Every client below connects through connection.mjs' JudgedConnector, which judges the (pinned) address again on
+	// each connect, as this boot judged it: `enforce` as the boot decided it, PI_VALKEY_SHARED from the deployment .env.
+	const valkeyContext = workerValkeyContext(valkey, env);
+	const valkeyConn = (opts = {}) => parseConnection(valkey.url, { ...opts, servername: valkey.servername, context: valkeyContext });
 
 	// DES-CRON-VIA-BULLMQ-SCHEDULER: load and validate the triggers file with the operator present and
 	// before any Valkey contact, so a misconfigured schedule refuses startup loudly (configError) rather
@@ -824,7 +858,7 @@ export async function startWorker(
 
 	// One raw Redis client, shared by the budget (via the worker) and the scheduler stall guard, so it is
 	// hoisted out of the createWorkerFn arg object.
-	const redis = makeRedisClient(config.valkeyUrl);
+	const redis = makeRedisClient(valkey.url, { servername: valkey.servername, context: valkeyContext });
 
 	// This host's own stale scope claims, gated on the reaper having having enumerated: the
 	// reaper is what establishes that this machine holds no `pi-job-*` containers, so a claim naming this
@@ -843,7 +877,7 @@ export async function startWorker(
 	// collector enqueues chained children onto it -- the same pi-jobs queue, so one handle serves both.
 	// Non-failFast: a long-lived handle rides out a Valkey blip. Registered as an extraCloser so shutdown
 	// drains it after the worker.
-	const runtimeQueue = makeQueue(parseConnection(config.valkeyUrl));
+	const runtimeQueue = makeQueue(valkeyConn());
 
 	// THE HOST QUEUE (issue #57): work only this machine can do, because the folder lives here.
 	//
@@ -859,7 +893,7 @@ export async function startWorker(
 	// live triggers-file edit lands on the same queue the boot reconcile used; otherwise the shared
 	// runtime queue, exactly as before. Registered as an extraCloser only when it is a NEW handle --
 	// closing `runtimeQueue` twice would be closing another owner's connection.
-	const cronQueue = hostQueue ? makeQueue(parseConnection(config.valkeyUrl), { name: hostQueue }) : runtimeQueue;
+	const cronQueue = hostQueue ? makeQueue(valkeyConn(), { name: hostQueue }) : runtimeQueue;
 
 	// REQ-LOCAL-JOB-VISIBILITY durable run history, all host-side. The raw `.log` sink is gated on
 	// captureJobLogs (raw container output is user-authored data, opt-in per no-pii-in-logs); the id-only
@@ -1428,7 +1462,7 @@ export async function startWorker(
 	});
 
 	const worker = createWorkerFn({
-		connection: parseConnection(config.valkeyUrl),
+		connection: valkeyConn(),
 		// #227. The abort path's stop, resolved per job rather than hard-wired to docker. A container NAME is
 		// not enough to find the runtime holding it once there is more than one venue.
 		stopContainer: backends.stopContainer,
@@ -1590,6 +1624,8 @@ export async function startWorker(
 			neverStartedExits: backends.neverStartedExits,
 			prepareWorkspace: makePrepareWorkspace({
 				jobsDir: config.jobsDir,
+				// Issue #464: the boot's own check, asked again before every job against the same env.
+				ensureDir: (dir) => ensureJobsDirFn(dir, { env }),
 				forgeFor,
 				// REQ-RESURRECTABLE-SANDBOX: the deployment default, resolved per job against run.image so a
 				// retained directory records the image that actually ran and a sandbox re-opens that one.
@@ -1730,7 +1766,7 @@ export async function startWorker(
 			// config" is correct again by construction and two hosts can no longer prune each other at all. The
 			// fingerprint gate stays, because it still catches the divergence itself -- including a timezone
 			// disagreement, which no queue split can detect.
-			const rq = makeQueue(parseConnection(config.valkeyUrl, { failFast: true }), { ...(hostQueue ? { name: hostQueue } : {}) });
+			const rq = makeQueue(valkeyConn({ failFast: true }), { ...(hostQueue ? { name: hostQueue } : {}) });
 			try {
 				const r = await reconcileGated(rq, served, { registry, log, tz: hostTz, authored: authoredCron(config) });
 				log("schedules_installed", { installed: r.installed, removed: r.removed, ...(unserved.length > 0 && { unserved: unserved.length }) });
@@ -1816,6 +1852,9 @@ export async function startWorker(
 			scopedLimits: scopedLimits.current.length, // row count -- money config deserves boot visibility; the watcher logs only changes
 			image: config.jobImage,
 			valkey: config.valkeyUrl,
+			// Issue #464: the literal address every Valkey client of this worker dials, beside the URL as written; null
+			// where nothing was pinned (another machine's Valkey, dialled by name).
+			valkeyPinned: valkey.pinned ? `${valkey.pinned.address.includes(":") ? `[${valkey.pinned.address}]` : valkey.pinned.address}:${valkey.pinned.port}` : null,
 			logsDir: config.logsDir,
 			settingsFile: config.settingsFile,
 			captureJobLogs: config.captureJobLogs,
@@ -1895,4 +1934,52 @@ function logDockerEndpoint(log, endpoint, { changed = false } = {}) {
 	if (endpoint.local === false) log("docker_endpoint_not_local", { context: endpoint.context, endpoint: endpoint.endpoint });
 	else if (endpoint.local === null) log("docker_endpoint_unresolved", { reason: endpoint.reason });
 	else if (changed) log("docker_endpoint_local", { context: endpoint.context, endpoint: endpoint.endpoint });
+}
+
+/**
+ * Where the worker's clients stand (issue #464): enforced exactly as its boot judgement was (`valkey.enforce`), so a
+ * reconnect is judged by the rule the boot applied, never a looser one; PI_VALKEY_SHARED from the deployment `.env`.
+ */
+export function workerValkeyContext(valkey, env, { cwd = process.cwd(), readEnv } = {}) {
+	return valkeyClientContext({ env, cwd, enforce: valkey?.enforce === true, ...(readEnv ? { readEnv } : {}) });
+}
+
+/**
+ * The worker's real Valkey judgement (issue #464, gate round 2): `resolveWorkerValkey` with this host's facts. The
+ * deployment `.env` is the one in the working directory (the unit's WorkingDirectory is the deployment folder), read
+ * only for PI_VALKEY_SHARED; nothing else of it is loaded into this process.
+ */
+async function defaultJudgeValkey({ url, venues, env }) {
+	const envPath = join(process.cwd(), ".env");
+	let envText = null;
+	try {
+		envText = readFileSync(envPath, "utf8");
+	} catch {
+		// No .env here: nothing opts in.
+	}
+	const fs = { readFileSync };
+	const euid = process.geteuid?.();
+	let user = null;
+	try {
+		user = userInfo().username;
+	} catch {
+		// A uid with no passwd entry: its subordinate ranges are read by uid.
+	}
+	return resolveWorkerValkey({
+		url,
+		venues,
+		platform: process.platform,
+		env,
+		envText,
+		envPath,
+		probeTcp: probeTcpAddress,
+		lookup: (host, opts) => dnsLookup(host, opts),
+		fs,
+		euid,
+		user,
+		ownerName: (uid) => passwdNameFrom(fs, uid),
+		interfaces: networkInterfaces,
+		subuids: readSubuidRanges({ user, euid, fs }),
+		configError,
+	});
 }

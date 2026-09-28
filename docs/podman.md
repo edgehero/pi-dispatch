@@ -340,7 +340,21 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    units there, naming this remedy. While the account's manager runs (linger on),
    `sudo -iu <account> env XDG_RUNTIME_DIR=/run/user/<uid> pi-dispatch ...` works too.
 2. **Linger**, so the account's runtime directory and its systemd user instance exist without anyone logged in:
-   `sudo loginctl enable-linger <account>`. Measured: with linger, a system unit running as that account
+   `sudo loginctl enable-linger <account>`. **Keep it on once Podman has run under it.** Podman stores the run root it
+   first used (`/run/user/<uid>/containers`), and `loginctl disable-linger` removes `/run/user/<uid>` with the user
+   manager; from then on every `podman` command as the account fails before doing anything (measured on Fedora 44
+   with 5.8.1 and Ubuntu 24.04 with 4.9.3: exit 125, `Error: default OCI runtime "crun" not found: invalid argument`,
+   after a warning that the RunRoot is not writable; exit 1 on 5.8.1 with `XDG_RUNTIME_DIR` set to the missing
+   directory). `podman system migrate` fails the same way and does not help, and `--runroot` elsewhere is refused as
+   a database mismatch. Turning linger back on recreates the directory and Podman answers again (measured on both); a
+   login session of the account does too, but only while it lasts. `pi-dispatch doctor` names this state (issue
+   #464) when three things hold: `podman info` fails with an exit status, `/run/user/<uid>` does not exist, and
+   Podman's own database (`db.sql`, or `libpod/bolt_state.db` on older installs, under
+   `~/.local/share/containers/storage`) records a run root there, which is the evidence that Podman ran under it
+   before. It then names linger as the fix. An account that never had a session has no such record, and doctor
+   says only that `podman info` failed.
+
+   Measured: with linger, a system unit running as that account
    (`deploy/worker.service` with `User=` set to it) runs `podman` with or without `XDG_RUNTIME_DIR` in its
    environment, since Podman then falls back to `/run/user/<uid>`. That hand-written system unit still works, but
    `pi-dispatch service install` installs this venue's worker in USER scope (it refuses `--system` here, step 6),
@@ -506,7 +520,8 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
      is running (`pi-dispatch pause`, wait, restart, `pi-dispatch resume`).
 
    Which parts are installed: Valkey only when `PI_BACKENDS` does not list `local` (with `local`, docker's Valkey is
-   the queue, as before) and nothing already listens on `127.0.0.1:6379`; the proxy only while the policy is armed
+   the queue, as before) and nothing already listens on the queue's port, `127.0.0.1:6379` unless `VALKEY_URL` names
+   another loopback port (step 7 says whose listener is taken as the queue); the proxy only while the policy is armed
    and `PI_EGRESS_PROXY` is unset or names `pi-dispatch-egress-proxy`. A different name is your own proxy, and neither
    command installs a unit for it, because the unit's `--replace` would remove your container of that name. The
    keeper whenever the policy is armed, whatever `PI_EGRESS_PROXY` names, since the worker detaches your own proxy
@@ -520,6 +535,16 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    unit and whether it is active. Every `.container` sets `Network=` explicitly (Valkey on a bridge network of its
    own), because a containers.conf `netns = "host"` puts a container started without one into the host's network
    namespace (measured), where Valkey's `127.0.0.1` port mapping would mean nothing.
+
+   A WRITE that fails part way leaves no file of the run behind (issue #464), from `up` too, which journals its
+   Quadlet writes the same way. `service install` writes every file (the Quadlet files, the proxy's rules copy, the
+   worker unit) before it runs any command, and when a write fails (a root-owned `~/.config`, say) it puts back every
+   file it wrote in that run, removing new ones and restoring the old bytes of replaced ones, and names any it could
+   not. A COMMAND that fails after the writes (a `daemon-reload` or a unit that does not start) is different: the
+   stack's files stay, since their units run from them, and the refusal names each one; only the worker unit is put
+   back, as it was never enabled. `service uninstall` removes those files even when their units were never loaded
+   (a failed `daemon-reload`): `systemctl --user stop` of such a unit exits 5, and uninstall then asks the manager
+   unit by unit and goes on when none of them is running.
 
    Measured again on 2026-09-27, on the same host, with these units as they ship: Valkey on its own bridge network,
    published on `127.0.0.1:6379` and healthy; the proxy's exec-form health check running under a systemd timer and
@@ -672,10 +697,59 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    the Docker API route, where a host service listening on `0.0.0.0` answers a job. The units in the previous
    paragraphs are what bring the proxy and the keeper back after a reboot; started by hand, neither comes back.
 7. **Valkey** can still run anywhere the worker reaches through `VALKEY_URL`. The Quadlet unit in step 6 is the
-   default on a host without Docker; a Valkey you already run (a distribution package, say) is left alone as long as
-   it listens on `127.0.0.1:6379` before `up` or `service install` looks. The compose file is docker-only. Without
-   `local` in `PI_BACKENDS`, doctor's fix for an unreachable Valkey points at `up` and `service install`, and
-   `doctor --fix` offers no `docker run` for it.
+   default on a host without Docker. **A Valkey that already answers is used only when it is this account's**
+   (issue #464): on a host with several accounts, a second account's install used to take the first account's
+   Valkey on 6379 as its own, and its worker then drained that account's queue. One rule decides it, and the
+   WORKER applies it itself at every start, before it talks to Valkey; `up`, `service install` and doctor apply the
+   same function:
+   - `VALKEY_URL`'s host is resolved once, as the worker's client resolves it (every address, in the order it tries
+     them: `localhost` is `::1` then `127.0.0.1` on Fedora, `127.0.0.1` alone on Ubuntu 24.04, measured). An
+     unspecified address is this host: `0.0.0.0` (or anything in `0.0.0.0/8`) reaches `127.0.0.1`, `::` reaches `::1`
+     (measured: `redis://0.0.0.0:<port>` reached another account's Valkey). `127.0.0.0/8` and this host's own
+     interface addresses are judged too; any other host adds no Valkey here and is not judged.
+   - Who holds each address that answers is read from `/proc/net/tcp` and `/proc/net/tcp6`, which every account can
+     read. It is this account's when the socket's uid is the account's own (a rootless container's published port,
+     measured on Fedora 44 and Ubuntu 24.04) or one of its subordinate uids (a container run with `--network host`),
+     taken from `getsubids(1)` where it is installed, which also answers for ranges an SSSD provider serves, else
+     from `/etc/subuid`; a refusal says which.
+   - The worker then connects to that address as a literal (`127.0.0.1`, not `localhost`; its `worker_started` log
+     line names it beside the URL as written), with a `rediss:` URL's
+     name kept for the certificate check, so no later DNS answer or address order can send it elsewhere. When
+     several addresses answer, the first that is this account's is used, and another account's listener on another
+     address of the same name (someone publishing `[::1]` beside your `127.0.0.1`) is named as a ⚠ by doctor and in
+     the worker's log, never dialled. Refusing there instead would let any account stop your worker by publishing a
+     port.
+   - When no answering address is this account's, it is refused, naming the owner: another account (a container of
+     one is named by its account, from `/etc/subuid`); root, which is docker-proxy or a rootful container any account
+     with sudo can start; a system service such as a distribution package's Valkey; or a listener no socket row
+     explains. No uid range decides this, since an LDAP account sits above `UID_MAX` and Lima's default user at 501,
+     below `UID_MIN`. The worker exits 2 with that sentence (not restarted), `service install` refuses before it
+     writes anything, `up` adds and adopts nothing and exits non-zero, and doctor prints a ✗ and neither PINGs that
+     Valkey nor reads its fleet. When nothing answers at all, the worker waits 20 s for a Valkey still starting,
+     then exits 1 and systemd starts it again.
+   - The way out is this account's own port, `VALKEY_URL=redis://127.0.0.1:6380` in that deployment's `.env`:
+     `service install` and `up` publish the Quadlet Valkey there (`PublishPort=127.0.0.1:6380:6379`). An `[::1]` URL
+     cannot reach that Quadlet Valkey, which publishes on `127.0.0.1` only, and is refused with that reason.
+   - A Valkey that is shared ON PURPOSE (a distribution package several deployments use, say) is taken only with
+     `PI_VALKEY_SHARED=1` in the deployment's `.env`, and the commands then say whose it is. Every account using it
+     can read and drain the others' jobs. It is read from `.env` ONLY, by the worker (from its working directory, the
+     deployment folder), `service install`, `up` and doctor; one set in a shell is ignored and said to be. `--force`
+     does not take it: it replaces changed files, and taking another account's queue must never ride along with that.
+
+   A `VALKEY_URL` line in `.env` that the loaders may read differently is a ✗ of its own in doctor, which then contacts
+   no Valkey at all (no reachability probe, no fleet read), since the default it would fall back to may be another
+   account's. An installed Quadlet Valkey is kept only while what the worker will use is this account's; with the
+   opt-in, a shared Valkey on the port is the queue instead. `up` and `service install` read `VALKEY_URL` from `.env`,
+   as the service does (`up` takes this shell's value only where the file sets none, and stops when the two
+   disagree). An `[::1]` URL in `.env` must be quoted, `VALKEY_URL="redis://[::1]:6379"`: the macOS wrapper sources the
+   file with sh, which may read an unquoted `[` as a pattern. With `local` in `PI_BACKENDS`, docker's Valkey is the
+   queue, published by root's docker-proxy, and nothing is refused. Every OTHER Valkey client applies the same rule
+   when it connects: `pi-dispatch run`, `pause`, `resume`, `status` and `cancel`, the receiver, the admin panel and
+   doctor all build their connections through one module, which resolves the name once per process, connects to the
+   literal address this account holds (the one that answers first where `local` is blessed, where nothing is
+   refused), and refuses another account's Valkey where the podman venue is this deployment's (the environment's
+   `PI_BACKENDS`, else the `.env` in the folder the command runs in). The compose file is docker-only. Without `local` in `PI_BACKENDS`, doctor's fix for an unreachable Valkey points at `up` and
+   `service install`, and `doctor --fix` offers no `docker run` for it.
 8. **`PI_BACKENDS=podman`** in `.env` (the setup wizard, `/dispatch setup`, writes it when you choose rootless Podman
    at its runtime step), then start the worker, and run `pi-dispatch doctor` and
    `pi-dispatch doctor --live` as the same account, from the deployment folder. doctor reads `PI_BACKENDS`,

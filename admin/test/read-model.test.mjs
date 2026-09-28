@@ -217,6 +217,7 @@ test("resolvePaths reads env with safe defaults and never calls loadConfig", () 
     chainDepthMax: 1,
     chainMaxPerJob: 2,
     graphDir: "/g",
+    graphRoot: null,
     pauseWindowsPath: "./pause-windows.json",
     scopedLimitsPath: "./scoped-limits.json",
     subscriptionsPath: "/subs.json",
@@ -240,8 +241,12 @@ test("the admin and the worker resolve the SAME durable defaults from an empty e
 
 test("resolvePaths resolves the graph dir from PI_GRAPH_DIR with the worker's temp default", () => {
   assert.equal(resolvePaths({ PI_GRAPH_DIR: "/x/graphs" }).graphDir, "/x/graphs");
-  assert.ok(resolvePaths({}).graphDir.endsWith("/pi-dispatch/graph"), "the default is the worker-owned temp path, never cwd");
-  assert.ok(resolvePaths({ PI_GRAPH_DIR: "" }).graphDir.endsWith("/pi-dispatch/graph"), "empty falls back like every other path here");
+  // Issue #464: per account, `<tmp>/pi-dispatch-<uid>/graph`, beside that account's jobs dir.
+  const perAccount = `/pi-dispatch-${process.geteuid()}/graph`;
+  assert.ok(resolvePaths({}).graphDir.endsWith(perAccount), "the default is the worker-owned temp path, never cwd");
+  assert.ok(resolvePaths({ PI_GRAPH_DIR: "" }).graphDir.endsWith(perAccount), "empty falls back like every other path here");
+  assert.equal(resolvePaths({ TMPDIR: "/t" }).graphRoot, `/t/pi-dispatch-${process.geteuid()}`, "the root the default is secured under");
+  assert.equal(resolvePaths({ PI_GRAPH_DIR: "/x/graphs" }).graphRoot, null, "an operator's own graph dir is not the account root's");
 });
 
 test("resolvePaths falls back to defaults on empty env (no worker config required)", () => {

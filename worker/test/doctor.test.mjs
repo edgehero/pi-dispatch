@@ -4205,8 +4205,11 @@ test("doctor --live with PI_JOBS_DIR unset builds its fixture under the injected
 	const { out, text } = capture();
 	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0", TMPDIR: tmp };
 	await runDoctor(env, { ...ghDeps(out, { ...liveOk(), ...green }), live: true, ...instantClock(), liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
-	assert.ok(text().includes(`with a fixture under ${tmp}/pi-dispatch/jobs;`), text());
-	assert.deepEqual(readdirSync(join(tmp, "pi-dispatch", "jobs")), [], "and removes it");
+	// Issue #464: the default is per account, `<tmp>/pi-dispatch-<uid>/jobs`, and the live probe makes it 0700 as the worker does.
+	const jobs = join(tmp, `pi-dispatch-${process.geteuid()}`, "jobs");
+	assert.ok(text().includes(`with a fixture under ${jobs};`), text());
+	assert.deepEqual(readdirSync(jobs), [], "and removes it");
+	assert.equal(statSync(dirname(jobs)).mode & 0o777, 0o700, "the account root it created is 0700");
 });
 
 test("an egress probe that timed out or exited 1 is not run either, and doctor says which", async () => {
@@ -6233,6 +6236,7 @@ const MIXED_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
@@ -6277,6 +6281,7 @@ const MIXED_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
@@ -6329,6 +6334,7 @@ const MIXED_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
@@ -6379,6 +6385,7 @@ const MIXED_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
@@ -7055,6 +7062,38 @@ test("on a fleet the unblessed-venue line judges only triggers this host serves,
 	assert.ok(single.text().includes('✗ run.backend "podman" is not in PI_BACKENDS (local), so every job of cron "nightly" is refused (backend-unblessed)'), single.text());
 });
 
+// Issue #464 (gate round 1, coordinator follow-up): PI_WORKER_NAME is resolved ONCE, this shell's value else the .env's
+// by the service's reader, and the fleet wording and which cron triggers are scheduled here both use it. Read from the
+// shell alone, a deployment whose .env names its worker was judged as a single host.
+test("a worker name in .env makes this host a fleet member for the unblessed-venue line and the cron placement, as the shell's did (#464)", async () => {
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0" };
+	const cwd = tempDir("pi-464-name-cwd-");
+	writeFileSync(join(cwd, ".env"), "PI_WORKER_NAME=mini1\n");
+	const deps = (out, extra = {}) => ({ ...ghDeps(out, { ...green }, []), agentDir: NO_AGENT_DIR, readHosts: async () => ({ hosts: [] }), cwd, readEnvFile: (path) => readFileSync(path, "utf8"), ...extra });
+	// Another machine's folder: not scheduled here, so not judged (was: judged in the single host's words).
+	const elsewhere = capture();
+	const code = await runDoctor({ ...env, PI_TRIGGERS_FILE: triggersFile(undefined, undefined, { backend: "podman", folder: "/srv/only-on-mini2" }) }, deps(elsewhere.out, { fileExists: (p) => p !== "/srv/only-on-mini2" }));
+	assert.doesNotMatch(elsewhere.text(), /backend-unblessed/, elsewhere.text());
+	assert.equal(code, 0, elsewhere.text());
+	// Its folder here: judged, in the fleet's words.
+	const here = capture();
+	await runDoctor({ ...env, PI_TRIGGERS_FILE: triggersFile(undefined, undefined, { backend: "podman" }) }, deps(here.out));
+	assert.ok(here.text().includes('✗ run.backend "podman" is not in this host\'s PI_BACKENDS (local), so a job of cron "nightly" that this host picks up is refused (backend-unblessed)'), here.text());
+	// A shell that sets the name empty overrides the file, as for every service key: a single host again.
+	const blank = capture();
+	await runDoctor({ ...env, PI_WORKER_NAME: "", PI_TRIGGERS_FILE: triggersFile(undefined, undefined, { backend: "podman", folder: "/srv/only-on-mini2" }) }, deps(blank.out, { fileExists: (p) => p !== "/srv/only-on-mini2" }));
+	assert.ok(blank.text().includes('✗ run.backend "podman" is not in PI_BACKENDS (local), so every job of cron "nightly" is refused (backend-unblessed)'), blank.text());
+});
+
+// The rule, not the site: doctor.mjs reads PI_WORKER_NAME from the environment in exactly one place, the resolution
+// every reader uses. A second `env.PI_WORKER_NAME` is a reader that went back to the shell alone.
+test("doctor.mjs reads PI_WORKER_NAME from the environment once, where it is resolved with the service's .env (#464)", () => {
+	const src = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8").replace(/^\s*(\/\/|\*).*$/gm, "");
+	const reads = [...src.matchAll(/\benv(?:\.PI_WORKER_NAME\b|\[\s*["']PI_WORKER_NAME["']\s*\])/g)];
+	assert.equal(reads.length, 1, "one read");
+	assert.match(src, /const declaredWorkerName = env\.PI_WORKER_NAME \?\? fromServiceFile\(\["PI_WORKER_NAME"\]\)\.PI_WORKER_NAME;/);
+});
+
 test("a webhook trigger is named by its position in the file, in the unblessed-venue line and the flow line alike (#433)", async () => {
 	const path = join(tempDir("pi-433-label-"), "triggers.json");
 	writeFileSync(
@@ -7681,8 +7720,9 @@ test("a URL doctor prints has its password blanked and its query dropped, or is 
 });
 
 test("doctor's .env reads pass ONE allowlist and ONE loader mapping (#453 gate 3)", async () => {
-	// PR #466 gate round 2 added the GitHub auth source and App keys, and nothing else.
-	assert.deepEqual([...SERVICE_ENV_KEYS], ["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY", "VALKEY_URL", "PI_PROVIDER", "GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY"]);
+	// PR #466 gate round 2 added the GitHub auth source and App keys; issue #464 the jobs and sandbox dirs, and in its gate
+	// round 1 the Valkey opt-in, the TMPDIR the default jobs root lives under, and the worker's name.
+	assert.deepEqual([...SERVICE_ENV_KEYS], ["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY", "VALKEY_URL", "PI_VALKEY_SHARED", "PI_PROVIDER", "GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY", "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", "PI_WORKER_NAME"]);
 	assert.deepEqual(serviceEnvKeys(["PI_JOB_IMAGE", "PI_ENV_SETUP", "VALKEY_URL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], ["ANTHROPIC_API_KEY"]), ["VALKEY_URL", "ANTHROPIC_API_KEY"]);
 	assert.deepEqual(["linux", "win32", "darwin", "freebsd"].map(serviceEnvLoader), ["systemd", "cmd", "shell", "shell"]);
 	// The venue read uses that mapping too: on freebsd a sourcing shell reads `export PI_BACKENDS=podman` as an assignment.
@@ -7851,6 +7891,7 @@ const DOCKER_CANARY_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
@@ -7917,6 +7958,7 @@ const DOCKER_CANARY_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
@@ -7987,6 +8029,7 @@ const DOCKER_CANARY_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
@@ -8061,6 +8104,7 @@ const DOCKER_CANARY_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
@@ -8135,6 +8179,7 @@ const DOCKER_CANARY_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
@@ -8368,4 +8413,354 @@ test("doctor: a .env line assigning a wrapper's own variable is named beside the
 	const { out } = capture();
 	const checks = await collectChecks(imgEnv(), { out, cwd, home: cwd, platform: "linux", spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", fileExists: existsSync, readEnvFile: (p) => readFileSync(p, "utf8") });
 	assert.ok(!checks.some((c) => c.label.includes("keeps for itself")));
+});
+
+// Issue #464: the jobs dir is this account's. A fake fs whose files are `{ path: { uid, dir, link, writable } }`; any
+// other path is absent. Real paths are never read.
+const jobsFs = (entries) => {
+	const missing = (p) => {
+		throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+	};
+	const at = (p) => entries[p] ?? missing(p);
+	const st = (e) => ({ uid: e.uid, isDirectory: () => e.dir !== false, isSymbolicLink: () => e.link === true });
+	return {
+		statSync: (p) => st(at(p)),
+		lstatSync: (p) => st(at(p)),
+		accessSync: (p) => {
+			if (at(p).writable === false) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+		},
+		readdirSync: (p) => {
+			at(p);
+			return Object.keys(entries).filter((k) => k.startsWith(`${p}/`) && !k.slice(p.length + 1).includes("/")).map((k) => k.slice(p.length + 1));
+		},
+	};
+};
+const JOBS_ENV = { TMPDIR: "/t" };
+const passwdNames = (uid) => ({ 1270: "op", 501: "rob" })[uid] ?? null;
+
+test("jobsDirChecks: the default per-account jobs dir, present or still to be made, is ✓; an account root another account owns is ✗ naming it and the fix (#464)", async () => {
+	const { jobsDirChecks } = await import("../src/doctor.mjs");
+	const made = jobsDirChecks(JOBS_ENV, { uid: 501, fs: jobsFs({ "/t": { uid: 0 }, "/t/pi-dispatch-501": { uid: 501 }, "/t/pi-dispatch-501/jobs": { uid: 501 } }) });
+	assert.deepEqual(made, [{ ok: true, label: "Jobs dir /t/pi-dispatch-501/jobs is this account's and writable" }]);
+	const fresh = jobsDirChecks(JOBS_ENV, { uid: 501, fs: jobsFs({ "/t": { uid: 0 } }) });
+	assert.deepEqual(fresh, [{ ok: true, label: "Jobs dir /t/pi-dispatch-501/jobs does not exist yet; the worker creates it (mode 0700) at boot" }]);
+	const squatted = jobsDirChecks(JOBS_ENV, { uid: 501, fs: jobsFs({ "/t": { uid: 0 }, "/t/pi-dispatch-501": { uid: 1270 } }), ownerName: passwdNames });
+	assert.deepEqual(squatted, [
+		{
+			ok: false,
+			label: "/t/pi-dispatch-501, where this account's jobs dir lives, is owned by op (uid 1270), not by this account (uid 501); the worker refuses it at boot -- every job fails before it starts",
+			fix: "another account created /t/pi-dispatch-501 before this one; remove it as its owner or as root (sudo rm -rf /t/pi-dispatch-501), or set PI_JOBS_DIR in .env to a directory this account owns",
+		},
+	]);
+	const linked = jobsDirChecks(JOBS_ENV, { uid: 501, fs: jobsFs({ "/t": { uid: 0 }, "/t/pi-dispatch-501": { uid: 501, link: true } }) });
+	assert.match(linked[0].label, /^\/t\/pi-dispatch-501, where this account's jobs dir lives, is not a directory \(a symlink or a file there is refused/);
+	assert.equal(linked[0].ok, false);
+	const unwritableTmp = jobsDirChecks(JOBS_ENV, { uid: 501, fs: jobsFs({ "/t": { uid: 0, writable: false } }) });
+	assert.equal(unwritableTmp[0].label, "the jobs dir /t/pi-dispatch-501/jobs does not exist, and this account cannot create it (/t is not writable by it) -- every job fails before it starts");
+	assert.deepEqual(jobsDirChecks(JOBS_ENV, { uid: null, fs: jobsFs({}) }), [], "no uid (Windows): nothing to say");
+});
+
+test("jobsDirChecks: an explicit PI_JOBS_DIR another account owns, one this account cannot write, one that is a file, and an empty one are ✗ (#464)", async () => {
+	const { jobsDirChecks } = await import("../src/doctor.mjs");
+	const env = { PI_JOBS_DIR: "/srv/jobs" };
+	const other = jobsDirChecks(env, { uid: 501, fs: jobsFs({ "/srv/jobs": { uid: 1270 } }), ownerName: passwdNames, note: " -- PI_JOBS_DIR read from /d/.env" });
+	assert.deepEqual(other, [
+		{
+			ok: false,
+			label: "the jobs dir /srv/jobs is owned by op (uid 1270), not by this account (uid 501), which could replace a job's inputs; the worker refuses it at boot -- every job fails before it starts -- PI_JOBS_DIR read from /d/.env",
+			fix: "point PI_JOBS_DIR at a directory this account owns, or chown /srv/jobs to this account",
+		},
+	]);
+	assert.equal(jobsDirChecks(env, { uid: 501, fs: jobsFs({ "/srv/jobs": { uid: 501, writable: false } }) })[0].fix, "chmod u+rwx /srv/jobs");
+	assert.match(jobsDirChecks(env, { uid: 501, fs: jobsFs({ "/srv/jobs": { uid: 501, dir: false } }) })[0].label, /^the jobs dir \/srv\/jobs is not a directory/);
+	assert.match(jobsDirChecks({ PI_JOBS_DIR: "" }, { uid: 501, fs: jobsFs({}) })[0].label, /^PI_JOBS_DIR is set to an empty value/);
+	assert.deepEqual(jobsDirChecks(env, { uid: 501, fs: jobsFs({ "/srv/jobs": { uid: 501 } }) }), [{ ok: true, label: "Jobs dir /srv/jobs is this account's and writable" }], "the account root is not judged for a dir outside it");
+});
+
+test("jobsDirChecks: this account's retained workspaces left under the OLD shared default are a ⚠ naming them and the move; another account's are not counted (#464)", async () => {
+	const { jobsDirChecks } = await import("../src/doctor.mjs");
+	const files = { "/t": { uid: 0 }, "/t/pi-dispatch/jobs/sandboxes": { uid: 1270 }, "/t/pi-dispatch/jobs/sandboxes/gh-1": { uid: 501 }, "/t/pi-dispatch/jobs/sandboxes/gh-2": { uid: 501 }, "/t/pi-dispatch/jobs/sandboxes/gh-3": { uid: 1270 } };
+	const checks = jobsDirChecks(JOBS_ENV, { uid: 501, fs: jobsFs(files) });
+	assert.deepEqual(checks[1], {
+		ok: false,
+		warn: true,
+		label: "2 retained workspace(s) of this account are in /t/pi-dispatch/jobs/sandboxes, the shared default before issue #464: this version keeps them in /t/pi-dispatch-501/jobs/sandboxes, so `pi-dispatch sandbox` cannot re-open them and the retention sweep no longer removes them",
+		// Gate round 1: the root named in the mkdir, since `mkdir -m` sets only the directories it names (measured: the plain
+		// `mkdir -p` this said before left the root 755 or 775 until the worker's next boot).
+		fix: "move the ones worth keeping (the same filesystem, so a rename): mkdir -m 700 -p /t/pi-dispatch-501 /t/pi-dispatch-501/jobs/sandboxes && mv /t/pi-dispatch/jobs/sandboxes/<name> /t/pi-dispatch-501/jobs/sandboxes/, and delete the rest: rm -rf /t/pi-dispatch/jobs/sandboxes/<name>. Naming /t/pi-dispatch-501 makes it 0700 too (`mkdir -m` sets only the directories named, and a plain `mkdir -p` leaves /t/pi-dispatch-501 755); the worker also tightens it to 0700 at its next boot",
+	});
+	assert.equal(jobsDirChecks(JOBS_ENV, { uid: 1234, fs: jobsFs(files) }).length, 1, "none of them is this account's");
+	assert.equal(jobsDirChecks({ ...JOBS_ENV, PI_SANDBOX_DIR: "/s" }, { uid: 501, fs: jobsFs(files) }).length, 1, "an explicit PI_SANDBOX_DIR did not move");
+	const explicit = jobsDirChecks({ ...JOBS_ENV, PI_JOBS_DIR: "/t/pi-dispatch/jobs" }, { uid: 501, fs: jobsFs({ ...files, "/t/pi-dispatch/jobs": { uid: 501 } }) });
+	assert.ok(!explicit.some((c) => c.warn), "an explicit PI_JOBS_DIR did not move either");
+	// Its sandboxes/ is another account's here, which the worker refuses at boot (gate round 1): said as that, a ✗.
+	assert.match(explicit[1].label, /^the sandbox dir \/t\/pi-dispatch\/jobs\/sandboxes is owned by uid 1270, not by this account \(uid 501\)/);
+});
+
+test("doctor reads PI_JOBS_DIR as the service does, from the deployment .env, and a jobs dir another account owns fails doctor (#464)", async () => {
+	const cwd = tempDir("pi-jobs-464-cwd-");
+	writeFileSync(join(cwd, ".env"), "PI_JOBS_DIR=/srv/pd-jobs\n");
+	const { out, text } = capture();
+	const code = await runDoctor(ghEnv(), ghDeps(out, green, [], { cwd, jobsDirUid: 501, jobsDirFs: jobsFs({ "/srv/pd-jobs": { uid: 1270 } }), passwd: () => "op:x:1270:1270::/home/op:/bin/bash\n" }));
+	assert.equal(code, 1, text());
+	assert.ok(text().includes(`✗ the jobs dir /srv/pd-jobs is owned by op (uid 1270), not by this account (uid 501), which could replace a job's inputs; the worker refuses it at boot -- every job fails before it starts -- PI_JOBS_DIR read from ${join(cwd, ".env")}, as the service reads it; this shell does not set it\n    → point PI_JOBS_DIR at a directory this account owns, or chown /srv/pd-jobs to this account\n`), text());
+});
+
+// Gate round 1: an explicit PI_SANDBOX_DIR another account owns (seen: a 0777 directory of another account's) is the
+// directory that account can swap a retained workspace in; the worker refuses it at boot and doctor says so.
+test("jobsDirChecks: a sandbox dir another account owns is ✗ naming the owner and the fix; this account's, or one not made yet, says nothing (#464)", async () => {
+	const { jobsDirChecks } = await import("../src/doctor.mjs");
+	const env = { ...JOBS_ENV, PI_SANDBOX_DIR: "/tmp/shared-sb" };
+	const base = { "/t": { uid: 0 }, "/t/pi-dispatch-501": { uid: 501 }, "/t/pi-dispatch-501/jobs": { uid: 501 } };
+	const other = jobsDirChecks(env, { uid: 501, fs: jobsFs({ ...base, "/tmp/shared-sb": { uid: 1270 } }), ownerName: passwdNames, note: " -- PI_SANDBOX_DIR read from /d/.env" });
+	assert.deepEqual(other, [
+		{ ok: true, label: "Jobs dir /t/pi-dispatch-501/jobs is this account's and writable -- PI_SANDBOX_DIR read from /d/.env" },
+		{
+			ok: false,
+			label: "the sandbox dir /tmp/shared-sb is owned by op (uid 1270), not by this account (uid 501), which could swap a retained workspace for one of its own; the worker refuses it at boot -- every job fails before it starts -- PI_SANDBOX_DIR read from /d/.env",
+			fix: "point PI_SANDBOX_DIR at a directory this account owns (or remove the line for the default), or chown /tmp/shared-sb to this account",
+		},
+	]);
+	assert.equal(jobsDirChecks(env, { uid: 501, fs: jobsFs({ ...base, "/tmp/shared-sb": { uid: 501, dir: false } }) })[1].label.startsWith("the sandbox dir /tmp/shared-sb is not a directory"), true);
+	assert.equal(jobsDirChecks(env, { uid: 501, fs: jobsFs({ ...base, "/tmp/shared-sb": { uid: 501 } }) }).length, 1, "this account's: nothing more");
+	assert.equal(jobsDirChecks(env, { uid: 501, fs: jobsFs(base) }).length, 1, "not made yet: the retention step makes it 0700");
+});
+
+test("doctor judges the sandbox dir and the jobs root the SERVICE uses (PI_SANDBOX_DIR and TMPDIR from .env), and prints no retained ✓ after a ✗ on them (#464)", async () => {
+	// The retained count reads the .env's PI_SANDBOX_DIR (gate round 1: it counted the default instead).
+	const cwd = tempDir("pi-464-sbenv-cwd-");
+	const sandboxDir = tempDir("pi-464-sbenv-");
+	mkdirSync(join(sandboxDir, "gh-1"));
+	writeFileSync(join(cwd, ".env"), `PI_SANDBOX_DIR=${sandboxDir}\n`);
+	const kept = capture();
+	await runDoctor(ghEnv(), ghDeps(kept.out, green, [], { cwd }));
+	assert.match(kept.text(), new RegExp(`✓ 1 retained workspace\\(s\\) in ${sandboxDir.replaceAll(".", "\\.")}, swept after 24h`));
+	// TMPDIR in .env (the documented way out of a squatted default root) moves the root doctor judges, as it moves the
+	// service's; a squat there is ✗, and then no ✓ counts what sits in the squatted directory.
+	const uid = process.geteuid();
+	const squatCwd = tempDir("pi-464-tmpenv-cwd-");
+	writeFileSync(join(squatCwd, ".env"), "TMPDIR=/t\n");
+	const squat = capture();
+	const { TMPDIR: _shellTmp, ...shell } = ghEnv();
+	const code = await runDoctor(shell, ghDeps(squat.out, green, [], { cwd: squatCwd, jobsDirUid: uid, jobsDirFs: jobsFs({ "/t": { uid: 0 }, [`/t/pi-dispatch-${uid}`]: { uid: 1270 } }), passwd: () => "op:x:1270:1270::/home/op:/bin/bash\n" }));
+	assert.equal(code, 1, squat.text());
+	assert.ok(squat.text().includes(`✗ /t/pi-dispatch-${uid}, where this account's jobs dir lives, is owned by op (uid 1270), not by this account (uid ${uid}); the worker refuses it at boot -- every job fails before it starts -- TMPDIR read from ${join(squatCwd, ".env")}, as the service reads it; this shell does not set it\n`), squat.text());
+	assert.doesNotMatch(squat.text(), /retained workspace\(s\) in/, "no ✓ over a directory another account made");
+});
+
+// Gate round 1 (D7): doctor said ✓ Valkey reachable on another account's Valkey, and the worker drained its queue. The
+// owner is judged by the SAME function `service install` and `up` use.
+test("doctor on podman: a VALKEY_URL whose listener is not this account's is ✗ by the worker's own rule, with no PING and no fleet read; this account's is ✓ and talked to at the pinned address; docker's is not judged (#464)", async () => {
+	const { judgeValkeyListeners } = await import("../src/podman-stack.mjs");
+	const TCP_HEAD = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+	const hostAt = (uid) => ({
+		"/proc/net/tcp": `${TCP_HEAD}   3: 0100007F:18EB 00000000:0000 0A 00000000:00000000 00:00000000 00000000  ${uid}        0 1 1 0 100 0 0 10 0\n`,
+		"/proc/net/tcp6": TCP_HEAD,
+		"/etc/subuid": "op:1234000000:65536\n",
+	});
+	const asked = [];
+	const owner = (uid) => async (url, opts) => {
+		asked.push({ url, ...opts });
+		return judgeValkeyListeners({ url, probeTcp: async () => true, lookup: async () => [], fs: { readFileSync: (p) => hostAt(uid)[p] }, euid: 1234, ownerName: (u) => ({ 1235: "op2" })[u] ?? null, ...opts });
+	};
+	// Gate round 2: after a refusal doctor does not PING that Valkey or read its fleet.
+	const talked = [];
+	const talk = { probeValkey: async (url) => (talked.push(["ping", url]), true), readHosts: async (url) => (talked.push(["hosts", url]), { hosts: [{ name: "their-worker" }] }) };
+	const other = capture();
+	const code = await runDoctor(podmanEnv(), podmanDeps(other.out, podmanPlan(), [], { userName: () => "op", valkeyOwner: owner(1235), ...talk }));
+	assert.equal(code, 1, other.text());
+	assert.ok(other.text().includes("✗ Valkey (redis://127.0.0.1:6379) is not this account's: 127.0.0.1:6379 is held by op2 (uid 1235), not by this account (uid 1234) or its containers (subordinate uids read from /etc/subuid). The worker refuses to start on it (exit 2); doctor did not talk to it\n    → Give this account a Valkey of its own on another port, VALKEY_URL=redis://127.0.0.1:<port> in "), other.text());
+	assert.deepEqual(talked, [], "no PING, no fleet read of another account's Valkey");
+	assert.doesNotMatch(other.text(), /Valkey reachable|Fleet:|their-worker/);
+	assert.deepEqual([asked[0].shared, asked[0].user], [false, "op"]);
+	// This account's: ✓, and the PING and the fleet read go to the address the worker pins.
+	const mine = capture();
+	talked.length = 0;
+	await runDoctor(podmanEnv({ VALKEY_URL: "redis://localhost:6379" }), podmanDeps(mine.out, podmanPlan(), [], { userName: () => "op", valkeyOwner: async (url, opts) => judgeValkeyListeners({ url, probeTcp: async () => true, lookup: async () => [{ address: "127.0.0.1", family: 4 }], fs: { readFileSync: (p) => hostAt(1234000998)[p] }, euid: 1234, ...opts }), ...talk }));
+	assert.match(mine.text(), /✓ Valkey \(redis:\/\/localhost:6379\) answers from a listener of this account's containers \(a subordinate uid of it, from \/etc\/subuid\); the worker connects to 127\.0\.0\.1 only\n/);
+	assert.deepEqual(talked, [["ping", "redis://127.0.0.1:6379"], ["hosts", "redis://127.0.0.1:6379"]], "the literal the worker pins, not the name");
+	// The opt-in, from the deployment .env only.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "PI_VALKEY_SHARED=1\n");
+	const shared = capture();
+	asked.length = 0;
+	await runDoctor(podmanEnv(), { ...podmanDeps(shared.out, podmanPlan(), [], { userName: () => "op", valkeyOwner: owner(1235) }), cwd, readEnvFile: (path) => readFileSync(path, "utf8") });
+	assert.equal(asked[0].shared, true);
+	assert.match(shared.text(), /✓ Valkey \(redis:\/\/127\.0\.0\.1:6379\) answers from a listener of op2 \(uid 1235\), shared on purpose as PI_VALKEY_SHARED=1 in [^\n]*\.env says/);
+	// Gate round 2: a shell opt-in is ignored and named, even over a PI_VALKEY_SHARED=0 in .env, and the refusal stands.
+	for (const file of ["PI_VALKEY_SHARED=0\n", ""]) {
+		const shellCwd = scaffoldedCwd();
+		writeFileSync(join(shellCwd, ".env"), file);
+		const shell = capture();
+		asked.length = 0;
+		const shellCode = await runDoctor(podmanEnv({ PI_VALKEY_SHARED: "1" }), { ...podmanDeps(shell.out, podmanPlan(), [], { userName: () => "op", valkeyOwner: owner(1235) }), cwd: shellCwd, readEnvFile: (path) => readFileSync(path, "utf8") });
+		assert.equal(asked[0].shared, false, JSON.stringify(file));
+		assert.equal(shellCode, 1);
+		assert.match(shell.text(), /⚠ PI_VALKEY_SHARED is "1" in this shell: ignored, since only [^\n]*\.env may say a Valkey is shared on purpose/);
+		assert.doesNotMatch(shell.text(), /shared on purpose as PI_VALKEY_SHARED=1/);
+	}
+	// Where `local` is blessed docker's Valkey is the queue (root's docker-proxy publishes it): not judged.
+	asked.length = 0;
+	const docker = capture();
+	await runDoctor(podmanEnv({ PI_BACKENDS: "local,podman" }), podmanDeps(docker.out, { ...green, ...podmanPlan() }, [], { userName: () => "op", valkeyOwner: owner(0) }));
+	assert.equal(asked.length, 0);
+	assert.doesNotMatch(docker.text(), /is not this account's/);
+});
+
+// Gate round 2: another account publishing ::1 beside this account's 127.0.0.1 (the localhost squat after install) is a
+// ⚠, since the worker pins 127.0.0.1 and never dials ::1; refusing would let any account stop another's worker.
+test("doctor names another account's listener on another address of the name as a ⚠, while ✓ on the address the worker pins (#464)", async () => {
+	const { judgeValkeyListeners } = await import("../src/podman-stack.mjs");
+	const TCP_HEAD = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+	const files = {
+		"/proc/net/tcp": `${TCP_HEAD}   3: 0100007F:4063 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1234        0 1 1 0 100 0 0 10 0\n`,
+		"/proc/net/tcp6": `${TCP_HEAD}   1: 00000000000000000000000001000000:4063 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1235        0 1 1 0 100 0 0 10 0\n`,
+	};
+	const { out, text } = capture();
+	const code = await runDoctor(podmanEnv({ VALKEY_URL: "redis://localhost:16483" }), podmanDeps(out, podmanPlan(), [], { userName: () => "op", valkeyOwner: async (url, opts) => judgeValkeyListeners({ url, probeTcp: async () => true, lookup: async () => [{ address: "::1", family: 6 }, { address: "127.0.0.1", family: 4 }], fs: { readFileSync: (p) => files[p] ?? "" }, euid: 1234, ownerName: (u) => ({ 1235: "op2" })[u] ?? null, ...opts }) }));
+	assert.match(text(), /✓ Valkey \(redis:\/\/localhost:16483\) answers from a listener of this account; the worker connects to 127\.0\.0\.1 only\n/);
+	assert.match(text(), /⚠ another account also listens on an address VALKEY_URL's host resolves to: \[::1\]:16483 \(held by op2 \(uid 1235\)\)\. The worker connects only to the address judged this account's/);
+	assert.equal(code, 0, text());
+});
+
+// Gate round 1 (coordinator follow-up): an unquoted [::1] VALKEY_URL line is one doctor takes no value from, while systemd
+// hands it to the worker as written. Doctor used to fall back to 127.0.0.1:6379 and PING it, which on a shared host is
+// another account's Valkey (measured on pd-ubuntu), then read that Valkey's fleet and judge its owner. Now it contacts no
+// Valkey at all, on either venue, and names the line.
+test("doctor contacts no Valkey when the service's VALKEY_URL line cannot be read, and names the line (#464)", async () => {
+	for (const [label, env, deps] of [
+		["podman", podmanEnv(), (out, extra) => podmanDeps(out, podmanPlan(), [], { userName: () => "op", ...extra })],
+		["docker", ghEnv(), (out, extra) => ghDeps(out, green, [], extra)],
+	]) {
+		const cwd = scaffoldedCwd();
+		writeFileSync(join(cwd, ".env"), "VALKEY_URL=redis://[::1]:16510\n");
+		const contacted = [];
+		const { out, text } = capture();
+		const code = await runDoctor(env, {
+			...deps(out, {
+				probeValkey: async (url) => (contacted.push(["probe", url]), true),
+				readHosts: async (url) => (contacted.push(["hosts", url]), { hosts: [{ name: "someone-else" }] }),
+				valkeyOwner: async (url) => (contacted.push(["owner", url]), null),
+			}),
+			cwd,
+			readEnvFile: (path) => readFileSync(path, "utf8"),
+		});
+		assert.equal(code, 1, `${label}: ${text()}`);
+		assert.deepEqual(contacted, [], `${label}: no probe, no fleet read, no owner verdict`);
+		assert.match(text(), /✗ [^\n]*\.env line 1 assigns VALKEY_URL in a form this command cannot read the way the service's loader will \(an unquoted \[ or \]: [^\n]*: doctor contacted no Valkey, since the default it would fall back to \(redis:\/\/127\.0\.0\.1:6379\) is not what the service's worker is given, and on a shared host may be another account's\n/, label);
+		assert.doesNotMatch(text(), /Valkey reachable|Fleet:/, label);
+	}
+	// Only the VALKEY_URL line decides it: a readable VALKEY_URL beside an unreadable PI_VALKEY_SHARED is still probed.
+	const plainCwd = scaffoldedCwd();
+	writeFileSync(join(plainCwd, ".env"), "VALKEY_URL=redis://127.0.0.1:16482\nPI_VALKEY_SHARED=$X\n");
+	const plain = capture();
+	await runDoctor(ghEnv(), { ...ghDeps(plain.out, green, []), cwd: plainCwd, readEnvFile: (path) => readFileSync(path, "utf8") });
+	assert.match(plain.text(), /✓ Valkey reachable \(redis:\/\/127\.0\.0\.1:16482\)/);
+	assert.doesNotMatch(plain.text(), /doctor contacted no Valkey/);
+	// This shell's own VALKEY_URL wins as for every service key: then the file's line is not what doctor judges.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "VALKEY_URL=redis://[::1]:16510\n");
+	const { out, text } = capture();
+	await runDoctor(ghEnv({ VALKEY_URL: "redis://127.0.0.1:16482" }), { ...ghDeps(out, green, []), cwd, readEnvFile: (path) => readFileSync(path, "utf8") });
+	assert.match(text(), /✓ Valkey reachable \(redis:\/\/127\.0\.0\.1:16482\)/);
+});
+
+// Gate round 1 (coordinator follow-up): the routing warning read PI_WORKER_NAME from this shell alone, so a deployment
+// whose .env names its worker was told host routing is off (measured on both lab VMs).
+test("doctor reads PI_WORKER_NAME from .env as the service does: no routing warning when the file names the worker, and the fleet line carries it (#464)", async () => {
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "PI_WORKER_NAME=mini1\n");
+	const named = capture();
+	await runDoctor(ghEnv(), { ...ghDeps(named.out, green, [], { readHosts: async () => ({ hosts: [{ name: "mini1" }, { name: "mini2" }] }) }), cwd, readEnvFile: (path) => readFileSync(path, "utf8") });
+	assert.doesNotMatch(named.text(), /no PI_WORKER_NAME/);
+	assert.match(named.text(), /✓ Fleet: 2 workers \(mini1, mini2\)/, "its own row is itself, not a peer");
+	const unnamed = capture();
+	await runDoctor(ghEnv(), { ...ghDeps(unnamed.out, green, [], { readHosts: async () => ({ hosts: [{ name: "mini2" }] }) }), cwd: scaffoldedCwd() });
+	assert.match(unnamed.text(), /⚠ This worker has peers but no PI_WORKER_NAME, so host routing is OFF here/);
+	// This shell's value still wins where it sets one.
+	const shell = capture();
+	await runDoctor(ghEnv({ PI_WORKER_NAME: "mini3" }), { ...ghDeps(shell.out, green, [], { readHosts: async () => ({ hosts: [{ name: "mini2" }] }) }), cwd, readEnvFile: (path) => readFileSync(path, "utf8") });
+	assert.match(shell.text(), /✓ Fleet: 2 workers \(mini2, mini3\)/);
+});
+
+// Issue #464: Podman after linger was switched off, measured on Fedora 44 (5.8.1) and Ubuntu 24.04 (4.9.3).
+test("podmanRunDirGone: an exit-status read with /run/user/<uid> absent and Podman's database recording a run root there, and nothing else (#464)", async () => {
+	const { podmanRunDirGone } = await import("../src/doctor.mjs");
+	const enoent = () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); };
+	// Podman's database as bytes around the measured string (a Lima account's db.sql held `/run/user/501/containers`).
+	const db = (uid) => Buffer.concat([Buffer.from([0x53, 0x51, 0x4c, 0, 0xff]), Buffer.from(`/run/user/${uid}/containers`), Buffer.from([0, 1])]);
+	const withDb = (files) => ({ statSync: enoent, readFileSync: (p) => files[p] ?? enoent() });
+	const gone = withDb({ "/home/op/.local/share/containers/storage/db.sql": db(1240) });
+	const there = { ...gone, statSync: () => ({}) };
+	const denied = { ...gone, statSync: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); } };
+	const read = (reason) => ({ answered: false, reason, transient: true });
+	const home = "/home/op";
+	assert.equal(podmanRunDirGone({ read: read("exit-125"), euid: 1240, fs: gone, home }), "/run/user/1240");
+	assert.equal(podmanRunDirGone({ read: read("exit-1"), euid: 1240, fs: gone, home }), "/run/user/1240", "5.8.1 with XDG_RUNTIME_DIR set exits 1");
+	assert.equal(podmanRunDirGone({ read: read("exit-125"), euid: 1240, fs: withDb({ "/home/op/.local/share/containers/storage/libpod/bolt_state.db": db(1240) }), home }), "/run/user/1240", "an older BoltDB store");
+	assert.equal(podmanRunDirGone({ read: read("exit-125"), euid: 1240, fs: withDb({ "/x/containers/storage/db.sql": db(1240) }), home, env: { XDG_DATA_HOME: "/x" } }), "/run/user/1240", "XDG_DATA_HOME moves it");
+	// Gate round 1: no evidence that Podman ever ran under /run/user (an account that never had a session), so nothing
+	// is claimed about linger; the generic line says what failed.
+	assert.equal(podmanRunDirGone({ read: read("exit-125"), euid: 1240, fs: withDb({}), home }), null, "no database");
+	assert.equal(podmanRunDirGone({ read: read("exit-125"), euid: 1240, fs: withDb({ "/home/op/.local/share/containers/storage/db.sql": Buffer.from("/tmp/podman-run-1240/containers") }), home }), null, "a database whose run root is elsewhere");
+	assert.equal(podmanRunDirGone({ read: read("exit-125"), euid: 1240, fs: withDb({ "/home/op/.local/share/containers/storage/db.sql": db(12400) }), home }), null, "another uid's /run/user is not this one's");
+	assert.equal(podmanRunDirGone({ read: read("exit-125"), euid: 1240, fs: gone, home: null }), null, "no home, no storage root to look in");
+	assert.equal(podmanRunDirGone({ read: read("exit-125"), euid: 1240, fs: there, home }), null);
+	assert.equal(podmanRunDirGone({ read: read("exit-125"), euid: 1240, fs: denied, home }), null, "only ENOENT counts");
+	for (const reason of ["timeout", "signal-sigkill", "spawn-failed", "podman-not-found"]) assert.equal(podmanRunDirGone({ read: read(reason), euid: 1240, fs: gone, home }), null, reason);
+	assert.equal(podmanRunDirGone({ read: { answered: true, info: {} }, euid: 1240, fs: gone, home }), null);
+	assert.equal(podmanRunDirGone({ read: read("exit-125"), euid: 0, fs: gone, home }), null, "root has no /run/user run root here");
+});
+
+test("readLingerOrFlag: loginctl's answer, else logind's flag file, as Ubuntu 24.04's loginctl fails for a non-lingering account (#464)", async () => {
+	const { readLingerOrFlag } = await import("../src/doctor.mjs");
+	const flags = (present) => ({ statSync: (p) => { if (present.includes(p)) return {}; throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); } });
+	const failing = fakeSpawn({ "loginctl show-user": { code: 1, output: "" } }, []);
+	assert.equal(await readLingerOrFlag("op", { spawn: fakeSpawn({ "loginctl show-user": { code: 0, output: "Linger=no\n" } }, []), fs: flags([]) }), false);
+	assert.equal(await readLingerOrFlag("op", { spawn: failing, fs: flags(["/var/lib/systemd/linger"]) }), false);
+	assert.equal(await readLingerOrFlag("op", { spawn: failing, fs: flags(["/var/lib/systemd/linger", "/var/lib/systemd/linger/op"]) }), true);
+	assert.equal(await readLingerOrFlag("op", { spawn: failing, fs: flags([]) }), null, "no logind flag directory: unknown");
+});
+
+test("doctor names Podman's missing run directory after linger went off, with the measured fix, in place of the undecided line (#464)", async () => {
+	const DB = `${PODMAN_HOME}/.local/share/containers/storage/db.sql`;
+	const runDirGone = { ...podmanFs, statSync: (p) => (p === "/run/user/1234" ? (() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); })() : podmanFs.statSync(p)), readFileSync: (p) => (p === DB ? Buffer.from("\0/run/user/1234/containers\0") : podmanFs.readFileSync(p)) };
+	for (const [linger, said] of [["no", ", because linger is off for op"], [null, " (linger could not be read)"]]) {
+		const { out, text } = capture();
+		const plan = { ...podmanPlan(), "podman info": { code: 125, output: "" }, ...(linger ? { "loginctl show-user op -p Linger": { code: 0, output: `Linger=${linger}\n` } } : { "loginctl show-user": { code: 1, output: "" } }) };
+		const code = await runDoctor(podmanEnv(), podmanDeps(out, plan, [], { userName: () => "op", observationFs: runDirGone }));
+		assert.equal(code, 1, text());
+		assert.ok(text().includes(`✗ podman: every podman command fails as this account (exit-125): its run directory /run/user/1234 does not exist${said}. Podman keeps the run root it first used, under that directory, and cannot start a container or answer \`podman info\` without it -- no podman job can run\n    → sudo loginctl enable-linger op -- it starts the account's user manager, which recreates /run/user/1234, and keeps it with no one logged in (measured, Podman 5.8.1 and 4.9.3). \`podman system migrate\` does not get past this (measured: it fails the same way), and a login session of the account (ssh, \`machinectl shell op@\`) recreates the directory only while that session lasts. Then re-run doctor\n`), text());
+		assert.doesNotMatch(text(), /which uid a job runs as could not be decided/);
+	}
+	// With the directory there, an exit status is still the undecided line it always was.
+	const { out, text } = capture();
+	await runDoctor(podmanEnv(), podmanDeps(out, { ...podmanPlan(), "podman info": { code: 125, output: "" } }, [], { userName: () => "op", observationFs: { ...podmanFs, statSync: (p) => (p === "/run/user/1234" ? {} : podmanFs.statSync(p)) } }));
+	assert.match(text(), /⚠ podman: which uid a job runs as could not be decided \(exit-125\)/);
+	assert.doesNotMatch(text(), /its run directory/);
+	// Gate round 1: the directory gone but no database of Podman's recording it (an account that never had a session):
+	// the undecided line, never "linger is off".
+	const fresh = capture();
+	await runDoctor(podmanEnv(), podmanDeps(fresh.out, { ...podmanPlan(), "podman info": { code: 125, output: "" } }, [], { userName: () => "op", observationFs: { ...runDirGone, readFileSync: podmanFs.readFileSync } }));
+	assert.match(fresh.text(), /⚠ podman: which uid a job runs as could not be decided \(exit-125\)/);
+	assert.doesNotMatch(fresh.text(), /its run directory|linger/);
+});
+
+test("doctor with no home: the durable stores' per-account root owned by another account is ✗, said once beside the jobs dir line (#464)", async () => {
+	const uid = process.geteuid();
+	const root = `/t/pi-dispatch-${uid}`;
+	const run = async (env) => {
+		const checks = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", TMPDIR: "/t", ...env }, { ...collectSeams(green), home: "", jobsDirUid: uid, jobsDirFs: jobsFs({ "/t": { uid: 0 }, [root]: { uid: 1270 } }), passwd: () => "op:x:1270:1270::/home/op:/bin/bash\n" });
+		return checks.filter((c) => c.ok === false && !c.warn);
+	};
+	const alone = await run({ PI_JOBS_DIR: "/srv/jobs-elsewhere" });
+	assert.deepEqual(alone.filter((c) => c.label.startsWith(root)), [{
+		ok: false,
+		label: `${root}, where this account's run history and settings overlay (no home directory, so the default is here) lives, is owned by op (uid 1270), not by this account (uid ${uid}); the worker refuses it at boot`,
+		fix: `another account created ${root} before this one; remove it as its owner or as root (sudo rm -rf ${root}), or set PI_JOBS_DIR in .env to a directory this account owns; or set PI_LOGS_DIR and PI_SETTINGS_FILE to a path this account owns`,
+	}]);
+	const both = await run({});
+	assert.equal(both.filter((c) => c.label.startsWith(`${root}, `)).length, 1, "the jobs dir line already names that root; not twice");
+	const mine = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", TMPDIR: "/t", PI_JOBS_DIR: "/srv/x" }, { ...collectSeams(green), home: "", jobsDirUid: uid, jobsDirFs: jobsFs({ "/t": { uid: 0 }, [root]: { uid } }) });
+	assert.ok(!mine.some((c) => c.label.startsWith(`${root}, `)), "this account's root says nothing new");
 });

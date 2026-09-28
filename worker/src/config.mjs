@@ -5,7 +5,7 @@
  * Errors are tagged `piDispatchConfig` so the CLI/entry can print them cleanly and exit non-zero.
  */
 
-import { existsSync, realpathSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import { delimiter, isAbsolute, posix } from "node:path";
 import { DEFAULT_BACKEND, backendRefusals, parseBackendFloor, parseBackendList } from "./backends.mjs";
@@ -538,14 +538,37 @@ export function loadGitHubAuth(env, fileExists) {
 // durable state root. Not a variable of this project's and not a deployment knob: PI_JOBS_DIR,
 // PI_LOGS_DIR, PI_GRAPH_DIR and PI_SETTINGS_FILE are how an operator moves any of them, and
 // .env.example says so.
-function defaultJobsDir(env = process.env) {
+
+/** This process's effective uid, the one its files are created as, or null where the platform has none (Windows). */
+function currentUid() {
+	return typeof process.geteuid === "function" ? process.geteuid() : null;
+}
+
+/**
+ * The per-account root under the OS temp dir that the default jobs, sandbox and graph paths live in (issue #464):
+ * `<tmp>/pi-dispatch-<uid>`, or `<tmp>/pi-dispatch` where the platform has no uid (Windows, whose TEMP is per user).
+ *
+ * Per ACCOUNT because the OS temp dir is shared by every account on a host. The old `<tmp>/pi-dispatch` was created by
+ * whichever account ran a job first (mode 775 or 755 under that account), and every other account's jobs then failed
+ * `EACCES` at `mkdtemp`, their worker service included, while doctor said ready (measured on Fedora 44 and Ubuntu
+ * 24.04). Not `$XDG_RUNTIME_DIR`: that is a small tmpfs (10% of RAM by default) that a retained sandbox, a whole repo
+ * clone, would fill, it is removed at the account's last logout without linger, and a shell reached through `sudo -iu`
+ * has none, so the worker and doctor could disagree about where the jobs are. `ensureAccountTempRoot` creates this
+ * directory 0700 and refuses one this account does not own, since anyone can create a name under a sticky /tmp first.
+ */
+export function accountTempRoot(env = process.env, uid = currentUid()) {
+	const suffix = Number.isInteger(uid) && uid >= 0 ? `-${uid}` : "";
+	return `${tempRoot(env)}/pi-dispatch${suffix}`;
+}
+
+function defaultJobsDir(env = process.env, uid = currentUid()) {
 	// Under the OS temp dir by default, and it STAYS there (issue #290 moved only the two durable
 	// stores). Holds only the read-only /job inputs (prompt + .pi/), rebuilt from scratch every job; the
 	// workspace for a local job is the operator's own folder, not here.
 	//
 	// Takes `env` because its caller `defaultSandboxDir` advertises one and could not honour it while
 	// this function read `process.env` directly -- an injected TMPDIR was silently ignored one frame in.
-	return `${env.TMPDIR ?? env.TEMP ?? "/tmp"}/pi-dispatch/jobs`.replace(/\\/g, "/");
+	return `${accountTempRoot(env, uid)}/jobs`;
 }
 
 /**
@@ -555,11 +578,117 @@ function defaultJobsDir(env = process.env) {
  * `defaultJobsDir()` without its `env` before this, which ignored an injected TMPDIR exactly as `defaultSandboxDir`'s
  * comment below records for itself; identical on the real path, where env is process.env.
  */
-export function jobsDirPath(env = process.env) {
-	return env.PI_JOBS_DIR ?? defaultJobsDir(env);
+export function jobsDirPath(env = process.env, uid = currentUid()) {
+	return env.PI_JOBS_DIR ?? defaultJobsDir(env, uid);
 }
 
-export function defaultSandboxDir(env = process.env) {
+/**
+ * The jobs dir, made ready for this account's jobs, or a thrown Error saying why it cannot be (issue #464). A jobs dir
+ * inside the per-account root (`accountTempRoot`, where the default lives) secures that root first; then the jobs dir
+ * is created (0700 where it is new) and must be a directory this account owns. A `PI_JOBS_DIR` elsewhere that another
+ * account owns is refused too: the owner of the directory holding a job's inputs can rename them and put its own in
+ * their place. `fs` is a seam; with no uid (Windows) nothing is checked and the dir is created as before. A refusal is a
+ * `configError` (determinate: the next try meets the same owner); a failed mkdir is thrown as the fs error it is.
+ */
+export function ensureJobsDir(jobsDir, { env = process.env, uid = currentUid(), fs = { mkdirSync, lstatSync, statSync, chmodSync } } = {}) {
+	ensureUnderAccountRoot(jobsDir, { env, uid, fs });
+	fs.mkdirSync(jobsDir, { recursive: true, mode: 0o700 });
+	if (!Number.isInteger(uid)) return;
+	const st = fs.statSync(jobsDir);
+	if (!st.isDirectory()) throw configError(`the jobs dir ${jobsDir} is not a directory`);
+	if (st.uid !== uid) throw configError(`the jobs dir ${jobsDir} is owned by uid ${st.uid}, not by this account (uid ${uid}), and that account could replace a job's inputs: ${jobsDirOwnerFix(jobsDir, false)}`);
+}
+
+/**
+ * The sandbox dir (retained workspaces), checked at boot as the jobs dir is (issue #464, gate round 1): inside the
+ * per-account root that root is secured first; a sandbox dir that exists must be a directory this account owns. Not
+ * created here: the retention step makes it 0700 when it first keeps a run (`retainJobDir`), and asks the owner again
+ * then. The owner of the directory holding a retained workspace can rename it and plant a manifest of its own in its
+ * place, which `pi-dispatch sandbox` then lists and opens (measured: an explicit PI_SANDBOX_DIR another account made
+ * 0777 was used, and that account swapped the entry). A `configError`, since a restart meets the same owner.
+ */
+export function ensureSandboxDir(sandboxDir, { env = process.env, uid = currentUid(), fs = { mkdirSync, lstatSync, statSync, chmodSync } } = {}) {
+	ensureUnderAccountRoot(sandboxDir, { env, uid, fs });
+	if (!Number.isInteger(uid)) return;
+	let st;
+	try {
+		st = fs.statSync(sandboxDir);
+	} catch (err) {
+		if (err?.code === "ENOENT") return;
+		throw configError(`the sandbox dir ${sandboxDir} could not be read (${err?.code ?? err?.message}): point PI_SANDBOX_DIR at a directory this account owns`);
+	}
+	if (!st.isDirectory()) throw configError(`the sandbox dir ${sandboxDir} is not a directory: point PI_SANDBOX_DIR at a directory this account owns`);
+	if (st.uid !== uid) throw configError(`the sandbox dir ${sandboxDir} is owned by uid ${st.uid}, not by this account (uid ${uid}), and that account could swap a retained workspace for one of its own: ${sandboxDirOwnerFix(sandboxDir)}`);
+}
+
+/** The remedy for a sandbox dir another account owns, shared with doctor. */
+export function sandboxDirOwnerFix(dir) {
+	return `point PI_SANDBOX_DIR at a directory this account owns (or remove the line for the default), or chown ${dir} to this account`;
+}
+
+/**
+ * Secure the per-account root (`ensureAccountTempRoot`) when `path` lies in it, else do nothing (issue #464). The one
+ * rule for every default that can live there: the jobs, sandbox and graph dirs, and, on an account with no home, the
+ * run history and the settings overlay (`defaultStateDir`). Returns whether it did.
+ */
+export function ensureUnderAccountRoot(path, { env = process.env, uid = currentUid(), fs = { mkdirSync, lstatSync, statSync, chmodSync } } = {}) {
+	const root = accountTempRoot(env, uid);
+	const p = String(path ?? "").replace(/\\/g, "/");
+	if (p !== root && !p.startsWith(`${root}/`)) return false;
+	ensureAccountTempRoot(root, { uid, fs });
+	return true;
+}
+
+/** The remedy for a jobs dir (`inRoot` false) or a per-account root (`inRoot` true) another account owns, shared with doctor. */
+export function jobsDirOwnerFix(dir, inRoot) {
+	return inRoot
+		? `another account created ${dir} before this one; remove it as its owner or as root (sudo rm -rf ${dir}), or set PI_JOBS_DIR in .env to a directory this account owns`
+		: `point PI_JOBS_DIR at a directory this account owns, or chown ${dir} to this account`;
+}
+
+/**
+ * Create `root` mode 0700 when it is absent, and refuse it unless it is a real directory (never a symlink, lstat) owned
+ * by `uid`; one this account owns with group or other bits is tightened to 0700. Exported for the admin's graph dir,
+ * which lives under the same root. Throws a `configError` naming the path and the remedy.
+ *
+ * lstat FIRST, never a recursive mkdir first (gate round 1, measured on Fedora 44): with fs.protected_symlinks on (the
+ * default on Fedora and Ubuntu), following another account's symlink under the sticky /tmp fails EACCES, and the
+ * recursive mkdir's own stat of the existing name did exactly that, so a symlink squat reached the worker as a raw
+ * EACCES (exit 1, a systemd restart loop) and each job as a generic failure instead of this refusal. The root itself is
+ * made with a plain mkdir, so a name another account creates between the lstat and the mkdir is EEXIST, judged again.
+ */
+export function ensureAccountTempRoot(root, { uid = currentUid(), fs = { mkdirSync, lstatSync, statSync, chmodSync } } = {}) {
+	if (!Number.isInteger(uid)) {
+		fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+		return;
+	}
+	const refuse = (why) => configError(`${root} ${why}: ${jobsDirOwnerFix(root, true)}`);
+	const look = () => {
+		try {
+			return fs.lstatSync(root);
+		} catch (err) {
+			if (err?.code === "ENOENT") return null;
+			throw refuse(`could not be read (${err?.code ?? err?.message})`);
+		}
+	};
+	let st = look();
+	if (st === null) {
+		try {
+			// The temp dir itself (a TMPDIR the operator named may not exist yet), then the root on its own.
+			fs.mkdirSync(posix.dirname(root), { recursive: true });
+			fs.mkdirSync(root, { mode: 0o700 });
+		} catch (err) {
+			if (err?.code !== "EEXIST") throw refuse(`could not be created (${err?.code ?? err?.message})`);
+		}
+		st = look();
+		if (st === null) throw refuse("vanished as it was created");
+	}
+	if (st.isSymbolicLink() || !st.isDirectory()) throw refuse("is not a directory (a symlink or a file there is refused, since any account can create a name under the temp dir)");
+	if (st.uid !== uid) throw refuse(`is owned by uid ${st.uid}, not by this account (uid ${uid})`);
+	if ((st.mode & 0o077) !== 0) fs.chmodSync(root, 0o700);
+}
+
+export function defaultSandboxDir(env = process.env, uid = currentUid()) {
 	// Beside the per-job dirs, because a retained directory IS a per-job dir -- `cleanup` renames it here
 	// rather than copying, which only stays atomic while both live on one filesystem. Created mode 0700 by
 	// the retention step, since the OS temp dir is 1777 on POSIX and a retained tree holds a repository
@@ -569,7 +698,7 @@ export function defaultSandboxDir(env = process.env) {
 	// Under temp deliberately, and unmoved by issue #290: a retained workspace is bounded by
 	// PI_SANDBOX_RETENTION_HOURS and is disposable by design, so a swept temp dir costs nothing that the
 	// sweep was not already going to take.
-	return `${jobsDirPath(env)}/sandboxes`.replace(/\\/g, "/");
+	return `${jobsDirPath(env, uid)}/sandboxes`.replace(/\\/g, "/");
 }
 
 /**
@@ -618,24 +747,27 @@ function homeOrEmpty(home) {
  * per-platform trio would be three new ENV reads needing their own env-internal markers, where
  * `homedir()` is a node:os call that the env-docs scan does not see at all.
  *
- * WITH NO HOME, this falls back to the old temp path, and that is load-bearing rather than a leak:
- * the fallback is exactly what `underOsTempDir` detects, so doctor prints one line naming the path
- * that will not survive a reboot. Defining `legacyTempStateDir` as this function with no home is what
- * keeps the fallback and doctor's migration hint from ever disagreeing about the old address.
+ * WITH NO HOME, this falls back to a temp path, and that is load-bearing rather than a leak: the fallback
+ * is exactly what `underOsTempDir` detects, so doctor prints one line naming the path that will not
+ * survive a reboot. Since issue #464 that fallback is the PER-ACCOUNT root (`accountTempRoot`,
+ * `<tmp>/pi-dispatch-<euid>`), secured by `ensureUnderAccountRoot` as the jobs dir is: the old shared
+ * `<tmp>/pi-dispatch` was created by whichever homeless account wrote first, and every other account's
+ * records then failed to write, or landed in a directory another account controls. `legacyTempStateDir`
+ * still names that OLD shared address, for doctor's migration hint, and is spelled out on its own.
  *
- * That pairing is why the temp fallback reads a BLANK `TMPDIR`/`TEMP` as absent rather than using it.
+ * The temp fallback reads a BLANK `TMPDIR`/`TEMP` as absent rather than using it.
  * The pre-#290 code spelled this `??`, so `TMPDIR=""` composed the bare `/pi-dispatch` -- a path at the
  * filesystem root that a non-root worker cannot create, and one `underOsTempDir` cannot recognise either,
  * because an empty root is not a prefix of anything. The detector would then have reported "survives a
  * reboot" over a directory that does not even exist. `||` in both places is what keeps the fallback and
  * the detector describing the same world; it is the same rule `loadConfig` applies to PI_LOGS_DIR itself.
  */
-function defaultStateDir(env = process.env, home = safeHomeDir()) {
+function defaultStateDir(env = process.env, home = safeHomeDir(), uid = currentUid()) {
 	// Strip the home dir's own trailing separator BEFORE composing, not after: stripping the composed
 	// string only reaches a slash at the END, and `${"/home/u/"}/.pi-dispatch` puts one in the MIDDLE.
 	const h = homeOrEmpty(home);
 	if (h !== "") return `${h.replace(/\\/g, "/").replace(/\/+$/, "")}/.pi-dispatch`;
-	return `${tempRoot(env)}/pi-dispatch`.replace(/\\/g, "/");
+	return accountTempRoot(env, uid);
 }
 
 /**
@@ -656,20 +788,21 @@ function tempRoot(env = process.env) {
 
 /** The address the durable stores had before issue #290, so doctor's migration hint can name it. */
 export function legacyTempStateDir(env = process.env) {
-	return defaultStateDir(env, "");
+	// The SHARED address every account used before issues #290 and #464; not a path anything writes any more.
+	return `${tempRoot(env)}/pi-dispatch`;
 }
 
-export function defaultLogsDir(env = process.env, home = safeHomeDir()) {
+export function defaultLogsDir(env = process.env, home = safeHomeDir(), uid = currentUid()) {
 	// Durable by default (issue #290, REQ-DURABLE-RUN-HISTORY): holds the per-run history sidecars and,
 	// when PI_CAPTURE_JOB_LOGS=1, the raw logs. A worker-owned path that never enters the container env
 	// allowlist (no-broad-env-into-container). Exported so the admin extension resolves the same default
 	// without calling loadConfig, which throws on unrelated env problems -- and the admin resolving the
 	// SAME answer is the whole point: a panel reading a different directory shows an empty history and
 	// says nothing about why.
-	return `${defaultStateDir(env, home)}/logs`;
+	return `${defaultStateDir(env, home, uid)}/logs`;
 }
 
-export function defaultSettingsFile(env = process.env, home = safeHomeDir()) {
+export function defaultSettingsFile(env = process.env, home = safeHomeDir(), uid = currentUid()) {
 	// Durable by default, beside the run history (issue #290). Holds the runtime-tunable settings overlay
 	// shared with the admin extension (INT-CONFIG-OVERLAY-CONTRACT); a worker-owned path that never
 	// enters the container env allowlist (no-broad-env-into-container).
@@ -678,7 +811,7 @@ export function defaultSettingsFile(env = process.env, home = safeHomeDir()) {
 	// settings.json silently restores the wider env cap. That is the same fail-open
 	// DES-RUNTIME-SETTINGS-FILE-OVERLAY already refuses on a bad parse, arriving through the filesystem
 	// instead of through the parser.
-	return `${defaultStateDir(env, home)}/settings.json`;
+	return `${defaultStateDir(env, home, uid)}/settings.json`;
 }
 
 /**
@@ -903,14 +1036,16 @@ function workerName(env) {
 	return declared;
 }
 
-export function defaultGraphDir(env = process.env) {
+export function defaultGraphDir(env = process.env, uid = currentUid()) {
 	// Under the OS temp dir by default, beside logs/ and jobs/ -- the admin's graph HTML artifact
 	// (issue #54) is host-side display output on the defaultLogsDir doctrine, and deliberately NOT
 	// inside logsDir: INT-RUN-HISTORY-FILE-CONTRACT names that directory's filename shape, and a
 	// stray .html beside the sidecars would widen a contract for a file that is not a record.
 	// Overridable with PI_GRAPH_DIR; exported so the admin resolves the same default without
 	// loadConfig, like defaultSandboxDir above.
-	return `${env.TMPDIR ?? env.TEMP ?? "/tmp"}/pi-dispatch/graph`.replace(/\\/g, "/");
+	// Issue #464: under the per-account root, for the jobs dir's reason: another account's `<tmp>/pi-dispatch` made
+	// this one uncreatable.
+	return `${accountTempRoot(env, uid)}/graph`;
 }
 
 

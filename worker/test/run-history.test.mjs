@@ -646,7 +646,7 @@ test("buildRecord for a github job keeps id-only fields and admits no PII", () =
 	});
 	assert.equal(record.target, "o/r#5");
 	assert.equal(record.outcome, "completed");
-	assert.equal(record.attempt, 0);
+	assert.equal(record.attempt, 1, "attemptsMade 0 while processing is the first attempt");
 	assert.equal(record.kind, "github");
 	assert.equal(record.flow, "fix");
 	assert.equal(record.turns, null);
@@ -678,7 +678,7 @@ test("buildRecord for a local job keeps only the folder basename and no task tex
 		endedAt: "2026-07-18T00:01:00.000Z",
 	});
 	assert.equal(record.target, "local:proj");
-	assert.equal(record.attempt, 0); // attemptsMade absent -> 0
+	assert.equal(record.attempt, 1); // attemptsMade absent -> the first attempt, numbered 1
 
 	const json = JSON.stringify(record);
 	assert.ok(!json.includes("SECRET_TASK"), "task must not leak");
@@ -696,8 +696,15 @@ test("buildRecord throw-path maps a present error and no result to a failed outc
 	});
 	assert.equal(record.outcome, "failed");
 	assert.equal(record.reason, "error");
-	assert.equal(record.attempt, 1);
+	assert.equal(record.attempt, 2, "attemptsMade 1 while processing is the second attempt");
 	assert.equal(record.turns, null);
+});
+
+test("the record's attempt is the 1-based attempt number, from BullMQ's attemptsMade while processing (ledger, #464 round)", () => {
+	// attemptsMade counts FINISHED attempts and the record is written before this one finishes, so the first of the
+	// queue's two attempts reads 0 there and the second 1. The record says 1 and 2, what the panel's "attempt N" means.
+	const at = (attemptsMade) => buildRecord({ job: { id: "gh-a", attemptsMade, name: "github", data: { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } } }, result: { outcome: "completed" }, startedAt: "2026-09-28T00:00:00.000Z", endedAt: "2026-09-28T00:00:01.000Z" }).attempt;
+	assert.deepEqual([at(0), at(1), at(undefined), at("1"), at(-0.5), at(-1)], [1, 2, 1, 1, 1, 1]);
 });
 
 test("buildRecord throw-path admits no PII for either job kind", () => {

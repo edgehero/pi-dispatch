@@ -110,7 +110,7 @@ function OTHER_VENUE(name, { spawned = [], reap = async () => ({ reaped: true })
 	};
 }
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -272,6 +272,11 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			...(makeGitLabHost ? { makeGitLabHost } : {}),
 			...(now ? { now } : {}),
 			...(authResolveTimeoutMs ? { authResolveTimeoutMs } : {}),
+			...(ensureJobsDir ? { ensureJobsDir } : {}),
+			...(ensureUnderAccountRoot ? { ensureUnderAccountRoot } : {}),
+			...(ensureSandboxDir ? { ensureSandboxDir } : {}),
+			// Issue #464 (gate round 2): never this host's /proc, DNS or ports. The URL as given unless a test judges it.
+			judgeValkey: judgeValkey ?? (async ({ url }) => ({ url, servername: null, pinned: null, notes: [] })),
 		});
 		booted = true;
 	} finally {
@@ -3249,4 +3254,73 @@ test("local's job teardown uses the runtime THAT job was admitted on, recorded p
 	// The worker's own log, not the default no-op: a refused teardown is said on the worker's stream.
 	assert.equal(typeof opts.log, "function");
 	assert.notEqual(opts.log.toString(), "() => {}");
+});
+
+test("boot makes the jobs dir this account's before it builds anything, and another account's refuses boot as a configError (#464)", { skip }, async () => {
+	const asked = [];
+	const order = [];
+	await runStart({ env: { PI_JOBS_DIR: "/srv/pd-jobs" }, order, ensureJobsDir: (dir, opts) => asked.push([dir, opts.env.PI_JOBS_DIR]) });
+	assert.deepEqual(asked, [["/srv/pd-jobs", "/srv/pd-jobs"], ["/srv/pd-jobs", "/srv/pd-jobs"]], "once at boot, before anything is built, and once by the job preparer it hands the worker, both against the boot's own env");
+	const refusal = Object.assign(new Error("/tmp/pi-dispatch-501 is owned by uid 1270, not by this account (uid 501)"), { piDispatchConfig: true });
+	const refusedOrder = [];
+	await assert.rejects(
+		runStart({ order: refusedOrder, ensureJobsDir: () => {
+			throw refusal;
+		} }),
+		(err) => err === refusal,
+	);
+	assert.deepEqual(refusedOrder, [], "no worker was created, nothing was connected");
+});
+
+// Gate round 1: an explicit PI_SANDBOX_DIR another account owned (0777) was used, and that account swapped a retained
+// workspace for its own. Refused at boot like the jobs dir, before anything is built.
+test("boot asks the sandbox dir's owner too, and another account's refuses boot as a configError before anything is built (#464)", { skip }, async () => {
+	const asked = [];
+	await runStart({ env: { PI_SANDBOX_DIR: "/srv/pd-sb" }, ensureJobsDir: () => {}, ensureSandboxDir: (dir, opts) => asked.push([dir, opts.env.PI_SANDBOX_DIR]) });
+	assert.deepEqual(asked, [["/srv/pd-sb", "/srv/pd-sb"]]);
+	const refusal = Object.assign(new Error("the sandbox dir /srv/pd-sb is owned by uid 1270"), { piDispatchConfig: true });
+	const order = [];
+	await assert.rejects(runStart({ order, env: { PI_SANDBOX_DIR: "/srv/pd-sb" }, ensureJobsDir: () => {}, ensureSandboxDir: () => {
+		throw refusal;
+	} }), (err) => err === refusal);
+	assert.deepEqual(order, [], "no worker was created");
+});
+
+// Gate round 2: the owner rule runs where the connection is made. A VALKEY_URL edited after install refused it, a
+// 0.0.0.0 URL, or a ::1 squat after install each reached another account's queue through an unjudged worker.
+test("boot judges VALKEY_URL's owner before any Valkey contact, refuses as a configError, and every client connects to the pinned address (#464)", { skip }, async () => {
+	const asked = [];
+	const refusal = Object.assign(new Error("the Valkey VALKEY_URL reaches is refused: 127.0.0.1:6379 is held by op2 (uid 1235)"), { piDispatchConfig: true });
+	const order = [];
+	await assert.rejects(
+		runStart({ order, env: { PI_BACKENDS: "podman" }, judgeValkey: async (args) => {
+			asked.push([args.url, args.venues]);
+			throw refusal;
+		} }),
+		(err) => err === refusal,
+	);
+	assert.deepEqual(order, [], "no worker was created, nothing was connected");
+	assert.deepEqual(asked[0][1], { localUsed: false, podmanUsed: true }, "judged for the venues the deployment blesses");
+	// Pinned: the worker's clients use the judged literal, not VALKEY_URL's name. VALKEY_URL here names a host that does not
+	// resolve, so the boot can only succeed if every client took the pinned URL instead.
+	const pinnedUrl = process.env.VALKEY_TEST_URL;
+	const r = await runStart({ env: { VALKEY_URL: "redis://valkey-name-never-resolves.invalid:1" }, judgeValkey: async () => ({ url: pinnedUrl, servername: null, pinned: { address: "127.0.0.1", port: 6399, heldBy: "this account" }, notes: ["another account also listens on [::1]:6399"] }) });
+	assert.equal(r.captured.connection.host, new URL(pinnedUrl).hostname, "BullMQ's worker connection");
+	assert.ok(r.logs.some((l) => l.event === "valkey_pinned" && l.address === "127.0.0.1" && l.heldBy === "this account"), JSON.stringify(r.logs.slice(0, 5)));
+	assert.ok(r.logs.some((l) => l.event === "valkey_note" && /\[::1\]:6399/.test(l.note)));
+	// The boot line carries the pinned address beside the URL as written (gate round 2 follow-up).
+	const started = r.logs.find((l) => l.event === "worker_started");
+	assert.deepEqual([started.valkey, started.valkeyPinned], ["redis://valkey-name-never-resolves.invalid:1", "127.0.0.1:6399"]);
+});
+
+test("boot secures the account root for the two durable stores too, and a refusal there stops it before anything is built (#464)", { skip }, async () => {
+	const asked = [];
+	await runStart({ env: { PI_LOGS_DIR: "/t/pi-dispatch-501/logs", PI_SETTINGS_FILE: "/t/pi-dispatch-501/settings.json" }, ensureJobsDir: () => {}, ensureUnderAccountRoot: (p) => asked.push(p) });
+	assert.deepEqual(asked, ["/t/pi-dispatch-501/logs", "/t/pi-dispatch-501"], "the run history and the overlay's directory");
+	const refusal = Object.assign(new Error("/t/pi-dispatch-501 is owned by uid 1270"), { piDispatchConfig: true });
+	const order = [];
+	await assert.rejects(runStart({ order, ensureJobsDir: () => {}, ensureUnderAccountRoot: () => {
+		throw refusal;
+	} }), (err) => err === refusal);
+	assert.deepEqual(order, [], "no worker was created");
 });

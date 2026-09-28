@@ -7,7 +7,7 @@
 import { parseBackendList } from "./backends.mjs";
 import { egressArmed, egressProxyName } from "./egress.mjs";
 import { envValueShown } from "./env-file.mjs";
-import { STACK_KEYS, readStackKeys } from "./podman-stack.mjs";
+import { STACK_KEYS, VALKEY_SHARED_KEY, readStackKeys, readValkeyKeys } from "./podman-stack.mjs";
 
 /** How each command says what a shell/file disagreement would make it do, the clause before "while the service ...". */
 const COMMAND_SAYS = Object.freeze({
@@ -69,6 +69,68 @@ export function deploymentVenueEnv({ env, fs, envPath, platform, command = "up",
 		return { error: `${conflicts.join("; ")}. ${COMMAND_SAYS[command] ?? COMMAND_SAYS.up} while the service runs the file's. Make them agree: change ${envPath} (what the service reads), or unset the key in this shell` };
 	}
 	return { env: merged, fromFile, notes };
+}
+
+/**
+ * VALKEY_URL and PI_VALKEY_SHARED as `up` must judge them (issue #464): the deployment `.env`'s, read with the loader the
+ * service uses (`readValkeyKeys`), because the Valkey `up` adopts or refuses is the one the SERVICE's worker will use.
+ * For VALKEY_URL this shell's value is taken where the file sets none (what the wizard relies on before init has
+ * written `.env`), and both set differently is refused, as a venue key is (`deploymentVenueEnv`), since the service
+ * runs the file's. PI_VALKEY_SHARED comes from the file only, a shell value named as ignored (gate round 2); a
+ * `.env` line the loaders read differently is refused, naming what in it is the problem, on Linux (off it the podman
+ * venue refuses the host anyway, so it is a note). Returns `{ env: { VALKEY_URL?, PI_VALKEY_SHARED? }, fromFile, notes }`
+ * or `{ error }`.
+ */
+export function deploymentValkeyEnv({ env, fs, envPath, platform, command = "up" }) {
+	const linux = platform === "linux";
+	const loader = linux ? "systemd" : platform === "darwin" ? "shell" : "cmd";
+	const notes = [];
+	let keys = {};
+	if (fs.existsSync(envPath)) {
+		let text = null;
+		try {
+			text = String(fs.readFileSync(envPath, "utf8"));
+		} catch (err) {
+			notes.push(`${envPath} could not be read (${err?.message}), so VALKEY_URL and ${VALKEY_SHARED_KEY} come from this shell alone`);
+		}
+		if (text !== null) {
+			const read = readValkeyKeys(text, { loader, path: envPath });
+			if (read.error && linux) return { error: `${read.error}. ${command} judges the Valkey the service will use, so it stops here` };
+			if (read.error) notes.push(read.error);
+			else keys = read.keys;
+		}
+	}
+	const merged = {};
+	const fromFile = {};
+	const conflicts = [];
+	{
+		const shell = typeof env.VALKEY_URL === "string" ? env.VALKEY_URL : undefined;
+		if (!Object.hasOwn(keys, "VALKEY_URL")) {
+			if (shell !== undefined) merged.VALKEY_URL = shell;
+		} else {
+			if (shell !== undefined && shell !== keys.VALKEY_URL) conflicts.push(`VALKEY_URL is ${quotedShown(shell)} in this shell and ${quotedShown(keys.VALKEY_URL)} in ${envPath}`);
+			merged.VALKEY_URL = keys.VALKEY_URL;
+			fromFile.VALKEY_URL = keys.VALKEY_URL;
+		}
+	}
+	// PI_VALKEY_SHARED from the file ONLY (gate round 2): it is the one statement that another uid's Valkey is this
+	// deployment's queue on purpose, and the worker, `service install` and doctor read it from `.env` alone, so a shell
+	// export that `up` honoured was an opt-in the service never made (measured: `up` exit 0 and a ✓ over a refused
+	// install). A shell value is ignored, and said.
+	if (Object.hasOwn(keys, VALKEY_SHARED_KEY)) {
+		merged[VALKEY_SHARED_KEY] = keys[VALKEY_SHARED_KEY];
+		fromFile[VALKEY_SHARED_KEY] = keys[VALKEY_SHARED_KEY];
+	}
+	if (typeof env[VALKEY_SHARED_KEY] === "string") notes.push(sharedShellIgnored(env[VALKEY_SHARED_KEY], envPath));
+	if (conflicts.length > 0) {
+		return { error: `${conflicts.join("; ")}. ${command} would judge the shell's Valkey while the service uses the file's. Make them agree: change ${envPath} (what the service reads), or unset the key in this shell` };
+	}
+	return { env: merged, fromFile, notes };
+}
+
+/** The sentence for a PI_VALKEY_SHARED this shell sets, which no command honours (issue #464, gate round 2). */
+export function sharedShellIgnored(value, envPath) {
+	return `${VALKEY_SHARED_KEY} is ${quotedShown(value)} in this shell: ignored, since only ${envPath} may say a Valkey is shared on purpose (the service's worker reads it there alone)`;
 }
 
 /**

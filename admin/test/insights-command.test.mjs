@@ -236,3 +236,27 @@ test("the budget slice carries the scoped rows from the limits file; a dead queu
   assert.ok(page.includes("day used ? / cap 10"), "the dead queue leaves used unknown, never an invented zero");
   assert.ok(page.includes("concurrent ≤2 (config; in-flight not shown)"), "concurrency stays config-only");
 });
+
+test("the default graph dir's account root is made this account's first, and another account's root writes nothing (#464)", async () => {
+  const uid = process.geteuid();
+  const withRoot = (owner) => {
+    const h = harness({ platform: "linux", env: { SSH_TTY: "/dev/pts/0" } });
+    Object.assign(h.deps.fs, {
+      lstatSync: (p) => (h.events.push(["lstat", p]), { uid: owner, isDirectory: () => true, isSymbolicLink: () => false, mode: 0o40700 }),
+      statSync: (p) => ({ uid: owner, isDirectory: () => true, mode: 0o40700 }),
+      chmodSync: (p, m) => h.events.push(["chmod", p, m]),
+    });
+    return h;
+  };
+  const paths = { ...cannedPaths(), graphDir: "/t/pi-dispatch-x/graph", graphRoot: "/t/pi-dispatch-x" };
+  const mine = withRoot(uid);
+  await mod.insightsCommand(paths, ["insights"], mine.notify, mine.deps);
+  // lstat first (gate round 1): an existing root is judged and never mkdir'd, so a symlink there is never followed.
+  assert.deepEqual(mine.events.slice(0, 2), [["lstat", "/t/pi-dispatch-x"], ["mkdir", "/t/pi-dispatch-x/graph", true]], "the root, checked, then the graph dir");
+  assert.ok(mine.events.some((e) => e[0] === "rename"));
+  const theirs = withRoot(uid + 1);
+  await mod.insightsCommand(paths, ["insights"], theirs.notify, theirs.deps);
+  assert.ok(!theirs.events.some((e) => e[0] === "write" || e[0] === "rename"), "nothing written under another account's root");
+  const said = theirs.events.find((e) => e[0] === "notify" && e[1] === "error");
+  assert.match(said[2], new RegExp(`^insights: could not write /t/pi-dispatch-x/graph/insights\\.html \\(/t/pi-dispatch-x is owned by uid ${uid + 1}, not by this account \\(uid ${uid}\\): another account created /t/pi-dispatch-x before this one`));
+});

@@ -49,15 +49,16 @@
  * containers, networks and fixture are named before they exist and removed when it ends; it is judged by the same failed/ok rule and carries
  * no fixAction, because what a failed read-back points at is the image or the runtime.
  */
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
-import { homedir, release as osRelease, tmpdir, userInfo } from "node:os";
-import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_START, STACK_KEYS, STARTED_AT_FORMAT, judgeNetnsKeeper, netnsKeeperRemedy, podmanNeedsNetnsKeeper, proxyRestartAdvice, readLinger } from "./podman-stack.mjs";
+import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { homedir, networkInterfaces, release as osRelease, tmpdir, userInfo } from "node:os";
+import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_START, STACK_KEYS, STARTED_AT_FORMAT, VALKEY_SHARED_KEY, judgeNetnsKeeper, judgeValkeyListeners, netnsKeeperRemedy, pinnedValkeyUrl, podmanNeedsNetnsKeeper, probeTcpAddress, readSubuidRanges, proxyRestartAdvice, readLinger, readValkeyKeys, valkeySharedOn } from "./podman-stack.mjs";
 import { dirname, isAbsolute, join, delimiter, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, logsDirPath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
-import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envFileWrapperInternal, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, wrapperInternalSentence } from "./env-file.mjs";
+import { accountTempRoot, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
+import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
 import { loadPauseWindows } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
@@ -69,7 +70,7 @@ import { copySkillTree } from "./copy-tree.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { GIT_READ_FLAGS } from "./git-hardening.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
-import { deploymentVenueEnv } from "./deployment-venue.mjs";
+import { deploymentVenueEnv, sharedShellIgnored } from "./deployment-venue.mjs";
 import { PROXY_STATE_FORMAT, parseProxyState, shippedProxyDrift } from "./egress-proxy-state.mjs";
 import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, observePodman, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
@@ -191,9 +192,18 @@ export async function runDoctor(env = process.env, deps = {}) {
 		readEnvFile = (path) => readFileSync(path),
 		// Issue #345: the host files the runtime-mounts observation reads (Podman's mounts.conf and containers.conf).
 		observationFs = { statSync, readFileSync, readdirSync },
+		// Issue #464: the jobs dir check's reads (its owner, whether this account may write it, the old shared default's
+		// retained workspaces). Never a write: doctor says what the worker will meet, and the worker creates the dir.
+		jobsDirFs = { accessSync, lstatSync, readdirSync, statSync },
+		// The uid the worker's files are created as, which is what `ensureJobsDir` compares an owner with: this process's
+		// own, not `jobUserIdentity`'s (the job-user decision's facts, which a test fakes for another reason).
+		jobsDirUid = process.geteuid?.(),
 		// Issue #453: this shell's account name, asked of loginctl for linger on the podman venue; and whether this folder
 		// holds the shipped proxy's two files, so its running proxy's mounts can be compared with them.
 		userName,
+		// Issue #464 (gate round 1): whose Valkey VALKEY_URL reaches, `(url, { shared, user, envPath })` answering as
+		// `judgeValkeyListeners`. Defaulted below, not here: see there.
+		valkeyOwner,
 		proxyFilesExist,
 		isAlive = defaultIsAlive,
 		pid = process.pid,
@@ -258,7 +268,18 @@ export async function runDoctor(env = process.env, deps = {}) {
 			env = venue.env;
 		}
 	}
-	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, serviceEnvFile: envText === null ? null : { text: decodeEnvFile(envText).text, path: envPath, loader: serviceEnvLoader(platform) } };
+	// The Valkey owner rule reads this host's sockets and probes its addresses, so it is real only where the Valkey probe
+	// is: a caller that injects `probeValkey` (every test, which must not reach a Valkey on this host, and a CI runner has
+	// one on 6379 behind root's docker-proxy) gets no owner check unless it injects `valkeyOwner` too. Linux only: /proc
+	// is where the owner is read.
+	const valkeyOwnerSeam =
+		valkeyOwner !== undefined
+			? valkeyOwner
+			: deps.probeValkey === undefined && platform === "linux"
+				? (url, { shared, user, envPath }) =>
+						judgeValkeyListeners({ url, probeTcp: probeTcpAddress, lookup: (host, opts) => dnsLookup(host, opts), fs: { readFileSync }, euid: process.geteuid?.(), user, shared, ownerName: (uid) => ownerNameFromPasswd(passwd, uid), interfaces: networkInterfaces, envPath, subuids: readSubuidRanges({ user, euid: process.geteuid?.(), fs: { readFileSync } }) })
+				: null;
+	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, serviceEnvFile: envText === null ? null : { text: decodeEnvFile(envText).text, path: envPath, loader: serviceEnvLoader(platform) } };
 
 	let checks = await collectChecks(env, seams);
 	let failed = render(checks, out);
@@ -403,7 +424,10 @@ export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "P
 /**
  * The keys doctor takes from the deployment's `.env` as the SERVICE's values where its own shell sets none (issue
  * #453): the venue keys `up` and `service install` read, the Valkey the worker connects to, the provider, the GitHub
- * auth source and App keys (PR #466 gate round 2, `GITHUB_SERVICE_KEYS`), and that provider's key variables (pi's own names for it, passed in, and judged for presence only, never printed). ONE
+ * auth source and App keys (PR #466 gate round 2, `GITHUB_SERVICE_KEYS`), that provider's key variables (pi's own
+ * names for it, passed in, and judged for presence only, never printed), and (issue #464) the jobs and sandbox dirs
+ * and the TMPDIR the default jobs root lives under, whose owner doctor judges as the service's worker will meet them,
+ * and PI_VALKEY_SHARED, the opt-in the Valkey owner check reads. ONE
  * structural allowlist: every `.env` value doctor acts on passes `serviceEnvKeys` first. Unlike
  * `ENV_FILE_READABLE_KEYS` these values steer what doctor does: which venue it judges and so which runtime it spawns,
  * which Valkey it connects to, and which fixes it offers.
@@ -412,7 +436,7 @@ export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "P
  *  the worker's boot or its token mint would. Judged, never printed, beyond what those lines already print (the ids and
  *  the key's path, neither a secret); the inline key is only ever sniffed for its first bytes. */
 export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY"]);
-export const SERVICE_ENV_KEYS = Object.freeze([...STACK_KEYS, "VALKEY_URL", "PI_PROVIDER", ...GITHUB_SERVICE_KEYS]);
+export const SERVICE_ENV_KEYS = Object.freeze([...STACK_KEYS, "VALKEY_URL", VALKEY_SHARED_KEY, "PI_PROVIDER", ...GITHUB_SERVICE_KEYS, "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", "PI_WORKER_NAME"]);
 
 /** `keys` narrowed to `SERVICE_ENV_KEYS` plus the provider's own key variables. */
 export function serviceEnvKeys(keys, providerKeys = []) {
@@ -658,7 +682,21 @@ export async function collectChecks(env, seams) {
 	};
 	const fileKeys = fromServiceFile(["VALKEY_URL", "PI_PROVIDER"]);
 	const valkeyUrl = env.VALKEY_URL ?? fileKeys.VALKEY_URL ?? "redis://127.0.0.1:6379";
+	// Issue #464 (gate round 1): a VALKEY_URL line in the service's `.env` that the loaders read differently (an unquoted
+	// [::1], say) gives `fileKeys` no value, so `valkeyUrl` above fell back to the default, while systemd hands the worker
+	// the line as written. Doctor then pinged 127.0.0.1:6379, which on a shared host is another account's Valkey
+	// (measured on pd-ubuntu: gx469's), and read that Valkey's fleet. Nothing below contacts a Valkey in that case; the
+	// line is named instead. Only when this shell sets no VALKEY_URL of its own, as for every other service key.
+	const valkeyLine = serviceEnvFile && env.VALKEY_URL === undefined ? readEnvAssignments(serviceEnvFile.text, ["VALKEY_URL"], { loader: serviceEnvFile.loader }).VALKEY_URL : undefined;
+	const unreadValkey = valkeyLine && !valkeyLine.plain ? readValkeyKeys(serviceEnvFile.text, { loader: serviceEnvFile.loader, path: serviceEnvFile.path }).error : null;
 	const provider = env.PI_PROVIDER ?? fileKeys.PI_PROVIDER ?? "anthropic";
+	// Issue #464 (gate round 1): this host's declared worker name, resolved ONCE, as for every other service key: this
+	// shell's value where it sets one, else the deployment `.env`'s, read by the service's own loader. Every reader
+	// below (the fleet line and its routing warning, the per-host backend wording, which cron triggers are scheduled
+	// here) uses this value and never `env.PI_WORKER_NAME`: read from the shell alone, a deployment whose `.env` names
+	// its worker was told host routing is off, and judged as a single host (measured on both lab VMs). A test holds the
+	// file to one read of the variable.
+	const declaredWorkerName = env.PI_WORKER_NAME ?? fromServiceFile(["PI_WORKER_NAME"]).PI_WORKER_NAME;
 	const fromFileNote = (keys) => (keys.length > 0 ? ` -- ${keys.join(" and ")} read from ${serviceEnvFile.path}, as the service reads it; this shell does not set ${keys.length === 1 ? "it" : "them"}` : "");
 
 	const checks = [];
@@ -745,7 +783,7 @@ export async function collectChecks(env, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { requiring, waiting, waitProfiles, waitAfters, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd);
+	const { requiring, waiting, waitProfiles, waitAfters, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName);
 	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
@@ -969,7 +1007,7 @@ export async function collectChecks(env, seams) {
 	// run it. And on a fleet
 	// a forge trigger's jobs go to the shared queue, so what this host can promise is only what it does with a job it
 	// picks up: the wording says that, while a single host keeps "every job", which is true there.
-	const nameDeclared = Boolean(env.PI_WORKER_NAME);
+	const nameDeclared = Boolean(declaredWorkerName);
 	let blessedList = null;
 	try {
 		blessedList = parseBackendList(env.PI_BACKENDS);
@@ -1494,8 +1532,36 @@ export async function collectChecks(env, seams) {
 		}
 	}
 
-	checks.push({
-		ok: await probeValkey(valkeyUrl),
+	// Issue #464 (gate rounds 1 and 2): WHOSE Valkey that is, on the podman venue, by the one rule the worker applies at
+	// boot and `service install` and `up` apply (`judgeValkeyListeners`). Reachable is not enough: on a shared host a
+	// VALKEY_URL that reaches another account's Valkey (its port, its ::1 for a `localhost` URL, or 0.0.0.0) passed here,
+	// and the worker then took and ran that account's jobs. Judged BEFORE anything talks to Valkey: after a refusal
+	// doctor neither PINGs that Valkey nor reads its fleet, and otherwise it talks to the address the worker pins.
+	// Only where `local` is not blessed (docker's Valkey, published by root's docker-proxy, is the queue there, as `up`
+	// and `service install` also say) and only on Linux, where /proc names the owner. PI_VALKEY_SHARED comes from the
+	// deployment `.env` alone, as the worker reads it; one in this shell is named as ignored.
+	let ownerVerdict = null;
+	const sharedInFile = (() => {
+		if (!serviceEnvFile) return undefined;
+		const read = readEnvAssignments(serviceEnvFile.text, [VALKEY_SHARED_KEY], { loader: serviceEnvFile.loader })[VALKEY_SHARED_KEY];
+		return read?.plain && typeof read.value === "string" ? read.value : undefined;
+	})();
+	if (!unreadValkey && seams.valkeyOwner && podmanUsed && !localUsed) {
+		if (typeof env[VALKEY_SHARED_KEY] === "string") checks.push({ ok: false, warn: true, label: sharedShellIgnored(env[VALKEY_SHARED_KEY], join(cwd, ".env")), fix: "put PI_VALKEY_SHARED=1 in the deployment's .env if that Valkey is shared on purpose, and unset it in this shell" });
+		ownerVerdict = await seams.valkeyOwner(valkeyUrl, { shared: valkeySharedOn(sharedInFile), user: userNameOf(seams), envPath: join(cwd, ".env") });
+	}
+	const valkeyRefused = Boolean(ownerVerdict?.refusal);
+	const valkeyTalkUrl = ownerVerdict?.chosen ? pinnedValkeyUrl(valkeyUrl, ownerVerdict.chosen).url : valkeyUrl;
+	if (valkeyRefused) {
+		checks.push({ ok: false, label: `Valkey (${urlShown(valkeyUrl)}) is not this account's: ${ownerVerdict.refusal.short}. The worker refuses to start on it (exit 2); doctor did not talk to it`, fix: ownerVerdict.refusal.fix });
+	} else if (unreadValkey) {
+		checks.push({
+			ok: false,
+			label: `${unreadValkey}: doctor contacted no Valkey, since the default it would fall back to (${urlShown(valkeyUrl)}) is not what the service's worker is given, and on a shared host may be another account's`,
+			fix: "write that line so every loader reads it the same (the reason above says how), then re-run doctor",
+		});
+	} else checks.push({
+		ok: await probeValkey(valkeyTalkUrl),
 		label: `Valkey reachable (${urlShown(valkeyUrl)})${fromFileNote(fileKeys.VALKEY_URL !== undefined ? ["VALKEY_URL"] : [])}`,
 		// Issue #433: without `local`, docker is not this deployment's runtime and may not be installed at all, so neither the
 		// compose file nor a `docker run` is offered. The words hold before and after the setup commands learn Podman: the
@@ -1522,6 +1588,13 @@ export async function collectChecks(env, seams) {
 			: {}),
 	});
 
+	if (ownerVerdict?.heldBy) {
+		checks.push({ ok: true, label: `Valkey (${urlShown(valkeyUrl)}) answers from a listener of ${ownerVerdict.heldBy}${ownerVerdict.chosen ? `; the worker connects to ${ownerVerdict.chosen} only` : ""}` });
+	}
+	for (const other of ownerVerdict?.elsewhere ?? []) {
+		checks.push({ ok: false, warn: true, label: `another account also listens on an address VALKEY_URL's host resolves to: ${other}. The worker connects only to the address judged this account's, so it never reaches that one`, fix: "nothing to change for this deployment; a client that resolves the name itself (`pi-dispatch run` from a shell) may still reach it, so prefer VALKEY_URL=redis://127.0.0.1:<port>" });
+	}
+
 	// --- the fleet (issue #57) -------------------------------------------------------------------------
 	//
 	// Every line here is gated on a peer actually existing, so a single-host deployment's output is
@@ -1530,11 +1603,13 @@ export async function collectChecks(env, seams) {
 	// This host's own image id, read through the same seam every other docker probe here uses. Only when
 	// the image is actually present -- an absent one is already reported above, and a second line saying
 	// its digest is unknown would be noise on a fault the operator has been told about.
-	const fleet = await readHosts(valkeyUrl);
+	// Not from the default Valkey when the service's VALKEY_URL line could not be read (`unreadValkey`): its fleet is
+	// another deployment's.
+	const fleet = unreadValkey || valkeyRefused ? { hosts: [] } : await readHosts(valkeyTalkUrl);
 	// Printable before anything is compared or said (issue #453, gate round 3): since a folder's `.env` now chooses the
 	// Valkey doctor reads, a host row is another party's text, and a control byte in a name or zone must not reach the
 	// terminal. The registry's own charset already refuses them at the source; this is the reader not relying on it.
-	const peers = (fleet.hosts ?? []).map((h) => ({ ...h, name: printable(h.name), tz: h.tz ? printable(h.tz) : h.tz })).filter((h) => h.name !== workerNameOf(env));
+	const peers = (fleet.hosts ?? []).map((h) => ({ ...h, name: printable(h.name), tz: h.tz ? printable(h.tz) : h.tz })).filter((h) => h.name !== workerNameOf(declaredWorkerName));
 	// Read only when there is a peer to compare against. Every line below is gated on a peer existing, and
 	// the SUBPROCESS has to be too: otherwise every `doctor` run on every single-host deployment spawns an
 	// extra docker call whose answer nothing reads.
@@ -1549,13 +1624,13 @@ export async function collectChecks(env, seams) {
 					: null
 				: (podman?.imageDigest ?? null);
 	if (peers.length > 0) {
-		const mine = workerNameOf(env);
+		const mine = workerNameOf(declaredWorkerName);
 		checks.push({ ok: true, label: `Fleet: ${peers.length + 1} worker${peers.length === 0 ? "" : "s"} (${[mine, ...peers.map((h) => h.name)].sort().join(", ")})` });
 
 		// The one thing that is silently WRONG rather than merely undeclared. Without a declared name this
 		// host enqueues its own folder work to the SHARED queue, where a peer that has no such folder can
 		// pop it -- so the routing that makes a fleet safe is simply off, and nothing else says so.
-		if (!env.PI_WORKER_NAME) {
+		if (!declaredWorkerName) {
 			checks.push({
 				ok: false,
 				warn: true,
@@ -2414,14 +2489,30 @@ export async function collectChecks(env, seams) {
 		}
 	}
 
+	// Issue #464: the jobs dir is this account's to write. PI_JOBS_DIR, PI_SANDBOX_DIR and TMPDIR as the service reads them
+	// (TMPDIR in .env is a documented way out of a squatted default root, so doctor judges the root the service will use).
+	const dirKeys = fromServiceFile(["PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR"]);
+	const dirSettings = { ...env, ...dirKeys };
+	let dirRefused = false;
+	if (seams.jobsDirFs) {
+		const uid = seams.jobsDirUid;
+		const ownerName = (id) => ownerNameFromPasswd(seams.passwd, id);
+		const dirChecks = jobsDirChecks(dirSettings, { uid, fs: seams.jobsDirFs, ownerName, note: fromFileNote(Object.keys(dirKeys)) });
+		dirRefused = dirChecks.some((c) => c.ok === false && !c.warn);
+		checks.push(...dirChecks);
+	}
+
 	// REQ-RESURRECTABLE-SANDBOX. A fact line, never a failure: retention is a convenience, and the only thing
 	// worth surfacing is that finished runs' directories -- a repository clone plus the run's prompt.md and
 	// event.json, so issue text -- are sitting on disk, and how many. An operator who never opens a sandbox
 	// should still know they are being kept. Issue #462: not a warning either, since retention on is the default and
 	// nothing needs changing, so what each holds and how to turn it off live in the label (`ok: true` prints no fix).
-	{
+	// Issue #464 (gate round 1): the sandbox dir the SERVICE uses (`dirSettings`), and nothing at all after a ✗ above on the
+	// jobs dir, its root or the sandbox dir: that worker does not start, and a ✓ counting what sits in a directory another
+	// account made would read as this account's.
+	if (!dirRefused) {
 		const retentionHours = nonNegativeEnvInt(env.PI_SANDBOX_RETENTION_HOURS, 24);
-		const sandboxDir = env.PI_SANDBOX_DIR || defaultSandboxDir(env);
+		const sandboxDir = dirSettings.PI_SANDBOX_DIR || defaultSandboxDir(dirSettings);
 		// Counted in BOTH branches (gate round 1): a tombstone the worker cannot delete does not go away because retention
 		// was turned off, and turning it off is exactly when an operator expects the disk back.
 		const kept = countRetained(sandboxDir, fileExists);
@@ -2442,10 +2533,11 @@ export async function collectChecks(env, seams) {
 	// ~/.pi-dispatch, so this block is normally one green line; it warns only when a path RESOLVES under a
 	// temp dir, which after the move means an operator put it there.
 	//
-	// Deliberately NOT checked: PI_JOBS_DIR, PI_SANDBOX_DIR and PI_GRAPH_DIR. Those are per-run,
+	// Deliberately NOT checked HERE: PI_JOBS_DIR, PI_SANDBOX_DIR and PI_GRAPH_DIR. Those are per-run,
 	// retention-bounded and regenerable respectively, and they stay under temp on purpose. Warning about a
 	// directory that is SUPPOSED to be swept is how an operator learns to skim this section, which costs
-	// more than it buys.
+	// more than it buys. Whose the jobs dir is, is checked above (`jobsDirChecks`, issue #464): that is a
+	// different question, and the one that failed every job of a second account on a shared host.
 	{
 		// The home SEAM, not the real homedir: this block must answer for the deployment doctor is
 		// describing, and the no-home case has to be exercisable on a host that has one.
@@ -2506,6 +2598,17 @@ export async function collectChecks(env, seams) {
 		// Asked for BOTH stores, not just the run history: a settings overlay that cannot be written is the
 		// quieter half of the same fault, since readOverlay treats an absent file as an empty overlay and
 		// every cap silently widens to the env default.
+		// Issue #464: with no home, the two stores default into the per-account temp root, which the worker (and the panel,
+		// for the overlay) refuses when it is not this account's. Said once: a root the jobs dir line already refused is not
+		// repeated here.
+		const uid = seams.jobsDirUid;
+		if (Number.isInteger(uid) && seams.jobsDirFs) {
+			const root = accountTempRoot(env, uid);
+			const inRoot = stores.filter((st) => !st.explicit && (st.path === root || st.path.startsWith(`${root}/`)));
+			const said = checks.some((c) => c.ok === false && typeof c.label === "string" && c.label.startsWith(`${root}, `));
+			const refused = inRoot.length > 0 && !said ? accountRootRefusal(root, { uid, fs: seams.jobsDirFs, ownerName: (id) => ownerNameFromPasswd(seams.passwd, id), what: `this account's ${inRoot.map((st) => (st.key === "PI_LOGS_DIR" ? "run history" : "settings overlay")).join(" and ")} (no home directory, so the default is here)` }) : null;
+			if (refused) checks.push({ ok: false, label: refused.label, fix: `${refused.fix}; or set ${inRoot.map((st) => st.key).join(" and ")} to a path this account owns` });
+		}
 		if (noHome) {
 			checks.push({
 				ok: false,
@@ -3068,7 +3171,7 @@ function triggerLabel(t, index) {
 	return t.on.type === "cron" ? `cron "${t.on.id}"` : `${t.on.type} trigger #${index}`;
 }
 
-function readTriggerFacts(env, fileExists, cwd) {
+function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
 	const none = { requiring: 0, waiting: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], parseError: null, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
@@ -3097,7 +3200,8 @@ function readTriggerFacts(env, fileExists, cwd) {
 		// still judged. Round 2 ran the whole `loadSchedules` instead and caught its throw as "judge everything", which let
 		// one served trigger's bad skillsDir bring back the false line for another machine's trigger: a predicate per
 		// trigger cannot be derailed by a sibling.
-		const fleet = Boolean(env.PI_WORKER_NAME);
+		// The name collectChecks resolved (issue #464), never this shell's alone.
+		const fleet = Boolean(declaredWorkerName);
 		const cronScheduledHere = (t) => env.PI_TRIGGERS_FILE !== undefined && cronPlacement(t.run, { existsSync: fileExists, fleet }) !== "elsewhere";
 		return {
 			onceArmed: rawEntries.filter((t) => t?.on?.once === true && t.on.disarmed === undefined).length,
@@ -4334,17 +4438,19 @@ function parseGhTokenScopes(output) {
  * is the posture every other network-touching check here already takes. Never throws: a fleet this
  * command cannot see is a fleet it says nothing about, not a doctor that fails.
  */
-/** This host's name as the worker computes it, so doctor and the worker cannot disagree about who "I" am. */
-function workerNameOf(env) {
-	return env.PI_WORKER_NAME || defaultWorkerName();
+/**
+ * This host's name as the worker computes it, so doctor and the worker cannot disagree about who "I" am. Takes the
+ * declared name collectChecks resolved (`declaredWorkerName`, issue #464), not an environment.
+ */
+function workerNameOf(declared) {
+	return declared || defaultWorkerName();
 }
 
 async function defaultReadHosts(url) {
 	try {
-		const { Redis } = await import("ioredis");
-		const { parseConnection } = await import("./connection.mjs");
+		const { makeRedisClient } = await import("./connection.mjs");
 		const { readLiveHosts } = await import("./host-registry.mjs");
-		const client = new Redis({ ...parseConnection(url, { failFast: true }), lazyConnect: true });
+		const client = makeRedisClient(url, { failFast: true, lazyConnect: true });
 		client.on("error", () => {});
 		try {
 			await client.connect();
@@ -4358,9 +4464,8 @@ async function defaultReadHosts(url) {
 }
 
 async function defaultProbeValkey(url) {
-	const { Redis } = await import("ioredis");
-	const { parseConnection } = await import("./connection.mjs");
-	const client = new Redis({ ...parseConnection(url, { failFast: true }), lazyConnect: true });
+	const { makeRedisClient } = await import("./connection.mjs");
+	const client = makeRedisClient(url, { failFast: true, lazyConnect: true });
 	client.on("error", () => {}); // swallow connect errors + retries; reachability is the ✓/✗, not a trace
 	try {
 		await client.connect();
@@ -4804,6 +4909,27 @@ export async function podmanChecks(env, seams, { jobImage }) {
 		});
 		return { checks, observed, relabel: false, forLive: notRun(`a podman job is refused here (${widened.cause}), so a probe would read back a container no job gets`, firstFix) };
 	}
+	// Issue #464: Podman's run directory gone from under it, after the containers.conf refusal (read from files, so it holds
+	// whatever Podman answers) and in place of the undecided line below, which it explains. Podman keeps the run root it
+	// first used in its database (/run/user/<uid>/containers, while the account's user manager ran), and once linger is
+	// switched off that directory is removed with the manager; every podman call as the account then fails before it does
+	// anything (measured on Fedora 44 with 5.8.1 and Ubuntu 24.04 with 4.9.3: exit 125, `default OCI runtime "crun" not
+	// found`; exit 1 with XDG_RUNTIME_DIR set to the missing directory on 5.8.1). stderr is never read (dockerRunVia), so
+	// this rests on two facts: the read failed with an exit status, and /run/user/<uid> does not exist.
+	const runRootGone = infoRead ? podmanRunDirGone({ read: infoRead, euid: ids.euid, fs: observationFs, home, env }) : null;
+	if (runRootGone) {
+		const user = userNameOf(seams);
+		const linger = user ? await readLingerOrFlag(user, { spawn, fs: observationFs }) : null;
+		const who = user ?? "<account>";
+		checks.push({
+			ok: false,
+			...(podmanDefault ? {} : { warn: true }),
+			label: `podman: every podman command fails as this account (${infoRead.reason}): its run directory ${runRootGone} does not exist${linger === false ? `, because linger is off for ${who}` : linger === null ? " (linger could not be read)" : ""}. Podman keeps the run root it first used, under that directory, and cannot start a container or answer \`podman info\` without it${podmanDefault ? " -- no podman job can run" : " -- every podman job fails"}`,
+			fix: `sudo loginctl enable-linger ${who} -- it starts the account's user manager, which recreates ${runRootGone}, and keeps it with no one logged in (measured, Podman 5.8.1 and 4.9.3). \`podman system migrate\` does not get past this (measured: it fails the same way), and a login session of the account (ssh, \`machinectl shell ${who}@\`) recreates the directory only while that session lasts. Then re-run doctor`,
+		});
+		return { checks, observed, relabel: false, forLive: notRun(`podman cannot run as this account (${runRootGone} does not exist)`, "fix the podman run directory line above first, then re-run `pi-dispatch doctor --live`") };
+	}
+
 	if (decision.mode !== "worker") {
 		checks.push({ ok: false, warn: true, label: `podman: which uid a job runs as could not be decided (${decision.reason})`, fix: "the worker retries every podman job until it can decide; fix what stops `podman info` answering for the worker's account, then re-run doctor" });
 		return { checks, observed, relabel: false, forLive: notRun(`the podman job user could not be decided (${decision.reason}), so a probe as any uid would read back a container no job gets`) };
@@ -5496,6 +5622,195 @@ const LIVE_FAIL_FIX = {
 const LIVE_FAIL_FIX_PODMAN = {
 	isolation: `the runtime did not apply a bound the worker passes: on rootless Podman that is the account's systemd user manager not running, Podman not reaching it, or a controller not delegated to it (the "isolation is ASSERTED" line above names which, when the static read sees it) -- jobs on this host do not have the boundary the table declares. ${capitalized(PODMAN_BOUNDS_FIX["no-user-manager"])}`,
 };
+
+/**
+ * The jobs dir as this account's worker will meet it (issue #464): ✓ when it is a directory this account owns and may
+ * write, or does not exist yet under a directory this account may write; ✗ otherwise, with the fix. Where it lies in
+ * the per-account temp root (the default), the root is judged too, as `ensureJobsDir` judges it: a real directory owned
+ * by this account. Then the sandbox dir, as `ensureSandboxDir` judges it: one that exists must be this account's. Then,
+ * only for the default paths, a ⚠ when the OLD shared default still holds retained workspaces of this account, which
+ * this version neither re-opens nor sweeps. Nothing where the platform has no uid (Windows).
+ */
+export function jobsDirChecks(env, { uid, fs, ownerName = () => null, note = "" }) {
+	if (!Number.isInteger(uid)) return [];
+	const jobsDir = jobsDirPath(env, uid);
+	if (jobsDir === "") return [{ ok: false, label: "PI_JOBS_DIR is set to an empty value, so the worker has no directory to put a job's inputs in and cannot start", fix: "remove the line to use the default, or set it to a directory this account owns" }];
+	const read = (p, follow) => {
+		try {
+			return (follow ? fs.statSync : fs.lstatSync)(p);
+		} catch (err) {
+			return err?.code === "ENOENT" ? null : { error: err?.code ?? "error" };
+		}
+	};
+	const writable = (p) => {
+		try {
+			fs.accessSync(p, fsConstants.W_OK | fsConstants.X_OK);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const owner = (id) => {
+		const name = ownerName(id);
+		return name ? `${name} (uid ${id})` : `uid ${id}`;
+	};
+	const checks = [];
+	const root = accountTempRoot(env, uid);
+	const inRoot = jobsDir === root || jobsDir.startsWith(`${root}/`);
+	const refuse = (label, fix) => [{ ok: false, label: `${label} -- every job fails before it starts${note}`, fix }];
+	if (inRoot) {
+		const refused = accountRootRefusal(root, { uid, fs, ownerName, what: "this account's jobs dir" });
+		if (refused) return refuse(refused.label, refused.fix);
+	}
+	const st = read(jobsDir, true);
+	if (st?.error) return refuse(`the jobs dir ${jobsDir} could not be read (${st.error})`, `make it readable by this account, or point PI_JOBS_DIR at a directory this account owns`);
+	if (st) {
+		if (!st.isDirectory()) return refuse(`the jobs dir ${jobsDir} is not a directory`, "point PI_JOBS_DIR at a directory this account owns, or remove what is there");
+		if (st.uid !== uid) return refuse(`the jobs dir ${jobsDir} is owned by ${owner(st.uid)}, not by this account (uid ${uid}), which could replace a job's inputs; the worker refuses it at boot`, jobsDirOwnerFix(jobsDir, inRoot));
+		if (!writable(jobsDir)) return refuse(`the jobs dir ${jobsDir} is this account's but it cannot write it`, `chmod u+rwx ${jobsDir}`);
+		checks.push({ ok: true, label: `Jobs dir ${jobsDir} is this account's and writable${note}` });
+	} else {
+		let parent = jobsDir;
+		let found = null;
+		for (let i = 0; i < 64 && !found; i += 1) {
+			const next = dirname(parent);
+			if (next === parent) break;
+			parent = next;
+			const at = read(parent, true);
+			if (at && !at.error) found = at;
+		}
+		if (!found || !writable(parent)) return refuse(`the jobs dir ${jobsDir} does not exist, and this account cannot create it (${found ? `${parent} is not writable by it` : "no parent of it could be read"})`, "point PI_JOBS_DIR at a directory this account owns, or create it for this account");
+		checks.push({ ok: true, label: `Jobs dir ${jobsDir} does not exist yet; the worker creates it (mode 0700) at boot${note}` });
+	}
+	// Issue #464 (gate round 1): the sandbox dir, as `ensureSandboxDir` judges it at boot. Its default lies in the jobs dir
+	// just judged; one set elsewhere that another account owns (seen: a 0777 directory of another account's) is where
+	// that account could swap a retained workspace for its own.
+	const sandboxDir = env.PI_SANDBOX_DIR || defaultSandboxDir(env, uid);
+	const sb = read(sandboxDir, true);
+	if (sb?.error) return [...checks, ...refuse(`the sandbox dir ${sandboxDir} could not be read (${sb.error})`, sandboxDirOwnerFix(sandboxDir))];
+	if (sb && !sb.isDirectory()) return [...checks, ...refuse(`the sandbox dir ${sandboxDir} is not a directory`, sandboxDirOwnerFix(sandboxDir))];
+	if (sb && sb.uid !== uid) return [...checks, ...refuse(`the sandbox dir ${sandboxDir} is owned by ${owner(sb.uid)}, not by this account (uid ${uid}), which could swap a retained workspace for one of its own; the worker refuses it at boot`, sandboxDirOwnerFix(sandboxDir))];
+	if (env.PI_JOBS_DIR === undefined && !env.PI_SANDBOX_DIR) {
+		// Issue #464's migration: before it, the default was the SHARED `<tmp>/pi-dispatch/jobs`, and a retained workspace
+		// there is this account's data the new default does not see. Counted by owner, so another account's are not named.
+		const old = `${accountTempRoot(env, null)}/jobs/sandboxes`;
+		let mine = [];
+		try {
+			mine = fs.readdirSync(old).filter((name) => {
+				try {
+					return fs.lstatSync(join(old, name)).uid === uid;
+				} catch {
+					return false;
+				}
+			});
+		} catch {
+			// Absent or unreadable: nothing of this account's is known to be there.
+		}
+		if (mine.length > 0) {
+			const now = `${jobsDir}/sandboxes`;
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `${mine.length} retained workspace(s) of this account are in ${old}, the shared default before issue #464: this version keeps them in ${now}, so \`pi-dispatch sandbox\` cannot re-open them and the retention sweep no longer removes them`,
+				fix: `move the ones worth keeping (the same filesystem, so a rename): mkdir -m 700 -p ${root} ${now} && mv ${old}/<name> ${now}/, and delete the rest: rm -rf ${old}/<name>. Naming ${root} makes it 0700 too (\`mkdir -m\` sets only the directories named, and a plain \`mkdir -p\` leaves ${root} 755); the worker also tightens it to 0700 at its next boot`,
+			});
+		}
+	}
+	return checks;
+}
+
+/**
+ * Why the per-account temp root `root` (`accountTempRoot`) cannot be used, as `{ label, fix }`, or null when it is this
+ * account's real directory or does not exist yet (issue #464): the reading of `ensureAccountTempRoot`'s refusals, shared
+ * by the jobs dir check and the no-home durable state check. `what` names what lives there.
+ */
+export function accountRootRefusal(root, { uid, fs, ownerName = () => null, what }) {
+	let st = null;
+	try {
+		st = fs.lstatSync(root);
+	} catch (err) {
+		if (err?.code === "ENOENT") return null;
+		return { label: `${root}, where ${what} lives, could not be read (${err?.code ?? "error"})`, fix: `make ${root} readable by this account, or set the variable for it in .env to a directory this account owns` };
+	}
+	if (st.isSymbolicLink() || !st.isDirectory()) return { label: `${root}, where ${what} lives, is not a directory (a symlink or a file there is refused, since any account can create a name under the temp dir)`, fix: jobsDirOwnerFix(root, true) };
+	if (st.uid !== uid) {
+		const name = ownerName(st.uid);
+		return { label: `${root}, where ${what} lives, is owned by ${name ? `${name} (uid ${st.uid})` : `uid ${st.uid}`}, not by this account (uid ${uid}); the worker refuses it at boot`, fix: jobsDirOwnerFix(root, true) };
+	}
+	return null;
+}
+
+/** An account's name from /etc/passwd text (the `passwd` seam), or null. */
+function ownerNameFromPasswd(passwd, uid) {
+	try {
+		for (const line of String(passwd?.() ?? "").split("\n")) {
+			const f = line.split(":");
+			if (f.length >= 3 && f[2] === String(uid) && f[0] !== "") return f[0];
+		}
+	} catch {
+		// No passwd: the uid alone is named.
+	}
+	return null;
+}
+
+/**
+ * The account's run directory, `/run/user/<euid>`, when a `podman info` read failed with an exit status, that directory
+ * does not exist, and Podman's own database records a run root under it (issue #464), else null. Only ENOENT counts: a
+ * stat that fails another way says nothing.
+ *
+ * The database is the evidence that Podman ran under /run/user before (gate round 1): an account that never had a
+ * session has no /run/user/<uid> either, and a podman failing there for any other reason was named "linger off". Podman
+ * keeps the run root it first used in `db.sql` (SQLite; measured on Podman 5.8.1 and on Ubuntu's 4.9.3) or
+ * `libpod/bolt_state.db` (BoltDB, older installs) under its storage root, `$XDG_DATA_HOME/containers/storage`, else
+ * `~/.local/share/containers/storage`; both hold the path as plain bytes (measured: `/run/user/501/containers` in a
+ * Lima account's db.sql). A storage root moved in storage.conf is not followed, and then nothing is claimed.
+ */
+export function podmanRunDirGone({ read, euid, fs, home = null, env = {} }) {
+	if (!read || read.answered !== false || !/^exit-[0-9]+$/.test(String(read.reason ?? ""))) return null;
+	if (!Number.isInteger(euid) || euid <= 0) return null;
+	const dir = `/run/user/${euid}`;
+	try {
+		fs.statSync(dir);
+		return null;
+	} catch (err) {
+		if (err?.code !== "ENOENT") return null;
+	}
+	// env-internal XDG_DATA_HOME: where Podman keeps this account's storage, the XDG base directory it reads itself;
+	// the operator sets it for Podman, never for this project.
+	const data = env.XDG_DATA_HOME ? env.XDG_DATA_HOME : home ? `${home}/.local/share` : null;
+	if (!data) return null;
+	const needle = `${dir}/`;
+	for (const db of [`${data}/containers/storage/db.sql`, `${data}/containers/storage/libpod/bolt_state.db`]) {
+		try {
+			const bytes = fs.readFileSync(db);
+			if ((Buffer.isBuffer(bytes) ? bytes : Buffer.from(String(bytes))).includes(needle)) return dir;
+		} catch {
+			// Absent or unreadable: no evidence from this one.
+		}
+	}
+	return null;
+}
+
+/**
+ * Linger for `user`: loginctl's answer, else logind's own flag file (issue #464). Measured on Ubuntu 24.04 (systemd 255):
+ * `loginctl show-user` exits 1 for an account that is neither logged in nor lingering ("is not logged in or lingering"),
+ * which is exactly the account whose linger this is asked about, while Fedora's 259 answers `Linger=no`. logind keeps
+ * one empty file per lingering account in /var/lib/systemd/linger, readable by every account on both.
+ */
+export async function readLingerOrFlag(user, { spawn, fs }) {
+	const asked = await readLinger(user, (cmd, args) => runCmdCapture(spawn, cmd, args, { stdoutOnly: true, timeoutMs: 5000 }));
+	if (asked !== null) return asked;
+	const flag = (p) => {
+		try {
+			fs.statSync(p);
+			return true;
+		} catch (err) {
+			return err?.code === "ENOENT" ? false : null;
+		}
+	};
+	if (flag("/var/lib/systemd/linger") !== true) return null;
+	return flag(`/var/lib/systemd/linger/${user}`);
+}
 
 /** This shell's account name, for loginctl; a seam so a test names the account it models. */
 function userNameOf(seams) {

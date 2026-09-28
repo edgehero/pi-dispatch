@@ -289,3 +289,22 @@ test("settingsFilePath: unset or empty falls back to the shared DURABLE default"
 	assert.equal(settingsFilePath({}, "/home/u"), "/home/u/.pi-dispatch/settings.json");
 	assert.equal(settingsFilePath({ PI_SETTINGS_FILE: "/abs/x.json" }, "/home/u"), "/abs/x.json", "an explicit path still wins over any home");
 });
+
+test("writeOverlay into the per-account temp root (the no-home default) refuses a root another account owns, and writes nothing (#464)", () => {
+	const writes = [];
+	const tmp = process.env.TMPDIR?.trim() ? process.env.TMPDIR.trim().replace(/(?!^)\/+$/, "") : "/tmp";
+	const root = `${tmp}/pi-dispatch-${process.geteuid()}`;
+	const owner = (uid) => ({
+		mkdirSync: () => {},
+		lstatSync: () => ({ uid, isDirectory: () => true, isSymbolicLink: () => false, mode: 0o40700 }),
+		statSync: () => ({ uid, isDirectory: () => true }),
+		chmodSync: () => {},
+		writeFileSync: (p) => writes.push(p),
+		renameSync: (a, b) => writes.push(b),
+	});
+	const theirs = writeOverlay(`${root}/settings.json`, { model: "m" }, { fs: owner(process.geteuid() + 1) });
+	assert.match(theirs.invalid, new RegExp(`^settings dir refused: ${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} is owned by uid ${process.geteuid() + 1}, not by this account`));
+	assert.deepEqual(writes, []);
+	assert.deepEqual(writeOverlay(`${root}/settings.json`, { model: "m" }, { fs: owner(process.geteuid()) }), { ok: true });
+	assert.ok(writes.includes(`${root}/settings.json`));
+});

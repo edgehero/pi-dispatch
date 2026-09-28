@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { lstatSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { defaultPrompt, runUp } from "../src/up.mjs";
+import { defaultPrompt, runUp, valkeyContainerPublishes } from "../src/up.mjs";
 import { NETNS_KEEPER_FORMAT } from "../src/podman-stack.mjs";
 
 // A fake `spawn`, mirroring doctor.test.mjs: plan keys are command-line prefixes ("docker version",
@@ -52,13 +52,17 @@ const SECRET = "cafef00d".repeat(8);
 
 // Everything injected, everything recorded. `files` seeds the in-memory fs (path → text); the fake
 // init deliberately creates nothing, so a test that wants a .env after init seeds it up front.
-function harness({ plan = {}, listening = true, answers = [], files = {}, doctorCode = 0, argv = [], env = { PI_PROVIDER: "anthropic" }, cwd = "/deploy", platform = "linux", logsDirPathFn, settingsFilePathFn, extra = {} } = {}) {
+function harness({ plan = {}, listening = true, answers = [], files = {}, doctorCode = 0, argv = [], env = { PI_PROVIDER: "anthropic" }, cwd = "/deploy", platform = "linux", logsDirPathFn, settingsFilePathFn, extra = {}, failWrites = {}, failUnlinks = {} } = {}) {
 	// The podman tests (those that inject a podman info reader) get what a real login has unless they say otherwise: a
 	// user manager to talk to (XDG_RUNTIME_DIR, round 2 E8) and a podman that answers "no such container" for the two
 	// names the stack would claim (E3: any other failure now refuses).
 	if (extra.readPodmanInfo) {
 		if (!("XDG_RUNTIME_DIR" in env) && !extra.noBus) env = { ...env, XDG_RUNTIME_DIR: "/run/user/1234" };
 		if (!Object.keys(plan).some((k) => k.startsWith("podman container inspect"))) plan = { "podman container inspect": { code: 125, stderr: "Error: no such container pi-dispatch-valkey\n" }, ...plan };
+		// Issue #464: a listener, unless a test says whose, is this account's own (uid 1234, the euid podmanExtra gives),
+		// which is what "something already listens" meant before the owner rule; a test about another owner seeds its own.
+		if (listening && !("/proc/net/tcp" in files)) files = { ...listenerFiles(1234), ...files };
+		extra = { lookup: async () => { throw Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" }); }, interfaces: () => ({}), runSync: () => null, ...extra };
 	}
 	const calls = [];
 	const promptCalls = [];
@@ -82,7 +86,15 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 				if (!store.has(p)) throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
 				return store.get(p);
 			},
-			writeFileSync: (p, data) => store.set(p, data),
+			// Issue #464: a path in `failWrites` is one this account cannot write (the injected write failure).
+			writeFileSync: (p, data) => {
+				if (failWrites[p]) throw failWrites[p];
+				store.set(p, data);
+			},
+			unlinkSync: (p) => {
+				if (failUnlinks[p]) throw failUnlinks[p];
+				store.delete(p);
+			},
 			renameSync: (from, to) => {
 				store.set(to, store.get(from));
 				store.delete(from);
@@ -771,16 +783,139 @@ test("up on podman: declining the stack runs nothing and writes no Quadlet file"
 	assert.match(h.text(), /valkey\s+skipped \(declined\)/);
 });
 
-test("up on podman: a listener on 6379 is left alone, as on docker", async () => {
+// Issue #464: who holds 127.0.0.1:<port>, as /proc/net/tcp says (the measured row shape) and /etc/passwd names.
+const TCP_HEAD = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+const listenerFiles = (uid, port = 6379) => ({
+	"/proc/net/tcp": `${TCP_HEAD}   3: 0100007F:${port.toString(16).toUpperCase().padStart(4, "0")} 00000000:0000 0A 00000000:00000000 00:00000000 00000000  ${uid}        0 1589654 1 00000000cd751f2b 100 0 0 10 0\n`,
+	"/proc/net/tcp6": TCP_HEAD,
+	"/etc/subuid": "op:1234000000:65536\n",
+	"/etc/passwd": "root:x:0:0:root:/root:/bin/bash\nop:x:1234:1234::/home/op:/bin/bash\nop2:x:1235:1235::/home/op2:/bin/bash\n",
+});
+const VALKEY_UNIT = `${QDIR}/pi-dispatch-valkey.container`;
+
+test("up on podman: a listener on 6379 is left alone, as on docker, when it is this account's, and named as our container only when that container publishes the port (#464)", async () => {
+	const at = (ports) =>
+		harness({
+			env: { PI_BACKENDS: "podman", PI_EGRESS: "0" },
+			plan: { "podman image exists": 0, "podman ps": { code: 0, output: `pi-dispatch-valkey|${ports}\n` } },
+			listening: true,
+			files: listenerFiles(1234),
+			extra: podmanExtra(),
+		});
+	const ours = at("127.0.0.1:6379->6379/tcp");
+	assert.equal(await ours.run(), 0);
+	assert.equal(ours.promptCalls.length, 0);
+	assert.match(ours.text(), /valkey\s+container pi-dispatch-valkey already running on 6379/);
+	assert.match(ours.text(), /✓ something is listening on 6379, assuming your Valkey \(it is the pi-dispatch-valkey container, published there\): something already listens on 127\.0\.0\.1:6379, held by this account/);
+	assert.ok(ours.calls.some((c) => c.cmd === "podman" && c.args.join(" ") === "ps --filter name=^pi-dispatch-valkey$ --format {{.Names}}|{{.Ports}}"));
+	// Gate round 1: a pi-dispatch-valkey container on ANOTHER port (a second deployment's) says nothing about who answers
+	// on 6379, so it is not named.
+	const elsewhere = at("127.0.0.1:16468->6379/tcp");
+	assert.equal(await elsewhere.run(), 0);
+	assert.doesNotMatch(elsewhere.text(), /it is the pi-dispatch-valkey container/);
+	assert.match(elsewhere.text(), /valkey\s+port 6379 already has a listener, left alone/);
+});
+
+test("valkeyContainerPublishes reads podman's Ports column for the host port mapped to 6379", () => {
+	assert.equal(valkeyContainerPublishes("pi-dispatch-valkey|127.0.0.1:16468->6379/tcp", 16468), true);
+	assert.equal(valkeyContainerPublishes("pi-dispatch-valkey|0.0.0.0:6379->6379/tcp, [::]:6379->6379/tcp", 6379), true);
+	assert.equal(valkeyContainerPublishes("pi-dispatch-valkey|127.0.0.1:16468->6379/tcp", 6379), false);
+	assert.equal(valkeyContainerPublishes("pi-dispatch-valkey|", 6379), false, "--network host publishes nothing");
+	assert.equal(valkeyContainerPublishes("other|127.0.0.1:6379->6379/tcp", 6379), false);
+	assert.equal(valkeyContainerPublishes("pi-dispatch-valkey|127.0.0.1:6379->6380/tcp", 6379), false);
+});
+
+test("up on podman: another account's listener is neither adopted nor doubled, the way out is named, and up exits non-zero (#464)", async () => {
 	const h = harness({
 		env: { PI_BACKENDS: "podman", PI_EGRESS: "0" },
-		plan: { "podman image exists": 0, "podman ps": { code: 0, output: "pi-dispatch-valkey\n" } },
+		plan: { "podman image exists": 0 },
 		listening: true,
+		files: listenerFiles(1235),
 		extra: podmanExtra(),
 	});
-	assert.equal(await h.run(), 0);
-	assert.equal(h.promptCalls.length, 0);
-	assert.match(h.text(), /container pi-dispatch-valkey already running/);
+	assert.equal(await h.run(), 1, "a refused Valkey fails `up`, whatever doctor says (gate round 1)");
+	assert.equal(h.promptCalls.length, 0, "nothing is offered for a port another account holds");
+	assert.match(h.text(), /✗ 127\.0\.0\.1:6379 is held by op2 \(uid 1235\), not by this account \(uid 1234\) or its containers \(subordinate uids read from \/etc\/subuid\): taking it as this deployment's Valkey would put this account's jobs in a queue another account can read and drain\. Give this account a Valkey of its own on another port, VALKEY_URL=redis:\/\/127\.0\.0\.1:<port> in \/deploy\/\.env/);
+	assert.match(h.text(), /valkey\s+NOT added and NOT adopted: 127\.0\.0\.1:6379 is held by op2 \(uid 1235\)/);
+	assert.match(h.text(), /up: the Valkey VALKEY_URL reaches is not this account's \(above\); give this account its own port, or opt in with PI_VALKEY_SHARED=1 in \.env/);
+	assert.ok(!h.calls.some((c) => c.cmd === "systemctl" && c.args.includes("start")), "no Valkey unit started");
+	assert.equal(h.doctorCalls.length, 1, "doctor still runs, and says what else is wrong");
+	// Root's (docker-proxy, a rootful container) too, and a doctor failure keeps its own code.
+	const root = harness({ env: { PI_BACKENDS: "podman", PI_EGRESS: "0" }, plan: { "podman image exists": 0 }, listening: true, files: listenerFiles(0), doctorCode: 2, extra: podmanExtra() });
+	assert.equal(await root.run(), 2);
+	assert.match(root.text(), /✗ 127\.0\.0\.1:6379 is held by root \(uid 0/);
+	// Opted in, in .env: taken, and exit 0.
+	const shared = harness({ env: { PI_BACKENDS: "podman", PI_EGRESS: "0" }, plan: { "podman image exists": 0 }, listening: true, files: { ...listenerFiles(1235), "/deploy/.env": "PI_VALKEY_SHARED=1\n" }, extra: podmanExtra() });
+	assert.equal(await shared.run(), 0);
+	assert.match(shared.text(), /held by op2 \(uid 1235\), shared on purpose as PI_VALKEY_SHARED=1 in \/deploy\/\.env says/);
+});
+
+test("up on podman: VALKEY_URL and PI_VALKEY_SHARED come from .env as the service reads them, a disagreement with this shell stops up, and an unreadable line is not judged as 6379 (#464)", async () => {
+	// The .env's port is where the Quadlet Valkey is published (gate round 1, M13: up read only this shell before).
+	const fromFile = harness({
+		env: { PI_BACKENDS: "podman", PI_EGRESS: "0" },
+		plan: { "podman image exists": 0, systemctl: 0, "loginctl show-user": { code: 0, output: "Linger=yes\n" } },
+		listening: false,
+		argv: ["--yes"],
+		files: { "/deploy/.env": "VALKEY_URL=redis://127.0.0.1:16468\n" },
+		extra: podmanExtra(),
+	});
+	assert.equal(await fromFile.run(), 0, fromFile.text());
+	assert.match(fromFile.store.get(VALKEY_UNIT), /^PublishPort=127\.0\.0\.1:16468:6379$/m);
+	// The shell's value where the file sets none (the wizard runs up before init writes .env).
+	const fromShell = harness({ env: { PI_BACKENDS: "podman", PI_EGRESS: "0", VALKEY_URL: "redis://127.0.0.1:16469" }, plan: { "podman image exists": 0, systemctl: 0, "loginctl show-user": { code: 0, output: "Linger=yes\n" } }, listening: false, argv: ["--yes"], extra: podmanExtra() });
+	assert.equal(await fromShell.run(), 0);
+	assert.match(fromShell.store.get(VALKEY_UNIT), /^PublishPort=127\.0\.0\.1:16469:6379$/m);
+	// Both, differently: stopped before anything runs, as a venue key is.
+	const both = harness({ env: { PI_BACKENDS: "podman", PI_EGRESS: "0", VALKEY_URL: "redis://127.0.0.1:6379" }, listening: false, files: { "/deploy/.env": "VALKEY_URL=redis://127.0.0.1:16468\n" }, extra: podmanExtra() });
+	assert.equal(await both.run(), 1);
+	assert.match(both.text(), /✗ VALKEY_URL is "redis:\/\/127\.0\.0\.1:6379" in this shell and "redis:\/\/127\.0\.0\.1:16468" in \/deploy\/\.env\. up would judge the shell's Valkey while the service uses the file's\. Make them agree/);
+	assert.deepEqual(both.calls, [], "nothing ran");
+	assert.equal(both.initCalls.length, 0);
+	// PI_VALKEY_SHARED from .env ONLY (gate round 2): a shell opt-in is ignored and named, never honoured, so another
+	// account's Valkey is refused and up fails, as the worker and service install would.
+	const shellOptIn = harness({ env: { PI_BACKENDS: "podman", PI_EGRESS: "0", PI_VALKEY_SHARED: "1" }, listening: true, files: { ...listenerFiles(1235), "/deploy/.env": "PI_VALKEY_SHARED=0\n" }, extra: podmanExtra() });
+	assert.equal(await shellOptIn.run(), 1);
+	assert.match(shellOptIn.text(), /⚠ PI_VALKEY_SHARED is "1" in this shell: ignored, since only \/deploy\/\.env may say a Valkey is shared on purpose/);
+	assert.match(shellOptIn.text(), /✗ 127\.0\.0\.1:6379 is held by op2 \(uid 1235\)/);
+	assert.doesNotMatch(shellOptIn.text(), /shared on purpose as PI_VALKEY_SHARED=1/);
+	const shellOnly = harness({ env: { PI_BACKENDS: "podman", PI_EGRESS: "0", PI_VALKEY_SHARED: "1" }, listening: true, files: listenerFiles(1235), extra: podmanExtra() });
+	assert.equal(await shellOnly.run(), 1, "with no .env line at all, too");
+	assert.match(shellOnly.text(), /PI_VALKEY_SHARED is "1" in this shell: ignored/);
+	// A line the loaders read differently is refused, naming why, never judged as the default 6379 (gate round 1).
+	const unplain = harness({ env: { PI_BACKENDS: "podman", PI_EGRESS: "0" }, listening: true, files: { ...listenerFiles(1235), "/deploy/.env": "VALKEY_URL=redis://[::1]:16510\n" }, extra: podmanExtra() });
+	assert.equal(await unplain.run(), 1);
+	assert.match(unplain.text(), /✗ \/deploy\/\.env line 1 assigns VALKEY_URL in a form this command cannot read the way the service's loader will \(an unquoted \[ or \]/);
+	assert.doesNotMatch(unplain.text(), /127\.0\.0\.1:6379|held by/, "nothing was judged, least of all the default port");
+	assert.deepEqual(unplain.calls, []);
+});
+
+// Gate round 2: the closing line says which fault it was, an owner refusal (above) or a URL the Quadlet Valkey cannot serve.
+test("up on podman: a VALKEY_URL the Quadlet Valkey cannot serve is its own failure, worded as such (#464)", async () => {
+	const h = harness({ env: { PI_BACKENDS: "podman", PI_EGRESS: "0" }, plan: { "podman image exists": 0 }, listening: false, files: { "/deploy/.env": 'VALKEY_URL="redis://[::1]:16499"\n' }, extra: podmanExtra() });
+	assert.equal(await h.run(), 1);
+	assert.match(h.text(), /VALKEY_URL's host is ::1, not 127\.0\.0\.1, and the Quadlet Valkey is published on 127\.0\.0\.1 only/);
+	assert.match(h.text(), /up: VALKEY_URL cannot be served as it is written \(above\); fix it in \.env, then re-run `pi-dispatch up`\./);
+	assert.doesNotMatch(h.text(), /is not this account's \(above\)/);
+});
+
+test("up on podman: a localhost VALKEY_URL is judged on every address it resolves to, so another account's ::1 is refused (#464, gate round 1 D1)", async () => {
+	const tcp6 = `${TCP_HEAD}   1: 00000000000000000000000001000000:407E 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1235        0 1 1 0 100 0 0 10 0\n`;
+	const probed = [];
+	const h = harness({
+		env: { PI_BACKENDS: "podman", PI_EGRESS: "0" },
+		plan: { "podman image exists": 0 },
+		listening: false,
+		files: { ...listenerFiles(1234), "/proc/net/tcp": TCP_HEAD, "/proc/net/tcp6": tcp6, "/deploy/.env": "VALKEY_URL=redis://localhost:16510\n" },
+		extra: podmanExtra({
+			lookup: async () => [{ address: "::1", family: 6 }, { address: "127.0.0.1", family: 4 }],
+			probeTcp: async (host, port) => (probed.push(`${host}:${port}`), host === "::1"),
+		}),
+	});
+	assert.equal(await h.run(), 1);
+	assert.deepEqual(probed, ["::1:16510", "127.0.0.1:16510"]);
+	assert.match(h.text(), /✗ \[::1\]:16510 is held by op2 \(uid 1235\), not by this account \(uid 1234\)/);
+	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)), "no Quadlet Valkey beside another account's");
 });
 
 test("up on local,podman: the docker steps are unchanged, then podman's image and proxy; Valkey stays docker's", async () => {
@@ -1465,4 +1600,42 @@ test("up on podman (#458): a manager XDG_CONFIG_HOME that resolves to this home'
 	const plain = run((p) => p);
 	assert.equal(await plain.run(), 0);
 	assert.match(plain.text(), /✗ op's user manager runs with XDG_CONFIG_HOME=\/srv\/link\/\.config, not \/home\/op\/\.config/);
+});
+
+test("up on podman: a Quadlet write that fails puts back every file this run wrote, runs nothing, and names what it could not put back (#464)", async () => {
+	const keeperFile = `${QDIR}/pi-dispatch-netns-keeper.container`;
+	const proxyUnit = `${QDIR}/pi-dispatch-egress-proxy.container`;
+	const confCopy = "/home/op/.config/pi-dispatch/egress-proxy.conf";
+	const base = {
+		env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "podman" },
+		plan: { "podman image exists": 0, "podman inspect": 1, systemctl: 0, "loginctl show-user": { code: 0, output: "Linger=yes\n" } },
+		listening: false,
+		argv: ["--yes"],
+		extra: podmanExtra(),
+	};
+	// up writes new files only (a file that differs is refused before anything is written), so every one is removed.
+	const files = { "/deploy/egress-allowlist.conf": "api.anthropic.com\n", "/deploy/deploy/egress-proxy.conf": "conf\n" };
+	const h = harness({ ...base, files, failWrites: { [keeperFile]: Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" }) } });
+	assert.equal(await h.run(), 0, "up carries on to doctor, as for any failed step");
+	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)), "no Quadlet file of this run is left");
+	assert.ok(!h.store.has(confCopy), "nor the rules copy it wrote before them");
+	assert.ok(!h.calls.some((c) => c.cmd === "systemctl" && c.args[1] !== "show-environment"), "nothing was reloaded or started");
+	assert.match(h.text(), new RegExp(`✗ write ${keeperFile.replaceAll(".", "\\.")} failed \\(EACCES: permission denied\\), so nothing was installed: rolled back what this run wrote \\(removed [^)]*${proxyUnit.replaceAll(".", "\\.")}[^)]*${confCopy.replaceAll(".", "\\.")}[^)]*\\); no file of this run remains`));
+	const stuck = harness({ ...base, files, failWrites: { [keeperFile]: new Error("EROFS") }, failUnlinks: { [proxyUnit]: new Error("EBUSY: resource busy") } });
+	await stuck.run();
+	assert.ok(stuck.store.has(proxyUnit));
+	assert.match(stuck.text(), new RegExp(`these could NOT be put back and remain as this run wrote them: ${proxyUnit.replaceAll(".", "\\.")} \\(EBUSY: resource busy\\)`));
+});
+
+test("up on podman: a stack command that fails names the files this run wrote, which remain (#464)", async () => {
+	const h = harness({
+		env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "podman", PI_EGRESS: "0" },
+		plan: { "podman image exists": 0, "systemctl --user start": 1, systemctl: 0, "loginctl show-user": { code: 0, output: "Linger=yes\n" } },
+		listening: false,
+		argv: ["--yes"],
+		extra: podmanExtra(),
+	});
+	await h.run();
+	assert.match(h.text(), new RegExp(`Files this run wrote, which remain: ${QDIR.replaceAll(".", "\\.")}/pi-dispatch-valkey\\.network, ${QDIR.replaceAll(".", "\\.")}/pi-dispatch-valkey\\.container`));
+	assert.ok(h.store.has(`${QDIR}/pi-dispatch-valkey.container`));
 });

@@ -53,11 +53,11 @@ volume without the files can leave you paused with nothing on disk explaining wh
 
 These are all regenerated or bounded, and copying them buys nothing:
 
-- `PI_JOBS_DIR` (default under your OS temp dir): the read only `/job` inputs, rebuilt from scratch for
-  every job.
+- `PI_JOBS_DIR` (default `<OS temp dir>/pi-dispatch-<uid>/jobs`, one per account): the read only `/job`
+  inputs, rebuilt from scratch for every job.
 - `PI_SANDBOX_DIR` (default `<PI_JOBS_DIR>/sandboxes`): a finished run's workspace, kept for
   `PI_SANDBOX_RETENTION_HOURS` (24 by default) so you can re-open it, and disposable by design.
-- `PI_GRAPH_DIR` (default under your OS temp dir): the insights HTML artifact, rewritten by the next
+- `PI_GRAPH_DIR` (default `<OS temp dir>/pi-dispatch-<uid>/graph`): the insights HTML artifact, rewritten by the next
   `/dispatch insights`.
 - `<deployment>/logs/worker.out.log` and `worker.err.log`: your service manager's capture of the
   worker's stdout and stderr. **This is not the run history**, and `PI_LOGS_DIR` must never be pointed
@@ -191,6 +191,9 @@ run history by accident. That is a supported shape, but it should be a decision.
 (doctor prints the expanded absolute paths, never a `~`.)
 
 If either path resolves under your OS temp directory, which the OS may sweep on its own schedule, it
-says so instead and keeps going. It is a warning, not a failure, and doctor still exits 0. You will
+says so instead and keeps going. It is a warning, not a failure, and doctor still exits 0. An account with
+no home directory gets its own temp root, `<OS temp dir>/pi-dispatch-<uid>` (issue #464; it used to be the
+`<OS temp dir>/pi-dispatch` every account shared), created mode 0700; if another account made that directory
+first, the worker refuses to start and doctor fails, naming the owner. You will
 also see a one line hint while an older deployment's records are still sitting at the previous
 default and the new location is still empty, and that hint retires itself once anything lands there.

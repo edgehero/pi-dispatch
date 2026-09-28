@@ -1,7 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveBackendName } from "./backend-registry.mjs";
+import { ensureJobsDir } from "./config.mjs";
 import { resolveJobImage } from "./image-preflight.mjs";
 import { retainJobDir } from "./sandbox-store.mjs";
 import { prepareGithubWorkspace } from "./prepare-github.mjs";
@@ -65,9 +66,14 @@ export function makePrepareWorkspace({
 	// an unwired dispatcher behaves exactly as it did: a job with no `run.skillsDir` never calls it.
 	injectSkills = copySkillTree,
 	log = () => {},
+	// Issue #464: creates the jobs dir and refuses one another account owns (config.mjs). Asked again before every job,
+	// not only here: a temp cleaner (systemd-tmpfiles ages /tmp) can remove an idle jobs dir, and a name under the temp
+	// dir that is gone is one any account can create next.
+	ensureDir = (dir) => ensureJobsDir(dir),
 }) {
-	mkdirSync(jobsDir, { recursive: true });
+	ensureDir(jobsDir);
 	return async function prepareWorkspace(job, token, { queueJobId, piVersion = null, jobUser = null, podmanStore = null } = {}) {
+		ensureDir(jobsDir);
 		const jobDir = mkdtempSync(join(jobsDir, "job-"));
 		// The trigger's injected skills (REQ-PER-TRIGGER-SKILLS, issue #60), COPIED here rather than
 		// mounted, and copied ONCE for every job kind because this is where local and forge converge.

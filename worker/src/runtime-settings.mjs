@@ -1,5 +1,6 @@
 import * as nodeFs from "node:fs";
 import { dirname } from "node:path";
+import { ensureUnderAccountRoot } from "./config.mjs";
 
 /**
  * Runtime-settings overlay: the shared, durable truth between the admin extension and the worker
@@ -202,9 +203,12 @@ export function writeOverlay(path, candidate, { fs = nodeFs, log = () => {} } = 
 	if (result.invalid) return { invalid: result.invalid };
 
 	try {
+		// Issue #464: on an account with no home the overlay's default lives in the per-account temp root, which is made
+		// this account's (0700) or refused, as the worker's boot does, before a file that outranks .env is written there.
+		ensureUnderAccountRoot(dirname(path), { fs: { mkdirSync: fs.mkdirSync, lstatSync: fs.lstatSync ?? nodeFs.lstatSync, statSync: fs.statSync ?? nodeFs.statSync, chmodSync: fs.chmodSync ?? nodeFs.chmodSync } });
 		fs.mkdirSync(dirname(path), { recursive: true });
 	} catch (err) {
-		return { invalid: `settings dir unwritable (${err?.code ?? "mkdir-error"})` };
+		return { invalid: err?.piDispatchConfig ? `settings dir refused: ${err.message}` : `settings dir unwritable (${err?.code ?? "mkdir-error"})` };
 	}
 
 	const tmp = `${path}.tmp`;

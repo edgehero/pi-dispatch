@@ -1,4 +1,5 @@
 import { DelayedError, UnrecoverableError, Worker } from "bullmq";
+import { assertJudgedConnection } from "./connection.mjs";
 import { jobContainerName } from "./backend-local.mjs";
 import { scrubCredentials } from "./redact.mjs";
 import { BACKEND_NOT_REGISTERED } from "./backend-registry.mjs";
@@ -886,6 +887,8 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			recordRun,
 		});
 
+		// Issue #464: only a connection `parseConnection` built, which judges and pins the Valkey it dials.
+		assertJudgedConnection(connection);
 		worker = new Worker(queueName, processor, {
 			// maxRetriesPerRequest: null is REQUIRED for BullMQ's blocking connections, or it throws.
 			connection: { ...connection, maxRetriesPerRequest: null },

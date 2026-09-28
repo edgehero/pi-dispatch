@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_EGRESS_PROXY } from "../src/egress.mjs";
-import { ALL_QUADLET_FILES, DETACH_GATE_READ_MAX_BUFFER, DETACH_GATE_READ_TIMEOUT_MS, NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_NOW_FORMAT, detachBlockedSentence, makeDetachGate, runtimeFromFacts, QUADLET_FILES, managerEnvRefusal, unquoteShowEnvironment, planStack, podmanNeedsNetnsKeeper, quadletDir, readStackKeys, stackComponents, STACK_KEYS } from "../src/podman-stack.mjs";
+import { ALL_QUADLET_FILES, DETACH_GATE_READ_MAX_BUFFER, DETACH_GATE_READ_TIMEOUT_MS, NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_NOW_FORMAT, detachBlockedSentence, makeDetachGate, runtimeFromFacts, QUADLET_FILES, managerEnvRefusal, unquoteShowEnvironment, planStack, podmanNeedsNetnsKeeper, quadletDir, readStackKeys, stackComponents, STACK_KEYS, decideValkey, describeRollBack, judgeValkeyListeners, listenerUids, pinnedValkeyUrl, reachedAddress, readSubuidRanges, readValkeyKeys, resolveWorkerValkey, rollBackWrites, subordinateUids, unplainCause, valkeyTarget } from "../src/podman-stack.mjs";
 import { SYSTEMD_259_ENV_BYTES, SYSTEMD_259_ENV_FILES } from "./helpers/systemd-env-259.mjs";
 import { systemdEnvFile } from "./helpers/systemd-env-parse.mjs";
 import { runService } from "../src/service.mjs";
@@ -190,7 +190,7 @@ const realReadFs = (files = {}) => {
 test("stackComponents: Valkey only without local; the proxy only while armed and only under the default name; the keeper whenever armed", () => {
 	const podmanOnly = { localUsed: false, podmanUsed: true };
 	const mixed = { localUsed: true, podmanUsed: true };
-	assert.deepEqual(stackComponents({ venues: podmanOnly, env: {}, includeValkey: true, armed: true }), { valkey: true, proxy: true, keeper: true, notes: [] });
+	assert.deepEqual(stackComponents({ venues: podmanOnly, env: {}, includeValkey: true, armed: true }), { valkey: true, proxy: true, keeper: true, notes: [], valkeyPort: 6379 });
 	assert.equal(stackComponents({ venues: mixed, env: {}, includeValkey: true, armed: true }).valkey, false, "docker's Valkey owns the port when local is blessed");
 	assert.equal(stackComponents({ venues: mixed, env: {}, includeValkey: true, armed: true }).keeper, true, "podman jobs on a mixed host disconnect the proxy too");
 	const off = stackComponents({ venues: podmanOnly, env: {}, includeValkey: true, armed: false });
@@ -274,7 +274,30 @@ function fakeSpawn(plan, calls) {
 const PODMAN_ENV = "PI_BACKENDS=podman\n";
 
 // A real login's environment by default: a user manager to talk to (round 2, E8).
-function svc({ argv = ["install"], files = {}, plan = {}, listening = false, env = { XDG_RUNTIME_DIR: "/run/user/1234" }, platform = "linux", cwd = DEPLOY_AT, realpath = (p) => p } = {}) {
+// Issue #464: the host files `decideValkey` reads, as this harness's host has them. A LISTEN row on 127.0.0.1:6379
+// (0x18EB) owned by `uid`, the column layout measured on Fedora 44 and Ubuntu 24.04; `null` for no row.
+const TCP_HEAD = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+const tcpListen = (uid, port = 6379, addr = "0100007F") => `${TCP_HEAD}   3: ${addr}:${port.toString(16).toUpperCase().padStart(4, "0")} 00000000:0000 0A 00000000:00000000 00:00000000 00000000  ${uid}        0 1589654 1 00000000cd751f2b 100 0 0 10 0\n`;
+const hostFiles = (listenerUid) => ({
+	"/proc/net/tcp": listenerUid === null ? TCP_HEAD : tcpListen(listenerUid),
+	"/proc/net/tcp6": TCP_HEAD,
+	// This account's subordinate uids (a `--network host` container of it listens as one of them), and another's.
+	"/etc/subuid": "op2:1235000000:65536\ntester:1234000000:65536\n",
+	"/etc/passwd": "root:x:0:0:root:/root:/bin/bash\nvalkey:x:975:975::/var/lib/valkey:/sbin/nologin\ntester:x:1234:1234::/home/tester:/bin/bash\nop2:x:1235:1235::/home/op2:/bin/bash\n",
+});
+// How this harness's host resolves a name, as the worker's client would (every address, `localhost` ::1 first as on
+// Fedora 44); anything else does not resolve.
+const DNS = { localhost: [{ address: "::1", family: 6 }, { address: "127.0.0.1", family: 4 }] };
+const fakeLookup = (dns = DNS) => async (host) => {
+	if (!dns[host]) throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: "ENOTFOUND" });
+	return dns[host];
+};
+
+function svc({ argv = ["install"], files = {}, plan = {}, listening = false, listenerUid = 1234, host = null, env = { XDG_RUNTIME_DIR: "/run/user/1234" }, platform = "linux", cwd = DEPLOY_AT, realpath = (p) => p, extra = {} } = {}) {
+	const hostRead = host ?? hostFiles(listening ? listenerUid : null);
+	const failWrites = new Map();
+	const failUnlinks = new Map();
+	const probed = [];
 	const calls = [];
 	const out = [];
 	const err = [];
@@ -296,24 +319,41 @@ function svc({ argv = ["install"], files = {}, plan = {}, listening = false, env
 		spawn: fakeSpawn({ ...plan, ...Object.fromEntries(Object.entries({ "loginctl show-user": { code: 0, output: "Linger=yes\n" }, "podman container inspect": { code: 125, stderr: "Error: no such container\n" }, "podman inspect --format={{.State.Status}}|": { code: 0, output: "running|bridge|pi-dispatch-netns-keeper,|1000000\n" } }).filter(([k]) => !(k in plan))) }, calls),
 		out: (s) => out.push(s),
 		err: (s) => err.push(s),
-		probeTcp: async () => listening,
+		probeTcp: async (hostName, port) => {
+			probed.push(`${hostName}:${port}`);
+			return typeof listening === "function" ? listening(hostName, port) : listening;
+		},
+		lookup: fakeLookup(),
+		interfaces: () => ({}),
+		// Never this host's getsubids: /etc/subuid from the fake files.
+		runSync: () => null,
 		realpath,
 		fs: {
 			existsSync: (p) => store.has(p),
 			readFileSync: (p, enc) => {
 				// A stored Error is a file that exists and cannot be read (R21).
 				if (store.get(p) instanceof Error) throw store.get(p);
+				if (!store.has(p) && Object.hasOwn(hostRead, p)) {
+					if (hostRead[p] instanceof Error) throw hostRead[p];
+					return hostRead[p];
+				}
 				return store.has(p) ? store.get(p) : readFileSync(p, enc);
 			},
 			writeFileSync: (p, d) => {
 				writes.push(p);
+				// A stored Error for a path is one this account cannot write (issue #464's injected write failure).
+				if (failWrites.has(p)) throw failWrites.get(p);
 				store.set(p, d);
 			},
 			mkdirSync: () => {},
-			unlinkSync: (p) => store.delete(p),
+			unlinkSync: (p) => {
+				if (failUnlinks.has(p)) throw failUnlinks.get(p);
+				store.delete(p);
+			},
 		},
+		...extra,
 	};
-	return { run: () => runService(argv, deps), calls, store, writes, text: () => out.join(""), errText: () => err.join("") };
+	return { run: () => runService(argv, deps), calls, store, writes, text: () => out.join(""), errText: () => err.join(""), failWrites, failUnlinks, probed };
 }
 
 test("service install (user scope, podman in .env, egress armed): writes the Quadlets, starts them (never enables), and the worker Wants/After them", async () => {
@@ -389,12 +429,440 @@ test("service install on podman: local in the list or a listener on 6379 means n
 	const taken = svc({ listening: true, files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\n` } });
 	assert.equal(await taken.run(), 0);
 	assert.ok(!taken.writes.some((p) => p.startsWith(QDIR)));
-	assert.match(taken.text(), /already listens on 127\.0\.0\.1:6379/);
+	assert.match(taken.text(), /already listens on 127\.0\.0\.1:6379, held by this account, so no Valkey is added for it/);
 	assert.doesNotMatch(taken.store.get(USER_UNIT), /^Wants=pi-dispatch/m);
 	// A Valkey unit an earlier run installed is kept and ordered after, even though it is now the listener.
 	const kept = svc({ listening: true, argv: ["install", "--force"], files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\n`, [join(QDIR, QUADLET_FILES.valkey.file)]: template(QUADLET_FILES.valkey.file) } });
 	assert.equal(await kept.run(), 0);
 	assert.match(kept.store.get(USER_UNIT), /^Wants=pi-dispatch-valkey\.service$/m);
+});
+
+// Issue #464 (the comment on it, and gate round 1): a Valkey VALKEY_URL reaches is this deployment's only when it is
+// this account's, on every address the worker's client would dial.
+test("valkeyTarget reads VALKEY_URL as the worker's client dials it: the host without brackets, the port, or not a redis URL", () => {
+	assert.deepEqual(valkeyTarget(undefined), { host: "127.0.0.1", port: 6379 }, "unset is the worker's own default");
+	assert.deepEqual(valkeyTarget(""), { host: "127.0.0.1", port: 6379 });
+	assert.deepEqual(valkeyTarget("redis://127.0.0.1:6380"), { host: "127.0.0.1", port: 6380 });
+	assert.deepEqual(valkeyTarget("redis://LocalHost"), { host: "localhost", port: 6379 });
+	assert.deepEqual(valkeyTarget("redis://:pw@[::1]:6390/0"), { host: "::1", port: 6390 });
+	assert.deepEqual(valkeyTarget("rediss://127.0.0.1:6381"), { host: "127.0.0.1", port: 6381 });
+	assert.deepEqual(valkeyTarget("redis://valkey.lan:6379"), { host: "valkey.lan", port: 6379 });
+	assert.match(valkeyTarget("http://127.0.0.1:6379").error, /scheme is http:/);
+	assert.match(valkeyTarget("not a url").error, /not a URL/);
+});
+
+test("listenerUids reads the LISTEN rows that answer an address, IPv4 and IPv6, off /proc/net/tcp and tcp6, as measured", () => {
+	const fs = (tcp, tcp6 = TCP_HEAD) => ({ readFileSync: (p) => ({ "/proc/net/tcp": tcp, "/proc/net/tcp6": tcp6 })[p] ?? (() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); })() });
+	// The measured row (Fedora 44, a rootless container's pasta socket on 127.0.0.1:6392, uid 1240).
+	const measured = `${TCP_HEAD}   3: 0100007F:18F8 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1240        0 1589654 1 00000000cd751f2b 100 0 0 10 0\n`;
+	assert.deepEqual(listenerUids("127.0.0.1", 6392, fs(measured)), { uids: [1240] });
+	assert.deepEqual(listenerUids("127.0.0.1", 6379, fs(tcpListen(1500, 6379, "00000000"))), { uids: [1500] }, "0.0.0.0 answers 127.0.0.1 too");
+	assert.deepEqual(listenerUids("127.0.0.1", 6379, fs(TCP_HEAD, tcpListen(1501, 6379, "00000000000000000000000000000000"))), { uids: [1501] }, ":: on tcp6 too");
+	// The row a dual-stack socket bound to ::ffff:127.0.0.1 shows (gate round 1, M2).
+	assert.deepEqual(listenerUids("127.0.0.1", 6379, fs(TCP_HEAD, tcpListen(1506, 6379, "0000000000000000FFFF00000100007F"))), { uids: [1506] }, "::ffff:127.0.0.1 answers 127.0.0.1");
+	assert.deepEqual(listenerUids("127.0.0.1", 6379, fs(TCP_HEAD, tcpListen(1502, 6379, "00000000000000000000000001000000"))), { uids: [] }, "::1 does not answer 127.0.0.1");
+	assert.deepEqual(listenerUids("127.0.0.1", 6379, fs(tcpListen(1503, 6379, "0200A8C0"))), { uids: [] }, "another address does not");
+	assert.deepEqual(listenerUids("127.0.0.1", 6379, fs(tcpListen(1504, 6380))), { uids: [] }, "another port does not");
+	assert.deepEqual(listenerUids("127.0.0.1", 6379, fs(tcpListen(1505).replace(" 0A ", " 01 "))), { uids: [] }, "an established connection is not a listener");
+	// IPv6 (gate round 1, D1): ::1 is answered by a ::1 or a :: socket, never by an IPv4 one.
+	const v6 = fs(tcpListen(1507, 6379), `${TCP_HEAD}   1: 00000000000000000000000001000000:18EB 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1467        0 1 1 0 100 0 0 10 0\n   2: 00000000000000000000000000000000:18EB 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1468        0 1 1 0 100 0 0 10 0\n`);
+	assert.deepEqual(listenerUids("::1", 6379, v6).uids.sort(), [1467, 1468]);
+	assert.deepEqual(listenerUids("0:0:0:0:0:0:0:1", 6379, v6).uids.sort(), [1467, 1468], "any spelling of ::1");
+	assert.deepEqual(listenerUids("::ffff:127.0.0.1", 6379, v6).uids.sort(), [1468, 1507], "an IPv4-mapped address is the IPv4 one");
+	assert.deepEqual(listenerUids("192.168.5.15", 6379, fs(tcpListen(1508, 6379, "0F05A8C0"))), { uids: [1508] }, "an interface address, byte order as the kernel prints it");
+	assert.match(listenerUids("127.0.0.1", 6379, { readFileSync: () => { throw new Error("EACCES"); } }).error, /neither \/proc\/net\/tcp nor \/proc\/net\/tcp6/);
+	assert.match(listenerUids("localhost", 6379, fs(TCP_HEAD)).error, /not an IP address/);
+});
+
+test("subordinateUids reads this account's ranges from /etc/subuid, by name or by uid, and no one else's", () => {
+	const at = (text) => ({ readFileSync: () => text });
+	assert.deepEqual(subordinateUids(at("op2:1235000000:65536\ntester:1234000000:65536\n1234:5000000:10\n"), { user: "tester", euid: 1234 }), [
+		{ lo: 1234000000, hi: 1234065535 },
+		{ lo: 5000000, hi: 5000009 },
+	]);
+	assert.deepEqual(subordinateUids(at("op2:1235000000:65536\n"), { user: "tester", euid: 1234 }), []);
+	assert.deepEqual(subordinateUids({ readFileSync: () => { throw new Error("ENOENT"); } }, { user: "tester", euid: 1234 }), []);
+});
+
+const VENUES = { localUsed: false, podmanUsed: true };
+const NAMES = { 0: "root", 501: "rob", 975: "valkey", 1234: "tester", 1235: "op2", 70000: "ldapuser" };
+// A host whose 127.0.0.1:<port> is held by `uid` (null: nothing), with the harness's subuid and passwd files.
+const decideAt = (uid, extra = {}) => decideValkey({ venues: VENUES, url: undefined, installed: false, probeTcp: async () => uid !== null, lookup: fakeLookup(), euid: 1234, user: "tester", fs: { readFileSync: (p) => hostFiles(uid)[p] }, ownerName: (u) => NAMES[u] ?? null, envPath: "/d/.env", ...extra });
+
+test("decideValkey takes only this account's listener, its own uid or a subordinate uid of it, and refuses every other owner by name (#464)", async () => {
+	const mine = await decideAt(1234);
+	assert.deepEqual([mine.include, mine.refusal, mine.error], [false, null, undefined]);
+	assert.equal(mine.notes[0], "something already listens on 127.0.0.1:6379, held by this account, so no Valkey is added for it: that listener is taken to be your Valkey, as `up` does");
+	// `podman run --network host` publishes from a subordinate uid of the account (measured: 1467000998 for uid 1467).
+	assert.match((await decideAt(1234000998)).notes[0], /held by this account's containers \(a subordinate uid of it, from \/etc\/subuid\)/);
+	const other = await decideAt(1235);
+	assert.equal(other.include, false);
+	assert.equal(
+		other.refusal.text,
+		"127.0.0.1:6379 is held by op2 (uid 1235), not by this account (uid 1234) or its containers (subordinate uids read from /etc/subuid): taking it as this deployment's Valkey would put this account's jobs in a queue another account can read and drain. Give this account a Valkey of its own on another port, VALKEY_URL=redis://127.0.0.1:<port> in /d/.env (`service install` and `up` then publish the Quadlet Valkey there); or, if that Valkey is shared on purpose, say so with PI_VALKEY_SHARED=1 in /d/.env",
+	);
+	// Gate round 1: no login.defs range. Root (docker-proxy, a rootful container of any sudoer), a system service, an
+	// LDAP account above UID_MAX, Lima's 501 below UID_MIN and another account's subordinate uid are all someone else.
+	assert.match((await decideAt(0)).refusal.text, /^127\.0\.0\.1:6379 is held by root \(uid 0: docker-proxy, or a rootful container any account with sudo can start\), not by this account/);
+	for (const [uid, who] of [[975, "valkey \\(uid 975\\)"], [70000, "ldapuser \\(uid 70000\\)"], [501, "rob \\(uid 501\\)"], [1235000998, "a container of op2 \\(its subordinate uid 1235000998\\)"], [1600, "uid 1600"]]) {
+		const d = await decideAt(uid);
+		assert.equal(d.include, false, String(uid));
+		assert.match(d.refusal.text, new RegExp(`^127\\.0\\.0\\.1:6379 is held by ${who}, not by this account`), String(uid));
+	}
+	const nobody = await decideAt(null, { probeTcp: async () => true });
+	assert.match(nobody.refusal.text, /^something answers 127\.0\.0\.1:6379, and which account holds it could not be told \(no listening socket for it is in \/proc\/net\/tcp or \/proc\/net\/tcp6\), so it is not taken to be this account's Valkey\. Give this account a Valkey of its own/);
+	const free = await decideAt(1235, { probeTcp: async () => false });
+	assert.deepEqual([free.include, free.refusal], [true, null], "nothing listening: ours is added");
+	assert.deepEqual((await decideAt(1234, { installed: true })).include, true, "an installed Quadlet Valkey of this account is kept");
+	assert.deepEqual((await decideAt(1235, { venues: { localUsed: true, podmanUsed: true } })).include, false, "docker's Valkey where local is blessed");
+});
+
+test("decideValkey: PI_VALKEY_SHARED=1 is the one way to take a Valkey another uid holds, and says whose it is (#464)", async () => {
+	for (const uid of [0, 975, 1235]) {
+		const d = await decideAt(uid, { shared: true });
+		assert.deepEqual([d.include, d.refusal], [false, null], String(uid));
+		assert.match(d.notes[0], new RegExp(`^something already listens on 127\\.0\\.0\\.1:6379, held by ${uid === 0 ? "root \\(uid 0" : `${NAMES[uid]} \\(uid ${uid}\\)`}.*, shared on purpose as PI_VALKEY_SHARED=1 in /d/\\.env says`));
+	}
+	// With our Quadlet Valkey installed too, the shared one is the queue: a Quadlet republished on its port would not bind.
+	const overInstalled = await decideAt(1235, { shared: true, installed: true });
+	assert.deepEqual([overInstalled.include, overInstalled.refusal], [false, null]);
+	assert.match(overInstalled.notes[0], /held by op2 \(uid 1235\), shared on purpose/);
+	const nobody = await decideAt(null, { probeTcp: async () => true, shared: true });
+	assert.match(nobody.notes[0], /held by an owner \/proc does not name, shared on purpose/);
+});
+
+test("decideValkey judges every address VALKEY_URL's host resolves to: another account on ::1 is refused for a localhost URL (#464, gate round 1 D1)", async () => {
+	// The measured bypass: A published on [::1]:16510 only, B's VALKEY_URL=redis://localhost:16510, and B's worker reached
+	// A's Valkey because only 127.0.0.1 was looked at. The kernel's view: ::1 answers (A's socket), 127.0.0.1 does not.
+	const probed = [];
+	const files = { ...hostFiles(null), "/proc/net/tcp6": `${TCP_HEAD}   1: 00000000000000000000000001000000:407E 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1235        0 1 1 0 100 0 0 10 0\n` };
+	const base = { url: "redis://localhost:16510", fs: { readFileSync: (p) => files[p] }, probeTcp: async (h, p) => (probed.push(`${h}:${p}`), h === "::1") };
+	const d = await decideAt(null, base);
+	assert.deepEqual(probed, ["::1:16510", "127.0.0.1:16510"], "both addresses the client may dial are probed");
+	assert.equal(d.include, false);
+	assert.match(d.refusal.text, /^\[::1\]:16510 is held by op2 \(uid 1235\), not by this account \(uid 1234\)/);
+	assert.ok((await decideAt(null, { ...base, installed: true })).refusal, "refused even over an installed Quadlet Valkey: the client may reach ::1 first");
+	// The same listener, reached through a quoted [::1] URL.
+	assert.match((await decideAt(null, { ...base, url: "redis://[::1]:16510" })).refusal.text, /^\[::1\]:16510 is held by op2/);
+	// Nothing on ::1, this account's Valkey on 127.0.0.1: taken.
+	const own = await decideAt(1234, { url: "redis://localhost:6379", probeTcp: async (h) => h === "127.0.0.1" });
+	assert.deepEqual([own.include, own.refusal], [false, null]);
+	// Nothing anywhere: the Quadlet Valkey, which localhost reaches on 127.0.0.1; an [::1] URL would not reach it.
+	assert.deepEqual((await decideAt(null, { url: "redis://localhost:6379", probeTcp: async () => false })).include, true);
+	assert.match((await decideAt(null, { url: "redis://[::]:6380", probeTcp: async () => false })).error, /VALKEY_URL's host is ::, which reaches ::1, not 127\.0\.0\.1/);
+	assert.match((await decideAt(null, { url: "redis://v6.lan:6380", lookup: fakeLookup({ "v6.lan": [{ address: "::1", family: 6 }] }), probeTcp: async () => false })).error, /VALKEY_URL's host resolves to ::1 here, not 127\.0\.0\.1/);
+	const v6only = await decideAt(null, { url: "redis://[::1]:6380", probeTcp: async () => false });
+	assert.equal(v6only.include, false);
+	assert.equal(v6only.error, "/d/.env: VALKEY_URL's host is ::1, not 127.0.0.1, and the Quadlet Valkey is published on 127.0.0.1 only, so the worker would not reach it. Write VALKEY_URL=redis://127.0.0.1:6380", "gate round 2: no \"is ::1 here\", and no localhost advice, which reaches ::1 first on Fedora");
+});
+
+test("judgeValkeyListeners: a name that resolves to this host's own interface address is judged, one that does not is another host (#464)", async () => {
+	const lan = `${TCP_HEAD}   3: 00000000:18EB 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1235        0 1 1 0 100 0 0 10 0\n`;
+	const common = { probeTcp: async () => true, euid: 1234, user: "tester", fs: { readFileSync: (p) => ({ ...hostFiles(null), "/proc/net/tcp": lan })[p] }, ownerName: (u) => NAMES[u] ?? null };
+	const here = await judgeValkeyListeners({ ...common, url: "redis://myhost:6379", lookup: fakeLookup({ myhost: [{ address: "192.168.5.15", family: 4 }] }), interfaces: () => ({ eth0: [{ address: "192.168.5.15", family: "IPv4" }] }) });
+	assert.match(here.refusal.text, /^192\.168\.5\.15:6379 is held by op2 \(uid 1235\)/, "a 0.0.0.0 listener answers this host's own address too");
+	const there = await judgeValkeyListeners({ ...common, url: "redis://queue.lan:6379", lookup: fakeLookup({ "queue.lan": [{ address: "10.0.0.5", family: 4 }] }), interfaces: () => ({ eth0: [{ address: "192.168.5.15", family: "IPv4" }] }) });
+	assert.deepEqual(there, { remote: "queue.lan" });
+	assert.deepEqual(await judgeValkeyListeners({ ...common, url: "redis://gone.lan:6379", lookup: fakeLookup({}) }), { remote: "gone.lan" }, "a name that does not resolve is not this host");
+	const remote = await decideAt(1235, { url: "redis://queue.lan:6379", lookup: fakeLookup({ "queue.lan": [{ address: "10.0.0.5", family: 4 }] }) });
+	assert.deepEqual([remote.include, remote.refusal], [false, null]);
+	assert.equal(remote.notes[0], "VALKEY_URL names queue.lan, not this host, so no Valkey is added here");
+});
+
+test("service install on podman: a Valkey that is not this account's is refused before anything is written, --force does not take it, and PI_VALKEY_SHARED=1 does (#464)", async () => {
+	const files = { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\n` };
+	const refusal = /127\.0\.0\.1:6379 is held by op2 \(uid 1235\), not by this account \(uid 1234\) or its containers \(subordinate uids read from \/etc\/subuid\): taking it as this deployment's Valkey would put this account's jobs in a queue another account can read and drain\. Give this account a Valkey of its own on another port, VALKEY_URL=redis:\/\/127\.0\.0\.1:<port> in \/srv\/pi-deploy\/\.env \(`service install` and `up` then publish the Quadlet Valkey there\); or, if that Valkey is shared on purpose, say so with PI_VALKEY_SHARED=1 in \/srv\/pi-deploy\/\.env/;
+	for (const argv of [["install"], ["install", "--force"]]) {
+		const h = svc({ argv, listening: true, listenerUid: 1235, files });
+		assert.equal(await h.run(), 1, argv.join(" "));
+		assert.match(h.errText(), refusal);
+		assert.deepEqual(h.writes, [], `${argv.join(" ")}: nothing written`);
+		assert.ok(!h.calls.some((c) => c[0] === "systemctl" && c[2] !== "show-environment"));
+	}
+	const unknown = svc({ listening: true, host: { ...hostFiles(null), "/proc/net/tcp": new Error("EACCES"), "/proc/net/tcp6": new Error("EACCES") }, files });
+	assert.equal(await unknown.run(), 1);
+	assert.match(unknown.errText(), /which account holds it could not be told \(neither \/proc\/net\/tcp nor \/proc\/net\/tcp6 could be read\)/);
+	// A system service's Valkey (a distribution package) and root's (docker-proxy) are refused too, until opted in.
+	for (const uid of [975, 0]) {
+		const refused = svc({ listening: true, listenerUid: uid, files });
+		assert.equal(await refused.run(), 1, String(uid));
+		const shared = svc({ listening: true, listenerUid: uid, files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\nPI_VALKEY_SHARED=1\n` } });
+		assert.equal(await shared.run(), 0, shared.errText());
+		assert.match(shared.text(), /held by .*, shared on purpose as PI_VALKEY_SHARED=1 in \/srv\/pi-deploy\/\.env says, so no Valkey is added for it/);
+		assert.ok(!shared.store.has(join(QDIR, QUADLET_FILES.valkey.file)));
+	}
+	const off = svc({ listening: true, listenerUid: 975, files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\nPI_VALKEY_SHARED=yes\n` } });
+	assert.equal(await off.run(), 1, "only 1 opts in");
+	const render = svc({ argv: ["render"], listening: true, listenerUid: 1235, files });
+	assert.equal(await render.run(), 0);
+	assert.match(render.text(), /# note: install refuses this: 127\.0\.0\.1:6379 is held by op2/);
+});
+
+test("service install on podman: VALKEY_URL's loopback port is where the Quadlet Valkey is published and what is probed; another host adds none (#464)", async () => {
+	const h = svc({ files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\nVALKEY_URL=redis://127.0.0.1:6380\n` } });
+	assert.equal(await h.run(), 0, h.errText());
+	assert.deepEqual(h.probed, ["127.0.0.1:6380"]);
+	const unit = h.store.get(join(QDIR, QUADLET_FILES.valkey.file));
+	assert.match(unit, /^PublishPort=127\.0\.0\.1:6380:6379$/m);
+	assert.doesNotMatch(unit, /127\.0\.0\.1:6379:6379/);
+	const plain = svc({ files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\n` } });
+	assert.equal(await plain.run(), 0);
+	assert.equal(plain.store.get(join(QDIR, QUADLET_FILES.valkey.file)), template(QUADLET_FILES.valkey.file), "the default port renders the template unchanged");
+	const local = svc({ files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\nVALKEY_URL=redis://localhost:6381\n` } });
+	assert.equal(await local.run(), 0, local.errText());
+	assert.deepEqual(local.probed, ["::1:6381", "127.0.0.1:6381"], "localhost: every address the client may dial");
+	assert.match(local.store.get(join(QDIR, QUADLET_FILES.valkey.file)), /^PublishPort=127\.0\.0\.1:6381:6379$/m);
+	const remote = svc({ files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\nVALKEY_URL=redis://queue.lan:6379\n` } });
+	assert.equal(await remote.run(), 0);
+	assert.deepEqual(remote.probed, [], "a remote queue is not probed here");
+	assert.ok(!remote.store.has(join(QDIR, QUADLET_FILES.valkey.file)));
+	assert.match(remote.text(), /VALKEY_URL names queue\.lan, not this host, so no Valkey is added here/);
+	const dollar = svc({ files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\nVALKEY_URL=redis://127.0.0.1:$PORT\n` } });
+	assert.equal(await dollar.run(), 1);
+	assert.match(dollar.errText(), /line 3 assigns VALKEY_URL in a form this command cannot read the way the service's loader will \(a \$, which the loaders expand differently/);
+	assert.deepEqual(dollar.writes, []);
+});
+
+test("service install on podman: an [::1] VALKEY_URL is refused for its brackets unquoted, read when quoted, and judged on ::1 (#464)", async () => {
+	const bare = svc({ files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\nVALKEY_URL=redis://[::1]:16510\n` } });
+	assert.equal(await bare.run(), 1);
+	assert.match(bare.errText(), /assigns VALKEY_URL in a form this command cannot read the way the service's loader will \(an unquoted \[ or \]: the macOS wrapper sources the file with sh, which may read it as a filename pattern\. Quote the value, for example VALKEY_URL="redis:\/\/\[::1\]:6379"/);
+	assert.doesNotMatch(bare.errText(), /spaces or a backslash/, "the true cause, not a list of others");
+	const tcp6 = `${TCP_HEAD}   1: 00000000000000000000000001000000:407E 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1235        0 1 1 0 100 0 0 10 0\n`;
+	const quoted = svc({ listening: (h) => h === "::1", host: { ...hostFiles(null), "/proc/net/tcp6": tcp6 }, files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\nVALKEY_URL="redis://[::1]:16510"\n` } });
+	assert.equal(await quoted.run(), 1);
+	assert.deepEqual(quoted.probed, ["::1:16510"]);
+	assert.match(quoted.errText(), /\[::1\]:16510 is held by op2 \(uid 1235\)/);
+	assert.deepEqual(quoted.writes, []);
+});
+
+test("readValkeyKeys reads VALKEY_URL and PI_VALKEY_SHARED as the loader does, and names what makes a line unreadable (#464)", () => {
+	assert.deepEqual(readValkeyKeys("VALKEY_URL=redis://127.0.0.1:6380\nPI_VALKEY_SHARED=1\n"), { keys: { VALKEY_URL: "redis://127.0.0.1:6380", PI_VALKEY_SHARED: "1" } });
+	assert.deepEqual(readValkeyKeys('VALKEY_URL="redis://[::1]:6379"\n'), { keys: { VALKEY_URL: "redis://[::1]:6379" } });
+	assert.deepEqual(readValkeyKeys("# VALKEY_URL=redis://x\n"), { keys: {} });
+	assert.match(readValkeyKeys("VALKEY_URL=redis://[::1]:6379\n", { path: "/d/.env" }).error, /^\/d\/\.env line 1 assigns VALKEY_URL .*\(an unquoted \[ or \]/);
+	assert.match(unplainCause("redis://a b"), /a space in the value/);
+	assert.match(unplainCause("redis://a\\b"), /a backslash/);
+	assert.match(unplainCause('"redis://$X"'), /a \$/);
+	assert.match(unplainCause("redis://a;b"), /a character outside/);
+});
+
+// Gate round 2: the owner rule moved to where the connection is made, with the address pinned.
+const row4 = (addr, port, uid) => `   3: ${addr}:${port.toString(16).toUpperCase().padStart(4, "0")} 00000000:0000 0A 00000000:00000000 00:00000000 00000000  ${uid}        0 1 1 0 100 0 0 10 0\n`;
+const row6 = (addr, port, uid) => `   1: ${addr}:${port.toString(16).toUpperCase().padStart(4, "0")} 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  ${uid}        0 1 1 0 100 0 0 10 0\n`;
+const judgeOn = (files, extra = {}) =>
+	judgeValkeyListeners({ url: "redis://127.0.0.1:16483", probeTcp: async () => true, lookup: fakeLookup(), fs: { readFileSync: (p) => ({ "/proc/net/tcp": TCP_HEAD, "/proc/net/tcp6": TCP_HEAD, "/etc/subuid": "op2:1235000000:65536\ntester:1234000000:65536\n", ...files })[p] }, euid: 1234, user: "tester", ownerName: (u) => NAMES[u] ?? null, envPath: "/d/.env", ...extra });
+
+test("reachedAddress: an unspecified address is this host's loopback of its family, an IPv4-mapped one its IPv4 form (#464, gate round 2)", () => {
+	assert.equal(reachedAddress("0.0.0.0"), "127.0.0.1");
+	assert.equal(reachedAddress("0.1.2.3"), "127.0.0.1", "0.0.0.0/8");
+	assert.equal(reachedAddress("::"), "::1");
+	assert.equal(reachedAddress("::ffff:0.0.0.0"), "127.0.0.1");
+	assert.equal(reachedAddress("::ffff:127.0.0.1"), "127.0.0.1");
+	assert.equal(reachedAddress("127.0.0.2"), "127.0.0.2");
+	assert.equal(reachedAddress("::1"), "::1");
+});
+
+test("judgeValkeyListeners: 0.0.0.0, :: and 127.0.0.0/8 URLs are this host's and judged at the address a connect reaches (#464, gate round 2 defect 1)", async () => {
+	// Measured on Fedora 44: redis://0.0.0.0:16483 was "not this host", unjudged, and the client reached another
+	// account's 127.0.0.1:16483.
+	const theirs = { "/proc/net/tcp": `${TCP_HEAD}${row4("0100007F", 16483, 1235)}` };
+	for (const url of ["redis://0.0.0.0:16483", "redis://0.1.2.3:16483", "redis://[::ffff:0.0.0.0]:16483"]) {
+		const v = await judgeOn(theirs, { url });
+		assert.match(v.refusal?.text ?? "", /^127\.0\.0\.1:16483 is held by op2 \(uid 1235\)/, url);
+	}
+	const v6 = await judgeOn({ "/proc/net/tcp6": `${TCP_HEAD}${row6("00000000000000000000000001000000", 16483, 1235)}` }, { url: "redis://[::]:16483" });
+	assert.match(v6.refusal.text, /^\[::1\]:16483 is held by op2/);
+	// 127.0.0.0/8 is loopback: 127.0.0.2 is judged here, never "another host" (gate round 2, test gap).
+	const other127 = await judgeOn({ "/proc/net/tcp": `${TCP_HEAD}${row4("0200007F", 16483, 1235)}` }, { url: "redis://127.0.0.2:16483" });
+	assert.match(other127.refusal.text, /^127\.0\.0\.2:16483 is held by op2/);
+	const mine = await judgeOn({ "/proc/net/tcp": `${TCP_HEAD}${row4("0100007F", 16483, 1234)}` }, { url: "redis://0.0.0.0:16483" });
+	assert.deepEqual([mine.chosen, mine.refusal], ["127.0.0.1", null], "pinned to what 0.0.0.0 reaches");
+});
+
+test("judgeValkeyListeners chooses this account's listener first and pins it; another account's on another address of the name is reported, never dialled (#464, gate round 2 defect 2)", async () => {
+	// The localhost squat after install (measured on Fedora 44): this account's Quadlet Valkey on 127.0.0.1, another
+	// account later publishing [::1] on the same port; localhost resolves ::1 first.
+	const files = { "/proc/net/tcp": `${TCP_HEAD}${row4("0100007F", 16483, 1234)}`, "/proc/net/tcp6": `${TCP_HEAD}${row6("00000000000000000000000001000000", 16483, 1235)}` };
+	const v = await judgeOn(files, { url: "redis://localhost:16483" });
+	assert.equal(v.chosen, "127.0.0.1");
+	assert.equal(v.refusal, null);
+	assert.deepEqual(v.elsewhere, ["[::1]:16483 (held by op2 (uid 1235))"]);
+	assert.deepEqual(v.answered.map((a) => [a.address, a.own]), [["::1", false], ["127.0.0.1", true]], "in the order the client tries them");
+	const d = await decideValkey({ venues: VENUES, url: "redis://localhost:16483", installed: true, probeTcp: async () => true, lookup: fakeLookup(), euid: 1234, user: "tester", fs: { readFileSync: (p) => ({ ...hostFiles(null), ...files })[p] }, ownerName: (u) => NAMES[u] ?? null, envPath: "/d/.env" });
+	assert.equal(d.include, true, "our installed Quadlet Valkey is kept");
+	assert.match(d.notes.join("\n"), /another account also listens on an address VALKEY_URL's host resolves to: \[::1\]:16483 \(held by op2 \(uid 1235\)\)\. The worker connects only to the address judged this account's/);
+	// With nothing of this account's answering, the refusal names ONLY the addresses a foreign uid holds (gate round 2).
+	const mixed = await judgeOn({ "/proc/net/tcp": `${TCP_HEAD}${row4("0100007F", 16483, 1235)}`, "/proc/net/tcp6": `${TCP_HEAD}${row6("00000000000000000000000001000000", 16483, 1236)}` }, { url: "redis://localhost:16483" });
+	assert.match(mixed.refusal.text, /^\[::1\]:16483 and 127\.0\.0\.1:16483 is held by uid 1236 and op2 \(uid 1235\)/);
+	// An address no socket row explains beside one another account holds: only the foreign-held one is said to be held.
+	const unknownAndForeign = await judgeOn({ "/proc/net/tcp": `${TCP_HEAD}${row4("0100007F", 16483, 1235)}` }, { url: "redis://localhost:16483" });
+	assert.match(unknownAndForeign.refusal.text, /^127\.0\.0\.1:16483 is held by op2 \(uid 1235\), not by/, "::1 answered with no row: not named as op2's");
+	const oneForeign = await judgeOn({ "/proc/net/tcp": `${TCP_HEAD}${row4("0100007F", 16483, 1235)}` }, { url: "redis://localhost:16483", probeTcp: async (h) => h === "127.0.0.1" });
+	assert.match(oneForeign.refusal.text, /^127\.0\.0\.1:16483 is held by op2 \(uid 1235\), not by/, "::1 did not answer, so it is not named");
+});
+
+test("judgeValkeyListeners bounds the name lookup: a resolver that does not answer is a name that did not resolve (#464, gate round 2)", async () => {
+	const v = await judgeOn({}, { url: "redis://slow.lan:6379", lookup: () => new Promise(() => {}), lookupTimeoutMs: 20 });
+	assert.deepEqual(v, { remote: "slow.lan" });
+});
+
+test("readSubuidRanges: getsubids(1) where it answers (SSSD ranges included), else /etc/subuid, and says which (#464, gate round 2)", async () => {
+	const fs = { readFileSync: () => "tester:1234000000:65536\n" };
+	assert.deepEqual(readSubuidRanges({ user: "tester", euid: 1234, fs, run: (cmd, args) => (cmd === "getsubids" && args[0] === "tester" ? "0: tester 5000000 100\n1: tester 7000000 10\n" : null) }), { ranges: [{ lo: 5000000, hi: 5000099 }, { lo: 7000000, hi: 7000009 }], source: "getsubids" });
+	assert.deepEqual(readSubuidRanges({ user: "tester", euid: 1234, fs, run: () => null }), { ranges: [{ lo: 1234000000, hi: 1234065535 }], source: "/etc/subuid" });
+	assert.deepEqual(readSubuidRanges({ user: "tester", euid: 1234, fs, run: () => "garbage\n" }).source, "/etc/subuid", "an answer with no range is not an answer");
+	// The source is what the refusal says, and an SSSD range makes a --network host container's uid this account's.
+	const v = await judgeOn({ "/proc/net/tcp": `${TCP_HEAD}${row4("0100007F", 16483, 5000042)}` }, { subuids: { ranges: [{ lo: 5000000, hi: 5000099 }], source: "getsubids" } });
+	assert.deepEqual([v.chosen, v.heldBy], ["127.0.0.1", "this account's containers (a subordinate uid of it, from getsubids)"]);
+	const refused = await judgeOn({ "/proc/net/tcp": `${TCP_HEAD}${row4("0100007F", 16483, 1235)}` }, { subuids: { ranges: [], source: "getsubids" } });
+	assert.match(refused.refusal.text, /or its containers \(subordinate uids read from getsubids\)/);
+});
+
+test("pinnedValkeyUrl puts the judged literal in place of the host and keeps the name for TLS (#464, gate round 2)", () => {
+	assert.deepEqual(pinnedValkeyUrl("redis://localhost:16483", "127.0.0.1"), { url: "redis://127.0.0.1:16483", servername: null });
+	assert.deepEqual(pinnedValkeyUrl("redis://:pw@localhost:16483/2", "::1"), { url: "redis://:pw@[::1]:16483/2", servername: null });
+	assert.deepEqual(pinnedValkeyUrl("rediss://valkey.lan:6380", "192.168.5.15"), { url: "rediss://192.168.5.15:6380", servername: "valkey.lan" });
+	assert.deepEqual(pinnedValkeyUrl("rediss://127.0.0.1:6380", "127.0.0.1"), { url: "rediss://127.0.0.1:6380", servername: null }, "a literal has no name to check");
+});
+
+test("resolveWorkerValkey: the worker's boot judgement, pinned, refused as a configError, and PI_VALKEY_SHARED from .env only (#464, gate round 2)", async () => {
+	const refuse = (m) => Object.assign(new Error(m), { piDispatchConfig: true });
+	const files = (uid) => ({ "/proc/net/tcp": `${TCP_HEAD}${row4("0100007F", 16483, uid)}`, "/proc/net/tcp6": TCP_HEAD, "/etc/subuid": "" });
+	const at = (uid, extra = {}) =>
+		resolveWorkerValkey({ url: "redis://localhost:16483", venues: VENUES, platform: "linux", env: {}, envText: "", envPath: "/d/.env", probeTcp: async (h) => h === "127.0.0.1", lookup: fakeLookup(), fs: { readFileSync: (p) => files(uid)[p] }, euid: 1234, user: "tester", ownerName: (u) => NAMES[u] ?? null, interfaces: () => ({}), subuids: { ranges: [], source: "/etc/subuid" }, configError: refuse, waitMs: 0, sleep: async () => {}, ...extra });
+	const mine = await at(1234);
+	assert.deepEqual([mine.url, mine.servername, mine.pinned], ["redis://127.0.0.1:16483", null, { address: "127.0.0.1", port: 16483, heldBy: "this account" }]);
+	await assert.rejects(at(1235), (err) => err.piDispatchConfig === true && /^the Valkey VALKEY_URL reaches is refused: 127\.0\.0\.1:16483 is held by op2 \(uid 1235\)/.test(err.message));
+	// Shared on purpose: from .env, and only from .env.
+	const shared = await at(1235, { envText: "PI_VALKEY_SHARED=1\n" });
+	assert.equal(shared.url, "redis://127.0.0.1:16483");
+	await assert.rejects(at(1235, { env: { PI_VALKEY_SHARED: "1" } }), (err) => err.piDispatchConfig === true, "an environment opt-in is not the file's");
+	const noted = await at(1234, { env: { PI_VALKEY_SHARED: "1" } });
+	assert.match(noted.notes[0], /^PI_VALKEY_SHARED is set in the worker's environment and not in \/d\/\.env: ignored/);
+	// Not judged where install, up and doctor do not judge either: docker's Valkey, another host, off Linux.
+	for (const extra of [{ venues: { localUsed: true, podmanUsed: true } }, { platform: "darwin" }, { url: "redis://queue.lan:6379", lookup: fakeLookup({ "queue.lan": [{ address: "10.0.0.5", family: 4 }] }) }]) {
+		const same = await at(1235, extra);
+		assert.equal(same.pinned, null, JSON.stringify(extra));
+		assert.equal(same.url, extra.url ?? "redis://localhost:16483");
+	}
+	// Nothing answering: waited for, then a plain error (exit 1, restarted), since no owner can be judged yet.
+	let clock = 0;
+	await assert.rejects(at(1234, { probeTcp: async () => false, waitMs: 2000, now: () => clock, sleep: async (ms) => { clock += ms; } }), (err) => !err.piDispatchConfig && /^nothing answers VALKEY_URL \(\[::1\]:16483, 127\.0\.0\.1:16483\)/.test(err.message));
+	let answersAt = 1000;
+	clock = 0;
+	const late = await at(1234, { probeTcp: async (h) => h === "127.0.0.1" && clock >= answersAt, waitMs: 5000, now: () => clock, sleep: async (ms) => { clock += ms; } });
+	assert.equal(late.url, "redis://127.0.0.1:16483", "a Valkey still starting is waited for");
+	await assert.rejects(at(1234, { url: "http://x" }), (err) => err.piDispatchConfig === true);
+});
+
+test("service install on podman: a PI_VALKEY_SHARED in this shell is ignored and named; only the .env's opts in (#464, gate round 2)", async () => {
+	const files = { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\n` };
+	const h = svc({ listening: true, listenerUid: 1235, files, env: { XDG_RUNTIME_DIR: "/run/user/1234", PI_VALKEY_SHARED: "1" }, argv: ["render"] });
+	assert.equal(await h.run(), 0);
+	assert.match(h.text(), /# note: install refuses this: 127\.0\.0\.1:6379 is held by op2/);
+	const install = svc({ listening: true, listenerUid: 1235, files, env: { XDG_RUNTIME_DIR: "/run/user/1234", PI_VALKEY_SHARED: "1" } });
+	assert.equal(await install.run(), 1);
+	const ok = svc({ listening: true, listenerUid: 1234, files, env: { XDG_RUNTIME_DIR: "/run/user/1234", PI_VALKEY_SHARED: "1" } });
+	assert.equal(await ok.run(), 0);
+	assert.match(ok.text(), /note: PI_VALKEY_SHARED is "1" in this shell: ignored, since only \/srv\/pi-deploy\/\.env may say a Valkey is shared on purpose/);
+});
+
+// Issue #464: a failed install leaves no half of itself behind, or says exactly which files remain.
+test("service install on podman: a write that fails puts back every file this run wrote, before any command runs (#464)", async () => {
+	const h = svc({ files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\n` } });
+	h.failWrites.set(USER_UNIT, Object.assign(new Error("EACCES: permission denied, open '/home/tester/.config/systemd/user/pi-dispatch-worker.service'"), { code: "EACCES" }));
+	assert.equal(await h.run(), 1);
+	const valkey = join(QDIR, QUADLET_FILES.valkey.file);
+	const network = join(QDIR, QUADLET_FILES.valkeyNetwork.file);
+	assert.equal(h.errText(), `error: write ${USER_UNIT} failed (EACCES: permission denied, open '${USER_UNIT}'), so nothing was installed: rolled back what this run wrote (removed ${valkey}, ${network}); no file of this run remains. Fix it, then re-run this install\n`, "the refused unit write changed nothing, so only the stack's two files are named");
+	for (const p of [valkey, network, USER_UNIT]) assert.ok(!h.store.has(p), `${p} is gone`);
+	assert.deepEqual(h.calls.filter((c) => c[0] === "systemctl" && c[2] !== "show-environment"), [], "nothing was started or reloaded");
+});
+
+test("service install --force on podman: a failed write puts back the files it replaced, byte for byte, and names what it could not put back (#464)", async () => {
+	const valkey = join(QDIR, QUADLET_FILES.valkey.file);
+	const network = join(QDIR, QUADLET_FILES.valkeyNetwork.file);
+	const files = { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\n`, [valkey]: "# an operator's edit\n", [USER_UNIT]: "old unit\n" };
+	const h = svc({ argv: ["install", "--force"], files });
+	h.failWrites.set(USER_UNIT, new Error("EROFS: read-only file system"));
+	h.failUnlinks.set(network, new Error("EBUSY: resource busy"));
+	assert.equal(await h.run(), 1);
+	assert.equal(h.store.get(valkey), "# an operator's edit\n", "the replaced file has its old bytes back");
+	assert.equal(h.store.get(USER_UNIT), "old unit\n");
+	assert.ok(h.store.has(network), "the one that could not be removed is still there");
+	assert.match(h.errText(), new RegExp(`\\(put back the earlier ${valkey.replaceAll(".", "\\.")}\\); these could NOT be put back and remain as this run wrote them: ${network.replaceAll(".", "\\.")} \\(EBUSY: resource busy\\)\\. Fix it`), "the refused write changed nothing, so it is not reported as left");
+	assert.deepEqual(h.calls.filter((c) => c[0] === "systemctl" && c[2] !== "show-environment"), []);
+});
+
+test("service install on podman: a stack command that fails puts back only the worker unit and names the stack files that remain (#464)", async () => {
+	const h = svc({ files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\n` }, plan: { "systemctl --user start": 1 } });
+	assert.equal(await h.run(), 1);
+	const valkey = join(QDIR, QUADLET_FILES.valkey.file);
+	const network = join(QDIR, QUADLET_FILES.valkeyNetwork.file);
+	assert.ok(!h.store.has(USER_UNIT), "the worker unit is not left behind");
+	assert.ok(h.store.has(valkey) && h.store.has(network), "the stack's files stay: its units run from them");
+	assert.match(h.errText(), new RegExp(`The stack files this run wrote remain, since its units run from them: ${network.replaceAll(".", "\\.")}, ${valkey.replaceAll(".", "\\.")}\\.`));
+	assert.equal(h.calls.filter((c) => c.join(" ") === "systemctl --user daemon-reload").length, 2, "one reload before the start, one after the unit was put back");
+	// Gate round 1: the rollback here is of the worker unit only, so it never claims that no file of this run remains.
+	assert.doesNotMatch(h.errText(), /no file of this run remains/);
+	assert.match(h.errText(), new RegExp(`\\(rolled back what this run wrote \\(removed ${USER_UNIT.replaceAll(".", "\\.")}\\)\\)\\. The stack files`));
+	assert.match(h.errText(), /`pi-dispatch service uninstall` removes them if you will not retry/);
+});
+
+// Gate round 1 (case 5): a failed install or `up` whose daemon-reload never ran leaves Quadlet files whose units the
+// manager never loaded, and `systemctl --user stop` of those exits 5 ("not loaded"), which made uninstall refuse to
+// remove the very files that run left.
+test("service uninstall removes Quadlet files whose units were never loaded, and still refuses while one runs (#464)", async () => {
+	const files = {};
+	for (const q of [QUADLET_FILES.valkey, QUADLET_FILES.valkeyNetwork]) files[join(QDIR, q.file)] = "q";
+	const notLoaded = { code: 0, output: "LoadState=not-found\nActiveState=inactive\n" };
+	const h = svc({ argv: ["uninstall"], files, plan: { "systemctl --user stop": 5, "systemctl --user show": notLoaded } });
+	assert.equal(await h.run(), 0, h.errText());
+	for (const f of Object.keys(files)) assert.ok(!h.store.has(f), `${f} removed`);
+	assert.match(h.text(), /note: systemctl --user stop exited 5, and none of pi-dispatch-valkey\.service, pi-dispatch-valkey-network\.service is running \(not loaded, or already stopped\), so their files are removed/);
+	assert.match(h.text(), /removed the podman venue's Quadlet units/);
+	assert.deepEqual(h.calls.filter((c) => c[2] === "show").map((c) => c.slice(3)), [["--property=LoadState,ActiveState", "pi-dispatch-valkey.service"], ["--property=LoadState,ActiveState", "pi-dispatch-valkey-network.service"]]);
+	// Loaded and failed is stopped as far as it goes too.
+	const failed = svc({ argv: ["uninstall"], files, plan: { "systemctl --user stop": 1, "systemctl --user show": { code: 0, output: "LoadState=loaded\nActiveState=failed\n" } } });
+	assert.equal(await failed.run(), 0, failed.errText());
+	// One still active, or one the manager would not answer about: nothing removed, as before.
+	for (const show of [{ code: 0, output: "LoadState=loaded\nActiveState=active\n" }, { code: 1, output: "" }]) {
+		const running = svc({ argv: ["uninstall"], files, plan: { "systemctl --user stop": 5, "systemctl --user show": show } });
+		assert.equal(await running.run(), 1);
+		assert.match(running.errText(), /systemctl --user stop .* failed \(exit 5\), so nothing was removed/);
+		for (const f of Object.keys(files)) assert.ok(running.store.has(f), `${f} kept`);
+	}
+});
+
+test("service install without podman: a unit write that fails is said, not thrown, and leaves nothing (#464)", async () => {
+	const h = svc({ files: {} });
+	h.failWrites.set(USER_UNIT, new Error("EACCES: permission denied"));
+	assert.equal(await h.run(), 1);
+	assert.match(h.errText(), /^error: write \/home\/tester\/\.config\/systemd\/user\/pi-dispatch-worker\.service failed \(EACCES: permission denied\), so nothing was installed: this run had written nothing; no file of this run remains/);
+	assert.deepEqual(h.calls.filter((c) => c[0] === "systemctl" && c[2] !== "show-environment"), []);
+	assert.ok(!h.store.has(USER_UNIT));
+});
+
+test("service install: an enable that fails after every write names the files this run wrote, which remain (#464)", async () => {
+	const h = svc({ files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\n` }, plan: { "systemctl --user enable": 1 } });
+	assert.equal(await h.run(), 1);
+	const valkey = join(QDIR, QUADLET_FILES.valkey.file);
+	const network = join(QDIR, QUADLET_FILES.valkeyNetwork.file);
+	assert.ok(h.errText().endsWith(`(files this run wrote, which remain: ${network}, ${valkey}, ${USER_UNIT})\n`), h.errText());
+});
+
+test("rollBackWrites: the FIRST record of a path is what is put back, and describeRollBack says what remains", () => {
+	const store = new Map([["/a", "old-a"]]);
+	const fs = { writeFileSync: (p, d) => store.set(p, d), unlinkSync: (p) => { if (!store.delete(p)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); } };
+	const journal = [{ path: "/a", existed: true, previous: "old-a" }, { path: "/b", existed: false, previous: null }, { path: "/a", existed: true, previous: "run-a" }];
+	store.set("/a", "run-a2");
+	store.set("/b", "run-b");
+	const rolled = rollBackWrites(fs, journal);
+	assert.deepEqual([store.get("/a"), store.has("/b")], ["old-a", false]);
+	assert.deepEqual(rolled, { restored: ["/a"], removed: ["/b"], left: [] });
+	assert.deepEqual(rollBackWrites(fs, [{ path: "/gone", existed: false, previous: null }]), { restored: [], removed: ["/gone"], left: [] }, "an absent new file counts as removed");
+	assert.equal(describeRollBack({ restored: [], removed: [], left: [] }), "this run had written nothing; no file of this run remains");
 });
 
 test("service install on podman: PI_EGRESS_PROXY naming another container installs no proxy unit and says why", async () => {

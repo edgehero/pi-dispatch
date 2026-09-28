@@ -465,7 +465,12 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		provider: source.provider ?? null,
 		model: source.model ?? null,
 		budgetReserved: source.budgetReserved ?? null,
-		attempt: job.attemptsMade ?? 0,
+		// The ATTEMPT NUMBER, 1-based: the first run of a job is 1, its retry 2 (ledger item, issue #464 round). Every
+		// record is written while the job is still processing, where BullMQ's `attemptsMade` counts the attempts FINISHED
+		// before this one (it increments in moveToFinished/moveToFailed, measured against bullmq 5.80.4), so it read 0 on
+		// a first attempt and 1 on the last of two, and the panel's "attempt 1" named the retry. +1 is the number an
+		// operator reads, and what the worker's own `job_failed` log line already shows (logged after the increment).
+		attempt: (Number.isInteger(job.attemptsMade) && job.attemptsMade >= 0 ? job.attemptsMade : 0) + 1,
 		// Chain telemetry (INT-RUN-HISTORY-FILE-CONTRACT): additive and nullable, explicit literals, no spread.
 		// parentJobId/chainDepth come from a chained child's own job.data; chainRefused counts a PARENT's
 		// /outbox requests that were refused. A chain refusal is pre-enqueue of the child, so the `reason` enum

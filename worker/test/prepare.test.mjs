@@ -557,3 +557,41 @@ test("every forge arm's wired builder honours a replica index -- the seam #187 d
 		assert.equal(/replica/i.test(build({ flow: "fix", target: job.target })), false, `${kind}: unflagged stays silent`);
 	}
 });
+
+test("the jobs dir is made this account's at construction and again before every job, and a refusal there runs no job (#464)", async () => {
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		const asked = [];
+		let refuse = null;
+		const prepareWorkspace = makePrepareWorkspace({
+			jobsDir,
+			forgeFor: () => ({ host: {} }),
+			prepareLocal: async () => ({ outcome: "ok" }),
+			ensureDir: (dir) => {
+				asked.push(dir);
+				if (refuse) throw refuse;
+			},
+		});
+		assert.deepEqual(asked, [jobsDir], "at construction");
+		await prepareWorkspace({ kind: "local", folder: "/some/folder", task: "x" }, null, {});
+		assert.deepEqual(asked, [jobsDir, jobsDir], "and before the job's mkdtemp: a temp cleaner can remove an idle jobs dir");
+		const before = readdirSync(jobsDir).length;
+		refuse = Object.assign(new Error("owned by uid 1270"), { piDispatchConfig: true });
+		await assert.rejects(prepareWorkspace({ kind: "local", folder: "/some/folder", task: "x" }, null, {}), /owned by uid 1270/);
+		assert.equal(readdirSync(jobsDir).length, before, "no job dir was made under a refused jobs dir");
+	} finally {
+		cleanup();
+	}
+});
+
+test("the default ensureDir recreates a jobs dir removed under a running worker (#464)", async () => {
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		const prepareWorkspace = makePrepareWorkspace({ jobsDir: join(jobsDir, "jobs"), forgeFor: () => ({ host: {} }), prepareLocal: async () => ({ outcome: "ok" }) });
+		rmSync(join(jobsDir, "jobs"), { recursive: true, force: true });
+		await prepareWorkspace({ kind: "local", folder: "/some/folder", task: "x" }, null, {});
+		assert.equal(readdirSync(join(jobsDir, "jobs")).length, 1, "made again, then the job's dir inside it");
+	} finally {
+		cleanup();
+	}
+});

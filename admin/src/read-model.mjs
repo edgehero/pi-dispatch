@@ -19,7 +19,7 @@ import * as nodeFs from "node:fs";
 import { GIT_READ_FLAGS } from "@edgehero/pi-dispatch/git-hardening";
 import { join, delimiter, sep } from "node:path";
 import { execFileSync } from "node:child_process";
-import { logsDirPath, defaultSandboxDir, defaultGraphDir, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
+import { logsDirPath, defaultSandboxDir, defaultGraphDir, accountTempRoot, ensureAccountTempRoot, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
@@ -121,7 +121,21 @@ export function resolvePaths(env = process.env) {
     // on the path without loadConfig. Deliberately NOT logsDir -- that directory's filename shape is
     // contract (INT-RUN-HISTORY-FILE-CONTRACT).
     graphDir: env.PI_GRAPH_DIR || defaultGraphDir(env),
+    // Issue #464: the per-account temp root the DEFAULT graph dir lives in (`<tmp>/pi-dispatch-<uid>`), which
+    // `secureGraphRoot` makes this account's before the artifact is written there; null for an operator's own
+    // PI_GRAPH_DIR, which is theirs to place.
+    graphRoot: env.PI_GRAPH_DIR ? null : accountTempRoot(env),
   };
+}
+
+/**
+ * Issue #464: make the default graph dir's account root this account's before writing into it, as the worker does
+ * for its jobs dir (`ensureAccountTempRoot`): created 0700, a symlink or another account's directory refused with
+ * the fix. Any account can create a name under the temp dir first, and a page the operator's browser opens from a
+ * directory another account controls is a page that account can replace. No-op for an explicit PI_GRAPH_DIR.
+ */
+export function secureGraphRoot(paths, fs) {
+  if (paths?.graphRoot) ensureAccountTempRoot(paths.graphRoot, { fs });
 }
 
 /** Parse a non-negative integer from a raw env string; absent/empty/invalid falls back to `fallback`. */

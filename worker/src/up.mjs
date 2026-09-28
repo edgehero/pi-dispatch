@@ -30,10 +30,11 @@
  */
 import { randomBytes } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
-import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdirSync, readFileSync as readPackageFile } from "node:fs";
 import { connect as netConnect } from "node:net";
-import { homedir, userInfo } from "node:os";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { homedir, networkInterfaces, userInfo } from "node:os";
 import { dirname, join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PODMAN_BOOT_REFUSING_CAUSES, makePodmanInfoReader, decidePodmanJobUser, podmanJobUserRefusal } from "./backend-podman.mjs";
@@ -41,9 +42,9 @@ import { venuesOf } from "./backends.mjs";
 import { logsDirPath, settingsFilePath } from "./config.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed as egressArmedFn, egressProxyName } from "./egress.mjs";
 import { envKeyIsBlank, envValueShown, updateEnvFile } from "./env-file.mjs";
-import { deploymentVenueEnv } from "./deployment-venue.mjs";
+import { deploymentValkeyEnv, deploymentVenueEnv } from "./deployment-venue.mjs";
 import { EGRESS_PROXY_IMAGE, PROXY_STATE_FORMAT, jobNetworksOf, parseProxyState, shippedProxyDrift } from "./egress-proxy-state.mjs";
-import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, QUADLET_FILES, STACK_KEYS, applyStack, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal } from "./podman-stack.mjs";
+import { DEFAULT_VALKEY_PORT, NETNS_KEEPER, NETNS_KEEPER_FORMAT, QUADLET_FILES, STACK_KEYS, applyStack, decideValkey, describeRollBack, passwdNameFrom, readSubuidRanges, rollBackWrites, valkeySharedOn, VALKEY_SHARED_KEY, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal } from "./podman-stack.mjs";
 
 // The shipped Quadlet templates, module-relative like service.mjs's: worker/deploy in a checkout, <pkg>/deploy under npm.
 const TEMPLATES_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "deploy");
@@ -150,8 +151,14 @@ export async function runUp(argv = [], deps = {}) {
 		// `.env` symlinked at a shared env file is edited THROUGH the link rather than replaced by a
 		// regular file. It calls it optionally, so leaving it out here made that repair dead code in the
 		// only production caller, and the test that covered it attached the method to its own fake.
-		fs = { existsSync, readFileSync, writeFileSync, renameSync, statSync, chmodSync, realpathSync },
+		fs = { existsSync, readFileSync, writeFileSync, renameSync, statSync, chmodSync, realpathSync, unlinkSync },
 		probeTcp = defaultProbeTcp,
+		// Issue #464: VALKEY_URL's host resolved as the worker's client resolves it (every address), and which addresses
+		// are this host's, for the Valkey owner rule on the podman venue.
+		lookup = (host, opts) => dnsLookup(host, opts),
+		interfaces = networkInterfaces,
+		// Issue #464 (gate round 2): how `getsubids` is run for this account's subordinate ranges (null: not installed).
+		runSync = undefined,
 		// PR #463: how a path resolves through symlinks, for the manager-environment rule (a symlinked home).
 		realpath = (p) => realpathSync(p),
 		cwd = process.cwd(),
@@ -208,6 +215,19 @@ export async function runUp(argv = [], deps = {}) {
 	// list WITHOUT `local` never touches docker at all: such a host may have no docker, and asking it would only fail.
 	const venues = venuesOf(venueEnv);
 	const dockerUsed = venues.localUsed;
+	// Issue #464: which Valkey the SERVICE's worker will use, and whether PI_VALKEY_SHARED lets it be one another uid
+	// holds, read from `.env` where `service install` reads them, with this shell's value only where the file sets none.
+	// Asked only where the podman stack decides its Valkey (docker's Valkey is the queue wherever `local` is blessed),
+	// and before anything runs, as the venue keys are.
+	let valkeyKeys = { env: {}, fromFile: {}, notes: [] };
+	if (venues.podmanUsed && !venues.localUsed) {
+		valkeyKeys = deploymentValkeyEnv({ env, fs, envPath: join(cwd, ".env"), platform });
+		if (valkeyKeys.error) {
+			out(`✗ ${valkeyKeys.error}\n\nup: cannot tell which Valkey this deployment's worker uses: fix the above, then re-run \`pi-dispatch up\`.\n`);
+			return 1;
+		}
+		for (const line of valkeyKeys.notes) out(`⚠ ${line}\n`);
+	}
 	//
 	// The docker lines below keep their original text and indentation, the `else` and the unbraced block included, so
 	// that the diff of issue #430 shows the docker path as the byte-identical thing its tests pin it to be.
@@ -286,6 +306,7 @@ export async function runUp(argv = [], deps = {}) {
 	// (a2)(b2) the podman venue: its gate and its job image, in this account's own store (issue #430). `podmanReady`
 	// is what lets the stack step below run at all.
 	let podmanReady = false;
+	let valkeyRefused = false;
 	if (venues.podmanUsed) {
 		const gate = await podmanGate({ readPodmanInfo, platform, euid, egid, out });
 		if (!gate.ok) {
@@ -608,7 +629,9 @@ export async function runUp(argv = [], deps = {}) {
 	// installer `pi-dispatch service install` uses (issue #430). After init for the reason (e2) gives: the proxy mounts
 	// the allowlist init scaffolds.
 	if (podmanReady) {
-		await podmanStackStep({ env: venueEnv, venues, spawn, out, yes, prompt, summary, fs, probeTcp, cwd, home, user: userName(), euid, templatesDir, readTemplate, mkdir, realpath });
+		const stackState = { valkeyRefused: false };
+		await podmanStackStep({ env: venueEnv, valkeyKeys: valkeyKeys.env, state: stackState, venues, spawn, out, yes, prompt, summary, fs, probeTcp, lookup, interfaces, runSync, cwd, home, user: userName(), euid, templatesDir, readTemplate, mkdir, realpath });
+		valkeyRefused = stackState.valkeyRefused;
 	}
 
 	// (f) doctor — always, verbatim: up converges what it can, doctor is the judge of what remains
@@ -662,6 +685,13 @@ Next:
 	// `.env` itself. Printed only there, so every other deployment's closing text is unchanged.
 	if (venues.podmanUsed) {
 		out("  (podman venue: a worker started by hand reads only its shell, so export the same PI_BACKENDS there first, or run it as a service with `pi-dispatch service install`, which reads .env)\n");
+	}
+	// Issue #464: a Valkey this pass refused (another account's, or one no one could name) is a failed `up` whatever doctor
+	// says: a worker started now would take that queue's jobs, and an exit 0 read by a script or the wizard says ready.
+	if (valkeyRefused) {
+		// Worded per reason (gate round 2): an owner refusal and a URL the Quadlet Valkey cannot serve are different faults.
+		out(valkeyRefused === "owner" ? "\nup: the Valkey VALKEY_URL reaches is not this account's (above); give this account its own port, or opt in with PI_VALKEY_SHARED=1 in .env, then re-run `pi-dispatch up`.\n" : "\nup: VALKEY_URL cannot be served as it is written (above); fix it in .env, then re-run `pi-dispatch up`.\n");
+		return doctorCode !== 0 ? doctorCode : 1;
 	}
 	return doctorCode;
 }
@@ -730,20 +760,54 @@ async function podmanImageStep({ spawn, out, yes, prompt, summary }) {
  * alone, a proxy that exists is left alone), then plans the Quadlet files with `planStack`, shows `plan.actions`, and on
  * consent hands those same objects to `applyStack`: what runs is literally what was shown.
  */
-async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, fs, probeTcp, cwd, home, user, euid, templatesDir, readTemplate, mkdir, realpath }) {
+async function podmanStackStep({ env, valkeyKeys = {}, state = {}, venues, spawn, out, yes, prompt, summary, fs, probeTcp, lookup, interfaces, runSync, cwd, home, user, euid, templatesDir, readTemplate, mkdir, realpath }) {
 	const armed = egressArmedFn(env);
 	let includeValkey = false;
+	let valkeyPort = DEFAULT_VALKEY_PORT;
 	if (!venues.localUsed) {
-		if (await probeTcp("127.0.0.1", 6379)) {
-			const ps = await runCmdQuery(spawn, "podman", ["ps", "--filter", "name=pi-dispatch-valkey", "--format", "{{.Names}}"]);
-			const ours = ps.code === 0 && ps.stdout.split("\n").map((l) => l.trim()).includes("pi-dispatch-valkey");
-			out(`\n✓ something is listening on 6379, assuming your Valkey${ours ? " (it is the pi-dispatch-valkey container)" : ""}\n`);
-			summary.push(["valkey", ours ? "container pi-dispatch-valkey already running" : "port 6379 already has a listener, left alone"]);
-		} else {
+		// Issue #464: the rule `service install` applies (`decideValkey`), on VALKEY_URL and PI_VALKEY_SHARED as the
+		// service reads them (`deploymentValkeyEnv`): every address the URL reaches is judged, and a listener there is taken
+		// to be the Valkey only when it is this account's (or shared on purpose, opted in). Anything else is refused,
+		// nothing is added for it, and `up` exits non-zero.
+		const decided = await decideValkey({
+			venues,
+			url: valkeyKeys.VALKEY_URL,
+			installed: false,
+			probeTcp,
+			lookup,
+			interfaces,
+			euid,
+			user,
+			shared: valkeySharedOn(valkeyKeys[VALKEY_SHARED_KEY]),
+			subuids: readSubuidRanges({ user, euid, fs: { readFileSync: (p, enc) => (fs.readFileSync ?? readFileSync)(p, enc) }, run: runSync }),
+			fs: { readFileSync: (p, enc) => (fs.readFileSync ?? readFileSync)(p, enc) },
+			ownerName: (uid) => passwdNameFrom({ readFileSync: (p, enc) => (fs.readFileSync ?? readFileSync)(p, enc) }, uid),
+			envPath: join(cwd, ".env"),
+		});
+		valkeyPort = decided.port;
+		if (decided.error) {
+			state.valkeyRefused = "url";
+			out(`\n✗ ${decided.error}\n`);
+			summary.push(["valkey", `NOT added: ${decided.error}`]);
+		} else if (decided.refusal) {
+			state.valkeyRefused = "owner";
+			out(`\n✗ ${decided.refusal.text}\n`);
+			summary.push(["valkey", `NOT added and NOT adopted: ${decided.refusal.short}`]);
+		} else if (decided.include) {
 			includeValkey = true;
+		} else if (decided.remote) {
+			out(`\n✓ ${decided.notes[0]}\n`);
+			summary.push(["valkey", "VALKEY_URL names another host, nothing added here"]);
+		} else {
+			// "It is the pi-dispatch-valkey container" only when that container PUBLISHES this port: a container of that name
+			// on another port (a second deployment's) says nothing about who answers here.
+			const ps = await runCmdQuery(spawn, "podman", ["ps", "--filter", "name=^pi-dispatch-valkey$", "--format", "{{.Names}}|{{.Ports}}"]);
+			const ours = ps.code === 0 && ps.stdout.split("\n").some((l) => valkeyContainerPublishes(l, decided.port));
+			out(`\n✓ something is listening on ${decided.port}, assuming your Valkey${ours ? " (it is the pi-dispatch-valkey container, published there)" : ""}: ${decided.notes[0] ?? ""}\n`);
+			summary.push(["valkey", ours ? `container pi-dispatch-valkey already running on ${decided.port}` : `port ${decided.port} already has a listener, left alone`]);
 		}
 	}
-	const components = stackComponents({ venues, env, includeValkey, armed });
+	const components = stackComponents({ venues, env, includeValkey, armed, valkeyPort });
 	for (const note of components.notes) out(`\n⚠ ${note}\n`);
 	let keeperRestart = false;
 	if (components.proxy) {
@@ -845,9 +909,21 @@ async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, 
 	}
 	// The fs seam gains mkdir here only: up's own writes (`.env`) never needed one, and the Quadlet directory usually
 	// does not exist on a fresh account.
-	const applied = await applyStack(plan, { fs: { ...fs, mkdirSync: fs.mkdirSync ?? mkdir }, run: (cmd, args) => runStreamed(spawn, cmd, args, out) });
+	// Issue #464: every write journalled, as `service install` does. The plan writes every file before its first command
+	// (planStack), so a failed WRITE puts back every file this run wrote and names any it could not; a failed COMMAND
+	// leaves the files its units run from, named.
+	const journal = [];
+	const stackFs = { ...fs, mkdirSync: fs.mkdirSync ?? mkdir, unlinkSync: fs.unlinkSync ?? unlinkSync };
+	const applied = await applyStack(plan, { fs: stackFs, run: (cmd, args) => runStreamed(spawn, cmd, args, out), journal });
 	if (!applied.ok) {
-		out(`✗ ${applied.failed} failed: continuing; doctor below will re-check. \`journalctl --user -u ${plan.start.join(" -u ")}\` has the details\n`);
+		if (!applied.ran) {
+			const rolled = describeRollBack(rollBackWrites(stackFs, journal));
+			out(`✗ ${applied.failed} failed (${applied.message ?? "write error"}), so nothing was installed: ${rolled}. Continuing; doctor below will re-check\n`);
+			summary.push([row, `install FAILED at: ${applied.failed}; ${rolled}`]);
+			return;
+		}
+		const remain = [...new Set(journal.map((e) => e.path))];
+		out(`✗ ${applied.failed} failed: continuing; doctor below will re-check. \`journalctl --user -u ${plan.start.join(" -u ")}\` has the details. Files this run wrote, which remain: ${remain.join(", ") || "none"}\n`);
 		summary.push([row, `install FAILED at: ${applied.failed}`]);
 		return;
 	}
@@ -862,6 +938,20 @@ async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, 
 	const hint = keeperUnderRunningProxyHint(plan, egressProxyName(env), { keeperStarting: plan.start.includes(QUADLET_FILES.keeper.unit) });
 	if (hint) out(`⚠ ${hint}\n`);
 	out(lingerNote(await readLinger(user, (cmd, args) => runCmdCapture(spawn, cmd, args)), user));
+}
+
+/**
+ * Whether a `podman ps --format {{.Names}}|{{.Ports}}` line is the pi-dispatch-valkey container publishing host port
+ * `port` to its 6379 (issue #464). Ports read like `127.0.0.1:16468->6379/tcp` (measured, Podman 5.8.1 and 4.9.3), a
+ * list comma-separated.
+ */
+export function valkeyContainerPublishes(line, port) {
+	const [name, ports = ""] = String(line).trim().split("|");
+	if (name !== "pi-dispatch-valkey") return false;
+	return ports.split(",").some((p) => {
+		const m = /:(\d+)->6379\/tcp$/.exec(p.trim());
+		return m !== null && Number(m[1]) === port;
+	});
 }
 
 /**

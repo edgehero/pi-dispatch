@@ -88,6 +88,21 @@ const prepared = (over = {}) => ({
 	...over,
 });
 
+// Issue #464, gate round 1: a sandbox dir absent at boot is a name another account can create first (a recursive mkdir
+// takes an existing directory silently), so the owner is asked again at every retention, and a run is deleted rather
+// than kept where another account could swap it.
+test("retention refuses a sandbox dir another account owns: the run is deleted, not renamed into it, and the failure is logged", () => {
+	const base = fakeFs({ files: { "/jobs/job-xyz": "<dir>" } });
+	const logged = [];
+	const fs = { ...base, statSync: (p) => ({ uid: p === "/sbx" ? 1270 : 1234 }) };
+	assert.equal(retainJobDir(prepared(), { sandboxDir: "/sbx", fs, euid: 1234, log: (e, d) => logged.push([e, d]) }), null);
+	assert.deepEqual(base.calls.renamed, [], "never renamed into another account's directory");
+	assert.ok(base.calls.removed.includes("/jobs/job-xyz"), "the run is deleted, as when retention is off");
+	assert.deepEqual(logged, [["sandbox_retain_failed", { jobId: "gh-1", reason: "/sbx is owned by uid 1270, not by this account (uid 1234)" }]]);
+	const mine = fakeFs({ files: { "/jobs/job-xyz": "<dir>" } });
+	assert.equal(retainJobDir(prepared(), { sandboxDir: "/sbx", fs: { ...mine, statSync: () => ({ uid: 1234 }) }, euid: 1234 }).jobId, "gh-1", "this account's: kept as ever");
+});
+
 test("retention renames the per-job dir and records a manifest", () => {
 	const fs = fakeFs({ files: { "/jobs/job-xyz": "<dir>" } });
 	const manifest = retainJobDir(prepared(), { sandboxDir: "/sbx", fs, now: () => Date.parse("2026-08-01T10:00:00Z") });

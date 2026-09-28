@@ -88,6 +88,7 @@ import {
   observedChainEdges,
   collectGraphInputs,
   forgeRepoTargets,
+  secureGraphRoot,
 } from "./read-model.mjs";
 import { buildGraphModel } from "./graph-model.mjs";
 import { buildInsightsHtml } from "./insights-html.mjs";
@@ -1633,6 +1634,8 @@ export async function insightsCommand(paths: any, tokens: string[], notify: Noti
   const html = buildInsightsHtml(payload, { now: deps.now(), fullPaths });
   const file = `${paths.graphDir}/insights.html`;
   try {
+    // Issue #464: the default graph dir's per-account root is this account's (created 0700), or the write refuses.
+    secureGraphRoot(paths, deps.fs);
     deps.fs.mkdirSync(paths.graphDir, { recursive: true });
     const tmp = `${file}.tmp`;
     deps.fs.writeFileSync(tmp, html, { mode: 0o644 });

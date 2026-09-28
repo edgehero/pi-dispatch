@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { parseConnection } from "../src/connection.mjs";
 // processor.mjs pulls in no bullmq, so this import is safe below the node floor where index.mjs skips.
 import { InfraRetry } from "../src/processor.mjs";
 // run-history.mjs pulls in only node:fs/node:path -- safe below the node floor alongside processor.mjs.
@@ -257,7 +258,7 @@ test("shutdown closes each extraCloser after the worker drains", { skip }, async
 	try {
 		process.exit = () => {}; // shutdown ends in process.exit(0); neutralise it for the test
 		worker = mod.createWorker({
-			connection: { host: "127.0.0.1", port: 1 },
+			connection: parseConnection("redis://127.0.0.1:1"),
 			concurrency: 1,
 			getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
 			redis: {},
@@ -297,7 +298,7 @@ test("shutdown releases the shared redis client AFTER every closer, by disconnec
 	try {
 		process.exit = () => {};
 		worker = mod.createWorker({
-			connection: { host: "127.0.0.1", port: 1 },
+			connection: parseConnection("redis://127.0.0.1:1"),
 			concurrency: 1,
 			getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
 			redis: {
@@ -343,7 +344,7 @@ test("createWorker exposes stop(): the shutdown minus the exit, for a boot that 
 			exits += 1;
 		};
 		worker = mod.createWorker({
-			connection: { host: "127.0.0.1", port: 1 },
+			connection: parseConnection("redis://127.0.0.1:1"),
 			concurrency: 1,
 			getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
 			redis: { disconnect: () => order.push("redis") },
@@ -385,7 +386,7 @@ test("a closer pushed AFTER createWorker returns is still closed by the shutdown
 		process.exit = () => {};
 		const extraClosers = [];
 		worker = mod.createWorker({
-			connection: { host: "127.0.0.1", port: 1 },
+			connection: parseConnection("redis://127.0.0.1:1"),
 			concurrency: 1,
 			getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
 			redis: {},
@@ -427,7 +428,7 @@ test("a closer that throws SYNCHRONOUSLY, and an absent one, never strand the cl
 			exitCode = code;
 		};
 		worker = mod.createWorker({
-			connection: { host: "127.0.0.1", port: 1 },
+			connection: parseConnection("redis://127.0.0.1:1"),
 			concurrency: 1,
 			getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
 			redis: {},
@@ -463,7 +464,7 @@ test("createWorker NAMES the BullMQ Worker when given one, and omits the option 
 	// name and `moveToActive` stamps `processedBy` onto each active job's hash. Conditional, so a bare
 	// createWorker still builds a byte-identical options object.
 	const base = {
-		connection: { host: "127.0.0.1", port: 1 },
+		connection: parseConnection("redis://127.0.0.1:1"),
 		concurrency: 1,
 		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
 		redis: {},
@@ -960,7 +961,7 @@ test("createWorker REFUSES a wiring with no stopContainer, rather than failing 3
 	// because neither ever aborts.
 	const mod = await import("../src/index.mjs");
 	assert.throws(
-		() => mod.createWorker({ connection: { host: "127.0.0.1", port: 1 }, concurrency: 1, getSettings: () => ({}), redis: {}, deps: {} }),
+		() => mod.createWorker({ connection: parseConnection("redis://127.0.0.1:1"), concurrency: 1, getSettings: () => ({}), redis: {}, deps: {} }),
 		/stopContainer is required -- it is the only thing that enforces the 30-minute job timeout/,
 	);
 });

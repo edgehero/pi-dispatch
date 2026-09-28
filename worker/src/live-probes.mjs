@@ -737,7 +737,9 @@ export async function runLiveProbes({
 		// the realpath so a directory mkdtemp did make is still removed below when a later call fails.
 		let fixture;
 		try {
-			fs.mkdirSync(jobsDir, { recursive: true });
+			// 0700 for what this creates (issue #464): the worker's own `ensureJobsDir` makes the per-account root so, and a
+			// probe run first must not leave it wider.
+			fs.mkdirSync(jobsDir, { recursive: true, mode: 0o700 });
 			root = fs.mkdtempSync(`${jobsDir}/${names.fixturePrefix}`);
 			root = fs.realpathSync(root);
 			fixture = makeFixture(root);

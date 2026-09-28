@@ -42,14 +42,16 @@
  */
 import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { lookup as dnsLookup } from "node:dns/promises";
 import { connect as netConnect } from "node:net";
-import { homedir, tmpdir, userInfo } from "node:os";
+import { homedir, networkInterfaces, tmpdir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { parseBackendList, venuesOf } from "./backends.mjs";
+import { sharedShellIgnored } from "./deployment-venue.mjs";
 import { egressArmed, egressProxyName } from "./egress.mjs";
-import { ALL_QUADLET_FILES, ALLOWLIST_PLACEHOLDER, NETNS_KEEPER, NETNS_KEEPER_FORMAT, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, PROXY_CONF_PLACEHOLDER, QUADLET_FILES, applyStack, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, proxyConfCopyPath, proxyRestartWarning, quadletDir, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal, workerUnitDeps } from "./podman-stack.mjs";
+import { ALL_QUADLET_FILES, ALLOWLIST_PLACEHOLDER, NETNS_KEEPER, NETNS_KEEPER_FORMAT, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, PROXY_CONF_PLACEHOLDER, QUADLET_FILES, applyStack, decideValkey, describeAction, passwdNameFrom, readSubuidRanges, readValkeyKeys, valkeySharedOn, VALKEY_SHARED_KEY, describeRollBack, journalWrite, rollBackWrites, foreignContainerRefusal, foreignContainers, lingerNote, planStack, proxyConfCopyPath, proxyRestartWarning, quadletDir, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal, workerUnitDeps } from "./podman-stack.mjs";
 
 // src/ is where this module lives in BOTH layouts (worker/src in a checkout,
 // node_modules/@edgehero/pi-dispatch/src under npm). Deploy templates resolve one level up from it
@@ -342,8 +344,14 @@ export async function runService(argv = [], deps = {}) {
 		now = () => Date.now(),
 		queue = null, // test seam; production builds one lazily in doRestart from VALKEY_URL
 		// Is anything on 127.0.0.1:6379? Asked only on a podman deployment, to decide whether the Quadlet Valkey is
-		// wanted (issue #430); the same plain TCP connect `up` uses, for up's reason.
+		// wanted (issue #430); the same plain TCP connect `up` uses, for up's reason. Issue #464: asked of every address
+		// VALKEY_URL's host resolves to (`lookup`, as the worker's client resolves it), and `interfaces` says which of
+		// them are this host's.
 		probeTcp = defaultProbeTcp,
+		lookup = (host, opts) => dnsLookup(host, opts),
+		interfaces = networkInterfaces,
+		// Issue #464 (gate round 2): how `getsubids` is run for this account's subordinate ranges (null: not installed).
+		runSync = undefined,
 		// PR #463: how a path resolves through symlinks, for the manager-environment rule (a symlinked home).
 		realpath = (p) => realpathSync(p),
 	} = deps;
@@ -409,6 +417,9 @@ export async function runService(argv = [], deps = {}) {
 		now,
 		queue,
 		probeTcp,
+		lookup,
+		interfaces,
+		runSync,
 		realpath,
 		which: values.receiver ? "receiver" : "worker",
 		scope: platform === "linux" && values.system ? "system" : "user",
@@ -767,9 +778,16 @@ function podmanVenue(ctx) {
 			if (!linux) return { used: false };
 			return { error: `cannot read ${envPath} to learn whether this deployment runs the podman venue: ${err?.message}` };
 		}
-		const read = readStackKeys(text, { loader: linux ? "systemd" : ctx.platform === "darwin" ? "shell" : "cmd", path: envPath });
+		const loader = linux ? "systemd" : ctx.platform === "darwin" ? "shell" : "cmd";
+		const read = readStackKeys(text, { loader, path: envPath });
 		if (read.error) return linux ? { error: read.error } : { used: false };
 		fileKeys = read.keys;
+		// Issue #464: where the worker's queue is, and whether a Valkey another uid holds may be it (PI_VALKEY_SHARED), as
+		// the service reads them, for the Valkey rule (`decideValkey`). A line the loaders read differently is refused,
+		// naming what in it is the problem, rather than guessed at.
+		const valkey = readValkeyKeys(text, { loader, path: envPath });
+		if (valkey.error) return linux ? { error: valkey.error } : { used: false };
+		fileKeys = { ...fileKeys, ...valkey.keys };
 	}
 	// Refused here, unlike doctor's venuesOf, which reads an unparseable list as `local`: doctor then reports the parse,
 	// but an install that guessed would write a unit and a stack for a deployment the worker refuses to boot.
@@ -811,11 +829,29 @@ async function podmanStackFor(ctx, venue, { readKeeper = false } = {}) {
 		return { error: `${join(ctx.deployDir, ".env")}: ${err.message}` };
 	}
 	const installed = ctx.fs.existsSync(join(quadletDir(ctx.home), QUADLET_FILES.valkey.file));
-	const includeValkey = venue.venues.localUsed ? false : installed || !(await ctx.probeTcp("127.0.0.1", 6379));
-	const components = stackComponents({ venues: venue.venues, env: venue.env, includeValkey, armed });
-	if (!venue.venues.localUsed && !includeValkey) {
-		components.notes.push("something already listens on 127.0.0.1:6379 and no Quadlet Valkey is installed, so none is added: that listener is taken to be your Valkey, as `up` does");
-	}
+	// Issue #464: a listener on any address VALKEY_URL reaches is taken to be this deployment's Valkey only when it is
+	// this account's (its uid, or a subordinate uid its containers run as), or PI_VALKEY_SHARED=1 in .env says it is
+	// shared on purpose; anything else is refused, not forceably (`stackRefusal`).
+	const valkey = await decideValkey({
+		venues: venue.venues,
+		url: venue.env.VALKEY_URL,
+		installed,
+		probeTcp: ctx.probeTcp,
+		lookup: ctx.lookup,
+		interfaces: ctx.interfaces,
+		euid: ctx.euid,
+		user: ctx.user,
+		shared: valkeySharedOn(venue.env[VALKEY_SHARED_KEY]),
+		subuids: readSubuidRanges({ user: ctx.user, euid: ctx.euid, fs: ctx.fs, run: ctx.runSync }),
+		fs: ctx.fs,
+		ownerName: (uid) => passwdNameFrom(ctx.fs, uid),
+		envPath: join(ctx.deployDir, ".env"),
+	});
+	if (valkey.error) return { error: valkey.error };
+	const components = stackComponents({ venues: venue.venues, env: venue.env, includeValkey: valkey.include, armed, valkeyPort: valkey.port });
+	components.notes.push(...valkey.notes);
+	// Gate round 2: the service reads PI_VALKEY_SHARED from .env alone, so a shell export says nothing; named, not honoured.
+	if (typeof ctx.env[VALKEY_SHARED_KEY] === "string") components.notes.push(sharedShellIgnored(ctx.env[VALKEY_SHARED_KEY], join(ctx.deployDir, ".env")));
 	// The keeper, read as `up` reads it (PR #463 final review), install only (render spawns nothing): a Quadlet keeper
 	// whose file is already there and unchanged but that does not hold (stopped, paused, off its bridge) is RESTARTED,
 	// since `start` over it is a no-op for a paused one and would say nothing of the proxy either way; the plan then
@@ -827,7 +863,7 @@ async function podmanStackFor(ctx, venue, { readKeeper = false } = {}) {
 	}
 	const plan = planStack({ components, templatesDir: ctx.templatesDir, deployDir: ctx.deployDir, home: ctx.home, fs: ctx.fs, restartUnits });
 	if (plan.error) return { error: plan.error };
-	return { components, plan, notes: components.notes, venues: venue.venues, proxy: egressProxyName(venue.env) };
+	return { components, plan, notes: components.notes, venues: venue.venues, proxy: egressProxyName(venue.env), valkeyRefusal: valkey.refusal };
 }
 
 async function doRender(ctx) {
@@ -864,6 +900,7 @@ async function doRender(ctx) {
 			else ctx.out(`\n# → ${f.path} (Quadlet, podman venue)\n${f.text}`);
 		}
 		for (const note of stack?.notes ?? []) ctx.out(`# note: ${note}\n`);
+		if (stack?.valkeyRefusal) ctx.out(`# note: install refuses this: ${stack.valkeyRefusal.text}\n`);
 		return 0;
 	}
 	const { service, commands } = nssmSequence(ctx);
@@ -934,11 +971,18 @@ async function installDarwin(ctx, paths) {
 		// the old copy out first. "Not loaded" is a fine answer — the nonzero exit is ignored.
 		await run(ctx, "launchctl", ["bootout", `gui/${ctx.euid}/${paths.name}`]);
 	}
-	ctx.fs.mkdirSync(dirname(paths.installPath), { recursive: true });
-	// launchd creates the StandardOutPath FILES but not their parent directory: without this the job
-	// spawns and dies with its error unwritable. Done at install, not render — render stays read-only.
-	ctx.fs.mkdirSync(join(ctx.deployDir, "logs"), { recursive: true });
-	ctx.fs.writeFileSync(paths.installPath, renderPlist(ctx));
+	// Issue #464: a write that fails is said, with what this run left, rather than thrown out of the command. The plist
+	// is the one file this path writes, so a failure leaves none of ours (a failed write is put back like the Linux path's).
+	const journal = [];
+	try {
+		ctx.fs.mkdirSync(dirname(paths.installPath), { recursive: true });
+		// launchd creates the StandardOutPath FILES but not their parent directory: without this the job
+		// spawns and dies with its error unwritable. Done at install, not render: render stays read-only.
+		ctx.fs.mkdirSync(join(ctx.deployDir, "logs"), { recursive: true });
+		journalWrite(ctx.fs, journal, paths.installPath, renderPlist(ctx));
+	} catch (err) {
+		return fail(ctx.err, `could not write ${paths.installPath} (${err?.message ?? err}), so nothing was installed: ${describeRollBack(rollBackWrites(ctx.fs, journal))}`);
+	}
 	const bootstrap = await run(ctx, "launchctl", ["bootstrap", `gui/${ctx.euid}`, paths.installPath]);
 	if (bootstrap !== 0) {
 		return fail(ctx.err, `launchctl bootstrap failed (exit ${bootstrap}) — the plist is written; retry by hand: launchctl bootstrap gui/${ctx.euid} ${paths.installPath}`);
@@ -966,6 +1010,9 @@ async function stackRefusal(ctx, paths, stack) {
 	if (ctx.fs.existsSync(paths.installPath)) forceable.push(`${paths.installPath} already exists (same non-clobber contract as init); --force replaces it`);
 	const changed = stack.plan.files.filter((f) => f.state === "changed");
 	if (changed.length > 0) forceable.push(`${changed.map((f) => f.path).join(", ")} already ${changed.length === 1 ? "exists" : "exist"} with other content than this version renders; --force replaces ${changed.length === 1 ? "it" : "them"} and restarts ${(stack.plan.restart ?? []).join(" ") || "nothing"}${proxyRestartWarning(stack.plan) ? ` (${proxyRestartWarning(stack.plan)})` : ""}`);
+	// Issue #464: a Valkey VALKEY_URL reaches that is not this account's. NOT forceable: --force is how an operator replaces
+	// a changed file, and taking another account's queue must never ride along with that. The opt-in is its own named key.
+	if (stack.valkeyRefusal) blocking.push(stack.valkeyRefusal.text);
 	const allowlist = join(ctx.deployDir, "egress-allowlist.conf");
 	if (stack.components.proxy && !ctx.fs.existsSync(allowlist)) {
 		blocking.push(`the egress policy is on, and ${allowlist} does not exist: a proxy unit mounting a missing file makes Podman create a DIRECTORY there and squid fail confusingly. Run \`pi-dispatch init\` in ${ctx.deployDir} first (it never overwrites), or set PI_EGRESS=0 in .env to opt out of the policy`);
@@ -998,6 +1045,22 @@ async function installLinuxUser(ctx, paths, stack = null, foreign = []) {
 	if (ctx.fs.existsSync(paths.installPath) && !ctx.force) {
 		return fail(ctx.err, `${paths.installPath} already exists — pass --force to replace it (same non-clobber contract as init)`);
 	}
+	// Issue #464: every file this run writes, recorded before it is written, so a failure puts them back rather than
+	// leaving half an install (seen with a root-owned ~/.config: the stack's files written, the worker unit refused). All
+	// files are written before any command runs (the worker unit inside applyStack's `beforeRuns`), which is what makes a
+	// write failure all-or-nothing. A COMMAND that fails leaves the stack's files, which units already started from, and
+	// says exactly which files this run wrote.
+	const journal = [];
+	const writeUnit = () => {
+		try {
+			ctx.fs.mkdirSync(dirname(paths.installPath), { recursive: true });
+			journalWrite(ctx.fs, journal, paths.installPath, renderLinuxUnit(ctx, stack?.plan.start ?? [], stack?.venues ?? null));
+			return { ok: true };
+		} catch (err) {
+			return { ok: false, failed: `write ${paths.installPath}`, code: null, message: err?.message };
+		}
+	};
+	const writtenList = () => [...new Set(journal.map((e) => e.path))].join(", ") || "none";
 	if (stack) {
 		for (const note of stack.notes) ctx.out(`note: ${note}\n`);
 		for (const f of foreign) {
@@ -1009,22 +1072,34 @@ async function installLinuxUser(ctx, paths, stack = null, foreign = []) {
 			// Shown, then done: the same lines `up` asks consent for, carried out by the same function.
 			ctx.out(`podman venue (PI_BACKENDS in .env): its stack, as Quadlet units in ${stack.plan.dir}:\n`);
 			for (const action of stack.plan.actions) ctx.out(`  ${describeAction(action)}\n`);
-			const applied = await applyStack(stack.plan, { fs: ctx.fs, run: (cmd, args) => run(ctx, cmd, args) });
+			const applied = await applyStack(stack.plan, { fs: ctx.fs, run: (cmd, args) => run(ctx, cmd, args), journal, beforeRuns: writeUnit });
 			if (!applied.ok) {
+				const what = `${applied.failed} failed (${applied.code === null ? applied.message ?? "command not found" : `exit ${applied.code}`})`;
+				if (!applied.ran) {
+					return fail(ctx.err, `${what}, so nothing was installed: ${describeRollBack(rollBackWrites(ctx.fs, journal))}. Fix it, then re-run this install`);
+				}
+				// A command failed: the stack's units may be running from their files, so only the worker unit is put back,
+				// and the manager is reloaded so it forgets it (best effort; the unit was never enabled or started).
+				const unitOnly = journal.filter((e) => e.path === paths.installPath);
+				const rolled = rollBackWrites(ctx.fs, unitOnly);
+				if (rolled.left.length === 0) await run(ctx, "systemctl", ["--user", "daemon-reload"]);
+				const remain = [...new Set(journal.filter((e) => e.path !== paths.installPath).map((e) => e.path))];
 				return fail(
 					ctx.err,
-					`${applied.failed} failed (${applied.code === null ? applied.message ?? "command not found" : `exit ${applied.code}`}), so the worker unit was NOT installed: it would only start against a missing queue or proxy. \`systemctl --user status ${stack.plan.start.join(" ")}\` and \`journalctl --user -u <unit>\` have the details; fix it, then re-run this install`,
+					`${what}, so the worker unit was NOT installed: it would only start against a missing queue or proxy (${describeRollBack(rolled, { partial: true })}). The stack files this run wrote remain, since its units run from them: ${remain.join(", ") || "none"}. \`pi-dispatch service uninstall\` removes them if you will not retry. \`systemctl --user status ${stack.plan.start.join(" ")}\` and \`journalctl --user -u <unit>\` have the details; fix it, then re-run this install`,
 				);
 			}
 		}
 	}
-	ctx.fs.mkdirSync(dirname(paths.installPath), { recursive: true });
-	ctx.fs.writeFileSync(paths.installPath, renderLinuxUnit(ctx, stack?.plan.start ?? [], stack?.venues ?? null));
+	if (!journal.some((e) => e.path === paths.installPath)) {
+		const wrote = writeUnit();
+		if (!wrote.ok) return fail(ctx.err, `${wrote.failed} failed (${wrote.message}), so nothing was installed: ${describeRollBack(rollBackWrites(ctx.fs, journal))}. Fix it, then re-run this install`);
+	}
 	const reload = await run(ctx, "systemctl", ["--user", "daemon-reload"]);
-	if (reload === null) return fail(ctx.err, `systemctl not found — is this a systemd host? The unit is written at ${paths.installPath}`);
+	if (reload === null) return fail(ctx.err, `systemctl not found: is this a systemd host? The unit is written at ${paths.installPath} (files this run wrote, which remain: ${writtenList()})`);
 	const enable = await run(ctx, "systemctl", ["--user", "enable", "--now", paths.name]);
 	if (enable !== 0) {
-		return fail(ctx.err, `systemctl --user enable --now ${paths.name} failed (exit ${enable}) — the unit is written at ${paths.installPath}; \`systemctl --user status ${paths.name}\` has the details`);
+		return fail(ctx.err, `systemctl --user enable --now ${paths.name} failed (exit ${enable}); the unit is written at ${paths.installPath}; \`systemctl --user status ${paths.name}\` has the details (files this run wrote, which remain: ${writtenList()})`);
 	}
 	ctx.out(`installed ${paths.name} → ${paths.installPath} (enabled and started in your user manager)\n`);
 	if (stack) {
@@ -1177,7 +1252,13 @@ async function removeQuadlets(ctx, quadlets) {
 		// unit that would not die), and removing the files under a running container would leave it running unmanaged
 		// while this command claimed it was gone (round 3, D3).
 		const stopped = await run(ctx, "systemctl", ["--user", "stop", ...units]);
-		if (stopped !== 0) {
+		// Issue #464: a unit the manager never loaded (an install or `up` whose daemon-reload failed after writing the
+		// files) makes `stop` exit 5 ("not loaded"), and uninstall then could not remove the very files that failed run
+		// left. So a failed stop is asked about unit by unit: one that is not loaded, or loaded and not running, is
+		// stopped as far as it can be; only a unit still active refuses the removal, as before.
+		if (stopped !== 0 && stopped !== null && (await unitsStillRunning(ctx, units)).length === 0) {
+			ctx.out(`note: systemctl --user stop exited ${stopped}, and none of ${units.join(", ")} is running (not loaded, or already stopped), so their files are removed\n`);
+		} else if (stopped !== 0) {
 			return fail(ctx.err, `systemctl --user stop ${units.join(" ")} failed (${stopped === null ? "systemctl not found" : `exit ${stopped}`}), so nothing was removed: the containers may still be running. \`systemctl --user status ${units.join(" ")}\` has the details`);
 		}
 	}
@@ -1198,6 +1279,28 @@ async function removeQuadlets(ctx, quadlets) {
 	const hadValkey = quadlets.some((q) => q.file === QUADLET_FILES.valkey.file);
 	ctx.out(`removed the podman venue's Quadlet units (${quadlets.map((q) => q.file).join(", ")}); ${hadValkey ? "the pi-dispatch-valkey-data volume and the networks are" : "the networks are"} kept, remove them with podman if you mean to\n`);
 	return 0;
+}
+
+/**
+ * The units of `units` the user manager still has running, asked one by one (`systemctl --user show`), for an
+ * uninstall whose `stop` failed (issue #464). A unit is taken as not running only on the manager's own answer: not
+ * loaded (`LoadState=not-found`), or loaded and `inactive` or `failed`. A unit it could not be asked about counts as
+ * running, so the removal is refused rather than guessed.
+ */
+async function unitsStillRunning(ctx, units) {
+	const running = [];
+	for (const unit of units) {
+		const shown = await runQuery(ctx, "systemctl", ["--user", "show", "--property=LoadState,ActiveState", unit]);
+		const props = Object.fromEntries(
+			String(shown.stdout ?? "")
+				.split("\n")
+				.map((l) => l.trim().split("="))
+				.filter((kv) => kv.length === 2),
+		);
+		const idle = shown.code === 0 && (props.LoadState === "not-found" || (props.LoadState === "loaded" && ["inactive", "failed"].includes(props.ActiveState)));
+		if (!idle) running.push(unit);
+	}
+	return running;
 }
 
 /** Informational only — reports every scope it knows about and always exits 0. */

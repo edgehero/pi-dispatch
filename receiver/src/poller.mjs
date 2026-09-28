@@ -108,7 +108,7 @@
 import { createSign } from "node:crypto";
 import { readFile as fsReadFile } from "node:fs/promises";
 import { configError } from "@edgehero/pi-dispatch/config";
-import { parseConnection } from "@edgehero/pi-dispatch/connection";
+import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connection";
 import { makeGitHubAuth } from "@edgehero/pi-dispatch/get-token";
 import { enqueueGitHubJob, makeQueue } from "@edgehero/pi-dispatch/queue";
 import { filter, hasCloseTriggers, wantsCloserAuthority } from "./filter.mjs";
@@ -231,8 +231,8 @@ export async function startPoller(env = process.env, deps = {}) {
 	let redisClient = redis ?? null;
 	let ownRedis = false;
 	if (redisClient === null) {
-		const { default: Redis } = await import("ioredis");
-		redisClient = new Redis(cfg.valkeyUrl);
+		// Through connection.mjs, as every Valkey client of this project (issue #464): it judges and pins the address.
+		redisClient = makeRedisClient(cfg.valkeyUrl);
 		ownRedis = true;
 	}
 

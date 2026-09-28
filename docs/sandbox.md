@@ -54,7 +54,7 @@ On by default, with a 24-hour window:
 
 ```bash
 PI_SANDBOX_RETENTION_HOURS=24   # 0 = OFF. Note: not "keep forever" — see below
-PI_SANDBOX_DIR=                 # default <PI_JOBS_DIR>/sandboxes, created mode 0700
+PI_SANDBOX_DIR=                 # default <PI_JOBS_DIR>/sandboxes, created mode 0700 (PI_JOBS_DIR: <tmp>/pi-dispatch-<uid>/jobs)
 PI_SANDBOX_PIN_DAYS=7           # what --pin extends a run to
 PI_SANDBOX_IDLE_MINUTES=30      # TMOUT inside the sandbox; 0 = no idle logout
 PI_SWEEP_INTERVAL_HOURS=24      # how often the sweep re-runs while the worker is up; 0 = boot-only
@@ -83,6 +83,22 @@ the longer one. Pin a run to keep it longer.
 the same data class as `logs/<jobId>.log`, which is opt-in and off by default. The directory is mode
 `0700`, host-only, and never mounted into a job container — but it is on your disk for 24 hours by
 default, so put `PI_JOBS_DIR` somewhere you would put issue text.
+
+**One directory per account** (issue #464). `PI_JOBS_DIR` defaults to `<OS temp dir>/pi-dispatch-<uid>/jobs`, and
+the retained runs sit under it. Before that the default was `<OS temp dir>/pi-dispatch/jobs` for every account on the
+host: the first account to run a job created it, and every other account's jobs then failed with `EACCES`. The worker
+creates `pi-dispatch-<uid>` mode `0700` and refuses to start (exit 2) when that name is a symlink or belongs to another
+account, since any account can create a name under the temp dir first; doctor fails on the same with the fix. A
+`TMPDIR` in `.env` moves that root for the service, and doctor judges the root the service will use. Runs
+retained under the OLD path before you upgraded are no longer re-opened or swept: doctor names this account's with a
+⚠ and the move (`mkdir -m 700 -p` of the new root and its `sandboxes/`, then `mv` them in, same filesystem), or
+delete them. A plain `mkdir -p` would leave the new root `755`; the worker tightens it to `0700` at its next boot
+either way.
+
+A `PI_SANDBOX_DIR` you set yourself must be this account's too. Its owner can rename a retained run and put one of
+its own, manifest and all, in its place, which `pi-dispatch sandbox` would then list and open. The worker refuses to
+start (exit 2) when that directory belongs to another account, asks again each time it keeps a run (a directory made
+by someone else after boot deletes the run instead of keeping it there), and doctor fails on it, naming the owner.
 
 **The transcript is not kept.** If a job persisted a session (`docs/sessions.md`), its per-job copy is
 deleted *before* the directory is retained. Transcripts live under `PI_SESSIONS_DIR` and expire on

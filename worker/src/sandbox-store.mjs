@@ -1,4 +1,4 @@
-import { chmodSync, chownSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { sanitizeJobId } from "./run-history.mjs";
 import { scrubCredentials } from "./redact.mjs";
@@ -120,7 +120,7 @@ export function sandboxEntryName(jobId) {
 	return name.startsWith(".") || name.startsWith("_") ? `_${name}` : name;
 }
 
-const defaultFs = { chmodSync, chownSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, writeFileSync };
+const defaultFs = { chmodSync, chownSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync };
 
 /**
  * Retain one finished job's directory, or delete it.
@@ -134,7 +134,7 @@ const defaultFs = { chmodSync, chownSync, lstatSync, mkdirSync, readFileSync, re
  * means no retention, which keeps such a caller on exactly
  * the pre-feature path.
  */
-export function retainJobDir(prepared, { sandboxDir, retentionHours = null, fs = defaultFs, log = () => {}, now = () => Date.now() } = {}) {
+export function retainJobDir(prepared, { sandboxDir, retentionHours = null, fs = defaultFs, log = () => {}, now = () => Date.now(), euid = process.geteuid?.() } = {}) {
 	const jobDir = prepared?.jobDir;
 	const meta = prepared?.sandbox;
 	if (!jobDir) return null;
@@ -154,6 +154,14 @@ export function retainJobDir(prepared, { sandboxDir, retentionHours = null, fs =
 		fs.rmSync(join(jobDir, "session"), { recursive: true, force: true });
 
 		fs.mkdirSync(sandboxDir, { recursive: true, mode: 0o700 });
+		// Issue #464 (gate round 1): this account's, asked again here and not only at boot. A sandbox dir absent at boot is
+		// a name another account can create first (a recursive mkdir takes an existing directory silently), and a workspace
+		// renamed into a directory that account owns is one it can swap for its own. Refused like any failed retention:
+		// the run is deleted, not kept where someone else controls it. A fake fs with no statSync asks nothing.
+		if (Number.isInteger(euid) && typeof fs.statSync === "function") {
+			const owner = fs.statSync(sandboxDir).uid;
+			if (owner !== euid) throw new Error(`${sandboxDir} is owned by uid ${owner}, not by this account (uid ${euid})`);
+		}
 		// A BullMQ retry reuses the job id, so the previous attempt may already be sitting at `dest`. Last
 		// attempt wins: it is the one whose workspace matches the run the operator just watched.
 		fs.rmSync(dest, { recursive: true, force: true });
