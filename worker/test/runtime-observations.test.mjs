@@ -323,6 +323,7 @@ import {
 	makePodmanServiceReader,
 	makeRootfulMemory,
 	moduleArgsIn,
+	onceFs,
 	observeRootfulConf,
 	parsePodmanServiceShow,
 	parseShowEnvironment,
@@ -728,6 +729,26 @@ test("a --module that names no file is unjudgeable and refused; a directory name
 	assert.equal(rootfulConfWidening({ fs: withDir, unit: UNIT(), now: NOW }).refusal, null);
 	assert.ok(!rootfulConfChain({ fs: withDir, unit: UNIT() }).files.includes("/etc/containers/containers.conf.d/x.conf"));
 	assert.deepEqual(confFilesIn(withDir, { dirs: ["/etc/containers/containers.conf.d"] }).files, ["/etc/containers/containers.conf.d/a.conf"]);
+});
+
+test("onceFs answers each call once per argument list, a thrown error included, and never across two instances (#448)", () => {
+	let calls = 0;
+	const inner = {
+		statSync: (p) => (calls++, p === "/gone" ? (() => { throw Object.assign(new Error(p), { code: "ENOENT" }); })() : { ctimeMs: calls }),
+		readFileSync: (p, e) => (calls++, `${p}:${e ?? "raw"}:${calls}`),
+		readdirSync: () => (calls++, ["a.conf"]),
+	};
+	const fs = onceFs(inner);
+	assert.equal(fs.statSync("/x").ctimeMs, fs.statSync("/x").ctimeMs);
+	assert.throws(() => fs.statSync("/gone"), { code: "ENOENT" });
+	assert.throws(() => fs.statSync("/gone"), { code: "ENOENT" });
+	assert.equal(fs.readFileSync("/f", "utf8"), fs.readFileSync("/f", "utf8"));
+	assert.notEqual(fs.readFileSync("/f"), fs.readFileSync("/f", "utf8"), "another argument list is another call");
+	fs.readdirSync("/d");
+	fs.readdirSync("/d");
+	assert.equal(calls, 5);
+	onceFs(inner).statSync("/x");
+	assert.equal(calls, 6, "a new instance (the next job) reads afresh");
 });
 
 test("rootfulConfChain reads the service's chain and watches no chain file's parent directory (#448)", () => {

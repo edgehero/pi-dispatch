@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { buildRecord } from "../src/run-history.mjs";
 import { PODMAN_RESTART_HOLD_EXPIRED, PODMAN_RESTART_HOLD_MAX_MS, PODMAN_RESTART_HOLD_RECHECK_MS } from "../src/runtime-observations.mjs";
 
 // Issue #448, gate round 2 of PR #473: a local job held until rootful Podman's service restarts is moved back to the
@@ -67,18 +68,32 @@ test("a job held for podman.service's restart is delayed a minute without an att
 	await assert.rejects(() => processor(job, "the-token", new AbortController().signal), (err) => err.name === "DelayedError");
 	assert.deepEqual(moves, [{ ts: NOW + PODMAN_RESTART_HOLD_RECHECK_MS, tok: "the-token" }], "one minute on, with the worker's token");
 	assert.equal(PODMAN_RESTART_HOLD_RECHECK_MS, 60_000);
-	assert.deepEqual(updates.map((d) => d.podmanRestartHoldSinceMs), [NOW], "the hold's start is stored on the job");
+	assert.deepEqual(updates.map((d) => [d.podmanRestartHoldSinceMs, d.podmanRestartHoldLastMs]), [[NOW, NOW]], "the hold's start and its last check are stored on the job");
 	assert.deepEqual([seen.containerCalls, seen.incr, seen.records.length], [0, 0, 0], "nothing started, reserved or recorded per deferral");
 	assert.deepEqual(seen.logs.filter((l) => l.event === "podman_restart_hold").map((l) => [l.heldForMs, l.delayMs]), [[0, 60_000]]);
-	// The next pickup, 59 minutes into the hold: delayed again, the stored start kept, not rewritten.
-	const later = harness({ now: () => NOW + PODMAN_RESTART_HOLD_MAX_MS - 60_000 });
+	// The next pickup, on time: delayed again, the stored start kept.
+	const later = harness({ now: () => NOW + 60_000 });
 	await assert.rejects(() => later.processor(job, "tok2", new AbortController().signal), (err) => err.name === "DelayedError");
 	assert.equal(moves.length, 2);
-	assert.equal(updates.length, 1, "the stored start is not rewritten");
+	assert.deepEqual(updates.at(-1).podmanRestartHoldSinceMs, NOW, "the stored start is kept while the checks come on time");
+	assert.deepEqual(later.seen.logs.filter((l) => l.event === "podman_restart_hold").map((l) => l.heldForMs), [60_000]);
+});
+
+test("a hold that comes back after a gap (a paused queue, no worker running) starts its hour afresh (#448)", { skip }, async () => {
+	// Gate round 3 of PR #473 (raw 51): the hour kept counting through `pi-dispatch pause`.
+	const { job, updates } = spyJob({ kind: "local", folder: "/srv/site", flow: "tidy", task: "t", podmanRestartHoldSinceMs: NOW - 50 * 60_000, podmanRestartHoldLastMs: NOW - 2 * PODMAN_RESTART_HOLD_RECHECK_MS - 1 });
+	const { processor, seen } = harness();
+	await assert.rejects(() => processor(job, "tok", new AbortController().signal), (err) => err.name === "DelayedError");
+	assert.deepEqual([updates[0].podmanRestartHoldSinceMs, updates[0].podmanRestartHoldLastMs], [NOW, NOW], "the start is reset");
+	assert.equal(seen.logs.find((l) => l.event === "podman_restart_hold").heldForMs, 0);
+	// Exactly two recheck periods late is still on time: the start is kept.
+	const onTime = spyJob({ kind: "local", folder: "/srv/site", flow: "tidy", task: "t", podmanRestartHoldSinceMs: NOW - 50 * 60_000, podmanRestartHoldLastMs: NOW - 2 * PODMAN_RESTART_HOLD_RECHECK_MS });
+	await assert.rejects(() => harness().processor(onTime.job, "tok", new AbortController().signal), (err) => err.name === "DelayedError");
+	assert.equal(onTime.updates[0].podmanRestartHoldSinceMs, NOW - 50 * 60_000);
 });
 
 test("a hold past an hour fails the job for good with its own reason token, recorded once (#448)", { skip }, async () => {
-	const { job, moves } = spyJob({ kind: "local", folder: "/srv/site", flow: "tidy", task: "t", podmanRestartHoldSinceMs: NOW });
+	const { job, moves } = spyJob({ kind: "local", folder: "/srv/site", flow: "tidy", task: "t", podmanRestartHoldSinceMs: NOW, podmanRestartHoldLastMs: NOW + PODMAN_RESTART_HOLD_MAX_MS - 60_000 });
 	assert.equal(PODMAN_RESTART_HOLD_MAX_MS, 3_600_000);
 	const { processor, seen } = harness({ now: () => NOW + PODMAN_RESTART_HOLD_MAX_MS });
 	await assert.rejects(
@@ -86,6 +101,10 @@ test("a hold past an hour fails the job for good with its own reason token, reco
 		(err) => err.name === "UnrecoverableError" && err.reason === PODMAN_RESTART_HOLD_EXPIRED && /^held 60 min for rootful Podman's service to restart, and it did not: rootful Podman's service may still hold/.test(err.message),
 	);
 	assert.deepEqual([moves.length, seen.containerCalls, seen.records.length], [0, 0, 1]);
+	// Gate round 3 of PR #473 (raw 50): recorded with the token its comment and hook carry, not container-never-started.
+	assert.deepEqual([seen.records[0].error.reason, seen.records[0].error.budgetReserved], [PODMAN_RESTART_HOLD_EXPIRED, false]);
+	const record = buildRecord(seen.records[0]);
+	assert.deepEqual([record.outcome, record.reason], ["failed", "podman-service-restart-hold-expired"], "the run record's reason");
 });
 
 test("a job the service no longer holds runs, and a moment's failed read is still the queue's ordinary retry (#448)", { skip }, async () => {

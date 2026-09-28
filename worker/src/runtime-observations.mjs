@@ -887,6 +887,32 @@ export function makeRootfulMemory() {
 	return { startedAtMs: null, files: new Set(), deleted: null };
 }
 
+/**
+ * `fs` answering each `statSync`, `readFileSync` and `readdirSync` call ONCE per distinct arguments, a thrown error
+ * included, for one job's (or one boot's) two checks, the widening check and the mounts observation, which read the same
+ * chain (gate round 3 of PR #473: with 1000 drop-ins the two cost 44 ms a job, 8025 stats and 2011 reads, each path
+ * stat-ed several times over). One per job, never kept past it: a file must be read afresh by the next job.
+ */
+export function onceFs(fs) {
+	const memo = (fn) => {
+		const seen = new Map();
+		return (...args) => {
+			const key = JSON.stringify(args);
+			if (!seen.has(key)) {
+				try {
+					seen.set(key, { value: fn(...args) });
+				} catch (error) {
+					seen.set(key, { error });
+				}
+			}
+			const got = seen.get(key);
+			if ("error" in got) throw got.error;
+			return got.value;
+		};
+	};
+	return { statSync: memo((...a) => fs.statSync(...a)), readFileSync: memo((...a) => fs.readFileSync(...a)), readdirSync: memo((...a) => fs.readdirSync(...a)) };
+}
+
 /** Whether `path` exists (a stat that fails other than ENOENT counts as existing: it is there, only not stat-able). */
 function existsAt(fs, path) {
 	try {

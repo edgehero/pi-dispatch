@@ -3472,6 +3472,24 @@ test("podman.service is read once per boot and once per job, and that one answer
 	assert.equal(parseLines(bootLines.slice(before)).find((l) => l.event === "runtime_observed"), undefined, "and per job, the same answer, so nothing changed to say");
 });
 
+test("per job, the two rootful checks read each host path once, and the next job reads it afresh (#448)", { skip: skipNoModule }, async () => {
+	// Gate round 3 of PR #473: with 1000 drop-ins each path was stat-ed about eight times a job (onceFs, one per job).
+	const counts = new Map();
+	const base = rootfulHost({ "/etc/containers/mounts.conf": "", "/etc/containers/containers.conf": "[containers]\n" });
+	const counted = (name) => (...args) => (counts.set(`${name} ${args[0]}`, (counts.get(`${name} ${args[0]}`) ?? 0) + 1), base[name](...args));
+	const host = { statSync: counted("statSync"), readFileSync: counted("readFileSync"), readdirSync: counted("readdirSync") };
+	const { captured } = await runStart({ readDaemonFacts: ROOTFUL_FACTS, jobUserIdentity: LINUX_ID(1234), observationFs: host, readPodmanService: RUNNING_PODMAN_SERVICE(5_000), ...ROOTFUL_AUTH });
+	counts.clear();
+	await captured.deps.observationPreflight({ id: "j1", kind: "local" });
+	const twice = [...counts].filter(([, n]) => n > 1);
+	assert.deepEqual(twice, [], "no path is read twice in one job");
+	assert.equal(counts.get("statSync /etc/containers/containers.conf"), 1);
+	assert.equal(counts.get("readFileSync /etc/containers/containers.conf"), 1, "and it IS read");
+	counts.clear();
+	await captured.deps.observationPreflight({ id: "j2", kind: "local" });
+	assert.equal(counts.get("readFileSync /etc/containers/containers.conf"), 1, "the next job reads it afresh");
+});
+
 test("per job: a service older than its conf, and a chain file deleted under the running service, are retries; a 0600 drop-in refuses (#448)", { skip: skipNoModule }, async () => {
 	const files = { "/etc/containers/containers.conf": "[containers]\n" };
 	const host = {

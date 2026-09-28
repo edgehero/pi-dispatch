@@ -46,7 +46,7 @@ import { runtimeFromFacts } from "./netns-keeper.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
 import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_INFO_TIMEOUT_MS, cachedPodmanInfo, decidePodmanJobUser, makePodmanBackend, makePodmanInfoReader, makePodmanReaper, observePodman, podmanConfRefusal, unavailableFor, podmanConfWidening, podmanJobUserRefusal, resolvePodmanImageUser } from "./backend-podman.mjs";
-import { PODMAN_RESTART_HOLD_EXPIRED, makePodmanServiceReader, makeRootfulMemory, observeHost, observeRootfulConf, readRootfulService, rootfulConfRefusal, rootfulConfRetries, rootfulUnreadList, runtimeObservationKey } from "./runtime-observations.mjs";
+import { PODMAN_RESTART_HOLD_EXPIRED, makePodmanServiceReader, onceFs, makeRootfulMemory, observeHost, observeRootfulConf, readRootfulService, rootfulConfRefusal, rootfulConfRetries, rootfulUnreadList, runtimeObservationKey } from "./runtime-observations.mjs";
 
 import { makeRunContainer } from "./run-container.mjs";
 import { resolveProviderCredential } from "./env-allowlist.mjs";
@@ -1243,7 +1243,9 @@ export async function startWorker(
 		}
 		const jobUser = await resolveJobUser({ endpoint, key: state });
 		const unit = await readRootfulService({ endpoint, daemon: jobUser.daemon, readService: readPodmanServiceFn });
-		const observed = observeHost({ endpoint, daemon: jobUser.daemon, fs: observationFs, unit, env, memory: rootfulMemory });
+		// One read of each host path for this job's two checks (`onceFs`, gate round 3 of PR #473), fresh per job.
+		const jobFs = onceFs(observationFs);
+		const observed = observeHost({ endpoint, daemon: jobUser.daemon, fs: jobFs, unit, env, memory: rootfulMemory });
 		if (runtimeObservationKey(observed) !== runtimeObservedSaid) {
 			runtimeObservedSaid = runtimeObservationKey(observed);
 			log("runtime_observed", { daemonAppliesBounds: observed.observations.daemonAppliesBounds, runtimeAddsNoMounts: observed.observations.runtimeAddsNoMounts, changed: true });
@@ -1252,7 +1254,7 @@ export async function startWorker(
 		// key must need no worker restart (only the Podman service's). Handed back as the podman venue's refusal is
 		// (`podmanConfRefused`, `rootful: true`), ahead of the floor: it is what the venue IS on this host, and the processor
 		// returns it before the image preflight. Nothing is read where the daemon is not rootful Podman on this host.
-		const rootful = await observeRootfulConf({ endpoint, daemon: jobUser.daemon, fs: observationFs, readService: readPodmanServiceFn, env, unit, memory: rootfulMemory });
+		const rootful = await observeRootfulConf({ endpoint, daemon: jobUser.daemon, fs: jobFs, readService: readPodmanServiceFn, env, unit, memory: rootfulMemory });
 		sayRootfulUnread(rootful);
 		if (rootful?.refusal) return { ok: true, endpoint, jobUser, podmanConfRefused: rootfulRefused(rootful.refusal) };
 		const args = {

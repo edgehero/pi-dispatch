@@ -324,8 +324,10 @@ one of its drop-ins. Restart the service after such a change, or let it idle out
 
 While any of that holds, the worker does not run local jobs, and gives `mountSet` no credit, until the service
 restarts: **a hold, not a refusal**. A job goes back to the queue and is checked again every minute without spending
-an attempt; if the service is still running with an older configuration after an hour of holding, the job fails, and
-its comment names the restart. A boot exits 1 to be restarted. The service exits on its own within twelve seconds of
+an attempt; if the service is still running with an older configuration after an hour of holding, the job fails, its
+run record and comment naming the restart (`podman-service-restart-hold-expired`). The hour counts only while the
+worker keeps checking: a job that comes back after a queue pause (`pi-dispatch pause`) or while no worker ran starts
+its hour afresh. A boot exits 1 to be restarted. The service exits on its own within twelve seconds of
 its last request (measured) and the socket starts it fresh, but a running local job holds it up, so a steady stream of
 jobs can keep it up past its change; restart it while no local job runs:
 

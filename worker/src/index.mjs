@@ -792,17 +792,26 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// deferral leaves `attemptsMade` alone and a worker restart must not reset it; past the bound it fails for good
 			// with its own reason token, whose comment names the restart. Nothing is recorded per deferral: the job never
 			// started, and one record a minute for an hour would bury the run history.
+			//
+			// Gate round 3: the hour counts only while the worker kept checking. A check that comes more than two recheck
+			// periods after the last one (the queue was paused, `pi-dispatch pause`, or no worker ran) starts the hold
+			// afresh, since the time between was no evidence that the service stayed up; the last check's time is stored
+			// beside the start. And the expired hold is RECORDED with its own token, the one its comment and the failure
+			// hook carry, never the `container-never-started` of the throw it ends.
 			if (error?.holdUntilRestart === true) {
 				const heldAt = now();
-				const since = Number.isFinite(job.data?.podmanRestartHoldSinceMs) ? job.data.podmanRestartHoldSinceMs : heldAt;
+				const last = job.data?.podmanRestartHoldLastMs;
+				const resumed = !Number.isFinite(last) || heldAt - last > 2 * PODMAN_RESTART_HOLD_RECHECK_MS;
+				const since = !resumed && Number.isFinite(job.data?.podmanRestartHoldSinceMs) ? job.data.podmanRestartHoldSinceMs : heldAt;
 				if (heldAt - since < PODMAN_RESTART_HOLD_MAX_MS) {
-					if (job.data?.podmanRestartHoldSinceMs !== since) await job.updateData({ ...job.data, podmanRestartHoldSinceMs: since });
+					await job.updateData({ ...job.data, podmanRestartHoldSinceMs: since, podmanRestartHoldLastMs: heldAt });
 					deps?.log?.("podman_restart_hold", { jobId: job.id, heldForMs: heldAt - since, delayMs: PODMAN_RESTART_HOLD_RECHECK_MS, reason: String(error.message).slice(0, 300) });
 					await job.moveToDelayed(heldAt + PODMAN_RESTART_HOLD_RECHECK_MS, token);
 					throw new DelayedError();
 				}
-				recordRun({ job, error, startedAt, endedAt: new Date().toISOString() });
-				throw Object.assign(new UnrecoverableError(`held ${Math.round((heldAt - since) / 60_000)} min for rootful Podman's service to restart, and it did not: ${error.message}`), { reason: PODMAN_RESTART_HOLD_EXPIRED });
+				const expired = Object.assign(new UnrecoverableError(`held ${Math.round((heldAt - since) / 60_000)} min for rootful Podman's service to restart, and it did not: ${error.message}`), { reason: PODMAN_RESTART_HOLD_EXPIRED, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
+				recordRun({ job, error: expired, startedAt, endedAt: new Date().toISOString() });
+				throw expired;
 			}
 			recordRun({ job, error, startedAt, endedAt: new Date().toISOString() });
 			if (error instanceof InfraRetry) throw error; // retryable: BullMQ retries per attempts
