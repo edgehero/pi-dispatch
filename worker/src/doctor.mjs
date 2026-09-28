@@ -57,7 +57,7 @@ import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, logsDirPath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
-import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue } from "./env-file.mjs";
+import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envFileWrapperInternal, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
 import { loadPauseWindows } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
@@ -532,7 +532,10 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 			// shape doctor could not vouch for and exited 0 on a deployment that cannot start.
 			if (own !== undefined && own.blank) blankInFile[key] = true;
 		}
-		return { ...plain, notPlain, insideValue, exported, alsoExported, blankInFile, serviceLoader, hazard };
+		// A line assigning one of the service wrapper's own variables (issue #470 follow-up): no effect, since the wrapper
+		// assigns them again after the load, and said as such. The line's NAME, never its value.
+		const wrapperInternal = envFileWrapperInternal(text, { loader: serviceLoader });
+		return { ...plain, notPlain, insideValue, exported, alsoExported, blankInFile, serviceLoader, hazard, wrapperInternal };
 	} catch {
 		// COULD NOT READ is not "this key is unset". Returning the same `{}` for both told an operator whose
 		// `.env` is a directory, or is not readable by this account, that the worker ignores a key -- a positive
@@ -2220,6 +2223,10 @@ export async function collectChecks(env, seams) {
 	// `WEBHOOK_SECRET`, which the receiver refuses to start without, and nothing here says so -- widening
 	// the read is how a narrow reader grows into "load the .env", which `envFileKeys`' own docblock and
 	// `docs/secrets.md` both refuse.
+	// Beside the readings, not in place of them: the line changes no other key (issue #470 follow-up).
+	if (envFile.wrapperInternal != null) {
+		checks.push({ ok: false, warn: true, label: `${join(cwd, ".env")}: ${wrapperInternalSentence(envFile.wrapperInternal).replace(/\. To fix it, .*$/, "")}`, fix: `${wrapperInternalSentence(envFile.wrapperInternal).replace(/^.*\. To fix it, /, "")}, then run doctor again` });
+	}
 	if (envFile.hazard != null) {
 		const named = BOOT_FILES.map((spec) => spec.key).join(" or ");
 		// A SHAPE comes from systemd's own line structure (issue #447): the line is one systemd reads differently from

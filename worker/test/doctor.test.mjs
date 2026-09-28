@@ -8346,3 +8346,26 @@ test("doctor --live on `local` reaching a rootless Podman 4.9 builds no peer net
 	assert.ok(checks.some((c) => /jobToJobIsolation not read back: no peer networks were built, because the rootless network keeper pi-dispatch-netns-keeper does not hold/.test(c.label)), checks.map((c) => c.label).join("\n"));
 	assert.ok(!calls.some((c) => c.args[0] === "info"), "the collection's answer is used, not a second read");
 });
+
+test("doctor: a .env line assigning a wrapper's own variable is named beside the readings, never its value (#470)", async () => {
+	// The wrappers assign their own variables again after the load, so such a line has no effect; doctor says so for the
+	// platforms that run a wrapper, keeps its readings of the two boot keys, and prints the NAME only.
+	for (const [platform, line, name] of [["darwin", "PI_ENV_SETUP=/tmp/evil.sh", "PI_ENV_SETUP"], ["darwin", "env_setup=/tmp/evil.sh", "env_setup"], ["win32", "Env_Setup=/tmp/evil.sh", "Env_Setup"]]) {
+		const cwd = scaffoldedCwd();
+		writeFileSync(join(cwd, ".env"), [`PI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json").replace(/\\/g, "/")}`, line].join("\n"));
+		const { out, text } = capture();
+		const checks = await collectChecks(imgEnv(), { out, cwd, home: cwd, platform, spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", fileExists: existsSync, readEnvFile: (p) => readFileSync(p, "utf8") });
+		const warned = checks.find((c) => c.label.includes(`line 2 assigns ${name}, a variable the service wrapper keeps for itself`));
+		assert.ok(warned, `${platform}: the line is named`);
+		assert.equal(warned.warn, true, "a warning: the line has no effect");
+		assert.match(warned.fix, /remove the line \(a setup script is named with pi-dispatch service install --env-setup <path>, never in \.env\), then run doctor again/);
+		assert.ok(!(JSON.stringify(checks) + text()).includes("/tmp/evil.sh"), "the value never leaves .env");
+		assert.ok(checks.some((c) => /PI_PAUSE_WINDOWS_FILE is set in/.test(c.label)), "and the boot key's reading stands");
+	}
+	// Linux runs no wrapper: nothing to say.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "env_setup=/tmp/evil.sh\n");
+	const { out } = capture();
+	const checks = await collectChecks(imgEnv(), { out, cwd, home: cwd, platform: "linux", spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", fileExists: existsSync, readEnvFile: (p) => readFileSync(p, "utf8") });
+	assert.ok(!checks.some((c) => c.label.includes("keeps for itself")));
+});

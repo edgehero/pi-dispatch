@@ -1078,6 +1078,114 @@ test("wrapper: a PI_ENV_SETUP line INSIDE ./.env is not honoured — the seam is
 	assert.equal(code, 0, "exit 9 = a .env line got itself sourced as a setup script");
 });
 
+// Issue #470 follow-up: ./.env is sourced into the wrapper's own shell, so a line in it could set any variable the
+// wrapper reads. Each of these ran against the wrapper before the fix and failed as its message says.
+const ENV_PROBE = '#!/bin/sh\nprintf %s "${PI_ENV_SETUP-__UNSET__}" > "$MARKER_DIR/seen-setup"\n: > "$MARKER_DIR/ran"\n[ -z "$PLANTED" ] || exit 9\nexit 0\n';
+
+test("wrapper: an `env_setup=` line in ./.env names no script the wrapper runs (#470)", { skip: !POSIX }, async () => {
+	const dir = wrapperDir(ENV_PROBE);
+	const planted = setupScript(dir, "export PLANTED=1\n", "planted.sh");
+	writeFileSync(join(dir, ".env"), `PI_WRAPPER_TEST=1\nenv_setup=${planted}\n`);
+	const { code } = await runWrapper(dir);
+	assert.equal(code, 0, "exit 9 = the wrapper's own env_setup was taken from ./.env and sourced");
+	// With a real seam configured, the file's line still loses to the unit's value.
+	const setup = setupScript(dir, "export FROM_MANAGER=1\n");
+	const second = await runWrapper(dir, { env: { PI_ENV_SETUP: setup } });
+	assert.equal(second.code, 0, "exit 9 = the file's env_setup replaced the unit's");
+	assert.equal(readFileSync(join(dir, "seen-setup"), "utf8"), setup);
+});
+
+test("wrapper: a PI_ENV_SETUP line in ./.env does not reach the worker either; the unit's value does (#470)", { skip: !POSIX }, async () => {
+	const dir = wrapperDir(ENV_PROBE);
+	writeFileSync(join(dir, ".env"), "PI_WRAPPER_TEST=1\nPI_ENV_SETUP=/from/the/file.sh\n");
+	assert.equal((await runWrapper(dir)).code, 0);
+	assert.equal(readFileSync(join(dir, "seen-setup"), "utf8"), "__UNSET__", "the worker saw the file's PI_ENV_SETUP, as if the unit had set it");
+	const setup = setupScript(dir, "export FROM_MANAGER=1\n");
+	assert.equal((await runWrapper(dir, { env: { PI_ENV_SETUP: setup } })).code, 0);
+	assert.equal(readFileSync(join(dir, "seen-setup"), "utf8"), setup, "the unit's PI_ENV_SETUP is what the worker sees");
+});
+
+test("wrapper: a `signaled=1` line in ./.env does not stop the worker from starting (#470)", { skip: !POSIX }, async () => {
+	const dir = wrapperDir(ENV_PROBE);
+	writeFileSync(join(dir, ".env"), "PI_WRAPPER_TEST=1\nsignaled=1\nchild=1\nrc=2\n");
+	const { code, stderr } = await runWrapper(dir);
+	assert.equal(code, 0);
+	assert.ok(existsSync(join(dir, "ran")), "the command never ran: the file's signaled=1 read as a stop");
+	assert.doesNotMatch(stderr, /stopped before the worker started/);
+});
+
+test("wrapper: a `child=` line in ./.env does not aim a stop at another process (#470)", { skip: !POSIX }, async () => {
+	// A stop during the load used to run the forwarding handler, which sent TERM to whatever pid `child` held, and
+	// ./.env could set it. The victim is a process of this test's own, so the proof is that it survives.
+	const victim = spawn("sleep", ["60"], { stdio: "ignore" });
+	try {
+		const dir = wrapperDir('#!/bin/sh\n: > "$MARKER_DIR/ran"\nexit 0\n');
+		writeFileSync(join(dir, ".env"), `PI_WRAPPER_TEST=1\nchild=${victim.pid}\n${blockUntilReleased()}`);
+		let inEnv = false;
+		const { code, signal, stderr } = await runWrapper(dir, {
+			onSpawn: async (child) => {
+				inEnv = await waitForMarker(join(dir, "sourcing"));
+				if (inEnv) child.kill("SIGTERM");
+				writeFileSync(join(dir, "release"), "");
+			},
+		});
+		assert.ok(inEnv, "./.env never announced itself: a readiness timeout, NOT a signal-handling failure");
+		assert.equal(signal, null);
+		assert.equal(code, 0);
+		assert.match(stderr, /stopped before the worker started/);
+		assert.equal(existsSync(join(dir, "ran")), false);
+		await new Promise((r) => setTimeout(r, 100));
+		assert.equal(victim.exitCode, null, "the stop was sent to the pid ./.env named");
+		assert.equal(victim.signalCode, null, "the stop was sent to the pid ./.env named");
+	} finally {
+		victim.kill("SIGKILL");
+	}
+});
+
+test("wrapper: a `child=` line in ./.env is not the pid a stop reaches between the handler and the fork (#470)", { skip: !POSIX }, async () => {
+	// The window between installing the forwarding handler and the fork is three lines wide and cannot be hit from
+	// outside, so, as for the fork window below, this runs a copy DERIVED from the shipped bytes by one substitution:
+	// an inert hold right after the handler is installed. `child` must be empty there whatever ./.env said.
+	const INSTALL = "trap wrapper_on_stop TERM INT\n\n# A stop between the line above and the fork";
+	const real = readFileSync(REAL_WRAPPER, "utf8");
+	assert.equal(real.split(INSTALL).length - 1, 1, "the forwarding handler's install moved or was respelled; this test measures nothing until INSTALL follows it");
+	const victim = spawn("sleep", ["60"], { stdio: "ignore" });
+	try {
+		const dir = wrapperDir('#!/bin/sh\n: > "$MARKER_DIR/ran"\nexit 0\n');
+		const wrapper = join(dir, "instrumented-wrapper.sh");
+		writeFileSync(wrapper, real.replace(INSTALL, `trap wrapper_on_stop TERM INT\n${blockUntilReleased("in-launch-window")}\n# A stop between the line above and the fork`));
+		writeFileSync(join(dir, ".env"), `PI_WRAPPER_TEST=1\nchild=${victim.pid}\n`);
+		let held = false;
+		const { code, stderr } = await runWrapper(dir, {
+			wrapper,
+			onSpawn: async (child) => {
+				held = await waitForMarker(join(dir, "in-launch-window"));
+				if (held) child.kill("SIGTERM");
+				writeFileSync(join(dir, "release"), "");
+			},
+		});
+		assert.ok(held, "the instrumented wrapper never reached the hold: a readiness timeout");
+		assert.equal(code, 0);
+		assert.match(stderr, /stopped before the worker started/);
+		await new Promise((r) => setTimeout(r, 100));
+		assert.equal(victim.signalCode, null, "the stop was sent to the pid ./.env named");
+	} finally {
+		victim.kill("SIGKILL");
+	}
+});
+
+test("the cmd wrapper re-asserts its own variables after the .env load, from values no .env line reaches (#470)", () => {
+	// Nothing here can run cmd.exe, so this pins the TEXT. The block's %PI_ENV_SETUP% is expanded when cmd reads the
+	// parenthesized block, before the for loop runs (`set /?`), so the two sets after the loop take the unit's value;
+	// and ERRORLEVEL is cleared right before the command, because a variable of that name overrides the dynamic one.
+	const text = readFileSync(WRAPPER_CMD, "utf8").replace(/\r\n/g, "\n");
+	const block = /^if exist "\.env" \(\n  for \/f "usebackq eol=# tokens=1,\* delims==" %%A in \("\.env"\) do set "%%A=%%B"\n  set "ENV_SETUP=%PI_ENV_SETUP%"\n  set "PI_ENV_SETUP=%PI_ENV_SETUP%"\n\) else \(/m;
+	assert.match(text, block, "the load and the two re-asserts, in one block");
+	assert.match(text, /^set "ERRORLEVEL="\n%\*\nset "RC=%ERRORLEVEL%"$/m, "ERRORLEVEL cleared just before the command, RC read just after");
+	assert.equal(text.match(/%%A in \("\.env"\)/g).length, 1, "one load");
+	assert.equal(readFileSync(join(REPO_ROOT, "deploy", "worker-env-wrapper.cmd"), "utf8"), readFileSync(WRAPPER_CMD, "utf8"), "deploy/ and worker/deploy/ carry the same bytes");
+});
+
 test("wrapper: the exit-2 conversion survives the seam — a policy refusal under PI_ENV_SETUP still stops cleanly", { skip: !POSIX }, async () => {
 	const dir = wrapperDir("#!/bin/sh\nexit 2\n");
 	const setup = setupScript(dir, "export FROM_MANAGER=1\n");

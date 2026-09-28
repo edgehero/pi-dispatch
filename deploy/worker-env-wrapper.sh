@@ -46,39 +46,57 @@ fi
 # own CLI, not just from the daemon: `pi-dispatch service stop` on macOS is `launchctl kill SIGTERM` at
 # this pid.
 #
-# The other window is two instructions wide, and is closed by the re-send after `child=$!` below. The
-# handler is a FUNCTION rather than a trap string because it is installed twice -- here, and again after
-# the sourcing -- and one behaviour spelled out in two places is one behaviour that can drift.
-signaled=0
-child=
-wrapper_on_stop() {
-	signaled=1
-	# `child` is empty until the fork below has been assigned, and `kill -TERM ""` kills nothing and
-	# fails silently, so a stop arriving before then has no pid to reach. It is not lost: the re-send
-	# after `child=$!` re-delivers it, and the launch gate refuses to start at all if nothing was
-	# started yet.
-	[ -n "$child" ] && kill -TERM "$child" 2>/dev/null
-	# Never leave a nonzero status behind. `rc=$?` is read immediately after the `wait` this interrupts,
-	# and the double wait at the bottom keys on rc >= 128.
-	return 0
+# The other window is two instructions wide, and is closed by the re-send after `child=$!` below.
+#
+# NOTHING THIS WRAPPER READS IS LEFT WHERE ./.env CAN ASSIGN IT (issue #470). ./.env is sourced into this
+# shell, so any line in it can set any variable this script uses: `env_setup=/x.sh` named a script the
+# wrapper then ran, `signaled=1` made it exit 0 without starting the worker, and `child=<pid>` pointed the
+# stop at another process. So the rule is: every variable below is assigned AFTER the load; the one value
+# it needs from before the load (PI_ENV_SETUP, as the unit set it) travels across the load in the
+# positional parameters, which no assignment line can reach; and a stop DURING the preparation is handled
+# by `wrapper_stopped_early`, which reads no variable at all and simply does not start the worker.
+wrapper_stopped_early() {
+	# A stop that arrived while the environment was being prepared is honoured by NOT STARTING. Launching
+	# would hand the service manager a worker it has already asked to go away: it would reserve a budget
+	# slot and take a job, and then need a drain nobody is waiting for. Exit 0 because 0 is the only code
+	# launchd's KeepAlive/SuccessfulExit=false leaves stopped -- the same reason the exit-2 conversion at the
+	# bottom exists. Not 2, because nothing was refused; not 1, because nothing failed; the manager's own
+	# instruction was carried out, and this says so rather than exiting mute. The shell runs a trap only
+	# after the command in progress returns, so a setup script's network call is not cut off mid-write.
+	echo "worker-env-wrapper: stopped before the worker started -- a stop signal arrived while the environment was being prepared, so the command was never launched; exiting 0 (nothing to restart)" >&2
+	exit 0
 }
-trap wrapper_on_stop TERM INT
+trap wrapper_stopped_early TERM INT
 
 # The env-setup seam (issue #209): `pi-dispatch service render|install --env-setup <path>` puts an
 # operator-typed path here -- the plist's EnvironmentVariables dict on macOS, nssm's AppEnvironmentExtra
 # on Windows -- so a secrets manager can fill this process's environment without anyone hand-editing a
 # rendered unit. Captured BEFORE ./.env is sourced, on purpose: the path is UNIT configuration, and a
-# `.env` line must never be able to name a script this wrapper then runs.
-env_setup="${PI_ENV_SETUP:-}"
+# `.env` line must never be able to name a script this wrapper then runs. It is held as "$1" across the
+# load (a `PI_ENV_SETUP=` or `env_setup=` line there reaches neither), and the command is "$2" onwards
+# until the `shift` below.
+set -- "${PI_ENV_SETUP:-}" "$@"
 
 if [ -f ./.env ]; then
 	set -a; . ./.env; set +a
-elif [ -z "$env_setup" ]; then
+elif [ -z "$1" ]; then
 	echo "worker-env-wrapper: .env not found in $PWD -- this wrapper must be started in the deployment folder (the unit's WorkingDirectory / nssm AppDirectory); it no longer guesses a location from its own path" >&2
 	exit 1
 else
 	# Only a configured seam earns this: the environment demonstrably comes from somewhere else.
-	echo "worker-env-wrapper: no .env in $PWD -- the environment comes from $env_setup (PI_ENV_SETUP)" >&2
+	echo "worker-env-wrapper: no .env in $PWD -- the environment comes from $1 (PI_ENV_SETUP)" >&2
+fi
+
+# AFTER THE LOAD, every variable this wrapper reads is assigned, so no line of ./.env reaches one. The
+# worker sees the unit's PI_ENV_SETUP too, never one the file set (the setup script, which is unit
+# configuration, may still set its own).
+env_setup=$1
+shift
+if [ -n "$env_setup" ]; then
+	PI_ENV_SETUP=$env_setup
+	export PI_ENV_SETUP
+else
+	unset PI_ENV_SETUP
 fi
 
 # AFTER ./.env, deliberately. The manager is the newer source of truth, so a stale key left in the file
@@ -102,23 +120,31 @@ if [ -n "$env_setup" ]; then
 	set +a
 fi
 
-# RE-ASSERTED after the sourcing, and this is not belt-and-braces. A sourced script runs in THIS shell,
-# so a `trap ... TERM` inside one REPLACES the handler above and the drain silently disappears -- a
-# manager's cleanup helper does exactly that. One line restores it. What it cannot undo is a script that
+# THE FORWARDING HANDLER, installed after the sourcing, and the placement is not belt-and-braces. A
+# sourced script runs in THIS shell, so a `trap ... TERM` inside one REPLACES whatever handler is up and
+# the drain would silently disappear -- a manager's cleanup helper does exactly that. Installing it here
+# restores it. Its two variables are assigned here too, after the load, for the reason given at the top. What it cannot undo is a script that
 # IGNORES TERM (`trap '' TERM`): a signal discarded while it was ignored is already gone, and the child
 # forked below would inherit SIG_IGN and be unable to trap TERM at all. That is why docs/secrets.md now
 # tells operators not to touch signals in a setup script.
+signaled=0
+child=
+wrapper_on_stop() {
+	signaled=1
+	# `child` is empty until the fork below has been assigned, and `kill -TERM ""` kills nothing and
+	# fails silently, so a stop arriving before then has no pid to reach. It is not lost: the re-send
+	# after `child=$!` re-delivers it, and the launch gate refuses to start at all if nothing was
+	# started yet.
+	[ -n "$child" ] && kill -TERM "$child" 2>/dev/null
+	# Never leave a nonzero status behind. `rc=$?` is read immediately after the `wait` this interrupts,
+	# and the double wait at the bottom keys on rc >= 128.
+	return 0
+}
 trap wrapper_on_stop TERM INT
 
-# A stop that arrived while the environment was being prepared is honoured by NOT STARTING. Launching now
-# would hand the service manager a worker it has already asked to go away: it would reserve a budget slot
-# and take a job, and then need a drain nobody is waiting for. Exit 0 because 0 is the only code launchd's
-# KeepAlive/SuccessfulExit=false leaves stopped -- the same reason the exit-2 conversion at the bottom
-# exists. Not 2, because nothing was refused; not 1, because nothing failed; the manager's own instruction
-# was carried out, and this says so rather than exiting mute.
+# A stop between the line above and the fork: the same answer as one during the preparation.
 if [ "$signaled" -eq 1 ]; then
-	echo "worker-env-wrapper: stopped before the worker started -- a stop signal arrived while the environment was being prepared, so the command was never launched; exiting 0 (nothing to restart)" >&2
-	exit 0
+	wrapper_stopped_early
 fi
 
 # `exec` is deliberately GONE here (it used to hand this shell's pid straight to node): intercepting

@@ -46,8 +46,18 @@ REM loaded, on purpose: the path is SERVICE configuration, and a `.env` line mus
 REM a script this wrapper then runs.
 set "ENV_SETUP=%PI_ENV_SETUP%"
 
+REM NOTHING THIS WRAPPER READS IS LEFT WHERE .env CAN ASSIGN IT (issue #470). Every .env line is a `set`, and
+REM set ignores case, so an `ENV_SETUP=` (or `env_setup=`) line replaced the copy above and named a script
+REM this wrapper then ran, and an `ERRORLEVEL=` line shadows the dynamic %ERRORLEVEL% (`set /?`: a variable
+REM defined under one of those names overrides it), so the exit-code conversion below would read the file's
+REM number. So after the load the wrapper re-asserts its own: ENV_SETUP and PI_ENV_SETUP from
+REM %PI_ENV_SETUP%, which cmd expands when it READS this parenthesized block, before its first line runs
+REM (`set /?`, the reason delayed expansion exists), so the value is the unit's and no .env line reaches it;
+REM and ERRORLEVEL cleared just before the command runs. RC is assigned after the command, before it is read.
 if exist ".env" (
   for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do set "%%A=%%B"
+  set "ENV_SETUP=%PI_ENV_SETUP%"
+  set "PI_ENV_SETUP=%PI_ENV_SETUP%"
 ) else (
   if not defined ENV_SETUP (
     echo worker-env-wrapper: .env not found in "%CD%" -- this wrapper must be started in the deployment folder, the service's nssm AppDirectory; it no longer guesses a location from its own path 1>&2
@@ -82,6 +92,7 @@ REM closed.
 REM
 REM The argv runs verbatim -- absolute node, absolute script, composed by `pi-dispatch service` (see
 REM the .sh twin for the whole contract).
+set "ERRORLEVEL="
 %*
 set "RC=%ERRORLEVEL%"
 

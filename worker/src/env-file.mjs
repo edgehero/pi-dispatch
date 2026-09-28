@@ -236,6 +236,8 @@ function cmdReading(text, key) {
 		const name = eq === -1 ? body : body.slice(0, eq);
 		if (name.includes("!")) note(n, "has a ! before its first =, and with delayed expansion on (the registry's DelayedExpansion value) the .cmd wrapper's set can expand that into another variable's name", "remove the ! from that line");
 		if (/^[ \t"]*\//.test(name)) note(n, "starts with /, which the .cmd wrapper's set might read as its /A or /P switch", "remove the / at the start of that line");
+		const internal = envFileWrapperInternal(l, { loader: "cmd" });
+		if (internal !== null) note(n, WRAPPER_INTERNAL_WHAT(internal.name), WRAPPER_INTERNAL_FIX);
 		if (upper(name.replace(/^[ \t\r\ufeff"]+|[ \t\r\ufeff"]+$/g, "")) !== K) continue;
 		if (name !== key && upper(name) === K) note(n, `sets ${name}, which the .cmd wrapper's set reads as ${key}, since Windows variable names ignore case`, `write the name as ${key}, or remove the line`);
 		else if (/^[A-Za-z0-9_]+[ \t]+$/.test(name)) note(n, `has a blank between ${key} and the =, which the .cmd wrapper's set keeps in the name, so the variable that line sets is not ${key}`, "remove the blank before the =");
@@ -772,6 +774,8 @@ function planEnvEdit(raw, path, key, value, { overwrite = false, platform = proc
 		// on a line that has none (round-cap review).
 		if (h?.shape !== undefined) return { error: `refusing to edit ${path}: line ${h.line} has ${SYSTEMD_HAZARD_SHAPES[h.shape].what}. To fix it, ${SYSTEMD_HAZARD_SHAPES[h.shape].fix}. Nothing was written` };
 		if (h !== null) return { error: `refusing to edit ${path}: line ${h.line} is one the wrapper that sources this file reads differently from this command (a second assignment on a line, a continuation, a command), so whether ${key} is already set there is unknown. Fix that line first. Nothing was written` };
+		const internal = envFileWrapperInternal(text, { loader: "shell" });
+		if (internal !== null) return { error: `refusing to edit ${path}: ${wrapperInternalSentence(internal)}. Nothing was written` };
 	}
 	const next = (overwrite ? setEnvKey : setEnvKeyIfEmpty)(text, key, value, { platform });
 	const already = next === text || overwrite ? null : keyAlreadySet(text, key, platform);
@@ -1840,6 +1844,61 @@ export function decodeEnvFile(content, { loader = "systemd" } = {}) {
 	const isBytes = content instanceof Uint8Array;
 	const text = isBytes ? Buffer.from(content.buffer, content.byteOffset, content.byteLength).toString("utf8") : String(content ?? "");
 	return { text, loadHazard: loader === "systemd" ? envFileLoadHazard(content) : null };
+}
+
+/**
+ * The variables each service wrapper keeps for itself (issue #470 follow-up). Both wrappers load `.env` into their own
+ * scope, so a line could once set one: `env_setup=` (sh) or `ENV_SETUP=` (cmd) named a script the wrapper then ran,
+ * `signaled=1` made the sh wrapper exit 0 without starting, and `ERRORLEVEL=` shadowed the exit code the cmd wrapper
+ * converts. The wrappers now assign all of them after the load, from values no line reaches, so such a line has no
+ * effect, and the reader and writer name it rather than let an operator believe it does anything. PI_ENV_SETUP is on
+ * both lists: it is unit configuration and never honoured from the file. The cmd list is compared ignoring case, as
+ * `set` does. Kept beside the wrappers' text by a test, which fails when either wrapper's own variables change.
+ */
+export const WRAPPER_INTERNAL_KEYS = Object.freeze({
+	shell: Object.freeze(["PI_ENV_SETUP", "env_setup", "signaled", "child", "rc"]),
+	cmd: Object.freeze(["PI_ENV_SETUP", "ENV_SETUP", "RC", "ERRORLEVEL"]),
+});
+
+/** What a line assigning one of the wrapper's own variables is, and what to do, in the words doctor and the writer use. */
+const WRAPPER_INTERNAL_WHAT = (name) => `assigns ${name}, a variable the service wrapper keeps for itself (deploy/worker-env-wrapper.sh on macOS, .cmd on Windows) and assigns again after loading this file, so the line has no effect${/^pi_env_setup$/i.test(name) ? "; PI_ENV_SETUP is never honoured from this file" : ""}`;
+const WRAPPER_INTERNAL_FIX = "remove the line (a setup script is named with pi-dispatch service install --env-setup <path>, never in .env)";
+
+/** A `envFileWrapperInternal` finding as one sentence: the line, what it is, and the fix. */
+export function wrapperInternalSentence(found) {
+	return `line ${found.line} ${WRAPPER_INTERNAL_WHAT(found.name)}. To fix it, ${WRAPPER_INTERNAL_FIX}`;
+}
+
+/**
+ * The first line of this text assigning one of the service wrapper's own variables (`WRAPPER_INTERNAL_KEYS`) for this
+ * loader, as `{ line, name }`, or `null`; always `null` for systemd, which runs no wrapper. Not a hazard: such a line
+ * changes no other key's reading, so doctor says it beside its readings rather than in place of them.
+ */
+export function envFileWrapperInternal(text, { loader = "systemd" } = {}) {
+	if (loader === "systemd") return null;
+	const lines = String(text ?? "").split("\n").map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
+	if (loader === "cmd") {
+		// The cmd wrapper's own name for the line (`cmdReading`): after any leading `=`, up to the first `=`, with blanks,
+		// quotes and a BOM around it set aside, compared ignoring case. A `#` line (skipped by `eol=#`) needs no test of
+		// its own: its name starts with `#`, which no name on the list does.
+		const names = new Set(WRAPPER_INTERNAL_KEYS.cmd);
+		for (let i = 0; i < lines.length; i++) {
+			const body = lines[i].replace(/^=+/, "");
+			const eq = body.indexOf("=");
+			const name = (eq === -1 ? body : body.slice(0, eq)).replace(/^[ \t\r\ufeff"]+|[ \t\r\ufeff"]+$/g, "");
+			const upper = name.replace(/[a-z]+/g, (m) => m.toUpperCase());
+			if (names.has(upper)) return { line: i + 1, name };
+		}
+		return null;
+	}
+	const names = new Set(WRAPPER_INTERNAL_KEYS.shell);
+	const inside = quoteSpans(lines, loader).inside;
+	for (let i = 0; i < lines.length; i++) {
+		if (inside[i]) continue;
+		const m = ASSIGNMENT.exec(lines[i]);
+		if (m !== null && names.has(m[2])) return { line: i + 1, name: m[2] };
+	}
+	return null;
 }
 
 /**

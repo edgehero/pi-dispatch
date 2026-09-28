@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { EXEC_ONE_MAX, EXEC_TOTAL_MAX, SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileEditCheck, envFileEditRefusal, envFileValueLines, envFileHazard, envFileLoadHazard, envFileSystemdHazard, firstInvalidUtf8, systemdReading, systemdUtf8, envKeyIsBlank, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, setEnvKey, setEnvKeyIfEmpty, updateEnvFile } from "../src/env-file.mjs";
+import { EXEC_ONE_MAX, EXEC_TOTAL_MAX, SYSTEMD_HAZARD_SHAPES, WRAPPER_INTERNAL_KEYS, decodeEnvFile, envFileEditCheck, envFileEditRefusal, envFileValueLines, envFileHazard, envFileWrapperInternal, envFileLoadHazard, envFileSystemdHazard, firstInvalidUtf8, systemdReading, systemdUtf8, envKeyIsBlank, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, setEnvKey, setEnvKeyIfEmpty, updateEnvFile } from "../src/env-file.mjs";
 import { SYSTEMD_259_ENV_BYTES, SYSTEMD_259_ENV_FILES } from "./helpers/systemd-env-259.mjs";
 import { readStackKeys } from "../src/podman-stack.mjs";
 
@@ -2154,4 +2154,57 @@ test("#470: a value the wrapper cannot carry is never written on Windows, and on
 	// Linux and macOS render these as they always did.
 	assert.equal(renderEnvValue("a!b", { platform: "linux" }), "'a!b'");
 	assert.equal(renderEnvValue("C:/Users/Jos\u00e9", { platform: "darwin" }), "'C:/Users/Jos\u00e9'");
+});
+
+// -- issue #470 follow-up: a line assigning one of the service wrapper's own variables is named, never trusted ----------
+
+test("#470: WRAPPER_INTERNAL_KEYS is every variable each wrapper assigns for itself, read off the wrappers' text", () => {
+	const root = join(import.meta.dirname, "..", "..");
+	const sh = readFileSync(join(root, "deploy", "worker-env-wrapper.sh"), "utf8");
+	const cmd = readFileSync(join(root, "deploy", "worker-env-wrapper.cmd"), "utf8");
+	// sh: every `name=` at the start of a statement, plus PI_ENV_SETUP, which it re-exports.
+	const shNames = new Set([...sh.matchAll(/^[ \t]*([A-Za-z_][A-Za-z0-9_]*)=/gm)].map((m) => m[1]));
+	assert.deepEqual([...shNames].sort(), [...WRAPPER_INTERNAL_KEYS.shell].sort(), "the sh wrapper's own variables");
+	// cmd: every `set "NAME=` but the load's own `%%A` (ERRORLEVEL among them, cleared before the command reads %ERRORLEVEL%).
+	const cmdNames = new Set([...cmd.matchAll(/\bset "([A-Za-z_][A-Za-z0-9_]*)=/g)].map((m) => m[1].toUpperCase()));
+	assert.deepEqual([...cmdNames].sort(), [...WRAPPER_INTERNAL_KEYS.cmd].sort(), "the cmd wrapper's own variables");
+	assert.match(cmd, /%ERRORLEVEL%/);
+});
+
+test("#470: the reader names a line assigning a wrapper's own variable, for the loader that has that wrapper", () => {
+	const shell = (t) => envFileWrapperInternal(t, { loader: "shell" });
+	const cmd = (t) => envFileWrapperInternal(t, { loader: "cmd" });
+	assert.deepEqual(shell("A=1\nenv_setup=/x.sh\n"), { line: 2, name: "env_setup" });
+	assert.deepEqual(shell("export PI_ENV_SETUP=/x.sh\n"), { line: 1, name: "PI_ENV_SETUP" });
+	assert.deepEqual(shell("  signaled=1\n"), { line: 1, name: "signaled" });
+	assert.equal(shell("ENV_SETUP=/x\nRC=1\n# env_setup=/x\n"), null, "sh is case-sensitive, and a comment is no assignment");
+	assert.equal(shell("NOTE='a\nenv_setup=/x.sh\n'\n"), null, "a line inside a quoted value is no assignment");
+	assert.deepEqual(cmd("A=1\r\nenv_setup=C:/x.cmd\r\n"), { line: 2, name: "env_setup" }, "set ignores case");
+	assert.deepEqual(cmd("ERRORLEVEL=2\n"), { line: 1, name: "ERRORLEVEL" });
+	assert.deepEqual(cmd("  Rc =1\n"), { line: 1, name: "Rc" }, "blanks around the name are set aside");
+	assert.equal(cmd("#ENV_SETUP=x\nsignaled=1\nchild=2\n"), null, "the cmd wrapper has no signaled or child");
+	assert.equal(envFileWrapperInternal("PI_ENV_SETUP=/x.sh\nenv_setup=1\n", { loader: "systemd" }), null, "systemd runs no wrapper");
+});
+
+test("#470: the writer refuses a file assigning a wrapper's own variable on macOS and Windows, and Linux is unchanged", () => {
+	const dir = tempDir("pi-dispatch-env-470-internal-");
+	const path = join(dir, ".env");
+	const tail = "a variable the service wrapper keeps for itself (deploy/worker-env-wrapper.sh on macOS, .cmd on Windows) and assigns again after loading this file, so the line has no effect";
+	const fix = "To fix it, remove the line (a setup script is named with pi-dispatch service install --env-setup <path>, never in .env). Nothing was written";
+	for (const [platform, text, sentence] of [
+		["darwin", "WEBHOOK_SECRET=old\nenv_setup=/x.sh\n", `line 2 assigns env_setup, ${tail}. ${fix}`],
+		["darwin", "PI_ENV_SETUP=/x.sh\nWEBHOOK_SECRET=\n", `line 1 assigns PI_ENV_SETUP, ${tail}; PI_ENV_SETUP is never honoured from this file. ${fix}`],
+		["win32", "WEBHOOK_SECRET=old\r\nEnv_Setup=C:/x.cmd\r\n", `line 2 assigns Env_Setup, ${tail}. ${fix}`],
+		["win32", "ERRORLEVEL=0\nWEBHOOK_SECRET=\n", `line 1 assigns ERRORLEVEL, ${tail}. ${fix}`],
+	]) {
+		writeFileSync(path, text);
+		assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform }), (err) => err.message === `refusing to edit ${path}: ${sentence}`, `${platform} ${JSON.stringify(text)}`);
+		assert.equal(readFileSync(path, "utf8"), text);
+	}
+	// Linux runs no wrapper: such a line is an ordinary variable of the service's, and the edit is made.
+	writeFileSync(path, "env_setup=/x.sh\nPI_ENV_SETUP=/x.sh\nWEBHOOK_SECRET=\n");
+	assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "linux" }).changed, true);
+	// A different case is another variable to sh.
+	writeFileSync(path, "ENV_SETUP=/x.sh\nWEBHOOK_SECRET=\n");
+	assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "darwin" }).changed, true);
 });
