@@ -950,7 +950,9 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    the keeper holds; a sandbox open waits once too. A keeper that keeps dying is young at every start, so that wait is
    bounded: if, while a job waited, the keeper started again or left its bridge, or the job has waited 30 s, the job
    is retried (spending an attempt) with its run record saying `netns-keeper-crash-loop`, the whole sentence logged as
-   `job_failed_netns_keeper`, and a job that runs out of retries gets a comment naming the loop. Look at why it exits
+   `job_failed_netns_keeper`, and a job that runs out of retries gets a comment naming the loop. Once a job has seen
+   the loop, any later attempt of it that fails on the keeper (a minute later the keeper has usually restarted out of
+   order against the proxy, or is between restarts) is named the loop too. Look at why it exits
    with `journalctl --user -u pi-dispatch-netns-keeper.service`. `pi-dispatch doctor` judges the keeper as before, so
    right after a start it can say ✗ for a keeper under 3 s old: run it again a few seconds later.
 

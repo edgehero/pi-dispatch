@@ -79,6 +79,18 @@ export function netnsKeeperYoungWaitMs(ageMs) {
 }
 
 /**
+ * The sentence for a later attempt of a job that already saw the keeper loop (issue #476, gate of PR #479): `seen`, the
+ * keeper starts the earlier attempt saw; `problem`, what the read now found, in words that follow the keeper's name.
+ * Without it the retry a minute later met a keeper that had restarted out of order against the proxy (or none at all)
+ * and failed as `netns-keeper-not-holding`, so the loop's own comment was almost never the one a job ended on.
+ */
+export function netnsKeeperLoopAgainSentence({ seen, problem = null, remedy }) {
+	const at = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : "an unread time");
+	const starts = (Array.isArray(seen) ? seen : []).map(at).join(" and ") || "unread times";
+	return `the rootless network keeper ${NETNS_KEEPER} keeps restarting (a crash loop): an earlier attempt of this job saw it start at ${starts}, and now it ${problem ?? "does not hold"}, so it holds nothing open for long, and on Podman 4.x a job network's teardown in a gap would cut the egress proxy's route out (issue #458), so this job is retried rather than started. To fix it, find why it exits (journalctl --user -u ${NETNS_KEEPER}.service -n 50), then ${remedy ?? `start it as the worker's account: systemctl --user restart ${NETNS_KEEPER}.service`}`;
+}
+
+/**
  * The sentence for a keeper that kept restarting while a job waited for it (issue #476). `was`: the start the job first
  * waited on; `now`: the start read now, or `null` when no running keeper was read; `problem`: what the read now found,
  * in words that follow the keeper's name, when it found no running keeper; `heldMs`: how long the job had waited.

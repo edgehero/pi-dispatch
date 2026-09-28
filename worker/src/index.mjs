@@ -4,8 +4,8 @@ import { jobContainerName } from "./backend-local.mjs";
 import { scrubCredentials } from "./redact.mjs";
 import { BACKEND_NOT_REGISTERED } from "./backend-registry.mjs";
 import { CANCEL_ACK_TTL_MS, cancelAckKey, cancelReqKey } from "./cancel-state.mjs";
-import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, runJob } from "./processor.mjs";
-import { NETNS_KEEPER_YOUNG_HOLD_MAX_MS, netnsKeeperCrashLoopSentence } from "./netns-keeper.mjs";
+import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, TERMINAL_COMMENTS, runJob } from "./processor.mjs";
+import { NETNS_KEEPER_YOUNG_HOLD_MAX_MS, netnsKeeperCrashLoopSentence, netnsKeeperLoopAgainSentence } from "./netns-keeper.mjs";
 import { PODMAN_RESTART_HOLD_EXPIRED, PODMAN_RESTART_HOLD_MAX_MS, PODMAN_RESTART_HOLD_RECHECK_MS } from "./runtime-observations.mjs";
 import { targetFor } from "./run-history.mjs";
 import { budgetCapsFor, canonicalScope, concurrencyFor, makeInFlight, scopeKeyPrefix } from "./scoped-limits.mjs";
@@ -799,6 +799,41 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// afresh, since the time between was no evidence that the service stayed up; the last check's time is stored
 			// beside the start. And the expired hold is RECORDED with its own token, the one its comment and the failure
 			// hook carry, never the `container-never-started` of the throw it ends.
+			// A CANCELLED JOB IS NEVER RUN AGAIN (gate of PR #479). The operator-cancel poll runs from pickup to the finally
+			// below, so a cancel can be acknowledged (the signal aborted with "operator-cancel") after the job was picked up
+			// and before this handler hands it back to the queue: a hold's `moveToDelayed`, or an `InfraRetry` BullMQ
+			// retries after its backoff. Either ran the job later, with the request key already consumed, so nothing
+			// cancelled it again. So every error this handler would hand back (every `InfraRetry`, the two holds' included,
+			// since both are one) is asked ONE question first, in ONE place, so the three paths cannot drift apart: was this
+			// job cancelled? A request not yet polled is read too, and acknowledged and consumed as the poll would. Either
+			// ends the job as the operator's cancel, the policy result the aborted-container path already returns, recorded,
+			// one fixed comment, never retried. A shutdown's abort is not a cancel: that job is held or retried as before,
+			// so it survives the restart.
+			const operatorCancelled = async () => {
+				if (signal?.aborted === true) return signal.reason === "operator-cancel";
+				if (typeof redis?.get !== "function") return false;
+				let req = null;
+				try {
+					req = await redis.get(cancelReqKey(job.id));
+				} catch {
+					return false;
+				}
+				if (req === null || req === undefined) return false;
+				await Promise.resolve(redis.set?.(cancelAckKey(job.id), hostName, "PX", CANCEL_ACK_TTL_MS)).catch(() => {});
+				await Promise.resolve(redis.del?.(cancelReqKey(job.id))).catch(() => {});
+				return true;
+			};
+			// A retry that already spent (a container that ran and exited as infra) keeps what it spent on the record, and
+			// says the processor's own operator-cancel sentence; one that never started says it was cancelled before it did.
+			const endCancelled = async () => {
+				const spent = error?.budgetReserved === true;
+				const result = { outcome: "policy", reason: "operator-cancel", exitCode: spent ? (error.exitCode ?? null) : null, turns: spent ? (error.turns ?? null) : null, tokens: spent ? (error.tokens ?? null) : null, provider: error?.provider ?? null, model: error?.model ?? null, budgetReserved: spent };
+				deps?.log?.("job_cancelled_instead_of_retry", { jobId: job.id, spent });
+				if (deps?.comment) await Promise.resolve(deps.comment(job.data, spent ? TERMINAL_COMMENTS["operator-cancel"] : CANCELLED_BEFORE_START_COMMENT)).catch(() => {});
+				recordRun({ job, result, startedAt, endedAt: new Date().toISOString() });
+				return result;
+			};
+			if (error instanceof InfraRetry && (await operatorCancelled())) return await endCancelled();
 			if (error?.holdUntilRestart === true) {
 				const heldAt = now();
 				const last = job.data?.podmanRestartHoldLastMs;
@@ -833,13 +868,27 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					await job.moveToDelayed(keeperHold.at + young.waitMs, token);
 					throw new DelayedError();
 				}
-				const loop = new InfraRetry(netnsKeeperCrashLoopSentence({ was: keeperHold.startedMs ?? young.startedMs, now: young.startedMs, heldMs, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
+				const was = keeperHold.startedMs ?? young.startedMs;
+				await markKeeperLoop(job, was === young.startedMs ? [was] : [was, young.startedMs]);
+				const loop = new InfraRetry(netnsKeeperCrashLoopSentence({ was, now: young.startedMs, heldMs, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
 				recordRun({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
 				throw loop;
 			}
 			if (error?.reason === NETNS_KEEPER_NOT_HOLDING && keeperHold.startedMs !== null) {
 				// The keeper this job was waiting on is no longer running on its bridge: it died young, the loop's other face.
+				await markKeeperLoop(job, [keeperHold.startedMs]);
 				const loop = new InfraRetry(netnsKeeperCrashLoopSentence({ was: keeperHold.startedMs, now: null, problem: error.keeperProblem ?? null, heldMs: keeperHold.at - keeperHold.since, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
+				recordRun({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
+				throw loop;
+			}
+			// A LATER ATTEMPT OF A JOB THAT SAW THE LOOP (gate of PR #479). The loop's retry comes after the queue's 60 s
+			// backoff, when the hold's 30 s window has closed, and it meets a keeper that restarted out of order against the
+			// proxy, or none: measured, it failed as `netns-keeper-not-holding`, and that attempt's record and terminal
+			// comment replaced the loop's. The marker (the keeper starts seen) is not reset by the window, so any keeper
+			// failure of this job after it is still named the loop.
+			const loopSeen = job.data?.netnsKeeperLoopSeen;
+			if (error?.reason === NETNS_KEEPER_NOT_HOLDING && Array.isArray(loopSeen) && loopSeen.length > 0) {
+				const loop = new InfraRetry(netnsKeeperLoopAgainSentence({ seen: loopSeen, problem: error.keeperProblem ?? null, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
 				recordRun({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
 				throw loop;
 			}
@@ -864,6 +913,21 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			signal.removeEventListener("abort", onAbort);
 		}
 	};
+}
+
+/** The comment for a job the operator cancelled before it started, where it would have been held or retried (gate of PR #479). */
+export const CANCELLED_BEFORE_START_COMMENT = "Stopped: the operator cancelled this run before it started. Nothing was spent. Not retried.";
+
+/**
+ * Store the keeper starts a crash loop was seen at on the job (gate of PR #479), outside the hold's 30 s window, so a
+ * later attempt that fails on the keeper is still named the loop. Fail open: a lost marker costs only the name.
+ */
+async function markKeeperLoop(job, seen) {
+	try {
+		await job.updateData({ ...job.data, netnsKeeperLoopSeen: seen.filter((ms) => Number.isFinite(ms)) });
+	} catch {
+		// The loop is still named on this attempt; only a later attempt's name depends on the marker.
+	}
 }
 
 /**

@@ -39,9 +39,17 @@ function spyJob(data) {
 	return { job, moves, updates };
 }
 
-function harness({ now = () => NOW, observed = { ok: true, podmanConfRefused: { reason: "podman-conf-widens-job", key: null, rootful: true, restart: true, retry: true, message: "Not run yet: ...", evidence: EVIDENCE } } } = {}) {
-	const seen = { containerCalls: 0, records: [], logs: [], incr: 0 };
+function harness({ now = () => NOW, cancelReq = undefined, observed = { ok: true, podmanConfRefused: { reason: "podman-conf-widens-job", key: null, rootful: true, restart: true, retry: true, message: "Not run yet: ...", evidence: EVIDENCE } } } = {}) {
+	const seen = { containerCalls: 0, records: [], logs: [], incr: 0, comments: [], redisOps: [] };
 	const redis = { incr: async () => (seen.incr++, 1), decr: async () => 0, expire: async () => {} };
+	if (cancelReq !== undefined) {
+		const keys = new Map([["cancel:req:local-hold", cancelReq]]);
+		Object.assign(redis, {
+			get: async (k) => keys.get(k) ?? null,
+			set: async (k, v) => (seen.redisOps.push(["set", k]), keys.set(k, v), "OK"),
+			del: async (k) => (seen.redisOps.push(["del", k]), keys.delete(k), 1),
+		});
+	}
 	const processor = mod.makeProcessor({
 		cancelJob: () => {},
 		stopContainer: () => {},
@@ -55,7 +63,7 @@ function harness({ now = () => NOW, observed = { ok: true, podmanConfRefused: { 
 			prepareWorkspace: async () => ({ workspaceDir: "/w", jobDir: "/j" }),
 			runContainer: async () => (seen.containerCalls++, { code: 0, aborted: false, turns: 1 }),
 			cleanup: async () => {},
-			comment: async () => {},
+			comment: async (_job, text) => void seen.comments.push(text),
 			log: (event, fields) => seen.logs.push({ event, ...fields }),
 		},
 	});
@@ -116,4 +124,30 @@ test("a job the service no longer holds runs, and a moment's failed read is stil
 	const transient = harness({ observed: { ok: true, podmanConfRefused: { reason: "podman-conf-widens-job", key: null, rootful: true, transient: true, message: "Not read yet: ...", evidence: "/etc/containers/containers.conf could not be read (EMFILE)" } } });
 	await assert.rejects(() => transient.processor(busy.job, "tok", new AbortController().signal), (err) => err.name === "InfraRetry" && err.holdUntilRestart === undefined);
 	assert.equal(busy.moves.length, 0, "no deferral: the queue's attempts retry it");
+});
+
+// Gate of PR #479: a cancel acknowledged between pickup and the hold's move went back to the delayed set and ran later.
+test("an operator's cancel ends a job podman.service's hold would delay, before it starts; a shutdown's abort keeps it held (#448, PR #479 gate)", { skip }, async () => {
+	const aborted = (reason) => {
+		const c = new AbortController();
+		c.abort(reason);
+		return c.signal;
+	};
+	const { job, moves, updates } = spyJob({ kind: "local", folder: "/srv/site", flow: "tidy", task: "t" });
+	const h = harness();
+	const result = await h.processor(job, "tok", aborted("operator-cancel"));
+	assert.deepEqual([result.outcome, result.reason, result.budgetReserved], ["policy", "operator-cancel", false]);
+	assert.deepEqual([moves.length, updates.length, h.seen.containerCalls, h.seen.incr, h.seen.records.length], [0, 0, 0, 0, 1]);
+	assert.deepEqual(h.seen.comments, [mod.CANCELLED_BEFORE_START_COMMENT]);
+	const req = spyJob({ kind: "local", folder: "/srv/site", flow: "tidy", task: "t" });
+	const polled = harness({ cancelReq: "1" });
+	assert.equal((await polled.processor(req.job, "tok", new AbortController().signal)).reason, "operator-cancel");
+	assert.deepEqual(polled.seen.redisOps, [["set", "cancel:ack:local-hold"], ["del", "cancel:req:local-hold"]]);
+	assert.equal(req.moves.length, 0);
+	const none = spyJob({ kind: "local", folder: "/srv/site", flow: "tidy", task: "t" });
+	await assert.rejects(() => harness({ cancelReq: null }).processor(none.job, "tok", new AbortController().signal), (err) => err.name === "DelayedError");
+	assert.equal(none.moves.length, 1);
+	const shut = spyJob({ kind: "local", folder: "/srv/site", flow: "tidy", task: "t" });
+	await assert.rejects(() => harness().processor(shut.job, "tok", aborted("shutdown")), (err) => err.name === "DelayedError");
+	assert.equal(shut.moves.length, 1);
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildRecord } from "../src/run-history.mjs";
-import { NETNS_KEEPER_AFTER_PROXY_GRACE_MS, NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_YOUNG_HOLD_MAX_MS, NETNS_KEEPER_YOUNG_MARGIN_MS, judgeNetnsKeeper, netnsKeeperCrashLoopSentence, netnsKeeperYoungWaitMs } from "../src/netns-keeper.mjs";
+import { NETNS_KEEPER_AFTER_PROXY_GRACE_MS, NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_YOUNG_HOLD_MAX_MS, NETNS_KEEPER_YOUNG_MARGIN_MS, judgeNetnsKeeper, netnsKeeperCrashLoopSentence, netnsKeeperLoopAgainSentence, netnsKeeperYoungWaitMs } from "../src/netns-keeper.mjs";
 import { NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING } from "../src/processor.mjs";
 import { sandboxKeeperCheck } from "../src/sandbox.mjs";
 
@@ -99,9 +99,18 @@ const SENTENCE = "the rootless network keeper pi-dispatch-netns-keeper has been 
 const young = (startedMs, at = NOW) => ({ unavailable: "pi-dispatch-egress-proxy", keeper: SENTENCE, remedy: "start it as the worker's account: X", problem: "has been running for only ...", young: { startedMs, ageMs: at - startedMs, waitMs: netnsKeeperYoungWaitMs(at - startedMs) } });
 const gone = { unavailable: "pi-dispatch-egress-proxy", keeper: "the rootless network keeper pi-dispatch-netns-keeper is not under this account's Podman, ... so this job is retried rather than started", remedy: "start it as the worker's account: X", problem: "is not under this account's Podman" };
 
-function harness({ now = () => NOW, egress }) {
-	const seen = { containerCalls: 0, records: [], logs: [], incr: 0 };
+function harness({ now = () => NOW, egress, cancelReq = undefined, exitCode = 0 }) {
+	const seen = { containerCalls: 0, records: [], logs: [], incr: 0, comments: [], redisOps: [] };
 	const redis = { incr: async () => (seen.incr++, 1), decr: async () => 0, expire: async () => {} };
+	// A cancel request key (issue #287's `cancel:req:<id>`), only when a test asks for one: `get` arms the cancel poll.
+	if (cancelReq !== undefined) {
+		const keys = new Map([[`cancel:req:local-keeper`, cancelReq]]);
+		Object.assign(redis, {
+			get: async (k) => keys.get(k) ?? null,
+			set: async (k, v) => (seen.redisOps.push(["set", k]), keys.set(k, v), "OK"),
+			del: async (k) => (seen.redisOps.push(["del", k]), keys.delete(k), 1),
+		});
+	}
 	const processor = mod.makeProcessor({
 		cancelJob: () => {},
 		stopContainer: () => {},
@@ -113,9 +122,9 @@ function harness({ now = () => NOW, egress }) {
 		deps: {
 			egressPreflight: async () => egress,
 			prepareWorkspace: async () => ({ workspaceDir: "/w", jobDir: "/j" }),
-			runContainer: async () => (seen.containerCalls++, { code: 0, aborted: false, turns: 1 }),
+			runContainer: async () => (seen.containerCalls++, { code: exitCode, aborted: false, turns: 1 }),
 			cleanup: async () => {},
-			comment: async () => {},
+			comment: async (_job, text) => void seen.comments.push(text),
 			log: (event, fields) => seen.logs.push({ event, ...fields }),
 		},
 	});
@@ -185,6 +194,105 @@ test("a hold checked again after more than the bound starts afresh: a retry afte
 	// Exactly at the bound is still the same hold.
 	const edge = spyJob({ ...DATA, netnsKeeperHoldSinceMs: NOW - 10_000, netnsKeeperHoldLastMs: NOW - NETNS_KEEPER_YOUNG_HOLD_MAX_MS, netnsKeeperHoldStartedMs: NOW - 9_000 });
 	await assert.rejects(() => harness({ egress: young(NOW - 500) }).processor(edge.job, "tok", new AbortController().signal), (err) => err.reason === NETNS_KEEPER_CRASH_LOOP);
+});
+
+// Gate of PR #479: the loop's retry comes after the queue's 60 s backoff, past the hold's 30 s window, and met a keeper
+// restarted out of order (or none): it failed as netns-keeper-not-holding, and that record and comment replaced the
+// loop's. Two attempts, as the queue runs them: the second is still named the loop.
+test("a crash loop seen on attempt 1 still names attempt 2's keeper failure, whatever it found (#476, PR #479 gate)", { skip }, async () => {
+	const { job } = spyJob({ ...DATA });
+	// Attempt 1: young, held; then a new start: the loop.
+	await assert.rejects(() => harness({ egress: young(NOW - 250) }).processor(job, "t1", new AbortController().signal), (err) => err.name === "DelayedError");
+	const first = harness({ now: () => NOW + 3_750, egress: young(NOW + 3_400, NOW + 3_750) });
+	await assert.rejects(() => first.processor(job, "t2", new AbortController().signal), (err) => err.reason === NETNS_KEEPER_CRASH_LOOP);
+	assert.deepEqual(job.data.netnsKeeperLoopSeen, [NOW - 250, NOW + 3_400], "the starts seen, kept on the job");
+	// Attempt 2, the queue's retry a minute later: the keeper restarted out of order against the proxy (not young).
+	job.attemptsMade = 1;
+	const lateKeeper = { ...gone, keeper: "the rootless network keeper pi-dispatch-netns-keeper started 64 s after the egress proxy did, ...", problem: "started 64 s after the egress proxy did, so it was down while the proxy ran", remedy: "restart the egress proxy once no job is running: P" };
+	const second = harness({ now: () => NOW + 64_000, egress: lateKeeper });
+	await assert.rejects(
+		() => second.processor(job, "t3", new AbortController().signal),
+		(err) => err.name === "InfraRetry" && err.reason === NETNS_KEEPER_CRASH_LOOP && err.budgetReserved === false && err.message.includes("an earlier attempt of this job saw it start at 2026-09-29T11:59:59.750Z and 2026-09-29T12:00:03.400Z, and now it started 64 s after the egress proxy did") && err.message.endsWith("then restart the egress proxy once no job is running: P"),
+	);
+	assert.deepEqual([second.seen.containerCalls, second.seen.records.length], [0, 1]);
+	assert.deepEqual([buildRecord(second.seen.records[0]).outcome, buildRecord(second.seen.records[0]).reason], ["failed", "netns-keeper-crash-loop"], "the terminal attempt's record names the loop");
+	// And a keeper gone on attempt 2 is named the loop too.
+	const third = harness({ now: () => NOW + 64_000, egress: gone });
+	await assert.rejects(() => third.processor(job, "t4", new AbortController().signal), (err) => err.reason === NETNS_KEEPER_CRASH_LOOP && /and now it is not under this account's Podman, /.test(err.message));
+	// A young keeper on attempt 2 is still held, not failed: the marker names failures, it does not refuse a keeper.
+	const { job: again } = spyJob({ ...DATA, netnsKeeperLoopSeen: [NOW - 90_000] });
+	await assert.rejects(() => harness({ egress: young(NOW - 300) }).processor(again, "t5", new AbortController().signal), (err) => err.name === "DelayedError");
+	// A job with no marker is today's ordinary not-holding retry.
+	const { job: plain } = spyJob({ ...DATA });
+	await assert.rejects(() => harness({ now: () => NOW + 64_000, egress: lateKeeper }).processor(plain, "t6", new AbortController().signal), (err) => err.reason === NETNS_KEEPER_NOT_HOLDING);
+	// The gone-while-held path stores the marker too.
+	const { job: died } = spyJob({ ...DATA, netnsKeeperHoldSinceMs: NOW - 3_400, netnsKeeperHoldLastMs: NOW - 3_400, netnsKeeperHoldStartedMs: NOW - 4_000 });
+	await assert.rejects(() => harness({ egress: gone }).processor(died, "t7", new AbortController().signal), (err) => err.reason === NETNS_KEEPER_CRASH_LOOP);
+	assert.deepEqual(died.data.netnsKeeperLoopSeen, [NOW - 4_000]);
+	assert.match(netnsKeeperLoopAgainSentence({ seen: [NOW], problem: "is exited under this account's Podman" }), /saw it start at 2026-09-29T12:00:00\.000Z, and now it is exited under this account's Podman, .* then start it as the worker's account: systemctl --user restart pi-dispatch-netns-keeper\.service$/);
+});
+
+// Gate of PR #479: a cancel acknowledged between pickup and the hold went back to the delayed set and ran later.
+test("an operator's cancel ends a job the young-keeper hold would delay, before it starts; a shutdown's abort keeps it held (#476, PR #479 gate)", { skip }, async () => {
+	const aborted = (reason) => {
+		const c = new AbortController();
+		c.abort(reason);
+		return c.signal;
+	};
+	const { job, moves, updates } = spyJob({ ...DATA });
+	const h = harness({ egress: young(NOW - 600) });
+	const result = await h.processor(job, "tok", aborted("operator-cancel"));
+	assert.deepEqual([result.outcome, result.reason, result.budgetReserved], ["policy", "operator-cancel", false]);
+	assert.deepEqual([moves.length, updates.length, h.seen.containerCalls, h.seen.incr], [0, 0, 0, 0], "not delayed, nothing started or reserved");
+	assert.deepEqual(h.seen.comments, [mod.CANCELLED_BEFORE_START_COMMENT]);
+	assert.deepEqual([buildRecord(h.seen.records[0]).outcome, buildRecord(h.seen.records[0]).reason], ["policy", "operator-cancel"]);
+	// A request not yet polled: read, acknowledged and consumed as the poll would, and the job ends the same way.
+	const req = spyJob({ ...DATA });
+	const polled = harness({ egress: young(NOW - 600), cancelReq: "1" });
+	assert.equal((await polled.processor(req.job, "tok", new AbortController().signal)).reason, "operator-cancel");
+	assert.deepEqual(polled.seen.redisOps, [["set", "cancel:ack:local-keeper"], ["del", "cancel:req:local-keeper"]]);
+	assert.equal(req.moves.length, 0);
+	// No request: held as before.
+	const none = spyJob({ ...DATA });
+	await assert.rejects(() => harness({ egress: young(NOW - 600), cancelReq: null }).processor(none.job, "tok", new AbortController().signal), (err) => err.name === "DelayedError");
+	assert.equal(none.moves.length, 1);
+	// A shutdown is not a cancel: the job is kept, held.
+	const shut = spyJob({ ...DATA });
+	await assert.rejects(() => harness({ egress: young(NOW - 600) }).processor(shut.job, "tok", aborted("shutdown")), (err) => err.name === "DelayedError");
+	assert.equal(shut.moves.length, 1);
+});
+
+// Gate of PR #479: the same question for an ORDINARY retryable failure, asked in the one place the holds ask it. A job
+// whose cancel was acknowledged or requested is never handed back to the queue's retry.
+test("an ordinary infra failure with a cancel pending ends the job as the operator's cancel, never a retry; a shutdown still retries (#476, PR #479 gate)", { skip }, async () => {
+	const SILENT = { unavailable: "pi-dispatch-egress-proxy" }; // the daemon did not answer: InfraRetry container-never-started
+	const aborted = (reason) => {
+		const c = new AbortController();
+		c.abort(reason);
+		return c.signal;
+	};
+	// Plain, no cancel: the queue's retry, as before.
+	const plain = spyJob({ ...DATA });
+	await assert.rejects(() => harness({ egress: SILENT, cancelReq: null }).processor(plain.job, "tok", new AbortController().signal), (err) => err.name === "InfraRetry" && err.reason === "container-never-started");
+	// A request pending: acknowledged, consumed, and the job ends as the cancel, recorded, one comment.
+	const req = spyJob({ ...DATA });
+	const pending = harness({ egress: SILENT, cancelReq: "1" });
+	const result = await pending.processor(req.job, "tok", new AbortController().signal);
+	assert.deepEqual([result.outcome, result.reason, result.budgetReserved], ["policy", "operator-cancel", false]);
+	assert.deepEqual(pending.seen.redisOps, [["set", "cancel:ack:local-keeper"], ["del", "cancel:req:local-keeper"]]);
+	assert.deepEqual(pending.seen.comments, [mod.CANCELLED_BEFORE_START_COMMENT]);
+	assert.deepEqual([buildRecord(pending.seen.records[0]).outcome, buildRecord(pending.seen.records[0]).reason, pending.seen.records.length], ["policy", "operator-cancel", 1]);
+	// Acknowledged already (the signal aborted as a cancel): the same end.
+	const acked = harness({ egress: SILENT });
+	assert.equal((await acked.processor(spyJob({ ...DATA }).job, "tok", aborted("operator-cancel"))).reason, "operator-cancel");
+	// A shutdown is not a cancel: retried as before.
+	await assert.rejects(() => harness({ egress: SILENT }).processor(spyJob({ ...DATA }).job, "tok", aborted("shutdown")), (err) => err.name === "InfraRetry");
+	// A retry that already spent (the container ran and exited 1, infra): the record keeps what it spent, and the comment
+	// is the processor's own operator-cancel sentence, not "before it started".
+	const ran = harness({ egress: { ok: true }, cancelReq: "1", exitCode: 1 });
+	const spent = await ran.processor(spyJob({ ...DATA }).job, "tok", new AbortController().signal);
+	assert.deepEqual([spent.reason, spent.budgetReserved, spent.exitCode, ran.seen.containerCalls], ["operator-cancel", true, 1, 1]);
+	assert.deepEqual(ran.seen.comments.at(-1), "Stopped: the operator cancelled this run. Partial work may exist. Not retried.");
 });
 
 test("the sandbox opener waits a young keeper out once, bounded, rather than refusing it (#476)", async () => {

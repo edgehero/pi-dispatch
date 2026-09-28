@@ -986,12 +986,11 @@ export const NETNS_KEEPER_READ_TIMEOUT_MS = 10_000;
  * first. So it is `{ unavailable, keeper }`, an INFRA retry before anything is spent, carrying the sentence that names
  * the keeper and what to run. "Holds" is `judgeNetnsKeeper` with the clock and the proxy's start (PR #463 round 2):
  * running on its own bridge for at least 3 s (a crash loop reads as running for moments), and not started more than
- * the grace (15 s) after the proxy, since a keeper that restarted while the proxy ran may have let a teardown cut the proxy's
- * route out, which only a proxy restart repairs and nothing outside can see. A keeper that is only too young (issue
- * #476) is still not held, but the answer carries `young`, so its caller waits it out rather than failing on it. On 5.x
- * nothing is read. Nothing is
- * cached across jobs but what the bundle already caches (`podman info`, for the version): the keeper and the proxy's
- * start are read on every armed job, two bounded `podman inspect`s.
+ * the grace (15 s) after the proxy, since a keeper that restarted while the proxy ran may have let a teardown cut the
+ * proxy's route out, which only a proxy restart repairs and nothing outside can see. A keeper that is only too young
+ * (issue #476) is still not held, but the answer carries `young`, so its caller waits it out rather than failing on it.
+ * On 5.x nothing is read. Nothing is cached across jobs but what the bundle already caches (`podman info`, for the
+ * version): the keeper and the proxy's start are read on every armed job, two bounded `podman inspect`s.
  */
 export function keeperPreflight(proxyPreflight, { armed, proxy, info, spawnFn = null, readKeeper = null, now = Date.now }) {
 	const read =
