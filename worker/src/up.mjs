@@ -37,10 +37,12 @@ import { homedir, userInfo } from "node:os";
 import { dirname, join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PODMAN_BOOT_REFUSING_CAUSES, makePodmanInfoReader, decidePodmanJobUser, podmanJobUserRefusal } from "./backend-podman.mjs";
-import { parseBackendList, venuesOf } from "./backends.mjs";
+import { venuesOf } from "./backends.mjs";
 import { logsDirPath, settingsFilePath } from "./config.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed as egressArmedFn, egressProxyName } from "./egress.mjs";
 import { envKeyIsBlank, envValueShown, updateEnvFile } from "./env-file.mjs";
+import { deploymentVenueEnv } from "./deployment-venue.mjs";
+import { EGRESS_PROXY_IMAGE, PROXY_STATE_FORMAT, jobNetworksOf, parseProxyState, shippedProxyDrift } from "./egress-proxy-state.mjs";
 import { STACK_KEYS, applyStack, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal } from "./podman-stack.mjs";
 
 // The shipped Quadlet templates, module-relative like service.mjs's: worker/deploy in a checkout, <pkg>/deploy under npm.
@@ -96,6 +98,11 @@ const VALKEY_RUN_ARGS = [
 // The per-job networks are NOT here: the worker creates one per job and attaches this container to it for
 // the life of that run. This is only the proxy and its way out.
 const EGRESS_NETWORK_ARGS = ["network", "create", "pi-dispatch-egress-out"];
+// A stopped CURRENT shipped proxy is started (a paused one unpaused) as it is; a STALE one is removed and run again from
+// the argv below (issue #453; the reasons are at step e2).
+const EGRESS_START_ARGS = ["start", "pi-dispatch-egress-proxy"];
+const EGRESS_UNPAUSE_ARGS = ["unpause", "pi-dispatch-egress-proxy"];
+const EGRESS_RM_ARGS = ["rm", "-f", "pi-dispatch-egress-proxy"];
 const EGRESS_RUN_ARGS = [
 	"run",
 	"-d",
@@ -112,7 +119,7 @@ const EGRESS_RUN_ARGS = [
 	"./deploy/egress-proxy.conf:/etc/squid/squid.conf:ro,z",
 	"-v",
 	"./egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro,z",
-	"ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029",
+	EGRESS_PROXY_IMAGE,
 ];
 
 /**
@@ -186,7 +193,7 @@ export async function runUp(argv = [], deps = {}) {
 	// PI_BACKENDS=podman before init has written `.env`); `.env` fills the keys the shell leaves unset; a key BOTH set
 	// differently stops `up` (round 2, E5), because the service will run the file's value. A `.env` line touching one
 	// of these keys that the loaders read differently stops `up` before anything runs, as `service install` refuses.
-	const venue = deploymentVenueEnv({ env, fs, envPath: join(cwd, ".env"), platform });
+	const venue = deploymentVenueEnv({ env, fs, envPath: join(cwd, ".env"), platform, command: "up" });
 	if (venue.error) {
 		out(`✗ ${venue.error}\n\nup: cannot tell which venue this deployment runs: fix the above, then re-run \`pi-dispatch up\`.\n`);
 		return 1;
@@ -297,7 +304,8 @@ export async function runUp(argv = [], deps = {}) {
 	// nothing the operator wrote can be lost here.
 	out("\ninit (never overwrites — an existing file is reported and kept):\n");
 	runInitFn ??= (await import("./init.mjs")).runInit;
-	runInitFn(cwd, { out });
+	// The venues THIS pass decided (issue #453), so init's next steps never name a runtime up just did not drive.
+	runInitFn(cwd, { out, venues });
 	summary.push(["init", "ran — existing files were kept untouched, missing ones scaffolded"]);
 
 	// (e) WEBHOOK_SECRET, only into a .env that exists (init just scaffolded one unless the operator
@@ -466,26 +474,110 @@ export async function runUp(argv = [], deps = {}) {
 		// shipped name whatever that key said, so it could report a proxy present that no job attaches to, or start one
 		// beside the one the worker actually uses. It now asks about the name the worker attaches by and starts nothing:
 		// that container is the operator's, and the shipped command below would not produce it.
-		if ((await runCmd(spawn, "docker", ["inspect", "--format={{.State.Running}}", proxyName])) === 0) {
+		// RUNNING, read off stdout alone, exactly as the podman path below (issue #453): `docker inspect` exits 0 for an
+		// exited container too, so the exit code called a stopped proxy "present" while every job was refused pre-spend.
+		// `.State.Status`, not `.State.Running` (issue #453): the status word is what names a paused or restarting container.
+		const inspect = await runCmdQuery(spawn, "docker", ["inspect", "--format={{.State.Status}}", proxyName]);
+		const status = inspect.code === 0 ? inspect.stdout.trim() : null;
+		if (status === "running") {
 			out(`\n✓ Egress proxy present (${proxyName}, named by PI_EGRESS_PROXY)\n`);
 			summary.push(["egress", `${proxyName} (PI_EGRESS_PROXY) present, left untouched`]);
+		} else if (inspect.code === 0) {
+			// It exists and is not running. Still the operator's container: reported, never started, for the reason above.
+			out(`\n✗ PI_EGRESS_PROXY names ${proxyName}, and that container exists but is not running (${status || "no status"}). up starts only the shipped ${DEFAULT_EGRESS_PROXY}, so start ${proxyName} yourself\n`);
+			summary.push(["egress", `${proxyName} (PI_EGRESS_PROXY) exists but is not running; every job is refused pre-spend until it runs`]);
 		} else {
 			out(`\n✗ PI_EGRESS_PROXY names ${proxyName}, and docker has no container of that name. up starts only the shipped ${DEFAULT_EGRESS_PROXY}, so start ${proxyName} yourself\n`);
 			summary.push(["egress", `${proxyName} (PI_EGRESS_PROXY) not found; every job is refused pre-spend until it runs`]);
 		}
 	} else if (dockerUsed && egressArmedFn(venueEnv)) {
-		if ((await runCmd(spawn, "docker", ["inspect", "--format={{.State.Running}}", "pi-dispatch-egress-proxy"])) === 0) {
+		// RUNNING and CURRENT, from one inspect (issue #453; `egress-proxy-state.mjs` says why each). Running is
+		// `.State.Status` "running". Current is the pinned image with its own entrypoint and command and THIS folder's two
+		// files mounted and nothing else: a container of the shipped name that differs is not this deployment's proxy,
+		// whether it is running or stopped. Mounts whose sources do not resolve on this host are UNKNOWN, never stale.
+		const inspect = await runCmdQuery(spawn, "docker", ["inspect", PROXY_STATE_FORMAT, DEFAULT_EGRESS_PROXY]);
+		const state = inspect.code === 0 ? parseProxyState(inspect.stdout) : null;
+		const judged = state ? shippedProxyDrift(state, { cwd, platform, realpath: (p) => (typeof fs.realpathSync === "function" ? fs.realpathSync(p) : p) }) : { drift: [], unknown: null };
+		const drift = judged.drift;
+		// The files a start or a recreate mounts. Both, not the allowlist alone: a missing egress-proxy.conf is bind-mounted
+		// as a directory the runtime creates in its place (measured, Docker Engine 29.8.1: the host path became a root-owned
+		// directory, and the create failed "not a directory: Are you trying to mount a directory onto a file", exit 127).
+		const missingFile = ["egress-allowlist.conf", "deploy/egress-proxy.conf"].find((f) => !fs.existsSync(join(cwd, f)));
+		if (judged.unknown) out(`\n⚠ could not compare ${DEFAULT_EGRESS_PROXY}'s mounts on this host: ${judged.unknown}. Everything else about it is still judged, and up replaces nothing while one of its own two mounts is unknown\n`);
+		if (inspect.code === 0 && !state) {
+			// It exists and its state could not be read: never started, never replaced, and never a `docker run` on a name
+			// that is taken.
+			out(`\n✗ ${DEFAULT_EGRESS_PROXY} exists, but its state could not be read from \`docker inspect\`, so up leaves it as it is; \`docker inspect ${DEFAULT_EGRESS_PROXY}\` shows it\n`);
+			summary.push(["egress", "proxy exists, state unreadable: left as it is"]);
+		} else if (state?.status === "running" && drift.length === 0) {
 			out("\n✓ Egress proxy already present (pi-dispatch-egress-proxy)\n");
-			summary.push(["egress", "proxy already present — left untouched"]);
-		} else if (!fs.existsSync(join(cwd, "egress-allowlist.conf"))) {
-			out("\n✗ the egress policy is on but egress-allowlist.conf is not here — not starting a proxy with no allowlist\n");
-			summary.push(["egress", "skipped — no egress-allowlist.conf in this folder; run `pi-dispatch init` here, then `up` again"]);
+			summary.push(["egress", judged.unknown ? "proxy already present, left untouched (its mounts could not be compared on this host)" : "proxy already present, left untouched"]);
+		} else if (state && drift.length > 0) {
+			// STALE, running or not: never started as it is. Its policy is not this deployment's, so the offer is to replace
+			// it with the shipped one, shown line for line. A running one may be carrying jobs: its job and sandbox networks
+			// are named, since removing it cuts each of them off mid-run.
+			out(`\n✗ ${DEFAULT_EGRESS_PROXY} exists (${state.status}) but is not this deployment's proxy: ${drift.join("; ")}\n`);
+			const attached = jobNetworksOf(state);
+			// Never removed while one of its two own mounts is unknown (round-cap re-review): the other findings are said.
+			const unjudged = Boolean(judged.unknown);
+			if (yes && attached.length > 0 && state.status === "running" && !judged.unknown && !missingFile) out("--yes does not cover replacing a proxy that jobs are using: answer below, or stop the worker and re-run\n");
+			if (unjudged) {
+				out(`not replaced: one of its own mounts could not be compared on this host (above), so up leaves it as it is; \`docker ${EGRESS_RM_ARGS.join(" ")}\` and \`pi-dispatch up\` replace it if you have checked it\n`);
+				summary.push(["egress", "stale proxy left as it is: one of its mounts could not be compared on this host"]);
+			} else if (missingFile) {
+				out(`✗ ${missingFile} is not here, so up cannot recreate it from this folder; run \`pi-dispatch init\` here (or \`up\` from the deployment folder), then \`up\` again\n`);
+				summary.push(["egress", `stale proxy left as it is: no ${missingFile} in this folder to recreate it from; its policy is not this deployment's`]);
+			} else if (
+				await consent(
+					`up would replace it with the shipped proxy (the same semantics as deploy/docker-compose.yml --profile egress)${attached.length > 0 ? `. It is attached to ${attached.join(", ")}: removing it cuts those jobs off from their egress mid-run, so stop the worker first (and let running jobs finish)` : ""}:`,
+					[`docker ${EGRESS_RM_ARGS.join(" ")}`, `docker ${EGRESS_NETWORK_ARGS.join(" ")}   (only if it does not exist yet)`, `docker ${quoteArgs(EGRESS_RUN_ARGS)}`],
+					// `--yes` does not cover cutting live jobs off (gate round 3): with a job network attached to a RUNNING
+					// proxy the lines are printed and a person must answer, so an unattended `up --yes` never does it.
+					{ yes: yes && !(attached.length > 0 && state.status === "running"), out, prompt },
+				)
+			) {
+				await runStreamed(spawn, "docker", EGRESS_RM_ARGS, out);
+				await ensureEgressNetwork(spawn, out);
+				if ((await runStreamed(spawn, "docker", EGRESS_RUN_ARGS, out)) !== 0) {
+					out("✗ could not start the egress proxy; continuing, doctor below will re-check it\n");
+					summary.push(["egress", "recreate failed: every job refuses pre-spend until it is up (costs no budget, runs nothing)"]);
+				} else {
+					summary.push(["egress", "replaced the stale pi-dispatch-egress-proxy with the shipped one"]);
+				}
+			} else {
+				out(`skipped: until it is replaced, jobs use a proxy whose policy is not this deployment's (\`docker ${EGRESS_RM_ARGS.join(" ")}\`, then \`pi-dispatch up\`)\n`);
+				summary.push(["egress", "stale proxy left as it is (declined): its policy is not this deployment's"]);
+			}
+		} else if (missingFile) {
+			out(`\n✗ the egress policy is on but ${missingFile} is not here, so no proxy is started without it\n`);
+			summary.push(["egress", `skipped: no ${missingFile} in this folder; run \`pi-dispatch init\` here (or \`up\` from the deployment folder), then \`up\` again`]);
+		} else if (state?.status === "restarting") {
+			// A crash loop: the restart policy is already starting it, and its squid keeps exiting. Nothing to start.
+			out(`\n✗ ${DEFAULT_EGRESS_PROXY} is restarting: its squid keeps exiting and its restart policy keeps bringing it back. \`docker logs ${DEFAULT_EGRESS_PROXY}\` says why; meanwhile each job is retried once, then failed\n`);
+			summary.push(["egress", "proxy crash-looping: see `docker logs pi-dispatch-egress-proxy`"]);
+		} else if (state) {
+			// Current, and stopped or paused. `docker run --name` would fail on the name conflict, so the SAME container is
+			// offered back: `unpause` for a paused one, else `start`, which is what `docker compose --profile egress up -d`
+			// does for a stopped container whose configuration is unchanged. It destroys nothing, and a compose-created
+			// container stays compose's.
+			const args = state.status === "paused" ? EGRESS_UNPAUSE_ARGS : EGRESS_START_ARGS;
+			if (await consent(`The egress policy is on (PI_EGRESS=0 opts out) and the allowlist proxy exists but is ${state.status}. up would ${args[0]} that same container (as deploy/docker-compose.yml --profile egress up -d does):`, [`docker ${args.join(" ")}`], { yes, out, prompt })) {
+				if ((await runStreamed(spawn, "docker", args, out)) !== 0) {
+					out(`✗ could not ${args[0]} the egress proxy; \`docker ${EGRESS_RM_ARGS.join(" ")}\` and re-run \`pi-dispatch up\` recreates it. Continuing; doctor below will re-check it\n`);
+					summary.push(["egress", `${args[0]} of the ${state.status} proxy failed; every job refuses pre-spend until it is up (costs no budget, runs nothing)`]);
+				} else {
+					summary.push(["egress", `${args[0] === "unpause" ? "unpaused" : "started"} the ${state.status} pi-dispatch-egress-proxy`]);
+				}
+			} else {
+				out(`skipped: ${args[0]} it later with \`docker ${args.join(" ")}\`\n`);
+				summary.push(["egress", "skipped (declined): every job is refused pre-spend until the proxy is up (PI_EGRESS=0 opts out)"]);
+			}
 		} else if (
-			await consent("The egress policy is on (PI_EGRESS=0 opts out) but the allowlist proxy is not running. up would start it (same semantics as deploy/docker-compose.yml --profile egress):", [`docker ${EGRESS_NETWORK_ARGS.join(" ")}`, `docker ${quoteArgs(EGRESS_RUN_ARGS)}`], { yes, out, prompt })
+			await consent("The egress policy is on (PI_EGRESS=0 opts out) but the allowlist proxy is not running. up would start it (same semantics as deploy/docker-compose.yml --profile egress):", [`docker ${EGRESS_NETWORK_ARGS.join(" ")}   (only if it does not exist yet)`, `docker ${quoteArgs(EGRESS_RUN_ARGS)}`], { yes, out, prompt })
 		) {
 			// The network may already exist from a previous run; that is not a failure, so its code is not
 			// checked. The proxy is what matters and it is checked.
-			await runStreamed(spawn, "docker", EGRESS_NETWORK_ARGS, out);
+			await ensureEgressNetwork(spawn, out);
 			if ((await runStreamed(spawn, "docker", EGRESS_RUN_ARGS, out)) !== 0) {
 				out("✗ could not start the egress proxy — continuing; doctor below will re-check it\n");
 				summary.push(["egress", "start failed — every job refuses pre-spend until it is up (costs no budget, runs nothing)"]);
@@ -558,81 +650,6 @@ Next:
 		out("  (podman venue: a worker started by hand reads only its shell, so export the same PI_BACKENDS there first, or run it as a service with `pi-dispatch service install`, which reads .env)\n");
 	}
 	return doctorCode;
-}
-
-/**
- * The venue keys this pass decides with (D2): this shell's value where it sets one, else the deployment `.env`'s, read
- * with `readStackKeys` exactly as `service install` reads them. Returns `{ env, fromFile, disagreements }` or
- * `{ error }`. `env` is the whole environment with the file's keys filled in; `fromFile` is only what the file
- * supplied, for doctor's layering; `disagreements` names each key both set differently.
- */
-function deploymentVenueEnv({ env, fs, envPath, platform }) {
-	let keys = {};
-	const notes = [];
-	// The loader of the file on THIS platform, as service.mjs reads it (round 2, E6): systemd's EnvironmentFile= on
-	// Linux, the sh wrapper on macOS, the cmd wrapper on Windows. Off Linux the venue refuses the host anyway, so a
-	// line that platform's loader reads differently is noted and never stops `up`.
-	const linux = platform === "linux";
-	const loader = linux ? "systemd" : platform === "darwin" ? "shell" : "cmd";
-	if (fs.existsSync(envPath)) {
-		let text = null;
-		try {
-			text = String(fs.readFileSync(envPath, "utf8"));
-		} catch (err) {
-			// Said rather than silent (round 2 nit): the venue then comes from this shell alone.
-			notes.push(`${envPath} could not be read (${err?.message}), so PI_BACKENDS, PI_EGRESS and PI_EGRESS_PROXY come from this shell alone`);
-		}
-		if (text !== null) {
-			const read = readStackKeys(text, { loader, path: envPath });
-			if (read.error && linux) return { error: read.error };
-			if (read.error) notes.push(`${read.error}; off Linux the podman venue refuses this host anyway, so this pass reads the venue from this shell`);
-			else keys = read.keys;
-		}
-	}
-	const merged = { ...env };
-	const fromFile = {};
-	const conflicts = [];
-	for (const key of STACK_KEYS) {
-		if (!Object.hasOwn(keys, key)) continue;
-		if (typeof env[key] === "string") {
-			// Compared as the worker READS them (round 3, D4), not as strings: ` podman` and `podman,podman` are the list
-			// `podman`, and refusing them sent an operator to reconcile two values that already agree.
-			if (venueKeyMeaning(key, env[key]) !== venueKeyMeaning(key, keys[key])) conflicts.push(`${key} is ${quotedShown(env[key])} in this shell and ${quotedShown(keys[key])} in ${envPath}`);
-			continue;
-		}
-		merged[key] = keys[key];
-		fromFile[key] = keys[key];
-	}
-	// A KNOWN disagreement is a refusal (round 2, E5), not a warning: this pass would stand up one venue's stack and the
-	// service installed next would run the other. The file is what the service runs, so it is the one to change unless
-	// the shell's value was a one-off.
-	if (conflicts.length > 0) {
-		return { error: `${conflicts.join("; ")}. up would drive the shell's venue while the service runs the file's. Make them agree: change ${envPath} (what the service reads), or unset the key in this shell` };
-	}
-	return { env: merged, fromFile, notes };
-}
-
-/**
- * What a venue key MEANS to the worker, for comparing two spellings of it: the parsed list for PI_BACKENDS, on or off
- * for PI_EGRESS, the resolved name for PI_EGRESS_PROXY exactly as egressProxyName resolves it (empty is the default
- * name; NOT trimmed, because nothing that reads the name trims it, so " x" and "x" are different proxies to the worker
- * and to podman). A value the worker would refuse keeps its raw spelling, so two different unreadable values still
- * disagree and the doctor below names them.
- */
-function venueKeyMeaning(key, value) {
-	try {
-		if (key === "PI_BACKENDS") return `list:${parseBackendList(value).join(",")}`;
-		if (key === "PI_EGRESS") return `egress:${egressArmedFn({ PI_EGRESS: value }) ? "on" : "off"}`;
-		return `proxy:${egressProxyName({ PI_EGRESS_PROXY: value })}`;
-	} catch {
-		return `raw:${value}`;
-	}
-}
-
-/** A value shown in quotes, so a leading space or an empty value is visible; control characters escaped as ever. */
-function quotedShown(value) {
-	const shown = envValueShown(value);
-	return shown.startsWith('"') ? shown : `"${shown}"`;
 }
 
 /**
@@ -719,8 +736,10 @@ async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, 
 		// (measured), so the exit code alone called a stopped hand-started proxy "present" and offered nothing, which is
 		// exactly the upgrade this step exists for. A stopped one is offered the unit, under the foreign-container rule.
 		// stdout ALONE (round 2, E2): podman's stderr warnings on an ordinary account would otherwise make `true` unequal.
-		const inspect = await runCmdQuery(spawn, "podman", ["inspect", "--format={{.State.Running}}", DEFAULT_EGRESS_PROXY]);
-		if (inspect.code === 0 && inspect.stdout.trim() === "true") {
+		// `.State.Status` (issue #453): Podman reports a paused container `paused` and one between restarts `stopped`
+		// (measured on 4.9.3 and 5.8.1), and only `running` carries a job's traffic.
+		const inspect = await runCmdQuery(spawn, "podman", ["inspect", "--format={{.State.Status}}", DEFAULT_EGRESS_PROXY]);
+		if (inspect.code === 0 && inspect.stdout.trim() === "running") {
 			out(`\n✓ Egress proxy already present under this account's Podman (${DEFAULT_EGRESS_PROXY})\n`);
 			summary.push(["egress (podman)", "proxy already present, left untouched"]);
 			components.proxy = false;
@@ -869,6 +888,16 @@ function runCmdQuery(spawn, cmd, args) {
 		child.on("error", () => resolve({ code: null, stdout, stderr }));
 		child.on("close", (code) => resolve({ code, stdout, stderr }));
 	});
+}
+
+/**
+ * `docker network create pi-dispatch-egress-out` only where it does not exist (exec round 3): a recreate otherwise printed
+ * the daemon's "network name ... already used" every time. A quiet inspect first; its answer is never a failure, since the
+ * run that follows is what is checked.
+ */
+async function ensureEgressNetwork(spawn, out) {
+	if ((await runCmdQuery(spawn, "docker", ["network", "inspect", EGRESS_NETWORK_ARGS[2]])).code === 0) return;
+	await runStreamed(spawn, "docker", EGRESS_NETWORK_ARGS, out);
 }
 
 /** Like runCmd but with stdout+stderr captured, for read-only lookups (docker ps). */

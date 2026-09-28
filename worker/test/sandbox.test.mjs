@@ -1375,7 +1375,10 @@ describe("decideSandboxJobUser on the podman venue (#429)", () => {
 	const USER_MOUNTS = `${HOME}/.config/containers/mounts.conf`;
 	const USER_CONF = `${HOME}/.config/containers/containers.conf`;
 	/** A host fs: `files` maps a path to its text, everything else is ENOENT. */
-	const hostFs = (files = { [USER_MOUNTS]: "" }) => {
+	// user@1234.service's controllers: the account's user manager running with them delegated (issue #453).
+	const USER_MANAGER = "/sys/fs/cgroup/user.slice/user-1234.slice/user@1234.service/cgroup.controllers";
+	const hostFs = (given = { [USER_MOUNTS]: "" }) => {
+		const files = { [USER_MANAGER]: "cpuset cpu io memory pids\n", ...given };
 		const miss = (path) => {
 			throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
 		};
@@ -1385,7 +1388,7 @@ describe("decideSandboxJobUser on the podman venue (#429)", () => {
 			readdirSync: (path) => miss(path),
 		};
 	};
-	const INFO = { rootless: true, serviceIsRemote: false, selinux: true, cgroupVersion: "v2", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1" };
+	const INFO = { rootless: true, serviceIsRemote: false, selinux: true, cgroupVersion: "v2", cgroupManager: "systemd", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1" };
 	const answered = (over = {}) => async () => ({ answered: true, info: { ...INFO, ...over } });
 	const base = { venue: "podman", platform: "linux", euid: 1234, egid: 1234, home: HOME, env: {}, fs: hostFs(), readInfo: answered(), imageCapabilities: async () => ({ ok: true, capabilities: ["anyUid"] }) };
 	const stamped = { image: "pi-job:x", jobUser: { user: "1234:1234", home: "/home/pi" } };
@@ -1425,11 +1428,11 @@ describe("decideSandboxJobUser on the podman venue (#429)", () => {
 
 	test("the observations are judged against the floor exactly as a job's are", async () => {
 		const floor = { isolation: "enforced" };
-		const undelegated = await decideSandboxJobUser({ ...base, backendFloor: floor, readInfo: answered({ controllers: ["cpu"] }), manifest: stamped });
+		const undelegated = await decideSandboxJobUser({ ...base, backendFloor: floor, fs: hostFs({ [USER_MOUNTS]: "", [USER_MANAGER]: "cpu\n" }), manifest: stamped });
 		assert.equal(undelegated.refused, "backend-floor");
 		assert.match(undelegated.message, /PI_BACKEND_FLOOR asks for something this host is not observed to provide/);
 		assert.ok((await decideSandboxJobUser({ ...base, backendFloor: floor, manifest: stamped })).user, "a delegated host passes the same floor");
-		assert.ok((await decideSandboxJobUser({ ...base, readInfo: answered({ controllers: ["cpu"] }), manifest: stamped })).user, "no floor, nothing observed refuses");
+		assert.ok((await decideSandboxJobUser({ ...base, fs: hostFs({ [USER_MOUNTS]: "", [USER_MANAGER]: "cpu\n" }), manifest: stamped })).user, "no floor, nothing observed refuses");
 		// A miss that rests only on a read that did not answer is its own token, not the floor's: the fix is to make
 		// podman answer, not to change the host.
 		const unread = await decideSandboxJobUser({ ...base, backendFloor: floor, readInfo: async () => ({ answered: false, reason: "timeout", transient: true }), manifest: stamped });

@@ -180,7 +180,7 @@ export function egressEnv({ proxy = DEFAULT_EGRESS_PROXY, armed }) {
  *
  * ZERO spawns when unarmed, which is what makes a deployment without a policy pay nothing at all.
  *
- * The gate gets `Running`, not `Health`. A healthcheck is advisory and can flap; a money gate that refuses
+ * The gate gets `Status` ("running"), not `Health`. A healthcheck is advisory and can flap; a money gate that refuses
  * on a flapping signal silently drops real work, and one that retries on it burns the second budget slot
  * this whole requirement exists to save. `doctor` reports health, where a human is reading.
  *
@@ -189,13 +189,28 @@ export function egressEnv({ proxy = DEFAULT_EGRESS_PROXY, armed }) {
  * party, which is not a thing to do before every job on every deployment. `doctor` does it once, when
  * asked. What is left unproven is stated where an operator reads it rather than implied away.
  */
+/** The proxy states that refuse a job (gate round 3's simple rule, beside `makeEgressPreflight`). */
+// `created` among them (round-cap re-review): a container created and never started stays so until someone acts
+// (measured on Docker Engine 29.8.1: a create that failed its mount stayed `created`, ExitCode 127).
+export const STOPPED_PROXY_STATES = new Set(["paused", "exited", "dead", "created"]);
+
 export function makeEgressPreflight({ proxy = DEFAULT_EGRESS_PROXY, armed = false, spawnFn = spawn, bin = "docker" } = {}) {
 	// Issue #354: `bin` is the venue's CLI, for both probes, so the proxy is looked for where the job will run.
 	return async function egressPreflight() {
 		if (!armed) return { ok: true };
-		const probe = await runDocker(spawnFn, ["inspect", "--format={{.State.Running}}", proxy], true, bin);
+		// `.State.Status` "running" (issue #453): measured on Docker Engine 29.8.1, a paused and a restarting container both
+		// read `.State.Running` true, and neither carries a job's traffic; the status word tells them apart.
+		const probe = await runDocker(spawnFn, ["inspect", "--format={{.State.Status}}", proxy], true, bin);
 		if (probe.code === 0) {
-			return probe.stdout.trim() === "true" ? { ok: true, proxy } : { proxyStopped: proxy };
+			const status = probe.stdout.trim();
+			// THE SIMPLE RULE (issue #453, gate round 3 and the re-review): only `running` admits; `paused`, `exited`, `dead`
+			// and `created` are a stopped proxy, which stays so until someone acts, so the job is refused; EVERY other word
+			// (restarting, stopping, removing, initialized, podman's `stopped` between restarts, one no runtime prints yet)
+			// is an infra retry with the state in its words. BullMQ gives a job two attempts, so that is one retry, then
+			// the job fails: a retry buys a moment, not a wait.
+			if (status === "running") return { ok: true, proxy };
+			if (STOPPED_PROXY_STATES.has(status)) return { proxyStopped: proxy };
+			return { unavailable: proxy, state: /^[a-z]{1,20}$/.test(status) ? status : "unreported" };
 		}
 		if ((await runDocker(spawnFn, ["info"], false, bin)).code === 0) return { proxyMissing: proxy };
 		return { unavailable: proxy };

@@ -7,9 +7,11 @@
  * scoped pauses, an empty packages list stages nothing, an empty subscriptions list declares no plan
  * prices — so a fresh deployment starts inert and is opted into feature by feature.
  */
-import { existsSync, copyFileSync, writeFileSync } from "node:fs";
+import { existsSync, copyFileSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
+import { parseBackendList, venuesOf } from "./backends.mjs";
+import { deploymentVenueEnv } from "./deployment-venue.mjs";
 
 const EMPTY_TRIGGERS = `${JSON.stringify({ triggers: [] }, null, 2)}\n`;
 /**
@@ -60,8 +62,15 @@ api.anthropic.com
 registry.npmjs.org
 `;
 
+/**
+ * `deps.env` is the caller's environment (the CLI's and doctor's pass theirs), and `deps.venues` a venue set the caller
+ * already decided (`up` passes its own, so the two never disagree). Otherwise the venue is decided as `up` decides it
+ * (`deploymentVenueEnv`): this shell where it sets a key, else the deployment `.env`, and a disagreement between the two
+ * is said instead of any next steps. The default `env` is `{}` and not `process.env` so a test is never steered by the
+ * shell it runs in.
+ */
 export function runInit(cwd = process.cwd(), deps = {}) {
-	const { fs = { existsSync, copyFileSync, writeFileSync }, out = (s) => process.stdout.write(s) } = deps;
+	const { fs = { existsSync, copyFileSync, readFileSync, writeFileSync }, out = (s) => process.stdout.write(s), env = {}, platform = process.platform } = deps;
 	const results = [];
 
 	// .env from the example. Prefer the copy in cwd (the clone's repo root); fall back to the copy
@@ -90,7 +99,25 @@ export function runInit(cwd = process.cwd(), deps = {}) {
 	for (const [verb, name, note] of results) {
 		out(`${verb.padEnd(7)} ${name.padEnd(20)} ${note}\n`);
 	}
-	out(nextSteps());
+	if (deps.venues) {
+		out(nextSteps(deps.venues, { platform }));
+		return 0;
+	}
+	// Decided exactly as `up` decides it (issue #453, gate round 1): a next-steps ladder for a venue `up` would refuse to
+	// guess is a ladder for the wrong venue. The files above are scaffolded either way; only the steps wait.
+	const venue = deploymentVenueEnv({ env, fs, envPath, platform, command: "init" });
+	if (venue.error) {
+		out(`\nNext: which venue this deployment runs is unknown, so no steps are shown: ${venue.error}. Then run \`pi-dispatch init\` again for them (it keeps every file above).\n`);
+		return 0;
+	}
+	for (const note of venue.notes) out(`⚠ ${note}\n`);
+	try {
+		parseBackendList(venue.env.PI_BACKENDS);
+	} catch (err) {
+		out(`\nNext: which venue this deployment runs is unknown, so no steps are shown: ${err.message}. Fix PI_BACKENDS, then run \`pi-dispatch init\` again for them (it keeps every file above).\n`);
+		return 0;
+	}
+	out(nextSteps(venuesOf(venue.env), { platform }));
 	return 0;
 }
 
@@ -104,7 +131,14 @@ function scaffold(fs, results, path, content, note) {
 	}
 }
 
-function nextSteps() {
+/**
+ * The docker text is unchanged byte for byte for every set that includes `local`. A podman-only deployment (issue
+ * #453) gets the podman ladder instead, the steps of docs/podman.md "Setup" in the order a fresh folder needs them:
+ * the job image into this account's own store, the venue key and provider key in `.env` (what `up` and `service
+ * install` read), the stack as Quadlet units, doctor, and the worker as a user service.
+ */
+export function nextSteps(venues = { localUsed: true, podmanUsed: false }, { platform = "linux" } = {}) {
+	if (venues.podmanUsed && !venues.localUsed) return platform === "linux" ? PODMAN_NEXT_STEPS : PODMAN_OFF_LINUX;
 	return `
 Next:
   1. docker pull ghcr.io/edgehero/pi-job:latest && docker tag ghcr.io/edgehero/pi-job:latest pi-job:latest
@@ -118,3 +152,26 @@ Operator panel (optional): pi install npm:@edgehero/pi-dispatch-admin   then   /
   (or let the panel do all of the above: /dispatch setup walks these steps with a consent per action)
 `;
 }
+
+// Off Linux the podman venue refuses the host (`podman-platform`: Podman machine on macOS and Windows was never
+// measured), so its ladder would walk an operator into Quadlet steps that cannot work here.
+const PODMAN_OFF_LINUX = `
+Next: PI_BACKENDS lists only the podman venue, which runs on Linux alone: on this host the worker refuses it
+(podman-platform), so there are no podman steps to run here. Run this deployment on a Linux host, or add \`local\` to
+PI_BACKENDS to run jobs on Docker here (then run \`pi-dispatch init\` again for those steps).
+`;
+
+const PODMAN_NEXT_STEPS = `
+Next (the podman venue; run these as the worker's own account. First set the account up as docs/podman.md "Setup"
+steps 1-4 say, linger included: sudo loginctl enable-linger <account>, without which a job gets no bounds):
+  1. podman pull ghcr.io/edgehero/pi-job:latest && podman tag ghcr.io/edgehero/pi-job:latest pi-job:latest
+                                                        # the prebuilt job image, in this account's own store
+  2. edit .env                                          # PI_BACKENDS=podman, and ANTHROPIC_API_KEY (or your provider's key)
+  3. pi-dispatch up                                     # Valkey and the egress proxy as Quadlet units in your user manager
+  4. pi-dispatch doctor                                 # verify Podman, Valkey, image, and key
+  5. pi-dispatch service install                        # the worker as a user service, after those units (also installs them)
+  6. pi-dispatch doctor --live                          # read the bounds, egress and job user back off real containers
+
+Operator panel (optional): pi install npm:@edgehero/pi-dispatch-admin   then   /dispatch
+  (or let the panel do all of the above: /dispatch setup walks these steps with a consent per action)
+`;

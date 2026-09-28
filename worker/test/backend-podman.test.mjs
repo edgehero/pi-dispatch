@@ -26,6 +26,7 @@ function infoBody(over = {}) {
 		{
 			host: {
 				cgroupVersion: "v2",
+				cgroupManager: "systemd",
 				cgroupControllers: ["cpuset", "cpu", "io", "memory", "pids"],
 				serviceIsRemote: false,
 				remoteSocket: { path: "/run/user/1234/podman/podman.sock", exists: false },
@@ -41,7 +42,7 @@ function infoBody(over = {}) {
 }
 // An escape byte built at run time: a literal one in source survives a copy and paste and then does not.
 const ESC = String.fromCharCode(27);
-const INFO = () => ({ rootless: true, serviceIsRemote: false, selinux: true, cgroupVersion: "v2", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1", graphRoot: "/home/op/.local/share/containers/storage" });
+const INFO = () => ({ rootless: true, serviceIsRemote: false, selinux: true, cgroupVersion: "v2", cgroupManager: "systemd", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1", graphRoot: "/home/op/.local/share/containers/storage" });
 const answered = (over = {}) => ({ answered: true, info: { ...INFO(), ...over } });
 
 /**
@@ -49,17 +50,22 @@ const answered = (over = {}) => ({ answered: true, info: { ...INFO(), ...over } 
  * every call on it throws. Everything else is ENOENT, which is what an unconfigured host looks like.
  */
 function fakeFs({ files = {}, dirs = {}, errors = {} } = {}) {
+	// The account's running user manager with the controllers delegated, as on the measured host, unless a test says
+	// otherwise: `[USER_MANAGER]: null` is an account with none running (issue #453). Added to the caller's own object,
+	// since a test may edit `files` after this and expect the change read.
+	if (!Object.hasOwn(files, USER_MANAGER)) files[USER_MANAGER] = DELEGATED;
+	const has = (path) => Object.hasOwn(files, path) && files[path] !== null;
 	const fail = (path) => {
 		const code = errors[path] ?? "ENOENT";
 		throw Object.assign(new Error(`${code}: ${path}`), { code });
 	};
 	return {
 		statSync(path) {
-			if (errors[path] || !Object.hasOwn(files, path)) fail(path);
+			if (errors[path] || !has(path)) fail(path);
 			return { size: Buffer.byteLength(files[path]) };
 		},
 		readFileSync(path) {
-			if (errors[path] || !Object.hasOwn(files, path)) fail(path);
+			if (errors[path] || !has(path)) fail(path);
 			return files[path];
 		},
 		readdirSync(path) {
@@ -69,6 +75,9 @@ function fakeFs({ files = {}, dirs = {}, errors = {} } = {}) {
 	};
 }
 const HOME = "/home/op";
+// user@1234.service's cgroup, whose controllers file is the fact podmanBoundsDelegated reads (issue #453).
+const USER_MANAGER = "/sys/fs/cgroup/user.slice/user-1234.slice/user@1234.service/cgroup.controllers";
+const DELEGATED = "cpuset cpu io memory pids\n";
 const USER_MOUNTS = `${HOME}/.config/containers/mounts.conf`;
 const clean = () => fakeFs({ files: { [USER_MOUNTS]: "" } });
 const observe = (read, fs = clean(), over = {}) => mod.observePodman({ read, fs, home: HOME, env: {}, euid: 1234, ...over });
@@ -82,9 +91,9 @@ test("parsePodmanInfo reads the measured shape and nothing else", { skip }, () =
 	}
 	// Every field null when absent or the wrong type: a missing `rootless` is never read as rootless, nor a missing
 	// `serviceIsRemote` as local.
-	assert.deepEqual(mod.parsePodmanInfo(JSON.stringify({ host: {} })), { rootless: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, controllers: null, version: null, graphRoot: null });
-	const odd = mod.parsePodmanInfo(infoBody({ host: { serviceIsRemote: "false", security: { rootless: 1, selinuxEnabled: "true" }, cgroupVersion: `v2${ESC}[2J`, cgroupControllers: ["pids", 7, "memory\n", "cpu"] }, version: { Version: `5.8.1${ESC}]0;x` } }));
-	assert.deepEqual(odd, { rootless: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, controllers: ["pids", "cpu"], version: null, graphRoot: "/home/op/.local/share/containers/storage" });
+	assert.deepEqual(mod.parsePodmanInfo(JSON.stringify({ host: {} })), { rootless: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, cgroupManager: null, controllers: null, version: null, graphRoot: null });
+	const odd = mod.parsePodmanInfo(infoBody({ host: { serviceIsRemote: "false", security: { rootless: 1, selinuxEnabled: "true" }, cgroupVersion: `v2${ESC}[2J`, cgroupManager: `systemd${ESC}[2J`, cgroupControllers: ["pids", 7, "memory\n", "cpu"] }, version: { Version: `5.8.1${ESC}]0;x` } }));
+	assert.deepEqual(odd, { rootless: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, cgroupManager: null, controllers: ["pids", "cpu"], version: null, graphRoot: "/home/op/.local/share/containers/storage" });
 	// The store is a path or nothing: a relative one, a non-string or one carrying a control byte is no fact.
 	for (const graphRoot of ["relative/path", 7, `/home/op${ESC}[2J`, ""]) assert.equal(mod.parsePodmanInfo(JSON.stringify({ host: {}, store: { graphRoot } })).graphRoot, null, JSON.stringify(graphRoot));
 });
@@ -184,15 +193,22 @@ test("observePodman credits a clean rootless host, and the table's words then ho
 
 test("podmanBoundsDelegated needs rootless cgroup v2 with pids, memory and cpu delegated, and no cgroups key", { skip }, () => {
 	const bounds = (read, fs) => observe(read, fs).observations[PODMAN_BOUNDS_DELEGATED];
+	const manager = (text) => fakeFs({ files: { [USER_MOUNTS]: "", [USER_MANAGER]: text } });
 	for (const missing of ["pids", "memory", "cpu"]) {
-		const o = observe(answered({ controllers: INFO().controllers.filter((c) => c !== missing) }));
+		const o = observe(answered(), manager(`${["cpuset", "cpu", "io", "memory", "pids"].filter((c) => c !== missing).join(" ")}\n`));
 		assert.equal(o.observations[PODMAN_BOUNDS_DELEGATED], false, missing);
-		assert.match(o.evidence[PODMAN_BOUNDS_DELEGATED], new RegExp(`the ${missing} cgroup controller is not delegated`));
+		assert.equal(o.evidence[PODMAN_BOUNDS_DELEGATED], `the ${missing} cgroup controller is not delegated to this account's systemd user manager (user@1234.service), so a job cannot have that bound: measured for cpu, Podman 5.8.1 refuses to start a container carrying --cpus (exit 126, "controller \`cpu\` is not available")`);
 	}
-	assert.equal(bounds(answered({ controllers: ["io"] })), false);
-	assert.equal(bounds(answered({ controllers: null })), false);
+	assert.equal(bounds(answered(), manager("io\n")), false);
+	assert.equal(bounds(answered(), manager("")), false);
 	assert.equal(bounds(answered({ cgroupVersion: "v1" })), false);
 	assert.equal(bounds(answered({ cgroupVersion: null })), false);
+	assert.equal(observe(answered(), clean(), { euid: null }).observations[PODMAN_BOUNDS_DELEGATED], false, "no uid, no user manager to read");
+	// A user manager's cgroup that could not be read for a moment is a retry, and one the account cannot read is refused.
+	const busy = observe(answered(), fakeFs({ files: { [USER_MOUNTS]: "" }, errors: { [USER_MANAGER]: "EMFILE" } }));
+	assert.equal(busy.observations[PODMAN_BOUNDS_DELEGATED], null);
+	assert.equal(busy.reasons[PODMAN_BOUNDS_DELEGATED], "file-unread");
+	assert.equal(observe(answered(), fakeFs({ files: { [USER_MOUNTS]: "" }, errors: { [USER_MANAGER]: "EACCES" } })).observations[PODMAN_BOUNDS_DELEGATED], false);
 	assert.equal(bounds(answered({ rootless: false })), false, "a rootful controller list is the whole tree, not a delegation");
 	// A containers.conf that takes containers out of their cgroup: measured, the bounds then read back `max`.
 	const conf = (text, path = "/etc/containers/containers.conf") => fakeFs({ files: { [USER_MOUNTS]: "", [path]: text } });
@@ -512,14 +528,84 @@ test("the podman reaper keeps the tri-state and enumerates podman's store", { sk
 	assert.equal((await mod.makePodmanReaper({ log: () => {}, spawnFn: broken.spawnFn })()).reaped, false);
 });
 
+// Issue #453, measured on Fedora 44 with rootless Podman 5.8.1 (round-446 M0-e with buildPodmanRunArgs' own argv, and
+// the gate-456 adversary's L rows), raw files named per row: whether a job's bounds were APPLIED, against what
+// `podman info` said (the cgroup manager and its caller-cgroup controller list), whether the account's user@<uid>.service
+// cgroup existed with the controllers, and the caller's own cgroup (/proc/self/cgroup). The uids of the measured
+// accounts (1236, 1238) are written as this suite's 1234; the other users' scopes are kept as measured. `credited` is
+// what the observation must answer: never credit where the bounds were not applied, and one measured-applied row (E3c)
+// deliberately not credited, since nothing this process can read tells it apart from L1-L3.
+const ALL5 = ["cpuset", "cpu", "io", "memory", "pids"];
+const OWN_UNIT = "0::/user.slice/user-1234.slice/user@1234.service/app.slice/run-p412811-i412812.service\n";
+const ROB_SESSION = "0::/user.slice/user-501.slice/session-5.scope\n";
+const M0E_ROWS = [
+	// [case, podman info cgroupManager, podman info cgroupControllers, user@1234.service controllers (null: not running), /proc/self/cgroup, applied, credited]
+	["E1: linger off, sudo -iu, no user manager: systemd fell back to cgroupfs (raw-M0e-E1-sudo-nolinger.txt, raw-M0e-E1r-E3d-nolinger.txt)", "cgroupfs", ALL5, null, ROB_SESSION, false, false],
+	["E1b: linger off, plain ssh, whose pam_systemd session started the manager (raw-M0e-E1b-ssh-nolinger.txt)", "systemd", ALL5, DELEGATED, "0::/user.slice/user-1234.slice/session-114.scope\n", true, true],
+	["E2a: linger on, a user unit without Delegate=, whose own cgroup lists memory pids, cpu applied anyway (raw-M0e-E2a-userunit-linger.txt, raw-M0e-controllers.txt)", "systemd", ["memory", "pids"], DELEGATED, OWN_UNIT, true, true],
+	["E2c: linger on, sudo -iu with no environment (raw-M0e-E2c-sudo-linger.txt)", "systemd", ALL5, DELEGATED, ROB_SESSION, true, true],
+	["E2d: linger on, sudo with XDG_RUNTIME_DIR only (raw-M0e-E2d-sudo-xdg-linger.txt)", "systemd", ALL5, DELEGATED, ROB_SESSION, true, true],
+	["E3a: explicit cgroupfs, a user unit with Delegate=yes (raw-M0e-E3a-cgroupfs-delegate.txt)", "cgroupfs", ALL5, DELEGATED, "0::/user.slice/user-1234.slice/user@1234.service/app.slice/run-p421802-i421803.service\n", true, true],
+	["E3b: explicit cgroupfs, a user unit without Delegate= (raw-M0e-E3b-cgroupfs-nodelegate.txt)", "cgroupfs", ["memory", "pids"], DELEGATED, "0::/user.slice/user-1234.slice/user@1234.service/app.slice/run-p422479-i422480.service\n", true, true],
+	["E3c: explicit cgroupfs, linger on, sudo -iu from another user's session, bus reachable: applied, NOT credited (raw-M0e-E3c-cgroupfs-sudo.txt)", "cgroupfs", ALL5, DELEGATED, ROB_SESSION, true, false],
+	["E3d: explicit cgroupfs, linger off, sudo -iu (raw-M0e-E1r-E3d-nolinger.txt)", "cgroupfs", ALL5, null, ROB_SESSION, false, false],
+	["the same user unit with a Delegate=yes sibling running, its own list flipped to all five (raw-M0e-controllers-sibling.txt)", "systemd", ALL5, DELEGATED, OWN_UNIT, true, true],
+	["L1: linger on, user manager running, no user bus socket, sudo -iu: systemd fell back to cgroupfs (gate456-adv raw-L1-L2.txt)", "cgroupfs", ALL5, DELEGATED, ROB_SESSION, false, false],
+	["L2: linger on, DBUS_SESSION_BUS_ADDRESS pointing at no bus: systemd fell back to cgroupfs (gate456-adv raw-L1-L2.txt)", "cgroupfs", ALL5, DELEGATED, ROB_SESSION, false, false],
+	["L3: a system unit with User= and no user bus: cgroupfs, the container in the unit's root-owned cgroup, memory.max max (gate456-adv raw-L1-L2.txt)", "cgroupfs", ALL5, DELEGATED, "0::/system.slice/adv4-l3.service\n", false, false],
+];
+const NOT_APPLIED = {
+	"no-user-manager": "no systemd user manager is running for this account (/sys/fs/cgroup/user.slice/user-1234.slice/user@1234.service/cgroup.controllers does not exist), so Podman leaves a job's pids, memory and cpu bounds unapplied, whichever cgroup manager it uses: with linger off the manager runs only while the account has a login session, and a `sudo -iu` shell starts none (measured). On a host without systemd managing cgroups under user.slice this path never exists, and the venue gives no credit there",
+	"user-manager-unreachable": "Podman is using the cgroupfs cgroup manager, not systemd, and this worker is not running inside the account's user manager (user@1234.service), so whether a job's pids, memory and cpu bounds are applied is not observed from here. Measured: where a configured systemd manager fell back to cgroupfs because Podman could not reach the user manager over D-Bus (no user bus socket, a DBUS_SESSION_BUS_ADDRESS pointing nowhere), the container landed in the worker's own cgroup unbounded; an explicit cgroupfs with the bus reachable had its bounds applied, and nothing read here tells the two apart",
+};
+
+test("podmanBoundsDelegated credits only where the bounds were measured applied: the user manager, and Podman reaching it or the worker inside it (#453)", { skip }, () => {
+	for (const [label, cgroupManager, controllers, userManager, self, applied, credited] of M0E_ROWS) {
+		assert.ok(!credited || applied, `${label}: the table itself never credits an unapplied row`);
+		const o = observe(answered({ cgroupManager, controllers }), fakeFs({ files: { [USER_MOUNTS]: "", [USER_MANAGER]: userManager, "/proc/self/cgroup": self } }));
+		assert.equal(o.observations[PODMAN_BOUNDS_DELEGATED], credited, label);
+		assert.deepEqual(o.reasons, {}, `${label}: determinate, never a retry`);
+		const cause = credited ? undefined : userManager === null ? "no-user-manager" : "user-manager-unreachable";
+		assert.equal(o.boundsCause, cause, label);
+		assert.equal(
+			o.evidence[PODMAN_BOUNDS_DELEGATED],
+			credited
+				? `rootless Podman on cgroup v2, with this account's systemd user manager (user@1234.service) running and the pids, memory and cpu controllers delegated to it, ${cgroupManager === "systemd" ? "Podman using the systemd cgroup manager" : "this worker running inside that manager"}, and no containers.conf sets cgroups`
+				: NOT_APPLIED[cause],
+			label,
+		);
+		assert.deepEqual(o.boundsControllers, credited ? ALL5 : undefined, `${label}: the manager's list, not podman info's`);
+	}
+	assert.equal(mod.podmanUserManagerControllersPath(1234), USER_MANAGER);
+	// A podman info that names no manager needs the worker inside the manager, as cgroupfs does.
+	const unnamed = (self) => observe(answered({ cgroupManager: null }), fakeFs({ files: { [USER_MOUNTS]: "", "/proc/self/cgroup": self } })).observations[PODMAN_BOUNDS_DELEGATED];
+	assert.equal(unnamed(ROB_SESSION), false);
+	assert.equal(unnamed(OWN_UNIT), true);
+	// A /proc/self/cgroup read that failed for a moment is a retry, never a determinate refusal.
+	const busy = observe(answered({ cgroupManager: "cgroupfs" }), fakeFs({ files: { [USER_MOUNTS]: "" }, errors: { "/proc/self/cgroup": "EMFILE" } }));
+	assert.equal(busy.observations[PODMAN_BOUNDS_DELEGATED], null);
+	assert.equal(busy.reasons[PODMAN_BOUNDS_DELEGATED], "file-unread");
+	// Another account's user manager does not count: the prefix is this uid's own.
+	assert.equal(observe(answered({ cgroupManager: "cgroupfs" }), fakeFs({ files: { [USER_MOUNTS]: "", "/proc/self/cgroup": "0::/user.slice/user-12345.slice/user@12345.service/app.slice/x.service\n" } })).observations[PODMAN_BOUNDS_DELEGATED], false);
+});
+
 test("the podman observationPreflight judges the floor on podman's observations, as local's does (#354)", { skip }, async () => {
 	const floor = { isolation: ENFORCED, credentialTransit: ENFORCED };
 	assert.deepEqual(Object.keys(await bundle({ backendFloor: floor }).observationPreflight(JOB)), ["ok", "podman"]);
-	const refused = await bundle({ backendFloor: floor, readInfo: async () => answered({ controllers: ["io"] }) }).observationPreflight(JOB);
+	const refused = await bundle({ backendFloor: floor, fs: fakeFs({ files: { [USER_MOUNTS]: "", [USER_MANAGER]: "io\n" } }) }).observationPreflight(JOB);
 	assert.equal(refused.refused, true);
 	assert.deepEqual(refused.observations, [PODMAN_BOUNDS_DELEGATED]);
 	assert.match(refused.message, /podman: isolation=enforced holds only while this worker's rootless Podman runs on cgroup v2/);
-	assert.match(refused.message, /Delegate the cpu, memory and pids controllers/);
+	assert.match(refused.message, /delegate the cpu, memory and pids controllers/);
+	// Issue #453: an account with no systemd user manager running, `podman info` still listing every controller: refused
+	// per job under the floor, the missing manager named, and the fix keeping one running first.
+	const noManager = fakeFs({ files: { [USER_MOUNTS]: "", [USER_MANAGER]: null } });
+	const noSession = await bundle({ backendFloor: floor, fs: noManager }).observationPreflight(JOB);
+	assert.equal(noSession.refused, true);
+	assert.deepEqual(noSession.observations, [PODMAN_BOUNDS_DELEGATED]);
+	assert.match(noSession.message, /no systemd user manager is running for this account \(\/sys\/fs\/cgroup\/user\.slice\/user-1234\.slice\/user@1234\.service\/cgroup\.controllers does not exist\)/);
+	assert.match(noSession.message, /Turn on linger for the worker account \(`loginctl enable-linger <account>`, which keeps its systemd user manager running with no one logged in\)/);
+	assert.deepEqual(Object.keys(await bundle({ fs: noManager }).observationPreflight(JOB)), ["ok", "podman"], "without the floor a job still runs");
 	assert.deepEqual(await bundle({ backendFloor: floor, readInfo: async () => ({ answered: false, reason: "timeout", transient: true }) }).observationPreflight(JOB), { unavailable: true, reason: "timeout" });
 	// A refused identity is passed through to jobUserPreflight, which names the one fix, rather than refused here with a
 	// floor fix that is not it. Every unmappable row, each of which misses a floored observation too.
@@ -642,7 +728,7 @@ test("through the processor, a refused podman identity is refused before the ima
 		["remote, image absent, floored", async () => answered({ serviceIsRemote: true }), "absent", floor],
 	]) assert.deepEqual(await run(readInfo, mode, backendFloor), { reason: "job-user-unmappable", reserved: 0 }, label);
 	// A usable identity still meets its floor first, and an undecided read is still retried, never refused.
-	assert.deepEqual(await run(async () => answered({ controllers: ["io"] }), "present", floor), { reason: "backend-floor-unobserved", reserved: 0 });
+	assert.deepEqual(await run(async () => answered(), "present", floor, fakeFs({ files: { [USER_MOUNTS]: "", [USER_MANAGER]: "io\n" } })), { reason: "backend-floor-unobserved", reserved: 0 });
 	assert.deepEqual(await run(async () => ({ answered: false, reason: "timeout", transient: true }), "present", floor), { threw: "retry", reserved: 0 });
 	assert.deepEqual(await run(async () => answered(), "absent", {}), { reason: "job-image-missing", reserved: 0 }, "and a usable venue's missing image is the image's");
 	// Issue #428: a widening containers.conf is refused as the venue's own answer, RETURNED (never a retry), before the
@@ -676,7 +762,8 @@ test("the bundle's observationPreflight answers exactly what judgePodmanVenue an
 		["clean", answered(), clean(), floor],
 		["rootful", answered({ rootless: false }), clean(), floor],
 		["widened", answered(), fakeFs({ files: { [USER_MOUNTS]: "", [conf]: MEASURED.annotations } }), floor],
-		["undelegated", answered({ controllers: ["cpu"] }), clean(), floor],
+		["undelegated", answered(), fakeFs({ files: { [USER_MOUNTS]: "", [USER_MANAGER]: "cpu\n" } }), floor],
+		["no user manager", answered(), fakeFs({ files: { [USER_MOUNTS]: "", [USER_MANAGER]: null } }), floor],
 		["unanswered", { answered: false, reason: "timeout", transient: true }, clean(), floor],
 		["no floor", answered({ controllers: [] }), clean(), {}],
 		// #428's transient rules, which the extraction must carry: a conf chain that could not be read just now rides

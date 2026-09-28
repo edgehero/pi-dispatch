@@ -50,7 +50,8 @@
  * no fixAction, because what a failed read-back points at is the image or the runtime.
  */
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
-import { homedir, release as osRelease, tmpdir } from "node:os";
+import { homedir, release as osRelease, tmpdir, userInfo } from "node:os";
+import { STACK_KEYS, readLinger } from "./podman-stack.mjs";
 import { dirname, isAbsolute, join, delimiter, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
@@ -68,12 +69,14 @@ import { copySkillTree } from "./copy-tree.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { GIT_READ_FLAGS } from "./git-hardening.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
+import { deploymentVenueEnv } from "./deployment-venue.mjs";
+import { PROXY_STATE_FORMAT, parseProxyState, shippedProxyDrift } from "./egress-proxy-state.mjs";
 import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, observePodman, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { PODMAN_PINNED_FLAGS, buildPodmanRunArgs, containerSpec, podmanArgsFromSpec } from "./docker-run.mjs";
 import { observeHost } from "./runtime-observations.mjs";
 import { endpointShown, makeDockerEndpointResolver, quotedShown } from "./backend-local.mjs";
-import { EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, egressArmed, egressCanaryNetwork, egressCanaryProbe, egressEnv, egressProxyName, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
+import { DEFAULT_EGRESS_PROXY, STOPPED_PROXY_STATES, EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, egressArmed, egressCanaryNetwork, egressCanaryProbe, egressEnv, egressProxyName, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { runLiveProbes } from "./live-probes.mjs";
 import { SANDBOX_TOMBSTONE_STUCK_MS, isSandboxTombstone, sandboxTombstoneAge } from "./sandbox-store.mjs";
 import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
@@ -91,6 +94,19 @@ const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
 
 // gh login scopes that reach well past what a job should ever hold — called out by name in the fix line.
 const BROAD_SCOPES = ["admin:org", "delete_repo", "workflow"];
+
+/**
+ * What to do when the podman venue's bounds miss for a reason in the account's systemd setup (issue #453, measured on
+ * Fedora 44 with Podman 5.8.1), per `observePodman`'s `boundsCause`. Linger leads: it is what keeps the user manager
+ * running for a service, where a login session keeps it only while that session lasts (a plain ssh started one,
+ * measured, and a `sudo -iu` shell started none). Which manager a doctor sees does not depend on the shell it runs in:
+ * with linger off, a `sudo -iu` doctor saw a running manager while another login session of the account was open
+ * (gate 456), and that ✓ lasted only as long as the session did.
+ */
+const PODMAN_BOUNDS_FIX = Object.freeze({
+	"no-user-manager": "turn on linger for the worker's account: `sudo loginctl enable-linger <account>` starts its systemd user manager and keeps it running with no one logged in, and `pi-dispatch service install` runs the worker as a systemd user service inside it. A hand-written system unit with `User=` also needs `Wants=user@<uid>.service` and `After=user@<uid>.service` (docs/podman.md); `pi-dispatch doctor --live` reads pids.max and memory.max back off a real container",
+	"user-manager-unreachable": "run the worker inside the account's user manager, as a systemd user service (`pi-dispatch service install`, with linger on), where a job's container lands under the manager whichever cgroup manager Podman uses; or let Podman reach the manager over the account's user bus, /run/user/<uid>/bus (on Debian and Ubuntu the dbus-user-session package provides it), with no DBUS_SESSION_BUS_ADDRESS pointing elsewhere and no `cgroup_manager = \"cgroupfs\"` in its containers.conf; `pi-dispatch doctor --live` reads pids.max and memory.max back off a real container",
+});
 
 // The podman venue's pull of the deployment's default job image into this account's store (issue #433): the fix line's
 // words and `--fix`'s prompt, one string so the two cannot name different commands.
@@ -172,6 +188,10 @@ export async function runDoctor(env = process.env, deps = {}) {
 		readEnvFile = (path) => readFileSync(path, "utf8"),
 		// Issue #345: the host files the runtime-mounts observation reads (Podman's mounts.conf and containers.conf).
 		observationFs = { statSync, readFileSync, readdirSync },
+		// Issue #453: this shell's account name, asked of loginctl for linger on the podman venue; and whether this folder
+		// holds the shipped proxy's two files, so its running proxy's mounts can be compared with them.
+		userName,
+		proxyFilesExist,
 		isAlive = defaultIsAlive,
 		pid = process.pid,
 		nonce = randomBytes(6).toString("hex"),
@@ -188,7 +208,50 @@ export async function runDoctor(env = process.env, deps = {}) {
 	// so it needs both, and a test cannot drive that sweep while the names come from `process.pid` directly.
 	// `live` rides the shared seams since issue #431 for ONE reader: the podman section, whose allowlist line points at
 	// `--live` on a plain run and has nothing to say on a `--live` run, where the read-back's own canary answers it.
-	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile, observationFs, isAlive, pid, runTimeouts, live: live === true };
+	// Issue #453 (gate round 1): the venue keys, decided as `up`, `init` and `service install` decide them. doctor read
+	// PI_BACKENDS from its shell alone, so on a podman-only deployment whose `.env` says so (the documented setup) its
+	// plain run judged docker, while the service it was checking ran podman. This shell wins where it sets a key; the
+	// deployment `.env` fills the rest; a disagreement is its own ✗, and doctor then judges this shell's values.
+	//
+	// ONE read of the file, shared: a regular file only (a FIFO would hang a synchronous read, as `envFileKeys` guards
+	// against), and the text handed to the first `.env` read the checks below make, so a run still reads the file once.
+	// A file that is there and cannot be read is said, as `up` says it (gate round 2): the venue then comes from this
+	// shell alone. An absent one (ENOENT) is simply absent.
+	const envPath = join(cwd, ".env");
+	let envText = null;
+	let envUnread = null;
+	try {
+		if (fileExists(envPath)) {
+			if (!statSync(envPath).isFile()) envUnread = "not a regular file";
+			else envText = String(readEnvFile(envPath));
+		}
+	} catch (err) {
+		if (err?.code !== "ENOENT") envUnread = err?.code ?? err?.message ?? "error";
+	}
+	let envTextUnused = envText !== null;
+	const readEnvFileShared = (path) => {
+		if (envTextUnused && path === envPath) {
+			envTextUnused = false;
+			return envText;
+		}
+		return readEnvFile(path);
+	};
+	const venueChecks = [];
+	if (envUnread) {
+		venueChecks.push({ ok: false, warn: true, label: `${envPath} could not be read (${envUnread}), so PI_BACKENDS, PI_EGRESS and PI_EGRESS_PROXY come from this shell alone`, fix: "make it a readable regular file, as the service's loader needs it to be" });
+	}
+	const venue = deploymentVenueEnv({ env, fs: { existsSync: () => envText !== null, readFileSync: () => envText }, envPath, platform, command: "doctor", loader: serviceEnvLoader(platform), keys: serviceEnvKeys(STACK_KEYS) });
+	if (venue.error) {
+		venueChecks.push({ ok: false, label: `which venue this deployment runs is unknown: ${venue.error}`, fix: "doctor judged this shell's values below; make the shell and the deployment's .env agree, then re-run doctor" });
+	} else {
+		for (const note of venue.notes) venueChecks.push({ ok: false, warn: true, label: note, fix: "fix that line so the service and this shell read the same venue" });
+		const read = Object.entries(venue.fromFile);
+		if (read.length > 0) {
+			venueChecks.push({ ok: true, label: `venue keys read from ${envPath} (${read.map(([key, value]) => `${key}=${quotedShown(value)}`).join(", ")}), as the service reads them: this shell does not set them` });
+			env = venue.env;
+		}
+	}
+	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, isAlive, pid, runTimeouts, live: live === true, venueChecks, userName, proxyFilesExist, serviceEnvFile: envText === null ? null : { text: envText, path: envPath, loader: serviceEnvLoader(platform) } };
 
 	let checks = await collectChecks(env, seams);
 	let failed = render(checks, out);
@@ -295,9 +358,10 @@ export async function defaultPromptFn(question, { input = process.stdin, output 
 }
 
 /**
- * The values `<cwd>/.env` sets for NAMED keys, or `{}`. The only place in this project that reads a `.env`
- * file's contents at all (issue #357), and the narrowing is what makes it an addition rather than a
- * reversal:
+ * The values `<cwd>/.env` sets for NAMED keys, or `{}`. Doctor's first read of a `.env` (issue #357), and the
+ * narrowing is what makes it an addition rather than a reversal. It is NOT the only reader: `up` and `service
+ * install` read the venue keys since #430 (`readStackKeys`), and since #453 doctor reads `SERVICE_ENV_KEYS` below,
+ * whose values DO steer what doctor spawns, connects to and offers as fixes. For these two keys:
  *
  *   - it reads to decide WHAT DOCTOR SAYS, never to configure anything. No value from here reaches a
  *     config, an argv, a container env, or a fix that writes;
@@ -315,6 +379,27 @@ export async function defaultPromptFn(question, { input = process.stdin, output 
  * the three loaders of this file disagree and a blended reading is wrong for every deployment at once.
  */
 export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"]);
+
+/**
+ * The keys doctor takes from the deployment's `.env` as the SERVICE's values where its own shell sets none (issue
+ * #453): the venue keys `up` and `service install` read, the Valkey the worker connects to, the provider, and that
+ * provider's key variables (pi's own names for it, passed in, and judged for presence only, never printed). ONE
+ * structural allowlist: every `.env` value doctor acts on passes `serviceEnvKeys` first. Unlike
+ * `ENV_FILE_READABLE_KEYS` these values steer what doctor does: which venue it judges and so which runtime it spawns,
+ * which Valkey it connects to, and which fixes it offers.
+ */
+export const SERVICE_ENV_KEYS = Object.freeze([...STACK_KEYS, "VALKEY_URL", "PI_PROVIDER"]);
+
+/** `keys` narrowed to `SERVICE_ENV_KEYS` plus the provider's own key variables. */
+export function serviceEnvKeys(keys, providerKeys = []) {
+	return keys.filter((k) => SERVICE_ENV_KEYS.includes(k) || providerKeys.includes(k));
+}
+
+/** The loader of the deployment's `.env` on this platform, as `service.mjs` renders it: systemd, the cmd wrapper, or a
+ * sourcing shell everywhere else. ONE mapping for every `.env` read doctor makes. */
+export function serviceEnvLoader(platform) {
+	return platform === "linux" ? "systemd" : platform === "win32" ? "cmd" : "shell";
+}
 
 export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = statSync, platform = process.platform }) {
 	if (typeof readEnvFile !== "function" || !fileExists(path)) return {};
@@ -347,7 +432,7 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 		// `worker-env-wrapper.sh` (a sourcing shell) on darwin, `worker-env-wrapper.cmd` on win32. Reporting a
 		// reading from a loader this deployment does not use is how doctor told half its operators the wrong
 		// file under the previous shape, which asked systemd's grammar on every platform.
-		const serviceLoader = platform === "linux" ? "systemd" : platform === "win32" ? "cmd" : "shell";
+		const serviceLoader = serviceEnvLoader(platform);
 		const service = readEnvAssignments(text, allowed, { loader: serviceLoader });
 		// The shell reading stays beside it on POSIX, because a `.env` is also sourced by hand
 		// (`set -a; . ./.env`) and because the two disagree about an `export` line, which is the third state
@@ -524,8 +609,21 @@ export async function collectChecks(env, seams) {
 	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env), home = safeHomeDir(), underTemp = underOsTempDir, providerOracle = defaultProviderOracle, facts = null, readEnvFile = null, stat: statSeam = statSync, runTimeouts = RUN_TIMEOUTS } = seams;
 
 	const jobImage = env.PI_JOB_IMAGE ?? "pi-job:latest";
-	const valkeyUrl = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
-	const provider = env.PI_PROVIDER ?? "anthropic";
+	// Issue #453 (gate round 2): the keys the service takes from the deployment's `.env` and a shell running doctor does
+	// not, read with the service's own loader (`serviceEnvFile`, from runDoctor's one read), so the ladder's own
+	// `doctor` step judges the deployment it was told to build: VALKEY_URL and PI_PROVIDER here, the provider's key
+	// below. This shell wins where it sets one. A value is taken only from a plain line the loader reads as written.
+	const { serviceEnvFile = null } = seams;
+	const fromServiceFile = (wanted, providerKeys = []) => {
+		if (!serviceEnvFile) return {};
+		const keys = serviceEnvKeys(wanted, providerKeys);
+		const read = readEnvAssignments(serviceEnvFile.text, keys, { loader: serviceEnvFile.loader });
+		return Object.fromEntries(keys.filter((k) => env[k] === undefined && read[k]?.plain && typeof read[k].value === "string").map((k) => [k, read[k].value]));
+	};
+	const fileKeys = fromServiceFile(["VALKEY_URL", "PI_PROVIDER"]);
+	const valkeyUrl = env.VALKEY_URL ?? fileKeys.VALKEY_URL ?? "redis://127.0.0.1:6379";
+	const provider = env.PI_PROVIDER ?? fileKeys.PI_PROVIDER ?? "anthropic";
+	const fromFileNote = (keys) => (keys.length > 0 ? ` -- ${keys.join(" and ")} read from ${serviceEnvFile.path}, as the service reads it; this shell does not set ${keys.length === 1 ? "it" : "them"}` : "");
 
 	const checks = [];
 	checks.push(nodeCheck(nodeVersion));
@@ -550,10 +648,11 @@ export async function collectChecks(env, seams) {
 		fixAction: {
 			tier: "silent",
 			describe: "pi-dispatch init",
-			run: async ({ out }) => {
+			run: async ({ out, platform }) => {
 				// Lazy import: a doctor run without --fix (or without this failure) never loads init.
 				const { runInit } = await import("./init.mjs");
-				const code = runInit(cwd, { out });
+				// With doctor's environment and platform, so the next steps match the venue (issue #453).
+				const code = runInit(cwd, { out, env, platform });
 				return { ok: code === 0, note: "scaffolded by `pi-dispatch init` (create-only: existing files were kept)" };
 			},
 		},
@@ -562,6 +661,9 @@ export async function collectChecks(env, seams) {
 	// Right after `.env present`, because it answers the same question that check raises: where DOES this
 	// deployment's environment come from. [] unless a seam is configured (issue #216).
 	checks.push(...(await envSetupChecks(env, seams)));
+	// Where the venue keys came from (issue #453), beside the other answers to "where does this deployment's environment
+	// come from". Empty unless the file supplied a key, or the two disagree.
+	checks.push(...(seams.venueChecks ?? []));
 
 	// Issue #354: which venues run jobs here. An unparseable PI_BACKENDS reads as the unset default, so every docker line
 	// below is exactly what it always was, and the backend section is what fails on it (the worker refuses to boot).
@@ -885,7 +987,7 @@ export async function collectChecks(env, seams) {
 			checks.push({
 				ok: run.code === 0,
 				label: run.ended === "timeout" ? `podman: trigger job image present in this account's Podman store (${img}) -- podman did not answer` : `podman: trigger job image present in this account's Podman store (${img})`,
-				fix: `pull, load or build it AS THE WORKER'S ACCOUNT, since rootless Podman keeps one image store per account: podman pull ${img} (or \`docker save ${img} | podman load\`) -- a trigger names it in run.image, and jobs run with --pull=never, so the worker never fetches it at job time`,
+				fix: `pull, load or build it AS THE WORKER'S ACCOUNT, since rootless Podman keeps one image store per account: podman pull ${img} -- a trigger names it in run.image, and jobs run with --pull=never, so the worker never fetches it at job time`,
 			});
 			if (run.code !== 0) continue;
 			const entry = await runCmdCapture(spawn, "podman", ["image", "inspect", "--format={{json .Config.Entrypoint}}", img]);
@@ -1334,7 +1436,7 @@ export async function collectChecks(env, seams) {
 
 	checks.push({
 		ok: await probeValkey(valkeyUrl),
-		label: `Valkey reachable (${valkeyUrl})`,
+		label: `Valkey reachable (${urlShown(valkeyUrl)})${fromFileNote(fileKeys.VALKEY_URL !== undefined ? ["VALKEY_URL"] : [])}`,
 		// Issue #433: without `local`, docker is not this deployment's runtime and may not be installed at all, so neither the
 		// compose file nor a `docker run` is offered. The words hold before and after the setup commands learn Podman: the
 		// podman guide says how to start Valkey under the account, whichever command does it.
@@ -1369,7 +1471,10 @@ export async function collectChecks(env, seams) {
 	// the image is actually present -- an absent one is already reported above, and a second line saying
 	// its digest is unknown would be noise on a fault the operator has been told about.
 	const fleet = await readHosts(valkeyUrl);
-	const peers = (fleet.hosts ?? []).filter((h) => h.name !== workerNameOf(env));
+	// Printable before anything is compared or said (issue #453, gate round 3): since a folder's `.env` now chooses the
+	// Valkey doctor reads, a host row is another party's text, and a control byte in a name or zone must not reach the
+	// terminal. The registry's own charset already refuses them at the source; this is the reader not relying on it.
+	const peers = (fleet.hosts ?? []).map((h) => ({ ...h, name: printable(h.name), tz: h.tz ? printable(h.tz) : h.tz })).filter((h) => h.name !== workerNameOf(env));
 	// Read only when there is a peer to compare against. Every line below is gated on a peer existing, and
 	// the SUBPROCESS has to be too: otherwise every `doctor` run on every single-host deployment spawns an
 	// extra docker call whose answer nothing reads.
@@ -1442,7 +1547,7 @@ export async function collectChecks(env, seams) {
 		}
 	} else if (fleet.unreachable) {
 		// Said, rather than silently absent: "no peers" and "could not ask" are different facts.
-		checks.push({ ok: true, label: `Fleet: could not read the host registry (${fleet.unreachable})` });
+		checks.push({ ok: true, label: `Fleet: could not read the host registry (${printable(fleet.unreachable)})` });
 	}
 
 	// Which variable holds a provider's key is PI'S fact, asked of pi rather than copied (issue #286).
@@ -1454,7 +1559,12 @@ export async function collectChecks(env, seams) {
 	// deployments with different remedies.
 	// Resolved ONCE and reused by the trigger-secret clash check further down: one seam call, one answer.
 	const oracle = await providerOracle();
-	checks.push(providerKeyCheck({ provider, env, agentDir, oracle, nodeOk: checks[0]?.ok }));
+	// The key's presence only, from the file where this shell sets none of the provider's variables; never its value.
+	const keyCandidates = typeof oracle?.providerKeyCandidates === "function" ? oracle.providerKeyCandidates(provider) : [];
+	const keyFromFile = keyCandidates.some((name) => (env[name] ?? "") !== "") ? {} : fromServiceFile(keyCandidates, keyCandidates);
+	const keyCheck = providerKeyCheck({ provider, env: { ...env, ...keyFromFile }, agentDir, oracle, nodeOk: checks[0]?.ok });
+	const keyNamed = Object.keys(keyFromFile).filter((name) => keyCheck.label?.includes(`: ${name})`));
+	checks.push({ ...keyCheck, label: `${keyCheck.label}${fromFileNote([...(fileKeys.PI_PROVIDER !== undefined ? ["PI_PROVIDER"] : []), ...keyNamed])}` });
 
 
 	// REQ-GLOBAL-PI-OVERLAY: read the extensions opt-out through the WORKER's own parser, so doctor reports
@@ -3353,7 +3463,10 @@ const CANARY_LEFTOVER_FIX = "remove whatever is still on it first (a probe conta
 async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpoint = { local: null, reason: "not resolved" } }) {
 	// `pid` and `isAlive` default here as well as riding the seams, so a caller that predates issue #350 still
 	// gets the process's own answer rather than a name ending in `undefined`.
-	const { spawn, pid = process.pid, isAlive = defaultIsAlive } = seams;
+	// `proxyFilesExist` asks whether this folder holds the proxy's two files, which is what makes it a deployment folder
+	// whose mounts the running proxy can be compared with. A seam of its own, on the real disk by default: the shared
+	// `fileExists` answers yes to everything in most tests, and "doctor run from some other folder" is the common case.
+	const { spawn, pid = process.pid, isAlive = defaultIsAlive, proxyFilesExist = existsSync } = seams;
 	// The SAME parse the worker boots with (egress.mjs), never a second `=== "1"`: doctor reporting a
 	// policy that is off, or nothing about one that is on, is worse than doctor not checking at all.
 	// A malformed value is the worker's boot failure to report, not doctor's to guess at, so it reads as
@@ -3407,18 +3520,78 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// `docker inspect` on the container, not `ps`: it answers present-vs-absent and running-vs-stopped in
 	// one call, and those are two different fixes. The FIELD_SEP habit is image-preflight.mjs's -- neither
 	// a boolean nor a health word can contain "|".
-	const state = await runCmdCapture(spawn, "docker", ["inspect", `--format={{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}`, proxy], { stdoutOnly: true });
-	const [running, health] = state.code === 0 ? state.output.trim().split("|") : [];
-	const up = running === "true";
-	checks.push({
+	//
+	// Issue #453 (gate rounds 1 and 2): RUNNING is `.State.Status` "running", and for the SHIPPED name the container
+	// must be CURRENT, the pinned squid with its own entrypoint and command and this deployment folder's two files
+	// mounted, or its policy is not this deployment's (`egress-proxy-state.mjs`). One inspect, as `up` reads it, with the
+	// health word in the same answer.
+	const state = await runCmdCapture(spawn, "docker", ["inspect", PROXY_STATE_FORMAT, proxy], { stdoutOnly: true });
+	const parsed = state.code === 0 ? parseProxyState(state.output) : null;
+	const health = parsed?.health ?? "none";
+	const up = parsed?.status === "running";
+	const custom = proxy !== DEFAULT_EGRESS_PROXY;
+	// CURRENT, for the shipped name, judged whether it runs or not (gate round 2): a stopped proxy of another folder is
+	// one `up` offers to replace, so its fix must say that, not compose, which would start it as it is. The mounts are
+	// compared only where this folder holds the two files, which is a deployment folder (run elsewhere, doctor cannot
+	// know which folder the service uses), and only where every bind source resolves on this host; otherwise that half
+	// is said to be unknown, never stale.
+	const inFolder = ["egress-allowlist.conf", "deploy/egress-proxy.conf"].every((f) => proxyFilesExist(join(seams.cwd, f)));
+	const judged = !custom && parsed ? shippedProxyDrift(parsed, { cwd: seams.cwd, platform: seams.platform ?? process.platform, realpath: (p) => realpathSync(p), compareMounts: inFolder }) : { drift: [], unknown: null };
+	const replaceFix = `\`pi-dispatch up\` from the deployment folder offers to replace it with the shipped one (docker rm -f ${proxy}, then the shipped run)`;
+	// The worker's simple rule (egress.mjs): paused, exited and dead refuse every job, so ✗; any other state is one the
+	// worker retries through (restarting, created, ...), so ⚠, and the fix says jobs wait rather than fail.
+	// `restarting` is a crash loop that fails every job (one retry, then failed), so ✗; ⚠ only for a transient word.
+	const retried = parsed !== null && !up && !STOPPED_PROXY_STATES.has(parsed.status) && parsed.status !== "restarting";
+	// A RUNNING stale proxy (exec round 3) gets no "✓ running" line: the ✗ below says what it is, and carries the state
+	// `--live` reads, so the output never reads healthy right before saying the proxy is not this deployment's.
+	const staleRunning = up && !custom && judged.drift.length > 0;
+	const proxyCheck = {
 		ok: up,
-		label: up ? `Egress proxy running (${proxy})` : state.code === 0 ? `Egress proxy is stopped (${proxy})` : `Egress proxy is not on this host (${proxy})`,
-		fix: "docker compose -f deploy/docker-compose.yml --profile egress up -d  -- the egress policy refuses every job pre-spend while this is down, which costs no budget but runs nothing (PI_EGRESS=0 opts out)",
+		...(retried ? { warn: true } : {}),
+		label: up
+			? `Egress proxy running (${proxy})`
+			: state.code === 0
+				? parsed
+					? `Egress proxy is ${parsed.status !== "exited" ? parsed.status : "stopped"} (${proxy})`
+					: `Egress proxy exists but its state could not be read (${proxy})`
+				: `Egress proxy is not on this host (${proxy})`,
+		// PI_EGRESS_PROXY names the operator's own proxy, which neither compose nor `up` starts (they start the shipped
+		// name), so its fix is to start that container, not to run compose.
+		fix: retried
+			? `a job meanwhile is retried once, then failed (the worker does not refuse it outright on this state); if it stays ${parsed.status}, \`docker logs ${proxy}\` says why`
+			: parsed?.status === "restarting"
+			? `its squid keeps exiting and its restart policy keeps bringing it back, so every job is retried once, then failed; \`docker logs ${proxy}\` says why`
+			: custom
+			? `PI_EGRESS_PROXY names your own proxy, which neither compose nor \`pi-dispatch up\` starts: ${state.code === 0 ? `\`docker ${parsed?.status === "paused" ? "unpause" : "start"} ${proxy}\`` : `create and start ${proxy} yourself`} -- the egress policy refuses every job pre-spend while it is down, which costs no budget but runs nothing (PI_EGRESS=0 opts out)`
+			: judged.drift.length > 0
+				? `it is not this deployment's either (${judged.drift.join("; ")}): ${replaceFix} -- the egress policy refuses every job pre-spend while it is down, which costs no budget but runs nothing (PI_EGRESS=0 opts out)`
+				: parsed?.status === "paused"
+					? `docker unpause ${proxy}  -- as \`pi-dispatch up\` offers; the egress policy refuses every job pre-spend while it is paused, which costs no budget but runs nothing (PI_EGRESS=0 opts out)`
+					: "docker compose -f deploy/docker-compose.yml --profile egress up -d  -- the egress policy refuses every job pre-spend while this is down, which costs no budget but runs nothing (PI_EGRESS=0 opts out)",
 		// Not rendered: `--live`'s peer probe (issue #344) needs the proxy's name and whether it is up, and reads them here
 		// rather than asking docker a second time.
 		proxyState: { proxy, running: up },
-	});
+	};
+	if (!staleRunning) checks.push(proxyCheck);
 	if (!up) return checks;
+	if (!custom) {
+		if (judged.drift.length > 0) {
+			checks.push({
+				ok: false,
+				label: `Egress proxy is running but is not this deployment's (${proxy}): ${judged.drift.join("; ")}`,
+				fix: `${replaceFix}; until then every job's egress runs through a policy this deployment did not ship`,
+				proxyState: proxyCheck.proxyState,
+			});
+		}
+		if (judged.unknown) {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `Egress proxy's mounts could not be compared on this host (${proxy}): ${judged.unknown}`,
+				fix: "its image, entrypoint and command were compared; check its two mounts by hand (`docker inspect --format '{{json .Mounts}}' " + proxy + "`): /etc/squid/squid.conf must be this deployment's deploy/egress-proxy.conf and /etc/pi-dispatch/allowlist.conf its egress-allowlist.conf",
+			});
+		}
+	}
 
 	// Advisory on purpose, and deliberately NOT what the money gate reads. A healthcheck can flap, and a
 	// pre-spend gate that refuses on a flapping signal drops real work while one that retries on it burns
@@ -3449,7 +3622,9 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// bounded step runner, so docker's spawns, and what a probe that never launched leaves for the teardown, are exactly
 	// what they were: pinned in doctor.test.mjs against the output and argv captured before the move.
 	const canary = await runEgressCanary({ run: liveRunVia(spawn), probeRun: (args) => runCmdCapture(spawn, "docker", args), proxy, image: jobImage, pid });
-	checks.push(...canary.checks);
+	// Through a stale proxy the canary reads THAT proxy's policy (exec round 3): a failure is the proxy's to fix, never
+	// this deployment's allowlist, which it may not even mount.
+	checks.push(...(staleRunning ? canary.checks.map((c) => (c.ok ? c : { ...c, fix: `the canary ran through ${proxy}, which is not this deployment's proxy (above), so this says nothing about egress-allowlist.conf: ${replaceFix}, then re-run doctor` })) : canary.checks));
 	return checks;
 }
 
@@ -4167,11 +4342,16 @@ export function backendChecks(env, { endpoint = null, daemon = null, fs = { stat
 					const unread = observations[d.observedBy] !== false;
 					// The endpoint is the operator's to point, as docker's is; bounds and mounts are this account's Podman setup.
 					const by = d.observedBy === PODMAN_SERVICE_LOCAL ? "the operator" : "this account's Podman setup";
+					// Issue #453: when the bounds miss for a reason in the account's systemd setup (no user manager, or one Podman
+					// cannot reach), this line is the ONE that says so (the podman section below does not repeat it), and its fix is
+					// that cause's rather than the floor's generic remedy. Keyed on the observation's own cause, so a miss with
+					// another cause keeps OBSERVATION_FIX.
+					const causeFix = d.observedBy === PODMAN_BOUNDS_DELEGATED && !unread ? PODMAN_BOUNDS_FIX[podman.boundsCause] : undefined;
 					checks.push({
 						ok: false,
 						warn: true,
 						label: `${name}: ${property} is ASSERTED by ${by}, not enforced: ${podman.evidence?.[d.observedBy] ?? "not observed"}`,
-						fix: !unread ? OBSERVATION_FIX[d.observedBy] : podman.reasons?.[d.observedBy] === "file-unread" ? fileUnreadFix(OBSERVATIONS[d.observedBy]) : `nothing shows whether ${OBSERVATIONS[d.observedBy]}; fix what stops \`podman info\` answering for the worker's account, then re-run doctor`,
+						fix: causeFix ?? (!unread ? OBSERVATION_FIX[d.observedBy] : podman.reasons?.[d.observedBy] === "file-unread" ? fileUnreadFix(OBSERVATIONS[d.observedBy]) : `nothing shows whether ${OBSERVATIONS[d.observedBy]}; fix what stops \`podman info\` answering for the worker's account, then re-run doctor`),
 					});
 					continue;
 				}
@@ -4418,7 +4598,9 @@ function fileUnreadFix(what) {
  * or retries each podman job. The image and the proxy are ✗ as they are for local: every job is refused without them.
  *
  * What goes wrong with the observations is NOT repeated here: the backend section above names each degraded word with
- * what was seen, so this section prints the bounds line only when they hold.
+ * what was seen, so this section prints the bounds line only when they hold. That includes a missing systemd user
+ * manager (issue #453): the backend section's isolation line carries it as evidence with its own fix, and the floor
+ * line there carries the ✗, so a line here would only repeat both.
  */
 export async function podmanChecks(env, seams, { jobImage }) {
 	const { spawn, home = safeHomeDir(), jobUserIdentity: ids = {}, observationFs = { statSync, readFileSync, readdirSync }, runTimeouts = RUN_TIMEOUTS } = seams;
@@ -4481,8 +4663,23 @@ export async function podmanChecks(env, seams, { jobImage }) {
 
 	// The bounds, said when they hold; see the header for why a miss is left to the backend section.
 	if (observed.observations[PODMAN_BOUNDS_DELEGATED] === true) {
-		const controllers = Array.isArray(info?.controllers) ? info.controllers.filter((c) => typeof c === "string" && /^[a-z_]{1,20}$/.test(c)) : [];
+		// The user manager's delegated list the answer rests on (issue #453), not `podman info`'s, which is the caller's cgroup.
+		const controllers = Array.isArray(observed.boundsControllers) ? observed.boundsControllers : [];
 		checks.push({ ok: true, label: `podman: cgroup v2 controllers are delegated to this account (${controllers.join(", ")}), so a job's pid, memory and cpu bounds are applied` });
+		// Issue #453 (gate round 1, measured): with linger off the user manager runs only while the account has a login
+		// session, and a doctor run then reads it running, from any shell, `sudo -iu` included. That ✓ ends with the last
+		// session, and a service-run worker then gets no bounds. Asked of loginctl as `up` asks it; an answer it cannot
+		// read says nothing, since the ✓ above is still what this read saw.
+		const user = userNameOf(seams);
+		const linger = user ? await readLinger(user, (cmd, args) => runCmdCapture(spawn, cmd, args, { stdoutOnly: true, timeoutMs: 5000 })) : null;
+		if (linger === false) {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `podman: linger is off for ${user}, so the user manager above runs only while a login session of the account is open: when the last one ends, a worker run as a user service stops with it, and one run as a system unit with User= runs on with no bounds (refused per job under an isolation floor)`,
+				fix: `sudo loginctl enable-linger ${user} -- it keeps the manager running with no one logged in, which is what a service needs`,
+			});
+		}
 	}
 
 	// SELinux, and what it means for a job's mounts: the worker's rule (#355) is `:Z` on a job's own directories only.
@@ -4518,7 +4715,7 @@ export async function podmanChecks(env, seams, { jobImage }) {
 		checks.push({
 			ok: false,
 			label: `podman: job image is not in this account's Podman store (${jobImage})`,
-			fix: `pull or load it AS THE WORKER'S ACCOUNT, since rootless Podman keeps one image store per account: ${jobImage === "pi-job:latest" ? PODMAN_JOB_IMAGE_PULL : `podman pull ${jobImage}`} (or \`docker save ${jobImage} | podman load\`) -- jobs run with --pull=never, so the worker never fetches it`,
+			fix: `pull or load it AS THE WORKER'S ACCOUNT, since rootless Podman keeps one image store per account: ${jobImage === "pi-job:latest" ? PODMAN_JOB_IMAGE_PULL : `podman pull ${jobImage}`} -- jobs run with --pull=never, so the worker never fetches it`,
 			...(!localUsed && jobImage === "pi-job:latest"
 				? {
 						fixAction: {
@@ -4571,12 +4768,20 @@ export async function podmanChecks(env, seams, { jobImage }) {
 	const proxy = egressProxyName(env);
 	let proxyRunning = null;
 	if (armed !== false) {
-		const state = await runCmdCapture(spawn, "podman", ["inspect", "--format={{.State.Running}}", proxy], { stdoutOnly: true });
-		proxyRunning = state.code === 0 && state.output.trim() === "true";
+		// `.State.Status` (issue #453): only `running` carries traffic; Podman reports paused and between-restarts states
+		// with their own words (measured on 4.9.3 and 5.8.1).
+		const state = await runCmdCapture(spawn, "podman", ["inspect", "--format={{.State.Status}}", proxy], { stdoutOnly: true });
+		const status = state.code === 0 ? state.output.trim() : null;
+		proxyRunning = status === "running";
+		// The worker's simple rule (egress.mjs), as on docker: a state it retries through is ⚠, one it refuses on is ✗.
+		const retried = state.code === 0 && !proxyRunning && /^[a-z]{1,20}$/.test(status ?? "") && !STOPPED_PROXY_STATES.has(status) && status !== "restarting";
 		checks.push({
 			ok: proxyRunning,
-			label: proxyRunning ? `podman: egress proxy running under this account's Podman (${proxy})` : state.code === 0 ? `podman: egress proxy is stopped under this account's Podman (${proxy})` : `podman: egress proxy is not under this account's Podman (${proxy})`,
-			fix: "start it as the worker's account, under the same rootless Podman, on a named bridge network (docs/podman.md): a job's --internal network reaches nothing on the host, so a proxy under docker or another account cannot serve it. Every podman job is refused pre-spend while this is down (PI_EGRESS=0 opts out)",
+			...(retried ? { warn: true } : {}),
+			label: proxyRunning ? `podman: egress proxy running under this account's Podman (${proxy})` : state.code === 0 ? `podman: egress proxy is ${status && status !== "exited" ? status : "stopped"} under this account's Podman (${proxy})` : `podman: egress proxy is not under this account's Podman (${proxy})`,
+			fix: retried
+				? `a podman job meanwhile is retried once, then failed (the worker does not refuse it outright on this state); if it stays ${status}, \`podman logs ${proxy}\` says why`
+				: "start it as the worker's account, under the same rootless Podman, on a named bridge network (docs/podman.md): a job's --internal network reaches nothing on the host, so a proxy under docker or another account cannot serve it. Every podman job is refused pre-spend while this is down (PI_EGRESS=0 opts out)",
 		});
 		// Said, never implied by the ✓ above: running is not the same as enforcing the allowlist. Issue #431: on this venue
 		// the canary that reads it back runs with `--live` (`podmanLiveChecks`), not here, so a plain run says where it is
@@ -4913,7 +5118,7 @@ function readBackChecks({ venue, bin, result, user, ids, relabel, facts, userFix
  * podman venue is never sent to `docker ps -a`. "Docker Desktop" and "rootful Podman" are proper names and stay.
  */
 function liveFailFix(bin, key) {
-	const text = LIVE_FAIL_FIX[key];
+	const text = (bin === "podman" ? LIVE_FAIL_FIX_PODMAN[key] : undefined) ?? LIVE_FAIL_FIX[key];
 	return text === undefined ? text : forRuntime(text, bin);
 }
 
@@ -5042,6 +5247,53 @@ const LIVE_FAIL_FIX = {
 	"localFolders:not-visible": "the daemon is not sharing the jobs directory's filesystem with containers as a live bind mount (on Docker Desktop, check its file sharing settings), so a local-folder job's edits would not land in the folder",
 	localFolders: "a bind-mounted host folder did not behave as one a job edits in place",
 };
+
+/**
+ * Where rootless Podman's cause is not docker's with the name swapped (issue #453). A failed isolation read-back on
+ * podman is, in the measured case, an account with no systemd user manager running, which the isolation line names;
+ * "cgroup delegation" alone sent the operator to controllers that already read delegated.
+ */
+const LIVE_FAIL_FIX_PODMAN = {
+	isolation: `the runtime did not apply a bound the worker passes: on rootless Podman that is the account's systemd user manager not running, Podman not reaching it, or a controller not delegated to it (the "isolation is ASSERTED" line above names which, when the static read sees it) -- jobs on this host do not have the boundary the table declares. ${capitalized(PODMAN_BOUNDS_FIX["no-user-manager"])}`,
+};
+
+/** This shell's account name, for loginctl; a seam so a test names the account it models. */
+function userNameOf(seams) {
+	if (typeof seams.userName === "function") return seams.userName();
+	try {
+		return userInfo().username;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * A URL as doctor may print it (issue #453, gate round 3 and the re-review): scheme, host, port and database only,
+ * never the userinfo (a password or a username that is a token), the query (`password=`, a token) or the fragment;
+ * `<no host>` without a host, and `<unparseable URL>` when it does not parse, since then nothing can say where a
+ * credential in it starts or ends.
+ */
+export function urlShown(url) {
+	let parsed;
+	try {
+		parsed = new URL(String(url));
+	} catch {
+		return "<unparseable URL>";
+	}
+	// scheme://host:port/db and nothing else (round-cap re-review): no userinfo at all, no query, no fragment.
+	if (!parsed.hostname) return "<no host>";
+	return printable(`${parsed.protocol}//${parsed.host}${parsed.pathname && parsed.pathname !== "/" ? parsed.pathname : ""}`);
+}
+
+/** Text with every C0 and C1 control blanked, for a line another party's value reaches. */
+function printable(text) {
+	return String(text ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+}
+
+/** A fix line opening a sentence of its own. */
+function capitalized(text) {
+	return `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
+}
 
 /** A PID-liveness check for the stale-fixture sweep: EPERM means alive and owned by someone else. */
 function defaultIsAlive(pid) {

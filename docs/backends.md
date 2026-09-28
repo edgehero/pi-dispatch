@@ -123,8 +123,10 @@ ones adapters get wrong:
   worker runs the `podman` CLI as its own account and each job as that account's uid with `--userns=keep-id`.
   Rootless Podman through its Docker API is still refused.
 - **`podman` declares every word `enforced`**, three of them only while observed from `podman info` and this
-  account's Podman files: `isolation` (`podmanBoundsDelegated`: cgroup v2 with the pids, memory and cpu
-  controllers delegated, since without delegation rootless Podman accepts the bounds and applies none),
+  account's Podman files: `isolation` (`podmanBoundsDelegated`: cgroup v2, the account's systemd user manager
+  running with the pids, memory and cpu controllers delegated to it, and Podman putting containers under it, through
+  the `systemd` cgroup manager or a worker running inside that manager; otherwise rootless Podman accepts the bounds
+  and applies none, measured in issue #453 and `docs/podman.md` step 3),
   `mountSet` (`podmanAddsNoMounts`: the mounts.conf that applies is empty and nothing else adds a mount) and
   `credentialTransit` (`podmanServiceLocal`: `serviceIsRemote` is false). `nonRoot` is `enforced` there, where
   `local` only asserts it, because the argv always carries the worker's own non-zero uid and keep-id maps it

@@ -18,7 +18,10 @@ export const OBSERVATION_COMMENT = Object.freeze({
 	[RUNTIME_ADDS_NO_MOUNTS]: "the container runtime is not observed adding no mounts of its own to a job container",
 	// Issue #354: the podman venue's three, in the same fixed register. No path, no controller list and no service URL:
 	// those are the evidence, which goes to the operator's log only.
-	[PODMAN_BOUNDS_DELEGATED]: "the worker's rootless Podman is not observed having the cgroup controllers that apply a container's pid and memory bounds",
+	// Cause-neutral (issue #453): the observation misses both when a controller is not delegated and when no systemd user
+	// manager runs for the account (measured: podman info then still lists every controller). Which one is the evidence's
+	// to say, in the operator's log.
+	[PODMAN_BOUNDS_DELEGATED]: "the worker's rootless Podman is not observed applying a container's pid, memory and cpu bounds",
 	[PODMAN_ADDS_NO_MOUNTS]: "the worker's rootless Podman is not observed adding no mounts of its own to a job container",
 	[PODMAN_SERVICE_LOCAL]: "the podman CLI is not observed running containers on this host rather than through a remote service, so the job's credentials could cross a network the deployment does not own",
 });
@@ -608,7 +611,10 @@ export async function runJob(job, deps) {
 			// The daemon did not answer, so this is indeterminate rather than a refusal -- the same
 			// determinate/indeterminate split the image preflight draws one gate up, and thrown for the same
 			// reason. Pre-reserve, so the refund below is a no-op and still honest if this gate ever moves.
-			throw new InfraRetry(runtimeUnavailable(resolveBackendName(job, blessedBackends[0]), "egress preflight"), { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			// With a proxy STATE (issue #453, gate round 3): the daemon answered and the proxy is on its way somewhere
+			// (restarting, created, ...), so the words name the proxy and its state rather than blaming the runtime.
+			const said = typeof egress.state === "string" ? `egress proxy "${egress.unavailable}" is ${egress.state}, not running; the job is retried once, then failed` : runtimeUnavailable(resolveBackendName(job, blessedBackends[0]), "egress preflight");
+			throw new InfraRetry(said, { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 		}
 
 		// REQ-RESUMABLE-SESSION's one fail-CLOSED case. Everything else in that feature fails OPEN and

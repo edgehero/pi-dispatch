@@ -919,6 +919,20 @@ test("a podman job's floor refusal names podman's own observations in fixed word
 	assert.doesNotMatch(texts[0], /docker|mounts\.conf|\/home\/|unix:/, "no docker word, and none of the evidence, reaches a forge comment");
 });
 
+test("the podman bounds comment is true for either cause, controllers or no user manager, and names neither (#453)", () => {
+	// Pinned whole: the observation misses when a controller is not delegated AND when no systemd user manager runs for
+	// the account while podman info lists every controller, so a sentence blaming the controllers was false for the
+	// second. The cause is evidence, and evidence stays in the operator's log.
+	assert.equal(OBSERVATION_COMMENT[PODMAN_BOUNDS_DELEGATED], "the worker's rootless Podman is not observed applying a container's pid, memory and cpu bounds");
+	assert.doesNotMatch(OBSERVATION_COMMENT[PODMAN_BOUNDS_DELEGATED], /controller|cgroupfs|systemd|manager|session/);
+});
+
+test("a proxy on its way somewhere is a retry that names the proxy and its state, never the runtime, and spends nothing (#453 gate 3)", async () => {
+	const { deps: d, calls } = deps({ redis: fakeRedis(), egressPreflight: async () => ({ unavailable: "pi-dispatch-egress-proxy", state: "restarting" }) });
+	await assert.rejects(runJob(ghJob, d), (err) => err instanceof InfraRetry && err.message === 'egress proxy "pi-dispatch-egress-proxy" is restarting, not running; the job is retried once, then failed');
+	assert.ok(!calls.some((c) => c[0] === "incr"), "no budget reserved");
+});
+
 test("the image and egress retries name the venue's runtime: docker's words on local byte-identical, podman's on podman (#354)", async () => {
 	// The message is the job_failed log line and BullMQ's failedReason. "docker unavailable" on a host with no docker
 	// sends the operator after the wrong daemon.

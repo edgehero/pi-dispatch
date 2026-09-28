@@ -342,13 +342,48 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    environment, since Podman then falls back to `/run/user/<uid>`. That hand-written system unit still works, but
    `pi-dispatch service install` installs this venue's worker in USER scope (it refuses `--system` here, step 6),
    and linger is then also what starts the user manager, and with it the worker and the Quadlet units, at boot.
-3. **cgroup v2 with the controllers delegated.** `podman info --format '{{.Host.CgroupControllers}}'` must list `cpu`,
-   `memory` and `pids`. Fedora delegates all of them to user sessions (measured: `cpuset cpu io memory pids`); where a
-   distribution does not, a drop-in for `user@.service` with `Delegate=cpu cpuset io memory pids` does. Leave `cgroups`
-   unset in every containers.conf the account reads: measured with `--cgroups=disabled`, `--memory` and `--pids-limit`
-   are accepted and silently not applied, and the bounds read back as `max`. The worker credits `isolation` only while
-   it observes the delegation (`podmanBoundsDelegated`), and `pi-dispatch doctor --live` reads `pids.max` and
-   `memory.max` back off a real container.
+   A hand-written SYSTEM unit with `User=` must also be ordered after that user manager, which nothing else orders
+   it after: add `Wants=user@<uid>.service` and `After=user@<uid>.service` to its `[Unit]` section. Measured (issue
+   #453, Fedora 44): without them, with `PI_BACKEND_FLOOR=isolation=enforced`, the worker started before
+   `user@<uid>.service`, found no user manager, refused to boot with exit 2, and stayed failed after the manager came
+   up, since `RestartPreventExitStatus=2` keeps a configuration refusal from restarting; with the two lines it started
+   after the manager and ran. Without an isolation floor the same race costs the jobs picked up before the manager
+   runs their bounds (step 3). The user-scope worker `service install` writes runs inside the manager and needs neither.
+3. **cgroup v2, a systemd user manager running for the account with the controllers delegated to it, and Podman
+   putting its containers under it.** `cat /sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service/cgroup.controllers`
+   must list `cpu`, `memory` and `pids`. Fedora delegates all of them to user managers (measured: `cpuset cpu io
+   memory pids`); where a distribution does not, a drop-in for `user@.service` with `Delegate=cpu cpuset io memory
+   pids` does. With a controller missing a job cannot have that bound: measured for cpu, Podman 5.8.1 refused to
+   start a container carrying `--cpus` (exit 126, "controller `cpu` is not available"). The file is absent while the
+   account's `user@<uid>.service` is inactive (measured, issue #453; systemd removes a stopped unit's cgroup). What
+   decided the bounds in every case measured (Fedora 44, Podman 5.8.1, the venue's own argv; issue #453):
+   - **no user manager** (linger off, the account reached through `sudo -iu`, which starts none): Podman put the job in
+     the caller's own root-owned cgroup, `pids.max`, `memory.max` and `cpu.max` read back `max`, and the run exited 0,
+     whether Podman's cgroup manager was `systemd` (it fell back to `cgroupfs` with a warning) or `cgroupfs`;
+   - **a user manager Podman reaches** (`podman info --format '{{.Host.CgroupManager}}'` says `systemd`): applied. A
+     plain ssh login started the manager (pam_systemd), and so does linger (step 2);
+   - **a user manager Podman does not reach** over the account's user bus (no `/run/user/<uid>/bus` socket, as without
+     the dbus-user-session package on Debian and Ubuntu; a `DBUS_SESSION_BUS_ADDRESS` pointing nowhere; a system unit
+     with `User=` and no user bus): Podman fell back to `cgroupfs` and the job again landed in the caller's own cgroup,
+     unbounded;
+   - **`cgroupfs` from a process inside `user@<uid>.service`** (the worker as a systemd user service): applied.
+   So the worker credits `isolation` (`podmanBoundsDelegated`) only while that file lists the three controllers AND
+   either Podman reports the `systemd` cgroup manager or the worker itself runs inside the user manager. One measured
+   case is applied and still not credited, since nothing the worker can read tells it apart from the unbounded ones:
+   an explicit `cgroup_manager = "cgroupfs"` used from a shell outside the manager. Not measured, and not credited: no
+   user manager, with the worker in a cgroup of its own that the account owns (a system unit with `User=` and
+   `Delegate=yes`, linger off). `podman info`'s `CgroupControllers` answers none of this: it is the calling process's
+   own cgroup, which listed every controller with nothing applied. Leave `cgroups` unset in every containers.conf the
+   account reads: measured with `--cgroups=disabled`, `--memory` and `--pids-limit` are accepted and silently not
+   applied, and the bounds read back as `max`.
+
+   `pi-dispatch doctor`'s isolation line names which of these it saw, with its fix (⚠; the `PI_BACKEND_FLOOR` line is
+   the ✗ when the floor asks for `isolation`), and `pi-dispatch doctor --live` reads `pids.max` and `memory.max` back
+   off a real container. With linger off, doctor's ✓ holds only while a login session of the account is open, from
+   whatever shell it runs in: measured, a `sudo -iu` doctor saw the manager another login session had started and
+   gave ✓. The manager stops with the last session, so doctor says linger is off in a ⚠ of its own. Without a floor
+   on `isolation` a missed observation changes only the word: podman jobs still run, unbounded. With one (say
+   `PI_BACKEND_FLOOR=isolation=enforced`) the worker refuses to boot, naming the cause.
 4. **No mounts of Podman's own.** `mkdir -p ~/.config/containers && : > ~/.config/containers/mounts.conf`. For a
    rootless account the user's `mounts.conf` replaces `/etc/containers/mounts.conf`, and an EMPTY file at whichever
    of the two applies stops the default `/run/secrets` mount (both measured). Leave `volumes`, `mounts`, `devices`
@@ -382,7 +417,9 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    --fix` run as the account offers the pull for you: `podman pull ghcr.io/edgehero/pi-job:latest`, then `podman tag`
    to `pi-job:latest`, which is the default `PI_JOB_IMAGE`, so there is nothing to set. It offers nothing while
    `local` is also listed, or for a `PI_JOB_IMAGE` you chose. The image must declare `anyUid` unless the account is uid 1001; releases
-   since issue #341 do.
+   since issue #341 do. Pull it as the account; doctor's fix line names only that, since a podman-only host has no
+   docker to save an image from (issue #453). `pi-dispatch init` run with `PI_BACKENDS=podman` (in the shell or the
+   folder's `.env`) prints these steps as its next steps, in place of the docker ones.
 6. **The egress proxy and Valkey, as Quadlet units in this account's user manager.** Put `PI_BACKENDS=podman` in
    `.env` first (step 8), then from the deployment folder run `pi-dispatch up`, which pulls the job image into this
    account's store and offers the stack, or `pi-dispatch service install`, which installs the same units beside the
@@ -485,8 +522,13 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    `doctor --fix` offers no `docker run` for it.
 8. **`PI_BACKENDS=podman`** in `.env` (the setup wizard, `/dispatch setup`, writes it when you choose rootless Podman
    at its runtime step), then start the worker, and run `pi-dispatch doctor` and
-   `pi-dispatch doctor --live` as the same account. doctor's podman section checks that `podman info` answered, that
-   the service is rootless and not remote, that the controllers are delegated, whether SELinux relabelling applies,
+   `pi-dispatch doctor --live` as the same account, from the deployment folder. doctor reads `PI_BACKENDS`,
+   `PI_EGRESS` and `PI_EGRESS_PROXY` as `up` and `service install` do: this shell's value where it sets one, else
+   `.env`'s, and a line naming the file when it supplied one; a shell and a `.env` that set one differently is a ✗,
+   since the service runs the file (issue #453). It takes the service's `VALKEY_URL`, `PI_PROVIDER` and the provider
+   key's presence from `.env` the same way where this shell does not set them, and says so; it never prints a key. doctor's podman section checks that `podman info` answered, that
+   the service is rootless and not remote, that a user manager runs with the controllers delegated and Podman puts
+   containers under it (step 3), whether SELinux relabelling applies,
    that the job image is in this account's store, and, with the egress policy armed, that the proxy is running under
    this Podman. `--live` reads the declarations back off real containers and says it read them back on podman,
    `egress` included: with the policy armed it first runs doctor's egress canary under this account's Podman, two
@@ -591,7 +633,7 @@ same host.
 <!-- PODMAN-PROPERTY-TABLE -->
 | Property | Docker Engine, rootful | Podman rootful | Podman rootless, keep-id, Docker API | Podman rootless, Docker API | podman-docker, rootful | podman-docker, rootless | podman (native, rootless) |
 |---|---|---|---|---|---|---|---|
-| isolation | enforced | asserted (bounds applied, not credited) | refused: rootless | refused: rootless | asserted | refused: rootless | enforced while the pids, memory and cpu controllers are observed delegated, else asserted |
+| isolation | enforced | asserted (bounds applied, not credited) | refused: rootless | refused: rootless | asserted | refused: rootless | enforced while this account's systemd user manager is observed running with the pids, memory and cpu controllers delegated to it and Podman putting containers under it, else asserted |
 | ephemeral | enforced | enforced | refused: rootless | refused: rootless | enforced | refused: rootless | enforced |
 | mountSet | enforced | enforced with the empty override, else asserted | refused: rootless | refused: rootless | enforced with the empty override, else asserted | refused: rootless | enforced while the mounts.conf that applies is observed empty, else asserted |
 | egress | enforced (PI_EGRESS) | enforced (PI_EGRESS) | refused: rootless | refused: rootless | enforced (PI_EGRESS) | refused: rootless | enforced (PI_EGRESS) |

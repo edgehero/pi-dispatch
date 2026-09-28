@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { main } from "../src/cli.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -113,4 +114,20 @@ test("run fails FAST (does not hang) when Valkey is unreachable", { skip: needsD
 	const code = await main(["run", dir, "--task", "x"], { VALKEY_URL: "redis://127.0.0.1:1" });
 	assert.equal(code, 1, "an unreachable Valkey is a clean error, not a hang");
 	assert.ok(Date.now() - start < 15000, "must fail fast, well under any CI timeout");
+});
+
+test("`pi-dispatch init` hands the CLI's environment to init: PI_BACKENDS=podman in the shell gets the podman ladder (#453 gate)", { skip: process.platform !== "linux" ? "the podman ladder is Linux's; off Linux init says the venue refuses the host, pinned in init.test.mjs" : false }, () => {
+	const dir = tempDir("pi-cli-init-");
+	const cli = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
+	const printed = execFileSync(process.execPath, [cli, "init"], { cwd: dir, env: { ...process.env, PI_BACKENDS: "podman" }, encoding: "utf8" });
+	assert.match(printed, /\nNext \(the podman venue; run these as the worker's own account\./);
+	const docker = execFileSync(process.execPath, [cli, "init"], { cwd: tempDir("pi-cli-init-"), env: { ...process.env, PI_BACKENDS: "local" }, encoding: "utf8" });
+	assert.match(docker, /\nNext:\n {2}1\. docker pull/);
+});
+
+test("`pi-dispatch init` off Linux with PI_BACKENDS=podman in the shell says the venue refuses the host (#453 gate)", { skip: process.platform === "linux" ? "covered on Linux by the ladder test beside this one" : false }, () => {
+	const dir = tempDir("pi-cli-init-");
+	const cli = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
+	const printed = execFileSync(process.execPath, [cli, "init"], { cwd: dir, env: { ...process.env, PI_BACKENDS: "podman" }, encoding: "utf8" });
+	assert.match(printed, /\nNext: PI_BACKENDS lists only the podman venue, which runs on Linux alone/);
 });

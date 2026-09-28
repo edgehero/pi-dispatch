@@ -88,7 +88,7 @@ const NO_HOST_FILES = { statSync: (p) => { throw enoent(p); }, readFileSync: (p)
 function PODMAN_INFO(over = {}, { answer, calls } = {}) {
 	return async () => {
 		calls?.push("podman info");
-		return answer ?? { answered: true, info: { rootless: true, serviceIsRemote: false, selinux: false, cgroupVersion: "v2", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1", ...over } };
+		return answer ?? { answered: true, info: { rootless: true, serviceIsRemote: false, selinux: false, cgroupVersion: "v2", cgroupManager: "systemd", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1", ...over } };
 	};
 }
 
@@ -2733,7 +2733,9 @@ test("with local blessed, the preflights are local's own members and a job namin
 
 const PODMAN_ID = { platform: "linux", release: "6.8.0-test", euid: 1234, egid: 1234, home: "/home/pdjob" };
 /** The one file that earns `podmanAddsNoMounts`: this account's own mounts.conf override, empty. */
-const PODMAN_FILES = hostFiles({ "/home/pdjob/.config/containers/mounts.conf": "" });
+// The account's user manager running with the controllers delegated (issue #453): user@1234.service's cgroup.
+const PODMAN_USER_MANAGER = "/sys/fs/cgroup/user.slice/user-1234.slice/user@1234.service/cgroup.controllers";
+const PODMAN_FILES = hostFiles({ "/home/pdjob/.config/containers/mounts.conf": "", [PODMAN_USER_MANAGER]: "cpuset cpu io memory pids\n" });
 const PODMAN_KEYS = ["podmanVersion", "podmanRootless", "podmanJobUser", "podmanBoundsDelegated", "podmanAddsNoMounts", "podmanServiceLocal"];
 
 test("podman unblessed: no podman info, no podman reaper, no podman bundle, and the boot line's podman keys are null (#354)", { skip }, async () => {
@@ -2966,8 +2968,15 @@ test("a floor naming a podman observation refuses to BOOT on a missed one, tagge
 	const base = { jobUserIdentity: PODMAN_ID, observationFs: PODMAN_FILES, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() };
 	const order = [];
 	await assert.rejects(
-		() => runStart({ ...base, env: { PI_BACKENDS: "podman", PI_BACKEND_FLOOR: "isolation=enforced" }, readPodmanInfo: PODMAN_INFO({ controllers: ["memory", "pids"] }), order, makePodmanReaper: () => (order.push("makePodmanReaper"), async () => ({ reaped: true })) }),
-		(err) => err.piDispatchConfig === true && /podman: isolation=enforced/.test(err.message) && /cpu cgroup controller is not delegated/.test(err.message),
+		() => runStart({ ...base, env: { PI_BACKENDS: "podman", PI_BACKEND_FLOOR: "isolation=enforced" }, readPodmanInfo: PODMAN_INFO(), observationFs: hostFiles({ "/home/pdjob/.config/containers/mounts.conf": "", [PODMAN_USER_MANAGER]: "memory pids\n" }), order, makePodmanReaper: () => (order.push("makePodmanReaper"), async () => ({ reaped: true })) }),
+		(err) => err.piDispatchConfig === true && /podman: isolation=enforced/.test(err.message) && /cpu cgroup controller is not delegated to this account's systemd user manager/.test(err.message),
+	);
+	assert.deepEqual(order, [], "before the reaper and the worker");
+	// Issue #453: an account with no systemd user manager running, podman info still listing every controller (measured
+	// E1), is refused at boot under an isolation floor, tagged (exit 2), with the missing manager named.
+	await assert.rejects(
+		() => runStart({ ...base, env: { PI_BACKENDS: "podman", PI_BACKEND_FLOOR: "isolation=enforced" }, readPodmanInfo: PODMAN_INFO(), observationFs: hostFiles({ "/home/pdjob/.config/containers/mounts.conf": "" }), order }),
+		(err) => err.piDispatchConfig === true && /podman: isolation=enforced/.test(err.message) && /no systemd user manager is running for this account \(\/sys\/fs\/cgroup\/user\.slice\/user-1234\.slice\/user@1234\.service\/cgroup\.controllers does not exist\)/.test(err.message),
 	);
 	assert.deepEqual(order, [], "before the reaper and the worker");
 	// Blessed but NOT the default, it is still judged: the floor is over every blessed venue.
@@ -3001,18 +3010,19 @@ test("each venue's boot observations are judged for that venue alone, so local a
 
 test("the boot line carries each podman observation under its own key (#354)", { skip }, async () => {
 	// Three different answers, so a key reading another observation's value cannot pass: bounds withheld (no cpu
-	// controller), mounts credited (the empty override), service local. No floor, so nothing refuses.
+	// controller delegated to the user manager, issue #453), mounts credited (the empty override), service local. No
+	// floor, so nothing refuses.
 	const { logs } = await runStart({
 		env: { PI_BACKENDS: "local,podman" },
 		jobUserIdentity: PODMAN_ID,
-		observationFs: PODMAN_FILES,
-		readPodmanInfo: PODMAN_INFO({ controllers: ["memory", "pids"] }),
+		observationFs: hostFiles({ "/home/pdjob/.config/containers/mounts.conf": "", [PODMAN_USER_MANAGER]: "memory pids\n" }),
+		readPodmanInfo: PODMAN_INFO(),
 		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
 		makeHost: () => fakeHost(),
 	});
 	const started = logs.find((l) => l.event === "worker_started");
 	assert.deepEqual([started.podmanBoundsDelegated, started.podmanAddsNoMounts, started.podmanServiceLocal], [false, true, true]);
-	const noOverride = await runStart({ env: { PI_BACKENDS: "local,podman" }, jobUserIdentity: PODMAN_ID, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
+	const noOverride = await runStart({ env: { PI_BACKENDS: "local,podman" }, jobUserIdentity: PODMAN_ID, observationFs: hostFiles({ [PODMAN_USER_MANAGER]: "cpuset cpu io memory pids\n" }), makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
 	const s2 = noOverride.logs.find((l) => l.event === "worker_started");
 	assert.deepEqual([s2.podmanBoundsDelegated, s2.podmanAddsNoMounts, s2.podmanServiceLocal], [true, false, true]);
 });

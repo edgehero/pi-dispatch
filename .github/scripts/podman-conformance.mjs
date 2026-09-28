@@ -132,6 +132,10 @@ const backend = makePodmanBackend({
 	onOutput: () => {},
 	euid,
 	egid,
+	// An isolation floor (issue #453, gate round 1), so the bounds observation must HOLD for the probe to be admitted:
+	// without it `observationPreflight` admitted every probe whatever `podmanBoundsDelegated` said, and an observation
+	// reading the wrong path would have stayed green here. The runner's pdjob has linger, a user bus and the drop-in.
+	backendFloor: { isolation: "enforced" },
 });
 
 let probes = 0;
@@ -205,8 +209,9 @@ const withBrokenEnumeration = () => makeReaper({ log: () => {}, bin: `pi-dispatc
  */
 async function egressCanary() {
 	if (armed !== true) return { results: [], proxyRunning: null };
-	const state = await podman(["inspect", "--format={{.State.Running}}", proxy]);
-	const proxyRunning = state.code === 0 && state.stdout.trim() === "true";
+	// `.State.Status` "running", as the worker's egress preflight reads it (issue #453).
+	const state = await podman(["inspect", "--format={{.State.Status}}", proxy]);
+	const proxyRunning = state.code === 0 && state.stdout.trim() === "running";
 	if (!proxyRunning) return { results: [], proxyRunning };
 	const canary = await runEgressCanary({ run: liveRunVia(spawn, { bin: "podman" }), bin: "podman", proxy, image, pid: process.pid, user: decision.user });
 	for (const check of canary.checks) if (!check.ok) console.error(`podman-conformance: ${check.label}`);

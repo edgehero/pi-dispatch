@@ -557,6 +557,21 @@ export async function awaitRemoved({ step, id, now, delay, deadlineMs = LIVE_REM
 }
 
 /**
+ * The first line the runtime printed on a failed run, stderr first, as one printable line of at most 300 characters,
+ * or null. Control bytes become spaces, so nothing a runtime prints can move an operator's cursor.
+ */
+export function runtimeErrorLine(result) {
+	for (const stream of [result?.stderr, result?.stdout]) {
+		const line = String(stream ?? "")
+			.split(/\r?\n/)
+			.map((l) => l.replace(/[\u0000-\u001f\u007f]/g, " ").trim())
+			.find((l) => l.length > 0);
+		if (line) return line.length > 300 ? `${line.slice(0, 300)}...` : line;
+	}
+	return null;
+}
+
+/**
  * The names and addresses a peer answers at on one network, from `docker inspect --format={{json .NetworkSettings.Networks}}`:
  * `{ targets, addresses }`, where `addresses` are the `IPAddress` and `GlobalIPv6Address` targets only, taken from
  * those FIELDS rather than recognised by shape (a short container ID that starts with a digit is a name).
@@ -716,7 +731,10 @@ export async function runLiveProbes({
 		const reading = await start("probe container", names.probe, liveProbeRunArgs({ image, name: names.probe, fixture, sleepSeconds: liveSleepSeconds(stepTimeoutMs), user, relabel, buildArgs }));
 		const probeId = reading.entry.id;
 		if (reading.result?.code !== 0 || probeId === null) {
-			return { ran: false, reason: "the probe container did not start, so nothing was read back", verdicts: [], notes, swept };
+			// The runtime's own words, when it printed any (issue #453, gate round 1): "did not start" alone left the operator
+			// to reproduce the run to learn why (a missing controller, a name in use, an image the store lacks).
+			const said = runtimeErrorLine(reading.result);
+			return { ran: false, reason: `the probe container did not start${said ? ` (${bin} said: ${said})` : ""}, so nothing was read back`, verdicts: [], notes, swept };
 		}
 
 		const expected = containerSpec(probeOptions({ image, name: names.probe, fixture, user, relabel })).mounts;

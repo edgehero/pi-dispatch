@@ -4846,9 +4846,11 @@ a tunnel.
     the default one included, which is why an egress-off job is not given a bridge of its own.
   The run, the stop, the reaper, the image and egress preflights and the job networks are
   the `local` venue's own factories with `bin: "podman"` (issue #354's first part, the seams). The venue decides from
-  one bounded `podman info --format json`, never from a container, kept once it answers (rootlessness, remoteness
-  and delegation are the account's and the process's, fixed for a worker's life) while the files the observations
-  read are read again before each job. In this order (`decidePodmanJobUser`):
+  one bounded `podman info --format json`, never from a container, kept once it answers (rootlessness and remoteness
+  are the account's and the process's, fixed for a worker's life) while the files the observations read are read
+  again before each job, the account's user-manager cgroup among them since issue #453, because that manager can stop
+  under a running worker. The cgroup manager that read reported is kept with it, a residual: a user bus that appears or
+  goes away later is not seen until a restart. In this order (`decidePodmanJobUser`):
   1. a worker that is not on Linux: refused, `podman-platform` (Podman machine is unmeasured);
   2. no answer: `unknown`, retried like any unanswered read, except the two determinate ones, no `podman` to run
      (`podman-not-found`) and an answer nothing parses (`podman-unreadable`);
@@ -4938,16 +4940,50 @@ a tunnel.
     `XDG_RUNTIME_DIR`, falling back to `/run/user/<uid>`.
   - **`podman info --format json`** carries `host.security.rootless`, `host.serviceIsRemote` (false for a plain
     `podman`, true under `CONTAINER_HOST` or `--remote`), `host.security.selinuxEnabled`, `host.cgroupVersion`,
-    `host.cgroupControllers` and `version.Version`: one read decides the job user and all three observations.
+    `host.cgroupControllers` and `version.Version`: one read decides the job user and all three observations, the
+    bounds one together with a host file (below). `host.cgroupControllers` is the CALLING process's own cgroup, not
+    what is delegated to the account (issue #453, measured): it listed all five controllers where no bound was applied,
+    `memory pids` inside a user unit without `Delegate=` where cpu was applied, and flipped with a sibling unit's
+    `Delegate=`. `host.cgroupManager` does not decide the bounds either (below).
+  - **Bounds and the user manager** (issue #453, Fedora 44, Podman 5.8.1; round-446 M0-e with the venue's own argv,
+    and the gate-456 adversary's L rows). With no user manager (linger off, reached through `sudo -iu`, which starts
+    none) the configured `systemd` cgroup manager fell back to `cgroupfs` with a warning, an explicit `cgroupfs`
+    behaved the same, the container landed in the caller's root-owned session scope, and `pids.max`, `memory.max` and
+    `cpu.max` read `max` with exit 0. With a user manager running, the bounds applied where Podman reached it over the
+    account's user bus (`podman info` then reports the `systemd` cgroup manager), from a shell or a system unit alike,
+    and where the caller itself ran inside `user@<uid>.service` under an explicit `cgroupfs`; they did NOT apply where
+    Podman could not reach it (no user bus socket, a `DBUS_SESSION_BUS_ADDRESS` pointing nowhere, a system unit with
+    `User=` and no bus): Podman fell back to `cgroupfs` and the container landed in the caller's own root-owned cgroup.
+    An explicit `cgroupfs` from another user's session with the bus reachable applied too (M0-e E3c). A plain ssh
+    login started the user manager (pam_systemd). The `user@<uid>.service` cgroup path was absent with the unit
+    inactive and present with it active (measured), which is systemd's removal of a stopped unit's cgroup.
   - **`mounts.conf`**: a rootless user's `~/.config/containers/mounts.conf` replaces `/etc/containers/mounts.conf`,
     and an empty file at whichever applies suppresses `/usr/share/containers/mounts.conf`'s `/run/secrets`.
   - **SELinux** confines rootless containers as it does rootful ones: an unlabelled source is denied, `:z` and `:Z`
     work, and `label=disable` works by running the container `spc_t`.
 - **The words**, each checked against how `local` words the same property:
-  - `isolation` **enforced**, `observedBy` `podmanBoundsDelegated` (rootless, cgroup v2, `pids`, `memory` and `cpu`
-    among the controllers, and no containers.conf setting `cgroups`): the flags are this worker's argv, and the
-    observation is what makes the bounds real rather than accepted and dropped. `local`'s equivalent (`daemonAppliesBounds`) is false on every Podman daemon because its
-    Docker API hard-codes the booleans; `podman info`'s controller list is a different and readable fact.
+  - `isolation` **enforced**, `observedBy` `podmanBoundsDelegated` (rootless, cgroup v2, the account's systemd user
+    manager running with `pids`, `memory` and `cpu` in `/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service/
+    cgroup.controllers`, Podman putting containers under it, and no containers.conf setting `cgroups`): the flags are
+    this worker's argv, and the observation is what makes the bounds real rather than accepted and dropped. "Under it"
+    is observed as either `podman info` reporting the `systemd` cgroup manager or the worker's own `/proc/self/cgroup`
+    inside `user@<uid>.service`, each of which the measurements above show applying the bounds, and neither of which
+    held in a row that did not. The file's absence is a determinate `false` (`no-user-manager`); a manager Podman does
+    not reach from outside it is a determinate `false` of its own (`user-manager-unreachable`); a read that failed for
+    a moment is a retry. Not credited, stated: an explicit `cgroupfs` from a shell outside the manager (measured
+    applied, but indistinguishable from the unbounded rows by anything the worker reads), and no user manager with the
+    worker in a cgroup of its own the account owns (a system unit with `User=` and `Delegate=yes`, linger off; not
+    measured). A hand-written system unit must be ordered after `user@<uid>.service` (`Wants=`/`After=`): measured, a
+    worker that started first refused to boot with exit 2 under an isolation floor and stayed failed. The observation changes a job only through
+    `PI_BACKEND_FLOOR`: with a floor on `isolation` the worker refuses to boot on it (tagged, exit 2) and each podman
+    job is refused `backend-floor-unobserved`; without one the word falls to `asserted` and jobs run as before,
+    unbounded. Doctor says it once, in the backend section's `isolation` line (⚠, with the cause's own fix; the floor
+    line is the ✗ under such a floor), its ✓ line lists the user manager's controllers, and with linger off a ⚠ says the
+    ✓ holds only while a login session lasts (measured: a `sudo -iu` doctor saw a manager another session had
+    started), so the static read agrees with `--live`, whose podman isolation fix names the same causes. The forge comment for a refusal
+    on this observation is cause-neutral: it says the bounds are not observed applied, never which cause, since the
+    cause is evidence and stays in the operator's log. `local`'s equivalent (`daemonAppliesBounds`) is false on every
+    Podman daemon because its Docker API hard-codes the booleans.
   - `ephemeral` **enforced**: `--rm` and a name carrying the job id, measured removing the container and its cidfile.
   - `mountSet` **enforced**, `observedBy` `podmanAddsNoMounts`: the argv's mounts are `containerSpec`'s, and the one
     runtime mount measured (`/run/secrets`) is observed absent through the mounts.conf chain this account's Podman
@@ -5110,7 +5146,32 @@ a tunnel.
     of the plan for its `PODMAN_SYSTEMD_UNIT` label; one that does not name our unit is foreign, `service install`
     refuses unless `--force` (and then says it replaces it), and `up`, which has no `--force`, installs nothing and
     names both ways out. `up` reads a running proxy from `{{.State.Running}}`'s OUTPUT: an exited container prints
-    `false` with exit 0 (measured), and the exit code alone called a stopped hand-started proxy present.
+    `false` with exit 0 (measured), and the exit code alone called a stopped hand-started proxy present. Since issue
+    #453 it reads `{{.State.Status}}` and counts only `running`: Podman reports a paused container `paused` and one
+    between restarts `stopped` (measured on 4.9.3 and 5.8.1). The docker venue's proxy step reads the same Status,
+    stdout alone, since the status word is what names a paused or restarting container (measured on Docker Engine
+    29.8.1: both read `.State.Running` true), and it also asks whether the shipped `pi-dispatch-egress-proxy` is CURRENT: the
+    pinned squid digest, the image's own entrypoint and command (read from its registry config; neither compose nor
+    `up` sets them), this folder's `deploy/egress-proxy.conf` and `egress-allowlist.conf` mounted, and no mount but
+    those and the image's two anonymous volumes (`egress-proxy-state.mjs`). The mounts are compared only where every
+    bind source resolves on this host: a runtime that reports its VM's own paths (Docker Desktop's shape, not measured
+    here) would otherwise have every proxy read stale, so that half is UNKNOWN, said as a ⚠ and never the ground for a
+    removal: UNKNOWN only for a source under a VM prefix (`/host_mnt/`, `/run/desktop/mnt/host/`) or on a macOS or
+    Windows host (gate round 3's simple rule); on Linux a source that does not resolve is gone, and stale. The argv is
+    normalised whatever the runtime's spelling: Podman 4.9.3's native inspect renders the entrypoint as a string
+    (measured), Docker Engine and Podman 5.8.1, natively and through its Docker API, as a list (measured). Measured on
+    Docker Engine 29.8.1 with compose 5.5.1 (rootful): a compose-made and an `up`-made proxy, from a real and a
+    symlinked folder, all read current (the symlink's path is kept as given, and resolves to the folder). A current
+    stopped one is
+    offered `docker start` of that same container (a paused one `docker unpause`): that is what `docker compose
+    --profile egress up -d` does to a stopped container whose configuration is unchanged, it keeps a compose-created
+    container compose's, and it destroys nothing. A stale one, running or not, would bring back a policy this
+    deployment did not ship, so it is offered `docker rm -f` and the shipped run, shown line for line, naming the job
+    and sandbox networks attached to it, which the removal cuts off mid-run, and saying to stop the worker first; a
+    container whose state `docker inspect` answers unreadably is left alone rather than run over; doctor's egress
+    section says the same ✗ for a running stale one, judging the mounts only when run from a folder holding the two
+    files. A container `PI_EGRESS_PROXY` names is the operator's: reported, never started or judged stale, and doctor's
+    fix for it names `docker start`, not compose, which starts only the shipped name.
   - **A replaced file restarts its unit.** `--force` over a changed `.container` file restarts that unit, because
     `start` on an active unit does nothing, and warns first when it is the proxy. A changed `.network` file restarts
     nothing: its unit runs `podman network create --ignore`, which cannot change an existing network.
@@ -5375,3 +5436,4 @@ a tunnel.
 | 2026-09-27 | Issue #432. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**, one sentence: its CI job, `.github/workflows/podman-conformance.yml`, is a required check on `main`, no longer advisory. It was promoted after it had passed on every PR and main push of the podman follow-up round (#428 to #437; 38 of 39 runs green, the one red a real defect on the branch that built the venue), renamed first to drop "(advisory)" because the job name is the context string, and then added to the branch protection as the sixth required context. The decision itself is UNCHANGED, checked. |
 | 2026-09-27 | Issue #451. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**, the `provider-auth-refused` paragraph: the quoted sentence's "(HTTP 401 or 403)" becomes "(an authentication or permission error)", and the stop is described as a provider's refusal of the credential rather than a 401/403, because issue #451 admits a Google 400 `API_KEY_INVALID` and Bedrock's `UnrecognizedClientException: 403: ` form (`INT-RUNNER-EXIT-CODE-PROTOCOL`). The token, its once-ness and its hook behaviour are UNCHANGED, checked. **Code evidence**: worker/src/processor.mjs -> TERMINAL_COMMENTS. |
 | 2026-09-27 | Issue #446, folding its PR #457 gate rounds 1 to 3 into this one row. **`DES-RETENTION-SWEEPS-ON-A-TIMER` UNCHANGED, checked**: the sandbox sweep's leftover-tombstone removal runs at the start of the closure boot already built, so boot and every tick share it, nothing new is constructed, and the per-tree yield covers each tombstone as it covers each directory; the "window is a floor" cost is unchanged, the window now being the earlier of the worker's current one and the run's recorded `retainUntil` (`INT-SANDBOX-CONTRACT`). **`DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked**: a sandbox is still a fresh `--rm` container from the run's image and workspace; the post-launch look only removes one whose run was swept as it started, and a loss later in the session is reported, never acted on. |
+| 2026-09-27 | Issue #453, three podman venue leftovers, with the PR's gate rounds 1 to 3 and the round-cap re-review. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED, and CORRECTED twice**: `podmanBoundsDelegated` read `podman info`'s `host.cgroupControllers`, which a measurement on Fedora 44 (Podman 5.8.1, the venue's own argv) showed is the CALLING process's cgroup, not the account's delegation: it listed all five controllers where an account with no systemd user manager (linger off, a `sudo -iu` shell) got no bound at all, `pids.max` and `memory.max` reading `max` with exit 0; it listed `memory pids` inside a user unit without `Delegate=` where cpu was applied; and it flipped with a sibling unit's `Delegate=`. The first correction read the fact that decided those rows, `user@<uid>.service`'s `cgroup.controllers`, and dropped the cgroup manager; the gate's adversary then measured a manager running that Podman could not reach (no user bus socket, a `DBUS_SESSION_BUS_ADDRESS` pointing nowhere, a system unit with `User=` and no bus), where Podman fell back to `cgroupfs` and the job again landed in the caller's own root-owned cgroup, unbounded, while the observation said applied. The rule now: the manager's cgroup with `pids`, `memory` and `cpu`, AND either the `systemd` cgroup manager reported by `podman info` or the worker's own `/proc/self/cgroup` inside `user@<uid>.service`. It credits no row measured unbounded; one measured-applied row (an explicit `cgroupfs` from a shell outside the manager) is not credited, and one unmeasured case fails closed, both named. A missing controller's evidence says what was measured (Podman 5.8.1 refuses a `--cpus` container, exit 126), not "applies nothing". The issue's "a plain `ssh`" case was corrected by measurement: an ssh login starts the user manager and the bounds apply; the failing case is `sudo -iu` with linger off. The residual the info cache carries (the cgroup manager of the first answered read) is stated. The consequence lands only through `PI_BACKEND_FLOOR` on `isolation` (the worker's boot, exit 2, and each podman job as `backend-floor-unobserved`); without one the word falls to `asserted`. A hand-written system unit must be ordered after `user@<uid>.service` (measured: without it the worker refused to boot and stayed failed). Doctor says the cause once, in the backend section's `isolation` line with that cause's fix (the ✗ under a floor stays the floor line's), its ✓ line lists the user manager's controllers, and with linger off a ⚠ says the ✓ lasts only as long as a login session (measured: a `sudo -iu` doctor saw a manager another session had started). The forge comment for this observation (`OBSERVATION_COMMENT`) says the bounds are not observed applied, true for every cause. Doctor's podman image fix lines no longer offer `docker save ... \| podman load`, which a podman-only host cannot run. **`DES-PODMAN-STACK-AS-QUADLET-UNITS` AMENDED**, one rule and its docker twin: a running proxy is `{{.State.Status}}` `running` on both venues (docker's `.State.Running` is also true for a paused or crash-looping container; Podman's states measured on 4.9.3 and 5.8.1). On docker the shipped proxy must also be current, the pinned squid with its own entrypoint and command and this folder's two files mounted and no other mount but its volumes: a current stopped one is offered `docker start` (a paused one `docker unpause`, compose's semantics for an unchanged container), a stale one `docker rm -f` and the shipped run, shown and consented with the job networks it would cut off named, and doctor says ✗ for a running stale one. Round 2 made the mount half conditional: it is compared only where every bind source resolves on this host, and is otherwise UNKNOWN (a ⚠, never a removal), since a runtime reporting its VM's own paths, as Docker Desktop is expected to, would have read every proxy stale; measured on Docker Engine 29.8.1 with compose 5.5.1, a compose-made and an `up`-made proxy from a real and a symlinked folder all read current, and a paused and a restarting container both read `.State.Running` true (pinned in `egress-proxy-state.test.mjs`). An unreadable inspect answer on an existing container is left alone rather than run over, and doctor's fix for a STOPPED shipped proxy that is stale is `up`'s replace offer, never compose (which would start it as it is). Round 3, the cap, chose the simplest rules: the proxy's states split three ways (running admits; paused, exited and dead refuse; every other word is a retry that names the state, in the worker, `up` and doctor alike); the mounts are unknown only under a VM prefix or on a macOS or Windows host, and a source gone on Linux is stale; the argv is normalised (Podman 4.9.3 renders the entrypoint as a string, measured); `--yes` never replaces a running proxy that job networks are attached to; and doctor's `.env` reads pass one allowlist and one loader mapping. The re-review: `created` refuses (it stays so, measured), a retry is "once, then failed" (two attempts), doctor says ✗ for `restarting` (a crash loop fails every job) and ⚠ only for a transient word; each bind is judged on its own, one under a VM prefix unknown for itself while the others and any extra mount are still compared, and nothing is removed while one of the two expected binds is unknown; doctor prints a URL as scheme, host, port and database only, and blanks C1 controls as well as C0. From the executing review of round 3: doctor's fix for a paused shipped proxy is `docker unpause`, as `up` offers; a running stale proxy gets no "✓ running" line before its ✗, and the canary through it names that proxy, not the allowlist, as what to fix; `up` creates the proxy's network only where it does not exist, so a recreate no longer prints the daemon's "already used". The `user-manager-unreachable` evidence says the bounds are not observed from here rather than not applied, since an explicit cgroupfs with the bus reachable measured them applied. An operator's `PI_EGRESS_PROXY` container is never started or judged stale, and doctor's fix for it now names `docker start` rather than compose. `up` no longer offers a proxy from a folder without `deploy/egress-proxy.conf` (measured: the runtime mounts a directory there). **UNCHANGED, checked**: `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` (no network, attach or proxy image moves) and `DES-CLI-SURFACE` (no command or flag is added; `init` prints different next steps, and `init` and `doctor` decide the venue with `up`'s function). **Code evidence**: worker/src/backend-podman.mjs -> parsePodmanInfo, observePodmanBounds, podmanUserManagerControllersPath, podmanNoUserManagerEvidence, observePodman; worker/src/backends.mjs -> OBSERVATIONS, OBSERVATION_FIX; worker/src/doctor.mjs -> runDoctor, backendChecks, podmanChecks, egressChecks, PODMAN_BOUNDS_FIX, LIVE_FAIL_FIX_PODMAN, liveFailFix; worker/src/processor.mjs -> OBSERVATION_COMMENT; worker/src/egress-proxy-state.mjs; worker/src/deployment-venue.mjs -> deploymentVenueEnv; worker/src/up.mjs -> runUp (steps e2 and e3); worker/src/init.mjs -> runInit, nextSteps; .github/scripts/podman-conformance.mjs (an isolation floor, so a wrong observation fails the job). |

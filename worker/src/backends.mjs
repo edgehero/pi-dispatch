@@ -363,12 +363,15 @@ export const DAEMON_APPLIES_BOUNDS = "daemonAppliesBounds";
 export const RUNTIME_ADDS_NO_MOUNTS = "runtimeAddsNoMounts";
 
 /**
- * The observation that a ROOTLESS Podman applies a job container's pid, memory and cpu bounds (issue #354), from the one
- * `podman info --format json` read the podman venue's job user is decided from: cgroup v2, with `pids`, `memory` and
- * `cpu` among the controllers systemd delegated to this user. Without delegation rootless Podman accepts `--pids-limit`
- * and `--memory` and applies nothing (measured on Podman 5.8.1, Fedora 44: `--cgroups=disabled` exits 0 and the bounds
- * read back `max`), so the word rests on the delegation being OBSERVED, and a `cgroups` key in a containers.conf this
- * user's Podman reads withholds it. `pi-dispatch doctor --live` reads `pids.max` and `memory.max` back off a container.
+ * The observation that a ROOTLESS Podman applies a job container's pid, memory and cpu bounds (issue #354; the facts it
+ * rests on corrected by issue #453's measurements). From the `podman info` read the venue's job user is decided from
+ * (rootless, cgroup v2, the cgroup manager Podman uses) and this host's files: the account's systemd user manager
+ * running with `pids`, `memory` and `cpu` delegated to it (its `user@<uid>.service` cgroup), and Podman able to put a
+ * container under it (the `systemd` cgroup manager, or the worker itself inside that manager). Measured on Podman
+ * 5.8.1, Fedora 44: without a reachable user manager a container lands in the caller's own cgroup and its bounds read
+ * back `max`, exit 0, and `--cgroups=disabled` does the same; so the word rests on those facts being OBSERVED, and a
+ * `cgroups` key in a containers.conf this user's Podman reads withholds it. `pi-dispatch doctor --live` reads
+ * `pids.max` and `memory.max` back off a container.
  */
 export const PODMAN_BOUNDS_DELEGATED = "podmanBoundsDelegated";
 
@@ -405,7 +408,7 @@ export const OBSERVATIONS = Object.freeze({
 	[DOCKER_ENDPOINT_LOCAL]: "the docker endpoint this host's docker CLI resolves is on this host",
 	[DAEMON_APPLIES_BOUNDS]: "the daemon reports that it applies a container's pid and memory bounds, and is neither rootless nor Podman",
 	[RUNTIME_ADDS_NO_MOUNTS]: "the container runtime adds no mounts of its own to a job container",
-	[PODMAN_BOUNDS_DELEGATED]: "this worker's rootless Podman runs on cgroup v2 with the pids, memory and cpu controllers delegated to it, and no containers.conf it reads sets `cgroups`",
+	[PODMAN_BOUNDS_DELEGATED]: "this worker's rootless Podman runs on cgroup v2 with a systemd user manager running for its account, the pids, memory and cpu controllers delegated to that manager, and Podman putting containers under it, and no containers.conf it reads sets `cgroups`",
 	[PODMAN_ADDS_NO_MOUNTS]: "this worker's rootless Podman adds no mounts of its own to a job container",
 	[PODMAN_SERVICE_LOCAL]: "the podman CLI this worker spawns runs containers on this host, not through a remote service",
 });
@@ -415,7 +418,7 @@ export const OBSERVATION_FIX = Object.freeze({
 	[DOCKER_ENDPOINT_LOCAL]: "Point the docker CLI back at this host (DOCKER_HOST, DOCKER_CONTEXT or `docker context use`), or lower that entry to `asserted` if the redirect is deliberate.",
 	[DAEMON_APPLIES_BOUNDS]: "Run jobs on a rootful Docker Engine that reports PidsLimit and MemoryLimit, or lower that entry to `asserted`: on Podman and rootless daemons `pi-dispatch doctor --live` reads pids.max and memory.max off a real container instead.",
 	[RUNTIME_ADDS_NO_MOUNTS]: "On Podman, create an empty /etc/containers/mounts.conf and remove any `volumes` or `mounts` key from containers.conf (and write it in plain ASCII with no escaped key or multi-line string, which the check refuses rather than guesses at), or lower that entry to `asserted`.",
-	[PODMAN_BOUNDS_DELEGATED]: "Delegate the cpu, memory and pids controllers to the worker account on cgroup v2 (a systemd `Delegate=` drop-in for user@.service), remove any `cgroups` key from its containers.conf (written in plain ASCII with no escaped key or multi-line string, which the check refuses rather than guesses at), or lower that entry to `asserted`: `pi-dispatch doctor --live` reads pids.max and memory.max off a real container.",
+	[PODMAN_BOUNDS_DELEGATED]: "Turn on linger for the worker account (`loginctl enable-linger <account>`, which keeps its systemd user manager running with no one logged in) and run the worker as a systemd user service (`pi-dispatch service install`), or give Podman the account's user bus so it uses the systemd cgroup manager; delegate the cpu, memory and pids controllers to that manager on cgroup v2 (a systemd `Delegate=` drop-in for user@.service), remove any `cgroups` key from its containers.conf (written in plain ASCII with no escaped key or multi-line string, which the check refuses rather than guesses at), or lower that entry to `asserted`: `pi-dispatch doctor --live` reads pids.max and memory.max off a real container.",
 	[PODMAN_ADDS_NO_MOUNTS]: "As the worker account, create an empty ~/.config/containers/mounts.conf (or, when it has none, an empty /etc/containers/mounts.conf), remove any `volumes`, `mounts`, `devices` or `hooks_dir` key from every containers.conf it reads (and write those in plain ASCII with no escaped key or multi-line string, which the check refuses rather than guesses at) and any OCI hook, or lower that entry to `asserted`.",
 	[PODMAN_SERVICE_LOCAL]: "Unset CONTAINER_HOST and any containers.conf service destination for the worker account so `podman info` reports serviceIsRemote false, or lower that entry to `asserted`.",
 });

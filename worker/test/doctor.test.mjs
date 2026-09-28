@@ -6,7 +6,7 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { CANARY_LINES, CANARY_PROBE_SLUGS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RUN_TIMEOUTS, backendChecks, collectChecks, defaultPromptFn, dockerRunVia, egressCanaryProbeArgs, egressCanaryScript, envFileKeys, countRetained, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks } from "../src/doctor.mjs";
+import { CANARY_LINES, CANARY_PROBE_SLUGS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryProbeArgs, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, urlShown } from "../src/doctor.mjs";
 import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS } from "../src/init.mjs";
 import { EGRESS_CANARY_NET_PREFIX, egressCanaryProbe } from "../src/egress.mjs";
 import { JOB_USER_FIX, parseDaemonFacts } from "../src/job-user.mjs";
@@ -115,11 +115,33 @@ function stripFlowLines(output) {
 // these specific keys win the prefix match over a later, broader "docker run" a test plans for the
 // in-image gh probe. A correct policy reaches the provider (exit 0) and is blocked from an unlisted host
 // (exit 3), which is what makes both directions of the allowlist assertable.
+// Issue #453: the proxy's state is one inspect, health first, then `egress-proxy-state.mjs`'s status, image and mounts.
+// A container `up` or compose made in the folder doctor runs from carries the pinned squid and that folder's two files.
+const PROXY_KEY = 'docker inspect --format={"status":';
+const PINNED_SQUID = "ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029";
+const proxyAnswer = (health, status, { image = PINNED_SQUID, cwd = process.cwd(), conf = join(cwd, "deploy/egress-proxy.conf"), allowlist = join(cwd, "egress-allowlist.conf"), entrypoint = ["entrypoint.sh"], cmd = ["-f", "/etc/squid/squid.conf", "-NYC"], stderr } = {}) => ({
+	code: 0,
+	output: `${JSON.stringify({
+		status,
+		health,
+		image,
+		entrypoint,
+		cmd,
+		mounts: [
+			{ Type: "bind", Source: conf, Destination: "/etc/squid/squid.conf" },
+			{ Type: "bind", Source: allowlist, Destination: "/etc/pi-dispatch/allowlist.conf" },
+			{ Type: "volume", Source: "/var/lib/docker/volumes/a1/_data", Destination: "/var/log/squid" },
+			{ Type: "volume", Source: "/var/lib/docker/volumes/b2/_data", Destination: "/var/spool/squid" },
+		],
+		networks: { "pi-dispatch-egress-out": {} },
+	})}\n`,
+	...(stderr ? { stderr } : {}),
+});
 const EGRESS_OK = {
 	// Issue #278: the docker CLI's endpoint, answered as a local socket. Here rather than only in `green`,
 	// because plans that build on EGRESS_OK without `green` would otherwise read an unresolved endpoint.
 	"docker context inspect": { code: 0, output: '"desktop-linux"|"unix:///Users/x/.docker/run/docker.sock"\n' },
-	"docker inspect --format={{.State.Running}}": { code: 0, output: "true|healthy\n" },
+	[PROXY_KEY]: proxyAnswer("healthy", "running"),
 	"docker network": 0,
 	"docker run --rm --name pi-dispatch-egress-probe-provider": 0,
 	"docker run --rm --name pi-dispatch-egress-probe-unlisted": 3,
@@ -1598,9 +1620,13 @@ test("doctor: the .env read is narrowed to the two keys these checks name, and n
 	const { out, text } = capture();
 	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), readEnvFile: (path) => (asked.push(path), readFileSync(path, "utf8")) });
 	assert.deepEqual(asked, [join(cwd, ".env")], "one file, read once");
-	for (const leaked of ["never-read:from-env-file", "openai", "/tmp/evil.sh", "redis://from-env-file:6379"]) {
+	// Issue #453 (gate round 2) widened the read by exactly the keys the service takes from this file and a doctor's
+	// shell does not: the venue keys, VALKEY_URL, PI_PROVIDER and the provider's key (its presence). Each is said with
+	// its source; everything else in the file still reaches nothing.
+	for (const leaked of ["never-read:from-env-file", "/tmp/evil.sh"]) {
 		assert.ok(!text().includes(leaked), `${leaked} came out of .env and must reach nothing`);
 	}
+	assert.match(text(), new RegExp(`Valkey reachable \\(redis://from-env-file:6379\\) -- VALKEY_URL read from ${join(cwd, ".env").replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}, as the service reads it; this shell does not set it`));
 	assert.match(text(), /PI_PAUSE_WINDOWS_FILE is set in/, "only the two keys the checks name are read back");
 });
 
@@ -2503,6 +2529,16 @@ test("doctor --fix: a missing .env is delegated to init's create-only scaffolds,
 	assert.equal(code, 0);
 });
 
+test("doctor --fix: init's next steps follow doctor's venue: PI_BACKENDS=podman gets the podman ladder (#453 gate)", async () => {
+	const cwd = tempDir("pi-fix-init-podman-");
+	const { out, text } = capture();
+	await runDoctor(podmanEnv(), { ...podmanDeps(out, podmanPlan(), []), cwd, fileExists: existsSync, platform: "linux", fix: true, promptFn: async () => false });
+	assert.ok(existsSync(join(cwd, ".env")), "init created the .env");
+	assert.match(text(), /\nNext \(the podman venue; run these as the worker's own account\. First set the account up as docs\/podman\.md "Setup"\n/);
+	assert.match(text(), / {2}6\. pi-dispatch doctor --live {26}# read the bounds, egress and job user back off real containers\n/);
+	assert.doesNotMatch(text(), /docker compose -f deploy\/docker-compose\.yml up -d {2}# the durable queue/);
+});
+
 test("doctor --fix: accepting the overlay auth.json offer deletes the file and converges credential-free", async () => {
 	const dir = overlay({ auth: true });
 	const cwd = tempDir("pi-fix-auth-");
@@ -2935,7 +2971,7 @@ test("doctor: a proxy that is not on the host FAILS, because every job is refuse
 	const { out, text } = capture();
 	const code = await runDoctor(
 		ghEnv({ PI_EGRESS: "1" }),
-		ghDeps(out, egressPlan({ "docker inspect --format={{.State.Running}}": 1, "gh auth status": { code: 0, output: ghStatusOutput } })),
+		ghDeps(out, egressPlan({ [PROXY_KEY]: 1, "gh auth status": { code: 0, output: ghStatusOutput } })),
 	);
 	// A ✓ would be a lie and a ⚠ would under-report a deployment that cannot run anything at all.
 	assert.equal(code, 1, "an armed policy with no proxy is a hard failure");
@@ -2947,16 +2983,76 @@ test("doctor: a proxy that exists but is STOPPED says so, because the fix is a d
 	const { out, text } = capture();
 	await runDoctor(
 		ghEnv({ PI_EGRESS: "1" }),
-		ghDeps(out, egressPlan({ "docker inspect --format={{.State.Running}}": { code: 0, output: "false|none\n" }, "gh auth status": { code: 0, output: ghStatusOutput } })),
+		ghDeps(out, egressPlan({ [PROXY_KEY]: proxyAnswer("none", "exited"), "gh auth status": { code: 0, output: ghStatusOutput } })),
 	);
 	assert.match(text(), /✗ Egress proxy is stopped \(pi-dispatch-egress-proxy\)/);
 });
+
+test("doctor: a paused or crash-looping proxy is not running, and one named by PI_EGRESS_PROXY is started by hand, never by compose (#453 gate)", async () => {
+	// The worker's simple rule (gate round 3): paused refuses every job, so ✗; restarting and every other non-running
+	// state is retried by the worker, so ⚠ with a fix that says so.
+	// `restarting` is a crash loop that fails every job (one retry, then failed), and `created` never starts: both ✗.
+	for (const [status, fix] of [["restarting", "its squid keeps exiting and its restart policy keeps bringing it back, so every job is retried once, then failed; `docker logs pi-dispatch-egress-proxy` says why"], ["created", "docker compose -f deploy/docker-compose.yml --profile egress up -d  -- "]]) {
+		const failed = capture();
+		assert.equal(await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(failed.out, egressPlan({ [PROXY_KEY]: proxyAnswer("none", status), "gh auth status": { code: 0, output: ghStatusOutput } }))), 1, status);
+		assert.ok(failed.text().includes(`✗ Egress proxy is ${status} (pi-dispatch-egress-proxy)\n    → ${fix}`), `${status}:\n${failed.text()}`);
+	}
+	const paused = capture();
+	assert.equal(await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(paused.out, egressPlan({ [PROXY_KEY]: proxyAnswer("none", "paused"), "gh auth status": { code: 0, output: ghStatusOutput } }))), 1);
+	assert.match(paused.text(), /✗ Egress proxy is paused \(pi-dispatch-egress-proxy\)/);
+	for (const status of ["stopping", "removing"]) {
+		const retried = capture();
+		assert.equal(await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(retried.out, egressPlan({ [PROXY_KEY]: proxyAnswer("none", status), "gh auth status": { code: 0, output: ghStatusOutput } }))), 0, status);
+		assert.match(retried.text(), new RegExp(`⚠ Egress proxy is ${status} \\(pi-dispatch-egress-proxy\\)\\n {4}→ a job meanwhile is retried once, then failed \\(the worker does not refuse it outright on this state\\); if it stays ${status}, \`docker logs pi-dispatch-egress-proxy\` says why\\n`), status);
+	}
+	const { out, text } = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "1", PI_EGRESS_PROXY: "my-squid" }), ghDeps(out, egressPlan({ [PROXY_KEY]: proxyAnswer("none", "exited"), "gh auth status": { code: 0, output: ghStatusOutput } })));
+	assert.match(text(), /✗ Egress proxy is stopped \(my-squid\)\n {4}→ PI_EGRESS_PROXY names your own proxy, which neither compose nor `pi-dispatch up` starts: `docker start my-squid` -- /);
+	assert.doesNotMatch(text(), /✗ Egress proxy is stopped \(my-squid\)\n {4}→ docker compose/);
+});
+
+test("doctor: a RUNNING shipped proxy from another squid, command or folder is ✗; mounts are compared only in a deployment folder whose sources resolve here (#453 gate)", async () => {
+	// Real folders, since the mount comparison resolves every bind source on this host (gate round 2).
+	const folder = tempDir("pi-proxy-folder-");
+	mkdirSync(join(folder, "deploy"));
+	writeFileSync(join(folder, "deploy/egress-proxy.conf"), "http_port 3128\n");
+	writeFileSync(join(folder, "egress-allowlist.conf"), "api.anthropic.com\n");
+	const other = tempDir("pi-proxy-other-");
+	writeFileSync(join(other, "egress-allowlist.conf"), "evil.example\n");
+	const run = async (answer, { inFolder = true, env = {} } = {}) => {
+		const { out, text } = capture();
+		const code = await runDoctor(ghEnv({ PI_EGRESS: "1", ...env }), { ...ghDeps(out, egressPlan({ [PROXY_KEY]: answer, "gh auth status": { code: 0, output: ghStatusOutput } })), cwd: folder, proxyFilesExist: () => inFolder });
+		return { code, text: text() };
+	};
+	const esc = (t) => t.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+	const stale = await run(proxyAnswer("healthy", "running", { cwd: folder, image: `ubuntu/squid@sha256:${"0".repeat(64)}` }), { inFolder: false });
+	assert.equal(stale.code, 1);
+	assert.match(stale.text, /✗ Egress proxy is running but is not this deployment's \(pi-dispatch-egress-proxy\): it was created from ubuntu\/squid@sha256:0{64}, not the pinned ubuntu\/squid@sha256:6a097f68[0-9a-f]{56}\n {4}→ `pi-dispatch up` from the deployment folder offers to replace it with the shipped one/);
+	// The entrypoint and command are judged wherever doctor runs (adversary Y7).
+	const command = await run(proxyAnswer("healthy", "running", { cwd: folder, entrypoint: ["squid"], cmd: ["-N", "-f", "/tmp/open.conf"] }), { inFolder: false });
+	assert.match(command.text, /its entrypoint is \["squid"\], not the image's \["entrypoint\.sh"\]; its command is \["-N","-f","\/tmp\/open\.conf"\]/);
+	const elsewhere = await run(proxyAnswer("healthy", "running", { cwd: folder, allowlist: join(other, "egress-allowlist.conf") }));
+	assert.equal(elsewhere.code, 1);
+	assert.match(elsewhere.text, new RegExp(`its /etc/pi-dispatch/allowlist\\.conf is ${esc(join(other, "egress-allowlist.conf"))}, not ${esc(join(folder, "egress-allowlist.conf"))}`));
+	// Run from a folder without the two files, doctor cannot know which folder the service uses: the mounts are not judged.
+	assert.equal((await run(proxyAnswer("healthy", "running", { cwd: folder, allowlist: join(other, "egress-allowlist.conf") }), { inFolder: false })).code, 0);
+	// Sources that do not resolve on this host: ⚠ unknown, never ✗ (Docker Desktop's shape, not measured here).
+	const desktop = await run(proxyAnswer("healthy", "running", { conf: "/host_mnt/Users/op/deploy/deploy/egress-proxy.conf", allowlist: "/host_mnt/Users/op/deploy/egress-allowlist.conf" }));
+	assert.equal(desktop.code, 0, "an unknown never fails doctor");
+	assert.match(desktop.text, /⚠ Egress proxy's mounts could not be compared on this host \(pi-dispatch-egress-proxy\): \/host_mnt\/Users\/op\/deploy\/deploy\/egress-proxy\.conf, \/host_mnt\/Users\/op\/deploy\/egress-allowlist\.conf are paths this host cannot resolve/);
+	assert.doesNotMatch(desktop.text, /is not this deployment's/);
+	// The operator's own proxy is never judged against the shipped one.
+	assert.doesNotMatch((await run(proxyAnswer("healthy", "running", { image: "my/squid:1" }), { env: { PI_EGRESS_PROXY: "my-squid" } })).text, /is not this deployment's|could not be compared/);
+	// Current: silent.
+	assert.doesNotMatch((await run(proxyAnswer("healthy", "running", { cwd: folder }))).text, /is not this deployment's|could not be compared/);
+});
+
 
 test("doctor: a wedged proxy WARNS rather than fails -- health can flap, and the money gate ignores it", async () => {
 	const { out, text } = capture();
 	const code = await runDoctor(
 		ghEnv({ PI_EGRESS: "1" }),
-		ghDeps(out, egressPlan({ "docker inspect --format={{.State.Running}}": { code: 0, output: "true|unhealthy\n" }, "gh auth status": { code: 0, output: ghStatusOutput } })),
+		ghDeps(out, egressPlan({ [PROXY_KEY]: proxyAnswer("unhealthy", "running"), "gh auth status": { code: 0, output: ghStatusOutput } })),
 	);
 	assert.equal(code, 0, "a flapping healthcheck must not make doctor red");
 	assert.match(text(), /⚠ Egress proxy health: unhealthy/);
@@ -3922,7 +4018,7 @@ test("doctor --live reads the eight back, reports the limits, leaves no fixture,
 	const env = liveEnv();
 	const { out, text } = capture();
 	const calls = [];
-	const code = await runDoctor(env, { ...ghDeps(out, { ...liveOk(), ...green }, calls), live: true, liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
+	const code = await runDoctor(env, { ...ghDeps(out, { ...liveOk(), ...green }, calls), live: true, ...instantClock(), liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
 	assert.equal(code, 0, text());
 	assert.equal(calls.filter((c) => c.args[0] === "context").length, 2, "the endpoint is read by the collection AND again right before the probe");
 	for (const property of ["isolation", "ephemeral", "mountSet", "imagePinning", "nonRoot", "localFolders"]) {
@@ -3946,7 +4042,7 @@ test("doctor --live reads the eight back, reports the limits, leaves no fixture,
 
 test("doctor --live renders a failed read-back as a hard failure with the declared word beside the observed", async () => {
 	const { out, text } = capture();
-	const code = await runDoctor(liveEnv(), { ...ghDeps(out, { ...liveOk({ uid: "0" }), ...green }), live: true, liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
+	const code = await runDoctor(liveEnv(), { ...ghDeps(out, { ...liveOk({ uid: "0" }), ...green }), live: true, ...instantClock(), liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
 	assert.equal(code, 1);
 	assert.match(text(), /✗ read back on local: nonRoot does NOT hold -- declared asserted, observed: Uid 0 0 0 0/);
 	assert.match(text(), /→ PI_JOB_IMAGE runs as root/);
@@ -3956,7 +4052,7 @@ test("doctor --live on a docker CLI not observed local runs no container and say
 	const { out, text } = capture();
 	const calls = [];
 	const plan = { ...liveOk(), ...green, "docker context inspect": { code: 0, output: '"remote"|"tcp://10.1.2.3:2375"\n' } };
-	await runDoctor(liveEnv(), { ...ghDeps(out, plan, calls), live: true, liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false });
+	await runDoctor(liveEnv(), { ...ghDeps(out, plan, calls), live: true, ...instantClock(), liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false });
 	assert.ok(!calls.some((c) => c.args.some((a) => String(a).includes("pi-dispatch-live"))));
 	assert.equal(text().match(/read back on local/g).length, 1);
 	assert.match(text(), /⚠ read back on local: not run -- this shell's docker CLI is not observed to point at this host/);
@@ -3965,12 +4061,12 @@ test("doctor --live on a docker CLI not observed local runs no container and say
 test("doctor --live checks carry no fixAction: a failed read-back is never something doctor fixes", async () => {
 	const env = liveEnv();
 	const facts = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: ["a:1", "b:2"], egress: { armed: false, results: [] } };
-	const checks = await liveChecks(env, { spawn: fakeSpawn({ ...liveOk({ uid: "0" }), ...green }), home: "/home/u", liveFs, isAlive: () => false, pid: 1, nonce: "n" }, facts);
+	const checks = await liveChecks(env, { ...instantClock(), spawn: fakeSpawn({ ...liveOk({ uid: "0" }), ...green }), home: "/home/u", liveFs, isAlive: () => false, pid: 1, nonce: "n" }, facts);
 	assert.ok(checks.length >= 7);
 	assert.ok(checks.every((c) => c.fixAction === undefined));
 	assert.match(checks.at(-1).label, /not the 2 image\(s\) your triggers name/);
 	// The not-run path too: a notes-only result must not grow an offer either.
-	const notRun = await liveChecks(env, { spawn: fakeSpawn(green), liveFs, isAlive: () => false, pid: 1, nonce: "n" }, { ...facts, imageCode: 1 });
+	const notRun = await liveChecks(env, { ...instantClock(), spawn: fakeSpawn(green), liveFs, isAlive: () => false, pid: 1, nonce: "n" }, { ...facts, imageCode: 1 });
 	assert.equal(notRun.length, 1);
 	assert.match(notRun[0].label, /not run -- the job image pi-job:latest is not present/);
 	assert.equal(notRun[0].fixAction, undefined);
@@ -3981,7 +4077,7 @@ test("doctor --live gives each localFolders failure its own fix, and names what 
 	mkdirSync(join(env.PI_JOBS_DIR, "pi-dispatch-live-99999-aB3xYz"));
 	const facts = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: [], egress: { armed: false, results: [] } };
 	const invisible = { ...liveOk(), [`docker exec ${LIVE_ID} sh -c [ -r /job ]`]: { code: 0, output: "wrote\n" } };
-	const checks = await liveChecks(env, { spawn: fakeSpawn({ ...invisible, ...green }), liveFs, isAlive: () => false, pid: 1, nonce: "n" }, facts);
+	const checks = await liveChecks(env, { ...instantClock(), spawn: fakeSpawn({ ...invisible, ...green }), liveFs, isAlive: () => false, pid: 1, nonce: "n" }, facts);
 	assert.match(checks[0].label, /✓?read back on local: removed fixture pi-dispatch-live-99999-aB3xYz, left by an interrupted --live run/);
 	const folders = checks.find((c) => /localFolders does NOT hold/.test(c.label));
 	assert.match(folders.fix, /file sharing/, "a write the host cannot see is not the uid problem");
@@ -3992,7 +4088,7 @@ test("doctor --fix --live reads back ONCE, after the fix pass, from the re-colle
 	const cwd = tempDir("pi-live-fix-"); // no .env, so the silent `init` fix runs and forces a re-collect
 	const { out, text } = capture();
 	const calls = [];
-	await runDoctor(liveEnv(), { ...ghDeps(out, { ...liveOk(), ...green }, calls), fileExists: existsSync, cwd, fix: true, promptFn: async () => false, live: true, liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
+	await runDoctor(liveEnv(), { ...ghDeps(out, { ...liveOk(), ...green }, calls), fileExists: existsSync, cwd, fix: true, promptFn: async () => false, live: true, ...instantClock(), liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
 	assert.match(text(), /re-check after fixes/, "the fixture must actually drive a re-collection");
 	// `docker info` bare: the job-user read (`info --format=...`, issue #341) is a different question.
 	const infos = calls.map((c, i) => [c, i]).filter(([c]) => c.args[0] === "info" && c.args.length === 1).map(([, i]) => i);
@@ -4006,7 +4102,7 @@ test("doctor --live with PI_JOBS_DIR unset builds its fixture under the injected
 	const tmp = tempDir("pi-live-tmpdir-");
 	const { out, text } = capture();
 	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0", TMPDIR: tmp };
-	await runDoctor(env, { ...ghDeps(out, { ...liveOk(), ...green }), live: true, liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
+	await runDoctor(env, { ...ghDeps(out, { ...liveOk(), ...green }), live: true, ...instantClock(), liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
 	assert.ok(text().includes(`with a fixture under ${tmp}/pi-dispatch/jobs;`), text());
 	assert.deepEqual(readdirSync(join(tmp, "pi-dispatch", "jobs")), [], "and removes it");
 });
@@ -4024,17 +4120,25 @@ test("doctor --live's not-run path still names what it swept", async () => {
 	mkdirSync(join(env.PI_JOBS_DIR, "pi-dispatch-live-99998-aB3xYz"));
 	const facts = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: [], egress: { armed: false, results: [] } };
 	const failing = { ...liveOk(), "docker run --name=pi-dispatch-live-probe-": { code: 127, output: `${LIVE_ID}\n` }, "docker rm -f": 1 };
-	const checks = await liveChecks(env, { spawn: fakeSpawn({ ...failing, ...green }), liveFs, isAlive: () => false, pid: 1, nonce: "n" }, facts);
+	const checks = await liveChecks(env, { ...instantClock(), spawn: fakeSpawn({ ...failing, ...green }), liveFs, isAlive: () => false, pid: 1, nonce: "n" }, facts);
 	assert.match(checks[0].label, /removed fixture pi-dispatch-live-99998-aB3xYz/);
 	assert.ok(checks.some((c) => /not run -- the probe container did not start/.test(c.label)));
 	assert.ok(checks.some((c) => c.warn && new RegExp(`could not be removed: docker rm -f ${LIVE_ID}`).test(c.label)), "a failed removal by ID is said on this path too");
+});
+
+test("doctor --live's probe that did not start carries the runtime's own words, one clean line (#453 gate)", async () => {
+	const env = liveEnv();
+	const facts = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: [], egress: { armed: false, results: [] } };
+	const failing = { ...liveOk(), "docker run --name=pi-dispatch-live-probe-": { code: 126, output: "", stderr: `\nError: OCI runtime error: crun: controller \`cpu\` is not available${String.fromCharCode(27)}[2J\nsecond line\n` } };
+	const checks = await liveChecks(env, { ...instantClock(), spawn: fakeSpawn({ ...failing, ...green }), liveFs, isAlive: () => false, pid: 1, nonce: "n" }, facts);
+	assert.ok(checks.some((c) => c.label.includes("not run -- the probe container did not start (docker said: Error: OCI runtime error: crun: controller `cpu` is not available [2J), so nothing was read back")), checks.map((c) => c.label).join("\n"));
 });
 
 test("doctor --live's not-writable localFolders failure keeps its own ownership fix", async () => {
 	const env = liveEnv();
 	const facts = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: [], egress: { armed: false, results: [] } };
 	const notWritable = { ...liveOk(), [`docker exec ${LIVE_ID} sh -c [ -r /job ]`]: { code: 0, output: "not-writable /workspace\n" } };
-	const checks = await liveChecks(env, { spawn: fakeSpawn({ ...notWritable, ...green }), liveFs, isAlive: () => false, pid: 1, nonce: "n" }, facts);
+	const checks = await liveChecks(env, { ...instantClock(), spawn: fakeSpawn({ ...notWritable, ...green }), liveFs, isAlive: () => false, pid: 1, nonce: "n" }, facts);
 	assert.match(checks.find((c) => /localFolders does NOT hold/.test(c.label)).fix, /the account the worker runs as/, "issue #341: the fix names the worker's uid, no longer the image's 1001");
 });
 
@@ -4248,19 +4352,19 @@ test("doctor --live runs its probes as the decided job user and reads the uid ba
 	const { out, text } = capture();
 	const calls = [];
 	const plan = { ...liveOk({ uid: "1234" }), ...infoPlan(ROOTFUL_INFO), ...imageLabels("anyUid"), ...green };
-	const code = await runDoctor(liveEnv(), { ...ghDeps(out, plan, calls), live: true, liveFs: liveFsAs(1234), jobUserIdentity: LINUX_ID(1234), stat: socketStat, isAlive: () => false, pid: 7, nonce: "n" });
+	const code = await runDoctor(liveEnv(), { ...ghDeps(out, plan, calls), live: true, ...instantClock(), liveFs: liveFsAs(1234), jobUserIdentity: LINUX_ID(1234), stat: socketStat, isAlive: () => false, pid: 7, nonce: "n" });
 	assert.equal(code, 0, text());
 	assert.ok(calls.filter((c) => c.args[0] === "run" && String(c.args[1]).startsWith("--name=pi-dispatch-live-")).every((c) => c.args.includes("--user=1234:1234")), "the reading and the pinning probe");
 	assert.match(text(), /✓ read back on local: the probe ran as uid 1234, the job user this host decides \(1234:1234\)/);
 	assert.match(text(), /it ran as the job user 1234:1234, decided for this shell \(uid 1234\)/);
 
 	const wrong = capture();
-	assert.equal(await runDoctor(liveEnv(), { ...ghDeps(wrong.out, { ...liveOk({ uid: "1001" }), ...infoPlan(ROOTFUL_INFO), ...imageLabels("anyUid"), ...green }), live: true, liveFs: liveFsAs(1234), jobUserIdentity: LINUX_ID(1234), stat: socketStat, isAlive: () => false, pid: 7, nonce: "n" }), 1);
+	assert.equal(await runDoctor(liveEnv(), { ...ghDeps(wrong.out, { ...liveOk({ uid: "1001" }), ...infoPlan(ROOTFUL_INFO), ...imageLabels("anyUid"), ...green }), live: true, ...instantClock(), liveFs: liveFsAs(1234), jobUserIdentity: LINUX_ID(1234), stat: socketStat, isAlive: () => false, pid: 7, nonce: "n" }), 1);
 	assert.match(wrong.text(), /✗ read back on local: the probe ran as uid 1001, not the decided job user 1234:1234/);
 
 	const refused = capture();
 	const refusedCalls = [];
-	await runDoctor(liveEnv(), { ...ghDeps(refused.out, { ...liveOk(), ...infoPlan(ROOTFUL_INFO), ...imageLabels("replicas"), ...green }, refusedCalls), live: true, liveFs: liveFsAs(1234), jobUserIdentity: LINUX_ID(1234), stat: socketStat, isAlive: () => false, pid: 7, nonce: "n" });
+	await runDoctor(liveEnv(), { ...ghDeps(refused.out, { ...liveOk(), ...infoPlan(ROOTFUL_INFO), ...imageLabels("replicas"), ...green }, refusedCalls), live: true, ...instantClock(), liveFs: liveFsAs(1234), jobUserIdentity: LINUX_ID(1234), stat: socketStat, isAlive: () => false, pid: 7, nonce: "n" });
 	assert.match(refused.text(), /⚠ read back on local: not run -- a local job is refused as this uid \(any-uid-unsupported\)/);
 	assert.ok(!refusedCalls.some((c) => c.args.some((a) => String(a).includes("pi-dispatch-live"))), "no probe for a container no job gets");
 });
@@ -4273,7 +4377,7 @@ test("doctor --live runs nothing where no job would run as a decided uid: a root
 	]) {
 		const { out, text } = capture();
 		const calls = [];
-		await runDoctor(liveEnv(), { ...ghDeps(out, { ...liveOk(), ...plan, ...green }, calls), live: true, liveFs: liveFsAs(1234), jobUserIdentity: ids, stat: () => ({ uid: 0, gid: 2375 }), isAlive: () => false, pid: 7, nonce: "n" });
+		await runDoctor(liveEnv(), { ...ghDeps(out, { ...liveOk(), ...plan, ...green }, calls), live: true, ...instantClock(), liveFs: liveFsAs(1234), jobUserIdentity: ids, stat: () => ({ uid: 0, gid: 2375 }), isAlive: () => false, pid: 7, nonce: "n" });
 		assert.ok(!calls.some((c) => c.args.some((a) => String(a).includes("pi-dispatch-live"))), `${label}: no probe`);
 		assert.match(text(), new RegExp(`⚠ read back on local: not run -- ${reason.source}`), label);
 	}
@@ -4288,7 +4392,7 @@ test("doctor --live gives job-unreadable, mount-not-writable and not-yours each 
 		["mount-not-writable", { [`docker exec ${LIVE_ID} sh -c [ -r /job ]`]: { code: 0, output: "not-writable /outbox\n" } }, 1234, /outbox or session mount/],
 		["not-yours", {}, 999, /owned by another uid, so the worker cannot remove/],
 	]) {
-		const checks = await liveChecks(env, { spawn: fakeSpawn({ ...liveOk({ uid: "1234" }), ...over, ...green }), liveFs: liveFsAs(fsUid), isAlive: () => false, pid: 1, nonce: "n", jobUserIdentity: LINUX_ID(1234) }, facts);
+		const checks = await liveChecks(env, { ...instantClock(), spawn: fakeSpawn({ ...liveOk({ uid: "1234" }), ...over, ...green }), liveFs: liveFsAs(fsUid), isAlive: () => false, pid: 1, nonce: "n", jobUserIdentity: LINUX_ID(1234) }, facts);
 		const folders = checks.find((c) => /localFolders does NOT hold/.test(c.label));
 		assert.ok(folders, `${label}: ${checks.map((c) => c.label).join("\n")}`);
 		assert.match(folders.fix, pattern, label);
@@ -4296,10 +4400,10 @@ test("doctor --live gives job-unreadable, mount-not-writable and not-yours each 
 	}
 	assert.equal(new Set(fixes).size, 3, "three causes, three fixes: none falls back to the generic one");
 	// A sudo'd doctor is not the worker, and root can remove anything: no owner comparison, so no false not-yours.
-	const root = await liveChecks(env, { spawn: fakeSpawn({ ...liveOk({ uid: "1234" }), ...green }), liveFs: liveFsAs(999), isAlive: () => false, pid: 1, nonce: "n", jobUserIdentity: { platform: "darwin", euid: 0, egid: 0 } }, facts);
+	const root = await liveChecks(env, { ...instantClock(), spawn: fakeSpawn({ ...liveOk({ uid: "1234" }), ...green }), liveFs: liveFsAs(999), isAlive: () => false, pid: 1, nonce: "n", jobUserIdentity: { platform: "darwin", euid: 0, egid: 0 } }, facts);
 	assert.ok(!root.some((c) => /not-yours|owned by another uid/.test(`${c.label} ${c.fix ?? ""}`)));
 	assert.match(root.at(-1).label, /the host owner of what the probe wrote was not compared, because doctor ran as root/, "and the limits line says so");
-	const shell = await liveChecks(env, { spawn: fakeSpawn({ ...liveOk({ uid: "1234" }), ...green }), liveFs: liveFsAs(1234), isAlive: () => false, pid: 1, nonce: "n", jobUserIdentity: LINUX_ID(1234) }, facts);
+	const shell = await liveChecks(env, { ...instantClock(), spawn: fakeSpawn({ ...liveOk({ uid: "1234" }), ...green }), liveFs: liveFsAs(1234), isAlive: () => false, pid: 1, nonce: "n", jobUserIdentity: LINUX_ID(1234) }, facts);
 	assert.doesNotMatch(shell.at(-1).label, /was not compared/, "only a root run says it");
 });
 
@@ -4387,7 +4491,7 @@ test("doctor's facts carry the proxy's name and whether it is up, so --live's pe
 	assert.equal(facts.egress.armed, true);
 	assert.deepEqual([facts.egress.proxy, facts.egress.proxyRunning], ["pi-dispatch-egress-proxy", true]);
 	const stopped = {};
-	await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, { ...collectSeams({ ...green, "docker inspect --format={{.State.Running}}": { code: 0, output: "false|none\n" } }), facts: stopped });
+	await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, { ...collectSeams({ ...green, [PROXY_KEY]: proxyAnswer("none", "exited") }), facts: stopped });
 	assert.equal(stopped.egress.proxyRunning, false);
 	const off = {};
 	await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0" }, { ...collectSeams(green), facts: off });
@@ -4408,7 +4512,7 @@ test("doctor --live with the policy armed reads jobToJobIsolation back through t
 	assert.match(failed.fix, /reached another's across their own --internal networks/);
 	assert.match(reached.at(-1).label, /jobToJobIsolation tried one pair of peers/, "a reach needed both peers started, so the limit still applies to it");
 
-	const noAddress = await liveChecks(env, { ...seams({}), spawn: fakeSpawn({ ...liveOk(), ...livePeersOk({}), "docker inspect --format={{json .NetworkSettings.Networks}}": { code: 1, output: "" }, ...green }) }, facts);
+	const noAddress = await liveChecks(env, { ...instantClock(), ...seams({}), spawn: fakeSpawn({ ...liveOk(), ...livePeersOk({}), "docker inspect --format={{json .NetworkSettings.Networks}}": { code: 1, output: "" }, ...green }) }, facts);
 	assert.ok(noAddress.some((c) => c.warn && /jobToJobIsolation not read back/.test(c.label)));
 	assert.doesNotMatch(noAddress.at(-1).label, /tried one pair of peers/, "peers that were not read back are not claimed as tried");
 	const proxyDown = await liveChecks(env, seams({}), { ...facts, egress: { ...facts.egress, proxyRunning: false } });
@@ -4535,7 +4639,7 @@ test("doctor names the runtime that answered, and warns on podman-docker, where 
 test("doctor parses the proxy's state and this host's image id from stdout only, so podman-docker's stderr banner cannot flip them (#345)", async () => {
 	const banner = "Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.\n";
 	const { out, text } = capture();
-	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, egressPlan({ "docker inspect --format={{.State.Running}}": { code: 0, output: "true|healthy\n", stderr: banner }, "gh auth status": { code: 0, output: ghStatusOutput } })));
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, egressPlan({ [PROXY_KEY]: proxyAnswer("healthy", "running", { stderr: banner }), "gh auth status": { code: 0, output: ghStatusOutput } })));
 	assert.match(text(), /✓ Egress proxy running \(pi-dispatch-egress-proxy\)/);
 	assert.doesNotMatch(text(), /Egress proxy is stopped/);
 
@@ -5747,7 +5851,7 @@ test("doctor --live reads relabel from the collection's own daemon answer, end t
 	for (const [label, body, want] of [["podman with selinux", PODMAN_SELINUX_INFO, true], ["docker", ROOTFUL_INFO, false]]) {
 		const { out } = capture();
 		const calls = [];
-		await runDoctor(liveEnv(), { ...ghDeps(out, { ...liveOk(), ...infoPlan(body), ...green }, calls), live: true, liveFs, jobUserIdentity: LINUX_1001, stat: socketStat, observationFs: noHostFiles, isAlive: () => false, pid: 7, nonce: "n" });
+		await runDoctor(liveEnv(), { ...ghDeps(out, { ...liveOk(), ...infoPlan(body), ...green }, calls), live: true, ...instantClock(), liveFs, jobUserIdentity: LINUX_1001, stat: socketStat, observationFs: noHostFiles, isAlive: () => false, pid: 7, nonce: "n" });
 		const probe = calls.find((c) => c.cmd === "docker" && c.args[0] === "run" && c.args.includes("sleep"));
 		assert.ok(probe, `${label}: the probe ran`);
 		assert.equal(probe.args.some((a) => a.endsWith(":/job:ro,Z")), want, label);
@@ -5791,7 +5895,7 @@ test("doctor's two docker runners spawn the bin they are given, and docker when 
 	// runtime from a variable, the in-image gh probe, which is docker's with `local` and podman's without it. A new podman
 	// spawn, or a docker one turned into a variable, lands here as a diff rather than going unseen.
 	const direct = [...doctorSource.matchAll(/runCmd(?:Capture)?\(\w*[sS]pawn, "podman", \[("[^"]*", "[^"]*")/g)].map((m) => m[1]);
-	assert.deepEqual(direct, ['"image", "inspect"', '"image", "inspect"', '"pull", "ghcr.io/edgehero/pi-job:latest"', '"tag", "ghcr.io/edgehero/pi-job:latest"', '"inspect", "--format={{.State.Running}}"']);
+	assert.deepEqual(direct, ['"image", "inspect"', '"image", "inspect"', '"pull", "ghcr.io/edgehero/pi-job:latest"', '"tag", "ghcr.io/edgehero/pi-job:latest"', '"inspect", "--format={{.State.Status}}"']);
 	const chosen = [...doctorSource.matchAll(/runCmd(?:Capture)?\(\w*[sS]pawn, ([a-z]\w*Bin)\b/g)].map((m) => m[1]);
 	assert.deepEqual(chosen, ["ghProbeBin"]);
 });
@@ -5800,15 +5904,28 @@ test("doctor's two docker runners spawn the bin they are given, and docker when 
 
 // `podman info --format json` as rootless Podman 5.8.1 on Fedora 44 answers it (measured), reduced to the keys read.
 const PODMAN_INFO = (over = {}, security = {}) =>
-	JSON.stringify({ host: { security: { rootless: true, selinuxEnabled: false, ...security }, serviceIsRemote: false, cgroupVersion: "v2", cgroupControllers: ["cpuset", "cpu", "io", "memory", "pids"], ...over }, version: { Version: "5.8.1" } });
+	JSON.stringify({ host: { security: { rootless: true, selinuxEnabled: false, ...security }, serviceIsRemote: false, cgroupVersion: "v2", cgroupManager: "systemd", cgroupControllers: ["cpuset", "cpu", "io", "memory", "pids"], ...over }, version: { Version: "5.8.1" } });
 // The worker account's own mounts.conf, empty: the documented override that earns podmanAddsNoMounts.
 const PODMAN_HOME = "/home/op";
-const podmanFs = { ...noHostFiles, statSync: (p) => (p === `${PODMAN_HOME}/.config/containers/mounts.conf` ? { size: 0 } : noHostFiles.statSync(p)) };
+// And the account's user manager running with the controllers delegated (issue #453): user@1234.service's cgroup.
+const PODMAN_USER_MANAGER = "/sys/fs/cgroup/user.slice/user-1234.slice/user@1234.service/cgroup.controllers";
+const podmanFs = {
+	...noHostFiles,
+	statSync: (p) => (p === `${PODMAN_HOME}/.config/containers/mounts.conf` ? { size: 0 } : noHostFiles.statSync(p)),
+	readFileSync: (p) => (p === PODMAN_USER_MANAGER ? "cpuset cpu io memory pids\n" : noHostFiles.readFileSync(p)),
+};
+// The same host with the user manager's controllers given (null: no user manager running for the account).
+// `self` is this process's /proc/self/cgroup (null: unread), which decides the bounds only when Podman does not use the
+// systemd cgroup manager (issue #453, gate round 1).
+const podmanFsWith = (controllers, self = null) => ({
+	...podmanFs,
+	readFileSync: (p) => (p === PODMAN_USER_MANAGER && controllers !== null ? controllers : p === "/proc/self/cgroup" && self !== null ? self : noHostFiles.readFileSync(p)),
+});
 // A podman host that answers everything, docker absent altogether. "docker" LAST, so it catches every docker call.
-const podmanPlan = ({ info = PODMAN_INFO(), capabilities = "anyUid", image = true, proxy = "true" } = {}) => ({
+const podmanPlan = ({ info = PODMAN_INFO(), capabilities = "anyUid", image = true, proxy = "running" } = {}) => ({
 	"podman info": { code: 0, output: `${info}\n` },
 	"podman image inspect --format={{.Id}}": image ? { code: 0, output: `abc|0.80.7||${capabilities}\n` } : { code: 125, output: "" },
-	"podman inspect --format={{.State.Running}}": proxy === null ? { code: 125, output: "" } : { code: 0, output: `${proxy}\n` },
+	"podman inspect --format={{.State.Status}}": proxy === null ? { code: 125, output: "" } : { code: 0, output: `${proxy}\n` },
 	docker: "enoent",
 });
 const podmanEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", PI_BACKENDS: "podman", PI_EGRESS: "0", ...extra });
@@ -6028,7 +6145,7 @@ const MIXED_PIN = {
 			"✓ podman: cgroup v2 controllers are delegated to this account (cpuset, cpu, io, memory, pids), so a job's pid, memory and cpu bounds are applied",
 			"✓ podman: SELinux does not confine containers here, so nothing a job mounts is relabelled",
 			"✗ podman: job image is not in this account's Podman store (pi-job:latest)",
-			"    → pull or load it AS THE WORKER'S ACCOUNT, since rootless Podman keeps one image store per account: podman pull ghcr.io/edgehero/pi-job:latest && podman tag ghcr.io/edgehero/pi-job:latest pi-job:latest (or `docker save pi-job:latest | podman load`) -- jobs run with --pull=never, so the worker never fetches it",
+			"    → pull or load it AS THE WORKER'S ACCOUNT, since rootless Podman keeps one image store per account: podman pull ghcr.io/edgehero/pi-job:latest && podman tag ghcr.io/edgehero/pi-job:latest pi-job:latest -- jobs run with --pull=never, so the worker never fetches it",
 			"✓ podman: jobs run as uid:gid 1234:1234 (passed as --user, with --userns=keep-id) with HOME=/home/pi, once the job image is in this account's store and declares anyUid",
 			"✓ Valkey reachable (redis://127.0.0.1:6379)",
 			"✓ Fleet: 2 workers (mini1, mini2)",
@@ -6172,7 +6289,7 @@ test("a widening containers.conf is a podman venue refusal: ✗ where podman is 
 	assert.equal(busyCode, 0);
 	// `--live` names the conf line as the one to fix, not the job-user line (the reviewer's R3).
 	const live = capture();
-	await runDoctor(liveEnv({ PI_BACKENDS: "podman" }), { ...podmanDeps(live.out, { ...podmanLiveOk(), ...podmanPlan() }, [], { observationFs: withConf("annotations = []\n") }), live: true, liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n" });
+	await runDoctor(liveEnv({ PI_BACKENDS: "podman" }), { ...podmanDeps(live.out, { ...podmanLiveOk(), ...podmanPlan() }, [], { observationFs: withConf("annotations = []\n") }), live: true, ...instantClock(), liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n" });
 	assert.match(live.text(), /⚠ read back on podman: not run -- a podman job is refused here \(podman-conf-widens-job\)[^\n]*\n {4}→ fix the podman containers\.conf line above first/);
 });
 
@@ -6220,17 +6337,17 @@ test("with egress armed the podman proxy is read under podman, and the docker eg
 		const code = await runDoctor(podmanEnv({ PI_EGRESS: "1" }), podmanDeps(out, podmanPlan({ proxy }), calls));
 		return { code, text: text(), calls };
 	};
-	const up = await run("true");
+	const up = await run("running");
 	assert.match(up.text, /✓ podman: egress proxy running under this account's Podman \(pi-dispatch-egress-proxy\)/);
 	// Issue #431: a plain run points at --live, where this venue's canary runs; it starts no canary container itself.
 	assert.match(up.text, /⚠ podman: the egress allowlist is read back by `pi-dispatch doctor --live` on this venue, not by this run/);
 	assert.ok(!up.calls.some((c) => c.args.some((a) => /pi-dispatch-egress-(doctor|probe)-/.test(String(a)))), "no canary object is touched by a plain run");
 	assert.doesNotMatch(up.text, /Egress (policy|proxy)/, "docker's egress lines are about a proxy no job here is wired to");
-	assert.deepEqual(up.calls.find((c) => c.cmd === "podman" && c.args[0] === "inspect")?.args, ["inspect", "--format={{.State.Running}}", "pi-dispatch-egress-proxy"]);
+	assert.deepEqual(up.calls.find((c) => c.cmd === "podman" && c.args[0] === "inspect")?.args, ["inspect", "--format={{.State.Status}}", "pi-dispatch-egress-proxy"]);
 	const down = await run(null);
 	assert.equal(down.code, 1);
 	assert.match(down.text, /✗ podman: egress proxy is not under this account's Podman \(pi-dispatch-egress-proxy\)\n {4}→ start it as the worker's account, under the same rootless Podman, on a named bridge network/);
-	const stopped = await run("false");
+	const stopped = await run("exited");
 	assert.match(stopped.text, /✗ podman: egress proxy is stopped under this account's Podman/);
 	assert.doesNotMatch(stopped.text, /allowlist is read back by/, "only said beside a running proxy");
 });
@@ -6297,12 +6414,12 @@ test("doctor --live on podman runs nothing when podman is re-read as remote, or 
 	const flips = { ...podmanLiveOk(), ...podmanPlan(), "podman info": () => ({ code: 0, output: `${PODMAN_INFO(++reads > 1 ? { serviceIsRemote: true } : {})}\n` }) };
 	const { out, text } = capture();
 	const calls = [];
-	await runDoctor(liveEnv({ PI_BACKENDS: "podman" }), { ...podmanDeps(out, flips, calls), live: true, liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n" });
+	await runDoctor(liveEnv({ PI_BACKENDS: "podman" }), { ...podmanDeps(out, flips, calls), live: true, ...instantClock(), liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n" });
 	assert.ok(!calls.some((c) => c.args.some((a) => String(a).includes("pi-dispatch-live"))), "no probe after the re-read");
 	assert.match(text(), /⚠ read back on podman: not run -- this shell's podman CLI is not observed to point at this host/);
 	const refused = capture();
 	const refusedCalls = [];
-	await runDoctor(liveEnv({ PI_BACKENDS: "podman" }), { ...podmanDeps(refused.out, { ...podmanLiveOk(), ...podmanPlan({ capabilities: "" }) }, refusedCalls), live: true, liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n" });
+	await runDoctor(liveEnv({ PI_BACKENDS: "podman" }), { ...podmanDeps(refused.out, { ...podmanLiveOk(), ...podmanPlan({ capabilities: "" }) }, refusedCalls), live: true, ...instantClock(), liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n" });
 	assert.match(refused.text(), /⚠ read back on podman: not run -- a podman job is refused as this uid \(any-uid-unsupported\), so a probe would read back a container no job gets\n {4}→ fix the podman job-user line above first/);
 	assert.ok(!refusedCalls.some((c) => c.args.some((a) => String(a).includes("pi-dispatch-live"))));
 });
@@ -6439,6 +6556,9 @@ test("podman-only: a trigger-named image is asked of this account's Podman store
 	const absent = await run({ "podman image inspect my-python:1.2.0": 1, ...podmanPlan() });
 	assert.equal(absent.code, 1, "a trigger that can never run fails, as on docker");
 	assert.match(absent.text, /✗ podman: trigger job image present in this account's Podman store \(my-python:1\.2\.0\)\n {4}→ pull, load or build it AS THE WORKER'S ACCOUNT[^\n]*podman pull my-python:1\.2\.0[^\n]*--pull=never/);
+	// The whole fix line (issue #453): `docker save ... | podman load` was offered as an alternative, and a podman-only
+	// host has no docker to save from.
+	assert.ok(absent.text.includes("\n    → pull, load or build it AS THE WORKER'S ACCOUNT, since rootless Podman keeps one image store per account: podman pull my-python:1.2.0 -- a trigger names it in run.image, and jobs run with --pull=never, so the worker never fetches it at job time\n"), absent.text);
 	assert.deepEqual(absent.calls.filter((c) => c.cmd === "docker"), [], "no docker image inspect");
 	assert.deepEqual(absent.calls.filter((c) => c.args.includes("my-python:1.2.0")).map((c) => [c.cmd, ...c.args]), [["podman", "image", "inspect", "my-python:1.2.0"]]);
 	const wrapped = await run({ "podman image inspect --format={{json": { code: 0, output: '["/bin/sh"]\n' }, "podman image inspect my-python:1.2.0": 0, ...podmanPlan() });
@@ -6894,10 +7014,198 @@ test("the podman canary's argv cannot be built weaker than a job's: no job user,
 
 test("the podman bounds line is said only when the controllers are delegated (#354)", async () => {
 	const { out, text } = capture();
-	await runDoctor(podmanEnv(), podmanDeps(out, podmanPlan({ info: PODMAN_INFO({ cgroupControllers: ["cpu", "memory"] }) }), []));
+	await runDoctor(podmanEnv(), podmanDeps(out, podmanPlan(), [], { observationFs: podmanFsWith("cpu memory\n") }));
 	assert.doesNotMatch(text(), /podman: cgroup v2 controllers are delegated/);
-	assert.match(text(), /⚠ podman: isolation is ASSERTED by this account's Podman setup, not enforced: the pids cgroup controller is not delegated/);
+	assert.match(text(), /⚠ podman: isolation is ASSERTED by this account's Podman setup, not enforced: the pids cgroup controller is not delegated to this account's systemd user manager \(user@1234\.service\)/);
 });
+
+test("an account with no systemd user manager running, or one Podman cannot reach: doctor names the cause once, as --live's isolation failure does (#453)", async () => {
+	// Measured (round-446 M0-e E1, gate 456 L1-L3): linger off and a `sudo -iu` shell, or a manager Podman reaches no bus
+	// to, podman info still listing every controller.
+	const noManager = { observationFs: podmanFsWith(null) };
+	const EVIDENCE = "no systemd user manager is running for this account (/sys/fs/cgroup/user.slice/user-1234.slice/user@1234.service/cgroup.controllers does not exist), so Podman leaves a job's pids, memory and cpu bounds unapplied, whichever cgroup manager it uses: with linger off the manager runs only while the account has a login session, and a `sudo -iu` shell starts none (measured). On a host without systemd managing cgroups under user.slice this path never exists, and the venue gives no credit there";
+	const FIX = "    → turn on linger for the worker's account: `sudo loginctl enable-linger <account>` starts its systemd user manager and keeps it running with no one logged in, and `pi-dispatch service install` runs the worker as a systemd user service inside it. A hand-written system unit with `User=` also needs `Wants=user@<uid>.service` and `After=user@<uid>.service` (docs/podman.md); `pi-dispatch doctor --live` reads pids.max and memory.max back off a real container\n";
+	const ISOLATION = `⚠ podman: isolation is ASSERTED by this account's Podman setup, not enforced: ${EVIDENCE}\n${FIX}`;
+	// No floor: jobs still run, so one ⚠, the backend section's, carrying the cause and its fix; podman info's controller
+	// list no longer earns the ✓ line, and the podman section does not repeat the ⚠.
+	const plain = capture();
+	assert.equal(await runDoctor(podmanEnv(), podmanDeps(plain.out, podmanPlan(), [], noManager)), 0);
+	assert.ok(plain.text().includes(ISOLATION), plain.text());
+	assert.equal(plain.text().match(/no systemd user manager is running/g).length, 1, "said once");
+	assert.doesNotMatch(plain.text(), /podman: cgroup v2 controllers are delegated/);
+	// A floor that needs the bounds: the same one line, and the floor line is the ✗ that fails doctor, saying the worker
+	// refuses to boot on this answer.
+	const floored = capture();
+	assert.equal(await runDoctor(podmanEnv({ PI_BACKEND_FLOOR: "isolation=enforced" }), podmanDeps(floored.out, podmanPlan(), [], noManager)), 1);
+	assert.ok(floored.text().includes(ISOLATION), floored.text());
+	assert.equal(floored.text().match(/no systemd user manager is running/g).length, 1, "said once");
+	assert.match(floored.text(), /✗ PI_BACKEND_FLOOR asks for isolation=enforced \(podman provides it only while this worker's rootless Podman runs on cgroup v2 with a systemd user manager running for its account, the pids, memory and cpu controllers delegated to that manager, and Podman putting containers under it, and no containers\.conf it reads sets `cgroups`, and that is not observed\)\n {4}→ Turn on linger for the worker account[^\n]* The worker refuses to boot, and refuses each job, on the same answer\.\n/);
+	// A manager Podman cannot reach (gate L1: no user bus, so podman info reports cgroupfs) from a shell outside it: its
+	// own cause, and its own fix, which leads with running inside the manager.
+	const unreachable = capture();
+	await runDoctor(podmanEnv(), podmanDeps(unreachable.out, podmanPlan({ info: PODMAN_INFO({ cgroupManager: "cgroupfs" }) }), [], { observationFs: podmanFsWith("cpuset cpu io memory pids\n", "0::/user.slice/user-501.slice/session-5.scope\n") }));
+	assert.ok(unreachable.text().includes("⚠ podman: isolation is ASSERTED by this account's Podman setup, not enforced: Podman is using the cgroupfs cgroup manager, not systemd, and this worker is not running inside the account's user manager (user@1234.service), so whether a job's pids, memory and cpu bounds are applied is not observed from here. Measured: where a configured systemd manager fell back to cgroupfs because Podman could not reach the user manager over D-Bus (no user bus socket, a DBUS_SESSION_BUS_ADDRESS pointing nowhere), the container landed in the worker's own cgroup unbounded; an explicit cgroupfs with the bus reachable had its bounds applied, and nothing read here tells the two apart\n    → run the worker inside the account's user manager, as a systemd user service (`pi-dispatch service install`, with linger on), where a job's container lands under the manager whichever cgroup manager Podman uses; or let Podman reach the manager over the account's user bus, /run/user/<uid>/bus (on Debian and Ubuntu the dbus-user-session package provides it), with no DBUS_SESSION_BUS_ADDRESS pointing elsewhere and no `cgroup_manager = \"cgroupfs\"` in its containers.conf; `pi-dispatch doctor --live` reads pids.max and memory.max back off a real container\n"), unreachable.text());
+	// The same cgroupfs from inside the manager (measured E3a, E3b) is credited.
+	const inside = capture();
+	await runDoctor(podmanEnv(), podmanDeps(inside.out, podmanPlan({ info: PODMAN_INFO({ cgroupManager: "cgroupfs" }) }), [], { observationFs: podmanFsWith("cpuset cpu io memory pids\n", "0::/user.slice/user-1234.slice/user@1234.service/app.slice/pi-dispatch-worker.service\n") }));
+	assert.match(inside.text(), /✓ podman: cgroup v2 controllers are delegated to this account/);
+	// Another cause keeps OBSERVATION_FIX: the cause fixes are tied to their causes, not to the observation.
+	const undelegated = capture();
+	await runDoctor(podmanEnv(), podmanDeps(undelegated.out, podmanPlan(), [], { observationFs: podmanFsWith("cpu memory\n") }));
+	assert.match(undelegated.text(), /⚠ podman: isolation is ASSERTED by this account's Podman setup, not enforced: the pids cgroup controller is not delegated to this account's systemd user manager \(user@1234\.service\), so a job cannot have that bound: measured for cpu, Podman 5\.8\.1 refuses to start a container carrying --cpus \(exit 126, "controller `cpu` is not available"\)\n {4}→ Turn on linger for the worker account/);
+	// A running manager with the controllers: the ✓ line, listing the MANAGER's controllers, whatever podman info's
+	// caller-cgroup list says (measured E2a: `memory pids` inside a user unit, cpu applied anyway).
+	const session = capture();
+	await runDoctor(podmanEnv(), podmanDeps(session.out, podmanPlan({ info: PODMAN_INFO({ cgroupControllers: ["memory", "pids"] }) }), []));
+	assert.doesNotMatch(session.text(), /user manager/);
+	assert.match(session.text(), /✓ podman: cgroup v2 controllers are delegated to this account \(cpuset, cpu, io, memory, pids\), so a job's pid, memory and cpu bounds are applied\n/);
+	// --live: pids.max and memory.max read back `max` (measured E1), and the failure's fix names the cause, not docker's
+	// delegation, opening its own sentence with a capital.
+	const live = capture();
+	const unbounded = LIVE_STATUS("1234").replace("pids.max:512", "pids.max:max").replace("memory.max:4294967296", "memory.max:max");
+	const plan = { ...podmanLiveOk(), [`podman exec ${LIVE_ID} sh -c cat /proc/1/status`]: { code: 0, output: unbounded }, ...podmanPlan() };
+	assert.equal(await runDoctor(liveEnv({ PI_BACKENDS: "podman" }), { ...podmanDeps(live.out, plan, [], noManager), live: true, liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n", ...instantClock() }), 1);
+	assert.match(live.text(), /✗ read back on podman: isolation does NOT hold -- declared enforced, observed: [^\n]*\n {4}→ the runtime did not apply a bound the worker passes: on rootless Podman that is the account's systemd user manager not running, Podman not reaching it, or a controller not delegated to it \(the "isolation is ASSERTED" line above names which, when the static read sees it\) -- jobs on this host do not have the boundary the table declares\. Turn on linger for the worker's account: `sudo loginctl enable-linger <account>`/);
+	assert.doesNotMatch(live.text(), /on rootless podman, cgroup delegation/, "not docker's words with the name swapped");
+});
+
+test("with linger off, doctor's ✓ for the bounds says it lasts only as long as a login session does (#453 gate)", async () => {
+	// Measured (gate 456, extra-login-session-sudo-doctor.txt): linger off, another login session of the account open, a
+	// `sudo -iu` doctor saw the manager running and gave ✓; the manager stops with the last session.
+	const run = async (linger) => {
+		const { out, text } = capture();
+		const calls = [];
+		const plan = { ...podmanPlan(), ...(linger === null ? {} : { "loginctl show-user op -p Linger": { code: 0, output: `Linger=${linger}\n` } }) };
+		await runDoctor(podmanEnv(), podmanDeps(out, plan, calls, { userName: () => "op" }));
+		return { text: text(), calls };
+	};
+	const off = await run("no");
+	assert.match(off.text, /✓ podman: cgroup v2 controllers are delegated to this account \(cpuset, cpu, io, memory, pids\), so a job's pid, memory and cpu bounds are applied\n⚠ podman: linger is off for op, so the user manager above runs only while a login session of the account is open: when the last one ends, a worker run as a user service stops with it, and one run as a system unit with User= runs on with no bounds \(refused per job under an isolation floor\)\n {4}→ sudo loginctl enable-linger op -- it keeps the manager running with no one logged in, which is what a service needs\n/);
+	assert.ok(off.calls.some((c) => c.cmd === "loginctl" && c.args.join(" ") === "show-user op -p Linger"), "asked as up asks it");
+	assert.doesNotMatch((await run("yes")).text, /linger is off/);
+	assert.doesNotMatch((await run(null)).text, /linger is off/, "an unanswered loginctl says nothing");
+});
+
+test("the ladder's doctor step judges the service's .env: the provider key's presence (never its value) and VALKEY_URL, with the source said (#453 gate 2)", async () => {
+	// The exec's ladder-4.txt: step 2 put the key and the Valkey URL in .env, and doctor's shell has neither.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "PI_BACKENDS=podman\nPI_EGRESS=0\nANTHROPIC_API_KEY=sk-ant-never-printed\nVALKEY_URL=redis://worker:hunter2@127.0.0.1:16456/1\n");
+	const probed = [];
+	const { out, text } = capture();
+	const { PI_BACKENDS: _b, PI_EGRESS: _e, ANTHROPIC_API_KEY: _k, ...shell } = podmanEnv();
+	await runDoctor(shell, { ...podmanDeps(out, podmanPlan(), []), cwd, platform: "linux", probeValkey: async (url) => (probed.push(url), true), readEnvFile: (path) => readFileSync(path, "utf8") });
+	const envPath = join(cwd, ".env").replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+	assert.match(text(), new RegExp(`✓ Provider key set \\(anthropic: ANTHROPIC_API_KEY\\) -- ANTHROPIC_API_KEY read from ${envPath}, as the service reads it; this shell does not set it\\n`));
+	assert.match(text(), new RegExp(`✓ Valkey reachable \\(redis://127\\.0\\.0\\.1:16456/1\\) -- VALKEY_URL read from ${envPath}, as the service reads it; this shell does not set it\\n`));
+	assert.deepEqual(probed, ["redis://worker:hunter2@127.0.0.1:16456/1"], "the service's URL is the one probed");
+	for (const secret of ["sk-ant-never-printed", "hunter2"]) assert.ok(!text().includes(secret), `${secret} must never be printed`);
+	// This shell's own values win, and then nothing is said about the file.
+	const own = capture();
+	await runDoctor({ ...shell, ANTHROPIC_API_KEY: "sk-shell", VALKEY_URL: "redis://127.0.0.1:6379" }, { ...podmanDeps(own.out, podmanPlan(), []), cwd, platform: "linux", probeValkey: async () => true, readEnvFile: (path) => readFileSync(path, "utf8") });
+	assert.match(own.text(), /✓ Provider key set \(anthropic: ANTHROPIC_API_KEY\)\n/);
+	assert.match(own.text(), /✓ Valkey reachable \(redis:\/\/127\.0\.0\.1:6379\)\n/);
+});
+
+test("doctor: a PAUSED shipped proxy's fix is docker unpause, as up offers; a RUNNING stale one gets no ✓ line, and the canary through it blames the proxy, not the allowlist (#453 exec round 3)", async () => {
+	const paused = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(paused.out, egressPlan({ [PROXY_KEY]: proxyAnswer("none", "paused"), "gh auth status": { code: 0, output: ghStatusOutput } })));
+	assert.match(paused.text(), /✗ Egress proxy is paused \(pi-dispatch-egress-proxy\)\n {4}→ docker unpause pi-dispatch-egress-proxy {2}-- as `pi-dispatch up` offers;/);
+	// A running proxy made from another image, the canary's provider probe failing through it (case6-docker-stale-imagerun.txt).
+	const stale = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(stale.out, egressPlan({ [PROXY_KEY]: proxyAnswer("none", "running", { image: "docker.io/library/alpine:3.20", entrypoint: [], cmd: ["sleep", "100000"] }), "docker run --rm --name pi-dispatch-egress-probe-provider": 3, "gh auth status": { code: 0, output: ghStatusOutput } })));
+	assert.doesNotMatch(stale.text(), /✓ Egress proxy running/, "never healthy right before the ✗");
+	assert.match(stale.text(), /✗ Egress proxy is running but is not this deployment's \(pi-dispatch-egress-proxy\): it was created from docker\.io\/library\/alpine:3\.20/);
+	assert.match(stale.text(), /⚠ Egress policy does NOT reach the provider \(api\.anthropic\.com\)\n {4}→ the canary ran through pi-dispatch-egress-proxy, which is not this deployment's proxy \(above\), so this says nothing about egress-allowlist\.conf: `pi-dispatch up` from the deployment folder offers to replace it/);
+	assert.doesNotMatch(stale.text(), /add api\.anthropic\.com to egress-allowlist\.conf/);
+	// A current proxy keeps its ✓ and the allowlist fix.
+	const current = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(current.out, egressPlan({ [PROXY_KEY]: proxyAnswer("none", "running"), "docker run --rm --name pi-dispatch-egress-probe-provider": 3, "gh auth status": { code: 0, output: ghStatusOutput } })));
+	assert.match(current.text(), /✓ Egress proxy running \(pi-dispatch-egress-proxy\)/);
+	assert.match(current.text(), /add api\.anthropic\.com to egress-allowlist\.conf/);
+});
+
+test("doctor: a STOPPED shipped proxy that is not this deployment's gets up's replace offer as its fix, never compose (#453 gate 2)", async () => {
+	const folder = tempDir("pi-proxy-stopped-");
+	mkdirSync(join(folder, "deploy"));
+	writeFileSync(join(folder, "deploy/egress-proxy.conf"), "http_port 3128\n");
+	writeFileSync(join(folder, "egress-allowlist.conf"), "api.anthropic.com\n");
+	const other = tempDir("pi-proxy-stopped-other-");
+	writeFileSync(join(other, "egress-allowlist.conf"), "evil.example\n");
+	const { out, text } = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), { ...ghDeps(out, egressPlan({ [PROXY_KEY]: proxyAnswer("none", "exited", { cwd: folder, allowlist: join(other, "egress-allowlist.conf") }), "gh auth status": { code: 0, output: ghStatusOutput } })), cwd: folder, proxyFilesExist: () => true });
+	assert.match(text(), /✗ Egress proxy is stopped \(pi-dispatch-egress-proxy\)\n {4}→ it is not this deployment's either \(its \/etc\/pi-dispatch\/allowlist\.conf is [^)]*\): `pi-dispatch up` from the deployment folder offers to replace it with the shipped one \(docker rm -f pi-dispatch-egress-proxy, then the shipped run\) -- /);
+	assert.doesNotMatch(text(), /✗ Egress proxy is stopped \(pi-dispatch-egress-proxy\)\n {4}→ docker compose/);
+});
+
+test("a URL doctor prints has its password blanked and its query dropped, or is not printed at all (#453 gate 3)", () => {
+	assert.equal(urlShown("redis://:p@ss@host"), "redis://host", "the userinfo is never printed, whatever @ it holds");
+	assert.equal(urlShown("redis://127.0.0.1:6379?password=secret"), "redis://127.0.0.1:6379");
+	assert.equal(urlShown("redis://:p@ss@host:6380/2?password=secret&token=t"), "redis://host:6380/2");
+	assert.equal(urlShown("redis://worker:hunter2@127.0.0.1:16456/1"), "redis://127.0.0.1:16456/1", "a username can be a token too");
+	assert.equal(urlShown("redis:///2"), "<no host>");
+	assert.equal(urlShown("redis://127.0.0.1:6379"), "redis://127.0.0.1:6379", "nothing to hide, printed as written");
+	assert.equal(urlShown("not a url with pass:word@"), "<unparseable URL>");
+});
+
+test("doctor's .env reads pass ONE allowlist and ONE loader mapping (#453 gate 3)", async () => {
+	assert.deepEqual([...SERVICE_ENV_KEYS], ["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY", "VALKEY_URL", "PI_PROVIDER"]);
+	assert.deepEqual(serviceEnvKeys(["PI_JOB_IMAGE", "PI_ENV_SETUP", "VALKEY_URL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], ["ANTHROPIC_API_KEY"]), ["VALKEY_URL", "ANTHROPIC_API_KEY"]);
+	assert.deepEqual(["linux", "win32", "darwin", "freebsd"].map(serviceEnvLoader), ["systemd", "cmd", "shell", "shell"]);
+	// The venue read uses that mapping too: on freebsd a sourcing shell reads `export PI_BACKENDS=podman` as an assignment.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "export PI_BACKENDS=podman\n");
+	const { out, text } = capture();
+	const { PI_BACKENDS: _b, ...shell } = podmanEnv();
+	await runDoctor(shell, { ...podmanDeps(out, podmanPlan(), []), cwd, platform: "freebsd", readEnvFile: (path) => readFileSync(path, "utf8") });
+	assert.match(text(), /✓ venue keys read from [^\n]* \(PI_BACKENDS="podman"\)/);
+});
+
+test("fleet host names and zones doctor prints from Valkey have their control bytes blanked (#453 gate 3)", async () => {
+	const ESC = String.fromCharCode(27);
+	const { out, text } = capture();
+	await runDoctor(ghEnv({ PI_WORKER_NAME: "mini1" }), { ...ghDeps(out, green), readHosts: async () => ({ hosts: [{ name: "mini1" }, { name: `evil${ESC}[2Jhost`, tz: `Zone${ESC}]0;x` }] }) });
+	assert.ok(!text().includes(ESC), "no escape byte reaches the terminal");
+	assert.match(text(), /Fleet: 2 workers \(evil \[2Jhost, mini1\)/);
+	// C1 controls too (U+0080 to U+009F: U+009B is a one-byte CSI to some terminals).
+	const c1 = capture();
+	await runDoctor(ghEnv({ PI_WORKER_NAME: "mini1" }), { ...ghDeps(c1.out, green), readHosts: async () => ({ hosts: [{ name: "mini1" }, { name: `evil${String.fromCharCode(0x9b)}2Jhost` }] }) });
+	assert.ok(!c1.text().includes(String.fromCharCode(0x9b)));
+	assert.match(c1.text(), /Fleet: 2 workers \(evil 2Jhost, mini1\)/);
+});
+
+test("doctor reads the venue keys from the deployment's .env as up does, says so, reads the file once, and refuses a disagreement (#453 gate)", async () => {
+	// The exec's ladder step 4 (gate 456, case6-step4-doctor.txt): PI_BACKENDS=podman in .env, nothing in the shell, and
+	// doctor judged docker.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "PI_BACKENDS=podman\nPI_EGRESS=0\n");
+	const asked = [];
+	const { out, text } = capture();
+	const { PI_BACKENDS: _b, PI_EGRESS: _e, ...shell } = podmanEnv();
+	await runDoctor(shell, { ...podmanDeps(out, podmanPlan(), []), cwd, platform: "linux", readEnvFile: (path) => (asked.push(path), readFileSync(path, "utf8")) });
+	assert.match(text(), new RegExp(`✓ venue keys read from ${join(cwd, ".env").replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")} \\(PI_BACKENDS="podman", PI_EGRESS="0"\\), as the service reads them: this shell does not set them\\n`));
+	assert.match(text(), /✓ Jobs run on: podman/);
+	assert.doesNotMatch(text(), /Docker daemon reachable/);
+	assert.deepEqual(asked, [join(cwd, ".env")], "one file, read once");
+	// This shell set differently: ✗, and doctor judges the shell's values.
+	const conflict = capture();
+	assert.equal(await runDoctor({ ...shell, PI_BACKENDS: "local" }, { ...ghDeps(conflict.out, green), cwd, platform: "linux", readEnvFile: (path) => readFileSync(path, "utf8") }), 1);
+	assert.match(conflict.text(), new RegExp(`✗ which venue this deployment runs is unknown: PI_BACKENDS is "local" in this shell and "podman" in ${join(cwd, ".env").replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}\\. doctor would judge the shell's venue while the service runs the file's\\.`));
+	// A .env that is there and cannot be read is said, as up says it (gate round 2); an absent one is not.
+	const dirEnv = tempDir("pi-venue-dir-env-");
+	mkdirSync(join(dirEnv, ".env"));
+	const unread = capture();
+	await runDoctor(shell, { ...podmanDeps(unread.out, podmanPlan(), []), cwd: dirEnv, fileExists: existsSync, platform: "linux" });
+	assert.match(unread.text(), new RegExp(`⚠ ${join(dirEnv, ".env").replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")} could not be read \\(not a regular file\\), so PI_BACKENDS, PI_EGRESS and PI_EGRESS_PROXY come from this shell alone\n`));
+	const absent = capture();
+	await runDoctor(shell, { ...podmanDeps(absent.out, podmanPlan(), []), cwd: tempDir("pi-venue-no-env-"), fileExists: existsSync, platform: "linux" });
+	assert.doesNotMatch(absent.text(), /come from this shell alone/);
+	// A shell that agrees in meaning is no disagreement, and no source line is needed for keys the shell set.
+	const agree = capture();
+	await runDoctor({ ...shell, PI_BACKENDS: " podman", PI_EGRESS: "0" }, { ...podmanDeps(agree.out, podmanPlan(), []), cwd, platform: "linux", readEnvFile: (path) => readFileSync(path, "utf8") });
+	assert.doesNotMatch(agree.text(), /which venue this deployment runs is unknown|venue keys read from/);
+});
+
+
 
 test("the pinning and ephemeral read-backs on podman name podman in what they could not read (#354)", async () => {
 	const { out, text } = capture();
@@ -6973,7 +7281,7 @@ const DOCKER_CANARY_PIN = {
 			"docker rm -f pi-dispatch-egress-probe-unlisted-4242",
 			"docker network disconnect -f pi-dispatch-egress-doctor-4242 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-4242",
-			"docker inspect --format={{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} pi-dispatch-egress-proxy",
+			'docker inspect --format={"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}},"image":{{json .Config.Image}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}}} pi-dispatch-egress-proxy',
 			"docker network create --internal pi-dispatch-egress-doctor-7",
 			"docker network connect pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
@@ -7040,7 +7348,7 @@ const DOCKER_CANARY_PIN = {
 			"docker rm -f pi-dispatch-egress-probe-unlisted-4242",
 			"docker network disconnect -f pi-dispatch-egress-doctor-4242 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-4242",
-			"docker inspect --format={{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} pi-dispatch-egress-proxy",
+			'docker inspect --format={"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}},"image":{{json .Config.Image}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}}} pi-dispatch-egress-proxy',
 			"docker network create --internal pi-dispatch-egress-doctor-7",
 			"docker network connect pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
@@ -7107,7 +7415,7 @@ const DOCKER_CANARY_PIN = {
 			"docker rm -f pi-dispatch-egress-probe-unlisted-4242",
 			"docker network disconnect -f pi-dispatch-egress-doctor-4242 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-4242",
-			"docker inspect --format={{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} pi-dispatch-egress-proxy",
+			'docker inspect --format={"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}},"image":{{json .Config.Image}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}}} pi-dispatch-egress-proxy',
 			"docker network create --internal pi-dispatch-egress-doctor-7",
 			"docker network connect pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
@@ -7181,7 +7489,7 @@ const DOCKER_CANARY_PIN = {
 			"docker rm -f pi-dispatch-egress-probe-unlisted-4242",
 			"docker network disconnect -f pi-dispatch-egress-doctor-4242 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-4242",
-			"docker inspect --format={{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} pi-dispatch-egress-proxy",
+			'docker inspect --format={"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}},"image":{{json .Config.Image}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}}} pi-dispatch-egress-proxy',
 			"docker network create --internal pi-dispatch-egress-doctor-7",
 			"docker network connect pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
@@ -7255,7 +7563,7 @@ const DOCKER_CANARY_PIN = {
 			"docker rm -f pi-dispatch-egress-probe-unlisted-4242",
 			"docker network disconnect -f pi-dispatch-egress-doctor-4242 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-4242",
-			"docker inspect --format={{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} pi-dispatch-egress-proxy",
+			'docker inspect --format={"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}},"image":{{json .Config.Image}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}}} pi-dispatch-egress-proxy',
 			"docker network create --internal pi-dispatch-egress-doctor-7",
 			"docker network connect pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",

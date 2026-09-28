@@ -56,7 +56,9 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 
 	if (cmd === "init") {
 		const { runInit } = await import("./init.mjs");
-		return runInit(process.cwd());
+		// The environment rides along so the next steps match the venue (issue #453): PI_BACKENDS=podman alone gets
+		// the podman ladder.
+		return runInit(process.cwd(), { env });
 	}
 
 	if (cmd === "doctor") {

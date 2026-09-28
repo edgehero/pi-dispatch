@@ -73,17 +73,39 @@ test("an UNARMED preflight admits everything and spawns NOTHING", async () => {
 
 test("a running proxy is admitted, and costs exactly ONE spawn", async () => {
 	const calls = [];
-	const preflight = makeEgressPreflight({ armed: true, spawnFn: fakeSpawn(calls, { inspect: 0, info: 0 }, "true\n") });
+	const preflight = makeEgressPreflight({ armed: true, spawnFn: fakeSpawn(calls, { inspect: 0, info: 0 }, "running\n") });
 	assert.deepEqual(await preflight({}), { ok: true, proxy: DEFAULT_EGRESS_PROXY });
 	// The `docker info` disambiguation runs ONLY on the failure path: every job pays this gate, so the
 	// happy path must not pay for the diagnosis of a case it is not in.
 	assert.equal(calls.length, 1, "the happy path does not probe the daemon a second time");
-	assert.deepEqual(calls[0].args, ["inspect", "--format={{.State.Running}}", DEFAULT_EGRESS_PROXY]);
+	assert.deepEqual(calls[0].args, ["inspect", "--format={{.State.Status}}", DEFAULT_EGRESS_PROXY]);
 });
 
 test("a proxy the daemon knows but has STOPPED is policy, not infra", async () => {
-	const preflight = makeEgressPreflight({ armed: true, spawnFn: fakeSpawn([], { inspect: 0, info: 0 }, "false\n") });
+	const preflight = makeEgressPreflight({ armed: true, spawnFn: fakeSpawn([], { inspect: 0, info: 0 }, "exited\n") });
 	assert.deepEqual(await preflight({}), { proxyStopped: DEFAULT_EGRESS_PROXY });
+});
+
+test("a PAUSED, exited or dead proxy refuses the job: Status decides, never the Running boolean, which docker reports true for paused (#453)", async () => {
+	// `created` among them: a container created and never started stays so (measured, Docker Engine 29.8.1, ExitCode 127).
+	for (const status of ["paused", "exited", "dead", "created"]) {
+		const preflight = makeEgressPreflight({ armed: true, spawnFn: fakeSpawn([], { inspect: 0, info: 0 }, `${status}\n`) });
+		assert.deepEqual(await preflight({}), { proxyStopped: DEFAULT_EGRESS_PROXY }, status);
+	}
+});
+
+test("EVERY other state is a retry naming it, never a refusal: restarting, created, stopping, removing, podman's stopped, a word no runtime prints yet (#453 gate 3)", async () => {
+	for (const status of ["restarting", "stopping", "removing", "initialized", "stopped", "configured", "somethingnew"]) {
+		const calls = [];
+		const preflight = makeEgressPreflight({ armed: true, spawnFn: fakeSpawn(calls, { inspect: 0, info: 0 }, `${status}\n`) });
+		assert.deepEqual(await preflight({}), { unavailable: DEFAULT_EGRESS_PROXY, state: status }, status);
+		assert.equal(calls.length, 1, `${status}: no second probe, the status alone decides`);
+	}
+	// An empty answer, or one carrying a control byte, is named "unreported", never echoed.
+	for (const junk of ["", `run${String.fromCharCode(27)}[2Jning`]) {
+		const preflight = makeEgressPreflight({ armed: true, spawnFn: fakeSpawn([], { inspect: 0, info: 0 }, `${junk}\n`) });
+		assert.deepEqual(await preflight({}), { unavailable: DEFAULT_EGRESS_PROXY, state: "unreported" }, JSON.stringify(junk));
+	}
 });
 
 test("a proxy the daemon does not have is POLICY -- disambiguated positively, never by stderr text", async () => {
@@ -103,9 +125,11 @@ test("a daemon that does not answer is INFRA, so a blip never becomes a permanen
 	assert.deepEqual(await gone({}), { unavailable: DEFAULT_EGRESS_PROXY });
 });
 
-test("a proxy whose inspect returns junk is treated as NOT running, which is the safe direction", async () => {
+test("a proxy whose inspect returns junk is NOT running, and retried rather than refused: a word nothing reads is not a stopped proxy (#453 gate 3)", async () => {
+	// The simple rule: only running admits, only paused, exited and dead refuse. Junk admits nothing (the safe
+	// direction for the money gate) and is retried, pre-spend, with the state named as unreported.
 	const preflight = makeEgressPreflight({ armed: true, spawnFn: fakeSpawn([], { inspect: 0, info: 0 }, "<no value>\n") });
-	assert.deepEqual(await preflight({}), { proxyStopped: DEFAULT_EGRESS_PROXY });
+	assert.deepEqual(await preflight({}), { unavailable: DEFAULT_EGRESS_PROXY, state: "unreported" });
 });
 
 test("createJobNetwork passes --internal at CREATE time, so there is no window with a route out", async () => {

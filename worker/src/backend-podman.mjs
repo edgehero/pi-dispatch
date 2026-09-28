@@ -16,10 +16,14 @@
  *   - only Linux was measured; Podman machine on macOS and Windows was not (`podman-platform`).
  *
  * THE FACTS COME FROM ONE READ, `podman info --format json`, cached once it answers: it decides the job user, whether
- * mounts are relabelled, and the three observations the table's words rest on. Rootless-ness, remoteness and the
- * delegated controllers cannot change under a running worker without a restart (they are this account's and this
- * process's environment), so re-reading per job would only add a spawn; the FILES an observation reads (mounts.conf,
- * containers.conf) are re-read per job, because an operator creating the empty override must not need a restart.
+ * mounts are relabelled, and, with this host's files, the three observations the table's words rest on. Rootless-ness
+ * and remoteness cannot change under a running worker without a restart (they are this account's and this process's
+ * environment), so re-reading them per job would only add a spawn. The FILES an observation reads are re-read per job:
+ * mounts.conf and containers.conf, because an operator creating the empty override must not need a restart, and the
+ * account's user-manager cgroup (issue #453), because that manager can stop under a running worker (linger turned off,
+ * the last login session ending) and the next job must then be judged without its bounds. One residual rides the
+ * cache: the cgroup manager `podman info` reported at the first answered read is kept, so a user bus that appears or
+ * disappears later is not seen until a restart.
  *
  * `backends.mjs` stays a leaf, so this module imports it and never the other way round.
  */
@@ -89,6 +93,12 @@ export function parsePodmanInfo(stdout) {
 		selinux: bool(host.security?.selinuxEnabled),
 		// "v2" or "v1"; anything else is no fact rather than a string an operator's terminal is handed.
 		cgroupVersion: typeof host.cgroupVersion === "string" && /^v[0-9]{1,2}$/.test(host.cgroupVersion) ? host.cgroupVersion : null,
+		// Issue #453: the cgroup manager Podman actually uses for this call. `cgroupfs` when it was configured so, and when a
+		// configured `systemd` could not reach the account's user manager over D-Bus (Podman then warns and falls back).
+		// A short lower-case word, else no fact.
+		cgroupManager: typeof host.cgroupManager === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(host.cgroupManager) ? host.cgroupManager : null,
+		// The controllers of the CALLING process's own cgroup, as `podman info` reports them. Kept for what it is and for
+		// nothing else: issue #453 measured it listing all five where no bound was applied, so no observation reads it.
 		controllers,
 		version: displayVersion(body.version?.Version),
 		// Issue #429: the container STORE this account's Podman uses (`store.graphRoot`), which moves with HOME,
@@ -240,20 +250,88 @@ function observePodmanMounts({ fs, home, env, euid }) {
 }
 
 /**
- * `podmanBoundsDelegated` from the info and this host's files: rootless, cgroup v2, `pids`, `memory` and `cpu` among the
- * controllers delegated to this user, and no containers.conf taking containers out of their cgroup. Rootful Podman is
- * refused as a venue, so its (undelegated, whole-tree) controller list earns nothing here either.
+ * The cgroup of this account's systemd user manager, whose `cgroup.controllers` says which controllers are delegated to
+ * it. Measured (issue #453, Fedora 44): the path is absent while `user@<uid>.service` is inactive and present while it
+ * runs, which is systemd's own behaviour (the unit's cgroup is removed when it stops).
+ */
+export function podmanUserManagerControllersPath(euid) {
+	return `/sys/fs/cgroup/user.slice/user-${euid}.slice/user@${euid}.service/cgroup.controllers`;
+}
+
+/** What `observePodmanBounds` says when no systemd user manager runs for the account (issue #453); doctor keys its fix on the cause. */
+export function podmanNoUserManagerEvidence(euid) {
+	return `no systemd user manager is running for this account (${podmanUserManagerControllersPath(euid)} does not exist), so Podman leaves a job's pids, memory and cpu bounds unapplied, whichever cgroup manager it uses: with linger off the manager runs only while the account has a login session, and a \`sudo -iu\` shell starts none (measured). On a host without systemd managing cgroups under user.slice this path never exists, and the venue gives no credit there`;
+}
+
+/** Whether a `/proc/self/cgroup` text puts this process inside the account's user manager (a systemd user service). */
+function insideUserManager(text, euid) {
+	const line = String(text ?? "").split("\n").find((l) => l.startsWith("0::"));
+	return typeof line === "string" && line.slice(3).startsWith(`/user.slice/user-${euid}.slice/user@${euid}.service/`);
+}
+
+/**
+ * `podmanBoundsDelegated` from the info and this host's files: rootless, cgroup v2, a RUNNING systemd user manager for
+ * this account with `pids`, `memory` and `cpu` delegated to it, Podman able to put its containers under that manager,
+ * and no containers.conf taking containers out of their cgroup. Rootful Podman is refused as a venue, so it earns
+ * nothing here either.
+ *
+ * WHAT DECIDES IT (issue #453, measured on Fedora 44 with rootless Podman 5.8.1, round-446 M0-e and the gate's L rows):
+ *   - no user manager (linger off, a `sudo -iu` shell): the container landed in the caller's root-owned session scope,
+ *     `pids.max`, `memory.max` and `cpu.max` `max`, exit 0, whichever cgroup manager was configured;
+ *   - a user manager running AND Podman reaching it (`podman info` reports the `systemd` cgroup manager): applied;
+ *   - a user manager running but NOT reachable over D-Bus (no user bus socket, a DBUS_SESSION_BUS_ADDRESS pointing
+ *     nowhere, a system unit with `User=` and no user bus): Podman fell back to `cgroupfs`, the container landed in the
+ *     caller's own root-owned cgroup, unbounded (gate L1, L2, L3);
+ *   - `cgroupfs` from a process already inside `user@<uid>.service` (a user unit, with or without `Delegate=`): applied.
+ * So credit needs the manager's cgroup with the three controllers, and then either the `systemd` cgroup manager or this
+ * process inside that manager. `podman info`'s `host.cgroupControllers` decides nothing: it is the caller's own cgroup,
+ * which listed all five with nothing applied. Fail-closed where not measured, or where measured applied but not
+ * provable from here: an explicit `cgroupfs` from a shell outside the manager with a reachable bus applied (M0-e E3c)
+ * and is not credited; no user manager with the caller in a cgroup of its own that the account owns (a system unit with
+ * `User=` and `Delegate=yes`, linger off) was not measured and is not credited.
  */
 function observePodmanBounds(info, { fs, home, env, euid }) {
 	if (info.rootless !== true) return { value: false, evidence: "podman info does not report a rootless Podman, which is the only kind this venue runs on" };
 	if (info.cgroupVersion !== "v2") return { value: false, evidence: `podman info reports cgroup ${info.cgroupVersion ?? "version unknown"}, and rootless bounds need cgroup v2` };
-	const missing = ["pids", "memory", "cpu"].filter((c) => !Array.isArray(info.controllers) || !info.controllers.includes(c));
-	if (missing.length > 0) return { value: false, evidence: `the ${missing.join(", ")} cgroup ${missing.length === 1 ? "controller is" : "controllers are"} not delegated to this user, so rootless Podman accepts the bound and applies nothing` };
+	if (!Number.isInteger(euid) || euid < 0) return { value: false, evidence: "the worker's uid is not known, so whether its systemd user manager runs could not be read" };
+	const path = podmanUserManagerControllersPath(euid);
+	let text;
+	try {
+		text = String(fs.readFileSync(path, "utf8"));
+	} catch (error) {
+		if (error?.code === "ENOENT") return { value: false, cause: "no-user-manager", evidence: podmanNoUserManagerEvidence(euid) };
+		return unreadFileFinding(path, error?.code ?? "error");
+	}
+	const controllers = text.split(/\s+/).filter((c) => /^[a-z][a-z0-9_]{0,31}$/.test(c));
+	const missing = ["pids", "memory", "cpu"].filter((c) => !controllers.includes(c));
+	// Measured (gate 456, Fedora 44, Podman 5.8.1, a manager delegated only memory and pids): a job carrying `--cpus`
+	// FAILED to start, crun exit 126 "controller `cpu` is not available", and one without it ran with no cpu.max at all.
+	// Only the cpu case was measured, so the sentence says what a job gets without claiming more for the other two.
+	if (missing.length > 0) return { value: false, evidence: `the ${missing.join(", ")} cgroup ${missing.length === 1 ? "controller is" : "controllers are"} not delegated to this account's systemd user manager (user@${euid}.service), so a job cannot have that bound: measured for cpu, Podman 5.8.1 refuses to start a container carrying --cpus (exit 126, "controller \`cpu\` is not available")` };
+	if (info.cgroupManager !== "systemd") {
+		let inside = false;
+		try {
+			inside = insideUserManager(fs.readFileSync("/proc/self/cgroup", "utf8"), euid);
+		} catch (error) {
+			if (error?.code !== "ENOENT") return unreadFileFinding("/proc/self/cgroup", error?.code ?? "error");
+		}
+		if (!inside) {
+			return {
+				value: false,
+				cause: "user-manager-unreachable",
+				evidence: `${info.cgroupManager === null ? "podman info does not say which cgroup manager Podman uses" : `Podman is using the ${info.cgroupManager} cgroup manager, not systemd`}, and this worker is not running inside the account's user manager (user@${euid}.service), so whether a job's pids, memory and cpu bounds are applied is not observed from here. Measured: where a configured systemd manager fell back to cgroupfs because Podman could not reach the user manager over D-Bus (no user bus socket, a DBUS_SESSION_BUS_ADDRESS pointing nowhere), the container landed in the worker's own cgroup unbounded; an explicit cgroupfs with the bus reachable had its bounds applied, and nothing read here tells the two apart`,
+			};
+		}
+	}
 	const listed = podmanConfFiles({ fs, home, env, euid });
 	if (listed.finding) return listed.finding;
 	const conf = confKeyFinding(fs, listed.files, { key: CGROUPS_KEY, says: "sets a cgroups key, which can run every container outside its cgroup with its bounds unapplied" });
 	if (conf) return conf;
-	return { value: true, evidence: "rootless Podman on cgroup v2 with the pids, memory and cpu controllers delegated, and no containers.conf sets cgroups" };
+	return {
+		value: true,
+		controllers,
+		evidence: `rootless Podman on cgroup v2, with this account's systemd user manager (user@${euid}.service) running and the pids, memory and cpu controllers delegated to it, ${info.cgroupManager === "systemd" ? "Podman using the systemd cgroup manager" : "this worker running inside that manager"}, and no containers.conf sets cgroups`,
+	};
 }
 
 /**
@@ -377,6 +455,11 @@ export function observePodman({ read, fs = { statSync, readFileSync, readdirSync
 	return {
 		observations: { [PODMAN_BOUNDS_DELEGATED]: bounds.value, [PODMAN_ADDS_NO_MOUNTS]: mounts.value, [PODMAN_SERVICE_LOCAL]: service.value },
 		evidence: { [PODMAN_BOUNDS_DELEGATED]: bounds.evidence, [PODMAN_ADDS_NO_MOUNTS]: mounts.evidence, [PODMAN_SERVICE_LOCAL]: service.evidence },
+		// The controllers delegated to the account's user manager when the bounds hold (issue #453), for doctor's line: the
+		// fact the answer rests on, never `podman info`'s caller-cgroup list.
+		...(bounds.value === true ? { boundsControllers: bounds.controllers } : {}),
+		// Which miss it was, when it was the user manager's, so doctor gives that fix and no other.
+		...(bounds.cause ? { boundsCause: bounds.cause } : {}),
 		// With an answered read, a `null` here is a host file that could not be read for a moment (`unreadFileFinding`),
 		// and its reason says so, so the retry names a file rather than "unknown".
 		reasons: {
