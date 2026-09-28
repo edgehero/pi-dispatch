@@ -8,7 +8,10 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { entryExitCode } from "../src/cli.mjs";
 import { resolveGitLabSelfId } from "@edgehero/pi-dispatch/gitlab-identity";
-import { startReceiver } from "../src/start.mjs";
+import { startReceiver as startReceiverReal } from "../src/start.mjs";
+
+// Issue #464 (gate round 3): never this host's Valkey. Every boot here is judged as answering, unless a test judges it.
+const startReceiver = (env, deps = {}) => startReceiverReal(env, { judgeValkey: async () => {}, ...deps });
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // The committed unified triggers file, addressed absolutely so loadReceiverConfig's real fs reads
@@ -179,6 +182,33 @@ test("HARD-FAIL: an unresolvable identity rejects and NO server is ever created"
 	// bypasses the draining helper on purpose -- an empty array is the assertion, and a helper that
 	// drains would make it true by cleanup instead of by placement.
 	assert.equal(closers.length, 0, "a refused boot must arm NOTHING: whatever sat here would be an FSWatcher no teardown reaches");
+});
+
+// Issue #464 (gate round 3): a refused receiver used to keep running and listening with a queue that could never
+// connect. The Valkey is judged before the queue is built and before listen, by the rule every client applies.
+test("a refused Valkey stops the receiver before its queue or its listen (exit 2), and nothing answering ends it (exit 1), never a dead queue (#464)", async () => {
+	const refusal = Object.assign(new Error("the Valkey VALKEY_URL reaches is refused: [::1]:16583 is held by gx467l (uid 1511)"), { piDispatchConfig: true, valkeyRefused: true });
+	for (const [err, config] of [[refusal, true], [new Error("nothing answers VALKEY_URL (127.0.0.1:6379), so whose Valkey it is cannot be judged yet"), false]]) {
+		const { captured, createServer } = capturingServer();
+		const asked = [];
+		let queues = 0;
+		await assert.rejects(
+			startReceiverReal(baseEnv({ VALKEY_URL: "redis://localhost:16583" }), {
+				makeAuth: okAuth,
+				makeQueueFn: (...a) => (queues++, stubQueue(...a)),
+				createServer,
+				closers: [],
+				judgeValkey: async (url, opts) => {
+					asked.push([url, typeof opts.now]);
+					throw err;
+				},
+			}),
+			(e) => e === err && (e.piDispatchConfig === true) === config,
+		);
+		assert.deepEqual(asked, [["redis://localhost:16583", "function"]]);
+		assert.equal(queues, 0, "no queue was built on it");
+		assert.equal(captured.listen, undefined, "and nothing listens");
+	}
 });
 
 test("happy path binds the configured host and port (defaults) and returns the server", async () => {

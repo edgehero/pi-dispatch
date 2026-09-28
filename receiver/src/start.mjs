@@ -45,7 +45,7 @@ import { makeResolveAzureAuthority } from "./azure-members.mjs";
 import { makeResolveGitHubAuthority } from "./github-members.mjs";
 import { makeQueue } from "@edgehero/pi-dispatch/queue";
 import { makeForgeRouter } from "./route.mjs";
-import { parseConnection } from "@edgehero/pi-dispatch/connection";
+import { judgeValkeyAtStart, parseConnection, valkeyClientContext } from "@edgehero/pi-dispatch/connection";
 import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "@edgehero/pi-dispatch/watch-closer";
 import { retryIdentity } from "./boot-retry.mjs";
 
@@ -81,6 +81,10 @@ export async function startReceiver(
 		// real shutdown below drains it, and a test injects its own array so the watch it armed dies with the
 		// boot that armed it instead of leaking an FSWatcher across tests.
 		closers = [],
+		// Issue #464 (gate round 3): whose Valkey VALKEY_URL reaches, judged before the queue is built and before `listen`,
+		// by the rule every client of this project applies (`judgeValkeyAtStart`). A seam: the real one probes this
+		// host's addresses and reads /proc.
+		judgeValkey = (url, opts) => judgeValkeyAtStart(url, valkeyClientContext({ env: opts.env }), { now: opts.now, ...(opts.sleep ? { sleep: opts.sleep } : {}) }),
 	} = {},
 ) {
 	// Single-object log line: `makeReceiver` calls `log?.({ event, ... })`, so the sink takes ONE object.
@@ -155,6 +159,10 @@ export async function startReceiver(
 
 	// Ride-out connection (no failFast): the receiver is long-running and should survive a Valkey
 	// restart, not give up on a transient disconnect.
+	// Issue #464 (gate round 3): a refused Valkey stops the receiver here (a configError, exit 2, as the worker's boot),
+	// and one that answers nothing for 20 s ends it with exit 1 so the service manager starts it again. It used to keep
+	// running and listening with a queue that could never connect.
+	await judgeValkey(cfg.valkeyUrl, { env, now, sleep });
 	const queue = makeQueueFn(parseConnection(cfg.valkeyUrl));
 
 	// Multi-host routing for deliveries that bind a host-local resource (issue #57, `OQ-032`). A trigger

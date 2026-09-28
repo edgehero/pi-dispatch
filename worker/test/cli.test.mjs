@@ -76,6 +76,16 @@ test("run enqueues against a real Valkey (VALKEY_TEST_URL) and prints the job id
 	assert.equal(code, 0, "a clean enqueue against a real Valkey returns 0");
 });
 
+// Issue #464 (gate round 3): a refused Valkey is said as its refusal before anything is sent, from any directory.
+test("run stops on the Valkey refusal before it enqueues anything (#464)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL" }, async () => {
+	const dir = gitRepo({ dirty: false });
+	const asked = [];
+	const valkeyRefusal = async (url) => (asked.push(url), "the Valkey VALKEY_URL reaches is refused: 127.0.0.1:6399 is held by op2 (uid 1235)");
+	const code = await main(["run", dir, "--task", "must not be sent", "--force"], { VALKEY_URL: process.env.VALKEY_TEST_URL }, { valkeyRefusal });
+	assert.equal(code, 1, "refused, though the Valkey answers and would have taken the job");
+	assert.deepEqual(asked, [process.env.VALKEY_TEST_URL]);
+});
+
 test("run --image enqueues against a real Valkey (the operator-at-the-terminal path for a per-trigger image)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL" }, async () => {
 	// The CLI is the operator-trusted path -- same class as the existing free-form --provider/--model -- and
 	// it is what lets an operator see the preflight refusal once, deliberately, instead of discovering it at

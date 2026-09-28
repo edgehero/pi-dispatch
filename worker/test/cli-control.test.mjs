@@ -50,6 +50,16 @@ test("an unknown command still exits 1", async () => {
 	assert.equal(await main(["frobnicate"], {}), 1);
 });
 
+// Issue #464 (gate round 3): the kill switch and status judge the Valkey before they talk to it.
+test("pause, resume and status stop on the Valkey refusal before they talk to it (#464)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL" }, async () => {
+	for (const cmd of ["pause", "resume", "status"]) {
+		const asked = [];
+		const code = await main([cmd], { VALKEY_URL: process.env.VALKEY_TEST_URL }, { write: () => {}, valkeyRefusal: async (url) => (asked.push(url), "the Valkey VALKEY_URL reaches is refused: held by op2") });
+		assert.equal(code, 1, cmd);
+		assert.deepEqual(asked, [process.env.VALKEY_TEST_URL], cmd);
+	}
+});
+
 test("pause fails fast (does not hang) when Valkey is unreachable", { skip: needsDeps }, async () => {
 	const start = Date.now();
 	const code = await main(["pause"], { VALKEY_URL: "redis://127.0.0.1:1" });

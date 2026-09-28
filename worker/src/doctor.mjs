@@ -276,10 +276,10 @@ export async function runDoctor(env = process.env, deps = {}) {
 		valkeyOwner !== undefined
 			? valkeyOwner
 			: deps.probeValkey === undefined && platform === "linux"
-				? (url, { shared, user, envPath }) =>
-						judgeValkeyListeners({ url, probeTcp: probeTcpAddress, lookup: (host, opts) => dnsLookup(host, opts), fs: { readFileSync }, euid: process.geteuid?.(), user, shared, ownerName: (uid) => ownerNameFromPasswd(passwd, uid), interfaces: networkInterfaces, envPath, subuids: readSubuidRanges({ user, euid: process.geteuid?.(), fs: { readFileSync } }) })
+				? (url, { shared, user, envPath, rootOk = false }) =>
+						judgeValkeyListeners({ url, probeTcp: probeTcpAddress, lookup: (host, opts) => dnsLookup(host, opts), fs: { readFileSync }, euid: process.geteuid?.(), user, shared, rootOk, ownerName: (uid) => ownerNameFromPasswd(passwd, uid), interfaces: networkInterfaces, envPath, subuids: readSubuidRanges({ user, euid: process.geteuid?.(), fs: { readFileSync } }) })
 				: null;
-	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, serviceEnvFile: envText === null ? null : { text: decodeEnvFile(envText).text, path: envPath, loader: serviceEnvLoader(platform) } };
+	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, serviceEnvFile: envText === null ? null : serviceEnvFileOf(envText, envPath, serviceEnvLoader(platform)) };
 
 	let checks = await collectChecks(env, seams);
 	let failed = render(checks, out);
@@ -674,9 +674,18 @@ export async function collectChecks(env, seams) {
 	// `doctor` step judges the deployment it was told to build: VALKEY_URL and PI_PROVIDER here, the provider's key
 	// below. This shell wins where it sets one. A value is taken only from a plain line the loader reads as written.
 	const { serviceEnvFile = null } = seams;
+	// Issue #464 (gate round 3): the keys a hazard in the service's `.env` kept doctor from reading, said once below.
+	const hazardSkipped = new Set();
 	const fromServiceFile = (wanted, providerKeys = []) => {
 		if (!serviceEnvFile) return {};
 		const keys = serviceEnvKeys(wanted, providerKeys);
+		// The hardened reader's verdict on the file (`serviceEnvFileOf`): where it has a line the service's loader reads
+		// differently, or refuses to load, and spells one of these keys, no value is taken from it, and that is SAID
+		// (the ✗ at the end of this function), never read as "unset".
+		if (serviceEnvFile.hazard && keys.some((k) => serviceEnvFile.text.includes(k))) {
+			for (const k of keys) if (serviceEnvFile.text.includes(k) && env[k] === undefined) hazardSkipped.add(k);
+			return {};
+		}
 		const read = readEnvAssignments(serviceEnvFile.text, keys, { loader: serviceEnvFile.loader });
 		return Object.fromEntries(keys.filter((k) => env[k] === undefined && read[k]?.plain && typeof read[k].value === "string").map((k) => [k, read[k].value]));
 	};
@@ -1537,8 +1546,9 @@ export async function collectChecks(env, seams) {
 	// VALKEY_URL that reaches another account's Valkey (its port, its ::1 for a `localhost` URL, or 0.0.0.0) passed here,
 	// and the worker then took and ran that account's jobs. Judged BEFORE anything talks to Valkey: after a refusal
 	// doctor neither PINGs that Valkey nor reads its fleet, and otherwise it talks to the address the worker pins.
-	// Only where `local` is not blessed (docker's Valkey, published by root's docker-proxy, is the queue there, as `up`
-	// and `service install` also say) and only on Linux, where /proc names the owner. PI_VALKEY_SHARED comes from the
+	// Gate round 3: on EVERY venue, as the worker and every client now judge it: another account's listener is refused
+	// wherever it is; root's (docker-proxy) only where `local` is not blessed, since docker's Valkey is the queue there.
+	// Only on Linux, where /proc names the owner (the default seam is null elsewhere). PI_VALKEY_SHARED comes from the
 	// deployment `.env` alone, as the worker reads it; one in this shell is named as ignored.
 	let ownerVerdict = null;
 	const sharedInFile = (() => {
@@ -1546,13 +1556,17 @@ export async function collectChecks(env, seams) {
 		const read = readEnvAssignments(serviceEnvFile.text, [VALKEY_SHARED_KEY], { loader: serviceEnvFile.loader })[VALKEY_SHARED_KEY];
 		return read?.plain && typeof read.value === "string" ? read.value : undefined;
 	})();
-	if (!unreadValkey && seams.valkeyOwner && podmanUsed && !localUsed) {
+	if (!unreadValkey && seams.valkeyOwner) {
 		if (typeof env[VALKEY_SHARED_KEY] === "string") checks.push({ ok: false, warn: true, label: sharedShellIgnored(env[VALKEY_SHARED_KEY], join(cwd, ".env")), fix: "put PI_VALKEY_SHARED=1 in the deployment's .env if that Valkey is shared on purpose, and unset it in this shell" });
-		ownerVerdict = await seams.valkeyOwner(valkeyUrl, { shared: valkeySharedOn(sharedInFile), user: userNameOf(seams), envPath: join(cwd, ".env") });
+		ownerVerdict = await seams.valkeyOwner(valkeyUrl, { shared: valkeySharedOn(sharedInFile), user: userNameOf(seams), envPath: join(cwd, ".env"), rootOk: !(podmanUsed && !localUsed) });
 	}
-	const valkeyRefused = Boolean(ownerVerdict?.refusal);
+	// A name that does not resolve here cannot be judged (gate round 3): said, and talked to no more than a refused one.
+	const valkeyUnresolved = ownerVerdict?.unresolved ? `VALKEY_URL's host ${ownerVerdict.unresolved} did not resolve here (${ownerVerdict.why}), so whose Valkey it reaches cannot be judged; the worker waits for it and retries` : null;
+	const valkeyRefused = Boolean(ownerVerdict?.refusal) || valkeyUnresolved !== null;
 	const valkeyTalkUrl = ownerVerdict?.chosen ? pinnedValkeyUrl(valkeyUrl, ownerVerdict.chosen).url : valkeyUrl;
-	if (valkeyRefused) {
+	if (valkeyUnresolved) {
+		checks.push({ ok: false, label: valkeyUnresolved, fix: "fix the name's resolution on this host, or write the address in VALKEY_URL" });
+	} else if (valkeyRefused) {
 		checks.push({ ok: false, label: `Valkey (${urlShown(valkeyUrl)}) is not this account's: ${ownerVerdict.refusal.short}. The worker refuses to start on it (exit 2); doctor did not talk to it`, fix: ownerVerdict.refusal.fix });
 	} else if (unreadValkey) {
 		checks.push({
@@ -2662,7 +2676,27 @@ export async function collectChecks(env, seams) {
 		}
 	}
 
+	if (hazardSkipped.size > 0) {
+		const { hazard } = serviceEnvFile;
+		checks.push({ ok: false, label: `${serviceEnvFile.path} line ${hazard.line} ${hazard.what}, so doctor read none of ${[...hazardSkipped].join(", ")} from it and judged this shell's values (or the defaults) instead: the service's own are unknown`, fix: hazard.fix });
+	}
 	return checks;
+}
+
+/**
+ * The deployment `.env` as doctor judges the service by (issue #464, gate round 3): decoded from its BYTES with the
+ * hardened reader, and `hazard` set to the first thing the service's loader reads differently from this reader, or
+ * refuses to load (a NUL, invalid UTF-8, an environment too big to exec, a lone CR), as `{ line, what, fix }`, or null.
+ */
+function serviceEnvFileOf(raw, path, loader) {
+	const { text, loadHazard } = decodeEnvFile(raw, { loader });
+	const h = loadHazard ?? envFileHazard(text, { loader });
+	let hazard = null;
+	if (h !== null) {
+		const shape = h.shape !== undefined ? SYSTEMD_HAZARD_SHAPES[h.shape] : null;
+		hazard = shape ? { line: h.line, what: `has ${shape.what}${h.detail ? ` (${h.detail})` : ""}`, fix: shape.fix } : { line: h.line, what: "is one this command cannot read the way the service's loader will (an open quote, a continuation, or a line that runs)", fix: "fix that line, then re-run doctor" };
+	}
+	return { text, path, loader, hazard };
 }
 
 /**

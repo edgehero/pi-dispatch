@@ -438,7 +438,7 @@ export async function startWorker(
 	for (const note of valkey.notes ?? []) log("valkey_note", { note });
 	if (valkey.pinned) log("valkey_pinned", { address: valkey.pinned.address, port: valkey.pinned.port, heldBy: valkey.pinned.heldBy });
 	// Every client below connects through connection.mjs' JudgedConnector, which judges the (pinned) address again on
-	// each connect, as this boot judged it: `enforce` as the boot decided it, PI_VALKEY_SHARED from the deployment .env.
+	// each connect, as this boot judged it: root refused as the boot decided it, PI_VALKEY_SHARED from the deployment .env.
 	const valkeyContext = workerValkeyContext(valkey, env);
 	const valkeyConn = (opts = {}) => parseConnection(valkey.url, { ...opts, servername: valkey.servername, context: valkeyContext });
 
@@ -1941,7 +1941,7 @@ function logDockerEndpoint(log, endpoint, { changed = false } = {}) {
  * reconnect is judged by the rule the boot applied, never a looser one; PI_VALKEY_SHARED from the deployment `.env`.
  */
 export function workerValkeyContext(valkey, env, { cwd = process.cwd(), readEnv } = {}) {
-	return valkeyClientContext({ env, cwd, enforce: valkey?.enforce === true, ...(readEnv ? { readEnv } : {}) });
+	return valkeyClientContext({ env, cwd, rootRefused: valkey?.rootRefused === true, ...(readEnv ? { readEnv } : {}) });
 }
 
 /**
@@ -1953,9 +1953,11 @@ async function defaultJudgeValkey({ url, venues, env }) {
 	const envPath = join(process.cwd(), ".env");
 	let envText = null;
 	try {
-		envText = readFileSync(envPath, "utf8");
-	} catch {
-		// No .env here: nothing opts in.
+		// Bytes (gate round 3): the hardened reader checks what systemd refuses to load before it decodes.
+		envText = readFileSync(envPath);
+	} catch (err) {
+		// No .env here: nothing opts in. Any other failure is said, never read as "no opt-in" (gate round 3).
+		if (err?.code !== "ENOENT") throw configError(`${envPath} could not be read (${err?.code ?? err?.message}), and the worker reads PI_VALKEY_SHARED from it, so it does not start`);
 	}
 	const fs = { readFileSync };
 	const euid = process.geteuid?.();

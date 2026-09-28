@@ -5,7 +5,10 @@ import { filter } from "../src/filter.mjs";
 import { parseSubset } from "../src/receiver.mjs";
 import { loadReceiverConfig } from "../src/config.mjs";
 import { loadPollerConfig } from "../src/poller-config.mjs";
-import { cancellableSleep, startPoller } from "../src/poller.mjs";
+import { cancellableSleep, startPoller as startPollerReal } from "../src/poller.mjs";
+
+// Issue #464 (gate round 3): never this host's Valkey. Every start here is judged as answering, unless a test judges it.
+const startPoller = (env, deps = {}) => startPollerReal(env, { judgeValkey: async () => {}, ...deps });
 import { readFileSync } from "node:fs";
 import { main } from "../src/cli.mjs";
 
@@ -1229,4 +1232,37 @@ test("poller: a semantic-window swallow is its own out-line with the survivor, a
 	const dedup = out.filter((l) => l.event === "deduplicated");
 	assert.equal(dedup.length, queued.length, "one line per swallow");
 	assert.ok(dedup.every((l) => l.survivingJobId === "the-survivor" && typeof l.jobId === "string"));
+});
+
+// Issue #464 (gate round 3): the poller judges its Valkey before it builds its own clients, as the receiver does.
+test("the poller judges VALKEY_URL before building its own Valkey clients, and a refusal stops it (#464)", async () => {
+	const refusal = Object.assign(new Error("the Valkey VALKEY_URL reaches is refused"), { piDispatchConfig: true, valkeyRefused: true });
+	let queues = 0;
+	const base = { fetchFn: fakeFetch(EMPTY_POLL_ROUTES()), out: () => {}, now: () => NOW, random: () => 0.5, selfIdFn: async () => SELF, tokenFn: async () => "poll-token", fsDeps: FS, sleep: async () => {}, signals: false };
+	// Settled either way, so a poller that starts after all is stopped and fails this test rather than running on.
+	let started = null;
+	const err = await startPollerReal({ POLL_REPOS: "o/r", VALKEY_URL: "redis://localhost:16583" }, {
+		...base,
+		makeQueueFn: () => (queues++, { close: async () => {} }),
+		makeRedisFn: () => (queues++, fakeRedis()),
+		judgeValkey: async (url) => {
+			assert.equal(url, "redis://localhost:16583");
+			throw refusal;
+		},
+	}).then(
+		(p) => ((started = p), null),
+		(e) => e,
+	);
+	if (started) {
+		started.stop();
+		await started.done.catch(() => {});
+	}
+	assert.equal(err, refusal, "the refusal stops the poller from starting");
+	assert.equal(queues, 0, "no client of its own was built");
+	// With its clients injected (a test's fakes), nothing of its own is built and nothing is judged.
+	let judged = 0;
+	const poller = await startPollerReal({ POLL_REPOS: "o/r" }, { ...base, redis: fakeRedis(), queueFn: async () => {}, judgeValkey: async () => judged++, sleep: async () => poller?.stop() });
+	poller.stop();
+	await poller.done.catch(() => {});
+	assert.equal(judged, 0);
 });

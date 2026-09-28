@@ -720,20 +720,27 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
      the worker's log, never dialled. Refusing there instead would let any account stop your worker by publishing a
      port.
    - When no answering address is this account's, it is refused, naming the owner: another account (a container of
-     one is named by its account, from `/etc/subuid`); root, which is docker-proxy or a rootful container any account
-     with sudo can start; a system service such as a distribution package's Valkey; or a listener no socket row
-     explains. No uid range decides this, since an LDAP account sits above `UID_MAX` and Lima's default user at 501,
+     one is named by its account, from `/etc/subuid`) or a system service such as a distribution package's Valkey,
+     on every venue; and, where `PI_BACKENDS` names `podman` without `local`, root (docker-proxy or a rootful
+     container any account with sudo can start) or a listener no socket row explains (only the kernel's NAT answers
+     with no socket, as docker without its proxy does). With `local` blessed, root's is docker's Valkey and is taken.
+     No uid range decides this, since an LDAP account sits above `UID_MAX` and Lima's default user at 501,
      below `UID_MIN`. The worker exits 2 with that sentence (not restarted), `service install` refuses before it
      writes anything, `up` adds and adopts nothing and exits non-zero, and doctor prints a ✗ and neither PINGs that
      Valkey nor reads its fleet. When nothing answers at all, the worker waits 20 s for a Valkey still starting,
-     then exits 1 and systemd starts it again.
+     then exits 1 and systemd starts it again; a name that does not resolve (or a resolver that does not answer) is
+     waited for the same way, never taken for another host. A Valkey restart under a running worker is survived:
+     each reconnect is judged again, and a judgement that fails meanwhile is retried, not the end of the client.
    - The way out is this account's own port, `VALKEY_URL=redis://127.0.0.1:6380` in that deployment's `.env`:
      `service install` and `up` publish the Quadlet Valkey there (`PublishPort=127.0.0.1:6380:6379`). An `[::1]` URL
      cannot reach that Quadlet Valkey, which publishes on `127.0.0.1` only, and is refused with that reason.
    - A Valkey that is shared ON PURPOSE (a distribution package several deployments use, say) is taken only with
      `PI_VALKEY_SHARED=1` in the deployment's `.env`, and the commands then say whose it is. Every account using it
      can read and drain the others' jobs. It is read from `.env` ONLY, by the worker (from its working directory, the
-     deployment folder), `service install`, `up` and doctor; one set in a shell is ignored and said to be. `--force`
+     deployment folder), `service install`, `up`, doctor and every other client; one set in a shell is ignored and
+     said to be, and a command run from a folder with no `.env` takes no opt-in from its environment either. The
+     `.env` is read with the same reader as the service's other keys: a line systemd reads differently (a lone CR, a
+     NUL, invalid UTF-8) is named, and then only this account's own Valkey is used. `--force`
      does not take it: it replaces changed files, and taking another account's queue must never ride along with that.
 
    A `VALKEY_URL` line in `.env` that the loaders may read differently is a ✗ of its own in doctor, which then contacts
@@ -743,12 +750,13 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    as the service does (`up` takes this shell's value only where the file sets none, and stops when the two
    disagree). An `[::1]` URL in `.env` must be quoted, `VALKEY_URL="redis://[::1]:6379"`: the macOS wrapper sources the
    file with sh, which may read an unquoted `[` as a pattern. With `local` in `PI_BACKENDS`, docker's Valkey is the
-   queue, published by root's docker-proxy, and nothing is refused. Every OTHER Valkey client applies the same rule
-   when it connects: `pi-dispatch run`, `pause`, `resume`, `status` and `cancel`, the receiver, the admin panel and
-   doctor all build their connections through one module, which resolves the name once per process, connects to the
-   literal address this account holds (the one that answers first where `local` is blessed, where nothing is
-   refused), and refuses another account's Valkey where the podman venue is this deployment's (the environment's
-   `PI_BACKENDS`, else the `.env` in the folder the command runs in). The compose file is docker-only. Without `local` in `PI_BACKENDS`, doctor's fix for an unreachable Valkey points at `up` and
+   queue, published by root's docker-proxy, and root's listener is taken; another account's is refused there too.
+   Every OTHER Valkey client applies the same rule when it connects, wherever it runs from: `pi-dispatch run`,
+   `pause`, `resume`, `status` and `cancel`, the receiver, the admin panel and doctor all build their connections
+   through one module, which resolves the name once per process, connects to the literal address judged (this
+   account's first, else root's where root may hold it), and refuses another account's Valkey on every venue. Only
+   whether root's is refused depends on the deployment (the environment's `PI_BACKENDS`, else the `.env` in the folder
+   the command runs in). The receiver judges before it listens and exits 2 on a refusal. The compose file is docker-only. Without `local` in `PI_BACKENDS`, doctor's fix for an unreachable Valkey points at `up` and
    `service install`, and `doctor --fix` offers no `docker run` for it.
 8. **`PI_BACKENDS=podman`** in `.env` (the setup wizard, `/dispatch setup`, writes it when you choose rootless Podman
    at its runtime step), then start the worker, and run `pi-dispatch doctor` and

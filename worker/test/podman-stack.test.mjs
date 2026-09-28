@@ -287,7 +287,7 @@ const hostFiles = (listenerUid) => ({
 });
 // How this harness's host resolves a name, as the worker's client would (every address, `localhost` ::1 first as on
 // Fedora 44); anything else does not resolve.
-const DNS = { localhost: [{ address: "::1", family: 6 }, { address: "127.0.0.1", family: 4 }] };
+const DNS = { localhost: [{ address: "::1", family: 6 }, { address: "127.0.0.1", family: 4 }], "queue.lan": [{ address: "10.0.0.5", family: 4 }] };
 const fakeLookup = (dns = DNS) => async (host) => {
 	if (!dns[host]) throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: "ENOTFOUND" });
 	return dns[host];
@@ -556,14 +556,19 @@ test("decideValkey judges every address VALKEY_URL's host resolves to: another a
 	assert.equal(v6only.error, "/d/.env: VALKEY_URL's host is ::1, not 127.0.0.1, and the Quadlet Valkey is published on 127.0.0.1 only, so the worker would not reach it. Write VALKEY_URL=redis://127.0.0.1:6380", "gate round 2: no \"is ::1 here\", and no localhost advice, which reaches ::1 first on Fedora");
 });
 
-test("judgeValkeyListeners: a name that resolves to this host's own interface address is judged, one that does not is another host (#464)", async () => {
+test("judgeValkeyListeners: a name that resolves to this host's own interface address is judged, one that resolves elsewhere is another host, and one that does not resolve cannot be judged (#464)", async () => {
 	const lan = `${TCP_HEAD}   3: 00000000:18EB 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1235        0 1 1 0 100 0 0 10 0\n`;
 	const common = { probeTcp: async () => true, euid: 1234, user: "tester", fs: { readFileSync: (p) => ({ ...hostFiles(null), "/proc/net/tcp": lan })[p] }, ownerName: (u) => NAMES[u] ?? null };
 	const here = await judgeValkeyListeners({ ...common, url: "redis://myhost:6379", lookup: fakeLookup({ myhost: [{ address: "192.168.5.15", family: 4 }] }), interfaces: () => ({ eth0: [{ address: "192.168.5.15", family: "IPv4" }] }) });
 	assert.match(here.refusal.text, /^192\.168\.5\.15:6379 is held by op2 \(uid 1235\)/, "a 0.0.0.0 listener answers this host's own address too");
 	const there = await judgeValkeyListeners({ ...common, url: "redis://queue.lan:6379", lookup: fakeLookup({ "queue.lan": [{ address: "10.0.0.5", family: 4 }] }), interfaces: () => ({ eth0: [{ address: "192.168.5.15", family: "IPv4" }] }) });
 	assert.deepEqual(there, { remote: "queue.lan" });
-	assert.deepEqual(await judgeValkeyListeners({ ...common, url: "redis://gone.lan:6379", lookup: fakeLookup({}) }), { remote: "gone.lan" }, "a name that does not resolve is not this host");
+	// Gate round 3, item 4: a name that does not resolve is not known to be another host; it is judged when it resolves.
+	assert.deepEqual(await judgeValkeyListeners({ ...common, url: "redis://gone.lan:6379", lookup: fakeLookup({}) }), { unresolved: "gone.lan", why: "ENOTFOUND" });
+	assert.deepEqual(await judgeValkeyListeners({ ...common, url: "redis://none.lan:6379", lookup: async () => [] }), { unresolved: "none.lan", why: "no address" });
+	const gone = await decideAt(1235, { url: "redis://gone.lan:6379", lookup: fakeLookup({}) });
+	assert.equal(gone.include, false);
+	assert.match(gone.error, /^VALKEY_URL's host gone\.lan did not resolve here \(ENOTFOUND\), so whose Valkey it reaches cannot be judged\. Retry when it resolves, or write the address/);
 	const remote = await decideAt(1235, { url: "redis://queue.lan:6379", lookup: fakeLookup({ "queue.lan": [{ address: "10.0.0.5", family: 4 }] }) });
 	assert.deepEqual([remote.include, remote.refusal], [false, null]);
 	assert.equal(remote.notes[0], "VALKEY_URL names queue.lan, not this host, so no Valkey is added here");
@@ -694,7 +699,7 @@ test("judgeValkeyListeners chooses this account's listener first and pins it; an
 	assert.match(d.notes.join("\n"), /another account also listens on an address VALKEY_URL's host resolves to: \[::1\]:16483 \(held by op2 \(uid 1235\)\)\. The worker connects only to the address judged this account's/);
 	// With nothing of this account's answering, the refusal names ONLY the addresses a foreign uid holds (gate round 2).
 	const mixed = await judgeOn({ "/proc/net/tcp": `${TCP_HEAD}${row4("0100007F", 16483, 1235)}`, "/proc/net/tcp6": `${TCP_HEAD}${row6("00000000000000000000000001000000", 16483, 1236)}` }, { url: "redis://localhost:16483" });
-	assert.match(mixed.refusal.text, /^\[::1\]:16483 and 127\.0\.0\.1:16483 is held by uid 1236 and op2 \(uid 1235\)/);
+	assert.match(mixed.refusal.text, /^\[::1\]:16483 and 127\.0\.0\.1:16483 are held by uid 1236 and op2 \(uid 1235\), not by/, "two addresses are held (gate round 3)");
 	// An address no socket row explains beside one another account holds: only the foreign-held one is said to be held.
 	const unknownAndForeign = await judgeOn({ "/proc/net/tcp": `${TCP_HEAD}${row4("0100007F", 16483, 1235)}` }, { url: "redis://localhost:16483" });
 	assert.match(unknownAndForeign.refusal.text, /^127\.0\.0\.1:16483 is held by op2 \(uid 1235\), not by/, "::1 answered with no row: not named as op2's");
@@ -702,9 +707,9 @@ test("judgeValkeyListeners chooses this account's listener first and pins it; an
 	assert.match(oneForeign.refusal.text, /^127\.0\.0\.1:16483 is held by op2 \(uid 1235\), not by/, "::1 did not answer, so it is not named");
 });
 
-test("judgeValkeyListeners bounds the name lookup: a resolver that does not answer is a name that did not resolve (#464, gate round 2)", async () => {
+test("judgeValkeyListeners bounds the name lookup: a resolver that does not answer is a name that cannot be judged yet, never another host (#464, gate rounds 2 and 3)", async () => {
 	const v = await judgeOn({}, { url: "redis://slow.lan:6379", lookup: () => new Promise(() => {}), lookupTimeoutMs: 20 });
-	assert.deepEqual(v, { remote: "slow.lan" });
+	assert.deepEqual(v, { unresolved: "slow.lan", why: "ETIMEOUT" });
 });
 
 test("readSubuidRanges: getsubids(1) where it answers (SSSD ranges included), else /etc/subuid, and says which (#464, gate round 2)", async () => {
@@ -740,12 +745,26 @@ test("resolveWorkerValkey: the worker's boot judgement, pinned, refused as a con
 	await assert.rejects(at(1235, { env: { PI_VALKEY_SHARED: "1" } }), (err) => err.piDispatchConfig === true, "an environment opt-in is not the file's");
 	const noted = await at(1234, { env: { PI_VALKEY_SHARED: "1" } });
 	assert.match(noted.notes[0], /^PI_VALKEY_SHARED is set in the worker's environment and not in \/d\/\.env: ignored/);
-	// Not judged where install, up and doctor do not judge either: docker's Valkey, another host, off Linux.
-	for (const extra of [{ venues: { localUsed: true, podmanUsed: true } }, { platform: "darwin" }, { url: "redis://queue.lan:6379", lookup: fakeLookup({ "queue.lan": [{ address: "10.0.0.5", family: 4 }] }) }]) {
+	// Gate round 3's simpler rule: another account's listener is refused on EVERY venue, docker's included; root's
+	// (docker-proxy) only where the podman venue is the deployment's without local, which rootRefused carries on.
+	const docker = { venues: { localUsed: true, podmanUsed: true } };
+	await assert.rejects(at(1235, docker), (err) => err.piDispatchConfig === true && /held by op2 \(uid 1235\)/.test(err.message), "another account's Valkey on the local venue");
+	const proxy = await at(0, docker);
+	assert.deepEqual([proxy.url, proxy.rootRefused, proxy.pinned?.heldBy], ["redis://127.0.0.1:16483", false, "root"], "docker-proxy on the local venue");
+	await assert.rejects(at(0), (err) => err.piDispatchConfig === true && /held by root/.test(err.message), "root on the podman venue");
+	assert.equal(mine.rootRefused, true);
+	// Not judged off Linux (no /proc), nor another host.
+	for (const extra of [{ platform: "darwin" }, { url: "redis://queue.lan:6379", lookup: fakeLookup({ "queue.lan": [{ address: "10.0.0.5", family: 4 }] }) }]) {
 		const same = await at(1235, extra);
 		assert.equal(same.pinned, null, JSON.stringify(extra));
 		assert.equal(same.url, extra.url ?? "redis://localhost:16483");
 	}
+	// Gate round 3, item 5: the .env's bytes go through the hardened reader; a hazard is named and the worker does not start.
+	await assert.rejects(at(1234, { envText: Buffer.from("PI_VALKEY_SHARED=1\rVALKEY_URL=redis://x\n") }), (err) => err.piDispatchConfig === true && /^\/d\/\.env line 1 .*carriage return.*The worker reads PI_VALKEY_SHARED and VALKEY_URL from it, so it does not start$/s.test(err.message));
+	await assert.rejects(at(1234, { envText: Buffer.from([0x50, 0x3d, 0xff, 0x0a]) }), (err) => err.piDispatchConfig === true && /UTF-8/.test(err.message));
+	// A name that does not resolve: waited for, then a plain error (exit 1, restarted), never dialled unjudged.
+	let dnsClock = 0;
+	await assert.rejects(at(1234, { url: "redis://gone.lan:16483", waitMs: 1000, now: () => dnsClock, sleep: async (ms) => { dnsClock += ms; } }), (err) => !err.piDispatchConfig && /^VALKEY_URL's host gone\.lan did not resolve here \(ENOTFOUND\), so whose Valkey it reaches cannot be judged; the service manager retries/.test(err.message));
 	// Nothing answering: waited for, then a plain error (exit 1, restarted), since no owner can be judged yet.
 	let clock = 0;
 	await assert.rejects(at(1234, { probeTcp: async () => false, waitMs: 2000, now: () => clock, sleep: async (ms) => { clock += ms; } }), (err) => !err.piDispatchConfig && /^nothing answers VALKEY_URL \(\[::1\]:16483, 127\.0\.0\.1:16483\)/.test(err.message));
@@ -754,6 +773,17 @@ test("resolveWorkerValkey: the worker's boot judgement, pinned, refused as a con
 	const late = await at(1234, { probeTcp: async (h) => h === "127.0.0.1" && clock >= answersAt, waitMs: 5000, now: () => clock, sleep: async (ms) => { clock += ms; } });
 	assert.equal(late.url, "redis://127.0.0.1:16483", "a Valkey still starting is waited for");
 	await assert.rejects(at(1234, { url: "http://x" }), (err) => err.piDispatchConfig === true);
+});
+
+// Gate round 3, item 5: `up` read the .env's VALKEY_URL and PI_VALKEY_SHARED from decoded text, past what systemd refuses.
+test("deploymentValkeyEnv reads the .env as bytes through the hardened reader, and stops on what systemd refuses (#464, gate round 3)", async () => {
+	const { deploymentValkeyEnv } = await import("../src/deployment-venue.mjs");
+	const fsOf = (bytes) => ({ existsSync: () => true, readFileSync: (_p, enc) => (enc ? bytes.toString(enc) : bytes) });
+	const bad = Buffer.concat([Buffer.from("VALKEY_URL=redis://127.0.0.1:6380\nPI_VALKEY_SHARED="), Buffer.from([0xff]), Buffer.from("1\n")]);
+	const refused = deploymentValkeyEnv({ env: {}, fs: fsOf(bad), envPath: "/d/.env", platform: "linux" });
+	assert.match(String(refused.error), /^\/d\/\.env line 2 has .*UTF-8.*\. up judges the Valkey the service will use, so it stops here$/s);
+	const ok = deploymentValkeyEnv({ env: {}, fs: fsOf(Buffer.from("VALKEY_URL=redis://127.0.0.1:6380\n")), envPath: "/d/.env", platform: "linux" });
+	assert.equal(ok.env.VALKEY_URL, "redis://127.0.0.1:6380");
 });
 
 test("service install on podman: a PI_VALKEY_SHARED in this shell is ignored and named; only the .env's opts in (#464, gate round 2)", async () => {

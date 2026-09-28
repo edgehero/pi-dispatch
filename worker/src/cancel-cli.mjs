@@ -27,7 +27,7 @@ const FLEET_READ_TIMEOUT_MS = 2_000;
  * Run the cancel. Returns the process exit code. Every collaborator is a seam with the production default,
  * so tests drive states and races without a queue; `write` is the stdout seam cli.mjs already injects.
  */
-export async function runCancel(jobId, url, { write = (chunk) => process.stdout.write(chunk), errWrite = (chunk) => process.stderr.write(chunk), redisFn, queueFn, parseConnectionFn, readLiveHostsFn, discoverHostQueuesFn, fleetQueueNamesFn, unionQueueNamesFn, ackTimeoutMs = 10_000, pollMs = 250, sleep } = {}) {
+export async function runCancel(jobId, url, { write = (chunk) => process.stdout.write(chunk), errWrite = (chunk) => process.stderr.write(chunk), redisFn, queueFn, parseConnectionFn, readLiveHostsFn, discoverHostQueuesFn, fleetQueueNamesFn, unionQueueNamesFn, ackTimeoutMs = 10_000, pollMs = 250, sleep, refusalFn } = {}) {
 	const fail = (message) => {
 		errWrite(`error: ${message}\n`);
 		return 1;
@@ -47,6 +47,23 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 	const fleetNames = fleetQueueNamesFn ?? fleetQueueNames;
 	const unionNames = unionQueueNamesFn ?? unionQueueNames;
 
+	// Issue #464 (gate round 3): judged before anything is sent, so a refused Valkey is said as the refusal it is. Only
+	// where this command builds its own clients (a test's fakes stand in for Valkey itself), or a test's `refusalFn`.
+	const refusalOf =
+		refusalFn ??
+		(redisFn
+			? async () => null
+			: async (u) => {
+					const { judgeValkeyAtStart, valkeyClientContext } = await import("./connection.mjs");
+					try {
+						await judgeValkeyAtStart(u, valkeyClientContext(), { waitMs: 0 });
+						return null;
+					} catch (error) {
+						return error?.valkeyRefused ? error.message : null;
+					}
+				});
+	const refused = await refusalOf(url);
+	if (refused) return fail(refused);
 	const probe = mkRedis(url);
 	probe.on?.("error", () => {});
 	const queues = [];

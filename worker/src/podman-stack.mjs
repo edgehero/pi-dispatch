@@ -402,7 +402,7 @@ function lookupWithin(lookup, host, timeoutMs) {
  * No uid ranges from login.defs: an LDAP or SSSD account sits above UID_MAX and Lima's default user at 501, below
  * UID_MIN, so a range cannot tell another person from a system service. Only this account's own uids are its own.
  */
-export async function judgeValkeyListeners({ url, probeTcp, lookup, fs, euid, user = null, shared = false, ownerName = () => null, interfaces = () => ({}), envPath = ".env", subuids = null, lookupTimeoutMs = 3000 }) {
+export async function judgeValkeyListeners({ url, probeTcp, lookup, fs, euid, user = null, shared = false, rootOk = false, ownerName = () => null, interfaces = () => ({}), envPath = ".env", subuids = null, lookupTimeoutMs = 3000 }) {
 	const target = valkeyTarget(url);
 	if (target.error) return { error: target.error };
 	const { host, port } = target;
@@ -412,9 +412,13 @@ export async function judgeValkeyListeners({ url, probeTcp, lookup, fs, euid, us
 		try {
 			const found = await lookupWithin(lookup, host, lookupTimeoutMs);
 			addresses = (Array.isArray(found) ? found : [found]).map((a) => a?.address).filter((a) => typeof a === "string");
-		} catch {
-			addresses = [];
+		} catch (err) {
+			// Gate round 3: a lookup that failed or timed out is NOT another host. It used to be read as one, and the client
+			// then dialled the name unjudged, landing wherever the resolver answered next (measured: EAI_AGAIN, and a
+			// resolver silent past the 3 s bound). Nothing can be judged, so the caller retries.
+			return { unresolved: host, why: err?.code ?? err?.message ?? "no answer" };
 		}
+		if (addresses.length === 0) return { unresolved: host, why: "no address" };
 	}
 	const local = [...new Set(addresses.filter((a) => isThisHost(a, interfaces)).map(reachedAddress))];
 	if (local.length === 0) return { remote: host };
@@ -433,12 +437,17 @@ export async function judgeValkeyListeners({ url, probeTcp, lookup, fs, euid, us
 		const held = listenerUids(address, port, fs);
 		const uids = held.uids ?? [];
 		const why = held.error ?? (uids.length === 0 ? "no listening socket for it is in /proc/net/tcp or /proc/net/tcp6" : null);
-		answered.push({ address, uids, own: why === null && uids.every(isOwn), why });
+		const own = why === null && uids.every(isOwn);
+		// Gate round 3: three classes, not two. ROOT covers uid 0 (docker-proxy, a rootful container) and a listener no
+		// socket row explains (a kernel NAT rule, which only root can set up); FOREIGN is any other uid.
+		const cls = own ? "own" : why !== null || uids.filter((u) => !isOwn(u)).every((u) => u === 0) ? "root" : "foreign";
+		answered.push({ address, uids, own, why, cls });
 	}
 	const base = { host, port, addresses: local, answered };
 	const mineFirst = answered.find((a) => a.own) ?? null;
 	const others = answered.filter((a) => !a.own);
-	const describe = (list) => list.map((a) => `${hostPort(a.address, port)} (${a.why ? `held by an owner /proc does not name: ${a.why}` : `held by ${[...new Set(a.uids.filter((u) => !isOwn(u)))].map(named).join(" and ")}`})`).join(", ");
+	const ownersOf = (a) => (a.why ? "an owner /proc does not name" : [...new Set(a.uids.filter((u) => !isOwn(u)))].map(named).join(" and "));
+	const describe = (list) => list.map((a) => `${hostPort(a.address, port)} (${a.why ? `held by an owner /proc does not name: ${a.why}` : `held by ${ownersOf(a)}`})`).join(", ");
 	if (answered.length === 0) return { ...base, chosen: null, refusal: null, heldBy: null, own: true, elsewhere: [] };
 	if (mineFirst) {
 		const heldBy = mineFirst.uids.every((u) => u === euid) ? "this account" : `this account's containers (a subordinate uid of it, from ${source})`;
@@ -446,8 +455,14 @@ export async function judgeValkeyListeners({ url, probeTcp, lookup, fs, euid, us
 	}
 	if (shared) {
 		const first = answered[0];
-		const owners = first.why ? "an owner /proc does not name" : [...new Set(first.uids.filter((u) => !isOwn(u)))].map(named).join(" and ");
-		return { ...base, chosen: first.address, refusal: null, heldBy: `${owners}, shared on purpose as ${VALKEY_SHARED_KEY}=1 in ${envPath} says`, own: false, elsewhere: [] };
+		return { ...base, chosen: first.address, refusal: null, heldBy: `${ownersOf(first)}, shared on purpose as ${VALKEY_SHARED_KEY}=1 in ${envPath} says`, own: false, elsewhere: [] };
+	}
+	// Root's listener where root is acceptable (every client but the podman venue's: docker's Valkey is published by
+	// root's docker-proxy there). Another account's listener is never acceptable without the opt-in.
+	const rootFirst = rootOk ? (answered.find((a) => a.cls === "root") ?? null) : null;
+	if (rootFirst) {
+		const foreign = answered.filter((a) => a.cls === "foreign");
+		return { ...base, chosen: rootFirst.address, refusal: null, heldBy: rootFirst.why ? "an owner /proc does not name (root's NAT, as docker without its proxy)" : "root", own: false, elsewhere: foreign.length > 0 ? [describe(foreign)] : [] };
 	}
 	const ways = `Give this account a Valkey of its own on another port, VALKEY_URL=redis://127.0.0.1:<port> in ${envPath} (\`service install\` and \`up\` then publish the Quadlet Valkey there); or, if that Valkey is shared on purpose, say so with ${VALKEY_SHARED_KEY}=1 in ${envPath}`;
 	const own = `this account (uid ${euid}) or its containers (subordinate uids read from ${source})`;
@@ -456,11 +471,13 @@ export async function judgeValkeyListeners({ url, probeTcp, lookup, fs, euid, us
 		const what = unknown.map((a) => hostPort(a.address, port)).join(" and ");
 		return { ...base, chosen: null, heldBy: null, own: false, elsewhere: [], refusal: { short: `something answers ${what}, and which account holds it could not be told`, text: `something answers ${what}, and which account holds it could not be told (${unknown[0].why}), so it is not taken to be this account's Valkey. ${ways}`, fix: ways } };
 	}
-	// Only the addresses a foreign uid holds are named, each with its own owner (gate round 2: an own 127.0.0.1 used to be
+	// Only the addresses a refused uid holds are named, each with its own owner (gate round 2: an own 127.0.0.1 used to be
 	// listed beside another account's ::1 as if both were that account's).
-	const foreignAt = others.filter((a) => !a.why);
-	const where = foreignAt.map((a) => hostPort(a.address, port)).join(" and ");
-	const who = [...new Set(foreignAt.flatMap((a) => a.uids.filter((u) => !isOwn(u))))].map(named).join(" and ");
+	const refusedAt = others.filter((a) => !a.why && (a.cls === "foreign" || !rootOk));
+	const where = refusedAt.map((a) => hostPort(a.address, port)).join(" and ");
+	const who = [...new Set(refusedAt.flatMap((a) => a.uids.filter((u) => !isOwn(u))))].map(named).join(" and ");
+	// Gate round 3 nit: "are held by" when the refusal names more than one address.
+	const held = refusedAt.length > 1 ? "are held by" : "is held by";
 	return {
 		...base,
 		chosen: null,
@@ -468,8 +485,8 @@ export async function judgeValkeyListeners({ url, probeTcp, lookup, fs, euid, us
 		own: false,
 		elsewhere: [],
 		refusal: {
-			short: `${where} is held by ${who}, not by ${own}`,
-			text: `${where} is held by ${who}, not by ${own}: taking it as this deployment's Valkey would put this account's jobs in a queue another account can read and drain. ${ways}`,
+			short: `${where} ${held} ${who}, not by ${own}`,
+			text: `${where} ${held} ${who}, not by ${own}: taking it as this deployment's Valkey would put this account's jobs in a queue another account can read and drain. ${ways}`,
 			fix: ways,
 		},
 	};
@@ -507,6 +524,7 @@ export async function decideValkey({ venues, url, installed, probeTcp, lookup, e
 	if (venues.localUsed) return { include: false, port: DEFAULT_VALKEY_PORT, notes, refusal: null };
 	const verdict = await judgeValkeyListeners({ url, probeTcp, lookup, fs, euid, user, shared, ownerName, interfaces, envPath, subuids });
 	if (verdict.error) return { include: false, port: DEFAULT_VALKEY_PORT, notes, refusal: null, error: `${envPath}: ${verdict.error}` };
+	if (verdict.unresolved) return { include: false, port: DEFAULT_VALKEY_PORT, notes, refusal: null, error: `VALKEY_URL's host ${verdict.unresolved} did not resolve here (${verdict.why}), so whose Valkey it reaches cannot be judged. Retry when it resolves, or write the address` };
 	if (verdict.remote) {
 		notes.push(`VALKEY_URL names ${verdict.remote}, not this host, so no Valkey is added here`);
 		return { include: false, port: DEFAULT_VALKEY_PORT, notes, refusal: null, remote: true };
@@ -541,29 +559,38 @@ export async function decideValkey({ venues, url, installed, probeTcp, lookup, e
  * nothing answers within `waitMs`, since then no owner can be judged and the Valkey may still be starting.
  */
 export async function resolveWorkerValkey({ url, venues, platform, env, envText, envPath, probeTcp, lookup, fs, euid, user, ownerName, interfaces, subuids, waitMs = 20_000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now(), configError: refuse }) {
-	const same = { url, servername: null, pinned: null, notes: [], enforce: false };
-	if (platform !== "linux" || !venues.podmanUsed || venues.localUsed) return same;
+	// Gate round 3: judged on EVERY venue on Linux, not only podman's. Another account's listener is refused everywhere
+	// (item 7: a local-venue worker silently adopted another account's rootless Valkey); root's (docker-proxy) is refused
+	// only where the podman venue is this deployment's and `local` is not.
+	const rootRefused = venues.podmanUsed && !venues.localUsed;
+	const same = { url, servername: null, pinned: null, notes: [], rootRefused };
+	if (platform !== "linux") return same;
 	const notes = [];
 	let fileKeys = {};
-	if (typeof envText === "string") {
+	if (envText !== null && envText !== undefined) {
+		// The file's BYTES through the hardened reader (gate round 3): a line systemd reads differently, or refuses to
+		// load, is named and refused, never taken as "no opt-in" silently.
 		const read = readValkeyKeys(envText, { loader: "systemd", path: envPath });
-		if (read.error) notes.push(`${read.error}; PI_VALKEY_SHARED is taken as unset`);
-		else fileKeys = read.keys;
+		if (read.error) throw refuse(`${read.error}. The worker reads PI_VALKEY_SHARED and VALKEY_URL from it, so it does not start`);
+		fileKeys = read.keys;
 	}
 	if (typeof env[VALKEY_SHARED_KEY] === "string" && !Object.hasOwn(fileKeys, VALKEY_SHARED_KEY)) notes.push(`${VALKEY_SHARED_KEY} is set in the worker's environment and not in ${envPath}: ignored, since only the deployment's .env may say a Valkey is shared on purpose`);
 	const shared = valkeySharedOn(fileKeys[VALKEY_SHARED_KEY]);
 	const deadline = now() + waitMs;
 	for (;;) {
-		const verdict = await judgeValkeyListeners({ url, probeTcp, lookup, fs, euid, user, shared, ownerName, interfaces, envPath, subuids });
+		const verdict = await judgeValkeyListeners({ url, probeTcp, lookup, fs, euid, user, shared, rootOk: !rootRefused, ownerName, interfaces, envPath, subuids });
 		if (verdict.error) throw refuse(`VALKEY_URL: ${verdict.error}`);
-		if (verdict.remote) return { ...same, notes, enforce: true };
+		if (verdict.remote) return { ...same, notes };
 		if (verdict.refusal) throw refuse(`the Valkey VALKEY_URL reaches is refused: ${verdict.refusal.text}`);
 		if (verdict.chosen) {
 			for (const other of verdict.elsewhere) notes.push(`another account also listens on an address VALKEY_URL's host resolves to: ${other}; this worker connects only to ${hostPort(verdict.chosen, verdict.port)}`);
 			const pinned = pinnedValkeyUrl(url, verdict.chosen);
-			return { url: pinned.url, servername: pinned.servername, pinned: { address: verdict.chosen, port: verdict.port, heldBy: verdict.heldBy }, notes, enforce: true };
+			return { url: pinned.url, servername: pinned.servername, pinned: { address: verdict.chosen, port: verdict.port, heldBy: verdict.heldBy }, notes, rootRefused };
 		}
-		if (now() >= deadline) throw new Error(`nothing answers VALKEY_URL (${verdict.addresses.map((a) => hostPort(a, verdict.port)).join(", ")}), so whose Valkey it is cannot be judged; the service manager retries`);
+		if (now() >= deadline) {
+			if (verdict.unresolved) throw new Error(`VALKEY_URL's host ${verdict.unresolved} did not resolve here (${verdict.why}), so whose Valkey it reaches cannot be judged; the service manager retries`);
+			throw new Error(`nothing answers VALKEY_URL (${verdict.addresses.map((a) => hostPort(a, verdict.port)).join(", ")}), so whose Valkey it is cannot be judged; the service manager retries`);
+		}
 		await sleep(500);
 	}
 }
@@ -971,25 +998,50 @@ export function readStackKeys(content, { loader = "systemd", path = ".env", assu
 }
 
 /**
- * VALKEY_URL and PI_VALKEY_SHARED as a deployment's `.env` assigns them, for the loader that reads that file (issue
- * #464): `{ keys }` (only keys the file assigns), or `{ error }` for a line the loaders may read differently, naming
- * what in it is the problem. `service install` and `up` judge the Valkey the SERVICE will use, so they read these
- * where the service does.
+ * Keys of a deployment `.env` as the service's loader reads them, through the hardened reader (issue #464, gate round
+ * 3): `content` as BYTES where the caller has them, so what systemd refuses to LOAD (a NUL, invalid UTF-8, an
+ * environment too big to exec) is seen before decoding erases it (`decodeEnvFile`, issue #447's rule); then a line
+ * systemd splits or joins differently from this reader (`envFileHazard`, systemd's own line structure included), when
+ * the file spells one of `keys` at all; then each key's own line, which must be one every loader reads the same.
+ * `{ keys }` (only keys the file assigns), or `{ error }` naming the line and the fix. Never an error dropped into
+ * "unset": a key this cannot read is not a key the service lacks.
  */
-export function readValkeyKeys(text, { loader = "systemd", path = ".env" } = {}) {
-	const lines = String(text ?? "").split("\n");
-	const found = readEnvAssignments(text, ["VALKEY_URL", VALKEY_SHARED_KEY], { loader });
-	const keys = {};
-	for (const key of ["VALKEY_URL", VALKEY_SHARED_KEY]) {
+export function readServiceKeys(content, keys, { loader = "systemd", path = ".env" } = {}) {
+	const { text, loadHazard } = decodeEnvFile(content, { loader });
+	if (loadHazard !== null) {
+		const shape = SYSTEMD_HAZARD_SHAPES[loadHazard.shape];
+		return { error: `${path} line ${loadHazard.line} has ${shape.what}${loadHazard.detail ? ` (${loadHazard.detail})` : ""}: ${shape.fix}` };
+	}
+	if (keys.some((k) => text.includes(k))) {
+		const hazard = envFileHazard(text, { loader });
+		if (hazard !== null) {
+			const shape = hazard.shape !== undefined ? SYSTEMD_HAZARD_SHAPES[hazard.shape] : null;
+			return { error: `${path} line ${hazard.line} is one this command cannot read the way the service's loader will${shape ? ` (${shape.what}): ${shape.fix}` : " (an open quote, a continuation, or a line that runs): fix that line first"}, and the file assigns ${keys.filter((k) => text.includes(k)).join(" or ")}` };
+		}
+	}
+	const lines = text.split("\n");
+	const found = readEnvAssignments(text, keys, { loader });
+	const out = {};
+	for (const key of keys) {
 		const read = found[key];
 		if (!read) continue;
 		if (!read.plain) {
 			const cause = unplainCause(String(lines[read.line - 1] ?? "").replace(/\r$/, "").replace(/^[^=]*=/, ""));
-			return { error: `${path} line ${read.line} assigns ${key} in a form this command cannot read the way the service's loader will (${cause}), so which Valkey the worker uses is unknown` };
+			return { error: `${path} line ${read.line} assigns ${key} in a form this command cannot read the way the service's loader will (${cause})` };
 		}
-		keys[key] = read.value;
+		out[key] = read.value;
 	}
-	return { keys };
+	return { keys: out };
+}
+
+/**
+ * VALKEY_URL and PI_VALKEY_SHARED as a deployment's `.env` assigns them (issue #464), through `readServiceKeys`:
+ * `service install`, `up`, the worker and every client judge the Valkey the SERVICE will use, so they read these where
+ * the service does, and a line they cannot read is refused, naming what in it is the problem.
+ */
+export function readValkeyKeys(content, { loader = "systemd", path = ".env" } = {}) {
+	const read = readServiceKeys(content, ["VALKEY_URL", VALKEY_SHARED_KEY], { loader, path });
+	return read.error ? { error: `${read.error}, so which Valkey the worker uses is unknown` } : read;
 }
 
 /** What in a `.env` value keeps it from reading the same under every loader, with the way to write it (issue #464). */

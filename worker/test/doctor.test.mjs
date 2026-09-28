@@ -8599,12 +8599,43 @@ test("doctor on podman: a VALKEY_URL whose listener is not this account's is ✗
 		assert.match(shell.text(), /⚠ PI_VALKEY_SHARED is "1" in this shell: ignored, since only [^\n]*\.env may say a Valkey is shared on purpose/);
 		assert.doesNotMatch(shell.text(), /shared on purpose as PI_VALKEY_SHARED=1/);
 	}
-	// Where `local` is blessed docker's Valkey is the queue (root's docker-proxy publishes it): not judged.
+	// Gate round 3's simpler rule: judged on every venue. Where `local` is blessed, root's listener (docker-proxy) is
+	// docker's Valkey and taken; another account's is refused there too (item 7).
 	asked.length = 0;
 	const docker = capture();
 	await runDoctor(podmanEnv({ PI_BACKENDS: "local,podman" }), podmanDeps(docker.out, { ...green, ...podmanPlan() }, [], { userName: () => "op", valkeyOwner: owner(0) }));
-	assert.equal(asked.length, 0);
+	assert.equal(asked[0].rootOk, true, "root is not refused where local is blessed");
+	assert.match(docker.text(), /✓ Valkey \(redis:\/\/127\.0\.0\.1:6379\) answers from a listener of root/);
 	assert.doesNotMatch(docker.text(), /is not this account's/);
+	const podmanRoot = capture();
+	asked.length = 0;
+	assert.equal(await runDoctor(podmanEnv(), podmanDeps(podmanRoot.out, podmanPlan(), [], { userName: () => "op", valkeyOwner: owner(0) })), 1);
+	assert.equal(asked[0].rootOk, false, "root refused on the podman venue alone");
+	assert.match(podmanRoot.text(), /✗ Valkey \(redis:\/\/127\.0\.0\.1:6379\) is not this account's: 127\.0\.0\.1:6379 is held by root/);
+	const dockerForeign = capture();
+	talked.length = 0;
+	assert.equal(await runDoctor(podmanEnv({ PI_BACKENDS: "local,podman" }), podmanDeps(dockerForeign.out, { ...green, ...podmanPlan() }, [], { userName: () => "op", valkeyOwner: owner(1235), ...talk })), 1);
+	assert.match(dockerForeign.text(), /✗ Valkey \(redis:\/\/127\.0\.0\.1:6379\) is not this account's: 127\.0\.0\.1:6379 is held by op2 \(uid 1235\)/);
+	assert.deepEqual(talked, []);
+	// Gate round 3, item 4: a name that does not resolve is ✗ and not talked to, never "another host".
+	const gone = capture();
+	talked.length = 0;
+	const goneOwner = async (url, opts) => judgeValkeyListeners({ url, probeTcp: async () => true, lookup: async () => { throw Object.assign(new Error("getaddrinfo EAI_AGAIN gone.lan"), { code: "EAI_AGAIN" }); }, fs: { readFileSync: (p) => hostAt(1235)[p] }, euid: 1234, ...opts });
+	assert.equal(await runDoctor(podmanEnv({ VALKEY_URL: "redis://gone.lan:6379" }), podmanDeps(gone.out, podmanPlan(), [], { userName: () => "op", valkeyOwner: goneOwner, ...talk })), 1);
+	assert.match(gone.text(), /✗ [^\n]*gone\.lan did not resolve here \(EAI_AGAIN\)/);
+	assert.deepEqual(talked, []);
+});
+
+// Gate round 3, item 5: doctor read the service .env's PI_WORKER_NAME, TMPDIR, PI_JOBS_DIR and PI_SANDBOX_DIR past a byte
+// systemd refuses or reads differently. It now names the hazard and reads none of them from the file.
+test("doctor names a hazard in the service .env and reads none of the service's keys from it (#464, gate round 3)", async () => {
+	for (const [bytes, re] of [[Buffer.from("PI_WORKER_NAME=a\rPI_JOBS_DIR=/x\n"), /carriage return/], [Buffer.from("PI_WORKER_NAME=a\nX=\u0000\n"), /NUL/]]) {
+		const cwd = scaffoldedCwd();
+		writeFileSync(join(cwd, ".env"), bytes);
+		const { out, text } = capture();
+		await runDoctor(podmanEnv(), { ...podmanDeps(out, podmanPlan(), [], { userName: () => "op", platform: "linux" }), cwd, readEnvFile: (path) => readFileSync(path) });
+		assert.match(text(), new RegExp(`✗ [^\\n]*\\.env line \\d+ [^\\n]*${re.source}[^\\n]*, so doctor read none of [^\\n]* from it and judged this shell's values \\(or the defaults\\) instead: the service's own are unknown`), text());
+	}
 });
 
 // Gate round 2: another account publishing ::1 beside this account's 127.0.0.1 (the localhost squat after install) is a

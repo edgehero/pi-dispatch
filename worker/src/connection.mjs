@@ -1,7 +1,10 @@
 import { AbstractConnector, Redis } from "ioredis";
-import { connect as netConnect } from "node:net";
+import { Socket, connect as netConnect } from "node:net";
 import { connect as tlsConnect } from "node:tls";
-import { judgedEndpoint, valkeyClientContext } from "./valkey-endpoint.mjs";
+import { judgeValkeyAtStart, judgedEndpoint, valkeyClientContext } from "./valkey-endpoint.mjs";
+
+// Re-exported for the receiver and the admin, which import this module from the package (issue #464).
+export { judgeValkeyAtStart, valkeyClientContext };
 
 /**
  * Connection helpers for BullMQ and the budget's raw Redis client, both from one VALKEY_URL.
@@ -68,8 +71,17 @@ const JUDGE = "piDispatchValkeyJudge";
 /**
  * ioredis' connector for every client of this project (issue #464, gate round 2 follow-up): on each connect it asks
  * `judgedEndpoint` for the address, then dials that literal (with a `rediss:` URL's name kept as the TLS servername),
- * exactly as ioredis' own StandaloneConnector dials a host. A refused Valkey fails the connect with the refusal, which
- * ioredis reports as the client's error and retries by its retry strategy, judging again each time.
+ * exactly as ioredis' own StandaloneConnector dials a host.
+ *
+ * A judgement that throws (nothing answers while the Valkey restarts, a refusal, a name that does not resolve) must NOT
+ * reject `connect()`: ioredis 5.11.1 then sets the client's status to "end" and never retries, so one Valkey restart
+ * killed every client for good (gate round 3, measured: "Connection is closed." on the next job, never retried). So
+ * `connect()` resolves a socket already destroyed, with the error as `firstError`: ioredis' own branch for a stream that
+ * failed before it was handed over, which reports that error and takes the close path, retrying by the client's
+ * strategy and judging again on the next connect. A client with a bounded strategy (the CLI's failFast) then ends with
+ * that error. Destroyed before it is returned, never on a later tick: a socket that is neither connecting nor destroyed
+ * when ioredis looks is taken as connected, and its ready check then fails on a dead stream (measured on the VMs:
+ * "Stream isn't writeable" printed beside every failed judgement).
  */
 export class JudgedConnector extends AbstractConnector {
 	constructor(options) {
@@ -82,18 +94,33 @@ export class JudgedConnector extends AbstractConnector {
 		this.connecting = true;
 		const judge = options[JUDGE];
 		if (!judge) return Promise.reject(new Error("a Valkey client was built without parseConnection's judged options"));
-		return (judge.judge ?? judgedEndpoint)(judge.url, judge.context).then((endpoint) => {
-			if (!this.connecting) throw new Error("Connection is closed.");
-			const target = { host: endpoint.host, port: options.port, ...(options.family != null ? { family: options.family } : {}) };
-			if (options.tls) Object.assign(target, options.tls, endpoint.servername ? { servername: endpoint.servername } : {});
-			this.stream = options.tls ? tlsConnect(target) : netConnect(target);
-			this.stream.once("error", (err) => {
+		return (judge.judge ?? judgedEndpoint)(judge.url, judge.context).then(
+			(endpoint) => {
+				if (!this.connecting) throw new Error("Connection is closed.");
+				const target = { host: endpoint.host, port: options.port, ...(options.family != null ? { family: options.family } : {}) };
+				if (options.tls) Object.assign(target, options.tls, endpoint.servername ? { servername: endpoint.servername } : {});
+				this.stream = options.tls ? JudgedConnector.dial.tls(target) : JudgedConnector.dial.net(target);
+				this.stream.once("error", (err) => {
+					this.firstError = err;
+				});
+				return this.stream;
+			},
+			(err) => {
+				if (!this.connecting) throw new Error("Connection is closed.");
+				const stream = new Socket();
+				this.stream = stream;
 				this.firstError = err;
-			});
-			return this.stream;
-		});
+				// The destroyed socket's own "error" event comes on a later tick; ioredis reports firstError instead.
+				stream.on("error", () => {});
+				stream.destroy(err);
+				return stream;
+			},
+		);
 	}
 }
+
+/** How `JudgedConnector` dials, net and tls: a seam, so a test sees the options a pinned connect is made with. */
+JudgedConnector.dial = { net: netConnect, tls: tlsConnect };
 
 /**
  * Whether `connection` (options for BullMQ, or an ioredis client) connects through `JudgedConnector`. `makeQueue` and the

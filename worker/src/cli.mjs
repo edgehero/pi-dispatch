@@ -51,7 +51,7 @@ with a consent per action:  pi install npm:@edgehero/pi-dispatch-admin`;
 	// injects a collector instead of reassigning `process.stdout.write`. That matters because `node --test`
 	// runs each file in a child process that serialises its own results over that same stdout, so a test
 	// holding a replacement across an `await` swallows the runner's result frames (issue #266).
-export async function main(argv = process.argv.slice(2), env = process.env, { write = (chunk) => process.stdout.write(chunk) } = {}) {
+export async function main(argv = process.argv.slice(2), env = process.env, { write = (chunk) => process.stdout.write(chunk), valkeyRefusal = valkeyRefusalAtStart } = {}) {
 	const cmd = argv[0];
 
 	if (cmd === "init") {
@@ -139,6 +139,10 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		// against this machine's filesystem a few lines up, so this machine is the only one that can run it;
 		// enqueueing it where every host drains would be handing a job to a peer that has no such folder.
 		const hq = config.workerNameDeclared ? hostQueueName(config.workerName) : null;
+		// Issue #464 (gate round 3): judged before anything is sent, so a refused Valkey is said as the refusal it is, from
+		// any directory. Only a refusal stops here; nothing answering is the "could not reach" below.
+		const refused = await valkeyRefusal(config.valkeyUrl, env);
+		if (refused) return fail(refused);
 		const queue = makeQueue(parseConnection(config.valkeyUrl, { failFast: true }), { ...(hq ? { name: hq } : {}) });
 		try {
 			// Absent flags stay absent (undefined) so the value resolves at job start against the
@@ -181,6 +185,8 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		// than left indistinguishable from a single-host success while a named host keeps spending.
 		// `readLiveHosts` RETURNS `{unreachable}` rather than rejecting, so `blind` is a branch on its
 		// value and the `.catch` below is only for a client that throws before it can answer.
+		const refused = await valkeyRefusal(url, env);
+		if (refused) return fail(refused);
 		const probe = makeRedisClient(url);
 		// Without this, a down Valkey dumps nine `[ioredis] Unhandled error event` traces before the one clean
 		// line -- the exact noise `defaultProbeValkey` exists to suppress.
@@ -282,4 +288,19 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
 			process.stderr.write(`error: ${err.message}\n`);
 			process.exitCode = entryExitCode(err);
 		});
+}
+
+/**
+ * The refusal of the Valkey at `url`, judged once before a CLI command connects (issue #464, gate round 3), or null. A
+ * judgement that may succeed later (nothing answers, a name that does not resolve) is not a refusal: the command's own
+ * connect then says it could not reach Valkey. A seam of `main` (`valkeyRefusal`), so a test can stand in for the host.
+ */
+async function valkeyRefusalAtStart(url, env) {
+	const { judgeValkeyAtStart, valkeyClientContext } = await import("./connection.mjs");
+	try {
+		await judgeValkeyAtStart(url, valkeyClientContext({ env }), { waitMs: 0 });
+		return null;
+	} catch (error) {
+		return error?.valkeyRefused ? error.message : null;
+	}
 }

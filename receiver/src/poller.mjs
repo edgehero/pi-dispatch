@@ -108,7 +108,7 @@
 import { createSign } from "node:crypto";
 import { readFile as fsReadFile } from "node:fs/promises";
 import { configError } from "@edgehero/pi-dispatch/config";
-import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connection";
+import { judgeValkeyAtStart, makeRedisClient, parseConnection, valkeyClientContext } from "@edgehero/pi-dispatch/connection";
 import { makeGitHubAuth } from "@edgehero/pi-dispatch/get-token";
 import { enqueueGitHubJob, makeQueue } from "@edgehero/pi-dispatch/queue";
 import { filter, hasCloseTriggers, wantsCloserAuthority } from "./filter.mjs";
@@ -180,7 +180,11 @@ export async function startPoller(env = process.env, deps = {}) {
 		fsDeps = {},
 		makeAuth = makeGitHubAuth,
 		makeQueueFn = makeQueue,
+		// Issue #464 (gate round 3): how the poller builds its own Valkey client; a seam, so a test sees none built.
+		makeRedisFn = makeRedisClient,
 		makeResolveGitHubAuthority: makeResolveGitHubAuthorityFn = makeResolveGitHubAuthority,
+		// Issue #464 (gate round 3): the start-time judgement of VALKEY_URL, as the receiver's (start.mjs).
+		judgeValkey = (url, opts) => judgeValkeyAtStart(url, valkeyClientContext({ env: opts.env }), { now: opts.now, ...(opts.sleep ? { sleep: opts.sleep } : {}) }),
 	} = deps;
 
 	const cfg = loadPollerConfig(env, fsDeps);
@@ -230,9 +234,12 @@ export async function startPoller(env = process.env, deps = {}) {
 	// queue connection: a long-running producer should survive a Valkey restart.
 	let redisClient = redis ?? null;
 	let ownRedis = false;
+	// Issue #464 (gate round 3): judged before this process builds its own Valkey clients: a refusal exits 2, nothing
+	// answering for 20 s exits 1, never a poller running on a queue that cannot connect.
+	if (redisClient === null || queueFn === undefined || queueFn === null) await judgeValkey(cfg.valkeyUrl, { env, now, sleep });
 	if (redisClient === null) {
 		// Through connection.mjs, as every Valkey client of this project (issue #464): it judges and pins the address.
-		redisClient = makeRedisClient(cfg.valkeyUrl);
+		redisClient = makeRedisFn(cfg.valkeyUrl);
 		ownRedis = true;
 	}
 

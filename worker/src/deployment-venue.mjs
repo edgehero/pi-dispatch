@@ -89,9 +89,10 @@ export function deploymentValkeyEnv({ env, fs, envPath, platform, command = "up"
 	if (fs.existsSync(envPath)) {
 		let text = null;
 		try {
-			text = String(fs.readFileSync(envPath, "utf8"));
+			// Bytes, not text (gate round 3): `readValkeyKeys` checks what systemd refuses to load before it decodes.
+			text = fs.readFileSync(envPath);
 		} catch (err) {
-			notes.push(`${envPath} could not be read (${err?.message}), so VALKEY_URL and ${VALKEY_SHARED_KEY} come from this shell alone`);
+			notes.push(`${envPath} could not be read (${err?.message}), so VALKEY_URL comes from this shell alone and PI_VALKEY_SHARED is unset`);
 		}
 		if (text !== null) {
 			const read = readValkeyKeys(text, { loader, path: envPath });

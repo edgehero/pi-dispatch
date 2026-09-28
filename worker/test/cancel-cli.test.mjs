@@ -84,6 +84,15 @@ function world({ hash = {}, state = "delayed", jobKnown = true, removeThrows = 0
 	return { ops, out, err, closed, seams };
 }
 
+// Issue #464 (gate round 3): cancel judges the Valkey before it builds a client.
+test("cancel stops on the Valkey refusal before it builds a client (#464)", { skip: needsDeps }, async () => {
+	const { ops, err, seams } = world();
+	const code = await runCancel("j1", "redis://x", { ...seams, refusalFn: async () => "the Valkey VALKEY_URL reaches is refused: held by op2" });
+	assert.equal(code, 1);
+	assert.match(err.join(""), /refused: held by op2/);
+	assert.deepEqual(ops, [], "no client was asked anything");
+});
+
 test("a missing job id refuses with usage, before any connection", { skip: needsDeps }, async () => {
 	const { err, seams } = world();
 	const code = await runCancel(undefined, "redis://x", seams);
