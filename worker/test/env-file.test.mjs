@@ -4,7 +4,9 @@ import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { envFileHazard, envKeyIsBlank, envValueShown, readEnvAssignments, renderEnvValue, setEnvKey, setEnvKeyIfEmpty, updateEnvFile } from "../src/env-file.mjs";
+import { EXEC_ONE_MAX, EXEC_TOTAL_MAX, SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileEditCheck, envFileEditRefusal, envFileValueLines, envFileHazard, envFileLoadHazard, envFileSystemdHazard, firstInvalidUtf8, systemdReading, systemdUtf8, envKeyIsBlank, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, setEnvKey, setEnvKeyIfEmpty, updateEnvFile } from "../src/env-file.mjs";
+import { SYSTEMD_259_ENV_BYTES, SYSTEMD_259_ENV_FILES } from "./helpers/systemd-env-259.mjs";
+import { readStackKeys } from "../src/podman-stack.mjs";
 
 // -- setEnvKeyIfEmpty: pure transform, table-driven over the text shapes it must handle ---------------
 //
@@ -441,6 +443,11 @@ const ORACLE_CORPUS = [
 	"KK=/other.json",
 	"# K=/commented.json",
 	"#K=/commented.json",
+	// A comment's trailing backslash continues nothing, in any shell (issue #447): the line below it is a line.
+	"# note\\\nK=/srv/a.json",
+	"  # note\\\nK=/srv/a.json",
+	// Unless the `#` line is itself reached by a continuation, where it is value and its backslash joins the next.
+	"OTHER=a\\\n# b\\\nK=/srv/a.json",
 	"\n\n# a note\n\nK=/srv/a.json\n",
 ];
 
@@ -651,12 +658,14 @@ test("E7: a line this reader cannot model is a HAZARD, never a key that is simpl
 	for (const [name, text] of [
 		["a plain expansion", "PI_LOGS_DIR=$HOME/logs\nK=/a.json"],
 		["a braced expansion", "PI_LOGS_DIR=${HOME}/logs\nK=/a.json"],
-		["a default expansion", "PI_LOGS_DIR=${HOME:-/tmp}/logs\nK=/a.json"],
 		["a trailing comment carrying an apostrophe", "OTHER=/a.json # it's fine\nK=/a.json"],
 		["a quoted hash", "OTHER='#not a comment'\nK=/a.json"],
 	]) {
 		assert.equal(envFileHazard(text, { loader: "shell" }), null, `${name}: reaches past nothing`);
 	}
+	// A DEFAULT expansion is a hazard since the delta review's `$` allowlist: only `$NAME` and `${NAME}` pass, because a
+	// default word can hold `$(`, `$[` or arithmetic, and telling a harmless one apart is the list that allowlist replaced.
+	assert.deepEqual(envFileHazard("PI_LOGS_DIR=${HOME:-/tmp}/logs\nK=/a.json", { loader: "shell" }), { line: 1 });
 	// systemd 252 accepts `K =/a.json` and sets the key, measured on the rig -- so the hazard here is the
 	// SHELLS, which run a command named `K`. The two ends of the file disagree about whether the key is
 	// assigned at all, which is exactly what "hazard" means in this reader.
@@ -1023,4 +1032,961 @@ test("a `$HOME` value is not vouched for on either POSIX loader, which is the di
 	const win = readEnvAssignments("PI_JOBS_DIR=$HOME/jobs\n", ["PI_JOBS_DIR"], { loader: "cmd" });
 	assert.equal(win.PI_JOBS_DIR.value, "$HOME/jobs");
 	assert.equal(win.PI_JOBS_DIR.plain, true);
+});
+
+// -- issue #447: systemd's own line structure, where this reader cannot model it ---------------------------------
+
+test("quotedRegions: a value that opens with a quote runs to its close, and nothing else is a region (#447)", () => {
+	const pem = 'GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----"\nK=1\n';
+	const table = [
+		["a PEM in double quotes", pem, [{ open: 1, close: 3 }]],
+		["single quotes", "K='a\nb'\n", [{ open: 1, close: 2 }]],
+		["an escaped double quote does not close", 'K="a\\"\nb"\n', [{ open: 1, close: 2 }]],
+		["a backslash does not escape in single quotes", "K='a\\'\nb'\n", []],
+		["never closes: to the end of the file", 'K="a\nb\nc\n', [{ open: 1, close: null }]],
+		["`export` and blanks around `=`", ' export K = "a\nb"\n', [{ open: 1, close: 2 }]],
+		["two regions, and the lines between are lines", 'A="1\n2"\nB=x\nC=\'3\n4\'\n', [{ open: 1, close: 2 }, { open: 4, close: 5 }]],
+		["a quote that closes on its own line is no region", 'K="a" "b"\nK2=\'x\'\n', []],
+		["a quote in the middle of a value is no region", 'K=a"b\nL=1\n', []],
+		["a comment is no region", '# K="a\nL=1\n', []],
+		["a non-identifier key is not modelled here (envFileSystemdHazard's)", 'FOO-BAR="a\nL=1\n"\n', []],
+		["a CRLF file", 'K="a\r\nb"\r\nL=1\r\n', [{ open: 1, close: 2 }]],
+		["a region closes at its first quote, even one in a key-looking line", 'K="a\nL="b\n"\nM=1\n', [{ open: 1, close: 2 }]],
+	];
+	for (const [name, text, want] of table) assert.deepEqual(quotedRegions(text), want, name);
+});
+
+test("envFileSystemdHazard agrees with systemd 259 on every measured file, and names the line and the shape (#447)", () => {
+	// THE ORACLE is the table: what systemd set, measured, beside what this function reports. A row systemd read with
+	// the swallowed key UNSET where a line-by-line reading sets it is a hazard; the rest must be null.
+	assert.ok(SYSTEMD_259_ENV_FILES.length >= 94 && SYSTEMD_259_ENV_BYTES.length >= 12, "the measured table is intact");
+	for (const [name, text, , want] of SYSTEMD_259_ENV_FILES) {
+		assert.deepEqual(envFileSystemdHazard(text), want === null ? null : { line: want[0], shape: want[1] }, name);
+	}
+	// The files systemd refused to LOAD, and the ones it loaded despite a stray byte, from their BYTES.
+	for (const [name, hex, systemd, want] of SYSTEMD_259_ENV_BYTES) {
+		assert.deepEqual(envFileLoadHazard(Buffer.from(hex, "hex")), want === null ? null : { line: want[0], shape: want[1] }, name);
+		assert.equal(want !== null, systemd === null, `${name}: a load hazard exactly where systemd refused the file`);
+	}
+	// Every shape is in them, as a must-refuse row.
+	const shapes = new Set([...SYSTEMD_259_ENV_FILES, ...SYSTEMD_259_ENV_BYTES].filter((r) => r[3] !== null).map((r) => r[3][1]));
+	// Too big for the table: the measured row c03 (one value of 131075 bytes; systemd 259 fails the exec with 203/EXEC).
+	shapes.add(envFileLoadHazard(Buffer.from(`PI_EGRESS=0\nX=${"h".repeat(131075)}\n`)).shape);
+	// The two `shell-` shapes are the sourcing shell's, measured in /bin/sh, bash --posix and dash by their own test.
+	assert.deepEqual([...shapes].sort(), Object.keys(SYSTEMD_HAZARD_SHAPES).filter((k) => !k.startsWith("shell-")).sort(), "each shape has a measured row");
+	for (const name of ["r-reopen-dq", "r-reopen-dq-space", "r-reopen-sq", "r-reopen-on-close-line", "r-key-dash", "r-key-dot", "r-key-digit", "r-key-space", "r-lone-cr"]) {
+		assert.ok(SYSTEMD_259_ENV_FILES.find((r) => r[0] === name)[3] !== null, `${name}, one of the issue's own shapes, is refused`);
+	}
+});
+
+test("quotedRegions follows systemd's line model: a CR, U+2028 or U+2029 on a value's first line is still that value (#447 gate round 1)", () => {
+	// `(.*)$` stopped matching at those three characters, so the value that opens on line 2 was no region and the lines
+	// it swallows read as assignments (measured on systemd 259: PI_EGRESS=0 set, the reader said 1).
+	for (const name of ["g1-a01-u2028-dq", "g1-a02-midcr-dq", "g1-a03-u2029-sq-backends", "g1-a04-u2028-proxy", "g1-a32-export-u2028"]) {
+		const [, text, systemd] = SYSTEMD_259_ENV_FILES.find((r) => r[0] === name);
+		assert.deepEqual(quotedRegions(text), [{ open: 2, close: 4 }], name);
+		// Line 3 is inside that value, so it is not an assignment: no value is claimed for it (systemd kept line 1's).
+		const key = Object.keys(systemd)[0];
+		const read = readEnvAssignments(text, [key])[key];
+		assert.deepEqual([read.line, read.plain, read.value], [3, false, null], `${name}: line 3 is value, not ${key}`);
+	}
+});
+
+test("envFileSystemdHazard checks the reader's own region model at every newline, and names any disagreement (#447 gate round 1)", () => {
+	// A quote systemd never opens, because the line it is on is the tail of a continuation (the `Y="b` below is VALUE
+	// text to systemd), while the reader's region model opens one there: the model and the parser disagree about line 4.
+	assert.deepEqual(envFileSystemdHazard('A=1\nX=a\\\nY="b\nK=0\n"\n'), { line: 3, shape: "unmodelled-quote" });
+	// The measured row (g1-a22): systemd set PI_EGRESS=0 from line 4, a line-by-line reading would say 1 or refuse.
+	assert.deepEqual(SYSTEMD_259_ENV_FILES.find((r) => r[0] === "g1-a22-cont-then-opener")[3], [3, "unmodelled-quote"]);
+	// And where the two agree there is nothing to say: the documented PEM, and a CR or U+2028 inside a modelled value.
+	for (const text of ['P="-----BEGIN-----\nab\ncd\n-----END-----"\nL=1\n', 'X="a\rb\nc"\nL=1\n', 'X="a\u2028b\nc"\nL=1\n']) assert.equal(envFileSystemdHazard(text), null, JSON.stringify(text));
+});
+
+test("envFileLoadHazard: a NUL anywhere, or invalid UTF-8 in what systemd pushes, from the BYTES (#447 gate round 1)", () => {
+	const b = (...parts) => Buffer.concat(parts.map((x) => (typeof x === "string" ? Buffer.from(x, "utf8") : Buffer.from(x))));
+	assert.deepEqual(envFileLoadHazard(b("A=1\n# c", [0], "\nB=2\n")), { line: 2, shape: "nul" });
+	assert.deepEqual(envFileLoadHazard(b("A=1\nX=", [0xff], "\n")), { line: 2, shape: "invalid-utf8" });
+	assert.deepEqual(envFileLoadHazard(b("A=1\n", [0xff], "=1\n")), { line: 2, shape: "invalid-utf8" }, "in a key");
+	assert.deepEqual(envFileLoadHazard(b('X="a\n', [0xc0, 0xaf], '\n"\n')), { line: 1, shape: "invalid-utf8" }, "an overlong form inside a multi-line value is that value's");
+	assert.deepEqual(envFileLoadHazard(b("A=1\nX=", [0xff])), { line: 2, shape: "invalid-utf8" }, "at the end of a file with no final newline");
+	assert.deepEqual(envFileLoadHazard(b("A=1\n", [0xff], "=\n")), { line: 2, shape: "invalid-utf8" }, "a key with an empty value is pushed too");
+	// systemd never pushes a comment or a line with no `=`, and loads these (measured).
+	assert.equal(envFileLoadHazard(b("# c ", [0xff], "\nA=1\n")), null);
+	assert.equal(envFileLoadHazard(b("; c ", [0xfe], "\nA=1\n")), null);
+	assert.equal(envFileLoadHazard(b("junk ", [0xff], "\nA=1\n")), null);
+	assert.equal(envFileLoadHazard(b("X=a�b\n")), null, "a correctly encoded U+FFFD is text");
+	// Decoding first loses the evidence, so a string is checked for NUL only.
+	assert.equal(envFileLoadHazard("X=a�b\n"), null);
+	assert.deepEqual(envFileLoadHazard("A=1\nB=\u0000\n"), { line: 2, shape: "nul" });
+	// decodeEnvFile is the one place bytes become text, and only systemd's loader refuses to load.
+	assert.deepEqual(decodeEnvFile(b("A=é\n")), { text: "A=é\n", loadHazard: null });
+	assert.deepEqual(decodeEnvFile(b("A=", [0xe9], "\n"), { loader: "shell" }).loadHazard, null);
+	assert.deepEqual(decodeEnvFile(b("A=", [0xe9], "\n")).loadHazard, { line: 1, shape: "invalid-utf8" });
+});
+
+test("the shell reading: a second assignment on one line, and ANSI-C quoting, are hazards (#447 gate round 1)", () => {
+	// Measured in bash and sh: `X=a PI_EGRESS=0` sets PI_EGRESS, and `$'a\'b` does not close at `\'`.
+	assert.deepEqual(envFileHazard("X=a PI_EGRESS=0\n", { loader: "shell" }), { line: 1 });
+	assert.deepEqual(envFileHazard("A=1\nX=$'a\\'b\nK=1\nY=1' #'\n", { loader: "shell" }), { line: 2 });
+	// Not inside quotes, not in a comment, not a word that is no assignment, and not for systemd, which reads the
+	// whole rest of the line as the value.
+	for (const text of ["X='a PI_EGRESS=0'\n", 'X="a PI_EGRESS=0"\n', "X=a # PI_EGRESS=0\n", "X=a\\ PI_EGRESS=0\n", "X='$'\"'\"'x'\n"]) {
+		assert.equal(envFileHazard(text, { loader: "shell" }), null, JSON.stringify(text));
+	}
+	// `"$'x"` is literal text to sh, and is refused anyway since the delta review: outside single quotes the only `$`
+	// forms that pass are `$NAME` and `${NAME}`, and deciding which other ones are harmless is what that rule stopped doing.
+	assert.deepEqual(envFileHazard('X="$\'x"\n', { loader: "shell" }), { line: 1 });
+	assert.equal(envFileHazard("X=a PI_EGRESS=0\n"), null, "systemd: one assignment, X");
+});
+
+test("envFileSystemdHazard: the harmless neighbours of each shape pass, the PEM and the corpus included (#447)", () => {
+	// After a closing quote any character but a blank, a quote or a backslash puts systemd in VALUE, where a quote is
+	// literal (measured: `K="a" # "b"` sets `a# "b"`), so these read line by line in both.
+	for (const text of ['K="a"b', 'K=a"b"c', 'K="a" # "b"', 'K="/a.json" # see "notes"', "K='a'b'", 'K="a" "b"', 'K="a\nb" x "c\nL=1', "FOO-BAR=\"x\"\nL=1", "FOO-BAR=x \"y\nL=1", "=\"x\nL=1", "# FOO-BAR=\"x\nL=1", "; FOO-BAR=\"x\nL=1"]) {
+		assert.equal(envFileSystemdHazard(text), null, JSON.stringify(text));
+	}
+	// A CR that is a line ending, one at the very end of the file, and one inside a quoted value are all read alike.
+	for (const text of ["K=1\r\nL=2\r\n", "K=1\nL=2\r", 'K="a\rb"\nL=1\n', "K='a\rb'\nL=1\n"]) assert.equal(envFileSystemdHazard(text), null, JSON.stringify(text));
+	// A continuation the line scan already sees is modelled (the next line is INSIDE), so it is no hazard; nor is a
+	// backslash before CRLF, which systemd does not continue and the reader does, reading LESS rather than more.
+	for (const text of ["K=a\\\nL=1", 'K="a"\\\nL=1', "K=a\\\r\nL=1\r\n", "# note\\\nL=1"]) assert.equal(envFileSystemdHazard(text), null, JSON.stringify(text));
+	// A comment's trailing backslash continues nothing in systemd 254+ (p-comment-backslash, measured on 259), so the
+	// line below it is an ordinary assignment to the systemd reading; one reached BY a continuation is value, and its
+	// backslash does join the next line (q-cont-into-hash-line: systemd set K to `a# bPI_BACKENDS=podman`).
+	for (const text of ["# note\\\nK=/a.json\n", "  ; note\\\nK=/a.json\n"]) {
+		const k = readEnvAssignments(text, ["K"]).K;
+		assert.deepEqual([k.value, k.plain, k.vouched], ["/a.json", true, true], JSON.stringify(text));
+	}
+	assert.equal(readEnvAssignments("O=a\\\n# b\\\nK=/a.json\n", ["K"]).K.plain, false, "a `#` line inside a continuation continues");
+	// The shells too (sh, bash, dash and zsh all set K, the E2 corpus rows), and PLAIN so E2 compares them rather than
+	// passing them by default. `;` is systemd's comment only: a shell reads that line as a syntax error.
+	for (const text of ["# note\\\nK=/a.json\n", "  # note\\\nK=/a.json\n"]) {
+		const k = readEnvAssignments(text, ["K"], { loader: "shell" }).K;
+		assert.deepEqual([k.value, k.plain, k.vouched], ["/a.json", true, true], `shell: ${JSON.stringify(text)}`);
+	}
+	assert.equal(readEnvAssignments("O=a\\\n# b\\\nK=/a.json\n", ["K"], { loader: "shell" }).K.plain, false, "shell: a `#` line inside a continuation continues");
+	assert.equal(readEnvAssignments("O='a\n# b\\\nK=/a.json\n'\n", ["K"], { loader: "shell" }).K.plain, false, "shell: a `#` line inside a quote is value");
+	assert.notEqual(envFileHazard("; note\\\nK=/a.json\n", { loader: "shell" }), null, "shell: a `;` line is not a comment");
+	assert.equal(readEnvAssignments("; note\\\nK=/a.json\n", ["K"], { loader: "shell" }).K.plain, false, "shell: so its backslash joins K's line to it");
+	// THE CORPUS, every entry, with the lone-CR entry as the one exception: it is the issue's own shape.
+	for (const text of ORACLE_CORPUS) {
+		const want = text === "K=/srv/a\rb.json" ? { line: 1, shape: "lone-cr" } : null;
+		assert.deepEqual(envFileSystemdHazard(text), want, JSON.stringify(text));
+	}
+});
+
+test("envFileSystemdHazard: the first hazard wins, and a region closed before it moves nothing (#447)", () => {
+	assert.deepEqual(envFileSystemdHazard('A="1\n2"\nB=ok\nFOO-BAR="x\nL=1\n"\nX=1\rY=2\n'), { line: 4, shape: "non-identifier-key" });
+	assert.deepEqual(envFileSystemdHazard('A="1\n2"\nB=ok\nX=1\rY=2\nFOO-BAR="x\n'), { line: 4, shape: "lone-cr" });
+	// A lone CR inside a PEM's quotes is value to both readers; one after the PEM is not.
+	assert.equal(envFileSystemdHazard('P="-----BEGIN-----\nab\rcd\n-----END-----"\nL=1\n'), null);
+	assert.deepEqual(envFileSystemdHazard('P="-----BEGIN-----\nabcd\n-----END-----"\nL=1\rM=2\n'), { line: 4, shape: "lone-cr" });
+	// Lines inside an identifier region are value: a non-identifier line in a PEM body is not a key.
+	assert.equal(envFileSystemdHazard('P="a\nFOO-BAR="x\n"\nL=1\n'), null);
+	assert.equal(envFileSystemdHazard(null), null);
+	assert.equal(envFileSystemdHazard(""), null);
+});
+
+test("the systemd reading shares the hazard: envFileHazard reports it, and no key in such a file is vouched (#447)", () => {
+	assert.deepEqual(envFileHazard("FOO-BAR=\"x\nK=/a.json\n\"\n"), { line: 1, shape: "non-identifier-key" });
+	assert.deepEqual(envFileHazard("X=1\rK=/a.json\n"), { line: 1, shape: "lone-cr" });
+	// Only systemd's: the shells read LF lines and carry every quote, and the cmd wrapper reads line by line.
+	assert.equal(envFileHazard("X=1\rK=/a.json\n", { loader: "shell" }), null);
+	assert.equal(envFileHazard("X=1\rK=/a.json\n", { loader: "cmd" }), null);
+	const read = readEnvAssignments('K=/a.json\nN="a" "b\nL=1\n"\n', ["K"]).K;
+	assert.equal(read.plain, true, "the line itself is plain");
+	assert.equal(read.vouched, false, "and the file is one systemd reads differently, so the value is not vouched");
+	assert.equal(read.hazardLine, 2);
+});
+
+test("the systemd reading knows a multi-line quoted value: a key line inside one is not an assignment (#447)", () => {
+	// Before #447 only the venue reader knew; doctor's systemd reading took this line for PI_PAUSE_WINDOWS_FILE's.
+	const text = 'NOTE="see\nK=/inside.json\n"\nM=/after.json\n';
+	const k = readEnvAssignments(text, ["K", "M"], { loader: "systemd" });
+	assert.equal(k.K.plain, false, "inside the value that opens on line 1");
+	assert.equal(k.K.value, null);
+	assert.equal(k.K.blank, false);
+	assert.deepEqual([k.M.value, k.M.vouched], ["/after.json", true], "the line after the close is a line again");
+	assert.equal(readEnvAssignments('NOTE="see\nK=\n"\n', ["K"]).K.blank, false, "an empty-looking line inside a value assigns nothing");
+	// The CLOSING line is part of the value too. Measured on systemd 259 (the c-key-on-close-line row): the first quote
+	// on line 2 closes NOTE, so NOTE is `see\nK=/x.json"` and K is never set, though line 2 on its own reads as a
+	// plain quoted assignment.
+	const closing = readEnvAssignments('NOTE="see\nK="/x.json"\n', ["K"]).K;
+	assert.deepEqual([closing.plain, closing.value], [false, null], "the line that closes the value");
+	// Never closed: to the end of the file.
+	assert.equal(readEnvAssignments('NOTE="see\nK=/x.json\n', ["K"]).K.plain, false);
+	// The documented PEM, with keys on both sides, reads as it always did.
+	const pem = 'A=/a.json\nGITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----"\nB=/b.json\n';
+	const both = readEnvAssignments(pem, ["A", "B"]);
+	assert.deepEqual([both.A.value, both.A.vouched, both.B.value, both.B.vouched], ["/a.json", true, "/b.json", true]);
+});
+
+test("updateEnvFile never rewrites bytes it did not mean to: a file that is not UTF-8 is refused and left byte-identical (#447 gate round 1)", () => {
+	// Measured through `up` on the round's host: `K=caf<0xE9>` came back as `K=caf<EF BF BD>` after up added its own
+	// key, the operator's byte replaced in a line up never meant to touch.
+	const dir = tempDir("pi-dispatch-env-latin1-");
+	const path = join(dir, ".env");
+	const before = Buffer.concat([Buffer.from("PI_EGRESS=0\nK=caf"), Buffer.from([0xe9]), Buffer.from("\nWEBHOOK_SECRET=\n")]);
+	writeFileSync(path, before);
+	assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "s3cr3t"), /refusing to edit .*\.env: line 2 \(byte 17\) is not valid UTF-8, and rewriting the file would replace those bytes/);
+	assert.ok(readFileSync(path).equals(before), "byte-identical after the refused edit");
+	assert.equal(existsSync(`${path}.tmp`), false, "and no temporary file was left");
+	// Valid UTF-8, a CRLF file and a BOM included, is edited and every other byte survives.
+	const ok = Buffer.from("\ufeffK=café\r\nWEBHOOK_SECRET=\r\n", "utf8");
+	writeFileSync(path, ok);
+	// On Linux: to a sourcing shell the BOM line is a command, which the macOS writer refuses to edit around (round 4).
+	assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "s3cr3t", { platform: "linux" }).changed, true);
+	assert.equal(readFileSync(path, "utf8"), "\ufeffK=caf\u00e9\r\nWEBHOOK_SECRET=s3cr3t\r\n");
+});
+
+test("firstInvalidUtf8 finds the first byte that does not begin a well-formed sequence (#447 gate round 1)", () => {
+	const at = (...bytes) => firstInvalidUtf8(Buffer.from(bytes));
+	assert.equal(at(0x41, 0xc3, 0xa9, 0xe2, 0x80, 0xa8, 0xf0, 0x9f, 0x98, 0x80), -1, "ASCII, e-acute, U+2028, an emoji");
+	assert.equal(at(0x41, 0xe9, 0x42), 1, "a Latin-1 byte");
+	assert.equal(at(0x80), 0, "a stray continuation byte");
+	assert.equal(at(0xc0, 0xaf), 0, "an overlong form");
+	assert.equal(at(0xed, 0xa0, 0x80), 0, "a surrogate");
+	assert.equal(at(0xf4, 0x90, 0x80, 0x80), 0, "past U+10FFFF");
+	assert.equal(at(0x41, 0xe2, 0x80), 1, "truncated at the end");
+});
+
+test("the writer's own line model is the loaders': blanks are space and tab, and a value runs to LF (#447 gate round 1 audit)", () => {
+	// A NBSP-led line is no assignment to any loader (systemd drops it as invalid), so it is not the key's line.
+	assert.equal(setEnvKeyIfEmpty("\u00a0WEBHOOK_SECRET=old\n", "WEBHOOK_SECRET", "new"), "\u00a0WEBHOOK_SECRET=old\nWEBHOOK_SECRET=new\n");
+	// A set value holding a CR or U+2028 is set: it is not appended over (the operator's value would lose to the new one).
+	for (const text of ["WEBHOOK_SECRET=a\rb\n", "WEBHOOK_SECRET=a\u2028b\n", "WEBHOOK_SECRET=\u000c\n"]) {
+		assert.equal(setEnvKeyIfEmpty(text, "WEBHOOK_SECRET", "new"), text, JSON.stringify(text));
+	}
+	assert.equal(setEnvKey("WEBHOOK_SECRET=a\rb\n", "WEBHOOK_SECRET", "new"), "WEBHOOK_SECRET=new\n", "the overwrite finds that line too");
+	// A form feed before `#` makes a WORD to every shell, so that line runs rather than being a comment (measured in sh,
+	// bash, dash and zsh: `#: command not found`).
+	assert.deepEqual(envFileHazard("K=/a.json\n\u000c# note\n", { loader: "shell" }), { line: 2 });
+	assert.deepEqual(envFileHazard("K=/a.json\n\u00a0\n", { loader: "shell" }), { line: 2 });
+});
+
+test("systemd's UTF-8 rule: well-formed AND no Unicode noncharacter, judged on the value as systemd stores it (#447 gate round 2)", () => {
+	const u = (str) => Buffer.from(str, "utf8");
+	// Measured on systemd 259: each of these in a value fails the load, and a strict TextDecoder accepts them all.
+	for (const cp of [0xfffe, 0xffff, 0xfdd0, 0xfdef, 0x1ffff, 0x10fffe]) assert.equal(systemdUtf8(u(`a${String.fromCodePoint(cp)}b`)), false, cp.toString(16));
+	for (const cp of [0xfdcf, 0xfdf0, 0xfffd, 0x80, 0x2028, 0x10fffd]) assert.equal(systemdUtf8(u(`a${String.fromCodePoint(cp)}b`)), true, cp.toString(16));
+	const b = (...parts) => Buffer.concat(parts.map((x) => (typeof x === "string" ? Buffer.from(x, "utf8") : Buffer.from(x))));
+	assert.deepEqual(envFileLoadHazard(b("A=1\nX=a\uffffb\n")), { line: 2, shape: "invalid-utf8" }, "a noncharacter in a value");
+	assert.deepEqual(envFileLoadHazard(b("A=1\nX\uffff=1\n")), { line: 2, shape: "invalid-utf8" }, "in a key");
+	assert.equal(envFileLoadHazard(b("A=1\n# \uffff\n\uffff\n")), null, "in a comment, or a line with no `=`, it is never stored");
+	// The value AS STORED: an escape can join a sequence the raw bytes split, and a double-quote escape can keep a
+	// backslash that splits one (both measured: the first loads, the second does not).
+	assert.equal(envFileLoadHazard(b("A=1\nX=", [0xe2], "\\", [0x82, 0x82], "\n")), null, "X=\\xE2\\\\\\x82\\x82");
+	assert.equal(envFileLoadHazard(b('A=1\nX="', [0xc3], '""', [0xa9], '"\n')), null, "two quoted halves of one character");
+	assert.deepEqual(envFileLoadHazard(b('A=1\nX="', [0xc3], "\\", [0xa9], '"\n')), { line: 2, shape: "invalid-utf8" }, "a kept backslash inside the sequence");
+});
+
+test("the shell reading judges the LOGICAL line and refuses a command separator (#447 gate round 2)", () => {
+	// Measured in bash: each of these sets the key after the first `=`; systemd reads none of them.
+	for (const text of ["X=a\\\n PI_EGRESS=0\n", "X=a\\\n;PI_EGRESS=0\n", "X=a\\\n#;PI_EGRESS=0\n", "A=0\nX=$\\\n'a\\'b\nA=1\nY=1' #'\n", "X=a;PI_EGRESS=0\n", "X=a&&PI_EGRESS=0\n", "X=a|b\n"]) {
+		assert.notEqual(envFileHazard(text, { loader: "shell" }), null, JSON.stringify(text));
+	}
+	// Single-quoted, escaped, or after a comment, a separator is text.
+	for (const text of ["X='a;b'\n", "X=a # b;c\n", "X=a\\;b\n"]) assert.equal(envFileHazard(text, { loader: "shell" }), null, JSON.stringify(text));
+});
+
+test("the writers never take a line inside a value for the key's, and updateEnvFile reads its result back first (#447 gate round 2)", () => {
+	// A `# KEY=` comment inside a quoted value is value: replacing it put the key into NOTE (measured on systemd 259).
+	assert.equal(setEnvKeyIfEmpty('NOTE="a\n# PI_BACKENDS=\n"\n', "PI_BACKENDS", "podman"), 'NOTE="a\n# PI_BACKENDS=\n"\nPI_BACKENDS=podman\n');
+	assert.equal(setEnvKeyIfEmpty("X=a\\\n# PI_BACKENDS=\n", "PI_BACKENDS", "podman"), "X=a\\\n# PI_BACKENDS=\nPI_BACKENDS=podman\n", "the tail of a continuation too");
+	assert.equal(setEnvKey('NOTE="a\nPI_BACKENDS=local\n"\n', "PI_BACKENDS", "podman"), 'NOTE="a\nPI_BACKENDS=local\n"\nPI_BACKENDS=podman\n', "an assignment-looking line inside a value is not the key's");
+	// For ANY loader: a mid-value quote carries only in a shell, where line 2 is part of X, so it is skipped too.
+	assert.equal(setEnvKeyIfEmpty("X=a'b\n# PI_BACKENDS=\n'\n", "PI_BACKENDS", "podman"), "X=a'b\n# PI_BACKENDS=\n'\nPI_BACKENDS=podman\n");
+	// Appending after a file that ends INSIDE something swallows the new line (w01, w02, w13, w14, measured): refused,
+	// nothing written, for the platform's own loader.
+	const dir = tempDir("pi-dispatch-env-swallow-");
+	const path = join(dir, ".env");
+	for (const platform of ["linux", "darwin"]) {
+		for (const before of ["A=1\nX=a\\\n", "A=1\nX=a\\", 'A=1\nX="abc\n', "A=1\nX='abc\n"]) {
+			writeFileSync(path, before);
+			assert.throws(() => updateEnvFile(path, "PI_BACKENDS", "podman", { platform }), /refusing to edit .*: (after the edit, .* would (read line \d+ as part of a quoted value or a continuation above it, not as|find no|find no command that assigns|read something other than what was written for) PI_BACKENDS|line \d+ has [^.]+|line \d+ is one the wrapper that sources this file reads differently from this command)[^]*\. Nothing was written/, `${platform} ${JSON.stringify(before)}`);
+			assert.equal(readFileSync(path, "utf8"), before, "unchanged");
+		}
+	}
+	// On Linux a file systemd splits differently, or will not load, is refused too: the key's line cannot be vouched for.
+	writeFileSync(path, "A=1\nX=1\rY=2\n");
+	assert.throws(() => updateEnvFile(path, "PI_BACKENDS", "podman", { platform: "linux" }), /line 2 has a carriage return/);
+	writeFileSync(path, "A=x\ufffe\n");
+	assert.throws(() => updateEnvFile(path, "PI_BACKENDS", "podman", { platform: "linux" }), /line 1 has bytes in a key or value that are not valid UTF-8, or a Unicode noncharacter/);
+	// A caller's own condition, checked before the write.
+	writeFileSync(path, "A=1\n");
+	assert.throws(() => updateEnvFile(path, "PI_BACKENDS", "podman", { platform: "linux", verify: () => "the caller says no" }), /refusing to edit .*: the caller says no\. Nothing was written/);
+	assert.equal(readFileSync(path, "utf8"), "A=1\n");
+	// And an ordinary edit, a CRLF file on Linux included (systemd strips the CR, and the file keeps its endings), still
+	// goes through. On macOS a CRLF file is refused: the wrapper that sources it keeps every CR (round-cap review).
+	writeFileSync(path, "A=1\r\nWEBHOOK_SECRET=\r\n");
+	assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "s3cr3t", { platform: "linux" }).changed, true);
+	assert.equal(envFileEditRefusal("text is never refused", path), null);
+	// An overwrite replaces the FIRST assignment, and a later one still wins for every loader: refused, not reported set.
+	writeFileSync(path, "K=a\nK=b\n");
+	assert.throws(() => updateEnvFile(path, "K", "new", { platform: "linux", overwrite: true }), /after the edit, systemd's EnvironmentFile= would read something other than what was written for K \(the assignment it takes is on line 2\)/);
+	assert.equal(readFileSync(path, "utf8"), "K=a\nK=b\n");
+	// The same through the macOS wrapper's reading, which the shell branch of the read-back answers.
+	assert.throws(() => updateEnvFile(path, "K", "new", { platform: "darwin", overwrite: true }), /after the edit, the wrapper that sources the file would read K as something other than what was written/);
+	assert.equal(readFileSync(path, "utf8"), "K=a\nK=b\n");
+});
+
+test("the writer never overwrites a key the service's loader already reads as set (#447 gate round 3)", () => {
+	// The diff reviewer's repro: the quote in NOTE carries only in a shell, so the WEBHOOK_SECRET line is set for
+	// systemd. Skipping it for "any loader" appended a new random secret, which systemd then took (receiver HMAC broken).
+	const repro1 = 'NOTE=see "the docs\nWEBHOOK_SECRET=operator-secret\n';
+	assert.equal(setEnvKeyIfEmpty(repro1, "WEBHOOK_SECRET", "new"), repro1, "already set: the input back");
+	// And a line the shell reads inside a quote but systemd reads as `WEBHOOK_SECRET =x` (201 fuzz hits).
+	const repro2 = 'WEBHOOK_SECRET=\n"\nWEBHOOK_SECRET =x\n';
+	assert.equal(setEnvKeyIfEmpty(repro2, "WEBHOOK_SECRET", "new"), repro2);
+	// WHERE to write is still "never into a line any loader reads as value": an EMPTY line the shell reads inside NOTE's
+	// quote is not filled in place; the key goes at the end, where the read-back judges it.
+	assert.equal(setEnvKeyIfEmpty('NOTE=see "the docs\nWEBHOOK_SECRET=\n', "WEBHOOK_SECRET", "new"), 'NOTE=see "the docs\nWEBHOOK_SECRET=\nWEBHOOK_SECRET=new\n');
+	const dir = tempDir("pi-dispatch-env-clobber-");
+	const path = join(dir, ".env");
+	for (const text of [repro1, repro2]) {
+		writeFileSync(path, text);
+		assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "linux" }).changed, false, JSON.stringify(text));
+		assert.equal(readFileSync(path, "utf8"), text);
+	}
+	// Where the line scan sees no set line at all but systemd does: a lone CR splits `A=1` from the key. Refused, and
+	// since the round-cap review by the lone CR it names, which is checked before any "already set" (a hazard file is
+	// never reported as set). The key is still never overwritten either way.
+	writeFileSync(path, "A=1\rWEBHOOK_SECRET=old\n");
+	assert.equal(systemdReading("A=1\rWEBHOOK_SECRET=old\n", "WEBHOOK_SECRET").value, "old");
+	assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "linux" }), /refusing to edit .*: line 1 has a carriage return \(CR\) that is not part of a CRLF line ending.*\. Nothing was written/);
+	assert.equal(readFileSync(path, "utf8"), "A=1\rWEBHOOK_SECRET=old\n");
+	// An EMPTY assignment is still filled, as ever.
+	writeFileSync(path, "WEBHOOK_SECRET=\n");
+	assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "linux" }).changed, true);
+	// setEnvKey's counterpart: a set line some loader reads as value is not rewritten in place; the new line goes at the
+	// end, and on Linux systemd reads it (the last assignment); on macOS the shell would swallow it, so it is refused.
+	assert.equal(setEnvKey(repro1, "WEBHOOK_SECRET", "new"), `${repro1}WEBHOOK_SECRET=new\n`);
+	// Nor does it fall back to a `# KEY=` comment above that line: systemd would then still take the old line below it.
+	assert.equal(setEnvKey(`# WEBHOOK_SECRET=\n${repro1}`, "WEBHOOK_SECRET", "new"), `# WEBHOOK_SECRET=\n${repro1}WEBHOOK_SECRET=new\n`);
+	writeFileSync(path, repro1);
+	assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "linux", overwrite: true }).changed, true);
+	assert.equal(systemdReading(readFileSync(path, "utf8"), "WEBHOOK_SECRET").value, "new");
+	writeFileSync(path, repro1);
+	assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "darwin", overwrite: true }), /line 1 is one the wrapper that sources this file reads differently from this command/);
+});
+
+test("an environment too large for exec is a load hazard: one KEY=value or the total (#447 gate round 3)", () => {
+	// Measured on systemd 259 (gate461-adv r3 c01-c05): `X=` + 131060 bytes runs, + 131075 fails 203/EXEC "Argument
+	// list too long"; 24 values of 100 KiB fail and 19 run. The bounds: one KEY=value under 131071 bytes, and a total
+	// re-measured in the focus review under `systemd-run --user` on Fedora 44, systemd 259, stack limit 8 MiB (so
+	// ARG_MAX 2097152): an .env of 2096288 counted bytes in 21 assignments started, 2096349 failed with 203/EXEC. The
+	// bound is 2 MiB less a 64 KiB margin for the argv, systemd's own variables (17, 535 bytes there) and the unit's,
+	// counting 8 bytes of pointer per variable. It was 1 MiB, which refused a 1.1 MB file systemd starts.
+	assert.equal(EXEC_ONE_MAX, 131071);
+	assert.equal(EXEC_TOTAL_MAX, 2031616);
+	const one = (n) => `PI_EGRESS=0\nX=${"h".repeat(n - 2)}\n`;
+	// Gate round 4, measured (r4 d01-d03): a KEY=value of 131071 bytes runs, of 131072 fails. The kernel's bound counts
+	// the NUL, so the longest accepted string is 131071 bytes.
+	assert.equal(envFileLoadHazard(one(EXEC_ONE_MAX)), null, "131071 bytes runs");
+	assert.deepEqual(envFileLoadHazard(one(EXEC_ONE_MAX + 1)), { line: 2, shape: "exec-too-large", detail: "X=... is 131072 bytes" });
+	// Only the environment exec gets: the LAST value of a name (d11: 200 KB reassigned small runs), valid names only.
+	assert.equal(envFileLoadHazard(`X=${"h".repeat(200000)}\nX=small\n`), null);
+	assert.equal(envFileLoadHazard(`FOO-BAR=${"h".repeat(200000)}\n`), null, "a name systemd drops never reaches exec");
+	assert.deepEqual(envFileLoadHazard(Buffer.from(one(200002))), { line: 2, shape: "exec-too-large", detail: "X=... is 200002 bytes" }, "from bytes too");
+	const many = (count) => Array.from({ length: count }, (_, i) => `K${i}=${"h".repeat(100000)}`).join("\n") + "\n";
+	assert.equal(envFileLoadHazard(many(11)), null, "about 1.1 MB, which systemd starts and the old 1 MiB bound refused");
+	assert.equal(envFileLoadHazard(many(20)), null, "about 2.0 MB, under the bound");
+	assert.deepEqual(envFileLoadHazard(many(24)), { line: 21, shape: "exec-too-large", detail: "the file's assignments reach 2100263 bytes by this line" });
+	// Eight bytes a variable, as the kernel counts a pointer: 130000 tiny ones cross the bound though their text does not.
+	const tiny = Array.from({ length: 130000 }, (_, i) => `V${i}=1`).join("\n") + "\n";
+	assert.ok(Buffer.byteLength(tiny) < EXEC_TOTAL_MAX, "the text alone is under the bound");
+	assert.equal(envFileLoadHazard(tiny)?.shape, "exec-too-large");
+	// A reassigned key counts once, as the service gets it once.
+	assert.equal(envFileLoadHazard(`K=${"h".repeat(100000)}\n`.repeat(24)), null);
+	// The writer's read-back refuses to add a key to a file the service cannot start with (w27, measured 203/EXEC).
+	const dir = tempDir("pi-dispatch-env-exec-");
+	const path = join(dir, ".env");
+	writeFileSync(path, one(200002));
+	assert.throws(() => updateEnvFile(path, "PI_BACKENDS", "podman", { platform: "linux" }), /line 2 has more environment than the service can safely be started with: .* \(X=\.\.\. is 200002 bytes\)\. Nothing was written/);
+	assert.equal(envFileEditCheck(one(200002), path, "PI_BACKENDS", "podman", { platform: "linux" }) !== null, true, "and the dry run says so first");
+});
+
+test("an appended line uses the file's own line ending (#447 gate round 3)", () => {
+	assert.equal(setEnvKeyIfEmpty("A=1\r\nB=2\r\n", "K", "v"), "A=1\r\nB=2\r\nK=v\r\n");
+	assert.equal(setEnvKeyIfEmpty("A=1\r\nB=2", "K", "v"), "A=1\r\nB=2\r\nK=v\r\n", "and terminates a last line that had none");
+	assert.equal(setEnvKeyIfEmpty("A=1\r", "K", "v"), "A=1\r\nK=v\r\n", "a CR at the very end is completed, never doubled into a lone CR");
+	assert.equal(setEnvKey("A=1\r\n", "K", "v"), "A=1\r\nK=v\r\n");
+	assert.equal(setEnvKeyIfEmpty("A=1\nB=2", "K", "v"), "A=1\nB=2\nK=v\n", "an LF file stays LF");
+	assert.equal(setEnvKeyIfEmpty("", "K", "v"), "K=v\n");
+});
+
+test("systemdReading is systemd's own stored value: trailing blanks of an unquoted value dropped, a quoted one's kept (#447 gate round 3)", () => {
+	// Pinned beside the port (test/helpers/systemd-env-parse.mjs), which the measured table pins to systemd 259.
+	const text = 'K=a  \t\nL="b  "  \nM=c\\  \nN=\nexport P=1\nQ =x\n';
+	assert.deepEqual(["K", "L", "M", "N", "P", "Q"].map((k) => systemdReading(text, k)?.value), ["a", "b  ", "c ", "", undefined, "x"]);
+	assert.equal(systemdReading("K=1\nK=2\n", "K").line, 2, "the last assignment");
+});
+
+test("a backslash before CRLF continues nothing, for systemd or a shell, and the writer reads the next line as a line (#447 gate round 4)", () => {
+	// The diff reviewer's repro: sh, bash, dash and zsh read `mine` before and a NEW secret after (the backslash quotes
+	// only the CR), and systemd measured the same (q-cont-crlf). Taking it for a continuation hid the real line.
+	const text = "K=x\\\r\nWEBHOOK_SECRET=mine\r\n";
+	for (const loader of ["systemd", "shell"]) assert.deepEqual(envFileValueLines(text, { loader }), [false, false, false], loader);
+	assert.equal(envFileHazard(text, { loader: "systemd" }), null);
+	// To the shell loader any CRLF file is a hazard since the round-cap review (every value it reads keeps a CR), so the
+	// macOS writer refuses to WRITE into one; a key already set is still left alone, below.
+	assert.deepEqual(envFileHazard(text, { loader: "shell" }), { line: 1, shape: "shell-crlf" });
+	const dir = tempDir("pi-dispatch-env-crlf-bs-");
+	const path = join(dir, ".env");
+	writeFileSync(path, text);
+	assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "linux" }).changed, false);
+	assert.equal(readFileSync(path, "utf8"), text);
+	// On macOS the file is CRLF, a shell hazard refused by name before any scan calls the key set (round-cap review).
+	assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "darwin" }), /line 1 has a carriage return \(CR\) at its end, a CRLF line ending/);
+	assert.equal(readFileSync(path, "utf8"), text);
+	// An LF backslash still is one, for both.
+	assert.deepEqual(envFileValueLines("K=x\\\nWEBHOOK_SECRET=mine\n", { loader: "shell" }), [false, true, false]);
+	// Nor does the shell's logical-line join run across it: ` WEBHOOK_SECRET=abc` below a CRLF backslash is a line, and
+	// the file's only hazard is its CRLF on line 1, not a join into line 2.
+	assert.deepEqual(envFileHazard("X=a\\\r\n WEBHOOK_SECRET=abc\r\n", { loader: "shell" }), { line: 1, shape: "shell-crlf" });
+});
+
+test("on a shell-loaded platform, a file with a shell hazard is not edited: the key may already be set where no line scan sees it (#447 gate round 4)", () => {
+	// Measured in sh/bash/dash/zsh (gate461-adv r4): each of these sets WEBHOOK_SECRET=abc, and appending a new secret
+	// replaced it for the wrapper that sources the file.
+	const dir = tempDir("pi-dispatch-env-shell-hazard-");
+	const path = join(dir, ".env");
+	for (const text of ["X=1 WEBHOOK_SECRET=abc\n", "X=a\\\n WEBHOOK_SECRET=abc\n", "X=a\\\n;WEBHOOK_SECRET=abc\n"]) {
+		writeFileSync(path, text);
+		assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "darwin" }), /refusing to edit .*: line \d is one the wrapper that sources this file reads differently from this command .* Fix that line first\. Nothing was written/, JSON.stringify(text));
+		assert.equal(readFileSync(path, "utf8"), text);
+	}
+	// n06, a CRLF continuation-looking line: no continuation, but a CRLF file, which the macOS wrapper reads with a CR on
+	// every value, so it is refused by name rather than reported set (round-cap review).
+	writeFileSync(path, "A=1\r\nX=a\\\r\nWEBHOOK_SECRET=abc\r\n");
+	assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "darwin" }), /line 1 has a carriage return \(CR\) at its end, a CRLF line ending/);
+	// A file with no shell hazard is edited as ever.
+	writeFileSync(path, "A=1\n");
+	assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "darwin" }).changed, true);
+});
+
+test("on Linux, a key only a shell reads as set is refused by name, not reported set (#447 gate round 4)", () => {
+	// systemd drops `export WEBHOOK_SECRET=abc` (its key is `export WEBHOOK_SECRET`), so the service has no secret.
+	const dir = tempDir("pi-dispatch-env-export-");
+	const path = join(dir, ".env");
+	writeFileSync(path, "A=1\nexport WEBHOOK_SECRET=abc\n");
+	assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "linux" }), /^Error: refusing to edit .*: WEBHOOK_SECRET is set only for a shell \(line 2: export WEBHOOK_SECRET=\.\.\.\); systemd's EnvironmentFile= ignores that line, so the service has no WEBHOOK_SECRET\. Write it as WEBHOOK_SECRET=\.\.\. on a line of its own\. Nothing was written$/);
+	assert.equal(readFileSync(path, "utf8"), "A=1\nexport WEBHOOK_SECRET=abc\n", "and the secret is never echoed");
+	// The macOS wrapper sources the file, so there it IS set, and left alone.
+	assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "darwin" }).changed, false);
+	// And a key systemd does read stays "already set" on Linux.
+	writeFileSync(path, "WEBHOOK_SECRET =abc\n");
+	assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "linux" }).changed, false);
+});
+
+test("a key line inside a quoted value is not a set key, for either loader: the key is appended and written (#447 gate round 4)", () => {
+	// Pins keyAlreadySet's inside-a-value guard and the `all` half of valueLines: every loader reads line 2 as K's value.
+	const text = 'K="a\nWEBHOOK_SECRET=inside\n"\n';
+	assert.equal(setEnvKeyIfEmpty(text, "WEBHOOK_SECRET", "new"), `${text}WEBHOOK_SECRET=new\n`);
+	const dir = tempDir("pi-dispatch-env-inside-");
+	const path = join(dir, ".env");
+	for (const platform of ["darwin", "linux"]) {
+		writeFileSync(path, text);
+		assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform }).changed, true, platform);
+		assert.equal(readFileSync(path, "utf8"), `${text}WEBHOOK_SECRET=new\n`);
+	}
+});
+
+/** What `/bin/sh` reads for `key` after sourcing `text` the way the macOS wrapper does, or null when there is no /bin/sh. */
+function shReads(text, key) {
+	if (!existsSync("/bin/sh")) return null;
+	const dir = tempDir("pi-dispatch-env-sh-");
+	writeFileSync(join(dir, ".env"), text);
+	const r = spawnSync("/bin/sh", ["-c", `set -a; . ./.env >/dev/null 2>&1; printf '%s' "\${${key}-__UNSET__}"`], { cwd: dir, encoding: "latin1", timeout: 20_000, killSignal: "SIGKILL" });
+	return r.stdout;
+}
+
+test("a shell command is judged through its quoted newlines, so a second assignment after a multi-line quote closes is a hazard (#447 final review)", () => {
+	// The final reviewer's repros, measured in /bin/sh on macOS: each sets the key on the line the quote closes on (or on
+	// the continuation after it), which no line scan sees. The writer appended a new secret over it, and the venue
+	// reader answered `{ keys: {} }` about a PI_EGRESS=0 the wrapper sets.
+	const clobbered = ['K="y\nK="a\\\nX=a WEBHOOK_SECRET=two\n', 'K="y\n" WEBHOOK_SECRET=two\n', "K='y\n' WEBHOOK_SECRET=two\n"];
+	const dir = tempDir("pi-dispatch-env-quote-close-");
+	const path = join(dir, ".env");
+	for (const text of clobbered) {
+		const measured = shReads(text, "WEBHOOK_SECRET");
+		if (measured !== null) assert.equal(measured, "two", `the oracle: ${JSON.stringify(text)}`);
+		assert.deepEqual(envFileHazard(text, { loader: "shell" }), { line: 1 }, JSON.stringify(text));
+		writeFileSync(path, text);
+		assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "darwin" }), /refusing to edit .*: line 1 is one the wrapper that sources this file reads differently from this command .* Nothing was written/, JSON.stringify(text));
+		assert.equal(readFileSync(path, "utf8"), text);
+		const venue = text.replace("WEBHOOK_SECRET=two", "PI_EGRESS=0");
+		if (measured !== null) assert.equal(shReads(venue, "PI_EGRESS"), "0", `the oracle: ${JSON.stringify(venue)}`);
+		assert.match(readStackKeys(venue, { loader: "shell" }).error ?? "", /line 1 is one this command cannot read .* the file names PI_EGRESS/, JSON.stringify(venue));
+	}
+	// A multi-line quoted value that is ONE assignment is no hazard: the documented key reads, and the line below it is
+	// filled in place.
+	const pem = 'GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\nMIIabc+/=\n-----END RSA PRIVATE KEY-----"\nWEBHOOK_SECRET=\n';
+	assert.equal(envFileHazard(pem, { loader: "shell" }), null);
+	writeFileSync(path, pem);
+	assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "darwin" }).changed, true);
+	assert.equal(readFileSync(path, "utf8"), pem.replace("WEBHOOK_SECRET=\n", "WEBHOOK_SECRET=new\n"));
+	// The join carries the blank before a backslash: `X=a \` + `#'` is `X=a #'` to sh, a comment, so the quote never
+	// opens and line 3 is a line (sh reads "" before and `new` after).
+	const blank = "X=a \\\n#'\nWEBHOOK_SECRET=\n";
+	if (shReads(blank, "WEBHOOK_SECRET") !== null) assert.equal(shReads(blank, "WEBHOOK_SECRET"), "", "the oracle");
+	assert.deepEqual(envFileValueLines(blank, { loader: "shell" }), [false, true, false, false]);
+	assert.equal(envFileHazard(blank, { loader: "shell" }), null);
+});
+
+test("a CRLF file: Linux reads back the line systemd takes, and macOS refuses to write into it, naming the fix (#447 final and round-cap reviews)", () => {
+	// Two empty lines for one key: the writer fills the FIRST and every loader takes the LAST. On Linux the read-back
+	// compares the value of that line and refuses. On macOS the wrapper also keeps each line's CR (/bin/sh reads `\r`
+	// here, and `new\r` for a written `new`), so no key written into a CRLF file reads as written: refused before the
+	// edit, with the fix, whatever the file holds.
+	const dir = tempDir("pi-dispatch-env-crlf-dup-");
+	const path = join(dir, ".env");
+	const dup = "WEBHOOK_SECRET=\r\nWEBHOOK_SECRET=\r\n";
+	if (shReads(dup, "WEBHOOK_SECRET") !== null) assert.equal(shReads(dup, "WEBHOOK_SECRET"), "\r", "the oracle");
+	if (shReads("WEBHOOK_SECRET=new\r\n", "WEBHOOK_SECRET") !== null) assert.equal(shReads("WEBHOOK_SECRET=new\r\n", "WEBHOOK_SECRET"), "new\r", "the oracle");
+	writeFileSync(path, dup);
+	assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "linux" }), /refusing to edit .*: after the edit, systemd's EnvironmentFile= would read something other than what was written for WEBHOOK_SECRET \(the assignment it takes is on line 2\)\. Nothing was written/);
+	assert.equal(readFileSync(path, "utf8"), dup);
+	const crlf = /^Error: refusing to edit .*: line 1 has a carriage return \(CR\) at its end, a CRLF line ending, which the wrapper that sources this file on macOS keeps: .*\. To fix it, convert the file to LF line endings\. Nothing was written$/;
+	for (const [text, key, overwrite] of [[dup, "WEBHOOK_SECRET", false], ["A=1\r\nWEBHOOK_SECRET=\r\n", "WEBHOOK_SECRET", false], ["K=old\r\n", "K", true]]) {
+		writeFileSync(path, text);
+		assert.throws(() => updateEnvFile(path, key, "new", { platform: "darwin", overwrite }), crlf, JSON.stringify(text));
+		assert.equal(readFileSync(path, "utf8"), text);
+	}
+	// A CRLF line anywhere counts, the last line without its LF included; converted to LF, the same file is written.
+	assert.deepEqual(envFileHazard("A=1\nB=2\r", { loader: "shell" }), { line: 2, shape: "shell-crlf" });
+	writeFileSync(path, "A=1\nWEBHOOK_SECRET=\n");
+	assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "darwin" }).changed, true);
+	assert.equal(readFileSync(path, "utf8"), "A=1\nWEBHOOK_SECRET=new\n");
+	// Linux and Windows read a CRLF file cleanly (systemd and `for /f` strip the CR): no hazard there.
+	assert.equal(envFileHazard(dup, { loader: "systemd" }), null);
+	assert.equal(envFileHazard(dup, { loader: "cmd" }), null);
+});
+
+test("a shell operator inside quotes is text, as sh reads it; command substitution inside double quotes still runs (#447 final review)", () => {
+	// Each row measured in /bin/sh on macOS and re-measured here where it exists. The operator check scanned double
+	// quotes as if unquoted, so these lines read as hazards, and a multi-line double-quoted value holding a parenthesis
+	// with them (the shell command is judged across its quoted newlines).
+	const reads = [
+		['K="a;b"', "a;b"],
+		['K="(x)"', "(x)"],
+		['K="a&b<c>d|e"', "a&b<c>d|e"],
+		["K='a|b'", "a|b"],
+		['K="a\n(b)\nc"', "a\n(b)\nc"],
+		// `\"` does not close the quote, so the `;` after it is still inside; `\$(` is a literal `$(`.
+		['K="a\\";b"', 'a";b'],
+		['K="\\$(id)"', "$(id)"],
+	];
+	for (const [line, value] of reads) {
+		const text = `${line}\nZ=ok\n`;
+		const measured = shReads(text, "K");
+		if (measured !== null) assert.equal(measured, value, `the oracle: ${JSON.stringify(line)}`);
+		assert.equal(envFileHazard(text, { loader: "shell" }), null, JSON.stringify(line));
+		assert.equal(readEnvAssignments(text, ["Z"], { loader: "shell" }).Z.vouched, true, JSON.stringify(line));
+	}
+	// Plain where every loader agrees, so the reading is the value itself.
+	assert.equal(readEnvAssignments('K="a;b"\n', ["K"], { loader: "shell" }).K.value, "a;b");
+	// Still hazards: command substitution runs inside double quotes, an unquoted `;` ends the assignment, and a `\\`
+	// before the closing quote escapes only the backslash, so the `;` after it is unquoted.
+	const runs = [
+		['K="$(id)"', /^uid=\d+/],
+		["K=\"`id`\"", /^uid=\d+/],
+		["K=a;b", /^a$/],
+		['K="a\\\\";echo hi', /^a\\$/],
+		['K="\\\\$(id)"', /^\\uid=\d+/],
+	];
+	for (const [line, measuredAs] of runs) {
+		const text = `${line}\nZ=ok\n`;
+		const measured = shReads(text, "K");
+		if (measured !== null) assert.match(measured, measuredAs, `the oracle: ${JSON.stringify(line)}`);
+		assert.deepEqual(envFileHazard(text, { loader: "shell" }), { line: 1 }, JSON.stringify(line));
+	}
+});
+
+/** Each POSIX shell here that sources `text` as the macOS wrapper does, with what it reads for K and WEBHOOK_SECRET. */
+function shellsRead(text) {
+	const dir = tempDir("pi-dispatch-env-shells-");
+	writeFileSync(join(dir, ".env"), text);
+	return [["/bin/sh"], ["/bin/bash", "--posix"], ["/bin/dash"]]
+		.filter(([sh]) => existsSync(sh))
+		.map(([sh, ...flags]) => {
+			const r = spawnSync(sh, [...flags, "-c", `set -a; . ./.env; printf '%s\\001%s' "\${K-__UNSET__}" "\${WEBHOOK_SECRET-__UNSET__}"`], { cwd: dir, encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: "/h" }, timeout: 20_000, killSignal: "SIGKILL" });
+			const [k, secret] = r.stdout.split("\x01");
+			return { sh, k, secret, failed: r.status !== 0 || r.stderr !== "", stderr: r.stderr };
+		});
+}
+
+test("outside single quotes only $NAME and ${NAME} pass, and a backslash-newline inside double quotes is removed first, as sh does (#447 delta review)", () => {
+	// Every row measured in /bin/sh (bash 3.2), bash --posix and dash on macOS, and re-measured here where each exists.
+	// `effect` is what makes the row dangerous in /bin/sh, the wrapper's own shell.
+	const refused = [
+		// A backslash-newline inside double quotes is deleted before expansion, so it cannot split a `$(`, `$((` or `${`.
+		['K="${x:-$\\\n((WEBHOOK_SECRET=7))}"', 1, (r) => r.secret === "7"],
+		['K="$\\\n(echo ran)"', 1, (r) => r.k === "ran"],
+		// `$[` arithmetic, evaluated by bash 3.2 (dash reads it as text), directly or through a variable's value.
+		["K=$[WEBHOOK_SECRET=5]", 1, (r) => r.secret === "5"],
+		["X='WEBHOOK_SECRET=9'\nK=$[X]", 2, (r) => r.secret === "9"],
+		["X='a[$(echo ran >&2)]'\nK=$[X]", 2, (r) => r.stderr.includes("ran")],
+		// Arithmetic inside `${}`: a substring offset and an array subscript.
+		["K=abcdef\nK=${K:WEBHOOK_SECRET=2}", 2, (r) => r.secret === "2"],
+		["K=${a[WEBHOOK_SECRET=5]}", 1, (r) => r.secret === "5"],
+		// A bad substitution: an error in bash, and it aborts the whole source under dash.
+		['K="${}"', 1, (r) => r.failed],
+		['K="${a b}"', 1, (r) => r.failed],
+	];
+	for (const [line, at, effect] of refused) {
+		const text = `${line}\n`;
+		const sh = shellsRead(text).find((r) => r.sh === "/bin/sh");
+		if (sh) assert.ok(effect(sh), `the oracle: ${JSON.stringify(line)} in /bin/sh: ${JSON.stringify(sh)}`);
+		assert.deepEqual(envFileHazard(text, { loader: "shell" }), { line: at }, JSON.stringify(line));
+	}
+	// Refused by the RULE rather than for a measured effect: a positional or special parameter, and a `$` before
+	// anything but a name or `{NAME}`, or at the end. Harmless ones are among them, and not telling them apart is the rule.
+	for (const line of ["K=$1", 'K="$$"', "K=a$", 'K="$ x"', 'K="${HOME:-/tmp}"']) {
+		assert.deepEqual(envFileHazard(`${line}\n`, { loader: "shell" }), { line: 1 }, JSON.stringify(line));
+	}
+	// The writer refuses the delta reviewer's file, and the venue reader its PI_EGRESS twin (sh sets it to 0).
+	const dir = tempDir("pi-dispatch-env-dollar-");
+	const path = join(dir, ".env");
+	const clobber = 'WEBHOOK_SECRET=\nK="${x:-$\\\n((WEBHOOK_SECRET=7))}"\n';
+	writeFileSync(path, clobber);
+	assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "darwin" }), /refusing to edit .*: line 2 is one the wrapper that sources this file reads differently/);
+	assert.equal(readFileSync(path, "utf8"), clobber);
+	const venue = 'PI_BACKENDS=podman\nK="$\\\n((PI_EGRESS=0))"\n';
+	if (existsSync("/bin/sh")) assert.equal(shReads(venue, "PI_EGRESS"), "0", "the oracle");
+	assert.match(readStackKeys(venue, { loader: "shell" }).error ?? "", /line 2 is one this command cannot read/);
+
+	// MUST PASS, read identically by every shell: a plain or braced name, a `$(` inside single quotes, an escaped `\$`,
+	// an EVEN backslash run before a newline inside double quotes (the newline stays), and the documented PEM.
+	const pem = 'K="-----BEGIN RSA PRIVATE KEY-----\nMIIabc+/=\n-----END RSA PRIVATE KEY-----"';
+	for (const [line, value] of [
+		["K=$HOME/x", "/h/x"],
+		['K="${HOME}/x"', "/h/x"],
+		["K='$(id)'", "$(id)"],
+		['K="\\$(id)"', "$(id)"],
+		['K="a\\\\\nb"', "a\\\nb"],
+		['K="a\\\\\\\nb"', "a\\b"],
+		[pem, pem.slice(3, -1)],
+	]) {
+		const text = `${line}\n`;
+		for (const r of shellsRead(text)) assert.equal(r.k, value, `the oracle: ${JSON.stringify(line)} in ${r.sh}`);
+		assert.equal(envFileHazard(text, { loader: "shell" }), null, JSON.stringify(line));
+	}
+});
+
+test("a word after an unquoted blank is a command or a second assignment, so it is a shell hazard (#447 round-cap review)", () => {
+	// Each row measured in /bin/sh, bash --posix and dash on macOS, and re-measured here where each exists; `effect` is
+	// what the wrapper's own /bin/sh does with it. Every one was accepted with no hazard.
+	const refused = [
+		['WEBHOOK_SECRET=\nK= eval "WEBHOOK_SECRET=7"', 2, (r) => r.secret === "7"],
+		['WEBHOOK_SECRET=\nK= export "WEBHOOK_SECRET=7"', 2, (r) => r.secret === "7"],
+		["WEBHOOK_SECRET=old\nK= unset WEBHOOK_SECRET", 2, (r) => r.secret === "__UNSET__"],
+		["K=1 exit 0\nWEBHOOK_SECRET=old", 1, (r) => r.secret !== "old"],
+		["K=1 z", 1, (r) => r.failed && r.k === "__UNSET__"],
+		['K="a" z', 1, (r) => r.failed && r.k === "__UNSET__"],
+		["K=a\tb", 1, (r) => r.failed && r.k === "__UNSET__"],
+		['K="a\n" z', 1, (r) => r.failed && r.k === "__UNSET__"],
+		["K=a WEBHOOK_SECRET=two", 1, (r) => r.secret === "two"],
+	];
+	for (const [lines, at, effect] of refused) {
+		const text = `${lines}\n`;
+		for (const r of shellsRead(text)) if (r.sh === "/bin/sh") assert.ok(effect(r), `the oracle: ${JSON.stringify(lines)} in /bin/sh: ${JSON.stringify(r)}`);
+		assert.deepEqual(envFileHazard(text, { loader: "shell" }), { line: at }, JSON.stringify(lines));
+	}
+	// The writer and the venue reader refuse the reviewer's files (sh sets PI_EGRESS=0 through the eval).
+	const dir = tempDir("pi-dispatch-env-cmdword-");
+	const path = join(dir, ".env");
+	writeFileSync(path, 'WEBHOOK_SECRET=\nK= eval "WEBHOOK_SECRET=7"\n');
+	assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "darwin" }), /refusing to edit .*: line 2 is one the wrapper that sources this file reads differently/);
+	const venue = 'PI_BACKENDS=podman\nK= eval "PI_EGRESS=0"\n';
+	if (existsSync("/bin/sh")) assert.equal(shReads(venue, "PI_EGRESS"), "0", "the oracle");
+	assert.match(readStackKeys(venue, { loader: "shell" }).error ?? "", /line 2 is one this command cannot read/);
+	// MUST PASS, read identically by every shell: trailing blanks, a comment after a blank, blanks inside quotes, and an
+	// escaped blank, which is part of the word.
+	for (const [line, value] of [["K=a   ", "a"], ["K=a # c z", "a"], ["K= # note", ""], ['K="a b"', "a b"], ["K='a\tb'", "a\tb"], ["K=a\\ b", "a b"]]) {
+		const text = `${line}\n`;
+		for (const r of shellsRead(text)) assert.equal(r.k, value, `the oracle: ${JSON.stringify(line)} in ${r.sh}`);
+		assert.equal(envFileHazard(text, { loader: "shell" }), null, JSON.stringify(line));
+	}
+});
+
+test("a NUL is a shell hazard on its line: the macOS /bin/sh stops reading the file there (#447 round-cap review)", () => {
+	// Measured: /bin/sh (bash 3.2) reads K=a and never reaches the line below; dash drops the byte and reads on; a NUL
+	// inside a quote aborts the source in /bin/sh. So what the service reads depends on a byte nobody sees.
+	const text = "K=a\0b\nWEBHOOK_SECRET=old\n";
+	const sh = shellsRead(text).find((r) => r.sh === "/bin/sh");
+	if (sh) assert.deepEqual([sh.k, sh.secret], ["a", "__UNSET__"], "the oracle");
+	for (const [t, at] of [[text, 1], ["A=1\nK='a\0b'\n", 2], ["A=1\n# a\0 note\nB=2\n", 2], ["A='x\ny\0z'\n", 2]]) {
+		assert.deepEqual(envFileHazard(t, { loader: "shell" }), { line: at, shape: "shell-nul" }, JSON.stringify(t));
+	}
+	// The macOS writer refuses before it writes, naming the byte.
+	const dir = tempDir("pi-dispatch-env-nul-");
+	const path = join(dir, ".env");
+	writeFileSync(path, "WEBHOOK_SECRET=\nK=a\0b\n");
+	assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "darwin" }), /^Error: refusing to edit .*: line 2 has a NUL byte, and the macOS \/bin\/sh stops reading the file there, so no key below it is set\. To fix it, remove the NUL byte\. Nothing was written$/);
+	assert.equal(readFileSync(path, "utf8"), "WEBHOOK_SECRET=\nK=a\0b\n");
+	// The venue reader names it too, and a CRLF file with its fix.
+	assert.match(readStackKeys("PI_BACKENDS=podman\nK=a\0b\n", { loader: "shell" }).error ?? "", /line 2 has a NUL byte, .* remove the NUL byte$/);
+	assert.match(readStackKeys("PI_BACKENDS=podman\r\n", { loader: "shell" }).error ?? "", /line 1 has a carriage return \(CR\) at its end, .* convert the file to LF line endings$/);
+	// Also where the key is only named mid-line (no line starts with it), which is the shell's own branch.
+	assert.match(readStackKeys("K=a\0b PI_EGRESS=0\n", { loader: "shell" }).error ?? "", /line 1 has a NUL byte, .* and the file names PI_EGRESS, .* remove the NUL byte$/);
+	// systemd's own NUL rule is its load hazard, unchanged: its line-level reading has no shell shape.
+	assert.equal(envFileHazard("K=a\nB=2\n", { loader: "shell" }), null);
+	assert.equal(envFileHazard(text, { loader: "systemd" })?.shape, undefined);
+});
+
+test("a hazard file is refused by name before any scan calls the key unchanged or already set (#447 round-cap review)", () => {
+	// `K=1 exit 0` ends the source before the key, so /bin/sh never reads WEBHOOK_SECRET=old; the line scan found it set
+	// and the writer returned "unchanged", which `up` reports as "already set".
+	const dir = tempDir("pi-dispatch-env-hazard-first-");
+	const path = join(dir, ".env");
+	const exits = "K=1 exit 0\nWEBHOOK_SECRET=old\n";
+	const sh = shellsRead(exits).find((r) => r.sh === "/bin/sh");
+	if (sh) assert.notEqual(sh.secret, "old", "the oracle: /bin/sh never reaches the key");
+	for (const [text, at] of [[exits, 1], ["WEBHOOK_SECRET=old\nK= unset WEBHOOK_SECRET\n", 2]]) {
+		writeFileSync(path, text);
+		for (const overwrite of [false, true]) {
+			assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", overwrite ? "old" : "new", { platform: "darwin", overwrite }), new RegExp(`^Error: refusing to edit .*: line ${at} is one the wrapper that sources this file reads differently`), JSON.stringify(text));
+		}
+		assert.equal(readFileSync(path, "utf8"), text);
+	}
+	// systemd the same way. A file it will not load, with the key set in it: "unchanged" before, the NUL now.
+	writeFileSync(path, "WEBHOOK_SECRET=abc\nK=a\0b\n");
+	assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "linux" }), /^Error: refusing to edit .*: line 2 has a NUL byte, and systemd refuses to load a file with one anywhere in it/);
+	// A lone CR that makes systemd read a second assignment the line scan does not see: "already set on line 2" before,
+	// the line systemd splits now.
+	writeFileSync(path, "WEBHOOK_SECRET=\n\rWEBHOOK_SECRET=abc\n");
+	assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "linux" }), /^Error: refusing to edit .*: line 2 has a carriage return \(CR\) that is not part of a CRLF line ending/);
+	// An EDIT is still judged on its result on Linux: overwriting the one line that held the NUL leaves a file systemd
+	// loads, and that is written, as before.
+	writeFileSync(path, "PI_BACKENDS=a\0b\n");
+	assert.equal(updateEnvFile(path, "PI_BACKENDS", "podman", { platform: "linux", overwrite: true }).changed, true);
+	assert.equal(readFileSync(path, "utf8"), "PI_BACKENDS=podman\n");
+	// And a clean file with the key set is still simply unchanged.
+	writeFileSync(path, "WEBHOOK_SECRET=abc\n");
+	for (const platform of ["linux", "darwin", "win32"]) assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform }).changed, false, platform);
+});
+
+test("on macOS ANY line ending in a CR is a shell hazard, a comment line included, so KEY=abc<CR> is never written (#447 regression review)", () => {
+	// The regression review's repros: exempting a comment line's CR let these through, and the writer wrote the new line
+	// in the file's CRLF ending (`appendEol`, or a replaced `# KEY=` line keeping its CR). /bin/sh then reads `abc<CR>`.
+	const written = "WEBHOOK_SECRET=abc123\r\n";
+	for (const r of shellsRead(written)) assert.equal(r.secret, "abc123\r", `the oracle in ${r.sh}`);
+	const dir = tempDir("pi-dispatch-env-cr-any-");
+	const path = join(dir, ".env");
+	for (const text of ["# pasted from a Windows editor\r\nPI_X=1\n", "# my deployment\r\n# WEBHOOK_SECRET=\r\n", "# note\r\nWEBHOOK_SECRET=abc\n"]) {
+		// Named as a COMMENT line's CR (second regression review): the shells read past it, and the refusal is this
+		// command's own, which the sentence says rather than describing a value or a line that runs.
+		assert.deepEqual(envFileHazard(text, { loader: "shell" }), { line: 1, shape: "shell-crlf-comment" }, JSON.stringify(text));
+		writeFileSync(path, text);
+		assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "abc123", { platform: "darwin" }), /^Error: refusing to edit .*: line 1 has a carriage return \(CR\) at the end of a comment line, a CRLF line ending: the wrapper that sources this file on macOS would still read the lines below it, but this command refuses CR line endings there, because a key it writes into the file would take the same ending .*\. To fix it, convert the file to LF line endings\. Nothing was written$/, JSON.stringify(text));
+		assert.equal(readFileSync(path, "utf8"), text);
+	}
+	// The other CR shapes, each named on its own line: a line of only a CR runs it as a command (measured), a `#` line
+	// inside a quoted value keeps its CR in the value, and an assignment's CR is in its value.
+	const bare = shellsRead("\r\nWEBHOOK_SECRET=abc\n").find((r) => r.sh === "/bin/sh");
+	if (bare) assert.ok(bare.failed, "the oracle: a lone CR line runs as a command");
+	for (const [text, at] of [["\r\nWEBHOOK_SECRET=abc\n", 1], ["A=1\nWEBHOOK_SECRET=abc\r\n", 2], ["K='a\n# x\r\n'\nWEBHOOK_SECRET=abc\n", 2]]) {
+		assert.deepEqual(envFileHazard(text, { loader: "shell" }), { line: at, shape: "shell-crlf" }, JSON.stringify(text));
+	}
+	assert.deepEqual(envFileHazard("A=1\n  # c\\\r\nB=2\n", { loader: "shell" }), { line: 2, shape: "shell-crlf-comment" }, "an indented comment line");
+	// The same file converted to LF is written, and reads as written.
+	writeFileSync(path, "# my deployment\n# WEBHOOK_SECRET=\n");
+	assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "abc123", { platform: "darwin" }).changed, true);
+	assert.equal(readFileSync(path, "utf8"), "# my deployment\nWEBHOOK_SECRET=abc123\n");
+	if (existsSync("/bin/sh")) assert.equal(shReads(readFileSync(path, "utf8"), "WEBHOOK_SECRET"), "abc123", "the oracle");
+});
+
+test("a later duplicate's inline comment is read the way the shell reads it, and an unreadable one is \"cannot confirm\" (#447 regression review)", () => {
+	// Measured in /bin/sh, bash --posix and dash: each of these reads PI_BACKENDS=podman, so an overwrite to podman has
+	// nothing to do. Reading the later line whole made it unplain, and the overwrite was refused as "reads something else".
+	const dir = tempDir("pi-dispatch-env-dup-comment-");
+	const path = join(dir, ".env");
+	for (const text of ["PI_BACKENDS=podman\nPI_BACKENDS=podman # c\n", "PI_BACKENDS=podman\nPI_BACKENDS=podman\t# note\n", 'PI_BACKENDS=podman\nPI_BACKENDS="podman" # c\n', "PI_BACKENDS=podman\nexport PI_BACKENDS=podman # c\n", "PI_BACKENDS=podman\nPI_BACKENDS=podman  \n"]) {
+		if (existsSync("/bin/sh")) assert.equal(shReads(text, "PI_BACKENDS"), "podman", `the oracle: ${JSON.stringify(text)}`);
+		writeFileSync(path, text);
+		assert.equal(updateEnvFile(path, "PI_BACKENDS", "podman", { platform: "darwin", overwrite: true }).changed, false, JSON.stringify(text));
+	}
+	// Linux keeps refusing the first: systemd reads `podman # c` (no comment after a value there).
+	writeFileSync(path, "PI_BACKENDS=podman\nPI_BACKENDS=podman # c\n");
+	assert.throws(() => updateEnvFile(path, "PI_BACKENDS", "podman", { platform: "linux", overwrite: true }), /takes the assignment on line 2, which reads something else/);
+	// A different word after the comment is still a different value, and one this module cannot read is said so.
+	writeFileSync(path, "PI_BACKENDS=podman\nPI_BACKENDS=docker # c\n");
+	assert.throws(() => updateEnvFile(path, "PI_BACKENDS", "podman", { platform: "darwin", overwrite: true }), /takes the assignment on line 2, which reads something else\. Remove one of the two lines/);
+	// A blank INSIDE quotes is part of the word: `"pod man"` is a different value, read, not an unreadable one.
+	writeFileSync(path, 'PI_BACKENDS=podman\nPI_BACKENDS="pod man" # c\n');
+	assert.throws(() => updateEnvFile(path, "PI_BACKENDS", "podman", { platform: "darwin", overwrite: true }), /takes the assignment on line 2, which reads something else\. Remove one of the two lines/);
+	writeFileSync(path, "PI_BACKENDS=podman\nPI_BACKENDS=$HOME\n");
+	assert.throws(() => updateEnvFile(path, "PI_BACKENDS", "podman", { platform: "darwin", overwrite: true }), /^Error: refusing to edit .*: PI_BACKENDS already reads as asked on line 1, but the wrapper that sources the file takes the assignment on line 2, and this command cannot confirm what line 2 reads\. Write it as a plain PI_BACKENDS=value line, or remove one of the two lines\. Nothing was written$/);
+	// A fill reads the word too: an empty value with a comment after it is empty to the shell.
+	const emptyCommented = "WEBHOOK_SECRET=old\nexport WEBHOOK_SECRET= # later\n";
+	if (existsSync("/bin/sh")) assert.equal(shReads(emptyCommented, "WEBHOOK_SECRET"), "", "the oracle");
+	writeFileSync(path, emptyCommented);
+	assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "darwin" }), /takes the assignment on line 2, which is empty, so the service gets an empty WEBHOOK_SECRET/);
+	// ONE line read two ways (docs/sandbox.md's own example): a comment after an empty value is the shell's comment, and
+	// systemd's value. Named as that line, not as two.
+	const oneLine = "PI_SANDBOX_DIR=                 # default <PI_JOBS_DIR>/sandboxes\n";
+	if (existsSync("/bin/sh")) assert.equal(shReads(oneLine, "PI_SANDBOX_DIR"), "", "the oracle");
+	writeFileSync(path, oneLine);
+	assert.throws(() => updateEnvFile(path, "PI_SANDBOX_DIR", "/srv/sandboxes", { platform: "darwin" }), /^Error: refusing to edit .*: PI_SANDBOX_DIR on line 1 looks set to this command, but the wrapper that sources the file reads it as empty, so the service gets an empty PI_SANDBOX_DIR\. Put the value after the =, or remove the text after it\. Nothing was written$/);
+});
+
+test("on Windows an empty last assignment gives the service NO key, and the refusal says so (#447 regression review)", () => {
+	// deploy/worker-env-wrapper.cmd runs `set "%%A=%%B"`, and `set "K="` UNSETS K (read from the wrapper, as elsewhere in
+	// this file). The `export` line is a variable named `export WEBHOOK_SECRET` there, so the POSIX loaders disagree and
+	// the key is not blank to them, which is what reaches this sentence.
+	const dir = tempDir("pi-dispatch-env-win-empty-");
+	const path = join(dir, ".env");
+	writeFileSync(path, "WEBHOOK_SECRET=old\nWEBHOOK_SECRET=\nexport WEBHOOK_SECRET=x\n");
+	assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "win32" }), /^Error: refusing to edit .*: WEBHOOK_SECRET looks set on line 1, but the \.cmd wrapper takes the assignment on line 2, which is empty, so the service gets no WEBHOOK_SECRET\. Remove one of the two lines\. Nothing was written$/);
+});
+
+test("\"unchanged\" only when the loader reads it so, and a Linux hazard refusal says the fix (#447 focus review)", () => {
+	const dir = tempDir("pi-dispatch-env-noop-");
+	const path = join(dir, ".env");
+	// Linux, a refusal before "unchanged" now carries the shape's fix, as macOS's does.
+	writeFileSync(path, "WEBHOOK_SECRET=abc\nK=a\0b\n");
+	assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "linux" }), /^Error: refusing to edit .*: line 2 has a NUL byte, .*\. To fix it, remove the NUL byte\. Nothing was written$/);
+	// An EMPTY assignment systemd takes, under a later export only a shell reads: not "already set".
+	writeFileSync(path, "WEBHOOK_SECRET=\nexport WEBHOOK_SECRET=old\n");
+	assert.equal(systemdReading("WEBHOOK_SECRET=\nexport WEBHOOK_SECRET=old\n", "WEBHOOK_SECRET").value, "");
+	assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "linux" }), /^Error: refusing to edit .*: WEBHOOK_SECRET is set only for a shell \(line 2: export WEBHOOK_SECRET=\.\.\.\); systemd's EnvironmentFile= ignores that line, so the service has the empty WEBHOOK_SECRET of line 1\. Write it as WEBHOOK_SECRET=\.\.\. on a line of its own, in place of line 1\. Nothing was written$/);
+	assert.equal(readFileSync(path, "utf8"), "WEBHOOK_SECRET=\nexport WEBHOOK_SECRET=old\n", "and the value is never echoed");
+	// An overwrite whose FIRST line already reads as asked, while every loader takes the second: not "unchanged".
+	for (const platform of ["linux", "darwin", "win32"]) {
+		writeFileSync(path, "PI_BACKENDS=podman\nPI_BACKENDS=docker\n");
+		assert.throws(() => updateEnvFile(path, "PI_BACKENDS", "podman", { platform, overwrite: true }), /refusing to edit .*: PI_BACKENDS already reads as asked on line 1, but .* takes the assignment on line 2, which reads something else\. Remove one of the two lines\. Nothing was written/, platform);
+	}
+	if (existsSync("/bin/sh")) assert.equal(shReads("PI_BACKENDS=podman\nPI_BACKENDS=docker\n", "PI_BACKENDS"), "docker", "the oracle");
+	// macOS, a fill: a set line above an `export` of nothing, which the shell takes and systemd ignores.
+	const exportEmpty = "WEBHOOK_SECRET=old\nexport WEBHOOK_SECRET=\n";
+	if (existsSync("/bin/sh")) assert.equal(shReads(exportEmpty, "WEBHOOK_SECRET"), "", "the oracle");
+	writeFileSync(path, exportEmpty);
+	assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "darwin" }), /refusing to edit .*: WEBHOOK_SECRET looks set on line 1, but the wrapper that sources the file takes the assignment on line 2, which is empty, so the service gets an empty WEBHOOK_SECRET\. Remove one of the two lines\. Nothing was written/);
+	// NOT when every loader reads it blank: that is `up`'s true EMPTY sentence, and the line stays the operator's (#365).
+	for (const text of ['WEBHOOK_SECRET=""\n', "WEBHOOK_SECRET=old\nWEBHOOK_SECRET=\n"]) {
+		writeFileSync(path, text);
+		for (const platform of ["linux", "darwin"]) assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform }).changed, false, `${platform} ${JSON.stringify(text)}`);
+	}
+	// And the plain cases, unchanged as ever.
+	writeFileSync(path, "WEBHOOK_SECRET=abc\nPI_BACKENDS=podman\n");
+	for (const platform of ["linux", "darwin", "win32"]) {
+		assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform }).changed, false, platform);
+		assert.equal(updateEnvFile(path, "PI_BACKENDS", "podman", { platform, overwrite: true }).changed, false, platform);
+	}
+	// A 1.1 MB file systemd starts is edited on Linux (the old 1 MiB bound refused it).
+	const big = Array.from({ length: 11 }, (_, i) => `K${i}=${"h".repeat(100000)}`).join("\n") + "\nWEBHOOK_SECRET=\n";
+	writeFileSync(path, big);
+	assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "linux" }).changed, true);
+});
+
+/** What each POSIX shell here reads for `key` after sourcing `text`, and whether the source failed or printed. */
+function shellsReadKey(text, key) {
+	const dir = tempDir("pi-dispatch-env-shells-key-");
+	writeFileSync(join(dir, ".env"), text);
+	return [["/bin/sh"], ["/bin/bash", "--posix"], ["/bin/dash"]]
+		.filter(([sh]) => existsSync(sh))
+		.map(([sh, ...flags]) => {
+			const r = spawnSync(sh, [...flags, "-c", `set -a; . ./.env; printf '%s' "\${${key}-__UNSET__}"`], { cwd: dir, encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: "/h" }, timeout: 20_000, killSignal: "SIGKILL" });
+			return { sh, value: r.stdout, failed: r.status !== 0 || r.stderr !== "" };
+		});
+}
+
+test("an escaped word after a blank is a command word; a continuation, an expansion-only fill and a CR comment line are read as the shells read them (#447 second regression review)", () => {
+	const dir = tempDir("pi-dispatch-env-regr2-");
+	const path = join(dir, ".env");
+	// 1. `\z` after a blank is the word `z`, run (and `\#` the word `#`, which aborts the source in dash), in all three
+	// shells. Testing the escape before the blank skipped it, and an overwrite said "unchanged" about a line that runs.
+	for (const [text, at] of [["PI_BACKENDS=podman\nPI_BACKENDS=podman \\z\n", 2], ["K= \\z\nWEBHOOK_SECRET=old\n", 1], ["export K= \\#\nWEBHOOK_SECRET=old\n", 1]]) {
+		for (const r of shellsReadKey(text, "K")) assert.ok(r.failed, `the oracle: ${JSON.stringify(text)} fails in ${r.sh}`);
+		assert.deepEqual(envFileHazard(text, { loader: "shell" }), { line: at }, JSON.stringify(text));
+	}
+	writeFileSync(path, "PI_BACKENDS=podman\nPI_BACKENDS=podman \\z\n");
+	assert.throws(() => updateEnvFile(path, "PI_BACKENDS", "podman", { platform: "darwin", overwrite: true }), /line 2 is one the wrapper that sources this file reads differently/);
+	// ...while a backslash-NEWLINE after a blank is joined away first, as the shells do: these read `a` and `podman`.
+	for (const [text, key, value] of [["K=a \\\n# c\nWEBHOOK_SECRET=old\n", "K", "a"], ["PI_BACKENDS=podman \\\n\nWEBHOOK_SECRET=old\n", "PI_BACKENDS", "podman"]]) {
+		for (const r of shellsReadKey(text, key)) assert.equal(r.value, value, `the oracle: ${JSON.stringify(text)} in ${r.sh}`);
+		assert.equal(envFileHazard(text, { loader: "shell" }), null, JSON.stringify(text));
+	}
+	// 3. A continuation is read on its joined line (`podman \` + an empty line or a comment is `podman`; `pod\` + `man`
+	// is `podman`), exact against the shells, where the whole line read as unplain refused the edit.
+	for (const [text, verdict] of [["PI_BACKENDS=docker\nPI_BACKENDS=podman \\\n\n", true], ["PI_BACKENDS=docker\nPI_BACKENDS=podman \\\n# c\n", true], ["PI_BACKENDS=podman\nPI_BACKENDS=pod\\\nman\n", false]]) {
+		for (const r of shellsReadKey(text, "PI_BACKENDS")) assert.equal(r.value, "podman", `the oracle: ${JSON.stringify(text)} in ${r.sh}`);
+		writeFileSync(path, text);
+		assert.equal(updateEnvFile(path, "PI_BACKENDS", "podman", { platform: "darwin", overwrite: true }).changed, verdict, JSON.stringify(text));
+		for (const r of shellsReadKey(readFileSync(path, "utf8"), "PI_BACKENDS")) assert.equal(r.value, "podman", `and after the edit, in ${r.sh}`);
+	}
+	// 2. A fill whose value is only an expansion is empty when the variable is unset at load time, which this command
+	// cannot see: refused as unconfirmable, not "unchanged". Literal text around one (`$HOME/logs`) is never empty.
+	for (const text of ["WEBHOOK_SECRET=$X\n", 'WEBHOOK_SECRET="${X}"\n']) {
+		for (const r of shellsReadKey(text, "WEBHOOK_SECRET")) assert.equal(r.value, "", `the oracle: X unset, ${JSON.stringify(text)} in ${r.sh}`);
+		writeFileSync(path, text);
+		assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "darwin" }), /^Error: refusing to edit .*: WEBHOOK_SECRET on line 1 is only an expansion \(\$NAME\), which the wrapper that sources the file fills in when it loads the file and leaves empty if that variable is unset then, so this command cannot confirm what line 1 reads\. Write the value itself there\. Nothing was written$/, JSON.stringify(text));
+	}
+	for (const [text, key] of [["WEBHOOK_SECRET='$X'\n", "WEBHOOK_SECRET"], ["PI_LOGS_DIR=$HOME/logs\n", "PI_LOGS_DIR"]]) {
+		writeFileSync(path, text);
+		assert.equal(updateEnvFile(path, key, "/new", { platform: "darwin" }).changed, false, JSON.stringify(text));
+	}
+	// Linux has no expansion: systemd reads `$X` as those two characters, so it is set, as before.
+	writeFileSync(path, "WEBHOOK_SECRET=$X\n");
+	assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "linux" }).changed, false);
+});
+
+test("an edit never leaves a hazard the file did not have; a CRLF comment line is named only when every CR line is one; a command across `export \\` is read (#447 third regression review)", () => {
+	const dir = tempDir("pi-dispatch-env-regr3-");
+	const path = join(dir, ".env");
+	// 1. Replacing the FIRST line of a command that continues left its tail standing as a line, which every shell runs:
+	// the key read back as written while the file now ran a command. Refused before anything is written.
+	for (const [text, tail, original] of [['PI_BACKENDS=""\\"\\\na\n', "a", '"a'], ["PI_BACKENDS=\\\n=\n", "=", "="], ["export PI_BACKENDS=\\\n\\ \n", "\\ ", " "]]) {
+		for (const r of shellsReadKey(text, "PI_BACKENDS")) assert.deepEqual([r.value, r.failed], [original, false], `the oracle: ${JSON.stringify(text)} in ${r.sh}`);
+		const naive = `PI_BACKENDS=podman\n${tail}\n`;
+		for (const r of shellsReadKey(naive, "PI_BACKENDS")) assert.ok(r.failed, `the oracle: the naive edit ${JSON.stringify(naive)} runs its tail in ${r.sh}`);
+		writeFileSync(path, text);
+		assert.throws(() => updateEnvFile(path, "PI_BACKENDS", "podman", { platform: "darwin", overwrite: true }), /^Error: refusing to edit .*: after the edit, line 2 would be one the wrapper that sources the file reads differently from this command \(a command, a continuation or an open quote the file did not have before; .*\)\. Put the key's line on one line first\. Nothing was written$/, JSON.stringify(text));
+		assert.equal(readFileSync(path, "utf8"), text);
+		// systemd ignores a line with no `=`, so on Linux the same edit leaves the service reading podman: written.
+		assert.equal(updateEnvFile(path, "PI_BACKENDS", "podman", { platform: "linux", overwrite: true }).changed, true, `linux ${JSON.stringify(text)}`);
+		assert.equal(systemdReading(readFileSync(path, "utf8"), "PI_BACKENDS").value, "podman");
+	}
+	// Only a NEW hazard refuses: the cmd wrapper's `"` in a value the file already had stays as it was (a Windows file
+	// is not refused wholesale for a line the edit does not touch, as before).
+	assert.deepEqual(envFileHazard('X=a"b\n', { loader: "cmd" }), { line: 1 });
+	writeFileSync(path, 'X=a"b\n');
+	assert.equal(updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "win32" }).changed, true);
+	assert.equal(readFileSync(path, "utf8"), 'X=a"b\nWEBHOOK_SECRET=new\n');
+	// Nor when the edit replaces the first of two such lines, leaving the second first (docs/wait-for.md's snippet).
+	writeFileSync(path, 'ticket="a"\nout="b"\n');
+	assert.equal(updateEnvFile(path, "ticket", "podman", { platform: "win32", overwrite: true }).changed, true);
+	assert.equal(readFileSync(path, "utf8"), 'ticket=podman\nout="b"\n');
+	// 3a. `export \` above `PI_BACKENDS=podman` is one command to a shell, which sets the key: read as such.
+	const exportCont = "PI_BACKENDS=docker\nexport \\\nPI_BACKENDS=podman\n";
+	for (const r of shellsReadKey(exportCont, "PI_BACKENDS")) assert.equal(r.value, "podman", `the oracle in ${r.sh}`);
+	writeFileSync(path, exportCont);
+	assert.equal(updateEnvFile(path, "PI_BACKENDS", "podman", { platform: "darwin", overwrite: true }).changed, true);
+	for (const r of shellsReadKey(readFileSync(path, "utf8"), "PI_BACKENDS")) assert.equal(r.value, "podman", `and after the edit, in ${r.sh}`);
+	// A later line this command cannot read is "cannot confirm", not "something other": `''podman` is podman to the shells.
+	const unreadable = "PI_BACKENDS=docker\nPI_BACKENDS=''podman\n";
+	for (const r of shellsReadKey(unreadable, "PI_BACKENDS")) assert.equal(r.value, "podman", `the oracle in ${r.sh}`);
+	writeFileSync(path, unreadable);
+	assert.throws(() => updateEnvFile(path, "PI_BACKENDS", "podman", { platform: "darwin", overwrite: true }), /^Error: refusing to edit .*: after the edit, the wrapper that sources the file would take PI_BACKENDS from line 2, and this command cannot confirm what that line reads\. Write it as a plain PI_BACKENDS=value line, or remove it\. Nothing was written$/);
+	// 3b. KEPT as a refusal, and literally true: ` ${X}` on a line of its own is a command, which runs whatever X holds
+	// when the wrapper loads the file (measured with X='echo ran'), and does nothing only while X is unset.
+	const expansionLine = "WEBHOOK_SECRET=~\n ${X}";
+	if (existsSync("/bin/sh")) {
+		const d = tempDir("pi-dispatch-env-x-");
+		writeFileSync(join(d, ".env"), expansionLine);
+		const r = spawnSync("/bin/sh", ["-c", "set -a; . ./.env"], { cwd: d, encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: "/h", X: "echo ran" } });
+		assert.equal(r.stdout, "ran\n", "the oracle: the line runs X's value");
+	}
+	writeFileSync(path, expansionLine);
+	assert.throws(() => updateEnvFile(path, "WEBHOOK_SECRET", "new", { platform: "darwin" }), /line 2 is one the wrapper that sources this file reads differently from this command \(a second assignment on a line, a continuation, a command\)/);
+	// 2. A comment line's CR is named as such only when EVERY CR line is a comment line; otherwise the first other CR
+	// line is, since its value reaches the service with the CR.
+	const mixed = "# c\r\nWEBHOOK_SECRET=abc\r\n";
+	for (const r of shellsReadKey(mixed, "WEBHOOK_SECRET")) assert.equal(r.value, "abc\r", `the oracle in ${r.sh}`);
+	assert.deepEqual(envFileHazard(mixed, { loader: "shell" }), { line: 2, shape: "shell-crlf" });
+	assert.deepEqual(envFileHazard("# c\r\n\r\nPI_BACKENDS=docker\n", { loader: "shell" }), { line: 2, shape: "shell-crlf" }, "a lone CR line runs");
+	assert.deepEqual(envFileHazard("# c\r\n# d\r\nA=1\n", { loader: "shell" }), { line: 1, shape: "shell-crlf-comment" });
+	// A comment CR above a real hazard: the hazard is named, not the comment.
+	assert.deepEqual(envFileHazard("# c\r\nK=1 z\n", { loader: "shell" }), { line: 2 });
 });

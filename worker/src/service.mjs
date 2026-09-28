@@ -761,7 +761,8 @@ function podmanVenue(ctx) {
 	if (ctx.fs.existsSync(envPath)) {
 		let text;
 		try {
-			text = String(ctx.fs.readFileSync(envPath, "utf8"));
+			// Bytes, not text: `readStackKeys` checks what systemd refuses to load before it decodes (issue #447).
+			text = ctx.fs.readFileSync(envPath);
 		} catch (err) {
 			if (!linux) return { used: false };
 			return { error: `cannot read ${envPath} to learn whether this deployment runs the podman venue: ${err?.message}` };

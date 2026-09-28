@@ -57,7 +57,7 @@ import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, logsDirPath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
-import { envFileHazard, envValueShown, readEnvAssignments, renderEnvValue } from "./env-file.mjs";
+import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue } from "./env-file.mjs";
 import { canonicalScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
 import { loadPauseWindows } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
@@ -186,7 +186,9 @@ export async function runDoctor(env = process.env, deps = {}) {
 		// The deployment's own `.env`, read for exactly the keys two checks below NAME (issue #357), and
 		// since issue #384 also the read behind the two boot-file loaders, which open the path that `.env`
 		// gives them through this same seam. See `envFileKeys` for why any of this is allowed to exist.
-		readEnvFile = (path) => readFileSync(path, "utf8"),
+		// BYTES since issue #447: systemd refuses to load a `.env` with a NUL or invalid UTF-8 in it, which decoded text
+		// cannot show. `envFileKeys` decodes; the boot-file loaders below get text through `seamsForLoad`.
+		readEnvFile = (path) => readFileSync(path),
 		// Issue #345: the host files the runtime-mounts observation reads (Podman's mounts.conf and containers.conf).
 		observationFs = { statSync, readFileSync, readdirSync },
 		// Issue #453: this shell's account name, asked of loginctl for linger on the podman venue; and whether this folder
@@ -227,7 +229,8 @@ export async function runDoctor(env = process.env, deps = {}) {
 	try {
 		if (fileExists(envPath)) {
 			if (!statSync(envPath).isFile()) envUnread = "not a regular file";
-			else envText = String(readEnvFile(envPath));
+			// BYTES where the seam gives them (issue #447): what systemd refuses to load is judged before decoding.
+			else envText = readEnvFile(envPath);
 		}
 	} catch (err) {
 		if (err?.code !== "ENOENT") envUnread = err?.code ?? err?.message ?? "error";
@@ -255,7 +258,7 @@ export async function runDoctor(env = process.env, deps = {}) {
 			env = venue.env;
 		}
 	}
-	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, serviceEnvFile: envText === null ? null : { text: envText, path: envPath, loader: serviceEnvLoader(platform) } };
+	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, serviceEnvFile: envText === null ? null : { text: decodeEnvFile(envText).text, path: envPath, loader: serviceEnvLoader(platform) } };
 
 	let checks = await collectChecks(env, seams);
 	let failed = render(checks, out);
@@ -369,6 +372,11 @@ export async function defaultPromptFn(question, { input = process.stdin, output 
 	}
 }
 
+/** What a `readFileSync(path, enc)` caller expects from a seam that may hand back bytes. */
+function asText(content, enc) {
+	return enc && typeof content !== "string" ? Buffer.from(content).toString(enc) : content;
+}
+
 /**
  * The values `<cwd>/.env` sets for NAMED keys, or `{}`. Doctor's first read of a `.env` (issue #357), and the
  * narrowing is what makes it an addition rather than a reversal. It is NOT the only reader: `up` and `service
@@ -442,13 +450,13 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 	const allowed = keys.filter((k) => ENV_FILE_READABLE_KEYS.includes(k));
 	if (allowed.length === 0) return {};
 	try {
-		const text = readEnvFile(path);
+		const serviceLoader = serviceEnvLoader(platform);
+		const { text, loadHazard } = decodeEnvFile(readEnvFile(path), { loader: serviceLoader });
 		// THE SERVICE'S OWN LOADER FIRST, because this file has three and they disagree (issue #384).
 		// `service.mjs` renders exactly one per platform: systemd's `EnvironmentFile=` on linux,
 		// `worker-env-wrapper.sh` (a sourcing shell) on darwin, `worker-env-wrapper.cmd` on win32. Reporting a
 		// reading from a loader this deployment does not use is how doctor told half its operators the wrong
 		// file under the previous shape, which asked systemd's grammar on every platform.
-		const serviceLoader = serviceEnvLoader(platform);
 		const service = readEnvAssignments(text, allowed, { loader: serviceLoader });
 		// The shell reading stays beside it on POSIX, because a `.env` is also sourced by hand
 		// (`set -a; . ./.env`) and because the two disagree about an `export` line, which is the third state
@@ -459,9 +467,14 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 		// One line elsewhere can take the vouch off every reading in the file, and a key with NO record at all
 		// is the case that needs this most: a BOM'd line, a `K+=` line or a line the shells simply run leaves
 		// this reader silent about a key the loaders do set.
-		const hazard = envFileHazard(text, { loader: serviceLoader });
+		// A file systemd will not LOAD comes first: nothing else about it reaches the service (issue #447, gate round 1).
+		const hazard = loadHazard ?? envFileHazard(text, { loader: serviceLoader });
+		// A line INSIDE a multi-line quoted value is part of that value to systemd and to the shells (issue #447), so
+		// its fix is about the quote above it, not about the line's own form.
+		const regions = serviceLoader === "cmd" ? [] : quotedRegions(text);
 		const plain = {};
 		const notPlain = {};
+		const insideValue = {};
 		const exported = {};
 		const alsoExported = {};
 		const blankInFile = {};
@@ -480,7 +493,11 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 			// caller answers that once and says nothing else about the key. Recorded rather than chased, like
 			// the same equivalence on the disagreement branch below.
 			if (own !== undefined && own.vouched && own.value !== "") plain[key] = own.value;
-			else if (own !== undefined && !own.plain) notPlain[key] = own.line;
+			else if (own !== undefined && !own.plain) {
+				notPlain[key] = own.line;
+				const region = regions.find((r) => own.line > r.open && (r.close === null || own.line <= r.close));
+				if (region) insideValue[key] = region.open;
+			}
 			// Export-only means NO bare assignment anywhere, not "none that survived". A file holding both
 			// `KEY=/systemd.json` and `export KEY=/wrapper.json` is configured under systemd, and calling it
 			// export-only would print a value systemd never sees and advise dropping a prefix, which would
@@ -515,7 +532,7 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 			// shape doctor could not vouch for and exited 0 on a deployment that cannot start.
 			if (own !== undefined && own.blank) blankInFile[key] = true;
 		}
-		return { ...plain, notPlain, exported, alsoExported, blankInFile, serviceLoader, hazard };
+		return { ...plain, notPlain, insideValue, exported, alsoExported, blankInFile, serviceLoader, hazard };
 	} catch {
 		// COULD NOT READ is not "this key is unset". Returning the same `{}` for both told an operator whose
 		// `.env` is a directory, or is not readable by this account, that the worker ignores a key -- a positive
@@ -2192,7 +2209,7 @@ export async function collectChecks(env, seams) {
 	// The IO the load verdict uses, injected like everything else this file touches: `statFile` for the
 	// regular-file guard and the loaders' own two reads. A test drives a whole deployment through these
 	// without a real file, which is how the fixtures below stay honest about content.
-	const seamsForLoad = { statFile: statSeam, loaderIo: { existsSync: (p) => fileExists(p), readFileSync: readEnvFile ? (p) => readEnvFile(p) : readFileSync } };
+	const seamsForLoad = { statFile: statSeam, loaderIo: { existsSync: (p) => fileExists(p), readFileSync: readEnvFile ? (p, enc) => asText(readEnvFile(p), enc) : readFileSync } };
 	// ONCE PER FILE, not once per key (issue #396). This is a fact about the FILE -- one line the reader
 	// cannot model -- and it was announced inside the per-key loop, so a `.env` with one such line produced
 	// two near-identical warnings differing only in which key they named. The keys it prevents a verdict
@@ -2205,11 +2222,20 @@ export async function collectChecks(env, seams) {
 	// `docs/secrets.md` both refuse.
 	if (envFile.hazard != null) {
 		const named = BOOT_FILES.map((spec) => spec.key).join(" or ");
+		// A SHAPE comes from systemd's own line structure (issue #447): the line is one systemd reads differently from
+		// this command, and the table names it and what to change -- the same words `service install` refuses with.
+		const shape = envFile.hazard.shape ? SYSTEMD_HAZARD_SHAPES[envFile.hazard.shape] : null;
+		const limit = "Other keys in the same file are affected too and are not checked here: this command reads only the two it names";
+		// A file systemd will not LOAD is a service that does not start (measured on systemd 259), which is a failure
+		// rather than a doubt about one reading (issue #447, gate round 1).
+		const unloadable = envFile.hazard.shape === "nul" || envFile.hazard.shape === "invalid-utf8" || envFile.hazard.shape === "exec-too-large";
 		checks.push({
 			ok: false,
-			warn: true,
-			label: `whether ${named} reaches the service cannot be read off ${join(cwd, ".env")}: line ${envFile.hazard.line} is not one this command can read`,
-			fix: `fix line ${envFile.hazard.line} of that file and run doctor again -- a line that is not an assignment is RUN by the wrappers that source this file, an unclosed quote or a trailing backslash makes the line below it part of that value, and a value that can run a command or end the shell leaves every key in the file unset. Other keys in the same file are affected too and are not checked here: this command reads only the two it names`,
+			warn: !unloadable,
+			label: `whether ${named} reaches the service cannot be read off ${join(cwd, ".env")}: line ${envFile.hazard.line} ${shape ? `has ${shape.what}${envFile.hazard.detail ? ` (${envFile.hazard.detail})` : ""}` : "is not one this command can read"}`,
+			fix: shape
+				? `on line ${envFile.hazard.line} of that file, ${shape.fix}, then run doctor again. ${limit}`
+				: `fix line ${envFile.hazard.line} of that file and run doctor again -- a line that is not an assignment is RUN by the wrappers that source this file, an unclosed quote or a trailing backslash makes the line below it part of that value, and a value that can run a command or end the shell leaves every key in the file unset. ${limit}`,
 		});
 	}
 
@@ -2218,6 +2244,7 @@ export async function collectChecks(env, seams) {
 		const shellRaw = spec.resolve(env);
 		const fileRaw = envFile[spec.key];
 		const notPlainLine = envFile.notPlain?.[spec.key];
+		const insideAt = envFile.insideValue?.[spec.key];
 		const blankInFile = envFile.blankInFile?.[spec.key] === true;
 		const onlyExported = envFile.exported?.[spec.key];
 		const alsoExported = envFile.alsoExported?.[spec.key];
@@ -2268,8 +2295,12 @@ export async function collectChecks(env, seams) {
 			checks.push({
 				ok: false,
 				warn: true,
-				label: `${spec.key} on line ${notPlainLine} of ${join(cwd, ".env")} is not in the form every loader reads the same way, so the service may read something other than what the line appears to say`,
-				fix: `rewrite it as ${fixLineFor(spec.key, scaffolded)} with any comment on its own line above it, which is the form \`pi-dispatch up\` writes`,
+				label: insideAt === undefined
+					? `${spec.key} on line ${notPlainLine} of ${join(cwd, ".env")} is not in the form every loader reads the same way, so the service may read something other than what the line appears to say`
+					: `${spec.key} on line ${notPlainLine} of ${join(cwd, ".env")} lies inside the quoted value that opens on line ${insideAt}, so the service reads it as part of that value and not as ${spec.key}`,
+				fix: insideAt === undefined
+					? `rewrite it as ${fixLineFor(spec.key, scaffolded)} with any comment on its own line above it, which is the form \`pi-dispatch up\` writes`
+					: `close the quote that opens on line ${insideAt} before line ${notPlainLine}, or write that value's newlines as \\n escapes`,
 			});
 		} else if (envFile.hazard == null && onlyExported !== undefined) {
 			// The loader that reads an `export` line is a SOURCING SHELL, and naming it "this platform's loader"

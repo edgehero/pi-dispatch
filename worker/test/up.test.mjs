@@ -1352,6 +1352,39 @@ test("E6/R31: the .env is read with the platform's loader, and off Linux a line 
 	assert.match(odd.text(), /off Linux the podman venue refuses this host anyway, so this pass reads the venue from this shell/);
 });
 
+test("#447 gate round 1: a .env systemd will not LOAD (a NUL, invalid UTF-8 in a value) stops up on Linux before anything runs", async () => {
+	for (const [bytes, what] of [
+		[Buffer.concat([Buffer.from("PI_EGRESS=0\n# a"), Buffer.from([0]), Buffer.from("b\nPI_BACKENDS=podman\n")]), /line 2 has a NUL byte, and systemd refuses to load a file with one anywhere in it, so the service does not start: remove the NUL byte/],
+		[Buffer.concat([Buffer.from("K=caf"), Buffer.from([0xe9]), Buffer.from("\n")]), /line 1 has bytes in a key or value that are not valid UTF-8, or a Unicode noncharacter.*: re-save the file as UTF-8, or remove those bytes/],
+	]) {
+		const h = harness({ env: {}, plan: green, files: { "/deploy/.env": bytes } });
+		assert.equal(await h.run(), 1);
+		assert.match(h.text(), what);
+		assert.deepEqual(h.calls, [], "nothing ran");
+		assert.equal(h.initCalls.length, 0, "not even init");
+		assert.ok(h.store.get("/deploy/.env").equals(bytes), "the file is byte-identical");
+	}
+});
+
+test("#447 gate round 2: up's own .env writes are read back first: a key that would land inside an open quote is not written", async () => {
+	// Appending WEBHOOK_SECRET after `X="abc` puts it inside X's value (measured on systemd 259 for PI_BACKENDS, w02), so
+	// the service would have no secret while up reported one generated. It is refused, said, and the file is unchanged.
+	const before = 'A=1\nX="abc\n';
+	const h = harness({ plan: green, listening: true, files: { "/deploy/.env": before } });
+	await h.run();
+	assert.match(h.text(), /✗ WEBHOOK_SECRET could not be written: refusing to edit \/deploy\/\.env: after the edit, systemd's EnvironmentFile= would find no WEBHOOK_SECRET\. Nothing was written/);
+	assert.doesNotMatch(h.text(), /generated WEBHOOK_SECRET into \.env/);
+	assert.equal(h.store.get("/deploy/.env"), before, "unchanged");
+});
+
+test("#447 gate round 4: up names a WEBHOOK_SECRET only a shell reads, instead of calling it already set", async () => {
+	const h = harness({ plan: green, listening: true, files: { "/deploy/.env": "export WEBHOOK_SECRET=abc\n" } });
+	await h.run();
+	assert.match(h.text(), /✗ WEBHOOK_SECRET could not be written: refusing to edit \/deploy\/\.env: WEBHOOK_SECRET is set only for a shell \(line 1: export WEBHOOK_SECRET=\.\.\.\); systemd's EnvironmentFile= ignores that line/);
+	assert.doesNotMatch(h.text(), /WEBHOOK_SECRET already set in \.env/);
+	assert.doesNotMatch(h.text(), /abc/, "the secret is never shown");
+});
+
 test("nit: an unreadable .env is said, not silently replaced by the shell's venue", async () => {
 	const h = harness({ env: {}, plan: green, listening: true, files: { "/deploy/.env": "x" } });
 	h.deps.fs.readFileSync = (p) => {

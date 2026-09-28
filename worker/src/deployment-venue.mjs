@@ -34,7 +34,8 @@ export function deploymentVenueEnv({ env, fs, envPath, platform, command = "up",
 	if (fs.existsSync(envPath)) {
 		let text = null;
 		try {
-			text = String(fs.readFileSync(envPath, "utf8"));
+			// Bytes, not text: `readStackKeys` checks what systemd refuses to load before it decodes (issue #447).
+			text = fs.readFileSync(envPath);
 		} catch (err) {
 			// Said rather than silent (round 2 nit): the venue then comes from this shell alone.
 			notes.push(`${envPath} could not be read (${err?.message}), so PI_BACKENDS, PI_EGRESS and PI_EGRESS_PROXY come from this shell alone`);

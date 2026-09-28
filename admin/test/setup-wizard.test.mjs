@@ -1203,6 +1203,26 @@ test("wizard: PI_BACKENDS=podman asks podman, never docker, runs up with it, and
   assert.ok(notes.some((n) => /PI_BACKENDS=podman written into/.test(n.m)));
 });
 
+test("#447 gate round 1: a .env that `up` creates with a systemd hazard in it is left unchanged, not given PI_BACKENDS", async () => {
+  // `init` inside `up` copies the deployment's OWN .env.example when there is one, so the file the wizard writes into
+  // can appear after its pre-check with a line systemd reads differently. The write-time check refuses it and says so.
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  const { ui, notes } = wizardUi({ select: ["Guided setup", "Skip", "Skip"], input: [dir], confirm: [true, false, false] });
+  const { deps } = wizardDeps({
+    env: { PI_DISPATCH_DEPLOYMENT_FILE: join(tempDir("admin-setup-ptr-"), "pointer.json"), PI_BACKENDS: "podman" },
+    probePodmanFn: () => ({ ok: true }),
+    runAttachedFn: async () => {
+      writeFileSync(join(dir, ".env"), "# PI_BACKENDS=\nX=1\rY=2\n");
+      return { code: 0 };
+    },
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.equal(readFileSync(join(dir, ".env"), "utf8"), "# PI_BACKENDS=\nX=1\rY=2\n", "PI_BACKENDS was not written");
+  assert.ok(notes.some((n) => /line 2 has a carriage return/.test(n.m) && /PI_BACKENDS=podman was NOT written into .*, which is unchanged/.test(n.m)), JSON.stringify(notes));
+  assert.ok(!notes.some((n) => /PI_BACKENDS=podman written into/.test(n.m)), "and it never says the service reads it");
+});
+
 test("wizard: on Linux a failed docker gate offers rootless Podman, and choosing it runs up with PI_BACKENDS=podman", async () => {
   const dir = emptyDir();
   plantRuntime(dir, mod.RUNTIME_VERSION);
@@ -1322,6 +1342,131 @@ test("E5: a .env that already lists podman is what up reads: the wizard hands up
   await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
   assert.equal(attached[0].env.PI_BACKENDS, undefined, "the shell's list would conflict with the file's, and up refuses a conflict");
   assert.doesNotMatch(seen.confirm[0].message, /PI_BACKENDS=podman /);
+});
+
+test("#447: a .env systemd splits into lines differently (a lone CR) stops the podman setup, naming the line and the change", async () => {
+  // systemd reads the CR as a line break, so the unit sets PI_BACKENDS=podman from line 1 while a line-by-line reading
+  // sees only X (measured on systemd 259). The wizard reads the file as `service install` does, so it stops too.
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  writeFileSync(join(dir, ".env"), "X=1\rPI_BACKENDS=local\n");
+  const { ui, notes } = wizardUi({ select: ["Guided setup"], input: [dir], confirm: [] });
+  const { deps, attached } = wizardDeps({
+    env: { PI_DISPATCH_DEPLOYMENT_FILE: join(tempDir("admin-setup-ptr-"), "pointer.json"), PI_BACKENDS: "podman" },
+    probePodmanFn: () => ({ ok: true }),
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.equal(attached.length, 0, "nothing is installed");
+  const err = notes.find((n) => n.t === "error" && /line 1 has a carriage return \(CR\) that is not part of a CRLF line ending/.test(n.m));
+  assert.ok(err, JSON.stringify(notes));
+  assert.match(err.m, /remove the CR, or save the file with LF \(or CRLF\) line endings\. Setup stops before anything is installed: make that change/);
+});
+
+test("#447 gate round 1: the podman setup refuses a .env with a systemd hazard BEFORE it writes PI_BACKENDS, even with no venue key in it", async () => {
+  // The wizard used to pass `X=1<CR>Y=2` (no venue key spelled), write PI_BACKENDS=podman under it, and say the service
+  // reads it; the next up or service install then refused the file. It now refuses first and changes nothing.
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  writeFileSync(join(dir, ".env"), "X=1\rY=2\n");
+  const { ui, notes } = wizardUi({ select: ["Guided setup"], input: [dir], confirm: [] });
+  const { deps, attached } = wizardDeps({
+    env: { PI_DISPATCH_DEPLOYMENT_FILE: join(tempDir("admin-setup-ptr-"), "pointer.json"), PI_BACKENDS: "podman" },
+    probePodmanFn: () => ({ ok: true }),
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.equal(attached.length, 0, "nothing is installed");
+  assert.ok(notes.some((n) => n.t === "error" && /line 1 has a carriage return/.test(n.m)), JSON.stringify(notes));
+  assert.equal(readFileSync(join(dir, ".env"), "utf8"), "X=1\rY=2\n", "and the file is unchanged");
+});
+
+test("#447 gate round 1: a .env that is not UTF-8 stops the podman setup, and its bytes are left alone", async () => {
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  const bytes = Buffer.concat([Buffer.from("K=caf"), Buffer.from([0xe9]), Buffer.from("\n")]);
+  writeFileSync(join(dir, ".env"), bytes);
+  const { ui, notes } = wizardUi({ select: ["Guided setup"], input: [dir], confirm: [] });
+  const { deps, attached } = wizardDeps({
+    env: { PI_DISPATCH_DEPLOYMENT_FILE: join(tempDir("admin-setup-ptr-"), "pointer.json"), PI_BACKENDS: "podman" },
+    probePodmanFn: () => ({ ok: true }),
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.equal(attached.length, 0);
+  // The WRITER's own rule answers first (gate round 2), before up runs, rather than after it.
+  assert.ok(notes.some((n) => n.t === "error" && /refusing to edit .*\.env: line 1 \(byte 5\) is not valid UTF-8, and rewriting the file would replace those bytes/.test(n.m)), JSON.stringify(notes));
+  assert.ok(readFileSync(join(dir, ".env")).equals(bytes), "byte-identical");
+});
+
+test("#447 gate round 2: a byte that is bad only in a COMMENT passes the reader but not the writer, so setup stops before up", async () => {
+  // systemd loads this file (a comment is never stored), but the writer would have to rewrite the byte to add a line.
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  const bytes = Buffer.concat([Buffer.from("# caf"), Buffer.from([0xe9]), Buffer.from("\nA=1\n")]);
+  writeFileSync(join(dir, ".env"), bytes);
+  const { ui, notes } = wizardUi({ select: ["Guided setup"], input: [dir], confirm: [] });
+  const { deps, attached } = wizardDeps({
+    env: { PI_DISPATCH_DEPLOYMENT_FILE: join(tempDir("admin-setup-ptr-"), "pointer.json"), PI_BACKENDS: "podman" },
+    probePodmanFn: () => ({ ok: true }),
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.equal(attached.length, 0, "up never ran");
+  assert.ok(notes.some((n) => n.t === "error" && /line 1 \(byte 5\) is not valid UTF-8/.test(n.m)), JSON.stringify(notes));
+  assert.ok(readFileSync(join(dir, ".env")).equals(bytes));
+});
+
+test("#447 gate round 3: a .env the writer would refuse stops setup BEFORE up (w01, w02, w13: a continuation or an open quote at the end)", async () => {
+  for (const before of ["A=1\nX=a\\\n", 'A=1\nX="abc\n', "A=1\nX='abc\n"]) {
+    const dir = emptyDir();
+    plantRuntime(dir, mod.RUNTIME_VERSION);
+    writeFileSync(join(dir, ".env"), before);
+    const { ui, notes } = wizardUi({ select: ["Guided setup"], input: [dir], confirm: [] });
+    const { deps, attached } = wizardDeps({
+      env: { PI_DISPATCH_DEPLOYMENT_FILE: join(tempDir("admin-setup-ptr-"), "pointer.json"), PI_BACKENDS: "podman" },
+      probePodmanFn: () => ({ ok: true }),
+    });
+    await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+    assert.equal(attached.length, 0, `up never ran: ${JSON.stringify(before)}`);
+    assert.ok(notes.some((n) => n.t === "error" && /refusing to edit .*: after the edit, systemd's EnvironmentFile= would find no PI_BACKENDS/.test(n.m) && /Setup stops before anything is installed/.test(n.m)), JSON.stringify(notes));
+    assert.equal(readFileSync(join(dir, ".env"), "utf8"), before);
+  }
+});
+
+test("#447 gate round 3: the wizard's own read-back is a backstop behind the writer's, and a failing reading refuses the write", async () => {
+  // No file reaches it today (the writer's read-back refuses first), so the seam feeds it a reading that fails: the
+  // edited text read as PI_BACKENDS=local. Nothing is written and the refusal is the wizard's own sentence.
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  writeFileSync(join(dir, ".env"), "A=1\n");
+  const { ui, notes } = wizardUi({ select: ["Guided setup"], input: [dir], confirm: [] });
+  const { deps, attached } = wizardDeps({
+    env: { PI_DISPATCH_DEPLOYMENT_FILE: join(tempDir("admin-setup-ptr-"), "pointer.json"), PI_BACKENDS: "podman" },
+    probePodmanFn: () => ({ ok: true }),
+    readBackFn: () => ({ keys: { PI_BACKENDS: "local" } }),
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.equal(attached.length, 0);
+  assert.ok(notes.some((n) => /refusing to edit .*: after the edit systemd would not read PI_BACKENDS as podman\. Nothing was written/.test(n.m)), JSON.stringify(notes));
+  assert.equal(readFileSync(join(dir, ".env"), "utf8"), "A=1\n");
+});
+
+test("#447 gate round 2: PI_BACKENDS is written only if the result reads PI_BACKENDS=podman (a file ending in an open quote)", async () => {
+  // w02, measured: appending after `X="abc` puts the key inside X's value. The reader has no hazard to name in the
+  // file as it stands (the value simply runs to the end), so only reading the RESULT back catches it.
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  const { ui, notes } = wizardUi({ select: ["Guided setup", "Skip", "Skip"], input: [dir], confirm: [true, false, false] });
+  const { deps } = wizardDeps({
+    env: { PI_DISPATCH_DEPLOYMENT_FILE: join(tempDir("admin-setup-ptr-"), "pointer.json"), PI_BACKENDS: "podman" },
+    probePodmanFn: () => ({ ok: true }),
+    runAttachedFn: async () => {
+      writeFileSync(join(dir, ".env"), 'A=1\nX="abc\n');
+      return { code: 0 };
+    },
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.equal(readFileSync(join(dir, ".env"), "utf8"), 'A=1\nX="abc\n', "nothing written");
+  // Refused by the writer's own plan, run dry just before the write (gate round 3), in the writer's words.
+  assert.ok(notes.some((n) => /refusing to edit .*: after the edit, systemd's EnvironmentFile= would find no PI_BACKENDS\. Nothing was written\. PI_BACKENDS=podman was NOT written into .*, which is unchanged/.test(n.m)), JSON.stringify(notes));
+  assert.ok(!notes.some((n) => /PI_BACKENDS=podman written into/.test(n.m)));
 });
 
 test("E4: a .env whose venue line sits inside a quoted value systemd continues is refused, not read", async () => {

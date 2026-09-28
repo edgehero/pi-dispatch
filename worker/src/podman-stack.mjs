@@ -24,7 +24,7 @@
  */
 import { dirname, join } from "node:path";
 import { DEFAULT_EGRESS_PROXY, egressProxyName } from "./egress.mjs";
-import { envFileHazard, quotedRegions, readEnvAssignments } from "./env-file.mjs";
+import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envFileSystemdHazard, envFileValueLines, quotedRegions, readEnvAssignments } from "./env-file.mjs";
 import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_NOW_FORMAT, STARTED_AT_FORMAT, NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_AFTER_PROXY_GRACE_MS, judgeNetnsKeeper, podmanNeedsNetnsKeeper, makeDetachGate, detachBlockedSentence, DETACH_GATE_READ_TIMEOUT_MS, DETACH_GATE_READ_MAX_BUFFER, runtimeFromFacts } from "./netns-keeper.mjs";
 
 // The keeper's identity, its judge and the network detach gate live in the leaf `netns-keeper.mjs` (issue #452, gate
@@ -371,11 +371,29 @@ export function foreignContainerRefusal(found, { forceHint }) {
  * systemd 252 (measured, see env-file.mjs's ASSIGNMENT) and produces no record here, `export PI_BACKENDS=podman` is
  * ignored by systemd and set by the shells, and a line inside a multi-line quote belongs to the value above it. Any
  * such line, or any file-level hazard while a key is mentioned at all, refuses: guessing "no podman" installs a
- * docker-shaped worker for a podman deployment, and the opposite guess a stack for a docker one.
+ * docker-shaped worker for a podman deployment, and the opposite guess a stack for a docker one. So does a line systemd
+ * splits differently from this reader (`envFileSystemdHazard`, issue #447), for the whole file.
  */
 export const STACK_KEYS = Object.freeze(["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY"]);
 
-export function readStackKeys(text, { loader = "systemd", path = ".env" } = {}) {
+/** The longest venue-key value `readStackKeys` accepts, in bytes (issue #447 gate round 2; systemd's own limit is ~128 KiB). */
+export const STACK_VALUE_MAX = 4096;
+
+/** A sourcing shell's named hazard (a NUL, a CRLF file), as the sentence that names it and its fix. systemd's shapes are refused above. */
+function shapedRefusal(path, hazard, why) {
+	const shape = SYSTEMD_HAZARD_SHAPES[hazard.shape];
+	return `${path} line ${hazard.line} has ${shape.what}, and ${why}, so what the service reads for it is unknown: ${shape.fix}`;
+}
+
+export function readStackKeys(content, { loader = "systemd", path = ".env", assumeSpelled = false } = {}) {
+	// The file's BYTES where the caller has them (issue #447, gate round 1): systemd refuses to LOAD a file with a NUL
+	// or with invalid UTF-8 in a key or value, and the unit then fails with every key unset, which no reading of the
+	// decoded text can see. Refused whatever the file assigns, because the service does not start on it at all.
+	const { text, loadHazard } = decodeEnvFile(content, { loader });
+	if (loadHazard !== null) {
+		const shape = SYSTEMD_HAZARD_SHAPES[loadHazard.shape];
+		return { error: `${path} line ${loadHazard.line} has ${shape.what}${loadHazard.detail ? ` (${loadHazard.detail})` : ""}: ${shape.fix}` };
+	}
 	const lines = String(text ?? "").split("\n").map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
 	// A line TOUCHES a key when the key is its leading word, `export ` allowed: that is where a loader could read an
 	// assignment of it. A key name inside another key's value (`PI_ENV_SETUP=/opt/PI_BACKENDS.sh`) touches nothing.
@@ -385,6 +403,34 @@ export function readStackKeys(text, { loader = "systemd", path = ".env" } = {}) 
 	// A `#` line is a comment to every loader. A `;` line (a comment to systemd's EnvironmentFile=) needs no rule of its
 	// own: its leading word is `;`, never a key, so it touches nothing and is not refused (the round 2 nit).
 	const comment = /^[ \t]*#/;
+	// WHERE systemd AND THIS READER DISAGREE ABOUT WHAT A LINE IS (issue #447): a lone CR, a quote reopened after a
+	// close, a quoted value under a non-identifier key, a continuation the line scan misses, a quoted value whose extent
+	// the reader's region model gets wrong. Refused rather than modelled, for the whole file, because such a line can
+	// move a venue key into or out of another value anywhere below it, or split one out of the middle of a line
+	// (`X=1<CR>PI_BACKENDS=podman`, which the `touches` scan above never sees).
+	//
+	// GATED on a venue key being SPELLED where a loader could read it as one, which is sound: systemd builds a key only
+	// from contiguous text on one line, and a line that starts with `#` or `;` is a comment to it except for text after
+	// a lone CR, which systemd reads as a line break (`# note<CR>PI_BACKENDS=podman` sets the key, measured). So a key
+	// spelled on a non-comment line counts, and on a comment line only after a lone CR on that same line; a comment
+	// that is really the tail of a continuation is value text, split into a line again only by such a CR. Counting
+	// every comment spelling refused every docker deployment with an unrelated odd line, since `init` copies
+	// `.env.example`, which spells all three keys in comments (gate round 1), and counting them all whenever the file
+	// had a lone CR ANYWHERE did the same for a CR on another line (gate round 2). `assumeSpelled` is for a caller about
+	// to WRITE a key into this file (the setup wizard), which must refuse on any hazard before it changes a byte.
+	// A comment is a line that STARTS as one: a `#` line inside a value or a continuation for this loader is part of that
+	// value, and to a shell part of the joined line (`X=a\` + `#;PI_EGRESS=0` sets PI_EGRESS, gate round 2).
+	const afterLoneCr = (l) => (l.includes("\r") ? l.slice(l.indexOf("\r") + 1) : "");
+	const inValue = loader === "cmd" ? [] : envFileValueLines(text, { loader });
+	const spelledOutside = (commentLine) => (assumeSpelled ? STACK_KEYS[0] : STACK_KEYS.find((k) => lines.some((l, i) => (commentLine.test(l) && !inValue[i] ? afterLoneCr(l) : l).includes(k))));
+	if (loader === "systemd") {
+		const h = envFileSystemdHazard(text);
+		const spelled = h === null ? undefined : spelledOutside(/^[ \t]*[#;]/);
+		if (h !== null && spelled !== undefined) {
+			const shape = SYSTEMD_HAZARD_SHAPES[h.shape];
+			return { error: `${path} line ${h.line} has ${shape.what}. The service's systemd would read the lines of this file differently from this command, so which venue keys (${STACK_KEYS.join(", ")}) it sets is unknown: ${shape.fix}` };
+		}
+	}
 	let touched = null;
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
@@ -399,10 +445,11 @@ export function readStackKeys(text, { loader = "systemd", path = ".env" } = {}) 
 	if (touched) {
 		// A value that OPENS with a quote continues across lines in systemd's parser until that quote closes (round 2,
 		// E4: systemd's test-env-file.c, env_file_6), so a key line INSIDE such a value is part of it, not an
-		// assignment, while the general reader takes it for one. Only a key line inside a still-open region is in doubt
-		// (round 3, D1): the documented multi-line GITHUB_APP_PRIVATE_KEY="-----BEGIN ...-----" closes, and a
-		// PI_BACKENDS above or below it reads normally (measured on systemd 259: the unit saw both). A quote that never
-		// closes runs to the end of the file, so every key line after it is in doubt.
+		// assignment. The general reader knows this too since #447; this check stays for the sentence it can say. Only a
+		// key line inside a still-open region is in doubt (round 3, D1): the documented multi-line
+		// GITHUB_APP_PRIVATE_KEY="-----BEGIN ...-----" closes, and a PI_BACKENDS above or below it reads normally
+		// (measured on systemd 259: the unit saw both). A quote that never closes runs to the end of the file, so every
+		// key line after it is in doubt.
 		if (loader !== "cmd") {
 			const regions = quotedRegions(text);
 			for (let i = 0; i < lines.length; i++) {
@@ -414,9 +461,21 @@ export function readStackKeys(text, { loader = "systemd", path = ".env" } = {}) 
 				}
 			}
 		}
-		const hazard = envFileHazard(text, { loader })?.line ?? null;
+		const hazard = envFileHazard(text, { loader });
+		if (hazard?.shape?.startsWith("shell-")) return { error: shapedRefusal(path, hazard, `the file assigns ${touched.key}`) };
 		if (hazard !== null) {
-			return { error: `${path} line ${hazard} is one this command cannot read (an open quote, a continuation, or a line that runs), and the file assigns ${touched.key}, so what the service reads for it is unknown. Fix that line first` };
+			return { error: `${path} line ${hazard.line} is one this command cannot read (an open quote, a continuation, or a line that runs), and the file assigns ${touched.key}, so what the service reads for it is unknown. Fix that line first` };
+		}
+	} else if (loader === "shell" || (assumeSpelled && loader !== "cmd")) {
+		// A sourcing shell can assign a key in the MIDDLE of a line (`X=a PI_EGRESS=0` is two assignments), which touches
+		// no line at its start, so here the shell's file-level hazard is asked whenever a key is spelled on a line that is
+		// not a comment (issue #447, gate round 1; the same gate as systemd's above, with `#` the shells' only comment).
+		const named = spelledOutside(/^[ \t]*#/);
+		const hazard = named === undefined ? null : envFileHazard(text, { loader });
+		const why = assumeSpelled ? "a venue key is about to be written into it" : `the file names ${named}`;
+		if (hazard?.shape?.startsWith("shell-")) return { error: shapedRefusal(path, hazard, why) };
+		if (hazard !== null) {
+			return { error: `${path} line ${hazard.line} is one this command cannot read (an open quote, a continuation, a line that runs, or a second assignment on one line), and ${why}, so what the service reads for it is unknown. Fix that line first` };
 		}
 	}
 	const found = readEnvAssignments(text, STACK_KEYS, { loader });
@@ -425,6 +484,10 @@ export function readStackKeys(text, { loader = "systemd", path = ".env" } = {}) 
 		const read = found[key];
 		if (!read) continue;
 		if (!read.plain) return { error: `${path} line ${read.line} assigns ${key} in a form this command cannot read the way the service's loader will ($, quotes, spaces or a backslash in the value), so whether this deployment runs the podman venue is unknown. Write it as a plain ${key}=value line` };
+		// THE PROJECT'S OWN CAP, not systemd's (gate round 3 corrected the wording): systemd 259 passes a value up to about
+		// 128 KiB, and past that the whole environment is `envFileLoadHazard`'s `exec-too-large`. A venue key names a list,
+		// a switch or a container, so 4096 bytes is far more than one needs, and a longer one is a mistake worth naming.
+		if (Buffer.byteLength(read.value, "utf8") > STACK_VALUE_MAX) return { error: `${path} line ${read.line} assigns ${key} a value of ${Buffer.byteLength(read.value, "utf8")} bytes, and a venue value longer than ${STACK_VALUE_MAX} bytes is refused by pi-dispatch (a venue key never needs that much; systemd itself passes up to about 128 KiB). Shorten it to at most ${STACK_VALUE_MAX} bytes` };
 		keys[key] = read.value;
 	}
 	return { keys };

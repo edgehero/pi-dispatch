@@ -1839,7 +1839,10 @@ test("doctor: a CRLF .env is judged on Windows, where CRLF is what writes it (#3
 	assert.match(text2(), /✓ PI_PAUSE_WINDOWS_FILE is set in .*\.env .* and loads/, "systemd strips the CR, so the line is ordinary there");
 	const { out: out3, text: text3 } = capture();
 	await runDoctor(imgEnv(), { ...scaffoldDeps(out3, cwd), platform: "darwin" });
-	assert.match(text3(), /is not in the form every loader reads the same way/, "and the disagreement is reported where it is real: a sourcing shell keeps the CR");
+	// On macOS the wrapper sources the file and keeps every CR, so the whole file is named, with its fix (round-cap
+	// review of #447), rather than one line's form.
+	assert.match(text3(), /line 1 has a carriage return \(CR\) at its end, a CRLF line ending, which the wrapper that sources this file on macOS keeps/, "and the disagreement is reported where it is real: a sourcing shell keeps the CR");
+	assert.match(text3(), /on line 1 of that file, convert the file to LF line endings, then run doctor again/);
 });
 
 test("doctor: a FIFO named by PI_SCOPED_LIMITS_FILE does not hang the command (#384)", async () => {
@@ -5724,12 +5727,15 @@ test("doctor: a line the reader cannot model is said ONCE for the file, naming b
 	// It was said once per KEY, inside the per-key loop, so one unreadable line produced two near-identical
 	// warnings differing only in which key they named. The fact is about the FILE, and nothing pinned the
 	// count -- hoisting it out left the whole suite green.
-	// PLATFORM DRIVEN EXPLICITLY, and the reason is a fact worth writing down rather than a test detail: a
+	// PLATFORM DRIVEN EXPLICITLY, and the reason is a fact worth writing down rather than a test detail: THIS
 	// hazard is a line a SOURCING loader cannot get past, and systemd has none of these -- it ignores what it
 	// cannot parse rather than aborting, measured in #384 for `unset K`, a command substitution, an unclosed
-	// quote and a bare word alike. So this warning can only ever arise where the service SOURCES the file,
-	// which is darwin and the sh wrapper. Left on the default platform, this passed on macOS and reported
-	// zero lines on CI's Linux, which is the platform-dependent-fixture defect this round has hit before.
+	// quote and a bare word alike. So this warning can only arise for this file where the service SOURCES it,
+	// which is darwin and the sh wrapper. (systemd has hazards of its own since #447 -- a lone CR, a reopened
+	// quote, a quoted value under a non-identifier key, a continuation the line scan misses, a quote the
+	// region model gets wrong, a file it will not load -- and this file has none of them, which the Linux
+	// half below still pins.) Left on the default platform, this passed on macOS and reported zero lines on
+	// CI's Linux, which is the platform-dependent-fixture defect this round has hit before.
 	const cwd = scaffoldedCwd();
 	writeFileSync(join(cwd, ".env"), `unset PI_PAUSE_WINDOWS_FILE\nPI_SCOPED_LIMITS_FILE=${join(cwd, "scoped-limits.json")}\n`);
 	const { out, text } = capture();
@@ -5757,6 +5763,90 @@ test("doctor: a line the reader cannot model is said ONCE for the file, naming b
 	assert.match(src, /BOOT_FILES\.map\(\(spec\) => spec\.key\)\.join\(/, "the names in that line are derived from BOOT_FILES, not spelled out");
 	// The limit is IN the line, because the same hazard may stop a sourcing shell reaching a key this
 	// command does not read at all -- WEBHOOK_SECRET, which the receiver refuses to start without.
+});
+
+test("doctor: a line systemd reads differently is named with its shape, once, and no reading is printed (#447)", async () => {
+	// The same once-per-file line as #396's, from systemd's side: the file is one systemd splits into lines
+	// differently from this command, so neither boot key's reading can be vouched for. Each issue shape, on Linux.
+	const shapes = [
+		["X=1\rY=2\n", 2, /has a carriage return \(CR\) that is not part of a CRLF line ending/, /remove the CR, or save the file with LF \(or CRLF\) line endings/],
+		['NOTE="a" "b\nOTHER=1\n"\n', 2, /has a second quote right after a value's closing quote/, /remove the second quote, or close it on the same line/],
+		['FOO-BAR="x\nOTHER=1\n"\n', 2, /has a quoted value under a key that is not a variable name/, /rename the key to a valid variable name/],
+		['NOTE="a\nb"\\\nOTHER=1\n', 3, /has a trailing backslash that systemd reads as joining the next line/, /remove the trailing backslash, or move the value onto one line/],
+	];
+	for (const [hazard, line, what, fix] of shapes) {
+		const cwd = scaffoldedCwd();
+		writeFileSync(join(cwd, ".env"), `PI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\n${hazard}`);
+		const { out, text } = capture();
+		const code = await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
+		const lines = text().split("\n").filter((l) => /cannot be read off/.test(l));
+		assert.equal(lines.length, 1, `one line for the file: ${JSON.stringify(hazard)}\n${text()}`);
+		assert.ok(lines[0].startsWith(`⚠ whether PI_PAUSE_WINDOWS_FILE or PI_SCOPED_LIMITS_FILE reaches the service cannot be read off ${join(cwd, ".env")}: line ${line} `), lines[0]);
+		assert.match(lines[0], what);
+		assert.match(text(), new RegExp(`on line ${line} of that file, ${fix.source}`), "the fix names the line and what to change");
+		assert.doesNotMatch(text(), /PI_PAUSE_WINDOWS_FILE is set in .* and loads/, "and no reading of a file systemd splits differently");
+		assert.equal(code, 0, "a warning, as #396's line is");
+	}
+	// The harmless neighbours read as before: after a closing quote any other character puts systemd in VALUE.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), `NOTE="a" # "b\nOTHER='x'y'\nPI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\n`);
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
+	assert.doesNotMatch(text(), /cannot be read off/);
+	assert.ok(text().includes(`✓ PI_PAUSE_WINDOWS_FILE is set in ${join(cwd, ".env")} (${join(cwd, "pause-windows.json")}) and loads`));
+});
+
+test("doctor: a .env systemd will not LOAD fails on Linux, naming the line and the byte (#447 gate round 1)", async () => {
+	// Measured on systemd 259: a NUL anywhere (a comment included) or invalid UTF-8 in a value fails the unit at start.
+	for (const [tail, what, fix] of [
+		[Buffer.concat([Buffer.from("# a"), Buffer.from([0]), Buffer.from("b\n")]), /line 2 has a NUL byte, and systemd refuses to load a file with one anywhere in it, so the service does not start/, /on line 2 of that file, remove the NUL byte, then run doctor again/],
+		[Buffer.concat([Buffer.from("K=caf"), Buffer.from([0xe9]), Buffer.from("\n")]), /line 2 has bytes in a key or value that are not valid UTF-8, or a Unicode noncharacter \(U\+FFFE, U\+FFFF, U\+FDD0 to U\+FDEF and the like\), and systemd refuses to load such a file/, /re-save the file as UTF-8, or remove those bytes/],
+		// Gate round 3: too large to exec (measured 203/EXEC on systemd 259), which also stops the service starting.
+		[Buffer.from(`X=${"h".repeat(200000)}\n`), /line 2 has more environment than the service can safely be started with: .*\(X=\.\.\. is 200002 bytes\)/, /shorten that value, or move the large content into a file/],
+	]) {
+		const cwd = scaffoldedCwd();
+		writeFileSync(join(cwd, ".env"), Buffer.concat([Buffer.from(`PI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\n`), tail]));
+		const { out, text } = capture();
+		const code = await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
+		assert.match(text(), new RegExp(`✗ whether PI_PAUSE_WINDOWS_FILE or PI_SCOPED_LIMITS_FILE reaches the service cannot be read off .*: ${what.source}`));
+		assert.match(text(), fix);
+		assert.doesNotMatch(text(), /PI_PAUSE_WINDOWS_FILE is set in .* and loads/);
+		assert.equal(code, 1, "a service that cannot start fails doctor");
+	}
+	// A stray byte in a COMMENT is never pushed and systemd loads the file (measured): no line about it.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), Buffer.concat([Buffer.from("# caf"), Buffer.from([0xe9]), Buffer.from(`\nPI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\n`)]));
+	const ok = capture();
+	await runDoctor(imgEnv(), { ...scaffoldDeps(ok.out, cwd), platform: "linux" });
+	assert.doesNotMatch(ok.text(), /cannot be read off/);
+	assert.ok(ok.text().includes(`✓ PI_PAUSE_WINDOWS_FILE is set in ${join(cwd, ".env")} (${join(cwd, "pause-windows.json")}) and loads`));
+});
+
+test("doctor: a lone CR is systemd's line break and not the wrapper's, so darwin says nothing about it (#447)", async () => {
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), `PI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\nX=1\rY=2\n`);
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "darwin" });
+	assert.doesNotMatch(text(), /cannot be read off/, "a sourcing shell reads LF lines, and the CR is part of X's value there");
+	assert.ok(text().includes(`✓ PI_PAUSE_WINDOWS_FILE is set in ${join(cwd, ".env")} (${join(cwd, "pause-windows.json")}) and loads`));
+});
+
+test("doctor: a boot key line inside a multi-line quoted value is not read as the key on Linux (#447)", async () => {
+	// The residual #430 left: systemd continues a value that OPENS with a quote to its close (env_file_6), and
+	// doctor's systemd reading did not know, so it said this key "is set ... and loads" while the service never
+	// saw it. It is now named as inside that value, and the fix is about the quote, not the line.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), `NOTE="see\nPI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\n"\n`);
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
+	assert.doesNotMatch(text(), /PI_PAUSE_WINDOWS_FILE is set in .* and loads/, "not read as the key");
+	assert.match(text(), /⚠ PI_PAUSE_WINDOWS_FILE on line 2 of .*\.env lies inside the quoted value that opens on line 1, so the service reads it as part of that value and not as PI_PAUSE_WINDOWS_FILE/);
+	assert.match(text(), /close the quote that opens on line 1 before line 2, or write that value's newlines as \\n escapes/);
+	// A value that closes ABOVE the key leaves it an ordinary line, as the documented PEM does.
+	writeFileSync(join(cwd, ".env"), `GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----"\nPI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\n`);
+	const pem = capture();
+	await runDoctor(imgEnv(), { ...scaffoldDeps(pem.out, cwd), platform: "linux" });
+	assert.ok(pem.text().includes(`✓ PI_PAUSE_WINDOWS_FILE is set in ${join(cwd, ".env")} (${join(cwd, "pause-windows.json")}) and loads`));
 });
 
 test("doctor: removing a regular-file guard REDDENS this file instead of hanging it (#396)", async () => {

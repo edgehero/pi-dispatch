@@ -4,7 +4,9 @@ import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_EGRESS_PROXY } from "../src/egress.mjs";
-import { ALL_QUADLET_FILES, DETACH_GATE_READ_MAX_BUFFER, DETACH_GATE_READ_TIMEOUT_MS, NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_NOW_FORMAT, detachBlockedSentence, makeDetachGate, runtimeFromFacts, QUADLET_FILES, managerEnvRefusal, unquoteShowEnvironment, planStack, podmanNeedsNetnsKeeper, quadletDir, readStackKeys, stackComponents } from "../src/podman-stack.mjs";
+import { ALL_QUADLET_FILES, DETACH_GATE_READ_MAX_BUFFER, DETACH_GATE_READ_TIMEOUT_MS, NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_NOW_FORMAT, detachBlockedSentence, makeDetachGate, runtimeFromFacts, QUADLET_FILES, managerEnvRefusal, unquoteShowEnvironment, planStack, podmanNeedsNetnsKeeper, quadletDir, readStackKeys, stackComponents, STACK_KEYS } from "../src/podman-stack.mjs";
+import { SYSTEMD_259_ENV_BYTES, SYSTEMD_259_ENV_FILES } from "./helpers/systemd-env-259.mjs";
+import { systemdEnvFile } from "./helpers/systemd-env-parse.mjs";
 import { runService } from "../src/service.mjs";
 
 /**
@@ -815,6 +817,160 @@ test("E4/D1: only a key line INSIDE a still-open quoted value is in doubt; a mul
 	// A quote opened MID-value does not continue, and a closed one is ordinary.
 	assert.deepEqual(readStackKeys("NOTE=a'b\nPI_BACKENDS=podman\n").keys, { PI_BACKENDS: "podman" });
 	assert.deepEqual(readStackKeys("NOTE='a b'\nPI_BACKENDS=podman\n").keys, { PI_BACKENDS: "podman" });
+});
+
+test("#447: the venue reader never reads a venue key differently from systemd 259 or bash, over every measured file", () => {
+	// THE ORACLE: each row is what a unit's EnvironmentFile= set, measured (and, for gate round 1's rows, what bash
+	// sourced). The reader either refuses or agrees; before #447 it read `podman` where systemd set nothing in 28 rows and
+	// nothing where systemd set `podman` in two, and gate round 1's adversary found seven more files it read wrongly.
+	const rows = [...SYSTEMD_259_ENV_FILES, ...SYSTEMD_259_ENV_BYTES.map(([n, hex, ...rest]) => [n, Buffer.from(hex, "hex"), ...rest])];
+	for (const [name, content, systemd, hazard, bash] of rows) {
+		const read = readStackKeys(content);
+		if (hazard !== null) {
+			assert.ok(read.error, `${name}: refused`);
+			assert.match(read.error, new RegExp(`^\\.env line ${hazard[0]} has `), `${name}: names the line`);
+		} else if (systemd === null) {
+			assert.ok(read.error, `${name}: systemd refused to load it, so the reader refuses`);
+		} else if (!read.error) {
+			// Refusing is always allowed; vouching for the wrong value never is.
+			assert.deepEqual(read.keys, systemd, `${name}: the reader says what systemd set`);
+		}
+		if (bash) {
+			const sh = readStackKeys(content, { loader: "shell" });
+			if (!sh.error) assert.deepEqual(sh.keys, bash, `${name}: the shell reading says what bash set`);
+		}
+	}
+	// The adversary's lies, each refused now.
+	for (const name of ["g1-a01-u2028-dq", "g1-a02-midcr-dq", "g1-a03-u2029-sq-backends", "g1-a04-u2028-proxy", "g1-a32-export-u2028", "g1-a05-nul-comment", "g1-a06-nul-value", "g1-a07-badutf8-value", "g1-a08-badutf8-key"]) {
+		const row = rows.find((r) => r[0] === name);
+		assert.ok(readStackKeys(row[1]).error, `${name}: refused`);
+	}
+	for (const name of ["g1-a23-shell-twoassign", "g1-a24-shell-dollarsq"]) assert.ok(readStackKeys(rows.find((r) => r[0] === name)[1], { loader: "shell" }).error, `${name}: the shell reading refuses`);
+	// And it still READS the must-pass rows, rather than passing the oracle by refusing everything.
+	for (const [name, text, systemd] of rows.filter((r) => r[0].startsWith("p-") || ["g1-b01-badutf8-comment", "g1-b02-badutf8-noeq", "g1-b06-fffd-valid", "g1-b09-badutf8-semicolon-comment"].includes(r[0]))) {
+		assert.deepEqual(readStackKeys(text).keys, systemd, name);
+	}
+});
+
+test("#447 gate round 1: a port of systemd's parser, pinned to every measured row, finds no file the reader reads wrongly", () => {
+	// THE PORT IS AN ORACLE ONLY BECAUSE OF THIS FIRST LOOP: it must give what systemd 259 set on every measured row.
+	const venue = (env) => Object.fromEntries(Object.entries(env).filter(([k]) => STACK_KEYS.includes(k)).sort());
+	for (const [name, text, systemd] of SYSTEMD_259_ENV_FILES) assert.deepEqual(venue(systemdEnvFile(text).env), systemd, `the port agrees with systemd on ${name}`);
+	// Then seeded random files from the tokens every shape is made of. The reader refuses or agrees; it never vouches for
+	// a value the port does not set. Seeded so a failure is a file anyone can reproduce, not a flake.
+	let seed = 447;
+	const rnd = () => {
+		seed = (seed + 0x6d2b79f5) | 0;
+		let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+		t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+	};
+	const TOKENS = ["PI_BACKENDS=", "PI_EGRESS=", "PI_EGRESS_PROXY=", "K=", "FOO-BAR=", "export K=", "export PI_BACKENDS=", "# ", "; ", '"', "'", "\\", "\n", "\n", "\n", "\r\n", "\r", " ", "\t", "podman", "0", "x", "=", "\u2028", "$'", "#", "\\\n"];
+	let read = 0;
+	for (let i = 0; i < 20000; i++) {
+		let text = "";
+		for (let k = 2 + Math.floor(rnd() * 14); k > 0; k--) text += TOKENS[Math.floor(rnd() * TOKENS.length)];
+		const r = readStackKeys(text);
+		if (r.error) continue;
+		read++;
+		assert.deepEqual(r.keys, venue(systemdEnvFile(text).env), `the reader vouched for what systemd does not set: ${JSON.stringify(text)}`);
+	}
+	assert.ok(read > 10000, `the reader still reads most of them (${read} of 20000), rather than passing by refusing`);
+	// The file this found: a `#` line that is the tail of a continuation, where a lone CR starts a real line. The first
+	// hazard is the continuation, and the comment spelling still counts because the file has a lone CR.
+	assert.match(readStackKeys("export K= #0#  \\\n# export PI_BACKENDS=PI_EGRESS=\rPI_EGRESS_PROXY= K=FOO-BAR=").error, /^\.env line 1 has a trailing backslash/);
+});
+
+test("#447 gate round 1: `.env.example` spells the venue keys in comments, which alone never refuses a file", () => {
+	// `init` copies it, so gating on any spelling refused every docker deployment with an unrelated odd line in it.
+	// Measured on systemd 259 with the shipped file plus each tail: neither sets a venue key.
+	const example = readFileSync(join(DEPLOY_DIR, "..", ".env.example"), "utf8");
+	assert.match(example, /^# PI_BACKENDS=$/m, "the premise: the shipped example spells the key in a comment");
+	assert.deepEqual(readStackKeys(`${example}FOO-BAR="x\nOTHER=1\n"\n`), { keys: {} }, "a non-identifier key's value, and no key spelled outside comments");
+	assert.deepEqual(readStackKeys(`${example}X=a Y=0\nunset Z\n`, { loader: "shell" }), { keys: {} }, "the shells' hazards, the same");
+	// A lone CR ELSEWHERE does not make the comments count (gate round 2; measured: the shipped example plus `X=1<CR>Y=2`
+	// sets no venue key). Only text after a lone CR on a comment's own line can be read as a key.
+	assert.deepEqual(readStackKeys(`${example}X=1\rY=2\n`), { keys: {} });
+	assert.match(readStackKeys(`${example}# note\rPI_BACKENDS=podman\n`).error, /has a carriage return/);
+	// And a caller about to WRITE a key refuses on any hazard (the setup wizard).
+	assert.match(readStackKeys(`${example}FOO-BAR="x\nOTHER=1\n"\n`, { assumeSpelled: true }).error, /not a variable name/);
+	assert.match(readStackKeys("X=1\nunset Y\n", { loader: "shell", assumeSpelled: true }).error, /a venue key is about to be written into it/);
+	assert.deepEqual(readStackKeys("X=1\n", { assumeSpelled: true }), { keys: {} }, "a clean file is still read");
+});
+
+test("#447 gate round 1: service install refuses a .env systemd will not load before writing anything, podman or docker", async () => {
+	const nul = Buffer.concat([Buffer.from("PI_EGRESS=0\n# a"), Buffer.from([0]), Buffer.from(`b\n${PODMAN_ENV}`)]);
+	const docker = Buffer.concat([Buffer.from("K=caf"), Buffer.from([0xe9]), Buffer.from("\n")]);
+	for (const [bytes, what] of [[nul, /line 2 has a NUL byte/], [docker, /line 1 has bytes in a key or value that are not valid UTF-8/]]) {
+		const h = svc({ files: { [ENV_PATH]: bytes } });
+		assert.equal(await h.run(), 1);
+		assert.match(h.errText(), what);
+		assert.deepEqual(h.writes, [], "no unit and no Quadlet file written");
+		assert.ok(!h.calls.some((c) => c[0] === "systemctl"), "and nothing enabled");
+	}
+});
+
+test("#447 gate round 2: a venue value longer than systemd passes on is refused, naming the key and the line", () => {
+	// Measured on systemd 259: a value of 131068 bytes and up fails the exec ("Argument list too long") and one of 2 MB
+	// is dropped at load (key unset); 131000 still passes. The bound here is 4096, far from both and from any real value.
+	const at = (n) => readStackKeys(`PI_EGRESS=0\nPI_EGRESS_PROXY=${"h".repeat(n)}\n`);
+	assert.deepEqual(at(4096).keys, { PI_EGRESS: "0", PI_EGRESS_PROXY: "h".repeat(4096) });
+	assert.match(at(4097).error, /^\.env line 2 assigns PI_EGRESS_PROXY a value of 4097 bytes, and a venue value longer than 4096 bytes is refused by pi-dispatch \(a venue key never needs that much; systemd itself passes up to about 128 KiB\)\. Shorten it to at most 4096 bytes$/);
+	assert.match(readStackKeys(`PI_BACKENDS=${"podman,".repeat(700)}podman\n`).error, /line 1 assigns PI_BACKENDS a value of 4906 bytes/);
+	assert.match(readStackKeys(`PI_BACKENDS='${"é".repeat(2049)}'\n`).error, /a value of 4098 bytes/, "bytes, not characters");
+});
+
+test("#447 gate round 2: the comment gate, per line: a lone CR elsewhere does not make comments count, a continuation does", () => {
+	assert.deepEqual(readStackKeys("# PI_BACKENDS=podman\nX=1\rY=2\n"), { keys: {} }, "the CR is on another line");
+	assert.match(readStackKeys("# note\rPI_BACKENDS=podman\n").error, /has a carriage return/, "text after a lone CR on the comment's own line is a line");
+	// To a shell a `#` line reached by a continuation is joined text (b52, measured: bash sets PI_EGRESS=0).
+	assert.ok(readStackKeys("X=a\\\n#;PI_EGRESS=0\n", { loader: "shell" }).error);
+	// The cmd wrapper has no shell hazards, even for a caller about to write.
+	assert.deepEqual(readStackKeys("X=1\nunset Y\n", { loader: "cmd", assumeSpelled: true }), { keys: {} });
+	assert.deepEqual(readStackKeys('X=a"b\n', { loader: "cmd", assumeSpelled: true }), { keys: {} }, "nor the shell branch at all: this line is a cmd hazard, and not what the writer asks about");
+});
+
+test("#447 gate round 3: a file too large for systemd to start the service with is refused, naming the key or the total", () => {
+	assert.match(readStackKeys(`PI_EGRESS=0\nX=${"h".repeat(200000)}\n`).error, /^\.env line 2 has more environment than the service can safely be started with: one KEY=value longer than 131071 bytes fails with "Argument list too long", and a total over 2031616 bytes .* \(X=\.\.\. is 200002 bytes\): shorten that value/);
+	const many = Array.from({ length: 24 }, (_, i) => `K${i}=${"h".repeat(100000)}`).join("\n");
+	assert.match(readStackKeys(`PI_EGRESS=0\n${many}\n`).error, /\(the file's assignments reach \d+ bytes by this line\)/);
+	assert.deepEqual(readStackKeys(`PI_EGRESS=0\nX=${"h".repeat(131060)}\n`).keys, { PI_EGRESS: "0" }, "c02, measured to run");
+	// c16, measured: a 4091-byte proxy value in two-byte characters, under the project's 4096-byte cap, which systemd passed.
+	const c16 = `http://a/${"\u00e9".repeat(2041)}`;
+	assert.equal(Buffer.byteLength(c16), 4091);
+	assert.deepEqual(readStackKeys(`PI_EGRESS_PROXY='${c16}'\n`).keys, { PI_EGRESS_PROXY: c16 }, "single-quoted, as the measured file has it");
+});
+
+test("#447: each shape is refused with its line, what systemd does with it, and what to change", () => {
+	const cases = [
+		['K="a" "b\nPI_BACKENDS=podman\n"\n', 1, /a second quote right after a value's closing quote.*: remove the second quote, or close it on the same line$/],
+		['NOTE="a\nb" "c\nPI_BACKENDS=podman\n"\n', 2, /a second quote right after/],
+		['FOO-BAR="x\nPI_BACKENDS=podman\n"\n', 1, /under a key that is not a variable name.*: rename the key to a valid variable name, close the quote on the same line, or delete the line$/],
+		["X=1\rPI_BACKENDS=podman\n", 1, /a carriage return \(CR\) that is not part of a CRLF line ending, which systemd reads as a line break.*: remove the CR, or save the file with LF \(or CRLF\) line endings$/],
+		['NOTE="a\nb"\\\nPI_BACKENDS=podman\n', 2, /a trailing backslash that systemd reads as joining the next line.*: remove the trailing backslash, or move the value onto one line$/],
+	];
+	for (const [text, line, what] of cases) {
+		const err = readStackKeys(text, { path: "/srv/pi/.env" }).error;
+		assert.ok(err, JSON.stringify(text));
+		assert.ok(err.startsWith(`/srv/pi/.env line ${line} has `), err);
+		assert.match(err, what);
+		assert.match(err, /which venue keys \(PI_BACKENDS, PI_EGRESS, PI_EGRESS_PROXY\) it sets is unknown/);
+	}
+	// The whole file: the hazard can sit BELOW the key, and a key after a lone CR is one no line scan finds.
+	assert.match(readStackKeys('PI_BACKENDS=podman\nFOO-BAR="x\nPI_EGRESS=0\n"\n').error, /^\.env line 2 has /);
+	assert.match(readStackKeys("X=1\rPI_EGRESS_PROXY=my-squid\n").error, /^\.env line 1 has a carriage return/);
+});
+
+test("#447: a file that never names a venue key outside a comment is not refused over a systemd hazard, and other loaders are unaffected", () => {
+	// Sound, not lenient: systemd builds a key only from contiguous text on one line, and a `#` or `;` line is a comment
+	// to it unless a lone CR splits it, so a file that spells no key outside comments assigns none under either reading
+	// (gate round 1 corrected "never spells one anywhere", which refused every file `init` makes from .env.example). A
+	// docker deployment with an odd line elsewhere keeps working.
+	assert.deepEqual(readStackKeys('FOO-BAR="x\nOTHER=1\n"\n'), { keys: {} });
+	assert.deepEqual(readStackKeys("X=1\rOTHER=2\n"), { keys: {} });
+	// The shells split on LF and carry every quote, and the cmd wrapper reads one line at a time: this is systemd's.
+	assert.deepEqual(readStackKeys("X=1\rPI_BACKENDS=podman\n", { loader: "shell" }), { keys: {} });
+	assert.deepEqual(readStackKeys("PI_BACKENDS=podman\nX=1\rY=2\n", { loader: "cmd" }).keys, { PI_BACKENDS: "podman" });
 });
 
 test("nits/R7/R32: `;` comments, a key inside another key's value, and a leading blank read as systemd reads them", () => {

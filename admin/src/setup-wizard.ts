@@ -42,7 +42,7 @@ import { readQueueState, resolvePaths, writeTriggers } from "./read-model.mjs";
 // The worker's own answers to "which venues does this list bless" and "set this .env key unless the operator already
 // did" (issue #430): one parse and one never-clobber writer, never a second copy of either in the admin.
 import { venuesOf } from "@edgehero/pi-dispatch/backends";
-import { updateEnvFile } from "@edgehero/pi-dispatch/env-file";
+import { envFileEditCheck, envFileEditRefusal, updateEnvFile } from "@edgehero/pi-dispatch/env-file";
 // The venue keys read exactly as `service install` and `up` read them (issue #430 review round 2, E4): the general
 // reader takes a line inside a quoted value that systemd continues for an assignment, and this one refuses that file.
 import { readStackKeys } from "@edgehero/pi-dispatch/podman-stack";
@@ -379,19 +379,35 @@ function podmanPreferred(env: any, dir: string, fs: any): boolean {
 
 /**
  * What the deployment's `.env` says about PI_BACKENDS, read as `service install` reads it: `{ absent: true }` when the
- * file or the key is not there, `{ value }`, or `{ unreadable }` with the reader's reason.
+ * file or the key is not there, `{ value }`, or `{ unreadable }` with the reader's reason. `writing`: the wizard is
+ * about to write PI_BACKENDS into this file, so a line systemd reads differently counts even where no venue key is
+ * spelled yet, because after the write one is (issue #447, gate round 1: it wrote the key under such a line and said the
+ * service reads it, and the next `up` refused).
  */
-function deploymentBackends(dir: string, fs: any): { absent: true } | { value: string } | { unreadable: string } {
+function deploymentBackends(dir: string, fs: any, { writing = false, platform = process.platform, readBackFn = readStackKeys }: any = {}): { absent: true } | { value: string } | { unreadable: string } {
   const envPath = join(dir, ".env");
-  let text: string;
+  let text: string | Uint8Array;
   try {
     if (!fs.existsSync(envPath)) return { absent: true };
-    text = String(fs.readFileSync(envPath, "utf8"));
+    // Bytes, not text: the reader checks what systemd refuses to load before it decodes (issue #447).
+    text = fs.readFileSync(envPath);
   } catch (err: any) {
     return { unreadable: `${envPath} could not be read: ${err?.message ?? err}` };
   }
-  const read: any = readStackKeys(text, { loader: "systemd", path: envPath });
+  // About to write: first the WRITER's own rule (a file it would refuse to edit is refused now, before `up` runs rather
+  // than after), then every line hazard as though the key were already spelled (issue #447, gate rounds 1 and 2).
+  if (writing) {
+    const refusal = envFileEditRefusal(text, envPath);
+    if (refusal !== null) return { unreadable: refusal };
+  }
+  const read: any = readStackKeys(text, { loader: "systemd", path: envPath, assumeSpelled: writing });
   if (read.error) return { unreadable: read.error };
+  // And the WRITER itself, run dry on the file as it stands (gate round 3): a file ending inside a continuation or an
+  // open quote passed every check above, `up` ran, and only then did the write refuse. Same rule, same function.
+  if (writing) {
+    const wouldRefuse = envFileEditCheck(text, envPath, "PI_BACKENDS", "podman", { platform, verify: podmanWriteVerify(envPath, read.keys, readBackFn) });
+    if (wouldRefuse !== null) return { unreadable: wouldRefuse };
+  }
   return typeof read.keys.PI_BACKENDS === "string" ? { value: read.keys.PI_BACKENDS } : { absent: true };
 }
 
@@ -576,6 +592,8 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
     existsSyncFn = (p: string) => fs.existsSync(p),
     probeDockerFn = probeDocker,
     probePodmanFn = probePodman,
+    // The venue-key reading behind the wizard's own post-edit check (a seam for its test; see podmanWriteVerify).
+    readBackFn = readStackKeys,
     initialDetection,
   } = deps;
   const ui = ctx?.ui;
@@ -640,10 +658,10 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   // deployment, where the operator picked rootless Podman at the docker gate. Setup never overwrites a key the operator
   // set, so going on would run `up` for podman while the service it installs next reads `local` from the file. It stops
   // here, before anything is downloaded, with the one edit that resolves it.
-  const fileBackends = deploymentBackends(dir, fs);
+  const fileBackends = deploymentBackends(dir, fs, { writing: runtime === "podman", platform, readBackFn });
   if (runtime === "podman") {
     if ("unreadable" in fileBackends) {
-      notify?.(`${fileBackends.unreadable}. Setup stops before anything is installed: fix that line (a plain PI_BACKENDS=podman), then re-run /dispatch setup`, "error");
+      notify?.(`${fileBackends.unreadable}. Setup stops before anything is installed: make that change, with PI_BACKENDS on a plain PI_BACKENDS=podman line, then re-run /dispatch setup`, "error");
       return;
     }
     if ("value" in fileBackends && !venuesOf({ PI_BACKENDS: fileBackends.value }).podmanUsed) {
@@ -740,7 +758,7 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   }
 
   // ── (5b) the podman venue, recorded where the service reads it ────────────────────────────────
-  if (runtime === "podman") recordPodmanVenue(dir, fs, notify, platform);
+  if (runtime === "podman") recordPodmanVenue(dir, fs, notify, platform, readBackFn);
 
   // ── (6) the deployment pointer ─────────────────────────────────────────────────────────────────
   // The four cwd-default files need pointing because resolvePaths defaults them to "./", which is right
@@ -1010,25 +1028,53 @@ async function offerTriggerEdge(
 }
 
 /**
+ * The wizard's own condition on the edited `.env` (gate round 2): read the way `service install` will read it, the new
+ * text must give PI_BACKENDS=podman with the other two venue keys as they were. A BACKSTOP behind the writer's own
+ * read-back (`updateEnvFile`), which since gate round 3 refuses every such case first, so no file reaches this today;
+ * it stays so that a gap in that read-back cannot turn into a venue the service does not run, and `readBackFn` is a seam
+ * so a test can pin it with a reading that fails.
+ */
+function podmanWriteVerify(envPath: string, prior: any, readBackFn: any = readStackKeys) {
+  return (next: string): string | null => {
+    const after: any = readBackFn(next, { loader: "systemd", path: envPath });
+    if (after.error) return `after the edit ${after.error}`;
+    if (after.keys.PI_BACKENDS !== "podman") return "after the edit systemd would not read PI_BACKENDS as podman";
+    for (const key of ["PI_EGRESS", "PI_EGRESS_PROXY"]) {
+      if (after.keys[key] !== prior[key]) return `the edit would change what systemd reads for ${key}`;
+    }
+    return null;
+  };
+}
+
+/**
  * Step 5b's body: the one `.env` line the podman answer implies, `PI_BACKENDS=podman`, written through the worker's
  * never-clobber writer so a value the operator set survives. Only into a `.env` that exists (init, inside `up`, makes
  * it): inventing one would stop init from ever scaffolding the real file. Without this line `service install` reads
  * the default list, `local`, and installs a docker worker on a host that has no docker.
  */
-function recordPodmanVenue(dir: string, fs: any, notify: Notify, platform: string): void {
+function recordPodmanVenue(dir: string, fs: any, notify: Notify, platform: string, readBackFn: any = readStackKeys): void {
   const envPath = join(dir, ".env");
   if (!fs.existsSync(envPath)) {
     notify?.(`no ${envPath} yet (\`up\` runs init, which writes it): add PI_BACKENDS=podman to it before \`service install\`, which reads only that file`, "warning");
     return;
   }
+  // Refused BEFORE the write, and the file left as it is: a line systemd reads differently would make the key this
+  // writes one the service may never see, and the next `up` or `service install` refuses the file anyway.
+  const before = deploymentBackends(dir, fs, { writing: true, platform, readBackFn });
+  if ("unreadable" in before) {
+    notify?.(`${before.unreadable}. PI_BACKENDS=podman was NOT written into ${envPath}, which is unchanged: make that change, then add PI_BACKENDS=podman before \`service install\``, "warning");
+    return;
+  }
+  const priorRead: any = readStackKeys(fs.readFileSync(envPath), { loader: "systemd", path: envPath });
+  const verify = podmanWriteVerify(envPath, priorRead.keys ?? {}, readBackFn);
   try {
-    if (updateEnvFile(envPath, "PI_BACKENDS", "podman", { fs, platform }).changed) {
+    if (updateEnvFile(envPath, "PI_BACKENDS", "podman", { fs, platform, verify }).changed) {
       notify?.(`PI_BACKENDS=podman written into ${envPath}: the worker and \`service install\` read the podman venue from there`, "info");
       return;
     }
     const file = deploymentBackends(dir, fs);
     if ("unreadable" in file) {
-      notify?.(`${file.unreadable}. Make it a plain PI_BACKENDS=podman before \`service install\``, "warning");
+      notify?.(`${file.unreadable}. Make that change, with PI_BACKENDS on a plain PI_BACKENDS=podman line, before \`service install\``, "warning");
     } else if (!venuesOf({ PI_BACKENDS: "value" in file ? file.value : undefined }).podmanUsed) {
       notify?.(`${envPath} already sets PI_BACKENDS to something without podman; left untouched (setup never overwrites a key you set). Add podman to it yourself if this deployment is meant to run there`, "warning");
     }

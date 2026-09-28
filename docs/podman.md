@@ -437,6 +437,16 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    opens on an earlier line and has not closed yet, which systemd reads as part of that value) stops both: write it as
    a plain `PI_BACKENDS=podman`. A multi-line value that closes, such as the documented inline
    `GITHUB_APP_PRIVATE_KEY="-----BEGIN ...-----"`, is fine with the key above or below it (measured on systemd 259).
+   Both also refuse the WHOLE file, naming the line and what to change, when a line anywhere in it is one systemd
+   splits into lines differently from `pi-dispatch` (a lone carriage return, a quote reopened right after a closing
+   quote, a quoted value under a key that is not a variable name, a trailing backslash after a mid-value quote or a
+   `#`) and a venue key is spelled outside a comment, when systemd would refuse to load the file at all (a NUL byte,
+   or a key or value that is not valid UTF-8 or holds a Unicode noncharacter such as U+FFFF, or more environment
+   than systemd can start the service with), and when a venue value is longer than 4096 bytes, pi-dispatch's own cap.
+   The setup wizard refuses the same lines before it runs `up`, and writes `PI_BACKENDS=podman` only when the edited
+   file reads back that way; otherwise it changes nothing. Neither ever overwrites a key the service already reads,
+   and `up` names a key that only a shell reads (an `export WEBHOOK_SECRET=` line, which systemd ignores) instead of
+   calling it set.
 
    The proxy's rules are mounted from `~/.config/pi-dispatch/egress-proxy.conf`, a copy of the package's own
    `egress-proxy.conf` that the installer writes (shown, compared and forced like the unit files). Never the package
