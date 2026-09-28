@@ -2061,6 +2061,13 @@ test("#470: a line that names the key other than as a plain KEY= line is refused
 		["A=\x1a\nWEBHOOK_SECRET=x\n", "line 1 has a Ctrl-Z byte (0x1A), which cmd may read as the end of the file. To fix it, remove the byte. Nothing was written"],
 		["A!B!=1\nWEBHOOK_SECRET=x\n", "line 1 has a ! before its first =, and with delayed expansion on (the registry's DelayedExpansion value) the .cmd wrapper's set can expand that into another variable's name. To fix it, remove the ! from that line. Nothing was written"],
 		["/A WEBHOOK_SECRET=5\n", "line 1 starts with /, which the .cmd wrapper's set might read as its /A or /P switch. To fix it, remove the / at the start of that line. Nothing was written"],
+		// A caret in a name is an escape cmd removes on a line delayed expansion touches, and the value's `!` is enough:
+		// `WEBHOOK_SECRE^T=evil!` sets WEBHOOK_SECRET then (COMMUNITY, the phase model), so it is refused whatever the key.
+		["WEBHOOK_SECRET=old\nWEBHOOK_SECRE^T=evil!\n", "line 2 has a ^ before its first =, which cmd removes as an escape on a line delayed expansion touches (one with a !, the value's included), so the .cmd wrapper's set can read that name as another variable's. To fix it, remove the ^ from that line. Nothing was written"],
+		["A^B=1\nWEBHOOK_SECRET=old\n", "line 1 has a ^ before its first =, which cmd removes as an escape on a line delayed expansion touches (one with a !, the value's included), so the .cmd wrapper's set can read that name as another variable's. To fix it, remove the ^ from that line. Nothing was written"],
+		// A name outside ASCII: how set folds its case is not documented, and Unicode folds `ı` to I and `ſ` to S.
+		["WEBHOOK_SECRET=old\nWEBHOOK_\u017fECRET=evil\n", "line 2 has a character outside ASCII before its first =, and how the .cmd wrapper's set folds the case of such a name (`\u0131` to I, `\u017f` to S) is not documented, so which variable that line sets cannot be confirmed. To fix it, spell the name in ASCII, or remove the line. Nothing was written"],
+		["P\u0131_BACKENDS=docker\nWEBHOOK_SECRET=old\n", "line 1 has a character outside ASCII before its first =, and how the .cmd wrapper's set folds the case of such a name (`\u0131` to I, `\u017f` to S) is not documented, so which variable that line sets cannot be confirmed. To fix it, spell the name in ASCII, or remove the line. Nothing was written"],
 		[`A=${"x".repeat(8184)}\nWEBHOOK_SECRET=x\n`, `line 1 is 8186 bytes long, and the .cmd wrapper's set "..." for it would pass cmd's 8191-character command-line limit. To fix it, shorten that value, or move the large content into a file and put its path in the .env. Nothing was written`],
 	];
 	for (const [text, message] of rows) {
@@ -2085,6 +2092,9 @@ test("#470: lines the wrapper reads harmlessly for the key are not refused on Wi
 		// An indented or case-varied line for ANOTHER key is that key's business.
 		["  OTHER=1\nother=2\nWEBHOOK_SECRET=old\n", "U"],
 		["WEBHOOK_SECRET=a=b\n", "U"],
+		// A BOM before another key's name is set aside before the ASCII rule, as the name rules set it aside; a caret or a
+		// character outside ASCII in a VALUE is the value's business, and this is not the key's line.
+		["\ufeffOTHER=1\nX=a^b\nY=caf\u00e9\nWEBHOOK_SECRET=old\n", "U"],
 	];
 	for (const [text, verdict] of rows) assert.equal(win32Verdict(text, "WEBHOOK_SECRET", "NEW"), verdict, JSON.stringify(text));
 	// `eol=#` skips the whole line (DOCUMENTED), so a `!` in a comment names nothing.
@@ -2158,17 +2168,53 @@ test("#470: a value the wrapper cannot carry is never written on Windows, and on
 
 // -- issue #470 follow-up: a line assigning one of the service wrapper's own variables is named, never trusted ----------
 
-test("#470: WRAPPER_INTERNAL_KEYS is every variable each wrapper assigns for itself, read off the wrappers' text", () => {
+/**
+ * Every variable name a service wrapper's CODE touches, comments removed: assigned (`NAME=`, `read NAME`, `export`,
+ * `unset`, `${NAME:=...}`, `set NAME=`, `set "NAME=`, `set /a`/`set /p`, `if defined NAME`) or only read (`$NAME`,
+ * `${NAME...}`, `%NAME%`, `!NAME!`). Special and positional parameters and FOR variables are not names.
+ */
+function wrapperVariables(text, kind) {
+	const found = new Set();
+	const add = (re, s) => {
+		for (const m of s.matchAll(re)) found.add(kind === "cmd" ? m[1].toUpperCase() : m[1]);
+	};
+	const NAME = "([A-Za-z_][A-Za-z0-9_]*)";
+	if (kind === "sh") {
+		const code = text.split("\n").filter((l) => !/^[ \t]*#/.test(l)).join("\n");
+		add(new RegExp(`(?:^|[;&|({ \\t])${NAME}=`, "gm"), code);
+		add(new RegExp(`\\$\\{?${NAME}`, "g"), code);
+		add(new RegExp(`\\b(?:read(?:[ \\t]+-r)?|export|unset|local|readonly|getopts[ \\t]+\\S+|for)[ \\t]+${NAME}`, "g"), code);
+		return found;
+	}
+	const code = text.replace(/\r\n/g, "\n").split("\n").filter((l) => !/^[ \t]*(?:@?rem\b|::)/i.test(l)).join("\n");
+	add(new RegExp(`\\bset[ \\t]+(?:/[aApP][ \\t]+)?"?${NAME}[ \\t]*=`, "gi"), code);
+	add(new RegExp(`%${NAME}(?::[^%]*)?%`, "g"), code);
+	add(new RegExp(`!${NAME}(?::[^!]*)?!`, "g"), code);
+	add(new RegExp(`\\bif[ \\t]+(?:not[ \\t]+)?defined[ \\t]+${NAME}`, "gi"), code);
+	return found;
+}
+
+test("#470: WRAPPER_INTERNAL_KEYS is every variable each wrapper assigns or reads for itself, read off the wrappers' text", () => {
 	const root = join(import.meta.dirname, "..", "..");
 	const sh = readFileSync(join(root, "deploy", "worker-env-wrapper.sh"), "utf8");
 	const cmd = readFileSync(join(root, "deploy", "worker-env-wrapper.cmd"), "utf8");
-	// sh: every `name=` at the start of a statement, plus PI_ENV_SETUP, which it re-exports.
-	const shNames = new Set([...sh.matchAll(/^[ \t]*([A-Za-z_][A-Za-z0-9_]*)=/gm)].map((m) => m[1]));
+	// The ONE exception each, and why it is not the wrapper's own: PWD (sh) and CD (cmd) are read only on the branch
+	// where there is no .env at all, so no line of one can reach them.
+	const shNames = wrapperVariables(sh, "sh");
+	shNames.delete("PWD");
 	assert.deepEqual([...shNames].sort(), [...WRAPPER_INTERNAL_KEYS.shell].sort(), "the sh wrapper's own variables");
-	// cmd: every `set "NAME=` but the load's own `%%A` (ERRORLEVEL among them, cleared before the command reads %ERRORLEVEL%).
-	const cmdNames = new Set([...cmd.matchAll(/\bset "([A-Za-z_][A-Za-z0-9_]*)=/g)].map((m) => m[1].toUpperCase()));
+	const cmdNames = wrapperVariables(cmd, "cmd");
+	cmdNames.delete("CD");
 	assert.deepEqual([...cmdNames].sort(), [...WRAPPER_INTERNAL_KEYS.cmd].sort(), "the cmd wrapper's own variables");
-	assert.match(cmd, /%ERRORLEVEL%/);
+	// The scanner sees every form it claims to, so a later wrapper line in one of them cannot slip past it.
+	for (const [line, name] of [["x=1", "x"], ["read -r y", "y"], [': "${z:=d}"', "z"], ['echo "$w"', "w"], ["echo ${v#a}", "v"], ["export u", "u"], ["a=1; t=2", "t"]]) {
+		assert.ok(wrapperVariables(`${line}\n`, "sh").has(name), `sh: ${line}`);
+	}
+	assert.equal(wrapperVariables("# q=1 $q\n", "sh").size, 0, "an sh comment names nothing");
+	for (const [line, name] of [["set q=1", "Q"], ['set "q=1"', "Q"], ["set /a q=1", "Q"], ["set /p q=prompt", "Q"], ["echo %q%", "Q"], ["echo !q!", "Q"], ["echo %q:~1%", "Q"], ["if defined q echo", "Q"], ["if not defined q echo", "Q"]]) {
+		assert.ok(wrapperVariables(`${line}\r\n`, "cmd").has(name), `cmd: ${line}`);
+	}
+	assert.equal(wrapperVariables("REM set q=1 %q%\n:: %r%\nfor %%A in (x) do set \"%%A=%%B\"\n%*\n%~1\n", "cmd").size, 0, "a comment, a FOR variable and the arguments name nothing");
 });
 
 test("#470: the reader names a line assigning a wrapper's own variable, for the loader that has that wrapper", () => {

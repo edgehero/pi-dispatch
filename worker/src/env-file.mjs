@@ -159,6 +159,13 @@ export function renderEnvValue(value, { platform = process.platform } = {}) {
  *   a `!` in any name, a name starting with `/`         CAUTIOUS, file-wide: with delayed expansion on (see `!`
  *                                                       below) a name can expand into the key's, and `set` might
  *                                                       read `/A` or `/P` as its switch
+ *   a `^` in any name                                  CAUTIOUS, file-wide: on a line delayed expansion touches
+ *                                                       (one with a `!`, the value's included) the caret is an
+ *                                                       escape and is removed, so `WEBHOOK_SECRE^T=evil!` sets
+ *                                                       WEBHOOK_SECRET (COMMUNITY: the phase model)
+ *   a character outside ASCII in any name              CAUTIOUS, file-wide: how `set` folds case beyond ASCII
+ *   (blanks, quotes and a BOM around it set aside)     is not documented, and Unicode folds `ı` to I and `ſ` to
+ *                                                       S, so `Pı_BACKENDS` may be PI_BACKENDS
  *   `export WEBHOOK_SECRET=x`                          a variable named `export WEBHOOK_SECRET`, so the key is not
  *                                                       set (`noOpMisread` says so)
  *
@@ -235,6 +242,8 @@ function cmdReading(text, key) {
 		const eq = body.indexOf("=");
 		const name = eq === -1 ? body : body.slice(0, eq);
 		if (name.includes("!")) note(n, "has a ! before its first =, and with delayed expansion on (the registry's DelayedExpansion value) the .cmd wrapper's set can expand that into another variable's name", "remove the ! from that line");
+		if (name.includes("^")) note(n, "has a ^ before its first =, which cmd removes as an escape on a line delayed expansion touches (one with a !, the value's included), so the .cmd wrapper's set can read that name as another variable's", "remove the ^ from that line");
+		if (/[^\x00-\x7f]/u.test(name.replace(/^[ \t\r\ufeff"]+|[ \t\r\ufeff"]+$/g, ""))) note(n, "has a character outside ASCII before its first =, and how the .cmd wrapper's set folds the case of such a name (`ı` to I, `ſ` to S) is not documented, so which variable that line sets cannot be confirmed", "spell the name in ASCII, or remove the line");
 		if (/^[ \t"]*\//.test(name)) note(n, "starts with /, which the .cmd wrapper's set might read as its /A or /P switch", "remove the / at the start of that line");
 		const internal = envFileWrapperInternal(l, { loader: "cmd" });
 		if (internal !== null) note(n, WRAPPER_INTERNAL_WHAT(internal.name), WRAPPER_INTERNAL_FIX);

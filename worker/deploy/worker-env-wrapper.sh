@@ -87,9 +87,9 @@ else
 	echo "worker-env-wrapper: no .env in $PWD -- the environment comes from $1 (PI_ENV_SETUP)" >&2
 fi
 
-# AFTER THE LOAD, every variable this wrapper reads is assigned, so no line of ./.env reaches one. The
-# worker sees the unit's PI_ENV_SETUP too, never one the file set (the setup script, which is unit
-# configuration, may still set its own).
+# AFTER THE LOAD, every variable this wrapper reads is assigned, so no assignment line of ./.env
+# reaches one. The worker sees the unit's PI_ENV_SETUP too, never one the file set (the setup script,
+# which is unit configuration, may still set its own).
 env_setup=$1
 shift
 if [ -n "$env_setup" ]; then
@@ -123,10 +123,10 @@ fi
 # THE FORWARDING HANDLER, installed after the sourcing, and the placement is not belt-and-braces. A
 # sourced script runs in THIS shell, so a `trap ... TERM` inside one REPLACES whatever handler is up and
 # the drain would silently disappear -- a manager's cleanup helper does exactly that. Installing it here
-# restores it. Its two variables are assigned here too, after the load, for the reason given at the top. What it cannot undo is a script that
-# IGNORES TERM (`trap '' TERM`): a signal discarded while it was ignored is already gone, and the child
-# forked below would inherit SIG_IGN and be unable to trap TERM at all. That is why docs/secrets.md now
-# tells operators not to touch signals in a setup script.
+# restores it. Its two variables are assigned here too, after the load, for the reason given at the
+# top. What it cannot undo is a script that IGNORES TERM (`trap '' TERM`): a signal discarded while it
+# was ignored is already gone, and the child forked below would inherit SIG_IGN and be unable to trap
+# TERM at all. That is why docs/secrets.md now tells operators not to touch signals in a setup script.
 signaled=0
 child=
 wrapper_on_stop() {
