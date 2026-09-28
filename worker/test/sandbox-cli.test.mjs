@@ -135,6 +135,28 @@ test("a good run builds a credential-free argv, launches it, and returns the she
 	assert.match(c.text(), /no credentials are set in this container/);
 });
 
+test("a refused open never prints the opening banner: a leftover egress network refuses first (#462)", async () => {
+	// Seen on Podman 4.9.3 and 5.8.1: "opening pi-sandbox-... no credentials are set" and then "network already exists".
+	const { root } = retained();
+	let launched = false;
+	const c = capture({
+		// The network create fails and the inspect finds one: a leftover under this session's name.
+		spawnNetwork: (cmd, args) => {
+			const child = new EventEmitter();
+			queueMicrotask(() => child.emit("close", args[1] === "create" ? 1 : 0));
+			return child;
+		},
+		launch: async () => {
+			launched = true;
+			return { code: 0 };
+		},
+	});
+	assert.equal(await runSandbox(["gh-1"], { env: envWith(root), deps: c.deps }), 1);
+	assert.match(c.errText(), /the egress network pi-sandbox-gh-1-net already exists/);
+	assert.equal(c.text(), "", "nothing on stdout: no \"opening\", no \"no credentials are set\"");
+	assert.equal(launched, false);
+});
+
 test("--publish is REFUSED while the egress policy is armed, before anything is created (#362)", async () => {
 	// Docker resolves the contradiction silently: it accepts `-p` on a container joined only to an
 	// `--internal` network, exits 0 and binds nothing. Measured on docker 27.4.0, `docker port` prints nothing.
@@ -419,18 +441,29 @@ test("--list SAYS a run past its window, or inside the grace, needs --pin, rathe
 });
 
 test("a run lost from under a session after it started is said when the shell exits, and the exit code kept (#446)", async () => {
-	// Real timers, the look's own 250 ms: listed at once, the run deleted well after the launch check, the shell back later.
+	// The look's own 250 ms timer, but no window it has to hit (PR #466 gate round 2): the run is deleted only after
+	// the look's ask has listed the container and its launch check has run (the macrotask after that answer), and the
+	// shell returns at once; the loss is then the one the exit check finds.
 	const { root, dir } = retained({ keepUntil: new Date(AT_446 + 86400000).toISOString() });
 	let listed = false;
+	let seen;
+	const listedByLook = new Promise((resolve) => (seen = resolve));
 	const c = capture({
 		now: () => AT_446,
-		running: async () => (listed ? ["gh-1"] : []),
+		running: async () => {
+			if (!listed) return [];
+			seen();
+			return ["gh-1"];
+		},
 		launch: async () => {
 			listed = true;
-			await new Promise((r) => setTimeout(r, 600));
+			// A keep-alive and nothing more: the look's own timer is `unref`'d, as a waiting look must never hold a process,
+			// so without a ref'd handle the test's loop would drain while it waits. It decides no ordering.
+			const alive = setInterval(() => {}, 1000);
+			await listedByLook;
+			clearInterval(alive);
+			await new Promise((r) => setImmediate(r));
 			rmSync(dir, { recursive: true, force: true });
-			// Generous, so a loaded CI runner still fits several 250 ms looks in before the shell "returns".
-			await new Promise((r) => setTimeout(r, 2000));
 			return { code: 3 };
 		},
 	});

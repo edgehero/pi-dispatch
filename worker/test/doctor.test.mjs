@@ -820,7 +820,9 @@ test("doctor: no in-image probe when docker is not green (gating)", async () => 
 test("doctor: GITHUB_AUTH_SOURCE=app skips the in-image probe (mints per-job)", async () => {
 	const calls = [];
 	const { out, text } = capture();
-	const code = await runDoctor(ghEnv({ GITHUB_AUTH_SOURCE: "app" }), ghDeps(out, green, calls));
+	// The ids and a key set, since without them doctor fails on their own lines (PR #466 gate round 1): this test is the
+	// probe's.
+	const code = await runDoctor(ghEnv({ GITHUB_AUTH_SOURCE: "app", GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----x-----END PRIVATE KEY-----" }), ghDeps(out, green, calls));
 	assert.equal(code, 0);
 	assert.match(text(), /✓ in-image gh auth: skipped \(GITHUB_AUTH_SOURCE=app mints per-job\)/);
 	assert.ok(
@@ -859,30 +861,31 @@ test("doctor: a complete app-auth triple with a locked-down PEM is all green, co
 	assert.doesNotMatch(text(), new RegExp(KEY_BODY), "the key's contents must never reach output");
 });
 
-test("doctor: app source with the whole triple unset warns per variable, points at setup github, exits 0", async () => {
+test("doctor: app source with the whole triple unset FAILS on the two ids, points at setup github, exits 1", async () => {
 	const { out, text } = capture();
 	const code = await runDoctor(appEnv(), appDeps(out));
-	assert.equal(code, 0, "app-auth completeness warns, never fails — a deployment can be mid-setup");
-	assert.match(text(), /⚠ GITHUB_AUTH_SOURCE=app but GITHUB_APP_ID is unset/);
-	assert.match(text(), /⚠ GITHUB_AUTH_SOURCE=app but GITHUB_APP_INSTALLATION_ID is unset/);
-	assert.match(text(), /⚠ GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set/);
+	// PR #466 gate round 1: unset ids refuse the worker's boot (`loadGitHubAuth`), so they are ✗, not the ⚠ they were.
+	assert.equal(code, 1, "a chosen app source without its ids is a deployment that cannot start");
+	assert.match(text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_ID is unset -- the worker will refuse to boot\n {4}→ run `pi-dispatch setup github`/);
+	assert.match(text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_INSTALLATION_ID is unset -- the worker will refuse to boot\n {4}→ run `pi-dispatch setup github`/);
+	assert.match(text(), /✗ GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set -- the worker will refuse to boot\n {4}→ run `pi-dispatch setup github`/);
 	assert.match(text(), /run `pi-dispatch setup github`/, "the fix is the wizard that mints all three");
 });
 
 test("doctor: a non-numeric GITHUB_APP_ID is named as such (an id is not a secret, so it IS echoed)", async () => {
 	const { out, text } = capture();
 	const code = await runDoctor(appEnv({ GITHUB_APP_ID: "Iv1.oops", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY_PATH: appKeyFile() }), appDeps(out));
-	assert.equal(code, 0);
-	assert.match(text(), /⚠ GITHUB_AUTH_SOURCE=app but GITHUB_APP_ID is not numeric \("Iv1\.oops"\)/);
+	assert.equal(code, 1, "every github job would fail to mint its token (PR #466 gate round 1)");
+	assert.match(text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_ID is not numeric \("Iv1\.oops"\) -- github jobs cannot mint tokens\n/);
 	assert.match(text(), /✓ GITHUB_APP_INSTALLATION_ID set \(987654\)/, "the other two are judged independently");
 });
 
-test("doctor: a key path that points at nothing warns with the path", async () => {
+test("doctor: a key path that points at nothing FAILS with the path, since the worker refuses to boot on it", async () => {
 	const { out, text } = capture();
 	const missing = join(tmpdir(), "no-such-github-app.pem");
 	const code = await runDoctor(appEnv({ GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY_PATH: missing }), appDeps(out));
-	assert.equal(code, 0);
-	assert.match(text(), new RegExp(`⚠ GITHUB_APP_PRIVATE_KEY_PATH does not exist \\(${missing.replace(/[.\\/]/g, "\\$&")}\\)`));
+	assert.equal(code, 1, "`loadGitHubAuth` refuses the boot on it (PR #466 gate round 1)");
+	assert.match(text(), new RegExp(`✗ GITHUB_APP_PRIVATE_KEY_PATH does not exist \\(${missing.replace(/[.\\/]/g, "\\$&")}\\) -- the worker will refuse to boot\\n {4}→ run \`pi-dispatch setup github\``));
 });
 
 test("doctor: a group/world-readable PEM warns with the chmod fix", { skip: process.platform === "win32" ? "POSIX modes are synthetic on win32 (the check skips itself there)" : false }, async () => {
@@ -919,13 +922,12 @@ test("doctor: an inline App key is reported as such, with no file anywhere and n
 	assert.doesNotMatch(text(), new RegExp(KEY_BODY));
 });
 
-test("doctor: both key sources set warns that the worker will refuse to boot", async () => {
+test("doctor: both key sources set FAILS, since the worker will refuse to boot", async () => {
 	const { out, text } = capture();
 	const env = appEnv({ GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----x-----END PRIVATE KEY-----", GITHUB_APP_PRIVATE_KEY_PATH: appKeyFile() });
 	const code = await runDoctor(env, appDeps(out));
-	assert.equal(code, 0, "doctor still only warns -- the boot refusal is config's job");
-	assert.match(text(), /⚠ GITHUB_APP_PRIVATE_KEY and GITHUB_APP_PRIVATE_KEY_PATH are both set/);
-	assert.match(text(), /unset one of them/);
+	assert.equal(code, 1, "`loadGitHubAuth` refuses the boot on it, so doctor says ✗ (PR #466 gate round 1)");
+	assert.match(text(), /✗ GITHUB_APP_PRIVATE_KEY and GITHUB_APP_PRIVATE_KEY_PATH are both set -- the worker will refuse to boot\n {4}→ unset one of them/);
 });
 
 test("doctor: an inline value that is not a PEM warns, and its contents are never echoed", async () => {
@@ -979,6 +981,43 @@ test("doctor: an ignored key, a non-repo, and a git that will not launch are all
 		assert.equal(code, 0);
 		assert.doesNotMatch(text(), /does not ignore it/, `${name}: only a definite "not ignored" may warn`);
 	}
+});
+
+test("doctor judges app auth on the service's .env where this shell sets none, never printing the key (PR #466 gate round 2)", async () => {
+	// The ✗ lines would otherwise judge a shell that lacks the keys the worker loads from its .env, and fail a deployment
+	// that boots, or pass one that does not.
+	const cwd = scaffoldedCwd();
+	const readEnvFile = (path) => readFileSync(path, "utf8");
+	const envPath = join(cwd, ".env").replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+	writeFileSync(join(cwd, ".env"), `GITHUB_AUTH_SOURCE=app\nGITHUB_APP_ID=4242\nGITHUB_APP_INSTALLATION_ID=987654\nGITHUB_APP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----${KEY_BODY}"\n`);
+	const good = capture();
+	const code = await runDoctor(imgEnv(), { ...scaffoldDeps(good.out, cwd), readEnvFile });
+	assert.equal(code, 0, good.text());
+	assert.match(good.text(), new RegExp(`✓ GitHub auth settings read from ${envPath}, as the service reads them \\(this shell does not set them\\): GITHUB_AUTH_SOURCE, GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, GITHUB_APP_PRIVATE_KEY\\n`));
+	assert.match(good.text(), /✓ GITHUB_APP_ID set \(4242\)\n/);
+	assert.match(good.text(), /✓ GitHub App private key supplied inline \(GITHUB_APP_PRIVATE_KEY\)\n/);
+	assert.ok(!good.text().includes(KEY_BODY), "the key's contents never reach output");
+	// Chosen in the file, incomplete there: ✗, as the worker would refuse to boot on that file.
+	writeFileSync(join(cwd, ".env"), "GITHUB_AUTH_SOURCE=app\nGITHUB_APP_ID=4242\n");
+	const bad = capture();
+	assert.equal(await runDoctor(imgEnv(), { ...scaffoldDeps(bad.out, cwd), readEnvFile }), 1);
+	assert.match(bad.text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_INSTALLATION_ID is unset -- the worker will refuse to boot\n/);
+	// This shell wins where it sets a key, and then the file's value is not read for it.
+	const own = capture();
+	await runDoctor(imgEnv({ GITHUB_AUTH_SOURCE: "pat" }), { ...scaffoldDeps(own.out, cwd), readEnvFile });
+	assert.doesNotMatch(own.text(), /GITHUB_APP_INSTALLATION_ID/, "the shell's pat wins over the file's app");
+	assert.doesNotMatch(own.text(), /GitHub auth settings read from/, "an App key read under another source decides nothing, so nothing is said");
+});
+
+test("doctor trims GITHUB_APP_PRIVATE_KEY_PATH as loadGitHubAuth does: blank beside an inline key is not 'both set' (PR #466 gate round 2)", async () => {
+	const inline = `-----BEGIN PRIVATE KEY-----${KEY_BODY}`;
+	const beside = capture();
+	assert.equal(await runDoctor(appEnv({ GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY: inline, GITHUB_APP_PRIVATE_KEY_PATH: "   " }), appDeps(beside.out)), 0);
+	assert.doesNotMatch(beside.text(), /are both set/);
+	assert.match(beside.text(), /✓ GitHub App private key supplied inline/);
+	const alone = capture();
+	assert.equal(await runDoctor(appEnv({ GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY_PATH: "   " }), appDeps(alone.out)), 1);
+	assert.match(alone.text(), /✗ GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set -- the worker will refuse to boot\n/);
 });
 
 test("doctor: the app-auth block only fires for source app", async () => {
@@ -1251,7 +1290,7 @@ function replicaTriggersFile(replicas) {
 	return path;
 }
 
-test("doctor: a replicating trigger warns with the budget arithmetic, and never fails", async () => {
+test("doctor: a replicating trigger states the budget arithmetic, and never fails", async () => {
 	// An opt-in an operator chose in a reviewed file, so the harness is doing exactly what was asked. What
 	// is worth saying is that each replica reserves its OWN slot before its own tokens, so the daily cap
 	// simply divides -- the caps stay the ceiling and that IS the feature.
@@ -1262,7 +1301,7 @@ test("doctor: a replicating trigger warns with the budget arithmetic, and never 
 	// In the LABEL, not the fix: an `ok: true` check never prints its fix line, and "they queue instead of
 	// racing" is the half an operator most often has wrong.
 	assert.match(text(), /PI_CONCURRENCY bounds how many actually race/);
-	assert.notEqual(code, 1, "a chosen opt-in is a warning, never a hard failure");
+	assert.notEqual(code, 1, "a chosen opt-in is a fact line, never a hard failure");
 });
 
 test("doctor: a deployment with no run.replicas anywhere prints no replica line at all", async () => {
@@ -2398,7 +2437,13 @@ test("doctor --fix: the converge re-check reruns the probes once and reports gre
 		{ out, cwd: tmpdir(), spawn, probeValkey: async () => true, fileExists: () => true, nodeVersion: "22.19.0", fix: true, promptFn: async () => true },
 	);
 	assert.match(text(), /✗ Job image present \(pi-job:latest\)/, "the first pass reported the failure as always");
-	assert.match(text(), /re-check after fixes: \d+ of \d+ checks pass/);
+	// PR #466 gate round 1: counted in render's tiers, so a ⚠ is a warning here as it is everywhere, and a converged run
+	// that says "ready" reports no failing check.
+	const recheck = /re-check after fixes: (\d+) pass, (\d+) warning\(s\), 0 failing\n/.exec(text());
+	assert.ok(recheck, text());
+	const tail = text().split("re-check after fixes")[1];
+	assert.equal((tail.match(/^⚠ /gm) ?? []).length, Number(recheck[2]), "the warning count is the ⚠ lines listed under it");
+	assert.ok(Number(recheck[2]) > 0, "the fixture carries warnings, so the count is not vacuous");
 	assert.match(text(), /\ndoctor: ready\. Start the worker with `pi-dispatch worker`\.\n/);
 	assert.equal(code, 0, "converge-to-green: the exit code judges the re-checked list by the same failed/ok logic");
 });
@@ -2457,9 +2502,9 @@ test("doctor prints which resume bounds are on, so an unset one is legible as a 
 	assert.match(text(), /Resume bounds: PI_SESSIONS_TTL_DAYS=14, PI_SESSION_MAX_AGE_DAYS=off, PI_SESSION_MAX_RESUME_CHAIN=off, PI_SESSION_MAX_CONTEXT_PCT=off/);
 });
 
-test("doctor warns that the context bound is inert until the job image reports a measurement", async () => {
+test("doctor says the context bound is inert until the job image reports a measurement", async () => {
 	// The one bound that can be set and still do nothing. Its measurement comes from the image's runner,
-	// and there is deliberately no capability label to check against, so this warning is the entire
+	// and there is deliberately no capability label to check against, so this line is the entire
 	// detection surface for "you set it and nothing is happening".
 	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SESSIONS_DIR: "/srv/pi-sessions", PI_TRIGGERS_FILE: resumeTriggersFile(), GITHUB_AUTH_SOURCE: "pat" };
 	const opts = { spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", fileExists: () => true };
@@ -2593,6 +2638,8 @@ test("doctor --fix: accepting the restage offer re-runs import-pi as a child thr
 	// The converge pass re-probes the real dirs; the fake spawn staged nothing, so the check honestly
 	// stays failing -- running a fix is reported, convergence is measured.
 	assert.match(text().split("re-check after fixes")[1], /✗ Staged packages present/);
+	const counts = /re-check after fixes: \d+ pass, \d+ warning\(s\), (\d+) failing\n/.exec(text());
+	assert.equal(Number(counts?.[1]), (text().split("re-check after fixes")[1].match(/^✗ /gm) ?? []).length, "the failing count is the ✗ lines listed (PR #466 gate round 1)");
 });
 
 test("doctor --fix: the default prompt answers No on non-TTY stdin and on plain enter", async () => {
@@ -3042,6 +3089,16 @@ test("doctor: a RUNNING shipped proxy from another squid, command or folder is �
 	assert.equal(desktop.code, 0, "an unknown never fails doctor");
 	assert.match(desktop.text, /⚠ Egress proxy's mounts could not be compared on this host \(pi-dispatch-egress-proxy\): \/host_mnt\/Users\/op\/deploy\/deploy\/egress-proxy\.conf, \/host_mnt\/Users\/op\/deploy\/egress-allowlist\.conf are paths this host cannot resolve/);
 	assert.doesNotMatch(desktop.text, /is not this deployment's/);
+	// Stale by its image with its mounts unknown: `up` offers the replace (PR #456's final check), and the fix says so.
+	const desktopOld = await run(proxyAnswer("healthy", "running", { image: "squid:old", conf: "/host_mnt/Users/op/deploy/deploy/egress-proxy.conf", allowlist: "/host_mnt/Users/op/deploy/egress-allowlist.conf" }));
+	assert.match(desktopOld.text, /✗ Egress proxy is running but is not this deployment's \(pi-dispatch-egress-proxy\): it was created from squid:old, not the pinned [^\n]*\n {4}→ `pi-dispatch up` from the deployment folder offers to replace it with the shipped one/);
+	// Stale on a mount alone while its other mount is unknown: `up` does not offer, so the fix names the commands instead.
+	const desktopMount = await run(proxyAnswer("healthy", "running", { conf: "/host_mnt/Users/op/deploy/deploy/egress-proxy.conf", allowlist: join(other, "egress-allowlist.conf") }));
+	assert.equal(desktopMount.code, 1);
+	assert.match(
+		desktopMount.text,
+		new RegExp(`✗ Egress proxy is running but is not this deployment's \\(pi-dispatch-egress-proxy\\): its /etc/pi-dispatch/allowlist\\.conf is ${esc(join(other, "egress-allowlist.conf"))}, not ${esc(join(folder, "egress-allowlist.conf"))}\\n {4}→ check its mounts \\(\`docker inspect --format '\\{\\{json \\.Mounts\\}\\}' pi-dispatch-egress-proxy\`\\), then \`docker rm -f pi-dispatch-egress-proxy\` and \`pi-dispatch up\` from the deployment folder replace it with the shipped one; \`up\` does not offer to on its own while one of its mounts cannot be compared here;`),
+	);
 	// The operator's own proxy is never judged against the shipped one.
 	assert.doesNotMatch((await run(proxyAnswer("healthy", "running", { image: "my/squid:1" }), { env: { PI_EGRESS_PROXY: "my-squid" } })).text, /is not this deployment's|could not be compared/);
 	// Current: silent.
@@ -3248,8 +3305,13 @@ test("doctor: the panel-authoring bound reads as SAFE when closed and as a discl
 
 	const open = await collectChecks({ ...base, PI_SECRET_RESOLVER_ROOTS: "/opt/pi" }, secretsSeams());
 	const wide = open.find((c) => /admits panel-declared resolvers/.test(c.label));
-	assert.ok(wide && wide.warn === true, "opening it is a disclosure the operator should see");
-	assert.match(wide.fix, /run code as the worker/);
+	// Issue #462: a FACT LINE, since the operator opened it on purpose and only closing it clears it, so the advice is in
+	// the label, which is all an `ok: true` check prints.
+	assert.equal(
+		rendered([wide]),
+		"✓ PI_SECRET_RESOLVER_ROOTS admits panel-declared resolvers under: /opt/pi -- keep those directories writable by nobody but the account the worker runs as: whoever can write a resolver there can run code as the worker\n",
+	);
+	assert.equal(render([wide], () => {}), false, "a disclosure never fails doctor");
 });
 
 test("doctor: a LOCAL trigger binding secrets warns that /workspace is the operator's real folder", async () => {
@@ -3258,10 +3320,14 @@ test("doctor: a LOCAL trigger binding secrets warns that /workspace is the opera
 	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: secretsTriggersFile({ kind: "local", folder: "/srv/site", profile: "prod" }), PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh" };
 	const checks = await collectChecks(env, secretsSeams());
 	const hit = checks.find((c) => /run IN the operator's own folder/.test(c.label));
-	assert.ok(hit, "the warning must exist");
-	assert.equal(hit.warn, true, "a warning, not a failure: a nightly deploy binding a secret is the use case");
-	assert.match(hit.label, /\/srv\/site/);
-	assert.match(hit.fix, /Nothing scans for that/);
+	assert.ok(hit, "the line must exist");
+	// Issue #462: a FACT LINE, not a failure and not a warning: a nightly deploy binding a secret is the use case and
+	// nothing clears it but unbinding, so what the operator must know is in the label, which is all a ✓ prints.
+	assert.equal(
+		rendered([hit]),
+		"✓ 1 local trigger(s) bind secrets and run IN the operator's own folder: /srv/site -- a credential the agent writes to .env, .netrc or .git-credentials there lands in your real repository (and in a retained sandbox). Nothing scans for that: keep those folders out of anything you push\n",
+	);
+	assert.equal(render([hit], () => {}), false);
 });
 
 test("doctor: a deployment that binds no secrets is told nothing about them at all", async () => {
@@ -3300,10 +3366,17 @@ test("doctor: the armed one-shot line counts from the raw file and WARNS only wh
 	const armedUnset = unset.find((c) => /one-shot trigger\(s\) armed/.test(c.label));
 	assert.ok(armedUnset, "the armed advisory must exist");
 	assert.match(armedUnset.label, /^1 one-shot/, "counted 1 from the RAW entries: the spent sibling does not inflate the armed count");
-	assert.equal(armedUnset.ok, true, "advisory, never a failure: doctor never touches triggers");
-	assert.equal(armedUnset.warn, true, "unset PI_TRIGGERS_FILE is the split-file hazard, so the line warns");
-	assert.match(armedUnset.label, /resolved against the worker service's working directory/);
-	assert.match(armedUnset.fix, /absolute path in both services/);
+	// Issue #462: unset PI_TRIGGERS_FILE is the split-file hazard, so the line is a WARNING: a ⚠ WITH its fix line (the
+	// old `ok: true` printed a ✓ and dropped it), and never a failure, since doctor never touches triggers.
+	assert.equal(
+		rendered([armedUnset]),
+		[
+			"⚠ 1 one-shot trigger(s) armed (on.once) -- the worker disarms the entry in ./triggers.json resolved against the worker service's working directory after the run record exists",
+			"    → set PI_TRIGGERS_FILE to an absolute path in both services' environments, so worker and receiver name the same file from anywhere",
+			"",
+		].join("\n"),
+	);
+	assert.equal(render([armedUnset], () => {}), false, "advisory, never a failure: doctor never touches triggers");
 
 	// Set: the same file by explicit path, and the warning goes away -- worker and receiver now name
 	// the same file from anywhere, so the label names the variable instead of the hazard.
@@ -3311,7 +3384,7 @@ test("doctor: the armed one-shot line counts from the raw file and WARNS only wh
 	const armedSet = set.find((c) => /one-shot trigger\(s\) armed/.test(c.label));
 	assert.ok(armedSet, "the armed advisory still appears -- only its warn flag changes");
 	assert.equal(armedSet.warn, false, "with the variable set there is no split-file hazard to warn about");
-	assert.match(armedSet.label, /in PI_TRIGGERS_FILE after the run record exists/);
+	assert.equal(rendered([armedSet]), "✓ 1 one-shot trigger(s) armed (on.once) -- the worker disarms the entry in PI_TRIGGERS_FILE after the run record exists\n");
 });
 
 test("doctor: the spent one-shot line counts 1, says 'spent', and states the deliberate degradation", async () => {
@@ -3412,15 +3485,25 @@ test("doctor: the dead-scope advisory flags folder-only shapes not in the canoni
 	const checks = await collectChecks(env, collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true }));
 	const c = checks.find((x) => /scoped limit\(s\) name a folder no trigger runs in/.test(x.label));
 	assert.ok(c, "the advisory is present");
-	assert.equal(c.ok, true, "an advisory, never a red X (the replica advisory's tier)");
+	// Issue #462: a WARNING, a ⚠ with its fix line and never a red X; the old `ok: true` printed a ✓ with no fix.
+	assert.equal(c.ok, false);
 	assert.equal(c.warn, true);
+	assert.equal(render([c], () => {}), false, "a warning never fails doctor");
+	assert.equal(
+		rendered([c]),
+		[
+			"⚠ 3 scoped limit(s) name a folder no trigger runs in (./relative-nowhere, sitealone, C:\\srv\\site) -- the cap guards nothing; scopes match exactly (no globs, folders by resolved ABSOLUTE path), so check the spelling against triggers.json run.folder or delete the entry",
+			`    → edit ${limitsPath} by hand or via dispatch_limit_edit/_delete -- repo-shaped scopes are never flagged here, because a webhook job's repo comes from the delivery, which triggers.json cannot enumerate`,
+			"",
+		].join("\n"),
+	);
 	assert.equal(c.fixAction, undefined, "never-tier");
 	assert.ok(!c.label.includes(folder), "the folder row matched across spellings -- not flagged");
 	assert.match(c.label, /\.\/relative-nowhere/, "a dead relative row is folder-only and unmatched -- flagged");
 	assert.match(c.label, /sitealone/, "a slashless scope can never be a repo -- flagged");
 	assert.match(c.label, /C:\\srv/, "a foreign-platform row is inert here -- flagged");
 	assert.ok(!c.label.includes("acme/web"), "a repo shape is never flagged -- doctor cannot enumerate webhook repos");
-	assert.match(c.label, /resolved ABSOLUTE path/, "the actionable content lives in the LABEL -- ok:true never prints fix");
+	assert.match(c.label, /resolved ABSOLUTE path/, "the actionable content is in the label as well as the fix");
 	// All judgeable scopes referenced: silent (the repo row alone must not keep the line alive).
 	writeFileSync(limitsPath, JSON.stringify({ version: 1, limits: [{ scope: folder, day: 3 }, { scope: "acme/web", day: 9 }] }));
 	const quiet = await collectChecks(env, collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true }));
@@ -3595,9 +3678,18 @@ test("doctor: a broken profile NO trigger names only warns -- nothing refuses to
 	};
 	const checks = await collectChecks(env, secretsSeams());
 	const retired = checks.find((c) => c.label.startsWith("Wait profile retired "));
-	assert.equal(retired.ok, true, "it does not fail the command");
+	// Issue #462: a WARNING, a ⚠ with its fix that does not fail the command; the old `ok: true` drew a ✓ and no fix.
+	assert.equal(retired.ok, false);
 	assert.equal(retired.warn, true, "but it is not silent either");
-	assert.match(retired.label, /no trigger names it/);
+	assert.equal(render([retired], () => {}), false, "it does not fail the command");
+	assert.equal(
+		rendered([retired]),
+		[
+			`⚠ Wait profile retired -> ${join(dir, "gone.sh")} (ENOENT), and no trigger names it`,
+			"    → no job looks this up, so nothing refuses today -- fix the path or drop the entry before a trigger starts naming it",
+			"",
+		].join("\n"),
+	);
 	assert.equal(checks.find((c) => c.label.startsWith("Wait profile jira ")).ok, true);
 	assert.ok(checks.find((c) => c.label.startsWith("Wait profile jira ")).label.includes("named by no trigger") === false);
 });
@@ -6029,7 +6121,7 @@ const MIXED_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
-			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h \u2014 re-open one with `pi-dispatch sandbox <jobId>`",
+			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
 			"doctor: ready. Start the worker with `pi-dispatch worker`.",
@@ -6073,7 +6165,7 @@ const MIXED_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
-			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h \u2014 re-open one with `pi-dispatch sandbox <jobId>`",
+			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
 			"fix available: Job image present (pi-job:latest)",
@@ -6125,7 +6217,7 @@ const MIXED_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
-			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h \u2014 re-open one with `pi-dispatch sandbox <jobId>`",
+			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
 			"doctor: some checks failed \u2014 fix the above, then re-run.",
@@ -6175,7 +6267,7 @@ const MIXED_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
-			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h \u2014 re-open one with `pi-dispatch sandbox <jobId>`",
+			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
 			"doctor: some checks failed \u2014 fix the above, then re-run.",
@@ -6367,8 +6459,23 @@ test("with egress armed the podman proxy is read under podman, and the docker eg
 	assert.equal(down.code, 1);
 	assert.match(down.text, /✗ podman: egress proxy is not under this account's Podman \(pi-dispatch-egress-proxy\)\n {4}→ start it as the worker's account, under the same rootless Podman, on a named bridge network/);
 	const stopped = await run("exited");
-	assert.match(stopped.text, /✗ podman: egress proxy is stopped under this account's Podman/);
+	// The raw word (gate round 1), so an exited proxy and a crash-looping `stopped` one read apart.
+	assert.match(stopped.text, /✗ podman: egress proxy is exited under this account's Podman \(pi-dispatch-egress-proxy\)\n {4}→ start it as the worker's account/);
 	assert.doesNotMatch(stopped.text, /allowlist is read back by/, "only said beside a running proxy");
+	// PR #456's final check: Podman reads a proxy crash-looping under a restart policy as `stopped` between restarts, and
+	// every job fails (one retry, then failed), so it is ✗ like docker's `restarting`, never the ⚠ that says jobs wait.
+	for (const status of ["stopped", "restarting"]) {
+		const looping = await run(status);
+		assert.equal(looping.code, 1, status);
+		assert.match(
+			looping.text,
+			new RegExp(`✗ podman: egress proxy is ${status} under this account's Podman \\(pi-dispatch-egress-proxy\\)\\n {4}→ if a restart policy keeps bringing it back, its squid keeps exiting \\(Podman reads such a crash loop as ${status}\\) and every podman job is retried once, then failed; \`podman logs pi-dispatch-egress-proxy\` says why\\n`),
+		);
+	}
+	// A transient word stays the ⚠ that says a job waits, and never fails doctor.
+	const transient = await run("stopping");
+	assert.match(transient.text, /⚠ podman: egress proxy is stopping under this account's Podman \(pi-dispatch-egress-proxy\)\n {4}→ a podman job meanwhile is retried once, then failed \(the worker does not refuse it outright on this state\); if it stays stopping, `podman logs pi-dispatch-egress-proxy` says why\n/);
+	assert.doesNotMatch(transient.text, /✗ podman: egress proxy/);
 });
 
 // Issue #458: on Podman 4.x a job's network teardown cuts the proxy's route out unless another bridge container runs,
@@ -7339,7 +7446,8 @@ test("a URL doctor prints has its password blanked and its query dropped, or is 
 });
 
 test("doctor's .env reads pass ONE allowlist and ONE loader mapping (#453 gate 3)", async () => {
-	assert.deepEqual([...SERVICE_ENV_KEYS], ["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY", "VALKEY_URL", "PI_PROVIDER"]);
+	// PR #466 gate round 2 added the GitHub auth source and App keys, and nothing else.
+	assert.deepEqual([...SERVICE_ENV_KEYS], ["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY", "VALKEY_URL", "PI_PROVIDER", "GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY"]);
 	assert.deepEqual(serviceEnvKeys(["PI_JOB_IMAGE", "PI_ENV_SETUP", "VALKEY_URL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], ["ANTHROPIC_API_KEY"]), ["VALKEY_URL", "ANTHROPIC_API_KEY"]);
 	assert.deepEqual(["linux", "win32", "darwin", "freebsd"].map(serviceEnvLoader), ["systemd", "cmd", "shell", "shell"]);
 	// The venue read uses that mapping too: on freebsd a sourcing shell reads `export PI_BACKENDS=podman` as an assignment.
@@ -7508,7 +7616,7 @@ const DOCKER_CANARY_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
-			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h \u2014 re-open one with `pi-dispatch sandbox <jobId>`",
+			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
 			"read back on local: starting pi-dispatch-live-probe-7-n, pi-dispatch-live-pin-7-n and pi-dispatch-live-ephemeral-7-n (twice) from pi-job:latest (no environment, as the image's own user), and pi-dispatch-live-peer1-7-n and pi-dispatch-live-peer2-7-n on their own --internal networks pi-dispatch-live-peer1-7-n-net and pi-dispatch-live-peer2-7-n-net, with pi-dispatch-egress-proxy attached to both, with a fixture under <jobs>; all of them are removed when the read-back ends, as is anything an interrupted earlier run left",
@@ -7574,7 +7682,7 @@ const DOCKER_CANARY_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
-			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h \u2014 re-open one with `pi-dispatch sandbox <jobId>`",
+			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
 			"read back on local: starting pi-dispatch-live-probe-7-n, pi-dispatch-live-pin-7-n and pi-dispatch-live-ephemeral-7-n (twice) from pi-job:latest (no environment, as the image's own user), and pi-dispatch-live-peer1-7-n and pi-dispatch-live-peer2-7-n on their own --internal networks pi-dispatch-live-peer1-7-n-net and pi-dispatch-live-peer2-7-n-net, with pi-dispatch-egress-proxy attached to both, with a fixture under <jobs>; all of them are removed when the read-back ends, as is anything an interrupted earlier run left",
@@ -7644,7 +7752,7 @@ const DOCKER_CANARY_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
-			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h \u2014 re-open one with `pi-dispatch sandbox <jobId>`",
+			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
 			"read back on local: starting pi-dispatch-live-probe-7-n, pi-dispatch-live-pin-7-n and pi-dispatch-live-ephemeral-7-n (twice) from pi-job:latest (no environment, as the image's own user), and pi-dispatch-live-peer1-7-n and pi-dispatch-live-peer2-7-n on their own --internal networks pi-dispatch-live-peer1-7-n-net and pi-dispatch-live-peer2-7-n-net, with pi-dispatch-egress-proxy attached to both, with a fixture under <jobs>; all of them are removed when the read-back ends, as is anything an interrupted earlier run left",
@@ -7718,7 +7826,7 @@ const DOCKER_CANARY_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
-			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h \u2014 re-open one with `pi-dispatch sandbox <jobId>`",
+			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
 			"read back on local: starting pi-dispatch-live-probe-7-n, pi-dispatch-live-pin-7-n and pi-dispatch-live-ephemeral-7-n (twice) from pi-job:latest (no environment, as the image's own user), and pi-dispatch-live-peer1-7-n and pi-dispatch-live-peer2-7-n on their own --internal networks pi-dispatch-live-peer1-7-n-net and pi-dispatch-live-peer2-7-n-net, with pi-dispatch-egress-proxy attached to both, with a fixture under <jobs>; all of them are removed when the read-back ends, as is anything an interrupted earlier run left",
@@ -7792,7 +7900,7 @@ const DOCKER_CANARY_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
-			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h \u2014 re-open one with `pi-dispatch sandbox <jobId>`",
+			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
 			"read back on local: starting pi-dispatch-live-probe-7-n, pi-dispatch-live-pin-7-n and pi-dispatch-live-ephemeral-7-n (twice) from pi-job:latest (no environment, as the image's own user), and pi-dispatch-live-peer1-7-n and pi-dispatch-live-peer2-7-n on their own --internal networks pi-dispatch-live-peer1-7-n-net and pi-dispatch-live-peer2-7-n-net, with pi-dispatch-egress-proxy attached to both, with a fixture under <jobs>; all of them are removed when the read-back ends, as is anything an interrupted earlier run left",
@@ -7876,4 +7984,97 @@ test("a stuck tombstone reaches doctor's RENDERED output as a warning with its f
 		if (env.PI_SANDBOX_RETENTION_HOURS === "0") assert.match(out, /Workspace retention off/);
 		else assert.match(out, new RegExp(`1 retained workspace\\(s\\) in`), "the tombstone is not a workspace");
 	}
+});
+
+// -- issue #462: every advisory renders as what it means ---------------------------------------------------------
+// `render` reads `ok` first, so a check returned as `ok: true, warn: true` printed a green ✓ and dropped its fix. Each
+// such check is now either a WARNING (`ok: false, warn: true`: a ⚠ with its fix, never failing doctor) or a FACT LINE
+// (`ok: true`, its advice in the label). Pinned RENDERED, since the shape is only a means to what an operator reads.
+
+/** The one check whose label matches, rendered alone, and whether rendering it would fail doctor. */
+function renderedOne(checks, re) {
+	const hits = checks.filter((c) => re.test(c.label ?? ""));
+	assert.equal(hits.length, 1, `exactly one check matches ${re}`);
+	return { text: rendered(hits), failed: render(hits, () => {}) };
+}
+const adviceSeams = (extra = {}) => collectSeams(green, { nodeVersion: "22.19.0", probeValkey: async () => true, ...extra });
+
+test("an injected skills dir's skipped symlinks and its unread ai-trigger opt-in are WARNINGS with their fixes (#462)", async () => {
+	const skillsDir = tempDir("pi-skills-462-");
+	mkdirSync(join(skillsDir, "review"));
+	writeFileSync(join(skillsDir, "review", "SKILL.md"), "---\ndescription: injected\nai-trigger: allow\n---\n");
+	symlinkSync(join(skillsDir, "review", "SKILL.md"), join(skillsDir, "review", "linked.md"));
+	const checks = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: triggersFile(undefined, undefined, { skillsDir }) }), adviceSeams());
+	const links = renderedOne(checks, /are symlinks and are SKIPPED/);
+	assert.equal(
+		links.text,
+		[
+			`⚠ 1 entry(ies) under ${skillsDir} are symlinks and are SKIPPED`,
+			"    → the copier never follows a link (a link out of the tree would put a host file in a job container); replace them with real files if the jobs need them",
+			"",
+		].join("\n"),
+	);
+	assert.equal(links.failed, false, "a warning never fails doctor");
+	const optIn = renderedOne(checks, /set ai-trigger: allow, which is NEVER read/);
+	assert.equal(
+		optIn.text,
+		[
+			`⚠ 1 injected skill(s) under ${skillsDir} set ai-trigger: allow, which is NEVER read`,
+			"    → injected skills are trigger-reachable but not AI-reachable: the gate reads the target repo's committed .pi/skills at the pinned sha, so chain and dispatch_run requests for these flows are refused. Commit the flow to the repo if a model must be able to start it",
+			"",
+		].join("\n"),
+	);
+	assert.equal(optIn.failed, false);
+});
+
+test("the GitLab token scope is a FACT LINE whose advice is in the label, since no change clears it (#462)", async () => {
+	const checks = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("gitlab"), GITLAB_TOKEN: "glpat_secret_val" }), adviceSeams());
+	const scope = renderedOne(checks, /needs the `api` scope to post notes/);
+	assert.equal(
+		scope.text,
+		"✓ a GitLab project access token needs the `api` scope to post notes, which grants full project API read/write: scope it to ONE project and rotate it on a schedule (GitLab has no contents-vs-issues split and no short-expiry token)\n",
+	);
+	assert.equal(scope.failed, false);
+});
+
+test("persisted transcripts and a context bound that may be inert are FACT LINES whose advice is in the label (#462)", async () => {
+	const env = imgEnv({ PI_SESSIONS_DIR: "/srv/pi-sessions", PI_TRIGGERS_FILE: resumeTriggersFile(), GITHUB_AUTH_SOURCE: "pat", PI_SESSION_MAX_CONTEXT_PCT: "80" });
+	const checks = await collectChecks(env, adviceSeams({ fileExists: () => true }));
+	const transcripts = renderedOne(checks, /persist agent transcripts/);
+	assert.equal(
+		transcripts.text,
+		"✓ 1 trigger(s) persist agent transcripts to /srv/pi-sessions -- PII-bearing, host-only, never committed: keep it outside every git repo, on a disk you would put issue text on (docs/sessions.md)\n",
+	);
+	assert.equal(transcripts.failed, false);
+	// Gate round 1: a fact line, not a warning, because doctor has no image capability to check, so a ⚠ here could never
+	// clear on an image that does report the reading. The older-image caveat rides in the label.
+	const bound = renderedOne(checks, /needs a job image whose runner reports context usage/);
+	assert.equal(
+		bound.text,
+		"✓ PI_SESSION_MAX_CONTEXT_PCT=80 needs a job image whose runner reports context usage: an older image reports none, and a bound with no measurement passes, so there it does nothing. Each run's record (the logs directory/<jobId>.json) carries session.reason, which names the gate that refused\n",
+	);
+	assert.equal(bound.failed, false, "a bound that may be inert is never a refusal");
+});
+
+test("replicas are a FACT LINE carrying the budget and concurrency arithmetic in the label (#462)", async () => {
+	const checks = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: replicaTriggersFile(2) }), adviceSeams());
+	const replicas = renderedOne(checks, /set run\.replicas/);
+	assert.equal(
+		replicas.text,
+		"✓ 1 trigger(s) set run.replicas -- one delivery reserves one budget slot PER replica, so the daily/weekly/monthly caps divide by it; PI_CONCURRENCY bounds how many actually race, so keep it at least the largest run.replicas\n",
+	);
+	assert.equal(replicas.failed, false);
+});
+
+test("retained workspaces are a FACT LINE that says what each holds only when there is one (#462)", async () => {
+	const sandboxDir = tempDir("pi-doctor-kept-462-");
+	const zero = renderedOne(await collectChecks({ PI_PROVIDER: "google", PI_SANDBOX_DIR: sandboxDir }, collectSeams(green, { providerOracle: async () => null })), /retained workspace\(s\)/);
+	assert.equal(zero.text, `✓ 0 retained workspace(s) in ${sandboxDir}, swept after 24h, re-open one with \`pi-dispatch sandbox <jobId>\`\n`);
+	mkdirSync(join(sandboxDir, "gh-1"));
+	const one = renderedOne(await collectChecks({ PI_PROVIDER: "google", PI_SANDBOX_DIR: sandboxDir }, collectSeams(green, { providerOracle: async () => null })), /retained workspace\(s\)/);
+	assert.equal(
+		one.text,
+		`✓ 1 retained workspace(s) in ${sandboxDir}, swept after 24h, re-open one with \`pi-dispatch sandbox <jobId>\`; each holds the run's clone plus its prompt.md/event.json (issue text), and PI_SANDBOX_RETENTION_HOURS=0 turns retention off\n`,
+	);
+	assert.equal(one.failed, false);
 });

@@ -505,7 +505,19 @@ export async function runUp(argv = [], deps = {}) {
 		// as a directory the runtime creates in its place (measured, Docker Engine 29.8.1: the host path became a root-owned
 		// directory, and the create failed "not a directory: Are you trying to mount a directory onto a file", exit 127).
 		const missingFile = ["egress-allowlist.conf", "deploy/egress-proxy.conf"].find((f) => !fs.existsSync(join(cwd, f)));
-		if (judged.unknown) out(`\n⚠ could not compare ${DEFAULT_EGRESS_PROXY}'s mounts on this host: ${judged.unknown}. Everything else about it is still judged, and up replaces nothing while one of its own two mounts is unknown\n`);
+		// Whether the proxy's network is missing, filled by `egressNetworkLines` when an offer is about to be shown.
+		const network = { missing: false };
+		// STALE BY ITS IMAGE, ENTRYPOINT OR COMMAND (PR #456's final check): those are compared on every host, and a
+		// difference in any of them says the container is not the shipped proxy whatever its mounts hold, so an unknown
+		// mount is no reason to keep it. Docker Desktop reports every bind source as a path of its VM, so without this a
+		// proxy made from an older squid there was never replaced by `up`. HOW DESKTOP REPORTS `.Config.Image`, the
+		// entrypoint and the command is NOT MEASURED here (measured: Docker Engine 29.8.1, and Podman 4.9.3 and 5.8.1,
+		// the last with an image-id-created proxy reading as the pinned digest's spelling), so a Desktop spelling this
+		// does not expect would read stale and be offered, shown line for line and asked, never removed silently. An
+		// unknown mount still blocks a replace grounded on mounts alone.
+		const configStale = state ? shippedProxyDrift(state, { cwd, compareMounts: false }).drift.length > 0 : false;
+		const unjudged = Boolean(judged.unknown) && !configStale;
+		if (judged.unknown) out(`\n⚠ could not compare ${DEFAULT_EGRESS_PROXY}'s mounts on this host: ${judged.unknown}. Everything else about it is still judged, and up replaces it while one of its own two mounts is unknown only when its image, entrypoint or command shows it stale\n`);
 		if (inspect.code === 0 && !state) {
 			// It exists and its state could not be read: never started, never replaced, and never a `docker run` on a name
 			// that is taken.
@@ -520,9 +532,9 @@ export async function runUp(argv = [], deps = {}) {
 			// are named, since removing it cuts each of them off mid-run.
 			out(`\n✗ ${DEFAULT_EGRESS_PROXY} exists (${state.status}) but is not this deployment's proxy: ${drift.join("; ")}\n`);
 			const attached = jobNetworksOf(state);
-			// Never removed while one of its two own mounts is unknown (round-cap re-review): the other findings are said.
-			const unjudged = Boolean(judged.unknown);
-			if (yes && attached.length > 0 && state.status === "running" && !judged.unknown && !missingFile) out("--yes does not cover replacing a proxy that jobs are using: answer below, or stop the worker and re-run\n");
+			// Never removed on its mounts while one of its two own mounts is unknown (round-cap re-review): the other findings
+			// are said. Its image, entrypoint or command is ground enough (`configStale` above).
+			if (yes && attached.length > 0 && state.status === "running" && !unjudged && !missingFile) out("--yes does not cover replacing a proxy that jobs are using: answer below, or stop the worker and re-run\n");
 			if (unjudged) {
 				out(`not replaced: one of its own mounts could not be compared on this host (above), so up leaves it as it is; \`docker ${EGRESS_RM_ARGS.join(" ")}\` and \`pi-dispatch up\` replace it if you have checked it\n`);
 				summary.push(["egress", "stale proxy left as it is: one of its mounts could not be compared on this host"]);
@@ -532,14 +544,14 @@ export async function runUp(argv = [], deps = {}) {
 			} else if (
 				await consent(
 					`up would replace it with the shipped proxy (the same semantics as deploy/docker-compose.yml --profile egress)${attached.length > 0 ? `. It is attached to ${attached.join(", ")}: removing it cuts those jobs off from their egress mid-run, so stop the worker first (and let running jobs finish)` : ""}:`,
-					[`docker ${EGRESS_RM_ARGS.join(" ")}`, `docker ${EGRESS_NETWORK_ARGS.join(" ")}   (only if it does not exist yet)`, `docker ${quoteArgs(EGRESS_RUN_ARGS)}`],
+					[`docker ${EGRESS_RM_ARGS.join(" ")}`, ...(await egressNetworkLines(spawn, network)), `docker ${quoteArgs(EGRESS_RUN_ARGS)}`],
 					// `--yes` does not cover cutting live jobs off (gate round 3): with a job network attached to a RUNNING
 					// proxy the lines are printed and a person must answer, so an unattended `up --yes` never does it.
 					{ yes: yes && !(attached.length > 0 && state.status === "running"), out, prompt },
 				)
 			) {
 				await runStreamed(spawn, "docker", EGRESS_RM_ARGS, out);
-				await ensureEgressNetwork(spawn, out);
+				await ensureEgressNetwork(spawn, out, network);
 				if ((await runStreamed(spawn, "docker", EGRESS_RUN_ARGS, out)) !== 0) {
 					out("✗ could not start the egress proxy; continuing, doctor below will re-check it\n");
 					summary.push(["egress", "recreate failed: every job refuses pre-spend until it is up (costs no budget, runs nothing)"]);
@@ -575,11 +587,11 @@ export async function runUp(argv = [], deps = {}) {
 				summary.push(["egress", "skipped (declined): every job is refused pre-spend until the proxy is up (PI_EGRESS=0 opts out)"]);
 			}
 		} else if (
-			await consent("The egress policy is on (PI_EGRESS=0 opts out) but the allowlist proxy is not running. up would start it (same semantics as deploy/docker-compose.yml --profile egress):", [`docker ${EGRESS_NETWORK_ARGS.join(" ")}   (only if it does not exist yet)`, `docker ${quoteArgs(EGRESS_RUN_ARGS)}`], { yes, out, prompt })
+			await consent("The egress policy is on (PI_EGRESS=0 opts out) but the allowlist proxy is not running. up would start it (same semantics as deploy/docker-compose.yml --profile egress):", [...(await egressNetworkLines(spawn, network)), `docker ${quoteArgs(EGRESS_RUN_ARGS)}`], { yes, out, prompt })
 		) {
-			// The network may already exist from a previous run; that is not a failure, so its code is not
-			// checked. The proxy is what matters and it is checked.
-			await ensureEgressNetwork(spawn, out);
+			// The network's create is not checked: one made between the ask and here is not a failure. The proxy is what
+			// matters and it is checked.
+			await ensureEgressNetwork(spawn, out, network);
 			if ((await runStreamed(spawn, "docker", EGRESS_RUN_ARGS, out)) !== 0) {
 				out("✗ could not start the egress proxy — continuing; doctor below will re-check it\n");
 				summary.push(["egress", "start failed — every job refuses pre-spend until it is up (costs no budget, runs nothing)"]);
@@ -934,9 +946,25 @@ function runCmdQuery(spawn, cmd, args) {
  * `docker network create pi-dispatch-egress-out` only where it does not exist (exec round 3): a recreate otherwise printed
  * the daemon's "network name ... already used" every time. A quiet inspect first; its answer is never a failure, since the
  * run that follows is what is checked.
+ *
+ * ASKED BEFORE THE CONSENT, and the create line shown only when the network is missing (PR #456's final check): `--yes`
+ * "runs exactly the lines shown", and the line it used to show, `... create pi-dispatch-egress-out   (only if it does
+ * not exist yet)`, was not a command anyone could run. The inspect is read-only, so it runs before the question; the
+ * create after it runs exactly when its line was shown.
  */
-async function ensureEgressNetwork(spawn, out) {
+async function egressNetworkLines(spawn, network) {
+	network.missing = (await runCmdQuery(spawn, "docker", ["network", "inspect", EGRESS_NETWORK_ARGS[2]])).code !== 0;
+	return network.missing ? [`docker ${EGRESS_NETWORK_ARGS.join(" ")}`] : [];
+}
+/**
+ * The network the run needs, made at RUN time (PR #466 gate round 1): asked again after the answer, since it can be
+ * removed while the prompt waits, and then `docker run --network` fails "network not found" (measured). Created when it
+ * is missing then; when its create line was not shown, because it existed at the question, that is said before it runs.
+ * One that appeared meanwhile is left as it is.
+ */
+async function ensureEgressNetwork(spawn, out, network) {
 	if ((await runCmdQuery(spawn, "docker", ["network", "inspect", EGRESS_NETWORK_ARGS[2]])).code === 0) return;
+	if (!network.missing) out(`${EGRESS_NETWORK_ARGS[2]} was removed while the question waited, and the proxy's run needs it: \`docker ${EGRESS_NETWORK_ARGS.join(" ")}\`\n`);
 	await runStreamed(spawn, "docker", EGRESS_NETWORK_ARGS, out);
 }
 

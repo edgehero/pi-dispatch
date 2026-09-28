@@ -267,8 +267,11 @@ export async function runDoctor(env = process.env, deps = {}) {
 			// structurally -- the re-check never re-enters the fix pass, so a fix that did not take is
 			// reported still-failing rather than retried forever.
 			checks = await collectChecks(env, seams);
+			// Three counts, in `render`'s own tiers (PR #466 gate round 1): "N of M pass" counted every ⚠ as not passing,
+			// which read as failures on a run that then said "ready".
 			const passing = checks.filter((c) => c.ok).length;
-			out(`\nre-check after fixes: ${passing} of ${checks.length} checks pass\n`);
+			const warnings = checks.filter((c) => !c.ok && c.warn).length;
+			out(`\nre-check after fixes: ${passing} pass, ${warnings} warning(s), ${checks.length - passing - warnings} failing\n`);
 			for (const c of checks.filter((c) => !c.ok)) {
 				out(`${c.warn ? "⚠" : "✗"} ${c.label}\n    → ${c.fix}\n`);
 			}
@@ -296,7 +299,12 @@ export async function runDoctor(env = process.env, deps = {}) {
 }
 
 /** The ✓/⚠/✗ lines plus each failure's fix, exactly as doctor has always printed them. Returns whether
- *  any HARD check failed (a ⚠ never fails doctor). Exported so a test can pin what an operator SEES. */
+ *  any HARD check failed (a ⚠ never fails doctor). Exported so a test can pin what an operator SEES.
+ *
+ *  Three shapes, and `ok` is read FIRST (issue #462): `ok: true` is a ✓ and never prints its fix, whatever `warn`
+ *  says, since `warn` there means only "if this fails, it is soft"; `ok: false, warn: true` is a WARNING, a ⚠ with
+ *  its fix that leaves the run ready and the exit code 0; `ok: false` alone is a ✗ that fails the run. A check meant
+ *  to warn must therefore say `ok: false, warn: true`, and a fact line that has advice carries it in its label. */
 export function render(checks, out) {
 	let failed = false;
 	for (const c of checks) {
@@ -385,13 +393,17 @@ export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "P
 
 /**
  * The keys doctor takes from the deployment's `.env` as the SERVICE's values where its own shell sets none (issue
- * #453): the venue keys `up` and `service install` read, the Valkey the worker connects to, the provider, and that
- * provider's key variables (pi's own names for it, passed in, and judged for presence only, never printed). ONE
+ * #453): the venue keys `up` and `service install` read, the Valkey the worker connects to, the provider, the GitHub
+ * auth source and App keys (PR #466 gate round 2, `GITHUB_SERVICE_KEYS`), and that provider's key variables (pi's own names for it, passed in, and judged for presence only, never printed). ONE
  * structural allowlist: every `.env` value doctor acts on passes `serviceEnvKeys` first. Unlike
  * `ENV_FILE_READABLE_KEYS` these values steer what doctor does: which venue it judges and so which runtime it spawns,
  * which Valkey it connects to, and which fixes it offers.
  */
-export const SERVICE_ENV_KEYS = Object.freeze([...STACK_KEYS, "VALKEY_URL", "PI_PROVIDER"]);
+/** The GitHub App keys (PR #466 gate round 2): whose presence and format decide the app-auth lines, which FAIL where
+ *  the worker's boot or its token mint would. Judged, never printed, beyond what those lines already print (the ids and
+ *  the key's path, neither a secret); the inline key is only ever sniffed for its first bytes. */
+export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY"]);
+export const SERVICE_ENV_KEYS = Object.freeze([...STACK_KEYS, "VALKEY_URL", "PI_PROVIDER", ...GITHUB_SERVICE_KEYS]);
 
 /** `keys` narrowed to `SERVICE_ENV_KEYS` plus the provider's own key variables. */
 export function serviceEnvKeys(keys, providerKeys = []) {
@@ -794,9 +806,11 @@ export async function collectChecks(env, seams) {
 			continue;
 		}
 		checks.push({ ok: true, label: `Trigger skills dir holds ${probe.dirs} skill(s), ${probe.files} file(s)` });
+		// Issue #462: a WARNING (`ok: false, warn: true`, the shape `render` prints as ⚠ with its fix): files the operator
+		// put in the skills dir do not reach a job, and replacing the links clears it.
 		if (probe.skipped.symlinks > 0) {
 			checks.push({
-				ok: true,
+				ok: false,
 				warn: true,
 				label: `${probe.skipped.symlinks} entry(ies) under ${dir} are symlinks and are SKIPPED`,
 				fix: "the copier never follows a link (a link out of the tree would put a host file in a job container); replace them with real files if the jobs need them",
@@ -806,9 +820,10 @@ export async function collectChecks(env, seams) {
 		// reads the repo's committed .pi/skills at the pinned sha, so an injected SKILL.md carrying the
 		// opt-in is never consulted. Without this line the operator writes it and nothing honours it.
 		const chainable = aiTriggerNames(dir);
+		// Issue #462: a WARNING, since a setting the operator wrote is never honoured, and committing the flow clears it.
 		if (chainable.length > 0) {
 			checks.push({
-				ok: true,
+				ok: false,
 				warn: true,
 				label: `${chainable.length} injected skill(s) under ${dir} set ai-trigger: allow, which is NEVER read`,
 				fix: "injected skills are trigger-reachable but not AI-reachable: the gate reads the target repo's committed .pi/skills at the pinned sha, so chain and dispatch_run requests for these flows are refused. Commit the flow to the repo if a model must be able to start it",
@@ -1120,12 +1135,11 @@ export async function collectChecks(env, seams) {
 			checks.push({ ok: true, label: `gitlab triggers configured (${env.GITLAB_URL ?? "https://gitlab.com"})` });
 			// The scope an operator cannot narrow. Said out loud because it is the one place GitLab is
 			// weaker than the github App path and an operator should know which trade they made
-			// (CONST-TOKEN-SCOPED-PER-JOB).
+			// (CONST-TOKEN-SCOPED-PER-JOB). Issue #462: a FACT LINE, not a warning, because no change clears it (GitLab offers
+			// no narrower scope), so the advice lives in the label: an `ok: true` check never prints a fix line.
 			checks.push({
 				ok: true,
-				warn: true,
-				label: "a GitLab project access token needs the `api` scope to post notes, which grants full project API read/write",
-				fix: "scope the token to ONE project and rotate it on a schedule -- GitLab offers no contents-vs-issues split, and no short-expiry equivalent of a GitHub App token",
+				label: "a GitLab project access token needs the `api` scope to post notes, which grants full project API read/write: scope it to ONE project and rotate it on a schedule (GitLab has no contents-vs-issues split and no short-expiry token)",
 			});
 		}
 		// The receiver-boot half (issue #80), mirrored from receiver/src/config.mjs loadGitLabConfig: once
@@ -1225,7 +1239,15 @@ export async function collectChecks(env, seams) {
 	// reaches every token-carrying job container — the opposite of the App path's per-repo short-lived
 	// tokens (CONST-TOKEN-SCOPED-PER-JOB). Both checks below warn, never fail: a local-only deployment with
 	// the default source is valid, for the same reason the worker's own auth at start is best-effort.
-	const ghSource = env.GITHUB_AUTH_SOURCE ?? "gh"; // config.mjs's own default, read directly — no loadConfig
+	// The service's GitHub auth settings (PR #466 gate round 2): this shell where it sets one, else the deployment's
+	// `.env`, as VALKEY_URL and PI_PROVIDER are read above, so an app-auth ✗ judges the file the worker will load and not
+	// a shell that happens to lack it. Said once, by NAME.
+	// Each key read as `env.NAME` first, so the environment scan (env-docs.test.mjs) still sees every read.
+	const ghFile = fromServiceFile([...GITHUB_SERVICE_KEYS]);
+	const ghSource = env.GITHUB_AUTH_SOURCE ?? ghFile.GITHUB_AUTH_SOURCE ?? "gh"; // config.mjs's own default, read directly, no loadConfig
+	// Only the keys that decide a line: the App keys matter only while app is the source.
+	const ghRead = Object.keys(ghFile).filter((k) => k === "GITHUB_AUTH_SOURCE" || ghSource === "app");
+	if (ghRead.length > 0) checks.push({ ok: true, label: `GitHub auth settings read from ${serviceEnvFile.path}, as the service reads them (this shell does not set them): ${ghRead.join(", ")}` });
 	if (ghSource === "gh") {
 		// gh writes `auth status` to stdout or stderr depending on version — capture both combined.
 		const status = await runCmdCapture(spawn, "gh", ["auth", "status"]);
@@ -1254,21 +1276,27 @@ export async function collectChecks(env, seams) {
 
 	// GITHUB_AUTH_SOURCE=app: completeness of the credential triple loadGitHubAuth hard-requires
 	// (config.mjs), preflighted here so a half-finished App setup surfaces as doctor lines instead of a
-	// boot refusal. WARN, never fail, same doctrine as the rest of the github block: a deployment can
-	// legitimately be mid-setup. The private key gets a hygiene pass on top — presence, POSIX mode, and
+	// boot refusal. Every line the worker's boot or its token mint refuses on FAILS (PR #466 gate round 1): the two ids
+	// and the key's presence; the key's hygiene lines still warn, the github block's mid-setup doctrine. The private key gets a hygiene pass on top: presence, POSIX mode, and
 	// a first-bytes PEM sniff — but its CONTENTS never reach output: only the leading bytes are read
 	// (never the whole key into memory), and nothing from the file is ever echoed. Every fix line points
 	// at `pi-dispatch setup github`, which mints all three values and writes the PEM 0600 in one pass.
 	if (ghSource === "app") {
 		const setupFix = "run `pi-dispatch setup github` -- it mints the App, writes these .env lines, and lands the key mode 0600";
 		const numeric = (v) => typeof v === "string" && /^\d+$/.test(v.trim());
-		for (const name of ["GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID"]) {
+		// A FAILURE, not a warning (PR #466 gate round 1): the "mid-setup" doctrine above is about what a deployment may
+		// not have reached yet, and choosing GITHUB_AUTH_SOURCE=app is past that point. Unset, `loadGitHubAuth` refuses the
+		// worker's boot; set but not a number, the worker boots and every github job fails to mint its token. Only ever
+		// reached when app auth is the selected source.
+		const ids = { GITHUB_APP_ID: env.GITHUB_APP_ID ?? ghFile.GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID: env.GITHUB_APP_INSTALLATION_ID ?? ghFile.GITHUB_APP_INSTALLATION_ID };
+		for (const name of Object.keys(ids)) {
 			checks.push({
-				ok: numeric(env[name]),
-				warn: true,
-				label: numeric(env[name])
-					? `${name} set (${env[name].trim()})`
-					: `GITHUB_AUTH_SOURCE=app but ${name} is ${env[name] ? `not numeric (${JSON.stringify(env[name])})` : "unset"} -- github jobs cannot mint tokens`,
+				ok: numeric(ids[name]),
+				label: numeric(ids[name])
+					? `${name} set (${ids[name].trim()})`
+					: ids[name]
+						? `GITHUB_AUTH_SOURCE=app but ${name} is not numeric (${JSON.stringify(ids[name])}) -- github jobs cannot mint tokens`
+						: `GITHUB_AUTH_SOURCE=app but ${name} is unset -- the worker will refuse to boot`,
 				fix: setupFix,
 			});
 		}
@@ -1278,12 +1306,16 @@ export async function collectChecks(env, seams) {
 		// file to stat on a value that only ever exists in this process's environment, and whoever supplies
 		// that environment owns its hygiene. What survives for both is the shape sniff, and the rule that
 		// nothing from the key reaches output.
-		const keyPath = env.GITHUB_APP_PRIVATE_KEY_PATH;
-		const inlineKey = (env.GITHUB_APP_PRIVATE_KEY ?? "").trim();
-		if (inlineKey !== "" && keyPath) {
+		const keyPath = env.GITHUB_APP_PRIVATE_KEY_PATH ?? ghFile.GITHUB_APP_PRIVATE_KEY_PATH;
+		const inlineKey = (env.GITHUB_APP_PRIVATE_KEY ?? ghFile.GITHUB_APP_PRIVATE_KEY ?? "").trim();
+		// Blank counts as unset, as `loadGitHubAuth` trims it (PR #466 gate round 2): a path of spaces beside an inline key
+		// is not "both set", and alone it is "neither set".
+		const keyPathSet = (keyPath ?? "").trim() !== "";
+		// The three key lines `loadGitHubAuth` refuses the worker's boot on (both forms set, neither set, a path that does not
+		// exist) FAIL, as the two ids do (PR #466 gate round 1); the hygiene lines below (mode, PEM shape) still warn.
+		if (inlineKey !== "" && keyPathSet) {
 			checks.push({
 				ok: false,
-				warn: true,
 				label: "GITHUB_APP_PRIVATE_KEY and GITHUB_APP_PRIVATE_KEY_PATH are both set -- the worker will refuse to boot",
 				fix: "unset one of them: the inline value for a deployment fed by a secrets manager, the path for a key on disk (docs/secrets.md)",
 			});
@@ -1300,10 +1332,10 @@ export async function collectChecks(env, seams) {
 					fix: "check for a truncated paste, or point GITHUB_APP_PRIVATE_KEY_PATH at the key file instead (docs/secrets.md)",
 				});
 			}
-		} else if (!keyPath) {
-			checks.push({ ok: false, warn: true, label: "GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set -- the worker will refuse to boot", fix: setupFix });
+		} else if (!keyPathSet) {
+			checks.push({ ok: false, label: "GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set -- the worker will refuse to boot", fix: setupFix });
 		} else if (!fileExists(keyPath)) {
-			checks.push({ ok: false, warn: true, label: `GITHUB_APP_PRIVATE_KEY_PATH does not exist (${keyPath})`, fix: setupFix });
+			checks.push({ ok: false, label: `GITHUB_APP_PRIVATE_KEY_PATH does not exist (${keyPath}) -- the worker will refuse to boot`, fix: setupFix });
 		} else {
 			checks.push({ ok: true, label: `GitHub App private key present (${keyPath})` });
 			// POSIX mode only -- on win32 stat modes are synthetic (0666-ish for everything), so a warn
@@ -1843,14 +1875,15 @@ export async function collectChecks(env, seams) {
 		// job looks them up -- a retired entry left in `.env` is untidy, not a deployment that refuses
 		// deliveries, and failing the whole command on it is the same over-reporting the `waiting > 0` gate
 		// exists to prevent. The probe is `wait-check.mjs`'s own, symlinks and all, so doctor and the gate
-		// cannot disagree about what will run.
+		// cannot disagree about what will run. Issue #462: the unnamed one is a WARNING (`ok: false, warn: true`), not a
+		// pass, because its path is broken and fixing or dropping the entry clears it; an `ok: true` never printed that fix.
 		const named = new Set(waitProfiles);
 		for (const name of Object.keys(declaredWaits).sort()) {
 			const path = declaredWaits[name];
 			const st = statPath(path);
 			const used = named.has(name);
 			checks.push({
-				ok: st.ok || !used,
+				ok: st.ok,
 				...(st.ok ? { label: `Wait profile ${name} -> ${path}${used ? "" : " (declared, named by no trigger)"}` } : {}),
 				...(st.ok
 					? {}
@@ -1910,13 +1943,15 @@ export async function collectChecks(env, seams) {
 				checks.push({ ok: true, label: `Secret resolver profiles declared: ${names.map((n) => `${n} -> ${declared[n]}`).join(", ")}` });
 			}
 			// The panel-authoring bound. Unset is the SAFE default rather than a defect, so this is a fact line
-			// when closed and a disclosure when open.
+			// when closed and a disclosure when open. Issue #462: the disclosure is a FACT LINE too, since the operator opened
+			// it on purpose and nothing but closing it again clears it, so its advice lives in the label (an `ok: true` check
+			// never prints a fix line).
 			const roots = (env.PI_SECRET_RESOLVER_ROOTS ?? "").split(delimiter).map((r) => r.trim()).filter(Boolean);
 			checks.push({
 				ok: true,
 				...(roots.length === 0
 					? { label: "PI_SECRET_RESOLVER_ROOTS is unset, so only PI_SECRET_PROFILES declares resolvers (the panel can declare none)" }
-					: { warn: true, label: `PI_SECRET_RESOLVER_ROOTS admits panel-declared resolvers under: ${roots.join(", ")}`, fix: "keep those directories writable by nobody but the account the worker runs as: whoever can write a resolver there can run code as the worker" }),
+					: { label: `PI_SECRET_RESOLVER_ROOTS admits panel-declared resolvers under: ${roots.join(", ")} -- keep those directories writable by nobody but the account the worker runs as: whoever can write a resolver there can run code as the worker` }),
 			});
 		}
 		// The local-workspace disclosure. Not a failure: a nightly deploy binding a secret is exactly what
@@ -1948,12 +1983,12 @@ export async function collectChecks(env, seams) {
 				fix: "rename them in the triggers file: the worker writes this deployment's own credential into those variables, so every job of those triggers refuses pre-spend as secret-name-reserved",
 			});
 		}
+		// Issue #462: a FACT LINE, not a warning. It is the feature working as chosen and nothing clears it but unbinding the
+		// secrets, so what the operator must know lives in the label: an `ok: true` check never prints a fix line.
 		if (localSecretFolders.length > 0) {
 			checks.push({
 				ok: true,
-				warn: true,
-				label: `${localSecretFolders.length} local trigger(s) bind secrets and run IN the operator's own folder: ${localSecretFolders.join(", ")}`,
-				fix: "a local job edits that folder in place, so a credential the agent writes to .env, .netrc or .git-credentials lands in your real repository (and survives in a retained sandbox for PI_SANDBOX_RETENTION_HOURS). Nothing scans for that: keep those folders out of anything you push",
+				label: `${localSecretFolders.length} local trigger(s) bind secrets and run IN the operator's own folder: ${localSecretFolders.join(", ")} -- a credential the agent writes to .env, .netrc or .git-credentials there lands in your real repository (and in a retained sandbox). Nothing scans for that: keep those folders out of anything you push`,
 			});
 		}
 	}
@@ -1987,14 +2022,14 @@ export async function collectChecks(env, seams) {
 					},
 				},
 			});
-			// Not a failure -- a warning, because it is a disclosure the operator may have accepted
-			// knowingly. A transcript holds tool output, file contents and the agent's own reasoning, which
-			// is strictly more than logs/<jobId>.log holds, and that one is opt-in for this reason.
+			// Not a failure: a disclosure the operator accepted by setting run.resume. A transcript holds tool output, file
+			// contents and the agent's own reasoning, which is strictly more than logs/<jobId>.log holds, and that one is
+			// opt-in for this reason. Issue #462: a FACT LINE, not a warning, because nothing clears it but turning resume
+			// off, so the advice lives in the label (an `ok: true` check never prints a fix line); the bounds it once
+			// listed are the fact line right below.
 			checks.push({
 				ok: true,
-				warn: true,
-				label: `${resuming} trigger(s) persist agent transcripts to ${sessionsDir} -- PII-bearing, host-only, never committed`,
-				fix: "confirm it is outside every git repo and on a disk you would put issue text on; PI_SESSIONS_TTL_DAYS, PI_SESSION_MAX_AGE_DAYS, PI_SESSION_MAX_RESUME_CHAIN and PI_SESSION_MAX_CONTEXT_PCT each bound a different thing about how much history one key accumulates (docs/sessions.md)",
+				label: `${resuming} trigger(s) persist agent transcripts to ${sessionsDir} -- PII-bearing, host-only, never committed: keep it outside every git repo, on a disk you would put issue text on (docs/sessions.md)`,
 			});
 			// Which of the four bounds are actually on, as a FACT LINE rather than a warning: how long a
 			// lineage may run is an operator's call, not a defect, and doctor's warnings are for things that
@@ -2015,14 +2050,15 @@ export async function collectChecks(env, seams) {
 			// image older than that field reports none, the gate passes on no measurement by design, and the
 			// bound is inert with nothing anywhere saying so. There is deliberately no image capability to
 			// check against -- capabilities are an inclusion list for what the host DEMANDS of an image, and
-			// telemetry is not that -- so this warning is the whole detection surface, which is exactly why
-			// it exists rather than being left to a doc.
+			// telemetry is not that -- so this line is the whole detection surface, which is exactly why
+			// it exists rather than being left to a doc. Issue #462 (gate round 1): a FACT LINE, with the older-image caveat in
+			// the label, because nothing doctor can see would ever clear a warning here: with no capability to check, a
+			// current image that does report the reading would carry the ⚠ forever. As `ok: true` with the caveat in a fix
+			// line (the shape before #462), `render` dropped the caveat entirely.
 			if (env.PI_SESSION_MAX_CONTEXT_PCT) {
 				checks.push({
 					ok: true,
-					warn: true,
-					label: `PI_SESSION_MAX_CONTEXT_PCT=${env.PI_SESSION_MAX_CONTEXT_PCT} needs a job image whose runner reports context usage`,
-					fix: `an older image reports none, and a bound with no measurement passes rather than guessing, so on such an image this bound does nothing at all. On an image that does report one the reading is kept whether or not the bound is set, so it applies from the next job. Each run's own record (${env.PI_LOGS_DIR || "the logs directory"}/<jobId>.json) carries session.reason, which names the gate that refused`,
+					label: `PI_SESSION_MAX_CONTEXT_PCT=${env.PI_SESSION_MAX_CONTEXT_PCT} needs a job image whose runner reports context usage: an older image reports none, and a bound with no measurement passes, so there it does nothing. Each run's record (${env.PI_LOGS_DIR || "the logs directory"}/<jobId>.json) carries session.reason, which names the gate that refused`,
 				});
 			}
 		}
@@ -2039,21 +2075,19 @@ export async function collectChecks(env, seams) {
 		});
 	}
 
-	// REQ-REPLICA-RUNS. A warning, never a failure -- replicas are an opt-in an operator chose in a reviewed
-	// file, and the harness is doing exactly what was asked. What is worth saying is the arithmetic: each
-	// replica reserves its OWN budget slot before its own tokens (CONST-BUDGET-BEFORE-TOKENS), so a delivery
-	// on a `replicas: 2` trigger consumes two, and the daily cap divides accordingly. Only reported when a
-	// trigger actually asked for it.
+	// REQ-REPLICA-RUNS. A fact line, never a failure -- replicas are an opt-in an operator chose in a reviewed file,
+	// and the harness is doing exactly what was asked (issue #462: so not a warning either, which no change clears).
+	// What is worth saying is the arithmetic: each replica reserves its OWN budget slot before its own tokens
+	// (CONST-BUDGET-BEFORE-TOKENS), so a delivery on a `replicas: 2` trigger consumes two, and the daily cap divides
+	// accordingly. Only reported when a trigger actually asked for it.
 	if (replicating > 0) {
 		checks.push({
 			ok: true,
-			warn: true,
-			// Both facts live in the LABEL rather than the fix, because an `ok: true` check never prints its
-			// fix line (the loop below) -- and the concurrency half is the one an operator most often has
-			// wrong: replicas above PI_CONCURRENCY queue instead of racing, which looks like the feature
-			// silently not working.
-			label: `${replicating} trigger(s) set run.replicas -- one delivery reserves one budget slot PER replica; PI_CONCURRENCY bounds how many actually race`,
-			fix: "confirm the daily/weekly/monthly caps account for the multiplier, and that PI_CONCURRENCY is at least the largest run.replicas",
+			// Both facts live in the LABEL, because an `ok: true` check never prints a fix line (`render`) -- and the
+			// concurrency half is the one an operator most often has wrong: replicas above PI_CONCURRENCY queue instead
+			// of racing, which looks like the feature silently not working. PI_CONCURRENCY is not judged here, since the
+			// panel's settings overlay can change it after doctor reads the env.
+			label: `${replicating} trigger(s) set run.replicas -- one delivery reserves one budget slot PER replica, so the daily/weekly/monthly caps divide by it; PI_CONCURRENCY bounds how many actually race, so keep it at least the largest run.replicas`,
 		});
 	}
 
@@ -2066,11 +2100,13 @@ export async function collectChecks(env, seams) {
 	// deliberate degradation: a spent entry counts toward NO parsed fact above (forges, flows,
 	// webhook-secret), mirroring what the receiver serves at its next boot.
 	if (onceArmed > 0) {
+		// Issue #462: a WARNING while PI_TRIGGERS_FILE is unset, since setting it clears the split-file hazard, and its fix
+		// line prints only in the `ok: false, warn: true` shape; a plain fact line once it is set.
 		checks.push({
-			ok: true,
+			ok: env.PI_TRIGGERS_FILE !== undefined,
 			warn: env.PI_TRIGGERS_FILE === undefined,
-			label: `${onceArmed} one-shot trigger(s) armed (on.once) -- the worker disarms the entry in ${env.PI_TRIGGERS_FILE === undefined ? "./triggers.json resolved against the worker service's working directory; set PI_TRIGGERS_FILE so worker and receiver name the same file from anywhere" : "PI_TRIGGERS_FILE"} after the run record exists`,
-			fix: "set PI_TRIGGERS_FILE to an absolute path in both services' environments",
+			label: `${onceArmed} one-shot trigger(s) armed (on.once) -- the worker disarms the entry in ${env.PI_TRIGGERS_FILE === undefined ? "./triggers.json resolved against the worker service's working directory" : "PI_TRIGGERS_FILE"} after the run record exists`,
+			fix: "set PI_TRIGGERS_FILE to an absolute path in both services' environments, so worker and receiver name the same file from anywhere",
 		});
 	}
 	if (onceSpent > 0) {
@@ -2318,16 +2354,16 @@ export async function collectChecks(env, seams) {
 	// every legitimate repo cap would be standing noise that teaches skimming (`repositories` is empty
 	// for every valid file today -- run.repository is azure-only, its own fact says so). Guarded on the
 	// TRIGGERS facts being readable too: a zeroed `folders` from an absent or unparseable triggers file
-	// has no honest claim to make (readTriggerFacts' own rule). ok:true -- the replica advisory's tier,
-	// and like it, everything the operator needs lives in the LABEL: an ok:true check never prints its
-	// fix line.
+	// has no honest claim to make (readTriggerFacts' own rule). Issue #462: a WARNING (`ok: false, warn: true`), never a
+	// failure: a cap that guards nothing is a mistake the operator can clear by fixing or deleting the row, and in this
+	// shape `render` prints the fix line too, which the old `ok: true` never did.
 	if (scopedLimitFacts.parseError === null && scopedLimitFacts.limits.length > 0 && parseError === null && triggersFilePath !== null) {
 		const folderSet = new Set(folders);
 		const folderOnly = (s) => s.startsWith("/") || s.startsWith("./") || s.startsWith("../") || s.includes("\\") || !s.includes("/") || /^[A-Za-z]:/.test(s);
 		const dead = scopedLimitFacts.limits.map((l) => l.scope).filter((s) => folderOnly(s) && !folderSet.has(s));
 		if (dead.length > 0) {
 			checks.push({
-				ok: true,
+				ok: false,
 				warn: true,
 				label: `${dead.length} scoped limit(s) name a folder no trigger runs in (${dead.join(", ")}) -- the cap guards nothing; scopes match exactly (no globs, folders by resolved ABSOLUTE path), so check the spelling against triggers.json run.folder or delete the entry`,
 				fix: `edit ${scopedLimitFacts.path} by hand or via dispatch_limit_edit/_delete -- repo-shaped scopes are never flagged here, because a webhook job's repo comes from the delivery, which triggers.json cannot enumerate`,
@@ -2335,10 +2371,11 @@ export async function collectChecks(env, seams) {
 		}
 	}
 
-	// REQ-RESURRECTABLE-SANDBOX. A warning, never a failure: retention is a convenience, and the only thing
+	// REQ-RESURRECTABLE-SANDBOX. A fact line, never a failure: retention is a convenience, and the only thing
 	// worth surfacing is that finished runs' directories -- a repository clone plus the run's prompt.md and
 	// event.json, so issue text -- are sitting on disk, and how many. An operator who never opens a sandbox
-	// should still know they are being kept.
+	// should still know they are being kept. Issue #462: not a warning either, since retention on is the default and
+	// nothing needs changing, so what each holds and how to turn it off live in the label (`ok: true` prints no fix).
 	{
 		const retentionHours = nonNegativeEnvInt(env.PI_SANDBOX_RETENTION_HOURS, 24);
 		const sandboxDir = env.PI_SANDBOX_DIR || defaultSandboxDir(env);
@@ -2350,9 +2387,7 @@ export async function collectChecks(env, seams) {
 		} else {
 			checks.push({
 				ok: true,
-				warn: kept.count > 0,
-				label: `${kept.count} retained workspace(s) in ${sandboxDir}, swept after ${retentionHours}h — re-open one with \`pi-dispatch sandbox <jobId>\``,
-				fix: "each holds the run's clone plus its prompt.md/event.json (issue text); PI_SANDBOX_RETENTION_HOURS=0 turns retention off entirely",
+				label: `${kept.count} retained workspace(s) in ${sandboxDir}, swept after ${retentionHours}h, re-open one with \`pi-dispatch sandbox <jobId>\`${kept.count > 0 ? "; each holds the run's clone plus its prompt.md/event.json (issue text), and PI_SANDBOX_RETENTION_HOURS=0 turns retention off" : ""}`,
 			});
 		}
 		checks.push(...sandboxTombstoneChecks(sandboxDir, kept));
@@ -3540,10 +3575,17 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// is said to be unknown, never stale.
 	const inFolder = ["egress-allowlist.conf", "deploy/egress-proxy.conf"].every((f) => proxyFilesExist(join(seams.cwd, f)));
 	const judged = !custom && parsed ? shippedProxyDrift(parsed, { cwd: seams.cwd, platform: seams.platform ?? process.platform, realpath: (p) => realpathSync(p), compareMounts: inFolder }) : { drift: [], unknown: null };
-	const replaceFix = `\`pi-dispatch up\` from the deployment folder offers to replace it with the shipped one (docker rm -f ${proxy}, then the shipped run)`;
-	// The worker's simple rule (egress.mjs): paused, exited and dead refuse every job, so ✗; any other state is one the
-	// worker retries through (restarting, created, ...), so ⚠, and the fix says jobs wait rather than fail.
-	// `restarting` is a crash loop that fails every job (one retry, then failed), so ✗; ⚠ only for a transient word.
+	// What `up` does with it, told the way `up` decides it (PR #456's final check): a proxy stale by its image, entrypoint
+	// or command is offered for replacement whatever its mounts; one stale on its mounts alone is not while one of its own
+	// two mounts is unknown, so the fix names the commands rather than an offer that `up` would not make.
+	const mountsOnly = judged.unknown !== null && judged.drift.length > 0 && shippedProxyDrift(parsed, { cwd: seams.cwd, compareMounts: false }).drift.length === 0;
+	const replaceFix = mountsOnly
+		? `check its mounts (\`docker inspect --format '{{json .Mounts}}' ${proxy}\`), then \`docker rm -f ${proxy}\` and \`pi-dispatch up\` from the deployment folder replace it with the shipped one; \`up\` does not offer to on its own while one of its mounts cannot be compared here`
+		: `\`pi-dispatch up\` from the deployment folder offers to replace it with the shipped one (docker rm -f ${proxy}, then the shipped run)`;
+	// The worker's simple rule (egress.mjs): paused, exited, dead and created (`STOPPED_PROXY_STATES`) refuse every job,
+	// so ✗; any other state is one the worker retries through (restarting, stopping, removing, ...), so ⚠, and the fix
+	// says jobs wait rather than fail. `restarting` is a crash loop that fails every job (one retry, then failed), so ✗;
+	// ⚠ only for a transient word.
 	const retried = parsed !== null && !up && !STOPPED_PROXY_STATES.has(parsed.status) && parsed.status !== "restarting";
 	// A RUNNING stale proxy (exec round 3) gets no "✓ running" line: the ✗ below says what it is, and carries the state
 	// `--live` reads, so the output never reads healthy right before saying the proxy is not this deployment's.
@@ -4779,13 +4821,22 @@ export async function podmanChecks(env, seams, { jobImage }) {
 		const status = state.code === 0 ? state.output.trim() : null;
 		proxyRunning = status === "running";
 		// The worker's simple rule (egress.mjs), as on docker: a state it retries through is ⚠, one it refuses on is ✗.
-		const retried = state.code === 0 && !proxyRunning && /^[a-z]{1,20}$/.test(status ?? "") && !STOPPED_PROXY_STATES.has(status) && status !== "restarting";
+		// A CRASH LOOP is ✗ too, as docker's `restarting` is, since every job is retried once and then failed. Podman reads
+		// a `--restart=always` crash loop as `stopped` continuously (PR #466 gate round 1, Podman 5.8.1: about eight restarts
+		// a second), while `podman stop`, `--restart=no` and an exhausted `on-failure` read `exited`; the worker retries
+		// through `stopped` (`egress.mjs` keeps that mapping), so a ⚠ saying jobs wait was the wrong line while every job
+		// failed. The label names the raw word, so `stopped` and `exited` read apart, and the fix names the crash loop as
+		// the likely cause, not as a fact.
+		const crashLoop = status === "stopped" || status === "restarting";
+		const retried = state.code === 0 && !proxyRunning && /^[a-z]{1,20}$/.test(status ?? "") && !STOPPED_PROXY_STATES.has(status) && !crashLoop;
 		checks.push({
 			ok: proxyRunning,
 			...(retried ? { warn: true } : {}),
-			label: proxyRunning ? `podman: egress proxy running under this account's Podman (${proxy})` : state.code === 0 ? `podman: egress proxy is ${status && status !== "exited" ? status : "stopped"} under this account's Podman (${proxy})` : `podman: egress proxy is not under this account's Podman (${proxy})`,
+			label: proxyRunning ? `podman: egress proxy running under this account's Podman (${proxy})` : state.code === 0 ? `podman: egress proxy is ${/^[a-z]{1,20}$/.test(status ?? "") ? status : "in a state it did not report"} under this account's Podman (${proxy})` : `podman: egress proxy is not under this account's Podman (${proxy})`,
 			fix: retried
 				? `a podman job meanwhile is retried once, then failed (the worker does not refuse it outright on this state); if it stays ${status}, \`podman logs ${proxy}\` says why`
+				: crashLoop
+				? `if a restart policy keeps bringing it back, its squid keeps exiting (Podman reads such a crash loop as ${status}) and every podman job is retried once, then failed; \`podman logs ${proxy}\` says why`
 				: "start it as the worker's account, under the same rootless Podman, on a named bridge network (docs/podman.md): a job's --internal network reaches nothing on the host, so a proxy under docker or another account cannot serve it. Every podman job is refused pre-spend while this is down (PI_EGRESS=0 opts out)",
 		});
 		// Said, never implied by the ✓ above: running is not the same as enforcing the allowlist. Issue #431: on this venue

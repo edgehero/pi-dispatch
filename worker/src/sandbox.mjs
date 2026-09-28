@@ -263,11 +263,13 @@ export async function listRunningSandboxes({ execFn = exec, bin = "docker", sign
  * under the shell. The runtime a run opens in is a property of the RUN, so the question is asked of the run.
  *
  * A RUN THIS CANNOT PLACE is asked of EVERY runtime present (review round 2): a manifest that cannot be read or parsed
- * right now (an `EMFILE`, a rewrite caught mid-write) and one naming a venue with no launcher. Such a run is held when
- * any runtime present cannot answer or reports it open, and swept only once every one has answered "not open". Skipping
- * it was the defect: the reaper's own expiry then re-read the manifest, found it unreadable, and deleted a directory an
- * open sandbox was using with no runtime asked. Holding it forever was the other wrong answer, since nothing would ever
- * sweep it. With no runtime present at all there is nothing on this host that could hold it open.
+ * right now (an `EMFILE`, a rewrite caught mid-write), one naming a venue with no launcher, and (PR #466 gate round 1)
+ * a directory with no manifest file at all, which a sandbox opened before its manifest went can still have mounted.
+ * Such a run is held when any runtime present cannot answer or reports it open, and swept only once every one has
+ * answered "not open". Skipping it was the defect: the reaper's own expiry then re-read the manifest, found it
+ * unreadable, and deleted a directory an open sandbox was using with no runtime asked. Holding it forever was the other
+ * wrong answer, since nothing would ever sweep it. With no runtime present at all there is nothing on this host that
+ * could hold it open.
  *
  * A PODMAN RUN RECORDS ITS STORE (`podmanStore`, `podman info`'s graphRoot) and is held while the podman this asks uses
  * another, or cannot say which it uses (review round 2, measured on Podman 5.8.1): rootless `podman ps -a` over another
@@ -317,11 +319,13 @@ export function makeSandboxRuntimeWatch({ sandboxDir, blessed = [], fs = { lstat
 		const stores = [];
 		for (const name of names) {
 			const read = reads.get(name);
-			// A transient failure is the REAPER's hold, whatever any runtime says (nothing about the run is known), and
-			// an absent manifest is its `no-manifest` rule: neither is a question for a runtime. A manifest that does not
-			// parse, or cannot be read for good, is a run this cannot place.
-			if (!read || read.transient || read.absent) continue;
-			if (!Object.hasOwn(read, "manifest")) {
+			// A transient failure is the REAPER's hold, whatever any runtime says (nothing about the run is known). A
+			// manifest that does not parse, or cannot be read for good, is a run this cannot place, and so, since PR #466
+			// gate round 1, is a directory with NO manifest file: the reaper's `no-manifest` rule deletes it, and a
+			// `pi-sandbox-<name>` container can still have it mounted (measured: one running over a directory whose
+			// manifest was removed was deleted under it, the runtime never asked). Every runtime present is asked.
+			if (!read || read.transient) continue;
+			if (read.absent || !Object.hasOwn(read, "manifest")) {
 				unplaced.push(name);
 				continue;
 			}
@@ -368,11 +372,12 @@ export function makeSandboxRuntimeWatch({ sandboxDir, blessed = [], fs = { lstat
 	 * Whether ONE retained run's sandbox is open right now (issue #446, gate round 1): the reaper asks it immediately
 	 * before renaming the run aside, because the pass's `listRunning` answer can be much older by then. Asked of the
 	 * run's own runtime, or of every runtime present for a run it cannot place; THROWS when a runtime cannot answer,
-	 * which the reaper holds. A run with no manifest file is nothing an open can be on (`resolveSandbox` refuses it) and
-	 * asks nobody, as `listRunning` does not.
+	 * which the reaper holds. A directory with no manifest file is one it cannot place (PR #466 gate round 1): no NEW
+	 * open can be on it (`resolveSandbox` refuses it), but one opened before its manifest went can still have it
+	 * mounted, so every runtime present is asked, as `listRunning` asks.
 	 */
 	async function isOpen({ name, read } = {}) {
-		if (!read || read.absent) return false;
+		if (!read) return false;
 		const manifest = Object.hasOwn(read, "manifest") ? read.manifest : null;
 		const launcher = manifest ? sandboxLauncher(sandboxVenueOf(manifest)) : null;
 		const bins = launcher ? [launcher.bin] : allBins.filter((bin) => present.has(bin));
@@ -896,8 +901,9 @@ export function sandboxEgress(env) {
  *
  * In order: `resolveSandbox` (every refusal, the venue one and the past-window one included) -> the pin, when the
  * caller asked for one (issue #446) -> the already-running refusal -> the argv, with this session's own network and
- * proxy variables when armed -> `beforeLaunch`, the caller's hook to print once the session is known to be openable ->
- * create the network (a network already under this name is REFUSED and named, never removed) -> launch, watched until
+ * proxy variables when armed -> create the network (a network already under this name is REFUSED and named, never
+ * removed) -> `beforeLaunch`, the caller's hook to print once the session is known to be openable, so after the last
+ * refusal (issue #462) and removed with the network if it throws -> launch, watched until
  * the runtime lists it (issue #446) -> ask the runtime again, and remove the network in a finally unless the sandbox
  * is still running. Returns `{ refused, message }`, or `{ code, error }` from the launch, with `detached: true` when
  * the runtime still lists the sandbox as running after the shell returned (its network is left in place).
@@ -1054,7 +1060,6 @@ export async function openSandbox({
 		// retained before a preparer moved its clone is still judged by where the files actually are.
 		workspaceOwned: insideDir(resolved.manifest.dir, resolved.manifest.workspace),
 	});
-	await beforeLaunch({ resolved, args, network, runtime: bin });
 
 	// No pre-spend gate here, deliberately: that is a MONEY gate and a sandbox spends nothing. A missing proxy
 	// fails at network creation, in front of an operator at a terminal, which is the one place a late failure
@@ -1161,6 +1166,10 @@ export async function openSandbox({
 		}
 	};
 	try {
+		// THE CALLER'S BANNER, AFTER THE LAST REFUSAL (issue #462): the CLI prints "opening ..." from here, and it ran before
+		// the network was created, so a leftover network printed the banner and then refused. Inside the `try`, so a hook
+		// that throws still has this session's network removed by the `finally`.
+		await beforeLaunch({ resolved, args, network, runtime: bin });
 		const watching = look().catch(() => {});
 		let launched;
 		try {

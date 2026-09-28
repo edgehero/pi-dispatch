@@ -919,6 +919,38 @@ test("a changed tombstone whose name holds anything but an empty directory is he
 	assert.equal(JSON.parse(fs.files["/sbx/a/manifest.json"]).keepUntil, new Date(AT + 7 * DAY).toISOString());
 });
 
+test("a pinned tombstone held by a manifest-less directory at its name is restored in the SAME pass that deletes that directory (PR #457's final check)", async () => {
+	// The leftover sweep runs before the main loop, so the name was still taken when it tried; the main loop then deletes
+	// the manifest-less directory (`no-manifest`), and the run used to wait a whole pass as a tombstone for the next sweep.
+	const fs = sandboxDirWith({});
+	fs.files["/sbx/.reap-1-2-3"] = "<dir>";
+	fs.files["/sbx/.reap-1-2-3/manifest.json"] = JSON.stringify({ jobId: "a", createdAt: hoursAgo(50), keepUntil: new Date(AT + DAY).toISOString() });
+	fs.files["/sbx/a"] = "<dir>";
+	fs.files["/sbx/a/left-behind"] = "x";
+	const logged = [];
+	const seen = [];
+	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs, now: () => AT, pidAlive: () => false, log: (e, d) => logged.push([e, d]), sweepNetworks: async ({ retained }) => (seen.push(retained()), { swept: [], notes: [] }) })();
+	assert.equal(JSON.parse(fs.files["/sbx/a/manifest.json"]).keepUntil, new Date(AT + DAY).toISOString(), "the pinned run is back under its name");
+	assert.ok(!("/sbx/a/left-behind" in fs.files), "what held the name had no manifest, and was deleted");
+	assert.deepEqual(Object.keys(fs.files).filter((k) => k.includes(".reap-")), [], "no tombstone left for a later pass");
+	assert.deepEqual(
+		logged.filter(([, d]) => d.entry === ".reap-1-2-3"),
+		[
+			["sandbox_reaper_skipped", { entry: ".reap-1-2-3", reason: "tombstone-pinned", restored: false }],
+			["sandbox_reaper_skipped", { entry: ".reap-1-2-3", reason: "tombstone-pinned", restored: true }],
+		],
+	);
+	assert.deepEqual(seen, [["a"]], "restored before the network sweep, whose fresh listing sees the run");
+	// A name held by a run that is NOT deleted this pass stays held, said once, and the retry deletes nothing.
+	const kept = sandboxDirWith({ a: { createdAt: hoursAgo(1) } });
+	kept.files["/sbx/.reap-1-2-3"] = "<dir>";
+	kept.files["/sbx/.reap-1-2-3/manifest.json"] = JSON.stringify({ jobId: "a", createdAt: hoursAgo(50), keepUntil: new Date(AT + DAY).toISOString() });
+	const keptLog = [];
+	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs: kept, now: () => AT, pidAlive: () => false, log: (e, d) => keptLog.push([e, d]) })();
+	assert.ok("/sbx/.reap-1-2-3/manifest.json" in kept.files, "held, never deleted while pinned");
+	assert.deepEqual(keptLog, [["sandbox_reaper_skipped", { entry: ".reap-1-2-3", reason: "tombstone-pinned", restored: false }]]);
+});
+
 test("a crash-left tombstone holding a live pin is restored under its run's escaped name, never deleted (#446, gate round 1)", async () => {
 	const fs = sandboxDirWith({});
 	fs.files["/sbx/.reap-1-2-3"] = "<dir>";

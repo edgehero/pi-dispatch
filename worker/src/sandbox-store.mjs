@@ -413,6 +413,8 @@ export function makeSandboxReaper({
 		// behind is cleared once it is old enough that no pass could still hold it.
 		const runs = [];
 		const pass = now();
+		// The pinned tombstones this pass could not put back, for ONE retry after the main loop (PR #457's final check).
+		const heldPinned = [];
 		for (const name of names) {
 			if (!isSandboxTombstone(name)) {
 				runs.push(name);
@@ -428,7 +430,7 @@ export function makeSandboxReaper({
 				sayOnce(name, pass, { reason: "tombstone-foreign" });
 				continue;
 			}
-			await clearTombstone(name, pass);
+			if ((await clearTombstone(name, pass)) === "pinned-held") heldPinned.push(name);
 		}
 		names = runs;
 
@@ -574,6 +576,13 @@ export function makeSandboxReaper({
 			}
 		}
 
+		// THE HELD PINNED TOMBSTONES, ONCE MORE (PR #457's final check). One held because a directory with no manifest held
+		// its run's name waited a whole pass for the next leftover sweep, though the loop above deletes such a directory
+		// (`no-manifest`) in this same pass. Retried here, after the loop and before the network sweep (whose fresh
+		// listing then sees the run back), through the same `clearTombstone`: its reads, its restore that displaces only an
+		// empty directory, its rule that never deletes a live pin, and its once-per-period line when the name is still taken.
+		for (const name of heldPinned) await clearTombstone(name, pass);
+
 		// The session networks, after the directories. Reached only when `listRunning` ANSWERED and the
 		// directory listing was read, which is the same precondition the directory pass has: without either,
 		// nothing here can be called unclaimed.
@@ -650,11 +659,15 @@ export function makeSandboxReaper({
 	 * `pinned: true`. It is restored under its run's name when that is free (or an empty directory), and otherwise held
 	 * and said (`tombstone-pinned`); once its pin lapses it is an ordinary leftover. A manifest that cannot be read for
 	 * a moment holds it too: deleting on an unknown is the one mistake here that cannot be undone.
+	 *
+	 * Resolves `"pinned-held"` for a pinned one whose run's name was taken, which the pass retries once after its main
+	 * loop; null otherwise.
 	 */
 	async function clearTombstone(name, at) {
 		const path = join(sandboxDir, name);
 		const read = readRetained(fs, path);
 		const keepUntil = Date.parse(read.manifest?.keepUntil ?? "");
+		let held = false;
 		if (read.transient) {
 			sayOnce(name, at, { reason: "manifest-unread" });
 		} else if (Number.isFinite(keepUntil) && keepUntil > at) {
@@ -663,7 +676,10 @@ export function makeSandboxReaper({
 			if (restored) {
 				stuckSaid.delete(name);
 				log("sandbox_reaper_skipped", { entry: name, reason: "tombstone-pinned", restored: true });
-			} else sayOnce(name, at, { reason: "tombstone-pinned", restored: false });
+			} else {
+				held = target !== null;
+				sayOnce(name, at, { reason: "tombstone-pinned", restored: false });
+			}
 		} else {
 			try {
 				fs.rmSync(path, { recursive: true, force: true });
@@ -675,6 +691,7 @@ export function makeSandboxReaper({
 		}
 		// The per-tree yield of the main loop, for its reason: this runs on the timer beside draining jobs.
 		await new Promise((resolve) => setImmediate(resolve));
+		return held ? "pinned-held" : null;
 	}
 
 	/**

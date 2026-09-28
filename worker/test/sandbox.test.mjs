@@ -371,14 +371,14 @@ test("openSandbox puts an armed session on its own egress network, and removes i
 	assert.ok(launchedWith.includes("--network=pi-sandbox-gh-1-net"), "the network the job would have had");
 	assert.ok(launchedWith.some((a) => a.startsWith("HTTPS_PROXY=http://pi-dispatch-egress-proxy:")), "and the proxy variables that make it usable");
 	assert.deepEqual(calls, [
-		// The hook first: a throw there (a failed pin) must not leave a network behind, so it runs before one exists.
-		"beforeLaunch",
 		"docker network create --internal pi-sandbox-gh-1-net",
 		"docker network connect pi-sandbox-gh-1-net pi-dispatch-egress-proxy",
+		// The hook AFTER the network (issue #462): it is where the CLI prints "opening ...", so it follows the last refusal.
+		"beforeLaunch",
 		"launch",
 		"docker network disconnect -f pi-sandbox-gh-1-net pi-dispatch-egress-proxy",
 		"docker network rm pi-sandbox-gh-1-net",
-	], "hook, built before the launch, torn down after it -- and nothing is removed before the build");
+	], "built, then the hook, then the launch, torn down after it -- and nothing is removed before the build");
 });
 
 test("openSandbox with egress off builds exactly the argv it always did, and touches no network", async () => {
@@ -491,14 +491,17 @@ test("openSandbox REFUSES a network already under the session's name and names i
 	// removing it automatically stripped the proxy from a racing open's live shell, so it is named instead.
 	const calls = [];
 	let launched = false;
+	const hooked = [];
 	const exists = await openSandbox({
 		...session,
 		...openable(),
 		egress: { armed: true, proxy: "my-proxy" },
 		spawnNetwork: recordingDocker(calls, (args) => (args[1] === "create" ? 1 : 0)),
+		beforeLaunch: () => hooked.push("beforeLaunch"),
 		launch: async () => ((launched = true), { code: 0 }),
 	});
 	assert.equal(exists.refused, "egress-network-exists");
+	assert.deepEqual(hooked, [], "a refusal at the network never reaches the hook that prints the opening banner (#462)");
 	// Disconnects whatever is attached, not the configured proxy: a leftover can carry a different one.
 	assert.match(exists.message, /docker network inspect -f '\{\{range \.Containers\}\}\{\{\.Name\}\} \{\{end\}\}' pi-sandbox-gh-1-net\); do docker network disconnect -f pi-sandbox-gh-1-net "\$c"; done; docker network rm pi-sandbox-gh-1-net/);
 	assert.equal(launched, false);
@@ -510,10 +513,34 @@ test("openSandbox REFUSES a network already under the session's name and names i
 		...openable(),
 		egress: { armed: true, proxy: "p" },
 		spawnNetwork: recordingDocker([], (args) => (args[1] === "create" || args[1] === "inspect" ? 1 : 0)),
+		beforeLaunch: () => hooked.push("beforeLaunch"),
 		launch: async () => ({ code: 0 }),
 	});
 	assert.equal(missing.refused, "egress-network-failed");
 	assert.match(missing.message, /is the proxy running\?.*read from this process's environment/);
+	assert.deepEqual(hooked, [], "nor does a network that could not be created");
+});
+
+test("a hook that throws still has the session's network removed, and launches nothing (#462)", async () => {
+	// The hook runs after the network exists now, so the `finally` that removes it has to cover the hook too.
+	const calls = [];
+	let launched = false;
+	await assert.rejects(
+		() =>
+			openSandbox({
+				...session,
+				...openable(),
+				egress: { armed: true, proxy: "p" },
+				spawnNetwork: recordingDocker(calls),
+				beforeLaunch: () => {
+					throw new Error("hook");
+				},
+				launch: async () => ((launched = true), { code: 0 }),
+			}),
+		/hook/,
+	);
+	assert.equal(launched, false);
+	assert.deepEqual(calls.slice(-2), ["docker network disconnect -f pi-sandbox-gh-1-net p", "docker network rm pi-sandbox-gh-1-net"]);
 });
 
 test("openSandbox refuses a running sandbox by its SANITIZED id, which is what docker reports", async () => {
@@ -1586,12 +1613,26 @@ describe("the reaper and the watch decide on ONE manifest read per directory (#4
 		assert.deepEqual(root.removed.sort(), ["bad", "none", "p-1"], "held by its runtime: d-1; the rest expire on their one read");
 	});
 
-	test("ENOENT keeps the no-manifest rule without asking anyone; a parse error is asked of every runtime present", async () => {
-		// A runtime IS present (podman blessed), so "nobody was asked" is a property of ENOENT, not of an empty host.
+	test("a directory with NO manifest file is asked of every runtime present, and held while one reports it open or cannot answer (PR #466 gate round 1)", async () => {
+		// Reproduced on a real host: a `pi-sandbox-none` container running over a directory whose manifest had been removed
+		// was deleted under it, because ENOENT was the no-manifest rule and no runtime was asked.
 		const asked = [];
-		const root = rootWith({ none: null });
-		await pass(root, { blessed: ["podman"], list: async ({ bin }) => (asked.push(bin), []) });
-		assert.deepEqual([root.removed, asked], [["none"], []], "no manifest file: swept, and no runtime asked about it");
+		const open = rootWith({ none: null });
+		await pass(open, { blessed: ["podman"], list: async ({ bin }) => (asked.push(bin), ["none"]) });
+		assert.deepEqual([open.removed, asked], [[], ["podman"]], "a sandbox of that name is running: held");
+		const down = rootWith({ none: null });
+		const logs = await pass(down, { blessed: ["podman"], list: async () => {
+			throw new Error("down");
+		} });
+		assert.deepEqual(down.removed, [], "the runtime could not answer: held");
+		assert.deepEqual(logs.filter((f) => f.reason === "runtime-unanswered"), [{ reason: "runtime-unanswered", runtime: "podman", held: 1 }]);
+		const closed = rootWith({ none: null });
+		await pass(closed, { blessed: ["podman"], list: async () => [] });
+		assert.deepEqual(closed.removed, ["none"], "every runtime present answered not open: the no-manifest rule sweeps it");
+		const bare = rootWith({ none: null });
+		const bareAsked = [];
+		await pass(bare, { list: async ({ bin }) => (bareAsked.push(bin), []) });
+		assert.deepEqual([bare.removed, bareAsked], [["none"], []], "no runtime present at all: nothing on this host can hold it open");
 		const unplacedAsked = [];
 		await pass(rootWith({ bad: "{" }), { blessed: ["podman"], list: async ({ bin }) => (unplacedAsked.push(bin), []) });
 		assert.deepEqual(unplacedAsked, ["podman"], "while a parse error IS asked of the runtime present");
@@ -1895,7 +1936,7 @@ describe("an open racing the sweep (#446)", () => {
 					// the look itself runs on microtasks, long before this.
 					return new Promise((resolve) => {
 						finish = resolve;
-						setTimeout(() => resolve({ code: 0 }), 50);
+						setTimeout(() => resolve({ code: -1 }), 10_000).unref();
 					});
 				},
 				stop: async ({ bin, name }) => (stopped.push(`${bin} ${name}`), finish({ code: 137 }), true),
@@ -1963,7 +2004,7 @@ describe("an open racing the sweep (#446)", () => {
 					listed = true;
 					return new Promise((resolve) => {
 						finish = resolve;
-						setTimeout(() => resolve({ code: 0 }), 50);
+						setTimeout(() => resolve({ code: -1 }), 10_000).unref();
 					});
 				},
 				stop: async ({ name }) => (stopped.push(name), finish({ code: 137 }), true),
@@ -1986,8 +2027,9 @@ describe("an open racing the sweep (#446)", () => {
 				running: ({ signal } = {}) => {
 					if (first) return ((first = false), Promise.resolve([]));
 					signalled = signal ?? null;
-					// A wedged `ps` that answers only at its own timeout (shortened here).
-					return new Promise((resolve) => setTimeout(() => ((askSettled = true), resolve([])), 300));
+					// A wedged `ps` that answers only at its own timeout: far past anything the test waits for, and `unref`'d, so
+					// "returned without waiting out the hung ask" is never a race against a short timer (PR #466 gate round 2).
+					return new Promise((resolve) => setTimeout(() => ((askSettled = true), resolve([])), 10_000).unref());
 				},
 				pause: async () => {},
 				launch: async () => new Promise((resolve) => (finish = resolve)),
@@ -2020,7 +2062,7 @@ describe("an open racing the sweep (#446)", () => {
 		assert.equal(sandboxContainerName(".reap-9"), "pi-sandbox-_.reap-9");
 	});
 
-	test("the runtime watch's isOpen asks the run's own runtime, asks nobody for a run with no manifest, and throws when unanswered (#446)", async () => {
+	test("the runtime watch's isOpen asks the run's own runtime, every runtime present for a run with no manifest, and throws when unanswered (#446)", async () => {
 		const asked = [];
 		let fail = false;
 		// `blessed` puts docker in the runtimes present, so "nobody asked" below is a property of the absent manifest.
@@ -2032,8 +2074,10 @@ describe("an open racing the sweep (#446)", () => {
 		assert.equal(await watch.isOpen({ name: "p-1", read: { manifest: { backend: "podman" } } }), true);
 		assert.equal(await watch.isOpen({ name: "d-1", read: { manifest: { backend: "local" } } }), false);
 		assert.deepEqual(asked, ["podman", "docker"]);
+		// PR #466 gate round 1: no manifest file is a run this cannot place, so every runtime present is asked.
 		assert.equal(await watch.isOpen({ name: "none", read: { absent: true } }), false);
-		assert.equal(asked.length, 2, "no manifest file, nobody asked");
+		assert.deepEqual(asked, ["podman", "docker", "docker"], "no manifest file: docker, the runtime present, asked");
+		assert.equal(await watch.isOpen({ name: "p-1", read: { absent: true } }), true, "and one it reports open is open");
 		fail = true;
 		await assert.rejects(watch.isOpen({ name: "d-1", read: { manifest: { backend: "local" } } }), /down/);
 	});
@@ -2148,6 +2192,9 @@ describe("the #446 races on a real filesystem (gate round 1)", () => {
 					renameSync(dir, join(sbx, "gone-old"));
 					mkdirSync(dir);
 					writeFileSync(p, body);
+					// The shell exits once the watch has made the read that sees the replacement (this one), never on a
+					// timer that the watch has to beat (PR #466 gate round 2).
+					setImmediate(() => finish({ code: 5 }));
 				}
 				return read(p, o);
 			},
@@ -2161,7 +2208,7 @@ describe("the #446 races on a real filesystem (gate round 1)", () => {
 					listed = true;
 					return new Promise((resolve) => {
 						finish = resolve;
-						setTimeout(() => resolve({ code: 5 }), 200);
+						setTimeout(() => resolve({ code: -1 }), 10_000).unref();
 					});
 				},
 				stop: async ({ name }) => (stopped.push(name), finish?.({ code: 137 }), true),
@@ -2214,13 +2261,18 @@ describe("the #446 races on a real filesystem (gate round 1)", () => {
 		const c = realRoot("gh-1");
 		let listed = false;
 		const stopped = [];
+		// Deleted only once the look has listed the container and made its launch check (the macrotask after that
+		// answer), never after a 50 ms window the look had to land in (PR #466 gate round 2).
+		let lookListed;
+		const listedByLook = new Promise((resolve) => (lookListed = resolve));
 		const seen = await openSandbox(
 			opener(c.sbx, {
-				running: async () => (listed ? ["gh-1"] : []),
+				running: async () => (listed ? (lookListed(), ["gh-1"]) : []),
 				stop: async () => (stopped.push(1), true),
 				launch: async () => {
 					listed = true;
-					await new Promise((r) => setTimeout(r, 50));
+					await listedByLook;
+					await new Promise((r) => setImmediate(r));
 					realFs.rmSync(c.dir, { recursive: true, force: true });
 					return { code: 125 };
 				},
@@ -2231,19 +2283,36 @@ describe("the #446 races on a real filesystem (gate round 1)", () => {
 	});
 
 	test("a container never listed is watched for the whole session but never removed, and a brief loss is still reported (#446 gate round 3)", async () => {
+		// NO WALL-CLOCK WINDOWS (PR #466 gate round 2: the 60 ms rename window below flaked once under full-suite load).
+		// The launch waits on the look's own read of the run's directory, taken from an `lstatSync` hook, so each loss is
+		// seen by the watch because the test waited for the watch to look, not because a timer happened to land.
+		const watched = (dir) => {
+			let wake = null;
+			return {
+				fs: { ...realFs, lstatSync: (p, o) => (p === dir && wake ? (wake(), (wake = null)) : null, realFs.lstatSync(p, o)) },
+				// A 10 s guard so a watch that never reads fails the assertions below instead of hanging; it decides no ordering.
+				nextRead: () =>
+					new Promise((resolve) => {
+						const guard = setTimeout(resolve, 10_000);
+						wake = () => (clearTimeout(guard), resolve());
+					}),
+			};
+		};
 		// `ps` fails throughout, so the look never lists the container and spends its asking budget; then the run goes.
 		const gone = realRoot("gh-1");
+		const goneWatch = watched(gone.dir);
 		const stopped = [];
 		const r = await openSandbox(
 			opener(gone.sbx, {
+				fs: goneWatch.fs,
 				running: async () => {
 					throw new Error("ps down");
 				},
 				stop: async () => (stopped.push(1), true),
 				launch: async () => {
-					// Gone BEFORE the asking budget runs out, so the check after it finds it gone: still not removed.
+					// Gone while the look watches: the watch reads it gone, and still does not remove the container.
 					realFs.rmSync(gone.dir, { recursive: true, force: true });
-					await new Promise((res) => setTimeout(res, 120));
+					await goneWatch.nextRead();
 					return { code: 0 };
 				},
 			}),
@@ -2253,21 +2322,24 @@ describe("the #446 races on a real filesystem (gate round 1)", () => {
 		// And a loss the exit check alone cannot see (the directory renamed away and back, same inode) is seen by the
 		// watch, which keeps running after the asking budget.
 		const back = realRoot("gh-1");
+		const backWatch = watched(back.dir);
 		const r2 = await openSandbox(
 			opener(back.sbx, {
+				fs: backWatch.fs,
 				running: async () => {
 					throw new Error("ps down");
 				},
 				launch: async () => {
-					await new Promise((res) => setTimeout(res, 60));
 					renameSync(back.dir, join(back.sbx, "away"));
-					await new Promise((res) => setTimeout(res, 60));
+					// Back only once the watch has read the run's path while it was away.
+					await backWatch.nextRead();
 					renameSync(join(back.sbx, "away"), back.dir);
 					return { code: 0 };
 				},
 			}),
 		);
 		assert.equal(r2.lost, "swept");
+		assert.ok(realFs.existsSync(join(back.dir, "manifest.json")), "and the run is back in place, so only the watch could have seen it");
 	});
 
 	test("a run retained BEFORE the escape (`_x`) is found, opened and held under its old name (#446 gate round 2)", async () => {
@@ -2299,7 +2371,7 @@ describe("the #446 races on a real filesystem (gate round 1)", () => {
 					listed = true;
 					return new Promise((resolve) => {
 						finish = resolve;
-						setTimeout(() => resolve({ code: 0 }), 200);
+						setTimeout(() => resolve({ code: -1 }), 10_000).unref();
 					});
 				},
 				stop: async ({ name }) => (stopped.push(name), finish?.({ code: 137 }), true),

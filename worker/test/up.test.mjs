@@ -940,17 +940,23 @@ test("up on docker: bind sources that do not resolve on this host make the mount
 		const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState(status, desktop), "docker start": 0 }, listening: true, files: PROXY_FILES, argv: ["--yes"] });
 		h.deps.fs.realpathSync = noResolve;
 		await h.run();
-		assert.match(h.text(), /⚠ could not compare pi-dispatch-egress-proxy's mounts on this host: \/host_mnt\/Users\/op\/deploy\/deploy\/egress-proxy\.conf, \/host_mnt\/Users\/op\/deploy\/egress-allowlist\.conf are paths this host cannot resolve \(the runtime's own VM's, as Docker Desktop reports its sources\), so those mounts cannot be compared from here\. Everything else about it is still judged, and up replaces nothing while one of its own two mounts is unknown\n/, status);
+		assert.match(h.text(), /⚠ could not compare pi-dispatch-egress-proxy's mounts on this host: \/host_mnt\/Users\/op\/deploy\/deploy\/egress-proxy\.conf, \/host_mnt\/Users\/op\/deploy\/egress-allowlist\.conf are paths this host cannot resolve \(the runtime's own VM's, as Docker Desktop reports its sources\), so those mounts cannot be compared from here\. Everything else about it is still judged, and up replaces it while one of its own two mounts is unknown only when its image, entrypoint or command shows it stale\n/, status);
 		assert.doesNotMatch(h.text(), /is not this deployment's proxy/, status);
 		assert.ok(!dockerMutations(h).some((a) => a[0] === "rm" || a[0] === "run"), `${status}: never removed or recreated on an unknown`);
 	}
-	// Stale by image while an expected mount is unknown: the finding is said, and nothing is removed until it can be judged.
-	const staleImage = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running", { ...desktop, image: "squid:old" }), "docker rm": 0, "docker network create": 0, "docker run -d --name pi-dispatch-egress-proxy": 0 }, listening: true, files: PROXY_FILES, argv: ["--yes"] });
-	staleImage.deps.fs.realpathSync = noResolve;
-	await staleImage.run();
-	assert.match(staleImage.text(), /is not this deployment's proxy: it was created from squid:old, not the pinned ubuntu\/squid@sha256:6a097f68[0-9a-f]{56}\n/, "the image drift alone, the unknown mounts not called stale");
-	assert.match(staleImage.text(), /not replaced: one of its own mounts could not be compared on this host \(above\)/);
-	assert.deepEqual(dockerMutations(staleImage), []);
+	// Stale by image while an expected mount is unknown (PR #456's final check): the image drift alone proves it is not the
+	// shipped proxy, so the replace is offered and `--yes` takes it, where it used to be refused on the mount and so never
+	// replaced on Docker Desktop, whose every bind source is a VM path. The unknown mounts are still not called stale.
+	for (const [label, drift] of [["image", { image: "squid:old" }], ["entrypoint", { entrypoint: ["squid"] }], ["command", { cmd: ["-N"] }]]) {
+		const staleImage = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running", { ...desktop, ...drift }), "docker rm": 0, "docker network create": 0, "docker run -d --name pi-dispatch-egress-proxy": 0 }, listening: true, files: PROXY_FILES, argv: ["--yes"] });
+		staleImage.deps.fs.realpathSync = noResolve;
+		await staleImage.run();
+		assert.match(staleImage.text(), /is not this deployment's proxy: it(s)? [^\n]*\n/, label);
+		assert.doesNotMatch(staleImage.text(), /is not this deployment's proxy: [^\n]*(its \/etc\/|nothing is mounted at)/, `${label}: the unknown mounts are not called stale`);
+		assert.doesNotMatch(staleImage.text(), /not replaced: one of its own mounts could not be compared/, label);
+		assert.deepEqual(dockerMutations(staleImage), [EGRESS_RM, EGRESS_NET, EGRESS_RUN], `${label}: replaced`);
+		if (label === "image") assert.match(staleImage.text(), /is not this deployment's proxy: it was created from squid:old, not the pinned ubuntu\/squid@sha256:6a097f68[0-9a-f]{56}\n/, "the image drift alone, the unknown mounts not called stale");
+	}
 	// One bind unknown, the other and an extra mount still judged (round-cap re-review): each on its own.
 	const partial = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running", { conf: "/host_mnt/Users/op/deploy/deploy/egress-proxy.conf", allowlist: "/srv/other/egress-allowlist.conf", extra: [{ Type: "bind", Source: "/host_mnt/tmp/open.conf", Destination: "/tmp/open.conf" }] }) }, listening: true, files: PROXY_FILES, argv: ["--yes"] });
 	partial.deps.fs.realpathSync = (p) => (p.startsWith("/host_mnt/") ? noResolve(p) : p);
@@ -993,14 +999,47 @@ test("up's recreate creates the proxy's network only where it does not exist, so
 	const there = harness({ env: EGRESS_ENV, plan: plan(true), listening: true, files: PROXY_FILES, argv: ["--yes"] });
 	await there.run();
 	assert.deepEqual(dockerMutations(there), [EGRESS_RM, EGRESS_RUN], "no create for a network that exists");
-	assert.match(there.text(), /docker network create pi-dispatch-egress-out {3}\(only if it does not exist yet\)\n/, "the shown line says it is conditional");
+	// `--yes` runs exactly the lines shown (PR #456's final check), so every shown line is a command, and the create is
+	// shown only where it runs: the old `... create pi-dispatch-egress-out   (only if it does not exist yet)` ran nowhere.
+	const shown = (h) => h.text().split("\n").filter((l) => l.startsWith("  docker "));
+	assert.deepEqual(shown(there), ["  docker rm -f pi-dispatch-egress-proxy", `  docker ${EGRESS_RUN.join(" ")}`], "a network that exists: no create line");
+	assert.doesNotMatch(there.text(), /only if it does not exist yet/);
 	const absent = harness({ env: EGRESS_ENV, plan: plan(false), listening: true, files: PROXY_FILES, argv: ["--yes"] });
 	await absent.run();
 	assert.deepEqual(dockerMutations(absent), [EGRESS_RM, EGRESS_NET, EGRESS_RUN]);
-	// The first start of an absent proxy follows the same rule.
-	const fresh = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: 1, "docker network inspect pi-dispatch-egress-out": 0, "docker run -d --name pi-dispatch-egress-proxy": 0 }, listening: true, files: PROXY_FILES, argv: ["--yes"] });
-	await fresh.run();
-	assert.deepEqual(dockerMutations(fresh), [EGRESS_RUN]);
+	assert.deepEqual(shown(absent), ["  docker rm -f pi-dispatch-egress-proxy", "  docker network create pi-dispatch-egress-out", `  docker ${EGRESS_RUN.join(" ")}`], "a missing network: its create, as a runnable line");
+	// The first start of an absent proxy follows the same rule, both ways.
+	for (const exists of [true, false]) {
+		const fresh = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: 1, "docker network inspect pi-dispatch-egress-out": exists ? 0 : { code: 1, stderr: "Error: no such network\n" }, "docker network create": 0, "docker run -d --name pi-dispatch-egress-proxy": 0 }, listening: true, files: PROXY_FILES, argv: ["--yes"] });
+		await fresh.run();
+		assert.deepEqual(dockerMutations(fresh), exists ? [EGRESS_RUN] : [EGRESS_NET, EGRESS_RUN], `network exists: ${exists}`);
+		assert.deepEqual(shown(fresh), [...(exists ? [] : ["  docker network create pi-dispatch-egress-out"]), `  docker ${EGRESS_RUN.join(" ")}`], `network exists: ${exists}`);
+	}
+});
+
+test("up makes the proxy's network at RUN time when it was removed while the question waited, and says so (PR #466 gate round 1)", async () => {
+	// Measured: the network present at the question and removed during the prompt made `docker run --network` fail
+	// "network not found". The consent lines stay runnable (no create line for a network that existed), and the create
+	// that runs anyway is said, with its command.
+	for (const stale of [false, true]) {
+		const plan = { ...green, [PROXY_INSPECT]: stale ? proxyState("exited", { image: "squid:old" }) : 1, "docker network inspect pi-dispatch-egress-out": 0, "docker rm": 0, "docker network create": 0, "docker run -d --name pi-dispatch-egress-proxy": 0 };
+		const h = harness({ env: EGRESS_ENV, plan, listening: true, files: PROXY_FILES });
+		h.deps.prompt = (q) => {
+			h.promptCalls.push(q);
+			if (/replace it|not running/.test(q + h.text())) plan["docker network inspect pi-dispatch-egress-out"] = { code: 1, stderr: "Error: no such network\n" };
+			return "y";
+		};
+		await h.run();
+		const shown = h.text().split("\n").filter((l) => l.startsWith("  docker "));
+		assert.ok(!shown.includes("  docker network create pi-dispatch-egress-out"), `stale ${stale}: not shown, since it existed at the question`);
+		assert.match(h.text(), /pi-dispatch-egress-out was removed while the question waited, and the proxy's run needs it: `docker network create pi-dispatch-egress-out`\n/, `stale ${stale}`);
+		assert.deepEqual(dockerMutations(h), [...(stale ? [EGRESS_RM] : []), EGRESS_NET, EGRESS_RUN], `stale ${stale}: made before the run`);
+	}
+	// Present at the run too: nothing is created and nothing is said.
+	const kept = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: 1, "docker network inspect pi-dispatch-egress-out": 0, "docker run -d --name pi-dispatch-egress-proxy": 0 }, listening: true, files: PROXY_FILES, argv: ["--yes"] });
+	await kept.run();
+	assert.deepEqual(dockerMutations(kept), [EGRESS_RUN]);
+	assert.doesNotMatch(kept.text(), /was removed while the question waited/);
 });
 
 test("up's proxy image is the compose file's and the Quadlet unit's, one pinned digest (#453 gate)", () => {
