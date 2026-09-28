@@ -619,9 +619,12 @@ export const RECORD_START_TOLERANCE_MS = 2_000;
  * Whether the recorded process is the one Podman's record was written for, as `{ trusted }` or `{ unread }`: it started
  * no later than the pid file's mtime (`/proc/<pid>/stat` field 22 in `PROC_USER_HZ` ticks after `/proc/stat`'s `btime`,
  * within `RECORD_START_TOLERANCE_MS`). A later start is a recycled pid, UNLESS the process is shaped as no job's process
- * can be: in the worker's own pid namespace (one `NSpid` field, 5.8.1's slirp4netns, measured) or PID 1 of one of its
- * own (5.8.1's pasta, measured), where a job's PID 1 is always its `--init` process (`/run/podman-init -- <the image's
- * entrypoint>`, measured), whose argv the worker and the image set and which names no record. Measured on 5.8.1 with
+ * can be: `NSpid` with exactly one field (the worker's own pid namespace, 5.8.1's slirp4netns, measured), or exactly
+ * two ending in 1 (PID 1 of a namespace DIRECTLY beneath the worker's, 5.8.1's pasta, measured). A job's own
+ * namespace is one level down too, but its PID 1 is always its `--init` process (`/run/podman-init -- <the image's
+ * entrypoint>`, measured), whose argv the worker and the image set and which names no record; and a namespace a job
+ * makes for itself (`unshare -Urpf` succeeds in a job-shaped container, PR #469's gate round 3) is two levels down, so
+ * its PID 1 has three or more fields and is not trusted. Measured on 5.8.1 with
  * pasta and with slirp4netns: the helper started 228 to 353 ms before its record's mtime. That
  * keeps a wall-clock step (which moves `btime` and not the file's mtime) from hiding the real helper: a step is judged
  * on the helper's shape, never read as "no helper". Anything that decides it and cannot be read refuses, named.
@@ -655,7 +658,7 @@ function startedByRecord(fs, pidFile, pid, nspid) {
 	if (btime === undefined) return unread("/proc/stat", "no-btime");
 	const startedMs = (Number(btime) + Number(ticks) / PROC_USER_HZ) * 1000;
 	if (startedMs <= mtimeMs + RECORD_START_TOLERANCE_MS) return { trusted: true };
-	return { trusted: Array.isArray(nspid) && (nspid.length === 1 || nspid.at(-1) === "1") };
+	return { trusted: Array.isArray(nspid) && (nspid.length === 1 || (nspid.length === 2 && nspid[1] === "1")) };
 }
 
 /**

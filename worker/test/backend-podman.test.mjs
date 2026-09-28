@@ -612,6 +612,13 @@ test("5.x: a recorded pid is the helper only if it started by the record's mtime
 	// by its shape: 5.8.1's pasta is PID 1 of its own namespace, its slirp4netns shares the worker's (both measured).
 	assert.equal(live({ 10: { ...helper(1235, F_MHL, { nspid: "10\t1" }), start: late } }, 1235, recorded(10))?.key, "pasta_options", "pasta after a clock step");
 	assert.equal(live({ 10: { ...helper(1235, F_SLIRP5_WIDE, { nspid: "10" }), start: late } }, 1235, recorded(10))?.key, "network_cmd_options", "slirp4netns after a clock step");
+	// Gate round 3: a job can make a pid namespace of its own (`unshare -Urpf`, measured on both Podmans) and be PID 1
+	// there, which is two levels below the worker's: three fields ending in 1, not trusted, whatever its argv names.
+	// Exactly two ending in 1 (5.8.1's pasta) and exactly one (the worker's own) are.
+	for (const [nspid, trusted] of [["10\t1", true], ["10", true], ["10\t587\t1", false], ["10\t2\t1", false], ["10\t5\t3\t1", false], ["10\t2", false]]) {
+		const got = live({ 10: { ...helper(1235, F_MHL, { nspid }), start: late } }, 1235, recorded(10));
+		assert.equal(got?.key ?? null, trusted ? "pasta_options" : null, `NSpid ${JSON.stringify(nspid)} after the record`);
+	}
 	// What decides it and cannot be read refuses, named; a process gone before its stat is read is no helper.
 	const refusing = (over, evidence, label) => assert.equal(live(pasta5(10, F_MHL), 1235, over)?.evidence, evidence, label);
 	refusing({ files: { [F_PID]: "10" } }, `${F_PID} gives no modification time, so whether the recorded process is the one Podman's record was written for is not known`, "no mtime");
