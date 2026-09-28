@@ -403,7 +403,8 @@ async function staleCanarySweep() {
 		// Through the ONE detach helper and its gate (issue #452), as every detach in worker/src is: without a holding keeper
 		// on 4.x this leaves the network and says so, rather than cut the proxy's route out for the steps after it.
 		for (const name of [runningProbe, stoppedProbe]) await podman(["rm", "-f", "--time=0", name]);
-		const cleanupRun = (args) => podman(args, { timeoutMs: 30_000 });
+		// The gate's own read asks for its bound (15 s), which this runner passes through; every other step keeps 30 s.
+		const cleanupRun = (args, opts) => podman(args, { timeoutMs: opts?.timeoutMs ?? 30_000 });
 		const cleanupGate = makeDetachGate(cleanupRun, { bin: "podman" });
 		for (const net of [emptyNet, fullNet]) {
 			if (!(await exists("network", net))) continue;

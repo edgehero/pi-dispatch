@@ -220,8 +220,6 @@ export function makeJobUserResolver({
 } = {}) {
 	let cached = null;
 	const inFlight = new Map();
-	// Issue #452, gate round 4: the last ANSWERED decision, without a read, for a job's teardown (`teardownRuntime`).
-	resolveJobUser.peek = () => cached?.value ?? null;
 	return resolveJobUser;
 	async function resolveJobUser({ endpoint, key }) {
 		if (cached && cached.key === key) return cached.value;

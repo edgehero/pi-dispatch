@@ -1197,13 +1197,33 @@ export async function startWorker(
 		if (observationRefusalIsTransient(args)) return unavailableFor(observed, missed[0]);
 		return { refused: true, message: refusal, observations: missed };
 	};
+	// Issue #452, gate round 5: the runtime each local job was admitted on, by job id, taken (and forgotten) by that job's
+	// teardown. Bounded: a job refused after its job-user preflight never reaches a teardown, so the oldest entries go first.
+	const admittedRuntimes = new Map();
+	const ADMITTED_RUNTIMES_MAX = 1000;
+	const recordAdmittedRuntime = (job, runtime) => {
+		if (job?.id === undefined || runtime === undefined) return;
+		admittedRuntimes.delete(job.id);
+		admittedRuntimes.set(job.id, runtime);
+		while (admittedRuntimes.size > ADMITTED_RUNTIMES_MAX) admittedRuntimes.delete(admittedRuntimes.keys().next().value);
+	};
+	const takeAdmittedRuntime = (job) => {
+		const runtime = admittedRuntimes.get(job?.id);
+		admittedRuntimes.delete(job?.id);
+		return runtime;
+	};
 	// Issue #341: the job user, for a job on the `local` venue only (its containers are this host's docker
 	// CLI's). The endpoint is the one `observationPreflight` just read, so one job's two decisions agree.
 	const localJobUserPreflight = async (job, { capabilities = [], observed } = {}) => {
 		const venue = resolveBackendName(job, config.defaultBackend);
 		if (venue !== DEFAULT_BACKEND) return { user: null, home: null };
 		const endpoint = observed?.endpoint ?? (await resolveDockerEndpointFn());
-		const { decision, socket, facts } = observed?.jobUser ?? (await resolveJobUser({ endpoint, key: dockerEndpointState(endpoint) }));
+		const admittedOn = observed?.jobUser ?? (await resolveJobUser({ endpoint, key: dockerEndpointState(endpoint) }));
+		const { decision, socket, facts } = admittedOn;
+		// Issue #452, gate round 5: the runtime THIS job is admitted on, recorded per job for its teardown's detach gate. The
+		// resolver's cache is per endpoint state and moves when the endpoint does, so reading it at teardown could hand a
+		// job the answer of another endpoint's daemon.
+		recordAdmittedRuntime(job, admittedOn?.daemon?.answered ? runtimeFromFacts(admittedOn.daemon) : undefined);
 		if (jobUserLogKey(decision) !== jobUserSaid) {
 			jobUserSaid = jobUserLogKey(decision);
 			log("job_user", { mode: decision.mode, user: decision.user, cause: decision.cause, reason: decision.reason });
@@ -1275,10 +1295,7 @@ export async function startWorker(
 						// on (the job-user resolver's cached answer), never a fresh read, which on Docker Engine read as
 						// `runtime-unreadable` whenever it timed out or failed and leaked the job's network. No cached answer: it
 						// reads. A refused teardown is logged with its token.
-						teardownRuntime: () => {
-							const admitted = resolveJobUser.peek?.();
-							return admitted?.daemon?.answered ? runtimeFromFacts(admitted.daemon) : undefined;
-						},
+						teardownRuntime: (job) => takeAdmittedRuntime(job),
 						log,
 					}),
 				}),

@@ -1400,13 +1400,26 @@ async function decideLocalSandboxJobUser({
 	imageCapabilities = (image) => makeImagePreflight({ image })({}),
 	stat,
 } = {}) {
-	if (platform === "darwin" || platform === "win32") return { user: null, home: null };
+	// Issue #452, gate round 5: the facts read ONCE here even where the uid needs none of them (a VM-backed platform, an
+	// endpoint on another machine), and carried beside the answer for the teardown's detach gate, which otherwise reads
+	// `docker info` again at teardown and, if that read fails, keeps the network (the Docker Desktop case).
+	const admittedOn = async () => {
+		try {
+			const read = await readFacts();
+			return read?.answered ? runtimeFromFacts(read) : undefined;
+		} catch {
+			return undefined;
+		}
+	};
+	if (platform === "darwin" || platform === "win32") return withRuntime({ user: null, home: null }, await admittedOn());
 	const stamp = manifest?.jobUser;
 	const read = readJobUserStamp(stamp);
 	if (read.malformed) return { ...MALFORMED_STAMP };
 	const identity = !read.stamped ? { euid, egid } : read.user === null ? { euid: SHIPPED_IMAGE_UID, egid: SHIPPED_IMAGE_UID } : { euid: read.uid, egid: read.gid };
 	const endpoint = await resolveEndpoint();
 	const daemon = endpoint?.local === false ? { answered: false, reason: "not-read", transient: true } : await readFacts();
+	// A remote endpoint decides the uid from nothing the daemon says, but the teardown still detaches through its CLI.
+	const remoteRuntime = endpoint?.local === false ? await admittedOn() : undefined;
 	const socketPath = endpoint?.local === true && typeof endpoint.endpoint === "string" && endpoint.endpoint.startsWith("unix://")
 		? endpoint.endpoint
 		: daemon?.answered ? daemon.facts.remoteSocketPath : null;
@@ -1426,7 +1439,7 @@ async function decideLocalSandboxJobUser({
 		return { refused: "job-user-unknown", message: `which uid the sandbox may run as could not be decided (${decision.reason}); is the docker daemon running?` };
 	}
 	// `runtime` (issue #452, gate round 4): the facts this session was admitted on, for its teardown's detach gate.
-	const runtime = daemon?.answered ? runtimeFromFacts(daemon) : undefined;
+	const runtime = daemon?.answered ? runtimeFromFacts(daemon) : remoteRuntime;
 	if (decision.mode === "image") return withRuntime({ user: null, home: null, ...relabel }, runtime);
 	const needsImage = identity.euid !== SHIPPED_IMAGE_UID;
 	const caps = needsImage ? await imageCapabilities(manifest?.image) : { ok: true, capabilities: [] };

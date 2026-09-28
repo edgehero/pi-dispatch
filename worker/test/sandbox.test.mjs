@@ -595,6 +595,28 @@ describe("decideSandboxJobUser", () => {
 		assert.equal(asked, false);
 	});
 
+	test("on macOS, Windows and a remote endpoint the facts are read once at open for the teardown, whose own read could fail and keep the network (#452 gate round 5)", async () => {
+		let reads = 0;
+		const counted = async () => (reads++, rootful());
+		for (const platform of ["darwin", "win32"]) {
+			reads = 0;
+			const answer = await decideSandboxJobUser({ ...base, platform, readFacts: counted, manifest: {} });
+			assert.deepEqual(answer, { user: null, home: null }, `${platform}: the answer's shape is what it was`);
+			assert.deepEqual(answer.runtime, { podman: false, rootless: false, version: null }, platform);
+			assert.equal(reads, 1, `${platform}: read once`);
+		}
+		const REMOTE = { local: false, context: "remote", endpoint: "tcp://10.0.0.5:2376", reason: null, transient: false };
+		reads = 0;
+		const remote = await decideSandboxJobUser({ ...base, resolveEndpoint: async () => REMOTE, readFacts: counted, manifest: {} });
+		assert.deepEqual(remote.runtime, { podman: false, rootless: false, version: null });
+		assert.equal(reads, 1);
+		// A read that fails at open carries nothing: the teardown reads for itself, as before.
+		const failed = await decideSandboxJobUser({ ...base, platform: "darwin", readFacts: async () => ({ answered: false, reason: "timeout", transient: true }), manifest: {} });
+		assert.equal(failed.runtime, undefined);
+		const thrown = await decideSandboxJobUser({ ...base, platform: "darwin", readFacts: async () => { throw new Error("spawn failed"); }, manifest: {} });
+		assert.equal(thrown.runtime, undefined);
+	});
+
 	test("the answer carries the runtime it was decided on BESIDE its shape, for the session teardown (#452 gate round 4)", async () => {
 		const manifest = { image: "pi-job:x", jobUser: { user: "1234:1234", home: "/home/pi" } };
 		const answer = await decideSandboxJobUser({ ...base, euid: 0, egid: 0, manifest });

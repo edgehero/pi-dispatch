@@ -3196,14 +3196,22 @@ test("a TERMINAL netns-keeper-not-holding failure comments the keeper's fixed se
 	assert.deepEqual(posted, []);
 });
 
-test("local's job teardown reads the runtime the job was admitted on from the resolver's cache, never the daemon, and has the worker's log (#452 gate round 4)", { skip }, async () => {
-	const { runContainerCalls, logs } = await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
+test("local's job teardown uses the runtime THAT job was admitted on, recorded per job, even after the endpoint's answer changes mid-job (#452 gate round 5)", { skip }, async () => {
+	const { runContainerCalls, captured } = await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
 	const opts = runContainerCalls[0];
-	assert.equal(typeof opts.teardownRuntime, "function");
-	// Boot asked the resolver, whose ANSWERED read (the default fake: Docker Engine) is what a teardown now uses.
-	assert.deepEqual(opts.teardownRuntime(), { podman: false, rootless: false, version: null });
+	const endpoint = { local: true, context: "default", endpoint: "unix:///test.sock", reason: null, transient: false };
+	const admittedOn = (daemonFacts) => ({ ok: true, endpoint, jobUser: { decision: { mode: "image", user: null, cause: "desktop-platform", reason: null }, socket: null, facts: daemonFacts, daemon: { answered: true, facts: daemonFacts } } });
+	const engine = { shape: "docker", podman: false, rootless: false, serverVersion: "27.4.0" };
+	const podman49 = { shape: "docker", podman: true, rootless: true, serverVersion: "4.9.3" };
+	// Job A admitted on Docker Engine; then `docker context use` moves the endpoint, and job B is admitted on a rootless
+	// Podman 4.9 behind it, which is now the resolver's cached answer. A's teardown must still be judged as A's.
+	await captured.deps.jobUserPreflight({ id: "a", kind: "local" }, { capabilities: [], observed: admittedOn(engine) });
+	await captured.deps.jobUserPreflight({ id: "b", kind: "local" }, { capabilities: [], observed: admittedOn(podman49) });
+	assert.deepEqual(opts.teardownRuntime({ id: "a" }), { podman: false, rootless: false, version: "27.4.0" });
+	assert.deepEqual(opts.teardownRuntime({ id: "b" }), { podman: true, rootless: true, version: "4.9.3" });
+	assert.equal(opts.teardownRuntime({ id: "a" }), undefined, "taken once, then forgotten: a second teardown reads for itself");
+	assert.equal(opts.teardownRuntime({ id: "never-admitted" }), undefined);
 	// The worker's own log, not the default no-op: a refused teardown is said on the worker's stream.
 	assert.equal(typeof opts.log, "function");
 	assert.notEqual(opts.log.toString(), "() => {}");
-	void logs;
 });

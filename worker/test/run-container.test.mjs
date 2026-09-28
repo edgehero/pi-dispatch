@@ -741,11 +741,13 @@ test("a job's teardown uses the runtime it was ADMITTED on, so a failed, errorin
 			return child;
 		};
 		const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn, fs: cidFs(), egress: true, detachedCheck: instantCheck(), log: (e, f) => logs.push([e, f]), ...(teardownRuntime ? { teardownRuntime } : {}) });
-		await runContainer({ job: JOB, prepared: PREPARED, name: "pi-job-j1", signal: new AbortController().signal, user: null, home: null });
+		await runContainer({ job: { ...JOB, id: "j1" }, prepared: PREPARED, name: "pi-job-j1", signal: new AbortController().signal, user: null, home: null });
 		return { calls, logs };
 	};
 	for (const [shape, info] of Object.entries(INFO)) {
-		const admitted = await job({ info, teardownRuntime: () => ENGINE });
+		const asked = [];
+		const admitted = await job({ info, teardownRuntime: (j) => (asked.push(j?.id), ENGINE) });
+		assert.deepEqual(asked, ["j1"], `${shape}: asked for THIS job's admitted runtime`);
 		assert.ok(admitted.calls.includes("network rm pi-job-j1-net"), `${shape}: the network is removed`);
 		assert.ok(!admitted.calls.some((c) => c.startsWith("info")), `${shape}: and the daemon is not asked again`);
 		assert.deepEqual(admitted.logs, []);
