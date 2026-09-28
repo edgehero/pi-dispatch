@@ -379,7 +379,7 @@ test("a run lost during the session is said after the shell, with a pause, and t
   });
   await mod.openSandboxSession({ sandboxDir, sandboxRetentionHours: 24, sandboxIdleMinutes: 30 }, "gh-1", io);
   const text = written.join("");
-  assert.match(text, /note: the retained workspace for gh-1 was DELETED by the retention sweep while this sandbox was open/);
+  assert.match(text, /note: the retained workspace for gh-1 was DELETED while this sandbox was open \(by the retention sweep, or by a retry of the run clearing it\)/);
   assert.doesNotMatch(text, /cannot open a sandbox/);
   assert.equal(pauses, 1, "read before the panel comes back");
 });

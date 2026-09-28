@@ -2126,7 +2126,7 @@ describe("the #446 races on a real filesystem (gate round 1)", () => {
 		assert.equal(r.refused, undefined);
 		assert.equal(r.code, 0, "the shell's own exit");
 		assert.equal(r.lost, "swept");
-		assert.match(r.message, /DELETED by the retention sweep while this sandbox was open/);
+		assert.match(r.message, /DELETED while this sandbox was open \(by the retention sweep/);
 	});
 
 	test("a run REPLACED after the launch check (a retry's retainJobDir) is recorded and said, and the shell left alone", async () => {

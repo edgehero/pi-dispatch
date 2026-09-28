@@ -435,5 +435,5 @@ test("a run lost from under a session after it started is said when the shell ex
 		},
 	});
 	assert.equal(await runSandbox(["gh-1"], { env: envWith(root, { PI_EGRESS: "0" }), deps: c.deps }), 3);
-	assert.match(c.errText(), /note: the retained workspace for gh-1 was DELETED by the retention sweep while this sandbox was open/);
+	assert.match(c.errText(), /note: the retained workspace for gh-1 was DELETED while this sandbox was open \(by the retention sweep, or by a retry of the run clearing it\)/);
 });

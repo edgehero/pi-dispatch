@@ -1208,8 +1208,8 @@ export async function openSandbox({
 					lost,
 					message:
 						lost === "replaced"
-							? `the retained workspace for ${jobId} was REPLACED while this sandbox was open (a retry of the run, most likely), so what the shell had under /job and /workspace was no longer the run on disk; nothing you saved there is in the new run's directory`
-							: `the retained workspace for ${jobId} was DELETED by the retention sweep while this sandbox was open, so nothing you saved under /job or /workspace survives; pin a run (\`--pin\`) before working in it late in its window`,
+							? `the retained workspace for ${jobId} was REPLACED while this sandbox was open (a retry of the run, most likely), so what the shell had under /workspace was no longer the run on disk; nothing you saved there is in the new run's directory`
+							: `the retained workspace for ${jobId} was DELETED while this sandbox was open (by the retention sweep, or by a retry of the run clearing it), so nothing you saved under /workspace survives; pin a run (\`--pin\`) before working in it late in its window`,
 				}
 			: {};
 		return { code: code ?? null, error: error ?? null, ...(detached ? { detached: true } : {}), ...during };
