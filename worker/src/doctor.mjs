@@ -4774,11 +4774,19 @@ export async function podmanChecks(env, seams, { jobImage }) {
 	// Issue #428: the account's containers.conf, read from the files the worker reads, by the worker's own function, so the
 	// line cannot say something the worker does not do. Severity by the boot rule, as the identity line above: ✗ where a
 	// worker with `podman` as its default venue refuses to boot, ⚠ where it boots and refuses each podman job. No spawn.
-	const widened = podmanConfWidening({ fs: observationFs, home, env, euid: ids.euid });
+	// `runRoot` from the same read (issue #450), `undefined` while it has not answered (the worker retries such a job).
+	const widened = podmanConfWidening({ fs: observationFs, home, env, euid: ids.euid, runRoot: infoRead?.answered === true && infoRead.info ? (infoRead.info.runRoot ?? null) : undefined });
+	// What `--live` points at (issue #450): the line above is the RUNNING rootless network's when the finding is `live`, and
+	// its fix is that network's reset, not a containers.conf edit.
+	const firstFix = widened?.live
+		? widened.key && !widened.transient
+			? "reset this account's rootless network as the podman line above says first, then re-run `pi-dispatch doctor --live`"
+			: "fix the podman rootless network line above first, then re-run `pi-dispatch doctor --live`"
+		: "fix the podman containers.conf line above first, then re-run `pi-dispatch doctor --live`";
 	if (widened?.transient) {
 		// A read that failed for a moment is the worker's retry, never its refusal, so it is ⚠ and says so.
-		checks.push({ ok: false, warn: true, label: `podman: whether this account's containers.conf widens a job could not be read just now: ${widened.evidence}`, fix: podmanConfFix(widened) });
-		return { checks, observed, relabel: false, forLive: notRun("this account's containers.conf could not be read just now, so whether a probe would match a job is not known", "fix the podman containers.conf line above first, then re-run `pi-dispatch doctor --live`") };
+		checks.push({ ok: false, warn: true, label: `podman: whether this account's containers.conf or running rootless network widens a job could not be read just now: ${widened.evidence}`, fix: podmanConfFix(widened) });
+		return { checks, observed, relabel: false, forLive: notRun("this account's containers.conf or running rootless network could not be read just now, so whether a probe would match a job is not known", firstFix) };
 	}
 	if (widened) {
 		checks.push({
@@ -4787,7 +4795,7 @@ export async function podmanChecks(env, seams, { jobImage }) {
 			label: `podman: no job can run on this venue (${widened.cause}): ${widened.evidence}${podmanDefault ? " -- a worker running as this account refuses to boot" : " -- every podman job is refused"}`,
 			fix: podmanConfFix(widened),
 		});
-		return { checks, observed, relabel: false, forLive: notRun(`a podman job is refused here (${widened.cause}), so a probe would read back a container no job gets`, "fix the podman containers.conf line above first, then re-run `pi-dispatch doctor --live`") };
+		return { checks, observed, relabel: false, forLive: notRun(`a podman job is refused here (${widened.cause}), so a probe would read back a container no job gets`, firstFix) };
 	}
 	if (decision.mode !== "worker") {
 		checks.push({ ok: false, warn: true, label: `podman: which uid a job runs as could not be decided (${decision.reason})`, fix: "the worker retries every podman job until it can decide; fix what stops `podman info` answering for the worker's account, then re-run doctor" });

@@ -1511,7 +1511,7 @@ async function decidePodmanSandboxJobUser({
 	// A containers.conf that could not be read JUST NOW (issue #428's transient rule) is a job's retry; a sandbox has no
 	// queue to retry through, so it is refused in its own words, naming the file, and the operator tries again.
 	if (judged.podmanConfRefused?.transient) {
-		return { refused: "podman-conf-unread", message: `the podman venue's containers.conf could not be read just now, so whether it widens this sandbox is not known (${judged.podmanConfRefused.evidence ?? "no file named"}); try again` };
+		return { refused: "podman-conf-unread", message: `the podman venue's containers.conf or running rootless network could not be read just now, so whether it widens this sandbox is not known (${judged.podmanConfRefused.evidence ?? "no file named"}); try again` };
 	}
 	if (judged.podmanConfRefused) return { refused: PODMAN_CONF_WIDENS_JOB, message: judged.podmanConfRefused.message };
 	if (judged.unavailable) {

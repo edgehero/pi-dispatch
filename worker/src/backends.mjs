@@ -400,6 +400,14 @@ export const PODMAN_SERVICE_LOCAL = "podmanServiceLocal";
 export const PODMAN_CONF_WIDENS_JOB = "podman-conf-widens-job";
 
 /**
+ * The containers.conf keys that refusal refuses on presence (issues #428 and #450), in the order every text names them.
+ * The ONE list: backend-podman.mjs builds `WIDENING_KEY` and its refusal texts from it, and `podman-doc.test.mjs`
+ * requires every list of these keys in the specs, the docs and the source to be exactly this one, since three copies
+ * drifted when #450 added the last two.
+ */
+export const PODMAN_WIDENING_KEYS = Object.freeze(["pasta_options", "network_cmd_options", "annotations", "env", "helper_binaries_dir", "network_cmd_path"]);
+
+/**
  * The closed list of observations a backend's `observedBy` may name, each with what it means. Closed for the
  * reason `PROPERTIES` is: a typo in a table entry must not become an observation nobody makes, which would
  * degrade a word forever with nothing saying why.

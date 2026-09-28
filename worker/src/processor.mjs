@@ -402,17 +402,26 @@ export async function runJob(job, deps) {
 		// refused for not being known, which is a different sentence. A read that failed for a moment (`transient`) is
 		// infrastructure, so it throws and is retried, pre-reserve, exactly like an unanswered observation.
 		if (observed?.podmanConfRefused?.transient) {
-			// `evidence` names the file (`<path> could not be read (<errno>)`), so the retry says which one.
-			throw new InfraRetry(`the podman venue's containers.conf could not be read just now, so whether it widens a job is not known (${observed.podmanConfRefused.evidence ?? "no file named"})`, { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			// `evidence` names the file (`<path> could not be read (<errno>)`), so the retry says which one: a containers.conf,
+			// or since issue #450 the /proc entry of the account's running rootless network.
+			throw new InfraRetry(`the podman venue's containers.conf or running rootless network could not be read just now, so whether it widens a job is not known (${observed.podmanConfRefused.evidence ?? "no file named"})`, { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 		}
 		if (observed?.podmanConfRefused) {
+			// Issue #450: `live` is the account's RUNNING rootless network, not a file, so it has its own two sentences: one
+			// still carrying an option a removed key gave it (the fix is a restart, not a configuration change), and one
+			// whose process could not be read.
+			const { key, live } = observed.podmanConfRefused;
 			await comment(
 				job,
-				observed.podmanConfRefused.key
-					? "Refused: the worker host's Podman configuration lets a job's container reach more than this venue allows (the host's own services or the worker account's groups), so the operator must change it before podman jobs run. Not run."
-					: "Refused: the worker host's Podman configuration could not be read in full, or is written in a form the worker does not decode, so whether it lets a job's container reach more than this venue allows is not known, and the operator must fix that before podman jobs run. Not run.",
+				live
+					? key
+						? "Refused: the worker host's running Podman network still lets a job's container reach the host's own services, with an option from a configuration since changed, so the operator must restart that network before podman jobs run. Not run."
+						: "Refused: the worker host's running Podman network could not be read, so whether it lets a job's container reach more than this venue allows is not known, and the operator must fix that before podman jobs run. Not run."
+					: key
+						? "Refused: the worker host's Podman configuration lets a job's container reach more than this venue allows (the host's own services or the worker account's groups), so the operator must change it before podman jobs run. Not run."
+						: "Refused: the worker host's Podman configuration could not be read in full, or is written in a form the worker does not decode, so whether it lets a job's container reach more than this venue allows is not known, and the operator must fix that before podman jobs run. Not run.",
 			);
-			log("refused_podman_conf_widens_job", { key: observed.podmanConfRefused.key ?? null, message: observed.podmanConfRefused.message });
+			log("refused_podman_conf_widens_job", { key: key ?? null, ...(live ? { live: true } : {}), message: observed.podmanConfRefused.message });
 			return { outcome: "policy", reason: PODMAN_CONF_WIDENS_JOB, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 

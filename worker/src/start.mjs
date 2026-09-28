@@ -542,7 +542,7 @@ export async function startWorker(
 	// read said, and tagged (exit 2): a restart reads the same bytes. After the identity, whose fix comes first. The one
 	// exception is a read that failed for a moment (out of descriptors, an I/O error), which is untagged (exit 1) so the
 	// supervisor restarts it, as an unanswered observation is.
-	const podmanConfBoot = podmanConfBootRefusal(bootPodmanDecision, config.defaultBackend, { fs: observationFs, home: jobUserIdentity.home, env, euid: jobUserIdentity.euid });
+	const podmanConfBoot = podmanConfBootRefusal(bootPodmanDecision, config.defaultBackend, { fs: observationFs, home: jobUserIdentity.home, env, euid: jobUserIdentity.euid, runRoot: bootPodmanRead?.answered === true && bootPodmanRead.info ? (bootPodmanRead.info.runRoot ?? null) : undefined });
 	if (podmanConfBoot) throw podmanConfBoot.transient ? new Error(podmanConfBoot.message) : configError(podmanConfBoot.message);
 	// The podman venue's own observations, judged for `podman` ALONE, as the endpoint and the daemon's are for `local`
 	// alone: each venue's words are earned by its own reads, and judging one venue's answers over every blessed venue

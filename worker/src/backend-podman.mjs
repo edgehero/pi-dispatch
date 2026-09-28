@@ -31,11 +31,11 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { JOB_NAME_PREFIX, execDockerBounded, jobContainerName, makeReaper, makeStopContainer } from "./backend-local.mjs";
-import { BACKENDS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_CONF_WIDENS_JOB, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
+import { BACKENDS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_CONF_WIDENS_JOB, PODMAN_WIDENING_KEYS, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { buildPodmanRunArgs } from "./docker-run.mjs";
 import { DEFAULT_EGRESS_PROXY, makeEgressPreflight } from "./egress.mjs";
-import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, STARTED_AT_FORMAT, judgeNetnsKeeper, netnsKeeperRemedy, podmanNeedsNetnsKeeper } from "./podman-stack.mjs";
+import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, QUADLET_FILES, STARTED_AT_FORMAT, judgeNetnsKeeper, netnsKeeperRemedy, podmanNeedsNetnsKeeper } from "./podman-stack.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { DAEMON_FACTS_TIMEOUT_MS } from "./job-user.mjs";
 import { PODMAN_INFO_ARGS, parsePodmanInfo } from "./daemon-facts.mjs";
@@ -43,7 +43,7 @@ import { PODMAN_INFO_ARGS, parsePodmanInfo } from "./daemon-facts.mjs";
 // Moved to the leaf `daemon-facts.mjs` (issue #452, gate round 3) and re-exported, so every importer keeps its path.
 export { PODMAN_INFO_ARGS, parsePodmanInfo };
 import { makeRunContainer } from "./run-container.mjs";
-import { MOUNT_KEY, MOUNT_KEY_SAYS, PODMAN_HOOKS_DIRS, confFilesIn, confKeyFinding, fipsFinding, hooksFinding, unreadFileFinding } from "./runtime-observations.mjs";
+import { MOUNT_KEY, MOUNT_KEY_SAYS, PODMAN_HOOKS_DIRS, TRANSIENT_READ_ERRORS, confFilesIn, confKeyFinding, fipsFinding, hooksFinding, unreadFileFinding } from "./runtime-observations.mjs";
 
 /**
  * `docker info`'s bound, reused: `podman info` also walks the store, and a per-job `unknown` retries the job, so a bound a
@@ -314,6 +314,11 @@ function observePodmanBounds(info, { fs, home, env, euid }) {
  *     `XDG_CONFIG_HOME` or `HOME` could; `[containers] env` adds variables to every job past the worker's own closed
  *     environment. Both are account-wide and no argv takes them back. `env_host` is NOT this key (the pattern ends at
  *     `env`), and needs no refusal: `--env-host=false` is in `PODMAN_PINNED_FLAGS`.
+ *   - `helper_binaries_dir` and `network_cmd_path` (issue #450, gate round 1): where Podman finds pasta, slirp4netns and
+ *     its other helpers, and which slirp4netns it runs. Either one swaps the program behind every job's network for
+ *     another: measured, a `helper_binaries_dir` naming a directory with a wrapper in it first ran the rootless network
+ *     as `podpasta`, and a plain bridge container then reached the host's loopback. Neither is set in the stock files
+ *     (Fedora 44's and Ubuntu 24.04's carry both commented out).
  * REFUSED ON PRESENCE, whatever the value, as `CGROUPS_KEY` is, and for a stronger reason: no argv pins it back. Rejected:
  * pinning `--network=pasta:--map-host-loopback,none` (pasta takes the last mapping, so it cancels the first two, but a
  * conf `-T` survives it, measured); a per-job bridge for an egress-off job (the shared rootless netns pasta reads the
@@ -326,7 +331,10 @@ function observePodmanBounds(info, { fs, home, env, euid }) {
  * quoted, dotted (`network.pasta_options`) or in an inline table, never on a whole-line comment, never inside a longer
  * key name. The one capture group is the key, so the refusal names the key it found.
  */
-export const WIDENING_KEY = /^(?!\s*#).*?(?:^|[\s.{,"'])["']?(pasta_options|network_cmd_options|annotations|env)["']?\s*=/im;
+export const WIDENING_KEY = new RegExp(`^(?!\\s*#).*?(?:^|[\\s.{,"'])["']?(${PODMAN_WIDENING_KEYS.join("|")})["']?\\s*=`, "im");
+
+/** `PODMAN_WIDENING_KEYS` as a sentence names them: "a, b, c or d". */
+const WIDENING_KEYS_LISTED = `${PODMAN_WIDENING_KEYS.slice(0, -1).join(", ")} or ${PODMAN_WIDENING_KEYS.at(-1)}`;
 
 /** What each widening key does, completing the sentence that names the file it was found in. */
 const WIDENING_KEY_SAYS = Object.freeze({
@@ -334,6 +342,8 @@ const WIDENING_KEY_SAYS = Object.freeze({
 	network_cmd_options: "sets network_cmd_options, which Podman hands to slirp4netns behind every job's network, where allow_host_loopback=true gives the job this host's 127.0.0.1 services",
 	annotations: "sets annotations, which Podman adds to every container, where run.oci.keep_original_groups=1 keeps this account's supplementary groups inside the job",
 	env: "sets env, which under [engine] is Podman's own environment (where CONTAINERS_CONF_OVERRIDE, CONTAINERS_CONF, XDG_CONFIG_HOME or HOME moves which containers.conf it reads) and under [containers] adds variables to every job",
+	helper_binaries_dir: "sets helper_binaries_dir, which is where Podman finds the pasta and slirp4netns behind every job's network, so another program can stand in for them",
+	network_cmd_path: "sets network_cmd_path, which names the slirp4netns Podman runs behind every job's network, so another program can stand in for it",
 });
 
 // The cause a widening containers.conf refuses the venue under, defined in the leaf (backends.mjs) and re-exported here.
@@ -349,8 +359,13 @@ export { PODMAN_CONF_WIDENS_JOB };
  * reads the same bytes. The one exception is a read that failed for a moment (`TRANSIENT_READ_ERRORS`: out of
  * descriptors, an I/O error), which comes back with `transient: true` and is retried, never refused, on
  * `observationRefusalIsTransient`'s rule. `podman info` is not an input.
+ *
+ * THEN THE LIVE NETWORK (issue #450), only when no containers.conf refused: a clean chain says what the NEXT rootless
+ * network starts with, not what the running one carries, and that one keeps the options it started with until every
+ * bridge container of the account stops (`podmanNetnsWidening`). Here rather than beside each caller, so the boot, the
+ * per-job pre-spend check, the sandbox and doctor cannot disagree about it: they all call this one function.
  */
-export function podmanConfWidening({ fs, home, env, euid }) {
+export function podmanConfWidening({ fs, home, env, euid, runRoot }) {
 	const listed = podmanConfFiles({ fs, home, env, euid });
 	let key = null;
 	const found =
@@ -362,7 +377,7 @@ export function podmanConfWidening({ fs, home, env, euid }) {
 				return WIDENING_KEY_SAYS[key];
 			},
 		});
-	if (!found) return null;
+	if (!found) return podmanNetnsWidening({ fs, euid, runRoot });
 	if (found.value === null) return { cause: PODMAN_CONF_WIDENS_JOB, key: null, evidence: found.evidence, transient: true };
 	return { cause: PODMAN_CONF_WIDENS_JOB, key, evidence: found.evidence, ...(found.spelling ? { spelling: found.spelling } : {}) };
 }
@@ -373,18 +388,311 @@ export function podmanConfWidening({ fs, home, env, euid }) {
  * operator wanted account-wide (a pasta MTU, say) now goes on their own containers' command line instead.
  */
 export function podmanConfRefusal(found) {
-	return `${found?.transient ? "Not read yet" : "Refused"}: ${found?.evidence ?? "the containers.conf chain was not read"}; ${podmanConfFix(found)} (issue #428).`;
+	return `${found?.transient ? "Not read yet" : "Refused"}: ${found?.evidence ?? "the containers.conf chain was not read"}; ${podmanConfFix(found)} (issue #${found?.live ? 450 : 428}).`;
 }
+
+/**
+ * How to reset this account's rootless network (issue #450), measured on Podman 5.8.1 and 4.9.3: it lives until the LAST
+ * running container on a bridge network stops, and a bridge container started meanwhile joins it as it is, so a restart
+ * of one container at a time never resets it. The shipped Quadlet units are named, the worker's first so its queue does
+ * not go under a running job, and the keeper through its unit: a `podman stop` of its container is undone a second
+ * later by `Restart=always`, and a keeper back while another bridge container still runs rejoins the network as it is
+ * (measured on 5.8.1 and 4.9.3). A unit the account does not have is reported "not loaded" and the others still stop
+ * and start (measured, exit 5). A container this project did not start is the operator's to find (`podman ps`).
+ */
+export const ROOTLESS_NETNS_RESET = `stop every running container of this account that is on a bridge network, all of them at once, then start them again, since the rootless network they share lives until the last of them stops and a container started meanwhile joins it as it is: with this project's units, systemctl --user stop pi-dispatch-worker.service ${QUADLET_FILES.proxy.unit} ${QUADLET_FILES.keeper.unit} ${QUADLET_FILES.valkey.unit}, then podman stop any other container \`podman ps\` still lists, then systemctl --user start ${QUADLET_FILES.valkey.unit} ${QUADLET_FILES.keeper.unit} ${QUADLET_FILES.proxy.unit} pi-dispatch-worker.service (a worker installed at system scope is stopped and started with sudo systemctl stop and start pi-dispatch-worker.service instead; for containers started by hand, podman stop them all, then podman start them). Stop the keeper with systemctl, not podman stop: its unit starts it again a second later, and it then rejoins the network as it is while any other bridge container still runs. A unit this account does not have is reported as not loaded, and the others still stop and start`;
 
 /** The remedy half of `podmanConfRefusal`, alone, for doctor's fix line. */
 export function podmanConfFix(found) {
+	if (found?.live && !found.transient) {
+		return found.key
+			? `${ROOTLESS_NETNS_RESET}. A worker this stopped at boot exits 2 and stays down until that start brings it back; a running one reads this network again before every podman job and admits the next once it no longer carries the option`
+			: "the podman venue reads /proc to find this account's rootless network and the options it runs with; run the worker where /proc is mounted and lists the worker account's own processes";
+	}
 	return found?.key
-		? "remove that key from that file, then restart this account's containers on a bridge network (the egress proxy among them), since the rootless network they share keeps the options it started with: the podman venue refuses any containers.conf this account's Podman reads that sets pasta_options, network_cmd_options, annotations or env, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers (a pasta MTU, say) goes on their own command line (--network=pasta:...) or Quadlet unit instead, not account-wide"
+		? `remove that key from that file, then ${ROOTLESS_NETNS_RESET}. The podman venue refuses any containers.conf this account's Podman reads that sets ${WIDENING_KEYS_LISTED}, whatever the value, because no flag on a job's command line takes it back, and it refuses a rootless network still running with such an option after the key is gone. A setting you need for your own containers (a pasta MTU, say) goes on their own command line (--network=pasta:...) or Quadlet unit instead, not account-wide`
 		: found?.transient
 			? "the read failed for a moment, not for a reason in the file; a job refused this way is retried once (the queue's second attempt) and a boot exits to be restarted, so if it recurs, fix what the host ran out of (file descriptors, memory, a failing disk)"
 			: found?.spelling
 				? `rewrite ${found.spelling === "escaped" ? "that key without a backslash escape" : "that line in plain ASCII with no \"\"\" or ''' multi-line string"}: this check reads a containers.conf only in plain ASCII with plain keys, since a non-ASCII case fold, a multi-line string or an escape was measured hiding a key from it that Podman honoured, and it refuses what it cannot read rather than guess`
-				: "the podman venue must read every containers.conf this account's Podman reads to know that none sets pasta_options, network_cmd_options, annotations or env; make that file or directory readable by the worker's account, or unset the variable for it";
+				: `the podman venue must read every containers.conf this account's Podman reads to know that none sets ${WIDENING_KEYS_LISTED}; make that file or directory readable by the worker's account, or unset the variable for it`;
+}
+
+/**
+ * Where Podman 5 RECORDS this account's rootless network helper (issue #450, measured on 5.8.1 with pasta, and with
+ * slirp4netns under `default_rootless_network_cmd`): the file holds the helper's host pid, and the helper's own argv
+ * names the network under the same directory (`--netns <dir>/rootless-netns` for pasta, the positional path after
+ * `--netns-type=path` for slirp4netns). `runRoot` is `podman info`'s `store.runRoot` (`/run/user/<uid>/containers` by
+ * default, measured; wherever `XDG_RUNTIME_DIR` or a storage.conf moves it otherwise). No job can write there.
+ */
+export function rootlessNetnsRecord(runRoot) {
+	const dir = `${runRoot}/networks/rootless-netns`;
+	return { pidFile: `${dir}/rootless-netns-conn.pid`, netns: `${dir}/rootless-netns` };
+}
+
+/**
+ * Podman 4.9.3's rootless network, as its slirp4netns's argv names it: `--netns-type=path
+ * <XDG_RUNTIME_DIR>/netns/rootless-netns-<hex>` (measured). 4.9.3 does keep a record, a
+ * `<engine tmp_dir>/rootless-netns/rootless-netns-slirp4netns.pid` (measured present while the helper runs), but `podman
+ * info` does not report that directory (measured: no key names `libpod/tmp`), so on 4.x the helper is found by this path
+ * instead, and only among processes in
+ * the worker's OWN pid namespace (`NSpid` with one field, which a job's `--pid=private` process never has, and which the
+ * worker reads from `/proc/<pid>/status` with no ptrace check a job could deny).
+ */
+const ROOTLESS_NETNS_4X = /\/netns\/rootless-netns-[0-9a-f]+$/;
+
+/**
+ * Which kind of helper `argv` is, from its SHAPE, never its name: a renamed binary (a `helper_binaries_dir` that puts
+ * another program first, measured running as `podpasta`) keeps Podman's argv. slirp4netns is the one given
+ * `--netns-type`; anything else Podman starts for the rootless network is pasta.
+ */
+export function rootlessNetnsKind(argv) {
+	return argv.slice(1).some((t) => t === "--netns-type" || t.startsWith("--netns-type=")) ? "slirp4netns" : "pasta";
+}
+
+/** The values `argv` carries, each option's `=` value as well as each bare token. */
+function argvValues(argv) {
+	return argv.slice(1).map((t) => (t.startsWith("-") && t.includes("=") ? t.slice(t.indexOf("=") + 1) : t));
+}
+/**
+ * What in a rootless network helper's argv gives a job this host's own services (issue #450), as phrases completing
+ * "the rootless network still ...", empty when nothing does. Keyed on what Podman 5.8.1 and 4.9.3 were MEASURED to put
+ * there when a containers.conf widened it, which is not always the option the conf named:
+ *   - `--map-host-loopback`, in the space or the `=` form, and any prefix pasta's getopt_long takes for it (measured:
+ *     Fedora 44's pasta 2026-01-20 ran with `--map-h 169.254.1.2` and `--tcp-n 6379`);
+ *   - Podman's own `--no-map-gw` MISSING: a conf `--map-gw` never shows in the argv, Podman drops `--no-map-gw` instead
+ *     (so issue #450's "look for --map-gw" would have missed it);
+ *   - a `-T`/`--tcp-ns` (and `-U`/`--udp-ns`) other than `none`, attached or in a short cluster too, or Podman's own
+ *     `-T none` MISSING, which a conf `-T <port>` makes Podman drop. `-U` was not measured widened; it gets the same
+ *     rule because pasta's default for it is not `none` either, and every measured argv carried `-U none`;
+ *   - on slirp4netns, Podman's own `--disable-host-loopback` MISSING, which `allow_host_loopback=true` removes.
+ * Presence of the known narrowing options, not a list of harmless ones: an option this does not know is not judged,
+ * which is why the containers.conf check beside it still refuses every value of the key.
+ */
+export function rootlessNetnsWidening(kind, argv) {
+	const args = argv.slice(1);
+	if (kind === "slirp4netns") return args.includes("--disable-host-loopback") ? [] : ["lacks Podman's own --disable-host-loopback, which allow_host_loopback=true removes, so 10.0.2.2 there is this host's 127.0.0.1"];
+	let mapsLoopback = false;
+	let noMapGw = false;
+	const ns = { T: [], U: [] };
+	args.forEach((t, i) => {
+		if (t.startsWith("--")) {
+			const eq = t.indexOf("=");
+			const name = eq < 0 ? t : t.slice(0, eq);
+			const value = eq < 0 ? args[i + 1] : t.slice(eq + 1);
+			// getopt_long takes an unambiguous prefix: `--map-h` is --map-host-loopback, `--tcp-n` is --tcp-ns.
+			if (name === "--no-map-gw") noMapGw = true;
+			else if (name.length >= 7 && "--map-host-loopback".startsWith(name)) mapsLoopback = true;
+			else if (name.length >= 7 && "--tcp-ns".startsWith(name)) ns.T.push(value);
+			else if (name.length >= 7 && "--udp-ns".startsWith(name)) ns.U.push(value);
+		} else if (/^-[^-]/.test(t)) {
+			for (const letter of ["T", "U"]) {
+				const at = t.indexOf(letter);
+				if (at > 0) ns[letter].push(t.length > at + 1 ? t.slice(at + 1) : args[i + 1]);
+			}
+		}
+	});
+	const found = [];
+	if (mapsLoopback) found.push("carries --map-host-loopback, which maps this host's 127.0.0.1 into it");
+	if (!noMapGw) found.push("lacks Podman's own --no-map-gw, which a --map-gw option removes, so its gateway address is this host");
+	for (const [letter, proto] of [["T", "TCP"], ["U", "UDP"]]) {
+		if (ns[letter].length === 0) found.push(`lacks Podman's own -${letter} none, so pasta forwards to this host's loopback ${proto} ports`);
+		else if (ns[letter].some((v) => v !== "none")) found.push(`carries a -${letter} other than none, which forwards to this host's loopback ${proto} ports`);
+	}
+	return found;
+}
+
+/**
+ * This account's running rootless network helpers, from Podman's own record (issue #450), as `{ helpers: [{ pid, kind,
+ * widened }] }` or `{ unread: { path, code } }`. Never found by process name, and never by a path a job could forge:
+ *   1. Podman 5: the pid in `rootlessNetnsRecord(runRoot).pidFile`. That process is the helper when it is still this
+ *      uid's and its argv names that record's pid file or network (so a pid the kernel has since handed to another
+ *      process is not trusted). A missing file is no helper: Podman removes it when the last bridge container stops
+ *      (measured), and with it missing under a running helper Podman itself could not start a job (TUNSETIFF,
+ *      measured). A file whose pid is gone (a killed helper leaves it, measured) is no helper either.
+ *   2. Podman 4.x, only when there is no such record: every process of this uid in the worker's own pid namespace
+ *      whose argv carries `--netns-type=path <...>/netns/rootless-netns-<hex>` (`ROOTLESS_NETNS_4X`).
+ * A process gone mid-read (ENOENT, ESRCH) is skipped; a status denied under `hidepid` is only ever another account's
+ * and is skipped. What decides it and cannot be read REFUSES, the containers.conf chain's rule: the record (a
+ * `runRoot` that is not an absolute path, a pid file that exists and cannot be read or holds no pid), a `/proc` that
+ * exists and cannot be listed, or the argv of a process this rule has already taken for the helper. A transient errno
+ * anywhere is the retry. A `/proc` that does not exist is not read, as a missing drop-in directory is not.
+ *
+ * UNCACHED, measured: the 4.x scan reads every `/proc/<pid>/status` synchronously, and with about 2200 processes took
+ * a median of 24.5 ms (max 40.8) on Fedora 44 and 19.1 ms (max 31.9) on Ubuntu 24.04; with a 5.x record it reads three
+ * files. A cache would be a window in which a network widened since reads as narrow.
+ */
+export function observeRootlessNetns({ fs, euid, runRoot }) {
+	if (typeof runRoot !== "string" || !runRoot.startsWith("/")) return { unread: { path: "podman info's store.runRoot", code: "unreported" } };
+	const gone = (code) => code === "ENOENT" || code === "ESRCH";
+	const record = rootlessNetnsRecord(runRoot);
+	let recorded;
+	try {
+		recorded = String(fs.readFileSync(record.pidFile, "utf8")).trim();
+	} catch (error) {
+		if (error?.code !== "ENOENT") return { unread: { path: record.pidFile, code: error?.code ?? "error" } };
+	}
+	if (recorded !== undefined) {
+		if (!/^[1-9][0-9]{0,9}$/.test(recorded)) return { unread: { path: record.pidFile, code: "no-pid" } };
+		const proc = readProcess(fs, recorded, euid);
+		if (proc.unread) return proc;
+		if (!proc.argv) return { helpers: [] };
+		const values = argvValues(proc.argv);
+		if (!values.includes(record.pidFile) && !values.includes(record.netns)) return { helpers: [] };
+		// A pid the kernel handed on after the helper died, to a process that names the record (gate round 2 of PR #469:
+		// a job's, after a pasta crash left the file behind): not the helper.
+		const age = startedByRecord(fs, record.pidFile, recorded, proc.nspid);
+		if (age.unread) return age;
+		if (!age.trusted) return { helpers: [] };
+		const kind = rootlessNetnsKind(proc.argv);
+		return { helpers: [{ pid: Number(recorded), kind, widened: rootlessNetnsWidening(kind, proc.argv) }] };
+	}
+	let entries;
+	try {
+		entries = fs.readdirSync("/proc");
+	} catch (error) {
+		if (error?.code === "ENOENT") return { helpers: [] };
+		return { unread: { path: "/proc", code: error?.code ?? "error" } };
+	}
+	const helpers = [];
+	for (const entry of entries) {
+		const pid = String(entry);
+		if (!/^\d+$/.test(pid)) continue;
+		const proc = readProcess(fs, pid, euid, { ownNamespaceOnly: true });
+		if (proc.unread) return proc;
+		if (!proc.argv) continue;
+		const argv = proc.argv;
+		const at = argv.findIndex((t, i) => t === "--netns-type=path" || (t === "--netns-type" && argv[i + 1] === "path"));
+		if (at < 0 || !argv.slice(at + 1).some((t) => ROOTLESS_NETNS_4X.test(t))) continue;
+		helpers.push({ pid: Number(pid), kind: "slirp4netns", widened: rootlessNetnsWidening("slirp4netns", argv) });
+	}
+	return { helpers };
+}
+
+/**
+ * One process, as `{ argv }` when it is this uid's (and, with `ownNamespaceOnly`, in the worker's own pid namespace:
+ * one `NSpid` field), `{}` when it is not, or is gone, or `{ unread }` when a read failed for a moment or its argv, once
+ * it is this uid's, could not be read. A status denied (EACCES, EPERM) is another account's under `hidepid`.
+ */
+function readProcess(fs, pid, euid, { ownNamespaceOnly = false } = {}) {
+	let status;
+	try {
+		status = String(fs.readFileSync(`/proc/${pid}/status`, "utf8"));
+	} catch (error) {
+		if (TRANSIENT_READ_ERRORS.has(error?.code)) return { unread: { path: `/proc/${pid}/status`, code: error.code } };
+		return {};
+	}
+	const uid = /^Uid:\s+(\d+)/m.exec(status)?.[1];
+	if (uid === undefined || Number(uid) !== euid) return {};
+	const nspidLine = /^NSpid:\s+(.*)$/m.exec(status)?.[1];
+	const nspid = nspidLine === undefined ? null : nspidLine.trim().split(/\s+/);
+	if (ownNamespaceOnly && (nspid === null || nspid.length !== 1)) return {};
+	let cmdline;
+	try {
+		cmdline = String(fs.readFileSync(`/proc/${pid}/cmdline`, "utf8"));
+	} catch (error) {
+		if (error?.code === "ENOENT" || error?.code === "ESRCH") return {};
+		return { unread: { path: `/proc/${pid}/cmdline`, code: error?.code ?? "error" } };
+	}
+	const argv = cmdline.split("\0");
+	if (argv.at(-1) === "") argv.pop();
+	return argv.length > 0 ? { argv, nspid } : {};
+}
+
+/**
+ * The units `/proc/<pid>/stat`'s start time is in: USER_HZ, which the kernel fixes at 100 for what `/proc` reports on
+ * every architecture Podman ships for (x86_64, aarch64, ppc64le, s390x; alpha's 1024 is not one), whatever CONFIG_HZ is.
+ */
+export const PROC_USER_HZ = 100;
+
+/**
+ * How much later than its pid file's mtime the recorded process may have started and still be the one that wrote it
+ * (gate round 2 of PR #469). The helper writes the file after it starts (pasta's own `--pid`, Podman's write for
+ * slirp4netns), so its true start is never later; the slack is for the arithmetic: `btime` is whole seconds, rounded
+ * down, which only makes the start read EARLIER; a start is in 10 ms ticks; and NTP may slew the wall clock by at most
+ * 500 ppm between the write and this read, 1.8 s over an hour. 2 s covers those and no more, since a pid recycled
+ * within it would need the helper to die within 2 s of starting.
+ */
+export const RECORD_START_TOLERANCE_MS = 2_000;
+
+/**
+ * Whether the recorded process is the one Podman's record was written for, as `{ trusted }` or `{ unread }`: it started
+ * no later than the pid file's mtime (`/proc/<pid>/stat` field 22 in `PROC_USER_HZ` ticks after `/proc/stat`'s `btime`,
+ * within `RECORD_START_TOLERANCE_MS`). A later start is a recycled pid, UNLESS the process is shaped as no job's process
+ * can be: in the worker's own pid namespace (one `NSpid` field, 5.8.1's slirp4netns, measured) or PID 1 of one of its
+ * own (5.8.1's pasta, measured), where a job's PID 1 is always its `--init` process (`/run/podman-init -- <the image's
+ * entrypoint>`, measured), whose argv the worker and the image set and which names no record. Measured on 5.8.1 with
+ * pasta and with slirp4netns: the helper started 228 to 353 ms before its record's mtime. That
+ * keeps a wall-clock step (which moves `btime` and not the file's mtime) from hiding the real helper: a step is judged
+ * on the helper's shape, never read as "no helper". Anything that decides it and cannot be read refuses, named.
+ */
+function startedByRecord(fs, pidFile, pid, nspid) {
+	const unread = (path, error) => ({ unread: { path, code: typeof error === "string" ? error : (error?.code ?? "error") } });
+	let mtimeMs;
+	try {
+		mtimeMs = fs.statSync(pidFile)?.mtimeMs;
+	} catch (error) {
+		if (error?.code === "ENOENT") return { trusted: false };
+		return unread(pidFile, error);
+	}
+	if (!Number.isFinite(mtimeMs)) return unread(pidFile, "no-mtime");
+	let stat;
+	try {
+		stat = String(fs.readFileSync(`/proc/${pid}/stat`, "utf8"));
+	} catch (error) {
+		if (error?.code === "ENOENT" || error?.code === "ESRCH") return { trusted: false };
+		return unread(`/proc/${pid}/stat`, error);
+	}
+	// Field 22, counted after the `(comm)` field, which may itself hold spaces and parentheses.
+	const ticks = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/)[19];
+	if (!/^\d+$/.test(ticks ?? "")) return unread(`/proc/${pid}/stat`, "no-start-time");
+	let btime;
+	try {
+		btime = /^btime\s+(\d+)$/m.exec(String(fs.readFileSync("/proc/stat", "utf8")))?.[1];
+	} catch (error) {
+		return unread("/proc/stat", error);
+	}
+	if (btime === undefined) return unread("/proc/stat", "no-btime");
+	const startedMs = (Number(btime) + Number(ticks) / PROC_USER_HZ) * 1000;
+	if (startedMs <= mtimeMs + RECORD_START_TOLERANCE_MS) return { trusted: true };
+	return { trusted: Array.isArray(nspid) && (nspid.length === 1 || nspid.at(-1) === "1") };
+}
+
+/**
+ * The live half of `podmanConfWidening` (issue #450): this account's running rootless network, when it still carries
+ * an option that gives a job this host's services, as a `podman-conf-widens-job` finding with `live: true`, else
+ * `null`. The SAME cause, not a sibling: it is the same widening, a containers.conf key's, still in force after the key
+ * went, and the cause is a fixed enum the forge comment and the run record already carry; the processor's comment for
+ * a `live` finding says it is the running network, not the configuration. `key` is the conf key that gave the helper
+ * that option (`pasta_options` for pasta, `network_cmd_options` for slirp4netns). No helper running is no live network:
+ * the next bridge container starts one from the conf as it is now, which the chain above has just judged.
+ *
+ * `runRoot` is `podman info`'s `store.runRoot`: a path, or `null` for an answered info that reported none, which REFUSES
+ * (named). `undefined` is an info read that has not answered, and is not judged here: that same read leaves the job user
+ * undecided (`unknown`), which retries the job before any container, and the next judgement has the answer.
+ */
+export function podmanNetnsWidening({ fs, euid, runRoot }) {
+	if (!Number.isInteger(euid) || runRoot === undefined) return null;
+	const seen = observeRootlessNetns({ fs, euid, runRoot });
+	if (seen.unread) {
+		const { path, code } = seen.unread;
+		const evidence = code === "unreported"
+			? "podman info reports no store.runRoot, so where Podman records this account's running rootless network is not known"
+			: code === "no-pid"
+				? `${path} holds no pid, so which process is this account's running rootless network is not known`
+				: code === "no-mtime" || code === "no-start-time" || code === "no-btime"
+					? `${path} gives no ${code === "no-mtime" ? "modification time" : code === "no-btime" ? "boot time" : "start time"}, so whether the recorded process is the one Podman's record was written for is not known`
+					: `${path} could not be read (${code}), so whether this account's running rootless network still carries an option that widens a job is not known`;
+		return TRANSIENT_READ_ERRORS.has(code) ? { cause: PODMAN_CONF_WIDENS_JOB, key: null, live: true, evidence, transient: true } : { cause: PODMAN_CONF_WIDENS_JOB, key: null, live: true, evidence };
+	}
+	const widened = seen.helpers.find((h) => h.widened.length > 0);
+	if (!widened) return null;
+	return {
+		cause: PODMAN_CONF_WIDENS_JOB,
+		key: widened.kind === "pasta" ? "pasta_options" : "network_cmd_options",
+		live: true,
+		evidence: `this account's running rootless network (${widened.kind}, pid ${widened.pid}), which every container on a bridge network shares, the egress proxy's among them, still ${widened.widened.join(", and ")}: it keeps the options it started with, whatever containers.conf says now`,
+	};
 }
 
 /**
@@ -545,9 +853,10 @@ export function resolvePodmanImageUser(decision, { capabilities = [], euid, egid
 export function judgePodmanVenue({ read, platform = process.platform, euid, egid, fs = { statSync, readFileSync, readdirSync }, home = homedir(), env = process.env, backendFloor = {}, onObserved = () => {} } = {}) {
 	const decision = decidePodmanJobUser({ platform, euid, egid, read });
 	if (decision.mode === "unmappable") return { ok: true, podman: read, jobUserRefused: { refused: "job-user-unmappable", cause: decision.cause } };
-	const widened = podmanConfWidening({ fs, home, env, euid });
+	// `runRoot` from this same read (issue #450): `undefined` while it has not answered, when the undecided job user retries.
+	const widened = podmanConfWidening({ fs, home, env, euid, runRoot: read?.answered === true && read.info ? (read.info.runRoot ?? null) : undefined });
 	// A transient read rides the same field with `transient: true`, which the processor retries rather than refuses.
-	if (widened) return { ok: true, podman: read, podmanConfRefused: { reason: PODMAN_CONF_WIDENS_JOB, key: widened.key, message: podmanConfRefusal(widened), ...(widened.transient ? { transient: true, evidence: widened.evidence } : {}) } };
+	if (widened) return { ok: true, podman: read, podmanConfRefused: { reason: PODMAN_CONF_WIDENS_JOB, key: widened.key, message: podmanConfRefusal(widened), ...(widened.live ? { live: true } : {}), ...(widened.transient ? { transient: true, evidence: widened.evidence } : {}) } };
 	const observed = observePodman({ read, fs, home, env, euid });
 	onObserved(observed);
 	const args = { backends: [PODMAN_BACKEND], backendFloor, observations: observed.observations, evidence: observed.evidence };

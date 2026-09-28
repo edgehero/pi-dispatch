@@ -6108,7 +6108,7 @@ test("doctor's two docker runners spawn the bin they are given, and docker when 
 
 // `podman info --format json` as rootless Podman 5.8.1 on Fedora 44 answers it (measured), reduced to the keys read.
 const PODMAN_INFO = (over = {}, security = {}) =>
-	JSON.stringify({ host: { security: { rootless: true, selinuxEnabled: false, ...security }, serviceIsRemote: false, cgroupVersion: "v2", cgroupManager: "systemd", cgroupControllers: ["cpuset", "cpu", "io", "memory", "pids"], ...over }, version: { Version: "5.8.1" } });
+	JSON.stringify({ host: { security: { rootless: true, selinuxEnabled: false, ...security }, serviceIsRemote: false, cgroupVersion: "v2", cgroupManager: "systemd", cgroupControllers: ["cpuset", "cpu", "io", "memory", "pids"], ...over }, version: { Version: "5.8.1" }, store: { runRoot: "/run/user/1234/containers" } });
 // The worker account's own mounts.conf, empty: the documented override that earns podmanAddsNoMounts.
 const PODMAN_HOME = "/home/op";
 // And the account's user manager running with the controllers delegated (issue #453): user@1234.service's cgroup.
@@ -6482,7 +6482,7 @@ test("a widening containers.conf is a podman venue refusal: ✗ where podman is 
 			const boot = PI_BACKENDS === "podman";
 			const line = `${boot ? "✗" : "⚠"} podman: no job can run on this venue (podman-conf-widens-job): ${confPath} sets ${key}, which `;
 			assert.ok(said().includes(line), `${key} ${PI_BACKENDS}:\n${said()}`);
-			assert.match(said(), new RegExp(`${boot ? "a worker running as this account refuses to boot" : "every podman job is refused"}\n {4}→ remove that key from that file, then restart this account's containers on a bridge network`));
+			assert.match(said(), new RegExp(`${boot ? "a worker running as this account refuses to boot" : "every podman job is refused"}\n {4}→ remove that key from that file, then stop every running container of this account that is on a bridge network, all of them at once`));
 			if (boot) assert.equal(code, 1, `${key}: a boot refusal fails doctor`);
 			assert.doesNotMatch(said(), /podman: jobs run as|podman: job image/, `${key}: nothing past the refusal is read`);
 			assert.deepEqual(calls.filter((c) => c.cmd === "podman").map((c) => c.args[0]), ["info"], "the files are read, podman is asked nothing more");
@@ -6508,12 +6508,52 @@ test("a widening containers.conf is a podman venue refusal: ✗ where podman is 
 	// A conf read that failed for a moment is ⚠ and says it is retried, never the ✗ refusal.
 	const busy = capture();
 	const busyCode = await runDoctor(podmanEnv(), podmanDeps(busy.out, podmanPlan(), [], { observationFs: { ...podmanFs, readFileSync: (p) => (p === confPath ? (() => { throw Object.assign(new Error("EMFILE"), { code: "EMFILE" }); })() : podmanFs.readFileSync(p)) } }));
-	assert.match(busy.text(), /⚠ podman: whether this account's containers.conf widens a job could not be read just now: [^\n]*could not be read \(EMFILE\)\n {4}→ the read failed for a moment/);
+	assert.match(busy.text(), /⚠ podman: whether this account's containers.conf or running rootless network widens a job could not be read just now: [^\n]*could not be read \(EMFILE\)\n {4}→ the read failed for a moment/);
 	assert.equal(busyCode, 0);
 	// `--live` names the conf line as the one to fix, not the job-user line (the reviewer's R3).
 	const live = capture();
 	await runDoctor(liveEnv({ PI_BACKENDS: "podman" }), { ...podmanDeps(live.out, { ...podmanLiveOk(), ...podmanPlan() }, [], { observationFs: withConf("annotations = []\n") }), live: true, ...instantClock(), liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n" });
 	assert.match(live.text(), /⚠ read back on podman: not run -- a podman job is refused here \(podman-conf-widens-job\)[^\n]*\n {4}→ fix the podman containers\.conf line above first/);
+});
+
+// Issue #450: this account's rootless network still running with an option a removed key gave it (Podman 5.8.1's pasta,
+// measured with --map-host-loopback after the key was removed), read from /proc by the worker's own function.
+test("a rootless network still carrying a removed key's option is the same podman venue refusal, with the reset to run (#450)", async () => {
+	const argv = ["/usr/sbin/pasta", "--config-net", "--map-host-loopback", "169.254.1.2", "--pid", "/run/user/1234/containers/networks/rootless-netns/rootless-netns-conn.pid", "--dns-forward", "169.254.1.1", "-t", "none", "-u", "none", "-T", "none", "-U", "none", "--no-map-gw", "--quiet", "--netns", "/run/user/1234/containers/networks/rootless-netns/rootless-netns", "--map-guest-addr", "169.254.1.2"];
+	const withLive = (args) => {
+		// 5.8.1's pasta: PID 1 of a pid namespace of its own, found through the pid file Podman keeps under runRoot.
+		// It started 10 s after boot (stat field 22, in ticks), and wrote the pid file a minute after boot.
+		const conn = "/run/user/1234/containers/networks/rootless-netns/rootless-netns-conn.pid";
+		const proc = { "/proc/4887/status": "Name:\tpasta\nUid:\t1234\t1234\t1234\t1234\nNSpid:\t4887\t1\n", "/proc/4887/cmdline": `${args.join("\0")}\0`, "/proc/4887/stat": "4887 (pasta) S 1 4887 4887 0 -1 4194560 1 0 0 0 0 0 0 0 20 0 1 0 1000 1 1\n", "/proc/stat": "btime 1790000000\n", [conn]: "4887\n" };
+		return { ...podmanFs, readFileSync: (p) => (Object.hasOwn(proc, p) ? proc[p] : podmanFs.readFileSync(p)), readdirSync: (p) => (p === "/proc" ? ["self", "4887"] : podmanFs.readdirSync(p)), statSync: (p) => (p === conn ? { size: 5, mtimeMs: 1_790_000_060_000 } : podmanFs.statSync(p)) };
+	};
+	for (const PI_BACKENDS of ["podman", "local,podman"]) {
+		const { out, text: said } = capture();
+		const calls = [];
+		const code = await runDoctor(podmanEnv({ PI_BACKENDS }), podmanDeps(out, podmanPlan(), calls, { observationFs: withLive(argv) }));
+		const boot = PI_BACKENDS === "podman";
+		const line = `${boot ? "✗" : "⚠"} podman: no job can run on this venue (podman-conf-widens-job): this account's running rootless network (pasta, pid 4887), which every container on a bridge network shares, the egress proxy's among them, still carries --map-host-loopback`;
+		assert.ok(said().includes(line), `${PI_BACKENDS}:\n${said()}`);
+		assert.match(said(), /\n {4}→ stop every running container of this account that is on a bridge network, all of them at once, [^\n]*systemctl --user stop pi-dispatch-worker\.service pi-dispatch-egress-proxy\.service pi-dispatch-netns-keeper\.service pi-dispatch-valkey\.service[^\n]*admits the next once it no longer carries the option\n/);
+		assert.doesNotMatch(said(), /remove that key/);
+		if (boot) assert.equal(code, 1, "a boot refusal fails doctor");
+		assert.deepEqual(calls.filter((c) => c.cmd === "podman").map((c) => c.args[0]), ["info"], "/proc is read, podman is asked nothing more");
+	}
+	// The same helper narrow says nothing of it.
+	const { out, text: said } = capture();
+	await runDoctor(podmanEnv(), podmanDeps(out, podmanPlan(), [], { observationFs: withLive(argv.filter((t, i) => i !== 2 && i !== 3)) }));
+	assert.doesNotMatch(said(), /podman-conf-widens-job/);
+	// `--live` points at the network's reset, never at a containers.conf line there is none of.
+	const live = capture();
+	await runDoctor(liveEnv({ PI_BACKENDS: "podman" }), { ...podmanDeps(live.out, { ...podmanLiveOk(), ...podmanPlan() }, [], { observationFs: withLive(argv) }), live: true, ...instantClock(), liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n" });
+	assert.match(live.text(), /⚠ read back on podman: not run -- a podman job is refused here \(podman-conf-widens-job\)[^\n]*\n {4}→ reset this account's rootless network as the podman line above says first, then re-run `pi-dispatch doctor --live`/);
+	assert.doesNotMatch(live.text(), /containers\.conf line above/);
+	// And a helper whose argv could not be read points at that line, not at a reset.
+	const denied = { ...withLive(argv), readFileSync: (p) => (p === "/proc/4887/cmdline" ? (() => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); })() : withLive(argv).readFileSync(p)) };
+	const unread = capture();
+	await runDoctor(liveEnv({ PI_BACKENDS: "podman" }), { ...podmanDeps(unread.out, { ...podmanLiveOk(), ...podmanPlan() }, [], { observationFs: denied }), live: true, ...instantClock(), liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n" });
+	assert.match(unread.text(), /\/proc\/4887\/cmdline could not be read \(EACCES\)/);
+	assert.match(unread.text(), /\n {4}→ fix the podman rootless network line above first, then re-run `pi-dispatch doctor --live`/);
 });
 
 test("doctor names a host file read that failed for a moment as that, not as a runtime that did not answer, on both venues (#428)", async () => {

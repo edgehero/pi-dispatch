@@ -1601,7 +1601,7 @@ describe("decideSandboxJobUser on the podman venue (#429)", () => {
 			readdirSync: (path) => miss(path),
 		};
 	};
-	const INFO = { rootless: true, serviceIsRemote: false, selinux: true, cgroupVersion: "v2", cgroupManager: "systemd", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1" };
+	const INFO = { rootless: true, serviceIsRemote: false, selinux: true, cgroupVersion: "v2", cgroupManager: "systemd", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1", runRoot: "/run/user/1234/containers" };
 	const answered = (over = {}) => async () => ({ answered: true, info: { ...INFO, ...over } });
 	const base = { venue: "podman", platform: "linux", euid: 1234, egid: 1234, home: HOME, env: {}, fs: hostFs(), readInfo: answered(), imageCapabilities: async () => ({ ok: true, capabilities: ["anyUid"] }) };
 	const stamped = { image: "pi-job:x", jobUser: { user: "1234:1234", home: "/home/pi" } };
@@ -1637,6 +1637,15 @@ describe("decideSandboxJobUser on the podman venue (#429)", () => {
 		// A refused identity names its own fix first, exactly as for a job.
 		const both = await decideSandboxJobUser({ ...base, readInfo: answered({ rootless: false }), fs: hostFs({ [USER_MOUNTS]: "", [USER_CONF]: "[network]\npasta_options = []\n" }), manifest: stamped });
 		assert.equal(both.refused, "job-user-unmappable");
+		// Issue #450: a clean conf with this account's rootless network still running widened (Podman 4.9.3's slirp4netns
+		// without --disable-host-loopback, measured after the key was removed) refuses the sandbox as it refuses a job.
+		const argv = ["/usr/bin/slirp4netns", "--mtu=65520", "-c", "-r", "3", "--netns-type=path", "/run/user/1234/netns/rootless-netns-95a67c32c4d4ea4d7b39", "tap0"];
+		const withLive = { ...hostFs(), readdirSync: (p) => (p === "/proc" ? ["20"] : hostFs().readdirSync(p)) };
+		const proc = { "/proc/20/status": "Name:\tslirp4netns\nUid:\t1234\t1234\t1234\t1234\nNSpid:\t20\n", "/proc/20/cmdline": `${argv.join("\0")}\0` };
+		const liveFs = { ...withLive, readFileSync: (p) => (Object.hasOwn(proc, p) ? proc[p] : withLive.readFileSync(p)) };
+		const wide = await decideSandboxJobUser({ ...base, fs: liveFs, manifest: stamped });
+		assert.equal(wide.refused, "podman-conf-widens-job");
+		assert.match(wide.message, /^Refused: this account's running rootless network \(slirp4netns, pid 20\), .*\(issue #450\)\.$/);
 	});
 
 	test("the observations are judged against the floor exactly as a job's are", async () => {

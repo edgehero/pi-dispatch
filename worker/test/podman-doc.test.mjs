@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
-import { PODMAN_JOB_USER_FIX, podmanConfRefusal, podmanConfWidening, podmanJobUserRefusal } from "../src/backend-podman.mjs";
-import { BACKENDS, DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, PODMAN_BACKEND, PROPERTIES, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, effectiveWord, meets } from "../src/backends.mjs";
+import { PODMAN_JOB_USER_FIX, WIDENING_KEY, podmanConfRefusal, podmanConfWidening, podmanJobUserRefusal } from "../src/backend-podman.mjs";
+import { BACKENDS, DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, PODMAN_BACKEND, PODMAN_WIDENING_KEYS, PROPERTIES, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, effectiveWord, meets } from "../src/backends.mjs";
 import { buildDockerRunArgs } from "../src/docker-run.mjs";
 import { DEFAULT_EGRESS_PROXY } from "../src/egress.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, JOB_USER_FIX, jobUserRefusal } from "../src/job-user.mjs";
@@ -237,7 +237,41 @@ test("the page quotes every refusal the podman venue can print, and when each fi
 	// rebuilt from the path and key the page quotes, through the worker's own function over a file holding that key, and
 	// its heading's timing from `podmanConfBootRefusal`, the function the boot calls.
 	let confQuoted = 0;
+	// Issue #450: the live network's refusal names a pid, and is rebuilt the same way, from a /proc holding that pid as
+	// the MEASURED widened helper of its kind (Podman 5.8.1's pasta after a `--map-host-loopback` key was removed, 4.9.3's
+	// slirp4netns after `allow_host_loopback=true` was), through the worker's own functions.
+	let liveQuoted = 0;
+	const MEASURED_WIDE = {
+		pasta: ["/usr/sbin/pasta", "--config-net", "--map-host-loopback", "169.254.1.2", "--pid", "/run/user/1234/containers/networks/rootless-netns/rootless-netns-conn.pid", "--dns-forward", "169.254.1.1", "-t", "none", "-u", "none", "-T", "none", "-U", "none", "--no-map-gw", "--quiet", "--netns", "/run/user/1234/containers/networks/rootless-netns/rootless-netns", "--map-guest-addr", "169.254.1.2"],
+		slirp4netns: ["/usr/bin/slirp4netns", "--mtu=65520", "--enable-sandbox", "--enable-seccomp", "--enable-ipv6", "-c", "-r", "3", "--netns-type=path", "/run/user/1234/netns/rootless-netns-95a67c32c4d4ea4d7b39", "tap0"],
+	};
 	lines.forEach((line, i) => {
+		const live = /^Refused: this account's running rootless network \((pasta|slirp4netns), pid (\d+)\), /.exec(line);
+		if (live) {
+			const [, kind, pid] = live;
+			const missing = (p) => {
+				throw Object.assign(new Error(p), { code: "ENOENT" });
+			};
+			// pasta through Podman 5's pid file under runRoot (its own pid namespace); slirp4netns in the worker's namespace.
+			const runRoot = "/run/user/1234/containers";
+			const proc = {
+				[`/proc/${pid}/status`]: `Name:\t${kind}\nUid:\t1234\t1234\t1234\t1234\nNSpid:\t${kind === "pasta" ? `${pid}\t1` : pid}\n`,
+				[`/proc/${pid}/cmdline`]: `${MEASURED_WIDE[kind].join("\0")}\0`,
+				[`/proc/${pid}/stat`]: `${pid} (${kind}) S 1 ${pid} ${pid} 0 -1 4194560 1 0 0 0 0 0 0 0 20 0 1 0 1000 1 1\n`,
+				"/proc/stat": "btime 1790000000\n",
+				...(kind === "pasta" ? { [`${runRoot}/networks/rootless-netns/rootless-netns-conn.pid`]: `${pid}\n` } : {}),
+			};
+			// Started 10 s after boot, its record written a minute after boot.
+			const stat = (p) => (p === `${runRoot}/networks/rootless-netns/rootless-netns-conn.pid` ? { size: 7, mtimeMs: 1_790_000_060_000 } : missing(p));
+			const files = { fs: { statSync: stat, readdirSync: (p) => (p === "/proc" ? [pid] : missing(p)), readFileSync: (p) => (Object.hasOwn(proc, p) ? proc[p] : missing(p)) }, home: "/home/pdjob", env: {}, euid: 1234, runRoot };
+			assert.equal(line, podmanConfRefusal(podmanConfWidening(files)), "the live network refusal is the worker's text for that helper");
+			const heading = lines[i - 1] ?? "";
+			assert.ok(heading.startsWith("# "), "the live network refusal has a heading line above it");
+			const stopsBoot = podmanConfBootRefusal({ mode: "worker" }, PODMAN_BACKEND, files) !== null && podmanConfBootRefusal({ mode: "worker" }, "local", files) === null;
+			assert.ok(heading.endsWith(stopsBoot ? NATIVE_BOOT : NATIVE_PER_JOB), heading);
+			liveQuoted += 1;
+			return;
+		}
 		const conf = /^Refused: (\/\S+) sets (\w+), which /.exec(line);
 		if (conf) {
 			const [, path, key] = conf;
@@ -246,7 +280,7 @@ test("the page quotes every refusal the podman venue can print, and when each fi
 				throw Object.assign(new Error(p), { code: "ENOENT" });
 			};
 			const home = path.replace(/\/\.config\/containers\/containers\.conf$/, "");
-			const files = { fs: { statSync: missing, readdirSync: missing, readFileSync: (p) => (p === path ? text : missing(p)) }, home, env: {}, euid: 1234 };
+			const files = { fs: { statSync: missing, readdirSync: missing, readFileSync: (p) => (p === path ? text : missing(p)) }, home, env: {}, euid: 1234, runRoot: "/run/user/1234/containers" };
 			assert.equal(line, podmanConfRefusal(podmanConfWidening(files)), "the conf refusal is the worker's text for that path and key");
 			const heading = lines[i - 1] ?? "";
 			assert.ok(heading.startsWith("# "), "the conf refusal has a heading line above it");
@@ -267,6 +301,7 @@ test("the page quotes every refusal the podman venue can print, and when each fi
 	});
 	assert.deepEqual([...covered].sort(), Object.keys(PODMAN_JOB_USER_FIX).sort());
 	assert.equal(confQuoted, 1, "the containers.conf refusal is quoted once (#428)");
+	assert.equal(liveQuoted, 1, "the live rootless network refusal is quoted once (#450)");
 });
 
 // The proxy command the native setup gives restates two things the worker and the compose file already say: the
@@ -405,4 +440,31 @@ test("the compose row's argv word is what the compose file's config mounts carry
 			assert.equal(mount.slice(mount.indexOf(`:${target}`) + target.length + 1), `:${word}`, `${path}: ${mount}`);
 		}
 	}
+});
+
+// Issue #450, gate round 2 of PR #469: the refused containers.conf keys were restated by hand in the specs, the docs and
+// the source, and three of those lists missed the two #450 added. So every LIST of them (three or more of the keys
+// joined by commas, "or" or "and", backticked or not, across line breaks and comment stars) must be exactly
+// `PODMAN_WIDENING_KEYS`, in its order. A revision-history row is a record of what was true then, and is not read.
+test("every list of the refused containers.conf keys is exactly PODMAN_WIDENING_KEYS (#450)", () => {
+	const root = new URL("../../", import.meta.url);
+	const at = (dir, ext) => readdirSync(new URL(dir, root)).filter((f) => f.endsWith(ext)).map((f) => `${dir}${f}`);
+	const files = [...at("specs/", ".md"), ...at("docs/", ".md"), ...at("worker/src/", ".mjs"), ...at(".github/scripts/", ".mjs"), "README.md"];
+	const token = `\`?(${PODMAN_WIDENING_KEYS.join("|")})\`?`;
+	const sep = "(?:[\\s*/]*,[\\s*/]*(?:(?:or|and)[\\s*/]+)?|[\\s*/]+(?:or|and)[\\s*/]+)";
+	const run = new RegExp(`${token}(?:${sep}${token})+`, "g");
+	let lists = 0;
+	for (const file of files) {
+		const text = readFileSync(new URL(file, root), "utf8").split("\n").filter((line) => !/^\| 20\d\d-/.test(line)).join("\n");
+		for (const match of text.matchAll(run)) {
+			const keys = [...match[0].matchAll(new RegExp(token, "g"))].map((m) => m[1]);
+			if (keys.length < 3) continue;
+			lists += 1;
+			assert.deepEqual(keys, [...PODMAN_WIDENING_KEYS], `${file}: ${match[0].replace(/\s+/g, " ")}`);
+		}
+	}
+	// The lists this was written against: the docs' four, the specs' three and the source's (docker-run.mjs's comment).
+	assert.ok(lists >= 8, `only ${lists} lists found, so the pattern no longer sees them`);
+	// And the check itself matches exactly these keys.
+	assert.deepEqual(WIDENING_KEY.source.match(/\(([a-z_|]+)\)/)?.[1].split("|"), [...PODMAN_WIDENING_KEYS]);
 });

@@ -159,5 +159,9 @@ export function parsePodmanInfo(stdout) {
 		// sandbox and the sweep compare it with the one a run recorded. An absolute path with no control character, else
 		// no fact.
 		graphRoot: typeof body.store?.graphRoot === "string" && body.store.graphRoot.length <= 4096 && /^\/[^\u0000-\u001f\u007f]*$/.test(body.store.graphRoot) ? body.store.graphRoot : null,
+		// Issue #450: where Podman keeps its runtime state (`store.runRoot`, `/run/user/<uid>/containers` by default,
+		// measured on 5.8.1 and 4.9.3), under which Podman 5 records this account's rootless network helper. Parsed as
+		// graphRoot is: an absolute path with no control character, else no fact (and the live network check refuses).
+		runRoot: typeof body.store?.runRoot === "string" && body.store.runRoot.length <= 4096 && /^\/[^\u0000-\u001f\u007f]*$/.test(body.store.runRoot) ? body.store.runRoot : null,
 	};
 }

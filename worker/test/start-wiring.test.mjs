@@ -88,7 +88,7 @@ const NO_HOST_FILES = { statSync: (p) => { throw enoent(p); }, readFileSync: (p)
 function PODMAN_INFO(over = {}, { answer, calls } = {}) {
 	return async () => {
 		calls?.push("podman info");
-		return answer ?? { answered: true, info: { rootless: true, serviceIsRemote: false, selinux: false, cgroupVersion: "v2", cgroupManager: "systemd", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1", ...over } };
+		return answer ?? { answered: true, info: { rootless: true, serviceIsRemote: false, selinux: false, cgroupVersion: "v2", cgroupManager: "systemd", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1", runRoot: "/run/user/1234/containers", ...over } };
 	};
 }
 
@@ -2921,6 +2921,41 @@ test("a podman default whose account's containers.conf widens a job refuses to B
 	// A clean conf boots as the default.
 	const clean = await runStart({ env: { PI_BACKENDS: "podman" }, readPodmanInfo: PODMAN_INFO(), jobUserIdentity: PODMAN_ID, observationFs: PODMAN_FILES, ...auth });
 	assert.ok(clean.logs.some((l) => l.event === "worker_started"));
+});
+
+// Issue #450: the account's rootless network still running with an option a removed key gave it, as Podman 4.9.3's
+// slirp4netns was measured after `allow_host_loopback=true` was removed (no --disable-host-loopback), read from /proc.
+const LIVE_WIDE = ["/usr/bin/slirp4netns", "--mtu=65520", "--enable-sandbox", "--enable-seccomp", "--enable-ipv6", "-c", "-r", "3", "--netns-type=path", "/run/user/1234/netns/rootless-netns-95a67c32c4d4ea4d7b39", "tap0"];
+const withLiveNetns = (argv) => {
+	// NSpid with one field: 4.9.3's slirp4netns runs in the worker's own pid namespace (measured).
+	const proc = { "/proc/4887/status": "Name:\tslirp4netns\nUid:\t1234\t1234\t1234\t1234\nNSpid:\t4887\n", "/proc/4887/cmdline": `${argv.join("\0")}\0` };
+	return { ...PODMAN_FILES, readFileSync: (p) => (Object.hasOwn(proc, p) ? proc[p] : PODMAN_FILES.readFileSync(p)), readdirSync: (p) => (p === "/proc" ? ["self", "4887"] : PODMAN_FILES.readdirSync(p)) };
+};
+
+test("a podman default whose rootless network still carries a removed key's option refuses to BOOT, tagged; merely blessed each job is refused (#450)", { skip: skipNoModule }, async () => {
+	const auth = { makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() };
+	const order = [];
+	await assert.rejects(
+		() => runStart({ env: { PI_BACKENDS: "podman" }, readPodmanInfo: PODMAN_INFO(), jobUserIdentity: PODMAN_ID, observationFs: withLiveNetns(LIVE_WIDE), order, makeAuth: async () => (order.push("makeAuth"), { mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() }),
+		(err) => err.piDispatchConfig === true && err.message.startsWith("Refused: this account's running rootless network (slirp4netns, pid 4887), ") && /still lacks Podman's own --disable-host-loopback/.test(err.message) && /systemctl --user stop [^;]*pi-dispatch-netns-keeper\.service/.test(err.message) && /\(issue #450\)\.$/.test(err.message),
+	);
+	assert.deepEqual(order, [], "before forge auth and the worker");
+	// Merely blessed, it boots, and the bundle refuses each podman job pre-spend on the same finding.
+	const { logs, captured } = await runStart({ env: { PI_BACKENDS: "local,podman" }, readPodmanInfo: PODMAN_INFO(), jobUserIdentity: PODMAN_ID, observationFs: withLiveNetns(LIVE_WIDE), ...auth });
+	assert.ok(logs.some((l) => l.event === "worker_started"));
+	const observed = await captured.deps.observationPreflight({ id: "j1", kind: "local", backend: "podman" });
+	assert.deepEqual([observed.podmanConfRefused?.reason, observed.podmanConfRefused?.key], ["podman-conf-widens-job", "network_cmd_options"]);
+	// The boot reads runRoot from its own info read: one that reports none refuses, tagged and named; one that has not
+	// answered boots, and each job is retried until it has.
+	await assert.rejects(
+		() => runStart({ env: { PI_BACKENDS: "podman" }, readPodmanInfo: PODMAN_INFO({ runRoot: null }), jobUserIdentity: PODMAN_ID, observationFs: PODMAN_FILES, ...auth }),
+		(err) => err.piDispatchConfig === true && err.message.startsWith("Refused: podman info reports no store.runRoot, so where Podman records this account's running rootless network is not known;"),
+	);
+	const slowInfo = await runStart({ env: { PI_BACKENDS: "podman" }, readPodmanInfo: PODMAN_INFO({}, { answer: { answered: false, reason: "timeout", transient: true } }), jobUserIdentity: PODMAN_ID, observationFs: withLiveNetns(LIVE_WIDE), ...auth });
+	assert.ok(slowInfo.logs.some((l) => l.event === "worker_started"));
+	// The same helper narrow again (every bridge container stopped and started) boots as the default.
+	const narrow = await runStart({ env: { PI_BACKENDS: "podman" }, readPodmanInfo: PODMAN_INFO(), jobUserIdentity: PODMAN_ID, observationFs: withLiveNetns([LIVE_WIDE[0], "--disable-host-loopback", ...LIVE_WIDE.slice(1)]), ...auth });
+	assert.ok(narrow.logs.some((l) => l.event === "worker_started"));
 });
 
 test("podmanConfBootRefusal: only while podman is the default venue and its identity is not already refused (#428)", { skip: skipNoModule }, () => {

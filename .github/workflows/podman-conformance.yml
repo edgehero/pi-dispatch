@@ -196,5 +196,8 @@ jobs:
           as-pdjob podman logs pi-dispatch-egress-proxy
           exit 1
 
+      # PI_EGRESS=1, said rather than inherited from the unset default: the teardown case (#458) and the live rootless
+      # network case (#450) SKIP with egress off, and a required check whose cases skip is blind. `as-pdjob` runs with
+      # `env -i`, so only what this line passes reaches the script.
       - name: Run the conformance harness against the real podman bundle
-        run: as-pdjob env PI_JOB_IMAGE="$PI_JOB_IMAGE" node .github/scripts/podman-conformance.mjs
+        run: as-pdjob env PI_JOB_IMAGE="$PI_JOB_IMAGE" PI_EGRESS=1 node .github/scripts/podman-conformance.mjs

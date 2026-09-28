@@ -190,7 +190,8 @@ export function podmanArgsFromSpec(spec) {
  * that network's OPTIONS: containers.conf `pasta_options` come before the command line's in pasta's argv, and a conf
  * `-T <port>` survives even `--network=pasta:--map-host-loopback,none` (measured), so no flag here could close it. It is
  * REFUSED instead, not left open: the venue refuses to run while the account's containers.conf sets `pasta_options`,
- * `network_cmd_options` or `annotations` at all (`podmanConfWidening` in backend-podman.mjs, issue #428).
+ * `network_cmd_options`, `annotations`, `env`, `helper_binaries_dir` or `network_cmd_path` at all, the list
+ * `PODMAN_WIDENING_KEYS` in backends.mjs (`podmanConfWidening` in backend-podman.mjs, issues #428 and #450).
  */
 export const PODMAN_PINNED_FLAGS = Object.freeze(["--pid=private", "--ipc=private", "--uts=private", "--cgroupns=private", "--env-host=false", "--http-proxy=false"]);
 

@@ -312,8 +312,11 @@ Refused: the worker's primary group is gid 0, and a podman job runs with that gr
 # a job image without anyUid, and a worker that is not uid 1001 (per job)
 Refused: the job image does not declare `anyUid` (`dev.pi-dispatch.capabilities`), so it cannot run as this worker's own uid, which the podman venue always uses; rebuild it from a release that has this feature, or run the worker as uid 1001 (issue #354).
 
-# a containers.conf the account reads that sets pasta_options, network_cmd_options, annotations or env, here the user's own (at boot when podman is the default venue, else per job)
-Refused: /home/pdjob/.config/containers/containers.conf sets pasta_options, which Podman hands to the pasta behind every job's network, where a host-loopback mapping (--map-host-loopback, --map-gw, -T) gives the job this host's 127.0.0.1 services; remove that key from that file, then restart this account's containers on a bridge network (the egress proxy among them), since the rootless network they share keeps the options it started with: the podman venue refuses any containers.conf this account's Podman reads that sets pasta_options, network_cmd_options, annotations or env, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers (a pasta MTU, say) goes on their own command line (--network=pasta:...) or Quadlet unit instead, not account-wide (issue #428).
+# a containers.conf the account reads that sets pasta_options, network_cmd_options, annotations, env, helper_binaries_dir or network_cmd_path, here the user's own (at boot when podman is the default venue, else per job)
+Refused: /home/pdjob/.config/containers/containers.conf sets pasta_options, which Podman hands to the pasta behind every job's network, where a host-loopback mapping (--map-host-loopback, --map-gw, -T) gives the job this host's 127.0.0.1 services; remove that key from that file, then stop every running container of this account that is on a bridge network, all of them at once, then start them again, since the rootless network they share lives until the last of them stops and a container started meanwhile joins it as it is: with this project's units, systemctl --user stop pi-dispatch-worker.service pi-dispatch-egress-proxy.service pi-dispatch-netns-keeper.service pi-dispatch-valkey.service, then podman stop any other container `podman ps` still lists, then systemctl --user start pi-dispatch-valkey.service pi-dispatch-netns-keeper.service pi-dispatch-egress-proxy.service pi-dispatch-worker.service (a worker installed at system scope is stopped and started with sudo systemctl stop and start pi-dispatch-worker.service instead; for containers started by hand, podman stop them all, then podman start them). Stop the keeper with systemctl, not podman stop: its unit starts it again a second later, and it then rejoins the network as it is while any other bridge container still runs. A unit this account does not have is reported as not loaded, and the others still stop and start. The podman venue refuses any containers.conf this account's Podman reads that sets pasta_options, network_cmd_options, annotations, env, helper_binaries_dir or network_cmd_path, whatever the value, because no flag on a job's command line takes it back, and it refuses a rootless network still running with such an option after the key is gone. A setting you need for your own containers (a pasta MTU, say) goes on their own command line (--network=pasta:...) or Quadlet unit instead, not account-wide (issue #428).
+
+# this account's rootless network still running with an option a removed key gave it, here Podman 5's pasta (at boot when podman is the default venue, else per job)
+Refused: this account's running rootless network (pasta, pid 398902), which every container on a bridge network shares, the egress proxy's among them, still carries --map-host-loopback, which maps this host's 127.0.0.1 into it: it keeps the options it started with, whatever containers.conf says now; stop every running container of this account that is on a bridge network, all of them at once, then start them again, since the rootless network they share lives until the last of them stops and a container started meanwhile joins it as it is: with this project's units, systemctl --user stop pi-dispatch-worker.service pi-dispatch-egress-proxy.service pi-dispatch-netns-keeper.service pi-dispatch-valkey.service, then podman stop any other container `podman ps` still lists, then systemctl --user start pi-dispatch-valkey.service pi-dispatch-netns-keeper.service pi-dispatch-egress-proxy.service pi-dispatch-worker.service (a worker installed at system scope is stopped and started with sudo systemctl stop and start pi-dispatch-worker.service instead; for containers started by hand, podman stop them all, then podman start them). Stop the keeper with systemctl, not podman stop: its unit starts it again a second later, and it then rejoins the network as it is while any other bridge container still runs. A unit this account does not have is reported as not loaded, and the others still stop and start. A worker this stopped at boot exits 2 and stays down until that start brings it back; a running one reads this network again before every podman job and admits the next once it no longer carries the option (issue #450).
 ```
 <!-- /PODMAN-NATIVE-REFUSALS -->
 
@@ -392,7 +395,8 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    `CONTAINERS_CONF_OVERRIDE` unset for the worker too: with either set, the files the worker reads are not the ones
    Podman reads, so the worker refuses the whole venue (below), and so it does when a containers.conf or a drop-in
    directory exists and cannot be read.
-   Leave `pasta_options`, `network_cmd_options`, `annotations` and `env` unset in every containers.conf the account
+   Leave `pasta_options`, `network_cmd_options`, `annotations`, `env`, `helper_binaries_dir` and `network_cmd_path`
+   (the last two swap the program behind every job's network for another, issue #450) unset in every containers.conf the account
    reads, whatever you would set them to: while any of them is present the worker refuses the venue (issue #428), at
    boot when `podman` is the default venue and each podman job otherwise, as `podman-conf-widens-job`, naming the
    file and the key, and `pi-dispatch doctor` says the same. Write the files in plain ASCII with no `"""` or `'''`
@@ -406,9 +410,22 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    on the job's command line takes those options back (Podman puts them first, and a `-T` survives any pin), which
    is why the key's presence is refused rather than its value judged. The cost: a setting you wanted for every
    container of the account, a pasta MTU say, goes on those containers' own command line
-   (`--network=pasta:...`) or Quadlet unit instead. After removing a key, restart the account's containers on a
-   bridge network, the egress proxy among them: the rootless network they share keeps the options it started with,
-   and the worker reads the files, not that live network, so it admits the next job as soon as the key is gone.
+   (`--network=pasta:...`) or Quadlet unit instead. After removing a key, stop every running container of the
+   account that is on a bridge network, all at once, and start them again (the refusal names the commands): the
+   rootless network they share keeps the options it started with until the last of them stops, and a container
+   started meanwhile joins it as it is (measured on Podman 5.8.1 and 4.9.3). So the worker reads that live network
+   too (issue #450), from Podman's own record: on Podman 5 the process whose pid it keeps in
+   `<runRoot>/networks/rootless-netns/rootless-netns-conn.pid` (`runRoot` is `podman info`'s `store.runRoot`), and on
+   4.9, which keeps no record `podman info` points to, the slirp4netns in the worker's own pid namespace whose
+   arguments name `netns/rootless-netns-<hex>`. Never by a process's name, so a renamed helper is found, and never a
+   job's own process or a container's own helper. It is refused while it still carries
+   `--map-host-loopback`, lacks Podman's own `--no-map-gw` (a conf `--map-gw` shows only as that), has a `-T` or
+   `-U` other than `none`, or on slirp4netns lacks `--disable-host-loopback`, with the same cause, at boot, before
+   each podman job, in a sandbox and in doctor, and admitted from the next job once it is narrow. A container's own
+   pasta or slirp4netns is not judged: that is where a setting for your own containers belongs. The keeper is one of
+   those bridge containers: stop it with `systemctl --user stop`, not `podman stop`, which its unit undoes a second
+   later, rejoining the old network if anything else on a bridge still runs. A unit your account does not have is
+   reported as not loaded, and the others still stop and start.
    The namespaces, `env_host` and `http_proxy` the argv can pin, and does.
 5. **The job image, in this account's own store.** A rootless account does not see root's images or another
    user's: `podman pull ghcr.io/edgehero/pi-job:latest` as the account, then set `PI_JOB_IMAGE` to the name
@@ -720,8 +737,11 @@ The shell's container is a job's on this venue, by the same builder: `--userns=k
 `HOME=/home/pi`, the pinned namespaces, and always a named network, the session's own `--internal` one with egress on
 and `--network=private` with it off, so a `netns = "host"` default cannot put it on the host's. It is refused for what
 a job on this venue is refused for, in the same order and by the same check: not Linux, no `podman`, a remote
-service, rootful Podman, a containers.conf that sets `pasta_options`, `network_cmd_options` or `annotations`
-(`podman-conf-widens-job`, or `podman-conf-unread` when a containers.conf could not be read just now: try again), and a
+service, rootful Podman, a containers.conf that sets `pasta_options`, `network_cmd_options`, `annotations`, `env`,
+`helper_binaries_dir` or `network_cmd_path`, or a rootless network still running with such an option, found from
+`/proc` and Podman's pid file for it under `podman info`'s `store.runRoot` (`podman-conf-widens-job`, also when
+`podman info` reports no `store.runRoot`; or `podman-conf-unread` when a containers.conf, `/proc` or that pid file
+could not be read just now: try again), and a
 `PI_BACKEND_FLOOR` the observations miss. With egress armed on Podman 4.x it is also refused while the rootless
 network keeper (step 6) does not hold, by the same check a job gets (`netns-keeper-not-holding`, with the command to
 run): closing the shell removes its network, and that disconnect of the running proxy is what cuts the proxy's route

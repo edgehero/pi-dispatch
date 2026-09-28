@@ -1870,8 +1870,16 @@ test("a podman conf that could not be read whole is refused without claiming it 
 	assert.doesNotMatch(unread.texts[0], /configuration lets a job's container reach more/, "an unread conf is not said to widen");
 	const busy = await run({ reason: "podman-conf-widens-job", key: null, message: "Not read yet: ...", transient: true, evidence: "/etc/containers/containers.conf could not be read (EMFILE)" });
 	assert.ok(busy.error instanceof InfraRetry, "a transient read is infrastructure: thrown, so the queue retries it");
-	assert.equal(busy.error.message, "the podman venue's containers.conf could not be read just now, so whether it widens a job is not known (/etc/containers/containers.conf could not be read (EMFILE))");
+	assert.equal(busy.error.message, "the podman venue's containers.conf or running rootless network could not be read just now, so whether it widens a job is not known (/etc/containers/containers.conf could not be read (EMFILE))");
 	assert.deepEqual([busy.texts.length, busy.incr], [0, 0], "no comment, nothing reserved");
+	// Issue #450: the RUNNING rootless network is not configuration. Unread, it says the network could not be read; still
+	// widened after the key went, it says the network must be restarted, not the configuration changed.
+	const liveUnread = await run({ reason: "podman-conf-widens-job", key: null, live: true, message: "Refused: /proc/10/cmdline could not be read (EACCES), ..." });
+	assert.equal(liveUnread.r.reason, "podman-conf-widens-job");
+	assert.equal(liveUnread.texts[0], "Refused: the worker host's running Podman network could not be read, so whether it lets a job's container reach more than this venue allows is not known, and the operator must fix that before podman jobs run. Not run.");
+	const liveWide = await run({ reason: "podman-conf-widens-job", key: "pasta_options", live: true, message: "Refused: this account's running rootless network ..." });
+	assert.equal(liveWide.texts[0], "Refused: the worker host's running Podman network still lets a job's container reach the host's own services, with an option from a configuration since changed, so the operator must restart that network before podman jobs run. Not run.");
+	for (const r of [liveUnread, liveWide]) assert.doesNotMatch(r.texts[0], /configuration could not be read|must change it/);
 });
 
 test("an unmappable job user comments fixed text and logs the cause; an image without anyUid is named in the comment", async () => {

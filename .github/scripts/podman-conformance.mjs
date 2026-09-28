@@ -19,13 +19,18 @@
  *   - after the harness, doctor's own stale canary sweep (`sweepStaleCanaryNetworks`, issue #452) over two leftovers
  *     this script makes as a killed `doctor --live` leaves them, which the harness has no probe for.
  *
- * AND ONE CASE OF ITS OWN, run before the harness (issue #458): two egress-armed jobs in sequence through the same
+ * AND TWO CASES OF ITS OWN, run before the harness. Issue #458: two egress-armed jobs in sequence through the same
  * bundle built with egress on, so each one's network is made and torn down by the worker's own `createJobNetwork` and
  * `removeJobNetwork`, and after EACH teardown doctor's canary reads the proxy's route to the provider again. On Podman
  * 4.9 the teardown's `network disconnect` of the proxy kills this account's rootless network helper whenever no other
  * bridge container runs, and the proxy has no route out from then on; the one read this script took before, on a
  * fresh proxy ahead of any teardown, could not see that. The rootless network keeper
  * (deploy/pi-dispatch-netns-keeper.container) is what keeps it green, so the workflow starts it beside the proxy.
+ * Issue #450: with the proxy and the keeper running on bridge networks this account's rootless network helper MUST
+ * exist, so the worker's own check is asked to find it from Podman's record, and to find it narrow. The worker reads no
+ * helper as no live network, so a Podman release that moved its record (the 5.x pid file under runRoot, or the 4.x
+ * slirp4netns argv) would make that check blind with every unit test still green; this is the one place a real Podman
+ * says so.
  *
  * Run it AS THE WORKER'S ACCOUNT, with the job image in that account's own store, and with the worker STOPPED: the
  * harness calls the bundle's real `reap`, which removes every `pi-job-` container in this account's store, so this
@@ -62,7 +67,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const load = (path) => import(pathToFileURL(join(root, path)).href);
 
 const { PODMAN_BACKEND } = await load("worker/src/backends.mjs");
-const { PODMAN_FIRST_START_TIMEOUT_MS, decidePodmanJobUser, makePodmanBackend, makePodmanInfoReader, podmanJobUserRefusal } = await load("worker/src/backend-podman.mjs");
+const { PODMAN_FIRST_START_TIMEOUT_MS, decidePodmanJobUser, makePodmanBackend, makePodmanInfoReader, observeRootlessNetns, podmanJobUserRefusal } = await load("worker/src/backend-podman.mjs");
 const { makeReaper } = await load("worker/src/backend-local.mjs");
 const { READ_BACK_BY_A_LIVE_PROBE, UNVERIFIED_BY_THIS_HARNESS, runBackendConformance } = await load("worker/src/backend-conformance.mjs");
 const { SHIPPED_IMAGE_UID } = await load("worker/src/container-spec.mjs");
@@ -269,6 +274,19 @@ async function egressAcrossTeardowns() {
 	return { ran: true, ok: true, detail: `${steps.join("; ")} (${keeper})` };
 }
 
+/** Issue #450: the worker's rootless network scan, against this account's real helper while the proxy runs. */
+async function liveNetnsSeen() {
+	if (armed !== true) return { ran: false, ok: true, detail: "PI_EGRESS is off, so no bridge container is sure to be running" };
+	const running = await podman(["inspect", "--format={{.State.Status}}", proxy]);
+	if (running.code !== 0 || running.stdout.trim() !== "running") return { ran: false, ok: false, detail: `${proxy} is not running under this account's Podman, so no rootless network is sure to exist` };
+	const seen = observeRootlessNetns({ fs: nodeFs, euid, runRoot: read.info.runRoot });
+	if (seen.unread) return { ran: true, ok: false, detail: `${seen.unread.path} could not be read (${seen.unread.code})` };
+	if (seen.helpers.length === 0) return { ran: true, ok: false, detail: `no rootless network helper of this account was found in /proc while ${proxy} runs on a bridge network, so the worker's live network check would read every widened network as narrow` };
+	const wide = seen.helpers.filter((h) => h.widened.length > 0);
+	if (wide.length > 0) return { ran: true, ok: false, detail: wide.map((h) => `${h.kind} (pid ${h.pid}) ${h.widened.join(", and ")}`).join("; ") };
+	return { ran: true, ok: true, detail: `found ${seen.helpers.map((h) => `${h.kind} (pid ${h.pid})`).join(", ")}, running with none of the options that widen a job` };
+}
+
 let ranAs = null;
 /** The harness's `readBack`: the live probes, run as `doctor --live` runs them on this venue, with the verdict ARRAY. */
 async function readBack() {
@@ -418,12 +436,18 @@ async function staleCanarySweep() {
 let report;
 let teardowns;
 let sweepCase;
+let netns;
 try {
 	// Before the harness, so its own egress read-back is also one taken after job teardowns rather than on a fresh proxy.
 	try {
 		teardowns = await egressAcrossTeardowns();
 	} catch (err) {
 		teardowns = { ran: false, ok: false, detail: `did not finish: ${err?.message ?? err}` };
+	}
+	try {
+		netns = await liveNetnsSeen();
+	} catch (err) {
+		netns = { ran: false, ok: false, detail: `did not finish: ${err?.message ?? err}` };
 	}
 	report = await runBackendConformance(backend, { probe, withBrokenEnumeration, readBack });
 	// LAST, see `staleCanarySweep`.
@@ -466,6 +490,9 @@ if (!userHeld) failures.push(`the job user: PID 1 ran as ${ranAs ?? "an unread u
 // Issue #458. Egress off is a skip, not a pass: there is then no teardown under a proxy to read.
 console.log(`  ${(!teardowns.ok ? "FAIL" : teardowns.ran ? "PASS" : "SKIP").padEnd(8)} egress after ${TEARDOWN_RUNS} job teardowns: ${teardowns.detail}`);
 if (!teardowns.ok) failures.push(`egress after ${TEARDOWN_RUNS} job teardowns: ${teardowns.detail}`);
+// Issue #450. Egress off is a skip: no bridge container is then sure to be running.
+console.log(`  ${(!netns.ok ? "FAIL" : netns.ran ? "PASS" : "SKIP").padEnd(8)} the live rootless network, as the worker reads it: ${netns.detail}`);
+if (!netns.ok) failures.push(`the live rootless network: ${netns.detail}`);
 console.log("\n  not verified by this harness at all:");
 for (const [property, why] of Object.entries(UNVERIFIED_BY_THIS_HARNESS)) console.log(`    ${property}: ${why}`);
 

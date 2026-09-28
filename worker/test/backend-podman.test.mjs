@@ -33,7 +33,7 @@ function infoBody(over = {}) {
 				security: { rootless: true, selinuxEnabled: true, seccompEnabled: true },
 				...host,
 			},
-			store: { graphRoot: "/home/op/.local/share/containers/storage" },
+			store: { graphRoot: "/home/op/.local/share/containers/storage", runRoot: "/run/user/1234/containers" },
 			version: { Version: "5.8.1", ...version },
 		},
 		null,
@@ -42,7 +42,7 @@ function infoBody(over = {}) {
 }
 // An escape byte built at run time: a literal one in source survives a copy and paste and then does not.
 const ESC = String.fromCharCode(27);
-const INFO = () => ({ rootless: true, serviceIsRemote: false, selinux: true, cgroupVersion: "v2", cgroupManager: "systemd", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1", graphRoot: "/home/op/.local/share/containers/storage" });
+const INFO = () => ({ rootless: true, serviceIsRemote: false, selinux: true, cgroupVersion: "v2", cgroupManager: "systemd", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1", graphRoot: "/home/op/.local/share/containers/storage", runRoot: "/run/user/1234/containers" });
 const answered = (over = {}) => ({ answered: true, info: { ...INFO(), ...over } });
 
 /**
@@ -91,11 +91,14 @@ test("parsePodmanInfo reads the measured shape and nothing else", { skip }, () =
 	}
 	// Every field null when absent or the wrong type: a missing `rootless` is never read as rootless, nor a missing
 	// `serviceIsRemote` as local.
-	assert.deepEqual(mod.parsePodmanInfo(JSON.stringify({ host: {} })), { rootless: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, cgroupManager: null, controllers: null, version: null, graphRoot: null });
+	assert.deepEqual(mod.parsePodmanInfo(JSON.stringify({ host: {} })), { rootless: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, cgroupManager: null, controllers: null, version: null, graphRoot: null, runRoot: null });
 	const odd = mod.parsePodmanInfo(infoBody({ host: { serviceIsRemote: "false", security: { rootless: 1, selinuxEnabled: "true" }, cgroupVersion: `v2${ESC}[2J`, cgroupManager: `systemd${ESC}[2J`, cgroupControllers: ["pids", 7, "memory\n", "cpu"] }, version: { Version: `5.8.1${ESC}]0;x` } }));
-	assert.deepEqual(odd, { rootless: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, cgroupManager: null, controllers: ["pids", "cpu"], version: null, graphRoot: "/home/op/.local/share/containers/storage" });
+	assert.deepEqual(odd, { rootless: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, cgroupManager: null, controllers: ["pids", "cpu"], version: null, graphRoot: "/home/op/.local/share/containers/storage", runRoot: "/run/user/1234/containers" });
 	// The store is a path or nothing: a relative one, a non-string or one carrying a control byte is no fact.
 	for (const graphRoot of ["relative/path", 7, `/home/op${ESC}[2J`, ""]) assert.equal(mod.parsePodmanInfo(JSON.stringify({ host: {}, store: { graphRoot } })).graphRoot, null, JSON.stringify(graphRoot));
+	// And so is its runtime state (issue #450), under which Podman 5 records the rootless network helper.
+	for (const runRoot of ["relative/path", 7, `/run/user/1234${ESC}[2J`, ""]) assert.equal(mod.parsePodmanInfo(JSON.stringify({ host: {}, store: { runRoot } })).runRoot, null, JSON.stringify(runRoot));
+	assert.equal(mod.parsePodmanInfo(JSON.stringify({ host: {}, store: { runRoot: "/tmp/gx469b-rt/containers" } })).runRoot, "/tmp/gx469b-rt/containers", "a runRoot outside /run/user is Podman's all the same");
 });
 
 test("makePodmanInfoReader asks `podman info --format json` and classifies each failure (#354)", { skip }, async () => {
@@ -270,7 +273,12 @@ test("podmanAddsNoMounts reads every containers.conf a rootless Podman reads, ho
 
 // --- issue #428: a containers.conf key that widens every job refuses the venue ------------------------------------
 
-const WIDENING_KEYS = ["pasta_options", "network_cmd_options", "annotations"];
+const WIDENING_KEYS = ["pasta_options", "network_cmd_options", "annotations", "helper_binaries_dir", "network_cmd_path"];
+test("PODMAN_WIDENING_KEYS is the refused key list, and every key but env has a measured widening row here (#450)", { skip }, async () => {
+	const { PODMAN_WIDENING_KEYS } = await import("../src/backends.mjs");
+	assert.deepEqual(PODMAN_WIDENING_KEYS, ["pasta_options", "network_cmd_options", "annotations", "env", "helper_binaries_dir", "network_cmd_path"]);
+	assert.deepEqual([...PODMAN_WIDENING_KEYS].filter((k) => k !== "env"), WIDENING_KEYS, "env is pinned by its own rows");
+});
 // Every file and drop-in directory `podmanConfFiles` names for uid 1234 and HOME /home/op: the vendor and /etc files and
 // directories, the rootless drop-ins without and with the uid, and the user's own file and drop-in directory.
 const CONF_FILES = ["/usr/share/containers/containers.conf", "/etc/containers/containers.conf", `${HOME}/.config/containers/containers.conf`];
@@ -283,13 +291,16 @@ const CONF_DIRS = [
 	"/etc/containers/containers.rootless.conf.d/1234",
 	`${HOME}/.config/containers/containers.conf.d`,
 ];
-const widening = (fs, over = {}) => mod.podmanConfWidening({ fs, home: HOME, env: {}, euid: 1234, ...over });
+const widening = (fs, over = {}) => mod.podmanConfWidening({ fs, home: HOME, env: {}, euid: 1234, runRoot: "/run/user/1234/containers", ...over });
 const confAt = (path, text, dir = null) => fakeFs({ files: { [path]: text }, dirs: dir ? { [dir]: [path.slice(dir.length + 1)] } : {} });
 // What each key looks like where it was measured widening a job (M0, Fedora 44, Podman 5.8.1).
 const MEASURED = {
 	pasta_options: '[network]\npasta_options = ["--map-host-loopback", "169.254.1.2"]\n',
 	network_cmd_options: '[engine]\nnetwork_cmd_options = ["allow_host_loopback=true"]\n',
 	annotations: '[containers]\nannotations = ["run.oci.keep_original_groups=1"]\n',
+	// Issue #450, gate round 1 (fedora-38): this ran the rootless network as `podpasta`. network_cmd_path was not measured.
+	helper_binaries_dir: '[engine]\nhelper_binaries_dir = ["/home/gx469b/hb", "/usr/libexec/podman", "/usr/bin"]\n',
+	network_cmd_path: '[engine]\nnetwork_cmd_path = "/home/gx469b/hb/slirp4netns"\n',
 };
 
 test("podmanConfWidening refuses each widening key in every containers.conf a rootless Podman reads (#428)", { skip }, () => {
@@ -341,6 +352,10 @@ test("podmanConfWidening matches every TOML spelling of a key and nothing that m
 		['engine = { env = ["HOME=/tmp/h"] }\n', "env"],
 		['[engine]\n"ENV" = []\n', "env"],
 		['[network]\n   pasta_options   =   []\n', "pasta_options"],
+		// Issue #450: either one swaps the program behind every job's network; the stock files carry both commented out.
+		['[engine]\nhelper_binaries_dir = ["/usr/libexec/podman"]\n', "helper_binaries_dir"],
+		['engine.network_cmd_path = "/usr/bin/slirp4netns"\n', "network_cmd_path"],
+		['[engine]\nHELPER_BINARIES_DIR=[]\n', "helper_binaries_dir"],
 		// Any value refuses, the empty one too: presence is the rule, since no argv takes any value back.
 		["[containers]\nannotations = []\n", "annotations"],
 		// A `#` inside a string earlier on the line is not a comment (MOUNT_KEY's measured rule).
@@ -354,8 +369,11 @@ test("podmanConfWidening matches every TOML spelling of a key and nothing that m
 		"pasta_optionsx = 1\n",
 		"pod_annotations = 1\n",
 		"network_cmd_options_extra = 1\n",
+		"#helper_binaries_dir = [\n",
+		"# the helper_binaries_dir option. It is recommended to just install catatonit\n",
+		'#network_cmd_path = ""\n',
+		"network_cmd_paths = 1\n",
 		'default_rootless_network_cmd = "slirp4netns"\n',
-		'network_cmd_path = "/usr/bin/slirp4netns"\n',
 		'[containers]\ndns_options = ["annotations"]\n',
 		// `env_host` is a real key, and pinned by --env-host=false, so it must NOT read as `env`; nor any other `env` suffix.
 		"[containers]\nenv_host = true\n",
@@ -412,7 +430,7 @@ test("the podman conf refusal names the file and key, says to remove it, and nam
 	const found = widening(confAt(`${HOME}/.config/containers/containers.conf`, MEASURED.pasta_options));
 	assert.equal(
 		mod.podmanConfRefusal(found),
-		"Refused: /home/op/.config/containers/containers.conf sets pasta_options, which Podman hands to the pasta behind every job's network, where a host-loopback mapping (--map-host-loopback, --map-gw, -T) gives the job this host's 127.0.0.1 services; remove that key from that file, then restart this account's containers on a bridge network (the egress proxy among them), since the rootless network they share keeps the options it started with: the podman venue refuses any containers.conf this account's Podman reads that sets pasta_options, network_cmd_options, annotations or env, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers (a pasta MTU, say) goes on their own command line (--network=pasta:...) or Quadlet unit instead, not account-wide (issue #428).",
+		"Refused: /home/op/.config/containers/containers.conf sets pasta_options, which Podman hands to the pasta behind every job's network, where a host-loopback mapping (--map-host-loopback, --map-gw, -T) gives the job this host's 127.0.0.1 services; remove that key from that file, then stop every running container of this account that is on a bridge network, all of them at once, then start them again, since the rootless network they share lives until the last of them stops and a container started meanwhile joins it as it is: with this project's units, systemctl --user stop pi-dispatch-worker.service pi-dispatch-egress-proxy.service pi-dispatch-netns-keeper.service pi-dispatch-valkey.service, then podman stop any other container `podman ps` still lists, then systemctl --user start pi-dispatch-valkey.service pi-dispatch-netns-keeper.service pi-dispatch-egress-proxy.service pi-dispatch-worker.service (a worker installed at system scope is stopped and started with sudo systemctl stop and start pi-dispatch-worker.service instead; for containers started by hand, podman stop them all, then podman start them). Stop the keeper with systemctl, not podman stop: its unit starts it again a second later, and it then rejoins the network as it is while any other bridge container still runs. A unit this account does not have is reported as not loaded, and the others still stop and start. The podman venue refuses any containers.conf this account's Podman reads that sets pasta_options, network_cmd_options, annotations, env, helper_binaries_dir or network_cmd_path, whatever the value, because no flag on a job's command line takes it back, and it refuses a rootless network still running with such an option after the key is gone. A setting you need for your own containers (a pasta MTU, say) goes on their own command line (--network=pasta:...) or Quadlet unit instead, not account-wide (issue #428).",
 	);
 	assert.equal(mod.podmanConfRefusal(found), `Refused: ${found.evidence}; ${mod.podmanConfFix(found)} (issue #428).`);
 	for (const key of WIDENING_KEYS) assert.match(mod.podmanConfRefusal(widening(confAt("/etc/containers/containers.conf", MEASURED[key]))), new RegExp(`^Refused: /etc/containers/containers\\.conf sets ${key}, which .*; remove that key from that file`));
@@ -420,6 +438,247 @@ test("the podman conf refusal names the file and key, says to remove it, and nam
 	assert.match(mod.podmanConfRefusal(unread), /^Refused: CONTAINERS_CONF is set, .*; the podman venue must read every containers\.conf .* make that file or directory readable by the worker's account, or unset the variable for it \(issue #428\)\.$/);
 	assert.equal(mod.PODMAN_CONF_WIDENS_JOB, "podman-conf-widens-job");
 	assert.ok(!Object.hasOwn(mod.PODMAN_JOB_USER_FIX, mod.PODMAN_CONF_WIDENS_JOB), "a venue refusal, not a job-user cause");
+});
+
+// Issue #450: the live rootless network. Every argv below is copied verbatim from a measured /proc/<pid>/cmdline
+// (round-446 M0-b and pr450: Fedora 44, Podman 5.8.1, uid 1235; Ubuntu 24.04, Podman 4.9.3, uid 1234), and only the rows
+// that say so edit one. The helper is found from Podman's own record (gate round 1 of PR #469), never by its name.
+const F_RUNROOT = "/run/user/1235/containers";
+const F_NETNS = `${F_RUNROOT}/networks/rootless-netns/rootless-netns`;
+const F_PID = `${F_RUNROOT}/networks/rootless-netns/rootless-netns-conn.pid`;
+const F_BASE = ["/usr/sbin/pasta", "--config-net", "--pid", F_PID, "--dns-forward", "169.254.1.1", "-t", "none", "-u", "none", "-T", "none", "-U", "none", "--no-map-gw", "--quiet", "--netns", F_NETNS, "--map-guest-addr", "169.254.1.2"];
+// The measured widened shapes: the conf option lands right after --config-net, and Podman drops its own counterpart.
+const F_ADDED = (...opts) => [F_BASE[0], F_BASE[1], ...opts, ...F_BASE.slice(2)];
+const F_WITHOUT = (argv, ...drop) => argv.filter((_, i) => !drop.includes(i));
+const F_MHL = F_ADDED("--map-host-loopback", "169.254.1.2");
+const F_MHL_EQ = F_ADDED("--map-host-loopback=169.254.1.2");
+const F_MAPGW = F_BASE.filter((t) => t !== "--no-map-gw");
+const F_T6379 = F_WITHOUT(F_ADDED("-T", "6379"), 12, 13);
+const F_TCPNS = F_WITHOUT(F_ADDED("--tcp-ns", "6379"), 12, 13);
+// 5.8.1 with `default_rootless_network_cmd = "slirp4netns"` (gate469 fedora-48): the same record, a slirp4netns helper.
+const F_SLIRP5_WIDE = ["/usr/bin/slirp4netns", "--mtu=65520", "--enable-sandbox", "--enable-seccomp", "--enable-ipv6", "-c", "-r", "3", "--netns-type=path", F_NETNS, "tap0"];
+const F_PER_PASTA = ["/usr/sbin/pasta", "--config-net", "--dns-forward", "169.254.1.1", "-t", "none", "-u", "none", "-T", "none", "-U", "none", "--no-map-gw", "--quiet", "--netns", "/run/user/1235/netns/netns-d7543bd6-5345-d135-a8e8-c28a851e1c50", "--map-guest-addr", "169.254.1.2"];
+const F_PER_SLIRP = ["/usr/sbin/slirp4netns", "--disable-host-loopback", "--mtu=65520", "--enable-sandbox", "--enable-seccomp", "--enable-ipv6", "-c", "-r", "3", "-e", "4", "--netns-type=path", "/run/user/1235/netns/netns-3fcb7f41-d4c6-702c-a04d-0ba9bbc3521e", "tap0"];
+const U_BASE = ["/usr/bin/slirp4netns", "--disable-host-loopback", "--mtu=65520", "--enable-sandbox", "--enable-seccomp", "--enable-ipv6", "-c", "-r", "3", "--netns-type=path", "/run/user/1234/netns/rootless-netns-95a67c32c4d4ea4d7b39", "tap0"];
+const U_WIDE = U_BASE.filter((t) => t !== "--disable-host-loopback");
+const U_PER_WIDE = ["/usr/bin/slirp4netns", "--mtu=65520", "--enable-sandbox", "--enable-seccomp", "--enable-ipv6", "-c", "-r", "3", "-e", "4", "--netns-type=path", "/run/user/1234/netns/netns-3fe2802e-f15d-84c7-754d-47167dbc0bc0", "tap0"];
+const U_PER_PASTA = ["/usr/bin/pasta", "--config-net", "-t", "none", "-u", "none", "-T", "none", "-U", "none", "--no-map-gw", "--netns", "/run/user/1234/netns/netns-378ea648-5636-723c-670d-bfc56de25c87"];
+/**
+ * A /proc tree: `procs` maps a pid to `{ name, uid, argv, nspid, start }` (status, stat and cmdline as the kernel writes
+ * them; `start` is field 22 of stat, in ticks after `BTIME`, 10 s after boot unless given; `nspid`
+ * defaults to the pid alone, the worker's own pid namespace, and two fields is a process in a namespace below it, as a
+ * job's and 5.8.1's pasta were measured), or to an errno a read of that pid's status throws. `cmdlineErrors` maps a pid
+ * to one its cmdline read throws; `files` adds host files (Podman's pid file); `errors` a path to an errno.
+ */
+function procFs(procs, { cmdlineErrors = {}, procError = null, files: extra = {}, errors: extraErrors = {}, mtimes = {} } = {}) {
+	const files = { "/proc/stat": `cpu  1 2 3 4\nbtime ${BTIME}\nprocesses 99\n` };
+	const errors = { ...extraErrors };
+	for (const [pid, p] of Object.entries(procs)) {
+		if (typeof p === "string") errors[`/proc/${pid}/status`] = p;
+		else {
+			files[`/proc/${pid}/status`] = `Name:\t${p.name}\nUmask:\t0022\nState:\tS (sleeping)\nTgid:\t${pid}\nNgid:\t0\nPid:\t${pid}\nPPid:\t1\nUid:\t${p.uid}\t${p.uid}\t${p.uid}\t${p.uid}\nGid:\t${p.uid}\t${p.uid}\t${p.uid}\t${p.uid}\n${p.nspid === null ? "" : `NSpid:\t${p.nspid ?? pid}\n`}`;
+			files[`/proc/${pid}/cmdline`] = `${p.argv.join("\0")}\0`;
+			// The comm field in parentheses may hold spaces and parentheses itself; field 22 is counted after it.
+			files[`/proc/${pid}/stat`] = `${pid} (${p.name} (x)) S 1 ${pid} ${pid} 0 -1 4194560 1 0 0 0 0 0 0 0 20 0 1 0 ${p.start ?? 1000} 1 1 18446744073709551615\n`;
+		}
+		if (cmdlineErrors[pid]) errors[`/proc/${pid}/cmdline`] = cmdlineErrors[pid];
+	}
+	if (procError) errors["/proc"] = procError;
+	const fs = fakeFs({ files: { ...files, ...extra }, errors, dirs: { "/proc": ["self", "thread-self", ...Object.keys(procs)] } });
+	return { ...fs, statSync: (path) => (Object.hasOwn(mtimes, path) && !errors[path] ? { ...fs.statSync(path), mtimeMs: mtimes[path] } : fs.statSync(path)) };
+}
+// Boot at this epoch second; Podman's record written a minute after boot, and each process started 10 s after boot.
+const BTIME = 1_790_000_000;
+const RECORD_MTIME = (BTIME + 60) * 1000;
+const helper = (uid, argv, { name = argv[0].split("/").pop(), nspid } = {}) => ({ name, uid, argv, nspid });
+// A 5.x helper as measured: PID 1 of a pid namespace of its own, recorded by Podman's pid file.
+const pasta5 = (pid, argv, uid = 1235) => ({ [pid]: helper(uid, argv, { nspid: `${pid}\t1` }) });
+const recorded = (pid, file = F_PID) => ({ files: { [file]: `${pid}\n` }, mtimes: { [file]: RECORD_MTIME } });
+const live = (procs, euid, over = {}) => mod.podmanNetnsWidening({ fs: procFs(procs, over), euid, runRoot: Object.hasOwn(over, "runRoot") ? over.runRoot : `/run/user/${euid}/containers` });
+
+test("5.x: the helper is the process Podman's pid file names, and each measured widening refuses (#450)", { skip }, () => {
+	// The narrow argv passes, beside a container's own pasta and slirp4netns and a rootlessport, all of this uid.
+	const quiet = { ...pasta5(10, F_BASE), 11: helper(1235, F_PER_PASTA), 12: helper(1235, F_PER_SLIRP), 13: helper(1235, ["rootlessport"]) };
+	assert.equal(live(quiet, 1235, recorded(10)), null);
+	assert.deepEqual(mod.observeRootlessNetns({ fs: procFs(quiet, recorded(10)), euid: 1235, runRoot: F_RUNROOT }), { helpers: [{ pid: 10, kind: "pasta", widened: [] }] });
+	for (const [label, argv, says] of [
+		["--map-host-loopback 169.254.1.2", F_MHL, /still carries --map-host-loopback, which maps this host's 127\.0\.0\.1 into it:/],
+		["--map-host-loopback=169.254.1.2", F_MHL_EQ, /still carries --map-host-loopback/],
+		["--map-gw (shows as --no-map-gw missing)", F_MAPGW, /still lacks Podman's own --no-map-gw, which a --map-gw option removes, so its gateway address is this host:/],
+		["-T 6379 (and -T none dropped)", F_T6379, /still carries a -T other than none, which forwards to this host's loopback TCP ports:/],
+		["--tcp-ns 6379 (and -T none dropped)", F_TCPNS, /still carries a -T other than none/],
+	]) {
+		const found = live({ ...pasta5(10, argv), 11: helper(1235, F_PER_PASTA) }, 1235, recorded(10));
+		assert.deepEqual([found?.cause, found?.key, found?.live, found?.transient], ["podman-conf-widens-job", "pasta_options", true, undefined], label);
+		assert.match(found.evidence, /^this account's running rootless network \(pasta, pid 10\), which every container on a bridge network shares, the egress proxy's among them, still /, label);
+		assert.match(found.evidence, says, label);
+		assert.match(found.evidence, /: it keeps the options it started with, whatever containers\.conf says now$/, label);
+	}
+	// Spellings not measured but taken by pasta's getopt_long, and a missing -T or -U, which pasta then defaults open.
+	for (const [label, argv] of [
+		["--map-h prefix", F_ADDED("--map-h", "169.254.1.2")],
+		["--tcp-n=6379 prefix", F_WITHOUT(F_ADDED("--tcp-n=6379"), 11, 12)],
+		["-T6379 attached", F_WITHOUT(F_ADDED("-T6379"), 11, 12)],
+		["-qT 6379 cluster", F_ADDED("-qT", "6379")],
+		["-T auto", F_ADDED("-T", "auto")],
+		["-U 5353", F_ADDED("-U", "5353")],
+		["--udp-ns 5353", F_ADDED("--udp-ns", "5353")],
+		["-T none missing", F_WITHOUT(F_BASE, 10, 11)],
+		["-U none missing", F_WITHOUT(F_BASE, 12, 13)],
+		["-T with no value", [...F_WITHOUT(F_BASE, 10, 11), "-T"]],
+	]) assert.equal(live(pasta5(10, argv), 1235, recorded(10))?.key, "pasta_options", label);
+	for (const [label, argv] of [
+		["-Tnone", F_WITHOUT(F_ADDED("-Tnone"), 11, 12)],
+		["--tcp-ns=none", F_WITHOUT(F_ADDED("--tcp-ns=none"), 11, 12)],
+		["--udp-ns none", F_WITHOUT(F_ADDED("--udp-ns", "none"), 14, 15)],
+	]) assert.equal(live(pasta5(10, argv), 1235, recorded(10)), null, label);
+	// Named by either half of the record: the pid file alone, or the network alone in its `=` form.
+	assert.equal(live(pasta5(10, F_MAPGW.filter((t) => t !== F_NETNS && t !== "--netns")), 1235, recorded(10))?.key, "pasta_options", "--pid only");
+	const netnsEq = F_MAPGW.filter((t) => t !== F_PID && t !== "--pid").map((t) => (t === "--netns" ? `--netns=${F_NETNS}` : t)).filter((t) => t !== F_NETNS);
+	assert.equal(live(pasta5(10, netnsEq), 1235, recorded(10))?.key, "pasta_options", "--netns= only");
+	// D3: never by name. A helper Podman ran from another helper_binaries_dir keeps Podman's argv (gate469 fedora-38).
+	assert.equal(live(pasta5(10, ["/home/gx469b/hb/podpasta", ...F_MHL.slice(1)]), 1235, recorded(10))?.key, "pasta_options", "renamed pasta");
+	// 5.x's slirp4netns rootless network, by the same record, judged by slirp4netns's rule (gate469 fedora-48).
+	const slirp5 = live({ 10: helper(1235, F_SLIRP5_WIDE) }, 1235, recorded(10));
+	assert.deepEqual([slirp5?.key, /\(slirp4netns, pid 10\)/.test(slirp5?.evidence)], ["network_cmd_options", true]);
+	// D2: a runRoot outside /run/user (XDG_RUNTIME_DIR moved, gate469 fedora-37c) is Podman's record all the same.
+	const moved = "/tmp/gx469b-rt/containers";
+	const movedArgv = F_MHL.map((t) => t.replace(F_RUNROOT, moved));
+	assert.equal(live(pasta5(10, movedArgv), 1235, { runRoot: moved, ...recorded(10, `${moved}/networks/rootless-netns/rootless-netns-conn.pid`) })?.key, "pasta_options");
+});
+
+test("5.x: the pid file is Podman's only word, and what it cannot say refuses (#450)", { skip }, () => {
+	// No record is no helper: Podman removes the file when the last bridge container stops (measured), and a helper
+	// running with it gone left Podman unable to start a job at all (TUNSETIFF, gate469 fedora-39).
+	assert.equal(live(pasta5(10, F_MHL), 1235), null, "no pid file");
+	// A record whose pid is gone (a killed helper leaves it, gate469 fedora-36), another uid's, or a process whose argv
+	// names neither half of the record (the kernel has handed the pid on), is no helper.
+	assert.equal(live({}, 1235, recorded(10)), null, "stale");
+	assert.equal(live({ 10: "ENOENT" }, 1235, recorded(10)), null, "gone mid-read");
+	assert.equal(live(pasta5(10, F_MHL, 1236), 1235, recorded(10)), null, "another uid's");
+	assert.equal(live({ 10: helper(1235, ["sleep", "1000"]) }, 1235, recorded(10)), null, "recycled");
+	assert.equal(live(pasta5(10, F_MHL.map((t) => t.replace("/1235/", "/1236/"))), 1235, recorded(10)), null, "another record's helper");
+	// What decides it and cannot be read refuses, naming it; a read failing for a moment is the retry.
+	const refuses = (found, evidence, label) => {
+		assert.deepEqual([found?.cause, found?.key, found?.live, found?.transient], ["podman-conf-widens-job", null, true, undefined], label);
+		assert.equal(found.evidence, evidence, label);
+	};
+	for (const code of ["EACCES", "ENOTDIR", "EISDIR"]) refuses(live(pasta5(10, F_BASE), 1235, { errors: { [F_PID]: code }, files: { [F_PID]: "10" } }), `${F_PID} could not be read (${code}), so whether this account's running rootless network still carries an option that widens a job is not known`, code);
+	refuses(live(pasta5(10, F_BASE), 1235, { files: { [F_PID]: "ten\n" } }), `${F_PID} holds no pid, so which process is this account's running rootless network is not known`, "no pid");
+	refuses(live(pasta5(10, F_BASE), 1235, { ...recorded(10), cmdlineErrors: { 10: "EACCES" } }), "/proc/10/cmdline could not be read (EACCES), so whether this account's running rootless network still carries an option that widens a job is not known", "argv denied");
+	for (const runRoot of [null, "relative/containers", ""]) refuses(live(pasta5(10, F_MHL), 1235, { runRoot, ...recorded(10) }), "podman info reports no store.runRoot, so where Podman records this account's running rootless network is not known", String(runRoot));
+	assert.match(mod.podmanConfFix(live(pasta5(10, F_BASE), 1235, { runRoot: null })), /^the podman venue reads \/proc to find this account's rootless network/);
+	for (const over of [{ errors: { [F_PID]: "EMFILE" }, files: { [F_PID]: "10" } }, { ...recorded(10), cmdlineErrors: { 10: "EIO" } }, { ...recorded(10), errors: { "/proc/10/status": "EAGAIN" } }]) {
+		const busy = live(pasta5(10, F_BASE), 1235, over);
+		assert.deepEqual([busy?.key, busy?.transient], [null, true], JSON.stringify(over));
+		assert.match(mod.podmanConfRefusal(busy), /^Not read yet: .* could not be read \(E\w+\), .*; the read failed for a moment/);
+	}
+	// A read that has not answered is not judged here: that same read leaves the job user undecided, which retries.
+	assert.equal(live(pasta5(10, F_MHL), 1235, { runRoot: undefined, ...recorded(10) }), null);
+});
+
+test("D1: a job's own process cannot stand in for the helper, whatever it names (#450)", { skip }, () => {
+	// A job runs as this uid under keep-id, in a pid namespace of its own (two NSpid fields, measured).
+	const job = (argv) => helper(1235, argv, { name: "pasta", nspid: "40\t1" });
+	// The gate's fakes: a `--pid` path that cannot be read as a file (ENOTDIR, EACCES), or that names Podman's own record.
+	for (const [label, argv, over] of [
+		["ENOTDIR pid path", ["/bin/sh", "/tmp/pasta", "--netns", "/x/rootless-netns", "--pid", "/run/user/1235/bus/rootless-netns-conn.pid"], { errors: { "/run/user/1235/bus/rootless-netns-conn.pid": "ENOTDIR" } }],
+		["EACCES pid path", ["/bin/sh", "/tmp/pasta", "--netns", "/x/rootless-netns", "--pid", "/run/user/1235/x/rootless-netns-conn.pid"], { errors: { "/run/user/1235/x/rootless-netns-conn.pid": "EACCES" }, files: { "/run/user/1235/x/rootless-netns-conn.pid": "40" } }],
+		["names the real record", ["/bin/sh", "/tmp/pasta", "--pid", F_PID, "--netns", F_NETNS], {}],
+		["4.x-shaped", ["/bin/sh", "/tmp/slirp4netns", "--netns-type=path", "/run/user/1235/netns/rootless-netns-0123abcd", "tap0"], {}],
+	]) {
+		assert.equal(live({ 40: job(argv) }, 1235, over), null, `${label}, alone`);
+		assert.equal(live({ ...pasta5(10, F_BASE), 40: job(argv) }, 1235, { ...over, files: { ...over.files, [F_PID]: "10" }, mtimes: { [F_PID]: RECORD_MTIME } }), null, `${label}, beside the real narrow helper`);
+	}
+	// And the real helper is still found and judged with the job's process beside it.
+	assert.equal(live({ ...pasta5(10, F_MHL), 40: job(F_MHL) }, 1235, recorded(10))?.evidence.includes("(pasta, pid 10)"), true);
+});
+
+test("5.x: a recorded pid is the helper only if it started by the record's mtime, or is shaped as no job's process is (#450)", { skip }, () => {
+	// Gate round 2 of PR #469 (fedora-42b): pasta crashed, its pid file stayed, and the kernel handed the pid to a job's
+	// process whose argv named the record. It started after the record was written, and it is no PID 1: not the helper.
+	const late = (BTIME + 120) * 100 - BTIME * 100; // 120 s after boot, a minute after the record
+	const recycled = { 10: helper(1235, ["sh", "-c", `sleep 3; : ${F_PID}`], { name: "sh", nspid: "10\t587" }) };
+	recycled[10].start = late;
+	assert.equal(live(recycled, 1235, recorded(10)), null, "a recycled pid");
+	const recycledWide = { 10: { ...helper(1235, F_MHL, { nspid: "10\t587" }), start: late } };
+	assert.equal(live(recycledWide, 1235, recorded(10)), null, "a recycled pid carrying a widening argv");
+	// Within the tolerance (btime rounding, a tick, NTP slew) it is still the writer; just past it, it is not.
+	const at = (ms) => ({ 10: { ...helper(1235, F_MHL, { nspid: "10\t587" }), start: Math.round(((RECORD_MTIME + ms) / 1000 - BTIME) * 100) } });
+	assert.equal(live(at(mod.RECORD_START_TOLERANCE_MS), 1235, recorded(10))?.key, "pasta_options", "at the tolerance");
+	assert.equal(live(at(mod.RECORD_START_TOLERANCE_MS + 10), 1235, recorded(10)), null, "one tick past it");
+	assert.deepEqual([mod.PROC_USER_HZ, mod.RECORD_START_TOLERANCE_MS], [100, 2000]);
+	// A wall-clock step moves btime and not the file: the real helper then reads as started late, and is still judged,
+	// by its shape: 5.8.1's pasta is PID 1 of its own namespace, its slirp4netns shares the worker's (both measured).
+	assert.equal(live({ 10: { ...helper(1235, F_MHL, { nspid: "10\t1" }), start: late } }, 1235, recorded(10))?.key, "pasta_options", "pasta after a clock step");
+	assert.equal(live({ 10: { ...helper(1235, F_SLIRP5_WIDE, { nspid: "10" }), start: late } }, 1235, recorded(10))?.key, "network_cmd_options", "slirp4netns after a clock step");
+	// What decides it and cannot be read refuses, named; a process gone before its stat is read is no helper.
+	const refusing = (over, evidence, label) => assert.equal(live(pasta5(10, F_MHL), 1235, over)?.evidence, evidence, label);
+	refusing({ files: { [F_PID]: "10" } }, `${F_PID} gives no modification time, so whether the recorded process is the one Podman's record was written for is not known`, "no mtime");
+	refusing({ ...recorded(10), errors: { "/proc/10/stat": "EACCES" } }, "/proc/10/stat could not be read (EACCES), so whether this account's running rootless network still carries an option that widens a job is not known", "stat denied");
+	refusing({ ...recorded(10), files: { [F_PID]: "10", "/proc/10/stat": "10 (pasta) S 1\n" } }, "/proc/10/stat gives no start time, so whether the recorded process is the one Podman's record was written for is not known", "short stat");
+	refusing({ ...recorded(10), files: { [F_PID]: "10", "/proc/stat": "cpu 1\n" } }, "/proc/stat gives no boot time, so whether the recorded process is the one Podman's record was written for is not known", "no btime");
+	refusing({ ...recorded(10), errors: { "/proc/stat": "EPERM" } }, "/proc/stat could not be read (EPERM), so whether this account's running rootless network still carries an option that widens a job is not known", "/proc/stat denied");
+	assert.equal(live(pasta5(10, F_MHL), 1235, { ...recorded(10), errors: { "/proc/10/stat": "ESRCH" } }), null, "gone before its stat");
+	assert.equal(live(pasta5(10, F_MHL), 1235, { ...recorded(10), errors: { "/proc/10/stat": "EMFILE" } })?.transient, true, "a moment's failure retries");
+});
+
+test("4.x: slirp4netns is found by its argv among the worker's own pid namespace, when Podman keeps no 5.x record (#450)", { skip }, () => {
+	assert.equal(live({ 20: helper(1234, U_BASE), 21: helper(1234, U_PER_PASTA) }, 1234), null);
+	assert.deepEqual(mod.observeRootlessNetns({ fs: procFs({ 20: helper(1234, U_BASE) }), euid: 1234, runRoot: "/run/user/1234/containers" }), { helpers: [{ pid: 20, kind: "slirp4netns", widened: [] }] });
+	const found = live({ 20: helper(1234, U_WIDE) }, 1234);
+	assert.deepEqual([found?.key, found?.live], ["network_cmd_options", true]);
+	assert.match(found.evidence, /^this account's running rootless network \(slirp4netns, pid 20\), .* still lacks Podman's own --disable-host-loopback, which allow_host_loopback=true removes, so 10\.0\.2\.2 there is this host's 127\.0\.0\.1:/);
+	assert.deepEqual(mod.rootlessNetnsWidening("slirp4netns", U_BASE), []);
+	// Found by argv, never by name: a renamed slirp4netns, and the split `--netns-type path` spelling.
+	assert.equal(live({ 20: helper(1234, ["/opt/hb/myslirp", ...U_WIDE.slice(1)]) }, 1234)?.key, "network_cmd_options", "renamed");
+	assert.equal(live({ 20: helper(1234, U_WIDE.flatMap((t) => (t === "--netns-type=path" ? ["--netns-type", "path"] : [t]))) }, 1234)?.key, "network_cmd_options", "split");
+	for (const [label, euid, procs] of [
+		// A container's own helper (netns-<uuid>) serves one container, and is where docs/podman.md sends a setting an
+		// operator needs for their own.
+		["a container's own slirp4netns, widened (measured)", 1234, { 20: helper(1234, U_BASE), 21: helper(1234, U_PER_WIDE) }],
+		["another account's widened helper", 1234, { 20: helper(1236, U_WIDE) }],
+		["outside the worker's pid namespace", 1234, { 20: helper(1234, U_WIDE, { nspid: "20\t1" }) }],
+		["no NSpid line at all", 1234, { 20: helper(1234, U_WIDE, { nspid: null }) }],
+		["the rootless path without --netns-type (nsenter, say)", 1234, { 20: helper(1234, ["nsenter", "--net=/run/user/1234/netns/rootless-netns-95a67c32c4d4ea4d7b39"]) }],
+		["conmon of a container named pasta", 1234, { 30: helper(1234, ["/usr/bin/conmon", "--api-version", "1", "-n", "pasta", "-p", "/run/user/1234/netns/rootless-netns-95a67c32c4d4ea4d7b39"]) }],
+		["nothing running", 1234, {}],
+	]) assert.equal(live(procs, euid), null, label);
+	// The scan's own reads: a process gone or another account's under hidepid is skipped; a /proc that exists and
+	// cannot be listed, or this uid's own-namespace process whose argv cannot be read, refuses; a moment's failure retries.
+	assert.equal(live({ 5: "ENOENT", 6: "ESRCH", 7: "EACCES", 8: "EPERM", 20: helper(1234, U_WIDE) }, 1234)?.key, "network_cmd_options");
+	assert.equal(live({ 20: helper(1234, U_WIDE) }, 1234, { cmdlineErrors: { 20: "ESRCH" } }), null);
+	assert.equal(live({ 20: helper(1234, U_BASE) }, 1234, { cmdlineErrors: { 20: "EACCES" } })?.evidence, "/proc/20/cmdline could not be read (EACCES), so whether this account's running rootless network still carries an option that widens a job is not known");
+	assert.equal(live({ 20: helper(1234, U_BASE, { nspid: "20\t1" }) }, 1234, { cmdlineErrors: { 20: "EACCES" } }), null, "a job's argv is never read");
+	assert.equal(live({}, 1234, { procError: "EACCES" })?.evidence, "/proc could not be read (EACCES), so whether this account's running rootless network still carries an option that widens a job is not known");
+	assert.equal(live({}, 1234, { procError: "ENOENT" }), null);
+	for (const over of [{ procError: "EMFILE" }, { cmdlineErrors: { 20: "EIO" } }]) assert.deepEqual([live({ 20: helper(1234, U_BASE) }, 1234, over)?.transient], [true], JSON.stringify(over));
+	assert.equal(live({ 5: "EMFILE", 20: helper(1234, U_BASE) }, 1234)?.transient, true, "a status read failing for a moment");
+});
+
+test("a widened live network is the podman venue's conf refusal, after the conf chain and with the reset to run (#450)", { skip }, () => {
+	const fs = procFs({ 10: helper(1234, U_WIDE) });
+	const found = widening(fs);
+	assert.deepEqual([found?.cause, found?.key, found?.live], ["podman-conf-widens-job", "network_cmd_options", true]);
+	const text = mod.podmanConfRefusal(found);
+	assert.ok(text.startsWith(`Refused: ${found.evidence}; stop every running container of this account that is on a bridge network, all of them at once, then start them again`), text);
+	// The reset names every unit this project ships a bridge container in, the keeper among them, stopped before started,
+	// and a worker installed at system scope.
+	assert.match(text, /systemctl --user stop pi-dispatch-worker\.service pi-dispatch-egress-proxy\.service pi-dispatch-netns-keeper\.service pi-dispatch-valkey\.service, then podman stop any other container `podman ps` still lists, then systemctl --user start pi-dispatch-valkey\.service pi-dispatch-netns-keeper\.service pi-dispatch-egress-proxy\.service pi-dispatch-worker\.service \(a worker installed at system scope is stopped and started with sudo systemctl stop and start pi-dispatch-worker\.service instead;/);
+	// At boot the worker exits 2 and stays down, so the text says the start brings it back, and only a running one admits.
+	assert.match(text, /Stop the keeper with systemctl, not podman stop: its unit starts it again a second later, and it then rejoins the network as it is while any other bridge container still runs\. A unit this account does not have is reported as not loaded, and the others still stop and start\. A worker this stopped at boot exits 2 and stays down until that start brings it back; a running one reads this network again before every podman job and admits the next once it no longer carries the option \(issue #450\)\.$/);
+	assert.doesNotMatch(text, /remove that key/, "there is no key in a file to remove");
+	// A key in a file is named first: its fix is the one that comes first.
+	const both = procFs({ 10: helper(1234, U_WIDE) }, { files: { [`${HOME}/.config/containers/containers.conf`]: MEASURED.annotations } });
+	assert.deepEqual([widening(both).key, widening(both).live], ["annotations", undefined]);
+	// The pre-spend judgement hands it back as a conf refusal marked live, from runRoot in the same info read.
+	const judged = mod.judgePodmanVenue({ read: answered(), platform: "linux", euid: 1234, egid: 1234, fs, home: HOME, env: {} });
+	assert.deepEqual(judged.podmanConfRefused, { reason: "podman-conf-widens-job", key: "network_cmd_options", message: text, live: true });
+	// An answered read reporting no runRoot refuses; one that has not answered leaves it to the undecided job user.
+	assert.equal(mod.judgePodmanVenue({ read: answered({ runRoot: null }), platform: "linux", euid: 1234, egid: 1234, fs: procFs({}), home: HOME, env: {} }).podmanConfRefused?.key, null);
+	assert.equal(mod.judgePodmanVenue({ read: answered({ runRoot: null }), platform: "linux", euid: 1234, egid: 1234, fs: procFs({}), home: HOME, env: {} }).podmanConfRefused?.reason, "podman-conf-widens-job");
+	// Narrow, the venue is clean again with no restart of the worker: the next judgement admits.
+	assert.equal(mod.judgePodmanVenue({ read: answered(), platform: "linux", euid: 1234, egid: 1234, fs: procFs({ 10: helper(1234, U_BASE) }), home: HOME, env: {} }).podmanConfRefused, undefined);
 });
 
 // Round 2 of the #428 review: the podman observations' sibling file reads follow the transient rule too, and a null
@@ -780,6 +1039,12 @@ test("through the processor, a refused podman identity is refused before the ima
 	}
 	// And the rootful identity still names its fix first on the same files.
 	assert.deepEqual(await run(async () => answered({ rootless: false }), "present", floor, widened), { reason: "job-user-unmappable", reserved: 0 });
+	// Issue #450: a clean conf chain with this account's rootless network still running widened is refused the same
+	// way, pre-spend and with no spawn, and a scan that failed for a moment is the retry.
+	spawned.length = 0;
+	assert.deepEqual(await run(async () => answered(), "present", {}, procFs({ 10: helper(1234, U_WIDE) })), { reason: "podman-conf-widens-job", reserved: 0 }, "live");
+	assert.deepEqual(spawned, [], "live: no podman spawn");
+	assert.deepEqual(await run(async () => answered(), "present", {}, procFs({ 10: helper(1234, U_BASE) }, { cmdlineErrors: { 10: "EMFILE" } })), { threw: "retry", reserved: 0 }, "live, busy");
 	// A conf read that failed for a moment is RETRIED (a throw), never a dropped job; one the account cannot read is refused.
 	for (const [code, want] of [["EMFILE", { threw: "retry", reserved: 0 }], ["EIO", { threw: "retry", reserved: 0 }], ["EACCES", { reason: "podman-conf-widens-job", reserved: 0 }]]) {
 		spawned.length = 0;
