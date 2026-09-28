@@ -6,7 +6,8 @@
 # to be, so this job makes one: `pdjob`, uid 1234 (the uid the Fedora lab measured with, and not the image's own
 # 1001, so keep-id is what makes the job's files readable), with subordinate ids, linger and its systemd user
 # instance, the job image loaded into ITS store and the egress proxy running under ITS Podman on a named bridge
-# network, exactly as docs/podman.md tells an operator to set one up.
+# network, exactly as docs/podman.md tells an operator to set one up, with the rootless network keeper beside it
+# (issue #458) started from its shipped Quadlet unit.
 #
 # REQUIRED on main since issue #432, the sixth required context and the only one outside pi-upgrade-check.yml
 # (CLAUDE.md lists all six). It ran advisory first, because Ubuntu 24.04 ships Podman 4.9, one major behind the 5.8.1
@@ -26,6 +27,8 @@ on:
       - "worker/src/**"
       - "image/**"
       - "deploy/egress-proxy.conf"
+      - "deploy/pi-dispatch-netns-keeper.container"
+      - "deploy/pi-dispatch-netns-keeper.network"
       - ".github/scripts/podman-conformance.mjs"
       - ".github/workflows/podman-conformance.yml"
   pull_request:
@@ -81,6 +84,20 @@ jobs:
           sudo mkdir -p /etc/systemd/system/user@.service.d
           printf '[Service]\nDelegate=cpu cpuset io memory pids\n' | sudo tee /etc/systemd/system/user@.service.d/delegate.conf
           sudo systemctl daemon-reload
+          # Issue #458 (PR #463 round 2): this runner's image writes XDG_CONFIG_HOME into /etc/environment
+          # (actions/runner-images, configure-environment.sh), and on Ubuntu /etc/environment is also environment.d's
+          # 99-environment.conf, which every user manager reads, its generators included. Measured on pd-ubuntu with
+          # Podman 4.9.3: a user manager whose environment carries ANOTHER home's XDG_CONFIG_HOME makes the Quadlet
+          # generator look there, and the keeper's unit is "not found" (exit 5), which is exactly what this job met on
+          # runs 36348645154 and 36383743068. An operator's account resolves it to its own home; this one is pinned to
+          # its own in its own environment.d (read after /etc/environment, so it wins), before its manager first starts.
+          # PR #463 round 3 (run 36387381332): the image writes the runner's XDG_RUNTIME_DIR (/run/user/1001) there too, and
+          # with it every podman command in the account's units failed "XDG_RUNTIME_DIR directory \"/run/user/1001\" is not
+          # owned by the current user" (reproduced on pd-ubuntu). Both are pinned to the account's own; the runner's PATH
+          # and tool variables also arrive, and are left: units call podman by absolute path, and none of them is read.
+          grep -n '^XDG_' /etc/environment || echo "no XDG_ variable in /etc/environment"
+          sudo -u "$PDJOB" mkdir -p "/home/$PDJOB/.config/environment.d"
+          printf 'XDG_CONFIG_HOME=/home/%s/.config\nXDG_RUNTIME_DIR=/run/user/%s\n' "$PDJOB" "$PDJOB_UID" | sudo -u "$PDJOB" tee "/home/$PDJOB/.config/environment.d/zz-pi-dispatch-ci.conf"
           sudo loginctl enable-linger "$PDJOB"
           sudo systemctl start "user@$PDJOB_UID.service"
           cat "/sys/fs/cgroup/user.slice/user-$PDJOB_UID.slice/user@$PDJOB_UID.service/cgroup.controllers"
@@ -113,6 +130,50 @@ jobs:
           name="$(as-pdjob podman image inspect --format '{{index .RepoTags 0}}' pi-job:ci)"
           echo "loaded as $name"
           echo "PI_JOB_IMAGE=$name" >> "$GITHUB_ENV"
+
+      # Issue #458: on Podman 4.9, which this runner ships, a job network's teardown disconnects the proxy and, with no
+      # other bridge container running, tears this account's rootless network helper down under it: every egress job
+      # after the first then gets 503. The keeper is what prevents that, so it runs here as it runs on a real host, from
+      # the SHIPPED Quadlet files through the account's own user manager (the generator, the unit and all), rather than
+      # a hand-typed copy of them. The harness's teardown case goes red without it. BEFORE the proxy, as docs/podman.md
+      # orders it: a keeper that starts well after the proxy reads to the worker and doctor as one that restarted under it
+      # (PR #463 round 2), which asks for a proxy restart.
+      - name: Start the rootless network keeper from its shipped Quadlet unit
+        run: |
+          # On any failure below, say why before the step ends: what the generator saw and made, and what it logged.
+          diagnose() {
+            echo "::group::keeper diagnostics"
+            echo "--- /etc/environment"; grep -n 'XDG' /etc/environment || true
+            echo "--- the account's user manager environment"; as-pdjob systemctl --user show-environment || true
+            echo "--- the Quadlet generator"; ls -la /usr/lib/systemd/user-generators/ || true
+            echo "--- the unit files"; as-pdjob ls -la "/home/$PDJOB/.config/containers/systemd" || true
+            echo "--- what the generator made"; sudo ls -la "/run/user/$PDJOB_UID/systemd/generator" || true
+            echo "--- quadlet -dryrun over the same files"; as-pdjob sh -c 'QUADLET_UNIT_DIRS="$HOME/.config/containers/systemd" /usr/libexec/podman/quadlet -dryrun -user' || true
+            echo "--- the units"; as-pdjob systemctl --user status pi-dispatch-netns-keeper-network.service pi-dispatch-netns-keeper.service --no-pager || true
+            echo "--- the account's journal"; sudo journalctl _UID="$PDJOB_UID" --no-pager -n 80 -o cat | grep -iE 'quadlet|generator|netns-keeper' || true
+            echo "::endgroup::"
+          }
+          trap diagnose ERR
+          # The generator reads the MANAGER's XDG_CONFIG_HOME, and every unit runs with its XDG_RUNTIME_DIR: another
+          # account's of either makes the units not found or failing (see the account step). `service install` and `up`
+          # refuse on the same rule (managerEnvRefusal); here it is a loud failure before anything is started.
+          managerenv="$(as-pdjob systemctl --user show-environment)"
+          xdg="$(printf '%s\n' "$managerenv" | sed -n 's/^XDG_CONFIG_HOME=//p')"
+          run="$(printf '%s\n' "$managerenv" | sed -n 's/^XDG_RUNTIME_DIR=//p')"
+          bus="$(printf '%s\n' "$managerenv" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p')"
+          echo "the account's user manager has XDG_CONFIG_HOME=${xdg:-(unset)} XDG_RUNTIME_DIR=${run:-(unset)} DBUS_SESSION_BUS_ADDRESS=${bus:-(unset)}"
+          if [ -n "$xdg" ] && [ "$xdg" != "/home/$PDJOB/.config" ]; then echo "::error::the user manager's XDG_CONFIG_HOME is not this account's own"; false; fi
+          if [ -n "$run" ] && [ "$run" != "/run/user/$PDJOB_UID" ]; then echo "::error::the user manager's XDG_RUNTIME_DIR is not this account's own"; false; fi
+          if [ -n "$bus" ] && [ "$bus" != "unix:path=/run/user/$PDJOB_UID/bus" ]; then echo "::error::the user manager's DBUS_SESSION_BUS_ADDRESS is not this account's own"; false; fi
+          as-pdjob mkdir -p "/home/$PDJOB/.config/containers/systemd"
+          as-pdjob cp deploy/pi-dispatch-netns-keeper.network deploy/pi-dispatch-netns-keeper.container "/home/$PDJOB/.config/containers/systemd/"
+          as-pdjob systemctl --user daemon-reload
+          as-pdjob systemctl --user start pi-dispatch-netns-keeper.service
+          # Running, in bridge mode, on its own network: the shape judgeNetnsKeeper counts (a keeper on any other network
+          # mode runs and holds nothing open, measured).
+          state="$(as-pdjob podman inspect --format '{{.State.Status}}|{{.HostConfig.NetworkMode}}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}' pi-dispatch-netns-keeper)"
+          echo "the keeper is $state"
+          test "$state" = "running|bridge|pi-dispatch-netns-keeper,"
 
       - name: Start the egress proxy under the account's Podman, on a named bridge network
         run: |

@@ -460,9 +460,11 @@ export function imagePinningVerdict({ code, output, stillAbsent, bin = "docker" 
  * its `--live` runs under Podman (issue #431), so "see the egress lines above" names lines about the proxy that venue's
  * jobs use. The `unread` override issue #354 added for a podman venue with no canary is gone with that gap.
  */
-export function egressVerdict({ armed, results }) {
+export function egressVerdict({ armed, results, keeperBlocked = null }) {
 	if (armed === null) return notReadBack("egress", "PI_EGRESS could not be read (see the .env check above)");
 	if (armed !== true) return notReadBack("egress", "PI_EGRESS is off, so there is no policy to read back");
+	// Issue #458: the podman venue on Podman 4.x without its keeper runs no canary, since its teardown would break the proxy.
+	if (keeperBlocked) return notReadBack("egress", `the egress canary was not run, because ${keeperBlocked} (see the keeper line above)`);
 	if (!Array.isArray(results) || results.length < 2) return notReadBack("egress", "the egress canary did not run both probes (see the egress lines above)");
 	// A WRONG reading fails first, whatever else is missing: an unlisted host that was reached is a finding even when
 	// the provider probe did not run, and reporting it as merely unread would pass doctor over it.
@@ -516,10 +518,11 @@ export function ephemeralVerdict({ first, second, markers = {}, nonce, bin = "do
  * rootless is not a bridge at all (pasta), so the other runtime says "default network" rather than borrowing docker's
  * noun; docker's sentence is unchanged.
  */
-export function jobToJobIsolationVerdict({ bin = "docker", armed, proxyRunning, networksCreated, peersStarted, proxyTarget, peerTargets = [], peerAddresses = [], fromPeer1 = new Map(), controlBefore = new Map(), controlAfter = new Map() }) {
+export function jobToJobIsolationVerdict({ bin = "docker", armed, proxyRunning, keeperBlocked = null, networksCreated, peersStarted, proxyTarget, peerTargets = [], peerAddresses = [], fromPeer1 = new Map(), controlBefore = new Map(), controlAfter = new Map() }) {
 	if (armed === null) return notReadBack("jobToJobIsolation", "PI_EGRESS could not be read (see the .env check above)");
 	if (armed !== true) return notReadBack("jobToJobIsolation", `PI_EGRESS is off, so jobs share ${bin === "docker" ? "docker's default bridge" : `${bin}'s default network`} by design and there is no per-job network to read back`);
 	if (proxyRunning === false) return notReadBack("jobToJobIsolation", "the egress proxy is not running, so no job-shaped network could be built");
+	if (keeperBlocked) return notReadBack("jobToJobIsolation", `no peer networks were built, because ${keeperBlocked} (see the keeper line above)`);
 	if (networksCreated !== true) return notReadBack("jobToJobIsolation", "the peer networks could not be created");
 	if (peersStarted !== true) return notReadBack("jobToJobIsolation", "a peer container did not start");
 	const reached = peerTargets.filter((t) => fromPeer1.get(t) === "reached");
@@ -654,7 +657,10 @@ export async function runLiveProbes({
 	const step = (args) => run(args, { timeoutMs: stepTimeoutMs });
 	const proxy = typeof egress?.proxy === "string" && egress.proxy ? egress.proxy : DEFAULT_EGRESS_PROXY;
 	// The peers run only where a job would get its own network: the policy armed and its proxy not known to be down.
-	const peersWanted = egress?.armed === true && egress?.proxyRunning !== false;
+	// Issue #458: and not while the podman venue's keeper is missing on Podman 4.x, where the peers' teardown (detaching
+	// the proxy from their networks) is exactly what cuts the proxy's route out.
+	const keeperBlocked = egress?.keeperBlocked || null;
+	const peersWanted = egress?.armed === true && egress?.proxyRunning !== false && !keeperBlocked;
 	const networkOf = { peer1: networkNameFor(names.peer1), peer2: networkNameFor(names.peer2) };
 	// SHOWN BEFORE IT HAPPENS (REQ-DEPLOYMENT-BOOTSTRAP): every host mutation this makes is named, with where it lives
 	// and that it goes away, before a sweep or the fixture touches anything.
@@ -663,7 +669,7 @@ export async function runLiveProbes({
 			(peersWanted ? `, and ${names.peer1} and ${names.peer2} on their own --internal networks ${networkOf.peer1} and ${networkOf.peer2}, with ${proxy} attached to both` : "") +
 			`, with a fixture under ${jobsDir}; all of them are removed when the read-back ends, as is anything an interrupted earlier run left`,
 	);
-	const swept = [...sweepStaleFixtures({ jobsDir, pid, fs, isAlive }), ...(await sweepStaleContainers({ step, pid, isAlive })), ...(await sweepStaleNetworks({ step, pid, isAlive, notes, bin }))];
+	const swept = [...sweepStaleFixtures({ jobsDir, pid, fs, isAlive }), ...(await sweepStaleContainers({ step, pid, isAlive })), ...(await sweepStaleNetworks({ step, pid, isAlive, notes, bin, keeperBlocked }))];
 
 	const owned = [];
 	const networks = [];
@@ -804,7 +810,7 @@ export async function runLiveProbes({
 		const ephemeral = ephemeralVerdict({ first, second, markers: { first: marker(1), second: marker(2) }, nonce, bin });
 
 		// --- the peers (issue #344): two job networks, two peers, one attempt each way ---
-		let jobToJobIsolation = jobToJobIsolationVerdict({ bin, armed: egress?.armed, proxyRunning: egress?.proxyRunning });
+		let jobToJobIsolation = jobToJobIsolationVerdict({ bin, armed: egress?.armed, proxyRunning: egress?.proxyRunning, keeperBlocked });
 		if (peersWanted) {
 			const reading = { bin, armed: true, proxyRunning: egress?.proxyRunning, networksCreated: false, peersStarted: false };
 			const peerNetworks = [];
@@ -946,7 +952,7 @@ export async function sweepStaleContainers({ step, pid, isAlive }) {
  * is detached, each one named in what is reported, and the network is removed WITHOUT `-f`. One that stays is a note
  * carrying the command, never silence.
  */
-export async function sweepStaleNetworks({ step, pid, isAlive, notes = [], bin = "docker" }) {
+export async function sweepStaleNetworks({ step, pid, isAlive, notes = [], bin = "docker", keeperBlocked = null }) {
 	const listed = await step(["network", "ls", "--filter", `name=${LIVE_PREFIX}`, "--format", "{{.Name}}"]);
 	if (listed?.code !== 0) return [];
 	const swept = [];
@@ -970,6 +976,12 @@ export async function sweepStaleNetworks({ step, pid, isAlive, notes = [], bin =
 		// pid is DEAD, and a dead process has no launch in flight. The sandbox sweep, whose owner may be very
 		// much alive, does carry the guard.
 		if (attached.some((n) => probeContainer.test(n))) continue;
+		// Issue #458: a detach is the trigger there, so a stale network with anything still on it is left and SAID; one
+		// with nothing attached is removed as before, since `network rm` alone does not tear the helper down (measured).
+		if (keeperBlocked && attached.length > 0) {
+			notes.push(`the stale network ${name} was left with ${attached.join(", ")} attached, because ${keeperBlocked}; the next \`pi-dispatch doctor --live\` with the keeper running removes it`);
+			continue;
+		}
 		for (const endpoint of attached) await step(["network", "disconnect", "-f", name, endpoint]);
 		// Every endpoint detached is SAID, the proxy included: a container this sweep did not make may be among them.
 		const detached = attached.length > 0 ? ` (after detaching ${attached.join(", ")})` : "";

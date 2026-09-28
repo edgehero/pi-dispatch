@@ -3138,3 +3138,54 @@ test("the sandbox network sweep visits each runtime present, built through the s
 	assert.deepEqual(await sweepOf("local,podman"), { made: ["docker", "podman"], swept: ["pi-sandbox-docker-net", "pi-sandbox-podman-net"] });
 	assert.deepEqual(await sweepOf("local"), { made: ["docker"], swept: ["pi-sandbox-docker-net"] });
 });
+
+// Issue #458 (PR #463 round 2): on Podman 4.x with egress armed, the keeper is read ONCE at boot through the bundle's own
+// egress preflight, and a keeper that does not hold is said as its own event with the WHOLE sentence, since a
+// deployment that upgraded without re-running `service install` would otherwise learn it only from retried jobs. Never
+// a refusal: the per-job preflight is the gate.
+test("a podman worker says at boot, whole, that its rootless network keeper does not hold (#458)", { skip }, async () => {
+	const SENTENCE = `the rootless network keeper pi-dispatch-netns-keeper is not under this account's Podman, and on Podman 4.9.3 ... To fix it, start it as the worker's account: ${"x".repeat(200)}`;
+	const withPreflight = (answer, seen) => (opts) => ({ ...realPodmanBackend({ ...opts, spawnFn: () => { throw new Error("no spawn"); } }), egressPreflight: async () => (seen.push("egress"), answer) });
+	const seen = [];
+	const { logs } = await runStart({ env: { PI_BACKENDS: "podman" }, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), jobUserIdentity: PODMAN_ID, makePodmanBackend: withPreflight({ unavailable: "pi-dispatch-egress-proxy", keeper: SENTENCE }, seen) });
+	assert.equal(logs.find((l) => l.event === "netns_keeper_not_holding_at_boot")?.reason, SENTENCE, "the whole sentence, never cut");
+	// PR #463 round 3: the boot line takes the preflight's own no-job sentence where it gives one.
+	const bootSeen = [];
+	const AT_BOOT = "the rootless network keeper pi-dispatch-netns-keeper is exited, so every egress job is retried rather than started until this is fixed";
+	const withBoot = await runStart({ env: { PI_BACKENDS: "podman" }, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), jobUserIdentity: PODMAN_ID, makePodmanBackend: withPreflight({ unavailable: "pi-dispatch-egress-proxy", keeper: `${SENTENCE} so this job is retried`, keeperAtBoot: AT_BOOT }, bootSeen) });
+	assert.equal(withBoot.logs.find((l) => l.event === "netns_keeper_not_holding_at_boot")?.reason, AT_BOOT);
+	assert.equal(seen.length, 1, "read once at boot");
+	const heldSeen = [];
+	const held = await runStart({ env: { PI_BACKENDS: "podman" }, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), jobUserIdentity: PODMAN_ID, makePodmanBackend: withPreflight({ ok: true }, heldSeen) });
+	assert.ok(!held.logs.some((l) => l.event === "netns_keeper_not_holding_at_boot"));
+	const offSeen = [];
+	const off = await runStart({ env: { PI_BACKENDS: "podman", PI_EGRESS: "0" }, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), jobUserIdentity: PODMAN_ID, makePodmanBackend: withPreflight({ unavailable: "x", keeper: SENTENCE }, offSeen) });
+	assert.equal(offSeen.length, 0, "egress off: nothing is read");
+	assert.ok(!off.logs.some((l) => l.event === "netns_keeper_not_holding_at_boot"));
+});
+
+// Issue #458 (PR #463 round 2): a job that ran out of retries on the podman venue's rootless network keeper gets a
+// terminal comment that names the keeper, keyed by the error's fixed reason token (never its message, which a host read
+// produced), and the whole sentence is logged beside the cut `job_failed` line. Any other reason keeps the one sentence.
+test("a TERMINAL netns-keeper-not-holding failure comments the keeper's fixed sentence and logs the reason whole (#458)", { skip }, async () => {
+	const posted = [];
+	const host = fakeHost({ postStatusComment: async (_job, _target, text) => void posted.push(text) });
+	const { handlers } = await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => host });
+	const SENTENCE = `the rootless network keeper pi-dispatch-netns-keeper is not under this account's Podman ${"y".repeat(300)}`;
+	const err = Object.assign(new Error(SENTENCE), { reason: "netns-keeper-not-holding" });
+	const from = bootLines.length;
+	handlers.failed({ id: "k1", data: { kind: "github", repo: "o/r", target: { type: "issue", number: 7 } }, attemptsMade: 2, finishedOn: 123 }, err);
+	await settleListeners();
+	assert.equal(posted.length, 1);
+	// Neutral on the cause (PR #463 round 3): a keeper not running and a proxy to restart after it both land here.
+	assert.equal(posted[0], "Failed before it started: this worker's rootless Podman egress proxy did not pass its pre-start check (its rootless network keeper, pi-dispatch-netns-keeper), so the job was retried and never run. Nothing was spent. Ask the operator to run `pi-dispatch doctor` on the worker for the exact fix.");
+	assert.ok(!posted[0].includes("yyy"), "never the error's own words");
+	const lines = parseLines(bootLines.slice(from));
+	assert.equal(lines.find((l) => l.event === "job_failed")?.reason.length, 120, "the existing line stays cut");
+	assert.equal(lines.find((l) => l.event === "job_failed_netns_keeper")?.reason, SENTENCE, "the whole sentence, beside it");
+	// A retried attempt of the same: the whole sentence is logged, and nothing is posted.
+	posted.length = 0;
+	handlers.failed({ id: "k2", data: { kind: "github", repo: "o/r" }, attemptsMade: 1 }, err);
+	await settleListeners();
+	assert.deepEqual(posted, []);
+});

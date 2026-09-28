@@ -1391,3 +1391,24 @@ test("a container START has its own bound, the step bound unless a venue asks fo
 	for (const [verb, ms] of longer) assert.equal(ms, verb === "run" ? 9000 : 1000, `${verb} ran with ${ms}`);
 	for (const [verb, ms] of await bounds({})) assert.equal(ms, 1000, `${verb}: by default a start is bounded like any step`);
 });
+
+// The live-probe sweep's side (#458): a dead run's peer network with the proxy still attached is LEFT and said while the
+// keeper is missing, since the detach is the trigger; one with nothing attached is removed as before.
+test("the stale live-network sweep never detaches the proxy while the keeper is missing (#458)", async () => {
+	const calls = [];
+	const step = async (args) => {
+		calls.push(args.join(" "));
+		if (args[0] === "network" && args[1] === "ls") return { code: 0, stdout: "pi-dispatch-live-peer1-99-abc-net\npi-dispatch-live-peer2-99-abc-net\n" };
+		if (args[0] === "network" && args[1] === "inspect") return { code: 0, stdout: args.at(-1).includes("peer1") ? '{"x":{"Name":"pi-dispatch-egress-proxy"}}' : "{}" };
+		return { code: 0, stdout: "" };
+	};
+	const notes = [];
+	const swept = await sweepStaleNetworks({ step, pid: 7, isAlive: () => false, notes, bin: "podman", keeperBlocked: "the keeper is not running" });
+	assert.ok(!calls.some((c) => c.startsWith("network disconnect")), calls.join("\n"));
+	assert.deepEqual(swept, ["network pi-dispatch-live-peer2-99-abc-net"]);
+	assert.match(notes[0], /^the stale network pi-dispatch-live-peer1-99-abc-net was left with pi-dispatch-egress-proxy attached, because the keeper is not running/);
+	const free = [];
+	const again = await sweepStaleNetworks({ step: async (args) => (free.push(args.join(" ")), step(args)), pid: 7, isAlive: () => false, bin: "podman" });
+	assert.ok(free.includes("network disconnect -f pi-dispatch-live-peer1-99-abc-net pi-dispatch-egress-proxy"), "without the block it detaches as before");
+	assert.equal(again.length, 2);
+});

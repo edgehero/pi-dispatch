@@ -5,7 +5,7 @@ import { configError, loadConfig } from "./config.mjs";
 import { makeRedisClient, parseConnection } from "./connection.mjs";
 import { reconcileGated, reloadSchedules } from "./cron.mjs";
 import { makeGitHubAuth } from "./get-token.mjs";
-import { InfraRetry } from "./processor.mjs";
+import { InfraRetry, NETNS_KEEPER_NOT_HOLDING } from "./processor.mjs";
 import { transientError } from "./transient.mjs";
 import { makeGitHubHost } from "./github-host.mjs";
 import { makeGitLabAuth } from "./gitlab-auth.mjs";
@@ -1054,6 +1054,22 @@ export async function startWorker(
 				log,
 			})
 		: null;
+	// Issue #458 (PR #463 round 2): on Podman 4.x with egress armed, the keeper read ONCE at boot through the bundle's own
+	// preflight, bounded, and said as its own event with the whole sentence. A deployment that upgraded without re-running
+	// `service install` or `up` has no keeper, and would otherwise learn it only from retried jobs. Only a warning: the
+	// per-job preflight is the gate: once the keeper holds, the next job runs (under a proxy up longer than the grace,
+	// 15 s, after the proxy's restart, which the job's retry message and doctor both ask for).
+	if (podmanBackend && config.egress) {
+		const bootKeeper = await settleWithin(
+			Promise.resolve()
+				.then(() => podmanBackend.egressPreflight({}))
+				.catch(() => ({})),
+			BOOT_IMAGE_TIMEOUT_MS * 4,
+			{},
+		);
+		// Its own sentence (PR #463 round 3): the job-shaped one says "this job is retried", and at boot there is no job.
+		if (typeof bootKeeper?.keeper === "string") log("netns_keeper_not_holding_at_boot", { reason: bootKeeper.keeperAtBoot ?? bootKeeper.keeper });
+	}
 	// Every bundle this boot built beside local's, in registration order: the podman one first, then the injected ones.
 	const builtBackends = [...(podmanBackend ? [podmanBackend] : []), ...extraBackends];
 	// BOUNDED, because `.catch()` cannot rescue a promise that never settles: `runDocker` resolves only on
@@ -1376,6 +1392,13 @@ export async function startWorker(
 	// lands verbatim in the service log through the adapter's stdout fallthrough. The worker log already
 	// holds the truncated reason on the job_failed line beside it.
 	const FAILED_COMMENT = "Failed: an error stopped this job and it will not be retried further. Ask the operator to check the worker log.";
+	// Issue #458 (PR #463 round 2): a job that never started because the podman venue's rootless network keeper did not
+	// hold says so, since the generic line sends an operator to a log that only says the job failed. Fixed text keyed by
+	// the fixed reason token, never the error's own words: a forge comment carries nothing a host read produced.
+	const FAILED_COMMENT_BY_REASON = Object.freeze({
+		// Neutral on the cause (PR #463 round 3): a keeper that is not running and a proxy that must restart after it both land here.
+		[NETNS_KEEPER_NOT_HOLDING]: "Failed before it started: this worker's rootless Podman egress proxy did not pass its pre-start check (its rootless network keeper, pi-dispatch-netns-keeper), so the job was retried and never run. Nothing was spent. Ask the operator to run `pi-dispatch doctor` on the worker for the exact fix.",
+	});
 
 	const worker = createWorkerFn({
 		connection: parseConnection(config.valkeyUrl),
@@ -1633,6 +1656,8 @@ export async function startWorker(
 		});
 		for (const w of allWorkers) w.on("failed", (job, err) => {
 			log("job_failed", { jobId: job?.id, attempt: job?.attemptsMade, reason: String(err?.message ?? err).slice(0, 120) });
+			// The one reason whose sentence is the fix itself (issue #458): logged WHOLE, beside the cut line above.
+			if (err?.reason === NETNS_KEEPER_NOT_HOLDING) log("job_failed_netns_keeper", { jobId: job?.id, attempt: job?.attemptsMade, reason: String(err?.message ?? "") });
 			// The TERMINAL failed attempt only (issue #288): `finishedOn` is set by BullMQ's own move on the
 			// non-retry branch alone, and the emit follows it, so this guard reads the queue's decision
 			// instead of re-deriving attempts arithmetic that could drift from shouldRetry. A retried
@@ -1641,7 +1666,7 @@ export async function startWorker(
 			// never sees: the stall-kill (maxStalledCount 0 fails a crashed worker's job at next pickup)
 			// and the wait-gate rethrow that escapes above the processor's catch.
 			if (job?.finishedOn) {
-				void comment({ ...job.data, id: job.id }, FAILED_COMMENT);
+				void comment({ ...job.data, id: job.id }, (typeof err?.reason === "string" && Object.hasOwn(FAILED_COMMENT_BY_REASON, err.reason) ? FAILED_COMMENT_BY_REASON[err.reason] : null) ?? FAILED_COMMENT);
 				onFailure?.({ jobId: job?.id, outcome: "failed", reason: typeof err?.reason === "string" ? err.reason : "infra" });
 			}
 		});

@@ -1,6 +1,7 @@
 /**
  * The native rootless `podman` venue's long-lived stack as Quadlet units (issue #430): Valkey, and while the egress
- * policy is armed the allowlist proxy on its named route-out network. ONE installer, used by both
+ * policy is armed the allowlist proxy on its named route-out network and the rootless network keeper (issue #458) on a
+ * network of its own. ONE installer, used by both
  * `pi-dispatch service install` (user scope) and `pi-dispatch up`, on up.mjs's own doctrine that two ways of starting
  * one thing is two places for it to drift.
  *
@@ -26,15 +27,146 @@ import { DEFAULT_EGRESS_PROXY, egressProxyName } from "./egress.mjs";
 import { envFileHazard, quotedRegions, readEnvAssignments } from "./env-file.mjs";
 
 /**
+ * The rootless network keeper's container and network name (issue #458). One idle container on an `--internal`,
+ * DNS-disabled network of its own, so this account's shared rootless network helper always has a running bridge member.
+ * On Podman 4.9, `podman network disconnect` of the proxy from a job's network tears that helper down under the running
+ * proxy whenever no other bridge container runs (v4.9.3 libpod/networking_linux.go counts the disconnecting container as
+ * the caller and cleans up at one), and every later egress job then gets 503 until the proxy restarts: measured, and
+ * gone with the keeper running (deploy/pi-dispatch-netns-keeper.container has the rest).
+ *
+ * Outside every prefix a pi-dispatch sweep removes, by a test: a sweep that took it would bring the defect back with
+ * nothing said, and a `network rm -f` of its network leaves its unit failed until restarted (measured).
+ */
+export const NETNS_KEEPER = "pi-dispatch-netns-keeper";
+
+/**
+ * How the keeper is read, everywhere it is read (doctor, `up`, the worker's egress preflight): its state, its network
+ * MODE and the networks it is on, in one `podman inspect`. Running is not enough (issue #463 gate, measured on 4.9.3):
+ * a container of this name on `--network none`, `slirp4netns`, `pasta` or `host` runs and holds nothing open, since only
+ * a running member of a BRIDGE network keeps the rootless helper alive. What 4.9.3 printed for each, with this format:
+ * `running|bridge|pi-dispatch-netns-keeper,` (the shipped unit), `running|none|none,`, `running|slirp4netns|`,
+ * `running|pasta|`, `running|host|host,`, `paused|bridge|pi-dispatch-netns-keeper,`, and exit 125 for no container.
+ */
+export const NETNS_KEEPER_FORMAT = "--format={{.State.Status}}|{{.HostConfig.NetworkMode}}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}|{{.State.StartedAt.UnixMilli}}";
+
+/** When a container started, in epoch milliseconds (`{{.State.StartedAt.UnixMilli}}`, measured on 4.9.3). */
+export const STARTED_AT_FORMAT = "--format={{.State.StartedAt.UnixMilli}}";
+
+/**
+ * How long the keeper must have been running to count (PR #463 round 2, measured on 4.9.3): a keeper killed every
+ * 0.5 s read as running on its bridge in 57 of 224 back-to-back reads, so a crash loop could pass a single read.
+ * Restart=always brings a killed keeper back in about 1.25 s, so a keeper in such a loop never reaches this age.
+ */
+export const NETNS_KEEPER_MIN_AGE_MS = 3_000;
+
+/**
+ * How much later than the proxy the keeper may have started and still count (PR #463 round 2). A keeper that started
+ * AFTER the proxy was down while the proxy ran, and a job teardown in that gap cuts the proxy's route out for good
+ * (measured: a kill and a teardown right after it, then the keeper back and holding, and the proxy still had no route
+ * out until IT restarted). Nothing outside shows that damage, so the order is the only evidence there is. The grace is
+ * for a start of both together, and no wider (PR #463 round 3): measured on 4.9.3, the keeper started 4 to 52 ms from the
+ * proxy in three `service install`s, 17 to 50 ms in three boot-like starts (the user manager restarted), and 63 ms in
+ * an `up --yes`. 15 s is two orders of magnitude over that, and it bounds the one window the rule cannot see: a keeper
+ * death AND a teardown both within 15 s of a joint start (it was a minute, and a review measured that window used).
+ */
+export const NETNS_KEEPER_AFTER_PROXY_GRACE_MS = 15_000;
+
+/**
+ * Judge one read of `podman inspect NETNS_KEEPER_FORMAT NETNS_KEEPER` (`{ code, stdout }`, stdout alone). Returns
+ * `{ holds, exists, running, restartProxy, problem }`: `holds` only when the keeper is running, in bridge mode, and
+ * attached to its own network, the one shape measured to keep the helper alive; `problem` says, in words that follow
+ * the keeper's name, what is wrong otherwise. A container that also sits on other networks still holds (it is a bridge
+ * member); only the shipped unit's shape is required, not its exact network list.
+ *
+ * With `now` (a clock, milliseconds) it also has to have been running for NETNS_KEEPER_MIN_AGE_MS; with
+ * `proxyStartedMs` it must not have started more than NETNS_KEEPER_AFTER_PROXY_GRACE_MS after the proxy, and one that
+ * did is `restartProxy`: the remedy is then the PROXY's restart, not the keeper's. `up` passes neither: it asks only
+ * whether a keeper is there to leave alone. doctor and the worker's preflight pass both.
+ */
+export function judgeNetnsKeeper({ code, stdout }, { now = null, proxyStartedMs = null } = {}) {
+	// `thenRestartProxy` (PR #463 round 3): a keeper that does not hold under a proxy already up longer than the grace will,
+	// once started, have started after it, and the order rule will then ask for the proxy's restart; so the fix says both
+	// steps now rather than one per retry.
+	const late = now !== null && Number.isFinite(proxyStartedMs) && now - proxyStartedMs > NETNS_KEEPER_AFTER_PROXY_GRACE_MS;
+	const no = (fields) => ({ holds: false, exists: true, running: true, restartProxy: false, thenRestartProxy: late && fields.restartProxy !== true, ...fields });
+	if (code !== 0) return no({ exists: false, running: false, problem: "is not under this account's Podman" });
+	const [status = "", mode = "", nets = "", started = ""] = String(stdout ?? "").trim().split("|");
+	const networks = nets.split(",").filter(Boolean);
+	if (status !== "running") return no({ running: false, problem: `is ${status || "not running"} under this account's Podman` });
+	if (mode !== "bridge") return no({ problem: `is running on the ${mode || "unreported"} network mode, not on its ${NETNS_KEEPER} bridge network, so it holds nothing open` });
+	if (!networks.includes(NETNS_KEEPER)) return no({ problem: `is running but not attached to its ${NETNS_KEEPER} bridge network (it is on ${networks.join(", ") || "none"}), which is not the keeper this project ships` });
+	if (now !== null) {
+		const startedMs = /^\d+$/.test(started) ? Number(started) : null;
+		if (startedMs === null) return no({ problem: "is running, but when it started could not be read, so whether it has stayed up is not known" });
+		const age = now - startedMs;
+		if (age < NETNS_KEEPER_MIN_AGE_MS) return no({ problem: `has been running for only ${Math.max(0, Math.round(age / 100) / 10)} s, and a keeper that keeps dying reads as running for a moment at a time; it counts once it has run for ${NETNS_KEEPER_MIN_AGE_MS / 1000} s` });
+		if (Number.isFinite(proxyStartedMs) && startedMs > proxyStartedMs + NETNS_KEEPER_AFTER_PROXY_GRACE_MS) {
+			return no({ restartProxy: true, problem: `started ${Math.round((startedMs - proxyStartedMs) / 1000)} s after the egress proxy did, so it was down while the proxy ran, and a job teardown in that gap would have cut the proxy's route out for good, which nothing can see from outside` });
+		}
+	}
+	return { holds: true, exists: true, running: true, restartProxy: false, problem: null };
+}
+
+/**
+ * What to run for a keeper that does not hold: the proxy's restart when that is the damage the order rule cannot rule
+ * out (`restartProxy`), else the keeper's own `reset-failed` and restart.
+ */
+export function netnsKeeperRemedy(judged, proxy) {
+	const restartProxy = proxyRestartAdvice(proxy);
+	if (judged.restartProxy) return restartProxy;
+	if (judged.thenRestartProxy) return `start it as the worker's account: ${NETNS_KEEPER_START}, then ${restartProxy}, since the proxy has been up since before it`;
+	return `start it as the worker's account: ${NETNS_KEEPER_START}`;
+}
+
+/** "restart the egress proxy once no job is running: <the command for this proxy's name>". */
+export function proxyRestartAdvice(proxy) {
+	return proxy === DEFAULT_EGRESS_PROXY ? `restart the egress proxy once no job is running: systemctl --user restart ${DEFAULT_EGRESS_PROXY}.service (podman restart ${DEFAULT_EGRESS_PROXY} for one started by hand)` : `restart the egress proxy once no job is running: podman restart ${proxy} (or its own unit)`;
+}
+
+/**
+ * The installer's hint (PR #463 round 3): a plan that starts the keeper for the first time or restarts it, while the
+ * proxy is NOT in the plan (an operator's own PI_EGRESS_PROXY, or `up` leaving a running proxy alone), leaves a proxy up
+ * since before the keeper, which the worker's order rule then answers with a retry and a request for the proxy's
+ * restart. So both commands say it now, with the proxy's real name. `null` when nothing of that happened.
+ */
+export function keeperUnderRunningProxyHint(plan, proxy, { keeperStarting = null } = {}) {
+	const keeper = plan.files?.find((f) => f.unit === QUADLET_FILES.keeper.unit);
+	if (!keeper) return null;
+	const restarted = (plan.restart ?? []).includes(keeper.unit);
+	// `keeperStarting`: a caller that knows the keeper was not running (`up` plans it only then) says so; otherwise a
+	// file the plan writes new, or a restart, is what moves it (a `start` over a running unit changes nothing).
+	if (!(keeperStarting ?? (keeper.state === "new" || restarted))) return null;
+	if ((plan.start ?? []).includes(QUADLET_FILES.proxy.unit)) return null;
+	return `${NETNS_KEEPER} was ${restarted ? "restarted" : "started"} while the egress proxy (${proxy}) is not part of this install: if it is running, ${proxyRestartAdvice(proxy)}; on Podman 4.x the worker retries every egress job, asking for exactly that, until the proxy has started after the keeper`;
+}
+
+/**
+ * The start command every "the keeper is not holding" message names (doctor, the worker's preflight).
+ */
+export const NETNS_KEEPER_START = `systemctl --user reset-failed ${NETNS_KEEPER}-network.service ${NETNS_KEEPER}.service; systemctl --user restart ${NETNS_KEEPER}-network.service ${NETNS_KEEPER}.service`;
+
+/**
+ * Whether this Podman needs the keeper to keep the proxy's route out (issue #458): every 4.x, and a version that cannot
+ * be read, since the defect is silent and an unread version is not evidence of 5.x. Only doctor's severity reads it;
+ * the installer installs the keeper on every version, where on 5.x it is one idle container (measured harmless on 5.8.1).
+ */
+export function podmanNeedsNetnsKeeper(version) {
+	const major = /^(\d+)\./.exec(String(version ?? "").trim())?.[1];
+	return major === undefined || Number(major) < 5;
+}
+
+/**
  * The Quadlet files, in the order they are shown and written. `unit` is the service the generator makes of each; the
  * networks' units are pulled in by the containers' own `Requires=` (Quadlet adds it for `Network=X.network`), so only
- * the two container services are ever started by name.
+ * the container services are ever started by name.
  */
 export const QUADLET_FILES = Object.freeze({
 	valkeyNetwork: Object.freeze({ file: "pi-dispatch-valkey.network", unit: "pi-dispatch-valkey-network.service" }),
 	valkey: Object.freeze({ file: "pi-dispatch-valkey.container", unit: "pi-dispatch-valkey.service", container: "pi-dispatch-valkey" }),
 	egressNetwork: Object.freeze({ file: "pi-dispatch-egress-out.network", unit: "pi-dispatch-egress-out-network.service" }),
 	proxy: Object.freeze({ file: "pi-dispatch-egress-proxy.container", unit: "pi-dispatch-egress-proxy.service", container: DEFAULT_EGRESS_PROXY }),
+	keeperNetwork: Object.freeze({ file: `${NETNS_KEEPER}.network`, unit: `${NETNS_KEEPER}-network.service` }),
+	keeper: Object.freeze({ file: `${NETNS_KEEPER}.container`, unit: `${NETNS_KEEPER}.service`, container: NETNS_KEEPER }),
 });
 
 /** Every Quadlet file this project ships, for uninstall and status, which act on what exists rather than on a plan. */
@@ -88,17 +220,22 @@ const UNSAFE_VOLUME_PATH = /[:\s%$"'\\\x00-\x1f\x7f]/;
  *   proxy    only while the egress policy is armed, and only under the default name. A PI_EGRESS_PROXY naming
  *            another container is the operator's own proxy: a Quadlet of that name would `podman run --replace`
  *            it away, so it is left alone and the reason is said.
+ *   keeper   whenever the egress policy is armed (issue #458), WHATEVER the proxy's name: the worker disconnects the
+ *            proxy from every egress job's network, an operator's own proxy as much as ours, and that disconnect is
+ *            what Podman 4.9 turns into a dead route out. On every Podman version, since on 5.x it is one idle
+ *            container (measured harmless on 5.8.1), and a rule with no version read in it cannot misread one.
  */
 export function stackComponents({ venues, env, includeValkey, armed }) {
 	const notes = [];
 	const valkey = !venues.localUsed && includeValkey;
+	const keeper = armed === true;
 	let proxy = false;
 	if (armed) {
 		const name = egressProxyName(env);
 		if (name === DEFAULT_EGRESS_PROXY) proxy = true;
 		else notes.push(`PI_EGRESS_PROXY names ${name}, your own proxy: the shipped ${DEFAULT_EGRESS_PROXY} unit is not installed for it, because its \`--replace\` would remove any container of that name. Keep ${name} running under this account's Podman yourself`);
 	}
-	return { valkey, proxy, notes };
+	return { valkey, proxy, keeper, notes };
 }
 
 /**
@@ -109,11 +246,12 @@ export function stackComponents({ venues, env, includeValkey, armed }) {
  * `state` is "new", "same" or "changed" against what is on disk, and `actions` is exactly what `applyStack` does,
  * in order: the caller shows these lines, and a test holds the two equal.
  */
-export function planStack({ components, templatesDir, deployDir, home, fs, readTemplate = (name) => fs.readFileSync(join(templatesDir, name), "utf8") }) {
+export function planStack({ components, templatesDir, deployDir, home, fs, readTemplate = (name) => fs.readFileSync(join(templatesDir, name), "utf8"), restartUnits = [] }) {
 	const dir = quadletDir(home);
 	const picked = [];
 	if (components.valkey) picked.push(QUADLET_FILES.valkeyNetwork, QUADLET_FILES.valkey);
 	if (components.proxy) picked.push(QUADLET_FILES.egressNetwork, QUADLET_FILES.proxy);
+	if (components.keeper) picked.push(QUADLET_FILES.keeperNetwork, QUADLET_FILES.keeper);
 	const conf = proxyConfCopyPath(home);
 	const allowlist = join(deployDir, "egress-allowlist.conf");
 	if (components.proxy) {
@@ -159,13 +297,24 @@ export function planStack({ components, templatesDir, deployDir, home, fs, readT
 			}
 			state = current === text ? "same" : "changed";
 		}
-		files.splice(files.length - 1, 0, { path: conf, text, unit: null, state, restarts: QUADLET_FILES.proxy.unit, kind: "conf" });
+		files.splice(files.findIndex((f) => f.unit === QUADLET_FILES.proxy.unit), 0, { path: conf, text, unit: null, state, restarts: QUADLET_FILES.proxy.unit, kind: "conf" });
 	}
 	const containers = files.filter((f) => f.path.endsWith(".container"));
 	const start = containers.map((f) => f.unit);
 	// A unit whose file changed is RESTARTED, not started: `start` on an active unit is a no-op, so a replaced file
 	// would otherwise change nothing until the next reboot while the command said it was done.
-	const restart = start.filter((u) => files.some((f) => f.state === "changed" && f.restarts === u));
+	// `restartUnits`: units the caller knows are up but wrong with their files unchanged (PR #463 round 2: `up` meeting a
+	// Quadlet keeper that does not hold, a paused one say), where `start` would be the same no-op.
+	const restart = start.filter((u) => restartUnits.includes(u) || files.some((f) => f.state === "changed" && f.restarts === u));
+	// A keeper (re)started under a proxy that stays up is what the worker and doctor read as possible damage (issue #458,
+	// PR #463 round 2): a teardown while it was down cuts the proxy's route out for good, nothing outside shows it, so
+	// both ask for a proxy restart whenever the keeper started more than the grace (15 s) after the proxy. So a plan that
+	// restarts the keeper, or starts it beside a proxy whose unit file it leaves as it was (an upgrade: that proxy has
+	// been up all along), restarts the proxy with it. Both files new is a first install: both start together.
+	const keeperFile = files.find((f) => f.unit === QUADLET_FILES.keeper.unit);
+	const proxyFile = files.find((f) => f.unit === QUADLET_FILES.proxy.unit);
+	const keeperMoves = keeperFile && (restart.includes(keeperFile.unit) || keeperFile.state === "new");
+	if (keeperMoves && proxyFile && proxyFile.state === "same" && !restart.includes(proxyFile.unit)) restart.push(proxyFile.unit);
 	const fresh = start.filter((u) => !restart.includes(u));
 	const actions = [];
 	for (const f of files) if (f.state !== "same") actions.push({ kind: "write", path: f.path });
@@ -208,7 +357,7 @@ export function proxyRestartWarning(plan) {
 export async function foreignContainers(plan, runQuery) {
 	const found = [];
 	const unknown = [];
-	for (const q of [QUADLET_FILES.valkey, QUADLET_FILES.proxy]) {
+	for (const q of [QUADLET_FILES.valkey, QUADLET_FILES.proxy, QUADLET_FILES.keeper]) {
 		if (!plan.start.includes(q.unit)) continue;
 		const res = await runQuery("podman", ["container", "inspect", "--format", '{{index .Config.Labels "PODMAN_SYSTEMD_UNIT"}}', q.container]);
 		if (res.code === 0) {
@@ -238,6 +387,61 @@ export function userBusRefusal({ env, user, euid }) {
 	if (env?.XDG_RUNTIME_DIR || env?.DBUS_SESSION_BUS_ADDRESS) return null;
 	const uid = Number.isInteger(euid) ? euid : "<uid>";
 	return `this shell has no user manager to talk to (neither XDG_RUNTIME_DIR nor DBUS_SESSION_BUS_ADDRESS is set, as under \`sudo -iu ${user}\`), so \`systemctl --user\` would fail after the files were written. Run it from a real login as ${user}, or \`machinectl shell ${user}@\`, or, while ${user}'s manager is running (linger on), \`sudo -iu ${user} env XDG_RUNTIME_DIR=/run/user/${uid} pi-dispatch ...\``;
+}
+
+/**
+ * The user MANAGER's own environment, read before anything is written (PR #463 round 3, measured). Every Quadlet unit
+ * this installer starts, and the worker unit, runs with the manager's environment, and the Quadlet generator reads its
+ * unit files from the manager's XDG_CONFIG_HOME. On a host whose /etc/environment names another account's
+ * XDG_RUNTIME_DIR or XDG_CONFIG_HOME (Ubuntu's user managers read /etc/environment through environment.d; a GitHub
+ * runner image writes both), measured on Podman 4.9.3: the generator looked in the other home and the units were "not
+ * found" (exit 5), and with that fixed, every podman command in a unit failed "XDG_RUNTIME_DIR directory
+ * \"/run/user/1001\" is not owned by the current user". This installer writes to ~/.config/containers/systemd (see
+ * `quadletDir`), so either value being another account's makes a stack that cannot start. `read` is
+ * `systemctl --user show-environment`'s `{ code, stdout }`; `null` when both are this account's own or unset.
+ * A manager that did not answer is left to the commands that follow, whose failures are said already.
+ */
+/**
+ * One value as `systemctl --user show-environment` prints it (PR #463 round 3): plain when it needs no quoting, else
+ * shell-quoted as `$'...'` with C escapes (systemd's shell_maybe_quote with ESCAPE_POSIX), so a home with a space reads
+ * `XDG_CONFIG_HOME=$'/home/a b/.config'`. Anything else is taken as printed.
+ */
+export function unquoteShowEnvironment(value) {
+	const m = /^\$'(.*)'$/s.exec(value);
+	if (!m) return value;
+	return m[1].replace(/\\(x[0-9a-fA-F]{1,2}|[0-7]{1,3}|.)/g, (_all, e) => {
+		const simple = { n: "\n", t: "\t", r: "\r", a: "\x07", b: "\b", e: "\x1b", f: "\f", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?" };
+		if (e[0] === "x") return String.fromCharCode(parseInt(e.slice(1), 16));
+		if (/^[0-7]+$/.test(e)) return String.fromCharCode(parseInt(e, 8));
+		return Object.hasOwn(simple, e) ? simple[e] : e;
+	});
+}
+
+export function managerEnvRefusal(read, { home, euid, user, realpath = (p) => p }) {
+	if (read?.code !== 0) return null;
+	const env = {};
+	for (const line of String(read.stdout ?? "").split("\n")) {
+		const eq = line.indexOf("=");
+		if (eq > 0) env[line.slice(0, eq)] = unquoteShowEnvironment(line.slice(eq + 1));
+	}
+	// A symlinked home (PR #463 round 3): the same directory under two spellings is the same directory.
+	const same = (a, b) => {
+		const tidy = (p) => p.replace(/\/+$/, "");
+		if (tidy(a) === tidy(b)) return true;
+		try {
+			return tidy(realpath(tidy(a))) === tidy(realpath(tidy(b)));
+		} catch {
+			return false;
+		}
+	};
+	const wrong = [];
+	// env-internal XDG_RUNTIME_DIR, XDG_CONFIG_HOME: read from the user MANAGER's show-environment, never this process's.
+	const ownRuntime = Number.isInteger(euid) ? `/run/user/${euid}` : null;
+	if (env.XDG_RUNTIME_DIR !== undefined && ownRuntime !== null && !same(env.XDG_RUNTIME_DIR, ownRuntime)) wrong.push(`XDG_RUNTIME_DIR=${env.XDG_RUNTIME_DIR}, not ${ownRuntime}: every podman command in a unit would fail ("XDG_RUNTIME_DIR directory ... is not owned by the current user", measured)`);
+	const ownConfig = typeof home === "string" && home ? join(home, ".config") : null;
+	if (env.XDG_CONFIG_HOME !== undefined && ownConfig !== null && !same(env.XDG_CONFIG_HOME, ownConfig)) wrong.push(`XDG_CONFIG_HOME=${env.XDG_CONFIG_HOME}, not ${ownConfig}: the Quadlet generator would look for the units there, not in ${quadletDir(home)} where they are written, and say they do not exist (measured)`);
+	if (wrong.length === 0) return null;
+	return `${user}'s user manager runs with ${wrong.join("; and ")}. That environment is what every unit it starts inherits, so nothing is installed. Find where it is set (a line in /etc/environment, which Ubuntu's user managers read through environment.d, or a file in ~/.config/environment.d), override it for this account in ~/.config/environment.d/ (for example a file zz-pi-dispatch.conf with ${ownRuntime ? `XDG_RUNTIME_DIR=${ownRuntime}` : "XDG_RUNTIME_DIR=/run/user/<uid>"}${ownConfig ? ` and XDG_CONFIG_HOME=${ownConfig}` : ""}), restart the manager (sudo systemctl restart user@${Number.isInteger(euid) ? euid : "<uid>"}.service, which stops this account's units), check \`systemctl --user show-environment\`, and re-run`;
 }
 
 /** The refusal for `foreignContainers`' answer, naming both ways out. */

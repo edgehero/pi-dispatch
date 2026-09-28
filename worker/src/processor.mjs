@@ -607,6 +607,15 @@ export async function runJob(job, deps) {
 				budgetReserved: false, // refused before reserveBudget, so no job-count slot was consumed
 			};
 		}
+		if (egress.unavailable && egress.keeper) {
+			// Issue #458: the podman venue on Podman 4.x, proxy up, its rootless network keeper not holding. INFRA, not a
+			// refusal: the keeper is one `systemctl --user` away, and a retry after it holds runs the job. Pre-reserve, so
+			// nothing is refunded. Its OWN reason token (PR #463 round 2), so the run record, the failure hook and the
+			// terminal comment can name the keeper rather than a generic never-started container; the full sentence rides
+			// the error message and is logged whole here, where `job_failed` cuts it at 120 characters.
+			log("egress_keeper_not_holding", { proxy: egress.unavailable, reason: egress.keeper });
+			throw new InfraRetry(egress.keeper, { reason: NETNS_KEEPER_NOT_HOLDING, provider: job.provider ?? null, model: job.model ?? null });
+		}
 		if (egress.unavailable) {
 			// The daemon did not answer, so this is indeterminate rather than a refusal -- the same
 			// determinate/indeterminate split the image preflight draws one gate up, and thrown for the same
@@ -1083,6 +1092,12 @@ export async function runJob(job, deps) {
 		if (prepared) await cleanup(prepared).catch(() => {});
 	}
 }
+
+/**
+ * The reason a job retried for the podman venue's rootless network keeper carries (issue #458, PR #463 round 2): a
+ * fixed token, as every run-record reason is, and the key the terminal comment is chosen by.
+ */
+export const NETNS_KEEPER_NOT_HOLDING = "netns-keeper-not-holding";
 
 /** Thrown for the retryable (infra) class only. The BullMQ processor lets this propagate to retry. */
 /**

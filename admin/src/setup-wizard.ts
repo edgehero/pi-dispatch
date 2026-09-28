@@ -714,7 +714,7 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   const upAddsBackends = runtime === "podman" && !fileAssigns && !venuesOf({ PI_BACKENDS: env?.PI_BACKENDS }).podmanUsed;
   const upEnv =
     runtime !== "podman" ? env : fileAssigns ? (typeof env?.PI_BACKENDS === "string" ? withoutBackends(env) : env) : upAddsBackends ? { ...env, PI_BACKENDS: "podman" } : env;
-  const podmanUpText = `Run in ${dir}:\n  ${upAddsBackends ? "PI_BACKENDS=podman " : ""}${execPath} ${cliPath} up\n\nup shows each podman and systemctl action (the job image, then Valkey and the egress proxy as Quadlet units) and asks y/N before it: nothing is auto-accepted.`;
+  const podmanUpText = `Run in ${dir}:\n  ${upAddsBackends ? "PI_BACKENDS=podman " : ""}${execPath} ${cliPath} up\n\nup shows each podman and systemctl action (the job image, then Valkey, the egress proxy and its rootless network keeper as Quadlet units) and asks y/N before it: nothing is auto-accepted.`;
   const okUp = await ui.confirm(
     "Bring the deployment up",
     runtime === "podman" ? podmanUpText :

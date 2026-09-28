@@ -43,7 +43,7 @@ import { DEFAULT_EGRESS_PROXY, egressArmed as egressArmedFn, egressProxyName } f
 import { envKeyIsBlank, envValueShown, updateEnvFile } from "./env-file.mjs";
 import { deploymentVenueEnv } from "./deployment-venue.mjs";
 import { EGRESS_PROXY_IMAGE, PROXY_STATE_FORMAT, jobNetworksOf, parseProxyState, shippedProxyDrift } from "./egress-proxy-state.mjs";
-import { STACK_KEYS, applyStack, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal } from "./podman-stack.mjs";
+import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, QUADLET_FILES, STACK_KEYS, applyStack, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal } from "./podman-stack.mjs";
 
 // The shipped Quadlet templates, module-relative like service.mjs's: worker/deploy in a checkout, <pkg>/deploy under npm.
 const TEMPLATES_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "deploy");
@@ -152,6 +152,8 @@ export async function runUp(argv = [], deps = {}) {
 		// only production caller, and the test that covered it attached the method to its own fake.
 		fs = { existsSync, readFileSync, writeFileSync, renameSync, statSync, chmodSync, realpathSync },
 		probeTcp = defaultProbeTcp,
+		// PR #463: how a path resolves through symlinks, for the manager-environment rule (a symlinked home).
+		realpath = (p) => realpathSync(p),
 		cwd = process.cwd(),
 		// Injected so tests can assert the secret never reaches output without fishing it back out of
 		// the written file. 32 bytes hex, matching doctor's `openssl rand -hex 32` fix line.
@@ -594,7 +596,7 @@ export async function runUp(argv = [], deps = {}) {
 	// installer `pi-dispatch service install` uses (issue #430). After init for the reason (e2) gives: the proxy mounts
 	// the allowlist init scaffolds.
 	if (podmanReady) {
-		await podmanStackStep({ env: venueEnv, venues, spawn, out, yes, prompt, summary, fs, probeTcp, cwd, home, user: userName(), euid, templatesDir, readTemplate, mkdir });
+		await podmanStackStep({ env: venueEnv, venues, spawn, out, yes, prompt, summary, fs, probeTcp, cwd, home, user: userName(), euid, templatesDir, readTemplate, mkdir, realpath });
 	}
 
 	// (f) doctor — always, verbatim: up converges what it can, doctor is the judge of what remains
@@ -716,7 +718,7 @@ async function podmanImageStep({ spawn, out, yes, prompt, summary }) {
  * alone, a proxy that exists is left alone), then plans the Quadlet files with `planStack`, shows `plan.actions`, and on
  * consent hands those same objects to `applyStack`: what runs is literally what was shown.
  */
-async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, fs, probeTcp, cwd, home, user, euid, templatesDir, readTemplate, mkdir }) {
+async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, fs, probeTcp, cwd, home, user, euid, templatesDir, readTemplate, mkdir, realpath }) {
 	const armed = egressArmedFn(env);
 	let includeValkey = false;
 	if (!venues.localUsed) {
@@ -731,6 +733,7 @@ async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, 
 	}
 	const components = stackComponents({ venues, env, includeValkey, armed });
 	for (const note of components.notes) out(`\n⚠ ${note}\n`);
+	let keeperRestart = false;
 	if (components.proxy) {
 		// RUNNING, read off the output: `podman inspect` exits 0 for an EXITED container too and prints `false`
 		// (measured), so the exit code alone called a stopped hand-started proxy "present" and offered nothing, which is
@@ -749,8 +752,29 @@ async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, 
 			components.proxy = false;
 		}
 	}
-	if (!components.valkey && !components.proxy) return;
-	const plan = planStack({ components, templatesDir, deployDir: cwd, home, fs, readTemplate });
+	if (components.keeper) {
+		// The keeper (issue #458) under the proxy's rule: one that HOLDS is left alone, read off stdout as above, by the
+		// shared rule (`judgeNetnsKeeper`: running, bridge mode, on its own network; issue #463's gate found a keeper on
+		// `--network none` called "already running" here). Anything else is offered the unit, under the foreign-container
+		// rule, which is what stops a `--replace` over a container of that name that is not ours. It is offered with the
+		// allowlist missing too, since it mounts nothing and a proxy started later needs it just the same.
+		const inspect = await runCmdQuery(spawn, "podman", ["inspect", NETNS_KEEPER_FORMAT, NETNS_KEEPER]);
+		const keeper = judgeNetnsKeeper({ code: inspect.code, stdout: inspect.stdout });
+		if (keeper.holds) {
+			out(`\n✓ Rootless network keeper already running under this account's Podman on its own bridge network (${NETNS_KEEPER})\n`);
+			summary.push(["netns keeper (podman)", "already running, left untouched"]);
+			components.keeper = false;
+		} else if (keeper.exists) {
+			// There but not holding (paused, running off its bridge, exited): its unit, if the files are ours and unchanged,
+			// is RESTARTED, since `start` on a unit that is still active does nothing and "installed and started" would
+			// then be said over a keeper still not holding (PR #463 round 2). A container that is not ours stops at the
+			// foreign-container rule below, as before.
+			out(`\n⚠ ${NETNS_KEEPER} ${keeper.problem}: offering its unit, restarted\n`);
+			keeperRestart = true;
+		}
+	}
+	if (!components.valkey && !components.proxy && !components.keeper) return;
+	const plan = planStack({ components, templatesDir, deployDir: cwd, home, fs, readTemplate, restartUnits: keeperRestart ? [QUADLET_FILES.keeper.unit] : [] });
 	if (plan.error) {
 		out(`\n✗ ${plan.error}\n`);
 		summary.push(["podman stack", `NOT installed: ${plan.error}`]);
@@ -772,6 +796,13 @@ async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, 
 		summary.push(["podman stack", "NOT installed: no user manager reachable from this shell"]);
 		return;
 	}
+	// The manager's own XDG_RUNTIME_DIR and XDG_CONFIG_HOME (PR #463 round 3): service install's refusal, the same words.
+	const managerEnv = plan.actions.length > 0 ? managerEnvRefusal(await runCmdQuery(spawn, "systemctl", ["--user", "show-environment"]), { home, euid, user, realpath }) : null;
+	if (managerEnv) {
+		out(`\n✗ ${managerEnv}\n`);
+		summary.push(["podman stack", "NOT installed: the user manager's environment names another account's directories"]);
+		return;
+	}
 	const containers = await foreignContainers(plan, (cmd, args) => runCmdQuery(spawn, cmd, args));
 	if (containers.unknown.length > 0) {
 		const why = unknownContainerRefusal(containers.unknown);
@@ -786,16 +817,18 @@ async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, 
 		summary.push(["podman stack", `NOT installed: ${foreign.map((f) => f.container).join(", ")} exists and is not the Quadlet unit's`]);
 		return;
 	}
-	const parts = [components.valkey ? "Valkey" : null, components.proxy ? "the egress proxy" : null].filter(Boolean).join(" and ");
+	const named = [components.valkey ? "Valkey" : null, components.proxy ? "the egress proxy" : null, components.keeper ? `the rootless network keeper (${NETNS_KEEPER}, which keeps the proxy's route out on Podman 4.x)` : null].filter(Boolean);
+	const parts = named.length > 1 ? `${named.slice(0, -1).join(", ")} and ${named.at(-1)}` : named[0];
+	const several = named.length > 1;
 	const accepted = await consent(
-		`${parts} ${components.valkey && components.proxy ? "are" : "is"} not running under this account's Podman. up would install ${components.valkey && components.proxy ? "them" : "it"} as Quadlet units in your user manager (the same installer \`pi-dispatch service install\` uses; systemd brings them back at boot while linger is on):`,
+		`${parts} ${several ? "are" : "is"} not running under this account's Podman. up would install ${several ? "them" : "it"} as Quadlet units in your user manager (the same installer \`pi-dispatch service install\` uses; systemd brings them back at boot while linger is on):`,
 		plan.actions.map(describeAction),
 		{ yes, out, prompt },
 	);
-	const row = components.valkey && components.proxy ? "podman stack" : components.valkey ? "valkey" : "egress (podman)";
+	const row = several ? "podman stack" : components.valkey ? "valkey" : components.proxy ? "egress (podman)" : "netns keeper (podman)";
 	if (!accepted) {
 		out("skipped: `pi-dispatch service install` installs the same units with the worker\n");
-		summary.push([row, `skipped (declined): ${components.valkey ? "the queue needs Valkey before `pi-dispatch worker` can drain" : "every podman job is refused pre-spend until the proxy is up (PI_EGRESS=0 opts out)"}`]);
+		summary.push([row, `skipped (declined): ${components.valkey ? "the queue needs Valkey before `pi-dispatch worker` can drain" : components.proxy ? "every podman job is refused pre-spend until the proxy is up (PI_EGRESS=0 opts out)" : "on Podman 4.x the first egress job's teardown cuts the proxy's route out, and every later one gets 503"}`]);
 		return;
 	}
 	// The fs seam gains mkdir here only: up's own writes (`.env`) never needed one, and the Quadlet directory usually
@@ -806,9 +839,16 @@ async function podmanStackStep({ env, venues, spawn, out, yes, prompt, summary, 
 		summary.push([row, `install FAILED at: ${applied.failed}`]);
 		return;
 	}
-	out(`✓ started ${plan.start.join(" ")}\n`);
-	// `up` never restarts (it refuses a changed file above), so everything it started it started fresh.
-	summary.push([row, `installed as Quadlet units and started (${plan.start.join(", ")})`]);
+	const restarted = plan.restart ?? [];
+	const fresh = plan.start.filter((u) => !restarted.includes(u));
+	if (fresh.length > 0) out(`✓ started ${fresh.join(" ")}\n`);
+	if (restarted.length > 0) out(`✓ restarted ${restarted.join(" ")}\n`);
+	// `up` refuses a changed file above, so the one restart it makes is a keeper that was there and not holding.
+	summary.push([row, `installed as Quadlet units and ${restarted.length > 0 ? `${fresh.length > 0 ? `started (${fresh.join(", ")}) and ` : ""}restarted (${restarted.join(", ")})` : `started (${plan.start.join(", ")})`}`]);
+	// A keeper (re)started under a proxy that stays up, ours left running or the operator's own PI_EGRESS_PROXY, leaves
+	// that proxy for the operator to restart, named: the worker and doctor both ask for exactly that (PR #463 round 3).
+	const hint = keeperUnderRunningProxyHint(plan, egressProxyName(env), { keeperStarting: plan.start.includes(QUADLET_FILES.keeper.unit) });
+	if (hint) out(`⚠ ${hint}\n`);
 	out(lingerNote(await readLinger(user, (cmd, args) => runCmdCapture(spawn, cmd, args)), user));
 }
 

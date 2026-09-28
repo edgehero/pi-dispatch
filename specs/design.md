@@ -3484,6 +3484,12 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   address rule, and it is not the one Rejected above: it only ever refuses, so it cannot go stale into permitting
   anything. It names `allowed` before `to_host_local`, so an unlisted name is never resolved by the proxy at all
   (a bare `dst` rule resolved every name asked for, a DNS channel out, measured).
+- **The teardown's detach has a runtime side effect on Podman 4.9 (issue #458, measured).** The per-job
+  `network disconnect` of the proxy, unchanged here, tears down a rootless Podman 4.9 account's shared network
+  helper under the running proxy whenever no other bridge container runs, so every later egress job got 503. The
+  network-per-job design stands: the fix is a runtime workaround on that venue, the rootless network keeper
+  (`DES-PODMAN-STACK-AS-QUADLET-UNITS`), not a change to what is created, attached or removed. Never detaching, a
+  reused pool of networks and restarting the proxy after each teardown were weighed there and rejected.
 - **Traces to**: `REQ-EGRESS-ALLOWLIST`, `INT-EGRESS-POLICY-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`,
   `INT-SANDBOX-CONTRACT`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-RETRY-INFRA-ONLY`, `DES-WORKER-ON-HOST`, `DES-CONCURRENCY-3`, `DES-PER-TRIGGER-JOB-IMAGE`,
@@ -5080,9 +5086,27 @@ a tunnel.
     restarted one was read back on the next run (the canary attaches the proxy by name on every run), a `kill -9`
     mid-canary left a network the rerun swept, and a widening containers.conf stopped it with the rest of `--live`;
     a cold first start took 29.4 s, inside the probe's 120 s bound; and on ubuntu-24.04 with Podman 4.9.3 the shared
-    canary read `egress` back in the conformance job. The one step not measured: the sweep reading a LEFTOVER
+    canary read `egress` back in the conformance job, but only ONCE, on a fresh proxy before any job network had been
+    torn down, which is the one order that could not see the 4.9 teardown defect below (issue #458). The one step not measured: the sweep reading a LEFTOVER
     network's members (`network inspect --format {{json .Containers}}`) on Podman 4.9, which the rerun above measured
     on 5.8.1 only.
+  - **Podman 4.9 cuts the proxy's route out at a job network's teardown** (issue #458, measured on Ubuntu 24.04's
+    4.9.3 in an isolated account). `removeJobNetwork`'s `podman network disconnect` of the proxy tears down the
+    account's shared rootless network namespace and its slirp4netns while the proxy runs, whenever no other running
+    container is on a bridge network (the disconnecting container is miscounted as the caller in v4.9.3's
+    `libpod/networking_linux.go`; no 4.x fix exists; Podman 5.0's rewrite, containers/podman#20772 and
+    containers/common#1761, removed it, and 5.8.1 was measured unaffected). Every egress job after the first then got
+    503 from the proxy (1 x 200, 4 x 503), a second disconnect in a row leaves `network inspection mismatch` on the
+    proxy, and `aardvark-dns` stays in the dead namespace with a stale record (`os error 99`, #20396). Every
+    disconnect of the proxy is a trigger: each egress job's teardown, the sandbox's, doctor's canary and the live
+    probes' peer networks (four more sweeps are unreached on 4.9 today only because their member read fails there,
+    #452). CLOSED on the shipped stack by the rootless network keeper, one idle bridge container installed with the
+    proxy's units (`DES-PODMAN-STACK-AS-QUADLET-UNITS` has what it is and why it widens nothing): with it running,
+    five sequential egress jobs all got 200. It protects only while it runs, which doctor reads (✗ on 4.x when it is
+    not running, and `--live` then runs nothing that detaches the proxy), and it does not heal an account already broken (restart the proxy; `docs/podman.md` has the
+    aardvark-dns reset). The conformance job now runs two egress-armed jobs through the worker's own teardown and
+    re-reads the provider route after each, with the keeper started from its shipped unit: measured on pd-ubuntu's
+    4.9.3, that case is red with the keeper stopped and green with it running.
   - The job still runs as the worker's own uid, so a container escape lands as the worker's account: this venue
     does not close `OQ-036`, it moves rootless Podman onto the same footing as rootful.
   - A transcript with no venue stamp is `local`'s (`UNATTRIBUTED_BACKEND`), so on a host that moves from `local` to
@@ -5109,14 +5133,16 @@ a tunnel.
 
 ## DES-PODMAN-STACK-AS-QUADLET-UNITS
 
-- **Decision**: On the native rootless `podman` venue the two long-lived containers the worker needs, Valkey and
-  (while `PI_EGRESS` is armed) the allowlist proxy on its route-out network, are **Quadlet units in the worker
-  account's own user manager**, shipped as four files in `deploy/` (`pi-dispatch-valkey.network`,
-  `pi-dispatch-valkey.container`, `pi-dispatch-egress-out.network`, `pi-dispatch-egress-proxy.container`) and
+- **Decision**: On the native rootless `podman` venue the long-lived containers the worker needs, Valkey and
+  (while `PI_EGRESS` is armed) the allowlist proxy on its route-out network and the rootless network keeper on a
+  network of its own (issue #458, below), are **Quadlet units in the worker account's own user manager**, shipped as
+  six files in `deploy/` (`pi-dispatch-valkey.network`, `pi-dispatch-valkey.container`,
+  `pi-dispatch-egress-out.network`, `pi-dispatch-egress-proxy.container`, `pi-dispatch-netns-keeper.network`,
+  `pi-dispatch-netns-keeper.container`) and
   installed by ONE planner, `worker/src/podman-stack.mjs`, which both `pi-dispatch service install` (user scope) and
   `pi-dispatch up` call: `up.mjs`'s own doctrine that two ways of starting one thing is two places for it to drift.
   Install is: write the files into `~/.config/containers/systemd/`, `systemctl --user daemon-reload`,
-  `systemctl --user start` the two container units, **never `enable`**. The worker unit gains `Wants=` and `After=`
+  `systemctl --user start` the container units, **never `enable`**. The worker unit gains `Wants=` and `After=`
   on exactly the units installed. `up` shows the planner's action list and, on consent (or `--yes`), hands the SAME
   objects to the applier, so what runs is literally what was shown.
   - **Which parts.** Valkey only where `local` is not blessed: with `local` in `PI_BACKENDS` docker is on the host
@@ -5126,7 +5152,87 @@ a tunnel.
     listener. The proxy only while armed and only under the default name: a `PI_EGRESS_PROXY` naming another
     container is the operator's own proxy, and a Quadlet of that name would `podman run --replace` it away, so
     neither command installs one and both say why. `up`'s docker egress step follows the same rule since this
-    issue: it used to inspect and offer to start the shipped name whatever `PI_EGRESS_PROXY` said.
+    issue: it used to inspect and offer to start the shipped name whatever `PI_EGRESS_PROXY` said. The keeper
+    whenever armed, WHATEVER `PI_EGRESS_PROXY` names (issue #458), since the worker detaches an operator's own proxy
+    from every job network just the same, and on every Podman version; `up` leaves a running keeper alone, reading
+    `{{.State.Running}}`'s output as it does for the proxy, and offers it even where the missing allowlist stops the
+    proxy, since it mounts nothing.
+  - **The rootless network keeper** (issue #458, measured on Ubuntu 24.04's Podman 4.9.3). `podman network
+    disconnect` of the proxy from a job's network, which every egress job's teardown runs, tears down the account's
+    shared rootless network namespace and its slirp4netns under the RUNNING proxy whenever no other running
+    container is on a bridge network: v4.9.3's `libpod/networking_linux.go` counts the disconnecting container as the
+    caller and cleans up at one (4.9.4 and 4.9.5 are identical; gone with Podman 5.0's rootless network rewrite,
+    containers/podman#20772 and containers/common#1761, which counts attachments). The next bridge container starts a
+    new namespace, the proxy's eth0 goes with the old one, and every later egress job got 503 from the proxy (job 1
+    200, jobs 2 to 5 503, through the worker's own `createJobNetwork`/`removeJobNetwork`); `aardvark-dns` stays in the
+    dead namespace with a stale record for the proxy (`os error 99`, upstream #20396). A running Valkey unit is a
+    bridge container and masked it, so the default stack looked fine while `local`, an external Valkey, a Valkey
+    restart window and the conformance job were exposed. The keeper is one idle container that is always a running
+    bridge member: `sleep` under catatonit (`RunInit=true`, which Quadlet 4.9.3 has and renders as `--init`, measured) in the proxy's own image and digest (nothing new to pull or pin), on an
+    `Internal=true`, `DisableDNS=true` network of its own, `ReadOnly`, `DropCapability=all`, `NoNewPrivileges`, uid and
+    gid 65534, no port, no mount, `--image-volume=ignore`; inside it the proxy and 1.1.1.1 were unreachable. With it,
+    4.9.3 gave five sequential egress jobs 200 each and the doctor-shaped two-network teardown stayed clean; on 5.8.1
+    it changed nothing. `Restart=always` (not the proxy's `on-failure`, since any exit of `sleep infinity` is one to
+    undo) brought it back from `podman stop`, `podman stop -a` and `podman rm -f` behind systemd's back, with
+    `RestartSec=1s` and `StartLimitIntervalSec=0` (measured on 4.9.3: back on its bridge 1.2 to 1.3 s after a kill; 10
+    quick kills and 15 s of a keeper that could not start never ended `failed`; the generator passes the [Unit] key
+    through; systemd's defaults, 100 ms and 5 starts in 10 s, would let a keeper that cannot start lock itself out
+    `failed` in under a second; 250 ms was measured too, back in 0.45 s, and not taken, because the order rule below
+    already treats a keeper that came back under a long-running proxy as damage whatever the gap, and a keeper that
+    cannot start would retry four times a second), and `SuccessExitStatus=143` keeps a clean stop `inactive` rather
+    than `failed` (measured: without it every stop left the unit failed). Its names are outside every prefix a sweep
+    removes, by a test that reads the prefixes off the source. Its network is made again before every start
+    (`ExecStartPre`, the `.network` unit's own `podman network create --ignore --disable-dns --internal`, a test holds
+    the two equal), because that unit runs once and stays active: measured on 4.9.3, a `podman network prune` with the
+    keeper stopped (running, prunes leave it) used to leave every later start failing, and a `podman network rm -f`
+    under it killed it for good; with `ExecStartPre` the start after a prune recreated the network, and after a
+    `network rm -f` the keeper was back holding in 1.2 s. `reset-failed` stays the first step of every documented repair.
+  - **The keeper counts only running on its own bridge network** (issue #463's gate, measured on 4.9.3). A container
+    of its name on `--network none`, `slirp4netns`, `pasta` or `host` runs and holds nothing open, and doctor called
+    it ✓, `up` "already running", and `doctor --live` then ran the canary whose teardown broke the proxy. One reader
+    now serves all three and the worker (`judgeNetnsKeeper` over one `podman inspect` of `{{.State.Status}}`,
+    `{{.HostConfig.NetworkMode}}` and the attached networks): it holds only when running, in `bridge` mode, and on
+    `pi-dispatch-netns-keeper`; anything else is named. Doctor and the worker add two rules (PR #463 round 2), with an
+    injected clock and the proxy's `{{.State.StartedAt.UnixMilli}}` (measured to print epoch ms on 4.9.3): it must have
+    run for 3 s (a keeper killed every 0.5 s read as running on its bridge in 57 of 224 back-to-back reads), and it must
+    not have started more than 15 s after the proxy. That second one is the only evidence there is of the restart
+    window's damage (below): a keeper that came back under a running proxy may have let a teardown cut the proxy's route
+    out, which the proxy's own state never shows, so the remedy said is a PROXY restart. The grace is for both starting
+    together, and no wider (PR #463 round 3, measured on 4.9.3: 4 to 52 ms apart in three `service install`s, 17 to 50
+    ms in three boot-like manager restarts, 63 ms in an `up --yes`; it was a minute, and a review measured a keeper death
+    and a teardown inside that minute go unseen). A keeper that does not hold under a proxy up longer than the grace is
+    told both steps at once, start it and then restart the proxy. Doctor also reads the keeper's network as it is
+    (`{{.Internal}} {{.DNSEnabled}}`, ✗ unless internal with DNS off, on every version), since its units' `--ignore` keeps
+    a same-named network whatever its options. The installer says to restart the proxy, by its real name, whenever it
+    starts or restarts the keeper beside a proxy it leaves running (an operator's own `PI_EGRESS_PROXY`, or ours already
+    up). `managerEnvRefusal` unquotes systemd's `$'...'` form (measured: `$'/home/a b/.config'`) and compares realpaths. `up` asks only the shape, since it only decides whether to leave a keeper be.
+  - **The worker checks it pre-spend** (issue #463's gate). On the `podman` venue with egress armed and Podman 4.x or
+    an unreported version, the egress preflight reads the keeper after the proxy on every job (the version from the
+    bundle's cached `podman info`, the keeper never cached), and one that does not hold is `{ unavailable, keeper }`:
+    an INFRA retry before anything is spent, carrying the keeper's sentence and the repair commands, where it used to
+    start, spend, and get 503 mid-job. On 5.x nothing is read. Its reason is its own fixed token,
+    `netns-keeper-not-holding` (PR #463 round 2), so the run record and the failure hook name it, and a job that runs
+    out of retries gets a terminal comment keyed by that token that names the keeper and `pi-dispatch doctor` (never
+    the error's words); the whole sentence is logged per attempt (`egress_keeper_not_holding`, and
+    `job_failed_netns_keeper` beside the 120-character `job_failed`), and once at boot
+    (`netns_keeper_not_holding_at_boot`), since a deployment upgraded without re-running the installer would otherwise
+    learn it only from retried jobs. Measured live on 4.9.3 through the worker's own preflight: admitted with the
+    keeper up, retried while it was down and for its first 3 s back, admitted again after, retried with "restart the
+    egress proxy" once a keeper restart landed more than the grace after the proxy's start (measured with the minute it
+    then was) (egress then really was
+    broken: a teardown in the gap), and admitted after the proxy restart (egress back).
+  - **A plan that moves the keeper moves the proxy** (PR #463 round 2). Starting the keeper beside a proxy whose unit
+    file stays the same (an upgrade), or restarting it, restarts the proxy after it, with the existing restart warning,
+    so the order rule never asks for a proxy restart the installer could have done; a first install starts both
+    together. `up` restarts a Quadlet keeper that is there, ours and unchanged but not holding (a paused one, where
+    `start` was a no-op and `up` said "installed and started"), and when the proxy it leaves running stays up, says to
+    restart it.
+  - `doctor` reads it with egress armed: not holding is ✗ on Podman 4.x or an unreported version, ✓ on 5.x. There,
+    `doctor --live` also tears nothing down under the proxy, since its own teardowns are the same trigger: no egress
+    canary (a second ✗ line says so and names the start command), no stale canary sweep, no jobToJobIsolation peer
+    networks, and a stale live-probe network with anything still attached is left and said rather than detached;
+    `egress` and `jobToJobIsolation` read "not read back" naming the keeper. On 5.x, or with the keeper running,
+    `--live` runs as before.
   - **Where the answer comes from.** Both commands read `PI_BACKENDS`, `PI_EGRESS` and `PI_EGRESS_PROXY` from the
     deployment's `.env` with one reader (`readStackKeys`), the way systemd's `EnvironmentFile=` reads it.
     `service install` reads the file alone, never the shell running it (nothing loads `.env` into a process, so a
@@ -5193,6 +5299,15 @@ a tunnel.
     merged capture compared into the running flag and the label (our own containers read as foreign). An inspect is
     "absent" only when stderr says no such container or object; any other failure, a locked store say, refuses,
     `--force` or not.
+  - **The manager's own environment, or no writes** (issue #458, PR #463 round 3, measured on Podman 4.9.3). Every
+    unit runs with the user manager's environment, and the Quadlet generator reads unit files from its
+    XDG_CONFIG_HOME, while this installer writes to `~/.config/containers/systemd`. A manager whose environment names
+    another account's XDG_CONFIG_HOME made the units "not found" (exit 5); another account's XDG_RUNTIME_DIR made every
+    podman command in them fail ("XDG_RUNTIME_DIR directory ... is not owned by the current user"). Both reach a manager
+    from /etc/environment, which Ubuntu's user managers read through environment.d (a GitHub runner image writes both).
+    `service install` and `up` read `systemctl --user show-environment` first (`managerEnvRefusal`) and refuse, not
+    forceable, naming the override that fixes it; measured live: refused with nothing written, then installed with the
+    keeper holding once the account's own values were pinned.
   - **No user manager, no writes** (round 2, measured). Under `sudo -iu <account>` there is neither
     `XDG_RUNTIME_DIR` nor a session bus and every `systemctl --user` fails; both commands refuse before writing a
     file, naming a real login, `machinectl shell`, or `XDG_RUNTIME_DIR=/run/user/<uid>` while linger runs the manager.
@@ -5201,7 +5316,7 @@ a tunnel.
     container state and a missing user manager are not forceable.
   - **Uninstall clears the failed state, stops the networks, and fails loudly.** squid ignores SIGTERM, so a proxy
     stop takes 10 s and ends 137 `failed` (measured); uninstall runs `systemctl --user reset-failed` on the units
-    after removing them. It stops the two network units as well as the containers (round 3, measured: left
+    after removing them. It stops the network units as well as the containers (round 3, measured: left
     `active (exited)`, a reinstall after `podman network rm` failed with "network not found"), refuses without a user
     manager before touching anything, and a stop or disable that fails removes nothing and exits non-zero (it used to
     print success under `sudo -iu` with everything still running).
@@ -5234,6 +5349,20 @@ a tunnel.
   - **`$XDG_CONFIG_HOME/containers/systemd`**: the generator runs in the user manager's environment, which usually
     has no such variable, so a shell exporting one would put the files where the generator never looks.
   - **Refusing without linger**: it would lock out a desktop deployment that is fine running only while logged in.
+  - **For the 4.9 teardown defect (issue #458)**: never disconnecting (the per-job networks pile up with the proxy on
+    all of them, and each takes a /24, so `network create` fails after about 254 jobs); a pool of reused networks
+    (job-to-job isolation across time would rest on the previous occupant being gone, and every reaper, the canary and
+    the live probes are keyed on per-job names); restarting the proxy after each teardown (version detection, a 10 s
+    squid stop under Quadlet, and a restart drops every other job's network, racing the worker's own concurrency);
+    `podman network reload` (measured: the first reload fails with an IPAM error and only a second restores egress);
+    installing the keeper on 4.x only (a version read at install time is one more thing to misread, and on 5.x the
+    keeper is one idle container); a Quadlet `.pod` as the keeper (5.0+ only); relying on Valkey (optional, and it
+    restarts on its own schedule); `Entrypoint=` for `sleep` (Quadlet 4.9.3 refuses the key, "unsupported key", measured)
+    and a JSON array in `PodmanArgs` (`--entrypoint=["sleep","infinity"]` came through as
+    `--entrypoint=[sleep,infinity]` and catatonit could not exec it, measured), so `--entrypoint=sleep` with
+    `Exec=infinity`; `--memory` and `--pids-limit` on the keeper, left out rather than refuted: the investigation's
+    keeper ran fine with `--pids-limit=8 --memory=16m` on a host with the controllers delegated, and they were dropped
+    because `sleep` needs neither and a host without that delegation was not measured with them.
 - **Residuals**:
   - **A proxy restart drops the per-job networks of jobs already running** (measured): the generated unit runs
     `podman run --replace --rm`, so a restart is a NEW container and the networks the worker connected to the old
@@ -5241,8 +5370,20 @@ a tunnel.
     route out for the rest of that run. The worker does not re-attach (a re-attach loop is a second writer on the
     proxy's networks beside the per-job create and remove), so the advice is not to restart the proxy under running
     jobs.
-  - Podman 4.9.3's generator accepts all four files (the deploy-lint `quadlet` job, which caught that 4.9 writes
-    `--name=X` where 5.8 writes `--name X`); no 4.9 host ran them.
+  - Podman 4.9.3's generator accepts all six files (the deploy-lint `quadlet` job, which caught that 4.9 writes
+    `--name=X` where 5.8 writes `--name X`); the keeper's pair ran on a 4.9.3 host (pd-ubuntu) and runs in the
+    required conformance job from its shipped files, the other four ran on 5.8.1 only.
+  - **The keeper's restart window** (measured on 4.9.3). A keeper killed behind systemd's back is back after
+    `RestartSec` (1.2 to 1.3 s); a job teardown in that gap cut the proxy's route out exactly as with no keeper, and the
+    keeper returning did NOT heal it (the proxy restart did). No new job starts into that damage: the worker's preflight
+    retries while the keeper is down, for its first 3 s back, and afterwards whenever it started more than 15 s after
+    the proxy, asking for the proxy's restart. What is left is the first 15 s after both started together (a keeper
+    death AND a teardown both inside it), and the price of the order rule: a keeper restart that no teardown met still
+    asks for one proxy restart.
+  - **The keeper does not heal an account a teardown already broke**: the proxy needs a restart, and a leftover
+    `aardvark-dns` in the dead namespace needs upstream's reset (with the stack stopped by `systemctl --user stop`,
+    since `Restart=always` undoes a `podman stop -a`, kill it and clear `/run/user/$UID/containers/networks/aardvark-dns/`),
+    which `docs/podman.md` gives, `reset-failed` first.
   - Measured on 2026-09-27 with the units as they ship (Fedora 44, Podman 5.8.1): Valkey on its bridge network
     published on `127.0.0.1:6379` and healthy, the proxy's exec-form health check reaching healthy, the
     `PODMAN_SYSTEMD_UNIT` label on each container, a job through the proxy, reboots with and without linger, and
@@ -5255,14 +5396,17 @@ a tunnel.
     is refused rather than escaped, because none of the escapes was measured.
   - A key an `--env-setup` script exports is invisible to the install's decision (`DES-SERVICE-ENV-SETUP-SEAM`):
     `PI_BACKENDS` must be in `.env` for `service install` to see it.
-- **Code evidence**: `worker/src/podman-stack.mjs` -> `stackComponents`, `planStack`, `applyStack`,
+- **Code evidence**: `worker/src/podman-stack.mjs` -> `managerEnvRefusal`, `NETNS_KEEPER`, `NETNS_KEEPER_FORMAT`, `judgeNetnsKeeper`, `NETNS_KEEPER_START`, `podmanNeedsNetnsKeeper`;
+  `worker/src/backend-podman.mjs` -> `keeperPreflight`; `worker/src/processor.mjs` (the `egress.keeper` retry);
+  `worker/src/podman-stack.mjs` -> `stackComponents`, `planStack`, `applyStack`,
   `describeAction`, `workerUnitDeps`, `readLinger`, `lingerNote`, `readStackKeys`, `foreignContainers`,
   `proxyRestartWarning`, `proxyConfCopyPath`, `unknownContainerRefusal`, `userBusRefusal`;
   `worker/src/env-file.mjs` -> `quotedRegions`; `worker/src/service.mjs` -> `podmanVenue`, `runQuery`,
   `podmanStackFor`, `refusePodmanSystemScope`, `installLinuxUser`, `removeQuadlets`, `TEMPLATE_PINS`;
   `worker/src/up.mjs` -> `deploymentVenueEnv`, `podmanGate`, `podmanImageStep`, `podmanStackStep`; `worker/src/backends.mjs` ->
-  `venuesOf`; `deploy/pi-dispatch-*.container`, `deploy/pi-dispatch-*.network`;
-  `worker/test/podman-stack.test.mjs`; `.github/workflows/deploy-lint.yml` (the `quadlet` job)
+  `venuesOf`; `worker/src/doctor.mjs` -> `netnsKeeperCheck`; `deploy/pi-dispatch-*.container`, `deploy/pi-dispatch-*.network`;
+  `worker/test/podman-stack.test.mjs`; `.github/workflows/deploy-lint.yml` (the `quadlet` job);
+  `.github/scripts/podman-conformance.mjs` (`egressAcrossTeardowns`) and `.github/workflows/podman-conformance.yml`
 - **Traces to**: `DES-PODMAN-NATIVE-ROOTLESS-BACKEND`, `REQ-DEPLOYMENT-BOOTSTRAP`, `DES-FIRST-RUN-SETUP-WIZARD`,
   `DES-SERVICE-ENV-SETUP-SEAM`, `DES-CONCURRENCY-3`, `REQ-EGRESS-ALLOWLIST`, `REQ-QUEUE-BURST-NO-DROP`
 
@@ -5437,3 +5581,4 @@ a tunnel.
 | 2026-09-27 | Issue #451. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**, the `provider-auth-refused` paragraph: the quoted sentence's "(HTTP 401 or 403)" becomes "(an authentication or permission error)", and the stop is described as a provider's refusal of the credential rather than a 401/403, because issue #451 admits a Google 400 `API_KEY_INVALID` and Bedrock's `UnrecognizedClientException: 403: ` form (`INT-RUNNER-EXIT-CODE-PROTOCOL`). The token, its once-ness and its hook behaviour are UNCHANGED, checked. **Code evidence**: worker/src/processor.mjs -> TERMINAL_COMMENTS. |
 | 2026-09-27 | Issue #446, folding its PR #457 gate rounds 1 to 3 into this one row. **`DES-RETENTION-SWEEPS-ON-A-TIMER` UNCHANGED, checked**: the sandbox sweep's leftover-tombstone removal runs at the start of the closure boot already built, so boot and every tick share it, nothing new is constructed, and the per-tree yield covers each tombstone as it covers each directory; the "window is a floor" cost is unchanged, the window now being the earlier of the worker's current one and the run's recorded `retainUntil` (`INT-SANDBOX-CONTRACT`). **`DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked**: a sandbox is still a fresh `--rm` container from the run's image and workspace; the post-launch look only removes one whose run was swept as it started, and a loss later in the session is reported, never acted on. |
 | 2026-09-27 | Issue #453, three podman venue leftovers, with the PR's gate rounds 1 to 3 and the round-cap re-review. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED, and CORRECTED twice**: `podmanBoundsDelegated` read `podman info`'s `host.cgroupControllers`, which a measurement on Fedora 44 (Podman 5.8.1, the venue's own argv) showed is the CALLING process's cgroup, not the account's delegation: it listed all five controllers where an account with no systemd user manager (linger off, a `sudo -iu` shell) got no bound at all, `pids.max` and `memory.max` reading `max` with exit 0; it listed `memory pids` inside a user unit without `Delegate=` where cpu was applied; and it flipped with a sibling unit's `Delegate=`. The first correction read the fact that decided those rows, `user@<uid>.service`'s `cgroup.controllers`, and dropped the cgroup manager; the gate's adversary then measured a manager running that Podman could not reach (no user bus socket, a `DBUS_SESSION_BUS_ADDRESS` pointing nowhere, a system unit with `User=` and no bus), where Podman fell back to `cgroupfs` and the job again landed in the caller's own root-owned cgroup, unbounded, while the observation said applied. The rule now: the manager's cgroup with `pids`, `memory` and `cpu`, AND either the `systemd` cgroup manager reported by `podman info` or the worker's own `/proc/self/cgroup` inside `user@<uid>.service`. It credits no row measured unbounded; one measured-applied row (an explicit `cgroupfs` from a shell outside the manager) is not credited, and one unmeasured case fails closed, both named. A missing controller's evidence says what was measured (Podman 5.8.1 refuses a `--cpus` container, exit 126), not "applies nothing". The issue's "a plain `ssh`" case was corrected by measurement: an ssh login starts the user manager and the bounds apply; the failing case is `sudo -iu` with linger off. The residual the info cache carries (the cgroup manager of the first answered read) is stated. The consequence lands only through `PI_BACKEND_FLOOR` on `isolation` (the worker's boot, exit 2, and each podman job as `backend-floor-unobserved`); without one the word falls to `asserted`. A hand-written system unit must be ordered after `user@<uid>.service` (measured: without it the worker refused to boot and stayed failed). Doctor says the cause once, in the backend section's `isolation` line with that cause's fix (the ✗ under a floor stays the floor line's), its ✓ line lists the user manager's controllers, and with linger off a ⚠ says the ✓ lasts only as long as a login session (measured: a `sudo -iu` doctor saw a manager another session had started). The forge comment for this observation (`OBSERVATION_COMMENT`) says the bounds are not observed applied, true for every cause. Doctor's podman image fix lines no longer offer `docker save ... \| podman load`, which a podman-only host cannot run. **`DES-PODMAN-STACK-AS-QUADLET-UNITS` AMENDED**, one rule and its docker twin: a running proxy is `{{.State.Status}}` `running` on both venues (docker's `.State.Running` is also true for a paused or crash-looping container; Podman's states measured on 4.9.3 and 5.8.1). On docker the shipped proxy must also be current, the pinned squid with its own entrypoint and command and this folder's two files mounted and no other mount but its volumes: a current stopped one is offered `docker start` (a paused one `docker unpause`, compose's semantics for an unchanged container), a stale one `docker rm -f` and the shipped run, shown and consented with the job networks it would cut off named, and doctor says ✗ for a running stale one. Round 2 made the mount half conditional: it is compared only where every bind source resolves on this host, and is otherwise UNKNOWN (a ⚠, never a removal), since a runtime reporting its VM's own paths, as Docker Desktop is expected to, would have read every proxy stale; measured on Docker Engine 29.8.1 with compose 5.5.1, a compose-made and an `up`-made proxy from a real and a symlinked folder all read current, and a paused and a restarting container both read `.State.Running` true (pinned in `egress-proxy-state.test.mjs`). An unreadable inspect answer on an existing container is left alone rather than run over, and doctor's fix for a STOPPED shipped proxy that is stale is `up`'s replace offer, never compose (which would start it as it is). Round 3, the cap, chose the simplest rules: the proxy's states split three ways (running admits; paused, exited and dead refuse; every other word is a retry that names the state, in the worker, `up` and doctor alike); the mounts are unknown only under a VM prefix or on a macOS or Windows host, and a source gone on Linux is stale; the argv is normalised (Podman 4.9.3 renders the entrypoint as a string, measured); `--yes` never replaces a running proxy that job networks are attached to; and doctor's `.env` reads pass one allowlist and one loader mapping. The re-review: `created` refuses (it stays so, measured), a retry is "once, then failed" (two attempts), doctor says ✗ for `restarting` (a crash loop fails every job) and ⚠ only for a transient word; each bind is judged on its own, one under a VM prefix unknown for itself while the others and any extra mount are still compared, and nothing is removed while one of the two expected binds is unknown; doctor prints a URL as scheme, host, port and database only, and blanks C1 controls as well as C0. From the executing review of round 3: doctor's fix for a paused shipped proxy is `docker unpause`, as `up` offers; a running stale proxy gets no "✓ running" line before its ✗, and the canary through it names that proxy, not the allowlist, as what to fix; `up` creates the proxy's network only where it does not exist, so a recreate no longer prints the daemon's "already used". The `user-manager-unreachable` evidence says the bounds are not observed from here rather than not applied, since an explicit cgroupfs with the bus reachable measured them applied. An operator's `PI_EGRESS_PROXY` container is never started or judged stale, and doctor's fix for it now names `docker start` rather than compose. `up` no longer offers a proxy from a folder without `deploy/egress-proxy.conf` (measured: the runtime mounts a directory there). **UNCHANGED, checked**: `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` (no network, attach or proxy image moves) and `DES-CLI-SURFACE` (no command or flag is added; `init` prints different next steps, and `init` and `doctor` decide the venue with `up`'s function). **Code evidence**: worker/src/backend-podman.mjs -> parsePodmanInfo, observePodmanBounds, podmanUserManagerControllersPath, podmanNoUserManagerEvidence, observePodman; worker/src/backends.mjs -> OBSERVATIONS, OBSERVATION_FIX; worker/src/doctor.mjs -> runDoctor, backendChecks, podmanChecks, egressChecks, PODMAN_BOUNDS_FIX, LIVE_FAIL_FIX_PODMAN, liveFailFix; worker/src/processor.mjs -> OBSERVATION_COMMENT; worker/src/egress-proxy-state.mjs; worker/src/deployment-venue.mjs -> deploymentVenueEnv; worker/src/up.mjs -> runUp (steps e2 and e3); worker/src/init.mjs -> runInit, nextSteps; .github/scripts/podman-conformance.mjs (an isolation floor, so a wrong observation fails the job). |
+| 2026-09-27 | Issue #458 (Podman 4.9: a job network teardown cuts the egress proxy off). **`DES-PODMAN-STACK-AS-QUADLET-UNITS` AMENDED**: the stack gains a third container, the rootless network keeper (`deploy/pi-dispatch-netns-keeper.network` and `.container`), installed by the same planner whenever the policy is armed, whatever `PI_EGRESS_PROXY` names and on every Podman version; the measured defect, the upstream cause (v4.9.3 `libpod/networking_linux.go`; removed by containers/podman#20772 and containers/common#1761), why the keeper widens nothing, `Restart=always` and `SuccessExitStatus=143` (measured), its names outside every sweep prefix, doctor's read, and the alternatives rejected (never detaching, a network pool, restarting the proxy, `network reload`, a 4.x-only install, a `.pod`, relying on Valkey). "four files" is now six, and "no 4.9 host ran them" is corrected for the keeper's pair, which ran on pd-ubuntu's 4.9.3. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**: a residual recording the measured defect and its closure, and a CORRECTION of the canary sentence, which said the shared canary read `egress` back on 4.9.3 in the conformance job without saying it read it once, on a fresh proxy, before any teardown, the one order that could not see this. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED**, one bullet: the teardown's detach has this side effect on Podman 4.9, and the design stands, the workaround is the venue's. Measured on pd-ubuntu (Podman 4.9.3, isolated account): the conformance script's new two-teardown case FAILED with the keeper stopped (and the harness's own egress read-back with it) and PASSED with the keeper started from its shipped unit. `doctor --live` on Podman 4.x (or an unreported version) with the keeper not running tears nothing down under the proxy: no egress canary (a ✗ line naming the keeper and its start command), no stale canary sweep, no peer networks, and a stale live-probe network with anything attached is left and said; `egress` and `jobToJobIsolation` are "not read back" naming the keeper. Gate round 1 (PR #463), in the same row: the keeper counts only running, in bridge mode, on its own network (one reader, `judgeNetnsKeeper`, for doctor, `up`, `--live` and the worker; a keeper on `--network none`, slirp4netns, pasta or host was ✓ and "already running", measured); the worker's egress preflight on 4.x retries pre-spend while it does not hold; `RunInit=true` replaces `--init` in PodmanArgs (measured identical on 4.9.3, and `Entrypoint=` is refused there, so the rejected-alternatives bullet now says what was measured, and `--memory`/`--pids-limit` are recorded as left out, not refuted); `RestartSec=1s` with `StartLimitIntervalSec=0` (measured: back 1.2 to 1.3 s after a kill, never `failed` under a crash loop); the prune hazard, the `reset-failed` step in every repair, the `systemctl --user stop` in the aardvark-dns reset; and a named residual for the keeper's restart window (a teardown 225 to 500 ms after a kill broke the proxy; the window is 1.2 to 1.3 s with `RestartSec=1s`; the keeper returning does not heal it). Round 2 (PR #463), in the same row: the keeper counts only after 3 s up and when it did not start more than a minute after the proxy (measured: a crash loop read as running in 57 of 224 reads; a keeper that came back under a running proxy had let a teardown cut its route out, which only a proxy restart healed), and the worker then asks for the PROXY's restart; `ExecStartPre` remakes its network before every start (measured: a prune and a `network rm -f` both healed); `RestartSec=1s` kept after measuring 250 ms; the worker's keeper retry carries its own reason token `netns-keeper-not-holding`, a keeper-specific terminal comment, the whole sentence in the log, and a boot-time line; a plan that starts or restarts the keeper beside an unchanged proxy restarts the proxy; `up` restarts a keeper that is there but not holding. `service install` and `up` refuse a user manager whose environment names another account's XDG_RUNTIME_DIR or XDG_CONFIG_HOME (round 3, measured: the CI's next failure was exactly that, "XDG_RUNTIME_DIR directory \"/run/user/1001\" is not owned by the current user"). The conformance workflow pins the account's XDG_CONFIG_HOME and XDG_RUNTIME_DIR for its user manager, and fails loudly if either, or its bus address, is not the account's own (reproduced cause of the CI "unit not found": a user manager whose environment carries another home's XDG_CONFIG_HOME makes the Quadlet generator look there) and starts the keeper before the proxy. Round 3 (PR #463), in the same row: the order rule's grace is 15 s, not a minute (measured joint starts 4 to 63 ms apart; the residual window is now those 15 s); a keeper not holding under a proxy up longer than the grace is told both steps; doctor reads the keeper network's options (✗ unless internal with DNS off); the installer names the proxy to restart when it (re)starts the keeper beside one it leaves running; `managerEnvRefusal` unquotes `$'...'` and compares realpaths; the terminal comment is neutral on the cause, and the boot line has its own sentence. `REQ-EGRESS-ALLOWLIST` UNCHANGED, checked: it states the policy and its proof, and the proof now runs after teardowns too. |

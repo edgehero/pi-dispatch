@@ -1,0 +1,80 @@
+# Quadlet unit for the rootless network keeper on the native rootless `podman` venue (issue #458, docs/podman.md):
+# one idle container that holds this account's shared rootless network helper open, so the egress proxy keeps its
+# route out after a job's network is torn down.
+#
+# WHY IT EXISTS. On Podman 4.9 (Ubuntu 24.04's), `podman network disconnect` of the proxy from a per-job network
+# tears down the account's shared rootless network namespace and its slirp4netns WHILE THE PROXY STILL RUNS, whenever
+# no other running container is on a bridge network: v4.9.3's libpod/networking_linux.go counts the disconnecting
+# container as the caller and cleans up at one. The next bridge container then starts a new namespace, the proxy's
+# eth0 goes with the old one, and every later egress job gets 503 from the proxy until it restarts (measured: job 1
+# 200, jobs 2 to 5 503). Podman 5.0's rootless network rewrite (containers/podman#20772, containers/common#1761)
+# counts attachments instead, and 5.8.1 was measured unaffected. With this container running on a bridge network of
+# its own, 4.9.3 gave 5 sequential egress jobs 200 each, and the two-network teardown `doctor --live` does stayed
+# clean. It is installed on every Podman version, because on 5.x it is one idle container and nothing else
+# (measured harmless on 5.8.1), and one rule is simpler than a version read at install time.
+#
+# Installed by `pi-dispatch service install` (user scope, with podman in PI_BACKENDS and PI_EGRESS armed) and by
+# `pi-dispatch up`, which copy it unchanged into ~/.config/containers/systemd/. Never `systemctl --user enable` it
+# (a generated unit refuses that); the [Install] section is read by the generator itself.
+#
+# IT MUST STAY RUNNING: it protects only while it runs. Stopped, the next job teardown breaks the proxy again (measured).
+#
+# IT WIDENS NOTHING. No published port, no mount, no capability, a read-only root, no new privileges, the nobody
+# uid, and a network with no route out and no DNS: inside it, the proxy and 1.1.1.1 were both unreachable (measured).
+
+[Unit]
+Description=pi-dispatch rootless network keeper (holds this account's rootless netns open; rootless Podman, Quadlet)
+# No start limit: with Restart=always a keeper that cannot start (its network pruned, say) would otherwise use up
+# systemd's default 5 starts in 10 s and stay `failed` for good. Measured on 4.9.3: the generator passes this through,
+# 10 quick kills in a row and 15 s of a keeper that could not start never ended `failed`.
+StartLimitIntervalSec=0
+
+[Container]
+# The proxy's own image and digest, so this unit pulls nothing the egress stack has not already pulled and adds no
+# pin to keep in step: it only runs `sleep`, which the image has. A test holds the digest equal to the proxy's.
+Image=docker.io/ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029
+# Outside every prefix a pi-dispatch sweep removes (pi-job-, pi-sandbox-, pi-dispatch-live-, pi-dispatch-egress-doctor-,
+# pi-dispatch-egress-probe-): a test holds that, since a sweep that removed it would bring the defect back unseen.
+ContainerName=pi-dispatch-netns-keeper
+# Its OWN network, never the proxy's or a job's: it has to be a running member of SOME bridge network, and on one of
+# its own it is reachable from nothing.
+Network=pi-dispatch-netns-keeper.network
+ReadOnly=true
+DropCapability=all
+NoNewPrivileges=true
+User=65534
+Group=65534
+# catatonit as PID 1 (`--init`), so a stop ends `sleep` at once rather than after podman's 10 s timeout (measured on
+# 4.9.3: 123 ms); a job's argv carries the same flag, so the venue already needs catatonit.
+RunInit=true
+# Two spellings Quadlet 4.9 has no key for. `--entrypoint=sleep` with `Exec=infinity`: 4.9.3's generator refuses an
+# `Entrypoint=` key ("unsupported key", measured), and a JSON array in PodmanArgs (`--entrypoint=["sleep","infinity"]`)
+# came through as `--entrypoint=[sleep,infinity]`, which catatonit could not exec (measured). `--image-volume=ignore`:
+# the squid image declares VOLUMEs, which would otherwise make two anonymous volumes on every start.
+PodmanArgs=--entrypoint=sleep --image-volume=ignore
+Exec=infinity
+
+[Service]
+TimeoutStartSec=900
+# Its network, made again before every start, with exactly the flags its .network unit's own `podman network create`
+# carries (--ignore makes it a no-op while the network exists). That unit runs once and stays `active`, so without
+# this a network pruned (or removed) under a stopped keeper kept every later start failing until someone restarted
+# both units by hand; measured on 4.9.3, with this line a start after `podman network prune` recreated the network
+# (internal, no DNS) and the keeper came up.
+ExecStartPre=/usr/bin/podman network create --ignore --disable-dns --internal pi-dispatch-netns-keeper
+# always, not the proxy's on-failure: a keeper that is not running is the whole defect, and `sleep infinity` never
+# exits on its own, so any exit at all is one to undo. An explicit `systemctl --user stop` still stops it; a `podman
+# stop` or `podman rm -f` behind systemd's back does not (measured: it is running again after RestartSec).
+Restart=always
+# One second, not systemd's 100 ms default, so a keeper that cannot start retries at a calm pace (the start limit is
+# off above). Measured on 4.9.3: back on its bridge network 1.2 to 1.3 s after a kill; 250 ms gave 0.45 s, and was not
+# taken, because a keeper that came back more than the grace (15 s) after the proxy started is already treated as
+# damage by the worker and doctor (a proxy restart is asked for, whatever the gap), so a shorter gap buys nothing there, and a
+# keeper that cannot start would retry four times a second.
+RestartSec=1s
+# A stop ends `sleep` with SIGTERM, which the unit sees as exit 143 and, without this line, as a failure (measured on
+# Podman 4.9.3: every clean `systemctl --user stop` left the unit `failed`).
+SuccessExitStatus=143
+
+[Install]
+WantedBy=default.target

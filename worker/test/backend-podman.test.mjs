@@ -781,3 +781,94 @@ test("the bundle's observationPreflight answers exactly what judgePodmanVenue an
 	const busy = mod.judgePodmanVenue({ read: answered(), platform: "linux", euid: 1234, egid: 1234, fs: fakeFs({ files: { [USER_MOUNTS]: "" }, errors: { "/etc/containers/containers.conf": "EMFILE" } }), home: HOME, env: {} });
 	assert.equal(busy.podmanConfRefused?.transient, true, "the transient arm is really exercised above");
 });
+
+// Issue #458, gate B: the worker's own pre-spend read of the rootless network keeper. On Podman 4.x (or an unreported
+// version) a proxy that is up but a keeper that does not hold is an INFRA retry before anything is spent, with the
+// sentence that names the keeper and its start command; on 5.x the keeper is never read. Read on every armed job.
+test("keeperPreflight: on Podman 4.x a keeper that does not hold is { unavailable, keeper }; 5.x and egress off read nothing (#458)", { skip }, async () => {
+	// On an injected clock (PR #463 round 2): the keeper started at 1,000 s, the proxy at 1,010 s, and it is now 2,000 s.
+	const NOW = 2_000_000;
+	const OK = { ok: true, proxy: "pi-dispatch-egress-proxy" };
+	const KEEPER = (state = "running|bridge|pi-dispatch-netns-keeper,", started = 1_000_000) => ({ code: 0, stdout: `${state}|${started}\n` });
+	const run = async ({ version = "4.9.3", answered = true, keeper = KEEPER(), proxyStarted = { code: 0, stdout: "1010000\n" }, armed = true, proxyResult = OK, now = NOW } = {}) => {
+		const reads = [];
+		const pre = mod.keeperPreflight(async () => proxyResult, {
+			armed,
+			proxy: "pi-dispatch-egress-proxy",
+			info: async () => (answered ? { answered: true, info: { version } } : { answered: false, reason: "timeout", transient: true }),
+			readKeeper: async (args) => (reads.push(args), args.at(-1) === "pi-dispatch-netns-keeper" ? keeper : proxyStarted),
+			now: () => now,
+		});
+		return { result: await pre({}), reads };
+	};
+	const held = await run();
+	assert.deepEqual(held.result, OK, "a keeper that holds admits the job");
+	assert.deepEqual(held.reads, [
+		["inspect", "--format={{.State.Status}}|{{.HostConfig.NetworkMode}}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}|{{.State.StartedAt.UnixMilli}}", "pi-dispatch-netns-keeper"],
+		["inspect", "--format={{.State.StartedAt.UnixMilli}}", "pi-dispatch-egress-proxy"],
+	]);
+	const startIt = /Start it as the worker's account|start it as the worker's account/;
+	for (const [label, keeper, words] of [
+		["absent", { code: 125, stdout: "" }, /is not under this account's Podman/],
+		["exited", KEEPER("exited|bridge|pi-dispatch-netns-keeper,"), /is exited under this account's Podman/],
+		["off its bridge", KEEPER("running|none|none,"), /is running on the none network mode/],
+		["crash loop", KEEPER(undefined, NOW - 2_000), /has been running for only 2 s/],
+	]) {
+		const { result } = await run({ keeper });
+		assert.equal(result.unavailable, "pi-dispatch-egress-proxy", label);
+		assert.match(result.keeper, words, label);
+		assert.match(result.keeper, /on Podman 4\.9\.3 a job network's teardown would then cut the egress proxy's route out \(issue #458\), so this job is retried rather than started\. To fix it, start it as the worker's account: systemctl --user reset-failed pi-dispatch-netns-keeper-network\.service pi-dispatch-netns-keeper\.service; systemctl --user restart /, label);
+		assert.match(result.keeper, startIt, label);
+		// PR #463 round 3: the proxy has been up 990 s, so the keeper once started will be after it: both steps, now.
+		assert.match(result.keeper, /, then restart the egress proxy once no job is running: systemctl --user restart pi-dispatch-egress-proxy\.service \(podman restart pi-dispatch-egress-proxy for one started by hand\), since the proxy has been up since before it$/, label);
+		// And the boot line's own sentence, with no job in it.
+		assert.match(result.keeperAtBoot, /, so every egress job is retried rather than started until this is fixed\. To fix it, start it as the worker's account/, label);
+		assert.doesNotMatch(result.keeperAtBoot, /this job/, label);
+	}
+	// A proxy up for less than the grace: one step, the keeper's own start.
+	const fresh = await run({ keeper: { code: 125, stdout: "" }, proxyStarted: { code: 0, stdout: `${NOW - 10_000}\n` } });
+	assert.match(fresh.result.keeper, /To fix it, start it as the worker's account: systemctl --user reset-failed pi-dispatch-netns-keeper-network\.service pi-dispatch-netns-keeper\.service; systemctl --user restart pi-dispatch-netns-keeper-network\.service pi-dispatch-netns-keeper\.service$/);
+	// Started more than the grace (15 s, PR #463 round 3) after the proxy: the damage nothing shows, so the remedy is
+	// the PROXY's restart.
+	const late = await run({ keeper: KEEPER(undefined, 1_010_000 + 15_001) });
+	assert.match(late.result.keeper, /^the rootless network keeper pi-dispatch-netns-keeper started 15 s after the egress proxy did, so it was down while the proxy ran, and a job teardown in that gap would have cut the proxy's route out for good, which nothing can see from outside \(Podman 4\.9\.3, issue #458\), so this job is retried rather than started\. To fix it, restart the egress proxy once no job is running: systemctl --user restart pi-dispatch-egress-proxy\.service/);
+	const within = await run({ keeper: KEEPER(undefined, 1_010_000 + 15_000) });
+	assert.deepEqual(within.result, OK, "within the grace of the proxy: a start of both together");
+	const unreadProxy = await run({ keeper: KEEPER(undefined, 1_900_000), proxyStarted: { code: 125, stdout: "" } });
+	assert.deepEqual(unreadProxy.result, OK, "an unread proxy start is not held against the keeper");
+	const unreported = await run({ answered: false, keeper: { code: 125, stdout: "" } });
+	assert.match(unreported.result.keeper, /on a Podman of unreported version/, "an unread version is no evidence of 5.x");
+	for (const version of ["5.0.0", "5.8.1"]) {
+		const five = await run({ version, keeper: { code: 125, stdout: "" } });
+		assert.deepEqual(five.result, OK, version);
+		assert.deepEqual(five.reads, [], `${version}: the keeper is not read`);
+	}
+	const off = await run({ armed: false, proxyResult: { ok: true }, keeper: { code: 125, stdout: "" } });
+	assert.deepEqual(off.result, { ok: true });
+	assert.deepEqual(off.reads, []);
+	// A proxy refusal is the proxy's to report: the keeper is not read under it.
+	const missing = await run({ proxyResult: { proxyMissing: "pi-dispatch-egress-proxy" }, keeper: { code: 125, stdout: "" } });
+	assert.deepEqual(missing.result, { proxyMissing: "pi-dispatch-egress-proxy" });
+	assert.deepEqual(missing.reads, []);
+	// Nothing cached across jobs: the keeper and the proxy's start are read again on every call.
+	const reads = [];
+	const pre = mod.keeperPreflight(async () => OK, { armed: true, info: async () => ({ answered: true, info: { version: "4.9.3" } }), readKeeper: async (args) => (reads.push(args), args.at(-1) === "pi-dispatch-netns-keeper" ? KEEPER() : { code: 0, stdout: "1010000\n" }), now: () => NOW });
+	await pre({});
+	await pre({});
+	assert.equal(reads.length, 4);
+});
+
+test("the podman bundle's egress preflight reads the keeper through podman on 4.x (#458)", { skip }, async () => {
+	// Every inspect answers `running`: the proxy's `.State.Status` (#453) admits, and the keeper's read gets a bare word.
+	const fake = fakePodman({ answers: { inspect: { code: 0, stdout: "running\n" } } });
+	const b = bundle({ spawnFn: fake.spawnFn, egress: true, readInfo: async () => ({ answered: true, info: { version: "4.9.3", rootless: true, serviceIsRemote: false } }) });
+	const result = await b.egressPreflight({});
+	assert.ok(fake.calls.some((c) => c[0] === "podman" && c[1] === "inspect" && c.at(-1) === "pi-dispatch-netns-keeper"), fake.calls.map((c) => c.join(" ")).join("\n"));
+	// A bare `running` carries no network mode, networks or start: not holding, so retried, and said.
+	assert.equal(result.unavailable, "pi-dispatch-egress-proxy");
+	assert.match(result.keeper, /^the rootless network keeper pi-dispatch-netns-keeper is running on the unreported network mode, not on its pi-dispatch-netns-keeper bridge network, so it holds nothing open, and on Podman 4\.9\.3 /);
+	// The proxy is read first (issue #453's `.State.Status`), then the keeper: the order the preflight gates in.
+	const inspects = fake.calls.filter((c) => c[0] === "podman" && c[1] === "inspect").map((c) => c.at(-1));
+	assert.deepEqual(inspects.slice(0, 2), ["pi-dispatch-egress-proxy", "pi-dispatch-netns-keeper"]);
+	assert.ok(fake.calls.some((c) => c[0] === "podman" && c[1] === "inspect" && c.includes("--format={{.State.StartedAt.UnixMilli}}") && c.at(-1) === "pi-dispatch-egress-proxy"), "the proxy's start, through podman");
+});

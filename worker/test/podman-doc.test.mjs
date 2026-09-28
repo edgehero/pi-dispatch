@@ -282,8 +282,44 @@ test("the native setup's proxy is the compose file's image, under the name the w
 	assert.ok(image, "the compose file pins the proxy by digest");
 	// Fully qualified for Podman, whose short-name resolution may refuse or prompt where Docker assumes docker.io.
 	assert.ok(block.includes(` docker.io/${image}\n`), `the command runs docker.io/${image}`);
-	assert.equal(block.split("sha256:").length - 1, 1, "one image, one digest");
+	// Two containers since issue #458, the proxy and the keeper, and both run the compose file's digest: one image.
+	const digests = [...block.matchAll(/sha256:[0-9a-f]*/g)].map((m) => m[0]);
+	assert.equal(digests.length, 2, "two containers, one digest each");
+	assert.deepEqual(new Set(digests), new Set([image.slice(image.indexOf("sha256:"))]), "both run the compose file's digest");
 	assert.match(block, new RegExp(`--name ${DEFAULT_EGRESS_PROXY} `), "the name the worker attaches to each job network");
+});
+
+// Issue #458: the by-hand keeper restates its Quadlet unit, and a hand-started keeper with a flag the unit does not
+// set (or without one it does) would be a different container than the one the page says is safe. So the command is
+// DERIVED from the shipped unit, key by key, and must be exactly that: no published port, no mount, nothing extra.
+test("the native setup's by-hand keeper is exactly the flags its shipped Quadlet unit generates (#458)", () => {
+	const start = doc.indexOf("<!-- PODMAN-NATIVE-PROXY -->");
+	const end = doc.indexOf("<!-- /PODMAN-NATIVE-PROXY -->");
+	const lines = doc.slice(start, end).replace(/\\\n\s*/g, "").split("\n").map((l) => l.trim());
+	const unit = readFileSync(new URL("../../deploy/pi-dispatch-netns-keeper.container", import.meta.url), "utf8");
+	const net = readFileSync(new URL("../../deploy/pi-dispatch-netns-keeper.network", import.meta.url), "utf8");
+	const key = (text, k) => {
+		const found = [...text.matchAll(new RegExp(`^${k}=(.*)$`, "gm"))].map((m) => m[1]);
+		assert.equal(found.length, 1, `${k} once`);
+		return found[0];
+	};
+	const name = key(net, "NetworkName");
+	assert.equal(key(net, "Internal"), "true");
+	assert.equal(key(net, "DisableDNS"), "true");
+	assert.ok(lines.includes(`podman network create --internal --disable-dns ${name}`), "its network: internal, no DNS");
+	assert.equal(key(unit, "ReadOnly"), "true");
+	assert.equal(key(unit, "NoNewPrivileges"), "true");
+	const expected = [
+		"podman", "run", "-d", "--name", key(unit, "ContainerName"), "--network", name,
+		"--read-only", `--cap-drop=${key(unit, "DropCapability")}`, "--security-opt=no-new-privileges", `--user=${key(unit, "User")}:${key(unit, "Group")}`,
+		...(key(unit, "RunInit") === "true" ? ["--init"] : []),
+		...key(unit, "PodmanArgs").split(/\s+/),
+		key(unit, "Image"),
+		key(unit, "Exec"),
+	];
+	const run = lines.find((l) => l.startsWith(`podman run -d --name ${key(unit, "ContainerName")} `));
+	assert.ok(run, "the keeper's run command is on the page");
+	assert.deepEqual(run.split(/\s+/), expected);
 });
 
 // The real-host table (issue #355). Its rows are measurements, which no source can derive, so what is pinned is the

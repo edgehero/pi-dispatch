@@ -1171,7 +1171,7 @@ test("wizard: PI_BACKENDS=podman asks podman, never docker, runs up with it, and
   plantRuntime(dir, mod.RUNTIME_VERSION);
   let dockerProbes = 0;
   let podmanProbes = 0;
-  const { ui, notes } = wizardUi({
+  const { ui, notes, seen } = wizardUi({
     select: ["Guided setup", "Skip", "Skip"], // intent, worker, trigger edge: no runtime gate on a green podman
     input: [dir],
     confirm: [true, false, false], // up accepted; pointer, github declined
@@ -1197,6 +1197,8 @@ test("wizard: PI_BACKENDS=podman asks podman, never docker, runs up with it, and
   assert.equal(dockerProbes, 0, "a podman deployment is never asked about docker");
   assert.equal(podmanProbes, 1);
   assert.equal(attached[0].env.PI_BACKENDS, "podman", "up itself runs the podman venue");
+  // Issue #458: what up starts on this venue, named as up's own plan names it (worker/src/podman-stack.mjs QUADLET_FILES).
+  assert.match(seen.confirm[0].message, /then Valkey, the egress proxy and its rootless network keeper as Quadlet units/);
   assert.match(readFileSync(join(dir, ".env"), "utf8"), /^PI_BACKENDS=podman$/m, "the service reads the venue from the file");
   assert.ok(notes.some((n) => /PI_BACKENDS=podman written into/.test(n.m)));
 });

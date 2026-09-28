@@ -51,7 +51,7 @@
  */
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir, release as osRelease, tmpdir, userInfo } from "node:os";
-import { STACK_KEYS, readLinger } from "./podman-stack.mjs";
+import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_START, STACK_KEYS, STARTED_AT_FORMAT, judgeNetnsKeeper, netnsKeeperRemedy, podmanNeedsNetnsKeeper, proxyRestartAdvice, readLinger } from "./podman-stack.mjs";
 import { dirname, isAbsolute, join, delimiter, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
@@ -199,6 +199,9 @@ export async function runDoctor(env = process.env, deps = {}) {
 		// here, so --live measured the real clock and a pinned "in 0 ms" read "1 ms" under load.
 		now,
 		delay,
+		// Issue #458 (PR #463 round 2): the clock the keeper's age is judged on, epoch ms. Its own name, not `now`: `--live`
+		// pairs `now` with `delay`, and a clock that does not advance without its `delay` would never reach a deadline.
+		wallClock = Date.now,
 	} = deps;
 	// The facts a --live pass needs from the collection it follows (the endpoint read, docker and the image, the
 	// egress canary's readings), filled by collectChecks rather than re-probed.
@@ -251,7 +254,7 @@ export async function runDoctor(env = process.env, deps = {}) {
 			env = venue.env;
 		}
 	}
-	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, isAlive, pid, runTimeouts, live: live === true, venueChecks, userName, proxyFilesExist, serviceEnvFile: envText === null ? null : { text: envText, path: envPath, loader: serviceEnvLoader(platform) } };
+	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, serviceEnvFile: envText === null ? null : { text: envText, path: envPath, loader: serviceEnvLoader(platform) } };
 
 	let checks = await collectChecks(env, seams);
 	let failed = render(checks, out);
@@ -4767,6 +4770,8 @@ export async function podmanChecks(env, seams, { jobImage }) {
 	}
 	const proxy = egressProxyName(env);
 	let proxyRunning = null;
+	// Issue #458: why `--live` must not tear a network down under the proxy here, or null where nothing stops it.
+	let keeperBlocked = null;
 	if (armed !== false) {
 		// `.State.Status` (issue #453): only `running` carries traffic; Podman reports paused and between-restarts states
 		// with their own words (measured on 4.9.3 and 5.8.1).
@@ -4792,10 +4797,77 @@ export async function podmanChecks(env, seams, { jobImage }) {
 		if (proxyRunning && seams.live !== true) {
 			checks.push({ ok: false, warn: true, label: "podman: the egress allowlist is read back by `pi-dispatch doctor --live` on this venue, not by this run", fix: "run `pi-dispatch doctor --live`: its egress canary runs two containers built like a podman job's (the job user, --userns=keep-id, the venue's pinned flags) on a job-shaped --internal network under this account's Podman, one that must reach the provider through the proxy and one that must not reach an unlisted host" });
 		}
+		const keeper = await netnsKeeperCheck(spawn, info?.version, { proxy, now: typeof seams.wallClock === "function" ? seams.wallClock : Date.now });
+		keeperBlocked = keeper.keeperBlocked ?? null;
+		checks.push(keeper);
+		const keeperNetwork = await netnsKeeperNetworkCheck(spawn);
+		if (keeperNetwork) checks.push(keeperNetwork);
 	}
 
-	forLive = { run: true, user, relabel, info, imagePresent, egress: { armed, proxy, proxyRunning } };
+	forLive = { run: true, user, relabel, info, imagePresent, egress: { armed, proxy, proxyRunning, keeperBlocked } };
 	return { checks, observed, relabel, imagesReadable, imageDigest, forLive };
+}
+
+/**
+ * The rootless network keeper (issue #458), read with egress armed, whatever the proxy's name, since the worker
+ * disconnects any proxy from every egress job's network. Read and judged by the one shared rule (`judgeNetnsKeeper`):
+ * it counts only when RUNNING, in BRIDGE mode and ON its own network (issue #463 gate: a keeper on `--network none`,
+ * slirp4netns, pasta or host runs and holds nothing open), off stdout alone.
+ *
+ * ✗ on Podman 4.x (and on a version `podman info` did not give, which is no evidence of 5.x) whenever it does not hold:
+ * measured on 4.9.3, the first egress job's teardown then cuts the proxy's route out, and every egress job after it
+ * starts, spends and gets 503 from the proxy until the proxy restarts, while the proxy line above still reads ✓. ✓ on
+ * 5.x either way, where the teardown leaves the proxy alone (measured on 5.8.1) and the keeper is one idle container.
+ */
+const NETNS_KEEPER_FIX = `start it as the worker's account where its Quadlet unit is installed: ${NETNS_KEEPER_START} (else \`pi-dispatch service install\` or \`pi-dispatch up\` installs it, or start it by hand, docs/podman.md step 6; a container of its name that is not the shipped keeper must be removed first)`;
+
+export async function netnsKeeperCheck(spawn, version, { proxy = DEFAULT_EGRESS_PROXY, now = Date.now } = {}) {
+	const state = await runCmdCapture(spawn, "podman", ["inspect", NETNS_KEEPER_FORMAT, NETNS_KEEPER], { stdoutOnly: true });
+	// PR #463 round 2: the worker's own rule, read the worker's way: running for 3 s, and not started more than 15 s
+	// after the proxy (a keeper that restarted under a running proxy may already have let a teardown cut its route out).
+	// On 5.x neither rule is asked: there the keeper is one idle container and nothing depends on it.
+	const needs = podmanNeedsNetnsKeeper(version);
+	const proxyState = needs ? await runCmdCapture(spawn, "podman", ["inspect", STARTED_AT_FORMAT, proxy], { stdoutOnly: true }) : null;
+	const proxyStarted = proxyState?.code === 0 ? proxyState.output.trim() : "";
+	const keeper = judgeNetnsKeeper({ code: state.code, stdout: state.output }, needs ? { now: now(), proxyStartedMs: /^\d+$/.test(proxyStarted) ? Number(proxyStarted) : null } : {});
+	if (keeper.holds) {
+		return { ok: true, label: `podman: rootless network keeper running under this account's Podman on its own bridge network (${NETNS_KEEPER}), so a job's network teardown cannot cut the proxy's route out` };
+	}
+	const where = `${NETNS_KEEPER} ${keeper.problem}`;
+	if (!needs) {
+		return { ok: true, label: `podman: rootless network keeper ${where}, which Podman ${version} does not need: its job network teardown leaves the proxy's route out alone` };
+	}
+	const on = `Podman ${typeof version === "string" && version.trim() ? version.trim() : "of an unreported version"}`;
+	return {
+		ok: false,
+		// Not rendered: what `--live` reads to run nothing that detaches the proxy (`podmanEgressCanary`, `runLiveProbes`).
+		keeperBlocked: `the rootless network keeper ${where} on ${on}, where tearing down a network the proxy is on would cut the proxy's route out (issue #458)`,
+		label: keeper.restartProxy
+			? `podman: rootless network keeper ${where}: on ${on}, so every egress job may get 503 from the proxy until the proxy restarts, and the worker retries each one rather than start it`
+			: `podman: rootless network keeper ${where}: on ${on}, the first egress job's network teardown then cuts the proxy's route out, and every egress job after it gets 503 from the proxy`,
+		fix: keeper.restartProxy
+			? `${netnsKeeperRemedy(keeper, proxy)}. The keeper itself is fine; a proxy started after it counts again. If egress still fails after that, docs/podman.md has the aardvark-dns repair`
+			: `${keeper.thenRestartProxy ? `${NETNS_KEEPER_FIX}, then ${proxyRestartAdvice(proxy)}, since the proxy has been up since before it` : NETNS_KEEPER_FIX}. \`pi-dispatch doctor --live\` runs no egress canary and no peer networks here until it holds, since their teardown is the same trigger. If egress still fails after that, docs/podman.md has the aardvark-dns repair`,
+	};
+}
+
+/**
+ * The keeper's network, as it IS (PR #463 round 3). Its units create it with `--ignore`, which keeps a network of that
+ * name that already exists whatever its options, so one made by hand without `--internal` or with DNS on would stay
+ * that way unseen, and a keeper on it has a route out. ✗ unless `podman network inspect` says internal and DNS off, on
+ * every Podman version (it is about what the keeper can reach, not about the 4.x defect); nothing when the network is
+ * not there, which the keeper line above already covers; ⚠ when podman answered in words this cannot read.
+ */
+export async function netnsKeeperNetworkCheck(spawn) {
+	const read = await runCmdCapture(spawn, "podman", ["network", "inspect", "--format", "{{.Internal}} {{.DNSEnabled}}", NETNS_KEEPER], { stdoutOnly: true });
+	if (read.code !== 0) return null;
+	const answer = read.output.trim();
+	if (answer === "true false") return { ok: true, label: `podman: the keeper's network ${NETNS_KEEPER} is internal with DNS off, so the keeper reaches nothing` };
+	const fix = `remove the network and restart the keeper units, which recreate it as shipped: systemctl --user stop ${NETNS_KEEPER}.service; podman network rm ${NETNS_KEEPER}; ${NETNS_KEEPER_START}`;
+	const m = /^(true|false) (true|false)$/.exec(answer);
+	if (!m) return { ok: false, warn: true, label: `podman: whether the keeper's network ${NETNS_KEEPER} is internal with DNS off could not be read (podman said ${quotedShown(answer)})`, fix };
+	const wrong = [m[1] !== "true" ? "not internal (it has a route out)" : null, m[2] !== "false" ? "DNS on" : null].filter(Boolean).join(" and ");
+	return { ok: false, label: `podman: the keeper's network ${NETNS_KEEPER} is ${wrong}, which is not the network this project ships: its units create it with --ignore, which keeps an existing network of that name whatever its options`, fix };
 }
 
 /** The two SELinux types a container may read a bind mount under without it being relabelled (container-selinux). */
@@ -5145,7 +5217,7 @@ export async function podmanLiveChecks(env, seams, facts) {
 	const run = liveRunVia(spawn, { bin: "podman" });
 	const image = facts.jobImage ?? env.PI_JOB_IMAGE ?? "pi-job:latest";
 	const canary = await podmanEgressCanary({ podman, readInfo, run, image, pid, isAlive, announce: (line) => out(`\nread back on podman: ${line}\n`) });
-	const egress = { armed: podman.egress.armed, results: canary.results, proxy: podman.egress.proxy, proxyRunning: podman.egress.proxyRunning };
+	const egress = { armed: podman.egress.armed, results: canary.results, proxy: podman.egress.proxy, proxyRunning: podman.egress.proxyRunning, keeperBlocked: podman.egress.keeperBlocked ?? null };
 	const result = await runLiveProbes({
 		image,
 		endpoint: podman.info,
@@ -5208,6 +5280,12 @@ export async function podmanLiveChecks(env, seams, facts) {
 async function podmanEgressCanary({ podman, readInfo, run, image, pid, isAlive, announce = () => {} }) {
 	const none = { checks: [], results: [] };
 	if (podman.egress?.armed === false) return none;
+	// Issue #458: on Podman 4.x without the keeper, the canary's own teardown (and the stale sweep's detach) is the step
+	// that cuts the proxy's route out, so neither runs: a read-back that breaks what it reads is worse than none. Said
+	// as ✗, beside the keeper line, and the egress verdict below says it was not read back because of it.
+	if (podman.egress?.keeperBlocked) {
+		return { checks: [{ ok: false, label: `podman: Egress policy: not proved, and no egress canary was run (nor a stale canary network swept), because ${podman.egress.keeperBlocked}`, fix: `${NETNS_KEEPER_FIX}, then re-run \`pi-dispatch doctor --live\`` }], results: [] };
+	}
 	const again = await readInfo();
 	if (!(again?.answered && again.info?.serviceIsRemote === false)) {
 		return { checks: [{ ok: false, warn: true, label: "podman: Egress policy: not proved, because this shell's podman CLI is not observed to point at this host, so no canary container was started", fix: "fix what the podman lines above say about this account's Podman service (CONTAINER_HOST, or a service that did not answer), then re-run `pi-dispatch doctor --live`" }], results: [] };

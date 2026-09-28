@@ -1,0 +1,18 @@
+# Quadlet network for the rootless network keeper on the native rootless `podman` venue (issue #458,
+# docs/podman.md): a network of the keeper's OWN, with nothing else ever on it.
+#
+# Installed with pi-dispatch-netns-keeper.container, while the egress policy is armed. Podman's generator turns it
+# into pi-dispatch-netns-keeper-network.service, which the keeper's unit requires. Internal= gives it no route out
+# and DisableDNS= no aardvark-dns entry, so the one container on it can reach nothing at all, not even the proxy:
+# jobs live on their own per-job `--internal` networks, which have no route to this subnet.
+#
+# NEVER REMOVE IT. Measured on Podman 4.9.3: `podman network rm -f` of this network kills the keeper, and a `podman
+# network prune` or `podman system prune` run while the keeper is stopped removes it (with the keeper running, both
+# leave it). Either way the keeper's unit cannot start again while this network's unit stays `active` (it ran once and
+# exited), until `systemctl --user reset-failed` and a restart of both units. Its name is outside every prefix a
+# pi-dispatch sweep removes.
+
+[Network]
+NetworkName=pi-dispatch-netns-keeper
+Internal=true
+DisableDNS=true

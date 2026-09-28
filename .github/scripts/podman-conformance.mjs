@@ -17,6 +17,14 @@
  *     its gate, exactly as `pi-dispatch doctor --live` runs it on this venue, with doctor's own egress canary
  *     (`runEgressCanary`, issue #431) under the same Podman, as `--live` runs it there.
  *
+ * AND ONE CASE OF ITS OWN, run before the harness (issue #458): two egress-armed jobs in sequence through the same
+ * bundle built with egress on, so each one's network is made and torn down by the worker's own `createJobNetwork` and
+ * `removeJobNetwork`, and after EACH teardown doctor's canary reads the proxy's route to the provider again. On Podman
+ * 4.9 the teardown's `network disconnect` of the proxy kills this account's rootless network helper whenever no other
+ * bridge container runs, and the proxy has no route out from then on; the one read this script took before, on a
+ * fresh proxy ahead of any teardown, could not see that. The rootless network keeper
+ * (deploy/pi-dispatch-netns-keeper.container) is what keeps it green, so the workflow starts it beside the proxy.
+ *
  * Run it AS THE WORKER'S ACCOUNT, with the job image in that account's own store, and with the worker STOPPED: the
  * harness calls the bundle's real `reap`, which removes every `pi-job-` container in this account's store, so this
  * refuses to start while any exists. PI_EGRESS is read as the worker reads it (on unless `0`), and with it on the
@@ -58,7 +66,8 @@ const { READ_BACK_BY_A_LIVE_PROBE, UNVERIFIED_BY_THIS_HARNESS, runBackendConform
 const { SHIPPED_IMAGE_UID } = await load("worker/src/container-spec.mjs");
 const { liveRunVia, runEgressCanary } = await load("worker/src/doctor.mjs");
 const { buildPodmanRunArgs } = await load("worker/src/docker-run.mjs");
-const { egressArmed, egressProxyName } = await load("worker/src/egress.mjs");
+const { egressArmed, egressProxyName, networkNameFor } = await load("worker/src/egress.mjs");
+const { NETNS_KEEPER, NETNS_KEEPER_FORMAT, judgeNetnsKeeper } = await load("worker/src/podman-stack.mjs");
 const { runLiveProbes } = await load("worker/src/live-probes.mjs");
 
 const refuse = (why) => {
@@ -138,7 +147,14 @@ const backend = makePodmanBackend({
 	backendFloor: { isolation: "enforced" },
 });
 
+// Issue #458: the same bundle with egress ON, for `egressAcrossTeardowns`: its runContainer makes each job's
+// `--internal` network, attaches the proxy, and in its `finally` detaches the proxy and removes the network, which is
+// the step Podman 4.9 turns into a dead route out. The harness's own probes keep `egress: false` above, unchanged.
+const egressBackend = armed === true ? makePodmanBackend({ image: probeImage, hostEnv: { ...process.env, ANTHROPIC_API_KEY: "conformance-probe-not-a-key" }, egress: true, egressProxy: proxy, readInfo, onOutput: () => {}, euid, egid }) : null;
+
 let probes = 0;
+// The container name of the last probe, so a caller can find the network the worker made for it (`networkNameFor`).
+let lastProbeName = null;
 /** Wait until `podman ps` lists `name` running, or give up after `ms`. */
 async function awaitRunning(name, ms = 60_000) {
 	const deadline = Date.now() + ms;
@@ -180,6 +196,7 @@ async function probe(bundle, { exitCode, aborted = false }) {
 	const who = await bundle.jobUserPreflight(job, { capabilities: img.capabilities ?? [], observed });
 	if (!who?.user) throw new Error(`jobUserPreflight gave no job user: ${JSON.stringify(who)}`);
 	const name = bundle.containerName(jobId);
+	lastProbeName = name;
 	const controller = new AbortController();
 	const running = bundle.runContainer({ job, token: null, prepared: { jobDir, workspace }, secrets: {}, name, signal: controller.signal, user: who.user, home: who.home, relabel: who.relabel });
 	try {
@@ -216,6 +233,37 @@ async function egressCanary() {
 	const canary = await runEgressCanary({ run: liveRunVia(spawn, { bin: "podman" }), bin: "podman", proxy, image, pid: process.pid, user: decision.user });
 	for (const check of canary.checks) if (!check.ok) console.error(`podman-conformance: ${check.label}`);
 	return { results: canary.results, proxyRunning };
+}
+
+/**
+ * Issue #458: two egress-armed jobs in sequence, each followed by a fresh read of the proxy's route to the provider
+ * (doctor's canary, which proves the route a job's provider call takes). Returns `{ ran, ok, detail }`. Every reading
+ * is taken AFTER a job's network was torn down by the worker's own code, which is the one order that shows the Podman
+ * 4.9 defect: measured without the keeper, job 1's teardown left the proxy with no route out and every later egress
+ * job got 503. The keeper's state is read and named, so a red run says which of the two it was.
+ */
+const TEARDOWN_RUNS = 2;
+async function egressAcrossTeardowns() {
+	if (armed !== true) return { ran: false, ok: true, detail: "PI_EGRESS is off, so no job network is torn down under a proxy" };
+	const state = judgeNetnsKeeper(await podman(["inspect", NETNS_KEEPER_FORMAT, NETNS_KEEPER]));
+	const keeper = `the rootless network keeper ${NETNS_KEEPER} ${state.holds ? "is running on its own bridge network" : state.problem}`;
+	// `.State.Status` "running", as the worker's egress preflight reads it (issue #453).
+	const running = await podman(["inspect", "--format={{.State.Status}}", proxy]);
+	if (running.code !== 0 || running.stdout.trim() !== "running") return { ran: false, ok: false, detail: `${proxy} is not running under this account's Podman, so nothing could be read (${keeper})` };
+	const steps = [];
+	for (let i = 1; i <= TEARDOWN_RUNS; i++) {
+		const result = await probe(egressBackend, { exitCode: 0 });
+		const network = networkNameFor(lastProbeName);
+		if (result?.code !== 0) return { ran: true, ok: false, detail: `egress job ${i} exited ${result?.code} instead of 0, after: ${steps.join("; ") || "nothing"} (${keeper})` };
+		// The teardown ran: the worker's `finally` removed the network, so the reading below is one taken after it.
+		if ((await podman(["network", "exists", network])).code === 0) return { ran: true, ok: false, detail: `egress job ${i}'s network ${network} is still there, so its teardown did not run (${keeper})` };
+		const canary = await runEgressCanary({ run: liveRunVia(spawn, { bin: "podman" }), bin: "podman", proxy, image, pid: process.pid, user: decision.user });
+		for (const check of canary.checks) if (!check.ok) console.error(`podman-conformance: after egress job ${i}'s teardown: ${check.label}`);
+		const reached = canary.results.find((r) => r.want === true)?.reached ?? null;
+		steps.push(`job ${i} exited 0 and its network was removed, then the provider was ${reached === true ? "reached" : reached === false ? "NOT reached" : "not read"} through ${proxy}`);
+		if (reached !== true) return { ran: true, ok: false, detail: `${steps.join("; ")}. On Podman 4.x a job network's teardown cuts the proxy's route out unless another bridge container runs (issue #458), and ${keeper}` };
+	}
+	return { ran: true, ok: true, detail: `${steps.join("; ")} (${keeper})` };
 }
 
 let ranAs = null;
@@ -258,7 +306,14 @@ async function readBack() {
 }
 
 let report;
+let teardowns;
 try {
+	// Before the harness, so its own egress read-back is also one taken after job teardowns rather than on a fresh proxy.
+	try {
+		teardowns = await egressAcrossTeardowns();
+	} catch (err) {
+		teardowns = { ran: false, ok: false, detail: `did not finish: ${err?.message ?? err}` };
+	}
 	report = await runBackendConformance(backend, { probe, withBrokenEnumeration, readBack });
 } finally {
 	await podman(["rmi", "-f", probeImage]);
@@ -285,6 +340,9 @@ for (const f of report.findings) {
 const userHeld = ranAs === euid;
 console.log(`  ${(userHeld ? "PASS" : "FAIL").padEnd(8)} job user: PID 1 ran as ${ranAs ?? "an unread uid"}, this account is ${euid}`);
 if (!userHeld) failures.push(`the job user: PID 1 ran as ${ranAs ?? "an unread uid"}, not ${euid}`);
+// Issue #458. Egress off is a skip, not a pass: there is then no teardown under a proxy to read.
+console.log(`  ${(!teardowns.ok ? "FAIL" : teardowns.ran ? "PASS" : "SKIP").padEnd(8)} egress after ${TEARDOWN_RUNS} job teardowns: ${teardowns.detail}`);
+if (!teardowns.ok) failures.push(`egress after ${TEARDOWN_RUNS} job teardowns: ${teardowns.detail}`);
 console.log("\n  not verified by this harness at all:");
 for (const [property, why] of Object.entries(UNVERIFIED_BY_THIS_HARNESS)) console.log(`    ${property}: ${why}`);
 

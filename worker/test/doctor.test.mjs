@@ -9,6 +9,7 @@ import { PassThrough } from "node:stream";
 import { CANARY_LINES, CANARY_PROBE_SLUGS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryProbeArgs, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, urlShown } from "../src/doctor.mjs";
 import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS } from "../src/init.mjs";
 import { EGRESS_CANARY_NET_PREFIX, egressCanaryProbe } from "../src/egress.mjs";
+import { LIVE_PREFIX } from "../src/live-probes.mjs";
 import { JOB_USER_FIX, parseDaemonFacts } from "../src/job-user.mjs";
 import { OBSERVATION_FIX } from "../src/backends.mjs";
 import { PODMAN_JOB_USER_FIX } from "../src/backend-podman.mjs";
@@ -5895,7 +5896,10 @@ test("doctor's two docker runners spawn the bin they are given, and docker when 
 	// runtime from a variable, the in-image gh probe, which is docker's with `local` and podman's without it. A new podman
 	// spawn, or a docker one turned into a variable, lands here as a diff rather than going unseen.
 	const direct = [...doctorSource.matchAll(/runCmd(?:Capture)?\(\w*[sS]pawn, "podman", \[("[^"]*", "[^"]*")/g)].map((m) => m[1]);
-	assert.deepEqual(direct, ['"image", "inspect"', '"image", "inspect"', '"pull", "ghcr.io/edgehero/pi-job:latest"', '"tag", "ghcr.io/edgehero/pi-job:latest"', '"inspect", "--format={{.State.Status}}"']);
+	assert.deepEqual(direct, ['"image", "inspect"', '"image", "inspect"', '"pull", "ghcr.io/edgehero/pi-job:latest"', '"tag", "ghcr.io/edgehero/pi-job:latest"', '"inspect", "--format={{.State.Status}}"', '"network", "inspect"']);
+	// Issue #458 added the last (PR #463 round 3): the keeper network's options. And the rootless network keeper's read, whose format is the shared constant (podman-stack.mjs), so the
+	// literal matcher above cannot see it; it is pinned by its own shape, exactly once.
+	assert.equal([...doctorSource.matchAll(/runCmd(?:Capture)?\(\w*[sS]pawn, "podman", \["inspect", NETNS_KEEPER_FORMAT, NETNS_KEEPER\]/g)].length, 1);
 	const chosen = [...doctorSource.matchAll(/runCmd(?:Capture)?\(\w*[sS]pawn, ([a-z]\w*Bin)\b/g)].map((m) => m[1]);
 	assert.deepEqual(chosen, ["ghProbeBin"]);
 });
@@ -5922,10 +5926,21 @@ const podmanFsWith = (controllers, self = null) => ({
 	readFileSync: (p) => (p === PODMAN_USER_MANAGER && controllers !== null ? controllers : p === "/proc/self/cgroup" && self !== null ? self : noHostFiles.readFileSync(p)),
 });
 // A podman host that answers everything, docker absent altogether. "docker" LAST, so it catches every docker call.
-const podmanPlan = ({ info = PODMAN_INFO(), capabilities = "anyUid", image = true, proxy = "running" } = {}) => ({
+// Issue #458 (PR #463 round 2): when the keeper and the proxy started, epoch ms. The keeper long before the proxy, both
+// long before any clock a test runs on, so the age and order rules hold unless a test moves them (with its own `now`).
+const KEEPER_STARTED = 1_000_000;
+const PROXY_STARTED = 2_000_000;
+const podmanPlan = ({ info = PODMAN_INFO(), capabilities = "anyUid", image = true, proxy = "running", keeper = "running", proxyStarted = PROXY_STARTED, keeperNet = "true false" } = {}) => ({
 	"podman info": { code: 0, output: `${info}\n` },
 	"podman image inspect --format={{.Id}}": image ? { code: 0, output: `abc|0.80.7||${capabilities}\n` } : { code: 125, output: "" },
+	// Issue #458: the rootless network keeper's state, network mode, networks and start, read beside the proxy's whenever
+	// egress is armed. BEFORE the proxy's key: its format begins with the proxy's `--format={{.State.Status}}`, and the fake
+	// takes the first matching prefix. A bare state word is the shipped shape; a full `state|mode|nets,|started` is as given.
+	"podman inspect --format={{.State.Status}}|{{.HostConfig.NetworkMode}}": keeper === null ? { code: 125, output: "" } : { code: 0, output: `${keeper.includes("|") ? keeper : `${keeper}|bridge|pi-dispatch-netns-keeper,|${KEEPER_STARTED}`}\n` },
+	"podman inspect --format={{.State.StartedAt.UnixMilli}}": proxyStarted === null ? { code: 125, output: "" } : { code: 0, output: `${proxyStarted}\n` },
 	"podman inspect --format={{.State.Status}}": proxy === null ? { code: 125, output: "" } : { code: 0, output: `${proxy}\n` },
+	// PR #463 round 3: the keeper network's options, as shipped unless a test says otherwise.
+	"podman network inspect --format {{.Internal}} {{.DNSEnabled}}": keeperNet === null ? { code: 125, output: "" } : { code: 0, output: `${keeperNet}\n` },
 	docker: "enoent",
 });
 const podmanEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", PI_BACKENDS: "podman", PI_EGRESS: "0", ...extra });
@@ -5998,6 +6013,10 @@ const MIXED_PIN = {
 			// Issue #431: the one line that moved, and on purpose: the podman venue's allowlist is now read back by --live.
 			"⚠ podman: the egress allowlist is read back by `pi-dispatch doctor --live` on this venue, not by this run",
 			"    → run `pi-dispatch doctor --live`: its egress canary runs two containers built like a podman job's (the job user, --userns=keep-id, the venue's pinned flags) on a job-shaped --internal network under this account's Podman, one that must reach the provider through the proxy and one that must not reach an unlisted host",
+			// Issue #458: the one line added, with egress armed on this venue.
+			"✓ podman: rootless network keeper running under this account's Podman on its own bridge network (pi-dispatch-netns-keeper), so a job's network teardown cannot cut the proxy's route out",
+			// PR #463 round 3: the keeper network's options, read as they are.
+			"✓ podman: the keeper's network pi-dispatch-netns-keeper is internal with DNS off, so the keeper reaches nothing",
 			"⚠ GITHUB_AUTH_SOURCE=gh forwards your full gh login into every token-carrying job container (scopes: gist, read:org, repo, workflow)",
 			"    → this token carries broad scopes (workflow) -- use a fine-grained PAT (GITHUB_AUTH_SOURCE=pat) or a GitHub App for per-job scoping -- see SECURITY.md",
 			"✓ gh authenticates inside the job image (pi-job:latest)",
@@ -6350,6 +6369,121 @@ test("with egress armed the podman proxy is read under podman, and the docker eg
 	const stopped = await run("exited");
 	assert.match(stopped.text, /✗ podman: egress proxy is stopped under this account's Podman/);
 	assert.doesNotMatch(stopped.text, /allowlist is read back by/, "only said beside a running proxy");
+});
+
+// Issue #458: on Podman 4.x a job's network teardown cuts the proxy's route out unless another bridge container runs,
+// and the proxy line above stays ✓ while every later egress job gets 503. So the keeper is read beside the proxy, and
+// its absence is ✗ exactly where it breaks egress: 4.x, or a version podman info did not give.
+test("with egress armed the rootless network keeper is read, and a missing one is ✗ on Podman 4.x only (#458)", async () => {
+	const run = async ({ version = "4.9.3", keeper = "running", env = { PI_EGRESS: "1" } } = {}) => {
+		const { out, text } = capture();
+		const calls = [];
+		const info = JSON.stringify({ ...JSON.parse(PODMAN_INFO()), version: { Version: version } });
+		const code = await runDoctor(podmanEnv(env), podmanDeps(out, podmanPlan({ info, keeper }), calls));
+		return { code, text: text(), calls };
+	};
+	const held = await run();
+	assert.equal(held.code, 0);
+	assert.match(held.text, /✓ podman: rootless network keeper running under this account's Podman on its own bridge network \(pi-dispatch-netns-keeper\), so a job's network teardown cannot cut the proxy's route out\n/);
+	assert.deepEqual(held.calls.filter((c) => c.cmd === "podman" && c.args[0] === "inspect").map((c) => c.args), [
+		["inspect", "--format={{.State.Status}}", "pi-dispatch-egress-proxy"],
+		["inspect", "--format={{.State.Status}}|{{.HostConfig.NetworkMode}}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}|{{.State.StartedAt.UnixMilli}}", "pi-dispatch-netns-keeper"],
+		["inspect", "--format={{.State.StartedAt.UnixMilli}}", "pi-dispatch-egress-proxy"],
+	]);
+	const absent = await run({ keeper: null });
+	assert.equal(absent.code, 1, "a missing keeper on 4.x fails doctor");
+	assert.match(absent.text, /✗ podman: rootless network keeper pi-dispatch-netns-keeper is not under this account's Podman: on Podman 4\.9\.3, the first egress job's network teardown then cuts the proxy's route out, and every egress job after it gets 503 from the proxy\n {4}→ start it as the worker's account where its Quadlet unit is installed: systemctl --user reset-failed pi-dispatch-netns-keeper-network\.service pi-dispatch-netns-keeper\.service; systemctl --user restart pi-dispatch-netns-keeper-network\.service pi-dispatch-netns-keeper\.service \(else `pi-dispatch service install` or `pi-dispatch up` installs it/);
+	const exited = await run({ keeper: "exited" });
+	assert.equal(exited.code, 1);
+	assert.match(exited.text, /✗ podman: rootless network keeper pi-dispatch-netns-keeper is exited under this account's Podman: on Podman 4\.9\.3/);
+	// Issue #463's gate: RUNNING is not holding. What 4.9.3 printed for a keeper of this name on each other network mode
+	// (measured), and one on another bridge only: each runs, protects nothing here, and is ✗ saying which.
+	for (const [shape, words] of [
+		["running|none|none,", /is running on the none network mode, not on its pi-dispatch-netns-keeper bridge network, so it holds nothing open/],
+		["running|slirp4netns|", /is running on the slirp4netns network mode/],
+		["running|pasta|", /is running on the pasta network mode/],
+		["running|host|host,", /is running on the host network mode/],
+		["running|bridge|pdn-other,", /is running but not attached to its pi-dispatch-netns-keeper bridge network \(it is on pdn-other\)/],
+		["paused|bridge|pi-dispatch-netns-keeper,", /is paused under this account's Podman/],
+	]) {
+		const off = await run({ keeper: shape });
+		assert.equal(off.code, 1, shape);
+		assert.match(off.text, new RegExp(`✗ podman: rootless network keeper pi-dispatch-netns-keeper ${words.source}`), shape);
+	}
+	const twoNets = await run({ keeper: `running|bridge|pdn-other,pi-dispatch-netns-keeper,|${KEEPER_STARTED}` });
+	assert.equal(twoNets.code, 0, "on its own network, whatever else it is on, it is a bridge member and holds");
+	// PR #463 round 2, on an injected clock: a keeper up for under 3 s is not yet counted (a crash loop reads as running
+	// for moments), and one that started more than 15 s after the proxy asks for a PROXY restart, since a teardown
+	// while it was down may already have cut the proxy's route out and nothing outside shows it.
+	const at = async (keeper, now, proxyStarted = PROXY_STARTED) => {
+		const { out, text } = capture();
+		const info = JSON.stringify({ ...JSON.parse(PODMAN_INFO()), version: { Version: "4.9.3" } });
+		const code = await runDoctor(podmanEnv({ PI_EGRESS: "1" }), podmanDeps(out, podmanPlan({ info, keeper, proxyStarted }), [], { wallClock: () => now }));
+		return { code, text: text() };
+	};
+	const young = await at(`running|bridge|pi-dispatch-netns-keeper,|${PROXY_STARTED + 15_000}`, PROXY_STARTED + 17_500);
+	assert.equal(young.code, 1);
+	assert.match(young.text, /✗ podman: rootless network keeper pi-dispatch-netns-keeper has been running for only 2\.5 s, and a keeper that keeps dying reads as running for a moment at a time; it counts once it has run for 3 s: on Podman 4\.9\.3/);
+	const settled = await at(`running|bridge|pi-dispatch-netns-keeper,|${PROXY_STARTED + 15_000}`, PROXY_STARTED + 18_000);
+	assert.equal(settled.code, 0, "3 s up, and within 15 s of the proxy: holds");
+	const late = await at(`running|bridge|pi-dispatch-netns-keeper,|${PROXY_STARTED + 15_001}`, PROXY_STARTED + 600_000);
+	assert.equal(late.code, 1);
+	assert.match(late.text, /✗ podman: rootless network keeper pi-dispatch-netns-keeper started 15 s after the egress proxy did, so it was down while the proxy ran, and a job teardown in that gap would have cut the proxy's route out for good, which nothing can see from outside: on Podman 4\.9\.3, so every egress job may get 503 from the proxy until the proxy restarts, and the worker retries each one rather than start it\n {4}→ restart the egress proxy once no job is running: systemctl --user restart pi-dispatch-egress-proxy\.service/);
+	// PR #463 round 3: a STOPPED keeper under a proxy up longer than the grace needs two steps, and the fix says both.
+	const stoppedLate = await at(`exited|bridge|pi-dispatch-netns-keeper,|${KEEPER_STARTED}`, PROXY_STARTED + 600_000);
+	assert.match(stoppedLate.text, /✗ podman: rootless network keeper pi-dispatch-netns-keeper is exited under this account's Podman[^\n]*\n {4}→ start it as the worker's account where its Quadlet unit is installed: systemctl --user reset-failed [^\n]*, then restart the egress proxy once no job is running: systemctl --user restart pi-dispatch-egress-proxy\.service \(podman restart pi-dispatch-egress-proxy for one started by hand\), since the proxy has been up since before it\./);
+	const stoppedFresh = await at(`exited|bridge|pi-dispatch-netns-keeper,|${KEEPER_STARTED}`, PROXY_STARTED + 10_000);
+	assert.doesNotMatch(stoppedFresh.text, /then restart the egress proxy/, "a proxy up under the grace: the keeper's start is enough");
+	// PR #463 round 3: the keeper's network is read as it IS; a widened one (its units' --ignore keeps it) is ✗.
+	const netAt = async (keeperNet) => {
+		const { out, text } = capture();
+		const calls = [];
+		const code = await runDoctor(podmanEnv({ PI_EGRESS: "1" }), podmanDeps(out, podmanPlan({ keeperNet }), calls));
+		return { code, text: text(), calls };
+	};
+	const shipped = await netAt("true false");
+	assert.equal(shipped.code, 0);
+	assert.match(shipped.text, /✓ podman: the keeper's network pi-dispatch-netns-keeper is internal with DNS off, so the keeper reaches nothing\n/);
+	assert.ok(shipped.calls.some((c) => c.cmd === "podman" && c.args.join(" ") === "network inspect --format {{.Internal}} {{.DNSEnabled}} pi-dispatch-netns-keeper"));
+	for (const [answer, words] of [["false false", "not internal \\(it has a route out\\)"], ["true true", "DNS on"], ["false true", "not internal \\(it has a route out\\) and DNS on"]]) {
+		const widened = await netAt(answer);
+		assert.equal(widened.code, 1, answer);
+		assert.match(widened.text, new RegExp(`✗ podman: the keeper's network pi-dispatch-netns-keeper is ${words}, which is not the network this project ships[^\\n]*\\n {4}→ remove the network and restart the keeper units, which recreate it as shipped: systemctl --user stop pi-dispatch-netns-keeper\\.service; podman network rm pi-dispatch-netns-keeper; systemctl --user reset-failed`), answer);
+	}
+	const odd = await netAt("<no value>");
+	assert.match(odd.text, /⚠ podman: whether the keeper's network pi-dispatch-netns-keeper is internal with DNS off could not be read/);
+	const absentNet = await netAt(null);
+	assert.doesNotMatch(absentNet.text, /keeper's network/, "no network: the keeper line already says what is missing");
+	// Pinned as a READ that exited 125, not a read never made (PR #463 final review): the inspect ran, and said nothing.
+	assert.ok(absentNet.calls.some((c) => c.cmd === "podman" && c.args.join(" ") === "network inspect --format {{.Internal}} {{.DNSEnabled}} pi-dispatch-netns-keeper"));
+	assert.equal(absentNet.code, 0, "and nothing failed for it");
+	const unreadStart = await at("running|bridge|pi-dispatch-netns-keeper,|", PROXY_STARTED);
+	assert.match(unreadStart.text, /✗ podman: rootless network keeper pi-dispatch-netns-keeper is running, but when it started could not be read/);
+	// The proxy's start not readable: the order cannot be judged, and is not held against the keeper.
+	const noProxyStart = await at(`running|bridge|pi-dispatch-netns-keeper,|${PROXY_STARTED + 600_000}`, PROXY_STARTED + 700_000, null);
+	assert.equal(noProxyStart.code, 0);
+	// On 5.x neither rule is asked, and the proxy's start is not even read.
+	const { out: o5, text: t5 } = capture();
+	const calls5 = [];
+	const info5 = JSON.stringify({ ...JSON.parse(PODMAN_INFO()), version: { Version: "5.8.1" } });
+	assert.equal(await runDoctor(podmanEnv({ PI_EGRESS: "1" }), podmanDeps(o5, podmanPlan({ info: info5, keeper: `running|bridge|pi-dispatch-netns-keeper,|${PROXY_STARTED + 600_000}` }), calls5, { wallClock: () => PROXY_STARTED + 600_500 })), 0, t5());
+	assert.ok(!calls5.some((c) => c.args.includes("--format={{.State.StartedAt.UnixMilli}}")));
+	const unread = await run({ version: "", keeper: "exited" });
+	assert.equal(unread.code, 1, "an unreported version is no evidence of 5.x");
+	assert.match(unread.text, /✗ podman: rootless network keeper pi-dispatch-netns-keeper is exited [^\n]*: on Podman of an unreported version, the first egress job's/);
+	for (const version of ["5.0.0", "5.8.1"]) {
+		const five = await run({ version, keeper: null });
+		assert.equal(five.code, 0, `Podman ${version} does not need it`);
+		assert.match(five.text, new RegExp(`✓ podman: rootless network keeper pi-dispatch-netns-keeper is not under this account's Podman, which Podman ${version.replaceAll(".", "\\.")} does not need`));
+	}
+	// Egress off: no proxy is ever disconnected, so neither is read.
+	const off = await run({ keeper: null, env: { PI_EGRESS: "0" } });
+	assert.equal(off.code, 0);
+	assert.doesNotMatch(off.text, /network keeper/);
+	assert.ok(!off.calls.some((c) => c.cmd === "podman" && c.args[0] === "inspect"), "no inspect with egress off");
+	// Whatever the proxy's name: the worker disconnects an operator's own proxy just the same.
+	const own = await run({ keeper: null, env: { PI_EGRESS: "1", PI_EGRESS_PROXY: "my-squid" } });
+	assert.match(own.text, /✗ podman: rootless network keeper pi-dispatch-netns-keeper is not under this account's Podman/);
 });
 
 test("the backend section judges the podman venue's words on its own observations, never the docker daemon's (#354)", () => {
@@ -6970,6 +7104,63 @@ test("doctor --live on a podman-only deployment with egress armed: the canary's 
 	assert.match(text(), /✓ podman: Egress policy reaches the provider[^\n]*\n✓ podman: Egress policy denies an unlisted host[^\n]*\n/);
 	assert.ok(text().indexOf("✓ podman: Egress policy denies an unlisted host") < text().indexOf("✓ read back on podman: egress holds"));
 	assert.equal(calls.filter((c) => c.cmd === "podman" && c.args[0] === "info").length, 3, "the section's read, the canary's re-ask, and the read-back's");
+});
+
+// Issue #458: on Podman 4.x (or an unreported version) with the keeper not running, every network teardown under the
+// proxy is the trigger, and `--live` makes three kinds of them: the canary's network, the stale sweeps' detaches, and
+// the jobToJobIsolation peers' networks. None may run there; each property says why it was not read back. With the
+// keeper running, or on 5.x, the same run reads everything back as before.
+test("doctor --live on Podman 4.x without the keeper runs no canary and no peer networks, and says why (#458)", async () => {
+	const env = liveEnv({ PI_EGRESS: "1", PI_BACKENDS: "podman" });
+	// `stale`: a peer network a dead run (pid 99) left with the proxy still on it, for the live sweep to meet.
+	const STALE = "pi-dispatch-live-peer1-99-abc-net";
+	const staleKeys = {
+		[`podman network ls --filter name=${LIVE_PREFIX}`]: { code: 0, output: `${STALE}\n` },
+		[`podman network inspect --format {{json .Containers}} ${STALE}`]: { code: 0, output: '{"x":{"Name":"pi-dispatch-egress-proxy"}}\n' },
+	};
+	const run = async ({ version, keeper, stale = false }) => {
+		const { out, text } = capture();
+		const calls = [];
+		const info = JSON.stringify({ ...JSON.parse(PODMAN_INFO()), version: { Version: version } });
+		const plan = { ...(stale ? staleKeys : {}), [`${PODMAN_PROBE}provider`]: 0, [`${PODMAN_PROBE}unlisted`]: 3, ...toPodman(liveOk({ uid: "1234" })), ...toPodman(livePeersOk({})), "podman network": 0, ...podmanPlan({ info, keeper }) };
+		const code = await runDoctor(env, { ...podmanDeps(out, plan, calls), live: true, liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n", ...instantClock() });
+		const lines = calls.map((c) => [c.cmd, ...c.args].join(" "));
+		return { code, text: text(), lines };
+	};
+	const touchesProxyNetworks = (lines) => lines.filter((l) => /pi-dispatch-egress-(doctor|probe)-|pi-dispatch-live-peer|network (connect|disconnect)/.test(l));
+	for (const version of ["4.9.3", ""]) {
+		const blocked = await run({ version, keeper: null });
+		assert.equal(blocked.code, 1, `${version || "unreported"}: fails`);
+		assert.deepEqual(touchesProxyNetworks(blocked.lines), [], `${version || "unreported"}: no canary, no sweep listing of canary networks, no peer network, no connect or disconnect`);
+		assert.match(blocked.text, /✗ podman: Egress policy: not proved, and no egress canary was run \(nor a stale canary network swept\), because the rootless network keeper pi-dispatch-netns-keeper is not under this account's Podman on Podman [^\n]*, where tearing down a network the proxy is on would cut the proxy's route out \(issue #458\)\n {4}→ start it as the worker's account where its Quadlet unit is installed: systemctl --user reset-failed /);
+		assert.match(blocked.text, /⚠ read back on podman: egress not read back: the egress canary was not run, because the rootless network keeper pi-dispatch-netns-keeper is not under this account's Podman/);
+		assert.match(blocked.text, /⚠ read back on podman: jobToJobIsolation not read back: no peer networks were built, because the rootless network keeper pi-dispatch-netns-keeper is not under this account's Podman/);
+		assert.doesNotMatch(blocked.text, /read back on podman: starting [^\n]*peer1/, "the announcement names no peers");
+		assert.match(blocked.text, /✓ read back on podman: isolation holds/, "what does not touch the proxy is still read back");
+	}
+	for (const [version, keeper] of [["4.9.3", "running"], ["5.8.1", null], ["5.8.1", "exited"]]) {
+		const held = await run({ version, keeper });
+		assert.equal(held.code, 0, `${version} keeper ${keeper}: ${held.text}`);
+		const touched = touchesProxyNetworks(held.lines);
+		assert.ok(touched.some((l) => l.startsWith("podman network create --internal pi-dispatch-egress-doctor-7")), `${version} keeper ${keeper}: the canary ran`);
+		assert.ok(touched.some((l) => l.startsWith("podman network disconnect -f pi-dispatch-live-peer1-7-n-net")), `${version} keeper ${keeper}: the peers ran`);
+		assert.match(held.text, /✓ read back on podman: egress holds/);
+		assert.match(held.text, /✓ read back on podman: jobToJobIsolation holds/);
+	}
+	// Issue #463's gate: a keeper RUNNING off its bridge network blocks exactly like a missing one.
+	const offBridge = await run({ version: "4.9.3", keeper: "running|none|none," });
+	assert.equal(offBridge.code, 1);
+	assert.deepEqual(touchesProxyNetworks(offBridge.lines), [], "a keeper on --network none holds nothing: no canary, no peers");
+	assert.match(offBridge.text, /no egress canary was run [^\n]*because the rootless network keeper pi-dispatch-netns-keeper is running on the none network mode/);
+	// The live sweep's side, end to end: a dead run's peer network with the proxy on it is LEFT, and said, while blocked
+	// (its detach is the trigger); swept, proxy detached, once the keeper holds.
+	const staleBlocked = await run({ version: "4.9.3", keeper: null, stale: true });
+	assert.deepEqual(staleBlocked.lines.filter((l) => / network (connect|disconnect|rm|create) /.test(` ${l.replace(/^podman /, "")} `) || /^podman network (connect|disconnect|rm|create)/.test(l)), [], "nothing connected, detached, removed or created");
+	assert.match(staleBlocked.text, new RegExp(`the stale network ${STALE} was left with pi-dispatch-egress-proxy attached, because the rootless network keeper pi-dispatch-netns-keeper is not under this account's Podman`));
+	const staleHeld = await run({ version: "4.9.3", keeper: "running", stale: true });
+	assert.ok(staleHeld.lines.includes(`podman network disconnect -f ${STALE} pi-dispatch-egress-proxy`), staleHeld.lines.join("\n"));
+	assert.ok(staleHeld.lines.includes(`podman network rm ${STALE}`));
+	assert.doesNotMatch(staleHeld.text, /was left with/);
 });
 
 test("a podman canary probe gets the first-start bound, and one the bound cut short is removed without podman's stop wait (#431)", async (t) => {

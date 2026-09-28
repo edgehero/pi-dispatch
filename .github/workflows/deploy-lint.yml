@@ -108,7 +108,7 @@ jobs:
             import { readFileSync, writeFileSync, existsSync } from 'node:fs';
             import { basename, join, resolve } from 'node:path';
             import { planStack } from './worker/src/podman-stack.mjs';
-            const plan = planStack({ components: { valkey: true, proxy: true }, templatesDir: resolve('worker/deploy'), deployDir: process.argv[1], home: '/nonexistent', fs: { readFileSync, existsSync } });
+            const plan = planStack({ components: { valkey: true, proxy: true, keeper: true }, templatesDir: resolve('worker/deploy'), deployDir: process.argv[1], home: '/nonexistent', fs: { readFileSync, existsSync } });
             if (plan.error) { console.error(plan.error); process.exit(1); }
             for (const f of plan.files) writeFileSync(join(process.argv[2], basename(f.path)), f.text);
           " "$deploy" "$units"
@@ -126,6 +126,7 @@ jobs:
           for needle in \
             'ExecStart=/usr/bin/podman network create --ignore pi-dispatch-valkey$' \
             'ExecStart=/usr/bin/podman network create --ignore pi-dispatch-egress-out$' \
+            'ExecStart=/usr/bin/podman network create --ignore --disable-dns --internal pi-dispatch-netns-keeper$' \
             '--name[= ]pi-dispatch-valkey ' \
             '--name[= ]pi-dispatch-egress-proxy ' \
             '--network[= ]pi-dispatch-valkey ' \
@@ -133,5 +134,26 @@ jobs:
             '--publish[= ]127\.0\.0\.1:6379:6379 ' \
             '--health-cmd[= ]"\[\\"bash\\",'; do
             grep -qE -- "$needle" generated.txt || { echo "::error::generated units lack: $needle"; exit 1; }
+          done
+          # The keeper's own flags (issue #458), read off ITS ExecStart line alone: `--read-only` or `--cap-drop` anywhere
+          # else in the generated units would otherwise satisfy a needle the keeper itself had lost.
+          keeper="$(grep -E '^ExecStart=/usr/bin/podman run .*--name[= ]pi-dispatch-netns-keeper ' generated.txt)"
+          test "$(printf '%s\n' "$keeper" | wc -l)" -eq 1 || { echo "::error::expected exactly one keeper ExecStart"; exit 1; }
+          for needle in \
+            ' --network[= ]pi-dispatch-netns-keeper ' \
+            ' --init ' \
+            ' --cap-drop[= ]all ' \
+            ' --read-only ' \
+            ' --user[= ]65534:65534 ' \
+            ' --security-opt[= ]no-new-privileges ' \
+            ' --entrypoint[= ]sleep --image-volume[= ]ignore docker\.io/ubuntu/squid@sha256:[0-9a-f]{64} infinity$'; do
+            printf '%s\n' "$keeper" | grep -qE -- "$needle" || { echo "::error::the keeper's ExecStart lacks: $needle"; exit 1; }
+          done
+          # And its unit-level restart policy, passed through by the generator: no start limit, a one-second retry.
+          for needle in '^StartLimitIntervalSec=0$' '^RestartSec=1s$' '^Restart=always$'; do
+            grep -qE -- "$needle" generated.txt || { echo "::error::the keeper's unit lacks: $needle"; exit 1; }
+          done
+          for banned in ' --publish' ' -p ' ' --volume' ' -v ' ' --cap-add' ' --privileged' ' --mount'; do
+            if printf '%s\n' "$keeper" | grep -qF -- "$banned"; then echo "::error::the keeper's ExecStart carries $banned"; exit 1; fi
           done
           echo "OK: every Quadlet template generates on $(podman --version)"

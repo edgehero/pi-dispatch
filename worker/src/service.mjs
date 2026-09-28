@@ -41,15 +41,15 @@
  * the rest of the config is broken.
  */
 import { spawn as nodeSpawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { connect as netConnect } from "node:net";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { parseBackendList, venuesOf } from "./backends.mjs";
-import { egressArmed } from "./egress.mjs";
-import { ALL_QUADLET_FILES, ALLOWLIST_PLACEHOLDER, PROXY_CONF_PLACEHOLDER, QUADLET_FILES, applyStack, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, proxyConfCopyPath, proxyRestartWarning, quadletDir, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal, workerUnitDeps } from "./podman-stack.mjs";
+import { egressArmed, egressProxyName } from "./egress.mjs";
+import { ALL_QUADLET_FILES, ALLOWLIST_PLACEHOLDER, NETNS_KEEPER, NETNS_KEEPER_FORMAT, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, PROXY_CONF_PLACEHOLDER, QUADLET_FILES, applyStack, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, proxyConfCopyPath, proxyRestartWarning, quadletDir, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal, workerUnitDeps } from "./podman-stack.mjs";
 
 // src/ is where this module lives in BOTH layouts (worker/src in a checkout,
 // node_modules/@edgehero/pi-dispatch/src under npm). Deploy templates resolve one level up from it
@@ -162,6 +162,26 @@ export const TEMPLATE_PINS = {
 		`Volume=${ALLOWLIST_PLACEHOLDER}:/etc/pi-dispatch/allowlist.conf:ro,z`, // → <deployDir>/egress-allowlist.conf, the list `init` scaffolds
 		"ContainerName=pi-dispatch-egress-proxy",
 		"Network=pi-dispatch-egress-out.network",
+		"WantedBy=default.target",
+	],
+	// The rootless network keeper (issue #458), copied verbatim. Pinned: the names (outside every sweep's prefix, and
+	// what doctor reads), its own network with no route and no DNS, and every line that keeps it from widening anything
+	// (podman-stack.test.mjs reads the same lines back as the argv they generate).
+	"pi-dispatch-netns-keeper.network": ["NetworkName=pi-dispatch-netns-keeper", "Internal=true", "DisableDNS=true"],
+	"pi-dispatch-netns-keeper.container": [
+		"ContainerName=pi-dispatch-netns-keeper",
+		"Network=pi-dispatch-netns-keeper.network",
+		"ReadOnly=true",
+		"DropCapability=all",
+		"NoNewPrivileges=true",
+		"User=65534",
+		"Group=65534",
+		"RunInit=true",
+		"ExecStartPre=/usr/bin/podman network create --ignore --disable-dns --internal pi-dispatch-netns-keeper",
+		"Restart=always",
+		"RestartSec=1s",
+		"StartLimitIntervalSec=0",
+		"SuccessExitStatus=143",
 		"WantedBy=default.target",
 	],
 };
@@ -324,6 +344,8 @@ export async function runService(argv = [], deps = {}) {
 		// Is anything on 127.0.0.1:6379? Asked only on a podman deployment, to decide whether the Quadlet Valkey is
 		// wanted (issue #430); the same plain TCP connect `up` uses, for up's reason.
 		probeTcp = defaultProbeTcp,
+		// PR #463: how a path resolves through symlinks, for the manager-environment rule (a symlinked home).
+		realpath = (p) => realpathSync(p),
 	} = deps;
 
 	let values, positionals;
@@ -387,6 +409,7 @@ export async function runService(argv = [], deps = {}) {
 		now,
 		queue,
 		probeTcp,
+		realpath,
 		which: values.receiver ? "receiver" : "worker",
 		scope: platform === "linux" && values.system ? "system" : "user",
 		force: values.force,
@@ -779,7 +802,7 @@ function refusePodmanSystemScope(ctx) {
  * `up` starts what is not running, while an install also keeps (and orders the worker after) a Valkey unit an
  * earlier run already installed, even though that Valkey is now the thing listening.
  */
-async function podmanStackFor(ctx, venue) {
+async function podmanStackFor(ctx, venue, { readKeeper = false } = {}) {
 	let armed;
 	try {
 		armed = egressArmed(venue.env);
@@ -792,9 +815,18 @@ async function podmanStackFor(ctx, venue) {
 	if (!venue.venues.localUsed && !includeValkey) {
 		components.notes.push("something already listens on 127.0.0.1:6379 and no Quadlet Valkey is installed, so none is added: that listener is taken to be your Valkey, as `up` does");
 	}
-	const plan = planStack({ components, templatesDir: ctx.templatesDir, deployDir: ctx.deployDir, home: ctx.home, fs: ctx.fs });
+	// The keeper, read as `up` reads it (PR #463 final review), install only (render spawns nothing): a Quadlet keeper
+	// whose file is already there and unchanged but that does not hold (stopped, paused, off its bridge) is RESTARTED,
+	// since `start` over it is a no-op for a paused one and would say nothing of the proxy either way; the plan then
+	// restarts our proxy after it (planStack), or the install names the operator's own proxy to restart.
+	let restartUnits = [];
+	if (readKeeper && components.keeper && ctx.fs.existsSync(join(quadletDir(ctx.home), QUADLET_FILES.keeper.file))) {
+		const keeper = judgeNetnsKeeper(await runQuery(ctx, "podman", ["inspect", NETNS_KEEPER_FORMAT, NETNS_KEEPER]));
+		if (!keeper.holds) restartUnits = [QUADLET_FILES.keeper.unit];
+	}
+	const plan = planStack({ components, templatesDir: ctx.templatesDir, deployDir: ctx.deployDir, home: ctx.home, fs: ctx.fs, restartUnits });
 	if (plan.error) return { error: plan.error };
-	return { components, plan, notes: components.notes, venues: venue.venues };
+	return { components, plan, notes: components.notes, venues: venue.venues, proxy: egressProxyName(venue.env) };
 }
 
 async function doRender(ctx) {
@@ -872,7 +904,7 @@ async function doInstall(ctx) {
 	let stack = null;
 	let foreign = [];
 	if (venue.used) {
-		stack = await podmanStackFor(ctx, venue);
+		stack = await podmanStackFor(ctx, venue, { readKeeper: true });
 		if (stack.error) return fail(ctx.err, stack.error);
 		// Every stack refusal first, the unit's own among them, so installLinuxUser's unit check never fires alone.
 		const refused = await stackRefusal(ctx, paths, stack);
@@ -939,6 +971,12 @@ async function stackRefusal(ctx, paths, stack) {
 	}
 	const bus = stack.plan.actions.length > 0 ? userBusRefusal({ env: ctx.env, user: ctx.user, euid: ctx.euid }) : null;
 	if (bus) blocking.push(bus);
+	// The manager's own XDG_RUNTIME_DIR and XDG_CONFIG_HOME (PR #463 round 3, measured): another account's makes every
+	// unit this installs fail to start, or not exist at all. Asked only where the manager can be asked.
+	if (!bus && stack.plan.actions.length > 0) {
+		const managerEnv = managerEnvRefusal(await runQuery(ctx, "systemctl", ["--user", "show-environment"]), { home: ctx.home, euid: ctx.euid, user: ctx.user, realpath: ctx.realpath });
+		if (managerEnv) blocking.push(managerEnv);
+	}
 	// A container of the unit's name that the unit does not own would be removed by its `podman run --replace`
 	// (issue #430 review): refused unless --force says to replace it, and then said out loud.
 	const containers = await foreignContainers(stack.plan, (cmd, args) => runQuery(ctx, cmd, args));
@@ -1000,6 +1038,10 @@ async function installLinuxUser(ctx, paths, stack = null, foreign = []) {
 			ctx.out(`restarted ${unit}, because this install replaced ${changedFiles.join(" and ")}\n`);
 		}
 		if (stack.plan.start.length > 0) ctx.out(`${paths.name} Wants= and is After= ${stack.plan.start.join(" ")}\n`);
+		// PR #463 round 3: a keeper started or restarted beside a proxy this install does not own (PI_EGRESS_PROXY naming
+		// the operator's own) leaves that proxy up since before the keeper; said, with its name.
+		const hint = keeperUnderRunningProxyHint(stack.plan, stack.proxy);
+		if (hint) ctx.out(`⚠ ${hint}\n`);
 		// A WARNING, not a refusal, like the note below it: a worker that runs only while its operator is logged in is a
 		// real (desktop) deployment. But on this venue linger is also what brings the queue and the proxy back, and it
 		// was measured both ways, so the line says which of the two this host is rather than the general caution.
@@ -1119,7 +1161,7 @@ async function doUninstall(ctx) {
 /**
  * Stop and remove the podman venue's Quadlet units. `stop`, never `disable`: a generated unit cannot be disabled any
  * more than enabled, and removing its file plus a daemon-reload is what unlinks it from default.target. The Valkey
- * volume and the two networks are deliberately LEFT: the volume holds the queue's wait-list, and a re-install that
+ * volume and the three networks are deliberately LEFT: the volume holds the queue's wait-list, and a re-install that
  * found it gone would have dropped every waiting job on an uninstall nobody meant as a purge.
  */
 async function removeQuadlets(ctx, quadlets) {

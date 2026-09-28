@@ -4,6 +4,7 @@ import { lstatSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { defaultPrompt, runUp } from "../src/up.mjs";
+import { NETNS_KEEPER_FORMAT } from "../src/podman-stack.mjs";
 
 // A fake `spawn`, mirroring doctor.test.mjs: plan keys are command-line prefixes ("docker version",
 // "docker image inspect", "docker pull", "docker tag", "docker ps", "docker volume", "docker run")
@@ -725,11 +726,11 @@ test("up on podman: --yes runs exactly the lines it showed, installs the Quadlet
 	const block = text.slice(from, text.indexOf("--yes: accepted", from));
 	const shown = block.split("\n").slice(1).filter((l) => l.startsWith("  ")).map((l) => l.trim());
 	const ran = [];
-	for (const c of h.calls) if (c.cmd === "systemctl") ran.push([c.cmd, ...c.args].join(" "));
+	for (const c of h.calls) if ((c.cmd === "systemctl" && c.args[1] !== "show-environment")) ran.push([c.cmd, ...c.args].join(" "));
 	const written = [...h.store.keys()].filter((p) => p.startsWith(QDIR) || p === "/home/op/.config/pi-dispatch/egress-proxy.conf").map((p) => `write ${p}`);
 	assert.deepEqual(shown, [...written, ...ran], "shown then run: the same lines, in the same order");
-	assert.deepEqual(ran, ["systemctl --user daemon-reload", "systemctl --user start pi-dispatch-valkey.service pi-dispatch-egress-proxy.service"]);
-	assert.equal(written.length, 5, "four units and the account-owned copy of the rules");
+	assert.deepEqual(ran, ["systemctl --user daemon-reload", "systemctl --user start pi-dispatch-valkey.service pi-dispatch-egress-proxy.service pi-dispatch-netns-keeper.service"]);
+	assert.equal(written.length, 7, "six units (the keeper's two since #458) and the account-owned copy of the rules");
 	assert.ok(!ran.some((l) => / enable /.test(l)), "a generated unit is never enabled");
 	assert.deepEqual(h.calls.filter((c) => c.cmd === "podman" && c.args[0] !== "inspect" && c.args[0] !== "container").map((c) => c.args), [
 		["image", "exists", "pi-job:latest"],
@@ -766,7 +767,7 @@ test("up on podman: declining the stack runs nothing and writes no Quadlet file"
 	assert.equal(await h.run(), 0);
 	assert.equal(h.promptCalls.length, 1);
 	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)));
-	assert.ok(!h.calls.some((c) => c.cmd === "systemctl"));
+	assert.ok(!h.calls.some((c) => (c.cmd === "systemctl" && c.args[1] !== "show-environment")));
 	assert.match(h.text(), /valkey\s+skipped \(declined\)/);
 });
 
@@ -799,7 +800,7 @@ test("up on local,podman: the docker steps are unchanged, then podman's image an
 	]);
 	assert.ok(![...h.store.keys()].some((p) => p.endsWith("pi-dispatch-valkey.container")), "no second Valkey on a docker host");
 	assert.ok(h.store.has(`${QDIR}/pi-dispatch-egress-proxy.container`), "podman jobs still need podman's own proxy");
-	assert.ok(h.calls.some((c) => c.cmd === "systemctl" && c.args.join(" ") === "--user start pi-dispatch-egress-proxy.service"));
+	assert.ok(h.calls.some((c) => (c.cmd === "systemctl" && c.args[1] !== "show-environment") && c.args.join(" ") === "--user start pi-dispatch-egress-proxy.service pi-dispatch-netns-keeper.service"));
 });
 
 // Issue #453: the docker proxy is RUNNING only when `docker inspect` prints `true` on stdout, as the podman path has read it
@@ -1036,6 +1037,7 @@ test("up on docker: PI_EGRESS_PROXY is the name up looks for, and it never start
 // Review round 1 (issue #430): the defects and the gaps each mutation survived
 // ---------------------------------------------------------------------------------------------------
 
+const KEEPER_READ = `podman inspect ${NETNS_KEEPER_FORMAT} pi-dispatch-netns-keeper`;
 const podmanPlan = (over = {}) => ({ "podman image exists": 0, "podman ps": { code: 0, output: "" }, systemctl: 0, "loginctl show-user": { code: 0, output: "Linger=yes\n" }, ...over });
 
 test("D2: PI_BACKENDS=podman in the deployment's .env drives the podman pass, as it drives service install", async () => {
@@ -1088,7 +1090,8 @@ test("D4: an EXITED proxy prints false with exit 0, and is offered the unit rath
 test("M7: a RUNNING proxy (true) is left alone and nothing is planned for it", async () => {
 	const h = harness({
 		env: { PI_BACKENDS: "podman" },
-		plan: podmanPlan({ "podman inspect": { code: 0, output: "running\n" } }),
+		// Issue #458: the keeper answers its own read, holding (the keeper key FIRST: the fake takes the first matching prefix).
+		plan: podmanPlan({ [KEEPER_READ]: { code: 0, output: "running|bridge|pi-dispatch-netns-keeper,\n" }, "podman inspect": { code: 0, output: "running\n" } }),
 		listening: true,
 		argv: ["--yes"],
 		files: { "/deploy/egress-allowlist.conf": "x\n", "/deploy/deploy/egress-proxy.conf": "conf\n" },
@@ -1097,7 +1100,7 @@ test("M7: a RUNNING proxy (true) is left alone and nothing is planned for it", a
 	assert.equal(await h.run(), 0);
 	assert.match(h.text(), /Egress proxy already present under this account's Podman/);
 	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)));
-	assert.ok(!h.calls.some((c) => c.cmd === "systemctl"));
+	assert.ok(!h.calls.some((c) => (c.cmd === "systemctl" && c.args[1] !== "show-environment")));
 });
 
 test("D3: up installs nothing over a container of the unit's name that the unit does not own", async () => {
@@ -1110,10 +1113,11 @@ test("D3: up installs nothing over a container of the unit's name that the unit 
 		extra: podmanExtra(),
 	});
 	assert.equal(await h.run(), 0);
-	assert.match(h.text(), /pi-dispatch-egress-proxy already exists under this account's Podman and is not managed by the Quadlet unit/);
+	// Issue #458: the keeper is read by the same rule, and this fake answers "<no value>" for both.
+	assert.match(h.text(), /pi-dispatch-egress-proxy and pi-dispatch-netns-keeper already exist under this account's Podman and are not managed by the Quadlet units/);
 	assert.match(h.text(), /pi-dispatch service install --force/);
 	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)));
-	assert.ok(!h.calls.some((c) => c.cmd === "systemctl"));
+	assert.ok(!h.calls.some((c) => (c.cmd === "systemctl" && c.args[1] !== "show-environment")));
 });
 
 test("M6: up never overwrites a Quadlet file that differs from what it renders", async () => {
@@ -1129,14 +1133,69 @@ test("M6: up never overwrites a Quadlet file that differs from what it renders",
 	assert.equal(await h.run(), 0);
 	assert.equal(h.store.get(edited), "[Container]\nImage=mine\n");
 	assert.match(h.text(), /podman stack\s+NOT installed: a Quadlet file differs/);
-	assert.ok(!h.calls.some((c) => c.cmd === "systemctl"));
+	assert.ok(!h.calls.some((c) => (c.cmd === "systemctl" && c.args[1] !== "show-environment")));
 });
 
 test("M13: on podman an armed policy with no allowlist starts no proxy and says which file", async () => {
 	const h = harness({ env: { PI_BACKENDS: "podman" }, plan: podmanPlan({ "podman inspect": 1 }), listening: true, argv: ["--yes"], extra: podmanExtra() });
 	assert.equal(await h.run(), 0);
 	assert.match(h.text(), /egress-allowlist\.conf is not here, not starting a proxy with no allowlist/);
-	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)));
+	// Issue #458: the keeper mounts nothing, and the proxy started after `init` needs it just the same, so only its two
+	// files are written; nothing of the proxy's is.
+	assert.deepEqual([...h.store.keys()].filter((p) => p.startsWith(QDIR)).sort(), [`${QDIR}/pi-dispatch-netns-keeper.container`, `${QDIR}/pi-dispatch-netns-keeper.network`]);
+	assert.ok(h.calls.some((c) => (c.cmd === "systemctl" && c.args[1] !== "show-environment") && c.args.join(" ") === "--user start pi-dispatch-netns-keeper.service"));
+	assert.match(h.text(), /netns keeper \(podman\)\s+installed as Quadlet units and started/);
+});
+
+// Issue #458: up reads the keeper like the proxy, off stdout: running is left alone, anything else is offered the unit.
+test("up on podman (#458): a keeper that holds is left alone, a stopped one or one off its bridge is offered its unit with the proxy already up", async () => {
+	// The keeper's own key FIRST: the fake takes the first matching prefix.
+	const inspect = (keeper) => ({ [KEEPER_READ]: { code: 0, output: `${keeper}\n` }, "podman inspect": { code: 0, output: "running\n" } });
+	const running = harness({ env: { PI_BACKENDS: "podman" }, plan: podmanPlan(inspect("running|bridge|pi-dispatch-netns-keeper,")), listening: true, argv: ["--yes"], files: { "/deploy/egress-allowlist.conf": "x\n" }, extra: podmanExtra() });
+	assert.equal(await running.run(), 0);
+	assert.match(running.text(), /✓ Rootless network keeper already running under this account's Podman on its own bridge network \(pi-dispatch-netns-keeper\)/);
+	assert.ok(![...running.store.keys()].some((p) => p.startsWith(QDIR)));
+	// Issue #463's gate: RUNNING on `--network none` holds nothing, and was called "already running" here.
+	const offBridge = harness({ env: { PI_BACKENDS: "podman" }, plan: podmanPlan(inspect("running|none|none,")), listening: true, argv: ["--yes"], files: { "/deploy/egress-allowlist.conf": "x\n" }, extra: podmanExtra() });
+	assert.equal(await offBridge.run(), 0);
+	assert.doesNotMatch(offBridge.text(), /already running/);
+	assert.match(offBridge.text(), /⚠ pi-dispatch-netns-keeper is running on the none network mode, not on its pi-dispatch-netns-keeper bridge network, so it holds nothing open: offering its unit, restarted/);
+	assert.ok(offBridge.store.has(`${QDIR}/pi-dispatch-netns-keeper.container`));
+	const stopped = harness({ env: { PI_BACKENDS: "podman" }, plan: podmanPlan(inspect("exited|bridge|pi-dispatch-netns-keeper,")), listening: true, argv: ["--yes"], files: { "/deploy/egress-allowlist.conf": "x\n" }, extra: podmanExtra() });
+	assert.equal(await stopped.run(), 0);
+	assert.match(stopped.text(), /the rootless network keeper \(pi-dispatch-netns-keeper, which keeps the proxy's route out on Podman 4\.x\) is not running under this account's Podman/);
+	assert.deepEqual([...stopped.store.keys()].filter((p) => p.startsWith(QDIR)).sort(), [`${QDIR}/pi-dispatch-netns-keeper.container`, `${QDIR}/pi-dispatch-netns-keeper.network`]);
+	assert.deepEqual(stopped.calls.filter((c) => c.cmd === "podman" && c.args[0] === "inspect").map((c) => c.args), [
+		["inspect", "--format={{.State.Status}}", "pi-dispatch-egress-proxy"],
+		["inspect", NETNS_KEEPER_FORMAT, "pi-dispatch-netns-keeper"],
+	]);
+	// Egress off: neither is asked about, and nothing of the keeper's is written.
+	const off = harness({ env: { PI_BACKENDS: "podman", PI_EGRESS: "0" }, plan: podmanPlan(inspect("exited|bridge|pi-dispatch-netns-keeper,")), listening: true, argv: ["--yes"], extra: podmanExtra() });
+	assert.equal(await off.run(), 0);
+	assert.ok(!off.calls.some((c) => c.cmd === "podman" && c.args[0] === "inspect"));
+	assert.ok(![...off.store.keys()].some((p) => p.includes("netns-keeper")));
+});
+
+// PR #463 round 2: a Quadlet keeper that is there, ours and unchanged, but not holding (paused, say). `start` on its
+// active unit is a no-op, and up used to report "installed as Quadlet units and started" over a keeper still paused.
+// Its unit is RESTARTED instead, the files are left alone, and since the proxy stayed up, up says to restart it.
+test("up on podman (#458): a Quadlet keeper that does not hold, with its files unchanged, is restarted, and the proxy's restart is asked for", async () => {
+	const unit = (name) => readFileSync(new URL(`../deploy/${name}`, import.meta.url), "utf8");
+	const files = { "/deploy/egress-allowlist.conf": "x\n", [`${QDIR}/pi-dispatch-netns-keeper.container`]: unit("pi-dispatch-netns-keeper.container"), [`${QDIR}/pi-dispatch-netns-keeper.network`]: unit("pi-dispatch-netns-keeper.network") };
+	const plan = podmanPlan({
+		[KEEPER_READ]: { code: 0, output: "paused|bridge|pi-dispatch-netns-keeper,|1000000\n" },
+		"podman inspect": { code: 0, output: "running\n" },
+		"podman container inspect": { code: 0, output: "pi-dispatch-netns-keeper.service\n" },
+	});
+	const h = harness({ env: { PI_BACKENDS: "podman" }, plan, listening: true, argv: ["--yes"], files, extra: podmanExtra() });
+	assert.equal(await h.run(), 0);
+	const ran = h.calls.filter((c) => (c.cmd === "systemctl" && c.args[1] !== "show-environment")).map((c) => c.args.join(" "));
+	assert.deepEqual(ran, ["--user daemon-reload", "--user restart pi-dispatch-netns-keeper.service"], "restarted, never a no-op start");
+	assert.equal(h.store.get(`${QDIR}/pi-dispatch-netns-keeper.container`), unit("pi-dispatch-netns-keeper.container"), "the files are left as they were");
+	assert.match(h.text(), /✓ restarted pi-dispatch-netns-keeper\.service/);
+	assert.doesNotMatch(h.text(), /✓ started /);
+	assert.match(h.text(), /netns keeper \(podman\)\s+installed as Quadlet units and restarted \(pi-dispatch-netns-keeper\.service\)/);
+	assert.match(h.text(), /⚠ pi-dispatch-netns-keeper was restarted while the egress proxy \(pi-dispatch-egress-proxy\) is not part of this install: if it is running, restart the egress proxy once no job is running: systemctl --user restart pi-dispatch-egress-proxy\.service/);
 });
 
 test("E7: up stops on a podman info that did not answer, stricter than the worker on purpose, and says so", async () => {
@@ -1214,7 +1273,7 @@ test("E2: a running proxy is read off stdout, so podman's stderr warnings cannot
 		extra: podmanExtra(),
 	});
 	assert.equal(await own.run(), 0);
-	assert.ok(own.calls.some((c) => c.cmd === "systemctl" && c.args[1] === "start"), "installed, not refused as foreign");
+	assert.ok(own.calls.some((c) => (c.cmd === "systemctl" && c.args[1] !== "show-environment") && c.args[1] === "start"), "installed, not refused as foreign");
 });
 
 test("E3: up installs nothing when podman cannot say whether a container exists", async () => {
@@ -1228,7 +1287,7 @@ test("E3: up installs nothing when podman cannot say whether a container exists"
 	assert.equal(await h.run(), 0);
 	assert.match(h.text(), /podman stack\s+NOT installed: podman did not say whether the containers exist/);
 	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)));
-	assert.ok(!h.calls.some((c) => c.cmd === "systemctl"));
+	assert.ok(!h.calls.some((c) => (c.cmd === "systemctl" && c.args[1] !== "show-environment")));
 });
 
 test("E8: up with no user manager reachable writes nothing and names the remedy", async () => {
@@ -1237,7 +1296,7 @@ test("E8: up with no user manager reachable writes nothing and names the remedy"
 	assert.match(h.text(), /as under `sudo -iu op`/);
 	assert.match(h.text(), /XDG_RUNTIME_DIR=\/run\/user\/1234/);
 	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)), "no file left behind that nothing loaded");
-	assert.ok(!h.calls.some((c) => c.cmd === "systemctl"));
+	assert.ok(!h.calls.some((c) => (c.cmd === "systemctl" && c.args[1] !== "show-environment")));
 });
 
 test("E6/R31: the .env is read with the platform's loader, and off Linux a line it reads differently never stops up", async () => {
@@ -1289,4 +1348,49 @@ test("D4 (round 3): shell and .env are compared as the worker reads them, and sh
 	const empty = harness({ env: { PI_BACKENDS: "" }, plan: green, files: { "/deploy/.env": "PI_BACKENDS=podman\n" } });
 	assert.equal(await empty.run(), 1);
 	assert.match(empty.text(), /PI_BACKENDS is "" in this shell and "podman" in \/deploy\/\.env/);
+});
+
+// PR #463 round 3: up asks the manager's environment with service install's rule, before its consent, and installs
+// nothing when it names another account's XDG_RUNTIME_DIR or XDG_CONFIG_HOME.
+test("up on podman (#458): a manager environment naming another account's directories installs nothing", async () => {
+	const h = harness({
+		env: { PI_BACKENDS: "podman" },
+		// The environment key FIRST: the fake takes the first matching prefix, and podmanPlan answers every `systemctl`.
+		plan: { "systemctl --user show-environment": { code: 0, output: "XDG_CONFIG_HOME=/home/runner/.config\n" }, ...podmanPlan({ "podman inspect": 1 }) },
+		listening: true,
+		argv: ["--yes"],
+		files: { "/deploy/egress-allowlist.conf": "x\n" },
+		extra: podmanExtra(),
+	});
+	assert.equal(await h.run(), 0);
+	assert.match(h.text(), /✗ op's user manager runs with XDG_CONFIG_HOME=\/home\/runner\/\.config, not \/home\/op\/\.config/);
+	assert.match(h.text(), /podman stack\s+NOT installed: the user manager's environment names another account's directories/);
+	assert.ok(![...h.store.keys()].some((p) => p.startsWith(QDIR)));
+	assert.ok(!h.calls.some((c) => c.cmd === "systemctl" && c.args[1] !== "show-environment"));
+});
+
+// PR #463 round 3: the operator's own proxy (PI_EGRESS_PROXY) is never ours to restart, and a keeper started beside it
+// leaves it up since before the keeper: said, with its real name. A keeper that stays holding says nothing.
+test("up on podman (#458): starting the keeper beside the operator's own proxy names that proxy's restart", async () => {
+	const h = harness({ env: { PI_BACKENDS: "podman", PI_EGRESS_PROXY: "my-squid" }, plan: podmanPlan({ [KEEPER_READ]: { code: 125, output: "" } }), listening: true, argv: ["--yes"], files: { "/deploy/egress-allowlist.conf": "x\n" }, extra: podmanExtra() });
+	assert.equal(await h.run(), 0);
+	assert.ok(h.store.has(`${QDIR}/pi-dispatch-netns-keeper.container`));
+	assert.match(h.text(), /⚠ pi-dispatch-netns-keeper was started while the egress proxy \(my-squid\) is not part of this install: if it is running, restart the egress proxy once no job is running: podman restart my-squid \(or its own unit\)/);
+	const held = harness({ env: { PI_BACKENDS: "podman", PI_EGRESS_PROXY: "my-squid" }, plan: podmanPlan({ [KEEPER_READ]: { code: 0, output: "running|bridge|pi-dispatch-netns-keeper,|1000000\n" } }), listening: true, argv: ["--yes"], files: { "/deploy/egress-allowlist.conf": "x\n" }, extra: podmanExtra() });
+	assert.equal(await held.run(), 0);
+	assert.doesNotMatch(held.text(), /is not part of this install/);
+});
+
+// PR #463 final review: the symlinked-home tolerance through up, so dropping its realpath seam is caught.
+test("up on podman (#458): a manager XDG_CONFIG_HOME that resolves to this home's .config is not refused", async () => {
+	const env = { "systemctl --user show-environment": { code: 0, output: "XDG_CONFIG_HOME=/srv/link/.config\n" } };
+	const links = { "/srv/link/.config": "/home/op/.config", "/home/op/.config": "/home/op/.config" };
+	const run = (realpath) => harness({ env: { PI_BACKENDS: "podman" }, plan: { ...env, ...podmanPlan({ "podman inspect": 1 }) }, listening: true, argv: ["--yes"], files: { "/deploy/egress-allowlist.conf": "x\n" }, extra: podmanExtra(realpath ? { realpath } : {}) });
+	const linked = run((p) => links[p] ?? p);
+	assert.equal(await linked.run(), 0);
+	assert.doesNotMatch(linked.text(), /user manager runs with/);
+	assert.ok([...linked.store.keys()].some((p) => p.startsWith(QDIR)), "installed");
+	const plain = run((p) => p);
+	assert.equal(await plain.run(), 0);
+	assert.match(plain.text(), /✗ op's user manager runs with XDG_CONFIG_HOME=\/srv\/link\/\.config, not \/home\/op\/\.config/);
 });

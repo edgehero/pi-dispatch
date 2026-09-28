@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_EGRESS_PROXY } from "../src/egress.mjs";
-import { ALL_QUADLET_FILES, QUADLET_FILES, planStack, quadletDir, readStackKeys, stackComponents } from "../src/podman-stack.mjs";
+import { ALL_QUADLET_FILES, NETNS_KEEPER, NETNS_KEEPER_FORMAT, QUADLET_FILES, managerEnvRefusal, unquoteShowEnvironment, planStack, podmanNeedsNetnsKeeper, quadletDir, readStackKeys, stackComponents } from "../src/podman-stack.mjs";
 import { runService } from "../src/service.mjs";
 
 /**
@@ -87,6 +87,91 @@ test("templates: generated units are started by the generator's own [Install], s
 	}
 });
 
+// Issue #458: the rootless network keeper must not widen anything, so its unit is read as the generator reads it, and
+// every key is on a list: a key added to it (a PublishPort, a Volume, an AddCapability, a PodmanArgs flag) fails here
+// until someone decides it belongs. Each allowed key's VALUE is pinned too, not only its presence.
+const unitSections = (text) => {
+	const sections = {};
+	let current = null;
+	for (const raw of text.split("\n")) {
+		const line = raw.trim();
+		if (line === "" || line.startsWith("#") || line.startsWith(";")) continue;
+		const header = /^\[(\w[\w-]*)\]$/.exec(line);
+		if (header) {
+			current = header[1];
+			sections[current] ??= [];
+			continue;
+		}
+		const eq = line.indexOf("=");
+		assert.ok(current && eq > 0, `a key=value line inside a section: ${line}`);
+		sections[current].push([line.slice(0, eq), line.slice(eq + 1)]);
+	}
+	return sections;
+};
+
+test("templates (#458): the keeper container widens nothing, key by key, and its PodmanArgs add only what is named", () => {
+	const unit = unitSections(template(QUADLET_FILES.keeper.file));
+	const proxyImage = /^Image=(.*)$/m.exec(template(QUADLET_FILES.proxy.file))?.[1];
+	assert.deepEqual(unit.Container, [
+		// The proxy's own image and digest: nothing new to pull or to keep in step.
+		["Image", proxyImage],
+		["ContainerName", NETNS_KEEPER],
+		["Network", QUADLET_FILES.keeperNetwork.file],
+		["ReadOnly", "true"],
+		["DropCapability", "all"],
+		["NoNewPrivileges", "true"],
+		["User", "65534"],
+		["Group", "65534"],
+		["RunInit", "true"],
+		["PodmanArgs", "--entrypoint=sleep --image-volume=ignore"],
+		["Exec", "infinity"],
+	]);
+	assert.deepEqual(unit.Service, [
+		["TimeoutStartSec", "900"],
+		// The keeper's own network, made again before each start with the .network unit's own flags.
+		["ExecStartPre", `/usr/bin/podman network create --ignore --disable-dns --internal ${NETNS_KEEPER}`],
+		["Restart", "always"],
+		["RestartSec", "1s"],
+		["SuccessExitStatus", "143"],
+	]);
+	assert.deepEqual(unit.Install, [["WantedBy", "default.target"]]);
+	assert.deepEqual(Object.keys(unit), ["Unit", "Container", "Service", "Install"]);
+	assert.deepEqual(unit.Unit.map(([k]) => k), ["Description", "StartLimitIntervalSec"]);
+	assert.deepEqual(unit.Unit[1], ["StartLimitIntervalSec", "0"], "no start-limit lockout for a keeper that restarts always");
+});
+
+test("templates (#458): the keeper's network has no route out and no DNS, and nothing else sets it up", () => {
+	const unit = unitSections(template(QUADLET_FILES.keeperNetwork.file));
+	assert.deepEqual(unit, { Network: [["NetworkName", NETNS_KEEPER], ["Internal", "true"], ["DisableDNS", "true"]] });
+	// The container's ExecStartPre makes this network again before each start, so it must carry exactly what Quadlet
+	// renders from these two keys (4.9.3: `podman network create --ignore --disable-dns --internal <name>`, measured).
+	const pre = unitSections(template(QUADLET_FILES.keeper.file)).Service.find(([k]) => k === "ExecStartPre")?.[1];
+	assert.equal(pre, `/usr/bin/podman network create --ignore --disable-dns --internal ${unit.Network[0][1]}`);
+});
+
+// A sweep that removed the keeper, or its network under it, would bring the defect back with nothing said (and a
+// `network rm -f` of its network leaves its unit failed until restarted, measured). The prefixes are READ from the
+// source, every exported `*PREFIX = "pi-..."`, so a sweep added later is covered without anyone remembering this test.
+// Substring, not prefix: `--filter name=X` matches anywhere in a name, on podman and docker alike.
+test("templates (#458): the keeper's container and network names are outside every prefix a pi-dispatch sweep removes", () => {
+	const prefixes = [];
+	for (const file of readdirSync(WORKER_SRC).filter((f) => f.endsWith(".mjs"))) {
+		for (const m of readFileSync(join(WORKER_SRC, file), "utf8").matchAll(/^export const \w*PREFIX = "(pi-[^"]*)";$/gm)) prefixes.push(m[1]);
+	}
+	for (const known of ["pi-job-", "pi-sandbox-", "pi-dispatch-live-", "pi-dispatch-egress-doctor-", "pi-dispatch-egress-probe-"]) assert.ok(prefixes.includes(known), `${known} is read from the source`);
+	const netName = /^NetworkName=(.*)$/m.exec(template(QUADLET_FILES.keeperNetwork.file))?.[1];
+	for (const name of [NETNS_KEEPER, netName]) {
+		for (const prefix of prefixes) assert.ok(!name.includes(prefix), `${name} would be matched by a sweep of ${prefix}`);
+	}
+	// And the prefixes the pinned test fixtures use for the other stack parts, so a rename cannot collide either.
+	assert.equal(new Set([NETNS_KEEPER, DEFAULT_EGRESS_PROXY, "pi-dispatch-valkey", "pi-dispatch-egress-out"]).size, 4);
+});
+
+test("podmanNeedsNetnsKeeper (#458): every 4.x and an unread version, never 5.x", () => {
+	for (const v of ["4.9.3", "4.9.5", "4.0.0", "3.4.4", "", null, undefined, "unknown", " 4.9.3 "]) assert.equal(podmanNeedsNetnsKeeper(v), true, String(v));
+	for (const v of ["5.0.0", "5.8.1", "6.0.0-dev", "10.1.0"]) assert.equal(podmanNeedsNetnsKeeper(v), false, v);
+});
+
 // ---------------------------------------------------------------------------------------------------
 // The planner
 // ---------------------------------------------------------------------------------------------------
@@ -100,14 +185,18 @@ const realReadFs = (files = {}) => {
 	};
 };
 
-test("stackComponents: Valkey only without local; the proxy only while armed and only under the default name", () => {
+test("stackComponents: Valkey only without local; the proxy only while armed and only under the default name; the keeper whenever armed", () => {
 	const podmanOnly = { localUsed: false, podmanUsed: true };
 	const mixed = { localUsed: true, podmanUsed: true };
-	assert.deepEqual(stackComponents({ venues: podmanOnly, env: {}, includeValkey: true, armed: true }), { valkey: true, proxy: true, notes: [] });
+	assert.deepEqual(stackComponents({ venues: podmanOnly, env: {}, includeValkey: true, armed: true }), { valkey: true, proxy: true, keeper: true, notes: [] });
 	assert.equal(stackComponents({ venues: mixed, env: {}, includeValkey: true, armed: true }).valkey, false, "docker's Valkey owns the port when local is blessed");
-	assert.equal(stackComponents({ venues: podmanOnly, env: {}, includeValkey: true, armed: false }).proxy, false);
+	assert.equal(stackComponents({ venues: mixed, env: {}, includeValkey: true, armed: true }).keeper, true, "podman jobs on a mixed host disconnect the proxy too");
+	const off = stackComponents({ venues: podmanOnly, env: {}, includeValkey: true, armed: false });
+	assert.equal(off.proxy, false);
+	assert.equal(off.keeper, false, "with egress off no proxy is ever disconnected, so there is nothing to keep");
 	const renamed = stackComponents({ venues: podmanOnly, env: { PI_EGRESS_PROXY: "my-squid" }, includeValkey: true, armed: true });
 	assert.equal(renamed.proxy, false, "never a Quadlet that would --replace the operator's own container");
+	assert.equal(renamed.keeper, true, "(#458) the worker disconnects the operator's own proxy from every job network just the same");
 	assert.match(renamed.notes[0], /PI_EGRESS_PROXY names my-squid/);
 });
 
@@ -183,7 +272,7 @@ function fakeSpawn(plan, calls) {
 const PODMAN_ENV = "PI_BACKENDS=podman\n";
 
 // A real login's environment by default: a user manager to talk to (round 2, E8).
-function svc({ argv = ["install"], files = {}, plan = {}, listening = false, env = { XDG_RUNTIME_DIR: "/run/user/1234" }, platform = "linux", cwd = DEPLOY_AT } = {}) {
+function svc({ argv = ["install"], files = {}, plan = {}, listening = false, env = { XDG_RUNTIME_DIR: "/run/user/1234" }, platform = "linux", cwd = DEPLOY_AT, realpath = (p) => p } = {}) {
 	const calls = [];
 	const out = [];
 	const err = [];
@@ -202,10 +291,11 @@ function svc({ argv = ["install"], files = {}, plan = {}, listening = false, env
 		tmp: "/faketmp",
 		// The test's own plan FIRST: the fake takes the first matching prefix, so a longer key a test adds must come
 		// before the defaults' shorter one.
-		spawn: fakeSpawn({ ...plan, ...Object.fromEntries(Object.entries({ "loginctl show-user": { code: 0, output: "Linger=yes\n" }, "podman container inspect": { code: 125, stderr: "Error: no such container\n" } }).filter(([k]) => !(k in plan))) }, calls),
+		spawn: fakeSpawn({ ...plan, ...Object.fromEntries(Object.entries({ "loginctl show-user": { code: 0, output: "Linger=yes\n" }, "podman container inspect": { code: 125, stderr: "Error: no such container\n" }, "podman inspect --format={{.State.Status}}|": { code: 0, output: "running|bridge|pi-dispatch-netns-keeper,|1000000\n" } }).filter(([k]) => !(k in plan))) }, calls),
 		out: (s) => out.push(s),
 		err: (s) => err.push(s),
 		probeTcp: async () => listening,
+		realpath,
 		fs: {
 			existsSync: (p) => store.has(p),
 			readFileSync: (p, enc) => {
@@ -230,18 +320,21 @@ test("service install (user scope, podman in .env, egress armed): writes the Qua
 	for (const q of ALL_QUADLET_FILES) assert.ok(h.store.has(join(QDIR, q.file)), `${q.file} written into ${QDIR}`);
 	const LABEL = '{{index .Config.Labels "PODMAN_SYSTEMD_UNIT"}}';
 	assert.deepEqual(h.calls, [
+		// PR #463 round 3: the manager's own environment, read before anything is written.
+		["systemctl", "--user", "show-environment"],
 		["podman", "container", "inspect", "--format", LABEL, "pi-dispatch-valkey"],
 		["podman", "container", "inspect", "--format", LABEL, "pi-dispatch-egress-proxy"],
+		["podman", "container", "inspect", "--format", LABEL, "pi-dispatch-netns-keeper"],
 		["systemctl", "--user", "daemon-reload"],
-		["systemctl", "--user", "start", "pi-dispatch-valkey.service", "pi-dispatch-egress-proxy.service"],
+		["systemctl", "--user", "start", "pi-dispatch-valkey.service", "pi-dispatch-egress-proxy.service", "pi-dispatch-netns-keeper.service"],
 		["systemctl", "--user", "daemon-reload"],
 		["systemctl", "--user", "enable", "--now", "pi-dispatch-worker.service"],
 		["loginctl", "show-user", "tester", "-p", "Linger"],
 	]);
 	assert.ok(h.writes.indexOf(USER_UNIT) > h.writes.indexOf(join(QDIR, "pi-dispatch-egress-proxy.container")), "the stack before the worker");
 	const unit = h.store.get(USER_UNIT);
-	assert.match(unit, /^Wants=pi-dispatch-valkey\.service pi-dispatch-egress-proxy\.service$/m);
-	assert.match(unit, /^After=pi-dispatch-valkey\.service pi-dispatch-egress-proxy\.service$/m);
+	assert.match(unit, /^Wants=pi-dispatch-valkey\.service pi-dispatch-egress-proxy\.service pi-dispatch-netns-keeper\.service$/m);
+	assert.match(unit, /^After=pi-dispatch-valkey\.service pi-dispatch-egress-proxy\.service pi-dispatch-netns-keeper\.service$/m);
 	assert.match(h.text(), /linger is on for tester/);
 	assert.doesNotMatch(h.text(), /⚠ linger is OFF/);
 });
@@ -252,6 +345,7 @@ test("service install on podman: linger OFF is a warning naming the exact comman
 	assert.match(h.text(), /⚠ linger is OFF for tester: measured, without it neither these Quadlet units nor a user-scope worker start at boot/);
 	assert.match(h.text(), /sudo loginctl enable-linger tester/);
 	assert.ok(!h.store.has(join(QDIR, QUADLET_FILES.proxy.file)), "PI_EGRESS=0: no proxy");
+	assert.ok(!h.store.has(join(QDIR, QUADLET_FILES.keeper.file)), "PI_EGRESS=0: no keeper (#458)");
 	assert.ok(h.store.has(join(QDIR, QUADLET_FILES.valkey.file)));
 });
 
@@ -289,7 +383,7 @@ test("service install on podman: local in the list or a listener on 6379 means n
 	const mixed = svc({ files: { [ENV_PATH]: "PI_BACKENDS=local,podman\n", [ALLOWLIST]: "x\n" } });
 	assert.equal(await mixed.run(), 0);
 	assert.ok(!mixed.store.has(join(QDIR, QUADLET_FILES.valkey.file)), "docker's Valkey owns the port on a mixed host");
-	assert.match(mixed.store.get(USER_UNIT), /^Wants=pi-dispatch-egress-proxy\.service$/m);
+	assert.match(mixed.store.get(USER_UNIT), /^Wants=pi-dispatch-egress-proxy\.service pi-dispatch-netns-keeper\.service$/m);
 	const taken = svc({ listening: true, files: { [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS=0\n` } });
 	assert.equal(await taken.run(), 0);
 	assert.ok(!taken.writes.some((p) => p.startsWith(QDIR)));
@@ -306,6 +400,9 @@ test("service install on podman: PI_EGRESS_PROXY naming another container instal
 	assert.equal(await h.run(), 0);
 	assert.ok(!h.store.has(join(QDIR, QUADLET_FILES.proxy.file)));
 	assert.match(h.text(), /PI_EGRESS_PROXY names my-squid, your own proxy/);
+	// Issue #458: the keeper still is, since the worker disconnects my-squid from every job network just the same.
+	assert.equal(h.store.get(join(QDIR, QUADLET_FILES.keeper.file)), template(QUADLET_FILES.keeper.file));
+	assert.match(h.store.get(USER_UNIT), /^Wants=pi-dispatch-valkey\.service pi-dispatch-netns-keeper\.service$/m);
 });
 
 test("service install on podman: a missing allowlist refuses before anything is written", async () => {
@@ -313,7 +410,7 @@ test("service install on podman: a missing allowlist refuses before anything is 
 	assert.equal(await h.run(), 1);
 	assert.match(h.errText(), /egress-allowlist\.conf does not exist/);
 	assert.deepEqual(h.writes, []);
-	assert.ok(!h.calls.some((c) => c[0] === "systemctl"), "only the read-only container queries ran");
+	assert.ok(!h.calls.some((c) => (c[0] === "systemctl" && c[2] !== "show-environment")), "only the read-only container queries ran");
 });
 
 test("service install on podman: a Quadlet file with other content is kept without --force and replaced with it", async () => {
@@ -338,7 +435,7 @@ test("service install on podman: a stack that fails to start leaves the worker u
 test("service render on podman prints the worker unit with its Wants= and every Quadlet file, spawning nothing", async () => {
 	const h = svc({ argv: ["render"], files: { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "x\n" } });
 	assert.equal(await h.run(), 0);
-	assert.match(h.text(), /^Wants=pi-dispatch-valkey\.service pi-dispatch-egress-proxy\.service$/m);
+	assert.match(h.text(), /^Wants=pi-dispatch-valkey\.service pi-dispatch-egress-proxy\.service pi-dispatch-netns-keeper\.service$/m);
 	for (const q of ALL_QUADLET_FILES) assert.ok(h.text().includes(`# → ${join(QDIR, q.file)} (Quadlet, podman venue)`), q.file);
 	assert.deepEqual(h.writes, []);
 	assert.deepEqual(h.calls, []);
@@ -355,10 +452,11 @@ test("service uninstall stops (never disables) and removes the Quadlet units wit
 	assert.deepEqual(h.calls.slice(2), [
 		// D2 (round 3, measured): the network units too, or a reinstall after `podman network rm` finds its network unit
 		// still "active (exited)" and the container fails with "network not found".
-		["systemctl", "--user", "stop", "pi-dispatch-valkey.service", "pi-dispatch-egress-proxy.service", "pi-dispatch-valkey-network.service", "pi-dispatch-egress-out-network.service"],
+		// Issue #458: the keeper stopped with the proxy and its network with theirs.
+		["systemctl", "--user", "stop", "pi-dispatch-valkey.service", "pi-dispatch-egress-proxy.service", "pi-dispatch-netns-keeper.service", "pi-dispatch-valkey-network.service", "pi-dispatch-egress-out-network.service", "pi-dispatch-netns-keeper-network.service"],
 		["systemctl", "--user", "daemon-reload"],
 		// E10 (measured): squid ignores SIGTERM, its stop ends 137 and `failed`; the failed state is cleared.
-		["systemctl", "--user", "reset-failed", "pi-dispatch-valkey.service", "pi-dispatch-egress-proxy.service", "pi-dispatch-valkey-network.service", "pi-dispatch-egress-out-network.service"],
+		["systemctl", "--user", "reset-failed", "pi-dispatch-valkey.service", "pi-dispatch-egress-proxy.service", "pi-dispatch-netns-keeper.service", "pi-dispatch-valkey-network.service", "pi-dispatch-egress-out-network.service", "pi-dispatch-netns-keeper-network.service"],
 	]);
 	assert.match(h.text(), /volume and the networks are kept/);
 	// With no worker unit (up installed the stack alone), uninstall still removes what exists.
@@ -395,7 +493,7 @@ test("D3: service install refuses a container of the unit's name the unit does n
 	assert.match(h.errText(), /podman rm -f pi-dispatch-valkey/);
 	assert.match(h.errText(), /pass --force/);
 	assert.deepEqual(h.writes, [], "refused before anything is written");
-	assert.ok(!h.calls.some((c) => c[0] === "systemctl"));
+	assert.ok(!h.calls.some((c) => (c[0] === "systemctl" && c[2] !== "show-environment")));
 	const forced = svc({ argv: ["install", "--force"], files: { [ENV_PATH]: NO_EGRESS }, plan: foreign });
 	assert.equal(await forced.run(), 0);
 	assert.match(forced.text(), /⚠ --force: pi-dispatch-valkey is not managed by pi-dispatch-valkey\.service and will be REPLACED by it\n/);
@@ -403,7 +501,7 @@ test("D3: service install refuses a container of the unit's name the unit does n
 	// A container the unit started carries the unit's label: that one is ours, and nothing is refused.
 	const ours = svc({ files: { [ENV_PATH]: NO_EGRESS }, plan: { "podman container inspect --format": { code: 0, output: "pi-dispatch-valkey.service\n" } } });
 	assert.equal(await ours.run(), 0);
-	assert.deepEqual(ours.calls[0], ["podman", "container", "inspect", "--format", LABEL, "pi-dispatch-valkey"]);
+	assert.deepEqual(ours.calls[1], ["podman", "container", "inspect", "--format", LABEL, "pi-dispatch-valkey"]);
 });
 
 test("D3: a hand-started proxy is foreign too, and --force warns that running jobs lose their per-job networks", async () => {
@@ -417,23 +515,189 @@ test("D3: a hand-started proxy is foreign too, and --force warns that running jo
 });
 
 test("D5: --force over a changed .container RESTARTS that unit (start is a no-op on an active one), and warns for the proxy", async () => {
-	const planned = planStack({ components: { valkey: true, proxy: true }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs() });
+	const planned = planStack({ components: { valkey: true, proxy: true, keeper: true }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs() });
 	const files = { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "x\n", [join(QDIR, QUADLET_FILES.valkey.file)]: planned.files[1].text };
 	for (const f of planned.files) files[f.path] = f.text;
 	files[join(QDIR, QUADLET_FILES.proxy.file)] = "[Container]\nImage=old\n";
 	const h = svc({ argv: ["install", "--force"], files, listening: true });
 	assert.equal(await h.run(), 0, h.errText());
-	assert.deepEqual(h.calls.filter((c) => c[0] === "systemctl").slice(0, 3), [
+	assert.deepEqual(h.calls.filter((c) => (c[0] === "systemctl" && c[2] !== "show-environment")).slice(0, 3), [
 		["systemctl", "--user", "daemon-reload"],
-		["systemctl", "--user", "start", "pi-dispatch-valkey.service"],
+		["systemctl", "--user", "start", "pi-dispatch-valkey.service", "pi-dispatch-netns-keeper.service"],
 		["systemctl", "--user", "restart", "pi-dispatch-egress-proxy.service"],
 	]);
 	assert.match(h.text(), /⚠ restarting pi-dispatch-egress-proxy\.service makes a NEW proxy container/);
 	assert.match(h.text(), /^restarted pi-dispatch-egress-proxy\.service, because this install replaced \/home\/tester\/\.config\/containers\/systemd\/pi-dispatch-egress-proxy\.container$/m);
-	assert.match(h.text(), /^started pi-dispatch-valkey\.service \(Quadlet units/m, "the started line lists ONLY what was started (R28)");
+	assert.match(h.text(), /^started pi-dispatch-valkey\.service pi-dispatch-netns-keeper\.service \(Quadlet units/m, "the started line lists ONLY what was started (R28)");
 	// A changed .network file alone restarts nothing: its unit only runs `network create --ignore`.
 	const netOnly = planStack({ components: { valkey: true, proxy: false }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs({ [join(QDIR, QUADLET_FILES.valkeyNetwork.file)]: "[Network]\n" }) });
 	assert.deepEqual(netOnly.restart, []);
+});
+
+test("planStack (#458): the keeper's two files follow the proxy's, the rules copy stays right before the proxy, and the keeper is started", () => {
+	const all = planStack({ components: { valkey: true, proxy: true, keeper: true }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs() });
+	assert.deepEqual(all.files.map((f) => f.path), [
+		...[QUADLET_FILES.valkeyNetwork, QUADLET_FILES.valkey, QUADLET_FILES.egressNetwork].map((q) => join(QDIR, q.file)),
+		CONF_COPY,
+		...[QUADLET_FILES.proxy, QUADLET_FILES.keeperNetwork, QUADLET_FILES.keeper].map((q) => join(QDIR, q.file)),
+	]);
+	assert.equal(all.files.find((f) => f.path.endsWith(QUADLET_FILES.keeper.file)).text, template(QUADLET_FILES.keeper.file), "copied verbatim");
+	assert.deepEqual(all.start, ["pi-dispatch-valkey.service", "pi-dispatch-egress-proxy.service", "pi-dispatch-netns-keeper.service"]);
+	// The keeper alone (an operator's own proxy, or ours already running under up): no rules copy, one unit started.
+	const alone = planStack({ components: { valkey: false, proxy: false, keeper: true }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs() });
+	assert.deepEqual(alone.files.map((f) => f.path), [QUADLET_FILES.keeperNetwork, QUADLET_FILES.keeper].map((q) => join(QDIR, q.file)));
+	assert.deepEqual(alone.actions.at(-1), { kind: "run", argv: ["systemctl", "--user", "start", "pi-dispatch-netns-keeper.service"] });
+	// A changed keeper file restarts the keeper only, and never warns about the proxy (a keeper restart costs no job anything).
+	const changed = planStack({ components: { valkey: false, proxy: true, keeper: true }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs({ [join(QDIR, QUADLET_FILES.keeper.file)]: "[Container]\nImage=old\n" }) });
+	assert.deepEqual(changed.restart, ["pi-dispatch-netns-keeper.service"]);
+});
+
+test("D3 (#458): a container named like the keeper that its unit does not own is refused like the proxy's", async () => {
+	const h = svc({ files: { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "x\n" }, plan: { "podman container inspect --format {{index .Config.Labels \"PODMAN_SYSTEMD_UNIT\"}} pi-dispatch-netns-keeper": { code: 0, output: "<no value>\n" } } });
+	assert.equal(await h.run(), 1);
+	assert.match(h.errText(), /pi-dispatch-netns-keeper already exists under this account's Podman and is not managed by the Quadlet unit/);
+	assert.deepEqual(h.writes, []);
+});
+
+// PR #463 round 2: a keeper (re)started under a proxy that stays up is what the worker and doctor read as possible
+// damage (the order rule), so a plan that moves the keeper beside an unchanged proxy restarts the proxy with it.
+test("planStack (#458): a keeper started or restarted beside an unchanged proxy restarts the proxy; a first install starts both", () => {
+	const all = { valkey: false, proxy: true, keeper: true };
+	const plan = (files = {}, restartUnits = []) => planStack({ components: all, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs(files), restartUnits });
+	const first = plan();
+	assert.deepEqual(first.restart, [], "both new: a first install starts them together");
+	const same = Object.fromEntries(first.files.map((f) => [f.path, f.text]));
+	const upgrade = plan(Object.fromEntries(Object.entries(same).filter(([p]) => !p.includes("netns-keeper"))));
+	assert.deepEqual(upgrade.restart, ["pi-dispatch-egress-proxy.service"], "an upgrade: the keeper is new, the proxy has been up all along");
+	assert.deepEqual(upgrade.actions.slice(-2), [
+		{ kind: "run", argv: ["systemctl", "--user", "start", "pi-dispatch-netns-keeper.service"] },
+		{ kind: "run", argv: ["systemctl", "--user", "restart", "pi-dispatch-egress-proxy.service"] },
+	], "the keeper first, then the proxy");
+	const asked = plan(same, ["pi-dispatch-netns-keeper.service"]);
+	assert.deepEqual(asked.restart, ["pi-dispatch-netns-keeper.service", "pi-dispatch-egress-proxy.service"]);
+	const unchanged = plan(same);
+	assert.deepEqual(unchanged.restart, [], "nothing moved, nothing restarted");
+	const ownProxy = planStack({ components: { valkey: false, proxy: false, keeper: true }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs() });
+	assert.deepEqual(ownProxy.restart, [], "an operator's own proxy is not ours to restart");
+});
+
+// PR #463 round 3 (measured on Podman 4.9.3): a user manager whose environment names ANOTHER account's
+// XDG_RUNTIME_DIR or XDG_CONFIG_HOME (a runner image's /etc/environment, read through environment.d) makes every unit
+// fail ("XDG_RUNTIME_DIR directory ... is not owned by the current user") or not exist at all. Refused before a write.
+test("managerEnvRefusal (#458): another account's XDG_RUNTIME_DIR or XDG_CONFIG_HOME in the manager refuses; its own or none passes", () => {
+	const who = { home: HOME, euid: 1234, user: "tester" };
+	const read = (text, code = 0) => managerEnvRefusal({ code, stdout: text }, who);
+	assert.equal(read("HOME=/home/tester\nXDG_RUNTIME_DIR=/run/user/1234\nXDG_CONFIG_HOME=/home/tester/.config\n"), null);
+	assert.equal(read("HOME=/home/tester\n"), null, "unset is the manager's own default");
+	assert.equal(read("XDG_RUNTIME_DIR=/run/user/1234/\nXDG_CONFIG_HOME=/home/tester/.config/\n"), null, "a trailing slash is the same directory");
+	assert.equal(read("XDG_RUNTIME_DIR=/run/user/1001\n", 1), null, "a manager that did not answer is left to the commands that follow");
+	const runtime = read("XDG_RUNTIME_DIR=/run/user/1001\n");
+	assert.match(runtime, /^tester's user manager runs with XDG_RUNTIME_DIR=\/run\/user\/1001, not \/run\/user\/1234: every podman command in a unit would fail \("XDG_RUNTIME_DIR directory \.\.\. is not owned by the current user", measured\)\. That environment is what every unit it starts inherits, so nothing is installed\./);
+	assert.match(runtime, /~\/\.config\/environment\.d\/ \(for example a file zz-pi-dispatch\.conf with XDG_RUNTIME_DIR=\/run\/user\/1234 and XDG_CONFIG_HOME=\/home\/tester\/\.config\), restart the manager \(sudo systemctl restart user@1234\.service/);
+	const config = read("XDG_CONFIG_HOME=/home/runner/.config\n");
+	assert.match(config, /XDG_CONFIG_HOME=\/home\/runner\/\.config, not \/home\/tester\/\.config: the Quadlet generator would look for the units there, not in \/home\/tester\/\.config\/containers\/systemd/);
+	assert.match(read("XDG_RUNTIME_DIR=/run/user/1001\nXDG_CONFIG_HOME=/home/runner/.config\n"), /XDG_RUNTIME_DIR=\/run\/user\/1001[^]*; and XDG_CONFIG_HOME=\/home\/runner\/\.config/);
+});
+
+test("service install and up (#458): a manager environment naming another account's directories installs nothing, said with the rest", async () => {
+	const leak = { "systemctl --user show-environment": { code: 0, output: "HOME=/home/tester\nXDG_RUNTIME_DIR=/run/user/1001\n" } };
+	const h = svc({ files: { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "x\n" }, plan: leak });
+	assert.equal(await h.run(), 1);
+	assert.match(h.errText(), /tester's user manager runs with XDG_RUNTIME_DIR=\/run\/user\/1001, not \/run\/user\/1234/);
+	assert.deepEqual(h.writes, [], "refused before anything is written");
+	assert.ok(!h.calls.some((c) => c[0] === "systemctl" && c[2] !== "show-environment"), "nothing started");
+	// --force does not apply: it is not a thing --force could accept.
+	const forced = svc({ argv: ["install", "--force"], files: { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "x\n" }, plan: leak });
+	assert.equal(await forced.run(), 1);
+	assert.deepEqual(forced.writes, []);
+	// Without a user manager to ask, the bus refusal is the one said, and the environment is never asked.
+	const noBus = svc({ env: {}, files: { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "x\n" }, plan: leak });
+	assert.equal(await noBus.run(), 1);
+	assert.ok(!noBus.calls.some((c) => c.join(" ") === "systemctl --user show-environment"));
+});
+
+// PR #463 round 3: service install with the operator's own proxy starts the keeper beside a proxy it does not own.
+test("service install (#458): a keeper started beside the operator's own proxy names that proxy's restart; a re-run with nothing moved says nothing", async () => {
+	const env = `${PODMAN_ENV}PI_EGRESS_PROXY=my-squid\n`;
+	const h = svc({ files: { [ENV_PATH]: env, [ALLOWLIST]: "x\n" } });
+	assert.equal(await h.run(), 0, h.errText());
+	assert.match(h.text(), /⚠ pi-dispatch-netns-keeper was started while the egress proxy \(my-squid\) is not part of this install: if it is running, restart the egress proxy once no job is running: podman restart my-squid \(or its own unit\)/);
+	const files = Object.fromEntries([...h.store.entries()]);
+	const again = svc({ argv: ["install", "--force"], files });
+	assert.equal(await again.run(), 0, again.errText());
+	assert.doesNotMatch(again.text(), /is not part of this install/, "a keeper file unchanged and not restarted moved nothing");
+	// Our own proxy in the plan: restarted with the keeper (planStack), never a hint.
+	const ours = svc({ files: { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "x\n" } });
+	assert.equal(await ours.run(), 0);
+	assert.doesNotMatch(ours.text(), /is not part of this install/);
+});
+
+// PR #463 round 3: systemd prints a value needing quotes as $'...' (measured on systemd 255: `$'/home/a b/.config'`,
+// `$'it\\'s'`), and a symlinked home is the same directory under another spelling.
+test("managerEnvRefusal (#458): a quoted value is unquoted before it is compared, and a symlinked home compares by realpath", () => {
+	assert.equal(unquoteShowEnvironment("$'/home/a b/.config'"), "/home/a b/.config");
+	assert.equal(unquoteShowEnvironment("$'it\\'s'"), "it's");
+	assert.equal(unquoteShowEnvironment("/plain"), "/plain");
+	const spaced = { home: "/home/a b", euid: 1234, user: "a b" };
+	assert.equal(managerEnvRefusal({ code: 0, stdout: "XDG_CONFIG_HOME=$'/home/a b/.config'\nXDG_RUNTIME_DIR=/run/user/1234\n" }, spaced), null, "its own, quoted");
+	assert.match(managerEnvRefusal({ code: 0, stdout: "XDG_CONFIG_HOME=$'/home/other b/.config'\n" }, spaced), /XDG_CONFIG_HOME=\/home\/other b\/\.config, not \/home\/a b\/\.config/, "another's, unquoted in the message");
+	const links = { "/home/me": "/data/home/me", "/home/me/.config": "/data/home/me/.config" };
+	const realpath = (p) => links[p] ?? p;
+	assert.equal(managerEnvRefusal({ code: 0, stdout: "XDG_CONFIG_HOME=/data/home/me/.config\n" }, { home: "/home/me", euid: 1, user: "me", realpath }), null, "the same directory through a symlinked home");
+	assert.match(managerEnvRefusal({ code: 0, stdout: "XDG_CONFIG_HOME=/data/home/you/.config\n" }, { home: "/home/me", euid: 1, user: "me", realpath }), /not \/home\/me\/\.config/);
+	const throwing = () => {
+		throw new Error("ENOENT");
+	};
+	assert.match(managerEnvRefusal({ code: 0, stdout: "XDG_RUNTIME_DIR=/run/user/9\n" }, { home: "/home/me", euid: 1, user: "me", realpath: throwing }), /XDG_RUNTIME_DIR=\/run\/user\/9/, "an unresolvable path is compared as written");
+});
+
+// PR #463 final review: a Quadlet keeper already installed and unchanged but not holding (stopped, say) is read as `up`
+// reads it, and RESTARTED; our proxy is restarted after it, and an operator's own proxy is named for a restart.
+test("service install (#458): a stopped keeper with its files unchanged is restarted, with our proxy after it or the operator's named", async () => {
+	const planned = planStack({ components: { valkey: false, proxy: true, keeper: true }, templatesDir: DEPLOY_DIR, deployDir: DEPLOY_AT, home: HOME, fs: realReadFs() });
+	const files = { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "x\n", [USER_UNIT]: "old unit" };
+	for (const f of planned.files) files[f.path] = f.text;
+	const stopped = { "podman inspect --format={{.State.Status}}|": { code: 0, output: "exited|bridge|pi-dispatch-netns-keeper,|1000000\n" } };
+	const h = svc({ argv: ["install", "--force"], files, plan: stopped, listening: true });
+	assert.equal(await h.run(), 0, h.errText());
+	assert.ok(h.calls.some((c) => c.join(" ") === `podman inspect ${NETNS_KEEPER_FORMAT} pi-dispatch-netns-keeper`), "read as up reads it");
+	assert.deepEqual(h.calls.filter((c) => c[0] === "systemctl" && ["start", "restart"].includes(c[2])).map((c) => c.join(" ")), ["systemctl --user restart pi-dispatch-netns-keeper.service pi-dispatch-egress-proxy.service"], "the keeper, then our proxy after it");
+	assert.match(h.text(), /⚠ restarting pi-dispatch-egress-proxy\.service makes a NEW proxy container/, "the proxy's restart is warned, as always");
+	// The operator's own proxy: nothing of theirs is restarted, and they are told to, by name.
+	const ownFiles = { ...files, [ENV_PATH]: `${PODMAN_ENV}PI_EGRESS_PROXY=my-squid\n` };
+	for (const p of Object.keys(ownFiles)) if (p.includes("egress-proxy.container") || p.includes("egress-out.network") || p.endsWith("egress-proxy.conf")) delete ownFiles[p];
+	const own = svc({ argv: ["install", "--force"], files: ownFiles, plan: stopped, listening: true });
+	assert.equal(await own.run(), 0, own.errText());
+	assert.ok(own.calls.some((c) => c.join(" ") === "systemctl --user restart pi-dispatch-netns-keeper.service"));
+	assert.match(own.text(), /⚠ pi-dispatch-netns-keeper was restarted while the egress proxy \(my-squid\) is not part of this install: if it is running, restart the egress proxy once no job is running: podman restart my-squid/);
+	// A keeper that holds: a plain start, no restart, no hint.
+	const held = svc({ argv: ["install", "--force"], files, listening: true });
+	assert.equal(await held.run(), 0, held.errText());
+	assert.ok(!held.calls.some((c) => c[0] === "systemctl" && c[2] === "restart"));
+	// Render reads nothing of the host.
+	const render = svc({ argv: ["render"], files, plan: stopped });
+	assert.equal(await render.run(), 0);
+	assert.deepEqual(render.calls, []);
+});
+
+// PR #463 final review: the symlinked-home tolerance, through the command, so dropping the realpath seam from either
+// caller is caught: a manager XDG_CONFIG_HOME that is a symlink to this home's .config is the same directory.
+test("service install and up (#458): a manager XDG_CONFIG_HOME that resolves to this home's .config is not refused", async () => {
+	const links = { "/srv/link/.config": "/home/tester/.config", "/home/tester/.config": "/home/tester/.config" };
+	const realpath = (p) => links[p] ?? p;
+	const env = { "systemctl --user show-environment": { code: 0, output: "XDG_CONFIG_HOME=/srv/link/.config\nXDG_RUNTIME_DIR=/run/user/1234\n" } };
+	const h = svc({ files: { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "x\n" }, plan: env, realpath });
+	assert.equal(await h.run(), 0, h.errText());
+	const unresolved = svc({ files: { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "x\n" }, plan: env });
+	assert.equal(await unresolved.run(), 1, "without the symlink it is another directory");
+	assert.match(unresolved.errText(), /XDG_CONFIG_HOME=\/srv\/link\/\.config, not \/home\/tester\/\.config/);
+});
+
+// PR #463 final review: systemd 255 prints a control character in show-environment as a 3-digit octal escape (measured:
+// `$'/home/a\\033b/.config'`), cescape_char's own choice over hex.
+test("unquoteShowEnvironment (#458): octal and hex escapes decode, as systemd's cescape_char writes them", () => {
+	assert.equal(unquoteShowEnvironment("$'/home/a\\033b/.config'"), "/home/a\x1bb/.config");
+	assert.equal(unquoteShowEnvironment("$'a\\tb\\x41'"), "a\tbA");
 });
 
 test("M19: every file unchanged still daemon-reloads before the start", () => {
@@ -523,7 +787,7 @@ test("E3: an inspect that fails for any reason but 'no such container' refuses, 
 		assert.equal(await h.run(), 1, argv.join(" "));
 		assert.match(h.errText(), /whether pi-dispatch-valkey already exists could not be read \(podman container inspect exited 125 without saying the container does not exist\)/);
 		assert.deepEqual(h.writes, []);
-		assert.ok(!h.calls.some((c) => c[0] === "systemctl"));
+		assert.ok(!h.calls.some((c) => (c[0] === "systemctl" && c[2] !== "show-environment")));
 	}
 	// "no such object" is podman's other spelling of absent.
 	const absent = svc({ files: { [ENV_PATH]: NO_EGRESS }, plan: { "podman container inspect": { code: 125, stderr: "Error: no such object: \"pi-dispatch-valkey\"\n" } } });
@@ -561,7 +825,7 @@ test("E8: service install with no user manager reachable refuses before writing 
 	assert.match(h.errText(), /machinectl shell tester@/);
 	assert.match(h.errText(), /XDG_RUNTIME_DIR=\/run\/user\/1234/);
 	assert.deepEqual(h.writes, []);
-	assert.ok(!h.calls.some((c) => c[0] === "systemctl"));
+	assert.ok(!h.calls.some((c) => (c[0] === "systemctl" && c[2] !== "show-environment")));
 });
 
 test("E9: every refusal reason is shown together, so --force is consent to the whole list", async () => {

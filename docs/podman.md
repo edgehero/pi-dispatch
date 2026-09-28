@@ -423,10 +423,12 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
 6. **The egress proxy and Valkey, as Quadlet units in this account's user manager.** Put `PI_BACKENDS=podman` in
    `.env` first (step 8), then from the deployment folder run `pi-dispatch up`, which pulls the job image into this
    account's store and offers the stack, or `pi-dispatch service install`, which installs the same units beside the
-   worker's own and orders the worker after them. Both use one installer: it writes four files from `deploy/` into
-   `~/.config/containers/systemd/` (`pi-dispatch-valkey.network`, `pi-dispatch-valkey.container`, and while the
-   egress policy is armed `pi-dispatch-egress-out.network` and `pi-dispatch-egress-proxy.container`), runs
-   `systemctl --user daemon-reload`, and starts `pi-dispatch-valkey.service` and `pi-dispatch-egress-proxy.service`.
+   worker's own and orders the worker after them. Both use one installer: it writes up to six files from `deploy/`
+   into `~/.config/containers/systemd/` (`pi-dispatch-valkey.network`, `pi-dispatch-valkey.container`, and while the
+   egress policy is armed `pi-dispatch-egress-out.network`, `pi-dispatch-egress-proxy.container`,
+   `pi-dispatch-netns-keeper.network` and `pi-dispatch-netns-keeper.container`), runs `systemctl --user
+   daemon-reload`, and starts `pi-dispatch-valkey.service`, `pi-dispatch-egress-proxy.service` and
+   `pi-dispatch-netns-keeper.service` (the keeper is explained below).
    `up` shows every one of those lines before it asks, and `--yes` runs exactly those lines. Both read `PI_BACKENDS`,
    `PI_EGRESS` and `PI_EGRESS_PROXY` from `.env`. `up` also takes a key your shell sets that `.env` does not, and
    REFUSES when the two set one differently, naming both, because it would stand up one venue while the service ran
@@ -442,6 +444,14 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    `sudo npm i -g`, rootless Podman could not relabel the root-owned file (`lsetxattr ... operation not permitted`,
    exit 126) and the unit failed. A copy this account owns can always be relabelled. A changed copy restarts the
    proxy, since squid reads it only at start.
+
+   Both refuse, installing nothing, when this account's user manager runs with another account's `XDG_RUNTIME_DIR`
+   or `XDG_CONFIG_HOME` (`systemctl --user show-environment` shows it; a line in `/etc/environment`, which Ubuntu's
+   user managers read, is the usual source). Every unit inherits that environment: measured on Podman 4.9.3, another
+   account's `XDG_CONFIG_HOME` made the generator look for the units there, so they were "not found", and another
+   account's `XDG_RUNTIME_DIR` made every podman command in them fail with "XDG_RUNTIME_DIR directory ... is not owned
+   by the current user". The fix is a file in `~/.config/environment.d/` setting this account's own values, then a
+   restart of the user manager.
 
    A container that already has a unit's name and was not started by that unit (the hand-started proxy below, or an
    older setup's Valkey) is never replaced silently: the unit's `podman run --replace` would remove it, and a proxy
@@ -471,7 +481,9 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    Which parts are installed: Valkey only when `PI_BACKENDS` does not list `local` (with `local`, docker's Valkey is
    the queue, as before) and nothing already listens on `127.0.0.1:6379`; the proxy only while the policy is armed
    and `PI_EGRESS_PROXY` is unset or names `pi-dispatch-egress-proxy`. A different name is your own proxy, and neither
-   command installs a unit for it, because the unit's `--replace` would remove your container of that name.
+   command installs a unit for it, because the unit's `--replace` would remove your container of that name. The
+   keeper whenever the policy is armed, whatever `PI_EGRESS_PROXY` names, since the worker detaches your own proxy
+   from every job network just the same; `up` leaves a keeper that is already running alone.
    `service install` reads these keys from `.env`, the file the unit loads, not from your shell and not from an
    `--env-setup` script. It refuses `--system` on this venue: the units belong to this account's user manager, which
    a system unit cannot order itself after, so install in user scope with linger on. `service uninstall` stops the
@@ -487,8 +499,119 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    reaching healthy; each container labelled `PODMAN_SYSTEMD_UNIT=<its unit>`, which the foreign-container check
    reads; a real job reaching the provider through the proxy; reboots with and without linger; uninstall. Not
    exercised: `Restart=` and `TimeoutStartSec=` doing their work. `.github/workflows/deploy-lint.yml` runs Podman
-   4.9.3's generator in dry-run over the rendered files: it accepts all four, and passes the health check through as
+   4.9.3's generator in dry-run over the rendered files: it accepts all six, and passes the health check through as
    the JSON array it is.
+
+   **The rootless network keeper** (`pi-dispatch-netns-keeper`, issue #458) is one idle container on an
+   `--internal`, DNS-disabled network of its own. It is there for a defect in Podman 4.9, the version Ubuntu 24.04
+   ships: when the worker detaches the proxy from a finished job's network (`podman network disconnect`), Podman 4.9
+   tears down this account's shared rootless network namespace and its `slirp4netns` while the proxy is still running,
+   whenever no other running container is on a bridge network. The next job's container starts a new namespace, the
+   proxy's route out goes with the old one, and from then on every egress job gets `503 Service Unavailable` from the
+   proxy until the proxy restarts. Measured on 4.9.3 with the worker's own network code: job 1 got 200, jobs 2 to 5
+   got 503. The cause is upstream: v4.9.3's `libpod/networking_linux.go` counts the disconnecting container as the
+   caller and cleans up when it finds one container; 4.9.4 and 4.9.5 are the same, and it went away with Podman 5.0's
+   rootless network rewrite ([containers/podman#20772](https://github.com/containers/podman/pull/20772),
+   [containers/common#1761](https://github.com/containers/common/pull/1761)), which counts attachments. Podman 5.8.1
+   was measured unaffected. A running Valkey unit happens to prevent it too, since it is a bridge container, which is
+   why a full default stack could look fine; a deployment with `local` in `PI_BACKENDS`, an external Valkey, or a
+   Valkey restart had no such cover.
+
+   With the keeper running, 4.9.3 gave five sequential egress jobs 200 each, and the two-network teardown
+   `doctor --live` performs stayed clean. It is installed on every Podman version: on 5.x it is one idle container
+   (measured harmless on 5.8.1), and one rule is simpler than a version read at install time. It widens nothing: no
+   published port, no mount, `--cap-drop=all`, a read-only root, `no-new-privileges`, uid and gid 65534, and a
+   network with no route out and no DNS (measured from inside it: the proxy and `1.1.1.1` are both unreachable). It
+   runs the proxy's own image, by the same digest, with `sleep` as its entrypoint, so it pulls nothing new;
+   `--image-volume=ignore` stops that image's `VOLUME`s from making anonymous volumes. `Restart=always` brings it back
+   from a `podman stop`, a `podman stop -a` or a `podman rm -f` behind systemd's back (measured: back on its bridge
+   network 1.2 to 1.3 s after a kill, with `RestartSec=1s`), and `StartLimitIntervalSec=0` means a keeper that
+   keeps failing never ends `failed` (measured: 10 quick kills in a row, and 15 s of a keeper whose network was gone,
+   stayed `active` and `activating`); a clean `systemctl --user stop` leaves it `inactive`, not `failed`. It counts only running ON ITS OWN BRIDGE
+   NETWORK: a container of its name on `--network none`, `slirp4netns`, `pasta` or `host` runs and holds nothing open
+   (measured), and doctor, `up` and the worker all read the network mode and the networks, not only the state.
+
+   **It protects only while it runs.** Stopped, the next job's teardown breaks the proxy again (measured). So does a
+   teardown while it is restarting: measured on 4.9.3, a keeper killed behind systemd's back and a job teardown right
+   after the kill left the proxy with no route out; the keeper came back (1.2 to 1.3 s with `RestartSec=1s`) and
+   holding, and the proxy still had no route out until the proxy itself restarted. Nothing outside shows that damage,
+   so the worker and doctor go by order instead: on Podman 4.x a keeper that started more than 15 s after the
+   proxy is taken to have been down under it (a joint start, by `service install`, `up` or a boot, measured 4 to 63 ms
+   apart), and each egress job is retried before anything is spent, with a reason
+   that says to restart the proxy, until the proxy is started again. For the same reason start the keeper BEFORE the
+   proxy (the units and the by-hand commands below do), and a keeper counts only once it has run for 3 s, since one
+   that keeps dying reads as running for a moment at a time (measured: 57 of 224 back-to-back reads of a keeper killed
+   every 0.5 s). A stopped keeper under a proxy that has been up longer than that needs two steps, and the fix says
+   both: start the keeper, then restart the proxy. What the order cannot see is a keeper death and a teardown both
+   within the first 15 s after a joint start.
+
+   Its network is made again before every start (`ExecStartPre`, the same flags as the `.network` unit), so a
+   `podman network prune` or `podman system prune` run while the keeper is stopped (which removes the network;
+   running, both leave it), or a `podman network rm -f` under it, heals on the keeper's next start (measured). If its
+   unit ever is `failed` anyway, the repair is:
+
+   ```sh
+   systemctl --user reset-failed pi-dispatch-netns-keeper-network.service pi-dispatch-netns-keeper.service
+   systemctl --user restart pi-dispatch-netns-keeper-network.service pi-dispatch-netns-keeper.service
+   ```
+
+   No pi-dispatch sweep touches it: its names are outside every prefix they remove. `pi-dispatch doctor` reads it
+   with the egress policy armed, and on Podman 4.x (or a version `podman info` did not give) a keeper that does not
+   hold (not running, running off its own bridge network, running for under 3 s, or started more than 15 s after
+   the proxy) is ✗, naming what is wrong and what to run; on 5.x it is ✓ either way. It also reads the keeper's
+   network as it is (`podman network inspect`): its units create it with `--ignore`, which keeps an existing network of
+   that name whatever its options, so one made by hand without `--internal` or with DNS on is ✗ on every version, with
+   the fix (remove the network, restart the keeper units). `service install` and `up` say to restart the egress proxy,
+   by its real name, whenever they start or restart the keeper beside a proxy they leave running (an operator's own
+   `PI_EGRESS_PROXY`, or ours already up). The worker reads it too, at boot
+   (a `netns_keeper_not_holding_at_boot` log line with the whole sentence) and before every egress job on 4.x: while
+   it does not hold, each such job is retried before anything is spent, its run record says `netns-keeper-not-holding`,
+   the whole sentence is logged as `egress_keeper_not_holding`, and a job that runs out of retries gets a comment
+   saying the proxy did not pass its pre-start check and to run `pi-dispatch doctor`, rather than being started into a proxy the job's own teardown would
+   break. In that ✗ case `doctor --live` also tears down nothing the proxy is on, because its own teardowns are the
+   same trigger: it runs no egress canary (a second ✗ line says so), no jobToJobIsolation peer networks, and leaves a
+   stale probe network that still has the proxy attached, and it reads `egress` and `jobToJobIsolation` as not read
+   back, naming the keeper. Fix what the line says and re-run it.
+
+   **Upgrading a Podman 4.x deployment from before the keeper** (issue #458): pause the worker (`pi-dispatch
+   pause`, wait for running jobs), re-run `pi-dispatch service install --force` as the worker's account, then
+   `pi-dispatch resume`. It installs and starts the keeper and restarts the proxy after it (a keeper started beside a
+   proxy that has been up all along would otherwise read as one that restarted under it), with the usual warning that
+   a running job loses its route out. `pi-dispatch up` starts the keeper too, and since it leaves a running proxy
+   alone, it says to restart the proxy. Until the keeper holds, every egress job is retried and none runs, the worker
+   logs `netns_keeper_not_holding_at_boot`, and `pi-dispatch doctor` says why. On Podman 5.x nothing changes.
+
+   **An account that is already damaged** is not healed by starting the keeper, which only prevents the next
+   teardown. Start the keeper, then restart the proxy, clearing any failed state first (a squid stop ends `failed`,
+   below):
+
+   ```sh
+   systemctl --user reset-failed pi-dispatch-netns-keeper-network.service pi-dispatch-netns-keeper.service pi-dispatch-egress-proxy.service
+   systemctl --user restart pi-dispatch-netns-keeper-network.service pi-dispatch-netns-keeper.service
+   systemctl --user restart pi-dispatch-egress-proxy.service   # after the keeper
+   ```
+
+   (`podman restart pi-dispatch-egress-proxy` for a hand-started proxy.) If jobs still cannot reach the proxy or the
+   provider, the account's `aardvark-dns` is still running in the torn-down namespace: it logs `os error 99` in the
+   journal and keeps a stale DNS record for the old proxy. With nothing of this account running, kill it and clear its
+   state, then start everything again (upstream's reset,
+   [containers/podman#20396](https://github.com/containers/podman/issues/20396)). Stop the units with `systemctl`,
+   not `podman stop -a`: the keeper's `Restart=always` undoes a `podman stop` within seconds (measured), so the
+   account would not be left with nothing running.
+
+   ```sh
+   systemctl --user stop pi-dispatch-worker.service   # or however this account runs the worker
+   systemctl --user stop pi-dispatch-netns-keeper.service pi-dispatch-egress-proxy.service pi-dispatch-valkey.service
+   podman stop -a   # anything else of this account's, started by hand
+   pkill -u "$(id -u)" -x aardvark-dns
+   rm -f "/run/user/$(id -u)/containers/networks/aardvark-dns/"*
+   systemctl --user reset-failed pi-dispatch-netns-keeper.service pi-dispatch-egress-proxy.service pi-dispatch-valkey.service
+   systemctl --user start pi-dispatch-valkey.service pi-dispatch-netns-keeper.service
+   systemctl --user start pi-dispatch-egress-proxy.service   # after the keeper
+   systemctl --user start pi-dispatch-worker.service
+   ```
+
+   A reboot does the same, since `/run` is a tmpfs.
 
    A proxy stop takes 10 s: squid does not exit on SIGTERM, so systemd waits out podman's stop timeout, kills it, and
    the unit ends `failed` with exit 137 (measured). Harmless; `service uninstall` clears the failed state.
@@ -498,10 +621,16 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    supported: invalid network mode`. To start it by hand instead of as a unit (it will not come back after a reboot,
    and `up` and `service install` will then refuse to install the unit over it until you remove it),
    from the directory holding your `.env` and the `egress-allowlist.conf` that `pi-dispatch init` wrote, with
-   `egress-proxy.conf` from `deploy/`:
+   `egress-proxy.conf` from `deploy/`, and the keeper FIRST with the same flags its unit generates (a keeper started
+   more than 15 s after the proxy reads as one that restarted under it):
 
    <!-- PODMAN-NATIVE-PROXY -->
    ```sh
+   podman network create --internal --disable-dns pi-dispatch-netns-keeper
+   podman run -d --name pi-dispatch-netns-keeper --network pi-dispatch-netns-keeper \
+     --read-only --cap-drop=all --security-opt=no-new-privileges --user=65534:65534 \
+     --init --entrypoint=sleep --image-volume=ignore \
+     docker.io/ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029 infinity
    podman network create pi-dispatch-egress-out
    podman run -d --name pi-dispatch-egress-proxy --network pi-dispatch-egress-out \
      -v "$PWD/deploy/egress-proxy.conf:/etc/squid/squid.conf:ro,z" \
@@ -513,8 +642,8 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    The image is the compose file's, by the same digest, and `:ro,z` is there for SELinux as in the compose file.
    Measured from a job's `--internal` network: the proxy answers by name, and nothing on the host does (the host's
    own addresses, `host.containers.internal` and the gateway all refuse or are unreachable), which is stricter than
-   the Docker API route, where a host service listening on `0.0.0.0` answers a job. The unit in the previous
-   paragraphs is what brings it back after a reboot.
+   the Docker API route, where a host service listening on `0.0.0.0` answers a job. The units in the previous
+   paragraphs are what bring the proxy and the keeper back after a reboot; started by hand, neither comes back.
 7. **Valkey** can still run anywhere the worker reaches through `VALKEY_URL`. The Quadlet unit in step 6 is the
    default on a host without Docker; a Valkey you already run (a distribution package, say) is left alone as long as
    it listens on `127.0.0.1:6379` before `up` or `service install` looks. The compose file is docker-only. Without
@@ -530,7 +659,8 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    the service is rootless and not remote, that a user manager runs with the controllers delegated and Podman puts
    containers under it (step 3), whether SELinux relabelling applies,
    that the job image is in this account's store, and, with the egress policy armed, that the proxy is running under
-   this Podman. `--live` reads the declarations back off real containers and says it read them back on podman,
+   this Podman and that its rootless network keeper holds (not holding is ✗ on Podman 4.x only, step 6). `--live`
+   reads the declarations back off real containers and says it read them back on podman,
    `egress` included: with the policy armed it first runs doctor's egress canary under this account's Podman, two
    containers built like a podman job (your uid as `--user`, `--userns=keep-id`, the venue's pinned flags, a job's
    proxy variables) on a job-shaped `--internal` network with the proxy attached, one that must reach the provider

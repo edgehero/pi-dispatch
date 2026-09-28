@@ -555,8 +555,9 @@ service is login-scoped, because Docker Desktop is; and a policy refusal (exit 2
 any OS, so no supervisor loops against a paid provider. If a secrets manager owns your credentials,
 `--env-setup <path>` renders a unit that sources your own setup script and then execs the worker, so a
 policy refusal still exits 2 instead of reading as a crash ([`docs/secrets.md`](docs/secrets.md)). On the
-rootless Podman venue (`PI_BACKENDS=podman` in `.env`), `install` also installs Valkey and the egress proxy as
-Quadlet units in your user manager and orders the worker after them; `up` offers the same units
+rootless Podman venue (`PI_BACKENDS=podman` in `.env`), `install` also installs Valkey, the egress proxy and
+the proxy's rootless network keeper (which Podman 4.9 needs) as Quadlet units in your user manager and orders the
+worker after them; `up` offers the same units
 ([`docs/podman.md`](docs/podman.md)). The
 templates remain hand-editable examples if you prefer to adapt them directly.
 

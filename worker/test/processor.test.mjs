@@ -1978,3 +1978,15 @@ test("an observation that could not read a host file for a moment is retried wit
 	);
 	assert.equal(redis.incrCalls, 0);
 });
+
+test("a podman keeper that does not hold RETRIES pre-spend with the keeper's own sentence, never the runtime's (#458)", async () => {
+	const redis = fakeRedis();
+	const logged = [];
+	const keeper = "the rootless network keeper pi-dispatch-netns-keeper is not under this account's Podman, and on Podman 4.9.3 ...";
+	const { deps: d, calls } = deps({ redis, egressPreflight: async () => ({ unavailable: "pi-dispatch-egress-proxy", keeper }), log: (event, fields) => logged.push([event, fields]) });
+	// Its own fixed token (PR #463 round 2), for the run record, the failure hook and the terminal comment.
+	await assert.rejects(() => runJob(ghJob, d), (e) => e.reason === "netns-keeper-not-holding" && e.message === keeper && e.budgetReserved === false);
+	assert.equal(redis.incrCalls, 0, "nothing reserved");
+	assert.ok(!calls.includes("run-container"));
+	assert.ok(logged.some(([e, f]) => e === "egress_keeper_not_holding" && f.proxy === "pi-dispatch-egress-proxy" && f.reason === keeper), "the whole sentence, logged");
+});

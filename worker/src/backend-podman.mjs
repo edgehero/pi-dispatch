@@ -34,7 +34,8 @@ import { JOB_NAME_PREFIX, execDockerBounded, jobContainerName, makeReaper, makeS
 import { BACKENDS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_CONF_WIDENS_JOB, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { buildPodmanRunArgs } from "./docker-run.mjs";
-import { makeEgressPreflight } from "./egress.mjs";
+import { DEFAULT_EGRESS_PROXY, makeEgressPreflight } from "./egress.mjs";
+import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, STARTED_AT_FORMAT, judgeNetnsKeeper, netnsKeeperRemedy, podmanNeedsNetnsKeeper } from "./podman-stack.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { DAEMON_FACTS_TIMEOUT_MS, displayVersion } from "./job-user.mjs";
 import { makeRunContainer } from "./run-container.mjs";
@@ -672,6 +673,54 @@ export const PODMAN_BACKEND_OPTIONS = Object.freeze([
 	"makeStopContainer",
 ]);
 
+/** The keeper read's bound: one `podman inspect`, on a pre-spend gate, like the proxy's own read beside it. */
+export const NETNS_KEEPER_READ_TIMEOUT_MS = 10_000;
+
+/**
+ * The egress preflight on this venue, with the rootless network keeper (issue #458) added to what it checks. On Podman
+ * 4.x (or a version `podman info` did not give) a job whose proxy is up but whose keeper does not hold would start,
+ * spend, and get 503 from the proxy as soon as any earlier job's teardown ran: measured, every egress job after the
+ * first. So it is `{ unavailable, keeper }`, an INFRA retry before anything is spent, carrying the sentence that names
+ * the keeper and what to run. "Holds" is `judgeNetnsKeeper` with the clock and the proxy's start (PR #463 round 2):
+ * running on its own bridge for at least 3 s (a crash loop reads as running for moments), and not started more than
+ * the grace (15 s) after the proxy, since a keeper that restarted while the proxy ran may have let a teardown cut the proxy's
+ * route out, which only a proxy restart repairs and nothing outside can see. On 5.x nothing is read. Nothing is
+ * cached across jobs but what the bundle already caches (`podman info`, for the version): the keeper and the proxy's
+ * start are read on every armed job, two bounded `podman inspect`s.
+ */
+export function keeperPreflight(proxyPreflight, { armed, proxy, info, spawnFn = null, readKeeper = null, now = Date.now }) {
+	const read =
+		readKeeper ??
+		(spawnFn
+			? (args) =>
+					execViaSpawn(spawnFn)("podman", args).then(
+						(r) => ({ code: 0, stdout: r.stdout }),
+						(err) => ({ code: typeof err?.code === "number" ? err.code : null, stdout: err?.stdout ?? "" }),
+					)
+			: (args) => execDockerBounded(args, { bin: "podman", timeoutMs: NETNS_KEEPER_READ_TIMEOUT_MS }));
+	return async (...args) => {
+		const result = await proxyPreflight(...args);
+		if (!armed || result?.ok !== true) return result;
+		const answered = await info();
+		const version = answered?.answered === true ? answered.info?.version : null;
+		if (!podmanNeedsNetnsKeeper(version)) return result;
+		const name = result.proxy ?? proxy ?? DEFAULT_EGRESS_PROXY;
+		const keeperRead = await read(["inspect", NETNS_KEEPER_FORMAT, NETNS_KEEPER]);
+		const proxyRead = await read(["inspect", STARTED_AT_FORMAT, name]);
+		const proxyStarted = proxyRead?.code === 0 ? String(proxyRead.stdout ?? "").trim() : "";
+		const keeper = judgeNetnsKeeper(keeperRead, { now: now(), proxyStartedMs: /^\d+$/.test(proxyStarted) ? Number(proxyStarted) : null });
+		if (keeper.holds) return result;
+		const on = typeof version === "string" && version.trim() ? `Podman ${version.trim()}` : "a Podman of unreported version";
+		const cause = keeper.restartProxy ? `the rootless network keeper ${NETNS_KEEPER} ${keeper.problem} (${on}, issue #458)` : `the rootless network keeper ${NETNS_KEEPER} ${keeper.problem}, and on ${on} a job network's teardown would then cut the egress proxy's route out (issue #458)`;
+		return {
+			unavailable: name,
+			// The same facts without a job in them, for the worker's boot line (PR #463 round 3).
+			keeperAtBoot: `${cause}, so every egress job is retried rather than started until this is fixed. To fix it, ${netnsKeeperRemedy(keeper, name)}`,
+			keeper: `${cause}, so this job is retried rather than started. To fix it, ${netnsKeeperRemedy(keeper, name)}`,
+		};
+	};
+}
+
 /**
  * The podman bundle: `{ name, declares, neverStartedExits, containerName, namePrefix, binds, runContainer,
  * imagePreflight, egressPreflight, stopContainer, reap, jobUserPreflight, observationPreflight }`.
@@ -791,7 +840,7 @@ export function makePodmanBackend(opts = {}) {
 		binds: true,
 		runContainer,
 		imagePreflight: makeImagePreflightFn({ image, bin: "podman", ...spawnSeam }),
-		egressPreflight: makeEgressPreflightFn({ proxy: egressProxy, armed: egress, bin: "podman", ...spawnSeam }),
+		egressPreflight: keeperPreflight(makeEgressPreflightFn({ proxy: egressProxy, armed: egress, bin: "podman", ...spawnSeam }), { armed: egress, proxy: egressProxy, info, spawnFn }),
 		stopContainer: makeStopContainerFn({ bin: "podman", ...execSeam }),
 		reap: reap ?? makePodmanReaper({ log, ...execSeam }),
 		jobUserPreflight,

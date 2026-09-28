@@ -38,6 +38,9 @@ const MIRRORED_DEPLOY = [
 	// copies, so an npm install needs them exactly as a checkout has them.
 	"pi-dispatch-egress-out.network",
 	"pi-dispatch-egress-proxy.container",
+	// The rootless network keeper (issue #458), installed with the proxy's units by the same installer.
+	"pi-dispatch-netns-keeper.container",
+	"pi-dispatch-netns-keeper.network",
 	"pi-dispatch-valkey.container",
 	"pi-dispatch-valkey.network",
 	"receiver.service",
