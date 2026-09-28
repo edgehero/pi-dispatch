@@ -622,7 +622,9 @@ export const RECORD_START_TOLERANCE_MS = 2_000;
  * can be: `NSpid` with exactly one field (the worker's own pid namespace, 5.8.1's slirp4netns, measured), or exactly
  * two ending in 1 (PID 1 of a namespace DIRECTLY beneath the worker's, 5.8.1's pasta, measured). A job's own
  * namespace is one level down too, but its PID 1 is always its `--init` process (`/run/podman-init -- <the image's
- * entrypoint>`, measured), whose argv the worker and the image set and which names no record; and a namespace a job
+ * entrypoint>`, measured), whose argv names no record because the worker passes no command after the image (a job's
+ * command travels in its environment) and the image is operator-authored: a job can put no string there, though an
+ * image that bakes the record's path into its own entrypoint could (PR #469's gate round 4); and a namespace a job
  * makes for itself (`unshare -Urpf` succeeds in a job-shaped container, PR #469's gate round 3) is two levels down, so
  * its PID 1 has three or more fields and is not trusted. Measured on 5.8.1 with
  * pasta and with slirp4netns: the helper started 228 to 353 ms before its record's mtime. That
