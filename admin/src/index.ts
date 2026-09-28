@@ -1923,6 +1923,8 @@ export async function openSandboxSession(paths: any, jobId: string, io: any = {}
     ...(io.launch ? { launch: io.launch } : {}),
     ...(io.spawnNetwork ? { spawnNetwork: io.spawnNetwork } : {}),
     ...(io.resolveJobUser ? { resolveJobUser: io.resolveJobUser } : {}),
+    // Issue #452 gate round 2: the keeper check an egress-armed podman open asks first, seamed like the rest.
+    ...(io.keeperCheck ? { keeperCheck: io.keeperCheck } : {}),
     // Issue #446: the clock the past-window refusal reads, seamed like the rest. No `pin`: the panel offers none, so a
     // run past its window is refused here with the CLI command that pins it.
     ...(io.now ? { now: io.now } : {}),

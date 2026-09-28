@@ -3207,7 +3207,9 @@ export const CANARY_LINES = Object.freeze({
 	unreadable: {
 		tier: "warn",
 		fix: () => CANARY_LEFTOVER_FIX,
-		label: ({ name, bin = "docker" }) => `the network ${name} could not be read: ${bin} network inspect ${name}`,
+		// The READ that failed, per runtime (issue #452): Podman's members come from `ps -a --filter network=`, since 4.9's
+		// `network inspect` renders no member list, so pointing a Podman operator at the inspect would show them nothing.
+		label: ({ name, bin = "docker" }) => `the network ${name} could not be read: ${bin === "podman" ? `${bin} ps -a --filter network=${name}` : `${bin} network inspect ${name}`}`,
 	},
 	kept: {
 		tier: "warn",
@@ -3272,6 +3274,11 @@ const CANARY_DOCKER = Object.freeze({ bin: "docker", prefix: "" });
 /** The podman venue's (issue #431): its CLI, and the `podman: ` its section's lines all carry. */
 const CANARY_PODMAN = Object.freeze({ bin: "podman", prefix: "podman: " });
 
+/** A CLI's canary words: the two above by name, and any other runtime's CLI as the prefix of its own lines. */
+function canaryVenueFor(bin) {
+	return bin === "podman" ? CANARY_PODMAN : bin === "docker" ? CANARY_DOCKER : { bin, prefix: `${bin}: ` };
+}
+
 /**
  * A fix written for docker, for another runtime: its CLI's name wherever the text names a command. The same rule as
  * `liveFailFix`, and docker's text is returned untouched.
@@ -3294,8 +3301,13 @@ function forRuntime(text, bin) {
  *
  * Anchored on the name, and only for a dead pid: a network this doctor made is its own business, and one whose
  * pid is still alive belongs to a doctor that is still running.
+ *
+ * EXPORTED for `.github/scripts/podman-conformance.mjs` (issue #452), which leaves a canary network behind on a real
+ * rootless Podman and runs THIS sweep over it, so the member read it depends on is exercised on the Podman the
+ * required CI job runs rather than only on the lab's. `bin` names the runtime for a caller outside this file, which
+ * has no venue constant to hand in; doctor's own two callers pass `venue`.
  */
-async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, venue = CANARY_DOCKER }) {
+export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bin = "docker", venue = canaryVenueFor(bin) }) {
 	// ONE QUESTION: can this shell show the daemon is on this host? Only `local === true` can, so remote and
 	// unknown take the same branch. The whole endpoint is passed rather than that boolean because the line
 	// this sweep prints for a daemon it will not touch now NAMES what the CLI resolved, the way
@@ -3360,7 +3372,7 @@ async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, venue = C
 		// belief it was protecting a concurrent run, left that network to block our own `network create` and
 		// take the whole egress read-back down silently, measured.
 		if (!Number.isSafeInteger(owner) || (owner !== pid && isAlive(owner))) continue;
-		const { ok, names, absent } = await networkEndpoints(run, name);
+		const { ok, names, absent, parked = [] } = await networkEndpoints(run, name, { bin: venue.bin });
 		if (absent) continue;
 		if (!ok) {
 			// The command that FAILED, which is this file's convention for a label, and it was the wrong one
@@ -3372,16 +3384,24 @@ async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, venue = C
 		}
 		// The dead run's own probes are REMOVED, everything else is merely detached -- the proxy is shared and
 		// long-lived, and a stranger on a network in this namespace is not ours to delete.
-		// RESIDUAL, same as `live-probes.mjs`'s and measured under #337: `names` holds RUNNING endpoints, so a
-		// probe in `created` state is missing from it and the removal below would succeed and strand it. Not
+		// RESIDUAL ON DOCKER, same as `live-probes.mjs`'s and measured under #337: `names` holds RUNNING endpoints,
+		// so a probe in `created` state is missing from it and the removal below would succeed and strand it. Not
 		// guarded, and the reason is the line above: only a DEAD pid's network is touched here, and a dead
 		// process is not mid-launch.
+		//
+		// CLOSED ON PODMAN (issue #452): its read also returns `parked`, the members in every other state, and they
+		// are handled exactly as the running ones are -- a parked probe of this run removed, anything else parked
+		// detached. Both halves are needed there and not on docker, because Podman's `network rm` refuses while a
+		// member in ANY state remains (measured on 4.9.3 and 5.8.1): a stopped probe, or a proxy that has since
+		// stopped, would otherwise hold the network and print `notRemoved` on every run. Docker's read carries no
+		// `parked`, so its pass is what it was.
+		const members = [...names, ...parked];
 		// Recorded only when it TOOK, the same rule `removeNetworkOrSay` applies to `detached` -- a ✓ claiming a
 		// probe was removed while it is still running is worse than no line. One that did NOT go stays in the
 		// detach list, so it is at least taken off the network rather than falling between the two.
 		const removed = [];
 		const stuck = [];
-		for (const endpoint of names.filter((n) => probeOf(ownerText).test(n))) {
+		for (const endpoint of members.filter((n) => probeOf(ownerText).test(n))) {
 			if ((await run(canaryProbeRemoval(venue.bin, endpoint)))?.code === 0) removed.push(endpoint);
 			else stuck.push(endpoint);
 		}
@@ -3394,7 +3414,7 @@ async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, venue = C
 			checks.push(canaryCheck("kept", { name, stuck }, venue));
 			continue;
 		}
-		const outcome = await removeNetworkOrSay(run, { network: name, detach: names.filter((n) => !removed.includes(n)), bin: venue.bin });
+		const outcome = await removeNetworkOrSay(run, { network: name, detach: members.filter((n) => !removed.includes(n)), bin: venue.bin });
 		// `" and "` between the two clauses, for the reason given at the vanished-network line below: each half
 		// is itself a comma-separated list, so a comma between them marks no boundary. This is the COMMON
 		// line, and it kept the defect for a round after its rarer sibling was fixed.
@@ -3750,7 +3770,7 @@ const CANARY_NO_WORKSPACE = "/nonexistent/pi-dispatch-egress-canary-mounts-nothi
  * proxy's state on its own runtime first, and runs this only when it is up and the job image is present.
  */
 export async function runEgressCanary({ run, bin = "docker", proxy, image, pid = process.pid, user = null, probeRun = null }) {
-	const venue = bin === "podman" ? CANARY_PODMAN : bin === "docker" ? CANARY_DOCKER : { bin, prefix: `${bin}: ` };
+	const venue = canaryVenueFor(bin);
 	const probe = probeRun ?? ((args) => run(args, { timeoutMs: bin === "podman" ? PODMAN_FIRST_START_TIMEOUT_MS : RUN_TIMEOUTS.cmd }));
 	const checks = [];
 	const net = egressCanaryNetwork(pid);

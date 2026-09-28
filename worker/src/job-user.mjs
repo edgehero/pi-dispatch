@@ -186,6 +186,22 @@ export function makeDaemonFactsReader({ run = (args) => execDockerBounded(args, 
 }
 
 /**
+ * What daemon a `docker` CLI reaches, for `makeNetnsDetachGuard` (issue #452, gate round 2): `{ known, podman, rootless,
+ * version }` from the same `docker info --format={{json .}}` read and `parseDaemonFacts` the local venue decides its job
+ * user with, over the caller's own runner. Its Podman detection covers both routes Podman is reached as `docker` by:
+ * `podman-docker` prints Podman's own shape, and the real CLI against Podman's API prints Docker's with Podman's
+ * `ProductLicense` (both measured on 4.9.3 and 5.8.1, with `rootless` and the version as Podman's).
+ */
+export function dockerRuntimeReader(run) {
+	const read = makeDaemonFactsReader({ run });
+	return async () => {
+		const answer = await read();
+		if (answer?.answered !== true) return { known: false };
+		return { known: true, podman: answer.facts.podman === true, rootless: typeof answer.facts.rootless === "boolean" ? answer.facts.rootless : null, version: answer.facts.serverVersion ?? null };
+	};
+}
+
+/**
  * `{ uid, gid }` of a local unix socket, or `null`. Takes the docker endpoint's `unix://` path or Podman's
  * `remoteSocket.path`, which is a bare path when the service is local and `unix://...` when it is remote (both
  * measured). `stat`, never `lstat`: `/var/run/docker.sock` is a symlink on Docker Desktop, and a link pointing at a

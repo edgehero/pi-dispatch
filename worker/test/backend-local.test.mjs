@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { BACKEND_FUNCTIONS, DOCKER_ENDPOINT_ARGS, ENDPOINT_LISTED_STATES, ENDPOINT_SHOWN_MAX, JOB_NAME_PREFIX, classifyDockerEndpoint, classifyEndpointFailure, endpointShown, execDockerBounded, isJobNamespace, jobContainerName, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, parseDockerEndpoint, quotedShown } from "../src/backend-local.mjs";
+import { BACKEND_FUNCTIONS, DOCKER_ENDPOINT_ARGS, REAPER_STEP_TIMEOUT_MS, reaperExec, ENDPOINT_LISTED_STATES, ENDPOINT_SHOWN_MAX, JOB_NAME_PREFIX, classifyDockerEndpoint, classifyEndpointFailure, endpointShown, execDockerBounded, isJobNamespace, jobContainerName, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, parseDockerEndpoint, quotedShown } from "../src/backend-local.mjs";
 import { BACKENDS, DEFAULT_BACKEND } from "../src/backends.mjs";
 import { networkNameFor } from "../src/egress.mjs";
 
@@ -320,6 +320,9 @@ function fakeDockerExec({ containers = [], nets = {}, stopped = {}, fail = {} } 
 		}
 		if (key === "rm -f") return { stdout: "", stderr: "" };
 		if (key === "network ls") return { stdout: [...state.keys()].join("\n"), stderr: "" };
+		// Podman's half of the endpoint read (issue #452): exit 0 when the network is there, 1 with nothing printed
+		// when it is not (measured on 4.9.3 and 5.8.1), which `promisify(execFile)` turns into a rejection.
+		if (key === "network exists") return state.has(args.at(-1)) ? { stdout: "", stderr: "" } : reject(1, "");
 		if (key === "network inspect") {
 			const net = args.at(-1);
 			if (!state.has(net)) return reject(1, `Error response from daemon: network ${net} not found`);
@@ -780,6 +783,61 @@ test("a network under the prefix without the `-net` suffix is now swept, and tha
 	assert.ok(!state.has("pi-job-mine-net-backup") && !state.has("pi-job-runner_default"), "both are gone");
 });
 
+// --- issue #452: the podman venue's reaper reads members with `ps -a`, which Podman 4.9 answers ---------------------
+
+test("the podman reaper reads a leftover job network's members with `ps -a`, never `.Containers`, and removes it (#452)", async () => {
+	// The #357 shape on the podman venue: the worker died mid-job, its container is reaped, and this worker's own proxy
+	// is still attached. Podman 4.9.3 answers `network inspect --format {{json .Containers}}` with exit 125 for EVERY
+	// network (measured), so on the read it used to take this network was "unreadable" on every boot, forever.
+	const { exec, calls, state } = fakeDockerExec({ nets: { "pi-job-a-net": ["pi-dispatch-egress-proxy"] } });
+	const { log, lines } = reaperLog();
+	assert.deepEqual(await makeReaper({ log, exec, bin: "podman" })(), { reaped: true });
+	assert.deepEqual(lines, [["reaped_network", { network: "pi-job-a-net", detached: ["pi-dispatch-egress-proxy"] }]]);
+	assert.equal(state.has("pi-job-a-net"), false);
+	assert.ok(!calls.some((c) => c.includes(".Containers")), calls.join(" | "));
+	assert.deepEqual(calls.slice(calls.indexOf("network ls --filter name=pi-job- --format {{.Name}}") + 1), [
+		"ps -a --filter network=pi-job-a-net --format {{.Names}}\t{{.State}}",
+		"network exists pi-job-a-net",
+		"ps -a --filter network=pi-job-a-net --format {{.Names}}\t{{.State}}",
+		"network disconnect -f pi-job-a-net pi-dispatch-egress-proxy",
+		"network rm pi-job-a-net",
+	]);
+});
+
+test("the podman reaper keeps each guard it has on docker: a job container, a stopped stranger, a stopped proxy, a gone network (#452)", async () => {
+	// A job container still RUNNING on it: left alone and said, exactly as on docker.
+	const job = fakeDockerExec({ nets: { "pi-job-a-net": ["pi-job-b", "pi-dispatch-egress-proxy"] } });
+	const jobLog = reaperLog();
+	await makeReaper({ log: jobLog.log, exec: job.exec, bin: "podman" })();
+	assert.deepEqual(jobLog.lines, [["network_not_reaped", { network: "pi-job-a-net", reason: "job-container-attached" }]]);
+	assert.ok(!job.calls.some((c) => c.startsWith("network disconnect")));
+	// A stranger that is `created`: parked, so it keeps the network (its `rm` would refuse on Podman anyway).
+	const stranger = fakeDockerExec({ nets: { "pi-job-a-net": ["pi-dispatch-egress-proxy"] }, stopped: { "pi-job-a-net": [["their-thing", "created"]] } });
+	const strangerLog = reaperLog();
+	await makeReaper({ log: strangerLog.log, exec: stranger.exec, bin: "podman" })();
+	assert.deepEqual(strangerLog.lines, [["network_not_reaped", { network: "pi-job-a-net", reason: "container-attached-not-running", containers: ["their-thing"], more: 0 }]]);
+	assert.ok(!stranger.calls.some((c) => c.startsWith("network disconnect")));
+	// The proxy STOPPED and nothing else: detached and the network removed, because Podman's `rm` refuses on a member in
+	// ANY state (measured on 4.9.3 and 5.8.1) and a stopped proxy is not a reason to keep a dead job's network.
+	const parkedProxy = fakeDockerExec({ nets: { "pi-job-a-net": [] }, stopped: { "pi-job-a-net": [["pi-dispatch-egress-proxy", "exited"]] } });
+	const parkedLog = reaperLog();
+	await makeReaper({ log: parkedLog.log, exec: parkedProxy.exec, bin: "podman" })();
+	assert.deepEqual(parkedLog.lines, [["reaped_network", { network: "pi-job-a-net", detached: ["pi-dispatch-egress-proxy"] }]]);
+	// Gone between the listing and the read: `network exists` exit 1 is the one silence.
+	const gone = fakeDockerExec({ nets: { "pi-job-a-net": [] } });
+	const goneExec = async (cmd, args) => (args[0] === "network" && args[1] === "exists" ? Promise.reject(Object.assign(new Error("Command failed: podman"), { code: 1, stdout: "", stderr: "" })) : gone.exec(cmd, args));
+	const goneLog = reaperLog();
+	assert.deepEqual(await makeReaper({ log: goneLog.log, exec: goneExec, bin: "podman" })(), { reaped: true });
+	assert.deepEqual(goneLog.lines, []);
+	// A Podman that cannot say whether it is there (125): unreadable, said, and nothing touched.
+	const unsure = fakeDockerExec({ nets: { "pi-job-a-net": ["pi-dispatch-egress-proxy"] } });
+	const unsureExec = async (cmd, args) => (args[0] === "network" && args[1] === "exists" ? Promise.reject(Object.assign(new Error("Command failed: podman"), { code: 125, stdout: "", stderr: "Error: boom" })) : unsure.exec(cmd, args));
+	const unsureLog = reaperLog();
+	assert.deepEqual(await makeReaper({ log: unsureLog.log, exec: unsureExec, bin: "podman" })(), { reaped: true });
+	assert.deepEqual(unsureLog.lines, [["network_not_reaped", { network: "pi-job-a-net", reason: "unreadable" }]]);
+	assert.ok(!unsure.calls.some((c) => c.startsWith("network disconnect") || c.startsWith("network rm")));
+});
+
 // --- issue #354: the runtime binary seam ------------------------------------------------------------------------------
 
 test("makeStopContainer and makeReaper spawn the venue's binary for EVERY step, and default to docker (#354)", async () => {
@@ -792,8 +850,9 @@ test("makeStopContainer and makeReaper spawn the venue's binary for EVERY step, 
 		};
 		const { log } = reaperLog();
 		assert.deepEqual(await makeReaper({ log, exec, ...seam })(), { reaped: true });
-		// The pass covered every verb the reaper has, so the binary below is pinned for each of them.
-		for (const verb of ["ps --filter", "rm -f pi-job-a", "network ls", "network inspect", "ps -a", "network disconnect", "network rm"]) {
+		// The pass covered every verb the reaper has, so the binary below is pinned for each of them. Podman's endpoint
+		// read is `ps -a` plus `network exists` rather than `network inspect` (issue #452).
+		for (const verb of ["ps --filter", "rm -f pi-job-a", "network ls", want === "podman" ? "network exists" : "network inspect", "ps -a", "network disconnect", "network rm"]) {
 			assert.ok(daemon.calls.some((c) => c.startsWith(verb)), verb);
 		}
 		assert.deepEqual([...new Set(bins)], [want], JSON.stringify(seam));
@@ -809,4 +868,23 @@ test("execDockerBounded runs the binary it is given, and docker by default (#354
 	await execDockerBounded(["info"], { execFileFn, bin: "podman" });
 	await execDockerBounded(["info"], { execFileFn });
 	assert.deepEqual(seen, ["podman", "docker"]);
+});
+
+test("the boot reaper's steps are bounded: 30 s each by default, and a step past its bound is killed and rejects (#452 gate round 2)", async () => {
+	// The pinned options, through a fake execFile.
+	const seen = [];
+	const fake = (bin, args, opts, cb) => (seen.push({ bin, args, opts }), queueMicrotask(() => cb(null, "out", "err")));
+	assert.deepEqual(await reaperExec({ execFileFn: fake })("podman", ["ps"]), { stdout: "out", stderr: "err" });
+	assert.equal(REAPER_STEP_TIMEOUT_MS, 30_000);
+	assert.deepEqual(seen[0].opts, { timeout: 30_000, killSignal: "SIGKILL", maxBuffer: 1024 * 1024 });
+	// A failure keeps promisify(execFile)'s shape: the code on `.code`, both streams on the error.
+	const failing = (bin, args, opts, cb) => queueMicrotask(() => cb(Object.assign(new Error("Command failed"), { code: 125 }), "o", "e"));
+	await assert.rejects(reaperExec({ execFileFn: failing })("podman", ["ps"]), (err) => err.code === 125 && err.stdout === "o" && err.stderr === "e");
+	// A real child that outlives the bound is killed: the reaper's step then reads no numeric code, which is no answer.
+	const started = Date.now();
+	await assert.rejects(reaperExec({ timeoutMs: 200 })(process.execPath, ["-e", "setTimeout(() => {}, 10000)"]), (err) => err.killed === true && typeof err.code !== "number");
+	assert.ok(Date.now() - started < 5000);
+	// And makeReaper uses it by default: a source pin, since the default spawns the real CLI.
+	const src = readFileSync(new URL("../src/backend-local.mjs", import.meta.url), "utf8");
+	assert.match(src, /export function makeReaper\(\{ log, exec = execReaperBounded, bin = "docker", detachGuardFor = null \}\)/);
 });

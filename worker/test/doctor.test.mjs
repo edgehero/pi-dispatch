@@ -6,7 +6,7 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { CANARY_LINES, CANARY_PROBE_SLUGS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryProbeArgs, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, urlShown } from "../src/doctor.mjs";
+import { CANARY_LINES, CANARY_PROBE_SLUGS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryProbeArgs, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown } from "../src/doctor.mjs";
 import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS } from "../src/init.mjs";
 import { EGRESS_CANARY_NET_PREFIX, egressCanaryProbe } from "../src/egress.mjs";
 import { LIVE_PREFIX } from "../src/live-probes.mjs";
@@ -7170,7 +7170,9 @@ test("the stale canary sweep works on podman: a dead run's leftover in this acco
 	const leftover = "pi-dispatch-egress-doctor-4242";
 	const sweep = {
 		[`podman network ls --filter name=${EGRESS_CANARY_NET_PREFIX} --format {{.Name}}`]: { code: 0, output: `${leftover}\npi-dispatch-egress-doctor-4242-extra\n` },
-		[`podman network inspect --format {{json .Containers}} ${leftover}`]: { code: 0, output: JSON.stringify({ a: { name: "pi-dispatch-egress-probe-unlisted-4242" }, b: { name: "pi-dispatch-egress-proxy" } }) },
+		// Podman's member read (issue #452): every member with its state, as 4.9.3 and 5.8.1 both render it.
+		[`podman ps -a --filter network=${leftover} --format {{.Names}}\t{{.State}}`]: { code: 0, output: "pi-dispatch-egress-probe-unlisted-4242\trunning\npi-dispatch-egress-proxy\trunning\n" },
+		[`podman network exists ${leftover}`]: { code: 0, output: "" },
 		[`${PODMAN_PROBE}provider`]: 0,
 		[`${PODMAN_PROBE}unlisted`]: 3,
 	};
@@ -7178,7 +7180,8 @@ test("the stale canary sweep works on podman: a dead run's leftover in this acco
 	const checks = await podmanLiveChecks(env, podmanEgressSeams(sweep, calls), podmanEgressFacts({ proxyRunning: false }));
 	const touched = calls.filter((c) => c.args.some((a) => String(a).includes("4242"))).map((c) => [c.cmd, ...c.args].join(" "));
 	assert.deepEqual(touched, [
-		`podman network inspect --format {{json .Containers}} ${leftover}`,
+		`podman ps -a --filter network=${leftover} --format {{.Names}}\t{{.State}}`,
+		`podman network exists ${leftover}`,
 		// `--time=0` (review F1): podman's `rm -f` otherwise waits the probe's 10 s stop timeout, the step bound itself.
 		"podman rm -f --time=0 pi-dispatch-egress-probe-unlisted-4242",
 		`podman network disconnect -f ${leftover} pi-dispatch-egress-proxy`,
@@ -7196,6 +7199,71 @@ test("the stale canary sweep works on podman: a dead run's leftover in this acco
 	const unproved = await podmanLiveChecks(env, podmanEgressSeams({ "podman network create": 1 }), podmanEgressFacts());
 	assert.match(unproved.find((c) => /could not be created/.test(c.label)).fix, /`podman network ls --filter name=pi-dispatch-egress-doctor-`/);
 	assert.doesNotMatch(unproved.find((c) => /could not be created/.test(c.label)).fix, /\bdocker\b/);
+});
+
+// --- issue #452: the canary sweep on Podman 4.9, which renders no `.Containers` --------------------------------------
+
+/** A Podman answering the canary sweep: `network ls`, the member `ps -a` rows per network, `network exists`, removals. */
+function podmanCanaryDaemon({ nets = {}, exists = () => 0, rm = () => 0 } = {}) {
+	const calls = [];
+	const run = async (args) => {
+		calls.push(args.join(" "));
+		if (args[0] === "network" && args[1] === "ls") return { code: 0, stdout: Object.keys(nets).join("\n"), stderr: "" };
+		if (args[0] === "ps") {
+			const net = args[args.indexOf("--filter") + 1].slice("network=".length);
+			return { code: 0, stdout: (nets[net] ?? []).map(([n, st]) => `${n}\t${st}`).join("\n"), stderr: "" };
+		}
+		if (args[0] === "network" && args[1] === "exists") return { code: exists(args.at(-1)), stdout: "", stderr: "" };
+		if (args[0] === "rm") return { code: rm(args.at(-1)), stdout: "", stderr: "" };
+		if (args[0] === "network" && (args[1] === "disconnect" || args[1] === "rm")) return { code: 0, stdout: "", stderr: "" };
+		return { code: 99, stdout: "", stderr: "unmodelled" };
+	};
+	return { run, calls };
+}
+
+test("on podman the canary sweep removes a dead run's probes in EVERY state and detaches the rest, stopped ones included (#452)", async () => {
+	// The measured leftover (a `kill -9` mid-canary on Podman 4.9.3): the proxy running on the network, a running probe,
+	// and here a stopped one as well. Podman's `network rm` refuses while any of them remains (4.9.3 and 5.8.1), so a
+	// stopped probe the sweep could not see would keep the network and print `notRemoved` on every run.
+	const net = "pi-dispatch-egress-doctor-4242";
+	const d = podmanCanaryDaemon({ nets: { [net]: [["pi-dispatch-egress-proxy", "running"], ["pi-dispatch-egress-probe-provider-4242", "running"], ["pi-dispatch-egress-probe-unlisted-4242", "exited"], ["someone-else", "created"]] } });
+	const checks = await sweepStaleCanaryNetworks({ run: d.run, pid: 1, isAlive: () => false, endpoint: { local: true }, bin: "podman" });
+	assert.deepEqual(d.calls, [
+		"network ls --filter name=pi-dispatch-egress-doctor- --format {{.Name}}",
+		`ps -a --filter network=${net} --format {{.Names}}\t{{.State}}`,
+		`network exists ${net}`,
+		"rm -f --time=0 pi-dispatch-egress-probe-provider-4242",
+		"rm -f --time=0 pi-dispatch-egress-probe-unlisted-4242",
+		`network disconnect -f ${net} pi-dispatch-egress-proxy`,
+		`network disconnect -f ${net} someone-else`,
+		`network rm ${net}`,
+	], "the probes are removed by name, the proxy and the stranger only detached, and the network removed without -f");
+	assert.deepEqual(checks.map((c) => c.label), [`podman: Egress canary: removed ${net} (after removing pi-dispatch-egress-probe-provider-4242, pi-dispatch-egress-probe-unlisted-4242 and detaching pi-dispatch-egress-proxy, someone-else), left by an EARLIER doctor run`]);
+	assert.equal(checks[0].label, `podman: Egress canary: ${CANARY_LINES[checks[0].canary.shape].label(checks[0].canary.params)}`);
+	// `venue` still wins where doctor passes it, and `bin` alone gives the same words.
+	const again = podmanCanaryDaemon({ nets: { [net]: [] } });
+	const viaBin = await sweepStaleCanaryNetworks({ run: again.run, pid: 1, isAlive: () => false, endpoint: { local: true }, bin: "podman" });
+	assert.deepEqual(viaBin.map((c) => c.label), [`podman: Egress canary: removed ${net}, left by an EARLIER doctor run`], "an EMPTY leftover is removed too");
+});
+
+test("on podman the canary sweep says `unreadable` only when Podman cannot answer, and is silent on a network already gone (#452)", async () => {
+	const net = "pi-dispatch-egress-doctor-4242";
+	// Gone between the listing and the read: `network exists` exit 1, the one silence.
+	const gone = podmanCanaryDaemon({ nets: { [net]: [] }, exists: () => 1 });
+	assert.deepEqual(await sweepStaleCanaryNetworks({ run: gone.run, pid: 1, isAlive: () => false, endpoint: { local: true }, bin: "podman" }), []);
+	// 125 from `network exists`, or a `ps` row this parser was not measured against: unreadable, and nothing touched.
+	for (const d of [podmanCanaryDaemon({ nets: { [net]: [] }, exists: () => 125 }), podmanCanaryDaemon({ nets: { [net]: [["pi-dispatch-egress-proxy", ""]] } })]) {
+		const checks = await sweepStaleCanaryNetworks({ run: d.run, pid: 1, isAlive: () => false, endpoint: { local: true }, bin: "podman" });
+		// The read that failed, which on Podman is the member `ps`, not an inspect that renders no members on 4.9.
+		assert.deepEqual(checks.map((c) => c.label), [`podman: Egress canary: the network ${net} could not be read: podman ps -a --filter network=${net}`]);
+		assert.equal(checks[0].label, `podman: Egress canary: ${CANARY_LINES.unreadable.label(checks[0].canary.params)}`);
+		assert.ok(!d.calls.some((c) => c.startsWith("rm ") || c.startsWith("network disconnect") || c.startsWith("network rm")), d.calls.join(" | "));
+	}
+	// A stopped probe that will not go keeps the network, named, exactly as a running one does.
+	const stuck = podmanCanaryDaemon({ nets: { [net]: [["pi-dispatch-egress-probe-unlisted-4242", "created"]] }, rm: () => 125 });
+	const kept = await sweepStaleCanaryNetworks({ run: stuck.run, pid: 1, isAlive: () => false, endpoint: { local: true }, bin: "podman" });
+	assert.deepEqual(kept.map((c) => c.canary.shape), ["kept"]);
+	assert.ok(!stuck.calls.some((c) => c.startsWith("network rm")));
 });
 
 test("doctor --live on a podman-only deployment with egress armed: the canary's lines, then the read-back, and no docker (#431)", async () => {
@@ -7223,7 +7291,9 @@ test("doctor --live on Podman 4.x without the keeper runs no canary and no peer 
 	const STALE = "pi-dispatch-live-peer1-99-abc-net";
 	const staleKeys = {
 		[`podman network ls --filter name=${LIVE_PREFIX}`]: { code: 0, output: `${STALE}\n` },
-		[`podman network inspect --format {{json .Containers}} ${STALE}`]: { code: 0, output: '{"x":{"Name":"pi-dispatch-egress-proxy"}}\n' },
+		// Podman's member read since #452 (4.9 renders no `.Containers`): the proxy as a running member, and the network there.
+		[`podman ps -a --filter network=${STALE} --format {{.Names}}\t{{.State}}`]: { code: 0, output: "pi-dispatch-egress-proxy\trunning\n" },
+		[`podman network exists ${STALE}`]: { code: 0, output: "" },
 	};
 	const run = async ({ version, keeper, stale = false }) => {
 		const { out, text } = capture();

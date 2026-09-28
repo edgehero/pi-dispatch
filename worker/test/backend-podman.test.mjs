@@ -520,6 +520,41 @@ test("every spawn the podman bundle makes is `podman`, and the run is keep-id as
 	assert.ok(fake.calls.some((c) => c[1] === "network" && c[2] === "create"), "the job network is podman's");
 });
 
+test("the podman reaper detaches nothing RUNNING from a leftover job network on 4.x while the keeper does not hold (#452 with #458, gate round 2)", { skip }, async () => {
+	const reapWith = async ({ keeper, members = "pi-dispatch-egress-proxy\trunning\n" }) => {
+		const calls = [];
+		const lines = [];
+		const exec = async (_bin, args) => {
+			calls.push(args.join(" "));
+			const k = args.slice(0, 2).join(" ");
+			if (k === "ps --filter") return { stdout: "", stderr: "" };
+			if (k === "network ls") return { stdout: "pi-job-a-net\n", stderr: "" };
+			if (k === "ps -a") return { stdout: members, stderr: "" };
+			if (k === "network exists") return { stdout: "", stderr: "" };
+			// The runtime from `podman info --format json`, as the venue's preflight reads it.
+			if (args.join(" ") === "info --format json") return { stdout: `${JSON.stringify({ host: { security: { rootless: true } }, version: { Version: "4.9.3" } })}\n`, stderr: "" };
+			if (args[0] === "inspect") return keeper ? { stdout: "running|bridge|pi-dispatch-netns-keeper,\n", stderr: "" } : Promise.reject(Object.assign(new Error("Command failed: podman"), { code: 125, stdout: "", stderr: "no such container" }));
+			if (k === "network disconnect" || k === "network rm") return { stdout: "", stderr: "" };
+			throw Object.assign(new Error(`unmodelled: ${args.join(" ")}`), { code: 99 });
+		};
+		const out = await mod.makePodmanReaper({ log: (e, f) => lines.push([e, f]), exec })();
+		return { out, calls, lines };
+	};
+	const blocked = await reapWith({ keeper: false });
+	assert.deepEqual(blocked.out, { reaped: true }, "the tri-state is about containers, and this is a network");
+	assert.deepEqual(blocked.lines, [["network_not_reaped", { network: "pi-job-a-net", reason: "keeper-not-holding" }]]);
+	assert.ok(!blocked.calls.some((c) => c.startsWith("network disconnect") || c.startsWith("network rm")), blocked.calls.join(" | "));
+	const held = await reapWith({ keeper: true });
+	assert.deepEqual(held.lines, [["reaped_network", { network: "pi-job-a-net", detached: ["pi-dispatch-egress-proxy"] }]]);
+	// Y5 (gate round 2): a leftover with NO members on 4.9.3 without a keeper is reaped, and neither the runtime nor the
+	// keeper is read, since nothing is detached; nor for a STOPPED proxy, which is not in the namespace.
+	for (const members of ["", "pi-dispatch-egress-proxy\texited\n"]) {
+		const bare = await reapWith({ keeper: false, members });
+		assert.equal(bare.lines[0]?.[0], "reaped_network", JSON.stringify(members));
+		assert.ok(!bare.calls.some((c) => c.startsWith("info") || c.startsWith("inspect")), bare.calls.join(" | "));
+	}
+});
+
 test("the podman reaper keeps the tri-state and enumerates podman's store", { skip }, async () => {
 	const ok = fakePodman({ answers: { ps: { code: 0, stdout: "" }, "network ls": { code: 0, stdout: "" } } });
 	assert.deepEqual(await mod.makePodmanReaper({ log: () => {}, spawnFn: ok.spawnFn })(), { reaped: true });

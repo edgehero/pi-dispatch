@@ -309,26 +309,79 @@ export function networkAbsentInDaemonWords(result) {
 }
 
 /**
- * The endpoint NAMES attached to a network, as `{ ok, names, absent }`. The template's `.Containers` reads on Docker AND
- * Podman (measured, issue #344), but the JSON it renders does not: Docker's members carry `Name`, Podman's `name` (5.8.1,
- * measured under issue #354). Either is read; a member with NEITHER as a non-empty string makes the whole answer
- * UNREADABLE (`ok: false`), never "nothing attached", because every caller treats an empty list as licence to detach
- * and remove, and a member this parser cannot name is still a member.
+ * The container states a daemon's own member list shows for a network: `docker network inspect`'s `.Containers`
+ * lists a member in these and in no other (measured, docker 27.4.0), and so does Podman 5.8.1's (issue #452,
+ * measured: `running` and `paused` listed, `exited` and `created` not). `backend-local.mjs` re-exports it under
+ * the same name for the boot reaper's second question, which asks about the states OUTSIDE this set.
  *
- * WHAT "ATTACHED" MEANS HERE, measured end to end on docker 27.4.0 rather than assumed. This lists RUNNING
- * endpoints only. A running member is listed and `network rm` fails "has active endpoints"; the SAME member
- * stopped is absent from this map AND the `rm` succeeds. So for those two states "listed" and "holds the
- * network" agree, and a stopped container is not something a sweep needs to reason about.
+ * An ALLOWLIST rather than a denylist, following `sandbox.mjs`: an unknown state -- a Podman rendering nothing
+ * here has measured, or one docker adds later -- is outside it, which keeps a network rather than losing it.
+ * `restarting` is NOT here, even though it can appear: whether a flapping container is in `.Containers` depends
+ * on which instant the sweep asks in, and a rule that changes answer between two runs is not a rule a sweep can
+ * act on.
+ */
+export const ENDPOINT_LISTED_STATES = new Set(["running", "paused"]);
+
+/**
+ * The endpoint NAMES attached to a network, as `{ ok, names, absent }`, plus `parked` on Podman (below).
+ *
+ * TWO READS, ONE PER RUNTIME, and `bin` picks which (issue #452). On docker it is `network inspect --format
+ * {{json .Containers}}`, byte for byte what it always was. On Podman that template does not work across the
+ * versions this project runs: 5.8.1 renders the member map (with a lowercase `name`, measured under issue #354),
+ * but 4.9.3 renders no member list at all -- its inspect JSON has no such key, and the template exits 125 with
+ * `can't evaluate field Containers in type interface {}` for EVERY existing network, empty or not (measured on
+ * Ubuntu 24.04). Read that way, every leftover network on 4.9 was unreadable forever, and all four sweeps that
+ * share this reader passed over it. So on Podman the members come from `ps -a --filter network=<net> --format
+ * {{.Names}}\t{{.State}}`, which both versions answer identically (measured on 4.9.3 and 5.8.1: exit 0, one
+ * `name<TAB>state` line per member in every state; the filter matches a network by its whole NAME only, never a
+ * name prefix, and by its full id or any prefix of that id, which a sweep never passes since it names networks).
+ *
+ * THAT READ CANNOT SAY "NOT THERE", which is why Podman's path has a second step: `ps` over a network that does
+ * not exist answers exit 0 and empty on both versions (measured), exactly like an empty network, and every
+ * caller treats empty as licence to remove. `network exists` then decides it, as its exit code (0 there, 1 not
+ * there, measured on both); anything else is no answer and the read is unreadable. The network is asked about
+ * AFTER its members, so an `absent` is the freshest fact this function has.
+ *
+ * WHAT `names` MEANS IS THE SAME ON BOTH RUNTIMES: the members the daemon lists, in `ENDPOINT_LISTED_STATES`.
+ * That is what every caller was written against (docker's `.Containers`, and Podman 5.8.1's, which lists the
+ * same two states), and keeping it is what keeps each caller's own guard meaning what it says. What Podman
+ * adds is `parked`: the members in every OTHER state, in the order `ps` gave them. Docker's read cannot see
+ * those at all and carries no `parked` key, so no docker caller's input changed. Podman is where they matter,
+ * because its `network rm` without `-f` refuses while a member in ANY state remains (measured on 4.9.3 and
+ * 5.8.1, each with a lone member in each of the four states running, paused, exited and created, and with all
+ * four together), where docker's refuses only for a listed one. A caller
+ * that must see a stopped member to act correctly reads `parked`; the others can ignore it and get what they
+ * always got.
+ *
+ * FAIL CLOSED, on both paths. A member with no readable name makes the whole answer UNREADABLE (`ok: false`),
+ * never "nothing attached", because every caller treats an empty list as licence to detach and remove, and a
+ * member this parser cannot name is still a member. On Podman that is any non-empty `ps` line that is not
+ * exactly a runtime-legal name, a tab and a lowercase state word.
+ *
+ * WHAT "ATTACHED" MEANS on docker, measured end to end on docker 27.4.0 rather than assumed. `.Containers` lists
+ * RUNNING endpoints only. A running member is listed and `network rm` fails "has active endpoints"; the SAME
+ * member stopped is absent from this map AND the `rm` succeeds. So for those two states "listed" and "holds the
+ * network" agree, and a stopped container is not something a docker sweep needs to reason about.
  *
  * CORRECTED under issue #337: that agreement does NOT extend to a container in `created` state, and the
  * earlier version of this comment generalised it to "listed and holds the network agree" full stop, which is
  * false. Measured: a container created on a network but never started is absent from this map, absent from
  * `docker ps`, and the `network rm` SUCCEEDS -- after which `docker start` fails with "network not found" and
- * the container can never run. So the daemon is a backstop for a RUNNING endpoint and for nothing else, and a
- * sweep that cares about a container being launched right now has to ask `docker ps -a --filter
- * status=created` rather than infer it from here. Unmeasured on Podman's netavark.
+ * the container can never run. So the docker daemon is a backstop for a RUNNING endpoint and for nothing else,
+ * and a sweep that cares about a container being launched right now has to ask `docker ps -a --filter
+ * status=created` rather than infer it from here. On Podman the backstop covers every state (above).
+ *
+ * `local` THROUGH `podman-docker` ON PODMAN 4.9 (issue #452, gate round 1). Podman's `docker` emulation is a
+ * script that runs `podman` itself, so `bin` says docker while the answer is 4.9's: the same exit 125 and
+ * `can't evaluate field Containers`, for every existing network (measured on 4.9.3; on 5.8.1 the emulation
+ * renders the member map). That exact wording, and nothing else, sends the docker path to the Podman read
+ * through the SAME runner, which the emulation answers as Podman does (measured on 4.9.3 and 5.8.1). Its
+ * presence step is a plain `network inspect <net>` read by `networkAbsentInDaemonWords` rather than `network
+ * exists`, because the real docker CLI has no such verb and exits 1 with its usage text (measured, docker
+ * 27.4.0 and 29.7.2), which would read as absent. The real docker CLI against Podman's Docker API never takes
+ * this branch: the API renders `.Containers` with `Name` (measured against 4.9.3's and 5.8.1's services).
  */
-export async function networkEndpoints(docker, network) {
+export async function networkEndpoints(docker, network, { bin = "docker" } = {}) {
 	// HALF-PROTECTED, and the half is worth naming (issue #360, item 6). `runWith` turns a runner that THROWS
 	// into `{ code: null }`, so a throwing runner reads here as an unreadable network and every caller's guard
 	// stays cautious. The `disconnect` and `rm` in `removeNetworkOrSay` go through the same wrapper, but the
@@ -336,17 +389,21 @@ export async function networkEndpoints(docker, network) {
 	// list: on the boot reaper that one is the throwing `exec` deliberately, so a daemon that dies mid-pass
 	// still answers `{ reaped: false }`. Unreachable with the production runners, which are all non-throwing
 	// by construction; stated so a future injected runner is not assumed to be.
+	if (bin === "podman") return podmanNetworkMembers(docker, network);
 	const inspected = await runWith(docker, ["network", "inspect", "--format", "{{json .Containers}}", network]);
-	if (inspected?.code !== 0) return { ok: false, names: [], absent: networkAbsentInDaemonWords(inspected) };
+	if (inspected?.code !== 0) {
+		if (/can't evaluate field Containers/.test(`${inspected?.stdout ?? ""}${inspected?.stderr ?? ""}`)) return podmanNetworkMembers(docker, network, { presence: "inspect" });
+		return { ok: false, names: [], absent: networkAbsentInDaemonWords(inspected) };
+	}
 	try {
 		const parsed = JSON.parse(String(inspected.stdout ?? "").trim() || "{}");
 		// FAIL CLOSED on anything that is not an object: a runtime rendering `.Containers` as `null` would
 		// otherwise read as "no endpoints", which makes every caller's guard vacuous rather than cautious.
-		// Netavark's rendering is unmeasured, so this is the direction to be wrong in.
 		if (parsed === null || typeof parsed !== "object") return { ok: false, names: [], absent: false };
 		const names = [];
 		for (const c of Object.values(parsed)) {
-			// `Name` first, the docker key, then Podman's `name`. A non-string or empty value under either is not a name.
+			// `Name` first, the docker key, then Podman 5.x's `name`, kept although Podman no longer takes this path:
+			// the reader is exported, and a caller handing it a Podman rendering still gets a name, not a refusal.
 			const name = [c?.Name, c?.name].find((v) => typeof v === "string" && v !== "");
 			if (name === undefined) return { ok: false, names: [], absent: false };
 			names.push(name);
@@ -355,6 +412,44 @@ export async function networkEndpoints(docker, network) {
 	} catch {
 		return { ok: false, names: [], absent: false };
 	}
+}
+
+/** A container name as both runtimes accept one (`[a-zA-Z0-9][a-zA-Z0-9_.-]*`, docker's and Podman's, measured). */
+const RUNTIME_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
+/**
+ * `networkEndpoints` on Podman: `ps -a --filter network=`, then whether the network is there (issue #452, see there):
+ * `network exists` for the podman CLI, a plain `network inspect` for Podman reached as `docker` (`presence: "inspect"`).
+ */
+async function podmanNetworkMembers(podman, network, { presence = "exists" } = {}) {
+	const unreadable = { ok: false, names: [], absent: false };
+	const listed = await runWith(podman, ["ps", "-a", "--filter", `network=${network}`, "--format", "{{.Names}}\t{{.State}}"]);
+	if (listed?.code !== 0) return unreadable;
+	const names = [];
+	const parked = [];
+	for (const raw of String(listed.stdout ?? "").split("\n")) {
+		const line = raw.trim();
+		if (line === "") continue;
+		// EXACTLY two fields. Podman writes its warnings to stderr, so anything else on stdout is a rendering this
+		// parser was not measured against, and a member it cannot name is still a member.
+		const fields = line.split("\t");
+		if (fields.length !== 2) return unreadable;
+		const [name, state] = fields.map((f) => f.trim());
+		if (!RUNTIME_NAME.test(name) || !/^[a-z]+$/.test(state)) return unreadable;
+		(ENDPOINT_LISTED_STATES.has(state) ? names : parked).push(name);
+	}
+	// Only now: `ps` answers the same for an empty network and a missing one. 0 is there, 1 is not (measured on
+	// 4.9.3 and 5.8.1); 125, a timeout or a launch failure is no answer, and no answer is never absence.
+	if (presence === "inspect") {
+		const inspected = await runWith(podman, ["network", "inspect", network]);
+		if (networkAbsentInDaemonWords(inspected)) return { ok: false, names: [], absent: true };
+		if (inspected?.code !== 0) return unreadable;
+		return { ok: true, absent: false, names, parked };
+	}
+	const exists = await runWith(podman, ["network", "exists", network]);
+	if (exists?.code === 1) return { ok: false, names: [], absent: true };
+	if (exists?.code !== 0) return unreadable;
+	return { ok: true, absent: false, names, parked };
 }
 
 /**

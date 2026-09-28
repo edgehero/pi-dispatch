@@ -967,14 +967,20 @@ export async function sweepStaleNetworks({ step, pid, isAlive, notes = [], bin =
 		// that renders as `null` used to parse to `{}` here and read as "nothing attached", which would detach
 		// and remove a network that still had members. Unreadable is now unreadable, and this sweep's own
 		// silence on it is unchanged -- it is best effort, and what it CAN read it still says.
-		const { ok, names: attached } = await networkEndpoints(step, name);
+		const { ok, names: running, parked = [] } = await networkEndpoints(step, name, { bin });
 		if (!ok) continue;
-		// RESIDUAL, recorded under issue #337 where it was measured rather than left for the next reader:
-		// `.Containers` lists RUNNING endpoints, so a probe in `created` state is not in `attached`, and on
-		// this daemon the `network rm` below would then SUCCEED and leave that container unable to start.
-		// Unguarded here on purpose rather than by oversight: this sweep only looks at a network whose owning
-		// pid is DEAD, and a dead process has no launch in flight. The sandbox sweep, whose owner may be very
-		// much alive, does carry the guard.
+		// RESIDUAL ON DOCKER, recorded under issue #337 where it was measured rather than left for the next reader:
+		// `.Containers` lists RUNNING endpoints, so a probe in `created` state is not in `running`, and on that
+		// daemon the `network rm` below would then SUCCEED and leave that container unable to start. Unguarded
+		// there on purpose rather than by oversight: this sweep only looks at a network whose owning pid is DEAD,
+		// and a dead process has no launch in flight. The sandbox sweep, whose owner may be very much alive, does
+		// carry the guard.
+		//
+		// CLOSED ON PODMAN (issue #452), where the read also returns `parked`, the members in every other state:
+		// Podman's `network rm` refuses while ANY of them remains (measured on 4.9.3 and 5.8.1), so a stopped proxy
+		// left on a peer network kept it forever, one ⚠ per run. A parked probe counts as a probe, and the rest are
+		// detached with the running ones. Docker's read carries no `parked`, so its pass is what it was.
+		const attached = [...running, ...parked];
 		if (attached.some((n) => probeContainer.test(n))) continue;
 		// Issue #458: a detach is the trigger there, so a stale network with anything still on it is left and SAID; one
 		// with nothing attached is removed as before, since `network rm` alone does not tear the helper down (measured).

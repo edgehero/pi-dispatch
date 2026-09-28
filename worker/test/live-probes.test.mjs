@@ -404,6 +404,9 @@ function fakeDocker(over = {}, { id = ID } = {}) {
 				return { code: 0, stdout: "", stderr: "" };
 			case "network-inspect":
 				return { code: 1, stdout: "", stderr: `Error response from daemon: network ${args.at(-1)} not found\n` };
+			// Podman's word for the same answer (issue #452): exit 1, nothing printed (measured on 4.9.3 and 5.8.1).
+			case "network-exists":
+				return { code: 1, stdout: "", stderr: "" };
 			case "network-create":
 			case "network-connect":
 			case "network-disconnect":
@@ -929,6 +932,44 @@ test("sweepStaleNetworks removes only a dead run's peer networks: never one a pr
 	assert.deepEqual(calls.slice(before).map((a) => a[1]), ["ls", "inspect"], "a network whose attachments cannot be read is left alone");
 });
 
+test("on podman the peer sweep reads members with `ps -a`, detaches a STOPPED member too, and a stopped probe still keeps the network (#452)", async () => {
+	// Podman 4.9.3 answers `network inspect --format {{json .Containers}}` with exit 125 for every network (measured), and
+	// Podman's `network rm` refuses while a member in ANY state remains (4.9.3 and 5.8.1), so a stopped proxy on a dead
+	// run's peer network kept it forever. The rows are `ps -a`'s, as both versions print them.
+	const members = {
+		"pi-dispatch-live-peer1-100-abc123-net": "pi-dispatch-egress-proxy\texited\nsome-other-container\trunning\n",
+		"pi-dispatch-live-peer2-100-abc123-net": "",
+		// A probe that is only `created` is still a run in progress for this sweep: never touched.
+		"pi-dispatch-live-peer1-400-bbb222-net": "pi-dispatch-live-peer1-400-bbb222\tcreated\npi-dispatch-egress-proxy\trunning\n",
+	};
+	const calls = [];
+	const step = async (args) => {
+		calls.push(args);
+		if (args[0] === "network" && args[1] === "ls") return { code: 0, stdout: Object.keys(members).join("\n") };
+		if (args[0] === "ps") return { code: 0, stdout: members[args[args.indexOf("--filter") + 1].slice("network=".length)] ?? "" };
+		if (args[1] === "exists") return { code: 0, stdout: "" };
+		return { code: 0, stdout: "" };
+	};
+	const notes = [];
+	const swept = await sweepStaleNetworks({ step, pid: 300, isAlive: () => false, notes, bin: "podman" });
+	assert.deepEqual(swept, ["network pi-dispatch-live-peer1-100-abc123-net (after detaching some-other-container, pi-dispatch-egress-proxy)", "network pi-dispatch-live-peer2-100-abc123-net"]);
+	assert.deepEqual(calls.filter((a) => a[1] === "disconnect" || a[1] === "rm"), [
+		["network", "disconnect", "-f", "pi-dispatch-live-peer1-100-abc123-net", "some-other-container"],
+		["network", "disconnect", "-f", "pi-dispatch-live-peer1-100-abc123-net", "pi-dispatch-egress-proxy"],
+		["network", "rm", "pi-dispatch-live-peer1-100-abc123-net"],
+		["network", "rm", "pi-dispatch-live-peer2-100-abc123-net"],
+	]);
+	assert.ok(!calls.some((a) => a.includes("{{json .Containers}}")), "never the read 4.9 cannot answer");
+	assert.deepEqual(notes, []);
+	// A network gone between the listing and the read is passed over; one Podman cannot say exists is too (silent here).
+	for (const code of [1, 125]) {
+		const quiet = [];
+		const s = async (args) => (quiet.push(args), args[1] === "ls" ? { code: 0, stdout: "pi-dispatch-live-peer1-100-abc123-net" } : args[1] === "exists" ? { code, stdout: "" } : { code: 0, stdout: "" });
+		assert.deepEqual(await sweepStaleNetworks({ step: s, pid: 300, isAlive: () => false, bin: "podman" }), [], String(code));
+		assert.ok(!quiet.some((a) => a[1] === "disconnect" || a[1] === "rm"), String(code));
+	}
+});
+
 test("the container sweep matches every kind liveNames makes, and still only a dead run's", async () => {
 	const calls = [];
 	const listing = LIVE_CONTAINER_KINDS.map((k, i) => `${String(i + 1).repeat(12)} pi-dispatch-live-${k}-100-abc123`).join("\n");
@@ -1297,6 +1338,8 @@ test("bin names the runtime in what the operator is told to run, and docker's wo
 	const staleNet = fakeDocker({
 		"network-ls": async () => ({ code: 0, stdout: "pi-dispatch-live-peer1-100-abc123-net\n", stderr: "" }),
 		"network-inspect": async () => ({ code: 0, stdout: "{}", stderr: "" }),
+		// Podman's endpoint read is `ps -a` then this (issue #452): the network is there.
+		"network-exists": async () => ({ code: 0, stdout: "", stderr: "" }),
 		"network-rm": async () => ({ code: 1, stdout: "", stderr: "" }),
 	});
 	// A peer network of this run's own that stays: its note is the shared egress rule's, spelled with this bin.
@@ -1399,7 +1442,8 @@ test("the stale live-network sweep never detaches the proxy while the keeper is 
 	const step = async (args) => {
 		calls.push(args.join(" "));
 		if (args[0] === "network" && args[1] === "ls") return { code: 0, stdout: "pi-dispatch-live-peer1-99-abc-net\npi-dispatch-live-peer2-99-abc-net\n" };
-		if (args[0] === "network" && args[1] === "inspect") return { code: 0, stdout: args.at(-1).includes("peer1") ? '{"x":{"Name":"pi-dispatch-egress-proxy"}}' : "{}" };
+		// Podman's member read since #452: `ps -a --filter network=` rows, then `network exists` (the default 0 below).
+		if (args[0] === "ps") return { code: 0, stdout: args.some((a) => a === "network=pi-dispatch-live-peer1-99-abc-net") ? "pi-dispatch-egress-proxy\trunning\n" : "" };
 		return { code: 0, stdout: "" };
 	};
 	const notes = [];

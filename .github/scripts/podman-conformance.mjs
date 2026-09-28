@@ -16,6 +16,8 @@
  *   - `readBack`: `runLiveProbes` with the podman runner, the podman argv builder and `serviceIsRemote === false` as
  *     its gate, exactly as `pi-dispatch doctor --live` runs it on this venue, with doctor's own egress canary
  *     (`runEgressCanary`, issue #431) under the same Podman, as `--live` runs it there.
+ *   - after the harness, doctor's own stale canary sweep (`sweepStaleCanaryNetworks`, issue #452) over two leftovers
+ *     this script makes as a killed `doctor --live` leaves them, which the harness has no probe for.
  *
  * AND ONE CASE OF ITS OWN, run before the harness (issue #458): two egress-armed jobs in sequence through the same
  * bundle built with egress on, so each one's network is made and torn down by the worker's own `createJobNetwork` and
@@ -64,9 +66,9 @@ const { PODMAN_FIRST_START_TIMEOUT_MS, decidePodmanJobUser, makePodmanBackend, m
 const { makeReaper } = await load("worker/src/backend-local.mjs");
 const { READ_BACK_BY_A_LIVE_PROBE, UNVERIFIED_BY_THIS_HARNESS, runBackendConformance } = await load("worker/src/backend-conformance.mjs");
 const { SHIPPED_IMAGE_UID } = await load("worker/src/container-spec.mjs");
-const { liveRunVia, runEgressCanary } = await load("worker/src/doctor.mjs");
+const { CANARY_PROBE_SLUGS, liveRunVia, runEgressCanary, sweepStaleCanaryNetworks } = await load("worker/src/doctor.mjs");
 const { buildPodmanRunArgs } = await load("worker/src/docker-run.mjs");
-const { egressArmed, egressProxyName, networkNameFor } = await load("worker/src/egress.mjs");
+const { egressArmed, egressCanaryNetwork, egressCanaryProbe, egressProxyName, networkNameFor } = await load("worker/src/egress.mjs");
 const { NETNS_KEEPER, NETNS_KEEPER_FORMAT, judgeNetnsKeeper } = await load("worker/src/podman-stack.mjs");
 const { runLiveProbes } = await load("worker/src/live-probes.mjs");
 
@@ -305,8 +307,110 @@ async function readBack() {
 	return result.verdicts;
 }
 
+/**
+ * Issue #452: the stale canary sweep, REAL, over a leftover it did not make. Podman 4.9 renders no `.Containers`, so the
+ * member read that sweep depended on failed for every network there and a leftover was reported "could not be read" on
+ * every `doctor --live` and never removed, while this job stayed green because nothing here ever left one behind. So
+ * this leaves two, as a `doctor --live` killed mid-canary does: an EMPTY one, and one built as `runEgressCanary` builds
+ * it (`network create --internal`, the proxy connected by name) with one probe RUNNING and one STOPPED under the probes'
+ * own names. Then it runs doctor's own sweep and reads back what the sweep promises: the networks and the probes gone,
+ * the proxy still running, still on its upstream network, and still reaching out.
+ *
+ * LAST, after the harness, and with NOTHING holding the rootless network up but what the deployment itself runs. On
+ * Podman 4.9.3, disconnecting the proxy from a network while no other container runs on a bridge network tears the
+ * account's rootless network namespace down under the running proxy (round 446, M0-c), and the canary's teardowns, the
+ * peers' and this sweep's all disconnect it. The rootless network keeper (issue #458, started by the workflow before the
+ * proxy) is what holds it now, so this case adds no container of its own for that and restarts nothing: a proxy that
+ * has lost its route out, or answers `inspect` with an error, BEFORE the sweep is a FAILURE, because by then the harness
+ * has torn down job, canary and peer networks under it, and so is one after it. Either is a #458 regression, and it
+ * turns this required check red. It was measured both ways on Podman 4.9.3: passing with the keeper running, failing
+ * with it stopped. What the sweep itself owns is asserted beside it: it never `rm -f`s, detaches the proxy from its
+ * upstream network or removes it. Every failure names the keeper's state.
+ */
+async function staleCanarySweep() {
+	// ONE array, returned by reference, so the observations the `finally` below adds reach the summary on every path.
+	const lines = [];
+	const fail = (why) => ({ ok: false, why, lines });
+	if (armed !== true) return { ok: true, notRead: "PI_EGRESS is off, so there is no proxy to leave a canary network holding" };
+	// From `ps`, not `inspect`: on Podman 4.9.3 the harness's own canary and peer teardowns can leave the proxy running
+	// with an `inspect` that exits 125 ("network inspection mismatch ... internal libpod error"), measured in this very
+	// job's position (round 446), and a case that read that as "not running" would say nothing about the sweep.
+	const proxyRow = async () => {
+		const row = await podman(["ps", "-a", "--filter", `name=^${proxy}$`, "--format", "{{.State}}\t{{.Networks}}"]);
+		const [state = "", networks = ""] = row.code === 0 ? row.stdout.trim().split("\t") : [];
+		return { state: state.trim(), networks: networks.split(",").map((n) => n.trim()).filter(Boolean) };
+	};
+	const inspectable = async () => {
+		const answer = await podman(["inspect", "--format={{.State.Running}}", proxy]);
+		return answer.code === 0 ? null : `exit ${answer.code}: ${firstLine(answer.stderr)}`;
+	};
+	// The proxy's own route out, to an ADDRESS: a name would also test the proxy's resolver, which is not this case's.
+	const reachesOut = async () => (await podman(["exec", proxy, "bash", "-c", "exec 3<>/dev/tcp/1.1.1.1/443"], { timeoutMs: 20_000 })).code === 0;
+	// Named in every failure, so a red run says whether the keeper was there at all.
+	const keeperSays = async () => {
+		const state = judgeNetnsKeeper(await podman(["inspect", NETNS_KEEPER_FORMAT, NETNS_KEEPER]));
+		return `the rootless network keeper ${NETNS_KEEPER} ${state.holds ? "is running on its own bridge network" : state.problem}`;
+	};
+	if ((await proxyRow()).state !== "running") return fail(`${proxy} is not running under this account's Podman (${await keeperSays()})`);
+	const broken = await inspectable();
+	if (broken) return fail(`BEFORE the sweep, after the harness's job, canary and peer teardowns, ${proxy} answers inspect with ${broken} (${await keeperSays()}; issue #458)`);
+	if (!(await reachesOut())) return fail(`BEFORE the sweep, after the harness's job, canary and peer teardowns, ${proxy} has NO route out (${await keeperSays()}; issue #458)`);
+	const upstream = (await proxyRow()).networks.filter((n) => !n.startsWith("pi-dispatch-egress-doctor-"));
+	if (upstream.length === 0) return fail(`${proxy} is on no network this case can hold open`);
+
+	// Two pids no process has, so the sweep's `isAlive` reads both networks as left by a run that is over.
+	const dead = [];
+	for (let pid = 999_999; dead.length < 2 && pid > 900_000; pid -= 1) {
+		if (pid === process.pid || isAlive(pid)) continue;
+		if ((await podman(["network", "exists", egressCanaryNetwork(pid)])).code === 1) dead.push(pid);
+	}
+	if (dead.length < 2) return fail("no two free dead pids for the leftover networks");
+	const [emptyPid, fullPid] = dead;
+	const emptyNet = egressCanaryNetwork(emptyPid);
+	const fullNet = egressCanaryNetwork(fullPid);
+	const [runningProbe, stoppedProbe] = CANARY_PROBE_SLUGS.map((slug) => egressCanaryProbe(slug, fullPid));
+	const exists = async (kind, name) => (await podman([kind, "exists", name])).code === 0;
+	try {
+		// The leftovers, built as the canary builds its network and names its probes.
+		if ((await podman(["network", "create", "--internal", emptyNet])).code !== 0) return fail(`could not create ${emptyNet}`);
+		if ((await podman(["network", "create", "--internal", fullNet])).code !== 0) return fail(`could not create ${fullNet}`);
+		if ((await podman(["network", "connect", fullNet, proxy])).code !== 0) return fail(`could not attach ${proxy} to ${fullNet}`);
+		const sleeper = (name, network, detach) => ["run", ...(detach ? ["-d"] : []), "--name", name, "--pull=never", `--network=${network}`, "--entrypoint", "sh", image, "-c", detach ? "exec sleep 600" : "exit 0"];
+		if ((await podman(sleeper(runningProbe, fullNet, true))).code !== 0 || !(await awaitRunning(runningProbe))) return fail(`could not start ${runningProbe}`);
+		// Exited and not `--rm`: the stopped member Podman's `network rm` refuses on (measured on 4.9.3 and 5.8.1).
+		if ((await podman(sleeper(stoppedProbe, fullNet, false))).code !== 0) return fail(`could not leave ${stoppedProbe} stopped`);
+
+		const checks = await sweepStaleCanaryNetworks({ run: (args) => podman(args, { timeoutMs: 30_000 }), pid: process.pid, isAlive, endpoint: { local: true }, bin: "podman" });
+		for (const check of checks) lines.push(`sweep said: ${check.label}`);
+		const said = (net) => checks.find((c) => c.canary?.params?.name === net);
+		const problems = [];
+		for (const net of [emptyNet, fullNet]) {
+			if (said(net)?.canary?.shape !== "removed") problems.push(`the sweep did not say it removed ${net}`);
+			if (await exists("network", net)) problems.push(`${net} is still there`);
+		}
+		for (const probeName of [runningProbe, stoppedProbe]) if (await exists("container", probeName)) problems.push(`${probeName} is still there`);
+		const after = await proxyRow();
+		if (after.state !== "running") problems.push(`${proxy} is no longer running (${after.state || "not listed"})`);
+		if (!upstream.every((n) => after.networks.includes(n))) problems.push(`${proxy} lost its upstream network (${upstream.join(", ")} before, ${after.networks.join(", ") || "none"} after)`);
+		if (!(await reachesOut())) problems.push(`${proxy} no longer reaches out`);
+		const inspectAfter = await inspectable();
+		if (inspectAfter) problems.push(`${proxy} answers inspect with ${inspectAfter}`);
+		return problems.length > 0 ? fail(`${problems.join("; ")} (${await keeperSays()})`) : { ok: true, lines };
+	} finally {
+		// Whatever a failed pass left, removed WITHOUT `-f` on a network: `network rm -f` deletes the containers on it,
+		// the proxy included (measured on 4.9.3).
+		for (const name of [runningProbe, stoppedProbe]) await podman(["rm", "-f", "--time=0", name]);
+		for (const net of [emptyNet, fullNet]) {
+			if (!(await exists("network", net))) continue;
+			await podman(["network", "disconnect", "-f", net, proxy]);
+			if ((await podman(["network", "rm", net])).code !== 0) lines.push(`could not remove ${net}: podman network rm ${net}`);
+		}
+	}
+}
+
 let report;
 let teardowns;
+let sweepCase;
 try {
 	// Before the harness, so its own egress read-back is also one taken after job teardowns rather than on a fresh proxy.
 	try {
@@ -315,6 +419,8 @@ try {
 		teardowns = { ran: false, ok: false, detail: `did not finish: ${err?.message ?? err}` };
 	}
 	report = await runBackendConformance(backend, { probe, withBrokenEnumeration, readBack });
+	// LAST, see `staleCanarySweep`.
+	sweepCase = venueRefused ? null : await staleCanarySweep();
 } finally {
 	await podman(["rmi", "-f", probeImage]);
 	nodeFs.rmSync(scratch, { recursive: true, force: true });
@@ -334,6 +440,16 @@ for (const f of report.findings) {
 	console.log(`  ${mark.padEnd(8)} ${f.check}: ${f.detail}`);
 	if (!f.ok) failures.push(`${f.check}: ${f.detail}`);
 	else if (f.unverifiable && READ_BACK_BY_A_LIVE_PROBE.includes(f.check)) failures.push(`${f.check} was not read back: ${f.detail}`);
+}
+// Issue #452: the stale canary sweep over a real leftover, on this Podman.
+if (sweepCase) {
+	const mark = sweepCase.notRead ? "NOT READ" : sweepCase.ok ? "PASS" : "FAIL";
+	console.log(`  ${mark.padEnd(8)} stale canary sweep: ${sweepCase.notRead ?? (sweepCase.ok ? "an empty leftover and one with the proxy, a running and a stopped probe were removed, and the proxy kept running with its route out" : "see below")}`);
+	for (const line of sweepCase.lines ?? []) console.log(`           ${line}`);
+	if (!sweepCase.ok) {
+		console.log(`           FAILED: ${sweepCase.why}`);
+		failures.push(`stale canary sweep: ${sweepCase.why}`);
+	}
 }
 // The job user, read back: PID 1's uid against this account's own. Not one of the harness's findings, and the property
 // this venue exists for, so it is checked here rather than left to `nonRoot`, which only asks for a non-zero uid.

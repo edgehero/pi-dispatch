@@ -95,6 +95,8 @@ function panelIo(over = {}) {
     launch: async ({ args }) => (launched.push(args), { code: 0 }),
     // Issue #341: never decided against a real daemon in a unit test.
     resolveJobUser: async () => ({ user: null, home: null }),
+    // Issue #452 gate round 2: the keeper holds, never read from a real Podman in a unit test.
+    keeperCheck: async () => null,
     // Issue #446: the past-window refusal reads this clock, an hour into every fixture's 24h window.
     now: () => NOW,
     spawnNetwork: (cmd, args) => {
@@ -382,4 +384,16 @@ test("a run lost during the session is said after the shell, with a pause, and t
   assert.match(text, /note: the retained workspace for gh-1 was DELETED while this sandbox was open \(by the retention sweep, or by a retry of the run clearing it\)/);
   assert.doesNotMatch(text, /cannot open a sandbox/);
   assert.equal(pauses, 1, "read before the panel comes back");
+});
+
+test("the panel hands its keeper check to the open, and a refusal opens nothing (#452 gate round 2)", async () => {
+  const paths = { sandboxDir: retainedRoot({ backend: "podman" }), sandboxRetentionHours: 24, sandboxIdleMinutes: 30 };
+  const { io, launched, written } = panelIo({
+    env: { PI_BACKENDS: "podman", PI_BACKEND_FLOOR: "isolation=enforced" },
+    resolveJobUser: async () => ({ user: "1234:1234", home: "/home/pi" }),
+    keeperCheck: async () => ({ refused: "netns-keeper-not-holding", message: "the seamed keeper check refused this open" }),
+  });
+  await mod.openSandboxSession(paths, "gh-1", io);
+  assert.deepEqual(launched, []);
+  assert.match(written.join(""), /the seamed keeper check refused this open/, "the panel's own seam, not a real Podman read");
 });

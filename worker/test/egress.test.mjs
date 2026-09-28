@@ -356,6 +356,144 @@ test("Podman's 'is not connected to network' disconnect wording is NOT the netwo
 	assert.equal(networkAbsentInDaemonWords({ code: 1, stdout: "", stderr: "Error: unable to find network with name or ID pi-job-x-net: network not found" }), true, "rm");
 });
 
+// --- issue #452: Podman's member read, which 4.9 cannot answer through `network inspect` ------------------------------
+
+// What each runtime answered, MEASURED (round 446, pd-ubuntu Podman 4.9.3 and pd-fedora Podman 5.8.1), for one network
+// holding a running, an exited, a created and a paused member. Both Podman versions print the same `ps -a` lines.
+const PODMAN_49_TEMPLATE = "Error: template: inspect:1:18: executing \"inspect\" at <.Containers>: can't evaluate field Containers in type interface {}\n";
+const PODMAN_NOT_FOUND = "Error: network pi-dispatch-egress-doctor-424241: unable to find network with name or ID pi-dispatch-egress-doctor-424241: network not found\n";
+const PODMAN_PS_FOUR_STATES = "m452-run\trunning\nm452-exit\texited\nm452-created\tcreated\nm452-paused\tpaused\n";
+const PS_ARGV = (net) => ["ps", "-a", "--filter", `network=${net}`, "--format", "{{.Names}}\t{{.State}}"];
+
+/** A Podman that answers the member `ps` and `network exists` from a table, recording every argv. */
+function podmanMembers({ ps = { code: 0, stdout: "", stderr: "" }, exists = { code: 0, stdout: "", stderr: "" } } = {}) {
+	const calls = [];
+	const run = async (args) => {
+		calls.push(args);
+		if (args[0] === "ps") return typeof ps === "function" ? ps(args) : ps;
+		if (args[0] === "network" && args[1] === "exists") return typeof exists === "function" ? exists(args) : exists;
+		return { code: 99, stdout: "", stderr: "unmodelled" };
+	};
+	return { run, calls };
+}
+
+test("on Podman the members come from `ps -a --filter network=`, running and paused as `names`, every other state as `parked` (#452)", async () => {
+	const pd = podmanMembers({ ps: { code: 0, stdout: PODMAN_PS_FOUR_STATES, stderr: "" } });
+	const out = await networkEndpoints(pd.run, "net-a", { bin: "podman" });
+	// `names` is what docker's `.Containers` and Podman 5.8.1's list (measured: running and paused, not exited or
+	// created), so every caller's guard reads the same as before; the rest is `parked`, in the order `ps` gave it.
+	assert.deepEqual(out, { ok: true, absent: false, names: ["m452-run", "m452-paused"], parked: ["m452-exit", "m452-created"] });
+	assert.deepEqual(pd.calls, [PS_ARGV("net-a"), ["network", "exists", "net-a"]], "the members, then whether the network is there, and NEVER `network inspect`");
+	// A state nothing here has measured is parked, never listed: the allowlist direction.
+	const odd = await networkEndpoints(podmanMembers({ ps: { code: 0, stdout: "a\tstopping\nb\tremoving\nc\tunknown\n", stderr: "" } }).run, "n", { bin: "podman" });
+	assert.deepEqual(odd, { ok: true, absent: false, names: [], parked: ["a", "b", "c"] });
+	// CRLF and surrounding blanks are not members, and a trailing newline is not an empty member.
+	const crlf = await networkEndpoints(podmanMembers({ ps: { code: 0, stdout: "\r\n  x\trunning\r\n\n", stderr: "" } }).run, "n", { bin: "podman" });
+	assert.deepEqual(crlf, { ok: true, absent: false, names: ["x"], parked: [] });
+});
+
+test("on Podman an empty answer is decided by `network exists`: 0 is an empty network, 1 is absent, anything else unreadable (#452)", async () => {
+	// Measured on 4.9.3 and 5.8.1: `ps -a --filter network=<missing>` is exit 0 and EMPTY, exactly like an empty network.
+	const empty = await networkEndpoints(podmanMembers().run, "n", { bin: "podman" });
+	assert.deepEqual(empty, { ok: true, absent: false, names: [], parked: [] });
+	const gone = await networkEndpoints(podmanMembers({ exists: { code: 1, stdout: "", stderr: "" } }).run, "n", { bin: "podman" });
+	assert.deepEqual(gone, { ok: false, names: [], absent: true });
+	for (const exists of [{ code: 125, stdout: "", stderr: "Error: cannot connect" }, { code: null, stdout: "" }, { code: 2, stdout: "", stderr: "" }, { stdout: "" }]) {
+		assert.deepEqual(await networkEndpoints(podmanMembers({ exists }).run, "n", { bin: "podman" }), { ok: false, names: [], absent: false }, JSON.stringify(exists));
+	}
+	// Absence is the network's answer even when `ps` listed members: those can only be from before it went.
+	const raced = await networkEndpoints(podmanMembers({ ps: { code: 0, stdout: "x\trunning\n", stderr: "" }, exists: { code: 1, stdout: "", stderr: "" } }).run, "n", { bin: "podman" });
+	assert.deepEqual(raced, { ok: false, names: [], absent: true });
+});
+
+test("on Podman a `ps` that did not answer, or answered a line this parser was not measured against, is UNREADABLE (#452)", async () => {
+	// Not asked about the network after a failed `ps`: no answer about the members is no answer, whatever the network is.
+	for (const ps of [{ code: 125, stdout: "", stderr: "Error: something" }, { code: null, stdout: "" }, { code: 1, stdout: "", stderr: PODMAN_NOT_FOUND }]) {
+		const pd = podmanMembers({ ps });
+		assert.deepEqual(await networkEndpoints(pd.run, "n", { bin: "podman" }), { ok: false, names: [], absent: false }, JSON.stringify(ps));
+		assert.equal(pd.calls.length, 1, "no `network exists` after a failed member read");
+	}
+	// A member this parser cannot name is still a member, so ONE bad line makes the whole answer unreadable.
+	for (const stdout of [
+		"x\n", // no state
+		"x\t\n", // an empty state
+		"x\trunning\textra\n", // three fields
+		"x running\n", // a space where the tab should be
+		"WARN[0000] some notice on stdout\n",
+		"bad name\trunning\n",
+		"-x\trunning\n", // not a runtime-legal first character
+		"x\tRunning\n", // not Podman's lowercase word
+		"x\trun ning\n", // a space INSIDE the state word
+		"ok\trunning\n\tpaused\n", // a nameless member beside a good one
+	]) {
+		assert.deepEqual(await networkEndpoints(podmanMembers({ ps: { code: 0, stdout, stderr: "" } }).run, "n", { bin: "podman" }), { ok: false, names: [], absent: false }, JSON.stringify(stdout));
+	}
+	// A runner that THROWS is no answer too, on either step.
+	const throwsPs = async () => {
+		throw new Error("spawn failed");
+	};
+	assert.deepEqual(await networkEndpoints(throwsPs, "n", { bin: "podman" }), { ok: false, names: [], absent: false });
+	const throwsExists = async (args) => {
+		if (args[0] === "ps") return { code: 0, stdout: "", stderr: "" };
+		throw new Error("spawn failed");
+	};
+	assert.deepEqual(await networkEndpoints(throwsExists, "n", { bin: "podman" }), { ok: false, names: [], absent: false });
+});
+
+test("docker keeps its `.Containers` read byte for byte, and 4.9's template error through that read is unreadable, not absent (#452)", async () => {
+	const calls = [];
+	const run = async (args) => (calls.push(args), { code: 0, stdout: '{"a":{"Name":"x"}}', stderr: "" });
+	assert.deepEqual(await networkEndpoints(run, "n"), { ok: true, absent: false, names: ["x"] }, "no `parked` key on docker");
+	assert.deepEqual(await networkEndpoints(run, "n", { bin: "docker" }), { ok: true, absent: false, names: ["x"] });
+	assert.deepEqual(calls, [["network", "inspect", "--format", "{{json .Containers}}", "n"], ["network", "inspect", "--format", "{{json .Containers}}", "n"]]);
+	assert.deepEqual(await networkEndpoints(async () => ({ code: 125, stdout: "", stderr: PODMAN_NOT_FOUND }), "n"), { ok: false, names: [], absent: true });
+	// Any other failure is what it always was, and asks nothing more.
+	const down = [];
+	assert.deepEqual(await networkEndpoints(async (args) => (down.push(args), { code: 1, stdout: "", stderr: "Cannot connect to the Docker daemon" }), "n"), { ok: false, names: [], absent: false });
+	assert.equal(down.length, 1);
+});
+
+// Podman 4.9's `docker` emulation (`podman-docker`) is a script that prints a notice on stderr and runs `podman`, so the
+// `.Containers` read gets 4.9's answer. MEASURED on 4.9.3 (and on 5.8.1 the emulation renders the member map instead).
+const EMULATION_NOTICE = "Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.\n";
+
+/** Podman 4.9 reached as `docker`: the template error, then the `ps` rows, then a plain inspect by the table. */
+function podmanDocker({ ps = { code: 0, stdout: "", stderr: EMULATION_NOTICE }, inspect = { code: 0, stdout: "[{}]", stderr: EMULATION_NOTICE } } = {}) {
+	const calls = [];
+	const run = async (args) => {
+		calls.push(args);
+		if (args[1] === "inspect" && args.includes("{{json .Containers}}")) return { code: 125, stdout: "", stderr: `${EMULATION_NOTICE}${PODMAN_49_TEMPLATE}` };
+		if (args[0] === "ps") return ps;
+		if (args[1] === "inspect") return inspect;
+		return { code: 99, stdout: "", stderr: "unmodelled" };
+	};
+	return { run, calls };
+}
+
+test("`local` through podman-docker on Podman 4.9: the template error sends the docker read to `ps -a` through the same CLI (#452 gate round 1)", async () => {
+	// Before: every sweep read every network as unreadable forever on such a host. Now the members are read the Podman
+	// way, and presence by a plain `network inspect`, because the real docker CLI has no `network exists` (measured:
+	// exit 1 with its usage, which would read as absent).
+	const pd = podmanDocker({ ps: { code: 0, stdout: PODMAN_PS_FOUR_STATES, stderr: EMULATION_NOTICE } });
+	assert.deepEqual(await networkEndpoints(pd.run, "net-a"), { ok: true, absent: false, names: ["m452-run", "m452-paused"], parked: ["m452-exit", "m452-created"] });
+	assert.deepEqual(pd.calls, [["network", "inspect", "--format", "{{json .Containers}}", "net-a"], PS_ARGV("net-a"), ["network", "inspect", "net-a"]]);
+	assert.ok(!pd.calls.some((a) => a[1] === "exists"), "never `network exists` on the docker path");
+	// Gone by the presence read, in Podman's measured words: absent.
+	const gone = podmanDocker({ inspect: { code: 125, stdout: "[]", stderr: `${EMULATION_NOTICE}${PODMAN_NOT_FOUND}` } });
+	assert.deepEqual(await networkEndpoints(gone.run, "n"), { ok: false, names: [], absent: true });
+	// The real docker CLI's usage exit, or any other failure of that read: unreadable, never absent.
+	for (const inspect of [{ code: 1, stdout: "", stderr: "docker: unknown command: docker network exists\n\nUsage:  docker network\n" }, { code: 125, stdout: "", stderr: "Error: boom" }, { code: null, stdout: "" }]) {
+		assert.deepEqual(await networkEndpoints(podmanDocker({ inspect }).run, "n"), { ok: false, names: [], absent: false }, JSON.stringify(inspect));
+	}
+	// The same parser, so the same fail-closed rules: a line it was not measured against is unreadable.
+	assert.deepEqual(await networkEndpoints(podmanDocker({ ps: { code: 0, stdout: "x\trun ning\n", stderr: "" } }).run, "n"), { ok: false, names: [], absent: false });
+	// Only THAT wording falls back: a template error about another field is not this one.
+	const other = [];
+	const otherRun = async (args) => (other.push(args), { code: 125, stdout: "", stderr: "Error: template: inspect:1:18: executing \"inspect\" at <.Foo>: can't evaluate field Foo in type interface {}\n" });
+	assert.deepEqual(await networkEndpoints(otherRun, "n"), { ok: false, names: [], absent: false });
+	assert.equal(other.length, 1);
+});
+
 // Issue #428: the proxy rules' address deny. Its ORDER is the property, twice over: before every allow, or a listed
 // name resolving to the host's loopback is let through; and with `allowed` BEFORE `to_host_local` in the line, or squid
 // resolves every name a job asks for, listed or not (`dst` resolves, and squid stops at the first ACL that fails), a

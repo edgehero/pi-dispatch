@@ -1614,6 +1614,63 @@ contract governs the argv of one container, this governs the estate that argv jo
     not widened the same way: it removes what it lists, so `ps -a` there would destroy an operator's stopped
     container and a crashed job's forensic one, while this half only declines to remove a network.
 
+    **ON PODMAN THE MEMBER READ IS `ps -a`, AND A STOPPED MEMBER HOLDS THE NETWORK** (issue #452, measured on
+    Podman 4.9.3 and 5.8.1). All four sweeps read a network's members through one reader, `networkEndpoints`
+    (`worker/src/egress.mjs`), and that reader now takes the runtime. On docker it is `network inspect --format
+    {{json .Containers}}`, byte for byte unchanged. On Podman that template cannot be used: 4.9.3 renders no member
+    list at all and exits 125 (`can't evaluate field Containers in type interface {}`) for EVERY existing network,
+    so every leftover read as unreadable on every pass and none was ever removed. Podman's read is `ps -a --filter
+    network=<net> --format {{.Names}}\t{{.State}}`, which both versions answer identically (exit 0, a member in
+    every state; the filter matches a network by its whole name, never a name prefix, and also by its full id or any
+    prefix of it, which the sweeps never pass since they name networks), then `network exists <net>`, because that `ps` answers a
+    missing network exactly as it answers an empty one; exit 1 there is absent, and any other answer, or any `ps`
+    line that is not a legal name, a tab and a lowercase state word, is unreadable. What the reader returns has ONE
+    meaning on both runtimes: `names` are the members in `ENDPOINT_LISTED_STATES` (`running`, `paused`), which is
+    what docker's `.Containers` lists and, measured, what Podman 5.8.1's lists too, so every sweep's guard reads
+    what it always read. On Podman it adds `parked`, the members in every other state, because Podman's `network
+    rm` without `-f` refuses while a member in ANY state remains (measured on both versions with a lone member in
+    each of `running`, `paused`, `exited` and `created`, and with all four together),
+    where docker's refuses only for a listed one. Each sweep keeps its own intent over that:
+    - the **boot reaper** is unchanged: it already asked `ps -a` for the parked half, a `pi-job-` member that is
+      listed keeps the network, any parked member but the proxy keeps it, and a parked proxy is detached;
+    - the **sandbox sweep** keeps its guards (a listed session container, and its own late `ps -a`) and now also
+      detaches a parked member that is the configured egress proxy, as the boot reaper does, since a stopped proxy
+      otherwise held a dead session's network forever; any other stopped member makes the `rm` fail and goes
+      through its failed-`rm` branch (this run's own finished container removed), and the
+      `sandbox_network_not_reaped {reason: "rm-failed"}` line now names what still holds the network (`holding`,
+      at most five names and a `more` count, read again after the pass, or `"unreadable"`), on docker too;
+    - the **canary sweep** treats a parked member exactly as a listed one: a dead run's probe in any state is
+      removed by name, anything else parked is detached, so a stopped probe or a stopped proxy no longer holds
+      the network forever; and its `unreadable` line on Podman names `podman ps -a --filter network=<net>`, the
+      read that failed, rather than an inspect that shows no members on 4.9;
+    - the **live-probe peer sweep** counts a parked probe as a run in progress, as it does a listed one, and
+      detaches every other parked member with the listed ones.
+    `network rm -f` stays refused everywhere, and on Podman for a sharper reason than docker's: it deletes the
+    containers on the network, the proxy included (measured on 4.9.3). And no sweep DETACHES a RUNNING container on
+    a rootless Podman 4.x while the rootless network keeper does not hold, since a disconnect of the running proxy
+    is the trigger that cuts its route out (issue #458); before #452 the member read failed there, so none of them
+    got that far. The canary and peer sweeps are held by doctor's own keeper read. The boot reaper and the sandbox
+    sweep ask `makeNetnsDetachGuard`, on BOTH venues, since `local` can be a rootless Podman too (reached through
+    `podman-docker`, or through its Docker API): it reads what the daemon is with the read that venue already
+    trusts (`podman info --format json`; `docker info --format={{json .}}` through `parseDaemonFacts`, which
+    recognises Podman on both routes), lets Docker Engine, rootful Podman and 5.x through unread, and otherwise
+    requires the keeper to hold AT THAT INSTANT (running, bridge mode, on its own network: `NETNS_KEEPER_NOW_FORMAT`,
+    measured identical through `podman`, `podman-docker` and the real docker CLI on 4.9.3 and 5.8.1). A detach is
+    safe exactly when the keeper holds while it happens, so the keeper's age and its start relative to the proxy are
+    NOT asked here; those two rules admit a job or a sandbox across time and stay in the job preflight, the sandbox
+    opener and doctor. When it does not hold the network is left and said, `keeper-not-holding`, or
+    `runtime-unreadable` when the daemon could not be read at all (`network_not_reaped` / `sandbox_network_not_reaped`).
+    Only a RUNNING member asks anything: a stopped proxy is not in the rootless namespace, so a network with nothing
+    running to detach (empty, or a stopped proxy) is removed with no runtime or keeper read. The boot reaper's steps
+    are bounded at 30 s each (`REAPER_STEP_TIMEOUT_MS`), since a wedged daemon held the worker's boot with nothing
+    said; a step the bound kills is no answer, `{ reaped: false }` in the container half. The sandbox's
+    `egress-network-exists` refusal prints the same member listing on Podman for the operator's own loop.
+    The one docker-path exception is Podman 4.9 reached through its `podman-docker` emulation, which is `podman`
+    itself answering as `docker`: there the `.Containers` read fails with that same template error, and exactly
+    that wording sends the read to the `ps -a` path through the same CLI, with a plain `network inspect` deciding
+    presence, since the real docker CLI has no `network exists` (measured: it exits 1 with its usage). The real
+    docker CLI against Podman's Docker API renders `.Containers` and never takes it (measured on 4.9.3 and 5.8.1).
+
     **The residual in "a daemon this host owns", stated rather than guarded** (issue #360). `isAlive` reads
     THIS process table while the name came from the daemon, and the test that gates it is
     `classifyDockerEndpoint`'s `local`, which answers `true` for any `unix:` endpoint unconditionally. That
@@ -2106,8 +2163,16 @@ sibling rather than an extension of the GitHub one for the same reason.
     finished by then, and a `network ls` that does not answer is that same line (`network-list-failed`)
     rather than a verdict about a network nobody saw; a per-network outcome is `reaped_sandbox_network` or
     `sandbox_network_not_reaped` with a fixed reason token
-    (`unreadable | containers-unreadable | sandbox-attached | sandbox-present | directory-not-removed | rm-failed`), which is `OQ-007`'s grep property kept
-    intact.
+    (`unreadable | containers-unreadable | sandbox-attached | sandbox-present | directory-not-removed | rm-failed | keeper-not-holding | runtime-unreadable`), which is `OQ-007`'s grep property kept
+    intact. Since issue #452 an `rm-failed` line also carries `holding`, the container names still on the
+    network when the pass ended (at most five, with a `more` count), or `"unreadable"`, the same bounded shape
+    the boot reaper's `containers` has, because `detached: []` on every pass named nothing an operator could act
+    on; and on Podman a STOPPED configured egress proxy on the network is detached like a running one, since
+    Podman's `network rm` refuses while it stays (`INT-EGRESS-POLICY-CONTRACT`). An egress-armed OPEN on the
+    `podman` venue first asks the worker's own keeper preflight (`sandboxKeeperCheck`, over `keeperPreflight`, with
+    its age and order rules) and on Podman 4.x, or an unreported version, refuses `netns-keeper-not-holding` with its
+    reason and fix while the keeper does not hold, before any network exists: the session's own teardown
+    (`removeJobNetwork`) disconnects the running proxy, which is #458's trigger (issue #452, gate round 2).
 - **Why**: The 5% case (`REQ-RESURRECTABLE-SANDBOX`). Every choice above exists to keep the *job*
   contract untouched while serving it: a second container shape rather than a longer-lived first one, a
   second env builder rather than a credential-optional one, a second name namespace rather than a
@@ -2258,7 +2323,10 @@ is its only entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`)
     flag the operator typed, unlike the boot reaper and the egress canary, which run unattended and name
     every outcome. Since issue #357 the read goes through the shared `networkEndpoints`, so a `.Containers`
     that renders as `null`, a number or a string is now unreadable rather than read as an empty network
-    (it used to be, and the sweep would then detach nothing and remove it). A stale peer network is left alone while any
+    (it used to be, and the sweep would then detach nothing and remove it). On Podman that read is `ps -a
+    --filter network=` since issue #452 (Podman 4.9 renders no `.Containers`), and there a probe in any state
+    counts as attached and every other member in any state is detached, because Podman will not remove a
+    network while any member remains (`INT-EGRESS-POLICY-CONTRACT`). A stale peer network is left alone while any
     live-probe container is still attached (a PID from another namespace reads as dead here); otherwise every
     endpoint still attached is detached, whatever proxy that run used, each one named in what is reported (a
     container pi-dispatch did not make may be among them), and it is removed without `-f`, and one that stays is a
@@ -5166,3 +5234,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-27 | Issue #458. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, one row in the objects table: the rootless network keeper on the `podman` venue, `pi-dispatch-netns-keeper` on its own `--internal`, DNS-disabled network of that name, why it exists (Podman 4.9 cuts the proxy's route out at a per-job network's teardown, measured), what it is not given (no port, no mount, no capability, read-only, uid 65534), when it is installed, and that nothing in pi-dispatch removes it. Round 2 (PR #463): the keeper's retry is its own fixed reason `netns-keeper-not-holding` (added to `INT-RUN-HISTORY-FILE-CONTRACT`'s reason enum), and "holding" also means up for 3 s and not started more than 15 s after the proxy (round 3: was a minute). Gate round 1 (PR #463), in the same row: the keeper row says it counts only running in bridge mode on its own network, and the disagreement table and the Acceptance gain the worker's pre-spend read on Podman 4.x (a keeper that does not hold is INFRA `container-never-started`, retried, naming the keeper). The per-job network row and the teardown it describes are UNCHANGED, checked: the fix changes no object the worker creates, attaches or removes. |
 | 2026-09-27 | Issue #458. **`INT-LIVE-PROBE-CONTRACT` AMENDED**, the `jobToJobIsolation` bullet: on the `podman` venue with Podman 4.x (or an unreported version) and the rootless network keeper not running, `doctor --live` builds no peer networks and runs no egress canary, and reads both `jobToJobIsolation` and `egress` as not read back naming the keeper, because their teardown (detaching the proxy) is the measured trigger that cuts the proxy's route out; the stale peer-network sweep then leaves a network with anything attached, with a note. On 5.x or with the keeper running, UNCHANGED. |
 | 2026-09-28 | Issue #462 and the ledger items from PR #456's and PR #457's final checks. **`INT-SANDBOX-CONTRACT` AMENDED**, two clauses. (1) `openSandbox` calls the caller's `beforeLaunch` after the session network's creation, right before the launch and inside the `try` whose `finally` removes that network: the CLI prints its `opening ... no credentials are set` banner there, and it printed above an `egress-network-exists` refusal (seen on Podman 4.9.3 and 5.8.1), so a refused open now prints no banner, and a hook that throws leaves no network. The order it replaced put the hook first so that a failing pin could not leave a network; the pin has run before any runtime call since issue #446, so that reason no longer applied. (2) The sandbox reaper retries a pinned tombstone it could not put back ONCE more in the same pass, after its main loop and before the network sweep: a directory with no manifest holding the run's name is deleted by that loop, and the run waited a whole pass as a tombstone. (3) PR #466 gate round 1, a pre-existing defect reproduced on a real host: a directory with NO manifest file was deleted by the `no-manifest` rule without any runtime asked, under a `pi-sandbox-` container still running on it; the runtime watch now asks every runtime present about such a directory, in the pass's listing and in the ask before the rename, and it is held while one reports it open or cannot answer. **`INT-EGRESS-POLICY-CONTRACT` AMENDED** in its failure table's two proxy rows, doctor's half only: ✗ for a crash loop on either runtime (docker's `restarting`, Podman's `stopped` and `restarting`), and `up`'s replace offered for a proxy stale by its image, entrypoint or command while a mount cannot be compared. The gate's own classes are UNCHANGED, checked: Podman's `stopped` stays INFRA, retried once, then failed. **Code evidence**: worker/src/sandbox.mjs -> openSandbox, makeSandboxRuntimeWatch; worker/src/sandbox-cli.mjs -> runSandbox; worker/src/sandbox-store.mjs -> makeSandboxReaper, clearTombstone; worker/src/doctor.mjs -> podmanChecks, egressChecks; worker/src/up.mjs -> runUp. |
+| 2026-09-27 | Issue #452 (the leftover-network member read on Podman 4.9). **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, one new paragraph after the boot reaper's two questions: on Podman the shared member read (`networkEndpoints`) is `ps -a --filter network=<net>` then `network exists <net>`, because Podman 4.9.3 renders no `.Containers` and exits 125 for every existing network (measured on Ubuntu 24.04, so every leftover was unreadable on every pass and never removed), while both 4.9.3 and 5.8.1 answer that `ps` identically (measured; its filter matches a network by whole name, never a name prefix, and also by full id or id prefix, measured in gate round 1 after the first text said "never a prefix" without that qualifier). `names` keeps ONE meaning on both runtimes, the members in `ENDPOINT_LISTED_STATES` (docker's `.Containers`, and measured to be Podman 5.8.1's too), and Podman adds `parked`, the members in every other state, because its `network rm` refuses while a member in any state remains (measured on both versions with a lone member in each of the four states and with all four together). Each sweep's use of that is stated: the boot reaper's rules UNCHANGED (on 4.9 it now reaches them instead of stopping at `unreadable`), the sandbox sweep detaching a STOPPED configured proxy too and naming what holds a network whose `rm` failed (gate round 1: a stopped proxy had kept a dead session's network forever, identically before this change on 5.8.1), the canary sweep removing a dead run's probe and detaching anything else in any state, the peer sweep counting a parked probe as a run in progress and detaching the rest; the canary's `unreadable` line on Podman names the `ps` that failed. Docker's read and its call sequence are UNCHANGED, checked, with two stated exceptions from gate round 1: the `.Containers` read that fails with Podman's own `can't evaluate field Containers` (Podman 4.9 reached through `podman-docker`, where every sweep had read every network as unreadable) falls back to the `ps -a` read through the same CLI with a plain `network inspect` for presence, and the sandbox sweep's `rm-failed` line gains `holding` on docker too. Rebased onto #458 (its keeper), and integrated with it rather than beside it: #458 held doctor's canary and peer sweeps while the keeper does not hold on Podman 4.x, and recorded the boot reaper and the sandbox sweep as unreached on 4.9 only because their member read failed there; this change reaches them, so they now ask `makeNetnsDetachGuard` before detaching anything RUNNING and leave the network with `keeper-not-holding` while it does not hold (a new reason token in both sweeps' closed sets). Gate round 2 amended that clause in place, four ways: the guard runs on the `local` venue's reaper and sandbox sweep too, reading the daemon through `docker info` and `parseDaemonFacts`, since `local` can be a rootless Podman through `podman-docker` or its Docker API and the fallback had handed those sweeps a readable member list (an adversary's bypass), with `runtime-unreadable` when the daemon cannot be read; it judges only whether the keeper holds NOW (`NETNS_KEEPER_NOW_FORMAT`, no age or order rule, which stay in the job preflight and doctor), which also stops a keeper a second old at the first boot after install from holding networks back; it reads nothing for a STOPPED proxy, which is not in the rootless namespace; and it reads the version from `podman info --format json`'s `version.Version` through `parsePodmanInfo`, the venue preflight's own read, not an unmeasured template. The boot reaper's steps are now bounded (30 s, `REAPER_STEP_TIMEOUT_MS`). #458's tests that faked a Podman `.Containers` rendering now fake the `ps -a` read. **`INT-LIVE-PROBE-CONTRACT` AMENDED**, one sentence in the peer-sweep bullet saying the same for that sweep. **`INT-SANDBOX-CONTRACT` AMENDED** (gate round 1, this row amended in place; it first said UNCHANGED): the `rm-failed` note carries `holding`, and a stopped configured proxy is detached on Podman; gate round 2 adds `runtime-unreadable` to the sweep's reason tokens and a refusal at OPEN, `netns-keeper-not-holding`, from the worker's own keeper preflight (`sandboxKeeperCheck`) for an egress-armed podman session on 4.x, since its own teardown disconnects the running proxy (a pre-existing gap the adversary found). The `egress-network-exists` refusal still names the commands to clear the network; on Podman its member loop now lists members with `ps -a --filter network=`, since the `.Containers` loop disconnected nothing on 4.9, and docker's text is byte for byte what it was. The object names, the anchored sweep tests and never `network rm -f` are UNCHANGED. **Code evidence**: worker/src/egress.mjs -> networkEndpoints, ENDPOINT_LISTED_STATES; worker/src/doctor.mjs -> sweepStaleCanaryNetworks, CANARY_LINES.unreadable; worker/src/live-probes.mjs -> sweepStaleNetworks; worker/src/sandbox.mjs -> makeSandboxNetworkSweeper, makeSandboxRuntimeWatch, openSandbox; worker/src/start.mjs -> the sandbox watch's proxy; worker/src/backend-local.mjs -> makeReaper; worker/src/podman-stack.mjs -> makeNetnsDetachGuard, NETNS_KEEPER_NOW_FORMAT; worker/src/backend-podman.mjs -> makePodmanReaper, podmanRuntimeReader, keeperPreflight; worker/src/job-user.mjs -> dockerRuntimeReader; worker/src/backend-local.mjs -> reaperExec; worker/src/sandbox.mjs -> sandboxKeeperCheck; worker/src/sandbox-cli.mjs -> keeperCheck; worker/src/start.mjs -> local's reaper guard; .github/scripts/podman-conformance.mjs -> staleCanarySweep. |

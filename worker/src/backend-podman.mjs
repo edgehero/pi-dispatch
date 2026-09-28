@@ -35,7 +35,7 @@ import { BACKENDS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_CONF_WIDENS_JOB
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { buildPodmanRunArgs } from "./docker-run.mjs";
 import { DEFAULT_EGRESS_PROXY, makeEgressPreflight } from "./egress.mjs";
-import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, STARTED_AT_FORMAT, judgeNetnsKeeper, netnsKeeperRemedy, podmanNeedsNetnsKeeper } from "./podman-stack.mjs";
+import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, STARTED_AT_FORMAT, judgeNetnsKeeper, makeNetnsDetachGuard, netnsKeeperRemedy, podmanNeedsNetnsKeeper } from "./podman-stack.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { DAEMON_FACTS_TIMEOUT_MS, displayVersion } from "./job-user.mjs";
 import { makeRunContainer } from "./run-container.mjs";
@@ -108,6 +108,21 @@ export function parsePodmanInfo(stdout) {
 		// sandbox and the sweep compare it with the one a run recorded. An absolute path with no control character, else
 		// no fact.
 		graphRoot: typeof body.store?.graphRoot === "string" && body.store.graphRoot.length <= 4096 && /^\/[^\u0000-\u001f\u007f]*$/.test(body.store.graphRoot) ? body.store.graphRoot : null,
+	};
+}
+
+/**
+ * What this account's Podman is, for `makeNetnsDetachGuard` (issue #452, gate round 2): `{ known, podman: true, rootless,
+ * version }` from the same `podman info --format json` read and `parsePodmanInfo` the venue's preflight uses, over the
+ * caller's own runner (the reaper's `step`, the sandbox sweep's `run`). Measured on 4.9.3 and 5.8.1: `version.Version`
+ * and `host.security.rootless` are there on both.
+ */
+export function podmanRuntimeReader(run) {
+	const read = makePodmanInfoReader({ run });
+	return async () => {
+		const answer = await read();
+		if (answer?.answered !== true) return { known: false };
+		return { known: true, podman: true, rootless: answer.info.rootless, version: answer.info.version };
 	};
 }
 
@@ -634,7 +649,9 @@ export function execViaSpawn(spawnFn) {
  * `spawnFn` (spawn-shaped, adapted) are the test seams.
  */
 export function makePodmanReaper({ log, exec, spawnFn } = {}) {
-	return makeReaper({ log: log ?? (() => {}), bin: "podman", ...(exec ? { exec } : spawnFn ? { exec: execViaSpawn(spawnFn) } : {}) });
+	// The keeper guard (issue #452 with #458): no running container is detached from a leftover job network while the keeper
+	// does not hold on 4.x, judged over the reaper's own runner and `podman info`'s JSON (`podmanRuntimeReader`).
+	return makeReaper({ log: log ?? (() => {}), bin: "podman", detachGuardFor: (step) => makeNetnsDetachGuard({ run: step, readRuntime: podmanRuntimeReader(step) }), ...(exec ? { exec } : spawnFn ? { exec: execViaSpawn(spawnFn) } : {}) });
 }
 
 /** The keys `makePodmanBackend` takes; anything else is refused, since a misspelt config key would be silently dropped. */
@@ -714,6 +731,9 @@ export function keeperPreflight(proxyPreflight, { armed, proxy, info, spawnFn = 
 		const cause = keeper.restartProxy ? `the rootless network keeper ${NETNS_KEEPER} ${keeper.problem} (${on}, issue #458)` : `the rootless network keeper ${NETNS_KEEPER} ${keeper.problem}, and on ${on} a job network's teardown would then cut the egress proxy's route out (issue #458)`;
 		return {
 			unavailable: name,
+			// The two halves on their own (issue #452, gate round 2), for a caller that is not about a job: the sandbox opener.
+			cause,
+			remedy: netnsKeeperRemedy(keeper, name),
 			// The same facts without a job in them, for the worker's boot line (PR #463 round 3).
 			keeperAtBoot: `${cause}, so every egress job is retried rather than started until this is fixed. To fix it, ${netnsKeeperRemedy(keeper, name)}`,
 			keeper: `${cause}, so this job is retried rather than started. To fix it, ${netnsKeeperRemedy(keeper, name)}`,

@@ -52,6 +52,8 @@ function capture(over = {}) {
 			spawnNetwork: fakeDockerSpawn(),
 			// Issue #341: which uid the shell runs as, never decided against a real daemon here.
 			resolveJobUser: async () => ({ user: null, home: null }),
+			// Issue #452 gate round 2: the keeper holds, never read from a real Podman here.
+			keeperCheck: async () => null,
 			...over,
 		},
 	};
@@ -469,4 +471,17 @@ test("a run lost from under a session after it started is said when the shell ex
 	});
 	assert.equal(await runSandbox(["gh-1"], { env: envWith(root, { PI_EGRESS: "0" }), deps: c.deps }), 3);
 	assert.match(c.errText(), /note: the retained workspace for gh-1 was DELETED while this sandbox was open \(by the retention sweep, or by a retry of the run clearing it\)/);
+});
+
+test("the CLI hands its keeper check to the open, and a refusal is said and opens nothing (#452 gate round 2)", async () => {
+	const { root } = retained({ backend: "podman" });
+	const launches = [];
+	const c = capture({
+		keeperCheck: async () => ({ refused: "netns-keeper-not-holding", message: "the seamed keeper check refused this open" }),
+		launch: async (o) => (launches.push(o.bin), { code: 0 }),
+		resolveJobUser: async () => ({ user: "1234:1234", home: "/home/pi" }),
+	});
+	assert.notEqual(await runSandbox(["gh-1"], { env: envWith(root, { PI_BACKENDS: "podman", PI_BACKEND_FLOOR: "isolation=enforced" }), deps: c.deps }), 0);
+	assert.deepEqual(launches, []);
+	assert.match(`${c.text()}${c.errText()}`, /the seamed keeper check refused this open/, "the CLI's own seam, not a real Podman read");
 });

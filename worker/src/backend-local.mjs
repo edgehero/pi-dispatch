@@ -25,10 +25,35 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { scrubCredentials } from "./redact.mjs";
 import { BACKENDS, DEFAULT_BACKEND, DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
-import { DEFAULT_EGRESS_PROXY, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
+import { DEFAULT_EGRESS_PROXY, ENDPOINT_LISTED_STATES, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { isDeterminateFsCode } from "./transient.mjs";
 
 const execDocker = promisify(execFile);
+
+/**
+ * The boot reaper's step bound (issue #452, gate round 2). Its `exec` had none, so a wedged daemon held the worker's boot
+ * with nothing said. 30 s, `RUN_TIMEOUTS.cmd`'s bound for one CLI step, and not the sandbox sweep's 10 s: Podman's `rm
+ * -f` of a running container waits its stop timeout (10 s by default, measured 10.1 s on 5.8.1) before SIGKILL, and the
+ * container half removes RUNNING job containers. A step killed by the bound rejects like a failed one: in the container
+ * half that is the conservative `{ reaped: false }`, in the network half an unreadable or failed step.
+ */
+export const REAPER_STEP_TIMEOUT_MS = 30_000;
+
+/**
+ * The reaper's default `exec`: `promisify(execFile)`'s contract (resolves `{ stdout, stderr }`, rejects with the exit
+ * code on `.code` and both streams on the error), with a bound. A step the bound kills is SIGKILLed and rejects with
+ * `killed: true` and no numeric code, which every caller already reads as no answer.
+ */
+export function reaperExec({ execFileFn = execFile, timeoutMs = REAPER_STEP_TIMEOUT_MS } = {}) {
+	return (bin, args) =>
+		new Promise((resolve, reject) => {
+			execFileFn(bin, [...args], { timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+				if (err) reject(Object.assign(err, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
+				else resolve({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+			});
+		});
+}
+const execReaperBounded = reaperExec();
 
 /**
  * `pi-job-` -- the container-name namespace, and a LOAD-BEARING string rather than a prefix chosen for
@@ -50,17 +75,13 @@ export const JOB_NAME_PREFIX = "pi-job-";
 /**
  * The container states `docker network inspect` lists in `.Containers`, and therefore the ones the daemon
  * itself guards: with one attached, `network rm` fails "has active endpoints" (measured, docker 27.4.0).
+ * `paused` is here because it is listed and the `rm` refuses while it is there.
  *
- * An ALLOWLIST rather than a denylist, following `sandbox.mjs`: an unknown state -- a Podman rendering
- * nothing here has measured, or one docker adds later -- keeps the network rather than losing it. The cost
- * of being wrong that way is a leftover network and a line naming it; the cost of the other way is a
- * container that can never start again.
- *
- * `paused` is here because it is listed and the `rm` refuses while it is there. `restarting` is NOT, even
- * though it can appear: whether a flapping container is in `.Containers` depends on which instant the sweep
- * asks in, and a rule that changes answer between two runs is not a rule a sweep can act on.
+ * DEFINED in `egress.mjs` since issue #452 and re-exported here under its old name: `networkEndpoints` now
+ * sorts Podman's members by the same set, so it is one fact with two readers, and `egress.mjs` cannot import
+ * from this module without a cycle. Its reasons (an allowlist, and why `restarting` is not in it) are there.
  */
-export const ENDPOINT_LISTED_STATES = new Set(["running", "paused"]);
+export { ENDPOINT_LISTED_STATES };
 
 /**
  * `pi-job-<jobId>`. The name a running job answers to, for `docker stop` on the 30-minute timeout, for the
@@ -390,7 +411,7 @@ export function isJobNamespace(name) {
  * for containers that may still be running and let another host start more alongside them. That is a spend
  * overrun rather than a tidy-up, which is why the catch below returns false rather than swallowing.
  */
-export function makeReaper({ log, exec = execDocker, bin = "docker" }) {
+export function makeReaper({ log, exec = execReaperBounded, bin = "docker", detachGuardFor = null }) {
 	// Issue #354: every spawn below names `bin`, the venue's CLI, so a podman venue's reaper enumerates, removes and
 	// sweeps in the store its jobs actually ran in. A mixed pass (listing under one binary, removing under another) would
 	// report `reaped: true` for a host whose containers it never saw, and the scope-claim sweep spends on that answer.
@@ -413,6 +434,12 @@ export function makeReaper({ log, exec = execDocker, bin = "docker" }) {
 			return { code: typeof err?.code === "number" ? err.code : null, stdout: String(err?.stdout ?? ""), stderr: String(err?.stderr ?? "") };
 		}
 	};
+
+	// Issue #452 with #458: on a Podman that needs the rootless network keeper, detaching the RUNNING proxy is the trigger
+	// that cuts its route out. Both production reapers hand a guard (`makeNetnsDetachGuard`): the podman venue's over
+	// `podman info`, and `local`'s (start.mjs) over `docker info`, since `local` can be Podman too, through `podman-docker`
+	// or its Docker API. Built over `step`, so its reads are this reaper's runtime and never throw. None injected: none asked.
+	const detachGuard = typeof detachGuardFor === "function" ? detachGuardFor(step) : null;
 
 	/**
 	 * One leftover network. The old body was a bare `network rm` in a `try {} catch {}` whose comment said an
@@ -445,7 +472,7 @@ export function makeReaper({ log, exec = execDocker, bin = "docker" }) {
 	 * the same way would destroy an operator's stopped container and a crashed job's forensic one.
 	 */
 	async function reapNetwork(network) {
-		const { ok, names, absent } = await networkEndpoints(step, network);
+		const { ok, names, absent } = await networkEndpoints(step, network, { bin });
 		// Gone between the `ls` and now. Nothing was left behind, so there is nothing to say: the ONE silence
 		// this sweep allows, and only in the daemon's own words for a network.
 		if (absent) return;
@@ -461,6 +488,11 @@ export function makeReaper({ log, exec = execDocker, bin = "docker" }) {
 		// container half stays `docker ps`, running-only, because widening it to `ps -a` would `rm -f` an
 		// operator's stopped container and a crashed job's forensic one, which `design.md` refuses; this half
 		// only DECLINES to remove something, which costs a leftover network and a line saying so.
+		//
+		// On Podman the read above is itself this `ps -a` since issue #452 (4.9 renders no `.Containers`), and its
+		// `parked` already holds this answer. Asked again anyway, so both runtimes take ONE path from here on and
+		// the classification below stays the one this sweep has always pinned; the cost is one command per
+		// leftover network per boot.
 		const members = await step(["ps", "-a", "--filter", `network=${network}`, "--format", "{{.Names}}\t{{.State}}"]);
 		if (members.code !== 0) return log("network_not_reaped", { network, reason: "containers-unreadable" });
 		// AN ALLOWLIST, following `sandbox.mjs`: the states named here are the ones the daemon itself lists in
@@ -495,7 +527,14 @@ export function makeReaper({ log, exec = execDocker, bin = "docker" }) {
 		if (attached.length > 0) return log("network_not_reaped", { network, reason: "container-attached-not-running", containers: attached.slice(0, 5), more: attached.length > 5 ? attached.length - 5 : 0 });
 		// The parked proxy is detached too: it is attached to this network and `.Containers` does not list it,
 		// so without naming it here the `rm` would fail "has active endpoints" on a member nothing detached.
-		const outcome = await removeNetworkOrSay(step, { network, detach: [...names, ...parked.filter((name) => name === DEFAULT_EGRESS_PROXY)], bin });
+		const detach = [...names, ...parked.filter((name) => name === DEFAULT_EGRESS_PROXY)];
+		// Left and said while the keeper does not hold (issue #452 with #458); the next boot with it holding removes it. Only a
+		// RUNNING member is the trigger (a stopped proxy is not in the namespace), so the guard reads nothing without one.
+		if (detachGuard) {
+			const why = await detachGuard({ running: detach.some((name) => names.includes(name)) });
+			if (why) return log("network_not_reaped", { network, reason: why });
+		}
+		const outcome = await removeNetworkOrSay(step, { network, detach, bin });
 		if (outcome.absent) return;
 		// `detached` is named rather than counted: one of them may be something this worker never attached.
 		if (outcome.removed) return log("reaped_network", { network, detached: outcome.detached });

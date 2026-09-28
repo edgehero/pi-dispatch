@@ -8,7 +8,7 @@ import { describe, test } from "node:test";
 import { ISOLATION_FLAGS, PODMAN_PINNED_FLAGS, buildDockerRunArgs, buildPodmanRunArgs } from "../src/docker-run.mjs";
 import { WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
 import { MINTED_TOKEN_VARS } from "../src/forges.mjs";
-import { SANDBOX_LAUNCHERS, SANDBOX_LAUNCH_WATCH_MS, SANDBOX_LAUNCH_WATCH_TRIES, SANDBOX_NAME_PREFIX, SANDBOX_NETWORK_SHAPE, SANDBOX_OPEN_GRACE_MS, buildSandboxRunArgs, combineSandboxNetworkSweepers, decideSandboxJobUser, launchSandbox, listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatch, openSandbox, parsePublish, resolveSandbox, sandboxContainerName, sandboxEgress, stopSandbox, sandboxLauncher, sandboxVenuePolicy, sandboxVenueRefusal, sandboxVenues } from "../src/sandbox.mjs";
+import { SANDBOX_LAUNCHERS, SANDBOX_LAUNCH_WATCH_MS, SANDBOX_LAUNCH_WATCH_TRIES, SANDBOX_NAME_PREFIX, SANDBOX_NETWORK_SHAPE, SANDBOX_OPEN_GRACE_MS, buildSandboxRunArgs, combineSandboxNetworkSweepers, decideSandboxJobUser, launchSandbox, listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatch, openSandbox, sandboxKeeperCheck, parsePublish, resolveSandbox, sandboxContainerName, sandboxEgress, stopSandbox, sandboxLauncher, sandboxVenuePolicy, sandboxVenueRefusal, sandboxVenues } from "../src/sandbox.mjs";
 import { networkNameFor } from "../src/egress.mjs";
 import { makeSandboxReaper, pinSandbox } from "../src/sandbox-store.mjs";
 
@@ -697,7 +697,7 @@ describe("decideSandboxJobUser relabel (#355)", () => {
 // --- the session-network sweep (issue #337) ----------------------------------------------------------
 
 /** A fake daemon: `nets` maps a network name to its attached endpoint NAMES; `rm` refuses while any remain. */
-function fakeNetDaemon({ nets = {}, fail = {}, containers = {} } = {}) {
+function fakeNetDaemon({ nets = {}, fail = {}, containers = {}, podmanVersion = "5.8.1", dockerInfo = JSON.stringify({ ServerVersion: "27.4.0", OperatingSystem: "Ubuntu", SecurityOptions: ["name=seccomp,profile=default"] }), keeperRead = { code: 125, stdout: "", stderr: "no such container" } } = {}) {
 	const calls = [];
 	const state = new Map(Object.entries(nets).map(([n, m]) => [n, [...m]]));
 	const run = async (args) => {
@@ -708,6 +708,19 @@ function fakeNetDaemon({ nets = {}, fail = {}, containers = {} } = {}) {
 		// else on this daemon can. Measured on 27.4.0 (issue #337): a container created on a network but not
 		// started is absent from `docker ps` AND from `network inspect`, and the `network rm` still succeeds.
 		// The filter is a substring match here too, so the fixtures carry foreign names on purpose.
+		// Podman's endpoint read (issue #452): `ps -a --filter network=`, every endpoint here a RUNNING member, then
+		// `network exists`, 0 or 1 as Podman answers (measured on 4.9.3 and 5.8.1).
+		if (key === "ps -a" && args[args.indexOf("--filter") + 1].startsWith("network=")) {
+			const net = args[args.indexOf("--filter") + 1].slice("network=".length);
+			return { code: 0, stdout: (state.get(net) ?? []).map((n) => `${n}\trunning`).join("\n"), stderr: "" };
+		}
+		if (key === "network exists") return { code: state.has(args.at(-1)) ? 0 : 1, stdout: "", stderr: "" };
+		// The keeper guard's version read (issue #452 with #458): 5.x by default, where no keeper is needed.
+		// The keeper guard's runtime read (issue #452 with #458): `podman info --format json` on the podman venue, `docker info
+		// --format={{json .}}` on docker's. Docker Engine by default on docker's (no guard), 5.x on podman's.
+		if (key === "info --format") return { code: 0, stdout: `${JSON.stringify({ host: { security: { rootless: true } }, version: { Version: podmanVersion } })}\n`, stderr: "" };
+		if (key === "info --format={{json .}}") return { code: 0, stdout: `${dockerInfo}\n`, stderr: "" };
+		if (args[0] === "inspect" && String(args[1]).startsWith("--format={{.State.Status}}|")) return keeperRead;
 		if (key === "ps -a") {
 			const want = args[args.indexOf("--filter") + 1].slice("name=".length);
 			return { code: 0, stdout: Object.entries(containers).filter(([n]) => n.includes(want)).map(([n, st]) => `${n}\t${st}`).join("\n"), stderr: "" };
@@ -1083,6 +1096,8 @@ const podmanSession = (over = {}) => {
 			blessed: ["podman"],
 			backendFloor: { isolation: "enforced" },
 			egress: { armed: true, proxy: "pi-dispatch-egress-proxy" },
+			// The keeper holds (issue #452 gate round 2); the refusal has its own test.
+			keeperCheck: async () => null,
 			running: async (o) => (asked.push(o?.bin), []),
 			resolveJobUser: async (o) => (judged.push(o), { user: "1234:1234", home: "/home/pi", relabel: true }),
 			spawnNetwork: spawn,
@@ -1136,7 +1151,10 @@ test("a podman sandbox's own lines name podman: attach, the leftover network, th
 	const exists = podmanSession({ spawnNetwork: recordingRuntime([], (_bin, args) => (args[1] === "create" ? 1 : 0)) });
 	const left = await openSandbox(exists.opts);
 	assert.equal(left.refused, "egress-network-exists");
-	assert.match(left.message, /\$\(podman network inspect .*podman network disconnect -f .*; podman network rm pi-sandbox-gh-1-net/);
+	// Every member by `ps -a --filter network=` (issue #452): Podman 4.9's `network inspect` renders no `.Containers`, so
+	// the loop over it disconnected nothing there, and Podman's `rm` refuses while a member in any state remains.
+	assert.ok(left.message.includes(`for c in $(podman ps -a --filter network=pi-sandbox-gh-1-net --format '{{.Names}}'); do podman network disconnect -f pi-sandbox-gh-1-net "$c"; done; podman network rm pi-sandbox-gh-1-net`), left.message);
+	assert.doesNotMatch(left.message, /\.Containers/);
 	assert.doesNotMatch(left.message, /docker/);
 
 	const noProxy = podmanSession({ spawnNetwork: recordingRuntime([], (_bin, args) => (args[1] === "connect" || args[1] === "inspect" ? 1 : 0)) });
@@ -1346,8 +1364,139 @@ test("each runtime's network sweeper runs in its own runtime, and every failure 
 	assert.deepEqual(half.failures, [{ reason: "network-list-failed", runtime: "docker" }]);
 	assert.deepEqual(half.swept.map((s) => s.network), ["pi-sandbox-p-net"]);
 	const src = readFileSync(new URL("../src/sandbox.mjs", import.meta.url), "utf8");
-	assert.match(src, /export function makeSandboxNetworkSweeper\(\{ bin = "docker", run = boundedRuntime\(bin\) \} = \{\}\)/);
+	assert.match(src, /export function makeSandboxNetworkSweeper\(\{ bin = "docker", run = boundedRuntime\(bin\), proxy = DEFAULT_EGRESS_PROXY, detachGuard = makeNetnsDetachGuard\(\{ run, readRuntime: bin === "podman" \? podmanRuntimeReader\(run\) : dockerRuntimeReader\(run\) \}\) \} = \{\}\)/);
 	assert.match(src, /execDockerBounded\(args, \{ timeoutMs: 10_000, bin \}\)/);
+});
+
+test("the podman session sweep reads members with `ps -a` and `network exists`, never `.Containers`, with every guard it has on docker (#452)", async () => {
+	// Podman 4.9.3 renders no `.Containers` (exit 125 for every network, measured), so this sweep noted every leftover
+	// session network `unreadable` on every pass there.
+	const d = fakeNetDaemon({ nets: { "pi-sandbox-a-net": ["pi-dispatch-egress-proxy"], "pi-sandbox-b-net": ["pi-sandbox-b", "pi-dispatch-egress-proxy"] } });
+	const out = await makeSandboxNetworkSweeper({ bin: "podman", run: d.run })({ retained: () => [] });
+	assert.deepEqual(out.swept, [{ network: "pi-sandbox-a-net", detached: ["pi-dispatch-egress-proxy"] }]);
+	assert.deepEqual(out.notes, [{ network: "pi-sandbox-b-net", reason: "sandbox-attached" }], "a session container on it still keeps it, and says so");
+	assert.ok(!d.calls.some((c) => c.includes(".Containers") || c.startsWith("network inspect")), d.calls.join(" | "));
+	assert.ok(d.calls.includes("ps -a --filter network=pi-sandbox-a-net --format {{.Names}}\t{{.State}}"));
+	assert.ok(d.calls.includes("network exists pi-sandbox-a-net"));
+	// A Podman that cannot say whether the network is there: unreadable, said, nothing touched.
+	const unsure = fakeNetDaemon({ nets: { "pi-sandbox-c-net": [] } });
+	const unsureRun = async (args) => (args[0] === "network" && args[1] === "exists" ? (unsure.calls.push(args.join(" ")), { code: 125, stdout: "", stderr: "Error: boom" }) : unsure.run(args));
+	const u = await makeSandboxNetworkSweeper({ bin: "podman", run: unsureRun })({ retained: () => [] });
+	assert.deepEqual(u, { swept: [], notes: [{ network: "pi-sandbox-c-net", reason: "unreadable" }] });
+	assert.ok(!unsure.calls.some((c) => c.startsWith("network rm") || c.startsWith("network disconnect")));
+});
+
+test("the podman session sweep detaches a STOPPED configured proxy, and a failed rm names what still holds the network (#452 gate round 1)", async () => {
+	// A Podman whose member `ps` reports stopped members by state; `network rm` refuses while ANY member remains, as
+	// Podman's does (measured on 4.9.3 and 5.8.1, a lone member in each state).
+	const podmanNet = (members) => {
+		const calls = [];
+		const on = new Map(Object.entries(members).map(([n, m]) => [n, new Map(m)]));
+		const run = async (args) => {
+			calls.push(args.join(" "));
+			const key = args.slice(0, 2).join(" ");
+			if (key === "network ls") return { code: 0, stdout: [...on.keys()].join("\n"), stderr: "" };
+			if (key === "ps -a" && args.some((a) => a.startsWith("network="))) {
+				const net = args.find((a) => a.startsWith("network=")).slice("network=".length);
+				return { code: 0, stdout: [...(on.get(net) ?? new Map())].map(([n, st]) => `${n}\t${st}`).join("\n"), stderr: "" };
+			}
+			if (key === "ps -a") return { code: 0, stdout: "", stderr: "" };
+			if (key === "network exists") return { code: on.has(args.at(-1)) ? 0 : 1, stdout: "", stderr: "" };
+			if (key === "info --format") return { code: 0, stdout: `${JSON.stringify({ host: { security: { rootless: true } }, version: { Version: "5.8.1" } })}\n`, stderr: "" };
+			if (key === "network disconnect") {
+				on.get(args.at(-2))?.delete(args.at(-1));
+				return { code: 0, stdout: "", stderr: "" };
+			}
+			if (key === "network rm") {
+				if ((on.get(args.at(-1))?.size ?? 0) > 0) return { code: 2, stdout: "", stderr: "network is being used" };
+				on.delete(args.at(-1));
+				return { code: 0, stdout: "", stderr: "" };
+			}
+			return { code: 0, stdout: "", stderr: "" };
+		};
+		return { run, calls, on };
+	};
+	// The measured gate finding: a stopped proxy alone kept the network, `rm-failed` with `detached: []` every pass.
+	const alone = podmanNet({ "pi-sandbox-a-net": [["pi-dispatch-egress-proxy", "exited"]] });
+	const out = await makeSandboxNetworkSweeper({ bin: "podman", run: alone.run })({ retained: () => [] });
+	assert.deepEqual(out, { swept: [{ network: "pi-sandbox-a-net", detached: ["pi-dispatch-egress-proxy"] }], notes: [] });
+	// The CONFIGURED proxy, by name: another name for it is detached, the default one is then a stranger.
+	const custom = podmanNet({ "pi-sandbox-a-net": [["my-proxy", "exited"]] });
+	assert.deepEqual((await makeSandboxNetworkSweeper({ bin: "podman", run: custom.run, proxy: "my-proxy" })({ retained: () => [] })).swept, [{ network: "pi-sandbox-a-net", detached: ["my-proxy"] }]);
+	// Anything else stopped is NOT detached: it keeps the network, and the line names it with the proxy it took off.
+	const held = podmanNet({ "pi-sandbox-a-net": [["pi-dispatch-egress-proxy", "exited"], ["operators-box", "created"]] });
+	const kept = await makeSandboxNetworkSweeper({ bin: "podman", run: held.run })({ retained: () => [] });
+	assert.deepEqual(kept, { swept: [], notes: [{ network: "pi-sandbox-a-net", reason: "rm-failed", detached: ["pi-dispatch-egress-proxy"], holding: ["operators-box"], more: 0 }] });
+	assert.ok(!held.calls.includes("network disconnect -f pi-sandbox-a-net operators-box"), "an operator's container is never detached");
+	// Bounded, as the boot reaper's list is: five names and a count.
+	const many = podmanNet({ "pi-sandbox-a-net": Array.from({ length: 7 }, (_, i) => [`box${i}`, "exited"]) });
+	const bounded = await makeSandboxNetworkSweeper({ bin: "podman", run: many.run })({ retained: () => [] });
+	assert.deepEqual(bounded.notes, [{ network: "pi-sandbox-a-net", reason: "rm-failed", detached: [], holding: ["box0", "box1", "box2", "box3", "box4"], more: 2 }]);
+	// A re-read that cannot answer says so rather than naming nobody.
+	let asks = 0;
+	const flaky = podmanNet({ "pi-sandbox-a-net": [["box", "exited"]] });
+	const flakyRun = async (args) => (args[0] === "network" && args[1] === "exists" && asks++ > 0 ? { code: 125, stdout: "", stderr: "boom" } : flaky.run(args));
+	assert.deepEqual((await makeSandboxNetworkSweeper({ bin: "podman", run: flakyRun })({ retained: () => [] })).notes, [{ network: "pi-sandbox-a-net", reason: "rm-failed", detached: [], holding: "unreadable" }]);
+	// The watch hands the configured proxy to every sweeper it makes.
+	const made = [];
+	const watch = makeSandboxRuntimeWatch({ sandboxDir: "/sbx", blessed: ["podman"], fs: { lstatSync: () => ({ isDirectory: () => true, isSymbolicLink: () => false }), readdirSync: () => [], readFileSync: () => "{}" }, list: async () => [], proxy: "my-proxy", makeSweeper: (o) => (made.push(o), async () => ({ swept: [], notes: [] })) });
+	await watch.sweepNetworks({ retained: () => [] });
+	assert.deepEqual(made, [{ bin: "podman", proxy: "my-proxy" }]);
+});
+
+test("docker's failed session-network rm names what holds it too, and docker's detach list is unchanged (#452 gate round 1)", async () => {
+	const d = fakeNetDaemon({ nets: { "pi-sandbox-a-net": ["pi-dispatch-egress-proxy"] } });
+	const run = async (args) => {
+		if (args.slice(0, 2).join(" ") === "network rm") {
+			d.calls.push(args.join(" "));
+			return { code: 1, stdout: "", stderr: "has active endpoints" };
+		}
+		return d.run(args);
+	};
+	const out = await makeSandboxNetworkSweeper({ run })({ retained: () => [] });
+	assert.deepEqual(out.notes, [{ network: "pi-sandbox-a-net", reason: "rm-failed", detached: ["pi-dispatch-egress-proxy"], holding: [], more: 0 }]);
+	assert.equal(d.calls.filter((c) => c.startsWith("network inspect --format {{json .Containers}}")).length, 2, "the first read, and the re-read after the failed rm");
+});
+
+test("on Podman 4.x the session sweep detaches nothing RUNNING while the rootless network keeper does not hold, on both venues (#452 with #458, gate round 2)", async () => {
+	// Detaching the RUNNING proxy is the 4.9 trigger #458 measured; before #452 this sweep never got that far on 4.9.
+	const holding = { code: 0, stdout: "running|bridge|pi-dispatch-netns-keeper,\n", stderr: "" };
+	const blocked = fakeNetDaemon({ nets: { "pi-sandbox-a-net": ["pi-dispatch-egress-proxy"], "pi-sandbox-e-net": [] }, podmanVersion: "4.9.3" });
+	const out = await makeSandboxNetworkSweeper({ bin: "podman", run: blocked.run })({ retained: () => [] });
+	assert.deepEqual(out.notes, [{ network: "pi-sandbox-a-net", reason: "keeper-not-holding" }]);
+	assert.deepEqual(out.swept, [{ network: "pi-sandbox-e-net", detached: [] }], "a network with nothing to detach is removed without asking");
+	assert.ok(!blocked.calls.some((c) => c.startsWith("network disconnect") || c === "network rm pi-sandbox-a-net"), blocked.calls.join(" | "));
+	// The runtime is read from `podman info`'s JSON, the keeper by its state, mode and networks only (no age rule).
+	assert.ok(blocked.calls.includes("info --format json"));
+	assert.ok(blocked.calls.includes("inspect --format={{.State.Status}}|{{.HostConfig.NetworkMode}}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}} pi-dispatch-netns-keeper"));
+	const held = fakeNetDaemon({ nets: { "pi-sandbox-a-net": ["pi-dispatch-egress-proxy"] }, podmanVersion: "4.9.3", keeperRead: holding });
+	assert.deepEqual((await makeSandboxNetworkSweeper({ bin: "podman", run: held.run })({ retained: () => [] })).swept, [{ network: "pi-sandbox-a-net", detached: ["pi-dispatch-egress-proxy"] }], "a keeper holding NOW is enough, however young");
+	// The docker venue reaching a rootless Podman 4.9 (the real CLI against its API: Docker's shape, Podman's licence):
+	// the same guard, the keeper read through docker.
+	const compat = JSON.stringify({ ServerVersion: "4.9.3", ProductLicense: "Apache-2.0", OperatingSystem: "ubuntu", SecurityOptions: ["name=seccomp,profile=default", "name=rootless"] });
+	const viaApi = fakeNetDaemon({ nets: { "pi-sandbox-a-net": ["pi-dispatch-egress-proxy"] }, dockerInfo: compat });
+	assert.deepEqual((await makeSandboxNetworkSweeper({ run: viaApi.run })({ retained: () => [] })).notes, [{ network: "pi-sandbox-a-net", reason: "keeper-not-holding" }]);
+	assert.ok(!viaApi.calls.some((c) => c.startsWith("network disconnect")));
+	const viaApiHeld = fakeNetDaemon({ nets: { "pi-sandbox-a-net": ["pi-dispatch-egress-proxy"] }, dockerInfo: compat, keeperRead: holding });
+	assert.equal((await makeSandboxNetworkSweeper({ run: viaApiHeld.run })({ retained: () => [] })).swept.length, 1);
+	// podman-docker on 4.9 (Podman's own shape through `docker`): the same.
+	const shim = fakeNetDaemon({ nets: { "pi-sandbox-a-net": ["pi-dispatch-egress-proxy"] }, dockerInfo: JSON.stringify({ host: { security: { rootless: true } }, version: { Version: "4.9.3" } }) });
+	assert.deepEqual((await makeSandboxNetworkSweeper({ run: shim.run })({ retained: () => [] })).notes, [{ network: "pi-sandbox-a-net", reason: "keeper-not-holding" }]);
+	// Docker Engine, rootful Podman and 5.x: no keeper read at all.
+	for (const dockerInfo of [undefined, JSON.stringify({ ServerVersion: "4.9.3", ProductLicense: "Apache-2.0", OperatingSystem: "ubuntu", SecurityOptions: ["name=seccomp,profile=default"] }), JSON.stringify({ ServerVersion: "5.8.1", ProductLicense: "Apache-2.0", OperatingSystem: "fedora", SecurityOptions: ["name=rootless"] })]) {
+		const d = fakeNetDaemon({ nets: { "pi-sandbox-a-net": ["pi-dispatch-egress-proxy"] }, ...(dockerInfo ? { dockerInfo } : {}) });
+		assert.equal((await makeSandboxNetworkSweeper({ run: d.run })({ retained: () => [] })).swept.length, 1, dockerInfo ?? "docker");
+		assert.ok(!d.calls.some((c) => c.startsWith("inspect")), d.calls.join(" | "));
+	}
+	// A runtime that cannot be read: fail closed for a RUNNING member only, with its own token.
+	const dark = fakeNetDaemon({ nets: { "pi-sandbox-a-net": ["pi-dispatch-egress-proxy"] }, dockerInfo: "not json" });
+	assert.deepEqual((await makeSandboxNetworkSweeper({ run: dark.run })({ retained: () => [] })).notes, [{ network: "pi-sandbox-a-net", reason: "runtime-unreadable" }]);
+	// A STOPPED proxy is not the trigger: detached with no runtime or keeper read, even on 4.9 without a keeper.
+	const stopped = fakeNetDaemon({ nets: { "pi-sandbox-s-net": [] }, podmanVersion: "4.9.3" });
+	const parkedRun = async (args) => (args[0] === "ps" && args.includes("network=pi-sandbox-s-net") ? (stopped.calls.push(args.join(" ")), { code: 0, stdout: "pi-dispatch-egress-proxy\texited\n", stderr: "" }) : stopped.run(args));
+	const s2 = await makeSandboxNetworkSweeper({ bin: "podman", run: parkedRun })({ retained: () => [] });
+	assert.deepEqual(s2.swept, [{ network: "pi-sandbox-s-net", detached: ["pi-dispatch-egress-proxy"] }]);
+	assert.ok(!stopped.calls.some((c) => c.startsWith("info") || c.startsWith("inspect")), stopped.calls.join(" | "));
 });
 
 test("an EXITED container of this run still on its network is removed, then the network, only after rm failed (#429 review, podman)", async () => {
@@ -1378,8 +1527,9 @@ test("an EXITED container of this run still on its network is removed, then the 
 		let asks = 0;
 		const r = async (args) => {
 			calls.push(args.join(" "));
-			// The guard sees the run finished, then the recovery look sees it in `state`.
-			if (args[0] === "ps") return asks++ === 0 ? { code: 0, stdout: "", stderr: "" } : e.run(args);
+			// The guard sees the run finished, then the recovery look sees it in `state`. The endpoint read's own `ps`
+			// (Podman's, issue #452) is not one of those two asks.
+			if (args[0] === "ps" && !args.some((a) => a.startsWith("network="))) return asks++ === 0 ? { code: 0, stdout: "", stderr: "" } : e.run(args);
 			if (args.slice(0, 2).join(" ") === "network rm") return { code: 2, stdout: "", stderr: "in use" };
 			return e.run(args);
 		};
@@ -1713,7 +1863,8 @@ test("the finished-container repair matches THIS run by its whole name, never a 
 	const run = async (args) => {
 		calls.push(args.join(" "));
 		// The guard answers clear (the container is created after it), then the repair's look sees both containers.
-		if (args[0] === "ps") return asks++ === 0 ? { code: 0, stdout: "", stderr: "" } : d.run(args);
+		// The endpoint read's own `ps` (Podman's, issue #452) is neither.
+		if (args[0] === "ps" && !args.some((a) => a.startsWith("network="))) return asks++ === 0 ? { code: 0, stdout: "", stderr: "" } : d.run(args);
 		if (args.slice(0, 2).join(" ") === "network rm") return { code: 2, stdout: "", stderr: "in use" };
 		return d.run(args);
 	};
@@ -2419,4 +2570,34 @@ test("a sandbox's container is removed AT ONCE on each runtime: podman needs --t
 	]);
 	assert.equal(await stopSandbox({ bin: "docker", name: "x", run: async () => ({ code: 1 }) }), false);
 	assert.equal(await stopSandbox({ bin: "docker", name: "x", run: async () => { throw new Error("boom"); } }), false);
+});
+
+test("an egress-armed podman sandbox is not opened while the keeper does not hold, since its own teardown is #458's trigger (#452 gate round 2)", async () => {
+	const refusal = { refused: "netns-keeper-not-holding", message: "the keeper is not holding" };
+	const asked = [];
+	const blocked = podmanSession({ keeperCheck: async (o) => (asked.push(o), refusal) });
+	let launched = false;
+	const r = await openSandbox({ ...blocked.opts, launch: async () => ((launched = true), { code: 0 }) });
+	assert.deepEqual(r, refusal);
+	assert.deepEqual(asked, [{ proxy: "pi-dispatch-egress-proxy" }]);
+	assert.equal(launched, false);
+	assert.deepEqual(blocked.calls, [], "no network was made, so no teardown can run");
+	// Egress off: nothing to tear down under a proxy, and nothing asked.
+	const off = [];
+	const unarmed = podmanSession({ keeperCheck: async (o) => (off.push(o), refusal) });
+	await openSandbox({ ...unarmed.opts, egress: { armed: false, proxy: "pi-dispatch-egress-proxy" } });
+	assert.deepEqual(off, []);
+});
+
+test("sandboxKeeperCheck is the worker's own keeper preflight: refused on 4.x without a holding keeper, nothing on 5.x (#452 gate round 2)", async () => {
+	const NOW = Date.now();
+	const info = (version) => async () => ({ answered: true, info: { version } });
+	const reads = (keeper) => async (args) => (args[0] === "inspect" && args.at(-1) === "pi-dispatch-netns-keeper" ? keeper : { code: 0, stdout: `${NOW - 120_000}\n` });
+	const absent = { code: 125, stdout: "" };
+	const refused = await sandboxKeeperCheck({ proxy: "pi-dispatch-egress-proxy", info: info("4.9.3"), readKeeper: reads(absent) });
+	assert.equal(refused.refused, "netns-keeper-not-holding");
+	assert.match(refused.message, /^the rootless network keeper pi-dispatch-netns-keeper is not under this account's Podman, and on Podman 4\.9\.3 a job network's teardown would then cut the egress proxy's route out \(issue #458\), so this sandbox is not opened: closing it tears its network down under the proxy, which is that same teardown\. To fix it, start it as the worker's account: /);
+	assert.equal(await sandboxKeeperCheck({ proxy: "pi-dispatch-egress-proxy", info: info("5.8.1"), readKeeper: reads(absent) }), null);
+	const holding = { code: 0, stdout: `running|bridge|pi-dispatch-netns-keeper,|${NOW - 130_000}\n` };
+	assert.equal(await sandboxKeeperCheck({ proxy: "pi-dispatch-egress-proxy", info: info("4.9.3"), readKeeper: reads(holding) }), null);
 });

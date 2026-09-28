@@ -156,6 +156,58 @@ export function podmanNeedsNetnsKeeper(version) {
 }
 
 /**
+ * The keeper read a DETACH asks (issue #452, gate round 2): its state, its network mode and the networks it is on, and
+ * NOT when it started. `NETNS_KEEPER_FORMAT`'s `{{.State.StartedAt.UnixMilli}}` is Podman's own template and is for the
+ * age and order rules, which admit a JOB across time; a detach is safe exactly when the keeper holds at that instant.
+ * Measured identical through `podman`, through `podman-docker` and through the real docker CLI against the account's
+ * Podman API socket, on 4.9.3 and 5.8.1: `running|bridge|pi-dispatch-netns-keeper,`.
+ */
+export const NETNS_KEEPER_NOW_FORMAT = "--format={{.State.Status}}|{{.HostConfig.NetworkMode}}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}";
+
+/**
+ * Whether a sweep may DETACH a RUNNING container from a network right now (issue #452, integrated with #458): `null`
+ * when it may, else a reason token. Every disconnect of the running proxy is the Podman 4.x trigger #458 measured, and
+ * the boot reaper and the sandbox sweep detach it from a dead job's or session's network; before #452 their member read
+ * failed on 4.9, so they never got that far, and now they do, on the podman venue and on `local` alike (Podman reached
+ * as `docker` through `podman-docker`, or through its Docker API).
+ *
+ * `detachGuard({ running })`: `running` says whether anything RUNNING is about to be detached. A stopped container is
+ * not in the rootless network namespace, so detaching one is not the trigger (gate round 2), and the guard answers
+ * `null` without a single read. Otherwise `readRuntime()` says what the daemon behind the caller's CLI is, as
+ * `{ known, podman, rootless, version }`, from the read that venue already trusts (`podmanRuntimeReader`: `podman info
+ * --format json`; `dockerRuntimeReader`: `docker info --format={{json .}}` and `parseDaemonFacts`, whose Podman
+ * detection covers both routes). Docker Engine, rootful Podman (no rootless namespace) and Podman 5.x need nothing. A
+ * rootless Podman 4.x, or a runtime that could not be read at all, needs the keeper to hold NOW (`judgeNetnsKeeper`
+ * without the clock), read through the same runner: `keeper-not-holding`, or `runtime-unreadable` when the runtime was
+ * not read and no keeper holds. The age and order rules stay in the job preflight and in doctor.
+ */
+export function makeNetnsDetachGuard({ run, readRuntime }) {
+	return async ({ running = true } = {}) => {
+		if (running !== true) return null;
+		let runtime = null;
+		try {
+			runtime = await readRuntime();
+		} catch {
+			runtime = null;
+		}
+		const known = runtime?.known === true;
+		if (known) {
+			if (runtime.podman !== true) return null;
+			if (runtime.rootless === false) return null;
+			if (!podmanNeedsNetnsKeeper(runtime.version)) return null;
+		}
+		let keeperRead;
+		try {
+			keeperRead = await run(["inspect", NETNS_KEEPER_NOW_FORMAT, NETNS_KEEPER]);
+		} catch {
+			keeperRead = { code: null, stdout: "" };
+		}
+		if (judgeNetnsKeeper({ code: keeperRead?.code ?? null, stdout: keeperRead?.stdout ?? "" }).holds) return null;
+		return known ? "keeper-not-holding" : "runtime-unreadable";
+	};
+}
+
+/**
  * The Quadlet files, in the order they are shown and written. `unit` is the service the generator makes of each; the
  * networks' units are pulled in by the containers' own `Requires=` (Quadlet adds it for `Network=X.network`), so only
  * the container services are ever started by name.

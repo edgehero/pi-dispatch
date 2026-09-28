@@ -4,14 +4,15 @@ import { basename, join } from "node:path";
 import { release as osRelease } from "node:os";
 import { promisify } from "node:util";
 import { execDockerBounded, makeDockerEndpointResolver } from "./backend-local.mjs";
-import { PODMAN_CONF_WIDENS_JOB, PODMAN_JOB_USER_FIX, decidePodmanJobUser, judgePodmanVenue, makePodmanInfoReader, resolvePodmanImageUser } from "./backend-podman.mjs";
+import { PODMAN_CONF_WIDENS_JOB, PODMAN_JOB_USER_FIX, decidePodmanJobUser, judgePodmanVenue, keeperPreflight, makePodmanInfoReader, podmanRuntimeReader, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { DEFAULT_BACKEND, PODMAN_BACKEND, UNATTRIBUTED_BACKEND, parseBackendFloor, parseBackendList } from "./backends.mjs";
 import { configError } from "./config.mjs";
 import { assertJobUser, CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { buildDockerRunArgs, buildPodmanRunArgs, insideDir } from "./docker-run.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
-import { decideJobUser, JOB_USER_FIX, makeDaemonFactsReader, relabelsPrivateMounts, resolveImageUser, socketFacts } from "./job-user.mjs";
-import { NETWORK_SUFFIX, createJobNetwork, egressArmed, egressEnv, egressProxyName, networkEndpoints, networkExists, networkNameFor, removeJobNetwork, removeNetworkOrSay } from "./egress.mjs";
+import { decideJobUser, dockerRuntimeReader, JOB_USER_FIX, makeDaemonFactsReader, relabelsPrivateMounts, resolveImageUser, socketFacts } from "./job-user.mjs";
+import { DEFAULT_EGRESS_PROXY, NETWORK_SUFFIX, createJobNetwork, egressArmed, egressEnv, egressProxyName, networkEndpoints, networkExists, networkNameFor, removeJobNetwork, removeNetworkOrSay } from "./egress.mjs";
+import { makeNetnsDetachGuard } from "./podman-stack.mjs";
 import { isSandboxTombstone, readManifest, readRetained, sandboxDeadline, sandboxEntryName } from "./sandbox-store.mjs";
 
 /**
@@ -293,7 +294,7 @@ export async function listRunningSandboxes({ execFn = exec, bin = "docker", sign
  * text and no path: `runtime-unanswered` per runtime with the number of directories it held, and `podman-store-mismatch`
  * per directory held for its store.
  */
-export function makeSandboxRuntimeWatch({ sandboxDir, blessed = [], fs = { lstatSync, readdirSync, readFileSync }, list = listRunningSandboxes, readPodmanStore = defaultPodmanStore, makeSweeper = makeSandboxNetworkSweeper, log = () => {} } = {}) {
+export function makeSandboxRuntimeWatch({ sandboxDir, blessed = [], fs = { lstatSync, readdirSync, readFileSync }, list = listRunningSandboxes, readPodmanStore = defaultPodmanStore, makeSweeper = makeSandboxNetworkSweeper, proxy = DEFAULT_EGRESS_PROXY, log = () => {} } = {}) {
 	const blessedBins = new Set(sandboxVenues(blessed).map((venue) => sandboxLauncher(venue).bin));
 	// Launcher-table order, so the asks and the log lines read the same on every pass.
 	const allBins = [...new Set(Object.values(SANDBOX_LAUNCHERS).map((l) => l.bin))];
@@ -387,7 +388,7 @@ export function makeSandboxRuntimeWatch({ sandboxDir, blessed = [], fs = { lstat
 	async function sweepNetworks(args) {
 		const bins = allBins.filter((bin) => present.has(bin));
 		if (bins.length === 0) return { swept: [], notes: [] };
-		for (const bin of bins) if (!sweepers.has(bin)) sweepers.set(bin, makeSweeper({ bin }));
+		for (const bin of bins) if (!sweepers.has(bin)) sweepers.set(bin, makeSweeper({ bin, proxy }));
 		return combineSandboxNetworkSweepers(bins.map((bin) => ({ runtime: bin, sweep: sweepers.get(bin) })))(args);
 	}
 	return { listRunning, sweepNetworks, isOpen };
@@ -509,12 +510,14 @@ function missingRetained() {
  * Returns `{ swept, notes }` rather than logging, so the reaper owns the log vocabulary and this stays a
  * pure-ish function over its runner.
  */
-export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime(bin) } = {}) {
+export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime(bin), proxy = DEFAULT_EGRESS_PROXY, detachGuard = makeNetnsDetachGuard({ run, readRuntime: bin === "podman" ? podmanRuntimeReader(run) : dockerRuntimeReader(run) }) } = {}) {
 	// `bin` (issue #429) is the one runtime this sweeper lists, inspects and removes in: a sweep that listed under one
 	// CLI and removed under another would be the mixed venue every `bin` seam comment warns about. One sweeper per venue
-	// a sandbox can open on (`combineSandboxNetworkSweepers`). Podman's `ps -a` renders `{{.State}}` and `network
-	// inspect` renders `.Containers` too (the second measured under issue #354); its state WORDS are this file's stated
-	// residual, below.
+	// a sandbox can open on (`combineSandboxNetworkSweepers`). Podman's `ps -a` renders `{{.State}}`; its endpoint read is
+	// `networkEndpoints`' Podman path (issue #452: 4.9 renders no `.Containers`), whose `names` are the running and paused
+	// members exactly as docker's are, so every guard below reads the same on both. A stopped member on Podman is not in
+	// `names` and still makes the `rm` fail, which the failed-`rm` branch below handles for this run's own container and
+	// reports for anything else. Its state WORDS are this file's stated residual, below.
 	return async function sweepSandboxNetworks({ running = new Set(), keep = new Set(), retained = missingRetained, blocked = new Set() } = {}) {
 		// CANDIDATES FIRST, then every piece of evidence that protects one. The order is the point, not an
 		// accident of writing: a network is created BEFORE the container that joins it and AFTER the directory
@@ -552,7 +555,7 @@ export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime
 				if (blocked.has(id)) notes.push({ network: name, reason: "directory-not-removed" });
 				continue;
 			}
-			const { ok, names, absent } = await networkEndpoints(run, name);
+			const { ok, names, absent, parked = [] } = await networkEndpoints(run, name, { bin });
 			if (absent) continue;
 			if (!ok) {
 				notes.push({ network: name, reason: "unreadable" });
@@ -608,7 +611,25 @@ export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime
 				}
 				return true;
 			};
-			const outcome = await removeNetworkOrSay(run, { network: name, detach: names, stillClear, bin });
+			// A STOPPED egress proxy is detached too, as the boot reaper and the canary sweep detach one (issue #452, gate
+			// round 1). On Podman it is in `parked`, and Podman's `rm` refuses while it is attached (measured on 4.9.3 and
+			// 5.8.1), so leaving it kept a dead session's network forever, `rm-failed` on every pass. Only the proxy this
+			// worker is configured with, by name: any other stopped member is an operator's, and is named below instead.
+			// Docker's read carries no `parked`, so its pass is what it was.
+			const detach = [...names, ...parked.filter((n) => n === proxy)];
+			// Issue #452 with #458: on a Podman that needs the rootless network keeper, detaching a RUNNING container (the proxy)
+			// cuts the proxy's route out while the keeper does not hold, so the network is left and said; a later pass with it
+			// holding removes it. On both venues, since `local` can be Podman (`podman-docker`, or its Docker API): the guard
+			// asks the runtime first and answers `null` for Docker Engine, rootful Podman and 5.x. Nothing running to detach,
+			// nothing read.
+			if (detachGuard) {
+				const why = await detachGuard({ running: detach.some((n) => names.includes(n)) });
+				if (why) {
+					notes.push({ network: name, reason: why });
+					continue;
+				}
+			}
+			const outcome = await removeNetworkOrSay(run, { network: name, detach, stillClear, bin });
 			if (outcome.aborted) {
 				// `restored`/`lost` rather than `detached`: an endpoint put back was not removed by this pass,
 				// and one that could not be put back is off a network someone may be using, which is the half an
@@ -636,7 +657,20 @@ export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime
 					retried = (await run(["network", "rm", name]))?.code === 0;
 				}
 				if (retried) swept.push({ network: name, detached: outcome.detached, removedContainer: own });
-				else notes.push({ network: name, reason: "rm-failed", detached: outcome.detached });
+				else {
+					// WHAT HOLDS IT, named (issue #452, gate round 1): `detached: []` on every pass said nothing an operator
+					// could act on. Read again now, after everything this pass did, through the same reader; bounded, as the
+					// boot reaper bounds its own list, because this goes into a log line. Container names only, which are the
+					// runtime's own vocabulary; an unreadable answer says so rather than naming nobody.
+					const after = await networkEndpoints(run, name, { bin });
+					const holding = after.ok ? [...after.names, ...(after.parked ?? [])] : null;
+					notes.push({
+						network: name,
+						reason: "rm-failed",
+						detached: outcome.detached,
+						...(holding === null ? { holding: "unreadable" } : { holding: holding.slice(0, 5), more: holding.length > 5 ? holding.length - 5 : 0 }),
+					});
+				}
 			}
 			// Between networks, for `retention-sweep.mjs`'s reason: this loop runs on a timer beside draining
 			// jobs, and `index.mjs` runs with `maxStalledCount: 0` against BullMQ's 30s lock.
@@ -670,6 +704,20 @@ export function combineSandboxNetworkSweepers(entries) {
 			if (outcome?.failed) failures.push({ reason: outcome.failed, runtime });
 		}
 		return failures.length > 0 ? { swept, notes, failed: failures[0].reason, failures } : { swept, notes };
+	};
+}
+
+/**
+ * The default `keeperCheck` (issue #452, gate round 2): the worker's own job preflight for the keeper (`keeperPreflight`,
+ * over this account's `podman info` and the keeper's and proxy's reads), with the proxy taken as up, since a missing
+ * proxy already fails the open at network creation with its own message. `null` when the keeper holds or is not needed.
+ */
+export async function sandboxKeeperCheck({ proxy, info = makePodmanInfoReader(), readKeeper = null } = {}) {
+	const answer = await keeperPreflight(async () => ({ ok: true, proxy }), { armed: true, proxy, info, ...(readKeeper ? { readKeeper } : {}) })();
+	if (!answer?.unavailable) return null;
+	return {
+		refused: "netns-keeper-not-holding",
+		message: `${answer.cause}, so this sandbox is not opened: closing it tears its network down under the proxy, which is that same teardown. To fix it, ${answer.remedy}`,
 	};
 }
 
@@ -949,6 +997,8 @@ export async function openSandbox({
 	// Issue #446: the post-launch look's two seams. `stop` removes this session's container, `pause` waits between asks.
 	stop = stopSandbox,
 	pause = launchWatchPause,
+	// Issue #452, gate round 2: `({ proxy }) => null | { refused, message }`, asked before an egress-armed podman open.
+	keeperCheck = sandboxKeeperCheck,
 }) {
 	// The posture is REQUIRED, and a boolean. Every other part of this function defaults safely; this one would
 	// default to the open bridge, which is the dropped part this function exists to stop a caller dropping.
@@ -1037,6 +1087,16 @@ export async function openSandbox({
 	const jobUser = await resolveJobUser({ manifest: resolved.manifest, venue: resolved.venue, backendFloor });
 	if (jobUser?.refused) return { refused: jobUser.refused, message: jobUser.message };
 
+	// THE KEEPER, before anything exists (issue #452, gate round 2; #458). An egress-armed podman session ends in
+	// `removeJobNetwork`, whose `network disconnect` of the running proxy is #458's trigger on Podman 4.x: without a
+	// holding keeper, closing this shell would cut the proxy's route out for every job after it. So the open asks what a
+	// job's preflight asks (`keeperPreflight`, with its age and order rules, since this admits a session that lasts) and
+	// refuses with its reason and fix. On 5.x, and with the policy off, nothing is asked.
+	if (egress.armed === true && bin === "podman") {
+		const keeper = await keeperCheck({ proxy: egress.proxy });
+		if (keeper?.refused) return keeper;
+	}
+
 	// REQ-EGRESS-ALLOWLIST: this session's own network, exactly like a job's, named off its own container so the
 	// reaper's `pi-job-` filter never touches it -- a worker restart must not tear the network out from under a
 	// shell an operator is sitting in.
@@ -1078,9 +1138,14 @@ export async function openSandbox({
 		// `createJobNetwork` rolls back a network it built itself, so one still present was almost always not
 		// built here; the exception is a rollback whose own remove failed, which these commands also clear.
 		if (await networkExists(spawnNetwork, network, { bin })) {
+			// The member listing is per runtime (issue #452): Podman 4.9's `network inspect` renders no `.Containers`, so
+			// the loop would disconnect nothing there, and its `network rm` refuses while a member in ANY state remains.
+			// `ps -a --filter network=` names every member on both Podman versions (measured on 4.9.3 and 5.8.1). docker's
+			// command is what it always was.
+			const members = bin === "podman" ? `${bin} ps -a --filter network=${network} --format '{{.Names}}'` : `${bin} network inspect -f '{{range .Containers}}{{.Name}} {{end}}' ${network}`;
 			return {
 				refused: "egress-network-exists",
-				message: `the egress network ${network} already exists -- left by an earlier session of ${jobId} that did not clean up, or one opening right now. If \`pi-dispatch sandbox --list\` shows no sandbox running for it, disconnect whatever is attached and remove it: \`for c in $(${bin} network inspect -f '{{range .Containers}}{{.Name}} {{end}}' ${network}); do ${bin} network disconnect -f ${network} "$c"; done; ${bin} network rm ${network}\``,
+				message: `the egress network ${network} already exists -- left by an earlier session of ${jobId} that did not clean up, or one opening right now. If \`pi-dispatch sandbox --list\` shows no sandbox running for it, disconnect whatever is attached and remove it: \`for c in $(${members}); do ${bin} network disconnect -f ${network} "$c"; done; ${bin} network rm ${network}\``,
 			};
 		}
 		// Where the proxy comes from differs by venue: the compose file is docker-only, and on podman the proxy is

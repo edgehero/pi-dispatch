@@ -1192,7 +1192,10 @@ async function removeQuadlets(ctx, quadlets) {
 	// `failed` (measured): after the file is gone `systemctl --user list-units` would show a not-found failed unit
 	// forever. reset-failed clears it. Its exit is not checked: a unit that never failed is already what it asks for.
 	if (units.length > 0) await run(ctx, "systemctl", ["--user", "reset-failed", ...units]);
-	ctx.out(`removed the podman venue's Quadlet units (${quadlets.map((q) => q.file).join(", ")}); the pi-dispatch-valkey-data volume and the networks are kept, remove them with podman if you mean to\n`);
+	// The volume is named only when a Valkey unit was among what was removed (issue #452 gate round 2): a stack installed
+	// without Valkey never had one, and the line used to claim a volume nothing here made was kept.
+	const hadValkey = quadlets.some((q) => q.file === QUADLET_FILES.valkey.file);
+	ctx.out(`removed the podman venue's Quadlet units (${quadlets.map((q) => q.file).join(", ")}); ${hadValkey ? "the pi-dispatch-valkey-data volume and the networks are" : "the networks are"} kept, remove them with podman if you mean to\n`);
 	return 0;
 }
 

@@ -28,6 +28,8 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 		spawnNetwork = spawn,
 		// Issue #341: which uid the shell runs as. Seamed so the tests never ask a daemon.
 		resolveJobUser,
+		// Issue #452, gate round 2: the keeper check an egress-armed podman open asks first. Seamed like `resolveJobUser`.
+		keeperCheck,
 		now = () => Date.now(),
 	} = deps;
 
@@ -113,6 +115,7 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 		launch,
 		spawnNetwork,
 		...(resolveJobUser ? { resolveJobUser } : {}),
+		...(keeperCheck ? { keeperCheck } : {}),
 		// Issue #429: which venues open here, and what a podman sandbox's observations must show, as the worker reads them.
 		blessed: config.backends,
 		backendFloor: config.backendFloor,

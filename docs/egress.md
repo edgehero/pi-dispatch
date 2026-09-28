@@ -116,7 +116,12 @@ mount), so a pass is about what a job gets. Its lines carry the section's prefix
 A plain `pi-dispatch doctor` does not run it there: the first keep-id start of an image copies its layers, which
 takes half a minute, and `--live` is where this venue already starts job-shaped containers. It says so in one ⚠
 line pointing at `--live`. The leftover lines below apply on that venue too, with `podman` in place of `docker` and
-the same prefix, and a canary network a killed `--live` left behind is removed by the next `--live`.
+the same prefix, and a canary network a killed `--live` left behind is removed by the next `--live`. Two differences
+there (issue #452). Podman 4.9's `network inspect` shows no containers, so what is on a network is read with
+`podman ps -a --filter network=<net>`, and the "could not be read" line names that command instead of the inspect.
+And Podman will not remove a network while any container is on it, stopped ones included, so the sweep also removes
+a probe that has stopped and detaches anything else that has, where docker would have removed the network around
+them.
 
 ### Lines about leftovers
 

@@ -488,7 +488,7 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    `--env-setup` script. It refuses `--system` on this venue: the units belong to this account's user manager, which
    a system unit cannot order itself after, so install in user scope with linger on. `service uninstall` stops the
    container and network units, removes them and the rules copy, clears their failed state, and keeps the
-   `pi-dispatch-valkey-data` volume and the networks; it refuses without a user manager (as install does) and reports a
+   networks and, when a Valkey unit was installed, the `pi-dispatch-valkey-data` volume; it refuses without a user manager (as install does) and reports a
    stop or disable that failed instead of claiming success; `service status` lists each
    unit and whether it is active. Every `.container` sets `Network=` explicitly (Valkey on a bridge network of its
    own), because a containers.conf `netns = "host"` puts a container started without one into the host's network
@@ -666,8 +666,12 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    proxy variables) on a job-shaped `--internal` network with the proxy attached, one that must reach the provider
    through the runner's own route and one that must not reach an unlisted host. Its lines start `podman: Egress`,
    before the read-back's. A plain `pi-dispatch doctor` does not run it on this venue, and says so in a ⚠ line
-   pointing at `--live`. A canary network a killed `--live` left behind is removed by the next `--live`.
-   `.github/scripts/podman-conformance.mjs` runs the same canary.
+   pointing at `--live`. A canary network a killed `--live` left behind is removed by the next `--live`, on
+   Podman 4.9 and 5.x alike: the sweeps read what is on a network with `podman ps -a --filter network=<net>`,
+   because Podman 4.9's `network inspect` has no member list (issue #452), and a probe or proxy that has stopped
+   is dealt with too, because Podman will not remove a network while any container, running or not, is still on it.
+   `.github/scripts/podman-conformance.mjs` runs the same canary, and then the same sweep over two leftovers it
+   makes.
    With `PI_BACKENDS=podman` (no `local`), doctor runs no `docker` command at all, so a host without Docker reads
    no Docker failure: one line says `Docker: not checked -- PI_BACKENDS lists no docker venue (local), so no job
    here runs on Docker`, and the podman section's image line is the image check (✗ while the job image is not in
@@ -705,7 +709,10 @@ and `--network=private` with it off, so a `netns = "host"` default cannot put it
 a job on this venue is refused for, in the same order and by the same check: not Linux, no `podman`, a remote
 service, rootful Podman, a containers.conf that sets `pasta_options`, `network_cmd_options` or `annotations`
 (`podman-conf-widens-job`, or `podman-conf-unread` when a containers.conf could not be read just now: try again), and a
-`PI_BACKEND_FLOOR` the observations miss. Then the sandbox's own: it runs as the account that opens it (keep-id maps
+`PI_BACKEND_FLOOR` the observations miss. With egress armed on Podman 4.x it is also refused while the rootless
+network keeper (step 6) does not hold, by the same check a job gets (`netns-keeper-not-holding`, with the command to
+run): closing the shell removes its network, and that disconnect of the running proxy is what cuts the proxy's route
+out on 4.x without the keeper (issue #458). Then the sandbox's own: it runs as the account that opens it (keep-id maps
 that account, and the run's image is in that account's store), so open it as the account the worker runs as, never
 with `sudo`; a run opened under another container store is refused (`podman-store-mismatch`, below); and a run
 recorded as another uid is refused rather than reopened as one.

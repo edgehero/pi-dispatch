@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_EGRESS_PROXY } from "../src/egress.mjs";
-import { ALL_QUADLET_FILES, NETNS_KEEPER, NETNS_KEEPER_FORMAT, QUADLET_FILES, managerEnvRefusal, unquoteShowEnvironment, planStack, podmanNeedsNetnsKeeper, quadletDir, readStackKeys, stackComponents } from "../src/podman-stack.mjs";
+import { ALL_QUADLET_FILES, NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_NOW_FORMAT, makeNetnsDetachGuard, QUADLET_FILES, managerEnvRefusal, unquoteShowEnvironment, planStack, podmanNeedsNetnsKeeper, quadletDir, readStackKeys, stackComponents } from "../src/podman-stack.mjs";
 import { runService } from "../src/service.mjs";
 
 /**
@@ -463,6 +463,12 @@ test("service uninstall stops (never disables) and removes the Quadlet units wit
 	const alone = svc({ argv: ["uninstall"], files: { [join(QDIR, QUADLET_FILES.valkey.file)]: "q" } });
 	assert.equal(await alone.run(), 0);
 	assert.ok(!alone.store.has(join(QDIR, QUADLET_FILES.valkey.file)));
+	assert.match(alone.text(), /the pi-dispatch-valkey-data volume and the networks are kept/);
+	// No Valkey unit installed: no volume is claimed kept (issue #452 gate round 2).
+	const noValkey = svc({ argv: ["uninstall"], files: { [join(QDIR, QUADLET_FILES.proxy.file)]: "q", [join(QDIR, QUADLET_FILES.keeper.file)]: "q" } });
+	assert.equal(await noValkey.run(), 0);
+	assert.doesNotMatch(noValkey.text(), /valkey-data/);
+	assert.match(noValkey.text(), /; the networks are kept, remove them with podman if you mean to/);
 });
 
 test("service status lists each installed Quadlet unit with its state, and nothing where there are none", async () => {
@@ -946,4 +952,42 @@ test("nit: a restart for the rules copy alone names that file, and render names 
 	assert.equal(await render.run(), 0);
 	assert.match(render.text(), new RegExp(`# → ${CONF_COPY} \\(the egress proxy's rules: install copies the package's egress-proxy\\.conf here, unchanged\\)`));
 	assert.doesNotMatch(render.text(), /http_access/, "the squid configuration itself is not printed");
+});
+
+test("makeNetnsDetachGuard: a RUNNING detach waits for a keeper that holds NOW on rootless Podman 4.x, and nothing else is read (#452 with #458, gate round 2)", async () => {
+	const guard = (runtime, keeper, calls = []) =>
+		makeNetnsDetachGuard({
+			run: async (args) => (calls.push(args.join(" ")), keeper),
+			readRuntime: async () => (calls.push("runtime"), runtime),
+		});
+	const holding = { code: 0, stdout: `running|bridge|${NETNS_KEEPER},\n` };
+	const absent = { code: 125, stdout: "" };
+	const podman49 = { known: true, podman: true, rootless: true, version: "4.9.3" };
+	// Nothing running to detach: not one read (a stopped proxy is not in the namespace).
+	const idle = [];
+	assert.equal(await guard(podman49, absent, idle)({ running: false }), null);
+	assert.deepEqual(idle, []);
+	// Rootless 4.x: only a keeper holding now allows it, read with the no-clock format.
+	const seen = [];
+	assert.equal(await guard(podman49, holding, seen)({ running: true }), null);
+	assert.deepEqual(seen, ["runtime", `inspect ${NETNS_KEEPER_NOW_FORMAT} ${NETNS_KEEPER}`]);
+	assert.ok(!NETNS_KEEPER_NOW_FORMAT.includes("StartedAt"), "no age rule for a detach");
+	assert.equal(await guard(podman49, absent)({ running: true }), "keeper-not-holding");
+	assert.equal(await guard({ ...podman49, version: null })({ running: true }).catch(() => "x"), "keeper-not-holding", "an unreported version is 4.x");
+	for (const stdout of [`exited|bridge|${NETNS_KEEPER},`, `running|none|none,`, `running|bridge|other,`]) {
+		assert.equal(await guard(podman49, { code: 0, stdout })({ running: true }), "keeper-not-holding", stdout);
+	}
+	// Docker Engine, rootful Podman and 5.x: no keeper read.
+	for (const runtime of [{ known: true, podman: false, rootless: false, version: "27.4.0" }, { ...podman49, rootless: false }, { ...podman49, version: "5.8.1" }]) {
+		const calls = [];
+		assert.equal(await guard(runtime, absent, calls)({ running: true }), null, JSON.stringify(runtime));
+		assert.deepEqual(calls, ["runtime"]);
+	}
+	// A runtime that could not be read: allowed only by a keeper that holds, else its own token; a throw is the same.
+	assert.equal(await guard({ known: false }, holding)({ running: true }), null);
+	assert.equal(await guard({ known: false }, absent)({ running: true }), "runtime-unreadable");
+	const throwing = makeNetnsDetachGuard({ run: async () => { throw new Error("spawn failed"); }, readRuntime: async () => { throw new Error("spawn failed"); } });
+	assert.equal(await throwing({ running: true }), "runtime-unreadable");
+	// `running` defaults to true: a caller that does not say is judged as the dangerous case.
+	assert.equal(await guard(podman49, absent)(), "keeper-not-holding");
 });
