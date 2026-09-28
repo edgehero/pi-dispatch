@@ -410,9 +410,10 @@ export async function runJob(job, deps) {
 		}
 		if (observed?.podmanConfRefused?.retry) {
 			// Gate round 1 of PR #473: rootful Podman's service running since before its containers.conf changed (or a change
-			// time ahead of the clock) heals by itself, once the service restarts or idles out or the clock passes, so it is a
-			// retry, pre-reserve, never a final `policy` outcome that would drop the job for a condition gone a minute later.
-			throw new InfraRetry(`rootful Podman's service may still hold a containers.conf older than the files, so this job waits for it to restart (${observed.podmanConfRefused.evidence ?? "no file named"})`, { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			// time ahead of the clock) heals by itself, once the service restarts or idles out or the clock passes, so it is
+			// never a final `policy` outcome, pre-reserve. Gate round 2: a HOLD, not a retry (`PodmanRestartHold`), which the
+			// processor moves back to the delayed set without spending an attempt, for up to `PODMAN_RESTART_HOLD_MAX_MS`.
+			throw new PodmanRestartHold(`rootful Podman's service may still hold a containers.conf older than the files, so this job waits for it to restart (${observed.podmanConfRefused.evidence ?? "no file named"})`, { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 		}
 		if (observed?.podmanConfRefused) {
 			// Issue #450: `live` is the account's RUNNING rootless network, not a file, so it has its own two sentences: one
@@ -1204,6 +1205,19 @@ export class InfraRetry extends Error {
 		this.provider = provider ?? null;
 		this.model = model ?? null;
 		this.budgetReserved = budgetReserved ?? null;
+	}
+}
+
+/**
+ * A local job held until rootful Podman's service restarts (issue #448, gate round 2 of PR #473). An `InfraRetry`, so
+ * any path that does not know it still retries rather than failing the job for good; `makeProcessor` knows it, and
+ * moves the job to the delayed set without spending an attempt until the hold has lasted `PODMAN_RESTART_HOLD_MAX_MS`.
+ */
+export class PodmanRestartHold extends InfraRetry {
+	constructor(message, options) {
+		super(message, options);
+		this.name = "PodmanRestartHold";
+		this.holdUntilRestart = true;
 	}
 }
 

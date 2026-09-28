@@ -5,6 +5,7 @@ import { scrubCredentials } from "./redact.mjs";
 import { BACKEND_NOT_REGISTERED } from "./backend-registry.mjs";
 import { CANCEL_ACK_TTL_MS, cancelAckKey, cancelReqKey } from "./cancel-state.mjs";
 import { InfraRetry, runJob } from "./processor.mjs";
+import { PODMAN_RESTART_HOLD_EXPIRED, PODMAN_RESTART_HOLD_MAX_MS, PODMAN_RESTART_HOLD_RECHECK_MS } from "./runtime-observations.mjs";
 import { targetFor } from "./run-history.mjs";
 import { budgetCapsFor, canonicalScope, concurrencyFor, makeInFlight, scopeKeyPrefix } from "./scoped-limits.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
@@ -785,6 +786,24 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			recordRun({ job, result, startedAt, endedAt: new Date().toISOString() });
 			return result;
 		} catch (error) {
+			// Issue #448 (gate round 2 of PR #473): a local job held until rootful Podman's service restarts goes back to the
+			// delayed set WITHOUT spending an attempt, the pause gate's move, since a service held up past one retry backoff
+			// failed a job that heals by itself (measured). Bounded by the hold's own start, stored on the job because a
+			// deferral leaves `attemptsMade` alone and a worker restart must not reset it; past the bound it fails for good
+			// with its own reason token, whose comment names the restart. Nothing is recorded per deferral: the job never
+			// started, and one record a minute for an hour would bury the run history.
+			if (error?.holdUntilRestart === true) {
+				const heldAt = now();
+				const since = Number.isFinite(job.data?.podmanRestartHoldSinceMs) ? job.data.podmanRestartHoldSinceMs : heldAt;
+				if (heldAt - since < PODMAN_RESTART_HOLD_MAX_MS) {
+					if (job.data?.podmanRestartHoldSinceMs !== since) await job.updateData({ ...job.data, podmanRestartHoldSinceMs: since });
+					deps?.log?.("podman_restart_hold", { jobId: job.id, heldForMs: heldAt - since, delayMs: PODMAN_RESTART_HOLD_RECHECK_MS, reason: String(error.message).slice(0, 300) });
+					await job.moveToDelayed(heldAt + PODMAN_RESTART_HOLD_RECHECK_MS, token);
+					throw new DelayedError();
+				}
+				recordRun({ job, error, startedAt, endedAt: new Date().toISOString() });
+				throw Object.assign(new UnrecoverableError(`held ${Math.round((heldAt - since) / 60_000)} min for rootful Podman's service to restart, and it did not: ${error.message}`), { reason: PODMAN_RESTART_HOLD_EXPIRED });
+			}
 			recordRun({ job, error, startedAt, endedAt: new Date().toISOString() });
 			if (error instanceof InfraRetry) throw error; // retryable: BullMQ retries per attempts
 			// A non-retryable, non-infra error (our bug) must not retry forever. UnrecoverableError

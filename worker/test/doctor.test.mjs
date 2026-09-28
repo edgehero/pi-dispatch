@@ -8831,7 +8831,7 @@ test("doctor: a rootful Podman containers.conf key that reaches a local job is �
 	// Measured inert on this route: no line refuses them, and the clean line is said.
 	for (const key of ["pasta_options", "network_cmd_options", "network_cmd_path"]) {
 		const clean = await rootfulDoctor({}, { fs: rootfulHostFs({ "/etc/containers/containers.conf": `${key} = []\n` }) });
-		assert.match(clean, /✓ local: no containers\.conf rootful Podman's service reads here sets any of the 24 keys the local venue refuses \(docs\/podman\.md\), and podman\.service is not running with an older one/, key);
+		assert.match(clean, /✓ local: no containers\.conf rootful Podman's service reads here sets any of the 24 keys the local venue refuses \(docs\/podman\.md\), and none of them changed since podman\.service started \(a file deleted while it runs is not seen here: only a running worker remembers what it saw\)/, key);
 		assert.doesNotMatch(clean, /podman-conf-widens-job/, key);
 	}
 });
@@ -8840,7 +8840,7 @@ test("doctor: a running podman.service older than its containers.conf is ⚠, th
 	const running = async () => UNIT_OF({ running: true, startedAtMs: 5_000 });
 	const stale = await rootfulDoctor({}, { fs: rootfulHostFs({ "/etc/containers/containers.conf": "[containers]\n" }, { "/etc/containers/containers.conf": 6_000 }), readPodmanService: running });
 	// Gate round 1 of PR #473: it heals by itself, so the worker retries (boot exit 1): ⚠, never ✗.
-	assert.match(stale, /⚠ local: every local job waits, retried, until rootful Podman's service restarts: \/etc\/containers\/containers\.conf changed after the running podman\.service started[^\n]*\n {4}→ sudo systemctl restart podman\.service while no local job runs/);
+	assert.match(stale, /⚠ local: every local job is held, not refused, until rootful Podman's service restarts: \/etc\/containers\/containers\.conf changed after the running podman\.service started[^\n]*\n {4}→ sudo systemctl restart podman\.service while no local job runs/);
 	assert.doesNotMatch(stale, /✗ local: no job can run/);
 	const fresh = await rootfulDoctor({}, { fs: rootfulHostFs({ "/etc/containers/containers.conf": "[containers]\n" }, { "/etc/containers/containers.conf": 4_000 }), readPodmanService: running });
 	assert.match(fresh, /✓ local: no containers\.conf rootful Podman's service reads here/);
@@ -8851,7 +8851,7 @@ test("doctor: a running podman.service older than its containers.conf is ⚠, th
 test("doctor: what this shell cannot read of rootful Podman's chain is its own ⚠, naming each path, never a refusal (#448)", async () => {
 	const text = await rootfulDoctor({}, { fs: rootfulHostFs({ "/root/.config/containers/containers.conf": { error: "EACCES" }, "/root/.config/containers/containers.conf.d": { error: "EACCES" } }) });
 	assert.match(text, /⚠ local: part of rootful Podman's configuration is not judged here: \/root\/\.config\/containers\/containers\.conf \(EACCES\), \/root\/\.config\/containers\/containers\.conf\.d \(EACCES\)\n {4}→ rootful Podman's service may also read /);
-	assert.match(text, /✓ local: no containers\.conf rootful Podman's service reads here sets any of the 24 keys the local venue refuses \(docs\/podman\.md\), among those this account can read, and podman\.service is not running with an older one\n/, "the readable chain is still judged, and clean, and the line says only that");
+	assert.match(text, /✓ local: no containers\.conf rootful Podman's service reads here sets any of the 24 keys the local venue refuses \(docs\/podman\.md\), among those this account can read, and none of them changed since podman\.service started \(a file deleted while it runs is not seen here: only a running worker remembers what it saw\)\n/, "the readable chain is still judged, and clean, and the line says only that");
 	assert.doesNotMatch(text, /podman-conf-widens-job/);
 	const noSystemd = await rootfulDoctor({}, { fs: rootfulHostFs(), readPodmanService: async () => ({ read: false, reason: "systemctl-not-found" }) });
 	assert.match(noSystemd, /⚠ local: part of rootful Podman's configuration is not judged here: podman\.service \(systemctl-not-found\)/);

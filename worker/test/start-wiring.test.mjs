@@ -3244,6 +3244,17 @@ test("a TERMINAL netns-keeper-not-holding failure comments the keeper's fixed se
 	assert.deepEqual(posted, []);
 });
 
+test("a hold on podman.service's restart that ran out comments its own fixed sentence, never the error's words (#448)", { skip }, async () => {
+	const posted = [];
+	const host = fakeHost({ postStatusComment: async (_job, _target, text) => void posted.push(text) });
+	const { handlers } = await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => host });
+	const err = Object.assign(new Error("held 60 min for rootful Podman's service to restart, and it did not: /etc/containers/containers.conf.d/zz.conf was removed"), { reason: "podman-service-restart-hold-expired" });
+	handlers.failed({ id: "h1", data: { kind: "github", repo: "o/r", target: { type: "issue", number: 7 } }, attemptsMade: 0, finishedOn: 123 }, err);
+	await settleListeners();
+	assert.deepEqual(posted, ["Failed before it started: rootful Podman's service on this worker kept running with a containers.conf older than its files (or a file's change time stayed ahead of the host's clock) for an hour, so the job was held and never run. Nothing was spent. Ask the operator to restart it while no local job runs (`sudo systemctl restart podman.service`), then run the job again."]);
+	assert.ok(!posted[0].includes("/etc"), "no host path in a forge comment");
+});
+
 test("local's job teardown uses the runtime THAT job was admitted on, recorded per job, even after the endpoint's answer changes mid-job (#452 gate round 5)", { skip }, async () => {
 	const { runContainerCalls, captured } = await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
 	const opts = runContainerCalls[0];

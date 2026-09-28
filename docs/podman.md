@@ -176,7 +176,7 @@ and `pi-dispatch up` was not.
    crypto policy into every container. A change to `mounts.conf` needs no restart: the running service reads it for
    each container (measured). A change to a containers.conf does: the running service keeps the one it started with
    (measured with `volumes`), so until `sudo systemctl restart podman.service` the worker gives `mountSet` no credit
-   and holds local jobs back (a retry, not a refusal). More keys are refused outright on this route: see "What rootful
+   and holds local jobs back (a hold, not a refusal). More keys are refused outright on this route: see "What rootful
    Podman's containers.conf must not set" below.
 5. **Point the docker CLI at Podman with a context**, as the worker's account:
 
@@ -287,7 +287,8 @@ judged (measured, gate round 1 of PR #473). An `[engine] env` naming `CONTAINERS
 refused anyway. The `mountSet` observation (step 4) reads the same files for its own four keys.
 
 **podman.service is trusted only for its own socket.** The worker compares its docker endpoint with the socket
-`podman.socket` listens on (`systemctl show -p Listen podman.socket`). A second rootful API service on another socket,
+`podman.socket` listens on (`systemctl show -p Listen podman.socket`), both with their symlinks resolved, so
+`/var/run/podman/podman.sock` is `/run/podman/podman.sock`. A second rootful API service on another socket,
 with an environment of its own, was measured applying its own `CONTAINERS_CONF_OVERRIDE` to jobs, and its environment is
 another process's, readable by root alone: the worker still judges the files every rootful Podman on the host reads, and
 names that service in doctor's ⚠ line rather than judging it by `podman.service`'s environment.
@@ -311,20 +312,34 @@ the kernel sets it, and no `cp -p` or `touch -d` can set it back (both were meas
 A chain file's parent directory is NOT watched, since unrelated files live there (a `sed -i` of
 `/etc/containers/registries.conf` held every local job back until this was fixed); a chain file replaced by a rename
 already has a new change time. A chain file the worker saw while the same service start ran and that is gone now is a
-deletion the service may still hold, and counts too. The one change nothing shows is a chain file deleted before the
-worker first looked, while an older service still runs: restart the service after deleting one.
+deletion the service may still hold, and counts too, whether the worker last saw it refused, unreadable or clean. The
+one change nothing shows is a chain file deleted before the worker first looked, while an older service still runs:
+restart the service after deleting one. Doctor keeps no such memory, so its ✓ says only that no file changed, and names
+the deletion it cannot see.
+
+Change time moves for more than an edit, and each of these holds local jobs until the service restarts or idles out,
+though nothing Podman reads changed: a `chmod` or `chown` of a chain file; any file created in a drop-in directory, a
+`.conf` or not (an editor's swap file, a `.rpmnew`, a backup); and a package update that rewrites `podman.service` or
+one of its drop-ins. Restart the service after such a change, or let it idle out.
 
 While any of that holds, the worker does not run local jobs, and gives `mountSet` no credit, until the service
-restarts: **a retry, not a refusal**. A job waits and is retried by the queue, and a boot exits 1 to be restarted, since
-the service exits on its own within twelve seconds of its last request (measured) and the socket starts it fresh. A
-running local job holds it up, so a steady stream of jobs can keep it up past its change; restart it while no local job
-runs:
+restarts: **a hold, not a refusal**. A job goes back to the queue and is checked again every minute without spending
+an attempt; if the service is still running with an older configuration after an hour of holding, the job fails, and
+its comment names the restart. A boot exits 1 to be restarted. The service exits on its own within twelve seconds of
+its last request (measured) and the socket starts it fresh, but a running local job holds it up, so a steady stream of
+jobs can keep it up past its change; restart it while no local job runs:
 
 ```sh
 sudo systemctl restart podman.service
 ```
 
-A change time later than the host's clock is the clock's problem, said as such (fix the clock or wait), and a retry too.
+A change time later than the host's clock is the clock's problem, said as such (fix the clock or wait), and held the
+same way.
+
+A `--module` the service passes that names no file refuses local jobs: `systemctl` prints the service's arguments
+unquoted, so a module path holding a space cannot be read whole, and the worker refuses it rather than judge half a
+path. Give modules paths without spaces. A directory named `*.conf` in a drop-in directory is skipped, as Podman skips
+it.
 
 The worker's sentences, which a test rebuilds from the code:
 
@@ -405,8 +420,8 @@ Refused: /etc/containers/containers.conf sets cgroups, which with disabled runs 
 # a part of that chain the worker's account cannot read, outside root's own config home (at boot when local is the default venue, else per job)
 Refused: /etc/containers/containers.conf.d/zz.conf could not be read (EACCES); make that file readable by the worker's account (only root's own config home may stay unreadable, and is then named, not judged): the local venue must read every other containers.conf rootful Podman's service reads to know that none of them widens a job, and refuses what it cannot read (issue #448).
 
-# podman.service running since before a containers.conf it reads changed (a retry: boot exits 1, a job waits)
-Not run yet: /etc/containers/containers.conf changed after the running podman.service started, and a running Podman service keeps the containers.conf it started with, so a key removed since may still reach every local job; sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request, so the service reads the files as they are now; until it does, each local job is retried rather than refused, and it heals by itself once the service idles out (issue #448).
+# podman.service running since before a containers.conf it reads changed (a hold: boot exits 1, a job waits)
+Not run yet: /etc/containers/containers.conf changed after the running podman.service started, and a running Podman service keeps the containers.conf it started with, so a key removed since may still reach every local job; sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request, so the service reads the files as they are now; until it does, each local job is held, never refused: it goes back to the queue and is checked again every minute without spending an attempt, and fails, with a comment naming this, only after an hour of holding; a boot exits 1 to be restarted. It heals by itself once the service idles out (issue #448).
 ```
 <!-- /PODMAN-ROOTFUL-CONF-TEXTS -->
 

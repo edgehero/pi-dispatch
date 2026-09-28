@@ -4755,8 +4755,9 @@ export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCod
 		checks.push({ ok: false, warn: true, label: `local: whether rootful Podman's containers.conf widens a job could not be read just now: ${rootfulRefused.evidence}`, fix: rootfulConfFix(rootfulRefused) });
 	} else if (rootfulConfRetries(rootfulRefused)) {
 		// Gate round 1 of PR #473: a service older than its containers.conf (or a clock behind a change time) heals by
-		// itself, so the worker retries each job and a boot exits 1: ⚠, never the ✗ a configuration fix earns.
-		checks.push({ ok: false, warn: true, label: `local: every local job waits, retried, until rootful Podman's service restarts: ${rootfulRefused.evidence}`, fix: rootfulConfFix(rootfulRefused) });
+		// itself, so the worker holds each job (gate round 2: re-checked every minute, no attempt spent, for up to an hour)
+		// and a boot exits 1: ⚠, never the ✗ a configuration fix earns.
+		checks.push({ ok: false, warn: true, label: `local: every local job is held, not refused, until rootful Podman's service restarts: ${rootfulRefused.evidence}`, fix: rootfulConfFix(rootfulRefused) });
 	} else if (rootfulRefused) {
 		const boot = defaultIsLocal && decision.mode !== "unmappable";
 		checks.push({
@@ -4767,10 +4768,12 @@ export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCod
 		});
 	} else if (rootful) {
 		// Says only what was judged: "among those this account can read" beside an unread part, and nothing about the running
-		// service when systemctl did not answer for it (the ⚠ below names both).
+		// service when systemctl did not answer for it (the ⚠ below names both). Doctor keeps no deletion memory (a worker
+		// does, from the files it saw while the service ran), so the ✓ claims only changes a change time shows, and names
+		// the deletion it cannot see (gate round 2 of PR #473: it said "not running with an older one" while one leaked).
 		const serviceUnread = rootful.unread.some((u) => !u.path.startsWith("/"));
 		const filesUnread = rootful.unread.some((u) => u.path.startsWith("/"));
-		checks.push({ ok: true, label: `local: no containers.conf rootful Podman's service reads here sets any of the ${PODMAN_ROOTFUL_WIDENING_KEYS.length} keys the local venue refuses (docs/podman.md)${filesUnread ? ", among those this account can read" : ""}${serviceUnread ? "" : `, and ${PODMAN_SERVICE_UNIT} is not running with an older one`}` });
+		checks.push({ ok: true, label: `local: no containers.conf rootful Podman's service reads here sets any of the ${PODMAN_ROOTFUL_WIDENING_KEYS.length} keys the local venue refuses (docs/podman.md)${filesUnread ? ", among those this account can read" : ""}${serviceUnread ? "" : `, and none of them changed since ${PODMAN_SERVICE_UNIT} started (a file deleted while it runs is not seen here: only a running worker remembers what it saw)`}` });
 	}
 	if (rootful && rootful.unread.length > 0) {
 		checks.push({ ok: false, warn: true, label: `local: part of rootful Podman's configuration is not judged here: ${rootfulUnreadList(rootful.unread)}`, fix: rootfulConfResidual(rootful.unread) });

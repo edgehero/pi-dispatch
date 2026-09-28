@@ -200,7 +200,7 @@ test("the page quotes every rootful containers.conf refusal the local venue prin
 		const boot = localConfBootRefusal({ mode: "worker" }, "local", judged);
 		assert.equal(localConfBootRefusal({ mode: "worker" }, PODMAN_BACKEND, judged), null);
 		// Gate round 1 of PR #473: a service older than its conf is a retry (boot exit 1), which the heading says.
-		assert.ok(heading.endsWith(boot?.transient ? "(a retry: boot exits 1, a job waits)" : boot ? "(at boot when local is the default venue, else per job)" : "(per job)"), heading);
+		assert.ok(heading.endsWith(boot?.transient ? "(a hold: boot exits 1, a job waits)" : boot ? "(at boot when local is the default venue, else per job)" : "(per job)"), heading);
 	});
 	assert.deepEqual(keys, [...PODMAN_ROOTFUL_WIDENING_KEYS], "one line per refused key, in the list's order");
 	assert.deepEqual([unreadable, restarts], [1, 1], "the unreadable part's line and the running service's");

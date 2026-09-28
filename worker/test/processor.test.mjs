@@ -1890,6 +1890,8 @@ test("a podman conf that could not be read whole is refused without claiming it 
 	for (const extra of [{ restart: true }, { skew: true }]) {
 		const retried = await run({ reason: "podman-conf-widens-job", key: null, rootful: true, ...extra, retry: true, message: "Not run yet: ...", evidence: "/etc/containers/containers.conf changed after the running podman.service started, ..." });
 		assert.ok(retried.error instanceof InfraRetry, JSON.stringify(extra));
+		// Gate round 2 of PR #473: marked a HOLD, which makeProcessor defers without spending an attempt (hold.test.mjs).
+		assert.deepEqual([retried.error.holdUntilRestart, retried.error.name], [true, "PodmanRestartHold"], JSON.stringify(extra));
 		assert.match(retried.error.message, /^rootful Podman's service may still hold a containers\.conf older than the files, so this job waits for it to restart \(\/etc\/containers\/containers\.conf changed after/);
 		assert.deepEqual([retried.texts.length, retried.incr], [0, 0]);
 	}
@@ -1898,6 +1900,7 @@ test("a podman conf that could not be read whole is refused without claiming it 
 	for (const r of [rootfulKey, rootfulSpelling]) assert.doesNotMatch(r.texts[0], /podman jobs|\/etc|\/root/, "the local venue's words, and no path in a forge comment");
 	const rootfulBusy = await run({ reason: "podman-conf-widens-job", key: null, rootful: true, transient: true, message: "Not read yet: ...", evidence: "/root/.config/containers/containers.conf could not be read (EIO)" });
 	assert.ok(rootfulBusy.error instanceof InfraRetry);
+	assert.equal(rootfulBusy.error.holdUntilRestart, undefined, "a moment's failed read is the queue's ordinary retry, not a hold");
 	assert.equal(rootfulBusy.error.message, "rootful Podman's containers.conf or podman.service could not be read just now, so whether it widens a job is not known (/root/.config/containers/containers.conf could not be read (EIO))");
 	assert.deepEqual([rootfulBusy.texts.length, rootfulBusy.incr], [0, 0]);
 });

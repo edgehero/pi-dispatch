@@ -13,6 +13,7 @@
  * carries, so they can be logged and put in a refusal.
  */
 
+import { realpathSync } from "node:fs";
 import { execDockerBounded } from "./backend-local.mjs";
 import { DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, PODMAN_CONF_WIDENS_JOB, PODMAN_ROOTFUL_WIDENING_KEYS, RUNTIME_ADDS_NO_MOUNTS } from "./backends.mjs";
 
@@ -130,6 +131,19 @@ export function fipsFinding(fs) {
 }
 
 /**
+ * Whether `path` is a directory (following a symlink, as Podman's own walk does), so a directory named `x.conf` in a
+ * drop-in directory is skipped the way Podman skips it (gate round 2 of PR #473: it was refused with EISDIR). A stat that
+ * fails, or a fake without `isDirectory`, reads as a file, whose own read then says what it is.
+ */
+export function isDirectoryAt(fs, path) {
+	try {
+		return fs.statSync(path)?.isDirectory?.() === true;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * The containers.conf files Podman would read from `files` and every `*.conf` in `dirs` (sorted per directory, missing
  * directories skipped), as `{ files }`, or `{ finding }` when a directory exists and cannot be listed: a drop-in nobody
  * could see must withhold credit, not read as none.
@@ -144,7 +158,7 @@ export function confFilesIn(fs, { files = [], dirs = [] }) {
 			if (error?.code === "ENOENT") continue;
 			return { finding: unreadFileFinding(dir, error?.code ?? "error") };
 		}
-		for (const entry of [...entries].sort()) if (String(entry).endsWith(".conf")) out.push(`${dir}/${entry}`);
+		for (const entry of [...entries].sort()) if (String(entry).endsWith(".conf") && !isDirectoryAt(fs, `${dir}/${entry}`)) out.push(`${dir}/${entry}`);
 	}
 	return { files: out };
 }
@@ -308,6 +322,13 @@ export function observeRuntimeMounts(daemon, { fs, sameHost, unit, env = {}, now
 	// Rootless Podman reads the user's own ~/.config/containers/mounts.conf before these, which a host check does not read.
 	if (daemon.facts.rootless === true) return { value: false, evidence: "the daemon is rootless Podman, which reads the user's own mounts.conf first" };
 	if (sameHost !== true) return { value: false, evidence: "the daemon is Podman on another machine, whose mounts.conf this host cannot read" };
+	// Issue #448: the SAME chain the rootful widening check reads (`rootfulConfChain`: the system files and drop-ins, root's
+	// own conf, `--module` files, the unit's and the manager's CONTAINERS_CONF and CONTAINERS_CONF_OVERRIDE), read FIRST
+	// and remembered before any answer returns (gate round 2 of PR #473: with no mounts.conf, stock Ubuntu, the memory
+	// was never written, so a file deleted under the running service went unseen). `unit` is `systemctl show
+	// podman.service` as the caller read it; a caller that read none (`undefined`) judges the files alone.
+	const chain = rootfulConfChain({ fs, unit: unit ?? { read: false, reason: "not-asked" }, env, facts: daemon.facts });
+	if (unit !== undefined) rememberChain({ fs, unit, chain, memory });
 	const fips = fipsFinding(fs);
 	if (fips) return fips;
 	let size;
@@ -318,14 +339,12 @@ export function observeRuntimeMounts(daemon, { fs, sameHost, unit, env = {}, now
 		return { value: false, evidence: `${PODMAN_MOUNTS_CONF} does not exist, so Podman mounts the default list (/run/secrets on Fedora and RHEL)` };
 	}
 	if (size !== 0) return { value: false, evidence: `${PODMAN_MOUNTS_CONF} is not empty, so Podman mounts what it lists` };
-	// Issue #448: the SAME chain the rootful widening check reads (`rootfulConfChain`: the system files and drop-ins, root's
-	// own conf, `--module` files, the unit's and the manager's CONTAINERS_CONF and CONTAINERS_CONF_OVERRIDE), under its rule:
-	// a part under root's own config home this account cannot read is named in the evidence; any other part that cannot be
-	// read withholds the credit, as it always did (gate round 1: a `0600` drop-in setting `volumes` earned the credit). `unit`
-	// is `systemctl show podman.service` as the caller read it; a caller that read none (`undefined`) judges the files alone.
-	const chain = rootfulConfChain({ fs, unit: unit ?? { read: false, reason: "not-asked" }, env, facts: daemon.facts });
+	// The chain under its rule: a part under root's own config home this account cannot read is named in the evidence; any
+	// other part that cannot be read, or a module that names no file, withholds the credit (gate round 1: a `0600` drop-in
+	// setting `volumes` earned the credit).
 	if (chain.transient) return unreadFileFinding(chain.transient.path, chain.transient.code);
 	if (chain.unreadable) return unreadFileFinding(chain.unreadable.path, chain.unreadable.code);
+	if (chain.unjudgeable) return { value: false, evidence: moduleEvidence(chain.unjudgeable.module) };
 	const unread = [...chain.unread];
 	const conf = confWidening(fs, chain.files, { pattern: MOUNT_KEY, says: MOUNT_KEY_SAYS, unread, nameable: chain.nameable });
 	if (conf) return conf.value === null ? { value: null, evidence: conf.evidence, reason: "file-unread" } : { value: false, evidence: conf.evidence };
@@ -670,9 +689,10 @@ export function expandEnvironmentFilePattern(fs, pattern) {
 }
 
 /**
- * EVERY containers.conf rootful Podman's API service may read (issue #448), as `{ files, existing, watched, unread,
- * nameable }`, or `{ transient: { path, code } }` when a read failed for a moment, or `{ unreadable: { path, code } }`
- * when a part outside root's own config home exists and cannot be read. The chain is containers/common v0.67.0's
+ * EVERY containers.conf rootful Podman's API service may read (issue #448), as `{ files, watched, unread, nameable,
+ * envFiles }`, plus at most one stop: `transient: { path, code }` when a read failed for a moment,
+ * `unreadable: { path, code }` when a part outside root's own config home exists and cannot be read, or
+ * `unjudgeable: { module }`. The chain is containers/common v0.67.0's
  * (`systemConfigs`, measured on rootful Podman 5.8.1 and 4.9.3 by a drop-in in each candidate place):
  *   - `PODMAN_CONTAINERS_CONF_FILES` and every `*.conf` in `/etc/containers/containers.conf.d` (NOT
  *     `/usr/share/containers/containers.conf.d` nor either `containers.rootful.conf.d`: no Podman measured read them);
@@ -690,7 +710,11 @@ export function expandEnvironmentFilePattern(fs, pattern) {
  * is named and not judged, since root's home is `0550` or `0700` on every stock host and a worker that is not root reads
  * none of it; any other part of the chain that exists and cannot be read is `unreadable`, which refuses (and withholds
  * `mountSet`), as the native venue's chain always has.
- * `existing` is every chain file that exists now (for the deletion rule), and `watched` what the running service may have
+ * A drop-in directory's `*.conf` that is itself a directory is skipped, as Podman skips it; a `--module` that names no
+ * file is `unjudgeable` (`{ module }`) and refuses, since systemctl's unquoted argv cannot say where a path with a
+ * space ends. The first such stop is returned BESIDE `files` and `watched`, never instead of them, so the deletion memory
+ * still records every existing file before the refusal (gate round 2 of PR #473).
+ * `files` is every chain file judged, and `watched` what the running service may have
  * read: every existing chain file, every drop-in directory that exists (a drop-in added, removed or renamed changes it),
  * every module and environment file, and the unit's own files. NOT a chain file's parent directory: unrelated files
  * live there (`sed -i registries.conf` changed `/etc/containers` and refused jobs, gate round 1), and a chain file's own
@@ -715,21 +739,25 @@ export function rootfulConfChain({ fs, unit, env = {}, facts = {} }) {
 	const configHomesOf = () => [...new Set([...values.XDG_CONFIG_HOME.filter((x) => x.startsWith("/")), ...[...homesOf()].map((h) => `${h}/.config`)])];
 	let homesNow = configHomesOf();
 	const nameable = (path) => homesNow.some((c) => path === c || path.startsWith(`${c}/`));
+	// The FIRST part that stops the judgement (`transient`, `unreadable`, `unjudgeable`) is kept and the walk goes on, so
+	// the caller still learns every chain file that exists: the deletion memory records them before any refusal returns
+	// (gate round 2 of PR #473: a file only ever refused for a key was never remembered, so deleting it under the running
+	// service let the next job through while the service still applied the key, measured on Ubuntu).
+	let stop = null;
 	const cannotRead = (path, code) => {
-		if (TRANSIENT_READ_ERRORS.has(code)) return { transient: { path, code } };
-		if (nameable(path)) {
-			unread.push({ path, code });
-			return null;
-		}
-		return { unreadable: { path, code } };
+		if (TRANSIENT_READ_ERRORS.has(code)) stop ??= { transient: { path, code } };
+		else if (nameable(path)) unread.push({ path, code });
+		else stop ??= { unreadable: { path, code } };
 	};
 	const envFiles = [];
 	for (const pattern of unitRead ? (unit.environmentFiles ?? []) : []) {
 		const expanded = expandEnvironmentFilePattern(fs, pattern);
-		if (expanded.transient) return { transient: expanded.transient };
+		if (expanded.transient) {
+			stop ??= { transient: expanded.transient };
+			continue;
+		}
 		if (expanded.unreadable) {
-			const stop = cannotRead(expanded.unreadable.path, expanded.unreadable.code);
-			if (stop) return stop;
+			cannotRead(expanded.unreadable.path, expanded.unreadable.code);
 			continue;
 		}
 		envFiles.push(...expanded.paths);
@@ -738,8 +766,7 @@ export function rootfulConfChain({ fs, unit, env = {}, facts = {} }) {
 		const got = readHostFile(fs, file);
 		if (got.missing) continue;
 		if (got.text === undefined) {
-			const stop = cannotRead(file, got.error);
-			if (stop) return stop;
+			cannotRead(file, got.error);
 			continue;
 		}
 		const { vars, modules: m } = envFileAssignments(got.text);
@@ -751,6 +778,23 @@ export function rootfulConfChain({ fs, unit, env = {}, facts = {} }) {
 	homesNow = configHomes;
 	const named = [...values.CONTAINERS_CONF, ...values.CONTAINERS_CONF_OVERRIDE].filter((v) => v !== "").map(absolute);
 	const moduleFiles = modules.flatMap((m) => (m.startsWith("/") ? [m] : PODMAN_MODULE_DIRS.map((d) => `${d}/${m}`)));
+	// A `--module` that names no file is UNJUDGEABLE, and refuses (gate round 2 of PR #473): systemctl prints an argv
+	// unquoted (`--module /etc/a b.conf` is two words or one, it cannot say), and a variable's words split the way
+	// `$LOGGING` splits them, not the way `${LOGGING}` would, so a module path holding a space is read cut short. A path
+	// that exists is what Podman read; one that does not is either such a cut or a module Podman itself fails to load,
+	// and neither is guessed at. A stat that fails for another reason is left to the read below.
+	for (const m of modules) {
+		const candidates = m.startsWith("/") ? [m] : PODMAN_MODULE_DIRS.map((d) => `${d}/${m}`);
+		const missing = candidates.every((c) => {
+			try {
+				fs.statSync(c);
+				return false;
+			} catch (error) {
+				return error?.code === "ENOENT";
+			}
+		});
+		if (missing) stop ??= { unjudgeable: { module: m } };
+	}
 	const files = [...new Set([...PODMAN_CONTAINERS_CONF_FILES, ...configHomes.map((c) => `${c}/containers/containers.conf`), ...moduleFiles, ...named])];
 	const dirs = [...PODMAN_CONTAINERS_CONF_DIRS, ...configHomes.map((c) => `${c}/containers/containers.conf.d`)];
 	const dropIns = [];
@@ -762,16 +806,15 @@ export function rootfulConfChain({ fs, unit, env = {}, facts = {} }) {
 		} catch (error) {
 			const code = error?.code ?? "error";
 			if (code === "ENOENT") continue;
-			const stop = cannotRead(dir, code);
-			if (stop) return stop;
+			cannotRead(dir, code);
 			continue;
 		}
 		existingDirs.push(dir);
-		for (const entry of [...entries].sort()) if (String(entry).endsWith(".conf")) dropIns.push(`${dir}/${entry}`);
+		for (const entry of [...entries].sort()) if (String(entry).endsWith(".conf") && !isDirectoryAt(fs, `${dir}/${entry}`)) dropIns.push(`${dir}/${entry}`);
 	}
 	const judged = [...files, ...dropIns];
 	const watched = [...new Set([...judged, ...existingDirs, ...(unitRead ? (unit.unitPaths ?? []) : []), ...envFiles])];
-	return { files: judged, watched, unread, nameable, envFiles };
+	return { files: judged, watched, unread, nameable, envFiles, ...(stop ?? {}) };
 }
 
 /**
@@ -844,6 +887,33 @@ export function makeRootfulMemory() {
 	return { startedAtMs: null, files: new Set(), deleted: null };
 }
 
+/** Whether `path` exists (a stat that fails other than ENOENT counts as existing: it is there, only not stat-able). */
+function existsAt(fs, path) {
+	try {
+		fs.statSync(path);
+		return true;
+	} catch (error) {
+		return error?.code !== "ENOENT";
+	}
+}
+
+/**
+ * Records in `memory` every path the running service may have read that exists now (`chain.watched`: the chain files,
+ * the drop-in directories, the environment and unit files, and the part that stopped the walk), while podman.service
+ * runs from one parseable start, and starts afresh when that start changes (a stopped service is reset by
+ * `serviceChangedSince`, and a new start always has a new time). Called FIRST by both callers, before any refusal returns
+ * (gate round 2 of PR #473): a file refused for a key, unreadable, or seen only by an observation that returned early
+ * (stock Ubuntu has no mounts.conf) is still remembered, so deleting it under the running service holds the next job.
+ * An environment file is remembered too: deleted, the service still has what it set, while the chain no longer names
+ * the file it pointed at.
+ */
+export function rememberChain({ fs, unit, chain, memory }) {
+	if (!memory || !unit?.read || !unit.loaded || !unit.running || typeof unit.startedAtMs !== "number") return;
+	if (memory.startedAtMs !== unit.startedAtMs) Object.assign(memory, { startedAtMs: unit.startedAtMs, files: new Set(), deleted: null });
+	const stopped = chain.unreadable?.path ?? chain.transient?.path;
+	for (const f of [...(chain.watched ?? []), ...(stopped ? [stopped] : [])]) if (existsAt(fs, f)) memory.files.add(f);
+}
+
 /**
  * THE RUNNING SERVICE (ledger L20), one rule for the widening check and the mounts observation, as `{ path }` (a watched
  * path changed after the service started), `{ deleted }` (a chain file this worker saw during this service start is
@@ -894,13 +964,18 @@ function serviceChangedSince({ fs, unit, chain, unread, now, memory }) {
 		else if (ctimeMs > unit.startedAtMs) found = { path };
 	}
 	if (memory) {
-		if (memory.startedAtMs !== unit.startedAtMs) Object.assign(memory, { startedAtMs: unit.startedAtMs, files: new Set(), deleted: null });
-		const files = chain.files.filter((f) => existing.has(f));
-		if (!memory.deleted) memory.deleted = [...memory.files].find((f) => !existing.has(f)) ?? null;
-		for (const f of files) memory.files.add(f);
+		rememberChain({ fs, unit, chain, memory });
+		// Deleted means gone from disk, not merely off the chain: a file the chain stopped naming because its environment
+		// file went is caught by that file's own deletion (remembered above), and one still on disk is not a deletion.
+		if (!memory.deleted) memory.deleted = [...memory.files].find((f) => !existing.has(f) && !existsAt(fs, f)) ?? null;
 		if (!found.path && !found.skew && memory.deleted) return { deleted: memory.deleted };
 	}
 	return found;
+}
+
+/** The evidence for a `--module` that names no file (`rootfulConfChain`'s `unjudgeable`). */
+function moduleEvidence(module) {
+	return `${PODMAN_SERVICE_UNIT} passes --module ${module}, which names no file here, so what it loads cannot be judged (systemctl prints the service's arguments unquoted, so a module path holding a space is read cut short)`;
 }
 
 /** The evidence of a `serviceChangedSince` answer that holds jobs back until the service restarts, or `null`. */
@@ -930,9 +1005,11 @@ function staleEvidence(stale, what) {
  */
 export function rootfulConfWidening({ fs, unit, env = {}, facts = {}, now = Date.now(), memory }) {
 	const chain = rootfulConfChain({ fs, unit, env, facts });
+	rememberChain({ fs, unit, chain, memory });
 	const retry = (evidence, extra) => ({ refusal: { cause: PODMAN_CONF_WIDENS_JOB, key: null, rootful: true, ...extra, evidence }, unread: [] });
 	if (chain.transient) return retry(`${chain.transient.path} could not be read (${chain.transient.code})`, { transient: true });
 	if (chain.unreadable) return { refusal: { cause: PODMAN_CONF_WIDENS_JOB, key: null, rootful: true, evidence: `${chain.unreadable.path} could not be read (${chain.unreadable.code})` }, unread: [] };
+	if (chain.unjudgeable) return { refusal: { cause: PODMAN_CONF_WIDENS_JOB, key: null, rootful: true, module: chain.unjudgeable.module, evidence: moduleEvidence(chain.unjudgeable.module) }, unread: [] };
 	const unread = [...chain.unread];
 	if (unit?.read && unit.manager && unit.manager.read !== true) unread.push({ path: "the systemd manager environment", code: unit.manager.reason ?? "not-read" });
 	const done = (refusal) => ({ refusal, unread: dedupeUnread(unread) });
@@ -963,6 +1040,15 @@ export async function observeRootfulConf({ endpoint, daemon, fs, readService, en
 	return rootfulConfWidening({ fs, unit: unit ?? (await readRootfulService({ endpoint, daemon, readService })), env, facts: daemon.facts, ...(now !== undefined ? { now } : {}), memory });
 }
 
+/** `path` with every symlink resolved (`fs.realpathSync`), or `path` itself when it cannot be (it does not exist here). */
+export function realpathOrSelf(path) {
+	try {
+		return realpathSync(path);
+	} catch {
+		return path;
+	}
+}
+
 /**
  * `systemctl show podman.service` where `rootfulPodmanHere` holds, else `undefined` (nothing spawned): read ONCE per boot
  * or job and handed to both `observeHost` (the mounts observation) and `observeRootfulConf`, so the two judge one answer.
@@ -974,7 +1060,7 @@ export async function observeRootfulConf({ endpoint, daemon, fs, readService, en
  * files it shares with every rootful Podman on the host are still judged, and doctor says which socket was not trusted.
  * A reader that throws is `{ read: false, reason: "spawn-failed" }`.
  */
-export async function readRootfulService({ endpoint, daemon, readService }) {
+export async function readRootfulService({ endpoint, daemon, readService, realpath = realpathOrSelf }) {
 	if (!rootfulPodmanHere({ endpoint, daemon })) return undefined;
 	let unit;
 	try {
@@ -984,8 +1070,11 @@ export async function readRootfulService({ endpoint, daemon, readService }) {
 	}
 	if (!unit?.read) return unit;
 	const socket = endpointSocketPath({ endpoint, facts: daemon.facts });
+	// Both sides RESOLVED before they are compared (gate round 2 of PR #473): `/var/run/podman/podman.sock` is
+	// `/run/podman/podman.sock` through the `/var/run` symlink, and the string compare named podman.service untrusted.
+	const resolved = new Set((Array.isArray(unit.listen) ? unit.listen : []).map((p) => realpath(p)));
 	if (!Array.isArray(unit.listen)) return { read: false, reason: `${PODMAN_SOCKET_UNIT} not read (${unit.listen?.reason ?? "not-read"}), so the service behind ${socket ?? "this socket"} is not known to be ${PODMAN_SERVICE_UNIT}` };
-	if (socket === null || !unit.listen.includes(socket)) return { read: false, reason: `the worker's socket ${socket ?? "(none)"} is not the one ${PODMAN_SOCKET_UNIT} listens on (${unit.listen.join(", ") || "none"}), so the service behind it is not ${PODMAN_SERVICE_UNIT}` };
+	if (socket === null || !resolved.has(realpath(socket))) return { read: false, reason: `the worker's socket ${socket ?? "(none)"} is not the one ${PODMAN_SOCKET_UNIT} listens on (${unit.listen.join(", ") || "none"}), so the service behind it is not ${PODMAN_SERVICE_UNIT}` };
 	return unit;
 }
 
@@ -999,6 +1088,17 @@ export function rootfulConfResidual(unread) {
 	return `rootful Podman's service may also read ${rootfulUnreadList(unread)}, which this account cannot read, so a key set there is not judged: run the worker as an account that can read them, or check them yourself as root for any key the local venue refuses (docs/podman.md) or a volumes, mounts, devices or hooks_dir key`;
 }
 
+/**
+ * THE HOLD (gate round 2 of PR #473): a local job held by `restart` or `skew` is moved back to the queue's delayed set
+ * every `PODMAN_RESTART_HOLD_RECHECK_MS` WITHOUT spending an attempt (`moveToDelayed`, as the pause and wait gates do),
+ * because a service held up past one 60 s retry backoff turned a "retried, heals by itself" job into a terminal failure
+ * (measured). Bounded: past `PODMAN_RESTART_HOLD_MAX_MS` of holding, the job fails with its own reason token,
+ * `PODMAN_RESTART_HOLD_EXPIRED`, whose forge comment names the restart.
+ */
+export const PODMAN_RESTART_HOLD_RECHECK_MS = 60_000;
+export const PODMAN_RESTART_HOLD_MAX_MS = 3_600_000;
+export const PODMAN_RESTART_HOLD_EXPIRED = "podman-service-restart-hold-expired";
+
 /** Whether a rootful finding holds jobs back only until something heals by itself (a retry), not a configuration fix. */
 export function rootfulConfRetries(found) {
 	return found?.transient === true || found?.restart === true || found?.skew === true;
@@ -1007,9 +1107,11 @@ export function rootfulConfRetries(found) {
 /** The remedy half of `rootfulConfRefusal`, alone, for doctor's fix line. */
 export function rootfulConfFix(found) {
 	const restart = `sudo systemctl restart ${PODMAN_SERVICE_UNIT} while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request`;
+	const held = `each local job is held, never refused: it goes back to the queue and is checked again every minute without spending an attempt, and fails, with a comment naming this, only after an hour of holding; a boot exits 1 to be restarted`;
 	if (found?.transient) return "the read failed for a moment, not for a reason in the file; a job refused this way is retried once (the queue's second attempt) and a boot exits to be restarted, so if it recurs, fix what the host ran out of (file descriptors, memory, a failing disk)";
-	if (found?.skew) return `fix this host's clock, or wait until it passes that file's change time; until then each local job is retried, never refused, and a boot exits 1 to be restarted. Then ${restart} if it runs`;
-	if (found?.restart) return `${restart}, so the service reads the files as they are now; until it does, each local job is retried rather than refused, and it heals by itself once the service idles out`;
+	if (found?.skew) return `fix this host's clock, or wait until it passes that file's change time; until then ${held}. Then ${restart} if it runs`;
+	if (found?.restart) return `${restart}, so the service reads the files as they are now; until it does, ${held}. It heals by itself once the service idles out`;
+	if (found?.module) return `give that module a path with no space, or remove that --module from ${PODMAN_SERVICE_UNIT} (its ExecStart or the variable that carries it), then ${restart}: the local venue judges every module the service loads, and refuses one it cannot find rather than guess where its path ends`;
 	if (found?.key) {
 		const listed = PODMAN_ROOTFUL_WIDENING_KEYS.join(", ").replace(/, ([^,]*)$/, " or $1");
 		return `remove that key from that file, then ${restart}. The local venue refuses any containers.conf rootful Podman's service reads that sets ${listed}, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide`;

@@ -329,6 +329,7 @@ import {
 	parseSocketListen,
 	parseUnitTimestamp,
 	readRootfulService,
+	realpathOrSelf,
 	rootfulConfChain,
 	rootfulConfFix,
 	rootfulConfRefusal,
@@ -370,8 +371,9 @@ function rootfulFs(files = {}, dirs = {}, ctimes = {}) {
 			reads.push(p);
 			if (typeof ctimes[p] === "string") fail(ctimes[p], p);
 			if (ctimes[p] === undefined) {
-				if (files[p] !== undefined) return { size: 0, ctimeMs: 0, mtimeMs: 0 };
-				if (Array.isArray(dirs[p])) return { size: 0, ctimeMs: 0, mtimeMs: 0 };
+				if (files[p] !== undefined) return { size: 0, ctimeMs: 0, mtimeMs: 0, isDirectory: () => false };
+				// A directory that cannot be LISTED still stats, as on a real host (stat needs only its parent's search bit).
+				if (Array.isArray(dirs[p]) || typeof dirs[p] === "string") return { size: 0, ctimeMs: 0, mtimeMs: 0, isDirectory: () => true };
 				fail("ENOENT", p);
 			}
 			// An mtime set back far (cp -p, touch -d) never counts: only the change time does.
@@ -631,7 +633,7 @@ test("the running service is judged by change time: a copy or touch that sets th
 		const r = rootfulConfWidening({ fs: newer, unit, now: NOW });
 		assert.deepEqual([r.refusal?.restart, r.refusal?.key, rootfulConfRetries(r.refusal)], [true, null, true], label);
 		assert.ok(r.refusal.evidence.startsWith(`${path} changed after the running podman.service started`), r.refusal.evidence);
-		assert.match(rootfulConfRefusal(r.refusal), /^Not run yet: .*; sudo systemctl restart podman\.service while no local job runs.*retried rather than refused/);
+		assert.match(rootfulConfRefusal(r.refusal), /^Not run yet: .*; sudo systemctl restart podman\.service while no local job runs.*each local job is held, never refused: it goes back to the queue and is checked again every minute without spending an attempt, and fails, with a comment naming this, only after an hour of holding/);
 		assert.equal(rootfulConfWidening({ fs: newer, unit: { ...unit, running: false }, now: NOW }).refusal, null, `${label}, idle`);
 		for (const at of [start, start - 1]) assert.equal(rootfulConfWidening({ fs: rootfulFs(extra.files ?? {}, extra.dirs ?? {}, { [path]: at }), unit, now: NOW }).refusal, null, `${label} at ${at}`);
 	}
@@ -668,6 +670,64 @@ test("a chain file this worker saw during one service start and that is gone now
 	assert.equal(rootfulConfWidening({ fs: gone, unit: UNIT(), now: NOW, memory }).refusal, null, "an idle service holds nothing");
 	// With no memory (doctor, one shot) a deletion cannot be seen: the documented residual.
 	assert.equal(rootfulConfWidening({ fs: gone, unit, now: NOW }).refusal, null);
+});
+
+test("a file seen only while refused, unreadable, or by a mounts observation that returned early is still remembered, so its deletion holds the next job (#448)", () => {
+	// Gate round 2 of PR #473 (raw 70, Ubuntu): job 1 refused for `env`, the file removed, job 2 ran while the service,
+	// still up, applied `env`. Every early return now follows the memory's write.
+	for (const [label, before, unitOver = {}, after = {}, beforeDirs = null] of [
+		["refused for a key", { "/etc/containers/containers.conf": ROOTFUL_MEASURED.env }],
+		["refused for a key in a drop-in", { "/etc/containers/containers.conf": "[containers]\n", "/etc/containers/containers.conf.d/zz.conf": ROOTFUL_MEASURED.label }],
+		["unreadable", { "/etc/containers/containers.conf.d/zz.conf": { error: "EACCES" } }],
+		["an unreadable environment file", { "/etc/sysconfig/podman.env": { error: "EACCES" } }, { environmentFiles: ["/etc/sysconfig/podman.env"] }],
+		["an unlistable drop-in directory", {}, {}, {}, { "/etc/containers/containers.conf.d": "EACCES" }],
+		["a readable environment file naming an override that stays", { "/etc/sysconfig/podman.env": "CONTAINERS_CONF_OVERRIDE=/var/tmp/o.conf\n", "/var/tmp/o.conf": ROOTFUL_MEASURED.env }, { environmentFiles: ["/etc/sysconfig/podman.env"] }, { "/var/tmp/o.conf": "[containers]\n" }],
+	]) {
+		const memory = makeRootfulMemory();
+		const dirs = beforeDirs ?? (Object.keys(before).some((p) => p.startsWith("/etc/containers/containers.conf.d/")) ? { "/etc/containers/containers.conf.d": ["zz.conf"] } : {});
+		const unit = RUNNING(unitOver);
+		const first = rootfulConfWidening({ fs: rootfulFs(before, dirs), unit, now: NOW, memory });
+		assert.ok(first.refusal && !first.refusal.restart, `${label}: refused first, not for the service`);
+		const next = rootfulConfWidening({ fs: rootfulFs(after), unit, now: NOW, memory });
+		assert.equal(next.refusal?.restart, true, `${label}: the next job is still held after the rm`);
+		assert.match(next.refusal.evidence, /was removed after the running podman\.service started/, label);
+	}
+	// The mounts observation with no mounts.conf (stock Ubuntu) returned before it remembered anything.
+	const unit = RUNNING();
+	const memory = makeRootfulMemory();
+	const daemon = { answered: true, facts: { podman: true, rootless: false } };
+	const volumes = rootfulFs({ "/etc/containers/containers.conf": '[containers]\nvolumes = ["/srv:/srv"]\n' });
+	assert.equal(observeRuntimeMounts(daemon, { fs: volumes, sameHost: true, unit, now: NOW, memory }).value, false);
+	assert.equal(observeRuntimeMounts(daemon, { fs: rootfulFs({ "/etc/containers/mounts.conf": "" }), sameHost: true, unit, now: NOW, memory }).value, false, "the deletion withholds mountSet");
+	assert.equal(rootfulConfWidening({ fs: rootfulFs({}), unit, now: NOW, memory }).refusal?.restart, true, "and holds the job");
+	// Nothing is remembered from a stopped service, and a file seen then deleted while no service ran holds nothing.
+	const idle = makeRootfulMemory();
+	rootfulConfWidening({ fs: rootfulFs({ "/etc/containers/containers.conf": ROOTFUL_MEASURED.env }), unit: UNIT(), now: NOW, memory: idle });
+	assert.equal(rootfulConfWidening({ fs: rootfulFs({}), unit, now: NOW, memory: idle }).refusal, null);
+	// A remembered file no longer in the chain but still on disk is not a deletion.
+	const kept = makeRootfulMemory();
+	rootfulConfWidening({ fs: rootfulFs({ "/var/tmp/o.conf": "[containers]\n" }), unit: RUNNING({ environment: { CONTAINERS_CONF_OVERRIDE: ["/var/tmp/o.conf"] } }), now: NOW, memory: kept });
+	assert.equal(rootfulConfWidening({ fs: rootfulFs({ "/var/tmp/o.conf": "[containers]\n" }), unit, now: NOW, memory: kept }).refusal, null);
+});
+
+test("a --module that names no file is unjudgeable and refused; a directory named *.conf in a drop-in directory is skipped, as Podman skips it (#448)", () => {
+	// Gate round 2 of PR #473: systemctl prints ExecStart's argv unquoted, so `--module /etc/a b.conf` reads as `/etc/a`.
+	const parsed = parsePodmanServiceShow("LoadState=loaded\nActiveState=inactive\nExecStart={ path=/usr/bin/podman ; argv[]=/usr/bin/podman --module /etc/containers/a b.conf system service ; ignore_errors=no }\n");
+	assert.deepEqual(parsed.modules, ["/etc/containers/a"]);
+	const cut = rootfulConfWidening({ fs: rootfulFs({ "/etc/containers/a b.conf": ROOTFUL_MEASURED.env }), unit: UNIT({ modules: parsed.modules }), now: NOW });
+	assert.deepEqual([cut.refusal?.key, cut.refusal?.module, rootfulConfRetries(cut.refusal)], [null, "/etc/containers/a", false]);
+	assert.match(rootfulConfRefusal(cut.refusal), /^Refused: podman\.service passes --module \/etc\/containers\/a, which names no file here, so what it loads cannot be judged [^]*; give that module a path with no space/);
+	const relative = rootfulConfWidening({ fs: rootfulFs({}), unit: UNIT({ modules: ["gone.conf"] }), now: NOW });
+	assert.equal(relative.refusal?.module, "gone.conf", "a relative module found under neither module directory");
+	const found = rootfulConfWidening({ fs: rootfulFs({ "/usr/share/containers/containers.conf.modules/m.conf": "[containers]\n" }), unit: UNIT({ modules: ["m.conf"] }), now: NOW });
+	assert.equal(found.refusal, null, "a module that exists is judged as a file");
+	const daemon = { answered: true, facts: { podman: true, rootless: false } };
+	assert.equal(observeRuntimeMounts(daemon, { fs: rootfulFs({ "/etc/containers/mounts.conf": "" }), sameHost: true, unit: UNIT({ modules: ["gone.conf"] }), now: NOW }).value, false, "and withholds mountSet");
+	// A directory named x.conf: skipped by the chain and by the native venue's confFilesIn, not refused with EISDIR.
+	const withDir = rootfulFs({ "/etc/containers/containers.conf.d/a.conf": "[containers]\n" }, { "/etc/containers/containers.conf.d": ["a.conf", "x.conf"], "/etc/containers/containers.conf.d/x.conf": [] });
+	assert.equal(rootfulConfWidening({ fs: withDir, unit: UNIT(), now: NOW }).refusal, null);
+	assert.ok(!rootfulConfChain({ fs: withDir, unit: UNIT() }).files.includes("/etc/containers/containers.conf.d/x.conf"));
+	assert.deepEqual(confFilesIn(withDir, { dirs: ["/etc/containers/containers.conf.d"] }).files, ["/etc/containers/containers.conf.d/a.conf"]);
 });
 
 test("rootfulConfChain reads the service's chain and watches no chain file's parent directory (#448)", () => {
@@ -727,6 +787,12 @@ test("podman.service is trusted only for the socket podman.socket listens on; an
 	assert.equal(judged.refusal?.key, "env", "the shared files are still judged");
 	const clean = await observeRootfulConf({ endpoint: at("/run/gx473/alt.sock"), daemon: pd, fs: rootfulFs({ "/var/tmp/o.conf": ROOTFUL_MEASURED.label }), readService: async () => ownEnv, now: NOW });
 	assert.deepEqual([clean.refusal, clean.unread.map((u) => u.path)], [null, ["podman.service"]], "podman.service's own environment is not this service's");
+	// Gate round 2 of PR #473: the /var/run spelling of the same socket is resolved, on both sides, before the compare.
+	const viaVarRun = (p) => p.replace(/^\/var\/run\//, "/run/");
+	assert.equal((await readRootfulService({ endpoint: at("/var/run/podman/podman.sock"), daemon: pd, readService: async () => ownEnv, realpath: viaVarRun })).read, true, "the worker's /var/run spelling");
+	assert.equal((await readRootfulService({ endpoint: at(SOCK), daemon: pd, readService: async () => UNIT({ listen: ["/var/run/podman/podman.sock"] }), realpath: viaVarRun })).read, true, "podman.socket's /var/run spelling");
+	assert.equal((await readRootfulService({ endpoint: at("/var/run/podman/podman.sock"), daemon: pd, readService: async () => ownEnv, realpath: (p) => p })).read, false, "without the resolve, the strings differ");
+	assert.equal(realpathOrSelf("/nonexistent-gx473/podman.sock"), "/nonexistent-gx473/podman.sock", "a path that does not resolve is itself");
 	const noListen = await readRootfulService({ endpoint: at(SOCK), daemon: pd, readService: async () => UNIT({ listen: { reason: "timeout" } }) });
 	assert.match(noListen.reason, /^podman\.socket not read \(timeout\)/);
 	assert.equal((await readRootfulService({ endpoint: { local: null }, daemon: podman({ shape: "podman", remoteSocketPath: `unix://${SOCK}` }), readService: async () => UNIT() })).read, true, "podman-docker's reported socket");

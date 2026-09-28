@@ -46,7 +46,7 @@ import { runtimeFromFacts } from "./netns-keeper.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
 import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_INFO_TIMEOUT_MS, cachedPodmanInfo, decidePodmanJobUser, makePodmanBackend, makePodmanInfoReader, makePodmanReaper, observePodman, podmanConfRefusal, unavailableFor, podmanConfWidening, podmanJobUserRefusal, resolvePodmanImageUser } from "./backend-podman.mjs";
-import { makePodmanServiceReader, makeRootfulMemory, observeHost, observeRootfulConf, readRootfulService, rootfulConfRefusal, rootfulConfRetries, rootfulUnreadList, runtimeObservationKey } from "./runtime-observations.mjs";
+import { PODMAN_RESTART_HOLD_EXPIRED, makePodmanServiceReader, makeRootfulMemory, observeHost, observeRootfulConf, readRootfulService, rootfulConfRefusal, rootfulConfRetries, rootfulUnreadList, runtimeObservationKey } from "./runtime-observations.mjs";
 
 import { makeRunContainer } from "./run-container.mjs";
 import { resolveProviderCredential } from "./env-allowlist.mjs";
@@ -1495,6 +1495,8 @@ export async function startWorker(
 	const FAILED_COMMENT_BY_REASON = Object.freeze({
 		// Neutral on the cause (PR #463 round 3): a keeper that is not running and a proxy that must restart after it both land here.
 		[NETNS_KEEPER_NOT_HOLDING]: "Failed before it started: this worker's rootless Podman egress proxy did not pass its pre-start check (its rootless network keeper, pi-dispatch-netns-keeper), so the job was retried and never run. Nothing was spent. Ask the operator to run `pi-dispatch doctor` on the worker for the exact fix.",
+		// Issue #448 (gate round 2 of PR #473): the hold's own ending, so the comment names the cause and the fix.
+		[PODMAN_RESTART_HOLD_EXPIRED]: "Failed before it started: rootful Podman's service on this worker kept running with a containers.conf older than its files (or a file's change time stayed ahead of the host's clock) for an hour, so the job was held and never run. Nothing was spent. Ask the operator to restart it while no local job runs (`sudo systemctl restart podman.service`), then run the job again.",
 	});
 
 	const worker = createWorkerFn({
