@@ -174,6 +174,10 @@ export async function runDoctor(env = process.env, deps = {}) {
 		isAlive = defaultIsAlive,
 		pid = process.pid,
 		nonce = randomBytes(6).toString("hex"),
+		// The clock a --live pass times its probes with. Forwarded since a caller's `now`/`delay` were silently dropped
+		// here, so --live measured the real clock and a pinned "in 0 ms" read "1 ms" under load.
+		now,
+		delay,
 	} = deps;
 	// The facts a --live pass needs from the collection it follows (the endpoint read, docker and the image, the
 	// egress canary's readings), filled by collectChecks rather than re-probed.
@@ -215,7 +219,7 @@ export async function runDoctor(env = process.env, deps = {}) {
 		// where no collection filled the facts, which reads as the default: local, exactly as before.
 		// Each venue's results are rendered BEFORE the next venue announces its containers, so what podman is about to
 		// start never lands between local's announcement and local's verdicts.
-		const liveSeams = { ...seams, liveFs, isAlive, pid, nonce };
+		const liveSeams = { ...seams, liveFs, isAlive, pid, nonce, ...(now ? { now } : {}), ...(delay ? { delay } : {}) };
 		if (facts.localUsed !== false && render(await liveChecks(env, liveSeams, facts), out)) failed = true;
 		if (facts.podman && render(await podmanLiveChecks(env, liveSeams, facts), out)) failed = true;
 	}
