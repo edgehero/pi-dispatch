@@ -115,7 +115,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -279,6 +279,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			...(makeGitLabAuth ? { makeGitLabAuth } : {}),
 			...(makeGitLabHost ? { makeGitLabHost } : {}),
 			...(now ? { now } : {}),
+			...(sleep ? { sleep } : {}),
 			...(authResolveTimeoutMs ? { authResolveTimeoutMs } : {}),
 			...(ensureJobsDir ? { ensureJobsDir } : {}),
 			...(ensureUnderAccountRoot ? { ensureUnderAccountRoot } : {}),
@@ -3242,6 +3243,36 @@ test("a TERMINAL netns-keeper-not-holding failure comments the keeper's fixed se
 	handlers.failed({ id: "k2", data: { kind: "github", repo: "o/r" }, attemptsMade: 1 }, err);
 	await settleListeners();
 	assert.deepEqual(posted, []);
+});
+
+// Issue #476: a keeper whose only fault is its age is waited out at boot, once and bounded, then judged again. The
+// measured joint start read it at 0.5 to 0.8 s and warned every time; a keeper that passes after the wait is not said.
+test("a podman worker waits out a young keeper at boot, once and bounded, and warns only if it still does not hold (#476)", { skip }, async () => {
+	const boot = async (answers) => {
+		const reads = [];
+		const slept = [];
+		const withPreflight = (opts) => ({ ...realPodmanBackend({ ...opts, spawnFn: () => { throw new Error("no spawn"); } }), egressPreflight: async () => answers[Math.min(reads.push("egress") - 1, answers.length - 1)] });
+		const { logs } = await runStart({ env: { PI_BACKENDS: "podman" }, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), jobUserIdentity: PODMAN_ID, makePodmanBackend: withPreflight, sleep: async (ms) => void slept.push(ms) });
+		return { reads: reads.length, slept, warned: logs.filter((l) => l.event === "netns_keeper_not_holding_at_boot").map((l) => l.reason), waited: logs.filter((l) => l.event === "netns_keeper_young_at_boot").map((l) => [l.keeperAgeMs, l.waitMs]) };
+	};
+	const YOUNG = { unavailable: "pi-dispatch-egress-proxy", keeper: "k", keeperAtBoot: "the rootless network keeper pi-dispatch-netns-keeper has been running for only 0.6 s", young: { startedMs: 1, ageMs: 600, waitMs: 3_400 } };
+	assert.deepEqual(await boot([YOUNG, { ok: true }]), { reads: 2, slept: [3_400], warned: [], waited: [[600, 3_400]] }, "young, then holds: no warning, the wait said as information");
+	assert.deepEqual(await boot([YOUNG, YOUNG]), { reads: 2, slept: [3_400], warned: [YOUNG.keeperAtBoot], waited: [[600, 3_400]] }, "still young after the wait (it restarted): said, once");
+	const GONE = { unavailable: "pi-dispatch-egress-proxy", keeper: "k", keeperAtBoot: "the rootless network keeper pi-dispatch-netns-keeper is not under this account's Podman" };
+	assert.deepEqual(await boot([GONE]), { reads: 1, slept: [], warned: [GONE.keeperAtBoot], waited: [] }, "not young: said at once, no wait");
+	assert.deepEqual(await boot([{ ...YOUNG, young: { ...YOUNG.young, waitMs: 60_000 } }, { ok: true }]), { reads: 2, slept: [4_000], warned: [], waited: [[600, 4_000]] }, "the wait is capped at the minimum age plus the margin");
+});
+
+test("a TERMINAL netns-keeper-crash-loop failure comments its own fixed sentence and logs the reason whole (#476)", { skip }, async () => {
+	const posted = [];
+	const host = fakeHost({ postStatusComment: async (_job, _target, text) => void posted.push(text) });
+	const { handlers } = await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => host });
+	const SENTENCE = `the rootless network keeper pi-dispatch-netns-keeper keeps restarting (a crash loop): ${"z".repeat(300)}`;
+	const from = bootLines.length;
+	handlers.failed({ id: "c1", data: { kind: "github", repo: "o/r", target: { type: "issue", number: 7 } }, attemptsMade: 2, finishedOn: 123 }, Object.assign(new Error(SENTENCE), { reason: "netns-keeper-crash-loop" }));
+	await settleListeners();
+	assert.deepEqual(posted, ["Failed before it started: this worker's rootless network keeper (pi-dispatch-netns-keeper), which its Podman egress proxy needs, kept restarting while the job waited for it, so the job was retried and never run. Nothing was spent. Ask the operator to run `pi-dispatch doctor` on the worker and read the keeper's log (`journalctl --user -u pi-dispatch-netns-keeper.service`)."]);
+	assert.equal(parseLines(bootLines.slice(from)).find((l) => l.event === "job_failed_netns_keeper")?.reason, SENTENCE, "the whole sentence, beside the cut line");
 });
 
 test("a hold on podman.service's restart that ran out comments its own fixed sentence, never the error's words (#448)", { skip }, async () => {

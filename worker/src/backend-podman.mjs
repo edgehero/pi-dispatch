@@ -987,7 +987,9 @@ export const NETNS_KEEPER_READ_TIMEOUT_MS = 10_000;
  * the keeper and what to run. "Holds" is `judgeNetnsKeeper` with the clock and the proxy's start (PR #463 round 2):
  * running on its own bridge for at least 3 s (a crash loop reads as running for moments), and not started more than
  * the grace (15 s) after the proxy, since a keeper that restarted while the proxy ran may have let a teardown cut the proxy's
- * route out, which only a proxy restart repairs and nothing outside can see. On 5.x nothing is read. Nothing is
+ * route out, which only a proxy restart repairs and nothing outside can see. A keeper that is only too young (issue
+ * #476) is still not held, but the answer carries `young`, so its caller waits it out rather than failing on it. On 5.x
+ * nothing is read. Nothing is
  * cached across jobs but what the bundle already caches (`podman info`, for the version): the keeper and the proxy's
  * start are read on every armed job, two bounded `podman inspect`s.
  */
@@ -1023,6 +1025,11 @@ export function keeperPreflight(proxyPreflight, { armed, proxy, info, spawnFn = 
 			// The same facts without a job in them, for the worker's boot line (PR #463 round 3).
 			keeperAtBoot: `${cause}, so every egress job is retried rather than started until this is fixed. To fix it, ${netnsKeeperRemedy(keeper, name)}`,
 			keeper: `${cause}, so this job is retried rather than started. To fix it, ${netnsKeeperRemedy(keeper, name)}`,
+			// Issue #476: a keeper whose only fault is its age (`{ startedMs, ageMs, waitMs }`), which the boot and the
+			// sandbox opener wait out and a job is held for, without an attempt.
+			...(keeper.young ? { young: keeper.young } : {}),
+			// The judge's own words alone, which follow the keeper's name, for the crash-loop sentence a held job may end on.
+			problem: keeper.problem,
 		};
 	};
 }

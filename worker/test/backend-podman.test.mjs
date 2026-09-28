@@ -1216,6 +1216,20 @@ test("keeperPreflight: on Podman 4.x a keeper that does not hold is { unavailabl
 	assert.equal(reads.length, 4);
 });
 
+test("keeperPreflight carries `young` for a keeper whose only fault is its age, and the judge's own words (#476)", { skip }, async () => {
+	const NOW = 2_000_000;
+	const pre = (keeper, proxyStarted = `${NOW - 607}\n`) => mod.keeperPreflight(async () => ({ ok: true, proxy: "pi-dispatch-egress-proxy" }), { armed: true, info: async () => ({ answered: true, info: { version: "4.9.3" } }), readKeeper: async (args) => (args.at(-1) === "pi-dispatch-netns-keeper" ? keeper : { code: 0, stdout: proxyStarted }), now: () => NOW })({});
+	const young = await pre({ code: 0, stdout: `running|bridge|pi-dispatch-netns-keeper,|${NOW - 600}\n` });
+	assert.equal(young.unavailable, "pi-dispatch-egress-proxy", "still not admitted by the preflight itself");
+	assert.deepEqual(young.young, { startedMs: NOW - 600, ageMs: 600, waitMs: 3_400 });
+	assert.match(young.problem, /^has been running for only 0\.6 s/);
+	const gone = await pre({ code: 125, stdout: "" });
+	assert.deepEqual([gone.young, gone.problem], [undefined, "is not under this account's Podman"]);
+	// Young but out of order against the proxy: no `young`, since waiting cannot fix its start.
+	const late = await pre({ code: 0, stdout: `running|bridge|pi-dispatch-netns-keeper,|${NOW - 600}\n` }, `${NOW - 600 - 15_001}\n`);
+	assert.equal(late.young, undefined);
+});
+
 test("the podman bundle's egress preflight reads the keeper through podman on 4.x (#458)", { skip }, async () => {
 	// Every inspect answers `running`: the proxy's `.State.Status` (#453) admits, and the keeper's read gets a bare word.
 	const fake = fakePodman({ answers: { inspect: { code: 0, stdout: "running\n" } } });

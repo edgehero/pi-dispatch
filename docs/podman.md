@@ -939,7 +939,22 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    it does not hold, each such job is retried before anything is spent, its run record says `netns-keeper-not-holding`,
    the whole sentence is logged as `egress_keeper_not_holding`, and a job that runs out of retries gets a comment
    saying the proxy did not pass its pre-start check and to run `pi-dispatch doctor`, rather than being started into a proxy the job's own teardown would
-   break. In that ✗ case `doctor --live` also tears down nothing the proxy is on, because its own teardowns are the
+   break.
+
+   **A keeper that is only young is waited for, not failed** (issue #476). When the whole stack starts together (a
+   fresh `service install`, or a boot with linger) the worker reads the keeper less than a second after it started.
+   A keeper running on its own bridge network whose only fault is being up for under 3 s is waited out: at boot the
+   worker waits until it is 3 s old plus 1 s (at most 4 s, a `netns_keeper_young_at_boot` line saying so) and judges
+   it again, logging `netns_keeper_not_holding_at_boot` only if it still does not hold; a job is put back on the queue's delayed set
+   for as long, without spending an attempt (a `netns_keeper_young_hold` log line), and runs on the same attempt once
+   the keeper holds; a sandbox open waits once too. A keeper that keeps dying is young at every start, so that wait is
+   bounded: if, while a job waited, the keeper started again or left its bridge, or the job has waited 30 s, the job
+   is retried (spending an attempt) with its run record saying `netns-keeper-crash-loop`, the whole sentence logged as
+   `job_failed_netns_keeper`, and a job that runs out of retries gets a comment naming the loop. Look at why it exits
+   with `journalctl --user -u pi-dispatch-netns-keeper.service`. `pi-dispatch doctor` judges the keeper as before, so
+   right after a start it can say ✗ for a keeper under 3 s old: run it again a few seconds later.
+
+   When doctor says ✗ for the keeper, `doctor --live` also tears down nothing the proxy is on, because its own teardowns are the
    same trigger: it runs no egress canary (a second ✗ line says so), no jobToJobIsolation peer networks, and leaves a
    stale probe network that still has the proxy attached, and it reads `egress` and `jobToJobIsolation` as not read
    back, naming the keeper. Fix what the line says and re-run it.
@@ -1184,7 +1199,7 @@ service, rootful Podman, a containers.conf that sets `pasta_options`, `network_c
 could not be read just now: try again), and a
 `PI_BACKEND_FLOOR` the observations miss. With egress armed on Podman 4.x it is also refused while the rootless
 network keeper (step 6) does not hold, by the same check a job gets (`netns-keeper-not-holding`, with the command to
-run): closing the shell removes its network, and that disconnect of the running proxy is what cuts the proxy's route
+run; a keeper only under 3 s old is waited for once, at most 4 s, and then judged again): closing the shell removes its network, and that disconnect of the running proxy is what cuts the proxy's route
 out on 4.x without the keeper (issue #458). Then the sandbox's own: it runs as the account that opens it (keep-id maps
 that account, and the run's image is in that account's store), so open it as the account the worker runs as, never
 with `sudo`; a run opened under another container store is refused (`podman-store-mismatch`, below); and a run

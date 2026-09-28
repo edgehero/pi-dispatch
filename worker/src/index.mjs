@@ -4,7 +4,8 @@ import { jobContainerName } from "./backend-local.mjs";
 import { scrubCredentials } from "./redact.mjs";
 import { BACKEND_NOT_REGISTERED } from "./backend-registry.mjs";
 import { CANCEL_ACK_TTL_MS, cancelAckKey, cancelReqKey } from "./cancel-state.mjs";
-import { InfraRetry, runJob } from "./processor.mjs";
+import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, runJob } from "./processor.mjs";
+import { NETNS_KEEPER_YOUNG_HOLD_MAX_MS, netnsKeeperCrashLoopSentence } from "./netns-keeper.mjs";
 import { PODMAN_RESTART_HOLD_EXPIRED, PODMAN_RESTART_HOLD_MAX_MS, PODMAN_RESTART_HOLD_RECHECK_MS } from "./runtime-observations.mjs";
 import { targetFor } from "./run-history.mjs";
 import { budgetCapsFor, canonicalScope, concurrencyFor, makeInFlight, scopeKeyPrefix } from "./scoped-limits.mjs";
@@ -813,6 +814,35 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				recordRun({ job, error: expired, startedAt, endedAt: new Date().toISOString() });
 				throw expired;
 			}
+			// Issue #476: a job whose egress preflight found the rootless network keeper running on its own bridge but younger
+			// than the minimum age is HELD until it is old enough (one `moveToDelayed`, no attempt), the move the hold above
+			// makes, since a keeper merely young is not a keeper that does not hold: every joint start of the stack read it
+			// at under a second and spent a queued job's attempt (measured on 4.9.3). A crash loop is young at every start,
+			// so the hold is BOUNDED, and ends early on the evidence of one: the keeper the job waited on is gone, or another
+			// start has taken its place. Either ends in an ordinary retry (an attempt, as any keeper that does not hold
+			// costs) with its own reason token naming the loop. The hold's state is stored on the job, as the podman.service
+			// hold's is, and read only while the checks come within the bound of each other: a later one starts afresh.
+			const keeperHold = keeperHoldState(job, now());
+			if (error?.keeperYoung && typeof error.keeperYoung === "object") {
+				const young = error.keeperYoung;
+				const restarted = keeperHold.startedMs !== null && keeperHold.startedMs !== young.startedMs;
+				const heldMs = keeperHold.at - keeperHold.since;
+				if (!restarted && heldMs < NETNS_KEEPER_YOUNG_HOLD_MAX_MS) {
+					await job.updateData({ ...job.data, netnsKeeperHoldSinceMs: keeperHold.since, netnsKeeperHoldLastMs: keeperHold.at, netnsKeeperHoldStartedMs: young.startedMs });
+					deps?.log?.("netns_keeper_young_hold", { jobId: job.id, keeperAgeMs: young.ageMs, heldForMs: heldMs, delayMs: young.waitMs });
+					await job.moveToDelayed(keeperHold.at + young.waitMs, token);
+					throw new DelayedError();
+				}
+				const loop = new InfraRetry(netnsKeeperCrashLoopSentence({ was: keeperHold.startedMs ?? young.startedMs, now: young.startedMs, heldMs, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
+				recordRun({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
+				throw loop;
+			}
+			if (error?.reason === NETNS_KEEPER_NOT_HOLDING && keeperHold.startedMs !== null) {
+				// The keeper this job was waiting on is no longer running on its bridge: it died young, the loop's other face.
+				const loop = new InfraRetry(netnsKeeperCrashLoopSentence({ was: keeperHold.startedMs, now: null, problem: error.keeperProblem ?? null, heldMs: keeperHold.at - keeperHold.since, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
+				recordRun({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
+				throw loop;
+			}
 			recordRun({ job, error, startedAt, endedAt: new Date().toISOString() });
 			if (error instanceof InfraRetry) throw error; // retryable: BullMQ retries per attempts
 			// A non-retryable, non-infra error (our bug) must not retry forever. UnrecoverableError
@@ -834,6 +864,19 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			signal.removeEventListener("abort", onAbort);
 		}
 	};
+}
+
+/**
+ * A job's young-keeper hold as stored on it (issue #476): `{ at, since, startedMs }`, `at` being now. The stored start
+ * and the keeper start it waited on count only while the last check was within `NETNS_KEEPER_YOUNG_HOLD_MAX_MS` of
+ * now; an older one (a retry after its backoff, a paused queue) is a fresh hold with no keeper start seen.
+ */
+export function keeperHoldState(job, at) {
+	const last = job?.data?.netnsKeeperHoldLastMs;
+	const current = Number.isFinite(last) && at - last >= 0 && at - last <= NETNS_KEEPER_YOUNG_HOLD_MAX_MS;
+	const since = current && Number.isFinite(job.data.netnsKeeperHoldSinceMs) ? job.data.netnsKeeperHoldSinceMs : at;
+	const startedMs = current && Number.isFinite(job.data.netnsKeeperHoldStartedMs) ? job.data.netnsKeeperHoldStartedMs : null;
+	return { at, since, startedMs };
 }
 
 export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), extraClosers = [] }) {

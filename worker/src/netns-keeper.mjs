@@ -53,6 +53,43 @@ export const NETNS_KEEPER_MIN_AGE_MS = 3_000;
 export const NETNS_KEEPER_AFTER_PROXY_GRACE_MS = 15_000;
 
 /**
+ * A YOUNG KEEPER IS WAITED OUT, NOT FAILED (issue #476). When the stack starts together (a `service install`, a boot
+ * with linger) the worker reads the keeper under a second after it started (measured 0.5 to 0.8 s on 4.9.3), so the
+ * age rule above failed every such start: a boot warning with a remedy that restarts the keeper after the proxy, and a
+ * queued job that spent an attempt. A keeper that is running on its own bridge holds the helper open now; the age rule
+ * is there to catch a keeper that keeps dying, which a wait tells apart. So a keeper whose only fault is its age, and
+ * that did not start out of order against the proxy, is `young`: the boot waits until it is `NETNS_KEEPER_MIN_AGE_MS`
+ * old plus this margin and judges once more, and a job is moved to the delayed set for as long, without an attempt.
+ */
+export const NETNS_KEEPER_YOUNG_MARGIN_MS = 1_000;
+
+/**
+ * How long one job may be held on a young keeper (issue #476). A keeper that stays up needs one wait (at most the
+ * minimum age plus the margin, 4 s); a crash loop (Restart=always, RestartSec=1s) is young at every start, and would
+ * hold a job for ever. So the hold ends at the first sign of a loop (a new start, or no keeper, while the job waited)
+ * and in any case after this bound, with its own reason, `netns-keeper-crash-loop`.
+ */
+export const NETNS_KEEPER_YOUNG_HOLD_MAX_MS = 30_000;
+
+/** The wait a young keeper needs, from its age: until it is old enough, plus the margin, never less than the margin. */
+export function netnsKeeperYoungWaitMs(ageMs) {
+	// A start read in the future (or no age at all) counts as age 0: the whole minimum, and no more.
+	const age = Number.isFinite(ageMs) ? Math.max(0, ageMs) : 0;
+	return Math.max(0, NETNS_KEEPER_MIN_AGE_MS - age) + NETNS_KEEPER_YOUNG_MARGIN_MS;
+}
+
+/**
+ * The sentence for a keeper that kept restarting while a job waited for it (issue #476). `was`: the start the job first
+ * waited on; `now`: the start read now, or `null` when no running keeper was read; `problem`: what the read now found,
+ * in words that follow the keeper's name, when it found no running keeper; `heldMs`: how long the job had waited.
+ */
+export function netnsKeeperCrashLoopSentence({ was, now = null, problem = null, heldMs, remedy }) {
+	const at = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : "an unread time");
+	const seen = now === null ? `and ${Math.round(heldMs / 100) / 10} s later it ${problem ?? "was not running"}` : now === was ? `and ${Math.round(heldMs / 100) / 10} s later it still read as younger than ${NETNS_KEEPER_MIN_AGE_MS / 1000} s` : `and started again at ${at(now)}`;
+	return `the rootless network keeper ${NETNS_KEEPER} keeps restarting (a crash loop): a job waited for the one started at ${at(was)} to have run ${NETNS_KEEPER_MIN_AGE_MS / 1000} s, ${seen}, so it holds nothing open for long, and on Podman 4.x a job network's teardown in a gap would cut the egress proxy's route out (issue #458), so this job is retried rather than started. To fix it, find why it exits (journalctl --user -u ${NETNS_KEEPER}.service -n 50), then ${remedy ?? `start it as the worker's account: systemctl --user restart ${NETNS_KEEPER}.service`}`;
+}
+
+/**
  * Judge one read of `podman inspect NETNS_KEEPER_FORMAT NETNS_KEEPER` (`{ code, stdout }`, stdout alone). Returns
  * `{ holds, exists, running, restartProxy, problem }`: `holds` only when the keeper is running, in bridge mode, and
  * attached to its own network, the one shape measured to keep the helper alive; `problem` says, in words that follow
@@ -63,6 +100,10 @@ export const NETNS_KEEPER_AFTER_PROXY_GRACE_MS = 15_000;
  * `proxyStartedMs` it must not have started more than NETNS_KEEPER_AFTER_PROXY_GRACE_MS after the proxy, and one that
  * did is `restartProxy`: the remedy is then the PROXY's restart, not the keeper's. `up` passes neither: it asks only
  * whether a keeper is there to leave alone. doctor and the worker's preflight pass both.
+ *
+ * A keeper whose ONLY fault is its age (running on its own bridge, not started out of order) also carries `young`,
+ * `{ startedMs, ageMs, waitMs }` (issue #476): it is still not held here, and doctor still says so, but the worker's
+ * boot, its per-job preflight and the sandbox opener wait `waitMs` for it rather than fail on it.
  */
 export function judgeNetnsKeeper({ code, stdout }, { now = null, proxyStartedMs = null } = {}) {
 	// `thenRestartProxy` (PR #463 round 3): a keeper that does not hold under a proxy already up longer than the grace will,
@@ -80,8 +121,16 @@ export function judgeNetnsKeeper({ code, stdout }, { now = null, proxyStartedMs 
 		const startedMs = /^\d+$/.test(started) ? Number(started) : null;
 		if (startedMs === null) return no({ problem: "is running, but when it started could not be read, so whether it has stayed up is not known" });
 		const age = now - startedMs;
-		if (age < NETNS_KEEPER_MIN_AGE_MS) return no({ problem: `has been running for only ${Math.max(0, Math.round(age / 100) / 10)} s, and a keeper that keeps dying reads as running for a moment at a time; it counts once it has run for ${NETNS_KEEPER_MIN_AGE_MS / 1000} s` });
-		if (Number.isFinite(proxyStartedMs) && startedMs > proxyStartedMs + NETNS_KEEPER_AFTER_PROXY_GRACE_MS) {
+		const outOfOrder = Number.isFinite(proxyStartedMs) && startedMs > proxyStartedMs + NETNS_KEEPER_AFTER_PROXY_GRACE_MS;
+		if (age < NETNS_KEEPER_MIN_AGE_MS) {
+			// `young` (issue #476): only when age is the whole fault. One started out of order against the proxy is not
+			// waited out, since waiting cannot make its start earlier; its words stay what they were.
+			return no({
+				problem: `has been running for only ${Math.max(0, Math.round(age / 100) / 10)} s, and a keeper that keeps dying reads as running for a moment at a time; it counts once it has run for ${NETNS_KEEPER_MIN_AGE_MS / 1000} s`,
+				...(outOfOrder ? {} : { young: { startedMs, ageMs: age, waitMs: netnsKeeperYoungWaitMs(age) } }),
+			});
+		}
+		if (outOfOrder) {
 			return no({ restartProxy: true, problem: `started ${Math.round((startedMs - proxyStartedMs) / 1000)} s after the egress proxy did, so it was down while the proxy ran, and a job teardown in that gap would have cut the proxy's route out for good, which nothing can see from outside` });
 		}
 	}

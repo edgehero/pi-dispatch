@@ -638,8 +638,12 @@ export async function runJob(job, deps) {
 			// nothing is refunded. Its OWN reason token (PR #463 round 2), so the run record, the failure hook and the
 			// terminal comment can name the keeper rather than a generic never-started container; the full sentence rides
 			// the error message and is logged whole here, where `job_failed` cuts it at 120 characters.
+			// Issue #476: a keeper whose only fault is its age is HELD for, not failed on. `makeProcessor` moves the job to
+			// the delayed set until the keeper is old enough, without an attempt, and names a crash loop if it keeps
+			// restarting; a path that does not know the hold still retries it, since it is an `InfraRetry`.
+			if (egress.young) throw new NetnsKeeperYoungHold(egress.keeper, { reason: NETNS_KEEPER_NOT_HOLDING, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false, young: egress.young, remedy: egress.remedy ?? null });
 			log("egress_keeper_not_holding", { proxy: egress.unavailable, reason: egress.keeper });
-			throw new InfraRetry(egress.keeper, { reason: NETNS_KEEPER_NOT_HOLDING, provider: job.provider ?? null, model: job.model ?? null });
+			throw Object.assign(new InfraRetry(egress.keeper, { reason: NETNS_KEEPER_NOT_HOLDING, provider: job.provider ?? null, model: job.model ?? null }), { keeperProblem: egress.problem ?? null, keeperRemedy: egress.remedy ?? null });
 		}
 		if (egress.unavailable) {
 			// The daemon did not answer, so this is indeterminate rather than a refusal -- the same
@@ -1123,6 +1127,8 @@ export async function runJob(job, deps) {
  * fixed token, as every run-record reason is, and the key the terminal comment is chosen by.
  */
 export const NETNS_KEEPER_NOT_HOLDING = "netns-keeper-not-holding";
+/** Issue #476: a job held on a young keeper that kept restarting, or stayed young past the hold's bound. */
+export const NETNS_KEEPER_CRASH_LOOP = "netns-keeper-crash-loop";
 
 /** Thrown for the retryable (infra) class only. The BullMQ processor lets this propagate to retry. */
 /**
@@ -1218,6 +1224,20 @@ export class PodmanRestartHold extends InfraRetry {
 		super(message, options);
 		this.name = "PodmanRestartHold";
 		this.holdUntilRestart = true;
+	}
+}
+
+/**
+ * A job held on a rootless network keeper that is running on its own bridge but younger than the minimum age (issue
+ * #476). An `InfraRetry`, so any path that does not know it still retries; `makeProcessor` knows it, and moves the job to
+ * the delayed set for `young.waitMs` without spending an attempt, up to `NETNS_KEEPER_YOUNG_HOLD_MAX_MS`.
+ */
+export class NetnsKeeperYoungHold extends InfraRetry {
+	constructor(message, { young, remedy = null, ...options } = {}) {
+		super(message, options);
+		this.name = "NetnsKeeperYoungHold";
+		this.keeperYoung = young;
+		this.keeperRemedy = remedy;
 	}
 }
 

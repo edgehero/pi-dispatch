@@ -715,9 +715,19 @@ export function combineSandboxNetworkSweepers(entries) {
  * The default `keeperCheck` (issue #452, gate round 2): the worker's own job preflight for the keeper (`keeperPreflight`,
  * over this account's `podman info` and the keeper's and proxy's reads), with the proxy taken as up, since a missing
  * proxy already fails the open at network creation with its own message. `null` when the keeper holds or is not needed.
+ * A keeper that is only too young is waited out once (issue #476), not refused.
  */
-export async function sandboxKeeperCheck({ proxy, info = makePodmanInfoReader(), readKeeper = null } = {}) {
-	const answer = await keeperPreflight(async () => ({ ok: true, proxy }), { armed: true, proxy, info, ...(readKeeper ? { readKeeper } : {}) })();
+export async function sandboxKeeperCheck({ proxy, info = makePodmanInfoReader(), readKeeper = null, now = Date.now, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
+	const ask = keeperPreflight(async () => ({ ok: true, proxy }), { armed: true, proxy, info, now, ...(readKeeper ? { readKeeper } : {}) });
+	let answer = await ask();
+	// Issue #476: a keeper whose only fault is its age is WAITED OUT, once and bounded (at most the minimum age plus the
+	// margin, 4 s), then judged again, rather than refused: an open right after the stack started would otherwise be sent
+	// to restart a keeper that holds. One still young after the wait restarted in it, and is refused as before.
+	if (answer?.young && typeof answer.young === "object") {
+		// `waitMs` is the judge's, bounded there (`netnsKeeperYoungWaitMs`: at most the minimum age plus the margin).
+		await sleep(answer.young.waitMs);
+		answer = await ask();
+	}
 	if (!answer?.unavailable) return null;
 	return {
 		refused: "netns-keeper-not-holding",

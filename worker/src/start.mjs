@@ -8,7 +8,7 @@ import { valkeyClientContext } from "./valkey-endpoint.mjs";
 import { authRefusalFor, makeRedisClient, onValkeyError, parseConnection, valkeyAuthState, valkeyPasswordFor } from "./connection.mjs";
 import { reconcileGated, reloadSchedules } from "./cron.mjs";
 import { makeGitHubAuth } from "./get-token.mjs";
-import { InfraRetry, NETNS_KEEPER_NOT_HOLDING } from "./processor.mjs";
+import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING } from "./processor.mjs";
 import { transientError } from "./transient.mjs";
 import { makeGitHubHost } from "./github-host.mjs";
 import { makeGitLabAuth } from "./gitlab-auth.mjs";
@@ -42,7 +42,7 @@ import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue } from "./queue.mjs";
 import { endpointShown, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
-import { runtimeFromFacts } from "./netns-keeper.mjs";
+import { NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_YOUNG_MARGIN_MS, runtimeFromFacts } from "./netns-keeper.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
 import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_INFO_TIMEOUT_MS, cachedPodmanInfo, decidePodmanJobUser, makePodmanBackend, makePodmanInfoReader, makePodmanReaper, observePodman, podmanConfRefusal, unavailableFor, podmanConfWidening, podmanJobUserRefusal, resolvePodmanImageUser } from "./backend-podman.mjs";
@@ -374,6 +374,9 @@ export async function startWorker(
 		// beside a subject built on the default `Date.now` is a fuse: it passes until the wall clock drifts
 		// past that window, then fails in CI on a tree nobody touched (issue #284).
 		now = () => Date.now(),
+		// Issue #476: how the boot waits out a rootless network keeper that is only too young. A seam so a wiring test
+		// proves the wait and its bound without spending real seconds.
+		sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 		// How long a job waits for a forge-auth re-resolve. A seam rather than a constant because the
 		// property under test is that the bound EXISTS, and a test that proved it by waiting ten real
 		// seconds would be paid for on every run for the life of the file.
@@ -1128,13 +1131,25 @@ export async function startWorker(
 	// per-job preflight is the gate: once the keeper holds, the next job runs (under a proxy up longer than the grace,
 	// 15 s, after the proxy's restart, which the job's retry message and doctor both ask for).
 	if (podmanBackend && config.egress) {
-		const bootKeeper = await settleWithin(
-			Promise.resolve()
-				.then(() => podmanBackend.egressPreflight({}))
-				.catch(() => ({})),
-			BOOT_IMAGE_TIMEOUT_MS * 4,
-			{},
-		);
+		const readBootKeeper = () =>
+			settleWithin(
+				Promise.resolve()
+					.then(() => podmanBackend.egressPreflight({}))
+					.catch(() => ({})),
+				BOOT_IMAGE_TIMEOUT_MS * 4,
+				{},
+			);
+		let bootKeeper = await readBootKeeper();
+		// Issue #476: a keeper whose only fault is its age is waited out, once and bounded (at most the minimum age plus
+		// the margin), then judged again. A stack started together reads it under a second old (measured 0.5 to 0.8 s on
+		// 4.9.3), and warning then was wrong every time; a keeper still young after the wait restarted in it, and is said.
+		if (bootKeeper?.young && typeof bootKeeper.young === "object") {
+			const waitMs = Math.min(Number.isFinite(bootKeeper.young.waitMs) ? bootKeeper.young.waitMs : 0, NETNS_KEEPER_MIN_AGE_MS + NETNS_KEEPER_YOUNG_MARGIN_MS);
+			// Said as information, not a warning: the one line that shows a joint start was waited out, and for how long.
+			log("netns_keeper_young_at_boot", { keeperAgeMs: bootKeeper.young.ageMs ?? null, waitMs });
+			await sleep(Math.max(0, waitMs));
+			bootKeeper = await readBootKeeper();
+		}
 		// Its own sentence (PR #463 round 3): the job-shaped one says "this job is retried", and at boot there is no job.
 		if (typeof bootKeeper?.keeper === "string") log("netns_keeper_not_holding_at_boot", { reason: bootKeeper.keeperAtBoot ?? bootKeeper.keeper });
 	}
@@ -1502,6 +1517,8 @@ export async function startWorker(
 	const FAILED_COMMENT_BY_REASON = Object.freeze({
 		// Neutral on the cause (PR #463 round 3): a keeper that is not running and a proxy that must restart after it both land here.
 		[NETNS_KEEPER_NOT_HOLDING]: "Failed before it started: this worker's rootless Podman egress proxy did not pass its pre-start check (its rootless network keeper, pi-dispatch-netns-keeper), so the job was retried and never run. Nothing was spent. Ask the operator to run `pi-dispatch doctor` on the worker for the exact fix.",
+		// Issue #476: a job held on a young keeper that kept restarting while it waited.
+		[NETNS_KEEPER_CRASH_LOOP]: "Failed before it started: this worker's rootless network keeper (pi-dispatch-netns-keeper), which its Podman egress proxy needs, kept restarting while the job waited for it, so the job was retried and never run. Nothing was spent. Ask the operator to run `pi-dispatch doctor` on the worker and read the keeper's log (`journalctl --user -u pi-dispatch-netns-keeper.service`).",
 		// Issue #448 (gate round 2 of PR #473): the hold's own ending, so the comment names the cause and the fix.
 		[PODMAN_RESTART_HOLD_EXPIRED]: "Failed before it started: rootful Podman's service on this worker kept running with a containers.conf older than its files (or a file's change time stayed ahead of the host's clock) for an hour, so the job was held and never run. Nothing was spent. Ask the operator to restart it while no local job runs (`sudo systemctl restart podman.service`), then run the job again.",
 	});
@@ -1765,7 +1782,7 @@ export async function startWorker(
 		for (const w of allWorkers) w.on("failed", (job, err) => {
 			log("job_failed", { jobId: job?.id, attempt: job?.attemptsMade, reason: String(err?.message ?? err).slice(0, 120) });
 			// The one reason whose sentence is the fix itself (issue #458): logged WHOLE, beside the cut line above.
-			if (err?.reason === NETNS_KEEPER_NOT_HOLDING) log("job_failed_netns_keeper", { jobId: job?.id, attempt: job?.attemptsMade, reason: String(err?.message ?? "") });
+			if (err?.reason === NETNS_KEEPER_NOT_HOLDING || err?.reason === NETNS_KEEPER_CRASH_LOOP) log("job_failed_netns_keeper", { jobId: job?.id, attempt: job?.attemptsMade, reason: String(err?.message ?? "") });
 			// The TERMINAL failed attempt only (issue #288): `finishedOn` is set by BullMQ's own move on the
 			// non-retry branch alone, and the emit follows it, so this guard reads the queue's decision
 			// instead of re-deriving attempts arithmetic that could drift from shouldRetry. A retried
