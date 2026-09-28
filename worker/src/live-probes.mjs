@@ -31,6 +31,7 @@ import { READ_BACK_BY_A_LIVE_PROBE } from "./backend-conformance.mjs";
 import { containerSpec } from "./container-spec.mjs";
 import { ISOLATION_FLAGS, buildDockerRunArgs } from "./docker-run.mjs";
 import { DEFAULT_EGRESS_PROXY, EGRESS_PROXY_PORT, createJobNetworkWith, networkEndpoints, networkNameFor, removeNetworkOrSay } from "./egress.mjs";
+import { detachBlockedSentence, makeDetachGate } from "./netns-keeper.mjs";
 
 /**
  * The namespace every live-probe object carries: every container name, the peer networks and the fixture directory. OUTSIDE the
@@ -641,6 +642,9 @@ export async function runLiveProbes({
 	buildArgs = buildDockerRunArgs,
 	bin = "docker",
 	isLocal = (observed) => observed?.local === true,
+	// Issue #452, gate round 3: the runtime as this pass already read it (`{ podman, rootless, version } | null`), for the
+	// detach gate, so doctor asks the daemon once per run. Absent, the gate reads it itself.
+	readRuntime = null,
 }) {
 	const notRun = (reason) => ({ ran: false, reason, verdicts: [], notes: [], swept: [] });
 	const notLocal = notRun(`this shell's ${bin} CLI is not observed to point at this host, so bind paths and .Mounts would describe another machine; nothing was run`);
@@ -654,12 +658,21 @@ export async function runLiveProbes({
 
 	const names = liveNames(pid, nonce);
 	const notes = [];
-	const step = (args) => run(args, { timeoutMs: stepTimeoutMs });
+	// `opts` only from the detach gate's runtime read, which asks with the facts readers' own bound (issue #452).
+	const step = (args, opts) => run(args, { timeoutMs: opts?.timeoutMs ?? stepTimeoutMs });
 	const proxy = typeof egress?.proxy === "string" && egress.proxy ? egress.proxy : DEFAULT_EGRESS_PROXY;
 	// The peers run only where a job would get its own network: the policy armed and its proxy not known to be down.
 	// Issue #458: and not while the podman venue's keeper is missing on Podman 4.x, where the peers' teardown (detaching
 	// the proxy from their networks) is exactly what cuts the proxy's route out.
-	const keeperBlocked = egress?.keeperBlocked || null;
+	// Issue #452, gate round 3: the same question on EVERY venue, through the one detach gate every detach below goes
+	// through anyway: `local` can be a rootless Podman 4.x too (reached through `podman-docker`, or its Docker API), where
+	// no keeper read of doctor's ran. One read for this pass, shared by the peers' teardown and the stale sweep.
+	const gate = makeDetachGate(step, { bin, ...(typeof readRuntime === "function" ? { readRuntime } : {}) });
+	let keeperBlocked = egress?.keeperBlocked || null;
+	if (!keeperBlocked && egress?.armed === true && egress?.proxyRunning !== false) {
+		const why = await gate({ running: true });
+		if (why) keeperBlocked = detachBlockedSentence(why, bin);
+	}
 	const peersWanted = egress?.armed === true && egress?.proxyRunning !== false && !keeperBlocked;
 	const networkOf = { peer1: networkNameFor(names.peer1), peer2: networkNameFor(names.peer2) };
 	// SHOWN BEFORE IT HAPPENS (REQ-DEPLOYMENT-BOOTSTRAP): every host mutation this makes is named, with where it lives
@@ -669,7 +682,7 @@ export async function runLiveProbes({
 			(peersWanted ? `, and ${names.peer1} and ${names.peer2} on their own --internal networks ${networkOf.peer1} and ${networkOf.peer2}, with ${proxy} attached to both` : "") +
 			`, with a fixture under ${jobsDir}; all of them are removed when the read-back ends, as is anything an interrupted earlier run left`,
 	);
-	const swept = [...sweepStaleFixtures({ jobsDir, pid, fs, isAlive }), ...(await sweepStaleContainers({ step, pid, isAlive })), ...(await sweepStaleNetworks({ step, pid, isAlive, notes, bin, keeperBlocked }))];
+	const swept = [...sweepStaleFixtures({ jobsDir, pid, fs, isAlive }), ...(await sweepStaleContainers({ step, pid, isAlive })), ...(await sweepStaleNetworks({ step, pid, isAlive, notes, bin, keeperBlocked, gate }))];
 
 	const owned = [];
 	const networks = [];
@@ -703,7 +716,7 @@ export async function runLiveProbes({
 		// disconnect the proxy, `network rm` without `-f`, and on a failure one `network inspect` whose answer
 		// decides between silence and a note.
 		// `bin` only spells the command a note tells the operator to type (issue #354); `step` already knows its binary.
-		const outcome = await removeNetworkOrSay(step, { network: entry.name, detach: [proxy], bin });
+		const outcome = await removeNetworkOrSay(step, { network: entry.name, detach: [proxy], bin, gate });
 		if (!outcome.removed) notes.push(`the network ${entry.name} could not be removed: ${outcome.command}`);
 	};
 	const makeFixture = (base) => {
@@ -821,7 +834,7 @@ export async function runLiveProbes({
 					const entry = { name: networkOf[key], done: false };
 					networks.push(entry);
 					peerNetworks.push(entry);
-					if (!(await createJobNetworkWith(step, { network: networkOf[key], proxy }))) break;
+					if (!(await createJobNetworkWith(step, { network: networkOf[key], proxy, bin }))) break;
 					entry.created = true;
 				}
 				reading.networksCreated = peerNetworks.length === 2 && peerNetworks.every((e) => e.created);
@@ -952,7 +965,7 @@ export async function sweepStaleContainers({ step, pid, isAlive }) {
  * is detached, each one named in what is reported, and the network is removed WITHOUT `-f`. One that stays is a note
  * carrying the command, never silence.
  */
-export async function sweepStaleNetworks({ step, pid, isAlive, notes = [], bin = "docker", keeperBlocked = null }) {
+export async function sweepStaleNetworks({ step, pid, isAlive, notes = [], bin = "docker", keeperBlocked = null, gate = makeDetachGate(step, { bin }) }) {
 	const listed = await step(["network", "ls", "--filter", `name=${LIVE_PREFIX}`, "--format", "{{.Name}}"]);
 	if (listed?.code !== 0) return [];
 	const swept = [];
@@ -988,10 +1001,17 @@ export async function sweepStaleNetworks({ step, pid, isAlive, notes = [], bin =
 			notes.push(`the stale network ${name} was left with ${attached.join(", ")} attached, because ${keeperBlocked}; the next \`pi-dispatch doctor --live\` with the keeper running removes it`);
 			continue;
 		}
-		for (const endpoint of attached) await step(["network", "disconnect", "-f", name, endpoint]);
+		// Through the ONE detach helper (issue #452, gate round 3), which asks the gate for the RUNNING members first; a
+		// refusal leaves the network whole and is said like the keeper block above.
+		const outcome = await removeNetworkOrSay(step, { network: name, detach: attached, running, bin, gate });
+		if (outcome.blocked) {
+			notes.push(`the stale network ${name} was left with ${attached.join(", ")} attached, because ${detachBlockedSentence(outcome.blocked, bin)}; the next \`pi-dispatch doctor --live\` with the keeper running removes it`);
+			continue;
+		}
+		if (outcome.absent) continue;
 		// Every endpoint detached is SAID, the proxy included: a container this sweep did not make may be among them.
-		const detached = attached.length > 0 ? ` (after detaching ${attached.join(", ")})` : "";
-		if ((await step(["network", "rm", name]))?.code === 0) swept.push(`network ${name}${detached}`);
+		const detached = outcome.detached.length > 0 ? ` (after detaching ${outcome.detached.join(", ")})` : "";
+		if (outcome.removed) swept.push(`network ${name}${detached}`);
 		else notes.push(`the stale network ${name}${detached} could not be removed: ${bin} network rm ${name}`);
 	}
 	return swept;

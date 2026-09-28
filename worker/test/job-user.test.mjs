@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	BOOT_REFUSING_JOB_USER_CAUSES,
 	DAEMON_FACTS_ARGS,
 	DAEMON_FACTS_TIMEOUT_MS,
 	decideJobUser,
@@ -334,4 +335,18 @@ test("the daemon's version is kept for display only, and only as a short run of 
 	for (const bad of ["27.5.1 \u001b[2J", "a".repeat(41), "27.5.1\nx"]) assert.equal(docker(bad), null, JSON.stringify(bad));
 	const shim = parseDaemonFacts(JSON.stringify({ host: { os: "linux", security: { rootless: false } }, version: { Version: "5.8.2" } }))?.facts;
 	assert.equal(shim.serverVersion, "5.8.2");
+});
+
+test("`local` never starts an egress-armed job or sandbox on a rootless Podman 4.x, through either route, so its teardown can never run there (#452 gate round 3, L206)", () => {
+	// The decision the spec now states: a teardown cannot be held (a job must end), so the safe behaviour is that one never
+	// STARTS where it could cut the proxy's route out. On `local` that is already the rootless refusal, which both routes to
+	// a rootless Podman 4.9.3 carry (measured shapes, round 446); the podman venue has its keeper preflight instead.
+	const shim = JSON.stringify({ host: { os: "linux", security: { rootless: true, selinuxEnabled: false }, serviceIsRemote: false }, version: { Version: "4.9.3" } });
+	const api = JSON.stringify({ ServerVersion: "4.9.3", ProductLicense: "Apache-2.0", OperatingSystem: "ubuntu", SecurityOptions: ["name=apparmor", "name=seccomp,profile=default", "name=rootless"] });
+	for (const body of [shim, api]) {
+		const daemon = { answered: true, facts: parseDaemonFacts(body).facts };
+		const decision = decideJobUser({ platform: "linux", euid: 1234, egid: 1234, endpoint: { local: true }, daemon });
+		assert.deepEqual([decision.mode, decision.cause], ["unmappable", "rootless"], body);
+		assert.ok(BOOT_REFUSING_JOB_USER_CAUSES.has(decision.cause), "the worker refuses to boot, the sandbox refuses to open");
+	}
 });

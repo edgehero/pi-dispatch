@@ -37,6 +37,7 @@ const skipNoPi = piMod ? false : `pi-ai not installed (node ${process.version} <
 // "gh auth status", "gh auth token") mapped to a canned exit code, a `{code, output}` pair (output is
 // emitted on the fake stdout for doctor's capture helper), or "enoent" for a launch failure. Every spawn
 // is recorded into `calls` (cmd, args, opts) so tests can assert argv and the spawn env.
+const ENGINE_FACTS = JSON.stringify({ ServerVersion: "27.5.1", OperatingSystem: "Ubuntu 24.04", SecurityOptions: ["name=seccomp,profile=builtin"], PidsLimit: true, MemoryLimit: true });
 function fakeSpawn(plan, calls = []) {
 	return (cmd, args, opts) => {
 		const line = [cmd, ...args].join(" ");
@@ -75,7 +76,12 @@ function fakeSpawn(plan, calls = []) {
 			}
 			// A FUNCTION outcome answers from the argv (issue #278's --live sequence, where a later step reads what an
 			// earlier one was given); it may also act, as the in-container write does on the host fixture.
-			const resolved = typeof outcome === "function" ? outcome(cmd, args) : outcome;
+			let resolved = typeof outcome === "function" ? outcome(cmd, args) : outcome;
+			// Issue #452 (gate round 3): every armed doctor run's canary asks the detach gate which runtime answered, from the
+			// run's one `docker info --format={{json .}}`. A plan whose bare `"docker info": 0` answers that read with no body has
+			// not said which daemon it is, and is read as Docker Engine, as a real Docker host answers, so the gate lets the
+			// canary through with no keeper read. A plan that gives the read a body of its own, or a key of its own, keeps it.
+			if (cmd === "docker" && args[0] === "info" && args[1] === "--format={{json .}}" && key === "docker info" && resolved === 0) resolved = { code: 0, output: `${ENGINE_FACTS}\n` };
 			const { code, output, stderr } = typeof resolved === "object" && resolved !== null ? resolved : { code: resolved, output: "" };
 			// stderr FIRST, as podman-docker's banner arrives before the answer (issue #345).
 			if (stderr) child.stderr.handlers.data?.(stderr);
@@ -4874,7 +4880,18 @@ const canaryPlan = (extra, seams = {}) => [
 ];
 const NET = "pi-dispatch-egress-doctor-4242";
 const LS = "docker network ls --filter name=pi-dispatch-egress-doctor-";
+// The measured answer of the real docker CLI on a rootless Podman 4.9.3 API socket (round 446): Docker's shape, Podman's
+// licence, `name=rootless`.
+const PODMAN49_COMPAT_INFO = JSON.stringify({ ServerVersion: "4.9.3", ProductLicense: "Apache-2.0", OperatingSystem: "ubuntu", SecurityOptions: ["name=apparmor", "name=seccomp,profile=default", "name=rootless"] });
 const CANARY_PLANS = [
+	// held (issue #452, gate round 3): `local` on a rootless Podman 4.9 through its Docker API, no keeper, and a dead
+	// doctor's network with the RUNNING proxy on it: the detach gate refuses, so nothing is detached and it is said.
+	() => canaryPlan({
+		"docker info --format={{json .}}": { code: 0, output: `${PODMAN49_COMPAT_INFO}\n` },
+		[LS]: { code: 0, output: `${NET}\n` },
+		[`docker network inspect --format {{json .Containers}} ${NET}`]: { code: 0, output: JSON.stringify({ b: { Name: "pi-dispatch-egress-proxy" } }) },
+		"docker inspect --format={{.State.Status}}|{{.HostConfig.NetworkMode}}": { code: 1, output: "Error: No such object: pi-dispatch-netns-keeper" },
+	}),
 	// unlisted: the listing itself fails.
 	() => canaryPlan({ [LS]: { code: 1, output: "" } }),
 	// unreadable: the network is there and its membership will not parse.
@@ -4995,6 +5012,7 @@ test("docs/egress.md's canary rows ARE the table, generated (#379)", () => {
 		removed: { name: "<net>", after: "after removing <probes> and detaching <endpoints>" },
 		gone: { name: "<net>", did: "removed <probes> and detached <endpoints>" },
 		notRemoved: { name: "<net>", command: null },
+		held: { name: "<net>", because: "<why>" },
 	};
 	assert.deepEqual(Object.keys(placeholders), Object.keys(CANARY_LINES), "a shape with no placeholder row is a shape the page cannot describe");
 	const expected = Object.entries(CANARY_LINES).map(([shape, spec]) => {
@@ -6057,6 +6075,8 @@ const mixedPinRun = async (scenario) => {
 					...podmanOnly,
 					"gh auth status": { code: 0, output: ghStatusOutput },
 					"gh auth token": { code: 0, output: "gho_x\n" },
+					// The facts read answers with no body, as it did when this pin was captured (issue #452 keeps it so).
+					"docker info --format={{json .}}": { code: 0, output: "" },
 					"docker info": 0,
 					"docker image inspect --format={{json": RUNNER_ENTRYPOINT,
 					"docker image inspect --format={{.Id}}": { code: 0, output: "sha256:aaaa\n" },
@@ -6084,8 +6104,10 @@ const MIXED_PIN = {
 			"✓ Trigger job image present (my-python:1.2.0)",
 			"✓ Egress proxy running (pi-dispatch-egress-proxy)",
 			"✓ Egress proxy health: healthy",
-			"✓ Egress policy reaches the provider (api.anthropic.com answered, so the whole path works and no key was spent)",
-			"✓ Egress policy denies an unlisted host (the deny direction is the half an allowlist can silently lose)",
+			// Issue #452 (gate round 3): this plan's `docker info` answers with no body, so the detach gate cannot say which
+			// runtime it is and no keeper holds: the canary, whose teardown detaches the running proxy, is not run.
+			"⚠ Egress policy: not proved, and no egress canary was run, because this shell's docker CLI could not say which container runtime it reaches and the rootless network keeper pi-dispatch-netns-keeper does not hold, and on a rootless Podman 4.x detaching the running egress proxy from a network cuts its route out (issue #458)",
+			"    → fix what stops `docker info` answering (which runtime it is decides whether a keeper is needed at all), or start it as the worker's account where its Quadlet unit is installed: systemctl --user reset-failed pi-dispatch-netns-keeper-network.service pi-dispatch-netns-keeper.service; systemctl --user restart pi-dispatch-netns-keeper-network.service pi-dispatch-netns-keeper.service (else `pi-dispatch service install` or `pi-dispatch up` installs it, or start it by hand, docs/podman.md step 6; a container of its name that is not the shipped keeper must be removed first), then re-run doctor",
 			"✓ Jobs run on: local, podman (a trigger that names none runs on local; run.backend selects)",
 			"⚠ local: isolation is ASSERTED by the daemon, not enforced: the daemon answered in a shape nothing here reads (unparseable)",
 			"    → the pid and memory bounds in the job argv are the daemon's to apply, and it is not observed applying them: `pi-dispatch doctor --live` reads pids.max and memory.max off a real container on this daemon. The worker logs its own answer at boot (worker_started.daemonAppliesBounds)",
@@ -7204,7 +7226,7 @@ test("the stale canary sweep works on podman: a dead run's leftover in this acco
 // --- issue #452: the canary sweep on Podman 4.9, which renders no `.Containers` --------------------------------------
 
 /** A Podman answering the canary sweep: `network ls`, the member `ps -a` rows per network, `network exists`, removals. */
-function podmanCanaryDaemon({ nets = {}, exists = () => 0, rm = () => 0 } = {}) {
+function podmanCanaryDaemon({ nets = {}, exists = () => 0, rm = () => 0, version = "5.8.1", keeper = { code: 125, stdout: "", stderr: "no such container" } } = {}) {
 	const calls = [];
 	const run = async (args) => {
 		calls.push(args.join(" "));
@@ -7216,6 +7238,9 @@ function podmanCanaryDaemon({ nets = {}, exists = () => 0, rm = () => 0 } = {}) 
 		if (args[0] === "network" && args[1] === "exists") return { code: exists(args.at(-1)), stdout: "", stderr: "" };
 		if (args[0] === "rm") return { code: rm(args.at(-1)), stdout: "", stderr: "" };
 		if (args[0] === "network" && (args[1] === "disconnect" || args[1] === "rm")) return { code: 0, stdout: "", stderr: "" };
+		// The detach gate's one runtime read (issue #452, gate round 3): Podman 5.8.1 unless a test says otherwise.
+		if (args[0] === "info") return { code: 0, stdout: JSON.stringify({ host: { security: { rootless: true } }, version: { Version: version } }), stderr: "" };
+		if (args[0] === "inspect") return keeper;
 		return { code: 99, stdout: "", stderr: "unmodelled" };
 	};
 	return { run, calls };
@@ -7234,10 +7259,20 @@ test("on podman the canary sweep removes a dead run's probes in EVERY state and 
 		`network exists ${net}`,
 		"rm -f --time=0 pi-dispatch-egress-probe-provider-4242",
 		"rm -f --time=0 pi-dispatch-egress-probe-unlisted-4242",
+		// The detach gate's one runtime read (issue #452, gate round 3): 5.8.1, so no keeper read.
+		"info --format json",
 		`network disconnect -f ${net} pi-dispatch-egress-proxy`,
 		`network disconnect -f ${net} someone-else`,
 		`network rm ${net}`,
 	], "the probes are removed by name, the proxy and the stranger only detached, and the network removed without -f");
+	// On 4.9.3 with no keeper holding, the probes still go (removing one is not the trigger) but nothing is DETACHED, and
+	// the network is kept with a `held` line, the table's own words (issue #452, gate round 3).
+	const old = podmanCanaryDaemon({ version: "4.9.3", nets: { [net]: [["pi-dispatch-egress-proxy", "running"], ["pi-dispatch-egress-probe-provider-4242", "running"]] } });
+	const held = await sweepStaleCanaryNetworks({ run: old.run, pid: 1, isAlive: () => false, endpoint: { local: true }, bin: "podman" });
+	assert.ok(!old.calls.some((c) => c.startsWith("network disconnect") || c.startsWith("network rm")), old.calls.join(" | "));
+	assert.deepEqual(held.map((c) => c.canary?.shape), ["held"]);
+	assert.equal(held[0].label, `podman: Egress canary: ${CANARY_LINES.held.label(held[0].canary.params)}`);
+	assert.match(held[0].label, /is kept with what is running on it, because the rootless network keeper pi-dispatch-netns-keeper does not hold under the rootless Podman 4\.x this shell's podman CLI reaches/);
 	assert.deepEqual(checks.map((c) => c.label), [`podman: Egress canary: removed ${net} (after removing pi-dispatch-egress-probe-provider-4242, pi-dispatch-egress-probe-unlisted-4242 and detaching pi-dispatch-egress-proxy, someone-else), left by an EARLIER doctor run`]);
 	assert.equal(checks[0].label, `podman: Egress canary: ${CANARY_LINES[checks[0].canary.shape].label(checks[0].canary.params)}`);
 	// `venue` still wins where doctor passes it, and `bin` alone gives the same words.
@@ -7648,6 +7683,7 @@ const DOCKER_CANARY_PIN = {
 			"docker network ls --filter name=pi-dispatch-egress-doctor- --format {{.Name}}",
 			"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242",
 			"docker rm -f pi-dispatch-egress-probe-unlisted-4242",
+			"docker info --format={{json .}}",
 			"docker network disconnect -f pi-dispatch-egress-doctor-4242 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-4242",
 			'docker inspect --format={"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}},"image":{{json .Config.Image}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}}} pi-dispatch-egress-proxy',
@@ -7657,7 +7693,6 @@ const DOCKER_CANARY_PIN = {
 			"docker run --rm --name pi-dispatch-egress-probe-unlisted-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(unlisted)>",
 			"docker network disconnect -f pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-7",
-			"docker info --format={{json .}}",
 			"gh auth status",
 			"gh auth token",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
@@ -7715,6 +7750,7 @@ const DOCKER_CANARY_PIN = {
 			"docker network ls --filter name=pi-dispatch-egress-doctor- --format {{.Name}}",
 			"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242",
 			"docker rm -f pi-dispatch-egress-probe-unlisted-4242",
+			"docker info --format={{json .}}",
 			"docker network disconnect -f pi-dispatch-egress-doctor-4242 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-4242",
 			'docker inspect --format={"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}},"image":{{json .Config.Image}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}}} pi-dispatch-egress-proxy',
@@ -7723,7 +7759,6 @@ const DOCKER_CANARY_PIN = {
 			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
 			"docker network disconnect -f pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-7",
-			"docker info --format={{json .}}",
 			"gh auth status",
 			"gh auth token",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
@@ -7782,6 +7817,7 @@ const DOCKER_CANARY_PIN = {
 			"docker network ls --filter name=pi-dispatch-egress-doctor- --format {{.Name}}",
 			"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242",
 			"docker rm -f pi-dispatch-egress-probe-unlisted-4242",
+			"docker info --format={{json .}}",
 			"docker network disconnect -f pi-dispatch-egress-doctor-4242 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-4242",
 			'docker inspect --format={"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}},"image":{{json .Config.Image}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}}} pi-dispatch-egress-proxy',
@@ -7792,7 +7828,6 @@ const DOCKER_CANARY_PIN = {
 			"docker rm -f pi-dispatch-egress-probe-provider-7",
 			"docker network disconnect -f pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-7",
-			"docker info --format={{json .}}",
 			"gh auth status",
 			"gh auth token",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
@@ -7856,6 +7891,7 @@ const DOCKER_CANARY_PIN = {
 			"docker network ls --filter name=pi-dispatch-egress-doctor- --format {{.Name}}",
 			"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242",
 			"docker rm -f pi-dispatch-egress-probe-unlisted-4242",
+			"docker info --format={{json .}}",
 			"docker network disconnect -f pi-dispatch-egress-doctor-4242 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-4242",
 			'docker inspect --format={"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}},"image":{{json .Config.Image}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}}} pi-dispatch-egress-proxy',
@@ -7866,7 +7902,6 @@ const DOCKER_CANARY_PIN = {
 			"docker rm -f pi-dispatch-egress-probe-provider-7",
 			"docker network disconnect -f pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-7",
-			"docker info --format={{json .}}",
 			"gh auth status",
 			"gh auth token",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
@@ -7930,6 +7965,7 @@ const DOCKER_CANARY_PIN = {
 			"docker network ls --filter name=pi-dispatch-egress-doctor- --format {{.Name}}",
 			"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242",
 			"docker rm -f pi-dispatch-egress-probe-unlisted-4242",
+			"docker info --format={{json .}}",
 			"docker network disconnect -f pi-dispatch-egress-doctor-4242 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-4242",
 			'docker inspect --format={"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}},"image":{{json .Config.Image}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}}} pi-dispatch-egress-proxy',
@@ -7940,7 +7976,6 @@ const DOCKER_CANARY_PIN = {
 			"docker rm -f pi-dispatch-egress-probe-provider-7",
 			"docker network disconnect -f pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-7",
-			"docker info --format={{json .}}",
 			"gh auth status",
 			"gh auth token",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
@@ -8147,4 +8182,37 @@ test("retained workspaces are a FACT LINE that says what each holds only when th
 		`✓ 1 retained workspace(s) in ${sandboxDir}, swept after 24h, re-open one with \`pi-dispatch sandbox <jobId>\`; each holds the run's clone plus its prompt.md/event.json (issue text), and PI_SANDBOX_RETENTION_HOURS=0 turns retention off\n`,
 	);
 	assert.equal(one.failed, false);
+});
+
+test("a plain doctor on `local` reaching a rootless Podman 4.9 runs no canary while the keeper does not hold, through the API or podman-docker (#452 gate round 3, L205)", async () => {
+	// MEASURED (gate round 3, c9-doctor-*): the canary's teardown detached the running proxy and cut its route out, through
+	// both routes. Now the ONE detach gate is asked before anything exists, from the run's one `docker info`.
+	const SHIM49 = JSON.stringify({ host: { os: "linux", security: { rootless: true, selinuxEnabled: false }, serviceIsRemote: false }, version: { Version: "4.9.3" } });
+	for (const [route, body] of [["api", PODMAN49_COMPAT_INFO], ["podman-docker", SHIM49]]) {
+		const calls = [];
+		const { out, text } = capture();
+		await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, canaryFixture({ "docker info --format={{json .}}": { code: 0, output: `${body}\n` }, "docker inspect --format={{.State.Status}}|{{.HostConfig.NetworkMode}}": { code: 1, output: "Error: no such container" } }), calls));
+		const lines = calls.map((c) => [c.cmd, ...c.args].join(" "));
+		assert.ok(!lines.some((l) => /network (create|connect|disconnect)/.test(l)), `${route}: no canary object, no detach: ${lines.join(" | ")}`);
+		assert.match(text(), /✗ Egress policy: not proved, and no egress canary was run, because the rootless network keeper pi-dispatch-netns-keeper does not hold under the rootless Podman 4\.x this shell's docker CLI reaches/, route);
+		assert.equal(lines.filter((l) => l.startsWith("docker info --format={{json .}}")).length, 1, `${route}: one runtime read for the run`);
+		// With the keeper holding, the canary runs as ever.
+		const heldCalls = [];
+		const held = capture();
+		await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(held.out, canaryFixture({ "docker info --format={{json .}}": { code: 0, output: `${body}\n` }, "docker inspect --format={{.State.Status}}|{{.HostConfig.NetworkMode}}": { code: 0, output: "running|bridge|pi-dispatch-netns-keeper,\n" } }), heldCalls));
+		assert.ok(heldCalls.some((c) => c.args.slice(0, 2).join(" ") === "network create"), `${route}: the canary ran with the keeper holding`);
+		assert.doesNotMatch(held.text(), /no egress canary was run/);
+	}
+});
+
+test("doctor --live on `local` reaching a rootless Podman 4.9 builds no peer networks while the keeper does not hold (#452 gate round 3, L205)", async () => {
+	const env = liveEnv({ PI_EGRESS: "1" });
+	const daemon = { answered: true, facts: { podman: true, rootless: true, serverVersion: "4.9.3" } };
+	const facts = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: [], daemon, egress: { armed: true, results: [], proxy: "pi-dispatch-egress-proxy", proxyRunning: true } };
+	const calls = [];
+	const seams = { spawn: fakeSpawn({ ...liveOk(), ...livePeersOk({}), "docker inspect --format={{.State.Status}}|{{.HostConfig.NetworkMode}}": { code: 1, output: "" }, ...green }, calls), liveFs: liveFsAs(1001), isAlive: () => false, pid: 1, nonce: "n", jobUserIdentity: LINUX_1001, ...instantClock() };
+	const checks = await liveChecks(env, seams, facts);
+	assert.ok(!calls.some((c) => c.args.slice(0, 2).join(" ") === "network create"), "no peer network");
+	assert.ok(checks.some((c) => /jobToJobIsolation not read back: no peer networks were built, because the rootless network keeper pi-dispatch-netns-keeper does not hold/.test(c.label)), checks.map((c) => c.label).join("\n"));
+	assert.ok(!calls.some((c) => c.args[0] === "info"), "the collection's answer is used, not a second read");
 });

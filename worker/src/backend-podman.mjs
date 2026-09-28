@@ -35,14 +35,15 @@ import { BACKENDS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_CONF_WIDENS_JOB
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { buildPodmanRunArgs } from "./docker-run.mjs";
 import { DEFAULT_EGRESS_PROXY, makeEgressPreflight } from "./egress.mjs";
-import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, STARTED_AT_FORMAT, judgeNetnsKeeper, makeNetnsDetachGuard, netnsKeeperRemedy, podmanNeedsNetnsKeeper } from "./podman-stack.mjs";
+import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, STARTED_AT_FORMAT, judgeNetnsKeeper, netnsKeeperRemedy, podmanNeedsNetnsKeeper } from "./podman-stack.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
-import { DAEMON_FACTS_TIMEOUT_MS, displayVersion } from "./job-user.mjs";
+import { DAEMON_FACTS_TIMEOUT_MS } from "./job-user.mjs";
+import { PODMAN_INFO_ARGS, parsePodmanInfo } from "./daemon-facts.mjs";
+
+// Moved to the leaf `daemon-facts.mjs` (issue #452, gate round 3) and re-exported, so every importer keeps its path.
+export { PODMAN_INFO_ARGS, parsePodmanInfo };
 import { makeRunContainer } from "./run-container.mjs";
 import { MOUNT_KEY, MOUNT_KEY_SAYS, PODMAN_HOOKS_DIRS, confFilesIn, confKeyFinding, fipsFinding, hooksFinding, unreadFileFinding } from "./runtime-observations.mjs";
-
-/** The one facts read. JSON, not a template: a template field one Podman lacks is an error, a missing key is `null`. */
-export const PODMAN_INFO_ARGS = Object.freeze(["info", "--format", "json"]);
 
 /**
  * `docker info`'s bound, reused: `podman info` also walks the store, and a per-job `unknown` retries the job, so a bound a
@@ -69,62 +70,6 @@ const PODMAN_INFO_MAX_BUFFER = 1024 * 1024;
  * except by a stderr line the job could print too, so NOT normalised (a residual the design entry names).
  */
 export const PODMAN_NEVER_STARTED_EXITS = Object.freeze([125, 126, 127]);
-
-/**
- * What `podman info --format json` says, reduced to the facts this venue reads, or `null` when the output is not a JSON
- * object with a `host` object. Every field is `null` when absent or of the wrong type, never a guess: a missing
- * `rootless` must not read as rootless, nor a missing `serviceIsRemote` as local. Nothing else of the body (proxy
- * settings, store paths) survives this function, so nothing else can be logged.
- */
-export function parsePodmanInfo(stdout) {
-	let body;
-	try {
-		body = JSON.parse(String(stdout ?? "").trim());
-	} catch {
-		return null;
-	}
-	if (!body || typeof body !== "object" || Array.isArray(body)) return null;
-	const host = body.host;
-	if (!host || typeof host !== "object" || Array.isArray(host)) return null;
-	const bool = (value) => (typeof value === "boolean" ? value : null);
-	const controllers = Array.isArray(host.cgroupControllers) ? host.cgroupControllers.filter((c) => typeof c === "string" && /^[a-z][a-z0-9_]{0,31}$/.test(c)) : null;
-	return {
-		rootless: bool(host.security?.rootless),
-		serviceIsRemote: bool(host.serviceIsRemote),
-		selinux: bool(host.security?.selinuxEnabled),
-		// "v2" or "v1"; anything else is no fact rather than a string an operator's terminal is handed.
-		cgroupVersion: typeof host.cgroupVersion === "string" && /^v[0-9]{1,2}$/.test(host.cgroupVersion) ? host.cgroupVersion : null,
-		// Issue #453: the cgroup manager Podman actually uses for this call. `cgroupfs` when it was configured so, and when a
-		// configured `systemd` could not reach the account's user manager over D-Bus (Podman then warns and falls back).
-		// A short lower-case word, else no fact.
-		cgroupManager: typeof host.cgroupManager === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(host.cgroupManager) ? host.cgroupManager : null,
-		// The controllers of the CALLING process's own cgroup, as `podman info` reports them. Kept for what it is and for
-		// nothing else: issue #453 measured it listing all five where no bound was applied, so no observation reads it.
-		controllers,
-		version: displayVersion(body.version?.Version),
-		// Issue #429: the container STORE this account's Podman uses (`store.graphRoot`), which moves with HOME,
-		// XDG_DATA_HOME or a storage.conf. Rootless `podman ps -a` over another store answers exit 0 with an EMPTY list
-		// (measured, Podman 5.8.1), so a sandbox opened with another store is invisible to the retention sweep; the
-		// sandbox and the sweep compare it with the one a run recorded. An absolute path with no control character, else
-		// no fact.
-		graphRoot: typeof body.store?.graphRoot === "string" && body.store.graphRoot.length <= 4096 && /^\/[^\u0000-\u001f\u007f]*$/.test(body.store.graphRoot) ? body.store.graphRoot : null,
-	};
-}
-
-/**
- * What this account's Podman is, for `makeNetnsDetachGuard` (issue #452, gate round 2): `{ known, podman: true, rootless,
- * version }` from the same `podman info --format json` read and `parsePodmanInfo` the venue's preflight uses, over the
- * caller's own runner (the reaper's `step`, the sandbox sweep's `run`). Measured on 4.9.3 and 5.8.1: `version.Version`
- * and `host.security.rootless` are there on both.
- */
-export function podmanRuntimeReader(run) {
-	const read = makePodmanInfoReader({ run });
-	return async () => {
-		const answer = await read();
-		if (answer?.answered !== true) return { known: false };
-		return { known: true, podman: true, rootless: answer.info.rootless, version: answer.info.version };
-	};
-}
 
 /**
  * `async () => ({ answered: true, info } | { answered: false, reason, transient })`. `run(args)` is the seam: a bounded
@@ -649,9 +594,7 @@ export function execViaSpawn(spawnFn) {
  * `spawnFn` (spawn-shaped, adapted) are the test seams.
  */
 export function makePodmanReaper({ log, exec, spawnFn } = {}) {
-	// The keeper guard (issue #452 with #458): no running container is detached from a leftover job network while the keeper
-	// does not hold on 4.x, judged over the reaper's own runner and `podman info`'s JSON (`podmanRuntimeReader`).
-	return makeReaper({ log: log ?? (() => {}), bin: "podman", detachGuardFor: (step) => makeNetnsDetachGuard({ run: step, readRuntime: podmanRuntimeReader(step) }), ...(exec ? { exec } : spawnFn ? { exec: execViaSpawn(spawnFn) } : {}) });
+	return makeReaper({ log: log ?? (() => {}), bin: "podman", ...(exec ? { exec } : spawnFn ? { exec: execViaSpawn(spawnFn) } : {}) });
 }
 
 /** The keys `makePodmanBackend` takes; anything else is refused, since a misspelt config key would be silently dropped. */

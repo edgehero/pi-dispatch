@@ -77,6 +77,7 @@ import { PODMAN_PINNED_FLAGS, buildPodmanRunArgs, containerSpec, podmanArgsFromS
 import { observeHost } from "./runtime-observations.mjs";
 import { endpointShown, makeDockerEndpointResolver, quotedShown } from "./backend-local.mjs";
 import { DEFAULT_EGRESS_PROXY, STOPPED_PROXY_STATES, EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, egressArmed, egressCanaryNetwork, egressCanaryProbe, egressEnv, egressProxyName, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
+import { detachBlockedSentence, makeDetachGate, runtimeFromFacts } from "./netns-keeper.mjs";
 import { runLiveProbes } from "./live-probes.mjs";
 import { SANDBOX_TOMBSTONE_STUCK_MS, isSandboxTombstone, sandboxTombstoneAge } from "./sandbox-store.mjs";
 import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
@@ -1022,7 +1023,11 @@ export async function collectChecks(env, seams) {
 	// wired to (a podman job's network is joined to a proxy under the same rootless Podman, read in the podman section
 	// below), and its canary starts containers on a daemon nothing else here uses. Said there, not silently dropped.
 	// Issue #431: that venue's own canary is `runEgressCanary` under podman, run by its `--live` (`podmanLiveChecks`).
-	const egress = localUsed ? await egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpoint }) : [];
+	// ONE `docker info` for this doctor run (issue #452, gate round 3), memoised: the job-user section reads it, and the
+	// egress canary's detach gate reads which runtime answered from the same answer, rather than asking twice.
+	let factsRead = null;
+	const readFactsOnce = () => (factsRead ??= makeDaemonFactsReader({ run: dockerRunVia(spawn, DAEMON_FACTS_TIMEOUT_MS) })());
+	const egress = localUsed ? await egressChecks(env, { ...seams, readFactsOnce }, { dockerCode, imageCode, jobImage, endpoint }) : [];
 	checks.push(...egress);
 	if (facts) {
 		let armed;
@@ -1046,7 +1051,7 @@ export async function collectChecks(env, seams) {
 	// Read BEFORE the backend lines are built (issue #345): the same `docker info` answer is where `isolation` and
 	// `mountSet` are observed, so the backend section and the job-user section speak from one read. Printed after them.
 	// Issue #354: every line it prints is `local: ...`, about a venue this deployment may not run; without local, none.
-	const jobUser = localUsed ? await jobUserChecks(env, seams, { endpoint, dockerCode, imageCode, jobImage }) : { checks: [], forLive: { run: true, user: null }, daemon: null };
+	const jobUser = localUsed ? await jobUserChecks(env, { ...seams, readFactsOnce }, { endpoint, dockerCode, imageCode, jobImage }) : { checks: [], forLive: { run: true, user: null }, daemon: null };
 	// Issue #354: the podman venue's own reads (taken above, with the per-trigger images) are BEFORE the backend lines for
 	// the same reason as the job user's: its observations are what the podman rows of the backend section and the floor judge.
 	// No docker binary at all is an ANSWER for the observations, as it is for the worker (exit 2 under a floor, not a retry).
@@ -3231,7 +3236,17 @@ export const CANARY_LINES = Object.freeze({
 		fix: () => CANARY_LEFTOVER_FIX,
 		label: ({ name, command }) => `the network ${name} could not be removed: ${command}`,
 	},
+	// Issue #452, gate round 3: the detach gate refused, so nothing was detached and the network is left whole. `because` is
+	// `detachBlockedSentence`'s clause, which names the runtime's CLI.
+	held: {
+		tier: "warn",
+		fix: () => CANARY_HELD_FIX,
+		label: ({ name, because }) => `${name} is kept with what is running on it, because ${because}`,
+	},
 });
+
+/** What to do about a `held` leftover: the keeper first, then doctor again, which removes it. */
+const CANARY_HELD_FIX = "start the rootless network keeper as docs/podman.md step 6 shows (pi-dispatch service install or pi-dispatch up installs it), then re-run doctor, which removes the network once the keeper holds";
 
 /**
  * One canary check, built from the table and CARRYING what it was built from.
@@ -3307,7 +3322,7 @@ function forRuntime(text, bin) {
  * required CI job runs rather than only on the lab's. `bin` names the runtime for a caller outside this file, which
  * has no venue constant to hand in; doctor's own two callers pass `venue`.
  */
-export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bin = "docker", venue = canaryVenueFor(bin) }) {
+export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bin = "docker", venue = canaryVenueFor(bin), gate = makeDetachGate(run, { bin: venue.bin }) }) {
 	// ONE QUESTION: can this shell show the daemon is on this host? Only `local === true` can, so remote and
 	// unknown take the same branch. The whole endpoint is passed rather than that boolean because the line
 	// this sweep prints for a daemon it will not touch now NAMES what the CLI resolved, the way
@@ -3414,7 +3429,13 @@ export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bi
 			checks.push(canaryCheck("kept", { name, stuck }, venue));
 			continue;
 		}
-		const outcome = await removeNetworkOrSay(run, { network: name, detach: members.filter((n) => !removed.includes(n)), bin: venue.bin });
+		// Through the ONE detach helper (issue #452, gate round 3), with `names` as the running members: a refusal leaves
+		// the network whole and is said as `held`, on every venue and through every route to Podman.
+		const outcome = await removeNetworkOrSay(run, { network: name, detach: members.filter((n) => !removed.includes(n)), running: names, bin: venue.bin, gate });
+		if (outcome.blocked) {
+			checks.push(canaryCheck("held", { name, because: detachBlockedSentence(outcome.blocked, venue.bin) }, venue));
+			continue;
+		}
 		// `" and "` between the two clauses, for the reason given at the vanished-network line below: each half
 		// is itself a comma-separated list, so a comma between them marks no boundary. This is the COMMON
 		// line, and it kept the defect for a round after its rarer sibling was fixed.
@@ -3572,8 +3593,11 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// loss: the objects are doctor's own ephemera and the victim degrades to a `probe did not run` with
 	// `reached: null`, never a false verdict. Stated in `INT-EGRESS-POLICY-CONTRACT` beside the sibling's,
 	// rather than guarded, because nothing this shell can ask distinguishes the two containers.
-	const canaryDocker = (args) => liveRunVia(spawn)(args, { timeoutMs: CANARY_STEP_TIMEOUT_MS });
-	checks.push(...(await sweepStaleCanaryNetworks({ run: canaryDocker, pid, isAlive, endpoint })));
+	const canaryDocker = (args, opts) => liveRunVia(spawn)(args, { timeoutMs: opts?.timeoutMs ?? CANARY_STEP_TIMEOUT_MS });
+	// ONE detach gate for this doctor run (issue #452, gate round 3), shared by the sweep and the canary: `local` can be a
+	// rootless Podman 4.x reached as `docker`, where both of them detach the running proxy.
+	const gate = makeDetachGate(canaryDocker, { bin: "docker", ...(seams.readFactsOnce ? { readRuntime: async () => runtimeFromFacts(await seams.readFactsOnce()) } : {}) });
+	checks.push(...(await sweepStaleCanaryNetworks({ run: canaryDocker, pid, isAlive, endpoint, gate })));
 
 	// `docker inspect` on the container, not `ps`: it answers present-vs-absent and running-vs-stopped in
 	// one call, and those are two different fixes. The FIELD_SEP habit is image-preflight.mjs's -- neither
@@ -3686,7 +3710,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// script. docker's probes keep `runCmdCapture` (its 30 s bound, stderr merged, SIGTERM at the bound) rather than the
 	// bounded step runner, so docker's spawns, and what a probe that never launched leaves for the teardown, are exactly
 	// what they were: pinned in doctor.test.mjs against the output and argv captured before the move.
-	const canary = await runEgressCanary({ run: liveRunVia(spawn), probeRun: (args) => runCmdCapture(spawn, "docker", args), proxy, image: jobImage, pid });
+	const canary = await runEgressCanary({ run: liveRunVia(spawn), probeRun: (args) => runCmdCapture(spawn, "docker", args), proxy, image: jobImage, pid, gate });
 	// Through a stale proxy the canary reads THAT proxy's policy (exec round 3): a failure is the proxy's to fix, never
 	// this deployment's allowlist, which it may not even mount.
 	checks.push(...(staleRunning ? canary.checks.map((c) => (c.ok ? c : { ...c, fix: `the canary ran through ${proxy}, which is not this deployment's proxy (above), so this says nothing about egress-allowlist.conf: ${replaceFix}, then re-run doctor` })) : canary.checks));
@@ -3769,7 +3793,7 @@ const CANARY_NO_WORKSPACE = "/nonexistent/pi-dispatch-egress-canary-mounts-nothi
  * whose builder refuses a keep-id argv without one. What it does NOT check is the proxy: every caller has read the
  * proxy's state on its own runtime first, and runs this only when it is up and the job image is present.
  */
-export async function runEgressCanary({ run, bin = "docker", proxy, image, pid = process.pid, user = null, probeRun = null }) {
+export async function runEgressCanary({ run, bin = "docker", proxy, image, pid = process.pid, user = null, probeRun = null, gate = makeDetachGate((args, opts) => run(args, { timeoutMs: opts?.timeoutMs ?? CANARY_STEP_TIMEOUT_MS }), { bin }) }) {
 	const venue = canaryVenueFor(bin);
 	const probe = probeRun ?? ((args) => run(args, { timeoutMs: bin === "podman" ? PODMAN_FIRST_START_TIMEOUT_MS : RUN_TIMEOUTS.cmd }));
 	const checks = [];
@@ -3782,6 +3806,18 @@ export async function runEgressCanary({ run, bin = "docker", proxy, image, pid =
 	// Probe containers this run may have left BEHIND its CLI, see the `code === null` branch below.
 	const unfinished = [];
 	let created = false;
+	// FIRST, before anything exists (issue #452, gate round 3): this canary's own teardown detaches the running proxy, which
+	// on a rootless Podman 4.x without a holding keeper cuts its route out, through `podman`, `podman-docker` or the Docker
+	// API alike (measured). So the detach gate every teardown goes through is asked up front, and a refusal runs nothing:
+	// a read-back that breaks what it reads is worse than none. The teardown asks the SAME gate, whose answer is memoised.
+	const blockedBy = await gate({ running: true });
+	if (blockedBy) {
+		// ✗ where the runtime is KNOWN to be a rootless Podman 4.x with no keeper, which the podman section's keeper line
+		// also fails; ⚠ where it could not be read at all, the class doctor warns on everywhere else.
+		const unread = blockedBy === "runtime-unreadable";
+		checks.push({ ok: false, ...(unread ? { warn: true } : {}), label: `${venue.prefix}Egress policy: not proved, and no egress canary was run, because ${detachBlockedSentence(blockedBy, bin)}`, fix: `${unread ? `fix what stops \`${bin} info\` answering (which runtime it is decides whether a keeper is needed at all), or ` : ""}${NETNS_KEEPER_FIX}, then re-run doctor` });
+		return { checks, results: readingsOf(checks) };
+	}
 	try {
 		// OWNED BEFORE THE CREATE, and inside the try, which is the change issue #350 asked for: the create used
 		// to sit above the `try`, so a create that timed out having actually landed skipped the teardown
@@ -3904,11 +3940,12 @@ export async function runEgressCanary({ run, bin = "docker", proxy, image, pid =
 		if (stuck.length > 0) {
 			checks.push(canaryCheck("kept", { name: net, stuck }, venue));
 		} else if (created) {
-			const outcome = await removeNetworkOrSay(docker, { network: net, detach: [proxy], bin });
+			const outcome = await removeNetworkOrSay(docker, { network: net, detach: [proxy], bin, gate });
 			// The COMMAND lives in the label and the generic advice in the fix, which is the shape `--live`'s own
 			// leftover notes already use: `render` prints a fix line only when a check is not ok, and an ok check
 			// never prints one at all.
-			if (!outcome.removed) checks.push(canaryCheck("notRemoved", { name: net, command: outcome.command }, venue));
+			if (outcome.blocked) checks.push(canaryCheck("held", { name: net, because: detachBlockedSentence(outcome.blocked, bin) }, venue));
+			else if (!outcome.removed) checks.push(canaryCheck("notRemoved", { name: net, command: outcome.command }, venue));
 		}
 	}
 	return { checks, results: readingsOf(checks) };
@@ -4510,7 +4547,7 @@ export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCod
 	const platform = ids.platform ?? seams.platform;
 	// The worker's bound, not the endpoint read's 5 s: `docker info` is the slow read on a busy host, and a doctor that
 	// gave up sooner would call undecidable a host the worker decides.
-	const readFacts = makeDaemonFactsReader({ run: dockerRunVia(spawn, DAEMON_FACTS_TIMEOUT_MS) });
+	const readFacts = seams.readFactsOnce ?? makeDaemonFactsReader({ run: dockerRunVia(spawn, DAEMON_FACTS_TIMEOUT_MS) });
 	const resolve = makeJobUserResolver({ readFacts, platform, ...(ids.release !== undefined ? { release: ids.release } : {}), euid: ids.euid, egid: ids.egid, ...(stat ? { stat } : {}) });
 	const { decision, socket, daemon } = await resolve({ endpoint, key: "doctor" });
 	let defaultIsLocal = true;
@@ -5162,6 +5199,9 @@ export async function liveChecks(env, seams, facts) {
 		home,
 		sessionsDir: env.PI_SESSIONS_DIR || null,
 		egress: facts.egress,
+		// The collection's one `docker info` answer, for the detach gate (issue #452, gate round 3); where the collection did
+		// not read one, the gate reads it itself.
+		...(facts.daemon ? { readRuntime: async () => runtimeFromFacts(facts.daemon) } : {}),
 		pid,
 		nonce,
 		run: liveRunVia(spawn),
@@ -5303,6 +5343,8 @@ export async function podmanLiveChecks(env, seams, facts) {
 		home,
 		sessionsDir: env.PI_SESSIONS_DIR || null,
 		egress,
+		// The section's own `podman info` answer, for the detach gate (issue #452, gate round 3): one read per run.
+		readRuntime: async () => (podman.info ? { podman: true, rootless: podman.info.rootless, version: podman.info.version } : null),
 		pid,
 		nonce,
 		run,
@@ -5362,12 +5404,15 @@ async function podmanEgressCanary({ podman, readInfo, run, image, pid, isAlive, 
 		return { checks: [{ ok: false, warn: true, label: "podman: Egress policy: not proved, because this shell's podman CLI is not observed to point at this host, so no canary container was started", fix: "fix what the podman lines above say about this account's Podman service (CONTAINER_HOST, or a service that did not answer), then re-run `pi-dispatch doctor --live`" }], results: [] };
 	}
 	// The service is this host's own, which is `endpoint.local === true` in the sweep's terms: its pid test is sound here.
-	const checks = await sweepStaleCanaryNetworks({ run: (args) => run(args, { timeoutMs: CANARY_STEP_TIMEOUT_MS }), pid, isAlive, endpoint: { local: true }, venue: CANARY_PODMAN });
+	const canaryRun = (args, opts) => run(args, { timeoutMs: opts?.timeoutMs ?? CANARY_STEP_TIMEOUT_MS });
+	// One detach gate for this pass, shared with the canary below (issue #452, gate round 3).
+	const gate = makeDetachGate(canaryRun, { bin: "podman", readRuntime: async () => (again.info ? { podman: true, rootless: again.info.rootless, version: again.info.version } : null) });
+	const checks = await sweepStaleCanaryNetworks({ run: canaryRun, pid, isAlive, endpoint: { local: true }, venue: CANARY_PODMAN, gate });
 	if (podman.egress.proxyRunning !== true || podman.imagePresent !== true) return { checks, results: [] };
 	// Announced, as `runLiveProbes` announces its own containers: these start before it, and a cold first keep-id start
 	// can take half a minute each, which is a long silence on an operator's terminal.
 	announce(`starting ${CANARY_PROBE_SLUGS.map((slug) => egressCanaryProbe(slug, pid)).join(" and ")} from ${image} (as the job user ${podman.user}) on the --internal network ${egressCanaryNetwork(pid)}, with ${podman.egress.proxy} attached, to read the egress allowlist back; both are removed when the canary ends`);
-	const canary = await runEgressCanary({ run, bin: "podman", proxy: podman.egress.proxy, image, pid, user: podman.user });
+	const canary = await runEgressCanary({ run, bin: "podman", proxy: podman.egress.proxy, image, pid, user: podman.user, gate });
 	return { checks: [...checks, ...canary.checks], results: canary.results };
 }
 

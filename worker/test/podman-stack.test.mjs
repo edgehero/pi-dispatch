@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_EGRESS_PROXY } from "../src/egress.mjs";
-import { ALL_QUADLET_FILES, NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_NOW_FORMAT, makeNetnsDetachGuard, QUADLET_FILES, managerEnvRefusal, unquoteShowEnvironment, planStack, podmanNeedsNetnsKeeper, quadletDir, readStackKeys, stackComponents } from "../src/podman-stack.mjs";
+import { ALL_QUADLET_FILES, DETACH_GATE_READ_MAX_BUFFER, DETACH_GATE_READ_TIMEOUT_MS, NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_NOW_FORMAT, detachBlockedSentence, makeDetachGate, runtimeFromFacts, QUADLET_FILES, managerEnvRefusal, unquoteShowEnvironment, planStack, podmanNeedsNetnsKeeper, quadletDir, readStackKeys, stackComponents } from "../src/podman-stack.mjs";
 import { runService } from "../src/service.mjs";
 
 /**
@@ -954,40 +954,99 @@ test("nit: a restart for the rules copy alone names that file, and render names 
 	assert.doesNotMatch(render.text(), /http_access/, "the squid configuration itself is not printed");
 });
 
-test("makeNetnsDetachGuard: a RUNNING detach waits for a keeper that holds NOW on rootless Podman 4.x, and nothing else is read (#452 with #458, gate round 2)", async () => {
-	const guard = (runtime, keeper, calls = []) =>
-		makeNetnsDetachGuard({
-			run: async (args) => (calls.push(args.join(" ")), keeper),
-			readRuntime: async () => (calls.push("runtime"), runtime),
-		});
+test("makeDetachGate: a RUNNING detach on a rootless Podman 4.x waits for a keeper that holds NOW, and nothing else is read (#452, gate round 3)", async () => {
+	// A runner that answers the runtime read and the keeper read from a table, recording every argv and its options.
+	const runner = ({ info = { code: 0, stdout: "" }, keeper = { code: 125, stdout: "" } } = {}) => {
+		const calls = [];
+		const run = async (args, opts) => {
+			calls.push({ line: args.join(" "), opts });
+			if (args[0] === "info") return typeof info === "function" ? info() : info;
+			if (args[0] === "inspect") return keeper;
+			return { code: 99, stdout: "" };
+		};
+		return { run, calls };
+	};
 	const holding = { code: 0, stdout: `running|bridge|${NETNS_KEEPER},\n` };
 	const absent = { code: 125, stdout: "" };
-	const podman49 = { known: true, podman: true, rootless: true, version: "4.9.3" };
-	// Nothing running to detach: not one read (a stopped proxy is not in the namespace).
-	const idle = [];
-	assert.equal(await guard(podman49, absent, idle)({ running: false }), null);
-	assert.deepEqual(idle, []);
-	// Rootless 4.x: only a keeper holding now allows it, read with the no-clock format.
-	const seen = [];
-	assert.equal(await guard(podman49, holding, seen)({ running: true }), null);
-	assert.deepEqual(seen, ["runtime", `inspect ${NETNS_KEEPER_NOW_FORMAT} ${NETNS_KEEPER}`]);
-	assert.ok(!NETNS_KEEPER_NOW_FORMAT.includes("StartedAt"), "no age rule for a detach");
-	assert.equal(await guard(podman49, absent)({ running: true }), "keeper-not-holding");
-	assert.equal(await guard({ ...podman49, version: null })({ running: true }).catch(() => "x"), "keeper-not-holding", "an unreported version is 4.x");
-	for (const stdout of [`exited|bridge|${NETNS_KEEPER},`, `running|none|none,`, `running|bridge|other,`]) {
-		assert.equal(await guard(podman49, { code: 0, stdout })({ running: true }), "keeper-not-holding", stdout);
+	// The runtime shapes, as measured on 4.9.3 and 5.8.1 (round 446): podman's own JSON, Podman's shape through
+	// podman-docker, and Docker's shape with Podman's licence from the real docker CLI on Podman's API socket.
+	const podman = (version, rootless = true) => ({ code: 0, stdout: JSON.stringify({ host: { security: { rootless } }, version: { Version: version } }) });
+	const compat = (version, rootless = true) => ({ code: 0, stdout: JSON.stringify({ ServerVersion: version, ProductLicense: "Apache-2.0", OperatingSystem: "ubuntu", SecurityOptions: ["name=seccomp,profile=default", ...(rootless ? ["name=rootless"] : [])] }) });
+	const engine = (ServerVersion) => ({ code: 0, stdout: JSON.stringify({ ServerVersion, OperatingSystem: "Ubuntu 24.04", SecurityOptions: ["name=seccomp,profile=builtin"] }) });
+	// Nothing running to detach: not one read.
+	const idle = runner({ info: podman("4.9.3") });
+	assert.equal(await makeDetachGate(idle.run, { bin: "podman" })({ running: false }), null);
+	assert.deepEqual(idle.calls, []);
+	// Rootless 4.x on every route: only a keeper holding now allows it, read with the no-clock format and the readers' bound.
+	for (const [bin, info] of [["podman", podman("4.9.3")], ["docker", podman("4.9.3")], ["docker", compat("4.9.3")]]) {
+		const blocked = runner({ info });
+		assert.equal(await makeDetachGate(blocked.run, { bin })(), "keeper-not-holding", `${bin} ${info.stdout}`);
+		assert.deepEqual(blocked.calls.map((c) => c.line), [bin === "podman" ? "info --format json" : "info --format={{json .}}", `inspect ${NETNS_KEEPER_NOW_FORMAT} ${NETNS_KEEPER}`]);
+		assert.deepEqual(blocked.calls[0].opts, { timeoutMs: DETACH_GATE_READ_TIMEOUT_MS, maxBuffer: DETACH_GATE_READ_MAX_BUFFER });
+		assert.equal(await makeDetachGate(runner({ info, keeper: holding }).run, { bin })(), null, "a keeper holding NOW is enough, with no age rule");
 	}
-	// Docker Engine, rootful Podman and 5.x: no keeper read.
-	for (const runtime of [{ known: true, podman: false, rootless: false, version: "27.4.0" }, { ...podman49, rootless: false }, { ...podman49, version: "5.8.1" }]) {
-		const calls = [];
-		assert.equal(await guard(runtime, absent, calls)({ running: true }), null, JSON.stringify(runtime));
-		assert.deepEqual(calls, ["runtime"]);
+	assert.ok(!NETNS_KEEPER_NOW_FORMAT.includes("StartedAt"));
+	assert.deepEqual([DETACH_GATE_READ_TIMEOUT_MS, DETACH_GATE_READ_MAX_BUFFER], [15_000, 1024 * 1024]);
+	// Docker Engine, rootful Podman and 5.x: no keeper read. Pinned (M4, gate round 3): a Docker Engine whose version is
+	// not a number ("dev", as a source build reports) and carries no Podman licence is NOT Podman, whatever its version
+	// says, and neither is a Docker Engine with no version at all.
+	for (const [bin, info] of [
+		["docker", engine("27.4.0")],
+		["docker", engine("dev")],
+		["docker", engine("27.4.0 (a build with spaces, so no display version: null)")],
+		// A ROOTLESS Docker Engine reporting "dev" (or no readable version), with no Podman licence: Docker, not Podman, so
+		// no keeper, even though its version would read as "needs one" and its rootless flag cannot let it through.
+		["docker", { code: 0, stdout: JSON.stringify({ ServerVersion: "dev", OperatingSystem: "Ubuntu", SecurityOptions: ["name=rootless"] }) }],
+		["docker", { code: 0, stdout: JSON.stringify({ ServerVersion: "27.4.0 custom", OperatingSystem: "Ubuntu", SecurityOptions: ["name=rootless"] }) }],
+		["docker", { code: 0, stdout: JSON.stringify({ ServerVersion: "dev", OperatingSystem: "Docker Desktop" }) }],
+		["docker", compat("4.9.3", false)],
+		["docker", compat("5.8.1")],
+		["podman", podman("4.9.3", false)],
+		["podman", podman("5.8.1")],
+	]) {
+		const r = runner({ info });
+		assert.equal(await makeDetachGate(r.run, { bin })(), null, `${bin} ${info.stdout}`);
+		assert.deepEqual(r.calls.map((c) => c.line.split(" ")[0]), ["info"], `no keeper read: ${info.stdout}`);
 	}
-	// A runtime that could not be read: allowed only by a keeper that holds, else its own token; a throw is the same.
-	assert.equal(await guard({ known: false }, holding)({ running: true }), null);
-	assert.equal(await guard({ known: false }, absent)({ running: true }), "runtime-unreadable");
-	const throwing = makeNetnsDetachGuard({ run: async () => { throw new Error("spawn failed"); }, readRuntime: async () => { throw new Error("spawn failed"); } });
-	assert.equal(await throwing({ running: true }), "runtime-unreadable");
-	// `running` defaults to true: a caller that does not say is judged as the dangerous case.
-	assert.equal(await guard(podman49, absent)(), "keeper-not-holding");
+	// A runtime the read cannot identify: allowed only by a keeper that holds, else its own token; a throw is the same.
+	for (const info of [{ code: 125, stdout: "" }, { code: 0, stdout: "not json" }, { code: null, stdout: "" }]) {
+		assert.equal(await makeDetachGate(runner({ info }).run)(), "runtime-unreadable", JSON.stringify(info));
+		assert.equal(await makeDetachGate(runner({ info, keeper: holding }).run)(), null);
+	}
+	const throwing = async () => {
+		throw new Error("spawn failed");
+	};
+	assert.equal(await makeDetachGate(throwing)(), "runtime-unreadable");
+});
+
+test("makeDetachGate reads ONCE per pass, an unanswered read included, and takes a runtime a caller already read (#452, gate round 3)", async () => {
+	// L207/G1 (gate round 3, measured): the round-2 guard re-read the runtime for every leftover network, so a `docker info`
+	// that hangs cost one bound per network (three leftovers, 90 s at boot). One gate is one pass.
+	let reads = 0;
+	const hang = async (args) => {
+		if (args[0] === "info") {
+			reads += 1;
+			return { code: null, stdout: "" };
+		}
+		return { code: 125, stdout: "" };
+	};
+	const gate = makeDetachGate(hang);
+	for (let i = 0; i < 3; i++) assert.equal(await gate({ running: true }), "runtime-unreadable");
+	assert.equal(reads, 1, "the unanswered read is remembered for the pass");
+	// Concurrent askers share the one read too.
+	let concurrent = 0;
+	const slow = makeDetachGate(async (args) => (args[0] === "info" ? (concurrent++, { code: 0, stdout: JSON.stringify({ ServerVersion: "27.4.0", OperatingSystem: "x" }) }) : { code: 125, stdout: "" }));
+	await Promise.all([slow(), slow(), slow()]);
+	assert.equal(concurrent, 1);
+	// A runtime handed in is used instead of a read of its own (doctor's one `docker info` per run).
+	const asked = [];
+	const handed = makeDetachGate(async (args) => (asked.push(args[0]), { code: 125, stdout: "" }), { readRuntime: async () => ({ podman: true, rootless: true, version: "4.9.3" }) });
+	assert.equal(await handed(), "keeper-not-holding");
+	assert.deepEqual(asked, ["inspect"], "only the keeper is read");
+	assert.equal(await makeDetachGate(async () => ({ code: 125, stdout: "" }), { readRuntime: async () => null })(), "runtime-unreadable");
+	assert.deepEqual(runtimeFromFacts({ answered: true, facts: { podman: true, rootless: true, serverVersion: "4.9.3" } }), { podman: true, rootless: true, version: "4.9.3" });
+	assert.equal(runtimeFromFacts({ answered: false, reason: "timeout" }), null);
+	// The clause each token becomes names the CLI.
+	assert.match(detachBlockedSentence("keeper-not-holding", "docker"), /rootless Podman 4\.x this shell's docker CLI reaches/);
+	assert.match(detachBlockedSentence("runtime-unreadable", "podman"), /this shell's podman CLI could not say which container runtime/);
 });

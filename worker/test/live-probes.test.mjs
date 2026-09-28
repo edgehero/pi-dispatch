@@ -312,6 +312,9 @@ function mountinfoFor(destinations, extra = []) {
 }
 
 /** A docker CLI that answers like the measured one, recording every argv. `over` replaces one step's answer. */
+// The detach gate held open (issue #452, gate round 3), for tests of the sweep's own MECHANICS; the gate has its own.
+const OPEN = async () => null;
+
 function fakeDocker(over = {}, { id = ID } = {}) {
 	const calls = [];
 	let volumes = [];
@@ -398,6 +401,10 @@ function fakeDocker(over = {}, { id = ID } = {}) {
 				return { code: 125, stdout: "", stderr: `docker: Error response from daemon: No such image: ${args.at(-1)}.\n` };
 			case "image":
 				return { code: 1, stdout: "", stderr: "" };
+			// The detach gate's runtime read (issue #452, gate round 3): Docker Engine, so no keeper is read and the peers run.
+			// Podman's `info --format json` gets Podman 5.8.1's shape, which needs no keeper either.
+			case "info":
+				return { code: 0, stdout: `${JSON.stringify(args[2] === "json" ? { host: { security: { rootless: true } }, version: { Version: "5.8.1" } } : { ServerVersion: "27.4.0", OperatingSystem: "Ubuntu", SecurityOptions: ["name=seccomp,profile=default"] })}\n`, stderr: "" };
 			case "rm":
 				return { code: 0, stdout: `${args.at(-1)}\n`, stderr: "" };
 			case "network-ls":
@@ -913,7 +920,7 @@ test("sweepStaleNetworks removes only a dead run's peer networks: never one a pr
 		return { code: 0, stdout: "" };
 	};
 	const notes = [];
-	const swept = await sweepStaleNetworks({ step, pid: 300, isAlive: (p) => p === 200, notes });
+	const swept = await sweepStaleNetworks({ step, pid: 300, isAlive: (p) => p === 200, notes, gate: OPEN });
 	assert.deepEqual(swept, ["network pi-dispatch-live-peer1-100-abc123-net (after detaching an-old-proxy-name, some-other-container)", "network pi-dispatch-live-peer2-100-abc123-net"], "every endpoint it detached is said: one may be a container this sweep did not make");
 	assert.deepEqual(calls.filter((a) => a[1] === "disconnect" || a[1] === "rm"), [
 		["network", "disconnect", "-f", "pi-dispatch-live-peer1-100-abc123-net", "an-old-proxy-name"],
@@ -924,11 +931,11 @@ test("sweepStaleNetworks removes only a dead run's peer networks: never one a pr
 	assert.deepEqual(notes, []);
 	const stays = async (args) => (args[1] === "ls" ? { code: 0, stdout: "pi-dispatch-live-peer1-100-abc123-net" } : args[1] === "inspect" ? { code: 0, stdout: JSON.stringify({ e9: { Name: "some-other-container" } }) } : { code: args[1] === "rm" ? 1 : 0, stdout: "" });
 	const stayNotes = [];
-	assert.deepEqual(await sweepStaleNetworks({ step: stays, pid: 300, isAlive: () => false, notes: stayNotes }), [], "a network that would not go is not reported as removed");
+	assert.deepEqual(await sweepStaleNetworks({ step: stays, pid: 300, isAlive: () => false, notes: stayNotes, gate: OPEN }), [], "a network that would not go is not reported as removed");
 	assert.deepEqual(stayNotes, ["the stale network pi-dispatch-live-peer1-100-abc123-net (after detaching some-other-container) could not be removed: docker network rm pi-dispatch-live-peer1-100-abc123-net"]);
 	const unreadable = async (args) => (calls.push(args), args[1] === "ls" ? { code: 0, stdout: "pi-dispatch-live-peer1-100-abc123-net" } : { code: 1, stdout: "" });
 	const before = calls.length;
-	assert.deepEqual(await sweepStaleNetworks({ step: unreadable, pid: 300, isAlive: () => false }), []);
+	assert.deepEqual(await sweepStaleNetworks({ step: unreadable, pid: 300, isAlive: () => false, gate: OPEN }), []);
 	assert.deepEqual(calls.slice(before).map((a) => a[1]), ["ls", "inspect"], "a network whose attachments cannot be read is left alone");
 });
 
@@ -951,7 +958,7 @@ test("on podman the peer sweep reads members with `ps -a`, detaches a STOPPED me
 		return { code: 0, stdout: "" };
 	};
 	const notes = [];
-	const swept = await sweepStaleNetworks({ step, pid: 300, isAlive: () => false, notes, bin: "podman" });
+	const swept = await sweepStaleNetworks({ step, pid: 300, isAlive: () => false, notes, bin: "podman", gate: OPEN });
 	assert.deepEqual(swept, ["network pi-dispatch-live-peer1-100-abc123-net (after detaching some-other-container, pi-dispatch-egress-proxy)", "network pi-dispatch-live-peer2-100-abc123-net"]);
 	assert.deepEqual(calls.filter((a) => a[1] === "disconnect" || a[1] === "rm"), [
 		["network", "disconnect", "-f", "pi-dispatch-live-peer1-100-abc123-net", "some-other-container"],
@@ -965,7 +972,7 @@ test("on podman the peer sweep reads members with `ps -a`, detaches a STOPPED me
 	for (const code of [1, 125]) {
 		const quiet = [];
 		const s = async (args) => (quiet.push(args), args[1] === "ls" ? { code: 0, stdout: "pi-dispatch-live-peer1-100-abc123-net" } : args[1] === "exists" ? { code, stdout: "" } : { code: 0, stdout: "" });
-		assert.deepEqual(await sweepStaleNetworks({ step: s, pid: 300, isAlive: () => false, bin: "podman" }), [], String(code));
+		assert.deepEqual(await sweepStaleNetworks({ step: s, pid: 300, isAlive: () => false, bin: "podman", gate: OPEN }), [], String(code));
 		assert.ok(!quiet.some((a) => a[1] === "disconnect" || a[1] === "rm"), String(code));
 	}
 });
@@ -1332,7 +1339,7 @@ test("bin names the runtime in what the operator is told to run, and docker's wo
 	assert.match((await runLiveProbes(probeArgs(fakeDocker(), { dockerReachable: false }))).reason, /^the Docker daemon did not answer/);
 	const stays = async (args) => (args[1] === "ls" ? { code: 0, stdout: "pi-dispatch-live-peer1-100-abc123-net" } : args[1] === "inspect" ? { code: 0, stdout: "{}" } : { code: args[1] === "rm" ? 1 : 0, stdout: "" });
 	const notes = [];
-	await sweepStaleNetworks({ step: stays, pid: 300, isAlive: () => false, notes, bin: "podman" });
+	await sweepStaleNetworks({ step: stays, pid: 300, isAlive: () => false, notes, bin: "podman", gate: OPEN });
 	assert.deepEqual(notes, ["the stale network pi-dispatch-live-peer1-100-abc123-net could not be removed: podman network rm pi-dispatch-live-peer1-100-abc123-net"]);
 	// And runLiveProbes hands its bin to that sweep.
 	const staleNet = fakeDocker({
@@ -1447,12 +1454,29 @@ test("the stale live-network sweep never detaches the proxy while the keeper is 
 		return { code: 0, stdout: "" };
 	};
 	const notes = [];
-	const swept = await sweepStaleNetworks({ step, pid: 7, isAlive: () => false, notes, bin: "podman", keeperBlocked: "the keeper is not running" });
+	const swept = await sweepStaleNetworks({ step, pid: 7, isAlive: () => false, notes, bin: "podman", keeperBlocked: "the keeper is not running", gate: OPEN });
 	assert.ok(!calls.some((c) => c.startsWith("network disconnect")), calls.join("\n"));
 	assert.deepEqual(swept, ["network pi-dispatch-live-peer2-99-abc-net"]);
 	assert.match(notes[0], /^the stale network pi-dispatch-live-peer1-99-abc-net was left with pi-dispatch-egress-proxy attached, because the keeper is not running/);
 	const free = [];
-	const again = await sweepStaleNetworks({ step: async (args) => (free.push(args.join(" ")), step(args)), pid: 7, isAlive: () => false, bin: "podman" });
+	const again = await sweepStaleNetworks({ step: async (args) => (free.push(args.join(" ")), step(args)), pid: 7, isAlive: () => false, bin: "podman", gate: OPEN });
 	assert.ok(free.includes("network disconnect -f pi-dispatch-live-peer1-99-abc-net pi-dispatch-egress-proxy"), "without the block it detaches as before");
 	assert.equal(again.length, 2);
+});
+
+test("the peer sweep goes through the one detach gate: a refusal detaches nothing and says so (#452 gate round 3)", async () => {
+	const calls = [];
+	const step = async (args) => {
+		calls.push(args.join(" "));
+		if (args[0] === "network" && args[1] === "ls") return { code: 0, stdout: "pi-dispatch-live-peer1-100-abc123-net\n" };
+		if (args[1] === "inspect") return { code: 0, stdout: JSON.stringify({ e: { Name: "pi-dispatch-egress-proxy" } }) };
+		return { code: 0, stdout: "" };
+	};
+	const notes = [];
+	const asked = [];
+	const swept = await sweepStaleNetworks({ step, pid: 300, isAlive: () => false, notes, gate: async (o) => (asked.push(o), "keeper-not-holding") });
+	assert.deepEqual(swept, []);
+	assert.deepEqual(asked, [{ running: true }]);
+	assert.ok(!calls.some((c) => c.startsWith("network disconnect") || c.startsWith("network rm")), calls.join(" | "));
+	assert.deepEqual(notes, ["the stale network pi-dispatch-live-peer1-100-abc123-net was left with pi-dispatch-egress-proxy attached, because the rootless network keeper pi-dispatch-netns-keeper does not hold under the rootless Podman 4.x this shell's docker CLI reaches, where detaching the running egress proxy from a network cuts its route out (issue #458); the next `pi-dispatch doctor --live` with the keeper running removes it"]);
 });

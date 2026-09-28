@@ -670,6 +670,9 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    Podman 4.9 and 5.x alike: the sweeps read what is on a network with `podman ps -a --filter network=<net>`,
    because Podman 4.9's `network inspect` has no member list (issue #452), and a probe or proxy that has stopped
    is dealt with too, because Podman will not remove a network while any container, running or not, is still on it.
+   On Podman 4.x nothing RUNNING is ever detached from a network while the rootless network keeper does not hold,
+   whichever CLI reaches it (`podman`, `podman-docker`, or the real docker CLI on its API socket): a leftover is then
+   kept and said, and doctor runs no canary and no peer networks, with a line saying why (issue #452).
    `.github/scripts/podman-conformance.mjs` runs the same canary, and then the same sweep over two leftovers it
    makes.
    With `PI_BACKENDS=podman` (no `local`), doctor runs no `docker` command at all, so a host without Docker reads

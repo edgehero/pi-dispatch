@@ -634,6 +634,8 @@ function binRecorder({ runCode, fs, psState = "running" }) {
 				return;
 			}
 			if (args[0] === "ps") child.stdout.emit("data", `${CID} ${psState}\n`);
+			// The detach gate's runtime read at the teardown (issue #452, gate round 3): 5.8.1 or Docker Engine, no keeper.
+			if (args[0] === "info") child.stdout?.emit?.("data", JSON.stringify(cmd === "podman" ? { host: { security: { rootless: true } }, version: { Version: "5.8.1" } } : { ServerVersion: "27.4.0", OperatingSystem: "Ubuntu", SecurityOptions: [] }));
 			child.emit("close", 0);
 		});
 		return child;

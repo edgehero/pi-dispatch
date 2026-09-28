@@ -21,7 +21,7 @@ import { cronFingerprint } from "./fingerprint.mjs";
 import { makeHostRegistry } from "./host-registry.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { createWorker, JOB_TIMEOUT_MS } from "./index.mjs";
-import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, dockerRuntimeReader, jobUserRefusal, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
+import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, jobUserRefusal, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
 import { makeCollectChain } from "./outbox.mjs";
 import { containerPackagePaths, readStageManifest } from "./packages.mjs";
 import { makeCleanup, makeForgePreparers, makePrepareWorkspace } from "./prepare.mjs";
@@ -38,7 +38,6 @@ import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue } from "./queue.mjs";
-import { makeNetnsDetachGuard } from "./podman-stack.mjs";
 import { endpointShown, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
 import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
@@ -742,9 +741,7 @@ export async function startWorker(
 		// Issue #354: podman's the same way and for the same reason, `makeReaper` with `bin: "podman"`, so the sweep lists
 		// the store this account's jobs actually ran in. Docker's listing says nothing about it, and the reverse.
 		backendReaps = {
-			// The keeper guard (issue #452, gate round 2): `local` can be a rootless Podman 4.x reached as `docker`, where a
-			// detach of the running proxy is #458's trigger. Over the reaper's own step and `docker info`'s facts.
-			...(localBlessed ? { [DEFAULT_BACKEND]: makeReaperFn({ log, detachGuardFor: (step) => makeNetnsDetachGuard({ run: step, readRuntime: dockerRuntimeReader(step) }) }) } : {}),
+			...(localBlessed ? { [DEFAULT_BACKEND]: makeReaperFn({ log }) } : {}),
 			...(podmanBlessed ? { [PODMAN_BACKEND]: makePodmanReaperFn({ log }) } : {}),
 			...Object.fromEntries(extraBackends.map((b) => [b?.name, b?.reap])),
 		};

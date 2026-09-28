@@ -26,6 +26,7 @@ import { promisify } from "node:util";
 import { scrubCredentials } from "./redact.mjs";
 import { BACKENDS, DEFAULT_BACKEND, DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
 import { DEFAULT_EGRESS_PROXY, ENDPOINT_LISTED_STATES, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
+import { makeDetachGate } from "./netns-keeper.mjs";
 import { isDeterminateFsCode } from "./transient.mjs";
 
 const execDocker = promisify(execFile);
@@ -411,7 +412,7 @@ export function isJobNamespace(name) {
  * for containers that may still be running and let another host start more alongside them. That is a spend
  * overrun rather than a tidy-up, which is why the catch below returns false rather than swallowing.
  */
-export function makeReaper({ log, exec = execReaperBounded, bin = "docker", detachGuardFor = null }) {
+export function makeReaper({ log, exec = execReaperBounded, bin = "docker" }) {
 	// Issue #354: every spawn below names `bin`, the venue's CLI, so a podman venue's reaper enumerates, removes and
 	// sweeps in the store its jobs actually ran in. A mixed pass (listing under one binary, removing under another) would
 	// report `reaped: true` for a host whose containers it never saw, and the scope-claim sweep spends on that answer.
@@ -435,11 +436,6 @@ export function makeReaper({ log, exec = execReaperBounded, bin = "docker", deta
 		}
 	};
 
-	// Issue #452 with #458: on a Podman that needs the rootless network keeper, detaching the RUNNING proxy is the trigger
-	// that cuts its route out. Both production reapers hand a guard (`makeNetnsDetachGuard`): the podman venue's over
-	// `podman info`, and `local`'s (start.mjs) over `docker info`, since `local` can be Podman too, through `podman-docker`
-	// or its Docker API. Built over `step`, so its reads are this reaper's runtime and never throw. None injected: none asked.
-	const detachGuard = typeof detachGuardFor === "function" ? detachGuardFor(step) : null;
 
 	/**
 	 * One leftover network. The old body was a bare `network rm` in a `try {} catch {}` whose comment said an
@@ -471,7 +467,7 @@ export function makeReaper({ log, exec = execReaperBounded, bin = "docker", deta
 	 * which costs a leftover network and a line. The container half `rm -f`s what it finds, so widening it
 	 * the same way would destroy an operator's stopped container and a crashed job's forensic one.
 	 */
-	async function reapNetwork(network) {
+	async function reapNetwork(network, gate) {
 		const { ok, names, absent } = await networkEndpoints(step, network, { bin });
 		// Gone between the `ls` and now. Nothing was left behind, so there is nothing to say: the ONE silence
 		// this sweep allows, and only in the daemon's own words for a network.
@@ -528,13 +524,11 @@ export function makeReaper({ log, exec = execReaperBounded, bin = "docker", deta
 		// The parked proxy is detached too: it is attached to this network and `.Containers` does not list it,
 		// so without naming it here the `rm` would fail "has active endpoints" on a member nothing detached.
 		const detach = [...names, ...parked.filter((name) => name === DEFAULT_EGRESS_PROXY)];
-		// Left and said while the keeper does not hold (issue #452 with #458); the next boot with it holding removes it. Only a
-		// RUNNING member is the trigger (a stopped proxy is not in the namespace), so the guard reads nothing without one.
-		if (detachGuard) {
-			const why = await detachGuard({ running: detach.some((name) => names.includes(name)) });
-			if (why) return log("network_not_reaped", { network, reason: why });
-		}
-		const outcome = await removeNetworkOrSay(step, { network, detach, bin });
+		// Through the detach gate, as every detach is (issue #452 with #458, gate round 3): `names` are the RUNNING members, so
+		// a stopped proxy asks nothing, and a refusal leaves the network whole and said; the next boot with the keeper
+		// holding removes it. The gate is this pass's, so its runtime read is made once however many networks there are.
+		const outcome = await removeNetworkOrSay(step, { network, detach, running: names, bin, gate });
+		if (outcome.blocked) return log("network_not_reaped", { network, reason: outcome.blocked });
 		if (outcome.absent) return;
 		// `detached` is named rather than counted: one of them may be something this worker never attached.
 		if (outcome.removed) return log("reaped_network", { network, detached: outcome.detached });
@@ -570,7 +564,9 @@ export function makeReaper({ log, exec = execReaperBounded, bin = "docker", deta
 			// the container loop above, which is the fix for #360 item 7: this used to be an anchored
 			// `^pi-job-.*-net$`, so the two loops gave different answers to "what is ours" and a network under
 			// the prefix without the suffix outlived the container it belonged to. See `isJobNamespace`.
-			for (const net of nets.split("\n").map((n) => n.trim()).filter(isJobNamespace)) await reapNetwork(net);
+			// ONE gate for the pass (issue #452, gate round 3): a runtime that hangs costs one bound, not one per network.
+			const gate = makeDetachGate(step, { bin });
+			for (const net of nets.split("\n").map((n) => n.trim()).filter(isJobNamespace)) await reapNetwork(net, gate);
 			// Whether the enumeration HAPPENED, which the scope-claim sweep depends on: it may only delete a
 			// claim naming this host once this host has actually established that it holds no containers.
 			return { reaped: true };
@@ -778,7 +774,7 @@ export function classifyEndpointFailure({ error = null, code = null } = {}) {
  * (`retention-sweep.mjs` records the same). A separate timer settles the promise regardless, kills with
  * SIGKILL and destroys the pipes. REF'D, because at boot nothing else may be holding the event loop.
  */
-export function execDockerBounded(args, { timeoutMs = 5000, execFileFn = execFile, maxBuffer = 64 * 1024, bin = "docker" } = {}) {
+export function execDockerBounded(args, { timeoutMs = 5000, execFileFn = execFile, maxBuffer = 64 * 1024, bin = "docker", withStderr = false } = {}) {
 	return new Promise((resolve) => {
 		let settled = false;
 		let child = null;
@@ -802,8 +798,12 @@ export function execDockerBounded(args, { timeoutMs = 5000, execFileFn = execFil
 		try {
 			// No `env`: the endpoint that matters is the one the job's own `docker run` will use, and that spawn
 			// inherits this process's environment. Passing an env here would ask about a different CLI.
-			child = execFileFn(bin, [...args], { killSignal: "SIGKILL", maxBuffer }, (err, stdout) => {
-				finish({ code: err ? (typeof err.code === "number" ? err.code : null) : 0, stdout: String(stdout ?? ""), error: err ?? null });
+			// `stderr` only for a caller that ASKS (`withStderr`, issue #452, gate round 3): `execFile` passes it to the callback
+			// and never puts it on the error, so the sandbox sweep's runner, which reads `error.stderr`, saw an empty string
+			// and the podman-docker `.Containers` fallback never fired there (measured). Not by default: stderr can repeat an
+			// unparseable DOCKER_HOST with its credentials (issue #339), and no other caller reads it.
+			child = execFileFn(bin, [...args], { killSignal: "SIGKILL", maxBuffer }, (err, stdout, stderr) => {
+				finish({ code: err ? (typeof err.code === "number" ? err.code : null) : 0, stdout: String(stdout ?? ""), ...(withStderr ? { stderr: String(stderr ?? "") } : {}), error: err ?? null });
 			});
 		} catch (err) {
 			finish({ code: null, stdout: "", error: err });

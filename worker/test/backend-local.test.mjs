@@ -294,7 +294,9 @@ test("the bounded runner passes NO env, and settles on its own timer when the CL
 // conversation with it: `network rm` REJECTS while a network still has endpoints, exactly as docker does
 // (measured on 27.4.0), and `network disconnect` empties one. A replayed script would pass whatever order
 // the code used.
-function fakeDockerExec({ containers = [], nets = {}, stopped = {}, fail = {} } = {}) {
+const ENGINE_INFO = JSON.stringify({ ServerVersion: "27.4.0", OperatingSystem: "Ubuntu", SecurityOptions: ["name=seccomp,profile=default"] });
+const PODMAN58_INFO = JSON.stringify({ host: { security: { rootless: true } }, version: { Version: "5.8.1" } });
+function fakeDockerExec({ containers = [], nets = {}, stopped = {}, fail = {}, runtime = { docker: ENGINE_INFO, podman: PODMAN58_INFO }, keeper = null } = {}) {
 	const calls = [];
 	const state = new Map(Object.entries(nets).map(([n, members]) => [n, [...members]]));
 	// MEMBERS THE DAEMON DOES NOT LIST IN `.Containers`: `{ "<network>": [["name", "exited"], ...] }`. A
@@ -320,6 +322,11 @@ function fakeDockerExec({ containers = [], nets = {}, stopped = {}, fail = {} } 
 		}
 		if (key === "rm -f") return { stdout: "", stderr: "" };
 		if (key === "network ls") return { stdout: [...state.keys()].join("\n"), stderr: "" };
+		// The detach gate's one runtime read per pass (issue #452, gate round 3): Docker Engine for docker, Podman 5.8.1 for
+		// podman, the two answers under which no keeper is read, unless the fixture says otherwise.
+		if (args[0] === "info" && args[1] === "--format={{json .}}") return { stdout: `${runtime.docker}\n`, stderr: "" };
+		if (args[0] === "info" && args[1] === "--format" && args[2] === "json") return { stdout: `${runtime.podman}\n`, stderr: "" };
+		if (args[0] === "inspect" && String(args[1]).startsWith("--format={{.State.Status}}|")) return keeper ? { stdout: `${keeper}\n`, stderr: "" } : reject(125, "Error: no such container");
 		// Podman's half of the endpoint read (issue #452): exit 0 when the network is there, 1 with nothing printed
 		// when it is not (measured on 4.9.3 and 5.8.1), which `promisify(execFile)` turns into a rejection.
 		if (key === "network exists") return state.has(args.at(-1)) ? { stdout: "", stderr: "" } : reject(1, "");
@@ -542,7 +549,7 @@ test("nothing the reaper logs about a network carries the CLI's own text (#339, 
 	const { exec } = fakeDockerExec({ nets: { "pi-job-f-net": ["some-proxy"] }, fail: { "network rm": "Failed to initialize: parse \"ssh://bob:pa?ss@remote\"" } });
 	const { log, lines } = reaperLog();
 	await makeReaper({ log, exec })();
-	const reasons = new Set(["unreadable", "job-container-attached", "rm-failed", "containers-unreadable", "container-attached-not-running"]);
+	const reasons = new Set(["unreadable", "job-container-attached", "rm-failed", "containers-unreadable", "container-attached-not-running", "keeper-not-holding", "runtime-unreadable"]);
 	for (const [event, fields] of lines) {
 		// `reaper_skipped` is exempt from the CLOSED-TOKEN rule and only from that. Its reason is a fault's
 		// own prose, deliberately, because at most of the twelve sites that share this treatment the message
@@ -799,6 +806,8 @@ test("the podman reaper reads a leftover job network's members with `ps -a`, nev
 		"ps -a --filter network=pi-job-a-net --format {{.Names}}\t{{.State}}",
 		"network exists pi-job-a-net",
 		"ps -a --filter network=pi-job-a-net --format {{.Names}}\t{{.State}}",
+		// The detach gate's one runtime read for this pass (issue #452, gate round 3): 5.8.1, so no keeper read.
+		"info --format json",
 		"network disconnect -f pi-job-a-net pi-dispatch-egress-proxy",
 		"network rm pi-job-a-net",
 	]);
@@ -886,5 +895,38 @@ test("the boot reaper's steps are bounded: 30 s each by default, and a step past
 	assert.ok(Date.now() - started < 5000);
 	// And makeReaper uses it by default: a source pin, since the default spawns the real CLI.
 	const src = readFileSync(new URL("../src/backend-local.mjs", import.meta.url), "utf8");
-	assert.match(src, /export function makeReaper\(\{ log, exec = execReaperBounded, bin = "docker", detachGuardFor = null \}\)/);
+	assert.match(src, /export function makeReaper\(\{ log, exec = execReaperBounded, bin = "docker" \}\)/);
+});
+
+test("the boot reaper asks the ONE detach gate, once per pass, on docker as on podman: local on a rootless Podman 4.9 detaches nothing running without a keeper (#452, gate round 3)", async () => {
+	// The real docker CLI on a rootless Podman 4.9.3 API socket (measured shape: Docker's, with Podman's licence and
+	// `name=rootless`), three leftover job networks each holding the RUNNING proxy, and no keeper.
+	const COMPAT49 = JSON.stringify({ ServerVersion: "4.9.3", ProductLicense: "Apache-2.0", OperatingSystem: "ubuntu", SecurityOptions: ["name=seccomp,profile=default", "name=rootless"] });
+	const nets = { "pi-job-a-net": ["pi-dispatch-egress-proxy"], "pi-job-b-net": ["pi-dispatch-egress-proxy"], "pi-job-c-net": ["pi-dispatch-egress-proxy"] };
+	const blocked = fakeDockerExec({ nets, runtime: { docker: COMPAT49, podman: PODMAN58_INFO } });
+	const blockedLog = reaperLog();
+	assert.deepEqual(await makeReaper({ log: blockedLog.log, exec: blocked.exec })(), { reaped: true });
+	assert.deepEqual(blockedLog.lines.map(([e, f]) => [e, f.network, f.reason]), [
+		["network_not_reaped", "pi-job-a-net", "keeper-not-holding"],
+		["network_not_reaped", "pi-job-b-net", "keeper-not-holding"],
+		["network_not_reaped", "pi-job-c-net", "keeper-not-holding"],
+	]);
+	assert.ok(!blocked.calls.some((c) => c.startsWith("network disconnect") || c.startsWith("network rm")), blocked.calls.join(" | "));
+	// ONE runtime read and ONE keeper read for the whole pass (L207/G1: a hanging read cost 30 s per network).
+	assert.equal(blocked.calls.filter((c) => c.startsWith("info ")).length, 1);
+	assert.equal(blocked.calls.filter((c) => c.startsWith("inspect ")).length, 1);
+	// The keeper holding now: all three reaped, still one read each.
+	const held = fakeDockerExec({ nets, runtime: { docker: COMPAT49, podman: PODMAN58_INFO }, keeper: "running|bridge|pi-dispatch-netns-keeper," });
+	const heldLog = reaperLog();
+	await makeReaper({ log: heldLog.log, exec: held.exec })();
+	assert.deepEqual(heldLog.lines.map(([e]) => e), ["reaped_network", "reaped_network", "reaped_network"]);
+	assert.equal(held.calls.filter((c) => c.startsWith("info ")).length, 1);
+	// A runtime read that never answers is remembered for the pass too: one bound, not one per network.
+	let infos = 0;
+	const hang = fakeDockerExec({ nets });
+	const hangExec = async (bin, args) => (args[0] === "info" ? (infos++, Promise.reject(Object.assign(new Error("killed"), { killed: true, code: null }))) : hang.exec(bin, args));
+	const hangLog = reaperLog();
+	await makeReaper({ log: hangLog.log, exec: hangExec })();
+	assert.equal(infos, 1);
+	assert.deepEqual(hangLog.lines.map(([, f]) => f.reason), ["runtime-unreadable", "runtime-unreadable", "runtime-unreadable"]);
 });

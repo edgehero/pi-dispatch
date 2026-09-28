@@ -3195,21 +3195,3 @@ test("a TERMINAL netns-keeper-not-holding failure comments the keeper's fixed se
 	await settleListeners();
 	assert.deepEqual(posted, []);
 });
-
-test("local's boot reaper is built with the keeper guard over its own step and `docker info`'s facts (#452 gate round 2)", { skip }, async () => {
-	let opts = null;
-	const makeReaper = (o) => ((opts = o), async () => ({ reaped: true }));
-	await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), makeReaper });
-	assert.equal(typeof opts?.detachGuardFor, "function");
-	// Driven with a step that answers as the real docker CLI against a rootless Podman 4.9 API (Docker's shape with
-	// Podman's licence, measured) and has no keeper: a running detach is refused; Docker Engine is let through unread.
-	const answer = (info) => async (args) => {
-		if (args[0] === "info") return { code: 0, stdout: `${info}\n`, stderr: "" };
-		if (args[0] === "inspect") return { code: 1, stdout: "", stderr: "No such object" };
-		return { code: 99, stdout: "", stderr: "" };
-	};
-	const podman49 = JSON.stringify({ ServerVersion: "4.9.3", ProductLicense: "Apache-2.0", OperatingSystem: "ubuntu", SecurityOptions: ["name=rootless"] });
-	assert.equal(await opts.detachGuardFor(answer(podman49))({ running: true }), "keeper-not-holding");
-	const engine = JSON.stringify({ ServerVersion: "27.4.0", ProductLicense: "Community Engine", OperatingSystem: "Ubuntu", SecurityOptions: ["name=seccomp,profile=default"] });
-	assert.equal(await opts.detachGuardFor(answer(engine))({ running: true }), null);
-});

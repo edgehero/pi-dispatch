@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { makeDetachGate } from "../src/netns-keeper.mjs";
 import { test } from "node:test";
-import { DEFAULT_EGRESS_PROXY, createJobNetwork, createJobNetworkWith, egressArmed, egressEnv, egressProxyUrl, makeEgressPreflight, networkAbsentInDaemonWords, networkEndpoints, networkExists, networkNameFor, removeJobNetwork, removeJobNetworkWith, removeNetworkOrSay } from "../src/egress.mjs";
+import { DEFAULT_EGRESS_PROXY, createJobNetwork, createJobNetworkWith, detachEndpoints, egressArmed, egressEnv, egressProxyUrl, makeEgressPreflight, networkAbsentInDaemonWords, networkEndpoints, networkExists, networkNameFor, removeJobNetwork, removeJobNetworkWith, removeNetworkOrSay } from "../src/egress.mjs";
 
 // No skip guard, deliberately: like image-preflight.mjs this module imports nothing but
 // node:child_process, and it decides whether a budget slot is spent. A money gate must not have
@@ -12,6 +13,9 @@ import { DEFAULT_EGRESS_PROXY, createJobNetwork, createJobNetworkWith, egressArm
  * match wins, so "network create" and "network connect" can be planned apart. A missing key means "not
  * launchable" (error event), which is how a docker that is not on PATH behaves.
  */
+// The detach gate held open (issue #452, gate round 3), for the tests of the MECHANICS below; the gate itself has its own.
+const OPEN = async () => null;
+
 function fakeSpawn(calls, plan, stdout = "") {
 	return (cmd, args, opts) => {
 		calls.push({ cmd, args, opts });
@@ -160,7 +164,7 @@ test("removeJobNetwork detaches before removing, and never throws on a failing t
 	const calls = [];
 	// It runs in a `finally` after the container has already exited. Its code is the job's answer, and a
 	// teardown fault must not rewrite it.
-	await removeJobNetwork(fakeSpawn(calls, { "network disconnect": 1, "network rm": 1 }), { network: "pi-job-x-net" });
+	await removeJobNetwork(fakeSpawn(calls, { "network disconnect": 1, "network rm": 1 }), { network: "pi-job-x-net", gate: OPEN });
 	assert.deepEqual(
 		calls.map((c) => c.args.slice(0, 2).join(" ")),
 		["network disconnect", "network rm"],
@@ -197,11 +201,11 @@ test("the With forms run the job path's exact sequence over any runner, and a ru
 	// not a second copy of how one is built.
 	const viaSpawn = [];
 	await createJobNetwork(fakeSpawn(viaSpawn, { "network create": 0, "network connect": 0 }), { network: "n", proxy: "p" });
-	await removeJobNetwork(fakeSpawn(viaSpawn, { "network disconnect": 0, "network rm": 0 }), { network: "n", proxy: "p" });
+	await removeJobNetwork(fakeSpawn(viaSpawn, { "network disconnect": 0, "network rm": 0 }), { network: "n", proxy: "p", gate: OPEN });
 	const viaRunner = [];
 	const runner = async (args) => (viaRunner.push(args), { code: 0 });
 	assert.equal(await createJobNetworkWith(runner, { network: "n", proxy: "p" }), true);
-	assert.equal(await removeJobNetworkWith(runner, { network: "n", proxy: "p" }), true);
+	assert.equal(await removeJobNetworkWith(runner, { network: "n", proxy: "p", gate: OPEN }), true);
 	assert.deepEqual(viaRunner, viaSpawn.map((c) => c.args));
 	assert.deepEqual(viaRunner[3], ["network", "rm", "n"], "removed without -f, so a network something else is on stays");
 
@@ -213,8 +217,8 @@ test("the With forms run the job path's exact sequence over any runner, and a ru
 		throw new Error("spawn EMFILE");
 	};
 	assert.equal(await createJobNetworkWith(throwing, { network: "n", proxy: "p" }), false);
-	assert.equal(await removeJobNetworkWith(throwing, { network: "n", proxy: "p" }), false);
-	assert.equal(await removeJobNetworkWith(async (a) => ({ code: a[1] === "rm" ? 1 : 0 }), { network: "n", proxy: "p" }), false, "a network that would not go says so");
+	assert.equal(await removeJobNetworkWith(throwing, { network: "n", proxy: "p", gate: OPEN }), false);
+	assert.equal(await removeJobNetworkWith(async (a) => ({ code: a[1] === "rm" ? 1 : 0 }), { network: "n", proxy: "p", gate: OPEN }), false, "a network that would not go says so");
 });
 
 // --- the shared network-removal rule (issues #357, #352) ---------------------------------------------
@@ -249,7 +253,7 @@ test("removeNetworkOrSay detaches what the CALLER names, never -f, and says what
 		if (args[1] === "inspect") return { code: 1, stdout: "", stderr: "Cannot connect to the Docker daemon" };
 		return { code: 0, stdout: "", stderr: "" };
 	};
-	const out = await removeNetworkOrSay(run, { network: "n", detach: ["p1", "p2"] });
+	const out = await removeNetworkOrSay(run, { network: "n", detach: ["p1", "p2"], gate: OPEN });
 	assert.deepEqual(out, { removed: false, absent: false, detached: ["p1", "p2"], command: "docker network rm n" });
 	assert.deepEqual(calls, ["network disconnect -f n p1", "network disconnect -f n p2", "network rm n", "network inspect n"]);
 	assert.ok(!calls.some((c) => c === "network rm -f n"), "never `network rm -f`: it would pull a network out from under a live endpoint");
@@ -257,7 +261,7 @@ test("removeNetworkOrSay detaches what the CALLER names, never -f, and says what
 
 test("removeNetworkOrSay is silent when the daemon says the network is gone (#357)", async () => {
 	const run = async (args) => (args[1] === "rm" ? { code: 1, stdout: "", stderr: "network n not found" } : { code: 1, stdout: "", stderr: "Error response from daemon: network n not found" });
-	assert.deepEqual(await removeNetworkOrSay(run, { network: "n" }), { removed: true, absent: true, detached: [], command: null });
+	assert.deepEqual(await removeNetworkOrSay(run, { network: "n", gate: OPEN }), { removed: true, absent: true, detached: [], command: null });
 });
 
 test("networkEndpoints reads the Name field, and an unreadable answer is not an empty one (#357)", async () => {
@@ -299,7 +303,7 @@ test("`detached` names what actually happened, never what was attempted (#357)",
 		if (args[1] === "rm") return { code: 0, stdout: "", stderr: "" };
 		return { code: 0, stdout: "", stderr: "" };
 	};
-	const out = await removeNetworkOrSay(run, { network: "n", detach: ["went", "stuck"] });
+	const out = await removeNetworkOrSay(run, { network: "n", detach: ["went", "stuck"], gate: OPEN });
 	assert.deepEqual(out.detached, ["went"], "the one that did not detach is not claimed");
 });
 
@@ -310,7 +314,7 @@ test("bin names every spawn of the job-path network helpers and the egress prefl
 		const calls = [];
 		const spawnFn = fakeSpawn(calls, { network: 0, inspect: 1, info: 0 });
 		assert.equal(await createJobNetwork(spawnFn, { network: "pi-job-1-net", ...seam }), true);
-		await removeJobNetwork(spawnFn, { network: "pi-job-1-net", ...seam });
+		await removeJobNetwork(spawnFn, { network: "pi-job-1-net", ...seam, gate: OPEN });
 		assert.equal(await networkExists(spawnFn, "pi-job-1-net", seam), true);
 		assert.deepEqual(await makeEgressPreflight({ armed: true, spawnFn, ...seam })(), { proxyMissing: DEFAULT_EGRESS_PROXY });
 		assert.equal(calls.length, 7, "create, connect, disconnect, rm, inspect, and the preflight's inspect and info");
@@ -519,4 +523,57 @@ test("the proxy denies a listed name resolving to this host's loopback or link-l
 	// And the allowlist itself is read with `-n`: without it squid reverse-resolves every unlisted IP-literal request, a
 	// PTR query into a zone the job picks (measured, round 2).
 	assert.deepEqual(lines.filter((line) => /^acl allowed\s/.test(line)), ['acl allowed dstdomain -n "/etc/pi-dispatch/allowlist.conf"']);
+});
+
+// --- issue #452, gate round 3: the ONE detach helper, and the gate every teardown asks through it ---------------------
+
+const COMPAT49 = JSON.stringify({ ServerVersion: "4.9.3", ProductLicense: "Apache-2.0", OperatingSystem: "ubuntu", SecurityOptions: ["name=rootless"] });
+
+test("detachEndpoints asks the gate FIRST, with whether anything running is among them, and a refusal detaches nothing (#452 gate round 3)", async () => {
+	const calls = [];
+	const run = async (args) => (calls.push(args.join(" ")), { code: 0, stdout: "" });
+	await assert.rejects(detachEndpoints(run, { network: "n", endpoints: ["p"] }), /a detach gate is required/, "no caller can leave the gate out");
+	const asked = [];
+	const refuse = async (o) => (asked.push(o), "keeper-not-holding");
+	assert.deepEqual(await detachEndpoints(run, { network: "n", endpoints: ["p", "q"], gate: refuse }), { blocked: "keeper-not-holding", detached: [] });
+	assert.deepEqual(asked, [{ running: true }], "every endpoint counts as running when the caller does not say");
+	assert.deepEqual(calls, []);
+	// Only STOPPED endpoints: the gate is told so, and here answers as the real one does.
+	const real = makeDetachGate(async (a) => (calls.push(a.join(" ")), { code: 0, stdout: COMPAT49 }));
+	assert.deepEqual(await detachEndpoints(run, { network: "n", endpoints: ["p"], running: [], gate: real }), { blocked: null, detached: ["p"] });
+	assert.deepEqual(calls, ["network disconnect -f n p"], "a stopped endpoint is detached with nothing read");
+});
+
+test("a job's teardown through the spawn path asks the gate over the same CLI: on a rootless Podman 4.9 with no keeper it detaches and removes nothing (#452 gate round 3)", async () => {
+	for (const [bin, body] of [["podman", JSON.stringify({ host: { security: { rootless: true } }, version: { Version: "4.9.3" } })], ["docker", COMPAT49]]) {
+		const calls = [];
+		const ok = await removeJobNetwork(fakeSpawn(calls, { info: 0, inspect: 125, "network disconnect": 0, "network rm": 0 }, body), { network: "pi-job-x-net", bin });
+		assert.equal(ok, false, "the network is left whole, for the reaper once the keeper holds");
+		assert.deepEqual(calls.map((c) => c.args[0]), ["info", "inspect"], `${bin}: only the two reads`);
+		assert.ok(calls.every((c) => c.cmd === bin));
+		// Captured and bounded, since a teardown in a `finally` must not hang on a wedged daemon.
+		assert.equal(calls[0].opts.stdio[1], "pipe");
+	}
+	// Docker Engine: the job path's two steps as ever, after the one read.
+	const calls = [];
+	assert.equal(await removeJobNetwork(fakeSpawn(calls, { info: 0, "network disconnect": 0, "network rm": 0 }, JSON.stringify({ ServerVersion: "27.4.0", OperatingSystem: "Ubuntu" })), { network: "pi-job-x-net" }), true);
+	assert.deepEqual(calls.map((c) => c.args.slice(0, 2).join(" ")), ["info --format={{json .}}", "network disconnect", "network rm"]);
+	// A runtime read that does not answer (the runner's own bound killed it) fails closed, and nothing is touched.
+	const touched = [];
+	const gate = makeDetachGate(async (args) => (args[0] === "info" || args[0] === "inspect" ? { code: null, stdout: "" } : (touched.push(args), { code: 0 })));
+	assert.equal(await removeJobNetworkWith(async (args) => (touched.push(args), { code: 0 }), { network: "n", gate }), false);
+	assert.deepEqual(touched, []);
+});
+
+test("removeNetworkOrSay says `blocked` and touches nothing when the gate refuses, and passes the caller's running list (#452 gate round 3)", async () => {
+	const calls = [];
+	const run = async (args) => (calls.push(args.join(" ")), { code: 0, stdout: "" });
+	const asked = [];
+	const gate = async (o) => (asked.push(o), o.running ? "runtime-unreadable" : null);
+	assert.deepEqual(await removeNetworkOrSay(run, { network: "n", detach: ["proxy"], running: ["proxy"], gate }), { removed: false, absent: false, detached: [], command: null, blocked: "runtime-unreadable" });
+	assert.deepEqual(calls, []);
+	// A stopped proxy only: not asked as running, detached, removed.
+	const out = await removeNetworkOrSay(run, { network: "n", detach: ["proxy"], running: [], gate });
+	assert.deepEqual([out.removed, out.detached], [true, ["proxy"]]);
+	assert.deepEqual(asked.map((o) => o.running), [true, false]);
 });

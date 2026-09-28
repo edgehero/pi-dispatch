@@ -4,15 +4,15 @@ import { basename, join } from "node:path";
 import { release as osRelease } from "node:os";
 import { promisify } from "node:util";
 import { execDockerBounded, makeDockerEndpointResolver } from "./backend-local.mjs";
-import { PODMAN_CONF_WIDENS_JOB, PODMAN_JOB_USER_FIX, decidePodmanJobUser, judgePodmanVenue, keeperPreflight, makePodmanInfoReader, podmanRuntimeReader, resolvePodmanImageUser } from "./backend-podman.mjs";
+import { PODMAN_CONF_WIDENS_JOB, PODMAN_JOB_USER_FIX, decidePodmanJobUser, judgePodmanVenue, keeperPreflight, makePodmanInfoReader, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { DEFAULT_BACKEND, PODMAN_BACKEND, UNATTRIBUTED_BACKEND, parseBackendFloor, parseBackendList } from "./backends.mjs";
 import { configError } from "./config.mjs";
 import { assertJobUser, CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { buildDockerRunArgs, buildPodmanRunArgs, insideDir } from "./docker-run.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
-import { decideJobUser, dockerRuntimeReader, JOB_USER_FIX, makeDaemonFactsReader, relabelsPrivateMounts, resolveImageUser, socketFacts } from "./job-user.mjs";
+import { decideJobUser, JOB_USER_FIX, makeDaemonFactsReader, relabelsPrivateMounts, resolveImageUser, socketFacts } from "./job-user.mjs";
 import { DEFAULT_EGRESS_PROXY, NETWORK_SUFFIX, createJobNetwork, egressArmed, egressEnv, egressProxyName, networkEndpoints, networkExists, networkNameFor, removeJobNetwork, removeNetworkOrSay } from "./egress.mjs";
-import { makeNetnsDetachGuard } from "./podman-stack.mjs";
+import { makeDetachGate } from "./netns-keeper.mjs";
 import { isSandboxTombstone, readManifest, readRetained, sandboxDeadline, sandboxEntryName } from "./sandbox-store.mjs";
 
 /**
@@ -407,10 +407,15 @@ async function defaultPodmanStore() {
  * for `close`, so a CLI wedged on a dead socket never settles. Its rejection carries `stderr` on the error,
  * which the "network is not there" rule needs and the bounded shape does not surface on its own.
  */
-function boundedRuntime(bin) {
-	return async function bounded(args) {
-		const { code, stdout, error } = await execDockerBounded(args, { timeoutMs: 10_000, bin });
-		return { code, stdout: String(stdout ?? ""), stderr: String(error?.stderr ?? "") };
+export function boundedRuntime(bin, { execFileFn } = {}) {
+	// `opts` (issue #452, gate round 3): the detach gate's runtime read asks with the facts readers' own bound (15 s,
+	// 1 MiB), which a `podman info` body needs; every network verb keeps the 10 s and 64 KiB it always had. `stderr` is
+	// the CLI's own, which `execDockerBounded` now returns: `execFile` hands it to the callback, never onto the error, so
+	// reading `error.stderr` got an empty string and the podman-docker `.Containers` fallback never fired here.
+	return async function bounded(args, opts = {}) {
+		// `withStderr`: matched by the "not found" and the podman-docker fallback rules, never logged.
+		const { code, stdout, stderr } = await execDockerBounded(args, { timeoutMs: opts.timeoutMs ?? 10_000, ...(opts.maxBuffer ? { maxBuffer: opts.maxBuffer } : {}), bin, withStderr: true, ...(execFileFn ? { execFileFn } : {}) });
+		return { code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") };
 	};
 }
 
@@ -510,7 +515,7 @@ function missingRetained() {
  * Returns `{ swept, notes }` rather than logging, so the reaper owns the log vocabulary and this stays a
  * pure-ish function over its runner.
  */
-export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime(bin), proxy = DEFAULT_EGRESS_PROXY, detachGuard = makeNetnsDetachGuard({ run, readRuntime: bin === "podman" ? podmanRuntimeReader(run) : dockerRuntimeReader(run) }) } = {}) {
+export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime(bin), proxy = DEFAULT_EGRESS_PROXY } = {}) {
 	// `bin` (issue #429) is the one runtime this sweeper lists, inspects and removes in: a sweep that listed under one
 	// CLI and removed under another would be the mixed venue every `bin` seam comment warns about. One sweeper per venue
 	// a sandbox can open on (`combineSandboxNetworkSweepers`). Podman's `ps -a` renders `{{.State}}`; its endpoint read is
@@ -519,6 +524,8 @@ export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime
 	// `names` and still makes the `rm` fail, which the failed-`rm` branch below handles for this run's own container and
 	// reports for anything else. Its state WORDS are this file's stated residual, below.
 	return async function sweepSandboxNetworks({ running = new Set(), keep = new Set(), retained = missingRetained, blocked = new Set() } = {}) {
+		// ONE detach gate per pass (issue #452, gate round 3): its runtime read is made once, however many networks.
+		const gate = makeDetachGate(run, { bin });
 		// CANDIDATES FIRST, then every piece of evidence that protects one. The order is the point, not an
 		// accident of writing: a network is created BEFORE the container that joins it and AFTER the directory
 		// that made the open legal, so evidence read before this listing can be older than the thing it is
@@ -617,19 +624,14 @@ export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime
 			// worker is configured with, by name: any other stopped member is an operator's, and is named below instead.
 			// Docker's read carries no `parked`, so its pass is what it was.
 			const detach = [...names, ...parked.filter((n) => n === proxy)];
-			// Issue #452 with #458: on a Podman that needs the rootless network keeper, detaching a RUNNING container (the proxy)
-			// cuts the proxy's route out while the keeper does not hold, so the network is left and said; a later pass with it
-			// holding removes it. On both venues, since `local` can be Podman (`podman-docker`, or its Docker API): the guard
-			// asks the runtime first and answers `null` for Docker Engine, rootful Podman and 5.x. Nothing running to detach,
-			// nothing read.
-			if (detachGuard) {
-				const why = await detachGuard({ running: detach.some((n) => names.includes(n)) });
-				if (why) {
-					notes.push({ network: name, reason: why });
-					continue;
-				}
+			// Through the detach gate, as every detach is (issue #452 with #458, gate round 3): `names` are the RUNNING members,
+			// so a stopped proxy asks nothing; a refusal leaves the network whole and is said with the gate's token; a later
+			// pass with the keeper holding removes it. On both venues, since `local` can be a rootless Podman too.
+			const outcome = await removeNetworkOrSay(run, { network: name, detach, running: names, stillClear, bin, gate });
+			if (outcome.blocked) {
+				notes.push({ network: name, reason: outcome.blocked });
+				continue;
 			}
-			const outcome = await removeNetworkOrSay(run, { network: name, detach, stillClear, bin });
 			if (outcome.aborted) {
 				// `restored`/`lost` rather than `detached`: an endpoint put back was not removed by this pass,
 				// and one that could not be put back is off a network someone may be using, which is the half an
@@ -999,6 +1001,9 @@ export async function openSandbox({
 	pause = launchWatchPause,
 	// Issue #452, gate round 2: `({ proxy }) => null | { refused, message }`, asked before an egress-armed podman open.
 	keeperCheck = sandboxKeeperCheck,
+	// Issue #452, gate round 3: the detach gate this session's teardown asks, a seam for the tests; by default the one
+	// `removeJobNetwork` builds over `spawnNetwork`, like every other teardown's.
+	detachGate = null,
 }) {
 	// The posture is REQUIRED, and a boolean. Every other part of this function defaults safely; this one would
 	// default to the open bridge, which is the dropped part this function exists to stop a caller dropping.
@@ -1288,7 +1293,7 @@ export async function openSandbox({
 			: {};
 		return { code: code ?? null, error: error ?? null, ...(detached ? { detached: true } : {}), ...during };
 	} finally {
-		if (network && !detached) await removeJobNetwork(spawnNetwork, { network, proxy: egress.proxy, bin });
+		if (network && !detached) await removeJobNetwork(spawnNetwork, { network, proxy: egress.proxy, bin, ...(detachGate ? { gate: detachGate } : {}) });
 	}
 }
 

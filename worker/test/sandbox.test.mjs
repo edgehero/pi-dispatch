@@ -8,7 +8,7 @@ import { describe, test } from "node:test";
 import { ISOLATION_FLAGS, PODMAN_PINNED_FLAGS, buildDockerRunArgs, buildPodmanRunArgs } from "../src/docker-run.mjs";
 import { WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
 import { MINTED_TOKEN_VARS } from "../src/forges.mjs";
-import { SANDBOX_LAUNCHERS, SANDBOX_LAUNCH_WATCH_MS, SANDBOX_LAUNCH_WATCH_TRIES, SANDBOX_NAME_PREFIX, SANDBOX_NETWORK_SHAPE, SANDBOX_OPEN_GRACE_MS, buildSandboxRunArgs, combineSandboxNetworkSweepers, decideSandboxJobUser, launchSandbox, listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatch, openSandbox, sandboxKeeperCheck, parsePublish, resolveSandbox, sandboxContainerName, sandboxEgress, stopSandbox, sandboxLauncher, sandboxVenuePolicy, sandboxVenueRefusal, sandboxVenues } from "../src/sandbox.mjs";
+import { SANDBOX_LAUNCHERS, SANDBOX_LAUNCH_WATCH_MS, SANDBOX_LAUNCH_WATCH_TRIES, SANDBOX_NAME_PREFIX, SANDBOX_NETWORK_SHAPE, SANDBOX_OPEN_GRACE_MS, buildSandboxRunArgs, combineSandboxNetworkSweepers, decideSandboxJobUser, launchSandbox, listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatch, openSandbox, sandboxKeeperCheck, boundedRuntime, parsePublish, resolveSandbox, sandboxContainerName, sandboxEgress, stopSandbox, sandboxLauncher, sandboxVenuePolicy, sandboxVenueRefusal, sandboxVenues } from "../src/sandbox.mjs";
 import { networkNameFor } from "../src/egress.mjs";
 import { makeSandboxReaper, pinSandbox } from "../src/sandbox-store.mjs";
 
@@ -354,7 +354,8 @@ function recordingDocker(calls, codeFor = () => 0) {
 }
 
 // `resolveJobUser` is seamed like every docker call here (issue #341): the image's own user unless a test says otherwise.
-const session = { jobId: "gh-1", sandboxDir: "/s", retentionHours: 24, term: "xterm", idleSeconds: 1800, running: async () => [], resolveJobUser: async () => ({ user: null, home: null }) };
+// `detachGate`: held open for these tests of the session's own MECHANICS (issue #452, gate round 3); the gate has its own.
+const session = { jobId: "gh-1", sandboxDir: "/s", retentionHours: 24, term: "xterm", idleSeconds: 1800, running: async () => [], resolveJobUser: async () => ({ user: null, home: null }), detachGate: async () => null };
 
 test("openSandbox puts an armed session on its own egress network, and removes it after the shell exits", async () => {
 	const calls = [];
@@ -1364,8 +1365,12 @@ test("each runtime's network sweeper runs in its own runtime, and every failure 
 	assert.deepEqual(half.failures, [{ reason: "network-list-failed", runtime: "docker" }]);
 	assert.deepEqual(half.swept.map((s) => s.network), ["pi-sandbox-p-net"]);
 	const src = readFileSync(new URL("../src/sandbox.mjs", import.meta.url), "utf8");
-	assert.match(src, /export function makeSandboxNetworkSweeper\(\{ bin = "docker", run = boundedRuntime\(bin\), proxy = DEFAULT_EGRESS_PROXY, detachGuard = makeNetnsDetachGuard\(\{ run, readRuntime: bin === "podman" \? podmanRuntimeReader\(run\) : dockerRuntimeReader\(run\) \}\) \} = \{\}\)/);
-	assert.match(src, /execDockerBounded\(args, \{ timeoutMs: 10_000, bin \}\)/);
+	assert.match(src, /export function makeSandboxNetworkSweeper\(\{ bin = "docker", run = boundedRuntime\(bin\), proxy = DEFAULT_EGRESS_PROXY \} = \{\}\)/);
+	// The bound, behaviourally (issue #452, gate round 3, which replaced the source pin): 10 s per network verb in `bin`.
+	const seen = [];
+	const fake = (bin, args, opts, cb) => (seen.push({ bin, opts }), queueMicrotask(() => cb(null, "", "")), { kill() {} });
+	await boundedRuntime("podman", { execFileFn: fake })(["network", "ls"]);
+	assert.deepEqual([seen[0].bin, seen[0].opts.maxBuffer], ["podman", 64 * 1024]);
 });
 
 test("the podman session sweep reads members with `ps -a` and `network exists`, never `.Containers`, with every guard it has on docker (#452)", async () => {
@@ -1483,7 +1488,9 @@ test("on Podman 4.x the session sweep detaches nothing RUNNING while the rootles
 	const shim = fakeNetDaemon({ nets: { "pi-sandbox-a-net": ["pi-dispatch-egress-proxy"] }, dockerInfo: JSON.stringify({ host: { security: { rootless: true } }, version: { Version: "4.9.3" } }) });
 	assert.deepEqual((await makeSandboxNetworkSweeper({ run: shim.run })({ retained: () => [] })).notes, [{ network: "pi-sandbox-a-net", reason: "keeper-not-holding" }]);
 	// Docker Engine, rootful Podman and 5.x: no keeper read at all.
-	for (const dockerInfo of [undefined, JSON.stringify({ ServerVersion: "4.9.3", ProductLicense: "Apache-2.0", OperatingSystem: "ubuntu", SecurityOptions: ["name=seccomp,profile=default"] }), JSON.stringify({ ServerVersion: "5.8.1", ProductLicense: "Apache-2.0", OperatingSystem: "fedora", SecurityOptions: ["name=rootless"] })]) {
+	// M4 (gate round 3): a Docker Engine reporting `ServerVersion: "dev"`, or a version no display rule reads (null), with no
+	// Podman licence, is Docker: no keeper read, whatever its version would say to `podmanNeedsNetnsKeeper`.
+	for (const dockerInfo of [undefined, JSON.stringify({ ServerVersion: "dev", OperatingSystem: "Ubuntu", SecurityOptions: [] }), JSON.stringify({ ServerVersion: "dev", OperatingSystem: "Ubuntu", SecurityOptions: ["name=rootless"] }), JSON.stringify({ ServerVersion: "27.4.0 custom build", OperatingSystem: "Ubuntu", SecurityOptions: [] }), JSON.stringify({ ServerVersion: "4.9.3", ProductLicense: "Apache-2.0", OperatingSystem: "ubuntu", SecurityOptions: ["name=seccomp,profile=default"] }), JSON.stringify({ ServerVersion: "5.8.1", ProductLicense: "Apache-2.0", OperatingSystem: "fedora", SecurityOptions: ["name=rootless"] })]) {
 		const d = fakeNetDaemon({ nets: { "pi-sandbox-a-net": ["pi-dispatch-egress-proxy"] }, ...(dockerInfo ? { dockerInfo } : {}) });
 		assert.equal((await makeSandboxNetworkSweeper({ run: d.run })({ retained: () => [] })).swept.length, 1, dockerInfo ?? "docker");
 		assert.ok(!d.calls.some((c) => c.startsWith("inspect")), d.calls.join(" | "));
@@ -2600,4 +2607,43 @@ test("sandboxKeeperCheck is the worker's own keeper preflight: refused on 4.x wi
 	assert.equal(await sandboxKeeperCheck({ proxy: "pi-dispatch-egress-proxy", info: info("5.8.1"), readKeeper: reads(absent) }), null);
 	const holding = { code: 0, stdout: `running|bridge|pi-dispatch-netns-keeper,|${NOW - 130_000}\n` };
 	assert.equal(await sandboxKeeperCheck({ proxy: "pi-dispatch-egress-proxy", info: info("4.9.3"), readKeeper: reads(holding) }), null);
+});
+
+test("the sandbox sweep's runner hands the CLI's stderr on, so the podman-docker `.Containers` fallback fires there (#452 gate round 3)", async () => {
+	// MEASURED (gate round 3, dbg-shim-sandbox-runner-ubuntu.txt): through podman-docker on 4.9.3 the `.Containers` read exits
+	// 125, `execFile` puts the template error in the callback's stderr and in `err.message`, and `err.stderr` is EMPTY. The
+	// runner read `error.stderr`, so the fallback's wording never reached `networkEndpoints` and every network read as
+	// unreadable in this sweep.
+	const TEMPLATE = "Error: template: inspect:1:8: executing \"inspect\" at <.Containers>: can't evaluate field Containers in type interface {}\n";
+	const calls = [];
+	const fake = (bin, args, opts, cb) => {
+		calls.push({ args, opts });
+		queueMicrotask(() => {
+			if (args[1] === "inspect" && args.includes("{{json .Containers}}")) return cb(Object.assign(new Error(`Command failed: docker ${args.join(" ")}\n${TEMPLATE}`), { code: 125 }), "", TEMPLATE);
+			if (args[0] === "ps") return cb(null, "pi-dispatch-egress-proxy\trunning\n", "");
+			if (args[1] === "inspect") return cb(null, "[{}]", "");
+			return cb(null, "", "");
+		});
+		return { kill() {} };
+	};
+	const run = boundedRuntime("docker", { execFileFn: fake });
+	const inspected = await run(["network", "inspect", "--format", "{{json .Containers}}", "pi-sandbox-a-net"]);
+	assert.equal(inspected.code, 125);
+	assert.match(inspected.stderr, /can't evaluate field Containers/, "the callback's stderr, not the error's (which is empty)");
+	const { networkEndpoints } = await import("../src/egress.mjs");
+	assert.deepEqual(await networkEndpoints(run, "pi-sandbox-a-net"), { ok: true, absent: false, names: ["pi-dispatch-egress-proxy"], parked: [] }, "the fallback fired through the sweep's own runner");
+	// And the gate's runtime read asks with the facts readers' bound, not the verbs' 10 s and 64 KiB.
+	await run(["info", "--format={{json .}}"], { timeoutMs: 15_000, maxBuffer: 1024 * 1024 });
+	assert.equal(calls.at(-1).opts.maxBuffer, 1024 * 1024);
+});
+
+test("the session sweep reads the runtime and the keeper ONCE per pass, however many networks it holds back (#452 gate round 3)", async () => {
+	const d = fakeNetDaemon({ nets: { "pi-sandbox-a-net": ["pi-dispatch-egress-proxy"], "pi-sandbox-b-net": ["pi-dispatch-egress-proxy"], "pi-sandbox-c-net": ["pi-dispatch-egress-proxy"] }, podmanVersion: "4.9.3" });
+	const out = await makeSandboxNetworkSweeper({ bin: "podman", run: d.run })({ retained: () => [] });
+	assert.deepEqual(out.notes.map((n) => n.reason), ["keeper-not-holding", "keeper-not-holding", "keeper-not-holding"]);
+	assert.equal(d.calls.filter((c) => c.startsWith("info ")).length, 1, "one runtime read for the pass");
+	assert.equal(d.calls.filter((c) => c.startsWith("inspect ")).length, 1, "one keeper read for the pass");
+	// A new pass reads again: the keeper may have been started since.
+	await makeSandboxNetworkSweeper({ bin: "podman", run: d.run })({ retained: () => [] });
+	assert.equal(d.calls.filter((c) => c.startsWith("info ")).length, 2);
 });

@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
+import { makeDetachGate } from "./netns-keeper.mjs";
 
 /**
  * REQ-EGRESS-ALLOWLIST. The shipped egress policy: what a job container may talk to, expressed in the
  * worker's own `docker run` argv rather than in a host firewall this process cannot see.
  *
- * This module imports nothing but `node:child_process` -- deliberately, and for `image-preflight.mjs`'s
+ * This module imports nothing but `node:child_process` and the two leaves under the detach gate (`netns-keeper.mjs`,
+ * `daemon-facts.mjs`, which import nothing else of this project's) -- deliberately, and for `image-preflight.mjs`'s
  * exact reason. It holds a money gate: it decides whether a budget slot is spent, so its tests must run
  * everywhere, unconditionally. It also owns every NAME the policy uses, so the gate that checks the proxy,
  * the argv that joins the network and the env that points at the proxy are ONE answer by construction
@@ -230,7 +232,7 @@ export function makeEgressPreflight({ proxy = DEFAULT_EGRESS_PROXY, armed = fals
 export async function createJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRESS_PROXY, bin = "docker" }) {
 	// `bin` (issue #354) is the venue's CLI: the network, the proxy's attachment and the container that joins it must all
 	// live in ONE runtime, or the job's `--network=` names a network its daemon has never heard of.
-	return createJobNetworkWith((args) => runDocker(spawnFn, args, false, bin), { network, proxy });
+	return createJobNetworkWith(spawnRunner(spawnFn, bin), { network, proxy, bin });
 }
 
 /**
@@ -238,12 +240,13 @@ export async function createJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRES
  * `doctor --live`'s bounded runner are two runners, and a probe that built its networks with a second copy of this
  * sequence would be reading back a network no job gets. Never throws: a runner that throws is a failed step.
  */
-export async function createJobNetworkWith(docker, { network, proxy = DEFAULT_EGRESS_PROXY }) {
+export async function createJobNetworkWith(docker, { network, proxy = DEFAULT_EGRESS_PROXY, bin = "docker" }) {
 	if ((await runWith(docker, ["network", "create", "--internal", network]))?.code !== 0) return false;
 	if ((await runWith(docker, ["network", "connect", network, proxy]))?.code !== 0) {
 		// Roll back rather than leave a network the proxy cannot serve: a half-built policy that admits a
-		// job is worse than one that refuses it.
-		await removeJobNetworkWith(docker, { network, proxy });
+		// job is worse than one that refuses it. The connect FAILED, so the proxy is not on it: nothing running is
+		// detached, and the gate asks nothing (issue #452).
+		await removeJobNetworkWith(docker, { network, proxy, bin, proxyRunning: false });
 		return false;
 	}
 	return true;
@@ -265,18 +268,46 @@ export async function networkExists(spawnFn, network, { bin = "docker" } = {}) {
  * `<container>-net` one this builds, detaching what is attached first since issue #357) and never for a sandbox
  * (`pi-sandbox-`); a sandbox's next open of the same run refuses and names it for removal.
  */
-export async function removeJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRESS_PROXY, bin = "docker" }) {
-	return removeJobNetworkWith((args) => runDocker(spawnFn, args, false, bin), { network, proxy });
+export async function removeJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRESS_PROXY, bin = "docker", gate = null }) {
+	return removeJobNetworkWith(spawnRunner(spawnFn, bin), { network, proxy, bin, ...(gate ? { gate } : {}) });
 }
 
 /**
  * `removeJobNetwork` over any docker runner (issue #344). Detaches ONLY the proxy, then `network rm` without `-f`, so a
  * network something else is still attached to stays, rather than being pulled out from under it. Resolves whether
  * the network is gone.
+ *
+ * Through the detach gate (issue #452, gate round 3), as every detach is: on a rootless Podman 4.x whose rootless
+ * network keeper does not hold, the proxy is NOT detached and the network is left whole (its `rm` would refuse with the
+ * proxy on it anyway), for the boot reaper to remove once the keeper holds. A job or a session is not started there in
+ * the first place (the podman venue's egress preflight and the sandbox opener refuse; `local` refuses every rootless
+ * daemon), so this is the case of a keeper that died mid-run, where leaving the network is the only safe teardown.
+ * `proxyRunning: false` (the create's rollback, whose connect failed) asks nothing.
  */
-export async function removeJobNetworkWith(docker, { network, proxy = DEFAULT_EGRESS_PROXY }) {
-	await runWith(docker, ["network", "disconnect", "-f", network, proxy]);
+export async function removeJobNetworkWith(docker, { network, proxy = DEFAULT_EGRESS_PROXY, bin = "docker", gate = makeDetachGate(docker, { bin }), proxyRunning = true }) {
+	const { blocked } = await detachEndpoints(docker, { network, endpoints: [proxy], running: proxyRunning ? [proxy] : [], gate });
+	if (blocked) return false;
 	return (await runWith(docker, ["network", "rm", network]))?.code === 0;
+}
+
+/**
+ * THE ONE PLACE A CONTAINER IS DETACHED FROM A NETWORK in `worker/src` (issue #452, gate round 3). Every teardown and
+ * every sweep reaches `network disconnect` through here, so the rule that makes a detach safe on a rootless Podman 4.x
+ * (`makeDetachGate`, in `netns-keeper.mjs`) cannot be forgotten by a caller: it is asked first, with whether anything
+ * RUNNING is among `endpoints` (`running`, the caller's knowledge; everything, when it does not say), and a refusal
+ * detaches NOTHING. `{ blocked, detached }`: `blocked` is the gate's token or `null`; `detached` holds only the
+ * endpoints whose disconnect exited 0, since it is printed and logged and a list of attempts would name something
+ * still attached as removed.
+ */
+export async function detachEndpoints(docker, { network, endpoints, running = endpoints, gate }) {
+	if (typeof gate !== "function") throw new Error("detachEndpoints: a detach gate is required (makeDetachGate)");
+	const blocked = await gate({ running: endpoints.some((e) => running.includes(e)) });
+	if (blocked) return { blocked, detached: [] };
+	const detached = [];
+	for (const endpoint of endpoints) {
+		if ((await runWith(docker, ["network", "disconnect", "-f", network, endpoint]))?.code === 0) detached.push(endpoint);
+	}
+	return { blocked: null, detached };
 }
 
 /**
@@ -470,7 +501,7 @@ async function podmanNetworkMembers(podman, network, { presence = "exists" } = {
  * error text is never surfaced, because a docker error can repeat a `DOCKER_HOST` with credentials in it
  * (issue #339).
  */
-export async function removeNetworkOrSay(docker, { network, detach = [], stillClear = async () => true, bin = "docker" }) {
+export async function removeNetworkOrSay(docker, { network, detach = [], running = detach, stillClear = async () => true, bin = "docker", gate = makeDetachGate(docker, { bin }) }) {
 	// `stillClear` is the OTHER kind of parameter, and naming the difference is what keeps `detach` explicit.
 	// `detach` names WHICH endpoints go, which every caller decides differently, so a default there would hide
 	// a decision. `stillClear` decides NOTHING about the target: it is the caller's own guard, re-asked
@@ -498,12 +529,11 @@ export async function removeNetworkOrSay(docker, { network, detach = [], stillCl
 	// gave a loud `docker run` failure. Silent is the worse of the two, so anything detached on an aborted pass
 	// is reconnected.
 	if (!(await stillClear())) return { removed: false, absent: false, detached: [], command: null, aborted: true };
-	const detached = [];
-	for (const endpoint of detach) {
-		// Recorded only when it TOOK. `detached` is printed to an operator and logged, so a list of attempts
-		// would name something still attached as something this sweep removed.
-		if ((await runWith(docker, ["network", "disconnect", "-f", network, endpoint]))?.code === 0) detached.push(endpoint);
-	}
+	// Through the ONE detach helper (issue #452, gate round 3): a gate that refuses leaves the network whole and says so as
+	// `blocked`, which each caller turns into its own line. `running` names which of `detach` are running (the caller's
+	// member read), so a stopped proxy is detached with nothing asked.
+	const { blocked, detached } = await detachEndpoints(docker, { network, endpoints: detach, running, gate });
+	if (blocked) return { removed: false, absent: false, detached: [], command: null, blocked };
 	// AGAIN, immediately before the verb that kills a launch. This is what removes the SCALING: with k
 	// endpoints the `rm` used to be k+1 commands after the only guard, and it is now always one. Asked only
 	// when there is something to re-ask ABOUT: with nothing detached, nothing has happened since the first ask
@@ -528,6 +558,49 @@ export async function removeNetworkOrSay(docker, { network, detach = [], stillCl
 	if (networkAbsentInDaemonWords(inspected)) return { removed: true, absent: true, detached, command: null };
 	// `bin` (issue #354) only spells the command an operator is told to type; the runner is the caller's, already bound.
 	return { removed: false, absent: false, detached, command: `${bin} network rm ${network}` };
+}
+
+/**
+ * The spawn-based runner the job path and the sandbox use: `runDocker` for the network verbs, as before, and a CAPTURING,
+ * BOUNDED spawn when the detach gate reads the runtime with its own `{ timeoutMs, maxBuffer }` (a `podman info` body is
+ * tens of KiB, past `runDocker`'s 4 KiB, and a teardown in a `finally` must not hang on a wedged daemon).
+ */
+function spawnRunner(spawnFn, bin) {
+	return (args, opts) => (opts ? runCapture(spawnFn, args, bin, opts) : runDocker(spawnFn, args, false, bin));
+}
+
+function runCapture(spawnFn, args, bin, { timeoutMs, maxBuffer }) {
+	return new Promise((resolve) => {
+		let child;
+		try {
+			child = spawnFn(bin, args, { stdio: ["ignore", "pipe", "ignore"] });
+		} catch {
+			resolve({ code: null, stdout: "" });
+			return;
+		}
+		let stdout = "";
+		let done = false;
+		const finish = (value) => {
+			if (done) return;
+			done = true;
+			clearTimeout(timer);
+			resolve(value);
+		};
+		const timer = setTimeout(() => {
+			try {
+				child.kill?.("SIGKILL");
+			} catch {
+				// already gone
+			}
+			finish({ code: null, stdout: "" });
+		}, timeoutMs);
+		child.stdout?.setEncoding?.("utf8");
+		child.stdout?.on?.("data", (chunk) => {
+			if (stdout.length < maxBuffer) stdout += chunk;
+		});
+		child.on?.("error", () => finish({ code: null, stdout: "" }));
+		child.on?.("close", (code) => finish({ code, stdout }));
+	});
 }
 
 /** One step through a caller's runner, as `{ code: null }` when it throws. */

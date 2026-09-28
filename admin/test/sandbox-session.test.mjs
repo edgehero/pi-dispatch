@@ -97,6 +97,8 @@ function panelIo(over = {}) {
     resolveJobUser: async () => ({ user: null, home: null }),
     // Issue #452 gate round 2: the keeper holds, never read from a real Podman in a unit test.
     keeperCheck: async () => null,
+    // Issue #452 gate round 3: the teardown's detach gate held open; the gate has its own tests in the worker.
+    detachGate: async () => null,
     // Issue #446: the past-window refusal reads this clock, an hour into every fixture's 24h window.
     now: () => NOW,
     spawnNetwork: (cmd, args) => {
