@@ -181,7 +181,7 @@ export function podmanArgsFromSpec(spec) {
 
 /**
  * The namespaces and inheritances a rootless Podman argv pins, because the account's own containers.conf can set every
- * container's defaults for them: `pidns`, `ipcns`, `utsns`, `cgroupns`, `env_host` and `http_proxy`. (dockerd's
+ * container's defaults for them: `pidns` (PID), `ipcns` (IPC), `utsns` (UTS), `cgroupns` (cgroup), `env_host` and `http_proxy`. (dockerd's
  * daemon.json can default the cgroup and IPC modes too, and the docker argv pins neither: a gap older than this venue.) Measured on Podman 5.8.1 with a user containers.conf of `pidns = "host"` and `env_host = true`: an
  * unpinned job ran outside its own PID namespace and received the worker's environment (the provider key with it);
  * with these flags it got its own namespaces and nothing. `http_proxy` is on by default, which copies the worker's proxy
@@ -189,8 +189,7 @@ export function podmanArgsFromSpec(spec) {
  * Podman's word for the rootless default), or `netns = "host"` would put it on the host's. What cannot be pinned is
  * that network's OPTIONS: containers.conf `pasta_options` come before the command line's in pasta's argv, and a conf
  * `-T <port>` survives even `--network=pasta:--map-host-loopback,none` (measured), so no flag here could close it. It is
- * REFUSED instead, not left open: the venue refuses to run while the account's containers.conf sets `pasta_options`,
- * `network_cmd_options`, `annotations`, `env`, `helper_binaries_dir` or `network_cmd_path` at all, the list
+ * REFUSED instead, not left open: the venue refuses to run while the account's containers.conf sets `pasta_options`, `network_cmd_options`, `annotations`, `env`, `helper_binaries_dir`, `network_cmd_path`, `default_sysctls`, `default_ulimits`, `seccomp_profile`, `init_path`, `dns_servers`, `dns_options`, `dns_searches`, `base_hosts_file`, `oom_score_adj`, `privileged`, `label`, `cgroup_conf`, `host_containers_internal_ip`, `runtimes`, `conmon_path`, `cgroups` or `umask` at all, the list
  * `PODMAN_WIDENING_KEYS` in backends.mjs (`podmanConfWidening` in backend-podman.mjs, issues #428 and #450).
  */
 export const PODMAN_PINNED_FLAGS = Object.freeze(["--pid=private", "--ipc=private", "--uts=private", "--cgroupns=private", "--env-host=false", "--http-proxy=false"]);

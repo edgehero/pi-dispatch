@@ -110,7 +110,12 @@ function OTHER_VENUE(name, { spawned = [], reap = async () => ({ reaped: true })
 	};
 }
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey } = {}) {
+/** Issue #448: `systemctl show podman.service` for a loaded, idle service with no environment of note. */
+const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: false, startedAtMs: null, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
+/** A running service's answer for the default test socket, started at `startedAtMs`. */
+const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
+
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -259,6 +264,9 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			// Issue #354: never the real `podman info` under test. A healthy rootless Podman unless a test says otherwise; only
 			// a boot that blesses `podman` ever asks.
 			readPodmanInfo: readPodmanInfo ?? PODMAN_INFO(),
+			// Issue #448: never this machine's systemd. An idle podman.service unless a test says otherwise; only a local
+			// daemon that is rootful Podman on this host ever asks.
+			readPodmanService: readPodmanService ?? IDLE_PODMAN_SERVICE,
 			makePodmanReaper: makePodmanReaper ?? (() => async () => ({ reaped: true })),
 			makePodmanBackend: podmanBackend,
 			...(makeBackendRegistry ? { makeBackendRegistry } : {}),
@@ -3323,4 +3331,152 @@ test("boot secures the account root for the two durable stores too, and a refusa
 		throw refusal;
 	} }), (err) => err === refusal);
 	assert.deepEqual(order, [], "no worker was created");
+});
+
+// --- issue #448: rootful Podman's containers.conf keys that reach a `local` job ---------------------------------------
+
+/** The real docker CLI against rootful Podman's compat API on this host: Docker's shape, Podman's licence. */
+const ROOTFUL_FACTS = DOCKER_FACTS({ podman: true, bounds: null, os: "fedora" });
+const rootfulHost = (files, errors = {}) => ({
+	statSync: (p) => {
+		if (errors[p]) throw Object.assign(new Error(errors[p]), { code: errors[p] });
+		if (files[p] === undefined) throw enoent(p);
+		return { size: Buffer.byteLength(files[p]), ctimeMs: 1_000 };
+	},
+	readFileSync: (p) => {
+		if (errors[p]) throw Object.assign(new Error(errors[p]), { code: errors[p] });
+		if (files[p] === undefined) throw enoent(p);
+		return files[p];
+	},
+	readdirSync: (p) => {
+		if (errors[p]) throw Object.assign(new Error(errors[p]), { code: errors[p] });
+		throw enoent(p);
+	},
+});
+const ROOTFUL_AUTH = { makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() };
+
+test("a local default on rootful Podman whose containers.conf sets a refused key refuses to BOOT, tagged, before anything is built (#448)", { skip: skipNoModule }, async () => {
+	for (const [key, text] of [
+		["annotations", '[containers]\nannotations = ["run.oci.keep_original_groups=1"]\n'],
+		["env", '[containers]\nenv = ["PD_X=1"]\n'],
+		["helper_binaries_dir", '[engine]\nhelper_binaries_dir = ["/opt/hb"]\n'],
+	]) {
+		const order = [];
+		const makeAuth = async () => (order.push("makeAuth"), { mintToken: async () => "tok", selfId: 1, source: "gh" });
+		await assert.rejects(
+			() => runStart({ readDaemonFacts: ROOTFUL_FACTS, jobUserIdentity: LINUX_ID(1234), observationFs: rootfulHost({ "/etc/containers/containers.conf": text }), order, makeAuth, makeHost: () => fakeHost() }),
+			(err) => err.piDispatchConfig === true && err.message.startsWith(`Refused: /etc/containers/containers.conf sets ${key}, which `) && /sudo systemctl restart podman\.service/.test(err.message) && /\(issue #448\)\.$/.test(err.message),
+			key,
+		);
+		assert.deepEqual(order, [], `${key}: before forge auth and the worker`);
+	}
+	// Measured inert on this route: not refused, the worker boots.
+	for (const text of ['[network]\npasta_options = ["--map-gw"]\n', '[engine]\nnetwork_cmd_options = ["allow_host_loopback=true"]\n', '[engine]\nnetwork_cmd_path = "/opt/slirp"\n']) {
+		const { logs } = await runStart({ readDaemonFacts: ROOTFUL_FACTS, jobUserIdentity: LINUX_ID(1234), observationFs: rootfulHost({ "/etc/containers/containers.conf": text }), ...ROOTFUL_AUTH });
+		assert.ok(logs.some((l) => l.event === "worker_started"), text);
+	}
+	// The running service older than its conf is the same refusal with the restart as its fix.
+	const running = RUNNING_PODMAN_SERVICE(500);
+	await assert.rejects(
+		() => runStart({ readDaemonFacts: ROOTFUL_FACTS, jobUserIdentity: LINUX_ID(1234), observationFs: rootfulHost({ "/etc/containers/containers.conf": "[containers]\n" }), readPodmanService: running, ...ROOTFUL_AUTH }),
+		// Gate round 1 of PR #473: it heals by itself (the service restarts or idles out), so exit 1, never a tagged exit 2.
+		(err) => err.piDispatchConfig !== true && err.message.startsWith("Not run yet: /etc/containers/containers.conf changed after the running podman.service started"),
+	);
+	// A read that failed for a moment is the supervisor's retry (untagged), never exit 2.
+	await assert.rejects(
+		() => runStart({ readDaemonFacts: ROOTFUL_FACTS, jobUserIdentity: LINUX_ID(1234), observationFs: rootfulHost({}, { "/etc/containers/containers.conf": "EMFILE" }), ...ROOTFUL_AUTH }),
+		(err) => err.piDispatchConfig !== true && err.message.startsWith("Not read yet: /etc/containers/containers.conf could not be read (EMFILE)"),
+	);
+	// The identity refusal names its fix first.
+	await assert.rejects(
+		() => runStart({ readDaemonFacts: ROOTFUL_FACTS, jobUserIdentity: LINUX_ID(0), observationFs: rootfulHost({ "/etc/containers/containers.conf": "env = []\n" }), ...ROOTFUL_AUTH }),
+		(err) => err.piDispatchConfig === true && /the worker runs as root/.test(err.message) && !/sets env/.test(err.message),
+	);
+});
+
+test("rootful Podman merely blessed: the worker boots, and each local job is refused pre-spend as podman-conf-widens-job, rootful (#448)", { skip: skipNoModule }, async () => {
+	// Root's own conf, which the rootless podman venue's account does not read, so only local's check sees it.
+	const files = rootfulHost({ "/home/pdjob/.config/containers/mounts.conf": "", [PODMAN_USER_MANAGER]: "cpuset cpu io memory pids\n", "/root/.config/containers/containers.conf": '[containers]\nenv = ["PD_X=rootuser"]\n' });
+	const { logs, captured } = await runStart({ env: { PI_BACKENDS: "podman,local" }, readPodmanInfo: PODMAN_INFO(), readDaemonFacts: ROOTFUL_FACTS, jobUserIdentity: PODMAN_ID, observationFs: files, ...ROOTFUL_AUTH });
+	assert.ok(logs.some((l) => l.event === "worker_started"));
+	const observed = await captured.deps.observationPreflight({ id: "j1", kind: "local", backend: "local" });
+	assert.deepEqual([observed.ok, observed.podmanConfRefused?.reason, observed.podmanConfRefused?.key, observed.podmanConfRefused?.rootful], [true, "podman-conf-widens-job", "env", true]);
+	assert.match(observed.podmanConfRefused.message, /^Refused: \/root\/\.config\/containers\/containers\.conf sets env, which /);
+	// The podman venue's own jobs are not judged by it.
+	const podmanJob = await captured.deps.observationPreflight({ id: "j2", kind: "local", backend: "podman" });
+	assert.equal(podmanJob.podmanConfRefused, undefined);
+});
+
+test("what the worker cannot read of rootful Podman's chain is logged by name at boot and never refused (#448)", { skip: skipNoModule }, async () => {
+	const errors = { "/root/.config/containers/containers.conf": "EACCES", "/root/.config/containers/containers.conf.d": "EACCES" };
+	const files = rootfulHost({}, errors);
+	const { logs, captured } = await runStart({ readDaemonFacts: ROOTFUL_FACTS, jobUserIdentity: LINUX_ID(1234), observationFs: files, ...ROOTFUL_AUTH });
+	assert.ok(logs.some((l) => l.event === "worker_started"));
+	const said = logs.filter((l) => l.event === "local_podman_conf_unread");
+	assert.deepEqual(said.map((l) => l.unread), ["/root/.config/containers/containers.conf (EACCES), /root/.config/containers/containers.conf.d (EACCES)"]);
+	// Per job: never refused on it, and said again only when the list changes (the log after boot is read off the stream).
+	const before = bootLines.length;
+	for (const id of ["j1", "j2"]) assert.equal((await captured.deps.observationPreflight({ id, kind: "local" })).podmanConfRefused, undefined);
+	assert.deepEqual(parseLines(bootLines.slice(before)).filter((l) => l.event === "local_podman_conf_unread"), [], "not said per job while it does not change");
+	delete errors["/root/.config/containers/containers.conf.d"];
+	await captured.deps.observationPreflight({ id: "j3", kind: "local" });
+	assert.deepEqual(parseLines(bootLines.slice(before)).filter((l) => l.event === "local_podman_conf_unread").map((l) => l.unread), ["/root/.config/containers/containers.conf (EACCES)"], "said again once it changes");
+});
+
+test("Docker, a remote endpoint and rootless Podman read no rootful file and never ask systemctl: byte-unchanged (#448)", { skip: skipNoModule }, async () => {
+	const asked = [];
+	const readPodmanService = async () => (asked.push("systemctl"), { read: true, loaded: true, running: true, startedAtMs: 0, environment: {}, environmentFiles: [], unitPaths: [] });
+	const reads = [];
+	const loud = { statSync: (p) => (reads.push(p), NO_HOST_FILES.statSync(p)), readFileSync: (p) => (reads.push(p), NO_HOST_FILES.readFileSync(p)), readdirSync: (p) => (reads.push(p), NO_HOST_FILES.readdirSync(p)) };
+	for (const [label, over] of [
+		["docker", { readDaemonFacts: DOCKER_FACTS() }],
+		["remote rootful Podman", { readDaemonFacts: ROOTFUL_FACTS, resolveDockerEndpoint: async () => ({ local: false, context: "far", endpoint: "tcp://10.0.0.9:2376", reason: null, transient: false }) }],
+		["rootless Podman", { readDaemonFacts: DOCKER_FACTS({ podman: true, bounds: null, rootless: true }), env: { PI_BACKENDS: "podman,local" }, readPodmanInfo: PODMAN_INFO(), jobUserIdentity: PODMAN_ID }],
+	]) {
+		asked.length = 0;
+		reads.length = 0;
+		const { logs, captured } = await runStart({ jobUserIdentity: LINUX_ID(1234), observationFs: loud, readPodmanService, ...ROOTFUL_AUTH, ...over });
+		assert.ok(logs.some((l) => l.event === "worker_started"), label);
+		const observed = await captured.deps.observationPreflight({ id: "j1", kind: "local", backend: "local" });
+		assert.equal(observed.podmanConfRefused, undefined, label);
+		assert.deepEqual(asked, [], `${label}: systemctl is never asked`);
+		assert.ok(!reads.some((p) => p.startsWith("/root/") || p === "/etc/passwd"), `${label}: ${reads.join(" ")}`);
+		assert.ok(!logs.some((l) => l.event === "local_podman_conf_unread"), label);
+	}
+});
+
+test("podman.service is read once per boot and once per job, and that one answer judges both mountSet and the refusal (#448)", { skip: skipNoModule }, async () => {
+	let reads = 0;
+	// Running since t=500; /etc/containers/containers.conf changed at t=1000 (rootfulHost's change time): stale.
+	const readPodmanService = async () => (reads++, await RUNNING_PODMAN_SERVICE(500)());
+	const files = rootfulHost({ "/etc/containers/mounts.conf": "", "/etc/containers/containers.conf": "" });
+	const { logs, captured } = await runStart({ env: { PI_BACKENDS: "podman,local" }, readPodmanInfo: PODMAN_INFO(), readDaemonFacts: ROOTFUL_FACTS, jobUserIdentity: PODMAN_ID, observationFs: files, readPodmanService, ...ROOTFUL_AUTH });
+	assert.ok(logs.some((l) => l.event === "worker_started"));
+	assert.equal(reads, 1, "one read at boot");
+	assert.equal(logs.find((l) => l.event === "worker_started").runtimeAddsNoMounts, false, "the stale service withholds mountSet at boot");
+	const before = bootLines.length;
+	const observed = await captured.deps.observationPreflight({ id: "j1", kind: "local", backend: "local" });
+	assert.equal(reads, 2, "one read per job");
+	assert.deepEqual([observed.podmanConfRefused?.restart, observed.podmanConfRefused?.rootful], [true, true]);
+	assert.equal(parseLines(bootLines.slice(before)).find((l) => l.event === "runtime_observed"), undefined, "and per job, the same answer, so nothing changed to say");
+});
+
+test("per job: a service older than its conf, and a chain file deleted under the running service, are retries; a 0600 drop-in refuses (#448)", { skip: skipNoModule }, async () => {
+	const files = { "/etc/containers/containers.conf": "[containers]\n" };
+	const host = {
+		statSync: (p) => (Object.hasOwn(files, p) ? { size: 0, ctimeMs: 100 } : (() => { throw enoent(p); })()),
+		readFileSync: (p) => (Object.hasOwn(files, p) ? (typeof files[p] === "object" ? (() => { throw Object.assign(new Error(p), { code: files[p].error }); })() : files[p]) : (() => { throw enoent(p); })()),
+		readdirSync: (p) => (p === "/etc/containers/containers.conf.d" && files["/etc/containers/containers.conf.d/zz.conf"] ? ["zz.conf"] : (() => { throw enoent(p); })()),
+	};
+	const { logs, captured } = await runStart({ readDaemonFacts: ROOTFUL_FACTS, jobUserIdentity: LINUX_ID(1234), observationFs: host, readPodmanService: RUNNING_PODMAN_SERVICE(500), ...ROOTFUL_AUTH });
+	assert.ok(logs.some((l) => l.event === "worker_started"));
+	assert.equal((await captured.deps.observationPreflight({ id: "j1", kind: "local" })).podmanConfRefused, undefined, "seen, unchanged");
+	delete files["/etc/containers/containers.conf"];
+	const gone = (await captured.deps.observationPreflight({ id: "j2", kind: "local" })).podmanConfRefused;
+	assert.deepEqual([gone?.retry, gone?.restart, gone?.rootful], [true, true, true]);
+	assert.match(gone.evidence, /^\/etc\/containers\/containers\.conf was removed after the running podman\.service started/);
+	files["/etc/containers/containers.conf.d/zz.conf"] = { error: "EACCES" };
+	const refused = (await captured.deps.observationPreflight({ id: "j3", kind: "local" })).podmanConfRefused;
+	assert.deepEqual([refused?.key, refused?.retry], [null, undefined]);
+	assert.match(refused.message, /^Refused: \/etc\/containers\/containers\.conf\.d\/zz\.conf could not be read \(EACCES\)/);
 });

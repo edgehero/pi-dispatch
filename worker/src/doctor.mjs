@@ -72,10 +72,10 @@ import { GIT_READ_FLAGS } from "./git-hardening.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { deploymentVenueEnv, sharedShellIgnored } from "./deployment-venue.mjs";
 import { PROXY_STATE_FORMAT, parseProxyState, shippedProxyDrift } from "./egress-proxy-state.mjs";
-import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
+import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, observePodman, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { PODMAN_PINNED_FLAGS, buildPodmanRunArgs, containerSpec, podmanArgsFromSpec } from "./docker-run.mjs";
-import { observeHost } from "./runtime-observations.mjs";
+import { PODMAN_SERVICE_TIMEOUT_MS, PODMAN_SERVICE_UNIT, makePodmanServiceReader, observeHost, observeRootfulConf, readRootfulService, rootfulConfFix, rootfulConfRetries, rootfulConfResidual, rootfulUnreadList } from "./runtime-observations.mjs";
 import { endpointShown, makeDockerEndpointResolver, quotedShown } from "./backend-local.mjs";
 import { DEFAULT_EGRESS_PROXY, STOPPED_PROXY_STATES, EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, egressArmed, egressCanaryNetwork, egressCanaryProbe, egressEnv, egressProxyName, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { detachBlockedSentence, makeDetachGate, runtimeFromFacts } from "./netns-keeper.mjs";
@@ -215,6 +215,9 @@ export async function runDoctor(env = process.env, deps = {}) {
 		// Issue #458 (PR #463 round 2): the clock the keeper's age is judged on, epoch ms. Its own name, not `now`: `--live`
 		// pairs `now` with `delay`, and a clock that does not advance without its `delay` would never reach a deadline.
 		wallClock = Date.now,
+		// Issue #448: `systemctl show podman.service`, read only where the local daemon is rootful Podman on this host. A seam
+		// so a test decides what the unit says; absent, it spawns systemctl through `spawn`, as the docker reads do.
+		readPodmanService,
 	} = deps;
 	// The facts a --live pass needs from the collection it follows (the endpoint read, docker and the image, the
 	// egress canary's readings), filled by collectChecks rather than re-probed.
@@ -279,7 +282,7 @@ export async function runDoctor(env = process.env, deps = {}) {
 				? (url, { shared, user, envPath, rootOk = false }) =>
 						judgeValkeyListeners({ url, probeTcp: probeTcpAddress, lookup: (host, opts) => dnsLookup(host, opts), fs: { readFileSync }, euid: process.geteuid?.(), user, shared, rootOk, ownerName: (uid) => ownerNameFromPasswd(passwd, uid), interfaces: networkInterfaces, envPath, subuids: readSubuidRanges({ user, euid: process.geteuid?.(), fs: { readFileSync } }) })
 				: null;
-	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, serviceEnvFile: envText === null ? null : serviceEnvFileOf(envText, envPath, serviceEnvLoader(platform)) };
+	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envText === null ? null : serviceEnvFileOf(envText, envPath, serviceEnvLoader(platform)) };
 
 	let checks = await collectChecks(env, seams);
 	let failed = render(checks, out);
@@ -1139,7 +1142,7 @@ export async function collectChecks(env, seams) {
 				: dockerCode === null
 					? { answered: false, reason: "docker-not-found", transient: true }
 					: null);
-	checks.push(...backendChecks(env, { endpoint, daemon, fs: seams.observationFs, ...(podman ? { podman: podman.observed } : {}) }));
+	checks.push(...backendChecks(env, { endpoint, daemon, fs: seams.observationFs, unit: jobUser.unit, ...(podman ? { podman: podman.observed } : {}) }));
 	checks.push(...jobUser.checks);
 	if (podman) checks.push(...podman.checks);
 	if (facts) facts.jobUser = jobUser.forLive;
@@ -4541,13 +4544,13 @@ async function defaultProbeValkey(url) {
  * Reads the environment directly, like every other check here, and parses through `backends.mjs` so doctor
  * and the worker cannot disagree about what a floor says.
  */
-export function backendChecks(env, { endpoint = null, daemon = null, fs = { statSync, readFileSync, readdirSync }, podman = null } = {}) {
+export function backendChecks(env, { endpoint = null, daemon = null, fs = { statSync, readFileSync, readdirSync }, podman = null, unit } = {}) {
 	const checks = [];
 	// What this shell's docker CLI resolves (#278), and what its daemon and this host's files say about bounds and mounts
 	// (#345), as the observation map the table's `observedBy` reads. Anything doctor was not given is not observed, which
 	// gets no credit -- the same polarity as everywhere. Issue #354: `podman` is `observePodman`'s answer plus the info
 	// read it came from (`read`), or null where the podman venue is not blessed, which adds nothing to the map.
-	const observed = observeHost({ endpoint, daemon, fs });
+	const observed = observeHost({ endpoint, daemon, fs, unit, env });
 	const observations = { ...observed.observations, [DOCKER_ENDPOINT_LOCAL]: endpoint?.local === true, ...(podman?.observations ?? {}) };
 	let backends;
 	let floor;
@@ -4719,7 +4722,7 @@ export function backendChecks(env, { endpoint = null, daemon = null, fs = { stat
  * above already failed.
  */
 export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCode, jobImage }) {
-	const { spawn, cwd, home, fileExists, jobUserIdentity: ids = {}, stat, passwd, readUnit = (path) => readFileSync(path, "utf8") } = seams;
+	const { spawn, cwd, home, fileExists, jobUserIdentity: ids = {}, stat, passwd, readUnit = (path) => readFileSync(path, "utf8"), observationFs = { statSync, readFileSync, readdirSync } } = seams;
 	if (dockerCode !== 0) return { checks: [], forLive: { run: true, user: null }, daemon: null };
 	const platform = ids.platform ?? seams.platform;
 	// The worker's bound, not the endpoint read's 5 s: `docker info` is the slow read on a busy host, and a doctor that
@@ -4739,6 +4742,39 @@ export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCod
 	// run; the real docker CLI pointed at Podman's socket is the route that reads everything back.
 	const runtime = runtimeLine(daemon);
 	if (runtime) checks.push(runtime);
+	// Issue #448: on rootful Podman's Docker API service on this host, the containers.conf that service reads, judged by
+	// the worker's own function, next to the line that says which runtime this is. Nothing is read or spawned elsewhere.
+	// Severity by the boot rule: ✗ where a worker with `local` as its default venue refuses to boot, ⚠ where it boots and
+	// refuses each local job. What this account cannot read is its own ⚠, a residual named, never a refusal.
+	const readPodmanService = seams.readPodmanService ?? makePodmanServiceReader({ run: dockerRunVia(spawn, PODMAN_SERVICE_TIMEOUT_MS, { bin: "systemctl" }) });
+	// One read of the unit, handed back for the backend section's mounts observation too (issue #448).
+	const unit = await readRootfulService({ endpoint, daemon, readService: readPodmanService });
+	const rootful = await observeRootfulConf({ endpoint, daemon, fs: observationFs, readService: readPodmanService, env, unit });
+	const rootfulRefused = rootful?.refusal ?? null;
+	if (rootfulRefused?.transient) {
+		checks.push({ ok: false, warn: true, label: `local: whether rootful Podman's containers.conf widens a job could not be read just now: ${rootfulRefused.evidence}`, fix: rootfulConfFix(rootfulRefused) });
+	} else if (rootfulConfRetries(rootfulRefused)) {
+		// Gate round 1 of PR #473: a service older than its containers.conf (or a clock behind a change time) heals by
+		// itself, so the worker retries each job and a boot exits 1: ⚠, never the ✗ a configuration fix earns.
+		checks.push({ ok: false, warn: true, label: `local: every local job waits, retried, until rootful Podman's service restarts: ${rootfulRefused.evidence}`, fix: rootfulConfFix(rootfulRefused) });
+	} else if (rootfulRefused) {
+		const boot = defaultIsLocal && decision.mode !== "unmappable";
+		checks.push({
+			ok: false,
+			...(boot ? {} : { warn: true }),
+			label: `local: no job can run on this venue (${rootfulRefused.cause}): ${rootfulRefused.evidence}${boot ? " -- a worker running as this account refuses to boot" : " -- every local job is refused"}`,
+			fix: rootfulConfFix(rootfulRefused),
+		});
+	} else if (rootful) {
+		// Says only what was judged: "among those this account can read" beside an unread part, and nothing about the running
+		// service when systemctl did not answer for it (the ⚠ below names both).
+		const serviceUnread = rootful.unread.some((u) => !u.path.startsWith("/"));
+		const filesUnread = rootful.unread.some((u) => u.path.startsWith("/"));
+		checks.push({ ok: true, label: `local: no containers.conf rootful Podman's service reads here sets any of the ${PODMAN_ROOTFUL_WIDENING_KEYS.length} keys the local venue refuses (docs/podman.md)${filesUnread ? ", among those this account can read" : ""}${serviceUnread ? "" : `, and ${PODMAN_SERVICE_UNIT} is not running with an older one`}` });
+	}
+	if (rootful && rootful.unread.length > 0) {
+		checks.push({ ok: false, warn: true, label: `local: part of rootful Podman's configuration is not judged here: ${rootfulUnreadList(rootful.unread)}`, fix: rootfulConfResidual(rootful.unread) });
+	}
 	let forLive = { run: true, user: null };
 	if (decision.mode === "image") {
 		const why = decision.cause === "desktop-platform" ? "a VM-backed daemon that maps file ownership" : "the docker endpoint is not on this host";
@@ -4850,7 +4886,9 @@ export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCod
 			}
 		}
 	}
-	return { checks, forLive, daemon };
+	// A local job refused on rootful Podman's configuration (issue #448) runs no container, so neither does the probe.
+	if (rootfulRefused) forLive = { run: false, reason: rootfulRefused.transient ? "rootful Podman's containers.conf could not be read just now, so whether a probe would match a job is not known" : rootfulConfRetries(rootfulRefused) ? "a local job waits for rootful Podman's service to restart, so a probe would read back a container no job gets yet" : `a local job is refused here (${rootfulRefused.cause}), so a probe would read back a container no job gets` };
+	return { checks, forLive, daemon, unit };
 }
 
 /** The podman venue's observations (issue #354), which only its own `podman info` and this account's files answer. */

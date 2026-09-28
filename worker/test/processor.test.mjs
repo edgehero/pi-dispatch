@@ -1880,6 +1880,26 @@ test("a podman conf that could not be read whole is refused without claiming it 
 	const liveWide = await run({ reason: "podman-conf-widens-job", key: "pasta_options", live: true, message: "Refused: this account's running rootless network ..." });
 	assert.equal(liveWide.texts[0], "Refused: the worker host's running Podman network still lets a job's container reach the host's own services, with an option from a configuration since changed, so the operator must restart that network before podman jobs run. Not run.");
 	for (const r of [liveUnread, liveWide]) assert.doesNotMatch(r.texts[0], /configuration could not be read|must change it/);
+	// Issue #448: the LOCAL venue on rootful Podman's Docker API hands back the same refusal marked `rootful`, with its
+	// own sentences: a key, a running service older than its configuration (a restart, not an edit), a spelling.
+	const rootfulKey = await run({ reason: "podman-conf-widens-job", key: "env", rootful: true, message: "Refused: /etc/containers/containers.conf sets env, ..." });
+	assert.deepEqual([rootfulKey.r.reason, rootfulKey.r.budgetReserved, rootfulKey.incr], ["podman-conf-widens-job", false, 0]);
+	assert.equal(rootfulKey.texts[0], "Refused: the worker host's Podman configuration adds to every job's container what this venue does not allow (variables, the Podman service's groups, looser limits and filters, or the programs that run it), so the operator must change it before local jobs run. Not run.");
+	// Gate round 1 of PR #473: a service older than its configuration (or a clock behind a change time) heals by itself, so
+	// it is a RETRY, pre-reserve, with no comment and no final policy outcome.
+	for (const extra of [{ restart: true }, { skew: true }]) {
+		const retried = await run({ reason: "podman-conf-widens-job", key: null, rootful: true, ...extra, retry: true, message: "Not run yet: ...", evidence: "/etc/containers/containers.conf changed after the running podman.service started, ..." });
+		assert.ok(retried.error instanceof InfraRetry, JSON.stringify(extra));
+		assert.match(retried.error.message, /^rootful Podman's service may still hold a containers\.conf older than the files, so this job waits for it to restart \(\/etc\/containers\/containers\.conf changed after/);
+		assert.deepEqual([retried.texts.length, retried.incr], [0, 0]);
+	}
+	const rootfulSpelling = await run({ reason: "podman-conf-widens-job", key: null, rootful: true, message: "Refused: ... escaped key ..." });
+	assert.match(rootfulSpelling.texts[0], /^Refused: the worker host's Podman configuration could not be read in full, or is written in a form the worker does not decode, [^]*before local jobs run\. Not run\.$/);
+	for (const r of [rootfulKey, rootfulSpelling]) assert.doesNotMatch(r.texts[0], /podman jobs|\/etc|\/root/, "the local venue's words, and no path in a forge comment");
+	const rootfulBusy = await run({ reason: "podman-conf-widens-job", key: null, rootful: true, transient: true, message: "Not read yet: ...", evidence: "/root/.config/containers/containers.conf could not be read (EIO)" });
+	assert.ok(rootfulBusy.error instanceof InfraRetry);
+	assert.equal(rootfulBusy.error.message, "rootful Podman's containers.conf or podman.service could not be read just now, so whether it widens a job is not known (/root/.config/containers/containers.conf could not be read (EIO))");
+	assert.deepEqual([rootfulBusy.texts.length, rootfulBusy.incr], [0, 0]);
 });
 
 test("an unmappable job user comments fixed text and logs the cause; an image without anyUid is named in the comment", async () => {

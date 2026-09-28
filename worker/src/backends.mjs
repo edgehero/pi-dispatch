@@ -400,12 +400,144 @@ export const PODMAN_SERVICE_LOCAL = "podmanServiceLocal";
 export const PODMAN_CONF_WIDENS_JOB = "podman-conf-widens-job";
 
 /**
- * The containers.conf keys that refusal refuses on presence (issues #428 and #450), in the order every text names them.
- * The ONE list: backend-podman.mjs builds `WIDENING_KEY` and its refusal texts from it, and `podman-doc.test.mjs`
- * requires every list of these keys in the specs, the docs and the source to be exactly this one, since three copies
- * drifted when #450 added the last two.
+ * The containers.conf keys that refusal refuses on presence (issues #428, #450 and #448), in the order every text names
+ * them. The ONE list for the podman venue: backend-podman.mjs builds `WIDENING_KEY` and its refusal texts from it, and
+ * `podman-doc.test.mjs` requires every list of these keys in the specs, the docs and the source to be exactly this one,
+ * since three copies drifted when #450 added two. The rule for a key issue #448 measured: REFUSED when the job saw its
+ * value cross a boundary the worker's argv sets (what the job may reach, run, read or be limited by), or when it could
+ * not be measured; documented as INERT when the argv's own pins overrode it; documented as HARMLESS
+ * (`PODMAN_HARMLESS_KEYS`) when it reached the job but moved nothing that is a boundary. Measured with the podman venue's
+ * own argv on rootless Podman 5.8.1 (Fedora 44) and 4.9.3 (Ubuntu 24.04), each key alone in the account's own
+ * containers.conf, on `--network=private` and on an `--internal` network, one parenthesis each:
+ * `default_sysctls` (a sysctl set in the job, the vendor's own block excepted), `default_ulimits` (a ulimit set),
+ * `seccomp_profile` (the job ran under the named profile), `init_path` (the named binary as its PID 1), `dns_servers`
+ * (its nameserver, on `--network=private`), `dns_options` (its resolver options), `dns_searches` (its search list),
+ * `base_hosts_file` (its /etc/hosts), `oom_score_adj` (its OOM score), `privileged` (a full capability bounding set, no
+ * seccomp filter, the host's devices and an unconfined SELinux label, though `--cap-drop=ALL` still empties its
+ * effective set), and from gate round 1 of PR #473: `label` (false ran it as `spc_t` on Fedora), `cgroup_conf` (its
+ * pids.max became max past `--pids-limit`), `host_containers_internal_ip` (the address it reaches as
+ * host.containers.internal), `runtimes` (the `[engine.runtimes]` table: a wrapper runtime ran for every job),
+ * `conmon_path` (a wrapper conmon ran for every job), `cgroups` (disabled left its pids and memory bounds unapplied) and
+ * `umask` (its umask became the one named, so what it writes to the host is as open as that says).
  */
-export const PODMAN_WIDENING_KEYS = Object.freeze(["pasta_options", "network_cmd_options", "annotations", "env", "helper_binaries_dir", "network_cmd_path"]);
+export const PODMAN_WIDENING_KEYS = Object.freeze([
+	"pasta_options",
+	"network_cmd_options",
+	"annotations",
+	"env",
+	"helper_binaries_dir",
+	"network_cmd_path",
+	"default_sysctls",
+	"default_ulimits",
+	"seccomp_profile",
+	"init_path",
+	"dns_servers",
+	"dns_options",
+	"dns_searches",
+	"base_hosts_file",
+	"oom_score_adj",
+	"privileged",
+	"label",
+	"cgroup_conf",
+	"host_containers_internal_ip",
+	"runtimes",
+	"conmon_path",
+	"cgroups",
+	"umask",
+]);
+
+/**
+ * The keys of `PODMAN_WIDENING_KEYS` that shape this account's shared rootless network helper (pasta or slirp4netns, the
+ * program behind it, and `env`, whose `[engine]` form can point Podman at another containers.conf that does): only these
+ * leave a running network carrying the setting after the key is gone, so only their remedy resets that network (issue
+ * #450). Every other refused key is applied per container, and the next job after its removal runs (gate round 1 of PR
+ * #473, which found the reset asked for every key).
+ */
+export const PODMAN_NETWORK_HELPER_KEYS = Object.freeze(["pasta_options", "network_cmd_options", "env", "helper_binaries_dir", "network_cmd_path"]);
+
+/**
+ * The keys MEASURED INERT for a podman venue job (issue #448), on rootless Podman 5.8.1 and 4.9.3 with the venue's own
+ * argv, one parenthesis each: `userns` (the argv's `--userns=keep-id`), `pidns` (its `--pid=private`), `ipcns` (its
+ * `--ipc=private`), `utsns` (its `--uts=private`), `cgroupns` (its `--cgroupns=private`), `netns` (its `--network`),
+ * `apparmor_profile` (rootless Podman applies no AppArmor profile: the job's label was `crun (unconfined)` with and
+ * without it on Ubuntu 24.04), `default_capabilities` (`--cap-drop=ALL`), `no_new_privileges` (`no-new-privileges`),
+ * `init` (`--init`), `pids_limit` (`--pids-limit`), `shm_size` (`--shm-size`), `env_host` (`--env-host=false`) and
+ * `http_proxy` (`--http-proxy=false`: a proxy in the account's environment did not reach the job). Documented, not
+ * refused.
+ */
+export const PODMAN_ROOTLESS_INERT_KEYS = Object.freeze(["userns", "pidns", "ipcns", "utsns", "cgroupns", "netns", "apparmor_profile", "default_capabilities", "no_new_privileges", "init", "pids_limit", "shm_size", "env_host", "http_proxy"]);
+
+/**
+ * The containers.conf keys the `local` venue refuses where rootful Podman's Docker API service on this host runs its jobs
+ * (issue #448), whatever the value, under `PODMAN_WIDENING_KEYS`' rule, each MEASURED with the job argv the worker
+ * builds, on the default network and on an `--internal` one, on Fedora 44 with rootful Podman 5.8.1 and on Ubuntu 24.04
+ * with 4.9.3 (`apparmor_profile` on Ubuntu alone, which runs AppArmor; `label` reached the job on Fedora alone, which runs
+ * SELinux). What each did, key by key, one parenthesis each so no two keys are read as a list:
+ *   `annotations` (the job got the service's own supplementary groups), `env` (a variable in every job),
+ *   `helper_binaries_dir` (the netavark and aardvark-dns Podman ran as root for the job's network were the named
+ *   directory's), `default_sysctls` (a sysctl set in the job), `default_ulimits` (a ulimit set in the job), `userns`
+ *   (with `auto` and no subordinate range the container could not be created), `pidns` (a host PID namespace, refused
+ *   at create against the argv's `--init`), `ipcns` (a host IPC namespace, refused at create against `--shm-size`),
+ *   `utsns` (the host's UTS namespace and hostname), `cgroupns` (the host's cgroup namespace), `netns` (the host's
+ *   network namespace, on the default network), `seccomp_profile` (the job ran under the named profile),
+ *   `apparmor_profile` (`unconfined` replaced the job's `containers-default` profile), `init_path` (the job's PID 1 was
+ *   the named binary), `dns_servers` (its resolv.conf nameserver, default network), `dns_options` (its resolv.conf
+ *   options), `dns_searches` (its resolv.conf search list), `base_hosts_file` (its /etc/hosts), `label` (false ran it as
+ *   `spc_t`), `cgroup_conf` (its pids.max became max), `host_containers_internal_ip` (the address of
+ *   host.containers.internal), `runtimes` (a wrapper runtime ran for every job), `conmon_path` (a wrapper conmon ran for
+ *   every job) and `cgroups` (disabled left its pids and memory bounds unapplied).
+ * The one value that is not refused is the vendor's own `default_sysctls = ["net.ipv4.ping_group_range=0 0"]`,
+ * uncommented in the stock containers.conf of Fedora 44 and Ubuntu 24.04 (`STOCK_CONF_BLOCKS` in
+ * runtime-observations.mjs). The rest are `PODMAN_ROOTFUL_INERT_KEYS` and `PODMAN_HARMLESS_KEYS`. The first three are in
+ * `PODMAN_WIDENING_KEYS`' order, and `podman-doc.test.mjs` holds every three-key list of these keys to exactly one of the
+ * derived lists.
+ */
+export const PODMAN_ROOTFUL_WIDENING_KEYS = Object.freeze([
+	"annotations",
+	"env",
+	"helper_binaries_dir",
+	"default_sysctls",
+	"default_ulimits",
+	"userns",
+	"pidns",
+	"ipcns",
+	"utsns",
+	"cgroupns",
+	"netns",
+	"seccomp_profile",
+	"apparmor_profile",
+	"init_path",
+	"dns_servers",
+	"dns_options",
+	"dns_searches",
+	"base_hosts_file",
+	"label",
+	"cgroup_conf",
+	"host_containers_internal_ip",
+	"runtimes",
+	"conmon_path",
+	"cgroups",
+]);
+
+/**
+ * The keys MEASURED INERT for a rootful local job (issue #448), on both hosts, one parenthesis each: `pasta_options`
+ * (rootful Podman runs no pasta for these networks; netavark sets them up), `network_cmd_options` (nor slirp4netns),
+ * `network_cmd_path` (no slirp4netns ran), `default_capabilities` (the argv's `--cap-drop=ALL`), `no_new_privileges`
+ * (the argv's `no-new-privileges`), `init` (the argv's `--init`), `oom_score_adj` (the compat API sends its own, on
+ * Fedora and on Ubuntu), `pids_limit` (the argv's `--pids-limit`), `shm_size` (the argv's `--shm-size`), `privileged`
+ * (the compat API sends its own, on both), `env_host` (the service's environment did not reach the job), `umask` (the
+ * job's umask stayed 0022) and `http_proxy` (a proxy in the service's environment reached no job, with the key absent,
+ * true or false): nothing the job saw changed. Documented, not refused.
+ */
+export const PODMAN_ROOTFUL_INERT_KEYS = Object.freeze(["pasta_options", "network_cmd_options", "network_cmd_path", "default_capabilities", "no_new_privileges", "init", "oom_score_adj", "pids_limit", "shm_size", "privileged", "env_host", "umask", "http_proxy"]);
+
+/**
+ * The keys MEASURED REACHING a job, on both venues and both hosts, that move nothing the worker's argv sets as a boundary
+ * (issue #448, gate round 1 of PR #473), so they are documented and not refused: `tz` (the job's clock read the named
+ * zone) and `no_hosts` (Podman wrote no /etc/hosts into the job, so it has less, not more). Refusing them would refuse
+ * a harmless preference, and a refusal that fires on harmless settings stops being read.
+ */
+export const PODMAN_HARMLESS_KEYS = Object.freeze(["tz", "no_hosts"]);
 
 /**
  * The closed list of observations a backend's `observedBy` may name, each with what it means. Closed for the
@@ -425,7 +557,7 @@ export const OBSERVATIONS = Object.freeze({
 export const OBSERVATION_FIX = Object.freeze({
 	[DOCKER_ENDPOINT_LOCAL]: "Point the docker CLI back at this host (DOCKER_HOST, DOCKER_CONTEXT or `docker context use`), or lower that entry to `asserted` if the redirect is deliberate.",
 	[DAEMON_APPLIES_BOUNDS]: "Run jobs on a rootful Docker Engine that reports PidsLimit and MemoryLimit, or lower that entry to `asserted`: on Podman and rootless daemons `pi-dispatch doctor --live` reads pids.max and memory.max off a real container instead.",
-	[RUNTIME_ADDS_NO_MOUNTS]: "On Podman, create an empty /etc/containers/mounts.conf and remove any `volumes` or `mounts` key from containers.conf (and write it in plain ASCII with no escaped key or multi-line string, which the check refuses rather than guesses at), or lower that entry to `asserted`.",
+	[RUNTIME_ADDS_NO_MOUNTS]: "On Podman, create an empty /etc/containers/mounts.conf and remove any `volumes` or `mounts` key from containers.conf (and write it in plain ASCII with no escaped key or multi-line string, which the check refuses rather than guesses at), then restart podman.service if it is running, since it keeps the containers.conf it started with, or lower that entry to `asserted`.",
 	[PODMAN_BOUNDS_DELEGATED]: "Turn on linger for the worker account (`loginctl enable-linger <account>`, which keeps its systemd user manager running with no one logged in) and run the worker as a systemd user service (`pi-dispatch service install`), or give Podman the account's user bus so it uses the systemd cgroup manager; delegate the cpu, memory and pids controllers to that manager on cgroup v2 (a systemd `Delegate=` drop-in for user@.service), remove any `cgroups` key from its containers.conf (written in plain ASCII with no escaped key or multi-line string, which the check refuses rather than guesses at), or lower that entry to `asserted`: `pi-dispatch doctor --live` reads pids.max and memory.max off a real container.",
 	[PODMAN_ADDS_NO_MOUNTS]: "As the worker account, create an empty ~/.config/containers/mounts.conf (or, when it has none, an empty /etc/containers/mounts.conf), remove any `volumes`, `mounts`, `devices` or `hooks_dir` key from every containers.conf it reads (and write those in plain ASCII with no escaped key or multi-line string, which the check refuses rather than guesses at) and any OCI hook, or lower that entry to `asserted`.",
 	[PODMAN_SERVICE_LOCAL]: "Unset CONTAINER_HOST and any containers.conf service destination for the worker account so `podman info` reports serviceIsRemote false, or lower that entry to `asserted`.",

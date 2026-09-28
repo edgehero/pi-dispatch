@@ -244,10 +244,10 @@ test("podmanAddsNoMounts reads every containers.conf a rootless Podman reads, ho
 		const dirs = dir ? { [dir]: [path.slice(dir.length + 1)] } : {};
 		return observe(answered(), fakeFs({ files, dirs }));
 	};
-	for (const path of ["/usr/share/containers/containers.conf", "/etc/containers/containers.conf", `${HOME}/.config/containers/containers.conf`]) {
+	for (const path of ["/usr/share/containers/containers.conf", "/etc/containers/containers.conf", "/etc/containers/containers.rootless.conf", `${HOME}/.config/containers/containers.conf`]) {
 		assert.equal(withConf(path).observations[PODMAN_ADDS_NO_MOUNTS], false, path);
 	}
-	for (const dir of ["/etc/containers/containers.conf.d", "/usr/share/containers/containers.rootless.conf.d", "/etc/containers/containers.rootless.conf.d", "/etc/containers/containers.rootless.conf.d/1234", `${HOME}/.config/containers/containers.conf.d`]) {
+	for (const dir of ["/etc/containers/containers.conf.d", "/etc/containers/containers.rootless.conf.d", "/etc/containers/containers.rootless.conf.d/1234", `${HOME}/.config/containers/containers.conf.d`]) {
 		const o = withConf(`${dir}/10-x.conf`, "[containers]\nmounts = [\"type=bind,src=/,dst=/h\"]\n", dir);
 		assert.equal(o.observations[PODMAN_ADDS_NO_MOUNTS], false, dir);
 		assert.match(o.evidence[PODMAN_ADDS_NO_MOUNTS], /sets a volumes, mounts, devices or hooks_dir key/);
@@ -273,24 +273,27 @@ test("podmanAddsNoMounts reads every containers.conf a rootless Podman reads, ho
 
 // --- issue #428: a containers.conf key that widens every job refuses the venue ------------------------------------
 
-const WIDENING_KEYS = ["pasta_options", "network_cmd_options", "annotations", "helper_binaries_dir", "network_cmd_path"];
-test("PODMAN_WIDENING_KEYS is the refused key list, and every key but env has a measured widening row here (#450)", { skip }, async () => {
+// Issue #448 (ledger L1): env joined this list and MEASURED below, so the every-file test covers it as it covers the rest;
+// it was left out of both while its rows lived only in the spelling test.
+const WIDENING_KEYS = ["pasta_options", "network_cmd_options", "annotations", "env", "helper_binaries_dir", "network_cmd_path", "default_sysctls", "default_ulimits", "seccomp_profile", "init_path", "dns_servers", "dns_options", "dns_searches", "base_hosts_file", "oom_score_adj", "privileged", "label", "cgroup_conf", "host_containers_internal_ip", "runtimes", "conmon_path", "cgroups", "umask"];
+test("PODMAN_WIDENING_KEYS is the refused key list, and every key has a measured widening row here (#450, #448)", { skip }, async () => {
 	const { PODMAN_WIDENING_KEYS } = await import("../src/backends.mjs");
-	assert.deepEqual(PODMAN_WIDENING_KEYS, ["pasta_options", "network_cmd_options", "annotations", "env", "helper_binaries_dir", "network_cmd_path"]);
-	assert.deepEqual([...PODMAN_WIDENING_KEYS].filter((k) => k !== "env"), WIDENING_KEYS, "env is pinned by its own rows");
+	assert.deepEqual(PODMAN_WIDENING_KEYS, WIDENING_KEYS);
+	assert.deepEqual(Object.keys(MEASURED), WIDENING_KEYS, "one measured row per key, in the list's order");
 });
 // Every file and drop-in directory `podmanConfFiles` names for uid 1234 and HOME /home/op: the vendor and /etc files and
 // directories, the rootless drop-ins without and with the uid, and the user's own file and drop-in directory.
-const CONF_FILES = ["/usr/share/containers/containers.conf", "/etc/containers/containers.conf", `${HOME}/.config/containers/containers.conf`];
-const CONF_DIRS = [
-	"/usr/share/containers/containers.conf.d",
-	"/etc/containers/containers.conf.d",
-	"/usr/share/containers/containers.rootless.conf.d",
-	"/etc/containers/containers.rootless.conf.d",
-	"/usr/share/containers/containers.rootless.conf.d/1234",
-	"/etc/containers/containers.rootless.conf.d/1234",
-	`${HOME}/.config/containers/containers.conf.d`,
-];
+// Gate round 1 of PR #473 (raw 31, M6): Podman 5.8.1 read /etc/containers/containers.rootless.conf, and neither Podman read
+// /usr/share's containers.conf.d or containers.rootless.conf.d (containers/common v0.67.0 `systemConfigs`).
+const CONF_FILES = ["/usr/share/containers/containers.conf", "/etc/containers/containers.conf", "/etc/containers/containers.rootless.conf", `${HOME}/.config/containers/containers.conf`];
+const CONF_DIRS = ["/etc/containers/containers.conf.d", "/etc/containers/containers.rootless.conf.d", "/etc/containers/containers.rootless.conf.d/1234", `${HOME}/.config/containers/containers.conf.d`];
+test("the rootless chain is the one Podman measured reading: no /usr/share drop-ins, and containers.rootless.conf (#448)", { skip }, async () => {
+	assert.deepEqual([...mod.PODMAN_ROOTLESS_CONF_FILES], ["/usr/share/containers/containers.conf", "/etc/containers/containers.conf", "/etc/containers/containers.rootless.conf"]);
+	assert.deepEqual([...mod.PODMAN_ROOTLESS_CONF_DIRS], ["/etc/containers/containers.conf.d", "/etc/containers/containers.rootless.conf.d"]);
+	for (const dir of ["/usr/share/containers/containers.conf.d", "/usr/share/containers/containers.rootless.conf.d", "/usr/share/containers/containers.rootless.conf.d/1234"]) {
+		assert.equal(widening(confAt(`${dir}/x.conf`, '[containers]\nenv = ["X=1"]\n', dir)), null, dir);
+	}
+});
 const widening = (fs, over = {}) => mod.podmanConfWidening({ fs, home: HOME, env: {}, euid: 1234, runRoot: "/run/user/1234/containers", ...over });
 const confAt = (path, text, dir = null) => fakeFs({ files: { [path]: text }, dirs: dir ? { [dir]: [path.slice(dir.length + 1)] } : {} });
 // What each key looks like where it was measured widening a job (M0, Fedora 44, Podman 5.8.1).
@@ -298,10 +301,58 @@ const MEASURED = {
 	pasta_options: '[network]\npasta_options = ["--map-host-loopback", "169.254.1.2"]\n',
 	network_cmd_options: '[engine]\nnetwork_cmd_options = ["allow_host_loopback=true"]\n',
 	annotations: '[containers]\nannotations = ["run.oci.keep_original_groups=1"]\n',
+	// Issue #428: pasta then got --map-host-loopback from the file this named.
+	env: '[engine]\nenv = ["CONTAINERS_CONF_OVERRIDE=/tmp/x.conf"]\n',
 	// Issue #450, gate round 1 (fedora-38): this ran the rootless network as `podpasta`. network_cmd_path was not measured.
 	helper_binaries_dir: '[engine]\nhelper_binaries_dir = ["/home/gx469b/hb", "/usr/libexec/podman", "/usr/bin"]\n',
 	network_cmd_path: '[engine]\nnetwork_cmd_path = "/home/gx469b/hb/slirp4netns"\n',
+	// Issue #448 (round-446/pr448/m5, rootless 5.8.1 and 4.9.3 alike), each as it was measured reaching the job.
+	default_sysctls: '[containers]\ndefault_sysctls = ["net.ipv4.ip_unprivileged_port_start=77"]\n',
+	default_ulimits: '[containers]\ndefault_ulimits = ["nofile=333:333"]\n',
+	seccomp_profile: '[containers]\nseccomp_profile = "/home/gx448r/aux/seccomp.json"\n',
+	init_path: '[containers]\ninit_path = "/home/gx448r/aux/catatonit-marked"\n',
+	dns_servers: '[containers]\ndns_servers = ["9.9.9.9"]\n',
+	dns_options: '[containers]\ndns_options = ["ndots:7"]\n',
+	dns_searches: '[containers]\ndns_searches = ["gx448.invalid"]\n',
+	base_hosts_file: '[containers]\nbase_hosts_file = "/home/gx448r/aux/hosts"\n',
+	oom_score_adj: '[containers]\noom_score_adj = 777\n',
+	privileged: '[containers]\nprivileged = true\n',
+	// Gate round 1 of PR #473 (raw 74, rootless on both hosts) and M6 (`cgroups`, `umask`).
+	label: "[containers]\nlabel = false\n",
+	cgroup_conf: '[containers]\ncgroup_conf = ["pids.max=max"]\n',
+	host_containers_internal_ip: '[containers]\nhost_containers_internal_ip = "10.99.99.99"\n',
+	runtimes: '[engine.runtimes]\ncrun = ["/home/gx473b/crun-wrap"]\n',
+	conmon_path: '[engine]\nconmon_path = ["/home/gx473b/conmon-wrap"]\n',
+	cgroups: '[containers]\ncgroups = "disabled"\n',
+	umask: '[containers]\numask = "0000"\n',
 };
+
+// Issue #448: what was measured INERT for this venue's argv (round-446/pr448/m5), each exactly as it was set there.
+const ROOTLESS_INERT = {
+	userns: '[containers]\nuserns = "auto"\n',
+	pidns: '[containers]\npidns = "host"\n',
+	ipcns: '[containers]\nipcns = "host"\n',
+	utsns: '[containers]\nutsns = "host"\n',
+	cgroupns: '[containers]\ncgroupns = "host"\n',
+	netns: '[containers]\nnetns = "host"\n',
+	apparmor_profile: '[containers]\napparmor_profile = "unconfined"\n',
+	default_capabilities: '[containers]\ndefault_capabilities = ["CHOWN", "NET_RAW", "SYS_ADMIN", "SYS_PTRACE"]\n',
+	no_new_privileges: '[containers]\nno_new_privileges = false\n',
+	init: '[containers]\ninit = false\n',
+	pids_limit: '[containers]\npids_limit = 77\n',
+	shm_size: '[containers]\nshm_size = "7m"\n',
+	env_host: "[containers]\nenv_host = true\n",
+	http_proxy: "[containers]\nhttp_proxy = true\n",
+};
+
+test("the podman venue's inert keys are documented and not refused, and the vendor's own default_sysctls block is accepted (#448)", { skip }, async () => {
+	const { PODMAN_ROOTLESS_INERT_KEYS } = await import("../src/backends.mjs");
+	assert.deepEqual([...PODMAN_ROOTLESS_INERT_KEYS], Object.keys(ROOTLESS_INERT));
+	for (const [key, text] of Object.entries(ROOTLESS_INERT)) assert.equal(widening(confAt(`${HOME}/.config/containers/containers.conf`, text))?.key ?? null, null, key);
+	// Fedora 44's and Ubuntu 24.04's stock vendor file, as shipped: accepted; any other value or a second sysctl: refused.
+	assert.equal(widening(confAt("/usr/share/containers/containers.conf", '[containers]\ndefault_sysctls = [\n  "net.ipv4.ping_group_range=0 0",\n]\nlog_driver = "journald"\n')), null);
+	assert.equal(widening(confAt("/usr/share/containers/containers.conf", '[containers]\ndefault_sysctls = [\n  "net.ipv4.ping_group_range=0 0",\n  "net.ipv4.ip_unprivileged_port_start=0",\n]\n'))?.key, "default_sysctls");
+});
 
 test("podmanConfWidening refuses each widening key in every containers.conf a rootless Podman reads (#428)", { skip }, () => {
 	for (const key of WIDENING_KEYS) {
@@ -339,7 +390,7 @@ test("podmanConfWidening matches every TOML spelling of a key and nothing that m
 		['engine.network_cmd_options = ["allow_host_loopback=true"]\n', "network_cmd_options"],
 		['network = { pasta_options = ["--map-gw"] }\n', "pasta_options"],
 		['containers = {annotations=["run.oci.keep_original_groups=1"]}\n', "annotations"],
-		['containers = { dns_options = ["A=1"], annotations = ["x=1"] }\n', "annotations"],
+		['containers = { label_users = ["A=1"], annotations = ["x=1"] }\n', "annotations"],
 		// containers.conf's append syntax, an array element `{append=true}`, which Podman 5.8.1 honours: the key is set.
 		['[network]\npasta_options = ["--map-gw", {append = true}]\n', "pasta_options"],
 		['[network]\npasta_options=["-T","6379",{append=true}]\n', "pasta_options"],
@@ -359,7 +410,7 @@ test("podmanConfWidening matches every TOML spelling of a key and nothing that m
 		// Any value refuses, the empty one too: presence is the rule, since no argv takes any value back.
 		["[containers]\nannotations = []\n", "annotations"],
 		// A `#` inside a string earlier on the line is not a comment (MOUNT_KEY's measured rule).
-		['[containers]\ndns_options = ["X=#"]\nannotations = ["a=b"]\n', "annotations"],
+		['[containers]\nlabel_users = ["X=#"]\nannotations = ["a=b"]\n', "annotations"],
 	]) assert.equal(at(text), key, text);
 	for (const text of [
 		'# pasta_options = ["--map-gw"]\n',
@@ -374,7 +425,7 @@ test("podmanConfWidening matches every TOML spelling of a key and nothing that m
 		'#network_cmd_path = ""\n',
 		"network_cmd_paths = 1\n",
 		'default_rootless_network_cmd = "slirp4netns"\n',
-		'[containers]\ndns_options = ["annotations"]\n',
+		'[containers]\nlabel_users = ["annotations"]\n',
 		// `env_host` is a real key, and pinned by --env-host=false, so it must NOT read as `env`; nor any other `env` suffix.
 		"[containers]\nenv_host = true\n",
 		'[engine]\nconmon_env_vars = ["A=1"]\n',
@@ -401,7 +452,7 @@ test("podmanConfWidening refuses what it cannot read whole, with no key and a de
 	// Issue #428, round 2: spellings the pattern cannot see through, each measured hiding a key Podman honoured.
 	for (const [label, text] of [
 		["long s", '[network]\n"pa\u017fta_options" = ["-T","6379"]\n'],
-		["multi-line basic", 'containers = { dns_options = ["""\n# """], annotations = ["run.oci.keep_original_groups=1"] }\n'],
+		["multi-line basic", 'containers = { label_users = ["""\n# """], annotations = ["run.oci.keep_original_groups=1"] }\n'],
 		["multi-line literal", "network = { default_subnet = '''\n#''', pasta_options = [\"-T\",\"6379\"] }\n"],
 		["u2028", 'network = { default_subnet = "a\u2028# ", pasta_options = ["-T","6379"] }\n'],
 		["u2029", 'network = { default_subnet = "a\u2029# ", pasta_options = ["-T","6379"] }\n'],
@@ -430,7 +481,7 @@ test("the podman conf refusal names the file and key, says to remove it, and nam
 	const found = widening(confAt(`${HOME}/.config/containers/containers.conf`, MEASURED.pasta_options));
 	assert.equal(
 		mod.podmanConfRefusal(found),
-		"Refused: /home/op/.config/containers/containers.conf sets pasta_options, which Podman hands to the pasta behind every job's network, where a host-loopback mapping (--map-host-loopback, --map-gw, -T) gives the job this host's 127.0.0.1 services; remove that key from that file, then stop every running container of this account that is on a bridge network, all of them at once, then start them again, since the rootless network they share lives until the last of them stops and a container started meanwhile joins it as it is: with this project's units, systemctl --user stop pi-dispatch-worker.service pi-dispatch-egress-proxy.service pi-dispatch-netns-keeper.service pi-dispatch-valkey.service, then podman stop any other container `podman ps` still lists, then systemctl --user start pi-dispatch-valkey.service pi-dispatch-netns-keeper.service pi-dispatch-egress-proxy.service pi-dispatch-worker.service (a worker installed at system scope is stopped and started with sudo systemctl stop and start pi-dispatch-worker.service instead; for containers started by hand, podman stop them all, then podman start them). Stop the keeper with systemctl, not podman stop: its unit starts it again a second later, and it then rejoins the network as it is while any other bridge container still runs. A unit this account does not have is reported as not loaded, and the others still stop and start. The podman venue refuses any containers.conf this account's Podman reads that sets pasta_options, network_cmd_options, annotations, env, helper_binaries_dir or network_cmd_path, whatever the value, because no flag on a job's command line takes it back, and it refuses a rootless network still running with such an option after the key is gone. A setting you need for your own containers (a pasta MTU, say) goes on their own command line (--network=pasta:...) or Quadlet unit instead, not account-wide (issue #428).",
+		"Refused: /home/op/.config/containers/containers.conf sets pasta_options, which Podman hands to the pasta behind every job's network, where a host-loopback mapping (--map-host-loopback, --map-gw, -T) gives the job this host's 127.0.0.1 services; remove that key from that file, then stop every running container of this account that is on a bridge network, all of them at once, then start them again, since the rootless network they share lives until the last of them stops and a container started meanwhile joins it as it is: with this project's units, systemctl --user stop pi-dispatch-worker.service pi-dispatch-egress-proxy.service pi-dispatch-netns-keeper.service pi-dispatch-valkey.service, then podman stop any other container `podman ps` still lists, then systemctl --user start pi-dispatch-valkey.service pi-dispatch-netns-keeper.service pi-dispatch-egress-proxy.service pi-dispatch-worker.service (a worker installed at system scope is stopped and started with sudo systemctl stop and start pi-dispatch-worker.service instead; for containers started by hand, podman stop them all, then podman start them). Stop the keeper with systemctl, not podman stop: its unit starts it again a second later, and it then rejoins the network as it is while any other bridge container still runs. A unit this account does not have is reported as not loaded, and the others still stop and start. The podman venue refuses any containers.conf this account's Podman reads that sets pasta_options, network_cmd_options, annotations, env, helper_binaries_dir, network_cmd_path, default_sysctls, default_ulimits, seccomp_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, oom_score_adj, privileged, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path, cgroups or umask, whatever the value, because no flag on a job's command line takes it back, and it refuses a rootless network still running with such an option after the key is gone. A setting you need for your own containers (a pasta MTU, say) goes on their own command line (--network=pasta:...) or Quadlet unit instead, not account-wide (issue #428).",
 	);
 	assert.equal(mod.podmanConfRefusal(found), `Refused: ${found.evidence}; ${mod.podmanConfFix(found)} (issue #428).`);
 	for (const key of WIDENING_KEYS) assert.match(mod.podmanConfRefusal(widening(confAt("/etc/containers/containers.conf", MEASURED[key]))), new RegExp(`^Refused: /etc/containers/containers\\.conf sets ${key}, which .*; remove that key from that file`));
@@ -1190,4 +1241,18 @@ test("the podman venue's job teardown uses the `podman info` it admitted jobs on
 	assert.equal(rt.podman, true);
 	assert.ok("version" in rt && "rootless" in rt);
 	assert.equal(typeof made.log, "function");
+});
+
+test("the remedy resets the rootless network only for the keys that shape it; a per-container key runs the next job once gone (#448)", { skip }, async () => {
+	const { PODMAN_NETWORK_HELPER_KEYS } = await import("../src/backends.mjs");
+	assert.deepEqual([...PODMAN_NETWORK_HELPER_KEYS], ["pasta_options", "network_cmd_options", "env", "helper_binaries_dir", "network_cmd_path"]);
+	for (const key of ["pasta_options", "network_cmd_options", "env", "helper_binaries_dir", "network_cmd_path"]) {
+		const fix = mod.podmanConfFix({ cause: "podman-conf-widens-job", key });
+		assert.ok(fix.includes(mod.ROOTLESS_NETNS_RESET), key);
+	}
+	for (const key of WIDENING_KEYS.filter((k) => !["pasta_options", "network_cmd_options", "env", "helper_binaries_dir", "network_cmd_path"].includes(k))) {
+		const fix = mod.podmanConfFix({ cause: "podman-conf-widens-job", key });
+		assert.ok(!fix.includes(mod.ROOTLESS_NETNS_RESET), key);
+		assert.match(fix, /^remove that key from that file; the next podman job runs once it is gone/, key);
+	}
 });

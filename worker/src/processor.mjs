@@ -403,25 +403,40 @@ export async function runJob(job, deps) {
 		// infrastructure, so it throws and is retried, pre-reserve, exactly like an unanswered observation.
 		if (observed?.podmanConfRefused?.transient) {
 			// `evidence` names the file (`<path> could not be read (<errno>)`), so the retry says which one: a containers.conf,
-			// or since issue #450 the /proc entry of the account's running rootless network.
-			throw new InfraRetry(`the podman venue's containers.conf or running rootless network could not be read just now, so whether it widens a job is not known (${observed.podmanConfRefused.evidence ?? "no file named"})`, { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			// or since issue #450 the /proc entry of the account's running rootless network. Issue #448: `rootful` is the local
+			// venue's, a containers.conf or unit file of rootful Podman's service on this host.
+			const what = observed.podmanConfRefused.rootful ? "rootful Podman's containers.conf or podman.service" : "the podman venue's containers.conf or running rootless network";
+			throw new InfraRetry(`${what} could not be read just now, so whether it widens a job is not known (${observed.podmanConfRefused.evidence ?? "no file named"})`, { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+		}
+		if (observed?.podmanConfRefused?.retry) {
+			// Gate round 1 of PR #473: rootful Podman's service running since before its containers.conf changed (or a change
+			// time ahead of the clock) heals by itself, once the service restarts or idles out or the clock passes, so it is a
+			// retry, pre-reserve, never a final `policy` outcome that would drop the job for a condition gone a minute later.
+			throw new InfraRetry(`rootful Podman's service may still hold a containers.conf older than the files, so this job waits for it to restart (${observed.podmanConfRefused.evidence ?? "no file named"})`, { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 		}
 		if (observed?.podmanConfRefused) {
 			// Issue #450: `live` is the account's RUNNING rootless network, not a file, so it has its own two sentences: one
 			// still carrying an option a removed key gave it (the fix is a restart, not a configuration change), and one
 			// whose process could not be read.
-			const { key, live } = observed.podmanConfRefused;
+			const { key, live, rootful } = observed.podmanConfRefused;
+			// Issue #448: `rootful` is the LOCAL venue on rootful Podman's Docker API service, with its own sentences: a key
+			// that reaches every local job, and a file it cannot read or does not decode. (A service older than its
+			// configuration is a retry, above, since gate round 1 of PR #473.)
 			await comment(
 				job,
-				live
+				rootful
 					? key
-						? "Refused: the worker host's running Podman network still lets a job's container reach the host's own services, with an option from a configuration since changed, so the operator must restart that network before podman jobs run. Not run."
-						: "Refused: the worker host's running Podman network could not be read, so whether it lets a job's container reach more than this venue allows is not known, and the operator must fix that before podman jobs run. Not run."
-					: key
-						? "Refused: the worker host's Podman configuration lets a job's container reach more than this venue allows (the host's own services or the worker account's groups), so the operator must change it before podman jobs run. Not run."
-						: "Refused: the worker host's Podman configuration could not be read in full, or is written in a form the worker does not decode, so whether it lets a job's container reach more than this venue allows is not known, and the operator must fix that before podman jobs run. Not run.",
+						? "Refused: the worker host's Podman configuration adds to every job's container what this venue does not allow (variables, the Podman service's groups, looser limits and filters, or the programs that run it), so the operator must change it before local jobs run. Not run."
+						: "Refused: the worker host's Podman configuration could not be read in full, or is written in a form the worker does not decode, so whether it adds to a job's container what this venue does not allow is not known, and the operator must fix that before local jobs run. Not run."
+					: live
+						? key
+							? "Refused: the worker host's running Podman network still lets a job's container reach the host's own services, with an option from a configuration since changed, so the operator must restart that network before podman jobs run. Not run."
+							: "Refused: the worker host's running Podman network could not be read, so whether it lets a job's container reach more than this venue allows is not known, and the operator must fix that before podman jobs run. Not run."
+						: key
+							? "Refused: the worker host's Podman configuration lets a job's container reach more than this venue allows (the host's own services, the worker account's groups, or looser limits and filters than the worker sets), so the operator must change it before podman jobs run. Not run."
+							: "Refused: the worker host's Podman configuration could not be read in full, or is written in a form the worker does not decode, so whether it lets a job's container reach more than this venue allows is not known, and the operator must fix that before podman jobs run. Not run.",
 			);
-			log("refused_podman_conf_widens_job", { key: key ?? null, ...(live ? { live: true } : {}), message: observed.podmanConfRefused.message });
+			log("refused_podman_conf_widens_job", { key: key ?? null, ...(live ? { live: true } : {}), ...(rootful ? { rootful: true } : {}), message: observed.podmanConfRefused.message });
 			return { outcome: "policy", reason: PODMAN_CONF_WIDENS_JOB, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 

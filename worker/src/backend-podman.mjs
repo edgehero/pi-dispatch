@@ -31,7 +31,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { JOB_NAME_PREFIX, execDockerBounded, jobContainerName, makeReaper, makeStopContainer } from "./backend-local.mjs";
-import { BACKENDS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_CONF_WIDENS_JOB, PODMAN_WIDENING_KEYS, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
+import { BACKENDS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_CONF_WIDENS_JOB, PODMAN_NETWORK_HELPER_KEYS, PODMAN_WIDENING_KEYS, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { buildPodmanRunArgs } from "./docker-run.mjs";
 import { DEFAULT_EGRESS_PROXY, makeEgressPreflight } from "./egress.mjs";
@@ -43,7 +43,7 @@ import { PODMAN_INFO_ARGS, parsePodmanInfo } from "./daemon-facts.mjs";
 // Moved to the leaf `daemon-facts.mjs` (issue #452, gate round 3) and re-exported, so every importer keeps its path.
 export { PODMAN_INFO_ARGS, parsePodmanInfo };
 import { makeRunContainer } from "./run-container.mjs";
-import { MOUNT_KEY, MOUNT_KEY_SAYS, PODMAN_HOOKS_DIRS, TRANSIENT_READ_ERRORS, confFilesIn, confKeyFinding, fipsFinding, hooksFinding, unreadFileFinding } from "./runtime-observations.mjs";
+import { MOUNT_KEY, MOUNT_KEY_SAYS, PODMAN_HOOKS_DIRS, TRANSIENT_READ_ERRORS, confFilesIn, confKeyFinding, confWidening, stripStockBlocks, widenKeyPattern, fipsFinding, hooksFinding, unreadFileFinding } from "./runtime-observations.mjs";
 
 /**
  * `docker info`'s bound, reused: `podman info` also walks the store, and a per-job `unknown` retries the job, so a bound a
@@ -138,14 +138,17 @@ export function cachedPodmanInfo(readInfo) {
 	return cached;
 }
 
-/** The system containers.conf files and drop-in directories rootless Podman reads (container-libs pkg/config). */
-export const PODMAN_ROOTLESS_CONF_FILES = Object.freeze(["/usr/share/containers/containers.conf", "/etc/containers/containers.conf"]);
-export const PODMAN_ROOTLESS_CONF_DIRS = Object.freeze([
-	"/usr/share/containers/containers.conf.d",
-	"/etc/containers/containers.conf.d",
-	"/usr/share/containers/containers.rootless.conf.d",
-	"/etc/containers/containers.rootless.conf.d",
-]);
+/**
+ * The system containers.conf files and drop-in directories rootless Podman reads (containers/common v0.67.0
+ * `systemConfigs`): the vendor and `/etc` files, `/etc/containers/containers.conf.d`, and for a uid above 0
+ * `/etc/containers/containers.rootless.conf`, its `.d` and the `.d/<uid>` beneath it (added in `podmanConfFiles`).
+ * Measured for issue #448 (gate round 1 of PR #473) with a drop-in in each place: Podman 5.8.1 read
+ * `containers.rootless.conf`, which this list missed until then, and neither Podman read
+ * `/usr/share/containers/containers.conf.d` or `/usr/share/containers/containers.rootless.conf.d`, so they are not on it.
+ * Podman 4.9.3 read none of the `rootless` places; they stay, since a superset only refuses more.
+ */
+export const PODMAN_ROOTLESS_CONF_FILES = Object.freeze(["/usr/share/containers/containers.conf", "/etc/containers/containers.conf", "/etc/containers/containers.rootless.conf"]);
+export const PODMAN_ROOTLESS_CONF_DIRS = Object.freeze(["/etc/containers/containers.conf.d", "/etc/containers/containers.rootless.conf.d"]);
 /** The system-wide mounts.conf a rootless Podman falls back to when the user has none (the user's one overrides it). */
 export const PODMAN_SYSTEM_MOUNTS_CONF = "/etc/containers/mounts.conf";
 
@@ -173,7 +176,7 @@ function podmanConfFiles({ fs, home, env, euid }) {
 	const configHome = typeof env?.XDG_CONFIG_HOME === "string" && env.XDG_CONFIG_HOME.startsWith("/") ? env.XDG_CONFIG_HOME : `${home}/.config`;
 	return confFilesIn(fs, {
 		files: [...PODMAN_ROOTLESS_CONF_FILES, `${configHome}/containers/containers.conf`],
-		dirs: [...PODMAN_ROOTLESS_CONF_DIRS, `/usr/share/containers/containers.rootless.conf.d/${euid}`, `/etc/containers/containers.rootless.conf.d/${euid}`, `${configHome}/containers/containers.conf.d`],
+		dirs: [...PODMAN_ROOTLESS_CONF_DIRS, `/etc/containers/containers.rootless.conf.d/${euid}`, `${configHome}/containers/containers.conf.d`],
 	});
 }
 
@@ -319,6 +322,11 @@ function observePodmanBounds(info, { fs, home, env, euid }) {
  *     another: measured, a `helper_binaries_dir` naming a directory with a wrapper in it first ran the rootless network
  *     as `podpasta`, and a plain bridge container then reached the host's loopback. Neither is set in the stock files
  *     (Fedora 44's and Ubuntu 24.04's carry both commented out).
+ *   - issue #448, measured with the venue's own argv on rootless Podman 5.8.1 and 4.9.3, each key alone in the account's
+ *     own containers.conf: ten more reached the job, and are in the list for that (`PODMAN_WIDENING_KEYS` in backends.mjs
+ *     says what each did); the rest measured were inert under the argv's own pins (`PODMAN_ROOTLESS_INERT_KEYS`). The
+ *     vendor's own `default_sysctls` block, uncommented in the stock file both distributions ship, is accepted exactly
+ *     as it ships (`STOCK_CONF_BLOCKS`), since refusing it would refuse every stock host.
  * REFUSED ON PRESENCE, whatever the value, as `CGROUPS_KEY` is, and for a stronger reason: no argv pins it back. Rejected:
  * pinning `--network=pasta:--map-host-loopback,none` (pasta takes the last mapping, so it cancels the first two, but a
  * conf `-T` survives it, measured); a per-job bridge for an egress-off job (the shared rootless netns pasta reads the
@@ -331,7 +339,7 @@ function observePodmanBounds(info, { fs, home, env, euid }) {
  * quoted, dotted (`network.pasta_options`) or in an inline table, never on a whole-line comment, never inside a longer
  * key name. The one capture group is the key, so the refusal names the key it found.
  */
-export const WIDENING_KEY = new RegExp(`^(?!\\s*#).*?(?:^|[\\s.{,"'])["']?(${PODMAN_WIDENING_KEYS.join("|")})["']?\\s*=`, "im");
+export const WIDENING_KEY = widenKeyPattern(PODMAN_WIDENING_KEYS);
 
 /** `PODMAN_WIDENING_KEYS` as a sentence names them: "a, b, c or d". */
 const WIDENING_KEYS_LISTED = `${PODMAN_WIDENING_KEYS.slice(0, -1).join(", ")} or ${PODMAN_WIDENING_KEYS.at(-1)}`;
@@ -344,6 +352,23 @@ const WIDENING_KEY_SAYS = Object.freeze({
 	env: "sets env, which under [engine] is Podman's own environment (where CONTAINERS_CONF_OVERRIDE, CONTAINERS_CONF, XDG_CONFIG_HOME or HOME moves which containers.conf it reads) and under [containers] adds variables to every job",
 	helper_binaries_dir: "sets helper_binaries_dir, which is where Podman finds the pasta and slirp4netns behind every job's network, so another program can stand in for them",
 	network_cmd_path: "sets network_cmd_path, which names the slirp4netns Podman runs behind every job's network, so another program can stand in for it",
+	default_sysctls: "sets default_sysctls, which Podman sets in every job (any value but the vendor's own ping_group_range block)",
+	default_ulimits: "sets default_ulimits, which Podman sets on every job's processes",
+	seccomp_profile: "sets seccomp_profile, which replaces the seccomp filter of every job",
+	init_path: "sets init_path, which names the binary that runs as every job's PID 1",
+	dns_servers: "sets dns_servers, which writes the nameservers of every job with no network of its own",
+	dns_options: "sets dns_options, which writes every job's resolver options",
+	dns_searches: "sets dns_searches, which writes every job's resolver search list",
+	base_hosts_file: "sets base_hosts_file, which names the file every job's /etc/hosts starts from",
+	oom_score_adj: "sets oom_score_adj, which Podman applies to every job's processes",
+	privileged: "sets privileged, which gives every job a full capability bounding set, no seccomp filter, the host's devices and an unconfined SELinux label",
+	label: "sets label, which with false runs every job unconfined by SELinux (spc_t, measured)",
+	cgroup_conf: "sets cgroup_conf, which writes cgroup files of every job past its own bounds (pids.max=max outlasted --pids-limit, measured)",
+	host_containers_internal_ip: "sets host_containers_internal_ip, which names the address every job reaches as host.containers.internal",
+	runtimes: "sets runtimes, which as the [engine.runtimes] table names the OCI runtime binary that creates every job (a wrapper there ran for every job, measured)",
+	conmon_path: "sets conmon_path, which names the conmon that monitors every job (a wrapper there ran for every job, measured)",
+	cgroups: "sets cgroups, which with disabled runs every job outside its cgroup with its pids and memory bounds unapplied (measured)",
+	umask: "sets umask, which every job's processes start with, so what a job writes to this host is as open as it says (measured)",
 });
 
 // The cause a widening containers.conf refuses the venue under, defined in the leaf (backends.mjs) and re-exported here.
@@ -367,19 +392,14 @@ export { PODMAN_CONF_WIDENS_JOB };
  */
 export function podmanConfWidening({ fs, home, env, euid, runRoot }) {
 	const listed = podmanConfFiles({ fs, home, env, euid });
-	let key = null;
-	const found =
-		listed.finding ??
-		confKeyFinding(fs, listed.files, {
-			key: WIDENING_KEY,
-			says: (match) => {
-				key = match[1].toLowerCase();
-				return WIDENING_KEY_SAYS[key];
-			},
-		});
+	// The chain-agnostic scan (issue #448) the rootful local check shares, with no `unread` list: every file this account's
+	// Podman reads is one the worker can read, so one it cannot is refused, as it always was.
+	// The vendor's own `default_sysctls` block is accepted as it ships (issue #448), as the rootful check accepts it: the
+	// stock file is on this chain too, and refusing it would refuse every stock host.
+	const found = listed.finding ?? confWidening(fs, listed.files, { keys: PODMAN_WIDENING_KEYS, says: WIDENING_KEY_SAYS, strip: stripStockBlocks });
 	if (!found) return podmanNetnsWidening({ fs, euid, runRoot });
 	if (found.value === null) return { cause: PODMAN_CONF_WIDENS_JOB, key: null, evidence: found.evidence, transient: true };
-	return { cause: PODMAN_CONF_WIDENS_JOB, key, evidence: found.evidence, ...(found.spelling ? { spelling: found.spelling } : {}) };
+	return { cause: PODMAN_CONF_WIDENS_JOB, key: found.key ?? null, evidence: found.evidence, ...(found.spelling ? { spelling: found.spelling } : {}) };
 }
 
 /**
@@ -402,12 +422,19 @@ export function podmanConfRefusal(found) {
  */
 export const ROOTLESS_NETNS_RESET = `stop every running container of this account that is on a bridge network, all of them at once, then start them again, since the rootless network they share lives until the last of them stops and a container started meanwhile joins it as it is: with this project's units, systemctl --user stop pi-dispatch-worker.service ${QUADLET_FILES.proxy.unit} ${QUADLET_FILES.keeper.unit} ${QUADLET_FILES.valkey.unit}, then podman stop any other container \`podman ps\` still lists, then systemctl --user start ${QUADLET_FILES.valkey.unit} ${QUADLET_FILES.keeper.unit} ${QUADLET_FILES.proxy.unit} pi-dispatch-worker.service (a worker installed at system scope is stopped and started with sudo systemctl stop and start pi-dispatch-worker.service instead; for containers started by hand, podman stop them all, then podman start them). Stop the keeper with systemctl, not podman stop: its unit starts it again a second later, and it then rejoins the network as it is while any other bridge container still runs. A unit this account does not have is reported as not loaded, and the others still stop and start`;
 
+/** `PODMAN_NETWORK_HELPER_KEYS` (backends.mjs) as a set: the only keys whose remedy resets the rootless network. */
+const NETWORK_HELPER_KEYS = new Set(PODMAN_NETWORK_HELPER_KEYS);
+
 /** The remedy half of `podmanConfRefusal`, alone, for doctor's fix line. */
 export function podmanConfFix(found) {
 	if (found?.live && !found.transient) {
 		return found.key
 			? `${ROOTLESS_NETNS_RESET}. A worker this stopped at boot exits 2 and stays down until that start brings it back; a running one reads this network again before every podman job and admits the next once it no longer carries the option`
 			: "the podman venue reads /proc to find this account's rootless network and the options it runs with; run the worker where /proc is mounted and lists the worker account's own processes";
+	}
+	if (found?.key && !NETWORK_HELPER_KEYS.has(found.key)) {
+		// Gate round 1 of PR #473: a key Podman applies per container needs no network reset; the next job reads the file.
+		return `remove that key from that file; the next podman job runs once it is gone, since Podman reads this account's containers.conf for every container it starts. The podman venue refuses any containers.conf this account's Podman reads that sets ${WIDENING_KEYS_LISTED}, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line or Quadlet unit instead, not account-wide`;
 	}
 	return found?.key
 		? `remove that key from that file, then ${ROOTLESS_NETNS_RESET}. The podman venue refuses any containers.conf this account's Podman reads that sets ${WIDENING_KEYS_LISTED}, whatever the value, because no flag on a job's command line takes it back, and it refuses a rootless network still running with such an option after the key is gone. A setting you need for your own containers (a pasta MTU, say) goes on their own command line (--network=pasta:...) or Quadlet unit instead, not account-wide`

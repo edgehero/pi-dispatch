@@ -46,7 +46,7 @@ import { runtimeFromFacts } from "./netns-keeper.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
 import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_INFO_TIMEOUT_MS, cachedPodmanInfo, decidePodmanJobUser, makePodmanBackend, makePodmanInfoReader, makePodmanReaper, observePodman, podmanConfRefusal, unavailableFor, podmanConfWidening, podmanJobUserRefusal, resolvePodmanImageUser } from "./backend-podman.mjs";
-import { observeHost, runtimeObservationKey } from "./runtime-observations.mjs";
+import { makePodmanServiceReader, makeRootfulMemory, observeHost, observeRootfulConf, readRootfulService, rootfulConfRefusal, rootfulConfRetries, rootfulUnreadList, runtimeObservationKey } from "./runtime-observations.mjs";
 
 import { makeRunContainer } from "./run-container.mjs";
 import { resolveProviderCredential } from "./env-allowlist.mjs";
@@ -355,6 +355,9 @@ export async function startWorker(
 		// Issue #345: the host files the runtime-mounts observation reads (Podman's mounts.conf and containers.conf). A seam so
 		// a wiring test never reads this machine's /etc.
 		observationFs = { statSync, readFileSync, readdirSync },
+		// Issue #448: `systemctl show podman.service`, read only where a local job runs on rootful Podman's Docker API on this
+		// host. A seam so a wiring test decides what the unit says, and never asks this machine's systemd.
+		readPodmanService: readPodmanServiceFn = makePodmanServiceReader(),
 		// Issue #354: the podman venue's three boot collaborators, each a seam for the endpoint's reason: the real ones spawn
 		// `podman`, and a wiring test must decide what `podman info` says, what the reaper lists and what the bundle is
 		// built from. Constructing the default reader spawns nothing; only a call does, and only while `podman` is blessed.
@@ -535,7 +538,12 @@ export async function startWorker(
 	// Issue #354: for `local` alone, like the endpoint above, and not at all with `local` unblessed. This is the site that
 	// would otherwise hold a worker without `local` at exit 1 forever: a floor naming `isolation` against observations
 	// nobody made reads as unanswered, which is the transient arm, which the supervisor retries without end.
-	const bootObserved = bootEndpoint ? observeHost({ endpoint: bootEndpoint, daemon: bootJobUser?.daemon ?? { answered: false, reason: "boot-read-timeout", transient: true }, fs: observationFs }) : null;
+	// Issue #448: `systemctl show podman.service`, read once here where the local daemon is rootful Podman on this host, and
+	// handed to both the mounts observation and the containers.conf refusal below, so they judge one answer.
+	// The deletion rule's memory (gate round 1 of PR #473): which chain files this worker saw while one service start ran.
+	const rootfulMemory = makeRootfulMemory();
+	const bootUnit = bootEndpoint && bootJobUser?.daemon ? await readRootfulService({ endpoint: bootEndpoint, daemon: bootJobUser.daemon, readService: readPodmanServiceFn }) : undefined;
+	const bootObserved = bootEndpoint ? observeHost({ endpoint: bootEndpoint, daemon: bootJobUser?.daemon ?? { answered: false, reason: "boot-read-timeout", transient: true }, fs: observationFs, unit: bootUnit, env, memory: rootfulMemory }) : null;
 	if (bootObserved) {
 		const bootObservedArgs = { backends: [DEFAULT_BACKEND], backendFloor: config.backendFloor, observations: bootObserved.observations, evidence: bootObserved.evidence };
 		const [runtimeRefusal] = observationRefusals(bootObservedArgs);
@@ -545,9 +553,29 @@ export async function startWorker(
 
 	const bootRefusal = jobUserBootRefusal(bootDecision, config.defaultBackend);
 	if (bootRefusal) throw configError(bootRefusal);
+	// Issue #448: where a local job runs on rootful Podman's Docker API service on this host, the containers.conf that
+	// service reads (the system chain, root's own, the unit's CONTAINERS_CONF) and whether the running service started
+	// before it last changed. A VENUE refusal, as the podman venue's #428 one is and for its reason: with egress off no
+	// declared property covers what `env` or `annotations` add to a job. After the identity, whose fix comes first, and
+	// only while `local` is the default venue; merely blessed, each local job is refused and the default venue's run.
+	// Tagged (exit 2) since a restart reads the same bytes, except what heals by itself (exit 1): a read that failed for a
+	// moment, a running service older than its containers.conf, a change time ahead of the clock. What the worker's account
+	// cannot read under root's own config home is said once here, never refused on; any other unreadable part refuses.
+	const bootRootful = bootEndpoint && bootJobUser?.daemon ? await observeRootfulConf({ endpoint: bootEndpoint, daemon: bootJobUser.daemon, fs: observationFs, readService: readPodmanServiceFn, env, unit: bootUnit, memory: rootfulMemory }) : null;
+	let rootfulUnreadSaid = "";
+	const sayRootfulUnread = (rootful) => {
+		const said = rootfulUnreadList(rootful?.unread);
+		if (said === rootfulUnreadSaid) return;
+		rootfulUnreadSaid = said;
+		if (said !== "") log("local_podman_conf_unread", { unread: said });
+	};
+	sayRootfulUnread(bootRootful);
+	const localConfBoot = localConfBootRefusal(bootDecision, config.defaultBackend, bootRootful);
+	if (localConfBoot) throw localConfBoot.transient ? new Error(localConfBoot.message) : configError(localConfBoot.message);
 
 	// Issue #354: the podman venue's ONE facts read, `podman info --format json`, at boot, where local's reads are and for
-	// their reasons: free, before forge auth, the reaper and Valkey, so a refusal here stops a process that built nothing.
+	// their reasons: free, before forge auth, the reaper and any Valkey client (the Valkey owner judgement above only reads
+	// sockets and probes addresses), so a refusal here stops a process that built nothing.
 	// Wrapped once in `cachedPodmanInfo` and the SAME wrapper is handed to the bundle below, so an answer read here is the
 	// one the first job is decided from rather than a second spawn. Bounded twice: the reader's own timeout (docker info's
 	// 15 s, reused) and this fuse two seconds past it, because a spawn that never settles has no timeout to fire.
@@ -1214,11 +1242,19 @@ export async function startWorker(
 			return { refused: true, message: endpointRefusal, observations: [DOCKER_ENDPOINT_LOCAL] };
 		}
 		const jobUser = await resolveJobUser({ endpoint, key: state });
-		const observed = observeHost({ endpoint, daemon: jobUser.daemon, fs: observationFs });
+		const unit = await readRootfulService({ endpoint, daemon: jobUser.daemon, readService: readPodmanServiceFn });
+		const observed = observeHost({ endpoint, daemon: jobUser.daemon, fs: observationFs, unit, env, memory: rootfulMemory });
 		if (runtimeObservationKey(observed) !== runtimeObservedSaid) {
 			runtimeObservedSaid = runtimeObservationKey(observed);
 			log("runtime_observed", { daemonAppliesBounds: observed.observations.daemonAppliesBounds, runtimeAddsNoMounts: observed.observations.runtimeAddsNoMounts, changed: true });
 		}
+		// Issue #448: rootful Podman's containers.conf, per job and before any spend, re-read every time because removing a
+		// key must need no worker restart (only the Podman service's). Handed back as the podman venue's refusal is
+		// (`podmanConfRefused`, `rootful: true`), ahead of the floor: it is what the venue IS on this host, and the processor
+		// returns it before the image preflight. Nothing is read where the daemon is not rootful Podman on this host.
+		const rootful = await observeRootfulConf({ endpoint, daemon: jobUser.daemon, fs: observationFs, readService: readPodmanServiceFn, env, unit, memory: rootfulMemory });
+		sayRootfulUnread(rootful);
+		if (rootful?.refusal) return { ok: true, endpoint, jobUser, podmanConfRefused: rootfulRefused(rootful.refusal) };
 		const args = {
 			backends: [venue],
 			backendFloor: config.backendFloor,
@@ -1896,6 +1932,37 @@ export function podmanBootRefusal(decision, defaultBackend) {
 	if (defaultBackend !== PODMAN_BACKEND) return null;
 	if (decision?.mode !== "unmappable" || !PODMAN_BOOT_REFUSING_CAUSES.has(decision.cause)) return null;
 	return podmanJobUserRefusal(decision);
+}
+
+/**
+ * The boot refusal for a rootful Podman containers.conf that reaches a local job (issue #448), from `observeRootfulConf`'s
+ * answer, or `null`: only while `local` is the default venue, and not when the local job user is already refused (that
+ * refusal, earlier at boot or per job, is the one to fix first). `transient` (thrown untagged, exit 1, so the supervisor
+ * restarts it) is a read that failed for a moment AND, since gate round 1 of PR #473, a service older than its
+ * containers.conf or a change time ahead of the clock: each heals by itself, so none may strand a unit with
+ * `RestartPreventExitStatus=2`. Exported for the doc test, as `podmanConfBootRefusal` is.
+ */
+export function localConfBootRefusal(decision, defaultBackend, rootful) {
+	if (defaultBackend !== DEFAULT_BACKEND || !rootful?.refusal || decision?.mode === "unmappable") return null;
+	return { message: rootfulConfRefusal(rootful.refusal), transient: rootfulConfRetries(rootful.refusal) };
+}
+
+/**
+ * A rootful finding as the processor's `podmanConfRefused` (issue #448): the podman venue's shape, marked `rootful`.
+ * `retry` marks what the processor throws for the queue's retry rather than returns (a moment's read failure, a service
+ * older than its containers.conf, a clock behind a change time), with the evidence its retry message names.
+ */
+function rootfulRefused(found) {
+	return {
+		reason: found.cause,
+		key: found.key ?? null,
+		message: rootfulConfRefusal(found),
+		rootful: true,
+		...(found.restart ? { restart: true } : {}),
+		...(found.skew ? { skew: true } : {}),
+		...(found.transient ? { transient: true } : {}),
+		...(rootfulConfRetries(found) ? { retry: true, evidence: found.evidence } : {}),
+	};
 }
 
 /**

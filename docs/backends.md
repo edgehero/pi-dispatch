@@ -81,7 +81,7 @@ worse.
 | `stopContainer` | `(name, job)` | anything. It is not awaited for its value: the abort's effect arrives through the container's own exit. |
 | `reap` | nothing | `{ reaped: true }` only if you ENUMERATED. See below. |
 | `containerName` | the job id | the name `stopContainer` will be given |
-| `observationPreflight` (optional) | the job | `{ ok: true }` to admit, `{ refused: true, message, observations }` when a floor needs an observation this host does not show (`message` goes to the operator's log only; `observations` names which, from the closed list), `{ unavailable: true, reason }` when it could not be read yet (retried). Anything carried beside `ok` is handed to `jobUserPreflight` as `observed`. Beside `ok`, `jobUserRefused: { refused: "job-user-unmappable", cause }` refuses the job before the image preflight, for a venue that already knows no uid can run there whatever the image (the `podman` venue uses it: its image probe asks the same runtime and would otherwise misname the fault), and so does `podmanConfRefused: { reason, key, message }`, the `podman` venue's refusal of a widening containers.conf (`podman-conf-widens-job`, issue #428). |
+| `observationPreflight` (optional) | the job | `{ ok: true }` to admit, `{ refused: true, message, observations }` when a floor needs an observation this host does not show (`message` goes to the operator's log only; `observations` names which, from the closed list), `{ unavailable: true, reason }` when it could not be read yet (retried). Anything carried beside `ok` is handed to `jobUserPreflight` as `observed`. Beside `ok`, `jobUserRefused: { refused: "job-user-unmappable", cause }` refuses the job before the image preflight, for a venue that already knows no uid can run there whatever the image (the `podman` venue uses it: its image probe asks the same runtime and would otherwise misname the fault), and so does `podmanConfRefused: { reason, key, message }`, the `podman` venue's refusal of a widening containers.conf (`podman-conf-widens-job`, issue #428), which `local` also hands back, marked `rootful: true`, for rootful Podman's own containers.conf (issue #448). |
 | `jobUserPreflight` (optional) | `(job, { capabilities, observed })` | `{ user, home }` (`user` null means the image's own `USER`), plus `relabel: true` where the job's own mounts must carry a private SELinux label (the processor hands it to `runContainer`), `{ refused: "job-user-unmappable", cause }` or `{ refused: "job-image-any-uid-unsupported" }` to refuse, `{ unavailable: true, reason }` to retry. |
 
 ## What a backend declares
@@ -180,6 +180,11 @@ ones adapters get wrong:
   probe as that user and reads it back. An adapter for another runtime answers the same question in its own
   terms.
 
+  Apart from the job user, where the docker CLI reaches rootful Podman through its Docker API on this host,
+  `local` also refuses while a containers.conf that Podman service reads sets one of the keys that reach a job there
+  (docs/podman.md lists them, measured key by key), or while the running service started before one of those files last changed, at the same
+  two points (issue #448, docs/podman.md, "What rootful Podman's containers.conf must not set").
+
 - **`podman`'s job user is decided from `podman info`**, and the answer is always the worker's own
   `<uid>:<gid>` with keep-id, or a refusal. Its texts are its own, in `PODMAN_JOB_USER_FIX`
   (`worker/src/backend-podman.mjs`), and when each fires is the same shape as above, with `podman` in `local`'s
@@ -194,7 +199,7 @@ ones adapters get wrong:
   without `anyUid`) fire at the same point on `podman` as on `local`, with the venue's own text. An unanswered
   `podman info` is in neither list, exactly as above: `unknown`, never kept, and a job picked up meanwhile is
   retried. Apart from the job user, the venue also refuses while a containers.conf its account reads sets
-  `pasta_options`, `network_cmd_options`, `annotations`, `env`, `helper_binaries_dir` or `network_cmd_path`, or while
+  `pasta_options`, `network_cmd_options`, `annotations`, `env`, `helper_binaries_dir`, `network_cmd_path`, `default_sysctls`, `default_ulimits`, `seccomp_profile`, `init_path`, `dns_servers`, `dns_options`, `dns_searches`, `base_hosts_file`, `oom_score_adj`, `privileged`, `label`, `cgroup_conf`, `host_containers_internal_ip`, `runtimes`, `conmon_path`, `cgroups` or `umask`, or while
   its running rootless network still carries such an option, at the same two points (issues #428 and #450,
   docs/podman.md step 4).
 

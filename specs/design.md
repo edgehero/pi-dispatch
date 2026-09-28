@@ -3884,15 +3884,18 @@ a tunnel.
   job user already makes (`runtime-observations.mjs`), so no second daemon call exists. `runtimeAddsNoMounts` is
   true on Docker, and on rootful Podman only with the documented empty `/etc/containers/mounts.conf` override, no
   `volumes` or `mounts` key in the containers.conf files and drop-ins this host keeps at their standard paths, those
-  files readable, FIPS off and the service's socket on this host. A read that did not answer is `null`, never
+  files readable, FIPS off and the service's socket on this host. Since issue #448 the containers.conf half reads the
+  rootful refusal's chain (`rootfulConfChain`: root's own conf and the unit's `CONTAINERS_CONF` and
+  `CONTAINERS_CONF_OVERRIDE` too), names a part it cannot read instead of withholding credit for it, and withholds
+  credit while a running `podman.service` is older than that chain (`DES-PODMAN-THROUGH-ITS-DOCKER-API`). A read that did not answer is `null`, never
   `false`: under a floor an unanswered read retries (exit 1 at boot, InfraRetry per job) rather than refusing for
   good. A clean `docker info` that parsed to no known shape, or no docker CLI at all, IS an answer, so it is `false`
   and refuses (exit 2). Each observation has its own remedy (`OBSERVATION_FIX`) and its own fixed forge
   comment, so a bounds miss is never told to repoint the docker CLI. `doctor` prints the degraded words with what
   was seen, and `doctor --live` reads what the observations cannot: `pids.max` and `memory.max` in a real
-  container, and its `/proc/self/mountinfo`. **Residuals**: the containers.conf the service reads through
-  `CONTAINERS_CONF`/`CONTAINERS_CONF_OVERRIDE`, root's `$XDG_CONFIG_HOME`, and the hidden `--default-mounts-file`
-  flag are not read (only `doctor --live`'s mountinfo catches them); a unix socket that is really `podman machine`'s
+  container, and its `/proc/self/mountinfo`. **Residuals**: the hidden `--default-mounts-file` flag is not read, and
+  only `doctor --live`'s mountinfo catches it (the containers.conf the service reads through `CONTAINERS_CONF` or
+  `CONTAINERS_CONF_OVERRIDE`, and root's own, are read since issue #448, from `podman.service`'s unit); a unix socket that is really `podman machine`'s
   forward reads this host's files, where no override exists, so it gets no credit unless an operator made one
   here; the facts are cached per endpoint state, so a daemon swapped behind an unchanged endpoint (Docker for Podman
   on one socket path) keeps its old answer until a restart, as the job user does. The containers.conf keys read are
@@ -4005,7 +4008,11 @@ a tunnel.
   venue, `DES-PODMAN-NATIVE-ROOTLESS-BACKEND`). Beside it, and for the same reason, `podmanConfRefused` (`{ reason,
   key, message }`, issue #428): a venue refusal the processor returns as `podman-conf-widens-job` right after the
   identity's, with a fixed comment and the file and key in the operator's log, or, marked `transient: true` (a conf
-  read that failed for a moment), throws for a retry instead. A venue without either behaves exactly as before.
+  read that failed for a moment), throws for a retry instead. Since issue #448 the `local` venue hands it back too,
+  marked `rootful: true`, where its jobs run on rootful Podman's Docker API on this host; the processor then comments
+  in the local venue's words (`DES-PODMAN-THROUGH-ITS-DOCKER-API`), except for `retry: true` (a running Podman service
+  older than its containers.conf, or a change time ahead of the clock), which it throws for the queue's retry, as it
+  does `transient`, since each heals by itself. A venue without either behaves exactly as before.
 - **`doctor` is what makes the declaration admissible at all.** A table of guarantees nothing ever prints is
   precisely the believed-in control `CONST-EGRESS-POLICY-IN-THE-ARGV` says is worse than a known-absent one,
   so the three words must stay told apart ON THE SCREEN: `enforced` is quiet, `asserted` renders as a
@@ -4746,7 +4753,120 @@ a tunnel.
     (`stat -L --format=%C`, the fix naming the fully resolved directory mapped back through the policy's path equivalences) and warns with the `semanage fcontext` fix, and the runner refuses a job whose `/workspace`
     it cannot read, pre-spend, as `job-inputs-unreadable`. Without the relabel every argv is byte-identical to
     before. The compose file's three single-file config mounts carry `:ro,z`.
+- **Rootful Podman's containers.conf keys that reach a local job (issue #448)**, measured on that Fedora 44 host
+  (rootful Podman 5.8.1 behind `podman.socket`, the argv from `buildDockerRunArgs` and `buildContainerEnv`, on the
+  default network and on an `--internal` one joined by a stand-in proxy, the service stopped before each cell so the
+  socket started it fresh), each key alone in `/etc/containers/containers.conf` and again in a
+  `containers.conf.d` drop-in; 2026-09-27 and 2026-09-28:
+  - **REACH THE JOB, or cannot be measured, so the `local` venue refuses them** (`PODMAN_ROOTFUL_WIDENING_KEYS`, one
+    exported list, key by key in `docs/podman.md`'s bolted table): `annotations` (`run.oci.keep_original_groups=1`
+    gave the job the API service's own supplementary groups in place of its gid; with a `SupplementaryGroups=podman`
+    drop-in on `podman.service` it read a `root:podman 0640` file), `env` (its variable in every job, past the
+    worker's closed environment), `helper_binaries_dir` (the netavark and aardvark-dns Podman ran as root for every
+    job's network, on both networks, were the named directory's), and the second round (M3, 2026-09-28, with a probe
+    run by the worker's own argv): a sysctl, a ulimit, the host's UTS, cgroup and (default network) network namespace,
+    a seccomp profile, a PID 1 binary, a nameserver, a resolver option and search domain and an `/etc/hosts` base
+    each reached the job from its key; `userns = "auto"` (no subordinate range) and a host PID or IPC namespace (against
+    the argv's own `--init` and `--shm-size`) left the job's container uncreatable, which is refused rather than left
+    to fail as a never-started container; `apparmor_profile` (measured on Ubuntu 24.04, rootful Podman 4.9.3,
+    which runs AppArmor: `unconfined` replaced the job's `containers-default` profile); and from gate round 1 of PR
+    #473, on both hosts: `label` (false ran the job as `spc_t`, on Fedora), `cgroup_conf` (`pids.max=max` outlasted
+    `--pids-limit`), `host_containers_internal_ip`, the `[engine.runtimes]` table and `conmon_path` (a wrapper ran for
+    every job), and `cgroups` (`disabled` left the pids and memory bounds unapplied). The rule, stated once for both
+    venues: REFUSED when what the job saw crossed a boundary the argv sets (what it may reach, run, read or be limited
+    by) or could not be measured; INERT when the argv or the API request overrode it; HARMLESS
+    (`PODMAN_HARMLESS_KEYS`: `tz` and `no_hosts`) when it reached the job and moved nothing that is a boundary, which is
+    documented and not refused. The vendor's own `default_sysctls = ["net.ipv4.ping_group_range=0 0"]` is uncommented in
+    the stock containers.conf of Fedora 44 and Ubuntu 24.04 and reaches every job (the job read `0 0`; `1 0` once a
+    drop-in replaced it); refusing the key on presence would refuse every stock host, which is worse, and the exception
+    is exact, so exactly that block
+    (`STOCK_CONF_BLOCKS`) is blanked before the scan and any other value is refused.
+  - **MEASURED INERT, so documented and not refused** (`PODMAN_ROOTFUL_INERT_KEYS`): rootful Podman runs no pasta or
+    slirp4netns for a job on its default or an `--internal` network, so no network helper key changed anything;
+    the job's own argv (`--cap-drop=ALL`, `no-new-privileges`, `--init`, `--pids-limit`, `--shm-size`) overrode the
+    keys that default those, and the Docker API request carries its own OOM score and privilege (measured on Fedora and
+    on Ubuntu), so those keys changed nothing the job saw either; nor did `env_host` (the service environment), `umask` (it stayed 0022), nor `http_proxy` (a proxy
+    in the service's own environment reached no job, the key absent, true or false).
+  - **The refusal** is `podman-conf-widens-job`, the native venue's reason, with its own sentences (`rootful: true`):
+    at boot while `local` is the default venue (exit 2, `localConfBootRefusal`), otherwise per job before the image
+    preflight and every spend (`localObservationPreflight` hands it back as `podmanConfRefused`, which the processor
+    returns), and in doctor beside the `local: the daemon is Podman` line (✗ where it stops a boot, ⚠ where it
+    refuses each job). What heals by itself is NOT a refusal (gate round 1 of PR #473, where it was a final `policy`
+    outcome): a running service older than its chain (`restart`) or a change time ahead of the clock (`skew`) is a retry,
+    thrown for the queue (`rootfulConfRetries`), a boot exit 1, a ⚠ in doctor. A VENUE refusal, not a floor observation, for #428's reason: with egress off no declared
+    property covers what `env` or `annotations` add to a job, so a floor would never ask on the deployments at risk.
+    It runs only where `rootfulPodmanHere` holds (the daemon answered as Podman, not rootless, on a unix socket of
+    this host, `podmanOnThisHost`): Docker, rootless Podman and a remote endpoint read no file, spawn nothing and get
+    exactly what they got.
+  - **The chain it reads is the service's, as measured, not only `/etc`** (`rootfulConfChain`, containers/common
+    v0.67.0's `systemConfigs`, each place measured with a drop-in): the vendor and `/etc` files and every `*.conf` in
+    `/etc/containers/containers.conf.d` (NOT `/usr/share/containers/containers.conf.d` or either
+    `containers.rootful.conf.d`, which neither Podman read, gate round 1 of PR #473); root's own
+    `<config home>/containers/containers.conf` and its `containers.conf.d` (measured honoured by the service with no
+    `HOME` in its unit, where Podman takes root's home from passwd; with `Environment=HOME=/root` the same); every
+    `--module` the unit passes, on its `ExecStart` or in a variable its argv expands (`LOGGING=`, measured), resolved
+    under `PODMAN_MODULE_DIRS`; and every file `CONTAINERS_CONF` or `CONTAINERS_CONF_OVERRIDE` names in the unit's
+    `Environment=`, an `EnvironmentFile=` (its wildcards expanded, as systemd does) or the manager's own environment
+    (`systemctl show-environment`, measured honoured; read as it is NOW, so a `set-environment` undone after the
+    service started is a residual only root can see, measured), all read with `systemctl`, which any account may
+    run. Judged IN ADDITION to the system chain, never instead of it, so the superset can only refuse more.
+    `podman.service` is
+    TRUSTED ONLY FOR ITS OWN SOCKET: when the worker's endpoint is not a socket `podman.socket` listens on, a second
+    rootful API service is behind it (measured applying its own `CONTAINERS_CONF_OVERRIDE`), whose environment only
+    root can read, so it is named as a residual, the files every rootful Podman reads still judged. An `[engine] env`
+    naming `CONTAINERS_CONF_OVERRIDE` was measured NOT honoured by the service; `env` is refused either way. The scan
+    is `confWidening`, chain-agnostic, the one the native venue's `podmanConfWidening` now calls with its own chain.
+    ONE chain reader, `rootfulConfChain`, serves this refusal and the `runtimeAddsNoMounts` observation
+    (`observeRuntimeMounts`, its `volumes`, `mounts`, `devices` and `hooks_dir`), and `podman.service` is read once per
+    boot or job (`readRootfulService`) and handed to both, so the two cannot judge different files or answers.
+  - **WHAT CANNOT BE READ REFUSES, EXCEPT ROOT'S OWN CONFIG HOME.** A path of that chain the worker's account cannot
+    read under root's config home (`/root/.config`, or the unit's `HOME` or `XDG_CONFIG_HOME`; `0550` or `0700` on every
+    stock host) is NOT judged and NOT refused: it is named, by doctor in a ⚠ line and by the worker in
+    `local_podman_conf_unread` (at boot, and again when the list changes). Any OTHER part that exists and cannot be read
+    refuses and withholds `mountSet` (`unreadFileFinding`, the native venue's rule): gate round 1 of PR #473 measured a
+    `0600` root drop-in in `/etc` setting `env` reach every job while this was named and doctor said ✓, and the same
+    drop-in setting `volumes` earn `mountSet`, a regression against main. A `systemctl` that does not answer or a unit
+    that is not loaded is named. A read that failed for a moment is retried (`TRANSIENT_READ_ERRORS`).
+  - **THE RUNNING SERVICE (the rootful twin of issue #450).** Measured: with the service held up by a `docker
+    events` client, a key written to `/etc` did not reach a job started on the same service pid; keys apply only once
+    it exits (after a few idle seconds, or a stop) and the socket starts it again. The same holds for a key removed.
+    So a clean chain says what the NEXT service reads, not what the running one holds, and nothing records what a
+    file held before. The rule: while `podman.service` is running (`ActiveState`), a path it may have read (every
+    existing chain file, every drop-in directory, since an entry added, removed or renamed changes it, the module and
+    environment files and the unit's own files) whose CHANGE time (`ctimeMs`) is later than the service's
+    `ExecMainStartTimestamp` holds jobs back until it restarts, as a retry with the fix `sudo systemctl restart
+    podman.service` while no local job runs. Change time, never mtime (gate round 1): `cp -p` and `touch -d` set an
+    mtime back and hid a removed key, and a future mtime held jobs back forever; a change time later than now is the
+    clock's (`skew`), said as such. A chain file's PARENT directory is not watched (`sed -i registries.conf` held every
+    job back); a file replaced by a rename has a new change time of its own. A chain file DELETED while the service ran
+    has no change time: the worker keeps which chain files it saw during one service start (`makeRootfulMemory`, per
+    worker), and one gone since is the same retry; a deletion before the worker first looked is the stated residual
+    (doctor, one shot, cannot see it at all). The cost is one restart after an edit; a service that has idled out is
+    never held back, since the next job's request starts it fresh. Refusing only when a key was REMOVED would need
+    what the file held before, which nothing keeps.
 - **Rejected**:
+  - **Watching a chain file's parent directory for its deletion** (the first form): unrelated files live there, and an
+    edit to one held every local job back as a terminal `policy` outcome (gate round 1 of PR #473); the per-worker
+    memory sees a deletion exactly.
+  - **A final `policy` refusal for a service older than its chain**: it heals by itself once the service restarts or
+    idles out, so a final refusal dropped work for a condition gone a minute later; it is a retry.
+  - **Judging the modification time**: userspace sets it (`cp -p`, `touch -d`), and it hid a removed key.
+  - **Refusing `tz` or `no_hosts`**: each reached the job and moved no boundary; a refusal that fires on harmless
+    settings stops being read.
+  - **A floor observation for the rootful keys**: the #428 reasoning holds unchanged, a floor names a declared
+    property and none covers what `env` or `annotations` add.
+  - **Refusing an unreadable part of the rootful chain**: root's home is unreadable to every worker that is not root
+    on a stock host, so the refusal would fire on every such deployment, whatever its configuration; the binding
+    decision is to judge the readable chain and name the rest.
+  - **Refusing `default_sysctls` on presence** (issue #448, M3): the vendor's own block is uncommented in the stock
+    file of both distributions measured, so every stock host would be refused; exactly that block is accepted.
+  - **Pinning `--uts`, `--cgroupns` or a network in the docker argv instead of refusing those keys**: a pin changes the
+    argv of every Docker job, which this route must leave byte-unchanged, and it covers three keys of eighteen; one
+    refusal rule covers all of them, measured the same way.
+  - **Refusing the network helper keys the native venue refuses here too, for symmetry**: each was
+    measured inert on this route, and a refusal that fires on harmless settings stops being read.
+  - **Reading the running service's own environment from `/proc/<pid>/environ`**: root-only; the unit's
+    `Environment=`, readable by any account, is where the measured variables were set.
   - **`:z` (shared) on a job's own directories**: every container on the host could then read every job's inputs and
     transcript while it runs, which is the job-to-job reach the per-job `0700` directory exists to deny
     (`CONST-ISOLATION-CONTAINER-PER-JOB`).
@@ -4779,6 +4899,17 @@ a tunnel.
   - `podman machine`, Podman Desktop, OrbStack, Colima and Docker Engine with `selinux-enabled` are unmeasured
     (`OQ-037`; rootless Podman has its own venue since issue #354). SELinux enforcing, netavark's nftables driver and systemd-run
     health checks were measured on a real host (issue #355, above).
+  - Issue #448: what the worker's account cannot read of root's own config home is named and not judged (every other
+    unreadable part refuses); a service on a socket `podman.socket` does not listen on (a second API service, or one
+    started by hand) is judged on the files alone, since its environment, modules and start are its own process's; a
+    docker CLI that is really podman-docker running Podman in the worker's own process is judged with the worker's
+    own `CONTAINERS_CONF` added, and the running-service rule may then hold jobs back for a service no job uses (fail
+    closed, and a retry). A chain file deleted before the worker first looked, while an older service still runs, is
+    not seen (restart the service after deleting one; doctor, one shot, sees no deletion at all). `runtimeAddsNoMounts`
+    reads the same chain under the same rules: root's config home named in its evidence, any other unreadable part
+    withholding the credit, and a running service older than the chain withholding it (measured with `volumes`: a key
+    added while the service ran did not reach the next job, one removed still did; `mounts.conf` was read per
+    container, so it is not watched).
   - An operator's local folder or overlay that is not labelled for containers refuses every job that mounts it, at
     the runner's pre-spend check, until the operator adds the `semanage` rule; doctor names it beforehand, but only
     for folders `triggers.json` names and for `PI_GLOBAL_PI_DIR`. The relabel and the refusals were read back on
@@ -4808,9 +4939,18 @@ a tunnel.
   `worker/src/container-spec.mjs` -> `containerSpec` (`relabel`, `workspaceOwned`); `worker/src/docker-run.mjs` ->
   `dockerArgsFromSpec`; `worker/src/doctor.mjs` -> `selinuxLabelChecks`; `image/runner/run-job.mjs` ->
   `assertJobInputsReadable`; `deploy/docker-compose.yml`; `.github/scripts/podman-host-check.mjs`
+  · issue #448: `worker/src/backends.mjs` -> `PODMAN_ROOTFUL_WIDENING_KEYS`, `PODMAN_ROOTFUL_INERT_KEYS`,
+  `PODMAN_HARMLESS_KEYS`, `PODMAN_NETWORK_HELPER_KEYS`; `worker/src/runtime-observations.mjs` -> `widenKeyPattern`,
+  `confWidening`, `runtimesTableSet`, `rootfulConfChain`, `expandEnvironmentFilePattern`, `rootfulConfWidening`,
+  `rootfulConfRetries`, `makeRootfulMemory`, `rootfulPodmanHere`, `endpointSocketPath`, `observeRootfulConf`,
+  `readRootfulService`, `makePodmanServiceReader`, `parsePodmanServiceShow`, `parseShowEnvironment`,
+  `parseSocketListen`, `moduleArgsIn`, `rootfulConfRefusal`, `rootfulConfResidual`; `worker/src/start.mjs` ->
+  `localConfBootRefusal`, `localObservationPreflight`; `worker/src/processor.mjs` (the `rootful` comments and the
+  `retry` arm); `worker/src/doctor.mjs` -> `jobUserChecks`; `worker/src/backend-podman.mjs` -> `podmanConfWidening`
+  (now on `confWidening`), `podmanConfFix`, `PODMAN_ROOTLESS_CONF_FILES`
 - **Traces to**: `DES-CONTAINER-BACKEND-REGISTRY`, `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`,
-  `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-LIVE-PROBE-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`,
-  `CONST-ISOLATION-CONTAINER-PER-JOB`, `OQ-036`, `OQ-037`
+  `DES-PODMAN-NATIVE-ROOTLESS-BACKEND`, `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-LIVE-PROBE-CONTRACT`,
+  `INT-RUNNER-EXIT-CODE-PROTOCOL`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `OQ-036`, `OQ-037`
 
 ## DES-PODMAN-NATIVE-ROOTLESS-BACKEND
 
@@ -4825,13 +4965,28 @@ a tunnel.
   PID namespace and received the worker's environment, the provider key with it; pinned, neither. (dockerd's
   daemon.json can default the cgroup and IPC modes too, and the `local` argv pins neither: a gap older than this
   venue.) What the argv CANNOT pin is the network's options, so the venue REFUSES them instead (issue #428): while
-  any containers.conf this account's Podman reads sets `pasta_options`, `network_cmd_options`, `annotations`, `env`,
-  `helper_binaries_dir` or `network_cmd_path` (`PODMAN_WIDENING_KEYS`), with any value, the worker refuses to boot with `podman` as its default venue, and refuses each podman job otherwise, as
+  any containers.conf this account's Podman reads sets `pasta_options`, `network_cmd_options`, `annotations`, `env`, `helper_binaries_dir`, `network_cmd_path`, `default_sysctls`, `default_ulimits`, `seccomp_profile`, `init_path`, `dns_servers`, `dns_options`, `dns_searches`, `base_hosts_file`, `oom_score_adj`, `privileged`, `label`, `cgroup_conf`, `host_containers_internal_ip`, `runtimes`, `conmon_path`, `cgroups` or `umask` (`PODMAN_WIDENING_KEYS`), with any value, the worker refuses to boot with `podman` as its default venue, and refuses each podman job otherwise, as
   `podman-conf-widens-job`, a determinate policy refusal handed back by `observationPreflight` as `podmanConfRefused`
   and returned by the processor ahead of the image preflight and every spend (`podmanConfWidening`, `WIDENING_KEY`).
-  It is read over the same chain as the observations' conf keys (the vendor and `/etc` files and `conf.d`
-  directories, the rootless drop-ins with and without the uid, the user's own file and `conf.d`, `XDG_CONFIG_HOME`
-  honoured), per job, so removing the key needs no restart, and matched the way `MOUNT_KEY` is (any case, quoted,
+  The seventeen keys after the first six are issue #448's: measured with this venue's own argv (`buildPodmanRunArgs`) on rootless Podman
+  5.8.1 (Fedora 44) and 4.9.3 (Ubuntu 24.04), each key alone in a throwaway account's own containers.conf, on
+  `--network=private` and on an `--internal` network, both Podmans answering alike, each reached the job (a sysctl, a
+  ulimit, a seccomp profile, a PID 1 binary, a nameserver, resolver options and search list, an `/etc/hosts` base, an
+  OOM score, with `privileged` a full capability bounding set, no seccomp filter, the host's devices and an
+  unconfined SELinux label, and from gate round 1 of PR #473 an `spc_t` label with `label = false` on Fedora, a
+  pids.max past the argv with `cgroup_conf`, the address of `host.containers.internal`, a wrapper runtime from the
+  `[engine.runtimes]` table and a wrapper conmon, unapplied bounds with `cgroups = "disabled"`, and the umask it named).
+  The rest measured there were inert under the argv's own pins and are documented (`PODMAN_ROOTLESS_INERT_KEYS`, with
+  `apparmor_profile` among them: rootless Podman applied no AppArmor profile on Ubuntu, with or without the key; and
+  `env_host` and `http_proxy`, which the argv pins), or reached the job and moved no boundary (`PODMAN_HARMLESS_KEYS`:
+  `tz` and `no_hosts`). The remedy resets the account's rootless network only for the keys that shape it
+  (`PODMAN_NETWORK_HELPER_KEYS`); every other key is applied per container, so the next job runs once it is gone. The vendor's own `default_sysctls` block, uncommented in both stock files, is
+  accepted exactly as it ships (`STOCK_CONF_BLOCKS`), as on the rootful route, because refusing every stock host
+  would be worse and the exception is exact. `docs/podman.md` has the key table, bolted to both lists.
+  It is read over the same chain as the observations' conf keys (the vendor and `/etc` files, `/etc`'s `conf.d`,
+  `/etc/containers/containers.rootless.conf` and its `.d` with and without the uid, the user's own file and `conf.d`,
+  `XDG_CONFIG_HOME` honoured; since gate round 1 of PR #473 `containers.rootless.conf` is on it, which Podman 5.8.1 was
+  measured reading, and `/usr/share`'s two drop-in directories are off it, which neither Podman read), per job, so removing the key needs no restart, and matched the way `MOUNT_KEY` is (any case, quoted,
   dotted, inline table, whole-line comments skipped). What it cannot read whole refuses too and names why:
   `CONTAINERS_CONF` or `CONTAINERS_CONF_OVERRIDE` set, an unreadable file or drop-in directory, an unknown home or
   uid, and a spelling the pattern cannot see through, which is refused rather than decoded (`ESCAPED_KEY`, and
@@ -5920,3 +6075,4 @@ a tunnel.
 | 2026-09-28 | Issue #450 (refuse a widened live rootless netns), with PR #469's gate rounds 1 to 3 folded into this one row. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**: the live-network residual of issue #428 is CLOSED. Measured on Fedora 44 with Podman 5.8.1 and Ubuntu 24.04 with Podman 4.9.3: with a widening key removed and nothing restarted, the account's shared rootless network helper still ran with the widening, a bridge container started meanwhile joined it, and only stopping every bridge container reset it. So `podmanConfWidening`, when no containers.conf refuses, finds that helper from Podman's own record and refuses a widened one as the same `podman-conf-widens-job`, with `live: true`, at boot, per job pre-spend, in the sandbox and in doctor. The record: on 5.x the pid in `<runRoot>/networks/rootless-netns/rootless-netns-conn.pid` (`store.runRoot` from `podman info`), trusted when that process is this uid's and its argv names the record; on 4.x, which keeps its record where `podman info` does not point, the slirp4netns in the worker's own pid namespace (one `NSpid` field) whose argv names `netns/rootless-netns-<hex>`. The gate found the first two cuts wrong and they are replaced, not patched: a scan by process name missed a renamed helper, a pid file under `/run/user/<uid>/` missed a runRoot moved elsewhere, and keeping a candidate whose pid file could not be read let a job's own process attest itself and refuse every other job (a filter on the pid namespace alone had also left 5.x's pasta, PID 1 of a namespace of its own, unfound). Round 2: a stale pid file after a pasta crash could be claimed by a job's process given the recycled pid, so a recorded process is trusted only if it started no later than the file's mtime (stat field 22 after `btime`, 2 s tolerance), or is shaped as no job's process is (round 3: exactly one `NSpid` field, or exactly two ending in 1, since a job can `unshare -Urpf` its own PID 1 two levels down, three fields, measured on both Podmans); the refused key list is now one exported list, `PODMAN_WIDENING_KEYS`, which a test holds every list in the specs, docs and source to. Widened is what the argv was measured to show, which is not always the conf's option: `--map-host-loopback`; Podman's own `--no-map-gw` MISSING (issue #450's text said to look for `--map-gw`, which never appears); a `-T`/`-U` other than `none` or Podman's own `-T none`/`-U none` missing; on slirp4netns, `--disable-host-loopback` missing. What decides it and cannot be read refuses, named (an answered info with no runRoot, a pid file that exists and cannot be read or holds no pid, an unlistable `/proc`), a transient errno retries, and an info read that has not answered is left to the undecided job user, which retries. The scan was measured cheap enough to leave uncached (about 2200 processes: a median of 24.5 ms on Fedora, 19.1 ms on Ubuntu). `helper_binaries_dir` and `network_cmd_path` join the refused keys: either swaps the program behind every job's network (measured, a wrapper ran as `podpasta` and a bridge container reached the host's loopback). The remedy, shared with the conf refusal as `ROOTLESS_NETNS_RESET`, is corrected as well: a one-at-a-time restart rejoins the same network (measured), so it says to stop every bridge container at once, the worker (at system scope with `sudo systemctl`), proxy, keeper and Valkey units by name, then start them, the keeper through systemctl because `Restart=always` undoes a `podman stop` (measured); a worker refused at boot exits 2 and stays down until that start brings it back. The job's comment for a live finding names the running network, not the configuration, and doctor `--live` points at that line. The conformance script asks the check to find the live helper on a real Podman, and the workflow passes `PI_EGRESS=1` explicitly so that case cannot silently SKIP if the unset default ever changes. `DES-PODMAN-STACK-AS-QUADLET-UNITS` UNCHANGED, checked: the keeper is named in the reset, its unit is not changed. `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` UNCHANGED, checked. |
 | 2026-09-28 | Issue #470, with PR #472's gate round 1. **`DES-PODMAN-STACK-AS-QUADLET-UNITS` AMENDED**, its writer paragraph: on Windows the `.env` writer judges the file the way `deploy/worker-env-wrapper.cmd` reads it (`cmdReading`, `cmdValueRefusal` in `worker/src/env-file.mjs`), with every rule marked documented, community-documented or cautious. It refuses by name a line naming the key in another case, indented, with a blank before the `=`, bare, or after a leading `=`, which had let the writer say "unchanged" about a key the wrapper removes or never sets; refuses file-wide a stray CR, a NUL, a Ctrl-Z, a `!`, a `^` or a character outside ASCII in a name (gate round 1: `WEBHOOK_SECRE^T=evil!` is WEBHOOK_SECRET under delayed expansion, and how `set` folds `Pı_BACKENDS` or `WEBHOOK_ſECRET` is not documented), a `/` name and an over-long line; and refuses on the line it takes and on every value it writes a control character, a double quote, `%`, `!`, `^`, non-ASCII and a leading `=`, and an empty written value. The cmd reader no longer calls `K==v`, a `!`, a `^`, non-ASCII or a control character plain. An emulation of the wrapper's documented reading over 200000 seeded files finds no write or no-op the wrapper would read differently (38973 on a892408); Linux and macOS verdicts of that change are byte-identical over 100000; the operator corpus changes only on win32, 16 cases, all refusals of doc snippets holding a quote, a `%` or an indented ini key. **`DES-CLI-SURFACE` AMENDED**, its never-tier sentence on the env-setup script: both wrappers loaded `.env` into their own scope, so an `env_setup=` (sh) or `ENV_SETUP=` (cmd, any case) line replaced the copy of `PI_ENV_SETUP` they had captured before the load and named a script they then ran. Now every variable a wrapper reads is assigned after the load, from a value no `.env` assignment line reaches: sh carries the unit's `PI_ENV_SETUP` across the load in its positional parameters, cmd re-asserts `ENV_SETUP` and `PI_ENV_SETUP` inside the load's block from `%PI_ENV_SETUP%` (expanded when cmd reads the block, `set /?`) and clears a shadowing `ERRORLEVEL` before the command (a `.env` `ERRORLEVEL=2` had turned every exit into the policy conversion). The worker gets the unit's `PI_ENV_SETUP`, never the file's (verified for sh by running it under sh and dash; for cmd by the block's text). **`DES-WRAPPER-STOPS-WHAT-IT-STARTED` AMENDED**: the handler armed before the sourcing now reads no variable and exits 0 itself, and the forwarding handler with `signaled` and `child` is installed after the sourcing (a `signaled=1` line had stopped the worker from starting, a `child=<pid>` line had aimed a stop at another process). **`DES-SERVICE-ENV-SETUP-SEAM` AMENDED**, its preparation-window bullet, which still said the handler is "re-asserted below" the sourcing. `WRAPPER_INTERNAL_KEYS` lists each wrapper's own variables, bolted to the wrappers' text by a test that also reads the variables they only read, `${NAME:=...}` defaults, `read NAME` and an unquoted `set NAME=`; `up`, the wizard (macOS, Windows) and doctor (a warning beside its readings, the name only) now name a line assigning one. Linux runs no wrapper and is unchanged. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` UNCHANGED, checked**; **`DES-FIRST-RUN-SETUP-WIZARD` UNCHANGED, checked**: the wizard's dry run is the writer's plan, so it stops on the new refusals too. `specs/interfaces.md` and `specs/constitution.md` UNCHANGED, checked. |
 | 2026-09-28 | Issue #464. **`DES-PODMAN-STACK-AS-QUADLET-UNITS` AMENDED**: the "Which parts" bullet gains whose listener counts (`decideValkey`, shared by `service install` and `up`): the queue's port from `VALKEY_URL`, a listener there taken to be the Valkey only when its socket is this account's (measured on Fedora 44 and Ubuntu 24.04: a rootless published port is a socket of the account's uid, readable by all), with `VALKEY_URL=redis://127.0.0.1:<port>` as the way out and the Quadlet Valkey published on that port. Gate round 1 replaced the first rule (IPv4 only, root and a `UID_MIN`..`UID_MAX` range deciding "system", `install --force` taking another account's): one function, `judgeValkeyListeners`, used by `service install`, `up` and doctor, resolves `VALKEY_URL`'s host as the client does and judges every answering address on `tcp` and `tcp6` (IPv4-mapped included; a `localhost` URL reached another account's `[::1]` Valkey, measured on Fedora 44); only the account's uid and its `/etc/subuid` range are its own (a `--network host` container's socket is a subordinate uid, measured); root, system and other uids are refused by name, not forceably; `PI_VALKEY_SHARED=1` in `.env` is the named opt-in; an `[::1]` URL with nothing listening is an error, since the Quadlet Valkey publishes on `127.0.0.1` only; `parseConnection` strips an IPv6 literal's brackets (it kept them, so BullMQ could never connect to one); gate round 2: every Valkey client in the repo judged and pinned by the connector connection.mjs builds, with a bolt test on client construction, the worker's own judgement at boot with every client pinned to the judged address and its boot line naming it, unspecified addresses as loopback, own-first choice with another account's listener elsewhere reported, `PI_VALKEY_SHARED` from `.env` only, `getsubids` ranges, a bounded lookup, doctor talking to no refused Valkey and to the pinned address otherwise, and `rediss:` given TLS in `parseConnection`; gate round 3: one owner rule for every client on Linux whatever its cwd or venue (another account's listener refused everywhere, root's and an unnamed owner's only where the venue is podman without local), `PI_VALKEY_SHARED` never from the environment, the `.env` read through the hardened reader with hazards named, a failed lookup retryable, a failed judgement handed to ioredis as a destroyed socket so a Valkey restart no longer ends the client (measured on 5.11.1), the receiver judging before it listens, and the bolt test widened to string literals and `createRequire`; doctor's ✗ for a `VALKEY_URL` line it cannot read, after which it contacts no Valkey (it probed, read the fleet of and judged the default 6379 instead, measured naming another account there); an installed Quadlet Valkey kept only while the listener is this account's; a new "All or nothing for files" bullet: every file written before any command, journalled, put back on a failed write, and the remaining files named after a failed command, with only the worker unit put back (gate round 1: that partial rollback no longer says that no file of the run remains), and `service uninstall` removing files whose units were never loaded (a `stop` exiting 5), asking the manager unit by unit and refusing only while one runs; `up`'s Quadlet step journals and puts back the same way (a follow-up in the same round), and `up` names the pi-dispatch-valkey container only when it publishes the port judged. Rejected alternatives recorded in the bullet. **UNCHANGED, checked**: the keeper and proxy bullets, the unit names, and `up`'s consent flow. |
+| 2026-09-28 | Issue #448 (containers.conf keys that reach a job, rootful `local` and the rootless `podman` venue), with gate round 1 of PR #473 folded in. **`DES-PODMAN-THROUGH-ITS-DOCKER-API` AMENDED**: a new decision bullet, rejected entries and a residual. Measured with the worker's own argv on Fedora 44 (rootful Podman 5.8.1) and Ubuntu 24.04 (4.9.3), each key alone in a drop-in, the service fresh for each, both networks: the keys that reached a local job across a boundary the argv sets, or left its container uncreatable, are refused as `podman-conf-widens-job` (`PODMAN_ROOTFUL_WIDENING_KEYS`, twenty-four), at boot where `local` is the default venue, per job pre-spend otherwise, in doctor and in a local sandbox; the keys the argv or the API request overrode are documented inert (`PODMAN_ROOTFUL_INERT_KEYS`), and the two that reached the job and moved no boundary are documented harmless (`PODMAN_HARMLESS_KEYS`: `tz`, `no_hosts`). The vendor's own `default_sysctls` block, uncommented in both stock files, is accepted exactly as it ships (`STOCK_CONF_BLOCKS`), because refusing every stock host would be worse and the exception is exact. The chain is the service's, as containers/common v0.67.0 reads it and as measured: the vendor and `/etc` files, `/etc/containers/containers.conf.d` (not `/usr/share`'s drop-ins nor either `containers.rootful.conf.d`, measured unread), root's own conf, every `--module` the unit passes (measured through `LOGGING=`), and every `CONTAINERS_CONF` or `CONTAINERS_CONF_OVERRIDE` file named in the unit, an `EnvironmentFile=` (wildcards expanded) or the manager's environment (measured). `podman.service` is trusted only for the socket `podman.socket` listens on (a second rootful API service was measured applying its own override). What cannot be read refuses and withholds `mountSet`, except root's own config home, which is named (a `0600` drop-in in `/etc` was measured reaching jobs while named). The running service (the rootful twin of #450): a chain file, drop-in directory, module, environment or unit file whose CHANGE time is later than the running service's start, or a chain file seen during that start and gone since (a per-worker memory), holds jobs back until it restarts, as a RETRY (boot exit 1, ⚠ in doctor), never a final refusal; no chain file's parent directory is watched (a `sed -i registries.conf` held every job back); a change time ahead of the clock is said as the clock's. `runtimeAddsNoMounts` reads the same chain under the same rules, and `podman.service` is read once per boot or job for both. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**: `PODMAN_WIDENING_KEYS` grows from six to twenty-three, the seventeen new keys measured reaching a job with the venue's own argv on rootless Podman 5.8.1 and 4.9.3 alike (`PODMAN_ROOTLESS_INERT_KEYS` documented inert under the argv's pins, `PODMAN_HARMLESS_KEYS` documented harmless, the vendor's `default_sysctls` block accepted); the chain gains `/etc/containers/containers.rootless.conf` (measured read by 5.8.1) and loses `/usr/share`'s two drop-in directories (measured unread by both); the remedy resets the rootless network only for `PODMAN_NETWORK_HELPER_KEYS`, and a per-container key's says the next job runs once it is gone. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: `local` hands back `podmanConfRefused` too, marked `rootful`, with `retry` for what heals by itself, which the processor throws; and the `runtimeAddsNoMounts` sentence and residual name the chain (the residual now only the hidden `--default-mounts-file` flag). **`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST` UNCHANGED, checked**: the job user is decided and refused first, and the new refusal comes after it. **`DES-PODMAN-STACK-AS-QUADLET-UNITS` and `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` UNCHANGED, checked**: neither reads a containers.conf. |

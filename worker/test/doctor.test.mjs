@@ -6093,7 +6093,9 @@ test("doctor's two docker runners spawn the bin they are given, and docker when 
 	// third, so the list is exactly what it was and a canary given a runner of its own would land here.
 	const doctorSource = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8");
 	const named = [...doctorSource.matchAll(/(?<!function )(?:docker|live)RunVia\(spawn[^)\n]*\{ bin: ([^ }]+)/g)].map((m) => m[1]);
-	assert.deepEqual(named, ['"podman"', '"podman"', '"podman"'], "only the podman venue's reads name a bin, and they name podman");
+	// Issue #448 added one, ahead of them in the file: the local section's `systemctl show podman.service`, read only where a
+	// local job runs on rootful Podman's Docker API on this host.
+	assert.deepEqual(named, ['"systemctl"', '"podman"', '"podman"', '"podman"'], "only the podman venue's reads and the rootful unit read name a bin");
 	// Issue #433: and the spawns that name `podman` directly, by their first two arguments: the trigger-named image and its
 	// entrypoint, `--fix`'s pull and tag of the default image, and the egress proxy's state. One more site picks its
 	// runtime from a variable, the in-image gh probe, which is docker's with `local` and podman's without it. A new podman
@@ -6489,7 +6491,8 @@ test("a widening containers.conf is a podman venue refusal: ✗ where podman is 
 			const boot = PI_BACKENDS === "podman";
 			const line = `${boot ? "✗" : "⚠"} podman: no job can run on this venue (podman-conf-widens-job): ${confPath} sets ${key}, which `;
 			assert.ok(said().includes(line), `${key} ${PI_BACKENDS}:\n${said()}`);
-			assert.match(said(), new RegExp(`${boot ? "a worker running as this account refuses to boot" : "every podman job is refused"}\n {4}→ remove that key from that file, then stop every running container of this account that is on a bridge network, all of them at once`));
+			// Gate round 1 of PR #473: a per-container key needs no network reset; a network-helper key does.
+			assert.match(said(), new RegExp(`${boot ? "a worker running as this account refuses to boot" : "every podman job is refused"}\n {4}→ ${key === "annotations" ? "remove that key from that file; the next podman job runs once it is gone" : "remove that key from that file, then stop every running container of this account that is on a bridge network, all of them at once"}`));
 			if (boot) assert.equal(code, 1, `${key}: a boot refusal fails doctor`);
 			assert.doesNotMatch(said(), /podman: jobs run as|podman: job image/, `${key}: nothing past the refusal is read`);
 			assert.deepEqual(calls.filter((c) => c.cmd === "podman").map((c) => c.args[0]), ["info"], "the files are read, podman is asked nothing more");
@@ -8794,4 +8797,99 @@ test("doctor with no home: the durable stores' per-account root owned by another
 	assert.equal(both.filter((c) => c.label.startsWith(`${root}, `)).length, 1, "the jobs dir line already names that root; not twice");
 	const mine = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", TMPDIR: "/t", PI_JOBS_DIR: "/srv/x" }, { ...collectSeams(green), home: "", jobsDirUid: uid, jobsDirFs: jobsFs({ "/t": { uid: 0 }, [root]: { uid } }) });
 	assert.ok(!mine.some((c) => c.label.startsWith(`${root}, `)), "this account's root says nothing new");
+});
+
+// --- issue #448: rootful Podman's containers.conf keys that reach a `local` job ---------------------------------------
+
+/** A host holding `files` (text, or `{ error }`) and nothing else; every stat is an mtime of 0 unless `mtimes` says. */
+const rootfulHostFs = (files = {}, ctimes = {}) => {
+	const fail = (code, p) => {
+		throw Object.assign(new Error(`${code}: ${p}`), { code });
+	};
+	const at = (p) => (files[p] === undefined ? fail("ENOENT", p) : typeof files[p] === "object" ? fail(files[p].error, p) : files[p]);
+	return { readFileSync: at, readdirSync: (p) => (typeof files[p] === "object" ? fail(files[p].error, p) : fail("ENOENT", p)), statSync: (p) => (ctimes[p] !== undefined ? { size: 0, ctimeMs: ctimes[p] } : (at(p), { size: 0, ctimeMs: 0 })) };
+};
+// The doctor fakes' docker endpoint (EGRESS_OK), which podman.socket must be listening on for podman.service to be trusted.
+const DOCTOR_SOCK = "/Users/x/.docker/run/docker.sock";
+const UNIT_OF = (over) => ({ read: true, loaded: true, running: false, startedAtMs: null, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: [DOCTOR_SOCK], ...over });
+const IDLE_UNIT = async () => UNIT_OF({});
+const rootfulDoctor = async (env, { fs, readPodmanService = IDLE_UNIT, body = PODMAN_COMPAT_INFO, live = false } = {}) => {
+	const { out, text } = capture();
+	await runDoctor(ghEnv(env), { ...ghDeps(out, { ...infoPlan(body), ...green }), jobUserIdentity: LINUX_ID(1234), stat: socketStat, observationFs: fs, readPodmanService, ...(live ? { live: true } : {}) });
+	return text();
+};
+
+test("doctor: a rootful Podman containers.conf key that reaches a local job is ✗ where it stops a boot, ⚠ where it refuses each job (#448)", async () => {
+	for (const key of ["annotations", "env", "helper_binaries_dir"]) {
+		const fs = rootfulHostFs({ "/etc/containers/containers.conf": `${key} = []\n` });
+		const boot = await rootfulDoctor({}, { fs });
+		assert.match(boot, new RegExp(`✗ local: no job can run on this venue \\(podman-conf-widens-job\\): /etc/containers/containers\\.conf sets ${key}, which [^\\n]* -- a worker running as this account refuses to boot\\n {4}→ remove that key from that file, then sudo systemctl restart podman\\.service`), key);
+		assert.doesNotMatch(boot, /✓ local: no containers\.conf rootful Podman's service reads here/);
+	}
+	const perJob = await rootfulDoctor({ PI_BACKENDS: "podman,local" }, { fs: rootfulHostFs({ "/etc/containers/containers.conf": "env = []\n" }) });
+	assert.match(perJob, /⚠ local: no job can run on this venue \(podman-conf-widens-job\): \/etc\/containers\/containers\.conf sets env, which [^\n]* -- every local job is refused/);
+	// Measured inert on this route: no line refuses them, and the clean line is said.
+	for (const key of ["pasta_options", "network_cmd_options", "network_cmd_path"]) {
+		const clean = await rootfulDoctor({}, { fs: rootfulHostFs({ "/etc/containers/containers.conf": `${key} = []\n` }) });
+		assert.match(clean, /✓ local: no containers\.conf rootful Podman's service reads here sets any of the 24 keys the local venue refuses \(docs\/podman\.md\), and podman\.service is not running with an older one/, key);
+		assert.doesNotMatch(clean, /podman-conf-widens-job/, key);
+	}
+});
+
+test("doctor: a running podman.service older than its containers.conf is ⚠, the worker's retry, with the restart; so is a moment's failure (#448)", async () => {
+	const running = async () => UNIT_OF({ running: true, startedAtMs: 5_000 });
+	const stale = await rootfulDoctor({}, { fs: rootfulHostFs({ "/etc/containers/containers.conf": "[containers]\n" }, { "/etc/containers/containers.conf": 6_000 }), readPodmanService: running });
+	// Gate round 1 of PR #473: it heals by itself, so the worker retries (boot exit 1): ⚠, never ✗.
+	assert.match(stale, /⚠ local: every local job waits, retried, until rootful Podman's service restarts: \/etc\/containers\/containers\.conf changed after the running podman\.service started[^\n]*\n {4}→ sudo systemctl restart podman\.service while no local job runs/);
+	assert.doesNotMatch(stale, /✗ local: no job can run/);
+	const fresh = await rootfulDoctor({}, { fs: rootfulHostFs({ "/etc/containers/containers.conf": "[containers]\n" }, { "/etc/containers/containers.conf": 4_000 }), readPodmanService: running });
+	assert.match(fresh, /✓ local: no containers\.conf rootful Podman's service reads here/);
+	const busy = await rootfulDoctor({}, { fs: rootfulHostFs({ "/etc/containers/containers.conf": { error: "EMFILE" } }) });
+	assert.match(busy, /⚠ local: whether rootful Podman's containers\.conf widens a job could not be read just now: \/etc\/containers\/containers\.conf could not be read \(EMFILE\)/);
+});
+
+test("doctor: what this shell cannot read of rootful Podman's chain is its own ⚠, naming each path, never a refusal (#448)", async () => {
+	const text = await rootfulDoctor({}, { fs: rootfulHostFs({ "/root/.config/containers/containers.conf": { error: "EACCES" }, "/root/.config/containers/containers.conf.d": { error: "EACCES" } }) });
+	assert.match(text, /⚠ local: part of rootful Podman's configuration is not judged here: \/root\/\.config\/containers\/containers\.conf \(EACCES\), \/root\/\.config\/containers\/containers\.conf\.d \(EACCES\)\n {4}→ rootful Podman's service may also read /);
+	assert.match(text, /✓ local: no containers\.conf rootful Podman's service reads here sets any of the 24 keys the local venue refuses \(docs\/podman\.md\), among those this account can read, and podman\.service is not running with an older one\n/, "the readable chain is still judged, and clean, and the line says only that");
+	assert.doesNotMatch(text, /podman-conf-widens-job/);
+	const noSystemd = await rootfulDoctor({}, { fs: rootfulHostFs(), readPodmanService: async () => ({ read: false, reason: "systemctl-not-found" }) });
+	assert.match(noSystemd, /⚠ local: part of rootful Podman's configuration is not judged here: podman\.service \(systemctl-not-found\)/);
+	assert.match(noSystemd, /✓ local: no containers\.conf rootful Podman's service reads here sets any of the 24 keys the local venue refuses \(docs\/podman\.md\)\n/, "nothing said of a service that was not read");
+});
+
+test("doctor: Docker reads no rootful file and never asks systemctl, and says nothing new (#448)", async () => {
+	let asked = 0;
+	const text = await rootfulDoctor({}, { fs: rootfulHostFs({ "/etc/containers/containers.conf": "env = []\n" }), body: ROOTFUL_INFO, readPodmanService: async () => (asked++, IDLE_UNIT()) });
+	assert.equal(asked, 0);
+	assert.doesNotMatch(text, /rootful Podman|podman-conf-widens-job/);
+});
+
+test("doctor --live runs no local probe where a local job is refused on rootful Podman's containers.conf (#448)", async () => {
+	const { out, text } = capture();
+	const facts = {};
+	await collectChecks(ghEnv(), { ...collectSeams({ ...infoPlan(PODMAN_COMPAT_INFO), ...green }, { home: "/nowhere", platform: "linux", jobUserIdentity: LINUX_ID(1234), stat: socketStat, observationFs: rootfulHostFs({ "/etc/containers/containers.conf": "env = []\n" }), readPodmanService: IDLE_UNIT, facts }), out });
+	assert.deepEqual(facts.jobUser, { run: false, reason: "a local job is refused here (podman-conf-widens-job), so a probe would read back a container no job gets" });
+	void text;
+});
+
+test("doctor: the backend section's mountSet judges the same podman.service answer, so a stale service withholds it (#448)", async () => {
+	let asked = 0;
+	const running = async () => (asked++, UNIT_OF({ running: true, startedAtMs: 5_000 }));
+	const text = await rootfulDoctor({}, { fs: rootfulHostFs({ "/etc/containers/mounts.conf": "", "/etc/containers/containers.conf": "[containers]\n" }, { "/etc/containers/containers.conf": 6_000 }), readPodmanService: running });
+	assert.equal(asked, 1, "one read, for both lines");
+	assert.match(text, /local: mountSet is ASSERTED[^\n]*\/etc\/containers\/containers\.conf changed after the running podman\.service started, and a running Podman service keeps the containers\.conf it started with, so what it mounts/);
+	const fresh = await rootfulDoctor({}, { fs: rootfulHostFs({ "/etc/containers/mounts.conf": "", "/etc/containers/containers.conf": "[containers]\n" }), readPodmanService: running });
+	assert.doesNotMatch(fresh, /local: mountSet is ASSERTED/);
+});
+
+test("doctor: an unreadable drop-in in /etc is ✗, not a residual; another rootful service's socket is named, not trusted (#448)", async () => {
+	// Gate round 1 of PR #473 (raw 70): a 0600 root drop-in the service applied while doctor said ✓.
+	const hidden = { ...rootfulHostFs({ "/etc/containers/containers.conf.d/zz.conf": { error: "EACCES" } }), readdirSync: (p) => (p === "/etc/containers/containers.conf.d" ? ["zz.conf"] : (() => { throw Object.assign(new Error(p), { code: "ENOENT" }); })()) };
+	const text = await rootfulDoctor({}, { fs: hidden });
+	assert.match(text, /✗ local: no job can run on this venue \(podman-conf-widens-job\): \/etc\/containers\/containers\.conf\.d\/zz\.conf could not be read \(EACCES\)[^\n]*\n {4}→ make that file readable by the worker's account/);
+	assert.doesNotMatch(text, /✓ local: no containers\.conf rootful Podman's service reads here/);
+	// A socket podman.socket does not listen on (raw 72): podman.service's environment is not that service's.
+	const other = await rootfulDoctor({}, { fs: rootfulHostFs(), readPodmanService: async () => UNIT_OF({ listen: ["/run/podman/podman.sock"] }) });
+	assert.match(other, /⚠ local: part of rootful Podman's configuration is not judged here: podman\.service \(the worker's socket \/Users\/x\/\.docker\/run\/docker\.sock is not the one podman\.socket listens on \(\/run\/podman\/podman\.sock\)/);
 });

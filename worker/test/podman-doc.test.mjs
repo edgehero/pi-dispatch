@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { PODMAN_JOB_USER_FIX, WIDENING_KEY, podmanConfRefusal, podmanConfWidening, podmanJobUserRefusal } from "../src/backend-podman.mjs";
-import { BACKENDS, DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, PODMAN_BACKEND, PODMAN_WIDENING_KEYS, PROPERTIES, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, effectiveWord, meets } from "../src/backends.mjs";
+import { BACKENDS, DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, PODMAN_BACKEND, PODMAN_HARMLESS_KEYS, PODMAN_NETWORK_HELPER_KEYS, PODMAN_ROOTFUL_INERT_KEYS, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_ROOTLESS_INERT_KEYS, PODMAN_WIDENING_KEYS, PROPERTIES, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, effectiveWord, meets } from "../src/backends.mjs";
 import { buildDockerRunArgs } from "../src/docker-run.mjs";
 import { DEFAULT_EGRESS_PROXY } from "../src/egress.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, JOB_USER_FIX, jobUserRefusal } from "../src/job-user.mjs";
 import { sandboxVenueRefusal } from "../src/sandbox.mjs";
-import { podmanBootRefusal, podmanConfBootRefusal } from "../src/start.mjs";
+import { rootfulConfRefusal, rootfulConfWidening } from "../src/runtime-observations.mjs";
+import { localConfBootRefusal, podmanBootRefusal, podmanConfBootRefusal } from "../src/start.mjs";
 
 // docs/podman.md's property table restates two derivable sources, so it is BOLTED to them (CLAUDE.md: a hand-written
 // table is derived or pinned, never trusted): its rows are the backend table's properties in order, and its Docker
@@ -155,6 +156,84 @@ test("the page quotes every refusal the worker can print, verbatim (#345)", () =
 		covered.add(cause);
 	}
 	assert.deepEqual([...covered].sort(), Object.keys(JOB_USER_FIX).sort());
+});
+
+// Issue #448: the rootful Podman containers.conf block quotes the local venue's own sentences, each rebuilt here through
+// the worker's functions from a host holding only what the line names: a key line from a containers.conf that sets that
+// key, the restart line from a running podman.service that started before that path last changed. Every refused key
+// has a line, and each heading's timing is what `localConfBootRefusal` does with it.
+test("the page quotes every rootful containers.conf refusal the local venue prints, verbatim (#448)", () => {
+	const start = doc.indexOf("<!-- PODMAN-ROOTFUL-CONF-TEXTS -->");
+	const end = doc.indexOf("<!-- /PODMAN-ROOTFUL-CONF-TEXTS -->");
+	assert.ok(start >= 0 && end > start, "the rootful block is between its markers");
+	const lines = doc.slice(start, end).split("\n");
+	const missing = (p) => {
+		throw Object.assign(new Error(p), { code: "ENOENT" });
+	};
+	const denied = (p) => {
+		throw Object.assign(new Error(p), { code: "EACCES" });
+	};
+	const now = 1_790_000_000_000;
+	const unit = { read: true, loaded: true, running: true, startedAtMs: now - 60_000, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/run/podman/podman.sock"] };
+	const keys = [];
+	let restarts = 0;
+	let unreadable = 0;
+	lines.forEach((line, i) => {
+		if (!/^(Refused|Not run yet|Not read yet):/.test(line)) return;
+		const conf = /^Refused: (\/\S+) sets (\w+), which /.exec(line);
+		const cannot = /^Refused: (\/\S+) could not be read \(EACCES\); /.exec(line);
+		const restart = /^Not run yet: (\/\S+) changed after the running podman\.service started, /.exec(line);
+		assert.ok(conf || cannot || restart, `not a rootful text the worker prints: ${line}`);
+		const dir = (p) => p.slice(0, p.lastIndexOf("/"));
+		const fs = conf
+			? { readFileSync: (p) => (p === conf[1] ? `${conf[2]} = []\n` : missing(p)), readdirSync: missing, statSync: missing }
+			: cannot
+				? { readFileSync: (p) => (p === cannot[1] ? denied(p) : missing(p)), readdirSync: (p) => (p === dir(cannot[1]) ? [cannot[1].slice(dir(cannot[1]).length + 1)] : missing(p)), statSync: missing }
+				: { readFileSync: (p) => (p === restart[1] ? "" : missing(p)), readdirSync: missing, statSync: (p) => (p === restart[1] ? { ctimeMs: unit.startedAtMs + 1 } : missing(p)) };
+		const judged = rootfulConfWidening({ fs, unit, now });
+		assert.equal(line, rootfulConfRefusal(judged.refusal), "the line is the worker's text for that host");
+		if (conf) keys.push(conf[2]);
+		else if (cannot) unreadable += 1;
+		else restarts += 1;
+		const heading = lines[i - 1] ?? "";
+		assert.ok(heading.startsWith("# "), "each rootful refusal has a heading line above it");
+		const boot = localConfBootRefusal({ mode: "worker" }, "local", judged);
+		assert.equal(localConfBootRefusal({ mode: "worker" }, PODMAN_BACKEND, judged), null);
+		// Gate round 1 of PR #473: a service older than its conf is a retry (boot exit 1), which the heading says.
+		assert.ok(heading.endsWith(boot?.transient ? "(a retry: boot exits 1, a job waits)" : boot ? "(at boot when local is the default venue, else per job)" : "(per job)"), heading);
+	});
+	assert.deepEqual(keys, [...PODMAN_ROOTFUL_WIDENING_KEYS], "one line per refused key, in the list's order");
+	assert.deepEqual([unreadable, restarts], [1, 1], "the unreadable part's line and the running service's");
+});
+
+
+// Issue #448: the rootful key table restates the two derived lists, so it is bolted to them: its rows are the refused
+// keys then the inert ones, each in its list's order, and each row's decision is its list's word.
+test("the rootful containers.conf key table is PODMAN_ROOTFUL_WIDENING_KEYS then PODMAN_ROOTFUL_INERT_KEYS (#448)", () => {
+	const start = doc.indexOf("<!-- PODMAN-ROOTFUL-KEY-TABLE -->");
+	const end = doc.indexOf("<!-- /PODMAN-ROOTFUL-KEY-TABLE -->");
+	assert.ok(start >= 0 && end > start, "the key table is between its markers");
+	const rows = doc.slice(start, end).split("\n").filter((l) => l.startsWith("|")).slice(2).map((l) => l.split("|").slice(1, -1).map((c) => c.trim()));
+	assert.deepEqual(rows.map((r) => r[0].replace(/`/g, "")), [...PODMAN_ROOTFUL_WIDENING_KEYS, ...PODMAN_ROOTFUL_INERT_KEYS, ...PODMAN_HARMLESS_KEYS]);
+	for (const [key, , decision] of rows) {
+		const k = key.replace(/`/g, "");
+		assert.match(decision, PODMAN_ROOTFUL_WIDENING_KEYS.includes(k) ? /^refused\b/ : PODMAN_HARMLESS_KEYS.includes(k) ? /^harmless$/ : /^inert$/, key);
+	}
+});
+
+// Issue #448: the podman venue's key table, bolted the same way: its rows are PODMAN_WIDENING_KEYS (refused, the venue's
+// one list) then PODMAN_ROOTLESS_INERT_KEYS (inert), each in its list's order.
+test("the podman venue's containers.conf key table is PODMAN_WIDENING_KEYS then PODMAN_ROOTLESS_INERT_KEYS (#448)", () => {
+	const start = doc.indexOf("<!-- PODMAN-ROOTLESS-KEY-TABLE -->");
+	const end = doc.indexOf("<!-- /PODMAN-ROOTLESS-KEY-TABLE -->");
+	assert.ok(start >= 0 && end > start, "the key table is between its markers");
+	const rows = doc.slice(start, end).split("\n").map((l) => l.trim()).filter((l) => l.startsWith("|")).slice(2).map((l) => l.split("|").slice(1, -1).map((c) => c.trim()));
+	assert.deepEqual(rows.map((r) => r[0].replace(/`/g, "")), [...PODMAN_WIDENING_KEYS, ...PODMAN_ROOTLESS_INERT_KEYS, ...PODMAN_HARMLESS_KEYS]);
+	for (const [key, , decision] of rows) {
+		const k = key.replace(/`/g, "");
+		assert.match(decision, PODMAN_WIDENING_KEYS.includes(k) ? /^refused\b/ : PODMAN_HARMLESS_KEYS.includes(k) ? /^harmless$/ : /^inert$/, key);
+	}
+	assert.equal(new Set([...PODMAN_WIDENING_KEYS, ...PODMAN_ROOTLESS_INERT_KEYS]).size, PODMAN_WIDENING_KEYS.length + PODMAN_ROOTLESS_INERT_KEYS.length, "no key decided twice");
 });
 
 // The entry-points table is the same seven setups in the same order, so it is pinned to the same list. Its cells are
@@ -446,25 +525,47 @@ test("the compose row's argv word is what the compose file's config mounts carry
 // the source, and three of those lists missed the two #450 added. So every LIST of them (three or more of the keys
 // joined by commas, "or" or "and", backticked or not, across line breaks and comment stars) must be exactly
 // `PODMAN_WIDENING_KEYS`, in its order. A revision-history row is a record of what was true then, and is not read.
-test("every list of the refused containers.conf keys is exactly PODMAN_WIDENING_KEYS (#450)", () => {
+test("every list of the refused containers.conf keys is exactly PODMAN_WIDENING_KEYS, or since #448 one of its two rootful halves (#450)", () => {
 	const root = new URL("../../", import.meta.url);
 	const at = (dir, ext) => readdirSync(new URL(dir, root)).filter((f) => f.endsWith(ext)).map((f) => `${dir}${f}`);
 	const files = [...at("specs/", ".md"), ...at("docs/", ".md"), ...at("worker/src/", ".mjs"), ...at(".github/scripts/", ".mjs"), "README.md"];
-	const token = `\`?(${PODMAN_WIDENING_KEYS.join("|")})\`?`;
+	// Issue #448: every key any derived list names, longest first, each a whole word (so `init` is not `init_path`'s start
+	// and `env` is not `environment`'s).
+	const known = [...new Set([...PODMAN_WIDENING_KEYS, ...PODMAN_ROOTFUL_WIDENING_KEYS, ...PODMAN_ROOTFUL_INERT_KEYS, ...PODMAN_ROOTLESS_INERT_KEYS, ...PODMAN_HARMLESS_KEYS])].sort((a, b) => b.length - a.length);
+	const token = `(?<![\\w-])\`?(${known.join("|")})\`?(?![\\w-])`;
 	const sep = "(?:[\\s*/]*,[\\s*/]*(?:(?:or|and)[\\s*/]+)?|[\\s*/]+(?:or|and)[\\s*/]+)";
 	const run = new RegExp(`${token}(?:${sep}${token})+`, "g");
 	let lists = 0;
+	const DERIVED_KEY_LISTS = [
+		{ name: "PODMAN_WIDENING_KEYS", keys: [...PODMAN_WIDENING_KEYS] },
+		{ name: "PODMAN_ROOTFUL_WIDENING_KEYS", keys: [...PODMAN_ROOTFUL_WIDENING_KEYS] },
+		{ name: "PODMAN_ROOTFUL_INERT_KEYS", keys: [...PODMAN_ROOTFUL_INERT_KEYS] },
+		{ name: "PODMAN_ROOTLESS_INERT_KEYS", keys: [...PODMAN_ROOTLESS_INERT_KEYS] },
+		{ name: "PODMAN_NETWORK_HELPER_KEYS", keys: [...PODMAN_NETWORK_HELPER_KEYS] },
+	];
+	const byList = Object.fromEntries(DERIVED_KEY_LISTS.map((l) => [l.name, 0]));
 	for (const file of files) {
 		const text = readFileSync(new URL(file, root), "utf8").split("\n").filter((line) => !/^\| 20\d\d-/.test(line)).join("\n");
 		for (const match of text.matchAll(run)) {
 			const keys = [...match[0].matchAll(new RegExp(token, "g"))].map((m) => m[1]);
 			if (keys.length < 3) continue;
 			lists += 1;
-			assert.deepEqual(keys, [...PODMAN_WIDENING_KEYS], `${file}: ${match[0].replace(/\s+/g, " ")}`);
+			// Issue #448: a list is one of three derived lists, never a fourth: every key (the podman venue's refusal), the
+			// rootful local refusal's subset, or the rest, measured inert there. Each is its constant, in its order.
+			const which = DERIVED_KEY_LISTS.find((list) => list.keys.join("|") === keys.join("|"));
+			assert.ok(which, `${file}: ${match[0].replace(/\s+/g, " ")} is none of ${DERIVED_KEY_LISTS.map((l) => l.name).join(", ")}`);
+			byList[which.name] += 1;
 		}
 	}
 	// The lists this was written against: the docs' four, the specs' three and the source's (docker-run.mjs's comment).
 	assert.ok(lists >= 8, `only ${lists} lists found, so the pattern no longer sees them`);
+	assert.ok(byList.PODMAN_WIDENING_KEYS >= 8, `only ${byList.PODMAN_WIDENING_KEYS} full lists found`);
+	// Issue #448: the rootful refused list this was written against: one in each of the eighteen quoted refusals of
+	// docs/podman.md. Neither rootful list is restated in prose any more; both are the key table's rows, bolted above.
+	assert.ok(byList.PODMAN_ROOTFUL_WIDENING_KEYS >= 18, `only ${byList.PODMAN_ROOTFUL_WIDENING_KEYS} rootful refused lists found`);
+	// The two rootful lists decide every key of the full one, and no key twice.
+	for (const key of PODMAN_WIDENING_KEYS) assert.ok(PODMAN_ROOTFUL_WIDENING_KEYS.includes(key) !== PODMAN_ROOTFUL_INERT_KEYS.includes(key), key);
+	assert.equal(new Set([...PODMAN_ROOTFUL_WIDENING_KEYS, ...PODMAN_ROOTFUL_INERT_KEYS]).size, PODMAN_ROOTFUL_WIDENING_KEYS.length + PODMAN_ROOTFUL_INERT_KEYS.length);
 	// And the check itself matches exactly these keys.
 	assert.deepEqual(WIDENING_KEY.source.match(/\(([a-z_|]+)\)/)?.[1].split("|"), [...PODMAN_WIDENING_KEYS]);
 });

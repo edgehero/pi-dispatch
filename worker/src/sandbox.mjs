@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { release as osRelease } from "node:os";
 import { promisify } from "node:util";
@@ -14,6 +14,7 @@ import { decideJobUser, JOB_USER_FIX, makeDaemonFactsReader, relabelsPrivateMoun
 import { DEFAULT_EGRESS_PROXY, NETWORK_SUFFIX, createJobNetwork, egressArmed, egressEnv, egressProxyName, networkEndpoints, networkExists, networkNameFor, removeJobNetwork, removeNetworkOrSay } from "./egress.mjs";
 import { NETNS_KEEPER, makeDetachGate, runtimeFromFacts } from "./netns-keeper.mjs";
 import { NETNS_KEEPER_START } from "./podman-stack.mjs";
+import { makePodmanServiceReader, observeRootfulConf, rootfulConfRefusal } from "./runtime-observations.mjs";
 import { isSandboxTombstone, readManifest, readRetained, sandboxDeadline, sandboxEntryName } from "./sandbox-store.mjs";
 
 /**
@@ -1399,6 +1400,11 @@ async function decideLocalSandboxJobUser({
 	readFacts = makeDaemonFactsReader(),
 	imageCapabilities = (image) => makeImagePreflight({ image })({}),
 	stat,
+	// Issue #448: the host files and `systemctl show podman.service` rootful Podman's containers.conf check reads, seamed as
+	// the worker's are. Read only where this CLI's daemon is rootful Podman on this host.
+	observationFs = { statSync, readFileSync, readdirSync },
+	readPodmanService = makePodmanServiceReader(),
+	env = process.env,
 } = {}) {
 	// Issue #452, gate round 5: the facts read ONCE here even where the uid needs none of them (a VM-backed platform, an
 	// endpoint on another machine), and carried beside the answer for the teardown's detach gate, which otherwise reads
@@ -1438,6 +1444,15 @@ async function decideLocalSandboxJobUser({
 	if (decision.mode === "unknown") {
 		return { refused: "job-user-unknown", message: `which uid the sandbox may run as could not be decided (${decision.reason}); is the docker daemon running?` };
 	}
+	// Issue #448: rootful Podman's own containers.conf reaches a sandbox exactly as it reaches a job (its `env` into the
+	// shell's environment, its `annotations` into its groups), so a sandbox is refused for what a local job is refused
+	// for, after the identity, as the podman venue's sandbox is (#428). A read that failed for a moment is refused in its
+	// own words, since a sandbox has no queue to retry through. Nothing is read where the daemon is not rootful Podman here.
+	const rootful = await observeRootfulConf({ endpoint, daemon, fs: observationFs, readService: readPodmanService, env });
+	if (rootful?.refusal?.transient) {
+		return { refused: "podman-conf-unread", message: `rootful Podman's containers.conf or podman.service could not be read just now, so whether it widens this sandbox is not known (${rootful.refusal.evidence}); try again` };
+	}
+	if (rootful?.refusal) return { refused: PODMAN_CONF_WIDENS_JOB, message: rootfulConfRefusal(rootful.refusal) };
 	// `runtime` (issue #452, gate round 4): the facts this session was admitted on, for its teardown's detach gate.
 	const runtime = daemon?.answered ? runtimeFromFacts(daemon) : remoteRuntime;
 	if (decision.mode === "image") return withRuntime({ user: null, home: null, ...relabel }, runtime);

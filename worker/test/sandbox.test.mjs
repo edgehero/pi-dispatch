@@ -706,7 +706,12 @@ test("openSandbox relabels a retained clone but never a local run's own folder (
 describe("decideSandboxJobUser relabel (#355)", () => {
 	const LOCAL = { local: true, context: "podman", endpoint: "unix:///run/podman/podman.sock", reason: null, transient: false };
 	const factsWith = (over) => async () => ({ answered: true, facts: { shape: "docker", podman: true, os: "fedora", rootless: false, selinux: true, userns: false, bounds: null, serviceIsRemote: null, remoteSocketPath: null, ...over } });
-	const base = { platform: "linux", release: "6.19.10", resolveEndpoint: async () => LOCAL, stat: () => ({ uid: 0, gid: 2375 }), imageCapabilities: async () => ({ ok: true, capabilities: ["anyUid"] }), euid: 1234, egid: 1234 };
+	// Issue #448: rootful Podman here also reads the host's containers.conf chain and podman.service, so both are seamed:
+	// an empty host and an idle service, which judge clean.
+	const noFile = (p) => {
+		throw Object.assign(new Error(p), { code: "ENOENT" });
+	};
+	const base = { platform: "linux", release: "6.19.10", resolveEndpoint: async () => LOCAL, stat: () => ({ uid: 0, gid: 2375 }), imageCapabilities: async () => ({ ok: true, capabilities: ["anyUid"] }), euid: 1234, egid: 1234, observationFs: { statSync: noFile, readFileSync: noFile, readdirSync: noFile }, readPodmanService: async () => ({ read: true, loaded: true, running: false, startedAtMs: null, environment: {}, environmentFiles: [], unitPaths: [] }), env: {} };
 
 	test("this CLI's own local Podman with SELinux relabels, in worker mode and for a uid-1001 run", async () => {
 		assert.deepEqual(await decideSandboxJobUser({ ...base, readFacts: factsWith({}), manifest: { image: "pi-job:x" } }), { user: "1234:1234", home: "/home/pi", relabel: true });
@@ -721,6 +726,40 @@ describe("decideSandboxJobUser relabel (#355)", () => {
 		// endpoint this CLI observed on this host, so nothing is relabelled.
 		const shim = async () => ({ answered: true, facts: { shape: "podman", podman: true, os: "linux", rootless: false, selinux: true, userns: false, bounds: null, serviceIsRemote: false, remoteSocketPath: "/run/podman/podman.sock" } });
 		assert.deepEqual(await decideSandboxJobUser({ ...base, readFacts: shim, resolveEndpoint: async () => ({ local: null, context: null, endpoint: null, reason: "unparseable", transient: false }), manifest: { image: "pi-job:x" } }), { user: "1234:1234", home: "/home/pi" });
+	});
+});
+
+describe("decideSandboxJobUser on rootful Podman's containers.conf (#448)", () => {
+	const LOCAL = { local: true, context: "podman", endpoint: "unix:///run/podman/podman.sock", reason: null, transient: false };
+	const facts = (over) => async () => ({ answered: true, facts: { shape: "docker", podman: true, os: "fedora", rootless: false, selinux: false, userns: false, bounds: null, serviceIsRemote: null, remoteSocketPath: null, ...over } });
+	const hostWith = (files) => {
+		const fail = (code, p) => {
+			throw Object.assign(new Error(p), { code });
+		};
+		const at = (p) => (files[p] === undefined ? fail("ENOENT", p) : typeof files[p] === "object" ? fail(files[p].error, p) : files[p]);
+		return { readFileSync: at, readdirSync: (p) => fail("ENOENT", p), statSync: (p) => (at(p), { size: 0, mtimeMs: 0 }) };
+	};
+	const idle = async () => ({ read: true, loaded: true, running: false, startedAtMs: null, environment: {}, environmentFiles: [], unitPaths: [] });
+	const base = { platform: "linux", release: "6.19.10", resolveEndpoint: async () => LOCAL, stat: () => ({ uid: 0, gid: 2375 }), imageCapabilities: async () => ({ ok: true, capabilities: ["anyUid"] }), euid: 1234, egid: 1234, readPodmanService: idle, env: {}, manifest: { image: "pi-job:x" } };
+
+	test("a key that reaches a local job refuses the sandbox too, with the worker's text; a moment's failure is its own refusal", async () => {
+		const wide = await decideSandboxJobUser({ ...base, readFacts: facts({}), observationFs: hostWith({ "/etc/containers/containers.conf": '[containers]\nannotations = ["run.oci.keep_original_groups=1"]\n' }) });
+		assert.equal(wide.refused, "podman-conf-widens-job");
+		assert.match(wide.message, /^Refused: \/etc\/containers\/containers\.conf sets annotations, which [^]*\(issue #448\)\.$/);
+		const busy = await decideSandboxJobUser({ ...base, readFacts: facts({}), observationFs: hostWith({ "/etc/containers/containers.conf": { error: "EMFILE" } }) });
+		assert.equal(busy.refused, "podman-conf-unread");
+		assert.match(busy.message, /could not be read \(EMFILE\)\); try again$/);
+		// What the opener cannot read is not a refusal, and a clean readable chain opens as before.
+		assert.deepEqual(await decideSandboxJobUser({ ...base, readFacts: facts({}), observationFs: hostWith({ "/root/.config/containers/containers.conf": { error: "EACCES" } }) }), { user: "1234:1234", home: "/home/pi" });
+	});
+
+	test("Docker, rootless Podman and a remote endpoint open exactly as before and read nothing of it", async () => {
+		let asked = 0;
+		const readPodmanService = async () => (asked++, idle());
+		const widened = hostWith({ "/etc/containers/containers.conf": "env = []\n" });
+		assert.deepEqual(await decideSandboxJobUser({ ...base, readPodmanService, readFacts: facts({ podman: false, bounds: { pids: true, memory: true } }), observationFs: widened }), { user: "1234:1234", home: "/home/pi" });
+		assert.deepEqual(await decideSandboxJobUser({ ...base, readPodmanService, readFacts: facts({}), resolveEndpoint: async () => ({ ...LOCAL, local: false, endpoint: "tcp://10.0.0.9:2376" }), observationFs: widened }), { user: null, home: null });
+		assert.equal(asked, 0);
 	});
 });
 

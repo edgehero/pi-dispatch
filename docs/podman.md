@@ -169,9 +169,15 @@ and `pi-dispatch up` was not.
    which pulled in no daemon and no `docker.service`).
 4. **Remove Podman's default mounts** so `mountSet` holds: `sudo sh -c ': > /etc/containers/mounts.conf'`. The file
    must exist and be EMPTY. Leave `volumes`, `mounts`, `devices` and `hooks_dir` unset in containers.conf and its
-   drop-ins, and install no OCI hooks, or the worker gives `mountSet` no credit. Two more conditions it checks: the
-   worker must be able to READ those files, and FIPS mode must be off, because a FIPS host mounts its crypto policy
-   into every container. No restart is needed: the worker reads these files before each job.
+   drop-ins, and install no OCI hooks, or the worker gives `mountSet` no credit. It reads the same containers.conf
+   files the check below reads (root's own, `--module` files and the `CONTAINERS_CONF` files included), and the
+   worker must be able to READ every one of them but root's own config home, which it names rather than judges; it
+   must also read `mounts.conf` and the hook directories, and FIPS mode must be off, because a FIPS host mounts its
+   crypto policy into every container. A change to `mounts.conf` needs no restart: the running service reads it for
+   each container (measured). A change to a containers.conf does: the running service keeps the one it started with
+   (measured with `volumes`), so until `sudo systemctl restart podman.service` the worker gives `mountSet` no credit
+   and holds local jobs back (a retry, not a refusal). More keys are refused outright on this route: see "What rootful
+   Podman's containers.conf must not set" below.
 5. **Point the docker CLI at Podman with a context**, as the worker's account:
 
    ```sh
@@ -197,6 +203,215 @@ and `pi-dispatch up` was not.
 8. **Run `pi-dispatch up`, then `pi-dispatch doctor --live`.** doctor names the runtime (`local: the daemon is Podman
    5.8.2, through its Docker API`), and `--live` reads the declarations back off real containers on this daemon.
    On an SELinux host, read the next section before the first job.
+
+### What rootful Podman's containers.conf must not set
+
+Rootful Podman's API service applies its own containers.conf to every container it starts, a local job's included,
+and no flag on the job's command line takes some keys back. Measured on the Fedora 44 host (rootful Podman 5.8.1
+behind `podman.socket`, the job argv the worker builds, on the default network and on an `--internal` one, issue
+#448), each key alone in a `containers.conf.d` drop-in (the first two also in `/etc/containers/containers.conf`),
+the service started fresh for each, and again on Ubuntu 24.04 with rootful Podman 4.9.3 (`apparmor_profile` there
+alone, since Fedora runs no AppArmor; `label` reached a job on Fedora alone, since Ubuntu runs no SELinux).
+
+The rule: a key is **refused** when what the job saw crossed a boundary the worker's argv sets (what the job may reach,
+run, read or be limited by), or when it could not be measured; **inert** when the argv, or the Docker API request it
+becomes, overrode it; **harmless** when it reached the job and moved nothing that is a boundary (the job's time zone,
+or Podman writing no `/etc/hosts` at all), which is documented and not refused.
+
+<!-- PODMAN-ROOTFUL-KEY-TABLE -->
+| Key | What the job saw | Decision |
+|---|---|---|
+| `annotations` | `run.oci.keep_original_groups=1`: the API service's own supplementary groups (with `SupplementaryGroups=podman` on the unit it read a `root:podman 0640` file) | refused |
+| `env` | its variable, past the worker's closed environment | refused |
+| `helper_binaries_dir` | the netavark and aardvark-dns set up for its network were the named directory's, run as root | refused |
+| `default_sysctls` | the sysctl it named (`ip_unprivileged_port_start` 77), in place of the vendor's own | refused, except the vendor's own block |
+| `default_ulimits` | the limit it named (`nofile` 333) | refused |
+| `userns` | `auto` with no subordinate range: the container could not be created | refused |
+| `pidns` | `host`: the container could not be created (against the argv's `--init`) | refused |
+| `ipcns` | `host`: the container could not be created (against the argv's `--shm-size`) | refused |
+| `utsns` | `host`: the host's UTS namespace and hostname | refused |
+| `cgroupns` | `host`: the host's cgroup namespace | refused |
+| `netns` | `host`: the host's network namespace, on the default network | refused |
+| `seccomp_profile` | the named profile (one denying `uname` aborted the job's node) | refused |
+| `apparmor_profile` | `unconfined` in place of its `containers-default` profile (on Ubuntu) | refused |
+| `init_path` | the named binary as its PID 1 | refused |
+| `dns_servers` | the named nameserver, on the default network | refused |
+| `dns_options` | the named resolver option | refused |
+| `dns_searches` | the named search domain | refused |
+| `base_hosts_file` | the named file's lines in its `/etc/hosts` | refused |
+| `label` | `false`: it ran as `spc_t`, unconfined by SELinux (on Fedora) | refused |
+| `cgroup_conf` | `pids.max=max`: its pids limit gone, past the argv's `--pids-limit` | refused |
+| `host_containers_internal_ip` | the named address as `host.containers.internal` | refused |
+| `runtimes` | a runtime in the `[engine.runtimes]` table: that wrapper created every job (the stock header alone, every entry commented, passes) | refused |
+| `conmon_path` | that wrapper monitored every job | refused |
+| `cgroups` | `disabled`: its pids and memory bounds unapplied | refused |
+| `pasta_options` | nothing: rootful Podman runs no pasta for these networks | inert |
+| `network_cmd_options` | nothing: nor slirp4netns | inert |
+| `network_cmd_path` | nothing: no slirp4netns ran | inert |
+| `default_capabilities` | nothing: the argv's `--cap-drop=ALL` | inert |
+| `no_new_privileges` | nothing: the argv's `no-new-privileges` | inert |
+| `init` | nothing: the argv's `--init` | inert |
+| `oom_score_adj` | nothing: the Docker API request sets its own (on Fedora and on Ubuntu) | inert |
+| `pids_limit` | nothing: the argv's `--pids-limit` | inert |
+| `shm_size` | nothing: the argv's `--shm-size` | inert |
+| `privileged` | nothing: the Docker API request sets its own (on Fedora and on Ubuntu) | inert |
+| `env_host` | nothing: the service's own environment did not reach it | inert |
+| `umask` | nothing: its umask stayed 0022 | inert |
+| `http_proxy` | nothing: a proxy in the service's environment reached no job, the key absent, true or false | inert |
+| `tz` | the named time zone | harmless |
+| `no_hosts` | no `/etc/hosts` at all | harmless |
+<!-- /PODMAN-ROOTFUL-KEY-TABLE -->
+
+So the `local` venue refuses to run a job while any containers.conf the service reads sets a key the table marks
+refused, whatever the value, at boot when `local` is the default venue and before each local job's spend otherwise, as
+`podman-conf-widens-job`. The one exception is the vendor's own `default_sysctls = ["net.ipv4.ping_group_range=0 0"]`,
+uncommented in the stock containers.conf of Fedora 44 and Ubuntu 24.04: exactly that block is accepted, because
+refusing every stock host would be worse and the exception is exact, and any other value, spelling or a second sysctl
+beside it is refused. `pi-dispatch doctor` prints the refusal beside its `local: the daemon is Podman` line. The check
+runs only where the docker CLI reaches rootful Podman through a unix socket on this host: a Docker daemon, a rootless
+Podman and a Podman service on another machine read no file and get what they got before.
+
+**The files it reads are the ones the service reads** (containers/common v0.67.0, each place measured with a drop-in):
+`/usr/share/containers/containers.conf`, `/etc/containers/containers.conf` and every `*.conf` in
+`/etc/containers/containers.conf.d` (not `/usr/share/containers/containers.conf.d`, nor either
+`containers.rootful.conf.d`, which neither Podman read); root's own `~/.config/containers/containers.conf` and its
+`containers.conf.d` (honoured with no `HOME` in the unit); every `--module` the service is started with, in its
+`ExecStart` or in a variable such as `LOGGING=` (measured honoured), resolved under
+`/etc/containers/containers.conf.modules` and `/usr/share/containers/containers.conf.modules`; and any file
+`CONTAINERS_CONF` or `CONTAINERS_CONF_OVERRIDE` names in `podman.service`'s `Environment=`, an `EnvironmentFile=`
+(wildcards expanded, as systemd does) or the systemd manager's own environment (`systemctl show-environment`, which
+`DefaultEnvironment=` and `set-environment` fill; measured honoured). All of it through `systemctl`, which any account
+may run. That environment is read as it is now: a `set-environment` undone with `unset-environment` after the service
+started still reaches jobs until the service restarts, and only root can see it (`/proc/<pid>/environ`), so it is not
+judged (measured, gate round 1 of PR #473). An `[engine] env` naming `CONTAINERS_CONF_OVERRIDE` was measured NOT honoured by the service, and `env` is
+refused anyway. The `mountSet` observation (step 4) reads the same files for its own four keys.
+
+**podman.service is trusted only for its own socket.** The worker compares its docker endpoint with the socket
+`podman.socket` listens on (`systemctl show -p Listen podman.socket`). A second rootful API service on another socket,
+with an environment of its own, was measured applying its own `CONTAINERS_CONF_OVERRIDE` to jobs, and its environment is
+another process's, readable by root alone: the worker still judges the files every rootful Podman on the host reads, and
+names that service in doctor's ⚠ line rather than judging it by `podman.service`'s environment.
+
+**What the worker cannot read refuses, except root's own config home.** A part of that chain that exists and that the
+worker's account cannot read refuses the job and withholds `mountSet` (measured: a `0600` drop-in in `/etc` setting
+`env` reached every job), with its own ✗ in doctor. The one exception is root's own config home (`/root/.config`, or
+the `HOME` or `XDG_CONFIG_HOME` the unit sets), which is `0550` or `0700` on every stock host: a worker that is not
+root reads none of it, so doctor names each such path in a ⚠ line and the worker logs `local_podman_conf_unread` once,
+and again when the list changes. Check those files yourself as root. A `systemctl` that does not answer (a worker in a
+container, a host without systemd) is named the same way, and then the unit's environment, its modules and the running
+service below are not judged.
+
+**A running service keeps the containers.conf it started with.** Measured: with the service held up, a key written
+to `/etc` did not reach a job started through it, and a key removed still did, for `env` and for `volumes` alike;
+only once the service exited and the socket started it again did the files apply. (`mounts.conf` is different: the
+running service read it for each container, measured.) So while `podman.service` runs, the worker compares the
+**change time** of every chain file, every drop-in directory (a drop-in added, removed or renamed changes it), the
+module and environment files and the unit's own files with the service's start. Change time, not modification time:
+the kernel sets it, and no `cp -p` or `touch -d` can set it back (both were measured hiding a change from an mtime).
+A chain file's parent directory is NOT watched, since unrelated files live there (a `sed -i` of
+`/etc/containers/registries.conf` held every local job back until this was fixed); a chain file replaced by a rename
+already has a new change time. A chain file the worker saw while the same service start ran and that is gone now is a
+deletion the service may still hold, and counts too. The one change nothing shows is a chain file deleted before the
+worker first looked, while an older service still runs: restart the service after deleting one.
+
+While any of that holds, the worker does not run local jobs, and gives `mountSet` no credit, until the service
+restarts: **a retry, not a refusal**. A job waits and is retried by the queue, and a boot exits 1 to be restarted, since
+the service exits on its own within twelve seconds of its last request (measured) and the socket starts it fresh. A
+running local job holds it up, so a steady stream of jobs can keep it up past its change; restart it while no local job
+runs:
+
+```sh
+sudo systemctl restart podman.service
+```
+
+A change time later than the host's clock is the clock's problem, said as such (fix the clock or wait), and a retry too.
+
+The worker's sentences, which a test rebuilds from the code:
+
+<!-- PODMAN-ROOTFUL-CONF-TEXTS -->
+```
+# a containers.conf rootful Podman's service reads that sets a refused key, here annotations (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets annotations, which rootful Podman adds to every container, where run.oci.keep_original_groups=1 gives a local job the supplementary groups of the Podman service that starts it (root's, and any SupplementaryGroups= on podman.service); remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, env (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets env, which under [containers] adds variables to every local job past the worker's own closed environment, and under [engine] is the Podman service's own environment; remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, helper_binaries_dir (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets helper_binaries_dir, which is where rootful Podman finds the netavark and aardvark-dns it runs as root to set up every local job's network, so another program can stand in for them; remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, default_sysctls (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets default_sysctls, which rootful Podman sets in every local job (any value but the vendor's own ping_group_range block); remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, default_ulimits (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets default_ulimits, which rootful Podman sets on every local job's processes; remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, userns (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets userns, which puts every local job in a user namespace the worker's argv does not name (with auto and no subordinate range, the job cannot even be created); remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, pidns (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets pidns, which asks for a PID namespace the worker's argv does not name (the host's was refused at create against the job's --init); remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, ipcns (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets ipcns, which asks for an IPC namespace the worker's argv does not name (the host's was refused at create against the job's --shm-size); remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, utsns (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets utsns, which gives every local job the UTS namespace it names, the host's hostname with host; remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, cgroupns (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets cgroupns, which gives every local job the cgroup namespace it names, the host's with host; remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, netns (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets netns, which gives a local job with no network of its own the network namespace it names, the host's with host; remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, seccomp_profile (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets seccomp_profile, which replaces the seccomp filter of every local job; remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, apparmor_profile (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets apparmor_profile, which replaces every local job's AppArmor profile where AppArmor runs (unconfined removed the containers-default profile, measured); remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, init_path (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets init_path, which names the binary that runs as every local job's PID 1; remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, dns_servers (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets dns_servers, which writes the nameservers of a local job with no network of its own; remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, dns_options (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets dns_options, which writes every local job's resolver options; remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, dns_searches (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets dns_searches, which writes every local job's resolver search list; remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, base_hosts_file (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets base_hosts_file, which names the file every local job's /etc/hosts starts from; remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, label (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets label, which with false runs every local job unconfined by SELinux (spc_t, measured); remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, cgroup_conf (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets cgroup_conf, which writes cgroup files of every local job past its own bounds (pids.max=max outlasted --pids-limit, measured); remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, host_containers_internal_ip (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets host_containers_internal_ip, which names the address every local job reaches as host.containers.internal; remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, runtimes (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets runtimes, which as the [engine.runtimes] table names the OCI runtime binary that creates every local job (a wrapper there ran for every job, measured); remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, conmon_path (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets conmon_path, which names the conmon that monitors every local job (a wrapper there ran for every job, measured); remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# the same, cgroups (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf sets cgroups, which with disabled runs every local job outside its cgroup with its pids and memory bounds unapplied (measured); remove that key from that file, then sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request. The local venue refuses any containers.conf rootful Podman's service reads that sets annotations, env, helper_binaries_dir, default_sysctls, default_ulimits, userns, pidns, ipcns, utsns, cgroupns, netns, seccomp_profile, apparmor_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path or cgroups, whatever the value, because no flag on a job's command line takes it back. A setting you need for your own containers goes on their own command line instead, not host-wide (issue #448).
+
+# a part of that chain the worker's account cannot read, outside root's own config home (at boot when local is the default venue, else per job)
+Refused: /etc/containers/containers.conf.d/zz.conf could not be read (EACCES); make that file readable by the worker's account (only root's own config home may stay unreadable, and is then named, not judged): the local venue must read every other containers.conf rootful Podman's service reads to know that none of them widens a job, and refuses what it cannot read (issue #448).
+
+# podman.service running since before a containers.conf it reads changed (a retry: boot exits 1, a job waits)
+Not run yet: /etc/containers/containers.conf changed after the running podman.service started, and a running Podman service keeps the containers.conf it started with, so a key removed since may still reach every local job; sudo systemctl restart podman.service while no local job runs (a running job's docker run holds the service up), or stop it and let podman.socket start it again on the next request, so the service reads the files as they are now; until it does, each local job is retried rather than refused, and it heals by itself once the service idles out (issue #448).
+```
+<!-- /PODMAN-ROOTFUL-CONF-TEXTS -->
+
+A forge job gets a fixed comment instead, which names no path. A file the check cannot decode (an escaped key, a
+non-ASCII character, a multi-line string) is refused the same way, as the native venue's check does.
 
 ## SELinux
 
@@ -312,8 +527,8 @@ Refused: the worker's primary group is gid 0, and a podman job runs with that gr
 # a job image without anyUid, and a worker that is not uid 1001 (per job)
 Refused: the job image does not declare `anyUid` (`dev.pi-dispatch.capabilities`), so it cannot run as this worker's own uid, which the podman venue always uses; rebuild it from a release that has this feature, or run the worker as uid 1001 (issue #354).
 
-# a containers.conf the account reads that sets pasta_options, network_cmd_options, annotations, env, helper_binaries_dir or network_cmd_path, here the user's own (at boot when podman is the default venue, else per job)
-Refused: /home/pdjob/.config/containers/containers.conf sets pasta_options, which Podman hands to the pasta behind every job's network, where a host-loopback mapping (--map-host-loopback, --map-gw, -T) gives the job this host's 127.0.0.1 services; remove that key from that file, then stop every running container of this account that is on a bridge network, all of them at once, then start them again, since the rootless network they share lives until the last of them stops and a container started meanwhile joins it as it is: with this project's units, systemctl --user stop pi-dispatch-worker.service pi-dispatch-egress-proxy.service pi-dispatch-netns-keeper.service pi-dispatch-valkey.service, then podman stop any other container `podman ps` still lists, then systemctl --user start pi-dispatch-valkey.service pi-dispatch-netns-keeper.service pi-dispatch-egress-proxy.service pi-dispatch-worker.service (a worker installed at system scope is stopped and started with sudo systemctl stop and start pi-dispatch-worker.service instead; for containers started by hand, podman stop them all, then podman start them). Stop the keeper with systemctl, not podman stop: its unit starts it again a second later, and it then rejoins the network as it is while any other bridge container still runs. A unit this account does not have is reported as not loaded, and the others still stop and start. The podman venue refuses any containers.conf this account's Podman reads that sets pasta_options, network_cmd_options, annotations, env, helper_binaries_dir or network_cmd_path, whatever the value, because no flag on a job's command line takes it back, and it refuses a rootless network still running with such an option after the key is gone. A setting you need for your own containers (a pasta MTU, say) goes on their own command line (--network=pasta:...) or Quadlet unit instead, not account-wide (issue #428).
+# a containers.conf the account reads that sets pasta_options, network_cmd_options, annotations, env, helper_binaries_dir, network_cmd_path, default_sysctls, default_ulimits, seccomp_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, oom_score_adj, privileged, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path, cgroups or umask, here the user's own (at boot when podman is the default venue, else per job)
+Refused: /home/pdjob/.config/containers/containers.conf sets pasta_options, which Podman hands to the pasta behind every job's network, where a host-loopback mapping (--map-host-loopback, --map-gw, -T) gives the job this host's 127.0.0.1 services; remove that key from that file, then stop every running container of this account that is on a bridge network, all of them at once, then start them again, since the rootless network they share lives until the last of them stops and a container started meanwhile joins it as it is: with this project's units, systemctl --user stop pi-dispatch-worker.service pi-dispatch-egress-proxy.service pi-dispatch-netns-keeper.service pi-dispatch-valkey.service, then podman stop any other container `podman ps` still lists, then systemctl --user start pi-dispatch-valkey.service pi-dispatch-netns-keeper.service pi-dispatch-egress-proxy.service pi-dispatch-worker.service (a worker installed at system scope is stopped and started with sudo systemctl stop and start pi-dispatch-worker.service instead; for containers started by hand, podman stop them all, then podman start them). Stop the keeper with systemctl, not podman stop: its unit starts it again a second later, and it then rejoins the network as it is while any other bridge container still runs. A unit this account does not have is reported as not loaded, and the others still stop and start. The podman venue refuses any containers.conf this account's Podman reads that sets pasta_options, network_cmd_options, annotations, env, helper_binaries_dir, network_cmd_path, default_sysctls, default_ulimits, seccomp_profile, init_path, dns_servers, dns_options, dns_searches, base_hosts_file, oom_score_adj, privileged, label, cgroup_conf, host_containers_internal_ip, runtimes, conmon_path, cgroups or umask, whatever the value, because no flag on a job's command line takes it back, and it refuses a rootless network still running with such an option after the key is gone. A setting you need for your own containers (a pasta MTU, say) goes on their own command line (--network=pasta:...) or Quadlet unit instead, not account-wide (issue #428).
 
 # this account's rootless network still running with an option a removed key gave it, here Podman 5's pasta (at boot when podman is the default venue, else per job)
 Refused: this account's running rootless network (pasta, pid 398902), which every container on a bridge network shares, the egress proxy's among them, still carries --map-host-loopback, which maps this host's 127.0.0.1 into it: it keeps the options it started with, whatever containers.conf says now; stop every running container of this account that is on a bridge network, all of them at once, then start them again, since the rootless network they share lives until the last of them stops and a container started meanwhile joins it as it is: with this project's units, systemctl --user stop pi-dispatch-worker.service pi-dispatch-egress-proxy.service pi-dispatch-netns-keeper.service pi-dispatch-valkey.service, then podman stop any other container `podman ps` still lists, then systemctl --user start pi-dispatch-valkey.service pi-dispatch-netns-keeper.service pi-dispatch-egress-proxy.service pi-dispatch-worker.service (a worker installed at system scope is stopped and started with sudo systemctl stop and start pi-dispatch-worker.service instead; for containers started by hand, podman stop them all, then podman start them). Stop the keeper with systemctl, not podman stop: its unit starts it again a second later, and it then rejoins the network as it is while any other bridge container still runs. A unit this account does not have is reported as not loaded, and the others still stop and start. A worker this stopped at boot exits 2 and stays down until that start brings it back; a running one reads this network again before every podman job and admits the next once it no longer carries the option (issue #450).
@@ -409,8 +624,9 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    `CONTAINERS_CONF_OVERRIDE` unset for the worker too: with either set, the files the worker reads are not the ones
    Podman reads, so the worker refuses the whole venue (below), and so it does when a containers.conf or a drop-in
    directory exists and cannot be read.
-   Leave `pasta_options`, `network_cmd_options`, `annotations`, `env`, `helper_binaries_dir` and `network_cmd_path`
-   (the last two swap the program behind every job's network for another, issue #450) unset in every containers.conf the account
+   Leave `pasta_options`, `network_cmd_options`, `annotations`, `env`, `helper_binaries_dir`, `network_cmd_path`, `default_sysctls`, `default_ulimits`, `seccomp_profile`, `init_path`, `dns_servers`, `dns_options`, `dns_searches`, `base_hosts_file`, `oom_score_adj`, `privileged`, `label`, `cgroup_conf`, `host_containers_internal_ip`, `runtimes`, `conmon_path`, `cgroups` and `umask`
+   (`helper_binaries_dir` and `network_cmd_path` swap the program behind every job's network for another, issue #450;
+   the seventeen after them are issue #448's, in the table below) unset in every containers.conf the account
    reads, whatever you would set them to: while any of them is present the worker refuses the venue (issue #428), at
    boot when `podman` is the default venue and each podman job otherwise, as `podman-conf-widens-job`, naming the
    file and the key, and `pi-dispatch doctor` says the same. Write the files in plain ASCII with no `"""` or `'''`
@@ -424,8 +640,10 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    on the job's command line takes those options back (Podman puts them first, and a `-T` survives any pin), which
    is why the key's presence is refused rather than its value judged. The cost: a setting you wanted for every
    container of the account, a pasta MTU say, goes on those containers' own command line
-   (`--network=pasta:...`) or Quadlet unit instead. After removing a key, stop every running container of the
-   account that is on a bridge network, all at once, and start them again (the refusal names the commands): the
+   (`--network=pasta:...`) or Quadlet unit instead. After removing one of the keys that shape the account's rootless network
+   (`pasta_options`, `network_cmd_options`, `env`, `helper_binaries_dir` and `network_cmd_path`), stop every running
+   container of the account that is on a bridge network, all at once, and start them again (the refusal names the
+   commands); every other key is applied per container, and the next podman job runs once it is gone: the
    rootless network they share keeps the options it started with until the last of them stops, and a container
    started meanwhile joins it as it is (measured on Podman 5.8.1 and 4.9.3). So the worker reads that live network
    too (issue #450), from Podman's own record: on Podman 5 the process whose pid it keeps in
@@ -441,6 +659,66 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    later, rejoining the old network if anything else on a bridge still runs. A unit your account does not have is
    reported as not loaded, and the others still stop and start.
    The namespaces, `env_host` and `http_proxy` the argv can pin, and does.
+
+   Issue #448 measured the rest of the keys containers.conf can set for every container, with this venue's own argv,
+   each alone in the account's own containers.conf, on `--network=private` and on an `--internal` network, on Fedora
+   44 with Podman 5.8.1 and on Ubuntu 24.04 with Podman 4.9.3, which answered alike. The whole list, the first six
+   from issues #428 and #450:
+
+   <!-- PODMAN-ROOTLESS-KEY-TABLE -->
+   | Key | What the job saw | Decision |
+   |---|---|---|
+   | `pasta_options` | a host-loopback mapping gave it the host's `127.0.0.1` services (issue #428) | refused |
+   | `network_cmd_options` | slirp4netns's `allow_host_loopback=true`, the same (issue #428) | refused |
+   | `annotations` | `run.oci.keep_original_groups=1` kept the account's groups (issue #428) | refused |
+   | `env` | its variable, and under `[engine]` Podman's own environment (issue #428) | refused |
+   | `helper_binaries_dir` | another program behind its network (issue #450) | refused |
+   | `network_cmd_path` | another slirp4netns behind its network (issue #450) | refused |
+   | `default_sysctls` | the sysctl it named (`ip_unprivileged_port_start` 77), in place of the vendor's own | refused, except the vendor's own block |
+   | `default_ulimits` | the limit it named (`nofile` 333) | refused |
+   | `seccomp_profile` | the named profile (one denying `uname` aborted the job's node) | refused |
+   | `init_path` | the named binary as its PID 1 | refused |
+   | `dns_servers` | the named nameserver, on `--network=private` | refused |
+   | `dns_options` | the named resolver option | refused |
+   | `dns_searches` | the named search domain | refused |
+   | `base_hosts_file` | the named file's lines in its `/etc/hosts` | refused |
+   | `oom_score_adj` | the OOM score it named | refused |
+   | `privileged` | a full capability bounding set, no seccomp filter, the host's devices, an unconfined SELinux label | refused |
+   | `label` | `false`: it ran as `spc_t`, unconfined by SELinux (on Fedora) | refused |
+   | `cgroup_conf` | `pids.max=max`: its pids limit gone, past the argv's `--pids-limit` | refused |
+   | `host_containers_internal_ip` | the named address as `host.containers.internal` | refused |
+   | `runtimes` | a runtime in the `[engine.runtimes]` table: that wrapper created every job (the stock header alone passes) | refused |
+   | `conmon_path` | that wrapper monitored every job | refused |
+   | `cgroups` | `disabled`: its pids and memory bounds unapplied | refused |
+   | `umask` | the umask it named (`0000`), so what it writes to this host is that open | refused |
+   | `userns` | nothing: the argv's `--userns=keep-id` | inert |
+   | `pidns` | nothing: the argv's `--pid=private` | inert |
+   | `ipcns` | nothing: the argv's `--ipc=private` | inert |
+   | `utsns` | nothing: the argv's `--uts=private` | inert |
+   | `cgroupns` | nothing: the argv's `--cgroupns=private` | inert |
+   | `netns` | nothing: the argv's `--network` | inert |
+   | `apparmor_profile` | nothing: rootless Podman applies no AppArmor profile (`crun (unconfined)` either way, on Ubuntu) | inert |
+   | `default_capabilities` | nothing: the argv's `--cap-drop=ALL` | inert |
+   | `no_new_privileges` | nothing: the argv's `no-new-privileges` | inert |
+   | `init` | nothing: the argv's `--init` | inert |
+   | `pids_limit` | nothing: the argv's `--pids-limit` | inert |
+   | `shm_size` | nothing: the argv's `--shm-size` | inert |
+   | `env_host` | nothing: the argv's `--env-host=false` | inert |
+   | `http_proxy` | nothing: the argv's `--http-proxy=false` (a proxy in the account's environment did not reach it) | inert |
+   | `tz` | the named time zone | harmless |
+   | `no_hosts` | no `/etc/hosts` at all | harmless |
+   <!-- /PODMAN-ROOTLESS-KEY-TABLE -->
+
+   The rule is the rootful route's (below, in "What rootful Podman's containers.conf must not set"): refused when the job
+   saw a boundary the argv sets crossed, inert when the argv overrode the key, harmless when the key reached the job and
+   moved nothing that is a boundary. The rows from `label` on, and `tz` and `no_hosts`, were measured in gate round 1 of
+   PR #473 and after it. Every key refused here but a network helper's (`pasta_options`, `network_cmd_options`, `env`,
+   `helper_binaries_dir`, `network_cmd_path`) is applied per container, so the next podman job runs once the key is
+   gone, with no network reset.
+
+   The vendor's own `default_sysctls = ["net.ipv4.ping_group_range=0 0"]`, uncommented in the stock containers.conf of
+   both distributions, is accepted exactly as it ships, on this venue as on the rootful route: refusing it would refuse
+   every stock host, and the exception is exact, so any other value, spelling or a second sysctl beside it is refused.
 5. **The job image, in this account's own store.** A rootless account does not see root's images or another
    user's: `podman pull ghcr.io/edgehero/pi-job:latest` as the account, then set `PI_JOB_IMAGE` to the name
    `podman images` shows. `--pull=never` resolves a short name such as `pi-job:latest` to `localhost/pi-job:latest`
@@ -819,8 +1097,7 @@ The shell's container is a job's on this venue, by the same builder: `--userns=k
 `HOME=/home/pi`, the pinned namespaces, and always a named network, the session's own `--internal` one with egress on
 and `--network=private` with it off, so a `netns = "host"` default cannot put it on the host's. It is refused for what
 a job on this venue is refused for, in the same order and by the same check: not Linux, no `podman`, a remote
-service, rootful Podman, a containers.conf that sets `pasta_options`, `network_cmd_options`, `annotations`, `env`,
-`helper_binaries_dir` or `network_cmd_path`, or a rootless network still running with such an option, found from
+service, rootful Podman, a containers.conf that sets `pasta_options`, `network_cmd_options`, `annotations`, `env`, `helper_binaries_dir`, `network_cmd_path`, `default_sysctls`, `default_ulimits`, `seccomp_profile`, `init_path`, `dns_servers`, `dns_options`, `dns_searches`, `base_hosts_file`, `oom_score_adj`, `privileged`, `label`, `cgroup_conf`, `host_containers_internal_ip`, `runtimes`, `conmon_path`, `cgroups` or `umask`, or a rootless network still running with such an option, found from
 `/proc` and Podman's pid file for it under `podman info`'s `store.runRoot` (`podman-conf-widens-job`, also when
 `podman info` reports no `store.runRoot`; or `podman-conf-unread` when a containers.conf, `/proc` or that pid file
 could not be read just now: try again), and a
