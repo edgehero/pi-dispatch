@@ -531,15 +531,19 @@ const PODMAN_CHAIN_KEYS = Object.freeze(["CONTAINERS_CONF", "CONTAINERS_CONF_OVE
  * the containers.conf chain check reads, that the check itself judged the file's value, in-process, as the worker does.
  */
 export function cliNotHandedLines(service, envPath) {
+	const listed = (items) => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`);
 	return CLI_KEY_NAMES.filter((k) => Object.hasOwn(service.fromFile, k)).map((k) => {
-		const clis = Object.entries(CLI_SERVICE_KEYS).filter(([, ks]) => ks.includes(k)).map(([cli]) => cli);
+		const names = Object.entries(CLI_SERVICE_KEYS).filter(([, ks]) => ks.includes(k)).map(([cli]) => cli);
+		const clis = listed(names);
+		// Grammar by count (round-cap re-review, D2): "podman, docker and gh use it", "podman uses it".
+		const verb = names.length > 1 ? "use" : "uses";
 		const shown = CLI_PATH_KEYS.includes(k) ? ` (${envValueShown(service.fromFile[k])})` : "";
 		return {
 			ok: false,
 			warn: true,
-			label: `${k} is set in ${envPath}${shown}, and doctor hands nothing from that file to a program it starts, so its ${clis.join(" and ")} probes ran without it and describe this shell's view, not the service's${PODMAN_CHAIN_KEYS.includes(k) ? "; the containers.conf check below read it as the worker does" : ""}`,
+			label: `${k} is set in ${envPath}${shown}, and doctor hands nothing from that file to a program it starts, so its ${clis} probes ran without it and describe this shell's view, not the service's${PODMAN_CHAIN_KEYS.includes(k) ? "; the containers.conf check below read it as the worker does" : ""}`,
 			// Not "export it and re-run" alone: what it names may be a program, and the lab's case was another account's.
-			fix: `the service's own ${clis.join(" and ")} uses it: check what ${k} names and who can change it, then, to see that view, run doctor from a shell that exports the same ${k}`,
+			fix: `the service's own ${clis} ${verb} it: check what ${k} names and who can change it, then, to see that view, run doctor from a shell that exports the same ${k}`,
 		};
 	});
 }
@@ -891,6 +895,8 @@ export async function collectChecks(shellVars, seams) {
 	// What a child process is handed: this shell's environment, as before #471, so a value from `.env` (a token, a secret)
 	// never rides into a process doctor starts unless a check passes it by name.
 	const spawnEnv = seams.spawnEnv ?? shellVars;
+	// The one by-name read of this shell's own environment, for a value a child is handed by name (the probe's PAT).
+	const shellValue = (name) => (Object.hasOwn(spawnEnv, name) ? spawnEnv[name] : undefined);
 	// `agentDir` is the operator's OWN pi setup, the one `import-pi` stages from and the host side of the overlay comparison
 	// below (issue #471 checked): no worker reads it for the overlay, which is PI_GLOBAL_PI_DIR; `import-pi` runs in this
 	// shell and reads this shell's PI_CODING_AGENT_DIR, and the restage offer runs it with this shell's environment. So it
@@ -1740,8 +1746,13 @@ export async function collectChecks(shellVars, seams) {
 				// hands a program a token only from THIS shell (PR #474's round cap: nothing from `.env` reaches a spawn), so a
 				// PAT, or the name of its variable, that only the file supplies means the probe is not run, and that is said.
 				const pat = service.extra([patVar]);
-				patFromFile = Object.hasOwn(pat.fromFile, patVar) ? patVar : fileSays("GITHUB_PAT_VAR").length > 0 ? "GITHUB_PAT_VAR" : null;
-				token = patFromFile ? "" : (env[patVar] ?? "").trim(); // absent → skip; loadConfig fails loud at worker boot anyway
+				// The value from THIS shell alone (round-cap re-review, D1): `env` also holds what the file supplied, the venue
+				// keys among them, so a shell GITHUB_PAT_VAR naming PI_EGRESS_PROXY handed the file's value to the probe as its
+				// token. Any value doctor would take from the file (the PAT's own key, or anything `env` has that this shell
+				// has not) skips the probe instead.
+				const shellPat = shellValue(patVar);
+				patFromFile = Object.hasOwn(pat.fromFile, patVar) || (env[patVar] !== undefined && shellPat === undefined) ? patVar : fileSays("GITHUB_PAT_VAR").length > 0 ? "GITHUB_PAT_VAR" : null;
+				token = patFromFile ? "" : (shellPat ?? "").trim(); // absent → skip; loadConfig fails loud at worker boot anyway
 			}
 			if (token && ghProbeBin === "docker" && endpoint.local !== true) {
 				// NOT RUN on a daemon that is not observed on this host (#278). The probe hands the operator's own gh

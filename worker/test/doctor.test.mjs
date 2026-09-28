@@ -7141,6 +7141,7 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 		/^export async function collectChecks\(shellVars, seams\) \{$/,
 		/^const service = seams\.serviceEnv \?\? resolveDoctorEnv\(shellVars, serviceEnvFile\);$/,
 		/^const spawnEnv = seams\.spawnEnv \?\? shellVars;$/,
+		/^const shellValue = \(name\) => \(Object\.hasOwn\(spawnEnv, name\) \? spawnEnv\[name\] : undefined\);$/,
 		/^const \{ cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom\(spawnEnv\), readHostPiFn = readHostPi, /,
 		/^const probe = await runCmdCapture\(spawn, ghProbeBin, ghProbeArgs\(jobImage, ghProbeBin\), \{ env: \{ \.\.\.spawnEnv, GH_TOKEN: token, GITHUB_TOKEN: token \} \}\);$/,
 		/^const res = await runCmdCapture\(spawn, process\.execPath, \[cli, "import-pi", "--with-packages", "--no-host-packages", "--to", overlay\], \{ env: spawnEnv, cwd, timeoutMs: 600000 \}\);$/,
@@ -7150,7 +7151,8 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 	sites.forEach((line, n) => assert.match(line, allowed[n]));
 	assert.equal([...code.matchAll(/\bprocess\.env\b/g)].length, 1, "process.env only as runDoctor's default");
 	// Handed on whole, never read by key: a `venueEnv.NAME` would be a service key read from the shell.
-	assert.deepEqual([...code.matchAll(/\b(?:shellVars|venueEnv|spawnEnv)\s*(?:\?\.|\.|\[)\s*\[?["']?[A-Za-z_]/g)].map((m) => m[0]), []);
+	// One by-name read, pinned above: `shellValue`, the probe PAT's value from this shell alone (round-cap re-review, D1).
+	assert.deepEqual([...code.matchAll(/\b(?:shellVars|venueEnv|spawnEnv)\s*(?:\?\.|\.|\[)\s*\[?["']?[A-Za-z_]/g)].map((m) => m[0]), ["spawnEnv[n"]);
 	// The one resolution runDoctor hands collectChecks, and `--live` the same one.
 	assert.match(code, /seams\.serviceEnv = resolveDoctorEnv\(venueEnv, seams\.serviceEnvFile\);\n\tconst env = seams\.serviceEnv\.env;/);
 
@@ -9356,7 +9358,8 @@ test("no program doctor starts receives an environment derived from .env values 
 	assert.equal(envOptions.filter((e) => e === "opts.env").length, 1, "one forwarder");
 	assert.doesNotMatch(code, /\bcliSpawn\b|\bspawnWith\b/, "no spawn wrapper that could add to it");
 	// The token the one extended environment carries never comes from .env (the probe is skipped instead).
-	assert.match(code, /token = patFromFile \? "" : \(env\[patVar\] \?\? ""\)\.trim\(\);/);
+	assert.match(code, /token = patFromFile \? "" : \(shellPat \?\? ""\)\.trim\(\);/);
+	assert.match(code, /const shellPat = shellValue\(patVar\);/);
 
 	const marker = (k) => `from-env-${k.toLowerCase()}-${k.length}`;
 	const cliKeys = [...new Set(Object.values(CLI_SERVICE_KEYS).flat())];
@@ -9384,6 +9387,19 @@ test("no program doctor starts receives an environment derived from .env values 
 	}
 });
 
+test("a shell GITHUB_PAT_VAR naming a venue key only .env sets hands the probe nothing from the file (#471 round-cap re-review, D1)", async () => {
+	const plan = { ...green, "docker run": 0 };
+	for (const [key, value] of [["PI_BACKENDS", "local"], ["PI_EGRESS", "on"], ["PI_EGRESS_PROXY", "from-dotenv-proxy"]]) {
+		const r = await envDoctor(`GITHUB_AUTH_SOURCE=pat\n${key}=${value}\n`, { GITHUB_PAT_VAR: key, ...(key === "PI_BACKENDS" ? {} : { PI_BACKENDS: "local" }) }, { plan });
+		for (const c of r.calls) assert.notEqual(c.opts?.env?.GH_TOKEN, value, `${key}: the file's value reached ${c.cmd} as GH_TOKEN`);
+		assert.ok(!r.calls.some((c) => c.args[0] === "run" && c.args.includes("gh")), `${key}: the probe is skipped`);
+		assert.ok(r.text.includes(`⚠ in-image gh auth: not checked, because ${key} comes from ${r.envPath} and doctor hands nothing from that file to a program it starts`), `${key}: ${r.text}`);
+	}
+	// This shell's own value of the same key: its own, handed on as before.
+	const own = await envDoctor("GITHUB_AUTH_SOURCE=pat\n", { GITHUB_PAT_VAR: "PI_EGRESS_PROXY", PI_EGRESS_PROXY: "shell-token", PI_BACKENDS: "local" }, { plan });
+	assert.equal(own.calls.find((c) => c.args[0] === "run" && c.args.includes("gh"))?.opts.env.GH_TOKEN, "shell-token");
+});
+
 test("cliNotHandedLines: one ⚠ per CLI variable the file sets, the value only for a path, and the chain check named for its three (#471 round cap)", () => {
 	const service = { fromFile: { CONTAINER_HOST: "ssh://u:p@h/s", DOCKER_CONFIG: "/srv/d\u001b[2J", GH_TOKEN: "ghp_x", PI_LOGS_DIR: "/srv/logs" } };
 	const lines = cliNotHandedLines(service, "/d/.env");
@@ -9395,6 +9411,9 @@ test("cliNotHandedLines: one ⚠ per CLI variable the file sets, the value only 
 	const chain = cliNotHandedLines({ fromFile: { XDG_CONFIG_HOME: "/x" } }, "/d/.env")[0].label;
 	assert.match(chain, /its podman and gh probes ran without it[^\n]*; the containers.conf check below read it as the worker does$/);
 	assert.match(lines[0].fix, /^the service's own podman uses it: check what CONTAINER_HOST names and who can change it, then/, "never plain advice to export a value nobody checked");
+	const home = cliNotHandedLines({ fromFile: { HOME: "/h" } }, "/d/.env")[0];
+	assert.match(home.label, /so its podman, docker and gh probes ran without it/);
+	assert.match(home.fix, /^the service's own podman, docker and gh use it: /, "the verb agrees with the count (D2)");
 });
 
 test("this account's own unix socket in .env is no failure: named as not handed on, nothing more (#471 round cap)", async () => {
