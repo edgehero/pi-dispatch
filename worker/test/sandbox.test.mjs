@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import * as realFs from "node:fs";
+import { join } from "node:path";
+import { tempDir } from "./helpers/temp-dir.mjs";
 import { describe, test } from "node:test";
 import { ISOLATION_FLAGS, PODMAN_PINNED_FLAGS, buildDockerRunArgs, buildPodmanRunArgs } from "../src/docker-run.mjs";
 import { WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
 import { MINTED_TOKEN_VARS } from "../src/forges.mjs";
-import { SANDBOX_LAUNCHERS, SANDBOX_NAME_PREFIX, SANDBOX_NETWORK_SHAPE, buildSandboxRunArgs, combineSandboxNetworkSweepers, decideSandboxJobUser, launchSandbox, listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatch, openSandbox, parsePublish, resolveSandbox, sandboxContainerName, sandboxEgress, sandboxLauncher, sandboxVenuePolicy, sandboxVenueRefusal, sandboxVenues } from "../src/sandbox.mjs";
+import { SANDBOX_LAUNCHERS, SANDBOX_LAUNCH_WATCH_MS, SANDBOX_LAUNCH_WATCH_TRIES, SANDBOX_NAME_PREFIX, SANDBOX_NETWORK_SHAPE, SANDBOX_OPEN_GRACE_MS, buildSandboxRunArgs, combineSandboxNetworkSweepers, decideSandboxJobUser, launchSandbox, listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatch, openSandbox, parsePublish, resolveSandbox, sandboxContainerName, sandboxEgress, stopSandbox, sandboxLauncher, sandboxVenuePolicy, sandboxVenueRefusal, sandboxVenues } from "../src/sandbox.mjs";
 import { networkNameFor } from "../src/egress.mjs";
-import { makeSandboxReaper } from "../src/sandbox-store.mjs";
+import { makeSandboxReaper, pinSandbox } from "../src/sandbox-store.mjs";
 
 const base = {
 	image: "pi-job:pinned",
@@ -181,12 +184,14 @@ test("resolveSandbox names the cause: retention off, swept, imageless, workspace
 	const fsWith = (m) => ({ readFileSync: () => JSON.stringify(m) });
 	const missing = { readFileSync: () => { throw new Error("ENOENT"); } };
 
-	assert.match(resolveSandbox({ jobId: "j1", sandboxDir: "/s", retentionHours: 0, fs: missing }).message, /PI_SANDBOX_RETENTION_HOURS/);
-	assert.match(resolveSandbox({ jobId: "j1", sandboxDir: "/s", retentionHours: 24, fs: missing }).message, /swept after 24h/);
-	assert.equal(resolveSandbox({ jobId: "", sandboxDir: "/s", retentionHours: 24, fs: missing }).refused, "no-job-id");
-	assert.equal(resolveSandbox({ jobId: "j1", sandboxDir: "/s", retentionHours: 24, fs: fsWith({ ...manifest, image: null }) }).refused, "no-image");
+	// Issue #446: an hour into the fixture's window, so the past-window refusal is never what these read.
+	const now = () => Date.parse("2026-08-01T01:00:00Z");
+	assert.match(resolveSandbox({ jobId: "j1", sandboxDir: "/s", retentionHours: 0, fs: missing, now }).message, /PI_SANDBOX_RETENTION_HOURS/);
+	assert.match(resolveSandbox({ jobId: "j1", sandboxDir: "/s", retentionHours: 24, fs: missing, now }).message, /swept at the end of its retention window/);
+	assert.equal(resolveSandbox({ jobId: "", sandboxDir: "/s", retentionHours: 24, fs: missing, now }).refused, "no-job-id");
+	assert.equal(resolveSandbox({ jobId: "j1", sandboxDir: "/s", retentionHours: 24, fs: fsWith({ ...manifest, image: null }), now }).refused, "no-image");
 
-	const gone = resolveSandbox({ jobId: "j1", sandboxDir: "/s", retentionHours: 24, fs: fsWith(manifest), fileExists: () => false });
+	const gone = resolveSandbox({ jobId: "j1", sandboxDir: "/s", retentionHours: 24, fs: fsWith(manifest), fileExists: () => false, now });
 	assert.equal(gone.refused, "workspace-gone");
 	assert.match(gone.message, /\/w/, "the missing path IS the diagnosis, so it must appear");
 });
@@ -194,7 +199,7 @@ test("resolveSandbox names the cause: retention off, swept, imageless, workspace
 test("resolveSandbox refuses a run from a venue this host did not run, ahead of the image and the workspace (#277)", () => {
 	const manifest = { jobId: "j1", kind: "github", image: "pi-job:latest", workspace: "/w", createdAt: "2026-08-01T00:00:00Z" };
 	const fsWith = (m) => ({ readFileSync: () => JSON.stringify(m) });
-	const resolve = (m, fileExists = () => true) => resolveSandbox({ jobId: "j1", sandboxDir: "/s", retentionHours: 24, fs: fsWith(m), fileExists });
+	const resolve = (m, fileExists = () => true) => resolveSandbox({ jobId: "j1", sandboxDir: "/s", retentionHours: 24, fs: fsWith(m), fileExists, now: () => Date.parse("2026-08-01T01:00:00Z") });
 
 	// Another venue: refused by name, and BEFORE the symptoms -- an imageless manifest whose workspace is gone
 	// still reports the venue, because that is the cause an operator can act on.
@@ -274,6 +279,7 @@ test("resolveSandbox yields the manifest and the container name when the run is 
 		retentionHours: 24,
 		fs: { readFileSync: () => JSON.stringify(manifest) },
 		fileExists: () => true,
+		now: () => Date.parse("2026-08-01T01:00:00Z"),
 	});
 	assert.equal(resolved.refused, undefined);
 	assert.equal(resolved.name, "pi-sandbox-j1");
@@ -329,8 +335,13 @@ test("an armed sandbox joins its OWN network and carries the proxy variables -- 
 /** A retained local run, read through an injected fs, with its workspace present. */
 function openable(over = {}) {
 	const manifest = { jobId: "gh-1", kind: "github", image: "pi-job:latest", backend: "local", workspace: "/w", createdAt: "2026-09-14T08:00:00Z", keepUntil: null, ...over };
-	return { fs: { readFileSync: () => JSON.stringify(manifest) }, fileExists: () => true };
+	// `now` rides along (issue #446): an hour into the run's 24h window, so the past-window refusal is decided on a fixed
+	// clock and never on the wall clock drifting past this fixture's createdAt.
+	return { fs: { readFileSync: () => JSON.stringify(manifest) }, fileExists: () => true, now: () => OPENABLE_NOW };
 }
+
+/** An hour after `openable()`'s createdAt. */
+const OPENABLE_NOW = Date.parse("2026-09-14T09:00:00Z");
 
 /** A docker that records every call and answers each with `codeFor(args)` (0 by default). */
 function recordingDocker(calls, codeFor = () => 0) {
@@ -1504,6 +1515,10 @@ describe("the reaper and the watch decide on ONE manifest read per directory (#4
 		const reads = {};
 		const removed = [];
 		const lstats = {};
+		// Issue #446: the sweep deletes a TOMBSTONE it renamed the run to, so what it removed and read is counted under the
+		// run's own name, mapped back through the renames.
+		const origin = {};
+		const idOf = (segment) => origin[segment] ?? segment;
 		const fs = {
 			lstatSync: (p) => {
 				const id = p.split("/").at(-1);
@@ -1514,15 +1529,24 @@ describe("the reaper and the watch decide on ONE manifest read per directory (#4
 			},
 			readdirSync: (p) => Object.keys(files).filter((k) => k.startsWith(`${p}/`) && !k.slice(p.length + 1).includes("/")).map((k) => k.slice(p.length + 1)),
 			readFileSync: (p) => {
-				const id = p.split("/").at(-2);
+				const id = idOf(p.split("/").at(-2));
 				reads[id] = (reads[id] ?? 0) + 1;
 				if (flaky[id] && reads[id] === 1) throw Object.assign(new Error(flaky[id]), { code: flaky[id] });
 				if (!(p in files)) throw Object.assign(new Error(p), { code: "ENOENT" });
 				return files[p];
 			},
 			rmSync: (p) => {
-				removed.push(p.split("/").at(-1));
+				removed.push(idOf(p.split("/").at(-1)));
 				for (const k of Object.keys(files)) if (k === p || k.startsWith(`${p}/`)) delete files[k];
+			},
+			// A rename moves the whole subtree, as a directory rename does.
+			renameSync: (from, to) => {
+				origin[to.split("/").at(-1)] = idOf(from.split("/").at(-1));
+				for (const k of Object.keys(files)) {
+					if (k !== from && !k.startsWith(`${from}/`)) continue;
+					files[`${to}${k.slice(from.length)}`] = files[k];
+					delete files[k];
+				}
 			},
 		};
 		return { fs, reads, removed, files };
@@ -1551,10 +1575,11 @@ describe("the reaper and the watch decide on ONE manifest read per directory (#4
 		assert.deepEqual(root.removed, ["p-open"], "second pass: read, same store, not open: swept");
 	});
 
-	test("every directory is read once to place it, and once more only at the point of deletion", async () => {
+	test("every directory is read once to place it, and again only at the point of deletion", async () => {
 		const root = rootWith({ "d-1": { backend: "local", createdAt: OLD }, "p-1": { backend: "podman", podmanStore: STORE, createdAt: OLD }, bad: "{", none: null });
 		await pass(root, { list: async ({ bin }) => (bin === "docker" ? ["d-1"] : []) });
-		assert.deepEqual(root.reads, { "d-1": 1, "p-1": 2, bad: 2, none: 2 }, "the held one is never re-read; each deleted one is confirmed fresh");
+		// Three for a deleted one since issue #446: the pass's read, the fresh read, and the read through its tombstone.
+		assert.deepEqual(root.reads, { "d-1": 1, "p-1": 3, bad: 3, none: 3 }, "the held one is never re-read; each deleted one is confirmed fresh, and again after it is renamed aside");
 		assert.deepEqual(root.removed.sort(), ["bad", "none", "p-1"], "held by its runtime: d-1; the rest expire on their one read");
 	});
 
@@ -1651,4 +1676,672 @@ test("the finished-container repair matches THIS run by its whole name, never a 
 	const out = await makeSandboxNetworkSweeper({ bin: "podman", run })({ retained: () => [] });
 	assert.deepEqual(out.notes.map((n) => n.reason), ["rm-failed"]);
 	assert.ok(!calls.some((c) => /^rm /.test(c)), `nothing removed: ${calls.join(" | ")}`);
+});
+
+// --- issue #446: the past-window refusal, the pin first, and the post-launch look --------------------------------
+
+test("the opener's grace and the post-launch look's bounds are pinned by literal (#446)", () => {
+	assert.deepEqual({ SANDBOX_OPEN_GRACE_MS, SANDBOX_LAUNCH_WATCH_MS, SANDBOX_LAUNCH_WATCH_TRIES }, { SANDBOX_OPEN_GRACE_MS: 300000, SANDBOX_LAUNCH_WATCH_MS: 250, SANDBOX_LAUNCH_WATCH_TRIES: 120 });
+});
+
+describe("the past-window refusal (#446)", () => {
+	const T = Date.parse("2026-08-02T00:00:00Z");
+	const manifest = { jobId: "j1", kind: "github", image: "pi-job:latest", backend: "local", workspace: "/w", createdAt: "2026-08-01T00:00:00.000Z", retainUntil: new Date(T).toISOString(), keepUntil: null };
+	const resolve = (at, over = {}, extra = {}) => resolveSandbox({ jobId: "j1", sandboxDir: "/s", retentionHours: 24, fs: { readFileSync: () => JSON.stringify({ ...manifest, ...over }) }, fileExists: () => true, now: () => at, ...extra });
+
+	test("the grace boundary: more than SANDBOX_OPEN_GRACE_MS left opens, exactly that much or less is refused", () => {
+		assert.equal(resolve(T - SANDBOX_OPEN_GRACE_MS - 1).refused, undefined);
+		const edge = resolve(T - SANDBOX_OPEN_GRACE_MS);
+		assert.equal(edge.refused, "past-window");
+		assert.match(edge.message, /within 5 minutes of the end of its retention window \(2026-08-02T00:00:00\.000Z\)/);
+		const past = resolve(T + 1);
+		assert.equal(past.refused, "past-window");
+		assert.match(past.message, /is past its retention window \(it closed at 2026-08-02T00:00:00\.000Z\)/);
+		assert.match(past.message, /`pi-dispatch sandbox j1 --pin`/, "the refusal names the command that opens it");
+	});
+
+	test("with a pin requested it opens, past the window or not", () => {
+		assert.equal(resolve(T + DAY_MS, {}, { pin: true }).refused, undefined);
+	});
+
+	test("an opener whose own window is LARGER than the worker's is still refused: it reads the deadline the worker wrote", () => {
+		// The worker retained this with 24h and wrote retainUntil; this shell says 480h. Only a manifest from before the
+		// key falls back to the shell's own window.
+		assert.equal(resolve(T + HOUR_MS, {}, { retentionHours: 480 }).refused, "past-window");
+		assert.equal(resolve(T + HOUR_MS, { retainUntil: undefined }, { retentionHours: 480 }).refused, undefined, "an old manifest: the reader's window, as before");
+		assert.equal(resolve(T + HOUR_MS, { keepUntil: new Date(T + DAY_MS).toISOString() }).refused, undefined, "a live pin wins over both");
+	});
+
+	test("a manifest with no creation time is refused, since the sweep deletes it on sight", () => {
+		assert.equal(resolve(T - DAY_MS, { createdAt: undefined, retainUntil: undefined }).refused, "past-window");
+	});
+
+	test("the run's own refusals come first: another venue is told as that, never as a pin away", () => {
+		assert.equal(resolve(T + DAY_MS, { backend: "far" }).refused, "venue-unreachable");
+	});
+});
+
+const HOUR_MS = 3600000;
+const DAY_MS = 86400000;
+
+/**
+ * A retention root in memory that the REAL store functions run on (the reaper, `pinSandbox`, `readManifest`), so the
+ * races below are between the actual sweep and the actual pin. A write into a directory that is not there fails, as
+ * it does on disk, which is how a pin loses to a rename.
+ */
+function memoryRoot(runs) {
+	const files = { "/sbx": "<dir>" };
+	for (const [id, m] of Object.entries(runs)) {
+		files[`/sbx/${id}`] = "<dir>";
+		files[`/sbx/${id}/manifest.json`] = JSON.stringify(m);
+	}
+	const enoent = (p) => Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+	const parentOf = (p) => p.slice(0, p.lastIndexOf("/"));
+	const fs = {
+		lstatSync: (p) => {
+			if (!(p in files)) throw enoent(p);
+			return { isDirectory: () => files[p] === "<dir>", uid: 1000, gid: 1000, mode: 0o100600 };
+		},
+		readdirSync: (p) => {
+			if (!(p in files)) throw enoent(p);
+			return Object.keys(files).filter((k) => k.startsWith(`${p}/`) && !k.slice(p.length + 1).includes("/")).map((k) => k.slice(p.length + 1));
+		},
+		readFileSync: (p) => {
+			if (!(p in files) || files[p] === "<dir>") throw enoent(p);
+			return files[p];
+		},
+		writeFileSync: (p, body, o) => {
+			if (!(parentOf(p) in files)) throw enoent(p);
+			if (o?.flag === "wx" && p in files) throw Object.assign(new Error(`EEXIST: ${p}`), { code: "EEXIST" });
+			files[p] = body;
+		},
+		chownSync: () => {},
+		chmodSync: () => {},
+		renameSync: (from, to) => {
+			if (!(from in files) || !(parentOf(to) in files)) throw enoent(from);
+			for (const k of Object.keys(files)) {
+				if (k !== from && !k.startsWith(`${from}/`)) continue;
+				files[`${to}${k.slice(from.length)}`] = files[k];
+				delete files[k];
+			}
+		},
+		rmSync: (p) => {
+			for (const k of Object.keys(files)) if (k === p || k.startsWith(`${p}/`)) delete files[k];
+		},
+	};
+	return { fs, files };
+}
+
+describe("an open racing the sweep (#446)", () => {
+	const AT = Date.parse("2026-09-01T12:00:00Z");
+	const expired = { jobId: "gh-1", kind: "github", image: "pi-job:latest", backend: "local", workspace: "/sbx/gh-1/workspace", createdAt: "2026-08-30T12:00:00.000Z", retainUntil: "2026-08-31T12:00:00.000Z", keepUntil: null };
+	const opener = (root, over = {}) => ({
+		jobId: "gh-1",
+		sandboxDir: "/sbx",
+		retentionHours: 24,
+		egress: { armed: false, proxy: "p" },
+		fs: root.fs,
+		fileExists: () => true,
+		now: () => AT,
+		resolveJobUser: async () => ({ user: null, home: null }),
+		running: async () => [],
+		...over,
+	});
+	const pinFor = (root) => () => pinSandbox({ sandboxDir: "/sbx", jobId: "gh-1", pinDays: 7, fs: root.fs, now: () => AT, euid: 1000 });
+	/** A sweep pass whose runtime ask waits on `gate`, as a slow `ps` does. */
+	const slowPass = (root, gate, logs) => makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs: root.fs, now: () => AT, listRunning: async () => (await gate, []), log: (e, f) => logs.push([e, f]) })();
+
+	test("window 1: an unpinned open while the sweep waits on the runtime is REFUSED, so no shell is under the delete", async () => {
+		const root = memoryRoot({ "gh-1": expired });
+		let release;
+		const gate = new Promise((r) => (release = r));
+		const logs = [];
+		const sweeping = slowPass(root, gate, logs);
+		let launched = false;
+		const r = await openSandbox(opener(root, { launch: async () => ((launched = true), { code: 0 }) }));
+		release();
+		await sweeping;
+		assert.equal(r.refused, "past-window");
+		assert.equal(launched, false);
+		assert.deepEqual(logs, [["reaped_sandbox", { entry: "gh-1", reason: "window" }]], "the sweep went ahead, with no shell under it");
+	});
+
+	test("window 1, pinned: the pin lands while the sweep waits, and the sweep's fresh read holds the run", async () => {
+		const root = memoryRoot({ "gh-1": expired });
+		let release;
+		const gate = new Promise((r) => (release = r));
+		const logs = [];
+		const sweeping = slowPass(root, gate, logs);
+		let mounted = null;
+		const r = await openSandbox(opener(root, { pin: pinFor(root), launch: async () => ((mounted = "/sbx/gh-1/manifest.json" in root.files), { code: 0 }) }));
+		release();
+		await sweeping;
+		assert.equal(r.code, 0);
+		assert.equal(mounted, true);
+		assert.ok("/sbx/gh-1/manifest.json" in root.files, "the run survives the pass");
+		assert.deepEqual(logs, [["sandbox_reaper_skipped", { entry: "gh-1", reason: "manifest-changed" }]]);
+	});
+
+	test("the pin lands BEFORE any runtime call: a sweep deciding during the open's first runtime ask is held", async () => {
+		// The pass read the run (unpinned, expired) and is waiting on its runtime; the open resolves, and the sweep then
+		// finishes while the open is asking ITS runtime whether the sandbox is up. With the pin where it used to be (in
+		// `beforeLaunch`, after that ask and the job-user decision) the pass deleted the run there and the pin failed.
+		const root = memoryRoot({ "gh-1": expired });
+		let release;
+		const gate = new Promise((r) => (release = r));
+		const logs = [];
+		const sweeping = slowPass(root, gate, logs);
+		const order = [];
+		let mounted = null;
+		const r = await openSandbox(
+			opener(root, {
+				pin: () => (order.push("pin"), pinFor(root)()),
+				running: async () => {
+					order.push("running");
+					release();
+					await sweeping;
+					return [];
+				},
+				resolveJobUser: async () => (order.push("jobUser"), { user: null, home: null }),
+				launch: async () => ((mounted = "/sbx/gh-1/manifest.json" in root.files), { code: 0 }),
+			}),
+		);
+		assert.deepEqual(order.slice(0, 2), ["pin", "running"], "the pin first");
+		assert.equal(r.refused, undefined, JSON.stringify(r));
+		assert.equal(mounted, true, "the launch binds the run's own directory");
+		assert.deepEqual(logs, [["sandbox_reaper_skipped", { entry: "gh-1", reason: "manifest-changed" }]]);
+	});
+
+	test("a pin that fails REFUSES the open before any runtime call, never a warning above a shell", async () => {
+		for (const [pin, why] of [
+			[() => ({ pinned: false, reason: "absent" }), /its retained workspace is gone/],
+			[() => ({ pinned: false, reason: "EPERM: operation not permitted" }), /EPERM/],
+			[() => {
+				throw new Error("disk on fire");
+			}, /disk on fire/],
+		]) {
+			const root = memoryRoot({ "gh-1": expired });
+			const asked = [];
+			const r = await openSandbox(opener(root, { pin, running: async () => (asked.push("running"), []), resolveJobUser: async () => (asked.push("jobUser"), { user: null, home: null }), launch: async () => (asked.push("launch"), { code: 0 }) }));
+			assert.equal(r.refused, "pin-failed");
+			assert.match(r.message, why);
+			assert.deepEqual(asked, []);
+		}
+		// And a refusal that costs nothing comes before the pin: a refused open leaves no pin behind.
+		const root = memoryRoot({ "gh-1": expired });
+		const pinned = [];
+		const r = await openSandbox(opener(root, { publish: ["-p", "127.0.0.1:3000:3000"], egress: { armed: true, proxy: "p" }, pin: () => (pinned.push(1), { pinned: true }) }));
+		assert.equal(r.refused, "publish-needs-egress-off");
+		assert.deepEqual(pinned, []);
+	});
+
+	test("the post-launch look: a run gone once the container is listed has its container removed and is reported (#446)", async () => {
+		const root = memoryRoot({ "gh-1": { ...expired, keepUntil: new Date(AT + DAY_MS).toISOString() } });
+		let finish;
+		const stopped = [];
+		let listed = false;
+		const r = await openSandbox(
+			opener(root, {
+				running: async () => (listed ? ["gh-1"] : []),
+				pause: async () => {},
+				launch: async () => {
+					// The sweep's rename and the runtime's start raced: the directory is not at the run's name any more.
+					root.fs.renameSync("/sbx/gh-1", "/sbx/.reap-1-2-3");
+					listed = true;
+					// The shell "exits" on its own a moment later, so a look that never stops it fails here rather than hangs;
+					// the look itself runs on microtasks, long before this.
+					return new Promise((resolve) => {
+						finish = resolve;
+						setTimeout(() => resolve({ code: 0 }), 50);
+					});
+				},
+				stop: async ({ bin, name }) => (stopped.push(`${bin} ${name}`), finish({ code: 137 }), true),
+			}),
+		);
+		assert.deepEqual(stopped, ["docker pi-sandbox-gh-1"]);
+		assert.equal(r.refused, "swept-at-launch");
+		assert.match(r.message, /deleted or replaced as this sandbox started, so the sandbox was stopped/);
+	});
+
+	test("the post-launch look keeps watching a run in place, and a transient, unreadable or unparsed read never stops the shell (#446)", async () => {
+		const root = memoryRoot({ "gh-1": { ...expired, keepUntil: new Date(AT + DAY_MS).toISOString() } });
+		const stopped = [];
+		let listed = false;
+		let finish;
+		// After the container is listed, the look's reads of the manifest go: fine, a transient errno, a permanent one, a
+		// manifest caught unparseable, then fine again. None of those says the run is gone.
+		const faults = ["EMFILE", "EACCES", "unparsed"];
+		let checks = 0;
+		const read = root.fs.readFileSync;
+		root.fs.readFileSync = (p) => {
+			if (!listed || !p.endsWith("/gh-1/manifest.json")) return read(p);
+			const fault = faults[checks++ - 1];
+			if (fault === "unparsed") return "{";
+			if (fault) throw Object.assign(new Error(fault), { code: fault });
+			return read(p);
+		};
+		const done = openSandbox(
+			opener(root, {
+				running: async () => (listed ? ["gh-1"] : []),
+				pause: () => new Promise((resolve) => setImmediate(resolve)),
+				launch: async () => {
+					listed = true;
+					return new Promise((resolve) => (finish = resolve));
+				},
+				stop: async () => (stopped.push(1), true),
+			}),
+		);
+		for (let i = 0; i < 200 && checks < 6; i++) await new Promise((r) => setImmediate(r));
+		assert.ok(checks >= 6, `the look kept watching after the first check (${checks})`);
+		finish({ code: 4 });
+		const r = await done;
+		assert.equal(r.code, 4);
+		assert.deepEqual(stopped, []);
+	});
+
+	test("the accepted residual: a worker window LOWERED below the opener's admits an open the sweep then takes, and the look reports it (#446)", async () => {
+		// Retained under 24h (retainUntil 14h out), the worker since lowered to 6h, the opener still at 24h: the opener's
+		// earlier-of rule sees 14h left and admits it; the worker's sees it 4h expired. The pass runs as the container
+		// starts and before it is listed, so nothing holds the run; the post-launch look is what reports it.
+		const retained = { ...expired, createdAt: new Date(AT - 10 * HOUR_MS).toISOString(), retainUntil: new Date(AT + 14 * HOUR_MS).toISOString() };
+		const root = memoryRoot({ "gh-1": retained });
+		const logs = [];
+		let listed = false;
+		let finish;
+		const stopped = [];
+		const r = await openSandbox(
+			opener(root, {
+				running: async () => (listed ? ["gh-1"] : []),
+				// A macrotask per look, as the real 250 ms timer is: the pass below yields between trees, and a look on
+				// microtasks alone would spend all its tries before the container is listed.
+				pause: () => new Promise((resolve) => setImmediate(resolve)),
+				launch: async () => {
+					await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 6, fs: root.fs, now: () => AT, log: (e, f) => logs.push([e, f]) })();
+					listed = true;
+					return new Promise((resolve) => {
+						finish = resolve;
+						setTimeout(() => resolve({ code: 0 }), 50);
+					});
+				},
+				stop: async ({ name }) => (stopped.push(name), finish({ code: 137 }), true),
+			}),
+		);
+		assert.deepEqual(logs, [["reaped_sandbox", { entry: "gh-1", reason: "window" }]], "the shorter worker window applies");
+		assert.equal(r.refused, "swept-at-launch");
+		assert.deepEqual(stopped, ["pi-sandbox-gh-1"]);
+	});
+
+	test("the look stops the moment the shell returns, abandoning a runtime ask in flight (#446)", async () => {
+		const root = memoryRoot({ "gh-1": { ...expired, keepUntil: new Date(AT + DAY_MS).toISOString() } });
+		let first = true;
+		let signalled = null;
+		let askSettled = false;
+		let finish;
+		const done = openSandbox(
+			opener(root, {
+				// The opener's own already-running ask answers; the look's ask hangs (a wedged `ps`) until it is aborted.
+				running: ({ signal } = {}) => {
+					if (first) return ((first = false), Promise.resolve([]));
+					signalled = signal ?? null;
+					// A wedged `ps` that answers only at its own timeout (shortened here).
+					return new Promise((resolve) => setTimeout(() => ((askSettled = true), resolve([])), 300));
+				},
+				pause: async () => {},
+				launch: async () => new Promise((resolve) => (finish = resolve)),
+			}),
+		);
+		for (let i = 0; i < 20 && !signalled; i++) await new Promise((r) => setImmediate(r));
+		assert.ok(signalled, "the look's ask carries a signal");
+		finish({ code: 3 });
+		const r = await done;
+		assert.equal(r.code, 3);
+		assert.equal(askSettled, false, "returned without waiting out the hung ask");
+		assert.equal(signalled.aborted, true, "and the ask was aborted");
+	});
+
+	test("listRunningSandboxes hands a signal to its runner, and only when given one (#446)", async () => {
+		const seen = [];
+		const execFn = async (bin, args, opts) => (seen.push(opts), { stdout: "" });
+		const controller = new AbortController();
+		await listRunningSandboxes({ execFn, signal: controller.signal });
+		await listRunningSandboxes({ execFn });
+		assert.deepEqual(seen, [{ timeout: 5000, signal: controller.signal }, { timeout: 5000 }]);
+	});
+
+	test("the runtime watch never places a tombstone, and a dot id's container is named off its retained directory (#446)", async () => {
+		const root = memoryRoot({ ".reap-1-2-3": { jobId: "gone", backend: "podman", createdAt: "2026-01-01T00:00:00Z" } });
+		const asked = [];
+		const watch = makeSandboxRuntimeWatch({ sandboxDir: "/sbx", fs: root.fs, list: async ({ bin }) => (asked.push(bin), []), readPodmanStore: async () => null, log: () => {} });
+		assert.deepEqual(await watch.listRunning(), []);
+		assert.deepEqual(asked, [], "no runtime is asked about a tombstone");
+		assert.equal(sandboxContainerName(".reap-9"), "pi-sandbox-_.reap-9");
+	});
+
+	test("the runtime watch's isOpen asks the run's own runtime, asks nobody for a run with no manifest, and throws when unanswered (#446)", async () => {
+		const asked = [];
+		let fail = false;
+		// `blessed` puts docker in the runtimes present, so "nobody asked" below is a property of the absent manifest.
+		const watch = makeSandboxRuntimeWatch({ sandboxDir: "/sbx", blessed: ["local"], fs: memoryRoot({}).fs, list: async ({ bin }) => {
+			asked.push(bin);
+			if (fail) throw new Error("down");
+			return ["p-1"];
+		}, readPodmanStore: async () => null, log: () => {} });
+		assert.equal(await watch.isOpen({ name: "p-1", read: { manifest: { backend: "podman" } } }), true);
+		assert.equal(await watch.isOpen({ name: "d-1", read: { manifest: { backend: "local" } } }), false);
+		assert.deepEqual(asked, ["podman", "docker"]);
+		assert.equal(await watch.isOpen({ name: "none", read: { absent: true } }), false);
+		assert.equal(asked.length, 2, "no manifest file, nobody asked");
+		fail = true;
+		await assert.rejects(watch.isOpen({ name: "d-1", read: { manifest: { backend: "local" } } }), /down/);
+	});
+
+	test("a dot id is checked for an open sandbox under its RETAINED name, which is what the runtime reports (#446)", async () => {
+		const root = memoryRoot({ "_.x": { ...expired, jobId: ".x", workspace: "/sbx/_.x/workspace", keepUntil: new Date(AT + DAY_MS).toISOString() } });
+		let launched = false;
+		const r = await openSandbox(opener(root, { jobId: ".x", running: async () => ["_.x"], launch: async () => ((launched = true), { code: 0 }) }));
+		assert.equal(r.refused, "already-running");
+		assert.match(r.message, /pi-sandbox-_\.x/);
+		assert.equal(launched, false);
+	});
+
+	test("a directory holding ANOTHER run than the id asked for is refused by name (#446)", () => {
+		const root = memoryRoot({ repeat_a_1: { ...expired, jobId: "repeat_a_1", workspace: "/w", keepUntil: new Date(AT + DAY_MS).toISOString() } });
+		const r = resolveSandbox({ jobId: "repeat:a:1", sandboxDir: "/sbx", retentionHours: 24, fs: root.fs, fileExists: () => true, now: () => AT });
+		assert.equal(r.refused, "id-mismatch");
+		assert.match(r.message, /holds run repeat_a_1, not repeat:a:1/);
+		assert.equal(resolveSandbox({ jobId: "repeat_a_1", sandboxDir: "/sbx", retentionHours: 24, fs: root.fs, fileExists: () => true, now: () => AT }).refused, undefined);
+	});
+});
+
+// --- issue #446, gate round 1: the same races on a REAL filesystem -----------------------------------------------
+
+describe("the #446 races on a real filesystem (gate round 1)", () => {
+	const AT = Date.parse("2026-09-01T12:00:00Z");
+	const H = 3600000;
+	/** A retention root with one retained run `id` in it, its workspace holding the operator's file. */
+	const realRoot = (id, over = {}) => {
+		const sbx = tempDir("sbx446-");
+		const dir = join(sbx, id);
+		mkdirSync(join(dir, "workspace"), { recursive: true });
+		writeFileSync(join(dir, "workspace", "work.txt"), "operator's work");
+		const manifest = { jobId: id, kind: "github", image: "pi-job:latest", backend: "local", workspace: join(dir, "workspace"), createdAt: new Date(AT - 10 * H).toISOString(), retainUntil: new Date(AT + 14 * H).toISOString(), keepUntil: null, ...over };
+		writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest));
+		return { sbx, dir, manifest };
+	};
+	const opener = (sbx, over) => ({ jobId: "gh-1", sandboxDir: sbx, retentionHours: 24, egress: { armed: false, proxy: "p" }, now: () => AT, resolveJobUser: async () => ({ user: null, home: null }), pause: () => new Promise((resolve) => setImmediate(resolve)), ...over });
+
+	/**
+	 * The adversary's shape: the worker's window was LOWERED to 6h, the opener's is 24h, and the pass's `ps` answers
+	 * "none" only after the container is listed and the post-launch look has already found the run in place.
+	 */
+	const adversary = async ({ wired }) => {
+		const { sbx, dir } = realRoot("gh-1");
+		let listed = false;
+		let finish;
+		const stopped = [];
+		const logs = [];
+		const r = await openSandbox(
+			opener(sbx, {
+				running: async () => (listed ? ["gh-1"] : []),
+				launch: async () => {
+					await makeSandboxReaper({
+						sandboxDir: sbx,
+						retentionHours: 6,
+						now: () => AT,
+						listRunning: async () => {
+							listed = true;
+							for (let i = 0; i < 50; i++) await new Promise((res) => setImmediate(res));
+							return [];
+						},
+						// The runtime watch's own re-ask, answered by the same runtime the opener asks.
+						...(wired ? { isOpen: async ({ name }) => (listed ? ["gh-1"] : []).includes(name) } : {}),
+						log: (e, f) => logs.push([e, f]),
+					})();
+					return new Promise((resolve) => {
+						finish = resolve;
+						setTimeout(() => resolve({ code: 0 }), 200);
+					});
+				},
+				stop: async ({ name }) => (stopped.push(name), finish?.({ code: 137 }), true),
+			}),
+		);
+		return { r, stopped, logs, kept: existsSync(join(dir, "workspace", "work.txt")) };
+	};
+
+	test("the pass re-asks the run's runtime before the rename, and holds a run whose sandbox opened during the pass", async () => {
+		const { r, stopped, logs, kept } = await adversary({ wired: true });
+		assert.deepEqual(logs, [["sandbox_reaper_skipped", { entry: "gh-1", reason: "opened-during-pass" }]]);
+		assert.equal(kept, true, "the operator's work is still there");
+		assert.deepEqual(stopped, []);
+		assert.equal(r.code, 0);
+	});
+
+	test("without the re-ask, the look keeps watching, never removes a shell past its launch check, and reports the loss when it exits", async () => {
+		// Gate round 2: after the launch check the shell may hold state outside the mounts, so a loss is RECORDED, not
+		// acted on, and said when the shell returns.
+		const { r, stopped, logs, kept } = await adversary({ wired: false });
+		assert.deepEqual(logs, [["reaped_sandbox", { entry: "gh-1", reason: "window" }]]);
+		assert.equal(kept, false);
+		assert.deepEqual(stopped, [], "the live shell is left alone");
+		assert.equal(r.refused, undefined);
+		assert.equal(r.code, 0, "the shell's own exit");
+		assert.equal(r.lost, "swept");
+		assert.match(r.message, /DELETED by the retention sweep while this sandbox was open/);
+	});
+
+	test("a run REPLACED after the launch check (a retry's retainJobDir) is recorded and said, and the shell left alone", async () => {
+		const { sbx, dir } = realRoot("gh-1");
+		let listed = false;
+		let finish;
+		const stopped = [];
+		let checks = 0;
+		const read = realFs.readFileSync;
+		const fs = {
+			...realFs,
+			readFileSync: (p, o) => {
+				// After the launch check has passed, the directory is replaced by a fresh one with a manifest.
+				if (listed && p === join(dir, "manifest.json") && ++checks === 2) {
+					const body = read(p);
+					renameSync(dir, join(sbx, "gone-old"));
+					mkdirSync(dir);
+					writeFileSync(p, body);
+				}
+				return read(p, o);
+			},
+		};
+		const r = await openSandbox(
+			opener(sbx, {
+				fs,
+				fileExists: () => true,
+				running: async () => (listed ? ["gh-1"] : []),
+				launch: async () => {
+					listed = true;
+					return new Promise((resolve) => {
+						finish = resolve;
+						setTimeout(() => resolve({ code: 5 }), 200);
+					});
+				},
+				stop: async ({ name }) => (stopped.push(name), finish?.({ code: 137 }), true),
+			}),
+		);
+		assert.deepEqual(stopped, []);
+		assert.equal(r.code, 5);
+		assert.equal(r.lost, "replaced");
+		assert.match(r.message, /REPLACED while this sandbox was open/);
+	});
+
+	test("a runtime that REFUSES the bind of a swept run (podman: statfs, exit 125) is reported as swept, not a bare 125", async () => {
+		const { sbx, dir } = realRoot("gh-1");
+		const r = await openSandbox(
+			opener(sbx, {
+				running: async () => [],
+				launch: async () => {
+					realFs.rmSync(dir, { recursive: true, force: true });
+					return { code: 125 };
+				},
+			}),
+		);
+		assert.equal(r.refused, "swept-at-launch");
+		assert.match(r.message, /the runtime refused the mount, exit 125/);
+		// And a 125 with the run in place is the runtime's own, left as it was.
+		const other = realRoot("gh-1");
+		const plain = await openSandbox(opener(other.sbx, { running: async () => [], launch: async () => ({ code: 125 }) }));
+		assert.equal(plain.code, 125);
+		assert.equal(plain.refused, undefined);
+	});
+
+	test("only a 125 from a container never listed is the runtime refusing the mount; any other exit with the run gone is LOST, from a check at exit (#446 gate round 3)", async () => {
+		// A shell that ran and exited 1, never listed (its `ps` answered nothing): the run was deleted while it ran.
+		const a = realRoot("gh-1");
+		const ran = await openSandbox(opener(a.sbx, { running: async () => [], launch: async () => (realFs.rmSync(a.dir, { recursive: true, force: true }), { code: 1 }) }));
+		assert.equal(ran.refused, undefined);
+		assert.deepEqual([ran.code, ran.lost], [1, "swept"]);
+		// Its `ps` failing throughout: never listed, never touched, and still told at exit.
+		const b = realRoot("gh-1");
+		const failing = await openSandbox(
+			opener(b.sbx, {
+				running: async () => {
+					throw new Error("ps down");
+				},
+				launch: async () => (realFs.rmSync(b.dir, { recursive: true, force: true }), { code: 0 }),
+			}),
+		);
+		assert.deepEqual([failing.code, failing.lost], [0, "swept"]);
+		// A 125 from a container that WAS listed is not a refused mount either.
+		const c = realRoot("gh-1");
+		let listed = false;
+		const stopped = [];
+		const seen = await openSandbox(
+			opener(c.sbx, {
+				running: async () => (listed ? ["gh-1"] : []),
+				stop: async () => (stopped.push(1), true),
+				launch: async () => {
+					listed = true;
+					await new Promise((r) => setTimeout(r, 50));
+					realFs.rmSync(c.dir, { recursive: true, force: true });
+					return { code: 125 };
+				},
+			}),
+		);
+		assert.equal(seen.refused, undefined);
+		assert.deepEqual([seen.code, seen.lost, stopped], [125, "swept", []]);
+	});
+
+	test("a container never listed is watched for the whole session but never removed, and a brief loss is still reported (#446 gate round 3)", async () => {
+		// `ps` fails throughout, so the look never lists the container and spends its asking budget; then the run goes.
+		const gone = realRoot("gh-1");
+		const stopped = [];
+		const r = await openSandbox(
+			opener(gone.sbx, {
+				running: async () => {
+					throw new Error("ps down");
+				},
+				stop: async () => (stopped.push(1), true),
+				launch: async () => {
+					// Gone BEFORE the asking budget runs out, so the check after it finds it gone: still not removed.
+					realFs.rmSync(gone.dir, { recursive: true, force: true });
+					await new Promise((res) => setTimeout(res, 120));
+					return { code: 0 };
+				},
+			}),
+		);
+		assert.deepEqual(stopped, [], "never removed: it was never known to be a fresh shell");
+		assert.deepEqual([r.refused, r.lost], [undefined, "swept"]);
+		// And a loss the exit check alone cannot see (the directory renamed away and back, same inode) is seen by the
+		// watch, which keeps running after the asking budget.
+		const back = realRoot("gh-1");
+		const r2 = await openSandbox(
+			opener(back.sbx, {
+				running: async () => {
+					throw new Error("ps down");
+				},
+				launch: async () => {
+					await new Promise((res) => setTimeout(res, 60));
+					renameSync(back.dir, join(back.sbx, "away"));
+					await new Promise((res) => setTimeout(res, 60));
+					renameSync(join(back.sbx, "away"), back.dir);
+					return { code: 0 };
+				},
+			}),
+		);
+		assert.equal(r2.lost, "swept");
+	});
+
+	test("a run retained BEFORE the escape (`_x`) is found, opened and held under its old name (#446 gate round 2)", async () => {
+		const { sbx } = realRoot("_x", { jobId: "_x", keepUntil: new Date(AT + DAY_MS).toISOString() });
+		const r = resolveSandbox({ jobId: "_x", sandboxDir: sbx, retentionHours: 24, now: () => AT });
+		assert.equal(r.refused, undefined, JSON.stringify(r));
+		assert.equal(r.name, "pi-sandbox-_x", "named off the directory it was found in, which the sweep holds by");
+		assert.equal(resolveSandbox({ jobId: ".x", sandboxDir: sbx, retentionHours: 24, now: () => AT }).refused, "absent", "and never under another id");
+		let launched = null;
+		const open = await openSandbox(opener(sbx, { jobId: "_x", running: async () => ["_x"], launch: async ({ args }) => ((launched = args), { code: 0 }) }));
+		assert.equal(open.refused, "already-running", "the running check keys off the same directory name");
+		assert.equal(launched, null);
+	});
+
+	test("a directory REPLACED at the run's path (another inode) is seen by the look, whatever its manifest says", async () => {
+		const { sbx, dir } = realRoot("gh-1");
+		let listed = false;
+		let finish;
+		const stopped = [];
+		const r = await openSandbox(
+			opener(sbx, {
+				running: async () => (listed ? ["gh-1"] : []),
+				launch: async () => {
+					// A fresh directory with a byte-identical manifest where the run was: only its inode differs.
+					const away = join(sbx, "elsewhere");
+					renameSync(dir, away);
+					mkdirSync(dir);
+					writeFileSync(join(dir, "manifest.json"), readFileSync(join(away, "manifest.json")));
+					listed = true;
+					return new Promise((resolve) => {
+						finish = resolve;
+						setTimeout(() => resolve({ code: 0 }), 200);
+					});
+				},
+				stop: async ({ name }) => (stopped.push(name), finish?.({ code: 137 }), true),
+			}),
+		);
+		assert.equal(r.refused, "swept-at-launch");
+		assert.deepEqual(stopped, ["pi-sandbox-gh-1"]);
+	});
+
+	test("a pin between the fresh read and the rename, with the name taken by an empty directory, keeps the pinned run on disk", async () => {
+		const { sbx, dir } = realRoot("gh-2", { jobId: "gh-2", createdAt: new Date(AT - 48 * H).toISOString(), retainUntil: new Date(AT - 24 * H).toISOString() });
+		let pinned = null;
+		const fs = {
+			...realFs,
+			renameSync: (from, to) => {
+				if (from === dir && to.includes(".reap-")) {
+					pinned = pinSandbox({ sandboxDir: sbx, jobId: "gh-2", pinDays: 7, now: () => AT });
+					realFs.renameSync(from, to);
+					realFs.mkdirSync(from); // a runtime's auto-created bind source
+					return;
+				}
+				return realFs.renameSync(from, to);
+			},
+		};
+		const reap = makeSandboxReaper({ sandboxDir: sbx, retentionHours: 24, fs, now: () => AT, pid: 4242 });
+		await reap();
+		await reap();
+		assert.equal(pinned.pinned, true);
+		assert.equal(JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")).keepUntil, pinned.keepUntil, "the pinned run is under its name");
+		assert.equal(readFileSync(join(dir, "workspace", "work.txt"), "utf8"), "operator's work");
+		assert.deepEqual(readdirSync(sbx).filter((n) => n.startsWith(".reap-")), []);
+	});
+});
+
+test("a sandbox's container is removed AT ONCE on each runtime: podman needs --time=0, docker's rm -f already kills (#446)", async () => {
+	// Measured on pd-fedora (#457 gate): bash under --init ignores SIGTERM, and podman's rm -f waited its 10 s stop timeout,
+	// past this call's own 10 000 ms bound, so the shell stayed up.
+	const seen = [];
+	const run = async (args, opts) => (seen.push([opts.bin, args.join(" "), opts.timeoutMs]), { code: 0 });
+	assert.equal(await stopSandbox({ bin: "podman", name: "pi-sandbox-gh-1", run }), true);
+	assert.equal(await stopSandbox({ bin: "docker", name: "pi-sandbox-gh-1", run }), true);
+	assert.deepEqual(seen, [
+		["podman", "rm -f --time=0 pi-sandbox-gh-1", 10000],
+		["docker", "rm -f pi-sandbox-gh-1", 10000],
+	]);
+	assert.equal(await stopSandbox({ bin: "docker", name: "x", run: async () => ({ code: 1 }) }), false);
+	assert.equal(await stopSandbox({ bin: "docker", name: "x", run: async () => { throw new Error("boom"); } }), false);
 });

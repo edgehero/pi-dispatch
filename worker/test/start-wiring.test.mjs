@@ -3090,7 +3090,9 @@ test("the sandbox reaper holds a directory its OWN runtime reports open, whateve
 		// Both runtimes answer: each live directory is held by ITS runtime, and each idle one is swept.
 		const both = await run(backends, { docker: ["d-live"], podman: ["p-live"] });
 		assert.deepEqual(both.left, ["d-live", "p-live"], `${backends}: live kept, idle swept`);
-		assert.deepEqual(both.asked, ["docker", "podman"], `${backends}: each run's own runtime is asked`);
+		// Issue #446, gate round 1: and each run about to be deleted is asked of ITS runtime once more, right before the
+		// rename (d-idle of docker, p-idle of podman), which is the wiring of the sweep's `isOpen`.
+		assert.deepEqual(both.asked, ["docker", "podman", "docker", "podman"], `${backends}: each run's own runtime is asked, and asked again before a delete`);
 		// Docker down (a stale CLI, no daemon): its runs are held, and podman's idle one is still swept.
 		const dockerDown = await run(backends, { docker: new Error("Cannot connect to the Docker daemon"), podman: ["p-live"] });
 		assert.deepEqual(dockerDown.left, ["d-live", "d-idle", "p-live"], `${backends}: docker down holds docker's runs only`);

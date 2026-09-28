@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { release as osRelease } from "node:os";
 import { promisify } from "node:util";
 import { execDockerBounded, makeDockerEndpointResolver } from "./backend-local.mjs";
@@ -12,8 +12,7 @@ import { buildDockerRunArgs, buildPodmanRunArgs, insideDir } from "./docker-run.
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { decideJobUser, JOB_USER_FIX, makeDaemonFactsReader, relabelsPrivateMounts, resolveImageUser, socketFacts } from "./job-user.mjs";
 import { NETWORK_SUFFIX, createJobNetwork, egressArmed, egressEnv, egressProxyName, networkEndpoints, networkExists, networkNameFor, removeJobNetwork, removeNetworkOrSay } from "./egress.mjs";
-import { sanitizeJobId } from "./run-history.mjs";
-import { readManifest, readRetained } from "./sandbox-store.mjs";
+import { isSandboxTombstone, readManifest, readRetained, sandboxDeadline, sandboxEntryName } from "./sandbox-store.mjs";
 
 /**
  * sandbox.mjs -- the operator session's container shape (INT-SANDBOX-CONTRACT).
@@ -96,9 +95,14 @@ export function sandboxVenuePolicy(env) {
  */
 export const SANDBOX_NAME_PREFIX = "pi-sandbox-";
 
-/** `pi-sandbox-<jobId>`. `sanitizeJobId` already maps to `[A-Za-z0-9._-]`, which is a legal docker name. */
+/**
+ * `pi-sandbox-<jobId>`. `sanitizeJobId` already maps to `[A-Za-z0-9._-]`, which is a legal docker name. Through
+ * `sandboxEntryName` (issue #446), the retained directory's own name, so the id a runtime reports for this container is
+ * the name the retention sweep holds: an id whose sanitized form starts with `.` is retained under `_...`, and a
+ * container named off the other spelling would never hold its own directory.
+ */
 export function sandboxContainerName(jobId) {
-	return `${SANDBOX_NAME_PREFIX}${sanitizeJobId(jobId)}`;
+	return `${SANDBOX_NAME_PREFIX}${sandboxEntryName(jobId)}`;
 }
 
 /**
@@ -227,11 +231,14 @@ export function buildSandboxRunArgs({ venue = DEFAULT_BACKEND, image, name, work
  * TIMED, unlike the boot container reaper's own `docker ps`: an unreachable daemon does not fail the CLI
  * fast, it blocks, and this call sits in front of a worker that has not started draining yet.
  */
-export async function listRunningSandboxes({ execFn = exec, bin = "docker" } = {}) {
+export async function listRunningSandboxes({ execFn = exec, bin = "docker", signal } = {}) {
 	// `bin` (issue #429) is ONE runtime's CLI: a podman sandbox is invisible to `docker ps` and the reverse, so the
 	// retention reaper asks the runtime each retained run records (`makeSandboxRuntimeWatch`), and `--list` each blessed
 	// one. `--format {{.Names}}` reads on both.
-	const { stdout } = await execFn(bin, ["ps", "--filter", `name=${SANDBOX_NAME_PREFIX}`, "--format", "{{.Names}}"], { timeout: 5000 });
+	// `signal` (issue #446) lets the opener's post-launch look abandon an ask the moment the shell returns: `execFile`
+	// kills the child and rejects on abort, so an exited shell never waits out this timeout. Passed only when given,
+	// so every other caller's options are what they always were.
+	const { stdout } = await execFn(bin, ["ps", "--filter", `name=${SANDBOX_NAME_PREFIX}`, "--format", "{{.Names}}"], { timeout: 5000, ...(signal ? { signal } : {}) });
 	return stdout
 		.split("\n")
 		.map((n) => n.trim())
@@ -297,7 +304,8 @@ export function makeSandboxRuntimeWatch({ sandboxDir, blessed = [], fs = { lstat
 		let reads = pass?.reads;
 		if (!Array.isArray(names) || !(reads instanceof Map)) {
 			try {
-				names = fs.readdirSync(sandboxDir);
+				// A tombstone is a run already decided for deletion (issue #446), never one to place.
+				names = fs.readdirSync(sandboxDir).filter((name) => !isSandboxTombstone(name));
 			} catch (err) {
 				if (err?.code !== "ENOENT") throw err;
 				names = [];
@@ -356,13 +364,28 @@ export function makeSandboxRuntimeWatch({ sandboxDir, blessed = [], fs = { lstat
 		}
 		return [...held];
 	}
+	/**
+	 * Whether ONE retained run's sandbox is open right now (issue #446, gate round 1): the reaper asks it immediately
+	 * before renaming the run aside, because the pass's `listRunning` answer can be much older by then. Asked of the
+	 * run's own runtime, or of every runtime present for a run it cannot place; THROWS when a runtime cannot answer,
+	 * which the reaper holds. A run with no manifest file is nothing an open can be on (`resolveSandbox` refuses it) and
+	 * asks nobody, as `listRunning` does not.
+	 */
+	async function isOpen({ name, read } = {}) {
+		if (!read || read.absent) return false;
+		const manifest = Object.hasOwn(read, "manifest") ? read.manifest : null;
+		const launcher = manifest ? sandboxLauncher(sandboxVenueOf(manifest)) : null;
+		const bins = launcher ? [launcher.bin] : allBins.filter((bin) => present.has(bin));
+		for (const bin of bins) if ((await list({ bin })).includes(name)) return true;
+		return false;
+	}
 	async function sweepNetworks(args) {
 		const bins = allBins.filter((bin) => present.has(bin));
 		if (bins.length === 0) return { swept: [], notes: [] };
 		for (const bin of bins) if (!sweepers.has(bin)) sweepers.set(bin, makeSweeper({ bin }));
 		return combineSandboxNetworkSweepers(bins.map((bin) => ({ runtime: bin, sweep: sweepers.get(bin) })))(args);
 	}
-	return { listRunning, sweepNetworks };
+	return { listRunning, sweepNetworks, isOpen };
 }
 
 /** The store this account's Podman uses right now, from one bounded `podman info`, or null when it cannot say. */
@@ -753,6 +776,46 @@ export function sandboxSyncRefusal({ jobId, manifest, fileExists = existsSync, b
 }
 
 /**
+ * How close to its deadline a run may be and still open without `--pin` (issue #446): five minutes.
+ *
+ * WHY A MARGIN AND NOT THE DEADLINE ITSELF. The sweep holds a run whose sandbox a runtime reports open, but an open is
+ * not in any `ps` until its container starts, and the opener spends that stretch on its own runtime asks (the running
+ * check, the job user, the image, the network), each bounded in seconds. A sweep whose `ps` came before the container
+ * and whose clock (`at`, read after its asks) is past the deadline would still delete the directory under the new
+ * shell: window 1 of #446, reproduced. A run whose deadline is more than this far away cannot be past it by the time a
+ * pass that missed the container decides, so the refusal closes that window with room to spare; inside it, `--pin`
+ * writes a new deadline FIRST, which the sweep's own re-reads honour.
+ */
+export const SANDBOX_OPEN_GRACE_MS = 5 * 60 * 1000;
+
+/**
+ * The refusal of a run past its deadline, or within `SANDBOX_OPEN_GRACE_MS` of it, unless the open pins it first
+ * (issue #446). `null` when the run may open.
+ *
+ * The deadline is `sandboxDeadline`'s, the sweep's own rule (the pin; else the earlier of the `retainUntil` the worker
+ * wrote and `createdAt` plus THIS opener's window), so an opener whose own PI_SANDBOX_RETENTION_HOURS is larger than
+ * the worker's is refused by the worker's deadline, not admitted by its own. The one case it cannot see, a worker
+ * whose window was lowered after the run was retained, is the post-launch look's (`openSandbox`).
+ * Shared by `resolveSandbox` and the admin panel's `readSandboxInfo`, which must not advertise `b` for a run the key
+ * press would refuse; the panel has no pin, so its refusal is this one and it names the CLI command.
+ */
+export function sandboxWindowRefusal({ jobId, manifest, retentionHours, at, pin = false }) {
+	if (pin) return null;
+	const { until } = sandboxDeadline(manifest, retentionHours);
+	const fix = `open it with \`pi-dispatch sandbox ${jobId} --pin\`, which extends its retention before anything starts`;
+	if (until === null) {
+		return { refused: "past-window", message: `the retained workspace for ${jobId} records no creation time, so the retention sweep deletes it on its next pass; ${fix}` };
+	}
+	if (until - at > SANDBOX_OPEN_GRACE_MS) return null;
+	const when = new Date(until).toISOString();
+	const where = until <= at ? `is past its retention window (it closed at ${when})` : `is within ${Math.round(SANDBOX_OPEN_GRACE_MS / 60000)} minutes of the end of its retention window (${when})`;
+	return {
+		refused: "past-window",
+		message: `the retained workspace for ${jobId} ${where}, so the retention sweep may delete it under the shell; ${fix}`,
+	};
+}
+
+/**
  * Resolve one retained run into a launchable argv, or a NAMED refusal.
  *
  * Split out from the launch so both callers -- the CLI and the admin panel -- refuse identically, the venue
@@ -761,24 +824,53 @@ export function sandboxSyncRefusal({ jobId, manifest, fileExists = existsSync, b
  * `doctor` sets: a bare "not found" for a run the operator watched finish ten minutes ago is the least
  * useful thing this could say.
  */
-export function resolveSandbox({ jobId, sandboxDir, retentionHours, publish = [], fs, fileExists = existsSync, blessed }) {
+export function resolveSandbox({ jobId, sandboxDir, retentionHours, publish = [], fs, fileExists = existsSync, blessed, now = Date.now, pin = false }) {
 	if (!jobId) return { refused: "no-job-id", message: "a job id is required (see `pi-dispatch sandbox --list`)" };
 
 	const manifest = readManifest({ sandboxDir, jobId, ...(fs ? { fs } : {}) });
+	if (manifest && typeof manifest.jobId === "string" && manifest.jobId !== String(jobId)) {
+		// Two ids can share a directory only by sharing a `sanitizeJobId` form (`a:b` and `a_b`), and the run in it is
+		// whichever was retained last (issue #446, gate round 1). Opening it under the other id would reproduce the wrong
+		// run, so the refusal names the run that is there; `--list` shows ids exactly as a run records them.
+		return { refused: "id-mismatch", message: `the retained workspace for ${jobId} holds run ${manifest.jobId}, not ${jobId} (two ids that differ only in characters a file name cannot hold share one directory); open it by the id \`pi-dispatch sandbox --list\` shows` };
+	}
 	if (!manifest) {
 		return retentionHours === 0
 			? { refused: "retention-off", message: "workspace retention is off — set PI_SANDBOX_RETENTION_HOURS to a positive number to make future runs resurrectable" }
-			: { refused: "absent", message: `no retained workspace for ${jobId} — it was swept after ${retentionHours}h, or the run predates retention (\`pi-dispatch sandbox --list\` shows what is left)` };
+			: // Neutral about WHEN (#446 gate round 2): the window that swept it was the worker's, or the run's own recorded
+				// deadline, and this shell's `retentionHours` is neither.
+				{ refused: "absent", message: `no retained workspace for ${jobId}: it was swept at the end of its retention window, or the run predates retention (\`pi-dispatch sandbox --list\` shows what is left)` };
 	}
 	// The venue BEFORE the image and the workspace (#277): for a run from another venue those two are the
 	// symptoms, and the first refusal an operator reads should be the cause. A workspace that happens to
 	// exist at the same path on this host would otherwise pass and silently reproduce the wrong run.
 	const refusal = sandboxSyncRefusal({ jobId, manifest, fileExists, blessed });
 	if (refusal) return refusal;
+	// AFTER the run's own refusals (issue #446): a run from another venue, or with no image, cannot open pinned or not,
+	// and the operator should read that cause rather than be told to pin it.
+	const lapsed = sandboxWindowRefusal({ jobId, manifest, retentionHours, at: now(), pin });
+	if (lapsed) return lapsed;
 
 	// `venue` is the one the refusal above admitted, so it always has a launcher: every later step of the session reads
 	// its runtime from this one answer rather than re-deriving it from the manifest.
-	return { manifest, name: sandboxContainerName(jobId), publish, venue: sandboxVenueOf(manifest) };
+	// `identity` (gate round 1): the retained directory's device and inode as it was resolved, so the post-launch look
+	// can tell the run's own directory from one that has REPLACED it at the same path (a retry's fresh run, a runtime's
+	// auto-created bind source on Docker). Null where the filesystem in use cannot say (an injected one without `lstatSync`).
+	//
+	// The container is named off the directory the run was FOUND in, not off the id (gate round 2): a run retained before
+	// the escape lives under its old name, and the sweep holds a run by its directory name, so a container named off
+	// the escaped id would never hold it. For every run retained since, the two are the same string.
+	return { manifest, name: `${SANDBOX_NAME_PREFIX}${basename(manifest.dir)}`, publish, venue: sandboxVenueOf(manifest), identity: dirIdentity(fs ?? { lstatSync }, manifest.dir) };
+}
+
+/** `{ dev, ino }` of `dir` by `lstat`, or null when the filesystem cannot say. Never throws. */
+function dirIdentity(fs, dir) {
+	try {
+		const st = typeof fs?.lstatSync === "function" ? fs.lstatSync(dir) : null;
+		return st && Number.isFinite(st.ino) && Number.isFinite(st.dev) ? { dev: st.dev, ino: st.ino } : null;
+	} catch {
+		return null;
+	}
 }
 
 /**
@@ -802,17 +894,21 @@ export function sandboxEgress(env) {
  * assembling the same session from parts is how one of them drops a part; this is where they now share every
  * part that decides what the container can reach.
  *
- * In order: `resolveSandbox` (every refusal, the venue one included) -> the already-running refusal ->
- * the argv, with this session's own network and proxy variables when armed -> `beforeLaunch`, the caller's
- * hook to print or pin once the session is known to be openable -> create the network (a network already
- * under this name is REFUSED and named, never removed) -> launch -> ask the runtime again, and remove the network
- * in a finally unless the sandbox is still running. Returns `{ refused, message }`, or `{ code, error }` from
- * the launch, with `detached: true` when the runtime still lists the sandbox as running after the shell returned
- * (its network is left in place).
+ * In order: `resolveSandbox` (every refusal, the venue one and the past-window one included) -> the pin, when the
+ * caller asked for one (issue #446) -> the already-running refusal -> the argv, with this session's own network and
+ * proxy variables when armed -> `beforeLaunch`, the caller's hook to print once the session is known to be openable ->
+ * create the network (a network already under this name is REFUSED and named, never removed) -> launch, watched until
+ * the runtime lists it (issue #446) -> ask the runtime again, and remove the network in a finally unless the sandbox
+ * is still running. Returns `{ refused, message }`, or `{ code, error }` from the launch, with `detached: true` when
+ * the runtime still lists the sandbox as running after the shell returned (its network is left in place).
  * THROWS when `egress.armed` is not a boolean.
  *
- * NOT here, deliberately: the terminal check and `--publish` parsing, which are about the CLI's own
- * arguments, and the pin, which only the CLI offers (it runs in `beforeLaunch`).
+ * NOT here, deliberately: the terminal check and `--publish` parsing, which are about the CLI's own arguments. The
+ * pin IS here since issue #446 (`pin`), though only the CLI offers one, because WHEN it lands is the point: straight
+ * after `resolveSandbox` and before any runtime call, where `beforeLaunch` used to run it after the running ask and
+ * the job-user decision had each spent seconds of a window the sweep could close. A pin that fails REFUSES the open:
+ * the warning it used to print let a shell open over a run the sweep could take, and a `-v` bind of a directory that
+ * has gone mounts an empty one Docker creates (Podman refuses the bind, exit 125).
  *
  * EVERY RUNTIME STEP IS THE RUN'S VENUE'S (issue #429): the running asks, the job-user decision, the argv builder, the
  * network's creation and removal and the launch all go through `SANDBOX_LAUNCHERS[resolved.venue]`, decided once by
@@ -840,13 +936,21 @@ export async function openSandbox({
 	fileExists,
 	blessed,
 	backendFloor = {},
+	// Issue #446: `({ resolved }) => { pinned, keepUntil?, reason? }` when the caller asked for `--pin`, else null. Its
+	// presence is also what admits a run past its window (`resolveSandbox`'s `pin`).
+	pin = null,
+	now = Date.now,
+	// Issue #446: the post-launch look's two seams. `stop` removes this session's container, `pause` waits between asks.
+	stop = stopSandbox,
+	pause = launchWatchPause,
 }) {
 	// The posture is REQUIRED, and a boolean. Every other part of this function defaults safely; this one would
 	// default to the open bridge, which is the dropped part this function exists to stop a caller dropping.
 	if (typeof egress?.armed !== "boolean") {
 		throw new Error("openSandbox: egress.armed must be a boolean -- a caller that does not say whether egress is armed must not get the default bridge");
 	}
-	const resolved = resolveSandbox({ jobId, sandboxDir, retentionHours, publish, blessed, ...(fs ? { fs } : {}), ...(fileExists ? { fileExists } : {}) });
+	const pinning = typeof pin === "function";
+	const resolved = resolveSandbox({ jobId, sandboxDir, retentionHours, publish, blessed, now, pin: pinning, ...(fs ? { fs } : {}), ...(fileExists ? { fileExists } : {}) });
 	if (resolved.refused) return resolved;
 	// Admitted by `resolveSandbox`, so never null here.
 	const { bin } = sandboxLauncher(resolved.venue);
@@ -886,13 +990,35 @@ export async function openSandbox({
 		};
 	}
 
+	// THE PIN, FIRST (issue #446): after the refusals that cost nothing, so only those come first (a refusal from a
+	// runtime ask later, an already-running sandbox say, still leaves the pin, which is the operator's asked-for act),
+	// and before the first runtime call. The sweep's re-reads (the fresh read, then the read through its tombstone)
+	// honour a manifest that changed, so a pin written here holds the run against a pass already in flight; a pin
+	// that cannot be written means the run is going or gone, and the open is refused rather than warned about.
+	if (pinning) {
+		let pinned;
+		try {
+			pinned = await pin({ resolved });
+		} catch (err) {
+			pinned = { pinned: false, reason: err?.message ?? "pin-failed" };
+		}
+		if (pinned?.pinned !== true) {
+			const reason = pinned?.reason === "absent" ? "its retained workspace is gone, swept since it was read" : String(pinned?.reason ?? "unknown");
+			return {
+				refused: "pin-failed",
+				message: `could not pin ${jobId} (${reason}), so the sandbox is not opened: an unpinned open of it could have its workspace deleted under the shell${pinned?.reason === "absent" ? "" : "; fix the cause and run it again"}`,
+			};
+		}
+	}
+
 	// Whether THIS job's sandbox is running. `listRunningSandboxes` throws so the REAPER can tell "none" from
 	// "could not ask"; here an unanswered ask costs only the early refusal (docker refuses a second container
 	// under the same name anyway) and, after the launch, is treated as "not running" so the network is removed.
-	const id = sanitizeJobId(jobId);
+	// The retained directory's own name (issue #446), which is how the runtime reports this container.
+	const id = basename(resolved.manifest.dir);
 	// Asked of the run's OWN runtime (issue #429): a podman sandbox is not in `docker ps`, so asking docker would call
 	// every podman session "not running", refuse nothing and tear a detached one's network down.
-	const ask = () => Promise.resolve().then(() => running({ bin })).then((ids) => ({ answered: true, live: new Set(ids) }), () => ({ answered: false, live: new Set() }));
+	const ask = (signal) => Promise.resolve().then(() => running(signal ? { bin, signal } : { bin })).then((ids) => ({ answered: true, live: new Set(ids) }), () => ({ answered: false, live: new Set() }));
 	const before = await ask();
 	if (before.live.has(id)) {
 		return { refused: "already-running", message: `a sandbox for ${jobId} is already running; attach to it with \`${bin} attach ${resolved.name}\`, or exit it first` };
@@ -961,8 +1087,112 @@ export async function openSandbox({
 		};
 	}
 	let detached = false;
+	// THE POST-LAUNCH LOOK (issue #446). The refusal and the pin decide from what was on disk before the launch, and
+	// two things can still take the run from under the new shell: the accepted residual (a worker whose window was
+	// lowered below this opener's, whose pass missed the container), and the sweep's own rename and restore. So once
+	// the runtime lists this sandbox, the run's own path is checked, and then KEPT checked for the life of the shell
+	// (gate round 1: one check at listing was not enough, since a pass whose `ps` came before the container can reach
+	// the directory later). The watching costs no runtime call: an `lstat` and a manifest read every
+	// `SANDBOX_LAUNCH_WATCH_MS`. A run that is gone, or whose directory is no longer the one resolved (another inode at
+	// the same path), has its container removed if that shows at the LAUNCH check, and is recorded and reported after
+	// the shell exits if it shows later (gate round 2, below).
+	//
+	// CONCURRENT WITH THE SHELL, not ahead of it, and that is the stated limit: `run -it` hands the terminal over as the
+	// container starts, and splitting it into a detached start and an attach would lose the prompt the shell prints
+	// before the attach and changes the launch shape on two runtimes nobody has measured this on. Only a manifest file
+	// that is NOT THERE, or a replaced directory, is a verdict: one that cannot be read for a moment, cannot be read for
+	// good, or does not parse is not a verdict, since none of those says the run is gone. A shell that DETACHES is
+	// no longer watched: the look ends with the shell's own return.
+	let settled = false;
+	let wake = () => {};
+	const woken = new Promise((resolve) => {
+		wake = resolve;
+	});
+	let swept = null;
+	// STOPS WHEN THE SHELL RETURNS, promptly: the ask in flight is aborted (the default runner kills its `ps`), and the
+	// look does not wait for it either way, so a `running` seam that ignores the signal cannot hold an exited shell for
+	// the ask's own timeout.
+	const abort = new AbortController();
+	const shellBack = woken.then(() => null);
+	// The injected `fs` when there is one (a test's), else the real one. One without `lstatSync` cannot look at all.
+	const retainedFs = fs ?? { lstatSync, readFileSync };
+	const runDir = resolved.manifest.dir;
+	// `"swept"` (no manifest file at the run's path), `"replaced"` (a directory other than the one resolved), or null.
+	const gone = () => {
+		const read = readRetained(retainedFs, runDir);
+		if (read.absent) return "swept";
+		if (read.transient || !resolved.identity) return null;
+		const now = dirIdentity(retainedFs, runDir);
+		return now !== null && (now.dev !== resolved.identity.dev || now.ino !== resolved.identity.ino) ? "replaced" : null;
+	};
+	let lost = null;
+	// Whether the look ever saw the container listed: a 125 WITHOUT that is the runtime refusing to start it.
+	let everListed = false;
+	const look = async () => {
+		if (typeof retainedFs?.lstatSync !== "function") return;
+		let listed = false;
+		for (let i = 0; !listed && i < SANDBOX_LAUNCH_WATCH_TRIES; i++) {
+			await Promise.race([pause(SANDBOX_LAUNCH_WATCH_MS), woken]);
+			if (settled) return;
+			const seen = await Promise.race([ask(abort.signal), shellBack]);
+			if (settled || !seen) return;
+			listed = seen.live.has(id);
+		}
+		everListed = listed;
+		// THE LAUNCH CHECK removes the container: nothing an operator did can be in it yet, and a shell over an empty mount
+		// is worse than none. AFTER it, a loss is RECORDED and never acted on (gate round 2): the shell may by then hold
+		// state outside the mounts (processes, files under `/tmp`, an `apt install`), and a retry's `retainJobDir`
+		// replacing the directory is an ordinary event that must not `rm -f` a working session. The operator is told when
+		// the shell exits. Nothing reaps the replacing run meanwhile: this container still carries the run's name, so
+		// every pass holds that directory as open.
+		//
+		// Only for a container the runtime LISTED: one never seen (its `ps` failing, or listed after the asking budget) is
+		// not known to be the operator's fresh shell, so it is watched without being touched (gate round 3), for the whole
+		// session, which costs an `lstat` and a manifest read per `SANDBOX_LAUNCH_WATCH_MS`.
+		if (listed && gone()) {
+			swept = { stopped: (await Promise.resolve().then(() => stop({ bin, name: resolved.name })).catch(() => false)) === true };
+			return;
+		}
+		while (!settled) {
+			await Promise.race([pause(SANDBOX_LAUNCH_WATCH_MS), woken]);
+			if (settled) return;
+			lost = gone();
+			if (lost) return;
+		}
+	};
 	try {
-		const { code, error } = await launch({ args, bin });
+		const watching = look().catch(() => {});
+		let launched;
+		try {
+			launched = await launch({ args, bin });
+		} finally {
+			settled = true;
+			abort.abort();
+			wake();
+		}
+		await watching;
+		const { code, error } = launched;
+		if (swept) {
+			const how = swept.stopped ? "was stopped" : `could not be stopped (\`${bin} rm -f ${resolved.name}\`)`;
+			return {
+				refused: "swept-at-launch",
+				message: `the retained workspace for ${jobId} was deleted or replaced as this sandbox started, so the sandbox ${how}: its mounts were no longer the run's. \`pi-dispatch sandbox --list\` shows whether the run is still there to open again`,
+				code: code ?? null,
+			};
+		}
+		// A RUNTIME THAT REFUSED THE BIND (gate round 2, measured on podman): asked to mount a path that is not there,
+		// podman refuses (`statfs ...: no such file or directory`, exit 125) where docker creates an empty directory. Its
+		// words went to the terminal; the cause is the run's directory, so that launch is reported as swept rather than
+		// left as a bare exit code. ONLY 125 and only a container never listed (gate round 3): any other exit is a shell
+		// that ran, and a run gone by then is reported as lost below, from a check at exit.
+		const lookable = typeof retainedFs?.lstatSync === "function";
+		if (!error && code === 125 && !everListed && lookable && gone()) {
+			return {
+				refused: "swept-at-launch",
+				message: `the retained workspace for ${jobId} was deleted or replaced as this sandbox started, so the sandbox could not start on it (the runtime refused the mount, exit ${code}). \`pi-dispatch sandbox --list\` shows whether the run is still there to open again`,
+				code: code ?? null,
+			};
+		}
 		// DETACHED, not exited: docker's detach sequence (Ctrl-P Ctrl-Q) returns with the container still running.
 		// Tearing the network down then would strip the proxy from a live sandbox, so `docker attach` reopens a
 		// shell with no egress at all. Leave it. An unanswered ask is NOT detached: the network is torn down, as it
@@ -970,9 +1200,54 @@ export async function openSandbox({
 		// Exit 0 as well: docker's detach returns 0, while a `docker run` that failed (125, a name taken by another
 		// open of the same run with a different egress setting) must not be read as this session detaching.
 		if (network && !error && code === 0) detached = (await ask()).live.has(id);
-		return { code: code ?? null, error: error ?? null, ...(detached ? { detached: true } : {}) };
+		// ONE MORE CHECK AT EXIT (gate round 3): the look can have missed a loss (it never saw the container listed, or
+		// the loss landed after its last check), and the shell's return is when the operator is told.
+		if (!lost && !error && lookable) lost = gone();
+		const during = lost
+			? {
+					lost,
+					message:
+						lost === "replaced"
+							? `the retained workspace for ${jobId} was REPLACED while this sandbox was open (a retry of the run, most likely), so what the shell had under /job and /workspace was no longer the run on disk; nothing you saved there is in the new run's directory`
+							: `the retained workspace for ${jobId} was DELETED by the retention sweep while this sandbox was open, so nothing you saved under /job or /workspace survives; pin a run (\`--pin\`) before working in it late in its window`,
+				}
+			: {};
+		return { code: code ?? null, error: error ?? null, ...(detached ? { detached: true } : {}), ...during };
 	} finally {
 		if (network && !detached) await removeJobNetwork(spawnNetwork, { network, proxy: egress.proxy, bin });
+	}
+}
+
+/** How often the post-launch look asks the runtime whether the sandbox is listed yet (issue #446). */
+export const SANDBOX_LAUNCH_WATCH_MS = 250;
+
+/** How many times it asks before giving up the look: thirty seconds, well past a container start with `--pull=never`. */
+export const SANDBOX_LAUNCH_WATCH_TRIES = 120;
+
+/** The look's default wait. `unref`, so a look still waiting never holds a process that is otherwise done. */
+function launchWatchPause(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms).unref?.());
+}
+
+/**
+ * The argv that removes one session's container AT ONCE (issue #446, measured on pd-fedora in the #457 gate). A sandbox
+ * runs an interactive bash under `--init`, which ignores SIGTERM, so `podman rm -f` without `--time=0` waits out
+ * podman's 10 s stop timeout; the 10 000 ms bound below killed the `rm` first (rc 124 after 10004 ms) and the shell
+ * stayed up over an emptied `/job`. `rm -f --time=0` took 106 ms. `-t, --time` is in podman 4.9.3, accepted beside
+ * `--force` (doctor's `canaryProbeRemoval`, #431, rests on the same reading). docker's `rm -f` sends SIGKILL at once and
+ * stays byte for byte what it was.
+ */
+export function sandboxRemovalArgs(bin, name) {
+	return bin === "podman" ? ["rm", "-f", "--time=0", name] : ["rm", "-f", name];
+}
+
+/** Remove one session's container, bounded, never throws: true when the runtime said it did (issue #446). */
+export async function stopSandbox({ bin = "docker", name, run = execDockerBounded }) {
+	try {
+		const { code } = await run(sandboxRemovalArgs(bin, name), { timeoutMs: 10_000, bin });
+		return code === 0;
+	} catch {
+		return false;
 	}
 }
 

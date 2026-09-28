@@ -281,6 +281,11 @@ jobs:
       - name: Every revision row renders as two cells (issue #388)
         run: node .github/scripts/revision-row-check.mjs
 
+      # A rebase once committed conflict markers into a spec's revision table, and every other guard was green: they
+      # render as plain text and no test reads a spec's history (PR #457). The worker suite runs the same scan.
+      - name: No merge-conflict marker in a tracked file (PR #457)
+        run: node .github/scripts/conflict-marker-check.mjs
+
       # The other half of issue #351's pair. This one is the fast hint: it sees a CALL SHAPE, so it
       # names the file and the fix in a second. It cannot see a missing cleanup at all -- delete an
       # after() hook and it stays green -- which is what the $TMPDIR count below is for.

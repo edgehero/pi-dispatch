@@ -304,6 +304,19 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   and appear in the fault grep on every single pass, which is the everyday outcome wearing the fault's name
   that this row exists to prevent. The one-grep property is unaffected: boot and every tick still share these
   names, and the fault name is still the one to grep for trouble.
+- **AMENDED (issue #446, 2026-09-27), the property kept through a new mechanism.** The sandbox sweep now
+  deletes through a tombstone (`INT-SANDBOX-CONTRACT`), which added new outcomes, and each was placed by this
+  row's rule rather than by convenience. A rename that fails holds the run: `sandbox_reaper_skipped` with the token
+  `rename-failed`, because the pass could not establish the removal. A tombstone whose delete fails:
+  `sandbox_reaper_skipped` with `tombstone-stuck`, for the same reason, said when first seen and then once a day
+  per tombstone, since every pass retries it and a line per tick would be the everyday noise this row keeps out of
+  the fault grep. A leftover tombstone that IS removed is a verdict, `reaped_sandbox` with reason `tombstone`. A
+  pin seen through the tombstone keeps the existing `manifest-changed`. Gate round 1 added four holds, each a
+  `sandbox_reaper_skipped` for the same reason as the first two: `tombstone-pinned` (a tombstone holding a live pin,
+  never deleted; said once a day while it cannot be restored), `tombstone-foreign` (a young tombstone of another live
+  process, left for it, said once a day), `opened-during-pass` and `runtime-unanswered` (the run's runtime, asked again right before
+  the rename, reports its sandbox open or does not answer). Boot and every tick share all of them, because the
+  leftover sweep runs at the start of the same closure.
 - **What the cadence costs, stated rather than glossed**: the window becomes a **floor**, not a ceiling.
   A file is deleted on the first sweep AFTER its window closes, so the effective ceiling is
   `window + PI_SWEEP_INTERVAL_HOURS` — up to 48 hours for a sandbox at both defaults. That is a bound
@@ -1540,7 +1553,10 @@ adversarial passes did.
 - **What the panel reads from its own process**, all through the worker's own readers so the panel and the
   CLI agree with each other even when neither agrees with the deployment: `PI_EGRESS` and
   `PI_EGRESS_PROXY` (what the shell can reach), `PI_SANDBOX_DIR` (which retained directories it can see at
-  all), `PI_SANDBOX_RETENTION_HOURS` (the window it reports, and `0` makes it report retention off),
+  all), `PI_SANDBOX_RETENTION_HOURS` (the window it reports, and `0` makes it report retention off; since issue
+  #446 a run carries the worker's own deadline, `retainUntil`, and the panel reports the earlier of the two, so a
+  panel window LONGER than the worker's no longer overstates what is left, while a shorter one still understates
+  it),
   `PI_SANDBOX_IDLE_MINUTES` (the `TMOUT` the shell gets) and **`DOCKER_HOST`**. Since issue #429 also
   **`PI_BACKENDS`** (which venues a sandbox opens on at all) and **`PI_BACKEND_FLOOR`** (what a podman
   sandbox's observations must show), through `sandboxVenuePolicy`, the worker's own two parsers. Both are
@@ -1574,6 +1590,22 @@ adversarial passes did.
     disagree, and every retained run in that list reports itself swept with no `b` offered. That is a
     live defect today, and it is the cheapest possible case for the review. `PI_SANDBOX_RETENTION_HOURS` and `PI_SANDBOX_IDLE_MINUTES` are numbers rather than
     paths, so they would be a genuine widening of what the file's shape carries.
+- **AMENDED (issue #446, 2026-09-27): the panel has no pin, and inherits the refusal that needs one.** A run
+  past its deadline, or within five minutes of it, opens only with `--pin`, which writes the new deadline before
+  any runtime call; the panel offers no pin action, and adding one was not the fix #446 needed. So
+  `readSandboxInfo` does not offer `b` for such a run (`past its window: open it with the CLI's --pin`, inside the
+  pane's 53 columns), through the same predicate `resolveSandbox` asks, and a key press that reaches it anyway is
+  refused by `openSandbox` with the whole command. The deadline is the earlier of the manifest's `retainUntil` and
+  `createdAt` plus the panel's own window, so a panel with a longer window than the worker's is still refused where
+  the worker's window has closed; a WORKER window lowered after retention, below the panel's, is the one case it
+  cannot see, and the key press then opens a run that a pass may delete; the sweep's re-ask of the run's runtime
+  right before the rename holds it once the container is up, and the post-launch look reports the narrow rest:
+  `swept-at-launch` with the container removed at its launch check, or, later, a note after the shell exits with the
+  shell left alone (`INT-SANDBOX-CONTRACT`'s accepted residual). The re-ask only sees a sandbox on the WORKER's
+  endpoint, which is why `INT-SANDBOX-CONTRACT` now states that the worker and the opener must share one runtime
+  endpoint: a panel whose `DOCKER_HOST` is not the worker's, the sharpest case above, opens sandboxes the sweep
+  cannot see (gate round 2; documented, not refused, since the manifest records no docker endpoint). Status stays
+  `WATCH`: this narrows what the panel's environment decides and closes nothing else in this row.
 - **A second thing the panel cannot settle without docker, recorded here so the code's pointer resolves**:
   when a sandbox launch exits 125, 126 or 127, the panel cannot tell the RUNTIME's refusal from the
   interactive shell's own status, because the sandbox runs `--entrypoint bash -i` and docker reuses those
@@ -1700,3 +1732,4 @@ adversarial passes did.
 | 2026-09-26 | Issue #429. **`OQ-038` AMENDED**, two bullets, status stays `WATCH`: the panel now also reads `PI_BACKENDS` and `PI_BACKEND_FLOOR` from its own environment (through `sandboxVenuePolicy`, the worker's own parsers), both capability-shaped and pointer-ineligible like `PI_EGRESS`, and the row records why that is SAFE without being informed: a panel without `PI_BACKENDS` sees `local` alone, so a `podman` run is neither offered nor launched under docker, and a malformed value refuses. The out-of-scope bullet is updated rather than deleted: the launcher is no longer docker-only, and a `podman` session reads no `DOCKER_HOST`. What would resolve the row is unchanged. **`OQ-037` UNCHANGED, checked**: nothing about the rootful and Docker API routes moves. **`OQ-036` UNCHANGED, checked**: a podman sandbox runs as the opening account, which is the worker's own, on the same footing as a job. |
 | 2026-09-26 | Issue #429, review round 1. **CORRECTION** to the previous row's `OQ-036` clause: "a podman sandbox runs as the opening account, which is the worker's own" holds only for a run whose manifest carries a job-user stamp, which the sandbox compares with the opening account and refuses on a mismatch; a run with no stamp opens as whichever account runs the command. `OQ-036` itself stays UNCHANGED, checked: nothing it rests on moves. **`OQ-038` UNCHANGED, checked**, and the reason is now sharper than it was: the retention sweep no longer depends on the panel's or the CLI's `PI_BACKENDS` agreeing with the worker's, since it asks the runtime each retained run recorded. |
 | 2026-09-27 | Issue #429, review round 2. **`OQ-038` UNCHANGED, checked**, with one note: the podman store is a third input the panel reads from its own process (the `podman` it runs uses the store its own HOME and XDG_DATA_HOME name), and it is SAFE for the same reason as the rest: a run that recorded its store refuses under another (`podman-store-mismatch`). **`OQ-007` UNCHANGED, checked**: every new hold is a `sandbox_reaper_skipped` line with a fixed reason token. |
+| 2026-09-27 | Issue #446, folding its PR #457 gate rounds 1 to 3 into this one row. **`OQ-007` AMENDED**, one bullet, status stays RESOLVED: the sandbox sweep's tombstone added outcomes, and each is placed by the one-grep rule. `rename-failed`, `tombstone-stuck` (rate-limited to once a day per tombstone, because each pass retries it), `tombstone-pinned` (a tombstone holding a live pin, never deleted), `tombstone-foreign` (a young tombstone of another live process, also once a day), `opened-during-pass` and `runtime-unanswered` (the re-ask right before the rename) are holds, so they are `sandbox_reaper_skipped`; a removed leftover is a verdict, `reaped_sandbox` with reason `tombstone`; a pin seen through the tombstone keeps `manifest-changed`. Boot and every tick share them. **`OQ-038` AMENDED**, two places, status stays `WATCH`: `PI_SANDBOX_RETENTION_HOURS` still sets the window the panel reports, now as the earlier of it and the run's `retainUntil`, so a longer panel window no longer overstates what is left; and a new bullet records that the panel has no pin, so it neither offers nor opens a run past its window (nor one whose directory holds another id's run), pointing at the CLI's `--pin`, with the one case it cannot see (a worker window lowered below the panel's) held by the sweep's re-ask and otherwise reported after launch, and that the re-ask sees only the worker's runtime endpoint, so the panel and the worker must share one. **`OQ-014` UNCHANGED, checked**: no session-store path moved. **`OQ-008` UNCHANGED, checked**: the deadline is a field in a host file, not Redis-side state. |

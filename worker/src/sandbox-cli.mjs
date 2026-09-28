@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
 import { parseArgs } from "node:util";
 import { loadConfig } from "./config.mjs";
-import { sanitizeJobId } from "./run-history.mjs";
-import { launchSandbox, listRunningSandboxes, openSandbox, parsePublish, sandboxContainerName, sandboxLauncher, sandboxVenueOf, sandboxVenueRefusal, sandboxVenues } from "./sandbox.mjs";
-import { listSandboxes, pinSandbox } from "./sandbox-store.mjs";
+import { basename } from "node:path";
+import { SANDBOX_OPEN_GRACE_MS, launchSandbox, listRunningSandboxes, openSandbox, parsePublish, sandboxContainerName, sandboxLauncher, sandboxVenueOf, sandboxVenueRefusal, sandboxVenues } from "./sandbox.mjs";
+import { listSandboxes, pinSandbox, sandboxDeadline } from "./sandbox-store.mjs";
 
 /**
  * `pi-dispatch sandbox` -- re-open a finished run's sandbox as an interactive shell
@@ -96,6 +96,9 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 	// runtime that ran it (`podman attach`, not `docker attach`). Stays "docker" only for a failure before that point,
 	// which never reaches those lines.
 	let runtime = "docker";
+	// The container's name as `resolveSandbox` built it, off the run's directory (a run retained before #446's escape
+	// keeps its old one); the id's own spelling only before that point.
+	let containerName = sandboxContainerName(jobId);
 	const result = await openSandbox({
 		jobId,
 		sandboxDir: config.sandboxDir,
@@ -113,15 +116,21 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 		// Issue #429: which venues open here, and what a podman sandbox's observations must show, as the worker reads them.
 		blessed: config.backends,
 		backendFloor: config.backendFloor,
+		now,
+		// Pin BEFORE the shell, not after: the operator asked to keep this one, and a session that ends in a crashed
+		// terminal or a closed laptop lid must not be the reason the pin never landed. And since issue #446 before
+		// ANY runtime call, inside `openSandbox` straight after `resolveSandbox`, where a pin that fails refuses the open
+		// instead of printing a warning above a shell whose workspace the sweep may take.
+		pin: values.pin
+			? () => {
+					const pinned = pinSandbox({ sandboxDir: config.sandboxDir, jobId, pinDays: config.sandboxPinDays, now });
+					if (pinned.pinned) out(`pinned ${jobId} until ${pinned.keepUntil} (${config.sandboxPinDays}d)\n`);
+					return pinned;
+				}
+			: null,
 		beforeLaunch: ({ resolved, runtime: cli }) => {
 			runtime = cli;
-			// Pin BEFORE the shell, not after: the operator asked to keep this one, and a session that ends in a
-			// crashed terminal or a closed laptop lid must not be the reason the pin never landed.
-			if (values.pin) {
-				const pinned = pinSandbox({ sandboxDir: config.sandboxDir, jobId, pinDays: config.sandboxPinDays, now });
-				if (pinned.pinned) out(`pinned ${jobId} until ${pinned.keepUntil} (${config.sandboxPinDays}d)\n`);
-				else err(`warning: could not pin ${jobId}: ${pinned.reason}\n`);
-			}
+			containerName = resolved.name;
 			out(`opening ${resolved.name} — image ${resolved.manifest.image}, workspace ${resolved.manifest.workspace}\n`);
 			out("no credentials are set in this container. exit the shell to dispose of it.\n");
 			if (publish.length > 0) out(`published: ${publish.filter((f) => f !== "-p").join(", ")}\n`);
@@ -129,7 +138,9 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 	});
 	if (result.refused) return fail(err, result.message);
 	if (result.error) return fail(err, `could not start ${runtime}: ${result.error.message}`);
-	if (result.detached) out(`detached: ${sandboxContainerName(jobId)} is still running with its egress network, which is left in place after it exits -- \`${runtime} attach ${sandboxContainerName(jobId)}\` to return\n`);
+	// Issue #446: a run lost from under a session after it started is said when the shell exits, never acted on then.
+	if (result.lost) err(`note: ${result.message}\n`);
+	if (result.detached) out(`detached: ${containerName} is still running with its egress network, which is left in place after it exits -- \`${runtime} attach ${containerName}\` to return\n`);
 	return result.code ?? 0;
 }
 
@@ -167,7 +178,8 @@ function renderList({ config, live, out, now }) {
 					? `not here (PI_BACKENDS lacks ${venue})`
 					: `not here (ran on ${venue})`
 				: "not openable (no venue recorded)"
-			: live.has(sanitizeJobId(row.jobId))
+			: // The directory's own name, which is what the runtime reports (a run retained before the escape keeps its old one).
+				live.has(basename(row.dir))
 				? "RUNNING"
 				: remaining(row, config.sandboxRetentionHours, now());
 		out(`${id}  ${kind}  ${state}\n`);
@@ -175,13 +187,19 @@ function renderList({ config, live, out, now }) {
 	return 0;
 }
 
-/** How long this one has left, from the manifest's own timestamps -- never from mtime, which a live sandbox moves. */
+/**
+ * How long this one has left, from the manifest's own timestamps -- never from mtime, which a live sandbox moves.
+ * Through `sandboxDeadline` (issue #446), the sweep's own order, so a run the worker retained with a shorter window
+ * than this shell's PI_SANDBOX_RETENTION_HOURS shows the worker's deadline, which is the one that deletes it.
+ */
 function remaining(row, retentionHours, at) {
-	const keepUntil = Date.parse(row.keepUntil ?? "");
-	if (Number.isFinite(keepUntil)) return `pinned, ${humanise(keepUntil - at)} left`;
-	const createdAt = Date.parse(row.createdAt ?? "");
-	if (!Number.isFinite(createdAt)) return "expired";
-	return `${humanise(createdAt + retentionHours * 3600000 - at)} left`;
+	const { until, source } = sandboxDeadline(row, retentionHours);
+	if (until === null) return "expired";
+	// Said, not counted down to "0h" (gate round 2): past the deadline, or inside the opener's grace, a plain open is
+	// refused, and the list is where an operator decides what to type.
+	if (until <= at) return "past its window (open with --pin)";
+	if (until - at <= SANDBOX_OPEN_GRACE_MS) return "within the grace (open with --pin)";
+	return source === "pin" ? `pinned, ${humanise(until - at)} left` : `${humanise(until - at)} left`;
 }
 
 function humanise(ms) {

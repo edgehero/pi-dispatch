@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { listSandboxes, makeSandboxReaper, pinSandbox, readManifest, retainJobDir, SANDBOX_MANIFEST } from "../src/sandbox-store.mjs";
+import { isSandboxTombstone, listSandboxes, makeSandboxReaper, pinSandbox, readManifest, retainJobDir, sandboxDeadline, sandboxEntryName, sandboxExpiry, sandboxTombstoneAge, SANDBOX_MANIFEST, SANDBOX_TOMBSTONE_PREFIX, SANDBOX_TOMBSTONE_RELOG_MS, SANDBOX_TOMBSTONE_STUCK_MS } from "../src/sandbox-store.mjs";
 
 const HOUR = 3600000;
 const DAY = 86400000;
@@ -46,11 +46,26 @@ function fakeFs({ files = {}, failOn = null, owners = {}, as = { uid: 1234, gid:
 			if (failOn === "rename") throw new Error("EXDEV: cross-device link");
 			calls.renamed.push([from, to]);
 			// A rename carries what it names: a directory's marker (as the retention rename always was here), or a
-			// file's CONTENT, which is how the pin's atomic manifest rewrite lands (issue #429).
-			files[to] = files[from] ?? "<dir>";
-			if (meta[from]) meta[to] = meta[from];
-			delete meta[from];
-			delete files[from];
+			// file's CONTENT, which is how the pin's atomic manifest rewrite lands (issue #429), and since issue #446 the
+			// whole SUBTREE under it, which is how the sweep's tombstone moves a retained run, manifest and all.
+			const moved = Object.keys(files).filter((k) => k === from || k.startsWith(`${from}/`));
+			if (!moved.includes(from)) files[to] = "<dir>";
+			for (const k of moved) {
+				const next = `${to}${k.slice(from.length)}`;
+				files[next] = files[k];
+				if (meta[k]) meta[next] = meta[k];
+				delete meta[k];
+				delete files[k];
+			}
+		},
+		// Removes an EMPTY directory only, as `rmdir(2)` does (gate round 1: how a tombstone is restored over a runtime's
+		// auto-created bind source).
+		rmdirSync(p) {
+			if (!(p in files)) throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+			if (files[p] !== "<dir>") throw Object.assign(new Error(`ENOTDIR: ${p}`), { code: "ENOTDIR" });
+			if (Object.keys(files).some((k) => k.startsWith(`${p}/`))) throw Object.assign(new Error(`ENOTEMPTY: ${p}`), { code: "ENOTEMPTY" });
+			calls.rmdired = [...(calls.rmdired ?? []), p];
+			delete files[p];
 		},
 		rmSync(p) {
 			calls.removed.push(p);
@@ -213,6 +228,25 @@ test("a pin is a TIMESTAMP, never a boolean -- there is no keep-forever", () => 
 	assert.deepEqual(pinSandbox({ sandboxDir: "/sbx", jobId: "gone", fs, pinDays: 7, now: () => at }), { pinned: false, reason: "absent" });
 });
 
+/**
+ * The retained directories a pass DELETED, by the name they had: the sweep deletes a tombstone it renamed the run to
+ * (issue #446), so each removed path is mapped back through the renames.
+ */
+function swept(fs) {
+	const origin = new Map(fs.calls.renamed.map(([from, to]) => [to, from]));
+	return fs.calls.removed.map((p) => origin.get(p) ?? p);
+}
+
+/** Make the delete of `dir`, under whatever name the sweep gives it, fail with `message`. */
+function failDelete(fs, dir, message = "EPERM: operation not permitted", code = "EPERM") {
+	fs.rmSync = (p) => {
+		const origin = new Map(fs.calls.renamed.map(([from, to]) => [to, from]));
+		if ((origin.get(p) ?? p) === dir) throw Object.assign(new Error(message), { code });
+		fs.calls.removed.push(p);
+		for (const k of Object.keys(fs.files)) if (k === p || k.startsWith(`${p}/`)) delete fs.files[k];
+	};
+}
+
 /** A retention root holding `entries`, each `{ createdAt?, keepUntil? }` or the string "<bad>". */
 function sandboxDirWith(entries) {
 	const files = { "/sbx": "<dir>" };
@@ -232,7 +266,7 @@ test("the sweep expires on the manifest's createdAt, not on mtime a live sandbox
 	const logged = [];
 	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs, now: () => at, log: (e, d) => logged.push([e, d]) })();
 
-	assert.deepEqual(fs.calls.removed, ["/sbx/old"]);
+	assert.deepEqual(swept(fs), ["/sbx/old"]);
 	assert.deepEqual(logged, [["reaped_sandbox", { entry: "old", reason: "window" }]]);
 });
 
@@ -243,7 +277,7 @@ test("a pin outlives the base window, and expires on its own deadline", async ()
 		lapsed: { createdAt: new Date(at - 200 * HOUR).toISOString(), keepUntil: new Date(at - DAY).toISOString() },
 	});
 	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs, now: () => at })();
-	assert.deepEqual(fs.calls.removed, ["/sbx/lapsed"], "a live pin survives; a lapsed one does not linger");
+	assert.deepEqual(swept(fs), ["/sbx/lapsed"], "a live pin survives; a lapsed one does not linger");
 });
 
 test("retention off sweeps everything unpinned, and needs no special case to do it", async () => {
@@ -254,7 +288,7 @@ test("retention off sweeps everything unpinned, and needs no special case to do 
 	});
 	// 0 is the feature being OFF -- the opposite of the log/session sentinels, where 0 is keep-forever.
 	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 0, fs, now: () => at })();
-	assert.deepEqual(fs.calls.removed, ["/sbx/recent"], "turning retention off also cleans up what it retained");
+	assert.deepEqual(swept(fs), ["/sbx/recent"], "turning retention off also cleans up what it retained");
 });
 
 test("a directory whose sandbox is RUNNING is never swept out from under the operator", async () => {
@@ -264,7 +298,7 @@ test("a directory whose sandbox is RUNNING is never swept out from under the ope
 		"gh-2": { createdAt: new Date(at - 99 * HOUR).toISOString() },
 	});
 	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs, now: () => at, listRunning: async () => ["gh-1"] })();
-	assert.deepEqual(fs.calls.removed, ["/sbx/gh-2"], "the live one stays, however old it is");
+	assert.deepEqual(swept(fs), ["/sbx/gh-2"], "the live one stays, however old it is");
 });
 
 test("the sweep's fault line carries the daemon's words with credentials scrubbed (#339)", async () => {
@@ -291,17 +325,20 @@ test("the sweep's fault line carries the daemon's words with credentials scrubbe
 	for (const needle of ["bob", "hunter2"]) assert.ok(!reason.includes(needle), needle);
 });
 
-test("a directory that could not be REMOVED names its network, end to end (#363)", async () => {
+test("a directory that could not be MOVED ASIDE names its network, end to end (#363, redefined by #446)", async () => {
 	// THE PRODUCER HALF, which nothing held: deleting `blocked.add(name)` or dropping `blocked` from the
 	// `sweepNetworks` call left the whole worker suite green while the feature was disconnected in production.
-	// The sweeper's own test hands it a hand-built set, which cannot see either.
+	// The sweeper's own test hands it a hand-built set, which cannot see either. Since #446 the directory is renamed to
+	// a tombstone before it is deleted, so what leaves a directory under its own name is a RENAME that fails.
 	const at = Date.now();
 	const fs = sandboxDirWith({ a: { createdAt: "2020-01-01T00:00:00Z" } });
-	fs.rmSync = (p) => {
-		if (p === "/sbx/a") throw new Error("EPERM: operation not permitted");
-		fs.calls.removed.push(p);
+	const rename = fs.renameSync;
+	fs.renameSync = (from, to) => {
+		if (from === "/sbx/a") throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+		rename(from, to);
 	};
 	const handed = [];
+	const logged = [];
 	await makeSandboxReaper({
 		sandboxDir: "/sbx",
 		retentionHours: 24,
@@ -309,10 +346,67 @@ test("a directory that could not be REMOVED names its network, end to end (#363)
 		now: () => at,
 		listRunning: async () => [],
 		sweepNetworks: async (arg) => (handed.push(arg), { swept: [], notes: [], failed: null }),
+		log: (e, d) => logged.push([e, d]),
 	})();
 
 	assert.equal(handed.length, 1, "the network sweep still runs");
 	assert.deepEqual([...(handed[0].blocked ?? [])], ["a"], "and is told which directory would not go");
+	assert.ok("/sbx/a/manifest.json" in fs.files, "held under its own name, whole");
+	// OQ-007's one grep: the hold is in the family, with a fixed token.
+	assert.deepEqual(logged, [["sandbox_reaper_skipped", { entry: "a", reason: "rename-failed", code: "EACCES" }]]);
+});
+
+test("a tombstone whose delete fails STAYS one: its id leaves keep, and each pass retries it with a rate-limited line (#446)", async () => {
+	// The ordinary #363 shape, root-owned files in a retained clone under a non-root worker, renames fine (the rename
+	// needs only the root) and fails the delete. The run is already unopenable, which is intended; what must not happen
+	// is its id staying in `keep` forever (its network never reaped) or a line on every tick.
+	let at = AT;
+	const fs = sandboxDirWith({ a: { createdAt: hoursAgo(50) } });
+	failDelete(fs, "/sbx/a", "EACCES: permission denied", "EACCES");
+	const handed = [];
+	const logged = [];
+	const reap = makeSandboxReaper({
+		sandboxDir: "/sbx",
+		retentionHours: 24,
+		fs,
+		now: () => at,
+		pid: 77,
+		listRunning: async () => [],
+		sweepNetworks: async (arg) => {
+			for (const name of arg.retained()) arg.keep.add(name);
+			handed.push({ keep: [...arg.keep].sort(), blocked: [...arg.blocked] });
+			return { swept: [], notes: [] };
+		},
+		log: (e, d) => logged.push([e, d]),
+	});
+	await reap();
+	const tomb = `.reap-77-${AT}-0`;
+	assert.ok(`/sbx/${tomb}/manifest.json` in fs.files, "the tree is still there, as a tombstone");
+	assert.ok(!("/sbx/a" in fs.files), "and no longer under the run's own name, so nothing can open or pin it");
+	assert.deepEqual(handed[0], { keep: ["a"], blocked: [] }, "this pass keeps the id it started with, and it is NOT blocked");
+	assert.deepEqual(logged, [["sandbox_reaper_skipped", { entry: "a", reason: "tombstone-stuck", tombstone: tomb, code: "EACCES" }]]);
+
+	// The next pass, an hour on: the delete is retried and still fails, silently (said an hour ago); the id is gone from
+	// `keep`, so its network is a candidate again.
+	logged.length = 0;
+	at = AT + HOUR;
+	await reap();
+	assert.deepEqual(handed[1], { keep: [], blocked: [] }, "the tombstone is in neither the listing nor the fresh read");
+	assert.deepEqual(logged, [], "rate-limited: one line per tombstone per day");
+	// A day after the first line, it is said again.
+	at = AT + DAY;
+	await reap();
+	assert.deepEqual(logged, [["sandbox_reaper_skipped", { entry: tomb, reason: "tombstone-stuck", code: "EACCES" }]]);
+	// And once the operator has cleared the cause, the next pass removes it.
+	logged.length = 0;
+	fs.rmSync = (p) => {
+		fs.calls.removed.push(p);
+		for (const k of Object.keys(fs.files)) if (k === p || k.startsWith(`${p}/`)) delete fs.files[k];
+	};
+	at = AT + DAY + HOUR;
+	await reap();
+	assert.deepEqual(logged, [["reaped_sandbox", { entry: tomb, reason: "tombstone" }]]);
+	assert.deepEqual(Object.keys(fs.files), ["/sbx"]);
 });
 
 test("a directory that VANISHED is not reported as one that could not be removed (#363)", async () => {
@@ -351,7 +445,7 @@ test("a docker lookup that FAILS skips the whole sweep rather than sweeping blin
 		log: (e, d) => logged.push([e, d]),
 	})();
 
-	assert.deepEqual(fs.calls.removed, [], "a directory kept one boot too long is the cheaper mistake");
+	assert.deepEqual(swept(fs), [], "a directory kept one boot too long is the cheaper mistake");
 	assert.deepEqual(logged, [["sandbox_reaper_skipped", { reason: "daemon down" }]]);
 });
 
@@ -361,7 +455,7 @@ test("an entry with no usable manifest is reaped -- it can never be resurrected"
 	const logged = [];
 	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs, now: () => at, log: (e, d) => logged.push([e, d]) })();
 
-	assert.deepEqual(fs.calls.removed.sort(), ["/sbx/bad", "/sbx/undated"]);
+	assert.deepEqual(swept(fs).sort(), ["/sbx/bad", "/sbx/undated"]);
 	assert.deepEqual(logged.map((l) => l[1].reason).sort(), ["no-created-at", "no-manifest"]);
 });
 
@@ -378,13 +472,10 @@ test("the sweep NEVER throws: a missing root, an unreadable entry, an unlink fai
 	await makeSandboxReaper({ sandboxDir: "/nope", retentionHours: 24, fs: fakeFs({ files: {} }), now: () => at })();
 
 	const fs = sandboxDirWith({ a: { createdAt: "2020-01-01T00:00:00Z" }, b: { createdAt: "2020-01-01T00:00:00Z" } });
-	fs.rmSync = (p) => {
-		if (p === "/sbx/a") throw new Error("EPERM");
-		fs.calls.removed.push(p);
-	};
+	failDelete(fs, "/sbx/a", "EPERM");
 	const logged = [];
 	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs, now: () => at, log: (e, d) => logged.push([e, d]) })();
-	assert.deepEqual(fs.calls.removed, ["/sbx/b"], "one bad entry cannot abort the rest of the sweep");
+	assert.deepEqual(swept(fs), ["/sbx/b"], "one bad entry cannot abort the rest of the sweep");
 	assert.ok(logged.some(([e, d]) => e === "sandbox_reaper_skipped" && d.entry === "a"));
 
 	// And with no root configured at all it is simply inert.
@@ -414,7 +505,7 @@ test("the network sweep is keyed on the listing the pass STARTED with, not on wh
 			return { swept: [], notes: [] };
 		},
 	})();
-	assert.deepEqual(fs.calls.removed, ["/sbx/old"], "the expired directory is still removed");
+	assert.deepEqual(swept(fs), ["/sbx/old"], "the expired directory is still removed");
 	assert.deepEqual(seen, [{ running: [], keep: ["fresh", "old"] }], "and its id is STILL in keep");
 });
 
@@ -470,7 +561,7 @@ test("a sandbox root that does not EXIST still sweeps networks, rather than neve
 	})();
 	assert.deepEqual(seen, [[]], "an absent root is an EMPTY listing, not a failed one");
 	assert.deepEqual(logged, [], "and nothing is reported as skipped, because nothing was");
-	assert.deepEqual(fs.calls.removed, []);
+	assert.deepEqual(swept(fs), []);
 });
 
 test("a re-read that FAILS is one skipped line, and nothing is swept on half the evidence (#337)", async () => {
@@ -665,4 +756,358 @@ test("a pin keeps the manifest's OWNER and MODE, even as root, and refuses rathe
 	const planted = fakeFs({ files: { [path]: body, [`/sbx/gh-1/.manifest.json.${process.pid}.${at}.tmp`]: "planted" }, owners: { [path]: worker } });
 	assert.equal(pinSandbox({ sandboxDir: "/sbx", jobId: "gh-1", pinDays: 7, fs: planted, now: () => at, euid: 1234 }).pinned, false);
 	assert.equal(planted.files[`/sbx/gh-1/.manifest.json.${process.pid}.${at}.tmp`], "planted", "the planted file is not removed either");
+});
+
+// --- issue #446: the deadline in the manifest, and the tombstone ------------------------------------------------
+
+test("the tombstone constants are pinned by literal (#446)", () => {
+	assert.deepEqual({ SANDBOX_TOMBSTONE_PREFIX, SANDBOX_TOMBSTONE_STUCK_MS, SANDBOX_TOMBSTONE_RELOG_MS }, { SANDBOX_TOMBSTONE_PREFIX: ".reap-", SANDBOX_TOMBSTONE_STUCK_MS: 600000, SANDBOX_TOMBSTONE_RELOG_MS: 86400000 });
+	assert.equal(sandboxTombstoneAge(".reap-12-1000-0", 61000), 60000);
+	assert.equal(sandboxTombstoneAge(".reap-by-hand", 61000), null, "a name this module did not write has no age");
+});
+
+test("retention writes the worker's deadline into the manifest, and null when the caller does not say (#446)", () => {
+	const at = Date.parse("2026-08-01T10:00:00Z");
+	const fs = fakeFs({ files: { "/jobs/job-xyz": "<dir>" } });
+	const manifest = retainJobDir(prepared(), { sandboxDir: "/sbx", retentionHours: 24, fs, now: () => at });
+	assert.equal(manifest.retainUntil, "2026-08-02T10:00:00.000Z");
+	assert.equal(JSON.parse(fs.files["/sbx/gh-1/manifest.json"]).retainUntil, "2026-08-02T10:00:00.000Z", "on disk, where every opener reads it");
+	const bare = fakeFs({ files: { "/jobs/job-xyz": "<dir>" } });
+	assert.equal(retainJobDir(prepared(), { sandboxDir: "/sbx", fs: bare, now: () => at }).retainUntil, null);
+	// A pin keeps it: the pin wins while it lasts, and the key is still the run's own record.
+	const pin = fakeFs({ files: { "/sbx/gh-1/manifest.json": fs.files["/sbx/gh-1/manifest.json"] } });
+	assert.equal(pinSandbox({ sandboxDir: "/sbx", jobId: "gh-1", pinDays: 7, fs: pin, now: () => at }).pinned, true);
+	assert.equal(JSON.parse(pin.files["/sbx/gh-1/manifest.json"]).retainUntil, "2026-08-02T10:00:00.000Z");
+});
+
+test("sandboxDeadline: the pin, else the EARLIER of retainUntil and createdAt plus the reader's window (#446)", () => {
+	const created = "2026-08-01T00:00:00.000Z";
+	const c = Date.parse(created);
+	assert.deepEqual(sandboxDeadline({ createdAt: created, retainUntil: "2026-08-01T06:00:00.000Z", keepUntil: "2026-08-09T00:00:00.000Z" }, 24), { until: Date.parse("2026-08-09T00:00:00.000Z"), source: "pin" }, "a pin wins over everything");
+	assert.deepEqual(sandboxDeadline({ createdAt: created, retainUntil: "2026-08-01T06:00:00.000Z", keepUntil: null }, 24), { until: c + 6 * HOUR, source: "retain" }, "the worker's written deadline, not this reader's longer 24h");
+	assert.deepEqual(sandboxDeadline({ createdAt: created, retainUntil: "2026-08-02T00:00:00.000Z" }, 6), { until: c + 6 * HOUR, source: "window" }, "a window SHORTER than the one it was retained with applies");
+	assert.deepEqual(sandboxDeadline({ createdAt: created, retainUntil: "2026-08-02T00:00:00.000Z" }, 0), { until: c, source: "window" }, "and 0 ends it at once");
+	assert.deepEqual(sandboxDeadline({ createdAt: created, retainUntil: "2026-08-02T00:00:00.000Z" }, 24), { until: c + 24 * HOUR, source: "window" }, "equal: the window's own edge");
+	assert.deepEqual(sandboxDeadline({ createdAt: created, keepUntil: "garbage" }, 24), { until: c + 24 * HOUR, source: "window" }, "an old manifest, and an unparseable pin is no pin");
+	// A number is not a deadline: `Date.parse(5)` reads it as a YEAR (gate round 1), so only a string counts.
+	for (const odd of [5, 0, 1e20, {}, null]) assert.deepEqual(sandboxDeadline({ createdAt: created, retainUntil: odd }, 24), { until: c + 24 * HOUR, source: "window" }, JSON.stringify(odd));
+	assert.deepEqual(sandboxDeadline({}, 24), { until: null, source: "no-created-at" });
+	// The adapter answers what the sweep answers, on readManifest's shape.
+	assert.deepEqual(sandboxExpiry({ createdAt: created, retainUntil: "2026-08-01T06:00:00.000Z" }, { at: c + 6 * HOUR, retentionHours: 24 }), { expired: true, reason: "window" });
+	assert.deepEqual(sandboxExpiry({ createdAt: created }, { at: c + 24 * HOUR, retentionHours: 24 }), { expired: false }, "the fallback window keeps its old edge");
+	assert.deepEqual(sandboxExpiry(null, { at: c, retentionHours: 24 }), { expired: true, reason: "no-manifest" });
+});
+
+test("the sweep ends a run at the earlier of its recorded deadline and the worker's CURRENT window (#446)", async () => {
+	// Both directions. A worker whose window was LOWERED after retention sweeps on the lower one (shortening applies,
+	// the promise docs/sandbox.md makes); a run whose recorded deadline is earlier than this worker's window goes on the
+	// recorded one; a pin keeps a run whatever either says.
+	const fs = sandboxDirWith({
+		recorded: { createdAt: hoursAgo(7), retainUntil: hoursAgo(1) },
+		lowered: { createdAt: hoursAgo(10), retainUntil: new Date(AT + 14 * HOUR).toISOString() },
+		within: { createdAt: hoursAgo(2), retainUntil: new Date(AT + 22 * HOUR).toISOString() },
+		pinned: { createdAt: hoursAgo(10), retainUntil: hoursAgo(1), keepUntil: new Date(AT + HOUR).toISOString() },
+		old: { createdAt: hoursAgo(70) },
+	});
+	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 6, fs, now: () => AT })();
+	assert.deepEqual(swept(fs).sort(), ["/sbx/lowered", "/sbx/old", "/sbx/recorded"]);
+});
+
+test("retention OFF still clears what an earlier setting retained, recorded deadlines and all, and keeps a pin (#446)", async () => {
+	const fs = sandboxDirWith({
+		fresh: { createdAt: hoursAgo(1), retainUntil: new Date(AT + 23 * HOUR).toISOString() },
+		pinned: { createdAt: hoursAgo(1), retainUntil: new Date(AT + 23 * HOUR).toISOString(), keepUntil: new Date(AT + DAY).toISOString() },
+	});
+	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 0, fs, now: () => AT })();
+	assert.deepEqual(swept(fs), ["/sbx/fresh"]);
+});
+
+test("a young tombstone ANOTHER process named is left for it; an old one, and this process's own, are cleared (#446)", async () => {
+	// One worker per retention root is the supported shape; this only keeps a second one from deleting a tombstone the
+	// first is about to rename back.
+	const fs = sandboxDirWith({});
+	const young = `.reap-900-${AT - 60_000}-0`;
+	const old = `.reap-900-${AT - SANDBOX_TOMBSTONE_STUCK_MS}-0`;
+	const mine = `.reap-77-${AT - 1000}-0`;
+	// Gate round 1: only while that process is ALIVE. A worker restarted after a crash has a new pid, and the tombstone
+	// its predecessor left seconds ago is a plain leftover to clear now.
+	const dead = `.reap-901-${AT - 5_000}-0`;
+	for (const n of [young, old, mine, dead, ".reap-by-hand"]) fs.files[`/sbx/${n}`] = "<dir>";
+	const logged = [];
+	const asked = [];
+	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs, now: () => AT, pid: 77, pidAlive: (p) => (asked.push(p), p === 900), log: (e, d) => logged.push([e, d]) })();
+	assert.deepEqual(Object.keys(fs.files).sort(), ["/sbx", `/sbx/${young}`]);
+	assert.deepEqual(logged.filter(([e]) => e === "reaped_sandbox").map(([, d]) => d.entry).sort(), [".reap-by-hand", dead, mine, old].sort());
+	assert.deepEqual(logged.filter(([e]) => e === "sandbox_reaper_skipped"), [["sandbox_reaper_skipped", { entry: young, reason: "tombstone-foreign" }]], "the skip is said");
+	assert.deepEqual(asked.sort(), [900, 901], "liveness is asked only of young foreign tombstones");
+});
+
+test("the sweep renames a run to a tombstone WITHOUT its id, then deletes the tombstone; a 250-byte id is no different (#446)", async () => {
+	const long = "x".repeat(250);
+	const fs = sandboxDirWith({ [long]: { createdAt: hoursAgo(50) } });
+	const logged = [];
+	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs, now: () => AT, pid: 4242, log: (e, d) => logged.push([e, d]) })();
+	assert.deepEqual(fs.calls.renamed, [[`/sbx/${long}`, `/sbx/.reap-4242-${AT}-0`]], "one rename, to a name that never carries the id (ENAMETOOLONG otherwise)");
+	assert.deepEqual(fs.calls.removed, [`/sbx/.reap-4242-${AT}-0`], "and only the tombstone is deleted");
+	assert.deepEqual(logged, [["reaped_sandbox", { entry: long, reason: "window" }]]);
+	assert.deepEqual(Object.keys(fs.files), ["/sbx"]);
+});
+
+test("a pin landing between the fresh read and the rename is seen through the tombstone, and the run is put back (#446)", async () => {
+	const fs = sandboxDirWith({ a: { createdAt: hoursAgo(50), keepUntil: null } });
+	const rename = fs.renameSync;
+	fs.renameSync = (from, to) => {
+		// The operator's pin, from another process, after the sweep's fresh read and before its rename.
+		if (from === "/sbx/a" && isSandboxTombstone(to.split("/").at(-1))) assert.equal(pinSandbox({ sandboxDir: "/sbx", jobId: "a", pinDays: 7, fs, now: () => AT }).pinned, true);
+		rename(from, to);
+	};
+	const logged = [];
+	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs, now: () => AT, log: (e, d) => logged.push([e, d]) })();
+	assert.deepEqual(swept(fs), [], "nothing deleted");
+	assert.equal(JSON.parse(fs.files["/sbx/a/manifest.json"]).keepUntil, new Date(AT + 7 * DAY).toISOString(), "the run is back under its own name, pinned");
+	assert.deepEqual(Object.keys(fs.files).filter((k) => k.includes(".reap-")), [], "no tombstone left");
+	assert.deepEqual(logged, [["sandbox_reaper_skipped", { entry: "a", reason: "manifest-changed" }]]);
+});
+
+test("a changed tombstone whose name a runtime took with an EMPTY directory is still restored, never left to be deleted (#446, gate round 1)", async () => {
+	// Reproduced with a real filesystem: the name taken by a runtime's auto-created, empty bind source left a PINNED run as
+	// a tombstone, and the next pass's leftover sweep deleted it. An empty directory is the one thing displaced.
+	const fs = sandboxDirWith({ a: { createdAt: hoursAgo(50) } });
+	const rename = fs.renameSync;
+	fs.renameSync = (from, to) => {
+		const tomb = from === "/sbx/a" && isSandboxTombstone(to.split("/").at(-1));
+		if (tomb) pinSandbox({ sandboxDir: "/sbx", jobId: "a", pinDays: 7, fs, now: () => AT });
+		rename(from, to);
+		if (tomb) fs.files["/sbx/a"] = "<dir>";
+	};
+	const logged = [];
+	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs, now: () => AT, pid: 9, log: (e, d) => logged.push([e, d]) })();
+	assert.deepEqual(logged, [["sandbox_reaper_skipped", { entry: "a", reason: "manifest-changed" }]]);
+	assert.deepEqual(fs.calls.rmdired, ["/sbx/a"], "the empty directory, and only it, was removed");
+	assert.equal(JSON.parse(fs.files["/sbx/a/manifest.json"]).keepUntil, new Date(AT + 7 * DAY).toISOString(), "the pinned run is back");
+	assert.deepEqual(Object.keys(fs.files).filter((k) => k.includes(".reap-")), []);
+});
+
+test("a changed tombstone whose name holds anything but an empty directory is held, and no pass deletes it while pinned (#446, gate round 1)", async () => {
+	const fs = sandboxDirWith({ a: { createdAt: hoursAgo(50) } });
+	const rename = fs.renameSync;
+	fs.renameSync = (from, to) => {
+		const tomb = from === "/sbx/a" && isSandboxTombstone(to.split("/").at(-1));
+		if (tomb) pinSandbox({ sandboxDir: "/sbx", jobId: "a", pinDays: 7, fs, now: () => AT });
+		rename(from, to);
+		if (tomb) fs.files["/sbx/a"] = "<dir>";
+		if (tomb) fs.files["/sbx/a/someone-elses"] = "x";
+	};
+	const logged = [];
+	const reap = makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs, now: () => AT, pid: 9, log: (e, d) => logged.push([e, d]) });
+	await reap();
+	const tomb = `.reap-9-${AT}-0`;
+	assert.deepEqual(logged, [["sandbox_reaper_skipped", { entry: "a", reason: "manifest-changed", restored: false }]]);
+	assert.ok(`/sbx/${tomb}/manifest.json` in fs.files, "held as a tombstone");
+	assert.equal(fs.files["/sbx/a/someone-elses"], "x", "and what took the name is untouched");
+	// The next passes: the tombstone holds a LIVE pin, so it is never deleted as a leftover; once the name is free it
+	// goes back under it.
+	logged.length = 0;
+	fs.files["/sbx/a/manifest.json"] = JSON.stringify({ jobId: "a", createdAt: hoursAgo(1) });
+	await reap();
+	assert.ok(`/sbx/${tomb}/manifest.json` in fs.files, "not deleted while pinned");
+	assert.deepEqual(logged.filter(([, d]) => d.entry === tomb), [["sandbox_reaper_skipped", { entry: tomb, reason: "tombstone-pinned", restored: false }]]);
+	for (const k of Object.keys(fs.files)) if (k.startsWith("/sbx/a")) delete fs.files[k];
+	logged.length = 0;
+	await reap();
+	assert.deepEqual(logged.filter(([, d]) => d.entry === tomb), [["sandbox_reaper_skipped", { entry: tomb, reason: "tombstone-pinned", restored: true }]]);
+	assert.equal(JSON.parse(fs.files["/sbx/a/manifest.json"]).keepUntil, new Date(AT + 7 * DAY).toISOString());
+});
+
+test("a crash-left tombstone holding a live pin is restored under its run's escaped name, never deleted (#446, gate round 1)", async () => {
+	const fs = sandboxDirWith({});
+	fs.files["/sbx/.reap-1-2-3"] = "<dir>";
+	fs.files["/sbx/.reap-1-2-3/manifest.json"] = JSON.stringify({ jobId: ".x", createdAt: hoursAgo(50), keepUntil: new Date(AT + DAY).toISOString() });
+	const logged = [];
+	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs, now: () => AT, pidAlive: () => false, log: (e, d) => logged.push([e, d]) })();
+	assert.ok("/sbx/_.x/manifest.json" in fs.files);
+	assert.deepEqual(logged, [["sandbox_reaper_skipped", { entry: ".reap-1-2-3", reason: "tombstone-pinned", restored: true }]]);
+	// A tombstone whose manifest cannot be read FOR A MOMENT is held: deleting on an unknown cannot be undone.
+	const flaky = sandboxDirWith({});
+	flaky.files["/sbx/.reap-1-2-3"] = "<dir>";
+	flaky.files["/sbx/.reap-1-2-3/manifest.json"] = JSON.stringify({ jobId: "z", createdAt: hoursAgo(50), keepUntil: new Date(AT + DAY).toISOString() });
+	const read = flaky.readFileSync;
+	flaky.readFileSync = (p) => {
+		if (p.includes(".reap-")) throw Object.assign(new Error("EMFILE"), { code: "EMFILE" });
+		return read(p);
+	};
+	const heldLog = [];
+	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs: flaky, now: () => AT, pidAlive: () => false, log: (e, d) => heldLog.push([e, d]) })();
+	assert.ok("/sbx/.reap-1-2-3/manifest.json" in flaky.files);
+	assert.deepEqual(heldLog, [["sandbox_reaper_skipped", { entry: ".reap-1-2-3", reason: "manifest-unread" }]]);
+	// A LAPSED pin is an ordinary leftover.
+	const lapsed = sandboxDirWith({});
+	lapsed.files["/sbx/.reap-1-2-3"] = "<dir>";
+	lapsed.files["/sbx/.reap-1-2-3/manifest.json"] = JSON.stringify({ jobId: "y", createdAt: hoursAgo(50), keepUntil: hoursAgo(1) });
+	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs: lapsed, now: () => AT })();
+	assert.deepEqual(Object.keys(lapsed.files), ["/sbx"]);
+});
+
+test("each expired run's own runtime is asked AGAIN right before the rename, and an open or unanswered one is held (#446, gate round 1)", async () => {
+	for (const [isOpen, reason] of [
+		[async () => true, "opened-during-pass"],
+		[async () => {
+			throw new Error("daemon down");
+		}, "runtime-unanswered"],
+	]) {
+		const fs = sandboxDirWith({ a: { createdAt: hoursAgo(50) } });
+		const logged = [];
+		const asked = [];
+		await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs, now: () => AT, isOpen: (arg) => (asked.push(arg.name), isOpen(arg)), log: (e, d) => logged.push([e, d]) })();
+		assert.deepEqual(asked, ["a"]);
+		assert.deepEqual(swept(fs), [], reason);
+		assert.deepEqual(logged, [["sandbox_reaper_skipped", { entry: "a", reason }]]);
+	}
+});
+
+test("a pin racing the delete reports the run gone, never pinned (#446)", async () => {
+	// The window #446 was opened for: a recursive delete of a large clone takes seconds, and a pin landing before it
+	// reached manifest.json reported `pinned: true` over a directory that was then gone.
+	const fs = sandboxDirWith({ a: { createdAt: hoursAgo(50) } });
+	const rm = fs.rmSync;
+	let during = null;
+	fs.rmSync = (p, o) => {
+		during = pinSandbox({ sandboxDir: "/sbx", jobId: "a", pinDays: 7, fs, now: () => AT });
+		rm(p, o);
+	};
+	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs, now: () => AT })();
+	assert.deepEqual(during, { pinned: false, reason: "absent" });
+	assert.deepEqual(swept(fs), ["/sbx/a"]);
+});
+
+test("tombstones a crash left are removed at the start of every pass, never placed or asked about, their manifest read only for a live pin (#446)", async () => {
+	const fs = sandboxDirWith({ live: { createdAt: hoursAgo(1) } });
+	fs.files["/sbx/.reap-1-2-3"] = "<dir>";
+	fs.files["/sbx/.reap-1-2-3/manifest.json"] = JSON.stringify({ jobId: "dead", createdAt: hoursAgo(1) });
+	fs.files["/sbx/.reap-1-2-3/workspace/big"] = "x";
+	const read = fs.readFileSync;
+	const reads = [];
+	fs.readFileSync = (p) => (reads.push(p), read(p));
+	const listed = [];
+	const logged = [];
+	await makeSandboxReaper({
+		sandboxDir: "/sbx",
+		retentionHours: 24,
+		fs,
+		now: () => AT,
+		listRunning: async ({ names }) => (listed.push(...names), []),
+		sweepNetworks: async (arg) => {
+			for (const name of arg.retained()) arg.keep.add(name);
+			listed.push(`keep:${[...arg.keep].join(",")}`);
+			return { swept: [], notes: [] };
+		},
+		log: (e, d) => logged.push([e, d]),
+	})();
+	assert.deepEqual(logged, [["reaped_sandbox", { entry: ".reap-1-2-3", reason: "tombstone" }]]);
+	assert.deepEqual(listed, ["live", "keep:live"], "the runtimes and the network sweep see only runs");
+	assert.deepEqual(reads.filter((p) => p.includes(".reap-")), ["/sbx/.reap-1-2-3/manifest.json"], "read once, for a pin, and never as a run");
+	assert.deepEqual(Object.keys(fs.files).sort(), ["/sbx", "/sbx/live", "/sbx/live/manifest.json"]);
+});
+
+test("tombstones are invisible to listSandboxes, and no job id can name one (#446)", () => {
+	const fs = sandboxDirWith({ "gh-1": { createdAt: "2026-08-01T00:00:00Z" } });
+	fs.files["/sbx/.reap-1-2-3"] = "<dir>";
+	fs.files["/sbx/.reap-1-2-3/manifest.json"] = JSON.stringify({ jobId: ".reap-1-2-3", createdAt: "2026-08-02T00:00:00Z" });
+	assert.deepEqual(listSandboxes({ sandboxDir: "/sbx", fs }).map((r) => r.jobId), ["gh-1"]);
+	assert.equal(readManifest({ sandboxDir: "/sbx", jobId: ".reap-1-2-3", fs }), null, "an operator typing a tombstone's name reads nothing");
+});
+
+test("an id whose sanitized form starts with a dot or an underscore is escaped with one more `_`, the pinned rule (#446)", async () => {
+	assert.deepEqual(
+		[".reap-9", ".", "..", ".hidden", "_x", ".x", "__", "gh-1", "repeat:a:1", "a.b"].map(sandboxEntryName),
+		["_.reap-9", "_.", "_..", "_.hidden", "__x", "_.x", "___", "gh-1", "repeat_a_1", "a.b"],
+		"an ESCAPE: `.x` and `_x` never share a directory (gate round 1)",
+	);
+	const at = Date.parse("2026-08-01T10:00:00Z");
+	const fs = fakeFs({ files: { "/jobs/job-xyz": "<dir>", "/sbx": "<dir>" } });
+	retainJobDir(prepared({ sandbox: { jobId: ".reap-9", kind: "github", image: "pi-job:latest", backend: "local" } }), { sandboxDir: "/sbx", retentionHours: 24, fs, now: () => at });
+	assert.deepEqual(fs.calls.renamed, [["/jobs/job-xyz", "/sbx/_.reap-9"]], "never under the reserved prefix");
+	assert.equal(readManifest({ sandboxDir: "/sbx", jobId: ".reap-9", fs })?.jobId, ".reap-9", "and read back by the same rule");
+	// The sweep treats it as the run it is, not as a leftover tombstone.
+	const logged = [];
+	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs, now: () => at + HOUR, log: (e, d) => logged.push([e, d]) })();
+	assert.deepEqual(logged, []);
+	assert.ok("/sbx/_.reap-9/manifest.json" in fs.files);
+	// And `_x` beside `.x`: two directories, two runs.
+	const two = fakeFs({ files: { "/j/a": "<dir>", "/j/b": "<dir>", "/sbx": "<dir>" } });
+	retainJobDir(prepared({ jobDir: "/j/a", sandbox: { jobId: "_x", kind: "github", image: "i", backend: "local" } }), { sandboxDir: "/sbx", retentionHours: 24, fs: two, now: () => at });
+	retainJobDir(prepared({ jobDir: "/j/b", sandbox: { jobId: ".x", kind: "github", image: "i", backend: "local" } }), { sandboxDir: "/sbx", retentionHours: 24, fs: two, now: () => at });
+	assert.deepEqual([readManifest({ sandboxDir: "/sbx", jobId: "_x", fs: two })?.jobId, readManifest({ sandboxDir: "/sbx", jobId: ".x", fs: two })?.jobId], ["_x", ".x"]);
+});
+
+// --- issue #446, gate round 2 --------------------------------------------------------------------------------------
+
+test("a foreign tombstone stamped in the FUTURE is not young, and a young one's skip is said once a period (#446)", async () => {
+	const fs = sandboxDirWith({});
+	const ahead = `.reap-900-${AT + HOUR}-0`;
+	const young = `.reap-900-${AT - 60_000}-1`;
+	fs.files[`/sbx/${ahead}`] = "<dir>";
+	fs.files[`/sbx/${young}`] = "<dir>";
+	const logged = [];
+	let at = AT;
+	const reap = makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs, now: () => at, pid: 77, pidAlive: () => true, log: (e, d) => logged.push([e, d]) });
+	await reap();
+	assert.ok(!(`/sbx/${ahead}` in fs.files), "a clock that ran ahead does not hold a tombstone forever");
+	assert.ok(`/sbx/${young}` in fs.files);
+	at = AT + 1000;
+	await reap();
+	assert.deepEqual(logged.filter(([, d]) => d.reason === "tombstone-foreign"), [["sandbox_reaper_skipped", { entry: young, reason: "tombstone-foreign" }]], "said once, not every pass");
+});
+
+test("a run retained BEFORE the escape is still read under its old name, and only as its own id (#446)", () => {
+	const fs = sandboxDirWith({ _x: { createdAt: "2026-08-01T00:00:00Z" }, _y: { createdAt: "2026-08-01T00:00:00Z" } });
+	fs.files["/sbx/_y/manifest.json"] = JSON.stringify({ jobId: "other", createdAt: "2026-08-01T00:00:00Z" });
+	assert.equal(readManifest({ sandboxDir: "/sbx", jobId: "_x", fs })?.dir, "/sbx/_x");
+	assert.equal(readManifest({ sandboxDir: "/sbx", jobId: "_y", fs }), null, "a directory holding another run is never handed over");
+	fs.files["/sbx/__x"] = "<dir>";
+	fs.files["/sbx/__x/manifest.json"] = JSON.stringify({ jobId: "_x", createdAt: "2026-08-02T00:00:00Z" });
+	assert.equal(readManifest({ sandboxDir: "/sbx", jobId: "_x", fs })?.dir, "/sbx/__x", "the escaped name wins when both exist");
+	assert.equal(readManifest({ sandboxDir: "/sbx", jobId: "..", fs }), null, "never a dot name");
+});
+
+test("a pinned tombstone goes back under the directory its manifest's paths name, so a pre-escape run keeps working paths (#446)", async () => {
+	const fs = sandboxDirWith({});
+	fs.files["/sbx/.reap-1-2-3"] = "<dir>";
+	fs.files["/sbx/.reap-1-2-3/manifest.json"] = JSON.stringify({ jobId: "_x", workspace: "/sbx/_x/workspace", createdAt: hoursAgo(50), keepUntil: new Date(AT + DAY).toISOString() });
+	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs, now: () => AT, pidAlive: () => false })();
+	assert.ok("/sbx/_x/manifest.json" in fs.files, "under `_x`, where its workspace path points");
+	assert.equal(readManifest({ sandboxDir: "/sbx", jobId: "_x", fs })?.workspace, "/sbx/_x/workspace");
+});
+
+// --- issue #446, gate round 3 --------------------------------------------------------------------------------------
+
+test("a pinned tombstone is restored only under a name its OWN jobId maps to; a crafted workspace path never chooses another run's (#446)", async () => {
+	const fs = sandboxDirWith({});
+	fs.files["/sbx/.reap-1-2-3"] = "<dir>";
+	fs.files["/sbx/.reap-1-2-3/manifest.json"] = JSON.stringify({ jobId: "a", workspace: "/sbx/victim/workspace", createdAt: hoursAgo(50), keepUntil: new Date(AT + DAY).toISOString() });
+	fs.files["/sbx/.reap-1-2-4"] = "<dir>";
+	fs.files["/sbx/.reap-1-2-4/manifest.json"] = JSON.stringify({ workspace: "/sbx/other/workspace", createdAt: hoursAgo(50), keepUntil: new Date(AT + DAY).toISOString() });
+	const logged = [];
+	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs, now: () => AT, pidAlive: () => false, log: (e, d) => logged.push([e, d]) })();
+	assert.ok("/sbx/a/manifest.json" in fs.files, "under its own id's name");
+	assert.ok(!Object.keys(fs.files).some((k) => k.startsWith("/sbx/victim") || k.startsWith("/sbx/other")), "never under a name its workspace path picked");
+	assert.ok("/sbx/.reap-1-2-4/manifest.json" in fs.files, "no usable jobId: held, never restored to a derived name");
+	assert.deepEqual(logged.find(([, d]) => d.entry === ".reap-1-2-4"), ["sandbox_reaper_skipped", { entry: ".reap-1-2-4", reason: "tombstone-pinned", restored: false }]);
+	// An id with a pre-escape name: the path may only choose between `__b` and `_b`, never `victim`.
+	const esc = sandboxDirWith({});
+	esc.files["/sbx/.reap-1-2-5"] = "<dir>";
+	esc.files["/sbx/.reap-1-2-5/manifest.json"] = JSON.stringify({ jobId: "_b", workspace: "/sbx/victim/workspace", createdAt: hoursAgo(50), keepUntil: new Date(AT + DAY).toISOString() });
+	await makeSandboxReaper({ sandboxDir: "/sbx", retentionHours: 24, fs: esc, now: () => AT, pidAlive: () => false })();
+	assert.ok("/sbx/__b/manifest.json" in esc.files);
+	assert.ok(!Object.keys(esc.files).some((k) => k.startsWith("/sbx/victim")));
+});
+
+test("the pre-escape name is also tried when the escaped name holds ANOTHER id's run (#446)", () => {
+	const fs = sandboxDirWith({ __x: { createdAt: "2026-08-01T00:00:00Z" }, _x: { createdAt: "2026-08-01T00:00:00Z" } });
+	fs.files["/sbx/__x/manifest.json"] = JSON.stringify({ jobId: "__x", createdAt: "2026-08-01T00:00:00Z" });
+	fs.files["/sbx/_x/manifest.json"] = JSON.stringify({ jobId: "_x", createdAt: "2026-08-01T00:00:00Z" });
+	assert.equal(readManifest({ sandboxDir: "/sbx", jobId: "_x", fs })?.dir, "/sbx/_x");
+	// No pre-escape match: the escaped read stands, for `resolveSandbox` to refuse by name.
+	delete fs.files["/sbx/_x/manifest.json"];
+	assert.equal(readManifest({ sandboxDir: "/sbx", jobId: "_x", fs })?.jobId, "__x");
 });

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -95,6 +95,8 @@ function panelIo(over = {}) {
     launch: async ({ args }) => (launched.push(args), { code: 0 }),
     // Issue #341: never decided against a real daemon in a unit test.
     resolveJobUser: async () => ({ user: null, home: null }),
+    // Issue #446: the past-window refusal reads this clock, an hour into every fixture's 24h window.
+    now: () => NOW,
     spawnNetwork: (cmd, args) => {
       docker.push(args.join(" "));
       const child = new EventEmitter();
@@ -339,4 +341,45 @@ test("a pre-attribution run in a panel without local names PI_BACKENDS, not a mi
   const info = mod.readSandboxInfo({ sandboxDir: retainedRoot({}), sandboxRetentionHours: 24 }, "gh-1", { now: () => NOW, env: { PI_BACKENDS: "podman" } });
   assert.equal(info.retained, false);
   assert.equal(info.reason, "not reopenable here (PI_BACKENDS lacks local)");
+});
+
+// --- issue #446: the panel has no pin, so it neither offers nor opens a run past its window ---------------------
+
+test("a run past the deadline its manifest records is not offered, and the key press is refused with the CLI's --pin (#446)", async () => {
+  // The worker retained it with a 6h window and wrote that down; this panel's own 24h must not admit it.
+  const paths = { sandboxDir: retainedRoot({ backend: "local", retainUntil: "2026-09-14T14:00:00.000Z" }), sandboxRetentionHours: 24, sandboxIdleMinutes: 30 };
+  const open = mod.readSandboxInfo(paths, "gh-1", { now: () => NOW, env: {} });
+  assert.equal(open.retained, true, "five hours left: offered");
+  assert.equal(open.expiresIn, "5h", "counted down to the worker's deadline, not createdAt plus this panel's window");
+
+  const late = Date.parse("2026-09-14T13:56:00.000Z");
+  const info = mod.readSandboxInfo(paths, "gh-1", { now: () => late, env: {} });
+  assert.deepEqual(info, { retained: false, reason: "past its window: open it with the CLI's --pin" }, "inside the grace: not offered");
+  assert.ok(info.reason.length <= 53, "and it fits the pane");
+
+  const { io, written, launched, docker } = panelIo({ now: () => late });
+  await mod.openSandboxSession(paths, "gh-1", io);
+  assert.match(written.join(""), /cannot open a sandbox for gh-1: .*`pi-dispatch sandbox gh-1 --pin`/);
+  assert.deepEqual([launched, docker], [[], []], "nothing launched, no network");
+});
+
+test("a directory holding ANOTHER run's manifest is not offered for this id (#446)", () => {
+  // The fixture's directory is `gh-1`, whose manifest says another id: two ids sharing one safe form.
+  const paths = { sandboxDir: retainedRoot({ backend: "local", jobId: "gh:1" }), sandboxRetentionHours: 24 };
+  assert.deepEqual(mod.readSandboxInfo(paths, "gh-1", { now: () => NOW, env: {} }), { retained: false, reason: "not reopenable (another run holds its directory)" });
+});
+
+test("a run lost during the session is said after the shell, with a pause, and the shell is not refused (#446)", async () => {
+  const sandboxDir = retainedRoot({ backend: "local", keepUntil: "2026-09-20T00:00:00.000Z" });
+  let pauses = 0;
+  const { io, written } = panelIo({
+    env: { PI_EGRESS: "0" },
+    pause: async () => void pauses++,
+    launch: async () => (rmSync(join(sandboxDir, "gh-1"), { recursive: true, force: true }), { code: 0 }),
+  });
+  await mod.openSandboxSession({ sandboxDir, sandboxRetentionHours: 24, sandboxIdleMinutes: 30 }, "gh-1", io);
+  const text = written.join("");
+  assert.match(text, /note: the retained workspace for gh-1 was DELETED by the retention sweep while this sandbox was open/);
+  assert.doesNotMatch(text, /cannot open a sandbox/);
+  assert.equal(pauses, 1, "read before the panel comes back");
 });

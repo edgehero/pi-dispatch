@@ -1747,9 +1747,17 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   the network is for. It outlives the directory by one pass: the pass that deletes a directory still counts
   that run as retained, so the network goes on the pass after. A pin is a timestamp, never a
   boolean: there is no keep-forever value, because a repository clone per run with no ceiling is
-  unbounded growth wearing a feature's clothing. `0` means the feature is OFF — the OPPOSITE of
-  `PI_LOG_RETENTION_DAYS` and `PI_SESSIONS_TTL_DAYS`, where `0` means keep forever — and it sweeps what
-  an earlier setting retained, so turning it off turns it off.
+  unbounded growth wearing a feature's clothing. `0` means the feature is OFF (the OPPOSITE of
+  `PI_LOG_RETENTION_DAYS` and `PI_SESSIONS_TTL_DAYS`, where `0` means keep forever), and nothing new is
+  retained from then on, and it sweeps what an earlier setting retained, so turning it off turns it off; a
+  lowered window likewise applies to runs already retained. Since issue #446 the worker also writes each run's
+  deadline into its manifest (`retainUntil`), and an unpinned run ends at the EARLIER of that and `createdAt` plus
+  the current window, so a reader with a longer window than the worker's (the panel) ends it where the worker
+  does, and raising the window does not extend a run already retained. **A run at the end of its window opens
+  only with `--pin`**, whose deadline is written before anything starts; the one open this cannot refuse (a worker
+  window lowered below the opener's) is held by the sweep's re-ask of the run's runtime, and otherwise reported:
+  removed as swept when the session starts, or said when the shell exits and never removed once the operator may
+  have work in it (`INT-SANDBOX-CONTRACT`).
 - **The transcript is excluded by construction.** A retained directory may contain a job's `/session`
   copy, which is the most PII-bearing artifact this system holds and belongs to `PI_SESSIONS_DIR`'s own
   TTL (`INT-SESSION-STORE-CONTRACT`). It is deleted BEFORE the directory is retained. Carrying it along
@@ -1777,7 +1785,15 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   bless, both the CLI and the panel refuse to open it, naming the venue, and `--list` does not show it as
   re-openable; given a run retained before venues were recorded, it opens as a `local` run does. Given a `podman`
   run on a host whose `PI_BACKENDS` names podman, it opens through the `podman` CLI and nothing else, as the
-  opening account's uid under `--userns=keep-id` (issue #429).
+  opening account's uid under `--userns=keep-id` (issue #429). Given a run past the deadline its manifest records,
+  or within five minutes of it, `pi-dispatch sandbox <jobId>` is refused naming `--pin`, also from a shell whose
+  own `PI_SANDBOX_RETENTION_HOURS` is larger than the worker's, and the panel does not offer `b` for it; with
+  `--pin` it opens, the pin on disk before any container runtime is asked, and a pin that cannot be written
+  refuses the open. Given a worker whose window is lowered or set to `0`, unpinned runs retained under the longer
+  window are swept on the next pass. Given a pin fired while the sweep is deleting a large retained run, the pin reports the run
+  gone, never pinned; given a worker killed between the sweep's rename and its delete, the next pass removes the
+  leftover; given a retained run holding files the worker cannot delete, it is no longer re-openable and
+  `pi-dispatch doctor` names it (issue #446).
 
 ## REQ-REPLICA-RUNS
 
@@ -2264,6 +2280,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-27 | Issue #446 (the two windows left after #429), folding its PR #457 gate rounds 1 to 3 into this one row. **`REQ-RESURRECTABLE-SANDBOX` AMENDED**, the Bounded bullet and the Acceptance. The bullet keeps its promise that `0` sweeps what an earlier setting retained and adds that a lowered window applies to retained runs too (decided under #446: shortening applies) while a raised one does not extend them; it records the manifest's new `retainUntil`, the earlier-of rule that lets a reader with a longer window end a run where the worker does, that a run at the end of its window opens only with `--pin`, and that the one open the refusal cannot see is held by the sweep's re-ask or reported: removed as swept at the launch check, or said after the shell exits and never removed later. The Acceptance gains the #446 clauses: the past-window refusal (also for an opener whose window is larger than the worker's), the pin first and a failed pin refusing, a lowered or zero window sweeping retained runs, a pin during a large delete reporting the run gone, a crash between rename and delete recovered by the next pass, and a stuck delete named by doctor. The Statement and the Scope are UNCHANGED, checked: nothing about who may open a run, or from where, moved. **`REQ-EGRESS-ALLOWLIST` UNCHANGED, checked**: the session network is created and removed as before. |
 | 2026-09-27 | Issue #451 (the Google, Vertex and Bedrock refusal shapes). **`REQ-OPERATOR-FAILURE-NOTIFICATION` UNCHANGED, checked**: the new shapes end as the existing `provider-auth-refused` token, which the hook already pages once per paid policy terminal; no reason is added. **`REQ-LOCAL-JOB-VISIBILITY` UNCHANGED, checked**: the same token rides the same fixed-enum field. **`REQ-JOB-STATUS-COMMENTS` AMENDED**, its #437 clause and the stop's sentence: the parenthetical "(HTTP 401 or 403)" becomes "(an authentication or permission error)", because a bogus Google AI Studio key is HTTP 400 `API_KEY_INVALID` and now ends as `provider-auth-refused` (`INT-RUNNER-EXIT-CODE-PROTOCOL`); the sentence stays fixed and path-free, and exactly one completion or failure comment still holds. **Code evidence**: worker/src/processor.mjs -> TERMINAL_COMMENTS (pinned by worker/test/processor.test.mjs); docs/notifications.md. |
 | 2026-09-27 | Issue #449 (a retry turn is not a budget turn), with PR #455's gate rounds 1 and 2 folded in. **`REQ-RUNNER-TURN-BUDGET` AMENDED**: a new **What counts** bullet (every `turn_start` except the one opening pi's own auto-retry of a turn that made NO progress, meaning no tool ran and no reply completed, tallied as `retryTurns`; the flag clears on `auto_retry_end` and on `agent_settled`), the tool guard's reason (a retry-shaped throw after a turn's tools ran is a new turn, and exempting it laundered 9 paid calls at `--max-turns 1`) and the completed-reply guard's (round 2: a fault after a clean reply let a queued follow-up run as exempt new work, 6 paid calls at `--max-turns 1`; with nothing queued the same fault rejects `session.prompt()` as exit `1`, retried, the right class for its likely cause, such as a session-store fault; the `agent_settled` clear is kept as a safeguard), the plain statement that compaction continuations still count including the overflow one that re-runs a turn and what that means under `--max-turns 1`, the bound restated as at most `maxTurns * PI_RETRY_MAX` retry calls uncounted BY THIS EXEMPTION (calls never counted before stay so), an evidence bullet citing the pinned 0.80.7 dist line by line and naming the real-`AgentSession` loopback pins in `pinned-api.test.mjs`, and two Acceptance sentences (a recovered 429 under `--max-turns 1` exits `0`; an unrecovered one exits `1`, not `turn_budget`). **Pre-existing defect fixed in the same entry**: every `turn_start` past the cap re-aborts (one abort ended only the run in flight, and a queued follow-up's new run went on, 7 paid calls at `--max-turns 1` on main); the fallback per-session token budget (`REQ-TOKEN-ACCOUNTING-AND-CAPS`, `image/runner/src/token-budget.mjs`) re-aborts every `turn_start` after its breach for the same reason, since pi retries a failed breaching turn with a fresh signal; the statement of that requirement is UNCHANGED, checked, and the process-wide meter's own brake already answered every later call. |
 | 2026-09-27 | Issue #431 (the `podman` venue reads `egress` back). **`REQ-EGRESS-ALLOWLIST` AMENDED**, the Why and the Acceptance: the proof that the policy works both ways, through the runner's own route, now also runs on the native `podman` venue, from `doctor --live` under the worker account's own Podman (where that venue's proxy is), with its probe containers built as a podman job's, and spawns no `docker` command there. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, one clause of the `--live` mutation sentence: on the podman venue the egress canary is among what `--live` runs, named before it starts and removed in the same run or by the next `--live`, the same shown tier. **UNCHANGED, checked**: `REQ-RESUMABLE-SESSION`, `REQ-RESURRECTABLE-SANDBOX` (no session or sandbox path is touched) and every job's pre-spend gate (the worker's egress preflight is untouched; the canary is doctor's). |

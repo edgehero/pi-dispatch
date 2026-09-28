@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
@@ -13,14 +13,14 @@ import { tempDir } from "./helpers/temp-dir.mjs";
  */
 
 /** A retention root with one retained run in it, on a real temp dir (readManifest reads it for real). */
-function retained({ jobId = "gh-1", image = "pi-job:latest", workspace, keepUntil = null, backend } = {}) {
+function retained({ jobId = "gh-1", image = "pi-job:latest", workspace, keepUntil = null, backend, createdAt = new Date().toISOString(), retainUntil } = {}) {
 	const root = tempDir("sbx-");
 	const dir = join(root, jobId);
 	mkdirSync(dir, { recursive: true });
 	const ws = workspace ?? join(dir, "workspace");
 	mkdirSync(ws, { recursive: true });
 	// `backend` omitted writes no key at all, which is every manifest retained before #277.
-	writeFileSync(join(dir, "manifest.json"), JSON.stringify({ jobId, kind: "github", image, workspace: ws, createdAt: new Date().toISOString(), keepUntil, ...(backend !== undefined ? { backend } : {}) }));
+	writeFileSync(join(dir, "manifest.json"), JSON.stringify({ jobId, kind: "github", image, workspace: ws, createdAt, ...(retainUntil !== undefined ? { retainUntil } : {}), keepUntil, ...(backend !== undefined ? { backend } : {}) }));
 	return { root, dir, workspace: ws };
 }
 
@@ -82,7 +82,9 @@ test("without a terminal it refuses in words, rather than letting docker say 'th
 test("a swept run names the window that expired; retention off names the variable", async () => {
 	const c1 = capture();
 	assert.equal(await runSandbox(["gh-404"], { env: envWith(tempDir("sbx-")), deps: c1.deps }), 1);
-	assert.match(c1.errText(), /swept after 24h/);
+	// Neutral about when (#446 gate round 2): this shell's window is not the one that swept it.
+	assert.match(c1.errText(), /swept at the end of its retention window/);
+	assert.doesNotMatch(c1.errText(), /24h/);
 
 	const c2 = capture();
 	assert.equal(await runSandbox(["gh-404"], { env: envWith(tempDir("sbx-"), { PI_SANDBOX_RETENTION_HOURS: "0" }), deps: c2.deps }), 1);
@@ -350,4 +352,88 @@ test("--list names PI_BACKENDS, not a missing record, for a pre-attribution run 
 	await runSandbox(["--list"], { env: envWith(root, { PI_BACKENDS: "podman" }), deps: c.deps });
 	assert.match(c.text(), /not here \(PI_BACKENDS lacks local\)/);
 	assert.doesNotMatch(c.text(), /no venue recorded/);
+});
+
+// --- issue #446 ------------------------------------------------------------------------------------------------
+
+const AT_446 = Date.parse("2026-08-03T00:00:00.000Z");
+const lapsed = () => retained({ createdAt: "2026-08-01T00:00:00.000Z", retainUntil: "2026-08-02T00:00:00.000Z" });
+
+test("a run past the deadline its manifest records is refused and told the command; with --pin it opens (#446)", async () => {
+	const { root, dir } = lapsed();
+	let launched = 0;
+	const c = capture({ now: () => AT_446, launch: async () => (launched++, { code: 0 }) });
+	// This shell's window is far larger than the worker's; the deadline the worker wrote is what refuses.
+	assert.equal(await runSandbox(["gh-1"], { env: envWith(root, { PI_SANDBOX_RETENTION_HOURS: "480" }), deps: c.deps }), 1);
+	assert.match(c.errText(), /past its retention window .*`pi-dispatch sandbox gh-1 --pin`/);
+	assert.equal(launched, 0);
+
+	const pinned = capture({ now: () => AT_446, launch: async () => (launched++, { code: 0 }) });
+	assert.equal(await runSandbox(["gh-1", "--pin"], { env: envWith(root), deps: pinned.deps }), 0);
+	assert.equal(launched, 1);
+	assert.match(pinned.text(), /pinned gh-1 until/);
+	const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
+	assert.ok(Date.parse(manifest.keepUntil) > AT_446, "the new deadline is on disk");
+});
+
+test("a --pin that cannot be written REFUSES the open, where it used to warn and open anyway (#446)", async () => {
+	const { root, dir } = lapsed();
+	// A path the pin's temp file must not write through: `wx` refuses it, so the pin fails deterministically.
+	writeFileSync(join(dir, `.manifest.json.${process.pid}.${AT_446}.tmp`), "planted");
+	let launched = false;
+	const c = capture({ now: () => AT_446, launch: async () => ((launched = true), { code: 0 }) });
+	assert.equal(await runSandbox(["gh-1", "--pin"], { env: envWith(root), deps: c.deps }), 1);
+	assert.match(c.errText(), /could not pin gh-1 \(EEXIST/);
+	assert.doesNotMatch(c.errText(), /warning/);
+	assert.equal(launched, false);
+});
+
+test("--list counts down the deadline the worker wrote, not this shell's window (#446)", async () => {
+	const { root } = retained({ createdAt: "2026-08-02T21:00:00.000Z", retainUntil: "2026-08-03T03:00:00.000Z" });
+	const c = capture({ now: () => AT_446 });
+	await runSandbox(["--list"], { env: envWith(root, { PI_SANDBOX_RETENTION_HOURS: "480" }), deps: c.deps });
+	assert.match(c.text(), /gh-1\s+github\s+3h left/);
+});
+
+test("--list marks a dot id RUNNING by its retained name, which is what the runtime reports (#446)", async () => {
+	const root = tempDir("sbx-");
+	const dir = join(root, "_.x");
+	mkdirSync(join(dir, "workspace"), { recursive: true });
+	writeFileSync(join(dir, "manifest.json"), JSON.stringify({ jobId: ".x", kind: "github", image: "pi-job:latest", workspace: join(dir, "workspace"), createdAt: "2026-08-02T21:00:00.000Z", keepUntil: null }));
+	const c = capture({ now: () => AT_446, running: async () => ["_.x"] });
+	await runSandbox(["--list"], { env: envWith(root), deps: c.deps });
+	assert.match(c.text(), /\.x\s+github\s+RUNNING/);
+});
+
+test("--list SAYS a run past its window, or inside the grace, needs --pin, rather than counting down to 0h (#446)", async () => {
+	for (const [retainUntil, want] of [
+		["2026-08-02T23:00:00.000Z", "past its window (open with --pin)"],
+		["2026-08-03T00:04:00.000Z", "within the grace (open with --pin)"],
+		["2026-08-03T00:06:00.000Z", "1h left"],
+	]) {
+		const { root } = retained({ createdAt: "2026-08-02T20:00:00.000Z", retainUntil });
+		const c = capture({ now: () => AT_446 });
+		await runSandbox(["--list"], { env: envWith(root), deps: c.deps });
+		assert.match(c.text(), new RegExp(`gh-1\\s+github\\s+${want.replace(/[()]/g, "\\$&")}`), retainUntil);
+	}
+});
+
+test("a run lost from under a session after it started is said when the shell exits, and the exit code kept (#446)", async () => {
+	// Real timers, the look's own 250 ms: listed at once, the run deleted well after the launch check, the shell back later.
+	const { root, dir } = retained({ keepUntil: new Date(AT_446 + 86400000).toISOString() });
+	let listed = false;
+	const c = capture({
+		now: () => AT_446,
+		running: async () => (listed ? ["gh-1"] : []),
+		launch: async () => {
+			listed = true;
+			await new Promise((r) => setTimeout(r, 600));
+			rmSync(dir, { recursive: true, force: true });
+			// Generous, so a loaded CI runner still fits several 250 ms looks in before the shell "returns".
+			await new Promise((r) => setTimeout(r, 2000));
+			return { code: 3 };
+		},
+	});
+	assert.equal(await runSandbox(["gh-1"], { env: envWith(root, { PI_EGRESS: "0" }), deps: c.deps }), 3);
+	assert.match(c.errText(), /note: the retained workspace for gh-1 was DELETED by the retention sweep while this sandbox was open/);
 });

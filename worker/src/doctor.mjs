@@ -75,6 +75,7 @@ import { observeHost } from "./runtime-observations.mjs";
 import { endpointShown, makeDockerEndpointResolver, quotedShown } from "./backend-local.mjs";
 import { EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, egressArmed, egressCanaryNetwork, egressCanaryProbe, egressEnv, egressProxyName, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { runLiveProbes } from "./live-probes.mjs";
+import { SANDBOX_TOMBSTONE_STUCK_MS, isSandboxTombstone, sandboxTombstoneAge } from "./sandbox-store.mjs";
 import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
@@ -229,8 +230,8 @@ export async function runDoctor(env = process.env, deps = {}) {
 }
 
 /** The ✓/⚠/✗ lines plus each failure's fix, exactly as doctor has always printed them. Returns whether
- *  any HARD check failed (a ⚠ never fails doctor). */
-function render(checks, out) {
+ *  any HARD check failed (a ⚠ never fails doctor). Exported so a test can pin what an operator SEES. */
+export function render(checks, out) {
 	let failed = false;
 	for (const c of checks) {
 		out(`${c.ok ? "✓" : c.warn ? "⚠" : "✗"} ${c.label}\n`);
@@ -2228,10 +2229,12 @@ export async function collectChecks(env, seams) {
 	{
 		const retentionHours = nonNegativeEnvInt(env.PI_SANDBOX_RETENTION_HOURS, 24);
 		const sandboxDir = env.PI_SANDBOX_DIR || defaultSandboxDir(env);
+		// Counted in BOTH branches (gate round 1): a tombstone the worker cannot delete does not go away because retention
+		// was turned off, and turning it off is exactly when an operator expects the disk back.
+		const kept = countRetained(sandboxDir, fileExists);
 		if (retentionHours === 0) {
 			checks.push({ ok: true, label: "Workspace retention off (PI_SANDBOX_RETENTION_HOURS=0) — finished runs are deleted, none are re-openable" });
 		} else {
-			const kept = countRetained(sandboxDir, fileExists);
 			checks.push({
 				ok: true,
 				warn: kept.count > 0,
@@ -2239,6 +2242,7 @@ export async function collectChecks(env, seams) {
 				fix: "each holds the run's clone plus its prompt.md/event.json (issue text); PI_SANDBOX_RETENTION_HOURS=0 turns retention off entirely",
 			});
 		}
+		checks.push(...sandboxTombstoneChecks(sandboxDir, kept));
 	}
 
 	// issue #290. The two DURABLE stores -- the run history everything folds over, and the overlay holding
@@ -2374,13 +2378,74 @@ export async function collectChecks(env, seams) {
  * GitHub auth must not stop the operator finding out how much disk this is using. Never throws -- an
  * unreadable or absent root reports zero, which is the honest answer to "how many can I open".
  */
-function countRetained(sandboxDir, fileExists) {
-	if (!fileExists(sandboxDir)) return { count: 0 };
+export function countRetained(sandboxDir, fileExists, { readdir = readdirSync, now = Date.now, readFile = readFileSync } = {}) {
+	if (!fileExists(sandboxDir)) return { count: 0, tombstones: 0, stuck: [], pinned: [] };
 	try {
-		return { count: readdirSync(sandboxDir).length };
+		// Issue #446: a TOMBSTONE (`.reap-...`) is a run the sweep has already decided to delete, so it is not one an
+		// operator can open and is not counted as one. Counted apart instead, and the ones older than a delete takes
+		// (`SANDBOX_TOMBSTONE_STUCK_MS`) are named: a tree the worker cannot delete (root-owned files under a non-root
+		// worker, the ordinary shape) stays a tombstone, and every pass retries it with a line a day, so this is where an
+		// operator sees one. A name this module did not write (no parseable age) is stuck by definition.
+		const names = readdir(sandboxDir);
+		const tombs = names.filter((n) => isSandboxTombstone(n));
+		const at = now();
+		// A negative age (a name stamped by a clock that ran ahead) is unknowable, and counts as old, as the sweep reads it.
+		const old = tombs.filter((n) => {
+			const age = sandboxTombstoneAge(n, at);
+			return age === null || age < 0 || age >= SANDBOX_TOMBSTONE_STUCK_MS;
+		});
+		// TWO stories, and NEVER told apart by the pid in the name (gate round 3): after any worker restart the pid is
+		// dead whether or not a delete has failed, so a pid rule called the ordinary stuck tombstone a harmless crash
+		// leftover and dropped its fix, and a pid means nothing across pid namespaces anyway. A tombstone holding a pin
+		// that has not run out is HELD by the sweep, never deleted, and goes back under its run's name once that is free;
+		// calling it stuck, with a removal command beside it, would have an operator delete a run someone was told was
+		// pinned. Its manifest is read for that one field; one that cannot be read is not called pinned. Every other old
+		// tombstone is one the sweep has not removed, whatever the reason, and gets its exact-path removal.
+		const pinned = old.filter((n) => {
+			try {
+				const keepUntil = Date.parse(JSON.parse(String(readFile(join(sandboxDir, n, "manifest.json"), "utf8")))?.keepUntil ?? "");
+				return Number.isFinite(keepUntil) && keepUntil > at;
+			} catch {
+				return false;
+			}
+		});
+		const stuck = old.filter((n) => !pinned.includes(n));
+		return { count: names.length - tombs.length, tombstones: tombs.length, stuck, pinned };
 	} catch {
-		return { count: 0 };
+		return { count: 0, tombstones: 0, stuck: [], pinned: [] };
 	}
+}
+
+/**
+ * The warnings for old tombstones (issue #446): pinned ones held aside, and every other one, or [] when there are none.
+ * Never a failure, since nothing is at risk, and in the WARNING shape, `ok: false, warn: true` (gate round 2): `render`
+ * prints a ⚠ and the fix line only for `!ok`, and the first version's `ok: true` rendered as a green tick with no fix.
+ */
+export function sandboxTombstoneChecks(sandboxDir, kept) {
+	const out = [];
+	const list = (names) => `${names.slice(0, 3).join(", ")}${names.length > 3 ? ", ..." : ""}`;
+	if (kept?.pinned?.length > 0) {
+		out.push({
+			ok: false,
+			warn: true,
+			label: `${kept.pinned.length} pinned workspace(s) in ${sandboxDir} are held aside by the retention sweep (${list(kept.pinned)}) because their run's name was taken when they were put back`,
+			fix: "do NOT remove them: each holds a pinned run, and the sweep puts it back under its run's name as soon as that name is free (move away whatever now holds the name, if it is not a run you want)",
+		});
+	}
+	if (kept?.stuck?.length > 0) out.push(stuckCheck(sandboxDir, kept, list));
+	return out;
+}
+
+function stuckCheck(sandboxDir, kept, list) {
+	const n = kept.stuck.length;
+	return {
+		ok: false,
+		warn: true,
+		label: `${n} deleted workspace(s) in ${sandboxDir} are still on disk (${list(kept.stuck)}) -- the sweep could not remove them; if the worker is running it retries each pass`,
+		// Each one BY NAME, never a `.reap-*` glob (gate round 2): a glob would take a pinned tombstone, or one being
+		// deleted right now, with it.
+		fix: `the usual cause is files the worker's account cannot delete (root-owned files a job left in its clone); remove each as their owner: ${kept.stuck.map((n) => `\`sudo rm -rf ${join(sandboxDir, n)}\``).join(", ")}. They are no longer re-openable either way`,
+	};
 }
 
 /**

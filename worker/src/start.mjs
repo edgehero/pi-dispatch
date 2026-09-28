@@ -812,6 +812,8 @@ export async function startWorker(
 			// precedent (it lists `pi-job-` networks whatever the posture) and for a sharper reason: a deployment that has
 			// turned the policy OFF is exactly where the leftovers are guaranteed dead, since nothing is making new ones.
 			sweepNetworks: watch.sweepNetworks,
+			// Issue #446, gate round 1: each expired run's own runtime is asked once more right before it is renamed aside.
+			isOpen: watch.isOpen,
 			log,
 		});
 		await reapSandboxes();

@@ -6,7 +6,7 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { CANARY_LINES, CANARY_PROBE_SLUGS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RUN_TIMEOUTS, backendChecks, collectChecks, defaultPromptFn, dockerRunVia, egressCanaryProbeArgs, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, runDoctor } from "../src/doctor.mjs";
+import { CANARY_LINES, CANARY_PROBE_SLUGS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RUN_TIMEOUTS, backendChecks, collectChecks, defaultPromptFn, dockerRunVia, egressCanaryProbeArgs, egressCanaryScript, envFileKeys, countRetained, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks } from "../src/doctor.mjs";
 import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS } from "../src/init.mjs";
 import { EGRESS_CANARY_NET_PREFIX, egressCanaryProbe } from "../src/egress.mjs";
 import { JOB_USER_FIX, parseDaemonFacts } from "../src/job-user.mjs";
@@ -7325,3 +7325,56 @@ test("docker's egress canary prints and spawns exactly what it did before it was
 	}
 });
 
+
+// --- issue #446: the sweep's tombstones -------------------------------------------------------------------------
+
+/** What an operator SEES for `checks`: `render`'s own lines (gate round 2 pinned the output, not the check objects). */
+const rendered = (checks) => {
+	const lines = [];
+	render(checks, (s) => lines.push(s));
+	return lines.join("");
+};
+
+test("doctor counts tombstones apart from retained workspaces, and tells a PINNED one from every other, never by pid (#446)", () => {
+	const at = 10_000_000;
+	const names = ["gh-1", "gh-2", ".reap-1-1000-0", `.reap-1-${at - 60_000}-1`, ".reap-by-hand", ".reap-7-2000-0", `.reap-1-${at + 60_000}-2`, ".reap-1-3000-0"];
+	// `.reap-1-3000-0` holds a pin that has not run out; `.reap-1-1000-0` held one that has.
+	const readFile = (p) => {
+		if (p === "/sbx/.reap-1-3000-0/manifest.json") return JSON.stringify({ jobId: "p", keepUntil: new Date(at + 3600000).toISOString() });
+		if (p === "/sbx/.reap-1-1000-0/manifest.json") return JSON.stringify({ jobId: "q", keepUntil: new Date(at - 1).toISOString() });
+		throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+	};
+	const kept = countRetained("/sbx", () => true, { readdir: () => names, now: () => at, readFile });
+	// A delete in progress (a minute old) is neither. Gate round 3: the pid in a name decides NOTHING here (after a
+	// restart every stuck tombstone's pid is dead, and a pid means nothing across namespaces), so `.reap-7-...` is an
+	// ordinary one with its removal, not a "crash leftover" without one.
+	assert.deepEqual(kept, { count: 2, tombstones: 6, stuck: [".reap-1-1000-0", ".reap-by-hand", ".reap-7-2000-0", `.reap-1-${at + 60_000}-2`], pinned: [".reap-1-3000-0"] });
+	const lines = sandboxTombstoneChecks("/sbx", kept);
+	assert.deepEqual(lines.map((c) => [c.ok, c.warn]), [[false, true], [false, true]], "the WARNING shape: a ⚠ that never fails doctor");
+	assert.deepEqual(sandboxTombstoneChecks("/sbx", { count: 1, tombstones: 1, stuck: [], pinned: [] }), [], "none old, no line");
+	assert.deepEqual(countRetained("/nope", () => false), { count: 0, tombstones: 0, stuck: [], pinned: [] });
+	// RENDERED: a ⚠ with its fix line, each unpinned one by its exact path, and never a claim that nothing failed.
+	assert.equal(
+		rendered(lines),
+		[
+			"⚠ 1 pinned workspace(s) in /sbx are held aside by the retention sweep (.reap-1-3000-0) because their run's name was taken when they were put back",
+			"    → do NOT remove them: each holds a pinned run, and the sweep puts it back under its run's name as soon as that name is free (move away whatever now holds the name, if it is not a run you want)",
+			`⚠ 4 deleted workspace(s) in /sbx are still on disk (.reap-1-1000-0, .reap-by-hand, .reap-7-2000-0, ...) -- the sweep could not remove them; if the worker is running it retries each pass`,
+			`    → the usual cause is files the worker's account cannot delete (root-owned files a job left in its clone); remove each as their owner: \`sudo rm -rf /sbx/.reap-1-1000-0\`, \`sudo rm -rf /sbx/.reap-by-hand\`, \`sudo rm -rf /sbx/.reap-7-2000-0\`, \`sudo rm -rf /sbx/.reap-1-${at + 60_000}-2\`. They are no longer re-openable either way`,
+			"",
+		].join("\n"),
+	);
+});
+
+test("a stuck tombstone reaches doctor's RENDERED output as a warning with its fix, retention on or off (#446)", async () => {
+	const sandboxDir = tempDir("pi-doctor-tomb-");
+	mkdirSync(join(sandboxDir, "gh-1"));
+	// pid 1 is always alive, so this is a delete that keeps failing rather than a crash leftover.
+	mkdirSync(join(sandboxDir, ".reap-1-1000-0"));
+	for (const env of [{}, { PI_SANDBOX_RETENTION_HOURS: "0" }]) {
+		const out = rendered(await collectChecks({ PI_PROVIDER: "google", PI_SANDBOX_DIR: sandboxDir, ...env }, collectSeams(green, { providerOracle: async () => null })));
+		assert.match(out, new RegExp(`⚠ 1 deleted workspace\\(s\\) in ${sandboxDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} are still on disk \\(\\.reap-1-1000-0\\)[^\\n]*\\n    → the usual cause`), JSON.stringify(env));
+		if (env.PI_SANDBOX_RETENTION_HOURS === "0") assert.match(out, /Workspace retention off/);
+		else assert.match(out, new RegExp(`1 retained workspace\\(s\\) in`), "the tombstone is not a workspace");
+	}
+});

@@ -64,7 +64,15 @@ PI_SWEEP_INTERVAL_HOURS=24      # how often the sweep re-runs while the worker i
 `PI_SESSIONS_TTL_DAYS=0` mean *keep forever*. `PI_SANDBOX_RETENTION_HOURS=0` means **off** — nothing is
 retained, and teardown deletes exactly as it did before this feature existed. There is deliberately no
 keep-forever value: one repository clone per run with no ceiling is a disk bomb. Setting it to `0` also
-sweeps what an earlier setting retained, so turning it off actually turns it off.
+sweeps what an earlier setting retained, so turning it off actually turns it off, and lowering it applies to runs
+already retained too. A pinned run is the exception: it keeps its pin either way.
+
+Since issue #446 the worker also writes each run's deadline into its manifest (`retainUntil`) when it retains it,
+and a run ends at the EARLIER of that and its creation time plus the current window. The written deadline is what
+keeps a shell with a longer window than the worker's (the admin panel is the usual one) from calling a run open
+that the worker is about to delete. The other side of the same rule: **raising** the window does not extend a run
+that is already retained, which keeps the deadline it was retained with; only runs retained after the change get
+the longer one. Pin a run to keep it longer.
 
 `pi-dispatch doctor` reports how many directories are being kept and where.
 
@@ -208,6 +216,34 @@ Extends *that* run to `now + PI_SANDBOX_PIN_DAYS`. A pin is a timestamp, never a
 change to the retention window, and it still expires. The pin is written before the shell opens, so a
 session that ends in a closed laptop still keeps the workspace.
 
+**A run at the end of its window opens only with `--pin`** (issue #446). A run whose deadline has passed, or is
+less than five minutes away, is refused without it, and the refusal names the window and the command:
+`pi-dispatch sandbox <jobId> --pin`. The deadline is worked out the way the sweep works it out: the pin while one
+is set, else the earlier of the deadline the worker wrote when it retained the run and its creation time plus the
+`PI_SANDBOX_RETENTION_HOURS` of the shell you open it from. So a shell whose window is larger than the worker's is
+still refused. The reason is that an open is not in any runtime's `ps`
+until its container starts, and a sweep that asked just before that could delete the directory under the new
+shell. With `--pin` the new deadline is written first, before any `docker` or `podman` call, and the sweep reads
+the manifest again before it deletes anything, so a pin that lands mid-sweep holds the run. A pin that cannot be
+written refuses the open (it used to print a warning and open anyway). The admin panel has no pin, so it does not
+offer `b` for such a run, and says to use the CLI.
+
+The one case this cannot see: the worker's window was LOWERED after the run was retained, while the shell you
+open from still has the old, longer one. That shell then opens a run the worker's next sweep may delete. The sweep
+asks the run's runtime once more right before it deletes anything, so once your container is up it holds the run.
+What is left is a container starting in the moment between that ask and the delete. The opener checks the run
+as your shell starts, and if it is already gone (or its directory replaced) it removes the container at once and
+tells you it was swept, rather than leaving you working over an empty directory (your shell may have printed its
+prompt by then). It then keeps checking while the shell is open, but from then on it never touches your shell: a
+run lost later is reported when you exit (`note: ...`), because by then the container may hold work outside the
+run's directories that removing it would destroy. The run is checked once more when your shell exits, so a loss
+the watch missed is still reported. This is accepted rather than closed. Lower the window in both
+places, or pin the run.
+
+**The worker and the shell you open from must use the same container runtime endpoint.** The sweep asks the
+worker's `docker` (its `DOCKER_HOST` or context) which sandboxes are open; a sandbox you open from a shell pointed
+at another daemon is invisible to it, and only the rules above protect it.
+
 ## Known limitations
 
 - **Which user the shell runs as.** A sandbox runs as the uid the job ran as: the worker's own on a native
@@ -227,17 +263,36 @@ session that ends in a closed laptop still keeps the workspace.
   refused. A manifest that cannot be read for a moment holds its directory on every sweep pass it stays unreadable,
   said each pass (`manifest-unread` in the worker log), rather than reading as missing; and a manifest that changes
   while a pass is running (a pin, a retry's fresh run) is read again before anything is deleted, and holds the
-  directory for that pass (`manifest-changed`).
+  directory for that pass (`manifest-changed`). The sweep renames a run it is about to delete to `.reap-<pid>-<time>-<n>`
+  in the same directory first, reads its manifest once more there (a pin that landed in between puts it back), and
+  only then deletes it, so from that rename on an open or a pin of the run finds nothing instead of a directory that
+  is half deleted (issue #446). Putting a run back displaces an EMPTY directory that has appeared at its name (Docker
+  creates one when it is asked to mount a path that is not there; Podman refuses the mount instead, and the open
+  then says the run was swept) and nothing else, and a
+  `.reap-` directory holding a pin that has not run out is never deleted: it is put back under its run's name as
+  soon as it can be, and said in the worker log (`tombstone-pinned`) until then. In the one moment this cannot
+  cover (a sandbox starting inside the sweep's own rename and put-back), that sandbox's shell shows an empty
+  `/job` and `/workspace` while the pinned run is intact on disk; exit and open it again. Names starting `.reap-`
+  are the sweep's own and never a run (a job id whose safe form starts with `.` or `_` is kept under one more `_`
+  in front, `.x` as `_.x` and `_x` as `__x`, so two ids never meet in one directory; a run retained before that
+  rule under `_x` is still found, opened and swept under that name); one a crash left behind is removed by the next
+  pass.
 - **Sandbox *containers* are not reaped by the worker.** They are named `pi-sandbox-*`, outside the
   `pi-job-*` filter the boot reaper uses, precisely so a worker restart cannot kill a shell you are
   sitting in. The cost is that stopping a forgotten one is yours: `docker stop pi-sandbox-<jobId>` (or
   `podman stop`). The retained **directories** are swept, and by a separate reaper: it deletes the ones past
   their window, skipping any id whose container is live. For each retained run it asks the runtime that
   run's manifest records (docker for `local`, podman for `podman`), and a runtime that does not answer
-  holds its own runs for that pass rather than sweeping as though none of their sandboxes were open. Two
-  narrow windows remain: a sandbox opened (without `--pin`) on a run already past its window while a sweep
-  is asking its runtime, and a pin that lands while a large directory is already being deleted, can both
-  lose the directory; pin a run before opening it late in its window. It runs at
+  holds its own runs for that pass rather than sweeping as though none of their sandboxes were open. An open
+  racing a sweep is covered three ways (issue #446): a run at the end of its window opens only with `--pin`,
+  whose deadline is written before anything starts; a pin that lands while a directory is being deleted finds
+  it already renamed aside and reports it gone rather than pinned; the sweep asks each expired run's runtime once
+  more right before it deletes it, and holds one whose sandbox has opened meanwhile; and once the sandbox shows in
+  `ps`, the opener checks the run's directory, and if the run is already gone or its directory replaced it
+  removes the container at once (on Podman with `--time=0`, since an interactive shell ignores the polite stop)
+  and says so rather than leaving you in a shell over an empty mount; after that first check it keeps watching but
+  only reports a loss when you exit. That check runs beside the shell, not ahead of it, so in that case the shell
+  may already have printed its prompt. It runs at
   every worker boot and then every `PI_SWEEP_INTERVAL_HOURS` while the worker is up (24 by default; set
   `0` for the boot-only behaviour, where a worker that never restarts never sweeps). Three things follow.
   The window is a **floor** rather than a ceiling: a directory dies on the first sweep after its window
@@ -252,3 +307,16 @@ session that ends in a closed laptop still keeps the workspace.
   it skipped because the run is still retained or still running is passed over in silence.
 - **The retention window is bounded but not quota'd.** At the default daily cap that is roughly 25
   directories at a time. There is no byte ceiling; `doctor` reports the count.
+- **One worker per retention directory.** `PI_SANDBOX_DIR` belongs to one worker, as a Docker daemon does
+  (`DES-CONCURRENCY-3`): two workers sweeping one directory each decide on their own window and their own view of
+  what is running, and nothing coordinates them. A second worker only leaves alone a `.reap-` directory another
+  process that is still running created in the last ten minutes, so it cannot delete a run the first is putting
+  back; that is a guard, not support for sharing. (One left by a worker that has since died is cleared at once.)
+- **A run the worker cannot delete stays a tombstone.** The usual cause on Linux is files a job left in its clone
+  that the worker's account does not own. The rename aside still works (it needs only the retention directory), so
+  the run is no longer re-openable and its session network is reclaimed on the next pass, but the disk is still in
+  use. Every pass retries the delete and says so in the worker log once a day (`tombstone-stuck`), and `doctor`
+  warns about each one older than ten minutes ("the sweep could not remove it; if the worker is running it retries
+  each pass"), with the command to remove that one directory as the files' owner. The one kind it never offers to
+  remove is a directory holding a PINNED run whose name was taken when it was put back: the sweep puts it back once
+  the name is free, so do not remove it.

@@ -123,8 +123,8 @@ import { COSTS_WINDOWS, costsSinceMs, foldCosts, foldTriggerCosts, repoOfTarget,
 import { getPricedModel, isZeroRated, listPricedModels, piAiVersion, reprice } from "@edgehero/pi-dispatch/pricing";
 import { clipData, scrubControls, scrubControlsPerLine, setGlyphs } from "./panel.mjs";
 import { gateDialogs } from "./dialog-gate.mjs";
-import { openSandbox, sandboxEgress, sandboxLauncher, sandboxSyncRefusal, sandboxVenueOf, sandboxVenuePolicy } from "@edgehero/pi-dispatch/sandbox";
-import { readManifest } from "@edgehero/pi-dispatch/sandbox-store";
+import { openSandbox, sandboxEgress, sandboxLauncher, sandboxSyncRefusal, sandboxVenueOf, sandboxVenuePolicy, sandboxWindowRefusal } from "@edgehero/pi-dispatch/sandbox";
+import { readManifest, sandboxDeadline } from "@edgehero/pi-dispatch/sandbox-store";
 import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf } from "./render.mjs";
 import { makeDashboard, createDashboardDeps } from "./dashboard.ts";
 // Only the nudge is loaded eagerly (it must register its session_start handler at factory time); the
@@ -1759,6 +1759,9 @@ export function readSandboxInfo(paths: any, jobId: string, { now = Date.now, env
   if (!paths?.sandboxRetentionHours) return { retained: false, reason: "retention off" };
   const manifest = readManifest({ sandboxDir: paths.sandboxDir, jobId });
   if (!manifest) return { retained: false, reason: "swept" };
+  // Issue #446: the same `id-mismatch` refusal `resolveSandbox` makes, so `b` is not offered for a directory that holds
+  // another run (two ids that differ only in characters a file name cannot hold share one).
+  if (typeof manifest.jobId === "string" && manifest.jobId !== String(jobId)) return { retained: false, reason: "not reopenable (another run holds its directory)" };
   // #277: the SAME venue refusal `resolveSandbox` applies when the key is pressed, asked here so the panel
   // never advertises `b` for a run this host cannot re-open. `retained` is this object's "re-openable"
   // verdict, which is what the dashboard's key guard reads.
@@ -1821,15 +1824,23 @@ export function readSandboxInfo(paths: any, jobId: string, { now = Date.now, env
               : "not reopenable (no venue recorded)";
     return { retained: false, reason };
   }
+  // Issue #446: a run past its deadline, or within the opener's grace of it, is refused when `b` is pressed unless the
+  // open pins it first, and this panel has no pin. So it is not offered: the SAME predicate `resolveSandbox` asks, never
+  // a copy of the window maths, and the reason names where the pin is (the CLI), kept under the pane's 53 columns. The
+  // key press itself inherits the refusal from `openSandbox`, whose message carries the whole command.
+  const at = now();
+  if (sandboxWindowRefusal({ jobId, manifest, retentionHours: paths.sandboxRetentionHours, at })) {
+    return { retained: false, reason: "past its window: open it with the CLI's --pin" };
+  }
   // The runtime `b` would open this run in, so the pane can say where an egress-off shell lands (issue #429).
   const runtime = sandboxLauncher(sandboxVenueOf(manifest))?.bin ?? "docker";
-  const keepUntil = Date.parse(manifest.keepUntil ?? "");
-  const createdAt = Date.parse(manifest.createdAt ?? "");
-  const until = Number.isFinite(keepUntil) ? keepUntil : createdAt + paths.sandboxRetentionHours * 3600000;
+  // The sweep's own deadline rule (issue #446): the pin, else the earlier of the `retainUntil` the worker wrote and
+  // `createdAt` plus this shell's window.
+  const { until, source } = sandboxDeadline(manifest, paths.sandboxRetentionHours);
   const egress = sandboxEgressPosture(env);
-  if (!Number.isFinite(until)) return { retained: true, egress, runtime };
-  const hours = Math.max(0, Math.round((until - now()) / 3600000));
-  return { retained: true, pinned: Number.isFinite(keepUntil), expiresIn: hours < 48 ? `${hours}h` : `${Math.round(hours / 24)}d`, egress, runtime };
+  if (until === null) return { retained: true, egress, runtime };
+  const hours = Math.max(0, Math.round((until - at) / 3600000));
+  return { retained: true, pinned: source === "pin", expiresIn: hours < 48 ? `${hours}h` : `${Math.round(hours / 24)}d`, egress, runtime };
 }
 
 /**
@@ -1912,6 +1923,9 @@ export async function openSandboxSession(paths: any, jobId: string, io: any = {}
     ...(io.launch ? { launch: io.launch } : {}),
     ...(io.spawnNetwork ? { spawnNetwork: io.spawnNetwork } : {}),
     ...(io.resolveJobUser ? { resolveJobUser: io.resolveJobUser } : {}),
+    // Issue #446: the clock the past-window refusal reads, seamed like the rest. No `pin`: the panel offers none, so a
+    // run past its window is refused here with the CLI command that pins it.
+    ...(io.now ? { now: io.now } : {}),
     blessed: policy.blessed,
     backendFloor: policy.backendFloor,
     beforeLaunch: ({ resolved, runtime: cli }: any) => {
@@ -1927,6 +1941,11 @@ export async function openSandboxSession(paths: any, jobId: string, io: any = {}
   }
   if (result.detached) {
     write("\ndetached: the sandbox is still running with its egress network, which is left in place after it exits\n");
+    await pause();
+  }
+  // Issue #446: a run lost from under the session after it started is said when the shell exits, and never acted on.
+  if (result.lost) {
+    write(`\nnote: ${result.message}\n`);
     await pause();
   }
   if (result.error) {

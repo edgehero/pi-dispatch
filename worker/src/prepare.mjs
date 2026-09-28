@@ -238,7 +238,7 @@ export function makeCleanup({ sandboxDir, retentionHours = 0, log = () => {} } =
 			await cleanup(prepared);
 			return;
 		}
-		retainJobDir(prepared, { sandboxDir, log });
+		retainJobDir(prepared, { sandboxDir, retentionHours, log });
 	};
 }
 

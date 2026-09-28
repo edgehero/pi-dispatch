@@ -421,6 +421,9 @@ test("with retention ON, cleanup retains the directory under the sandbox root", 
 		assert.equal(existsSync(join(sandboxDir, "gh-1", "prompt.md")), true, "the run's /job inputs travelled with it");
 		const manifest = JSON.parse(readFileSync(join(sandboxDir, "gh-1", "manifest.json"), "utf8"));
 		assert.equal(manifest.workspace, join(sandboxDir, "gh-1", "workspace"), "the workspace path follows the rename");
+		// Issue #446: the worker's window reaches the manifest, as the deadline every opener reads. Without it a
+		// production worker silently stops writing `retainUntil` and a panel with a longer window overstates what is left.
+		assert.equal(Date.parse(manifest.retainUntil) - Date.parse(manifest.createdAt), 24 * 3600000);
 	} finally {
 		cleanup();
 	}

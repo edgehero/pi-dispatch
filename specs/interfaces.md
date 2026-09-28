@@ -1815,21 +1815,44 @@ sibling rather than an extension of the GitHub one for the same reason.
     `buildContainerEnv`
     is NOT reused and cannot be: it writes the mint (`env-allowlist.mjs`) and throws when no provider
     credential resolves, so it has no credential-free output to produce.
-  - **Name**: `pi-sandbox-<sanitizeJobId(jobId)>`. Docker matches `--filter name=` as a **substring**, and
+  - **Name**: `pi-sandbox-<name of the run's retained directory>`, which is `sandboxEntryName(jobId)` for every run
+    retained since #446 and the old `sanitizeJobId` form for one retained before its escape (gate round 2: the sweep
+    holds a run by its directory name, so the container is named off the directory the run was FOUND in, and
+    `readManifest` falls back to the old name when the escaped one holds nothing or another id's run, and only when
+    the manifest there is this id's). Docker matches `--filter name=` as a **substring**, and
     the boot reaper filters `name=pi-job-`; `pi-sandbox-` shares no substring with it, which is the whole
-    reason a worker restart cannot `docker rm -f` a shell an operator is sitting in.
+    reason a worker restart cannot `docker rm -f` a shell an operator is sitting in. `sandboxEntryName` is
+    `sanitizeJobId` plus an ESCAPE (issue #446, a pinned rule): a safe form starting with `.` or `_` gets one more `_`
+    in front (`.x` is `_.x`, `_x` is `__x`), and nothing else changes. It is the ONE function every id-to-name step
+    here goes through (the retained directory, the manifest read, the container name, the running checks), so the id a
+    runtime reports is the name the sweep holds. The dot namespace of the retention root is the sweep's own: an id
+    whose safe form is `.reap-...` would name a tombstone, and `.` or `..` the root or its parent. An escape rather
+    than a substitution (gate round 1): mapping `.` to `_` made `.x` and `_x` share one directory, and every
+    character outside `sanitizeJobId`'s set is illegal in the container name this becomes, so the escape stays in the
+    set and is made unambiguous instead. Two ids with the SAME safe form (`a:b` and `a_b`) still share a directory;
+    `resolveSandbox` refuses a manifest whose `jobId` is not the id asked for (`id-mismatch`), naming the run that is
+    there.
   - **Retained directory layout**, under `PI_SANDBOX_DIR` (default `<PI_JOBS_DIR>/sandboxes`, mode `0700`):
     ```
-    <sandboxDir>/<sanitizeJobId(jobId)>/
+    <sandboxDir>/<sandboxEntryName(jobId)>/
       manifest.json          mode 0600
       prompt.md  event.json  pi/     the run's /job inputs, mounted :ro
       workspace/                     forge jobs only; a local job's workspace is the operator's folder
+    <sandboxDir>/.reap-<pid>-<epochMs>-<n>/   a TOMBSTONE: a run the sweep is deleting (issue #446), never a run
     ```
     ```jsonc
     { "jobId": "gh-12345", "kind": "github", "image": "pi-job:latest", "backend": "local",
       "jobUser": { "user": "1234:1234", "home": "/home/pi" },
-      "workspace": "/abs/host/path", "createdAt": "2026-08-01T10:00:00.000Z", "keepUntil": null }
+      "workspace": "/abs/host/path", "createdAt": "2026-08-01T10:00:00.000Z",
+      "retainUntil": "2026-08-02T10:00:00.000Z", "keepUntil": null }
     ```
+    `retainUntil` (issue #446) is the deadline the WORKER's `PI_SANDBOX_RETENTION_HOURS` gives the run, written
+    when the run is retained (`createdAt` plus that window). Every reader takes the EARLIER of it and `createdAt`
+    plus its own current window (Retention, below), so what the key adds is that a reader whose window is LONGER
+    than the worker's (the panel, or a shell with its own setting; `OQ-038`, `docs/sandbox.md`) still ends the run
+    where the worker does. `null` only from a caller that states no window; a manifest without the key (every one
+    from before #446) is judged by `createdAt` plus the reader's window alone. A pin rewrites the manifest with it
+    kept.
     `jobUser` (issue #341) is the job user the run had, and a sandbox reads it for IDENTITY only: `null` means
     nothing decided one (a bare wiring), so the sandbox decides from the CLI's own ids; `{ "user": null, "home":
     null }` is the image's own user, reopened without `--user` on `local` and REFUSED on `podman`, where no run has it;
@@ -1854,11 +1877,48 @@ sibling rather than an extension of the GitHub one for the same reason.
     property is what lets the admin extension feed those records to a model. This manifest holds a host
     path — which on Windows embeds the operator's account name — so it is a separate file that never goes
     near a prompt. The panel renders the retention *verdict*, never the path.
-  - **Retention**: `createdAt + PI_SANDBOX_RETENTION_HOURS`, or `keepUntil` when pinned. Swept at worker
-    boot and every `PI_SWEEP_INTERVAL_HOURS` thereafter (default 24; `0` = boot-only). The window is
+  - **Retention**: ONE rule, `sandboxDeadline`, read by the sweep, the CLI (the open and `--list`) and the
+    panel alike (issue #446): `keepUntil` while pinned, whatever else the manifest says; otherwise the EARLIER of
+    the manifest's `retainUntil` and `createdAt + PI_SANDBOX_RETENTION_HOURS` as the reader has it NOW. Swept at
+    worker boot and every `PI_SWEEP_INTERVAL_HOURS` thereafter (default 24; `0` = boot-only). The window is
     therefore a FLOOR: a directory dies on the first sweep AFTER it closes, so the effective ceiling is
-    the window plus the interval. `0` = OFF: nothing retained, and the sweep's cutoff becomes `now`, so it also clears what an
-    earlier setting kept. There is no keep-forever value.
+    the window plus the interval. **Shortening applies** (decided under #446): `0` = OFF, nothing new is retained
+    and the next pass clears every unpinned run an earlier setting kept, and a LOWERED window applies to runs
+    already retained, because the worker's current window is one of the two terms; a pin still runs to its own
+    deadline. **Raising the window does NOT extend a run already retained**: its `retainUntil` is one of the two
+    terms, so a run keeps at most the window it was retained with; only runs retained after the change get the
+    longer one (a pin is how to keep a retained run longer). There is no keep-forever value.
+    **The accepted residual, stated exactly.** An opener judges a run by the same rule with ITS window, so it
+    agrees with the sweep whenever its window is at least as short as the worker's, and when it is longer
+    `retainUntil` brings it back to the worker's deadline at retention. What neither term covers is a worker whose
+    CURRENT window is shorter than both the opener's window and the run's `retainUntil`, which is a worker window
+    lowered after the run was retained while the opener's was not (or a run from before `retainUntil` existed,
+    judged by an opener with a longer window). Such an unpinned open passes the `past-window` refusal. Two things then
+    stand between it and a delete (gate round 1, which reproduced a pass whose `ps` came before the container
+    reaching the directory after the opener's single check): the sweep asks the run's own runtime AGAIN immediately
+    before it renames the run aside, holding it when a sandbox is open or the runtime cannot answer
+    (`opened-during-pass`, `runtime-unanswered`); and the opener's post-launch look keeps watching the run's path for
+    the life of the shell. What is left is the stretch from that re-ask to the rename, microseconds plus a manifest
+    read: a container that starts inside it has its run deleted. If that shows at the look's LAUNCH check, the
+    container is removed and the open reported `swept-at-launch`; if later, the loss is recorded and said when the
+    shell exits, and the container is left alone (below). That is accepted rather than closed, and it is not silent.
+    What the operator may see first is the shell's prompt, since the look runs beside the shell, and nothing they
+    typed into `/workspace` in that interval survives.
+    **One runtime endpoint for the worker and the opener** is the supported configuration too, stated because
+    nothing did before (gate round 2): the sweep's `ps` and re-ask go to the endpoint the WORKER's docker CLI
+    resolves (`DOCKER_HOST`, `DOCKER_CONTEXT`), and the opener's container is created on the endpoint ITS shell
+    resolves. Two different endpoints never see each other's containers, so a sandbox open on the opener's is
+    invisible to the sweep, and only the refusal, the pin and the look protect it. The manifest records the venue
+    (and a podman run's store, which the opener already refuses a mismatch of) but not a docker endpoint, so this
+    is documented rather than refused; `OQ-038` records the panel's half of the same blindness.
+    **One worker per retention root** is the supported configuration, on `DES-CONCURRENCY-3`'s one worker per
+    daemon: two workers sweeping one `PI_SANDBOX_DIR` each decide on their own window and their own view of what
+    is running, and nothing coordinates them. The one cheap guard is kept regardless: a pass leaves alone a
+    tombstone another LIVE process named (its pid is in the name; `kill(pid, 0)`, EPERM counting as alive) while it
+    is younger than ten minutes, since that process may be about to rename it back, and says so once a day
+    (`tombstone-foreign`). A dead pid's tombstone, the ordinary one a restarted worker finds after a crash, is
+    cleared at once, and so is one whose name carries a FUTURE time (a clock that ran ahead), which is unknowable
+    rather than young.
   - **Age comes from `createdAt`, never mtime.** `makeLogReaper` calls mtime "the authority" and is right
     about an append-once log file. An operator working inside a resurrected sandbox writes into the
     directory, so mtime would keep moving and the window would never close — for exactly the directories
@@ -1890,10 +1950,94 @@ sibling rather than an extension of the GitHub one for the same reason.
     venue with no launcher is asked of every runtime present, as above. The pass's read PLACES the run; a delete
     additionally needs a fresh read at the point of deletion (lstat first) that is byte-for-byte the same, because
     the runtimes are asked in between and can take seconds: a pin landing meanwhile, or a retry replacing the
-    directory with a fresh run, holds it (`manifest-changed`), as does a transient fresh read (`manifest-unread`). A pin rewrites the manifest atomically (a
+    directory with a fresh run, holds it (`manifest-changed`), as does a transient fresh read (`manifest-unread`).
+    **The delete goes through a TOMBSTONE** (issue #446): once the fresh read matches, the directory is renamed to
+    `.reap-<pid>-<epochMs>-<n>` in the same root (the name never carries the job id, whose `sanitizeJobId` form is
+    unbounded, so a rename to `.reap-<id>` would fail ENAMETOOLONG for a 250-byte id and hold that run forever), its
+    manifest is read ONCE MORE through the tombstone, and only a read identical to the pass's own is deleted. A
+    different one (a pin that landed between the fresh read and the rename, the one write the rename cannot see) is
+    renamed back and held (`manifest-changed`). When the run's name has been TAKEN meanwhile, only an EMPTY directory
+    is displaced (`rmdir`, which removes nothing else), because the one thing that can appear there in those
+    microseconds is Docker's auto-created bind source (Docker creates a missing `-v` source as an empty directory;
+    Podman refuses the bind, `statfs ...: no such file or directory`, exit 125, measured on pd-fedora); anything else
+    leaves it held as a tombstone
+    (`restored: false`). Gate round 1 reproduced, on a real filesystem, the first version's rule (never displace
+    anything) handing a PINNED run to the next pass's leftover sweep. The open that created that empty directory is
+    then bound to an inode that is no longer at the path, and its look cannot see that (the path is the run's own
+    directory again, same inode): its shell shows an empty `/job` and `/workspace` while the pinned run is intact
+    on disk and opens normally next time. That is the one case stated here as unseen, and it needs a container to
+    start inside the sweep's own rename-and-restore, microseconds. **A tombstone holding a live pin is never
+    deleted**: the leftover sweep reads each tombstone's manifest first, and one whose `keepUntil` is still ahead is
+    restored ONLY under a name its own `jobId` maps to, `sandboxEntryName(jobId)` or that id's pre-escape name (gate
+    round 3: the manifest's `workspace` path may choose between those two, so a run retained before the escape keeps
+    working paths, and never names anything else, since a crafted path could otherwise restore it over another run's
+    name), over an empty directory there if need be; with no usable `jobId` it is held; and otherwise held and said
+    (`tombstone-pinned`, once a day); one whose manifest cannot be read for a moment is held too. Once its pin lapses
+    it is an ordinary leftover. From the rename on, an
+    open, a pin or a read of the run finds nothing, which is the truth, rather than a directory a recursive delete
+    is part way through: a 200k-file clone takes about 10 s to delete, and a pin landing inside that used to report
+    `pinned: true` over a directory that was then gone. The worker's own `retainJobDir` cannot interleave, since it
+    runs in the same process and the stretch from rename to delete is synchronous. A rename that fails HOLDS the
+    directory under its own name (`rename-failed`, with the errno). **A tombstone whose delete fails stays a
+    tombstone** (`tombstone-stuck`): the run is no longer re-openable, which is intended; every pass retries the
+    delete, saying so when first seen and then once a day per tombstone; doctor counts tombstones apart from
+    retained runs and, for each one older than ten minutes, gives one of two warnings (`ok: false, warn: true`, the
+    shape `render` prints with a ⚠ and a fix): one holding a live pin is HELD and must not be removed; every other is
+    one "the sweep could not remove; if the worker is running it retries each pass", named for removal by its own
+    path, never a `.reap-*` glob. Doctor never classifies by the pid in the name (gate round 3): after any worker
+    restart that pid is dead whether or not a delete failed, and a pid means nothing across pid namespaces. Leftover tombstones (a crash between the rename and the
+    delete, or a stuck one) are removed at the START of every pass, boot and timer alike (`reaped_sandbox` with
+    reason `tombstone`), before any run is read or asked about; their own manifest is read to find a live pin. **`.reap-` is a reserved prefix**: the sweep's own
+    listing, `listSandboxes`, the runtime watch, the network sweep's keep set and doctor's count all skip it, and
+    `retainJobDir` cannot produce it. Every hold and fault here stays in the `sandbox_reaper_skipped` family with a
+    fixed token (`OQ-007`'s one grep). A pin rewrites the manifest atomically (a
     temp file created `wx`, given the manifest's own owner, group and mode, and renamed over it), so no reader
     sees a truncated one and a pin under `sudo` does not hand the worker's manifest to root; a pin that cannot
     keep the owner is refused.
+  - **Opening a run at the end of its window** (issue #446). The sweep holds a run whose sandbox a runtime
+    reports open, and an open is in no `ps` until its container starts, so the opener is where the rest of the
+    race is closed, in three steps, all in `openSandbox` and so the same for the CLI and the panel.
+    **The refusal**: `resolveSandbox` refuses (`past-window`) a run whose `sandboxDeadline` has passed, or is within
+    `SANDBOX_OPEN_GRACE_MS` (five minutes, pinned by a literal) of it, unless the open pins it first; it comes
+    AFTER the run's own refusals (venue, image, workspace), so a run that cannot open at all says why first, and it
+    names the window and the command, `pi-dispatch sandbox <jobId> --pin`. A margin rather than the deadline
+    itself, because the opener spends its setup on its own runtime asks (the running check, the job user, the image,
+    the network), each bounded in seconds, and a pass whose `ps` came before the container and whose clock is past
+    the deadline would still delete the directory under the new shell. A manifest with no usable `createdAt` is
+    refused the same way, since the sweep deletes it on sight. **The pin, first**: with `--pin` the new `keepUntil`
+    is written straight after `resolveSandbox` and the costless `publish-needs-egress-off` refusal, BEFORE any
+    runtime call; the sweep's fresh read and its read through the tombstone both honour it. A pin that fails
+    REFUSES the open (`pin-failed`, naming the reason, or that the run is gone), where it used to print `warning:
+    could not pin` and open anyway, and a `-v` bind of a directory that has gone mounts an empty one on Docker (Podman
+    refuses it, exit 125). The panel has NO pin (`OQ-038`): `readSandboxInfo` does not offer `b` for a run this refusal would
+    refuse (`past its window: open it with the CLI's --pin`), and a key press inherits the refusal and its
+    command. **The post-launch look**: once the runtime lists the sandbox, the opener checks the run's own path,
+    and then keeps checking it every `SANDBOX_LAUNCH_WATCH_MS` for the life of the shell (gate round 1; no runtime
+    call, an `lstat` and a manifest read). A verdict is a manifest file that is NOT THERE, or a directory that is not
+    the one `resolveSandbox` resolved (another device or inode at the same path: a retry's fresh run, a displaced
+    bind source); a manifest that cannot be read for a moment, cannot be read for good, or does not parse is not
+    one, and never stops a shell. **Only the LAUNCH check acts** (gate round 2): a verdict there removes the
+    container at once (`rm -f`, with `--time=0` on podman, whose `rm -f` otherwise waits its 10 s stop timeout
+    because bash under `--init` ignores SIGTERM, measured: rc 124 against this call's 10 s bound, 106 ms with it;
+    docker's `rm -f` already sends SIGKILL) and reports `swept-at-launch`, since nothing an operator did can be in
+    the container yet. A verdict LATER is recorded and never acted on: the shell may hold state outside the mounts
+    by then, and a retry's `retainJobDir` replacing the directory is an ordinary event that must not `rm -f` a
+    working session. When the shell exits, the result carries `lost` (`swept` or `replaced`) and a message the CLI
+    and the panel print after the shell; the exit code is the shell's own. Nothing reaps the replacing run
+    meanwhile, since the running container still carries the run's name and every pass holds it. Only a container
+    the runtime LISTED gets the launch check's removal; one never listed (its `ps` failing, or listed after the asking
+    budget) is watched for the whole session without being touched (gate round 3). An exit of exactly 125 from a
+    container never listed, with the run gone, is also `swept-at-launch`: that is Podman refusing the bind of a swept
+    directory, whose own words went to the terminal. Every other exit is a shell that ran, and the run is checked
+    once more AT EXIT, so a loss the watch missed is still reported as `lost`. A shell that detaches is no longer
+    watched. It is CONCURRENT with the shell, not ahead of it, and that is the stated limit: `run -it` hands the
+    terminal over as the container starts, and a detached start plus an attach would lose the prompt and change the
+    launch shape on two runtimes nobody has measured it on. It asks every `SANDBOX_LAUNCH_WATCH_MS` (250 ms) for at
+    most `SANDBOX_LAUNCH_WATCH_TRIES` (120) asks while waiting for the container to be listed; the `lstat` watch runs
+    for the whole session either way. It stops the moment the shell returns: its ask in flight is ABORTED (`listRunningSandboxes` takes a
+    `signal`, and `execFile` kills the `ps` on it), and it does not wait for that ask either way, so an exited
+    shell never waits out the ask's 5 s timeout. This look is also what catches the accepted residual under
+    Retention above.
   - **The same sweep reclaims the session NETWORK, on the directory's clock** (issue #337). After the
     directory pass, `reapSandboxes` hands an injected `sweepNetworks` the ids it must keep and a closure that
     re-reads the retained directories; one sweeper per runtime PRESENT since the worker started (one a blessed
@@ -1977,9 +2121,12 @@ sibling rather than an extension of the GitHub one for the same reason.
   a gap and it is now the width of one command; disconnect number i is still i commands after the guard, and
   i is 1 in every shape this project produces. An answer that arrives after endpoints were already detached
   leaves the network and NAMES them. A candidate whose id is retained is passed over in silence EXCEPT where
-  this pass tried to remove that directory and could not: that one is `directory-not-removed`, because such a
-  directory stays on disk, so its id is in `keep` on every later pass and its network is never a candidate
-  again, and no other line on the host names it. Its run's directory
+  this pass tried to move that directory aside and could not (a failed tombstone rename, or a non-directory entry
+  that would not go; issue #446 narrowed it to those): that one is `directory-not-removed`, because such a
+  directory stays on disk under its own name, so its id is in `keep` on every later pass and its network is never
+  a candidate again, and no other line on the host names it. A tombstone whose DELETE fails is not that case: its
+  id is in neither listing from the next pass on, so its network is reclaimed then, and the tombstone is doctor's
+  to name. Its run's directory
   was gone for at least one whole pass before that, since the pass that deletes a directory still counts that
   run as retained. A network outside that name shape is never listed as a candidate and never touched, and
   neither a network name nor a container name that merely CONTAINS `pi-sandbox-` is ever parsed into an id. Unless `PI_EGRESS=0` the argv carries
@@ -1993,7 +2140,35 @@ sibling rather than an extension of the GitHub one for the same reason.
   with egress armed, the argv carries `--network=pi-sandbox-<jobId>-net` and the proxy variables, the network
   is created before the launch and removed after the shell exits (left when it detaches), a network already
   under that name is refused and named rather than removed, and a sandbox already running is refused; given a
-  malformed `PI_EGRESS`, the panel refuses and launches nothing.
+  malformed `PI_EGRESS`, the panel refuses and launches nothing. Issue #446: a retained manifest carries
+  `retainUntil`; given a worker whose window was lowered, or set to `0`, an unpinned run retained under the
+  longer window is swept on the lower one, and a pinned run is kept; given a run whose deadline (the pin, else the
+  earlier of `retainUntil` and `createdAt` plus the reader's window) is past or within `SANDBOX_OPEN_GRACE_MS`, the CLI and the panel refuse it as `past-window` naming `pi-dispatch
+  sandbox <jobId> --pin`, and an opener whose own window is larger than the worker's is refused all the same;
+  with `--pin` the pin is on disk before the first runtime call, and a pin that fails refuses the open; given a
+  sweep pass that read the run and decides while the open is between `resolveSandbox` and the launch, a pinned
+  open is held and launched on the run's own directory. The sweep renames an expired run to `.reap-<pid>-<epochMs>-<n>`
+  before deleting it, a 250-byte id included; a pin landing between the fresh read and the rename puts the run
+  back, over an empty directory a runtime created at its name too, while anything else there leaves it a
+  tombstone that no pass deletes while its pin lasts; a pin landing during the delete reports `absent`, never
+  `pinned: true`; a tombstone left by a crash is removed at the start of the next pass, never placed or asked
+  about, unless it holds a live pin, which is restored; tombstones are absent from `listSandboxes`, the runtime
+  watch, the network sweep's keep set and doctor's count, and doctor names a stuck one, retention off or not; a
+  young tombstone a LIVE other pid named is left for it, and a dead pid's is cleared; a job id whose safe form
+  starts with `.` or `_` is escaped with one more `_`, so `.x` and `_x` never share a directory, and a directory
+  holding another id's run is refused as `id-mismatch`; an expired run whose runtime reports its sandbox open when
+  asked again right before the rename is held; given the accepted residual (a worker window lowered below the
+  opener's) and a pass that does not re-ask, the look, still watching after its launch check, leaves the shell
+  alone and reports `lost: "swept"` with the shell's own exit code; a directory replaced after the launch check is
+  `lost: "replaced"`, and one replaced by the launch check is `swept-at-launch` with the container removed; an exit
+  125 from a container never listed, with the run gone (Podman's refused bind), is `swept-at-launch`, while any
+  other exit with the run gone (including a shell whose `ps` never listed it) is `lost`, found by a check at exit;
+  the removal is `rm -f --time=0` on podman and `rm -f` on docker; a transient, unreadable or unparsed manifest never
+  stops a shell; the post-launch look returns as soon as the shell does, aborting a runtime ask in flight; a run
+  retained before the escape (`_x`) is found, named and held under its old directory, also when the escaped name
+  holds another id's run; a pinned tombstone is restored only under a name its own `jobId` maps to, and one with no
+  usable `jobId` is held; and doctor renders pinned-held and other old tombstones as two warnings, never by pid,
+  naming each unpinned one for removal and telling the operator never to remove a pinned one.
 
 ## INT-LIVE-PROBE-CONTRACT
 
@@ -4956,3 +5131,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-27 | Issue #431 (the `podman` venue reads `egress` back). **`INT-LIVE-PROBE-CONTRACT` AMENDED**, three places, and the podman bullet's "`egress` is not read back there ... always not read back" is REMOVED rather than qualified. (1) The `egress` verdict bullet: the readings come from the canary of the venue being read back, docker's from plain `doctor`, the podman venue's from the canary its read-back runs. (2) The podman bullet: with the policy armed the read-back re-asks `podman info`, sweeps the dead-pid canary networks in this account's Podman, and runs doctor's own `runEgressCanary` under `podman` with its probe containers built by the podman builder as the job user (the builder's isolation flags and bounds, `--user=`, `--userns=keep-id`, `PODMAN_PINNED_FLAGS`, a job's egress variables and HOME, no mount); its lines come before the verdicts, and the conformance script runs the same canary instead of its own plain `fetch`. (3) Acceptance gains the podman canary's argv, the absence of any docker spawn, both verdict directions, the three stops (a venue refusal, a remote service, the policy off) and the sweep. Why a JOB's argv and not docker's short one: the account's containers.conf can default what an argv does not pin (#428), so an unpinned probe could carry doctor's environment or the host's proxy variables, and a pass would then be about something no job gets. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the object table's two canary rows (built by `runEgressCanary`, on the runtime of the venue it reads; on podman a job's argv) and the "what is left behind" sentence: a podman canary network is swept by the next `doctor --live` on that venue, which is the only thing that makes one. The name prefixes, the anchored sweep test, never `-f`, and the docker canary's argv and output are UNCHANGED, the last pinned byte for byte against a capture taken before the move. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no job argv moves; the canary reuses the podman builder rather than amending it. **`INT-SANDBOX-CONTRACT` UNCHANGED, checked**: no sandbox name or network is touched, and the canary names stay outside `pi-sandbox-` and `pi-job-`. **Code evidence**: worker/src/doctor.mjs -> runEgressCanary, egressCanaryProbeArgs, sweepStaleCanaryNetworks, podmanLiveChecks, podmanChecks; worker/src/live-probes.mjs -> egressVerdict; .github/scripts/podman-conformance.mjs -> egressCanary. |
 | 2026-09-27 | Issue #449 (a retry turn is not a budget turn), with PR #455's gate rounds 1 and 2 folded in. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**, two places: the provider 429 row now says the code stays `1` under `--max-turns 1` too, because pi's own auto-retry of a turn that made no progress (no tool ran, no reply completed) is not a budget turn; and the telemetry paragraph names the decided exit line's new `retryTurns` field beside `turns`, diagnostic only, omitted on the catch path, parsed by nothing host-side. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, one sentence: the record's `turns` is the budgeted count and `retryTurns` is deliberately not recovered into it; the record shape is UNCHANGED (no new field). **`parseExitTurns`' cites corrected** in `worker/src/run-history.mjs` (the exit lines moved from `run-job.mjs:263/:277` to `:431/:446`). **Pre-existing wording fixed in the same entry**: the `tokens.calls` key is defined precisely (stream dispatches the process-wide meter observed, including one pi-ai ended as aborted before sending, excluding a call the meter's own hard stop answered), matching `image/runner/src/usage-meter.mjs`'s `observe()` and `wrapProviderStreams`; no field changed. |
 | 2026-09-27 | Issue #451. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**, the provider-refusal row and its named residuals, admitting only shapes MEASURED against a real endpoint with a real bogus credential, because the costly mistake is a false refusal. (1) Refusals now read as `2` / `provider-auth-refused`: google-generative-ai and google-vertex (api key) by PARSING @google/genai's double-wrapped body (the whole message is JSON, the outer `error.code` is 400, 401 or 403, `error.message` is JSON again, and, reading own properties only, an ErrorInfo `reason` is `API_KEY_INVALID` or `ACCESS_TOKEN_TYPE_UNSUPPORTED`; the gRPC `status` is never read), and bedrock-converse-stream by the anchored `UnrecognizedClientException: 403: ` prefix (a runner rule: a shipped worker refuses a built-in `amazon-bedrock` job pre-spend as `provider-unconfigured`, since pi gives that provider no API-key variable to forward, and on the one reachable route, a custom `models.json` provider on that api, the key goes out as a bearer token whose bogus answer is a residual, so the admitted prefix is SigV4's and is reached only when SigV4 keys arrive another way; see (6)). Every one still passes pi-ai's `isRetryableAssistantError` guard. Why parse and not match: Google's inner key order differed between two identical real requests, and a status quoted inside another string must not count. Why these tokens: each is exactly what a real endpoint sent for a bogus credential (M0-d; the Google key is HTTP 400 `INVALID_ARGUMENT`, so its reason is the only signal). (2) The loopback table's Google cells answer `text/event-stream`, the format the real endpoints use; the old `application/json` cells tested a message production never produces. Must-stay-infra rows join it. (3) Named residuals, each a decision: openai-codex-responses (no status on either transport, only server prose); Google's gRPC status without a measured reason, `UNAUTHENTICATED` (a class, not a cause: "Authentication backend unavailable, try again later" is not transient to pi's predicate) and `PERMISSION_DENIED` (stub-only, and `SERVICE_DISABLED` and IAM propagation are transient windows pi's predicate misses); Bedrock's `AccessDeniedException` (also an intermittent cross-region SCP/IAM denial or a propagating fix, told apart only by the lost message) and `ExpiredTokenException` (never seen from real AWS); google-vertex under ADC in its three library forms, `invalid_grant: ...`, bare `invalid_grant`/`invalid_client`, and `Error code invalid_grant: ...` (`invalid_grant` also covers a clock-skewed assertion and a propagating service account, and a bare `invalid_client` is too generic); Google's quota 429 with the `billing` wording that pi calls non-transient; the single-layer Google JSON form. Gate round 1 of the PR narrowed a first draft that also admitted the `UNAUTHENTICATED` and `PERMISSION_DENIED` statuses, `AccessDeniedException` and `ExpiredTokenException`, and CORRECTED its ADC ground ("no loopback can drive the family's stream()"), which review refuted: an external_account credential names its own token URL, and a pinned test now drives the family's own `stream()` through it. (4) Recorded only: pi-ai 0.80.7 loses Bedrock's message, so nothing past the prefix is read, and the table pins the lost-body message so a fix is noticed. The residual "Google's bogus key is HTTP 400 and retries" is REMOVED, closed by (1). (5) **`INT-RUN-HISTORY-FILE-CONTRACT` and `INT-ON-FAILURE-HOOK-CONTRACT` AMENDED in wording only**: their prose restatements of the reason (the runner-reason paragraph, the paid-terminals bullet) say "refused the credential" instead of "answered 401 or 403", since a Google 400 `API_KEY_INVALID` now reaches it; the token and every rule around it are UNCHANGED. **`CONST-RETRY-INFRA-ONLY` statement UNCHANGED, checked; its note AMENDED** (see constitution.md): every admitted shape has a row driving its family's own `stream()` and a real-endpoint measurement. **Code evidence**: image/runner/src/outcome.mjs -> PROVIDER_AUTH_REFUSED, googleRpcAuthRefused, providerAuthRefused; image/runner/test/pinned-api.test.mjs -> AUTH_REFUSAL_TABLE, the two google-vertex ADC tests; image/runner/test/outcome.test.mjs -> AUTH_REFUSED_451, NOT_AUTH_REFUSED_451. (6) Round 2 of the gate, reachability and one admitted-shape residual: a shipped worker refuses a built-in `amazon-bedrock` job pre-spend as `provider-unconfigured`, and on the one reachable route (a custom `models.json` provider on `bedrock-converse-stream`) pi-ai sends the key as a bearer token, whose bogus answer (`AccessDeniedException`) is a residual, so a bogus key there ends infra; the admitted `UnrecognizedClientException` is SigV4's, reached only when SigV4 keys arrive another way. ADC Vertex likewise reaches the runner only through `auth.json` or a custom provider (pi's one key variable for `google-vertex` is `GOOGLE_CLOUD_API_KEY`). NEW named residual: a Google key used within minutes of creation or undelete can be answered `API_KEY_INVALID` before it propagates and ends `provider-auth-refused`; kept admitted, since the operator is at the keyboard and the stop names the reason. The own-properties read is pinned by a polluted-prototype test and described as defense in depth. |
+| 2026-09-27 | Issue #446 (the two windows left after #429), folding its PR #457 gate rounds 1 to 3 into this one row. **`INT-SANDBOX-CONTRACT` AMENDED**, seven places. (1) The manifest gains `retainUntil`, the worker's own deadline written at retention, and ONE rule (`sandboxDeadline`) is now read by the sweep, the CLI's open and `--list`, and the panel: the pin while set, else the EARLIER of `retainUntil` (a string, or nothing) and `createdAt` plus the reader's CURRENT window. Shortening applies (decided): `0` or a lowered window still clears what an earlier setting kept, raising it does not extend a run already retained, and `retainUntil` makes a reader with a LONGER window than the worker's end the run where the worker does. The Retention bullet writes down the accepted residual exactly: the sweep re-asks each expired run's runtime right before the rename (`opened-during-pass`, `runtime-unanswered`), and what is left, a container starting between that re-ask and the rename, is removed at the look's launch check or reported after the shell exits. It also states two supported configurations nothing stated before: one worker per retention root, and one runtime endpoint for the worker and the opener (documented, not refused: the manifest records no docker endpoint). (2) The sweep deletes through a TOMBSTONE, `.reap-<pid>-<epochMs>-<n>` in the same root with no job id in the name (ENAMETOOLONG otherwise), re-reads the manifest there and restores a changed one, displacing an EMPTY directory at the name when it must (Docker's auto-created bind source; Podman refuses such a bind instead); a tombstone holding a live pin is never deleted (`tombstone-pinned`) and goes back only under a name its own `jobId` maps to (held with no usable `jobId`); a failed rename holds the run (`rename-failed`), a failed delete stays a tombstone (`tombstone-stuck`, retried each pass, said once a day), leftovers are removed at the start of every pass except a young tombstone of another LIVE pid (`tombstone-foreign`, once a day; a future-stamped name counts as old), and `.reap-` is reserved from every reader of the root. The one unseen case is stated: an open bound to an empty directory that a restore displaced shows an empty mount while the pinned run is intact. (3) A new bullet on opening a run at the end of its window: the `past-window` refusal inside `SANDBOX_OPEN_GRACE_MS` (five minutes) naming `--pin`, the pin written before any runtime call with its failure a refusal (`pin-failed`), the panel inheriting the refusal with no pin, and the post-launch look, concurrent with the shell: only its LAUNCH check removes the container (`rm -f --time=0` on podman, whose plain `rm -f` outlasted its own bound on pd-fedora; `rm -f` on docker), a loss later is reported after the shell exits (`lost`: `swept` or `replaced`) and never acted on, only an exit 125 from a container never listed, with the run gone, is `swept-at-launch` (Podman's refused bind), every other exit is checked for a loss at exit, a container never listed is watched but never touched, only a missing manifest or a replaced directory (another inode) is a verdict, and the look stops at once when the shell returns (its in-flight `ps` aborted). (4) The Name and the layout go through `sandboxEntryName`, `sanitizeJobId` plus an escape (one more `_` before a leading `.` or `_`), so no id names a tombstone, the root or its parent, and `.x` and `_x` never share a directory; a run retained before the escape is still read, named and held under its old directory (also when the escaped name holds another id's run); `resolveSandbox` refuses a directory holding another id's run (`id-mismatch`). (5) `directory-not-removed` and `blocked` are narrowed to a directory that could not be moved aside; a stuck tombstone's id leaves `keep` from the next pass; doctor warns about pinned-held tombstones apart from every other old one, never classifying by pid, and names only the unpinned ones for removal, each by path. (6) The absent refusal is neutral about which window swept a run, and `--list` says a run past its window or inside the grace needs `--pin`. (7) The Acceptance gains the #446 clauses. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no job argv, mount or env var moves, and the sandbox argv is untouched. **`INT-EGRESS-POLICY-CONTRACT` UNCHANGED, checked**: the session network's creation and removal are where they were; only the keep set's inputs lost the tombstone names. **Code evidence**: worker/src/sandbox-store.mjs -> retainJobDir, readManifest, sandboxEntryName, sandboxDeadline, sandboxExpiry, sandboxTombstonePid, defaultPidAlive, makeSandboxReaper (isOpen, pidAlive, clearTombstone, restoreTombstone, restoreName), listSandboxes; worker/src/sandbox.mjs -> SANDBOX_OPEN_GRACE_MS, sandboxWindowRefusal, resolveSandbox, openSandbox, sandboxRemovalArgs, stopSandbox, listRunningSandboxes, makeSandboxRuntimeWatch (isOpen), sandboxContainerName; worker/src/start.mjs -> startWorker (isOpen wired); worker/src/sandbox-cli.mjs -> runSandbox, renderList, remaining; worker/src/doctor.mjs -> render, countRetained, sandboxTombstoneChecks; admin/src/index.ts -> readSandboxInfo, openSandboxSession; .github/scripts/conflict-marker-check.mjs (every tracked text file). |
