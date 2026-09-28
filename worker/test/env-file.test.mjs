@@ -674,10 +674,11 @@ test("E7: a line this reader cannot model is a HAZARD, never a key that is simpl
 	// The cmd wrapper has no hazards at all: `for /f` takes one line at a time, with no quoting, no
 	// continuation and no execution, so no line there can reach another.
 	assert.equal(envFileHazard("unset K\nOTHER='open", { loader: "cmd" }), null, "no continuation, no multi-line value, no execution");
-	// ONE EXCEPTION, and the module already knew it: `set "%%A=%%B"` is itself quoted, so a `"` in any value
-	// closes it and the rest of the line becomes command. `renderEnvValue` refuses to WRITE that character
-	// for exactly this reason.
-	assert.deepEqual(envFileHazard('OTHER=x" & set "K=evil\nK=C:/ok.json', { loader: "cmd" }), { line: 1 }, "a double quote breaks out of the wrapper's own quoting");
+	// ONE EXCEPTION, kept CAUTIOUSLY (issue #470): `set "%%A=%%B"` is itself quoted, and a `"` in a value was taken
+	// to close it. The parser's phase order says FOR variables are substituted after the quotes and operators are
+	// parsed, so it cannot, but that is not Microsoft's documentation and nothing here runs cmd, so the line stays
+	// unvouched and `renderEnvValue` still refuses to WRITE the character.
+	assert.deepEqual(envFileHazard('OTHER=x" & set "K=evil\nK=C:/ok.json', { loader: "cmd" }), { line: 1 }, "a double quote in a value stays the cmd loader's one hazard (cautious, issue #470)");
 });
 
 test("E8: a CR or a line separator inside a value is a value, not an absence", () => {
@@ -749,11 +750,11 @@ test("E6: the cmd wrapper is a third loader, and it is read from its own source"
 	const cmd = (text, key = "K") => readEnvAssignments(text, [key], { loader: "cmd" }).K;
 	assert.deepEqual(cmd("K=/srv/a.json"), rec({ value: "/srv/a.json", plain: true, vouched: true }));
 	// The quotes are part of what `for /f` hands `set` -- which is why `renderEnvValue` writes none for
-	// win32 -- but they are NOT safe: the wrapper's `set "%%A=%%B"` is itself quoted, so a `"` in any value
-	// closes it and the rest of the line becomes command. The reading stands and the VOUCH does not, which
+	// win32 -- but they are NOT vouched for: the wrapper's `set "%%A=%%B"` is itself quoted, and whether a `"` in a
+	// value survives it is not documented by Microsoft (issue #470). The reading stands and the VOUCH does not, which
 	// is the same distinction the POSIX side draws, and it is the one the writer already enforced by
 	// refusing to emit the character at all.
-	assert.deepEqual(cmd('K="/srv/a.json"'), rec({ value: '"/srv/a.json"', plain: true, vouched: false, hazardLine: 1 }), "a double quote breaks out of the wrapper's quoted `set`");
+	assert.deepEqual(cmd('K="/srv/a.json"'), rec({ value: '"/srv/a.json"', plain: true, vouched: false, hazardLine: 1 }), "a double quote in a value is not vouched for (cautious, issue #470)");
 	assert.deepEqual(cmd("K=C:/srv/a.json"), rec({ value: "C:/srv/a.json", plain: true, vouched: true }), "while an ordinary Windows path is vouched for");
 	assert.deepEqual(cmd("K=/srv/a.json   # note"), rec({ value: "/srv/a.json   # note", plain: true, vouched: true }), "`eol=#` skips a line that STARTS with one, and does nothing to a trailing comment");
 	assert.deepEqual(cmd("K=C:\\pi\\x"), rec({ value: "C:\\pi\\x", plain: true, vouched: true }), "a backslash is a literal there and an escape everywhere else");
@@ -2021,4 +2022,136 @@ test("an edit never leaves a hazard the file did not have; a CRLF comment line i
 	assert.deepEqual(envFileHazard("# c\r\n# d\r\nA=1\n", { loader: "shell" }), { line: 1, shape: "shell-crlf-comment" });
 	// A comment CR above a real hazard: the hazard is named, not the comment.
 	assert.deepEqual(envFileHazard("# c\r\nK=1 z\n", { loader: "shell" }), { line: 2 });
+});
+
+// -- issue #470: on Windows the writer judges the file the way deploy/worker-env-wrapper.cmd reads it ---------------------
+//
+// `for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do set "%%A=%%B"`. Nothing here can run cmd.exe, so each
+// row is pinned against the wrapper's documented reading (the table at `cmdReading` says which rows are documented and
+// which are cautious refusals), never against a measurement. Every refusal leaves the file byte-identical.
+
+/** The win32 writer's verdict on `text`: "W" plus the written text, "U", or the refusal without its path prefix. */
+function win32Verdict(text, key, value, overwrite = false) {
+	const dir = tempDir("pi-dispatch-env-470-");
+	const path = join(dir, ".env");
+	writeFileSync(path, text);
+	try {
+		const { changed } = updateEnvFile(path, key, value, { platform: "win32", overwrite });
+		return changed ? `W ${readFileSync(path, "utf8")}` : "U";
+	} catch (err) {
+		assert.equal(readFileSync(path, "utf8"), text, `a refusal writes nothing: ${JSON.stringify(text)}`);
+		return err.message.replace(/^refusing to edit \S+: /, "");
+	}
+}
+
+test("#470: a line that names the key other than as a plain KEY= line is refused by name on Windows", () => {
+	const rows = [
+		// The issue's two shapes. `set` ignores case (DOCUMENTED), so `webhook_secret=` removes the key the writer called set.
+		["WEBHOOK_SECRET=old\nwebhook_secret=\n", "line 2 sets webhook_secret, which the .cmd wrapper's set reads as WEBHOOK_SECRET, since Windows variable names ignore case. To fix it, write the name as WEBHOOK_SECRET, or remove the line. Nothing was written"],
+		// `delims==` replaces the default space and tab (DOCUMENTED), so the indent stays in the name; what set does with
+		// it is not documented, so this is a CAUTIOUS refusal.
+		["  WEBHOOK_SECRET=old\n", "line 1 spells WEBHOOK_SECRET with a blank, a quote, a CR or a byte-order mark beside the name, which the .cmd wrapper's for /f keeps as part of the name (it splits only on =), so whether that line sets WEBHOOK_SECRET cannot be confirmed. To fix it, write WEBHOOK_SECRET=value at the very start of the line. Nothing was written"],
+		["\ufeffWEBHOOK_SECRET=old\n", "line 1 spells WEBHOOK_SECRET with a blank, a quote, a CR or a byte-order mark beside the name, which the .cmd wrapper's for /f keeps as part of the name (it splits only on =), so whether that line sets WEBHOOK_SECRET cannot be confirmed. To fix it, write WEBHOOK_SECRET=value at the very start of the line. Nothing was written"],
+		["WEBHOOK_SECRET =old\n", "line 1 has a blank between WEBHOOK_SECRET and the =, which the .cmd wrapper's set keeps in the name, so the variable that line sets is not WEBHOOK_SECRET. To fix it, remove the blank before the =. Nothing was written"],
+		["WEBHOOK_SECRET=old\nWEBHOOK_SECRET\n", 'line 2 is WEBHOOK_SECRET with no =, which the .cmd wrapper reads as set "WEBHOOK_SECRET=", removing WEBHOOK_SECRET. To fix it, write WEBHOOK_SECRET=value, or remove the line. Nothing was written'],
+		["=WEBHOOK_SECRET=old\n", "line 1 starts with =, which the .cmd wrapper's for /f skips, so that line sets WEBHOOK_SECRET. To fix it, remove the = at the start of the line. Nothing was written"],
+		// File-wide, whatever the key: bytes and names whose reading is not documented (CAUTIOUS).
+		["A=1\rWEBHOOK_SECRET=x\n", "line 1 has a carriage return (CR) that is not part of a CRLF line ending, and whether the .cmd wrapper's for /f reads it as a line break is not documented. To fix it, remove the CR, or save the file with CRLF (or LF) line endings. Nothing was written"],
+		["A=1\0\nWEBHOOK_SECRET=x\n", "line 1 has a NUL byte, and whether the .cmd wrapper's for /f reads past it is not documented. To fix it, remove the NUL byte. Nothing was written"],
+		["A=\x1a\nWEBHOOK_SECRET=x\n", "line 1 has a Ctrl-Z byte (0x1A), which cmd may read as the end of the file. To fix it, remove the byte. Nothing was written"],
+		["A!B!=1\nWEBHOOK_SECRET=x\n", "line 1 has a ! before its first =, and with delayed expansion on (the registry's DelayedExpansion value) the .cmd wrapper's set can expand that into another variable's name. To fix it, remove the ! from that line. Nothing was written"],
+		["/A WEBHOOK_SECRET=5\n", "line 1 starts with /, which the .cmd wrapper's set might read as its /A or /P switch. To fix it, remove the / at the start of that line. Nothing was written"],
+		[`A=${"x".repeat(8184)}\nWEBHOOK_SECRET=x\n`, `line 1 is 8186 bytes long, and the .cmd wrapper's set "..." for it would pass cmd's 8191-character command-line limit. To fix it, shorten that value, or move the large content into a file and put its path in the .env. Nothing was written`],
+	];
+	for (const [text, message] of rows) {
+		assert.equal(win32Verdict(text, "WEBHOOK_SECRET", "NEW"), message, JSON.stringify(text).slice(0, 80));
+		// Linux and macOS read these files as they always did: none of this reaches them.
+		for (const platform of ["linux", "darwin"]) assert.doesNotMatch(envFileEditCheck(text, "/x/.env", "WEBHOOK_SECRET", "NEW", { platform }) ?? "", /\.cmd wrapper/, platform);
+	}
+	// A line of 8185 bytes is the longest whose `set "..."` fits 8191 characters.
+	assert.equal(win32Verdict(`A=${"x".repeat(8183)}\n`, "WEBHOOK_SECRET", "NEW"), `W A=${"x".repeat(8183)}\nWEBHOOK_SECRET=NEW\n`);
+	// The overwrite refuses the same shapes: the wizard's `pi_backends=docker` below the line it replaces would win.
+	assert.match(win32Verdict("PI_BACKENDS=docker\npi_backends=docker\n", "PI_BACKENDS", "podman", true), /^line 2 sets pi_backends, which the \.cmd wrapper's set reads as PI_BACKENDS/);
+});
+
+test("#470: lines the wrapper reads harmlessly for the key are not refused on Windows", () => {
+	const rows = [
+		// `eol=#` replaces the default `;` (DOCUMENTED), so `;x=1` is a variable named `;x`; a `#` line is skipped; an
+		// indented comment is a variable named `  # WEBHOOK_SECRET`, never the key; blank lines assign nothing.
+		["\n;x=1\n# WEBHOOK_SECRET=x\n  # WEBHOOK_SECRET=y\nWEBHOOK_SECRET=old\r\n", "U"],
+		// Another key's quote, `%` or operators change only that key's value, never another line (COMMUNITY: FOR variables
+		// are substituted after the line is parsed for operators and quotes).
+		['X=a"b & set "WEBHOOK_SECRET=evil\nY=100%\n', 'W X=a"b & set "WEBHOOK_SECRET=evil\nY=100%\nWEBHOOK_SECRET=NEW\n'],
+		// An indented or case-varied line for ANOTHER key is that key's business.
+		["  OTHER=1\nother=2\nWEBHOOK_SECRET=old\n", "U"],
+		["WEBHOOK_SECRET=a=b\n", "U"],
+	];
+	for (const [text, verdict] of rows) assert.equal(win32Verdict(text, "WEBHOOK_SECRET", "NEW"), verdict, JSON.stringify(text));
+	// `eol=#` skips the whole line (DOCUMENTED), so a `!` in a comment names nothing.
+	assert.equal(win32Verdict("# important! read this\nWEBHOOK_SECRET=old\n", "WEBHOOK_SECRET", "NEW"), "U");
+	// A CR at the very end of the file is that line's, not a line break: another key's line is left alone, and the
+	// append gives it the CRLF ending it lacked.
+	assert.equal(win32Verdict("X=1\r", "WEBHOOK_SECRET", "NEW"), "W X=1\r\nWEBHOOK_SECRET=NEW\r\n");
+});
+
+test("#470: the value the wrapper takes for the key must be one it carries, before \"unchanged\" or \"already set\"", () => {
+	const shapes = [
+		["WEBHOOK_SECRET==old", "an = at the start, which for /f drops with the = after the name"],
+		['WEBHOOK_SECRET=a"b', "a double quote"],
+		["WEBHOOK_SECRET=100%", "a % (cmd's expansion character)"],
+		["WEBHOOK_SECRET=a!b!", "a ! (cmd's delayed-expansion character, on whenever the registry's DelayedExpansion value is set)"],
+		["WEBHOOK_SECRET=a^b", "a ^ (cmd's escape character)"],
+		["WEBHOOK_SECRET=caf\u00e9", "a character outside ASCII, which cmd reads in the console code page rather than as UTF-8"],
+		["WEBHOOK_SECRET=a\x07b", "a control character (U+0007)"],
+	];
+	for (const [line, what] of shapes) {
+		const want = `line 1 is the WEBHOOK_SECRET line the .cmd wrapper takes, and its value has ${what}, so what the service reads cannot be confirmed. To fix it, write that value without it, or give the service WEBHOOK_SECRET through its own environment (pi-dispatch service install --env-setup). Nothing was written`;
+		assert.equal(win32Verdict(`${line}\n`, "WEBHOOK_SECRET", "NEW"), want, line);
+		// An overwrite that replaces the line is judged on its result instead, which is clean.
+		assert.equal(win32Verdict(`${line}\n`, "WEBHOOK_SECRET", "NEW", true), "W WEBHOOK_SECRET=NEW\n", `overwrite ${line}`);
+	}
+	// Only the line the wrapper TAKES: an earlier one is overwritten by it.
+	assert.equal(win32Verdict('WEBHOOK_SECRET=a"b\nWEBHOOK_SECRET=old\n', "WEBHOOK_SECRET", "NEW"), "U");
+	// A TAB and a trailing blank are carried by the quoted `set` (COMMUNITY), so a line holding them is set as written.
+	assert.equal(win32Verdict("WEBHOOK_SECRET=a\tb \n", "WEBHOOK_SECRET", "NEW"), "U");
+	// A CR ending the file on the key's line stays in its value, where it is a line break, not a file-wide hazard.
+	assert.match(win32Verdict("WEBHOOK_SECRET=old\r", "WEBHOOK_SECRET", "NEW"), /^line 1 is the WEBHOOK_SECRET line the \.cmd wrapper takes, and its value has a line break, so/);
+	// The cmd reader does not repeat such a value back either, where it cannot know it (a `"` and a `%` keep the reading
+	// the wrapper's own header describes).
+	for (const rest of ["=old", "a!b", "a^b", "caf\u00e9", "a\x07b"]) assert.deepEqual([readEnvAssignments(`K=${rest}\n`, ["K"], { loader: "cmd" }).K.plain, readEnvAssignments(`K=${rest}\n`, ["K"], { loader: "cmd" }).K.value], [false, null], rest);
+	for (const rest of ["100%", "a & b", "a b ", "a=b"]) assert.equal(readEnvAssignments(`K=${rest}\n`, ["K"], { loader: "cmd" }).K.value, rest, rest);
+});
+
+test("#470: a value the wrapper cannot carry is never written on Windows, and one it can is written bare", () => {
+	const refused = [
+		['a"b', "a double quote"],
+		["100%", "a % (cmd's expansion character)"],
+		["a!b", "a ! (cmd's delayed-expansion character, on whenever the registry's DelayedExpansion value is set)"],
+		["a^b", "a ^ (cmd's escape character)"],
+		["C:/Users/Jos\u00e9/app.pem", "a character outside ASCII, which cmd reads in the console code page rather than as UTF-8"],
+		["a\nb", "a line break"],
+		["a\rb", "a line break"],
+		["a\x1bb", "a control character (U+001B)"],
+		["a\x7fb", "a control character (U+007F)"],
+		["=abc", "an = at the start, which for /f drops with the = after the name"],
+	];
+	for (const [value, what] of refused) {
+		assert.equal(win32Verdict("PI_BACKENDS=docker\n", "PI_BACKENDS", value, true), `cannot write this value into a .env on Windows: it contains ${what}, and the .cmd wrapper (deploy/worker-env-wrapper.cmd) cannot be shown to read that back as written. Choose a value without it, or give the service this key through its own environment (pi-dispatch service install --env-setup)`, JSON.stringify(value));
+	}
+	// Carried (COMMUNITY: the phase order makes operators and parentheses text; the quoted `set` keeps blanks and tabs).
+	for (const value of ["a & b | c < d > e", "(x)", "C:/Program Files/pi/app.pem", "a\tb", "trailing ", "a=b", "x#y;z", "C:\\pi\\x"]) {
+		assert.equal(win32Verdict("PI_BACKENDS=docker\n", "PI_BACKENDS", value, true), `W PI_BACKENDS=${value}\n`, JSON.stringify(value));
+	}
+	// An empty value REMOVES the key there (`set "K="`, DOCUMENTED), so it is never reported written.
+	assert.equal(win32Verdict("PI_BACKENDS=docker\n", "PI_BACKENDS", "", true), "after the edit, the .cmd wrapper would take PI_BACKENDS from line 1, which is empty, and an empty value removes PI_BACKENDS there. Nothing was written");
+	// A value whose line would pass cmd's command-line limit is refused on the file it would write.
+	assert.equal(win32Verdict("PI_BACKENDS=docker\n", "PI_BACKENDS", "x".repeat(8200), true), `after the edit, line 1 is 8212 bytes long, and the .cmd wrapper's set "..." for it would pass cmd's 8191-character command-line limit. To fix it, shorten that value, or move the large content into a file and put its path in the .env. Nothing was written`);
+	// The read-back names the line the wrapper takes when the edit leaves a later one for it: a value it cannot carry, a
+	// different value, or an empty one.
+	assert.equal(win32Verdict('PI_BACKENDS=docker\nPI_BACKENDS=a"b\n', "PI_BACKENDS", "podman", true), "after the edit, the .cmd wrapper would take PI_BACKENDS from line 2, whose value has a double quote, so what the service reads cannot be confirmed. Nothing was written");
+	assert.equal(win32Verdict("PI_BACKENDS=docker\nPI_BACKENDS=docker\n", "PI_BACKENDS", "podman", true), "after the edit, the .cmd wrapper would read PI_BACKENDS as something other than what was written (the assignment it takes is on line 2). Nothing was written");
+	assert.equal(win32Verdict("WEBHOOK_SECRET=\r\nWEBHOOK_SECRET=\r\n", "WEBHOOK_SECRET", "NEW"), "after the edit, the .cmd wrapper would take WEBHOOK_SECRET from line 2, which is empty, and an empty value removes WEBHOOK_SECRET there. Nothing was written");
+	// Linux and macOS render these as they always did.
+	assert.equal(renderEnvValue("a!b", { platform: "linux" }), "'a!b'");
+	assert.equal(renderEnvValue("C:/Users/Jos\u00e9", { platform: "darwin" }), "'C:/Users/Jos\u00e9'");
 });

@@ -97,24 +97,159 @@ const UNQUOTED_SAFE = /^[A-Za-z0-9_@+=:,./-]*$/;
  * which preserves spaces exactly. So a space is fine there and `C:\Program Files\...` needs no quoting,
  * while the POSIX predicate would have refused all four keys on the commonest Windows layout there is.
  *
- * What cmd cannot take is `%` (its expansion character), a `"` (it would close the quoted `set`), and a
- * carriage return or newline. `'` is ordinary there, and is excluded anyway by the shared refusal above,
- * because the same file is read on POSIX by deployments that share it.
+ * What cmd cannot be shown to carry is `cmdValueRefusal`'s list (issue #470): a line break or another control
+ * character, a `"`, a `%`, a `!`, a `^`, a character outside ASCII, and an `=` at the start of the value. Each
+ * row there says whether it is cmd's documented behaviour or a cautious refusal. `'` is ordinary there.
  */
-const WINDOWS_UNSAFE = /[%"\n\r]/;
-
 export function renderEnvValue(value, { platform = process.platform } = {}) {
 	const v = String(value);
 	// The Windows loader keeps surrounding quotes as part of the value ("Values MUST be UNQUOTED", its own
 	// header), so nothing is ever quoted for it: a value it can take is written bare, and one it cannot is
 	// refused rather than dressed in quotes that become part of a path.
 	if (platform === "win32") {
-		if (WINDOWS_UNSAFE.test(v)) throw new Error(`cannot write this value into a .env on Windows: it contains ${/[%]/.test(v) ? "a % (cmd's expansion character)" : /["]/.test(v) ? 'a double quote' : "a line break"}, and cmd's \`set\` cannot be quoted around it (deploy/worker-env-wrapper.cmd)`);
+		const bad = cmdValueRefusal(v);
+		if (bad !== null) throw new Error(`cannot write this value into a .env on Windows: it contains ${bad}, and the .cmd wrapper (deploy/worker-env-wrapper.cmd) cannot be shown to read that back as written. Choose a value without it, or give the service this key through its own environment (pi-dispatch service install --env-setup)`);
 		return v;
 	}
 	if (UNQUOTED_SAFE.test(v)) return v;
 	if (v.includes("'") || /[\n\r]/.test(v)) throw new Error(`cannot write this value into a .env safely: ${v.includes("'") ? "it contains a single quote" : "it contains a newline"}`);
 	return `'${v}'`;
+}
+
+/**
+ * HOW THE WINDOWS WRAPPER READS THIS FILE, and what the writer refuses there (issue #470). The loader is one line of
+ * `deploy/worker-env-wrapper.cmd`, run under a bare `setlocal`:
+ *
+ *     for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do set "%%A=%%B"
+ *
+ * Nobody can run cmd.exe where this is tested, so every row is either DOCUMENTED (Microsoft's `for /?`, `set /?` and
+ * `cmd /?` texts), COMMUNITY (the batch parser's phase model and set's quote handling, as the long-standing write-ups
+ * of cmd's parser record them, not Microsoft), or CAUTIOUS: behaviour this command cannot confirm, so it is refused by
+ * name rather than guessed. A refusal names the line and the character, never the value.
+ *
+ *   THE LINE (for /f)
+ *   `delims==` REPLACES the default space and tab       DOCUMENTED. A name is everything before the first `=`,
+ *                                                       its blanks included
+ *   `eol=#`: a line whose first character is `#`       DOCUMENTED. Skipped. It replaces the default `;`, so a `;`
+ *                                                       line is a variable named `;...`, not a comment
+ *   `tokens=1,*`: the value is the rest of the line    DOCUMENTED. `=` inside it survives (base64, API keys)
+ *   an empty line                                      skipped, and assigns nothing either way
+ *   CRLF                                               COMMUNITY: for /f drops the CR before the LF (relied on
+ *                                                       since #447, and CRLF is the platform's own ending)
+ *   a CR anywhere else, a NUL, a Ctrl-Z (0x1A)         CAUTIOUS, file-wide: whether for /f ends a line, stops the
+ *                                                       file or keeps the byte is not documented, so no line below
+ *                                                       can be vouched for
+ *   a line whose `set "..."` exceeds 8191 characters   CAUTIOUS, file-wide: 8191 is cmd's documented command-line
+ *                                                       limit, and whether it binds after FOR substitution is not
+ *
+ *   THE NAME (set, for the key being written)
+ *   `webhook_secret=` for WEBHOOK_SECRET               DOCUMENTED: Windows variable names ignore case, so the line
+ *                                                       assigns (or, empty, removes) the key. REFUSED by name: the
+ *                                                       line scan here is case-sensitive, and a Windows line should
+ *                                                       spell the key as the service reads it
+ *   `WEBHOOK_SECRET` with no `=`                       DOCUMENTED: `set "WEBHOOK_SECRET="` removes the key.
+ *                                                       REFUSED by name
+ *   `WEBHOOK_SECRET =x` (a blank before the `=`)       COMMUNITY: the name keeps the blank, so the service gets no
+ *                                                       WEBHOOK_SECRET. REFUSED by name
+ *   `  WEBHOOK_SECRET=x` (indented), a BOM, a `"`       for /f keeps the leading blanks in the name (DOCUMENTED, the
+ *   around the name                                    `delims==` row); what `set` makes of them is not, so
+ *                                                       CAUTIOUS: REFUSED by name
+ *   `=WEBHOOK_SECRET=x` (a leading `=`)                COMMUNITY: for /f skips leading delimiters, so this sets the
+ *                                                       key where no line scan sees it. REFUSED by name
+ *   a `!` in any name, a name starting with `/`         CAUTIOUS, file-wide: with delayed expansion on (see `!`
+ *                                                       below) a name can expand into the key's, and `set` might
+ *                                                       read `/A` or `/P` as its switch
+ *   `export WEBHOOK_SECRET=x`                          a variable named `export WEBHOOK_SECRET`, so the key is not
+ *                                                       set (`noOpMisread` says so)
+ *
+ *   THE VALUE (the line the wrapper takes for the key, and every value written: `cmdValueRefusal`)
+ *   `& | < > ( )`                                      COMMUNITY: FOR variables are substituted AFTER the line is
+ *                                                       parsed for operators and quotes, so these are text
+ *                                                       (`for %%a in ("a&b") do echo %%~a` prints `a&b`). Carried
+ *   a trailing blank                                   COMMUNITY: the quoted `set` keeps it. Carried, as written
+ *   `"`                                                COMMUNITY: by the same phase order it cannot end the command,
+ *                                                       and `set "..."` keeps the text up to the LAST quote, which
+ *                                                       is the wrapper's own. CAUTIOUS all the same: the wrapper's
+ *                                                       header forbids quotes, and set's quote rule is not
+ *                                                       Microsoft's documentation
+ *   `%`                                                COMMUNITY: percent expansion runs before FOR substitution,
+ *                                                       so it is text. CAUTIOUS all the same, as it has always been
+ *   `!`                                                DOCUMENTED dependence: with delayed expansion on, `!NAME!`
+ *                                                       expands and a lone `!` is removed. `cmd /?` documents the
+ *                                                       registry's DelayedExpansion value turning it on, and a bare
+ *                                                       `setlocal` leaves it as it was. REFUSED
+ *   `^`                                                COMMUNITY: an escape only on a line delayed expansion
+ *                                                       touches. CAUTIOUS
+ *   a character outside ASCII                          CAUTIOUS: for /f decodes the file in the console code page,
+ *                                                       not UTF-8, and the wrapper sets none
+ *   a control character but TAB                        CAUTIOUS
+ *   an `=` at the start of the value (`K==v`)          COMMUNITY: the remainder starts after the run of delimiters,
+ *                                                       so the `=` is lost. CAUTIOUS
+ *   empty                                              DOCUMENTED: `set "K="` removes K, so the service has no key
+ *
+ * Linux and macOS never reach any of this: it runs only for the cmd loader (win32).
+ */
+const CMD_LINE_MAX = 8191;
+
+/** Why a value cannot be shown to reach the service intact through the cmd wrapper, as words, or `null`. */
+function cmdValueRefusal(v) {
+	if (v.startsWith("=")) return "an = at the start, which for /f drops with the = after the name";
+	const c = /[\x00-\x08\x0a-\x1f\x7f"%!^]|[^\x00-\x7f]/u.exec(v)?.[0];
+	if (c === undefined) return null;
+	if (c === "\n" || c === "\r") return "a line break";
+	if (c === '"') return "a double quote";
+	if (c === "%") return "a % (cmd's expansion character)";
+	if (c === "!") return "a ! (cmd's delayed-expansion character, on whenever the registry's DelayedExpansion value is set)";
+	if (c === "^") return "a ^ (cmd's escape character)";
+	if (c.codePointAt(0) > 0x7f) return "a character outside ASCII, which cmd reads in the console code page rather than as UTF-8";
+	return `a control character (U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")})`;
+}
+
+/**
+ * The cmd wrapper's reading of this text for `key` (see the table above): `hazard`, the first line this command
+ * cannot vouch for (file-wide, or one that names the key other than as a plain `KEY=` line), as `{ line, what, fix }`;
+ * and `taken`, the last plain `KEY=...` line, as `{ line, value }` with the value exactly as the line holds it.
+ */
+function cmdReading(text, key) {
+	const lines = text.split("\n");
+	const upper = (s) => s.replace(/[a-z]+/g, (m) => m.toUpperCase());
+	const K = upper(key);
+	let hazard = null;
+	let taken;
+	const note = (line, what, fix) => {
+		hazard ??= { line, what, fix };
+	};
+	for (let i = 0; i < lines.length; i++) {
+		const last = i === lines.length - 1;
+		// The CR of a CRLF ending goes; a CR at the very end of the file stays in the line, where it is a control
+		// character in the value if the line is the key's.
+		const l = !last && lines[i].endsWith("\r") ? lines[i].slice(0, -1) : lines[i];
+		const n = i + 1;
+		const inner = last && l.endsWith("\r") ? l.slice(0, -1) : l;
+		if (inner.includes("\r")) note(n, "has a carriage return (CR) that is not part of a CRLF line ending, and whether the .cmd wrapper's for /f reads it as a line break is not documented", "remove the CR, or save the file with CRLF (or LF) line endings");
+		if (l.includes("\0")) note(n, "has a NUL byte, and whether the .cmd wrapper's for /f reads past it is not documented", "remove the NUL byte");
+		if (l.includes("\x1a")) note(n, "has a Ctrl-Z byte (0x1A), which cmd may read as the end of the file", "remove the byte");
+		if (Buffer.byteLength(l, "utf8") + 6 > CMD_LINE_MAX) note(n, `is ${Buffer.byteLength(l, "utf8")} bytes long, and the .cmd wrapper's set "..." for it would pass cmd's ${CMD_LINE_MAX}-character command-line limit`, "shorten that value, or move the large content into a file and put its path in the .env");
+		const body = l.replace(/^=+/, "");
+		if (body === "" || body[0] === "#") continue;
+		const eq = body.indexOf("=");
+		const name = eq === -1 ? body : body.slice(0, eq);
+		if (name.includes("!")) note(n, "has a ! before its first =, and with delayed expansion on (the registry's DelayedExpansion value) the .cmd wrapper's set can expand that into another variable's name", "remove the ! from that line");
+		if (/^[ \t"]*\//.test(name)) note(n, "starts with /, which the .cmd wrapper's set might read as its /A or /P switch", "remove the / at the start of that line");
+		if (upper(name.replace(/^[ \t\r\ufeff"]+|[ \t\r\ufeff"]+$/g, "")) !== K) continue;
+		if (name !== key && upper(name) === K) note(n, `sets ${name}, which the .cmd wrapper's set reads as ${key}, since Windows variable names ignore case`, `write the name as ${key}, or remove the line`);
+		else if (/^[A-Za-z0-9_]+[ \t]+$/.test(name)) note(n, `has a blank between ${key} and the =, which the .cmd wrapper's set keeps in the name, so the variable that line sets is not ${key}`, "remove the blank before the =");
+		else if (name !== key) note(n, `spells ${key} with a blank, a quote, a CR or a byte-order mark beside the name, which the .cmd wrapper's for /f keeps as part of the name (it splits only on =), so whether that line sets ${key} cannot be confirmed`, `write ${key}=value at the very start of the line`);
+		else if (eq === -1) note(n, `is ${key} with no =, which the .cmd wrapper reads as set "${key}=", removing ${key}`, `write ${key}=value, or remove the line`);
+		else if (l[0] === "=") note(n, `starts with =, which the .cmd wrapper's for /f skips, so that line sets ${key}`, "remove the = at the start of the line");
+		else taken = { line: n, value: body.slice(eq + 1) };
+	}
+	return { hazard, taken };
+}
+
+/** A `cmdReading` hazard as the writer says it: the line, what is there, and the fix. */
+function cmdHazardSentence(h) {
+	return `line ${h.line} ${h.what}. To fix it, ${h.fix}`;
 }
 
 /**
@@ -373,23 +508,18 @@ function editedValueRefusal(next, key, value, platform) {
 		if (want.plain && taken.value !== want.value) return `after the edit, ${where} would read ${key} as something other than what was written (the assignment it takes is on line ${taken.line})`;
 		return null;
 	}
-	const got = readEnvAssignments(next, [key], { loader })[key];
-	if (got === undefined) return `after the edit, ${where} would find no ${key} line`;
-	const lines = next.split("\n");
-	if (quoteSpans(lines, loader).inside[got.line - 1]) return `after the edit, ${where} would read line ${got.line} as part of a quoted value or a continuation above it, not as ${key}`;
-	// The line the loader TAKES, compared by value on a CRLF file too (final review): skipping the comparison whenever
-	// the line had a CR reported `WEBHOOK_SECRET=\r\nWEBHOOK_SECRET=\r\n` written after filling the FIRST line, while
-	// every loader takes the second. The CR is set aside only for the cmd wrapper, whose `for /f` strips it. A shell
-	// KEEPS it, so the line is read with it (and a CR-ended line is never plain there): a CRLF file on macOS is refused
-	// before this, and this is the backstop that caught `KEY=abc<CR>` written behind a ✓ when that refusal had a hole
-	// (regression review). Unreadable once its CR is gone (`KEY=v\` before the CR) counts as different. `read` is never
-	// undefined: the line matched `ASSIGNMENT` with its CR, so it matches without.
-	// For a shell, the reading `lastAssignment` makes of the same line (the joined command's first word, a CR it runs
-	// into kept), so `KEY=podman \` above an empty line reads `podman`, as the shells do (second regression review).
-	const taken = loader === "cmd" ? lines[got.line - 1].replace(/\r$/, "") : lines[got.line - 1];
-	const read = readEnvAssignments(`${taken}\n`, [key], { loader })[key];
-	const clean = readEnvAssignments(`${key}=${renderEnvValue(value, { platform })}\n`, [key], { loader })[key];
-	if (clean.plain && (!read.plain || read.value !== clean.value)) return `after the edit, ${where} would read ${key} as something other than what was written (the assignment it takes is on line ${got.line})`;
+	// The cmd wrapper, by its own reading (issue #470, `cmdReading`): nothing on the edited file it cannot vouch for, and
+	// the line it takes for the key holds exactly the value written. An empty one removes the key there, so it is never
+	// "written". The line taken is the LAST plain one, with a CRLF line's CR set aside as for /f drops it (the final
+	// review of #447: with two empty CRLF lines for the key the first was filled while the loader took the second). This
+	// replaced a comparison through `readEnvAssignments`, which read `K==v` as `=v` where for /f reads `v`.
+	const { hazard, taken } = cmdReading(next, key);
+	if (hazard !== null) return `after the edit, ${cmdHazardSentence(hazard)}`;
+	if (taken === undefined) return `after the edit, ${where} would find no ${key} line`;
+	const bad = cmdValueRefusal(taken.value);
+	if (bad !== null) return `after the edit, ${where} would take ${key} from line ${taken.line}, whose value has ${bad}, so what the service reads cannot be confirmed`;
+	if (taken.value === "") return `after the edit, ${where} would take ${key} from line ${taken.line}, which is empty, and an empty value removes ${key} there`;
+	if (taken.value !== renderEnvValue(value, { platform })) return `after the edit, ${where} would read ${key} as something other than what was written (the assignment it takes is on line ${taken.line})`;
 	return null;
 }
 
@@ -629,6 +759,13 @@ function planEnvEdit(raw, path, key, value, { overwrite = false, platform = proc
 	// key where no line scan sees it (`X=1 WEBHOOK_SECRET=abc`, a continuation into ` WEBHOOK_SECRET=abc`), so the
 	// append would replace the operator's value: any shell hazard refuses the edit (gate round 4, measured in sh,
 	// bash, dash and zsh).
+	// On Windows, the same rule by the cmd wrapper's own reading (issue #470, `cmdReading`): a line it cannot be shown
+	// to read line by line, or one that names the key other than as a plain `KEY=` line (`webhook_secret=`, an indented
+	// or blank-suffixed name, a bare `KEY`), refuses the edit by name, whatever the edit would have been.
+	if (loaderFor(platform) === "cmd") {
+		const h = cmdReading(text, key).hazard;
+		if (h !== null) return { error: `refusing to edit ${path}: ${cmdHazardSentence(h)}. Nothing was written` };
+	}
 	if (loaderFor(platform) === "shell") {
 		const h = envFileHazard(text, { loader: "shell" });
 		// A NUL or a CRLF file is named, with its fix: the generic sentence below sends an operator looking for a command
@@ -638,11 +775,18 @@ function planEnvEdit(raw, path, key, value, { overwrite = false, platform = proc
 	}
 	const next = (overwrite ? setEnvKey : setEnvKeyIfEmpty)(text, key, value, { platform });
 	const already = next === text || overwrite ? null : keyAlreadySet(text, key, platform);
+	// The cmd wrapper's value, where the answer would be "unchanged" or "already set" (issue #470): the line it takes
+	// for the key must hold a value it can be shown to carry, or neither claim is one this command can make.
+	if (loaderFor(platform) === "cmd" && (next === text || already !== null)) {
+		const t = cmdReading(text, key).taken;
+		const bad = t === undefined ? null : cmdValueRefusal(t.value);
+		if (bad !== null) return { error: `refusing to edit ${path}: line ${t.line} is the ${key} line the .cmd wrapper takes, and its value has ${bad}, so what the service reads cannot be confirmed. To fix it, write that value without it, or give the service ${key} through its own environment (pi-dispatch service install --env-setup). Nothing was written` };
+	}
 	// systemd's two, the ones `editedValueRefusal` asks of the edited text: a file it will not load (the key is then set
 	// for nobody) or splits into lines differently from this module. Asked of the file AS IT STANDS only where the
 	// answer would otherwise be "unchanged" or "already set", which are claims about that file; an edit keeps being
 	// judged on its result below, where replacing the one offending line can leave a file systemd reads cleanly. The cmd
-	// wrapper has no hazard the writer asks about, so Windows is unchanged.
+	// wrapper's are asked above and below this, by `cmdReading`.
 	if (loaderFor(platform) === "systemd" && (next === text || already !== null)) {
 		const h = envFileLoadHazard(raw) ?? envFileSystemdHazard(text);
 		// With its fix, as the macOS branch says it (focus review): the line alone left an operator to work out the change.
@@ -953,9 +1097,10 @@ function quoteSpans(input, loader) {
 	const bare = input.map((l, i) => (cr[i] ? l.slice(0, -1) : l));
 	const inside = bare.map(() => false);
 	if (loader === "cmd") {
-		// `for /f` reads one line at a time: no continuation, no multi-line value, no execution. Its only
-		// cross-line hazard is a `"`, which closes the wrapper's own `set "%%A=%%B"` and makes the rest of
-		// the line command. `renderEnvValue` refuses to WRITE that character for exactly this reason.
+		// `for /f` reads one line at a time: no continuation, no multi-line value, no execution. A `"` in a value is
+		// kept as this loader's one hazard, CAUTIOUSLY: the parser's phase order says FOR variables are substituted after
+		// the line's quotes and operators are parsed, so it cannot make the rest of the line a command, but that is not
+		// Microsoft's documentation and nothing here can run cmd (issue #470; the writer's own rules are `cmdReading`'s).
 		const at = bare.findIndex((l) => (ASSIGNMENT.exec(l)?.[3] ?? "").includes('"'));
 		return { inside, hazard: at === -1 ? null : at + 1 };
 	}
@@ -1718,10 +1863,14 @@ function readValue(rest, loader) {
 		// `for /f "delims=="` takes the rest of the line verbatim, so there is no quoting and no comment.
 		// An empty value UNSETS the variable there (`set "K="`), read from the wrapper's own source rather
 		// than run on Windows.
-		// Verbatim, so this loader's reading is never ambiguous: there is no quoting to strip, no comment
-		// syntax, and no expansion. It can still DISAGREE with the POSIX loaders, which is why a caller asks
-		// the loader its own deployment uses rather than blending them.
-		return { plain: true, value: rest };
+		// Verbatim: there is no quoting to strip and no comment syntax. It can still DISAGREE with the POSIX loaders,
+		// which is why a caller asks the loader its own deployment uses rather than blending them.
+		// NOT PLAIN where this reading is not the wrapper's (issue #470, the table at `cmdReading`): `K==v` is `v` to
+		// for /f, not `=v`; a `!` (and a `^` beside one) depends on the registry's delayed expansion; a character outside
+		// ASCII is decoded in the console code page; a control character is not documented at all. A `"` and a `%` keep
+		// the reading the wrapper's own header describes (the quote stays unvouched, as the file's hazard); the WRITER is
+		// stricter and refuses all of them on the line it takes (`cmdValueRefusal`).
+		return rest.startsWith("=") || /[\x00-\x08\x0a-\x1f\x7f!^]|[^\x00-\x7f]/u.test(rest) ? { plain: false, value: null } : { plain: true, value: rest };
 	}
 	const trimmedEnd = rest.replace(/[ \t]+$/, "");
 	if (trimmedEnd === "") return { plain: true, value: "" };
