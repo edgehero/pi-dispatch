@@ -133,6 +133,8 @@ export function cachedPodmanInfo(readInfo) {
 		}
 	};
 	cached[CACHED] = true;
+	// Issue #452, gate round 4: the kept ANSWERED read, without reading, for a job's teardown.
+	cached.peek = () => kept;
 	return cached;
 }
 
@@ -750,6 +752,13 @@ export function makePodmanBackend(opts = {}) {
 		neverStartedExits: PODMAN_NEVER_STARTED_EXITS,
 		bin: "podman",
 		buildArgs: buildPodmanRunArgs,
+		// Issue #452, gate round 4: the teardown's detach gate uses the `podman info` this venue admitted jobs on, never a
+		// read of its own; before any answered read it falls back to one. A refused teardown is logged with its token.
+		teardownRuntime: () => {
+			const kept = info.peek?.();
+			return kept?.info ? { podman: true, rootless: kept.info.rootless, version: kept.info.version } : undefined;
+		},
+		log,
 		...spawnSeam,
 	});
 

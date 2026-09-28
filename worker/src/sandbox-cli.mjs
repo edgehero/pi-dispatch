@@ -116,6 +116,8 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 		spawnNetwork,
 		...(resolveJobUser ? { resolveJobUser } : {}),
 		...(keeperCheck ? { keeperCheck } : {}),
+		// Issue #452, gate round 4: a teardown the detach gate refused leaves the session's network, said here with its reason.
+		onNetworkKept: (network, reason) => err(`warning: the egress network ${network} was kept (${reason}): detaching the running proxy from it now could cut the proxy's route out on a rootless Podman 4.x whose rootless network keeper does not hold (issue #458); start the keeper, and the worker's retention sweep removes it\n`),
 		// Issue #429: which venues open here, and what a podman sandbox's observations must show, as the worker reads them.
 		blessed: config.backends,
 		backendFloor: config.backendFloor,

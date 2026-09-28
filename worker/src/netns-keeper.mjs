@@ -152,15 +152,17 @@ export function makeDetachGate(run, { bin = "docker", readRuntime = null } = {})
 		// `readRuntime`: a caller that has ALREADY read the runtime this pass (doctor's one `docker info`, which its job-user
 		// section reads too) hands that read in, `async () => { podman, rootless, version } | null`, so a pass still asks the
 		// daemon once. Otherwise the gate reads it itself, with its own bound.
+		// `undefined` from it (issue #452, gate round 4) means "I have no answer of my own": the gate then reads it itself,
+		// as with no `readRuntime`. `null` is an answer, that the runtime could not be read.
+		let handed;
 		if (typeof readRuntime === "function") {
 			try {
-				runtime = (await readRuntime()) ?? null;
+				handed = await readRuntime();
 			} catch {
-				runtime = null;
+				handed = null;
 			}
-		} else {
-			runtime = await readItself();
 		}
+		runtime = handed === undefined ? await readItself() : handed;
 		if (runtime && (runtime.podman !== true || runtime.rootless === false || !podmanNeedsNetnsKeeper(runtime.version))) return null;
 		const keeper = await ask(["inspect", NETNS_KEEPER_NOW_FORMAT, NETNS_KEEPER]);
 		if (judgeNetnsKeeper({ code: keeper?.code ?? null, stdout: keeper?.stdout ?? "" }).holds) return null;

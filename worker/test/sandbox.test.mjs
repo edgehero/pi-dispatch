@@ -595,6 +595,13 @@ describe("decideSandboxJobUser", () => {
 		assert.equal(asked, false);
 	});
 
+	test("the answer carries the runtime it was decided on BESIDE its shape, for the session teardown (#452 gate round 4)", async () => {
+		const manifest = { image: "pi-job:x", jobUser: { user: "1234:1234", home: "/home/pi" } };
+		const answer = await decideSandboxJobUser({ ...base, euid: 0, egid: 0, manifest });
+		assert.deepEqual(answer.runtime, { podman: false, rootless: false, version: null });
+		assert.deepEqual(Object.keys(answer), ["user", "home"], "not in the shape callers compare and print");
+	});
+
 	test("the run's stamp supplies the uid: sudo (euid 0) reopens a worker-mode run as that run's user", async () => {
 		const manifest = { image: "pi-job:x", jobUser: { user: "1234:1234", home: "/home/pi" } };
 		assert.deepEqual(await decideSandboxJobUser({ ...base, euid: 0, egid: 0, manifest }), { user: "1234:1234", home: "/home/pi" });
@@ -2646,4 +2653,44 @@ test("the session sweep reads the runtime and the keeper ONCE per pass, however 
 	// A new pass reads again: the keeper may have been started since.
 	await makeSandboxNetworkSweeper({ bin: "podman", run: d.run })({ retained: () => [] });
 	assert.equal(d.calls.filter((c) => c.startsWith("info ")).length, 2);
+});
+
+test("a session teardown uses the runtime it was admitted on, so a failing `docker info` leaves no network on Docker Engine, and a refusal is SAID (#452 gate round 4)", async () => {
+	const engine = Object.defineProperty({ user: null, home: null }, "runtime", { value: { podman: false, rootless: false, version: "27.4.0" }, enumerable: false });
+	const open = async (resolved, over = {}) => {
+		const calls = [];
+		const kept = [];
+		// `info` fails and `inspect` finds no keeper: what a teardown that read again would have met (measured shapes).
+		const r = await openSandbox({
+			...session,
+			...openable(),
+			detachGate: null,
+			resolveJobUser: async () => resolved,
+			egress: { armed: true, proxy: "pi-dispatch-egress-proxy" },
+			spawnNetwork: recordingDocker(calls, (args) => (args[0] === "info" || args[0] === "inspect" ? 1 : 0)),
+			onNetworkKept: (network, reason) => kept.push([network, reason]),
+			launch: async () => ({ code: 0 }),
+			...over,
+		});
+		return { r, calls, kept };
+	};
+	const admitted = await open(engine);
+	assert.ok(admitted.calls.includes("docker network rm pi-sandbox-gh-1-net"), admitted.calls.join(" | "));
+	assert.ok(!admitted.calls.some((c) => c.startsWith("docker info")), "the daemon is not asked again");
+	assert.deepEqual(admitted.kept, []);
+	// No runtime carried: the teardown reads, the read fails, the network is kept, and the caller is told why.
+	const unread = await open({ user: null, home: null });
+	assert.ok(!unread.calls.includes("docker network rm pi-sandbox-gh-1-net"));
+	assert.deepEqual(unread.kept, [["pi-sandbox-gh-1-net", "runtime-unreadable"]]);
+});
+
+test("the leftover-network refusal on podman says to start the keeper BEFORE its disconnect loop, and docker's text is as it was (#452 gate round 4)", async () => {
+	const exists = podmanSession({ spawnNetwork: recordingRuntime([], (_bin, args) => (args[1] === "create" ? 1 : 0)) });
+	const left = await openSandbox(exists.opts);
+	assert.equal(left.refused, "egress-network-exists");
+	const keeperAt = left.message.indexOf("rootless network keeper is running");
+	const loopAt = left.message.indexOf("network disconnect -f");
+	assert.ok(keeperAt > 0 && keeperAt < loopAt, left.message);
+	assert.match(left.message, /podman ps --filter name=\^pi-dispatch-netns-keeper\$/);
+	assert.match(left.message, /systemctl --user restart pi-dispatch-netns-keeper-network\.service pi-dispatch-netns-keeper\.service/);
 });

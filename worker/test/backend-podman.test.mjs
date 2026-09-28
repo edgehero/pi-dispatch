@@ -907,3 +907,15 @@ test("the podman bundle's egress preflight reads the keeper through podman on 4.
 	assert.deepEqual(inspects.slice(0, 2), ["pi-dispatch-egress-proxy", "pi-dispatch-netns-keeper"]);
 	assert.ok(fake.calls.some((c) => c[0] === "podman" && c[1] === "inspect" && c.includes("--format={{.State.StartedAt.UnixMilli}}") && c.at(-1) === "pi-dispatch-egress-proxy"), "the proxy's start, through podman");
 });
+
+test("the podman venue's job teardown uses the `podman info` it admitted jobs on, and nothing before one answered (#452 gate round 4)", { skip }, async () => {
+	let made = null;
+	const b = mod.makePodmanBackend({ image: "pi-job:x", readInfo: async () => answered(), platform: "linux", euid: 1234, egid: 1234, fs: clean(), home: HOME, env: {}, onOutput: () => {}, log: () => {}, makeRunContainer: (o) => ((made = o), async () => ({ code: 0 })) });
+	assert.equal(typeof made.teardownRuntime, "function");
+	assert.equal(made.teardownRuntime(), undefined, "no answered read yet: the gate reads for itself");
+	await b.observationPreflight({ id: "j", kind: "local" });
+	const rt = made.teardownRuntime();
+	assert.equal(rt.podman, true);
+	assert.ok("version" in rt && "rootless" in rt);
+	assert.equal(typeof made.log, "function");
+});

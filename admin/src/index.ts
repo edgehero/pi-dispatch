@@ -1927,6 +1927,8 @@ export async function openSandboxSession(paths: any, jobId: string, io: any = {}
     ...(io.keeperCheck ? { keeperCheck: io.keeperCheck } : {}),
     // Issue #452 gate round 3: the detach gate the session's teardown asks, seamed like the rest.
     ...(io.detachGate ? { detachGate: io.detachGate } : {}),
+    // Issue #452 gate round 4: a teardown the detach gate refused leaves the session's network; said, never silent.
+    onNetworkKept: (network: string, reason: string) => write(`\nthe egress network ${network} was kept (${reason}): start the rootless network keeper, and the worker's retention sweep removes it\n`),
     // Issue #446: the clock the past-window refusal reads, seamed like the rest. No `pin`: the panel offers none, so a
     // run past its window is refused here with the CLI command that pins it.
     ...(io.now ? { now: io.now } : {}),

@@ -3195,3 +3195,15 @@ test("a TERMINAL netns-keeper-not-holding failure comments the keeper's fixed se
 	await settleListeners();
 	assert.deepEqual(posted, []);
 });
+
+test("local's job teardown reads the runtime the job was admitted on from the resolver's cache, never the daemon, and has the worker's log (#452 gate round 4)", { skip }, async () => {
+	const { runContainerCalls, logs } = await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
+	const opts = runContainerCalls[0];
+	assert.equal(typeof opts.teardownRuntime, "function");
+	// Boot asked the resolver, whose ANSWERED read (the default fake: Docker Engine) is what a teardown now uses.
+	assert.deepEqual(opts.teardownRuntime(), { podman: false, rootless: false, version: null });
+	// The worker's own log, not the default no-op: a refused teardown is said on the worker's stream.
+	assert.equal(typeof opts.log, "function");
+	assert.notEqual(opts.log.toString(), "() => {}");
+	void logs;
+});

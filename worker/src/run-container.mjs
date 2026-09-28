@@ -56,6 +56,11 @@ export function makeRunContainer({
 	// and look for it (or remove its network) under another. The defaults are the local venue's, byte-identical.
 	bin = "docker",
 	buildArgs = buildDockerRunArgs,
+	// Issue #452, gate round 4: `() => runtime | undefined`, the runtime this job was ADMITTED on (the venue's cached facts),
+	// handed to the teardown's detach gate so the teardown never reads the daemon again; `undefined` falls back to a read.
+	// `log` names a teardown the gate refused, which leaves the job's network for the boot reaper.
+	teardownRuntime = null,
+	log = () => {},
 }) {
 	// async so a synchronous throw (e.g. buildContainerEnv on an unconfigured provider) surfaces as
 	// a rejection, uniformly awaitable by the processor and by tests.
@@ -241,7 +246,15 @@ export function makeRunContainer({
 			}
 			return result;
 		} finally {
-			if (network) await removeJobNetwork(spawnFn, { network, proxy: egressProxy, bin });
+			if (network) {
+				await removeJobNetwork(spawnFn, {
+					network,
+					proxy: egressProxy,
+					bin,
+					...(typeof teardownRuntime === "function" ? { readRuntime: async () => teardownRuntime() } : {}),
+					onRefused: (reason) => log("job_network_not_removed", { network, reason }),
+				});
+			}
 			try {
 				fs.rmSync(cidFile, { force: true });
 			} catch {

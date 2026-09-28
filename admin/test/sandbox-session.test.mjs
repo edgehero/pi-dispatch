@@ -399,3 +399,10 @@ test("the panel hands its keeper check to the open, and a refusal opens nothing 
   assert.deepEqual(launched, []);
   assert.match(written.join(""), /the seamed keeper check refused this open/, "the panel's own seam, not a real Podman read");
 });
+
+test("a session teardown the detach gate refused is said on the panel, with its reason (#452 gate round 4)", async () => {
+  const paths = { sandboxDir: retainedRoot({ backend: "local" }), sandboxRetentionHours: 24, sandboxIdleMinutes: 30 };
+  const { io, written } = panelIo({ detachGate: async () => "keeper-not-holding" });
+  await mod.openSandboxSession(paths, "gh-1", io);
+  assert.match(written.join(""), /the egress network pi-sandbox-gh-1-net was kept \(keeper-not-holding\)/);
+});

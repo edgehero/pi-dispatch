@@ -39,6 +39,7 @@ import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue } from "./queue.mjs";
 import { endpointShown, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
+import { runtimeFromFacts } from "./netns-keeper.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
 import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_INFO_TIMEOUT_MS, cachedPodmanInfo, decidePodmanJobUser, makePodmanBackend, makePodmanInfoReader, makePodmanReaper, observePodman, podmanConfRefusal, unavailableFor, podmanConfWidening, podmanJobUserRefusal, resolvePodmanImageUser } from "./backend-podman.mjs";
@@ -1270,6 +1271,15 @@ export async function startWorker(
 						// which variable each lands in, so a forge with no self-hosted concept simply has no entry, and
 						// adding one does not widen this signature again.
 						forgeHosts: { gitlab: config.gitlab?.apiUrl ?? null, forgejo: config.forgejo?.apiUrl ?? null, azure: config.azure?.orgUrl ?? null },
+						// Issue #452, gate round 4: the teardown's detach gate uses the `docker info` facts this job was admitted
+						// on (the job-user resolver's cached answer), never a fresh read, which on Docker Engine read as
+						// `runtime-unreadable` whenever it timed out or failed and leaked the job's network. No cached answer: it
+						// reads. A refused teardown is logged with its token.
+						teardownRuntime: () => {
+							const admitted = resolveJobUser.peek?.();
+							return admitted?.daemon?.answered ? runtimeFromFacts(admitted.daemon) : undefined;
+						},
+						log,
 					}),
 				}),
 				observationPreflight: localObservationPreflight,

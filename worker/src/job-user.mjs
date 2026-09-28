@@ -220,7 +220,10 @@ export function makeJobUserResolver({
 } = {}) {
 	let cached = null;
 	const inFlight = new Map();
-	return async function resolveJobUser({ endpoint, key }) {
+	// Issue #452, gate round 4: the last ANSWERED decision, without a read, for a job's teardown (`teardownRuntime`).
+	resolveJobUser.peek = () => cached?.value ?? null;
+	return resolveJobUser;
+	async function resolveJobUser({ endpoint, key }) {
 		if (cached && cached.key === key) return cached.value;
 		if (inFlight.has(key)) return inFlight.get(key);
 		const work = (async () => {
@@ -247,5 +250,5 @@ export function makeJobUserResolver({
 		} finally {
 			inFlight.delete(key);
 		}
-	};
+	}
 }

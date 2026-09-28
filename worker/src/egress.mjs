@@ -268,8 +268,13 @@ export async function networkExists(spawnFn, network, { bin = "docker" } = {}) {
  * `<container>-net` one this builds, detaching what is attached first since issue #357) and never for a sandbox
  * (`pi-sandbox-`); a sandbox's next open of the same run refuses and names it for removal.
  */
-export async function removeJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRESS_PROXY, bin = "docker", gate = null }) {
-	return removeJobNetworkWith(spawnRunner(spawnFn, bin), { network, proxy, bin, ...(gate ? { gate } : {}) });
+export async function removeJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRESS_PROXY, bin = "docker", gate = null, readRuntime = null, onRefused = null }) {
+	// `readRuntime` (issue #452, gate round 4): the runtime the job or session was ADMITTED on, so a teardown does not read
+	// it again. A fresh `docker info` at every teardown that timed out, failed or answered `ServerErrors` read as
+	// `runtime-unreadable` on Docker Engine, where no keeper exists, and left the job's network behind every time
+	// (measured); a pool of leaked networks ends in every egress job failing.
+	const runner = spawnRunner(spawnFn, bin);
+	return removeJobNetworkWith(runner, { network, proxy, bin, gate: gate ?? makeDetachGate(runner, { bin, ...(readRuntime ? { readRuntime } : {}) }), ...(onRefused ? { onRefused } : {}) });
 }
 
 /**
@@ -284,9 +289,13 @@ export async function removeJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRES
  * daemon), so this is the case of a keeper that died mid-run, where leaving the network is the only safe teardown.
  * `proxyRunning: false` (the create's rollback, whose connect failed) asks nothing.
  */
-export async function removeJobNetworkWith(docker, { network, proxy = DEFAULT_EGRESS_PROXY, bin = "docker", gate = makeDetachGate(docker, { bin }), proxyRunning = true }) {
+export async function removeJobNetworkWith(docker, { network, proxy = DEFAULT_EGRESS_PROXY, bin = "docker", gate = makeDetachGate(docker, { bin }), proxyRunning = true, onRefused = null }) {
 	const { blocked } = await detachEndpoints(docker, { network, endpoints: [proxy], running: proxyRunning ? [proxy] : [], gate });
-	if (blocked) return false;
+	if (blocked) {
+		// SAID, never silent (issue #452, gate round 4): a network left here is a network the caller must name.
+		if (typeof onRefused === "function") onRefused(blocked);
+		return false;
+	}
 	return (await runWith(docker, ["network", "rm", network]))?.code === 0;
 }
 

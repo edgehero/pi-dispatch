@@ -12,7 +12,8 @@ import { buildDockerRunArgs, buildPodmanRunArgs, insideDir } from "./docker-run.
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { decideJobUser, JOB_USER_FIX, makeDaemonFactsReader, relabelsPrivateMounts, resolveImageUser, socketFacts } from "./job-user.mjs";
 import { DEFAULT_EGRESS_PROXY, NETWORK_SUFFIX, createJobNetwork, egressArmed, egressEnv, egressProxyName, networkEndpoints, networkExists, networkNameFor, removeJobNetwork, removeNetworkOrSay } from "./egress.mjs";
-import { makeDetachGate } from "./netns-keeper.mjs";
+import { NETNS_KEEPER, makeDetachGate, runtimeFromFacts } from "./netns-keeper.mjs";
+import { NETNS_KEEPER_START } from "./podman-stack.mjs";
 import { isSandboxTombstone, readManifest, readRetained, sandboxDeadline, sandboxEntryName } from "./sandbox-store.mjs";
 
 /**
@@ -1004,6 +1005,8 @@ export async function openSandbox({
 	// Issue #452, gate round 3: the detach gate this session's teardown asks, a seam for the tests; by default the one
 	// `removeJobNetwork` builds over `spawnNetwork`, like every other teardown's.
 	detachGate = null,
+	// Issue #452, gate round 4: `(network, reason) => void`, told of a teardown the gate refused, which leaves the network.
+	onNetworkKept = () => {},
 }) {
 	// The posture is REQUIRED, and a boolean. Every other part of this function defaults safely; this one would
 	// default to the open bridge, which is the dropped part this function exists to stop a caller dropping.
@@ -1150,7 +1153,9 @@ export async function openSandbox({
 			const members = bin === "podman" ? `${bin} ps -a --filter network=${network} --format '{{.Names}}'` : `${bin} network inspect -f '{{range .Containers}}{{.Name}} {{end}}' ${network}`;
 			return {
 				refused: "egress-network-exists",
-				message: `the egress network ${network} already exists -- left by an earlier session of ${jobId} that did not clean up, or one opening right now. If \`pi-dispatch sandbox --list\` shows no sandbox running for it, disconnect whatever is attached and remove it: \`for c in $(${members}); do ${bin} network disconnect -f ${network} "$c"; done; ${bin} network rm ${network}\``,
+				// KEEPER FIRST on podman (issue #452, gate round 4): the loop below is a manual `network disconnect` of the running
+				// proxy, which on Podman 4.x without the rootless network keeper is #458's trigger itself. docker's text is as it was.
+				message: `the egress network ${network} already exists -- left by an earlier session of ${jobId} that did not clean up, or one opening right now. If \`pi-dispatch sandbox --list\` shows no sandbox running for it, ${bin === "podman" ? `first make sure the rootless network keeper is running (\`podman ps --filter name=^${NETNS_KEEPER}$\` lists it; if not, \`${NETNS_KEEPER_START}\`), because on Podman 4.x detaching the running proxy without it cuts the proxy's route out (issue #458); then ` : ""}disconnect whatever is attached and remove it: \`for c in $(${members}); do ${bin} network disconnect -f ${network} "$c"; done; ${bin} network rm ${network}\``,
 			};
 		}
 		// Where the proxy comes from differs by venue: the compose file is docker-only, and on podman the proxy is
@@ -1293,7 +1298,18 @@ export async function openSandbox({
 			: {};
 		return { code: code ?? null, error: error ?? null, ...(detached ? { detached: true } : {}), ...during };
 	} finally {
-		if (network && !detached) await removeJobNetwork(spawnNetwork, { network, proxy: egress.proxy, bin, ...(detachGate ? { gate: detachGate } : {}) });
+		if (network && !detached) {
+			// The runtime this session was ADMITTED on (issue #452, gate round 4), never a fresh read at the teardown; a
+			// refused teardown is said with its token.
+			await removeJobNetwork(spawnNetwork, {
+				network,
+				proxy: egress.proxy,
+				bin,
+				...(detachGate ? { gate: detachGate } : {}),
+				...(jobUser?.runtime ? { readRuntime: async () => jobUser.runtime } : {}),
+				onRefused: (reason) => onNetworkKept(network, reason),
+			});
+		}
 	}
 }
 
@@ -1409,7 +1425,9 @@ async function decideLocalSandboxJobUser({
 	if (decision.mode === "unknown") {
 		return { refused: "job-user-unknown", message: `which uid the sandbox may run as could not be decided (${decision.reason}); is the docker daemon running?` };
 	}
-	if (decision.mode === "image") return { user: null, home: null, ...relabel };
+	// `runtime` (issue #452, gate round 4): the facts this session was admitted on, for its teardown's detach gate.
+	const runtime = daemon?.answered ? runtimeFromFacts(daemon) : undefined;
+	if (decision.mode === "image") return withRuntime({ user: null, home: null, ...relabel }, runtime);
 	const needsImage = identity.euid !== SHIPPED_IMAGE_UID;
 	const caps = needsImage ? await imageCapabilities(manifest?.image) : { ok: true, capabilities: [] };
 	if (needsImage && !caps?.ok) {
@@ -1420,7 +1438,17 @@ async function decideLocalSandboxJobUser({
 		return { refused: chosen.refused, message: `the retained image ${manifest?.image} does not declare anyUid, so it cannot run as the uid that owns this run's files (issue #341)` };
 	}
 	if (chosen.refused) return { refused: chosen.refused, message: `${JOB_USER_FIX[chosen.cause] ?? "the job user could not be decided"} (issue #341)` };
-	return { user: chosen.user, home: chosen.home, ...relabel };
+	return withRuntime({ user: chosen.user, home: chosen.home, ...relabel }, runtime);
+}
+
+/**
+ * The runtime a sandbox was admitted on, carried BESIDE the job-user answer rather than in it (issue #452, gate round 4):
+ * non-enumerable, so the answer's shape, which callers compare and print, is what it always was, while `openSandbox`'s
+ * teardown hands it to the detach gate and reads the daemon nothing more.
+ */
+function withRuntime(answer, runtime) {
+	if (runtime !== undefined) Object.defineProperty(answer, "runtime", { value: runtime, enumerable: false });
+	return answer;
 }
 
 /**
@@ -1513,7 +1541,8 @@ async function decidePodmanSandboxJobUser({
 	if (chosen.refused) return { refused: chosen.refused, message: `${PODMAN_JOB_USER_FIX[chosen.cause] ?? "the job user could not be decided"} (issue #354)` };
 	if (chosen.unavailable) return { refused: "job-user-unknown", message: `which uid the sandbox may run as could not be decided (${chosen.reason}); is podman answering \`podman info\` as this account?` };
 	// `relabel` on podman is `podman info`'s SELinux fact, the rule a podman job's own mounts follow (issue #355).
-	return { user: chosen.user, home: chosen.home, ...(chosen.relabel === true ? { relabel: true } : {}) };
+	// `runtime` (issue #452, gate round 4): the same read, for the session teardown's detach gate, so it reads nothing again.
+	return withRuntime({ user: chosen.user, home: chosen.home, ...(chosen.relabel === true ? { relabel: true } : {}) }, { podman: true, rootless: info.info?.rootless ?? null, version: info.info?.version ?? null });
 }
 
 /**

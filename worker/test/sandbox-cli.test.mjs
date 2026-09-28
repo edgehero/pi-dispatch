@@ -485,3 +485,12 @@ test("the CLI hands its keeper check to the open, and a refusal is said and open
 	assert.deepEqual(launches, []);
 	assert.match(`${c.text()}${c.errText()}`, /the seamed keeper check refused this open/, "the CLI's own seam, not a real Podman read");
 });
+
+test("a session teardown the detach gate refused is SAID by the CLI, with its reason (#452 gate round 4)", async () => {
+	// The fake runtime answers `info` with nothing readable and knows no keeper, and the seamed job user carries no admitted
+	// runtime: the teardown reads, cannot tell, keeps the network, and the operator is told.
+	const { root } = retained({ backend: "local" });
+	const c = capture();
+	assert.equal(await runSandbox(["gh-1"], { env: envWith(root), deps: c.deps }), 0);
+	assert.match(c.errText(), /warning: the egress network pi-sandbox-gh-1-net was kept \(runtime-unreadable\)/);
+});

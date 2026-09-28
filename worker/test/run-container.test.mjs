@@ -710,3 +710,49 @@ test("exitReason reaches the result through a disabled real sink, and only off a
 	}
 	assert.deepEqual(opened, [], "raw logs stayed off: no .log was ever opened");
 });
+
+test("a job's teardown uses the runtime it was ADMITTED on, so a failed, erroring or slow `docker info` never leaks its network on Docker Engine (#452 gate round 4)", { skip }, async () => {
+	// MEASURED (gate round 4, engine-teardown.txt): a fresh `docker info` at every teardown that exited 1, answered
+	// ServerErrors, or took 15 s read as `runtime-unreadable`, asked for a keeper Docker never has, and left the network.
+	const ENGINE = { podman: false, rootless: false, version: "27.4.0" };
+	const INFO = {
+		"exit 1": { code: 1, out: "" },
+		ServerErrors: { code: 0, out: JSON.stringify({ ServerErrors: ["Cannot connect to the Docker daemon"] }) },
+		slow: "hang",
+	};
+	const job = async ({ info, teardownRuntime }) => {
+		const calls = [];
+		const logs = [];
+		const spawnFn = (cmd, args) => {
+			calls.push(args.join(" "));
+			const child = new EventEmitter();
+			child.stdout = new EventEmitter();
+			child.stderr = new EventEmitter();
+			child.kill = () => {};
+			queueMicrotask(() => {
+				if (args[0] === "info") {
+					if (info === "hang") return;
+					child.stdout.emit("data", info.out);
+					return child.emit("close", info.code);
+				}
+				if (args[0] === "inspect") return child.emit("close", 1);
+				child.emit("close", 0);
+			});
+			return child;
+		};
+		const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn, fs: cidFs(), egress: true, detachedCheck: instantCheck(), log: (e, f) => logs.push([e, f]), ...(teardownRuntime ? { teardownRuntime } : {}) });
+		await runContainer({ job: JOB, prepared: PREPARED, name: "pi-job-j1", signal: new AbortController().signal, user: null, home: null });
+		return { calls, logs };
+	};
+	for (const [shape, info] of Object.entries(INFO)) {
+		const admitted = await job({ info, teardownRuntime: () => ENGINE });
+		assert.ok(admitted.calls.includes("network rm pi-job-j1-net"), `${shape}: the network is removed`);
+		assert.ok(!admitted.calls.some((c) => c.startsWith("info")), `${shape}: and the daemon is not asked again`);
+		assert.deepEqual(admitted.logs, []);
+	}
+	// No admitted answer (`undefined`): the teardown reads, as before, and a refusal is LOGGED with its token.
+	const unread = await job({ info: INFO["exit 1"], teardownRuntime: () => undefined });
+	assert.ok(unread.calls.some((c) => c.startsWith("info")), "it falls back to a read");
+	assert.ok(!unread.calls.includes("network rm pi-job-j1-net"));
+	assert.deepEqual(unread.logs, [["job_network_not_removed", { network: "pi-job-j1-net", reason: "runtime-unreadable" }]]);
+});

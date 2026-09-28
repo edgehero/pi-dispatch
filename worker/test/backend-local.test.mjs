@@ -930,3 +930,19 @@ test("the boot reaper asks the ONE detach gate, once per pass, on docker as on p
 	assert.equal(infos, 1);
 	assert.deepEqual(hangLog.lines.map(([, f]) => f.reason), ["runtime-unreadable", "runtime-unreadable", "runtime-unreadable"]);
 });
+
+test("the boot reaper's detach-gate read gets the gate's own bound, 15 s and 1 MiB, not the reaper's 30 s (#452 gate round 4)", async () => {
+	// Through the reaper's `step` to its exec, as the third argument.
+	const seen = [];
+	const daemon = fakeDockerExec({ nets: { "pi-job-a-net": ["pi-dispatch-egress-proxy"] } });
+	const exec = (bin, args, opts) => (seen.push({ verb: args[0], opts }), daemon.exec(bin, args));
+	await makeReaper({ log: () => {}, exec })();
+	assert.deepEqual(seen.find((c) => c.verb === "info").opts, { timeoutMs: 15_000, maxBuffer: 1024 * 1024 });
+	assert.equal(seen.find((c) => c.verb === "network").opts, undefined, "every other step keeps the reaper's own bound");
+	// And the default exec turns those options into execFile's own.
+	const got = [];
+	const fake = (bin, args, o, cb) => (got.push(o), queueMicrotask(() => cb(null, "", "")));
+	await reaperExec({ execFileFn: fake })("docker", ["info"], { timeoutMs: 15_000, maxBuffer: 1024 * 1024 });
+	await reaperExec({ execFileFn: fake })("docker", ["ps"]);
+	assert.deepEqual(got.map((o) => [o.timeout, o.maxBuffer]), [[15_000, 1024 * 1024], [30_000, 1024 * 1024]]);
+});

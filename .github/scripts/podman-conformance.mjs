@@ -68,7 +68,8 @@ const { READ_BACK_BY_A_LIVE_PROBE, UNVERIFIED_BY_THIS_HARNESS, runBackendConform
 const { SHIPPED_IMAGE_UID } = await load("worker/src/container-spec.mjs");
 const { CANARY_PROBE_SLUGS, liveRunVia, runEgressCanary, sweepStaleCanaryNetworks } = await load("worker/src/doctor.mjs");
 const { buildPodmanRunArgs } = await load("worker/src/docker-run.mjs");
-const { egressArmed, egressCanaryNetwork, egressCanaryProbe, egressProxyName, networkNameFor } = await load("worker/src/egress.mjs");
+const { egressArmed, egressCanaryNetwork, egressCanaryProbe, egressProxyName, networkNameFor, removeNetworkOrSay } = await load("worker/src/egress.mjs");
+const { makeDetachGate } = await load("worker/src/netns-keeper.mjs");
 const { NETNS_KEEPER, NETNS_KEEPER_FORMAT, judgeNetnsKeeper } = await load("worker/src/podman-stack.mjs");
 const { runLiveProbes } = await load("worker/src/live-probes.mjs");
 
@@ -399,11 +400,16 @@ async function staleCanarySweep() {
 	} finally {
 		// Whatever a failed pass left, removed WITHOUT `-f` on a network: `network rm -f` deletes the containers on it,
 		// the proxy included (measured on 4.9.3).
+		// Through the ONE detach helper and its gate (issue #452), as every detach in worker/src is: without a holding keeper
+		// on 4.x this leaves the network and says so, rather than cut the proxy's route out for the steps after it.
 		for (const name of [runningProbe, stoppedProbe]) await podman(["rm", "-f", "--time=0", name]);
+		const cleanupRun = (args) => podman(args, { timeoutMs: 30_000 });
+		const cleanupGate = makeDetachGate(cleanupRun, { bin: "podman" });
 		for (const net of [emptyNet, fullNet]) {
 			if (!(await exists("network", net))) continue;
-			await podman(["network", "disconnect", "-f", net, proxy]);
-			if ((await podman(["network", "rm", net])).code !== 0) lines.push(`could not remove ${net}: podman network rm ${net}`);
+			const outcome = await removeNetworkOrSay(cleanupRun, { network: net, detach: [proxy], bin: "podman", gate: cleanupGate });
+			if (outcome.blocked) lines.push(`kept ${net} with ${proxy} on it (${outcome.blocked}): detaching it now could cut the proxy's route out`);
+			else if (!outcome.removed) lines.push(`could not remove ${net}: ${outcome.command}`);
 		}
 	}
 }

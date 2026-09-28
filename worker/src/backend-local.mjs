@@ -46,9 +46,11 @@ export const REAPER_STEP_TIMEOUT_MS = 30_000;
  * `killed: true` and no numeric code, which every caller already reads as no answer.
  */
 export function reaperExec({ execFileFn = execFile, timeoutMs = REAPER_STEP_TIMEOUT_MS } = {}) {
-	return (bin, args) =>
+	// `opts` (issue #452, gate round 4): a step may ask for its own bound, as the detach gate's runtime read does (15 s,
+	// 1 MiB, the facts readers' own); every other step keeps the reaper's 30 s.
+	return (bin, args, opts = {}) =>
 		new Promise((resolve, reject) => {
-			execFileFn(bin, [...args], { timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+			execFileFn(bin, [...args], { timeout: opts.timeoutMs ?? timeoutMs, killSignal: "SIGKILL", maxBuffer: opts.maxBuffer ?? 1024 * 1024 }, (err, stdout, stderr) => {
 				if (err) reject(Object.assign(err, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
 				else resolve({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
 			});
@@ -425,9 +427,10 @@ export function makeReaper({ log, exec = execReaperBounded, bin = "docker" }) {
 	// The `network ls` itself deliberately stays on the throwing `exec`, so a daemon that dies between the `ps`
 	// and the listing still answers `{ reaped: false }`. That is the pre-existing behaviour and it is the
 	// conservative direction: this host cannot claim it holds nothing while it could not finish looking.
-	const step = async (args) => {
+	// `opts` passed through (issue #452, gate round 4): the detach gate's runtime read asks for its own bound.
+	const step = async (args, opts) => {
 		try {
-			const { stdout, stderr } = await exec(bin, args);
+			const { stdout, stderr } = await (opts ? exec(bin, args, opts) : exec(bin, args));
 			return { code: 0, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") };
 		} catch (err) {
 			// `promisify(execFile)` rejects with the exit code on `.code` and what the CLI printed on
