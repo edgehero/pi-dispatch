@@ -357,7 +357,15 @@ function editedValueRefusal(next, key, value, platform) {
 	// start and reads the last one that assigns the key, as the shell takes it.
 	if (loader === "shell") {
 		const taken = lastAssignment(next, key, loader);
-		if (taken === undefined) return `after the edit, ${where} would find no command that assigns ${key}`;
+		if (taken === undefined) {
+			// Named by its line (third regression review nit): the written line is there, and a command above it
+			// swallows it (`PI_BACKENDS=\` at the end of the file, then the appended `WEBHOOK_SECRET=...`).
+			const lines = next.split("\n");
+			const written = lines.findLastIndex((l) => l.replace(/\r$/, "") === `${key}=${renderEnvValue(value, { platform })}`);
+			return written === -1
+				? `after the edit, ${where} would find no command that assigns ${key}`
+				: `after the edit, ${where} would read line ${written + 1}, where ${key} is written, as part of the command above it, so no command would assign ${key}`;
+		}
 		const want = readEnvAssignments(`${key}=${renderEnvValue(value, { platform })}\n`, [key], { loader })[key];
 		// Unreadable is not DIFFERENT: `PI_BACKENDS=''podman` is `podman` to the shells, and saying the edit would read
 		// "something other" was false (third regression review). Said as what it is.

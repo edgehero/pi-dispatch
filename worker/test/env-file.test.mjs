@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { EXEC_ONE_MAX, EXEC_TOTAL_MAX, SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileEditCheck, envFileEditRefusal, envFileValueLines, envFileHazard, envFileLoadHazard, envFileSystemdHazard, firstInvalidUtf8, systemdReading, systemdUtf8, envKeyIsBlank, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, setEnvKey, setEnvKeyIfEmpty, updateEnvFile } from "../src/env-file.mjs";
@@ -1303,7 +1303,9 @@ test("the writers never take a line inside a value for the key's, and updateEnvF
 	for (const platform of ["linux", "darwin"]) {
 		for (const before of ["A=1\nX=a\\\n", "A=1\nX=a\\", 'A=1\nX="abc\n', "A=1\nX='abc\n"]) {
 			writeFileSync(path, before);
-			assert.throws(() => updateEnvFile(path, "PI_BACKENDS", "podman", { platform }), /refusing to edit .*: (after the edit, .* would (read line \d+ as part of a quoted value or a continuation above it, not as|find no|find no command that assigns|read something other than what was written for) PI_BACKENDS|line \d+ has [^.]+|line \d+ is one the wrapper that sources this file reads differently from this command)[^]*\. Nothing was written/, `${platform} ${JSON.stringify(before)}`);
+			assert.throws(() => updateEnvFile(path, "PI_BACKENDS", "podman", { platform }), /refusing to edit .*: (after the edit, .* would (read line \d+ as part of a quoted value or a continuation above it, not as|find no|read something other than what was written for) PI_BACKENDS|after the edit, the wrapper that sources the file would read line \d+, where PI_BACKENDS is written, as part of the command above it|line \d+ has [^.]+|line \d+ is one the wrapper that sources this file reads differently from this command)[^]*\. Nothing was written/, `${platform} ${JSON.stringify(before)}`);
+			// macOS names the swallowed line (third regression review nit): `X=a\` at the end, then the appended key.
+			if (platform === "darwin" && before === "A=1\nX=a\\\n") assert.throws(() => updateEnvFile(path, "PI_BACKENDS", "podman", { platform }), /^Error: refusing to edit .*: after the edit, the wrapper that sources the file would read line 3, where PI_BACKENDS is written, as part of the command above it, so no command would assign PI_BACKENDS\. Nothing was written$/);
 			assert.equal(readFileSync(path, "utf8"), before, "unchanged");
 		}
 	}
@@ -1492,6 +1494,28 @@ test("a key line inside a quoted value is not a set key, for either loader: the 
 	}
 });
 
+/**
+ * What a shell IS, probed rather than assumed: "bash3", "bash5" and so on (its BASH_VERSION's major), "dash" (its path
+ * resolves to dash), or "other". /bin/sh is bash 3.2 on macOS and dash on the ubuntu CI runner, and two oracle rows
+ * written as "/bin/sh" encoded the first while CI ran the second (a `$[` row and the NUL row failed there on every head
+ * since 8dc943a). The version matters too, measured: bash 3.2 stops reading a file at a NUL, bash 5.2 (ubuntu 24.04,
+ * under --posix) drops the byte and reads on, as dash does. A row measured on one shell is asserted only against a
+ * shell of that kind; a row that holds for every POSIX shell stays unconditional, and the module's own assertions
+ * never depend on this.
+ */
+function shellKind(path, flags = []) {
+	if (!existsSync(path)) return null;
+	const r = spawnSync(path, [...flags, "-c", 'printf %s "${BASH_VERSION-}"'], { encoding: "utf8", timeout: 20_000, killSignal: "SIGKILL" });
+	if (r.stdout !== "") return `bash${r.stdout.split(".")[0]}`;
+	let real = path;
+	try {
+		real = realpathSync(path);
+	} catch {
+		// keep the path as given
+	}
+	return /(^|\/)dash$/.test(real) ? "dash" : "other";
+}
+
 /** What `/bin/sh` reads for `key` after sourcing `text` the way the macOS wrapper does, or null when there is no /bin/sh. */
 function shReads(text, key) {
 	if (!existsSync("/bin/sh")) return null;
@@ -1612,32 +1636,35 @@ function shellsRead(text) {
 		.map(([sh, ...flags]) => {
 			const r = spawnSync(sh, [...flags, "-c", `set -a; . ./.env; printf '%s\\001%s' "\${K-__UNSET__}" "\${WEBHOOK_SECRET-__UNSET__}"`], { cwd: dir, encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: "/h" }, timeout: 20_000, killSignal: "SIGKILL" });
 			const [k, secret] = r.stdout.split("\x01");
-			return { sh, k, secret, failed: r.status !== 0 || r.stderr !== "", stderr: r.stderr };
+			return { sh, kind: shellKind(sh, flags), k, secret, failed: r.status !== 0 || r.stderr !== "", stderr: r.stderr };
 		});
 }
 
 test("outside single quotes only $NAME and ${NAME} pass, and a backslash-newline inside double quotes is removed first, as sh does (#447 delta review)", () => {
 	// Every row measured in /bin/sh (bash 3.2), bash --posix and dash on macOS, and re-measured here where each exists.
-	// `effect` is what makes the row dangerous in /bin/sh, the wrapper's own shell.
+	// `effect` is what makes the row dangerous in /bin/sh, the wrapper's own shell, asserted only when /bin/sh here is
+	// the kind of shell the row was measured on: "posix" rows hold in bash and dash alike, "bash3" rows were measured on
+	// bash 3.2, the macOS /bin/sh (dash reads `$[` as text and rejects `${K:...}` as a bad substitution). The hazard
+	// verdict is the module's, always.
 	const refused = [
 		// A backslash-newline inside double quotes is deleted before expansion, so it cannot split a `$(`, `$((` or `${`.
-		['K="${x:-$\\\n((WEBHOOK_SECRET=7))}"', 1, (r) => r.secret === "7"],
-		['K="$\\\n(echo ran)"', 1, (r) => r.k === "ran"],
+		['K="${x:-$\\\n((WEBHOOK_SECRET=7))}"', 1, "posix", (r) => r.secret === "7"],
+		['K="$\\\n(echo ran)"', 1, "posix", (r) => r.k === "ran"],
 		// `$[` arithmetic, evaluated by bash 3.2 (dash reads it as text), directly or through a variable's value.
-		["K=$[WEBHOOK_SECRET=5]", 1, (r) => r.secret === "5"],
-		["X='WEBHOOK_SECRET=9'\nK=$[X]", 2, (r) => r.secret === "9"],
-		["X='a[$(echo ran >&2)]'\nK=$[X]", 2, (r) => r.stderr.includes("ran")],
+		["K=$[WEBHOOK_SECRET=5]", 1, "bash3", (r) => r.secret === "5"],
+		["X='WEBHOOK_SECRET=9'\nK=$[X]", 2, "bash3", (r) => r.secret === "9"],
+		["X='a[$(echo ran >&2)]'\nK=$[X]", 2, "bash3", (r) => r.stderr.includes("ran")],
 		// Arithmetic inside `${}`: a substring offset and an array subscript.
-		["K=abcdef\nK=${K:WEBHOOK_SECRET=2}", 2, (r) => r.secret === "2"],
-		["K=${a[WEBHOOK_SECRET=5]}", 1, (r) => r.secret === "5"],
+		["K=abcdef\nK=${K:WEBHOOK_SECRET=2}", 2, "bash3", (r) => r.secret === "2"],
+		["K=${a[WEBHOOK_SECRET=5]}", 1, "bash3", (r) => r.secret === "5"],
 		// A bad substitution: an error in bash, and it aborts the whole source under dash.
-		['K="${}"', 1, (r) => r.failed],
-		['K="${a b}"', 1, (r) => r.failed],
+		['K="${}"', 1, "posix", (r) => r.failed],
+		['K="${a b}"', 1, "posix", (r) => r.failed],
 	];
-	for (const [line, at, effect] of refused) {
+	for (const [line, at, measuredOn, effect] of refused) {
 		const text = `${line}\n`;
 		const sh = shellsRead(text).find((r) => r.sh === "/bin/sh");
-		if (sh) assert.ok(effect(sh), `the oracle: ${JSON.stringify(line)} in /bin/sh: ${JSON.stringify(sh)}`);
+		if (sh && (measuredOn === "posix" || sh.kind === measuredOn)) assert.ok(effect(sh), `the oracle: ${JSON.stringify(line)} in /bin/sh (${sh.kind}): ${JSON.stringify(sh)}`);
 		assert.deepEqual(envFileHazard(text, { loader: "shell" }), { line: at }, JSON.stringify(line));
 	}
 	// Refused by the RULE rather than for a measured effect: a positional or special parameter, and a `$` before
@@ -1713,9 +1740,14 @@ test("a word after an unquoted blank is a command or a second assignment, so it 
 test("a NUL is a shell hazard on its line: the macOS /bin/sh stops reading the file there (#447 round-cap review)", () => {
 	// Measured: /bin/sh (bash 3.2) reads K=a and never reaches the line below; dash drops the byte and reads on; a NUL
 	// inside a quote aborts the source in /bin/sh. So what the service reads depends on a byte nobody sees.
+	// Keyed to each shell's kind: bash 3.2 (the macOS /bin/sh) stops at the NUL; dash and bash 5.2 drop the byte and read
+	// on (measured on macOS and on ubuntu 24.04, whose /bin/sh is dash). Either way the reading depends on which shell
+	// sources the file, which is the hazard.
 	const text = "K=a\0b\nWEBHOOK_SECRET=old\n";
-	const sh = shellsRead(text).find((r) => r.sh === "/bin/sh");
-	if (sh) assert.deepEqual([sh.k, sh.secret], ["a", "__UNSET__"], "the oracle");
+	for (const r of shellsRead(text)) {
+		if (r.kind === "bash3") assert.deepEqual([r.k, r.secret], ["a", "__UNSET__"], `the oracle in ${r.sh} (bash 3)`);
+		else if (r.kind === "dash" || r.kind === "bash5") assert.deepEqual([r.k, r.secret], ["ab", "old"], `the oracle in ${r.sh} (${r.kind})`);
+	}
 	for (const [t, at] of [[text, 1], ["A=1\nK='a\0b'\n", 2], ["A=1\n# a\0 note\nB=2\n", 2], ["A='x\ny\0z'\n", 2]]) {
 		assert.deepEqual(envFileHazard(t, { loader: "shell" }), { line: at, shape: "shell-nul" }, JSON.stringify(t));
 	}
