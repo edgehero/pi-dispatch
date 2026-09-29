@@ -136,6 +136,60 @@ export function makeStyler(theme, { ascii = false } = {}) {
     return strong ? bold(out) : out;
   };
 
+  /**
+   * An ALREADY-COLOURED line cut to at most `width` visible columns, KEEPING its colour (issue #482).
+   *
+   * `cell` drops the colour on the input, and it says why: keeping it needs an ANSI-aware slice. Both
+   * line fitters (`fitLine` in the dashboard, `padVisible` below) reached for `cell` on overflow anyway,
+   * so ANY line one column too wide printed in the default colour: a dim post-mortem came out bright, and
+   * an amber risk badge on a clipped trigger row came out plain. This is that slice, built from the SAME
+   * two primitives `cell` cuts with (`columnsOf`, `sliceColumns`), so it measures nothing its own way.
+   *
+   * The line is gated with `scrubKeepingStyle` first, so the only escapes left are SGR runs; each text
+   * run between two of them is cut by columns and the runs themselves pass through at zero width. After a
+   * cut, one `ESC [ 0 m`, because the run that was cut never reached its own closing code and would
+   * otherwise bleed into the padding and the frame border after it. A line with no escape at all gets
+   * none, so under PLAIN_THEME this returns exactly what `cell` returns, byte for byte.
+   *
+   * The runs are measured ONE BY ONE, which is how the renderer's compositor measures them (issue #417),
+   * and the whole-string count can still differ, so the result is measured again the way `visibleLen`
+   * measures a line and, on the one shape where that is wider than `width`, it falls back to `cell`:
+   * colourless, but never through the border. Not padded; the caller owns the fill.
+   */
+  const clipStyled = (text, width) => {
+    const w = Math.max(0, Math.trunc(width) || 0);
+    const line = scrubKeepingStyle(String(text ?? ""));
+    if (visibleLen(line) <= w) return line;
+    const ell = G.ellipsis;
+    const narrow = w <= columnsOf(ell);
+    const budget = narrow ? w : w - columnsOf(ell);
+    const codes = /\x1b\[[0-9;]*m/g;
+    let out = "";
+    let used = 0;
+    let styled = false;
+    let at = 0;
+    for (;;) {
+      const m = codes.exec(line);
+      const run = line.slice(at, m ? m.index : line.length);
+      if (columnsOf(run) > budget - used) {
+        out += sliceColumns(run, budget - used);
+        break;
+      }
+      out += run;
+      used += columnsOf(run);
+      if (!m) break;
+      out += m[0];
+      styled = true;
+      at = m.index + m[0].length;
+    }
+    // A JOINER LEFT AT THE CUT, looking through any colour codes after it, joins the ellipsis to the glyph
+    // before it. `sliceColumns` strips one at the end of the run it cut, but a run that FITTED can end in
+    // one with the cut landing in the next run, which put `U+200D` straight in front of the ellipsis.
+    out = out.replace(/\u200d+((?:\x1b\[[0-9;]*m)*)$/u, "$1");
+    out += (narrow ? "" : ell) + (styled ? "\x1b[0m" : "");
+    return visibleLen(out) <= w ? out : cell(line, w);
+  };
+
   /** A small colored token (no padding). Visible width is `columnsOf(label)`, plus 2 if `pad`. */
   const badge = (label, color, { pad = false } = {}) => {
     const text = pad ? ` ${label} ` : String(label);
@@ -247,7 +301,7 @@ export function makeStyler(theme, { ascii = false } = {}) {
   // trigger field has the same shape as one written here: keeping ours kept theirs, with their URL under
   // their display text. `stripAnsi` still recognises OSC-8, because data can still contain one.
 
-  return { theme: th, glyphs: G, fg, bold, cell, badge, meter, divider, joinCells, sparkline, fmtCost, lineInput, stripAnsi, visibleLen };
+  return { theme: th, glyphs: G, fg, bold, cell, clipStyled, badge, meter, divider, joinCells, sparkline, fmtCost, lineInput, stripAnsi, visibleLen };
 }
 
 /**
@@ -309,7 +363,11 @@ function padVisible(styler, line, width) {
   // STRICTLY GREATER, then clip: the frame promises every body line is exactly `inner` columns, and an
   // over-wide one broke the right border instead -- the spend "off" rows at narrow widths never fitted.
   // `>=` here would strip colour from every line that already fits, which is why the comparison is strict.
-  if (vis > width) return styler.cell(line, width);
+  // Clipped KEEPING its colour (issue #482): `cell` here printed any over-wide line in the default colour.
+  if (vis > width) {
+    const cut = styler.clipStyled(line, width);
+    return cut + " ".repeat(Math.max(0, width - styler.visibleLen(cut)));
+  }
   if (vis === width) return line;
   return line + " ".repeat(width - vis);
 }

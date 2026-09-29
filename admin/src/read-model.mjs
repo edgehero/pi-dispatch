@@ -1331,6 +1331,35 @@ export function readTriggers({ triggersPath, fs = nodeFs }) {
 }
 
 /**
+ * The panel's TRIGGER_DETAIL read (issue #482): the same display view `readTriggers` returns, plus each
+ * entry's `run.instructions` TEXT keyed by its raw file index.
+ *
+ * A SEPARATE function and a SEPARATE key, never a field on the display record, and that is the whole
+ * design. `readTriggers`' records are what the model-callable `dispatch_triggers` tool returns verbatim,
+ * which is why `normalizeTriggerForDisplay` carries `instructions` as a boolean: up to 2000 characters of
+ * operator standing text has no business in a tool result. The overlay is not model context, so the words
+ * can be shown there, and only there; nothing but `createDashboardDeps` calls this.
+ *
+ * ONE read of the file, captured through `readTriggers`' own `fs` seam, so the text and the view can never
+ * describe two different versions of a file an operator saved between two reads. The view's shapes pass
+ * through untouched (`missing`, `invalid`), with an empty map beside them.
+ */
+export function readTriggersWithInstructions({ triggersPath, fs = nodeFs }) {
+  let text = null;
+  const capture = { readFileSync: (p, enc) => (text = fs.readFileSync(p, enc)) };
+  const view = readTriggers({ triggersPath, fs: capture });
+  const instructions = {};
+  if (Array.isArray(view?.triggers) && typeof text === "string") {
+    const entries = JSON.parse(text).triggers;
+    for (const t of view.triggers) {
+      const raw = entries?.[t.index]?.run?.instructions;
+      if (typeof raw === "string" && raw.trim() !== "") instructions[t.index] = raw;
+    }
+  }
+  return { view, instructions };
+}
+
+/**
  * Normalize one `{ on, run }` entry into its display record, or `null` when it is not usable. Exported for
  * the display tests; `readTriggers` is the only production caller.
  *

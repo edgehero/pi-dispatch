@@ -261,6 +261,34 @@ export function renderSchedulers(schedulers) {
 }
 
 /**
+ * The skills dir's last path segment, the ONE rule both trigger surfaces badge with (issue #482): either
+ * separator, so a win32 path names its folder too, and a trailing separator ignored. A dir with no segment
+ * at all (`"/"`) reads `-`, this module's absence mark, where it used to print `undefined`.
+ */
+export function skillsBasename(dir) {
+  return String(dir).split(/[\\/]/).filter(Boolean).pop() ?? "-";
+}
+
+/**
+ * A trigger display record with every string field, and every string in an array field, through
+ * `scrubControls` (issue #482). Applied where EVERY trigger renderer begins -- this module's
+ * `renderTriggers`, and the panel's LIST row and TRIGGER_DETAIL -- which is the rule rather than a list of
+ * sites. The panes' gate cannot cover this class: it keeps an SGR run BECAUSE the styler emits them, so an
+ * SGR run inside a label, a phrase, an image tag or a secrets profile painted the pane and, since the gate
+ * runs after the line was measured, pushed it past the frame; and the unframed degrade, which substitutes
+ * only a bare ESC, printed it raw. Shallow on purpose: the one nested value, `disarmed`, is printed only as
+ * `[spent]` here and through the panel's scrubbing `spentMark` there. Exported for the panel, not re-spelled.
+ */
+export function scrubTrigger(t) {
+  if (!t || typeof t !== "object") return t;
+  const out = {};
+  for (const [k, v] of Object.entries(t)) {
+    out[k] = typeof v === "string" ? scrubControls(v) : Array.isArray(v) ? v.map((x) => (typeof x === "string" ? scrubControls(x) : x)) : v;
+  }
+  return out;
+}
+
+/**
  * Render triggers display-only (OQ-008): the schedulers block, then the committed unified `triggers.json`
  * as a discriminated list -- cron, label, comment, and pull_request entries each on their own line.
  */
@@ -273,7 +301,7 @@ export function renderTriggers({ schedulers, triggers } = {}) {
   } else {
     const list = (triggers && triggers.triggers) ?? [];
     if (list.length === 0) out.push("  (no triggers)");
-    else for (const t of list) out.push(`  ${triggerLine(t)}`);
+    else for (const t of list) out.push(`  ${triggerLine(scrubTrigger(t))}`);
   }
   return out.join("\n");
 }
@@ -308,7 +336,7 @@ function triggerLine(t) {
   // choosing the skills IS choosing what the agent can do. The BASENAME only, so the line stays skimmable;
   // the full path lives in the trigger detail view, where the panel is the operator's own session on their
   // own host and a path discloses nothing new.
-  const skl = t?.skillsDir ? `  [skills ${String(t.skillsDir).split(/[\\/]/).filter(Boolean).pop()}]` : "";
+  const skl = t?.skillsDir ? `  [skills ${skillsBasename(t.skillsDir)}]` : "";
   // A trigger that puts operator standing text into every job's prompt says so. Same doctrine as the
   // badges above: a trigger that changes what the agent is told must never render like one that does not.
   const ins = t?.instructions === true ? "  [instructions]" : "";

@@ -26,11 +26,11 @@ import { makeQueue, fleetQueueNames, discoverHostQueues, unionQueueNames } from 
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
-import { cancelHeldJob, listRuns, mergedRunsOn, readSettingsView, mapSchedulers, readTriggers, readPauseWindows, readScopedLimits, readStagedPackages } from "./read-model.mjs";
+import { cancelHeldJob, listRuns, mergedRunsOn, readSettingsView, mapSchedulers, readTriggersWithInstructions, readPauseWindows, readScopedLimits, readStagedPackages } from "./read-model.mjs";
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
-import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel } from "./render.mjs";
+import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
-import { box, clip, clipData, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle } from "./panel.mjs";
+import { box, clip, clipData, cutUnits, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
 
 const KEY_HINTS = "[p]ause  [r]esume  [q]uit";
@@ -315,7 +315,9 @@ export function createDashboardDeps(
       // (`scoped-limits.json` enumerates every scope that can carry a claim; `no KEYS, no SCAN, and no index
       // set to leak`). A keyspace scan was measured and refused for `wait:held` and `host:h:*` because the
       // panel reads every second and a scan walks hardest when nothing is registered.
-      const triggersView: any = readTriggers({ triggersPath: paths.triggersPath });
+      // With the instructions TEXT beside the view rather than inside it (issue #482): the view's records
+      // are the model-callable `dispatch_triggers` result, and the words belong to this overlay alone.
+      const { view: triggersView, instructions: triggerInstructions }: any = readTriggersWithInstructions({ triggersPath: paths.triggersPath });
       const cronIds: string[] = Array.isArray(triggersView?.triggers)
         ? triggersView.triggers.filter((t: any) => t?.type === "cron" && typeof t?.id === "string" && t.id !== "").map((t: any) => t.id)
         : [];
@@ -416,6 +418,7 @@ export function createDashboardDeps(
         runMirror: merged.mirror,
         settings: readSettingsView({ settingsFile: paths.settingsFile }),
         triggers: triggersView,
+        triggerInstructions,
         pauseWindows: readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath }),
         // The operator's staged third-party pi packages (REQ-GLOBAL-PI-OVERLAY), for the armed triggers'
         // trust model. Like the four reads above it is a plain file read whose fs access lives entirely in
@@ -920,7 +923,10 @@ export function makeDashboard({
         const row = rows[selected];
         if (!row) return;
         if (row.kind === "trigger") {
-          detailTrigger = { record: row.trigger, index: row.index };
+          // The instructions text is captured HERE, from the snapshot the record came from (issue #482). Read
+          // at render time from the LIVE snapshot by index, a trigger deleted or moved while this pane was
+          // open handed the pane its new occupant's words under the old record's header.
+          detailTrigger = { record: row.trigger, index: row.index, instructions: snapshot?.triggerInstructions?.[row.index] ?? null };
           pendingDelete = false;
           view = "TRIGGER_DETAIL";
           tui?.requestRender?.();
@@ -1143,7 +1149,7 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
     const detailTitle = `trigger · ${scrubControl(String(t?.type ?? "?"))}`;
     const dw = framed ? Math.min(Math.trunc(width), DRILL_WIDTH) : Math.trunc(width);
     const sched = cronSchedInfo(t, snapshot);
-    const lines = renderTriggerDetail(t, framed ? dw - 4 : 24, styler, sched, snapshot?.stagedPackages, snapshot?.fetchedAt);
+    const lines = renderTriggerDetail(t, framed ? dw - 4 : 24, styler, sched, snapshot?.stagedPackages, snapshot?.fetchedAt, detailTrigger?.instructions);
     if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", pendingDelete ? "delete this trigger? y/n" : "e edit · x delete · esc back"];
     const boxed = frame(styler, { title: detailTitle, width: dw, lines, footer: triggerDetailHints(dw - 4, styler, pendingDelete) });
     return centerBlock(boxed, Math.trunc(width), dw);
@@ -1294,12 +1300,50 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
 const KIND_COLOR: Record<string, string> = { cron: "accent", label: "syntaxType", comment: "syntaxKeyword", pull_request: "syntaxFunction", issue: "syntaxString" };
 const KIND_WIDTH = 13; // fits "pull_request "
 
-/** Pad an already-colored line up to `inner` visible columns; if it overflows, clip its plain form. */
+/**
+ * Pad an already-colored line up to `inner` visible columns; if it overflows, clip it KEEPING its colour.
+ *
+ * It used to clip the PLAIN form (`styler.cell(styler.stripAnsi(line), inner)`), so every line one column
+ * too wide lost all of its colour, not just its end (issue #482): the dim post-mortem printed bright, and a
+ * trigger row too long for the frame printed its amber risk badges in the default colour. `clipStyled`
+ * cuts through the colour instead; under PLAIN_THEME the result is byte-identical to the old branch.
+ */
 function fitLine(line: string, inner: number, styler: any): string {
   const vis = styler.visibleLen(line);
   if (vis === inner) return line;
   if (vis < inner) return line + " ".repeat(inner - vis);
-  return styler.cell(styler.stripAnsi(line), inner);
+  const cut = styler.clipStyled(line, inner);
+  return cut + " ".repeat(Math.max(0, inner - styler.visibleLen(cut)));
+}
+
+/**
+ * Plain text broken at spaces into lines of at most `width` COLUMNS, measured with the styler's own
+ * `visibleLen` (issue #401's table, not `.length`). A word wider than `width` on its own is cut by
+ * `sliceColumns`, whole characters only, rather than left to overrun: a wrap that can still emit an
+ * over-wide line is a clip with extra steps. Colour is the caller's, applied per line after this.
+ */
+function wrapColumns(text: string, width: number, styler: any): string[] {
+  const w = Math.max(1, Math.trunc(width) || 1);
+  const lines: string[] = [];
+  let cur = "";
+  for (let word of String(text ?? "").split(" ").filter((x) => x !== "")) {
+    while (styler.visibleLen(word) > w) {
+      if (cur) { lines.push(cur); cur = ""; }
+      // By COLUMNS, then back to the last GRAPHEME boundary inside that, through panel's own segmenter:
+      // `sliceColumns` alone could stop inside a ZWJ emoji sequence, strip the joiner it ended on, and
+      // start the next line with a bare U+200D. `cutUnits` returns an exact prefix, so the remainder is too.
+      const head = cutUnits(word, sliceColumns(word, w).length);
+      if (!head) break; // one cluster wider than the budget: emitted below, and `fitLine` clips it
+      lines.push(head);
+      word = word.slice(head.length);
+    }
+    if (!word) continue;
+    const next = cur ? `${cur} ${word}` : word;
+    if (!cur || styler.visibleLen(next) <= w) cur = next;
+    else { lines.push(cur); cur = word; }
+  }
+  if (cur) lines.push(cur);
+  return lines;
 }
 
 // The frame rows around a composed body -- top border, footer rule, footer, bottom border -- charged to
@@ -1689,7 +1733,8 @@ function triggerLines(snapshot: any, selected: number, inner: number, styler: an
   return { count: list.length, lines };
 }
 
-function triggerRow(t: any, sel: boolean, inner: number, styler: any, sched: any = null): string {
+function triggerRow(raw: any, sel: boolean, inner: number, styler: any, sched: any = null): string {
+  const t = scrubTrigger(raw);
   const cursor = sel ? styler.fg("accent", "›") : " ";
   const kind = t?.type ?? "?";
   const badge = styler.cell(kind, KIND_WIDTH, { color: KIND_COLOR[kind] ?? "muted" });
@@ -1702,33 +1747,116 @@ function triggerRow(t: any, sel: boolean, inner: number, styler: any, sched: any
   // used to read `-> github` for every forge, which made a gitlab row contradict its own badge; fixing the
   // target removed the badge's reason to exist rather than merely its wrongness. render.mjs keeps its badge
   // because its line goes straight to the flow (`-> fix`) and never names the forge at all.
-  const pkgs = t?.packages === true ? " " + styler.fg("warning", "[packages]") : "";
+  const pkgs = t?.packages === true ? rowBadge("warning", true, "[packages]") : null;
   // A non-default image, in `accent` rather than `warning`: amber is reserved for the risk badge (third-party
   // code), and an operator-built image is not third-party. `accent` is already this file's colour for "this
   // trigger overrides a deployment default" -- the same choice the pinned-model row makes below.
-  const img = t?.image ? " " + styler.fg("accent", `[${t.image}]`) : "";
+  const img = t?.image ? rowBadge("accent", false, "[", t.image, "]") : null;
   // `warning`, not `accent`: amber is this file's colour for a risk badge rather than for "overrides a
   // deployment default", and persisting the agent's full working history to host disk -- issue text, file
   // contents, tool output, its own reasoning -- is a disclosure, not a preference. Same class as
   // [packages], which is the badge whose inverted polarity 0.1.4 had to fix.
-  const res = t?.resume === true ? " " + styler.fg("warning", "[resume]") : "";
+  const res = t?.resume === true ? rowBadge("warning", true, "[resume]") : null;
   // `warning` for the same reason [resume] is: a spend multiplier is a risk badge, not a preference. A
   // trigger without it renders byte-identically -- the badge is purely additive, appended last.
-  const rep = t?.replicas > 1 ? " " + styler.fg("warning", `[x${t.replicas}]`) : "";
+  const rep = t?.replicas > 1 ? rowBadge("warning", true, `[x${t.replicas}]`) : null;
+  // The three badges `render.mjs`'s `triggerLine` always carried and this row did not (issue #482), so the
+  // same trigger read differently on the two surfaces. Same texts, and the basename through render.mjs's
+  // own `skillsBasename`, so the two surfaces cannot drift apart; each value through `cellOf` like every
+  // other operator string in this panel.
+  // [skills] and [instructions] in `accent`, NOT `warning`: both are operator-authored (a directory on the
+  // operator's own host, standing text from their own triggers file), so neither is the third-party code
+  // amber marks on [packages]. What they are is an override of a deployment default -- which skills load,
+  // what every prompt is told -- and that is exactly `accent`'s meaning here ([image], the pinned model).
+  const skl = t?.skillsDir ? rowBadge("accent", false, "[skills ", cellOf(skillsBasename(t.skillsDir)), "]") : null;
+  const ins = t?.instructions === true ? rowBadge("accent", false, "[instructions]") : null;
+  // [secrets] in `warning`: the sharpest risk badge on the row. [image] and [skills] change what the agent
+  // can DO, this changes what it can REACH, and the drill-in's own secrets lines are amber for that reason.
+  // The COUNT and the profile name, never the references (the reference list maps the operator's vault).
+  const sec = t?.secrets > 0 ? rowBadge("warning", true, `[secrets ${t.secrets}${t.secretsProfile ? " via " : ""}`, t.secretsProfile ? cellOf(t.secretsProfile) : "", "]") : null;
   // The one-shot badges (issue #231). [once] in `accent`, NOT `warning`: amber is this file's colour for
   // a risk badge, and a one-shot NARROWS spend to a single future run -- [x N]'s inverse, an override of
   // the fire-forever default, which is exactly what `accent` marks ([image], the pinned model). [spent]
   // in `dim`: a rule that finished its job, not a risk -- the row stays on the list because the raw file
   // keeps the entry, and it dims so it cannot be misread as armed. Mutually exclusive by construction
   // (the worker only disarms once rules); absent otherwise, so every existing row is byte-identical.
-  const shot = t?.disarmed ? " " + styler.fg("dim", "[spent]") : t?.once === true ? " " + styler.fg("accent", "[once]") : "";
+  const shot = t?.disarmed ? rowBadge("dim", false, "[spent]") : t?.once === true ? rowBadge("accent", false, "[once]") : null;
   // Health is a LIST-level fact, not only a drill-in one: an overdue scheduler or a stall counter at the
   // backstop max is exactly the row an operator must notice without opening it. Amber, appended last like
   // the other risk badges; a healthy or non-cron row renders byte-identically to before.
   const health = sched && (sched.overdueMs || (sched.stallMax > 0 && sched.stalls >= sched.stallMax))
-    ? " " + styler.fg("warning", sched.overdueMs ? "⚠ overdue" : "⚠ stalled")
-    : "";
-  return fitLine(`${cursor} ${badge} ${matchColored(t, styler)} ${targetColored(t, styler)}${pkgs}${img}${res}${rep}${shot}${health}`, inner, styler);
+    ? rowBadge("warning", true, sched.overdueMs ? "⚠ overdue" : "⚠ stalled")
+    : null;
+  const badges = [pkgs, img, skl, ins, res, rep, sec, shot, health].filter((b): b is RowBadge => b !== null);
+  const match = matchColored(t, styler);
+  return fitTriggerRow(`${cursor} ${badge} `, match, targetColored(t, styler), badges, inner, styler, rowFloorMatch(t, match, styler));
+}
+
+/** One LIST-row badge: fixed text around an optional FREE part (an operator string) that may be clipped. */
+type RowBadge = { color: string; risk: boolean; pre: string; free: string; post: string };
+function rowBadge(color: string, risk: boolean, pre: string, free = "", post = ""): RowBadge {
+  return { color, risk, pre, free, post };
+}
+
+// The selector's share of the row's identity: its first 4 columns and an ellipsis. A cron row's floor is
+// its id instead (`rowFloorMatch`), because a cron selector is `id  pattern` and the id is what names it.
+const ROW_MIN_MATCH = 5;
+
+/** The fewest selector columns a row keeps: the whole selector if shorter, else the floor above. */
+function rowFloorMatch(t: any, match: string, styler: any): number {
+  const full = styler.visibleLen(match);
+  const want = t?.type === "cron" ? styler.visibleLen(String(t.id ?? "-")) + 1 : ROW_MIN_MATCH;
+  return Math.min(full, want);
+}
+
+/**
+ * Fit a trigger row to the frame (issue #482). ONE rule, in three parts.
+ *
+ * A row that fits renders exactly as it always did: everything below exists only on overflow.
+ *
+ * THE FLOOR is the row's identity and is never given away: the cursor, the kind column, the selector's
+ * first columns (`rowFloorMatch`) and the target with its flow. With it, the RISK badges ([packages],
+ * [resume], [xN], [secrets], health) always stay. So the row is first taken to its MINIMUM: the selector
+ * at its floor and the free text inside EVERY badge (image ref, secrets profile, skills basename, risk or
+ * not) at its ellipsis; then, only if that still does not fit, the non-risk badges drop right to left.
+ * The room left over is GIVEN BACK in order of what the operator most needs: the selector first, then the
+ * risk badges' text, then the other badges' text. Below floor plus the risk badges at their minimum, the
+ * plain right-hand clip is all there is.
+ *
+ * Two rules came before this one, and review refuted both. A fixed threshold cut [secrets] at common
+ * widths; then a give-way ORDER dropped the selector before it had cut badge text to its ellipsis, so two
+ * rules differing only in their label rendered as the same row, and it gave room back to an image ref
+ * before a secrets profile. A floor plus a give-back order has no step that can run out of turn.
+ */
+function fitTriggerRow(lead: string, match: string, target: string, badges: RowBadge[], inner: number, styler: any, floorMatch: number): string {
+  const vl = (x: string) => styler.visibleLen(x);
+  // Narrower than the ellipsis, a cut shows the ellipsis and no text: `clipStyled` would keep the first
+  // character bare, and `[secrets 2 via p]` names a profile called "p" rather than a clipped one.
+  const ell = styler.glyphs?.ellipsis ?? "…";
+  const clip = (x: string, w: number) => (w <= 0 ? "" : vl(x) <= w ? x : w <= vl(ell) ? sliceColumns(ell, w) : styler.clipStyled(x, w));
+  const free = new Map(badges.map((b) => [b, vl(b.free)]));
+  let kept = badges;
+  let mw = vl(match);
+  const compose = () => lead + (mw > 0 ? clip(match, mw) + " " : "") + target + kept.map((b) => " " + styler.fg(b.color, b.pre + clip(b.free, free.get(b) ?? 0) + b.post)).join("");
+  const over = () => vl(compose()) - inner;
+  if (over() <= 0) return fitLine(compose(), inner, styler);
+  // The minimum.
+  mw = floorMatch;
+  for (const b of badges) free.set(b, Math.min(1, vl(b.free)));
+  for (let i = kept.length - 1; i >= 0 && over() > 0; i--) if (!kept[i].risk) kept = kept.filter((_, j) => j !== i);
+  if (over() > 0) return fitLine(compose(), inner, styler);
+  // The give-back: each grown by the slack, then stepped back until the row fits.
+  const regrow = (get: () => number, set: (w: number) => void, full: number) => {
+    if (over() >= 0 || get() >= full) return;
+    const was = get();
+    set(Math.min(full, was - over()));
+    while (over() > 0 && get() > was) set(get() - 1);
+  };
+  regrow(() => mw, (w) => { mw = w; }, vl(match));
+  for (const risk of [true, false]) {
+    for (const b of kept) if (b.risk === risk) regrow(() => free.get(b) ?? 0, (w) => free.set(b, w), vl(b.free));
+  }
+  return fitLine(compose(), inner, styler);
 }
 
 function matchColored(t: any, styler: any): string {
@@ -1963,13 +2091,23 @@ function settingsLines(settings: any, inner: number, styler: any): string[] {
  * no crammed "produces" line. Read-only; `e`/`x` drive edit/delete through the command loop. Every line is
  * `inner` cols.
  */
-function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = null, staged: any = null, fetchedAt?: number): string[] {
-  if (!t) return [styler.cell("(no trigger)", inner, { color: "dim" })];
+function renderTriggerDetail(raw: any, inner: number, styler: any, sched: any = null, staged: any = null, fetchedAt?: number, instructionsText: any = null): string[] {
+  if (!raw) return [styler.cell("(no trigger)", inner, { color: "dim" })];
+  const t = scrubTrigger(raw); // the rule at the door: see `scrubTrigger`
   const out: string[] = [];
   const kv = (k: string, v: string, color = "text") =>
     fitLine(styler.cell(k, 12, { color: "muted" }) + " " + styler.fg(color, v), inner, styler);
   const blank = () => out.push(styler.cell("", inner));
   const section = (label: string) => out.push(styler.divider(label, null, inner));
+  // A value that may be wider than the 53 columns `kv` leaves WRAPS under a blank label instead of being
+  // clipped (issue #482): a skills path or the instructions text cut at the frame would show the operator
+  // a different path, or half a sentence, while looking whole. `maxLines` bounds a pane that has no scroll;
+  // what it holds back is COUNTED on a dim line, never silently dropped.
+  const kvWrap = (k: string, v: string, color: string, maxLines = Infinity) => {
+    const parts = wrapColumns(v, inner - 13, styler);
+    parts.slice(0, maxLines).forEach((part, i) => out.push(kv(i === 0 ? k : "", part, color)));
+    if (parts.length > maxLines) out.push(kv("", `${styler.glyphs?.ellipsis ?? "…"} ${parts.length - maxLines} more line(s) in triggers.json`, "dim"));
+  };
 
   // Header: kind badge -> flow, plus a health marker for cron (✔ healthy / ⚠ overdue) derived from the
   // scheduler's overdueMs. A trigger with no matching scheduler shows no health marker rather than a guess.
@@ -2052,10 +2190,25 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
   // `accent` rather than `warning` when armed: this row is a NARROWING, and warning on this pane is
   // reserved for spend and for what leaves the job (the resume/replicas rows directly below).
   out.push(kv("excludeTools", Array.isArray(t.excludeTools) && t.excludeTools.length > 0 ? `${t.excludeTools.join(", ")} removed` : "full pinned tool set", Array.isArray(t.excludeTools) && t.excludeTools.length > 0 ? "accent" : "dim"));
+  // The skills dir IN FULL (issue #482): the LIST row names its basename only, on the promise that the whole
+  // path lives here, which it did not. `accent` when set, the dim "I checked" default when not, the image
+  // row's shape: an operator-authored directory overrides what the agent can do, it is not a risk badge.
+  kvWrap("skills", t.skillsDir ? cellOf(t.skillsDir) : "none injected", t.skillsDir ? "accent" : "dim");
+  // The instructions TEXT, which the display record does not carry: it arrives on its own snapshot key,
+  // because the record is the model-callable `dispatch_triggers` result and this overlay is not model
+  // context. Scrubbed like every operator string (a newline becomes a space and the wrap folds it), and
+  // capped at six lines, since up to 2000 characters would otherwise push the trust model off the pane.
+  // `true` without text is a file changed between reads of an older panel: said, not faked.
+  const insText = typeof instructionsText === "string" && instructionsText.trim() !== "" ? cellOf(instructionsText) : null;
+  kvWrap("instructions", insText ?? (t.instructions === true ? "attached (text not read)" : "none"), t.instructions === true || insText ? "accent" : "dim", 6);
   // Rendered on BOTH branches and on every kind, with the same "I checked" dim default the image row uses.
   // `warning` when armed, because this is the one row on this pane that describes something LEAVING the
   // job: everything above says what the job runs, this says what it writes down and hands to the next one.
   out.push(kv("resume", t.resume === true ? "continues the previous session" : "cold start", t.resume === true ? "warning" : "dim"));
+  // Secrets get a row of their own beside resume, so the three #482 fields read alike here as on the LIST
+  // row; the trust-model lines below still say what binding them means. `warning` when bound, for the
+  // row badge's reason: this is what the job can REACH. Count and profile name, never the references.
+  kvWrap("secrets", t.secrets > 0 ? `${t.secrets} bound${t.secretsProfile ? ` via profile ${cellOf(t.secretsProfile)}` : ""}` : "none bound", t.secrets > 0 ? "warning" : "dim");
   // The same "I checked" dim default, for the one field on this pane that changes what a delivery COSTS
   // (REQ-REPLICA-RUNS). `warning` when armed: this row is a multiplier, and a multiplier that renders like
   // a preference is the polarity mistake 0.1.4 shipped a fix for on [packages].
@@ -2064,13 +2217,18 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
   // TRUST MODEL — who authorizes it, how it dedups, which service owns it.
   blank();
   section("trust model");
-  for (const line of trustModel(t)) out.push(fitLine(styler.fg("border", "· ") + styler.fg("text", line), inner, styler));
+  // Every trust-model bullet WRAPS under its own indent (issue #482). They were clipped at the pane's inner
+  // width, so the secrets disclosure read "the job holds no vau…" and "the egress allowli…": the one
+  // block written to be read in full was the one the frame cut. A bullet that fits is byte-identical.
+  const bullet = (text: string, color: string) =>
+    wrapColumns(text, inner - 2, styler).forEach((part, i) => out.push(fitLine(styler.fg("border", i === 0 ? "· " : "  ") + styler.fg(color, part), inner, styler)));
+  for (const line of trustModel(t)) bullet(line, "text");
   // A trigger that did not decline (`run.packages: false`) additionally loads the operator-staged
   // third-party pi packages into the job — name+version, so the operator sees exactly which pinned code this
   // trigger runs, plus the one-line consequence. Display only: declining is an edit to the reviewed triggers
   // file, never a panel key.
   if (t.packages === true) {
-    const loads = (text: string) => out.push(fitLine(styler.fg("border", "· ") + styler.fg("warning", text), inner, styler));
+    const loads = (text: string) => bullet(text, "warning");
     loads(`packages loaded · ${stagedNames(staged)}`);
     loads("third-party code on adversarial input, open network egress");
   }
@@ -2078,7 +2236,7 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
   // SECURITY.md. A transcript is strictly MORE PII-bearing than the raw job log, which is opt-in and off
   // by default for exactly this reason -- and unlike that log it must exist for the feature to work.
   if (t.resume === true) {
-    const keeps = (text: string) => out.push(fitLine(styler.fg("border", "· ") + styler.fg("warning", text), inner, styler));
+    const keeps = (text: string) => bullet(text, "warning");
     keeps("persists the agent transcript to PI_SESSIONS_DIR");
     keeps("issue text, file contents, tool output, the agent's own reasoning");
     keeps("replayed into the next job on the same branch; forks never resume");
@@ -2088,7 +2246,7 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
   // the profile NAME, never the references: this view renders on the operator's own host, but the same
   // record feeds the model-callable read tool, and a reference list is the map of their vault.
   if (t.secrets > 0) {
-    const holds = (text: string) => out.push(fitLine(styler.fg("border", "· ") + styler.fg("warning", text), inner, styler));
+    const holds = (text: string) => bullet(text, "warning");
     holds(`${t.secrets} vault secret(s) injected${t.secretsProfile ? ` via profile ${t.secretsProfile}` : ""}`);
     holds("resolved on the host before the container; the job holds no vault credential");
     holds("the agent can read them, and the forge is on the egress allowlist");
@@ -2097,7 +2255,7 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
   // of what an operator needs to weigh: N replicas is N HONEST budget reservations, not a bypass, so the
   // daily/weekly/monthly caps stay the ceiling and simply divide by N (CONST-BUDGET-BEFORE-TOKENS).
   if (t.replicas > 1) {
-    const races = (text: string) => out.push(fitLine(styler.fg("border", "· ") + styler.fg("warning", text), inner, styler));
+    const races = (text: string) => bullet(text, "warning");
     races(`each delivery starts ${t.replicas} independent jobs`);
     races(`${t.replicas} budget slots reserved, ${t.replicas}× the tokens, ${t.replicas} pull requests`);
     races("nothing cancels a sibling; a human picks the better result");
@@ -2593,7 +2751,12 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
 
   out.push(styler.cell("", inner));
   out.push(styler.divider("post-mortem", null, inner));
-  out.push(fitLine(styler.fg("dim", "container torn down at job end · stored PII-free fields + optional raw-log overlay only"), inner, styler));
+  // WRAPPED, not clipped (issue #482): the sentence is 86 columns and the pane's inner width is 66, so a
+  // single `fitLine` cut it at "+ optiona…" and the one line saying what this pane is NOT showing lost its
+  // own end. Every wrapped line is dimmed on its own, so no line depends on a colour opened on another.
+  for (const part of wrapColumns("container torn down at job end · stored PII-free fields + optional raw-log overlay only", inner, styler)) {
+    out.push(fitLine(styler.fg("dim", part), inner, styler));
+  }
   return out;
 }
 
