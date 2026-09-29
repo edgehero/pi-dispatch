@@ -87,8 +87,11 @@ function replacementLines(key, value, bare, wasComment, opts) {
  * REFUSED rather than escaped: the shells want `'\''` and systemd's parser does not understand it, so no
  * one rendering is read identically by both, and inventing one would be the kind of cleverness that ships
  * a path nobody can read back.
+ *
+ * THE SET IS THE READER'S OWN, `UNQUOTED_PLAIN` below (PR #478's gate). The writer had a set of its own that wrote a
+ * leading `=` or a `:=` bare, which the reader refuses (zsh expands both), so `up` wrote a line doctor then called
+ * unread. One set, so what is written bare is exactly what is read back as plain, and everything else is quoted.
  */
-const UNQUOTED_SAFE = /^[A-Za-z0-9_@+=:,./-]*$/;
 
 /**
  * cmd's own bare set, derived from `deploy/worker-env-wrapper.cmd` rather than borrowed from the POSIX
@@ -111,8 +114,13 @@ export function renderEnvValue(value, { platform = process.platform } = {}) {
 		if (bad !== null) throw new Error(`cannot write this value into a .env on Windows: it contains ${bad}, and the .cmd wrapper (deploy/worker-env-wrapper.cmd) cannot be shown to read that back as written. Choose a value without it, or give the service this key through its own environment (pi-dispatch service install --env-setup)`);
 		return v;
 	}
-	if (UNQUOTED_SAFE.test(v)) return v;
+	if (UNQUOTED_PLAIN.test(v)) return v;
 	if (v.includes("'") || /[\n\r]/.test(v)) throw new Error(`cannot write this value into a .env safely: ${v.includes("'") ? "it contains a single quote" : "it contains a newline"}`);
+	// Gate round 2 of PR #478: a control or invisible character is read alike by every loader inside single quotes, but
+	// the reader never vouches for it (`QUOTED_CONTROL`: printing it rewrites a terminal), so writing it quoted gave doctor
+	// a line it calls unread. Refused instead, naming the character, never the value.
+	const hidden = invisibleCharacter(v);
+	if (hidden !== null) throw new Error(`cannot write this value into a .env safely: it contains ${hidden}, which doctor would not show back. Remove it`);
 	return `'${v}'`;
 }
 
@@ -1427,7 +1435,14 @@ function assignsNothing(rest) {
  *   `'...'`                -> the inner text, any character but `'` (non-ASCII and a TAB included, both
  *                             measured on systemd 252 and in the three shells)
  *   `"..."`                -> the inner text, without `"`, `$`, `\`, a backtick or a control character
- *   bare                   -> `[A-Za-z0-9_@+:,./-]*`, not starting `=` and with no `:=`
+ *   bare                   -> `[A-Za-z0-9_@+=:,./-]*`, not starting `=` and with no `:=`
+ *
+ * An `=` INSIDE a bare value is literal to every loader (issue #477): systemd's `EnvironmentFile=` splits a line on its
+ * first `=` and keeps the rest, the shells expand nothing at an `=` that follows another character (measured in
+ * /bin/sh, bash, dash and zsh: `K=isolation=enforced`, `K=a=b=c`, `K=a==b`, `K=a=` and `K=a=:b` all set the text as
+ * written), and the cmd wrapper's `tokens=1,*` takes everything after the first `=` run. Refusing it made doctor refuse
+ * the documented `PI_BACKEND_FLOOR=isolation=enforced` and then judge no floor at all. Only the two `=` shapes zsh
+ * expands stay out: one at the start of the value and one after a `:`.
  *
  * The exclusions each have a measurement behind them. `$`, a backtick and `~` are expanded by the shells and
  * not by systemd. A backslash is an escape to systemd and to the shells, and a literal to the cmd wrapper,
@@ -1436,7 +1451,7 @@ function assignsNothing(rest) {
  * whitespace is a comment to the shells and part of the value to systemd, which is the defect issue #392
  * shipped in the scaffold.
  */
-const UNQUOTED_PLAIN = /^(?!=)(?![^\n]*:=)[A-Za-z0-9_@+:,./-]*$/;
+const UNQUOTED_PLAIN = /^(?!=)(?![^\n]*:=)[A-Za-z0-9_@+=:,./-]*$/;
 
 /**
  * `plain` has TWO conditions, and the second one is why this exists: every loader must read the value the
@@ -1456,6 +1471,16 @@ const UNQUOTED_PLAIN = /^(?!=)(?![^\n]*:=)[A-Za-z0-9_@+:,./-]*$/;
  * identical on all five loaders, and the printable-ASCII-only first draft warned about `up`'s own line.
  */
 const QUOTED_CONTROL = /[\x00-\x08\x0a-\x1f\x7f-\x9f\u00ad\u061c\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\u3164\ufe00-\ufe0f\ufeff\ufff9-\ufffb]/;
+
+/**
+ * The first character of `value` the reader never vouches for inside quotes (`QUOTED_CONTROL`), as words naming its code
+ * point ("a control or invisible character (U+200B)"), or null. Shared by the writer's refusal and `unplainCause`, so
+ * both name what is actually there.
+ */
+export function invisibleCharacter(value) {
+	const c = QUOTED_CONTROL.exec(String(value))?.[0];
+	return c === undefined ? null : `a control or invisible character (U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")})`;
+}
 
 /**
  * The offset of the first byte of `bytes` that does not begin a well-formed UTF-8 sequence (a stray continuation byte,

@@ -319,6 +319,13 @@ const ORACLE_CORPUS = [
 	"K=user@host:/path",
 	"K=a,b:c+d_e-f./g",
 	"K=_underscored",
+	// An `=` inside a bare value (issue #477): the documented PI_BACKEND_FLOOR forms, and the edges around them.
+	"K=isolation=enforced",
+	"K=egress=enforced,nonRoot=asserted",
+	"K=a=b=c",
+	"K=a==b",
+	"K=a=",
+	"K=a=:b",
 	// Quoting.
 	"K='/srv/a b.json'",
 	'K="/srv/ab.json"',
@@ -715,6 +722,138 @@ test("E4: everything the writer writes, the reader reads back exactly", () => {
 	}
 });
 
+// systemd 259 (Fedora 44, 259.5-1.fc44), measured for issue #477 with `systemd-run --wait -p EnvironmentFile=<file>
+// /usr/bin/env` (system scope, the unit's output read back from the journal), each file `K=<value>\nK3=after\n`: what
+// the unit saw for K, and K3 was `after` in every row. The shells' readings of the same values are the E2 corpus rows.
+const SYSTEMD_259_INTERIOR_EQ = Object.freeze([
+	["isolation=enforced", "isolation=enforced"],
+	["egress=enforced,nonRoot=asserted", "egress=enforced,nonRoot=asserted"],
+	["a=b=c", "a=b=c"],
+	["a==b", "a==b"],
+	["a=", "a="],
+	["a=:b", "a=:b"],
+]);
+
+test("an `=` inside a bare value is plain to every loader, as systemd, the shells and the cmd wrapper read it (#477)", () => {
+	// Doctor refused the documented `PI_BACKEND_FLOOR=isolation=enforced` ("in a form the service's loader may read
+	// differently") and then judged no floor at all. systemd splits on the first `=` (measured above), every shell sets
+	// the text as written (the E2 corpus rows, run in each shell this host has), and the cmd wrapper's `tokens=1,*`
+	// takes everything after the first `=` run.
+	for (const [value, systemd] of SYSTEMD_259_INTERIOR_EQ) {
+		const text = `K=${value}\nK3=after\n`;
+		assert.deepEqual(readEnvAssignments(text, ["K"]).K, rec({ value: systemd, plain: true, vouched: true }), `systemd: ${value}`);
+		assert.deepEqual(readEnvAssignments(text, ["K"], { loader: "shell" }).K, rec({ value, plain: true, vouched: true }), `shell: ${value}`);
+		assert.deepEqual(readEnvAssignments(text, ["K"], { loader: "cmd" }).K, rec({ value, plain: true, vouched: true }), `cmd: ${value}`);
+		assert.ok(ORACLE_CORPUS.includes(`K=${value}`), `${value} is an E2 row, so every shell here is asked`);
+	}
+	// What stays refused: the two `=` shapes zsh expands (at the start, and after a `:`), for systemd and the shells; the
+	// cmd wrapper refuses a leading `=` on its own (for /f drops it).
+	for (const value of ["=x", "==ls", "a:=b", "x:=y=z", "a=b:=c"]) {
+		for (const loader of ["systemd", "shell"]) assert.equal(readEnvAssignments(`K=${value}`, ["K"], { loader }).K.plain, false, `${loader}: ${value}`);
+	}
+	assert.equal(readEnvAssignments("K==x", ["K"], { loader: "cmd" }).K.plain, false, "cmd: a leading =");
+	// And every other refusal of the bare grammar is untouched by the widening.
+	for (const value of ["a b", "$HOME/x", "~/x", "a#b=c", "a=b c", "a=$b", "a=`b`", "a=\\b", "a=b;c", "a=(b)", "a=*", "a=b\"c\""]) {
+		assert.equal(readEnvAssignments(`K=${value}`, ["K"]).K.plain, false, `systemd: ${value}`);
+		assert.equal(readEnvAssignments(`K=${value}`, ["K"], { loader: "shell" }).K.plain, false, `shell: ${value}`);
+	}
+	// The writer already wrote these bare (`renderEnvValue`), so what `up` writes, doctor now reads back.
+	for (const value of ["isolation=enforced", "egress=enforced,nonRoot=asserted"]) {
+		const line = `K=${renderEnvValue(value, { platform: "linux" })}`;
+		assert.equal(line, `K=${value}`);
+		for (const loader of ["systemd", "shell"]) assert.equal(readEnvAssignments(line, ["K"], { loader }).K.value, value, `${loader}: ${line}`);
+	}
+});
+
+test("the writer refuses a control or invisible character rather than write a line the reader will not vouch for (gate round 2 of PR #478)", () => {
+	// Such a value used to be single-quoted, which every loader reads alike and the reader still calls unplain (printing
+	// it rewrites a terminal), so doctor called a line `up` wrote unread. Named by code point, never the value.
+	for (const [value, cp] of [["a\u200bb", "200B"], ["/srv/\u001b[2J", "001B"], ["x\u202ey", "202E"], ["\u00adsoft", "00AD"], ["del\u007f", "007F"]]) {
+		for (const platform of ["linux", "darwin"]) {
+			assert.throws(() => renderEnvValue(value, { platform }), (err) => err.message === `cannot write this value into a .env safely: it contains a control or invisible character (U+${cp}), which doctor would not show back. Remove it`, `${platform} U+${cp}`);
+		}
+		assert.equal(readEnvAssignments(`K='${value}'`, ["K"]).K.plain, false, "the reader refuses it quoted, which is why");
+	}
+	// A TAB is not one of them: quoted, every loader keeps it and the reader vouches for it (E4).
+	assert.equal(renderEnvValue("a\tb", { platform: "linux" }), "'a\tb'");
+	// Windows is unchanged: its writer already refused every such character.
+	assert.throws(() => renderEnvValue("a\u200bb", { platform: "win32" }), /a character outside ASCII/);
+	// Over a seeded sample with them in the alphabet, whatever is written on any platform reads back plain and exact.
+	const alphabet = ["a", "0", "=", ":", "/", " ", "$", "'", "#", "\\", "\u00e9", "\t", "\u0001", "\u001b", "\u0085", "\u200b", "\u202e", "\ufeff", "\u65e5"];
+	let seed = 4782;
+	const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+	for (let i = 0; i < 20000; i++) {
+		let v = "";
+		for (let n = Math.floor(next() * 6); n > 0; n--) v += alphabet[Math.floor(next() * alphabet.length)];
+		for (const [platform, loaders] of [["linux", ["systemd", "shell"]], ["darwin", ["systemd", "shell"]], ["win32", ["cmd"]]]) {
+			let written;
+			try {
+				written = renderEnvValue(v, { platform });
+			} catch {
+				continue;
+			}
+			if (platform === "win32" && v === "") continue; // `set "K="` unsets: the writer's own rule, not a reading
+			for (const loader of loaders) assert.deepEqual([readEnvAssignments(`K=${written}`, ["K"], { loader }).K.plain, readEnvAssignments(`K=${written}`, ["K"], { loader }).K.value], [true, v], `${platform} ${loader}: ${JSON.stringify(v)} written ${JSON.stringify(written)}`);
+		}
+	}
+});
+
+test("the writer quotes exactly what the reader would refuse bare, so what `up` writes doctor reads back (#477 follow-up)", () => {
+	// PR #478's gate: `renderEnvValue` had its own bare set, which wrote a leading `=` and a `:=` unquoted, and the reader
+	// refuses both (zsh expands them), so doctor called a line `up` wrote unread. They are single-quoted now, and read back.
+	for (const [value, written] of [["=x", "K='=x'"], ["==ls", "K='==ls'"], ["a:=b", "K='a:=b'"], ["x:=y=z", "K='x:=y=z'"]]) {
+		for (const platform of ["linux", "darwin"]) {
+			const line = `K=${renderEnvValue(value, { platform })}`;
+			assert.equal(line, written, `${platform}: ${value}`);
+			for (const loader of ["systemd", "shell"]) assert.deepEqual(readEnvAssignments(line, ["K"], { loader }).K, rec({ value, plain: true, vouched: true }), `${platform} ${loader}: ${line}`);
+		}
+	}
+	// Windows is unchanged: a leading `=` is refused there (for /f drops it) and a `:=` is written bare, which the cmd
+	// reader takes as written.
+	assert.throws(() => renderEnvValue("=x", { platform: "win32" }), /an = at the start/);
+	assert.equal(renderEnvValue("a:=b", { platform: "win32" }), "a:=b");
+	assert.deepEqual(readEnvAssignments("K=a:=b", ["K"], { loader: "cmd" }).K, rec({ value: "a:=b", plain: true, vouched: true }));
+	// And over a seeded sample of short values from the bare alphabet: every bare write reads back plain, and every value
+	// the reader would refuse bare is quoted, on both POSIX platforms.
+	const alphabet = "aZ09_@+=:,./-";
+	let seed = 477;
+	const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+	for (let i = 0; i < 20000; i++) {
+		let v = "";
+		for (let n = Math.floor(next() * 6); n > 0; n--) v += alphabet[Math.floor(next() * alphabet.length)];
+		const bare = readEnvAssignments(`K=${v}`, ["K"]).K.plain;
+		for (const platform of ["linux", "darwin"]) {
+			const rendered = renderEnvValue(v, { platform });
+			assert.equal(rendered === v, bare, `${platform}: ${JSON.stringify(v)} written ${rendered}`);
+			for (const loader of ["systemd", "shell"]) assert.equal(readEnvAssignments(`K=${rendered}`, ["K"], { loader }).K.value, v, `${platform} ${loader}: ${rendered}`);
+		}
+	}
+});
+
+test("every uncommented line of .env.example, and each documented PI_BACKEND_FLOOR form, reads as plain to every loader (#477)", () => {
+	const example = readFileSync(new URL("../../.env.example", import.meta.url), "utf8");
+	const lines = example.split("\n").map((l, i) => [l, i + 1]).filter(([l]) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(l));
+	assert.ok(lines.length >= 25, `the example has ${lines.length} uncommented assignments, and a floor keeps this from going vacuous`);
+	for (const [line, n] of lines) {
+		const key = line.slice(0, line.indexOf("="));
+		for (const loader of ["systemd", "shell", "cmd"]) {
+			const r = readEnvAssignments(example, [key], { loader })[key];
+			assert.equal(r?.line, n, `.env.example line ${n} is ${key}'s last assignment for ${loader}`);
+			assert.equal(r.plain, true, `.env.example line ${n} (${line}) is not plain to ${loader}`);
+		}
+	}
+	// The floor is commented there; the forms docs/podman.md and the example's own comment show, uncommented.
+	const shown = new Set();
+	for (const doc of ["../../docs/podman.md", "../../.env.example", "../../docs/backends.md"]) {
+		for (const m of readFileSync(new URL(doc, import.meta.url), "utf8").matchAll(/PI_BACKEND_FLOOR=([A-Za-z]+=[A-Za-z]+(?:,[A-Za-z]+=[A-Za-z]+)*)/g)) shown.add(m[1]);
+		for (const m of readFileSync(new URL(doc, import.meta.url), "utf8").matchAll(/e\.g\. ([A-Za-z]+=[A-Za-z]+(?:,[A-Za-z]+=[A-Za-z]+)+)/g)) shown.add(m[1]);
+	}
+	assert.ok(shown.has("isolation=enforced") && shown.has("egress=enforced,nonRoot=asserted"), [...shown].join(" "));
+	for (const value of shown) {
+		for (const loader of ["systemd", "shell", "cmd"]) assert.deepEqual(readEnvAssignments(`PI_BACKEND_FLOOR=${value}\n`, ["PI_BACKEND_FLOOR"], { loader }).PI_BACKEND_FLOOR, rec({ value, plain: true, vouched: true }), `${loader}: ${value}`);
+	}
+});
+
 test("E5: envKeyIsBlank is derived from the reader, so it cannot disagree with it", () => {
 	// ONE HELPER, because `up` and doctor answered this separately and disagreed (issue #365): doctor said
 	// "unset, so the worker ignores it" about a file that makes the worker refuse to start, while `up`,
@@ -1019,8 +1158,8 @@ test("a `$HOME` value is not vouched for on either POSIX loader, which is the di
 	// characters, while a sourcing shell and compose's `env_file` expand it. So the same file puts the jobs
 	// in two different places on the two deployments this repo ships, and nothing refuses it.
 	//
-	// The reader already declines to vouch, because `$` is outside `UNQUOTED_PLAIN`, the READER's bare-value
-	// set -- not `UNQUOTED_SAFE`, which is the WRITER's and belongs to `renderEnvValue`. So for the two keys
+	// The reader already declines to vouch, because `$` is outside `UNQUOTED_PLAIN`, the bare-value set the
+	// reader and, since PR #478's gate, the writer (`renderEnvValue`) share. So for the two keys
 	// doctor reads, an operator already gets the line named. What the reader cannot do is cover a key it
 	// does not read, which is why `.env.example`'s header states the rule for the rest.
 	for (const loader of ["systemd", "shell"]) {

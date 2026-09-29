@@ -288,9 +288,12 @@ export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnec
  * never refuses the command.
  */
 export async function readFleetQueues({ url, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
-  const redis = redisFn(url);
-  redis.on?.("error", () => {}); // a down Valkey is one clean line, never nine ioredis stack traces
+  let redis;
   try {
+    // Made inside the try (PR #478's gate): a VALKEY_URL the client refuses (a path that names no database) is this
+    // read's degraded answer, like a down Valkey, never a throw out of a function that fails open.
+    redis = redisFn(url);
+    redis.on?.("error", () => {}); // a down Valkey is one clean line, never nine ioredis stack traces
     // CONCURRENTLY, sharing one budget. Serialising them doubled the worst case, so a status read against
     // an unreachable Valkey took twice as long to say the same thing.
     // The inner per-operation bound is HALVED, like `readHosts`: `readLiveHosts` walks `1 + N` operations
@@ -306,7 +309,7 @@ export async function readFleetQueues({ url, redisFn = makeRedisClient, timeoutM
     return { names: [QUEUE], blind: err?.message ?? String(err), hosts: [] };
   } finally {
     try {
-      redis.disconnect?.();
+      redis?.disconnect?.();
     } catch {
       // best-effort teardown
     }
@@ -917,7 +920,7 @@ export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient,
  * Cancel a job that is waiting on a `run.waitFor` condition (issue #230).
  *
  * One of the two doors that stop a held job (the CLI's `pi-dispatch cancel` is the other, issue #287), and
- * it needs to exist because every other lever misses: a held job has spent nothing, so no budget cap will
+ * it needs to exist because every other lever misses: a held job spends nothing while it waits, so no budget cap will
  * ever refuse it; deleting the trigger does not reach a job already enqueued, since `job.data.trigger` is a
  * frozen snapshot; and the queue's own retention prunes completed and failed jobs, never delayed ones.
  *
@@ -925,8 +928,8 @@ export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient,
  * queue. Removing an arbitrary delayed job would reach cron next-occurrences and retry backoff too, and a
  * tool whose blast radius is "anything in the delayed set" is not the tool this description promises.
  *
- * Writes no run record: the job never ran, and `INT-RUN-HISTORY-FILE-CONTRACT` records terminal states of
- * runs. The hold's own keys go with it, so the panel stops showing a row for a job that no longer exists.
+ * Writes no run record: `INT-RUN-HISTORY-FILE-CONTRACT` records terminal states of runs, and a held job is in none
+ * (one held again on a retry keeps the records its earlier attempts wrote; the result's `attemptsMade` says so, #477). The hold's own keys go with it, so the panel stops showing a row for a job that no longer exists.
  */
 export async function cancelHeldJob({ url, jobId, redisFn = makeRedisClient, queueFn = makeQueue, timeoutMs = 2500 } = {}) {
   if (typeof jobId !== "string" || jobId === "") return { invalid: "a job id is required" };

@@ -1346,6 +1346,9 @@ test("the cancel OUTCOME and the tail title carry nothing either (#337)", async 
   for (const [res, expect] of [
     [{ ok: true, jobId: dirty }, /cancelled worker-A/],
     [{ invalid: dirty }, /rejected: worker-A/],
+    // Issue #477: the job's past is read off its counter, so a held retry is not said to have never run.
+    [{ ok: true, jobId: "j1" }, /cancelled j1: it never ran; no record written/],
+    [{ ok: true, jobId: "j2", attemptsMade: 1 }, /cancelled j2: it made 1 attempt before and was waiting to retry/],
   ]) {
     const one = makeDashboard({
       paths: {},

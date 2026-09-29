@@ -5,8 +5,8 @@
  * misconfigured. The verb finds the job across every queue this deployment drains (the kill switch's own
  * fleet discovery), then dispatches on what the job IS:
  *
- *   held on run.waitFor  -> the shared removeHeldJob sequence (hold keys first, then the job); no record,
- *                           because the job never ran (the dispatch_wait_cancel rule).
+ *   held on run.waitFor  -> the shared removeHeldJob sequence (hold keys first, then the job); no record
+ *                           (the dispatch_wait_cancel rule).
  *   delayed / queued     -> job.remove(); no record, same rule.
  *   active               -> a `cancel:req` key + a brief ack poll (cancel-state.mjs), because the abort can
  *                           only be raised by the process that holds the job. No ack within the window is a
@@ -15,9 +15,14 @@
  *
  * Held is checked BEFORE the plain state dispatch: a held job IS delayed, and removing it through the plain
  * path would strand its wait:* keys as a panel row for a job that no longer exists.
+ *
+ * What the line says about the job's PAST is read off the job, not assumed from its state (issue #477): a delayed job
+ * can be one waiting to retry after a failed attempt, which usually wrote a run record and may have left a retained
+ * sandbox, and "it never ran" was printed about it. `ranBefore` (cancel-state.mjs, shared with the panel) words it from the
+ * job's attempt count.
  */
 
-import { cancelReqKey, removeHeldJob, requestCancel } from "./cancel-state.mjs";
+import { cancelReqKey, ranBefore, removeHeldJob, requestCancel } from "./cancel-state.mjs";
 import { jobKey } from "./wait-state.mjs";
 
 /** Same budget the kill switch gives the host registry before acting on what the keyspace alone says. */
@@ -102,7 +107,8 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 		if (hash?.since) {
 			const res = await removeHeldJob({ redis: probe, queue: owner, jobId });
 			if (res.ok) {
-				write(`cancelled ${jobId} — it was held on its wait condition and never ran; no record written\n`);
+				// A hold consumes no attempt (`skipAttempt`), so a held job that ran is a retry held again by its conditions.
+				write(`cancelled ${jobId}: it was held on its wait condition, and ${ranBefore(res)}\n`);
 				return 0;
 			}
 			return fail(`could not cancel held job ${jobId}: ${res.invalid}`);
@@ -112,7 +118,7 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 		if (state === "delayed" || state === "waiting" || state === "prioritized" || state === "paused") {
 			try {
 				await job.remove();
-				write(`removed ${jobId} (${state}) — it never ran; no record written\n`);
+				write(`removed ${jobId} (${state}): ${ranBefore(job)}\n`);
 				return 0;
 			} catch (error) {
 				// The one race worth handling by name: picked up between getState and remove. remove() throws

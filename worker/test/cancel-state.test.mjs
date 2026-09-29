@@ -55,9 +55,10 @@ test("requestCancel times out by deleting its own request -- a cancel the operat
 });
 
 /** The held-removal fakes share ONE ops array so the hold-keys-before-remove ORDER is observable. */
-function heldWorld({ hash, state = "delayed", holder, removeThrows = false, jobMissing = false } = {}) {
+function heldWorld({ hash, state = "delayed", holder, removeThrows = false, jobMissing = false, attemptsMade } = {}) {
 	const ops = [];
 	const job = {
+		attemptsMade,
 		async getState() {
 			ops.push(["getState"]);
 			return state;
@@ -113,7 +114,7 @@ test("removeHeldJob refuses a job that left the queue, and one that left the hol
 test("removeHeldJob deletes the hold keys BEFORE the job, and takes the lease only when it names this job", async () => {
 	const { ops, redis, queue } = heldWorld({ hash: { since: "1", dedupId: "d1" }, holder: "j1" });
 	const res = await removeHeldJob({ redis, queue, jobId: "j1" });
-	assert.deepEqual(res, { ok: true, jobId: "j1" });
+	assert.deepEqual(res, { ok: true, jobId: "j1", attemptsMade: 0 });
 	// The exact sequence is the contract: an orphaned hash is a lying panel row, an orphaned job merely runs.
 	assert.deepEqual(ops, [
 		["hgetall", "wait:job:j1"],
@@ -138,4 +139,14 @@ test("a remove() throw yields { invalid } with the hold keys already gone -- the
 	const res = await removeHeldJob({ redis, queue, jobId: "j1" });
 	assert.match(res.invalid, /locked by another worker/);
 	assert.ok(ops.some((op) => op[0] === "del" && op[1] === "wait:job:j1"), "hold keys go first even when the remove then fails");
+});
+
+test("removeHeldJob reports the attempts the job had made, for the caller's sentence (#477)", async () => {
+	// A job held again on a retry had run: the CLI and the panel word it from this count (`ranBefore`).
+	const ran = heldWorld({ hash: { since: "1" }, attemptsMade: 2 });
+	assert.deepEqual(await removeHeldJob({ redis: ran.redis, queue: ran.queue, jobId: "j1" }), { ok: true, jobId: "j1", attemptsMade: 2 });
+	for (const made of [undefined, -1, 1.5, "3"]) {
+		const odd = heldWorld({ hash: { since: "1" }, attemptsMade: made });
+		assert.equal((await removeHeldJob({ redis: odd.redis, queue: odd.queue, jobId: "j1" })).attemptsMade, 0, String(made));
+	}
 });

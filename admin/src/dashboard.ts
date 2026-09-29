@@ -20,7 +20,7 @@
  * never a message.
  */
 import { dayKey, weekKey, monthKey, tokenDayKey, windowState } from "@edgehero/pi-dispatch/budget";
-import { requestCancel } from "@edgehero/pi-dispatch/cancel-state";
+import { ranBefore, requestCancel } from "@edgehero/pi-dispatch/cancel-state";
 import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
 import { makeQueue, fleetQueueNames, discoverHostQueues, unionQueueNames } from "@edgehero/pi-dispatch/queue";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
@@ -1471,7 +1471,8 @@ function cancelNote(res: any): string {
   const say = (v: any): string => scrubControl(String(v ?? "-"));
   if (res?.ack !== undefined) return `cancel accepted by ${res.ack === "" ? "the worker" : say(res.ack)} — stopping the container (~30s)`;
   if (res?.timeout) return "no worker acknowledged: the job may have just finished, gone back to the queue (cancel it again to remove it), or its host is unreachable; nothing was changed";
-  if (res?.ok) return `cancelled ${say(res.jobId)} — it never ran, no record written`;
+  // Issue #477: the job's past from its own counter (`ranBefore`), as the CLI says it: a held retry had run.
+  if (res?.ok) return `cancelled ${say(res.jobId)}: ${ranBefore(res)}`;
   if (res?.invalid) return `rejected: ${say(res.invalid)}`;
   return "cancel failed — check the worker log";
 }

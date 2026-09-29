@@ -309,6 +309,11 @@ test("a client refused for its password is a configError naming VALKEY_PASSWORD 
 	// The worker's boot: the same refusal as a configError, from its judged address and its own context.
 	await assert.rejects(refuseValkeyAuth({ url, servername: null, rootRefused: false }, {}, { cwd: tempDir("boot-"), authState: async () => ({ state: "noauth" }) }), (err) => err.piDispatchConfig === true && /requires a password, and this deployment sets none/.test(err.message));
 	await refuseValkeyAuth({ url, servername: null, rootRefused: false }, {}, { cwd: tempDir("boot-"), authState: async () => ({ state: "ok" }) });
+	// Gate round 2 of PR #478: a database the server does not have is the same kind of refusal, in its own words, at both
+	// starts (the worker exits 2 on it, the CLI and the receiver say it and stop).
+	const range = "VALKEY_URL redis://127.0.0.1:6379/16 names database 16, which that Valkey does not have: it has 16";
+	await assert.rejects(refuseValkeyAuth({ url, servername: null, rootRefused: false }, {}, { cwd: tempDir("boot-"), authState: async () => ({ state: "dbrange", error: range }) }), (err) => err.piDispatchConfig === true && err.message === range);
+	await assert.rejects(judgeValkeyAtStart(url, ctx(), { judge, checkAuth: async () => ({ state: "dbrange", error: range }) }), (err) => err.valkeyRefused === true && err.piDispatchConfig === true && err.message === range);
 	assert.equal(authRefusalFor("wrongpass", "redis://:x@127.0.0.1:6379", ctx()).includes("the password in VALKEY_URL"), true);
 	assert.equal(valkeyAuthRefusal(new Error("ECONNREFUSED"), { passwordSet: false }), null, "only a credential refusal is one");
 });

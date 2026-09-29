@@ -27,7 +27,7 @@ import { connect as netConnect } from "node:net";
 import { dirname, join } from "node:path";
 import { DEFAULT_EGRESS_PROXY, egressProxyName } from "./egress.mjs";
 import { VALKEY_PASSWORD_KEY, valkeyEnvFileText } from "./valkey-auth.mjs";
-import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envFileSystemdHazard, envFileValueLines, quotedRegions, readEnvAssignments } from "./env-file.mjs";
+import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envFileSystemdHazard, envFileValueLines, invisibleCharacter, quotedRegions, readEnvAssignments } from "./env-file.mjs";
 import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_NOW_FORMAT, STARTED_AT_FORMAT, NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_AFTER_PROXY_GRACE_MS, judgeNetnsKeeper, podmanNeedsNetnsKeeper, makeDetachGate, detachBlockedSentence, DETACH_GATE_READ_TIMEOUT_MS, DETACH_GATE_READ_MAX_BUFFER, runtimeFromFacts } from "./netns-keeper.mjs";
 
 // The keeper's identity, its judge and the network detach gate live in the leaf `netns-keeper.mjs` (issue #452, gate
@@ -155,6 +155,15 @@ export function valkeySharedOn(value) {
  * the host as the client dials it (an IPv6 literal without its brackets, as `parseConnection` hands it over), or
  * `{ error }` for a value that is not a redis URL. Unset is the worker's own default, redis://127.0.0.1:6379.
  */
+/**
+ * The scheme a VALKEY_URL is read as (gate round 3 of PR #478): `valkey:` and `valkeys:` are aliases of `redis:` and
+ * `rediss:`, as Valkey's own clients take them, and connected before #477's scheme check; null for any other. Every
+ * place that judges a scheme asks this, so the aliases cannot be accepted in one and refused in another.
+ */
+export function valkeySchemeOf(protocol) {
+	return { "redis:": "redis:", "valkey:": "redis:", "rediss:": "rediss:", "valkeys:": "rediss:" }[protocol] ?? null;
+}
+
 export function valkeyTarget(url) {
 	const raw = typeof url === "string" && url !== "" ? url : `redis://127.0.0.1:${DEFAULT_VALKEY_PORT}`;
 	let parsed;
@@ -163,7 +172,7 @@ export function valkeyTarget(url) {
 	} catch {
 		return { error: "VALKEY_URL is not a URL (redis://host:port)" };
 	}
-	if (parsed.protocol !== "redis:" && parsed.protocol !== "rediss:") return { error: `VALKEY_URL's scheme is ${parsed.protocol}, not redis: or rediss:` };
+	if (valkeySchemeOf(parsed.protocol) === null) return { error: `VALKEY_URL's scheme is ${parsed.protocol}, not redis:, rediss:, valkey: or valkeys:` };
 	const host = parsed.hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase() || "127.0.0.1";
 	return { host, port: parsed.port === "" ? DEFAULT_VALKEY_PORT : Number(parsed.port) };
 }
@@ -515,7 +524,7 @@ export function pinnedValkeyUrl(url, address) {
 	const u = new URL(url);
 	const original = u.hostname.replace(/^\[(.*)\]$/, "$1");
 	u.hostname = address.includes(":") ? `[${address}]` : address;
-	const servername = u.protocol === "rediss:" && !addressOf(original) ? original : null;
+	const servername = valkeySchemeOf(u.protocol) === "rediss:" && !addressOf(original) ? original : null;
 	return { url: u.toString(), servername };
 }
 
@@ -1106,12 +1115,21 @@ export function unplainCause(value) {
 	const v = String(value).replace(/[ \t]+$/, "");
 	const quoted = /^["']/.test(v);
 	if (!quoted && /[[\]]/.test(v)) return `an unquoted [ or ]: the macOS wrapper sources the file with sh, which may read it as a filename pattern. Quote the value, for example VALKEY_URL="redis://[::1]:6379", which every loader reads the same`;
+	// A control or invisible character is refused quoted or not (gate round 2 of PR #478), so quoting cannot help.
+	const hidden = invisibleCharacter(v);
+	if (hidden !== null) return `${hidden}, which doctor does not show back, quoted or not. Remove it`;
 	if (/\$/.test(v)) return "a $, which the loaders expand differently. Write the value out";
 	if (/^[ \t]/.test(v)) return "a space before the value, which the shells drop. Remove it";
 	if (quoted) return "a quote that is not the whole value, or a $, \\ or ` inside double quotes. Write it as one quoted value with none of those";
 	if (/\\/.test(v)) return "a backslash, which the loaders read differently. Remove it";
 	if (/\s/.test(v)) return "a space in the value. Remove it, or quote the whole value";
-	return "a character outside A-Z, a-z, 0-9 and _@+:,./- in an unquoted value. Quote the whole value";
+	// Issue #477: the reader's bare set takes `=` inside a value, and refuses it at the start or after a `:`, where zsh
+	// expands it; each of those, and any other character, is named as what it is.
+	if (v.startsWith("=")) return "an = at the start of an unquoted value, which zsh expands as a command name. Quote the whole value";
+	if (v.includes(":=")) return "a := in an unquoted value, which zsh expands as a command name. Quote the whole value";
+	const bad = /[^A-Za-z0-9_@+=:,./-]/u.exec(v)?.[0];
+	const shown = bad === undefined ? "" : /^[\x21-\x7e]$/.test(bad) ? `\`${bad}\` ` : `U+${bad.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")} `;
+	return `a character (${shown.trim() || "one"}) outside A-Z, a-z, 0-9 and _@+=:,./- in an unquoted value. Quote the whole value`;
 }
 
 /** The shown form of one action. `applyStack` runs the same objects these lines were made from. */

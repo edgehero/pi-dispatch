@@ -45,7 +45,7 @@ dialog before it takes effect**:
   an id-only target, the operator's own words for what it waits on, and how long it has waited. Different
   from the queue's `delayed` count, which also mixes cron next-occurrences, retry backoff and quiet hours.
 - `dispatch_wait_cancel` — remove a held job so it never runs (confirm-gated). The caps cannot do this: a
-  held job has spent nothing, so no budget cap will ever refuse it, and deleting the trigger does not
+  held job spends nothing while it waits, so no budget cap will refuse it, and deleting the trigger does not
   reach a job already enqueued. The operator has the same lever without you: `pi-dispatch cancel <jobId>`
   at a terminal, or `h` then `x` in the panel — that CLI verb also removes a plain queued job and stops a
   RUNNING one (its record then says `operator-cancel`), both beyond this tool's reach.
@@ -289,8 +289,9 @@ What that means when you are asked about a job that "has not run":
   script is broken rather than the condition slow. `wait-expired` means a bound was reached.
   `wait-skew` / `wait-unreadable` mean two services in the deployment disagree about the field and one needs
   upgrading or restarting.
-- **Cancelling is an operator decision.** `dispatch_wait_cancel` needs a confirm, writes no run record (the
-  job never ran), and cannot be undone: the delivery is gone, and a webhook does not resend itself.
+- **Cancelling is an operator decision.** `dispatch_wait_cancel` needs a confirm, writes no run record of its
+  own (a held job usually never ran; one held again on a retry keeps whatever its earlier attempts recorded), and
+  cannot be undone: the delivery is gone, and a webhook does not resend itself.
 
 ## Scoped limits — and the folder mutex you cannot turn off
 

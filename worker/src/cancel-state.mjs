@@ -63,13 +63,33 @@ export async function requestCancel({ redis, jobId, ackTimeoutMs = 10_000, pollM
 }
 
 /**
+ * What a removed job had done before a cancel removed it, in the CLI's and the panel's words (issue #477), from BullMQ's
+ * own counter. `attemptsMade` counts the attempts that FINISHED (moveToFinished/moveToFailed, bullmq 5.80.4). Most of
+ * them wrote a run record, but not all: a gate above the processor's `try` (a `moveToDelayed` or a wait-state read that
+ * rejects) fails the attempt with nothing recorded, by design (index.mjs). So the sentence says an attempt was made and
+ * that whatever it recorded stays, never that a record exists. NOT `attemptsStarted`: a hold on run.waitFor, a
+ * pause-gate move and a rootful-Podman deferral each take the job and hand it back to the delayed set with
+ * `skipAttempt`, which counts a start and no attempt (moveToDelayed), so that counter is non-zero on jobs that never
+ * ran. Cancel itself writes no record in any case.
+ */
+export function ranBefore(job) {
+	const made = Number.isInteger(job?.attemptsMade) && job.attemptsMade > 0 ? job.attemptsMade : 0;
+	if (made === 0) return "it never ran; no record written";
+	return made === 1
+		? "it made 1 attempt before and was waiting to retry; whatever that attempt recorded stays, and cancel writes none"
+		: `it made ${made} attempts before and was waiting to retry; whatever those attempts recorded stays, and cancel writes none`;
+}
+
+/**
  * Remove a job that is held on a `run.waitFor` condition: hold keys first, then the job (issue #230's
  * sequence, issue #287's shared home). This is the inner body of the admin's `cancelHeldJob`, moved here
  * so the CLI's held path and the panel's are ONE sequence rather than two copies that can drift -- the
  * read-model's own rule is that key derivations are imported from the worker, never re-implemented.
  *
- * Returns `{ ok: true, jobId }` or `{ invalid: <reason> }`; never throws. Writes no run record: the job
- * never ran, and INT-RUN-HISTORY-FILE-CONTRACT records terminal states of runs.
+ * Returns `{ ok: true, jobId, attemptsMade }` or `{ invalid: <reason> }`; never throws. Writes no run record of its
+ * own (INT-RUN-HISTORY-FILE-CONTRACT records terminal states of runs, and a removed hold is none); `attemptsMade` is
+ * what the job had done before, for the caller's sentence (`ranBefore`, issue #477): a job held again on a retry has
+ * made attempts, and whatever they recorded stays.
  */
 export async function removeHeldJob({ redis, queue, jobId }) {
 	try {
@@ -97,7 +117,8 @@ export async function removeHeldJob({ redis, queue, jobId }) {
 			if (holder === jobId) await redis.del(leaseKey(hash.dedupId));
 		}
 		await job.remove();
-		return { ok: true, jobId };
+		// Issue #477: what the job had done, for the caller's sentence (`ranBefore`); read off the job just removed.
+		return { ok: true, jobId, attemptsMade: Number.isInteger(job.attemptsMade) && job.attemptsMade > 0 ? job.attemptsMade : 0 };
 	} catch (err) {
 		return { invalid: err?.message ?? String(err) };
 	}

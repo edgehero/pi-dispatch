@@ -569,7 +569,8 @@ Steer the running worker without stopping it, from any terminal:
   Jobs still enqueue; they wait.
 - `pi-dispatch resume` takes jobs again. `pi-dispatch status` prints the counts.
 - `pi-dispatch cancel <jobId>` stops exactly one job, whatever state it is in. A queued or held job is
-  removed and records nothing (it never ran); a running one is aborted on whichever host owns it, and
+  removed and the cancel records nothing; the command says whether it had made attempts (a job waiting to
+  retry after a failed attempt had, and whatever that attempt recorded stays); a running one is aborted on whichever host owns it, and
   its run record says `operator-cancel` so the stop is attributable later. Like `pause`, the verb reads
   only `VALKEY_URL`: a misconfigured forge cannot stand between you and the stop. If no reachable
   worker owns the job (the host is down, or its worker predates this verb) the command says so and

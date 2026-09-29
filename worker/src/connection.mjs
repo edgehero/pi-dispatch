@@ -2,10 +2,11 @@ import { AbstractConnector, Command, Redis } from "ioredis";
 import { Socket, connect as netConnect } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import { valkeyAuthRefusal } from "./valkey-auth.mjs";
-import { decodedUserinfo, judgeValkeyAtStart as judgeEndpointAtStart, judgedEndpoint, killSwitchValkeyUrls, defaultValkeyContext, urlShown, useValkeyContext, valkeyClientContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS, valkeyPasswordFor, valkeyUrlFor } from "./valkey-endpoint.mjs";
+import { valkeySchemeOf } from "./podman-stack.mjs";
+import { decodedUserinfo, judgeValkeyAtStart as judgeEndpointAtStart, judgedEndpoint, killSwitchValkeyUrls, defaultValkeyContext, urlShown, useValkeyContext, valkeyClientContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS, valkeyPasswordFor, valkeyDbRangeSentence, valkeyRefusal, valkeyUrlFor, valkeyUrlProblem } from "./valkey-endpoint.mjs";
 
 // Re-exported for the receiver and the admin, which import this module from the package (issues #464 and #468).
-export { killSwitchValkeyUrls, defaultValkeyContext, urlShown, useValkeyContext, valkeyClientContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS, valkeyPasswordFor, valkeyUrlFor };
+export { killSwitchValkeyUrls, defaultValkeyContext, urlShown, useValkeyContext, valkeyClientContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS, valkeyPasswordFor, valkeyUrlFor, valkeyUrlProblem };
 
 /**
  * The VALKEY_URL a CLI command uses from `cwd` (`valkeyUrlFor`), with a disagreement or an unreadable `.env` written as
@@ -73,6 +74,48 @@ if (!Redis.prototype[SCRUBS]) {
 }
 
 /**
+ * A database the server refuses is a REFUSAL, never database 0 (gate round 2 of PR #478). ioredis 5.11.1 applies `db`
+ * with a SELECT in its connect handler (redis/event_handler.js), before the ready check, and on a failure only
+ * `silentEmit`s the error and carries on: the client went ready on database 0, so `status`, `cancel`, the worker and
+ * doctor used database 0 of a Valkey whose `/16` does not exist, possibly another deployment's queue (measured against
+ * Valkey: "ERR DB index is out of range", then a write through the `/16` client read back from database 0).
+ *
+ * Here, where that error surfaces, the client is stopped before its ready check can finish: the refusal
+ * (`valkeyRefusal`, a configuration error naming the index) rejects every command queued so far, the client closes
+ * without reconnecting, `JudgedConnector.check` fails the ready check that was already in flight, and a later connect
+ * rejects with the same refusal. Every client of the project is built on that connector, so none goes ready on
+ * another database. The start judgements (`judgeValkeyAtStart`, the worker's `refuseValkeyAuth`) and doctor read the
+ * server's `databases` count for their sentence (`valkeyAuthState`).
+ */
+export const DB_REFUSED = Symbol.for("pi-dispatch.valkey-db-refused");
+const SELECT_HOOK = Symbol.for("pi-dispatch.valkey-select-refusal");
+/** Whether `err` is a server's refusal of a SELECT for a database it does not have. */
+function isSelectRangeError(err) {
+	return Boolean(err) && typeof err === "object" && String(err.command?.name ?? "").toLowerCase() === "select" && /DB index is out of range|invalid DB index/i.test(String(err.message ?? ""));
+}
+if (!Redis.prototype[SELECT_HOOK]) {
+	const silentEmit = Redis.prototype.silentEmit;
+	Redis.prototype.silentEmit = function silentEmitSelectRefused(event, arg, ...rest) {
+		if (event === "error" && isSelectRangeError(arg)) {
+			if (!this[DB_REFUSED]) {
+				const refusal = Object.assign(valkeyRefusal(valkeyDbRangeSentence(this.options?.[JUDGE]?.url ?? "", this.condition?.select ?? this.options?.db)), { valkeyDbRange: true, cause: scrubValkeyError(arg) });
+				this[DB_REFUSED] = refusal;
+				if (this.connector) this.connector[DB_REFUSED] = refusal;
+				try {
+					this.flushQueue(refusal);
+				} catch {}
+				this.disconnect();
+			}
+			// Said to a listener only: without one, every command of the client already rejects with the refusal, and
+			// ioredis' own "Unhandled error event" print would add a stack trace to that sentence.
+			return this.listeners("error").length > 0 ? silentEmit.call(this, event, this[DB_REFUSED], ...rest) : false;
+		}
+		return silentEmit.call(this, event, arg, ...rest);
+	};
+	Redis.prototype[SELECT_HOOK] = true;
+}
+
+/**
  * The `error` listener every BullMQ Queue and Worker of the project carries (issue #468): without one, BullMQ prints
  * the whole error object with `console.error`. This writes one line, the message only (scrubbed of any command), and
  * `what` naming whose error it is.
@@ -99,6 +142,11 @@ export function onValkeyError(emitter, what, write = (line) => process.stderr.wr
  */
 export function parseConnection(url, { failFast = false, servername = null, context = null, judge = null, withoutPassword = false } = {}) {
 	const u = new URL(url);
+	// PR #478's gate: a path that is not a database number was `db: NaN`, and the SELECT ioredis then sent failed outside
+	// every caller's await (an unhandled rejection). Refused here, where every client of the project is made, as the
+	// configuration refusal it is; `judgeValkeyAtStart` says it first at each start.
+	const dbProblem = valkeyUrlProblem(url);
+	if (dbProblem) throw valkeyRefusal(dbProblem);
 	const where = context ?? defaultValkeyContext();
 	// Issue #468: the password this client sends, by `valkeyPasswordFor`'s rule (the URL's own, else VALKEY_PASSWORD from
 	// the environment, else from the deployment `.env` for a loopback host). Here and nowhere else, so every client of the
@@ -123,7 +171,8 @@ export function parseConnection(url, { failFast = false, servername = null, cont
 		// TLS for `rediss:` (issue #464, gate round 2). Host and port alone dropped it, so a `rediss:` VALKEY_URL reached
 		// BullMQ as plaintext. `servername` is the name a certificate is checked against when the worker connects to a
 		// pinned address rather than to that name (`pinnedValkeyUrl`).
-		...(u.protocol === "rediss:" ? { tls: servername ? { servername } : {} } : {}),
+		// `valkeys:` is `rediss:`'s alias (`valkeySchemeOf`, gate round 3): TLS as well.
+		...(valkeySchemeOf(u.protocol) === "rediss:" ? { tls: servername ? { servername } : {} } : {}),
 		maxRetriesPerRequest: null, // required for BullMQ blocking connections
 		...(failFast
 			? {
@@ -175,6 +224,7 @@ export async function valkeyAuthState(url, { context = null, servername = null, 
 		]);
 		return reply === "PONG" ? { state: "ok" } : { state: "unreachable", error: `PING answered ${String(reply).slice(0, 40)}` };
 	} catch (err) {
+		if (client[DB_REFUSED]) return { state: "dbrange", error: await dbRangeSentenceFor(url, client, { context, servername, makeClient, timeoutMs }) };
 		const all = [err?.message ?? String(err), ...seen].join("\n");
 		if (/\bWRONGPASS\b|invalid password/i.test(all)) return { state: "wrongpass" };
 		if (/\bNOAUTH\b/.test(all)) return { state: "noauth" };
@@ -183,6 +233,37 @@ export async function valkeyAuthState(url, { context = null, servername = null, 
 		clearTimeout(timer);
 		client.disconnect();
 	}
+}
+
+/**
+ * The refusal sentence for a client whose SELECT was refused, with the server's `databases` count read by a second
+ * client on database 0 (`CONFIG GET databases`; null where that is refused, a managed Valkey say). The second client
+ * only reads that setting and never touches a key.
+ */
+async function dbRangeSentenceFor(url, client, { context, servername, makeClient, timeoutMs }) {
+	let databases = null;
+	let probe;
+	let timer;
+	try {
+		const u = new URL(url);
+		u.pathname = "";
+		probe = makeClient(u.toString(), { failFast: true, lazyConnect: true, context, servername });
+		probe.on?.("error", () => {});
+		const reply = await Promise.race([
+			probe.connect().then(() => probe.config("GET", "databases")),
+			new Promise((_, reject) => {
+				timer = setTimeout(() => reject(new Error("timeout")), timeoutMs);
+			}),
+		]);
+		const n = Array.isArray(reply) ? Number(reply[1]) : NaN;
+		databases = Number.isInteger(n) && n > 0 ? n : null;
+	} catch {
+		// Unreadable: the sentence says so.
+	} finally {
+		clearTimeout(timer);
+		probe?.disconnect?.();
+	}
+	return valkeyDbRangeSentence(url, client.options?.db ?? client.condition?.select, databases);
 }
 
 /**
@@ -197,7 +278,9 @@ export async function judgeValkeyAtStart(url, context, opts = {}) {
 	const checkAuth = opts.checkAuth !== undefined ? opts.checkAuth : opts.judge ? null : valkeyAuthState;
 	if (checkAuth) {
 		const where = context ?? defaultValkeyContext();
-		const { state } = await checkAuth(url, { context: where, servername: endpoint?.servername ?? null });
+		const { state, error } = await checkAuth(url, { context: where, servername: endpoint?.servername ?? null });
+		// Gate round 2 of PR #478: a database the server does not have is a refusal too, never database 0.
+		if (state === "dbrange") throw Object.assign(new Error(error), { piDispatchConfig: true, valkeyRefused: true, valkeyDbRange: true });
 		const refusal = state === "noauth" || state === "wrongpass" ? authRefusalFor(state, url, where) : null;
 		if (refusal) throw Object.assign(new Error(refusal), { piDispatchConfig: true, valkeyRefused: true, valkeyAuth: state });
 	}
@@ -237,8 +320,15 @@ export class JudgedConnector extends AbstractConnector {
 		this.options = options;
 	}
 
+	/** ioredis' ready check: failed for a client whose SELECT was refused (`DB_REFUSED`), so it never goes ready. */
+	check() {
+		return !this[DB_REFUSED];
+	}
+
 	connect() {
 		const { options } = this;
+		// A database the server refused stays refused: no reconnect goes ready on another one.
+		if (this[DB_REFUSED]) return Promise.reject(this[DB_REFUSED]);
 		this.connecting = true;
 		const judge = options[JUDGE];
 		if (!judge) return Promise.reject(new Error("a Valkey client was built without parseConnection's judged options"));

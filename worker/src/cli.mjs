@@ -41,8 +41,9 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
   pi-dispatch pause        stop taking new jobs (durable; survives worker restart)
   pi-dispatch resume       resume taking jobs
   pi-dispatch status       show paused state + job counts
-  pi-dispatch cancel <jobId>  stop one job: a queued or held job is removed (it never ran), a running
-                           one is aborted on whichever host owns it (its record says operator-cancel)
+  pi-dispatch cancel <jobId>  stop one job: a queued or held job is removed (the line says whether it had
+                           made attempts; cancel records nothing), a running one is aborted on whichever
+                           host owns it (its record says operator-cancel)
 
 Config comes from the environment (see .env.example); flags override it per run.
 Prefer being walked through all of this? The operator panel's /dispatch setup does every step

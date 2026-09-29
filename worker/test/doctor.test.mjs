@@ -6,7 +6,7 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryProbeArgs, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, triggersPath, valkeyPasswordUpgradeStep } from "../src/doctor.mjs";
+import { startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryProbeArgs, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, triggersPath, valkeyPasswordUpgradeStep } from "../src/doctor.mjs";
 import { valkeyPasswordFor } from "../src/valkey-endpoint.mjs";
 import { serviceEnvFileOf } from "../src/service-env.mjs";
 import { VALKEY_SHARED_KEY as VALKEY_SHARED_NAME } from "../src/podman-stack.mjs";
@@ -6263,7 +6263,7 @@ const MIXED_PIN = {
 			"    $ docker pull ghcr.io/edgehero/pi-job:latest && docker tag ghcr.io/edgehero/pi-job:latest pi-job:latest",
 			"skipped: Job image present (pi-job:latest)",
 			"",
-			"doctor: some checks failed \u2014 fix the above, then re-run.",
+			"doctor: some checks failed: fix the above, then re-run.",
 			"",
 		].join("\n"),
 	},
@@ -6312,7 +6312,7 @@ const MIXED_PIN = {
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
-			"doctor: some checks failed \u2014 fix the above, then re-run.",
+			"doctor: some checks failed: fix the above, then re-run.",
 			"",
 		].join("\n"),
 	},
@@ -6363,7 +6363,7 @@ const MIXED_PIN = {
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
 			"",
-			"doctor: some checks failed \u2014 fix the above, then re-run.",
+			"doctor: some checks failed: fix the above, then re-run.",
 			"",
 		].join("\n"),
 	},
@@ -9487,4 +9487,124 @@ test("doctor (#468 over #471): the AUTH check's context carries the resolved pas
 	assert.match(both, /VALKEY_PASSWORD is set differently in this shell and in [^\n]*\.env \(neither value is shown\)/);
 	assert.ok(!both.includes(PW468) && !both.includes("shellside0123456789"), "neither value printed");
 	for (const c of calls) for (const v of Object.values(c.opts?.env ?? {})) assert.notEqual(String(v), PW468, `${c.cmd} ${c.args.join(" ")} was handed the file's password`);
+});
+
+test("doctor reads the documented unquoted PI_BACKEND_FLOOR from .env and judges it (#477)", async () => {
+	// Round-446 final verification (pd-fedora, raw/52): `PI_BACKEND_FLOOR=isolation=enforced` in .env, the form
+	// docs/podman.md shows, drew a false ✗ ("in a form the service's loader may read differently") and then "✓
+	// PI_BACKEND_FLOOR is not set", so the floor the service refuses to boot on was never judged.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "PI_BACKEND_FLOOR=isolation=enforced\n");
+	const { out, text } = capture();
+	const code = await runDoctor(podmanEnv(), podmanDeps(out, podmanPlan(), [], { cwd, platform: "linux", observationFs: podmanFsWith(null) }));
+	assert.equal(code, 1, text());
+	assert.doesNotMatch(text(), /assigns PI_BACKEND_FLOOR/);
+	assert.doesNotMatch(text(), /PI_BACKEND_FLOOR is not set/);
+	assert.match(text(), /✓ service settings read from [^\n]*\.env, as the service reads them \(this shell does not set them\): [^\n]*PI_BACKEND_FLOOR/);
+	assert.match(text(), /✗ PI_BACKEND_FLOOR asks for isolation=enforced \(podman provides it only while/);
+	// Quoted, the same value reads the same.
+	writeFileSync(join(cwd, ".env"), "PI_BACKEND_FLOOR='isolation=enforced'\n");
+	const quoted = capture();
+	assert.equal(await runDoctor(podmanEnv(), podmanDeps(quoted.out, podmanPlan(), [], { cwd, platform: "linux", observationFs: podmanFsWith(null) })), 1);
+	assert.match(quoted.text(), /✗ PI_BACKEND_FLOOR asks for isolation=enforced \(podman provides it only while/);
+});
+
+test("doctor's ready line names a worker that reads the .env it judged, and keeps `pi-dispatch worker` where it judged none (#477)", async () => {
+	// Round-446 final verification (pd-fedora, raw/51): doctor judged .env's Valkey and ended with "Start the worker with
+	// `pi-dispatch worker`", and that worker, started by hand, read its shell alone and dialled 127.0.0.1:6379.
+	const cwd = scaffoldedCwd();
+	const envPath = join(cwd, ".env");
+	writeFileSync(envPath, "PI_JOB_IMAGE=pi-job:latest\n");
+	const { out, text } = capture();
+	assert.equal(await runDoctor(podmanEnv(), podmanDeps(out, podmanPlan(), [], { cwd, platform: "linux" })), 0, text());
+	assert.match(text(), /✓ service settings read from [^\n]*\.env[^\n]*: PI_JOB_IMAGE\n/);
+	assert.ok(text().endsWith(`\ndoctor: ready. Start the worker as the service, whose loader reads ${envPath} as doctor did: \`pi-dispatch service install\`. A worker started by hand (\`pi-dispatch worker\`) reads this shell's environment and not that file, so it runs without the settings doctor read from the file above unless this shell exports them.\n`), text());
+	assert.doesNotMatch(text(), /Start the worker with `pi-dispatch worker`/);
+	// A service installed for this folder: restart it, by the command that drives its scope (PR #478's gate: a system
+	// unit was told `pi-dispatch service restart`, which only drives `systemctl --user` and refuses `--system`).
+	const esc = (x) => x.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+	const withUnit = async (unitPath) => {
+		const c = capture();
+		await runDoctor(podmanEnv(), podmanDeps(c.out, podmanPlan(), [], { cwd, platform: "linux", fileExists: (p) => p === unitPath || existsSync(p), readUnit: (p) => (p === unitPath ? `[Service]\nWorkingDirectory=${cwd}\nEnvironmentFile=${envPath}\n` : (() => { throw new Error("ENOENT"); })()) }));
+		return c.text();
+	};
+	for (const [unitPath, command] of [
+		["/etc/systemd/system/pi-dispatch-worker.service", "sudo systemctl restart pi-dispatch-worker.service"],
+		["/etc/systemd/system/worker.service", "sudo systemctl restart worker.service"],
+		[join(PODMAN_HOME, ".config", "systemd", "user", "pi-dispatch-worker.service"), "pi-dispatch service restart"],
+	]) {
+		const text = await withUnit(unitPath);
+		assert.match(text, new RegExp(`\\ndoctor: ready\\. Start the worker as the service, whose loader reads [^\\n]* as doctor did: \`${esc(command)}\` \\(the service installed for this folder, ${esc(unitPath)}\\)\\. A worker started by hand`), unitPath);
+	}
+	// The same rule on the other two platforms, where doctor cannot be run green here: a LaunchDaemon is kickstarted
+	// in the system domain, a LaunchAgent restarts through the CLI, and on Windows the nssm service has no file to read.
+	const advice = (platform, unit) => startAdvice({ tookFromFile: true, envPath: "/d/.env", platform, unit });
+	assert.match(advice("darwin", { path: "/Library/LaunchDaemons/com.pi-dispatch.worker.plist", scope: "system" }), /: `sudo launchctl kickstart -k system\/com\.pi-dispatch\.worker` \(the service installed for this folder, \/Library\/LaunchDaemons\/com\.pi-dispatch\.worker\.plist\)\./);
+	assert.match(advice("darwin", { path: "/Users/o/Library/LaunchAgents/com.pi-dispatch.worker.plist", scope: "user" }), /: `pi-dispatch service restart` \(the service installed for this folder, /);
+	assert.match(advice("darwin", null), /: `pi-dispatch service install`\. A worker/);
+	assert.match(advice("win32", null), /: `pi-dispatch service install`, or `pi-dispatch service restart` when its nssm service is already installed\. A worker/);
+	assert.equal(startAdvice({ tookFromFile: false, envPath: "/d/.env", platform: "win32", unit: null }), "Start the worker with `pi-dispatch worker`.");
+	// Taken from the file only through a provider key (`extra`), the line still names the service.
+	const { ANTHROPIC_API_KEY: _k, ...noKey } = podmanEnv();
+	writeFileSync(envPath, "ANTHROPIC_API_KEY=sk-file\n");
+	const keyed = capture();
+	assert.equal(await runDoctor(noKey, podmanDeps(keyed.out, podmanPlan(), [], { cwd, platform: "linux" })), 0, keyed.text());
+	assert.doesNotMatch(keyed.text(), /service settings read from/);
+	assert.match(keyed.text(), /\ndoctor: ready\. Start the worker as the service/);
+	// This shell sets what the file does (it wins, so doctor judged the shell's): the worker started from it runs that.
+	writeFileSync(envPath, "PI_JOB_IMAGE=pi-job:latest\n");
+	const shellWins = capture();
+	assert.equal(await runDoctor(podmanEnv({ PI_JOB_IMAGE: "pi-job:latest" }), podmanDeps(shellWins.out, podmanPlan(), [], { cwd, platform: "linux" })), 0, shellWins.text());
+	assert.ok(shellWins.text().endsWith("\ndoctor: ready. Start the worker with `pi-dispatch worker`.\n"), shellWins.text());
+	// And with no .env at all.
+	const bare = capture();
+	assert.equal(await runDoctor(podmanEnv(), podmanDeps(bare.out, podmanPlan(), [], { cwd: scaffoldedCwd(), platform: "linux" })), 0, bare.text());
+	assert.ok(bare.text().endsWith("\ndoctor: ready. Start the worker with `pi-dispatch worker`.\n"), bare.text());
+	// The venue keys, which `deploymentVenueEnv` decides apart from the rest, count too.
+	writeFileSync(envPath, "PI_BACKENDS=podman\nPI_EGRESS=0\n");
+	const { PI_BACKENDS: _b, PI_EGRESS: _e, ...noVenue } = podmanEnv();
+	const venue = capture();
+	assert.equal(await runDoctor(noVenue, podmanDeps(venue.out, podmanPlan(), [], { cwd, platform: "linux" })), 0, venue.text());
+	assert.match(venue.text(), /✓ venue keys read from/);
+	assert.match(venue.text(), /\ndoctor: ready\. Start the worker as the service/);
+});
+
+test("doctor says a VALKEY_URL path that names no database as a ✗ and contacts no Valkey, never an unhandled rejection (#477 follow-up)", async () => {
+	// PR #478's gate, pd-fedora: `redis://127.0.0.1:16478/abc` and `/0,x=y=z` ended doctor with "error: an unhandled
+	// rejection: ERR value is not an integer or out of range".
+	for (const url of ["redis://127.0.0.1:6379/abc", "redis://127.0.0.1:6379/0,x=y=z"]) {
+		const { out, text } = capture();
+		const asked = [];
+		const code = await runDoctor(ghEnv({ VALKEY_URL: url }), { ...ghDeps(out, green), probeValkey: async (u) => (asked.push(`probe ${u}`), true), valkeyAuth: async (u) => (asked.push(`auth ${u}`), { state: "ok" }), readHosts: async (u) => (asked.push(`hosts ${u}`), { hosts: [] }) });
+		assert.equal(code, 1, text());
+		assert.ok(text().includes(`✗ VALKEY_URL ${url} names no database: its path must be a whole number (redis://host:port/0 is database 0, and no path means the same), not ${JSON.stringify(new URL(url).pathname)}: the worker refuses to start on it (exit 2), and doctor contacted no Valkey\n    → write VALKEY_URL as redis://host:port, or redis://host:port/<database number>, then re-run doctor\n`), text());
+		assert.deepEqual(asked, [], "no probe, no AUTH, no fleet read");
+		assert.doesNotMatch(text(), /Valkey reachable/);
+	}
+	// A database number is judged as before.
+	const { out, text } = capture();
+	await runDoctor(ghEnv({ VALKEY_URL: "redis://127.0.0.1:6379/3" }), { ...ghDeps(out, green), probeValkey: async () => true });
+	assert.match(text(), /✓ Valkey reachable \(redis:\/\/127\.0\.0\.1:6379\/3\)/);
+});
+
+test("doctor says a VALKEY_URL database that Valkey does not have as a ✗, and reads nothing more from it (gate round 2 of PR #478)", async () => {
+	// Measured: `/16` on a default Valkey. Every client refuses it rather than going on on database 0, and doctor's AUTH
+	// probe is the client that finds it (`valkeyAuthState`'s "dbrange").
+	const sentence = "VALKEY_URL redis://127.0.0.1:6379/16 names database 16, which that Valkey does not have: it has 16 (databases 0 to 15, its `databases` setting). No client uses another database in its place; name one it has, or raise `databases` in that Valkey's configuration";
+	const { out, text } = capture();
+	const asked = [];
+	const code = await runDoctor(ghEnv({ VALKEY_URL: "redis://127.0.0.1:6379/16" }), { ...ghDeps(out, green), probeValkey: async (u) => (asked.push(`probe ${u}`), true), valkeyAuth: async (u, o) => (asked.push(`auth ${u}${o?.withoutPassword ? " (no password)" : ""}`), { state: "dbrange", error: sentence }), readHosts: async (u) => (asked.push(`hosts ${u}`), { hosts: [] }) });
+	assert.equal(code, 1, text());
+	assert.ok(text().includes(`✗ ${sentence}: the worker refuses to start on it (exit 2)\n    → write VALKEY_URL with a database that Valkey has (no path is database 0), or raise \`databases\` in its configuration, then re-run doctor\n`), text());
+	assert.deepEqual(asked, ["auth redis://127.0.0.1:6379/16"], "the one probe that found it, and no reachability, password or fleet read after it");
+	assert.doesNotMatch(text(), /Valkey reachable/);
+});
+
+test("doctor takes a valkey:// VALKEY_URL as redis:// (gate round 3 of PR #478)", async () => {
+	const { out, text } = capture();
+	const asked = [];
+	await runDoctor(ghEnv({ VALKEY_URL: "valkey://127.0.0.1:6379/2" }), { ...ghDeps(out, green), probeValkey: async (u) => (asked.push(u), true) });
+	assert.match(text(), /✓ Valkey reachable \(valkey:\/\/127\.0\.0\.1:6379\/2\)/);
+	assert.doesNotMatch(text(), /does not connect with|names no database/);
+	assert.deepEqual(asked, ["valkey://127.0.0.1:6379/2"]);
 });

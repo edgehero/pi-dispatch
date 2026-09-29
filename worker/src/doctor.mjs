@@ -53,7 +53,7 @@ import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync,
 import { lookup as dnsLookup } from "node:dns/promises";
 import { homedir, networkInterfaces, release as osRelease, tmpdir, userInfo } from "node:os";
 import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_START, STACK_KEYS, STARTED_AT_FORMAT, VALKEY_SHARED_KEY, judgeNetnsKeeper, judgeValkeyListeners, netnsKeeperRemedy, pinnedValkeyUrl, podmanNeedsNetnsKeeper, probeTcpAddress, readSubuidRanges, proxyRestartAdvice, readLinger, readValkeyKeys, valkeySharedOn, valkeyTarget } from "./podman-stack.mjs";
-import { dirname, isAbsolute, join, delimiter, posix, resolve, win32 } from "node:path";
+import { basename, dirname, isAbsolute, join, delimiter, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -83,7 +83,7 @@ import { DEFAULT_EGRESS_PROXY, STOPPED_PROXY_STATES, EGRESS_CANARY_NET_PREFIX, E
 import { detachBlockedSentence, makeDetachGate, runtimeFromFacts } from "./netns-keeper.mjs";
 import { runLiveProbes } from "./live-probes.mjs";
 import { VALKEY_PASSWORD_KEY, VALKEY_PASSWORD_HOWTO, VALKEY_PORT_KEY, isLoopbackHost, valkeyPasswordProblem, valkeyPortConflict } from "./valkey-auth.mjs";
-import { urlShown, valkeyContextFromResolution, valkeyPasswordFor } from "./valkey-endpoint.mjs";
+import { urlShown, valkeyContextFromResolution, valkeyPasswordFor, valkeyUrlProblem } from "./valkey-endpoint.mjs";
 import { SANDBOX_TOMBSTONE_STUCK_MS, isSandboxTombstone, sandboxTombstoneAge } from "./sandbox-store.mjs";
 import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
@@ -364,8 +364,39 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		if (facts.podman && render(await podmanLiveChecks(env, liveSeams, facts), out)) failed = true;
 	}
 
-	out(failed ? "\ndoctor: some checks failed — fix the above, then re-run.\n" : "\ndoctor: ready. Start the worker with `pi-dispatch worker`.\n");
+	// Issue #477: whether anything doctor judged came from the deployment's `.env`, which a hand-started worker never reads.
+	const fromFile = [venue.error ? {} : venue.fromFile, seams.serviceEnv.fromFile, seams.serviceEnv.extraFromFile];
+	const tookFromFile = fromFile.some((taken) => Object.keys(taken ?? {}).length > 0);
+	out(failed ? "\ndoctor: some checks failed: fix the above, then re-run.\n" : `\ndoctor: ready. ${startAdvice({ tookFromFile, envPath, platform, unit: tookFromFile ? installedWorkerUnit(seams, cwd) : null })}\n`);
 	return failed ? 1 : 0;
+}
+
+/**
+ * Issue #477: how to start a worker that runs with what doctor judged. `pi-dispatch worker` started by hand reads this
+ * shell's environment and no `.env` (docs/secrets.md: the worker parses no `.env` file), so where doctor took any value
+ * from the deployment's `.env`, the worker that sees it is the service, whose loader reads the file; the line names that
+ * command (restart for a service installed for this folder), and what a hand-started worker needs. Where doctor took
+ * nothing from the file, what it judged is this shell's, and a worker started from it runs with the same.
+ */
+export function startAdvice({ tookFromFile, envPath, unit, platform = process.platform }) {
+	if (!tookFromFile) return "Start the worker with `pi-dispatch worker`.";
+	return `Start the worker as the service, whose loader reads ${envPath} as doctor did: ${restartAdvice(unit, platform)}. A worker started by hand (\`pi-dispatch worker\`) reads this shell's environment and not that file, so it runs without the settings doctor read from the file above unless this shell exports them.`;
+}
+
+/**
+ * The command that (re)starts the worker service for this folder (issue #477, PR #478's gate): `pi-dispatch service
+ * restart` drives only a USER unit (`systemctl --user`, launchctl's `gui/<uid>` domain) or the nssm service, and says
+ * `--system is print-only` of a system one, so a system-scope unit gets the root command itself. Windows has no unit
+ * file doctor can read (the service is registered with nssm), so there both commands are named.
+ */
+function restartAdvice(unit, platform) {
+	if (platform === "win32") return "`pi-dispatch service install`, or `pi-dispatch service restart` when its nssm service is already installed";
+	if (!unit) return "`pi-dispatch service install`";
+	const name = basename(unit.path);
+	const at = ` (the service installed for this folder, ${unit.path})`;
+	if (unit.scope !== "system") return `\`pi-dispatch service restart\`${at}`;
+	if (platform === "darwin") return `\`sudo launchctl kickstart -k system/${name.replace(/\.plist$/, "")}\`${at}`;
+	return `\`sudo systemctl restart ${name}\`${at}`;
 }
 
 /** The ✓/⚠/✗ lines plus each failure's fix, exactly as doctor has always printed them. Returns whether
@@ -520,11 +551,16 @@ const AMBIENT_SERVICE_KEYS = Object.freeze(["TMPDIR", "TEMP", "XDG_RUNTIME_DIR",
  * Read as the job-user check reads units (`installedUnitPaths`, `readUnitSeam`), for the shell-only line.
  */
 function serviceUnitFor(seams, cwd) {
+	return installedWorkerUnit(seams, cwd)?.path ?? null;
+}
+
+/** `serviceUnitFor` with the unit's scope (issue #477): `{ path, scope }`, `scope` "user" or "system", else null. */
+function installedWorkerUnit(seams, cwd) {
 	const { platform, home, fileExists, readUnit = (path) => readFileSync(path, "utf8") } = seams;
-	for (const { path, which } of installedUnitPaths(platform, home)) {
+	for (const { path, which, scope } of installedUnitPaths(platform, home)) {
 		if (which !== "worker" || !fileExists(path)) continue;
 		try {
-			if (readUnitSeam(readUnit(path), platform).deployDir === cwd) return path;
+			if (readUnitSeam(readUnit(path), platform).deployDir === cwd) return { path, scope };
 		} catch {}
 	}
 	return null;
@@ -622,8 +658,12 @@ export function resolveDoctorEnv(venueEnv, file) {
 	const record = resolveServiceEnv({ env: venueEnv, file, keys });
 	// The venue keys only this shell sets (gate round 1): `deploymentVenueEnv` decided them, and says nothing of these.
 	record.shellOnly.unshift(...resolveServiceEnv({ env: venueEnv, file, keys: STACK_KEYS }).shellOnly);
+	// Issue #477: the keys `extra` took from the file, kept apart from `fromFile` (whose ✓ line each extra's own line
+	// already covers), so doctor's closing line knows the file decided something.
+	record.extraFromFile = {};
 	record.extra = (names) => {
 		const more = resolveServiceEnv({ env: venueEnv, file, keys: names });
+		Object.assign(record.extraFromFile, more.fromFile);
 		for (const k of ["disagreements", "unread", "hazardSkipped", "shellOnly"]) {
 			for (const item of more[k]) if (!record[k].some((have) => (have.key ?? have) === (item.key ?? item))) record[k].push(item);
 		}
@@ -929,6 +969,9 @@ export async function collectChecks(shellVars, seams) {
 	const unreadValkey = valkeyUnread ? readValkeyKeys(serviceEnvFile.text, { loader: serviceEnvFile.loader, path: serviceEnvFile.path }).error : null;
 	if (unreadValkey) valkeyUnread.skip = true;
 	const valkeyUrl = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
+	// PR #478's gate: a VALKEY_URL path that names no database (`/abc`) crashed doctor with an unhandled rejection from
+	// ioredis's SELECT. It is a ✗ of its own, the worker's refusal (exit 2), and nothing below contacts a Valkey.
+	const valkeyDbProblem = unreadValkey ? null : valkeyUrlProblem(valkeyUrl);
 	const provider = env.PI_PROVIDER ?? "anthropic";
 	// Issue #464 (gate round 1): this host's declared worker name, resolved with every other service key. Every reader
 	// below (the fleet line and its routing warning, the per-host backend wording, which cron triggers are scheduled
@@ -1824,7 +1867,7 @@ export async function collectChecks(shellVars, seams) {
 		const read = readEnvAssignments(serviceEnvFile.text, [VALKEY_SHARED_KEY], { loader: serviceEnvFile.loader })[VALKEY_SHARED_KEY];
 		return read?.plain && typeof read.value === "string" ? read.value : undefined;
 	})();
-	if (!unreadValkey && seams.valkeyOwner) {
+	if (!unreadValkey && !valkeyDbProblem && seams.valkeyOwner) {
 		if (typeof env[VALKEY_SHARED_KEY] === "string") checks.push({ ok: false, warn: true, label: sharedShellIgnored(env[VALKEY_SHARED_KEY], join(cwd, ".env")), fix: "put PI_VALKEY_SHARED=1 in the deployment's .env if that Valkey is shared on purpose, and unset it in this shell" });
 		ownerVerdict = await seams.valkeyOwner(valkeyUrl, { shared: valkeySharedOn(sharedInFile), user: userNameOf(seams), envPath: join(cwd, ".env"), rootOk: !(podmanUsed && !localUsed) });
 	}
@@ -1840,8 +1883,10 @@ export async function collectChecks(shellVars, seams) {
 	// This shell's side where it set the key, the file's where the resolution took it from there (sent to a loopback
 	// Valkey only), as every client sends it (`valkeyContextFromResolution`).
 	const valkeyContext = valkeyContextFromResolution({ service, envPath: serviceEnvFile?.path ?? join(cwd, ".env"), shared: sharedInFile, platform });
-	const valkeyAuthVerdict = !valkeyUnresolved && !valkeyRefused && !unreadValkey && seams.valkeyAuth ? await seams.valkeyAuth(valkeyTalkUrl, { context: valkeyContext }) : null;
-	if (valkeyUnresolved) {
+	const valkeyAuthVerdict = !valkeyUnresolved && !valkeyRefused && !unreadValkey && !valkeyDbProblem && seams.valkeyAuth ? await seams.valkeyAuth(valkeyTalkUrl, { context: valkeyContext }) : null;
+	if (valkeyDbProblem) {
+		checks.push({ ok: false, label: `${valkeyDbProblem}: the worker refuses to start on it (exit 2), and doctor contacted no Valkey`, fix: "write VALKEY_URL as redis://host:port, or redis://host:port/<database number>, then re-run doctor" });
+	} else if (valkeyUnresolved) {
 		checks.push({ ok: false, label: valkeyUnresolved, fix: "fix the name's resolution on this host, or write the address in VALKEY_URL" });
 	} else if (valkeyRefused) {
 		checks.push({ ok: false, label: `Valkey (${urlShown(valkeyUrl)}) is not this account's: ${ownerVerdict.refusal.short}. The worker refuses to start on it (exit 2); doctor did not talk to it`, fix: ownerVerdict.refusal.fix });
@@ -1851,6 +1896,10 @@ export async function collectChecks(shellVars, seams) {
 			label: `${unreadValkey}: doctor contacted no Valkey, since the default it would fall back to (${urlShown(valkeyUrl)}) is not what the service's worker is given, and on a shared host may be another account's`,
 			fix: "write that line so every loader reads it the same (the reason above says how), then re-run doctor",
 		});
+	} else if (valkeyAuthVerdict?.state === "dbrange") {
+		// Gate round 2 of PR #478: a database that Valkey does not have. Every client refuses it rather than using
+		// database 0 (connection.mjs, `DB_REFUSED`), so it is the worker's refusal too, and nothing more is read from it.
+		checks.push({ ok: false, label: `${valkeyAuthVerdict.error}: the worker refuses to start on it (exit 2)`, fix: "write VALKEY_URL with a database that Valkey has (no path is database 0), or raise `databases` in its configuration, then re-run doctor" });
 	} else if (valkeyAuthVerdict && (valkeyAuthVerdict.state === "noauth" || valkeyAuthVerdict.state === "wrongpass")) {
 		// Issue #468: a Valkey that refuses this deployment's credential answers, so "not reachable" would be the wrong
 		// sentence: it is the password, named by its key and where it came from, never its value.
@@ -1903,7 +1952,7 @@ export async function collectChecks(shellVars, seams) {
 	// its digest is unknown would be noise on a fault the operator has been told about.
 	// Not from the default Valkey when the service's VALKEY_URL line could not be read (`unreadValkey`): its fleet is
 	// another deployment's.
-	const fleet = unreadValkey || valkeyRefused ? { hosts: [] } : await readHosts(valkeyTalkUrl);
+	const fleet = unreadValkey || valkeyRefused || valkeyDbProblem || valkeyAuthVerdict?.state === "dbrange" ? { hosts: [] } : await readHosts(valkeyTalkUrl);
 	// Printable before anything is compared or said (issue #453, gate round 3): since a folder's `.env` now chooses the
 	// Valkey doctor reads, a host row is another party's text, and a control byte in a name or zone must not reach the
 	// terminal. The registry's own charset already refuses them at the source; this is the reader not relying on it.

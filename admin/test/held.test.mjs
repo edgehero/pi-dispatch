@@ -183,7 +183,7 @@ test("cancelHeldJob removes the hold FIRST, then the job, and only a lease it ow
 		}),
 		queueFn: () => ({ getJob: async () => ({ getState: async () => "delayed", remove: async () => order.push("remove") }), close: async () => order.push("close") }),
 	});
-	assert.deepEqual(res, { ok: true, jobId: "gh-1" });
+	assert.deepEqual(res, { ok: true, jobId: "gh-1", attemptsMade: 0 });
 	// The hold goes first: if `remove` throws or the timeout fires, an orphaned hash keeps a panel row for a
 	// job that is gone, while an orphaned job is merely a job that still runs -- the state we were in.
 	assert.deepEqual(order.slice(0, 4), ["del wait:job:gh-1", "srem gh-1", "del wait:key:o/r#1:fix#0", "remove"]);

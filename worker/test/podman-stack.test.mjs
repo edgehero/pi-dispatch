@@ -676,7 +676,25 @@ test("readValkeyKeys reads VALKEY_URL and PI_VALKEY_SHARED as the loader does, a
 	assert.match(unplainCause("redis://a b"), /a space in the value/);
 	assert.match(unplainCause("redis://a\\b"), /a backslash/);
 	assert.match(unplainCause('"redis://$X"'), /a \$/);
-	assert.match(unplainCause("redis://a;b"), /a character outside/);
+	assert.equal(unplainCause("redis://a;b"), "a character (`;`) outside A-Z, a-z, 0-9 and _@+=:,./- in an unquoted value. Quote the whole value");
+});
+
+test("unplainCause names the character that is refused, and not an = the reader now takes (#477)", () => {
+	// The gate's case: `?x=y` blamed a character set without `=`, as if the `=` were the problem.
+	assert.match(unplainCause("redis://127.0.0.1:6379/0?x=y"), /^a character \(`\?`\) outside A-Z, a-z, 0-9 and _@\+=:,\.\/- /);
+	assert.match(unplainCause("a#b"), /\(`#`\)/);
+	assert.match(unplainCause("x=y?z"), /^a character \(`\?`\) /, "an interior = is not the character refused");
+	assert.match(unplainCause("caf\u00e9"), /\(U\+00E9\)/);
+	// A control or invisible character is refused quoted too (gate round 2), so the advice is to remove it, not to quote.
+	for (const v of ["a\u200bb", "'a\u200bb'", '"a\u200bb"']) assert.equal(unplainCause(v), "a control or invisible character (U+200B), which doctor does not show back, quoted or not. Remove it", JSON.stringify(v));
+	assert.match(unplainCause("x\u001by"), /^a control or invisible character \(U\+001B\).* Remove it$/);
+	// The two `=` shapes the reader still refuses have their own cause.
+	assert.equal(unplainCause("=ls"), "an = at the start of an unquoted value, which zsh expands as a command name. Quote the whole value");
+	assert.equal(unplainCause("a:=b"), "a := in an unquoted value, which zsh expands as a command name. Quote the whole value");
+	// And through the reader, end to end: an interior = reads, a leading one is refused with its cause.
+	assert.deepEqual(readValkeyKeys("VALKEY_URL=redis://h:6379/0\nPI_VALKEY_SHARED=a=b\n"), { keys: { VALKEY_URL: "redis://h:6379/0", PI_VALKEY_SHARED: "a=b" } });
+	assert.match(readValkeyKeys("PI_VALKEY_SHARED==1\n", { path: "/d/.env" }).error, /line 1 assigns PI_VALKEY_SHARED .*\(an = at the start of an unquoted value/);
+	assert.match(readValkeyKeys("VALKEY_URL=redis://h:6379/0?x=y\n", { path: "/d/.env" }).error, /\(a character \(`\?`\) outside/);
 });
 
 // Gate round 2: the owner rule moved to where the connection is made, with the address pinned.

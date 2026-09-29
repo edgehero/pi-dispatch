@@ -2090,6 +2090,8 @@ async function defaultJudgeValkey({ url, venues, env }) {
  */
 export async function refuseValkeyAuth(valkey, env, { cwd = process.cwd(), authState = valkeyAuthState } = {}) {
 	const context = workerValkeyContext(valkey, env, { cwd });
-	const { state } = await authState(valkey.url, { context, servername: valkey.servername ?? null });
+	const { state, error } = await authState(valkey.url, { context, servername: valkey.servername ?? null });
+	// Gate round 2 of PR #478: a database the server does not have (`/16` on a default Valkey) is a refusal, exit 2.
+	if (state === "dbrange") throw configError(error);
 	if (state === "noauth" || state === "wrongpass") throw configError(authRefusalFor(state, valkey.url, context));
 }

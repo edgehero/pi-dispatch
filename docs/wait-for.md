@@ -241,8 +241,9 @@ Every cell is chosen by the worker: an id-only target, the operator-authored con
 duration. No issue title and no issue body reaches the panel, which is why the reader takes the worker's own
 records rather than the delayed jobs.
 
-Stopping one held job has three doors, all running the same sequence and all recording nothing, because a
-held job never ran:
+Stopping one held job has three doors, all running the same sequence and none writing a run record of its own. A
+held job usually never ran; one held again on a retry after a failed attempt did, and whatever that attempt
+recorded stays (`pi-dispatch cancel` and the panel say which, from the job's attempt count):
 
 - `h` in the panel opens the held view; `x` on a row asks an in-frame y/n and cancels that hold.
 - `pi-dispatch cancel <jobId>` at a terminal, reading only `VALKEY_URL` (the kill switch's own rule, so a

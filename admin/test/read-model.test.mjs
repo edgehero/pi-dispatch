@@ -2449,3 +2449,26 @@ test("panelValkeyContext: the pointer's folder only, through #471's reader: noth
   // What the pointer layered is not pi's own: the file is compared with an operator export only.
   assert.equal(panelValkeyContext({ env: { VALKEY_URL: "redis://127.0.0.1:1" }, pointerDir: dir, owned: ["VALKEY_URL"] }).url.environment, null);
 });
+
+test("the panel's Valkey reads fail open on a VALKEY_URL whose path names no database (#477 follow-up)", async () => {
+  // PR #478's gate: the client refuses such a URL where it is made; every panel read says it rather than throwing.
+  const rm = await import("../src/read-model.mjs");
+  const url = "redis://127.0.0.1:6379/abc";
+  const fleet = await rm.readFleetQueues({ url });
+  assert.deepEqual(fleet.names, ["pi-jobs"]);
+  assert.match(fleet.blind, /^VALKEY_URL redis:\/\/127\.0\.0\.1:6379\/abc names no database/);
+  for (const r of [await rm.readQueueState({ url }), await rm.setQueuePaused({ url, paused: true }), await rm.readHeldJobs({ url })]) {
+    assert.match(r.unreachable, /names no database/);
+  }
+  assert.match((await rm.cancelHeldJob({ url, jobId: "j1" })).invalid, /names no database/);
+});
+
+test("the panel's Valkey reads fail open, naming it, on a database that Valkey does not have (gate round 2 of PR #478, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 30_000 }, async () => {
+  const rm = await import("../src/read-model.mjs");
+  const base = new URL(process.env.VALKEY_TEST_URL);
+  base.pathname = "";
+  const url = `${base.toString().replace(/\/$/, "")}/999999`;
+  const said = /names database 999999, which that Valkey does not have/;
+  assert.match((await rm.readFleetQueues({ url })).blind, said);
+  for (const r of [await rm.readQueueState({ url }), await rm.readHeldJobs({ url }), await rm.readHosts({ url })]) assert.match(r.unreachable, said);
+});

@@ -30,7 +30,7 @@ import { readFileSync } from "node:fs";
 import { networkInterfaces, userInfo } from "node:os";
 import { join } from "node:path";
 import { venuesOf } from "./backends.mjs";
-import { VALKEY_SHARED_KEY, judgeValkeyListeners, passwdNameFrom, pinnedValkeyUrl, probeTcpAddress, readStackKeys, readSubuidRanges, readValkeyKeys, valkeySharedOn } from "./podman-stack.mjs";
+import { VALKEY_SHARED_KEY, judgeValkeyListeners, passwdNameFrom, pinnedValkeyUrl, probeTcpAddress, readStackKeys, readSubuidRanges, readValkeyKeys, valkeySharedOn, valkeySchemeOf } from "./podman-stack.mjs";
 import { VALKEY_PASSWORD_KEY, isLoopbackHost } from "./valkey-auth.mjs";
 
 /** A refused Valkey: tagged as the configError it is, so the worker's CLI exits 2 on it. */
@@ -146,6 +146,42 @@ export function valkeyContextFromKeys({ env = process.env, envPath = null, fileK
 	const derived = platform === "linux" && venues.podmanUsed && !venues.localUsed;
 	const envUrl = typeof env.VALKEY_URL === "string" ? env.VALKEY_URL : null;
 	return { envPath, shared, rootRefused: typeof rootRefused === "boolean" ? rootRefused : derived, error, password: { environment: envPassword, file: filePassword }, url: { environment: envUrl, file: fileUrl } };
+}
+
+/**
+ * Why `url` cannot name a Valkey database, as a sentence, or null (PR #478's gate). The path of a VALKEY_URL is the
+ * database number (`redis://host:port/2`); anything else (`/abc`, `/0,x=y`) became `db: NaN`, and ioredis's SELECT
+ * then failed outside any caller's await, so doctor and every client died on "an unhandled rejection: ERR value is not
+ * an integer or out of range" (measured on pd-fedora). A URL that does not parse is left to the callers that already
+ * say so. The path is shown through `urlShown`, which never prints a credential.
+ */
+export function valkeyUrlProblem(url) {
+	let u;
+	try {
+		u = new URL(String(url));
+	} catch {
+		return null;
+	}
+	// A scheme no client here speaks gets its own sentence (gate round 2: `unix:///path` was "<no host> names no
+	// database", and before this change it dialled 127.0.0.1, ioredis' default host).
+	if (valkeySchemeOf(u.protocol) === null) return `VALKEY_URL uses the scheme ${JSON.stringify(u.protocol.replace(/[^\x21-\x7e]/g, " ").slice(0, 20))}, which pi-dispatch does not connect with: write redis://host:port (or rediss://host:port for TLS; valkey:// and valkeys:// are the same two)`;
+	// Leading zeros are the number they spell (gate round 2): ioredis and the code before this read `/01` as database 1,
+	// so an upgrading deployment with one keeps its database.
+	if (!u.pathname || u.pathname === "/" || /^\/[0-9]{1,9}$/.test(u.pathname)) return null;
+	return `VALKEY_URL ${urlShown(url)} names no database: its path must be a whole number (redis://host:port/0 is database 0, and no path means the same), not ${JSON.stringify(u.pathname.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 60))}`;
+}
+
+/**
+ * The sentence for a VALKEY_URL whose database the server refuses to SELECT (gate round 2 of PR #478): `databases` is
+ * the server's count when it could be read, null when it could not, undefined when it was not asked. Measured on Valkey: `/16` on a default server answers `ERR DB
+ * index is out of range`, and ioredis only emitted an `error` and carried on on database 0, which may be another
+ * deployment's queue.
+ */
+export function valkeyDbRangeSentence(url, db, databases) {
+	// `databases`: the server's count; null where it could not be read; undefined where it was not asked (a client's own
+	// refusal, which has only the server's answer to go on).
+	const has = Number.isInteger(databases) && databases > 0 ? `it has ${databases} (databases 0 to ${databases - 1}, its \`databases\` setting)` : databases === null ? "its `databases` setting could not be read" : "it answered the SELECT with \"DB index is out of range\"";
+	return `VALKEY_URL ${urlShown(url)} names database ${db}, which that Valkey does not have: ${has}. No client uses another database in its place; name one it has, or raise \`databases\` in that Valkey's configuration`;
 }
 
 /** The default VALKEY_URL, the worker's own (config.mjs). */
@@ -313,6 +349,9 @@ function retryable(message) {
  * every 500 ms for `waitMs`, then thrown as the plain Error it is (exit 1: the service manager starts it again).
  */
 export async function judgeValkeyAtStart(url, context, { waitMs = 20_000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now(), judge = judgedEndpoint } = {}) {
+	// PR #478's gate: a path that names no database is a refusal (exit 2 at a start), said before anything connects.
+	const dbProblem = valkeyUrlProblem(url);
+	if (dbProblem) throw valkeyRefusal(dbProblem);
 	const deadline = now() + waitMs;
 	for (;;) {
 		try {
