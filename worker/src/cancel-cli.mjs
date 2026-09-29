@@ -133,6 +133,10 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 				write(`cancel accepted by ${res.ack === "" ? "the worker" : res.ack} — stopping the container (allow ~30s); the run record will say operator-cancel\n`);
 				return 0;
 			}
+			// Gate round 2 of PR #479: the worker stops its cancel poll before it holds or retries a job, so a request that
+			// lands in that moment is never acknowledged and the job is back in the queue. Re-read, so the words are true.
+			const after = await job.getState().catch(() => "unknown");
+			if (after !== "active") return fail(`no worker acknowledged within ${Math.round(ackTimeoutMs / 1000)}s: the job went back to the queue before its worker read the cancel (it is now ${after}), and nothing was changed. Run \`pi-dispatch cancel ${jobId}\` again to remove it`);
 			return fail(`no worker acknowledged within ${Math.round(ackTimeoutMs / 1000)}s — the job is active but no reachable worker owns it (host down, or a worker predating cancel); nothing was changed`);
 		}
 

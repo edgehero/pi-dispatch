@@ -158,6 +158,16 @@ test("an unacknowledged active cancel says so, deletes its request, and exits 1 
 	assert.ok(ops.some((op) => op[0] === "del" && op[1] === "cancel:req:j5"), "the abandoned request must not fire after the operator walked away");
 });
 
+test("an unacknowledged cancel of a job that went back to the queue says so truthfully, and to cancel again (#476, PR #479 gate round 2)", { skip: needsDeps }, async () => {
+	// The worker stops its cancel poll before it holds or retries a job, so a request landing then is never acknowledged,
+	// and the job is delayed by the time the requester gives up: "the job is active" would be false.
+	const { err, seams } = world({ hash: {}, state: ["active", "delayed"] });
+	const code = await runCancel("j6", "redis://x", { ...seams, ackTimeoutMs: 1000 });
+	assert.equal(code, 1);
+	assert.match(err.join(""), /no worker acknowledged within 1s: the job went back to the queue before its worker read the cancel \(it is now delayed\), and nothing was changed\. Run `pi-dispatch cancel j6` again to remove it/);
+	assert.doesNotMatch(err.join(""), /is active/);
+});
+
 test("a paused-queue job removes like any other never-ran job", { skip: needsDeps }, async () => {
 	// Jobs enqueued while the kill switch is on land in the paused list; they never ran either.
 	const { out, seams } = world({ hash: {}, state: "paused" });

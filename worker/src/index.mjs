@@ -541,6 +541,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		let timer;
 		let cancelPoll;
 		let cancelPolling = false;
+		// The poll tick in flight, KEPT (gate round 2 of PR #479), so the error handler can stop the poll and wait for it
+		// before it asks whether the job was cancelled: a flag says a tick runs, only its promise says when it is done.
+		let cancelTick = null;
 		let onAbort;
 		let venue;
 		try {
@@ -626,7 +629,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				cancelPoll = setInterval(() => {
 					if (cancelPolling) return;
 					cancelPolling = true;
-					void (async () => {
+					cancelTick = (async () => {
 						try {
 							const req = await redis.get(cancelReqKey(job.id));
 							if (req === null || req === undefined) return;
@@ -825,15 +828,26 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			};
 			// A retry that already spent (a container that ran and exited as infra) keeps what it spent on the record, and
 			// says the processor's own operator-cancel sentence; one that never started says it was cancelled before it did.
+			// The session rides along as the aborted-container path keeps it (`mergeSession`, already applied to the throw).
 			const endCancelled = async () => {
 				const spent = error?.budgetReserved === true;
-				const result = { outcome: "policy", reason: "operator-cancel", exitCode: spent ? (error.exitCode ?? null) : null, turns: spent ? (error.turns ?? null) : null, tokens: spent ? (error.tokens ?? null) : null, provider: error?.provider ?? null, model: error?.model ?? null, budgetReserved: spent };
+				const result = { outcome: "policy", reason: "operator-cancel", exitCode: spent ? (error.exitCode ?? null) : null, turns: spent ? (error.turns ?? null) : null, tokens: spent ? (error.tokens ?? null) : null, ...(spent && error.usage ? { usage: error.usage } : {}), provider: error?.provider ?? null, model: error?.model ?? null, session: error?.session ?? null, budgetReserved: spent };
 				deps?.log?.("job_cancelled_instead_of_retry", { jobId: job.id, spent });
 				if (deps?.comment) await Promise.resolve(deps.comment(job.data, spent ? TERMINAL_COMMENTS["operator-cancel"] : CANCELLED_BEFORE_START_COMMENT)).catch(() => {});
 				recordRun({ job, result, startedAt, endedAt: new Date().toISOString() });
 				return result;
 			};
-			if (error instanceof InfraRetry && (await operatorCancelled())) return await endCancelled();
+			// STOP THE POLL BEFORE ASKING (gate round 2 of PR #479). The poll ran until the finally below, so a request that
+			// landed after the question was still acknowledged by it (ack written, request consumed, the CLI saying "cancel
+			// accepted") while the job went on to its hold or its retry and ran again. So the poll is stopped first and any
+			// tick already in flight awaited, and only then is the question asked: a cancel the poll took is seen on the
+			// signal, one it had not read is read here, and one that lands after is never acknowledged, so its requester
+			// truthfully says nothing was changed while the job is held or retried, and a second cancel removes it.
+			if (error instanceof InfraRetry) {
+				clearInterval(cancelPoll);
+				await Promise.resolve(cancelTick).catch(() => {});
+				if (await operatorCancelled()) return await endCancelled();
+			}
 			if (error?.holdUntilRestart === true) {
 				const heldAt = now();
 				const last = job.data?.podmanRestartHoldLastMs;

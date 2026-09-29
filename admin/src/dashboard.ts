@@ -1470,7 +1470,7 @@ function cancelNote(res: any): string {
   // through the same render call, as the armed question beside them (issue #337).
   const say = (v: any): string => scrubControl(String(v ?? "-"));
   if (res?.ack !== undefined) return `cancel accepted by ${res.ack === "" ? "the worker" : say(res.ack)} — stopping the container (~30s)`;
-  if (res?.timeout) return "no worker acknowledged — the job may have just finished, or its host is unreachable; nothing was changed";
+  if (res?.timeout) return "no worker acknowledged: the job may have just finished, gone back to the queue (cancel it again to remove it), or its host is unreachable; nothing was changed";
   if (res?.ok) return `cancelled ${say(res.jobId)} — it never ran, no record written`;
   if (res?.invalid) return `rejected: ${say(res.invalid)}`;
   return "cancel failed — check the worker log";

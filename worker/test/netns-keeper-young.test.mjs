@@ -295,6 +295,130 @@ test("an ordinary infra failure with a cancel pending ends the job as the operat
 	assert.deepEqual(ran.seen.comments.at(-1), "Stopped: the operator cancelled this run. Partial work may exist. Not retried.");
 });
 
+// Gate round 2 of PR #479: the cancel poll ran until the finally, so a request that landed after the handler's question
+// was acknowledged by the poll while the job still went to its hold and ran again. The poll is now stopped, and a tick in
+// flight awaited, BEFORE the question. The reviewer's race: a fast poll, the request written during the hold's own
+// `updateData`. It must NOT be acknowledged (the job is back in the queue, and the requester says nothing was changed).
+function raceWorld({ updateData, get: slowGet, cancelJob, egressDelayMs = 0, onPreflight = null } = {}) {
+	const keys = new Map();
+	const ops = [];
+	const redis = {
+		incr: async () => 1,
+		decr: async () => 0,
+		expire: async () => {},
+		get: async (k) => (slowGet ? slowGet(k, keys) : (keys.get(k) ?? null)),
+		set: async (k, v) => (ops.push(["set", k]), keys.set(k, v), "OK"),
+		del: async (k) => (ops.push(["del", k]), keys.delete(k), 1),
+	};
+	const moves = [];
+	const records = [];
+	const job = { id: "local-race", attemptsMade: 0, name: "local", data: { ...DATA }, moveToDelayed: async (ts) => moves.push(ts) };
+	job.updateData = updateData ? (d) => updateData(d, job, keys) : async (d) => void (job.data = d);
+	const processor = mod.makeProcessor({
+		cancelJob: cancelJob ?? (() => true),
+		stopContainer: () => {},
+		redis,
+		cancelPollMs: 5,
+		now: () => NOW,
+		recordRun: (r) => records.push(r),
+		timeoutMs: 100000,
+		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, weeklyCap: null, monthlyCap: null, concurrency: 3, softHoldPct: null }),
+		deps: { egressPreflight: async () => (egressDelayMs ? await new Promise((r) => setTimeout(r, egressDelayMs)) : null, (onPreflight?.(keys), young(NOW - 600))), prepareWorkspace: async () => ({}), runContainer: async () => ({ code: 0 }), cleanup: async () => {}, comment: async () => {}, log: () => {} },
+	});
+	return { processor, job, keys, ops, moves, records };
+}
+
+test("a cancel that lands after the handler's question is never acknowledged, and the job is held (#476, PR #479 gate round 2)", { skip }, async () => {
+	const w = raceWorld({
+		updateData: async (d, job, keys) => {
+			keys.set("cancel:req:local-race", "operator-cancel");
+			await new Promise((r) => setTimeout(r, 40)); // eight poll periods: a live poll would read it
+			job.data = d;
+		},
+	});
+	await assert.rejects(() => w.processor(w.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.deepEqual(w.ops, [], "no ack written, no request consumed");
+	assert.equal(w.keys.get("cancel:ack:local-race"), undefined);
+	assert.equal(w.keys.get("cancel:req:local-race"), "operator-cancel", "left for the requester's own timeout to delete");
+	assert.equal(w.moves.length, 1, "held, as the unacknowledged requester is told");
+});
+
+test("the poll is stopped BEFORE the question: a request landing during the question is never acknowledged (#476, PR #479 gate round 2)", { skip }, async () => {
+	// Armed when the keeper read returns, with only microtasks between it and the handler: from then, every read of the
+	// request answers what it held when sent (nothing) and the operator's request lands while it is in flight. Asked
+	// after the poll stopped, nobody reads it again; a poll still live during the question would read it and ack it.
+	let armed = false;
+	const w = raceWorld({
+		onPreflight: () => void (armed = true),
+		egressDelayMs: 12,
+		get: async (k, keys) => {
+			const sent = keys.get(k) ?? null;
+			if (k === "cancel:req:local-race" && armed) {
+				keys.set(k, "operator-cancel");
+				await new Promise((r) => setTimeout(r, 30));
+			}
+			return sent;
+		},
+	});
+	await assert.rejects(() => w.processor(w.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	await new Promise((r) => setTimeout(r, 60));
+	assert.deepEqual(w.ops, [], "no ack written, no request consumed");
+	assert.equal(w.moves.length, 1);
+});
+
+test("a poll tick already in flight is awaited before the question, so one cancel is acknowledged once (#476, PR #479 gate round 2)", { skip }, async () => {
+	const controller = new AbortController();
+	let slowReads = 0;
+	const w = raceWorld({
+		// The request is already there; the poll's read of it is slow, so its tick is in flight when the handler runs.
+		// A read answers what the key held when it was SENT, as Valkey does.
+		get: async (k, keys) => {
+			const sent = keys.get(k) ?? null;
+			if (k === "cancel:req:local-race" && slowReads++ === 0) await new Promise((r) => setTimeout(r, 40));
+			return sent;
+		},
+		cancelJob: (_id, reason) => (controller.abort(reason), true),
+		// The keeper read takes long enough that the poll's first tick (5 ms) has started its slow read.
+		egressDelayMs: 15,
+	});
+	w.keys.set("cancel:req:local-race", "operator-cancel");
+	const result = await w.processor(w.job, "tok", controller.signal);
+	await new Promise((r) => setTimeout(r, 80)); // a tick left running would finish here
+	assert.equal(result.reason, "operator-cancel");
+	assert.deepEqual(w.ops, [["set", "cancel:ack:local-race"], ["del", "cancel:req:local-race"]], "acknowledged once, by the tick, never twice");
+	assert.equal(w.moves.length, 0);
+});
+
+test("the cancel record keeps the run's session, as the aborted-container path does (#476, PR #479 gate round 2)", { skip }, async () => {
+	const SESSION = { key: "k", resumed: false, staged: true };
+	const { job } = spyJob({ ...DATA });
+	const h = harness({ egress: { unavailable: "p" }, cancelReq: "1" });
+	// A retryable throw that carries the session the processor merged (`mergeSession`), as runJob's infra throws do.
+	const { InfraRetry } = await import("../src/processor.mjs");
+	const failing = mod.makeProcessor({
+		cancelJob: () => true,
+		stopContainer: () => {},
+		redis: { incr: async () => 1, decr: async () => 0, expire: async () => {}, get: async (k) => (k === "cancel:req:local-keeper" ? "1" : null), set: async () => "OK", del: async () => 1 },
+		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, weeklyCap: null, monthlyCap: null, concurrency: 3, softHoldPct: null }),
+		now: () => NOW,
+		recordRun: (r) => h.seen.records.push(r),
+		timeoutMs: 100000,
+		deps: {
+			egressPreflight: async () => ({ ok: true }),
+			prepareWorkspace: async () => ({}),
+			runContainer: async () => {
+				throw new InfraRetry("infra failure, container exit 1", { exitCode: 1, turns: 2, tokens: null, session: SESSION, budgetReserved: true });
+			},
+			cleanup: async () => {},
+			comment: async () => {},
+			log: () => {},
+		},
+	});
+	const result = await failing(job, "tok", new AbortController().signal);
+	assert.deepEqual([result.reason, result.session, result.budgetReserved], ["operator-cancel", SESSION, true]);
+	assert.deepEqual(h.seen.records.at(-1).result.session, SESSION);
+});
+
 test("the sandbox opener waits a young keeper out once, bounded, rather than refusing it (#476)", async () => {
 	const info = async () => ({ answered: true, info: { version: "4.9.3" } });
 	const run = async (answers, clock, proxyRead = { code: 0, stdout: `${clock - 700}\n` }) => {

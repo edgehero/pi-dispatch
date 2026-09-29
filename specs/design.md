@@ -5691,8 +5691,9 @@ a tunnel.
     `netns-keeper-not-holding`, whose record and comment replaced the loop's (PR #479's gate, measured), so a later
     attempt that fails on the keeper for any reason is named the loop. And a cancelled job is never run again: before
     the processor hands any error back to the queue (this hold, the podman.service hold, or an ordinary retry), one
-    shared check reads a cancel acknowledged since pickup or requested and not yet polled, and ends the job as
-    `operator-cancel` (`INT-CANCEL-CHANNEL-CONTRACT`).
+    shared check, asked only after the cancel poll is stopped and its tick in flight awaited, reads a cancel
+    acknowledged since pickup or requested and not yet polled, and ends the job as `operator-cancel`
+    (`INT-CANCEL-CHANNEL-CONTRACT`).
     Rejected: reading a restart counter to tell a loop from a first start. Podman's `RestartCount` stays 0 for the
     shipped keeper (measured on 4.9.3: each systemd restart is a new `--rm` container), and systemd's `NRestarts`
     exists only for a keeper under the user manager and costs a second read on every young judgement; the start the
