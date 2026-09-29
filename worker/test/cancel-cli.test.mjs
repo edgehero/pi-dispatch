@@ -168,6 +168,24 @@ test("an unacknowledged cancel of a job that went back to the queue says so trut
 	assert.doesNotMatch(err.join(""), /is active/);
 });
 
+test("an unacknowledged cancel names what became of the job: finished, or no longer in the queue (#476, PR #479 gate round 3)", { skip: needsDeps }, async () => {
+	for (const after of ["completed", "failed"]) {
+		const { err, seams } = world({ hash: {}, state: ["active", after] });
+		assert.equal(await runCancel("j7", "redis://x", { ...seams, ackTimeoutMs: 1000 }), 1);
+		assert.match(err.join(""), new RegExp(`no worker acknowledged within 1s: the job finished \\(${after}\\) before its worker read the cancel, and nothing was changed`), after);
+		assert.doesNotMatch(err.join(""), /cancel .* again|went back to the queue/, `${after}: a finished job cannot be removed`);
+	}
+	const gone = world({ hash: {}, state: ["active", "unknown"] });
+	assert.equal(await runCancel("j7", "redis://x", { ...gone.seams, ackTimeoutMs: 1000 }), 1);
+	assert.match(gone.err.join(""), /no worker acknowledged within 1s: the job is no longer in the queue \(its state reads unknown\), and nothing was changed/);
+	assert.doesNotMatch(gone.err.join(""), /again|went back/);
+	for (const after of ["waiting", "prioritized", "paused"]) {
+		const back = world({ hash: {}, state: ["active", after] });
+		await runCancel("j7", "redis://x", { ...back.seams, ackTimeoutMs: 1000 });
+		assert.match(back.err.join(""), new RegExp(`went back to the queue before its worker read the cancel \\(it is now ${after}\\).*again to remove it`), after);
+	}
+});
+
 test("a paused-queue job removes like any other never-ran job", { skip: needsDeps }, async () => {
 	// Jobs enqueued while the kill switch is on land in the paused list; they never ran either.
 	const { out, seams } = world({ hash: {}, state: "paused" });

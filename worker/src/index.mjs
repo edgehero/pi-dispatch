@@ -112,7 +112,7 @@ function boundAfterAbort(run, signal, job, log, graceMs = ABORT_GRACE_MS) {
  * The overlay changes which values the spend caps take, never when they are checked -- reserveBudget still
  * runs inside runJob against the freshly passed caps (CONST-BUDGET-BEFORE-TOKENS).
  */
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, hostName = "", now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
 	return async function processor(job, token, signal) {
 		// Scoped pause windows (REQ-SCOPED-PAUSE-WINDOWS): if this job's folder/repo is inside an active pause
 		// window, DEFER it to the window end via BullMQ's delayed set -- the job keeps its identity/dedup and
@@ -544,6 +544,40 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// The poll tick in flight, KEPT (gate round 2 of PR #479), so the error handler can stop the poll and wait for it
 		// before it asks whether the job was cancelled: a flag says a tick runs, only its promise says when it is done.
 		let cancelTick = null;
+		// THE ONE STOP (gate rounds 2 to 4 of PR #479), used wherever this job's outcome is about to be decided: at the
+		// container's observed exit, when runJob returns, and in the error handler. `pollStopped` is set first and read by
+		// the tick synchronously right before it aborts and acknowledges, so after a stop no cancel is ever acknowledged;
+		// a tick already past that point has aborted the signal and writes its ack before the stop's await returns. So
+		// "acknowledged" and "the signal says operator-cancel" are the same fact by the time anything is decided.
+		//
+		// BOUNDED (gate round 4 of PR #479): the worker's Valkey client queues commands while offline, so a tick's read can
+		// hang for a whole outage, and an unbounded await held the job's outcome (its record, comment and slot) with it: a
+		// restart in that window lost the record. The bound is safe because the flag is set FIRST: a read still hanging
+		// returns without acknowledging, and a tick already past the flag check aborted the signal synchronously, so the
+		// decision sees the cancel even while its ack write waits. Said once per job when the bound is hit.
+		let pollStopped = false;
+		let stopBoundSaid = false;
+		const stopCancelPoll = async () => {
+			pollStopped = true;
+			clearInterval(cancelPoll);
+			if (!cancelTick) return;
+			let bound;
+			const hit = await Promise.race([
+				Promise.resolve(cancelTick).then(
+					() => false,
+					() => false,
+				),
+				new Promise((resolve) => {
+					bound = setTimeout(() => resolve(true), cancelStopBoundMs);
+					bound.unref?.();
+				}),
+			]);
+			clearTimeout(bound);
+			if (hit && !stopBoundSaid) {
+				stopBoundSaid = true;
+				deps?.log?.("cancel_poll_stop_bounded", { jobId: job.id, boundMs: cancelStopBoundMs });
+			}
+		};
 		let onAbort;
 		let venue;
 		try {
@@ -633,6 +667,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						try {
 							const req = await redis.get(cancelReqKey(job.id));
 							if (req === null || req === undefined) return;
+							// Stopped while this read was in flight: the outcome is being decided, so this request is left
+							// unanswered (its requester's timeout re-reads the job), never acknowledged after the fact.
+							if (pollStopped) return;
 							// Bound to this worker (the injection comment in createWorker): `false` means the job
 							// left the tracked map in this same instant, in which case the finally below clears
 							// this interval anyway and the request's TTL reaps the key.
@@ -745,7 +782,18 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// stays byte-identical -- and only a STRING rides: a non-string reason (AbortError objects,
 				// future bullmq surprises) collapses to null, which classifies as worker-abort, the
 				// conservative direction.
-				runContainer: (ctx) => boundAfterAbort(deps.runContainer({ ...ctx, name, signal }), signal, job, deps.log ?? (() => {})).then((r) => (r?.aborted ? { ...r, abortReason: typeof signal.reason === "string" ? signal.reason : null } : r)),
+				// Gate round 4 of PR #479: the poll STOPS at the container's observed exit, since after it there is nothing
+				// left for a cancel to stop. A cancel acknowledged before that moment raced the exit and lost nothing it was
+				// promised: the run is recorded as that cancel (the existing path, "partial work may exist") even when the
+				// container happened to exit on its own, because the operator was told the record would say operator-cancel.
+				runContainer: (ctx) =>
+					boundAfterAbort(deps.runContainer({ ...ctx, name, signal }), signal, job, deps.log ?? (() => {})).then(async (r) => {
+						await stopCancelPoll();
+						const raced = r && r.aborted !== true && signal.aborted === true && signal.reason === "operator-cancel";
+						if (raced) deps.log?.("cancel_acked_as_container_exited", { jobId: job.id, exitCode: r.code ?? null });
+						const run = raced ? { ...r, aborted: true } : r;
+						return run?.aborted ? { ...run, abortReason: typeof signal.reason === "string" ? signal.reason : null } : run;
+					}),
 				// REQ-TRIGGER-SECRETS. The resolver runs INSIDE the 30-minute kill timer armed above, so it has
 				// to be abortable for the same reason runContainer does: a resolver blocking on an unreachable
 				// vault would otherwise hold its slot until its own timeout, and an abort landing mid-resolution
@@ -787,8 +835,19 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// replacing wrapper would lose it in the same silence.
 				...(deps.checkOnceSpent ? { checkOnceSpent: (j, opts) => deps.checkOnceSpent(j, { ...opts, queueJobId: job.id }) } : {}),
 			});
-			recordRun({ job, result, startedAt, endedAt: new Date().toISOString() });
-			return result;
+			// Gate round 4 of PR #479: stopped again as runJob returns, before anything is recorded (a result with no
+			// container never passed the exit stop above). A cancel that lands after is never acknowledged, and its
+			// requester's re-read says the job finished. One acknowledged before, on a result that is not the cancel (a
+			// pre-spend refusal that finished after the ack, since a container would have seen the abort), is recorded as
+			// the cancel the operator was told of, the result it replaced named in the log.
+			await stopCancelPoll();
+			let outcome = result;
+			if (signal.aborted === true && signal.reason === "operator-cancel" && result?.reason !== "operator-cancel") {
+				deps.log?.("cancel_acked_before_result", { jobId: job.id, was: `${result?.outcome}/${result?.reason ?? ""}` });
+				outcome = { ...result, outcome: "policy", reason: "operator-cancel" };
+			}
+			recordRun({ job, result: outcome, startedAt, endedAt: new Date().toISOString() });
+			return outcome;
 		} catch (error) {
 			// Issue #448 (gate round 2 of PR #473): a local job held until rootful Podman's service restarts goes back to the
 			// delayed set WITHOUT spending an attempt, the pause gate's move, since a service held up past one retry backoff
@@ -812,8 +871,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// ends the job as the operator's cancel, the policy result the aborted-container path already returns, recorded,
 			// one fixed comment, never retried. A shutdown's abort is not a cancel: that job is held or retried as before,
 			// so it survives the restart.
-			const operatorCancelled = async () => {
+			// `readPending: false` asks only whether the poll ALREADY acknowledged a cancel (the signal), and leaves a request it
+			// had not read unanswered.
+			const operatorCancelled = async ({ readPending = true } = {}) => {
 				if (signal?.aborted === true) return signal.reason === "operator-cancel";
+				if (!readPending) return false;
 				if (typeof redis?.get !== "function") return false;
 				let req = null;
 				try {
@@ -829,11 +891,14 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// A retry that already spent (a container that ran and exited as infra) keeps what it spent on the record, and
 			// says the processor's own operator-cancel sentence; one that never started says it was cancelled before it did.
 			// The session rides along as the aborted-container path keeps it (`mergeSession`, already applied to the throw).
-			const endCancelled = async () => {
+			// A NON-retryable error (gate round 3) is not known to have started nothing, so it says the processor's own
+			// operator-cancel sentence, keeps whatever `budgetReserved` it carried, and its own words go to the log, never lost.
+			const endCancelled = async ({ retryable }) => {
 				const spent = error?.budgetReserved === true;
-				const result = { outcome: "policy", reason: "operator-cancel", exitCode: spent ? (error.exitCode ?? null) : null, turns: spent ? (error.turns ?? null) : null, tokens: spent ? (error.tokens ?? null) : null, ...(spent && error.usage ? { usage: error.usage } : {}), provider: error?.provider ?? null, model: error?.model ?? null, session: error?.session ?? null, budgetReserved: spent };
-				deps?.log?.("job_cancelled_instead_of_retry", { jobId: job.id, spent });
-				if (deps?.comment) await Promise.resolve(deps.comment(job.data, spent ? TERMINAL_COMMENTS["operator-cancel"] : CANCELLED_BEFORE_START_COMMENT)).catch(() => {});
+				const beforeStart = retryable && !spent;
+				const result = { outcome: "policy", reason: "operator-cancel", exitCode: spent ? (error.exitCode ?? null) : null, turns: spent ? (error.turns ?? null) : null, tokens: spent ? (error.tokens ?? null) : null, ...(spent && error.usage ? { usage: error.usage } : {}), provider: error?.provider ?? null, model: error?.model ?? null, session: error?.session ?? null, budgetReserved: retryable ? spent : (error?.budgetReserved ?? null) };
+				deps?.log?.("job_cancelled_instead_of_retry", { jobId: job.id, spent, retryable, ...(retryable ? {} : { failure: scrubCredentials(String(error?.message ?? error)).slice(0, 300) }) });
+				if (deps?.comment) await Promise.resolve(deps.comment(job.data, beforeStart ? CANCELLED_BEFORE_START_COMMENT : TERMINAL_COMMENTS["operator-cancel"])).catch(() => {});
 				recordRun({ job, result, startedAt, endedAt: new Date().toISOString() });
 				return result;
 			};
@@ -843,11 +908,18 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// tick already in flight awaited, and only then is the question asked: a cancel the poll took is seen on the
 			// signal, one it had not read is read here, and one that lands after is never acknowledged, so its requester
 			// truthfully says nothing was changed while the job is held or retried, and a second cancel removes it.
-			if (error instanceof InfraRetry) {
-				clearInterval(cancelPoll);
-				await Promise.resolve(cancelTick).catch(() => {});
-				if (await operatorCancelled()) return await endCancelled();
-			}
+			//
+			// EVERY ERROR, NOT ONLY A RETRY (gate round 3 of PR #479). On a non-retryable error the still-running poll could
+			// acknowledge a cancel, so the CLI said the record would say operator-cancel while it said failed. The poll is
+			// stopped the same way before the terminal path, and the question differs by one thing only. A cancel the poll
+			// ALREADY acknowledged (the signal) ends the job as operator-cancel: the requester was told that, so the record
+			// must agree, and the failure's own words go to the log. A request it had NOT read is left unanswered: the job
+			// has failed for its own reason, the record says so, and the requester's re-read then says the job finished
+			// before its worker read the cancel and nothing was changed. Consistent either way, never one said and the
+			// other recorded. A retryable error reads that request too, since the job would otherwise run again.
+			await stopCancelPoll();
+			const retryable = error instanceof InfraRetry;
+			if (await operatorCancelled({ readPending: retryable })) return await endCancelled({ retryable });
 			if (error?.holdUntilRestart === true) {
 				const heldAt = now();
 				const last = job.data?.podmanRestartHoldLastMs;
@@ -928,6 +1000,12 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		}
 	};
 }
+
+/**
+ * How long the stop of a job's cancel poll waits for a tick already in flight (gate round 4 of PR #479). About one Valkey
+ * round trip under load, and far under the 30 s abort grace; past it a read still hanging cannot acknowledge anything.
+ */
+export const CANCEL_STOP_BOUND_MS = 1_000;
 
 /** The comment for a job the operator cancelled before it started, where it would have been held or retried (gate of PR #479). */
 export const CANCELLED_BEFORE_START_COMMENT = "Stopped: the operator cancelled this run before it started. Nothing was spent. Not retried.";

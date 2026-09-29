@@ -419,6 +419,236 @@ test("the cancel record keeps the run's session, as the aborted-container path d
 	assert.deepEqual(h.seen.records.at(-1).result.session, SESSION);
 });
 
+// Gate round 3 of PR #479: a NON-retryable error. The poll is stopped the same way before the terminal path. A cancel it
+// already acknowledged ends the job as the cancel (the requester was told the record would say so); a request it had not
+// read is left unanswered, and the job fails for its own reason (the requester's re-read then says it finished).
+function bugWorld({ get, cancelJob, runDelayMs = 0, cancelPollMs = 2_000 } = {}) {
+	const keys = new Map();
+	const ops = [];
+	const records = [];
+	const comments = [];
+	const logs = [];
+	const redis = {
+		incr: async () => 1,
+		decr: async () => 0,
+		expire: async () => {},
+		get: async (k) => (get ? get(k, keys) : (keys.get(k) ?? null)),
+		set: async (k, v) => (ops.push(["set", k]), keys.set(k, v), "OK"),
+		del: async (k) => (ops.push(["del", k]), keys.delete(k), 1),
+	};
+	const job = { id: "local-bug", attemptsMade: 0, name: "local", data: { ...DATA }, moveToDelayed: async () => {}, updateData: async () => {} };
+	const processor = mod.makeProcessor({
+		cancelJob: cancelJob ?? (() => true),
+		stopContainer: () => {},
+		redis,
+		cancelPollMs,
+		now: () => NOW,
+		recordRun: (r) => records.push(r),
+		timeoutMs: 100000,
+		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, weeklyCap: null, monthlyCap: null, concurrency: 3, softHoldPct: null }),
+		deps: {
+			egressPreflight: async () => ({ ok: true }),
+			prepareWorkspace: async () => ({}),
+			// Our own bug: a plain Error, which the processor ends for good (UnrecoverableError), never retried.
+			runContainer: async () => {
+				if (runDelayMs) await new Promise((r) => setTimeout(r, runDelayMs));
+				throw new Error("a bug in the worker");
+			},
+			cleanup: async () => {},
+			comment: async (_j, text) => void comments.push(text),
+			log: (event, fields) => logs.push({ event, ...fields }),
+		},
+	});
+	return { processor, job, keys, ops, records, comments, logs };
+}
+
+test("a non-retryable failure leaves an unread cancel request unanswered, so the record and the requester agree it failed (#476, PR #479 gate round 3)", { skip }, async () => {
+	const w = bugWorld();
+	w.keys.set("cancel:req:local-bug", "operator-cancel");
+	await assert.rejects(() => w.processor(w.job, "tok", new AbortController().signal), (e) => e.name === "UnrecoverableError" && e.message === "a bug in the worker");
+	assert.deepEqual(w.ops, [], "no ack: the requester's re-read will say the job finished");
+	assert.equal(w.keys.get("cancel:req:local-bug"), "operator-cancel");
+	assert.equal(buildRecord(w.records[0]).outcome, "failed");
+});
+
+test("a non-retryable failure after the poll acknowledged a cancel ends as the cancel, as the requester was told, with the failure logged (#476, PR #479 gate round 3)", { skip }, async () => {
+	const controller = new AbortController();
+	// The poll (5 ms) reads the request and acknowledges it while the run is still going; the run then fails with our bug.
+	const w = bugWorld({ cancelPollMs: 5, runDelayMs: 25, cancelJob: (_id, reason) => (controller.abort(reason), true) });
+	w.keys.set("cancel:req:local-bug", "operator-cancel");
+	const result = await w.processor(w.job, "tok", controller.signal);
+	assert.deepEqual([result.outcome, result.reason], ["policy", "operator-cancel"]);
+	assert.deepEqual(w.ops, [["set", "cancel:ack:local-bug"], ["del", "cancel:req:local-bug"]], "acknowledged once, by the poll");
+	assert.deepEqual([buildRecord(w.records.at(-1)).outcome, buildRecord(w.records.at(-1)).reason], ["policy", "operator-cancel"], "the record says what the requester was told");
+	assert.deepEqual(w.comments, ["Stopped: the operator cancelled this run. Partial work may exist. Not retried."], "not known to have started nothing");
+	assert.equal(w.logs.find((l) => l.event === "job_cancelled_instead_of_retry")?.failure, "a bug in the worker", "the failure's own words are kept");
+});
+
+test("a poll read still in flight when a non-retryable failure stops the poll acknowledges nothing, and the job fails (#476, PR #479 gate round 4)", { skip }, async () => {
+	const controller = new AbortController();
+	let slow = 0;
+	const w = bugWorld({
+		cancelPollMs: 5,
+		runDelayMs: 15,
+		cancelJob: (_id, reason) => (controller.abort(reason), true),
+		get: async (k, keys) => {
+			const sent = keys.get(k) ?? null;
+			if (k === "cancel:req:local-bug" && slow++ === 0) await new Promise((r) => setTimeout(r, 40));
+			return sent;
+		},
+	});
+	w.keys.set("cancel:req:local-bug", "operator-cancel");
+	await assert.rejects(() => w.processor(w.job, "tok", controller.signal), (e) => e.name === "UnrecoverableError");
+	await new Promise((r) => setTimeout(r, 80));
+	assert.deepEqual(w.ops, [], "the tick, past the stop, answers nothing");
+	assert.equal(controller.signal.aborted, false);
+	assert.equal(buildRecord(w.records.at(-1)).outcome, "failed");
+});
+
+test("a tick past the stop's check is awaited to its end, so an ack it writes is always the recorded outcome (#476, PR #479 gate round 4)", { skip }, async () => {
+	// A cancelJob that raises the abort a moment later (any implementation may): the tick has passed its check, so the
+	// stop must wait for it, or the handler decides before the abort and the ack lands after a failed record.
+	const controller = new AbortController();
+	const w = bugWorld({ cancelPollMs: 5, runDelayMs: 10, cancelJob: (_id, reason) => new Promise((r) => setTimeout(() => (controller.abort(reason), r(true)), 20)) });
+	w.keys.set("cancel:req:local-bug", "operator-cancel");
+	const result = await w.processor(w.job, "tok", controller.signal);
+	await new Promise((r) => setTimeout(r, 60));
+	assert.deepEqual([result.outcome, result.reason], ["policy", "operator-cancel"]);
+	assert.deepEqual(w.ops, [["set", "cancel:ack:local-bug"], ["del", "cancel:req:local-bug"]]);
+	assert.equal(buildRecord(w.records.at(-1)).reason, "operator-cancel");
+});
+
+// Gate round 4 of PR #479 (the reviewer's probe): the worker's Valkey client queues commands while offline, so a poll
+// read can hang for a whole outage. The stop's wait for it is bounded, or the job's outcome (record, comment, slot)
+// waited with it and a restart lost the record.
+test("a poll read hung on an unreachable Valkey does not hold a finished job's outcome: bounded, said once (#476, PR #479 gate round 4)", { skip }, async () => {
+	assert.equal(mod.CANCEL_STOP_BOUND_MS, 1_000);
+	const records = [];
+	const logs = [];
+	const redis = { incr: async () => 1, decr: async () => 0, expire: async () => {}, get: () => new Promise(() => {}), set: async () => "OK", del: async () => 1 };
+	const job = { id: "local-hung", attemptsMade: 0, name: "local", data: { ...DATA }, updateData: async () => {}, moveToDelayed: async () => {} };
+	const processor = mod.makeProcessor({
+		cancelJob: () => true,
+		stopContainer: () => {},
+		redis,
+		cancelPollMs: 5,
+		cancelStopBoundMs: 50,
+		now: () => NOW,
+		recordRun: (r) => records.push(r),
+		timeoutMs: 100000,
+		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, weeklyCap: null, monthlyCap: null, concurrency: 3, softHoldPct: null }),
+		deps: {
+			egressPreflight: async () => ({ ok: true }),
+			prepareWorkspace: async () => ({ workspaceDir: "/w", jobDir: "/j" }),
+			runContainer: async () => (await new Promise((r) => setTimeout(r, 30)), { code: 0, aborted: false, turns: 1 }),
+			cleanup: async () => {},
+			comment: async () => {},
+			log: (event, fields) => logs.push({ event, ...fields }),
+		},
+	});
+	let guard;
+	const settled = await Promise.race([processor(job, "tok", new AbortController().signal).then((r) => r?.outcome), new Promise((r) => (guard = setTimeout(() => r("STILL PENDING"), 1_000)))]);
+	clearTimeout(guard);
+	assert.equal(settled, "completed", "the outcome is decided within the bound");
+	assert.equal(records.length, 1);
+	// Stopped twice (the exit, the return), said once.
+	assert.deepEqual(logs.filter((l) => l.event === "cancel_poll_stop_bounded").map((l) => l.boundMs), [50]);
+});
+
+// Gate round 4 of PR #479: the SUCCESS path. The poll stops at the container's observed exit, and again as runJob
+// returns, before anything is recorded.
+function runWorld({ get, runDelayMs = 10, code = 0, egress = { ok: true }, egressDelayMs = 0, cleanupDelayMs = 0 } = {}) {
+	const controller = new AbortController();
+	const w = bugWorld({ cancelPollMs: 5, get, cancelJob: (_id, reason) => (controller.abort(reason), true) });
+	const processor = mod.makeProcessor({
+		cancelJob: (_id, reason) => (controller.abort(reason), true),
+		stopContainer: () => {},
+		redis: {
+			incr: async () => 1,
+			decr: async () => 0,
+			expire: async () => {},
+			get: async (k) => (get ? get(k, w.keys) : (w.keys.get(k) ?? null)),
+			set: async (k, v) => (w.ops.push(["set", k]), w.keys.set(k, v), "OK"),
+			del: async (k) => (w.ops.push(["del", k]), w.keys.delete(k), 1),
+		},
+		cancelPollMs: 5,
+		now: () => NOW,
+		recordRun: (r) => w.records.push(r),
+		timeoutMs: 100000,
+		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, weeklyCap: null, monthlyCap: null, concurrency: 3, softHoldPct: null }),
+		deps: {
+			egressPreflight: async () => (egressDelayMs ? await new Promise((r) => setTimeout(r, egressDelayMs)) : null, egress),
+			prepareWorkspace: async () => ({ workspaceDir: "/w", jobDir: "/j" }),
+			// Ignores the abort, as a container that exits on its own at the same moment does.
+			runContainer: async () => (await new Promise((r) => setTimeout(r, runDelayMs)), { code, aborted: false, turns: 1 }),
+			// After the container: a slow cleanup keeps runJob going past the exit, so only the stop AT the exit is tested.
+			cleanup: async () => (cleanupDelayMs ? await new Promise((r) => setTimeout(r, cleanupDelayMs)) : null),
+			comment: async (_j, text) => void w.comments.push(text),
+			log: (event, fields) => w.logs.push({ event, ...fields }),
+		},
+	});
+	return { ...w, processor, controller };
+}
+
+test("a cancel read in flight as the container exits is never acknowledged, and the run keeps its real outcome (#476, PR #479 gate round 4)", { skip }, async () => {
+	let slow = 0;
+	const w = runWorld({
+		runDelayMs: 10,
+		cleanupDelayMs: 60,
+		get: async (k, keys) => {
+			const sent = keys.get(k) ?? null;
+			if (k === "cancel:req:local-bug" && slow++ === 0) await new Promise((r) => setTimeout(r, 40));
+			return sent;
+		},
+	});
+	w.keys.set("cancel:req:local-bug", "operator-cancel");
+	const result = await w.processor(w.job, "tok", w.controller.signal);
+	await new Promise((r) => setTimeout(r, 80));
+	assert.equal(result.outcome, "completed");
+	assert.deepEqual(w.ops, [], "no ack: the requester's re-read will say the job finished");
+	assert.equal(w.keys.get("cancel:req:local-bug"), "operator-cancel");
+	assert.equal(buildRecord(w.records.at(-1)).outcome, "completed");
+});
+
+test("a cancel acknowledged before the container's exit was seen is the cancel, even if it exited on its own (#476, PR #479 gate round 4)", { skip }, async () => {
+	const w = runWorld({ runDelayMs: 30 });
+	w.keys.set("cancel:req:local-bug", "operator-cancel");
+	const result = await w.processor(w.job, "tok", w.controller.signal);
+	assert.deepEqual([result.outcome, result.reason], ["policy", "operator-cancel"], "as the operator was told");
+	assert.deepEqual(w.ops, [["set", "cancel:ack:local-bug"], ["del", "cancel:req:local-bug"]]);
+	assert.deepEqual([buildRecord(w.records.at(-1)).outcome, buildRecord(w.records.at(-1)).reason], ["policy", "operator-cancel"]);
+	assert.ok(w.logs.some((l) => l.event === "cancel_acked_as_container_exited" && l.exitCode === 0), "the race is named");
+	assert.ok(w.comments.includes("Stopped: the operator cancelled this run. Partial work may exist. Not retried."), "the run took the existing cancel path, not a completed one relabelled");
+});
+
+test("a cancel acknowledged before a pre-spend refusal returned is recorded as the cancel, the refusal named in the log (#476, PR #479 gate round 4)", { skip }, async () => {
+	const w = runWorld({ egress: { proxyMissing: "pi-dispatch-egress-proxy" }, egressDelayMs: 25 });
+	w.keys.set("cancel:req:local-bug", "operator-cancel");
+	const result = await w.processor(w.job, "tok", w.controller.signal);
+	assert.deepEqual([result.outcome, result.reason, result.budgetReserved], ["policy", "operator-cancel", false]);
+	assert.deepEqual(w.ops, [["set", "cancel:ack:local-bug"], ["del", "cancel:req:local-bug"]]);
+	assert.equal(buildRecord(w.records.at(-1)).reason, "operator-cancel");
+	assert.equal(w.logs.find((l) => l.event === "cancel_acked_before_result")?.was, "policy/egress-proxy-missing");
+	// A read still in flight as that refusal returns: never acknowledged, the refusal recorded as itself.
+	let slow = 0;
+	const late = runWorld({
+		egress: { proxyMissing: "pi-dispatch-egress-proxy" },
+		egressDelayMs: 10,
+		get: async (k, keys) => {
+			const sent = keys.get(k) ?? null;
+			if (k === "cancel:req:local-bug" && slow++ === 0) await new Promise((r) => setTimeout(r, 40));
+			return sent;
+		},
+	});
+	late.keys.set("cancel:req:local-bug", "operator-cancel");
+	assert.equal((await late.processor(late.job, "tok", late.controller.signal)).reason, "egress-proxy-missing");
+	await new Promise((r) => setTimeout(r, 80));
+	assert.deepEqual(late.ops, []);
+	// And with no cancel, the refusal is recorded as itself.
+	const plain = runWorld({ egress: { proxyMissing: "pi-dispatch-egress-proxy" } });
+	assert.equal((await plain.processor(plain.job, "tok", plain.controller.signal)).reason, "egress-proxy-missing");
+});
+
 test("the sandbox opener waits a young keeper out once, bounded, rather than refusing it (#476)", async () => {
 	const info = async () => ({ answered: true, info: { version: "4.9.3" } });
 	const run = async (answers, clock, proxyRead = { code: 0, stdout: `${clock - 700}\n` }) => {
