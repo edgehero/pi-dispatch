@@ -36,6 +36,7 @@ import { loadReceiverConfig, triggersFilePath, reloadTriggers } from "./config.m
 import { makeReceiver } from "./receiver.mjs";
 import { entryExitCode } from "./cli.mjs";
 import { installRejectionPrinter } from "@edgehero/pi-dispatch/exit-code";
+import { isEntryModule } from "@edgehero/pi-dispatch/entry";
 import { makeGitHubAuth } from "@edgehero/pi-dispatch/get-token";
 import { resolveGitLabSelfId } from "@edgehero/pi-dispatch/gitlab-identity";
 import { resolveForgejoSelfId } from "@edgehero/pi-dispatch/forgejo-identity";
@@ -367,7 +368,7 @@ function watchTriggers(env, cfg, log, triggersAtBoot) {
 
 // Entry point when run directly (main: src/start.mjs, no bin). Kept out of startReceiver so tests call
 // it directly. The error line carries only `err.message` -- never a secret or PII.
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("start.mjs")) {
+if (isEntryModule(import.meta.url)) {
 	// An unhandled rejection is printed as its message alone (PR #475's review), never Node's print of the whole reason.
 	installRejectionPrinter();
 	startReceiver(process.env).catch((err) => {

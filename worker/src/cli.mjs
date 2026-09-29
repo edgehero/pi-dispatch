@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { loadConfig } from "./config.mjs";
 import { EXIT_POLICY, installRejectionPrinter } from "./exit-code.mjs";
+import { isEntryModule } from "./entry.mjs";
 import { gitDirty } from "./git-dirty.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
 
@@ -217,7 +218,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 	}
 
 	write(`${USAGE}\n`);
-	return cmd ? 1 : 0;
+	return cmd && cmd !== "--help" && cmd !== "-h" ? 1 : 0; // asked-for help is success; a typo is not (the receiver's rule)
 }
 
 /**
@@ -338,7 +339,7 @@ export function entryExitCode(err) {
 }
 
 // Entry point when run as a bin. Kept out of the exported main so tests can call main() directly.
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("cli.mjs")) {
+if (isEntryModule(import.meta.url)) {
 	// A promise nobody handled is printed as its message alone (PR #475's review): Node's own print shows the whole
 	// reason, which for a Valkey client's error could carry what it sent.
 	installRejectionPrinter();

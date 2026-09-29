@@ -14,6 +14,7 @@
  */
 
 import { EXIT_POLICY, installRejectionPrinter } from "@edgehero/pi-dispatch/exit-code";
+import { isEntryModule } from "@edgehero/pi-dispatch/entry";
 
 const USAGE = `pi-dispatch-receiver — the always-on trigger edge: turns GitHub activity into queued jobs
 
@@ -74,8 +75,8 @@ export function entryExitCode(err) {
 
 // Entry point when run as a bin. Kept out of the exported main so tests can call main() directly.
 // The error line mirrors start.mjs's own entry guard: `err.message` only -- never a secret or PII.
-// (start.mjs's guard keys on argv[1] ending in start.mjs, so importing it from here never double-boots.)
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("cli.mjs")) {
+// (start.mjs's guard asks whether argv[1] IS start.mjs once links resolve, so importing it from here never double-boots.)
+if (isEntryModule(import.meta.url)) {
 	// An unhandled rejection is printed as its message alone (PR #475's review), never Node's print of the whole reason.
 	installRejectionPrinter();
 	main()
