@@ -1550,7 +1550,11 @@ function nodeSvg(p, flags, hasIn, hasOut) {
   if (hasOut) parts.push(`<rect x="${fmt(p.w - 5)}" y="${fmt(NODE_H / 2 - 5)}" width="10" height="10" rx="3" fill="${PORT_FILL}" stroke="${CHIP_STROKE}" stroke-width="1"/>`);
   if (n.kind === "trigger") {
     parts.push(`<rect x="3" y="${fmt(NODE_H + 3)}" width="9" height="9" rx="2" fill="${statusColor(n.runs > 0 ? n.lastOutcome : null)}"/>`);
-    parts.push(`<text x="16" y="${fmt(STATUS_DY)}" font-size="10" fill="${PAGE_DIM}">${n.runs > 0 ? `${fmt(n.runs)} runs` : "no runs"}</text>`);
+    // A one-shot says so on the chip, in the panel's words and colours (issue #492): `[once]` in the accent while
+    // armed, `[spent]` dim once it fired. Before, only the tooltip said it, and an armed one-shot read as a
+    // standing rule; the spent chip's fade alone asked the eye to know the palette.
+    const shot = n.disarmed !== null ? `<tspan fill="${PAGE_DIM}"> [spent]</tspan>` : n.once ? `<tspan fill="${PAGE_ACCENT}"> [once]</tspan>` : "";
+    parts.push(`<text x="16" y="${fmt(STATUS_DY)}" font-size="10" fill="${PAGE_DIM}">${n.runs > 0 ? `${fmt(n.runs)} runs` : "no runs"}${shot}</text>`);
   }
   const orange = [...flagNames].some((f) => ORANGE_FLAGS.has(f));
   if (orange) parts.push(`<circle cx="${fmt(p.w - 4)}" cy="-2" r="5" fill="${BADGE_ORANGE}"/>`);

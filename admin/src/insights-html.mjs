@@ -69,6 +69,7 @@ const LINES_TOP = 4;
 // total dwarfs daily bars, and a second y-axis on one plot is the classic dual-axis lie.
 const CUM_H = 84;
 const CUM_LABEL_COL_W = 6; // px per column at the 9px end label, over-counted so the width is a bound
+const BADGE_COL_W = 6; // px per column at the badge's 10px font, over-counted so the width is a bound
 const GRAPH_MAX_SCALE = 1.35; // the topology's page pixels per scene unit, at most (a real deployment's page sits near 1.3)
 const CUM_LABEL_GAP = 4; // the end label stops short of the last point's 2px dot
 // Room above the plot for the end label over a last point at the very top (a total equal to the scale
@@ -1213,7 +1214,13 @@ export function buildInsightsHtml(payload, { now, fullPaths } = {}) {
     const fill = cls === "estimated" || cls === "seeded" ? PAGE_THEME.amber : PAGE_THEME.dim;
     // At the scene's own badge line: the scene routes a trigger's re-arm loop below that line, so a badge
     // drawn anywhere else could land on the loop again (issue #483).
-    spendParts.push(`<text x="${fmt(pl.x + 16)}" y="${fmt(pl.y + SPEND_BADGE_DY)}" font-size="10" fill="${fill}">${escapeHtml(fmtCost(entry.cost))}</text>`);
+    // The badge fits its chip (issue #492): a plan badge carries the plan's free-form id, and one long enough
+    // ran past the chip onto the wires beside it. Cut with the ellipsis, the whole text in a tooltip.
+    const text = fmtCost(entry.cost);
+    const cols = Math.max(2, Math.floor((pl.w - 20) / BADGE_COL_W));
+    const shown = drawnColumns(text) <= cols ? text : clipColumns(text, cols - 1);
+    const tip = shown !== text ? `<title>${escapeHtml(text)}</title>` : "";
+    spendParts.push(`<text x="${fmt(pl.x + 16)}" y="${fmt(pl.y + SPEND_BADGE_DY)}" font-size="10" fill="${fill}">${escapeHtml(shown)}${tip}</text>`);
   }
 
   const tips = [];

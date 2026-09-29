@@ -8,7 +8,7 @@
 //
 // Exits 1 when any label runs past its box or collides with another label with the fit on, or when an ASCII
 // label the static builder sized was changed by it, or (issue #483) when any text on the plain, realistic, #483
-// (and its long skill-group name twin), long folder title, many mentions or deep chains page sits on a wire, a
+// (and its long skill-group name twin), long folder title, many mentions, deep chains or one-shot page sits on a wire, a
 // loop, a ring, a painted rect's border, a line or another text, or runs past its svg. The same page with the fit stripped
 // is measured too, and its overflow count is printed for comparison only.
 
@@ -532,7 +532,17 @@ const realFitted = await measure(page(realGraph, fold(ascii), true));
 const realStripped = await measure(page(realGraph, fold(ascii), false));
 const tieredFitted = await measure(page(buildGraphModel(tiered()), tieredFold(), true, TIERED_COSTS));
 const longFitted = await measure(page(buildGraphModel(tiered("build-report-for-the-whole-customer-website")), tieredFold(), true, TIERED_COSTS));
+// Issue #492: an armed and a spent one-shot close rule (the [once] and [spent] status lines, the number that
+// leads their labels) and a plan-covered trigger whose plan id is long enough to need the badge's cut.
+function oneShots() {
+  const m = tiered();
+  const shot = (index, number, extra = {}) => ({ type: "issue", index, action: ["closed", "reopened"], number, once: true, flow: "fix", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github", ...extra });
+  m.triggers.triggers.push(shot(7, 4072), shot(8, 41, { disarmed: { at: "2026-08-20T09:00:00Z" } }));
+  return m;
+}
+const ONE_SHOT_COSTS = { ...TIERED_COSTS, "trigger:0": { cost: usd(0, "plan", { planId: "customer-facing-enterprise-plan-2026" }), runs: 28 } };
 const reviewPages = {
+  "one-shot and long plan badge": await measure(page(buildGraphModel(oneShots()), tieredFold(), true, ONE_SHOT_COSTS)),
   "long folder title": await measure(page(buildGraphModel(tiered("build-report", "/srv/customer-facing-marketing-website-production-deployment-folder-2026q3")), tieredFold(), true, TIERED_COSTS)),
   "many mentions": await measure(page(buildGraphModel(manyMentions()), tieredFold(), true, {})),
   "deep chains": await measure(page(buildGraphModel(deepChains()), tieredFold(), true, {})),

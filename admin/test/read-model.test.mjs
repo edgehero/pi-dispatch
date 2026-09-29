@@ -1598,7 +1598,7 @@ test("attributeRunsToTriggers: a SPENT one-shot keeps its cost attribution, labe
   ];
   const records = [runRec({ jobId: "gh-1", triggerIndex: 0, triggerType: "issue" })];
   const { byJobId } = attributeRunsToTriggers({ records, triggers });
-  assert.deepEqual(byJobId["gh-1"], { key: "trigger:0", index: 0, type: "issue", label: "action[closed] #40 (spent)" });
+  assert.deepEqual(byJobId["gh-1"], { key: "trigger:0", index: 0, type: "issue", label: "#40 action[closed] (spent)" });
 });
 
 test("observedChainEdges folds child->parent joins per (parentFlow, childFlow, target), self-chains included", () => {

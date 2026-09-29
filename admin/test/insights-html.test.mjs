@@ -4,7 +4,8 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { buildInsightsHtml, layoutDailyChart, layoutBarList, layoutFlowLines, layoutCumulative, INSIGHTS_COST_CLASSES } from "../src/insights-html.mjs";
 import { buildGraphModel } from "../src/graph-model.mjs";
-import { COST_CLASSES } from "../src/costs.mjs";
+import { buildGraphScene, drawnColumns } from "../src/graph-html.mjs";
+import { COST_CLASSES, foldTriggerCosts } from "../src/costs.mjs";
 
 const NOW = 1770000000000;
 
@@ -812,4 +813,41 @@ test("a small topology is not blown up past a real deployment's scale (issue #48
     assert.ok(m, "the pane carries its scale cap");
     assert.ok(Number(m[2]) <= Number(m[3]) * 1.35 + 0.1, `max-width ${m[2]} for a ${m[3]}-unit scene`);
   }
+});
+
+test("a plan-covered trigger's badge reads plan:<id>, never a dollar, from the real fold (issue #492)", () => {
+  // The fold demoted a bucket of plan-covered runs to "estimated", so the badge read "~$0 est." beside a
+  // by-model table saying plan:kimi. Built here through foldTriggerCosts itself, not a hand-typed badge.
+  const row = { provider: "kimi-coding", model: "kimi-k2", calls: 2, input: 4000000, output: 2000000, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 6000000, cost: 0, unpriced: 0 };
+  const run = (jobId) => ({
+    jobId, kind: "local", target: "local:site", flow: "build-report", startedAt: "2026-08-10T03:00:00.000Z", endedAt: "2026-08-10T03:04:00.000Z", outcome: "completed",
+    tokens: { input: 4000000, output: 2000000, total: 6000000, cost: 0, metered: true, calls: 2, unpriced: 0, unresolved: 0 },
+    usage: { v: 1, piAi: "1.2.3", truncated: 0, models: [row] }, provider: "kimi-coding", model: "kimi-k2",
+  });
+  const subs = [{ id: "kimi", vendor: "Moonshot AI", provider: "kimi-coding", models: ["*"], price: { amount: 99, currency: "USD", per: "month" }, hypothetical: false, counterfactualModel: null, windows: [] }];
+  const pricing = { getPricedModel: () => null, isZeroRated: () => false, reprice: () => null, listPricedModels: () => [], piAiVersion: () => "1.2.3" };
+  const triggerJoin = { byJobId: { "r-1": { key: "trigger:0", index: 0, type: "cron", label: "nightly 0 3 * * *" }, "r-2": { key: "trigger:0", index: 0, type: "cron", label: "nightly 0 3 * * *" } } };
+  const costByTrigger = foldTriggerCosts({ records: [run("r-1"), run("r-2")], subscriptions: subs, pricing, triggerJoin });
+  const p = CANNED_PAYLOAD();
+  p.costByTrigger = costByTrigger;
+  const out = buildInsightsHtml(p, { now: NOW });
+  const spend = /<g id="spend">(.*?)<\/g>/.exec(out)[1];
+  assert.ok(spend.includes(">plan:kimi</text>"), `trigger:0's plan-covered spend reads plan:kimi: ${spend}`);
+  assert.ok(!/>~?\$0(\.00)? ?(est\.)?<\/text>/.test(spend), "and no badge reads $0");
+});
+
+test("a trigger's spend badge fits its chip, the whole text in a tooltip (issue #492)", () => {
+  // A plan badge carries the plan's free-form id, and a long one ran past the chip onto the wires beside it.
+  const long = "customer-facing-enterprise-plan-2026"; // under the page's 40-character id clip
+  const p = CANNED_PAYLOAD();
+  p.costByTrigger["trigger:0"] = { cost: usd(0, "plan", { planId: long }), runs: 9 };
+  const out = buildInsightsHtml(p, { now: NOW });
+  const layout = buildGraphScene(p.graph, { now: NOW }).layout;
+  const chip = layout.nodes.find((n) => n.node.id === "trigger:0");
+  const m = new RegExp(`<text x="${chip.x + 16}" y="${chip.y + 53}" font-size="10" fill="[^"]+">([^<]*)<title>([^<]*)</title></text>`).exec(out);
+  assert.ok(m, "the long badge is cut and carries its tooltip");
+  assert.equal(m[2], `plan:${long}`, "the tooltip holds the whole badge");
+  assert.ok(m[1].endsWith("…") && 16 + drawnColumns(m[1]) * 6 <= chip.w - 4, `the cut badge ${JSON.stringify(m[1])} fits a ${chip.w}px chip`);
+  // A badge that fits is drawn whole and carries no tooltip, byte for byte as before.
+  assert.ok(buildInsightsHtml(CANNED_PAYLOAD(), { now: NOW }).includes(">plan:kimi</text>"), "a short badge is untouched");
 });

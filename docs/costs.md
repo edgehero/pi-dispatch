@@ -40,6 +40,11 @@ Every dollar carries its class, rendered by one shared formatter — these marke
 A run whose container died before reporting tokens contributes no row of its own: it makes its bucket a
 floor and demotes it to `est.` with coverage, so nothing renders as an unclassified dollar.
 
+A bucket (a trigger, flow, repo or day) whose every run one declared plan covers reads `plan:<id>`, and
+`dispatch_costs` returns its typed value as class `"plan"` with that `planId`. A bucket that mixes plan
+and billed runs, that two plans cover (an id may hold any character, so no separator could name both),
+or that holds a floor reads as the estimate it is, `~$4.12 est.` or `~≥$0 est.`, with its coverage.
+
 Metered numbers are pi-ai's computed prices, not invoices. The series is bounded by run-history
 retention (`PI_LOG_RETENTION_DAYS`, default 30 days; the scan hard-caps at 92 days even when retention
 is the keep-forever `0`), and the screen says which window it shows. Plan proration denominates on the

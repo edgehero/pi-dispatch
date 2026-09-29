@@ -643,16 +643,18 @@ export function triggerMatchLabel(t) {
       // one-shot's spend history must not read back as an armed rule's. Armed carries no marker -- the
       // label names the MATCH, and armed is the state every rule has always been in. A close-only rule's
       // `#<n>` narrowing rides here too, the issue arm's rule: the list row and the drill-in both show
-      // it, and this label must not tell less than the surfaces it feeds.
+      // it, and this label must not tell less than the surfaces it feeds. The number leads (issue #492): it is
+      // what tells one narrowed rule from every rule on that action, and a chip cuts a label from its end.
       const action = `action[${(Array.isArray(t.action) ? t.action : []).join(",")}]`;
-      const num = Number.isInteger(t.number) ? ` #${t.number}` : "";
-      return t.disarmed ? `${action}${num} (spent)` : `${action}${num}`;
+      const base = Number.isInteger(t.number) ? `#${t.number} ${action}` : action;
+      return t.disarmed ? `${base} (spent)` : base;
     }
     case "issue": {
       // pull_request's vocabulary plus the one narrowing an issue rule can carry: `#<n>` is the forge's own
-      // spelling of the item, so the label reads back the way the operator wrote the rule (issue #231).
+      // spelling of the item, so the label reads back the way the operator wrote the rule (issue #231). It leads
+      // (issue #492): `action[closed]` alone reads as every close, and the topology chip cut `#40` off the end.
       const action = `action[${(Array.isArray(t.action) ? t.action : []).join(",")}]`;
-      const base = Number.isInteger(t.number) ? `${action} #${t.number}` : action;
+      const base = Number.isInteger(t.number) ? `#${t.number} ${action}` : action;
       return t.disarmed ? `${base} (spent)` : base;
     }
     default:

@@ -188,6 +188,13 @@ function runContribution(record, subscriptions, pricing) {
  * EVERY addend is purely metered; one plan/zero-rated/estimated/unknown addend demotes the sum to
  * "estimated", because the number no longer says what was spent -- only what was spent on the metered
  * part -- and `coverage` then reports what fraction of the bucket's runs contributed metered dollars.
+ * One exception (issue #492): a bucket whose runs ONE declared plan covers, every row of them, with no run a
+ * floor, keeps `plan:<id>` (REQ-COST-ANALYTICS (b): a plan-covered run never renders as $0.00, and "~$0 est."
+ * is that $0 with a tilde). The model table already kept it (combineRowCosts); the trigger badge and every
+ * other bucket read "~$0 est." beside it. The two conditions are what (d) and the id grammar leave: a floor's
+ * `≥` has no place in `plan:<id>` and may never be dropped by aggregation (a fallback-metered run cannot see
+ * subagent spend), and a subscription id may hold any character, so no separator could join two ids without
+ * ambiguity. Such buckets, and any mixing plan and billed runs, stay "estimated" with coverage, as before.
  * An empty bucket is vacuously metered: $0, fully measured.
  */
 function combineContributions(contribs) {
@@ -195,6 +202,9 @@ function combineContributions(contribs) {
   const floor = contribs.some((c) => c.floor);
   const allMetered = contribs.every((c) => c.classes.length === 1 && c.classes[0] === "metered");
   if (allMetered) return typed(usd, "metered", { floor });
+  const allPlan = !floor && contribs.length > 0 && contribs.every((c) => c.rows.length > 0 && c.classes.length === 1 && c.classes[0] === "plan");
+  const ids = allPlan ? [...new Set(contribs.flatMap((c) => c.rows.map((row) => row.planId)))] : [];
+  if (ids.length === 1) return typed(usd, "plan", { floor, planId: ids[0] });
   const meteredRuns = contribs.filter((c) => c.classes.includes("metered")).length;
   return typed(usd, "estimated", { floor, coverage: meteredRuns / contribs.length });
 }

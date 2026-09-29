@@ -523,8 +523,8 @@ test("a spent one-shot fades like a disabled chip, both tips state the state, an
   // The disabled treatment: CANNED's two orphan chips + the legend swatch + exactly ONE spent chip.
   assert.equal((out.match(/stroke-dasharray="8,3"/g) ?? []).length, 4, "the spent trigger chip joins the faded-dash treatment; the armed one does not");
   assert.ok(out.includes(">◉</text>"), "the issue trigger glyph renders in the icon column");
-  assert.ok(out.includes("action[closed] #41 (spent)"), "the shared label's spent marker reaches the tip");
-  assert.ok(out.includes("action[closed] #40"), "the armed label stays the plain match vocabulary");
+  assert.ok(out.includes("#41 action[closed] (spent)"), "the shared label's spent marker reaches the tip");
+  assert.ok(out.includes("#40 action[closed]"), "the armed label stays the plain match vocabulary");
 });
 
 test("junk one-shot shapes die at the allowlist: an unusable disarm instant still reads spent, without leaking", () => {
@@ -1604,4 +1604,37 @@ test("in seeded dense scenes, every drawn label is nearer its own wire than any 
     }
   }
   assert.ok(checked > 100, `${checked} labels checked`);
+});
+
+// ---- issue #492: a close rule keeps its number, a one-shot says so on the chip ----
+
+test("a narrowed close rule's chip keeps its number whatever the chip cuts (issue #492)", () => {
+  // The label put the action first, so the chip cut `#40` off and a rule for one issue read as a rule for
+  // every close. The number leads now; a long action list is what the cut takes.
+  const inputs = SHOT();
+  inputs.triggers.triggers.push(
+    { type: "issue", index: 5, action: ["closed", "reopened", "edited", "labeled"], number: 4072, once: false, flow: "triage", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" },
+    { type: "pull_request", index: 6, action: ["closed", "reopened", "synchronize"], number: 918, flow: "triage", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" },
+  );
+  const layout = layoutOf(buildGraphModel(inputs));
+  const chip = (n) => layout.nodes.find((p) => p.node.kind === "trigger" && p.node.id === `trigger:${n}`);
+  for (const [idx, num] of [[3, 40], [4, 41], [5, 4072], [6, 918]]) {
+    assert.ok(chip(idx).label.startsWith(`#${num} `), `trigger ${idx}'s chip reads ${JSON.stringify(chip(idx).label)}`);
+  }
+  assert.ok(chip(5).label.endsWith("…"), "the long one is cut, and the cut takes the action list, not the number");
+});
+
+test("a one-shot trigger carries [once] armed and [spent] fired on its chip, a standing rule neither (issue #492)", () => {
+  // The panel's words and colours: [once] in the accent while armed, [spent] dim once it fired. Before, only
+  // the tooltip said it, and an armed one-shot looked like a standing rule.
+  const scene = buildGraphScene(buildGraphModel(SHOT()), { now: NOW });
+  const statusOf = (idx) => {
+    const p = scene.layout.nodes.find((n) => n.node.id === `trigger:${idx}`);
+    const g = new RegExp(`<g class="gnode" id="${p.id}"[^>]*>(.*?)</g>`).exec(scene.svgBody)[1];
+    return /<text x="16" y="41" font-size="10" fill="[^"]+">(.*?)<\/text>/.exec(g)[1];
+  };
+  assert.equal(statusOf(3), `no runs<tspan fill="#58a6ff"> [once]</tspan>`, "armed: [once] in the accent");
+  assert.equal(statusOf(4), `no runs<tspan fill="#8b949e"> [spent]</tspan>`, "spent: [spent], dim");
+  assert.ok(!/tspan/.test(statusOf(1)), "a standing rule carries neither");
+  assert.ok(pageOf(buildGraphModel(SHOT())).includes("one-shot (armed)"), "and the tooltip still says it in words");
 });

@@ -374,12 +374,12 @@ test("the one-shot facts ride the trigger node: once means ARMED, disarmed is th
   const armed = m.nodes.find((n) => n.id === "trigger:3");
   assert.equal(armed.once, true, "an armed one-shot says so");
   assert.equal(armed.disarmed, null, "and carries no mark");
-  assert.equal(armed.label, "action[closed] #40", "the armed label is the plain match vocabulary");
+  assert.equal(armed.label, "#40 action[closed]", "the armed label is the plain match vocabulary");
 
   const spent = m.nodes.find((n) => n.id === "trigger:4");
   assert.equal(spent.once, false, "once is true only while ARMED -- a spent one-shot will not fire once more");
   assert.deepEqual(spent.disarmed, { at: "2026-08-20T09:00:00Z", jobId: "gh-77" }, "the worker's mark rides verbatim");
-  assert.equal(spent.label, "action[closed] #41 (spent)", "the shared label carries the spent marker");
+  assert.equal(spent.label, "#41 action[closed] (spent)", "the shared label carries the spent marker");
 
   assert.equal(m.nodes.find((n) => n.id === "trigger:1").once, false, "a kind that cannot carry the fields reads false/null");
   assert.equal(m.nodes.find((n) => n.id === "trigger:1").disarmed, null);
@@ -400,12 +400,12 @@ test("the one-shot facts ride the trigger node: once means ARMED, disarmed is th
 test("triggerMatchLabel marks a spent close rule on both close-capable kinds, and only there (#231)", () => {
   // One vocabulary for what a trigger is called (issue #175): this label feeds the graph chip AND
   // the cost tables, so the spent marker lands in both by construction.
-  assert.equal(triggerMatchLabel({ type: "issue", action: ["closed"], number: 40 }), "action[closed] #40");
-  assert.equal(triggerMatchLabel({ type: "issue", action: ["closed"], number: 40, disarmed: { at: "t" } }), "action[closed] #40 (spent)");
+  assert.equal(triggerMatchLabel({ type: "issue", action: ["closed"], number: 40 }), "#40 action[closed]");
+  assert.equal(triggerMatchLabel({ type: "issue", action: ["closed"], number: 40, disarmed: { at: "t" } }), "#40 action[closed] (spent)");
   assert.equal(triggerMatchLabel({ type: "pull_request", action: ["close"] }), "action[close]");
   assert.equal(triggerMatchLabel({ type: "pull_request", action: ["close"], disarmed: { at: "t" } }), "action[close] (spent)");
   // Armed carries no marker: armed is the state every rule has always been in.
-  assert.equal(triggerMatchLabel({ type: "issue", action: ["closed"], number: 40, once: true }), "action[closed] #40");
+  assert.equal(triggerMatchLabel({ type: "issue", action: ["closed"], number: 40, once: true }), "#40 action[closed]");
 });
 
 test("skill nodes carry their loops, and forge groups carry their record-derived repos", () => {

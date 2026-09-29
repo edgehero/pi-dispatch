@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { COST_CLASSES, COSTS_WINDOWS, costsSinceMs, matchesGlob, classifyRow, foldCosts, whatIfFlow, repoOfTarget, foldTriggerCosts } from "../src/costs.mjs";
+import { parseSubscriptions } from "@edgehero/pi-dispatch/subscriptions";
 
 test("costs.mjs is pure: no fs, no redis, no queue, no env, no console -- records and opinions in, typed dollars out", () => {
   const src = readFileSync(fileURLToPath(new URL("../src/costs.mjs", import.meta.url)), "utf8");
@@ -642,4 +643,46 @@ test("whatIfFlow: an unpriced target degrades to the seeded band rather than emi
     whatIfFlow({ records: [m], flow: "fix", target: { provider: "nobody", id: "no-model" }, pricing: cannedPricing() }),
     { class: "seeded", low: 0.5, high: 5, note: "unmeasured (OQ-002)" },
   );
+});
+
+// ---- plan-covered buckets keep the plan (issue #492) ----
+
+test("a bucket every run of which one plan covers, no run a floor, keeps plan:<id>, the trigger badge and the trigger table alike", () => {
+  // combineContributions demoted any bucket holding a non-metered run to "estimated", so a trigger whose runs
+  // the kimi plan covers read "~$0 est." on its badge and in the by-trigger table, while the by-model table on
+  // the same page said plan:kimi. REQ-COST-ANALYTICS (b): a plan-covered run never renders as $0.00.
+  const covered = (jobId) => ({ ...planCovered, jobId });
+  const metered = { ...ledgeredMetered, jobId: "m-1" };
+  const zaiCovered = rec({ jobId: "z-1", tokens: tok(0), usage: usage([row("zai", "glm-4.7", { cost: 0 })]), provider: "zai", model: "glm-4.7" });
+  const subs = [sub(), sub({ id: "zai-max", provider: "zai" })];
+  const join = (keys) => ({ byJobId: Object.fromEntries(Object.entries(keys).map(([jobId, idx]) => [jobId, { key: `trigger:${idx}`, index: idx, type: "cron", label: `t${idx}` }])) });
+  const records = [covered("p-1"), covered("p-2"), covered("p-3"), metered, zaiCovered];
+  const triggerJoin = join({ "p-1": 0, "p-2": 0, "p-3": 1, "m-1": 1, "z-1": 2 });
+  const map = foldTriggerCosts({ records: [...records, { ...zaiCovered, jobId: "z-2" }, { ...planCovered, jobId: "p-4" }], subscriptions: subs, pricing: cannedPricing(), triggerJoin: join({ "p-1": 0, "p-2": 0, "p-3": 1, "m-1": 1, "z-2": 3, "p-4": 3 }) });
+  assert.deepEqual(map["trigger:0"].cost, { usd: 0, class: "plan", floor: false, planId: "kimi" }, "all covered by kimi: the plan, never ~$0 est.");
+  assert.equal(map["trigger:1"].cost.class, "estimated", "plan and metered runs mixed: estimated, as every mixed bucket is");
+  assert.equal(map["trigger:1"].cost.coverage, 0.5);
+  // Two plans covering one bucket: no plan chip, because a subscription id may hold any character, so no
+  // separator names both without ambiguity (the parser below accepts ids spelling "+", "," and " & ").
+  assert.equal(map["trigger:3"].cost.class, "estimated", "two plans covering it: estimated, as before");
+  const ids = parseSubscriptions(JSON.stringify({ version: 1, subscriptions: ["a+b", "a,b", "a & b"].map((id) => ({ id, vendor: "v", provider: "p", models: ["*"], price: { amount: 1, currency: "USD", per: "month" }, windows: [] })) }), "subs.json").subscriptions.map((x) => x.id);
+  assert.deepEqual(ids, ["a+b", "a,b", "a & b"], "the id grammar forbids every would-be separator, so the fold joins none");
+  // A floor in a plan-covered bucket keeps its ≥: REQ-COST-ANALYTICS (d), the marker is never dropped by
+  // aggregation, and plan:<id> has no place for it (a fallback-metered run cannot see subagent spend).
+  const flooredPlan = { ...planCovered, jobId: "f-1", tokens: { ...planCovered.tokens, metered: false } };
+  const floorMap = foldTriggerCosts({ records: [covered("p-9"), flooredPlan], subscriptions: subs, pricing: cannedPricing(), triggerJoin: join({ "p-9": 5, "f-1": 5 }) });
+  assert.equal(floorMap["trigger:5"].cost.class, "estimated", "a plan bucket holding a floor stays estimated");
+  assert.equal(floorMap["trigger:5"].cost.floor, true, "with its floor");
+  // The fold's own by-trigger table agrees with the badge map, row for row.
+  const f = foldCosts({ records, subscriptions: subs, pricing: cannedPricing(), nowMs: NOW, piAiPin: "1.2.3", sinceMs: null, triggerJoin });
+  const byKey = Object.fromEntries(f.byTrigger.map((r) => [r.key, r.cost]));
+  assert.deepEqual(byKey["trigger:0"], { usd: 0, class: "plan", floor: false, planId: "kimi" });
+  assert.equal(byKey["trigger:1"].class, "estimated");
+  assert.deepEqual(byKey["trigger:2"], { usd: 0, class: "plan", floor: false, planId: "zai-max" });
+  // One run half on the plan and half billed is a mixed run: its bucket is estimated, never the plan.
+  const split = rec({ jobId: "s-1", tokens: tok(0.5), usage: usage([row("kimi-coding", "kimi-k2", { cost: 0 }), row("anthropic", "claude-sonnet-4", { cost: 0.5 })]), provider: "kimi-coding", model: "kimi-k2" });
+  const splitMap = foldTriggerCosts({ records: [split], subscriptions: subs, pricing: cannedPricing(), triggerJoin: join({ "s-1": 4 }) });
+  assert.equal(splitMap["trigger:4"].cost.class, "estimated", "a run with a billed row is not plan covered");
+  // A bucket of only metered runs is untouched.
+  assert.equal(foldTriggerCosts({ records: [metered], subscriptions: subs, pricing: cannedPricing(), triggerJoin })["trigger:1"].cost.class, "metered");
 });
