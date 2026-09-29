@@ -12,7 +12,9 @@ from cron triggers, or from forge events that the
 
 ## Start
 
-You need Docker or Podman, Node 22.19 or newer, and an API key for a model provider that pi supports.
+You need Docker or Podman and Node 22.19 or newer on one machine that stays on (a Linux server or VM, or
+your own Mac or Windows machine with Docker Desktop), and an API key for a model provider that pi supports.
+pi-dispatch itself needs no AI key: the key is for pi, inside each job.
 
 ```bash
 mkdir my-dispatch && cd my-dispatch

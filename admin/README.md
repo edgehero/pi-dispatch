@@ -58,6 +58,12 @@ container runtime guarantees is declared in
 [`docs/backends.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/backends.md), and
 `pi-dispatch doctor --live` reads it back from real containers.
 
+**Where it runs.** On any Linux server or VM you control, or your own Mac or Windows machine with Docker
+Desktop: the worker is a long running process beside a container runtime on the same host. Serverless
+platforms, hosted sandbox services and a container daemon on another machine are not supported. pi-dispatch
+itself needs no AI key; the provider key is for pi inside each job. The details are in the
+[main README](https://github.com/edgehero/pi-dispatch#where-it-can-run).
+
 Spend is checked before a container starts, so a runaway or a junk trigger costs a refusal, not a bill.
 The job image ships Playwright and Chromium, so a flow can build a frontend, screenshot it and iterate.
 

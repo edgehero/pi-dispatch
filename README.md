@@ -67,9 +67,10 @@ what each of them costs and whether a subscription pays off ([`docs/insights.md`
 You need:
 
 - **Docker**, or **Podman** (rootful through its Docker API, or rootless on Linux with `PI_BACKENDS=podman`;
-  see [`docs/podman.md`](docs/podman.md));
+  which to pick: [Docker or Podman](#docker-or-podman));
 - **Node 22.19 or newer**;
-- an **API key** for a model provider (see [Providers and models](#providers-and-models)).
+- an **API key** for a model provider, which pi uses inside each job (see [Providers and models](#providers-and-models));
+- a machine that can run a container runtime all the time (see [Where it can run](#where-it-can-run)).
 
 ### From pi (the default route)
 
@@ -126,9 +127,47 @@ A job that names an image the host does not have is refused before it costs anyt
 > command). The bare npm name `pi-dispatch` belongs to an unrelated package (see [License](#license)), so
 > outside a checkout always use the scoped name.
 
+## Where it can run
+
+pi-dispatch is a long running worker that starts containers, so it runs on a machine where it can do both:
+Node 22.19 or newer beside a container runtime (Docker, or Podman), on the same host.
+
+| Where | Works? |
+|---|---|
+| A Linux server or VM you control (a VPS, a cloud VM, a home server) | **Yes.** The main target. Run the worker as a service ([Run as a service](#run-as-a-service)). |
+| Your own Mac or Windows machine with Docker Desktop | **Yes**, while you are logged in, because Docker Desktop is. |
+| Several machines sharing one queue | **Yes** ([`docs/multi-host.md`](docs/multi-host.md)). |
+| Serverless and app platforms (Vercel functions, Netlify, Cloudflare Workers, a PaaS without a container runtime) | **No.** There is no container runtime to start jobs in, and nowhere for a worker that never stops. |
+| Hosted sandbox services as the place jobs run (Vercel Sandbox, E2B, Modal, Daytona and similar) | **Not yet.** A job runs only on the two backends below. A new venue needs an adapter, and [`docs/backends.md`](docs/backends.md) is the contract it would implement. |
+| A Docker or Podman daemon on another machine (`DOCKER_HOST=ssh://...`) | **No.** Job files are mounted from the worker's own disk, which that machine does not have, and it would receive every job's provider key and forge token. |
+
+Only the receiver needs to be reachable from the internet, and only for webhooks. Behind a firewall, use
+the receiver's `poll` mode instead, which needs no public URL ([`docs/github.md`](docs/github.md)).
+
+### Docker or Podman
+
+Jobs run in one of two backends, both on the worker's own host:
+
+- **`local`**, the default: the Docker daemon (or rootful Podman through its Docker API). Easiest to set up,
+  and the only choice on macOS and Windows. The worker needs access to the daemon's socket, and that
+  access is equivalent to root on the host.
+- **`podman`**: rootless Podman, as the worker's own account, on Linux. No daemon runs as root, and the
+  worker needs no root equivalent group. Each job runs as the worker's own uid in that account's own
+  container store, so a container escape lands in an unprivileged account. Valkey, the egress proxy and
+  the worker run as systemd user units. Pick it for a shared or security sensitive Linux server.
+
+To use rootless Podman: run the worker as an ordinary account (not root) with its own subordinate ids,
+turn on linger (`sudo loginctl enable-linger <account>`) so its services run without a login, set
+`PI_BACKENDS=podman` in `.env`, pull the job image with `podman`, then run `pi-dispatch up`,
+`pi-dispatch service install` and `pi-dispatch doctor --live`. The full, measured setup, and what is
+refused (Podman machine on macOS and Windows, rootful or remote Podman on this venue, a root worker), is in
+[`docs/podman.md`](docs/podman.md).
+
 ## Providers and models
 
-pi-dispatch works with most providers pi supports: Anthropic, OpenAI, Google, Groq and about thirty more
+**pi-dispatch itself needs no AI key.** The queue, the caps, the containers and the panel run no model. The
+key is for pi, the agent that runs inside each job, and the worker hands it to each job container. pi-dispatch
+works with most providers pi supports: Anthropic, OpenAI, Google, Groq and about thirty more
 (the exceptions are below). Pick the default in `.env`:
 
 ```bash
