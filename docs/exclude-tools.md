@@ -78,5 +78,5 @@ from a current tree and the refusal disappears.
 | Observability | `tools_excluded` log line on every flagged job: the requested exclusions and the session's active tool list read back |
 | Panel | the trigger drill-in's `excludeTools` row beside `image` (`full pinned tool set` when absent); no panel key, no AI tool |
 | Chaining | inherited from the parent's job data; the request file cannot set or drop it |
-| Version floor | unreleased at the time of writing: the first releases after worker 1.10.3 / receiver 1.5.0 / admin 1.10.2, plus a job image rebuilt from the same tree |
+| Version floor | worker 2.0.0, receiver 2.0.0, admin 2.0.0, plus the 2.0.0 job image (`ghcr.io/edgehero/pi-job:2.0.0`) or one rebuilt from the same tree |
 | Related | [job image](job-image.md), [global pi overlay](global-pi-overlay.md), [workflows](workflows.md) |

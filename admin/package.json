@@ -1,6 +1,6 @@
 {
   "name": "@edgehero/pi-dispatch-admin",
-  "version": "1.10.2",
+  "version": "2.0.0",
   "description": "Operator console for pi-dispatch, as a pi extension: a /dispatch panel over the queue, spend caps, scoped limits, run history and insights, editable cron and GitHub, GitLab, Forgejo and Azure DevOps triggers, pause windows, and human-confirmed tools your AI can operate.",
   "keywords": [
     "pi-package",
