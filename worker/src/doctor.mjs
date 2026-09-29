@@ -292,8 +292,13 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		for (const note of venue.notes) venueChecks.push({ ok: false, warn: true, label: note, fix: "fix that line so the service and this shell read the same venue" });
 		const read = Object.entries(venue.fromFile);
 		if (read.length > 0) {
-			venueChecks.push({ ok: true, label: `venue keys read from ${envPath} (${read.map(([key, value]) => `${key}=${quotedShown(value)}`).join(", ")}), as the service reads them: this shell does not set them` });
 			venueEnv = venue.env;
+		}
+		// Issue #481: an empty venue key is the worker's unset (`parseBackendList`, `egressArmed`, `egressProxyName`), so the
+		// line names only the keys the file gives a value; the resolved env keeps the "", which means the same thing.
+		const configured = read.filter(([key, value]) => fileConfigures(key, value));
+		if (configured.length > 0) {
+			venueChecks.push({ ok: true, label: `venue keys read from ${envPath} (${configured.map(([key, value]) => `${key}=${quotedShown(value)}`).join(", ")}), as the service reads them: this shell does not set them` });
 		}
 	}
 	// The Valkey owner rule reads this host's sockets and probes its addresses, so it is real only where the Valkey probe
@@ -366,8 +371,13 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 
 	// Issue #477: whether anything doctor judged came from the deployment's `.env`, which a hand-started worker never reads.
 	const fromFile = [venue.error ? {} : venue.fromFile, seams.serviceEnv.fromFile, seams.serviceEnv.extraFromFile];
-	const tookFromFile = fromFile.some((taken) => Object.keys(taken ?? {}).length > 0);
-	out(failed ? "\ndoctor: some checks failed: fix the above, then re-run.\n" : `\ndoctor: ready. ${startAdvice({ tookFromFile, envPath, platform, unit: tookFromFile ? installedWorkerUnit(seams, cwd) : null })}\n`);
+	// Issue #481: by `fileConfigures`, so a file whose only lines are empty ones (the service reads them as unset) is not
+	// "the file decided something", and the line does not send the operator to the service for nothing.
+	const tookFromFile = fromFile.some((taken) => Object.entries(taken ?? {}).some(([key, value]) => fileConfigures(key, value)));
+	// Issue #481 (review round 3): and whether doctor accepted a credential only because an env-setup script may export it.
+	const expected = seams.expectedFromSetup ?? [];
+	const fromSetup = expected.length > 0 && seams.envSetupSeen ? { script: seams.envSetupSeen.script, names: [...new Set(expected)] } : null;
+	out(failed ? "\ndoctor: some checks failed: fix the above, then re-run.\n" : `\ndoctor: ready. ${startAdvice({ tookFromFile, envPath, platform, fromSetup, unit: tookFromFile || fromSetup ? installedWorkerUnit(seams, cwd) : null })}\n`);
 	return failed ? 1 : 0;
 }
 
@@ -378,9 +388,16 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
  * command (restart for a service installed for this folder), and what a hand-started worker needs. Where doctor took
  * nothing from the file, what it judged is this shell's, and a worker started from it runs with the same.
  */
-export function startAdvice({ tookFromFile, envPath, unit, platform = process.platform }) {
-	if (!tookFromFile) return "Start the worker with `pi-dispatch worker`.";
-	return `Start the worker as the service, whose loader reads ${envPath} as doctor did: ${restartAdvice(unit, platform)}. A worker started by hand (\`pi-dispatch worker\`) reads this shell's environment and not that file, so it runs without the settings doctor read from the file above unless this shell exports them.`;
+export function startAdvice({ tookFromFile, envPath, unit, platform = process.platform, fromSetup = null }) {
+	// Issue #481 (PR #485 review round 3): what doctor accepted only because an --env-setup script may export it
+	// (`fromSetup`: `{ script, names }`) reaches the service alone, which runs that script; a worker started by hand runs
+	// none, so the line never sends the operator there, whether or not anything came from the file.
+	const setupSaid = fromSetup
+		? ` The service ${tookFromFile ? "also " : ""}runs the env-setup script ${envValueShown(fromSetup.script)} first, which doctor expects to export ${fromSetup.names.join(", ")}; a worker started by hand (\`pi-dispatch worker\`) runs no env-setup script, so it starts without ${fromSetup.names.length === 1 ? "that" : "those"} unless this shell exports ${fromSetup.names.length === 1 ? "it" : "them"}.`
+		: "";
+	if (!tookFromFile && !fromSetup) return "Start the worker with `pi-dispatch worker`.";
+	if (!tookFromFile) return `Start the worker as the service: ${restartAdvice(unit, platform)}.${setupSaid}`;
+	return `Start the worker as the service, whose loader reads ${envPath} as doctor did: ${restartAdvice(unit, platform)}. A worker started by hand (\`pi-dispatch worker\`) reads this shell's environment and not that file, so it runs without the settings doctor read from the file above unless this shell exports them.${setupSaid}`;
 }
 
 /**
@@ -579,12 +596,14 @@ const PODMAN_CHAIN_KEYS = Object.freeze(["CONTAINERS_CONF", "CONTAINERS_CONF_OVE
  */
 export function cliNotHandedLines(service, envPath) {
 	const listed = (items) => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`);
-	return CLI_KEY_NAMES.filter((k) => Object.hasOwn(service.fromFile, k)).map((k) => {
+	// Issue #481: an empty value is left out only where the tool's own source reads it as unset (`fileConfigures`).
+	return CLI_KEY_NAMES.filter((k) => Object.hasOwn(service.fromFile, k) && fileConfigures(k, service.fromFile[k])).map((k) => {
 		const names = Object.entries(CLI_SERVICE_KEYS).filter(([, ks]) => ks.includes(k)).map(([cli]) => cli);
 		const clis = listed(names);
 		// Grammar by count (round-cap re-review, D2): "podman, docker and gh use it", "podman uses it".
 		const verb = names.length > 1 ? "use" : "uses";
-		const shown = CLI_PATH_KEYS.includes(k) ? ` (${envValueShown(service.fromFile[k])})` : "";
+		// An empty HOME in quotes, so the line does not read "(" and ")" around nothing.
+		const shown = CLI_PATH_KEYS.includes(k) ? ` (${service.fromFile[k] === "" ? '""' : envValueShown(service.fromFile[k])})` : "";
 		return {
 			ok: false,
 			warn: true,
@@ -686,6 +705,91 @@ function disagreementShown({ key, shell, file }, path) {
 }
 
 /**
+ * Issue #481: the keys whose EMPTY value in the deployment `.env` every reader of it takes as unset, so a line saying
+ * the file set the key would say more than the file does. An ALLOWLIST, never a denylist (PR #485 review round 1): a key
+ * is here only where that is PROVEN, and every other key an empty line names is still said, because a reader that takes
+ * empty as a value (PI_TRIGGERS_FILE, GITLAB_URL, VALKEY_URL, CONTAINER_HOST) is exactly the key whose empty line decides
+ * something. `"blank"` also covers a whitespace-only value, where the reader trims; `"empty"` is the empty string alone.
+ *
+ * Two kinds of proof, each pinned by `doctor-empty-keys.test.mjs`:
+ *   - a worker or receiver key: the real loaders (`loadConfig`, `loadReceiverConfig`) return the same answer for the key
+ *     empty (or blank) as for it absent, across a base per forge and GitHub auth source, and the key is one they read.
+ *   - a CLI key, which neither loader reads: the tool's own source reads it with `os.Getenv(...) != ""`. docker
+ *     (docker/cli `cli/command/cli.go` for DOCKER_HOST and DOCKER_CONTEXT, `cli/config/config.go` `Dir()` for
+ *     DOCKER_CONFIG), gh (cli/go-gh `pkg/auth/auth.go` for GH_TOKEN, GITHUB_TOKEN and GH_HOST, `pkg/config/config.go`
+ *     for GH_CONFIG_DIR), and Podman's containers.conf pair (containers/common v0.57.4 `pkg/config/new.go`, as the
+ *     worker's own chain check reads them). NOT CONTAINER_HOST or CONTAINER_CONNECTION (podman's
+ *     `cmd/podman/registry/remote.go` asks `os.LookupEnv`, so an empty one switches it to remote), CONTAINERS_STORAGE_CONF
+ *     (LookupEnv, then a stat of ""), XDG_CONFIG_HOME, XDG_RUNTIME_DIR, HOME, TMPDIR or TEMP, each read by more than one
+ *     program, some of which take empty as a value (`os.homedir()` returns an empty HOME as it is; containers/common
+ *     takes a set TMPDIR by LookupEnv).
+ * Where an empty value refuses the boot, the key is not here, and a ✗ of its own names it besides (the boot files,
+ * PI_JOBS_DIR, PI_TRIGGERS_FILE, GITHUB_AUTH_SOURCE, the PAT and its variable, the App keys while app is the source).
+ * Judged HERE and not in `resolveServiceEnv`, whose `fromFile` must keep the "" so every check judges what the service
+ * is given, and whose cmd rule already drops the empty value where the loader unsets the key.
+ */
+export const EMPTY_READ_AS_UNSET = Object.freeze({
+	PI_BACKENDS: "blank",
+	PI_EGRESS: "empty",
+	PI_EGRESS_PROXY: "empty",
+	GITHUB_APP_PRIVATE_KEY: "blank",
+	PI_SANDBOX_DIR: "empty",
+	PI_WORKER_NAME: "empty",
+	PI_JOB_IMAGE: "empty",
+	PI_LOGS_DIR: "empty",
+	PI_SETTINGS_FILE: "empty",
+	PI_SESSIONS_DIR: "empty",
+	PI_SESSIONS_TTL_DAYS: "empty",
+	PI_SESSION_MAX_AGE_DAYS: "empty",
+	PI_SESSION_MAX_CONTEXT_PCT: "empty",
+	PI_SESSION_MAX_RESUME_CHAIN: "empty",
+	PI_GLOBAL_PI_DIR: "empty",
+	PI_GLOBAL_ALLOW_EXTENSIONS: "empty",
+	PI_FORWARD_ENV: "blank",
+	PI_BACKEND_FLOOR: "blank",
+	PI_SECRET_PROFILES: "blank",
+	PI_SECRET_RESOLVER_ROOTS: "blank",
+	PI_WAIT_PROFILES: "blank",
+	PI_WAIT_AFTER_MAX_MS: "empty",
+	PI_SANDBOX_RETENTION_HOURS: "empty",
+	WEBHOOK_SECRET: "blank",
+	RECEIVER_PORT: "empty",
+	GITLAB_TOKEN: "empty",
+	GITLAB_WEBHOOK_MODE: "empty",
+	GITLAB_WEBHOOK_SECRET: "empty",
+	FORGEJO_URL: "empty",
+	FORGEJO_TOKEN: "empty",
+	FORGEJO_WEBHOOK_SECRET: "empty",
+	AZURE_ORG_URL: "empty",
+	AZURE_TOKEN: "empty",
+	AZURE_WEBHOOK_MODE: "empty",
+	AZURE_WEBHOOK_SECRET: "empty",
+	AZURE_WEBHOOK_HEADER: "blank",
+	// The CLI keys, by each tool's source (above).
+	DOCKER_HOST: "empty",
+	DOCKER_CONTEXT: "empty",
+	DOCKER_CONFIG: "empty",
+	GH_TOKEN: "empty",
+	GITHUB_TOKEN: "empty",
+	GH_HOST: "empty",
+	GH_CONFIG_DIR: "empty",
+	CONTAINERS_CONF: "empty",
+	CONTAINERS_CONF_OVERRIDE: "empty",
+});
+
+/** Issue #481: whether a value the `.env` supplied configures anything (`EMPTY_READ_AS_UNSET`): unproven keys always do. */
+export function fileConfigures(key, value) {
+	const rule = Object.hasOwn(EMPTY_READ_AS_UNSET, key) ? EMPTY_READ_AS_UNSET[key] : null;
+	if (rule === null || typeof value !== "string") return true;
+	return rule === "blank" ? value.trim() !== "" : value !== "";
+}
+
+/** Issue #481: the keys of `fromFile` a "settings read from" line may name (`fileConfigures`). */
+function settingsRead(fromFile) {
+	return Object.keys(fromFile).filter((k) => fileConfigures(k, fromFile[k]));
+}
+
+/**
  * Issue #471: what the service-key resolution has to say, as check lines: where the file supplied keys (one ✓, names
  * only), where this shell and the file disagree (one ✗: doctor judged this shell's values, which a worker started by
  * hand from this shell runs, while the service runs the file's), and a line doctor could not read (one ✗, the line
@@ -693,7 +797,7 @@ function disagreementShown({ key, shell, file }, path) {
  */
 function serviceEnvLines(service, path, { said = [] } = {}) {
 	const lines = [];
-	const read = Object.keys(service.fromFile).filter((k) => !said.includes(k));
+	const read = settingsRead(service.fromFile).filter((k) => !said.includes(k));
 	if (read.length > 0) lines.push({ ok: true, label: `service settings read from ${path}, as the service reads them (this shell does not set them): ${read.join(", ")}` });
 	if (service.disagreements.length > 0) {
 		lines.push({
@@ -1021,7 +1125,64 @@ export async function collectChecks(shellVars, seams) {
 
 	// Right after `.env present`, because it answers the same question that check raises: where DOES this
 	// deployment's environment come from. [] unless a seam is configured (issue #216).
-	checks.push(...(await envSetupChecks(env, seams)));
+	const services = await installedServices(seams);
+	checks.push(...(await envSetupChecks(env, seams, envSetupSources(env, services))));
+	// Issue #481 (PR #485's final review): WHICH script may supply a value, by one strict rule. A value missing from this
+	// shell and the `.env` is one an --env-setup script may export, invisible to doctor by design (docs/secrets.md), so
+	// its refusal is softened to a ⚠ naming the script, but ONLY where every installed service of this folder that READS
+	// the value names a USABLE script, and the worker's service is installed wherever the worker reads it (every such
+	// value here does). Usable is a regular file, after symlinks, that this account can read: a script the service
+	// manager cannot source supplies nothing, and its own ⚠ above says so. This shell's PI_ENV_SETUP never softens
+	// anything: the service does not run what this shell names, so the round-2 rule, which fell back to it, turned a boot
+	// refusal into a ⚠ and exit 0 on a deployment whose unit names no script. A receiver's script is not the worker's.
+	const usableScript = (path) => {
+		try {
+			if (!statSync(path).isFile()) return false;
+			accessSync(path, fsConstants.R_OK);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	/** `readers` (the services that read the value) -> `[{ script, source }]` supplying it, or null where none may. */
+	const setupSupplies = (readers) => {
+		if (readers.includes("worker") && !services.some((s) => s.which === "worker")) return null;
+		const reading = services.filter((s) => readers.includes(s.which));
+		if (reading.length === 0 || !reading.every((s) => s.setup && usableScript(s.setup))) return null;
+		return [...new Map(reading.map((s) => [s.setup, { script: s.setup, source: s.source }])).values()];
+	};
+	// What doctor ACCEPTED only because a worker service's script may supply it, for the closing ready line (review
+	// round 3): a worker started by hand runs no env-setup script. Reset per collection (`--fix` re-collects).
+	seams.expectedFromSetup = [];
+	const workerScript = setupSupplies(["worker"])?.find((s) => services.some((u) => u.which === "worker" && u.setup === s.script)) ?? null;
+	seams.envSetupSeen = workerScript;
+	// Where no downgrade applies, what the fix line owes the operator: that this shell's PI_ENV_SETUP is not what the
+	// service runs, or, where doctor found no service of this folder at all, that it cannot tell.
+	const shellSetup = typeof env.PI_ENV_SETUP === "string" && env.PI_ENV_SETUP !== "" ? env.PI_ENV_SETUP : null;
+	const notSupplied = (names, readers) => {
+		const reading = services.filter((s) => readers.includes(s.which));
+		if (shellSetup !== null && !reading.some((s) => s.setup)) return `. PI_ENV_SETUP in this shell is not what the service runs: install with \`pi-dispatch service install --env-setup ${shellSetup}\``;
+		if (!services.some((s) => s.which === "worker")) return `. A deployment whose service gets ${names} from an --env-setup script (docs/secrets.md) can ignore this line; doctor found no service installed for this folder to read`;
+		return "";
+	};
+	/**
+	 * A credential presence refusal, by whether an env-setup script can supply it: `subject` is what is missing
+	 * ("GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset"), `names` the variables the script would export, `readers` the
+	 * services that read them, `refusal` what happens without them, `sep` how the refusal's label joins the two (each
+	 * check keeps its own), `fix` the usual fix.
+	 */
+	const credentialAbsent = ({ subject, names, readers = ["worker", "receiver"], refusal, sep = " -- ", fix }) => {
+		const supply = setupSupplies(readers);
+		if (supply === null) return { ok: false, label: `${subject}${sep}${refusal}`, fix: `${fix}${notSupplied(names, readers)}` };
+		seams.expectedFromSetup.push(names);
+		const from = supply.map((s) => `${envValueShown(s.script)} (named by ${s.source})`).join(" and ");
+		return {
+			ok: false,
+			warn: true,
+			label: `${subject}: not visible to doctor in this shell or .env, and expected from the env-setup script ${from}, which the service runs after .env`,
+			fix: `if that script does not export ${names}, ${refusal}: ${fix}`,
+		};
+	};
 	// Where the venue keys came from (issue #453), beside the other answers to "where does this deployment's environment
 	// come from". Empty unless the file supplied a key, or the two disagree.
 	checks.push(...(seams.venueChecks ?? []));
@@ -1091,6 +1252,22 @@ export async function collectChecks(shellVars, seams) {
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
 	// file unconditionally and refuses to start without it, which is the consequence worth naming.
+	// Issue #481 (PR #485 review round 1): a PI_TRIGGERS_FILE that is SET and names no file, the empty value included.
+	// Both processes refuse to start on it (exit 2): the worker's `loadSchedules` takes any set value as the file to load
+	// (only an unset one turns cron off), and the receiver's `loadTriggers` as the file it serves from. Doctor's own read
+	// takes a missing file as "no triggers", which is right only for the UNSET default, whose missing ./triggers.json the
+	// worker never reads; so a set one is judged here, before that read's silence can pass it.
+	const triggersSet = env.PI_TRIGGERS_FILE;
+	if (triggersSet !== undefined && !fileExists(triggersPath(env, cwd))) {
+		const note = fromFileNote(fileSays("PI_TRIGGERS_FILE"));
+		checks.push({
+			ok: false,
+			label: triggersSet === ""
+				? `PI_TRIGGERS_FILE is set to an empty value, which neither process reads as unset: the worker and the receiver refuse to start on it (exit 2)${note}`
+				: `PI_TRIGGERS_FILE names ${quotedShown(triggersPath(env, cwd))}, which does not exist: the worker and the receiver refuse to start on it (exit 2)${note}`,
+			fix: "run `pi-dispatch init` in this folder to scaffold triggers.json, point PI_TRIGGERS_FILE at yours, or delete the line (the worker then schedules no cron, and the receiver reads ./triggers.json)",
+		});
+	}
 	if (parseError) {
 		checks.push({
 			ok: false,
@@ -1611,8 +1788,37 @@ export async function collectChecks(shellVars, seams) {
 	// Each key read as `env.NAME` first, so the environment scan (env-docs.test.mjs) still sees every read.
 	const ghSource = env.GITHUB_AUTH_SOURCE ?? "gh"; // config.mjs's own default, read directly, no loadConfig
 	// Only the keys that decide a line: the App keys matter only while app is the source.
-	const ghRead = fileSays(...GITHUB_SERVICE_KEYS).filter((k) => k === "GITHUB_AUTH_SOURCE" || ghSource === "app");
+	const ghRead = GITHUB_SERVICE_KEYS.filter((k) => settingsRead(service.fromFile).includes(k) && (k === "GITHUB_AUTH_SOURCE" || ghSource === "app"));
 	if (ghRead.length > 0) checks.push({ ok: true, label: `GitHub auth settings read from ${serviceEnvFile.path}, as the service reads them (this shell does not set them): ${ghRead.join(", ")}` });
+	// Issue #481: a source `loadGitHubAuth` refuses, the EMPTY one included, and both the worker and the receiver load it
+	// at start. It was said nowhere: every branch below asks for gh, pat or app, so `GITHUB_AUTH_SOURCE=` passed doctor on
+	// a deployment that exits 2 at boot. The value is shown only where it is short and plain (PR #485 review round 1): a
+	// token pasted into the wrong line is a token, and this line would have printed it in full.
+	if (ghSource !== "gh" && ghSource !== "pat" && ghSource !== "app") {
+		const sourceShown = /^[A-Za-z0-9_-]{0,12}$/.test(ghSource) ? quotedShown(ghSource) : `an unrecognised value (${ghSource.length} characters, not shown)`;
+		checks.push({ ok: false, label: `GITHUB_AUTH_SOURCE is ${sourceShown}, which is none of pat, gh or app: the worker and the receiver refuse to start on it (exit 2)${fromFileNote(fileSays("GITHUB_AUTH_SOURCE"))}`, fix: "set GITHUB_AUTH_SOURCE to pat, gh or app, or delete the line for the default (gh)" });
+	}
+	// Issue #481 (PR #485 review round 1): the PAT source's own refusal, `GITHUB_AUTH_SOURCE=pat requires a non-empty
+	// <var>`, which both processes make at start (the PAT is trimmed there, so blank is missing too). GITHUB_PAT_VAR set
+	// to "" names no variable at all. Before this doctor said only that the in-image probe was not run. The PAT is
+	// resolved by the service's rule like every other key, by name, and never shown.
+	if (ghSource === "pat") {
+		const patVar = env.GITHUB_PAT_VAR ?? "GITHUB_PAT"; // config.mjs's patVar default, read directly
+		const patValue = patVar === "" ? undefined : service.extra([patVar]).env[patVar];
+		if ((patValue ?? "").trim() === "") {
+			const what = patVar === "" ? "GITHUB_PAT_VAR is set to an empty value, so it names no variable to take the PAT from" : `${patVar} is ${patValue === undefined ? "unset" : patValue === "" ? "empty" : "whitespace only"}`;
+			const note = patVar === "" ? fromFileNote(fileSays("GITHUB_PAT_VAR")) : patValue !== undefined && Object.hasOwn(service.extraFromFile, patVar) ? fromFileNote([patVar]) : "";
+			const patCheck = credentialAbsent({
+				subject: `GITHUB_AUTH_SOURCE=pat but ${what}`,
+				names: patVar === "" ? "GITHUB_PAT_VAR and the PAT it names" : patVar,
+				refusal: "the worker and the receiver refuse to start (exit 2)",
+				sep: ": ",
+				fix: patVar === "" ? "delete the GITHUB_PAT_VAR line to use GITHUB_PAT, or name the variable that holds the PAT" : `set ${patVar} to a fine-grained PAT in .env, or switch GITHUB_AUTH_SOURCE`,
+			});
+			// Where the file said it, that is part of the subject either way; the seen label already names .env.
+			checks.push(patCheck.warn ? patCheck : { ...patCheck, label: `${patCheck.label}${note}` });
+		}
+	}
 	if (ghSource === "gh") {
 		// gh writes `auth status` to stdout or stderr depending on version — capture both combined.
 		const status = await runCmdCapture(spawn, "gh", ["auth", "status"]);
@@ -1655,13 +1861,15 @@ export async function collectChecks(shellVars, seams) {
 		// reached when app auth is the selected source.
 		const ids = { GITHUB_APP_ID: env.GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID: env.GITHUB_APP_INSTALLATION_ID };
 		for (const name of Object.keys(ids)) {
+			// Unset and empty alike (`loadGitHubAuth`'s `!appId`), so the words say both (PR #485 review round 2); and a
+			// missing id is one an env-setup script may export (`credentialAbsent`).
+			if (!ids[name]) {
+				checks.push(credentialAbsent({ subject: `GITHUB_AUTH_SOURCE=app but ${name} is unset or empty`, names: name, refusal: "the worker will refuse to boot", fix: setupFix }));
+				continue;
+			}
 			checks.push({
 				ok: numeric(ids[name]),
-				label: numeric(ids[name])
-					? `${name} set (${ids[name].trim()})`
-					: ids[name]
-						? `GITHUB_AUTH_SOURCE=app but ${name} is not numeric (${JSON.stringify(ids[name])}) -- github jobs cannot mint tokens`
-						: `GITHUB_AUTH_SOURCE=app but ${name} is unset -- the worker will refuse to boot`,
+				label: numeric(ids[name]) ? `${name} set (${ids[name].trim()})` : `GITHUB_AUTH_SOURCE=app but ${name} is not numeric (${JSON.stringify(ids[name])}) -- github jobs cannot mint tokens`,
 				fix: setupFix,
 			});
 		}
@@ -1698,7 +1906,7 @@ export async function collectChecks(shellVars, seams) {
 				});
 			}
 		} else if (!keyPathSet) {
-			checks.push({ ok: false, label: "GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set -- the worker will refuse to boot", fix: setupFix });
+			checks.push(credentialAbsent({ subject: "GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set", names: "GITHUB_APP_PRIVATE_KEY_PATH or GITHUB_APP_PRIVATE_KEY", refusal: "the worker will refuse to boot", fix: setupFix }));
 		} else if (!fileExists(keyPath)) {
 			checks.push({ ok: false, label: `GITHUB_APP_PRIVATE_KEY_PATH does not exist (${keyPath}) -- the worker will refuse to boot`, fix: setupFix });
 		} else {
@@ -1805,7 +2013,10 @@ export async function collectChecks(shellVars, seams) {
 				// token. Any value doctor would take from the file (the PAT's own key, or anything `env` has that this shell
 				// has not) skips the probe instead.
 				const shellPat = shellValue(patVar);
-				patFromFile = Object.hasOwn(pat.fromFile, patVar) || (env[patVar] !== undefined && shellPat === undefined) ? patVar : fileSays("GITHUB_PAT_VAR").length > 0 ? "GITHUB_PAT_VAR" : null;
+				// Issue #481 (PR #485 review round 1): a PAT line the file leaves blank supplies no PAT (`loadGitHubAuth` trims it,
+				// and the ✗ above names it), and an empty GITHUB_PAT_VAR names none; neither is "the PAT comes from the file".
+				const filePat = Object.hasOwn(pat.fromFile, patVar) && pat.fromFile[patVar].trim() !== "";
+				patFromFile = filePat || (env[patVar] !== undefined && shellPat === undefined && env[patVar].trim() !== "") ? patVar : settingsRead(service.fromFile).includes("GITHUB_PAT_VAR") && env.GITHUB_PAT_VAR !== "" ? "GITHUB_PAT_VAR" : null;
 				token = patFromFile ? "" : (shellPat ?? "").trim(); // absent → skip; loadConfig fails loud at worker boot anyway
 			}
 			if (token && ghProbeBin === "docker" && endpoint.local !== true) {
@@ -2053,7 +2264,16 @@ export async function collectChecks(shellVars, seams) {
 	const keyAgentDir = fileSays("PI_CODING_AGENT_DIR").length > 0 ? agentDirFrom(env) : agentDir;
 	const keyCheck = providerKeyCheck({ provider, env: { ...env, ...keyFromFile }, agentDir: keyAgentDir, oracle, nodeOk: checks[0]?.ok });
 	const keyNamed = Object.keys(keyFromFile).filter((name) => keyCheck.label?.includes(`: ${name})`));
-	checks.push({ ...keyCheck, label: `${keyCheck.label}${fromFileNote([...fileSays("PI_PROVIDER"), ...keyNamed, ...(keyAgentDir !== agentDir ? ["PI_CODING_AGENT_DIR"] : [])])}` });
+	// Issue #481 (PR #485 review round 2): a key found nowhere doctor can look is one an env-setup script may export, which
+	// is the documented home for a provider key fetched from a secrets manager (docs/secrets.md).
+	const { absent: keyAbsent, ...keyShown } = keyCheck;
+	const keyNames = keyAbsent ? `one of ${keyAbsent.join(" or ")}` : null;
+	const keyLine = !keyAbsent
+		? keyShown
+		: setupSupplies(["worker"])
+			? credentialAbsent({ subject: `Provider key (${provider}: ${keyAbsent.join(" or ")}) not set`, names: keyNames, readers: ["worker"], refusal: "jobs cannot authenticate to the provider", fix: keyShown.fix })
+			: { ...keyShown, fix: `${keyShown.fix}${notSupplied(keyNames, ["worker"])}` };
+	checks.push({ ...keyLine, label: `${keyLine.label}${fromFileNote([...fileSays("PI_PROVIDER"), ...keyNamed, ...(keyAgentDir !== agentDir ? ["PI_CODING_AGENT_DIR"] : [])])}` });
 
 
 	// REQ-GLOBAL-PI-OVERLAY: read the extensions opt-out through the WORKER's own parser, so doctor reports
@@ -2699,15 +2919,14 @@ export async function collectChecks(shellVars, seams) {
 		// check would otherwise report is a WARNING naming the script: doctor cannot run it, and failing a
 		// working `--env-setup` deployment is the crying wolf this file refuses elsewhere.
 		//
-		// `!== ""`, not `.trim() !== ""`, because `worker-env-wrapper.sh` tests `[ -n "$env_setup" ]` and then
-		// `[ ! -f "$env_setup" ]`: a value of three spaces is CONFIGURED to the wrapper, which then refuses to
-		// start on the missing file. Reading it as unset here left that deployment with no line anywhere.
-		const envSetupRaw = typeof env.PI_ENV_SETUP === "string" && env.PI_ENV_SETUP !== "" ? env.PI_ENV_SETUP : null;
-		// AND ONLY WHEN IT COULD RUN. A script doctor has already reported as missing cannot replace anything,
-		// so downgrading on it produced two contradicting lines in one run: one saying the unit restart-loops
-		// until the script is back, the next saying a blank key is only a warning because that same script may
-		// replace it.
-		const envSetup = envSetupRaw !== null && fileExists(envSetupRaw) ? envSetupRaw : null;
+		// WHICH script, by the one strict rule the credential checks use (issue #481, PR #485's final review;
+		// `setupSupplies`): the script the worker's installed service for this folder names, when every such unit names
+		// one this account can read as a regular file. This used to read PI_ENV_SETUP from this shell alone, so a unit's
+		// script went unseen and a script the service never runs softened a boot refusal; the shell's PI_ENV_SETUP now
+		// softens nothing. A script that is missing or unreadable cannot replace anything, so downgrading on it would print
+		// two contradicting lines in one run: one saying the unit restart-loops until the script is back, the next saying
+		// a blank key is only a warning because that same script may replace it.
+		const envSetup = setupSupplies(["worker"])?.[0]?.script ?? null;
 
 		// A FILE THIS COMMAND CANNOT READ IS ANSWERED ONCE, and then nothing else is said about the key.
 		// Three adversarial passes found what the alternative costs: with a verdict computed beside the
@@ -3312,6 +3531,8 @@ function providerKeyCheck({ provider, env, agentDir, oracle, nodeOk }) {
 		ok: false,
 		label: `Provider key set (${provider}: ${candidates.join(" or ")})${note}`,
 		fix: authFromPi ? `run \`pi login\` with an API key for ${provider}, or set ${apiKeyVar} in .env` : `set ${apiKeyVar} in .env`,
+		// Issue #481: the names no environment doctor can see supplies, for the caller's env-setup rule; never printed.
+		absent: candidates,
 	};
 }
 
@@ -4490,6 +4711,62 @@ function readingsOf(checks) {
 }
 
 /**
+ * The worker and receiver services installed for THIS folder, as `[{ which, source, setup }]` (`setup` null for a unit
+ * rendered without `--env-setup`): an installed unit whose WorkingDirectory is this folder (systemd, launchd), or the
+ * nssm service by name on win32, where nssm keeps the folder in a separate AppDirectory property and there is exactly
+ * one machine-scoped service per name. Read ONCE (issue #481, PR #485's final review) and shared by the env-setup lines
+ * and every check that asks whether a service's script may supply a value, so no second `nssm get` is spent.
+ */
+async function installedServices(seams) {
+	const { cwd, spawn, fileExists, platform, home } = seams;
+	const found = [];
+	if (platform === "win32") {
+		for (const which of ["worker", "receiver"]) {
+			const service = `pi-dispatch-${which}`;
+			const got = await runCmdCapture(spawn, "nssm", ["get", service, "AppEnvironmentExtra"]);
+			// Not installed, or nssm not on PATH: silence. Same doctrine as check-ignore below -- a check
+			// nobody can silence must never cry wolf, and "could not ask" is not "misconfigured".
+			if (got.code !== 0) continue;
+			found.push({ which, source: `${service}'s AppEnvironmentExtra`, setup: readUnitSeam(got.output, "win32").setup });
+		}
+	} else {
+		for (const { path, which } of installedUnitPaths(platform, home)) {
+			if (!fileExists(path)) continue;
+			let seam;
+			try {
+				seam = readUnitSeam(readFileSync(path, "utf8"), platform);
+			} catch {
+				continue; // a system-scope unit this user may not read: which deployment it serves is unknowable
+			}
+			if (seam.deployDir !== cwd) continue;
+			found.push({ which, source: path, setup: seam.setup });
+		}
+	}
+	return found;
+}
+
+/**
+ * Where this deployment's service sources an `--env-setup` script from, as `Map<path, how doctor learned it>`, for the
+ * env-setup lines: the installed services for this folder, else PI_ENV_SETUP in doctor's own environment. The
+ * fallback is for REPORTING only (it answers for a doctor run through the environment launchd or nssm give the service);
+ * nothing a service may or may not be given is judged from it (`setupSupplies`).
+ */
+function envSetupSources(env, services) {
+	const sources = new Map(); // setup path -> how doctor learned it; the first source to name it wins
+	for (const { setup, source } of services) if (setup && !sources.has(setup)) sources.set(setup, source);
+	// env-internal PI_ENV_SETUP: unit configuration, deliberately never an .env key. The wrappers capture
+	// it BEFORE they source ./.env so that nothing able to write that file can name a script they run
+	// (REQ-DEPLOYMENT-BOOTSTRAP). doctor reads it here only to answer for a host whose unit names none.
+	// NOT trimmed, because `worker-env-wrapper.sh` does not trim: it tests `[ -n "$env_setup" ]` and then
+	// `[ ! -f "$env_setup" ]`, so `PI_ENV_SETUP="   "` is a CONFIGURED script that does not exist and the
+	// wrapper refuses to start on it. Trimming here read that as unset, so the one deployment shape where
+	// the worker cannot boot got no line anywhere in the report (issue #384).
+	const fromEnv = env.PI_ENV_SETUP ?? "";
+	if (sources.size === 0 && fromEnv !== "") sources.set(fromEnv, "PI_ENV_SETUP in this environment");
+	return sources;
+}
+
+/**
  * The `--env-setup` script (issue #216). `pi-dispatch service render|install --env-setup <path>` names a
  * script the service manager SOURCES at every boot, as the service user, with the deployment's
  * environment -- and after that nothing ever looks at it again. resolveEnvSetup checked it existed once,
@@ -4515,45 +4792,8 @@ function readingsOf(checks) {
  * Returns [] when no seam is configured, so a deployment that does not use one gets byte-identical
  * output.
  */
-async function envSetupChecks(env, seams) {
-	const { cwd, spawn, fileExists, platform, home, runTimeouts = RUN_TIMEOUTS } = seams;
-	const sources = new Map(); // setup path -> how doctor learned it; the first source to name it wins
-
-	if (platform === "win32") {
-		for (const which of ["worker", "receiver"]) {
-			const service = `pi-dispatch-${which}`;
-			const got = await runCmdCapture(spawn, "nssm", ["get", service, "AppEnvironmentExtra"]);
-			// Not installed, or nssm not on PATH: silence. Same doctrine as check-ignore below -- a check
-			// nobody can silence must never cry wolf, and "could not ask" is not "misconfigured".
-			if (got.code !== 0) continue;
-			// No deployment match here: nssm keeps the folder in a SEPARATE AppDirectory property, and there
-			// is exactly one machine-scoped service per name for it to be confused with.
-			const { setup } = readUnitSeam(got.output, "win32");
-			if (setup && !sources.has(setup)) sources.set(setup, `${service}'s AppEnvironmentExtra`);
-		}
-	} else {
-		for (const { path } of installedUnitPaths(platform, home)) {
-			if (!fileExists(path)) continue;
-			let seam;
-			try {
-				seam = readUnitSeam(readFileSync(path, "utf8"), platform);
-			} catch {
-				continue; // a system-scope unit this user may not read: which deployment it serves is unknowable
-			}
-			if (!seam.setup || seam.deployDir !== cwd) continue;
-			if (!sources.has(seam.setup)) sources.set(seam.setup, path);
-		}
-	}
-
-	// env-internal PI_ENV_SETUP: unit configuration, deliberately never an .env key. The wrappers capture
-	// it BEFORE they source ./.env so that nothing able to write that file can name a script they run
-	// (REQ-DEPLOYMENT-BOOTSTRAP). doctor reads it here only to answer for a host whose unit names none.
-	// NOT trimmed, because `worker-env-wrapper.sh` does not trim: it tests `[ -n "$env_setup" ]` and then
-	// `[ ! -f "$env_setup" ]`, so `PI_ENV_SETUP="   "` is a CONFIGURED script that does not exist and the
-	// wrapper refuses to start on it. Trimming here read that as unset, so the one deployment shape where
-	// the worker cannot boot got no line anywhere in the report (issue #384).
-	const fromEnv = env.PI_ENV_SETUP ?? "";
-	if (sources.size === 0 && fromEnv !== "") sources.set(fromEnv, "PI_ENV_SETUP in this environment");
+async function envSetupChecks(env, seams, sources) {
+	const { spawn, fileExists, platform, runTimeouts = RUN_TIMEOUTS } = seams;
 
 	const checks = [];
 	for (const [setup, source] of sources) {

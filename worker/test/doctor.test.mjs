@@ -6,11 +6,11 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryProbeArgs, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, triggersPath, valkeyPasswordUpgradeStep } from "../src/doctor.mjs";
+import { startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryProbeArgs, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep } from "../src/doctor.mjs";
 import { valkeyPasswordFor } from "../src/valkey-endpoint.mjs";
 import { serviceEnvFileOf } from "../src/service-env.mjs";
 import { VALKEY_SHARED_KEY as VALKEY_SHARED_NAME } from "../src/podman-stack.mjs";
-import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS } from "../src/init.mjs";
+import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS, runInit } from "../src/init.mjs";
 import { EGRESS_CANARY_NET_PREFIX, egressCanaryProbe } from "../src/egress.mjs";
 import { LIVE_PREFIX } from "../src/live-probes.mjs";
 import { JOB_USER_FIX, parseDaemonFacts } from "../src/job-user.mjs";
@@ -769,7 +769,7 @@ test("doctor: a fine-grained token (no scopes line) is reported as such", async 
 
 test("doctor: GITHUB_AUTH_SOURCE=pat emits no scope warning", async () => {
 	const { out, text } = capture();
-	await runDoctor(ghEnv({ GITHUB_AUTH_SOURCE: "pat" }), ghDeps(out, green));
+	await runDoctor(ghEnv({ GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" }), ghDeps(out, green));
 	assert.doesNotMatch(text(), /forwards your full gh login/);
 });
 
@@ -875,8 +875,8 @@ test("doctor: app source with the whole triple unset FAILS on the two ids, point
 	const code = await runDoctor(appEnv(), appDeps(out));
 	// PR #466 gate round 1: unset ids refuse the worker's boot (`loadGitHubAuth`), so they are ✗, not the ⚠ they were.
 	assert.equal(code, 1, "a chosen app source without its ids is a deployment that cannot start");
-	assert.match(text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_ID is unset -- the worker will refuse to boot\n {4}→ run `pi-dispatch setup github`/);
-	assert.match(text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_INSTALLATION_ID is unset -- the worker will refuse to boot\n {4}→ run `pi-dispatch setup github`/);
+	assert.match(text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_ID is unset or empty -- the worker will refuse to boot\n {4}→ run `pi-dispatch setup github`/);
+	assert.match(text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_INSTALLATION_ID is unset or empty -- the worker will refuse to boot\n {4}→ run `pi-dispatch setup github`/);
 	assert.match(text(), /✗ GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set -- the worker will refuse to boot\n {4}→ run `pi-dispatch setup github`/);
 	assert.match(text(), /run `pi-dispatch setup github`/, "the fix is the wizard that mints all three");
 });
@@ -1010,12 +1010,117 @@ test("doctor judges app auth on the service's .env where this shell sets none, n
 	writeFileSync(join(cwd, ".env"), "GITHUB_AUTH_SOURCE=app\nGITHUB_APP_ID=4242\n");
 	const bad = capture();
 	assert.equal(await runDoctor(imgEnv(), { ...scaffoldDeps(bad.out, cwd), readEnvFile }), 1);
-	assert.match(bad.text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_INSTALLATION_ID is unset -- the worker will refuse to boot\n/);
+	assert.match(bad.text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_INSTALLATION_ID is unset or empty -- the worker will refuse to boot\n/);
 	// This shell wins where it sets a key, and then the file's value is not read for it.
 	const own = capture();
-	await runDoctor(imgEnv({ GITHUB_AUTH_SOURCE: "pat" }), { ...scaffoldDeps(own.out, cwd), readEnvFile });
+	await runDoctor(imgEnv({ GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" }), { ...scaffoldDeps(own.out, cwd), readEnvFile });
 	assert.doesNotMatch(own.text(), /GITHUB_APP_INSTALLATION_ID/, "the shell's pat wins over the file's app");
 	assert.doesNotMatch(own.text(), /GitHub auth settings read from/, "an App key read under another source decides nothing, so nothing is said");
+});
+
+// Issue #481: the GitHub twin of the settings line, and the two GitHub auth refusals doctor had passed in silence. The
+// line hides an empty value only where the loaders read it as unset (`EMPTY_READ_AS_UNSET`): a blank inline App key is
+// hidden, an empty App id is not (the loader keeps it), and its own ✗ names it besides.
+test("the GitHub auth settings line hides only a proven-unset empty key, and an empty or unknown GITHUB_AUTH_SOURCE is a ✗ in that block (#481)", async () => {
+	const cwd = scaffoldedCwd();
+	const readEnvFile = (path) => readFileSync(path, "utf8");
+	const envPath = join(cwd, ".env");
+	const keyPath = join(cwd, "app.pem");
+	writeFileSync(keyPath, `-----BEGIN PRIVATE KEY-----${KEY_BODY}\n`, { mode: 0o600 });
+	writeFileSync(envPath, `GITHUB_AUTH_SOURCE=app\nGITHUB_APP_ID=4242\nGITHUB_APP_INSTALLATION_ID=987654\nGITHUB_APP_PRIVATE_KEY_PATH=${keyPath}\nGITHUB_APP_PRIVATE_KEY=\n`);
+	const good = capture();
+	await runDoctor(imgEnv(), { ...scaffoldDeps(good.out, cwd), readEnvFile });
+	assert.ok(good.text().includes(`✓ GitHub auth settings read from ${envPath}, as the service reads them (this shell does not set them): GITHUB_AUTH_SOURCE, GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, GITHUB_APP_PRIVATE_KEY_PATH\n`), good.text());
+	// An empty App id is not proven unset (the loader returns it as ""), so it is still named, beside the ✗ that decides.
+	writeFileSync(envPath, "GITHUB_AUTH_SOURCE=app\nGITHUB_APP_ID=\nGITHUB_APP_INSTALLATION_ID=987654\nGITHUB_APP_PRIVATE_KEY_PATH=/nope\n");
+	const idless = capture();
+	assert.equal(await runDoctor(imgEnv(), { ...scaffoldDeps(idless.out, cwd), readEnvFile }), 1);
+	assert.match(idless.text(), /: GITHUB_AUTH_SOURCE, GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, GITHUB_APP_PRIVATE_KEY_PATH\n/);
+	assert.match(idless.text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_ID is unset or empty -- the worker will refuse to boot\n/);
+	const note = `GITHUB_AUTH_SOURCE read from ${envPath}, as the service reads it; this shell does not set it`;
+	for (const [value, shown] of [["", '""'], ["bogus", '"bogus"'], [`ghp_${"x".repeat(36)}`, "an unrecognised value (40 characters, not shown)"]]) {
+		writeFileSync(envPath, `GITHUB_AUTH_SOURCE=${value}\n`);
+		const bad = capture();
+		assert.equal(await runDoctor(imgEnv(), { ...scaffoldDeps(bad.out, cwd), readEnvFile }), 1, `${shown}: both processes exit 2 on it`);
+		const want = `✗ GITHUB_AUTH_SOURCE is ${shown}, which is none of pat, gh or app: the worker and the receiver refuse to start on it (exit 2) -- ${note}`;
+		const lines = bad.text().split("\n");
+		const at = lines.indexOf(want);
+		assert.ok(at > 0, bad.text());
+		// In the GitHub auth block: straight after that block's own read line (an unknown source is not proven unset, so
+		// the line names it), not merely somewhere in the output.
+		assert.ok(lines[at - 1].startsWith(`✓ GitHub auth settings read from ${envPath}`) && lines[at - 1].endsWith(": GITHUB_AUTH_SOURCE"), lines[at - 1]);
+		assert.ok(!bad.text().includes("x".repeat(36)), "a token pasted into the source line is never printed");
+	}
+	// This shell's own bad value is the same ✗, with no file note.
+	writeFileSync(envPath, "");
+	const shell = capture();
+	assert.equal(await runDoctor(imgEnv({ GITHUB_AUTH_SOURCE: "token" }), scaffoldDeps(shell.out, cwd)), 1);
+	assert.match(shell.text(), /✗ GITHUB_AUTH_SOURCE is "token", which is none of pat, gh or app: the worker and the receiver refuse to start on it \(exit 2\)\n/);
+});
+
+// Issue #481 (PR #485 review round 1): the PAT source's refusal, `requires a non-empty <var>`, which both processes make
+// at start and doctor had reported only as a probe it did not run.
+test("GITHUB_AUTH_SOURCE=pat with no PAT, an empty or blank one, or an empty GITHUB_PAT_VAR is a ✗; a PAT in the file is none (#481)", async () => {
+	const cwd = scaffoldedCwd();
+	const readEnvFile = (path) => readFileSync(path, "utf8");
+	const envPath = join(cwd, ".env");
+	const run = async (text) => {
+		writeFileSync(envPath, text);
+		const c = capture();
+		const code = await runDoctor(imgEnv(), { ...scaffoldDeps(c.out, cwd), readEnvFile });
+		return { code, text: c.text() };
+	};
+	const fromFile = (key) => ` -- ${key} read from ${envPath}, as the service reads it; this shell does not set it`;
+	const refusal = "the worker and the receiver refuse to start (exit 2)";
+	const unset = await run("GITHUB_AUTH_SOURCE=pat\n");
+	assert.equal(unset.code, 1);
+	assert.ok(unset.text.includes(`✗ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: ${refusal}\n`), unset.text);
+	const empty = await run("GITHUB_AUTH_SOURCE=pat\nGITHUB_PAT=\n");
+	assert.equal(empty.code, 1);
+	assert.ok(empty.text.includes(`✗ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is empty: ${refusal}${fromFile("GITHUB_PAT")}\n`), empty.text);
+	// The probe does not claim a blank PAT "comes from" the file: the file supplies none.
+	assert.doesNotMatch(empty.text, /because GITHUB_PAT comes from/);
+	const blank = await run("GITHUB_AUTH_SOURCE=pat\nGITHUB_PAT='   '\n");
+	assert.equal(blank.code, 1);
+	assert.ok(blank.text.includes(`✗ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is whitespace only: ${refusal}${fromFile("GITHUB_PAT")}\n`), blank.text);
+	const noVar = await run("GITHUB_AUTH_SOURCE=pat\nGITHUB_PAT_VAR=\nGITHUB_PAT=ghp_real\n");
+	assert.equal(noVar.code, 1);
+	assert.ok(noVar.text.includes(`✗ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT_VAR is set to an empty value, so it names no variable to take the PAT from: ${refusal}${fromFile("GITHUB_PAT_VAR")}\n`), noVar.text);
+	const named = await run("GITHUB_AUTH_SOURCE=pat\nGITHUB_PAT_VAR=MY_PAT\nMY_PAT=\n");
+	assert.ok(named.text.includes(`✗ GITHUB_AUTH_SOURCE=pat but MY_PAT is empty: ${refusal}${fromFile("MY_PAT")}\n`), named.text);
+	const good = await run("GITHUB_AUTH_SOURCE=pat\nGITHUB_PAT=ghp_real\n");
+	assert.doesNotMatch(good.text, /GITHUB_AUTH_SOURCE=pat but/);
+	assert.match(good.text, /in-image gh auth: not checked, because GITHUB_PAT comes from/);
+});
+
+// Issue #481 (PR #485 review round 1): a PI_TRIGGERS_FILE that is set and names no file, empty included. The worker takes
+// any set value as the file to load and the receiver as the file to serve from, and both exit 2 without it.
+test("a set PI_TRIGGERS_FILE that names no file, or is empty, is a ✗; unset keeps each process's own default (#481)", async () => {
+	const cwd = scaffoldedCwd();
+	const readEnvFile = (path) => readFileSync(path, "utf8");
+	const envPath = join(cwd, ".env");
+	const refusal = "the worker and the receiver refuse to start on it (exit 2)";
+	const run = async (text, shell = {}) => {
+		writeFileSync(envPath, text);
+		const c = capture();
+		const code = await runDoctor(imgEnv(shell), { ...scaffoldDeps(c.out, cwd), fileExists: existsSync, readEnvFile });
+		return { code, text: c.text() };
+	};
+	const empty = await run("PI_TRIGGERS_FILE=\n");
+	assert.equal(empty.code, 1);
+	const note = ` -- PI_TRIGGERS_FILE read from ${envPath}, as the service reads it; this shell does not set it`;
+	assert.ok(empty.text.includes(`✗ PI_TRIGGERS_FILE is set to an empty value, which neither process reads as unset: ${refusal}${note}\n`), empty.text);
+	const missing = await run("", { PI_TRIGGERS_FILE: "/nonexistent/t.json" });
+	assert.equal(missing.code, 1);
+	assert.ok(missing.text.includes(`✗ PI_TRIGGERS_FILE names "/nonexistent/t.json", which does not exist: ${refusal}\n`), missing.text);
+	const relative = await run("PI_TRIGGERS_FILE=gone.json\n");
+	assert.ok(relative.text.includes(`✗ PI_TRIGGERS_FILE names "${join(cwd, "gone.json")}", which does not exist: ${refusal}${note}\n`), relative.text);
+	// Unset with no ./triggers.json: the worker schedules no cron, so there is nothing of this to say.
+	const unset = await run("");
+	assert.doesNotMatch(unset.text, /PI_TRIGGERS_FILE (is set|names)/);
+	writeFileSync(join(cwd, "t.json"), JSON.stringify({ triggers: [] }));
+	const present = await run(`PI_TRIGGERS_FILE=${join(cwd, "t.json")}\n`);
+	assert.doesNotMatch(present.text, /PI_TRIGGERS_FILE (is set|names)/);
 });
 
 test("doctor trims GITHUB_APP_PRIVATE_KEY_PATH as loadGitHubAuth does: blank beside an inline key is not 'both set' (PR #466 gate round 2)", async () => {
@@ -1031,7 +1136,7 @@ test("doctor trims GITHUB_APP_PRIVATE_KEY_PATH as loadGitHubAuth does: blank bes
 
 test("doctor: the app-auth block only fires for source app", async () => {
 	const { out, text } = capture();
-	await runDoctor(ghEnv({ GITHUB_AUTH_SOURCE: "pat" }), ghDeps(out, green));
+	await runDoctor(ghEnv({ GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" }), ghDeps(out, green));
 	assert.doesNotMatch(text(), /GITHUB_APP_ID/, "pat deployments hear nothing about App credentials");
 });
 
@@ -1079,7 +1184,7 @@ function installUnit({ platform, home = tempDir("pi-unit-home-"), deployDir, set
 	return { home, path };
 }
 
-const seamEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", ...extra });
+const seamEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture", ...extra });
 const seamDeps = (out, extra = {}) => ({
 	out,
 	cwd: tmpdir(),
@@ -1165,6 +1270,131 @@ test("doctor: with no unit, PI_ENV_SETUP in doctor's own environment answers -- 
 	const code = await runDoctor(seamEnv({ PI_ENV_SETUP: setup }), seamDeps(out));
 	assert.equal(code, 0);
 	assert.match(text(), new RegExp(`✓ env-setup script present \\(${rx(setup)}, named by PI_ENV_SETUP in this environment\\)`));
+});
+
+// Issue #481 (PR #485 review round 2): a credential an --env-setup script exports is invisible to doctor by design
+// (docs/secrets.md), so where doctor sees such a script that can run, a credential missing from this shell and the .env
+// is a ⚠ naming the script, never a ✗ on a working deployment. Where it sees none it cannot tell: the ✗ stands and its
+// fix line says who may ignore it. The PAT, the App keys and the provider key alike.
+test("a credential missing from shell and .env is a ⚠ naming the env-setup script doctor sees, and a ✗ where it sees none (#481)", async () => {
+	const setup = setupScript();
+	const deployDir = tempDir("pi-deploy-");
+	const { home, path: unit } = installUnit({ platform: "linux", deployDir, setup });
+	const seen = `not visible to doctor in this shell or .env, and expected from the env-setup script ${setup} (named by ${unit}), which the service runs after .env`;
+	const run = async (env, extra = {}) => {
+		const c = capture();
+		const code = await runDoctor(env, seamDeps(c.out, { cwd: deployDir, home, ...extra }));
+		return { code, text: c.text() };
+	};
+	const { GITHUB_PAT: _p, ...noPat } = seamEnv();
+	const pat = await run(noPat);
+	assert.equal(pat.code, 0, pat.text);
+	assert.ok(pat.text.includes(`⚠ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: ${seen}\n    → if that script does not export GITHUB_PAT, the worker and the receiver refuse to start (exit 2): set GITHUB_PAT`), pat.text);
+	const app = await run(seamEnv({ GITHUB_AUTH_SOURCE: "app" }));
+	assert.equal(app.code, 0, app.text);
+	for (const subject of ["GITHUB_APP_ID is unset or empty", "GITHUB_APP_INSTALLATION_ID is unset or empty", "neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set"]) {
+		assert.ok(app.text.includes(`⚠ GITHUB_AUTH_SOURCE=app but ${subject}: ${seen}\n`), `${subject}\n${app.text}`);
+	}
+	const { ANTHROPIC_API_KEY: _k, ...noKey } = seamEnv({ PI_AUTH_FROM_PI: "0" });
+	const key = await run(noKey);
+	assert.equal(key.code, 0, key.text);
+	assert.match(key.text, new RegExp(`⚠ Provider key \\(anthropic: [A-Z_]+( or [A-Z_]+)*\\) not set: ${seen.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}\\n`));
+	// A script that is not there supplies nothing (its own ⚠ says the unit restart-loops): the ✗ stands.
+	const gone = tempDir("pi-deploy-gone-");
+	const lost = installUnit({ platform: "linux", deployDir: gone, setup: join(gone, "nope.sh") });
+	const c = capture();
+	assert.equal(await runDoctor(noPat, seamDeps(c.out, { cwd: gone, home: lost.home })), 1);
+	assert.match(c.text(), /✗ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: the worker and the receiver refuse to start \(exit 2\)\n/);
+	// No script at all: the ✗ stands, and its fix line says an env-setup deployment may ignore it.
+	const none = capture();
+	assert.equal(await runDoctor(noPat, seamDeps(none.out)), 1);
+	assert.ok(none.text().includes("✗ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: the worker and the receiver refuse to start (exit 2)\n    → set GITHUB_PAT to a fine-grained PAT in .env, or switch GITHUB_AUTH_SOURCE. A deployment whose service gets GITHUB_PAT from an --env-setup script (docs/secrets.md) can ignore this line; doctor found no service installed for this folder to read\n"), none.text());
+	const noKeyNone = capture();
+	assert.equal(await runDoctor(noKey, seamDeps(noKeyNone.out)), 1);
+	assert.match(noKeyNone.text(), /✗ Provider key set \(anthropic: [^\n]*\n {4}→ [^\n]*\. A deployment whose service gets one of [A-Za-z_ ]+ from an --env-setup script \(docs\/secrets\.md\) can ignore this line; doctor found no service installed for this folder to read\n/);
+	assert.ok(!pat.text.includes(SETUP_BODY.trim()) && !app.text.includes(SETUP_BODY.trim()), "the script is named, never read out");
+});
+
+// Issue #481 (PR #485's final review): the strict rule, case by case. A missing credential is softened only where EVERY
+// installed service of this folder that reads it names a USABLE script (a regular file after symlinks, readable here),
+// with the worker's service installed. This shell's PI_ENV_SETUP softens nothing, and a receiver's script is not the
+// worker's. The reviewer's L, P, D and W cases, by shape.
+test("a credential ✗ is softened only by a usable script every installed service reading it names; never by this shell's PI_ENV_SETUP (#481)", async () => {
+	const { GITHUB_PAT: _p, ...noPat } = seamEnv();
+	const { ANTHROPIC_API_KEY: _k, ...noKey } = seamEnv({ PI_AUTH_FROM_PI: "0" });
+	const soft = /⚠ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: not visible to doctor/;
+	const hard = /✗ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: the worker and the receiver refuse to start \(exit 2\)\n/;
+	const run = async (env, { platform = "linux", units = [], spawn } = {}) => {
+		const deployDir = tempDir("pi-deploy-");
+		const home = tempDir("pi-unit-home-");
+		for (const u of units) installUnit({ platform, home, deployDir: u.other ? tempDir("pi-other-") : deployDir, setup: u.setup, which: u.which ?? "worker" });
+		const c = capture();
+		const code = await runDoctor(env, seamDeps(c.out, { cwd: deployDir, home, platform, ...(spawn ? { spawn } : {}) }));
+		return { code, text: c.text() };
+	};
+	const plain = setupScript();
+	const dir = tempDir("pi-setup-kinds-");
+	const link = join(dir, "link.sh");
+	symlinkSync(plain, link);
+	const dangling = join(dir, "dangling.sh");
+	symlinkSync(join(dir, "nope.sh"), dangling);
+	const folder = join(dir, "dir.sh");
+	mkdirSync(folder);
+	const unreadable = join(dir, "unreadable.sh");
+	writeFileSync(unreadable, "#!/bin/sh\n", { mode: 0o000 });
+	// L1, L6: the worker's unit names a regular file (directly or through a symlink): softened, exit 0.
+	for (const setup of [plain, link]) {
+		const r = await run(noPat, { units: [{ setup }] });
+		assert.equal(r.code, 0, r.text);
+		assert.match(r.text, soft);
+	}
+	// L7, L9, L10: a dangling symlink, a file this account cannot read, a directory: nothing the service can source.
+	if (process.getuid?.() !== 0) {
+		for (const setup of [dangling, unreadable, folder]) {
+			const r = await run(noPat, { units: [{ setup }] });
+			assert.equal(r.code, 1, `${setup}\n${r.text}`);
+			assert.match(r.text, hard);
+		}
+	}
+	// L2: a unit for ANOTHER folder names a script: not this deployment's; doctor found no service for this folder.
+	const other = await run(noPat, { units: [{ setup: plain, other: true }] });
+	assert.equal(other.code, 1);
+	assert.match(other.text, /doctor found no service installed for this folder to read\n/);
+	// L4, L5: this shell's PI_ENV_SETUP, with this folder's unit rendered without --env-setup, or with no unit at all.
+	for (const units of [[{ setup: null }], []]) {
+		const r = await run({ ...noPat, PI_ENV_SETUP: plain }, { units });
+		assert.equal(r.code, 1, r.text);
+		assert.match(r.text, hard);
+		assert.ok(r.text.includes(`. PI_ENV_SETUP in this shell is not what the service runs: install with \`pi-dispatch service install --env-setup ${plain}\`\n`), r.text);
+		assert.doesNotMatch(r.text, /doctor: ready/);
+	}
+	// L13: the worker's unit names no script, the receiver's does: the worker reads the PAT and the provider key.
+	const recv = await run(noPat, { units: [{ setup: null }, { setup: plain, which: "receiver" }] });
+	assert.equal(recv.code, 1);
+	assert.match(recv.text, hard);
+	// And a receiver's script with no worker service installed at all: the worker is the reader that must name one.
+	const recvOnly = await run(noPat, { units: [{ setup: plain, which: "receiver" }] });
+	assert.match(recvOnly.text, hard);
+	// A shared credential needs every installed reader's script: the worker's alone does not cover a receiver without one.
+	const half = await run(noPat, { units: [{ setup: plain }, { setup: null, which: "receiver" }] });
+	assert.match(half.text, hard);
+	const whole = await run(noPat, { units: [{ setup: plain }, { setup: plain, which: "receiver" }] });
+	assert.match(whole.text, soft);
+	// ...while a worker-only credential ignores the receiver: the provider key, with the receiver's unit naming none.
+	const workerOnly = await run(noKey, { units: [{ setup: plain }, { setup: null, which: "receiver" }] });
+	assert.match(workerOnly.text, /⚠ Provider key \(anthropic: [^\n]*\) not set: not visible to doctor/);
+	// D1, D2: a launchd plist for this folder names the script; one for another folder does not count.
+	const d1 = await run(noPat, { platform: "darwin", units: [{ setup: plain }] });
+	assert.match(d1.text, soft);
+	const d2 = await run(noPat, { platform: "darwin", units: [{ setup: plain, other: true }] });
+	assert.match(d2.text, hard);
+	// W1, W4: nssm's worker service names the script; nssm's worker names none while this shell's PI_ENV_SETUP does.
+	const nssm = (worker) => fakeSpawn({ ...green, "nssm get pi-dispatch-worker": { code: 0, output: worker }, "nssm get pi-dispatch-receiver": { code: 1, output: "" } });
+	const w1 = await run(noPat, { platform: "win32", spawn: nssm(`PI_ENV_SETUP=${plain}\r\n`) });
+	assert.match(w1.text, soft);
+	const w4 = await run({ ...noPat, PI_ENV_SETUP: plain }, { platform: "win32", spawn: nssm("\r\n") });
+	assert.match(w4.text, hard);
+	assert.match(w4.text, /PI_ENV_SETUP in this shell is not what the service runs/);
 });
 
 test("doctor: the unit outranks PI_ENV_SETUP -- the file that boots is the answer", async () => {
@@ -1565,19 +1795,20 @@ test("doctor: a file the SERVICE names but cannot load is a failure, not a warni
 	assert.equal(code, 1);
 });
 
-test("doctor: a PI_ENV_SETUP deployment gets a warning where another would fail (#384)", async () => {
-	// The setup script runs AFTER the file on every platform, so it can supply or replace what the file
-	// says. Doctor cannot run it, and failing a working `--env-setup` deployment would be the crying wolf
-	// this file refuses elsewhere -- so the same finding is a ⚠ that names the script.
+test("doctor: this shell's PI_ENV_SETUP softens no boot-file refusal; the installed unit's script does (#384, #481)", async () => {
+	// The setup script runs AFTER the file on every platform, so it can supply or replace what the file says, and a ⚠
+	// naming it is right where the SERVICE runs one. Issue #481 (PR #485's final review) CHANGED this: it used to soften
+	// on PI_ENV_SETUP in doctor's own shell, which the service does not run, so a deployment whose unit names no script
+	// passed doctor and then refused to boot. The unit-named case is the round-3 test below.
 	const cwd = scaffoldedCwd();
 	writeFileSync(join(cwd, ".env"), "PI_PAUSE_WINDOWS_FILE=\n");
 	const setup = join(cwd, "env-setup.sh");
 	writeFileSync(setup, "#!/bin/sh\n");
 	const { out, text } = capture();
 	const code = await runDoctor(imgEnv({ PI_ENV_SETUP: setup }), scaffoldDeps(out, cwd));
-	assert.match(text(), /⚠ PI_PAUSE_WINDOWS_FILE is assigned an EMPTY value/, "the finding stands");
-	assert.match(text(), /runs after that file and may replace it/, "and it names what doctor cannot see");
-	assert.notEqual(code, 1, "a deployment doctor cannot judge must not be failed on a guess");
+	assert.match(text(), /✗ PI_PAUSE_WINDOWS_FILE is assigned an EMPTY value/, "the finding stands, as a failure");
+	assert.doesNotMatch(text(), /runs after that file and may replace it/, "no script the service runs was seen");
+	assert.equal(code, 1);
 });
 
 test("doctor: a PI_ENV_SETUP script that is NOT THERE downgrades nothing (#384)", async () => {
@@ -1592,6 +1823,54 @@ test("doctor: a PI_ENV_SETUP script that is NOT THERE downgrades nothing (#384)"
 	assert.match(text(), /✗ PI_PAUSE_WINDOWS_FILE is assigned an EMPTY value/, "the finding is not softened by a script that is not there");
 	assert.doesNotMatch(text(), /gone\.sh runs after that file and may replace it/, "and nothing claims it may be replaced");
 	assert.equal(code, 1);
+});
+
+// Issue #481 (PR #485 review round 3): the boot-file downgrade asks the one discovery the env-setup lines and the
+// credential checks ask (`envSetupSources`): the installed unit's script for this folder, else PI_ENV_SETUP here. It read
+// this shell's PI_ENV_SETUP alone, so a unit-named script went unseen, and a shell's could outrank the unit's.
+test("the boot-file downgrade sees the env-setup script the installed unit names, and the unit's outranks this shell's (#481)", async () => {
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "PI_PAUSE_WINDOWS_FILE=\n");
+	const setup = setupScript({ name: "unit-setup.sh" });
+	const { home } = installUnit({ platform: "linux", deployDir: cwd, setup });
+	const deps = (out) => ({ ...scaffoldDeps(out, cwd), platform: "linux", home });
+	const unitOnly = capture();
+	assert.equal(await runDoctor(imgEnv(), deps(unitOnly.out)), 0, unitOnly.text());
+	assert.match(unitOnly.text(), /⚠ PI_PAUSE_WINDOWS_FILE is assigned an EMPTY value/);
+	assert.ok(unitOnly.text().includes(`${setup} runs after that file and may replace it`), unitOnly.text());
+	const other = join(cwd, "shell-setup.sh");
+	writeFileSync(other, "#!/bin/sh\n");
+	const both = capture();
+	await runDoctor(imgEnv({ PI_ENV_SETUP: other }), deps(both.out));
+	assert.ok(both.text().includes(`${setup} runs after that file and may replace it`), both.text());
+	assert.ok(!both.text().includes(`${other} runs after that file`), "the file that boots is the answer, not this shell");
+});
+
+// Issue #481 (PR #485 review round 3): a credential doctor accepted as expected from an env-setup script reaches only the
+// service, which runs that script, so the ready line never sends the operator to a hand-started worker.
+test("the ready line points at the service when a credential is expected from an env-setup script (#481)", async () => {
+	const setup = setupScript();
+	const deployDir = tempDir("pi-deploy-");
+	const { home, path: unit } = installUnit({ platform: "linux", deployDir, setup });
+	const { GITHUB_PAT: _p, ...noPat } = seamEnv();
+	const c = capture();
+	assert.equal(await runDoctor(noPat, seamDeps(c.out, { cwd: deployDir, home })), 0, c.text());
+	assert.ok(
+		c.text().endsWith(`\ndoctor: ready. Start the worker as the service: \`pi-dispatch service restart\` (the service installed for this folder, ${unit}). The service runs the env-setup script ${setup} first, which doctor expects to export GITHUB_PAT; a worker started by hand (\`pi-dispatch worker\`) runs no env-setup script, so it starts without that unless this shell exports it.\n`),
+		c.text(),
+	);
+	// The same script, nothing expected from it: the advice is unchanged.
+	const plain = capture();
+	await runDoctor(seamEnv(), seamDeps(plain.out, { cwd: deployDir, home }));
+	assert.ok(plain.text().endsWith("\ndoctor: ready. Start the worker with `pi-dispatch worker`.\n"), plain.text());
+});
+
+test("startAdvice joins the .env reason and the env-setup reason, and names each expected credential (#481)", () => {
+	const fromSetup = { script: "/etc/pi/setup.sh", names: ["GITHUB_PAT", "one of A or B"] };
+	const both = startAdvice({ tookFromFile: true, envPath: "/d/.env", unit: null, platform: "linux", fromSetup });
+	assert.match(both, /^Start the worker as the service, whose loader reads \/d\/\.env as doctor did: `pi-dispatch service install`\./);
+	assert.ok(both.endsWith(" The service also runs the env-setup script /etc/pi/setup.sh first, which doctor expects to export GITHUB_PAT, one of A or B; a worker started by hand (`pi-dispatch worker`) runs no env-setup script, so it starts without those unless this shell exports them."), both);
+	assert.equal(startAdvice({ tookFromFile: false, envPath: "/d/.env", unit: null, platform: "linux" }), "Start the worker with `pi-dispatch worker`.");
 });
 
 test("doctor: a PI_ENV_SETUP of only whitespace is CONFIGURED, because the wrapper says so (#384)", async () => {
@@ -2465,7 +2744,7 @@ test("doctor --fix: the converge re-check reruns the probes once and reports gre
 	};
 	const { out, text } = capture();
 	const code = await runDoctor(
-		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat" },
+		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" },
 		{ out, cwd: tmpdir(), spawn, probeValkey: async () => true, fileExists: () => true, nodeVersion: "22.19.0", fix: true, promptFn: async () => true },
 	);
 	assert.match(text(), /✗ Job image present \(pi-job:latest\)/, "the first pass reported the failure as always");
@@ -2489,7 +2768,7 @@ test("doctor --fix starts no Valkey: the unreachable check names `pi-dispatch up
 	const { out, text } = capture();
 	const { fn: promptFn, calls: prompts } = promptRecorder(true);
 	const code = await runDoctor(
-		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat" },
+		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" },
 		{ out, cwd: tmpdir(), spawn: fakeSpawn({ ...EGRESS_OK, "docker info": 0, "docker image": 0, "docker run": 0 }, calls), probeValkey: async () => false, fileExists: () => true, nodeVersion: "22.19.0", fix: true, promptFn },
 	);
 	assert.equal(code, 1);
@@ -2501,7 +2780,7 @@ test("doctor --fix starts no Valkey: the unreachable check names `pi-dispatch up
 test("doctor prints which resume bounds are on, so an unset one is legible as a choice", async () => {
 	const { out, text } = capture();
 	await runDoctor(
-		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SESSIONS_DIR: "/srv/pi-sessions", PI_TRIGGERS_FILE: resumeTriggersFile(), GITHUB_AUTH_SOURCE: "pat" },
+		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SESSIONS_DIR: "/srv/pi-sessions", PI_TRIGGERS_FILE: resumeTriggersFile(), GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" },
 		{ out, spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", fileExists: () => true },
 	);
 	// Defaults: the TTL ships at 14 and the three eligibility bounds ship off. All four are printed, because
@@ -2514,7 +2793,7 @@ test("doctor says the context bound is inert until the job image reports a measu
 	// The one bound that can be set and still do nothing. Its measurement comes from the image's runner,
 	// and there is deliberately no capability label to check against, so this line is the entire
 	// detection surface for "you set it and nothing is happening".
-	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SESSIONS_DIR: "/srv/pi-sessions", PI_TRIGGERS_FILE: resumeTriggersFile(), GITHUB_AUTH_SOURCE: "pat" };
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SESSIONS_DIR: "/srv/pi-sessions", PI_TRIGGERS_FILE: resumeTriggersFile(), GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" };
 	const opts = { spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", fileExists: () => true };
 
 	const on = capture();
@@ -2531,7 +2810,7 @@ test("the resume-bound lines appear only for a deployment that actually resumes"
 	// feature it does not use.
 	const { out, text } = capture();
 	await runDoctor(
-		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SESSIONS_DIR: "/srv/pi-sessions", PI_SESSION_MAX_CONTEXT_PCT: "80", GITHUB_AUTH_SOURCE: "pat" },
+		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SESSIONS_DIR: "/srv/pi-sessions", PI_SESSION_MAX_CONTEXT_PCT: "80", GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" },
 		{ out, spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", fileExists: () => true },
 	);
 	assert.doesNotMatch(text(), /Resume bounds:/);
@@ -2545,7 +2824,7 @@ test("doctor --fix: the declared-but-absent session store is created silently --
 	const { fn: promptFn, calls: prompts } = promptRecorder(true);
 	const { out, text } = capture();
 	const code = await runDoctor(
-		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SESSIONS_DIR: sessionsDir, PI_TRIGGERS_FILE: resumeTriggersFile(), GITHUB_AUTH_SOURCE: "pat" },
+		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SESSIONS_DIR: sessionsDir, PI_TRIGGERS_FILE: resumeTriggersFile(), GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" },
 		{
 			out,
 			spawn: fakeSpawn(green),
@@ -2572,7 +2851,7 @@ test("doctor --fix: a missing .env is delegated to init's create-only scaffolds,
 	const { fn: promptFn, calls: prompts } = promptRecorder(true);
 	const { out, text } = capture();
 	const code = await runDoctor(
-		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat" },
+		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" },
 		{ out, cwd, spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", fix: true, promptFn },
 	);
 	assert.equal(prompts.length, 0, "scaffold delegation is silent -- init is create-only by contract and can overwrite nothing");
@@ -2598,7 +2877,7 @@ test("doctor --fix: accepting the overlay auth.json offer deletes the file and c
 	const cwd = tempDir("pi-fix-auth-");
 	const { fn: promptFn, calls: prompts } = promptRecorder(true);
 	const { out, text } = capture();
-	const code = await runDoctor(overlayEnv(dir, { GITHUB_AUTH_SOURCE: "pat" }), {
+	const code = await runDoctor(overlayEnv(dir, { GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" }), {
 		out,
 		cwd,
 		spawn: fakeSpawn(green),
@@ -2619,7 +2898,7 @@ test("doctor --fix: accepting the restage offer re-runs import-pi as a child thr
 	const dir = overlay({ packages: [pkg(), pkg({ name: "pi-lint", version: "0.4.0", dir: "pi-lint", stage: false })] });
 	const cwd = tempDir("pi-fix-restage-");
 	const calls = [];
-	const env = overlayEnv(dir, { GITHUB_AUTH_SOURCE: "pat" });
+	const env = overlayEnv(dir, { GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" });
 	const { fn: promptFn, calls: prompts } = promptRecorder(true);
 	const { out, text } = capture();
 	await runDoctor(env, {
@@ -6120,7 +6399,7 @@ const podmanPlan = ({ info = PODMAN_INFO(), capabilities = "anyUid", image = tru
 	"podman network inspect --format {{.Internal}} {{.DNSEnabled}}": keeperNet === null ? { code: 125, output: "" } : { code: 0, output: `${keeperNet}\n` },
 	docker: "enoent",
 });
-const podmanEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", PI_BACKENDS: "podman", PI_EGRESS: "0", ...extra });
+const podmanEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture", PI_BACKENDS: "podman", PI_EGRESS: "0", ...extra });
 const podmanDeps = (out, plan, calls, extra = {}) => ({ ...ghDeps(out, plan, calls), home: PODMAN_HOME, observationFs: podmanFs, jobUserIdentity: LINUX_ID(1234), ...extra });
 
 // Issue #433: a deployment that blesses BOTH venues keeps doctor's output byte for byte. Captured from main at 98f2857,
@@ -6180,7 +6459,7 @@ const MIXED_PIN = {
 			"    → the pid and memory bounds in the job argv are the daemon's to apply, and it is not observed applying them: `pi-dispatch doctor --live` reads pids.max and memory.max off a real container on this daemon. The worker logs its own answer at boot (worker_started.daemonAppliesBounds)",
 			"⚠ local: mountSet is ASSERTED by the container runtime's configuration, not enforced: the daemon answered in a shape nothing here reads (unparseable)",
 			"    → Podman mounts what its mounts.conf and containers.conf list into every job container, invisible to docker inspect: create an empty /etc/containers/mounts.conf and remove any volumes or mounts key. The worker logs its own answer at boot (worker_started.runtimeAddsNoMounts)",
-			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or on a daemon that enforces bind-mount ownership and a worker uid other than 1001 the worker's own non-zero uid passed as `--user`, not enforced by it",
+			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"⚠ local: which uid a job runs as could not be read from the daemon's answer (runtime-unreadable) -- every local job is refused",
@@ -6234,7 +6513,7 @@ const MIXED_PIN = {
 			"    → arm PI_EGRESS to get it (the job reaches only what the allowlist proxy permits (CONST-EGRESS-POLICY-IN-THE-ARGV))",
 			"⚠ local: jobToJobIsolation CAN be enforced here, but PI_EGRESS is off, so this deployment is not getting it",
 			"    → arm PI_EGRESS to get it (two jobs cannot reach each other, structurally rather than by policy)",
-			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or on a daemon that enforces bind-mount ownership and a worker uid other than 1001 the worker's own non-zero uid passed as `--user`, not enforced by it",
+			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"⚠ local: credentialTransit is ASSERTED by the operator, not enforced: this shell's docker CLI did not say which endpoint it resolves (spawn-failed)",
 			"    → nothing shows where job containers (and the credentials they carry) would go; fix what stops the docker CLI answering, then re-run doctor. The worker logs its own answer at boot (worker_started.dockerEndpointLocal)",
@@ -6287,7 +6566,7 @@ const MIXED_PIN = {
 			"    → arm PI_EGRESS to get it (the job reaches only what the allowlist proxy permits (CONST-EGRESS-POLICY-IN-THE-ARGV))",
 			"⚠ local: jobToJobIsolation CAN be enforced here, but PI_EGRESS is off, so this deployment is not getting it",
 			"    → arm PI_EGRESS to get it (two jobs cannot reach each other, structurally rather than by policy)",
-			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or on a daemon that enforces bind-mount ownership and a worker uid other than 1001 the worker's own non-zero uid passed as `--user`, not enforced by it",
+			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"⚠ podman: egress CAN be enforced here, but PI_EGRESS is off, so this deployment is not getting it",
 			"    → arm PI_EGRESS to get it (the job reaches only what the allowlist proxy permits (CONST-EGRESS-POLICY-IN-THE-ARGV))",
@@ -6335,7 +6614,7 @@ const MIXED_PIN = {
 			"    → arm PI_EGRESS to get it (the job reaches only what the allowlist proxy permits (CONST-EGRESS-POLICY-IN-THE-ARGV))",
 			"⚠ local: jobToJobIsolation CAN be enforced here, but PI_EGRESS is off, so this deployment is not getting it",
 			"    → arm PI_EGRESS to get it (two jobs cannot reach each other, structurally rather than by policy)",
-			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or on a daemon that enforces bind-mount ownership and a worker uid other than 1001 the worker's own non-zero uid passed as `--user`, not enforced by it",
+			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"⚠ podman: egress CAN be enforced here, but PI_EGRESS is off, so this deployment is not getting it",
 			"    → arm PI_EGRESS to get it (the job reaches only what the allowlist proxy permits (CONST-EGRESS-POLICY-IN-THE-ARGV))",
@@ -6350,6 +6629,9 @@ const MIXED_PIN = {
 			"✗ podman: job image is not in this account's Podman store (pi-job:latest)",
 			"    → pull or load it AS THE WORKER'S ACCOUNT, since rootless Podman keeps one image store per account: podman pull ghcr.io/edgehero/pi-job:latest && podman tag ghcr.io/edgehero/pi-job:latest pi-job:latest -- jobs run with --pull=never, so the worker never fetches it",
 			"✓ podman: jobs run as uid:gid 1234:1234 (passed as --user, with --userns=keep-id) with HOME=/home/pi, once the job image is in this account's store and declares anyUid",
+			// Issue #481: the fixture now carries the PAT its source needs (the ✗ for a missing one is new), so the in-image
+			// probe runs here as it does on the green path. Nothing about the #433 output this pins moved.
+			"✓ gh authenticates inside the job image (pi-job:latest)",
 			"✓ Valkey reachable (redis://127.0.0.1:6379)",
 			"✓ Fleet: 2 workers (mini1, mini2)",
 			"⚠ Job image digest differs from the other host",
@@ -7223,6 +7505,84 @@ test("a key only the deployment's .env sets is judged as the service reads it, a
 	assert.doesNotMatch(none.text, /PI_GLOBAL_ALLOW_EXTENSIONS|service settings read from/);
 });
 
+// Issue #481: a present but EMPTY line is left off the settings line only where every reader of the key takes empty as
+// unset (`EMPTY_READ_AS_UNSET`, proven in doctor-empty-keys.test.mjs). `KEY=` is what init scaffolds for every optional
+// key, and the line listed twelve of them on a fresh deployment; a key whose empty value is a value is still named.
+test("the service settings line hides an empty key only where it is proven unset (#481)", async () => {
+	const mixed = await envDoctor("PI_SESSIONS_TTL_DAYS=30\nWEBHOOK_SECRET=\nFORGEJO_URL=\nAZURE_WEBHOOK_HEADER=\nGITLAB_URL=\n", {});
+	// GITLAB_URL= is not unset: both processes default it with `??`, so the empty string becomes the API base.
+	assert.ok(mixed.text.includes(`✓ service settings read from ${mixed.envPath}, as the service reads them (this shell does not set them): PI_SESSIONS_TTL_DAYS, GITLAB_URL\n`), mixed.text);
+	// Nothing but proven-unset empty lines: no line at all, as with no file.
+	const blank = await envDoctor("WEBHOOK_SECRET=\nGITLAB_TOKEN=\n", {});
+	assert.doesNotMatch(blank.text, /service settings read from/);
+	assert.equal(blank.code, 0, blank.text);
+});
+
+test("fileConfigures decides per key and per value shape: blank is unset only where the reader trims (#481)", () => {
+	assert.equal(fileConfigures("WEBHOOK_SECRET", "  "), false, "the receiver trims it");
+	assert.equal(fileConfigures("PI_SESSIONS_TTL_DAYS", "  "), true, "the loader does not read a blank count as unset");
+	assert.equal(fileConfigures("PI_SESSIONS_TTL_DAYS", ""), false);
+	assert.equal(fileConfigures("DOCKER_HOST", " "), true, "docker compares with \"\", not a trim");
+	assert.equal(fileConfigures("GITLAB_URL", ""), true, "unproven keys always configure");
+	assert.equal(fileConfigures("HOME", ""), true);
+});
+
+test("a .env straight from init: the settings line names no key init left empty (#481)", async () => {
+	const cwd = tempDir("pi-init-env-");
+	runInit(cwd, { out: () => {}, platform: "linux", newPassword: () => "a".repeat(64) });
+	const text = readFileSync(join(cwd, ".env"), "utf8");
+	const empty = [...text.matchAll(/^([A-Z][A-Z0-9_]*)=$/gm)].map((m) => m[1]);
+	assert.ok(empty.includes("WEBHOOK_SECRET") && empty.includes("GITLAB_TOKEN"), "init still scaffolds empty keys, so this test tests something");
+	const { out, text: printed } = capture();
+	await runDoctor(ghEnv({}), { ...ghDeps(out, green, []), cwd, agentDir: NO_AGENT_DIR, readEnvFile: (path) => readFileSync(path) });
+	const line = printed().split("\n").find((l) => l.startsWith("✓ service settings read from "));
+	assert.ok(line, printed());
+	const named = line.slice(line.lastIndexOf(": ") + 2).split(", ");
+	assert.deepEqual(named.filter((k) => empty.includes(k)), [], line);
+	assert.ok(named.includes("PI_JOB_IMAGE") && named.includes("RECEIVER_PORT"), "and the keys init did set are still named");
+	const gh = printed().split("\n").find((l) => l.startsWith("✓ GitHub auth settings read from "));
+	assert.ok(gh?.endsWith(": GITHUB_AUTH_SOURCE"), printed());
+});
+
+// Issue #481: the venue line, the CLI-variable warnings and the closing line judge an empty value by the same allowlist.
+test("an empty venue key is not named as read from .env: the worker reads it as unset (#481)", async () => {
+	const cwd = scaffoldedCwd();
+	const envPath = join(cwd, ".env");
+	const { PI_BACKENDS: _b, PI_EGRESS: _e, ...shell } = podmanEnv();
+	writeFileSync(envPath, "PI_BACKENDS=podman\nPI_EGRESS=\nPI_EGRESS_PROXY=\n");
+	const mixed = capture();
+	await runDoctor(shell, { ...podmanDeps(mixed.out, podmanPlan(), []), cwd, platform: "linux", readEnvFile: (path) => readFileSync(path, "utf8") });
+	assert.ok(mixed.text().includes(`✓ venue keys read from ${envPath} (PI_BACKENDS="podman"), as the service reads them: this shell does not set them\n`), mixed.text());
+	writeFileSync(envPath, "PI_EGRESS=\n");
+	const blank = capture();
+	await runDoctor({ ...shell, PI_BACKENDS: "podman" }, { ...podmanDeps(blank.out, podmanPlan(), []), cwd, platform: "linux", readEnvFile: (path) => readFileSync(path, "utf8") });
+	assert.doesNotMatch(blank.text(), /venue keys read from/);
+	assert.match(blank.text(), /✓ Jobs run on: podman/);
+});
+
+test("a CLI variable left empty in .env is warned about unless its tool reads empty as unset (#481)", () => {
+	const fromFile = { DOCKER_HOST: "", GH_TOKEN: "", CONTAINERS_CONF: "", CONTAINER_HOST: "", CONTAINER_CONNECTION: "", CONTAINERS_STORAGE_CONF: "", XDG_CONFIG_HOME: "", HOME: "" };
+	const lines = cliNotHandedLines({ fromFile }, "/d/.env");
+	// podman takes CONTAINER_HOST and CONTAINER_CONNECTION by os.LookupEnv (an empty one switches it to remote), and the
+	// storage conf, XDG_CONFIG_HOME and HOME are read as values by at least one of their readers.
+	assert.deepEqual(lines.map((l) => l.label.split(" ")[0]).sort(), ["CONTAINERS_STORAGE_CONF", "CONTAINER_CONNECTION", "CONTAINER_HOST", "HOME", "XDG_CONFIG_HOME"]);
+	assert.ok(lines.some((l) => /^HOME is set in \/d\/\.env \(""\), and doctor hands nothing/.test(l.label)));
+	assert.equal(cliNotHandedLines({ fromFile: { DOCKER_HOST: "tcp://x:2375" } }, "/d/.env").length, 1, "a value is still warned about");
+});
+
+test("doctor's ready line counts an empty .env key as the file deciding something only where it is not proven unset (#481)", async () => {
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "PI_JOB_IMAGE=\nWEBHOOK_SECRET=\nPI_EGRESS_PROXY=\nDOCKER_HOST=\n");
+	const quiet = capture();
+	assert.equal(await runDoctor(podmanEnv(), podmanDeps(quiet.out, podmanPlan(), [], { cwd, platform: "linux" })), 0, quiet.text());
+	assert.ok(quiet.text().endsWith("\ndoctor: ready. Start the worker with `pi-dispatch worker`.\n"), quiet.text());
+	// GITLAB_URL= is a value to both processes (the API base becomes ""), so the file decided something.
+	writeFileSync(join(cwd, ".env"), "GITLAB_URL=\n");
+	const said = capture();
+	assert.equal(await runDoctor(podmanEnv(), podmanDeps(said.out, podmanPlan(), [], { cwd, platform: "linux" })), 0, said.text());
+	assert.match(said.text(), /doctor: ready\. Start the worker as the service/);
+});
+
 test("a shell/.env disagreement is a ✗ naming both values, a secret by name only, and doctor judges this shell's (#471)", async () => {
 	const envText = "PI_GLOBAL_ALLOW_EXTENSIONS=false\nWEBHOOK_SECRET=file-secret-value\nGITLAB_URL=https://tok:en@gitlab.file.example\n";
 	const r = await envDoctor(envText, { PI_GLOBAL_ALLOW_EXTENSIONS: "0", WEBHOOK_SECRET: "shell-secret-value", GITLAB_URL: "https://gitlab.shell.example" });
@@ -7301,7 +7661,7 @@ test("doctor --fix: a session store named only in .env is offered at the prompt 
 	const sessionsDir = join(tempDir("pi-471-sessions-"), "store");
 	const made = [];
 	const { fn: promptFn, calls: prompts } = promptRecorder(false);
-	const r = await envDoctor(`PI_SESSIONS_DIR=${sessionsDir}\n`, { PI_TRIGGERS_FILE: resumeTriggersFile(), GITHUB_AUTH_SOURCE: "pat" }, { deps: { fix: true, promptFn, mkdir: (p) => made.push(p), fileExists: (p) => p !== sessionsDir } });
+	const r = await envDoctor(`PI_SESSIONS_DIR=${sessionsDir}\n`, { PI_TRIGGERS_FILE: resumeTriggersFile(), GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" }, { deps: { fix: true, promptFn, mkdir: (p) => made.push(p), fileExists: (p) => p !== sessionsDir } });
 	assert.deepEqual(prompts, ["run this? [y/N] "], "asked, not run silently");
 	assert.ok(r.text.includes(`fix available: Session store does not exist (${sessionsDir}) -- PI_SESSIONS_DIR read from ${r.envPath}, as the service reads it; this shell does not set it\n    $ mkdir -p ${sessionsDir} && chmod 700 ${sessionsDir}\n`), r.text);
 	assert.deepEqual(made, [], "declined, so nothing was created");
@@ -8099,7 +8459,7 @@ const DOCKER_CANARY_PIN = {
 			"✓ Egress policy reaches the provider (api.anthropic.com answered, so the whole path works and no key was spent)",
 			"✓ Egress policy denies an unlisted host (the deny direction is the half an allowlist can silently lose)",
 			"✓ Jobs run on: local",
-			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or on a daemon that enforces bind-mount ownership and a worker uid other than 1001 the worker's own non-zero uid passed as `--user`, not enforced by it",
+			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ local: the daemon is Docker Engine 27.5.1",
@@ -8166,7 +8526,7 @@ const DOCKER_CANARY_PIN = {
 			"⚠ Egress policy: not proved, because the job image could not find /app/image/runner/src/env-proxy.mjs (or an import of it): its runner predates issue #427, whose provider call goes around the proxy so that with egress armed every job fails at its first turn, or the image is not built from this project's",
 			"    → use a job image built after issue #427 (ghcr.io/edgehero/pi-job:latest, or rebuild yours FROM it), or set PI_EGRESS=0 until you can",
 			"✓ Jobs run on: local",
-			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or on a daemon that enforces bind-mount ownership and a worker uid other than 1001 the worker's own non-zero uid passed as `--user`, not enforced by it",
+			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ local: the daemon is Docker Engine 27.5.1",
@@ -8237,7 +8597,7 @@ const DOCKER_CANARY_PIN = {
 			"    → re-run doctor; if it persists, run the job image by hand to see why a container on this network will not start",
 			"✓ Egress policy denies an unlisted host (the deny direction is the half an allowlist can silently lose)",
 			"✓ Jobs run on: local",
-			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or on a daemon that enforces bind-mount ownership and a worker uid other than 1001 the worker's own non-zero uid passed as `--user`, not enforced by it",
+			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ local: the daemon is Docker Engine 27.5.1",
@@ -8312,7 +8672,7 @@ const DOCKER_CANARY_PIN = {
 			"    → re-run doctor; if it persists, run the job image by hand to see why a container on this network will not start",
 			"✓ Egress policy denies an unlisted host (the deny direction is the half an allowlist can silently lose)",
 			"✓ Jobs run on: local",
-			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or on a daemon that enforces bind-mount ownership and a worker uid other than 1001 the worker's own non-zero uid passed as `--user`, not enforced by it",
+			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ local: the daemon is Docker Engine 27.5.1",
@@ -8387,7 +8747,7 @@ const DOCKER_CANARY_PIN = {
 			"    → re-run doctor; if it persists, run the job image by hand to see why a container on this network will not start",
 			"✓ Egress policy denies an unlisted host (the deny direction is the half an allowlist can silently lose)",
 			"✓ Jobs run on: local",
-			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or on a daemon that enforces bind-mount ownership and a worker uid other than 1001 the worker's own non-zero uid passed as `--user`, not enforced by it",
+			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
 			"✓ PI_BACKEND_FLOOR is not set, so no minimum is required of any backend",
 			"✓ local: the daemon is Docker Engine 27.5.1",
@@ -8539,7 +8899,7 @@ test("the GitLab token scope is a FACT LINE whose advice is in the label, since 
 });
 
 test("persisted transcripts and a context bound that may be inert are FACT LINES whose advice is in the label (#462)", async () => {
-	const env = imgEnv({ PI_SESSIONS_DIR: "/srv/pi-sessions", PI_TRIGGERS_FILE: resumeTriggersFile(), GITHUB_AUTH_SOURCE: "pat", PI_SESSION_MAX_CONTEXT_PCT: "80" });
+	const env = imgEnv({ PI_SESSIONS_DIR: "/srv/pi-sessions", PI_TRIGGERS_FILE: resumeTriggersFile(), GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture", PI_SESSION_MAX_CONTEXT_PCT: "80" });
 	const checks = await collectChecks(env, adviceSeams({ fileExists: () => true }));
 	const transcripts = renderedOne(checks, /persist agent transcripts/);
 	assert.equal(
@@ -9137,7 +9497,7 @@ test("the session store's path reaches the terminal escaped, in its label, its f
 	const { fn: promptFn } = promptRecorder(false);
 	const { out, text } = capture();
 	await runDoctor(
-		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SESSIONS_DIR: sessionsDir, PI_SESSION_MAX_AGE_DAYS: "3\u001b]0;x", PI_TRIGGERS_FILE: resumeTriggersFile(), GITHUB_AUTH_SOURCE: "pat" },
+		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SESSIONS_DIR: sessionsDir, PI_SESSION_MAX_AGE_DAYS: "3\u001b]0;x", PI_TRIGGERS_FILE: resumeTriggersFile(), GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" },
 		{ out, spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", fix: true, promptFn, fileExists: (p) => p !== sessionsDir, mkdir: () => {}, chmod: () => {} },
 	);
 	assert.doesNotMatch(text(), /\u001b/, "no raw ESC reaches the terminal");
@@ -9388,7 +9748,7 @@ test("doctor flags a PI_VALKEY_PORT that disagrees with VALKEY_URL's port, in .e
 	writeFileSync(join(dir, ".env"), "VALKEY_URL=redis://127.0.0.1:16495\nPI_VALKEY_PORT=16000\n");
 	const run = async (env) => {
 		const { out, text } = capture();
-		await runDoctor({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", ...env }, { out, cwd: dir, spawn: fakeSpawn(green), probeValkey: async () => true, fileExists: () => true, nodeVersion: "22.19.0" });
+		await runDoctor({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture", ...env }, { out, cwd: dir, spawn: fakeSpawn(green), probeValkey: async () => true, fileExists: () => true, nodeVersion: "22.19.0" });
 		return text();
 	};
 	const t1 = await run({});
@@ -9409,7 +9769,7 @@ async function doctorAuth({ auth, open, passwordSet = false, env = {}, envFile =
 	const probed = [];
 	const { out, text } = capture();
 	const code = await runDoctor(
-		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", ...env },
+		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture", ...env },
 		{
 			out,
 			cwd,
@@ -9476,7 +9836,7 @@ test("doctor (#468 over #471): the AUTH check's context carries the resolved pas
 	const run = async (env, url = "redis://127.0.0.1:6379") => {
 		const { out, text } = capture();
 		contexts.length = 0;
-		await runDoctor({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", VALKEY_URL: url, ...env }, { out, cwd, spawn: fakeSpawn(green, calls), probeValkey: async () => true, valkeyAuth: async (_u, opts = {}) => (contexts.push(opts.context), { state: opts.withoutPassword ? "noauth" : "ok", passwordSet: true, from: "x" }), nodeVersion: "22.19.0" });
+		await runDoctor({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture", VALKEY_URL: url, ...env }, { out, cwd, spawn: fakeSpawn(green, calls), probeValkey: async () => true, valkeyAuth: async (_u, opts = {}) => (contexts.push(opts.context), { state: opts.withoutPassword ? "noauth" : "ok", passwordSet: true, from: "x" }), nodeVersion: "22.19.0" });
 		return text();
 	};
 	await run({});

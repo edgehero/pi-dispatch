@@ -148,7 +148,9 @@ test("declarationOf joins a word to what qualifies it, so a consumer cannot prin
 	// which is why doctor can honestly say it names the asserter.
 	assert.match(declarationOf("local", "nonRoot").assertedBy, /USER directive/);
 	// Issue #341: and who asserts it where the argv supplies the uid, with the uid-1001 exception named.
-	assert.match(declarationOf("local", "nonRoot").assertedBy, /worker uid other than 1001 the worker's own non-zero uid passed as `--user`/);
+	// Issue #481: the whole sentence, pinned: it once ran "other than 1001 the worker's own" with no separator, which a
+	// fragment match cannot see, and doctor prints it verbatim before ", not enforced by it".
+	assert.equal(declarationOf("local", "nonRoot").assertedBy, "the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`");
 	assert.equal(declarationOf("local", "credentialTransit").assertedBy, null, "enforced, so no asserter");
 	assert.equal(declarationOf("local", "isolation").assertedBy, null, "meaningless for an enforced word");
 	assert.equal(declarationOf("nope", "egress"), undefined);

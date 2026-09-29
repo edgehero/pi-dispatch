@@ -654,7 +654,7 @@ const BACKENDS_TABLE = {
 			// Issue #341: on a daemon that enforces bind-mount ownership the argv supplies the uid instead, validated
 			// non-zero by the builder; the word stays asserted because on Docker Desktop, and for a uid-1001 worker, the
 			// image still provides it.
-			nonRoot: "the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or on a daemon that enforces bind-mount ownership and a worker uid other than 1001 the worker's own non-zero uid passed as `--user`",
+			nonRoot: "the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`",
 		},
 		/**
 		 * Which declared words hold only while something about THIS HOST is observed (issue #278), as
