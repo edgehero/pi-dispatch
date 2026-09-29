@@ -2,7 +2,7 @@
   "name": "pi-dispatch",
   "version": "1.10.3",
   "private": true,
-  "description": "A containerized job harness for the pi coding agent",
+  "description": "Run the pi coding agent as a self-hosted service: queued jobs in locked down Docker or Podman containers, spend caps checked before anything is spent, triggered by cron, the CLI, or GitHub, GitLab, Forgejo and Azure DevOps events.",
   "license": "MIT",
   "type": "module",
   "engines": {

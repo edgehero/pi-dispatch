@@ -26,7 +26,7 @@ VALKEY_URL=redis://127.0.0.1:6379
 ```
 
 ```
-npx pi-dispatch-receiver poll
+npx @edgehero/pi-dispatch-receiver poll
 ```
 
 `WEBHOOK_SECRET` is not needed: there is no inbound delivery to verify, so demanding one would block

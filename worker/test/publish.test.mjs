@@ -204,6 +204,7 @@ test("npm pack (worker): ships src, .env.example and every deploy template — a
 	assert.ok(paths.includes("src/cli.mjs"), "the bin target ships");
 	assert.ok(paths.includes("src/service.mjs"), "the service renderer ships");
 	assert.ok(paths.includes(".env.example"), "init's packaged fallback ships");
+	assert.ok(paths.includes("README.md"), "the npm page is this README; without it the package page is blank");
 	for (const name of MIRRORED_DEPLOY) {
 		assert.ok(paths.includes(`deploy/${name}`), `deploy/${name} must ship — the service renderer reads it from the package`);
 	}
@@ -217,6 +218,7 @@ test("npm pack (receiver): ships src (cli.mjs included) — and never test/", PA
 	const paths = report.files.map((f) => f.path);
 	assert.ok(paths.includes("src/cli.mjs"), "the bin target ships");
 	assert.ok(paths.includes("src/start.mjs"), "the exports target ships");
+	assert.ok(paths.includes("README.md"), "the npm page is this README; without it the package page is blank");
 	assert.ok(paths.includes("package.json"));
 	assert.deepEqual(paths.filter((p) => p.startsWith("test/")), [], "test/ stays out of the tarball");
 });

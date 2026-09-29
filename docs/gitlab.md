@@ -81,8 +81,7 @@ secret are set when your triggers name GitLab, plus `WEBHOOK_SECRET` for any for
 there is nothing to type after the name. A container profile is the alternative
 (`docker compose --env-file .env -f deploy/docker-compose.yml --profile receiver up -d`, which needs
 `deploy/docker-compose.yml`: a clone carries it, and `/dispatch setup` copies it in when you choose the receiver
-container), and the README lays out the
-choice. The third way the README offers, `pi-dispatch-receiver poll`, cannot serve this forge: the poller
+container), and [`docs/github.md`](github.md#three-ways-to-run-the-trigger-edge) lays out the choice. The third way it offers, `pi-dispatch-receiver poll`, cannot serve this forge: the poller
 reads api.github.com and has no GitLab path at all.
 
 ## Self-hosted instances
@@ -201,7 +200,7 @@ doing nothing.
 
 `close` is close-only: it never shares a rule with other actions, because a close is gated on the actor
 who closed the MR rather than on the author, and it takes `on.number` (the **iid**, the number in the MR's
-own URL, not the global id) and `on.once` — see the README's close-triggers section. `merge` is still not
+own URL, not the global id) and `on.once`: see [close triggers and one-shots](triggers.md#close-triggers-and-one-shots). `merge` is still not
 offered, and a merged MR does not fire the close rule either: GitLab reports a merge as its own
 `merge` action, which drops unhandled, so a close rule fires on an explicit close only.
 

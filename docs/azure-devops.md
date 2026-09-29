@@ -71,8 +71,7 @@ Add a `github` trigger later and both become required again, as they should.
 
 Then start it: `pi-dispatch-receiver` from your deployment folder, where `serve` is the default command, or
 the container profile instead (`docker compose --env-file .env -f deploy/docker-compose.yml --profile receiver up -d`,
-it needs `deploy/docker-compose.yml`, which a clone carries and `/dispatch setup` copies in when you choose the receiver container); the
-README lays out the choice. The third way the README offers, `pi-dispatch-receiver poll`, cannot serve this
+it needs `deploy/docker-compose.yml`, which a clone carries and `/dispatch setup` copies in when you choose the receiver container); [`docs/github.md`](github.md#three-ways-to-run-the-trigger-edge) lays out the choice. The third way it offers, `pi-dispatch-receiver poll`, cannot serve this
 forge: the poller reads api.github.com and has no Azure path at all.
 
 ## Tags are the label analogue, and the DIFF is the trigger
