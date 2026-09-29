@@ -30,7 +30,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
-import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdirSync, readFileSync as readPackageFile } from "node:fs";
 import { connect as netConnect } from "node:net";
 import { lookup as dnsLookup } from "node:dns/promises";
@@ -44,6 +44,7 @@ import { DEFAULT_EGRESS_PROXY, egressArmed as egressArmedFn, egressProxyName } f
 import { envKeyIsBlank, envValueShown, readEnvAssignments, updateEnvFile } from "./env-file.mjs";
 import { COMPOSE_FILE, COMPOSE_VALKEY_OVERRIDE, OWNER_MARKER_KEY, VALKEY_PASSWORD_KEY, VALKEY_PORT_KEY, OWNER_CHECK_CONTAINER, OWNER_CHECK_EXEC, VALKEY_VOLUME_RECORD, adoptVolumeQuestion, composeArgs, ownerCheckAnswer, readVolumeRecord, valkeyOwnerCheckArgs, volumeRecordMatches, volumeRecordText, composeProjectName, foreignContainerSentence, foreignMarkerRefusal, foreignVolumeLabelRefusal, foreignVolumeRefusal, foreignVolumeUsers, isLoopbackHost, newValkeyPassword, unadoptedVolumeRefusal, valkeyContainerOwner, valkeyDockerRunArgs, valkeyPasswordDecision, valkeyPortEnvDecision, valkeyVolumeCreateArgs, valkeyVolumeOwner } from "./valkey-auth.mjs";
 import { deploymentValkeyEnv, deploymentVenueEnv } from "./deployment-venue.mjs";
+import { PACKAGED_EGRESS_PROXY_CONF, judgeProxyConfCopy, packageCopyName, readPackagedProxyConf, replaceProxyConfCopy } from "./egress-conf-copy.mjs";
 import { EGRESS_PROXY_IMAGE, PROXY_STATE_FORMAT, jobNetworksOf, parseProxyState, shippedProxyDrift } from "./egress-proxy-state.mjs";
 import { DEFAULT_VALKEY_PORT, NETNS_KEEPER, NETNS_KEEPER_FORMAT, QUADLET_FILES, STACK_KEYS, applyStack, decideValkey, describeRollBack, passwdNameFrom, readSubuidRanges, rollBackWrites, valkeySharedOn, VALKEY_SHARED_KEY, readValkeyKeys, valkeyTarget, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal } from "./podman-stack.mjs";
 
@@ -86,6 +87,8 @@ const EGRESS_NETWORK_ARGS = ["network", "create", "pi-dispatch-egress-out"];
 const EGRESS_START_ARGS = ["start", "pi-dispatch-egress-proxy"];
 const EGRESS_UNPAUSE_ARGS = ["unpause", "pi-dispatch-egress-proxy"];
 const EGRESS_RM_ARGS = ["rm", "-f", "pi-dispatch-egress-proxy"];
+// Issue #484: how a running proxy reads refreshed rules (see the refresh step in `runUp` for why a restart).
+const EGRESS_RESTART_ARGS = ["restart", "pi-dispatch-egress-proxy"];
 const EGRESS_RUN_ARGS = [
 	"run",
 	"-d",
@@ -133,7 +136,8 @@ export async function runUp(argv = [], deps = {}) {
 		// `.env` symlinked at a shared env file is edited THROUGH the link rather than replaced by a
 		// regular file. It calls it optionally, so leaving it out here made that repair dead code in the
 		// only production caller, and the test that covered it attached the method to its own fake.
-		fs = { existsSync, readFileSync, writeFileSync, renameSync, statSync, chmodSync, realpathSync, unlinkSync },
+		// `lstatSync` for the rules refresh (issue #484), which follows no symlink.
+		fs = { existsSync, lstatSync, readFileSync, writeFileSync, renameSync, statSync, chmodSync, realpathSync, unlinkSync },
 		probeTcp = defaultProbeTcp,
 		// Issue #468: whether the Valkey on 127.0.0.1:6379 answers a client that sends NO password ("ok" when it does),
 		// through the project's one connection function. Real only where the TCP probe is: a test that stands in for the
@@ -183,6 +187,10 @@ export async function runUp(argv = [], deps = {}) {
 		// deployment folder; injectable so a test can hand in its own.
 		readTemplate = (name) => readPackageFile(join(templatesDir, name), "utf8"),
 		mkdir = mkdirSync,
+		// Issue #484: the installed package's rules, which a differing folder copy is compared with and refreshed from, and
+		// the clock the backup's name is stamped with.
+		readPackagedConf = readPackagedProxyConf,
+		now = Date.now,
 	} = deps;
 	let { runInitFn, runDoctorFn } = deps;
 	const yes = argv.includes("--yes");
@@ -750,6 +758,10 @@ export async function runUp(argv = [], deps = {}) {
 	// allowlist file does not exist gets a directory created by docker where a file belonged and a squid
 	// that fails confusingly. If the file is still missing, this step declines itself and says which file.
 	const proxyName = egressProxyName(venueEnv);
+	// (e1b) the folder's copy of the proxy's rules (issue #484), before the proxy step so that a proxy started, replaced
+	// or restarted below reads the refreshed file. Only where the shipped docker proxy mounts it: a proxy PI_EGRESS_PROXY
+	// names is the operator's, and the podman venue mounts an account-owned copy `service install` writes.
+	const confRefreshed = dockerUsed && egressArmedFn(venueEnv) && proxyName === DEFAULT_EGRESS_PROXY ? await proxyConfRefreshStep({ fs, cwd, out, prompt, summary, readPackagedConf, now, yes }) : false;
 	if (dockerUsed && egressArmedFn(venueEnv) && proxyName !== DEFAULT_EGRESS_PROXY) {
 		// PI_EGRESS_PROXY names the operator's own proxy (issue #430). This step used to look for, and offer to start, the
 		// shipped name whatever that key said, so it could report a proxy present that no job attaches to, or start one
@@ -806,6 +818,53 @@ export async function runUp(argv = [], deps = {}) {
 			// that is taken.
 			out(`\n✗ ${DEFAULT_EGRESS_PROXY} exists, but its state could not be read from \`docker inspect\`, so up leaves it as it is; \`docker inspect ${DEFAULT_EGRESS_PROXY}\` shows it\n`);
 			summary.push(["egress", "proxy exists, state unreadable: left as it is"]);
+		} else if ((state?.status === "running" || state?.status === "paused") && drift.length === 0 && confRefreshed) {
+			// Issue #484: the rules were just refreshed under a running proxy, and squid reads them only at start. A RESTART,
+			// not `squid -k reconfigure`: the refresh renamed a new file over the old one, and a running container's bind
+			// mount still holds the old file (a file bind mount is of the inode; a start mounts the path again). Not the
+			// replace below either, which removes the container and with it every job network it is attached to; a restart
+			// keeps them. `--yes` never covers restarting a proxy jobs are using, as it never covers replacing one.
+			//
+			// A PAUSED current proxy takes this path too (PR #491's review): `unpause` alone resumes the same squid on the
+			// same mount, which still holds the old file, so it would run the old rules while `up` had just said they were
+			// replaced. It is unpaused and then restarted, two lines shown as one answer; unpausing first, rather than
+			// restarting a paused container, keeps the step off how each runtime stops a frozen one, which is not measured.
+			const paused = state.status === "paused";
+			const lines = paused ? [EGRESS_UNPAUSE_ARGS, EGRESS_RESTART_ARGS] : [EGRESS_RESTART_ARGS];
+			const shown = lines.map((a) => `docker ${a.join(" ")}`);
+			out(`\n${paused ? "⚠ Egress proxy is paused (pi-dispatch-egress-proxy), and holds" : "✓ Egress proxy present (pi-dispatch-egress-proxy), still running"} the rules it read at start\n`);
+			const attached = jobNetworksOf(state);
+			if (judged.unknown || missingFile) {
+				const why = judged.unknown ? "its mounts could not be compared on this host (above), so whether it mounts this folder's file is not known" : `${missingSaid}, and a restart would mount it as a directory`;
+				out(`not restarted: ${why}; \`${shown.join(" && ")}\` loads the refreshed rules once that is settled\n`);
+				summary.push(["egress", `proxy left ${state.status} on the rules it started with: not restarted, since ${why}`]);
+			} else {
+				if (yes && attached.length > 0) out("--yes does not cover restarting a proxy that jobs are using: answer below, or stop the worker and re-run\n");
+				if (
+					await consent(
+						`up would ${paused ? "unpause and then restart" : "restart"} it so squid reads the refreshed deploy/egress-proxy.conf${attached.length > 0 ? `. It is attached to ${attached.join(", ")}: those jobs lose their egress while it restarts` : ""}:`,
+						shown,
+						{ yes: yes && attached.length === 0, out, prompt },
+					)
+				) {
+					let failed = null;
+					for (const args of lines) {
+						if ((await runStreamed(spawn, "docker", args, out)) !== 0) {
+							failed = args[0];
+							break;
+						}
+					}
+					if (failed) {
+						out(`✗ could not ${failed} the egress proxy; continuing, doctor below will re-check it\n`);
+						summary.push(["egress", `${failed} FAILED after the rules refresh: see \`docker logs pi-dispatch-egress-proxy\``]);
+					} else {
+						summary.push(["egress", `${paused ? "unpaused and restarted" : "restarted"} pi-dispatch-egress-proxy on the refreshed rules`]);
+					}
+				} else {
+					out(`skipped: it ${paused ? "stays paused, and holds" : "runs"} the old rules until \`${shown.join(" && ")}\`\n`);
+					summary.push(["egress", `proxy left ${state.status} on the old rules (declined): \`${shown.join(" && ")}\` loads the refreshed ones`]);
+				}
+			}
 		} else if (state?.status === "running" && drift.length === 0) {
 			out("\n✓ Egress proxy already present (pi-dispatch-egress-proxy)\n");
 			summary.push(["egress", judged.unknown ? "proxy already present, left untouched (its mounts could not be compared on this host)" : "proxy already present, left untouched"]);
@@ -1272,6 +1331,55 @@ export function valkeyContainerPublishes(line, port) {
 		const m = /:(\d+)->6379\/tcp$/.exec(p.trim());
 		return m !== null && Number(m[1]) === port;
 	});
+}
+
+/**
+ * Issue #484: the folder's `deploy/egress-proxy.conf` against the installed package's copy. Nothing is said for an
+ * identical or an absent copy (the proxy step says what a missing file costs); a differing one is offered for
+ * replacement, shown and asked. Returns true when it was replaced.
+ *
+ * `--yes` DOES NOT COVER IT, and that is the one departure from up's consent rule ("--yes accepts them all"): every other
+ * action --yes accepts creates or starts something, or replaces a container this project made, while this replaces a
+ * FILE that reads the same whether an upgrade left it behind or the operator edited it on purpose, and nothing here can
+ * tell the two apart. So the lines are printed and a person answers, as for removing a proxy jobs are using. The old
+ * bytes are kept beside it either way (`replaceProxyConfCopy`), since an edit lost to a wrong "y" is still the
+ * operator's.
+ */
+async function proxyConfRefreshStep({ fs, cwd, out, prompt, summary, readPackagedConf, now, yes }) {
+	const rel = "deploy/egress-proxy.conf";
+	const path = join(cwd, rel);
+	// A directory there is the proxy step's to say (it starts nothing on one), so it is not read as a copy here.
+	if (pathIsDirectory(fs, path)) return false;
+	const judged = judgeProxyConfCopy({ path, read: (p) => fs.readFileSync(p, "utf8"), readPackaged: readPackagedConf });
+	if (judged.state === "absent" || judged.state === "same") return false;
+	if (judged.state !== "differs") {
+		const why = judged.state === "no-package" ? `the package's own copy (${PACKAGED_EGRESS_PROXY_CONF}) could not be read (${judged.error})` : `it could not be read (${judged.error})`;
+		out(`\n⚠ ${rel} was not compared with ${packageCopyName()}: ${why}\n`);
+		summary.push(["egress rules", `not compared: ${why}`]);
+		return false;
+	}
+	out(`\n⚠ ${rel} differs from ${packageCopyName()}: ${judged.summary}. An upgrade does not rewrite it, so it is either an older version's rules or an edit of your own (\`diff ${rel} ${PACKAGED_EGRESS_PROXY_CONF}\` shows which)\n`);
+	if (yes) out("--yes does not cover replacing a file that may hold your own edits: answer below\n");
+	const accepted = await consent(
+		`up would replace it with ${packageCopyName()}, keeping yours beside it:`,
+		[`cp ${rel} ${rel}.bak-<timestamp>`, `write ${PACKAGED_EGRESS_PROXY_CONF}'s content beside ${rel}, then rename it over ${rel}`],
+		{ yes: false, out, prompt },
+	);
+	if (!accepted) {
+		out(`skipped: ${rel} is left as it is; \`pi-dispatch up\` offers this again\n`);
+		summary.push(["egress rules", `${rel} differs from ${packageCopyName()}, left as it is (declined)`]);
+		return false;
+	}
+	const done = replaceProxyConfCopy({ path, text: judged.packaged, fs, now });
+	if (!done.ok) {
+		out(`✗ not replaced: ${done.reason}\n`);
+		summary.push(["egress rules", `NOT replaced: ${done.reason}`]);
+		return false;
+	}
+	const backup = `${rel}${done.backup.slice(path.length)}`;
+	out(`✓ replaced ${rel} with ${packageCopyName()}; yours is kept as ${backup}. squid reads it only at start, so a proxy already running or paused is offered a restart below\n`);
+	summary.push(["egress rules", `${rel} replaced with ${packageCopyName()} (the old one is ${backup})`]);
+	return true;
 }
 
 /**

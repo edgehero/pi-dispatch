@@ -9984,3 +9984,60 @@ test("doctor takes a valkey:// VALKEY_URL as redis:// (gate round 3 of PR #478)"
 	assert.doesNotMatch(text(), /does not connect with|names no database/);
 	assert.deepEqual(asked, ["valkey://127.0.0.1:6379/2"]);
 });
+
+// Issue #484: a copy of the proxy's rules that differs from the installed package's is said, as a ⚠ naming the file and
+// the refresh; an identical or an absent one is not, and neither is a copy no shipped proxy mounts.
+test("doctor warns when this folder's deploy/egress-proxy.conf differs from the package's copy, and is silent when it matches (#484)", async () => {
+	const folder = tempDir("pi-doctor-484-");
+	mkdirSync(join(folder, "deploy"));
+	writeFileSync(join(folder, "egress-allowlist.conf"), "api.anthropic.com\n");
+	writeFileSync(join(folder, "deploy/egress-proxy.conf"), "http_port 3128\n");
+	const run = async (packaged, env = {}, plan = {}) => {
+		const { out, text } = capture();
+		const code = await runDoctor(ghEnv({ PI_EGRESS: "1", ...env }), { ...ghDeps(out, egressPlan({ [PROXY_KEY]: proxyAnswer("healthy", "running", { cwd: folder }), "gh auth status": { code: 0, output: ghStatusOutput }, ...plan })), cwd: folder, readPackagedProxyConf: () => packaged });
+		return { code, text: text() };
+	};
+	const stale = await run("http_port 3128\nacl allowed dstdomain -n \"/etc/pi-dispatch/allowlist.conf\"\n");
+	assert.match(stale.text, /⚠ deploy\/egress-proxy\.conf in this folder differs from the package's copy \([^)]+\) \(0 lines of it not in the package's copy, 1 line of the package's not in it\), so the egress proxy runs rules this version did not ship\n/);
+	assert.match(stale.text, /→ an upgrade does not rewrite it, so this is either an older version's rules or your own edit: `diff \S+\/deploy\/egress-proxy\.conf \S+egress-proxy\.conf` shows which\. To take this version's, `pi-dispatch up` from this folder offers to replace it with the package's copy, keeping this one as a backup, and then to restart the proxy, since squid reads its rules only at start\. Leave it if the difference is yours/);
+	assert.doesNotMatch(stale.text, /✗ deploy\/egress-proxy\.conf/, "a warning, never a failure: a differing copy still enforces the allowlist");
+	const same = await run("http_port 3128\n");
+	assert.doesNotMatch(same.text, /egress-proxy\.conf in this folder (differs|could not)/);
+	assert.equal(same.code, stale.code, "the warning moves no exit code");
+	// Said before the daemon is asked: a file compare holds whatever docker answers.
+	const down = await run("other\n", {}, { "docker version": 1 });
+	assert.match(down.text, /⚠ deploy\/egress-proxy\.conf in this folder differs from the package's copy/);
+	// A proxy PI_EGRESS_PROXY names mounts no copy of this folder's, and an unarmed policy has no proxy to speak of.
+	for (const env of [{ PI_EGRESS_PROXY: "my-squid" }, { PI_EGRESS: "0" }]) {
+		const other = await run("other\n", env);
+		assert.doesNotMatch(other.text, /egress-proxy\.conf in this folder differs/, JSON.stringify(env));
+	}
+	// Absent: the missing-file lines elsewhere are the story; nothing here.
+	const empty = tempDir("pi-doctor-484-empty-");
+	const { out, text } = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), { ...ghDeps(out, egressPlan({ [PROXY_KEY]: proxyAnswer("healthy", "running"), "gh auth status": { code: 0, output: ghStatusOutput } })), cwd: empty, readPackagedProxyConf: () => "other\n" });
+	assert.doesNotMatch(text(), /egress-proxy\.conf in this folder (differs|could not)/);
+});
+
+test("doctor on the podman venue warns when the account's rules copy differs from the package's, naming service install --force (#484)", async () => {
+	const COPY = `${PODMAN_HOME}/.config/pi-dispatch/egress-proxy.conf`;
+	const run = async ({ copy, packaged = "new rules\n", env = {} }) => {
+		const { out, text } = capture();
+		const readProxyConf = (p) => {
+			if (p === COPY && copy !== null) return copy;
+			throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+		};
+		const code = await runDoctor(podmanEnv({ PI_EGRESS: "1", ...env }), podmanDeps(out, podmanPlan({ proxy: "running" }), [], { readProxyConf, readPackagedProxyConf: () => packaged }));
+		return { code, text: text() };
+	};
+	const stale = await run({ copy: "old rules\n" });
+	assert.match(stale.text, /⚠ podman: the egress proxy's rules copy \/home\/op\/\.config\/pi-dispatch\/egress-proxy\.conf differs from the package's copy \([^)]+\) \(1 line of it not in the package's copy, 1 line of the package's not in it\), so the egress proxy runs rules this version did not ship\n/);
+	assert.match(stale.text, /To take this version's, `pi-dispatch service install` lists it among what differs and `pi-dispatch service install --force` replaces it and restarts the proxy \(squid reads its rules only at start\)/);
+	const same = await run({ copy: "new rules\n" });
+	assert.doesNotMatch(same.text, /rules copy .* (differs|could not)/);
+	assert.equal(same.code, stale.code, "a warning moves no exit code");
+	const absent = await run({ copy: null });
+	assert.doesNotMatch(absent.text, /rules copy/);
+	const custom = await run({ copy: "old rules\n", env: { PI_EGRESS_PROXY: "my-squid" } });
+	assert.doesNotMatch(custom.text, /rules copy/, "a proxy PI_EGRESS_PROXY names mounts no copy of ours");
+});

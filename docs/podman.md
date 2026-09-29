@@ -807,6 +807,13 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    exit 126) and the unit failed. A copy this account owns can always be relabelled. A changed copy restarts the
    proxy, since squid reads it only at start.
 
+   An upgrade does not rewrite that copy on its own. After one that changed the shipped rules, `doctor` warns that
+   `~/.config/pi-dispatch/egress-proxy.conf` differs from the package's copy (⚠: the old rules still enforce the
+   allowlist, and the difference could be an edit of yours, which `diff` against the package's file shows). `service
+   install` lists it among the files that differ from what this version renders, and `service install --force`
+   replaces it and restarts the proxy; `--force` replaces every other item that list names too, so read the list
+   first. `up`, when it has a unit to install, installs nothing while a stack file differs, and says so.
+
    Both refuse, installing nothing, when this account's user manager runs with another account's `XDG_RUNTIME_DIR`
    or `XDG_CONFIG_HOME` (`systemctl --user show-environment` shows it; a line in `/etc/environment`, which Ubuntu's
    user managers read, is the usual source). Every unit inherits that environment: measured on Podman 4.9.3, another

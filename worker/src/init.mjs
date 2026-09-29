@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { parseBackendList, venuesOf } from "./backends.mjs";
 import { deploymentVenueEnv } from "./deployment-venue.mjs";
 import { setEnvKeyIfEmpty } from "./env-file.mjs";
+import { PACKAGED_EGRESS_PROXY_CONF } from "./egress-conf-copy.mjs";
 import { VALKEY_PASSWORD_KEY, newValkeyPassword } from "./valkey-auth.mjs";
 
 const EMPTY_TRIGGERS = `${JSON.stringify({ triggers: [] }, null, 2)}\n`;
@@ -64,14 +65,9 @@ api.anthropic.com
 registry.npmjs.org
 `;
 
-/**
- * The proxy's RULES (INT-EGRESS-POLICY-CONTRACT), the package's own copy: `../deploy/` from this module, the layout
- * service.mjs resolves its templates by, which is worker/deploy in a checkout (byte-identical to the root deploy/,
- * pinned by worker/test/publish.test.mjs) and the shipped deploy/ under npm. Issue #480: the docker proxy mounts
- * `./deploy/egress-proxy.conf` from the deployment folder, and a folder made by `npx @edgehero/pi-dispatch up` had
- * none, so `up` declined to start the proxy the policy is on by default for and every job was refused before it spent.
- */
-export const PACKAGED_EGRESS_PROXY_CONF = fileURLToPath(new URL("../deploy/egress-proxy.conf", import.meta.url));
+// The package's own copy of the proxy's rules, which init scaffolds (issue #480). It lives in egress-conf-copy.mjs since
+// issue #484, beside the comparison doctor and `up` make against it, and is re-exported here for init's callers.
+export { PACKAGED_EGRESS_PROXY_CONF };
 
 /**
  * `deps.env` is the caller's environment (the CLI's and doctor's pass theirs), and `deps.venues` a venue set the caller

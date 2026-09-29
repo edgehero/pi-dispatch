@@ -7,6 +7,7 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { defaultPrompt, runUp, valkeyContainerPublishes } from "../src/up.mjs";
 import { NETNS_KEEPER_FORMAT } from "../src/podman-stack.mjs";
 import { runInit } from "../src/init.mjs";
+import { readPackagedProxyConf } from "../src/egress-conf-copy.mjs";
 import { VALKEY_HEALTH_SCRIPT, VALKEY_START_SCRIPT } from "../src/valkey-auth.mjs";
 
 // A fake `spawn`, mirroring doctor.test.mjs: plan keys are command-line prefixes ("docker version",
@@ -62,7 +63,7 @@ const PASSWORD = "5eca1ed0".repeat(8);
 
 // Everything injected, everything recorded. `files` seeds the in-memory fs (path → text); the fake
 // init deliberately creates nothing, so a test that wants a .env after init seeds it up front.
-function harness({ plan = {}, listening = true, answers = [], files = {}, doctorCode = 0, argv = [], env = { PI_PROVIDER: "anthropic" }, cwd = "/deploy", platform = "linux", logsDirPathFn, settingsFilePathFn, extra = {}, failWrites = {}, failUnlinks = {} } = {}) {
+function harness({ plan = {}, listening = true, answers = [], files = {}, doctorCode = 0, argv = [], env = { PI_PROVIDER: "anthropic" }, cwd = "/deploy", platform = "linux", logsDirPathFn, settingsFilePathFn, extra = {}, failWrites = {}, failUnlinks = {}, links = new Set(), packagedConf = "conf\n" } = {}) {
 	// The podman tests (those that inject a podman info reader) get what a real login has unless they say otherwise: a
 	// user manager to talk to (XDG_RUNTIME_DIR, round 2 E8) and a podman that answers "no such container" for the two
 	// names the stack would claim (E3: any other failure now refuses).
@@ -121,7 +122,18 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 			},
 			statSync: () => ({ mode: 0o100600 }),
 			chmodSync: () => {},
+			// Issue #484: what the rules refresh asks, which follows no link. A path in `links` is a symlink; a path some
+			// stored file sits under is a directory.
+			lstatSync: (p) => {
+				const kind = links.has(p) ? "link" : store.has(p) ? "file" : [...store.keys()].some((k) => k.startsWith(`${p}/`)) ? "dir" : null;
+				if (!kind) throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+				return { mode: 0o100644, isSymbolicLink: () => kind === "link", isDirectory: () => kind === "dir", isFile: () => kind === "file" };
+			},
 		},
+		// Issue #484: the package's rules, which every fixture's "conf\n" matches unless a test says otherwise, so a test
+		// about something else is never asked about a refresh.
+		readPackagedConf: () => packagedConf,
+		now: () => Date.UTC(2026, 8, 29, 10, 15, 0),
 		probeTcp: async () => listening,
 		cwd,
 		platform,
@@ -1252,11 +1264,13 @@ test("up in an empty folder reaches the egress proxy start with no missing-file 
 		listening: true,
 		argv: ["--yes"],
 		cwd: dir,
-		extra: { fs: realFs, runInitFn: runInit },
+		// The real package's rules too (issue #484), which init just copied: the fresh copy is identical, so nothing asks.
+		extra: { fs: realFs, runInitFn: runInit, readPackagedConf: readPackagedProxyConf },
 	});
 	await h.run();
 	const text = h.text();
 	assert.ok(realFs.existsSync(join(dir, "deploy", "egress-proxy.conf")), "init scaffolded the proxy's rules");
+	assert.doesNotMatch(text, /differs from the package's copy|egress rules/, "a copy identical to the package's is silent (#484)");
 	assert.doesNotMatch(text, /is not here/, text);
 	assert.deepEqual(dockerMutations(h).filter((a) => a[0] === "run" && a.includes("pi-dispatch-egress-proxy")), [EGRESS_RUN], "the proxy is started from the shown argv");
 	assert.match(text, /started pi-dispatch-egress-proxy/);
@@ -2227,4 +2241,144 @@ test("up records an adopted volume by its CreatedAt, and that very volume is thi
 	const labelled = harness({ plan: { ...base, "docker volume inspect": volumeRecord("/deploy") }, listening: false, argv: ["--yes"], files });
 	await labelled.run();
 	assert.ok(!labelled.store.has("/deploy/.pi-dispatch-valkey-volume.json"));
+});
+
+// Issue #484: the folder's deploy/egress-proxy.conf against the installed package's copy. The harness's fixtures hold
+// "conf\n" and its package copy is "conf\n", so every other test is silent; these hand in a package copy that differs.
+const CONF = "/deploy/deploy/egress-proxy.conf";
+const NEW_RULES = "http_port 3128\nacl allowed dstdomain -n \"/etc/pi-dispatch/allowlist.conf\"\n";
+const BACKUP = `${CONF}.bak-20260929T101500Z`;
+const RESTART = ["restart", "pi-dispatch-egress-proxy"];
+const restarts = (h) => h.calls.filter((c) => c.cmd === "docker" && c.args[0] === "restart").map((c) => c.args);
+
+test("up offers to refresh a deploy/egress-proxy.conf that differs from the package's, and a declined offer changes nothing (#484)", async () => {
+	const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running") }, listening: true, files: PROXY_FILES, argv: ["--yes"], answers: ["n"], packagedConf: NEW_RULES });
+	assert.equal(await h.run(), 0);
+	const text = h.text();
+	// Shown: which file, a summary of how it differs, the diff that shows the rest, and the two steps a yes takes.
+	assert.match(text, /⚠ deploy\/egress-proxy\.conf differs from the package's copy[^:]*: 1 line of it not in the package's copy, 2 lines of the package's not in it\. An upgrade does not rewrite it/);
+	assert.match(text, /`diff deploy\/egress-proxy\.conf \S+egress-proxy\.conf` shows which/);
+	assert.match(text, /up would replace it with the package's copy[^:]*, keeping yours beside it:\n\s+cp deploy\/egress-proxy\.conf deploy\/egress-proxy\.conf\.bak-<timestamp>\n\s+write \S+ content beside deploy\/egress-proxy\.conf, then rename it over deploy\/egress-proxy\.conf\n/);
+	// Asked of a person even under --yes: the file may hold the operator's own edit.
+	assert.match(text, /--yes does not cover replacing a file that may hold your own edits: answer below\n/);
+	assert.equal(h.promptCalls.length, 1, "the one question is the refresh; --yes answered the rest");
+	// Declined: the file is byte for byte what it was, nothing else was written beside it, the proxy is left running.
+	assert.equal(h.store.get(CONF), "conf\n");
+	assert.deepEqual([...h.store.keys()].filter((k) => k.startsWith(`${CONF}.`) || k.includes(".egress-proxy.conf.tmp-")), []);
+	assert.deepEqual(restarts(h), []);
+	assert.match(text, /skipped: deploy\/egress-proxy\.conf is left as it is; `pi-dispatch up` offers this again/);
+	assert.match(text, /egress rules\s+deploy\/egress-proxy\.conf differs from the package's copy[^,]*, left as it is \(declined\)/);
+	assert.match(text, /✓ Egress proxy already present/);
+});
+
+test("up's accepted refresh replaces the copy through a temp file, keeps the old one, and restarts a running proxy (#484)", async () => {
+	const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running"), "docker restart": 0 }, listening: true, files: PROXY_FILES, argv: ["--yes"], answers: ["y"], packagedConf: NEW_RULES });
+	const renames = [];
+	const rename = h.deps.fs.renameSync;
+	h.deps.fs.renameSync = (from, to) => {
+		renames.push([from, to]);
+		rename(from, to);
+	};
+	assert.equal(await h.run(), 0);
+	const text = h.text();
+	assert.equal(h.store.get(CONF), NEW_RULES, "the package's rules, byte for byte");
+	assert.equal(h.store.get(BACKUP), "conf\n", "the old copy kept, named by the injected clock");
+	// Atomic: written beside it in the same directory under a temp name, then renamed over it; no temp file left.
+	assert.equal(renames.length, 1, JSON.stringify(renames));
+	assert.match(renames[0][0], /^\/deploy\/deploy\/\.egress-proxy\.conf\.tmp-[0-9a-f]+$/);
+	assert.equal(renames[0][1], CONF);
+	assert.deepEqual([...h.store.keys()].filter((k) => k.includes(".tmp-")), []);
+	assert.match(text, /✓ replaced deploy\/egress-proxy\.conf with the package's copy[^;]*; yours is kept as deploy\/egress-proxy\.conf\.bak-20260929T101500Z\. squid reads it only at start/);
+	// The running proxy still holds the old file, so it is restarted, shown and (no job network on it) accepted by --yes.
+	assert.match(text, /up would restart it so squid reads the refreshed deploy\/egress-proxy\.conf:\n\s+docker restart pi-dispatch-egress-proxy\n--yes: accepted\n/);
+	assert.deepEqual(restarts(h), [RESTART]);
+	assert.deepEqual(dockerMutations(h), [], "restarted, never removed or recreated");
+	assert.match(text, /egress rules\s+deploy\/egress-proxy\.conf replaced with the package's copy/);
+	assert.match(text, /egress\s+restarted pi-dispatch-egress-proxy on the refreshed rules/);
+});
+
+test("up never restarts, under --yes, a proxy jobs are using after a refresh, and a declined restart says the old rules still run (#484)", async () => {
+	const busy = proxyState("running", { networks: ["pi-dispatch-egress-out", "pi-job-abc-net"] });
+	const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: busy }, listening: true, files: PROXY_FILES, argv: ["--yes"], answers: ["y", "n"], packagedConf: NEW_RULES });
+	assert.equal(await h.run(), 0);
+	const text = h.text();
+	assert.equal(h.store.get(CONF), NEW_RULES);
+	assert.match(text, /--yes does not cover restarting a proxy that jobs are using/);
+	assert.match(text, /It is attached to pi-job-abc-net: those jobs lose their egress while it restarts/);
+	assert.equal(h.promptCalls.length, 2, "the refresh, then the restart");
+	assert.deepEqual(restarts(h), []);
+	assert.match(text, /skipped: it runs the old rules until `docker restart pi-dispatch-egress-proxy`/);
+});
+
+test("up refuses to refresh a deploy/egress-proxy.conf that is a symlink, or one under a symlinked deploy/, and writes nothing (#484)", async () => {
+	for (const link of [CONF, "/deploy/deploy"]) {
+		const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running"), "docker restart": 0 }, listening: true, files: PROXY_FILES, argv: ["--yes"], answers: ["y"], packagedConf: NEW_RULES, links: new Set([link]) });
+		assert.equal(await h.run(), 0);
+		const text = h.text();
+		assert.match(text, link === CONF ? /✗ not replaced: \/deploy\/deploy\/egress-proxy\.conf is a symlink/ : /✗ not replaced: \/deploy\/deploy is a symlink/, text);
+		assert.equal(h.store.get(CONF), "conf\n");
+		assert.deepEqual([...h.store.keys()].filter((k) => k.startsWith(`${CONF}.`) || k.includes(".tmp-")), [], "no backup, no temp file");
+		assert.deepEqual(restarts(h), [], "nothing was refreshed, so nothing is restarted");
+		assert.match(text, /egress rules\s+NOT replaced:/);
+	}
+});
+
+test("up says nothing about the rules for an identical copy, a custom PI_EGRESS_PROXY or an unarmed policy (#484)", async () => {
+	const same = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running") }, listening: true, files: PROXY_FILES, argv: ["--yes"] });
+	await same.run();
+	assert.doesNotMatch(same.text(), /differs from the package's copy|egress rules/);
+	assert.equal(same.promptCalls.length, 0);
+	for (const env of [{ PI_PROVIDER: "anthropic", PI_EGRESS_PROXY: "my-squid" }, { PI_PROVIDER: "anthropic", PI_EGRESS: "0" }]) {
+		const h = harness({ env, plan: { ...green, "docker inspect": { code: 0, output: "running\n" } }, listening: true, files: PROXY_FILES, argv: ["--yes"], packagedConf: NEW_RULES });
+		await h.run();
+		assert.doesNotMatch(h.text(), /differs from the package's copy|egress rules/, JSON.stringify(env));
+		assert.equal(h.store.get(CONF), "conf\n");
+	}
+});
+
+test("up refreshes the rules before a stopped proxy is started, so the start reads the new file (#484)", async () => {
+	const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("exited"), "docker start pi-dispatch-egress-proxy": 0 }, listening: true, files: PROXY_FILES, argv: ["--yes"], answers: ["y"], packagedConf: NEW_RULES });
+	const order = [];
+	const write = h.deps.fs.renameSync;
+	h.deps.fs.renameSync = (from, to) => {
+		order.push("rename");
+		write(from, to);
+	};
+	const spawn = h.deps.spawn;
+	h.deps.spawn = (cmd, args, opts) => {
+		if (cmd === "docker" && args[0] === "start") order.push("start");
+		return spawn(cmd, args, opts);
+	};
+	assert.equal(await h.run(), 0);
+	assert.deepEqual(order, ["rename", "start"]);
+	assert.deepEqual(restarts(h), [], "a start reads the file; no restart on top");
+});
+
+test("a refreshed copy under a PAUSED proxy is unpaused and then restarted, never only unpaused on the old rules (PR #491's review)", async () => {
+	const paused = proxyState("paused");
+	const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: paused, "docker unpause": 0, "docker restart": 0 }, listening: true, files: PROXY_FILES, argv: ["--yes"], answers: ["y"], packagedConf: NEW_RULES });
+	assert.equal(await h.run(), 0);
+	const text = h.text();
+	assert.equal(h.store.get(CONF), NEW_RULES);
+	assert.match(text, /a proxy already running or paused is offered a restart below/);
+	assert.match(text, /up would unpause and then restart it so squid reads the refreshed deploy\/egress-proxy\.conf:\n\s+docker unpause pi-dispatch-egress-proxy\n\s+docker restart pi-dispatch-egress-proxy\n--yes: accepted\n/);
+	const acted = h.calls.filter((c) => c.cmd === "docker" && ["unpause", "restart", "start", "rm", "run"].includes(c.args[0])).map((c) => c.args[0]);
+	assert.deepEqual(acted, ["unpause", "restart"]);
+	assert.match(text, /egress\s+unpaused and restarted pi-dispatch-egress-proxy on the refreshed rules/);
+	// Jobs attached: --yes does not answer, and a declined restart leaves it paused on the old rules, said.
+	const busy = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("paused", { networks: ["pi-dispatch-egress-out", "pi-job-abc-net"] }) }, listening: true, files: PROXY_FILES, argv: ["--yes"], answers: ["y", "n"], packagedConf: NEW_RULES });
+	await busy.run();
+	assert.match(busy.text(), /--yes does not cover restarting a proxy that jobs are using/);
+	assert.ok(!busy.calls.some((c) => c.cmd === "docker" && ["unpause", "restart"].includes(c.args[0])), "nothing run on a no");
+	assert.match(busy.text(), /skipped: it stays paused, and holds the old rules until `docker unpause pi-dispatch-egress-proxy && docker restart pi-dispatch-egress-proxy`/);
+	// Not refreshed (identical): a paused proxy is unpaused as before, no restart.
+	const plain = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: paused, "docker unpause": 0 }, listening: true, files: PROXY_FILES, argv: ["--yes"] });
+	await plain.run();
+	assert.deepEqual(plain.calls.filter((c) => c.cmd === "docker" && ["unpause", "restart"].includes(c.args[0])).map((c) => c.args[0]), ["unpause"]);
+});
+
+test("up's offer names a copy that differs only in its line endings as that (PR #491's review)", async () => {
+	const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running") }, listening: true, files: { ...PROXY_FILES, [CONF]: "conf\r\n" }, argv: ["--yes"], answers: ["n"] });
+	await h.run();
+	assert.match(h.text(), /⚠ deploy\/egress-proxy\.conf differs from the package's copy[^:]*: only in its line endings, CRLF here and LF in the package's\. /);
 });

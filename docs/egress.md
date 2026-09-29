@@ -43,6 +43,21 @@ proxy's rules, copied from the installed package and also never overwritten: the
 from the deployment folder, so a folder made without a clone gets them too. You edit the allowlist, never
 the rules.
 
+**An upgrade does not rewrite the rules.** Never overwritten means a newer version's rules stay in the
+package until you take them, so `doctor` compares this folder's `deploy/egress-proxy.conf` with the installed
+package's copy and warns (⚠, not ✗: a differing copy still enforces the allowlist, and the difference may be
+an edit of yours) naming both files, so `diff` shows which it is. `pi-dispatch up` offers the refresh: it
+shows how the two differ, asks (`--yes` does not answer this one, since only you know whether the difference
+is yours), keeps your copy as `deploy/egress-proxy.conf.bak-<timestamp>`, and writes the package's copy
+beside it before renaming it into place; it refuses a `deploy/egress-proxy.conf` or a `deploy/` that is a
+symlink. squid reads its rules only at start, and a running or paused container still holds the file it
+started with, so `up` then offers `docker restart pi-dispatch-egress-proxy` for a proxy already running, and
+`docker unpause` followed by that restart for a paused one (asked, not taken by `--yes`, while jobs are
+attached to it); a stopped proxy it starts, or one it creates or replaces, in the same pass reads the new
+file anyway. On the Podman venue the rules live in an account-owned
+copy instead, which `doctor` compares the same way and `pi-dispatch service install --force` refreshes
+([`podman.md`](podman.md)).
+
 ```
 api.anthropic.com          # the provider: every turn of every job
 .github.com                # your forge: the push and the pull request

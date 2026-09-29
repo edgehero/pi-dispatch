@@ -52,7 +52,7 @@
 import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { homedir, networkInterfaces, release as osRelease, tmpdir, userInfo } from "node:os";
-import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_START, STACK_KEYS, STARTED_AT_FORMAT, VALKEY_SHARED_KEY, judgeNetnsKeeper, judgeValkeyListeners, netnsKeeperRemedy, pinnedValkeyUrl, podmanNeedsNetnsKeeper, probeTcpAddress, readSubuidRanges, proxyRestartAdvice, readLinger, readValkeyKeys, valkeySharedOn, valkeyTarget } from "./podman-stack.mjs";
+import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_START, STACK_KEYS, STARTED_AT_FORMAT, VALKEY_SHARED_KEY, judgeNetnsKeeper, judgeValkeyListeners, netnsKeeperRemedy, pinnedValkeyUrl, podmanNeedsNetnsKeeper, probeTcpAddress, proxyConfCopyPath, readSubuidRanges, proxyRestartAdvice, readLinger, readValkeyKeys, valkeySharedOn, valkeyTarget } from "./podman-stack.mjs";
 import { basename, dirname, isAbsolute, join, delimiter, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
@@ -74,6 +74,7 @@ import { deploymentVenueEnv, sharedShellIgnored } from "./deployment-venue.mjs";
 import { readDeploymentEnv, resolveServiceEnv, serviceEnvFileOf, serviceEnvLoader } from "./service-env.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
 import { PROXY_STATE_FORMAT, parseProxyState, shippedProxyDrift } from "./egress-proxy-state.mjs";
+import { PACKAGED_EGRESS_PROXY_CONF, judgeProxyConfCopy, packageCopyName, readPackagedProxyConf } from "./egress-conf-copy.mjs";
 import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, observePodman, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { PODMAN_PINNED_FLAGS, buildPodmanRunArgs, containerSpec, podmanArgsFromSpec } from "./docker-run.mjs";
@@ -213,6 +214,9 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		proxyFilesExist,
 		// PR #488's review: whether a path of the proxy's two files is a DIRECTORY, which docker would mount as the file.
 		proxyFileIsDirectory,
+		// Issue #484: how a copy of the proxy's rules is read, and the installed package's copy it is compared with.
+		readProxyConf,
+		readPackagedProxyConf: readPackagedConf,
 		isAlive = defaultIsAlive,
 		pid = process.pid,
 		nonce = randomBytes(6).toString("hex"),
@@ -324,7 +328,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -4276,6 +4280,37 @@ function statIsDirectory(path) {
 }
 
 /**
+ * Issue #484: one copy of the proxy's rules against the installed package's (`judgeProxyConfCopy`), as the line doctor
+ * prints, or null for nothing to say. SILENT when the two are identical, and when the copy is absent, since whatever
+ * mounts it reports that already (docker: the missing-file and directory lines; podman: the proxy's own state line).
+ *
+ * ⚠, never ✗, for a copy that differs: a differing copy still starts a proxy that enforces the allowlist, and the
+ * difference may be an edit the operator made on purpose, which nothing here can tell from an upgrade that left the
+ * file behind. The fix therefore names both readings: the refresh, and `diff` to see which one this is.
+ *
+ * Seams: `readProxyConf(path)` reads the copy (the real disk by default, as `proxyFilesExist` does, since the shared
+ * `fileExists` answers yes to everything in most tests) and `readPackagedProxyConf()` the package's.
+ */
+function proxyConfCopyCheck({ path, name, seams, skip = () => false, refresh }) {
+	const { readProxyConf = (p) => readFileSync(p, "utf8"), readPackagedProxyConf: readPackaged = readPackagedProxyConf } = seams;
+	if (skip()) return null;
+	const judged = judgeProxyConfCopy({ path, read: readProxyConf, readPackaged });
+	if (judged.state === "absent" || judged.state === "same") return null;
+	if (judged.state === "no-package") {
+		return { ok: false, warn: true, label: `${name} could not be compared with the package's copy, which could not be read (${PACKAGED_EGRESS_PROXY_CONF}: ${judged.error})`, fix: "the installed package is missing a file it ships; reinstall it (`npm i -g @edgehero/pi-dispatch`, or the way it was installed), then re-run doctor" };
+	}
+	if (judged.state === "unreadable") {
+		return { ok: false, warn: true, label: `${name} could not be read (${judged.error}), so whether it matches ${packageCopyName()} is not known`, fix: `make ${path} readable by this account, then re-run doctor` };
+	}
+	return {
+		ok: false,
+		warn: true,
+		label: `${name} differs from ${packageCopyName()} (${judged.summary}), so the egress proxy runs rules this version did not ship`,
+		fix: `an upgrade does not rewrite it, so this is either an older version's rules or your own edit: \`diff ${path} ${PACKAGED_EGRESS_PROXY_CONF}\` shows which. To take this version's, ${refresh}. Leave it if the difference is yours (hosts belong in egress-allowlist.conf, which no refresh touches)`,
+	};
+}
+
+/**
  * REQ-EGRESS-ALLOWLIST. What the shipped egress policy actually is on this host, read back from docker
  * rather than assumed from the compose file that was supposed to create it.
  *
@@ -4323,6 +4358,19 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	if (!armed) return [];
 	const proxy = egressProxyName(env);
 	const checks = [];
+	// Issue #484: this folder's copy of the proxy's rules against the installed package's, before the daemon is asked,
+	// since it is a file compare and holds whatever docker answers. Only for the shipped proxy, which is the one that
+	// mounts this folder's copy; a proxy PI_EGRESS_PROXY names runs whatever rules its operator gave it.
+	if (proxy === DEFAULT_EGRESS_PROXY) {
+		const stale = proxyConfCopyCheck({
+			path: join(seams.cwd, "deploy/egress-proxy.conf"),
+			name: "deploy/egress-proxy.conf in this folder",
+			seams,
+			skip: () => proxyFileIsDirectory(join(seams.cwd, "deploy/egress-proxy.conf")),
+			refresh: `\`pi-dispatch up\` from this folder offers to replace it with the package's copy, keeping this one as a backup, and then to restart the proxy, since squid reads its rules only at start`,
+		});
+		if (stale) checks.push(stale);
+	}
 
 	if (dockerCode !== 0) {
 		checks.push({
@@ -5830,6 +5878,19 @@ export async function podmanChecks(env, seams, { jobImage, jobImageNote = "" }) 
 		// built like a job's.
 		if (proxyRunning && seams.live !== true) {
 			checks.push({ ok: false, warn: true, label: "podman: the egress allowlist is read back by `pi-dispatch doctor --live` on this venue, not by this run", fix: "run `pi-dispatch doctor --live`: its egress canary runs two containers built like a podman job's (the job user, --userns=keep-id, the venue's pinned flags) on a job-shaped --internal network under this account's Podman, one that must reach the provider through the proxy and one that must not reach an unlisted host" });
+		}
+		// Issue #484: the account-owned copy of the rules the shipped unit mounts, against the installed package's. `service
+		// install` compares it on every run and replaces a differing one only under --force, and `up` installs nothing
+		// while it differs, so after an upgrade that changed the shipped rules neither said so unless asked to install. A
+		// proxy PI_EGRESS_PROXY names mounts no copy of ours.
+		if (proxy === DEFAULT_EGRESS_PROXY) {
+			const stale = proxyConfCopyCheck({
+				path: proxyConfCopyPath(home),
+				name: `podman: the egress proxy's rules copy ${proxyConfCopyPath(home)}`,
+				seams,
+				refresh: "`pi-dispatch service install` lists it among what differs and `pi-dispatch service install --force` replaces it and restarts the proxy (squid reads its rules only at start); --force also replaces every other item that list names",
+			});
+			if (stale) checks.push(stale);
 		}
 		const keeper = await netnsKeeperCheck(spawn, info?.version, { proxy, now: typeof seams.wallClock === "function" ? seams.wallClock : Date.now });
 		keeperBlocked = keeper.keeperBlocked ?? null;
