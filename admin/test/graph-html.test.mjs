@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildGraphScene, clip, clipColumns, drawnColumns, FIT_JS, GRAPH_HTML_KINDS, GLYPH, labelColumns, PAGE_JS } from "../src/graph-html.mjs";
+import { buildGraphScene, clip, clipColumns, drawnColumns, FIT_JS, GRAPH_HTML_KINDS, GLYPH, labelColumns, PAGE_JS, SPEND_BADGE_DY } from "../src/graph-html.mjs";
 import { columnsOf } from "../src/panel.mjs";
 import { buildInsightsHtml } from "../src/insights-html.mjs";
 import { buildGraphModel, findLoopHints, GRAPH_EDGE_KINDS, GRAPH_NODE_KINDS, parseSkillMeta } from "../src/graph-model.mjs";
@@ -161,7 +161,7 @@ function assertUnderRoutesClearChips(layout) {
     if (!w.self && !w.back) continue;
     const f = byId.get(w.from);
     const t = byId.get(w.to);
-    const runY = w.labelY - 12;
+    const runY = Math.max(...pathPoints(w.d).map(([, y]) => y)); // the run is the route's lowest line
     const lo = Math.min(t.x, f.x + f.w);
     const hi = Math.max(t.x, f.x + f.w);
     for (const n of layout.nodes) {
@@ -1105,4 +1105,503 @@ test("a measure that fails part way through a cut leaves the label as the builde
     return widthOf(t.firstChild.nodeValue);
   });
   assert.equal(g.children[1].firstChild.nodeValue, "M".repeat(20));
+});
+
+// ---- 9. nothing drawn sits on a wire, a loop or another label (issue #483) ----
+
+// The drawn path of a wire as points: every M/L/C segment sampled, so the pins below read the `d` the page
+// draws rather than any layout field that could disagree with it.
+function pathPoints(d) {
+  const tok = d.match(/[MLC]|-?\d+(?:\.\d+)?/g);
+  const pts = [];
+  let cur = null;
+  for (let i = 0; i < tok.length; ) {
+    const c = tok[i++];
+    const nums = [];
+    while (i < tok.length && !/[MLC]/.test(tok[i])) nums.push(Number(tok[i++]));
+    if (c === "M") {
+      cur = [nums[0], nums[1]];
+      pts.push(cur);
+    } else if (c === "L") {
+      const [x, y] = nums;
+      for (let k = 1; k <= 32; k++) pts.push([cur[0] + ((x - cur[0]) * k) / 32, cur[1] + ((y - cur[1]) * k) / 32]);
+      cur = [x, y];
+    } else {
+      const [ax, ay, bx, by, x, y] = nums;
+      for (let k = 1; k <= 32; k++) {
+        const t = k / 32;
+        const u = 1 - t;
+        pts.push([u * u * u * cur[0] + 3 * u * u * t * ax + 3 * u * t * t * bx + t * t * t * x, u * u * u * cur[1] + 3 * u * u * t * ay + 3 * u * t * t * by + t * t * t * y]);
+      }
+      cur = [x, y];
+    }
+  }
+  return pts;
+}
+
+// A wire label's drawn box at the 10px font: 5.5px a column (the measured average of the digits and
+// lowercase the labels are made of), 8px of ascent and 3 of descent around the baseline, centred.
+function wireLabelBox(w) {
+  const hw = (labelColumns(w.label) * 5.5) / 2;
+  return { x0: w.labelX - hw, x1: w.labelX + hw, y0: w.labelY - 8, y1: w.labelY + 3 };
+}
+const inBox = ([x, y], b) => x > b.x0 && x < b.x1 && y > b.y0 && y < b.y1;
+const boxesMeet = (a, b) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+
+// TIERED (above) is the #483 page's shape: three site cron triggers whose flows resolve in the three tiers,
+// with the forge group between the site folder and the tier groups those wires land in.
+
+test("a cron trigger's re-arm loop runs below its status line and spend badge, its pattern below the loop (issue #483)", () => {
+  // The badge the insights page lays over a trigger sat at the chip's top + 53 and the loop ran at + 55,
+  // so the dollar figure was drawn on the dashed loop. The loop now clears the whole under-chip stack.
+  for (const layout of [layoutOf(buildGraphModel(CANNED())), layoutOf(buildGraphModel(TIERED()))]) {
+    const byId = new Map(layout.nodes.map((n) => [n.id, n]));
+    const loops = layout.wires.filter((w) => w.kind === "cron-rearm");
+    assert.ok(loops.length >= 2, "the scene has re-arm loops to check");
+    for (const w of loops) {
+      const chip = byId.get(w.from);
+      const run = Math.max(...pathPoints(w.d).map(([, y]) => y));
+      const badgeBottom = chip.y + SPEND_BADGE_DY + 3;
+      assert.ok(run - 1 > badgeBottom, `loop ${w.id} runs at ${run}, on the badge line ending at ${badgeBottom}`);
+      assert.ok(w.labelY - 8 > run + 1, `the pattern of ${w.id} sits on its own loop`);
+    }
+    assertUnderRoutesClearChips(layout);
+  }
+});
+
+// A skill leaving for two skills of the next column, each with a count and a mention: a label stack per
+// (from, to) pair centred on the gap put both counts on the same pixels.
+const FAN = () => {
+  const sk = (name, extra = {}) => ({ name, isSub: false, group: null, aiTrigger: true, meta: null, mentions: [], loops: [], unread: false, ...extra });
+  return {
+    ...CANNED(),
+    triggers: { triggers: [{ type: "cron", index: 0, id: "a", pattern: "0 3 * * *", folder: "/srv/site", flow: "alpha", model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false }] },
+    schedulers: [],
+    folderSkills: { "/srv/site": { head: "a", truncated: false, unreachable: null, skills: [sk("alpha", { mentions: [{ name: "beta", strong: false }, { name: "gamma", strong: false }] }), sk("beta"), sk("gamma")] } },
+    injectedSkills: {},
+    cronStats: { byId: {} },
+    runJoin: { byIndex: {}, unattributed: 0 },
+    chainEdges: { edges: [["beta", 3], ["gamma", 5]].map(([childFlow, count]) => ({ parentFlow: "alpha", childFlow, target: "local:site", count, lastEndedAt: "2026-08-10T00:00:00.000Z" })), refusals: {}, truncated: false },
+  };
+};
+// Adjacent full-width chips (a 20px gap) on two rows, each pair with a count and a mention: stacking both
+// labels over the lower pair reached the chips of the row above.
+const TIGHT = () => {
+  const m = FAN();
+  const name = (c) => `${c}`.repeat(16);
+  const sk = (n, extra = {}) => ({ name: n, isSub: false, group: null, aiTrigger: true, meta: null, mentions: [], loops: [], unread: false, ...extra });
+  m.triggers.triggers = ["a", "b"].map((c, i) => ({ type: "cron", index: i, id: c, pattern: "0 3 * * *", folder: "/srv/site", flow: name(c), model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false }));
+  m.folderSkills["/srv/site"].skills = [sk(name("a"), { mentions: [{ name: name("c"), strong: false }] }), sk(name("b"), { mentions: [{ name: name("d"), strong: true }] }), sk(name("c")), sk(name("d"))];
+  m.chainEdges.edges = [["a", "c", 3], ["b", "d", 7]].map(([p, c, count]) => ({ parentFlow: name(p), childFlow: name(c), target: "local:site", count, lastEndedAt: "2026-08-10T00:00:00.000Z" }));
+  return m;
+};
+
+// A mention cycle on the first row (a back edge under it, whose label sat fixed under its run) and a wire
+// climbing to that row from the next one through the band under it.
+const CYCLE = () => {
+  const m = FAN();
+  const sk = (name, mentions) => ({ name, isSub: false, group: null, aiTrigger: false, meta: null, mentions: mentions.map((n) => ({ name: n, strong: false })), loops: [], unread: false });
+  m.triggers.triggers = ["a1", "c1"].map((flow, i) => ({ type: "cron", index: i, id: `t${flow}`, pattern: "0 3 * * *", folder: "/srv/site", flow, model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false }));
+  m.folderSkills["/srv/site"].skills = [sk("a1", ["b2"]), sk("b2", ["a1"]), sk("c1", ["b2"])];
+  m.chainEdges.edges = [{ parentFlow: "b2", childFlow: "a1", target: "local:site", count: 4, lastEndedAt: "2026-08-10T00:00:00.000Z" }];
+  return m;
+};
+
+test("no wire label sits on any wire, any chip or another label, fan-outs and tight rows included (issue #483)", () => {
+  // Each label is placed on its own wire's path at the first spot clear of everything drawn and of every label
+  // placed before it. Two earlier rules were each refuted: a label at its curve's midpoint with a sibling
+  // 10.5px up drew mention across the count; a stack per (from, to) pair centred on the gap drew the two
+  // counts of a fan-out on the same pixels and, between adjacent chips, reached the row above.
+  for (const layout of [CANNED(), TIERED(), FAN(), TIGHT(), CYCLE()].map((m) => layoutOf(buildGraphModel(m)))) {
+    const labelled = layout.wires.filter((w) => w.label !== null && w.labelHidden !== true);
+    const pair = labelled.filter((w) => w.kind === "observed" || w.kind === "potential");
+    assert.ok(pair.length >= 2, "the scene has wire labels to place");
+    assert.ok(layout.wires.every((w) => w.labelHidden !== true), "and every one of them found a clear spot");
+    const drawn = layout.wires.map((w) => ({ w, pts: pathPoints(w.d), half: w.kind === "observed" ? 1.5 : 1 }));
+    for (const w of labelled) {
+      const box = wireLabelBox(w);
+      for (const { w: o, pts, half } of drawn) {
+        // Against the stroke plus a pixel of air, not the centre line: a label may not sink into the wire it rides.
+        const wide = { x0: box.x0 - half - 1, x1: box.x1 + half + 1, y0: box.y0 - half - 1, y1: box.y1 + half + 1 };
+        const hit = pts.find((p) => inBox(p, wide));
+        assert.ok(!hit, `label ${JSON.stringify(w.label)} of ${w.id} sits on wire ${o.id} at ${hit}`);
+      }
+      for (const n of layout.nodes) {
+        assert.ok(!boxesMeet(box, { x0: n.x - 5, x1: n.x + n.w + 5, y0: n.y - 7, y1: n.y + n.h }), `label ${JSON.stringify(w.label)} of ${w.id} sits on chip ${n.id}`);
+      }
+    }
+    for (let i = 0; i < labelled.length; i++) {
+      for (let j = i + 1; j < labelled.length; j++) {
+        assert.ok(!boxesMeet(wireLabelBox(labelled[i]), wireLabelBox(labelled[j])), `labels of ${labelled[i].id} and ${labelled[j].id} overlap`);
+      }
+    }
+    // And each reads as its own wire's: from the middle of its box's top and bottom edges, its own wire lies
+    // within 16 and no wire outside its (from, to) pair lies nearer. Placed six lines out, a fan-out's mention
+    // sat beside the other target's port and read as that edge's.
+    const dense = new Map(layout.wires.map((w) => [w.id, densePath(w.d)]));
+    for (const w of labelled.filter((x) => !x.self)) {
+      const anchors = [[w.labelX, w.labelY - 9], [w.labelX, w.labelY + 3]];
+      const dist = (pts) => Math.min(...anchors.flatMap(([ax, ay]) => pts.map((q) => Math.hypot(q[0] - ax, q[1] - ay))));
+      const own = dist(dense.get(w.id));
+      assert.ok(own <= 16.5, `label of ${w.id} sits ${own.toFixed(1)} from its own wire`);
+      for (const o of layout.wires) {
+        if (o.id === w.id || (o.from === w.from && o.to === w.to)) continue;
+        const d = dist(dense.get(o.id));
+        assert.ok(d >= own - 0.5, `label of ${w.id} (${JSON.stringify(w.label)}) is nearer wire ${o.id} (${d.toFixed(1)}) than its own (${own.toFixed(1)})`);
+      }
+    }
+  }
+});
+
+test("a wire that leaves its group runs between groups: through no other group, no title band and no chip (issue #483)", () => {
+  // The straight bezier from a site trigger to its tier flow ran down the page through the forge group's
+  // title and past the ports of every chip on its way.
+  const layout = layoutOf(buildGraphModel(TIERED()));
+  const byId = new Map(layout.nodes.map((n) => [n.id, n]));
+  const groupOf = new Map(layout.nodes.map((n) => [n.id, n.groupId]));
+  const cross = layout.wires.filter((w) => !w.self && groupOf.get(w.from) !== groupOf.get(w.to));
+  assert.equal(cross.length, 3, "one wire into each tier group");
+  const forge = layout.groups.find((g) => g.kind === "forge");
+  const tiers = layout.groups.filter((g) => cross.some((w) => groupOf.get(w.to) === g.id));
+  assert.ok(forge && tiers.every((g) => g.y > forge.y), "the forge group sits between the source folder and every tier group");
+  for (const w of cross) {
+    const f = byId.get(w.from);
+    const t = byId.get(w.to);
+    assert.ok(f.x + f.w <= t.x, "it still leaves a right port for a left one");
+    const pts = pathPoints(w.d);
+    for (const g of layout.groups) {
+      const title = { x0: g.x, x1: g.x + g.w, y0: g.y, y1: g.y + 24 };
+      const hit = pts.find((p) => inBox(p, title));
+      assert.ok(!hit, `wire ${w.id} crosses the title band of ${g.label} at ${hit}`);
+      if (g.id === f.groupId || g.id === t.groupId) continue;
+      const inside = pts.find((p) => inBox(p, { x0: g.x, x1: g.x + g.w, y0: g.y, y1: g.y + g.h }));
+      assert.ok(!inside, `wire ${w.id} runs through ${g.label} at ${inside}`);
+    }
+    for (const n of layout.nodes) {
+      // The 5px port overhang is where a wire starts and ends; anything else inside a chip is a crossing.
+      const chip = { x0: n.x - 5, x1: n.x + n.w + 5, y0: n.y, y1: n.y + n.h };
+      const hit = pts.find((p) => inBox(p, chip) && !(n === f && p[0] >= f.x + f.w - 5) && !(n === t && p[0] <= t.x + 5));
+      assert.ok(!hit, `wire ${w.id} crosses chip ${n.id} at ${hit}`);
+      // And the text under a trigger chip (status line, spend badge) is not crossed either.
+      if (n.node.kind === "trigger") {
+        const under = { x0: n.x, x1: n.x + n.w, y0: n.y + n.h, y1: n.y + SPEND_BADGE_DY + 3 };
+        assert.ok(!pts.find((p) => inBox(p, under)), `wire ${w.id} crosses the text under ${n.id}`);
+      }
+    }
+  }
+});
+
+test("the viewBox is what is drawn plus a stroke margin: no empty band above the first group (issue #483)", () => {
+  // A fixed 80 around the groups drew a band above the first group as tall as a row.
+  for (const layout of [layoutOf(buildGraphModel(CANNED())), layoutOf(buildGraphModel(TIERED()))]) {
+    const vb = layout.viewBox;
+    const top = Math.min(...layout.groups.map((g) => g.y));
+    assert.ok(vb.y <= top && top - vb.y <= 16, `the pane starts ${top - vb.y} above the first group`);
+    for (const w of layout.wires) {
+      for (const [x, y] of pathPoints(w.d)) {
+        assert.ok(x >= vb.x && x <= vb.x + vb.w && y >= vb.y && y <= vb.y + vb.h, `wire ${w.id} is drawn outside the viewBox at ${x},${y}`);
+      }
+      if (w.label !== null) {
+        const b = wireLabelBox(w);
+        assert.ok(b.x0 >= vb.x && b.x1 <= vb.x + vb.w && b.y0 >= vb.y && b.y1 <= vb.y + vb.h, `label of ${w.id} is drawn outside the viewBox`);
+      }
+    }
+    for (const g of layout.groups) assert.ok(g.x >= vb.x && g.x + g.w <= vb.x + vb.w && g.y + g.h <= vb.y + vb.h, `group ${g.label} is cut by the viewBox`);
+    // Inside every folder, a line of wire label fits between the title band and the first row's badges, so a
+    // label of a wire on the first row has a place in its own folder (at a 40px pad it had 10px).
+    for (const g of layout.groups) {
+      const tops = layout.nodes.filter((n) => n.groupId === g.id).map((n) => n.y);
+      if (tops.length > 0) assert.ok(Math.min(...tops) - 8 - (g.y + 22) >= 14, `${g.label}: ${Math.min(...tops) - 8 - (g.y + 22)}px above the first row`);
+    }
+  }
+});
+
+test("no wire runs through a skill group's title, whichever row its trigger sits on (issue #483)", () => {
+  // The title started at the box's left edge, left of the chip's input port, where every wire into the
+  // chip arrives: a wire from a trigger on the chip's own row or a row above ran through the title. Three
+  // triggers feeding three skills, the looped one sorted last; with an untriggered skill sorted first the
+  // looped skill drops a row below its trigger (the corpus page of label-fit-check found it that way), and
+  // without it the two share a row.
+  const names = ["alpha", "beta", "zeta"];
+  const flat = {
+    triggers: { triggers: names.map((k, i) => ({ type: "cron", index: i, id: k, pattern: "0 3 * * *", folder: "/srv/site", flow: `${k}-x`, model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false })) },
+    schedulers: [],
+    folderSkills: { "/srv/site": { head: "abc123", truncated: false, unreachable: null, skills: names.map((k, i) => ({ name: `${k}-x`, isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], loops: i === 2 ? [{ hint: "until it is right" }] : [], unread: false })) } },
+    injectedSkills: {},
+    overlaySkills: { skills: [], truncated: false, unreachable: null },
+    stagedSkills: { skills: [], unenumerable: [], truncated: false },
+    forgeRepos: {},
+    cronStats: { byId: {} },
+    runJoin: { byIndex: {}, unattributed: 0 },
+    chainEdges: { edges: [], refusals: {}, truncated: false },
+    caps: { chainDepthMax: 1, chainMaxPerJob: 2, windowDays: 30 },
+    nowMs: NOW,
+  };
+  const above = structuredClone(flat);
+  above.folderSkills["/srv/site"].skills.push({ name: "aaa-orphan", isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], loops: [], unread: false });
+  const rowOf = (model, pick) => {
+    const layout = layoutOf(buildGraphModel(model));
+    return layout.nodes.find((n) => pick(n.node)).y;
+  };
+  assert.ok(rowOf(above, (n) => n.kind === "trigger" && n.label?.startsWith("zeta")) < rowOf(above, (n) => n.name === "zeta-x") - 30, "the looped skill sits a row below its trigger");
+  // A long looped name whose chip's wires climb to the row above (the observed count and the mention to
+  // notify, like the #483 page's build-report): the title's right end is where the climbing wire runs.
+  const long = CANNED();
+  const LONG = "build-report-for-the-whole-customer-website";
+  const site = long.folderSkills["/srv/site"].skills;
+  site[0].name = LONG;
+  long.triggers.triggers[0].flow = LONG;
+  long.chainEdges.edges[0].parentFlow = LONG;
+  long.chainEdges.refusals = {};
+  let checked = 0;
+  for (const model of [flat, above, CANNED(), TIERED(), long]) {
+    const scene = buildGraphScene(buildGraphModel(model), { now: NOW });
+    const titles = [...scene.svgBody.matchAll(/<g class="sgroup" id="[^"]+">(?:<rect[^>]*\/>)+<text x="([\d.-]+)" y="([\d.-]+)" font-size="11"[^>]*>([^<]*)/g)];
+    assert.ok(titles.length >= 1, "the scene has a skill group");
+    for (const [, x, y, label] of titles) {
+      // 11px text: 6.5px a column, 9px of ascent and 3 of descent.
+      const box = { x0: Number(x), x1: Number(x) + labelColumns(label) * 6.5, y0: Number(y) - 9, y1: Number(y) + 3 };
+      for (const w of scene.layout.wires) {
+        const hit = pathPoints(w.d).find((p) => inBox(p, box));
+        assert.ok(!hit, `wire ${w.id} runs through the title ${JSON.stringify(label)} at ${hit}`);
+      }
+      checked++;
+    }
+  }
+  assert.ok(checked >= 5);
+  // By construction, not by luck of the scene: the title (at its estimate and its fit rect alike) ends
+  // short of the output port's square, and a cut title keeps the whole name in a tooltip.
+  const scene = buildGraphScene(buildGraphModel(long), { now: NOW });
+  const sg = scene.layout.skillGroups.find((g) => g.label === LONG);
+  const chip = scene.layout.nodes.find((n) => n.id === sg.nodeId);
+  const m = new RegExp(`<g class="sgroup" id="${sg.id}"><rect[^>]*/><rect x="([\\d.-]+)" y="[\\d.-]+" width="([\\d.-]+)"[^>]*/><text x="([\\d.-]+)"[^>]*>([^<]*)<title>([^<]*)</title>`).exec(scene.svgBody);
+  assert.ok(m, "the cut title draws its fit rect and carries its tooltip");
+  // The fit rect spans the gap between the ports when a drawn path enters the title band, the box otherwise;
+  // either way the cut title ends inside it, and no wire runs through it (checked above).
+  const rectEnd = Number(m[1]) + Number(m[2]);
+  const band = scene.layout.wires.some((w) => pathPoints(w.d).some(([x, y]) => x > sg.x + 27 && x < sg.x + sg.w - 3 && y > sg.y + 2 && y < sg.y + 22));
+  if (band) assert.ok(Number(m[1]) > chip.x + 5 && rectEnd <= chip.x + chip.w - 5, "a crossed band: the fit rect lies between the ports");
+  else assert.ok(rectEnd <= sg.x + sg.w - 4, "a clear band: the fit rect ends inside the box");
+  assert.ok(Number(m[3]) + drawnColumns(m[4]) * 7 <= rectEnd + 2, "the cut title ends inside its fit rect");
+  assert.equal(m[5], LONG, "the whole name rides the tooltip");
+  assert.notEqual(m[4], LONG);
+});
+
+// Two paths coincide where one runs within 1.5px of the other for more than 8px of its length. The first and
+// last 10px of a wire are left out: every wire leaves its port along the port's own loop, and wires into one
+// port meet there.
+function longestShared(a, b) {
+  const near = (p) => b.some((q) => Math.abs(p[0] - q[0]) < 1.5 && Math.abs(p[1] - q[1]) < 1.5 && Math.hypot(p[0] - q[0], p[1] - q[1]) < 1.5);
+  let run = 0;
+  let best = 0;
+  let len = 0;
+  const total = a.reduce((s2, p, i) => s2 + (i > 0 ? Math.hypot(p[0] - a[i - 1][0], p[1] - a[i - 1][1]) : 0), 0);
+  for (let i = 1; i < a.length; i++) {
+    const step = Math.hypot(a[i][0] - a[i - 1][0], a[i][1] - a[i - 1][1]);
+    len += step;
+    if (len < 10 || len > total - 10) {
+      run = 0;
+      continue;
+    }
+    run = near(a[i]) ? run + step : 0;
+    if (run > best) best = run;
+  }
+  return best;
+}
+const densePath = (d) => {
+  const pts = pathPoints(d);
+  const out = [pts[0]];
+  for (let i = 1; i < pts.length; i++) {
+    const [x0, y0] = pts[i - 1];
+    const [x1, y1] = pts[i];
+    const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0)));
+    for (let k = 1; k <= n; k++) out.push([x0 + ((x1 - x0) * k) / n, y0 + ((y1 - y0) * k) / n]);
+  }
+  return out;
+};
+
+test("every wire that leaves its group has a lane, a gap line and a gutter of its own, and shares no run with any wire (issue #483)", () => {
+  // Three site triggers' wires into three tiers shared one lane and one gap line, one trunk the eye could not
+  // take apart; and a steep intra-group wire from the same column ran along the lane. Here four wires leave
+  // (two for one target, which meet only at its port), and an untriggered skill adds an intra-group wire
+  // from a lane column to a row far below.
+  const m = TIERED();
+  m.triggers.triggers.push({ type: "cron", index: 6, id: "inj2", pattern: "0 6 * * *", folder: "/srv/site", flow: "tidy", model: null, packages: true, image: null, skillsDir: "/inj", instructions: false, resume: false });
+  const site = m.folderSkills["/srv/site"].skills;
+  site.push({ name: "zz-orphan", isSub: false, group: null, aiTrigger: false, meta: null, mentions: [{ name: site[0].name, strong: false }], loops: [], unread: false });
+  const layout = layoutOf(buildGraphModel(m));
+  const groupOf = new Map(layout.nodes.map((n) => [n.id, n.groupId]));
+  const cross = layout.wires.filter((w) => !w.self && groupOf.get(w.from) !== groupOf.get(w.to));
+  assert.equal(cross.length, 4);
+  const lanes = cross.map((w) => pathPoints(w.d).find((p, i, a) => i > 0 && Math.abs(p[0] - a[i - 1][0]) < 0.01 && p[1] > a[i - 1][1])[0]);
+  assert.equal(new Set(lanes).size, 4, `four lanes: ${lanes}`);
+  assert.equal(new Set(cross.map((w) => w.gutterX)).size, 4, "four gutters");
+  // Each lane runs clear of every re-arm loop in its column (a loop reaches 13.5px past its chip).
+  const loopRight = Math.max(...layout.wires.filter((w) => w.kind === "cron-rearm").map((w) => Math.max(...pathPoints(w.d).map(([x]) => x))));
+  for (const x of lanes) assert.ok(x > loopRight + 2, `a lane at ${x} runs on the re-arm loops, which reach ${loopRight}`);
+  // And no wire of them runs along another wire, or along a group's border (the gap line sits inside the gap).
+  const borders = layout.groups.map((g) => ({ w: { id: `border of ${g.label}`, kind: "border" }, pts: densePath(`M ${g.x} ${g.y} L ${g.x + g.w} ${g.y} L ${g.x + g.w} ${g.y + g.h} L ${g.x} ${g.y + g.h} L ${g.x} ${g.y}`) }));
+  const paths = layout.wires.map((w) => ({ w, pts: densePath(w.d) }));
+  for (const a of paths.filter((p) => cross.includes(p.w))) {
+    for (const b of [...paths, ...borders]) {
+      if (a === b) continue;
+      const shared = longestShared(a.pts, b.pts);
+      assert.ok(shared <= 8, `wire ${a.w.id} runs along ${b.w.id} (${b.w.kind}) for ${shared.toFixed(1)}px`);
+    }
+  }
+});
+
+test("a forward wire crosses no chip and no skill-group box but those it starts or ends in, skipped columns included (issue #483)", () => {
+  // A config wire to a skill two columns on ran through the skill group standing in the column between, its
+  // title and all (on main too). A wire that skips a column now passes it through a gap between its boxes.
+  const sk = (name, extra = {}) => ({ name, isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], loops: [], unread: false, ...extra });
+  const skip = {
+    ...FAN(),
+    triggers: { triggers: ["alpha", "beta"].map((flow, i) => ({ type: "cron", index: i, id: flow[0], pattern: "0 3 * * *", folder: "/srv/site", flow, model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false })) },
+    folderSkills: { "/srv/site": { head: "a", truncated: false, unreachable: null, skills: [sk("alpha"), sk("beta", { loops: [{ hint: "until done" }], mentions: [{ name: "alpha", strong: false }] })] } },
+    chainEdges: { edges: [], refusals: {}, truncated: false },
+  };
+  let skipped = 0;
+  for (const model of [skip, CANNED(), TIERED(), FAN(), TIGHT()]) {
+    const layout = layoutOf(buildGraphModel(model));
+    const byId = new Map(layout.nodes.map((n) => [n.id, n]));
+    for (const w of layout.wires.filter((x) => !x.self && !x.back)) {
+      const f = byId.get(w.from);
+      const t = byId.get(w.to);
+      const pts = pathPoints(w.d);
+      const own = new Set([f.id, t.id]);
+      for (const n of layout.nodes) {
+        if (own.has(n.id)) continue;
+        const hit = pts.find((p) => inBox(p, { x0: n.x - 5, x1: n.x + n.w + 5, y0: n.y, y1: n.y + n.h }));
+        assert.ok(!hit, `wire ${w.id} crosses chip ${n.id} at ${hit}`);
+      }
+      for (const sg of layout.skillGroups) {
+        if (own.has(sg.nodeId)) continue;
+        const hit = pts.find((p) => inBox(p, { x0: sg.x, x1: sg.x + sg.w, y0: sg.y, y1: sg.y + sg.h }));
+        assert.ok(!hit, `wire ${w.id} runs through the skill group of ${sg.label} at ${hit}`);
+      }
+      if (f.x + f.w < t.x - 200) skipped++;
+    }
+  }
+  assert.ok(skipped >= 1, "a scene has a wire that skips a column");
+});
+
+test("a skill group's title takes the box's whole width unless a wire enters its band (issue #483)", () => {
+  // Cut to the gap between the chip's ports always, near-identical long names read the same.
+  const LONG = "deploy-staging-website-for-the-customer";
+  const lone = CANNED();
+  lone.folderSkills["/srv/site"].skills[0].name = LONG;
+  lone.folderSkills["/srv/site"].skills[0].mentions = [];
+  lone.triggers.triggers[0].flow = LONG;
+  lone.chainEdges.edges = [];
+  const sgOf = (model) => {
+    const scene = buildGraphScene(buildGraphModel(model), { now: NOW });
+    const sg = scene.layout.skillGroups.find((g) => g.label === LONG);
+    return { sg, chip: scene.layout.nodes.find((n) => n.id === sg.nodeId) };
+  };
+  const { sg, chip } = sgOf(lone);
+  assert.ok(sg.titleW > chip.w, `a title no wire reaches gets the box: ${sg.titleW} for a ${sg.w}px box`);
+  assert.ok(labelColumns(sg.title) * 7 <= sg.titleW, "and is cut to it");
+  const climbing = structuredClone(lone);
+  climbing.folderSkills["/srv/site"].skills[0].mentions = [{ name: "notify", strong: true }];
+  const crossed = sgOf(climbing);
+  assert.ok(crossed.sg.titleW < crossed.chip.w, "a wire climbing through the band cuts it back between the ports");
+  assert.ok(labelColumns(crossed.sg.title) < labelColumns(sg.title));
+});
+
+test("a wire label with no clear spot moves to its wire's tooltip and the legend counts it; none is drawn over anything (issue #483)", () => {
+  // One skill mentioning and chaining to seven skills of the next column: fourteen labels in one gap, more
+  // than it holds. Placing the least-bad spot drew them on each other; the ones with no clear spot are not
+  // drawn at all now, but carried by their wire's title element, and the legend says how many.
+  const m = FAN();
+  const names = ["beta", "gamma", "delta", "eps", "zeta", "eta", "theta"];
+  const sk = (name, extra = {}) => ({ name, isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], loops: [], unread: false, ...extra });
+  m.folderSkills["/srv/site"].skills = [sk("alpha", { mentions: names.map((n) => ({ name: n, strong: false })) }), ...names.map((n) => sk(n))];
+  m.chainEdges.edges = names.map((childFlow, i) => ({ parentFlow: "alpha", childFlow, target: "local:site", count: i + 2, lastEndedAt: "2026-08-10T00:00:00.000Z" }));
+  const scene = buildGraphScene(buildGraphModel(m), { now: NOW });
+  const hidden = scene.layout.wires.filter((w) => w.labelHidden === true);
+  assert.ok(hidden.length >= 1, "the scene is denser than its gaps");
+  assert.equal(scene.hiddenLabels, hidden.length);
+  for (const w of hidden) {
+    const g = new RegExp(`<g class="gwire" id="${w.id}"><path[^>]*/><title>${w.label.replace(/[()×·]/g, (c) => `\\${c}`)}</title></g>`);
+    assert.match(scene.svgBody, g, `wire ${w.id} carries its label as a tooltip and draws no text`);
+  }
+  const drawn = scene.layout.wires.filter((w) => w.label !== null && w.labelHidden !== true && !w.self);
+  assert.ok(drawn.length >= 1);
+  for (let i = 0; i < drawn.length; i++) {
+    for (let j = i + 1; j < drawn.length; j++) assert.ok(!boxesMeet(wireLabelBox(drawn[i]), wireLabelBox(drawn[j])), `labels of ${drawn[i].id} and ${drawn[j].id} overlap`);
+    for (const o of scene.layout.wires) {
+      const hit = pathPoints(o.d).find((p) => inBox(p, wireLabelBox(drawn[i])));
+      assert.ok(!hit, `label of ${drawn[i].id} sits on wire ${o.id}`);
+    }
+  }
+  const page = pageOf(buildGraphModel(m));
+  assert.ok(page.includes(`${hidden.length} wire label${hidden.length === 1 ? "" : "s"} in tooltips only (no clear spot on the page)`), "the legend states the count");
+  assert.ok(!cannedPage().includes("in tooltips only"), "and says nothing when every label is drawn");
+});
+
+test("two back edges out of one node take runs of their own (issue #483)", () => {
+  // z closes two cycles, to x and to y, all on the first row: both back edges left z's port and ran under the
+  // row at one height, pixel for pixel, so neither the eye nor a label could tell them apart.
+  const m = FAN();
+  const sk = (name, mentions) => ({ name, isSub: false, group: null, aiTrigger: false, meta: null, mentions: mentions.map((n) => ({ name: n, strong: false })), loops: [], unread: false });
+  m.triggers.triggers[0].flow = "x";
+  m.folderSkills["/srv/site"].skills = [sk("x", ["y"]), sk("y", ["z"]), sk("z", ["x", "y"])];
+  m.chainEdges.edges = [];
+  const layout = layoutOf(buildGraphModel(m));
+  const back = layout.wires.filter((w) => w.back);
+  assert.equal(back.length, 2, "both cycles close with a back edge out of z");
+  assert.equal(back[0].from, back[1].from);
+  // Past the shared port (every wire leaving one port shares its first curve, a fan-out's too), nothing is shared.
+  const [a0, a1] = back.map((w) => densePath(w.d));
+  const past = (pts) => pts.filter((p) => Math.hypot(p[0] - pts[0][0], p[1] - pts[0][1]) > 30);
+  const shared = longestShared(past(a0), past(a1));
+  assert.ok(shared <= 8, `the two back edges share ${shared.toFixed(1)}px of run`);
+  assertUnderRoutesClearChips(layout);
+});
+
+test("in seeded dense scenes, every drawn label is nearer its own wire than any other pair's (issue #483)", () => {
+  // The review's generator (PR #487): three to eight skills, each mentioning each other one in four, most
+  // mentions also chained, half the skills with a trigger. Its first 40 scenes hold labels that, placed only
+  // by the distance cap, sat nearer another pair's wire than their own.
+  let seed = 1;
+  const rnd = () => {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return seed / 2147483648;
+  };
+  let checked = 0;
+  for (let it = 0; it < 40; it++) {
+    const n = 3 + Math.floor(rnd() * 6);
+    const names = Array.from({ length: n }, (_, i) => String.fromCharCode(97 + i) + "-" + "x".repeat(Math.floor(rnd() * (rnd() < 0.3 ? 30 : 10))));
+    const skills = names.map((name) => ({ name, isSub: false, group: null, aiTrigger: rnd() < 0.5, meta: null, mentions: [], loops: rnd() < 0.3 ? [{ hint: "until done" }] : [], unread: false }));
+    const edges = [];
+    for (const s of skills) {
+      for (const t of skills) {
+        if (s !== t && rnd() < 0.25) {
+          s.mentions.push({ name: t.name, strong: rnd() < 0.5 });
+          if (rnd() < 0.6) edges.push({ parentFlow: s.name, childFlow: t.name, target: "local:site", count: 1 + Math.floor(rnd() * 9), lastEndedAt: "2026-08-10T00:00:00.000Z" });
+        }
+      }
+    }
+    const triggers = [];
+    names.forEach((nm, i) => {
+      if (rnd() < 0.5) triggers.push({ type: "cron", index: triggers.length, id: "t" + i, pattern: "0 3 * * *", folder: "/srv/site", flow: nm, model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false });
+    });
+    const model = { ...FAN(), triggers: { triggers }, folderSkills: { "/srv/site": { head: "a", truncated: false, unreachable: null, skills } }, chainEdges: { edges, refusals: {}, truncated: false } };
+    const layout = layoutOf(buildGraphModel(model));
+    const dense = new Map(layout.wires.map((w) => [w.id, densePath(w.d)]));
+    for (const w of layout.wires.filter((x) => x.label !== null && x.labelHidden !== true && !x.self)) {
+      const anchors = [[w.labelX, w.labelY - 9], [w.labelX, w.labelY + 3]];
+      const dist = (pts) => Math.min(...anchors.flatMap(([ax, ay]) => pts.map((q) => Math.hypot(q[0] - ax, q[1] - ay))));
+      const own = dist(dense.get(w.id));
+      assert.ok(own <= 16.5, `scene ${it}: label of ${w.id} sits ${own.toFixed(1)} from its own wire`);
+      for (const o of layout.wires) {
+        if (o.id === w.id || (o.from === w.from && o.to === w.to)) continue;
+        const d = dist(dense.get(o.id));
+        assert.ok(d >= own, `scene ${it}: label of ${w.id} is nearer wire ${o.id} (${d.toFixed(1)}) than its own (${own.toFixed(1)})`);
+      }
+      checked++;
+    }
+  }
+  assert.ok(checked > 100, `${checked} labels checked`);
 });

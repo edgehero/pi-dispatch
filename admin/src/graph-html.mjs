@@ -36,25 +36,63 @@ const RANK_PITCH = 180; // fixed column pitch
 const ROW_GAP = 26; // vertical gap between rows (leaves room for the status line under a chip)
 const GROUP_PAD_L = 20;
 const GROUP_PAD_R = 20;
-const GROUP_PAD_T = 40; // room for the group label above the first row
+// Room for the group's title and then one line of wire label above the first row: at 40, the 10px left between
+// the title band and the first row's badges held no label, so every label of a wire on that row was pushed
+// onto a chip or out of its folder (issue #483).
+const GROUP_PAD_T = 54;
 const GROUP_PAD_B = 44; // breathing room below the last row band (under-route depth is paid per band)
 const GROUP_GAP = 40; // folder groups stack vertically with this gap
-const SELF_LOOP_DROP = 25; // Node-RED self-wires drop this far below the node
-// Extra pitch below any row band hosting an under-row route (self-loop or back edge): the route
-// needs SELF_LOOP_DROP plus a label (~37px past the chip bottom), which ROW_GAP alone cannot
-// absorb -- without this, a folder with two cron triggers drew the first re-arm label inside the
-// second trigger's chip.
-const UNDER_ROUTE_EXTRA = 40;
+// What a trigger draws under its chip, as baselines below the chip's top: the status line (square
+// and run count) here, and the spend badge the insights page lays over the scene on the next line.
+// Exported for that page, which draws the badge at SPEND_BADGE_DY, so the one number the loop below
+// must clear is also the one the badge is drawn at (issue #483: they were two literals, and the
+// re-arm loop ran through the badge).
+const STATUS_DY = NODE_H + 11;
+export const SPEND_BADGE_DY = NODE_H + 23;
+// Where that text stack ends: the badge baseline plus the 10px font's descent.
+const UNDER_TEXT_BOTTOM = SPEND_BADGE_DY + 3;
+// An under-row route (a self-loop, a back edge) runs this far below the chip's top: past the whole
+// under-chip text stack plus room for the 2px stroke, never through it. It was NODE_H + 25, a
+// Node-RED self-wire's drop, which put a cron trigger's re-arm loop across its own spend badge.
+const UNDER_ROUTE_Y = UNDER_TEXT_BOTTOM + 6;
+// Extra pitch below any row band hosting an under-row route: the route plus its label end about
+// 47px past the chip bottom, which ROW_GAP alone cannot absorb -- without this, a folder with two
+// cron triggers drew the first re-arm label inside the second trigger's chip.
+const UNDER_ROUTE_EXTRA = 44;
 // Parallel-wire fan-out: an observed edge and a potential mention often join the SAME pair of
-// skills, and without an offset the two beziers overlay and their mid-path labels garble into one
-// smear. Sibling 0 stays straight; each later sibling bows alternately up/down by 14px at the
-// control points, and its label steps 10.5px (0.75 of the bow: a cubic's midpoint moves 3/4 of a
-// shared control offset) so every label rides its own curve and anchors stay 10px apart.
+// skills, and without an offset the two beziers overlay. Sibling 0 stays straight; each later
+// sibling bows alternately up/down by 14px at the control points.
 const PARALLEL_BOW = 14;
-const PARALLEL_LABEL_STEP = 10.5;
-// A wire spanning under 40px has its midpoint hugging the ports, so its label lifts above the
-// wire (siblings stacking further up) instead of sitting on the port squares and the wire itself.
-const LABEL_MIN_SPAN = 40;
+// Wire labels (the observed count, the word mention) are 10px text, and each is placed beside its own wire at
+// the first candidate spot whose box is clear of every wire, loop, ring, chip, badge, title, box border and
+// label already placed, and whose nearest wire is its own (issue #483). Two earlier rules were each refuted by a scene: a label at
+// its curve's midpoint with a sibling stepped 10.5px drew mention across the count; a stack per (from, to)
+// pair centred on the gap drew two pairs leaving one skill for one column on the same pixels.
+const WIRE_LABEL_COL_W = 6; // px per column at 10px, over-counted like CHAR_W so the width is a bound
+const WIRE_LABEL_DESCENT = 4; // baseline to the lowest ink, plus air
+const WIRE_LABEL_ASCENT = 9; // baseline to the highest ink (brackets), plus air
+const WIRE_LABEL_ASSOC = 16; // a label's anchor points lie at most this far from its own wire
+const WIRE_LABEL_ASSOC_MARGIN = 1.5; // and every wire outside its pair lies at least this much farther
+// A wire that leaves its group (a cron trigger's flow found in the injected, overlay or staged tier)
+// travels between groups, never across one: down a lane right of its trigger column, left along the
+// gap under its group, down a gutter left of every group, and in to its target from the left. The
+// straight bezier it used to be crossed every group stacked between (the forge group's title among
+// them) and grazed the ports of the chips it passed. The lane clears the widest trigger's re-arm loop
+// (a cubic with an 18px control offset reaches 13.5px past the chip) and its 2px stroke; the column
+// after it moves right by what the lane needs, only in a group that has such a wire.
+// Every such wire has a lane, a gap line and a gutter of its own, stepped apart, so the drawing still says
+// which trigger feeds which tier (sharing them drew one trunk for three wires). A wire that stays in the
+// group crosses the lanes square, along its trigger's row, and turns down only in the drop strip after them:
+// a curve through the lanes ran along a lane for as long as it was steep.
+const LANE_CLEAR = 22;
+const LANE_STEP = 6; // between two lanes after one column
+const LANE_DROP = 38; // the drop strip after the last lane, to the next column's chips (port included)
+const GUTTER_IN = 14; // the innermost gutter, left of every group's left edge
+const GUTTER_STEP = 8; // each further gutter wire, one step further out
+const GAP_PAD = 10; // the first gap line under a group
+const GAP_STEP = 6; // each further gap line
+const APPROACH_STEP = 4; // wires into one port run in on lines this far apart and meet only at the port
+const CORNER_R = 8;
 // Skill-group (loop-in-skill) geometry: the Node-RED group treatment around a skill whose SKILL.md
 // iterates (prose-loop hints) or which owns sub-skills. The chip keeps its ports and every external
 // wire -- the box, the ⟳ markers and the ring wire only VISUALISE that the looping lives inside
@@ -63,11 +101,15 @@ const LABEL_MIN_SPAN = 40;
 const SG_CHIP_X = 22; // chip inset: the ring at inset 10, the 5px input-port overhang, some air
 const SG_CHIP_Y = 26; // chip sits below the group's own label line
 const SG_RING = 10; // the loop wire's inset from the box edge
+const SG_TITLE_X = SG_CHIP_X + 8; // the group's title, clear of the chip's input port
 const SG_MARKER = 40; // the ⟳ marker square
 const SG_HINT_CHARS = 24; // loop-hint clip; small text at ~6px/char sizes the box
 const SG_SMALL_CHAR_W = 6;
 const SUB_CHIP_H = 24; // nested sub-skill chips are deliberately smaller than real nodes
-const VIEW_MARGIN = 80; // viewBox margin around the content bbox
+// The viewBox is the drawn content's bounds plus this much on every side. It was a fixed 80 around the
+// groups alone, which drew an empty band above the first group as tall as a row (issue #483); the
+// bounds now take the gutter wires in too, so the one margin needed is for the strokes.
+const VIEW_MARGIN = 12;
 
 // ---- palette: repo-dark chrome, authentic pale Node-RED chips with DARK labels inside ----
 const PAGE_CANVAS = "#0d1117";
@@ -510,7 +552,7 @@ function chipWidth(label) {
  * builder (issue #279): neither had a production caller left, and an exported helper nothing calls
  * does not stay uncalled -- the purity test bans both names from ever reappearing here.
  */
-function layoutNormalized(norm) {
+function layoutNormalized(norm, nowMs) {
   const empty = { nodes: [], wires: [], groups: [], skillGroups: [], viewBox: { x: 0, y: 0, w: 800, h: 600 } };
   if (!norm.ok && norm.nodes.length === 0) return empty;
 
@@ -554,6 +596,8 @@ function layoutNormalized(norm) {
     wires.push({ id: `w${wires.length}`, kind: e.kind, from: f.id, to: t.id, self: f === t, back: false, edge: e, f, t, d: "", labelX: 0, labelY: 0 });
   }
   markBackEdges(placed, wires);
+  // Labels are known before the layout, so a column gap can be made wide enough for the ones crossing it.
+  for (const w of wires) w.label = wireLabel(w, nowMs);
 
   // Rank + order + coordinates, one group at a time; groups then stack vertically. Skill groups
   // (loop-in-skill boxes) are collected with folder-local coords and translated alongside the
@@ -561,6 +605,10 @@ function layoutNormalized(norm) {
   const skillGroups = [];
   let groupY = 0;
   let maxGroupW = 0;
+  const crossFrom = new Map();
+  for (const w of wires) {
+    if (!w.self && w.f.groupId !== w.t.groupId) crossFrom.set(w.f.groupId, (crossFrom.get(w.f.groupId) ?? 0) + 1);
+  }
   for (const g of groups) {
     const sgStart = skillGroups.length;
     const size = layoutGroup(g, wires, skillGroups);
@@ -575,6 +623,13 @@ function layoutNormalized(norm) {
     for (const p of g.members) {
       p.x += g.x;
       p.y += g.y;
+      if (typeof p.laneX === "number") p.laneX += g.x;
+      if (typeof p.dropX === "number") p.dropX += g.x;
+    }
+    for (const c of g.cols ?? []) {
+      c.x0 += g.x;
+      c.x1 += g.x;
+      c.occ = c.occ.map(([a, b]) => [a + g.y, b + g.y]);
     }
     for (let i = sgStart; i < skillGroups.length; i++) {
       const sg = skillGroups[i];
@@ -589,7 +644,10 @@ function layoutNormalized(norm) {
       sg.points = sg.points.map(([px, py]) => [px + g.x, py + g.y]);
       sg.d = sg.points.map(([px, py], j) => `${j === 0 ? "M" : "L"} ${fmt(px)} ${fmt(py)}`).join(" ");
     }
-    groupY += g.h + GROUP_GAP;
+    // The gap under a group holds one gap line per wire leaving it, and grows when there are more of them.
+    const n = crossFrom.get(g.id) ?? 0;
+    g.gapBelow = Math.max(GROUP_GAP, 2 * GAP_PAD + Math.max(0, n - 1) * GAP_STEP);
+    groupY += g.h + g.gapBelow;
     if (g.w > maxGroupW) maxGroupW = g.w;
   }
 
@@ -602,18 +660,348 @@ function layoutNormalized(norm) {
     w.parallel = parallelCount.get(key) ?? 0;
     parallelCount.set(key, w.parallel + 1);
   }
+  // Back edges leaving one node share its port and would share their run under the rows too, pixel for pixel,
+  // wherever their targets differ: each takes its own run, one step apart, by its order among them.
+  const backCount = new Map();
+  for (const w of wires) {
+    if (!w.back) continue;
+    w.backStep = backCount.get(w.from) ?? 0;
+    backCount.set(w.from, w.backStep + 1);
+  }
 
-  for (const w of wires) routeWire(w);
+  const groupById = new Map(groups.map((g) => [g.id, g]));
+  routeCrossWires(wires.filter((w) => !w.self && w.f.groupId !== w.t.groupId && typeof w.f.laneX === "number"), groupById);
+  for (const w of wires) {
+    if (!w.cross) routeWire(w, groupById.get(w.f.groupId));
+  }
+  const drawn = wires.map((w) => samplePath(w.d)).concat(skillGroups.map((sg) => samplePath(sg.d)));
+  for (const sg of skillGroups) Object.assign(sg, sgTitle(sg, placedById(placed, sg.nodeId), drawn));
+  placeWireLabels(wires, placed, groups, skillGroups, drawn);
   for (const w of wires) {
     delete w.f;
     delete w.t;
   }
 
-  const totalH = groups.length > 0 ? groupY - GROUP_GAP : 0;
+  const totalH = groups.length > 0 ? groupY - groups[groups.length - 1].gapBelow : 0;
+  // Bounds of what is drawn: the groups (which hold every chip, box and label), the gutter wires left
+  // of them, and any wire label, whatever it sits beside.
+  let minX = 0;
+  let minY = 0;
+  let maxX = maxGroupW;
+  let maxY = totalH;
+  for (const w of wires) {
+    if (w.cross) minX = Math.min(minX, w.gutterX - 1);
+    if (w.label !== null && w.labelHidden !== true) {
+      const hw = labelHalfWidth(w.label);
+      minX = Math.min(minX, w.labelX - hw);
+      maxX = Math.max(maxX, w.labelX + hw);
+      minY = Math.min(minY, w.labelY - 10);
+      maxY = Math.max(maxY, w.labelY + WIRE_LABEL_DESCENT);
+    }
+  }
   const viewBox = groups.length > 0
-    ? { x: -VIEW_MARGIN, y: -VIEW_MARGIN, w: maxGroupW + VIEW_MARGIN * 2, h: totalH + VIEW_MARGIN * 2 }
+    ? { x: minX - VIEW_MARGIN, y: minY - VIEW_MARGIN, w: maxX - minX + VIEW_MARGIN * 2, h: maxY - minY + VIEW_MARGIN * 2 }
     : { x: 0, y: 0, w: 800, h: 600 };
   return { nodes: placed, wires, groups, skillGroups, viewBox };
+}
+
+// A wire's label text, or null for a kind that carries none (config). Decided here rather than at
+// emission so the layout can size the label it places.
+function wireLabel(w, nowMs) {
+  if (w.kind === "observed" && w.edge.count !== null) {
+    // Recency beside the count when the fold recorded it: relTime against the injected instant,
+    // so the byte-determinism guarantee holds -- same model + same now, same label.
+    const ago = relTime(nowMs, w.edge.lastEndedAt);
+    return ago !== null ? `(${w.edge.count}× · ${ago})` : `(${w.edge.count}×)`;
+  }
+  if (w.kind === "potential") return "mention";
+  if (w.kind === "cron-rearm" && w.edge.label !== null) return w.edge.label;
+  return null;
+}
+
+function labelHalfWidth(label) {
+  return (drawnColumns(label) * WIRE_LABEL_COL_W) / 2;
+}
+
+// Give every wire that leaves its group its own gutter, gap line and lane. The gutter goes by target: the
+// wire whose target sits lowest takes the outermost, so a wire running on down never crosses one that
+// already turned in. Within one source group the inner gutter takes the lowest gap line, and within one
+// source column the rightmost lane, which is the nesting under which the gap runs and lanes do not cross.
+function routeCrossWires(cross, groupById) {
+  cross.sort((a, b) => a.t.y - b.t.y || a.f.y - b.f.y || cmpStr(a.id, b.id));
+  cross.forEach((w, k) => {
+    w.k = k;
+  });
+  const bySrc = new Map();
+  const byLane = new Map();
+  const byTarget = new Map();
+  const push = (m, key, w) => {
+    if (!m.has(key)) m.set(key, []);
+    m.get(key).push(w);
+  };
+  for (const w of cross) {
+    push(bySrc, w.f.groupId, w);
+    push(byLane, `${w.f.groupId} ${w.f.rank}`, w);
+    push(byTarget, w.t.id, w);
+  }
+  for (const list of bySrc.values()) list.forEach((w, i) => (w.gapI = list.length - 1 - i));
+  for (const list of byLane.values()) list.forEach((w, i) => (w.laneI = list.length - 1 - i));
+  for (const list of byTarget.values()) list.forEach((w, i) => (w.approach = (i - (list.length - 1) / 2) * APPROACH_STEP));
+  for (const w of cross) routeCrossWire(w, groupById.get(w.f.groupId), -GUTTER_IN - w.k * GUTTER_STEP);
+}
+
+// Route a wire that leaves its group: out of the port, down its lane to its gap line under its group, along
+// that line to its gutter, along the gutter to the target's row, and in to the port from the left. The
+// target's column 0 is empty on that row by construction (such a target is a tier node, and a tier group
+// holds no trigger), and the run in is below the target group's title band.
+function routeCrossWire(w, srcGroup, gutterX) {
+  const f = w.f;
+  const t = w.t;
+  const y1 = f.y + NODE_H / 2;
+  const y2 = t.y + NODE_H / 2;
+  const laneX = f.laneX + w.laneI * LANE_STEP;
+  const yGap = srcGroup.y + srcGroup.h + GAP_PAD + w.gapI * GAP_STEP;
+  const yIn = y2 + w.approach;
+  const pts = [[f.x + f.w, y1], [laneX, y1], [laneX, yGap], [gutterX, yGap], [gutterX, yIn], [t.x - 16, yIn]];
+  w.cross = true;
+  w.gutterX = gutterX;
+  w.d = `${roundedPath(pts, CORNER_R)} C ${fmt(t.x - 8)} ${fmt(yIn)}, ${fmt(t.x - 8)} ${fmt(y2)}, ${fmt(t.x)} ${fmt(y2)}`;
+  w.labelX = gutterX;
+  w.labelY = (yGap + y2) / 2;
+}
+
+// An orthogonal polyline with each corner rounded by a cubic whose control points sit on the corner;
+// the radius shrinks to half the shorter leg, so a short leg never turns the path back on itself.
+function roundedPath(pts, r) {
+  const parts = [`M ${fmt(pts[0][0])} ${fmt(pts[0][1])}`];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const [px, py] = pts[i - 1];
+    const [cx, cy] = pts[i];
+    const [nx, ny] = pts[i + 1];
+    const lin = Math.hypot(cx - px, cy - py);
+    const lout = Math.hypot(nx - cx, ny - cy);
+    const rr = Math.min(r, lin / 2, lout / 2);
+    if (!(rr > 0)) {
+      parts.push(`L ${fmt(cx)} ${fmt(cy)}`);
+      continue;
+    }
+    const ax = cx - ((cx - px) / lin) * rr;
+    const ay = cy - ((cy - py) / lin) * rr;
+    const bx = cx + ((nx - cx) / lout) * rr;
+    const by = cy + ((ny - cy) / lout) * rr;
+    parts.push(`L ${fmt(ax)} ${fmt(ay)} C ${fmt(cx)} ${fmt(cy)}, ${fmt(cx)} ${fmt(cy)}, ${fmt(bx)} ${fmt(by)}`);
+  }
+  const last = pts[pts.length - 1];
+  parts.push(`L ${fmt(last[0])} ${fmt(last[1])}`);
+  return parts.join(" ");
+}
+
+// The Node-RED wire bezier between two points: horizontal control offsets at 0.75 of the span, tightened
+// when the points are closer than 100px so short wires do not balloon, bowed by `bow` at both controls.
+function nodeRedCurve([x1, y1], [x2, y2], bow) {
+  const dx = Math.max(x2 - x1, 4);
+  const sc = dx < 100 ? 0.75 * (dx / 100) : 0.75;
+  const off = Math.max(dx * sc, 10);
+  return `C ${fmt(x1 + off)} ${fmt(y1 + bow)}, ${fmt(x2 - off)} ${fmt(y2 + bow)}, ${fmt(x2)} ${fmt(y2)}`;
+}
+
+// Where a wire that skips column `col` passes it: a height in a gap between the column's boxes (below the
+// group's title band, above its bottom), the one nearest `want`; parallel siblings step off it.
+function passY(col, g, want) {
+  const spans = [[g.y + 24, g.y + 24], ...col.occ, [g.y + g.h - 4, g.y + g.h - 4]];
+  let best = null;
+  for (let i = 0; i + 1 < spans.length; i++) {
+    const lo = spans[i][1] + 4;
+    const hi = spans[i + 1][0] - 4;
+    if (hi <= lo) continue;
+    const y = Math.min(hi, Math.max(lo, want));
+    if (best === null || Math.abs(y - want) < Math.abs(best - want)) best = y;
+  }
+  return best ?? want;
+}
+
+// The points a drawn `d` passes through, about every 1.5px: M, L and C, the only commands this module emits.
+function samplePath(d) {
+  const tok = d.match(/[MLC]|-?\d+(?:\.\d+)?/g) ?? [];
+  const pts = [];
+  let cur = [0, 0];
+  for (let i = 0; i < tok.length; ) {
+    const c = tok[i++];
+    const nums = [];
+    while (i < tok.length && !/[MLC]/.test(tok[i])) nums.push(Number(tok[i++]));
+    if (c === "M") {
+      cur = [nums[0], nums[1]];
+      pts.push(cur);
+    } else if (c === "L") {
+      const [x, y] = nums;
+      const n = Math.max(1, Math.ceil(Math.hypot(x - cur[0], y - cur[1]) / 1.5));
+      for (let k = 1; k <= n; k++) pts.push([cur[0] + ((x - cur[0]) * k) / n, cur[1] + ((y - cur[1]) * k) / n]);
+      cur = [x, y];
+    } else if (c === "C") {
+      const [ax, ay, bx, by, x, y] = nums;
+      const n = Math.max(2, Math.ceil((Math.hypot(ax - cur[0], ay - cur[1]) + Math.hypot(bx - ax, by - ay) + Math.hypot(x - bx, y - by)) / 1.5));
+      for (let k = 1; k <= n; k++) {
+        const t = k / n;
+        const u = 1 - t;
+        pts.push([u * u * u * cur[0] + 3 * u * u * t * ax + 3 * u * t * t * bx + t * t * t * x, u * u * u * cur[1] + 3 * u * u * t * ay + 3 * u * t * t * by + t * t * t * y]);
+      }
+      cur = [x, y];
+    }
+  }
+  return pts;
+}
+
+function placedById(placed, id) {
+  return placed.find((p) => p.id === id);
+}
+
+// The obstacles a wire label must stay clear of, as boxes, and every drawn path's points, both bucketed on a
+// grid so a candidate box asks only the cells it covers.
+function obstacleIndex(placed, groups, skillGroups, wires, drawn) {
+  const CELL = 24;
+  const cells = new Map();
+  const key = (cx, cy) => `${cx} ${cy}`;
+  const add = (kind, item, x0, y0, x1, y1) => {
+    for (let cx = Math.floor(x0 / CELL); cx <= Math.floor(x1 / CELL); cx++) {
+      for (let cy = Math.floor(y0 / CELL); cy <= Math.floor(y1 / CELL); cy++) {
+        const k = key(cx, cy);
+        if (!cells.has(k)) cells.set(k, { boxes: [], pts: [] });
+        cells.get(k)[kind].push(item);
+      }
+    }
+  };
+  const box = (x0, y0, x1, y1) => add("boxes", { x0, y0, x1, y1 }, x0, y0, x1, y1);
+  for (const pts of drawn) for (const q of pts) add("pts", q, q[0], q[1], q[0], q[1]);
+  for (const n of placed) {
+    if (n.nested === true) {
+      box(n.x, n.y, n.x + n.w, n.y + n.h);
+      continue;
+    }
+    box(n.x - 6, n.y - 8, n.x + n.w + 6, n.y + NODE_H);
+    if (n.kind === "trigger") box(n.x, n.y + NODE_H, n.x + n.w, n.y + UNDER_TEXT_BOTTOM);
+  }
+  const edges = (x, y, w, h) => {
+    box(x - 1.5, y - 1.5, x + w + 1.5, y + 1.5);
+    box(x - 1.5, y + h - 1.5, x + w + 1.5, y + h + 1.5);
+    box(x - 1.5, y - 1.5, x + 1.5, y + h + 1.5);
+    box(x + w - 1.5, y - 1.5, x + w + 1.5, y + h + 1.5);
+  };
+  for (const g of groups) {
+    edges(g.x, g.y, g.w, g.h);
+    box(g.x + 8, g.y + 6, g.x + g.w, g.y + 22); // the title band, whole: its text's width depends on the page's options
+  }
+  for (const sg of skillGroups) {
+    edges(sg.x, sg.y, sg.w, sg.h);
+    box(sg.x + SG_TITLE_X, sg.y + 5, sg.x + SG_TITLE_X + sg.titleW, sg.y + 20);
+    for (const m of sg.markers) {
+      box(m.x, m.y, m.x + m.w, m.y + m.h);
+      box(m.hintX, m.hintY - 9, m.hintX + drawnColumns(m.hint) * SG_SMALL_CHAR_W, m.hintY + 3);
+    }
+  }
+  for (const w of wires) {
+    if (w.label !== null && w.self) box(w.labelX - labelHalfWidth(w.label), w.labelY - WIRE_LABEL_ASCENT, w.labelX + labelHalfWidth(w.label), w.labelY + 3);
+  }
+  const hits = (b, pad) => {
+    let n = 0;
+    for (let cx = Math.floor(b.x0 / CELL); cx <= Math.floor(b.x1 / CELL); cx++) {
+      for (let cy = Math.floor(b.y0 / CELL); cy <= Math.floor(b.y1 / CELL); cy++) {
+        const c = cells.get(key(cx, cy));
+        if (!c) continue;
+        for (const o of c.boxes) if (o.x0 < b.x1 && b.x0 < o.x1 && o.y0 < b.y1 && b.y0 < o.y1) n++;
+        for (const q of c.pts) if (q[0] > b.x0 - pad && q[0] < b.x1 + pad && q[1] > b.y0 - pad && q[1] < b.y1 + pad) n++;
+      }
+    }
+    return n;
+  };
+  return { box, hits };
+}
+
+// Place each forward wire's label (in wire order, so the result is deterministic) at the first spot on its own
+// path whose box meets nothing and which reads as that wire's (readsAsOwn): anchors walk out from the path's
+// middle, and at each the label sits just above or just below the path where it spans, then further out on
+// either side up to WIRE_LABEL_ASSOC. When no candidate qualifies (a scene too dense for the search), the
+// label is not drawn over anything or beside another edge: it moves to its wire's tooltip, and the legend
+// counts it. Taking the least-bad spot instead (the first cut of this rule) still
+// drew labels on labels and chips in dense scenes, which is the very defect the rule exists to end. A back edge's label is placed the same way (fixed under its run, another wire could pass through
+// it); a cron pattern keeps its place under its own loop, in the band the layout pays for it, and a gutter wire
+// carries none.
+// A label reads as its own wire's only when that wire is the nearest one: measured from the label's two anchor
+// points (the middle of its top edge and of its bottom edge), its own wire must lie within WIRE_LABEL_ASSOC, and
+// every wire outside its (from, to) pair must lie at least WIRE_LABEL_ASSOC_MARGIN farther. A clear spot six lines out, the first cut of the search,
+// sat beside another pair's wire and read as that edge's label (issue #483, PR #487's final review).
+function readsAsOwn(w, wi, cx, b, wires, drawn) {
+  const anchors = [[cx, b.y0], [cx, b.y1]];
+  const dist = (pts) => {
+    let d = Infinity;
+    for (const [ax, ay] of anchors) for (const q of pts) d = Math.min(d, Math.hypot(q[0] - ax, q[1] - ay));
+    return d;
+  };
+  const own = dist(drawn[wi]);
+  if (own > WIRE_LABEL_ASSOC) return false;
+  for (let j = 0; j < drawn.length; j++) {
+    if (j === wi) continue;
+    const o = wires[j];
+    if (o && o.from === w.from && o.to === w.to) continue;
+    // Only points that could come within `own` plus the margin matter: a cheap box test first, then the distance.
+    // The margin keeps the answer from turning on a pixel of the label box's estimated ink.
+    const reach = own + WIRE_LABEL_ASSOC_MARGIN;
+    const near = drawn[j].filter((q) => q[0] > cx - reach - 1 && q[0] < cx + reach + 1 && q[1] > b.y0 - reach - 1 && q[1] < b.y1 + reach + 1);
+    if (near.length > 0 && dist(near) < reach) return false;
+  }
+  return true;
+}
+
+function placeWireLabels(wires, placed, groups, skillGroups, drawn) {
+  const index = obstacleIndex(placed, groups, skillGroups, wires, drawn);
+  const groupOf = new Map(groups.map((g) => [g.id, g]));
+  wires.forEach((w, wi) => {
+    if (w.label === null || w.self || w.cross) return;
+    // A label stays inside its own folder's box: a spot outside it reads as belonging to no folder.
+    const home = groupOf.get(w.f.groupId);
+    const outside = (b) => b.x0 < home.x + 3 || b.x1 > home.x + home.w - 3 || b.y0 < home.y + 3 || b.y1 > home.y + home.h - 3;
+    const pts = drawn[wi];
+    const hw = labelHalfWidth(w.label);
+    const half = wireStyle(w).width / 2 + 1.5; // clear of its own stroke, not just its centre line
+    const mid = pts.length >> 1;
+    const order = [];
+    for (let k = 0; k <= mid; k += 3) {
+      order.push(mid - k);
+      if (k > 0 && mid + k < pts.length) order.push(mid + k);
+    }
+    let best = null;
+    for (const i of order) {
+      const cx = pts[i][0];
+      let top = Infinity;
+      let bottom = -Infinity;
+      for (const q of pts) {
+        if (q[0] < cx - hw || q[0] > cx + hw) continue;
+        if (q[1] < top) top = q[1];
+        if (q[1] > bottom) bottom = q[1];
+      }
+      // Nearest first, alternating sides, in 2px steps out to the association distance: fixed one-line lifts
+      // (and 3px steps) missed the few pixels where a label fits the slot between two rows of chips.
+      const bases = [];
+      for (let off = 0; off <= WIRE_LABEL_ASSOC; off += 2) {
+        bases.push(top - half - WIRE_LABEL_DESCENT - off);
+        bases.push(bottom + half + WIRE_LABEL_ASCENT + off);
+      }
+      for (const base of bases) {
+        const b = { x0: cx - hw, x1: cx + hw, y0: base - WIRE_LABEL_ASCENT, y1: base + 3 };
+        if (outside(b) || index.hits(b, 3) > 0) continue; // 3: the widest stroke's half (observed, 3px) and air
+        if (!readsAsOwn(w, wi, cx, b, wires, drawn)) continue;
+        best = { cx, base, b };
+        break;
+      }
+      if (best !== null) break;
+    }
+    if (best === null) {
+      w.labelHidden = true;
+      return;
+    }
+    w.labelX = best.cx;
+    w.labelY = best.base;
+    index.box(best.b.x0, best.b.y0, best.b.x1, best.b.y1);
+  });
 }
 
 // Iterative DFS in sorted order; an edge landing on a node still on the stack is a back edge.
@@ -721,8 +1109,33 @@ function layoutGroup(g, allWires, sgOut) {
   // one chip (the fixed-pitch shortcut only held while every node was chip-sized).
   const rankMaxW = [];
   for (let r = 0; r <= maxRank; r++) rankMaxW.push(Math.max(NODE_MAX_W, ...rows[r].map(effW)));
+  // A rank holding the source of a wire that leaves this group gets a lane after it (see LANE_CLEAR), and
+  // the next column moves right far enough to leave the lane clear.
+  const laneCount = new Map();
+  for (const w of allWires) {
+    if (!w.self && gridSet.has(w.from) && w.t.groupId !== g.id) laneCount.set(rank.get(w.from), (laneCount.get(rank.get(w.from)) ?? 0) + 1);
+  }
+  const lanesW = (r) => (laneCount.has(r) ? LANE_CLEAR + (laneCount.get(r) - 1) * LANE_STEP : 0);
+  // A gap crossed by a labelled wire (an observed count, a mention) is wide enough for the widest such label and
+  // its margins, so the label has a place beside its own wire within one line of it: a gap the width of a
+  // chip's port and some air held no label, and the placer, bound to stay near its wire, had to hide it.
+  const labelW = new Map();
+  for (const w of allWires) {
+    if (w.self || w.back || w.label === null || !gridSet.has(w.from) || !gridSet.has(w.to)) continue;
+    const r = rank.get(w.from);
+    labelW.set(r, Math.max(labelW.get(r) ?? 0, 2 * labelHalfWidth(w.label) + 24));
+  }
   const colX = [GROUP_PAD_L];
-  for (let r = 1; r <= maxRank; r++) colX.push(colX[r - 1] + Math.max(RANK_PITCH, rankMaxW[r - 1] + 20));
+  for (let r = 1; r <= maxRank; r++) {
+    const lane = laneCount.has(r - 1) ? rankMaxW[r - 1] + lanesW(r - 1) + LANE_DROP : 0;
+    colX.push(colX[r - 1] + Math.max(RANK_PITCH, rankMaxW[r - 1] + 20, lane, rankMaxW[r - 1] + (labelW.get(r - 1) ?? 0)));
+  }
+  for (const p of grid) {
+    const r = rank.get(p.id);
+    p.rank = r;
+    p.laneX = laneCount.has(r) ? colX[r] + rankMaxW[r] + LANE_CLEAR : null;
+    p.dropX = laneCount.has(r) ? colX[r] + rankMaxW[r] + lanesW(r) + 8 : null;
+  }
 
   // Row bands hosting an under-row route (a self-loop, or either end of a back edge) get extra
   // pitch below them. Band-wide rather than per rank, so rows stay grid-aligned and the back
@@ -759,8 +1172,17 @@ function layoutGroup(g, allWires, sgOut) {
       }
     }
   }
+  // What each column holds, top to bottom (a chip with the badges over its corner, or a skill group's whole
+  // box): a wire that skips a column passes it through a gap between these, never across one.
+  g.cols = rows.map((row, r) => ({
+    x0: colX[r] - 8,
+    x1: colX[r] + rankMaxW[r] + 8,
+    occ: row.map((p) => (supers.has(p.id) ? [p.y - SG_CHIP_Y, p.y - SG_CHIP_Y + supers.get(p.id).h] : [p.y - 8, p.y + NODE_H])).sort((a, b) => a[0] - b[0]),
+  }));
+  // A lane after the last column stays inside the box, like everything else the group draws.
+  const lastLane = laneCount.has(maxRank) ? lanesW(maxRank) + 10 : GROUP_PAD_R;
   return {
-    w: colX[maxRank] + rankMaxW[maxRank] + GROUP_PAD_R,
+    w: colX[maxRank] + rankMaxW[maxRank] + Math.max(GROUP_PAD_R, lastLane),
     h: y - ROW_GAP + GROUP_PAD_B,
   };
 }
@@ -802,6 +1224,25 @@ function computeSkillGroup(p, loops, subs) {
   return { w, h, markers, subPlaced, points };
 }
 
+// A skill group's title uses the box's whole width when no drawn path enters that band, and otherwise only the
+// span between its chip's two ports: every wire into the chip ends at the input port and every wire out of it
+// starts at the output port, and a wire that skips the column passes it between its boxes, so text drawn
+// strictly between the ports meets no wire whatever row the wire comes from or climbs to. The title is cut
+// to the span it gets (issue #483: from the box's edge a wire into the chip ran through it, and a long name
+// ran on past the output port into a wire climbing to the row above), the whole name riding a tooltip, and
+// an unpainted rect over the span is the box the page's view-time fit measures it against, so the real font
+// is held to the same bound the column estimate is. The whole width is the default because a cut to the
+// ports alone made near-identical long names read the same.
+function sgTitle(sg, chip, drawn) {
+  const x0 = sg.x + SG_TITLE_X;
+  const wide = sg.w - SG_TITLE_X - 6;
+  const crossed = drawn.some((pts) => pts.some(([x, y]) => x > x0 - 3 && x < x0 + wide + 3 && y > sg.y + 2 && y < sg.y + 22));
+  const w = crossed ? chip.w - 16 : wide; // between the ports: 8px past the input port to 8px short of the output port's square
+  const cols = Math.max(1, Math.floor(w / TITLE_COL_W));
+  const full = String(sg.label);
+  return { title: labelColumns(full) > cols ? clipColumns(full, cols - 1) : full, titleW: w };
+}
+
 // Place a sized skill group at its grid cell (folder-local coords); the translation to page
 // coords happens with the rest of the folder in layoutNormalized.
 function placeSkillGroup(g, p, box, x, y, sgOut) {
@@ -817,6 +1258,8 @@ function placeSkillGroup(g, p, box, x, y, sgOut) {
     groupId: g.id,
     nodeId: p.id,
     label: p.node.name ?? p.label,
+    title: p.node.name ?? p.label,
+    titleW: box.w - SG_TITLE_X - 6,
     x,
     y,
     w: box.w,
@@ -863,7 +1306,7 @@ function orderRows(rows, rankEdges) {
   sweep(succs, up);
 }
 
-function routeWire(w) {
+function routeWire(w, g) {
   const f = w.f;
   const t = w.t;
   const y1 = f.y + NODE_H / 2;
@@ -878,7 +1321,7 @@ function routeWire(w) {
     // -- layoutGroup pays UNDER_ROUTE_EXTRA below this row band so that claim stays true.
     const x1 = f.x + f.w;
     const x2 = f.x;
-    const yb = f.y + NODE_H + SELF_LOOP_DROP + w.parallel * 12;
+    const yb = f.y + UNDER_ROUTE_Y + w.parallel * 12;
     w.d = `M ${fmt(x1)} ${fmt(y1)} C ${fmt(x1 + LOOP_OFF)} ${fmt(y1)}, ${fmt(x1 + LOOP_OFF)} ${fmt(yb)}, ${fmt(x1)} ${fmt(yb)} L ${fmt(x2)} ${fmt(yb)} C ${fmt(x2 - LOOP_OFF)} ${fmt(yb)}, ${fmt(x2 - LOOP_OFF)} ${fmt(y2)}, ${fmt(x2)} ${fmt(y2)}`;
     w.labelX = f.x + f.w / 2;
     w.labelY = yb + 12;
@@ -889,32 +1332,39 @@ function routeWire(w) {
     // reads left-of-target and the forward layout invariant stays honest for every other wire.
     const x1 = f.x + f.w;
     const x2 = t.x;
-    const yb = Math.max(f.y, t.y) + NODE_H + SELF_LOOP_DROP + 10 + w.parallel * 12;
+    const yb = Math.max(f.y, t.y) + UNDER_ROUTE_Y + 10 + w.backStep * 12;
     w.d = `M ${fmt(x1)} ${fmt(y1)} C ${fmt(x1 + LOOP_OFF)} ${fmt(y1)}, ${fmt(x1 + LOOP_OFF)} ${fmt(yb)}, ${fmt(x1)} ${fmt(yb)} L ${fmt(x2)} ${fmt(yb)} C ${fmt(x2 - LOOP_OFF)} ${fmt(yb)}, ${fmt(x2 - LOOP_OFF)} ${fmt(y2)}, ${fmt(x2)} ${fmt(y2)}`;
     w.labelX = (x1 + x2) / 2;
     w.labelY = yb + 12;
     return;
   }
-  // The Node-RED wire bezier: horizontal control offsets at 0.75 of the span, tightened when the
-  // nodes are closer than 100px so short wires do not balloon. Parallel siblings (index > 0) bow
-  // their control points alternately up/down so two wires between one pair never overlay.
-  const x1 = f.x + f.w;
-  const x2 = t.x;
-  const dx = Math.max(x2 - x1, 4);
-  const sc = dx < 100 ? 0.75 * (dx / 100) : 0.75;
-  const off = Math.max(dx * sc, 10);
+  // The Node-RED wire bezier. Parallel siblings (index > 0) bow their control points alternately up/down so
+  // two wires between one pair never overlay. From a column with lanes after it, the wire first runs square
+  // across them along its own row; and it passes every column it skips through a gap between that column's
+  // boxes, square across it, so it crosses no chip and no skill group's title (issue #483).
   const sign = w.parallel % 2 === 1 ? -1 : 1;
   const steps = Math.ceil(w.parallel / 2);
   const bow = sign * steps * PARALLEL_BOW;
-  w.d = `M ${fmt(x1)} ${fmt(y1)} C ${fmt(x1 + off)} ${fmt(y1 + bow)}, ${fmt(x2 - off)} ${fmt(y2 + bow)}, ${fmt(x2)} ${fmt(y2)}`;
-  w.labelX = (x1 + x2) / 2;
-  if (x2 - x1 < LABEL_MIN_SPAN) {
-    // Adjacent full-width chips leave a ~20px span: the midpoint hugs the port squares, so the
-    // label lifts above the wire and siblings stack upward by a fixed pitch instead of bow-tracking.
-    w.labelY = Math.min(y1, y2) - 12 - w.parallel * 12;
-  } else {
-    w.labelY = (y1 + y2) / 2 - 5 + sign * steps * PARALLEL_LABEL_STEP;
+  const end = [t.x, y2];
+  let cur = [f.x + f.w, y1];
+  const parts = [`M ${fmt(cur[0])} ${fmt(cur[1])}`];
+  if (typeof f.dropX === "number" && f.dropX < end[0]) {
+    cur = [f.dropX, y1];
+    parts.push(`L ${fmt(cur[0])} ${fmt(cur[1])}`);
   }
+  const cols = g && Array.isArray(g.cols) && Number.isInteger(f.rank) && Number.isInteger(t.rank) ? g.cols.slice(f.rank + 1, t.rank) : [];
+  for (const col of cols) {
+    const want = cur[1] + ((end[1] - cur[1]) * (col.x0 - cur[0])) / Math.max(1, end[0] - cur[0]);
+    const y = passY(col, g, want + bow);
+    parts.push(nodeRedCurve(cur, [col.x0, y], bow));
+    parts.push(`L ${fmt(col.x1)} ${fmt(y)}`);
+    cur = [col.x1, y];
+  }
+  parts.push(nodeRedCurve(cur, end, bow));
+  w.d = parts.join(" ");
+  // The midpoint, until placeWireLabels finds the label its clear spot on this path.
+  w.labelX = (f.x + f.w + t.x) / 2;
+  w.labelY = (y1 + y2) / 2;
 }
 
 // ---- server-side strings the page shows (tips, legend, banners) ----
@@ -1100,7 +1550,7 @@ function nodeSvg(p, flags, hasIn, hasOut) {
   if (hasOut) parts.push(`<rect x="${fmt(p.w - 5)}" y="${fmt(NODE_H / 2 - 5)}" width="10" height="10" rx="3" fill="${PORT_FILL}" stroke="${CHIP_STROKE}" stroke-width="1"/>`);
   if (n.kind === "trigger") {
     parts.push(`<rect x="3" y="${fmt(NODE_H + 3)}" width="9" height="9" rx="2" fill="${statusColor(n.runs > 0 ? n.lastOutcome : null)}"/>`);
-    parts.push(`<text x="16" y="${fmt(NODE_H + 11)}" font-size="10" fill="${PAGE_DIM}">${n.runs > 0 ? `${fmt(n.runs)} runs` : "no runs"}</text>`);
+    parts.push(`<text x="16" y="${fmt(STATUS_DY)}" font-size="10" fill="${PAGE_DIM}">${n.runs > 0 ? `${fmt(n.runs)} runs` : "no runs"}</text>`);
   }
   const orange = [...flagNames].some((f) => ORANGE_FLAGS.has(f));
   if (orange) parts.push(`<circle cx="${fmt(p.w - 4)}" cy="-2" r="5" fill="${BADGE_ORANGE}"/>`);
@@ -1116,27 +1566,16 @@ function wireStyle(w) {
   return { stroke: CHIP_FILL.cron, width: 2, dash: "4,3" }; // cron-rearm: dashed in the trigger's own hue
 }
 
-function wireSvg(w, nowMs) {
+function wireSvg(w) {
   const s = wireStyle(w);
   // A cron re-arm wire says so in its class (issue #422): its pattern is centred under the loop with no box of its own,
   // and the page's fit measures it against the loop it labels, which only the page can do exactly.
   const parts = [`<g class="${w.kind === "cron-rearm" ? "gwire gcron" : "gwire"}" id="${w.id}">`];
   parts.push(`<path d="${w.d}" fill="none" stroke="${s.stroke}" stroke-width="${fmt(s.width)}"${s.dash !== null ? ` stroke-dasharray="${s.dash}"` : ""}/>`);
-  let label = null;
-  let fill = PAGE_DIM;
-  if (w.kind === "observed" && w.edge.count !== null) {
-    // Recency beside the count when the fold recorded it: relTime against the injected instant,
-    // so the byte-determinism guarantee holds -- same model + same now, same label.
-    const ago = relTime(nowMs, w.edge.lastEndedAt);
-    label = ago !== null ? `(${w.edge.count}× · ${ago})` : `(${w.edge.count}×)`;
-    fill = WIRE_OBSERVED;
-  } else if (w.kind === "potential") {
-    label = "mention";
-    fill = w.edge.strong ? PAGE_ACCENT : WIRE_POTENTIAL;
-  } else if (w.kind === "cron-rearm" && w.edge.label !== null) {
-    label = w.edge.label;
-    fill = CHIP_FILL.cron;
-  }
+  // A label with no clear spot rides the wire's tooltip instead of being drawn over something (issue #483).
+  if (w.labelHidden === true && w.label !== null) parts.push(`<title>${escapeHtml(w.label)}</title>`);
+  const label = w.labelHidden === true ? null : w.label;
+  const fill = w.kind === "observed" ? WIRE_OBSERVED : w.kind === "potential" ? (w.edge.strong ? PAGE_ACCENT : WIRE_POTENTIAL) : w.kind === "cron-rearm" ? CHIP_FILL.cron : PAGE_DIM;
   if (label !== null) parts.push(`<text x="${fmt(w.labelX)}" y="${fmt(w.labelY)}" text-anchor="middle" font-size="10" fill="${fill}">${escapeHtml(label)}</text>`);
   parts.push("</g>");
   return parts.join("");
@@ -1158,7 +1597,11 @@ function groupSvg(g, fullPaths) {
 function skillGroupSvg(sg) {
   const parts = [`<g class="sgroup" id="${sg.id}">`];
   parts.push(`<rect x="${fmt(sg.x)}" y="${fmt(sg.y)}" width="${fmt(sg.w)}" height="${fmt(sg.h)}" rx="2" fill="${GROUP_FILL}" fill-opacity="0.08" stroke="${PAGE_BORDER}" stroke-width="2"/>`);
-  parts.push(`<text x="${fmt(sg.x + 8)}" y="${fmt(sg.y + 16)}" font-size="11" fill="${PAGE_DIM}">${escapeHtml(sg.label)}</text>`);
+  // The title spans only the chip's ports' gap (see sgTitle); at the box's edge a wire into the chip from
+  // its own row or a row above ran through it, past the output port one climbing to the row above did.
+  const tip = sg.title !== sg.label ? `<title>${escapeHtml(sg.label)}</title>` : "";
+  parts.push(`<rect x="${fmt(sg.x + SG_TITLE_X - 2)}" y="${fmt(sg.y + 4)}" width="${fmt(sg.titleW + 2)}" height="16" fill="none" stroke="none"/>`);
+  parts.push(`<text x="${fmt(sg.x + SG_TITLE_X)}" y="${fmt(sg.y + 16)}" font-size="11" fill="${PAGE_DIM}">${escapeHtml(sg.title)}${tip}</text>`);
   parts.push(`<path d="${sg.d}" fill="none" stroke="${WIRE_POTENTIAL}" stroke-width="1.5" stroke-dasharray="4,3"/>`);
   for (const m of sg.markers) {
     parts.push(`<rect x="${fmt(m.x)}" y="${fmt(m.y)}" width="${fmt(m.w)}" height="${fmt(m.h)}" rx="6" fill="${CHIP_FILL.skill}" stroke="${CHIP_STROKE}" stroke-width="1"/>`);
@@ -1179,7 +1622,7 @@ function legendSwatch(inner) {
   return `<svg width="16" height="12" aria-hidden="true">${inner}</svg>`;
 }
 
-export function legendHtml(norm) {
+export function legendHtml(norm, hiddenLabels = 0) {
   const rows = [];
   const row = (sample, text) => rows.push(`<div class="row">${sample}<span>${escapeHtml(text)}</span></div>`);
   rows.push("<h2>edges</h2>");
@@ -1208,6 +1651,8 @@ export function legendHtml(norm) {
   if (norm.meta.injectedUnreachable.length > 0) honesty.push(`injected skills dir unreadable: ${norm.meta.injectedUnreachable.join(", ")}`);
   if (norm.meta.overlayUnreachable) honesty.push("overlay skills dir unreadable (global pi dir)");
   if (norm.meta.stagedUnenumerable.length > 0) honesty.push(`staged packages not enumerable (manifest patterns): ${norm.meta.stagedUnenumerable.join(", ")}`);
+  // Stated, never silent: a wire label the layout found no clear spot for is in that wire's tooltip only.
+  if (Number.isInteger(hiddenLabels) && hiddenLabels > 0) honesty.push(`${hiddenLabels} wire label${hiddenLabels === 1 ? "" : "s"} in tooltips only (no clear spot on the page)`);
   for (const line of honesty) rows.push(`<div class="honesty">${escapeHtml(line)}</div>`);
   return `<div id="legend">${rows.join("")}</div>`;
 }
@@ -1301,7 +1746,7 @@ function fitLabels(doc, measure) {
       }
     }
     // A loop hint's box ends at the ring wire, drawn RING_INSET inside the skill group's right edge from the chip's
-    // midline down; the group's title sits above that line and has the whole width.
+    // midline down; the group's title sits above that line, held by its own rect between the chip's ports.
     if (holds !== null && hasClass(t.parentNode, "sgroup") && ty > holdsTop + RING_TOP) holds -= RING_INSET;
     var bound = holds !== null ? holds : after;
     if (next !== null && (bound === null || next < bound)) bound = next;
@@ -1638,8 +2083,8 @@ export function buildGraphScene(model, { now, fullPaths } = {}) {
   } catch {
     norm = normalizeModel(null);
   }
-  const layout = layoutNormalized(norm);
   const nowMs = Number.isFinite(now) ? now : (norm.meta.generatedAt ?? 0);
+  const layout = layoutNormalized(norm, nowMs);
 
   // Per-node flag lists and adjacency, keyed by ordinal ids only: the originals embed host paths.
   const flagsByOrig = new Map();
@@ -1684,10 +2129,11 @@ export function buildGraphScene(model, { now, fullPaths } = {}) {
   const svgBody = [
     layout.groups.map((g) => groupSvg(g, fullPaths)).join(""),
     layout.skillGroups.map(skillGroupSvg).join(""),
-    layout.wires.map((w) => wireSvg(w, nowMs)).join(""),
+    layout.wires.map(wireSvg).join(""),
     nodeParts.join(""),
   ].join("");
-  return { norm, layout, svgBody, viewBox: layout.viewBox, graphData, nowMs };
+  const hiddenLabels = layout.wires.filter((w) => w.labelHidden === true).length;
+  return { norm, layout, svgBody, viewBox: layout.viewBox, graphData, nowMs, hiddenLabels };
 }
 
 // Flags were recorded against original node ids; the placed node still holds its normalised node,

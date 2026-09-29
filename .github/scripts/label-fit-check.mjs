@@ -7,8 +7,10 @@
 //   node .github/scripts/label-fit-check.mjs [path-to-chrome]
 //
 // Exits 1 when any label runs past its box or collides with another label with the fit on, or when an ASCII
-// label the static builder sized was changed by it. The same page with the fit stripped is measured too, and its
-// overflow count is printed for comparison only.
+// label the static builder sized was changed by it, or (issue #483) when any text on the plain, realistic, #483
+// (and its long skill-group name twin), long folder title, many mentions or deep chains page sits on a wire, a
+// loop, a ring, a painted rect's border, a line or another text, or runs past its svg. The same page with the fit stripped
+// is measured too, and its overflow count is printed for comparison only.
 
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
@@ -67,7 +69,8 @@ function model(corpus, folder, cron) {
     name: `${k}-${corpus[k]}`, isSub: false, group: null, aiTrigger: i % 2 === 0, meta: null, mentions: [],
     loops: i === 0 ? [{ hint: `until ${corpus.malayalam}${corpus.wide}` }] : [], unread: false,
   }));
-  // A skill group whose name, sub chips and loop hints all run long: the titles the builder never cuts.
+  // A skill group whose name, sub chips and loop hints all run long. The group's title is cut by the builder
+  // to the gap between its chip's ports since issue #483; the sub chips and hints are left to the fit.
   const group = `a-very-long-skill-group-name-${corpus.wide}`;
   skills.push({ name: group, isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], unread: false, loops: [{ hint: `until ${corpus.wide}` }, { hint: `repeat ${corpus.cuneiform}` }] });
   for (const sub of ["s1", `s2${corpus.mmm}`, corpus.arabic]) skills.push({ name: `${group}/${sub}`, isSub: true, group, aiTrigger: false, meta: null, mentions: [], unread: false });
@@ -178,13 +181,153 @@ const PROBE = `<script>
 })();
 </script>`;
 
-function page(graph, fitFold, withFit) {
-  let html = buildInsightsHtml({ graph, fold: fitFold, costsUnreachable: null, window: "30d", costByTrigger: {}, budget: null }, { now: NOW });
+// The collision probe (issue #483), written apart from the layout like PROBE is from the fit: every drawn text's
+// box against every other text's, against every wire, loop and ring path (sampled along its length in screen
+// space), and against its own svg's edges, whatever its anchor. The layout's own tests pin the same rules with
+// an estimated font; this is where the real font answers.
+const HITS = `<script>
+(function () {
+  function report() {
+    var out = [];
+    var texts = [];
+    var all = document.getElementsByTagName("text");
+    for (var i = 0; i < all.length; i++) {
+      var t = all[i];
+      if (!(t.getComputedTextLength() > 0)) continue;
+      var r = t.getBoundingClientRect();
+      var root = t.ownerSVGElement;
+      while (root && root.ownerSVGElement) root = root.ownerSVGElement;
+      var sr = root.getBoundingClientRect();
+      // The 1px shrink that absorbs anti-aliasing is a unit of the text's own space, so it scales with the
+      // rendered scale: a fixed screen pixel was three units on a scene drawn at 0.34 and reported false hits.
+      var ctm = t.getScreenCTM();
+      var sh = ctm ? Math.min(1, Math.abs(ctm.a)) : 1;
+      var box = [r.left + sh, r.top + sh, r.right - sh, r.bottom - sh];
+      var name = JSON.stringify(t.firstChild ? t.firstChild.nodeValue : "");
+      if (box[0] < sr.left - 0.5 || box[2] > sr.right + 0.5 || box[1] < sr.top - 0.5 || box[3] > sr.bottom + 0.5) out.push(name + " runs past its svg");
+      var g = t.parentNode;
+      var wire = g && / gwire /.test(" " + (g.getAttribute("class") || "") + " ") && !/ gcron /.test(" " + (g.getAttribute("class") || "") + " ") ? g : null;
+      texts.push({ el: t, name: name, box: box, ink: [r.left, r.top, r.right, r.bottom], wire: wire, scale: ctm ? Math.abs(ctm.a) : 1 });
+    }
+    for (var a = 0; a < texts.length; a++) {
+      for (var b = a + 1; b < texts.length; b++) {
+        var p = texts[a].box, q = texts[b].box;
+        var ox = Math.min(p[2], q[2]) - Math.max(p[0], q[0]);
+        var oy = Math.min(p[3], q[3]) - Math.max(p[1], q[1]);
+        if (ox > 1 && oy > 3) out.push(texts[a].name + " overlaps " + texts[b].name);
+      }
+    }
+    // Rects (chips, ports, group and skill-group boxes, bars): a text that meets a painted rect without lying
+    // wholly inside it crosses that rect's border. An unpainted rect (the fit's own bound) draws nothing.
+    var rects = document.querySelectorAll("svg rect");
+    for (var ri = 0; ri < rects.length; ri++) {
+      var rc = rects[ri];
+      if ((rc.getAttribute("stroke") || "none") === "none" && (rc.getAttribute("fill") || "") === "none") continue;
+      var rb = rc.getBoundingClientRect();
+      if (!(rb.width > 0.5) || !(rb.height > 0.5)) continue;
+      // One exemption, stated in DES-ADMIN-VIA-PI-EXTENSION: a chip's label against its own chip's port squares.
+      // The fit bounds a chip label at the chip's edge, not at the port straddling it (#422: a port bound cut
+      // ordinary names the builder had already cut), so a label cut to that bound may end up to 3 units under
+      // its own output port, which is drawn over it.
+      var port = rc.getAttribute("width") === "10" && rc.getAttribute("height") === "10" && / gnode /.test(" " + (rc.parentNode.getAttribute("class") || "") + " ");
+      for (var tj = 0; tj < texts.length; tj++) {
+        if (port && texts[tj].el.parentNode === rc.parentNode) continue;
+        var tb2 = texts[tj].box;
+        var mx = Math.min(tb2[2], rb.right) - Math.max(tb2[0], rb.left);
+        var my = Math.min(tb2[3], rb.bottom) - Math.max(tb2[1], rb.top);
+        if (!(mx > 0.5 && my > 0.5)) continue;
+        var inside = tb2[0] >= rb.left - 0.5 && tb2[2] <= rb.right + 0.5 && tb2[1] >= rb.top - 0.5 && tb2[3] <= rb.bottom + 0.5;
+        if (!inside) out.push(texts[tj].name + " crosses the border of a " + (rc.parentNode.getAttribute("class") || rc.parentNode.localName) + " rect");
+      }
+    }
+    // Lines (axes, gridlines): sampled along their length in screen space, like the paths below.
+    var lines = document.querySelectorAll("svg line");
+    for (var li = 0; li < lines.length; li++) {
+      var ln = lines[li];
+      var lm = ln.getScreenCTM();
+      var ax = parseFloat(ln.getAttribute("x1")), ay = parseFloat(ln.getAttribute("y1")), bx = parseFloat(ln.getAttribute("x2")), by = parseFloat(ln.getAttribute("y2"));
+      var lhit = {};
+      for (var q = 0; q <= 200; q++) {
+        var lx = ax + ((bx - ax) * q) / 200, ly = ay + ((by - ay) * q) / 200;
+        var sx = lm.a * lx + lm.c * ly + lm.e, sy = lm.b * lx + lm.d * ly + lm.f;
+        for (var tk = 0; tk < texts.length; tk++) {
+          var tb3 = texts[tk].box;
+          if (!lhit[tk] && sx > tb3[0] && sx < tb3[2] && sy > tb3[1] && sy < tb3[3]) {
+            lhit[tk] = true;
+            out.push(texts[tk].name + " sits on a line");
+          }
+        }
+      }
+    }
+    var paths = document.querySelectorAll(".gwire path, .sgroup path");
+    var sampled = [];
+    for (var k = 0; k < paths.length; k++) {
+      var path = paths[k];
+      var m = path.getScreenCTM();
+      var len = path.getTotalLength();
+      var owner = path.parentNode.getAttribute("id");
+      // Against the text's whole font box widened by half the stroke: a path whose centre line passes just
+      // under a baseline still draws its stroke through the text, which is how the badge sat on its loop.
+      var half = (parseFloat(path.getAttribute("stroke-width")) || 1) / 2 * m.a;
+      var hit = {};
+      var pts = [];
+      sampled.push({ g: path.parentNode, pts: pts });
+      for (var s = 0; s <= len; s += 1.5) {
+        var pt = path.getPointAtLength(s);
+        var x = m.a * pt.x + m.c * pt.y + m.e;
+        var y = m.b * pt.x + m.d * pt.y + m.f;
+        pts.push([x, y]);
+        for (var j = 0; j < texts.length; j++) {
+          var c = texts[j].ink;
+          if (!hit[j] && x > c[0] - half && x < c[2] + half && y > c[1] - half && y < c[3] + half) {
+            hit[j] = true;
+            out.push(texts[j].name + " sits on path " + owner);
+          }
+        }
+      }
+    }
+    // A wire label reads as its own wire's (issue #483): from the middle of its drawn box's top and bottom
+    // edges, its own wire lies within 20 units and no wire outside its pair (a pair shares both ends) lies
+    // nearer. The layout holds 16 with its estimated box; the 4 absorb the real font's box.
+    function dist(pts, anchors) {
+      var d = Infinity;
+      for (var ai = 0; ai < anchors.length; ai++) for (var pi = 0; pi < pts.length; pi++) d = Math.min(d, Math.hypot(pts[pi][0] - anchors[ai][0], pts[pi][1] - anchors[ai][1]));
+      return d;
+    }
+    function ends(pts) { return pts.length > 0 ? [pts[0], pts[pts.length - 1]] : null; }
+    function same(a, b) { return Math.hypot(a[0][0] - b[0][0], a[0][1] - b[0][1]) < 0.5 && Math.hypot(a[1][0] - b[1][0], a[1][1] - b[1][1]) < 0.5; }
+    for (var ti = 0; ti < texts.length; ti++) {
+      var tx = texts[ti];
+      if (tx.wire === null) continue;
+      var mine = null;
+      for (var si = 0; si < sampled.length; si++) if (sampled[si].g === tx.wire) mine = sampled[si];
+      if (mine === null || mine.pts.length === 0) continue;
+      var cxm = (tx.ink[0] + tx.ink[2]) / 2;
+      var anchors = [[cxm, tx.ink[1]], [cxm, tx.ink[3]]];
+      var own = dist(mine.pts, anchors);
+      if (own > 20 * tx.scale) out.push(tx.name + " sits " + (own / tx.scale).toFixed(1) + " units from its own wire");
+      var mineEnds = ends(mine.pts);
+      for (var oi = 0; oi < sampled.length; oi++) {
+        var o = sampled[oi];
+        if (o === mine || o.pts.length === 0 || !/ gwire /.test(" " + (o.g.getAttribute("class") || "") + " ")) continue;
+        if (same(mineEnds, ends(o.pts))) continue;
+        var od = dist(o.pts, anchors);
+        if (od < own - 0.5 * tx.scale) out.push(tx.name + " is nearer wire " + o.g.getAttribute("id") + " than its own " + tx.wire.getAttribute("id"));
+      }
+    }
+    document.getElementById("hitout").textContent = JSON.stringify(out);
+  }
+  setTimeout(report, 400);
+})();
+</script>`;
+
+function page(graph, fitFold, withFit, costByTrigger = {}) {
+  let html = buildInsightsHtml({ graph, fold: fitFold, costsUnreachable: null, window: "30d", costByTrigger, budget: null }, { now: NOW });
   if (!withFit) {
     if (!html.includes(FIT_JS)) throw new Error("the page does not carry FIT_JS verbatim");
     html = html.replace(FIT_JS, "");
   }
-  return html.replace("</body>", `<pre id="fitout"></pre>${PROBE}</body>`);
+  return html.replace("</body>", `<pre id="fitout"></pre>${PROBE}<pre id="hitout"></pre>${HITS}</body>`);
 }
 
 function measure(html) {
@@ -200,10 +343,16 @@ function measure(html) {
       child.stdout.on("data", (d) => { dom += d; });
       child.on("close", () => {
         server.close();
-        const m = /<pre id="fitout">([^<]*)<\/pre>/.exec(dom);
-        if (!m || m[1] === "") return reject(new Error("no probe output (Chrome did not run the page?)"));
-        const decoded = m[1].replace(/&quot;/g, "\"").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
-        resolve(JSON.parse(decoded));
+        const read = (id) => {
+          const m = new RegExp(`<pre id="${id}">([^<]*)</pre>`).exec(dom);
+          if (!m || m[1] === "") return null;
+          return JSON.parse(m[1].replace(/&quot;/g, "\"").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&"));
+        };
+        const rows = read("fitout");
+        const hits = read("hitout");
+        if (rows === null || hits === null) return reject(new Error("no probe output (Chrome did not run the page?)"));
+        rows.hits = hits;
+        resolve(rows);
       });
     });
   });
@@ -291,6 +440,85 @@ function realistic() {
   };
 }
 
+// The issue #483 page's shape: a site folder whose cron triggers carry spend badges over their re-arm loops, one
+// flow in a skill group chaining to a skill one row up (an observed count and a mention on one short sloped pair),
+// three flows found in the three tiers, and a forge group stacked between the folder and those tier groups; its
+// fold ends on a day that ran, so the cumulative line ends at the plot's right edge with its label.
+// With `flow` a long name, the looped skill's title runs on past its chip, where the wires climbing to notify run.
+// With `folder` a long path, the folder's title fills the band a label climbing from the first row would reach.
+function tiered(flow = "build-report", folder = "/srv/site") {
+  const cron = (index, id, pattern, flow, extra = {}) => ({ type: "cron", index, id, pattern, folder, flow, model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false, ...extra });
+  const triggers = [
+    cron(0, "nightly", "0 3 * * *", flow),
+    cron(1, "inject-tidy", "30 4 * * *", "tidy", { skillsDir: "/srv/skills" }),
+    cron(2, "weekly-overlay", "0 6 * * mon", "overlay-report"),
+    cron(3, "audit", "0 5 * * fri", "house-audit"),
+    cron(4, "reaper", "0 7 1 * *", "prune-stale"),
+    { type: "comment", index: 5, phrase: "@pi wf", any: [], all: [], none: [], command: "wf run", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" },
+    { type: "label", index: 6, any: ["ai"], all: [], none: [], flow: "fix", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" },
+  ];
+  return {
+    triggers: { triggers },
+    schedulers: triggers.filter((t) => t.type === "cron").map((t) => ({ key: t.id, name: t.id, pattern: t.pattern, every: null, next: "2026-08-12T03:00:00.000Z", overdueMs: null })),
+    folderSkills: {
+      [folder]: {
+        head: "a1c93f7", truncated: false, unreachable: null,
+        skills: [
+          { name: flow, isSub: false, group: null, aiTrigger: false, meta: null, mentions: [{ name: "notify", strong: true }], loops: [{ hint: "until it renders right" }], unread: false },
+          { name: "notify", isSub: false, group: null, aiTrigger: true, meta: null, mentions: [], loops: [], unread: false },
+          { name: "old-import", isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], loops: [], unread: false },
+        ],
+      },
+    },
+    injectedSkills: { "/srv/skills": { skills: [{ name: "tidy", aiTrigger: false }], truncated: false, unreachable: null } },
+    overlaySkills: { skills: [{ name: "overlay-report" }], truncated: false, unreachable: null },
+    stagedSkills: { skills: [{ name: "house-audit", package: "@acme/pi-house-skills", dir: "house-skills" }], unenumerable: [], truncated: false },
+    forgeRepos: { github: ["acme/api", "acme/website"] },
+    cronStats: { byId: Object.fromEntries(["nightly", "inject-tidy", "weekly-overlay", "audit", "reaper"].map((id, i) => [id, { runs: [28, 26, 5, 4, 1][i], lastOutcome: i === 4 ? "failed" : "completed", lastEndedAt: "2026-08-11T03:04:00.000Z" }])) },
+    runJoin: { byIndex: { 5: { runs: 3, lastOutcome: "completed", lastEndedAt: "2026-08-11T01:00:00.000Z" }, 6: { runs: 10, lastOutcome: "completed", lastEndedAt: "2026-08-11T01:00:00.000Z" } }, unattributed: 2 },
+    chainEdges: { edges: [{ parentFlow: flow, childFlow: "notify", target: "local:site", count: 3, lastEndedAt: "2026-08-10T00:00:00.000Z" }], refusals: {}, truncated: false },
+    caps: { chainDepthMax: 1, chainMaxPerJob: 2, windowDays: 30 },
+    nowMs: NOW,
+  };
+}
+const TIERED_COSTS = {
+  "trigger:0": { cost: usd(0, "estimated"), runs: 28 },
+  "trigger:1": { cost: usd(5.7, "metered"), runs: 26 },
+  "trigger:2": { cost: usd(0.77, "metered"), runs: 5 },
+  "trigger:3": { cost: usd(1.55, "metered"), runs: 4 },
+  "trigger:4": { cost: usd(0.02, "metered"), runs: 1 },
+  "trigger:5": { cost: usd(1.18, "estimated"), runs: 3 },
+  "trigger:6": { cost: usd(3.05, "estimated", { floor: true }), runs: 10 },
+};
+// Many skills mentioning one (fourteen mention labels into one gap), and a deep observed chain with a fan-out
+// sibling, a loop in the middle and a mention back to the root (labels lifted under the chips of the row between):
+// the review scenes of PR #487.
+function manyMentions() {
+  const m = tiered();
+  const sk = (name, extra = {}) => ({ name, isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], loops: [], unread: false, ...extra });
+  m.triggers.triggers = Array.from({ length: 4 }, (_, i) => ({ type: "cron", index: i, id: `c${i}`, pattern: "0 3 * * *", folder: "/srv/site", flow: `caller-${i}`, model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false }));
+  m.schedulers = m.triggers.triggers.map((t) => ({ key: t.id, name: t.id, pattern: t.pattern, every: null, next: "2026-08-12T03:00:00.000Z", overdueMs: null }));
+  m.folderSkills["/srv/site"].skills = [sk("notify", { aiTrigger: true }), ...Array.from({ length: 14 }, (_, i) => sk(`caller-${i}`, { mentions: [{ name: "notify", strong: i % 3 === 0 }] }))];
+  m.chainEdges.edges = [{ parentFlow: "caller-0", childFlow: "notify", target: "local:site", count: 1, lastEndedAt: "2026-08-10T00:00:00.000Z" }];
+  return m;
+}
+function deepChains() {
+  const m = tiered();
+  const chain = ["root", "stage-b", "stage-c", "stage-d", "stage-e", "stage-f"];
+  const sk = (name, extra = {}) => ({ name, isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], loops: [], unread: false, ...extra });
+  m.triggers.triggers = [{ type: "cron", index: 0, id: "deep", pattern: "0 3 * * *", folder: "/srv/site", flow: "root", model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false }];
+  m.schedulers = [{ key: "deep", name: "deep", pattern: "0 3 * * *", every: null, next: "2026-08-12T03:00:00.000Z", overdueMs: null }];
+  m.folderSkills["/srv/site"].skills = [...chain.map((c, i) => sk(c, { mentions: [{ name: i < chain.length - 1 ? chain[i + 1] : "root", strong: i < chain.length - 1 }], loops: i === 2 ? [{ hint: "until done" }] : [] })), sk("side-notify", { aiTrigger: true })];
+  const counts = [6, 6, 6, 4, 2];
+  m.chainEdges.edges = [...chain.slice(1).map((c, i) => ({ parentFlow: chain[i], childFlow: c, target: "local:site", count: counts[i], lastEndedAt: "2026-08-10T00:00:00.000Z" })), { parentFlow: "root", childFlow: "side-notify", target: "local:site", count: 6, lastEndedAt: "2026-08-10T00:00:00.000Z" }];
+  return m;
+}
+function tieredFold() {
+  const f = fold(Object.fromEntries(NAMES.map((k) => [k, "x"])));
+  f.daily = Array.from({ length: 12 }, (_, i) => ({ day: `2026-07-${String(20 + i).padStart(2, "0")}`, cost: usd(0.4 + i * 0.1, i > 6 ? "estimated" : "metered", { floor: i === 11 }), runs: 2 }));
+  return f;
+}
+
 const ascii = Object.fromEntries(NAMES.map((k) => [k, "x"]));
 const corpusGraph = buildGraphModel(model(CORPUS, LONG_FOLDER, LONG_CRON));
 const plainGraph = buildGraphModel(model(ascii, "/srv/site", "0 3 * * *"));
@@ -302,13 +530,20 @@ const plainFitted = await measure(page(plainGraph, fold(ascii), true));
 const plainStripped = await measure(page(plainGraph, fold(ascii), false));
 const realFitted = await measure(page(realGraph, fold(ascii), true));
 const realStripped = await measure(page(realGraph, fold(ascii), false));
+const tieredFitted = await measure(page(buildGraphModel(tiered()), tieredFold(), true, TIERED_COSTS));
+const longFitted = await measure(page(buildGraphModel(tiered("build-report-for-the-whole-customer-website")), tieredFold(), true, TIERED_COSTS));
+const reviewPages = {
+  "long folder title": await measure(page(buildGraphModel(tiered("build-report", "/srv/customer-facing-marketing-website-production-deployment-folder-2026q3")), tieredFold(), true, TIERED_COSTS)),
+  "many mentions": await measure(page(buildGraphModel(manyMentions()), tieredFold(), true, {})),
+  "deep chains": await measure(page(buildGraphModel(deepChains()), tieredFold(), true, {})),
+};
 
 const report = (name, list) => {
   console.log(`${name}: ${list.length}`);
   for (const line of list) console.log(`  ${line}`);
   return list.length;
 };
-console.log(`labels measured: ${fitted.length} (corpus), ${plainFitted.length} (plain ascii), ${realFitted.length} (realistic ascii)`);
+console.log(`labels measured: ${fitted.length} (corpus), ${plainFitted.length} (plain ascii), ${realFitted.length} (realistic ascii), ${tieredFitted.length} (issue #483 page)`);
 console.log(`corpus overflows with the fit stripped: ${findings(stripped).length} (for comparison)`);
 let bad = 0;
 bad += report("corpus overflows with the fit", findings(fitted));
@@ -329,5 +564,17 @@ for (const forge of ["github", "forgejo"]) {
   if (!realFitted.some((r) => r.text.startsWith(`${forge} · forge · unverifiable from this host`))) { console.log(`the ${forge} group's caveat is gone from the realistic page`); bad++; }
 }
 bad += report("realistic ascii cron patterns cut", realFitted.filter((r) => r.loopLeft !== undefined && r.drawn !== null).map((r) => JSON.stringify(r.drawn)));
+// Issue #483: on the plain, realistic and #483 pages no text sits on a wire, a loop or a ring, none overlaps another
+// (whatever its anchor, so the cumulative end label and the centred wire labels count), and none runs past its svg.
+bad += report("plain ascii text on a path, a rect border, a line, a text or past its svg", plainFitted.hits);
+bad += report("realistic ascii text on a path, a rect border, a line, a text or past its svg", realFitted.hits);
+bad += report("issue #483 page overflows with the fit", findings(tieredFitted));
+bad += report("issue #483 page text on a path, a rect border, a line, a text or past its svg", tieredFitted.hits);
+bad += report("issue #483 page, long skill-group name, overflows with the fit", findings(longFitted));
+bad += report("issue #483 page, long skill-group name, text on a path, a rect border, a line, a text or past its svg", longFitted.hits);
+for (const [name, rows] of Object.entries(reviewPages)) {
+  bad += report(`${name} page overflows with the fit`, findings(rows));
+  bad += report(`${name} page text on a path, a rect border, a line, a text or past its svg`, rows.hits);
+}
 if (findings(stripped).length === 0) { console.log("NOTE: the corpus overflowed nothing without the fit, so this run proves nothing"); bad++; }
 process.exitCode = bad === 0 ? 0 : 1;

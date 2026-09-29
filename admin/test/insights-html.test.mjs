@@ -732,3 +732,84 @@ test("a list label and a plan chip are sized in columns (#418)", () => {
   const ascii = layoutBarList([{ label: "a-label-that-is-longer-than-twenty", cost: null, runs: 0 }], { width: 430 })[0];
   assert.equal(ascii.labelText, "a-label-that-is-long\u2026", "an ASCII label is cut exactly where it was");
 });
+
+// ---- nothing on the page overlaps a wire, a loop or another label (issue #483) ----
+
+test("the cumulative end label sits inside its chart, above its line and off every point (issue #483)", () => {
+  // It started 6px right of the last point, which is the plot's right edge whenever the window's last day
+  // ran, so it ran past the svg and was cut. A total equal to the scale maximum puts the last point on the
+  // plot's top line, the case where a label above it has least room.
+  const series = [
+    CANNED_FOLD().daily,
+    Array.from({ length: 30 }, (_, i) => ({ day: `2026-07-${String(i + 1).padStart(2, "0")}`, cost: usd(0.4 + (i % 3) * 0.1, i > 20 ? "estimated" : "metered", { floor: i === 29 }), runs: 2 })),
+    [{ day: "2026-07-01", cost: usd(1, "metered"), runs: 1 }, { day: "2026-07-02", cost: usd(1, "metered"), runs: 1 }],
+    [{ day: "2026-07-01", cost: usd(12345.67, "estimated", { floor: true }), runs: 1 }],
+  ];
+  let lifted = 0;
+  for (const daily of series) {
+    const lay = layoutCumulative(daily, {});
+    const el = lay.endLabel;
+    const left = el.anchor === "end" ? el.x - el.width : el.x;
+    const box = { x0: left, x1: left + el.width, y0: el.y - 9, y1: el.y + 2 };
+    assert.ok(box.x0 >= 0 && box.x1 <= lay.width, `the end label spans ${box.x0}..${box.x1} in a ${lay.width}px chart`);
+    assert.ok(box.y0 >= 0, `the end label's top is at ${box.y0}`);
+    for (const t of lay.yTicks) assert.ok(!(box.y0 < t.y + 0.5 && box.y1 > t.y - 0.5), `the end label crosses the ${t.label} gridline`);
+    if (lay.yTicks.some((t) => lay.endLabel.y === t.y - 3)) lifted++;
+    for (const pt of lay.points) {
+      const hit = pt.x + 2 > box.x0 && pt.x - 2 < box.x1 && pt.y + 2 > box.y0 && pt.y - 2 < box.y1;
+      assert.ok(!hit, `the end label covers the point of ${pt.day}`);
+    }
+    for (const sg of lay.segments) {
+      for (let k = 0; k <= 16; k++) {
+        const x = sg.x1 + ((sg.x2 - sg.x1) * k) / 16;
+        const y = sg.y1 + ((sg.y2 - sg.y1) * k) / 16;
+        assert.ok(!(x > box.x0 && x < box.x1 && y > box.y0 && y < box.y1), "the end label sits on its own line");
+      }
+    }
+  }
+  assert.ok(lifted >= 1, "a series whose label would cross a gridline is among them");
+  const out = cannedHtml();
+  const el = layoutCumulative(CANNED_FOLD().daily, {}).endLabel;
+  assert.ok(out.includes(`<text x="${el.x}" y="${el.y}" text-anchor="end" font-size="9"`), "the page draws the label where the layout put it, anchored at its end");
+});
+
+test("a trigger's spend badge sits above its re-arm loop on the page (issue #483)", () => {
+  // The badge was drawn at the chip's top + 53 and the loop ran at + 55, so the dollars sat on the dashed
+  // loop. The badge now takes the scene's own line, and the scene routes the loop below it.
+  const p = CANNED_PAYLOAD();
+  p.costByTrigger["trigger:0"] = { cost: usd(1.55, "metered"), runs: 4 };
+  const out = buildInsightsHtml(p, { now: NOW });
+  const spend = /<g id="spend">(.*?)<\/g>/.exec(out)[1];
+  const badges = [...spend.matchAll(/<text x="([\d.-]+)" y="([\d.-]+)"[^>]*>([^<]*)<\/text>/g)].map((m) => ({ x: Number(m[1]), y: Number(m[2]), text: m[3] }));
+  const loops = [...out.matchAll(/<g class="gwire gcron" id="[^"]+"><path d="([^"]+)"/g)].map((m) => m[1].match(/-?\d+(?:\.\d+)?/g).map(Number));
+  assert.ok(badges.some((b) => b.text === "$1.55") && loops.length >= 1, "the scene has a badged cron trigger to check");
+  let checked = 0;
+  for (const nums of loops) {
+    const xs = nums.filter((_, i) => i % 2 === 0);
+    const ys = nums.filter((_, i) => i % 2 === 1);
+    const run = Math.max(...ys);
+    for (const b of badges) {
+      // The badge under this loop's chip: its start is inside the loop's span and above the loop's run.
+      if (b.x < Math.min(...xs) || b.x > Math.max(...xs) || b.y > run || b.y < Math.min(...ys)) continue;
+      assert.ok(b.y + 3 < run - 1, `badge ${JSON.stringify(b.text)} at y ${b.y} sits on the loop running at ${run}`);
+      checked++;
+    }
+  }
+  assert.ok(checked >= 1, "at least one badge sits over a loop's chip");
+});
+
+test("a small topology is not blown up past a real deployment's scale (issue #483)", () => {
+  // With the viewBox fitted to what is drawn, a one-trigger scene filled the whole pane at several times the
+  // scale of a real page. The pane holds at most 1.35 page pixels per scene unit, and a small scene sits centred.
+  const one = CANNED();
+  one.triggers.triggers = [one.triggers.triggers[0]];
+  one.folderSkills["/srv/site"].skills = [one.folderSkills["/srv/site"].skills[1]];
+  one.triggers.triggers[0].flow = "notify";
+  one.chainEdges.edges = [];
+  for (const graph of [buildGraphModel(one), buildGraphModel(CANNED())]) {
+    const out = buildInsightsHtml({ graph, fold: null, costsUnreachable: null, window: "30d", costByTrigger: null }, { now: NOW });
+    const m = /<svg id="graph" class="canvas" style="aspect-ratio:([\d.]+)\/[\d.]+;max-width:([\d.]+)px;margin:0 auto" viewBox="[\d. -]+ ([\d.]+) [\d.]+"/.exec(out);
+    assert.ok(m, "the pane carries its scale cap");
+    assert.ok(Number(m[2]) <= Number(m[3]) * 1.35 + 0.1, `max-width ${m[2]} for a ${m[3]}-unit scene`);
+  }
+});

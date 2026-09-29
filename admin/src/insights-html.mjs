@@ -22,7 +22,7 @@
  * and the posture test bans that whole reference syntax as a substring.
  */
 
-import { buildGraphScene, clip, clipColumns, drawnColumns, escapeHtml, embedJson, fmt, FIT_JS, PAGE_JS, legendHtml, bannersHtml, PAGE_THEME } from "./graph-html.mjs";
+import { buildGraphScene, clip, clipColumns, drawnColumns, escapeHtml, embedJson, fmt, FIT_JS, PAGE_JS, legendHtml, bannersHtml, PAGE_THEME, SPEND_BADGE_DY } from "./graph-html.mjs";
 import { fmtCost, fmtUsd } from "./panel.mjs";
 
 // Must equal costs.mjs's COST_CLASSES; the parity test compares the two literals. Duplicated rather
@@ -68,6 +68,12 @@ const LINES_TOP = 4;
 // The cumulative mini-chart under the daily columns: its OWN plot with its OWN scale -- a running
 // total dwarfs daily bars, and a second y-axis on one plot is the classic dual-axis lie.
 const CUM_H = 84;
+const CUM_LABEL_COL_W = 6; // px per column at the 9px end label, over-counted so the width is a bound
+const GRAPH_MAX_SCALE = 1.35; // the topology's page pixels per scene unit, at most (a real deployment's page sits near 1.3)
+const CUM_LABEL_GAP = 4; // the end label stops short of the last point's 2px dot
+// Room above the plot for the end label over a last point at the very top (a total equal to the scale
+// maximum): the 9px text needs 12px above its point, and a plot starting at 8 clamped it down onto the line.
+const CUM_MT = 14;
 // Budget meter geometry: the panel `meter` idiom in SVG -- a fixed track the fill clamps inside
 // (overflow is carried by the state WORD, never by geometry past the track).
 const METER_W = 220;
@@ -580,7 +586,7 @@ export function layoutCumulative(daily, { width, height } = {}) {
   const w = Number.isFinite(width) && width > 100 ? width : DAILY_W;
   const h = Number.isFinite(height) && height > 40 ? height : CUM_H;
   const entries = normDailyEntries(daily);
-  const plot = { x: DAILY_ML, y: 8, w: w - DAILY_ML - DAILY_MR, h: h - 8 - DAILY_MB };
+  const plot = { x: DAILY_ML, y: CUM_MT, w: w - DAILY_ML - DAILY_MR, h: h - CUM_MT - DAILY_MB };
   let running = 0;
   let demoted = false;
   let floor = false;
@@ -608,7 +614,31 @@ export function layoutCumulative(daily, { width, height } = {}) {
   }
   const yTicks = scaleMax > 0 ? [1, 2].map((k) => ({ y: plot.y + plot.h - (k / 2) * plot.h, label: fmtUsd(step * k) })) : [];
   const endTotal = n > 0 ? { usd: points[n - 1].total, class: points[n - 1].demoted ? "estimated" : "metered", floor } : null;
-  return { points, segments, yTicks, endTotal, scaleMax, width: w, height: h, plot };
+  // The end label ENDS at the last point and sits above it. It used to start just right of that point,
+  // which is the right edge of the plot on any window with a run on its last day, so the label ran past
+  // the svg and was cut (issue #483). Above-left is always free: a running total never falls, so every
+  // earlier point is at or below the last one. When the series is too short for that (one early day), the
+  // label starts at the point instead, and stays inside the chart either way.
+  let endLabel = null;
+  if (n > 0) {
+    const text = fmtCost(endTotal);
+    const last = points[n - 1];
+    const tw = drawnColumns(text) * CUM_LABEL_COL_W;
+    const fitsLeft = last.x - CUM_LABEL_GAP - tw >= 0;
+    // Off the gridlines too: a label straddling one moves up above it (the probe measured it across the $10
+    // and $20 lines on most windows). Up is always free, for the reason above, and the plot's top margin
+    // leaves room above the top gridline.
+    let y = last.y - 5;
+    for (const t of [...yTicks].sort((a, b) => b.y - a.y)) if (y - 9 < t.y + 0.5 && y + 2 > t.y - 0.5) y = t.y - 3;
+    endLabel = {
+      text,
+      x: fitsLeft ? last.x - CUM_LABEL_GAP : Math.min(last.x + CUM_LABEL_GAP, w - tw),
+      anchor: fitsLeft ? "end" : "start",
+      y,
+      width: tw,
+    };
+  }
+  return { points, segments, yTicks, endTotal, endLabel, scaleMax, width: w, height: h, plot };
 }
 
 // ---- HTML emission (server-side strings; the page script only ever assigns them as text) ----
@@ -694,9 +724,9 @@ function cumulativeHtml(daily, tips) {
       const idx = tips.push(`${pt.day} · cumulative ${fmtCost({ usd: pt.total, class: pt.demoted ? "estimated" : "metered", floor: pt.floor })}`) - 1;
       parts.push(`<circle data-tip="${fmt(idx)}" cx="${fmt(pt.x)}" cy="${fmt(pt.y)}" r="2" fill="${PAGE_THEME.accent}"${pt.demoted ? ' fill-opacity=".45" stroke="' + PAGE_THEME.accent + '"' : ""}/>`);
     }
-    const last = lay.points[lay.points.length - 1];
     // Direct end-of-line label: the running typed total, which converges to the KPI's provenance total.
-    parts.push(`<text x="${fmt(Math.min(last.x + 6, lay.width - 4))}" y="${fmt(Math.max(10, last.y - 4))}" font-size="9" fill="${PAGE_THEME.dim}">${escapeHtml(fmtCost(lay.endTotal))}</text>`);
+    const el = lay.endLabel;
+    parts.push(`<text x="${fmt(el.x)}" y="${fmt(el.y)}"${el.anchor === "end" ? ' text-anchor="end"' : ""} font-size="9" fill="${PAGE_THEME.dim}">${escapeHtml(el.text)}</text>`);
   }
   parts.push("</svg>");
   return `<div class="dim small">cumulative</div>${parts.join("")}`;
@@ -1181,7 +1211,9 @@ export function buildInsightsHtml(payload, { now, fullPaths } = {}) {
     if (!entry) continue;
     const cls = entry.cost.class;
     const fill = cls === "estimated" || cls === "seeded" ? PAGE_THEME.amber : PAGE_THEME.dim;
-    spendParts.push(`<text x="${fmt(pl.x + 16)}" y="${fmt(pl.y + pl.h + 23)}" font-size="10" fill="${fill}">${escapeHtml(fmtCost(entry.cost))}</text>`);
+    // At the scene's own badge line: the scene routes a trigger's re-arm loop below that line, so a badge
+    // drawn anywhere else could land on the loop again (issue #483).
+    spendParts.push(`<text x="${fmt(pl.x + 16)}" y="${fmt(pl.y + SPEND_BADGE_DY)}" font-size="10" fill="${fill}">${escapeHtml(fmtCost(entry.cost))}</text>`);
   }
 
   const tips = [];
@@ -1218,7 +1250,10 @@ export function buildInsightsHtml(payload, { now, fullPaths } = {}) {
     // The pane takes the scene's own aspect ratio (clamped by the stylesheet's max-height): a fixed
     // pane height letterboxes a wide flat topology into a mostly-empty band under "meet", and the
     // headless-screenshot pass caught exactly that. Height stays fluid; pan/zoom covers a tall scene.
-    `<svg id="graph" class="canvas" style="aspect-ratio:${fmt(Math.max(1, vb.w))}/${fmt(Math.max(1, vb.h))}" viewBox="${fmt(vb.x)} ${fmt(vb.y)} ${fmt(vb.w)} ${fmt(vb.h)}" role="img" aria-label="pi-dispatch trigger and flow topology" preserveAspectRatio="xMidYMid meet">`,
+    // At most GRAPH_MAX_SCALE page pixels per scene unit: a one-trigger scene filled the pane at several times the
+    // scale of a real deployment's, its 14px chip labels drawn at 50px (issue #483, once the viewBox stopped
+    // padding every scene with 80 units). Wider scenes fill the pane as before; a small one sits centred.
+    `<svg id="graph" class="canvas" style="aspect-ratio:${fmt(Math.max(1, vb.w))}/${fmt(Math.max(1, vb.h))};max-width:${fmt(Math.max(1, vb.w) * GRAPH_MAX_SCALE)}px;margin:0 auto" viewBox="${fmt(vb.x)} ${fmt(vb.y)} ${fmt(vb.w)} ${fmt(vb.h)}" role="img" aria-label="pi-dispatch trigger and flow topology" preserveAspectRatio="xMidYMid meet">`,
     `<g id="root">${scene.svgBody}</g>`,
     `<g id="spend">${spendParts.join("")}</g>`,
     "</svg>",
@@ -1226,7 +1261,7 @@ export function buildInsightsHtml(payload, { now, fullPaths } = {}) {
     "</div>",
   ].join(""));
   bodyParts.push(dollarsLegendHtml());
-  bodyParts.push(legendHtml(scene.norm));
+  bodyParts.push(legendHtml(scene.norm, scene.hiddenLabels));
   bodyParts.push("</section>");
   if (nf !== null) bodyParts.push(footerHtml(nf, windowLabel));
 
