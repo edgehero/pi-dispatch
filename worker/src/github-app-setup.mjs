@@ -363,7 +363,7 @@ function printSummary(say, summary, { noWebhook }) {
 		say("  Polling delivery is a follow-up; until it lands, forge triggers for this App will not fire on their own.\n");
 	} else {
 		say("  start the receiver so deliveries have somewhere to land: `pi-dispatch-receiver`\n");
-		say("  (or the deploy/docker-compose.yml receiver profile), reachable at the --webhook-url you gave GitHub.\n");
+		say("  (or, where the folder holds deploy/docker-compose.yml, its receiver profile), reachable at the --webhook-url you gave GitHub.\n");
 	}
 	say("  `pi-dispatch doctor` re-checks the whole deployment, including these credentials.\n");
 }

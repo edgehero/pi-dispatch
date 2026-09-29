@@ -7,7 +7,7 @@
  * scoped pauses, an empty packages list stages nothing, an empty subscriptions list declares no plan
  * prices — so a fresh deployment starts inert and is opted into feature by feature.
  */
-import { existsSync, copyFileSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, copyFileSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { parseBackendList, venuesOf } from "./backends.mjs";
@@ -65,81 +65,174 @@ registry.npmjs.org
 `;
 
 /**
+ * The proxy's RULES (INT-EGRESS-POLICY-CONTRACT), the package's own copy: `../deploy/` from this module, the layout
+ * service.mjs resolves its templates by, which is worker/deploy in a checkout (byte-identical to the root deploy/,
+ * pinned by worker/test/publish.test.mjs) and the shipped deploy/ under npm. Issue #480: the docker proxy mounts
+ * `./deploy/egress-proxy.conf` from the deployment folder, and a folder made by `npx @edgehero/pi-dispatch up` had
+ * none, so `up` declined to start the proxy the policy is on by default for and every job was refused before it spent.
+ */
+export const PACKAGED_EGRESS_PROXY_CONF = fileURLToPath(new URL("../deploy/egress-proxy.conf", import.meta.url));
+
+/**
  * `deps.env` is the caller's environment (the CLI's and doctor's pass theirs), and `deps.venues` a venue set the caller
  * already decided (`up` passes its own, so the two never disagree). Otherwise the venue is decided as `up` decides it
  * (`deploymentVenueEnv`): this shell where it sets a key, else the deployment `.env`, and a disagreement between the two
  * is said instead of any next steps. The default `env` is `{}` and not `process.env` so a test is never steered by the
- * shell it runs in.
+ * shell it runs in. `deps.steps: false` prints the file list and no "Next:" at all: `up` passes it (issue #480), since
+ * `up` performs that ladder itself and printing it mid-pass told a reader to do by hand what was being done for them.
  */
 export function runInit(cwd = process.cwd(), deps = {}) {
-	const { fs = { existsSync, copyFileSync, readFileSync, writeFileSync }, out = (s) => process.stdout.write(s), env = {}, platform = process.platform, newPassword = newValkeyPassword } = deps;
+	const { fs = { existsSync, copyFileSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync }, readPackageFile = readFileSync, out = (s) => process.stdout.write(s), env = {}, platform = process.platform, newPassword = newValkeyPassword } = deps;
 	const results = [];
-
-	// .env from the example. Prefer the copy in cwd (the clone's repo root); fall back to the copy
-	// SHIPPED with the worker package (worker/.env.example, kept byte-identical to the root example by
-	// worker/test/publish.test.mjs) so init works both from elsewhere in a checkout and from an npm
-	// install, where the repo root does not exist.
+	// The list prints even when a write throws part way (PR #488's final review: a read-only deploy/ lost the seven lines
+	// of what init had already created, leaving one EACCES line), so the operator always sees what now exists.
+	const printList = () => {
+		// The name column is as wide as the longest name (issue #480): a fixed 20 put egress-allowlist.conf's note out of line.
+		const width = Math.max(...results.map(([, name]) => name.length));
+		for (const [verb, name, note] of results) {
+			out(`${verb.padEnd(7)} ${name.padEnd(width)} ${note}\n`);
+		}
+	};
 	const envPath = join(cwd, ".env");
-	if (fs.existsSync(envPath)) {
-		results.push(["kept", ".env", "already exists — left untouched"]);
-	} else {
-		const cwdExample = join(cwd, ".env.example");
-		const source = fs.existsSync(cwdExample)
-			? cwdExample
-			: fileURLToPath(new URL("../.env.example", import.meta.url));
-		// Issue #468: the new file carries this deployment's own Valkey password (the example's `# VALKEY_PASSWORD=` line
-		// filled in, never shown) and is created readable by this account alone: it holds that password and, soon, the
-		// provider key. `wx`: a file that appeared since the check above is never overwritten (init's contract).
-		const text = setEnvKeyIfEmpty(String(fs.readFileSync(source, "utf8")), VALKEY_PASSWORD_KEY, newPassword(), { platform });
-		fs.writeFileSync(envPath, text, { mode: 0o600, flag: "wx" });
-		results.push(["created", ".env", `from .env.example, mode 0600, with a generated ${VALKEY_PASSWORD_KEY} (value not shown): set your provider key next`]);
-	}
+	try {
+		// .env from the example. Prefer the copy in cwd (the clone's repo root); fall back to the copy
+		// SHIPPED with the worker package (worker/.env.example, kept byte-identical to the root example by
+		// worker/test/publish.test.mjs) so init works both from elsewhere in a checkout and from an npm
+		// install, where the repo root does not exist.
+		if (fs.existsSync(envPath)) {
+			results.push(["kept", ".env", KEPT]);
+		} else {
+			const cwdExample = join(cwd, ".env.example");
+			const source = fs.existsSync(cwdExample)
+				? cwdExample
+				: fileURLToPath(new URL("../.env.example", import.meta.url));
+			// Issue #468: the new file carries this deployment's own Valkey password (the example's `# VALKEY_PASSWORD=` line
+			// filled in, never shown) and is created readable by this account alone: it holds that password and, soon, the
+			// provider key. `wx`: a file that appeared since the check above is never overwritten (init's contract).
+			const text = setEnvKeyIfEmpty(String(fs.readFileSync(source, "utf8")), VALKEY_PASSWORD_KEY, newPassword(), { platform });
+			if (createOnly(fs, envPath, text, { mode: 0o600 })) results.push(["created", ".env", `from .env.example, mode 0600, with a generated ${VALKEY_PASSWORD_KEY} (value not shown): set your provider key next`]);
+			else results.push(["kept", ".env", KEPT]);
+		}
 
-	scaffold(fs, results, join(cwd, "triggers.json"), EMPTY_TRIGGERS, "empty triggers list");
-	scaffold(fs, results, join(cwd, "pause-windows.json"), EMPTY_PAUSE_WINDOWS, "empty pause-windows list");
-	scaffold(fs, results, join(cwd, "pi-packages.json"), EMPTY_PACKAGES, "empty pi package list (stage with import-pi --with-packages)");
-	scaffold(fs, results, join(cwd, "subscriptions.json"), EMPTY_SUBSCRIPTIONS, "empty subscription list (declare plan prices for the admin's cost analytics)");
-	scaffold(fs, results, join(cwd, "scoped-limits.json"), EMPTY_SCOPED_LIMITS, "empty scoped-limits list (per repo/folder caps; the folder mutex needs no file)");
-	scaffold(fs, results, join(cwd, "egress-allowlist.conf"), DEFAULT_EGRESS_ALLOWLIST, "egress allowlist (provider + forge + registry; the egress policy is on unless PI_EGRESS=0)");
-
-	for (const [verb, name, note] of results) {
-		out(`${verb.padEnd(7)} ${name.padEnd(20)} ${note}\n`);
+		scaffold(fs, results, join(cwd, "triggers.json"), EMPTY_TRIGGERS, "empty triggers list");
+		scaffold(fs, results, join(cwd, "pause-windows.json"), EMPTY_PAUSE_WINDOWS, "empty pause-windows list");
+		scaffold(fs, results, join(cwd, "pi-packages.json"), EMPTY_PACKAGES, "empty pi package list (stage with import-pi --with-packages)");
+		scaffold(fs, results, join(cwd, "subscriptions.json"), EMPTY_SUBSCRIPTIONS, "empty subscription list (declare plan prices for the admin's cost analytics)");
+		scaffold(fs, results, join(cwd, "scoped-limits.json"), EMPTY_SCOPED_LIMITS, "empty scoped-limits list (per repo/folder caps; the folder mutex needs no file)");
+		scaffold(fs, results, join(cwd, "egress-allowlist.conf"), DEFAULT_EGRESS_ALLOWLIST, "egress allowlist (provider + forge + registry; the egress policy is on unless PI_EGRESS=0)");
+		// Issue #480: the proxy's rules, the file beside the allowlist that the docker proxy mounts. Create-only like every
+		// scaffold here, so a clone's own deploy/egress-proxy.conf is reported and kept. The one scaffold whose content is
+		// not this module's: it is the package's file verbatim, read from the package and never through `fs` (the
+		// deployment folder's seam), as `up` reads its Quadlet templates. The podman venue does not read this copy (its unit
+		// mounts an account-owned copy `service install` writes), and it costs nothing there.
+		//
+		// Only into a deploy/ that is a real directory of this folder (PR #488's review): a symlinked deploy/ would put the
+		// file wherever the link points, so init refuses there and writes nothing, and says so. Asked again after the mkdir,
+		// so a link that appeared in between is refused too.
+		const deployDir = join(cwd, "deploy");
+		const notOurDir = () => {
+			const st = lstatOrNull(fs, deployDir);
+			return st && (st.isSymbolicLink() || !st.isDirectory()) ? (st.isSymbolicLink() ? "a symlink" : "not a directory") : null;
+		};
+		let deployRefusal = notOurDir();
+		if (!deployRefusal && !lstatOrNull(fs, deployDir)) {
+			fs.mkdirSync(deployDir, { recursive: true });
+			deployRefusal = notOurDir();
+		}
+		if (deployRefusal) {
+			results.push(["refused", "deploy/egress-proxy.conf", `deploy/ here is ${deployRefusal}, so init writes nothing into it: make deploy/ a directory of this folder, then run \`pi-dispatch init\` again`]);
+		} else {
+			scaffold(fs, results, join(deployDir, "egress-proxy.conf"), () => readPackageFile(PACKAGED_EGRESS_PROXY_CONF), "the egress proxy's rules, the package's copy (shipped, not edited; the hosts go in the allowlist)", "deploy/egress-proxy.conf");
+		}
+	} catch (err) {
+		printList();
+		throw err;
 	}
+	printList();
+	// A refused scaffold is a failed init (fail loudly): the line above says which, and the steps below still print.
+	const code = results.some(([verb]) => verb === "refused") ? 1 : 0;
+	if (deps.steps === false) return code;
 	if (deps.venues) {
 		out(nextSteps(deps.venues, { platform }));
-		return 0;
+		return code;
 	}
 	// Decided exactly as `up` decides it (issue #453, gate round 1): a next-steps ladder for a venue `up` would refuse to
 	// guess is a ladder for the wrong venue. The files above are scaffolded either way; only the steps wait.
 	const venue = deploymentVenueEnv({ env, fs, envPath, platform, command: "init" });
 	if (venue.error) {
 		out(`\nNext: which venue this deployment runs is unknown, so no steps are shown: ${venue.error}. Then run \`pi-dispatch init\` again for them (it keeps every file above).\n`);
-		return 0;
+		return code;
 	}
 	for (const note of venue.notes) out(`⚠ ${note}\n`);
 	try {
 		parseBackendList(venue.env.PI_BACKENDS);
 	} catch (err) {
 		out(`\nNext: which venue this deployment runs is unknown, so no steps are shown: ${err.message}. Fix PI_BACKENDS, then run \`pi-dispatch init\` again for them (it keeps every file above).\n`);
-		return 0;
+		return code;
 	}
 	out(nextSteps(venuesOf(venue.env), { platform }));
-	return 0;
+	return code;
 }
 
-function scaffold(fs, results, path, content, note) {
-	const name = path.split(/[\\/]/).pop();
-	if (fs.existsSync(path)) {
-		results.push(["kept", name, "already exists — left untouched"]);
-	} else {
-		fs.writeFileSync(path, content);
+const KEPT = "already exists, left untouched";
+
+// `name` is what the list shows, the file's own name unless it sits below the folder; `content` may be a function, so a
+// file read from the package is read only when it is about to be written.
+function scaffold(fs, results, path, content, note, name = path.split(/[\\/]/).pop()) {
+	// A DIRECTORY where the file belongs (PR #488's review) is not "kept": every reader of these files wants a file, and
+	// docker mounts a directory at deploy/egress-proxy.conf where squid reads its config. Followed through a link, too.
+	if (isDirectory(fs, path)) {
+		results.push(["refused", name, `${name} here is a directory, not a file: remove it, then run \`pi-dispatch init\` again`]);
+	} else if (fs.existsSync(path)) {
+		results.push(["kept", name, KEPT]);
+	} else if (createOnly(fs, path, typeof content === "function" ? content() : content)) {
 		results.push(["created", name, note]);
+	} else {
+		results.push(["kept", name, KEPT]);
 	}
 }
 
 /**
- * The docker text is unchanged byte for byte for every set that includes `local`. A podman-only deployment (issue
- * #453) gets the podman ladder instead, the steps of docs/podman.md "Setup" in the order a fresh folder needs them:
+ * Every scaffold's write (PR #488's review): `wx` (O_CREAT|O_EXCL), so nothing that exists is written through, not even
+ * a dangling symlink, which `existsSync` reports absent and a plain write follows out of the folder. EEXIST is "kept",
+ * as init's contract says; any other failure is thrown as it was.
+ */
+function createOnly(fs, path, content, opts = {}) {
+	try {
+		fs.writeFileSync(path, content, { ...opts, flag: "wx" });
+		return true;
+	} catch (err) {
+		if (err?.code === "EEXIST") return false;
+		throw err;
+	}
+}
+
+function isDirectory(fs, path) {
+	const st = lstatOrNull(fs, path);
+	if (!st) return false;
+	if (!st.isSymbolicLink()) return st.isDirectory();
+	try {
+		return typeof fs.statSync === "function" && fs.statSync(path).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+function lstatOrNull(fs, path) {
+	try {
+		return fs.lstatSync(path);
+	} catch (err) {
+		if (err?.code === "ENOENT") return null;
+		throw err;
+	}
+}
+
+/**
+ * The docker text is the same for every set that includes `local`. Its step 2 was a compose command naming
+ * deploy/docker-compose.yml, a file a folder made by init alone does not have (issue #480), and it started no egress
+ * proxy either; it is now `pi-dispatch up`, which starts Valkey and the proxy itself. A podman-only deployment (issue
+ * #453) gets the podman ladder instead, the steps of docs/podman.md "Setup" in the order a fresh folder needs them
+ * (named by its URL since #480, because a folder made without a clone has no docs/):
  * the job image into this account's own store, the venue key and provider key in `.env` (what `up` and `service
  * install` read), the stack as Quadlet units, doctor, and the worker as a user service.
  */
@@ -148,9 +241,8 @@ export function nextSteps(venues = { localUsed: true, podmanUsed: false }, { pla
 	return `
 Next:
   1. docker pull ghcr.io/edgehero/pi-job:latest && docker tag ghcr.io/edgehero/pi-job:latest pi-job:latest
-                                                        # the prebuilt job image (or build image/Dockerfile)
-  2. docker compose --env-file .env -f deploy/docker-compose.yml up -d
-                                                        # the durable queue (Valkey, with the password init wrote)
+                                                        # the prebuilt job image (or build your own from a clone)
+  2. pi-dispatch up                                     # Valkey and the egress proxy (unless PI_EGRESS=0)
   3. edit .env                                          # set ANTHROPIC_API_KEY (or your provider's key)
   4. pi-dispatch doctor                                 # verify Docker, Valkey, image, and key
   5. pi-dispatch worker                                 # drain the queue
@@ -169,8 +261,9 @@ PI_BACKENDS to run jobs on Docker here (then run \`pi-dispatch init\` again for 
 `;
 
 const PODMAN_NEXT_STEPS = `
-Next (the podman venue; run these as the worker's own account. First set the account up as docs/podman.md "Setup"
-steps 1-4 say, linger included: sudo loginctl enable-linger <account>, without which a job gets no bounds):
+Next (the podman venue; run these as the worker's own account. First set the account up as the Podman guide's "Setup"
+steps 1-4 say (https://github.com/edgehero/pi-dispatch/blob/main/docs/podman.md), linger included:
+sudo loginctl enable-linger <account>, without which a job gets no bounds):
   1. podman pull ghcr.io/edgehero/pi-job:latest && podman tag ghcr.io/edgehero/pi-job:latest pi-job:latest
                                                         # the prebuilt job image, in this account's own store
   2. edit .env                                          # PI_BACKENDS=podman, and ANTHROPIC_API_KEY (or your provider's key)

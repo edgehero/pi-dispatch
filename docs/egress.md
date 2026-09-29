@@ -8,11 +8,19 @@ Not any more. Egress is **denied by default**: every job runs on **its own
 `--internal` Docker network** whose only other member is an allowlist proxy, with no route off this host,
 and a job whose policy cannot serve it is **refused before it costs anything**.
 
-What you have to do, once:
+What you have to do, once, from your deployment folder:
+
+```bash
+pi-dispatch up
+pi-dispatch doctor
+```
+
+`up` shows the proxy's `docker run` and asks before it runs it, and it works in any folder `pi-dispatch init`
+made, since init writes both files the proxy mounts. From a clone, or a folder holding `deploy/docker-compose.yml`,
+compose starts the same proxy instead:
 
 ```bash
 docker compose --env-file .env -f deploy/docker-compose.yml --profile egress up -d
-pi-dispatch doctor
 ```
 
 In a folder `/dispatch setup` laid out, name the folder's project and, when setup wrote it, its Valkey override, so
@@ -22,7 +30,7 @@ compose addresses the containers it already runs:
 command for its own folder.
 
 **If you are upgrading**, that is the step. Until the proxy is up, every job is refused pre-spend naming it
-and naming that command: loud, free (no budget slot, no tokens), and reversible in one line with
+and naming `pi-dispatch up` as the way to start it: loud, free (no budget slot, no tokens), and reversible in one line with
 `PI_EGRESS=0` if you want the old posture back. `pi-dispatch up` offers to start it (on the rootless Podman venue,
 as a Quadlet unit that comes back at boot: [`podman.md`](podman.md)), and `doctor` fails
 until it is running, so both commands you already run say it before a single job does.
@@ -30,7 +38,10 @@ until it is running, so both commands you already run say it before a single job
 ## The hosts, and they are yours
 
 `pi-dispatch init` writes `egress-allowlist.conf` next to your `.env` and never overwrites it. One bare
-hostname per line; a leading dot matches subdomains.
+hostname per line; a leading dot matches subdomains. Beside it init writes `deploy/egress-proxy.conf`, the
+proxy's rules, copied from the installed package and also never overwritten: the Docker proxy mounts both
+from the deployment folder, so a folder made without a clone gets them too. You edit the allowlist, never
+the rules.
 
 ```
 api.anthropic.com          # the provider: every turn of every job

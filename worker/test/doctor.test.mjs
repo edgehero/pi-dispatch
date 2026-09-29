@@ -2852,7 +2852,8 @@ test("doctor --fix: a missing .env is delegated to init's create-only scaffolds,
 	const { out, text } = capture();
 	const code = await runDoctor(
 		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" },
-		{ out, cwd, spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", fix: true, promptFn },
+		// The proxy's mounts are this folder's (issue #480): init now scaffolds both files it mounts, so doctor compares them.
+		{ out, cwd, spawn: fakeSpawn({ ...green, [PROXY_KEY]: proxyAnswer("healthy", "running", { cwd }) }), probeValkey: async () => true, nodeVersion: "22.19.0", fix: true, promptFn },
 	);
 	assert.equal(prompts.length, 0, "scaffold delegation is silent -- init is create-only by contract and can overwrite nothing");
 	assert.ok(existsSync(join(cwd, ".env")), "init created the .env");
@@ -2867,7 +2868,7 @@ test("doctor --fix: init's next steps follow doctor's venue: PI_BACKENDS=podman 
 	const { out, text } = capture();
 	await runDoctor(podmanEnv(), { ...podmanDeps(out, podmanPlan(), []), cwd, fileExists: existsSync, platform: "linux", fix: true, promptFn: async () => false });
 	assert.ok(existsSync(join(cwd, ".env")), "init created the .env");
-	assert.match(text(), /\nNext \(the podman venue; run these as the worker's own account\. First set the account up as docs\/podman\.md "Setup"\n/);
+	assert.match(text(), /\nNext \(the podman venue; run these as the worker's own account\. First set the account up as the Podman guide's "Setup"\n/);
 	assert.match(text(), / {2}6\. pi-dispatch doctor --live {26}# read the bounds, egress and job user back off real containers\n/);
 	assert.doesNotMatch(text(), /docker compose -f deploy\/docker-compose\.yml up -d {2}# the durable queue/);
 });
@@ -2880,7 +2881,8 @@ test("doctor --fix: accepting the overlay auth.json offer deletes the file and c
 	const code = await runDoctor(overlayEnv(dir, { GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" }), {
 		out,
 		cwd,
-		spawn: fakeSpawn(green),
+		// This folder's mounts (issue #480): the --fix pass runs init here, which scaffolds both files the proxy mounts.
+		spawn: fakeSpawn({ ...green, [PROXY_KEY]: proxyAnswer("healthy", "running", { cwd }) }),
 		probeValkey: async () => true,
 		nodeVersion: "22.19.0",
 		fix: true,
@@ -3312,7 +3314,21 @@ test("doctor: a proxy that is not on the host FAILS, because every job is refuse
 	// A ✓ would be a lie and a ⚠ would under-report a deployment that cannot run anything at all.
 	assert.equal(code, 1, "an armed policy with no proxy is a hard failure");
 	assert.match(text(), /✗ Egress proxy is not on this host \(pi-dispatch-egress-proxy\)/);
-	assert.match(text(), /--profile egress up -d/);
+	// `pi-dispatch up` only (PR #488's review): a compose line here would start a second Valkey in a setup folder.
+	assert.match(text(), /→ `pi-dispatch up` from the deployment folder starts it {2}-- /);
+	assert.doesNotMatch(text(), /--profile egress up -d/);
+});
+
+test("doctor: a directory where one of the proxy's two files belongs is a failure naming it (PR #488's review)", async () => {
+	const { out, text } = capture();
+	const code = await runDoctor(ghEnv({ PI_EGRESS: "1" }), { ...ghDeps(out, egressPlan({ [PROXY_KEY]: proxyAnswer("healthy", "running"), "gh auth status": { code: 0, output: ghStatusOutput } })), proxyFileIsDirectory: (p) => p.endsWith(join("deploy", "egress-proxy.conf")) });
+	assert.equal(code, 1);
+	assert.match(text(), /✗ deploy\/egress-proxy\.conf in this folder is a directory, not a file\n {4}→ the egress proxy mounts it where squid reads a file, so it cannot start from this folder: remove the directory, then `pi-dispatch init` writes the file \(create-only\)/);
+	assert.doesNotMatch(text(), /egress-allowlist\.conf in this folder is a directory/);
+	// PI_EGRESS_PROXY's own proxy mounts whatever its operator gave it: not judged.
+	const custom = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "1", PI_EGRESS_PROXY: "my-squid" }), { ...ghDeps(custom.out, egressPlan({ [PROXY_KEY]: proxyAnswer("healthy", "running"), "gh auth status": { code: 0, output: ghStatusOutput } })), proxyFileIsDirectory: () => true });
+	assert.doesNotMatch(custom.text(), /in this folder is a directory/);
 });
 
 test("doctor: a proxy that exists but is STOPPED says so, because the fix is a different one", async () => {
@@ -3328,7 +3344,7 @@ test("doctor: a paused or crash-looping proxy is not running, and one named by P
 	// The worker's simple rule (gate round 3): paused refuses every job, so ✗; restarting and every other non-running
 	// state is retried by the worker, so ⚠ with a fix that says so.
 	// `restarting` is a crash loop that fails every job (one retry, then failed), and `created` never starts: both ✗.
-	for (const [status, fix] of [["restarting", "its squid keeps exiting and its restart policy keeps bringing it back, so every job is retried once, then failed; `docker logs pi-dispatch-egress-proxy` says why"], ["created", "docker compose -f deploy/docker-compose.yml --profile egress up -d  -- "]]) {
+	for (const [status, fix] of [["restarting", "its squid keeps exiting and its restart policy keeps bringing it back, so every job is retried once, then failed; `docker logs pi-dispatch-egress-proxy` says why"], ["created", "`pi-dispatch up` from the deployment folder starts it  -- "]]) {
 		const failed = capture();
 		assert.equal(await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(failed.out, egressPlan({ [PROXY_KEY]: proxyAnswer("none", status), "gh auth status": { code: 0, output: ghStatusOutput } }))), 1, status);
 		assert.ok(failed.text().includes(`✗ Egress proxy is ${status} (pi-dispatch-egress-proxy)\n    → ${fix}`), `${status}:\n${failed.text()}`);

@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as realFs from "node:fs";
 import { lstatSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { defaultPrompt, runUp, valkeyContainerPublishes } from "../src/up.mjs";
 import { NETNS_KEEPER_FORMAT } from "../src/podman-stack.mjs";
+import { runInit } from "../src/init.mjs";
 import { VALKEY_HEALTH_SCRIPT, VALKEY_START_SCRIPT } from "../src/valkey-auth.mjs";
 
 // A fake `spawn`, mirroring doctor.test.mjs: plan keys are command-line prefixes ("docker version",
@@ -1241,6 +1243,161 @@ test("up's proxy image is the compose file's and the Quadlet unit's, one pinned 
 	assert.equal(EGRESS_RUN.at(-1), PINNED_SQUID);
 });
 
+// Issue #480: `mkdir x && cd x && npx @edgehero/pi-dispatch up`, driven through up's seams with the REAL init on a real
+// empty folder (the harness's fake init creates nothing, which is how this hole went unseen), and the policy on by default.
+test("up in an empty folder reaches the egress proxy start with no missing-file line, and prints no Next ladder of init's (#480)", async () => {
+	const dir = tempDir("pi-up-480-");
+	const h = harness({
+		plan: { "docker version": 0, "docker image inspect": 0, [PROXY_INSPECT]: 1, "docker network create": 0, "docker run -d --name pi-dispatch-egress-proxy": 0 },
+		listening: true,
+		argv: ["--yes"],
+		cwd: dir,
+		extra: { fs: realFs, runInitFn: runInit },
+	});
+	await h.run();
+	const text = h.text();
+	assert.ok(realFs.existsSync(join(dir, "deploy", "egress-proxy.conf")), "init scaffolded the proxy's rules");
+	assert.doesNotMatch(text, /is not here/, text);
+	assert.deepEqual(dockerMutations(h).filter((a) => a[0] === "run" && a.includes("pi-dispatch-egress-proxy")), [EGRESS_RUN], "the proxy is started from the shown argv");
+	assert.match(text, /started pi-dispatch-egress-proxy/);
+	// init's created lines stay; its ladder does not. The one "Next:" is up's own closing text, after the summary.
+	assert.match(text, /^created deploy\/egress-proxy\.conf /m);
+	assert.equal(text.split("Next:").length - 1, 1, text);
+	assert.ok(text.indexOf("Next:") > text.indexOf("up: summary"), "the only Next: is up's own");
+	assert.doesNotMatch(text, /1\. docker pull|\/dispatch setup walks these steps/);
+});
+
+test("up's declined Valkey and proxy name a compose line only where the folder holds the compose file (#480)", async () => {
+	const bare = harness({ env: EGRESS_ENV, plan: { "docker version": 0, "docker image inspect": 0, [PROXY_INSPECT]: 1 }, listening: false, answers: ["", ""], files: { "/deploy/.env": `VALKEY_PASSWORD=${PASSWORD}\n`, ...PROXY_FILES } });
+	await bare.run();
+	assert.equal((bare.text().match(/skipped: start it later by running `pi-dispatch up` again and accepting\n/g) ?? []).length, 2, bare.text());
+	assert.doesNotMatch(bare.text(), /skipped: start it later with `docker compose/);
+	const clone = harness({ env: EGRESS_ENV, plan: { "docker version": 0, "docker image inspect": 0, [PROXY_INSPECT]: 1 }, listening: false, answers: ["", ""], files: { "/deploy/.env": `VALKEY_PASSWORD=${PASSWORD}\n`, ...PROXY_FILES, "/deploy/deploy/docker-compose.yml": "services: {}\n" } });
+	await clone.run();
+	assert.match(clone.text(), /skipped: start it later with `docker compose --env-file \.env -f deploy\/docker-compose\.yml up -d`/);
+	assert.match(clone.text(), /skipped: start it later with `docker compose --env-file \.env -f deploy\/docker-compose\.yml --profile egress up -d`/);
+});
+
+test("up's failed Valkey start and its open-Valkey hint name compose only where the folder holds the compose file (PR #488 review)", async () => {
+	const env = `VALKEY_PASSWORD=${PASSWORD}\n`;
+	for (const withCompose of [false, true]) {
+		const files = { "/deploy/.env": env, ...(withCompose ? { "/deploy/deploy/docker-compose.yml": "services: {}\n" } : {}) };
+		const failed = harness({ plan: { "docker version": 0, "docker image inspect": 0, "docker volume create": 0, "docker run -d --name pi-dispatch-valkey": 1 }, listening: false, argv: ["--yes"], files: { ...files } });
+		await failed.run();
+		if (withCompose) assert.match(failed.text(), /valkey\s+container start FAILED; `docker compose --env-file \.env -f deploy\/docker-compose\.yml up -d` is the fallback/);
+		else assert.match(failed.text(), /valkey\s+container start FAILED; re-run `pi-dispatch up`\n/, failed.text());
+		const open = harness({ plan: { "docker version": 0, "docker image inspect": 0 }, listening: true, files: { ...files }, extra: { probeValkeyAuth: async () => "ok" } });
+		await open.run();
+		assert.match(open.text(), /⚠ the Valkey on 6379 answers without a password, and it is not a container up started, so up leaves it: restart it with VALKEY_PASSWORD from \.env/);
+		assert.equal(/\(compose: `docker compose/.test(open.text()), withCompose, `compose named only with the file: ${withCompose}`);
+	}
+});
+
+// Issue #480, PR #488's review: no operator-facing string names a compose COMMAND that reads no .env. Every mention of
+// `docker compose` (or `docker-compose`) outside a comment is either a command carrying --env-file on the same line, or
+// one of the prose sentences named here by their text. A new mention of either kind fails until it is one or the other.
+// Commands built at run time go through `composeArgs`, whose own test below pins --env-file.
+const COMPOSE_PROSE = [
+	["../../admin/src/setup-wizard.ts", 'const EDGE_COMPOSE = "Run the receiver with docker compose";'],
+	["../../admin/src/setup-wizard.ts", "the receiver container needs docker compose, and this deployment runs on rootless Podman without docker"],
+	["../src/valkey-auth.mjs", "# Written by /dispatch setup (the docker compose answer)"],
+	["../../admin/src/setup-wizard.ts", "no receiver container on rootless Podman (it needs docker compose: run the receiver as that service instead)"],
+];
+/** "ok" (a compose command carrying --env-file), "bad" (one without it), "prose" (a mention that is no command), or null. */
+function composeMention(line) {
+	const text = line.replace(/docker-compose(\.valkey)?\.ya?ml/g, "");
+	if (!/docker[ -]compose\b/.test(text)) return null;
+	if (/docker[ -]compose\s+(-|(up|down|stop|start|restart|run|pull|ps|logs|exec|rm|build|config|create|kill|pause|unpause)\b)/.test(text)) return /--env-file/.test(text) ? "ok" : "bad";
+	return "prose";
+}
+
+test("the compose scan's own judgement: flags in any order, docker-compose, prose (PR #488's review)", () => {
+	for (const [line, want] of [
+		["`docker compose -f deploy/docker-compose.yml --env-file .env up -d`", "ok"],
+		["docker compose --env-file .env -f deploy/docker-compose.yml --profile egress up -d", "ok"],
+		["`docker compose --profile egress up -d`", "bad"],
+		["docker compose -p x --profile receiver -f deploy/docker-compose.yml up -d", "bad"],
+		["docker-compose up -d", "bad"],
+		["(docker compose up)", "bad"],
+		["the receiver container needs docker compose, and", "prose"],
+		["same semantics as deploy/docker-compose.yml --profile egress", null],
+	]) assert.equal(composeMention(line), want, line);
+});
+
+test("no source line names a docker compose command without --env-file; the prose mentions are the named ones (#480)", () => {
+	const commands = [];
+	const prose = [];
+	for (const dir of ["../src", "../../receiver/src", "../../admin/src"]) {
+		const root = new URL(`${dir}/`, import.meta.url);
+		for (const name of realFs.readdirSync(root, { recursive: true })) {
+			if (!/\.(mjs|js|ts)$/.test(name)) continue;
+			let inBlock = false;
+			realFs.readFileSync(new URL(name, root), "utf8").split("\n").forEach((line, i) => {
+				// Comments only: a `*` line counts as one inside a /* block alone, never inside a template literal.
+				const t = line.trim();
+				if (inBlock) {
+					if (t.includes("*/")) inBlock = false;
+					return;
+				}
+				if (t.startsWith("/*")) {
+					if (!t.includes("*/")) inBlock = true;
+					return;
+				}
+				if (t.startsWith("//")) return;
+				const kind = composeMention(line);
+				const where = `${dir}/${name}:${i + 1}`;
+				if (kind === "bad") commands.push(where);
+				else if (kind === "prose" && !COMPOSE_PROSE.some(([file, needle]) => where.startsWith(`${file}:`) && line.includes(needle))) prose.push(`${where}: ${t.slice(0, 120)}`);
+			});
+		}
+	}
+	assert.deepEqual(commands, [], "a compose command without --env-file");
+	assert.deepEqual(prose, [], "a prose mention of compose not named in COMPOSE_PROSE: make it a command with --env-file, or name it");
+});
+
+test("composeArgs always carries --env-file .env, with or without the folder's project and override (#480)", async () => {
+	const { composeArgs } = await import("../src/valkey-auth.mjs");
+	for (const opts of [undefined, {}, { project: "x" }, { override: true }, { project: "x", override: true }]) {
+		const args = composeArgs(opts);
+		assert.equal(args[0], "compose");
+		assert.deepEqual(args.slice(args.indexOf("--env-file"), args.indexOf("--env-file") + 2), ["--env-file", ".env"], JSON.stringify(opts));
+	}
+});
+
+
+test("up goes on past an init that refuses or throws: a FILE named deploy, and a folder init cannot write (PR #488's review)", async () => {
+	const dir = tempDir("pi-up-488-");
+	realFs.writeFileSync(join(dir, "deploy"), "not a folder\n");
+	const real = harness({ plan: { "docker version": 0, "docker image inspect": 0, [PROXY_INSPECT]: 1 }, listening: true, argv: ["--yes"], cwd: dir, extra: { fs: realFs, runInitFn: runInit } });
+	await real.run();
+	assert.match(real.text(), /^refused deploy\/egress-proxy\.conf deploy\/ here is not a directory/m);
+	assert.match(real.text(), /^created triggers\.json /m, "init listed what it did");
+	assert.match(real.text(), /init\s+ran, and REFUSED a file \(said above\)/);
+	assert.equal(real.doctorCalls.length, 1, "doctor still ran");
+	const thrown = harness({ plan: green, listening: true, extra: { runInitFn: () => { throw Object.assign(new Error("EACCES: permission denied, open '/deploy/triggers.json'"), { code: "EACCES" }); } } });
+	assert.equal(await thrown.run(), 0);
+	assert.match(thrown.text(), /✗ init could not finish: EACCES: permission denied/);
+	assert.match(thrown.text(), /init\s+FAILED \(said above\); the steps below still ran/);
+	assert.equal(thrown.doctorCalls.length, 1, "doctor still ran");
+});
+
+test("up never starts the proxy on a directory where deploy/egress-proxy.conf belongs (PR #488's review)", async () => {
+	const dir = tempDir("pi-up-488-dir-");
+	realFs.mkdirSync(join(dir, "deploy", "egress-proxy.conf"), { recursive: true });
+	realFs.writeFileSync(join(dir, "egress-allowlist.conf"), "api.anthropic.com\n");
+	const h = harness({ plan: { "docker version": 0, "docker image inspect": 0, [PROXY_INSPECT]: 1, "docker network create": 0, "docker run -d --name pi-dispatch-egress-proxy": 0 }, listening: true, argv: ["--yes"], cwd: dir, extra: { fs: realFs, runInitFn: () => 0 } });
+	await h.run();
+	assert.match(h.text(), /✗ the egress policy is on but deploy\/egress-proxy\.conf here is a directory, not a file, so no proxy is started without it/);
+	assert.match(h.text(), /egress\s+skipped: deploy\/egress-proxy\.conf in this folder is a directory; run/);
+	assert.ok(!h.calls.some((c) => c.args[0] === "run" && c.args.includes("pi-dispatch-egress-proxy")), "nothing started");
+});
+
+test("up tells init to print no next steps of its own (#480)", async () => {
+	const h = harness({ plan: green, listening: true });
+	await h.run();
+	assert.deepEqual(h.initOpts.map((o) => o.steps), [false]);
+});
+
 test("up hands init the venues it decided, so init's next steps match the pass (#453)", async () => {
 	const docker = harness({ plan: green, listening: true });
 	await docker.run();
@@ -1742,7 +1899,8 @@ test("up on docker (#468): our pi-dispatch-valkey answering without a password i
 	assert.ok(!no.calls.some((c) => ["stop", "rm", "run"].includes(c.args[0])));
 	assert.match(no.text(), /pi-dispatch-valkey runs WITHOUT a password \(declined the restart with it\)/);
 	// Not ours (compose's, or a package's): never touched, the compose recreate named.
-	const foreign = harness({ plan: { ...plan, "docker container inspect pi-dispatch-valkey": { code: 1, stderr: "Error: No such container: pi-dispatch-valkey\n" } }, listening: true, argv: ["--yes"], files, extra: { probeValkeyAuth: async () => "ok" } });
+	// A folder holding the compose file, so the hint names compose (PR #488's review: only there).
+	const foreign = harness({ plan: { ...plan, "docker container inspect pi-dispatch-valkey": { code: 1, stderr: "Error: No such container: pi-dispatch-valkey\n" } }, listening: true, argv: ["--yes"], files: { ...files, "/deploy/deploy/docker-compose.yml": "services: {}\n" }, extra: { probeValkeyAuth: async () => "ok" } });
 	await foreign.run();
 	assert.ok(!foreign.calls.some((c) => ["stop", "rm", "run"].includes(c.args[0])));
 	assert.match(foreign.text(), /⚠ the Valkey on 6379 answers without a password, and it is not a container up started, so up leaves it: restart it with VALKEY_PASSWORD from \.env \(compose: `docker compose --env-file \.env -f deploy\/docker-compose\.yml up -d`/);
@@ -2003,7 +2161,7 @@ test("up on docker in a handed-over folder starts compose's valkey (-p, the over
 	// A refusal is not a decline: nothing was asked (measured on Fedora, where it first read "skipped (declined)").
 	assert.doesNotMatch(mounted.text(), /skipped \(declined|skipped: start it later|declined the restart|skipped: until it restarts/);
 	// A folder without the override: every compose hint names the -p a wizard folder needs.
-	const plain = harness({ plan: { "docker version": 0, "docker image inspect": 0 }, listening: false, answers: [""], files: { "/deploy/.env": `VALKEY_PASSWORD=${PASSWORD}\n` } });
+	const plain = harness({ plan: { "docker version": 0, "docker image inspect": 0 }, listening: false, answers: [""], files: { "/deploy/.env": `VALKEY_PASSWORD=${PASSWORD}\n`, "/deploy/deploy/docker-compose.yml": "services: {}\n" } });
 	await plain.run();
 	assert.match(plain.text(), /skipped: start it later with `docker compose --env-file \.env -f deploy\/docker-compose\.yml up -d` \(in a folder \/dispatch setup laid out, with -p deploy after `compose`\)/);
 });

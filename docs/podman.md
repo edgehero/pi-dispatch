@@ -194,7 +194,9 @@ and `pi-dispatch up` was not.
    `PI_JOB_IMAGE` to the name `docker images` shows for it.
 7. **Start the stack the same way you would on Docker.** It is the same compose file:
    `docker compose --env-file .env -f deploy/docker-compose.yml up -d` for Valkey, and `--profile egress` as well if you use the
-   egress policy. Podman serves it through the same Docker API, and compose needs no adaptation (measured with
+   egress policy. That file is in a clone's `deploy/`; a folder made without a clone does not have it, and
+   `pi-dispatch up` there starts Valkey and the proxy through the same docker CLI the worker uses instead (not
+   separately measured on this venue). Podman serves it through the same Docker API, and compose needs no adaptation (measured with
    v2.33.0 in the lab and 5.5.1 on Fedora 44). Its config mounts carry `:ro,z` for an SELinux host (see SELinux
    below), which does nothing where SELinux is off. `podman compose` is not a second implementation: it executes
    whatever compose provider it finds, which on a host set up this way is that same binary, and it says so on stderr.
@@ -1008,8 +1010,8 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    measured, a container on Podman's default rootless network (pasta or slirp4netns) is refused with `"pasta" is not
    supported: invalid network mode`. To start it by hand instead of as a unit (it will not come back after a reboot,
    and `up` and `service install` will then refuse to install the unit over it until you remove it),
-   from the directory holding your `.env` and the `egress-allowlist.conf` that `pi-dispatch init` wrote, with
-   `egress-proxy.conf` from `deploy/`, and the keeper FIRST with the same flags its unit generates (a keeper started
+   from the directory holding your `.env` and the `egress-allowlist.conf` and `deploy/egress-proxy.conf` that
+   `pi-dispatch init` wrote, and the keeper FIRST with the same flags its unit generates (a keeper started
    more than 15 s after the proxy reads as one that restarted under it):
 
    <!-- PODMAN-NATIVE-PROXY -->

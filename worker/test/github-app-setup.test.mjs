@@ -535,3 +535,9 @@ test("setup github: an over-long --name is sanitized into the manifest", async (
 	assert.equal(manifest.name, "my-very-long-and-fancy-app-name-fo");
 	assert.ok(manifest.name.length <= 34);
 });
+
+test("setup github: the closing steps name the receiver's compose profile only where the folder holds the compose file (#480)", async () => {
+	const h = harness({ files: { [ENV_PATH]: SEED_ENV }, answers: ["y", "y", "y"] });
+	assert.equal(await h.run(), 0);
+	assert.match(h.text(), /start the receiver so deliveries have somewhere to land: `pi-dispatch-receiver`\n {2}\(or, where the folder holds deploy\/docker-compose\.yml, its receiver profile\)/);
+});

@@ -165,7 +165,7 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 			]);
 			clearTimeout(bound);
 		}
-		return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${(await import("./connection.mjs")).urlShown(url)}: is it running? (docker compose up)\n  ${error.message}`);
+		return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${(await import("./connection.mjs")).urlShown(url)}: ${(await import("./valkey-auth.mjs")).valkeyDownHint(url)}\n  ${error.message}`);
 	} finally {
 		probe.disconnect?.();
 		for (const q of queues) await q.close().catch(() => {});

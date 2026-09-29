@@ -42,7 +42,7 @@ import { venuesOf } from "./backends.mjs";
 import { logsDirPath, settingsFilePath } from "./config.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed as egressArmedFn, egressProxyName } from "./egress.mjs";
 import { envKeyIsBlank, envValueShown, readEnvAssignments, updateEnvFile } from "./env-file.mjs";
-import { COMPOSE_VALKEY_OVERRIDE, OWNER_MARKER_KEY, VALKEY_PASSWORD_KEY, VALKEY_PORT_KEY, OWNER_CHECK_CONTAINER, OWNER_CHECK_EXEC, VALKEY_VOLUME_RECORD, adoptVolumeQuestion, composeArgs, ownerCheckAnswer, readVolumeRecord, valkeyOwnerCheckArgs, volumeRecordMatches, volumeRecordText, composeProjectName, foreignContainerSentence, foreignMarkerRefusal, foreignVolumeLabelRefusal, foreignVolumeRefusal, foreignVolumeUsers, isLoopbackHost, newValkeyPassword, unadoptedVolumeRefusal, valkeyContainerOwner, valkeyDockerRunArgs, valkeyPasswordDecision, valkeyPortEnvDecision, valkeyVolumeCreateArgs, valkeyVolumeOwner } from "./valkey-auth.mjs";
+import { COMPOSE_FILE, COMPOSE_VALKEY_OVERRIDE, OWNER_MARKER_KEY, VALKEY_PASSWORD_KEY, VALKEY_PORT_KEY, OWNER_CHECK_CONTAINER, OWNER_CHECK_EXEC, VALKEY_VOLUME_RECORD, adoptVolumeQuestion, composeArgs, ownerCheckAnswer, readVolumeRecord, valkeyOwnerCheckArgs, volumeRecordMatches, volumeRecordText, composeProjectName, foreignContainerSentence, foreignMarkerRefusal, foreignVolumeLabelRefusal, foreignVolumeRefusal, foreignVolumeUsers, isLoopbackHost, newValkeyPassword, unadoptedVolumeRefusal, valkeyContainerOwner, valkeyDockerRunArgs, valkeyPasswordDecision, valkeyPortEnvDecision, valkeyVolumeCreateArgs, valkeyVolumeOwner } from "./valkey-auth.mjs";
 import { deploymentValkeyEnv, deploymentVenueEnv } from "./deployment-venue.mjs";
 import { EGRESS_PROXY_IMAGE, PROXY_STATE_FORMAT, jobNetworksOf, parseProxyState, shippedProxyDrift } from "./egress-proxy-state.mjs";
 import { DEFAULT_VALKEY_PORT, NETNS_KEEPER, NETNS_KEEPER_FORMAT, QUADLET_FILES, STACK_KEYS, applyStack, decideValkey, describeRollBack, passwdNameFrom, readSubuidRanges, rollBackWrites, valkeySharedOn, VALKEY_SHARED_KEY, readValkeyKeys, valkeyTarget, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal } from "./podman-stack.mjs";
@@ -293,9 +293,21 @@ export async function runUp(argv = [], deps = {}) {
 	// nothing the operator wrote can be lost here.
 	out("\ninit (never overwrites — an existing file is reported and kept):\n");
 	runInitFn ??= (await import("./init.mjs")).runInit;
-	// The venues THIS pass decided (issue #453), so init's next steps never name a runtime up just did not drive.
-	runInitFn(cwd, { out, venues });
-	summary.push(["init", "ran — existing files were kept untouched, missing ones scaffolded"]);
+	// The venues THIS pass decided (issue #453), so init decides nothing of its own here. And no "Next:" from init (issue
+	// #480): that ladder is this pass, so printing it here told a reader to pull the image and start Valkey by hand while
+	// `up` was doing both; the created and kept lines stay, and `up` closes with its own next steps below.
+	// A throw here (a folder init cannot write, PR #488's review) is said and the pass goes on: the steps below and doctor
+	// still say what else is missing, and an aborted `up` said nothing after the image pull.
+	let initCode;
+	try {
+		initCode = runInitFn(cwd, { out, venues, steps: false });
+	} catch (err) {
+		initCode = null;
+		out(`✗ init could not finish: ${err?.message ?? err}\n`);
+	}
+	if (initCode === 1) summary.push(["init", "ran, and REFUSED a file (said above); the others were kept or scaffolded"]);
+	else if (initCode === null) summary.push(["init", "FAILED (said above); the steps below still ran"]);
+	else summary.push(["init", "ran: existing files were kept untouched, missing ones scaffolded"]);
 
 	// (e) WEBHOOK_SECRET, only into a .env that exists (init just scaffolded one unless the operator
 	// keeps env elsewhere — a service-manager deployment gets no file invented for it). Same
@@ -604,6 +616,9 @@ export async function runUp(argv = [], deps = {}) {
 	const ourName = handedOver ? `${project}-valkey-1` : "pi-dispatch-valkey";
 	const shownCompose = (args) => `${vport !== 6379 ? `${VALKEY_PORT_KEY}=${vport} ` : ""}docker ${quoteArgs(args)}`;
 	const composeNote = handedOver ? "" : ` (in a folder /dispatch setup laid out, with -p ${project} after \`compose\`)`;
+	// Issue #480: a compose line is a way to start Valkey later only where the folder holds the compose file (a clone, or
+	// a folder /dispatch setup copied it into). A folder init made has none, and there the way is this command again.
+	const laterValkey = () => (composeHere(cwd, fs) ? `start it later with \`${shownCompose([...composeBase, "up", "-d"])}\`${composeNote}` : "start it later by running `pi-dispatch up` again and accepting");
 	let existing = null;
 	if (dockerValkey.error) {
 		valkeyRefused = "url";
@@ -660,7 +675,7 @@ export async function runUp(argv = [], deps = {}) {
 				summary.push(["valkey", `restarted pi-dispatch-valkey with ${VALKEY_PASSWORD_KEY} (volume kept); restart the worker and the receiver`]);
 			}
 		} else if (open) {
-			out(`⚠ the Valkey on ${vport} answers without a password, and it is not a container up started, so up leaves it: restart it with ${VALKEY_PASSWORD_KEY} from .env (compose: \`${shownCompose([...composeBase, "up", "-d"])}\`${composeNote}, which recreates it and keeps its volume)\n`);
+			out(`⚠ the Valkey on ${vport} answers without a password, and it is not a container up started, so up leaves it: restart it with ${VALKEY_PASSWORD_KEY} from .env${composeHere(cwd, fs) ? ` (compose: \`${shownCompose([...composeBase, "up", "-d"])}\`${composeNote}, which recreates it and keeps its volume)` : ""}\n`);
 			summary.push(["valkey", `port ${vport} has a listener that answers WITHOUT a password, left alone: restart it with ${VALKEY_PASSWORD_KEY}`]);
 		} else {
 			summary.push(["valkey", ours ? `container ${ourName} already running` : `port ${vport} already has a listener, left alone`]);
@@ -712,14 +727,14 @@ export async function runUp(argv = [], deps = {}) {
 			{ yes, out, prompt },
 		);
 		if (!accepted) {
-			out(`skipped: start it later with \`${shownCompose([...composeBase, "up", "-d"])}\`${composeNote}\n`);
+			out(`skipped: ${laterValkey()}\n`);
 			summary.push(["valkey", "skipped (declined): the queue needs it before `pi-dispatch worker` can drain"]);
 		} else if (creates && await runStreamed(spawn, "docker", VALKEY_VOLUME_ARGS, out) !== 0) {
 			out("✗ docker volume create failed; continuing, doctor below will re-check Valkey\n");
-			summary.push(["valkey", `volume create FAILED; \`${shownCompose([...composeBase, "up", "-d"])}\` is the fallback`]);
+			summary.push(["valkey", composeHere(cwd, fs) ? `volume create FAILED; \`${shownCompose([...composeBase, "up", "-d"])}\` is the fallback` : "volume create FAILED; re-run `pi-dispatch up`"]);
 		} else if (await runStreamed(spawn, "docker", VALKEY_RUN_ARGS, out, { env: dockerEnv }) !== 0) {
 			out("✗ docker run failed; continuing, doctor below will re-check Valkey\n");
-			summary.push(["valkey", `container start FAILED; \`${shownCompose([...composeBase, "up", "-d"])}\` is the fallback`]);
+			summary.push(["valkey", composeHere(cwd, fs) ? `container start FAILED; \`${shownCompose([...composeBase, "up", "-d"])}\` is the fallback` : "container start FAILED; re-run `pi-dispatch up`"]);
 		} else if (await ownerMarkerOk(stopRun)) {
 			out(`✓ started Valkey (container pi-dispatch-valkey, AOF on, bound to 127.0.0.1, ${dockerValkeyPassword ? `with ${VALKEY_PASSWORD_KEY} from .env` : "WITHOUT a password: .env sets none"})\n`);
 			summary.push(["valkey", "started container pi-dispatch-valkey (durable: --appendonly yes, restart unless-stopped)"]);
@@ -768,7 +783,11 @@ export async function runUp(argv = [], deps = {}) {
 		// The files a start or a recreate mounts. Both, not the allowlist alone: a missing egress-proxy.conf is bind-mounted
 		// as a directory the runtime creates in its place (measured, Docker Engine 29.8.1: the host path became a root-owned
 		// directory, and the create failed "not a directory: Are you trying to mount a directory onto a file", exit 127).
-		const missingFile = ["egress-allowlist.conf", "deploy/egress-proxy.conf"].find((f) => !fs.existsSync(join(cwd, f)));
+		// A DIRECTORY at either path counts as missing too (PR #488's review): it is mounted where squid reads a file.
+		const fileProblem = (f) => (!fs.existsSync(join(cwd, f)) ? "is not here" : pathIsDirectory(fs, join(cwd, f)) ? "here is a directory, not a file" : null);
+		const missingFile = ["egress-allowlist.conf", "deploy/egress-proxy.conf"].find((f) => fileProblem(f) !== null);
+		const missingSaid = missingFile ? `${missingFile} ${fileProblem(missingFile)}` : "";
+		const noFile = missingFile ? (fileProblem(missingFile) === "is not here" ? `no ${missingFile} in this folder` : `${missingFile} in this folder is a directory`) : "";
 		// Whether the proxy's network is missing, filled by `egressNetworkLines` when an offer is about to be shown.
 		const network = { missing: false };
 		// STALE BY ITS IMAGE, ENTRYPOINT OR COMMAND (PR #456's final check): those are compared on every host, and a
@@ -803,8 +822,8 @@ export async function runUp(argv = [], deps = {}) {
 				out(`not replaced: one of its own mounts could not be compared on this host (above), so up leaves it as it is; \`docker ${EGRESS_RM_ARGS.join(" ")}\` and \`pi-dispatch up\` replace it if you have checked it\n`);
 				summary.push(["egress", "stale proxy left as it is: one of its mounts could not be compared on this host"]);
 			} else if (missingFile) {
-				out(`✗ ${missingFile} is not here, so up cannot recreate it from this folder; run \`pi-dispatch init\` here (or \`up\` from the deployment folder), then \`up\` again\n`);
-				summary.push(["egress", `stale proxy left as it is: no ${missingFile} in this folder to recreate it from; its policy is not this deployment's`]);
+				out(`✗ ${missingSaid}, so up cannot recreate it from this folder; run \`pi-dispatch init\` here (or \`up\` from the deployment folder), then \`up\` again\n`);
+				summary.push(["egress", `stale proxy left as it is: ${noFile} to recreate it from; its policy is not this deployment's`]);
 			} else if (
 				await consent(
 					`up would replace it with the shipped proxy (the same semantics as deploy/docker-compose.yml --profile egress)${attached.length > 0 ? `. It is attached to ${attached.join(", ")}: removing it cuts those jobs off from their egress mid-run, so stop the worker first (and let running jobs finish)` : ""}:`,
@@ -827,8 +846,8 @@ export async function runUp(argv = [], deps = {}) {
 				summary.push(["egress", "stale proxy left as it is (declined): its policy is not this deployment's"]);
 			}
 		} else if (missingFile) {
-			out(`\n✗ the egress policy is on but ${missingFile} is not here, so no proxy is started without it\n`);
-			summary.push(["egress", `skipped: no ${missingFile} in this folder; run \`pi-dispatch init\` here (or \`up\` from the deployment folder), then \`up\` again`]);
+			out(`\n✗ the egress policy is on but ${missingSaid}, so no proxy is started without it\n`);
+			summary.push(["egress", `skipped: ${noFile}; run \`pi-dispatch init\` here (or \`up\` from the deployment folder), then \`up\` again`]);
 		} else if (state?.status === "restarting") {
 			// A crash loop: the restart policy is already starting it, and its squid keeps exiting. Nothing to start.
 			out(`\n✗ ${DEFAULT_EGRESS_PROXY} is restarting: its squid keeps exiting and its restart policy keeps bringing it back. \`docker logs ${DEFAULT_EGRESS_PROXY}\` says why; meanwhile each job is retried once, then failed\n`);
@@ -863,7 +882,7 @@ export async function runUp(argv = [], deps = {}) {
 				summary.push(["egress", "started pi-dispatch-egress-proxy on pi-dispatch-egress-out"]);
 			}
 		} else {
-			out(`skipped: start it later with \`${composeCommandFor(cwd, fs, ["--profile", "egress", "up", "-d"])}\`\n`);
+			out(`skipped: ${composeHere(cwd, fs) ? `start it later with \`${composeCommandFor(cwd, fs, ["--profile", "egress", "up", "-d"])}\`` : "start it later by running `pi-dispatch up` again and accepting"}\n`);
 			summary.push(["egress", "skipped (declined) — every job is refused pre-spend until the proxy is up (PI_EGRESS=0 opts out)"]);
 		}
 	}
@@ -1108,8 +1127,8 @@ async function podmanStackStep({ env, valkeyKeys = {}, state = {}, venues, spawn
 			out(`\n✓ Egress proxy already present under this account's Podman (${DEFAULT_EGRESS_PROXY})\n`);
 			summary.push(["egress (podman)", "proxy already present, left untouched"]);
 			components.proxy = false;
-		} else if (!fs.existsSync(join(cwd, "egress-allowlist.conf"))) {
-			out("\n✗ the egress policy is on but egress-allowlist.conf is not here, not starting a proxy with no allowlist\n");
+		} else if (!fs.existsSync(join(cwd, "egress-allowlist.conf")) || pathIsDirectory(fs, join(cwd, "egress-allowlist.conf"))) {
+			out(`\n✗ the egress policy is on but egress-allowlist.conf ${pathIsDirectory(fs, join(cwd, "egress-allowlist.conf")) ? "here is a directory, not a file" : "is not here"}, not starting a proxy with no allowlist\n`);
 			summary.push(["egress (podman)", "skipped: no egress-allowlist.conf in this folder; run `pi-dispatch init` here, then `up` again"]);
 			components.proxy = false;
 		}
@@ -1353,6 +1372,24 @@ function dockerValkeyPortStep({ fs, envPath, platform, port, out, summary }) {
 		out(`\n✓ wrote ${VALKEY_PORT_KEY}=${port} into .env (VALKEY_URL's port), so compose in this folder publishes its Valkey there\n`);
 		summary.push([VALKEY_PORT_KEY, `written: ${port} (VALKEY_URL's port)`]);
 	}
+}
+
+/** Whether `path` is a directory, followed through a link; false where the seam cannot say (a test's fake fs). */
+function pathIsDirectory(fs, path) {
+	try {
+		return typeof fs.statSync === "function" && fs.statSync(path).isDirectory() === true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Whether this folder holds the compose file its compose lines name (issue #480: a folder init made does not). Every
+ * compose line `up` prints as a later or fallback step asks this first; the hand-over's own consented compose runs are
+ * reached only in a folder the wizard wrote the override into beside that file.
+ */
+function composeHere(cwd, fs) {
+	return fs.existsSync(join(cwd, COMPOSE_FILE));
 }
 
 /**

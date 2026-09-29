@@ -1035,7 +1035,9 @@ async function offerTriggerEdge(
     const dest = copies[0][1];
     for (const [src, to, required] of copies) {
       if (fs.existsSync(to)) {
-        notify?.(`${to} already exists: keeping yours as it is (setup never overwrites a file you may have edited)`, "info");
+        // Neutral (PR #488's review): `pi-dispatch init` writes deploy/egress-proxy.conf itself now, so an existing file here is
+        // as often init's copy as one the operator edited.
+        notify?.(`${to} already exists: kept as it is (setup never overwrites an existing file)`, "info");
         continue;
       }
       try {
@@ -1239,7 +1241,7 @@ async function offerTriggerEdge(
   }
 
   notify?.(
-    `trigger edge left for later — all three ways stay open from ${dir}: \`service install --receiver\` (a receiver unit on this host), \`docker compose --profile receiver up -d\` (a receiver container), or \`npx @edgehero/pi-dispatch-receiver poll\` (no public URL at all). Local cron triggers need none of them.`,
+    `trigger edge left for later: ${runtime === "podman" ? "two ways stay open" : "all three ways stay open"} from ${dir}: \`service install --receiver\` (a receiver unit on this host), ${runtime === "podman" ? "no receiver container on rootless Podman (it needs docker compose: run the receiver as that service instead)" : "a receiver container (run /dispatch setup again and choose it: that copies in deploy/docker-compose.yml and runs its \`--profile receiver up -d\`)"}, or \`npx @edgehero/pi-dispatch-receiver poll\` (no public URL at all). Local cron triggers need none of them.`,
     "info",
   );
 }

@@ -519,6 +519,18 @@ test("openSandbox REFUSES a network already under the session's name and names i
 	});
 	assert.equal(missing.refused, "egress-network-failed");
 	assert.match(missing.message, /is the proxy running\?.*read from this process's environment/);
+	// Issue #480, PR #488's review: `pi-dispatch up` and only that; the operator's own proxy is theirs to start.
+	assert.match(missing.message, /is the proxy running\? PI_EGRESS_PROXY names your own proxy, which `pi-dispatch up` does not start: start p yourself\. /);
+	assert.doesNotMatch(missing.message, /docker compose/);
+	const shipped = await openSandbox({
+		...session,
+		...openable(),
+		egress: { armed: true, proxy: "pi-dispatch-egress-proxy" },
+		spawnNetwork: recordingDocker([], (args) => (args[1] === "create" || args[1] === "inspect" ? 1 : 0)),
+		launch: async () => ({ code: 0 }),
+	});
+	assert.match(shipped.message, /is the proxy running\? `pi-dispatch up` from the deployment folder starts it\. /);
+	assert.doesNotMatch(shipped.message, /docker compose/);
 	assert.deepEqual(hooked, [], "nor does a network that could not be created");
 });
 

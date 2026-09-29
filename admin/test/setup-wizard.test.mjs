@@ -903,7 +903,7 @@ test("wizard: the edge's compose answer copies the runtime's compose file CREATE
   const rec2 = wizardDeps();
   await mod.runSetupWizard({}, tuiCtx(second.ui, repo), second.ui.notify, rec2.deps);
   assert.equal(readFileSync(dest, "utf8"), "# MINE — edited by the operator\n", "create-only: an existing compose file survives");
-  assert.ok(second.notes.some((n) => /already exists/.test(n.m) && /keeping yours/.test(n.m)), "and the skip is said out loud");
+  assert.ok(second.notes.some((n) => /already exists/.test(n.m) && /kept as it is \(setup never overwrites an existing file\)/.test(n.m)), "and the skip is said out loud");
   assert.ok(second.notes.some((n) => n.m.startsWith(`later: docker ${args.join(" ")}  (in ${dir})`)), "the skip hint is the argv that would have run");
   assert.equal(rec2.attached.length, 0, "a declined up spawns nothing");
   assert.ok(reachedFirstTrigger(second.seen));
@@ -987,6 +987,9 @@ test("wizard: the edge's Skip says one line naming all three options, and spawns
   for (const needle of ["service install --receiver", "--profile receiver up -d", "pi-dispatch-receiver poll"]) {
     assert.ok(note.m.includes(needle), `the deferral names ${needle}`);
   }
+  // Issue #480: the compose route needs the compose file, which this answer did not copy in, so it names setup's own step.
+  assert.ok(note.m.includes("run /dispatch setup again and choose it: that copies in deploy/docker-compose.yml"), note.m);
+  assert.ok(!note.m.includes("`docker compose --profile receiver up -d`"), "no bare compose line a folder without the file cannot run");
   assert.ok(reachedFirstTrigger(seen));
 });
 
@@ -1328,6 +1331,25 @@ test("wizard: the compose receiver is explained, not attempted, on the podman ve
   assert.ok(!existsSync(join(dir, "docker-compose.yml")), "no compose file copied");
   assert.ok(!attached.some((a) => a.argv0 === "docker"), "docker never spawned");
   assert.ok(notes.some((n) => /needs docker compose, and this deployment runs on rootless Podman/.test(n.m)));
+});
+
+test("wizard: the edge's Skip on the podman venue names no receiver container, only the service (PR #488's review)", async () => {
+  const dir = emptyDir();
+  plantRuntime(dir, mod.RUNTIME_VERSION);
+  const { ui, notes } = wizardUi({
+    select: ["Guided setup", "Skip", "Skip"],
+    input: [dir],
+    confirm: [false, false, false],
+  });
+  const { deps } = wizardDeps({
+    env: { PI_DISPATCH_DEPLOYMENT_FILE: join(tempDir("admin-setup-ptr-"), "pointer.json"), PI_BACKENDS: "podman" },
+    probePodmanFn: () => ({ ok: true }),
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  const note = notes.find((n) => /trigger edge left for later/.test(n.m));
+  assert.ok(note, notes.map((n) => n.m).join("\n"));
+  assert.match(note.m, /trigger edge left for later: two ways stay open from .*no receiver container on rootless Podman \(it needs docker compose: run the receiver as that service instead\)/);
+  assert.doesNotMatch(note.m, /--profile receiver up -d|all three/);
 });
 
 test("M21: a re-run finds the podman venue in the deployment's .env when the wizard's own env says nothing", async () => {

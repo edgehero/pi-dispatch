@@ -211,6 +211,8 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// `judgeValkeyListeners`. Defaulted below, not here: see there.
 		valkeyOwner,
 		proxyFilesExist,
+		// PR #488's review: whether a path of the proxy's two files is a DIRECTORY, which docker would mount as the file.
+		proxyFileIsDirectory,
 		isAlive = defaultIsAlive,
 		pid = process.pid,
 		nonce = randomBytes(6).toString("hex"),
@@ -322,7 +324,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -4265,6 +4267,14 @@ const CANARY_UNPROVED_FIX = "re-run doctor; the policy itself may be fine, but n
 /** One fixed text for a canary leftover, because the COMMAND is in the label and only the advice belongs here. */
 const CANARY_LEFTOVER_FIX = "remove whatever is still on it first (a probe container under `pi-dispatch-egress-probe-`), then the network. A later `pi-dispatch doctor` on this host clears a leftover whose process has exited, but not one a container is still holding: that one waits for you";
 
+function statIsDirectory(path) {
+	try {
+		return statSync(path).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
 /**
  * REQ-EGRESS-ALLOWLIST. What the shipped egress policy actually is on this host, read back from docker
  * rather than assumed from the compose file that was supposed to create it.
@@ -4299,7 +4309,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// `proxyFilesExist` asks whether this folder holds the proxy's two files, which is what makes it a deployment folder
 	// whose mounts the running proxy can be compared with. A seam of its own, on the real disk by default: the shared
 	// `fileExists` answers yes to everything in most tests, and "doctor run from some other folder" is the common case.
-	const { spawn, pid = process.pid, isAlive = defaultIsAlive, proxyFilesExist = existsSync } = seams;
+	const { spawn, pid = process.pid, isAlive = defaultIsAlive, proxyFilesExist = existsSync, proxyFileIsDirectory = statIsDirectory } = seams;
 	// The SAME parse the worker boots with (egress.mjs), never a second `=== "1"`: doctor reporting a
 	// policy that is off, or nothing about one that is on, is worse than doctor not checking at all.
 	// A malformed value is the worker's boot failure to report, not doctor's to guess at, so it reads as
@@ -4372,6 +4382,15 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// know which folder the service uses), and only where every bind source resolves on this host; otherwise that half
 	// is said to be unknown, never stale.
 	const inFolder = ["egress-allowlist.conf", "deploy/egress-proxy.conf"].every((f) => proxyFilesExist(join(seams.cwd, f)));
+	// A DIRECTORY at either path (PR #488's review): docker bind-mounts it where squid reads a file, and the proxy cannot
+	// start from it. Said for the shipped proxy, whose run and compose file mount this folder's two paths.
+	if (!custom) {
+		for (const f of ["egress-allowlist.conf", "deploy/egress-proxy.conf"]) {
+			if (proxyFileIsDirectory(join(seams.cwd, f))) {
+				checks.push({ ok: false, label: `${f} in this folder is a directory, not a file`, fix: `the egress proxy mounts it where squid reads a file, so it cannot start from this folder: remove the directory, then \`pi-dispatch init\` writes the file (create-only)` });
+			}
+		}
+	}
 	const judged = !custom && parsed ? shippedProxyDrift(parsed, { cwd: seams.cwd, platform: seams.platform ?? process.platform, realpath: (p) => realpathSync(p), compareMounts: inFolder }) : { drift: [], unknown: null };
 	// What `up` does with it, told the way `up` decides it (PR #456's final check): a proxy stale by its image, entrypoint
 	// or command is offered for replacement whatever its mounts; one stale on its mounts alone is not while one of its own
@@ -4410,7 +4429,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 				? `it is not this deployment's either (${judged.drift.join("; ")}): ${replaceFix} -- the egress policy refuses every job pre-spend while it is down, which costs no budget but runs nothing (PI_EGRESS=0 opts out)`
 				: parsed?.status === "paused"
 					? `docker unpause ${proxy}  -- as \`pi-dispatch up\` offers; the egress policy refuses every job pre-spend while it is paused, which costs no budget but runs nothing (PI_EGRESS=0 opts out)`
-					: "docker compose -f deploy/docker-compose.yml --profile egress up -d  -- the egress policy refuses every job pre-spend while this is down, which costs no budget but runs nothing (PI_EGRESS=0 opts out)",
+					: "`pi-dispatch up` from the deployment folder starts it  -- the egress policy refuses every job pre-spend while this is down, which costs no budget but runs nothing (PI_EGRESS=0 opts out)",
 		// Not rendered: `--live`'s peer probe (issue #344) needs the proxy's name and whether it is up, and reads them here
 		// rather than asking docker a second time.
 		proxyState: { proxy, running: up },

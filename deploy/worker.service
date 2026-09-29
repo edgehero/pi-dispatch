@@ -34,7 +34,7 @@
 Description=pi-dispatch worker (drains the job queue on the host; launches job containers via docker)
 After=network-online.target docker.service
 Wants=network-online.target
-# Valkey must be reachable (docker compose --env-file .env -f deploy/docker-compose.yml up -d), but it is a separate
+# Valkey must be reachable (on this host, `pi-dispatch up` in the deployment folder starts it), but it is a separate
 # unit/container -- not ordered here since it may be remote.
 # Crash-loop bound: at most StartLimitBurst restarts within StartLimitIntervalSec, then systemd stops
 # trying. A restart loop against a paid provider is a bill, not just log noise. Pairs with

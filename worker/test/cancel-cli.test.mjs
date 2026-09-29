@@ -237,6 +237,8 @@ test("Valkey dying MID-active-cancel still deletes the placed request, promptly 
 	const code = await runCancel("j8", "redis://x", seams);
 	assert.equal(code, 1);
 	assert.match(err.join(""), /could not reach Valkey/);
+	// Not loopback, so not a Valkey `pi-dispatch up` starts (PR #488's review): asked about by its host.
+	assert.match(err.join(""), /: is the Valkey at x running\?\n/);
 	assert.match(err.join(""), /boom mid-poll/);
 	assert.ok(ops.some((op) => op[0] === "set" && op[1] === "cancel:req:j8"), "the request was really placed (this test would be vacuous otherwise)");
 	assert.ok(ops.some((op) => op[0] === "del" && op[1] === "cancel:req:j8"), "the placed request is deleted on the error path");

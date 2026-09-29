@@ -157,6 +157,22 @@ export function isLoopbackHost(hostname) {
 }
 
 /**
+ * The "is it running?" half of a could-not-reach-Valkey line (issue #480, PR #488's review). `pi-dispatch up` is named
+ * only for a loopback VALKEY_URL, the only Valkey `up` starts; a Valkey on another host is asked about by its host
+ * (`URL.hostname`: never userinfo, a path or a query), and a URL that does not parse by nothing at all.
+ */
+export function valkeyDownHint(url) {
+	let host = null;
+	try {
+		host = new URL(String(url)).hostname || null;
+	} catch {
+		host = null;
+	}
+	if (host !== null && isLoopbackHost(host)) return "is it running? (`pi-dispatch up` in the deployment folder starts it)";
+	return host !== null ? `is the Valkey at ${host} running?` : "is it running?";
+}
+
+/**
  * The refusal for a Valkey that rejected this client's credential, or null for any other error: NOAUTH (it requires a
  * password and none was sent), WRONGPASS or "invalid password" (one was sent and it is not that Valkey's). `from` is
  * where the password that was sent came from (`valkeyPasswordFor`), `envPath` the deployment `.env`; the sentence names

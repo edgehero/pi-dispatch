@@ -96,6 +96,7 @@ import {
 import { buildGraphModel } from "./graph-model.mjs";
 import { buildInsightsHtml } from "./insights-html.mjs";
 import { parseBackendList } from "@edgehero/pi-dispatch/backends";
+import { valkeyDownHint } from "@edgehero/pi-dispatch/valkey-auth";
 // The trigger vocabularies, IMPORTED from the loader that validates them rather than retyped. Every one
 // of these was a hand-written copy of a table one package over, and this is the surface a MODEL authors
 // triggers through -- so both drift directions are silent and both are expensive. A widened loader table
@@ -1398,7 +1399,7 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
           notify?.(
             res.partial
               ? `${paused ? "paused" : "resumed"} ${res.partial.done.join(", ")}${at} but FAILED at ${res.partial.failed}: the deployment is half ${paused ? "paused" : "resumed"}`
-              : `could not reach Valkey at ${shown}: is it running? (docker compose up)`,
+              : `could not reach Valkey at ${shown}: ${valkeyDownHint(shown)}`,
             "error",
           );
           continue;

@@ -172,7 +172,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 			});
 			write(`queued ${jobId} — folder ${folder}\nrun \`pi-dispatch worker\` to process it.\n`);
 		} catch (error) {
-			return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${(await import("./connection.mjs")).urlShown(valkeyUrl)}: is it running? (docker compose up)\n  ${error.message}`);
+			return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${(await import("./connection.mjs")).urlShown(valkeyUrl)}: ${(await import("./valkey-auth.mjs")).valkeyDownHint(valkeyUrl)}\n  ${error.message}`);
 		} finally {
 			await queue.close().catch(() => {});
 		}
@@ -317,7 +317,7 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 			write(`${JSON.stringify(out)}\n`);
 		}
 	} catch (error) {
-		return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${urlShown(url)}: is it running? (docker compose up)\n  ${error.message}`);
+		return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${urlShown(url)}: ${(await import("./valkey-auth.mjs")).valkeyDownHint(url)}\n  ${error.message}`);
 	} finally {
 		for (const q of queues) await q.close().catch(() => {});
 	}

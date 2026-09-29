@@ -7,6 +7,7 @@ import { scopeKeyPrefix } from "./scoped-limits.mjs";
 import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
 import { RUNNER_POLICY_REASONS } from "./run-history.mjs";
+import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
 
 /**
  * The forge comment's reason for each observation a floor refusal missed (issues #278 and #345), keyed like
@@ -113,11 +114,16 @@ function runtimeUnavailable(venue, gate) {
  * The remedy an egress-proxy refusal's comment names. The compose profile starts the proxy on the DOCKER daemon, which a
  * job on the native podman venue cannot reach: rootless podman's `--internal` network reaches nothing on the host
  * (measured, issue #354), so its proxy must run under the SAME rootless podman on a named bridge network, which is what
- * docs/podman.md sets up. Every other venue keeps the words it had.
+ * docs/podman.md sets up. Every other venue names `pi-dispatch up` from the deployment folder, and ONLY that (issue #480,
+ * PR #488's review): it starts the proxy in any folder init made, and it knows the folder. A compose line printed from
+ * here could not: a folder /dispatch setup laid out needs its project and override, and without them `--profile egress
+ * up -d` also starts compose's unprofiled valkey under project `deploy`, a second Valkey on a fresh volume or a clash on
+ * its port. A proxy PI_EGRESS_PROXY names is the operator's own, which `up` never starts, so that one is theirs to start.
  */
-function egressProxyFix(venue) {
+function egressProxyFix(venue, proxy = DEFAULT_EGRESS_PROXY) {
 	if (venue === PODMAN_BACKEND) return "Start it under the worker account's own rootless podman, on a named bridge network (docs/podman.md)";
-	return "Start it with `docker compose --env-file .env -f deploy/docker-compose.yml --profile egress up -d`";
+	if (proxy !== DEFAULT_EGRESS_PROXY) return `PI_EGRESS_PROXY names your own proxy, which \`pi-dispatch up\` does not start: start ${proxy} yourself`;
+	return "Start it with `pi-dispatch up` from the deployment folder";
 }
 
 export async function runJob(job, deps) {
@@ -617,7 +623,7 @@ export async function runJob(job, deps) {
 		if (egress.proxyMissing || egress.proxyStopped) {
 			const proxy = egress.proxyMissing ?? egress.proxyStopped;
 			const state = egress.proxyMissing ? "is not on this host" : "is not running";
-			await comment(job, `Refused: this deployment runs jobs behind an egress policy and its allowlist proxy "${proxy}" ${state}, so the job could not reach the provider and would burn its budget slot proving it. ${egressProxyFix(resolveBackendName(job, blessedBackends[0]))}, or set PI_EGRESS=0 to run without an egress policy. Not run.`);
+			await comment(job, `Refused: this deployment runs jobs behind an egress policy and its allowlist proxy "${proxy}" ${state}, so the job could not reach the provider and would burn its budget slot proving it. ${egressProxyFix(resolveBackendName(job, blessedBackends[0]), proxy)}, or set PI_EGRESS=0 to run without an egress policy. Not run.`);
 			// The proxy's NAME is operator-authored deployment config, never payload -- the same PII class as
 			// the image ref on the refusal above.
 			log(egress.proxyMissing ? "refused_egress_proxy_missing" : "refused_egress_proxy_stopped", { proxy });

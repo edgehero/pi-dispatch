@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runInit } from "../src/init.mjs";
+import { PACKAGED_EGRESS_PROXY_CONF, runInit } from "../src/init.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 const tmp = () => tempDir("pi-init-");
@@ -115,14 +115,13 @@ test("init never overwrites an edited allowlist", () => {
 
 // --- issue #453: the next steps follow the venue ------------------------------------------------------------------------
 
-// Byte for byte what init printed before #453, and still prints for every venue set that includes `local` (step 2 names the
-// .env compose reads VALKEY_PASSWORD from since #468).
+// What init prints for every venue set that includes `local`. Step 2 was a compose command naming deploy/docker-compose.yml,
+// which a folder made by init alone does not have, and it started no egress proxy; it is `pi-dispatch up` since #480.
 const DOCKER_NEXT = `
 Next:
   1. docker pull ghcr.io/edgehero/pi-job:latest && docker tag ghcr.io/edgehero/pi-job:latest pi-job:latest
-                                                        # the prebuilt job image (or build image/Dockerfile)
-  2. docker compose --env-file .env -f deploy/docker-compose.yml up -d
-                                                        # the durable queue (Valkey, with the password init wrote)
+                                                        # the prebuilt job image (or build your own from a clone)
+  2. pi-dispatch up                                     # Valkey and the egress proxy (unless PI_EGRESS=0)
   3. edit .env                                          # set ANTHROPIC_API_KEY (or your provider's key)
   4. pi-dispatch doctor                                 # verify Docker, Valkey, image, and key
   5. pi-dispatch worker                                 # drain the queue
@@ -133,8 +132,9 @@ Operator panel (optional): pi install npm:@edgehero/pi-dispatch-admin   then   /
 
 // The podman ladder, docs/podman.md "Setup" in the order a fresh folder needs it, linger named up front (gate 456).
 const PODMAN_NEXT = `
-Next (the podman venue; run these as the worker's own account. First set the account up as docs/podman.md "Setup"
-steps 1-4 say, linger included: sudo loginctl enable-linger <account>, without which a job gets no bounds):
+Next (the podman venue; run these as the worker's own account. First set the account up as the Podman guide's "Setup"
+steps 1-4 say (https://github.com/edgehero/pi-dispatch/blob/main/docs/podman.md), linger included:
+sudo loginctl enable-linger <account>, without which a job gets no bounds):
   1. podman pull ghcr.io/edgehero/pi-job:latest && podman tag ghcr.io/edgehero/pi-job:latest pi-job:latest
                                                         # the prebuilt job image, in this account's own store
   2. edit .env                                          # PI_BACKENDS=podman, and ANTHROPIC_API_KEY (or your provider's key)
@@ -213,4 +213,128 @@ test("init decides the venue exactly as up does: a disagreement, a line the load
 	// loader, and a line it reads differently is a note, as up says it.
 	assert.ok(nextFor({ env: { PI_BACKENDS: "podman" }, platform: "darwin" }).text.endsWith(PODMAN_OFF_LINUX));
 	assert.ok(nextFor({ envFile: "PI_BACKENDS=podman\n", platform: "darwin" }).text.endsWith(PODMAN_OFF_LINUX));
+});
+
+// --- issue #480: the no-clone folder gets the proxy's rules, and init's output names only what the folder has --------------
+
+test("init in an empty folder scaffolds deploy/egress-proxy.conf, the package's own copy byte for byte, and lists it (#480)", () => {
+	// No seeded example and no deploy/: the folder `npx @edgehero/pi-dispatch up` starts from.
+	const dir = tmp();
+	const { out, text } = capture();
+	assert.equal(runInit(dir, { out, newPassword: () => PASSWORD }), 0);
+	const packaged = readFileSync(fileURLToPath(new URL("../deploy/egress-proxy.conf", import.meta.url)));
+	assert.equal(PACKAGED_EGRESS_PROXY_CONF, fileURLToPath(new URL("../deploy/egress-proxy.conf", import.meta.url)), "resolved from the module, as service.mjs resolves its templates");
+	assert.deepEqual(readFileSync(join(dir, "deploy", "egress-proxy.conf")), packaged, "the shipped rules, verbatim");
+	assert.match(text(), /^created deploy\/egress-proxy\.conf the egress proxy's rules/m);
+});
+
+test("init never overwrites an existing deploy/egress-proxy.conf, and reports it kept (#480)", () => {
+	const dir = tmp();
+	writeFileSync(join(dir, ".env.example"), "ANTHROPIC_API_KEY=\n");
+	mkdirSync(join(dir, "deploy"));
+	writeFileSync(join(dir, "deploy", "egress-proxy.conf"), "# a clone's own rules\n");
+	const { out, text } = capture();
+	assert.equal(runInit(dir, { out, readPackageFile: () => assert.fail("a kept file is never read from the package") }), 0);
+	assert.equal(readFileSync(join(dir, "deploy", "egress-proxy.conf"), "utf8"), "# a clone's own rules\n");
+	assert.match(text(), /^kept\s+deploy\/egress-proxy\.conf\s+already exists/m);
+});
+
+test("init's ladders name no file the folder does not have, docker and podman (#480)", () => {
+	for (const [label, opts] of [["docker", {}], ["podman", { env: { PI_BACKENDS: "podman" } }]]) {
+		const { text, dir } = nextFor(opts);
+		const ladder = text.slice(text.indexOf("\nNext"));
+		assert.ok(ladder.length > 5, `${label}: a ladder was printed`);
+		// Every token shaped like a relative path or a config file: a word with a slash in it (a registry reference or an npm
+		// spec aside, which carry `:`), or a name ending in a config extension, and `.env` itself.
+		const named = new Set();
+		for (const token of ladder.split(/[\s()`,]+/)) {
+			if (!token || token.includes(":") || token.includes("@")) continue;
+			if (/^\.?[\w.-]+(\/[\w.-]+)+\/?$/.test(token) || /\.(ya?ml|conf|json|env)$/.test(token) || token === ".env") named.add(token);
+		}
+		assert.ok(named.has(".env"), `${label}: the scan sees the files a step names: ${[...named]}`);
+		for (const file of named) assert.ok(existsSync(join(dir, file)), `${label}: the ladder names ${file}, which init's folder does not have`);
+		assert.doesNotMatch(ladder, /docker-compose\.yml|image\/Dockerfile/, label);
+	}
+});
+
+test("init's file column is as wide as the longest name, so every note starts in one column (#480)", () => {
+	const { text } = nextFor({});
+	const rows = text.slice(0, text.indexOf("\nNext:")).split("\n").filter(Boolean);
+	assert.equal(rows.length, 8, text);
+	const starts = new Set(rows.map((row) => row.match(/^\S+\s+\S+\s+/)[0].length));
+	assert.equal(starts.size, 1, `every note starts in one column:\n${rows.join("\n")}`);
+	assert.ok(rows.some((row) => row.includes("egress-allowlist.conf ")), "the 21-character name is followed by a space before its note");
+});
+
+test("init with steps: false prints the file list and no Next ladder (what up passes, #480)", () => {
+	for (const venues of [undefined, { localUsed: true, podmanUsed: false, podmanDefault: false }, { localUsed: false, podmanUsed: true, podmanDefault: true }]) {
+		const dir = tmp();
+		const { out, text } = capture();
+		assert.equal(runInit(dir, { out, venues, steps: false, platform: "linux" }), 0);
+		assert.match(text(), /^created deploy\/egress-proxy\.conf /m, "the created lines stay");
+		assert.doesNotMatch(text(), /Next/, JSON.stringify(venues));
+	}
+});
+
+// PR #488's review: every scaffold is written create-only (`wx`), so nothing is written through a link out of the folder.
+test("init never writes through a dangling symlink: every scaffold is kept, and the link's target is never created (#488)", { skip: process.platform === "win32" }, () => {
+	const dir = tmp();
+	const outside = tmp();
+	mkdirSync(join(dir, "deploy"));
+	const names = [".env", "triggers.json", "pause-windows.json", "pi-packages.json", "subscriptions.json", "scoped-limits.json", "egress-allowlist.conf", "deploy/egress-proxy.conf"];
+	for (const name of names) symlinkSync(join(outside, name.replace("/", "-")), join(dir, name));
+	const { out, text } = capture();
+	assert.equal(runInit(dir, { out, newPassword: () => PASSWORD }), 0);
+	assert.deepEqual(readdirSync(outside), [], "nothing was written where a link points");
+	for (const name of names) {
+		assert.ok(lstatSync(join(dir, name)).isSymbolicLink(), `${name} is still the link`);
+		assert.match(text(), new RegExp(`^kept\\s+${name.replace(/[./]/g, "\\$&")}\\s+already exists, left untouched$`, "m"), name);
+	}
+});
+
+test("init refuses a symlinked deploy/, or a deploy/ that is not a directory, and writes nothing into it (#488)", { skip: process.platform === "win32" }, () => {
+	for (const shape of ["symlink", "file"]) {
+		const dir = tmp();
+		const outside = tmp();
+		if (shape === "symlink") symlinkSync(outside, join(dir, "deploy"));
+		else writeFileSync(join(dir, "deploy"), "not a folder\n");
+		const { out, text } = capture();
+		assert.equal(runInit(dir, { out, newPassword: () => PASSWORD }), 1, `${shape}: a refused scaffold fails init`);
+		assert.deepEqual(readdirSync(outside), [], `${shape}: nothing written where deploy/ points`);
+		assert.match(text(), new RegExp(`^refused deploy/egress-proxy\\.conf deploy/ here is ${shape === "symlink" ? "a symlink" : "not a directory"}, so init writes nothing into it`, "m"), shape);
+		assert.ok(existsSync(join(dir, "triggers.json")), `${shape}: the other scaffolds are still written`);
+		assert.match(text(), /^created triggers\.json /m, `${shape}: and listed, the refusal beside them`);
+	}
+});
+
+test("init refuses a directory where a scaffold's file belongs, deploy/egress-proxy.conf included, and never calls it kept (#488)", () => {
+	const dir = tmp();
+	writeFileSync(join(dir, ".env.example"), "ANTHROPIC_API_KEY=\n");
+	mkdirSync(join(dir, "deploy", "egress-proxy.conf"), { recursive: true });
+	mkdirSync(join(dir, "triggers.json"));
+	const { out, text } = capture();
+	assert.equal(runInit(dir, { out }), 1);
+	assert.match(text(), /^refused deploy\/egress-proxy\.conf deploy\/egress-proxy\.conf here is a directory, not a file: remove it, then run `pi-dispatch init` again$/m);
+	assert.match(text(), /^refused triggers\.json\s+triggers\.json here is a directory, not a file/m);
+	assert.doesNotMatch(text(), /^kept\s+(deploy\/egress-proxy\.conf|triggers\.json)/m);
+	assert.ok(existsSync(join(dir, "pause-windows.json")), "the rest are written");
+});
+
+test("a write that throws part way still prints what init already created, then throws (PR #488's final review)", () => {
+	const dir = tempDir("init-throw-");
+	const lines = [];
+	const out = (s) => lines.push(s);
+	const eacces = Object.assign(new Error("EACCES: permission denied, open 'deploy/egress-proxy.conf'"), { code: "EACCES" });
+	const fs = {
+		existsSync, lstatSync, mkdirSync, readFileSync, statSync,
+		copyFileSync: () => {},
+		writeFileSync: (path, ...rest) => {
+			if (String(path).endsWith("egress-proxy.conf")) throw eacces;
+			return writeFileSync(path, ...rest);
+		},
+	};
+	assert.throws(() => runInit(dir, { out, fs, steps: false }), /EACCES/);
+	const printed = lines.join("");
+	for (const name of [".env", "triggers.json", "egress-allowlist.conf"]) assert.match(printed, new RegExp(`created ${name.replace(".", "\\.")}`), printed);
+	assert.doesNotMatch(printed, /Next:/);
 });

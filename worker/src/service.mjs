@@ -84,7 +84,7 @@ function resolveReceiverStart() {
  */
 // The two worker-template literals a podman render rewrites (issue #430), spelled once for the pin table and the render.
 const WORKER_DESCRIPTION = "Description=pi-dispatch worker (drains the job queue on the host; launches job containers via docker)";
-const WORKER_VALKEY_COMMENT = "# Valkey must be reachable (docker compose --env-file .env -f deploy/docker-compose.yml up -d), but it is a separate\n# unit/container -- not ordered here since it may be remote.\n";
+const WORKER_VALKEY_COMMENT = "# Valkey must be reachable (on this host, `pi-dispatch up` in the deployment folder starts it), but it is a separate\n# unit/container -- not ordered here since it may be remote.\n";
 
 export const TEMPLATE_PINS = {
 	"worker.service": [
@@ -95,7 +95,7 @@ export const TEMPLATE_PINS = {
 		"WantedBy=multi-user.target", // → default.target in user scope (multi-user.target never runs there)
 		"\nWants=network-online.target\n", // the anchor the podman venue's Wants=/After= on its Quadlet units go after (issue #430), user scope only
 		"Description=pi-dispatch worker (drains the job queue on the host; launches job containers via docker)", // → names rootless podman on a podman deployment (issue #430)
-		"# Valkey must be reachable (docker compose --env-file .env -f deploy/docker-compose.yml up -d), but it is a separate\n# unit/container -- not ordered here since it may be remote.\n", // → says it IS ordered, when the Quadlet Valkey is installed
+		"# Valkey must be reachable (on this host, `pi-dispatch up` in the deployment folder starts it), but it is a separate\n# unit/container -- not ordered here since it may be remote.\n", // → says it IS ordered, when the Quadlet Valkey is installed
 		// Byte-for-byte survivors — semantics the render must not lose:
 		"RestartPreventExitStatus=2", // EXIT_POLICY is never restarted (a retry loop is a bill)
 		"StartLimitIntervalSec=60",
@@ -1497,6 +1497,7 @@ async function doRestart(ctx, values) {
 		return fail(ctx.err, `--drain-timeout must be a positive number of seconds, got: ${values["drain-timeout"]}`);
 	}
 	let queue = ctx.queue;
+	let url;
 	if (!queue) {
 		// VALKEY_URL only, exactly like cli.mjs's pause/resume: the drain must work even when the rest
 		// of the config (forge auth …) is broken, and failFast keeps a down Valkey an error in seconds
@@ -1504,7 +1505,7 @@ async function doRestart(ctx, values) {
 		// subcommands that never touch the queue must not load bullmq/ioredis.
 		// This shell's VALKEY_URL, else the deployment .env's (PR #475's review), as every CLI verb reads it.
 		const { cliValkeyUrl, parseConnection } = await import("./connection.mjs");
-		const url = cliValkeyUrl(ctx.env, { cwd: ctx.deployDir, warn: (line) => ctx.err(line) });
+		url = cliValkeyUrl(ctx.env, { cwd: ctx.deployDir, warn: (line) => ctx.err(line) });
 		const { makeQueue } = await import("./queue.mjs");
 		queue = makeQueue(parseConnection(url, { failFast: true }));
 	}
@@ -1550,7 +1551,7 @@ async function doRestart(ctx, values) {
 		ctx.out("resumed — drained restart complete\n");
 		return 0;
 	} catch (error) {
-		return fail(ctx.err, `could not reach Valkey — is it running? (docker compose up)\n  ${error.message}`);
+		return fail(ctx.err, `could not reach Valkey: ${(await import("./valkey-auth.mjs")).valkeyDownHint(url)}\n  ${error.message}`);
 	} finally {
 		await queue.close().catch(() => {});
 	}

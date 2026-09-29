@@ -961,13 +961,19 @@ test("an egress-proxy refusal on the podman venue names the rootless-podman reme
 		return runJob(job, d);
 	};
 	await run(ghJob, ["local"], { proxyMissing: "pi-dispatch-egress-proxy" });
-	assert.ok(texts[0].includes("Start it with `docker compose --env-file .env -f deploy/docker-compose.yml --profile egress up -d`, or set PI_EGRESS=0"), texts[0]);
+	// Issue #480, PR #488's review: `pi-dispatch up` and only that. It works in a folder made without a clone and knows the
+	// folder, where a compose line printed here would start a second Valkey in a folder /dispatch setup laid out.
+	assert.ok(texts[0].includes("Start it with `pi-dispatch up` from the deployment folder, or set PI_EGRESS=0"), texts[0]);
+	assert.doesNotMatch(texts[0], /docker compose/);
 	const r = await run({ ...ghJob, backend: "podman" }, ["local", "podman"], { proxyStopped: "pi-dispatch-egress-proxy" });
 	assert.equal(r.reason, "egress-proxy-stopped");
 	assert.ok(texts[1].includes("Start it under the worker account's own rootless podman, on a named bridge network (docs/podman.md), or set PI_EGRESS=0"), texts[1]);
 	assert.doesNotMatch(texts[1], /docker compose/);
 	await run(ghJob, ["podman"], { proxyMissing: "p" });
 	assert.match(texts[2], /rootless podman/, "the default venue's remedy for a job naming none");
+	// PI_EGRESS_PROXY's own proxy: `up` never starts it, so the comment does not say it would (PR #488's review).
+	await run(ghJob, ["local"], { proxyStopped: "my-squid" });
+	assert.ok(texts[3].includes("PI_EGRESS_PROXY names your own proxy, which `pi-dispatch up` does not start: start my-squid yourself, or set PI_EGRESS=0"), texts[3]);
 });
 
 test("a proxy that exists but is STOPPED is its own reason, because the fix is a different one", async () => {
