@@ -228,7 +228,7 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * Every set is IMPORTED, never retyped, which is the rule `sandbox.test.mjs` keeps for the same reason: a
  * forge added to the table later must not need a second edit here to stay covered.
  */
-const RESERVED_ENV_NAMES = new Set([...MINTED_TOKEN_VARS, ...FORGE_HOST_VARS, ...WORKER_ONLY_SECRET_VARS, ...EGRESS_ENV_VARS, ...CONTAINER_ENV_NAMES, ...PROVIDER_STEERING_VARS]);
+export const RESERVED_ENV_NAMES = new Set([...MINTED_TOKEN_VARS, ...FORGE_HOST_VARS, ...WORKER_ONLY_SECRET_VARS, ...EGRESS_ENV_VARS, ...CONTAINER_ENV_NAMES, ...PROVIDER_STEERING_VARS]);
 
 function isNonEmptyString(value) {
 	return typeof value === "string" && value.trim() !== "";

@@ -409,16 +409,29 @@ failed, and never the reference, the resolver's path, or a byte of what it print
    `ANTHROPIC_AUTH_TOKEN` stays refused for every trigger, whichever provider the job runs on.
    The list is not maintained by hand: it is extracted from the pinned pi and from every package pi builds
    a client with, and a test compares the two in both directions, so an upgrade that starts reading a new
-   variable fails the build. Seven names cannot be extracted, because the code builds the key at runtime
-   (`AWS_ENDPOINT_URL` and the lowercase proxy spellings); those are listed by hand and a test checks they
-   are still unfindable.
+   variable fails the build. The scan also reads those packages' own dependencies, one level down. That
+   adds the Google auth library's names (`GOOGLE_CLOUD_QUOTA_PROJECT`, `CLOUDSDK_CONFIG`, and the
+   lowercase `google_application_credentials`, `gcloud_project` and `google_cloud_project`, which it reads
+   beside the uppercase ones), the AWS SDK's (`AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, the EC2
+   metadata settings, `AWS_USE_FIPS_ENDPOINT`, `AWS_MAX_ATTEMPTS` and the other client settings), the
+   Google GenAI SDK's `GOOGLE_GENAI_ACCESS_TOKEN`, pi's Cloudflare `CLOUDFLARE_ACCOUNT_ID` and
+   `CLOUDFLARE_GATEWAY_ID`, and a few from small helpers such as `DEBUG`. Names are matched exactly: only a
+   lowercase spelling that some pinned package reads is refused.
+   pi's own settings are refused too: every `PI_*` variable pi reads, such as `PI_CODING_AGENT_DIR`
+   (another agent folder, with another `auth.json`), except the ones pi-dispatch sets itself.
+   Four names cannot be extracted, because the code builds the key at runtime
+   (`AWS_ENDPOINT_URL_BEDROCK_RUNTIME`, `http_proxy`, `https_proxy` and `ALL_PROXY`); those are listed by
+   hand and a test checks they are still unfindable.
+   A job that was queued before a name joined this list (or sent by an older receiver) is refused before
+   it starts, as `secret-name-reserved`, and the refusal names the variable.
    This list does **not** include another provider's API key. Binding `OPENAI_API_KEY` on an Anthropic
    deployment is still fine, exactly as item 4 says: that is the previous rule and it is unchanged.
    **What it will cost you is carrying AWS or Google cloud credentials on a trigger for a step that has
    nothing to do with your model provider**, such as an S3 push or a `gcloud` call. `AWS_ACCESS_KEY_ID`,
    `AWS_SECRET_ACCESS_KEY` and `GOOGLE_APPLICATION_CREDENTIALS` are read by the provider SDKs as provider
    configuration, so they are refused on every deployment now, including one that uses neither Bedrock nor
-   Vertex. The set also covers names that are harmless in themselves, such as `AWS_REGION` and `OPENAI_LOG`.
+   Vertex. The set also covers names that are harmless in themselves, such as `AWS_REGION`, `OPENAI_LOG`
+   and `DEBUG`.
    Put what you need on `PI_FORWARD_ENV` instead: nothing there refuses these names. It is not a
    like-for-like replacement, and the difference is the point of the refusal, `PI_FORWARD_ENV` is one host
    value for the whole deployment and it is the operator's list rather than the trigger author's.

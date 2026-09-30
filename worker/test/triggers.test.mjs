@@ -1103,6 +1103,22 @@ test("a run.secrets key that STEERS a provider is refused, which is a different 
 	assert.ok(PROVIDER_STEERING_VARS.has("AZURE_OPENAI_BASE_URL"), "and the wiring reads THAT set, not a copy of these names");
 });
 
+test("the lowercase twins, the quota project and pi's own agent directory are refused, by exact name (#511)", () => {
+	// google-auth-library reads `google_application_credentials` beside the uppercase form (measured
+	// planting a credential file the job then uses), and pi reads PI_CODING_AGENT_DIR to find its agent
+	// directory. Spelled out for the same reason as the test above.
+	for (const name of ["google_application_credentials", "gcloud_project", "google_cloud_project", "GOOGLE_CLOUD_QUOTA_PROJECT", "PI_CODING_AGENT_DIR", "CLOUDFLARE_ACCOUNT_ID"]) {
+		assert.throws(
+			() => parse([withRun(LABEL, { secrets: { [name]: "op://a/b/c" } })]),
+			(e) => isConfigError(e) && e.message.includes(name),
+			`${name} must be refused at load`,
+		);
+	}
+	// Exact, not case-folded: a lowercase spelling no pinned source reads is an operator's own name.
+	const [t] = parse([withRun(LABEL, { secrets: { openai_base_url: "op://ci/x/y" } })]);
+	assert.deepEqual(Object.keys(t.run.secrets), ["openai_base_url"]);
+});
+
 test("an operator's own secret is still bindable -- the widening has a bound", () => {
 	// Reserving every name would make run.secrets useless, which is the feature this protects rather than
 	// replaces. These are the shapes docs/secrets.md uses as examples.
@@ -1118,7 +1134,7 @@ test("ANOTHER provider's key variable is still bindable at LOAD, which is the bo
 	// that can break it is not asserted.
 	//
 	// It is also why the key variables are subtracted from PROVIDER_STEERING_VARS rather than left in:
-	// only four of pi's thirty-one appear as literals in a scanned artifact, so keeping them would have
+	// only six of pi's thirty-eight (0.99.1 pin) are read by name in a scanned artifact, so keeping them would have
 	// refused OPENAI_API_KEY while GROQ_API_KEY stayed bindable, for reasons no operator could predict.
 	const [t] = parse([withRun(LABEL, { secrets: { OPENAI_API_KEY: "op://ci/openai/key", GROQ_API_KEY: "op://ci/groq/key", HF_TOKEN: "op://ci/hf/token" } })]);
 	assert.deepEqual(Object.keys(t.run.secrets).sort(), ["GROQ_API_KEY", "HF_TOKEN", "OPENAI_API_KEY"]);

@@ -1326,8 +1326,9 @@ refactor apart.
     would be sent by `gh` to github.com on the agent's first invocation — a working credential handed to
     the wrong host, which is precisely how a scoped token stops being scoped. Absent otherwise; `PI_JOB_ID`; `PI_PROVIDER`;
     `PI_MODEL`; `PI_MAX_TURNS`; `PI_MAX_TOKENS` (the per-job token budget — forwarded ONLY when set, omitted
-    otherwise so the runner meters usage without a cap; `REQ-TOKEN-ACCOUNTING-AND-CAPS`); `PI_CODING_AGENT_DIR`
-    (if not `$HOME/.pi/agent`); `PI_GLOBAL_ALLOW_EXTENSIONS=0` (forwarded ONLY to carry the operator's explicit
+    otherwise so the runner meters usage without a cap; `REQ-TOKEN-ACCOUNTING-AND-CAPS`); no
+    `PI_CODING_AGENT_DIR` (pi's `getAgentDir` falls back to `$HOME/.pi/agent`, and from issue #511 a trigger
+    cannot bind it either, `INT-TRIGGERS-FILE-CONTRACT`); `PI_GLOBAL_ALLOW_EXTENSIONS=0` (forwarded ONLY to carry the operator's explicit
     opt-OUT — loading is the **absence** of the variable, on both sides of the mount, so an unset var and an
     explicit `true` emit nothing at all; `REQ-GLOBAL-PI-OVERLAY`); `PI_PACKAGES` (the `":"`-delimited ABSOLUTE
     CONTAINER paths of the operator-staged pi packages, forwarded whenever at least one package is staged
@@ -1450,7 +1451,8 @@ refactor apart.
   - **One credential fact is written down here rather than derived, in two suffixes.** (Issue #314 added a
     second hand-written-looking table, `PROVIDER_STEERING_VARS`, and it is not an exception to this: it is
     a literal list in the source only so that `triggers.mjs` can stay import-free, and it is derived from
-    the pinned artifacts by its own bolt in both directions. What follows is still the only fact this
+    the pinned artifacts by its own bolt in both directions; from issue #511 that derivation also covers
+    the SDKs' own dependencies one hop further and pi's own `PI_*` reads. What follows is still the only fact this
     project asserts about a credential that pi's own tables cannot supply.) Whether a variable is
     an OAuth/subscription token is a claim about a credential that must **not** be used, so it cannot come
     from a table of the credentials that work: pi's table says which variables it reads, never which of
@@ -3574,6 +3576,13 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `secret-profile-unknown`, `secret-profile-ambiguous`, `secret-name-reserved` and `secret-unresolved`, all
   with `budgetReserved: false`; a resolver that could not reach its manager is INFRASTRUCTURE and retries as
   `secret-resolver-unreachable`. `doctor` carries the load-time half.
+  **The load-time names are asked again pre-spend, of the job itself** (issue #511). A job does not always
+  come from a file this worker loaded: one queued before an upgrade widened the reserved set, a
+  job-scheduler template stored in Valkey, or a receiver older than the worker all carry `secrets` the
+  current set would refuse, and the container env would carry every such name. So the worker refuses a
+  job binding any name the loader reserves (the same set, imported) as `secret-name-reserved`, at the
+  call site before the secrets resolver is called, so no wiring of the resolver can skip it, with a
+  message that names the key and says the job was queued before the refusal applied.
 
   **`secret-name-reserved` reserves every variable pi reads for the job's provider, set on this host or
   not** (issue #309). The question is what a trigger may not NAME, which is a property of the provider,
@@ -3605,14 +3614,49 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   **The set is DERIVED and bolted in both directions** (`worker/src/provider-steering.mjs`,
   `worker/test/provider-steering.test.mjs`): the names are extracted from the pinned pi's `dist` and from
   every package pi imports a client from, with the package list read off pi's OWN import statements rather
-  than written here, so a pi bump that adds an SDK fails the bolt too. Four accessor spellings are matched
-  because the SDKs do not agree on one -- `getProviderEnvValue`, `readEnv`, `getEnv` and
-  `process.env["NAME"]`, the last of which is the only way `AZURE_OPENAI_ENDPOINT` is read.
+  than written here, so a pi bump that adds an SDK fails the bolt too. **Every name the scan finds is
+  reserved, with no judgement about which ones matter** (issue #511); the only subtractions are named
+  below and asserted. The scan is **two hops deep**: hop 1 is the packages pi-ai's dist imports, hop 2 is,
+  for each of those, the packages its sources import AND its `package.json` declares in `dependencies`
+  (so an optional peer such as `undici` under `openai`, which resolves only by an accident of layout, is
+  not followed). That is where google-auth-library, `@smithy/core` and the AWS credential chain are. It
+  reads **both copies** of pi-ai: the hoisted one and the one the runner dispatches through, nested under
+  pi-coding-agent with its own google-auth-library, and reserves the union. **Every occurrence is
+  counted, rather than a list of accessor spellings matched**, because a list kept missing the next
+  one. After comments are stripped, the bolt counts, in every scanned file, every `env` token (so
+  `process.env`, `ctx.env`, a parameter named `env`, `{ env: e } = process`), every `process["env"]`,
+  every use of an alias of one (`const v = env()`, `const e = process.env`), and every call of a helper.
+  Helpers are derived, not listed: any named function one of whose own parameters is the key of an
+  environment read (`resolveEnvConfigValue(name, env)`), so a new call of an existing helper is counted
+  like a read. Each occurrence either names a variable (a member, a key, a call, an `in` test, a
+  destructure, or the receiver handed to a selector beside its key; a key is a literal or a string
+  constant of the file or its package) or it is a site, and every file's sites are pinned WITH A COUNT.
+  A new occurrence anywhere therefore names something the equality sees or changes a count, and the
+  failure prints the entries to review. The comment stripper is checked against esbuild's parser on
+  every scanned file. An assignment (`process.env.PI_CODING_AGENT = "true"`) is a write, a site, not a
+  read. The
+  names are any identifier, lowercase included, and **matching stays EXACT**: google-auth-library reads
+  `google_application_credentials`, `gcloud_project` and `google_cloud_project` beside the uppercase forms,
+  so those twins are literal members, while a lowercase spelling no pinned source reads (`openai_base_url`)
+  stays bindable. Folding case would refuse names nothing reads.
+  **pi's own namespace is scanned too** (issue #511): every `PI_*` name (the prefix is pi's
+  `APP_NAME.toUpperCase()`) that pi-coding-agent's `dist` and the pi packages it declares read, pi-tui
+  included, since it runs in the same process. `dist/bundle/`, the vendored single-file build, is not the
+  code the runner loads and is skipped; a test asserts pi's package entry is outside it. pi builds the
+  agent and session directory keys at runtime from `APP_NAME`, so the bolt imports pi's `config.js` to
+  evaluate them, and asserts that config.js is the only module it imports for that. Two sets are
+  subtracted from the namespace: the names the worker writes (`CONTAINER_ENV_NAMES`, reserved already)
+  and the ones the runner assigns before pi runs, derived from `image/runner/src` (`PI_OFFLINE`,
+  `PI_TELEMETRY` at the pin), each asserted to still be read by pi. `PI_CODING_AGENT_DIR` is the reason:
+  it points the job's pi at another agent directory, and with it another `auth.json`. Names pi reads
+  outside its namespace (the terminal, the OS, the editor, the proxy variables, the `llama.cpp`
+  extension's `LLAMA_BASE_URL`) are found and left out, and the bolt pins that list, so a new one is a
+  decision rather than a silent skip.
   **The set deliberately EXCLUDES a provider's KEY variables**, and that is what keeps
   `REQ-TRIGGER-SECRETS`' documented bound true: an `anthropic` job may still bind `OPENAI_API_KEY` for a
   flow that talks to OpenAI, refused pre-spend only for the job's OWN provider. Including them would have
-  broken that bound arbitrarily, because only five of pi's thirty-eight key variables (0.99.1 pin; four of
-  thirty-one at 0.80.7) happen to appear as literals in a scanned artifact -- `OPENAI_API_KEY` would refuse
+  broken that bound arbitrarily, because only six of pi's thirty-eight key variables (0.99.1 pin, from issue #511's scan; four of
+  thirty-one at 0.80.7) happen to be read by name in a scanned artifact -- `OPENAI_API_KEY` would refuse
   while `GROQ_API_KEY` stayed bindable, for a reason no operator could predict. The bolt subtracts them by
   asking `providerKeyCandidates`, so the two gates stay one derivation rather than two lists. **One key
   variable is kept anyway, by name** (`RETAINED_KEY_VARIABLES`, issue #509): `ANTHROPIC_AUTH_TOKEN` was in
@@ -3621,23 +3665,36 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   not widen what a trigger may bind without an operator deciding it, so it stays refused at load; a test
   asserts it is still both a pi key variable and read by the SDK. The AWS credential variables are NOT an exception to
   this: pi's key table has no `amazon-bedrock` entry at all, so nothing else reserves them.
-  **Nine names cannot be reached by the scan and are listed by hand, which is stated rather than glossed.**
-  The AWS four are read inside `@smithy/core`, one dependency hop past the scan's boundary, two of them
-  through a key built at runtime; they matter because pi stops pinning the Bedrock endpoint as soon as
-  `AWS_REGION` or `AWS_PROFILE` is present, which is the ordinary way to configure Bedrock, and
-  `AWS_SHARED_CREDENTIALS_FILE` replaces the credential the request is signed with rather than only its
-  destination. The rest are the proxy spellings pi's own `getProxyEnv` lowercases and uppercases, of which
-  `EGRESS_ENV_VARS` holds only the uppercase three. A test asserts all nine are still unreachable, so the
-  day one becomes findable it moves into the derivation.
-  **Three limits are on the record rather than implied.** The scan is ONE dependency hop deep, so the rest
-  of the AWS and Google SDK closure (`AWS_EC2_METADATA_SERVICE_ENDPOINT`, `AWS_ROLE_ARN`,
-  `GCE_METADATA_HOST` and some forty more) is not covered; recursing it would reserve most of two SDKs'
-  surface and take a large bite out of what an operator may legitimately bind, so the boundary is a choice.
+  **Four names cannot be reached by the scan and are listed by hand, which is stated rather than glossed.**
+  Each is read through a key built at runtime, and the bolt pins the key that builds it.
+  `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` is `@smithy/core`'s `AWS_ENDPOINT_URL_<SERVICE>`; it matters because pi
+  stops pinning the Bedrock endpoint as soon as `AWS_REGION` or `AWS_PROFILE` is present, which is the
+  ordinary way to configure Bedrock. `http_proxy`, `https_proxy` and `ALL_PROXY` come from pi's own
+  `getProxyEnv`, which builds `${protocol}_proxy` and asks for the lowercase and uppercase forms of each
+  key; `EGRESS_ENV_VARS` holds the uppercase `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`. `AWS_ENDPOINT_URL`,
+  `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, `all_proxy` and `no_proxy` were on this list until
+  issue #511 and are now derived. A test asserts all four are still unreachable, so the day one becomes
+  findable it moves into the derivation.
+  **The limits are on the record rather than implied.** The scan does not follow hop 3, and these are read
+  there and NOT reserved: in gcp-metadata `GCE_METADATA_HOST`, `GCE_METADATA_IP`,
+  `METADATA_SERVER_DETECTION` and `K_SERVICE`; in the AWS credential providers `AWS_ROLE_ARN`,
+  `AWS_ROLE_SESSION_NAME`, `AWS_CONTAINER_AUTHORIZATION_TOKEN` and its `_FILE` form (useless without the
+  reserved `AWS_CONTAINER_CREDENTIALS_FULL_URI`), `AWS_ACCOUNT_ID`, `AWS_CREDENTIAL_SCOPE` and
+  `AWS_CREDENTIAL_EXPIRATION`. The metadata host is the sharpest: it moves where google-auth-library asks
+  for a token when no other credential is configured. pi-coding-agent's own third-party dependencies
+  (undici, jiti, yaml, semver, cross-spawn, chalk) are not scanned; at the pin they read the proxy
+  variables and tooling switches (`NODE_DEBUG`, `FORCE_COLOR`, jiti's Babel flags). The `llama.cpp`
+  extension's `LLAMA_BASE_URL` is found and left outside pi's namespace; the worker cannot dispatch to
+  that provider, and a test asserts it still cannot.
+  The count rule starts from an `env` token, so a form with none is not seen: `process["e" + "nv"]`,
+  `const E = "env"; process[E]`, `{ ["env"]: e } = process`, `Reflect.get(process, "env")`,
+  `require("process")["env"]`. None occurs in the pinned sources.
   `NODE_OPTIONS`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE` and `NODE_TLS_REJECT_UNAUTHORIZED` are excluded as
   properties of the RUNTIME rather than of a provider, and they predate this gate. So are `HOME`, `PATH`,
   `APPDATA`, `USERPROFILE` and `XDG_CONFIG_HOME`, which the scan reaches from the 0.99.1 pin on: the
   Anthropic SDK reads the four directory variables only to find its default config directory, and `PATH`
-  inside its agent toolset, which pi does not use. The bolt subtracts them by name and asserts each is
+  inside its agent toolset, which pi does not use. `HOMEDRIVE` and `HOMEPATH` join them from issue #511:
+  `@smithy/core` reads them in the same home-directory helper. The bolt subtracts them by name and asserts each is
   still found, so a stale subtraction fails; `HOME` is reserved anyway, because the worker writes it
   (issue #341). The Anthropic-specific switch for the same directory, `ANTHROPIC_CONFIG_DIR`, IS in the set. And a bound on the whole
   family: a trigger author picks a NAME and a vault REFERENCE, never a value, so every one of these needs
@@ -5713,5 +5770,6 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-30 | Issue #509, the pi 0.80.7 -> 0.99.1 bump, one row for the runner, worker and admin halves. **`INT-SDK-SESSION-OPTIONS` AMENDED**: the model/auth wiring is one `ModelRuntime` (OQ-005's migration shipped): created after enforceOfflineMode and enforceTelemetryOff with a discarding models store and `allowModelNetwork: false`, `getModel`, `hasConfiguredAuth(provider)`, handed to createAgentSession as `modelRuntime`; the preamble and the pinned-artifact evidence are re-verified at 0.99.1, the 0.80.7 evidence kept as the record; the option set is re-pinned (modelRuntime replaces authStorage and modelRegistry) and the tool factories are eight (`powershell`). Trap (g)'s invariant now rests on the injected ModelRuntime class plus an IDENTITY check of the compat copy against pi's VIRTUAL_MODULES (the ModelRegistry mutation probe cannot work: the registry no longer writes to pi-ai's registry). Trap (h) REWRITTEN: the process-wide choke point moved to ModelRuntime.prototype, the api-provider registry is kept only for legacy extension calls, and the two halves meet on composed providers, deduplicated by an AsyncLocalStorage (measured). New trap (m): cacheWarming off, maxAgentDelayMs pinned, install telemetry off with PI_TELEMETRY forced to "0", a discarding models store, no builtin: extension loaded. Trap (f) re-worded for `SettingsManager.inMemory`, which now accepts an options argument the runner does not pass (trust default unchanged); trap (l) re-checked at 0.99.1 (open still throws on an unparseable file, measured; the session-dir variable is read only by the CLI's main.js). Traps (a) to (e), (i) to (k) UNCHANGED, checked against 0.99.1 (loader tests green). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: three new rows, all under existing codes: pi's unresumable retry after a tool ran (prompt() rejects while a retry is in flight) is `2` / `retry-unresumable` instead of an unclassified `1` that the queue would re-run on a fresh budget (measured by the loopback test); `stopReason: "deferred"` is `2` / `deferred`; `"pending"` is `1` / `pending`. StopReason is seven values at the pin and the runner's list is pinned to the union. The Bedrock refusal reads the exception NAME `UnrecognizedClientException: ` (pi-ai now carries AWS's message and no status); AccessDeniedException and ExpiredTokenException stay residual (no real-AWS measurement of the transient forms). The KnownApi union is the same ten families. Every other row UNCHANGED, checked by the loopback table at 0.99.1. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED in wording only**: a non-zero `otherTotal` is spend under a session id other than the root's, since a compaction or branch summary now lands there; the `tokens` keys, the `usage` ledger (its `piAi` now stamps 0.99.1), `context` and `session` UNCHANGED, checked. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: anthropic's key list is now `[ANTHROPIC_AUTH_TOKEN, ANTHROPIC_OAUTH_TOKEN, ANTHROPIC_API_KEY]` and pi sends the first as `Authorization: Bearer`; `provider-key.mjs` gains the `/_AUTH_TOKEN$/` suffix beside `/_OAUTH_TOKEN$/`, so an auth.json API key is always written under `ANTHROPIC_API_KEY`, and a host bearer token is forwarded with a doctor warning exactly as a host OAuth token is; radius's variable is `RADIUS_API_KEY` and the catalog is now a superset of the key table, so the candidates-first order is defence in depth; the getProviderEnvValue order is re-checked at 0.99.1. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: the excludable set is the eight built-ins; the steering set is re-derived (twenty-one names in, three out), `ANTHROPIC_AUTH_TOKEN` is retained by name, the OS directory variables are subtracted as runtime properties, the custom-header variables are pinned as credential substitution, and the no-baseUrl control is re-derived. **`INT-SUBSCRIPTIONS-FILE-CONTRACT` and `INT-PRICING-EXPORT-CONTRACT` AMENDED**: kimi-coding, zai and zai-coding-cn carry implied prices (all three were all-zero at 0.80.7), `isZeroRated` is no longer a subscription signal, and the pricing pins moved to openai/gpt-5.4 and the qwen-token-plan tables. UNCHANGED, checked: the auth.json refusals (OAuth, command/variable-reference, non-string, companion env), the closed container env map. Doctor also names the auth.json key a host token displaces (the worker reads the environment first, pi on the host reads the stored key first), and warns on an `sk-ant-oat` value in the API-key variable. |
 | 2026-09-30 | Issue #508 (plain HTTP reached every port of a listed host). **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the rules bullet, the object table and the Acceptance: exactly two shapes pass, both to a listed host, a `CONNECT` to 443 or a plain request to 80, by `acl Safe_ports port 80` and `http_access deny !Safe_ports !CONNECT` directly before `http_access allow allowed`, which resolves nothing and never matches a `CONNECT`; a plain forward `GET https://` is now refused; the canary probe slugs are `provider`, `unlisted` and `plainhttp`; a job reaches a forge only over `https://` on 443 (git ignores `HTTP_PROXY` for `http://`), and `doctor` warns on an armed policy with a triggered forge's `GITLAB_URL` or `FORGEJO_URL` that is anything else; the Acceptance gains a plain request to a listed host on any port but 80 refused by the proxy. **`INT-LIVE-PROBE-CONTRACT` AMENDED**, the `egress` bullet and the Acceptance: three probes, each `readBack` carrying `probe` and each probe required exactly once by that name, the third a raw `node:http` forward request counted as refused only on squid's 403 with `X-Squid-Error` `ERR_ACCESS_DENIED`. |
 | 2026-09-30 | Issue #503 (declared model endpoints), the first change: the file, its derivation and its squid rules, with nothing enforced yet. Added **`INT-MODEL-ENDPOINTS-FILE-CONTRACT`**: `model-endpoints.json` in the deployment folder (`PI_MODEL_ENDPOINTS_FILE` overrides; a missing default declares none, a missing named file or an empty value is refused), scaffolded empty by `init` beside `model-endpoints.conf`, the empty render; the schema and its refusals (unknown keys refused, not dropped, because this file decides proxy rules); the derivation (a model's own baseUrl beats its provider's, host AND port, main model only until #502, a named residual); the render (CONNECT rules only, the host ACL first, `dstdomain -n` for IP literals too because `dst <ip>` is a DNS channel, IPv6 in brackets, both measured on squid 6.13 on 2026-09-30; the loopback deny is `to_host_local` minus the link-local ranges, because Podman 5.3+ reaches the host at 169.254.1.2); one trailing dot on a baseUrl host is dropped, since squid tunnels it to the same server; a `$VAR` baseUrl matches nothing, a named residual; the parts of #503 still pending are listed in Status; not settable by a model-callable tool or the settings overlay. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, the env bullet: `PI_DISPATCH_KEYLESS` is reserved (not yet emitted), so `run.secrets` cannot bind it and `PI_FORWARD_ENV` refuses it at load. **`INT-EGRESS-POLICY-CONTRACT` UNCHANGED, checked**: `deploy/egress-proxy.conf`, its mounts and the proxy argv are untouched; the include line lands in a later change. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: no overlay key reaches the endpoints. **Code evidence**: worker/src/model-endpoints.mjs -> parseModelEndpoints, loadModelEndpoints, endpointsForModel, renderEndpointsInclude; worker/src/init.mjs -> runInit; worker/src/reserved-env.mjs -> KEYLESS_ENV_NAME; worker/src/config.mjs -> forwardEnvList; worker/src/doctor.mjs -> BOOT_FILES. |
+| 2026-09-30 | Issue #511 (the steering scan misses lowercase twins, a second SDK hop and pi's own reads), folding its PR #513 gate rounds 1 and 2. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the steering family: every name the derivation finds is reserved, matched exactly; the scan reads both copies of pi-ai (hoisted, and the runner's copy nested under pi-coding-agent), goes two hops deep through each SDK's declared dependencies (google-auth-library, `@smithy/core`, the AWS credential chain, `debug`, `ws`), and, after stripping comments (checked against esbuild's parser), COUNTS every occurrence that can reach the environment (every `env` token, every `process["env"]`, every use of an alias of one such as `const v = env()`, every call of a helper, the helpers derived from their own parameter reads) instead of matching a list of accessor spellings: an occurrence names a variable (members, keys, calls, `in`, destructuring, selector arguments, keys resolved through string constants) or is a site, and every file's sites are pinned with a count, so a new occurrence anywhere fails the bolt; forms with no `env` token (`Reflect.get(process, "env")` and the like) are stated as a limit, none occurring at the pin. It adds pi's own `PI_*` reads from pi-coding-agent's dist (not `dist/bundle/`) and the pi packages it declares, minus `CONTAINER_ENV_NAMES` and the runner's own writes (`PI_OFFLINE`, `PI_TELEMETRY`), and pins the names pi reads outside that namespace. The lowercase twins google-auth-library reads are literal members. The hand-written residuals go from nine to four (`AWS_ENDPOINT_URL`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, `all_proxy`, `no_proxy` are now derived); `HOMEDRIVE` and `HOMEPATH` join the runtime subtractions; the limits are restated (hop 3 by name, pi-coding-agent's third-party dependencies, the `llama.cpp` extension's reads found and left outside). The pre-spend clause gains the re-check: a queued job binding a load-time reserved name is refused as `secret-name-reserved` at the call site, before the secrets resolver is called. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, two places: the stale claim that the container gets `PI_CODING_AGENT_DIR` is corrected (the worker never sets it; pi falls back to `$HOME/.pi/agent`, and a trigger cannot bind it now), and the note on `PROVIDER_STEERING_VARS` says its derivation now covers the second hop and pi's own reads. The closed container env map itself UNCHANGED, checked. |
 | 2026-10-02 | Issue #503, part 3. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, the `host` bullet: `10.0.2.2` is refused too. It was always in the rendered `_local` deny, so a declaration of it could never answer; the parser and the rule now read one set, `PROXY_LOCAL_ADDRESSES` in `worker/src/backends.mjs`, from which `LOCAL_ADDRESSES` is built. Every other refusal and message is unchanged. **Code evidence**: worker/src/backends.mjs -> PROXY_LOCAL_ADDRESSES, isProxyLocalHost; worker/src/model-endpoints.mjs -> LOCAL_ADDRESSES; worker/test/model-endpoints.test.mjs. |
 | 2026-09-30 | Issue #503 (declared model endpoints), the second change: the proxy includes them. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, a new bullet beside the rules one: `deploy/egress-proxy.conf` (and its mirror) carries `include /etc/pi-dispatch/model-endpoints.conf` after `http_access deny allowed to_host_local` and before `http_access deny CONNECT !SSL_ports`, because pi tunnels every provider call and first match wins; the include is mounted read-only from the deployment folder by the compose service, `up`'s argv, the Quadlet unit (a third placeholder, the folder's own file, never a copy), the hand-started Podman recipe and `podman-conformance.yml`; `pi-dispatch egress render` validates in memory, then writes the include IN PLACE (no `O_CREAT`, `O_NOFOLLOW`, truncate, fsync) and refuses a symlink, a directory or a missing file, because a renamed file is invisible to a running single-file bind mount and `squid -k reconfigure` then reloads the old rules silently (measured on Docker 29.1.3 and Podman 4.9.3 and 5.8.1, 2026-09-30); the verb prints the reload (`docker exec` or `podman exec` of `squid -k reconfigure`) and never runs it; the proxy gets `host.docker.internal:host-gateway` on Docker (compose and `up`), nothing on rootless Podman; the governing rule (PR #517's review): the folder's rules include `model-endpoints.conf` only together with a proxy that mounts it, so a two-mount proxy is drift only when the folder's rules include the file, `up` refreshes the rules and replaces such a proxy as one step (declined or blocked, nothing written; a failed replace puts the old rules back), a replaced proxy is removed with `rm -f -v`, endpoints declared under older rules are named by `up`, `doctor` and `egress render` alike as the rules refresh's to fix, and a third bind must be the folder's file; the render empties the include on a failed write, refuses a hard-linked one, and compares `PI_MODEL_ENDPOINTS_FILE` as resolved paths. The Acceptance gains the endpoint case. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, Status: the include, its mounts, the render verb and the host route on Docker are landed; the Podman route table, the slot leases, the keyless gate and the doctor probes stay pending. Shape: a host with a port separator and an empty port (`a.lan:`) is refused as carrying a port, not as an IPv6 address with an IPv4 tail (PR #515's review). **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no job flag, mount or variable moves; the host entry is the proxy's only. **Code evidence**: deploy/egress-proxy.conf; deploy/docker-compose.yml; deploy/pi-dispatch-egress-proxy.container; worker/src/egress-cli.mjs -> runEgress, writeInPlace, proxyIncludeNeeds; worker/src/egress-proxy-state.mjs -> shippedProxyDrift, rulesIncludeEndpoints; worker/src/up.mjs -> EGRESS_RUN_ARGS; worker/src/podman-stack.mjs -> MODEL_ENDPOINTS_PLACEHOLDER, planStack; worker/src/service.mjs -> TEMPLATE_PINS, stackRefusal; worker/src/doctor.mjs -> egressChecks. |

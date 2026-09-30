@@ -5,6 +5,7 @@ import { checkTokenCap, recordTokenSpend, releaseBudget, reserveBudget } from ".
 import { configError } from "./config.mjs";
 import { scopeKeyPrefix } from "./scoped-limits.mjs";
 import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
+import { RESERVED_ENV_NAMES } from "./triggers.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
 import { RUNNER_POLICY_REASONS } from "./run-history.mjs";
 import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
@@ -732,7 +733,16 @@ export async function runJob(job, deps) {
 		//
 		// Guarded by `secretsArmed` at the CALL SITE, not inside the resolver: an unflagged job must not reach
 		// it under ANY wiring, and a guard that lives in the default is a guard an injected resolver skips.
-		const resolved = secretsArmed(job) ? await resolveSecrets(job) : { ok: true, secrets: {} };
+		//
+		// The load-time reserved names are asked again HERE, of the job itself, for the same reason (issue
+		// #511). parseTriggers refuses them when the file loads, but a job does not always come from a file
+		// this worker loaded: one queued before an upgrade widened the set, a cron job-scheduler template
+		// stored in Valkey (schedules.mjs keeps `run.secrets` in it), or a receiver older than the worker all
+		// carry `secrets` the current set would refuse, and buildContainerEnv would write every one of them.
+		// The same set the loader uses, imported, so the two cannot drift, and checked before the resolver so
+		// no wiring of it can skip the check.
+		const loadReserved = secretsArmed(job) ? Object.keys(job.secrets ?? {}).find((name) => RESERVED_ENV_NAMES.has(name)) : undefined;
+		const resolved = loadReserved !== undefined ? { reserved: loadReserved, atLoad: true } : secretsArmed(job) ? await resolveSecrets(job) : { ok: true, secrets: {} };
 		if (resolved.profileUnknown) {
 			await comment(job, "Refused: this trigger set `run.secrets`, and the resolver profile it names is not usable on this worker host. No profile of that name is declared, or its resolver is absent or not executable. The job would have started with those variables unset, and an agent that gets a 401 writes a plausible report and exits 0. Run `pi-dispatch doctor` on the worker to see which profiles it has. Not run.");
 			// The operator's own profile LABEL, and never a path, a reference, or a byte the resolver printed.
@@ -771,7 +781,14 @@ export async function runJob(job, deps) {
 			//     (apiKeyVariable skips both), so a trigger binding one lands beside the operator's key and
 			//     outranks it in pi's own precedence.
 			// The old message asserted the first for both, which is exactly backwards for the second.
-			await comment(job, `Refused: this trigger's \`run.secrets\` binds \`${resolved.reserved}\`, which is a variable this deployment already uses for the job's own credentials. Whichever of the two values reached the container, one of them would be silently ignored. Rename it in the triggers file. Not run.`);
+			// A name the triggers file itself would refuse at load (issue #511) reaches here only from a job
+			// queued before that refusal, a stored cron scheduler template, or an older receiver, so it says that.
+			await comment(
+				job,
+				resolved.atLoad
+					? `Refused: this job's \`run.secrets\` binds \`${resolved.reserved}\`, a name the triggers file refuses at load because this deployment writes it or pi reads it to configure a provider or itself. The job was queued before that refusal applied, by a stored cron schedule, or by an older receiver. Rename it in the triggers file. Not run.`
+					: `Refused: this trigger's \`run.secrets\` binds \`${resolved.reserved}\`, which is a variable this deployment already uses for the job's own credentials. Whichever of the two values reached the container, one of them would be silently ignored. Rename it in the triggers file. Not run.`,
+			);
 			// The variable NAME only. It is the operator's own choice of name, not payload, and naming it is what
 			// makes the refusal actionable -- but the REFERENCE behind it never appears.
 			log("refused_secret_name_reserved", { kind: job.kind ?? null, name: resolved.reserved });

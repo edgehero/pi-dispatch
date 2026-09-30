@@ -3724,10 +3724,13 @@ test("doctor: a trigger binding a variable pi reads for the provider FAILS at se
 	// machine doctor happened to run on.
 	//
 	// The fixture uses HF_TOKEN rather than GEMINI_API_KEY since issue #314, and the reason is worth
-	// keeping: GEMINI_API_KEY is now in PROVIDER_STEERING_VARS, so a file binding it refuses at LOAD and
-	// never reaches this check at all. 27 of the 31 provider key variables are NOT in that set -- it is
-	// derived from what pi and its SDKs READ, while the key table is data -- so this check still has work
-	// to do, and a fixture that is double-covered would have hidden that either way.
+	// keeping: a name in PROVIDER_STEERING_VARS refuses at LOAD and never reaches this check at all.
+	// An early draft of #314 had GEMINI_API_KEY in that set; the set as landed subtracts every key
+	// variable, so it is not, and either name would do today. HF_TOKEN stays, and
+	// provider-steering.test.mjs pins it outside the set. 37 of the 38 provider key variables (0.99.1 pin)
+	// are NOT in that set (the one inside is the retained ANTHROPIC_AUTH_TOKEN), and 32 are not even read by
+	// name in a scanned SDK source, so this check still has work to do, and a fixture that is
+	// double-covered would have hidden that either way.
 	const env = {
 		PI_PROVIDER: "huggingface",
 		HF_TOKEN: "hf-x",

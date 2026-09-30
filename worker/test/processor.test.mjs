@@ -1506,6 +1506,40 @@ test("a job whose profile cannot be resolved refuses BEFORE the mint, the clone 
 	assert.equal(d.redis.incrCalls, 0, "must not reserve a budget slot");
 });
 
+test("a queued job binding a load-time reserved name refuses pre-spend, before ANY resolver runs (#511)", async () => {
+	// parseTriggers refuses these at load, but a job queued before an upgrade widened the set, a cron
+	// scheduler template stored in Valkey, or an older receiver hands the worker `secrets` that never passed
+	// the current validator. The check is at the call site, so an injected resolver cannot skip it: this one
+	// fails the test if it is ever reached.
+	for (const name of ["google_application_credentials", "PI_CODING_AGENT_DIR", "AZURE_OPENAI_BASE_URL", "GITHUB_TOKEN", "PI_OFFLINE"]) {
+		let posted = "";
+		const { deps: d, calls } = deps({
+			resolveSecrets: async () => assert.fail("a load-time reserved name must refuse before the resolver is called"),
+			comment: async (_j, t) => {
+				posted = t;
+			},
+		});
+		const r = await runJob({ ...ghJob, secrets: { STRIPE_KEY: "op://ci/s/k", [name]: "op://Engineering-Prod/x/y" } }, d);
+		assert.equal(r.reason, "secret-name-reserved", name);
+		assert.equal(r.budgetReserved, false);
+		assert.ok(!calls.includes("run-container"), "must not spend");
+		assert.ok(!calls.some((c) => c.startsWith("mint:")), "must not mint");
+		assert.ok(posted.includes(name), "the key is named");
+		assert.match(posted, /refuses at load/);
+		assert.equal(/op:\/\//.test(posted), false, "a reference must never be published");
+	}
+	// And the bound: an operator's own name, and a lowercase spelling nothing reads, reach the resolver.
+	let reached = false;
+	const { deps: d } = deps({
+		resolveSecrets: async () => {
+			reached = true;
+			return { profileUnknown: "prod" };
+		},
+	});
+	await runJob({ ...ghJob, secrets: { STRIPE_KEY: "op://ci/s/k", openai_base_url: "op://ci/x/y" } }, d);
+	assert.equal(reached, true);
+});
+
 test("a reserved credential variable refuses pre-spend, names the variable, and never the reference", async () => {
 	// The `resolved.reserved` branch had NO test at all before issue #309, which is how the gate behind it
 	// could reserve nothing on every auth.json deployment and stay green. Three properties, one path: the
