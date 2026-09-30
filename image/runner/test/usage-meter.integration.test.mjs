@@ -5,6 +5,7 @@ import { test } from "node:test";
 // Both of these are pure -- no static pi import anywhere in their module graph -- so they load
 // unconditionally and the gate below applies only to pi itself.
 import { attachTokenBudget } from "../src/token-budget.mjs";
+import { createJobModelRuntime } from "../src/model-runtime.mjs";
 import { createUsageMeter, installProcessUsageMeter } from "../src/usage-meter.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -14,13 +15,21 @@ import { tempDir } from "./helpers/temp-dir.mjs";
  * usage-meter.test.mjs verifies the accumulator with everything pi-shaped injected. That is the right
  * shape for the arithmetic and the wrong shape for the CLAIM this commit rests on, which is about the
  * real SDK: that two AgentSessions alive in one process are invisible to each other's event bus, and
- * that metering at pi-ai's module-level api-provider registry sees both. A fake registry cannot
- * falsify either half -- only a real `createAgentSession` can.
+ * that metering at ModelRuntime.prototype (the 0.99.1 choke point, issue #509) sees both. A fake class
+ * cannot falsify either half -- only a real `createAgentSession` can. The two sessions run on two
+ * SEPARATE ModelRuntime instances, as a subagent extension that builds its own would, because "the
+ * prototype covers every instance" is the claim the redesign rests on.
+ *
+ * Every install here must report ok:true AND count what reached the provider: a meter degraded to
+ * ok:false would make run-job fall back to the per-session bus meter, and a test that tolerated that
+ * would pass exactly when the process-wide meter had silently died, which is what happened at the pin
+ * bump before this rewrite (`usage_meter_unavailable`).
  *
  * There is NO API credential here and none is needed. The fixture declares a CUSTOM provider whose
- * api id is served by a `streamSimple` we register ourselves, so the whole run is offline: nothing is
- * dialled, and the baseUrl points at a port that is not listening precisely so a regression that DOES
- * try to dial fails loudly instead of quietly reaching the internet.
+ * api id is served by a `streamSimple` we register ourselves (the extension-provider path,
+ * ModelRuntime.registerProvider), so the whole run is offline: nothing is dialled, and the baseUrl
+ * points at a port that is not listening precisely so a regression that DOES try to dial fails loudly
+ * instead of quietly reaching the internet.
  *
  * Gated exactly like loader.test.mjs: a skip is NOT a pass. CI sets PI_DISPATCH_REQUIRE_LOADER_TESTS=1,
  * which turns a skip into a hard failure, because "the proof did not run" must never read as green.
@@ -67,12 +76,11 @@ const FAKE_KEY = "pi-dispatch-fake-key-sentinel";
 /**
  * A temp agent root whose models.json declares the custom provider.
  *
- * `api` is parameterised because installProcessUsageMeter wraps EVERY api id registered at arm() time
- * and never unwraps (`uninstall()` only clears the re-arm interval, by design -- unregistering would
- * call refresh() -> resetApiProviders() and wipe every wrapper). Giving each test its own api id is
- * what keeps one test's meter out of the next test's dispatch chain.
+ * `api` is parameterised so each test's provider is its own: the compat half wraps every api id in the
+ * registry at arm() time and never unwraps (re-registering the builtin would need a resetApiProviders()),
+ * and a per-test api id keeps one test's registrations out of the next test's way.
  */
-function fixture(api) {
+async function fixture(api) {
 	const root = tempDir("pi-dispatch-meter-");
 	const modelsPath = join(root, "models.json");
 	writeFileSync(
@@ -107,24 +115,25 @@ function fixture(api) {
 		)}\n`,
 	);
 
-	const authStorage = pi.AuthStorage.create(join(root, "auth.json"));
-	const modelRegistry = pi.ModelRegistry.create(authStorage, modelsPath);
-	const model = modelRegistry.find(PROVIDER, MODEL_ID);
+	// Built the way run-job.mjs builds it. Each call makes a NEW runtime on the same files.
+	const runtime = () => createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir: root, modelsPath });
+	const modelRuntime = await runtime();
+	const model = modelRuntime.getModel(PROVIDER, MODEL_ID);
 	assert.ok(model, "the fixture's custom model must resolve out of models.json");
-	assert.ok(modelRegistry.hasConfiguredAuth(model), "the fixture's literal apiKey must count as configured auth");
-	return { root, authStorage, modelRegistry, model, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+	assert.ok(modelRuntime.hasConfiguredAuth(model.provider), "the fixture's literal apiKey must count as configured auth");
+	return { root, modelRuntime, runtime, model, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 /**
- * Register the provider that serves the fixture's api id.
+ * Register the provider that serves the fixture's api id, on one runtime.
  *
- * Registered through `modelRegistry.registerProvider` (not compat's registerApiProvider) for the same
- * reason the meter does: refresh() re-applies stored provider configs, so this survives a reload the
- * way a real extension's provider would. `calls` records what actually reached the provider, which is
- * how the hard-stop test proves a capped call never got there.
+ * Through `ModelRuntime.registerProvider`, which is exactly where an extension's `pi.registerProvider`
+ * lands at 0.99.1 (agent-session.js, `this._modelRuntime.registerProvider`): the composed provider then
+ * calls this streamSimple for the api (provider-composer.js). `calls` records what actually reached the
+ * provider, which is how the hard-stop test proves a capped call never got there.
  */
-function registerFakeProvider({ modelRegistry, compat, api, calls }) {
-	modelRegistry.registerProvider(PROVIDER, {
+function registerFakeProvider({ modelRuntime, compat, api, calls }) {
+	modelRuntime.registerProvider(PROVIDER, {
 		api,
 		streamSimple(model, _context, options) {
 			calls.push({ sessionId: options?.sessionId, apiKey: options?.apiKey });
@@ -148,6 +157,10 @@ function registerFakeProvider({ modelRegistry, compat, api, calls }) {
 			return stream;
 		},
 	});
+	// registerProvider starts a refresh it does not await (model-runtime.js, `void this.refresh(...)`), and that
+	// refresh writes auth.json into the fixture root. Settle it here so it can neither race the prompt nor
+	// recreate the root after cleanup (a leaked temp dir the suite's TMPDIR check would name).
+	return modelRuntime.refresh({ allowNetwork: false });
 }
 
 /**
@@ -171,7 +184,7 @@ function registerFakeProvider({ modelRegistry, compat, api, calls }) {
  * is what makes `calls` mean what the assertions say it means. The loader posture is pinned where it IS
  * the subject -- image/runner/test/loader.test.mjs, which builds through buildResourceLoader itself.
  */
-async function openSession({ fx, sessionManager }) {
+async function openSession({ fx, modelRuntime, sessionManager }) {
 	const settingsManager = pi.SettingsManager.inMemory({});
 	const resourceLoader = new pi.DefaultResourceLoader({
 		cwd: fx.root,
@@ -185,14 +198,13 @@ async function openSession({ fx, sessionManager }) {
 	const { session } = await pi.createAgentSession({
 		cwd: fx.root,
 		agentDir: pi.getAgentDir(),
-		authStorage: fx.authStorage,
-		modelRegistry: fx.modelRegistry,
+		modelRuntime,
 		model: fx.model,
 		settingsManager,
 		sessionManager,
 		resourceLoader,
 		// "all", not `true`: CreateAgentSessionOptions.noTools is the union "all" | "builtin" at the
-		// pin. No tools at all keeps every prompt to exactly one provider call, so `calls` counts what
+		// 0.99.1 pin, as at 0.80.7. No tools at all keeps every prompt to exactly one provider call, so `calls` counts what
 		// it claims to count.
 		noTools: "all",
 	});
@@ -209,7 +221,7 @@ test("two concurrent sessions: the process-wide meter sees both, the session bus
 	// tells you the per-session meter is no longer blind -- rather than leaving usage-meter.mjs in place
 	// as unexplained ballast.
 	const API = "pi-dispatch-fake-api-concurrent";
-	const fx = fixture(API);
+	const fx = await fixture(API);
 	const sessions = [];
 	let installed;
 	try {
@@ -220,17 +232,23 @@ test("two concurrent sessions: the process-wide meter sees both, the session bus
 		assert.notEqual(rootSessionId, otherManager.getSessionId(), "the two sessions must have distinct ids");
 
 		const meter = createUsageMeter({ maxTokens: null, rootSessionId });
-		installed = await installProcessUsageMeter({ modelRegistry: fx.modelRegistry, meter, log: () => {} });
-		assert.equal(installed.ok, true, "the meter must find the pi-ai copy pi actually mutates");
+		const logged = [];
+		installed = await installProcessUsageMeter({ ModelRuntime: pi.ModelRuntime, runtime: fx.modelRuntime, meter, log: (event, fields) => logged.push({ event, fields }) });
+		assert.equal(installed.ok, true, `the runtime half must install at the pin; logged ${JSON.stringify(logged)}`);
+		// Both halves healthy at the pin: the compat copy proven by identity, and the brake present, so a
+		// degraded install cannot pass here while reporting itself fine.
+		assert.equal(installed.tag, "nested", `the compat half must accept pi's own copy; logged ${JSON.stringify(logged)}`);
+		assert.equal(logged[0]?.fields?.compat, "nested");
 
+		// The OTHER session's runtime is built AFTER the install, as a subagent extension's would be: the
+		// prototype wrapper must cover it without any re-arm.
+		const otherRuntime = await fx.runtime();
 		const calls = [];
-		registerFakeProvider({ modelRegistry: fx.modelRegistry, compat: installed.module, api: API, calls });
-		// The re-arm run-job.mjs performs after createAgentSession: our api id did not exist when the
-		// meter installed, so without this the fake provider is unwrapped and nothing is counted.
-		installed.arm();
+		await registerFakeProvider({ modelRuntime: fx.modelRuntime, compat: installed.module, api: API, calls });
+		await registerFakeProvider({ modelRuntime: otherRuntime, compat: installed.module, api: API, calls });
 
-		const rootSession = await openSession({ fx, sessionManager: rootManager });
-		const otherSession = await openSession({ fx, sessionManager: otherManager });
+		const rootSession = await openSession({ fx, modelRuntime: fx.modelRuntime, sessionManager: rootManager });
+		const otherSession = await openSession({ fx, modelRuntime: otherRuntime, sessionManager: otherManager });
 		sessions.push(rootSession, otherSession);
 
 		// THE CONTROL: the OLD mechanism, attached to the root session exactly as run-job.mjs used to
@@ -268,7 +286,7 @@ test("two concurrent sessions: the process-wide meter sees both, the session bus
 
 		// The per-model ledger, driven through the REAL dispatch chain (issue #53): both sessions' calls
 		// must land on the ONE (provider, model) pair the fixture declares -- read off the Model object
-		// compat dispatched on, not off the settled message -- with the cache split intact that the flat
+		// the runtime dispatched on, not off the settled message -- with the cache split intact that the flat
 		// totals above collapse. And `piAi` must carry a real version, because in THIS test the installer
 		// read it from the accepted copy's own package.json on disk: the one claim the injected-readText
 		// tests in usage-meter.test.mjs cannot make.
@@ -321,7 +339,7 @@ test("the brake: past the cap, the next call is stopped before it reaches the pr
 	// Asserted on the fake provider's own call log, because "the meter recorded zero" would also be true
 	// if the request had gone out and simply returned nothing.
 	const API = "pi-dispatch-fake-api-brake";
-	const fx = fixture(API);
+	const fx = await fixture(API);
 	const sessions = [];
 	let installed;
 	try {
@@ -337,15 +355,19 @@ test("the brake: past the cap, the next call is stopped before it reaches the pr
 			rootSessionId: rootManager.getSessionId(),
 			onBreach: (total) => breaches.push(total),
 		});
-		installed = await installProcessUsageMeter({ modelRegistry: fx.modelRegistry, meter, log: () => {} });
-		assert.equal(installed.ok, true);
+		const logged = [];
+		installed = await installProcessUsageMeter({ ModelRuntime: pi.ModelRuntime, runtime: fx.modelRuntime, meter, log: (event, fields) => logged.push({ event, fields }) });
+		assert.equal(installed.ok, true, `logged ${JSON.stringify(logged)}`);
+		// The brake is the subject: a capped install without one would enforce the cap only after the fact.
+		assert.deepEqual([logged[0]?.fields?.capped, logged[0]?.fields?.brake], [true, true], "a capped meter must have its brake at the pin");
 
+		const otherRuntime = await fx.runtime();
 		const calls = [];
-		registerFakeProvider({ modelRegistry: fx.modelRegistry, compat: installed.module, api: API, calls });
-		installed.arm();
+		await registerFakeProvider({ modelRuntime: fx.modelRuntime, compat: installed.module, api: API, calls });
+		await registerFakeProvider({ modelRuntime: otherRuntime, compat: installed.module, api: API, calls });
 
-		const rootSession = await openSession({ fx, sessionManager: rootManager });
-		const otherSession = await openSession({ fx, sessionManager: otherManager });
+		const rootSession = await openSession({ fx, modelRuntime: fx.modelRuntime, sessionManager: rootManager });
+		const otherSession = await openSession({ fx, modelRuntime: otherRuntime, sessionManager: otherManager });
 		sessions.push(rootSession, otherSession);
 
 		await Promise.all([rootSession.prompt("root prompt"), otherSession.prompt("other prompt")]);
@@ -374,6 +396,9 @@ test("the brake: past the cap, the next call is stopped before it reaches the pr
 
 		// And the totals did not move: the refused call is not observed at all (the wrapper returns
 		// before meter.observe), so it cannot inflate calls, cost, or the daily token counter.
+		// The OTHER runtime is braked too: the cap is process-wide, not per instance.
+		await otherSession.prompt("nor this one");
+		assert.equal(calls.length, 2, "a capped call from the other runtime must not reach the provider either");
 		const snapshot = meter.snapshot();
 		assert.equal(snapshot.calls, 2, "a refused call must not be counted as a call");
 		assert.equal(snapshot.total, 2 * SENTINEL_TOTAL, "the overshoot is reported as-is; the refusal adds nothing");

@@ -167,7 +167,10 @@ export const REVIEW_STATES = new Set(["approved", "changes_requested", "commente
 const REVIEW_ACTION = "review_submitted";
 
 /**
- * The pi tool names a trigger may exclude (issue #291) -- the built-in set of the PINNED pi, 0.80.7.
+ * The pi tool names a trigger may exclude (issue #291) -- the built-in set of the PINNED pi, 0.99.1, in pi's
+ * own `allToolNames` order. `powershell` joined it at the 0.99.1 bump (issue #509): pi registers it as a
+ * built-in but does not activate it by default (`DEFAULT_TOOL_NAMES` is read, bash, edit, write), so a
+ * trigger that means "no shell" names it beside `bash`.
  * Hand-written because this validator is pure and pi-free (the worker does not depend on the agent
  * package), and therefore BOLTED twice to the artifact it restates: `worker/test/exclude-tools.pinned.test.mjs`
  * and `image/runner/test/pinned-api.test.mjs` both derive the set from the pinned package and fail with a
@@ -177,7 +180,7 @@ const REVIEW_ACTION = "review_submitted";
  * validation exists to close -- pi ignores unknown names in `excludeTools` without a diagnostic.
  */
 // EXPORTED for the two pinned-set bolts and for the admin, which states the vocabulary to an operator.
-export const EXCLUDABLE_TOOL_NAMES = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
+export const EXCLUDABLE_TOOL_NAMES = new Set(["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"]);
 
 // A cron id flows into BullMQ's deterministic `repeat:<id>:<nextMillis>` jobId, so a `:` corrupts that
 // parse; the charset also excludes `:` and the dedicated check names the reason.

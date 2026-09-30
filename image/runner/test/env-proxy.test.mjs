@@ -11,7 +11,11 @@ const RUNNER_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function fakeUndici() {
 	const installed = [];
-	class EnvHttpProxyAgent {}
+	class EnvHttpProxyAgent {
+		constructor(options) {
+			this.options = options;
+		}
+	}
 	return { installed, EnvHttpProxyAgent, setGlobalDispatcher: (d) => installed.push(d) };
 }
 
@@ -20,6 +24,9 @@ test("an env-proxy dispatcher is installed exactly when the worker armed one (is
 	assert.equal(restoreEnvProxyDispatcher({ env: { NODE_USE_ENV_PROXY: "1" }, loadUndici: () => undici }), true);
 	assert.equal(undici.installed.length, 1);
 	assert.ok(undici.installed[0] instanceof undici.EnvHttpProxyAgent);
+	// pi's own dispatcher's choice (issue #509): since undici 8.7 an http:// origin is otherwise sent to the proxy
+	// as a plain forward request instead of a CONNECT tunnel. The real-proxy test below is what proves it matters.
+	assert.deepEqual(undici.installed[0].options, { proxyTunnel: true });
 });
 
 test("with no policy armed, pi's dispatcher is left alone and undici is not even loaded", () => {
@@ -34,7 +41,7 @@ test("run-job.mjs restores the dispatcher after pi is loaded and before auth, th
 	const call = src.indexOf("\trestoreEnvProxyDispatcher();");
 	assert.ok(call > 0, "run-job.mjs no longer calls restoreEnvProxyDispatcher()");
 	assert.ok(call > src.indexOf("enforceOfflineMode(process.env);"), "called before the offline mode is enforced");
-	assert.ok(call < src.indexOf("AuthStorage.create("), "called after auth is built");
+	assert.ok(call < src.indexOf("createJobModelRuntime({"), "called after the model runtime is built");
 	assert.ok(call < src.indexOf("createAgentSession("), "called after the session is created");
 });
 
@@ -57,8 +64,10 @@ const skip = piImportable ? false : "pi not installed; CI runs these";
 
 async function fetchAfterPi({ restore }) {
 	const seen = [];
-	// undici's proxy agent TUNNELS every request, http:// ones included (a plain request handler never sees it and the
-	// fetch hangs), so this answers CONNECT, as squid does for the provider's https, and then plays the origin itself.
+	// The runner's proxy agent TUNNELS every request, http:// ones included (proxyTunnel: true, as pi's own dispatcher
+	// sets it; undici 8.7+ would otherwise send an http:// origin as a plain forward request, which this server's plain
+	// handler refuses 405 -- the shape that failed here at the 0.99.1 pin before the option was set). So this answers
+	// CONNECT, as squid does for the provider's https, and then plays the origin itself.
 	const server = createServer((req, res) => res.writeHead(405).end());
 	server.on("connect", (req, socket) => {
 		seen.push(req.url);

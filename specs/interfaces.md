@@ -21,20 +21,28 @@ Evidence convention as in `constitution.md`.
 *invisibly*.
 
 - **Contract**:
-  **Verified against the published `0.80.7` tarball, not against HEAD** — see the evidence convention
-  in `constitution.md`. At this pin the model/auth wiring is `AuthStorage` + `ModelRegistry`. There is
-  **no `ModelRuntime`**: that is HEAD-only, `[Unreleased]`, and importing it makes every job die on a
-  missing export while the image builds cleanly.
+  **Verified against the published `0.99.1` tarball, not against HEAD** (see the evidence convention
+  in `constitution.md`). At this pin the model/auth wiring is ONE `ModelRuntime` (`OQ-005`'s migration,
+  shipped between 0.80.7 and this pin): `AuthStorage` is no longer exported (0.80.8), `ModelRegistry` is a
+  facade over a runtime and `ModelRegistry.create(auth, path)` is gone. Importing either old name makes every
+  job die on a missing export while the image builds cleanly, which is the failure this block was first
+  written about, in the other direction.
 
   ```typescript
-  const authStorage   = AuthStorage.create(`${agentDir}/auth.json`);
-  // Prefer the operator overlay's models.json when the :ro overlay is mounted (REQ-GLOBAL-PI-OVERLAY) —
+  enforceOfflineMode(process.env);     // BEFORE the runtime: create() reads PI_OFFLINE once, at construction
+  enforceTelemetryOff(process.env);    // PI_TELEMETRY overrides the setting at 0.99.1; forced to "0". See (m)
+  // Prefer the operator overlay's models.json when the :ro overlay is mounted (REQ-GLOBAL-PI-OVERLAY) --
   // how a CUSTOM provider/model becomes resolvable. Definitions only; the key still flows env -> auth.json.
   const modelsPath = existsSync("/opt/pi-global/models.json") ? "/opt/pi-global/models.json" : `${agentDir}/models.json`;
-  const modelRegistry = ModelRegistry.create(authStorage, modelsPath);
-  const model = modelRegistry.find(process.env.PI_PROVIDER, process.env.PI_MODEL);  // NOT getModel
-  if (!model) throw configError(`unknown model`);   // configError tags exit 2 — see below
-  if (!modelRegistry.hasConfiguredAuth(model)) throw configError(`no configured auth`);
+  const modelRuntime = await ModelRuntime.create({
+    authPath: `${agentDir}/auth.json`,
+    modelsPath,
+    modelsStore: DISCARDING_MODELS_STORE,  // pi's default writes models-store.json BESIDE modelsPath: EACCES on the :ro overlay
+    allowModelNetwork: false,              // no catalog refresh over the network (PI_OFFLINE=1 is the other lock)
+  });
+  const model = modelRuntime.getModel(process.env.PI_PROVIDER, process.env.PI_MODEL);
+  if (!model) throw configError(`unknown model`);   // configError tags exit 2 -- see below
+  if (!modelRuntime.hasConfiguredAuth(model.provider)) throw configError(`no configured auth`);  // takes the PROVIDER id now
 
   // Guardrails read EXPLICITLY from a path we own — never via discovery. See (e).
   const guardrails     = readFileSync("/opt/pi-dispatch/HARD_RULES.md", "utf8");
@@ -121,25 +129,25 @@ Evidence convention as in `constitution.md`.
   // Declared BEFORE the meter so onBreach can close over it; assigned the moment the session exists.
   let session;
 
-  // Process-wide usage meter (REQ-TOKEN-ACCOUNTING-AND-CAPS). AFTER ModelRegistry.create — it registers
-  // THROUGH the registry so refresh() re-applies it — and BEFORE createAgentSession, so the first call
-  // of the run is already metered. See (g) and (h).
+  // Process-wide usage meter (REQ-TOKEN-ACCOUNTING-AND-CAPS). Wraps ModelRuntime.prototype (the class run-job
+  // imports, handed over) AFTER the runtime exists -- the install checks that THIS instance dispatches through
+  // the wrappers -- and BEFORE createAgentSession, so the first call of the run is already metered. See (g), (h), (m).
   const meter      = createUsageMeter({ maxTokens, rootSessionId, onBreach: () => { void session?.abort(); } });
-  const usageMeter = await installProcessUsageMeter({ modelRegistry, meter });
+  const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter });
 
   ({ session } = await createAgentSession({
     cwd: "/workspace",
     agentDir: getAgentDir(),
-    authStorage,
-    modelRegistry,
+    modelRuntime,                          // the SAME instance the meter proved
     model,
     sessionManager,
-    settingsManager: SettingsManager.inMemory({ retry: { maxRetries, baseDelayMs } }),
+    // retry pinned (maxAgentDelayMs 60000 included), cacheWarming "off", enableInstallTelemetry false. See (m).
+    settingsManager: SettingsManager.inMemory(jobSettings({ maxRetries, baseDelayMs })),
     resourceLoader,
   }));
 
-  usageMeter.arm();   // extensions register their OWN api providers during createAgentSession — an api id
-                      // that did not exist at install time is unwrapped until this deterministic re-arm.
+  usageMeter.arm();   // the COMPAT half only: an extension factory that registered an api id in pi-ai's legacy
+                      // registry during createAgentSession is unwrapped until this deterministic re-arm.
   // The per-session accumulator is the FALLBACK, attached ONLY when the meter could not install, so the
   // two are never both counting: attachTokenBudget(session, maxTokens) if (!usageMeter.ok).
   ```
@@ -157,7 +165,8 @@ Evidence convention as in `constitution.md`.
   `interactive|print|json|rpc` — there is no `tui`.
 - **Why**: **Nearly everything that makes this contract dangerous is invisible at runtime**, and each
   hazard has its own mechanism. Read them as separate traps, not one — (a)–(f) are the loader's own, and
-  (g)–(k) were added as the runner grew the meter, the staged-package tier, and the discovery relaxation.
+  (g)–(k) were added as the runner grew the meter, the staged-package tier, and the discovery relaxation
+  ((l) with resume, (m) with the pi 0.99.1 bump).
 
   **(a) `appendSystemPrompt` replaces discovery.** It does not compose with it. The `??` means the
   persona baked at `~/.pi/agent/APPEND_SYSTEM.md` is never looked for. No error, no warning, the job
@@ -210,8 +219,9 @@ Evidence convention as in `constitution.md`.
   granted, and is not needed", which read as a safety property the code does not have. Precisely:
   `reload({ resolveProjectTrust })` is the only way we could *set* trust, and we do not pass it — but
   `SettingsManager.fromStorage` takes `options.projectTrusted ?? true` and `SettingsManager.inMemory`
-  forwards no options, so the manager the runner builds reports the project **TRUSTED** from the first
-  call. Not granting is not revoking.
+  is handed no options (at 0.80.7 it forwarded none; at 0.99.1 it forwards a second `options` argument,
+  which the runner does not pass, re-checked in issue #509), so the manager the runner builds reports the
+  project **TRUSTED** from the first call. Not granting is not revoking.
   **That default is load-bearing now, and it was inert before.** While `noSkills`/`noExtensions` were
   both `true`, project-resource discovery was suppressed and trust had nothing to gate — the old wording
   was harmless because it described a path nothing walked. With `noExtensions: false` it is exactly this
@@ -238,11 +248,15 @@ Evidence convention as in `constitution.md`.
   — `image/runner/package.json` declares `@earendil-works/pi-coding-agent` and `@playwright/cli`, never
   pi-ai — so the nested copy is the **ONLY** copy and that same bare specifier does not resolve at all
   (`ERR_MODULE_NOT_FOUND`, not a wrong binding).
-  **One invariant covers both, and it is the one to hold onto**: never reach pi-ai by bare specifier — go
-  through `modelRegistry.registerProvider`, and let a **runtime mutation probe** decide which module object
-  the registry actually writes to (register an inert provider through the `ModelRegistry`, then ask each
-  candidate module whether it can see it). Path inspection cannot settle the dual case and has nothing to
-  inspect in the single one. This is why `run-job.mjs` carries **no pi-ai specifier at all** (a test guards
+  **One invariant covers both, and it is the one to hold onto**: never reach pi-ai by bare specifier. At
+  0.99.1 the meter's choke point is `ModelRuntime.prototype`, and the CLASS is handed over by run-job.mjs,
+  which imports it from pi-coding-agent itself, so there is no pi-ai candidate to choose for it at all. The
+  compat half (legacy extension calls, see (h)) still needs pi's own pi-ai copy, and a runtime IDENTITY check
+  decides it: a candidate is accepted only when it IS the module pi hands an extension for
+  `@earendil-works/pi-ai` (`VIRTUAL_MODULES` in pi-coding-agent's core/extensions/virtual-modules.js, read by
+  file URL). The 0.80.7 mutation probe through `modelRegistry.registerProvider` cannot work any more, because
+  the ModelRegistry no longer writes to that registry. Path inspection cannot settle the dual case and has
+  nothing to inspect in the single one. This is why `run-job.mjs` carries **no pi-ai specifier at all** (a test guards
   the file for that string), why the meter loads its candidate by dynamic import in a proved order (nested
   first), and why `resolvePiAiCompat` wraps **both** lookups in a `tryResolve`: an unresolvable candidate is
   **skipped, not thrown**, which is exactly what makes one implementation correct in the image and in a dev
@@ -255,19 +269,33 @@ Evidence convention as in `constitution.md`.
   nested, never declared, therefore the only copy — holds for **an image built from this repo's
   `image/Dockerfile`**. An image assembled another way could have pi-ai hoisted, deduped, or present twice,
   and these layout claims would simply not describe it. **That costs nothing, and it is the point of the
-  invariant**: the runner never reads the layout, it registers through `modelRegistry.registerProvider` and
-  lets the runtime probe decide. What does **not** survive is the *assertion*: the `image` CI job proves the
+  invariant**: the runner never reads the layout, it wraps the ModelRuntime class it was handed and lets an
+  identity check decide the compat copy. What does **not** survive is the *assertion*: the `image` CI job proves the
   property for the tag it builds; for a foreign image nothing in this repo proves anything (`OQ-012`).
 
-  **(h) `resetApiProviders()` WIPES the registry, so a raw registration cannot be install-once.** It is
-  what `AgentSession.reload()` calls. Registering through `modelRegistry.registerProvider` is what makes
-  `ModelRegistry.refresh()` **re-apply** our wrappers instead of dropping them; a bare
-  `resetApiProviders()` re-applies nothing, which is why an unref'd re-arm interval (plus the deterministic
-  `arm()` after `createAgentSession`) exists at all. Two consequences worth stating: overriding a
-  **builtin** api id flips compat's `shouldUseBuiltinModels` to false, so the wrapper must reproduce the
-  catalog path rather than blindly delegate (two of the builtin providers substitute baseUrl placeholders
-  and inject headers in that layer); and `refresh()` hands back **fresh** provider objects, so
-  "did we already wrap this?" is answerable only by object identity, never by api id.
+  **(h) At 0.99.1 a session never touches pi-ai's api-provider registry, and the meter moved to where it does
+  go.** createAgentSession's streamFn returns `modelRuntime.streamSimple(...)` (sdk.js:260); compaction and
+  branch summaries reuse that streamFn; the cache warmer calls the runtime; `ctx.modelRegistry` is a facade
+  whose stream/streamSimple/complete/classify forward to its runtime; ModelRuntime's complete/completeSimple/
+  fetchDeferred go through its own stream/streamSimple/streamDeferred. So the process-wide choke point is
+  `ModelRuntime.prototype` (streamSimple, stream, streamDeferred, classify, generateImages), and wrapping the
+  prototype covers every instance, a subagent extension's own `ModelRuntime.create` included. The 0.80.7
+  registry meter run against 0.99.1 logged `usage_meter_unavailable`; installed, it would have counted
+  nothing. The registry half is KEPT for one purpose: an extension calling pi-ai's legacy global
+  `streamSimple`/`completeSimple` (the compat entry is what a bare pi-ai import resolves to in an extension)
+  still dispatches through it. `resetApiProviders()`, which `AgentSession.reload()` still calls, WIPES that
+  registry, so that half stays re-armable (unref'd interval plus the deterministic `arm()`), and overriding a
+  builtin api id still flips compat's own dispatch (`getBuiltinProviderForModel` answers undefined), so its
+  wrapper mirrors 0.99.1 compat.js (builtin provider's own stream; cloudflare-* through the catalog
+  collection, whose auth layer substitutes their placeholders). Two more facts: a virtual model
+  (`api: "pi-virtual"`, 0.99.0 experimental) re-enters `this.streamSimple` with the physical model, so only
+  the physical call is counted; and the two halves MEET on one common path, a provider with no builtin base
+  for its api (an overlay models.json provider on `openai-completions`), which pi composes so that its stream
+  resolves the api in the compat registry (provider-composer.js). An AsyncLocalStorage shared by both halves of
+  one install makes the compat wrapper route such a call without counting it again (measured: counted once
+  with it, twice without). Residual, recorded: a legacy compat call an extension makes from inside a provider
+  hook of a runtime call is counted by neither half; extension code is the same trust class as a raw fetch,
+  which no in-process meter sees either.
 
   **(i) Skill precedence is decided by `skillsOverride`, not by path order -- and there are now THREE protected roots, `/job/pi/skills`, `/job/trigger-skills` and `/opt/pi-global/skills`, consulted in that order (`REQ-PER-TRIGGER-SKILLS`).** `additionalSkillPaths` sets
   the order *among our own* paths (repo before overlay), but pi builds `skillPaths` as
@@ -321,8 +349,8 @@ Evidence convention as in `constitution.md`.
   gets. It also feeds garbage to (i): `skillsOverride` decides between package roots and protected roots
   and has no case for the same protected skill arriving twice. Same content, no benefit, real breakage.
 
-  `modelRegistry.find(provider, modelId)` is a **method**, not a free function; there is no exported
-  `getModel`. Pin the model explicitly: with `model` omitted, pi picks from settings and provider
+  `modelRuntime.getModel(provider, modelId)` is a **method** (pi-ai's own `getModel` is a deprecated static
+  catalog read on the compat entry, and the runner never imports pi-ai). Pin the model explicitly: with `model` omitted, pi picks from settings and provider
   defaults, which is nondeterministic across images and silently changes cost per job. A missing model
   yields a fallback message on the *result*, not a throw — validate and fail loudly.
   `SessionManager.inMemory()` because the container is ephemeral: session storage would write to a
@@ -332,18 +360,32 @@ Evidence convention as in `constitution.md`.
   never read and **cannot override our spend controls**. `SettingsManager.create(cwd, agentDir)` would
   read it and `deepMergeSettings(global, project)` lets project win. Use `inMemory`. Deliberately.
 
-  The complete option set **at 0.80.7** is `cwd`, `agentDir`, `authStorage`, `modelRegistry`, `model`,
-  `thinkingLevel`, `scopedModels`, `noTools`, `tools`, `excludeTools`, `customTools`, `resourceLoader`,
-  `sessionManager`, `settingsManager`, `sessionStartEvent`. `OQ-005`'s migration replaces the first two
-  with an async `modelRuntime` and **has not shipped** — it exists only on `main`. This sentence is a
+  The complete option set **at 0.99.1** is `cwd`, `agentDir`, `modelRuntime`, `model`, `thinkingLevel`,
+  `scopedModels`, `noTools`, `tools`, `excludeTools`, `customTools`, `resourceLoader`, `sessionManager`,
+  `settingsManager`, `sessionStartEvent`. `OQ-005`'s migration shipped: `authStorage` and `modelRegistry`
+  became the one `modelRuntime`. This sentence is a
   hand-written table restating a derivable source and carries its bolt (CLAUDE.md's rule):
   `image/runner/test/pinned-api.test.mjs` extracts the interface's top-level member names from the
   pinned `sdk.d.ts` and deepEquals them against this exact list. `excludeTools` became LOAD-BEARING
   with issue #291: the runner passes it (conditionally -- an unflagged job's options object stays
   byte-identical), pi filters the tool registry with it, and the same test pins the trio's declared
   types plus the fact that `allToolNames` stays un-exported from the package root (the reason
-  `tools.mjs` derives the set from the seven root-exported `create*ToolDefinition` factories).
-- **Evidence (pinned artifact — authoritative)**: `npm @earendil-works/pi-coding-agent@0.80.7 →
+  `tools.mjs` derives the set from the eight
+  root-exported `create*ToolDefinition` factories; `powershell` joined at 0.99.1).
+- **Evidence (pinned artifact, 0.99.1, authoritative)**: `npm @earendil-works/pi-coding-agent@0.99.1 ->
+  dist/core/sdk.d.ts -> CreateAgentSessionOptions` (`modelRuntime?: ModelRuntime`; no authStorage/modelRegistry) ·
+  `-> dist/core/model-runtime.d.ts` (`static create(options?: CreateModelRuntimeOptions)`, `getModel(providerId,
+  modelId)`, `hasConfiguredAuth(providerId: string)`, CreateModelRuntimeOptions `authPath`, `modelsPath`,
+  `modelsStore`, `allowModelNetwork`) · `-> dist/core/model-runtime.js:82-85` (default FileModelsStore beside
+  modelsPath), `:92` (PI_OFFLINE read at create), `:95` (network refresh gate), `:489-515` (virtual re-entry) ·
+  `-> dist/core/sdk.js:241,260` (the Agent's streamFn returns `modelRuntime.streamSimple`) ·
+  `-> dist/core/provider-composer.js` (`streamWith`: a composed provider with no base resolves the api in the
+  compat registry) · `-> dist/core/extensions/virtual-modules.js` and `loader.js getAliases` (extensions get pi's
+  own pi-ai compat and pi-coding-agent) · `-> dist/core/settings-manager.js:664,679-682` (maxAgentDelayMs,
+  cacheWarming default "streaming") · `-> dist/core/telemetry.js:6-7` (PI_TELEMETRY overrides the setting) ·
+  `-> dist/index.js` (`ModelRuntime` a value export; `AuthStorage` absent). The 0.80.7 evidence below is kept
+  as the record of the previous pin.
+- **Evidence (the previous pin, 0.80.7, kept as the record)**: `npm @earendil-works/pi-coding-agent@0.80.7 →
   dist/core/sdk.d.ts → CreateAgentSessionOptions` — `authStorage?: AuthStorage` ("Default:
   AuthStorage.create(agentDir/auth.json)"), `modelRegistry?: ModelRegistry` ("Default:
   ModelRegistry.create(authStorage, agentDir/models.json)"); **no `modelRuntime` field, and no
@@ -410,9 +452,13 @@ Evidence convention as in `constitution.md`.
   `→ packages/ai/src/providers/anthropic.models.ts` (auto-generated catalog) ·
   `→ packages/ai/src/providers/anthropic.ts:12-14 → envApiKeyAuth("Anthropic API key", ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"])`
   — the OAuth precedence is baked into the provider definition too, independently of `env-api-keys.ts`
+  (at the 0.99.1 npm pin the list leads with `ANTHROPIC_AUTH_TOKEN`, sent as `Authorization: Bearer`,
+  issue #509)
 
 - **(l) Resume is not an option you pass, and four things about it fail quietly.** Verified against the
-  pinned `0.80.7` tarball and pi's own `docs/`, not recalled.
+  pinned `0.80.7` tarball and pi's own `docs/`, not recalled, and re-checked at the `0.99.1` pin (issue
+  #509: no resume field in the option set, `SessionManager.open` still throws `Session file is not a valid
+  pi session` on an unparseable file, measured).
   1. **There is no `resume`, `sessionId` or `continueSession` field** on `CreateAgentSessionOptions`. The
      JSDoc example in `dist/core/sdk.d.ts` showing `continueSession: true` does not describe this version.
      Handing `createAgentSession` a persisted `SessionManager` IS the mechanism, and pi's `docs/sdk.md`
@@ -433,9 +479,26 @@ Evidence convention as in `constitution.md`.
      behaviour change nobody asked for: a `thinking_level_change` entry crosses jobs and changes spend.
      Named here rather than fixed, because changing it is a behaviour decision, not a bug fix.
   Plus one documented-but-inert knob worth pinning: **`PI_CODING_AGENT_SESSION_DIR`** is documented by pi
-  (`docs/usage.md`, `docs/settings.md`) as the session-storage override and is **read by nothing in
-  `dist/`** — `getDefaultSessionDir(cwd, agentDir)` consults only its arguments. It is a CLI-layer
+  (`docs/usage.md`, `docs/settings.md`) as the session-storage override and is **read by nothing on
+  the SDK path** (in `dist/` only the CLI's `main.js` reads it, still so at 0.99.1) — `getDefaultSessionDir(cwd,
+  agentDir)` consults only its arguments. It is a CLI-layer
   variable, so the session dir must be passed explicitly, and an operator who sets it gets silence.
+
+- **(m) Three settings and one env var are spend or egress controls at 0.99.1, and each is pinned against
+  pi's own default.** `cacheWarming: "off"`: pi 0.86.0 made `"streaming"` the default, which re-sends the
+  cached prefix with maxTokens 1 during long tool runs, for up to an hour, as paid requests the turn budget
+  never sees. `retry.maxAgentDelayMs: 60000`: new since 0.80.7, it caps the backoff between agent retries at
+  pi's own default; pinned so an upstream default change cannot move unattended retry timing. Compaction and
+  branch-summary retries (`summarization_retry_*`) now use the same `retry` budget, and each is a paid call.
+  `enableInstallTelemetry: false` and `PI_TELEMETRY=0`: the env var, when set at all, OVERRIDES the setting
+  (telemetry.js), so the runner forces it (`enforceTelemetryOff`) beside `enforceOfflineMode`; in a job it
+  gates pi's attribution headers to OpenRouter, NVIDIA NIM and Cloudflare. And the model runtime is created
+  with a discarding `modelsStore` and `allowModelNetwork: false`: pi's default store writes `models-store.json`
+  beside modelsPath, which on the overlay's :ro mount fails EACCES once per provider on every refresh. Also
+  not loaded, by construction: pi 0.99's built-in extensions (`builtin:mcp`, `builtin:codemode`,
+  `builtin:tool-search`, `builtin:llama.cpp`) come only from the loader's `extensionFactories`, which the
+  runner never passes; a `builtin:` path that reaches the loader is refused as unknown (pinned in
+  loader.test.mjs against a real session). So a repo's `mcp.json` is never read in a job.
 
 ## INT-RUNNER-EXIT-CODE-PROTOCOL
 
@@ -503,15 +566,20 @@ refactor apart.
   | `"Agent is already processing."` | **throws** (before the lifecycle try) | `1` — our bug |
   | Extension error in `before_agent_start` | **throws** (preflight) | `1` |
   | Provider 429 / 5xx / network death | `stopReason: "error"` | `1`, infra, retryable. **Also under `--max-turns 1`** (issue #449): pi's own auto-retry of the error re-emits `turn_start`, and when the failed turn made no progress (no tool ran, no reply completed) that turn is NOT a budget turn (`REQ-RUNNER-TURN-BUDGET`), so an unrecovered 429 stays `1` rather than ending `2` / `turn_budget`, and a recovered one ends on its reply's own verdict |
-  | **The provider refused the credential or access** (HTTP 401 / 403, issue #437; and the Google and Bedrock forms of the same refusal, issue #451) | `stopReason: "error"` whose `errorMessage` matches one of `providerAuthRefused`'s CLOSED shapes: `401`/`403` followed by a space or `:` at position 0 (the Anthropic and openai SDKs' `${status} ${message}`, pi-ai's unprefixed `<status>: <body>`, pi-messages' `<status> <statusText>: <message>`), or the fixed prefixes `OpenAI API error (401\|403): `, `Azure OpenAI API error (401\|403): ` and `Mistral API error (401\|403): `; or (issue #451, admitting only shapes measured against a real endpoint with a real bogus credential) bedrock-converse-stream's `UnrecognizedClientException: 403: ` at position 0 (pi-ai's exception name, then the status; nothing after that prefix is read; real AWS sent it for a bogus key and a bogus session token; this is a RUNNER rule, and what reaches it from a shipped worker is narrower, see the Bedrock reachability residual below); or google-generative-ai and google-vertex's double-wrapped body, PARSED and never byte-matched: the whole message is JSON, its outer `error.code` is 400, 401 or 403, its `error.message` is a string that is JSON again (Google answers a streaming error as `text/event-stream`, so @google/genai wraps the body text, and the outer `status` is only the HTTP reason phrase), and in that inner body, reading own properties only, a `details[]` entry of type `google.rpc.ErrorInfo` has `reason` `API_KEY_INVALID` (a real bogus AI Studio key is HTTP 400 `INVALID_ARGUMENT` with that reason) or `ACCESS_TOKEN_TYPE_UNSUPPORTED` (a real bogus Vertex key is HTTP 401 `UNAUTHENTICATED` with that reason). The gRPC `status` is never read. Parsing is required, not a style choice: Google's inner key order differed between two identical requests, and a reason quoted inside some other string must not count; **and** that pi-ai's own `isRetryableAssistantError` (from the pinned copy pi dispatches through) does NOT call transient | `2` / `provider-auth-refused`: the worker hands the container the same key on every attempt, so a retry pays for a container to rediscover the refusal. The retry-predicate guard exists because a 403 is also what a gateway sends while it is down: OpenRouter's `403: {"message":"Provider returned error",...}` and an HTML 403 "please retry your request" page match the shape and stay `1`. No predicate (none found in the pinned copy, logged as `retry_predicate_unavailable`) means every provider error stays `1`. Every pinned chat family (the ten of pi-ai 0.80.7's `KnownApi`) is driven into its refusals by a loopback table (`image/runner/test/pinned-api.test.mjs`) that also asserts the table covers exactly that union; the Google cells answer `text/event-stream` with Google's pretty-printed body, the format the real endpoints sent (an `application/json` stub produced a single-layer message production never sees), and the Bedrock cells pin the whole message, lost body included. The same table holds the must-stay-infra rows: a Google 429 `RESOURCE_EXHAUSTED` in both wordings, a Google 400 `INVALID_ARGUMENT` bad payload, a Google body whose message merely quotes `UNAUTHENTICATED` and `API_KEY_INVALID`, a Google 401 `UNAUTHENTICATED` with no reason (the real bogus Vertex key's status and message minus its reason, and a hypothetical "Authentication backend unavailable, try again later"), and Bedrock's `Throttling error: 429: `. **Refusals read as `2`**: anthropic-messages, openai-completions, openai-responses, azure-openai-responses, mistral-conversations, pi-messages, google-generative-ai and google-vertex (api key; the two measured reasons only), bedrock-converse-stream (`UnrecognizedClientException` only). **Residuals, still `1` and retried until attempts run out, each by decision and named below**: `openai-codex-responses`; Google's gRPC status without a measured reason (`UNAUTHENTICATED`, `PERMISSION_DENIED`); Bedrock's `AccessDeniedException` and `ExpiredTokenException`; google-vertex under ADC (the OAuth token endpoint's codes); Google's quota 429; the single-layer Google JSON form. `openrouter-images` is pi-ai's images api and never ends a chat turn, so it is out of scope. Anchoring is the point: an unanchored `401` would read `500 upstream said 401` or a proxy's `Proxy response (403) !== 200 when HTTP Tunneling` as a refusal and stop retrying a transient failure, the costlier of the two mistakes |
+  | **The provider refused the credential or access** (HTTP 401 / 403, issue #437; and the Google and Bedrock forms of the same refusal, issue #451) | `stopReason: "error"` whose `errorMessage` matches one of `providerAuthRefused`'s CLOSED shapes: `401`/`403` followed by a space or `:` at position 0 (the Anthropic and openai SDKs' `${status} ${message}`, pi-ai's unprefixed `<status>: <body>`, pi-messages' `<status> <statusText>: <message>`), or the fixed prefixes `OpenAI API error (401\|403): `, `Azure OpenAI API error (401\|403): ` and `Mistral API error (401\|403): `; or (issue #451, admitting only shapes measured against a real endpoint with a real bogus credential) bedrock-converse-stream's `UnrecognizedClientException: ` at position 0 (pi-ai's exception NAME; nothing after it is read, the status included: pi-ai 0.99.1 prints AWS's own message and no status, `UnrecognizedClientException: The security token included in the request is invalid.`, where 0.80.7 printed `...: 403: [object Object]`; real AWS sent the name for a bogus key and a bogus session token; this is a RUNNER rule, and what reaches it from a shipped worker is narrower, see the Bedrock reachability residual below); or google-generative-ai and google-vertex's double-wrapped body, PARSED and never byte-matched: the whole message is JSON, its outer `error.code` is 400, 401 or 403, its `error.message` is a string that is JSON again (Google answers a streaming error as `text/event-stream`, so @google/genai wraps the body text, and the outer `status` is only the HTTP reason phrase), and in that inner body, reading own properties only, a `details[]` entry of type `google.rpc.ErrorInfo` has `reason` `API_KEY_INVALID` (a real bogus AI Studio key is HTTP 400 `INVALID_ARGUMENT` with that reason) or `ACCESS_TOKEN_TYPE_UNSUPPORTED` (a real bogus Vertex key is HTTP 401 `UNAUTHENTICATED` with that reason). The gRPC `status` is never read. Parsing is required, not a style choice: Google's inner key order differed between two identical requests, and a reason quoted inside some other string must not count; **and** that pi-ai's own `isRetryableAssistantError` (from the pinned copy pi dispatches through) does NOT call transient | `2` / `provider-auth-refused`: the worker hands the container the same key on every attempt, so a retry pays for a container to rediscover the refusal. The retry-predicate guard exists because a 403 is also what a gateway sends while it is down: OpenRouter's `403: {"message":"Provider returned error",...}` and an HTML 403 "please retry your request" page match the shape and stay `1`. No predicate (none found in the pinned copy, logged as `retry_predicate_unavailable`) means every provider error stays `1`. Every pinned chat family (the ten of pi-ai 0.99.1's `KnownApi`, the same ten as at 0.80.7) is driven into its refusals by a loopback table (`image/runner/test/pinned-api.test.mjs`) that also asserts the table covers exactly that union; the Google cells answer `text/event-stream` with Google's pretty-printed body, the format the real endpoints sent (an `application/json` stub produced a single-layer message production never sees), and the Bedrock cells pin the whole message (the lost body at 0.80.7, AWS's own message at 0.99.1). The same table holds the must-stay-infra rows: a Google 429 `RESOURCE_EXHAUSTED` in both wordings, a Google 400 `INVALID_ARGUMENT` bad payload, a Google body whose message merely quotes `UNAUTHENTICATED` and `API_KEY_INVALID`, a Google 401 `UNAUTHENTICATED` with no reason (the real bogus Vertex key's status and message minus its reason, and a hypothetical "Authentication backend unavailable, try again later"), and Bedrock's `Throttling error: 429: `. **Refusals read as `2`**: anthropic-messages, openai-completions, openai-responses, azure-openai-responses, mistral-conversations, pi-messages, google-generative-ai and google-vertex (api key; the two measured reasons only), bedrock-converse-stream (`UnrecognizedClientException` only). **Residuals, still `1` and retried until attempts run out, each by decision and named below**: `openai-codex-responses`; Google's gRPC status without a measured reason (`UNAUTHENTICATED`, `PERMISSION_DENIED`); Bedrock's `AccessDeniedException` and `ExpiredTokenException`; google-vertex under ADC (the OAuth token endpoint's codes); Google's quota 429; the single-layer Google JSON form. `openrouter-images` is pi-ai's images api and never ends a chat turn, so it is out of scope. Anchoring is the point: an unanchored `401` would read `500 upstream said 401` or a proxy's `Proxy response (403) !== 200 when HTTP Tunneling` as a refusal and stop retrying a transient failure, the costlier of the two mistakes |
   | Our turn budget or timeout aborts | `stopReason: "aborted"` | `2` |
   | Our per-job **token budget** aborts | `stopReason: "aborted"` | `2` — `decideExit` intercepts it as `reason: "token_budget"` BEFORE the generic `"aborted"`, exactly as the turn budget is intercepted (`REQ-TOKEN-ACCOUNTING-AND-CAPS`) |
   | The **process-wide** token budget breaches mid-fanout (a subagent session's call trips it) | `stopReason: "aborted"` on the root — every later call **by any session** is answered with a synthetic aborted stream | `2` / `token_budget` — the same row as above by design: `decideExit` reads one `tokenAborted` flag and neither meter gets its own exit code, so an operator never has to learn which one fired |
+  | **pi's own retry cannot resume** (issue #509): a retry-shaped error after the turn's tools ran; pi omits the failed attempt and its continue() refuses a transcript ending on the assistant | `session.prompt()` REJECTS with `Cannot continue from message role: ...` while a retry is in flight (auto_retry_start seen, no auto_retry_end) | `2` / `retry-unresumable` -- the paid call and the tool already happened; a queue retry would re-run them on a fresh budget, the uncounted re-run #449/#455's rule forbids. Both conditions are required; any other rejection keeps the preflight rows above |
+  | The provider **deferred** the response (pi-ai 0.99.1 deferred responses) | `stopReason: "deferred"` | `2` / `deferred` -- the job has no answer, the provider still completes and bills it, and whatever asked for deferral (the runner never does) asks again on a retry |
+  | A terminal still **pending** | `stopReason: "pending"` | `1` / `pending` -- the stream stopped before the provider finished: no evidence the agent ran, the no-terminal-message verdict under its own name |
   | Normal completion | `stopReason: "stop"` \| `"toolUse"` | `0` |
   | **Output truncated at the token limit** | `stopReason: "length"` | `0`, **but log it** — it is a completed run, not a silent failure, and must not be mistaken for either |
 
-  `StopReason` is exactly `"stop" | "length" | "toolUse" | "error" | "aborted"` — enumerate all five. A
-  default-to-`0` branch would map `"length"` to success without anyone noticing the agent was cut off.
+  `StopReason` is exactly `"pending" | "stop" | "length" | "toolUse" | "error" | "aborted" | "deferred"` at
+  pi-ai 0.99.1 (types.d.ts:311), enumerate all seven; `image/runner/test/pinned-api.test.mjs` pins the
+  runner's STOP_REASONS against that union. A default-to-`0` branch would map `"length"` to success without
+  anyone noticing the agent was cut off.
 
   **Named residuals of the provider-refusal row (issue #437), none of which the runner can see:**
   - A provider's IN-STREAM error (the HTTP exchange answered 200 and the failure arrived as an event) whose
@@ -541,13 +609,12 @@ refactor apart.
     endpoint (a stub only), and it has transient windows the predicate does not catch: `SERVICE_DISABLED`
     tells the caller to wait for an enable to propagate and retry, and an IAM grant
     (`IAM_PERMISSION_DENIED`) propagates too. A measured reason under a 401 or 403 still reads.
-  - **pi-ai 0.80.7 loses Bedrock's message (upstream, recorded only).** `normalizeProviderError` serializes
-    the SDK's already-consumed response stream as the body instead of AWS's message, so the text after the
-    prefix is `[object Object]` over HTTP/1 and about 330 characters of stream internals (`{"_events":...`)
-    over HTTP/2, the default. The refusal rule reads only the `UnrecognizedClientException: 403: ` prefix
-    and depends on nothing after it; the table pins the whole HTTP/1 message so a pi-ai that fixes the bug
-    fails a cell and the new message is read before anything relies on it. A Bedrock
-    `UnrecognizedClientException` with any status but the measured 403 stays infra.
+  - **pi-ai carries Bedrock's message again at 0.99.1 (issue #509).** 0.80.7's `normalizeProviderError`
+    serialized the consumed response stream instead of AWS's message (`[object Object]` over HTTP/1, stream
+    internals over HTTP/2). 0.99.1 prints `<name or pi-ai prefix>: <AWS's message>` with no status, or
+    `<status>: <body>` when the SDK did not fold the body into its message, so the rule moved from the
+    `UnrecognizedClientException: 403: ` prefix to the exception name alone. The loopback table pins every
+    Bedrock cell's WHOLE message, so the next format change fails a cell before anything relies on it.
   - **Bedrock reachability: the rule lives in the runner, and a shipped worker reaches it only through a
     custom provider (issue #451 gate).** A job naming pi's built-in `amazon-bedrock` provider never
     starts a container: pi authenticates it without an API-key variable (the AWS credential chain), so
@@ -557,9 +624,9 @@ refactor apart.
     is reachable only through a custom provider in the overlay `models.json` whose `api` is
     `bedrock-converse-stream` and whose key is one variable, and pi-ai sends any key it is given as a
     BEARER token (`bedrock-converse-stream.js:52-56`: `options.apiKey` before
-    `AWS_BEARER_TOKEN_BEDROCK`). A bogus bearer token was measured as `AccessDeniedException: 403: `,
+    `AWS_BEARER_TOKEN_BEDROCK`). A bogus bearer token was measured as `AccessDeniedException: 403: ` at 0.80.7 (`AccessDeniedException: <AWS's message>` at 0.99.1),
     which is a residual, so on that route a bogus key ends `1` / infra and retries. The admitted
-    `UnrecognizedClientException: 403: ` is SigV4's answer to a bogus access key or session token,
+    `UnrecognizedClientException` is SigV4's answer to a bogus access key or session token,
     reached only when SigV4 keys arrive another way (for example `PI_FORWARD_ENV` forwarding
     `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` to a custom provider that carries no key of its
     own). A pi-dispatch job with bogus AWS keys ends `provider-unconfigured`, not
@@ -568,7 +635,7 @@ refactor apart.
     gate).** `AccessDeniedException: 403: ` is what real AWS sent for a bogus bearer token, but AWS also
     sends it intermittently for a cross-region inference profile whose SCP or IAM policy does not allow
     every destination region, and for up to about two minutes after a Marketplace or IAM fix propagates;
-    the message that would tell these apart is the one pi-ai loses. `ExpiredTokenException` was never seen
+    the message that would tell these apart was lost at 0.80.7; pi-ai 0.99.1 carries it, but no real-AWS measurement of the cross-region and propagation messages exists, so the admission rule (only a shape measured against a real endpoint) keeps both residual. Re-measuring them is the follow-up that could narrow this. `ExpiredTokenException` was never seen
     from real AWS (a bogus session token answered `UnrecognizedClientException`). Both are residual cells.
   - **google-vertex under ADC stays infra, by decision.** A bogus credential fails at Google's OAuth
     token endpoint before Vertex is reached, in one of three pinned library forms: `invalid_grant:
@@ -657,8 +724,9 @@ refactor apart.
   one of them feeds classification either**: `metered` (`true` from the process-wide meter, `false` from
   the `subscribe()` fallback — the flag that tells a reader whether the total covers every in-process
   session or only the root's turns), `rootTotal` / `otherTotal` / `looseTotal` (the attribution split;
-  they sum to `total` exactly, and a non-zero `otherTotal` **is** the subagent spend a per-session bus
-  cannot see), `sessions` (distinct session ids observed), `calls` (stream dispatches the meter observed, not turns: including one pi-ai ended as aborted before sending, and excluding a call the meter's own hard stop answered, which reaches no provider),
+  they sum to `total` exactly, and a non-zero `otherTotal` is spend under a session id other than the
+  root's, a subagent session's that a per-session bus cannot see or, from the 0.99.1 pin, a compaction or
+  branch summary's), `sessions` (distinct session ids observed), `calls` (stream dispatches the meter observed, not turns: including one pi-ai ended as aborted before sending, and excluding a call the meter's own hard stop answered, which reaches no provider),
   `unresolved` (streams still unsettled when the job ended — non-zero means the totals are a **floor**, not
   a total) and `unpriced` (calls whose usage carried no finite cost; counted rather than guessed, because a
   silent `0` would read as "this call was free"). The four original keys keep their meaning and position,
@@ -1341,12 +1409,13 @@ refactor apart.
     image cannot be held wrong.
   - **The provider key variable is derived from pi's own table via `findEnvKeys(provider)`**
     (`import { findEnvKeys } from "@earendil-works/pi-ai/compat"`), never hardcoded and never
-    pass-through. pi supports ~30 providers, each with its own variable, so "support any model" must not
+    pass-through. pi supports ~40 providers, each with its own variable, so "support any model" must not
     become "forward everything" — `no-broad-env-into-container` is a BLOCKER. Deriving the allowlist
     from pi's table rather than copying it means it **cannot drift** when pi adds a provider, and a
     hand-maintained copy is exactly the reinvention `no-reimplementing-pi` forbids. For `anthropic` the
-    call returns `["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]` — **the array order *is* the
-    precedence**, which is precisely the trap this rule exists for.
+    call returns `["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]` at the 0.99.1 pin
+    (the first name is new since 0.80.7, issue #509) — **the array order *is* the precedence**, which is
+    precisely the trap this rule exists for. pi sends the first as `Authorization: Bearer`, ahead of both.
   - **The same module answers `doctor`'s different question, and it is a different question** (issue
     #286). The container path only ever needs the keys the host HOLDS, which reads like
     `findEnvKeys(provider, hostEnv)` and is not (issue #311 corrects this: that call answers presence from
@@ -1360,18 +1429,21 @@ refactor apart.
     back to the real `process.env` for any name the caller's env lacks, so asking pi "is it set" reports
     the machine doctor is running ON rather than the deployment it is diagnosing. The candidate list is
     pi's; the presence test must be ours.
-  - **The question order is load-bearing: candidates first, catalog second.** An empty candidate list is
+  - **The question order: candidates first, catalog second.** An empty candidate list is
     disambiguated by `piProviders()` (pi's catalog, through the side-effect-free `providers/all`
-    specifier, never `compat`), and only then. The catalog is **not** a superset of the ids `findEnvKeys`
-    answers for — `radius` is purely dynamic, with a real key variable (`PI_GATEWAY_API_KEY`) and no
-    catalog entry — so asking membership first would report a working configuration as an unknown
-    provider. Empty **and** in the catalog means pi authenticates that provider without a key variable at
+    specifier, never `compat`), and only then. At the 0.80.7 pin the order was load-bearing: the catalog
+    was not a superset of the ids `findEnvKeys` answers for (`radius` was purely dynamic, with a real key
+    variable and no catalog entry), so asking membership first would have reported a working
+    configuration as an unknown provider. At the 0.99.1 pin (issue #509) `radius` is a builtin provider
+    whose variable is `RADIUS_API_KEY`, and the catalog covers every id pi's key table answers for;
+    `worker/test/env-allowlist.test.mjs` pins that superset against the artifact, and the order stays as
+    defence in depth for the day the two diverge again. Empty **and** in the catalog means pi authenticates that provider without a key variable at
     all (`amazon-bedrock` wants AWS credentials, `openai-codex` an OAuth login); the container env is a
     closed set of variables, so neither has a door, and `doctor` says so at setup time rather than at the
     first job. Empty **and** absent from the catalog is the `PI_PROVIDER=gemini` case: not a provider pi
     has, and the did-you-mean is derived the same way, by asking which provider reads
     `<PROVIDER>_API_KEY`.
-  - **One credential fact is written down here rather than derived, and only one.** (Issue #314 added a
+  - **One credential fact is written down here rather than derived, in two suffixes.** (Issue #314 added a
     second hand-written-looking table, `PROVIDER_STEERING_VARS`, and it is not an exception to this: it is
     a literal list in the source only so that `triggers.mjs` can stay import-free, and it is derived from
     the pinned artifacts by its own bolt in both directions. What follows is still the only fact this
@@ -1381,10 +1453,31 @@ refactor apart.
     them expires. The rule is a suffix (`/_OAUTH_TOKEN$/`) rather than a name set, because the
     expensive direction is the false green — a set would silently bless the next provider's OAuth
     variable — and it is pinned against pi in both directions rather than against a second copy.
+    Its sibling, added at the pi 0.99.1 bump (issue #509), is `/_AUTH_TOKEN$/`: a variable pi reads for a
+    provider but sends as `Authorization: Bearer` rather than as an API key (`ANTHROPIC_AUTH_TOKEN`, which
+    pi lists FIRST and resolves ahead of the API key; pi's own `getEnvApiKey` steps over it, which is the
+    evidence the distinction is pi's and not ours). The two do not overlap (`_OAUTH_TOKEN` does not end in
+    `_AUTH_TOKEN`), and `nonApiKeyKind` names which one a variable is, so doctor can give each its own advice.
     **It lives with the selection it drives, in `worker/src/provider-key.mjs`, and both `doctor` and the
     container path read it from there** (issue #311). `apiKeyVariable(candidates)` is that selection:
-    pi's first NON-OAuth candidate, falling back to pi's first only for a provider with no non-OAuth
-    variable at all. `doctor` NAMES a variable and the worker WRITES one, and those must be the same
+    pi's first candidate that is neither an OAuth token nor a bearer token, falling back to pi's first only
+    for a provider with no API-key variable at all. So an `auth.json` API key is ALWAYS written under the
+    provider's real API-key variable (`ANTHROPIC_API_KEY`), never under `ANTHROPIC_AUTH_TOKEN`, where pi
+    would send it in the wrong header, and never under `ANTHROPIC_OAUTH_TOKEN`.
+    **A host OAuth or bearer token in the worker's environment is FORWARDED, and doctor warns** (issue
+    #509 applies the OAuth token's rule to the bearer token unchanged): every held candidate reaches the
+    container under its own name in pi's order, the auth.json fallback does not fire while one is held,
+    and doctor's line is a ⚠ naming the API-key variable the token outranks. Forwarded rather than
+    refused because the worker and doctor must agree on what a job spends, and a gateway bearer token is a
+    legitimate service credential. This does not always match pi on the same host, and the case is stated:
+    the worker's first source is the environment and auth.json only its fallback, while pi takes a stored
+    api_key credential FIRST (pi-ai/dist/auth/helpers.js). With an api_key login in auth.json AND a host
+    OAuth or bearer token set, the job spends the token while `pi` on the host would spend the stored key;
+    doctor's warning then adds that the auth.json API key is NOT used while the token is set, and says to
+    unset the token to spend the pi login, or to keep it only if the token is the credential jobs are meant
+    to spend. Separately, doctor warns when the VALUE in `ANTHROPIC_API_KEY` (or an auth.json api_key for
+    `anthropic`) contains `sk-ant-oat`: pi's `isOAuthToken` judges the value, not the variable, and sends
+    it as a Bearer subscription login. `doctor` NAMES a variable and the worker WRITES one, and those must be the same
     variable or a green setup line points at a name no job uses — the #286 failure, one module over. A
     module with **no imports** is what lets both have it: the container path must not import `doctor`, and
     `doctor` must not statically import the pi-loading module (it uses `await import` so its Node-floor
@@ -1512,9 +1605,10 @@ refactor apart.
   `--pids-limit` bounds a fork bomb. `--memory` bounds an OOM to one job rather than the host.
   `PLAYWRIGHT_BROWSERS_PATH` resolves the collision between non-root execution and root-installed
   Chromium — see `DES-PLAYWRIGHT-CLI-NOT-CHROME-DEVTOOLS`.
-  **Env is an allowlist, never a pass-through**: `ANTHROPIC_OAUTH_TOKEN` silently takes *precedence*
-  over `ANTHROPIC_API_KEY`, so a stray variable in the host environment would quietly redirect which
-  credential every job spends. Pass exactly these.
+  **Env is an allowlist, never a pass-through**: `ANTHROPIC_OAUTH_TOKEN`, and from the 0.99.1 pin
+  `ANTHROPIC_AUTH_TOKEN` ahead of it, silently take *precedence* over `ANTHROPIC_API_KEY`, so a stray
+  variable in the host environment would quietly redirect which credential every job spends. Pass
+  exactly these.
   Absence of `-it` is worth knowing rather than relying on: with no TTY, pi enters print mode
   automatically. Pass `-p` explicitly anyway — inferring behaviour from TTY presence is fragile.
 - **Open**: `--pids-limit=512` is **UNVERIFIED** — no authoritative figure for headless Chromium exists in
@@ -1527,14 +1621,18 @@ refactor apart.
   and why.
 - **Evidence (upstream)**: `earendil-works/pi @ 5e336cf → packages/ai/src/env-api-keys.ts:69-71 → getApiKeyEnvVars`
   — verbatim: `// ANTHROPIC_OAUTH_TOKEN takes precedence over ANTHROPIC_API_KEY` /
-  `return ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]` (the array order **is** the precedence) ·
+  `return ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]` (the array order **is** the precedence; at the
+  0.99.1 npm pin `pi-ai/dist/env-api-keys.js` `getApiKeyEnvVars` returns
+  `[ANTHROPIC_AUTH_TOKEN_ENV, ANTHROPIC_OAUTH_TOKEN_ENV, ANTHROPIC_API_KEY_ENV]`, and
+  `pi-ai/dist/providers/anthropic.js` resolves the first as `Authorization: Bearer`, issue #509) ·
   `→ packages/coding-agent/src/config.ts:515 → getAgentDir()` — `process.env[ENV_AGENT_DIR]` else
   `join(homedir(), CONFIG_DIR_NAME, "agent")`: respects `$HOME`, **no hardcoded `/root`** ·
   `→ packages/coding-agent/src/config.ts:495 → ENV_AGENT_DIR = \`${APP_NAME.toUpperCase()}_CODING_AGENT_DIR\``
   (the override var is *derived*, not a literal — it resolves to `PI_CODING_AGENT_DIR`, and would follow a
   rename of `APP_NAME`) · `→ main.ts:99-108` (no TTY → print mode) ·
   `@earendil-works/pi-ai 0.80.7 → dist/utils/provider-env.js → getProviderEnvValue` — verbatim:
-  `env?.[name] || process.env[name] || …`, i.e. **an injected env is a preference, not an isolation
+  `env?.[name] || process.env[name] || …` (the same order at 0.99.1, `:38-42`, with a Bun sandbox fallback
+  after `process.env`), i.e. **an injected env is a preference, not an isolation
   boundary**, which is why the presence half of the provider-key question is answered here and not by pi ·
   `→ dist/env-api-keys.js → findEnvKeys` — returns the names it considers PRESENT, which per the line above
   means present in the env it is handed **or** in the real `process.env`, and
@@ -3338,8 +3436,8 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   session option and would otherwise be dropped in exactly the silence this field's validation refuses).
 
   **Refused at load** for a non-array, an empty array, a non-string or empty member, a duplicate member,
-  and -- the load-bearing one -- **any name outside the pinned built-in set** (`read`, `bash`, `edit`,
-  `write`, `grep`, `find`, `ls` at pi 0.80.7): pi consults `excludeTools` only through a set filter, so
+  and -- the load-bearing one -- **any name outside the pinned built-in set** (`read`, `bash`,
+  `powershell`, `edit`, `write`, `grep`, `find`, `ls` at pi 0.99.1; `powershell` joined in issue #509): pi consults `excludeTools` only through a set filter, so
   an unknown name excludes nothing, silently, which puts a misspelled member in `run.backend`'s
   destructive-absence class. The set is `EXCLUDABLE_TOOL_NAMES` in `triggers.mjs`, hand-written because
   the shared validator is pure and pi-free, and BOLTED twice against the pinned artifact
@@ -3429,10 +3527,15 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   **The set deliberately EXCLUDES a provider's KEY variables**, and that is what keeps
   `REQ-TRIGGER-SECRETS`' documented bound true: an `anthropic` job may still bind `OPENAI_API_KEY` for a
   flow that talks to OpenAI, refused pre-spend only for the job's OWN provider. Including them would have
-  broken that bound arbitrarily, because only four of pi's thirty-one key variables happen to appear as
-  literals in a scanned artifact -- `OPENAI_API_KEY` would refuse while `GROQ_API_KEY` stayed bindable, for
-  a reason no operator could predict. The bolt subtracts them by asking `providerKeyCandidates`, so the two
-  gates stay one derivation rather than two lists. The AWS credential variables are NOT an exception to
+  broken that bound arbitrarily, because only five of pi's thirty-eight key variables (0.99.1 pin; four of
+  thirty-one at 0.80.7) happen to appear as literals in a scanned artifact -- `OPENAI_API_KEY` would refuse
+  while `GROQ_API_KEY` stayed bindable, for a reason no operator could predict. The bolt subtracts them by
+  asking `providerKeyCandidates`, so the two gates stay one derivation rather than two lists. **One key
+  variable is kept anyway, by name** (`RETAINED_KEY_VARIABLES`, issue #509): `ANTHROPIC_AUTH_TOKEN` was in
+  the set since #314, when it was read only by the Anthropic SDK; at 0.99.1 pi made it anthropic's first key
+  variable, and the subtraction would have released it for every non-anthropic trigger. A version bump does
+  not widen what a trigger may bind without an operator deciding it, so it stays refused at load; a test
+  asserts it is still both a pi key variable and read by the SDK. The AWS credential variables are NOT an exception to
   this: pi's key table has no `amazon-bedrock` entry at all, so nothing else reserves them.
   **Nine names cannot be reached by the scan and are listed by hand, which is stated rather than glossed.**
   The AWS four are read inside `@smithy/core`, one dependency hop past the scan's boundary, two of them
@@ -3447,23 +3550,36 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `GCE_METADATA_HOST` and some forty more) is not covered; recursing it would reserve most of two SDKs'
   surface and take a large bite out of what an operator may legitimately bind, so the boundary is a choice.
   `NODE_OPTIONS`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE` and `NODE_TLS_REJECT_UNAUTHORIZED` are excluded as
-  properties of the RUNTIME rather than of a provider, and they predate this gate. And a bound on the whole
+  properties of the RUNTIME rather than of a provider, and they predate this gate. So are `HOME`, `PATH`,
+  `APPDATA`, `USERPROFILE` and `XDG_CONFIG_HOME`, which the scan reaches from the 0.99.1 pin on: the
+  Anthropic SDK reads the four directory variables only to find its default config directory, and `PATH`
+  inside its agent toolset, which pi does not use. The bolt subtracts them by name and asserts each is
+  still found, so a stale subtraction fails; `HOME` is reserved anyway, because the worker writes it
+  (issue #341). The Anthropic-specific switch for the same directory, `ANTHROPIC_CONFIG_DIR`, IS in the set. And a bound on the whole
   family: a trigger author picks a NAME and a vault REFERENCE, never a value, so every one of these needs
   the operator's own vault to hold a useful string at a reference the author may name -- equally true of
   `AZURE_OPENAI_BASE_URL`, so it bounds the severity of the set rather than distinguishing parts of it. That is also why the set holds
   names nobody would have written down: `AWS_CONTAINER_CREDENTIALS_FULL_URI` makes the AWS SDK fetch
   credentials from a URL of the trigger's choosing, `AWS_WEB_IDENTITY_TOKEN_FILE` and
   `GOOGLE_APPLICATION_CREDENTIALS` are paths to credential files, and `AWS_BEDROCK_SKIP_AUTH` is an auth
-  bypass. The provider KEY variables are left in rather than subtracted, which closes a gap of its own:
+  bypass. From the 0.99.1 pin (issue #509) the set also holds `ANTHROPIC_CUSTOM_HEADERS` and
+  `OPENAI_CUSTOM_HEADERS`, and they are the sharpest members: both SDKs fold the variable into every
+  client's headers, and a line naming the credential header REPLACES the key pi was given (measured
+  through pi's own request path: `x-api-key` for anthropic, `Authorization` for openai-responses; pinned
+  in `worker/test/env-allowlist.test.mjs`). The derivation also dropped three names nothing reads any more
+  (`PI_GATEWAY`, `GEMINI_NEXT_GEN_API_BASE_URL`, `GEMINI_NEXT_GEN_API_LOG`). The provider KEY variables are left in rather than subtracted, which closes a gap of its own:
   `providerKeyCandidates("amazon-bedrock")` is empty, so before this the pre-spend gate reserved NOTHING at
   all for a bedrock deployment.
   **The ANTHROPIC pair is in the set even though pi shadows it**, because the shadowing is conditional.
   `baseURL: model.baseUrl` is passed explicitly on every branch, so the SDK's `readEnv` default never
-  fires -- while `model.baseUrl` is a non-empty string. Every builtin anthropic model carries one; a model
-  declared in the operator's global overlay, which the runner PREFERS, need not, and with it absent the
-  request goes wherever `ANTHROPIC_BASE_URL` says. Both measured, and both pinned in
-  `worker/test/env-allowlist.test.mjs`: the inert case, and the control that makes the inert case mean
-  something.
+  fires -- while `model.baseUrl` is a non-empty string. Every builtin anthropic model carries one. At the
+  0.80.7 pin a model with no baseUrl reached the client with `baseURL: undefined` and the request went
+  wherever `ANTHROPIC_BASE_URL` said; at the 0.99.1 pin such a model never reaches the client at all
+  (`getAnthropicCompat` reads `model.baseUrl.includes(...)` first and throws, measured), so the shadowing is
+  unconditional on that path today. Both are pinned in `worker/test/env-allowlist.test.mjs`: the inert
+  case, the new throw, and a control re-derived for 0.99.1 that builds the client pi builds, from the SDK
+  copy pi imports, minus `baseURL`, and shows the environment winning, which is what makes the inert case
+  mean something.
 
   **Unlike `run.replicas`, this is legal on a `cron` trigger.** That refusal turns on a local `/workspace`
   being the operator's own folder with no clone, which is a fact about two agents sharing a working tree and
@@ -4823,8 +4939,10 @@ validator rather than a second copy of it.
 ## INT-SUBSCRIPTIONS-FILE-CONTRACT
 
 - **Producer/Consumer**: operator → admin extension; the worker exports the validator and reads nothing.
-  Subscription-backed providers ship all-zero rate tables (pi-ai's `kimi-coding`, `zai-coding-cn`), so their
-  runs record cost 0 and read as free when they are prepaid — and the env boundary refuses
+  pi-ai's rate table never states a subscription plan's price: at 0.80.7 `kimi-coding`, `zai` and
+  `zai-coding-cn` shipped all-zero tables, so prepaid runs recorded cost 0 and read as free; at the 0.99.1
+  pin most of their models carry an implied API-equivalent rate (issue #509), so the same prepaid runs
+  record a positive cost and read as metered. Either way the table is the wrong price — and the env boundary refuses
   OAuth/subscription logins by design (`env-allowlist.mjs`), so an operator-side declaration is the only
   place the real price can come from (`DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY`).
 - **Location**: `PI_SUBSCRIPTIONS_FILE` (the admin defaults to `./subscriptions.json` in its working
@@ -4958,7 +5076,7 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
   ```
   listPricedModels()            -> [{ provider, id, cost }]        // every builtin model; cost is pi-ai's table, read-only
   getPricedModel(provider, id)  -> Model | null                    // own-key catalog lookup; never throws on garbage
-  isZeroRated(model)            -> bool                            // all four base rates strictly 0 (subscription providers)
+  isZeroRated(model)            -> bool                            // all four base rates strictly 0 (a fact about the table; NOT a subscription signal since 0.99.1)
   piAiVersion()                 -> "major.minor.patch" | null      // the RESOLVED pi-ai package's version, read from disk
   reprice(quad, {provider,id})  -> { usd, ratesVersion } | null    // quad = {input, output, cacheRead, cacheWrite, cacheWrite1h}
   ```
@@ -4976,8 +5094,10 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
   `subscriptions`' parser already use. Enumeration goes through `@earendil-works/pi-ai/providers/all`
   (declared side-effect-free) — **never `./compat`**, whose module scope registers api providers.
   The enforcement is a **pinned-artifact guard** (`worker/test/pricing.test.mjs`): it asserts
-  `calculateCost`'s mutation contract, the tier threshold key, concrete opus/codex rates, the codex 272k
-  tier boundary, the all-zero kimi/zai tables, and the exact resolved version — so a pi-ai pin bump that
+  `calculateCost`'s mutation contract, the tier threshold key, concrete opus and `openai/gpt-5.4` rates
+  (the `openai-codex/gpt-5.4` entry is gone at 0.99.1 and its removal is pinned), the gpt-5.4 272k tier
+  boundary, the all-zero qwen-token-plan tables, the now-priced kimi-coding and zai-coding-cn tables, and
+  the exact resolved version — so a pi-ai pin bump that
   reshapes pricing **fails the build, not the screen**.
 - **Traces to**: `DES-COST-FOLD-BY-SCAN`, `DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY`,
   `REQ-TOKEN-ACCOUNTING-AND-CAPS`, `REQ-UPSTREAM-CONTRACT-TESTS`
@@ -5420,3 +5540,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-29 | Issue #477, with PR #478's gate rounds 1 and 2. **`INT-CANCEL-CHANNEL-CONTRACT` AMENDED**, the state-dispatch bullet: queued and held cancels still write no run record, and the CLI's line reads the job's past off BullMQ's `attemptsMade` (not `attemptsStarted`, which a hold's `moveToDelayed` increments): none is "it never ran; no record written", one or more is attempts made with whatever they recorded kept, never a promised record, since a gate failing above the processor's `try` counts an attempt and records nothing; `removeHeldJob` returns `attemptsMade` for the panel's footer. The request and ack keys, their TTLs and the active path are UNCHANGED, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: no field or reason token changes. **`INT-DEPLOYMENT-POINTER-CONTRACT` UNCHANGED, checked**: the panel's Valkey reads still take the pointer's `VALKEY_URL`; one that names no database, or a database that Valkey does not have, is now a degraded read naming it rather than a throw or a read of database 0. |
 | 2026-09-29 | Issue #480. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the rules bullet: `pi-dispatch init` now copies the package's `deploy/egress-proxy.conf` into a deployment folder that lacks one, create-only, so the docker proxy's `./deploy/egress-proxy.conf` mount exists in a folder made without a clone. The rules themselves, the allowlist, the proxy's argv and its mounts are UNCHANGED, checked. Being create-only, a copy init made is not refreshed when the package is upgraded, the same as a clone's file between pulls; `up`'s proxy judgement compares mount paths, not file contents, so a stale copy is not reported by it. **UNCHANGED, checked**: `INT-CONTAINER-RUNTIME-CONTRACT` (no job flag or mount moves). |
 | 2026-09-29 | Issue #484. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the rules bullet: a copy of the package's `deploy/egress-proxy.conf` outside the package (the deployment folder's, which `init` writes create-only since issue #480, and the podman venue's account-owned copy `service install` writes) is compared by its bytes with the installed package's file, because an upgrade rewrites neither and the mount-path comparison `up` and `doctor` already made could not see old rules at the right path. `doctor` warns (⚠) for the shipped proxy only, silent for an identical or absent copy; `up` offers the folder copy's refresh, asked even under `--yes`, with a backup, a same-directory temp file renamed over the copy, and no symlink followed, then offers `docker restart` of a running current proxy, and `docker unpause` then `docker restart` of a paused one (PR #491's review), since a renamed file is not the one a running or paused container's bind mount holds. **UNCHANGED, checked**: the rules' content, the allowlist and its scaffold, the proxy's argv and its two mounts, the mount-path drift rule (`egress-proxy-state.mjs`), the podman Quadlet plan (it already compared and replaced the account copy under `--force`), and the job-side contract (no job flag, mount or environment variable moves). |
+| 2026-09-30 | Issue #509, the pi 0.80.7 -> 0.99.1 bump, one row for the runner, worker and admin halves. **`INT-SDK-SESSION-OPTIONS` AMENDED**: the model/auth wiring is one `ModelRuntime` (OQ-005's migration shipped): created after enforceOfflineMode and enforceTelemetryOff with a discarding models store and `allowModelNetwork: false`, `getModel`, `hasConfiguredAuth(provider)`, handed to createAgentSession as `modelRuntime`; the preamble and the pinned-artifact evidence are re-verified at 0.99.1, the 0.80.7 evidence kept as the record; the option set is re-pinned (modelRuntime replaces authStorage and modelRegistry) and the tool factories are eight (`powershell`). Trap (g)'s invariant now rests on the injected ModelRuntime class plus an IDENTITY check of the compat copy against pi's VIRTUAL_MODULES (the ModelRegistry mutation probe cannot work: the registry no longer writes to pi-ai's registry). Trap (h) REWRITTEN: the process-wide choke point moved to ModelRuntime.prototype, the api-provider registry is kept only for legacy extension calls, and the two halves meet on composed providers, deduplicated by an AsyncLocalStorage (measured). New trap (m): cacheWarming off, maxAgentDelayMs pinned, install telemetry off with PI_TELEMETRY forced to "0", a discarding models store, no builtin: extension loaded. Trap (f) re-worded for `SettingsManager.inMemory`, which now accepts an options argument the runner does not pass (trust default unchanged); trap (l) re-checked at 0.99.1 (open still throws on an unparseable file, measured; the session-dir variable is read only by the CLI's main.js). Traps (a) to (e), (i) to (k) UNCHANGED, checked against 0.99.1 (loader tests green). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: three new rows, all under existing codes: pi's unresumable retry after a tool ran (prompt() rejects while a retry is in flight) is `2` / `retry-unresumable` instead of an unclassified `1` that the queue would re-run on a fresh budget (measured by the loopback test); `stopReason: "deferred"` is `2` / `deferred`; `"pending"` is `1` / `pending`. StopReason is seven values at the pin and the runner's list is pinned to the union. The Bedrock refusal reads the exception NAME `UnrecognizedClientException: ` (pi-ai now carries AWS's message and no status); AccessDeniedException and ExpiredTokenException stay residual (no real-AWS measurement of the transient forms). The KnownApi union is the same ten families. Every other row UNCHANGED, checked by the loopback table at 0.99.1. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED in wording only**: a non-zero `otherTotal` is spend under a session id other than the root's, since a compaction or branch summary now lands there; the `tokens` keys, the `usage` ledger (its `piAi` now stamps 0.99.1), `context` and `session` UNCHANGED, checked. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: anthropic's key list is now `[ANTHROPIC_AUTH_TOKEN, ANTHROPIC_OAUTH_TOKEN, ANTHROPIC_API_KEY]` and pi sends the first as `Authorization: Bearer`; `provider-key.mjs` gains the `/_AUTH_TOKEN$/` suffix beside `/_OAUTH_TOKEN$/`, so an auth.json API key is always written under `ANTHROPIC_API_KEY`, and a host bearer token is forwarded with a doctor warning exactly as a host OAuth token is; radius's variable is `RADIUS_API_KEY` and the catalog is now a superset of the key table, so the candidates-first order is defence in depth; the getProviderEnvValue order is re-checked at 0.99.1. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: the excludable set is the eight built-ins; the steering set is re-derived (twenty-one names in, three out), `ANTHROPIC_AUTH_TOKEN` is retained by name, the OS directory variables are subtracted as runtime properties, the custom-header variables are pinned as credential substitution, and the no-baseUrl control is re-derived. **`INT-SUBSCRIPTIONS-FILE-CONTRACT` and `INT-PRICING-EXPORT-CONTRACT` AMENDED**: kimi-coding, zai and zai-coding-cn carry implied prices (all three were all-zero at 0.80.7), `isZeroRated` is no longer a subscription signal, and the pricing pins moved to openai/gpt-5.4 and the qwen-token-plan tables. UNCHANGED, checked: the auth.json refusals (OAuth, command/variable-reference, non-string, companion env), the closed container env map. Doctor also names the auth.json key a host token displaces (the worker reads the environment first, pi on the host reads the stored key first), and warns on an `sk-ant-oat` value in the API-key variable. |

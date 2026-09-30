@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import {
 	capExitMessage,
 	captureTerminal,
+	classifyPromptRejection,
 	classifyStopReason,
 	classifyThrow,
 	configError,
@@ -62,13 +63,22 @@ test("'length' exits 0 but is flagged truncated -- not hidden by a default branc
 	assert.equal(outcome.truncated, true, "a truncated run must be visible, not silently 'success'");
 });
 
-test("every one of pi's five stopReasons is handled explicitly", () => {
-	// packages/ai/src/types.ts:380. If pi's union grows, this fails rather than guessing.
-	assert.deepEqual(STOP_REASONS, ["stop", "length", "toolUse", "error", "aborted"]);
+test("every one of pi's seven stopReasons is handled explicitly", () => {
+	// pi-ai 0.99.1 dist/types.d.ts:311, in the union's own order; pinned-api.test.mjs holds this list to that
+	// line of the pinned artifact. If pi's union grows, this fails rather than guessing.
+	assert.deepEqual(STOP_REASONS, ["pending", "stop", "length", "toolUse", "error", "aborted", "deferred"]);
 	for (const stopReason of STOP_REASONS) {
 		const outcome = classifyStopReason({ stopReason });
 		assert.ok(!String(outcome.reason).startsWith("unknown-"), `${stopReason} fell through`);
 	}
+});
+
+test("a deferred terminal is policy, a pending one is infra (issue #509)", () => {
+	// deferred: the provider holds the answer for later and still bills it; whatever asked for deferral asks
+	// again on a retry, so a queue retry pays twice and fetches nothing. pending: the stream stopped before the
+	// provider finished, no evidence the agent ran -- the no-terminal-message verdict under its own name.
+	assert.deepEqual(classifyStopReason({ stopReason: "deferred" }), { code: EXIT_POLICY, reason: "deferred" });
+	assert.deepEqual(classifyStopReason({ stopReason: "pending" }), { code: EXIT_INFRA, reason: "pending" });
 });
 
 test("an unknown stopReason is infra, not assumed benign", () => {
@@ -291,9 +301,17 @@ const AUTH_REFUSED_451 = [
 	googleWrap(googleBody(400, "INVALID_ARGUMENT", "x", [{ "@type": ERROR_INFO, reason: "API_KEY_INVALID" }]), 400, "Bad Request"),
 	googleWrap(googleBody(400, "INVALID_ARGUMENT", "x", [{ "@type": ERROR_INFO, reason: "ACCESS_TOKEN_TYPE_UNSUPPORTED" }]), 400, "Bad Request"),
 	googleWrap(googleBody(403, "PERMISSION_DENIED", "x", [{ "@type": ERROR_INFO, reason: "API_KEY_INVALID" }]), 403, "Forbidden"),
-	// Bedrock: the one measured refusal name, on HTTP/1 ([object Object]) and HTTP/2 (the stream junk).
+	// Bedrock: the one measured refusal NAME, whatever follows it (issue #509). pi-ai 0.99.1 prints AWS's own
+	// sentence and no status (the first row, verbatim as the loopback table in pinned-api.test.mjs measures
+	// it), or `<status>: <body>` when the SDK did not fold the body into its message; pi-ai 0.80.7 lost the
+	// message and printed the status and junk, on HTTP/1 ([object Object]) and HTTP/2 (the stream junk). The
+	// rule reads the name alone, so a status the old rule demanded (403) no longer matters, 401 included.
+	"UnrecognizedClientException: The security token included in the request is invalid.",
+	"UnrecognizedClientException: The security token included in the request is expired",
 	"UnrecognizedClientException: 403: [object Object]",
 	`UnrecognizedClientException: 403: ${STREAM_JUNK}`,
+	"UnrecognizedClientException: 401: [object Object]",
+	"UnrecognizedClientException: 4031: x",
 ];
 
 const NOT_AUTH_REFUSED_451 = [
@@ -338,21 +356,25 @@ const NOT_AUTH_REFUSED_451 = [
 	`[${googleWrap(API_KEY_INVALID_BODY, 400, "Bad Request")}]`,
 	"text that merely mentions API_KEY_INVALID and UNAUTHENTICATED",
 	'500: {"error":{"status":"UNAUTHENTICATED","details":[{"reason":"API_KEY_INVALID"}]}}',
-	// Bedrock: the transient and non-credential prefixes pi-ai maps, a status AWS was not seen to send,
-	// and each anchor boundary.
+	// Bedrock: the transient and non-credential prefixes pi-ai maps, in both the 0.99.1 form (AWS's message)
+	// and the 0.80.7 one, and each anchor boundary of the name rule.
+	"Throttling error: Too many requests, please wait before trying again.",
 	"Throttling error: 429: [object Object]",
 	"Service unavailable: 503: [object Object]",
 	"Validation error: 400: [object Object]",
-	"UnrecognizedClientException: 401: [object Object]",
 	// AccessDeniedException and ExpiredTokenException are residuals: the first also means an intermittent
 	// cross-region SCP/IAM denial or a propagating fix, told apart only by the message pi-ai loses; the
 	// second was never seen from real AWS.
+	"AccessDeniedException: User is not authorized to perform: bedrock:InvokeModelWithResponseStream",
+	"ExpiredTokenException: The security token included in the request is expired",
 	"AccessDeniedException: 403: [object Object]",
 	`AccessDeniedException: 403: ${STREAM_JUNK}`,
 	"ExpiredTokenException: 403: [object Object]",
 	" UnrecognizedClientException: 403: x",
 	"Error: UnrecognizedClientException: 403: x",
-	"UnrecognizedClientException: 4031: x",
+	"UnrecognizedClientExceptionX: 403: x",
+	"UnrecognizedClientException:403: x",
+	"UnrecognizedClientException 403: x",
 	"AccessDeniedException: 4031: x",
 	"AccessDeniedException: 403 x",
 	" AccessDeniedException: 403: x",
@@ -505,7 +527,18 @@ test("run-job.mjs caps every exit line and hands decideExit the pinned retry pre
 	assert.match(exitLines[0], /\.\.\.capExitMessage\(outcome\)/, "the decided outcome's exit line must be capped");
 	assert.match(src, /const capped = capExitMessage\(outcome\);\s*log\("exit", \{ code: capped\.code, reason: capped\.reason, message: capped\.message \}\)/, "the throw path's exit line must be capped");
 	assert.match(src, /loadRetryPredicate\(\{ module: usageMeter\.ok \? usageMeter\.module : null, candidates: resolvePiAiCompat\(\) \}\)/);
-	assert.match(src, /decideExit\(\{[\s\S]*?\n\t\tisRetryable,\n\t\}\);/, "decideExit must receive isRetryable");
+	assert.match(src, /decideExit\(\{[\s\S]*?\n\t\tisRetryable,\n\t\trejected,\n\t\}\);/, "decideExit must receive isRetryable, and the classified rejection");
+});
+
+test("run-job.mjs classifies a prompt() rejection only through classifyPromptRejection, and rethrows the rest (issue #509)", () => {
+	// Wiring the unit tests above cannot see. Without the catch, pi's unresumable retry is exit 1 and the queue
+	// re-runs paid work on a fresh budget; without the rethrow, every OTHER rejection (the preflight path)
+	// would vanish into a decided outcome; without the retry tracking, the verdict can never fire.
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	assert.match(src, /\} catch \(error\) \{\n\t\trejected = classifyPromptRejection\(error, \{ retryInFlight \}\);\n\t\tif \(!rejected\) throw error;\n\t\} finally \{/, "the prompt() catch must classify, and rethrow what it does not classify");
+	assert.ok(src.indexOf("await session.prompt(prompt);") < src.indexOf("rejected = classifyPromptRejection("), "the catch belongs to the prompt() call");
+	assert.match(src, /if \(event\.type === "auto_retry_start"\) \{\n\t\t\tretryInFlight = true;/, "auto_retry_start must arm the in-flight flag");
+	assert.match(src, /if \(event\.type === "auto_retry_end"\) retryInFlight = false;/, "auto_retry_end must clear it");
 });
 
 /**
@@ -569,4 +602,36 @@ test("run-job.mjs puts the turn budget's retryTurns on the decided exit line bes
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
 	const decided = (src.match(/log\("exit", \{[^\n]*/g) ?? [])[0] ?? "";
 	assert.match(decided, /turns: budget\.state\.turns, retryTurns: budget\.state\.retryTurns,/);
+});
+
+// --- issue #509: a prompt() that rejects while pi's own retry is in flight ---
+
+const UNRESUMABLE = "Cannot continue from message role: assistant";
+
+test("pi's unresumable retry is policy under its own name, not a queue retry of paid work (issue #509)", () => {
+	// The shape the loopback test in pinned-api.test.mjs measures at 0.99.1: a retry-shaped throw after the
+	// turn's tool ran, pi omits the failed attempt, and continue() refuses a transcript ending on the
+	// assistant. Exit 1 would re-run the whole job, model call and tool run included, on a fresh budget.
+	assert.deepEqual(classifyPromptRejection(new Error(UNRESUMABLE), { retryInFlight: true }), { code: EXIT_POLICY, reason: "retry-unresumable", message: UNRESUMABLE });
+	// Both conditions are required: the same words outside a retry are some other bug, and a different
+	// rejection during a retry is not this one. null leaves either to classifyThrow, unchanged.
+	assert.equal(classifyPromptRejection(new Error(UNRESUMABLE), { retryInFlight: false }), null);
+	assert.equal(classifyPromptRejection(new Error(UNRESUMABLE)), null);
+	assert.equal(classifyPromptRejection(new Error("fetch failed"), { retryInFlight: true }), null);
+	assert.equal(classifyPromptRejection(new Error(`x ${UNRESUMABLE}`), { retryInFlight: true }), null, "anchored at the start");
+	// pi's other continue() refusal wording belongs to the same family, and a non-Error rejection is read as text.
+	assert.equal(classifyPromptRejection(UNRESUMABLE, { retryInFlight: true })?.reason, "retry-unresumable");
+	assert.equal(classifyPromptRejection(new Error("Cannot continue from message role: toolResult"), { retryInFlight: true })?.reason, "retry-unresumable");
+});
+
+test("decideExit ranks a classified rejection below both budget aborts and above the terminal message", () => {
+	const rejected = { code: EXIT_POLICY, reason: "retry-unresumable", message: UNRESUMABLE };
+	// The last message a rejected prompt leaves is a toolUse, which alone would read as a clean exit 0.
+	const terminal = { stopReason: "toolUse" };
+	assert.deepEqual(decideExit({ budgetAborted: false, tokenAborted: false, terminal, rejected }), rejected);
+	assert.equal(decideExit({ budgetAborted: true, budgetTurns: 2, tokenAborted: false, terminal, rejected }).reason, "turn_budget");
+	assert.equal(decideExit({ budgetAborted: false, tokenAborted: true, terminal, rejected }).reason, "token_budget");
+	assert.deepEqual(decideExit({ budgetAborted: false, tokenAborted: false, terminal, rejected, command: { failed: true } }), rejected, "a command job's rejection is classified the same way");
+	// Absent, the decision tree is byte-identical to before.
+	assert.deepEqual(decideExit({ budgetAborted: false, tokenAborted: false, terminal }), { code: EXIT_COMPLETED, reason: "toolUse" });
 });

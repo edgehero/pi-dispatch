@@ -1,8 +1,12 @@
 /**
  * Operator-declared subscription plans (issue #53): the one place a flat-rate plan's real price can be
- * stated. Subscription-backed providers ship all-zero rate tables (pi-ai's kimi-coding and zai-coding-cn
- * both do), so their runs record cost 0 and read as FREE when they are PREPAID -- and the env boundary
- * REFUSES OAuth/subscription logins on purpose (env-allowlist.mjs: an expiring token cannot power an
+ * stated. pi-ai's rate table for a subscription-backed provider does not state the plan's price: at 0.80.7
+ * kimi-coding and zai-coding-cn shipped all-zero tables, so their runs recorded cost 0 and read as FREE
+ * when they were PREPAID; at the 0.99.1 pin most of their models carry an implied API-equivalent rate
+ * instead (issue #509), so the same prepaid runs now record a POSITIVE cost and read as METERED spend.
+ * Either way the table is the wrong price, and a zero rate is no longer even a hint that a plan exists
+ * (the qwen-token-plan family is all-zero, and so are free models of metered providers). And the env
+ * boundary REFUSES OAuth/subscription logins on purpose (env-allowlist.mjs: an expiring token cannot power an
  * unattended service), so no credential ever reaches the worker that could name the plan. An operator-side
  * declaration is therefore the only honest price source, and `subscriptions.json` is that declaration.
  *

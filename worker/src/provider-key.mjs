@@ -27,15 +27,40 @@
 // worker/test/provider-key.test.mjs -- never against a second copy of a table.
 export const OAUTH_KEY_RE = /_OAUTH_TOKEN$/;
 
+// The second fact of the same kind, added with the pi 0.99.1 bump (issue #509): a variable pi reads for a
+// provider that is NOT an API key, because pi sends it as a different header. At 0.99.1 pi lists
+// ANTHROPIC_AUTH_TOKEN FIRST for `anthropic` (pi-ai/dist/env-api-keys.js getApiKeyEnvVars), and its
+// resolver (pi-ai/dist/providers/anthropic.js) sends it as `Authorization: Bearer <value>` AHEAD of both
+// ANTHROPIC_OAUTH_TOKEN and ANTHROPIC_API_KEY. Without this rule `apiKeyVariable` picked it: an auth.json
+// API key would have been written into the container under the bearer name, so pi would send it as
+// `Authorization: Bearer` rather than as the `x-api-key` an API key travels in, and doctor would have told
+// an operator to set the bearer variable.
+// pi's own `getEnvApiKey` skips it for the same reason, which is the evidence that the distinction is real
+// rather than ours. A suffix rule, for OAUTH_KEY_RE's reason: a set naming one variable would silently
+// bless the next provider's bearer variable. Pinned against pi in worker/test/provider-key.test.mjs.
+export const BEARER_KEY_RE = /_AUTH_TOKEN$/;
+
+/**
+ * Why a variable pi reads is not an API key, or null when it is one. The two answers need different
+ * advice, so the caller is told which: an OAuth token is a subscription login that expires, a bearer token
+ * is a credential pi sends in another header and reads BEFORE the API key.
+ */
+export function nonApiKeyKind(name) {
+	if (OAUTH_KEY_RE.test(name)) return "oauth";
+	if (BEARER_KEY_RE.test(name)) return "bearer";
+	return null;
+}
+
 /**
  * The api-key variable to write and to name, given pi's candidate list for a provider in pi's own
- * precedence order. Never the OAuth token, whatever that precedence says: pi returns
- * ANTHROPIC_OAUTH_TOKEN first, "set your subscription login" is wrong advice for an unattended service,
- * and an api-key credential written under that name would be a value whose variable lies about what it
- * is. Falls back to the first candidate only for a provider with no non-OAuth variable at all, which is
- * no provider pi has today; `null` for a provider pi reads no key variable for, which is the caller's
- * cue to refuse rather than to guess.
+ * precedence order. Never the OAuth token and never the bearer token, whatever that precedence says: pi
+ * returns ANTHROPIC_AUTH_TOKEN then ANTHROPIC_OAUTH_TOKEN before ANTHROPIC_API_KEY, "set your subscription
+ * login" is wrong advice for an unattended service, and an api-key credential written under either name
+ * would be a value whose variable lies about what it is (under the bearer name pi would also send it in
+ * the wrong header). Falls back to the first candidate only for a provider with no API-key variable at
+ * all, which is no provider pi has today; `null` for a provider pi reads no key variable for, which is the
+ * caller's cue to refuse rather than to guess.
  */
 export function apiKeyVariable(candidates) {
-	return candidates.find((name) => !OAUTH_KEY_RE.test(name)) ?? candidates[0] ?? null;
+	return candidates.find((name) => nonApiKeyKind(name) === null) ?? candidates[0] ?? null;
 }

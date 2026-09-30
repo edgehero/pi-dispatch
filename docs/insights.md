@@ -49,7 +49,9 @@ tab you keep open picks the new fold up through its Reload/auto-reload controls.
 Every dollar keeps the class discipline of [`costs.md`](costs.md), visually: solid means metered,
 dashed and translucent means estimated (`~ … est.`), `≥` means a floor, a plan-covered bucket draws
 a `plan:<id>` chip and **no dollar bar** (prepaid is not free, and $0.00 would be a lie), an
-uncovered zero-rate bucket reads `$0 (unrated)`, and the word "free" appears nowhere. Color
+uncovered zero-rate bucket reads `$0 (unrated)`, and the word "free" appears nowhere. An undeclared plan
+whose provider pi prices at an API-equivalent rate (`kimi-coding`, `zai`, `zai-coding-cn`) draws that rate
+as metered spend, so declare it (see [`costs.md`](costs.md#declaring-subscriptions)). Color
 reinforces these markers; it never replaces them.
 
 ## Two windows, stated
@@ -90,7 +92,7 @@ on the deployment default; before pinning the trigger's `model` to something che
 What-if build-report @ anthropic/claude-haiku-4-5:
   estimate ~$4.87 est. total · ~$0.16 est. per run
   coverage 87% of observed runs ledgered · excluded 4 (no ledger)
-  rates pi-ai 0.80.7
+  rates pi-ai 0.99.1
 ```
 
 How to read it, class markers on ([`costs.md`](costs.md)): the flow's **median ledgered run** is

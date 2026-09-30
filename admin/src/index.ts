@@ -40,7 +40,7 @@
  * this factory applies above. A bare `/dispatch` against a POINTED-AT deployment whose installed
  * runtime differs from the pinned one says so once per process, and names setup as the fix.
  *
- * Tested pi version: 0.80.7 (SUPPORTED_PI_VERSION). The gate is the capability
+ * Tested pi version: 0.99.1 (SUPPORTED_PI_VERSION). The gate is the capability
  * probe, not the version: the factory registers nothing unless every API member
  * it consumes is present; on a miss it names the member and the tested version
  * on stderr and returns. A pi that DIFFERS from the pin but passes the probe
@@ -142,7 +142,7 @@ import { matchesKey } from "./keys.mjs";
 // consumes. It grows only when a task actually uses a new member.
 export const USED_API = ["registerCommand", "registerTool", "sendMessage", "on"] as const;
 
-export const SUPPORTED_PI_VERSION = "0.80.7";
+export const SUPPORTED_PI_VERSION = "0.99.1";
 
 /**
  * The advisory for running on a pi that is not the tested pin (issue #96). Pure over its two inputs

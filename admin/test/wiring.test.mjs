@@ -803,15 +803,15 @@ test("unset removes a key, leaving a valid empty overlay", async () => {
 test("the version advisory: pure comparison, and the drain fires once per process at info", async () => {
   const { mod, def } = await loadRegistered();
 
-  assert.equal(mod.computePiVersionAdvisory("0.80.7", "0.80.7"), undefined, "equal versions: nothing to say");
+  assert.equal(mod.computePiVersionAdvisory("0.99.1", "0.99.1"), undefined, "equal versions: nothing to say");
   assert.equal(
-    mod.computePiVersionAdvisory("0.0.0", "0.80.7"),
+    mod.computePiVersionAdvisory("0.0.0", "0.99.1"),
     undefined,
     "pi's own unreadable-package fallback means UNKNOWN, not different -- no bogus mismatch",
   );
-  const msg = mod.computePiVersionAdvisory("0.99.0", "0.80.7");
-  assert.match(msg, /running on pi 0\.99\.0/, "names the runtime version");
-  assert.match(msg, /tested with pi 0\.80\.7/, "names the tested version");
+  const msg = mod.computePiVersionAdvisory("1.0.0", "0.99.1");
+  assert.match(msg, /running on pi 1\.0\.0/, "names the runtime version");
+  assert.match(msg, /tested with pi 0\.99\.1/, "names the tested version");
   assert.match(msg, /things should work/, "reassures rather than scares");
   assert.match(msg, /@edgehero\/pi-dispatch-admin/, "points at the upgrade that resolves it");
 

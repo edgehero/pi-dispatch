@@ -29,8 +29,10 @@ import { getBuiltinModel, getBuiltinModels, getBuiltinProviders } from "@earendi
 /**
  * Every builtin pi-ai model, flattened to `{ provider, id, cost }`. `cost` is pi-ai's ModelCost
  * object passed BY REFERENCE -- it is pi-ai's data, callers treat it read-only. Rates are USD per
- * 1M tokens; an all-zero table is CORRECT data for subscription-backed providers (kimi-coding,
- * zai-coding-cn), not missing data -- `isZeroRated` is how callers tell the two apart.
+ * 1M tokens. An all-zero table is pi-ai's data, not missing data: at the 0.99.1 pin the all-zero
+ * providers include the qwen-token-plan family. It is NOT a subscription signal any more (issue #509):
+ * kimi-coding and zai-coding-cn, all-zero at 0.80.7, now carry implied API-equivalent rates on most
+ * models although their plans are prepaid, and plenty of pay-per-token providers list a free model.
  */
 export function listPricedModels() {
 	const out = [];
@@ -58,9 +60,11 @@ export function getPricedModel(provider, id) {
 }
 
 /**
- * True when all four base rates are zero -- the signature of a subscription-backed provider, whose
- * runs meter at $0 because the plan is prepaid (see subscriptions.mjs for where the real price
- * lives). Tiers are deliberately ignored: a zero-rate provider ships no tiers, and a priced provider
+ * True when all four base rates are zero: pi-ai rated the model at $0, which is a fact about the table
+ * and nothing more. It USED to be read as the signature of a subscription-backed provider; at the 0.99.1
+ * pin it is not (issue #509: kimi-coding and zai-coding-cn carry implied prices, and free models of
+ * metered providers are zero too), so a subscription is known only from subscriptions.json. Tiers are
+ * deliberately ignored: a zero-rate provider ships no tiers, and a priced provider
  * with a zero base rate somewhere does not become "free" by it. Null/malformed input is false --
  * "not zero-rated" is the safe answer for a thing that is not a model.
  */

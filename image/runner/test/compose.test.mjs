@@ -8,7 +8,7 @@ import { captureTerminal, decideExit, EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } 
 // pieces that composition rests on.
 
 test("captureTerminal reads agent_end.messages.at(-1) -- agent_end has no `message` field", () => {
-	// Verified against agent-session.d.ts@0.80.7: agent_end carries messages[], not message.
+	// Verified against agent-session.d.ts@0.99.1 (as @0.80.7): agent_end carries messages[] and willRetry, not message.
 	const assistant = { role: "assistant", stopReason: "stop" };
 	const terminal = captureTerminal(undefined, { type: "agent_end", messages: [{ role: "user" }, assistant] });
 	assert.equal(terminal, assistant);

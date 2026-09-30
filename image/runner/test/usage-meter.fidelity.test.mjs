@@ -3,20 +3,26 @@ import { rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { test } from "node:test";
+import { createJobModelRuntime } from "../src/model-runtime.mjs";
 import { createUsageMeter, installProcessUsageMeter } from "../src/usage-meter.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
- * WIRE FIDELITY: installing the meter must not change the request a provider sends.
+ * WIRE FIDELITY: installing the meter must not change the request a provider sends, on any path it wraps,
+ * and must count each request exactly once.
  *
- * The worry this retires. Overriding a BUILTIN api id flips compat's own dispatch: once
- * `getApiProvider(api)` is no longer the builtin instance, `shouldUseBuiltinModels` returns false and
- * compat stops routing catalog models through its own `compatModels` collection and calls OUR wrapper
- * instead. The wrapper reproduces that catalog branch (usage-meter.mjs's `fallbackModels`) precisely
- * because two of the builtin providers substitute baseUrl placeholders and inject headers in that
- * layer -- but "I reproduced it correctly" is a claim about behaviour, and reading the code is how the
- * mistakes in this project's history were made. So: send the SAME request twice, once through each
- * path, and compare what actually arrived.
+ * Three paths, because the 0.99.1 meter (issue #509) sits on two choke points and they meet on a third:
+ *   1. THE SESSION PATH for a builtin model: ModelRuntime.streamSimple, which is what createAgentSession's
+ *      streamFn calls. The runtime half only observes here, so identity of the request is the claim.
+ *   2. THE COMPAT PATH for a builtin model: pi-ai's legacy global streamSimple, what an extension reaches
+ *      with a bare pi-ai import. Overriding a builtin api id flips compat's own dispatch (its
+ *      getBuiltinProviderForModel answers undefined), and the compat wrapper reproduces that branch --
+ *      "I reproduced it correctly" is a claim about behaviour, so the same request is sent through each
+ *      and what arrived is compared.
+ *   3. THE COMPOSED PATH: a custom models.json provider on a builtin api with no builtin base, which pi
+ *      composes so that its stream resolves the api in the compat registry -- through the compat wrapper,
+ *      INSIDE a runtime call. Counted twice unless the two halves agree who counts (trap #5 in
+ *      usage-meter.mjs); an operator overlay provider is exactly this shape.
  *
  * A silently altered request is the worst possible failure mode here -- an auth header dropped or a
  * placeholder left unsubstituted turns into a provider error that looks like a model problem, on every
@@ -51,6 +57,9 @@ const BUILTIN_PROVIDER = "groq";
 const BUILTIN_API = "openai-completions";
 /** Literal, so nothing is read from the environment. Asserted on the wire, which catches env leakage. */
 const FIDELITY_KEY = "pi-dispatch-fidelity-key-sentinel";
+/** A custom provider with NO builtin base, on the same builtin api: the composed path (path 3). */
+const CUSTOM_PROVIDER = "pi-dispatch-fidelity-custom";
+const CUSTOM_MODEL = "custom-1";
 
 /** Minimal OpenAI-compatible SSE: one content delta, one finish with usage, then [DONE]. */
 function writeStubStream(res) {
@@ -103,85 +112,105 @@ function splitAuth(capture) {
 	return { authorization, rest: { method: capture.method, path: capture.path, headers, body: capture.body } };
 }
 
-test("installing the meter does not change the request that reaches the provider", { skip }, async () => {
+test("installing the meter changes no request on any wrapped path, and counts each exactly once", { skip }, async () => {
 	const captures = [];
 	const endpoint = await startCapturingServer(captures);
 	const root = tempDir("pi-dispatch-fidelity-");
 	let installed;
 	try {
-		// Override-only models.json config: no `models` key, so the BUILTIN catalog entries survive and
-		// only their baseUrl moves. That is what keeps this a test of the builtin dispatch path.
+		const base = `http://127.0.0.1:${endpoint.port}/v1`;
+		// Override-only config for the builtin: no `models` key, so the BUILTIN catalog entries survive and
+		// only their baseUrl moves. The custom provider declares its own model on the same api.
 		const modelsPath = join(root, "models.json");
 		writeFileSync(
 			modelsPath,
 			`${JSON.stringify(
-				{ providers: { [BUILTIN_PROVIDER]: { baseUrl: `http://127.0.0.1:${endpoint.port}/v1`, apiKey: FIDELITY_KEY } } },
+				{
+					providers: {
+						[BUILTIN_PROVIDER]: { baseUrl: base, apiKey: FIDELITY_KEY },
+						[CUSTOM_PROVIDER]: {
+							baseUrl: base,
+							apiKey: FIDELITY_KEY,
+							api: BUILTIN_API,
+							models: [{ id: CUSTOM_MODEL, name: "fidelity custom", api: BUILTIN_API, reasoning: false, input: ["text"], cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 4096 }],
+						},
+					},
+				},
 				null,
 				"\t",
 			)}\n`,
 		);
 
-		const authStorage = pi.AuthStorage.create(join(root, "auth.json"));
-		const modelRegistry = pi.ModelRegistry.create(authStorage, modelsPath);
+		const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir: root, modelsPath });
 		// Resolved from the catalog rather than hardcoded: a pin bump that retires one model id must not
 		// fail this as if fidelity had broken.
-		const model = modelRegistry.getAll().find((m) => m.provider === BUILTIN_PROVIDER && m.api === BUILTIN_API);
+		const model = modelRuntime.getModels(BUILTIN_PROVIDER).find((m) => m.api === BUILTIN_API);
 		assert.ok(model, `the pinned catalog must still ship a ${BUILTIN_PROVIDER} model on ${BUILTIN_API}`);
-		assert.equal(model.baseUrl, `http://127.0.0.1:${endpoint.port}/v1`, "the models.json override must have applied");
+		assert.equal(model.baseUrl, base, "the models.json override must have applied");
+		const custom = modelRuntime.getModel(CUSTOM_PROVIDER, CUSTOM_MODEL);
+		assert.ok(custom, "the custom provider's model must resolve");
 
-		const meter = createUsageMeter({});
-		// Installed once, for two reasons: it is the only thing that can name WHICH of the two pi-ai
-		// copies pi actually mutates (import.meta.resolve names the wrong one), and both requests must go
-		// through that same copy or the comparison is between unrelated modules.
-		installed = await installProcessUsageMeter({ modelRegistry, meter, log: () => {} });
-		assert.equal(installed.ok, true, "the meter must find the pi-ai copy pi actually mutates");
-		const compat = installed.module;
-
-		// Auth resolved exactly as pi's own streamFn resolves it, so the only variable between the two
-		// requests below is whether the meter's wrapper is in the dispatch chain.
-		const auth = await modelRegistry.getApiKeyAndHeaders(model);
-		assert.equal(auth.ok, true, `auth resolution failed: ${auth.error}`);
 		const context = {
 			systemPrompt: "fidelity system prompt",
-			messages: [{ role: "user", content: "fidelity user message" }],
+			messages: [{ role: "user", content: "fidelity user message", timestamp: 0 }],
 			tools: [],
 		};
-		const options = {
-			apiKey: auth.apiKey,
-			headers: auth.headers,
-			temperature: 0,
-			maxTokens: 16,
-			sessionId: "pi-dispatch-fidelity-session",
+		const options = { temperature: 0, maxTokens: 16, sessionId: "pi-dispatch-fidelity-session" };
+		const send = async (label, streamFn) => {
+			const message = await streamFn().result();
+			assert.notEqual(message.stopReason, "error", `${label} failed: ${message.errorMessage}`);
 		};
 
-		// BASELINE -- no meter. resetApiProviders() is what AgentSession.reload() calls; it clears every
-		// registration and re-registers the builtins as the instances shouldUseBuiltinModels compares
-		// against, so this really is the untouched dispatch path.
+		// BASELINES -- no meter anywhere yet.
+		await send("runtime baseline", () => modelRuntime.streamSimple(model, context, options));
+		await send("composed baseline", () => modelRuntime.streamSimple(custom, context, options));
+
+		const meter = createUsageMeter({});
+		installed = await installProcessUsageMeter({ ModelRuntime: pi.ModelRuntime, runtime: modelRuntime, meter, log: () => {} });
+		assert.equal(installed.ok, true, "the runtime half must install at the pin");
+		assert.equal(installed.tag, "nested", "the compat half must accept pi's own copy at the pin");
+		const compat = installed.module;
+
+		// METERED -- the same two requests through the wrapped runtime (the compat half armed as well).
+		await send("runtime metered", () => modelRuntime.streamSimple(model, context, options));
+		await send("composed metered", () => modelRuntime.streamSimple(custom, context, options));
+		assert.equal(meter.state.calls, 2, `each runtime request counted ONCE, the composed one included; got ${meter.state.calls}`);
+
+		// THE COMPAT PATH. resetApiProviders() is what AgentSession.reload() calls; it clears every registration
+		// and re-registers the builtins as the instances compat compares against, so this really is the
+		// untouched legacy path. The runtime half is still installed and must not see either request.
+		const compatOptions = { ...options, apiKey: FIDELITY_KEY };
 		compat.resetApiProviders();
-		const baseline = await compat.streamSimple(model, context, options).result();
-		assert.notEqual(baseline.stopReason, "error", `baseline request failed: ${baseline.errorMessage}`);
-
-		// METERED -- the wrappers back in place over the freshly reset builtins.
+		await send("compat baseline", () => compat.streamSimple(model, context, compatOptions));
+		assert.equal(meter.state.calls, 2, "a legacy compat call never enters a ModelRuntime, and the wrappers are wiped");
 		installed.arm();
-		const metered = await compat.streamSimple(model, context, options).result();
-		assert.notEqual(metered.stopReason, "error", `metered request failed: ${metered.errorMessage}`);
+		await send("compat metered", () => compat.streamSimple(model, context, compatOptions));
 
-		assert.equal(captures.length, 2, "both requests must have reached the endpoint");
-		const [before, after] = captures.map(splitAuth);
+		assert.equal(captures.length, 6, "every request must have reached the endpoint");
+		const [runtimeBefore, composedBefore, runtimeAfter, composedAfter, compatBefore, compatAfter] = captures.map(splitAuth);
 
-		// THE ASSERTION. Method, path, every non-auth header, and the serialised body -- byte for byte.
-		assert.deepEqual(after.rest, before.rest, "the metered request differs from the unmetered one");
+		// THE ASSERTIONS. Method, path, every non-auth header, and the serialised body -- byte for byte.
+		assert.deepEqual(runtimeAfter.rest, runtimeBefore.rest, "the metered runtime request differs from the unmetered one");
+		assert.deepEqual(composedAfter.rest, composedBefore.rest, "the metered composed request differs from the unmetered one");
+		assert.deepEqual(compatAfter.rest, compatBefore.rest, "the metered compat request differs from the unmetered one");
 
 		// ...and the key, checked separately so "identical" cannot mean "both unauthenticated". Equality
 		// with the literal sentinel also catches a real credential leaking in from the environment.
-		assert.equal(before.authorization, `Bearer ${FIDELITY_KEY}`, "the baseline request lost or altered its api key");
-		assert.equal(after.authorization, before.authorization, "the metered request altered the api key");
+		for (const [label, before, after] of [["runtime", runtimeBefore, runtimeAfter], ["composed", composedBefore, composedAfter], ["compat", compatBefore, compatAfter]]) {
+			assert.equal(before.authorization, `Bearer ${FIDELITY_KEY}`, `the ${label} baseline lost or altered its api key`);
+			assert.equal(after.authorization, before.authorization, `the metered ${label} request altered the api key`);
+		}
 
-		// THE CONTROL: proof the second request actually went THROUGH the wrapper. Without this the
-		// deepEqual above would pass trivially if arm() had silently done nothing -- which is precisely
-		// the silent no-op failure mode usage-meter.mjs is shaped around.
-		assert.equal(meter.state.calls, 1, "exactly the metered request may be observed -- not the baseline, not neither");
-		assert.equal(meter.state.total, 14, "the meter must have read the stub's usage off the settled stream");
+		// THE CONTROL: proof the metered requests actually went THROUGH the wrappers. Without this the
+		// deepEquals above would pass trivially if the install had silently done nothing -- which is
+		// precisely the silent no-op failure mode usage-meter.mjs is shaped around.
+		assert.equal(meter.state.calls, 3, "exactly the three metered requests may be observed -- not a baseline, not a double count");
+		assert.equal(meter.state.total, 3 * 14, "the meter must have read the stub's usage off each settled stream");
+		assert.deepEqual(
+			meter.usageSnapshot().models.map((row) => [row.provider, row.model, row.calls]).sort(),
+			[[BUILTIN_PROVIDER, model.id, 2], [CUSTOM_PROVIDER, CUSTOM_MODEL, 1]].sort(),
+			"each request on the row of the model it was dispatched on",
+		);
 	} finally {
 		installed?.uninstall();
 		await endpoint.close();

@@ -1,12 +1,13 @@
 /**
  * Build the EXACT environment a job container receives. Never a pass-through.
  *
- * `no-broad-env-into-container` is a BLOCKER, and for good reason: `ANTHROPIC_OAUTH_TOKEN`
- * silently outranks `ANTHROPIC_API_KEY`, so one stray host variable would redirect which
- * credential every job spends, with no error and no log line. So we forward a closed set.
+ * `no-broad-env-into-container` is a BLOCKER, and for good reason: `ANTHROPIC_OAUTH_TOKEN` (and, from
+ * the pi 0.99.1 pin on, `ANTHROPIC_AUTH_TOKEN` ahead of it) silently outranks `ANTHROPIC_API_KEY`, so one
+ * stray host variable would redirect which credential every job spends, with no error and no log line.
+ * So we forward a closed set.
  *
  * The provider key variable is DERIVED from pi's own table, not hardcoded. Deriving it means any of
- * pi's ~30 providers works with no code change here, and the list cannot drift when pi adds one, as a
+ * pi's ~40 providers works with no code change here, and the list cannot drift when pi adds one, as a
  * hand-copied table would. `getApiKeyEnvVars` (that table) is intentionally NOT exported by pi, which
  * is why `providerKeyCandidates` below has to recover it a different way.
  *
@@ -89,10 +90,12 @@ export function providerKeyCandidates(provider) {
  * `getProviders` from "/compat", which is a @deprecated alias for this exact function and reaching it
  * means loading compat's module-scope provider registration.
  *
- * Only ever consulted AFTER `providerKeyCandidates` comes back empty, and the order is load-bearing:
- * the catalog is NOT a superset of the ids `findEnvKeys` answers for. `radius` is a purely dynamic
- * provider with a real key variable (PI_GATEWAY_API_KEY) and no catalog entry, so asking this first
- * would call a working configuration unknown.
+ * Only ever consulted AFTER `providerKeyCandidates` comes back empty. At the 0.80.7 pin that order was
+ * load-bearing: `radius` was a purely dynamic provider with a real key variable and no catalog entry, so
+ * asking this first would have called a working configuration unknown. At the 0.99.1 pin (issue #509)
+ * radius is a builtin provider (key variable RADIUS_API_KEY) and the catalog covers every id pi reads a key
+ * for; env-allowlist.test.mjs pins that, and the order stays because it costs nothing and is the safe one
+ * the day the two diverge again.
  */
 export function piProviders() {
 	return getBuiltinProviders();
@@ -129,6 +132,24 @@ export function resolveProviderCredential({ provider, hostEnv, authFromPi = fals
 	const held = providerKeyCandidates(provider)
 		.map((name) => [name, hostEnv[name]])
 		.filter(([, value]) => value);
+	// EVERY held candidate is forwarded, in pi's order, including the two that are not API keys: a host
+	// ANTHROPIC_OAUTH_TOKEN and (from the 0.99.1 pin, issue #509) a host ANTHROPIC_AUTH_TOKEN, which pi reads
+	// FIRST among the variables and sends as `Authorization: Bearer`. Forwarded rather than refused, and the
+	// choice is the same one for both: the operator put the variable in the worker's environment, a gateway
+	// bearer token is a legitimate service credential, and the job env should carry what the worker's own
+	// environment says rather than a filtered version of it.
+	//
+	// That does NOT make the job agree with pi on this host in every case, and the case where it does not
+	// is stated rather than implied: the ENVIRONMENT is this function's first source and auth.json only its
+	// fallback, while pi itself takes a stored api_key credential FIRST (pi-ai/dist/auth/helpers.js, "a
+	// stored credential key wins") and the environment only without one. So with an api_key login in
+	// auth.json AND a host token set, the job spends the token while `pi` on the host would spend the stored
+	// key. Kept that way because the env-first order is this function's documented contract (its header)
+	// and the token is the operator's explicit setting; `doctor` is where it is said out loud, a warning
+	// that names the API key the token shadows and, in this case, that the auth.json key is not used while
+	// the token is set.
+	// What is NEVER done is WRITING an auth.json key under either token name: that choice is
+	// `apiKeyVariable`'s, below.
 	if (held.length > 0) {
 		return Object.fromEntries(held);
 	}
@@ -215,8 +236,8 @@ function credentialFromPiAuth(provider, agentDir, readFile, { hostEnv = {}, forw
 	const name = resolveEnvName(provider);
 	if (!name) {
 		// Two different facts, and they need different fixes -- the same split `doctor` makes, in the same
-		// order (candidates first, catalog second: `radius` has a key variable and no catalog entry, so
-		// asking membership first would call a working configuration unknown). The old message said "set it
+		// order (candidates first, catalog second: at 0.80.7 `radius` had a key variable and no catalog entry,
+		// so asking membership first would have called a working configuration unknown). The old message said "set it
 		// in the worker environment manually" for BOTH, which for the first is advice `doctor` correctly
 		// calls impossible: there is no variable to set.
 		if (piProviders().includes(provider)) {
@@ -239,7 +260,7 @@ function credentialFromPiAuth(provider, agentDir, readFile, { hostEnv = {}, forw
  * plus a conventional `<PROVIDER>_API_KEY`/`_KEY`. That convention is the part that drifts, and it was
  * wrong for 13 of the 34 provider ids that have a key variable at the pin -- `google` is
  * `GEMINI_API_KEY`, `huggingface` is `HF_TOKEN`, `moonshotai` is `MOONSHOT_API_KEY`, `github-copilot` is
- * `COPILOT_GITHUB_TOKEN`, `radius` is `PI_GATEWAY_API_KEY` -- so for those pi recognized nothing and a
+ * `COPILOT_GITHUB_TOKEN`, `radius` was `PI_GATEWAY_API_KEY` (RADIUS_API_KEY at 0.99.1) -- so for those pi recognized nothing and a
  * valid `pi login` refused every job. The convention happening to be right for the other 21 is what let
  * this survive: `anthropic` and `openai` are both in that set.
  *
@@ -251,7 +272,9 @@ function credentialFromPiAuth(provider, agentDir, readFile, { hostEnv = {}, forw
  * environment where every name is present -- which also closes a hermeticity hole the synthetic object
  * had: pi's `getProviderEnvValue` falls back to the real `process.env`, so on a host that exported
  * `ANTHROPIC_OAUTH_TOKEN` the old code resolved to THAT name. `apiKeyVariable` then picks the same
- * variable `doctor` names, from the same module, so the two cannot diverge again.
+ * variable `doctor` names, from the same module, so the two cannot diverge again. It skips both
+ * non-API-key kinds: the OAuth token, and (from the 0.99.1 pin, issue #509) the bearer token
+ * ANTHROPIC_AUTH_TOKEN, which pi lists first and sends as `Authorization: Bearer`.
  */
 function resolveEnvName(provider) {
 	return apiKeyVariable(providerKeyCandidates(provider));

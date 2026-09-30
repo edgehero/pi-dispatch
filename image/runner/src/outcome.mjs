@@ -8,8 +8,11 @@ export const EXIT_COMPLETED = 0; // agent ran -- INCLUDING concluding "I cannot 
 export const EXIT_INFRA = 1; // retryable: provider 5xx/429, network, our own bug
 export const EXIT_POLICY = 2; // not retried: turn budget, cap, config error, provider refused the credential
 
-/** pi-ai@0.80.7 dist/types.d.ts:273 -- all five. Enumerated so "length" cannot hide in a default branch. */
-export const STOP_REASONS = ["stop", "length", "toolUse", "error", "aborted"];
+/**
+ * pi-ai@0.99.1 dist/types.d.ts:311 -- all seven, in the union's own order. Enumerated so "length" (or a
+ * reason a pin bump adds) cannot hide in a default branch; outcome.test.mjs pins the list against that line.
+ */
+export const STOP_REASONS = ["pending", "stop", "length", "toolUse", "error", "aborted", "deferred"];
 
 /**
  * An error WE raised for a deterministic misconfiguration -- a bad/absent env var, a missing
@@ -61,10 +64,48 @@ export function classifyThrow(error) {
 }
 
 /**
+ * pi's own words when a retry it started cannot resume (pi-agent-core 0.99.1, agent.js:270 and
+ * agent-loop.js:33/64): `continue()` refuses a transcript whose last message is an assistant one.
+ */
+const UNRESUMABLE_RETRY = /^Cannot continue from message role: /;
+
+/**
+ * Classify a `session.prompt()` REJECTION that happened while one of pi's own auto-retries was in flight,
+ * or return null to leave the rejection to classifyThrow (the preflight path, unchanged).
+ *
+ * Issue #509, measured at 0.99.1 by the loopback test in pinned-api.test.mjs. When a retry-shaped error
+ * lands after the turn's tools have run (a listener throwing "fetch failed" on a tool result, the #455 A8
+ * shape), pi schedules a retry, omits the failed attempt from the model's view, and then its continue()
+ * throws because the transcript now ends on the assistant's tool call: prompt() REJECTS. At 0.80.7 the same
+ * shape was a second model call that the turn budget counted. Unclassified, the rejection is exit 1, and
+ * the queue re-runs the WHOLE job in a new container with a fresh budget: the model call and the tool run
+ * that already happened are paid for and executed again, which is exactly what #449/#455's rule forbids (a
+ * failed turn that made progress is counted, never re-run for free).
+ *
+ * So it is POLICY, exit 2, not retried, under its own reason rather than borrowing `turn_budget` (no cap
+ * fired, and a record that said one did would send the operator to the wrong knob). Why that is safe:
+ *   - The refusal is pi's, and determinate for this container: the omitted attempt is persisted, so no
+ *     second continue() from the same state can succeed.
+ *   - It cannot hit a job that made no progress. pi omits only the FAILED attempt, so the transcript ends
+ *     on an assistant message only when an earlier model call completed and was kept, i.e. the job already
+ *     paid for work (in the measured case, and ran its tool). A retry of a turn that ran nothing ends on
+ *     the user message and continues normally, and a queued follow-up or steering message is run instead
+ *     of the throw (agent.js drains both first).
+ *   - Both conditions are required: the message, and a retry in flight (auto_retry_start seen, no
+ *     auto_retry_end yet). The same words outside a retry are some other bug and stay classifyThrow's.
+ */
+export function classifyPromptRejection(error, { retryInFlight = false } = {}) {
+	if (!retryInFlight) return null;
+	const message = error instanceof Error ? error.message : String(error);
+	if (!UNRESUMABLE_RETRY.test(message)) return null;
+	return { code: EXIT_POLICY, reason: "retry-unresumable", message };
+}
+
+/**
  * Capture the terminal assistant message from the event stream.
  *
  * `agent_end` carries `messages: AgentMessage[]` and **no `message` field** (verified against
- * agent-session.d.ts at 0.80.7); `turn_end` carries `message`. Take whichever is present.
+ * agent-session.d.ts at 0.99.1, which adds `willRetry`); `turn_end` carries `message`. Take whichever is present.
  * The runner asserts the result is an assistant message before classifying -- see REQ tests --
  * because a future pi that ended a turn on a ToolResultMessage would give it no stopReason.
  */
@@ -87,13 +128,17 @@ export function captureTerminal(previous, event) {
  */
 // `isRetryable` is pi-ai's own transient-error predicate (loadRetryPredicate), threaded to the one branch
 // that reads it; null keeps every provider error retryable, which is what it was before issue #437.
-export function decideExit({ budgetAborted, budgetTurns, tokenAborted, terminal, command = null, isRetryable = null }) {
+// `rejected` is classifyPromptRejection's verdict on a prompt() that rejected, or null. It ranks BELOW both
+// budget aborts (a cap that fired is the better-named cause of whatever pi did next) and above everything
+// the terminal message could say, because a rejected prompt's last message is not the job's outcome.
+export function decideExit({ budgetAborted, budgetTurns, tokenAborted, terminal, command = null, isRetryable = null, rejected = null }) {
 	if (budgetAborted) {
 		return { code: EXIT_POLICY, reason: "turn_budget", turns: budgetTurns };
 	}
 	if (tokenAborted) {
 		return { code: EXIT_POLICY, reason: "token_budget" };
 	}
+	if (rejected) return rejected;
 	// A command job (issue #189, run.command): session.prompt("/name args") dispatches a registered
 	// extension command and returns with NO assistant message, so the no-terminal branch below would
 	// classify a clean headless run as infra and pay to retry a success. Three rules, in order:
@@ -138,8 +183,8 @@ export function decideExit({ budgetAborted, budgetTurns, tokenAborted, terminal,
  *   compose. Literals, not a generic `^.* API error \(`, so a new provider joins by proof, not by shape.
  * - Google's ErrorInfo reason, read by PARSING, never by matching bytes (issue #451). google-generative-ai
  *   and google-vertex stream, Google answers a streaming error as text/event-stream, and @google/genai
- *   (pinned 1.52.0 under pi-ai) JSON-parses an error body only for application/json, so it wraps Google's
- *   pretty-printed body TEXT as a string: `{"error":{"message":"<Google's JSON>","code":<http>,
+ *   (2.21.0 under the pi-ai 0.99.1 pin, 1.52.0 under 0.80.7; the loopback table measured both) JSON-parses
+ *   an error body only for application/json, so it wraps Google's pretty-printed body TEXT as a string: `{"error":{"message":"<Google's JSON>","code":<http>,
  *   "status":"<reason phrase>"}}`, and pi-ai passes that on unchanged. The outer `status` is the HTTP
  *   reason phrase ("Unauthorized"); the real verdict is inside the string. Google's own key order moved
  *   between two identical requests (M0-d), so googleRpcAuthRefused parses both layers and reads only
@@ -147,11 +192,15 @@ export function decideExit({ budgetAborted, budgetTurns, tokenAborted, terminal,
  *   google.rpc.ErrorInfo whose `reason` is in GOOGLE_AUTH_REASONS. A reason that only appears inside
  *   some other string (a message quoting `API_KEY_INVALID`) is never read. The single-layer
  *   application/json form is not read either: streaming never produces it (M0-d).
- * - `UnrecognizedClientException: 403: `: bedrock-converse-stream, where pi-ai names the SDK exception
- *   and then the status. It is what real AWS answered to a bogus access key and to a bogus session
- *   token (M0-d). ONLY this prefix is stable: pi-ai 0.80.7 serializes the consumed response stream
- *   instead of AWS's message, so the rest is `[object Object]` on HTTP/1 and stream-internals JSON on
- *   HTTP/2 (an upstream bug, recorded and not read). Any other status stays infra.
+ * - `UnrecognizedClientException: `: bedrock-converse-stream, where pi-ai prefixes the SDK exception's
+ *   NAME (formatBedrockError, pi-ai 0.99.1). It is what real AWS answered to a bogus access key and to a
+ *   bogus session token (M0-d). The name is the whole rule, and deliberately so: at 0.80.7 pi-ai lost
+ *   AWS's message and printed `UnrecognizedClientException: 403: [object Object]`, and 0.99.1 prints
+ *   AWS's own sentence with no status at all (`UnrecognizedClientException: The security token included
+ *   in the request is invalid.`), or `<status>: <body>` when the SDK did not fold the body into its
+ *   message. The exception name is what AWS sends in `x-amzn-errortype` and the SDK only ever raises it
+ *   for an unrecognised credential, so the text after it is never read. Every other Bedrock name stays
+ *   infra.
  *
  * Admission rule: only a shape MEASURED against a real endpoint with a real bogus credential, because
  * the costly mistake is a false refusal. NOT here, each a named residual in
@@ -220,7 +269,7 @@ const PROVIDER_AUTH_REFUSED = [
 	/^OpenAI API error \((?:401|403)\): /,
 	/^Azure OpenAI API error \((?:401|403)\): /,
 	/^Mistral API error \((?:401|403)\): /,
-	/^UnrecognizedClientException: 403: /,
+	/^UnrecognizedClientException: /,
 	{ test: googleRpcAuthRefused },
 ];
 
@@ -352,6 +401,20 @@ export function classifyStopReason(terminal, isRetryable = null) {
 		case "stop":
 		case "toolUse":
 			return { code: EXIT_COMPLETED, reason: terminal.stopReason };
+
+		case "deferred":
+			// The provider accepted the request and holds the answer for LATER retrieval (pi-ai's deferred
+			// responses, 0.99.1): the job ends without the work, while the provider still completes, and bills,
+			// the request. Nothing in the runner asks for one (SimpleStreamOptions.deferred is never set), so a
+			// deferred terminal means something in the job's own configuration asked for it and will ask again:
+			// a queue retry would pay for a second deferred request and fetch neither. Determinate, so policy.
+			return { code: EXIT_POLICY, reason: "deferred" };
+
+		case "pending":
+			// pi-ai's placeholder for a message still being produced. As a TERMINAL it means the stream stopped
+			// before the provider finished, which is no evidence the agent ran: the no-terminal-message verdict,
+			// with its own name so the record says which.
+			return { code: EXIT_INFRA, reason: "pending" };
 
 		default:
 			// An unknown stopReason means pi's union grew under our pin. Do not guess it

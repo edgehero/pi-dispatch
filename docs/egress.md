@@ -234,8 +234,8 @@ the policy is armed, `PI_FORWARD_ENV` refuses those four names at boot: a forwar
 at a proxy of your own and would read exactly like the control working.
 
 **And then loading pi took the proxy away (issue #427).** Every measurement above was of `fetch` and the SDK
-on their own, never after pi was loaded, which is the runner's case. The pinned pi (0.80.7) depends on npm
-`undici` 8.5.0, and loading it replaces the global dispatcher the flag installs with one that ignores the proxy
+on their own, never after pi was loaded, which is the runner's case. The pinned pi (0.80.7 at the time) depended on npm
+`undici` 8.5.0 (0.99.1, the pin now, carries 8.10.2 and does the same, issue #509), and loading it replaces the global dispatcher the flag installs with one that ignores the proxy
 variables. In the job image, on an internal network with the proxy attached:
 
 | | |
@@ -250,7 +250,9 @@ env-proxy dispatcher itself, from pi's own `undici`, right after pi is loaded, a
 Before, it was a plain `fetch` and stayed green through all of this. On a job image built before the fix, the
 canary says the image cannot find that module, rather than reporting a policy result. That the runner's entrypoint
 calls the module, before its first request, is checked in CI, where the job image's contract job runs the real
-entrypoint against a stub proxy.
+entrypoint against a stub proxy. The runner's restored dispatcher tunnels every origin (`proxyTunnel: true`,
+as pi's own CLI does since undici 8.7 stopped tunnelling `http://`), so an `http://` provider is a CONNECT
+to port 80, which the shipped policy refuses, as before.
 
 ## What this does not buy you
 

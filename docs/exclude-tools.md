@@ -6,7 +6,7 @@ cannot run a shell or modify a file, whatever the prompt says and whatever the i
 
 ```jsonc
 { "on": { "type": "comment", "phrase": "@pi" },
-  "run": { "kind": "forgejo", "flow": "triage", "excludeTools": ["bash", "edit", "write"] } }
+  "run": { "kind": "forgejo", "flow": "triage", "excludeTools": ["bash", "powershell", "edit", "write"] } }
 ```
 
 This is the first enforced in-container permission in pi-dispatch. Everything else the guardrails say
@@ -19,16 +19,17 @@ so the enforcement is visible in the job log, not taken on faith.
 
 ## What you can exclude
 
-The built-in tools of the pinned pi, and nothing else: `read`, `bash`, `edit`, `write`, `grep`,
-`find`, `ls`. Any other name refuses when the file loads, and the refusal prints this whole set. That
+The built-in tools of the pinned pi, and nothing else: `read`, `bash`, `powershell`, `edit`, `write`,
+`grep`, `find`, `ls`. Any other name refuses when the file loads, and the refusal prints this whole set. That
 strictness is not pedantry: pi silently ignores unknown names in its exclusion list, so a misspelled
 `"Bash"` would exclude nothing while your file reads as though it did. A field that can be quietly
 wrong about a permission is worse than no field, so the loader refuses what pi would ignore.
 
 One nuance worth knowing: at the pinned version only `read`, `bash`, `edit` and `write` are ACTIVE by
-default; `grep`, `find` and `ls` are registered but inactive until something activates them.
+default; `powershell`, `grep`, `find` and `ls` are registered but inactive until something activates them.
 Excluding an inactive tool still matters, because the exclusion removes it from the registry, so
-nothing in the job can activate it later. Excluding all seven is legal and yields an agent with no
+nothing in the job can activate it later. A trigger that means "no shell" names `powershell` beside
+`bash`. Excluding all eight is legal and yields an agent with no
 built-in tools at all (extension tools, where loaded, still work).
 
 Narrowing only. There is no `run.tools` allowlist, deliberately: an allowlist answers "which tools
@@ -72,7 +73,7 @@ from a current tree and the refusal disappears.
 | Piece | Value |
 |---|---|
 | Field | `run.excludeTools`, a non-empty array of built-in pi tool names, any trigger kind (cron included) |
-| Known names | `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` (the pinned pi's built-ins) |
+| Known names | `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, `ls` (the pinned pi's built-ins) |
 | Refused at load | any name outside the known set, an empty array, a duplicate, a non-string member, near-miss spellings of the field itself, `run.tools`, `run.noTools`, `on.excludeTools` |
 | Refused pre-spend | `job-image-exclude-tools-unsupported` (image lacks the `excludeTools` capability token); in-container exit 2 on a name the baked pi does not know (version skew, hand-run containers) |
 | Observability | `tools_excluded` log line on every flagged job: the requested exclusions and the session's active tool list read back |

@@ -94,7 +94,7 @@ const CANNED_FOLD = () => ({
   byModel: [
     { provider: "kimi-coding", model: "kimi-k2", runs: 12, calls: 24, input: 4000000, output: 1400000, cacheRead: 0, cacheWrite: 0, tokens: 5400000, cost: usd(0, "plan", { planId: "kimi" }) },
     { provider: "anthropic", model: "claude-sonnet-4", runs: 3, calls: 6, input: 60000, output: 30000, cacheRead: 0, cacheWrite: 0, tokens: 90000, cost: usd(1.25, "metered") },
-    { provider: "zai", model: "glm-4.7", runs: 1, calls: 1, input: 800, output: 200, cacheRead: 0, cacheWrite: 0, tokens: 1000, cost: usd(0, "zero-rated") },
+    { provider: "qwen-token-plan", model: "deepseek-v4-pro", runs: 1, calls: 1, input: 800, output: 200, cacheRead: 0, cacheWrite: 0, tokens: 1000, cost: usd(0, "zero-rated") },
   ],
   byTrigger: [
     { key: "trigger:0", index: 0, type: "cron", label: "nightly 0 3 * * *", runs: 9, tokens: 4000000, cost: usd(0, "plan", { planId: "kimi" }), outcomes: { completed: 9, policy: 0, failed: 0 }, failedCost: null },

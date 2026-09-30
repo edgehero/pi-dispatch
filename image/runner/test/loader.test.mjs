@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 // Static import: packages.mjs is pure -- no pi, no fs -- so it needs none of the gating below.
 import { findShadowedSkills } from "../src/packages.mjs";
+// Pure too (the ModelRuntime class is injected): the one spelling of the job's model runtime, so these real
+// sessions are built on exactly what run-job.mjs builds.
+import { createJobModelRuntime } from "../src/model-runtime.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
@@ -118,9 +121,13 @@ function fixture({ adminExtensions = false } = {}) {
 		);
 		// Signal two: this repo's actual shim -- a name no pattern could flag, the paid-enqueue tool
 		// behind it. If only the name were tested, THIS is the file that would reach the model.
+		// The tool carries an object `parameters` schema, as the real admin tools do, and it must: from pi
+		// 0.86.0 a tool without one is REJECTED at registration and the factory's registrations rolled back,
+		// so the extension lands in pi's own load errors and never reaches the guard at all (measured at the
+		// 0.99.1 pin, issue #509). Without the schema this fixture tested pi's validation, not the guard.
 		writeFileSync(
 			join(workspace, ".pi", "extensions", "relay.js"),
-			`export default function (api) {\n\tapi.registerCommand("${ADMIN_TOOL_SENTINEL}", { description: "admin by surface" });\n\tapi.registerTool({\n\t\tname: "dispatch_run",\n\t\tlabel: "Run",\n\t\tdescription: "enqueue a paid job",\n\t\texecute: async () => ({ output: "" }),\n\t});\n}\n`,
+			`export default function (api) {\n\tapi.registerCommand("${ADMIN_TOOL_SENTINEL}", { description: "admin by surface" });\n\tapi.registerTool({\n\t\tname: "dispatch_run",\n\t\tlabel: "Run",\n\t\tdescription: "enqueue a paid job",\n\t\tparameters: { type: "object", properties: {} },\n\t\texecute: async () => ({ output: "" }),\n\t});\n}\n`,
 		);
 	} else {
 		writeFileSync(
@@ -273,6 +280,11 @@ test("the ADMIN extension a serviced repo ships is DROPPED -- its ordinary sibli
 	assert.ok(!commands.includes(ADMIN_NAME_SENTINEL), "an admin-named extension's command reached the session");
 	assert.ok(!paths.includes(join(dir, "relay.js")), "an admin re-export under another name reached the loaded set");
 	assert.ok(!commands.includes(ADMIN_TOOL_SENTINEL), "an admin re-export's command reached the session");
+
+	// The drops above are the GUARD's: neither admin file fell out as a pi load error instead, which is how
+	// relay.js "vanished" at the 0.99.1 pin while its fixture tool had no parameters schema (issue #509).
+	const errored = loader.getExtensions().errors.map((e) => e.path).filter((path) => path.startsWith(dir));
+	assert.deepEqual(errored, [], `a repo extension fixture failed pi's own load, so the guard proved nothing: ${JSON.stringify(errored)}`);
 
 	// The outcome that actually matters: no dispatch_* tool is LLM-callable in the job. createAgentSession
 	// builds its ExtensionRunner from exactly this array, so what is not here cannot be called.
@@ -793,10 +805,9 @@ test("run.command's dispatch contract at the pin: headless commands, swallowed t
 		outboxProtocolPath: f.outboxProtocolPath,
 	});
 	const agentDir = tempDir("pi-agent-");
-	const authStorage = pi.AuthStorage.create(join(agentDir, "auth.json"));
-	const modelRegistry = pi.ModelRegistry.create(authStorage, join(agentDir, "models.json"));
+	const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir, modelsPath: join(agentDir, "models.json") });
 	const settingsManager = pi.SettingsManager.inMemory({});
-	const { session } = await pi.createAgentSession({ cwd: f.workspace, agentDir, authStorage, modelRegistry, settingsManager, resourceLoader: loader });
+	const { session } = await pi.createAgentSession({ cwd: f.workspace, agentDir, modelRuntime, settingsManager, resourceLoader: loader });
 	try {
 		const sessionEvents = [];
 		const offSession = session.subscribe((event) => sessionEvents.push(event.type));
@@ -858,10 +869,9 @@ test("run.excludeTools' enforcement contract at the pin: structural removal, rea
 		outboxProtocolPath: f.outboxProtocolPath,
 	});
 	const agentDir = tempDir("pi-agent-");
-	const authStorage = pi.AuthStorage.create(join(agentDir, "auth.json"));
-	const modelRegistry = pi.ModelRegistry.create(authStorage, join(agentDir, "models.json"));
+	const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir, modelsPath: join(agentDir, "models.json") });
 	const settingsManager = pi.SettingsManager.inMemory({});
-	const common = { cwd: f.workspace, agentDir, authStorage, modelRegistry, settingsManager, resourceLoader: loader };
+	const common = { cwd: f.workspace, agentDir, modelRuntime, settingsManager, resourceLoader: loader };
 	// The unknown name rides along DELIBERATELY: pi ignoring it without a throw or a diagnostic is the
 	// pin fact the loader's and the runner's membership validation exist for. If a bump makes this
 	// construction throw, re-read the belt-and-braces split before relaxing anything.
@@ -886,6 +896,53 @@ test("run.excludeTools' enforcement contract at the pin: structural removal, rea
 	} finally {
 		narrowed.dispose();
 		control.dispose();
+	}
+});
+
+test("no builtin: extension (MCP, codemode, tool-search, llama.cpp) is loaded in a job, even when a path asks for one", { skip }, async () => {
+	// Issue #509. From pi 0.99 the CLI loads four built-in extensions, `builtin:<name>` paths whose code comes
+	// from the loader's `extensionFactories` (main.js: `[...builtInExtensions, ...]`). MCP would connect to
+	// servers an mcp.json names (a repo file, in a job), codemode can call models.classify() and spawn a
+	// worker, tool-search adds a model-callable tool: none of that is part of what a trigger reviewed. The
+	// runner builds pi through the SDK and passes no extensionFactories, so the loader knows no built-in:
+	// this pins that, against a REAL session, including the case where a `builtin:` path does reach the
+	// loader (here through packagePaths, the one list the runner feeds into additionalExtensionPaths).
+	const pi = await import("@earendil-works/pi-coding-agent");
+	const f = fixture();
+	const asked = ["builtin:mcp", "builtin:codemode", "builtin:tool-search", "builtin:llama.cpp"];
+	const loader = await loaderModule.buildLoadedResourceLoader({
+		cwd: f.workspace,
+		jobPiDir: f.jobPi,
+		guardrailsPath: f.guardrailsPath,
+		outboxProtocolPath: f.outboxProtocolPath,
+		packagePaths: asked,
+	});
+	const { extensions, errors } = loader.getExtensions();
+	assert.deepEqual(extensions.filter((e) => e.path.startsWith("builtin:")).map((e) => e.path), [], "a built-in extension loaded");
+	// The premise, so the absence above is pi's refusal and not a path that never reached it: each asked-for
+	// name comes back as pi's own "unknown built-in" error.
+	assert.deepEqual(
+		errors.filter((e) => e.path.startsWith("builtin:")).map((e) => [e.path, String(e.error)]).sort(),
+		asked.map((path) => [path, `Unknown built-in extension: ${path}`]).sort(),
+		"each builtin: path must reach the loader and be refused as unknown",
+	);
+	// The source half: the runner never hands pi the factories that would make those names known.
+	const runnerSources = ["../run-job.mjs", "../src/loader.mjs", "../src/session.mjs", "../src/tools.mjs"].map((rel) => readFileSync(new URL(rel, import.meta.url), "utf8"));
+	for (const needle of ["extensionFactories", "builtInExtensions", "createMcpExtension", "createCodemodeExtension", "createToolSearchExtension"]) {
+		assert.ok(!runnerSources.some((src) => src.includes(needle)), `the runner now names ${needle} -- a built-in extension could load in a job`);
+	}
+
+	// And on a real session: no tool or command any of the four registers is present.
+	const agentDir = tempDir("pi-agent-");
+	const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir, modelsPath: join(agentDir, "models.json") });
+	const { session } = await pi.createAgentSession({ cwd: f.workspace, agentDir, modelRuntime, settingsManager: pi.SettingsManager.inMemory({}), resourceLoader: loader });
+	try {
+		const tools = session.getAllTools().map((t) => t.name);
+		for (const name of ["codemode", "tool_search", "mcp"]) assert.ok(!tools.includes(name), `the ${name} tool is registered in a job: ${JSON.stringify(tools)}`);
+		const commands = session.extensionRunner.getRegisteredCommands().map((c) => c.name);
+		assert.ok(!commands.includes("mcp"), `/mcp is registered in a job: ${JSON.stringify(commands)}`);
+	} finally {
+		session.dispose();
 	}
 });
 

@@ -20,7 +20,8 @@ test("excludableToolNames derives the pinned built-in set off the root-exported 
 	// (pinned-api.test.mjs pins that), so the factories' own `.name` fields are the artifact-backed
 	// answer, and a pin bump that renames a tool moves this set with it instead of leaving a copy lying.
 	const { excludableToolNames } = await import("../src/tools.mjs");
-	assert.deepEqual(excludableToolNames(), ["read", "bash", "edit", "write", "grep", "find", "ls"]);
+	// powershell joined at the 0.99.1 pin (registered, not active by default), in allToolNames' own position.
+	assert.deepEqual(excludableToolNames(), ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"]);
 });
 
 test("assertExcludeToolsKnown refuses an unknown entry VERBATIM, exit 2, naming the known set", { skip }, async () => {
@@ -33,10 +34,10 @@ test("assertExcludeToolsKnown refuses an unknown entry VERBATIM, exit 2, naming 
 	} catch (error) {
 		assert.equal(error.piDispatchExit, EXIT_POLICY, "a bad exclusion is config: exit 2, never retried");
 		assert.match(error.message, /" bash"/, "the entry is reported verbatim, padding included");
-		assert.match(error.message, /read, bash, edit, write, grep, find, ls/, "the refusal names the whole known set");
+		assert.match(error.message, /read, bash, powershell, edit, write, grep, find, ls/, "the refusal names the whole known set");
 		assert.match(error.message, /ignores unknown names silently/, "and says WHY refusing beats passing it through");
 	}
 	// Every real name passes, unordered and repeated calls included (the memoized set is stable).
-	assertExcludeToolsKnown(["ls", "bash", "edit", "write", "grep", "find", "read"]);
+	assertExcludeToolsKnown(["ls", "bash", "edit", "write", "grep", "find", "read", "powershell"]);
 	assertExcludeToolsKnown([]);
 });

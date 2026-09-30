@@ -1,9 +1,8 @@
 import { existsSync } from "node:fs";
 import {
-	AuthStorage,
 	createAgentSession,
 	getAgentDir,
-	ModelRegistry,
+	ModelRuntime,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -12,6 +11,8 @@ import {
 	assertSessionMountReady,
 	commandName,
 	enforceOfflineMode,
+	enforceTelemetryOff,
+	jobSettings,
 	mountAdvisories,
 	parseRunnerEnv,
 	readPrompt,
@@ -20,6 +21,7 @@ import { buildLoadedResourceLoader, GLOBAL_PI_DIR, JOB_PI_DIR, TRIGGER_SKILLS_DI
 import {
 	capExitMessage,
 	captureTerminal,
+	classifyPromptRejection,
 	classifyThrow,
 	configError,
 	decideExit,
@@ -27,16 +29,17 @@ import {
 	loadRetryPredicate,
 } from "./src/outcome.mjs";
 import { restoreEnvProxyDispatcher } from "./src/env-proxy.mjs";
+import { createJobModelRuntime } from "./src/model-runtime.mjs";
 import { countPackageResources, findShadowedSkills, isFlowLoaded, owningRoot } from "./src/packages.mjs";
 import { openSessionManager } from "./src/session.mjs";
 import { attachTokenBudget } from "./src/token-budget.mjs";
 import { assertExcludeToolsKnown } from "./src/tools.mjs";
 import { attachTurnBudget } from "./src/turn-budget.mjs";
-// NOTE: usage-meter.mjs reaches pi-ai's module-level api-provider registry through a RUNTIME-probed
-// dynamic import, never a static one. Never add a pi-ai package specifier to this file's imports: two
-// copies of that package are installed and a plain specifier binds the HOISTED one, which pi does not
-// use -- the meter would register, report success, and count nothing. pinned-api.test.mjs guards this
-// file against exactly that string.
+// NOTE: usage-meter.mjs meters at ModelRuntime.prototype, with the class handed over from the import above,
+// and reaches pi-ai (its compat half, the brake's stream factory) only through a copy it proves at runtime,
+// never a static import. Never add a pi-ai package specifier to this file's imports: two copies of that
+// package are installed and a plain specifier binds the HOISTED one, which pi does not use.
+// pinned-api.test.mjs guards this file against exactly that string.
 import { createUsageMeter, installProcessUsageMeter, resolvePiAiCompat } from "./src/usage-meter.mjs";
 
 const JOB_DIR = "/job";
@@ -85,6 +88,9 @@ async function main() {
 	// live `npm install` at agent runtime, from inside the job, against a network the job's own input
 	// can influence. Idempotent and only ever tightening. INT-SDK-SESSION-OPTIONS.
 	enforceOfflineMode(process.env);
+	// Same moment, same reason (issue #509): pi reads PI_TELEMETRY at each call and it OVERRIDES the setting
+	// jobSettings pins, so the override is closed here, before the runtime or any request exists.
+	enforceTelemetryOff(process.env);
 	// And before anything can reach the network: loading pi (the static import above) replaced the env-proxy dispatcher
 	// NODE_USE_ENV_PROXY installed, so with egress armed the provider call went direct and died on the job's
 	// `--internal` network (issue #427). Free, and a no-op unless NODE_USE_ENV_PROXY=1 reached the container.
@@ -109,32 +115,26 @@ async function main() {
 
 	const agentDir = getAgentDir();
 
-	// AuthStorage + ModelRegistry, NOT ModelRuntime.
-	//
-	// pi's [Unreleased] changelog says these two are replaced by an async `modelRuntime`. That is
-	// true of its main branch and NOT of 0.80.7, which is what we pin -- the source at HEAD and the
-	// artifact on npm are different things, and conflating them cost a build. When the migration
-	// ships, REQ-UPSTREAM-CONTRACT-TESTS fires on the pin bump and this is the code that changes.
-	// See OQ-005.
-	const authStorage = AuthStorage.create(`${agentDir}/auth.json`);
-	// Prefer the operator's global overlay models.json (REQ-GLOBAL-PI-OVERLAY) when the :ro overlay is
-	// mounted -- this is how a CUSTOM provider/model becomes resolvable. The credential still comes from
-	// env -> auth.json; the overlay models.json is definitions only (import-pi refuses a literal key).
+	// ModelRuntime, the 0.99.1 model and credential layer (issue #509, OQ-005's migration, which shipped between
+	// 0.80.7 and this pin: AuthStorage is no longer exported and ModelRegistry is a facade over a runtime).
+	// Built AFTER enforceOfflineMode, deliberately: create() reads PI_OFFLINE at construction to decide whether the
+	// runtime may ever reach the network (model-runtime.js:92). The options, and why each is set, live in
+	// src/model-runtime.mjs. Prefer the operator's global overlay models.json (REQ-GLOBAL-PI-OVERLAY) when the :ro
+	// overlay is mounted -- this is how a CUSTOM provider/model becomes resolvable.
 	const GLOBAL_MODELS = "/opt/pi-global/models.json";
 	const modelsPath = existsSync(GLOBAL_MODELS) ? GLOBAL_MODELS : `${agentDir}/models.json`;
-	const modelRegistry = ModelRegistry.create(authStorage, modelsPath);
+	const modelRuntime = await createJobModelRuntime({ ModelRuntime, agentDir, modelsPath });
 
 	// Pin the model explicitly. With `model` omitted, pi picks from settings and provider defaults
-	// -- nondeterministic across images, and it silently changes cost per job.
-	const model = modelRegistry.find(cfg.provider, cfg.model);
+	// -- nondeterministic across images, and it silently changes cost per job. hasConfiguredAuth takes the
+	// PROVIDER id at 0.99.1 (it took the model at 0.80.7) and answers from the availability snapshot create()
+	// awaited, so both refusals stay pre-spend config errors (exit 2) exactly as before.
+	const model = modelRuntime.getModel(cfg.provider, cfg.model);
 	if (!model) throw configError(`unknown model: ${cfg.provider}/${cfg.model}`);
-	if (!modelRegistry.hasConfiguredAuth(model)) throw configError(`no configured auth for ${cfg.provider}`);
+	if (!modelRuntime.hasConfiguredAuth(model.provider)) throw configError(`no configured auth for ${cfg.provider}`);
 
-	// Pin pi's own retry settings rather than inherit `maxRetries ?? 3`. An upstream default change
-	// would silently move our spend (CONST-PI-VERSION-PINNED's reasoning, applied to a default). And
-	// inMemory() writes to the GLOBAL scope of a storage with no project file, so a serviced
-	// project's .pi/settings.json cannot override our spend controls.
-	const settingsManager = SettingsManager.inMemory({ retry: { enabled: true, ...cfg.retry } });
+	// Retry pinned, cache warming off, telemetry off: every key and why, in src/config.mjs jobSettings.
+	const settingsManager = SettingsManager.inMemory(jobSettings(cfg.retry));
 
 	// `log` is handed over so the loader's own findings arrive on THIS writer, with this job's id: the
 	// recursion guard drops an extension during reload() (see dropAdminExtensions), and a drop that
@@ -240,10 +240,11 @@ async function main() {
 	//
 	// The per-session event bus cannot see a subagent session an extension spawns: the bus is per
 	// AgentSession instance and no event carries a sessionId, so a 16-wide fanout registers on our bus
-	// as roughly ONE turn. Metering at pi-ai's module-level api-provider registry -- the one choke
-	// point every in-process session funnels through -- counts calls instead of turns and gets
-	// per-session attribution for free from options.sessionId. Installed AFTER ModelRegistry.create
-	// (it registers through the registry so refresh() re-applies it) and BEFORE createAgentSession.
+	// as roughly ONE turn. Metering at ModelRuntime.prototype -- the one choke point every in-process
+	// session's model calls go through at 0.99.1 -- counts calls instead of turns and gets per-session
+	// attribution for free from options.sessionId. Installed AFTER the runtime exists (the install checks
+	// that THIS instance dispatches through the wrappers) and BEFORE createAgentSession, so the session's
+	// first call is already metered.
 	const meter = createUsageMeter({
 		maxTokens: cfg.maxTokens,
 		rootSessionId,
@@ -255,8 +256,8 @@ async function main() {
 			void session?.abort();
 		},
 	});
-	const usageMeter = await installProcessUsageMeter({ modelRegistry, meter, log });
-	// pi-ai's own transient-error predicate, from the copy the meter just accepted (issue #437): a 401/403
+	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log });
+	// pi-ai's own transient-error predicate, from the compat copy the meter just accepted (issue #437): a 401/403
 	// shape pi calls retryable (a gateway's "Provider returned error", an HTML "please retry" page) is not
 	// a refusal of the credential. Without it every provider error stays retryable, so say so on the log.
 	const isRetryable = await loadRetryPredicate({ module: usageMeter.ok ? usageMeter.module : null, candidates: resolvePiAiCompat() });
@@ -265,8 +266,7 @@ async function main() {
 	({ session } = await createAgentSession({
 		cwd: WORKSPACE,
 		agentDir,
-		authStorage,
-		modelRegistry,
+		modelRuntime,
 		model,
 		settingsManager,
 		sessionManager,
@@ -286,10 +286,11 @@ async function main() {
 		log("tools_excluded", { excludeTools: cfg.excludeTools, active: session.getActiveToolNames() });
 	}
 
-	// Deterministic re-arm. Extensions register their providers during createAgentSession, so any api
-	// id that did not exist at install time is unwrapped until now. The unref'd interval inside the
-	// meter would eventually catch it; this closes the window before the first prompt instead of
-	// leaving the first call of an extension-provided model unmetered.
+	// Deterministic re-arm of the meter's COMPAT half. An extension factory that registered an api id in
+	// pi-ai's legacy registry during createAgentSession left it unwrapped until now; the unref'd interval
+	// inside the meter would eventually catch it, and this closes the window before the first prompt. (The
+	// runtime half needs no re-arm: a provider an extension registers with pi.registerProvider is served by
+	// the ModelRuntime, whose prototype is already wrapped.)
 	usageMeter.arm();
 
 	// The one packages count that cannot ride packages_loaded: a COMMAND exists only once the
@@ -345,12 +346,18 @@ async function main() {
 	// outcome arrives. captureTerminal handles both event shapes (agent_end carries messages[],
 	// turn_end carries message).
 	let terminal;
+	// Whether one of pi's own auto-retries is under way: set by auto_retry_start, cleared by auto_retry_end.
+	// classifyPromptRejection reads it, because a prompt() that rejects mid-retry is pi failing to resume
+	// work already paid for, not a preflight fault (issue #509).
+	let retryInFlight = false;
 	const unsubscribeTerminal = session.subscribe((event) => {
 		terminal = captureTerminal(terminal, event);
 		if (event.type === "auto_retry_start") {
+			retryInFlight = true;
 			// pi retries internally. Surface it: our daily cap counts jobs, not provider calls.
 			log("pi_auto_retry", { attempt: event.attempt, maxAttempts: event.maxAttempts });
 		}
+		if (event.type === "auto_retry_end") retryInFlight = false;
 	});
 
 	const budget = attachTurnBudget(session, cfg.maxTurns, {
@@ -363,8 +370,15 @@ async function main() {
 	// meter that aborts only when cfg.maxTokens is set (lagging backstop, OQ-010).
 	const tokenBudget = usageMeter.ok ? null : attachTokenBudget(session, cfg.maxTokens, { onAbort: onTokenAbort });
 
+	// A prompt() rejection is classified HERE only when it is pi's unresumable retry (classifyPromptRejection
+	// says which, and why that must not be retried by the queue); every other rejection is rethrown untouched to
+	// the catch at the bottom, the preflight path it has always taken. The finally runs either way.
+	let rejected = null;
 	try {
 		await session.prompt(prompt);
+	} catch (error) {
+		rejected = classifyPromptRejection(error, { retryInFlight });
+		if (!rejected) throw error;
 	} finally {
 		budget.unsubscribe();
 		tokenBudget?.unsubscribe();
@@ -375,11 +389,12 @@ async function main() {
 		unsubscribeTerminal();
 		unsubscribeCommandErrors?.();
 		// Captured ABOVE dispose() rather than read at the exit line, and the reason is smaller than it
-		// first looks. At the 0.80.7 pin dispose() aborts the agent, invalidates the extension ctx and
-		// drops the listeners; it leaves the model and the session manager alone, so the reading DOES
-		// survive it -- measured inside the built image, not assumed. What remains is that reading state
-		// off an object which has been told it is finished is not a supported thing anywhere upstream,
-		// and the ordering costs nothing. Defensive, then, not load-bearing, and the test pins the order
+		// first looks. At the 0.99.1 pin dispose() aborts the agent (and any retry, compaction, branch
+		// summary or bash run), invalidates the extension ctx, drops the listeners and cancels the cache
+		// warmer; it leaves the model and the session manager alone, so the reading DOES survive it (read
+		// in agent-session.js at the pin; the 0.80.7 behaviour was measured inside the built image). What
+		// remains is that reading state off an object which has been told it is finished is not a supported
+		// thing anywhere upstream, and the ordering costs nothing. Defensive, then, not load-bearing, and the test pins the order
 		// so a refactor cannot quietly invert it and find out when a pin bump does start clearing here.
 		//
 		// Three shapes come back and all three are honest answers. `undefined` when pi has no model or no
@@ -403,6 +418,7 @@ async function main() {
 		// Null for every prompt job, so their decision tree is byte-identical to before run.command.
 		command: cfg.command ? { failed: commandFailed } : null,
 		isRetryable,
+		rejected,
 	});
 	// `metered: true` on the process-wide snapshot is what tells the daily token counter that this
 	// total includes every in-process session, not just the root's turns.

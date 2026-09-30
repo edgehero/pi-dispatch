@@ -116,6 +116,24 @@ test("isEnabledByPatterns returns null for a glob rather than guessing, unless a
 	assert.equal(isEnabledByPatterns(candidate, ["!other/**"]), null, "a glob we cannot evaluate is unknown even when it looks unrelated");
 });
 
+// pi 0.99.1 (issue #509): the same `extensions` list may hold `builtin:<name>` entries, which pi resolves
+// against its built-in extensions only (package-manager.js, the BUILTIN_PATH_PREFIX loop), never a file.
+test("isEnabledByPatterns ignores builtin: entries, which address no file, including a builtin glob", () => {
+	assert.equal(isEnabledByPatterns(candidate, ["-builtin:mcp"]), true, "a builtin force-exclude is not an exclusion of any file");
+	assert.equal(isEnabledByPatterns(candidate, ["!builtin:*"]), true, "a builtin glob is not an unevaluable FILE glob, so the verdict is not unknown");
+	assert.equal(isEnabledByPatterns(candidate, ["+builtin:codemode", "-./builtin:mcp"]), true);
+	// And beside a real file pattern, the file pattern still decides.
+	assert.equal(isEnabledByPatterns(candidate, ["!builtin:*", "-extensions/my-tool/index.js"]), false);
+	assert.equal(isEnabledByPatterns(candidate, ["!builtin:*", "!extensions/**"]), null, "a real file glob is still unknown");
+});
+
+test("parseHostSettings keeps builtin: entries raw and ignores defaultTools, a key the mirror has no use for", () => {
+	const got = parseHostSettings(JSON.stringify({ extensions: ["-builtin:mcp", "-extensions/x/index.js"], defaultTools: ["-bash", "+powershell"] }));
+	assert.equal(got.state, "ok");
+	assert.deepEqual(got.patterns, ["-builtin:mcp", "-extensions/x/index.js"], "the parse is raw; the verdict is where builtin entries are dropped");
+	assert.equal("defaultTools" in got, false, "host settings are read, never copied, so a host defaultTools cannot reach a job");
+});
+
 // --- hostExtensionState ------------------------------------------------------------------------------
 
 /** The subset of the fs bag host-pi reads through. readHostPi builds this same shape by default. */
@@ -159,6 +177,20 @@ test("hostExtensionState leaves an entry-less directory alone: pi loads nothing 
 	assert.deepEqual(state.unevaluated, []);
 });
 
+test("hostExtensionState treats a settings file holding only builtin: entries as one with no overrides (#509)", () => {
+	// Two spurious outcomes this rules out: a `!builtin:*` glob marking every extension "could not be
+	// evaluated", and an extensions dir that is itself one extension getting a note about per-name state
+	// when nothing in the settings addresses a file at all.
+	const dir = withExtensions({ tool: { "index.js": "" } });
+	const state = hostExtensionState({ fs: fsBag, agentDir: dir, patterns: ["-builtin:mcp", "!builtin:*"] });
+	assert.equal(state.disabled.size, 0);
+	assert.deepEqual(state.unevaluated, []);
+	const single = agentDir();
+	mkdirSync(join(single, "extensions"), { recursive: true });
+	writeFileSync(join(single, "extensions", "index.js"), "");
+	assert.deepEqual(hostExtensionState({ fs: fsBag, agentDir: single, patterns: ["-builtin:mcp"] }).unevaluated, []);
+});
+
 test("hostExtensionState does nothing at all when pi declares no override patterns", () => {
 	const dir = withExtensions({ tool: { "index.js": "" } });
 	const state = hostExtensionState({ fs: fsBag, agentDir: dir, patterns: [] });
@@ -182,7 +214,7 @@ test("discoverHostPackages reads the version off the INSTALLED package, never ou
 });
 
 test("discoverHostPackages accepts a convention dir with no pi key, because pi does", async () => {
-	// The issue proposed requiring a `pi` key. pi 0.80.7 falls through to the convention dirs, so requiring
+	// The issue proposed requiring a `pi` key. pi (0.80.7, and still 0.99.1) falls through to the convention dirs, so requiring
 	// it would silently drop a whole legitimate class -- see host-pi.pinned.test.mjs.
 	const dir = hostSetup({ installed: [{ name: "conv", version: "1.0.0", dirs: ["skills"] }, { name: "manifested", version: "2.0.0", pi: { extensions: [] } }, { name: "neither", version: "3.0.0" }] });
 	const found = await discoverHostPackages({ agentDir: dir, settings: settingsOf(["npm:conv", "npm:manifested", "npm:neither"]), fs: fsBag, exec: noExec });

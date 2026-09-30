@@ -21,7 +21,7 @@ REM     `pi-dispatch service install` passes them via nssm AppParameters. This w
 REM     decides WHAT to run -- only the env it runs in and what its exit code means -- so an empty
 REM     argument list is a configuration error, refused below.
 REM
-REM TRAP: inside pi, ANTHROPIC_OAUTH_TOKEN silently takes precedence over ANTHROPIC_API_KEY. Set exactly
+REM TRAP: inside pi, ANTHROPIC_AUTH_TOKEN and ANTHROPIC_OAUTH_TOKEN silently take precedence over ANTHROPIC_API_KEY. Set exactly
 REM one in `.env`.
 REM
 REM `.env` FORMAT for this loader: KEY=VALUE, one per line. Values MUST be UNQUOTED -- cmd's `set` keeps

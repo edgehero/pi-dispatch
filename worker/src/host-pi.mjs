@@ -15,7 +15,7 @@
  * What it must never become. Nothing on the worker's BOOT path may import this file. It reads host paths and
  * may spawn a package manager, and neither belongs anywhere near `start.mjs`.
  *
- * Everything here MIRRORS a private detail of the pinned pi (0.80.7) rather than calling it: pi exports no
+ * Everything here MIRRORS a private detail of the pinned pi (0.99.1) rather than calling it: pi exports no
  * public answer to "where is this package installed" or "is this resource enabled", and importing the whole
  * coding-agent SDK to read two well-known paths is not worth the weight. That mirroring is a real risk --
  * pi could change the grammar and we would silently start staging something the operator turned off -- so it
@@ -66,7 +66,12 @@ export const PINNED_PI_NEEDLES = {
 		"function isEnabledByOverrides(filePath, patterns, baseDir) {",
 		// The npm spec split that yields a name from `@scope/name@version`.
 		"const match = spec.match(/^(@?[^@]+(?:\\/[^@]+)?)(?:@(.+))?$/);",
+		// Built-in extensions (0.99.1, issue #509) are addressed in the SAME `extensions` list as files, as
+		// `builtin:<name>` paths, and resolved in a loop of their own. The mirror ignores those entries
+		// (see isOverridePattern); these two pin that they are still a separate namespace resolved apart.
+		"const path = `${BUILTIN_PATH_PREFIX}${name}`;",
 	],
+	"dist/core/source-info.js": ['export const BUILTIN_PATH_PREFIX = "builtin:";'],
 	"dist/core/settings-manager.d.ts": [
 		"export type PackageSource = string | {",
 		"    autoload?: boolean;",
@@ -148,9 +153,20 @@ export function parsePackageSource(source) {
 	return { kind: "git", name, spec: null, requested: null, raw };
 }
 
-/** The prefixes pi treats as overrides; a plain pattern is not one (getOverridePatterns). */
+/** pi's BUILTIN_PATH_PREFIX (source-info.js): a path naming a built-in extension, never a file. */
+const BUILTIN_PATH_PREFIX = "builtin:";
+
+/**
+ * The override patterns that can address a FILE: pi's prefixes (getOverridePatterns), minus the ones whose
+ * body is a `builtin:<name>` path. From the 0.99.1 pin on (issue #509) the same `extensions` list holds
+ * `-builtin:mcp` and friends, which pi resolves against its built-in extensions only, never against a file
+ * on disk. Kept, they would change no verdict pi reaches, but they would still make a settings file with
+ * only a builtin entry look like one with overrides, and a `!builtin:*` glob would mark every extension
+ * "could not be evaluated", which is a note about nothing. Dropped here, before any verdict is computed.
+ */
 function isOverridePattern(pattern) {
-	return typeof pattern === "string" && (pattern.startsWith("!") || pattern.startsWith("+") || pattern.startsWith("-"));
+	if (typeof pattern !== "string" || !(pattern.startsWith("!") || pattern.startsWith("+") || pattern.startsWith("-"))) return false;
+	return !normalizeExact(pattern.slice(1)).startsWith(BUILTIN_PATH_PREFIX);
 }
 
 /** Any minimatch magic we decline to interpret. Deliberately over-broad: a false "unknown" only costs a note. */

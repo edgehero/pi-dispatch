@@ -19,7 +19,7 @@
  * can assert both the plain content and the width math without a real terminal.
  */
 
-import { LINE_INPUT_CURSOR, columnsOf, fmtCost as plainFmtCost, scrubControls, scrubKeepingStyle, sliceColumns, sparkline as plainSparkline } from "./panel.mjs";
+import { LINE_INPUT_CURSOR, columnsAfterSpace, columnsOf, fmtCost as plainFmtCost, scrubControls, scrubKeepingStyle, sliceColumns, sparkline as plainSparkline } from "./panel.mjs";
 
 // Strip SGR (and OSC-8 hyperlink) escapes to recover the visible text, which is then measured in COLUMNS.
 // This comment used to end "so post-strip `.length` is a safe column proxy", and issue #401 is what that
@@ -37,15 +37,16 @@ export function stripAnsi(s) {
  * Through `panel.mjs`'s table, so the framed pane and the monochrome one measure the same TEXT the same
  * way. They draw the same geometry, and a width rule that holds in one and not the other is how a frame
  * ends up ten columns wider than the line above it. A styled line can measure wider than its plain text,
- * by up to one column for each colour code standing in front of a mark (issue #417, below).
+ * by up to one column for each colour code that splits a cluster (issue #417, below).
  */
 export function visibleLen(s) {
   const plain = columnsOf(stripAnsi(s));
   // A STYLED LINE IS ALSO MEASURED PIECE BY PIECE, and the larger answer wins (issue #417). The renderer's
   // overlay compositor cuts a line with a slicer that segments each run BETWEEN two escape codes on its
-  // own, so a mark right after a colour code starts a cluster there even though it does not in the whole
-  // string: a framed line measured to fit, and the compositor's own count dropped its right border. Only a
-  // line that carries a code can differ, so a plain line pays nothing.
+  // own, so a cluster a colour code splits is two clusters there: under pi-tui 0.99.1 a spacing mark cut
+  // from the base it leads draws the column it did not draw in the whole string (under 0.80.7 it was a
+  // mark after the code doubling its base). A framed line measured to fit, and the compositor's own count
+  // dropped its right border. Only a line that carries a code can differ, so a plain line pays nothing.
   if (plain === 0 || !String(s ?? "").includes("\u001b")) return plain;
   let pieces = 0;
   for (const piece of String(s).split(ANSI)) pieces += columnsOf(piece);
@@ -238,9 +239,12 @@ export function makeStyler(theme, { ascii = false } = {}) {
     // without: clip the META first, and the LABEL only if it alone still does not fit. Getting this wrong by
     // one is why the clamp existed in the first place -- `Math.max(1, ...)` hid the overflow instead of
     // preventing it, and the line ran over its own width.
-    met = sliceColumns(met, Math.max(0, w - columnsOf(lab) - 3));
-    const labClipped = sliceColumns(lab, Math.max(0, w - columnsOf(met) - (met ? 3 : 2)));
-    const ruleLen = Math.max(1, w - columnsOf(labClipped) - columnsOf(met) - (met ? 2 : 1));
+    //
+    // BOTH ARE MEASURED AFTER A SPACE, where they are drawn (issue #509's review): the meta after the one
+    // in front of it, and the label after the frame's own, since a divider is a frame body line.
+    met = sliceColumns(met, Math.max(0, w - columnsAfterSpace(lab) - 3), { afterSpace: true });
+    const labClipped = sliceColumns(lab, Math.max(0, w - columnsAfterSpace(met) - (met ? 3 : 2)), { afterSpace: true });
+    const ruleLen = Math.max(1, w - columnsAfterSpace(labClipped) - columnsAfterSpace(met) - (met ? 2 : 1));
     const labPart = labClipped ? bold(fg("muted", labClipped)) + " " : "";
     const rulePart = fg("border", G.h.repeat(ruleLen));
     const metPart = met ? " " + fg("dim", met) : "";
@@ -317,6 +321,7 @@ export function frame(styler, { title = "", width = 40, lines = [], footer = nul
   const B = (s) => styler.fg("border", s);
   const out = [];
 
+  // Clipped AFTER A SPACE, where it is drawn: see `panel.mjs`'s `box` (issue #509's review).
   const titleText = title ? ` ${clipPlain(title, Math.max(0, inner - 2), G.ellipsis)} ` : "";
   // THE TOP RULE IS FILLED IN COLUMNS, not code units (issue #401). A CJK title is half as many code units
   // as the terminal draws columns, so `.length` here over-filled the rule by the title's own width: a
@@ -327,8 +332,9 @@ export function frame(styler, { title = "", width = 40, lines = [], footer = nul
   out.push(B(G.tl + G.h) + styler.bold(styler.fg("accent", titleText)) + B(G.h.repeat(topFill) + G.tr));
 
   // The body is measured FROM THE FRAME'S OWN SPACE, the same repair as `panel.mjs`'s `box` (issue #417):
-  // a line beginning with a cluster the renderer counts wider at the start of a string is drawn after that
-  // space, not at column 0, so it is padded where it stands. Byte-identical for every other line.
+  // a line beginning with a cluster the renderer counts differently at the start of a string (a spacing
+  // mark leading it draws nothing there, and its own column after the space) is drawn after that space,
+  // not at column 0, so it is padded where it stands. Byte-identical for every other line.
   const side = (content) => B(G.v) + content + " " + B(G.v);
   const body = (line) => side(padVisible(styler, " " + (line ?? ""), inner + 1));
   const rule = () => B(G.ml + G.h.repeat(w - 2) + G.mr);
@@ -385,6 +391,6 @@ function padVisible(styler, line, width) {
  */
 function clipPlain(s, width, ellipsis = "…") {
   const plain = scrubControls(s);
-  if (columnsOf(plain) <= width) return plain;
-  return width <= columnsOf(ellipsis) ? sliceColumns(plain, width) : sliceColumns(plain, width - columnsOf(ellipsis)) + ellipsis;
+  if (columnsAfterSpace(plain) <= width) return plain;
+  return width <= columnsOf(ellipsis) ? sliceColumns(plain, width) : sliceColumns(plain, width - columnsOf(ellipsis), { afterSpace: true }) + ellipsis;
 }

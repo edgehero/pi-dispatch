@@ -25,7 +25,9 @@ in blood: every upstream claim in this repository was originally verified by rea
 `ModelRuntime` is a value export at that sha and **does not exist in 0.80.7 at all** — pi's changelog
 files it under `[Unreleased]`, which was exactly correct, and a spec entry here "corrected" the
 changelog for being out of date. The changelog was right; the methodology was wrong. The runner imported
-it, the image built cleanly, and every job would have died on a missing export.
+it, the image built cleanly, and every job would have died on a missing export. (The pin has since
+moved to `0.99.1`, where `ModelRuntime` does exist and the runner uses it, issue #509; the lesson did not
+move.)
 
 Reading a moving branch to verify a fixed version is not verification — it is verification of something
 else. So:
@@ -387,7 +389,14 @@ passing, on the record — issue #80.)
   `AGENTS.md`/`CLAUDE.md` absent) · `→ resource-loader.ts:463-470 → noContextFiles` (sole gate) ·
   `→ sdk.ts:176-180` (default loader is constructed **without** `noContextFiles` when none is passed) ·
   `→ system-prompt.ts:145-152 → <project_context>` (emitted after the append section at `140-142`)
-- **Evidence (pinned artifact — authoritative)**: `npm @earendil-works/pi-coding-agent@0.80.7 →
+- **Evidence (pinned artifact, re-verified at 0.99.1, issue #509)**: `npm @earendil-works/pi-coding-agent@0.99.1 →
+  dist/core/package-manager.js:2024,2035-2040` (the same `if (projectTrusted)` branch loads
+  `/workspace/.pi/extensions`) · `→ dist/core/settings-manager.js:213-214,227-231` (`fromStorageWithPaths`
+  takes `options.projectTrusted ?? true`; `inMemory(settings, options = {})` now forwards an `options`
+  argument, and the runner passes none, so the project is still trusted by default) ·
+  `→ dist/core/resource-loader.js:403-405` (the `noExtensions` branch), `:417` (`extensionsOverride` before
+  the loader stores the set), `:419-421` (the `noSkills` branch)
+- **Evidence (pinned artifact at the previous pin, 0.80.7)**: `npm @earendil-works/pi-coding-agent@0.80.7 →
   dist/core/package-manager.js:1935-1946` — `const projectTrusted = this.settingsManager.isProjectTrusted();`
   then `if (projectTrusted) { addResources("extensions", collectAutoExtensionEntries(projectDirs.extensions), …) }`,
   the branch that loads `/workspace/.pi/extensions` · `→ dist/core/settings-manager.js:153,166-171` —
@@ -920,7 +929,7 @@ passing, on the record — issue #80.)
 
 ## CONST-PI-VERSION-PINNED
 
-- **Statement**: The job image shall pin an exact pi version (currently **0.80.7**). Upgrading is an
+- **Statement**: The job image shall pin an exact pi version (currently **0.99.1**). Upgrading is an
   explicit commit that changes a version string, gated by the upstream contract tests.
 - **Why**: pi breaks between **minors**, not just majors — a past regression silently dropped
   `sendUserMessage` after `newSession`, and the npm package was renamed from `@mariozechner` to
@@ -930,7 +939,10 @@ passing, on the record — issue #80.)
   within twenty-four hours of this project's design being written, and `[Unreleased]` already carries a
   breaking change to model/auth wiring.
 - **Evidence (upstream)**: `earendil-works/pi @ 5e336cf → CHANGELOG.md:31` (0.80.7, 2026-07-14) ·
-  `→ CHANGELOG.md:5-10` (`[Unreleased]`: `authStorage`/`modelRegistry` replaced by `modelRuntime`)
+  `→ CHANGELOG.md:5-10` (`[Unreleased]`: `authStorage`/`modelRegistry` replaced by `modelRuntime`). That
+  `[Unreleased]` change shipped before `0.99.1`, the pin since issue #509, whose bump is the worked example
+  of this entry: the model/auth wiring, the usage meter's choke point, the stop reasons, a key variable and
+  the steering set all moved between two exact version strings, and the move was one reviewed commit.
   **Two upgrade gates now hang off this entry rather than one** (issue #314). `findEnvKeys` was the first:
   it answers which variable a provider's key is read from, and `worker/test/env-allowlist.test.mjs` round
   trips it. The second is `PROVIDER_STEERING_VARS`, which answers which variables STEER a provider -- where
@@ -959,6 +971,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-09-30 | Issue #509, the pi 0.80.7 -> 0.99.1 bump. **No article changed.** **`CONST-PI-VERSION-PINNED`**: the statement's version string reads **0.99.1**, and the evidence records that the `[Unreleased]` model/auth change it cited has shipped; the rule, and its two upgrade gates (`findEnvKeys` and `PROVIDER_STEERING_VARS`), UNCHANGED, checked: the steering gate named every new and stale name at this bump. The evidence convention gains one parenthetical: the pin moved and `ModelRuntime` now exists at it, the lesson did not move. **`CONST-NO-CONTEXT-FILES-MANDATORY` evidence re-verified at 0.99.1** (the trust branch, the `projectTrusted ?? true` default, the loader's two merge branches and `extensionsOverride`, at new line numbers; `SettingsManager.inMemory` now accepts options the runner does not pass), the 0.80.7 block kept as the record. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: the new `retry-unresumable` exit `2` is a determinate stop after a paid turn and its tool effects, which a queue retry would repeat on a fresh budget, not an infrastructure failure; its #449 evidence block stays the 0.80.7 record. `CONST-MERGE-NEVER-AUTOMATIC`, `CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked. |
 | 2026-09-29 | Issue #477, with PR #478's gate rounds 1 and 2. **No article changed.** **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: doctor now judges an unquoted `PI_BACKEND_FLOOR` from `.env` rather than calling it unread; the worker's boot refusal on the floor was already reading it. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: cancel's wording changes no retry, removal or record, and a `VALKEY_URL` that names no database, or one the server does not have, is a configuration refusal (exit 2, not restarted into the same answer), as a refused owner is. **`CONST-TOKEN-SCOPED-PER-JOB` UNCHANGED, checked**: the foreground worker still reads no `.env`, and the `.env` writer hands no value to any new process. |
 | 2026-09-29 | Issue #476 (the netns keeper judged too young on every stack start). **No article changed.** **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: a keeper that is only young is held through the delayed set, which spends no attempt, like the pause, wait and podman.service holds; a keeper that does not hold, and the new `netns-keeper-crash-loop`, stay infrastructure throws that the queue retries. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the hold sits where the keeper's check was, in the egress preflight before any reservation, and a held or crash-looped job reserves nothing. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: no job runs any earlier than before; every pickup is judged by every keeper rule again. With PR #479's gate, an operator's cancel reaching a job the processor would hold or retry is a policy return, never a retry or a later run (`CONST-RETRY-INFRA-ONLY`). |
 | 2026-09-28 | Issue #468. **No article changed.** **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: a Valkey that refuses this deployment's credential (NOAUTH, WRONGPASS) is a determinate refusal, a configError (exit 2, not restarted into the same answer) at the worker's boot and at every CLI and receiver start, while a Valkey that does not answer stays infrastructure, retried as before. **`CONST-TOKEN-SCOPED-PER-JOB` UNCHANGED, checked**: `VALKEY_PASSWORD` joins the worker-only secrets, refused in `PI_FORWARD_ENV` and as a trigger's `run.secrets` name, so no job container can hold the queue's password. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: no job container's argv, mount or env changes; the Valkey container's command changes, and never carries the password on it (measured on both VMs). Round 3 of PR #475's review: the same three UNCHANGED, checked; `up` labels the Valkey container it starts and refuses to act on one that is not this deployment's, and `--valkey-url` refuses a password, neither touching a job container. Rebased over issue #471 (PR #474), whose rule is that doctor hands no program anything from `.env`: doctor starts NO Valkey any more (its `--fix` offer for an unreachable loopback Valkey is removed, since after this issue that `docker run` needed the deployment's VALKEY_PASSWORD in the docker CLI's environment), and the fix line names `pi-dispatch up`; doctor's own in-process AUTH check (its own client, no spawn) uses the resolved password; `VALKEY_PASSWORD` and `PI_VALKEY_PORT` join `SERVICE_ENV_KEYS`, the password in the secret set (named, never shown); the panel's Valkey clients and kill switch read the pointer's `.env` only, through #471's one reader (`readDeploymentEnv`), and the pointer module no longer aims a second reader. |

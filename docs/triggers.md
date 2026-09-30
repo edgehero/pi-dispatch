@@ -150,10 +150,10 @@ changes what code runs or what it costs.
 - `"packages": false` opts one trigger out of the staged third-party pi packages. This is also how a
   workflow extension is withheld from one flow ([`docs/workflows.md`](workflows.md)).
 
-- `"excludeTools": ["bash", "edit", "write"]` removes named built-in pi tools from that trigger's
+- `"excludeTools": ["bash", "powershell", "edit", "write"]` removes named built-in pi tools from that trigger's
   sessions. The session itself enforces this, not the prompt text. The excluded tools are gone from the
   tool registry. Nothing running inside the job can switch them back on. This only narrows tools. Only
-  the pinned pi's built-ins can be excluded: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`. A
+  the pinned pi's built-ins can be excluded: `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, `ls`. A
   misspelled name is refused when the file loads. Pi would otherwise ignore it silently. The job image
   must declare the `excludeTools` capability. The shipped image does. A job carrying exclusions on an
   older image is refused before it costs anything. That image's runner would run the job with every tool

@@ -1662,8 +1662,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   colour is post-layout by construction now rather than by convention; and the width is a COLUMN count under
   issue #401, transcribed from that renderer's own table, so it frames CJK, fullwidth, Hangul, astral and
   combining content too, not only ASCII, with multi-code-point emoji and Indic clusters the shapes it still
-  draws short, and a cluster that BEGINS with a zero-width character counted as the renderer counts it,
-  under issue #417) carrying a
+  draws short, and a cluster that BEGINS with a zero-width character or a spacing mark counted as the
+  renderer counts it, under issues #417 and #509) carrying a
   status header, day/week/month **SPEND meters** (colored by the
   same `windowState` the worker enforces) plus a daily **token** counter, a unified **TRIGGERS** pane whose
   `{on, run}` rows are **selectable and editable** (a cron row carries an amber `⚠ overdue`/`⚠ stalled`
@@ -2012,46 +2012,61 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     character followed by U+FE0F) coming out WORSE than the `.length` it replaced, since an astral character
     is two code units and two columns. The renderer draws these panes, so the renderer is the authority.
     **It is held there by sweeps: every code point there is, every character followed by U+FE0F and by a
-    keycap, and (issue #417) every zero-width character followed by every code point the renderer counts
-    twice, with a second leader or tail beside it, and four leader shapes after every predecessor there is**, asserting that on
+    keycap, and (issues #417 and #509) every zero-width character and every spacing mark followed by every
+    code point the renderer counts after a base, with a second leader or tail beside it, every spacing
+    mark before each emoji modifier, and four leader shapes after every predecessor there is**, asserting that on
     every one of those the table never measures NARROWER than the renderer, and that every place it
     measures wider is a declared departure: an unassigned code point, a keycap asked for on a base that has
     no keycap form, or a regional indicator. **A cluster that BEGINS with something that draws nothing is
-    MATCHED, not bounded** (issue #417). The renderer computes a cluster's base AFTER stripping leading
-    non-printing characters, then walks the cluster again from its second code unit adding a column for
-    U+FF00-U+FFEF and for U+0E33 / U+0EB3, so that base is counted twice; the table now counts it twice as
-    well, bundling the base with the part of the run inside its cluster as ONE step a cut cannot split
-    (a mark earlier in the run that joins the character in front stays with that character). The issue's
-    own account was incomplete in two measured ways. It is
-    not only a string's START: thirty-one spacing marks (the Myanmar vowel signs among them) are marks
-    that are neither grapheme Extend nor SpacingMark, so each starts a cluster wherever it stands, and text the
-    substitution pass keeps drew a 24-column framed pane at 33. And it is not only four tails: thirteen
-    prepended format characters (U+0600 among them) take any following character into their cluster and can
-    double a TWO-column base, which makes 13,545 doubled forms at a string's start and 3,273 after a
-    character, both counted from the renderer alone and pinned. Whether a run starts a cluster is asked of
-    `Intl.Segmenter` with the renderer's own arguments, not of a list, so the two cannot disagree about
-    where a cluster starts; a bounded memo keeps a line built to defeat the fast path cheap, keyed on the
-    CLASS of the character in front (a stand-in for every printing character whose class cannot change
-    the answer, and a key of its own for a string's start, after a review pass poisoned a memo that had
-    neither). Bounding (substituting a
+    MATCHED, not bounded** (issue #417, re-derived under #509). The renderer computes a cluster's base AFTER
+    stripping its leading non-printing code points, spacing marks included, and counts only what follows the
+    base; a cluster of nothing but non-printing code points is zero columns unless every one is a spacing
+    mark. A spacing mark draws one column alone or after a base (pi-tui 0.99.1 gave 472 of them a column),
+    so one that LEADS a cluster is the one place the sum of the steps over-counts: the table bundles the
+    leading part of the run with the base as ONE step as wide as the base alone, and a cluster made only of
+    run code points as one zero-column step, so no cut can leave a spacing mark on its own to draw the
+    column its cluster did not (a mark earlier in the run that joins the character in front stays with that
+    character and draws as usual). Under pi-tui 0.80.7 the rule went the other way: the renderer walked a
+    cluster again from its second code unit adding a column for U+FF00-U+FFEF and for U+0E33 / U+0EB3, so a
+    base behind a leader was counted TWICE, 13,545 forms at a string's start and 3,273 after a character,
+    and the table counted it twice as well. 0.99.1 walks from after the base, so both counts are now pinned
+    at zero, and the spacing-mark forms the renderer draws as their base alone are pinned instead (1,888 at
+    a string's start, 124 after a character, the renderer's count alone). Where a run leads a cluster is
+    not only a string's START: thirty-one spacing marks (U+102B and U+102C among them) are marks that are
+    neither grapheme Extend nor SpacingMark, so each starts a cluster wherever it stands, and a framed pane
+    of already-scrubbed Myanmar text was the fixture under both renderers, in opposite directions. Whether
+    a run starts a cluster is asked of `Intl.Segmenter` with the renderer's own arguments, not of a list,
+    so the two cannot disagree about where a cluster starts; a bounded memo keeps a line built to defeat
+    the fast path cheap, keyed on the CLASS of the character in front (a stand-in for every printing
+    character whose class cannot change the answer, and a key of its own for a string's start, after a
+    review pass poisoned a memo that had neither). **The stand-in's safe direction FLIPPED with the
+    renderer**: under 0.80.7 a cluster wrongly started here doubled a base, an over-count; under 0.99.1 it
+    makes a spacing mark draw nothing, an under-count, so the kept classes (the fifteen prepended letters,
+    the Hangul leading and vowel jamo and LV syllables, the Kirat Rai vowel signs) must be exact, and the
+    predecessor sweep holds every character there is in front of U+102C and U+FF9E to it (1,111,984 lead a
+    cluster; the fifteen prepended letters take the mark into their own). Bounding (substituting a
     leading mark with nothing to attach to) was rejected: it needs a notion of POSITION the substitution
     class does not have, since every cell and every piece between two colour codes is scrubbed on its own,
-    and it rewrites content where matching changes none. The cost is stated rather than hidden: a renderer
-    that stops double counting turns this into an OVER-count, the safe direction, and the pinned counts go
-    red at that upgrade rather than drifting. **Width is now measured WHERE THE TEXT IS DRAWN**, which a
+    and it rewrites content where matching changes none. The cost is stated rather than hidden, and was
+    paid once: the 0.99.1 upgrade turned the doubling into an OVER-count and the pinned counts went red at
+    it rather than drifting, as this entry said they would. **Width is now measured WHERE THE TEXT IS DRAWN**, which a
     rule about cluster starts forces: a framed body line is padded from the frame's own space (`box` and
-    `frame` alike), the line editor's window after the prompt's space and ALSO piece by piece (the styler
+    `frame` alike), a frame's title and a divider's label and meta are cut after the space they stand
+    behind (every cutter takes that context, `afterSpace`, rather than each site padding one in; issue
+    #509's review found both titles and the divider cut at column 0), the line editor's window after the prompt's space and ALSO piece by piece (the styler
     wraps its cursor cell in inverse video, and the cursor must keep it), every cell of the model-visible runs
     table after a space (pi draws that message inside a padded box, so no cell is at column 0), and a
     STYLED line also piece by piece between its colour codes, because pi's overlay compositor segments each
-    such piece on its own and its cut dropped a right border the whole-string count said fitted. **Declared
+    such piece on its own and its cut dropped a right border the whole-string count said fitted. A cut that strips the joiner it left dangling measures the stripped text again and cuts it again if it no longer fits: under pi-tui 0.99.1 a spacing mark and a joiner are one cluster that draws nothing, and the mark alone draws a column, so a one-column cut of `x`, U+102C, ZWJ drew two (issue #509's review; thirty-one marks, the ones that start a cluster wherever they stand). **Declared
     residuals**: a piece measured alone and then joined after a printing character (a divider label, a
-    badge) can draw one base short INSIDE a frame whose own measurement keeps the border exact; one of
-    fifteen prepended letters followed by U+FFA0 under-counts by one, which is raw text only because U+FFA0
-    is substituted on every drawn path. The rest over-count and so draw short: an emoji-form sequence that a
+    badge) can draw differently INSIDE a frame whose own measurement keeps the border exact: under 0.80.7
+    one base short, and under 0.99.1 one column WIDER when the piece begins with a spacing mark that joins
+    the character in front, which the frame's whole-line measure clips (measured: the border holds and the
+    piece loses a column of content). The prepended-letter-before-U+FFA0 under-count this sentence named is
+    gone: 0.99.1 skips U+FFA0 after a base. The rest over-count and so draw short: an emoji-form sequence that a
     mark extends (the renderer then drops the emoji form); a prepended letter at the END of a cell, which
     takes the following space into its cluster; and a styled line whose pieces measure wider than the whole,
-    which the terminal draws one column short of the border because the compositor's reading wins. **One leader of that shape was fixed under #401 rather than filed**, because its containment was one line: a LONE SURROGATE breaks a cluster the same way, and `clip` used to return its input unchanged when it fitted, so an orphan the count had already removed was still in the text handed to the renderer. It steps the fitted line too now, which makes the rule this module states -- half a character is removed where text ENTERS -- true of the TEXT rather than only of the count. **The direction is the point, and "over-counting is harmless" would be
+    which the terminal draws one column short of the border because the compositor's reading wins. **One leader of that shape was fixed under #401 rather than filed**, because its containment was one line: a LONE SURROGATE broke a cluster the same way under pi-tui 0.80.7 (0.99.1 no longer doubles after one, and draws that line at the count), and `clip` used to return its input unchanged when it fitted, so an orphan the count had already removed was still in the text handed to the renderer. It steps the fitted line too now, which makes the rule this module states -- half a character is removed where text ENTERS -- true of the TEXT rather than only of the count. **The direction is the point, and "over-counting is harmless" would be
     too kind**: both directions rag a frame and they rag it differently. An over-count pads a body line as
     though it were wider than it is, so the line comes out SHORT and the right border sits left of the one
     above it, contained by the pane. An under-count runs the line PAST the pane and past the terminal, where
@@ -2060,7 +2075,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     shape**: the table sums
     CODE POINTS, so any cluster the renderer collapses to one glyph comes out wider than it draws: an emoji
     ZWJ sequence counts every member (6 against 2), and so do a skin-tone modifier, a regional-indicator
-    flag pair, a Hangul jamo cluster and a Devanagari cluster. Every one of them over-counts, so every one
+    flag pair, a Hangul jamo cluster and a prepended letter with the character it takes into its cluster
+    (`ൎa`, 2 against 1); a Devanagari conjunct was on this list until pi-tui 0.99.1, which counts the
+    consonant after a virama and so agrees with the sum. Every one of them over-counts, so every one
     draws SHORT. A first version of this sentence said the ZWJ sequence was the only shape, which a review
     pass refuted by measuring four more; the same pass found the one shape that went the other way, a
     KEYCAP, and that one is fixed rather than stated, because an under-count is the direction that
@@ -2154,7 +2171,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     tools are `sequential` so two writes cannot interleave.
   - **The operator's pi version is uncontrolled**, so the extension runs a **load-time capability probe**
     of the exact API surface it uses and, on any miss, registers **nothing** — all-or-nothing rather than
-    half-loading. The supported version is the pin, `0.80.7` (`CONST-PI-VERSION-PINNED`). Residual risk,
+    half-loading. The supported version is the pin, `0.99.1` (`CONST-PI-VERSION-PINNED`; it was `0.80.7` until issue #509). Residual risk,
     named: an operator on a divergent pi version gets no admin surface and falls back to direct Valkey and
     file inspection, rather than a silently degraded one.
 - **Rejected**:
@@ -2176,7 +2193,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     launch an agent.
 - **Evidence (upstream)**: read from the **published pinned artifact** `@earendil-works/pi-coding-agent@0.80.7`
   (npm), **not HEAD** — `dist/core/extensions/types.d.ts` (`registerCommand` :876, `registerTool` :874,
-  `ExtensionUIContext.custom` :116-126) · `docs/extensions.md` (extension commands run without model
+  `ExtensionUIContext.custom` :116-126; re-read at the 0.99.1 pin, issue #509: `registerTool` :1181,
+  `registerCommand` :1183, `custom` :121) · `docs/extensions.md` (extension commands run without model
   involvement; loading via `-e` / `~/.pi/agent/extensions` / trust-gated `.pi/extensions`) ·
   `examples/extensions/` (doom-overlay, an interactive TUI overlay; the with-deps example resolves its own
   `node_modules` via jiti). The load-time capability probe exists precisely because these are asserted
@@ -2210,10 +2228,13 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   worker exports the shared `parseSubscriptions` validator (the `parseTriggers`/`parsePauseWindows`
   anti-drift idiom) and **reads nothing at job time**; the admin extension is the only reader.
 - **Why**:
-  - **Zero-rate tables make prepaid look free.** Subscription-backed providers (pi-ai's `kimi-coding`,
-    `zai-coding-cn`) ship all-zero rate tables, so every covered run records cost 0 and the spend meters
-    report a paid-for plan as a free lunch. The declaration is what turns "cost 0" back into "prepaid at
-    a price somebody is actually paying".
+  - **A rate table never states a plan's price.** At 0.80.7 pi-ai's `kimi-coding`, `zai` and
+    `zai-coding-cn` shipped all-zero rate tables, so every covered run recorded cost 0 and the spend meters
+    reported a paid-for plan as a free lunch. At the 0.99.1 pin (issue #509) most of their models carry an
+    implied API-equivalent rate instead, so the same prepaid runs record a positive cost and read as
+    metered spend, and a zero rate is no longer even a hint that a plan exists (the qwen-token-plan family
+    is all-zero, and so are free models of metered providers). Either way the declaration is what turns
+    the recorded number back into "prepaid at a price somebody is actually paying".
   - **The env boundary refuses subscription logins by design.** `env-allowlist.mjs` rejects an
     OAuth/subscription credential deliberately (it expires; an unattended service cannot refresh it), so
     no credential that could name the plan ever reaches the worker — the operator declaration is the
@@ -2766,6 +2787,17 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `options.sessionId` gives the root/other attribution for free. The `subscribe()` per-turn accumulator
   (`attachTokenBudget`) survives as the **fallback**, attached only when the meter could not install, so
   exactly one accumulator is ever live.
+- **Amended at the 0.99.1 pin (issue #509)**: the choke point this decision chose is no longer on a session's
+  path. pi 0.99.1 dispatches every session call through a `ModelRuntime` instance, which calls each builtin
+  provider's own api object, and ModelRegistry.registerProvider no longer writes to pi-ai's registry. The
+  same decision (meter calls process-wide at the one shared choke point, observe without consuming, keep the
+  bus meter as the fallback) now applies at `ModelRuntime.prototype`: its streamSimple, stream,
+  streamDeferred, classify and generateImages are wrapped, with the class injected by run-job.mjs, installed
+  before createAgentSession and accepted only when the session's own runtime instance dispatches through the
+  wrappers. The registry half is kept, re-armable as before, for extensions that call pi-ai's legacy global
+  stream functions; its copy is accepted by identity with the module pi hands extensions. Where the halves
+  meet (a composed provider with no builtin base resolves its api in the registry), an AsyncLocalStorage keeps
+  one call from being counted twice.
 - **Why**: The bus is **per instance** and no event carries a session id, so a subagent session an extension
   spawns is invisible to it — a 16-wide fanout registers as roughly **one** turn, and both the cap and the
   run record then understate spend on exactly the most expensive jobs. The registry is the one choke point
@@ -2773,7 +2805,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   resolves the provider for `model.api` out of that registry, and root and subagent alike pass through it.
   Metering there counts **calls** rather than turns, which is the honest unit anyway — a turn is a bundle of
   calls whose count we do not control. Two properties fall out for free and are worth naming: per-session
-  attribution (so `otherTotal > 0` **is** the evidence of subagent spend), and a **forward brake** that the
+  attribution (so `otherTotal > 0` **is** the evidence of subagent spend; from the 0.99.1 pin a compaction or
+  branch summary lands there too, under a fresh session id), and a **forward brake** that the
   bus could never give — `session.abort()` is voluntary and does not propagate to a child, whereas after a
   breach every subsequent call by any session is answered with a synthetic aborted stream before it reaches
   a provider. The cap stays structurally **lagging** (`OQ-010`) either way; `REQ-JOB-TIMEOUT-30M` is still
@@ -2794,7 +2827,15 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     meter exists to watch.
   - *Patch or vendor pi* — a monkey-patch of `dist/` turns `CONST-PI-VERSION-PINNED`'s "upgrading is one
     version string" into "upgrading is a fork". The registry is a supported, exported seam; use it.
-- **Must handle** (each verified by runtime probe, none by reading source — this is the part that bites):
+  - *Patch `ModelRuntime.prototype` "is a monkey-patch of pi"* -- considered and accepted anyway at 0.99.1, and
+    the difference from the rejected `dist/` patch matters: nothing is edited on disk and no private method is
+    replaced; the five wrapped methods are the public surface of an exported class, their shapes are pinned
+    (pinned-api.test.mjs), and uninstall() restores them. The alternatives were worse: a session's streamFn
+    is not an option createAgentSession takes, and wrapping only the runner's own instance would miss every
+    runtime a subagent extension creates.
+- **Must handle** (each verified by runtime probe, none by reading source — this is the part that bites; written at
+  the 0.80.7 pin, and from 0.99.1 true of the registry half only, whose copy is now accepted by identity
+  rather than by the mutation probe below, issue #509):
   - **Two module instances.** pi-ai is installed twice (hoisted, and nested under pi-coding-agent) with
     **separate** module-level registries, and pi-coding-agent uses the nested one. A bare-specifier import
     from runner code binds the hoisted copy and is a **silent no-op** — it registers, reports success, and
@@ -3029,7 +3070,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     the operator's config is already broken.
   - *A package with no `pi` key but a convention dir IS a pi package.* The issue proposed requiring the
     `pi` key. At the 0.80.7 pin `collectPackageResources` falls through to `extensions/ skills/ prompts/
-    themes/` when the manifest is absent, so requiring the key would have silently dropped a legitimate
+    themes/` when the manifest is absent (still so at the 0.99.1 pin, issue #509), so requiring the key would have silently dropped a legitimate
     class. The stager already had the right predicate; discovery reuses it rather than restating it.
   - *On by default inside `--with-packages`, rather than an opt-in flag for one release.* A flagless
     `import-pi` still stages no packages, before and after, so the only run whose behaviour moves is one
@@ -4329,11 +4370,12 @@ a tunnel.
 - **Decision**: A trigger may name built-in pi tools its jobs' sessions must not have
   (`run.excludeTools`, issue #291), and the runner passes the list to `createAgentSession` as
   `excludeTools` -- the first enforced in-container permission this project has. The loader validates
-  members against a hand-written `EXCLUDABLE_TOOL_NAMES` set (the seven built-ins at pi 0.80.7) that is
+  members against a hand-written `EXCLUDABLE_TOOL_NAMES` set (the eight built-ins at pi 0.99.1: `powershell`
+  joined the seven of 0.80.7, registered but not active by default, issue #509) that is
   BOLTED twice to the pinned artifact; a near-miss key sweep in `validateBackend`'s shape refuses
   misspellings of the field itself; the job image declares an `excludeTools` capability token that the
   worker's preflight checks pre-spend (`job-image-exclude-tools-unsupported`); the runner re-asserts
-  membership in-container pre-spend against a set DERIVED from the seven root-exported
+  membership in-container pre-spend against a set DERIVED from the eight root-exported
   `create*ToolDefinition` factories, and logs `tools_excluded` with the session's active tool list read
   back; a chained child inherits the parent's exclusions off validated job data.
 - **Why**: pi scopes tools per session and this project never used it, so a "read-only triage" flow's
@@ -6348,3 +6390,4 @@ a tunnel.
 | 2026-09-29 | Issue #482. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**, three clauses of the four-views bullet. (1) The LIST trigger row carries the three badges `render.mjs`'s `triggerLine` always showed and the panel did not: `[skills <basename>]` and `[instructions]` in `accent`, because both are operator-authored overrides of a deployment default and amber is reserved for risk, and `[secrets N via <profile>]` in `warning`, the one badge that says what a job can REACH. Not a width decision: the omission came in with #60 and #225, whose commits added the line to `render.mjs` and the trust model and never touched the row. A row too wide for the frame follows ONE rule (`fitTriggerRow`), because a single right-hand clip cut the LAST badges first, which is `[secrets]` and the health badge. **The floor is the row's identity and is never given away**: the cursor, the kind column, the target with its flow, and the selector's first 4 columns plus an ellipsis (a cron row's id plus an ellipsis, since `id  pattern` is named by its id); and with it the risk badges (`[packages]`, `[resume]`, `[xN]`, `[secrets]`, health) always stay. The row is taken to its MINIMUM, the selector at its floor and the free text inside EVERY badge (image ref, secrets profile, skills basename, risk or not) at its ellipsis, then the non-risk badges drop right to left only if that minimum still does not fit, and the room left is given back in order: the selector, then the risk badges' text, then the other badges' text. Below the floor plus the risk badges at their minimum the plain right-hand clip applies, and that width is a FORMULA, not a number: 4 of frame + 16 of cursor and kind + the floor selector + 1 + the target + each risk badge with its text at the ellipsis (`[secrets 3 via …]`, `⚠ overdue`). **CORRECTED TWICE in review of PR #486.** Round 1: the first version split at one fixed threshold, keeping badges only when they left 17 columns of head, so at widths 80 to 136 with a 34-column image ref `[secrets]` was cut after all (the overlay is 75% of the terminal, so that is the common width), and just above the threshold selector and flow were both cut to nothing. Round 2: the give-way ORDER that replaced it dropped the selector before it had cut badge text to its ellipsis, so at 86 to 94 columns a `bug` rule and a `regression` rule with the same flow rendered as one row, it gave room back to an image ref before a secrets profile, and the "below 86 columns" this row then claimed held only for a short target. A floor plus a give-back order has no step that can run out of turn; the twin tests differ ONLY in selector, and only in cron id, across widths 60 to 200. A row that fits renders byte-identically, pinned against goldens rendered before the change. (2) RUN_DETAIL's post-mortem sentence (86 columns in a 66-column pane) is word-wrapped by columns, each line dimmed on its own, instead of clipped at `+ optiona`. (3) TRIGGER_DETAIL shows the skills dir IN FULL, which `render.mjs`'s comment has claimed since #60 and was false, plus the instructions TEXT and a secrets row, so the three fields read alike on the row and the drill-in: `accent` for the two operator-authored overrides, `warning` for secrets, the dim "I checked" default when unset. A long value wraps under a blank label and the instructions stop at six lines with the remainder COUNTED, since the pane has no scroll and 2000 characters would push the trust model off it; a word wider than the pane breaks at a grapheme boundary inside the column budget, so a joined emoji is never split onto a line beginning with a bare U+200D; the trust-model bullets wrap under their own indent too, which is what the secrets disclosure needed ("the job holds no vau..." before). **THE TEXT IS NOT ON THE DISPLAY RECORD, and cannot be**: `readTriggers`' records are what the model-callable `dispatch_triggers` tool returns verbatim, which is why `normalizeTriggerForDisplay` carries a boolean. So `read-model.mjs` gains `readTriggersWithInstructions`, called only by the panel's deps factory, which returns the same view plus a map of text by raw file index from ONE read captured through `readTriggers`' own `fs` seam, so the two cannot describe different saves of the file. The text is CAPTURED with the record when the pane opens: read by index from each live refresh, a trigger deleted or moved under an open pane showed its new occupant's words under the old header (also review round 1). Nothing routes drill-in text anywhere else: the overlay resolves with an action and an index only, and the degraded LIST renders `render.mjs`'s line, which has no text. **AND A GATE GAP, found writing the test**: the pane gate keeps an SGR run BECAUSE the styler emits them, so an SGR run in a label, phrase, image, flow or secrets profile painted the pane and pushed the line past the frame, since the gate runs after `fitLine` has measured. EVERY trigger renderer now scrubs the record at its door (`scrubTrigger` in `render.mjs`, every string field and every string in an array): the LIST row, TRIGGER_DETAIL, and `render.mjs`'s own `renderTriggers`, whose line the unframed degrade prints, where SGR survived raw at `render(undefined)` and `render(NaN)` because that path substitutes only a bare ESC; the first version of this row said "both renderers" and missed that third one. The trust model's secrets line had no belt at all. Both surfaces now badge the skills dir through one `skillsBasename`, which reads `-` for a dir with no segment where `render.mjs` printed `undefined`. **The general half**: `fitLine`, and the frame's own `padVisible` belt, clipped an over-wide line through `styler.cell` on its STRIPPED text, so every overflowing line in the panel printed in the default colour, not only the post-mortem (the narrow-width key hints and settings line did too). Both now go through one styler helper, `clipStyled`, which cuts each text run between two SGR codes by columns with the same `columnsOf`/`sliceColumns` the cell uses, strips a joiner left at the cut (looking through any colour codes after it), closes the cut run with one reset, and falls back to the colourless cell on the one shape where the whole-line count exceeds the run-by-run count (a colour code between a base and its U+FE0F, issue #417). Under no theme it is byte-identical to the old clip. **UNCHANGED, checked**: `REQ-PER-TRIGGER-INSTRUCTION` and `REQ-PER-TRIGGER-SKILLS` (display only, nothing about what a job loads or is told), `render.mjs`'s `triggerLine` layout and the model-visible channel's shape (its line is only scrubbed now, and names a segmentless skills dir `-`), `styler.cell` itself (it still drops colour on its input, which is right for a cell of plain text), `INT-TRIGGERS-FILE-CONTRACT` and `normalizeTriggerForDisplay`, whose records already carried all four fields and still carry the instructions as a boolean only. **Code evidence**: admin/src/dashboard.ts -> triggerRow, fitTriggerRow, fitLine, wrapColumns, renderRunDetail, renderTriggerDetail, createDashboardDeps; admin/src/read-model.mjs -> readTriggersWithInstructions; admin/src/render.mjs -> scrubTrigger, skillsBasename, renderTriggers; admin/src/style.mjs -> clipStyled, padVisible; admin/test/dashboard-badges.test.mjs. |
 | 2026-09-29 | Issue #483 (insights page: labels that overlap wires, loops and each other), with PR #487's review round 1 and its final review folded in. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: a new passage after the label-fit gate's results, "Where the topology draws its labels and wires", stating what is guaranteed (the under-chip stack below every under-row route; one greedy label placement on points of each wire's own path, clear of every drawn thing and every label before it and read as that wire's (its own wire within 16 units, every other pair's at least 1.5 farther), a label with no such spot moved to its wire's tooltip and counted in the legend; column gaps crossed by labelled wires widened to hold their widest label; back edges out of one node on runs of their own; a label line above each folder's first row; a lane, gap line and gutter per wire that leaves its group, wires into one port on separate lines, square crossings of the lanes; skipped columns passed between their boxes; skill-group titles full width unless a path enters their band, else between the chip's ports; the cumulative end label above its last point and off the gridlines; the viewBox at drawn bounds plus 12 and at most 1.35 page pixels per unit), what is not (two wires that stay in one group may still run along each other; a label box is an estimate the gate alone measures; a dense scene puts labels in tooltips; a chip label cut to its chip's edge may end up to 3 units under its own port, per #422's measured decision), and the gate's collision probe (text against text, paths, painted rect borders, lines and svg edges, and each wire label against the reading rule, on seven pages, with a shrink that scales with the rendered scale). A CORRECTION: the corpus overflow count with the fit stripped was 31 on the tree before this change, not the 29 the passage recorded, and is 30 after it (the builder now cuts the corpus's long skill-group title). Causes, one per defect of the issue: the spend badge baseline (chip top + 53) and the re-arm loop run (chip top + 55) were two literals in two files; a pair's second label was stepped 10.5px from the first at its own curve's midpoint, less than a line; a trigger-to-tier wire was a bezier across every group stacked between; the cumulative end label was start-anchored 6px right of a point on the plot's right edge; the viewBox took a fixed 80px margin. Found on the way: a skill group's title began left of the chip's input port (a wire from its own row or above ran through it). Review round 1 refuted three first cuts, and the final review a fourth (a clear spot up to six lines out read as another edge's label; replaced by the reading rule, with the gap widening that gives it room), each replaced by the rule above rather than patched: the per-pair label stack (a fan-out's counts on the same pixels, lifts under a chip and into a folder title), the shared lane and gap line (one trunk for three wires, and an intra-group curve along the lane), and the between-ports title cut applied always (near-identical names read the same); it also found the skip-column crossing, on main too. **Why rules and not nudges**: each is a property of every scene, which is what the unit pins assert over their scenes (mutation-checked: reverting any one rule turns a pin red) and the browser probe measures on its pages. **`REQ-INSIGHTS-HTML-EXPORT` UNCHANGED, checked**: its clauses (a) to (h) are encodings, not geometry. **`REQ-TOPOLOGY-GRAPH` UNCHANGED, checked**: (c)'s labels keep their words; a label in a tooltip keeps them too, and the legend states the count. ASCII scenes change bytes: under-row routes drop 7px, the band under them grows 4px, the first row sits 14px lower, a group with lanes widens the pitch after their column, wire labels move and a hidden one becomes a title element, a gap crossed by a labelled wire widens, a second back edge out of one node runs a step lower, skill-group titles move 22px right and gain an unpainted rect, the viewBox shrinks, the pane gains a max-width, and the cumulative plot starts 6px lower. **Code evidence**: admin/src/graph-html.mjs; admin/src/insights-html.mjs; admin/test/graph-html.test.mjs and admin/test/insights-html.test.mjs (the issue #483 pins); .github/scripts/label-fit-check.mjs (the collision probe and its pages). |
 | 2026-09-29 | Issue #492, with PR #493's review folded in. **`DES-COST-FOLD-BY-SCAN` AMENDED**: the aggregation sentence gains its one exception, a bucket every run of which ONE declared plan covers, with no run a floor, keeps `plan:<id>` instead of demoting to `estimated` (the review found the first cut dropped a floor's `≥` and joined two ids with a character an id may hold), so the fold agrees with `REQ-COST-ANALYTICS` (b) and with its own per-model bucket; mixed buckets still demote with coverage, and zero-rated and unknown buckets are unchanged (the issue is about plan coverage; widening the exception to them is a separate decision). The daily chart draws a plan day with the same 1px dashed sliver as before; only its tooltip now reads `plan:<id>`. **`DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: the topology's layout rules and the label-fit gate are untouched (the gate exits 0, with a new page of an armed and a spent one-shot and a long plan badge; the documented fixture's page probes clean). docs/costs.md gains the sentence saying what a wholly plan-covered bucket reads and what `dispatch_costs` returns for it. **Code evidence**: admin/src/costs.mjs; admin/test/costs.test.mjs. |
+| 2026-09-30 | Issue #509, the pi 0.80.7 -> 0.99.1 bump, one row for the runner, worker and admin halves. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED in place** (ID kept, it is an address): at pi 0.99.1 the api-provider registry is off the session path, so the process-wide meter moved to ModelRuntime.prototype, with the registry kept as a second half for legacy extension calls and an AsyncLocalStorage deduplicating the composed-provider path where the two meet; a Rejected entry records why patching the prototype is not the rejected `dist/` patch; the Must-handle list is marked as the registry half's; compaction and branch summaries now land in `otherTotal`. The observe-don't-consume design, the fallback rule and the brake are UNCHANGED. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**, the supported version (the pin, `0.99.1`), the evidence line numbers re-read at 0.99.1, and the column-width bullet: pi-tui 0.99.1 gives 472 spacing marks a column and walks a cluster from after its base, so the #417 doubling is gone (its pinned counts, 13,545 and 3,273 doubled forms and 6,446 breaking predecessors, are now zero, re-pinned rather than dropped) and the matched-leader rule is re-derived for the opposite correction: a spacing mark that LEADS a cluster draws nothing, so `panel.mjs` bundles the leading part of a run with its base as one step as wide as the base alone, and a cluster made only of non-printing code points as one zero step. The segmenter probe, the memo and the context stand-in are kept; the stand-in's safe direction flipped (a wrong join is now an under-count) and the predecessor sweep pins the new count (1,111,984 predecessors lead, fifteen join). New pinned arms: 472 spacing marks against 242 tails (1,888 and 124 narrower forms), and against the five emoji modifiers (exact at a string's start, 155 exact after a letter, the rest the declared skin-tone over-count). Residuals restated: the U+FFA0 under-count is gone, a joined piece now draws one column wider and is clipped by its frame, a Devanagari conjunct no longer over-counts. **`DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY` AMENDED**, the first Why bullet: kimi-coding, zai and zai-coding-cn now carry implied API-equivalent rates, so prepaid runs record a positive cost rather than 0, and a zero rate is no longer a subscription signal; the declaration's role is unchanged. **The `run.excludeTools` decision AMENDED**: the known set and the runner's derivation are the eight built-ins of pi 0.99.1 (`powershell` added). The package-discovery Rejected entry re-checked: `collectPackageResources` still falls through to the convention dirs at 0.99.1. PR #510's review found two cuts the new rule left measuring text where it is not drawn, both fixed at the rule: a cut that strips a dangling joiner re-measures and re-cuts (a spacing mark and a joiner draw nothing together, the mark alone a column; thirty-one marks, swept), and every cutter takes an `afterSpace` context, used by both frame titles and the divider's label and meta (an 8-column box drew its top line at 9; the divider missed its width in 13,380 swept forms at the previous commit). **UNCHANGED, checked**: `OQ-035` (the substitution class is untouched; `interpreted` keeps every mark as composing), `REQ-TOPOLOGY-GRAPH`, `REQ-INSIGHTS-HTML-EXPORT` (the chip estimate is still one-sided; its exact-count pin moved from 185,319 to 185,583 for the 264 BMP spacing marks), `DES-COST-FOLD-BY-SCAN` (classification order unchanged: an owned plan first, so a declared plan reads `plan:<id>` across the rate change), counterfactual-only subscriptions. **Code evidence**: image/runner/src/usage-meter.mjs, model-runtime.mjs; admin/src/panel.mjs -> widthSteps, leaderSteps, planRun, contextOf, NON_PRINTING, SPACING; admin/src/style.mjs -> visibleLen (comments); admin/test/width-leaders.test.mjs, width-predecessors.test.mjs, width.test.mjs, graph-html.test.mjs, control-bytes.test.mjs, helpers/renderer.mjs (pin 0.99.1). |

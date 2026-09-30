@@ -156,7 +156,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   retry-shaped throw after a tool ran (counted, aborted, one request); the same throw after a completed reply
   with a follow-up queued (counted, aborted, one request); a queued follow-up after the abort (re-aborted, one
   request); and the fallback token budget's breach on a failed turn (re-aborted at the retry's `turn_start`,
-  one request)
+  one request). At the 0.99.1 pin (issue #509) three of those premises moved and the test pins the new ones:
+  the throw after a tool ran makes pi omit the failed attempt and `prompt()` reject (`Cannot continue from
+  message role: assistant`), which the runner ends as `2` / `retry-unresumable` rather than a queue-retried
+  `1` (`INT-RUNNER-EXIT-CODE-PROTOCOL`); a queued follow-up no longer starts a second run after the abort;
+  and the token budget's abort at `turn_end` reaches pi before it decides to retry, so no `auto_retry_start`
+  follows. Each still costs one request, and the recovered-429 order above is unchanged
 - **Traces to**: `CONST-BUDGET-BEFORE-TOKENS`, `REQ-JOB-TIMEOUT-30M`, `REQ-UPSTREAM-CONTRACT-TESTS`
 - **Acceptance**: Given a flow that would exceed the turn maximum, the runner aborts at the threshold and
   exits with the policy code, not the infra code. Given `--max-turns 1` and a provider 429 that pi's own
@@ -874,8 +879,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 ## REQ-TOKEN-ACCOUNTING-AND-CAPS
 
 - **Statement**: The harness shall (a) **account** every job's token usage **process-wide** — the runner
-  wraps every api id in pi-ai's module-level api-provider registry, the one choke point every in-process
-  session funnels through, and accumulates each provider call's `usage` into per-job totals
+  wraps the model-calling methods of pi's `ModelRuntime` class (streamSimple, stream, streamDeferred,
+  classify, generateImages) on its prototype, the one choke point every in-process session's model calls go
+  through at the 0.99.1 pin, plus pi-ai's legacy api-provider registry for extensions that call it directly,
+  and accumulates each provider call's `usage` into per-job totals
   `{ input, output, total, cost }` plus the attribution split
   `{ metered, rootTotal, otherTotal, looseTotal, sessions, calls, unresolved, unpriced }`, emits them on the
   `exit` line, and the worker persists them in the run record and surfaces them in the admin run views. The
@@ -890,8 +897,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (`INT-RUN-HISTORY-FILE-CONTRACT`) — so "what did flow X on model Y cost" is reconstructable from history
   and a recorded run can later be re-priced under different rates. The fallback meter keeps **no** ledger:
   it reports five keys and `usage: null`, absence being the reader's signal, not an error; (b) provide an **optional per-job token budget** (`maxTokens` /
-  `PI_MAX_TOKENS`) that the runner enforces in-run — once the running total exceeds it the meter returns a
-  synthetic **aborted** stream for every subsequent provider call **by any session** and the root session is
+  `PI_MAX_TOKENS`) that the runner enforces in-run — once the running total exceeds it the meter answers
+  every subsequent provider call **by any session** without reaching the provider (a synthetic **aborted**
+  stream, or an aborted classify/images result) and the root session is
   aborted — exiting policy (`2`) with `reason: "token_budget"`; and (c) provide an **optional daily token
   cap** (`dailyTokenCap` / `PI_DAILY_TOKEN_CAP`) that refuses a new job pre-container once the day's recorded
   spend has reached it. Both caps are unset-means-disabled and resolve `job.data > overlay > env` per job;
@@ -917,8 +925,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `sessionId`**. So a subagent session an extension spawns emits **nothing** on the parent's bus, and a
   16-wide fanout registers there as roughly **one** turn — meaning a `subscribe()`-only meter understates
   spend precisely on the most expensive jobs, which is the opposite of what a spend control is for. The one
-  choke point every in-process session shares is pi-ai's module-level api-provider registry: metering there
-  counts **calls** rather than turns, and `options.sessionId` (a declared field on pi-ai's `StreamOptions`)
+  choke point every in-process session shares is `ModelRuntime.prototype` (at 0.80.7 it was pi-ai's
+  module-level api-provider registry, which a 0.99.1 session no longer touches): metering there counts
+  **calls** rather than turns, and `options.sessionId` (a declared field on pi-ai's `StreamOptions`)
   reaches the provider, which is what makes the root/other split possible at all. If pi ever forwards a
   child session's events onto its parent's bus, this scope becomes deletable — the absence is named here so
   a future maintainer knows that, rather than leaving the meter as unexplained ballast.
@@ -928,6 +937,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   The exit-line shape and every exit code are unchanged; the accounting is simply more complete. A daily
   token counter fed by it therefore fills faster than before at identical real spend — that is the
   correction, not a regression.
+  At the 0.99.1 pin compaction and branch summaries are sent under a FRESH session id when the caller passes
+  none (compaction.js completeSummarization), so they land in `otherTotal`, not `rootTotal`: `otherTotal > 0`
+  alone no longer proves a fanout (`sessions` counts the distinct ids). Cache warming, which would add paid
+  maxTokens-1 re-sends under the root id, is off in every job.
   **What the breach actually stops.** `session.abort()` on the root is **voluntary and does not propagate**
   to a child session, so aborting is not the brake. The forward brake is the meter: once breached, every
   subsequent provider call by **any** session is answered with a synthetic aborted stream before it reaches
@@ -1941,8 +1954,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   or starts with `-`, when more than sixteen references are named, when a key collides with a name the
   worker writes itself (`MINTED_TOKEN_VARS`, `FORGE_HOST_VARS`, `WORKER_ONLY_SECRET_VARS`, `EGRESS_ENV_VARS`
   or the closed map's own `PI_*`/`PLAYWRIGHT_*`), when a key is one **pi or its provider SDK reads to
-  configure a provider** (`PROVIDER_STEERING_VARS`, issue #314: derived from the pinned artifacts, never
-  written by hand), when `run.secretsProfile` names nothing resolvable, and
+  configure a provider** (`PROVIDER_STEERING_VARS`, issue #314: derived from the pinned artifacts, with
+  two named exceptions pinned by tests, the scan-unreachable residuals and, since issue #509,
+  `ANTHROPIC_AUTH_TOKEN` retained after pi made it a key variable), when `run.secretsProfile` names nothing
+  resolvable, and
   when `run.secrets` appears beside `run.resume: true`. **Pre-spend, per delivery**, the job is refused with
   `budgetReserved: false`, no token minted and no clone, as `secret-profile-unknown` when no declared profile
   matches or its resolver is absent, not executable or outside `PI_SECRET_RESOLVER_ROOTS`; as
@@ -2591,6 +2606,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-30 | Issue #509, the pi 0.80.7 -> 0.99.1 bump, one row for the runner and worker halves. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED** (mechanism, not contract): the process-wide meter's choke point moved from pi-ai's api-provider registry (no longer on a session's path) to ModelRuntime.prototype, with the registry kept for legacy extension calls; the brake covers classify/generateImages too; compaction now lands in otherTotal, and cache warming is off in every job. **`REQ-RUNNER-TURN-BUDGET` AMENDED**, evidence only: three loopback premises moved at 0.99.1 and are re-pinned (the throw after a tool ran now ends `2` / `retry-unresumable`, a queued follow-up starts no second run, the token budget's abort suppresses pi's retry); the bound and every count are UNCHANGED. **`REQ-TRIGGER-SECRETS` AMENDED**, the load-time clause: the steering set is re-derived against 0.99.1 and keeps `ANTHROPIC_AUTH_TOKEN` by name after pi made it anthropic's first key variable, so a version bump did not widen what a trigger may bind. UNCHANGED, checked: the exit-line `tokens` shape, the `usage` ledger shape and every exit code (INT-RUN-HISTORY-FILE-CONTRACT); the pre-spend per-provider reservation (it now reserves `ANTHROPIC_AUTH_TOKEN` for anthropic jobs through pi's own list); `REQ-DEPLOYMENT-BOOTSTRAP` (a host bearer token is a warning, like an OAuth token); `REQ-COST-ANALYTICS` (b) (an uncovered zero-rate run still renders `$0 (unrated)`; which providers are zero-rate changed, not the rule). |
 | 2026-09-29 | Issue #492, with PR #493's review folded in. **`REQ-TOPOLOGY-GRAPH` AMENDED**, clause (h): the plan-covered spend badge now holds, because the fold keeps `plan:<id>` for a bucket every run of which ONE declared plan covers with no run a floor (it had returned only metered or estimated, so the badge read `~$0 est.` beside a by-model table saying `plan:kimi`); the badge fits its chip, cut with the whole text in a tooltip (a long plan id ran onto the wires); a narrowed close rule's label leads with its `#<n>` (the chip cut `action[closed]…` and dropped `#40`); a one-shot trigger carries `[once]` or `[spent]` on its chip. **`REQ-COST-ANALYTICS` UNCHANGED, checked**: its (b) is the rule this makes true; its (c) still demotes any bucket mixing plan and billed runs to estimated with coverage; its (d) holds because a plan bucket holding a floor stays estimated with its `≥` (the review found the first cut dropped it: a fallback-metered run cannot see subagent spend, and `plan:<id>` has no place for `≥`). A bucket two plans cover stays estimated too: the subscriptions validator accepts any non-empty id, so no separator could join two unambiguously (pinned against the parser). **`REQ-INSIGHTS-HTML-EXPORT` UNCHANGED, checked**: its (b) (a plan bucket draws a chip, no dollar bar) now applies to the trigger, flow and repo tables whenever a plan covers the whole bucket, which it always required. **Code evidence**: admin/src/costs.mjs (combineContributions); admin/src/graph-model.mjs (triggerMatchLabel); admin/src/graph-html.mjs (the status line); admin/test/costs.test.mjs, graph-html.test.mjs, insights-html.test.mjs (the issue #492 pins). |
 | 2026-09-29 | Issue #484 (the folder's `egress-proxy.conf` went stale after an upgrade, and nothing said so). **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, one clause after the #480 scaffold: `doctor` warns (⚠) when the folder's `deploy/egress-proxy.conf`, or the podman venue's account-owned copy, differs from the installed package's file, for the shipped proxy with the policy armed, and is silent for an identical or absent copy; `up` offers the folder copy's refresh before its proxy step, asked even under `--yes` (the one action `--yes` does not accept, since the difference may be the operator's own edit), keeping a timestamped backup, writing through a same-directory temp file and a rename, refusing a symlinked copy or `deploy/`, and then offers `docker restart` of a running current proxy, and `docker unpause` then `docker restart` of a paused one (PR #491's review: an unpause alone resumed squid on the old file while `up` had said the rules were replaced), which `--yes` accepts unless job networks are attached. A copy that differs only in its line endings is said to. A declined refresh changes nothing. **UNCHANGED, checked**: `init` (still create-only; it never refreshes), `REQ-EGRESS-ALLOWLIST` (the rules' content and the policy), the consent contract for every other `up` action, and `service install`, which already compared the account copy and replaced it only under `--force`. |
 | 2026-09-29 | Issue #480 (the no-clone quickstart started no egress proxy). **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, three clauses. (1) `init` scaffolds `deploy/egress-proxy.conf`, create-only, from the package's own copy (resolved from the module as `service.mjs` resolves its templates), and lists it. `up` needs that file and the allowlist in the folder before it starts the docker proxy, and a folder made by `npx @edgehero/pi-dispatch up` got the allowlist alone, so on the default policy `up` declined the proxy and every job was refused before it spent, while its own advice (run `init`, then `up`) could not help. (2) The docker next steps no longer name `deploy/docker-compose.yml`: step 2 is `pi-dispatch up`, which starts Valkey and the proxy (the compose line started no proxy either), and step 1's note no longer names `image/Dockerfile`; the sentence calling the docker text unchanged byte for byte is replaced by what is now true. (3) `up` runs `init` without its "Next:" ladder, which used to print mid-pass the steps `up` was performing; the created and kept lines stay, and init's name column is as wide as its longest name. The podman ladder's first line names the Podman guide by its URL rather than `docs/podman.md`, which a folder made without a clone has no copy of. The operator-facing remedies follow the same rule, revised by PR #488's review round 1: the egress-proxy refusal comment, the sandbox's network-failure message and doctor's proxy fix name `pi-dispatch up` from the deployment folder and no compose line at all (only `up` knows the folder, and a compose line printed without it would, in a folder `/dispatch setup` laid out, start a second Valkey under project `deploy`), and a proxy `PI_EGRESS_PROXY` names is the operator's to start; every later or fallback compose line `up` prints is printed only where the folder holds `deploy/docker-compose.yml`; the Valkey-unreachable hints of the CLI, `cancel`, `service` and the panel name `pi-dispatch up` only for a loopback `VALKEY_URL` (the only Valkey `up` starts) and otherwise ask about the Valkey at its host; the worker unit template's Valkey comment names `pi-dispatch up`; and a static test requires `--env-file` on every compose command in the sources, names each prose mention, and `composeArgs` is pinned to carry `--env-file .env`. Every `init` scaffold is written `wx` (never through an existing path, a dangling symlink included, which is reported kept), and `init` refuses, writing nothing into it and exiting 1, a `deploy/` that is a symlink or not a directory, and a directory where any scaffold's file belongs, listing every other file it wrote beside the refusal. `up` goes on past an `init` that refused or threw (said, and named in its summary) instead of aborting after the image pull, and neither `up` nor `doctor` treats a directory at either proxy file as the file: `up` starts no proxy on it and `doctor` fails naming it. Refusal reasons, log events and the run record are unchanged (only human text moved). **UNCHANGED, checked**: the consent contract (`init` still runs nothing and writes only create-only scaffolds; the proxy start is shown and asked as before), `REQ-EGRESS-ALLOWLIST` (the rules file's content, the allowlist scaffold and the policy are untouched), the podman ladder's steps and the podman venue (its unit mounts an account-owned copy `service install` writes, never the folder's). |

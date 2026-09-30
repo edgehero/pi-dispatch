@@ -357,8 +357,8 @@ export function hasControls(s) {
  * `.value()`), so the reason to keep `clip` deleting is that pin and the defence it gives, not a live
  * caller. Said plainly because the first draft of this change claimed a caller that does not exist.
  */
-export function clipData(line, w) {
-  return clip(scrubControls(line), w);
+export function clipData(line, w, opts) {
+  return clip(scrubControls(line), w, opts);
 }
 
 /**
@@ -396,6 +396,8 @@ export function clipData(line, w) {
  *
  *   - zero for a mark (`\p{M}`) and for a format character (`\p{Cf}`), plus the fillers and
  *     reserved code points the renderer also draws as nothing;
+ *   - except one for a spacing mark (`SPACING`, 472 code points pi-tui 0.99.1 gives a column), and zero
+ *     again for one that LEADS a cluster, where the renderer strips it with the rest (`leaderSteps`);
  *   - two for every code point in `WIDE`, which is that renderer's own double-width set;
  *   - two for a narrow character followed by U+FE0F, which asks for its emoji form, and two for a keycap,
  *     which is one of twelve bases plus U+FE0F plus U+20E3 drawn as a single key;
@@ -403,8 +405,9 @@ export function clipData(line, w) {
  *     how a rule starts breaking the panes it was added to fix.
  *
  * WHAT IT IS HELD TO, in `width.test.mjs`: sweeps of every code point there is, of every character
- * followed by U+FE0F and by a keycap, and (issue #417) of every zero-width character followed by every code
- * point the renderer counts twice, asserting that this never measures NARROWER than the renderer and that
+ * followed by U+FE0F and by a keycap, and (issues #417 and #509) of every zero-width character and every
+ * spacing mark followed by every code point the renderer counts after a base, and of every character in
+ * front of four leader shapes, asserting that this never measures NARROWER than the renderer and that
  * every place it measures wider is a declared departure. The pair sweep is there because
  * a first version CLAIMED it and shipped a six-entry list instead, and the hole was one selector further
  * along: a keycap measured 1 against the renderer's 2.
@@ -419,13 +422,16 @@ export function clipData(line, w) {
  *
  * WHAT IS LEFT, and it is a CLASS rather than one shape: this sums steps, and the renderer collapses some
  * runs of them into a single glyph. An emoji ZWJ sequence counts every member (6 here against 2 there), and
- * so do a skin-tone modifier, a regional-indicator flag pair, a Hangul jamo cluster and a Devanagari
- * cluster. A first version of this paragraph named the ZWJ sequence as the ONLY case; a review pass
- * measured four more, and found the one case that went the other way -- a keycap, at 1 against 2 -- which
- * is fixed above rather than listed here, because an under-count is the direction that overflows a pane.
+ * so do a skin-tone modifier, a regional-indicator flag pair, a Hangul jamo cluster, and a prepended letter
+ * with the character it takes into its cluster (`\u0d4ea`, 2 here against 1). A first version of this
+ * paragraph named the ZWJ sequence as the ONLY case; a review pass measured four more, and found the one
+ * case that went the other way -- a keycap, at 1 against 2 -- which is fixed above rather than listed here,
+ * because an under-count is the direction that overflows a pane. A Devanagari conjunct was on the list
+ * until pi-tui 0.99.1, which counts the consonant after a virama and so agrees with the sum.
  *
- * Every remaining case over-counts, so every one draws SHORT inside its border rather than through it, with
- * one exception stated at `leaderStep`: a prepended letter followed by U+FFA0, which no drawn path keeps.
+ * Every remaining case over-counts, so every one draws SHORT inside its border rather than through it. The
+ * one under-count this paragraph used to name (a prepended letter followed by U+FFA0, counted by pi-tui
+ * 0.80.7's second walk over a cluster) is gone: 0.99.1 skips U+FFA0 as default-ignorable after a base.
  *
  * A COUNT IS A COUNT OF A LINE. Whether a cluster starts depends on what stands in front of it (issue #417),
  * so a string is measured as though it began a line, and a caller that draws it after something measures
@@ -463,26 +469,25 @@ function* widthSteps(s) {
   // raw input, in the safe direction, because the renderer measures the orphan as a sequence break and we
   // measure the text we are about to hand it.
   const chars = dropOrphans([...String(s ?? "")]);
-  // TRUE ONLY WHILE INSIDE A RUN OF PLAIN ZERO-WIDTH STEPS, so a leader run is judged once, at its first
+  // TRUE ONLY WHILE INSIDE A RUN OF PLAIN NON-PRINTING STEPS, so a leader run is judged once, at its first
   // member. It is a flag and not a look at `chars[i - 1]`, and a review pass measured why: an emoji-form
   // step and a keycap END in a zero-width code point (U+FE0F, U+20E3), so asking the previous character
   // skipped every leader run that followed one, and `("\u00a9\ufe0f\u102c\uff9e").repeat(10)` drew 30
-  // columns in a 24-column box.
+  // columns in a 24-column box under the renderer of that round.
   let inRun = false;
   for (let i = 0; i < chars.length; i++) {
     const ch = chars[i];
-    if (ZERO_WIDTH.test(ch)) {
-      const lead = inRun ? null : leaderStep(chars, i);
+    if (NON_PRINTING.test(ch)) {
+      const lead = inRun ? null : leaderSteps(chars, i);
       if (lead) {
-        // The part of the run that joins the character in front stays with it, as zero-width steps.
-        for (const c of lead.before) yield { text: c, cols: 0 };
-        yield lead.step;
+        // The whole run, stepped as the renderer draws it, and the base with it when the run leads its cluster.
+        yield* lead.steps;
         i = lead.next - 1;
         inRun = false;
         continue;
       }
       inRun = true;
-      yield { text: ch, cols: 0 };
+      yield { text: ch, cols: SPACING.test(ch) ? 1 : 0 };
       continue;
     }
     inRun = false;
@@ -513,101 +518,139 @@ function* widthSteps(s) {
 }
 
 /**
- * A CLUSTER THAT BEGINS WITH SOMETHING THAT DRAWS NOTHING, which the pinned renderer counts WIDER than its
- * parts (issue #417). The renderer finds a cluster's base AFTER stripping its leading non-printing code
- * points, and then walks the cluster again from its second code unit adding a column for every code point
- * in U+FF00-U+FFEF and for U+0E33 / U+0EB3. When the cluster began with a mark or a format character, the
- * base is one of the code points that second walk visits, so it is counted twice: `\u0301\uff9e` draws 2,
- * and summing the steps said 1. An under-count is the direction that runs a line past its pane.
+ * A RUN OF NON-PRINTING CODE POINTS THAT HOLDS A SPACING MARK, stepped as the pinned renderer draws it.
  *
- * MATCHED, NOT BOUNDED. The other answer was to substitute a leading mark with nothing to attach to, and it
- * needs a notion of POSITION the substitution class does not have: every cell and every piece between two
- * colour codes is scrubbed on its own, so "leading" there is not "leading" on the drawn line, and `clip`
- * deletes the class rather than substituting it. Matching changes no content. The cost is that a future
- * renderer which stops double counting makes this an OVER-count, the safe direction, and the literal counts
- * pinned in `width.test.mjs` go red at that upgrade rather than drifting.
+ * WHAT THE RENDERER DOES (pi-tui 0.99.1, `graphemeWidth` in `dist/utils.js`). A spacing mark (`SPACING`
+ * below) draws one column, alone or after a base. But the renderer finds a cluster's base by STRIPPING
+ * the cluster's leading non-printing code points, spacing marks included, and it counts only what follows
+ * the base; and a cluster made of nothing but non-printing code points is zero columns unless every one of
+ * them is a spacing mark. So a spacing mark that LEADS a cluster draws nothing, and summing the steps
+ * over-counts it: `\u102c\uff9e` is one cluster of one column, and `a\u102c\uff9e` repeated inside a pane
+ * padded every line short by a column per repeat, which the pane tests hold exactly.
  *
- * NOT ONLY AT THE START OF A STRING, which is what the issue first said. Thirty-one spacing marks (the
- * Myanmar vowel signs among them) are `\p{M}` but neither grapheme Extend nor SpacingMark, so each one
- * STARTS a cluster wherever it stands, and thirteen prepended format characters (U+0600 among them) take any
- * following character into their cluster, which can double a TWO-column base. So whether the run starts a
- * cluster is asked of `Intl.Segmenter`, with the renderer's own arguments, rather than of a list: the same
- * runtime segments both, so the two cannot disagree about where a cluster starts.
+ * THIS REPLACES A RULE THAT WENT THE OTHER WAY. Under pi-tui 0.80.7 the renderer walked a cluster again
+ * from its SECOND CODE UNIT rather than from after its base, so a base behind a leader was counted twice:
+ * `\u0301\uff9e` drew 2 at the start of a string, and this function (then `leaderStep`, issue #417)
+ * matched that doubling. 0.99.1 walks from after the base, so nothing is doubled any more and the leader
+ * cluster measures as its base alone; the same shape now needs the opposite correction, for the spacing
+ * marks the release moved from zero columns to one. The literal counts `width-leaders.test.mjs` pinned for
+ * the doubling went red at the upgrade, as that file said they would, and pin the new answers.
  *
- * Returns the part of the run inside the base's cluster and the base as ONE step, so no cut can separate
- * them, with the rest of the run (which joins the character in front) as `before`; or null when nothing is
- * doubled and the run steps as zero-width code points as before.
+ * MATCHED BY SEGMENTING, with the renderer's own segmenter and arguments, because whether a run leads a
+ * cluster is a question about grapheme boundaries: thirty-one spacing marks (U+102B and U+102C among them)
+ * are neither grapheme Extend nor SpacingMark, so each one STARTS a cluster wherever it stands, while the
+ * others join the character in front. Each cluster the run touches is one of three kinds:
+ *
+ *   - it reaches back to the character in front: the run's part of it is drawn after that cluster's base,
+ *     so every code point steps as itself (a spacing mark one column, the rest none);
+ *   - it holds the base after the run: the run's part LEADS it, so that part and the base are ONE step as
+ *     wide as the base alone, which no cut can separate (a cut that kept the marks and dropped the base
+ *     would hand the renderer an all-spacing-mark cluster it draws one column per mark);
+ *   - it holds only run code points: one step of zero columns, unless every one is a spacing mark, when
+ *     each steps as its own column. One step, for the same reason: a cut inside it could leave a
+ *     spacing-mark-only remainder.
+ *
+ * Returns the steps and where the walk resumes, or null when every code point of the run steps as itself.
  */
-function leaderStep(chars, i) {
+function leaderSteps(chars, i) {
   let k = i;
-  while (k < chars.length && ZERO_WIDTH.test(chars[k])) k += 1;
-  const base = chars[k];
-  if (base === undefined || !DOUBLED.test(base)) return null;
-  const run = chars.slice(i, k).join("");
+  while (k < chars.length && NON_PRINTING.test(chars[k])) k += 1;
+  const members = chars.slice(i, k);
+  // THE ORDINARY CASE NEVER REACHES THE SEGMENTER. A run without a spacing mark sums the same however it
+  // clusters, since every other member draws nothing wherever it stands. Like the check below, it is a
+  // performance path (`planRun` answers null for such a run anyway), and a mutant that deletes it is
+  // equivalent.
+  if (!members.some((c) => SPACING.test(c))) return null;
+  const run = members.join("");
   const prev = i > 0 ? chars[i - 1] : "";
-  // THE ORDINARY CASE NEVER REACHES THE SEGMENTER: a nonspacing or enclosing mark, or a joiner, after a
-  // character that is not a break always extends that character's cluster. `interpreted(prev)` is there
+  // And a run of nonspacing or enclosing marks and joiners after a character that is not a break always
+  // extends that character's cluster, so its spacing marks draw after a base. `interpreted(prev)` is there
   // for U+2028 and U+2029, which ARE breaks and draw a column, so nothing else here would catch them.
   // Removing this check changes no answer, only the cost: it is a performance path, and a mutant that
   // deletes it is equivalent.
-  //
-  // ONE DOCUMENTED UNDER-COUNT SURVIVES THIS STEP, because no step can see it: one of the fifteen
-  // prepended letters followed by U+FFA0 is a cluster the renderer counts one wider, with no leader in it.
-  // No drawn path keeps U+FFA0 (the substitution class takes it), so it lives in raw text only.
   if (prev !== "" && JOINS.test(run) && !interpreted(prev)) return null;
-  // ONE CODE POINT OF CONTEXT IS ENOUGH, and only its CLASS. Whether a break falls before the run depends on
-  // the code point in front of it (no base here is a pictographic, a regional indicator or a conjunct
-  // consonant, the rules that look further back). Controls keep their own class, and among printing
-  // characters only a prepended letter, a Hangul leading or vowel jamo or LV syllable, and the Kirat Rai
-  // vowel signs change the answer (see `contextOf`). Every other one is segmented as
-  // `a`, which is what makes the memo below a memo: keyed on the character itself, a line that varied the
-  // character in front of each run defeated it, 94 ms to count 100 KB against 6.5 ms before this step.
+  const base = k < chars.length ? chars[k] : "";
+  // ONE CODE POINT OF CONTEXT IS ENOUGH, and only its CLASS: see `contextOf`. Keyed on the character
+  // itself, a line that varied the character in front of each run defeated the memo below.
   const ctx = contextOf(prev);
-  // THE START OF A STRING IS ITS OWN KEY. A review pass poisoned the first version, which keyed on
+  // THE START OF A STRING IS ITS OWN KEY. A review pass poisoned a first version keyed on
   // `prev + run + base`: after an emoji form `prev` is U+FE0F, so "U+FE0F in front of a run" and "a run
-  // that begins with U+FE0F at the start of a string" were one key with opposite answers, and whichever
-  // was measured first answered for both, an under-count by one after the other order.
+  // that begins with U+FE0F at the start of a string" were one key with opposite answers.
   const key = (ctx === "" ? "^" : "~" + ctx) + run + base;
-  let doubled = key.length <= LEADER_MEMO_KEY ? leaderMemo.get(key) : undefined;
-  // `null` is a remembered "not doubled"; `undefined` is "not asked yet".
-  if (doubled === undefined) {
-    const probe = ctx + run + base;
-    let last = "";
-    for (const { segment } of GRAPHEMES.segment(probe)) last = segment;
-    // Doubled when the base's cluster holds something IN FRONT of the base and does not reach back to
-    // the context: the last segment is always a suffix of the probe, so both are length comparisons. The
-    // memo holds the extra columns and HOW MUCH OF THE RUN is in the base's cluster, because only that part
-    // is bundled with the base: a mark earlier in the run can still join the character in front (U+0301
-    // before a Myanmar vowel sign does), and bundling it let a cut take it away from its own letter.
-    doubled = last.length > base.length && last.length <= probe.length - ctx.length ? [countLater(last), last.length - base.length] : null;
+  // `null` is a remembered "every member steps as itself"; `undefined` is "not asked yet".
+  let plan = key.length <= LEADER_MEMO_KEY ? leaderMemo.get(key) : undefined;
+  if (plan === undefined) {
+    plan = planRun(ctx, run, base);
     if (key.length <= LEADER_MEMO_KEY) {
-      // A BOUNDED MEMO, because an adversarial line defeats the fast path above with a run per character:
-      // `"\u102c\uff9e".repeat(50000)` took 101 ms to count without it and 16 ms with it (7 ms before this
-      // step existed). Cleared rather than evicted: the keys are short and repeat within one line.
+      // A BOUNDED MEMO, because an adversarial line defeats the fast paths above with a run per character:
+      // `"\u102c\uff9e".repeat(50000)` asks the segmenter once per pair without it. Cleared rather than
+      // evicted: the keys are short and repeat within one line.
       if (leaderMemo.size >= LEADER_MEMO_SIZE) leaderMemo.clear();
-      leaderMemo.set(key, doubled);
+      leaderMemo.set(key, plan);
     }
   }
-  if (doubled === null) return null;
-  const [extra, inCluster] = doubled;
-  const joined = run.slice(0, run.length - inCluster);
-  return { before: [...joined], step: { text: run.slice(run.length - inCluster) + base, cols: 2 * (WIDE.test(base) ? 2 : 1) + extra }, next: k + 1 };
+  if (plan === null) return null;
+  const text = run + base;
+  const steps = [];
+  let at = 0;
+  for (const [units, cols] of plan) {
+    steps.push({ text: text.slice(at, at + units), cols });
+    at += units;
+  }
+  return { steps, next: at > run.length ? k + 1 : k };
+}
+
+/**
+ * The steps for `run`, as `[code units, columns]` pairs, from how the segmenter clusters `ctx + run + base`;
+ * a pair that reaches past the run holds the base too. Null when that is every member stepping as itself.
+ */
+function planRun(ctx, run, base) {
+  const probe = ctx + run + base;
+  const from = ctx.length;
+  const to = from + run.length;
+  const plan = [];
+  let differs = false;
+  const alone = (part) => {
+    for (const c of part) plan.push([c.length, SPACING.test(c) ? 1 : 0]);
+  };
+  for (const { segment, index } of GRAPHEMES.segment(probe)) {
+    const end = index + segment.length;
+    if (end <= from) continue;
+    if (index >= to) break;
+    const part = probe.slice(Math.max(index, from), Math.min(end, to));
+    const spacing = [...part].filter((c) => SPACING.test(c)).length;
+    if (index < from || spacing === 0) {
+      // Drawn after the base in front, or holding no spacing mark: every member as itself.
+      alone(part);
+    } else if (end > to) {
+      // LEADS THE BASE'S CLUSTER. The base's own width is the table's; what follows it steps as usual.
+      plan.push([part.length + base.length, WIDE.test(base) ? 2 : 1]);
+      differs = true;
+    } else if (spacing === [...part].length) {
+      alone(part);
+    } else {
+      plan.push([part.length, 0]);
+      differs = true;
+    }
+  }
+  return differs ? plan : null;
 }
 
 /**
  * The code point that stands in for `prev` when asking where a cluster starts: itself where its class
  * changes the answer, `a` for every other printing character.
  *
- * THE DIRECTION OF A WRONG ANSWER HERE IS SAFE, which is why a short list is acceptable: `a` breaks before
- * a run at least as often as any printing character does, so a character wrongly segmented as `a` can only
- * make a cluster START here that did not, and a start is what doubles a base. That is an over-count. The
- * characters that break MORE often than `a` (the controls and the line and paragraph separators) are kept
- * as themselves, and so are the ones that JOIN more often: the fifteen prepended letters, which take the
- * next character into their cluster whatever it is, the Hangul leading and vowel jamo and LV syllables,
- * which take the zero-width jamo fillers, and the five
- * Kirat Rai vowel signs Unicode 16 made vowel jamo for the same rule (the sweep found those). The
- * predecessor sweep in `width.test.mjs` runs every character there is through four leader shapes, so a
- * missing entry fails there as an over-count with a name.
+ * THE DIRECTION OF A WRONG ANSWER HERE FLIPPED WITH THE RENDERER, which is why the list must be exact
+ * rather than merely safe. Under pi-tui 0.80.7 a cluster that started here DOUBLED its base, so a
+ * character wrongly segmented as `a` could only over-count. Under 0.99.1 a cluster that starts here makes
+ * its leading spacing marks draw NOTHING, so a character that joins more often than `a` and is stood in
+ * for anyway would UNDER-count. The characters that break MORE often than `a` (the controls and the line
+ * and paragraph separators) are kept as themselves, and so are the ones that JOIN more often: the fifteen
+ * prepended letters, which take the next character into their cluster whatever it is, the Hangul leading
+ * and vowel jamo and LV syllables, which take the zero-width jamo fillers, and the five Kirat Rai vowel
+ * signs Unicode 16 made vowel jamo for the same rule. The predecessor sweep in
+ * `width-predecessors.test.mjs` runs every character there is in front of spacing-mark leaders and asserts
+ * this table is never narrower, so a missing entry fails there by name.
  */
 function contextOf(prev) {
   if (prev === "" || KEEPS_CONTEXT.test(prev) || isLvSyllable(prev) || !PRINTS.test(prev)) return prev;
@@ -631,8 +674,6 @@ const KEEPS_CONTEXT = new RegExp(
   "u",
 );
 
-// The renderer's own add-set: the code points its second walk over a cluster counts again.
-const DOUBLED = /[\uff00-\uffef\u0e33\u0eb3]/u;
 // A run made ONLY of these always extends the cluster before it (every Mn and Me is grapheme Extend).
 const JOINS = /^[\p{Mn}\p{Me}\u200c\u200d]+$/u;
 // The renderer's segmenter, with the renderer's arguments. A global, not a dependency.
@@ -640,20 +681,6 @@ const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const leaderMemo = new Map();
 const LEADER_MEMO_SIZE = 4096;
 const LEADER_MEMO_KEY = 16;
-
-/**
- * U+FFA0 inside a doubled cluster, after its first code point, is one more column to the renderer's second
- * walk and nothing to this table's (it is a filler that draws alone as nothing).
- */
-function countLater(segment) {
-  let n = 0;
-  let first = true;
-  for (const c of segment) {
-    if (!first && c === "\uffa0") n += 1;
-    first = false;
-  }
-  return n;
-}
 
 /** Drop every unpaired surrogate from a character array. Half a pair reaches a terminal as U+FFFD at best. */
 function dropOrphans(chars) {
@@ -667,13 +694,25 @@ const KEYCAP_BASE = /[#*0-9]/;
 /** VARIATION SELECTOR-16, which asks for the emoji form of the character before it. */
 const VS16 = "\ufe0f";
 
-// ZERO COLUMNS. `\p{M}` is every mark, SPACING MARKS INCLUDED, and that is deliberate: two earlier versions
-// of this comment said the opposite, that Mc is excluded because it occupies a column, and both were false
-// when written. The argument for excluding it came from Unicode; the renderer that draws this pane gives Mc
-// zero, and between a standard and the thing painting the characters the painter wins. Cf covers the
-// zero-width and bidi format characters, and the bracketed tail is the Hangul fillers and the reserved code points
-// the renderer also draws as nothing.
-const ZERO_WIDTH = /\p{M}|\p{Cf}|[ᅟᅠ᠎ㅤﾠ￰-￻]/u;
+// WHAT THE RENDERER DOES NOT PRINT: every mark, the format characters, and the Hangul fillers and the reserved
+// code points it also draws as nothing. A member draws ZERO columns, except a spacing mark below.
+//
+// THE SPACING MARKS WERE ZERO AND ARE NOW ONE, and this comment has been wrong about them before in both
+// directions. Two early versions said Mc is excluded because it occupies a column, false under pi-tui
+// 0.80.7, which gave every mark zero; issue #401 then made the whole of `\p{M}` zero to match it. pi-tui
+// 0.99.1 gives 472 of them one column, alone or after a base: `SPACING` is its own class, transcribed.
+// The renderer still strips them from the FRONT of a cluster like any other non-printing code point, which
+// is why they stay in this class and `leaderSteps` decides what one draws there. Between a standard and the
+// thing painting the characters the painter wins, and the painter changed.
+const NON_PRINTING = /\p{M}|\p{Cf}|[ᅟᅠ᠎ㅤﾠ￰-￻]/u;
+
+// THE PINNED RENDERER'S `terminalSpacingMarkRegex`, one code point at a time: the spacing marks less three
+// (U+1734 and the two Hangul tone marks, U+302E and U+302F), plus seven nonspacing Arabic and Myanmar signs
+// legacy wcwidth tables give a cell (its list names seven spacing marks too, which the class already
+// holds). 472 code points, the same set as the renderer's expression, compared over every code point when
+// this was written. Spelled with a lookahead rather than the renderer's `v` flag set subtraction, so the
+// bundler never has to transform one; the same runtime answers `\p{Mc}` for both.
+const SPACING = /^(?:(?![\u1734\u302e\u302f])\p{Mc}|[\u065f\u0f7f\u102b\u102c\u1031\u1033-\u1035\u1038\u103a-\u103e])$/u;
 
 // A TEXT-PRESENTATION EMOJI: one that draws narrow on its own and WIDE once U+FE0F asks for the emoji
 // form. There are 201 of them and they are the reason this table cannot be purely per-character.
@@ -714,20 +753,34 @@ const WIDE = new RegExp(
  * ASCII/box-drawing, so post-strip `String.length` is a safe column proxy". It is not (issue #401): the
  * content includes repository names, job ids and branch names, and a forge accepts whatever the forge
  * accepts.
+ *
+ * `afterSpace` says the result is drawn after a printing column, and it is measured and cut THERE: a
+ * frame's title stands after `\u2500 `, and under pi-tui 0.99.1 a run of spacing marks that draws nothing
+ * at the start of a string draws its own columns after a space (issue #509's review measured an 8-column
+ * box drawing its top line at 9). See `sliceColumns`.
  */
-export function clip(line, w) {
+export function clip(line, w, { afterSpace = false } = {}) {
   const width = Math.max(0, Math.trunc(w) || 0);
   // THE TEXT, NOT THE INPUT, on both paths. Returning the input unchanged when it fits left a lone
-  // surrogate in the DRAWN line, and the renderer treats one as a cluster break: it then computes the next
-  // cluster's base after skipping it and counts that base twice, so `\ud800\uff9f` repeated twelve times
-  // measured 12 here and 24 there, and a 24-column pane drew at 36. Stepping the fitted line too makes the
-  // rule this module already states -- half a character is removed where text ENTERS -- true of the text
-  // rather than only of the count.
+  // surrogate in the DRAWN line, and pi-tui 0.80.7 treated one as a cluster break: it then computed the
+  // next cluster's base after skipping it and counted that base twice, so `\ud800\uff9f` repeated twelve
+  // times measured 12 here and 24 there, and a 24-column pane drew at 36. 0.99.1 no longer doubles (it
+  // draws that line at 12), and the rule stays: stepping the fitted line too makes the rule this module
+  // already states -- half a character is removed where text ENTERS -- true of the text rather than only
+  // of the count, whatever a later renderer makes of an orphan.
   const clean = sliceColumns(stripControls(line), Number.MAX_SAFE_INTEGER);
-  if (columnsOf(clean) <= width) return clean;
+  if ((afterSpace ? columnsAfterSpace(clean) : columnsOf(clean)) <= width) return clean;
   const ell = active.ellipsis;
   if (width <= columnsOf(ell)) return sliceColumns(ell, width);
-  return sliceColumns(clean, width - columnsOf(ell)) + ell;
+  return sliceColumns(clean, width - columnsOf(ell), { afterSpace }) + ell;
+}
+
+/**
+ * The columns `s` draws when it stands after a printing column rather than at the start of a line: the
+ * measure of `" " + s` less the space's own column, which is always a step of its own.
+ */
+export function columnsAfterSpace(s) {
+  return columnsOf(" " + String(s ?? "")) - 1;
 }
 
 /**
@@ -738,9 +791,15 @@ export function clip(line, w) {
  * nothing and one column of overflow, so the line is both wrong and ragged. Walking code points and
  * stopping BEFORE the budget is passed means the result is always at most `w` columns and always a whole
  * character, and it makes `dropLoneSurrogate` unnecessary on this path: a surrogate pair is one step here.
+ *
+ * A CUT IS MEASURED WHERE IT IS DRAWN, which is what `afterSpace` is for: a count is a count of a line
+ * (see `columnsOf`), so text drawn after a printing column is cut as the tail of `" " + s`, where the space
+ * is always a step of its own and is then removed. Every cutter takes the context rather than each site
+ * padding its own space in, because a site that forgot is the defect this parameter exists for.
  */
-export function sliceColumns(s, w) {
+export function sliceColumns(s, w, { afterSpace = false } = {}) {
   const budget = Math.max(0, Math.trunc(w) || 0);
+  if (afterSpace) return budget === 0 ? "" : sliceColumns(" " + String(s ?? ""), budget + 1).slice(1);
   // NO BUDGET, NO CONTENT. Without this a zero-column step passes the test below and a cut to zero
   // returned a floating accent with nothing to attach to.
   if (budget === 0) return "";
@@ -758,7 +817,13 @@ export function sliceColumns(s, w) {
   // just cut away. Left in place it reaches the terminal ahead of the ellipsis and asks it to join a glyph
   // to a horizontal bar. A selector cannot be stranded here any more, because a promoted base carries its
   // selector inside one step, but a ZWJ is a step of its own and is exactly what this strips.
-  return out.replace(/\u200d+$/u, "");
+  // AND STRIPPING IT CAN CHANGE WHAT THE REST DRAWS, so the stripped text is measured again (issue #509's
+  // review). Under pi-tui 0.99.1 a spacing mark and a joiner are one cluster of non-printing code points and
+  // draw nothing together, and the mark ALONE draws a column: `x\u102c\u200d` was one column and, with its
+  // joiner stripped, `x\u102c` is two, so a one-column cut drew two and `pad` came out one wide. The
+  // stripped text is cut again, which only ever takes steps away.
+  const kept = out.replace(/\u200d+$/u, "");
+  return kept === out || columnsOf(kept) <= budget ? kept : sliceColumns(kept, budget);
 }
 
 /**
@@ -824,7 +889,9 @@ export function box({ title = "", sections = [], footer, width = 40 } = {}) {
   // Top border: `+- title -...-+`, title clipped so the border never overflows `w`.
   // `clipData`, not `clip`: `frame` substitutes in its own title (`clipPlain`), and a title that DELETES
   // here clipped one column narrower than the coloured twin for the same string.
-  const titleText = title ? ` ${clipData(title, Math.max(0, inner - 2))} ` : "";
+  // AFTER A SPACE, which is where the title is drawn: clipped at column 0 it fitted a budget it then
+  // overran once the space in front joined its leading marks' cluster (issue #509's review).
+  const titleText = title ? ` ${clipData(title, Math.max(0, inner - 2), { afterSpace: true })} ` : "";
   // COLUMNS, not code units (issue #401), the same repair as `frame`'s top rule and for the same reason: a
   // CJK title made this rule over-fill by the title's own width, so the pane's FIRST line was wider than
   // every line under it. `clipData` has already substituted, so `titleText` is plain and `columnsOf` is the
@@ -1131,8 +1198,9 @@ export function makeLineInput(initial = "") {
       const textOf = (a, b) => steps.slice(a, b).map((step) => step.text).join("");
       // THE WINDOW IS MEASURED WHERE IT IS DRAWN, after the prompt's space (issue #417). The steps above
       // were counted inside the WHOLE value, and a window can start where the whole value had no cluster
-      // start: after a prepended letter such as U+0D4E, `\u102c\uff9e` is 1 column inside the value and 2
-      // once the letter is outside the window. So the shown text is re-measured after a printing column.
+      // start: after a prepended letter such as U+0D4E, `\u102c\uff9e` is 2 columns inside the value and 1
+      // once the letter is outside the window, where the spacing mark leads its own cluster (pi-tui 0.99.1;
+      // 0.80.7 had it 1 and 2). So the shown text is re-measured after a printing column.
       //
       // AND PIECE BY PIECE, because the styler colours the prompt and wraps the cursor cell in inverse
       // video, and the renderer's overlay compositor segments each run between two colour codes on its

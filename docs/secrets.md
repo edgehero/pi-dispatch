@@ -391,7 +391,8 @@ failed, and never the reference, the resolver's path, or a byte of what it print
    trigger. It is refused before anything spends, as `secret-name-reserved`, and the refusal names the
    variable. This covers every variable pi reads for that provider whether or not it is set on the host. For
    `anthropic`, the only provider at the pinned pi with more than one, that includes
-   `ANTHROPIC_OAUTH_TOKEN`, which pi reads before the API key. The names on your `PI_FORWARD_ENV` list are
+   `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_OAUTH_TOKEN`, which pi reads before the API key. The names on your
+   `PI_FORWARD_ENV` list are
    reserved the same way, for the same reason. Another provider's *key* variable is fine: an `anthropic` job
    may bind `OPENAI_API_KEY` for a flow that talks to OpenAI itself.
 5. **You cannot bind a variable that steers a provider either, whichever provider it belongs to.** The
@@ -402,6 +403,9 @@ failed, and never the reference, the resolver's path, or a byte of what it print
    picked, `GOOGLE_APPLICATION_CREDENTIALS` and `AWS_WEB_IDENTITY_TOKEN_FILE` point at credential files,
    and `AWS_BEDROCK_SKIP_AUTH` turns authentication off. These are refused **at load**, so the whole file
    is rejected and `doctor` says so, rather than per delivery.
+   `ANTHROPIC_CUSTOM_HEADERS` and `OPENAI_CUSTOM_HEADERS` are refused too: a line in either naming the
+   credential header replaces your key with the trigger's (measured at pi 0.99.1).
+   `ANTHROPIC_AUTH_TOKEN` stays refused for every trigger, whichever provider the job runs on.
    The list is not maintained by hand: it is extracted from the pinned pi and from every package pi builds
    a client with, and a test compares the two in both directions, so an upgrade that starts reading a new
    variable fails the build. Seven names cannot be extracted, because the code builds the key at runtime
@@ -570,7 +574,13 @@ by design, the provider key resolved from the injected environment, and every ot
 normally. The line names the variable pi will actually read, and only that one: doctor asks pi which
 variables the provider uses rather than keeping a list of its own, so it cannot bless a variable pi does
 not read (issue #286). If the value it finds is an `ANTHROPIC_OAUTH_TOKEN`, the line is a warning
-instead, because a subscription login cannot power an unattended service. Run `doctor` through your
+instead, because a subscription login cannot power an unattended service. An `ANTHROPIC_AUTH_TOKEN` is a
+warning too: pi sends it as a bearer token and reads it before `ANTHROPIC_API_KEY`, so while it is set
+the API key is ignored, and the line says so. If you also have a `pi login` API key, the line says that
+key is not used while the token is set: the worker reads the environment first, while pi on your host
+would use the stored key. And a subscription token pasted into `ANTHROPIC_API_KEY` (it starts
+`sk-ant-oat`) is a warning too, because pi sends it as a subscription login whatever variable holds it.
+Run `doctor` through your
 manager once, exactly the way the unit will, before you enable the service.
 
 ## What doctor says about the setup script itself

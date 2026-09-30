@@ -10,12 +10,15 @@ import { loadRenderer, loadVisibleWidth } from "./helpers/renderer.mjs";
 
 // ISSUE #417: A CLUSTER THAT BEGINS WITH SOMETHING THAT DRAWS NOTHING.
 //
-// The renderer finds a cluster's base after stripping its leading non-printing code points, then walks the
-// cluster again from its second code unit adding a column for U+FF00-U+FFEF and U+0E33 / U+0EB3, so a base
-// behind a leader is counted twice. `panel.mjs` now MATCHES that rather than bounding it, and the arms below
-// hold it to the renderer the only way a table can be held: by sweeping, with every count derived from the
-// renderer alone and pinned as a literal. A pi release that stops double counting turns these red at the
-// upgrade, which is the point: the table then over-counts, and the pins say so instead of drifting.
+// The renderer finds a cluster's base after stripping its leading non-printing code points. Under pi-tui
+// 0.80.7 it then walked the cluster again from its second code unit, adding a column for U+FF00-U+FFEF and
+// U+0E33 / U+0EB3, so a base behind a leader was counted twice, and `panel.mjs` matched that. pi-tui 0.99.1
+// (issue #509) walks from after the base instead, so NOTHING IS DOUBLED ANY MORE; and it gives 472 spacing
+// marks a column of their own, which a cluster they LEAD does not draw. So the leader that matters moved from
+// "any zero-width code point" to "a spacing mark", and the correction from wider to narrower. The arms below
+// hold both to the renderer the only way a table can be held: by sweeping, with every count derived from the
+// renderer alone and pinned as a literal. That is how this upgrade was found: the doubling pins went red at
+// it, as this comment said they would, and now pin zero.
 
 /** Every code point this table draws as nothing: the leaders. Derived, then pinned. */
 function zeroWidthCodePoints() {
@@ -28,7 +31,18 @@ function zeroWidthCodePoints() {
   return out;
 }
 
-/** Every code point the renderer's second walk counts: the tails. */
+/** Every spacing mark: a mark this table, like the renderer, draws one column wide on its own. */
+function spacingMarks() {
+  const out = [];
+  for (let cp = 0; cp <= 0x10ffff; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue;
+    const ch = String.fromCodePoint(cp);
+    if (/\p{M}/u.test(ch) && columnsOf(ch) === 1) out.push(ch);
+  }
+  return out;
+}
+
+/** Every code point the renderer counts after a cluster's base without a mark in front of it: the tails. */
 function doubledTails() {
   const out = [];
   for (let cp = 0xff00; cp <= 0xffef; cp++) out.push(String.fromCodePoint(cp));
@@ -40,15 +54,16 @@ test("a leader cluster measures what the renderer draws, at a string's start and
   assert.equal(typeof visibleWidth, "function", "pi-tui's visibleWidth must load, or this test is checking nothing");
   const Z = zeroWidthCodePoints();
   const T = doubledTails();
-  assert.equal(Z.length, 2684, "every zero-width code point is a leader candidate");
-  assert.equal(T.length, 242, "and every code point the renderer's second walk counts is a tail");
+  // 2,684 under pi-tui 0.80.7, when every mark drew nothing; 0.99.1 moved the 472 spacing marks to one
+  // column, and they are swept as leaders of their own below.
+  assert.equal(Z.length, 2212, "every zero-width code point is a leader candidate");
+  assert.equal(T.length, 242, "and every code point the renderer counts after a base is a tail");
   // EXACT, not one-sided, at the two positions a line actually offers: its first column, and after a
   // printing character. The DOUBLED count is the renderer's alone -- where its answer is not the sum of
-  // its answers for the parts -- so it cannot restate this module's rule. It is 13,545 at the start
-  // (2,616 leaders take the four joining tails, and thirteen prepended format characters take 237 more)
-  // and 3,273 after a character, where only the thirty-one marks that start a cluster anywhere and the
-  // thirteen prepended characters are left.
-  for (const [prefix, pinned] of [["", 13545], ["a", 3273]]) {
+  // its answers for the parts -- so it cannot restate this module's rule. Under pi-tui 0.80.7 it was
+  // 13,545 at the start and 3,273 after a character. Under 0.99.1 it is ZERO at both: a zero-width
+  // leader now draws nothing wherever it stands, which this sweep holds exactly.
+  for (const [prefix, pinned] of [["", 0], ["a", 0]]) {
     let doubled = 0;
     for (const z of Z) {
       for (const t of T) {
@@ -60,6 +75,43 @@ test("a leader cluster measures what the renderer draws, at a string's start and
     }
     assert.equal(doubled, pinned, `the renderer doubles ${pinned} forms after ${JSON.stringify(prefix)}`);
   }
+  // A SPACING MARK AS THE LEADER, the rule 0.99.1 brought (issue #509): alone it draws one column, and
+  // leading a cluster it draws nothing, so the renderer's answer is NARROWER than the sum of its parts. It
+  // is 1,888 forms at the start of a string (each of the 472 marks before the four tails that join a
+  // cluster) and 124 after a character, where only the thirty-one marks that start a cluster anywhere are
+  // left. Both counts are the renderer's alone; exactness is what holds the table to them.
+  const S = spacingMarks();
+  assert.equal(S.length, 472, "every spacing mark the renderer gives a column is a leader too");
+  for (const [prefix, pinned] of [["", 1888], ["a", 124]]) {
+    let narrower = 0;
+    for (const m of S) {
+      for (const t of T) {
+        const s = prefix + m + t;
+        const theirs = visibleWidth(s);
+        assert.equal(columnsOf(s), theirs, `${JSON.stringify(s)}: we say ${columnsOf(s)}, the renderer draws ${theirs}`);
+        if (theirs < visibleWidth(prefix) + visibleWidth(m) + visibleWidth(t)) narrower += 1;
+      }
+    }
+    assert.equal(narrower, pinned, `the renderer draws ${pinned} spacing-mark forms as their base alone after ${JSON.stringify(prefix)}`);
+  }
+  // A WIDE BASE BEHIND A SPACING MARK. The five emoji modifiers are the only two-column code points that
+  // join a cluster a spacing mark leads, and they are what shows the leader step keeps its base's own
+  // width: at the start of a string each form is the modifier alone, two columns, exactly. After a letter
+  // the thirty-one marks that start a cluster anywhere are exact too, and the rest join the letter's
+  // cluster, where the renderer counts a modifier after a non-emoji base as nothing: the skin-tone
+  // over-count `panel.mjs` already declares, so that half is one-sided.
+  const MODIFIERS = ["\u{1f3fb}", "\u{1f3fc}", "\u{1f3fd}", "\u{1f3fe}", "\u{1f3ff}"];
+  let exactAfter = 0;
+  for (const m of S) {
+    for (const mod of MODIFIERS) {
+      assert.equal(columnsOf(m + mod), 2, `${JSON.stringify(m + mod)}: the modifier alone`);
+      assert.equal(visibleWidth(m + mod), 2, `${JSON.stringify(m + mod)}: and the renderer agrees`);
+      const s = "a" + m + mod;
+      assert.ok(columnsOf(s) >= visibleWidth(s), `${JSON.stringify(s)}: we say ${columnsOf(s)}, the renderer draws ${visibleWidth(s)}`);
+      if (columnsOf(s) === visibleWidth(s)) exactAfter += 1;
+    }
+  }
+  assert.equal(exactAfter, 155, "exact after a letter for the thirty-one marks that start a cluster, with each modifier");
   // AFTER AN EMOJI FORM OR A KEYCAP, which end in a zero-width code point themselves. Asking whether the
   // PREVIOUS character drew nothing skipped every leader run behind one: `\u00a9\ufe0f\u0600\uff01` was 4
   // here and 6 there. One-sided, because the renderer drops the emoji form once a cluster extends past it
@@ -78,8 +130,9 @@ test("longer leader runs and longer tails agree with the renderer too (#417)", a
   const visibleWidth = await loadVisibleWidth();
   assert.equal(typeof visibleWidth, "function");
   // A SECOND LEADER on either side of each one, and a second tail, because a rule fitted to the two-code-
-  // point form can be right there and wrong one character further along. U+FFA0 is here because the
-  // renderer's second walk counts it too, which nothing in the table would say on its own.
+  // point form can be right there and wrong one character further along. U+102B is a spacing mark that
+  // starts a cluster wherever it stands. U+FFA0 is here because pi-tui 0.80.7's second walk counted it
+  // too, which nothing in the table would say on its own; 0.99.1 skips it as default-ignorable.
   const Z = zeroWidthCodePoints();
   let forms = 0;
   for (const z of Z) {
@@ -99,18 +152,25 @@ test("longer leader runs and longer tails agree with the renderer too (#417)", a
       }
     }
   }
-  assert.equal(forms, 1545984, "every form was measured");
+  // 576 forms per zero-width code point: 1,545,984 while the spacing marks were among them (0.80.7).
+  assert.equal(forms, 1274112, "every form was measured");
 });
 
 test("a cut never separates a leader from the base it doubles (#417)", async () => {
   const visibleWidth = await loadVisibleWidth();
   assert.equal(typeof visibleWidth, "function");
-  // ONE STEP, so no cut can take the leader and leave the base, or take the base at the price of one
-  // column when it draws two. RAW input for `sliceColumns`: `clip` deletes the format characters first,
-  // so it would test nothing for them.
-  for (const z of zeroWidthCodePoints()) {
-    // A leader that doubles a base is never left behind on its own: a one-column cut of one takes nothing.
-    if (columnsOf(z + "\uff9e") === 2) assert.equal(sliceColumns(z + "\uff9ebc", 1), "", `a cut of ${JSON.stringify(z + "\uff9e")}`);
+  // ONE STEP, so no cut can take the leader and leave the base: a spacing mark left behind on its own draws
+  // the column its cluster did not (pi-tui 0.99.1), as a base cut from a doubling leader once drew two
+  // for one (0.80.7). RAW input for `sliceColumns`: `clip` deletes the format characters first, so it would
+  // test nothing for them.
+  let stranded = 0;
+  for (const z of [...zeroWidthCodePoints(), ...spacingMarks()]) {
+    // A spacing mark that leads its base's cluster after a character is never left behind on its own: a
+    // one-column cut after that character takes the character and nothing else.
+    if (columnsOf("a" + z + "\uff9e") === 2 && columnsOf(z) === 1) {
+      assert.equal(sliceColumns("a" + z + "\uff9ebc", 1), "a", `a cut of ${JSON.stringify("a" + z + "\uff9e")}`);
+      stranded += 1;
+    }
     for (const s of [z + "\uff9e\uff9fbc", "a" + z + "\u0e33x", z + "\uff01z"]) {
       for (let w = 0; w <= 6; w++) {
         const cut = sliceColumns(s, w);
@@ -121,6 +181,7 @@ test("a cut never separates a leader from the base it doubles (#417)", async () 
       }
     }
   }
+  assert.equal(stranded, 31, "the thirty-one spacing marks that start a cluster wherever they stand");
 });
 
 test("a pane holding leader clusters measures exactly its width, in our terms and the renderer's (#417)", async () => {
@@ -128,7 +189,9 @@ test("a pane holding leader clusters measures exactly its width, in our terms an
   assert.equal(typeof visibleWidth, "function");
   const styler = makeStyler(PLAIN_THEME);
   // THE MYANMAR REPEAT IS THE ONE THE ISSUE DID NOT SEE: U+102C is a mark that starts a cluster wherever it
-  // stands, so the frame's own leading space does not absorb it, and a 24-column pane drew at 33. The
+  // stands, so the frame's own leading space does not absorb it, and a 24-column pane drew at 33 under
+  // pi-tui 0.80.7. Under 0.99.1 the same cluster draws its base alone, one column NARROWER than the sum,
+  // so the same line is the fixture for the opposite correction (issue #509). The
   // emoji-form repeat is the shape the first repair got wrong. The leader-led line is the frame's first
   // column, which the frame's space now absorbs exactly rather than being padded as though it were not there.
   const lines = [
@@ -209,30 +272,41 @@ test("the runs table measures a cell where it is drawn, after a space (#417)", a
   const visibleWidth = await loadVisibleWidth();
   assert.equal(typeof visibleWidth, "function");
   // NO CELL OF THIS TABLE IS AT COLUMN 0: pi draws the message in a box with a column of padding, and the
-  // cells are joined by two spaces. `\u0301\uff9e` is 2 columns at the start of a string and 1 after a
-  // space, and a Myanmar vowel sign with a halfwidth mark is 2 in both places.
+  // cells are joined by two spaces. Under pi-tui 0.99.1 `\u093e\uff9e` is 1 column at the start of a
+  // string (the spacing mark leads the cluster and draws nothing) and 2 after a space (it joins the
+  // space's cluster and draws its own column), so the first id draws ten columns where it stands and
+  // counts nine at column 0. Under 0.80.7 the fixture was `\u0301\uff9e`, 2 at the start and 1 after a
+  // space, the other direction; 0.99.1 draws that one 1 in both places, so it is kept as a control.
   const at = "2026-07-21T00:00:00.000Z";
   const base = { flow: "review", outcome: "completed", turns: 3, tokens: { total: 10 }, endedAt: at, target: "t" };
-  const ids = ["\u0301\uff9egh-aaaa1", "\u102c\uff9egh-aaa2", "gh-aaaa33"];
+  const ids = ["\u093e\uff9egh-aaaa1", "\u0301\uff9egh-aaaa2", "gh-aaaa3"];
+  assert.deepEqual(ids.map((id) => visibleWidth(" " + id) - 1), [10, 9, 8], "the fixture draws these widths after a space");
+  assert.deepEqual(ids.map((id) => visibleWidth(id)), [9, 9, 8], "and these at column 0, the first narrower");
   const rows = renderRuns(ids.map((jobId) => ({ ...base, jobId }))).split("\n");
+  // Measured at column 0 the first id counted nine, the column was nine wide, and its row drew one column
+  // past it, so its flow cell started one column right of the others.
   const flowAt = rows.slice(1).map((r) => visibleWidth(" " + r.slice(0, r.indexOf("review"))) - 1);
   assert.equal(new Set(flowAt).size, 1, `the flow column starts at ${flowAt.join(", ")}`);
-  // AND THE COLUMN IS NO WIDER THAN ITS WIDEST CELL DRAWS. All three ids draw nine columns after a space,
-  // so each is followed by exactly the two-space gap: measured at column 0 the first counted ten, and the
-  // whole column widened by one for a cell that never draws that wide.
-  ids.forEach((id, i) => assert.ok(rows[i + 1].startsWith(id + "  ") && !rows[i + 1].startsWith(id + "   "), `row ${i + 1}: ${JSON.stringify(rows[i + 1])}`));
+  // AND THE COLUMN IS NO WIDER THAN ITS WIDEST CELL DRAWS: the widest id is followed by exactly the
+  // two-space gap, and every narrower one by the gap plus what it lacks of the widest.
+  ids.forEach((id, i) => {
+    const gap = 2 + 10 - (visibleWidth(" " + id) - 1);
+    assert.ok(rows[i + 1].startsWith(id + " ".repeat(gap)) && !rows[i + 1].startsWith(id + " ".repeat(gap + 1)), `row ${i + 1}: ${JSON.stringify(rows[i + 1])}`);
+  });
 });
 
 test("a styled line keeps its right border through the renderer's own cut (#417)", async () => {
   const tui = await loadRenderer();
   assert.ok(tui, "pi-tui must load");
-  // THE COMPOSITOR SEGMENTS EACH PIECE BETWEEN TWO ESCAPE CODES ON ITS OWN, so a mark right after a colour
-  // code leads a cluster there even when it does not in the whole string. The line measured to fit, and the
-  // compositor's cut at the pane's width dropped the border.
+  // THE COMPOSITOR SEGMENTS EACH PIECE BETWEEN TWO ESCAPE CODES ON ITS OWN, so a cluster a colour code
+  // splits is measured as two there. Under pi-tui 0.80.7 that was a combining mark after the code doubling
+  // its base; under 0.99.1 it is a spacing mark before the code, cut from the base it leads, drawing a
+  // column the whole string does not. The line measured to fit, and the compositor's cut at the pane's
+  // width dropped the border.
   const ESC = String.fromCharCode(27);
   const styler = makeStyler({ fg: (_c, t) => `${ESC}[31m${t}${ESC}[39m`, bold: (t) => t, bg: (_c, t) => t });
   for (const w of [12, 24, 40]) {
-    const body = "id " + styler.fg("accent", "\u0301\uff9exyz");
+    const body = "id " + styler.fg("accent", "\u102c") + "\uff9exyz";
     for (const line of frame(styler, { title: "t", width: w, lines: [body] })) {
       const kept = tui.sliceByColumn(line, 0, w, true);
       assert.equal(styler.stripAnsi(kept), styler.stripAnsi(line), `at ${w} the compositor keeps the whole line: ${JSON.stringify(line)}`);
@@ -257,7 +331,8 @@ test("an adversarial line of leader clusters is still cheap to count and cut (#4
   };
   const hostile = "\u102c\uff9e".repeat(50000);
   const plain = "a\uff9e".repeat(50000);
-  assert.equal(columnsOf(hostile), 100000, "every pair is a doubled cluster");
+  // 100,000 under pi-tui 0.80.7, which doubled each pair's base; 0.99.1 draws each pair as its base alone.
+  assert.equal(columnsOf(hostile), 50000, "every pair is a cluster its spacing mark leads");
   // AND WITH THE CHARACTER IN FRONT OF EACH RUN VARIED, which defeated a memo keyed on that character:
   // CJK ideographs, every Hangul syllable, which a first cut of the stand-in kept as themselves, and
   // private-use characters, which it did not stand in at all.
@@ -299,12 +374,15 @@ test("a styled line measures the larger of its whole and its pieces, never the s
   assert.ok(tui, "pi-tui must load");
   const ESC = String.fromCharCode(27);
   const red = (t) => `${ESC}[31m${t}${ESC}[39m`;
-  // The first is wider WHOLE (the leading mark is its own cluster there and a piece's first column is not
-  // where it stands), the second wider in PIECES (the colour code makes the mark lead a cluster). Either
-  // reading alone under-counts one of them.
-  for (const line of ["\u0301" + red("\uff9e") + "xyz", "id " + red("\u0301\uff9exyz")]) {
+  // The first is wider WHOLE (the spacing mark joins `a` and draws its column there, and leads the piece
+  // it starts, where it draws none), the second wider in PIECES (the colour code cuts the mark from the
+  // base it leads, so it draws its own column). Either reading alone under-counts one of them. Under
+  // pi-tui 0.80.7 the fixtures were a combining acute and a doubled base; 0.99.1 draws both of those
+  // the same whole and in pieces, which the inequality below would now refuse (issue #509).
+  for (const line of ["a" + red("\u093e\uff9e") + "xyz", red("\u102c") + "\uff9exyz"]) {
     const whole = tui.visibleWidth(line);
     const pieces = line.split(/\u001b\[[0-9;]*m/).reduce((n, piece) => n + tui.visibleWidth(piece), 0);
+    assert.notEqual(whole, pieces, `${JSON.stringify(line)}: the fixture must tell the two readings apart`);
     assert.equal(visibleLen(line), Math.max(whole, pieces), `${JSON.stringify(line)}: whole ${whole}, pieces ${pieces}`);
   }
 });
@@ -344,4 +422,85 @@ test("a null body line is a blank line, in both frame builders (#417)", () => {
     assert.equal(box({ sections: [{ lines: [line] }], width: 12 })[1], `${"|"} ${" ".repeat(8)} ${"|"}`.replace(/\|/g, box({ sections: [{ lines: [""] }], width: 12 })[1][0]));
     assert.equal(frame(styler, { width: 12, lines: [line] })[1], frame(styler, { width: 12, lines: [""] })[1]);
   }
+});
+
+// ISSUE #509's REVIEW: two cuts the spacing-mark rule left measuring text somewhere other than where it is
+// drawn. Every character that could be misread in this file's source is built from its code point.
+const ZWJ = String.fromCodePoint(0x200d);
+const GRIN = String.fromCodePoint(0x1f600);
+
+test("a cut that strips a dangling joiner measures what is left again (#509)", async () => {
+  const visibleWidth = await loadVisibleWidth();
+  assert.equal(typeof visibleWidth, "function");
+  // A SPACING MARK AND A JOINER ARE ONE CLUSTER THAT DRAWS NOTHING, and the mark alone draws a column. The
+  // cut kept the pair for a budget of one and then stripped the joiner it was left dangling with, so
+  // `x`, U+102C, ZWJ, an emoji padded to 2 drew 3.
+  const repro = "x" + String.fromCodePoint(0x102c) + ZWJ + GRIN;
+  for (const w of [1, 2, 3]) {
+    assert.equal(visibleWidth(pad(repro, w)), w, `pad to ${w}`);
+    assert.equal(columnsOf(pad(repro, w)), w, `pad to ${w}, our measure`);
+  }
+  // THE MARKS IT CAN HAPPEN TO, derived from the renderer: a spacing mark whose joiner, once stripped,
+  // changes what the text before it draws. They are the thirty-one that start a cluster wherever they stand.
+  const hit = spacingMarks().filter((m) => visibleWidth("x" + m + ZWJ) !== visibleWidth("x" + m));
+  assert.equal(hit.length, 31, "the marks whose dangling joiner changes their cluster");
+  for (const m of hit) {
+    for (const base of ["", "x", "a "]) {
+      const s = base + m + ZWJ + GRIN;
+      for (let w = 0; w <= 5; w++) {
+        const cut = sliceColumns(s, w);
+        assert.ok(visibleWidth(cut) <= w, `sliceColumns(${JSON.stringify(s)}, ${w}) draws ${visibleWidth(cut)}`);
+        assert.equal(columnsOf(cut), visibleWidth(cut), `and measures what it draws: ${JSON.stringify(cut)}`);
+        assert.ok(visibleWidth(clip(s, w)) <= w, `clip(${JSON.stringify(s)}, ${w}) draws ${visibleWidth(clip(s, w))}`);
+        assert.equal(visibleWidth(pad(s, w)), w, `pad(${JSON.stringify(s)}, ${w})`);
+      }
+    }
+  }
+});
+
+test("a title and a divider are cut where they are drawn, after a space (#509)", async () => {
+  const visibleWidth = await loadVisibleWidth();
+  assert.equal(typeof visibleWidth, "function");
+  const styler = makeStyler(PLAIN_THEME);
+  // U+065F and U+093E draw a column each after a space and, with U+302E, nothing at a string's start, so a
+  // title clipped at column 0 fitted a budget it overran once drawn after the frame's space: an 8-column
+  // box drew its top line at 9.
+  const repro = String.fromCodePoint(0x065f, 0x093e, 0x302e, 0x1f1f8);
+  for (const line of [...box({ title: repro, width: 8 }), ...frame(styler, { title: repro, width: 8, lines: [] })]) {
+    assert.equal(visibleWidth(line), 8, JSON.stringify(line));
+  }
+  // Every spacing mark, leading a title and a divider's label and meta. The divider is a frame body line,
+  // so it is drawn after the frame's space and is held to its width there.
+  let dividers = 0;
+  for (const m of spacingMarks()) {
+    for (const t of [m + m + "ab", m + String.fromCodePoint(0x093e, 0x302e, 0x1f1f8)]) {
+      for (const w of [8, 9, 12]) {
+        const panes = [
+          ["box", box({ title: t, sections: [{ title: t, lines: [t] }], footer: t, width: w })],
+          ["frame", frame(styler, { title: t, width: w, lines: [t], footer: t })],
+        ];
+        for (const [name, pane] of panes) {
+          for (const line of pane) {
+            assert.equal(visibleWidth(line), w, `${name} at ${w}: ${JSON.stringify(line)}`);
+            assert.equal(columnsOf(line), w, `${name} at ${w}, our measure: ${JSON.stringify(line)}`);
+          }
+        }
+        const d = styler.divider(t, t, w);
+        assert.equal(visibleWidth(" " + d) - 1, w, `divider at ${w}: ${JSON.stringify(d)}`);
+        dividers += 1;
+      }
+    }
+    // A LABEL OR META LONG ENOUGH TO BE CUT, which is the only place measuring at column 0 cuts differently:
+    // it keeps a run that draws nothing there and two columns after the space.
+    const long = m + String.fromCodePoint(0x093e, 0x302e) + "abcdefgh";
+    for (const w of [8, 9, 12]) {
+      const d = styler.divider(long, null, w);
+      assert.equal(visibleWidth(" " + d) - 1, w, `divider at ${w}: ${JSON.stringify(d)}`);
+      // The META gives way first: a label that fits on its own is kept whole beside it.
+      const kept = styler.divider("ab", long, w);
+      assert.ok(kept.startsWith("AB "), `the label survives a long meta at ${w}: ${JSON.stringify(kept)}`);
+      assert.equal(visibleWidth(" " + kept) - 1, w, `and the line is its width: ${JSON.stringify(kept)}`);
+    }
+  }
+  assert.equal(dividers, 2832, "every spacing mark in both title shapes at three widths");
 });

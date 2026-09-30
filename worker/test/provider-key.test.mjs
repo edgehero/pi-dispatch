@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 // Static, unlike env-allowlist below: provider-key.mjs imports nothing at all, so its own rules are
 // testable on a box where pi-ai will not load and the oracle round-trips skip.
-import { OAUTH_KEY_RE, apiKeyVariable } from "../src/provider-key.mjs";
+import { BEARER_KEY_RE, OAUTH_KEY_RE, apiKeyVariable, nonApiKeyKind } from "../src/provider-key.mjs";
 
 // env-allowlist imports @earendil-works/pi-ai (for findEnvKeys). That needs node >=22.19.0 and installed
 // deps, so the round-trips skip on a below-floor dev box and run in CI, where
@@ -27,6 +27,17 @@ test("apiKeyVariable takes the first NON-OAuth candidate, not the first candidat
 	// Order within the non-OAuth names is still pi's: the FIRST one wins, because pi reads the first
 	// present name and ignores the rest.
 	assert.equal(apiKeyVariable(["A_KEY", "B_KEY"]), "A_KEY");
+});
+
+test("apiKeyVariable skips the bearer token too, which pi 0.99.1 lists FIRST (#509)", () => {
+	assert.equal(apiKeyVariable(["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]), "ANTHROPIC_API_KEY");
+	assert.equal(apiKeyVariable(["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"]), "ANTHROPIC_API_KEY");
+	// The two rules are distinct: `_OAUTH_TOKEN` does not end in `_AUTH_TOKEN` (an O sits before AUTH), so
+	// each kind is named for what it is and doctor can give each its own advice.
+	assert.equal(nonApiKeyKind("ANTHROPIC_AUTH_TOKEN"), "bearer");
+	assert.equal(nonApiKeyKind("ANTHROPIC_OAUTH_TOKEN"), "oauth");
+	assert.equal(nonApiKeyKind("ANTHROPIC_API_KEY"), null);
+	assert.equal(nonApiKeyKind("HF_TOKEN"), null, "a bare _TOKEN suffix is an ordinary key variable");
 });
 
 test("apiKeyVariable falls back to the first candidate only when every one is an OAuth token", () => {
@@ -57,9 +68,23 @@ test("the OAuth suffix rule is pinned against pi, not against a table", { skip: 
 	// Both directions, with pi as the oracle. The suffix rule is the ONE credential fact this project
 	// holds itself, because it is a statement about a credential that must NOT be used and so cannot come
 	// from a table of credentials that do.
-	assert.ok(OAUTH_KEY_RE.test(providerKeyCandidates("anthropic")[0]), "anthropic's first candidate IS the OAuth token");
+	// At the 0.99.1 pin anthropic's list is [ANTHROPIC_AUTH_TOKEN, ANTHROPIC_OAUTH_TOKEN, ANTHROPIC_API_KEY]
+	// (issue #509): the bearer token first, the OAuth token second, and both ahead of the API key.
+	const anthropic = providerKeyCandidates("anthropic");
+	assert.ok(BEARER_KEY_RE.test(anthropic[0]), "anthropic's first candidate IS the bearer token");
+	assert.ok(OAUTH_KEY_RE.test(anthropic[1]), "anthropic's second candidate IS the OAuth token");
 	const matching = [...piProviders(), "radius"].flatMap((id) => providerKeyCandidates(id).filter((name) => OAUTH_KEY_RE.test(name)));
 	assert.deepEqual(matching, ["ANTHROPIC_OAUTH_TOKEN"], "exactly one variable pi reads is an OAuth token today");
+	const bearer = [...piProviders(), "radius"].flatMap((id) => providerKeyCandidates(id).filter((name) => BEARER_KEY_RE.test(name)));
+	assert.deepEqual(bearer, ["ANTHROPIC_AUTH_TOKEN"], "exactly one variable pi reads is a bearer token today");
+});
+
+test("the bearer rule is pi's own distinction, not ours: pi's getEnvApiKey skips the same variable", { skip: skipNoPi }, async () => {
+	// pi sends ANTHROPIC_AUTH_TOKEN as `Authorization: Bearer` and its own API-key lookup steps over it,
+	// so an API key written under it would be a value in the wrong header. Asked of pi, with an env that
+	// carries only the bearer token beside an API key: pi's API key is the API key, not the token.
+	const { getEnvApiKey } = await import("@earendil-works/pi-ai/compat");
+	assert.equal(getEnvApiKey("anthropic", { ANTHROPIC_AUTH_TOKEN: "bearer", ANTHROPIC_API_KEY: "sk-key" }), "sk-key");
 });
 
 test("every provider pi reads a key for resolves to a non-OAuth variable pi actually reads", { skip: skipNoPi }, () => {

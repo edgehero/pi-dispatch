@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 // Pure -- no static pi import in its module graph -- so it needs none of the gating below. Importing
 // the runner's OWN candidate resolver is deliberate: the layout fact it encodes is the thing that
 // breaks silently, so pin the function the runner actually calls rather than a copy of its reasoning.
-import { resolvePiAiCompat } from "../src/usage-meter.mjs";
-import { classifyStopReason, loadRetryPredicate } from "../src/outcome.mjs";
+import { resolvePiAiCompat, RUNTIME_RESULT_METHODS, RUNTIME_STREAM_METHODS, VIRTUAL_MODEL_API } from "../src/usage-meter.mjs";
+import { classifyPromptRejection, classifyStopReason, decideExit, loadRetryPredicate, STOP_REASONS } from "../src/outcome.mjs";
+import { jobSettings } from "../src/config.mjs";
+import { createJobModelRuntime, jobModelRuntimeOptions } from "../src/model-runtime.mjs";
 import { attachTokenBudget } from "../src/token-budget.mjs";
 import { attachTurnBudget } from "../src/turn-budget.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -47,15 +49,15 @@ const skip = mod ? false : `pi not installed (node ${process.version} < 22.19.0)
 const REQUIRED_VALUE_EXPORTS = [
 	"createAgentSession",
 	"getAgentDir",
-	"AuthStorage",
-	"ModelRegistry",
+	"ModelRuntime",
 	"SessionManager",
 	"SettingsManager",
 	"DefaultResourceLoader",
-	// The seven tool factories tools.mjs derives the excludable set from (issue #291). The :112 import
-	// scan below reads run-job.mjs only, so these earn their guard here.
+	// The eight tool factories tools.mjs derives the excludable set from (issue #291; powershell joined at
+	// the 0.99.1 pin, issue #509). The import scan below reads run-job.mjs only, so these earn their guard here.
 	"createReadToolDefinition",
 	"createBashToolDefinition",
+	"createPowerShellToolDefinition",
 	"createEditToolDefinition",
 	"createWriteToolDefinition",
 	"createGrepToolDefinition",
@@ -68,18 +70,91 @@ test("the pinned package exports everything the runner imports", { skip }, () =>
 	assert.deepEqual(missing, [], `pinned ${pkg} is missing value exports the runner needs: ${missing}`);
 });
 
-test("model/auth wiring is the 0.80.7 shape, not HEAD's", { skip }, () => {
-	// The [Unreleased] migration replaces these two with an async ModelRuntime. When the pin
-	// moves past it, THIS fails -- which is the signal to rewrite run-job.mjs's wiring,
-	// rather than discovering it when every queued job becomes a no-op.
-	assert.equal(typeof mod.AuthStorage?.create, "function", "AuthStorage.create missing");
-	assert.equal(typeof mod.ModelRegistry?.create, "function", "ModelRegistry.create missing");
-	assert.equal(
-		typeof mod.ModelRuntime,
-		"undefined",
-		"ModelRuntime now EXISTS at the pin -- the [Unreleased] migration shipped. " +
-			"Rewrite run-job.mjs to modelRuntime and re-verify sdk.d.ts before bumping.",
-	);
+test("model/auth wiring is the ModelRuntime shape the runner builds (0.99.1), not the 0.80.7 one", { skip }, () => {
+	// OQ-005's migration shipped between 0.80.7 and this pin (issue #509): AuthStorage left the exports
+	// (0.80.8) and ModelRegistry.create(auth, path) is gone, replaced by an async ModelRuntime.create handed
+	// to createAgentSession as `modelRuntime`. This pins the shape run-job.mjs and src/model-runtime.mjs
+	// build against, so the next reshaping fails here rather than as every queued job's first line.
+	assert.equal(typeof mod.ModelRuntime?.create, "function", "ModelRuntime.create missing");
+	const proto = Object.getOwnPropertyNames(mod.ModelRuntime?.prototype ?? {});
+	for (const method of ["getModel", "hasConfiguredAuth", "setRuntimeApiKey", "getError"]) {
+		assert.ok(proto.includes(method), `ModelRuntime.${method} missing -- run-job.mjs or the loopback helper calls it`);
+	}
+	assert.equal(typeof mod.AuthStorage, "undefined", "AuthStorage is exported again -- re-read which credential layer createAgentSession uses before trusting the runtime wiring");
+	assert.equal(typeof mod.ModelRegistry?.create, "undefined", "ModelRegistry.create is back -- re-read whether the facade still delegates to a ModelRuntime");
+
+	// The TYPES, where a changed parameter would not throw: hasConfiguredAuth took the MODEL at 0.80.7 and
+	// takes the PROVIDER id now; handed a model object it would silently answer false for every job.
+	const dts = agentDistFile("core", "model-runtime.d.ts");
+	assert.match(dts, /\n {4}static create\(options\?: CreateModelRuntimeOptions\): Promise<ModelRuntime>;/, "ModelRuntime.create's signature moved");
+	assert.match(dts, /\n {4}hasConfiguredAuth\(providerId: string\): boolean;/, "hasConfiguredAuth no longer takes a provider id -- run-job.mjs passes model.provider");
+	assert.match(dts, /\n {4}getModel\(providerId: string, modelId: string\): Model<Api> \| undefined;/, "getModel's signature moved");
+	const options = dts.match(/export interface CreateModelRuntimeOptions \{([\s\S]*?)\n\}/);
+	assert.ok(options, "CreateModelRuntimeOptions must exist in the pinned package");
+	for (const [field, type] of [["authPath", "string"], ["modelsPath", "string \\| null"], ["modelsStore", "ModelsStore"], ["allowModelNetwork", "boolean"]]) {
+		assert.match(options[1], new RegExp(`\\n\\s*${field}\\?: ${type};`), `CreateModelRuntimeOptions.${field} moved -- src/model-runtime.mjs sets it`);
+	}
+	// And the two network gates src/model-runtime.mjs's comment relies on, as source: PI_OFFLINE is read
+	// ONCE, at create (so enforceOfflineMode must run first), and a network refresh also needs the option.
+	const src = agentDistFile("core", "model-runtime.js");
+	assert.match(src, /process\.env\.PI_OFFLINE === undefined\);/, "ModelRuntime.create no longer reads PI_OFFLINE at construction -- re-check the runner's ordering");
+	assert.match(src, /runtime\.modelNetworkEnabled && options\.allowModelNetwork === true/, "the create-time network refresh gate moved");
+});
+
+test("the job's model runtime writes no catalog cache beside a read-only models.json (the default store is the control)", { skip }, async () => {
+	// src/model-runtime.mjs's measured claim, kept measured. The runner's modelsPath is the operator overlay's
+	// :ro /opt/pi-global/models.json when mounted, and pi's default FileModelsStore writes models-store.json
+	// BESIDE it. Here a 0555 directory stands in for the :ro mount (chmod does not bind root, so a root-run
+	// suite would see nothing fail; the image runs non-root and CI does too).
+	const readOnly = tempDir("pi-ro-overlay-");
+	const agentDir = tempDir("pi-ro-agent-");
+	const modelsPath = join(readOnly, "models.json");
+	writeFileSync(modelsPath, JSON.stringify({ providers: { anthropic: { baseUrl: "http://127.0.0.1:1" } } }));
+	chmodSync(readOnly, 0o555);
+	try {
+		const job = await createJobModelRuntime({ ModelRuntime: mod.ModelRuntime, agentDir, modelsPath });
+		const jobRefresh = await job.refresh({ allowNetwork: false });
+		assert.deepEqual([...jobRefresh.errors.keys()], [], "the job's runtime must not try to write a catalog cache anywhere");
+		assert.equal(job.getError(), undefined);
+		assert.ok(job.getModel("anthropic", "claude-sonnet-4-5-20250929"), "the overlay still applies and the builtin catalog still resolves");
+		assert.deepEqual(readdirSync(readOnly), ["models.json"], "nothing written beside the overlay");
+		assert.deepEqual(jobModelRuntimeOptions({ agentDir, modelsPath }).allowModelNetwork, false);
+
+		// THE CONTROL: the same files through pi's default store. Without it, a pin bump that stopped caching
+		// catalogs would leave the assertion above passing about nothing.
+		if (process.getuid?.() !== 0) {
+			const { modelsStore: _discarding, ...defaults } = jobModelRuntimeOptions({ agentDir, modelsPath });
+			const control = await mod.ModelRuntime.create(defaults);
+			const controlRefresh = await control.refresh({ allowNetwork: false });
+			const codes = [...controlRefresh.errors.values()].map((error) => error?.code ?? error?.cause?.code);
+			assert.ok(codes.length > 0 && codes.every((code) => code === "EACCES"), `pi's default store no longer writes beside models.json (got ${JSON.stringify(codes.slice(0, 3))}) -- re-read src/model-runtime.mjs's reason for the discarding store`);
+		}
+	} finally {
+		chmodSync(readOnly, 0o755);
+	}
+});
+
+test("the job's settings mean what jobSettings says at the pin, each against pi's own default (issue #509)", { skip }, async () => {
+	// Each key is read back through the getter pi itself calls, beside the default it replaces: a key pi stopped
+	// reading, or a default that moved to where the pin is a no-op, fails here instead of silently costing money.
+	const job = mod.SettingsManager.inMemory(jobSettings({ maxRetries: 2, baseDelayMs: 2000 }));
+	const stock = mod.SettingsManager.inMemory({});
+	// Cache warming: pi 0.86.0's default re-sends the prefix during long tool runs, as extra paid requests.
+	assert.equal(stock.getCacheWarmingMode(), "streaming", "pi's default cache warming moved -- re-check whether the pin still changes anything");
+	assert.equal(job.getCacheWarmingMode(), "off", "cacheWarming: \"off\" is no longer honoured -- a job pays to keep a cache warm");
+	// The retry settings pi's _prepareRetry reads, including the new backoff cap.
+	assert.deepEqual(job.getRetrySettings(), { enabled: true, maxRetries: 2, baseDelayMs: 2000, maxAgentDelayMs: 60_000 });
+	const retry = await import(new URL("./utils/retry.js", resolvePiAiCompat()[0].url).href);
+	assert.equal(retry.DEFAULT_MAX_AGENT_RETRY_DELAY_MS, 60_000, "pi's default agent retry cap moved: jobSettings pins the old value, decide deliberately whether to follow");
+	assert.equal(retry.retryDelayMs(job.getRetrySettings(), 2), 4000, "at the runner's defaults the second retry waits 4 s and the cap does not bind");
+	assert.equal(retry.retryDelayMs({ baseDelayMs: 2000, maxAgentDelayMs: 60_000 }, 7), 60_000, "and it binds once base * 2^(n-1) passes 60 s");
+	// Telemetry: the setting, and the env override enforceTelemetryOff exists to close.
+	assert.equal(stock.getEnableInstallTelemetry(), true, "pi's default install telemetry moved");
+	assert.equal(job.getEnableInstallTelemetry(), false);
+	const telemetry = await import(pathToFileURL(join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "core", "telemetry.js")).href);
+	assert.equal(telemetry.isInstallTelemetryEnabled(job, "1"), true, "the premise: PI_TELEMETRY overrides the setting -- if this is false, enforceTelemetryOff guards nothing");
+	assert.equal(telemetry.isInstallTelemetryEnabled(job, "0"), false, "the value enforceTelemetryOff writes must read as off");
+	assert.equal(telemetry.isInstallTelemetryEnabled(job, undefined), false, "and with no override, the setting decides");
 });
 
 test("the resource-loader options the instruction model depends on still exist", { skip }, () => {
@@ -100,7 +175,7 @@ test("the pinned pi-ai still exposes the Usage shape the runner's token meter re
   // pi-coding-agent's own context so this checks the exact copy the runner uses.
   // pi-ai is ESM-only (its `exports` has no `require` condition and hides ./package.json), so resolve its
   // main entry (./dist/index.js) via import.meta.resolve and read the sibling types.d.ts. The lockfile pins
-  // pi-ai to the same 0.80.7 pi-coding-agent depends on, so the hoisted copy is the pinned artifact.
+  // pi-ai to the same 0.99.1 pi-coding-agent depends on, so the hoisted copy is the pinned artifact.
   const typesPath = join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-ai"))), "types.d.ts");
   const src = readFileSync(typesPath, "utf8");
 
@@ -139,9 +214,11 @@ test("the runner imports nothing the pinned package does not export", { skip }, 
 });
 
 /* ------------------------------------------------------------------------------------------------
- * Issue #58: the process-wide usage meter. Everything below pins a fact the meter DEPENDS ON and
- * cannot detect the loss of at runtime -- each one, if it changed under a pin bump, would leave the
- * meter installing cleanly, logging success, and counting nothing or counting wrong.
+ * Issue #58: the process-wide usage meter (redesigned for the 0.99.1 pin, issue #509: the choke point is
+ * ModelRuntime.prototype, and pi-ai's api-provider registry is the compat half for legacy extension calls).
+ * Everything below pins a fact the meter DEPENDS ON and cannot detect the loss of at runtime -- each one,
+ * if it changed under a pin bump, would leave the meter installing cleanly, logging success, and counting
+ * nothing or counting wrong.
  * ---------------------------------------------------------------------------------------------- */
 
 /** The pinned pi-ai's dist dir, resolved exactly as the Usage test above resolves it. */
@@ -155,15 +232,22 @@ function agentDistFile(...segments) {
 	return readFileSync(join(dist, ...segments), "utf8");
 }
 
-test("the registry methods the meter installs through still exist at the pin", { skip }, () => {
-	// registerProvider is the ONLY installation route that survives a reload: ModelRegistry.refresh()
-	// re-applies its stored provider configs, so our wrappers come back. Registering through compat
-	// directly would not. unregisterProvider is pinned because the meter deliberately does NOT call it
-	// (it calls refresh() -> resetApiProviders(), wiping every wrapper) -- a maintainer who "tidies up"
-	// the never-unregistered probe needs that method to still mean what the comment says it means.
-	const registry = Object.getOwnPropertyNames(mod.ModelRegistry?.prototype ?? {});
-	for (const method of ["registerProvider", "unregisterProvider", "refresh"]) {
-		assert.ok(registry.includes(method), `ModelRegistry.${method} missing at the pin -- the meter installs through it`);
+test("the ModelRuntime methods the meter wraps still exist at the pin, with options in the position it reads", { skip }, () => {
+	// The runtime half (issue #509) wraps these five on ModelRuntime.prototype and reads the call's options
+	// off the LAST argument for sessionId attribution. A method renamed away is a call the meter no longer
+	// sees; a moved options argument is every call filed as unattributed, rootTotal 0, the fanout hidden.
+	const proto = Object.getOwnPropertyNames(mod.ModelRuntime?.prototype ?? {});
+	for (const method of [...RUNTIME_STREAM_METHODS, ...RUNTIME_RESULT_METHODS]) {
+		assert.ok(proto.includes(method), `ModelRuntime.${method} missing at the pin -- the meter wraps it`);
+	}
+	const dts = agentDistFile("core", "model-runtime.d.ts");
+	for (const [method, second] of [["streamSimple", "context: Context"], ["stream", "context: Context"], ["streamDeferred", "handle: DeferredHandle"], ["generateImages", "context: ImagesContext"], ["classify", "context: ClassifierContext"]]) {
+		assert.match(dts, new RegExp(`\\n {4}${method}(?:<[^>]*>)?\\(model: [^,]+, ${second}, options\\?: [^)]+\\): `), `ModelRuntime.${method}'s (model, ${second.split(":")[0]}, options) shape moved`);
+	}
+	// The two result methods must still carry usage, or the meter records every one of them as unpriced.
+	const types = readFileSync(new URL("./types.d.ts", resolvePiAiCompat()[0].url), "utf8");
+	for (const iface of ["AssistantImages", "ClassifierResult"]) {
+		assert.match(types.match(new RegExp(`export interface ${iface} \\{([\\s\\S]*?)\\n\\}`))?.[1] ?? "", /\n\s*usage\?: Usage;/, `${iface}.usage moved -- the meter reads it off classify/generateImages results`);
 	}
 
 	// run-job.mjs hoists the SessionManager purely to read this BEFORE the session exists. Without a
@@ -205,29 +289,47 @@ test("getContextUsage and the ContextUsage shape the session store's bound is wr
 	assert.match(header, /SessionHeader \{[^}]*\btimestamp: string;/, "SessionHeader.timestamp is gone or is no longer a string -- the conversation-age bound reads it and fails closed without it");
 });
 
-test("ProviderConfigInput still accepts the { api, streamSimple } pair the meter registers", { skip }, () => {
-	// A TYPE contract, so `typeof` is the wrong tool -- assert the pinned .d.ts still declares it. If
-	// registerProvider stopped accepting a bare streamSimple override (say it started requiring
-	// `models` or `baseUrl`), the meter's registration would throw inside install and degrade to
-	// ok:false -- which is caught, logged once, and looks exactly like an unsupported layout.
-	const src = agentDistFile("core", "model-registry.d.ts");
-	assert.match(
-		src,
-		/registerProvider\(providerName: string, config: ProviderConfigInput\): void;/,
-		"ModelRegistry.registerProvider's signature changed",
-	);
+test("every model call a session or an extension makes reaches a ModelRuntime method the meter wraps", { skip }, () => {
+	// WHY the prototype is the choke point at 0.99.1, pinned as source (the behavioural proof is
+	// usage-meter.integration.test.mjs and usage-meter.fidelity.test.mjs). If any of these call sites
+	// starts calling a provider some other way, the meter keeps installing, keeps logging ok:true, and stops
+	// counting that path -- the silent loss this file exists to catch.
+	const sdk = agentDistFile("core", "sdk.js");
+	assert.match(sdk, /\n {12}return modelRuntime\.streamSimple\(model, context, requestOptions\);/, "the session's streamFn no longer returns modelRuntime.streamSimple -- re-find the session's model path");
+	assert.match(sdk, /\n {4}const agent = new Agent\(\{/, "createAgentSession no longer builds the Agent itself");
+	// Compaction and branch summaries reuse the session's streamFn (so they are counted, under their own id).
+	assert.match(agentDistFile("core", "agent-session.js"), /streamFn: this\.agent\.streamFunction,/, "summaries no longer reuse the session's streamFn");
+	// The cache warmer (off in a job, jobSettings) goes through the runtime too.
+	assert.match(agentDistFile("core", "cache-warmer.js"), /\.streamSimple\(run\.model, run\.context, \{/, "the cache warmer's call moved");
+	// ctx.modelRegistry is a facade over the runtime: every one of its model calls lands on a wrapped method.
+	const registry = agentDistFile("core", "model-registry.js");
+	for (const call of ["stream", "streamSimple", "complete", "classify"]) {
+		assert.match(registry, new RegExp(`return this\\.runtime\\.${call}\\(model, context, options\\);`), `ModelRegistry.${call} no longer forwards to its runtime`);
+	}
+	// The runtime's convenience methods call the instance's own wrapped ones (so they are counted once).
+	const runtime = agentDistFile("core", "model-runtime.js");
+	for (const [convenience, via] of [["complete", "stream"], ["completeSimple", "streamSimple"], ["fetchDeferred", "streamDeferred"]]) {
+		assert.match(runtime, new RegExp(`${convenience}\\(model, (?:context|handle), options\\) \\{\\n\\s*return this\\.${via}\\(model, (?:context|handle), options\\)\\.result\\(\\);`), `ModelRuntime.${convenience} no longer goes through this.${via}`);
+	}
+	// Trap #4: a virtual model re-enters this.streamSimple with the physical one, and its api id is the
+	// constant the meter skips.
+	assert.match(runtime, /return this\.streamSimple\(route\.model, context, \{/, "a routed virtual model no longer re-enters this.streamSimple");
+	assert.match(agentDistFile("core", "virtual-models.js"), new RegExp(`export const VIRTUAL_MODEL_API = "${VIRTUAL_MODEL_API}";`), "the virtual api id moved -- usage-meter.mjs's VIRTUAL_MODEL_API must follow it");
+	// Trap #5: a composed provider with no builtin base resolves the api in the COMPAT registry, which is
+	// where the two halves meet. If this line goes, so does the reason for the AsyncLocalStorage.
+	const composer = agentDistFile("core", "provider-composer.js");
+	assert.match(composer, /import \{ getApiProvider \} from "@earendil-works\/pi-ai\/compat";/, "the composer no longer reads the compat registry");
+	assert.match(composer, /const api = getApiProvider\(model\.api\);/, "the composed provider's registry fallback moved");
 
-	const input = src.match(/export interface ProviderConfigInput \{([\s\S]*?)\n\}/);
+	// The extension-provider contract the integration fixture registers through (pi.registerProvider lands
+	// on ModelRuntime.registerProvider at 0.99.1): a bare { api, streamSimple } pair is still accepted.
+	const input = agentDistFile("core", "provider-composer.d.ts").match(/export interface ProviderConfigInput \{([\s\S]*?)\n\}/);
 	assert.ok(input, "the ProviderConfigInput interface must exist in the pinned package");
-	assert.match(input[1], /\n\s*api\?:/, "ProviderConfigInput.api must stay optional-but-declared -- the meter sets it");
-	assert.match(
-		input[1],
-		/\n\s*streamSimple\?:\s*\(model:[^)]*\)\s*=>/,
-		"ProviderConfigInput.streamSimple must remain a declared function field -- it IS the meter's hook",
-	);
+	assert.match(input[1], /\n\s*api\?: Api;/, "ProviderConfigInput.api must stay optional-but-declared");
+	assert.match(input[1], /\n\s*streamSimple\?: \(model: Model<Api>, context: TranscriptContext, options\?: SimpleStreamOptions\) => AssistantMessageEventStream;/, "ProviderConfigInput.streamSimple's shape moved");
 });
 
-test("the pinned pi-ai still exposes the api-provider registry the meter meters at", { skip }, () => {
+test("the pinned pi-ai still exposes the api-provider registry the meter's compat half arms", { skip }, () => {
 	const src = readFileSync(join(piAiDist(), "compat.d.ts"), "utf8");
 	for (const fn of ["getApiProvider", "getApiProviders", "registerApiProvider", "resetApiProviders"]) {
 		// The optional `<...>` covers registerApiProvider, which is generic. Anchoring on the "(" that
@@ -236,22 +338,33 @@ test("the pinned pi-ai still exposes the api-provider registry the meter meters 
 		assert.match(
 			src,
 			new RegExp(`export declare function ${fn}(?:<[^>]*>)?\\(`),
-			`compat.${fn} missing at the pin -- the meter probes, arms and re-arms through these`,
+			`compat.${fn} missing at the pin -- the compat half arms and re-arms through these`,
 		);
 	}
+	// registerApiProvider's sourceId is what files one registration per api id under METER_PROVIDER_PREFIX.
+	assert.match(src, /export declare function registerApiProvider<[^>]*>\(provider: ApiProvider<TApi, TOptions>, sourceId\?: string\): void;/, "registerApiProvider's (provider, sourceId) shape moved");
 
 	// The single field that makes per-session attribution possible. Nothing else on the wire carries a
 	// session identity, so if this were dropped every call would land in looseTotal, rootTotal and
 	// otherTotal would both be 0, and the exit line would stop being able to show that a job fanned
-	// out at all -- with no error anywhere. That is the silent collapse this pin exists to catch.
+	// out at all -- with no error anywhere. At 0.99.1 StreamOptions EXTENDS ProviderRequestOptions (0.86.0),
+	// so the pattern admits the clause and still requires the field on StreamOptions itself.
 	const types = readFileSync(join(piAiDist(), "types.d.ts"), "utf8");
-	const options = types.match(/export interface StreamOptions \{([\s\S]*?)\n\}/);
+	const options = types.match(/export interface StreamOptions(?: extends [^{]+)? \{([\s\S]*?)\n\}/);
 	assert.ok(options, "the StreamOptions interface must exist in the pinned pi-ai");
 	assert.match(
 		options[1],
 		/\n\s*sessionId\?:\s*string;/,
 		"StreamOptions.sessionId must remain declared -- lose it and root/other attribution silently collapses",
 	);
+});
+
+test("STOP_REASONS is exactly the pinned pi-ai's StopReason union, in order", { skip }, () => {
+	// The bolt outcome.test.mjs's literal list owes (CLAUDE.md: a table restating a derivable source is derived
+	// or pinned). Read from the NESTED copy, the one whose providers produce the terminal message.
+	const types = readFileSync(new URL("./types.d.ts", resolvePiAiCompat()[0].url), "utf8");
+	const union = types.match(/export type StopReason = ([^;]+);/)?.[1].match(/"([^"]+)"/g)?.map((name) => name.slice(1, -1));
+	assert.deepEqual(STOP_REASONS, union, "pi-ai's StopReason union moved: classify every new reason explicitly in outcome.mjs, then update STOP_REASONS");
 });
 
 test("pi still refuses to auto-retry the hard stop -- a non-error stopReason is NOT retryable", { skip }, async () => {
@@ -433,11 +546,16 @@ test("the runner never imports pi-ai directly -- a static import makes the meter
 		"usage-meter.mjs must have NO static pi import -- the candidate copy is decided by runtime probe",
 	);
 
-	// And the two call sites that are invisible when dropped. Without installProcessUsageMeter the
-	// runner silently falls back to per-session accounting; without the arm() after createAgentSession,
-	// any api id an extension registered during session construction stays unwrapped until the meter's
-	// own interval catches it -- so the first call of a package-provided model goes uncounted.
-	assert.match(runJob, /installProcessUsageMeter\(/, "run-job.mjs must install the process-wide meter");
+	// And the call sites that are invisible when dropped. Without installProcessUsageMeter the runner
+	// silently falls back to per-session accounting. Without the class and the instance, the runtime half
+	// cannot wrap or prove anything. Installed AFTER the runtime and BEFORE the session, or the session's
+	// first call goes unmetered. Without the arm() after createAgentSession, an api id an extension
+	// registered in the legacy registry during session construction stays unwrapped until the meter's own
+	// interval catches it.
+	assert.match(runJob, /installProcessUsageMeter\(\{ ModelRuntime, runtime: modelRuntime, meter, log \}\)/, "run-job.mjs must install the process-wide meter on the class it imports and the instance the session uses");
+	assert.ok(runJob.indexOf("createJobModelRuntime({") < runJob.indexOf("installProcessUsageMeter({"), "the meter installs after the runtime exists");
+	assert.ok(runJob.indexOf("installProcessUsageMeter({") < runJob.indexOf("createAgentSession({"), "the meter installs before the session exists");
+	assert.match(runJob, /\n\t\tmodelRuntime,\n\t\tmodel,\n/, "the session must be created on the SAME runtime the meter proved");
 	assert.match(runJob, /usageMeter\.arm\(\)/, "run-job.mjs must re-arm the meter AFTER createAgentSession");
 });
 
@@ -492,7 +610,16 @@ test("the accepted compat copy still has a providers/all.js sibling exposing a P
 	);
 
 	const models = all.builtinModels();
-	assert.equal(typeof models?.getModel, "function", "builtinModels() must return a catalog with getModel -- the wrapper calls it per stream");
+	// What wrapProviderStreams calls per stream: getProvider(id), that provider's getModels() to compare apis
+	// (pi-ai 0.99.1 compat.js's getBuiltinProviderForModel), its own stream functions, and the collection's
+	// streamSimple/stream for the cloudflare providers.
+	assert.equal(typeof models?.getProvider, "function", "builtinModels() must return a catalog with getProvider -- the compat wrapper calls it per stream");
+	assert.equal(typeof models?.streamSimple, "function", "the catalog collection must still stream -- the cloudflare path goes through it");
+	assert.equal(typeof models?.stream, "function");
+	assert.equal(typeof models?.getModel, "function");
+	const compatSrc = readFileSync(fileURLToPath(candidates[0].url), "utf8");
+	assert.match(compatSrc, /const provider = compatModels\.getProvider\(model\.provider\);\n\s*return provider\?\.getModels\(\)\.some\(\(candidate\) => candidate\.api === model\.api\) \? provider : undefined;/, "compat's builtin-provider test moved -- wrapProviderStreams mirrors it");
+	assert.match(compatSrc, /if \(model\.provider\.startsWith\("cloudflare-"\) && !hasResolvedCloudflareAuth\(options\)\) \{\n\s*return compatModels\.streamSimple\(model, transcript, options\);/, "compat's cloudflare branch moved -- wrapProviderStreams mirrors it");
 
 	// A populated catalog, not merely a callable one: an empty catalog makes every getModel() miss, which is
 	// indistinguishable at run time from fallbackModels being null in the first place.
@@ -503,7 +630,7 @@ test("the accepted compat copy still has a providers/all.js sibling exposing a P
 	// The two providers this whole fallback exists for. Their ids are read from the catalog itself, so a
 	// renamed model does not fail here -- only a provider that stopped shipping models does.
 	for (const provider of ["cloudflare-ai-gateway", "cloudflare-workers-ai"]) {
-		const entry = models.getProviders?.().find((p) => p?.id === provider);
+		const entry = models.getProvider(provider);
 		assert.ok(entry, `${provider} is gone from the builtin catalog -- the meter's fallback can no longer serve it`);
 		const first = entry.getModels?.()?.[0];
 		assert.ok(first?.id, `${provider} ships no builtin models -- its baseUrl/header substitution is unreachable through the catalog`);
@@ -514,21 +641,32 @@ test("the accepted compat copy still has a providers/all.js sibling exposing a P
 	}
 });
 
-test("pi hands extensions ITS OWN pi-ai and pi-coding-agent, not a second copy", { skip }, () => {
-	// If an extension resolved its own pi-ai, its sessions would dispatch through a DIFFERENT
-	// module-level registry and the meter would see none of their calls -- coverage would silently halve
-	// on exactly the fanout jobs #58 is about, and the totals would still look plausible. pi's extension
-	// loader prevents that by aliasing both packages to its own entries; that is what this pins.
+test("pi hands extensions ITS OWN pi-ai and pi-coding-agent, not a second copy", { skip }, async () => {
+	// If an extension resolved its own pi-coding-agent, a subagent session it built would run on a
+	// DIFFERENT ModelRuntime class, one the meter never wrapped; its own pi-ai, a different legacy registry.
+	// Coverage would silently halve on exactly the fanout jobs #58 is about, and the totals would still look
+	// plausible. pi's extension loader prevents that by handing both packages as its own; this pins both
+	// spellings of that, and then the IDENTITY the meter actually relies on.
 	const loader = agentDistFile("core", "extensions", "loader.js");
+	// The unbundled Node build (the runner's) uses jiti aliases to pi's own entries.
 	assert.match(loader, /"@earendil-works\/pi-ai":\s*piAiCompatEntry/, "the jiti alias for pi-ai is gone");
 	assert.match(loader, /"@earendil-works\/pi-coding-agent":\s*piCodingAgentEntry/, "the jiti alias for pi-coding-agent is gone");
-	// The bundled-binary path uses virtual modules instead of aliases; both must keep pointing at pi's own.
-	assert.match(loader, /"@earendil-works\/pi-ai":\s*_bundledPiAiCompat/, "the virtual-module mapping for pi-ai is gone");
-	assert.match(
-		loader,
-		/"@earendil-works\/pi-coding-agent":\s*_bundledPiCodingAgent/,
-		"the virtual-module mapping for pi-coding-agent is gone",
-	);
+	assert.match(loader, /const piCodingAgentEntry = packageIndex;/, "the pi-coding-agent alias no longer names pi's own index.js");
+	assert.match(loader, /: \{ alias: getAliases\(\) \};/, "the Node build no longer resolves extensions through the aliases");
+	// Bundled and source runtimes use virtual modules instead, moved into their own file at 0.99.1.
+	const virtual = agentDistFile("core", "extensions", "virtual-modules.js");
+	assert.match(virtual, /import \* as bundledPiAiCompat from "@earendil-works\/pi-ai\/compat";/, "the virtual pi-ai is no longer pi's own compat import");
+	assert.match(virtual, /"@earendil-works\/pi-ai": bundledPiAiCompat,/, "the virtual-module mapping for pi-ai is gone");
+	assert.match(virtual, /import \* as bundledPiCodingAgent from "\.\.\/\.\.\/index\.js";/, "the virtual pi-coding-agent is no longer pi's own index");
+	assert.match(virtual, /"@earendil-works\/pi-coding-agent": bundledPiCodingAgent,/, "the virtual-module mapping for pi-coding-agent is gone");
+
+	// The identities, at runtime. This map is also the compat half's acceptance oracle
+	// (installProcessUsageMeter), so both halves of the meter rest on these two lines.
+	const dist = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
+	const { VIRTUAL_MODULES } = await import(pathToFileURL(join(dist, "core", "extensions", "virtual-modules.js")).href);
+	assert.equal(VIRTUAL_MODULES["@earendil-works/pi-coding-agent"].ModelRuntime, mod.ModelRuntime, "an extension's ModelRuntime is not the class run-job.mjs wraps");
+	const nestedCompat = await import(resolvePiAiCompat()[0].url);
+	assert.equal(VIRTUAL_MODULES["@earendil-works/pi-ai"], nestedCompat, "the pi-ai an extension gets is not the nested compat the meter's compat half arms");
 });
 
 // ── Issue #291: run.excludeTools' pin surface ─────────────────────────────────────────────────────
@@ -542,19 +680,21 @@ test("pi hands extensions ITS OWN pi-ai and pi-coding-agent, not a second copy",
 test("CreateAgentSessionOptions declares the tools trio, and INT-SDK-SESSION-OPTIONS' option table is exact", { skip }, () => {
 	const src = agentDistFile("core", "sdk.d.ts");
 	const iface = src.match(/export interface CreateAgentSessionOptions \{([\s\S]*?)\n\}/);
-	assert.ok(iface, "CreateAgentSessionOptions must exist in the pinned package -- if this is the modelRuntime migration, see OQ-005");
+	assert.ok(iface, "CreateAgentSessionOptions must exist in the pinned package");
+	// OQ-005's migration, landed at this pin: authStorage + modelRegistry became one modelRuntime option.
+	assert.match(iface[1], /\n {4}modelRuntime\?: ModelRuntime;/, "modelRuntime?: ModelRuntime moved -- run-job.mjs passes the runtime the meter proved");
 	// The TYPE is in the pattern, not just the name (the Usage.cost lesson at the top of this file): a
 	// rename-with-substitute or a widened type must fail before a bump ships, not after.
 	assert.match(iface[1], /\n {4}excludeTools\?: string\[\];/, "excludeTools?: string[] moved -- run-job passes it and the loader validates its members; re-verify the trio in the NEW tarball before bumping (OQ-005's rule)");
 	assert.match(iface[1], /\n {4}tools\?: string\[\];/, "tools?: string[] moved -- the loader refuses run.tools on the claim this option exists upstream");
 	assert.match(iface[1], /\n {4}noTools\?: "all" \| "builtin";/, "noTools's union moved -- the loader refuses run.noTools on this shape");
-	// The bolt INT-SDK-SESSION-OPTIONS' hand-written "complete option set at 0.80.7" sentence has owed
+	// The bolt INT-SDK-SESSION-OPTIONS' hand-written "complete option set at <pin>" sentence has owed
 	// since it was written (CLAUDE.md: a table restating a derivable source is derived or pinned, never
 	// trusted). Top-level members only -- the 4-space indent excludes scopedModels' nested fields.
 	const names = [...iface[1].matchAll(/^ {4}(\w+)\?:/gm)].map((m) => m[1]);
 	assert.deepEqual(
 		names,
-		["cwd", "agentDir", "authStorage", "modelRegistry", "model", "thinkingLevel", "scopedModels", "noTools", "tools", "excludeTools", "customTools", "resourceLoader", "sessionManager", "settingsManager", "sessionStartEvent"],
+		["cwd", "agentDir", "modelRuntime", "model", "thinkingLevel", "scopedModels", "noTools", "tools", "excludeTools", "customTools", "resourceLoader", "sessionManager", "settingsManager", "sessionStartEvent"],
 		"the option set moved: update INT-SDK-SESSION-OPTIONS' 'complete option set' sentence in the same commit as the pin bump",
 	);
 	// The read-back half of the same contract: run-job's tools_excluded line and the loader acceptance
@@ -674,10 +814,12 @@ const GOOGLE_ROW_CASES = [
 	residual(401, GOOGLE_CELLS.unauthenticatedBare, SSE_TYPE),
 	residual(401, GOOGLE_CELLS.backendUnavailable, SSE_TYPE),
 ];
-// Bedrock: pi-ai 0.80.7 loses AWS's message (it serializes the consumed response stream), so on HTTP/1
-// every message is `<prefix>: <status>: [object Object]`. Each cell pins that whole string, junk included:
-// the refusal rule reads only the prefix, and a pi-ai that fixes the upstream bug changes these cells,
-// which is the moment to re-read what the message now carries.
+// Bedrock: pi-ai 0.80.7 lost AWS's message (it serialized the consumed response stream), so every message
+// was `<prefix>: <status>: [object Object]`. pi-ai 0.99.1 fixed that: each message is now `<prefix>: <AWS's own
+// message>`, with no status (measured here at the bump, issue #509), which is what moved the refusal rule
+// from `UnrecognizedClientException: 403: ` to the exception name alone. Each cell pins the whole string:
+// the rule reads only the name, and a pi-ai that changes the format again changes these cells, which is
+// the moment to re-read what the message carries.
 const BEDROCK_ERROR_TYPE = (name) => ({ "x-amzn-errortype": `${name}:http://internal.amazon.com/coral/com.amazon.coral.service/` });
 const bedrockCell = (make, status, name, message, pinned) => ({ ...make(status, JSON.stringify({ message }), JSON_TYPE, BEDROCK_ERROR_TYPE(name)), pinned });
 
@@ -691,8 +833,9 @@ const bedrockCell = (make, status, name, message, pinned) => ({ ...make(status, 
  * with `pinned` also asserts the whole errorMessage, for a family whose rule deliberately reads only a
  * prefix of it.
  *
- * Not driven, on purpose: `openrouter-images` is pi-ai's IMAGES api (generateImages), not a chat stream,
- * so its failure never becomes the terminal AssistantMessage the runner classifies.
+ * Not driven, on purpose: `openrouter-images` is pi-ai's IMAGES api (generateImages), and the three
+ * classifier apis (0.99.1) serve classify(); neither is a chat stream, so their failures never become the
+ * terminal AssistantMessage the runner classifies.
  */
 const AUTH_REFUSAL_TABLE = [
 	{
@@ -722,10 +865,10 @@ const AUTH_REFUSAL_TABLE = [
 	// Same SDK, same wrap, with an api key and a custom baseUrl. Under ADC the refusal comes from Google's
 	// OAuth token endpoint instead; those shapes are a residual, pinned by the google-vertex ADC tests below.
 	{ api: "google-vertex", provider: "google-vertex", path: "/v1", cases: GOOGLE_ROW_CASES },
-	// formatBedrockError names the exception, then the status: `UnrecognizedClientException: 403: ...`, and
-	// only that prefix is read (issue #451). HTTP/1.1 is forced because the stub is node:http and the SDK
-	// defaults to HTTP/2, where the lost body serializes as stream-internals JSON instead of [object Object]
-	// (M0-d); the prefix is the same either way. UnrecognizedClientException is the one name real AWS sent
+	// formatBedrockError names the exception, then AWS's message (0.99.1; the status and a lost body at
+	// 0.80.7), and only the name is read (issues #451, #509). HTTP/1.1 is forced because the stub is
+	// node:http and the SDK defaults to HTTP/2 (where the 0.80.7 lost body serialized differently, M0-d).
+	// UnrecognizedClientException is the one name real AWS sent
 	// for a bogus credential with a 403 (a bogus key and a bogus session token). AccessDeniedException
 	// (measured for a bogus bearer token, but also an intermittent cross-region SCP/IAM denial or a
 	// propagating fix, told apart only by the lost message) and ExpiredTokenException (never seen from real
@@ -734,10 +877,10 @@ const AUTH_REFUSAL_TABLE = [
 	{
 		api: "bedrock-converse-stream", provider: "amazon-bedrock", path: "", options: { env: { AWS_REGION: "us-east-1", AWS_BEDROCK_FORCE_HTTP1: "1" } },
 		cases: [
-			bedrockCell(refusal, 403, "UnrecognizedClientException", "The security token included in the request is invalid.", "UnrecognizedClientException: 403: [object Object]"),
-			bedrockCell(residual, 403, "AccessDeniedException", "User is not authorized to perform: bedrock:InvokeModelWithResponseStream", "AccessDeniedException: 403: [object Object]"),
-			bedrockCell(residual, 403, "ExpiredTokenException", "The security token included in the request is expired", "ExpiredTokenException: 403: [object Object]"),
-			bedrockCell(transient, 429, "ThrottlingException", "Too many requests, please wait before trying again.", "Throttling error: 429: [object Object]"),
+			bedrockCell(refusal, 403, "UnrecognizedClientException", "The security token included in the request is invalid.", "UnrecognizedClientException: The security token included in the request is invalid."),
+			bedrockCell(residual, 403, "AccessDeniedException", "User is not authorized to perform: bedrock:InvokeModelWithResponseStream", "AccessDeniedException: User is not authorized to perform: bedrock:InvokeModelWithResponseStream"),
+			bedrockCell(residual, 403, "ExpiredTokenException", "The security token included in the request is expired", "ExpiredTokenException: The security token included in the request is expired"),
+			bedrockCell(transient, 429, "ThrottlingException", "Too many requests, please wait before trying again.", "Throttling error: Too many requests, please wait before trying again."),
 		],
 	},
 	// Residual BY DECISION (issue #451): the codex family throws `new Error(info.friendlyMessage ||
@@ -822,8 +965,8 @@ test("each driven pi-ai chat family's credential refusal lands in its expected e
 			assert.equal(
 				errorMessage,
 				pinned,
-				`${api} ${status}: the whole message moved. For bedrock this is most likely pi-ai no longer losing AWS's message ` +
-					"(the upstream bug named in INT-RUNNER-EXIT-CODE-PROTOCOL): re-read what the message now carries before touching the prefix rule.",
+				`${api} ${status}: the whole message moved. For bedrock this is pi-ai changing its format again ` +
+					"(0.99.1 carries AWS's message, 0.80.7 lost it): re-read what the message now carries before touching the name rule.",
 			);
 		}
 	}
@@ -833,7 +976,11 @@ test("each driven pi-ai chat family's credential refusal lands in its expected e
 	const types = readFileSync(fileURLToPath(new URL("./types.d.ts", candidates[0].url)), "utf8");
 	const known = types.match(/export type KnownApi = ([^;]+);/)?.[1].match(/"([^"]+)"/g)?.map((name) => name.slice(1, -1));
 	assert.deepEqual([...new Set(AUTH_REFUSAL_TABLE.map((row) => row.api))].sort(), [...known].sort(), "the table must hold one row per KnownApi family at the pin");
-	assert.match(types, /export type KnownImagesApi = "openrouter-images";/, "the images api set moved -- re-check whether any of it can end a chat turn");
+	// Renamed KnownImagesApi -> KnownImageApi by 0.99.1, which also added the classifier apis. Neither kind
+	// returns an AssistantMessage (generateImages and classify answer AssistantImages / ClassifierResult), so
+	// neither can be the terminal the runner classifies; both are pinned so a new one is looked at.
+	assert.match(types, /export type KnownImageApi = "openrouter-images";/, "the image api set moved -- re-check whether any of it can end a chat turn");
+	assert.match(types, /export type KnownClassifierApi = "typesafe-system-one" \| "cloudflare-workers-ai-system-one" \| "llama-cpp-classify";/, "the classifier api set moved -- re-check whether any of it can end a chat turn");
 });
 
 /**
@@ -847,11 +994,17 @@ test("each driven pi-ai chat family's credential refusal lands in its expected e
  *
  * Zero spend, no key, no network past loopback: a node:http stub speaks the Anthropic messages api from a
  * per-request plan, the provider's baseUrl is pointed at it through a models.json override exactly as the
- * operator overlay does in the runner, and the key is a runtime dummy. Built from the same public exports
- * run-job.mjs uses, with pi's retry pinned the way the runner pins it (maxRetries 2 is PI_RETRY_MAX's
- * default; the base delay is shortened so the backoff costs milliseconds). Resource discovery is switched
- * off: it plays no part here, and a temp agentDir with no extensions, skills or context files keeps the
- * host's own pi setup out of the run. One custom tool, `probe`, stands in for any tool the model calls.
+ * operator overlay does in the runner, and the key is a runtime dummy (ModelRuntime.setRuntimeApiKey, 0.99.1).
+ * Built from the same public exports and the same src/ helpers run-job.mjs uses: the job's model runtime
+ * (createJobModelRuntime) and the job's settings (jobSettings, so cache warming is off and the retry is pinned
+ * the way the runner pins it; maxRetries 2 is PI_RETRY_MAX's default, and the base delay is shortened so the
+ * backoff costs milliseconds). Resource discovery is switched off: it plays no part here, and a temp agentDir
+ * with no extensions, skills or context files keeps the host's own pi setup out of the run. One custom tool,
+ * `probe`, stands in for any tool the model calls.
+ *
+ * The helper also does what run-job.mjs does with a prompt() that REJECTS (issue #509): it tracks whether one
+ * of pi's retries is in flight and hands the rejection to classifyPromptRejection, then decideExit, so a test
+ * can assert the exit the runner would take, not only the budget state.
  */
 const STUB_ANSWERS = (() => {
 	const sse = (events) => events.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join("");
@@ -905,13 +1058,13 @@ async function runLoopbackSession({ plan, maxTurns = 1, tokenCap = null, onSessi
 		const origin = `http://127.0.0.1:${server.address().port}`;
 		const modelsPath = join(agentDir, "models.json");
 		writeFileSync(modelsPath, JSON.stringify({ providers: { anthropic: { baseUrl: origin } } }));
-		const authStorage = mod.AuthStorage.inMemory();
-		authStorage.setRuntimeApiKey("anthropic", "dummy-key-loopback-only");
-		const modelRegistry = mod.ModelRegistry.create(authStorage, modelsPath);
-		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5-20250929");
+		const modelRuntime = await createJobModelRuntime({ ModelRuntime: mod.ModelRuntime, agentDir, modelsPath });
+		await modelRuntime.setRuntimeApiKey("anthropic", "dummy-key-loopback-only");
+		const model = modelRuntime.getModel("anthropic", "claude-sonnet-4-5-20250929");
 		assert.ok(model, "the pinned catalog no longer has the probe model -- pick another anthropic-messages model");
 		assert.equal(model.baseUrl, origin, "the models.json override must route the provider to the stub");
-		const settingsManager = mod.SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 2, baseDelayMs: 5 } });
+		assert.ok(modelRuntime.hasConfiguredAuth(model.provider), "the runtime dummy key must count as configured auth");
+		const settingsManager = mod.SettingsManager.inMemory(jobSettings({ maxRetries: 2, baseDelayMs: 5 }));
 		const resourceLoader = new mod.DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
 		await resourceLoader.reload();
 		const toolRuns = [];
@@ -928,8 +1081,7 @@ async function runLoopbackSession({ plan, maxTurns = 1, tokenCap = null, onSessi
 		({ session } = await mod.createAgentSession({
 			cwd,
 			agentDir,
-			authStorage,
-			modelRegistry,
+			modelRuntime,
 			model,
 			settingsManager,
 			sessionManager: mod.SessionManager.inMemory(cwd),
@@ -937,19 +1089,38 @@ async function runLoopbackSession({ plan, maxTurns = 1, tokenCap = null, onSessi
 			customTools: [probe],
 		}));
 		const order = [];
-		session.subscribe((event) => order.push(event.type === "agent_end" ? `agent_end:${event.willRetry}` : event.type));
+		// run-job.mjs's retry tracking, verbatim in effect: armed by auto_retry_start, cleared by auto_retry_end.
+		let retryInFlight = false;
+		session.subscribe((event) => {
+			order.push(event.type === "agent_end" ? `agent_end:${event.willRetry}` : event.type);
+			if (event.type === "auto_retry_start") retryInFlight = true;
+			if (event.type === "auto_retry_end") retryInFlight = false;
+		});
 		onSession?.(session);
 		// The runner's own order: the terminal subscription, then the turn budget, then the fallback token budget.
 		const budget = attachTurnBudget(session, maxTurns);
 		const tokenBudget = tokenCap === null ? null : attachTokenBudget(session, tokenCap);
-		await session.prompt("say ok");
+		let rejection = null;
+		let rejected = null;
+		try {
+			await session.prompt("say ok");
+		} catch (error) {
+			rejection = error;
+			rejected = classifyPromptRejection(error, { retryInFlight });
+		}
+		const last = session.messages.at(-1);
 		return {
 			budget: { ...budget.state },
 			tokenBudget: tokenBudget && { ...tokenBudget.state },
 			requests,
 			toolRuns: toolRuns.length,
 			order: order.filter((type) => !/^(message_update|queue_update|tool_execution_update)$/.test(type)),
-			last: session.messages.at(-1),
+			last,
+			rejection,
+			followUps: session.getFollowUpMessages().length,
+			// The exit the runner takes, when the rejection is one it classifies; an unclassified rejection is
+			// run-job's rethrow to classifyThrow, reported here as `rejection` with `exit` null.
+			exit: rejection && !rejected ? null : decideExit({ budgetAborted: budget.state.aborted, budgetTurns: budget.state.turns, tokenAborted: tokenBudget?.state.aborted ?? false, terminal: last, rejected }),
 		};
 	} finally {
 		session?.dispose();
@@ -992,43 +1163,61 @@ test("a 429 that outlasts pi's retries is one budget turn and PI_RETRY_MAX retry
 	assert.ok(order.lastIndexOf("auto_retry_end") > order.lastIndexOf("agent_end:false"), `an exhausted streak ends with auto_retry_end, no further auto_retry_start: ${order.join(",")}`);
 });
 
-test("a retry-shaped throw after the turn's tools ran is NOT exempt: --max-turns 1 stops after one counted turn (loopback, no key)", { skip }, async () => {
-	// Issue #455 gate round 1, A8. pi turns an exception thrown in its loop into an assistant error; a
-	// listener throwing "fetch failed" on each tool result's message_end made pi retry turns whose tools
-	// had already run, each retry a new model call with fresh tool results, and a successful reply reset
-	// pi's retry counter: 9 paid calls at --max-turns 1 with the unguarded exemption.
-	const { budget, requests, toolRuns, order } = await runLoopbackSession({
+test("a retry-shaped throw after the turn's tools ran is never re-run for free: pi cannot resume it, and the runner exits 2 (loopback, no key)", { skip }, async () => {
+	// Issue #455 gate round 1, A8, as it behaves at the 0.99.1 pin (issue #509). pi turns an exception thrown in
+	// its loop into an assistant error; a listener throwing "fetch failed" on each tool result's message_end
+	// made pi 0.80.7 retry turns whose tools had already run, each retry a new model call with fresh tool
+	// results (9 paid calls at --max-turns 1 with the unguarded exemption). At 0.99.1 the retry omits the
+	// failed attempt and continue() refuses a transcript that ends on the assistant, so prompt() REJECTS.
+	// Left unclassified that is exit 1, and the queue would re-run the whole job, model call and tool run
+	// included, on a fresh budget: #449/#455's rule forbids exactly that re-run for free.
+	const shape = {
 		plan: [...Array(8).fill("tool"), "text"],
 		onSession: (session) =>
 			session.subscribe((event) => {
 				if (event.type === "message_end" && event.message.role === "toolResult") throw new Error("fetch failed");
 			}),
-	});
-	// The premise, so this cannot pass for another reason: pi did retry the failed turn, after its tool ran.
-	assert.ok(order.includes("auto_retry_start"), `pi no longer retries a retry-shaped throw after a tool: ${order.join(",")}`);
-	assert.ok(order.indexOf("tool_execution_start") < order.indexOf("auto_retry_start"), "the tool ran before the retry");
-	assert.deepEqual(budget, { turns: 2, retryTurns: 0, aborted: true }, "the retry after a tool is the second real turn and trips the budget");
-	assert.deepEqual(requests, ["tool"], "the aborted second turn never reaches the provider");
-	assert.equal(toolRuns, 1);
+	};
+	const UNRESUMABLE = "Cannot continue from message role: assistant";
+	// Under --max-turns 1, and again under a cap that cannot fire, so the verdict is shown not to be the budget's.
+	for (const maxTurns of [1, 100]) {
+		const { budget, requests, toolRuns, order, rejection, exit } = await runLoopbackSession({ ...shape, maxTurns });
+		// The premise, so this cannot pass for another reason: pi did schedule a retry, after its tool ran.
+		assert.ok(order.includes("auto_retry_start"), `pi no longer retries a retry-shaped throw after a tool: ${order.join(",")}`);
+		assert.ok(order.indexOf("tool_execution_start") < order.indexOf("auto_retry_start"), "the tool ran before the retry");
+		// What 0.99.1 does with it: the retry never reaches the model, and prompt() rejects while it is in flight.
+		assert.equal(rejection?.message, UNRESUMABLE, `pi's retry after a tool no longer ends in its continue() refusal (got ${rejection?.message ?? "a resolved prompt"}): re-derive classifyPromptRejection`);
+		assert.ok(!order.includes("auto_retry_end"), `the retry must still be in flight when prompt() rejects -- the condition classifyPromptRejection reads: ${order.join(",")}`);
+		// The outcome #455 pinned still holds: one counted turn, one paid call, one tool run, nothing re-run.
+		assert.deepEqual(requests, ["tool"], `maxTurns ${maxTurns}: the retry must never reach the provider`);
+		assert.equal(toolRuns, 1);
+		assert.deepEqual(budget, { turns: 1, retryTurns: 0, aborted: false }, `maxTurns ${maxTurns}: no second turn started`);
+		assert.deepEqual(exit, { code: 2, reason: "retry-unresumable", message: UNRESUMABLE }, `maxTurns ${maxTurns}: exit 2, never the queue's retry of work already paid for`);
+	}
 });
 
 test("a queued follow-up after the budget aborts is aborted too: every over-cap turn re-aborts (loopback, no key)", { skip }, async () => {
-	// Issue #455 gate round 1, A13 (pre-existing). A message queued for a follow-up makes pi's
+	// Issue #455 gate round 1, A13 (pre-existing). A message queued for a follow-up made pi 0.80.7's
 	// _handlePostAgentRun start a NEW run with a fresh AbortController after the budget's abort; a budget
 	// that aborted once let it run on (7 paid calls at --max-turns 1, on main too). session.followUp is the
 	// public queue a staged extension's sendUserMessage(deliverAs: "followUp") lands in.
 	let turnStarts = 0;
-	const { budget, requests, toolRuns, order } = await runLoopbackSession({
+	const { budget, requests, toolRuns, order, followUps, exit } = await runLoopbackSession({
 		plan: [...Array(6).fill("tool"), "text"],
 		onSession: (session) =>
 			session.subscribe((event) => {
 				if (event.type === "turn_start" && ++turnStarts === 2) void session.followUp("keep going");
 			}),
 	});
-	assert.ok(order.filter((type) => type === "agent_start").length >= 2, `the premise: pi started a new run for the follow-up: ${order.join(",")}`);
+	// The premise at 0.99.1 (issue #509): the follow-up really was queued during the over-cap turn, and pi no
+	// longer starts a run for it after the abort -- it is still in the queue when prompt() returns. If pi goes
+	// back to starting that run, this premise fails first, and the outcome below is what must still hold.
+	assert.equal(followUps, 1, "the follow-up was queued and is still queued: the premise the test is about");
+	assert.equal(order.filter((type) => type === "agent_start").length, 1, `pi started a new run for the queued follow-up again, as 0.80.7 did: the re-abort path is live once more: ${order.join(",")}`);
 	assert.equal(budget.aborted, true);
 	assert.deepEqual(requests, ["tool"], "only the first, counted turn reaches the provider");
 	assert.equal(toolRuns, 1);
+	assert.equal(exit?.reason, "turn_budget");
 });
 
 test("a retry-shaped throw after a COMPLETED reply is not exempt: a queued follow-up is a counted turn (loopback, no key)", { skip }, async () => {
@@ -1053,15 +1242,20 @@ test("a retry-shaped throw after a COMPLETED reply is not exempt: a queued follo
 	assert.deepEqual(requests, ["text"], "the aborted follow-up turn never reaches the provider");
 });
 
-test("the fallback token budget re-aborts pi's retry of the breaching turn (loopback, no key)", { skip }, async () => {
+test("the fallback token budget stops pi's retry of the breaching turn (loopback, no key)", { skip }, async () => {
 	// Issue #455 gate round 1, A11. The per-session token budget (the fallback when the process-wide meter
-	// cannot install) aborts on the breaching turn's turn_end. When that turn FAILED with a retryable error,
-	// pi's retry starts with a fresh signal and the one abort never reaches it; the re-abort on the retry's
-	// turn_start does. The turn budget is set high so only the token budget can stop anything.
-	const { tokenBudget, requests, order } = await runLoopbackSession({ plan: ["errusage", "text"], maxTurns: 100, tokenCap: 100 });
+	// cannot install) aborts on the breaching turn's turn_end. At 0.80.7, when that turn FAILED with a
+	// retryable error, pi's retry started with a fresh signal and the one abort never reached it; the re-abort
+	// on the retry's turn_start did. The turn budget is set high so only the token budget can stop anything.
+	const { tokenBudget, requests, order, exit } = await runLoopbackSession({ plan: ["errusage", "text"], maxTurns: 100, tokenCap: 100 });
 	assert.equal(tokenBudget.aborted, true, "the failed call's usage breaches a cap of 100");
-	assert.ok(order.includes("auto_retry_start"), `the premise: pi retried the breaching turn anyway: ${order.join(",")}`);
-	assert.deepEqual(requests, ["errusage"], "the retried request is aborted before it reaches the provider");
+	// The premise at 0.99.1 (issue #509): the abort at turn_end now reaches pi before it decides to retry, so
+	// no retry starts at all, and the failed run's agent_end says so. If pi retries again, the re-abort on the
+	// retry's turn_start is what stops it, and the outcome below must still hold.
+	assert.ok(!order.includes("auto_retry_start"), `pi retries the breaching turn again despite the abort, as 0.80.7 did: the re-abort path is live once more: ${order.join(",")}`);
+	assert.ok(order.includes("agent_end:false"), `the failed run ends with willRetry:false: ${order.join(",")}`);
+	assert.deepEqual(requests, ["errusage"], "no retried request reaches the provider");
+	assert.deepEqual(exit, { code: 2, reason: "token_budget" });
 });
 
 test("google-vertex ADC: the pinned auth library's OAuth refusals keep their shapes and stay a retried residual (loopback, no key)", { skip }, async () => {

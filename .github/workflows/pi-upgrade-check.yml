@@ -640,9 +640,11 @@ jobs:
             || { echo "::error::PI_OFFLINE=1 did not make an unresolvable npm: source a clean skip -- pi may have tried to install at load time."; exit 1; }
 
       # --- DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY (trap (g) in INT-SDK-SESSION-OPTIONS) ---
-      # The meter must bind pi-coding-agent's OWN nested pi-ai: that is the module-level api-provider
-      # registry a running session dispatches through, and a bare `import "@earendil-works/pi-ai"` binds
-      # something else and meters nothing while reporting success.
+      # The meter's compat half must bind pi-coding-agent's OWN nested pi-ai: that is the pi-ai pi hands its
+      # extensions, whose module-level api-provider registry legacy extension calls dispatch through, and a
+      # bare `import "@earendil-works/pi-ai"` binds something else and meters nothing while reporting success.
+      # Since the pi 0.99.1 pin (issue #509) a session's own calls go through ModelRuntime instead, so the
+      # process-wide choke point is ModelRuntime.prototype; the step after this one asserts that half.
       #
       # What this step deliberately does NOT assert is "pi-ai is installed twice". That is FALSE HERE, and
       # an earlier version of this step failed on it. The image installs the ROOT lockfile against
@@ -676,7 +678,25 @@ jobs:
           console.log("OK: " + candidates.length + " candidate(s), nested first, compat surface intact");'
           docker run --rm --network none -e PROBE="$PROBE" \
             --entrypoint sh "$IMAGE_REF" -c 'node --input-type=module -e "$PROBE"' \
-            || { echo "::error::The usage meter no longer offers pi-coding-agent's NESTED pi-ai first in this image. That copy owns the module-level api-provider registry every session dispatches through, so it is the only one worth metering; installProcessUsageMeter still DECIDES by runtime mutation probe and would fall back, so this step is about the ORDER and the surface, not the decision. If the layout moved, re-verify in this order: resolvePiAiCompat's nested-path derivation in image/runner/src/usage-meter.mjs, the compat exports the probe and the wrapper call (getApiProvider/getApiProviders/registerApiProvider/resetApiProviders, createAssistantMessageEventStream), trap (g) in specs/interfaces.md, and image/runner/test/pinned-api.test.mjs -- which pins the dual-copy layout in contract-tests, where the worker's hoisted pi-ai is installed too."; exit 1; }
+            || { echo "::error::The usage meter no longer offers pi-coding-agent's NESTED pi-ai first in this image. That copy is the pi-ai pi hands its extensions, whose registry the meter's compat half arms for legacy extension calls; the process-wide choke point is ModelRuntime.prototype, and installProcessUsageMeter accepts the compat copy by identity with pi's VIRTUAL_MODULES, so this step is about the ORDER and the surface, not the decision. If the layout moved, re-verify in this order: resolvePiAiCompat's nested-path derivation in image/runner/src/usage-meter.mjs, the compat exports the probe and the wrapper call (getApiProvider/getApiProviders/registerApiProvider/resetApiProviders, createAssistantMessageEventStream), trap (g) in specs/interfaces.md, and image/runner/test/pinned-api.test.mjs -- which pins the dual-copy layout in contract-tests, where the worker's hoisted pi-ai is installed too."; exit 1; }
+
+      # The process-wide half (issue #509): at the pi 0.99.1 pin a session dispatches every model call through
+      # a ModelRuntime instance, so the meter wraps ModelRuntime.prototype, and the brake's stream factory
+      # comes from the accepted compat copy. Asserted inside the built image, where only the nested copy
+      # exists: the install must succeed, accept the NESTED compat copy, and have a brake for a capped job.
+      - name: "RUNNER: the usage meter installs on ModelRuntime inside the image, compat half nested"
+        run: |
+          PROBE='import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+          import { createUsageMeter, installProcessUsageMeter } from "file:///app/image/runner/src/usage-meter.mjs";
+          const logged = [];
+          const handle = await installProcessUsageMeter({ ModelRuntime, meter: createUsageMeter({ maxTokens: 1000 }), log: (event, fields) => logged.push({ event, ...fields }) });
+          handle.uninstall();
+          const line = logged.find((l) => l.event === "usage_meter");
+          if (!handle.ok || line?.compat !== "nested" || line?.brake !== true) { console.error(JSON.stringify(logged)); process.exit(1); }
+          console.log("OK: " + JSON.stringify(line));'
+          docker run --rm --network none -e PROBE="$PROBE" \
+            --entrypoint sh "$IMAGE_REF" -c 'cd /app && node --input-type=module -e "$PROBE"' \
+            || { echo "::error::The usage meter did not install on ModelRuntime with its compat half and brake inside the image."; exit 1; }
 
   admin-extension-canary:
     # The admin extension is the default front door (issue #96): it is TESTED against an exact pi

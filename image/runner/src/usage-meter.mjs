@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -14,52 +15,84 @@ import { fileURLToPath, pathToFileURL } from "node:url";
  * bus as roughly ONE turn, so both the token cap and the run record understate spend precisely on
  * the most expensive jobs -- the opposite of what a spend control is for.
  *
- * The one choke point every in-process session shares is pi-ai's MODULE-LEVEL api-provider registry:
- * pi-coding-agent's agent-session.js calls compat's `streamSimple`, compat resolves the provider for
- * `model.api` out of that registry, and every session -- root or subagent -- goes through it. Metering
- * there counts calls, not turns, and `options.sessionId` (a declared field on pi-ai's StreamOptions)
- * reaches the provider, so per-session attribution comes free. A "call" (`calls`) is precisely a stream
- * dispatch the meter observed (`observe()` in wrapProviderStreams), which includes one pi-ai then ended as
- * aborted before sending anything (an abort signal already set when the turn started, say); a call the
- * meter's own hard stop answered never reaches a provider and is not counted.
+ * THE CHOKE POINT, at the 0.99.1 pin (issue #509): `ModelRuntime.prototype`. Every model call an
+ * in-process session makes goes through a ModelRuntime instance: createAgentSession's streamFn returns
+ * `modelRuntime.streamSimple(...)` (sdk.js:260), compaction and branch summaries reuse that streamFn
+ * (agent-session.js, `streamFn: this.agent.streamFunction`), the cache warmer calls
+ * `modelRuntime.streamSimple` (cache-warmer.js:239), and the ModelRegistry facade an extension sees as
+ * `ctx.modelRegistry` forwards stream/streamSimple/complete/classify to its runtime (model-registry.js).
+ * complete/completeSimple/fetchDeferred call the instance's own stream/streamSimple/streamDeferred, so they
+ * are counted through those. Wrapping the PROTOTYPE covers every instance, the runner's and any a subagent
+ * extension builds with `ModelRuntime.create`, and `options.sessionId` (a declared field on pi-ai's
+ * StreamOptions) still reaches it, so per-session attribution comes free. A "call" (`calls`) is a stream,
+ * or a classify/images promise, the meter observed, including one that then ended as aborted before sending
+ * anything; a call the meter's own brake answered never reaches a provider and is not counted.
  *
- * Three traps this module is shaped around, all verified by runtime probe, none by reading source:
+ * What moved, and why the old choke point is dead: at 0.80.7 every session dispatched through pi-ai's
+ * MODULE-LEVEL api-provider registry (compat's streamSimple resolved `model.api` in it), and the meter
+ * wrapped each registry entry. At 0.99.1 a session never touches that registry: ModelRuntime calls each
+ * builtin provider's own api object, and ModelRegistry.registerProvider no longer writes to it. Measured:
+ * the 0.80.7 meter run against 0.99.1 logged `usage_meter_unavailable`, and had it installed it would
+ * have counted nothing.
  *
- * 1. A BARE pi-ai SPECIFIER IS NEVER THE COPY pi USES -- and what it IS depends on the install. Where
- *    the WORKER's deps are installed too (a dev checkout, the contract-tests job) pi-ai is on disk
- *    TWICE, with SEPARATE module-level registries: the hoisted `node_modules/@earendil-works/pi-ai`,
- *    which is the WORKER's declared dependency, and the nested
- *    `node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai`. pi-coding-agent
- *    uses the NESTED one, so a plain `import "@earendil-works/pi-ai"` from runner code binds the
- *    HOISTED copy and is a SILENT NO-OP: it registers, reports success, and meters nothing, while
- *    `import.meta.resolve` reports a path that looks right and is wrong. The JOB IMAGE installs the
- *    RUNNER's deps only, and the runner does not declare pi-ai (see resolvePiAiCompat below for why it
- *    must not), so there the nested copy is the ONLY copy and that specifier does not resolve at all.
- *    Hence: no static pi import anywhere in this file, an ordered candidate list built with tryResolve
- *    around BOTH lookups so an unresolvable candidate is SKIPPED rather than thrown, and acceptance
- *    decided ONLY by a runtime mutation probe (register an inert provider through the ModelRegistry,
- *    then ask the candidate module whether it can see it).
+ * The registry still exists (pi-ai/compat, "temporary"), and it is what an extension reaches when it calls
+ * pi-ai's legacy global `streamSimple`/`completeSimple` directly: pi hands extensions the compat entry for a
+ * bare `@earendil-works/pi-ai` import (virtual-modules.js, and loader.js's jiti aliases). So the registry
+ * half is KEPT, as the second half, for exactly those legacy paths. The two never overlap: a ModelRuntime
+ * call never enters the registry, and a registry call never enters a ModelRuntime.
  *
- * 2. `resetApiProviders()` -- what `AgentSession.reload()` calls -- WIPES the registry. So the meter
- *    cannot be install-once; it must be RE-ARMABLE, hence the unref'd re-arm interval.
+ * Traps, each verified by probe rather than by reading source:
  *
- * 3. Overriding a BUILTIN api id changes compat's own dispatch: `shouldUseBuiltinModels` returns false
- *    once `getApiProvider(api)` is no longer the builtin instance, so compat stops calling its own
- *    model catalog and calls US instead. Our wrapper must therefore REPRODUCE the catalog path
- *    (fallbackModels) rather than blindly delegate to the registry entry -- 2 of the 35 builtin
- *    providers (cloudflare-ai-gateway, cloudflare-workers-ai) substitute baseUrl placeholders and
- *    inject headers in their auth layer, and bypassing the catalog would break exactly those.
+ * 1. A BARE pi-ai SPECIFIER IS NEVER THE COPY pi USES. Where the WORKER's deps are installed too (a dev
+ *    checkout, the contract-tests job) pi-ai is on disk TWICE, with separate module-level registries: the
+ *    hoisted `node_modules/@earendil-works/pi-ai` (the WORKER's dependency) and the nested
+ *    `node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai`, which pi uses. The
+ *    job image installs the runner's deps only, and there the nested copy is the only copy. Hence: no
+ *    static pi import anywhere in this file. The ModelRuntime CLASS is injected by run-job.mjs, which
+ *    imports it from pi-coding-agent itself, so there is no candidate to choose between; and the compat
+ *    half's copy is decided at runtime by IDENTITY with the module pi hands its extensions
+ *    (installProcessUsageMeter), never by a resolved path.
+ * 2. `resetApiProviders()` -- which `AgentSession.reload()` still calls -- WIPES the registry. So the compat
+ *    half cannot be install-once; it is RE-ARMABLE, hence the unref'd re-arm interval. The prototype half
+ *    has no such hazard: nothing in pi reassigns ModelRuntime's methods.
+ * 3. Overriding a BUILTIN api id changes compat's own dispatch: `getBuiltinProviderForModel` answers
+ *    undefined once `getApiProvider(api)` is no longer the builtin instance, so compat calls US instead of
+ *    its builtin provider. The compat wrapper therefore REPRODUCES that branch (fallbackModels) rather than
+ *    blindly delegating to the registry entry -- the cloudflare providers substitute baseUrl placeholders in
+ *    their auth layer, and bypassing it would break exactly those.
+ * 4. A virtual model (`model.api === "pi-virtual"`, 0.99.0 experimental) re-enters: ModelRuntime.streamSimple
+ *    routes it and calls `this.streamSimple(physicalModel, ...)`. Only the PHYSICAL call is counted, so one
+ *    request is never counted twice and the ledger names the model that actually answered.
+ * 5. The two halves DO meet on one path, and it is a common one: a provider with no builtin base for the
+ *    model's api -- an operator's overlay models.json provider on `openai-completions`, say -- is composed by
+ *    pi so that its stream resolves `getApiProvider(model.api)` in the compat registry
+ *    (provider-composer.js, `streamWith`), which is our compat wrapper. The runtime half observes the
+ *    outer stream and the compat wrapper the inner one, two different objects, so the `observed` set cannot
+ *    dedupe them. An AsyncLocalStorage shared by the two halves of one install marks "inside this meter's
+ *    runtime dispatch" (it follows the lazyStream setup across its awaits), and the compat wrapper routes
+ *    such a call without counting it again. Measured by usage-meter.fidelity.test.mjs: counted once. The
+ *    residual this buys, named rather than hidden: a LEGACY compat call an extension makes from inside a
+ *    provider hook of a runtime call (before_provider_request, after_provider_response, a credential
+ *    resolver) runs in that marked context and is counted by neither half. Extension code is the same trust
+ *    class as a raw fetch to the provider, which no meter sees either; this meter is accounting, not a
+ *    boundary against the code it runs beside.
  *
  * The cap here is still structurally LAGGING for the same reason token-budget.mjs's is: usage is known
  * only after a call completes. The hard stop is a runaway backstop, not a before-the-spend cap.
  */
 
-/** Provider-name prefix for our per-api wrappers. One registration per api id, upserted on re-arm. */
+/** The sourceId the compat half's per-api registrations are filed under in pi-ai's registry. */
 export const METER_PROVIDER_PREFIX = "pi-dispatch-usage-meter";
-/** Provider name of the inert candidate probe. */
-export const PROBE_PROVIDER = "pi-dispatch-usage-probe";
-/** Api id of the inert candidate probe. Never wrapped, never dispatched to. */
-export const PROBE_API = "pi-dispatch-usage-probe";
+/** pi's api id for a virtual catalog entry (pi-coding-agent 0.99.1, dist/core/virtual-models.js:3). */
+export const VIRTUAL_MODEL_API = "pi-virtual";
+/**
+ * The ModelRuntime methods the runtime half wraps. The three stream methods return an event stream; the
+ * two result methods return a Promise of a result that carries `usage` (pi-ai 0.99.1 ClassifierResult,
+ * AssistantImages), and both cost money on a paid provider. Every other model call on a ModelRuntime goes
+ * through one of these five.
+ */
+export const RUNTIME_STREAM_METHODS = Object.freeze(["streamSimple", "stream", "streamDeferred"]);
+export const RUNTIME_RESULT_METHODS = Object.freeze(["classify", "generateImages"]);
 
 /** Coerce a possibly-absent numeric usage field. Never propagates NaN into the totals. */
 function finite(value) {
@@ -125,8 +158,11 @@ export function createUsageMeter({ maxTokens, rootSessionId, onBreach } = {}) {
 		total: 0,
 		cost: 0,
 		// The attribution split. INVARIANT: rootTotal + otherTotal + looseTotal === total, because every
-		// record() adds its billed tokens to exactly one of the three. otherTotal > 0 is the direct
-		// evidence of subagent spend that the per-session bus could not see.
+		// record() adds its billed tokens to exactly one of the three. otherTotal > 0 is spend the
+		// per-session bus could not attribute to the root: a subagent session's, and at the 0.99.1 pin also
+		// compaction and branch summaries, which pi sends under a FRESH session id when the caller passes
+		// none (compaction.js completeSummarization, `sessionId: options.sessionId ?? uuidv7()`; measured
+		// for issue #509). So otherTotal alone no longer proves a fanout; `sessions` counts the ids.
 		rootTotal: 0,
 		otherTotal: 0,
 		looseTotal: 0,
@@ -141,10 +177,10 @@ export function createUsageMeter({ maxTokens, rootSessionId, onBreach } = {}) {
 		sessionIds: new Set(),
 	};
 
-	// Streams already accounted for. ModelRegistry.refresh() re-applies our stored provider configs as
-	// FRESH entry objects, which arm() cannot tell apart from a third party's override, so a wrapper
-	// chain can form across a reload. Every link in such a chain hands us the SAME stream object; this
-	// makes the double count impossible instead of merely unlikely.
+	// Streams already accounted for. Two meters can sit in one dispatch chain -- a compat-half wrapper
+	// re-armed over a third party's re-registration of it, or a prototype wrapper a second install layered
+	// over the first -- and every link in such a chain hands us the SAME stream object; this makes the
+	// double count impossible instead of merely unlikely.
 	const observed = new WeakSet();
 
 	// The per-(provider,model) ledger (issue #53; REQ-TOKEN-ACCOUNTING-AND-CAPS,
@@ -159,7 +195,7 @@ export function createUsageMeter({ maxTokens, rootSessionId, onBreach } = {}) {
 	// COUNTED here, never guessed onto whichever model a heuristic liked.
 	const other = emptyRow();
 	// The version of the pi-ai copy the meter priced with, stamped by installProcessUsageMeter once
-	// the probe accepts a candidate. Pricing PROVENANCE for the run record: history is priced once,
+	// it accepts a compat copy. Pricing PROVENANCE for the run record: history is priced once,
 	// and a later pin bump must show as a different stamp on new records, not a silent repricing of
 	// old ones. null = unknown, and the exit line says so rather than inventing one.
 	let piAiVersion = null;
@@ -253,6 +289,28 @@ export function createUsageMeter({ maxTokens, rootSessionId, onBreach } = {}) {
 		return stream;
 	}
 
+	/**
+	 * The same accounting for a call that answers with a PROMISE of a result rather than a stream:
+	 * ModelRuntime.classify and generateImages (pi-ai 0.99.1), both of which carry `usage` on the result
+	 * and cost money on a paid provider. Both are documented never to reject; a rejection is swallowed
+	 * all the same, for observe()'s reason. The promise is returned untouched.
+	 */
+	function observeResult(promise, ctx = {}) {
+		if (!promise || typeof promise.then !== "function") return promise;
+		state.calls += 1;
+		state.unresolved += 1;
+		promise.then(
+			(result) => {
+				state.unresolved -= 1;
+				record(result?.usage, ctx);
+			},
+			() => {
+				state.unresolved -= 1;
+			},
+		);
+		return promise;
+	}
+
 	/** The exit-line shape. `metered: true` marks totals that came from here, not from the session bus. */
 	function snapshot() {
 		return {
@@ -304,36 +362,146 @@ export function createUsageMeter({ maxTokens, rootSessionId, onBreach } = {}) {
 		if (typeof version === "string" && version.length > 0) piAiVersion = version;
 	}
 
-	return { state, cap, record, observe, snapshot, usageSnapshot, setPiAiVersion };
+	return { state, cap, record, observe, observeResult, snapshot, usageSnapshot, setPiAiVersion };
+}
+
+
+/** The zero usage a call the meter's brake answered carries: nothing was spent, so nothing may be recorded as spent. */
+function zeroUsage() {
+	return {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
 }
 
 /**
- * A ProviderStreams-shaped `{ streamSimple }` that mirrors compat's OWN dispatch and meters the result.
+ * THE RUNTIME HALF: wrap ModelRuntime's model-calling methods on its PROTOTYPE, so every instance -- the
+ * runner's own and any an extension creates -- is metered, and return how to undo it.
  *
- * Once we override an api id, compat's `shouldUseBuiltinModels` goes false and compat routes catalog
- * models to us instead of to its `compatModels` collection. Reproducing that branch here is not
- * belt-and-braces: skipping it drops the catalog's per-provider auth layer, which for
- * cloudflare-ai-gateway and cloudflare-workers-ai is where baseUrl placeholders get substituted and
- * headers injected. Those two providers would break outright.
+ * Per call, in this order:
+ *   1. The brake. Checked before dispatch, so a breach stops the NEXT call rather than merely recording it.
+ *      A stream method answers with `hardStop(model)` (makeHardStopStream below); a result method answers
+ *      with an aborted result of its own kind, zero usage, and never calls the provider. Virtual or not:
+ *      past the cap nothing is dispatched.
+ *   2. A virtual model passes straight through UNOBSERVED (trap #4 in the header): ModelRuntime routes it
+ *      and calls `this.streamSimple` again with the physical model, which is the call that is counted.
+ *   3. Everything else is the original method, its stream observed (or its promise, for classify and
+ *      generateImages) with the (provider, model) pair read off the Model object dispatched on and the
+ *      sessionId off the options -- never parsed back out of a settled message, whose provider/model a
+ *      provider is free to normalise, alias or omit.
  *
- * There is deliberately NO try/catch. A throw in here is OUR bug; swallowing it would turn a metering
+ * `this` is preserved on every call, because the originals read instance state (credentials, providers).
+ * There is deliberately NO try/catch: a throw in here is OUR bug, and swallowing it would turn a metering
  * defect into a silent provider outage that looks like a model error.
+ *
+ * `restore()` puts back each original only while the prototype still holds OUR wrapper, so a wrapper a
+ * later install layered on top is never torn out from under it; in that case this layer is switched to
+ * pass-through instead, so it stops counting without breaking the chain.
  */
-export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop }) {
-	return {
-		streamSimple(model, context, options) {
-			// Checked before dispatch, so the breach stops the NEXT call rather than merely recording it.
+export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardStopResult = defaultHardStopResult, dispatch = new AsyncLocalStorage() }) {
+	const proto = ModelRuntime?.prototype;
+	const originals = new Map();
+	const wrappers = new Map();
+	let active = true;
+	const ctxOf = (model, options) => ({ sessionId: options?.sessionId, provider: model?.provider, modelId: model?.id });
+
+	for (const name of RUNTIME_STREAM_METHODS) {
+		const original = proto?.[name];
+		if (typeof original !== "function") continue;
+		const wrapper = function (model, ...rest) {
+			if (!active) return original.call(this, model, ...rest);
 			if (hardStop && meter.state.breached) return hardStop(model);
-			const builtin = fallbackModels?.getModel?.(model.provider, model.id);
-			const stream = builtin?.api === model.api
-				? fallbackModels.streamSimple(model, context, options)
-				: inner.streamSimple(model, context, options);
-			// The full pi-ai Model is in scope right HERE, so the ledger's (provider, model) pair is read
-			// off the object compat actually dispatched on -- never parsed back out of a settled message,
-			// whose provider/model fields a provider is free to normalise, alias, or omit.
-			meter.observe(stream, { sessionId: options?.sessionId, provider: model.provider, modelId: model.id });
-			return stream;
+			// Trap #5: everything this call dispatches, across its awaits, runs marked as ours.
+			const stream = dispatch.run(true, () => original.call(this, model, ...rest));
+			if (model?.api === VIRTUAL_MODEL_API) return stream;
+			// streamSimple/stream take (model, context, options); streamDeferred takes (model, handle, options).
+			// Options are the LAST argument in all three.
+			return meter.observe(stream, ctxOf(model, rest.at(-1)));
+		};
+		originals.set(name, original);
+		wrappers.set(name, wrapper);
+	}
+	for (const name of RUNTIME_RESULT_METHODS) {
+		const original = proto?.[name];
+		if (typeof original !== "function") continue;
+		const wrapper = function (model, context, options) {
+			if (!active) return original.call(this, model, context, options);
+			if (hardStop && meter.state.breached) return Promise.resolve(hardStopResult(name, model));
+			const promise = dispatch.run(true, () => original.call(this, model, context, options));
+			if (model?.api === VIRTUAL_MODEL_API) return promise;
+			return meter.observeResult(promise, ctxOf(model, options));
+		};
+		originals.set(name, original);
+		wrappers.set(name, wrapper);
+	}
+	for (const [name, wrapper] of wrappers) proto[name] = wrapper;
+
+	return {
+		methods: [...wrappers.keys()],
+		/** True when `runtime` dispatches through this layer: an instance of the class, no own-property shadow. */
+		covers(runtime) {
+			if (!(runtime instanceof ModelRuntime)) return false;
+			return [...wrappers].every(([name, wrapper]) => runtime[name] === wrapper);
 		},
+		restore() {
+			active = false;
+			for (const [name, wrapper] of wrappers) {
+				if (proto[name] === wrapper) proto[name] = originals.get(name);
+			}
+		},
+	};
+}
+
+/**
+ * The aborted result a braked classify or generateImages call answers with: the shape pi-ai's own
+ * classifierErrorResult/imageErrorResult build (pi-ai 0.99.1, utils/model-operations.js), with zero usage
+ * and `stopReason: "aborted"`, for the reason makeHardStopStream gives.
+ */
+function defaultHardStopResult(method, model, message = "pi-dispatch: token cap exceeded") {
+	const base = { api: model?.api, provider: model?.provider, model: model?.id, usage: zeroUsage(), stopReason: "aborted", errorMessage: message, timestamp: Date.now() };
+	return method === "generateImages" ? { ...base, output: [] } : { ...base, answers: {} };
+}
+
+/**
+ * THE COMPAT HALF: a registry-entry-shaped `{ stream, streamSimple }` that mirrors compat's OWN dispatch and
+ * meters the result, for extensions that call pi-ai's legacy global stream functions.
+ *
+ * Once we override an api id, compat's `getBuiltinProviderForModel` answers undefined and compat routes
+ * catalog models to us instead of to its builtin provider. Reproducing that branch here is not
+ * belt-and-braces (trap #3). It mirrors pi-ai 0.99.1 compat.js exactly: a model whose PROVIDER the builtin
+ * catalog knows, with some model on the same api, goes to that provider's own stream function; the
+ * cloudflare providers go through the catalog collection itself, whose auth layer substitutes their baseUrl
+ * placeholders. compat decides the cloudflare case on whether the caller passed an explicit credential, and
+ * it applies the env key BEFORE calling a registry entry, so by the time we are called that distinction is
+ * gone; the collection's auth layer is correct whichever it was (it lets an explicit key win), so cloudflare
+ * always takes it here.
+ *
+ * A call made from inside the same install's runtime dispatch (`dispatch`, trap #5) is routed the same way
+ * and NOT observed: the runtime half already counted it.
+ *
+ * There is deliberately NO try/catch, for the reason wrapModelRuntime gives.
+ */
+export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, dispatch = null }) {
+	function route(kind, model, context, options) {
+		// Checked before dispatch, so the breach stops the NEXT call rather than merely recording it.
+		if (hardStop && meter.state.breached) return hardStop(model);
+		const provider = fallbackModels?.getProvider?.(model.provider);
+		const builtin = provider?.getModels?.().some((candidate) => candidate.api === model.api) ? provider : null;
+		const stream = builtin
+			? model.provider.startsWith("cloudflare-")
+				? fallbackModels[kind](model, context, options)
+				: builtin[kind](model, context, options)
+			: inner[kind](model, context, options);
+		if (dispatch?.getStore() === true) return stream;
+		return meter.observe(stream, { sessionId: options?.sessionId, provider: model.provider, modelId: model.id });
+	}
+	return {
+		stream: (model, context, options) => route("stream", model, context, options),
+		streamSimple: (model, context, options) => route("streamSimple", model, context, options),
 	};
 }
 
@@ -361,14 +529,7 @@ export function makeHardStopStream({ createStream, message = "pi-dispatch: token
 			api: model?.api,
 			provider: model?.provider,
 			model: model?.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
+			usage: zeroUsage(),
 			stopReason: "aborted",
 			errorMessage: message,
 			timestamp: Date.now(),
@@ -392,24 +553,23 @@ function tryResolve(resolve, specifier) {
 }
 
 /**
- * The ORDERED candidate list, most-likely-correct first.
+ * The ORDERED compat candidate list, most-likely-correct first.
  *
  * WHY pi-ai IS NOT IN THE RUNNER'S package.json, even though this module depends on it. What the
- * meter needs is not "a pi-ai" but pi-coding-agent's OWN pi-ai -- the copy whose module-level registry
- * a running session dispatches through (trap #1 above). No dependency declaration can express that:
- * a declared `@earendil-works/pi-ai` is a request for a copy at the runner's own tree position, which
- * npm may satisfy by hoisting a THIRD one, and the meter would then have more wrong answers to choose
- * between, not fewer. Version-matching it to the transitive pin is worse still -- it would look
- * authoritative while binding the copy nobody dispatches through. So the dependency stays deliberately
- * undeclared and the binding is settled where it can actually be settled: at runtime, by the mutation
- * probe in installProcessUsageMeter, which accepts a copy only after the ModelRegistry has been proven
- * to write to it. (package.json admits no comment, which is why this note lives here.)
+ * meter needs is not "a pi-ai" but pi-coding-agent's OWN pi-ai -- the copy pi hands its extensions (trap
+ * #1 above). No dependency declaration can express that: a declared `@earendil-works/pi-ai` is a request
+ * for a copy at the runner's own tree position, which npm may satisfy by hoisting a THIRD one, and the
+ * meter would then have more wrong answers to choose between, not fewer. So the dependency stays
+ * deliberately undeclared and the binding is settled where it can actually be settled: at runtime, by the
+ * identity check in installProcessUsageMeter. (package.json admits no comment, which is why this note lives
+ * here.)
  *
- * NESTED first because pi-coding-agent's own imports resolve there, and it is the registry whose
- * mutation actually affects a running session. HOISTED second only as a degraded fallback for a
- * flattened install tree where the nested copy does not exist. This ordering is a hypothesis, not a
- * conclusion -- installProcessUsageMeter proves each candidate by probe before trusting it, because
- * `import.meta.resolve` is exactly the thing that lies here.
+ * NESTED first because pi-coding-agent's own imports resolve there. HOISTED second only as a degraded
+ * fallback for a flattened install tree where the nested copy does not exist. This ordering is a
+ * hypothesis, not a conclusion -- installProcessUsageMeter proves a candidate before trusting it, because
+ * `import.meta.resolve` is exactly the thing that lies here. Also read by the image contract job
+ * (.github/workflows/pi-upgrade-check.yml), and by loadRetryPredicate for a runner whose compat half did
+ * not install.
  *
  * `resolve` and `exists` are injected so this stays pure and testable.
  */
@@ -438,6 +598,20 @@ function defaultExists(url) {
 	} catch {
 		return false;
 	}
+}
+
+/**
+ * The module map pi hands its extensions, read from pi-coding-agent's own dist by FILE URL: the exports map
+ * constrains bare specifiers only, and this file is not exported (the tools.mjs allToolNames trick). At the
+ * 0.99.1 pin `VIRTUAL_MODULES["@earendil-works/pi-ai"]` IS the compat namespace pi's own code imports
+ * (virtual-modules.js: `import * as bundledPiAiCompat from "@earendil-works/pi-ai/compat"`), which makes it
+ * the one oracle for "the compat copy an extension gets": the Node build's jiti aliases resolve the same
+ * specifier from the same package (loader.js getAliases). pinned-api.test.mjs pins both spellings.
+ */
+async function defaultLoadExtensionModules({ resolve = (spec) => import.meta.resolve(spec), load = (url) => import(url) } = {}) {
+	const agentEntry = resolve("@earendil-works/pi-coding-agent");
+	const modules = await load(new URL("./core/extensions/virtual-modules.js", agentEntry).href);
+	return modules?.VIRTUAL_MODULES ?? null;
 }
 
 /**
@@ -479,38 +653,58 @@ function createChildSampler(platform) {
 	return children;
 }
 
+/** A code or name for a failure, never `error.message`: a module-resolution message carries a path, and run logs ship. */
+function reasonOf(error) {
+	return error?.code ?? error?.name ?? "unknown";
+}
+
 /**
- * Install the meter into whichever pi-ai module-level registry pi is ACTUALLY using.
+ * Install both halves of the meter. Returns `ok: false` -- and the caller falls back to the per-session
+ * token budget -- ONLY when the RUNTIME half cannot meter, because that half is the one every session
+ * dispatches through. A compat half that could not install degrades the meter without disabling it, and is
+ * named on the `usage_meter` line (`compat: false` with a reason) rather than hidden behind a plain ok:true.
  *
- * The acceptance test is a mutation probe and nothing else: register an inert provider through the
- * ModelRegistry, then ask the candidate module `getApiProvider(PROBE_API)`. Only the copy the
- * ModelRegistry writes to can answer yes. Path inspection cannot decide this -- both copies sit at
- * plausible paths and `import.meta.resolve` names the wrong one.
+ * The runtime half. `ModelRuntime` is the class run-job.mjs imports from pi-coding-agent (injected, trap
+ * #1). `runtime`, when given, is the instance the session will be created with, and it is the acceptance
+ * test: after wrapping, the instance must dispatch through the wrappers (an instance of the class, no own
+ * property shadowing a method). That is the runtime analogue of the old mutation probe -- it fails when the
+ * class run-job imported is not the one the instance was built from, the wrong-copy failure trap #1 names.
+ * A class with no streamSimple/stream is refused outright (ok:false, reason `no-runtime-methods`).
  *
- * The probe is never unregistered: `ModelRegistry.unregisterProvider` calls `refresh()`, which calls
- * `resetApiProviders()`, which would wipe every wrapper we just installed. An inert api id nobody
- * dispatches to is far cheaper than that.
- *
- * Registration goes through `modelRegistry.registerProvider` rather than compat's `registerApiProvider`
- * so that `refresh()` re-applies our wrappers instead of dropping them; the unref'd interval covers the
- * bare `resetApiProviders()` path, which re-applies nothing.
+ * The compat half. Each candidate from resolvePiAiCompat is loaded and accepted only when it IS, by object
+ * identity, the module pi hands an extension for `@earendil-works/pi-ai` (defaultLoadExtensionModules).
+ * The accepted module also supplies the brake's stream factory and the ledger's pricing provenance (the
+ * `version` in the package.json above its dist/), because it is the copy whose providers priced the calls.
+ * Registration goes straight through the accepted compat's own `registerApiProvider` (at 0.99.1 the
+ * ModelRegistry no longer writes to this registry at all), filed under METER_PROVIDER_PREFIX so one api id
+ * is one registration; the unref'd interval re-arms after `resetApiProviders()`.
  */
 export async function installProcessUsageMeter({
-	modelRegistry,
+	ModelRuntime,
+	runtime = null,
 	meter,
 	log = () => {},
 	rearmMs = 1000,
 	resolve,
 	load = (url) => import(url),
 	exists,
+	loadExtensionModules = () => defaultLoadExtensionModules({ ...(resolve ? { resolve } : {}), load }),
 	readText = (path) => readFileSync(path, "utf8"),
 	platform = process.platform,
 }) {
+	// --- the compat half's copy, decided first: it supplies the brake's stream factory to BOTH halves ---
 	const candidates = resolvePiAiCompat({ resolve, exists });
 	const tried = [];
 	let accepted = null;
-
-	for (const candidate of candidates) {
+	let compatError = null;
+	let extensionModules = null;
+	try {
+		extensionModules = await loadExtensionModules();
+		if (!extensionModules) compatError = "no-extension-modules";
+	} catch (error) {
+		compatError = reasonOf(error);
+	}
+	for (const candidate of extensionModules ? candidates : []) {
 		tried.push(candidate.tag);
 		let mod;
 		try {
@@ -518,82 +712,96 @@ export async function installProcessUsageMeter({
 		} catch {
 			continue;
 		}
-		if (typeof mod?.getApiProvider !== "function" || typeof mod?.getApiProviders !== "function") continue;
-		try {
-			modelRegistry.registerProvider(PROBE_PROVIDER, {
-				api: PROBE_API,
-				streamSimple: () => {
-					throw new Error("pi-dispatch usage probe is inert and must never be dispatched to");
-				},
-			});
-		} catch {
-			continue;
-		}
-		if (!mod.getApiProvider(PROBE_API)) continue; // This copy is not the one pi mutates. Next.
+		if (typeof mod?.registerApiProvider !== "function" || typeof mod?.getApiProvider !== "function" || typeof mod?.getApiProviders !== "function") continue;
+		// Identity, not equality of shape: two copies export the same names. Only the copy pi hands its
+		// extensions is the registry a legacy extension call goes through.
+		if (extensionModules["@earendil-works/pi-ai"] !== mod) continue;
 		accepted = { candidate, mod };
 		break;
 	}
+	if (!accepted && !compatError) compatError = "no-candidate-matched";
+	const module = accepted?.mod ?? null;
 
-	if (!accepted) {
-		// Never log a filesystem path: run logs are shipped, and the image layout is not public data.
-		log("usage_meter_unavailable", { tried, candidates: candidates.length });
-		return { ok: false, arm: () => {}, uninstall: () => {} };
-	}
-
-	const module = accepted.mod;
-
-	// Stamp the ledger's pricing provenance: the `version` of the COPY the probe just accepted, read
-	// from the package.json above its dist/. Same reasoning as the sibling load below -- resolving the
-	// package by specifier would reopen trap #1, but a path built RELATIVE TO the accepted compat url
-	// can only ever name the accepted copy. Best-effort and SILENT on any failure: a version is
-	// optional (the exit line's `piAi` is null when unknown), and an error logged here would carry the
-	// resolved path, which the no-path rule above already forbids shipping. `readText` is injected so
-	// the pure tests need no disk.
-	try {
-		meter.setPiAiVersion(JSON.parse(readText(fileURLToPath(new URL("../package.json", accepted.candidate.url)))).version);
-	} catch {
-		// piAi stays null on the exit line; the ledger itself is unaffected.
-	}
-
-	// The catalog path compat would have taken for builtin models, loaded as a SIBLING of the accepted
-	// compat url so it comes from the same copy. Resolving it by specifier would reopen trap #1.
-	let fallbackModels = null;
-	let fallbackError = null;
-	try {
-		const all = await load(new URL("./providers/all.js", accepted.candidate.url).href);
-		fallbackModels = all?.builtinModels?.() ?? null;
-		// A module that loaded but exposes no builtinModels() is the same loss as a module that did not
-		// load, and it is the shape a pin bump would produce -- so it gets its own reason, not silence.
-		if (!fallbackModels) fallbackError = "no-builtin-models";
-	} catch (error) {
-		// Degraded but still metering: without the catalog every call goes to the registry entry, which
-		// is correct for 33 of 35 builtin providers -- and WRONG for cloudflare-ai-gateway and
-		// cloudflare-workers-ai, whose auth layer is where baseUrl placeholders are substituted and
-		// headers injected. A code/name, never `error.message`: a module-resolution message carries the
-		// full path and run logs ship.
-		fallbackModels = null;
-		fallbackError = error?.code ?? error?.name ?? "unknown";
+	// Stamp the ledger's pricing provenance from the ACCEPTED copy's package.json, a path built RELATIVE TO
+	// the accepted compat url so it can only ever name that copy (resolving the package by specifier would
+	// reopen trap #1). Best-effort and SILENT on any failure: `piAi` is null when unknown, and an error
+	// logged here would carry the resolved path, which the no-path rule forbids shipping. `readText` is
+	// injected so the pure tests need no disk.
+	if (accepted) {
+		try {
+			meter.setPiAiVersion(JSON.parse(readText(fileURLToPath(new URL("../package.json", accepted.candidate.url)))).version);
+		} catch {
+			// piAi stays null on the exit line; the ledger itself is unaffected.
+		}
 	}
 
 	// Only armed when a cap exists -- an uncapped job must never have a call stopped.
-	const createStream = typeof module.createAssistantMessageEventStream === "function"
+	const createStream = typeof module?.createAssistantMessageEventStream === "function"
 		? module.createAssistantMessageEventStream
-		: typeof module.AssistantMessageEventStream === "function"
+		: typeof module?.AssistantMessageEventStream === "function"
 			? () => new module.AssistantMessageEventStream()
 			: null;
 	const hardStop = meter.cap !== null && createStream
 		? makeHardStopStream({ createStream, message: "pi-dispatch: token cap exceeded" })
 		: null;
 
-	// Object identity, not api id: the registry hands back a FRESH provider object on every
-	// registration, so "did we install this one?" is answerable only by identity.
+	// --- the runtime half: THE choke point. Without it there is no process-wide meter. ---
+	const methodsPresent = typeof ModelRuntime?.prototype?.streamSimple === "function" && typeof ModelRuntime?.prototype?.stream === "function";
+	if (!methodsPresent) {
+		// Never log a filesystem path: run logs are shipped, and the image layout is not public data.
+		log("usage_meter_unavailable", { reason: "no-runtime-methods" });
+		return { ok: false, arm: () => {}, uninstall: () => {} };
+	}
+	// One per install, shared by both halves (trap #5).
+	const dispatch = new AsyncLocalStorage();
+	const runtimeLayer = wrapModelRuntime({ ModelRuntime, meter, hardStop, dispatch });
+	if (runtime !== null && !runtimeLayer.covers(runtime)) {
+		runtimeLayer.restore();
+		log("usage_meter_unavailable", { reason: "runtime-not-covered" });
+		return { ok: false, arm: () => {}, uninstall: () => {} };
+	}
+
+	// --- the compat half, armed only on an accepted copy ---
+	// The catalog path compat would have taken for builtin models, loaded as a SIBLING of the accepted
+	// compat url so it comes from the same copy. Resolving it by specifier would reopen trap #1.
+	let fallbackModels = null;
+	let fallbackError = null;
+	if (accepted) {
+		try {
+			const all = await load(new URL("./providers/all.js", accepted.candidate.url).href);
+			fallbackModels = all?.builtinModels?.() ?? null;
+			// A module that loaded but exposes no builtinModels() is the same loss as a module that did not
+			// load, and it is the shape a pin bump would produce -- so it gets its own reason, not silence.
+			if (!fallbackModels) fallbackError = "no-builtin-models";
+		} catch (error) {
+			// Degraded but still metering: without the catalog every compat call goes to the registry entry,
+			// which is WRONG for the builtin providers (compat itself would have called their own provider)
+			// and breaks the cloudflare ones outright.
+			fallbackModels = null;
+			fallbackError = reasonOf(error);
+		}
+	}
+
+	// Object identity, not api id: the registry hands back a FRESH provider object on every registration,
+	// so "did we install this one?" is answerable only by identity.
 	const wrapped = new Set();
 	const armedApis = new Set();
 	const children = createChildSampler(platform);
 
-	const handle = { ok: true, module, tag: accepted.candidate.tag, apis: [], arm, rearms: 0, children, uninstall };
+	const handle = {
+		ok: true,
+		methods: runtimeLayer.methods,
+		module,
+		tag: accepted?.candidate.tag ?? null,
+		apis: [],
+		arm,
+		rearms: 0,
+		children,
+		uninstall,
+	};
 
 	function arm() {
+		if (!module) return handle;
 		let entries;
 		try {
 			entries = module.getApiProviders();
@@ -602,12 +810,12 @@ export async function installProcessUsageMeter({
 		}
 		for (const entry of entries ?? []) {
 			const api = entry?.api;
-			if (typeof api !== "string" || api === PROBE_API) continue;
+			if (typeof api !== "string") continue;
 			if (wrapped.has(entry)) continue;
-			const { streamSimple } = wrapProviderStreams({ inner: entry, fallbackModels, meter, hardStop });
-			// One provider name per api id, so re-arming upserts the stored config instead of piling up
-			// registrations that refresh() would replay.
-			modelRegistry.registerProvider(`${METER_PROVIDER_PREFIX}:${api}`, { api, streamSimple });
+			const streams = wrapProviderStreams({ inner: entry, fallbackModels, meter, hardStop, dispatch });
+			// One sourceId per api id, and registerApiProvider keys the registry by api id, so re-arming
+			// replaces our entry instead of piling up registrations.
+			module.registerApiProvider({ api, ...streams }, `${METER_PROVIDER_PREFIX}:${api}`);
 			const installed = module.getApiProvider(api);
 			if (installed) wrapped.add(installed);
 			if (armedApis.has(api)) handle.rearms += 1;
@@ -622,37 +830,34 @@ export async function installProcessUsageMeter({
 		clearInterval(timer);
 		if (toreDown) return;
 		toreDown = true;
-		// THE RE-ARM GAP, made inferable (REQ-TOKEN-ACCOUNTING-AND-CAPS).
+		runtimeLayer.restore();
+		// THE RE-ARM GAP, made inferable (REQ-TOKEN-ACCOUNTING-AND-CAPS). Compat half only: at 0.99.1 a
+		// session's own calls never enter the registry, so this window can hide only a legacy extension call.
 		//
-		// `resetApiProviders()` wipes our wrappers and replays nothing, and the only thing that puts them
-		// back is the unref'd `rearmMs` poll. A provider call landing between the wipe and the next arm()
-		// is therefore UNMETERED, and nothing else in the run record shows it: the totals just come out
-		// low, which reads exactly like a cheap job. `rearms` counts the api IDS arm() found displaced,
-		// not the wipes -- one wipe displaces every armed api at once, which is why `apis` is on the same
-		// line, and `rearmMs` with it because the window's width is the other half of any estimate. A
-		// non-zero `rearms` is the only evidence such a window existed at all. Reported at teardown
-		// rather than left in a handle field nobody reads. No second timer, no extra work.
+		// `resetApiProviders()` wipes the compat wrappers and replays nothing, and the only thing that puts
+		// them back is the unref'd `rearmMs` poll. A registry call landing between the wipe and the next arm()
+		// is UNMETERED, and nothing else in the run record shows it. `rearms` counts the api IDS arm() found
+		// displaced, not the wipes -- one wipe displaces every armed api at once, which is why `apis` is on
+		// the same line, and `rearmMs` with it because the window's width is the other half of any estimate.
 		log("usage_meter_teardown", { rearms: handle.rearms, apis: handle.apis.length, rearmMs });
 	}
 
 	arm();
-	// Once, on success. A tag ("nested"/"hoisted") -- never a path.
+	// Once, on success. Tags and names -- never a path.
 	//
-	// `fallback` and `brake` are on this line because BOTH degrade silently and BOTH change what the
-	// meter is: without the catalog (`fallback:false`) the two cloudflare providers lose the auth layer
-	// that substitutes their baseUrl placeholders and injects their headers, and without a hard-stop
-	// stream (`brake:false`) the cap can still fire through session.abort() but the pre-dispatch brake
-	// on the NEXT call is gone. Reporting a plain `ok:true` over either would be a degraded meter
-	// calling itself healthy.
-	//
-	// `capped` rides along because it is what makes `brake` readable: an uncapped job has no brake BY
-	// DESIGN, so `brake:false` alone would mean two entirely different things. `capped:true` with
-	// `brake:false` is the alarm -- a cap that can only be enforced after the fact.
+	// `methods` is what the runtime half wrapped. `compat` is the compat half's accepted copy (a tag, or
+	// false with `compatError`), and `fallback` whether its builtin catalog loaded; without it the compat
+	// half sends builtin models to the wrong entry. `brake` is whether a hard-stop stream exists; `capped`
+	// rides along because it is what makes `brake` readable: an uncapped job has no brake BY DESIGN, so
+	// `capped:true` with `brake:false` is the alarm -- a cap that can only be enforced after the fact.
+	// Reporting a plain `ok:true` over any of these would be a degraded meter calling itself healthy.
 	log("usage_meter", {
 		ok: true,
-		tag: handle.tag,
+		methods: handle.methods,
+		compat: handle.tag ?? false,
+		...(compatError ? { compatError, tried } : {}),
 		apis: handle.apis,
-		fallback: fallbackModels !== null,
+		...(accepted ? { fallback: fallbackModels !== null } : {}),
 		...(fallbackError ? { fallbackError } : {}),
 		capped: meter.cap !== null,
 		brake: hardStop !== null,

@@ -33,7 +33,7 @@ async function loadVisibleWidth() {
 	const { createRequire } = await import("node:module");
 	const { pathToFileURL } = await import("node:url");
 	const pi = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
-	assert.equal(pi("@earendil-works/pi-tui/package.json").version, "0.80.7", "the oracle must be the pinned renderer");
+	assert.equal(pi("@earendil-works/pi-tui/package.json").version, "0.99.1", "the oracle must be the pinned renderer");
 	const { visibleWidth } = await import(pathToFileURL(pi.resolve("@earendil-works/pi-tui")).href);
 	assert.equal(typeof visibleWidth, "function", "and it must actually load");
 	return visibleWidth;

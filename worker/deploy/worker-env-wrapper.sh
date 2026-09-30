@@ -24,9 +24,9 @@
 # profile happens to export. Nothing here contains a credential -- the secrets live in `.env`, which is
 # gitignored and read at runtime.
 #
-# TRAP: inside pi, `ANTHROPIC_OAUTH_TOKEN` silently takes precedence over `ANTHROPIC_API_KEY`. Set exactly
-# one in `.env`; this wrapper only ADDS the `.env` vars on top of the current environment, it does not
-# clear a stray pre-existing one, so a leaked host `ANTHROPIC_OAUTH_TOKEN` would still win.
+# TRAP: inside pi, `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_OAUTH_TOKEN` silently take precedence over
+# `ANTHROPIC_API_KEY`. Set exactly one in `.env`; this wrapper only ADDS the `.env` vars on top of the
+# current environment, it does not clear a stray pre-existing one, so a leaked host token would still win.
 #
 # One worker per host (DES-CONCURRENCY-3): parallelism is PI_CONCURRENCY inside the single process, not
 # multiple daemons. Requires the AOF-enabled Valkey from deploy/docker-compose.yml.

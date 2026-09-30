@@ -91,12 +91,19 @@ function coveringSubscription(provider, model, subscriptions, { includeHypotheti
 
 /**
  * Classify one attribution row. Order matters:
- *   1. a matched OWNED (non-hypothetical) subscription wins outright -> "plan": the row's recorded $0
- *      is an artifact of the provider's all-zero rate table, not a price;
- *   2. a positive stream-time cost is metered truth -> "metered" -- the fold never re-prices it;
+ *   1. a matched OWNED (non-hypothetical) subscription wins outright -> "plan": the row's recorded cost
+ *      is not what the plan charged, whether it is $0 (an all-zero rate table: kimi-coding, zai and
+ *      zai-coding-cn under pi 0.80.7, the qwen and xiaomi token plans under 0.99.1) or an implied
+ *      API-equivalent price (kimi-coding, zai and zai-coding-cn under pi 0.99.1, issue #509). History holds
+ *      both shapes for one plan, and a plan row contributes $0 either way;
+ *   2. a positive stream-time cost is metered truth -> "metered" -- the fold never re-prices it. For an
+ *      UNDECLARED coding plan pi 0.99.1 prices, that is the implied price the rate table recorded, which is
+ *      why a plan is known only from subscriptions.json and never from the provider or the rate;
  *   3. zero cost -> "zero-rated", whether the rate table says so (isZeroRated) or the model is unknown
  *      to the tables entirely. NEVER "free": "zero-rated" says a table rated it zero, which is a fact;
- *      "free" would claim nobody paid, which this fold cannot know.
+ *      "free" would claim nobody paid, which this fold cannot know. Nor "subscription": a $0 rate was
+ *      once the mark of a coding plan, and 0.99.1 prices most of those plans while free models of
+ *      metered providers stay at zero.
  */
 export function classifyRow(row, subscriptions, pricing) {
   const sub = coveringSubscription(row.provider, row.model, Array.isArray(subscriptions) ? subscriptions : []);

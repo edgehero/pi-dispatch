@@ -1,6 +1,6 @@
 /**
- * PINNED-ARTIFACT PRICING-SURFACE GUARD (pi-ai 0.80.7). These tests pin the exact pieces of pi-ai's
- * pricing surface the façade (and through it the admin's cost analytics) depends on: the providers/all
+ * PINNED-ARTIFACT PRICING-SURFACE GUARD (pi-ai 0.99.1; re-pinned from 0.80.7 in issue #509). These tests
+ * pin the exact pieces of pi-ai's pricing surface the façade (and through it the admin's cost analytics) depends on: the providers/all
  * enumeration shape, specific rate tables, the tier-selection key, the 1h-cache premium formula, and
  * calculateCost's mutate-in-place contract. A pi-ai pin bump that reshapes any of this must fail the
  * BUILD, not the screen -- a silently changed rate table would misprice every counterfactual with no
@@ -30,13 +30,15 @@ const freshUsage = (q) => ({
 });
 
 const OPUS = { provider: "anthropic", id: "claude-opus-4-6" };
-const CODEX = { provider: "openai-codex", id: "gpt-5.4" };
+// openai/gpt-5.4, not openai-codex/gpt-5.4: the pi 0.99.1 catalog dropped the codex entry and kept this
+// one with the same rates and the same single tier (issue #509; the removal is pinned below).
+const GPT54 = { provider: "openai", id: "gpt-5.4" };
 
 // ── providers/all enumeration shape ─────────────────────────────────────────────────────────────────────
 
 test("getBuiltinProviders includes the providers the cost analytics reason about", () => {
 	const providers = getBuiltinProviders();
-	for (const p of ["anthropic", "openai-codex", "kimi-coding", "zai-coding-cn"]) {
+	for (const p of ["anthropic", "openai", "openai-codex", "kimi-coding", "zai-coding-cn", "qwen-token-plan"]) {
 		assert.ok(providers.includes(p), `builtin providers must include ${p}`);
 	}
 });
@@ -61,7 +63,7 @@ test("claude-opus-4-6 rates are pinned exactly (USD per 1M tokens, no tiers)", (
 });
 
 test("gpt-5.4 base rates and the single 272000 tier are pinned exactly", () => {
-	const model = getPricedModel("openai-codex", "gpt-5.4");
+	const model = getPricedModel("openai", "gpt-5.4");
 	assert.ok(model);
 	assert.deepEqual(model.cost, {
 		input: 2.5,
@@ -72,13 +74,32 @@ test("gpt-5.4 base rates and the single 272000 tier are pinned exactly", () => {
 	});
 });
 
-test("every kimi-coding and zai-coding-cn model is zero-rated (correct data: subscription providers)", () => {
-	for (const provider of ["kimi-coding", "zai-coding-cn"]) {
+test("openai-codex/gpt-5.4 is gone from the 0.99.1 catalog, which is why the tier pins moved to openai/gpt-5.4", () => {
+	assert.equal(getPricedModel("openai-codex", "gpt-5.4"), null);
+	assert.ok(listPricedModels().some((m) => m.provider === "openai-codex"), "the provider itself is still there");
+});
+
+test("every qwen-token-plan* model is zero-rated: the all-zero subscription providers at the 0.99.1 pin", () => {
+	for (const provider of ["qwen-token-plan", "qwen-token-plan-cn", "qwen-token-plan-individual"]) {
 		const models = listPricedModels().filter((m) => m.provider === provider);
 		assert.ok(models.length > 0, `${provider} must ship models`);
 		for (const m of models) {
 			assert.ok(isZeroRated(m), `${provider}/${m.id} must be all-zero rated`);
 		}
+	}
+});
+
+test("kimi-coding and zai-coding-cn now carry API-equivalent rates, so zero-rated no longer means subscription", () => {
+	// At 0.80.7 every model of both providers was all-zero and this file pinned that as "correct data:
+	// subscription providers". At 0.99.1 (issue #509) most of them carry an implied API-equivalent price
+	// although the plan is still prepaid, so a run on them records a POSITIVE stream-time cost, and
+	// `isZeroRated` is no longer a subscription signal. Pinned exactly on one model of each, so a catalog
+	// that moves these numbers again fails here rather than on the cost screen.
+	assert.deepEqual(getPricedModel("kimi-coding", "kimi-for-coding").cost, { input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 });
+	assert.deepEqual(getPricedModel("zai-coding-cn", "glm-5.3").cost, { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 });
+	for (const provider of ["kimi-coding", "zai-coding-cn"]) {
+		const models = listPricedModels().filter((m) => m.provider === provider);
+		assert.ok(models.some((m) => !isZeroRated(m)), `${provider}: at least one model is priced`);
 	}
 });
 
@@ -104,19 +125,19 @@ test("calculateCost throws without the cost skeleton -- why reprice always build
 // ── tier boundary (whole-request rates, key = input + cacheRead + cacheWrite) ───────────────────────────
 
 test("reprice at 300k input on gpt-5.4 prices the WHOLE request at tier rates", () => {
-	const result = reprice(quad({ input: 300000, output: 10000 }), CODEX);
+	const result = reprice(quad({ input: 300000, output: 10000 }), GPT54);
 	// 300000 > 272000 -> tier {5, 22.5}. Expected mirrors pi-ai's operand order for bit-exactness.
 	assert.equal(result.usd, (5 / 1e6) * 300000 + (22.5 / 1e6) * 10000);
-	assert.equal(result.ratesVersion, "0.80.7");
+	assert.equal(result.ratesVersion, "0.99.1");
 });
 
 test("reprice at 100k input on gpt-5.4 stays on base rates", () => {
-	const result = reprice(quad({ input: 100000, output: 10000 }), CODEX);
+	const result = reprice(quad({ input: 100000, output: 10000 }), GPT54);
 	assert.equal(result.usd, (2.5 / 1e6) * 100000 + (15 / 1e6) * 10000); // 0.25 + 0.15
 });
 
 test("the tier key includes cacheRead: 100k input + 200k cacheRead crosses 272k", () => {
-	const result = reprice(quad({ input: 100000, cacheRead: 200000 }), CODEX);
+	const result = reprice(quad({ input: 100000, cacheRead: 200000 }), GPT54);
 	// Tier rates {input 5, cacheRead 0.5}: 0.5 + 0.1 -- NOT base's 0.25 + 0.05.
 	assert.equal(result.usd, (5 / 1e6) * 100000 + (0.5 / 1e6) * 200000);
 	assert.notEqual(result.usd, (2.5 / 1e6) * 100000 + (0.25 / 1e6) * 200000);
@@ -132,8 +153,8 @@ test("an anthropic target prices the 1h split: short writes at cacheWrite, 1h wr
 });
 
 test("a non-anthropic target folds the same quad short: all 10000 writes at its cacheWrite rate", () => {
-	const result = reprice(quad({ cacheWrite: 10000, cacheWrite1h: 4000 }), CODEX);
-	// codex's cacheWrite rate is 0, so the whole write is free -- and specifically NOT the invented
+	const result = reprice(quad({ cacheWrite: 10000, cacheWrite1h: 4000 }), GPT54);
+	// gpt-5.4's cacheWrite rate is 0, so the whole write is free -- and specifically NOT the invented
 	// premium (2.5 * 2 * 4000) / 1e6 that forwarding the source profile's 1h split would produce.
 	assert.equal(result.usd, 0);
 });
@@ -172,9 +193,9 @@ test("reprice never mutates the caller's quad", () => {
 // ── getPricedModel lookups ──────────────────────────────────────────────────────────────────────────────
 
 test("getPricedModel returns the pi-ai model for known pairs and null for everything else", () => {
-	const model = getPricedModel("openai-codex", "gpt-5.4");
+	const model = getPricedModel("openai", "gpt-5.4");
 	assert.equal(model.id, "gpt-5.4");
-	assert.equal(model.provider, "openai-codex");
+	assert.equal(model.provider, "openai");
 	assert.equal(getPricedModel("anthropic", "claude-not-a-model"), null);
 	assert.equal(getPricedModel(123, "gpt-5.4"), null);
 	assert.equal(getPricedModel("anthropic", {}), null);
@@ -184,14 +205,19 @@ test("getPricedModel returns the pi-ai model for known pairs and null for everyt
 
 // ── isZeroRated ─────────────────────────────────────────────────────────────────────────────────────────
 
-test("isZeroRated: opus false, kimi true, null/{}/costless false", () => {
+test("isZeroRated: opus false, qwen-token-plan true, kimi-for-coding false, null/{}/costless false", () => {
 	assert.equal(isZeroRated(getPricedModel("anthropic", "claude-opus-4-6")), false);
-	const kimi = listPricedModels().find((m) => m.provider === "kimi-coding");
-	assert.ok(kimi);
-	assert.equal(isZeroRated(kimi), true);
+	const qwen = listPricedModels().find((m) => m.provider === "qwen-token-plan");
+	assert.ok(qwen);
+	assert.equal(isZeroRated(qwen), true);
+	// A subscription provider whose table carries an implied price at 0.99.1 (issue #509).
+	assert.equal(isZeroRated(getPricedModel("kimi-coding", "kimi-for-coding")), false);
 	assert.equal(isZeroRated(null), false);
 	assert.equal(isZeroRated({}), false);
 	assert.equal(isZeroRated({ cost: {} }), false, "a cost table missing its rates is malformed, not free");
+	// All four base rates, not the two a reader would check first: a table with only a cache rate is priced.
+	assert.equal(isZeroRated({ cost: { input: 0, output: 0, cacheRead: 0.1, cacheWrite: 0 } }), false);
+	assert.equal(isZeroRated({ cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0.1 } }), false);
 });
 
 // ── piAiVersion ─────────────────────────────────────────────────────────────────────────────────────────
@@ -214,6 +240,6 @@ test("piAiVersion default path resolves the real pin -- a bump must update this 
 	const entry = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai"));
 	const realPackage = JSON.parse(readFileSync(join(dirname(entry), "..", "package.json"), "utf8"));
 	assert.equal(piAiVersion(), realPackage.version);
-	assert.equal(realPackage.version, "0.80.7", "pi-ai pin bumped: re-verify the pricing surface, then update this pin");
+	assert.equal(realPackage.version, "0.99.1", "pi-ai pin bumped: re-verify the pricing surface, then update this pin");
 	assert.equal(piAiVersion(), piAiVersion(), "cached: repeated calls agree");
 });

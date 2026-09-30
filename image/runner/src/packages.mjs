@@ -198,7 +198,7 @@ export function countPackageResources({ packageRoots = [], extensionPaths = [], 
  *
  * Exact name equality against the LOADED set, which makes this the one check in the system that is
  * not an approximation: doctor probes tier directories host-side and a dir name can lie (pi names a
- * skill `frontmatter.name || parentDirName` at the 0.80.7 pin, skills.js:221), but here the names
+ * skill `frontmatter.name || parentDirName`, skills.js:245 at the 0.99.1 pin), but here the names
  * come off the skills the loader materialised for THIS job, after every tier and override.
  *
  * A `disableModelInvocation` skill still counts as loaded -- it is absent from the system-prompt

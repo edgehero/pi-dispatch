@@ -32,7 +32,7 @@ Every dollar carries its class, rendered by one shared formatter — these marke
 | `$4.12`          | metered — the stream-time price pi-ai computed when the run happened |
 | `≥$4.12`         | a floor — some spend was unpriced/unresolved, the run fell back to the in-session meter (which cannot see subagent spend), or the run pre-dates the meter |
 | `plan:kimi`      | covered by a declared subscription — prepaid, **never shown as $0.00** |
-| `$0 (unrated)`   | a zero-rate provider with **no** declared subscription — unrated, never "free" |
+| `$0 (unrated)`   | a model the rate table prices at $0, with **no** declared subscription covering it: unrated, never "free" |
 | `~$4.12 est.`    | an estimate (what-if, API-equivalent, or a sum containing any estimate) |
 | `~~$4 seeded`    | seeded from no history — a band, never a point |
 | `—`              | there is no number behind this cell: a null typed value, such as a flow with no plan-covered rows (no api-equivalent) or a plan with no attributed runs (no amortized figure) |
@@ -53,8 +53,13 @@ plan's share of the month, and verdicts do not read SAVING just because the depl
 
 ## Declaring subscriptions
 
-Subscription-backed providers (`kimi-coding`, `zai-coding-cn`, …) ship all-zero rate tables, so their
-runs record `cost: 0` — prepaid, not free. The real price can only come from you: declare each plan in
+The rate tables pi ships never state a subscription plan's price. Some subscription providers ship
+all-zero tables (the `qwen-token-plan` and `xiaomi-token-plan` families), so their runs record `cost: 0`:
+prepaid, not free, and undeclared they read `$0 (unrated)`. Others (`kimi-coding`, `zai` and `zai-coding-cn`
+at the pinned pi; all three were all-zero before pi 0.99.1) carry an API-equivalent rate, so their runs
+record a cost you did not pay per token, and undeclared they read as that metered dollar figure. A
+declared plan reads `plan:<id>` either way, for runs recorded before the change and after it. The real
+price can only come from you: declare each plan in
 `subscriptions.json` (scaffolded by `pi-dispatch init` into the working directory; see
 `subscriptions.example.json`). Three routes point the admin at that file: the working-directory default,
 an explicit `PI_SUBSCRIPTIONS_FILE`, and the deployment pointer at

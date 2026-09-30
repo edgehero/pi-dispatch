@@ -71,6 +71,13 @@ RUN set -eu; \
 ENV GLAB_CHECK_UPDATE=false
 ENV GLAB_SEND_TELEMETRY=false
 
+# pi's own switch, for the same two reasons (issue #509). From pi 0.99 an interactive `pi` reports an install
+# ping, and PI_TELEMETRY also gates the attribution headers pi adds to OpenRouter, NVIDIA and Cloudflare
+# requests. A job never runs pi interactively and the runner forces this to "0" itself, over whatever reached
+# the container (image/runner/src/config.mjs, enforceTelemetryOff), so this line is for everything ELSE that
+# runs pi in this image: `pi-dispatch sandbox` re-opening a run with bash, verify-image.sh's `pi -p --help`.
+ENV PI_TELEMETRY=0
+
 
 # tea, the Forgejo/Gitea CLI, for forgejo jobs (issue #61). Same reason glab is here: `gh` speaks the
 # GitHub API and nothing else, so a forgejo job following the github envelope fails at its first
@@ -210,7 +217,7 @@ RUN chmod +x /entrypoint.sh \
 #
 # It must track the runner's pin in image/runner/package.json. The CI pin-check greps both, so they
 # cannot drift silently -- the same discipline the glab and gh pins get.
-ARG PI_VERSION=0.80.7
+ARG PI_VERSION=0.99.1
 LABEL dev.pi-dispatch.pi-version="${PI_VERSION}"
 
 # Which forges this image can actually SERVE -- read by the worker's pre-spend image preflight, on the same

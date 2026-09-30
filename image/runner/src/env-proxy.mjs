@@ -5,22 +5,36 @@ import { createRequire } from "node:module";
  *
  * With egress armed the worker gives the job `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` and `NODE_USE_ENV_PROXY=1`
  * (worker/src/egress.mjs), and the last one makes Node install an `EnvHttpProxyAgent` as the global dispatcher that
- * `fetch`, and so both provider SDKs, send through. Loading pi undoes that. pi 0.80.7 depends on npm `undici`
- * 8.5.0, whose module load replaces the shared global dispatcher (`Symbol.for("undici.globalDispatcher.1")`) with
- * its own wrapper around a plain Agent, and that one ignores the proxy variables. Measured on the job image (Node
- * 22.23.1) on an `--internal` network: a plain `fetch` reached the provider through the proxy (401 in 279 ms), and
- * the same `fetch` after `import("@earendil-works/pi-coding-agent")` went direct and died on `ENOTFOUND` in 11 ms.
- * Every egress-armed job ended at its first turn with `Connection error.`, on every venue.
+ * `fetch`, and so both provider SDKs, send through. Loading pi undoes that. pi depends on npm `undici` (8.5.0 at
+ * pi 0.80.7, 8.10.2 at the 0.99.1 pin), whose module load replaces the shared global dispatcher
+ * (`Symbol.for("undici.globalDispatcher.1")`) with its own wrapper around a plain Agent, and that one ignores the
+ * proxy variables. Measured on the job image (Node 22.23.1) on an `--internal` network at 0.80.7: a plain `fetch`
+ * reached the provider through the proxy (401 in 279 ms), and the same `fetch` after
+ * `import("@earendil-works/pi-coding-agent")` went direct and died on `ENOTFOUND` in 11 ms. Every egress-armed job
+ * ended at its first turn with `Connection error.`, on every venue. The 0.99.1 pin still drops it (env-proxy.test.mjs's
+ * control case).
  *
  * pi's own CLI repairs it with `configureHttpDispatcher()` (dist/core/http-dispatcher.js), but the runner starts pi
- * through `createAgentSession`, not the CLI, and that function is not exported (`exports` names only `.` and
- * `./rpc-entry`). So the runner does the same repair itself, with two deliberate differences:
+ * through `createAgentSession`, not the CLI, and that function is not exported (`exports` names `.`, `./rpc-entry`,
+ * and at 0.99.1 the source-only `./client` and `./experimental/plugin`). So the runner does the same repair itself,
+ * with the same `proxyTunnel: true` pi passes, and two deliberate differences:
  *
  *   - It uses the `undici` copy pi resolves, not one of its own. A second copy would be a second version to keep in
  *     step, and the dispatcher it installs is read through the shared symbol whichever copy wrote it.
  *   - It does not call `undici.install()`, which replaces the global `fetch` as well. pi does that because Node 26's
  *     bundled fetch mishandles compressed bodies through npm undici's dispatcher; the image runs Node 22, and without
  *     it the provider was reached through the proxy all the same (measured, with and without).
+ *
+ * Why `proxyTunnel: true` and not undici's default. From undici 8.7 an `EnvHttpProxyAgent` sends an `http://` origin
+ * to the proxy as a plain forward request (`GET http://host/ HTTP/1.1`) and only CONNECT-tunnels `https://`. pi's own
+ * dispatcher passes `proxyTunnel: true` to keep every origin on a CONNECT tunnel as before 8.7 (http-dispatcher.js,
+ * "Keep HTTP origins on CONNECT tunnels"), and the runner matches it so that provider traffic reaches the egress proxy
+ * exactly as it did at 0.80.7 and as it does under pi's own CLI. That matters for an operator-configured `http://`
+ * provider (a local gateway, an overlay models.json baseUrl): tunnelled, it arrives as `CONNECT host:80`, which
+ * deploy/egress-proxy.conf refuses (`deny CONNECT !SSL_ports`), the verdict it has always had; untunnelled it would
+ * arrive as a plain forward request, which the same file's `allow allowed` admits for a listed host, a silent
+ * widening of the policy by a dependency bump. Measured at the 0.99.1 pin: without the option the env-proxy test's
+ * CONNECT-only proxy saw no tunnel and answered the plain request 405.
  *
  * Only when `NODE_USE_ENV_PROXY` is "1", which is exactly what the worker emits with egress armed. Without it nothing is
  * installed and the job keeps whatever dispatcher pi gave it, as it always has. An operator who turned the policy off
@@ -44,7 +58,7 @@ export function restoreEnvProxyDispatcher({ env = process.env, loadUndici = load
 	// in PI_FORWARD_ENV while it is; forwarded only by an operator who turned the policy off for a proxy of their own.
 	if (env.NODE_USE_ENV_PROXY !== "1") return false;
 	const undici = loadUndici();
-	undici.setGlobalDispatcher(new undici.EnvHttpProxyAgent());
+	undici.setGlobalDispatcher(new undici.EnvHttpProxyAgent({ proxyTunnel: true }));
 	return true;
 }
 

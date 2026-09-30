@@ -59,9 +59,9 @@
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.80.7",
+    "@earendil-works/pi-coding-agent": "0.99.1",
     "@edgehero/pi-dispatch": "*",
     "esbuild": "^0.28.1",
-    "typebox": "1.1.38"
+    "typebox": "1.3.27"
   }
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assertPackagePathsExist, commandName, enforceOfflineMode, parseRunnerEnv } from "../src/config.mjs";
+import { assertPackagePathsExist, commandName, enforceOfflineMode, enforceTelemetryOff, jobSettings, parseRunnerEnv } from "../src/config.mjs";
 import { EXIT_POLICY } from "../src/outcome.mjs";
 
 const base = { PI_PROVIDER: "anthropic", PI_MODEL: "claude-x", PI_MAX_TURNS: "20" };
@@ -186,6 +186,33 @@ test("enforceOfflineMode sets PI_OFFLINE=1 and is idempotent", () => {
 		enforceOfflineMode(env);
 		assert.equal(env.PI_OFFLINE, "1", `PI_OFFLINE=${JSON.stringify(weak)} must be overwritten`);
 	}
+});
+
+test("enforceTelemetryOff pins PI_TELEMETRY to \"0\" whatever reached the container (issue #509)", () => {
+	// pi reads PI_TELEMETRY as an OVERRIDE of the enableInstallTelemetry setting, so a forwarded "1" would undo
+	// jobSettings' false; the canonical off value is written unconditionally.
+	for (const value of [undefined, "1", "true", "yes", "", "0", "no"]) {
+		const env = value === undefined ? {} : { PI_TELEMETRY: value };
+		enforceTelemetryOff(env);
+		assert.equal(env.PI_TELEMETRY, "0", `PI_TELEMETRY=${JSON.stringify(value)} must end as "0"`);
+	}
+});
+
+test("jobSettings pins retry, turns cache warming and telemetry off, and lets PI_RETRY_* win (issue #509)", () => {
+	const settings = jobSettings({ maxRetries: 2, baseDelayMs: 2000 });
+	assert.deepEqual(settings, {
+		retry: { enabled: true, maxAgentDelayMs: 60_000, maxRetries: 2, baseDelayMs: 2000 },
+		cacheWarming: "off",
+		enableInstallTelemetry: false,
+	});
+	// The spread comes last, so a future knob for the delay cap wins over the pinned default...
+	assert.equal(jobSettings({ maxAgentDelayMs: 5 }).retry.maxAgentDelayMs, 5);
+	// The same spread would let a caller turn retry off (`enabled` sits in the same object). What stops that is
+	// parseRunnerEnv producing only these two keys, pinned here so widening it is a conscious change.
+	assert.deepEqual(Object.keys(parseRunnerEnv({ ...base }).retry).sort(), ["baseDelayMs", "maxRetries"]);
+	// A fresh object each call: SettingsManager.inMemory structuredClones it, but a shared one would still be a
+	// cross-job hazard for any future caller that does not.
+	assert.notEqual(jobSettings({}).retry, jobSettings({}).retry);
 });
 
 test("PI_SESSION_FILE is optional: unset is null, so an unarmed job is byte-identical to today", () => {

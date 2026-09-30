@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { test } from "node:test";
 import {
 	createUsageMeter,
 	installProcessUsageMeter,
 	makeHardStopStream,
 	METER_PROVIDER_PREFIX,
-	PROBE_API,
 	resolvePiAiCompat,
+	RUNTIME_RESULT_METHODS,
+	RUNTIME_STREAM_METHODS,
+	VIRTUAL_MODEL_API,
+	wrapModelRuntime,
 	wrapProviderStreams,
 } from "../src/usage-meter.mjs";
 
@@ -396,18 +400,251 @@ test("the worst-case exit line fits the worker's 8 KiB recovery tail with headro
 });
 
 // ---------------------------------------------------------------------------------------------
-// wrapProviderStreams
+// observeResult (classify, generateImages)
 // ---------------------------------------------------------------------------------------------
 
-/** A `Models`-shaped stand-in for pi-ai's builtinModels() catalog. */
-function fakeCatalog(models) {
+test("observeResult counts a promise-returning call and records its result's usage", async () => {
+	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
+	let settle;
+	const promise = new Promise((resolve) => {
+		settle = resolve;
+	});
+	assert.equal(meter.observeResult(promise, { sessionId: "root", provider: "p", modelId: "m" }), promise, "the promise is returned untouched");
+	assert.equal(meter.state.calls, 1);
+	assert.equal(meter.state.unresolved, 1, "unsettled until the result arrives");
+	settle({ usage: usage({ input: 4, output: 1, cost: 0.2 }) });
+	await flush();
+	assert.equal(meter.state.unresolved, 0);
+	assert.equal(meter.state.rootTotal, 5);
+	assert.equal(meter.usageSnapshot().models[0].model, "m");
+	// A result without usage (a local classifier) is COUNTED as unpriced, never priced at zero.
+	meter.observeResult(Promise.resolve({ answers: {} }), {});
+	await flush();
+	assert.equal(meter.state.calls, 2);
+	assert.equal(meter.state.unpriced, 1);
+	// A rejection is swallowed and still clears unresolved.
+	meter.observeResult(Promise.reject(new Error("boom")), {});
+	await flush();
+	assert.equal(meter.state.unresolved, 0);
+});
+
+// ---------------------------------------------------------------------------------------------
+// wrapModelRuntime -- THE choke point at 0.99.1
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * A ModelRuntime-shaped class. The methods read `this.tag`, so a wrapper that dropped `this` fails here, and
+ * streamSimple re-enters itself for a virtual model exactly as the real one does (model-runtime.js:489-509).
+ */
+function fakeRuntimeClass() {
+	const calls = [];
+	class FakeRuntime {
+		constructor(tag = "rt") {
+			this.tag = tag;
+		}
+		streamSimple(model, context, options) {
+			calls.push({ method: "streamSimple", tag: this.tag, model: model.id });
+			if (model.api === VIRTUAL_MODEL_API) {
+				// Like the real one: the routed call's stream is a NEW object (lazyStream) that forwards the
+				// physical call's result, so identity dedupe cannot hide a double count here.
+				const inner = this.streamSimple({ ...PHYSICAL }, context, options);
+				const outer = new FakeStream();
+				inner.result().then((message) => outer.end(message));
+				return outer;
+			}
+			return streamOf(usage({ input: 10, output: 5, cost: 0.5 }));
+		}
+		stream(model) {
+			calls.push({ method: "stream", tag: this.tag, model: model.id });
+			return streamOf(usage({ input: 1, output: 1 }));
+		}
+		streamDeferred(model) {
+			calls.push({ method: "streamDeferred", tag: this.tag, model: model.id });
+			return streamOf(usage({ input: 2, output: 2 }));
+		}
+		async classify(model) {
+			calls.push({ method: "classify", tag: this.tag, model: model.id });
+			return { answers: {}, usage: usage({ input: 3, output: 0, cost: 0.01 }), stopReason: "stop" };
+		}
+		async generateImages(model) {
+			calls.push({ method: "generateImages", tag: this.tag, model: model.id });
+			return { output: [], usage: usage({ input: 0, output: 7, cost: 0.07 }), stopReason: "stop" };
+		}
+		getModel() {
+			return null;
+		}
+	}
+	return { FakeRuntime, calls };
+}
+const PHYSICAL = { api: "anthropic-messages", provider: "anthropic", id: "claude-physical" };
+const VIRTUAL = { api: VIRTUAL_MODEL_API, provider: "router", id: "auto" };
+
+test("the runtime layer counts every model-calling method, with sessionId and the dispatched model, and keeps `this`", async () => {
+	const { FakeRuntime, calls } = fakeRuntimeClass();
+	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
+	const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter });
+	try {
+		assert.deepEqual(layer.methods, [...RUNTIME_STREAM_METHODS, ...RUNTIME_RESULT_METHODS]);
+		const runtime = new FakeRuntime("mine");
+		runtime.streamSimple(MODEL, [], { sessionId: "root" });
+		runtime.stream(MODEL, [], { sessionId: "child" });
+		// streamDeferred's options are its THIRD argument (model, handle, options), like the other two.
+		runtime.streamDeferred(MODEL, { id: "h" }, { sessionId: "child" });
+		await runtime.classify(MODEL, {}, { sessionId: "child" });
+		await runtime.generateImages(MODEL, {}, {});
+		await flush();
+
+		assert.deepEqual(calls.map((c) => c.tag), ["mine", "mine", "mine", "mine", "mine"], "every original ran with its own `this`");
+		assert.equal(meter.state.calls, 5);
+		assert.equal(meter.state.rootTotal, 15);
+		assert.equal(meter.state.otherTotal, 2 + 4 + 3, "stream, streamDeferred and classify carried the child's id");
+		assert.equal(meter.state.looseTotal, 7, "generateImages carried none");
+		assert.equal(meter.state.cost, 0.5 + 0.01 + 0.07);
+		const [row] = meter.usageSnapshot().models;
+		assert.deepEqual([row.provider, row.model, row.calls], [MODEL.provider, MODEL.id, 5], "the ledger names the model dispatched on");
+	} finally {
+		layer.restore();
+	}
+});
+
+test("a virtual model is counted ONCE, as the physical model it routed to", async () => {
+	// ModelRuntime.streamSimple routes a pi-virtual model and calls this.streamSimple again with the physical
+	// model; counting both would double every routed request and put a model nobody billed in the ledger.
+	const { FakeRuntime, calls } = fakeRuntimeClass();
+	const meter = createUsageMeter({ maxTokens: null });
+	const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter });
+	try {
+		new FakeRuntime().streamSimple(VIRTUAL, [], { sessionId: "s" });
+		await flush();
+		assert.deepEqual(calls.map((c) => c.model), ["auto", "claude-physical"], "the premise: the virtual call re-entered");
+		assert.equal(meter.state.calls, 1);
+		assert.deepEqual(meter.usageSnapshot().models.map((r) => r.model), ["claude-physical"]);
+	} finally {
+		layer.restore();
+	}
+});
+
+test("past the cap the runtime layer's brake answers every method without calling the provider", async () => {
+	const { FakeRuntime, calls } = fakeRuntimeClass();
+	const meter = createUsageMeter({ maxTokens: 10 });
+	const hardStop = makeHardStopStream({ createStream: () => new FakeStream(), message: "cap" });
+	const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter, hardStop });
+	try {
+		meter.record(usage({ total: 99 }));
+		const runtime = new FakeRuntime();
+		for (const method of RUNTIME_STREAM_METHODS) {
+			const message = await runtime[method](MODEL, [], {}).result();
+			assert.equal(message.stopReason, "aborted", `${method}: an abort, never an error pi would retry`);
+			assert.equal(message.usage.totalTokens, 0);
+		}
+		const classified = await runtime.classify(MODEL, {}, {});
+		assert.deepEqual([classified.stopReason, classified.usage.totalTokens, classified.model], ["aborted", 0, MODEL.id]);
+		assert.deepEqual(classified.answers, {});
+		const images = await runtime.generateImages(MODEL, {}, {});
+		assert.deepEqual([images.stopReason, images.usage.cost.total], ["aborted", 0]);
+		assert.deepEqual(images.output, []);
+		// A virtual model is braked too: past the cap nothing is dispatched, routed or not.
+		await runtime.streamSimple(VIRTUAL, [], {}).result();
+		assert.equal(calls.length, 0, "no provider may be reached once the cap is blown");
+		assert.equal(meter.state.calls, 0, "a braked call is not a call");
+		assert.equal(meter.state.total, 99);
+	} finally {
+		layer.restore();
+	}
+});
+
+test("an uncapped runtime layer never brakes, even after a breach", () => {
+	const { FakeRuntime, calls } = fakeRuntimeClass();
+	const meter = createUsageMeter({ maxTokens: 10 });
+	const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter, hardStop: null });
+	try {
+		meter.record(usage({ total: 99 }));
+		new FakeRuntime().streamSimple(MODEL, [], {});
+		assert.equal(calls.length, 1, "no hard-stop stream means the call goes through; the session abort is the other half");
+	} finally {
+		layer.restore();
+	}
+});
+
+test("covers() is the acceptance test: an instance of the class, with no own method shadowing a wrapper", () => {
+	const { FakeRuntime } = fakeRuntimeClass();
+	const { FakeRuntime: Other } = fakeRuntimeClass();
+	const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter: createUsageMeter({}) });
+	try {
+		assert.equal(layer.covers(new FakeRuntime()), true);
+		assert.equal(layer.covers(new Other()), false, "an instance of ANOTHER copy of the class dispatches around us");
+		const shadowed = new FakeRuntime();
+		shadowed.streamSimple = FakeRuntime.prototype.streamSimple.bind(shadowed);
+		assert.equal(layer.covers(shadowed), false, "an own property wins over the prototype");
+		assert.equal(layer.covers(null), false);
+	} finally {
+		layer.restore();
+	}
+});
+
+test("restore() puts the originals back, and never tears a later layer out from under itself", async () => {
+	const { FakeRuntime } = fakeRuntimeClass();
+	const original = FakeRuntime.prototype.streamSimple;
+	const first = createUsageMeter({});
+	const firstLayer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter: first });
+	assert.notEqual(FakeRuntime.prototype.streamSimple, original);
+	firstLayer.restore();
+	assert.equal(FakeRuntime.prototype.streamSimple, original, "a lone layer restores exactly");
+
+	const inner = createUsageMeter({});
+	const outer = createUsageMeter({});
+	const innerLayer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter: inner });
+	const outerLayer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter: outer });
+	const outerWrapper = FakeRuntime.prototype.streamSimple;
+	innerLayer.restore();
+	assert.equal(FakeRuntime.prototype.streamSimple, outerWrapper, "the outer layer stays installed");
+	new FakeRuntime().streamSimple(MODEL, [], {});
+	await flush();
+	assert.equal(outer.state.calls, 1);
+	assert.equal(inner.state.calls, 0, "the restored inner layer passes through without counting");
+	outerLayer.restore();
+	// What is left is the inner layer's wrapper, switched to pass-through: calls reach the original and
+	// neither meter counts them.
+	new FakeRuntime().streamSimple(MODEL, [], {});
+	await flush();
+	assert.deepEqual([inner.state.calls, outer.state.calls], [0, 1]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// wrapProviderStreams -- the compat half, for legacy extension calls
+// ---------------------------------------------------------------------------------------------
+
+/** A builtin provider as pi-ai's catalog holds it: its models, and its own stream functions. */
+function fakeProvider(id, models) {
+	const calls = [];
+	return {
+		id,
+		calls,
+		getModels: () => models,
+		streamSimple(model, context, options) {
+			calls.push({ kind: "streamSimple", model, options });
+			return streamOf(usage({ input: 10, output: 5, total: 15, cost: 0.5 }));
+		},
+		stream(model, context, options) {
+			calls.push({ kind: "stream", model, options });
+			return streamOf(usage({ input: 10, output: 5, total: 15, cost: 0.5 }));
+		},
+	};
+}
+
+/** A `Models`-shaped stand-in for pi-ai's builtinModels() catalog collection. */
+function fakeCatalog(providers) {
 	const calls = [];
 	return {
 		calls,
-		getModel: (provider, id) => models.find((m) => m.provider === provider && m.id === id),
+		getProvider: (id) => providers.find((p) => p.id === id),
 		streamSimple(model, context, options) {
-			calls.push({ model, context, options });
-			return streamOf(usage({ input: 10, output: 5, total: 15, cost: 0.5 }));
+			calls.push({ kind: "streamSimple", model, options });
+			return streamOf(usage({ input: 20, output: 5, total: 25, cost: 0.7 }));
+		},
+		stream(model, context, options) {
+			calls.push({ kind: "stream", model, options });
+			return streamOf(usage({ input: 20, output: 5, total: 25, cost: 0.7 }));
 		},
 	};
 }
@@ -415,74 +652,117 @@ function fakeCatalog(models) {
 /** A registry-entry-shaped stand-in for a registered api provider. */
 function fakeInner() {
 	const calls = [];
-	return {
-		api: MODEL.api,
-		calls,
-		streamSimple(model, context, options) {
-			calls.push({ model, context, options });
-			return streamOf(usage({ input: 1, output: 2, total: 3, cost: 0.1 }));
-		},
+	const streams = (kind) => (model, context, options) => {
+		calls.push({ kind, model, context, options });
+		return streamOf(usage({ input: 1, output: 2, total: 3, cost: 0.1 }));
 	};
+	return { api: MODEL.api, calls, streamSimple: streams("streamSimple"), stream: streams("stream") };
 }
 
-test("routes a catalog model to the builtin catalog, not to the registry entry", async () => {
-	// Overriding a builtin api flips compat's shouldUseBuiltinModels to false, so compat hands us
-	// catalog models it would otherwise have served itself. Two providers' auth layers live only on
-	// that catalog path, so the wrapper has to take it.
+test("routes a model of a builtin provider to that provider's own stream, as compat itself would", async () => {
+	// Overriding a builtin api makes compat's getBuiltinProviderForModel answer undefined, so compat hands us
+	// the models it would otherwise have sent to its builtin provider (pi-ai 0.99.1 compat.js). The decision is
+	// the PROVIDER's: any model of it on the same api, so an operator's extra model id under a builtin
+	// provider still takes the provider's path.
 	const meter = createUsageMeter({ maxTokens: null });
-	const fallbackModels = fakeCatalog([MODEL]);
+	const provider = fakeProvider("anthropic", [MODEL]);
+	const catalog = fakeCatalog([provider]);
 	const inner = fakeInner();
-	const wrapper = wrapProviderStreams({ inner, fallbackModels, meter });
+	const wrapper = wrapProviderStreams({ inner, fallbackModels: catalog, meter });
 
-	const stream = wrapper.streamSimple(MODEL, [], { sessionId: "child-9" });
+	const stream = wrapper.streamSimple({ ...MODEL, id: "operator-added" }, [], { sessionId: "child-9" });
 	await flush();
 
-	assert.equal(fallbackModels.calls.length, 1);
+	assert.equal(provider.calls.length, 1);
+	assert.equal(catalog.calls.length, 0, "a non-cloudflare builtin skips the collection's auth layer, exactly as compat does");
 	assert.equal(inner.calls.length, 0);
-	assert.equal(fallbackModels.calls[0].options.sessionId, "child-9", "options must pass through intact");
+	assert.equal(provider.calls[0].options.sessionId, "child-9", "options must pass through intact");
 	assert.equal(meter.state.total, 15);
 	assert.equal(meter.state.otherTotal, 15, "sessionId from StreamOptions is what makes attribution work");
 	assert.equal(typeof stream.result, "function");
 });
 
-test("routes a non-catalog model to the registry entry", async () => {
+test("routes a cloudflare model through the catalog collection, whose auth layer substitutes its placeholders", async () => {
 	const meter = createUsageMeter({ maxTokens: null });
-	const custom = { api: "openai-completions", provider: "acme", id: "acme-1" };
-	const fallbackModels = fakeCatalog([MODEL]);
+	const model = { api: "openai-completions", provider: "cloudflare-workers-ai", id: "cf-1" };
+	const provider = fakeProvider("cloudflare-workers-ai", [model]);
+	const catalog = fakeCatalog([provider]);
 	const inner = fakeInner();
-	const wrapper = wrapProviderStreams({ inner, fallbackModels, meter });
-
-	wrapper.streamSimple(custom, [], {});
+	const wrapper = wrapProviderStreams({ inner, fallbackModels: catalog, meter });
+	wrapper.streamSimple(model, [], {});
+	wrapper.stream(model, [], {});
 	await flush();
-
-	assert.equal(inner.calls.length, 1);
-	assert.equal(fallbackModels.calls.length, 0);
-	assert.equal(meter.state.total, 3);
-	assert.equal(meter.state.looseTotal, 3);
+	assert.deepEqual(catalog.calls.map((c) => c.kind), ["streamSimple", "stream"]);
+	assert.equal(provider.calls.length, 0);
+	assert.equal(inner.calls.length, 0);
+	assert.equal(meter.state.total, 50);
 });
 
-test("a catalog hit on a DIFFERENT api still goes to the registry entry", async () => {
-	// An operator override can repoint a catalog model at another api; compat compares apis, not ids.
+test("routes a non-catalog provider, or a catalog provider with no model on this api, to the registry entry", async () => {
 	const meter = createUsageMeter({ maxTokens: null });
-	const fallbackModels = fakeCatalog([{ ...MODEL, api: "openai-completions" }]);
+	const provider = fakeProvider("anthropic", [{ ...MODEL, api: "openai-completions" }]);
+	const catalog = fakeCatalog([provider]);
 	const inner = fakeInner();
-	wrapProviderStreams({ inner, fallbackModels, meter }).streamSimple(MODEL, [], {});
+	const wrapper = wrapProviderStreams({ inner, fallbackModels: catalog, meter });
+	wrapper.streamSimple({ api: "openai-completions", provider: "acme", id: "acme-1" }, [], {});
+	// An operator override can repoint a catalog provider's model at another api; compat compares apis.
+	wrapper.streamSimple(MODEL, [], {});
 	await flush();
-	assert.equal(inner.calls.length, 1);
-	assert.equal(fallbackModels.calls.length, 0);
+	assert.equal(inner.calls.length, 2);
+	assert.equal(provider.calls.length + catalog.calls.length, 0);
+	assert.equal(meter.state.looseTotal, 6);
 });
 
-test("with no catalog loaded everything falls back to the registry entry", async () => {
+test("with no catalog loaded everything falls back to the registry entry, stream and streamSimple alike", async () => {
 	const meter = createUsageMeter({ maxTokens: null });
 	const inner = fakeInner();
-	wrapProviderStreams({ inner, fallbackModels: null, meter }).streamSimple(MODEL, [], {});
+	const wrapper = wrapProviderStreams({ inner, fallbackModels: null, meter });
+	wrapper.streamSimple(MODEL, [], {});
+	wrapper.stream(MODEL, [], {});
 	await flush();
-	assert.equal(inner.calls.length, 1);
+	assert.deepEqual(inner.calls.map((c) => c.kind), ["streamSimple", "stream"]);
+	assert.equal(meter.state.calls, 2, "compat's stream() is a model call too: registerApiProvider wraps both");
+});
+
+test("a compat call made inside the same install's runtime dispatch is routed but not counted twice", async () => {
+	// Trap #5: pi composes a provider with no builtin base so that its stream, INSIDE ModelRuntime.streamSimple
+	// and after awaits, resolves the api in the compat registry. The runtime half has already counted that
+	// call; the shared AsyncLocalStorage is how the compat wrapper knows.
+	const meter = createUsageMeter({ maxTokens: null });
+	const dispatch = new AsyncLocalStorage();
+	const inner = fakeInner();
+	const compatEntry = wrapProviderStreams({ inner, fallbackModels: null, meter, dispatch });
+	class ComposingRuntime {
+		streamSimple(model, context, options) {
+			const outer = new FakeStream();
+			(async () => {
+				await flush(); // the lazyStream setup's awaits: the marker must survive them
+				const message = await compatEntry.streamSimple(model, context, options).result();
+				outer.end(message);
+			})();
+			return outer;
+		}
+		stream() {
+			return streamOf(usage({}));
+		}
+	}
+	const layer = wrapModelRuntime({ ModelRuntime: ComposingRuntime, meter, dispatch });
+	try {
+		await new ComposingRuntime().streamSimple(MODEL, [], {}).result();
+		await flush();
+		assert.equal(inner.calls.length, 1, "the composed call still reached its provider");
+		assert.equal(meter.state.calls, 1, "counted once, by the runtime half");
+		assert.equal(meter.state.total, 3);
+		// Outside any runtime dispatch the same entry counts, as a legacy extension call must.
+		compatEntry.streamSimple(MODEL, [], {});
+		await flush();
+		assert.equal(meter.state.calls, 2);
+	} finally {
+		layer.restore();
+	}
 });
 
 test("hands the meter the model identity compat dispatched on, so the ledger row is never a guess", async () => {
-	// The wrapper is the ONE place the full Model object and the stream co-exist, which is why the
-	// ledger's (provider, model) pair is read here and not parsed back out of the settled message.
 	const meter = createUsageMeter({ maxTokens: null });
 	const inner = fakeInner();
 	wrapProviderStreams({ inner, fallbackModels: null, meter }).streamSimple(MODEL, [], { sessionId: "s1" });
@@ -494,12 +774,13 @@ test("hands the meter the model identity compat dispatched on, so the ledger row
 	assert.equal(row.calls, 1);
 });
 
-test("after a breach the hard stop replaces the call entirely", async () => {
+test("after a breach the compat half's hard stop replaces the call entirely", async () => {
 	const meter = createUsageMeter({ maxTokens: 10 });
-	const fallbackModels = fakeCatalog([MODEL]);
+	const provider = fakeProvider("anthropic", [MODEL]);
+	const catalog = fakeCatalog([provider]);
 	const inner = fakeInner();
 	const hardStop = makeHardStopStream({ createStream: () => new FakeStream(), message: "cap" });
-	const wrapper = wrapProviderStreams({ inner, fallbackModels, meter, hardStop });
+	const wrapper = wrapProviderStreams({ inner, fallbackModels: catalog, meter, hardStop });
 
 	meter.record(usage({ total: 99 })); // breach
 	assert.equal(meter.state.breached, true);
@@ -507,8 +788,7 @@ test("after a breach the hard stop replaces the call entirely", async () => {
 	const stream = wrapper.streamSimple(MODEL, [], { sessionId: "child-1" });
 	const message = await stream.result();
 
-	assert.equal(inner.calls.length, 0, "no provider may be reached once the cap is blown");
-	assert.equal(fallbackModels.calls.length, 0);
+	assert.equal(inner.calls.length + provider.calls.length + catalog.calls.length, 0, "no provider may be reached once the cap is blown");
 	// "aborted", not "error": pi's isRetryableAssistantError returns false unless stopReason is
 	// "error", so this terminal message cannot spin pi's auto-retry into paid retries.
 	assert.equal(message.stopReason, "aborted");
@@ -591,25 +871,27 @@ test("an unresolvable package yields no candidate rather than throwing", () => {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * A pi-ai copy: a module-level api-provider registry plus the compat exports we touch. The point of
- * the fixture is that a ModelRegistry writes to exactly ONE of these, which is the whole reason the
- * installer probes instead of trusting a resolved path.
+ * A pi-ai compat copy: a module-level api-provider registry plus the compat exports we touch. Two of these
+ * exist on a dev box and only ONE is the module pi hands its extensions, which is the whole reason the
+ * installer checks identity instead of trusting a resolved path.
  */
 function fakeCopy(apis = []) {
 	const registry = new Map();
 	const seedBuiltins = () => {
-		for (const api of apis) registry.set(api, { api, streamSimple: () => streamOf(usage({ total: 1 })) });
+		for (const api of apis) registry.set(api, { api, streamSimple: () => streamOf(usage({ total: 1 })), stream: () => streamOf(usage({ total: 1 })) });
 	};
 	seedBuiltins();
 	return {
 		registry,
 		// resetApiProviders(): clears every registration, then re-registers the builtins as FRESH
-		// objects. This is what AgentSession.reload() triggers, and why the meter must be re-armable.
+		// objects. This is what AgentSession.reload() triggers, and why the compat half must be re-armable.
 		reset() {
 			registry.clear();
 			seedBuiltins();
 		},
 		module: {
+			// Like the real one: every registration stores a FRESH provider object, filed under a sourceId.
+			registerApiProvider: (provider, sourceId) => registry.set(provider.api, { api: provider.api, stream: provider.stream, streamSimple: provider.streamSimple, sourceId }),
 			getApiProvider: (api) => registry.get(api) ?? null,
 			getApiProviders: () => [...registry.values()],
 			createAssistantMessageEventStream: () => new FakeStream(),
@@ -617,25 +899,13 @@ function fakeCopy(apis = []) {
 	};
 }
 
-/** A ModelRegistry stand-in bound to exactly one copy, as the real one is bound to the nested copy. */
-function fakeModelRegistry(copy) {
-	const calls = [];
-	return {
-		calls,
-		registerProvider(name, config) {
-			calls.push({ name, config });
-			// The real registry re-wraps into a NEW provider object on every registration.
-			copy.registry.set(config.api, { api: config.api, streamSimple: config.streamSimple });
-		},
-	};
-}
-
 /** The sibling the installer loads for builtinModels(), resolved relative to the accepted compat url. */
 const NESTED_PROVIDERS = new URL("./providers/all.js", NESTED_COMPAT).href;
 
-function installArgs({ copy, registryCopy = copy, ...rest }) {
+function installArgs({ copy, extensionCopy = copy, ...rest }) {
+	const { FakeRuntime } = fakeRuntimeClass();
 	return {
-		modelRegistry: fakeModelRegistry(registryCopy),
+		ModelRuntime: FakeRuntime,
 		meter: createUsageMeter({ maxTokens: null }),
 		resolve: fakeResolve({
 			"@earendil-works/pi-coding-agent": AGENT_ENTRY,
@@ -650,13 +920,15 @@ function installArgs({ copy, registryCopy = copy, ...rest }) {
 			error.code = "ERR_MODULE_NOT_FOUND";
 			throw error;
 		},
+		// What pi hands an extension for a bare pi-ai import: the oracle the compat half is accepted against.
+		loadExtensionModules: async () => ({ "@earendil-works/pi-ai": extensionCopy?.module }),
 		rearmMs: 60_000,
 		platform: "darwin",
 		...rest,
 	};
 }
 
-test("wraps every api the accepted copy has registered, and never the probe", async () => {
+test("installs the runtime half and the compat half, and says so on one line", async () => {
 	const copy = fakeCopy(["anthropic-messages", "openai-completions"]);
 	const args = installArgs({ copy });
 	const logged = [];
@@ -664,31 +936,21 @@ test("wraps every api the accepted copy has registered, and never the probe", as
 	handle.uninstall();
 
 	assert.equal(handle.ok, true);
+	assert.deepEqual(handle.methods, [...RUNTIME_STREAM_METHODS, ...RUNTIME_RESULT_METHODS]);
 	assert.equal(handle.tag, "nested");
+	assert.equal(handle.module, copy.module);
 	assert.deepEqual(handle.apis, ["anthropic-messages", "openai-completions"]);
 	assert.equal(handle.rearms, 0);
-	assert.equal(
-		copy.registry.has(PROBE_API),
-		true,
-		"the probe stays registered: unregisterProvider() calls refresh(), which would wipe the wrappers",
-	);
-	assert.equal(
-		args.modelRegistry.calls.some((c) => c.config.api === PROBE_API && c.name.startsWith(METER_PROVIDER_PREFIX)),
-		false,
-		"the probe api must never be wrapped",
-	);
 	for (const api of handle.apis) {
-		assert.equal(
-			args.modelRegistry.calls.some((c) => c.name === `${METER_PROVIDER_PREFIX}:${api}`),
-			true,
-		);
+		assert.equal(copy.registry.get(api).sourceId, `${METER_PROVIDER_PREFIX}:${api}`, "one registration per api id, under our sourceId");
 	}
 	assert.deepEqual(logged, [
 		{
 			event: "usage_meter",
 			fields: {
 				ok: true,
-				tag: "nested",
+				methods: [...RUNTIME_STREAM_METHODS, ...RUNTIME_RESULT_METHODS],
+				compat: "nested",
 				apis: ["anthropic-messages", "openai-completions"],
 				// This fixture ships no providers/all.js and the meter is uncapped, so BOTH degradations
 				// are present -- and both are stated. Reporting a bare ok:true here is the exact failure
@@ -714,7 +976,7 @@ test("a healthy meter reports its catalog and its brake as present", async () =>
 		meter: createUsageMeter({ maxTokens: 1000 }),
 		load: async (url) => {
 			if (url === NESTED_COMPAT) return copy.module;
-			if (url === NESTED_PROVIDERS) return { builtinModels: () => fakeCatalog([MODEL]) };
+			if (url === NESTED_PROVIDERS) return { builtinModels: () => fakeCatalog([]) };
 			throw new Error(`no such module: ${url}`);
 		},
 		log: (event, fields) => logged.push({ event, fields }),
@@ -723,18 +985,18 @@ test("a healthy meter reports its catalog and its brake as present", async () =>
 
 	assert.deepEqual(logged[0].fields, {
 		ok: true,
-		tag: "nested",
+		methods: [...RUNTIME_STREAM_METHODS, ...RUNTIME_RESULT_METHODS],
+		compat: "nested",
 		apis: ["anthropic-messages"],
 		fallback: true,
 		capped: true,
 		brake: true,
 	});
 	assert.equal("fallbackError" in logged[0].fields, false, "a healthy load must not report a reason");
+	assert.equal("compatError" in logged[0].fields, false);
 });
 
 test("a sibling that loads but exposes no builtinModels() is reported, not passed off as healthy", async () => {
-	// The pin-bump shape: providers/all.js still resolves, its export is gone. Identical loss to a
-	// failed load, so it must not read as a clean one.
 	const copy = fakeCopy(["anthropic-messages"]);
 	const logged = [];
 	const handle = await installProcessUsageMeter({
@@ -770,37 +1032,14 @@ test("a cap with no stream factory is logged as capped-but-brakeless", async () 
 	assert.equal(logged[0].fields.brake, false);
 });
 
-test("teardown reports the re-arm count, so a post-reset unmetered window is inferable", async () => {
-	// The gap: resetApiProviders() wipes the wrappers and replays nothing, so a provider call landing
-	// before the next poll is metered NOWHERE and the totals simply come out low. rearms > 0 on this
-	// line is the only evidence such a window existed; rearmMs is how wide it could have been.
-	const copy = fakeCopy(["anthropic-messages", "openai-completions"]);
-	const logged = [];
-	const handle = await installProcessUsageMeter({
-		...installArgs({ copy }),
-		log: (event, fields) => logged.push({ event, fields }),
-	});
-
-	copy.reset();
-	handle.arm();
-	handle.uninstall();
-	handle.uninstall(); // idempotent: a second teardown must not double the record
-
-	const teardown = logged.filter((entry) => entry.event === "usage_meter_teardown");
-	assert.equal(teardown.length, 1);
-	assert.deepEqual(teardown[0].fields, { rearms: 2, apis: 2, rearmMs: 60_000 });
-});
-
-test("rejects a copy whose registry cannot see the probe and advances to the next candidate", async () => {
-	// The exact failure this module exists to prevent: the hoisted copy imports cleanly, registers
-	// cleanly, and meters nothing, because the ModelRegistry writes to the nested copy.
+test("the compat copy is accepted by IDENTITY with the one pi hands extensions, never by path", async () => {
+	// The exact failure trap #1 names: the nested copy imports cleanly and has every export, and is still
+	// the wrong one when pi hands its extensions another. Here the extension-facing module is the HOISTED
+	// fixture, so the nested one must be rejected and the hoisted one accepted.
 	const nested = fakeCopy(["anthropic-messages"]);
 	const hoisted = fakeCopy(["anthropic-messages"]);
-	const modelRegistry = fakeModelRegistry(hoisted); // bound to the WRONG copy for the nested candidate
-
 	const handle = await installProcessUsageMeter({
-		...installArgs({ copy: nested }),
-		modelRegistry,
+		...installArgs({ copy: nested, extensionCopy: hoisted }),
 		load: async (url) => {
 			if (url === NESTED_COMPAT) return nested.module;
 			if (url === HOISTED_COMPAT) return hoisted.module;
@@ -810,41 +1049,127 @@ test("rejects a copy whose registry cannot see the probe and advances to the nex
 	handle.uninstall();
 
 	assert.equal(handle.ok, true);
-	assert.equal(handle.tag, "hoisted", "acceptance is decided by mutation probe, not by resolved path");
-	assert.equal(nested.registry.has(`${METER_PROVIDER_PREFIX}`), false);
-	assert.deepEqual(handle.apis, ["anthropic-messages"]);
+	assert.equal(handle.tag, "hoisted", "acceptance is decided by identity, not by resolved path");
+	assert.equal(nested.registry.get("anthropic-messages").sourceId, undefined, "the rejected copy is left alone");
+	assert.equal(hoisted.registry.get("anthropic-messages").sourceId, `${METER_PROVIDER_PREFIX}:anthropic-messages`);
 });
 
-test("returns ok:false when no candidate can be proven, so the caller can fall back", async () => {
+test("no provable compat copy degrades the meter LOUDLY and leaves the runtime half metering", async () => {
+	// The compat half serves legacy extension calls only; a session's own calls go through ModelRuntime. So
+	// losing it is `compat: false` with a reason on the line, never ok:false (which would drop the whole job
+	// to the per-session bus meter) and never a silent ok:true either.
 	const blind = fakeCopy(["anthropic-messages"]);
-	const visible = fakeCopy([]);
 	const logged = [];
+	const meter = createUsageMeter({ maxTokens: 1000, rootSessionId: "root" });
+	const args = installArgs({ copy: blind, extensionCopy: fakeCopy([]) });
 	const handle = await installProcessUsageMeter({
-		...installArgs({ copy: blind }),
-		modelRegistry: fakeModelRegistry(visible), // writes somewhere neither candidate can see
+		...args,
+		meter,
 		load: async (url) => {
 			if (url === NESTED_COMPAT || url === HOISTED_COMPAT) return blind.module;
 			throw new Error(`no such module: ${url}`);
 		},
 		log: (event, fields) => logged.push({ event, fields }),
 	});
-
-	assert.equal(handle.ok, false);
-	assert.doesNotThrow(() => handle.arm());
-	assert.doesNotThrow(() => handle.uninstall());
-	assert.equal(logged.length, 1);
-	assert.equal(logged[0].event, "usage_meter_unavailable");
-	assert.deepEqual(logged[0].fields.tried, ["nested", "hoisted"]);
-	assert.equal(
-		JSON.stringify(logged[0].fields).includes("/"),
-		false,
-		"logs ship: tags only, never a filesystem path",
-	);
+	try {
+		assert.equal(handle.ok, true);
+		assert.equal(handle.tag, null);
+		assert.equal(handle.module, null);
+		assert.deepEqual(logged[0].fields, {
+			ok: true,
+			methods: [...RUNTIME_STREAM_METHODS, ...RUNTIME_RESULT_METHODS],
+			compat: false,
+			compatError: "no-candidate-matched",
+			tried: ["nested", "hoisted"],
+			apis: [],
+			capped: true,
+			// The brake's stream factory comes from the accepted copy, so without one the cap is
+			// enforced only through session.abort(): capped-but-brakeless, said out loud.
+			brake: false,
+		});
+		assert.equal(JSON.stringify(logged).includes("/"), false, "logs ship: tags only, never a filesystem path");
+		assert.equal(blind.registry.get("anthropic-messages").sourceId, undefined, "nothing was registered into an unproven copy");
+		new args.ModelRuntime().streamSimple(MODEL, [], { sessionId: "root" });
+		await flush();
+		assert.equal(meter.state.rootTotal, 15, "the runtime half meters regardless");
+	} finally {
+		handle.uninstall();
+	}
 });
 
-test("arm() re-wraps after a simulated resetApiProviders() and counts the re-arm", async () => {
-	// A bare resetApiProviders() -- what AgentSession.reload() calls -- wipes our registrations without
-	// replaying them. Install-once would silently stop metering from that moment on.
+test("extension modules that cannot be read are a named compat degradation, not a crash", async () => {
+	const copy = fakeCopy(["anthropic-messages"]);
+	const logged = [];
+	const handle = await installProcessUsageMeter({
+		...installArgs({ copy }),
+		loadExtensionModules: async () => {
+			const error = new Error("Cannot find module /some/path/virtual-modules.js");
+			error.code = "ERR_MODULE_NOT_FOUND";
+			throw error;
+		},
+		log: (event, fields) => logged.push({ event, fields }),
+	});
+	handle.uninstall();
+	assert.equal(handle.ok, true);
+	assert.equal(logged[0].fields.compat, false);
+	assert.equal(logged[0].fields.compatError, "ERR_MODULE_NOT_FOUND", "a code, never the message: it carries a path");
+	assert.deepEqual(logged[0].fields.tried, []);
+});
+
+test("returns ok:false only when the RUNTIME half cannot meter, so the caller falls back", async () => {
+	const copy = fakeCopy(["anthropic-messages"]);
+	for (const ModelRuntime of [undefined, class {}, class { streamSimple() {} }]) {
+		const logged = [];
+		const handle = await installProcessUsageMeter({ ...installArgs({ copy }), ModelRuntime, log: (event, fields) => logged.push({ event, fields }) });
+		assert.equal(handle.ok, false);
+		assert.doesNotThrow(() => handle.arm());
+		assert.doesNotThrow(() => handle.uninstall());
+		assert.deepEqual(logged, [{ event: "usage_meter_unavailable", fields: { reason: "no-runtime-methods" } }]);
+	}
+	assert.equal(copy.registry.get("anthropic-messages").sourceId, undefined, "a failed install arms nothing");
+});
+
+test("an instance that does not dispatch through the wrappers is refused, and the prototype is restored", async () => {
+	// The runtime analogue of the old mutation probe: run-job hands over the instance the session will use,
+	// and an instance of another class copy (or one with an own method) would be metered by nothing.
+	const copy = fakeCopy(["anthropic-messages"]);
+	const args = installArgs({ copy });
+	const { FakeRuntime: Other } = fakeRuntimeClass();
+	const original = args.ModelRuntime.prototype.streamSimple;
+	const logged = [];
+	const handle = await installProcessUsageMeter({ ...args, runtime: new Other(), log: (event, fields) => logged.push({ event, fields }) });
+	assert.equal(handle.ok, false);
+	assert.deepEqual(logged, [{ event: "usage_meter_unavailable", fields: { reason: "runtime-not-covered" } }]);
+	assert.equal(args.ModelRuntime.prototype.streamSimple, original, "a refused install leaves no wrapper behind");
+
+	const again = installArgs({ copy: fakeCopy([]) });
+	const accepted = await installProcessUsageMeter({ ...again, runtime: new again.ModelRuntime() });
+	assert.equal(accepted.ok, true, "the instance the session will use, of the class that was wrapped, is accepted");
+	accepted.uninstall();
+});
+
+test("uninstall() restores the prototype and reports the compat half's re-arm count", async () => {
+	// The gap: resetApiProviders() wipes the compat wrappers and replays nothing, so a legacy registry call
+	// landing before the next poll is metered NOWHERE. rearms > 0 is the only evidence such a window existed.
+	const copy = fakeCopy(["anthropic-messages", "openai-completions"]);
+	const args = installArgs({ copy });
+	const original = args.ModelRuntime.prototype.stream;
+	const logged = [];
+	const handle = await installProcessUsageMeter({ ...args, log: (event, fields) => logged.push({ event, fields }) });
+	assert.notEqual(args.ModelRuntime.prototype.stream, original);
+
+	copy.reset();
+	handle.arm();
+	handle.uninstall();
+	handle.uninstall(); // idempotent: a second teardown must not double the record
+
+	assert.equal(args.ModelRuntime.prototype.stream, original, "the runtime half is undone at teardown");
+	const teardown = logged.filter((entry) => entry.event === "usage_meter_teardown");
+	assert.equal(teardown.length, 1);
+	assert.deepEqual(teardown[0].fields, { rearms: 2, apis: 2, rearmMs: 60_000 });
+});
+
+test("arm() re-wraps the compat half after a simulated resetApiProviders() and counts the re-arm", async () => {
 	const copy = fakeCopy(["anthropic-messages", "openai-completions"]);
 	const handle = await installProcessUsageMeter(installArgs({ copy }));
 	handle.uninstall();
@@ -860,10 +1185,9 @@ test("arm() re-wraps after a simulated resetApiProviders() and counts the re-arm
 	assert.equal(handle.rearms, 2, "one per api id re-wrapped after the wipe");
 	assert.deepEqual(handle.apis, ["anthropic-messages", "openai-completions"]);
 	assert.notEqual(copy.registry.get("anthropic-messages"), beforeReset);
-	assert.equal(copy.registry.has(PROBE_API), false, "the wipe took the probe too; we do not re-add it");
 });
 
-test("a wrapped api routes real calls through the meter", async () => {
+test("a wrapped compat api routes real calls through the meter", async () => {
 	const copy = fakeCopy(["anthropic-messages"]);
 	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root-1" });
 	const handle = await installProcessUsageMeter(installArgs({ copy, meter }));
@@ -872,7 +1196,7 @@ test("a wrapped api routes real calls through the meter", async () => {
 	// Exactly what compat does once the api id is overridden: resolve the entry, call streamSimple.
 	const entry = copy.registry.get("anthropic-messages");
 	entry.streamSimple(MODEL, [], { sessionId: "child-3" });
-	entry.streamSimple(MODEL, [], { sessionId: "root-1" });
+	entry.stream(MODEL, [], { sessionId: "root-1" });
 	await flush();
 
 	assert.equal(meter.state.calls, 2);
@@ -885,47 +1209,49 @@ test("the installer stamps the meter with the accepted copy's package version, v
 	const copy = fakeCopy(["anthropic-messages"]);
 	const meter = createUsageMeter({ maxTokens: null });
 	const reads = [];
+	const args = installArgs({ copy, meter });
 	const handle = await installProcessUsageMeter({
-		...installArgs({ copy, meter }),
+		...args,
 		readText: (path) => {
 			reads.push(path);
-			return JSON.stringify({ name: "a-package", version: "0.80.7" });
+			return JSON.stringify({ name: "a-package", version: "0.99.1" });
 		},
 	});
-	handle.uninstall();
-
-	// ../package.json RELATIVE TO the accepted compat url: the copy the probe proved, never whichever
-	// copy a bare specifier would have resolved -- the same discipline as the providers/all.js sibling.
-	assert.deepEqual(reads, [
-		"/app/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/package.json",
-	]);
-
-	copy.registry.get("anthropic-messages").streamSimple(MODEL, [], {});
-	await flush();
-	assert.equal(meter.usageSnapshot().piAi, "0.80.7", "the version priced with, stamped before the first call");
+	try {
+		// ../package.json RELATIVE TO the accepted compat url: the copy the identity check proved, never
+		// whichever copy a bare specifier would have resolved -- the same discipline as the providers/all.js sibling.
+		assert.deepEqual(reads, [
+			"/app/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/package.json",
+		]);
+		new args.ModelRuntime().streamSimple(MODEL, [], {});
+		await flush();
+		assert.equal(meter.usageSnapshot().piAi, "0.99.1", "the version priced with, stamped before the first call");
+	} finally {
+		handle.uninstall();
+	}
 });
 
 test("a failed version probe is silent -- no extra log line, no path, and the meter still installs", async () => {
 	// The failure path may not log AT ALL: an error message here would carry the resolved package.json
-	// path, and the no-path rule for shipped run logs has no exception for optional extras. The exact
-	// whole-array assertions on usage_meter / usage_meter_teardown elsewhere in this file are what pin
-	// the line SHAPES; this pins the line COUNT against the probe's failure.
+	// path, and the no-path rule for shipped run logs has no exception for optional extras.
 	const copy = fakeCopy(["anthropic-messages"]);
 	const meter = createUsageMeter({ maxTokens: null });
 	const logged = [];
+	const args = installArgs({ copy, meter });
 	const handle = await installProcessUsageMeter({
-		...installArgs({ copy, meter }),
+		...args,
 		readText: () => {
 			throw new Error("ENOENT: /some/resolved/path/package.json");
 		},
 		log: (event, fields) => logged.push({ event, fields }),
 	});
-	handle.uninstall();
-
-	assert.equal(handle.ok, true, "a version is optional; failing to read one must not degrade the meter");
+	try {
+		assert.equal(handle.ok, true, "a version is optional; failing to read one must not degrade the meter");
+		new args.ModelRuntime().streamSimple(MODEL, [], {});
+		await flush();
+		assert.equal(meter.usageSnapshot().piAi, null, "unknown stays null -- never guessed, never defaulted");
+	} finally {
+		handle.uninstall();
+	}
 	assert.deepEqual(logged.map((entry) => entry.event), ["usage_meter", "usage_meter_teardown"]);
-
-	copy.registry.get("anthropic-messages").streamSimple(MODEL, [], {});
-	await flush();
-	assert.equal(meter.usageSnapshot().piAi, null, "unknown stays null -- never guessed, never defaulted");
 });

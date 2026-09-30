@@ -14,6 +14,7 @@ test("whatever stands in front of a leader cluster, the table never measures it 
   // front of it, and a list of the ones that matter is the shape this module has stopped trusting.
   let swept = 0;
   let breakers = 0;
+  let leads = 0;
   let flags = 0;
   for (let cp = 0x20; cp <= 0x10ffff; cp++) {
     if (cp >= 0xd800 && cp <= 0xdfff) continue;
@@ -24,7 +25,9 @@ test("whatever stands in front of a leader cluster, the table never measures it 
     // mark that starts a cluster wherever it stands, a prepended format character, and a Hangul filler,
     // which joins a Hangul jamo in front of it and nothing else. `panel.mjs` asks the segmenter about a
     // STAND-IN for most predecessors, so this is the sweep that shows the stand-in is never narrower: a
-    // character wrongly stood in for fails here, by name.
+    // character wrongly stood in for fails here, by name. Under pi-tui 0.99.1 the second shape is the one
+    // that fails: U+102C is a spacing mark, a cluster it leads draws it as nothing, and a predecessor that
+    // takes it into its own cluster but was stood in for by `a` would measure one column short.
     for (const leader of ["\u0301\uff9e", "\u102c\uff9e", "\u0600\uff01", "\u1160\uff9e"]) {
       const s = p + leader;
       const ours = columnsOf(s);
@@ -38,9 +41,14 @@ test("whatever stands in front of a leader cluster, the table never measures it 
         assert.ok(flag || !/\p{Assigned}/u.test(p), `${JSON.stringify(s)} over-counts after an assigned character for no stated reason`);
       }
       if (leader === "\u0301\uff9e" && theirs === visibleWidth(p) + 2) breakers += 1;
+      if (leader === "\u102c\uff9e" && theirs === visibleWidth(p) + 1) leads += 1;
     }
   }
   assert.equal(swept, 1111999, "every predecessor there is");
-  assert.equal(breakers, 6446, "the predecessors after which the renderer starts a doubled cluster");
+  // 6,446 under pi-tui 0.80.7. 0.99.1 doubles nothing after any predecessor (issue #509).
+  assert.equal(breakers, 0, "the predecessors after which the renderer starts a doubled cluster");
+  // What 0.99.1 does instead: after every predecessor but the fifteen prepended letters, which take the mark
+  // into their own cluster, the spacing mark leads a cluster of its own and draws nothing.
+  assert.equal(leads, 1111984, "the predecessors after which a spacing mark leads its base's cluster");
   assert.equal(flags, 26, "and every regional indicator is the declared over-count");
 });

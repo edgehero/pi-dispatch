@@ -184,8 +184,9 @@ and `doctor` checks that it is set.
   `~/.pi/agent/auth.json` on the host and passes it to each job. Set `PI_AUTH_FROM_PI=0` to turn that off.
 - **Not supported from your pi login:** an OAuth or subscription login, or a stored key written as
   `!command` or `$VAR`. They expire or need a shell, and a service needs an API key with a spend limit.
-  These are refused with a reason before anything is spent. An `ANTHROPIC_OAUTH_TOKEN` set in the
-  environment is still sent to the job, and `doctor` only warns about it.
+  These are refused with a reason before anything is spent. An `ANTHROPIC_OAUTH_TOKEN` or
+  `ANTHROPIC_AUTH_TOKEN` set in the environment is still sent to the job, and `doctor` only warns about
+  it: pi reads either one before `ANTHROPIC_API_KEY`.
 - **Not supported at all:** providers that do not use a single key variable (an AWS profile for Bedrock,
   for example). The job is refused before anything is spent.
 - **A custom provider** goes in your pi `models.json`, staged with `import-pi`, with its key named in
@@ -335,7 +336,7 @@ agent never to print or send them, but that is prompt text, not enforcement.
 
 - **The provider key**, under your provider's variable name. It cannot be scoped, because the agent
   needs it to work. Bound it with a **spend limit at your provider** instead. Set one. A host that holds
-  both `ANTHROPIC_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` sends both.
+  both `ANTHROPIC_OAUTH_TOKEN` (or `ANTHROPIC_AUTH_TOKEN`) and `ANTHROPIC_API_KEY` sends both.
 - **The forge token**, bounded by the auth source you chose. On GitHub that is a one hour token for one
   repo with the App, or **your whole login, full scope and never expiring**, with the default `gh`
   source (`GITHUB_AUTH_SOURCE`). On the other forges it is the token you made, for as long as it is valid.

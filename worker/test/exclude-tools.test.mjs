@@ -59,7 +59,7 @@ test("a name outside the pinned set refuses at load, printing the whole known se
 	for (const bad of ["Bash", "shell", "not-a-tool", " bash"]) {
 		assert.throws(
 			() => parse([KINDS[0][1]({ excludeTools: [bad] })]),
-			(e) => /is not a tool the pinned pi knows/.test(e.message) && /read, bash, edit, write, grep, find, ls/.test(e.message) && /ignores unknown names silently/.test(e.message),
+			(e) => /is not a tool the pinned pi knows/.test(e.message) && /read, bash, powershell, edit, write, grep, find, ls/.test(e.message) && /ignores unknown names silently/.test(e.message),
 			bad,
 		);
 	}
@@ -69,7 +69,7 @@ test("a duplicate member refuses -- a removal set's second entry can never chang
 	assert.throws(() => parse([KINDS[0][1]({ excludeTools: ["bash", "bash"] })]), /names "bash" twice/);
 });
 
-test("every member of the pinned set is excludable, all seven at once included", () => {
+test("every member of the pinned set is excludable, all eight at once included", () => {
 	// Excluding everything is a legal narrowing: extension and custom tools still load, which is the
 	// field's documented bound. The loader must not invent a floor the runner does not have.
 	const all = [...EXCLUDABLE_TOOL_NAMES];

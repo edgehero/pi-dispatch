@@ -669,6 +669,78 @@ test("doctor: an OAuth token in the ENV is reported, never silently blessed", { 
 	assert.match(second.text(), /unset ANTHROPIC_OAUTH_TOKEN: pi reads it BEFORE ANTHROPIC_API_KEY/);
 });
 
+test("doctor: a bearer token in the ENV is reported, and the line says it outranks the API key (#509)", { skip: skipNoPi }, async () => {
+	// pi 0.99.1 lists ANTHROPIC_AUTH_TOKEN FIRST and sends it as `Authorization: Bearer`, ahead of the
+	// API key. Same treatment as the OAuth token above (forwarded, so a warn), with its own sentence.
+	const { out, text } = capture();
+	const code = await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_AUTH_TOKEN: "gateway-token" }), provDeps(out));
+	assert.equal(code, 0, "a warn does not fail the run");
+	assert.match(text(), /⚠ Provider key set \(anthropic: ANTHROPIC_AUTH_TOKEN\) -- a bearer token, not an API key/);
+	assert.match(text(), /set ANTHROPIC_API_KEY and unset ANTHROPIC_AUTH_TOKEN: pi reads ANTHROPIC_AUTH_TOKEN BEFORE ANTHROPIC_API_KEY/, "the fix names the API key and says the token outranks it");
+	assert.doesNotMatch(text(), /✓ Provider key set/, "never blessed in silence");
+
+	// Beside a real API key the key is the one ignored, and that is the sentence.
+	const second = capture();
+	await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_AUTH_TOKEN: "gateway-token", ANTHROPIC_API_KEY: "sk-x" }), provDeps(second.out));
+	assert.match(second.text(), /unset ANTHROPIC_AUTH_TOKEN: pi reads it BEFORE ANTHROPIC_API_KEY and sends it as an Authorization: Bearer header/);
+	assert.doesNotMatch(second.text(), /✓ Provider key set/);
+});
+
+test("doctor: a host token beside an auth.json API key says the pi login is NOT used while the token is set (#509 review)", { skip: skipNoPi }, async () => {
+	// The worker reads the environment first and auth.json only as a fallback, while pi on the host takes a
+	// stored api_key first. So with both, the job spends the token and the host's pi spends the key; the
+	// warning has to say which one is being ignored and what to do about it.
+	const dir = agentDirWith({ type: "api_key", key: "sk-from-login" });
+	const deps = (out) => ({ ...provDeps(out), agentDir: dir });
+	for (const [token, kind] of [["ANTHROPIC_AUTH_TOKEN", "a bearer token"], ["ANTHROPIC_OAUTH_TOKEN", "an OAuth\\/subscription login"]]) {
+		const { out, text } = capture();
+		const code = await runDoctor({ PI_PROVIDER: "anthropic", [token]: "tok" }, deps(out));
+		assert.equal(code, 0, `${token}: still a warning`);
+		assert.match(text(), new RegExp(`⚠ Provider key set \\(anthropic: ${token}\\) -- ${kind}`));
+		assert.match(text(), new RegExp(`the API key in pi auth\\.json is NOT used while ${token} is set`), `${token}: names the ignored login`);
+		assert.match(text(), new RegExp(`unset ${token} to spend the pi login, or keep it only if this token is the credential you mean jobs to spend`));
+		assert.doesNotMatch(text(), /sk-from-login/, "the stored key is never printed");
+		// Without a pi login, or with the fallback off, there is nothing to name.
+		const bare = capture();
+		await runDoctor(provEnv({ PI_PROVIDER: "anthropic", [token]: "tok" }), provDeps(bare.out));
+		assert.doesNotMatch(bare.text(), /pi auth\.json is NOT used/, `${token}: no login, no line`);
+		const off = capture();
+		await runDoctor({ PI_PROVIDER: "anthropic", PI_AUTH_FROM_PI: "0", [token]: "tok" }, deps(off.out));
+		assert.doesNotMatch(off.text(), /pi auth\.json is NOT used/, `${token}: PI_AUTH_FROM_PI=0 never reads the login`);
+		// With an env API key beside the token, THAT key is the ignored credential and the line names it; the
+		// login is not in play at all, because the worker never reads auth.json while the env holds a key.
+		const shadow = capture();
+		await runDoctor({ PI_PROVIDER: "anthropic", [token]: "tok", ANTHROPIC_API_KEY: "sk-x" }, deps(shadow.out));
+		assert.doesNotMatch(shadow.text(), /pi auth\.json is NOT used/, `${token}: an env key beside it is the one named`);
+		assert.match(shadow.text(), new RegExp(`unset ${token}: pi reads it BEFORE ANTHROPIC_API_KEY`));
+	}
+});
+
+test("doctor: an OAuth token in the API-key variable, or in pi auth.json, warns instead of passing (#509 review)", { skip: skipNoPi }, async () => {
+	// pi judges by the VALUE (`isOAuthToken`: contains "sk-ant-oat"), so a subscription login under
+	// ANTHROPIC_API_KEY is still sent as a Bearer subscription token.
+	const { out, text } = capture();
+	const code = await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-ant-oat01-not-a-real-token" }), provDeps(out));
+	assert.equal(code, 0, "a warning, as for the OAuth variable");
+	assert.match(text(), /⚠ Provider key set \(anthropic: ANTHROPIC_API_KEY\) -- but the value is an OAuth\/subscription token, not an API key/);
+	assert.doesNotMatch(text(), /✓ Provider key set/);
+	assert.doesNotMatch(text(), /sk-ant-oat01/, "the value is never printed");
+
+	const dir = agentDirWith({ type: "api_key", key: "sk-ant-oat01-not-a-real-token" });
+	const stored = capture();
+	await runDoctor({ PI_PROVIDER: "anthropic" }, { ...provDeps(stored.out), agentDir: dir });
+	assert.match(stored.text(), /⚠ Provider key set \(anthropic\) -- from pi auth\.json, but the stored key is an OAuth\/subscription token/);
+	assert.doesNotMatch(stored.text(), /sk-ant-oat01/);
+
+	// A real API key, and another provider's key that happens to contain the marker, stay green.
+	const real = capture();
+	await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-ant-api03-x" }), provDeps(real.out));
+	assert.match(real.text(), /✓ Provider key set \(anthropic: ANTHROPIC_API_KEY\)/);
+	const other = capture();
+	await runDoctor(provEnv({ PI_PROVIDER: "openai", OPENAI_API_KEY: "sk-ant-oat-lookalike" }), provDeps(other.out));
+	assert.match(other.text(), /✓ Provider key set \(openai: OPENAI_API_KEY\)/);
+});
+
 test("doctor: a whitespace value is refused against the variable pi will actually read", async () => {
 	// The trap this replaced a `.trim()` presence filter to close. A blank OAuth token beside a real API
 	// key USED to read as "the API key is set, all good" -- while pi, whose truthiness is plain, reads the

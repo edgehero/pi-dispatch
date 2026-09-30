@@ -28,7 +28,7 @@ function fakeSession() {
 	return session;
 }
 
-/** A turn_end event carrying an assistant message with the given usage, as pi 0.80.7 emits. */
+/** A turn_end event carrying an assistant message with the given usage, as pi emits (0.80.7 and 0.99.1). */
 function turnEnd(usage) {
 	return { type: "turn_end", message: { role: "assistant", usage } };
 }

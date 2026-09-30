@@ -298,7 +298,8 @@ export function makeSecretsResolver({
 		// prevent. Same conflated `undefined` as issue #286, one module over.
 		//
 		// It also closes a second hole that never needed auth.json. The worker never WRITES the OAuth variable
-		// (`apiKeyVariable` skips it deliberately) and pi reads it BEFORE `ANTHROPIC_API_KEY`, so a presence
+		// or (from the 0.99.1 pin, issue #509) the bearer ANTHROPIC_AUTH_TOKEN (`apiKeyVariable` skips both
+		// deliberately) and pi reads both BEFORE `ANTHROPIC_API_KEY`, so a presence
 		// filter held it only on hosts that happened to export it, and a trigger binding it outranked the
 		// operator's own key on the pure-env path too.
 		//

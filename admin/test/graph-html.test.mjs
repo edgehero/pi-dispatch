@@ -568,8 +568,9 @@ test("the chip width estimate is never narrower than the panel's table, on every
   // THE PARITY WIRE a `from` clause would otherwise be: this module loads nothing, so it carries its own
   // estimate, and the panel's table (itself swept against the renderer) holds it. One-sided on purpose:
   // an over-count makes a chip too wide, an under-count lets its text run out of it. String-level parity
-  // is deliberately NOT claimed -- `\u0e48\u0e33` is 2 columns to the panel only because the terminal
-  // renderer counts a cluster's base twice, which is not a glyph width.
+  // is deliberately NOT claimed -- `\u093e\uff9e` is 1 column to the panel only because the terminal
+  // renderer draws a spacing mark that leads a cluster as nothing (pi-tui 0.99.1), which is not a glyph
+  // width. (Under 0.80.7 the example was `\u0e48\u0e33` at 2, a base counted twice.)
   let swept = 0;
   let equal = 0;
   let pairs = 0;
@@ -589,7 +590,9 @@ test("the chip width estimate is never narrower than the panel's table, on every
   assert.equal(swept, 1112064, "every code point outside the surrogates");
   assert.equal(pairs, 2224128, "and each with U+FE0F and as a keycap");
   // EXACT where the two agree, pinned, because "answer 2 for everything" also satisfies the sweep.
-  assert.equal(equal, 185319, "code points estimated at exactly the panel's width");
+  // 185,319 under pi-tui 0.80.7. 0.99.1 gives the spacing marks a column (issue #509), and the 264 of them
+  // in the BMP are one code unit here, so they now agree; the 208 astral ones stay two here against one.
+  assert.equal(equal, 185583, "code points estimated at exactly the panel's width");
   // None: U+FE0F counts the code unit it takes here and nothing in the panel's table, on purpose (a mark
   // is never free in this estimate), so every pair is estimated wider than the terminal draws it.
   assert.equal(pairsEqual, 0, "pairs estimated at exactly the panel's width");

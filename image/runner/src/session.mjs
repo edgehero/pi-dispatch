@@ -19,8 +19,8 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
  *   would reorder the meter install relative to createAgentSession.
  *
  * Resume itself is not an option we pass. `CreateAgentSessionOptions` has no `resume`, no `sessionId`
- * and no `continueSession` at the 0.80.7 pin -- the JSDoc example in sdk.d.ts showing
- * `continueSession: true` is wrong for this version. Handing createAgentSession a persisted manager IS
+ * and no `continueSession` at the 0.99.1 pin (as at 0.80.7; pinned-api.test.mjs holds the whole option
+ * set) -- the JSDoc example in sdk.d.ts showing `continueSession: true` is still wrong for this version. Handing createAgentSession a persisted manager IS
  * the documented mechanism (pi's own docs/sdk.md, "Open specific file"); it then restores
  * `agent.state.messages` itself. pi's interactive /resume is a different thing entirely --
  * AgentSessionRuntime.switchSession, which replaces the ACTIVE session mid-process. We prompt once and

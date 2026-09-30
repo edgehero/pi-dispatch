@@ -766,9 +766,10 @@ export async function runJob(job, deps) {
 			//   - the worker WRITES the name: buildContainerEnv assigns the provider credential and
 			//     PI_FORWARD_ENV before this feature's values, so the trigger's value replaces the operator's
 			//     and every job of that trigger spends the trigger author's key;
-			//   - the worker does NOT write the name but pi READS it first: the OAuth token variable is
-			//     deliberately never written (apiKeyVariable skips it), so a trigger binding it lands beside
-			//     the operator's key and outranks it in pi's own precedence.
+			//   - the worker does NOT write the name but pi READS it first: the OAuth token variable, and from
+			//     the 0.99.1 pin the bearer ANTHROPIC_AUTH_TOKEN (issue #509), are deliberately never written
+			//     (apiKeyVariable skips both), so a trigger binding one lands beside the operator's key and
+			//     outranks it in pi's own precedence.
 			// The old message asserted the first for both, which is exactly backwards for the second.
 			await comment(job, `Refused: this trigger's \`run.secrets\` binds \`${resolved.reserved}\`, which is a variable this deployment already uses for the job's own credentials. Whichever of the two values reached the container, one of them would be silently ignored. Rename it in the triggers file. Not run.`);
 			// The variable NAME only. It is the operator's own choice of name, not payload, and naming it is what

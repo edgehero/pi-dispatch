@@ -23,6 +23,12 @@ if (!piEntry && process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS === "1") {
 }
 const skip = piEntry ? false : "pi-ai not installed; CI runs these";
 
+// Spelled out rather than imported, for the reason the literal pin at the bottom of this file gives: a test
+// that iterates the constant the code reads is correct at any value. RETAINED mirrors the module's
+// RETAINED_KEY_VARIABLES and the membership test above holds the two together.
+const RETAINED = new Set(["ANTHROPIC_AUTH_TOKEN"]);
+const RUNTIME_NOT_PROVIDER = ["HOME", "PATH", "APPDATA", "USERPROFILE", "XDG_CONFIG_HOME"];
+
 /** Every .js/.mjs/.cjs file under `dir`, ignoring nested dependencies. */
 function sourcesUnder(dir) {
 	const files = [];
@@ -109,19 +115,30 @@ test("the set is exactly what the pinned pi and the SDKs it imports read, minus 
 	// A provider's KEY variables are `providerKeyCandidates`' business, refused pre-spend against the job's
 	// own provider, and the bound that gate keeps is deliberate: an anthropic job may bind OPENAI_API_KEY
 	// for a flow that talks to OpenAI. Subtracted HERE rather than by hand in the module, so the two stay
-	// one derivation: only four of pi's thirty-one key variables happen to appear as literals in a scanned
-	// artifact, so leaving them in would have broken that documented bound for four names and not the
-	// other twenty-seven.
+	// one derivation: only five of pi's thirty-eight key variables (0.99.1 pin) happen to appear as literals
+	// in a scanned artifact, so leaving them in would have broken that documented bound for five names and
+	// not the other thirty-three. The one the module keeps anyway is asserted in its own test below.
 	const { piProviders, providerKeyCandidates } = await import("../src/env-allowlist.mjs");
 	const providerKeys = new Set(piProviders().flatMap((id) => providerKeyCandidates(id)));
 	assert.ok(providerKeys.size > 25, `only ${providerKeys.size} provider key variables; the subtraction below is probably reading the wrong thing`);
 	for (const name of providerKeys) derived.delete(name);
 
+	// And the operating-system variables the Anthropic SDK reads from the 0.99.1 pin on (issue #509): the
+	// four directory variables locate its default config directory, and PATH is read by its agent toolset,
+	// which pi does not use. Properties of the runtime rather than of a provider, the same class as
+	// NODE_OPTIONS (see the module's header), and HOME is reserved by reserved-env.mjs anyway. Each is
+	// asserted to be FOUND before it is subtracted, so a subtraction nothing needs any more fails here
+	// instead of sitting in the list unexamined.
+	for (const name of RUNTIME_NOT_PROVIDER) {
+		assert.ok(derived.has(name), `${name} is no longer read by the scanned sources: drop it from RUNTIME_NOT_PROVIDER`);
+		derived.delete(name);
+	}
+
 	// The residuals are unreachable by any literal scan of the packages pi imports, so they are excluded
 	// from the comparison and asserted separately below. Everything else must match exactly.
 	const residual = new Set(["AWS_CONFIG_FILE", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "AWS_SHARED_CREDENTIALS_FILE", "ALL_PROXY", "all_proxy", "http_proxy", "https_proxy", "no_proxy"]);
 	const missing = [...derived].filter((n) => !PROVIDER_STEERING_VARS.has(n)).sort();
-	const extra = [...PROVIDER_STEERING_VARS].filter((n) => !derived.has(n) && !residual.has(n)).sort();
+	const extra = [...PROVIDER_STEERING_VARS].filter((n) => !derived.has(n) && !residual.has(n) && !RETAINED.has(n)).sort();
 	assert.deepEqual(
 		missing,
 		[],
@@ -132,6 +149,26 @@ test("the set is exactly what the pinned pi and the SDKs it imports read, minus 
 		[],
 		`the reserved set names ${extra.join(", ")}, which nothing in the pinned pi or its SDKs reads any more. Remove them, or the set has stopped being a derivation.`,
 	);
+});
+
+test("the retained key variable is still a key variable pi reads AND a name the scan finds (#509)", { skip }, async () => {
+	// ANTHROPIC_AUTH_TOKEN became a pi key variable at 0.99.1, so the subtraction above would drop it and
+	// the set would release a name refused at load since #314. The module keeps it by name; this pins both
+	// facts that make that a choice rather than drift: it IS a key variable at the pin (else it belongs to
+	// the ordinary derivation again) and the SDK still reads it (else the reason to reserve it is gone).
+	const { providerKeyCandidates } = await import("../src/env-allowlist.mjs");
+	const req = createRequire(piEntry);
+	const derived = namesIn(dirname(piEntry));
+	for (const spec of clientPackages()) {
+		try {
+			for (const name of namesIn(dirname(req.resolve(spec)))) derived.add(name);
+		} catch {}
+	}
+	for (const name of RETAINED) {
+		assert.ok(PROVIDER_STEERING_VARS.has(name), `${name} must be reserved`);
+		assert.ok(providerKeyCandidates("anthropic").includes(name), `${name} is no longer a pi key variable: the ordinary derivation owns it again, drop it from RETAINED_KEY_VARIABLES`);
+		assert.ok(derived.has(name), `${name} is no longer read by the scanned sources: re-check whether reserving it still means anything`);
+	}
 });
 
 test("each source the derivation depends on still yields names", { skip }, () => {
@@ -221,7 +258,11 @@ test("the names that motivated the issue are all in, and an ordinary secret is n
 		"AZURE_OPENAI_RESOURCE_NAME",
 		"ANTHROPIC_BASE_URL",
 		"ANTHROPIC_AUTH_TOKEN",
+		// Measured at the 0.99.1 pin (issue #509; env-allowlist.test.mjs pins it): each replaces the
+		// credential header pi's own request carries.
+		"ANTHROPIC_CUSTOM_HEADERS",
 		"OPENAI_BASE_URL",
+		"OPENAI_CUSTOM_HEADERS",
 		"GOOGLE_GEMINI_BASE_URL",
 		"GOOGLE_VERTEX_BASE_URL",
 		"AWS_ENDPOINT_URL",
@@ -254,7 +295,7 @@ test("bedrock is why the key variables stay in this set rather than being left t
 test("this set and the pre-spend provider gate are COMPLEMENTARY, not one subsuming the other", { skip }, async () => {
 	// Worth pinning because it is easy to conclude the wrong thing in either direction. This set is derived
 	// from what pi and its SDKs READ, and pi's key table is DATA rather than accessor calls, so most
-	// provider key variables are not in here: measured, 27 of 31. So the pre-spend gate and doctor's
+	// provider key variables are not in here: measured, 33 of 38 at the 0.99.1 pin (27 of 31 at 0.80.7). So the pre-spend gate and doctor's
 	// per-provider check both still have work to do, and a fixture using one of the four names both cover
 	// would silently stop exercising them -- which is exactly what happened to two doctor tests when this
 	// landed.

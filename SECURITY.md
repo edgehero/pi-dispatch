@@ -498,8 +498,8 @@ Stated openly rather than discovered later:
   worker refuses to run without it, and you should not work around that.
 - Set a provider spend limit and a daily job cap.
 - Do not blanket-forward host environment into job containers. Pass only the variables the configured
-  provider needs. In particular `ANTHROPIC_OAUTH_TOKEN` silently takes precedence over
-  `ANTHROPIC_API_KEY`, so a stray variable in the host environment can quietly redirect which credential
+  provider needs. In particular `ANTHROPIC_OAUTH_TOKEN`, and at the pinned pi `ANTHROPIC_AUTH_TOKEN` ahead
+  of it, silently take precedence over `ANTHROPIC_API_KEY`, so a stray variable in the host environment can quietly redirect which credential
   a job spends. Every minted-token name is refused in `PI_FORWARD_ENV` at config load, across all four
   forges: `GITHUB_TOKEN`, `GH_TOKEN`, `GITLAB_TOKEN`, `GL_TOKEN`, `FORGEJO_TOKEN`, `GITEA_SERVER_TOKEN`,
   `AZURE_DEVOPS_EXT_PAT` and `SYSTEM_ACCESSTOKEN`. The worker sets them from the per-job mint, and a

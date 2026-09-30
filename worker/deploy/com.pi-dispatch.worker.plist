@@ -15,7 +15,7 @@
   (`pi-dispatch service render` composes exactly that argv with this host's real paths; the wrapper
   refuses an empty argv rather than guessing what to run). NO secrets are inlined here: there is
   deliberately no EnvironmentVariables dict, since that would commit credentials into this file. The
-  wrapper reads `.env` at runtime instead (note the ANTHROPIC_OAUTH_TOKEN over ANTHROPIC_API_KEY
+  wrapper reads `.env` at runtime instead (note the ANTHROPIC_AUTH_TOKEN/ANTHROPIC_OAUTH_TOKEN over ANTHROPIC_API_KEY
   precedence trap documented in the wrapper).
 
   Graceful shutdown needs NO macOS-specific code: `launchctl bootout` sends SIGTERM, which the wrapper

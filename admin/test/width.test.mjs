@@ -517,11 +517,12 @@ test("the editor's value never admits half a character, through any door (#401)"
 });
 
 test("a lone surrogate cannot reach the drawn line and break a cluster (#401)", async () => {
-  // THE LAST VARIANT, and it is the same mechanism as #417 (now matched) with a different leader. The renderer
-  // treats a lone surrogate as a cluster BREAK, then computes the next cluster's base after skipping it and
-  // counts that base twice. So an orphan the count had already removed was still in the text handed to the
+  // THE LAST VARIANT, and it was the same mechanism as #417 with a different leader. pi-tui 0.80.7 treated a
+  // lone surrogate as a cluster BREAK, then computed the next cluster's base after skipping it and counted
+  // that base twice. So an orphan the count had already removed was still in the text handed to the
   // renderer, and it made the renderer measure a line wider than we did: measured at 12 columns here and 24
-  // there, with a 24-column pane drawing at 36.
+  // there, with a 24-column pane drawing at 36. 0.99.1 no longer doubles, and draws the raw line at 12 too;
+  // the orphan is still removed, and this still holds both measures to the pane.
   //
   // `clip` used to return its input unchanged when it fitted. It steps the fitted line too now, which makes
   // the rule this module states -- half a character is removed where text ENTERS -- true of the text rather

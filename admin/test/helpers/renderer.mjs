@@ -30,8 +30,8 @@ export async function loadRenderer() {
     const pi = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
     const entry = pi.resolve("@earendil-works/pi-tui");
     // WHICH COPY, asserted rather than assumed. pi depends on pi-tui by a RANGE, so a resolve that is not
-    // the lockfile's would answer any 0.80.x, and a hoisted layout could put a different copy above this
-    // one. `CONST-PI-VERSION-PINNED` says to verify against the pinned artifact rather than a range, and
+    // the lockfile's would answer any version in that range, and a hoisted layout could put a different
+    // copy above this one. `CONST-PI-VERSION-PINNED` says to verify against the pinned artifact rather than a range, and
     // an oracle measured against the wrong artifact is a table pinned to the wrong renderer.
     const version = pi("@earendil-works/pi-tui/package.json").version;
     if (version !== PI_TUI_VERSION) return null;
@@ -43,4 +43,4 @@ export async function loadRenderer() {
 }
 
 /** The pin, from `package-lock.json`. A mismatch fails the tests below rather than measuring silently. */
-export const PI_TUI_VERSION = "0.80.7";
+export const PI_TUI_VERSION = "0.99.1";

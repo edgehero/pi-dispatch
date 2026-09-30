@@ -193,7 +193,15 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
 
 ## OQ-005 — pi's `modelRuntime` migration: NOT in the pin; lands when we bump
 
-- **Status**: **WATCH — NOT IN THE PIN**
+- **Status**: **CLOSED (landed at 0.99.1, issue #509)**
+- **Closed (2026-09-30)**: The migration shipped between 0.80.7 and 0.99.1 (AuthStorage left the exports
+  at 0.80.8; ModelRuntime.create replaces ModelRegistry.create). The runner migrated in issue #509;
+  image/runner/test/pinned-api.test.mjs now pins the ModelRuntime shape instead of the absence. The Action
+  on bump below was carried out against the 0.99.1 tarball: `model` is still a `Model`, obtained from
+  `modelRuntime.getModel`; `authStorage` and `modelRegistry` are gone from the option set, not deprecated;
+  `excludeTools` survives as `string[]`, `allToolNames` is now EIGHT (`powershell` joined, and
+  `EXCLUDABLE_TOOL_NAMES` restates the eight), and pi still ignores an unknown exclusion name silently. The
+  rest of this row is kept as the record of the question while it was open.
 - **Not a question — a scheduled landmine.** pi's changelog carries the breaking change under
   `[Unreleased]`: `authStorage` and `modelRegistry` *replaced* by an async `modelRuntime`.
   `createAgentSession`'s option set changes with it. **It has not shipped.** At `0.80.7` the wiring is
@@ -419,7 +427,8 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   nothing on the parent's bus, and a 16-wide fanout registers there as roughly **one** turn. Everything
   built on this row is unaffected in shape and was understating spend precisely on the most expensive jobs.
   Issue #58 moves the accounting to pi-ai's module-level api-provider registry — the one choke point every
-  in-process session shares — and keeps this bus sum as the fallback
+  in-process session shares — (moved again at the 0.99.1 pin, issue #509, to ModelRuntime.prototype: the
+  registry is no longer on a session's path) and keeps this bus sum as the fallback
   (`REQ-TOKEN-ACCOUNTING-AND-CAPS`, `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`). The row is corrected in
   place rather than deleted, because the *question it asked* was answered correctly and the gap was in the
   question's reach, not in its answer — and a register that quietly widens a past answer teaches the next
@@ -935,6 +944,10 @@ adversarial passes did.
   pinned to an incidental line reports refactors as breakage**, and a canary that cries wolf is one people
   stop reading, which costs more than the drift it was watching for. When this fires, check the needle
   before believing the verdict.
+- **Re-checked at the pi 0.99.1 bump (2026-09-30, issue #509)**: the `extensions` settings list now also
+  carries `builtin:<name>` entries, resolved in a separate loop; the mirror drops them before any verdict
+  and two needles (`BUILTIN_PATH_PREFIX` in source-info.js, the builtin loop in package-manager.js) pin
+  that. The file grammar itself did not move.
 - **Related risks**: `OQ-005` (the upstream-drift row this is the same species as, and the one whose
   correction records that a sha is not a version), `OQ-011`.
 
@@ -1747,3 +1760,4 @@ adversarial passes did.
 | 2026-09-27 | Issue #429, review round 2. **`OQ-038` UNCHANGED, checked**, with one note: the podman store is a third input the panel reads from its own process (the `podman` it runs uses the store its own HOME and XDG_DATA_HOME name), and it is SAFE for the same reason as the rest: a run that recorded its store refuses under another (`podman-store-mismatch`). **`OQ-007` UNCHANGED, checked**: every new hold is a `sandbox_reaper_skipped` line with a fixed reason token. |
 | 2026-09-27 | Issue #446, folding its PR #457 gate rounds 1 to 3 into this one row. **`OQ-007` AMENDED**, one bullet, status stays RESOLVED: the sandbox sweep's tombstone added outcomes, and each is placed by the one-grep rule. `rename-failed`, `tombstone-stuck` (rate-limited to once a day per tombstone, because each pass retries it), `tombstone-pinned` (a tombstone holding a live pin, never deleted), `tombstone-foreign` (a young tombstone of another live process, also once a day), `opened-during-pass` and `runtime-unanswered` (the re-ask right before the rename) are holds, so they are `sandbox_reaper_skipped`; a removed leftover is a verdict, `reaped_sandbox` with reason `tombstone`; a pin seen through the tombstone keeps `manifest-changed`. Boot and every tick share them. **`OQ-038` AMENDED**, two places, status stays `WATCH`: `PI_SANDBOX_RETENTION_HOURS` still sets the window the panel reports, now as the earlier of it and the run's `retainUntil`, so a longer panel window no longer overstates what is left; and a new bullet records that the panel has no pin, so it neither offers nor opens a run past its window (nor one whose directory holds another id's run), pointing at the CLI's `--pin`, with the one case it cannot see (a worker window lowered below the panel's) held by the sweep's re-ask and otherwise reported after launch, and that the re-ask sees only the worker's runtime endpoint, so the panel and the worker must share one. **`OQ-014` UNCHANGED, checked**: no session-store path moved. **`OQ-008` UNCHANGED, checked**: the deadline is a field in a host file, not Redis-side state. |
 | 2026-09-28 | Issue #471. **`OQ-038` AMENDED**, one bullet, status stays `WATCH`: the panel now reads the path and number keys this row named (`PI_SANDBOX_DIR`, `PI_SANDBOX_RETENTION_HOURS`, `PI_SANDBOX_IDLE_MINUTES`) and the rest of `resolvePaths`'s from the deployment's own `.env` where pi's environment does not set them, from the pointer's folder only (not a cwd carrying init's scaffold, which a repository can commit, gate round 1) and only from a file this account owns and nobody else can write, which closes the run-history-beside-own-sandbox-dir defect for a deployment whose `.env` names its sandbox directory. The five capability-shaped keys stay the panel's own on purpose. The other questions UNCHANGED, checked. |
+| 2026-09-30 | Issue #509, the pi 0.80.7 -> 0.99.1 bump. **`OQ-005` CLOSED**: the modelRuntime migration landed at the 0.99.1 pin and the runner uses it; the Action on bump was carried out against the tarball (the option set, `excludeTools` as `string[]`, eight built-in tools, unknown exclusion names still ignored silently); the rest of the row is kept as the record. **`OQ-010` AMENDED**, one parenthetical, status stays CLOSED: its pointer to the meter's choke point now names ModelRuntime.prototype. **`OQ-018` AMENDED**, status stays `ACCEPTED RISK`: pi 0.99.1's `builtin:<name>` entries in the `extensions` list are dropped by the mirror before any verdict, pinned by two new needles; the file grammar did not move. |

@@ -61,7 +61,7 @@ export const NPM_NAME_RE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
  * would add an edge to the import-pi <-> packages cycle that only survives because both sides use their
  * bindings at call time.
  *
- * This list is pi's, not ours: at the 0.80.7 pin `collectPackageResources` falls through to exactly these
+ * This list is pi's, not ours: at the 0.99.1 pin (as at 0.80.7) `collectPackageResources` falls through to exactly these
  * four directory names when `readPiManifest` returns null, so a package with no `pi` key and a `skills/`
  * dir IS a pi package. See host-pi.mjs's PINNED_PI_NEEDLES for the assertion that keeps that true.
  */
@@ -281,7 +281,7 @@ export function readStageManifest({ globalPiDir, readFile = readFileSync, fileEx
  * readStageManifest's policy, because the consumers are advisory (doctor's per-trigger flow lines,
  * and issue #188's topology) and a half-staged tree must degrade to "nothing visible", not a crash.
  *
- * The semantics mirror pi's collectPackageResources at the 0.80.7 pin EXACTLY, because an enumerator
+ * The semantics mirror pi's collectPackageResources at the 0.99.1 pin EXACTLY (unchanged since 0.80.7), because an enumerator
  * that agrees with pi by hand is how doctor comes to report a tier pi then ignores:
  *   - a `pi` manifest object means its `skills` entries are the ONLY sources -- a manifest WITHOUT a
  *     `skills` key contributes NO skills and gets NO convention fallback (readPiManifest short-circuits

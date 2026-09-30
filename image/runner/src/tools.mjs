@@ -4,6 +4,7 @@ import {
 	createFindToolDefinition,
 	createGrepToolDefinition,
 	createLsToolDefinition,
+	createPowerShellToolDefinition,
 	createReadToolDefinition,
 	createWriteToolDefinition,
 } from "@earendil-works/pi-coding-agent";
@@ -21,13 +22,18 @@ import { configError } from "./outcome.mjs";
  * this reach-around is retired loudly, not discovered.
  *
  * The factory argument is a cwd; the `.name` on the returned definition is static (verified at the
- * pin), so "/" serves and nothing here touches the filesystem.
+ * 0.99.1 pin, powershell included), so "/" serves and nothing here touches the filesystem.
  */
 let cached;
 export function excludableToolNames() {
 	cached ??= [
 		createReadToolDefinition,
 		createBashToolDefinition,
+		// Added at the 0.99.1 pin (issue #509): pi registers `powershell` as a built-in (allToolNames) without
+		// making it active by default (DEFAULT_TOOL_NAMES is still read, bash, edit, write). Registered is what
+		// matters here: an extension's setActiveTools can switch on anything in the registry, so a trigger that
+		// means to remove every shell must be able to name this one too.
+		createPowerShellToolDefinition,
 		createEditToolDefinition,
 		createWriteToolDefinition,
 		createGrepToolDefinition,

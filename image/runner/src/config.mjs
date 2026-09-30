@@ -448,3 +448,53 @@ export function enforceOfflineMode(env = process.env) {
 	if (env.PI_OFFLINE === "1") return;
 	env.PI_OFFLINE = "1";
 }
+
+/**
+ * Force pi's install telemetry off for this process (issue #509).
+ *
+ * At the 0.99.1 pin `PI_TELEMETRY`, when set at all, OVERRIDES the `enableInstallTelemetry` setting
+ * (dist/core/telemetry.js: `telemetryEnv !== undefined ? isTruthyEnvFlag(telemetryEnv) : setting`), so the
+ * in-memory setting the runner pins (jobSettings below) is only half the switch: a `PI_TELEMETRY=1` that
+ * reached the container through PI_FORWARD_ENV or `run.secrets` would turn it back on. What it gates in a
+ * job is not the install ping (interactive mode only) but pi's attribution HEADERS on OpenRouter, NVIDIA
+ * NIM and Cloudflare requests (provider-attribution.js), a fingerprint of this deployment sent to a third
+ * party that nobody asked for. pi reads the variable at each call, not at module load, so setting it here,
+ * beside the offline mode and before the runtime, the settings or any request exist, is in time.
+ *
+ * Unconditional, unlike enforceOfflineMode's early return, because the canonical "off" value is the only
+ * one that can be left in place: "0", "false", "no" and "" all read as off to pi, and normalising them costs
+ * nothing.
+ */
+// env-internal PI_TELEMETRY: pi's own override of its telemetry setting, written here and read only by pi;
+// nothing in this project sets it, and an operator's value is overwritten on purpose.
+export function enforceTelemetryOff(env = process.env) {
+	env.PI_TELEMETRY = "0";
+}
+
+/**
+ * The SettingsManager.inMemory() object every job runs on (INT-SDK-SESSION-OPTIONS), one spelling for
+ * run-job.mjs and for the loopback tests that must run pi the way the runner does.
+ *
+ * - `retry` pins pi's own retry settings rather than inheriting `maxRetries ?? 3`: an upstream default
+ *   change would silently move our spend (CONST-PI-VERSION-PINNED's reasoning, applied to a default).
+ *   `maxAgentDelayMs` is pinned to 60000, pi 0.99.1's own default (pi-ai utils/retry.js
+ *   DEFAULT_MAX_AGENT_RETRY_DELAY_MS), for the same reason: it is new since 0.80.7, it caps the backoff
+ *   pi sleeps between agent retries (retryDelayMs: min(base * 2^(n-1), maxAgentDelayMs)), and at 0.80.7
+ *   there was no cap at all. At the runner's defaults (PI_RETRY_MAX 2, PI_RETRY_BASE_MS 2000) the delays
+ *   are 2 s and 4 s and the cap never binds; it binds only once base * 2^(n-1) passes 60 s. Placed BEFORE
+ *   the spread so a future PI_RETRY_* knob for it would win.
+ * - `cacheWarming: "off"`: pi 0.86.0 made "streaming" the default, which re-sends the cached prefix with
+ *   maxTokens 1 during long tool runs, for up to an hour, as extra PAID requests the turn budget never
+ *   sees. A job pays for its turns, not for keeping a cache warm between them.
+ * - `enableInstallTelemetry: false`: see enforceTelemetryOff, which closes the env override of it.
+ *
+ * inMemory() writes to the GLOBAL scope of a storage with no project file, so a serviced project's
+ * .pi/settings.json cannot override any of these spend controls.
+ */
+export function jobSettings(retry) {
+	return {
+		retry: { enabled: true, maxAgentDelayMs: 60_000, ...retry },
+		cacheWarming: "off",
+		enableInstallTelemetry: false,
+	};
+}

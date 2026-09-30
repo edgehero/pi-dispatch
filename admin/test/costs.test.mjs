@@ -89,9 +89,9 @@ const zeroRatedUnmatched = rec({
   flow: null,
   endedAt: "2026-07-14T12:00:00.000Z",
   tokens: tok(0),
-  usage: usage([row("zai", "glm-4.7", { cost: 0 })]),
-  provider: "zai",
-  model: "glm-4.7",
+  usage: usage([row("qwen-token-plan", "deepseek-v4-pro", { cost: 0 })]),
+  provider: "qwen-token-plan",
+  model: "deepseek-v4-pro",
 });
 const preLedger = rec({
   jobId: "prelede-1",
@@ -140,16 +140,21 @@ const retried = rec({
 /**
  * A canned pricing facade (the frozen worker/src/pricing.mjs API), deterministic so every assertion is
  * hand-computable: re-pricing at claude-sonnet-4 charges $10 per million quad tokens, at haiku-cheap
- * $1 per million; glm-4.7 is the zero-rated model; any other target is unpriced (null).
+ * $1 per million; a qwen token-plan model is the zero-rated one; any other target is unpriced (null).
+ *
+ * THE ZERO-RATED MODEL WAS zai/glm-4.7 until issue #509: pi-ai 0.80.7 rated every zai, zai-coding-cn and
+ * kimi-coding model at $0, and 0.99.1 gives them API-equivalent implied prices (glm-4.7 at $0.60 in and
+ * $2.20 out per million). Its all-zero providers are the qwen and xiaomi token plans, so the fake
+ * follows the pinned table rather than a fact it no longer holds.
  */
 const SONNET = { provider: "anthropic", id: "claude-sonnet-4", cost: { input: 10, output: 10 } };
-const GLM = { provider: "zai", id: "glm-4.7", cost: { input: 0, output: 0 } };
+const ZERO = { provider: "qwen-token-plan", id: "deepseek-v4-pro", cost: { input: 0, output: 0 } };
 function cannedPricing() {
   return {
-    listPricedModels: () => [SONNET, GLM],
+    listPricedModels: () => [SONNET, ZERO],
     getPricedModel: (provider, id) =>
-      provider === SONNET.provider && id === SONNET.id ? SONNET : provider === GLM.provider && id === GLM.id ? GLM : null,
-    isZeroRated: (model) => model === GLM,
+      provider === SONNET.provider && id === SONNET.id ? SONNET : provider === ZERO.provider && id === ZERO.id ? ZERO : null,
+    isZeroRated: (model) => model === ZERO,
     reprice: (quad, target) => {
       const tokens = quad.input + quad.output + quad.cacheRead + quad.cacheWrite + quad.cacheWrite1h;
       if (target.provider === "anthropic" && target.id === "claude-sonnet-4") return { usd: (tokens / 1e6) * 10, ratesVersion: "1.2.3" };
@@ -207,12 +212,40 @@ test("classifyRow: owned plan match wins; cost>0 is metered; $0 is zero-rated --
   const subs = [sub()];
   assert.deepEqual(classifyRow(row("kimi-coding", "kimi-k2"), subs, pricing), { class: "plan", planId: "kimi" });
   assert.deepEqual(classifyRow(row("anthropic", "claude-sonnet-4", { cost: 0.5 }), subs, pricing), { class: "metered", planId: null });
-  assert.equal(classifyRow(row("zai", "glm-4.7"), subs, pricing).class, "zero-rated", "the rate table itself says zero");
+  assert.equal(classifyRow(row("qwen-token-plan", "deepseek-v4-pro"), subs, pricing).class, "zero-rated", "the rate table itself says zero");
   assert.equal(
     classifyRow(row("someone", "mystery-model"), subs, pricing).class,
     "zero-rated",
     "an unknown model at $0 is zero-rated too -- the honest default, never 'free'",
   );
+});
+
+test("a coding plan pi 0.99.1 prices still reads as its plan, and as metered only when undeclared (#509)", () => {
+  // pi-ai 0.80.7 rated kimi-coding at $0, so a covered run recorded $0 and an undeclared one read
+  // "$0 (unrated)". 0.99.1 gives the same plan an implied API-equivalent price, so a run AFTER the upgrade
+  // records a positive cost. An operator's history holds both shapes for one plan at once, and the fold
+  // reads history: a declared plan wins over either, and contributes $0 for either.
+  const pricing = cannedPricing();
+  const before = row("kimi-coding", "kimi-k2", { cost: 0 });
+  // kimi-for-coding at 0.99.1's implied $0.95 in and $4 out per million: 4M in and 2M out is $11.80.
+  const after = row("kimi-coding", "kimi-for-coding", { cost: 11.8, input: 4_000_000, output: 2_000_000 });
+  assert.deepEqual(classifyRow(before, [sub()], pricing), { class: "plan", planId: "kimi" }, "a pre-upgrade $0 record");
+  assert.deepEqual(classifyRow(after, [sub()], pricing), { class: "plan", planId: "kimi" }, "and a post-upgrade implied price");
+  // UNDECLARED, each reads what its own table said, which is the reason a plan is never inferred from a
+  // provider or a rate: the same plan was "zero-rated" before the upgrade and is "metered" after it.
+  assert.equal(classifyRow(before, [], pricing).class, "zero-rated");
+  assert.deepEqual(classifyRow(after, [], pricing), { class: "metered", planId: null });
+  const implied = rec({
+    jobId: "plan-2",
+    endedAt: "2026-07-14T11:30:00.000Z",
+    tokens: tok(11.8, { input: 4_000_000, output: 2_000_000 }),
+    usage: usage([after]),
+    provider: "kimi-coding",
+    model: "kimi-for-coding",
+  });
+  const f = fold([planCovered, implied], { subscriptions: [sub()] });
+  assert.deepEqual(f.provenance.total, { usd: 0, class: "plan", floor: false, planId: "kimi" }, "the implied price never reaches the plan's total");
+  assert.deepEqual(f.byModel.map((m) => m.cost.class), ["plan", "plan"]);
 });
 
 test("classifyRow: a hypothetical plan never classifies -- the row still costs what it costs today", () => {
@@ -315,7 +348,7 @@ test("dailyByFlow: every flow gap-padded over the SHARED span, mixed days demote
   const nowMs = Date.parse("2026-07-08T12:00:00.000Z");
   const fixA = rec({ jobId: "a", flow: "fix", endedAt: "2026-07-05T10:00:00.000Z", tokens: tok(0.5), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.5 })]), provider: "anthropic", model: "claude-sonnet-4" });
   const fixB = rec({ jobId: "b", flow: "fix", endedAt: "2026-07-07T10:00:00.000Z", tokens: tok(0.25), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.25 })]), provider: "anthropic", model: "claude-sonnet-4" });
-  const noflow = rec({ jobId: "c", flow: null, endedAt: "2026-07-06T10:00:00.000Z", tokens: tok(0), usage: usage([row("zai", "glm-4.7", { cost: 0 })]), provider: "zai", model: "glm-4.7" });
+  const noflow = rec({ jobId: "c", flow: null, endedAt: "2026-07-06T10:00:00.000Z", tokens: tok(0), usage: usage([row("qwen-token-plan", "deepseek-v4-pro", { cost: 0 })]), provider: "qwen-token-plan", model: "deepseek-v4-pro" });
   const f = fold([fixA, fixB, noflow], { nowMs });
 
   assert.deepEqual(f.dailyByFlow.map((r) => [r.flow, r.flowKey]), [["fix", "fix"], ["(no flow)", null]], "window total desc; machine key beside the label, null for the no-flow bucket");
@@ -363,17 +396,17 @@ test("byModel attribution ladder: ledger rows, whole-run fallback via record.pro
   const f = fold([ledgeredMetered, preLedger, legacyNoModel, planCovered, zeroRatedUnmatched], { subscriptions: [sub()] });
   assert.deepEqual(
     f.byModel.map((m) => `${m.provider}/${m.model}`),
-    ["anthropic/claude-sonnet-4", "unknown/unknown", "kimi-coding/kimi-k2", "zai/glm-4.7"],
+    ["anthropic/claude-sonnet-4", "unknown/unknown", "kimi-coding/kimi-k2", "qwen-token-plan/deepseek-v4-pro"],
     "sorted by cost desc, ties alphabetical",
   );
-  const [sonnet, unknown, kimi, zai] = f.byModel;
+  const [sonnet, unknown, kimi, zeroRated] = f.byModel;
   assert.equal(sonnet.runs, 2, "the ledgered run and the pre-ledger whole-run fallback");
   assert.equal(sonnet.calls, 2 + 3, "ledger row calls plus the pre-ledger run's flat tokens.calls");
   assert.equal(sonnet.tokens, 3000);
   assert.deepEqual(sonnet.cost, { usd: 0.75, class: "metered", floor: false });
   assert.deepEqual(unknown.cost, { usd: 0.125, class: "metered", floor: false }, "a legacy record with no provider/model attributes to ('unknown','unknown'), never to a guess");
   assert.deepEqual(kimi.cost, { usd: 0, class: "plan", floor: false, planId: "kimi" });
-  assert.deepEqual(zai.cost, { usd: 0, class: "zero-rated", floor: false }, "zero-rated, not 'free'");
+  assert.deepEqual(zeroRated.cost, { usd: 0, class: "zero-rated", floor: false }, "zero-rated, not 'free'");
 });
 
 // ---- byTrigger / byRepo / foldTriggerCosts (issue #175) ----

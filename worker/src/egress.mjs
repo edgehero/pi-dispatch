@@ -40,9 +40,10 @@ import { makeDetachGate } from "./netns-keeper.mjs";
  *     Hence a hostname allowlist and no address rule that allows anything, which is the mechanism OQ-004's
  *     close condition actually names (the proxy's one address rule only denies this host's loopback and
  *     link-local addresses, issue #428).
- *     BUT THAT WAS MEASURED WITHOUT PI LOADED (issue #427). The pinned pi 0.80.7 depends on npm `undici`
- *     8.5.0, whose load replaces the global dispatcher the flag installs with one that ignores the proxy
- *     variables, so in the runner the provider call went direct and every egress-armed job died at its first
+ *     BUT THAT WAS MEASURED WITHOUT PI LOADED (issue #427). pi depends on npm `undici` (8.5.0 at the 0.80.7
+ *     pin where this was measured, 8.10.2 at the 0.99.1 pin, where loading pi was re-measured to drop the
+ *     env proxy the same way), whose load replaces the global dispatcher the flag installs with one that
+ *     ignores the proxy variables, so in the runner the provider call went direct and every egress-armed job died at its first
  *     turn. The runner now re-installs an env-proxy dispatcher after loading pi
  *     (image/runner/src/env-proxy.mjs), and doctor's canary takes that same path instead of a plain fetch.
  */

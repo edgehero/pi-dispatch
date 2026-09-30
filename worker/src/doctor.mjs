@@ -93,7 +93,7 @@ import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FIX, m
 import { parseSecretProfiles } from "./secret-profiles.mjs";
 // The OAuth-suffix rule and the variable it selects live in their own import-free module so the worker
 // can share them: doctor NAMES a variable and env-allowlist WRITES one, and they must never differ.
-import { OAUTH_KEY_RE, apiKeyVariable } from "./provider-key.mjs";
+import { apiKeyVariable, nonApiKeyKind } from "./provider-key.mjs";
 import { parseTriggers } from "./triggers.mjs";
 import { cronPlacement } from "./schedules.mjs";
 
@@ -3468,9 +3468,10 @@ function providerKeyCheck({ provider, env, agentDir, oracle, nodeOk }) {
 	// still refused -- one step further down, against the variable pi actually reads, where it is a fact
 	// about THAT credential rather than a reason to pretend the variable is unset.
 	const set = candidates.filter((name) => (env[name] ?? "") !== "");
-	// The variable to TELL an operator to set is never the OAuth token, and it is the SAME choice the
-	// worker makes when it writes an `auth.json` key into a container (issue #311). One function, one
-	// module, so a doctor line cannot name a variable the job path does not use.
+	// The variable to TELL an operator to set is never the OAuth token or the bearer token, and it is the
+	// SAME choice the worker makes when it writes an `auth.json` key into a container (issue #311; the
+	// bearer half is issue #509). One function, one module, so a doctor line cannot name a variable the job
+	// path does not use.
 	const apiKeyVar = apiKeyVariable(candidates);
 
 	if (set.length > 0) {
@@ -3489,19 +3490,57 @@ function providerKeyCheck({ provider, env, agentDir, oracle, nodeOk }) {
 				fix: `set a real value for ${using}, or unset it: pi reads it as present, so every job spends a container to fail auth`,
 			};
 		}
-		if (!OAUTH_KEY_RE.test(using)) return { ok: true, label: `Provider key set (${provider}: ${using})` };
+		const kind = nonApiKeyKind(using);
+		if (kind === null && isOAuthTokenValue(provider, env[using])) {
+			// The variable is the API key's, the VALUE is a subscription login: pi decides by the value
+			// (anthropic-messages.js `isOAuthToken`, a substring test for "sk-ant-oat"), not by the name, and
+			// sends it as `Authorization: Bearer` with Claude Code's identity headers. So it is the OAuth
+			// case under the API key's name, and it gets that warning rather than a green line.
+			return {
+				ok: false,
+				warn: true,
+				label: `Provider key set (${provider}: ${using}) -- but the value is an OAuth/subscription token, not an API key`,
+				fix: `put a real API key in ${using}: pi recognises the value as a subscription login whatever variable holds it and sends it as an Authorization: Bearer header; it expires, and the container cannot refresh it`,
+			};
+		}
+		if (kind === null) return { ok: true, label: `Provider key set (${provider}: ${using})` };
 		// Warn, not fail, and the choice is deliberate: the worker forwards this variable and the job WILL
 		// run, so failing here would put doctor in disagreement with the worker -- the exact disease this
 		// issue is about. What doctor must stop doing is what it did before: pass in silence, as though a
 		// subscription login were a service credential.
 		const shadowed = set[1] ?? null;
+		// The pi login this token silently displaces. The worker takes the ENVIRONMENT first and reads
+		// auth.json only when the environment holds no candidate, while pi on this host takes a stored
+		// api_key credential FIRST (pi-ai/dist/auth/helpers.js: "a stored credential key wins"). So with both
+		// present the job spends the token and pi on the host spends the stored key, and without this line
+		// nothing says so. Appended only to the fix lines for a token with no other env candidate beside it:
+		// with one, that env key is the ignored credential and the line already names it.
+		const ignoredLogin = env.PI_AUTH_FROM_PI !== "0" && usablePiLoginKey(agentDir, provider) !== null
+			? `; the API key in pi auth.json is NOT used while ${using} is set (the worker reads the environment first, although pi on this host would use the stored key): unset ${using} to spend the pi login, or keep it only if this token is the credential you mean jobs to spend`
+			: "";
+		if (kind === "bearer") {
+			// The bearer token (ANTHROPIC_AUTH_TOKEN at the pi 0.99.1 pin, issue #509) gets the OAuth token's
+			// treatment, a forwarded variable and a warning, and a line of its own because the hazard is a
+			// different one: it is often a real gateway credential rather than a login that expires, but pi
+			// reads it BEFORE the API key and sends it as `Authorization: Bearer`, so while it is set the API
+			// key is ignored. The API-key variable is named whether or not it is set, because an operator who
+			// sets it later without unsetting this one gets no change at all.
+			return {
+				ok: false,
+				warn: true,
+				label: `Provider key set (${provider}: ${using}) -- a bearer token, not an API key`,
+				fix: shadowed
+					? `unset ${using}: pi reads it BEFORE ${shadowed} and sends it as an Authorization: Bearer header, so every job spends it and ${shadowed} is ignored`
+					: `set ${apiKeyVar} and unset ${using}: pi reads ${using} BEFORE ${apiKeyVar} and sends it as an Authorization: Bearer header, so while it is set ${apiKeyVar} is ignored${ignoredLogin}`,
+			};
+		}
 		return {
 			ok: false,
 			warn: true,
 			label: `Provider key set (${provider}: ${using}) -- an OAuth/subscription login, not an API key`,
 			fix: shadowed
 				? `unset ${using}: pi reads it BEFORE ${shadowed}, so every job spends the subscription login and your API key is ignored`
-				: `set ${apiKeyVar} instead -- an OAuth/subscription token expires, the container cannot refresh it, and it is not the credential for an unattended service`,
+				: `set ${apiKeyVar} instead -- an OAuth/subscription token expires, the container cannot refresh it, and it is not the credential for an unattended service${ignoredLogin}`,
 		};
 	}
 
@@ -3525,6 +3564,16 @@ function providerKeyCheck({ provider, env, agentDir, oracle, nodeOk }) {
 		// itself when IT reads auth.json, but this service forwards the value into a container where it is
 		// read raw, so a login stored that way is not a key this deployment can spend.
 		if (cred?.type === "api_key" && key && !key.startsWith("!") && !key.includes("$") && key.trim()) {
+			if (isOAuthTokenValue(provider, key)) {
+				// The env arm's value rule, for the same reason: the worker writes this under the API key's
+				// name and pi sends it as a subscription login anyway.
+				return {
+					ok: false,
+					warn: true,
+					label: `Provider key set (${provider}) -- from pi auth.json, but the stored key is an OAuth/subscription token, not an API key`,
+					fix: `run \`pi login\` with a real API key for ${provider}: pi recognises the stored value as a subscription login and sends it as an Authorization: Bearer header; it expires, and the container cannot refresh it`,
+				};
+			}
 			return { ok: true, label: `Provider key set (${provider}) -- from pi auth.json` };
 		}
 		if (cred?.type === "api_key" && key && (key.startsWith("!") || key.includes("$")))
@@ -3540,6 +3589,32 @@ function providerKeyCheck({ provider, env, agentDir, oracle, nodeOk }) {
 		// Issue #481: the names no environment doctor can see supplies, for the caller's env-setup rule; never printed.
 		absent: candidates,
 	};
+}
+
+/**
+ * pi's own test for a subscription token in an API-key slot, restated: `isOAuthToken` in
+ * pi-ai/dist/api/anthropic-messages.js is `apiKey.includes("sk-ant-oat")`, applied to the value whatever
+ * variable carried it. Restricted to `anthropic`, the provider whose credential this is; the value itself is
+ * never printed.
+ */
+function isOAuthTokenValue(provider, value) {
+	return provider === "anthropic" && typeof value === "string" && value.includes("sk-ant-oat");
+}
+
+/**
+ * The API key a pi login holds for `provider`, when it is one the worker would forward (a non-blank string
+ * that is not pi's command or variable-reference form), else null. The same acceptance the auth.json arm of
+ * providerKeyCheck applies; never throws, never printed.
+ */
+function usablePiLoginKey(agentDir, provider) {
+	let cred;
+	try {
+		cred = JSON.parse(readFileSync(join(agentDir, "auth.json"), "utf8"))?.[provider];
+	} catch {
+		return null;
+	}
+	const key = cred?.type === "api_key" && typeof cred.key === "string" ? cred.key : null;
+	return key && key.trim() && !key.startsWith("!") && !key.includes("$") ? key : null;
 }
 
 /**
