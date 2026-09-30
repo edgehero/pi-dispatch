@@ -80,7 +80,7 @@ import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO
 import { PODMAN_PINNED_FLAGS, buildPodmanRunArgs, containerSpec, podmanArgsFromSpec } from "./docker-run.mjs";
 import { PODMAN_SERVICE_TIMEOUT_MS, PODMAN_SERVICE_UNIT, makePodmanServiceReader, observeHost, observeRootfulConf, readRootfulService, rootfulConfFix, rootfulConfRetries, rootfulConfResidual, rootfulUnreadList } from "./runtime-observations.mjs";
 import { endpointShown, makeDockerEndpointResolver, quotedShown } from "./backend-local.mjs";
-import { DEFAULT_EGRESS_PROXY, STOPPED_PROXY_STATES, EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, egressArmed, egressCanaryNetwork, egressCanaryProbe, egressEnv, egressProxyName, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
+import { DEFAULT_EGRESS_PROXY, STOPPED_PROXY_STATES, EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, egressArmed, egressCanaryNetwork, egressCanaryProbe, egressEnv, egressProxyName, egressProxyUrl, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { detachBlockedSentence, makeDetachGate, runtimeFromFacts } from "./netns-keeper.mjs";
 import { runLiveProbes } from "./live-probes.mjs";
 import { VALKEY_PASSWORD_KEY, VALKEY_PASSWORD_HOWTO, VALKEY_PORT_KEY, isLoopbackHost, valkeyPasswordProblem, valkeyPortConflict } from "./valkey-auth.mjs";
@@ -1732,6 +1732,9 @@ export async function collectChecks(shellVars, seams) {
 			checks.push({ ok: true, label: `forgejo triggers configured (${urlShown(env.FORGEJO_URL)})` });
 		}
 	}
+
+	// Issue #508: with the egress policy on, a job reaches a forge only over https on port 443.
+	checks.push(...forgeUrlEgressChecks(env, forges));
 
 	// Azure DevOps, when the triggers file names it (issue #80) -- same shape, mirrored from
 	// receiver/src/config.mjs loadAzureConfig. AZURE_WEBHOOK_MODE gets its own line because it is
@@ -4190,7 +4193,7 @@ export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bi
 	// gets added to the producer and not to the reaper.
 	//
 	// ASYMMETRY ON PURPOSE, recorded because it looks like an oversight three characters apart: the OWNER is
-	// escaped and the slugs are interpolated raw. `CANARY_PROBE_SLUGS` is a frozen literal of two plain words
+	// escaped and the slugs are interpolated raw. `CANARY_PROBE_SLUGS` is a frozen literal of three plain words
 	// three lines below, so today there is nothing to escape and escaping it would say the set is untrusted
 	// when it is this file's own. It is here so that whoever adds a slug with a `.` or a `-` in it sees the
 	// obligation: a metacharacter there widens what this `rm -f` matches (issue #360, item 6).
@@ -4306,8 +4309,55 @@ export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bi
 	return checks;
 }
 
-/** The canary's two probe directions. ONE list: the loop names its containers from it and the sweep matches on it. */
-export const CANARY_PROBE_SLUGS = Object.freeze(["provider", "unlisted"]);
+/**
+ * Issue #508: with the egress policy on, a forge must be served over https on port 443, the one shape a job's git reaches
+ * it by. git never uses the job's proxy for an `http://` remote: the job gets the proxy variables in UPPERCASE only, and
+ * libcurl ignores `HTTP_PROXY` for `http://` (measured in the job image, git 2.39.5: `git ls-remote http://...` went to
+ * DNS, and the proxy saw nothing), so an http:// forge fails behind the `--internal` network on ANY port, 80 included.
+ * An `https://` remote is a CONNECT, which the proxy refuses to any port but 443 (a rule older than #508). The clone
+ * itself runs on the host before the container exists, so it is the job's git push and fetch that fail, and its API
+ * calls too unless the forge is on port 80: glab and tea (Go) do use `HTTP_PROXY` for `http://`, and the proxy passes
+ * plain HTTP to a listed host on port 80 (round 3 of #508's review). Any other scheme reaches nothing. One ⚠
+ * per such URL, for a forge the triggers file names; nothing with the policy off or unreadable (the .env check reports
+ * a malformed PI_EGRESS).
+ */
+export function forgeUrlEgressChecks(env, forges = []) {
+	let armed;
+	try {
+		armed = egressArmed(env);
+	} catch {
+		return [];
+	}
+	if (armed !== true) return [];
+	const checks = [];
+	for (const [forge, key] of [["gitlab", "GITLAB_URL"], ["forgejo", "FORGEJO_URL"]]) {
+		if (!forges.includes(forge) || typeof env[key] !== "string") continue;
+		let url;
+		try {
+			url = new URL(env[key].trim());
+		} catch {
+			continue;
+		}
+		// The WHATWG parser drops a default port, so an empty port on https: is 443.
+		if (url.protocol === "https:" && url.port === "") continue;
+		const why =
+			url.protocol === "https:"
+				? `https:// on port ${url.port}, and the egress proxy refuses a CONNECT to any port but 443, so with the egress policy on every job's push, fetch and API call to it fails`
+				: url.protocol === "http:"
+					? `http://, so with the egress policy on a job's git push and fetch fail (git never sends http:// through the proxy)${url.port === "" ? "" : `, and on port ${url.port}, not 80, its API calls fail too`}`
+					: "not an https:// URL, so with the egress policy on a job cannot reach it";
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `${key} (${urlShown(env[key])}) is ${why} (issue #508)`,
+			fix: `serve the forge over https:// on port 443 and point ${key} there, or set PI_EGRESS=0 if you accept jobs without the policy (docs/egress.md)`,
+		});
+	}
+	return checks;
+}
+
+/** The canary's three probes. ONE list: the loop names its containers from it and the sweep matches on it. */
+export const CANARY_PROBE_SLUGS = Object.freeze(["provider", "unlisted", "plainhttp"]);
 
 /** Where the job image's runner keeps the module its own provider call goes through (issue #427). */
 export const EGRESS_CANARY_RUNNER_MODULE = "/app/image/runner/src/env-proxy.mjs";
@@ -4329,6 +4379,21 @@ export const EGRESS_CANARY_STALE_RUNNER = 4;
  */
 export function egressCanaryScript(url) {
 	return `import(${JSON.stringify(EGRESS_CANARY_RUNNER_MODULE)}).then(m=>m.loadPiThenRestore(),e=>{console.log("error",e.code??e.message);process.exit(e.code==="ERR_MODULE_NOT_FOUND"?${EGRESS_CANARY_STALE_RUNNER}:5)}).then(()=>fetch(${JSON.stringify(url)},{method:"POST"}).then(r=>{console.log("reached",r.status);process.exit(0)},e=>{console.log("blocked",e.cause?.code??e.message);process.exit(3)}),e=>{console.log("error",e.message);process.exit(5)})`;
+}
+
+/**
+ * The third probe's in-container script (issue #508): ONE plain forward request, `GET <absolute url>`, written straight
+ * to `proxyUrl`, which the caller passes as `egressProxyUrl(proxy)`: the value both venues' probe argv put in
+ * HTTPS_PROXY. Passed rather than read from the container's environment because this file's text is pinned to read no
+ * environment by name outside the resolver (issue #471), and a script string is text. Raw `node:http` with `agent: false`, and NOT the
+ * runner's route (`loadPiThenRestore`, `fetch`): those tunnel every origin, so they would send a CONNECT, which is
+ * the path the other two probes read, never the plain one a curl or a package manager takes. Exit 3 only for squid's
+ * own refusal (403 with an `X-Squid-Error` of ERR_ACCESS_DENIED), 0 for any other answer (the request went on: a 400
+ * from a TLS port spoken to in clear, or squid's 502 when the far end hung up, both mean the proxy let it through),
+ * and 5 for a proxy that could not be spoken to or never answered, which is no reading at all.
+ */
+export function egressCanaryPlainScript(url, { proxyUrl, timeoutMs = 15_000 } = {}) {
+	return `import("node:http").then(h=>{let p,u;try{p=new URL(${JSON.stringify(String(proxyUrl))});u=new URL(${JSON.stringify(url)})}catch(e){console.log("error",e.message);process.exit(5)}const q=h.request({host:p.hostname,port:p.port||80,method:"GET",path:u.href,headers:{Host:u.host},agent:false,timeout:${Number(timeoutMs)}},r=>{const x=String(r.headers["x-squid-error"]??"");r.resume();if(r.statusCode===403&&x.startsWith("ERR_ACCESS_DENIED")){console.log("blocked",r.statusCode,x);process.exit(3)}console.log("reached",r.statusCode,x);process.exit(0)});q.on("timeout",()=>{console.log("error","timeout");process.exit(5)});q.on("error",e=>{console.log("error",e.code??e.message);process.exit(5)});q.end()},e=>{console.log("error",e.message);process.exit(5)})`;
 }
 
 /**
@@ -4592,7 +4657,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	}
 
 	// The end-to-end probe, and the only place in this codebase that proves the policy rather than
-	// inspecting it. Two containers, on a throwaway network built exactly like a job's, gated on the image
+	// inspecting it. Three containers, on a throwaway network built exactly like a job's, gated on the image
 	// being present because it uses the job image's own node and runner module -- which is the point: it proves the
 	// operator's OWN image routes a request through the proxy the way its runner does (pi loaded, then the runner's
 	// restore), the property a stale image would silently lack and the one whose absence turns the whole policy into an
@@ -4619,6 +4684,9 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
  * docker's is what it always was: a plain `docker run` on the canary network with the two proxy variables, which is
  * pinned byte for byte and not widened here, because moving it is its own change with its own review.
  *
+ * `script` is what the container runs, the runner's route (`egressCanaryScript`) unless a probe says otherwise: the
+ * plain HTTP probe (issue #508) passes `egressCanaryPlainScript`, and its argv differs from the others in nothing else.
+ *
  * podman's is a JOB's, built by the podman venue's own builder (`podmanArgsFromSpec` over `containerSpec`, the path
  * `buildPodmanRunArgs` takes), never a hand-rolled argv: `ISOLATION_FLAGS`, the job's memory and cpu bounds,
  * the job user this host decides as `--user`, `--userns=keep-id` and `PODMAN_PINNED_FLAGS`, and a job's own egress
@@ -4635,7 +4703,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
  * then replaced by none; `CANARY_NO_WORKSPACE` is a path nothing creates, so if a later edit ever kept the mount, the
  * run would fail on a missing source rather than bind a real directory.
  */
-export function egressCanaryProbeArgs({ bin = "docker", slug, pid, network, proxy, image, url, user = null }) {
+export function egressCanaryProbeArgs({ bin = "docker", slug, pid, network, proxy, image, url, user = null, script = egressCanaryScript(url) }) {
 	const name = egressCanaryProbe(slug, pid);
 	if (bin !== "podman") {
 		return [
@@ -4657,14 +4725,14 @@ export function egressCanaryProbeArgs({ bin = "docker", slug, pid, network, prox
 			"node",
 			image,
 			"-e",
-			egressCanaryScript(url),
+			script,
 		];
 	}
 	// HOME as a podman job gets it (`resolvePodmanImageUser` always answers CONTAINER_HOME): under keep-id the job user's
 	// passwd entry otherwise names this host's home path, which does not exist in the image, and the canary loads pi as
 	// that user. No credential rides along: the canary proves the route, and a 401 from the provider is its success.
 	const { mounts: _placeholder, ...spec } = containerSpec({ image, name, env: { HOME: CONTAINER_HOME, ...egressEnv({ proxy, armed: true }) }, workspace: CANARY_NO_WORKSPACE, network, user, userns: "keep-id", extraFlags: ["--entrypoint", "node"] });
-	return [...podmanArgsFromSpec({ ...spec, mounts: [] }), "-e", egressCanaryScript(url)];
+	return [...podmanArgsFromSpec({ ...spec, mounts: [] }), "-e", script];
 }
 
 /** The workspace `containerSpec` requires and the canary never mounts (see `egressCanaryProbeArgs`). */
@@ -4672,10 +4740,11 @@ const CANARY_NO_WORKSPACE = "/nonexistent/pi-dispatch-egress-canary-mounts-nothi
 
 /**
  * The egress canary (REQ-EGRESS-ALLOWLIST, issue #431): a throwaway `--internal` network built like a job's, the proxy
- * attached, two probe containers running `egressCanaryScript` (the runner's own route to the network, #427), one that
- * must reach the provider and one that must not reach an unlisted host, and a teardown that removes everything it made
- * or names what it could not. Returns `{ checks, results }`: the lines to print, and the `[{ property, want, reached }]`
- * readings `egressVerdict` folds into `--live`.
+ * attached, three probe containers, and a teardown that removes everything it made or names what it could not. Two run
+ * `egressCanaryScript` (the runner's own route to the network, #427): one must reach the provider and one must not reach
+ * an unlisted host. The third runs `egressCanaryPlainScript` and must not get plain HTTP through to a listed host on a
+ * port other than 80 (issue #508). Returns `{ checks, results }`: the lines to print, and the
+ * `[{ property, want, reached, probe }]` readings `egressVerdict` folds into `--live`, `probe` being the slug.
  *
  * ONE canary for every caller: docker's `doctor` (`egressChecks`), the podman venue's `doctor --live`
  * (`podmanLiveChecks`) and `.github/scripts/podman-conformance.mjs`. The conformance script used to carry a canary of
@@ -4756,11 +4825,17 @@ export async function runEgressCanary({ run, bin = "docker", proxy, image, pid =
 		// which no proxy can reach, so a proxy allowing every host still read as denying this one (measured: an
 		// allow-all squid answered 503 for it and let `example.com` through). `example.com` is reserved for documentation
 		// (RFC 2606), answers everywhere, and is contacted only when the proxy lets the request out, which is the finding.
-		for (const [slug, host, url, want] of [
+		//
+		// The THIRD probe (issue #508) asks the proxy for plain HTTP to a LISTED host on a port other than 80, as a client
+		// that forwards rather than tunnels would (npm undici's EnvHttpProxyAgent without proxyTunnel, a package manager). Port 443 of the provider because it is a
+		// port that host certainly listens on, so a proxy that lets it through gets an answer (a 400 for clear text on a
+		// TLS port) rather than a timeout, and no second host has to be listed for the canary.
+		for (const [slug, host, url, want, script] of [
 			[CANARY_PROBE_SLUGS[0], "the provider", "https://api.anthropic.com/v1/messages", true],
 			[CANARY_PROBE_SLUGS[1], "an unlisted host", "https://example.com/", false],
+			[CANARY_PROBE_SLUGS[2], "plain HTTP to a listed host off port 80", "http://api.anthropic.com:443/", false, egressCanaryPlainScript("http://api.anthropic.com:443/", { proxyUrl: egressProxyUrl(proxy) })],
 		]) {
-			const answer = await probe(egressCanaryProbeArgs({ bin, slug, pid, network: net, proxy, image, url, user }));
+			const answer = await probe(egressCanaryProbeArgs({ bin, slug, pid, network: net, proxy, image, url, user, ...(script ? { script } : {}) }));
 			// The script exits 0 (reached) or 3 (blocked). Anything else is the container not running it -- a name clash,
 			// the image, the daemon -- which is no reading at all, and must not pass for a deny.
 			// `code === null` is the ONE case where a container may still be RUNNING under a name we chose: the
@@ -4772,7 +4847,7 @@ export async function runEgressCanary({ run, bin = "docker", proxy, image, pid =
 			// nothing of ours to remove. Harmless either way today (`docker rm -f <missing>` exits 0, measured),
 			// and written out because the conflation it removes is the one this item is about.
 			if (answer.code === null && answer.ended !== "error") unfinished.push(egressCanaryProbe(slug, pid));
-			// Said ONCE and the second probe not run: the unlisted host's "blocked" would come from the internal network
+			// Said ONCE and the later probes not run: the unlisted host's "blocked" would come from the internal network
 			// refusing a runner that never tried the proxy, which reads exactly like a policy that denies it.
 			if (answer.code === EGRESS_CANARY_STALE_RUNNER) {
 				checks.push({
@@ -4780,7 +4855,7 @@ export async function runEgressCanary({ run, bin = "docker", proxy, image, pid =
 					warn: true,
 					label: `${venue.prefix}Egress policy: not proved, because the job image could not find ${EGRESS_CANARY_RUNNER_MODULE} (or an import of it): its runner predates issue #427, whose provider call goes around the proxy so that with egress armed every job fails at its first turn, or the image is not built from this project's`,
 					fix: `use a job image built after issue #427 (ghcr.io/edgehero/pi-job:latest, or rebuild yours FROM it), or set PI_EGRESS=0 until you can`,
-					readBack: { property: "egress", want, reached: null },
+					readBack: { property: "egress", want, reached: null, probe: slug },
 				});
 				break;
 			}
@@ -4790,17 +4865,31 @@ export async function runEgressCanary({ run, bin = "docker", proxy, image, pid =
 					warn: true,
 					label: `${venue.prefix}Egress policy probe for ${host} did not run (${answer.code === null ? `${bin} run did not finish` : `${bin} run exited ${answer.code}`})`,
 					fix: "re-run doctor; if it persists, run the job image by hand to see why a container on this network will not start",
-					readBack: { property: "egress", want, reached: null },
+					readBack: { property: "egress", want, reached: null, probe: slug },
 				});
 				continue;
 			}
 			const reached = answer.code === 0;
+			if (slug === CANARY_PROBE_SLUGS[2]) {
+				checks.push({
+					ok: reached === want,
+					warn: true,
+					readBack: { property: "egress", want, reached, probe: slug },
+					label: `${venue.prefix}${
+						reached === want
+							? "Egress policy refuses plain HTTP to a listed host off port 80 (api.anthropic.com:443 without a tunnel; only a CONNECT reaches 443)"
+							: "Egress policy lets plain HTTP through to api.anthropic.com on port 443, so a client that does not tunnel reaches every port of a listed host"
+					}`,
+					fix: `the proxy runs rules from before issue #508: restart it on the current egress-proxy.conf (\`pi-dispatch up\`; on the podman venue \`pi-dispatch service install --force\`; for a proxy you started by hand, update the egress-proxy.conf it mounts, then \`${bin} restart ${proxy}\`); a copy you keep by hand must add "http_access deny !Safe_ports !CONNECT" right before "http_access allow allowed"`,
+				});
+				continue;
+			}
 			checks.push({
 				ok: reached === want,
 				warn: true,
 				// NOT rendered: what `doctor --live` folds into its egress read-back (live-probes.mjs), so the canary is
 				// run once and read twice rather than a second canary built beside it.
-				readBack: { property: "egress", want, reached },
+				readBack: { property: "egress", want, reached, probe: slug },
 				label: `${venue.prefix}${
 					reached === want
 						? want
@@ -5952,7 +6041,7 @@ export async function podmanChecks(env, seams, { jobImage, jobImageNote = "" }) 
 		// an image copies its layers (27 to 32 s measured), and `--live` is where this venue already starts containers
 		// built like a job's.
 		if (proxyRunning && seams.live !== true) {
-			checks.push({ ok: false, warn: true, label: "podman: the egress allowlist is read back by `pi-dispatch doctor --live` on this venue, not by this run", fix: "run `pi-dispatch doctor --live`: its egress canary runs two containers built like a podman job's (the job user, --userns=keep-id, the venue's pinned flags) on a job-shaped --internal network under this account's Podman, one that must reach the provider through the proxy and one that must not reach an unlisted host" });
+			checks.push({ ok: false, warn: true, label: "podman: the egress allowlist is read back by `pi-dispatch doctor --live` on this venue, not by this run", fix: "run `pi-dispatch doctor --live`: its egress canary runs three containers built like a podman job's (the job user, --userns=keep-id, the venue's pinned flags) on a job-shaped --internal network under this account's Podman, one that must reach the provider through the proxy, one that must not reach an unlisted host, and one that must not get plain HTTP through to a listed host off port 80" });
 		}
 		// Issue #484: the account-owned copy of the rules the shipped unit mounts, against the installed package's. `service
 		// install` compares it on every run and replaces a differing one only under --force, and `up` installs nothing
@@ -6473,7 +6562,8 @@ async function podmanEgressCanary({ podman, readInfo, run, image, pid, isAlive, 
 	if (podman.egress.proxyRunning !== true || podman.imagePresent !== true) return { checks, results: [] };
 	// Announced, as `runLiveProbes` announces its own containers: these start before it, and a cold first keep-id start
 	// can take half a minute each, which is a long silence on an operator's terminal.
-	announce(`starting ${CANARY_PROBE_SLUGS.map((slug) => egressCanaryProbe(slug, pid)).join(" and ")} from ${image} (as the job user ${podman.user}) on the --internal network ${egressCanaryNetwork(pid)}, with ${podman.egress.proxy} attached, to read the egress allowlist back; both are removed when the canary ends`);
+	const probes = CANARY_PROBE_SLUGS.map((slug) => egressCanaryProbe(slug, pid));
+	announce(`starting ${probes.slice(0, -1).join(", ")} and ${probes.at(-1)} from ${image} (as the job user ${podman.user}) on the --internal network ${egressCanaryNetwork(pid)}, with ${podman.egress.proxy} attached, to read the egress allowlist back; all three are removed when the canary ends`);
 	const canary = await runEgressCanary({ run, bin: "podman", proxy: podman.egress.proxy, image, pid, user: podman.user, gate });
 	return { checks: [...checks, ...canary.checks], results: canary.results };
 }

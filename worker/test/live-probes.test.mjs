@@ -279,17 +279,51 @@ test("imagePinning holds only for a refusal with no pull attempt, and the image 
 });
 
 test("egress is folded from the canary: off or partial is not read back, a wrong reading fails", () => {
+	// The canary's three readings (issue #508 added the third), each naming its probe.
+	const provider = (reached) => ({ want: true, reached, probe: "provider" });
+	const unlisted = (reached) => ({ want: false, reached, probe: "unlisted" });
+	const plainhttp = (reached) => ({ want: false, reached, probe: "plainhttp" });
 	assert.equal(egressVerdict({ armed: false, results: [] }).warn, true);
-	assert.equal(egressVerdict({ armed: true, results: [{ want: true, reached: true }] }).warn, true, "one of two readings is not a read-back");
-	assert.equal(egressVerdict({ armed: true, results: [{ want: true, reached: true }, { want: false, reached: false }] }).ok, true);
-	const leak = egressVerdict({ armed: true, results: [{ want: true, reached: true }, { want: false, reached: true }] });
+	assert.equal(egressVerdict({ armed: true, results: [provider(true)] }).warn, true, "one of three readings is not a read-back");
+	const two = egressVerdict({ armed: true, results: [provider(true), unlisted(false)] });
+	assert.equal(two.warn, true, "two of three is not a read-back either");
+	assert.equal(two.detail, "not read back: the egress canary did not run all three probes (see the egress lines above)");
+	const holds = egressVerdict({ armed: true, results: [provider(true), unlisted(false), plainhttp(false)] });
+	assert.equal(holds.ok, true);
+	assert.equal(holds.detail, "the provider was reached, an unlisted host was not, and plain HTTP off port 80 was refused");
+	const leak = egressVerdict({ armed: true, results: [provider(true), unlisted(true), plainhttp(false)] });
 	assert.equal(leak.ok, false);
 	assert.match(leak.detail, /unlisted host was reached/);
-	assert.equal(egressVerdict({ armed: true, results: [{ want: true, reached: true }, { want: false, reached: null }] }).warn, true, "a probe that did not run is no reading, never a deny");
+	const plain = egressVerdict({ armed: true, results: [provider(true), unlisted(false), plainhttp(true)] });
+	assert.equal(plain.ok, false);
+	assert.equal(plain.detail, "plain HTTP to a listed host off port 80 was let through");
+	assert.equal(egressVerdict({ armed: true, results: [provider(true), unlisted(false), plainhttp(null)] }).warn, true, "a probe that did not run is no reading, never a deny");
 	assert.match(egressVerdict({ armed: null, results: [] }).detail, /could not be read/, "a malformed PI_EGRESS is not reported as off");
-	const reachedWhileProviderUnread = egressVerdict({ armed: true, results: [{ want: true, reached: null }, { want: false, reached: true }] });
+	const reachedWhileProviderUnread = egressVerdict({ armed: true, results: [provider(null), unlisted(true), plainhttp(false)] });
 	assert.equal(reachedWhileProviderUnread.ok, false);
 	assert.notEqual(reachedWhileProviderUnread.warn, true, "a reached unlisted host is a finding even when the other probe did not run");
+	const plainWhileUnread = egressVerdict({ armed: true, results: [provider(true), unlisted(null), plainhttp(true)] });
+	assert.equal(plainWhileUnread.ok, false, "a wrong plain HTTP reading fails even when another probe did not run");
+	assert.notEqual(plainWhileUnread.warn, true);
+	// Gate round 1 of #508: the three readings are counted BY NAME. A repeated probe, or readings that name none, are
+	// not a canary that ran all three, whatever their count.
+	for (const [why, results] of [
+		["a repeated probe", [provider(true), unlisted(false), unlisted(false)]],
+		["no probe named", [{ want: true, reached: true }, { want: false, reached: false }, { want: false, reached: false }]],
+		["four readings", [provider(true), unlisted(false), plainhttp(false), plainhttp(false)]],
+	]) {
+		const got = egressVerdict({ armed: true, results });
+		assert.equal(got.warn, true, why);
+		assert.equal(got.detail, "not read back: the egress canary did not run all three probes (see the egress lines above)", why);
+	}
+	// In any order.
+	assert.equal(egressVerdict({ armed: true, results: [plainhttp(false), provider(true), unlisted(false)] }).ok, true);
+});
+
+test("egressVerdict's probe names are doctor's canary slugs (#508)", async () => {
+	const { CANARY_PROBE_SLUGS } = await import("../src/doctor.mjs");
+	const { EGRESS_PROBES } = await import("../src/live-probes.mjs");
+	assert.deepEqual([...EGRESS_PROBES], [...CANARY_PROBE_SLUGS]);
 });
 
 test("containerIdOf takes the ID docker run -d printed, and nothing else", () => {
@@ -1420,10 +1454,10 @@ test("mountSet refuses Podman's API socket on sight, as it does docker's (#354)"
 });
 
 test("egressVerdict with no readings points at the egress lines, and takes no caller's reason any more (#354, #431)", () => {
-	assert.equal(egressVerdict({ armed: true, results: [] }).detail, "not read back: the egress canary did not run both probes (see the egress lines above)");
+	assert.equal(egressVerdict({ armed: true, results: [] }).detail, "not read back: the egress canary did not run all three probes (see the egress lines above)");
 	// Issue #431: the `unread` override existed for a podman venue with no canary of its own; that venue now runs one, so
 	// a caller's reason is ignored rather than trusted, and every venue's missing reading points at its own canary lines.
-	assert.equal(egressVerdict({ armed: true, results: [], unread: "the canary runs on docker only" }).detail, "not read back: the egress canary did not run both probes (see the egress lines above)");
+	assert.equal(egressVerdict({ armed: true, results: [], unread: "the canary runs on docker only" }).detail, "not read back: the egress canary did not run all three probes (see the egress lines above)");
 	assert.equal(egressVerdict({ armed: false, results: [] }).detail, "not read back: PI_EGRESS is off, so there is no policy to read back");
 });
 

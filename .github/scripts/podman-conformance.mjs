@@ -226,8 +226,9 @@ const withBrokenEnumeration = () => makeReaper({ log: () => {}, bin: `pi-dispatc
 
 /**
  * The egress readings `egressVerdict` takes, from doctor's own canary (`runEgressCanary`, issue #431) under this
- * account's Podman: a job-shaped `--internal` network with the proxy attached, and two probe containers built by the
- * podman builder as a job's are, as the job user, running the runner's route to the network. This script carried a copy
+ * account's Podman: a job-shaped `--internal` network with the proxy attached, and three probe containers built by the
+ * podman builder as a job's are, as the job user: two running the runner's route to the network, and one sending plain
+ * HTTP to a listed host off port 80, which the proxy must refuse (issue #508). This script carried a copy
  * of its own until then, with a plain `fetch`, which proved the network and the allowlist and not the runner's route;
  * the one canary now serves `doctor --live` and this run alike. Every line it prints that is not a pass is repeated
  * here, since the harness only sees the readings.
@@ -387,6 +388,8 @@ async function staleCanarySweep() {
 	const [emptyPid, fullPid] = dead;
 	const emptyNet = egressCanaryNetwork(emptyPid);
 	const fullNet = egressCanaryNetwork(fullPid);
+	// The first two slugs only: two leftover shapes (one running, one stopped) are what the sweep is tested on, and the
+	// third slug (issue #508) is matched by the same pattern, so a third leftover would add nothing.
 	const [runningProbe, stoppedProbe] = CANARY_PROBE_SLUGS.map((slug) => egressCanaryProbe(slug, fullPid));
 	const exists = async (kind, name) => (await podman([kind, "exists", name])).code === 0;
 	try {

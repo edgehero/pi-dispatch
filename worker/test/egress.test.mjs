@@ -525,6 +525,35 @@ test("the proxy denies a listed name resolving to this host's loopback or link-l
 	assert.deepEqual(lines.filter((line) => /^acl allowed\s/.test(line)), ['acl allowed dstdomain -n "/etc/pi-dispatch/allowlist.conf"']);
 });
 
+// Issue #508: `allow allowed` carried no port rule, so a client forwarding plain HTTP reached ANY port of a listed host.
+// The narrowing is stock squid's `Safe_ports`, one port wide, as a deny right before that allow (first match wins, so
+// after it would never apply), and it names only port and method ACLs, which resolve nothing, so #428's "no unlisted
+// name is resolved" still holds. `!CONNECT` keeps it off every tunnel, so the CONNECT rules are untouched.
+test("plain HTTP reaches a listed host on port 80 only: `deny !Safe_ports !CONNECT` right before `allow allowed`, resolving nothing (#508)", async () => {
+	const { readFileSync } = await import("node:fs");
+	const conf = readFileSync(new URL("../../deploy/egress-proxy.conf", import.meta.url), "utf8");
+	const lines = conf.split("\n").map((line) => line.trim()).filter((line) => line !== "" && !line.startsWith("#"));
+	const access = lines.filter((line) => line.startsWith("http_access "));
+	const safe = lines.filter((line) => /^acl Safe_ports\s/.test(line));
+	assert.deepEqual(safe, ["acl Safe_ports port 80"], "defined once, with exactly that port");
+	const naming = access.filter((line) => /\bSafe_ports\b/.test(line));
+	assert.deepEqual(naming, ["http_access deny !Safe_ports !CONNECT"], "one rule names it, and it never matches a CONNECT");
+	const at = access.indexOf(naming[0]);
+	assert.ok(at > access.findIndex((line) => /\bto_host_local\b/.test(line)), "after the address deny");
+	assert.equal(access[at + 1], "http_access allow allowed", "directly before the allow it narrows");
+	assert.ok(lines.indexOf(safe[0]) < lines.indexOf(naming[0]), "defined before use");
+	// It names no ACL that resolves: every ACL on the line is a port or a method ACL.
+	for (const name of naming[0].split(/\s+/).slice(2).map((word) => word.replace(/^!/, ""))) {
+		const def = lines.filter((line) => line.startsWith(`acl ${name} `));
+		assert.equal(def.length, 1, name);
+		assert.ok(["port", "method"].includes(def[0].split(/\s+/)[2]), `${name} is a ${def[0].split(/\s+/)[2]} acl`);
+	}
+	// The tunnel rules are as they were.
+	assert.ok(access.indexOf("http_access deny CONNECT !SSL_ports") < access.indexOf("http_access allow CONNECT allowed"));
+	assert.deepEqual(lines.filter((line) => /^acl SSL_ports\s/.test(line)), ["acl SSL_ports port 443"]);
+	assert.equal(access.at(-1), "http_access deny all");
+});
+
 // --- issue #452, gate round 3: the ONE detach helper, and the gate every teardown asks through it ---------------------
 
 const COMPAT49 = JSON.stringify({ ServerVersion: "4.9.3", ProductLicense: "Apache-2.0", OperatingSystem: "ubuntu", SecurityOptions: ["name=rootless"] });

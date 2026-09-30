@@ -116,8 +116,9 @@ for `RECEIVER_IDENTITY_RETRY_SECONDS`, default 10 minutes); when a window ends t
 the supervisor starts another, so an instance restart measured in minutes is ridden out rather than
 outlasting the recovery.
 
-The **job container** is a separate trust store: `git clone` and `glab` run inside it, so the CA has to be
-in the image. Add it to your own image (`docs/job-image.md`) — a `COPY` of the cert into
+The **job container** is a separate trust store: the job's `git push` and `fetch` and `glab` run inside it
+(the clone runs on the host first), so the CA has to be in the image. Add it to your own image
+(`docs/job-image.md`): a `COPY` of the cert into
 `/usr/local/share/ca-certificates/` plus `update-ca-certificates`. The stock image trusts only the public
 roots.
 
@@ -125,9 +126,13 @@ roots.
 HTTPS, calls fail rather than silently following — a redirect is somewhere to send a credential, and
 following one is how a token ends up at a host you did not name. Set `GITLAB_URL` to the final URL.
 
-Plain `http://` does work if that is genuinely what you run. It sends the token in the clear on every API
-call and every clone, so it is only reasonable on a trusted network, and it is not what the isolation
-model assumes elsewhere.
+Plain `http://` works only with the egress policy off (`PI_EGRESS=0`). It sends the token in the clear on
+every API call, push and fetch (and the clone on the host), so it is only reasonable on a trusted network, and it is not what the
+isolation model assumes elsewhere. With the policy on (the default), GitLab must be served over `https://` on
+port 443: git in a job never sends an `http://` remote through the proxy, and the proxy refuses a `CONNECT` to
+any other port (issue #508, `docs/egress.md`). Otherwise a job's git push and fetch fail, and on a port other
+than 80 its API calls fail too.
+`pi-dispatch doctor` warns when `GITLAB_URL` is anything but `https://` on 443.
 
 ## Minimum GitLab version: 17.4
 

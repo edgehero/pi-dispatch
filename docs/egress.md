@@ -82,7 +82,7 @@ than everything else combined.
 | | |
 |---|---|
 | One `--internal` network **per job** | `pi-job-<id>-net`, created at job start and removed at job end. Holds exactly two endpoints: the container and the proxy. If the worker dies before it can remove one, the next boot removes it, detaching whatever is still on it first, and says so in the log if it cannot. |
-| One long-lived proxy | `pi-dispatch-egress-proxy`, squid, hostname filtering on `CONNECT` to port 443, and a listed name that resolves to one of this host's fixed loopback or link-local addresses (or slirp4netns's `10.0.2.2`) is refused (issue #428). The allowlist is matched as written (`dstdomain -n`): an IP-literal request is refused unless that literal is itself listed, and the proxy makes no reverse lookup of it. A host mapped to another address (pasta's `--map-host-loopback <address>` or `--map-gw`, slirp4netns's `cidr=`) is not covered here; on the `podman` venue the worker refuses the containers.conf that would do that, and the account's running rootless network while it still does after the key is gone (issue #450). Publishes no port. |
+| One long-lived proxy | `pi-dispatch-egress-proxy`, squid, filtering by hostname. Exactly two shapes pass, both to a listed host: a `CONNECT` tunnel to port 443, or a plain (untunnelled) request to port 80. Nothing else passes (issue #508). "A plain request to port 80" also covers squid's own gateways for other schemes, but only to port 80 (`ftp://host:80/`, `https://host:80/`); every other scheme and port is refused. A plain forward request for an `https://` URL on 443, where the proxy would open the TLS itself, is refused too. A listed name that resolves to one of this host's fixed loopback or link-local addresses (or slirp4netns's `10.0.2.2`) is refused (issue #428). The allowlist is matched as written (`dstdomain -n`): an IP-literal request is refused unless that literal is itself listed, and the proxy makes no reverse lookup of it. A host mapped to another address (pasta's `--map-host-loopback <address>` or `--map-gw`, slirp4netns's `cidr=`) is not covered here; on the `podman` venue the worker refuses the containers.conf that would do that, and the account's running rootless network while it still does after the key is gone (issue #450). Publishes no port. |
 | One upstream network | `pi-dispatch-egress-out`. Only the proxy is on it. |
 
 **Per job, not one shared network**, and that is the part worth understanding. A shared network is a shared
@@ -129,6 +129,7 @@ deployment. `doctor` does it once, when you ask.
 ✓ Egress proxy health: healthy
 ✓ Egress policy reaches the provider (api.anthropic.com answered, so the whole path works and no key was spent)
 ✓ Egress policy denies an unlisted host (the deny direction is the half an allowlist can silently lose)
+✓ Egress policy refuses plain HTTP to a listed host off port 80 (api.anthropic.com:443 without a tunnel; only a CONNECT reaches 443)
 ```
 
 ### On the native `podman` venue
@@ -142,7 +143,8 @@ mount), so a pass is about what a job gets. Its lines carry the section's prefix
 ```
 ✓ podman: Egress policy reaches the provider (api.anthropic.com answered, so the whole path works and no key was spent)
 ✓ podman: Egress policy denies an unlisted host (the deny direction is the half an allowlist can silently lose)
-✓ read back on podman: egress holds (the provider was reached and an unlisted host was not)
+✓ podman: Egress policy refuses plain HTTP to a listed host off port 80 (api.anthropic.com:443 without a tunnel; only a CONNECT reaches 443)
+✓ read back on podman: egress holds (the provider was reached, an unlisted host was not, and plain HTTP off port 80 was refused)
 ```
 
 A plain `pi-dispatch doctor` does not run it there: the first keep-id start of an image copies its layers, which
@@ -158,7 +160,7 @@ them.
 ### Lines about leftovers
 
 You may also see a line about a leftover. Those are the canary's own objects, `pi-dispatch-egress-doctor-<pid>`
-and its two probe containers. The rule is simple enough to rely on: **every one of them is removed at the end
+and its three probe containers. The rule is simple enough to rely on: **every one of them is removed at the end
 of the run that made it, or reported in that same run** -- so what a later run finds is what a run that was
 KILLED left behind, and doctor does not have to guess which. What it knows is that the process in the name is
 no longer alive. The next run sweeps whatever belongs to a process that is no longer alive
@@ -186,7 +188,7 @@ generator.
 
 <!-- /CANARY-LINES -->
 
-The two policy lines each run a throwaway container on a throwaway network, using **your job image's own node and
+The provider and unlisted-host lines each run a throwaway container on a throwaway network, using **your job image's own node and
 its runner's own module** (pi loaded, then the runner's proxy restore, issue #427), so they prove the route your jobs'
 provider calls take once the runner has called that module; that it does, before its first request, is checked in CI. (Before #427 they used a plain `fetch`, which never loads pi and stayed green while every job
 failed.) They cost nothing: `api.anthropic.com` answers `401` to an
@@ -194,6 +196,32 @@ unauthenticated request, so reaching the provider and being refused for the key 
 without spending a token. The deny probe asks for `example.com`, a host that resolves and answers, so a proxy
 that lets everything out is caught; it is only contacted if your proxy lets the request out, which is the
 finding. A probe container that does not run at all is reported as not run, never as a deny.
+
+The third line (issue #508) runs a third container the same way, but not the runner's route: that route tunnels
+every request, so it would only ever send a `CONNECT`. This one sends a plain forward request with raw `node:http`,
+`GET http://api.anthropic.com:443/`, the way a tool that forwards plain HTTP would (npm undici's `EnvHttpProxyAgent`
+without `proxyTunnel`, a package manager, or a `curl -x` a job brings). It asks for port
+443 because that host certainly listens there, so a proxy that lets the request through gets an answer (a `400` for
+clear text on a TLS port) instead of a timeout, and nothing extra has to be listed. It counts as refused only when
+squid itself refuses it: a `403` with an `X-Squid-Error` header starting `ERR_ACCESS_DENIED`. Any other answer means
+the proxy let it through. A proxy that cannot be reached or never answers is no reading. The check is best effort:
+an upstream on port 443 that answered clear text with a `403` and a forged `X-Squid-Error` header would read as
+refused, which needs control of the provider's own answer.
+
+**Right after an upgrade this line can fail.** squid reads its rules only at start, so until the proxy restarts on
+the refreshed `egress-proxy.conf` it still runs the old rules: the line reads `Egress policy lets plain HTTP through
+to api.anthropic.com on port 443, ...` and `--live`'s egress verdict fails. `pi-dispatch up` refreshes the file and
+restarts the proxy; on the `podman` venue `pi-dispatch service install --force` does. A proxy you started by hand
+needs the updated file in its mount and a restart (`docker restart pi-dispatch-egress-proxy`, or `podman restart`).
+
+**With the policy on, a forge must be served over `https://` on port 443.** A job gets the proxy variables in
+uppercase only, and git ignores `HTTP_PROXY` for an `http://` remote, so it never sends one through the proxy: from
+behind the job's `--internal` network an `http://` forge fails on any port, 80 included (measured in the job image,
+git 2.39.5; this was so before issue #508 too). An `https://` remote is a `CONNECT`, which the proxy refuses to any
+port but 443. The clone runs on the host before the container exists, so with an `http://` forge it is a job's
+git push and fetch that fail; on a port other than 80 its API calls fail too (glab and tea do use `HTTP_PROXY`, and
+port 80 is allowed). `pi-dispatch doctor` warns when `GITLAB_URL` or `FORGEJO_URL` is anything but `https://` on 443. The ways
+out are `https://` on 443, or `PI_EGRESS=0`.
 
 An absent proxy is a **hard failure** in doctor, because every job is refused while it is down. Everything
 that needs the network to answer is a **warning**, because a custom provider base URL or a transient blip
@@ -250,9 +278,11 @@ env-proxy dispatcher itself, from pi's own `undici`, right after pi is loaded, a
 Before, it was a plain `fetch` and stayed green through all of this. On a job image built before the fix, the
 canary says the image cannot find that module, rather than reporting a policy result. That the runner's entrypoint
 calls the module, before its first request, is checked in CI, where the job image's contract job runs the real
-entrypoint against a stub proxy. The runner's restored dispatcher tunnels every origin (`proxyTunnel: true`,
-as pi's own CLI does since undici 8.7 stopped tunnelling `http://`), so an `http://` provider is a CONNECT
-to port 80, which the shipped policy refuses, as before.
+entrypoint against a stub proxy. pi and the runner always tunnel (`proxyTunnel: true`, as pi's own CLI does
+since undici 8.7 stopped tunnelling `http://`). So a provider configured with an `http://` URL is a CONNECT to
+that URL's port, and the shipped policy refuses it unless the port is 443. A tool that forwards plain HTTP
+instead, such as npm undici's `EnvHttpProxyAgent` without `proxyTunnel` or a package manager, gets port 80 of a
+listed host and nothing else (issue #508).
 
 ## What this does not buy you
 
@@ -264,6 +294,9 @@ credential's scope and expiry remain what actually bound the damage.
 It also accounts for nothing. A staged package that spawns a `pi` subprocess spends against the provider
 host, which is on the allowlist by necessity, and a proxy that does not decrypt cannot count tokens
 (`OQ-011`).
+
+Plain HTTP to port 80 of a listed host is allowed, because some package mirrors and redirects still use it
+(issue #508). Whatever a job sends that way crosses the network in clear text.
 
 And it does not hide **this host** from the job. `--internal` stops the network routing anywhere beyond
 itself, but its gateway is still the host, so a service listening on `0.0.0.0` there answers a job container
@@ -282,6 +315,15 @@ All of it was run. The method costs nothing and is worth repeating on your own h
 - **The whole path, end to end**, with the shipped compose profile and a real per-job network: the provider
   answered `401` in 228 ms, an unlisted host was denied in 18 ms, and `api.github.com` answered in 205 ms
   through the `.github.com` rule.
+- **The port rule for plain HTTP** (issue #508), measured on 2026-09-30 with the pinned squid (6.13) on Docker
+  29.1.3, rootless Podman 4.9.3 and rootless Podman 5.8.1 (SELinux enforcing), all three alike. Before the rule, a
+  plain `GET` to a listed host on port 8080 answered `200`; after it, `403`. Port 80 answered `200` before and after.
+  A `CONNECT` to port 8080 was `403` both times. A plain `GET http://api.anthropic.com:443/`, the canary's third
+  probe, got Cloudflare's `400` before and squid's `403` with `X-Squid-Error: ERR_ACCESS_DENIED` after. A plain
+  forward `GET https://api.anthropic.com/` made squid open the TLS itself before (`503`), and is `403` after. An
+  unlisted name was never resolved, before or after. npm undici 8.10.0's `EnvHttpProxyAgent` without
+  `proxyTunnel` went from `200` to `403` on port 8080 and stayed `200` on 80. Node 22's built-in `fetch` with
+  `NODE_USE_ENV_PROXY=1` sends a `CONNECT` even for `http://`, so it was already refused off port 443.
 - **The pre-spend refusal**, in both directions: with the proxy stopped the preflight returns
   `proxyStopped`, with it removed `proxyMissing`, and with `PI_EGRESS` unset it returns admit **without
   spawning docker at all**.

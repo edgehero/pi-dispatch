@@ -287,6 +287,8 @@ const fromDoctor = (id, pattern, what) => {
 fromDoctor("D-health", /^Egress proxy health: healthy/, "the proxy's health");
 fromDoctor("EG1", /^Egress policy reaches the provider/, "the provider");
 fromDoctor("EG2", /^Egress policy denies an unlisted host/, "an unlisted host");
+// Issue #508: the proxy's port rule for plain (untunnelled) requests, read by doctor's third canary probe.
+fromDoctor("EG8", /^Egress policy refuses plain HTTP/, "plain HTTP to a listed host off port 80");
 fromDoctor("D-egress", /^read back on local: egress holds/, "egress");
 fromDoctor("EG6", /^read back on local: jobToJobIsolation holds/, "jobToJobIsolation");
 fromDoctor("D-localFolders", /^read back on local: localFolders holds/, "localFolders");
@@ -363,7 +365,9 @@ const ROWS = [
 	{ row: "SELinux: an operator's local folder, unlabelled", result: "refused: job-inputs-unreadable", needs: /^(S-\w+:(none|ro)$|R-local$|R-control$)/ },
 	{ row: "SELinux: the global overlay, unlabelled", result: "refused: job-inputs-unreadable", needs: /^(R-overlay|R-control)$/ },
 	{ row: "SELinux: SecurityOptions carries name=selinux", result: "measured", needs: /^SECOPT$/ },
-	{ row: "nftables: egress reaches the provider and denies an unlisted host", result: "measured", needs: /^(EG[1-57]|EG-net|D-egress)$/ },
+	// EG8 (issue #508) rides this row rather than a row of its own: it is the same canary on the same network, and a new
+	// row would need a measured date on this page's SELinux host before it could be printed.
+	{ row: "nftables: egress reaches the provider and denies an unlisted host", result: "measured", needs: /^(EG[1-578]|EG-net|D-egress)$/ },
 	{ row: "nftables: jobToJobIsolation", result: "measured", needs: /^EG6$/ },
 	{ row: "Health checks under systemd", result: "measured", needs: /^(H-|D-health$)/ },
 	{ row: "SELinux: the compose file's config mounts", result: "argv: :ro,z", needs: /^(C-compose|H-proxy)$/ },

@@ -32,6 +32,12 @@ FORGEJO_BOT_ID=42          # the harness account's numeric id, from its profile 
 FORGEJO_WEBHOOK_SECRET=... # a long random string
 ```
 
+With the egress policy on (the default), Forgejo must be served over `https://` on port 443. git in a job never
+sends an `http://` remote through the proxy, and the proxy refuses a `CONNECT` to any other port (issue #508,
+`docs/egress.md`). With Forgejo's default `http://forgejo.example:3000` a job's git push and fetch fail, and its
+API calls too, since the port is not 80. Plain `http://` works only with `PI_EGRESS=0`. `pi-dispatch doctor` warns when `FORGEJO_URL` is anything
+but `https://` on 443.
+
 There is no source to choose here either. `FORGEJO_AUTH_SOURCE` accepts only `pat` and defaults to it,
 for the same reason GitLab's does: Forgejo has no App or installation token, so the variable exists to
 refuse a wrong assumption of symmetry with `GITHUB_AUTH_SOURCE` rather than to offer an alternative, and it

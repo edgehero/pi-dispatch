@@ -452,10 +452,11 @@ export function imagePinningVerdict({ code, output, stillAbsent, bin = "docker" 
 }
 
 /**
- * EGRESS, folded in from `doctor.mjs`'s canary: two containers on a job-shaped network behind the proxy, one that
- * must reach the provider and one that must not reach an unlisted host. `results` is `[{ want, reached }]` from the
- * canary's `readBack`; anything short of both readings -- the policy off, the proxy down, the canary skipped -- is
- * "not read back", never a pass.
+ * EGRESS, folded in from `doctor.mjs`'s canary: three containers on a job-shaped network behind the proxy, one that
+ * must reach the provider, one that must not reach an unlisted host, and one that must not get plain HTTP through to a
+ * listed host on a port other than 80 (issue #508). `results` is `[{ want, reached, probe }]` from the canary's
+ * `readBack`, `probe` naming which of the three it is; anything short of all three readings -- the policy off, the
+ * proxy down, the canary skipped -- is "not read back", never a pass.
  *
  * Each venue hands in its OWN canary's readings: docker's from doctor's egress lines, the podman venue's from the canary
  * its `--live` runs under Podman (issue #431), so "see the egress lines above" names lines about the proxy that venue's
@@ -466,14 +467,28 @@ export function egressVerdict({ armed, results, keeperBlocked = null }) {
 	if (armed !== true) return notReadBack("egress", "PI_EGRESS is off, so there is no policy to read back");
 	// Issue #458: the podman venue on Podman 4.x without its keeper runs no canary, since its teardown would break the proxy.
 	if (keeperBlocked) return notReadBack("egress", `the egress canary was not run, because ${keeperBlocked} (see the keeper line above)`);
-	if (!Array.isArray(results) || results.length < 2) return notReadBack("egress", "the egress canary did not run both probes (see the egress lines above)");
-	// A WRONG reading fails first, whatever else is missing: an unlisted host that was reached is a finding even when
-	// the provider probe did not run, and reporting it as merely unread would pass doctor over it.
+	// Each of the three probes exactly once, by NAME (issue #508, gate round 1): a count alone read two unlisted readings,
+	// or three with no probe named, as a canary that ran all three.
+	const probes = Array.isArray(results) ? results.map((r) => r?.probe) : [];
+	if (probes.length !== EGRESS_PROBES.length || !EGRESS_PROBES.every((p) => probes.includes(p))) return notReadBack("egress", "the egress canary did not run all three probes (see the egress lines above)");
+	// With all three probes present, a WRONG reading fails first, whatever else did not run to an answer: an unlisted
+	// host that was reached is a finding even when the provider probe did not run, and reporting it as merely unread
+	// would pass doctor over it. A probe missing altogether is "not read back" above, before any reading is judged.
 	const wrong = results.filter((r) => typeof r.reached === "boolean" && r.reached !== r.want);
-	if (wrong.length > 0) return verdict("egress", false, wrong.map((r) => (r.want ? "the provider was not reached" : "an unlisted host was reached")).join("; "));
+	if (wrong.length > 0) return verdict("egress", false, wrong.map((r) => EGRESS_WRONG[r.probe]).join("; "));
 	if (results.some((r) => typeof r.reached !== "boolean")) return notReadBack("egress", "an egress probe did not run to an answer (see the egress lines above)");
-	return verdict("egress", true, "the provider was reached and an unlisted host was not");
+	return verdict("egress", true, "the provider was reached, an unlisted host was not, and plain HTTP off port 80 was refused");
 }
+
+/** The canary's probes: `CANARY_PROBE_SLUGS` in doctor.mjs, which imports this module, so a test pins the two equal. */
+export const EGRESS_PROBES = Object.freeze(["provider", "unlisted", "plainhttp"]);
+
+/** What a wrong reading says, by the canary probe it came from. */
+const EGRESS_WRONG = Object.freeze({
+	provider: "the provider was not reached",
+	unlisted: "an unlisted host was reached",
+	plainhttp: "plain HTTP to a listed host off port 80 was let through",
+});
 
 /**
  * EPHEMERAL (issue #344): two runs under ONE name, each detached with `--rm`, each waited on until `docker ps -a` no

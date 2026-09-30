@@ -1155,10 +1155,11 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    that the job image is in this account's store, and, with the egress policy armed, that the proxy is running under
    this Podman and that its rootless network keeper holds (not holding is ✗ on Podman 4.x only, step 6). `--live`
    reads the declarations back off real containers and says it read them back on podman,
-   `egress` included: with the policy armed it first runs doctor's egress canary under this account's Podman, two
+   `egress` included: with the policy armed it first runs doctor's egress canary under this account's Podman, three
    containers built like a podman job (your uid as `--user`, `--userns=keep-id`, the venue's pinned flags, a job's
    proxy variables) on a job-shaped `--internal` network with the proxy attached, one that must reach the provider
-   through the runner's own route and one that must not reach an unlisted host. Its lines start `podman: Egress`,
+   through the runner's own route, one that must not reach an unlisted host, and one whose plain HTTP to a listed
+   host off port 80 must be refused (issue #508). Its lines start `podman: Egress`,
    before the read-back's. A plain `pi-dispatch doctor` does not run it on this venue, and says so in a ⚠ line
    pointing at `--live`. A canary network a killed `--live` left behind is removed by the next `--live`, on
    Podman 4.9 and 5.x alike: the sweeps read what is on a network with `podman ps -a --filter network=<net>`,

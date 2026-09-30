@@ -32,8 +32,9 @@ import { createRequire } from "node:module";
  * exactly as it did at 0.80.7 and as it does under pi's own CLI. That matters for an operator-configured `http://`
  * provider (a local gateway, an overlay models.json baseUrl): tunnelled, it arrives as `CONNECT host:80`, which
  * deploy/egress-proxy.conf refuses (`deny CONNECT !SSL_ports`), the verdict it has always had; untunnelled it would
- * arrive as a plain forward request, which the same file's `allow allowed` admits for a listed host, a silent
- * widening of the policy by a dependency bump. Measured at the 0.99.1 pin: without the option the env-proxy test's
+ * arrive as a plain forward request, which the same file's `allow allowed` admits for a listed host on port 80 only
+ * (issue #508: `deny !Safe_ports !CONNECT` refuses every other port), a silent widening of the policy by a dependency
+ * bump all the same. Measured at the 0.99.1 pin: without the option the env-proxy test's
  * CONNECT-only proxy saw no tunnel and answered the plain request 405.
  *
  * Only when `NODE_USE_ENV_PROXY` is "1", which is exactly what the worker emits with egress armed. Without it nothing is

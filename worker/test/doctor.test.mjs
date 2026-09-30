@@ -6,13 +6,13 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryProbeArgs, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep } from "../src/doctor.mjs";
+import { startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryPlainScript, egressCanaryProbeArgs, forgeUrlEgressChecks, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep } from "../src/doctor.mjs";
 import { valkeyPasswordFor } from "../src/valkey-endpoint.mjs";
 import { serviceEnvFileOf } from "../src/service-env.mjs";
 import { VALKEY_SHARED_KEY as VALKEY_SHARED_NAME } from "../src/podman-stack.mjs";
 import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS, runInit } from "../src/init.mjs";
 import { EGRESS_CANARY_NET_PREFIX, egressCanaryProbe } from "../src/egress.mjs";
-import { LIVE_PREFIX } from "../src/live-probes.mjs";
+import { LIVE_PREFIX, egressVerdict } from "../src/live-probes.mjs";
 import { JOB_USER_FIX, parseDaemonFacts } from "../src/job-user.mjs";
 import { OBSERVATION_FIX } from "../src/backends.mjs";
 import { PODMAN_JOB_USER_FIX } from "../src/backend-podman.mjs";
@@ -155,6 +155,8 @@ const EGRESS_OK = {
 	"docker network": 0,
 	"docker run --rm --name pi-dispatch-egress-probe-provider": 0,
 	"docker run --rm --name pi-dispatch-egress-probe-unlisted": 3,
+	// Issue #508: plain HTTP to a listed host off port 80 is refused by the proxy (exit 3).
+	"docker run --rm --name pi-dispatch-egress-probe-plainhttp": 3,
 };
 const green = { ...EGRESS_OK, "docker info": 0, "docker image": 0 };
 // A classic-token `gh auth status` (newer gh quotes each scope; the parser also accepts unquoted).
@@ -4618,7 +4620,7 @@ test("an egress probe that did not RUN is reported as not run, and never passes 
 	const checks = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, collectSeams({ ...green, "docker run --rm --name pi-dispatch-egress-probe-unlisted": 125 }));
 	assert.ok(checks.some((c) => /Egress policy probe for an unlisted host did not run \(docker run exited 125\)/.test(c.label) && c.warn === true));
 	assert.ok(!checks.some((c) => /denies an unlisted host/.test(c.label)));
-	assert.deepEqual(checks.filter((c) => c.readBack).map((c) => c.readBack.reached), [true, null]);
+	assert.deepEqual(checks.filter((c) => c.readBack).map((c) => c.readBack.reached), [true, null, false]);
 });
 
 test("a job image whose runner predates issue #427 is named once, and neither direction is read as the policy", async () => {
@@ -4631,6 +4633,7 @@ test("a job image whose runner predates issue #427 is named once, and neither di
 	assert.match(stale[0].fix, /built after issue #427/);
 	assert.ok(calls.some((c) => c.args.some((a) => /egress-probe-provider/.test(a))), "the provider probe ran");
 	assert.ok(!calls.some((c) => c.args.some((a) => /egress-probe-unlisted/.test(a))), "the deny probe is not run: its block would be the network's, not the policy's");
+	assert.ok(!calls.some((c) => c.args.some((a) => /egress-probe-plainhttp/.test(a))), "nor the plain HTTP probe (#508): the canary stops at the first stale reading");
 	assert.ok(!checks.some((c) => /reaches the provider|denies an unlisted host|did not run/.test(c.label)));
 	assert.deepEqual(checks.filter((c) => c.readBack).map((c) => c.readBack.reached), [null]);
 	assert.ok(calls.some((c) => c.args.slice(0, 2).join(" ") === "network rm"), "and the canary network is still removed");
@@ -4655,6 +4658,161 @@ test("the canary script's exits are real: 4 only for a missing module, 3 for a b
 	assert.equal(run(join(dir, "syntax.mjs")).status, 5);
 });
 
+// Issue #508: the plain HTTP probe's script, against a fake proxy in this process. It must send a plain forward request
+// (absolute URI, never a CONNECT), and only squid's own refusal (403 + X-Squid-Error ERR_ACCESS_DENIED) counts as denied.
+test("the plain HTTP canary script sends a forward GET, and only squid's access denial is a block (#508)", async () => {
+	const { createServer } = await import("node:http");
+	const { spawn: spawnChild } = await import("node:child_process");
+	const runAgainst = (answer) =>
+		new Promise((resolve) => {
+			const seen = [];
+			const server = createServer((req, res) => {
+				seen.push(`${req.method} ${req.url} HTTP/${req.httpVersion}`, req.headers.host);
+				answer?.(res);
+			});
+			server.on("connect", (req, socket) => {
+				seen.push(`CONNECT ${req.url}`);
+				socket.destroy();
+			});
+			server.listen(0, "127.0.0.1", () => {
+				const script = egressCanaryPlainScript("http://api.anthropic.com:443/", { proxyUrl: `http://127.0.0.1:${server.address().port}`, timeoutMs: 300 });
+				const child = spawnChild(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "pipe"] });
+				let stdout = "";
+				child.stdout.on("data", (d) => (stdout += d));
+				child.on("close", (status) => {
+					server.closeAllConnections();
+					server.close(() => resolve({ status, stdout, seen }));
+				});
+			});
+		});
+	const denied = await runAgainst((res) => res.writeHead(403, { "X-Squid-Error": "ERR_ACCESS_DENIED 0" }).end("no"));
+	assert.equal(denied.status, 3, denied.stdout);
+	assert.deepEqual(denied.seen, ["GET http://api.anthropic.com:443/ HTTP/1.1", "api.anthropic.com:443"], "a plain forward request, absolute URI, never a CONNECT");
+	assert.match(denied.stdout, /^blocked 403 ERR_ACCESS_DENIED/);
+	for (const [why, answer] of [
+		["a TLS port spoken to in clear", (res) => res.writeHead(400).end()],
+		["squid let it out and the far end hung up", (res) => res.writeHead(502, { "X-Squid-Error": "ERR_ZERO_SIZE_OBJECT 0" }).end()],
+		["a 403 that is not squid's", (res) => res.writeHead(403).end()],
+	]) {
+		const got = await runAgainst(answer);
+		assert.equal(got.status, 0, `${why}: ${got.stdout}`);
+		assert.match(got.stdout, /^reached /, why);
+	}
+	const silent = await runAgainst(null);
+	assert.equal(silent.status, 5, "a proxy that never answers is no reading");
+	// Nothing listening: take a port, then free it.
+	const { createServer: net } = await import("node:net");
+	const port = await new Promise((resolve) => {
+		const s = net().listen(0, "127.0.0.1", () => {
+			const p = s.address().port;
+			s.close(() => resolve(p));
+		});
+	});
+	const refused = spawnSync(process.execPath, ["-e", egressCanaryPlainScript("http://api.anthropic.com:443/", { proxyUrl: `http://127.0.0.1:${port}`, timeoutMs: 300 })], { encoding: "utf8", timeout: 30_000 });
+	assert.equal(refused.status, 5, refused.stdout);
+	assert.match(refused.stdout, /^error ECONNREFUSED/);
+});
+
+test("the plain HTTP probe's argv is the unlisted probe's apart from its name and its script (#508)", () => {
+	const base = { pid: 42, network: "pi-dispatch-egress-doctor-42", proxy: "pi-dispatch-egress-proxy", image: "pi-job:latest" };
+	const plain = egressCanaryPlainScript("http://api.anthropic.com:443/", { proxyUrl: "http://pi-dispatch-egress-proxy:3128" });
+	for (const bin of ["docker", "podman"]) {
+		const user = bin === "podman" ? "1234:1234" : null;
+		const unlisted = egressCanaryProbeArgs({ bin, ...base, user, slug: "unlisted", url: "https://example.com/" });
+		const plainhttp = egressCanaryProbeArgs({ bin, ...base, user, slug: "plainhttp", url: "http://api.anthropic.com:443/", script: plain });
+		assert.equal(plainhttp.at(-1), plain, bin);
+		assert.equal(unlisted.at(-1), egressCanaryScript("https://example.com/"), `${bin}: the default script is unchanged`);
+		assert.deepEqual(
+			plainhttp.slice(0, -1).map((a) => a.replace("plainhttp", "SLUG")),
+			unlisted.slice(0, -1).map((a) => a.replace("unlisted", "SLUG")),
+			bin,
+		);
+	}
+});
+
+test("a proxy that lets plain HTTP through fails its own line and reads back as reached; an unrun one is not a reading (#508)", async () => {
+	const through = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, collectSeams({ ...green, "docker run --rm --name pi-dispatch-egress-probe-plainhttp": 0 }));
+	const line = through.find((c) => c.readBack?.probe === "plainhttp");
+	assert.equal(line.ok, false);
+	assert.equal(line.warn, true);
+	assert.equal(line.label, "Egress policy lets plain HTTP through to api.anthropic.com on port 443, so a client that does not tunnel reaches every port of a listed host");
+	assert.match(line.fix, /issue #508/);
+	assert.ok(line.fix.includes('"http_access deny !Safe_ports !CONNECT" right before "http_access allow allowed"'));
+	assert.ok(line.fix.includes("for a proxy you started by hand, update the egress-proxy.conf it mounts, then `docker restart pi-dispatch-egress-proxy`"), line.fix);
+	assert.deepEqual(line.readBack, { property: "egress", want: false, reached: true, probe: "plainhttp" });
+	const held = (await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, collectSeams(green))).find((c) => c.readBack?.probe === "plainhttp");
+	assert.equal(held.ok, true);
+	assert.equal(held.label, "Egress policy refuses plain HTTP to a listed host off port 80 (api.anthropic.com:443 without a tunnel; only a CONNECT reaches 443)");
+	const unrun = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, collectSeams({ ...green, "docker run --rm --name pi-dispatch-egress-probe-plainhttp": 125 }));
+	assert.ok(unrun.some((c) => c.label === "Egress policy probe for plain HTTP to a listed host off port 80 did not run (docker run exited 125)"));
+	assert.deepEqual(unrun.find((c) => c.readBack?.probe === "plainhttp").readBack, { property: "egress", want: false, reached: null, probe: "plainhttp" });
+});
+
+// Issue #508, gate round 1: docs/egress.md's sample doctor output is the code's own wording. The page's generated rows
+// (CANARY_LINES) are the leftover sweep's lines only, so the probe lines were free to drift; they are pinned here, read
+// off a real canary run and the real verdict rather than retyped.
+test("docs/egress.md's sample egress lines are what doctor prints, on docker and on podman (#508)", async () => {
+	const doc = readFileSync(new URL("../../docs/egress.md", import.meta.url), "utf8");
+	const probes = (await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, collectSeams(green))).filter((c) => c.readBack);
+	assert.deepEqual(probes.map((c) => c.readBack.probe), ["provider", "unlisted", "plainhttp"]);
+	const docker = probes.map((c) => `✓ ${c.label}\n`).join("");
+	const podman = probes.map((c) => `✓ podman: ${c.label}\n`).join("");
+	assert.ok(doc.includes(`✓ Egress proxy health: healthy\n${docker}\`\`\``), "the docker sample, all three lines in order");
+	const held = egressVerdict({ armed: true, results: probes.map((c) => c.readBack) });
+	assert.equal(held.ok, true);
+	assert.ok(doc.includes(`${podman}✓ read back on podman: egress holds (${held.detail})\n`), "the podman sample, with the read-back's own wording");
+});
+
+// Issue #508, gate rounds 1 and 2: with the egress policy on a job reaches a forge only over https on 443. git ignores the
+// job's uppercase HTTP_PROXY for an http:// remote (measured in the job image), and the proxy refuses a CONNECT off 443.
+test("doctor warns when egress is on and a forge URL is anything but https:// on port 443 (#508)", () => {
+	const on = { PI_EGRESS: "1" };
+	const [gitlab] = forgeUrlEgressChecks({ ...on, GITLAB_URL: "http://gitlab.example:8929" }, ["gitlab"]);
+	assert.deepEqual([gitlab.ok, gitlab.warn], [false, true]);
+	assert.equal(gitlab.label, "GITLAB_URL (http://gitlab.example:8929) is http://, so with the egress policy on a job's git push and fetch fail (git never sends http:// through the proxy), and on port 8929, not 80, its API calls fail too (issue #508)");
+	// On port 80 the API calls pass (glab and tea use HTTP_PROXY, and the proxy allows port 80): only git is named.
+	assert.equal(forgeUrlEgressChecks({ GITLAB_URL: "http://gitlab.example" }, ["gitlab"])[0].label, "GITLAB_URL (http://gitlab.example) is http://, so with the egress policy on a job's git push and fetch fail (git never sends http:// through the proxy) (issue #508)");
+	// Any other scheme, a bare host:port among them (parsed with the host as its scheme), is not called http://.
+	for (const value of ["ftp://gl.example", "gitlab.internal:8443"]) {
+		const [other] = forgeUrlEgressChecks({ GITLAB_URL: value }, ["gitlab"]);
+		assert.match(other.label, /^GITLAB_URL \(.*\) is not an https:\/\/ URL, so with the egress policy on a job cannot reach it \(issue #508\)$/, value);
+		assert.match(other.fix, /^serve the forge over https:\/\/ on port 443/, value);
+	}
+	assert.equal(gitlab.fix, "serve the forge over https:// on port 443 and point GITLAB_URL there, or set PI_EGRESS=0 if you accept jobs without the policy (docs/egress.md)");
+	const [tls] = forgeUrlEgressChecks({ GITLAB_URL: "https://gitlab.example:8443" }, ["gitlab"]);
+	assert.equal(tls.label, "GITLAB_URL (https://gitlab.example:8443) is https:// on port 8443, and the egress proxy refuses a CONNECT to any port but 443, so with the egress policy on every job's push, fetch and API call to it fails (issue #508)");
+	for (const [why, env, forges] of [
+		["http on 80", { GITLAB_URL: "http://gitlab.example" }, ["gitlab"]],
+		["http on 80 written out", { GITLAB_URL: "http://gitlab.example:80" }, ["gitlab"]],
+		["forgejo on 3000, armed by default", { FORGEJO_URL: "http://forgejo.example:3000/" }, ["forgejo"]],
+	]) {
+		assert.equal(forgeUrlEgressChecks(env, forges).length, 1, why);
+	}
+	// The credential in a URL is never printed.
+	assert.doesNotMatch(forgeUrlEgressChecks({ GITLAB_URL: "http://u:secret@gitlab.example:8929" }, ["gitlab"])[0].label, /secret/);
+	for (const [why, env, forges] of [
+		["https by default", { GITLAB_URL: "https://gitlab.example" }, ["gitlab"]],
+		["https on 443 written out", { FORGEJO_URL: "https://forgejo.example:443/" }, ["forgejo"]],
+		["policy off", { PI_EGRESS: "0", GITLAB_URL: "http://gitlab.example:8929" }, ["gitlab"]],
+		["policy unreadable", { PI_EGRESS: "maybe", GITLAB_URL: "http://gitlab.example:8929" }, ["gitlab"]],
+		["forge not in triggers", { GITLAB_URL: "http://gitlab.example:8929" }, ["forgejo"]],
+		["not a URL", { GITLAB_URL: "gitlab" }, ["gitlab"]],
+	]) {
+		assert.deepEqual(forgeUrlEgressChecks(env, forges), [], why);
+	}
+});
+
+test("the forge warning reaches doctor's output for a gitlab and a forgejo trigger (#508)", async () => {
+	for (const [kind, vars] of [
+		["gitlab", { GITLAB_TOKEN: "glpat_x", GITLAB_URL: "http://gitlab.example:8929" }],
+		["forgejo", { FORGEJO_URL: "http://code.example.org:3000", FORGEJO_WEBHOOK_SECRET: "s", FORGEJO_TOKEN: "t" }],
+	]) {
+		const { out, text } = capture();
+		await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile(kind), ...vars }), imgDeps(out, green));
+		assert.match(text(), new RegExp(`⚠ ${kind.toUpperCase()}_URL \\([^)]*\\) is http://, so with the egress policy on a job's git push and fetch fail`), `${kind}: ${text()}`);
+	}
+});
+
 test("the egress canary's deny probe asks for a host that RESOLVES, under a per-process name", async () => {
 	const calls = [];
 	await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, collectSeams(green, { spawn: fakeSpawn(green, calls) }));
@@ -4666,7 +4824,11 @@ test("the egress canary's deny probe asks for a host that RESOLVES, under a per-
 test("the egress canary carries a non-rendered readBack, so --live folds it in without a second canary", async () => {
 	const checks = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, collectSeams(green));
 	const readBacks = checks.filter((c) => c.readBack).map((c) => c.readBack);
-	assert.deepEqual(readBacks, [{ property: "egress", want: true, reached: true }, { property: "egress", want: false, reached: false }]);
+	assert.deepEqual(readBacks, [
+		{ property: "egress", want: true, reached: true, probe: "provider" },
+		{ property: "egress", want: false, reached: false, probe: "unlisted" },
+		{ property: "egress", want: false, reached: false, probe: "plainhttp" },
+	]);
 });
 
 // --- issue #341: the job-user line, and the probe run as the job user ------------------------------------------
@@ -5396,7 +5558,7 @@ test("docs/egress.md's canary rows ARE the table, generated (#379)", () => {
 	// THE RETIRED PHRASES, carried over from the test this replaced. It guarded them with the note that a
 	// correction had landed everywhere except the page four times on that branch, and dropping the guard let
 	// all three back into the columns this test does not otherwise read.
-	const section = doc.slice(doc.indexOf("### Lines about leftovers"), doc.indexOf("The two policy lines each run"));
+	const section = doc.slice(doc.indexOf("### Lines about leftovers"), doc.indexOf("The provider and unlisted-host lines each run"));
 	for (const retired of ["left by a doctor run that did not finish", "from an interrupted doctor", "the network itself was already gone"]) {
 		assert.equal(section.includes(retired), false, `the page must not quote a sentence no site can emit: ${retired}`);
 	}
@@ -5628,7 +5790,7 @@ test("doctor: the probe's name comes from the SEAM, so the producer and the reap
 	const wedged = { ...green, "docker run --rm --name pi-dispatch-egress-probe-unlisted": { code: null, output: "" }, "gh auth status": { code: 0, output: ghStatusOutput } };
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, wedged, calls, { pid: 777, isAlive: () => true }));
 	const ran = calls.filter((c) => c.args[0] === "run").map((c) => c.args[c.args.indexOf("--name") + 1]);
-	assert.deepEqual(ran, ["pi-dispatch-egress-probe-provider-777", "pi-dispatch-egress-probe-unlisted-777"], "the injected pid names the probes");
+	assert.deepEqual(ran, ["pi-dispatch-egress-probe-provider-777", "pi-dispatch-egress-probe-unlisted-777", "pi-dispatch-egress-probe-plainhttp-777"], "the injected pid names the probes");
 	assert.deepEqual(calls.filter((c) => c.args[0] === "rm").map((c) => c.args.at(-1)), ["pi-dispatch-egress-probe-unlisted-777"], "and the cleanup looks for that same name");
 });
 
@@ -5814,7 +5976,8 @@ test("doctor: the slug list is pinned as LITERALS, because order is part of the 
 	// REVERSAL moves both sides together. Order matters here -- reversing it names the provider probe
 	// `-unlisted-<pid>` while it fetches api.anthropic.com, defeating the whole point of a name someone reads
 	// off `ps` to find out what a wedged probe was doing.
-	assert.deepEqual([...CANARY_PROBE_SLUGS], ["provider", "unlisted"]);
+	// Issue #508 appends `plainhttp` LAST, so the two names that were already read off `ps` keep their places.
+	assert.deepEqual([...CANARY_PROBE_SLUGS], ["provider", "unlisted", "plainhttp"]);
 });
 
 test("doctor: a listing that FAILS is said, never taken as 'no leftovers' (#350)", async () => {
@@ -6560,7 +6723,7 @@ const MIXED_PIN = {
 			"✓ podman: egress proxy running under this account's Podman (pi-dispatch-egress-proxy)",
 			// Issue #431: the one line that moved, and on purpose: the podman venue's allowlist is now read back by --live.
 			"⚠ podman: the egress allowlist is read back by `pi-dispatch doctor --live` on this venue, not by this run",
-			"    → run `pi-dispatch doctor --live`: its egress canary runs two containers built like a podman job's (the job user, --userns=keep-id, the venue's pinned flags) on a job-shaped --internal network under this account's Podman, one that must reach the provider through the proxy and one that must not reach an unlisted host",
+			"    → run `pi-dispatch doctor --live`: its egress canary runs three containers built like a podman job's (the job user, --userns=keep-id, the venue's pinned flags) on a job-shaped --internal network under this account's Podman, one that must reach the provider through the proxy, one that must not reach an unlisted host, and one that must not get plain HTTP through to a listed host off port 80",
 			// Issue #458: the one line added, with egress armed on this venue.
 			"✓ podman: rootless network keeper running under this account's Podman on its own bridge network (pi-dispatch-netns-keeper), so a job's network teardown cannot cut the proxy's route out",
 			// PR #463 round 3: the keeper network's options, read as they are.
@@ -7885,7 +8048,8 @@ const podmanEgressFacts = (egress = {}, over = {}) => ({
 const podmanEgressSeams = (canary = {}, calls = [], plan = {}) => ({
 	// `canary` FIRST, for its keys' place in the prefix match, and LAST, for their values: a spread keeps the first place a
 	// key had and the last value it was given, so spreading it once would lose an override of a key the rest also carry.
-	spawn: fakeSpawn({ ...canary, ...toPodman(liveOk({ uid: "1234" })), ...toPodman(livePeersOk(plan)), ...podmanPlan(), "podman network": 0, ...canary }, calls),
+	// The plain HTTP probe (issue #508) refused by default, as a current proxy does; a test that reads it names it.
+	spawn: fakeSpawn({ [`${PODMAN_PROBE}plainhttp`]: 3, ...canary, ...toPodman(liveOk({ uid: "1234" })), ...toPodman(livePeersOk(plan)), ...podmanPlan(), "podman network": 0, ...canary }, calls),
 	liveFs: liveFsAs(1234),
 	isAlive: () => false,
 	pid: 1,
@@ -7897,7 +8061,7 @@ const PODMAN_PROBE = "podman run --name=pi-dispatch-egress-probe-";
 // The podman canary's probe argv, WRITTEN OUT rather than built by the builder under test: a job's own argv (the
 // builder's isolation flags and bounds, the job user, keep-id and the venue's pinned flags, a job's HOME and its four
 // egress variables), on the canary network, with no mount, running the runner's route to the network.
-const podmanProbeArgv = (slug, url) => [
+const podmanProbeArgv = (slug, url, script = egressCanaryScript(url)) => [
 	"run",
 	`--name=pi-dispatch-egress-probe-${slug}-1`,
 	"--pull=never",
@@ -7933,7 +8097,7 @@ const podmanProbeArgv = (slug, url) => [
 	"NODE_USE_ENV_PROXY=1",
 	"pi-job:latest",
 	"-e",
-	egressCanaryScript(url),
+	script,
 ];
 
 test("doctor --live on podman reads egress back through a canary under podman, built as a podman job is (#431)", async () => {
@@ -7950,6 +8114,7 @@ test("doctor --live on podman reads egress back through a canary under podman, b
 		"network connect pi-dispatch-egress-doctor-1",
 		"run --name=pi-dispatch-egress-probe-provider-1 --pull=never",
 		"run --name=pi-dispatch-egress-probe-unlisted-1 --pull=never",
+		"run --name=pi-dispatch-egress-probe-plainhttp-1 --pull=never",
 		"network disconnect -f",
 		"network rm pi-dispatch-egress-doctor-1",
 	]);
@@ -7957,11 +8122,18 @@ test("doctor --live on podman reads egress back through a canary under podman, b
 	const probes = calls.filter((c) => String(c.args[1]).startsWith("--name=pi-dispatch-egress-probe-"));
 	assert.deepEqual(probes[0].args, podmanProbeArgv("provider", "https://api.anthropic.com/v1/messages"));
 	assert.deepEqual(probes[1].args, podmanProbeArgv("unlisted", "https://example.com/"));
+	// Issue #508: the plain HTTP probe is a job's argv too, running the raw forward request at the job's own proxy.
+	assert.deepEqual(probes[2].args, podmanProbeArgv("plainhttp", "http://api.anthropic.com:443/", egressCanaryPlainScript("http://api.anthropic.com:443/", { proxyUrl: "http://pi-dispatch-egress-proxy:3128" })));
 	// want and reached per probe, carried where the verdict reads them, and the lines say podman.
-	assert.deepEqual(held.filter((c) => c.readBack).map((c) => c.readBack), [{ property: "egress", want: true, reached: true }, { property: "egress", want: false, reached: false }]);
+	assert.deepEqual(held.filter((c) => c.readBack).map((c) => c.readBack), [
+		{ property: "egress", want: true, reached: true, probe: "provider" },
+		{ property: "egress", want: false, reached: false, probe: "unlisted" },
+		{ property: "egress", want: false, reached: false, probe: "plainhttp" },
+	]);
 	assert.ok(labels.includes("podman: Egress policy reaches the provider (api.anthropic.com answered, so the whole path works and no key was spent)"), labels.join("\n"));
 	assert.ok(labels.includes("podman: Egress policy denies an unlisted host (the deny direction is the half an allowlist can silently lose)"));
-	assert.ok(held.some((c) => c.ok && c.label === "read back on podman: egress holds (the provider was reached and an unlisted host was not)"), labels.join("\n"));
+	assert.ok(labels.includes("podman: Egress policy refuses plain HTTP to a listed host off port 80 (api.anthropic.com:443 without a tunnel; only a CONNECT reaches 443)"));
+	assert.ok(held.some((c) => c.ok && c.label === "read back on podman: egress holds (the provider was reached, an unlisted host was not, and plain HTTP off port 80 was refused)"), labels.join("\n"));
 	assert.ok(labels.indexOf("podman: Egress policy reaches the provider (api.anthropic.com answered, so the whole path works and no key was spent)") < labels.findIndex((l) => l.startsWith("read back on podman: egress")), "the canary's lines come first, so the verdict's 'above' is true");
 	assert.equal(calls.filter((c) => c.args[0] === "info").length, 2, "podman info asked again before the canary, and again before the probes");
 	assert.ok(held.some((c) => c.ok && /^read back on podman: jobToJobIsolation holds \(peer1 reached the proxy/.test(c.label)), labels.join("\n"));
@@ -7982,10 +8154,14 @@ test("a podman canary that reaches an unlisted host, or not the provider, fails 
 	assert.match(shut.find((c) => c.label.startsWith("read back on podman: egress")).label, /egress does NOT hold -- declared enforced, observed: the provider was not reached$/);
 	const stale = await run({ [`${PODMAN_PROBE}provider`]: EGRESS_CANARY_STALE_RUNNER });
 	assert.ok(stale.some((c) => c.warn && c.label.startsWith(`podman: Egress policy: not proved, because the job image could not find ${EGRESS_CANARY_RUNNER_MODULE}`)));
-	assert.match(stale.find((c) => c.label.startsWith("read back on podman: egress")).label, /egress not read back: the egress canary did not run both probes \(see the egress lines above\)/);
+	assert.match(stale.find((c) => c.label.startsWith("read back on podman: egress")).label, /egress not read back: the egress canary did not run all three probes \(see the egress lines above\)/);
 	const refused = await run({ [`${PODMAN_PROBE}provider`]: 125, [`${PODMAN_PROBE}unlisted`]: 3 });
 	assert.ok(refused.some((c) => c.label === "podman: Egress policy probe for the provider did not run (podman run exited 125)"));
 	assert.match(refused.find((c) => c.label.startsWith("read back on podman: egress")).label, /egress not read back: an egress probe did not run to an answer/);
+	// Issue #508: a proxy on rules from before it lets plain HTTP through, and podman's verdict says which probe.
+	const plain = await run({ [`${PODMAN_PROBE}provider`]: 0, [`${PODMAN_PROBE}unlisted`]: 3, [`${PODMAN_PROBE}plainhttp`]: 0 });
+	assert.ok(plain.some((c) => c.warn && !c.ok && c.label === "podman: Egress policy lets plain HTTP through to api.anthropic.com on port 443, so a client that does not tunnel reaches every port of a listed host"));
+	assert.equal(plain.find((c) => c.label.startsWith("read back on podman: egress")).label, "read back on podman: egress does NOT hold -- declared enforced, observed: plain HTTP to a listed host off port 80 was let through");
 });
 
 test("the podman canary is stopped by the venue's refusals, a service no longer this host's own, the policy off, and a proxy that is down (#431)", async () => {
@@ -8135,14 +8311,14 @@ test("doctor --live on a podman-only deployment with egress armed: the canary's 
 	const env = liveEnv({ PI_EGRESS: "1", PI_BACKENDS: "podman" });
 	const { out, text } = capture();
 	const calls = [];
-	const plan = { [`${PODMAN_PROBE}provider`]: 0, [`${PODMAN_PROBE}unlisted`]: 3, ...toPodman(liveOk({ uid: "1234" })), ...toPodman(livePeersOk({})), "podman network": 0, ...podmanPlan() };
+	const plan = { [`${PODMAN_PROBE}provider`]: 0, [`${PODMAN_PROBE}unlisted`]: 3, [`${PODMAN_PROBE}plainhttp`]: 3, ...toPodman(liveOk({ uid: "1234" })), ...toPodman(livePeersOk({})), "podman network": 0, ...podmanPlan() };
 	const code = await runDoctor(env, { ...podmanDeps(out, plan, calls), live: true, liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n", ...instantClock() });
 	assert.equal(code, 0, text());
 	assert.deepEqual(calls.filter((c) => c.cmd === "docker"), []);
 	assert.doesNotMatch(text(), /allowlist is read back by `pi-dispatch doctor --live`/, "a --live run does not point at itself");
-	assert.match(text(), /\nread back on podman: starting pi-dispatch-egress-probe-provider-7 and pi-dispatch-egress-probe-unlisted-7 from pi-job:latest \(as the job user 1234:1234\) on the --internal network pi-dispatch-egress-doctor-7, with pi-dispatch-egress-proxy attached/);
-	assert.match(text(), /✓ podman: Egress policy reaches the provider[^\n]*\n✓ podman: Egress policy denies an unlisted host[^\n]*\n/);
-	assert.ok(text().indexOf("✓ podman: Egress policy denies an unlisted host") < text().indexOf("✓ read back on podman: egress holds"));
+	assert.match(text(), /\nread back on podman: starting pi-dispatch-egress-probe-provider-7, pi-dispatch-egress-probe-unlisted-7 and pi-dispatch-egress-probe-plainhttp-7 from pi-job:latest \(as the job user 1234:1234\) on the --internal network pi-dispatch-egress-doctor-7, with pi-dispatch-egress-proxy attached, to read the egress allowlist back; all three are removed when the canary ends\n/);
+	assert.match(text(), /✓ podman: Egress policy reaches the provider[^\n]*\n✓ podman: Egress policy denies an unlisted host[^\n]*\n✓ podman: Egress policy refuses plain HTTP to a listed host off port 80[^\n]*\n/);
+	assert.ok(text().indexOf("✓ podman: Egress policy refuses plain HTTP to a listed host off port 80") < text().indexOf("✓ read back on podman: egress holds"));
 	assert.equal(calls.filter((c) => c.cmd === "podman" && c.args[0] === "info").length, 3, "the section's read, the canary's re-ask, and the read-back's");
 });
 
@@ -8164,7 +8340,7 @@ test("doctor --live on Podman 4.x without the keeper runs no canary and no peer 
 		const { out, text } = capture();
 		const calls = [];
 		const info = JSON.stringify({ ...JSON.parse(PODMAN_INFO()), version: { Version: version } });
-		const plan = { ...(stale ? staleKeys : {}), [`${PODMAN_PROBE}provider`]: 0, [`${PODMAN_PROBE}unlisted`]: 3, ...toPodman(liveOk({ uid: "1234" })), ...toPodman(livePeersOk({})), "podman network": 0, ...podmanPlan({ info, keeper }) };
+		const plan = { ...(stale ? staleKeys : {}), [`${PODMAN_PROBE}provider`]: 0, [`${PODMAN_PROBE}unlisted`]: 3, [`${PODMAN_PROBE}plainhttp`]: 3, ...toPodman(liveOk({ uid: "1234" })), ...toPodman(livePeersOk({})), "podman network": 0, ...podmanPlan({ info, keeper }) };
 		const code = await runDoctor(env, { ...podmanDeps(out, plan, calls), live: true, liveFs: liveFsAs(1234), isAlive: () => false, pid: 7, nonce: "n", ...instantClock() });
 		const lines = calls.map((c) => [c.cmd, ...c.args].join(" "));
 		return { code, text: text(), lines };
@@ -8231,7 +8407,7 @@ test("the podman canary runs PI_JOB_IMAGE, whatever it names (#431)", async () =
 	const calls = [];
 	await podmanLiveChecks(env, podmanEgressSeams({ [`${PODMAN_PROBE}provider`]: 0, [`${PODMAN_PROBE}unlisted`]: 3 }, calls), { ...podmanEgressFacts(), jobImage: "registry.example.invalid/team/pi-job:7" });
 	const probes = calls.filter((c) => String(c.args[1]).startsWith("--name=pi-dispatch-egress-probe-"));
-	assert.equal(probes.length, 2);
+	assert.equal(probes.length, 3);
 	for (const p of probes) {
 		assert.equal(p.args.at(-3), "registry.example.invalid/team/pi-job:7", p.args.join(" "));
 		assert.equal(p.args.includes("pi-job:latest"), false);
@@ -8461,10 +8637,13 @@ test("the pinning and ephemeral read-backs on podman name podman in what they co
 // --- issue #431: docker's egress canary, pinned before it was parameterised on the venue -------------------------------
 
 // A docker deployment with egress armed, run as `doctor --live`, in three shapes: the ordinary one (a DEAD doctor's
-// leftover swept, both probes answering, the teardown clean, the read-back with its peers), a job image whose runner
+// leftover swept, every probe answering, the teardown clean, the read-back with its peers), a job image whose runner
 // predates #427, and a provider probe the bound cut short. Captured from main at 26cef96, BEFORE the canary was
 // parameterised on a venue runner: the text and every spawn (runtime and argv), with the only per-run values (the
 // jobs directory and the fixture names under it) replaced. A docker canary that moved by one byte or one spawn lands here.
+// Issue #508 added, by hand and nothing else: the third probe's spawn after the unlisted one (its argv the unlisted one's
+// but for name and script), its ✓ line, one more spawn in each total but the stale runner's (which stops at the first
+// probe), and the read-back's wording for three probes.
 const dockerCanaryPinRun = async (scenario, t = null) => {
 	const env = liveEnv({ PI_EGRESS: "1" });
 	const cwd = tempDir("pi-canary-pin-cwd-");
@@ -8504,7 +8683,11 @@ const dockerCanaryPinRun = async (scenario, t = null) => {
 	const norm = (s) => String(s).replaceAll(jobs, "<jobs>").replaceAll(env.PI_JOBS_DIR, "<jobs>").replaceAll(cwd, "<cwd>").replace(/pi-dispatch-live-7-[A-Za-z0-9]{6}/g, "<fixture>");
 	// The in-container script is `egressCanaryScript`'s, which its own tests pin; here it is named, so the argv around it
 	// is what this reads, and a script that is not exactly that function's output for that URL still differs.
-	const script = (s) => s.replace(egressCanaryScript("https://api.anthropic.com/v1/messages"), "<egressCanaryScript(provider)>").replace(egressCanaryScript("https://example.com/"), "<egressCanaryScript(unlisted)>");
+	const script = (s) =>
+		s
+			.replace(egressCanaryScript("https://api.anthropic.com/v1/messages"), "<egressCanaryScript(provider)>")
+			.replace(egressCanaryScript("https://example.com/"), "<egressCanaryScript(unlisted)>")
+			.replace(egressCanaryPlainScript("http://api.anthropic.com:443/", { proxyUrl: "http://pi-dispatch-egress-proxy:3128" }), "<egressCanaryPlainScript(plainhttp)>");
 	const spawns = calls.map((c) => script(norm([c.cmd, ...c.args].join(" "))));
 	// The collection's spawns, which is where the canary lives, exactly; the read-back's (runLiveProbes, which this
 	// change does not touch) by count.
@@ -8514,7 +8697,7 @@ const dockerCanaryPinRun = async (scenario, t = null) => {
 const DOCKER_CANARY_PIN = {
 	green: {
 		code: 0,
-		total: 50,
+		total: 51,
 		collection: [
 			"docker info",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
@@ -8530,6 +8713,7 @@ const DOCKER_CANARY_PIN = {
 			"docker network connect pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
 			"docker run --rm --name pi-dispatch-egress-probe-unlisted-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(unlisted)>",
+			"docker run --rm --name pi-dispatch-egress-probe-plainhttp-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryPlainScript(plainhttp)>",
 			"docker network disconnect -f pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-7",
 			"gh auth status",
@@ -8546,6 +8730,7 @@ const DOCKER_CANARY_PIN = {
 			"✓ Egress proxy health: healthy",
 			"✓ Egress policy reaches the provider (api.anthropic.com answered, so the whole path works and no key was spent)",
 			"✓ Egress policy denies an unlisted host (the deny direction is the half an allowlist can silently lose)",
+			"✓ Egress policy refuses plain HTTP to a listed host off port 80 (api.anthropic.com:443 without a tunnel; only a CONNECT reaches 443)",
 			"✓ Jobs run on: local",
 			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
@@ -8569,7 +8754,7 @@ const DOCKER_CANARY_PIN = {
 			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296)",
 			"✓ read back on local: ephemeral holds (two runs under one name each removed themselves (in 0 ms and 0 ms), and the second found nothing of the first)",
 			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
-			"✓ read back on local: egress holds (the provider was reached and an unlisted host was not)",
+			"✓ read back on local: egress holds (the provider was reached, an unlisted host was not, and plain HTTP off port 80 was refused)",
 			"✓ read back on local: jobToJobIsolation holds (peer1 reached the proxy and none of peer2's 3 name(s) and address(es) (pi-dispatch-live-peer2-7-n:47431 enetunreach, pi-dispatch-live-peer2-1-n:47431 enetunreach, 10.99.0.3:47431 enetunreach); peer2 answered itself before and after)",
 			"✓ read back on local: imagePinning holds (an absent image was refused without a pull)",
 			"✓ read back on local: nonRoot holds (Uid 1001 1001 1001 1001)",
@@ -8636,7 +8821,7 @@ const DOCKER_CANARY_PIN = {
 			"✓ read back on local: isolation holds (CapBnd 0, NoNewPrivs 1, pids.max 512, memory.max 4294967296)",
 			"✓ read back on local: ephemeral holds (two runs under one name each removed themselves (in 0 ms and 0 ms), and the second found nothing of the first)",
 			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
-			"⚠ read back on local: egress not read back: the egress canary did not run both probes (see the egress lines above)",
+			"⚠ read back on local: egress not read back: the egress canary did not run all three probes (see the egress lines above)",
 			"    → this property was not read back, which is not the same as holding: see the reason, fix it if you can, and re-run `pi-dispatch doctor --live`",
 			"✓ read back on local: jobToJobIsolation holds (peer1 reached the proxy and none of peer2's 3 name(s) and address(es) (pi-dispatch-live-peer2-7-n:47431 enetunreach, pi-dispatch-live-peer2-1-n:47431 enetunreach, 10.99.0.3:47431 enetunreach); peer2 answered itself before and after)",
 			"✓ read back on local: imagePinning holds (an absent image was refused without a pull)",
@@ -8650,7 +8835,7 @@ const DOCKER_CANARY_PIN = {
 	},
 	unfinished: {
 		code: 0,
-		total: 51,
+		total: 52,
 		collection: [
 			"docker info",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
@@ -8666,6 +8851,7 @@ const DOCKER_CANARY_PIN = {
 			"docker network connect pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
 			"docker run --rm --name pi-dispatch-egress-probe-unlisted-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(unlisted)>",
+			"docker run --rm --name pi-dispatch-egress-probe-plainhttp-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryPlainScript(plainhttp)>",
 			"docker rm -f pi-dispatch-egress-probe-provider-7",
 			"docker network disconnect -f pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-7",
@@ -8684,6 +8870,7 @@ const DOCKER_CANARY_PIN = {
 			"⚠ Egress policy probe for the provider did not run (docker run did not finish)",
 			"    → re-run doctor; if it persists, run the job image by hand to see why a container on this network will not start",
 			"✓ Egress policy denies an unlisted host (the deny direction is the half an allowlist can silently lose)",
+			"✓ Egress policy refuses plain HTTP to a listed host off port 80 (api.anthropic.com:443 without a tunnel; only a CONNECT reaches 443)",
 			"✓ Jobs run on: local",
 			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
@@ -8721,7 +8908,7 @@ const DOCKER_CANARY_PIN = {
 	},
 	hung: {
 		code: 0,
-		total: 51,
+		total: 52,
 		// The kills the provider probe got: none before its 30 s bound, then ONE, with no signal named (so the
 		// default SIGTERM), which is `runCmdCapture`'s. The step runner would send SIGKILL.
 		killsBeforeBound: [],
@@ -8741,6 +8928,7 @@ const DOCKER_CANARY_PIN = {
 			"docker network connect pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
 			"docker run --rm --name pi-dispatch-egress-probe-unlisted-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(unlisted)>",
+			"docker run --rm --name pi-dispatch-egress-probe-plainhttp-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryPlainScript(plainhttp)>",
 			"docker rm -f pi-dispatch-egress-probe-provider-7",
 			"docker network disconnect -f pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-7",
@@ -8759,6 +8947,7 @@ const DOCKER_CANARY_PIN = {
 			"⚠ Egress policy probe for the provider did not run (docker run did not finish)",
 			"    → re-run doctor; if it persists, run the job image by hand to see why a container on this network will not start",
 			"✓ Egress policy denies an unlisted host (the deny direction is the half an allowlist can silently lose)",
+			"✓ Egress policy refuses plain HTTP to a listed host off port 80 (api.anthropic.com:443 without a tunnel; only a CONNECT reaches 443)",
 			"✓ Jobs run on: local",
 			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
@@ -8796,7 +8985,7 @@ const DOCKER_CANARY_PIN = {
 	},
 	enoent: {
 		code: 0,
-		total: 51,
+		total: 52,
 		// The kills the provider probe got: none before its 30 s bound, then ONE, with no signal named (so the
 		// A probe that never launched is never killed.
 		killsBeforeBound: null,
@@ -8816,6 +9005,7 @@ const DOCKER_CANARY_PIN = {
 			"docker network connect pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
 			"docker run --rm --name pi-dispatch-egress-probe-unlisted-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(unlisted)>",
+			"docker run --rm --name pi-dispatch-egress-probe-plainhttp-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryPlainScript(plainhttp)>",
 			"docker rm -f pi-dispatch-egress-probe-provider-7",
 			"docker network disconnect -f pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-7",
@@ -8834,6 +9024,7 @@ const DOCKER_CANARY_PIN = {
 			"⚠ Egress policy probe for the provider did not run (docker run did not finish)",
 			"    → re-run doctor; if it persists, run the job image by hand to see why a container on this network will not start",
 			"✓ Egress policy denies an unlisted host (the deny direction is the half an allowlist can silently lose)",
+			"✓ Egress policy refuses plain HTTP to a listed host off port 80 (api.anthropic.com:443 without a tunnel; only a CONNECT reaches 443)",
 			"✓ Jobs run on: local",
 			"⚠ local: nonRoot is ASSERTED by the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or, on a daemon that enforces bind-mount ownership with a worker uid other than 1001, the worker's own non-zero uid passed as `--user`, not enforced by it",
 			"    → not verifiable from here, so treat it as a claim rather than a control: the agent runs as a non-root user",
