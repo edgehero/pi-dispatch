@@ -30,6 +30,7 @@ import { readFileSync } from "node:fs";
 import { networkInterfaces, userInfo } from "node:os";
 import { join } from "node:path";
 import { venuesOf } from "./backends.mjs";
+import { DEFAULT_VALKEY_URL } from "./config.mjs";
 import { VALKEY_SHARED_KEY, judgeValkeyListeners, passwdNameFrom, pinnedValkeyUrl, probeTcpAddress, readStackKeys, readSubuidRanges, readValkeyKeys, valkeySharedOn, valkeySchemeOf } from "./podman-stack.mjs";
 import { VALKEY_PASSWORD_KEY, isLoopbackHost } from "./valkey-auth.mjs";
 
@@ -184,8 +185,8 @@ export function valkeyDbRangeSentence(url, db, databases) {
 	return `VALKEY_URL ${urlShown(url)} names database ${db}, which that Valkey does not have: ${has}. No client uses another database in its place; name one it has, or raise \`databases\` in that Valkey's configuration`;
 }
 
-/** The default VALKEY_URL, the worker's own (config.mjs). */
-export const DEFAULT_VALKEY_URL = "redis://127.0.0.1:6379";
+/** The default VALKEY_URL, the worker's own, defined once in config.mjs. */
+export { DEFAULT_VALKEY_URL };
 
 /**
  * The VALKEY_URL a command run from a deployment folder uses (PR #475's review), by the same rule as the password it

@@ -4,6 +4,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, 
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PACKAGED_EGRESS_PROXY_CONF, runInit } from "../src/init.mjs";
+import { loadModelEndpoints, renderEndpointsInclude } from "../src/model-endpoints.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 const tmp = () => tempDir("pi-init-");
@@ -12,7 +13,7 @@ function capture() {
 	return { out: (s) => buf.push(s), text: () => buf.join("") };
 }
 
-test("init scaffolds the six config files with the empty templates the loaders validate against", () => {
+test("init scaffolds the config files with the empty templates the loaders validate against", () => {
 	const dir = tmp();
 	writeFileSync(join(dir, ".env.example"), "ANTHROPIC_API_KEY=\n"); // stand in for the repo's example
 	const { out, text } = capture();
@@ -32,6 +33,27 @@ test("init scaffolds the six config files with the empty templates the loaders v
 	assert.deepEqual(JSON.parse(readFileSync(join(dir, "scoped-limits.json"), "utf8")), { version: 1, limits: [] });
 	assert.match(text(), /the folder mutex needs no file/, "the scaffold line says what is NOT configuration");
 	assert.match(text(), /pi install npm:@edgehero\/pi-dispatch-admin/, "next steps name the operator panel");
+	// Issue #503: the declared model endpoints, empty and versioned, which the worker's own loader reads as none, and the
+	// proxy include rendered from them, the header alone (squid starts on it and refuses a missing file).
+	assert.equal(readFileSync(join(dir, "model-endpoints.json"), "utf8"), '{\n  "version": 1,\n  "endpoints": []\n}\n');
+	assert.deepEqual(loadModelEndpoints({ modelEndpointsFile: null }, { cwd: dir }), [], "the default file loads to no endpoints");
+	assert.equal(readFileSync(join(dir, "model-endpoints.conf"), "utf8"), renderEndpointsInclude([]), "the include is exactly the empty render");
+	assert.match(text(), /^created\s+model-endpoints\.json\s/m);
+	assert.match(text(), /^created\s+model-endpoints\.conf\s/m);
+});
+
+test("init keeps an existing model-endpoints.json and model-endpoints.conf byte for byte (#503)", () => {
+	const dir = tmp();
+	writeFileSync(join(dir, ".env.example"), "ANTHROPIC_API_KEY=\n");
+	const declared = JSON.stringify({ version: 1, endpoints: [{ id: "mac", host: "host.docker.internal", port: 11434, slots: 2 }] });
+	writeFileSync(join(dir, "model-endpoints.json"), declared);
+	writeFileSync(join(dir, "model-endpoints.conf"), "# mine\n");
+	const { out, text } = capture();
+	assert.equal(runInit(dir, { out }), 0);
+	assert.equal(readFileSync(join(dir, "model-endpoints.json"), "utf8"), declared);
+	assert.equal(readFileSync(join(dir, "model-endpoints.conf"), "utf8"), "# mine\n");
+	assert.match(text(), /^kept\s+model-endpoints\.json\s+already exists/m);
+	assert.match(text(), /^kept\s+model-endpoints\.conf\s+already exists/m);
 });
 
 test("init is idempotent and never overwrites operator edits", () => {
@@ -260,7 +282,7 @@ test("init's ladders name no file the folder does not have, docker and podman (#
 test("init's file column is as wide as the longest name, so every note starts in one column (#480)", () => {
 	const { text } = nextFor({});
 	const rows = text.slice(0, text.indexOf("\nNext:")).split("\n").filter(Boolean);
-	assert.equal(rows.length, 8, text);
+	assert.equal(rows.length, 10, text);
 	const starts = new Set(rows.map((row) => row.match(/^\S+\s+\S+\s+/)[0].length));
 	assert.equal(starts.size, 1, `every note starts in one column:\n${rows.join("\n")}`);
 	assert.ok(rows.some((row) => row.includes("egress-allowlist.conf ")), "the 21-character name is followed by a space before its note");
@@ -281,7 +303,7 @@ test("init never writes through a dangling symlink: every scaffold is kept, and 
 	const dir = tmp();
 	const outside = tmp();
 	mkdirSync(join(dir, "deploy"));
-	const names = [".env", "triggers.json", "pause-windows.json", "pi-packages.json", "subscriptions.json", "scoped-limits.json", "egress-allowlist.conf", "deploy/egress-proxy.conf"];
+	const names = [".env", "triggers.json", "pause-windows.json", "pi-packages.json", "subscriptions.json", "scoped-limits.json", "model-endpoints.json", "model-endpoints.conf", "egress-allowlist.conf", "deploy/egress-proxy.conf"];
 	for (const name of names) symlinkSync(join(outside, name.replace("/", "-")), join(dir, name));
 	const { out, text } = capture();
 	assert.equal(runInit(dir, { out, newPassword: () => PASSWORD }), 0);
@@ -312,8 +334,12 @@ test("init refuses a directory where a scaffold's file belongs, deploy/egress-pr
 	writeFileSync(join(dir, ".env.example"), "ANTHROPIC_API_KEY=\n");
 	mkdirSync(join(dir, "deploy", "egress-proxy.conf"), { recursive: true });
 	mkdirSync(join(dir, "triggers.json"));
+	// Issue #503: the proxy include too. Docker Desktop creates a DIRECTORY for a missing bind source, and squid then
+	// reads that path as an empty include with no warning (measured), so the refusal is what names it.
+	mkdirSync(join(dir, "model-endpoints.conf"));
 	const { out, text } = capture();
 	assert.equal(runInit(dir, { out }), 1);
+	assert.match(text(), /^refused model-endpoints\.conf\s+model-endpoints\.conf here is a directory, not a file/m);
 	assert.match(text(), /^refused deploy\/egress-proxy\.conf deploy\/egress-proxy\.conf here is a directory, not a file: remove it, then run `pi-dispatch init` again$/m);
 	assert.match(text(), /^refused triggers\.json\s+triggers\.json here is a directory, not a file/m);
 	assert.doesNotMatch(text(), /^kept\s+(deploy\/egress-proxy\.conf|triggers\.json)/m);

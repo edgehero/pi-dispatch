@@ -1359,7 +1359,11 @@ refactor apart.
     `tools_excluded` with the session's active tool list read back. Enforcement, refusal and read-back
     are `INT-TRIGGERS-FILE-CONTRACT`'s `run.excludeTools` bullet); `HOME=/home/pi` (issue #341: set ONLY beside
     `--user`, assigned after the `PI_FORWARD_ENV` and `run.secrets` loops so neither can move it, and reserved so a
-    trigger cannot bind it); and each name in `PI_FORWARD_ENV` (an explicit operator
+    trigger cannot bind it); `PI_DISPATCH_KEYLESS` is RESERVED (issue #503) and not yet emitted: a later change
+    sets it to the fixed, non-secret `keyless` only for a job whose provider has every model on a keyless model
+    endpoint (`INT-MODEL-ENDPOINTS-FILE-CONTRACT`), so a keyless `models.json` provider can name
+    `"apiKey": "$PI_DISPATCH_KEYLESS"`. Only the worker may set it: a trigger's `run.secrets` cannot bind it, and
+    `PI_FORWARD_ENV` refuses it at config load whatever the egress policy; and each name in `PI_FORWARD_ENV` (an explicit operator
     allowlist of extra host vars — e.g. a custom provider's key — forwarded by exact `-e NAME=VALUE`, never a
     pass-through, so it satisfies `no-broad-env-into-container`; **every** minted-token name is refused in
     the allowlist at config load — derived from the forge table rather than enumerated here, currently
@@ -4809,6 +4813,88 @@ validator rather than a second copy of it.
 
 ---
 
+## INT-MODEL-ENDPOINTS-FILE-CONTRACT
+
+**operator → worker, and worker → egress proxy.** The local or LAN model servers (Ollama, vLLM, llama.cpp,
+LM Studio) a job may reach through the egress proxy, each by one host and one port (issue #503).
+
+- **Status**: the file, its parser, the endpoint derivation and the proxy include's render are LANDED (#503, part
+  1). PENDING, in later parts of #503 that land before any release: the `include` line in
+  `deploy/egress-proxy.conf` and the include's mounts (compose, the Podman recipe, the Quadlet unit,
+  `podman-conformance.yml`); the `pi-dispatch egress render` verb that the scaffolded include's header already
+  names; how the proxy reaches the host per venue; the slot leases; the keyless credential gate and
+  `PI_DISPATCH_KEYLESS`; the doctor probes. Until then a declaration changes no proxy rule and no job.
+- **Producer/Consumer**: the operator writes it by hand. The worker reads it for the render and, in a later change,
+  at each pickup, so a `slots` edit applies to the next job.
+  `doctor` loads it through the worker's own loader. It is NOT settable by a model-callable tool or by the settings
+  overlay: the proxy rules derive from it, so a write would widen egress.
+- **Location**: `model-endpoints.json` in the deployment folder (the worker's working directory), which
+  `pi-dispatch init` scaffolds empty, create-only. `PI_MODEL_ENDPOINTS_FILE` overrides it, and a relative value
+  resolves against the deployment folder. A missing DEFAULT file declares no endpoints, a valid deployment. A
+  missing file the key NAMES is refused (`configError`), and so is an empty value (read with `??`, so it is not
+  unset), because a typo there would silently declare nothing. `init` also scaffolds `model-endpoints.conf`
+  beside it, the render of no endpoints: squid refuses to start when an included file is missing and starts on a
+  comments-only one (measured on squid 6.13, 2026-09-30, on Docker 29.1.3, Docker Desktop 4.37.2, rootful Podman
+  5.8.1 and rootless Podman 4.9.3 and 5.8.1).
+- **Shape**: `{ "version": 1, "endpoints": [ { "id", "host", "port", "slots", "keyless"? } ] }`.
+  - `version` (required): an integer of at least 1. A newer version is refused, naming both. Refuse, never repair.
+  - Unknown keys, at the top level or in an endpoint, are REFUSED rather than dropped. This file decides proxy
+    rules, so a key an old worker dropped would be a rule the operator believes in and does not have.
+  - `id` (required): `[a-z0-9-]{1,32}`, unique. It names the squid ACLs (`pde_<id>_...`) and, later, the slot keys.
+  - `host` (required): a DNS name, an IPv4 literal in dotted-decimal form, or an IPv6 literal. A name is
+    lowercased. An IPv6 literal is stored in brackets, compressed and lowercase (`[fd00::2]`), the form a URL's
+    `hostname` and squid both use. Refused: `localhost` and any `*.localhost`, `127.0.0.0/8`, `0.0.0.0`, `::1`,
+    `::` (inside the proxy, loopback is the proxy itself); a trailing dot (a URL keeps it, so a stripped
+    declaration would not match the baseUrl it was written for); an IPv6 literal with a zone id, an IPv4 tail, an
+    IPv4-mapped (`::ffff:0:0/96`) or IPv4-compatible (first 96 bits zero) address, which squid and a URL spell
+    differently; a `host:port` or `[v6]:port` value (the port goes in `port`); a name whose last label is a number or `0x...`, which a URL reads as an IPv4 address (`127.1`
+    is `127.0.0.1`); anything else that is not a name or a literal.
+  - `port` (required): 1 to 65535. Refused when it is the proxy's own 3128 or the job queue's port (`VALKEY_URL`'s,
+    6379 when the URL names none).
+  - `slots` (required): 1 to 64, the server's parallel requests. Later changes lease one per job.
+  - `keyless` (optional): a boolean, default `false`. Later changes let a provider whose every model sits on a
+    keyless endpoint pass the credential gate.
+  - One `host` and `port` pair is declared once. Two ids for one server would split its slots.
+- **Derivation**: which models use an endpoint is DERIVED from the overlay `models.json`
+  (`<PI_GLOBAL_PI_DIR>/models.json`, read as JSON only, with no `$VAR` expansion), never listed twice. A model's
+  effective `baseUrl` is its own `baseUrl`, else its provider's. It uses endpoint E when that URL's hostname
+  (lowercase, IPv6 in brackets) and port (the scheme's default, 80 or 443, when none is written) are E's host and
+  port. Host alone does not match. ONE trailing dot on the URL's hostname is dropped before comparing
+  (`http://host.docker.internal.:11434` uses the `host.docker.internal` endpoint): squid tunnels `name.` to the same
+  server (measured 200 on 2026-09-30), so leaving it unmatched would let that model skip the endpoint's slot lease
+  and keyless gate. The declaration itself stays strict. A baseUrl that is not an `http:` or `https:` URL matches
+  nothing, and that includes a `$VAR` or `!command` baseUrl, which pi expands in the job and this derivation does
+  not: RESIDUAL, such a model takes no slot lease and does not pass the keyless gate, so a keyless endpoint must be
+  written as a literal URL. A job's
+  endpoint set is its MAIN model's endpoints for now. The models on a job's allowed list join it with #502; until
+  then that is a named residual.
+- **Render**: the include is deterministic, endpoints sorted by id, after a fixed header (generated, do not edit,
+  regenerate with `pi-dispatch egress render`). Per endpoint:
+  `acl pde_<id>_host dstdomain -n <host>`, `acl pde_<id>_port port <port>`,
+  `acl pde_<id>_local dst 127.0.0.0/8 0.0.0.0/32 10.0.2.2/32 ::1 ::/128`,
+  `http_access deny CONNECT pde_<id>_host pde_<id>_port pde_<id>_local`, then
+  `http_access allow CONNECT pde_<id>_host pde_<id>_port`. Every rule is a CONNECT rule: pi sends every provider
+  call as a CONNECT tunnel, so no plain forward request is ever allowed. The host ACL comes first on each line, so
+  squid only ever resolves a declared name. The `_local` set is `to_host_local`'s
+  (`INT-EGRESS-POLICY-CONTRACT`) minus `169.254.0.0/16` and `fe80::/10`, deliberately: on Podman 5.3 and later
+  `host.containers.internal` is `169.254.1.2` (pasta's `--map-guest-addr`, measured on Podman 5.8.1 on
+  2026-09-30), which is how a rootless job reaches a server on its own host. `10.0.2.2` (slirp4netns's host alias)
+  stays. The host ACL is `dstdomain -n` for an IP literal too. Measured on squid 6.13,
+  2026-09-30: a `dst <ip>` host ACL makes squid resolve the name of every CONNECT that reaches the line (a DNS
+  channel out of the job) and admits any name that resolves to that address; `dstdomain -n <ip>` does neither.
+  For IPv6, squid compares the bracketed canonical form, so `dstdomain -n [fd00::2]` matches `[fd00:0:0::2]` and
+  `[FD00::2]` and a bare `fd00::2` matches nothing (measured the same day). The render of no endpoints is the
+  header alone.
+- **Acceptance**: Given a file with `version: 2`, a loopback or `localhost` host, port 3128 or the queue's port, a
+  duplicate id, one host and port under two ids, `slots` of 0 or 65, or an unknown key, when parsed, then the
+  whole file is refused naming the endpoint. Given a model whose own baseUrl names another host than its
+  provider's, then the model's wins. Given a baseUrl on the right host and another port, then no endpoint
+  matches. Given the render of any parsed file, then every `http_access` line is a CONNECT rule, every allow is
+  `allow CONNECT pde_<id>_host pde_<id>_port`, and no host ACL is a `dst` ACL. Given no file at the default path,
+  then the worker's loader returns no endpoints and `doctor` says nothing about it.
+
+---
+
 ## INT-WAIT-PROFILES-CONTRACT
 
 - **Status**: LANDED in full, including the running of a check. What remains deferred is stated where it
@@ -5563,3 +5649,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-29 | Issue #484. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the rules bullet: a copy of the package's `deploy/egress-proxy.conf` outside the package (the deployment folder's, which `init` writes create-only since issue #480, and the podman venue's account-owned copy `service install` writes) is compared by its bytes with the installed package's file, because an upgrade rewrites neither and the mount-path comparison `up` and `doctor` already made could not see old rules at the right path. `doctor` warns (⚠) for the shipped proxy only, silent for an identical or absent copy; `up` offers the folder copy's refresh, asked even under `--yes`, with a backup, a same-directory temp file renamed over the copy, and no symlink followed, then offers `docker restart` of a running current proxy, and `docker unpause` then `docker restart` of a paused one (PR #491's review), since a renamed file is not the one a running or paused container's bind mount holds. **UNCHANGED, checked**: the rules' content, the allowlist and its scaffold, the proxy's argv and its two mounts, the mount-path drift rule (`egress-proxy-state.mjs`), the podman Quadlet plan (it already compared and replaced the account copy under `--force`), and the job-side contract (no job flag, mount or environment variable moves). |
 | 2026-09-30 | Issue #509, the pi 0.80.7 -> 0.99.1 bump, one row for the runner, worker and admin halves. **`INT-SDK-SESSION-OPTIONS` AMENDED**: the model/auth wiring is one `ModelRuntime` (OQ-005's migration shipped): created after enforceOfflineMode and enforceTelemetryOff with a discarding models store and `allowModelNetwork: false`, `getModel`, `hasConfiguredAuth(provider)`, handed to createAgentSession as `modelRuntime`; the preamble and the pinned-artifact evidence are re-verified at 0.99.1, the 0.80.7 evidence kept as the record; the option set is re-pinned (modelRuntime replaces authStorage and modelRegistry) and the tool factories are eight (`powershell`). Trap (g)'s invariant now rests on the injected ModelRuntime class plus an IDENTITY check of the compat copy against pi's VIRTUAL_MODULES (the ModelRegistry mutation probe cannot work: the registry no longer writes to pi-ai's registry). Trap (h) REWRITTEN: the process-wide choke point moved to ModelRuntime.prototype, the api-provider registry is kept only for legacy extension calls, and the two halves meet on composed providers, deduplicated by an AsyncLocalStorage (measured). New trap (m): cacheWarming off, maxAgentDelayMs pinned, install telemetry off with PI_TELEMETRY forced to "0", a discarding models store, no builtin: extension loaded. Trap (f) re-worded for `SettingsManager.inMemory`, which now accepts an options argument the runner does not pass (trust default unchanged); trap (l) re-checked at 0.99.1 (open still throws on an unparseable file, measured; the session-dir variable is read only by the CLI's main.js). Traps (a) to (e), (i) to (k) UNCHANGED, checked against 0.99.1 (loader tests green). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: three new rows, all under existing codes: pi's unresumable retry after a tool ran (prompt() rejects while a retry is in flight) is `2` / `retry-unresumable` instead of an unclassified `1` that the queue would re-run on a fresh budget (measured by the loopback test); `stopReason: "deferred"` is `2` / `deferred`; `"pending"` is `1` / `pending`. StopReason is seven values at the pin and the runner's list is pinned to the union. The Bedrock refusal reads the exception NAME `UnrecognizedClientException: ` (pi-ai now carries AWS's message and no status); AccessDeniedException and ExpiredTokenException stay residual (no real-AWS measurement of the transient forms). The KnownApi union is the same ten families. Every other row UNCHANGED, checked by the loopback table at 0.99.1. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED in wording only**: a non-zero `otherTotal` is spend under a session id other than the root's, since a compaction or branch summary now lands there; the `tokens` keys, the `usage` ledger (its `piAi` now stamps 0.99.1), `context` and `session` UNCHANGED, checked. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: anthropic's key list is now `[ANTHROPIC_AUTH_TOKEN, ANTHROPIC_OAUTH_TOKEN, ANTHROPIC_API_KEY]` and pi sends the first as `Authorization: Bearer`; `provider-key.mjs` gains the `/_AUTH_TOKEN$/` suffix beside `/_OAUTH_TOKEN$/`, so an auth.json API key is always written under `ANTHROPIC_API_KEY`, and a host bearer token is forwarded with a doctor warning exactly as a host OAuth token is; radius's variable is `RADIUS_API_KEY` and the catalog is now a superset of the key table, so the candidates-first order is defence in depth; the getProviderEnvValue order is re-checked at 0.99.1. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: the excludable set is the eight built-ins; the steering set is re-derived (twenty-one names in, three out), `ANTHROPIC_AUTH_TOKEN` is retained by name, the OS directory variables are subtracted as runtime properties, the custom-header variables are pinned as credential substitution, and the no-baseUrl control is re-derived. **`INT-SUBSCRIPTIONS-FILE-CONTRACT` and `INT-PRICING-EXPORT-CONTRACT` AMENDED**: kimi-coding, zai and zai-coding-cn carry implied prices (all three were all-zero at 0.80.7), `isZeroRated` is no longer a subscription signal, and the pricing pins moved to openai/gpt-5.4 and the qwen-token-plan tables. UNCHANGED, checked: the auth.json refusals (OAuth, command/variable-reference, non-string, companion env), the closed container env map. Doctor also names the auth.json key a host token displaces (the worker reads the environment first, pi on the host reads the stored key first), and warns on an `sk-ant-oat` value in the API-key variable. |
 | 2026-09-30 | Issue #508 (plain HTTP reached every port of a listed host). **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the rules bullet, the object table and the Acceptance: exactly two shapes pass, both to a listed host, a `CONNECT` to 443 or a plain request to 80, by `acl Safe_ports port 80` and `http_access deny !Safe_ports !CONNECT` directly before `http_access allow allowed`, which resolves nothing and never matches a `CONNECT`; a plain forward `GET https://` is now refused; the canary probe slugs are `provider`, `unlisted` and `plainhttp`; a job reaches a forge only over `https://` on 443 (git ignores `HTTP_PROXY` for `http://`), and `doctor` warns on an armed policy with a triggered forge's `GITLAB_URL` or `FORGEJO_URL` that is anything else; the Acceptance gains a plain request to a listed host on any port but 80 refused by the proxy. **`INT-LIVE-PROBE-CONTRACT` AMENDED**, the `egress` bullet and the Acceptance: three probes, each `readBack` carrying `probe` and each probe required exactly once by that name, the third a raw `node:http` forward request counted as refused only on squid's 403 with `X-Squid-Error` `ERR_ACCESS_DENIED`. |
+| 2026-09-30 | Issue #503 (declared model endpoints), the first change: the file, its derivation and its squid rules, with nothing enforced yet. Added **`INT-MODEL-ENDPOINTS-FILE-CONTRACT`**: `model-endpoints.json` in the deployment folder (`PI_MODEL_ENDPOINTS_FILE` overrides; a missing default declares none, a missing named file or an empty value is refused), scaffolded empty by `init` beside `model-endpoints.conf`, the empty render; the schema and its refusals (unknown keys refused, not dropped, because this file decides proxy rules); the derivation (a model's own baseUrl beats its provider's, host AND port, main model only until #502, a named residual); the render (CONNECT rules only, the host ACL first, `dstdomain -n` for IP literals too because `dst <ip>` is a DNS channel, IPv6 in brackets, both measured on squid 6.13 on 2026-09-30; the loopback deny is `to_host_local` minus the link-local ranges, because Podman 5.3+ reaches the host at 169.254.1.2); one trailing dot on a baseUrl host is dropped, since squid tunnels it to the same server; a `$VAR` baseUrl matches nothing, a named residual; the parts of #503 still pending are listed in Status; not settable by a model-callable tool or the settings overlay. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, the env bullet: `PI_DISPATCH_KEYLESS` is reserved (not yet emitted), so `run.secrets` cannot bind it and `PI_FORWARD_ENV` refuses it at load. **`INT-EGRESS-POLICY-CONTRACT` UNCHANGED, checked**: `deploy/egress-proxy.conf`, its mounts and the proxy argv are untouched; the include line lands in a later change. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: no overlay key reaches the endpoints. **Code evidence**: worker/src/model-endpoints.mjs -> parseModelEndpoints, loadModelEndpoints, endpointsForModel, renderEndpointsInclude; worker/src/init.mjs -> runInit; worker/src/reserved-env.mjs -> KEYLESS_ENV_NAME; worker/src/config.mjs -> forwardEnvList; worker/src/doctor.mjs -> BOOT_FILES. |

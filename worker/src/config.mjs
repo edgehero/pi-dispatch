@@ -15,6 +15,14 @@ import { SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS } from "./retention-swee
 import { parseSecretProfiles } from "./secret-profiles.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, parseWaitProfiles } from "./wait-for.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
+import { KEYLESS_ENV_NAME } from "./reserved-env.mjs";
+
+/**
+ * The VALKEY_URL the worker uses when none is set. ONE constant (issue #503's review): doctor judges the model endpoints
+ * file against this port too, and a doctor that read an unset VALKEY_URL as "no queue port" passed an endpoint on 6379
+ * that the worker refuses. valkey-endpoint.mjs re-exports it.
+ */
+export const DEFAULT_VALKEY_URL = "redis://127.0.0.1:6379";
 
 export function configError(message) {
 	const error = new Error(message);
@@ -165,6 +173,12 @@ function forwardEnvList(raw, egressArmed = false) {
 			`PI_FORWARD_ENV must not forward ${workerOnly.join(", ")} -- ${workerOnly.map((n) => WORKER_ONLY_WHY[n]).join("; ")}, and a job container is the last place it belongs (CONST-TOKEN-SCOPED-PER-JOB)`,
 		);
 	}
+	// Issue #503: the keyless marker is the worker's to set, and only for a job whose provider is served by keyless
+	// endpoints alone. Forwarded, it would make any provider whose models.json key is `$PI_DISPATCH_KEYLESS` look
+	// configured, so it is refused whatever the egress policy.
+	if (names.includes(KEYLESS_ENV_NAME)) {
+		throw configError(`PI_FORWARD_ENV must not forward ${KEYLESS_ENV_NAME} -- the worker sets it itself, only for a job whose provider has every model on a keyless model endpoint (model-endpoints.json)`);
+	}
 	const egress = egressArmed ? names.filter((n) => EGRESS_ENV_VARS.has(n)) : [];
 	if (egress.length > 0) {
 		throw configError(
@@ -301,7 +315,7 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 	const backends = backendSet(env);
 	const backendFloor = backendFloorOf(env);
 	const config = {
-		valkeyUrl: env.VALKEY_URL ?? "redis://127.0.0.1:6379",
+		valkeyUrl: env.VALKEY_URL ?? DEFAULT_VALKEY_URL,
 		// Issue #57. What this machine calls itself: the key of its registry row, the `host` on every log
 		// line and run record, and the BullMQ worker name. Always populated -- a deployment that declares
 		// nothing still has an identity, which is what lets a fleet of two be TOLD APART before anyone has
@@ -352,6 +366,7 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		sandboxIdleMinutes: nonNegativeInt(env, "PI_SANDBOX_IDLE_MINUTES", 30), // bash's own TMOUT inside a sandbox; 0 = no idle logout
 		triggersFile: env.PI_TRIGGERS_FILE ?? null, // DES-CRON-VIA-BULLMQ-SCHEDULER: unified triggers file; null = cron disabled for the worker (it selects on.type:"cron")
 		pauseWindowsFile: pauseWindowsFilePath(env), // REQ-SCOPED-PAUSE-WINDOWS: per-folder/repo timed pause; null = no scoped pauses
+		modelEndpointsFile: modelEndpointsFilePath(env), // issue #503: the declared model endpoints (INT-MODEL-ENDPOINTS-FILE-CONTRACT); null = model-endpoints.json in the deployment folder, and a missing default file declares none
 		scopedLimitsFile: scopedLimitsFilePath(env), // issue #242: per-scope run caps + concurrency (INT-SCOPED-LIMITS-FILE-CONTRACT); null = none. The one-job-per-folder mutex for local jobs is code, not configuration, and holds regardless
 		schedulerStallMax: positiveInt(env, "PI_SCHEDULER_STALL_MAX", 2), // CONST-RETRY-INFRA-ONLY: per-scheduler stall backstop; positiveInt rejects <1 so a 0 threshold fails closed
 		logsDir: logsDirPath(env), // || (not ??) inside logsDirPath, so an empty string falls back to the default
@@ -861,6 +876,12 @@ export function pauseWindowsFilePath(env = process.env) {
 
 export function scopedLimitsFilePath(env = process.env) {
 	return env.PI_SCOPED_LIMITS_FILE ?? null;
+}
+
+/** Issue #503. `??` like the two above, so an empty value is a value, which the loader refuses rather than reading the
+ *  default file in its place. Unlike them, null does not turn anything off: it means the deployment folder's file. */
+export function modelEndpointsFilePath(env = process.env) {
+	return env.PI_MODEL_ENDPOINTS_FILE ?? null;
 }
 
 export function logsDirPath(env = process.env, home) {

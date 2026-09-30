@@ -11,12 +11,13 @@ import { valkeyPasswordFor } from "../src/valkey-endpoint.mjs";
 import { serviceEnvFileOf } from "../src/service-env.mjs";
 import { VALKEY_SHARED_KEY as VALKEY_SHARED_NAME } from "../src/podman-stack.mjs";
 import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS, runInit } from "../src/init.mjs";
+import { EMPTY_MODEL_ENDPOINTS, loadModelEndpoints } from "../src/model-endpoints.mjs";
 import { EGRESS_CANARY_NET_PREFIX, egressCanaryProbe } from "../src/egress.mjs";
 import { LIVE_PREFIX, egressVerdict } from "../src/live-probes.mjs";
 import { JOB_USER_FIX, parseDaemonFacts } from "../src/job-user.mjs";
 import { OBSERVATION_FIX } from "../src/backends.mjs";
 import { PODMAN_JOB_USER_FIX } from "../src/backend-podman.mjs";
-import { underOsTempDir } from "../src/config.mjs";
+import { loadConfig, underOsTempDir } from "../src/config.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // env-allowlist imports @earendil-works/pi-ai, which needs node >=22.19.0 and installed deps. doctor.mjs
@@ -1709,6 +1710,61 @@ function scaffoldedCwd() {
 	return dir;
 }
 const scaffoldDeps = (out, cwd) => ({ out, cwd, spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0" });
+
+// Issue #503: the model endpoints file defaults to the deployment folder's copy, so unset is not off and the scaffold is
+// what doctor loads, through the worker's own loader.
+test("doctor: an unset PI_MODEL_ENDPOINTS_FILE loads model-endpoints.json from the deployment folder, silent when it loads or is absent (#503)", async () => {
+	for (const content of [null, EMPTY_MODEL_ENDPOINTS, JSON.stringify({ version: 1, endpoints: [{ id: "mac", host: "host.docker.internal", port: 11434, slots: 2 }] })]) {
+		const cwd = scaffoldedCwd();
+		if (content !== null) writeFileSync(join(cwd, "model-endpoints.json"), content);
+		const { out, text } = capture();
+		const code = await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
+		assert.doesNotMatch(text(), /PI_MODEL_ENDPOINTS_FILE|model-endpoints/, String(content));
+		assert.doesNotMatch(text(), /exists but PI_MODEL_ENDPOINTS_FILE is unset/, "unset is not off for this key");
+		assert.equal(code, 0);
+	}
+});
+
+test("doctor: a default model-endpoints.json that does not load fails, with the loader's own reason (#503)", async () => {
+	const cases = [
+		[JSON.stringify({ version: 2, endpoints: [] }), /written by a newer pi-dispatch/],
+		[JSON.stringify({ version: 1, endpoints: [{ id: "lo", host: "localhost", port: 11434, slots: 1 }] }), /loopback/],
+		[JSON.stringify({ version: 1, endpoints: [{ id: "q", host: "valkey.lan", port: 6390, slots: 1 }] }), /job queue's \(VALKEY_URL\)/],
+	];
+	for (const [content, reason] of cases) {
+		const cwd = scaffoldedCwd();
+		writeFileSync(join(cwd, "model-endpoints.json"), content);
+		const { out, text } = capture();
+		const code = await runDoctor(imgEnv({ VALKEY_URL: "redis://127.0.0.1:6390" }), scaffoldDeps(out, cwd));
+		assert.match(text(), /✗ PI_MODEL_ENDPOINTS_FILE is unset, so the worker reads model-endpoints\.json in the deployment folder, and it does not load: the worker REFUSES THE FILE and uses no model endpoint: /, content);
+		assert.match(text(), reason, content);
+		assert.equal(code, 1);
+	}
+});
+
+test("doctor: with VALKEY_URL unset, an endpoint on 6379 fails as the worker's default queue port (#503 review)", async () => {
+	// The worker's config defaults VALKEY_URL and refuses the endpoint; doctor must reach the same verdict, from the same
+	// constant, rather than read an unset URL as "no queue port".
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, "model-endpoints.json"), JSON.stringify({ version: 1, endpoints: [{ id: "q", host: "valkey.lan", port: 6379, slots: 1 }] }));
+	const { out, text } = capture();
+	const env = imgEnv();
+	assert.equal(env.VALKEY_URL, undefined);
+	const code = await runDoctor(env, scaffoldDeps(out, cwd));
+	assert.match(text(), /✗ PI_MODEL_ENDPOINTS_FILE is unset, .* port 6379 is the job queue's \(VALKEY_URL\)/);
+	assert.equal(code, 1);
+	assert.throws(() => loadModelEndpoints(loadConfig({}), { cwd }), /port 6379 is the job queue's/, "the worker's own config refuses it too");
+});
+
+test("doctor: a PI_MODEL_ENDPOINTS_FILE naming no file, or set empty, fails in this shell (#503)", async () => {
+	const cwd = scaffoldedCwd();
+	for (const [value, re] of [[join(cwd, "nope.json"), /✗ PI_MODEL_ENDPOINTS_FILE is set in this shell to a file the worker cannot load, so it REFUSES THE FILE and uses no model endpoint: .*nope\.json does not exist/], ["", /✗ PI_MODEL_ENDPOINTS_FILE is set to an EMPTY value in this shell/]]) {
+		const { out, text } = capture();
+		const code = await runDoctor(imgEnv({ PI_MODEL_ENDPOINTS_FILE: value }), scaffoldDeps(out, cwd));
+		assert.match(text(), re);
+		assert.equal(code, 1);
+	}
+});
 
 test("doctor: a scaffolded pause-windows.json with PI_PAUSE_WINDOWS_FILE unset warns, names the var, and never fails", async () => {
 	// The one failure mode where the UI asserts the opposite of the truth: the panel defaults to this same
@@ -6259,7 +6315,7 @@ test("doctor: a line the reader cannot model is said ONCE for the file, naming b
 	assert.doesNotMatch(onLinux.text(), /cannot be read off/, "systemd ignores the line rather than stopping at it, so there is nothing to warn about");
 	assert.ok(lines[0].includes(` or `), "and joins them, rather than naming one");
 	// The limit sentence rides the FIX line, not the label, so it is matched against the whole report.
-	assert.match(text(), new RegExp(`reads only the ${ENV_FILE_READABLE_KEYS.length === 2 ? "two" : String(ENV_FILE_READABLE_KEYS.length)} it names`), "the count in the limit sentence matches the frozen set");
+	assert.match(text(), new RegExp(`reads only the ${["zero", "one", "two", "three", "four"][ENV_FILE_READABLE_KEYS.length] ?? String(ENV_FILE_READABLE_KEYS.length)} it names`), "the count in the limit sentence matches the frozen set");
 	// AND BY SHAPE, because with exactly two keys a frozen literal produces the same string and every
 	// assertion above passes on it -- measured. The risk the derivation exists for is a THIRD boot file, at
 	// which point the literal would keep naming two while the sentence beside it kept saying "the two it
@@ -6286,7 +6342,7 @@ test("doctor: a line systemd reads differently is named with its shape, once, an
 		const code = await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
 		const lines = text().split("\n").filter((l) => /cannot be read off/.test(l));
 		assert.equal(lines.length, 1, `one line for the file: ${JSON.stringify(hazard)}\n${text()}`);
-		assert.ok(lines[0].startsWith(`⚠ whether PI_PAUSE_WINDOWS_FILE or PI_SCOPED_LIMITS_FILE reaches the service cannot be read off ${join(cwd, ".env")}: line ${line} `), lines[0]);
+		assert.ok(lines[0].startsWith(`⚠ whether PI_PAUSE_WINDOWS_FILE or PI_SCOPED_LIMITS_FILE or PI_MODEL_ENDPOINTS_FILE reaches the service cannot be read off ${join(cwd, ".env")}: line ${line} `), lines[0]);
 		assert.match(lines[0], what);
 		assert.match(text(), new RegExp(`on line ${line} of that file, ${fix.source}`), "the fix names the line and what to change");
 		assert.doesNotMatch(text(), /PI_PAUSE_WINDOWS_FILE is set in .* and loads/, "and no reading of a file systemd splits differently");
@@ -6313,7 +6369,7 @@ test("doctor: a .env systemd will not LOAD fails on Linux, naming the line and t
 		writeFileSync(join(cwd, ".env"), Buffer.concat([Buffer.from(`PI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\n`), tail]));
 		const { out, text } = capture();
 		const code = await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
-		assert.match(text(), new RegExp(`✗ whether PI_PAUSE_WINDOWS_FILE or PI_SCOPED_LIMITS_FILE reaches the service cannot be read off .*: ${what.source}`));
+		assert.match(text(), new RegExp(`✗ whether PI_PAUSE_WINDOWS_FILE or PI_SCOPED_LIMITS_FILE or PI_MODEL_ENDPOINTS_FILE reaches the service cannot be read off .*: ${what.source}`));
 		assert.match(text(), fix);
 		assert.doesNotMatch(text(), /PI_PAUSE_WINDOWS_FILE is set in .* and loads/);
 		assert.equal(code, 1, "a service that cannot start fails doctor");
@@ -7689,6 +7745,7 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 		observeRootfulConf: (e) => runtimeObs.observeRootfulConf({ endpoint: rootfulEndpoint, daemon: rootfulDaemon, fs: noFs, readService: async () => ({ code: 1, stdout: "" }), env: e, unit: { read: false, reason: "probe" } }),
 		pauseWindowsFilePath: (e) => cfg.pauseWindowsFilePath(e),
 		scopedLimitsFilePath: (e) => cfg.scopedLimitsFilePath(e),
+		modelEndpointsFilePath: (e) => cfg.modelEndpointsFilePath(e),
 	};
 	assert.deepEqual([...handedEnv].filter((n) => !Object.hasOwn(probes, n)).sort(), [], "every imported helper doctor hands env to is probed here");
 	const probedReads = {};

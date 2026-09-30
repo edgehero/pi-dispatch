@@ -57,9 +57,10 @@ import { basename, dirname, isAbsolute, join, delimiter, posix, resolve, win32 }
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { accountTempRoot, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
+import { DEFAULT_VALKEY_URL, accountTempRoot, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
+import { MODEL_ENDPOINTS_FILE_NAME, loadModelEndpoints } from "./model-endpoints.mjs";
 import { loadPauseWindows } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
 import { isForgeKind } from "./forges.mjs";
@@ -518,7 +519,7 @@ function asText(content, enc) {
  * set is a key the other reads back the same way -- and it is asked for THIS PLATFORM's loader, because
  * the three loaders of this file disagree and a blended reading is wrong for every deployment at once.
  */
-export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"]);
+export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_MODEL_ENDPOINTS_FILE"]);
 
 /**
  * The keys doctor takes from the deployment's `.env` as the SERVICE's values (issue #453, and since issue #471 every key
@@ -657,6 +658,7 @@ export const DOCTOR_SHELL_KEYS = Object.freeze({
 	DOCKER_CONTENT_TRUST: "a docker CLI setting of this shell, named for the --live probes this shell's CLI runs",
 	PI_PAUSE_WINDOWS_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS): the service judged from the file, this shell judged as itself",
 	PI_SCOPED_LIMITS_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS)",
+	PI_MODEL_ENDPOINTS_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS), #503",
 	[VALKEY_SHARED_KEY]: "read from .env ONLY (#464); a value in this shell is named as ignored",
 });
 
@@ -947,7 +949,8 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 }
 
 /**
- * The two files a worker LOADS AT BOOT, and the one place that knows what each is and how to ask.
+ * The files a worker LOADS, and the one place that knows what each is and how to ask. Two are read at boot; the
+ * third, the model endpoints file (issue #503), defaults to the deployment folder's copy and is judged the same way.
  *
  * `load` calls the worker's own loader (issue #384). Doctor used to carry its own parse for scoped limits
  * and nothing at all for pause windows, so "will the worker start" had two answers and one silence. The
@@ -963,6 +966,10 @@ const BOOT_FILES = Object.freeze([
 		unsetMeans: "the worker loads no windows at all",
 		unit: "window",
 		nothing: "quiet hours",
+		fails: "REFUSES TO START",
+		whenDeleted: "turns scoped pauses off",
+		whenEmpty: "turns the worker off",
+		emptyCost: "refuses the boot",
 		resolve: pauseWindowsFilePath,
 		load: (path, io) => loadPauseWindows({ pauseWindowsFile: path }, io),
 	}),
@@ -974,10 +981,51 @@ const BOOT_FILES = Object.freeze([
 		unsetMeans: "the worker enforces no scoped limits at all",
 		unit: "limit",
 		nothing: "scoped limits",
+		fails: "REFUSES TO START",
+		whenDeleted: "turns scoped limits off",
+		whenEmpty: "turns the worker off",
+		emptyCost: "refuses the boot",
 		resolve: scopedLimitsFilePath,
 		load: (path, io) => loadScopedLimits({ scopedLimitsFile: path }, io),
 	}),
+	// Issue #503. Not off when unset: the worker then reads the scaffold in the deployment folder, so `defaultsToScaffold`
+	// swaps the "exists but unset" warning for a load of that file. Nothing in the worker reads it yet (its proxy
+	// include, leases and keyless gate are later changes of the issue), so a bad file is named for what it costs, no
+	// usable endpoint, and not as a refused start.
+	Object.freeze({
+		key: "PI_MODEL_ENDPOINTS_FILE",
+		noun: "declared model endpoints",
+		scaffold: MODEL_ENDPOINTS_FILE_NAME,
+		defaultsToScaffold: true,
+		unsetMeans: `the worker reads ${MODEL_ENDPOINTS_FILE_NAME} in the deployment folder`,
+		unit: "endpoint",
+		nothing: "model endpoints",
+		fails: "REFUSES THE FILE and uses no model endpoint",
+		whenDeleted: `reads ${MODEL_ENDPOINTS_FILE_NAME} in the deployment folder instead`,
+		whenEmpty: "leaves no endpoint usable",
+		emptyCost: "leaves no endpoint usable",
+		resolve: modelEndpointsFilePath,
+		// The worker's own default when VALKEY_URL is unset, so both refuse an endpoint on 6379 alike.
+		load: (path, io, env) => loadModelEndpoints({ modelEndpointsFile: path, valkeyUrl: env?.VALKEY_URL ?? DEFAULT_VALKEY_URL }, io),
+	}),
 ]);
+
+/**
+ * Is anything at `path`, by `statFile`: ENOENT is absence, so a directory or an unreadable entry is judged. A stat that
+ * cannot say what the entry is (no `isFile`: a seam answering only an owner) is no evidence of a file either.
+ */
+function presentAt(statFile, path) {
+	try {
+		return typeof statFile(path)?.isFile === "function";
+	} catch (err) {
+		return err?.code !== "ENOENT";
+	}
+}
+
+/** The number of boot files in words, for the one sentence that counts them. */
+function countWord(n) {
+	return ["zero", "one", "two", "three", "four", "five"][n] ?? String(n);
+}
 
 /**
  * Would the worker load this path? The loader answers, with two guards doctor owes it.
@@ -1029,7 +1077,7 @@ function loadVerdict(spec, rawPath, cwd, io, platform = process.platform) {
 		return { ok: false, reason: err?.code === "ENOENT" ? `${shown} does not exist` : `${shown} cannot be read: ${envValueShown(err?.message ?? String(err))}` };
 	}
 	try {
-		spec.load(path, io.loaderIo);
+		spec.load(path, io.loaderIo, io.env);
 		return { ok: true };
 	} catch (err) {
 		return { ok: false, reason: envValueShown(err?.message ?? String(err)) };
@@ -1078,7 +1126,7 @@ export async function collectChecks(shellVars, seams) {
 	const valkeyUnread = service.unread.find((u) => u.key === "VALKEY_URL" && !u.shellSet);
 	const unreadValkey = valkeyUnread ? readValkeyKeys(serviceEnvFile.text, { loader: serviceEnvFile.loader, path: serviceEnvFile.path }).error : null;
 	if (unreadValkey) valkeyUnread.skip = true;
-	const valkeyUrl = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
+	const valkeyUrl = env.VALKEY_URL ?? DEFAULT_VALKEY_URL;
 	// PR #478's gate: a VALKEY_URL path that names no database (`/abc`) crashed doctor with an unhandled rejection from
 	// ioredis's SELECT. It is a ✗ of its own, the worker's refusal (exit 2), and nothing below contacts a Valkey.
 	const valkeyDbProblem = unreadValkey ? null : valkeyUrlProblem(valkeyUrl);
@@ -2856,7 +2904,7 @@ export async function collectChecks(shellVars, seams) {
 	// a deployment whose unit exits 1 in a restart loop is not a deployment that is merely unconfigured in
 	// this shell. Where the file merely configures what this shell does not, the line still says which
 	// process would honour it, and is still a warning.
-	const envFile = envFileKeys(join(cwd, ".env"), ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], { fileExists, readEnvFile, platform });
+	const envFile = envFileKeys(join(cwd, ".env"), BOOT_FILES.map((spec) => spec.key), { fileExists, readEnvFile, platform });
 	// ONE RULE FOR BOTH BOOT FILES, and it asks the worker's own loader rather than a second opinion
 	// (issue #384). Before this there were two hand-written copies of a shell-shaped check for
 	// `PI_PAUSE_WINDOWS_FILE`, a THIRD rule for a scoped-limits file that does not parse, and no rule at all
@@ -2876,7 +2924,7 @@ export async function collectChecks(shellVars, seams) {
 	// The IO the load verdict uses, injected like everything else this file touches: `statFile` for the
 	// regular-file guard and the loaders' own two reads. A test drives a whole deployment through these
 	// without a real file, which is how the fixtures below stay honest about content.
-	const seamsForLoad = { statFile: statSeam, loaderIo: { existsSync: (p) => fileExists(p), readFileSync: readEnvFile ? (p, enc) => asText(readEnvFile(p), enc) : readFileSync } };
+	const seamsForLoad = { env, statFile: statSeam, loaderIo: { existsSync: (p) => fileExists(p), readFileSync: readEnvFile ? (p, enc) => asText(readEnvFile(p), enc) : readFileSync } };
 	// ONCE PER FILE, not once per key (issue #396). This is a fact about the FILE -- one line the reader
 	// cannot model -- and it was announced inside the per-key loop, so a `.env` with one such line produced
 	// two near-identical warnings differing only in which key they named. The keys it prevents a verdict
@@ -2896,7 +2944,7 @@ export async function collectChecks(shellVars, seams) {
 		// A SHAPE comes from systemd's own line structure (issue #447): the line is one systemd reads differently from
 		// this command, and the table names it and what to change -- the same words `service install` refuses with.
 		const shape = envFile.hazard.shape ? SYSTEMD_HAZARD_SHAPES[envFile.hazard.shape] : null;
-		const limit = "Other keys in the same file are affected too and are not checked here: this command reads only the two it names";
+		const limit = `Other keys in the same file are affected too and are not checked here: this command reads only the ${countWord(BOOT_FILES.length)} it names`;
 		// A file systemd will not LOAD is a service that does not start (measured on systemd 259), which is a failure
 		// rather than a doubt about one reading (issue #447, gate round 1).
 		const unloadable = envFile.hazard.shape === "nul" || envFile.hazard.shape === "invalid-utf8" || envFile.hazard.shape === "exec-too-large";
@@ -2954,10 +3002,10 @@ export async function collectChecks(shellVars, seams) {
 			checks.push({
 				ok: false,
 				warn: envSetup !== null,
-				label: `${spec.key} is assigned an EMPTY value in ${join(cwd, ".env")}, which is not unset: ${loaderName} keeps it, the worker tries to load "" and REFUSES TO START${alsoExported === undefined ? "" : `, while ${otherName} would take ${envValueShown(alsoExported)}, so two deployments of this one file disagree`}`,
+				label: `${spec.key} is assigned an EMPTY value in ${join(cwd, ".env")}, which is not unset: ${loaderName} keeps it, the worker tries to load "" and ${spec.fails}${alsoExported === undefined ? "" : `, while ${otherName} would take ${envValueShown(alsoExported)}, so two deployments of this one file disagree`}`,
 				fix: envSetup !== null
 					? `${envSetup} runs after that file and may replace it, which is why this is a warning: if it does not, delete the ${spec.key} line, or give it the absolute path (${scaffolded})`
-					: `delete the ${spec.key} line from that .env, or give it a path: ${fixLineFor(spec.key, scaffolded)}. Deleting it turns ${spec.noun} off; an empty value turns the worker off`,
+					: `delete the ${spec.key} line from that .env, or give it a path: ${fixLineFor(spec.key, scaffolded)}. Deleting it ${spec.whenDeleted}; an empty value ${spec.whenEmpty}`,
 			});
 		} else if (envFile.hazard == null && notPlainLine !== undefined) {
 			// NAMED, NEVER QUOTED. The value is outside the grammar every loader reads the same way, so this
@@ -2986,7 +3034,7 @@ export async function collectChecks(shellVars, seams) {
 			checks.push({
 				ok: false,
 				warn: true,
-				label: `${spec.key} is assigned TWICE in ${join(cwd, ".env")} with different values: ${loaderName} takes ${envValueShown(fileRaw)}, ${otherName} would take ${alsoExported === "" ? "an EMPTY value, which refuses the boot" : envValueShown(alsoExported)}`,
+				label: `${spec.key} is assigned TWICE in ${join(cwd, ".env")} with different values: ${loaderName} takes ${envValueShown(fileRaw)}, ${otherName} would take ${alsoExported === "" ? `an EMPTY value, which ${spec.emptyCost}` : envValueShown(alsoExported)}`,
 				fix: `keep one assignment. Which one is in force depends on how the worker starts, so two of them means two deployments of the same file disagree`,
 			});
 		}
@@ -3007,7 +3055,7 @@ export async function collectChecks(shellVars, seams) {
 					: {
 							ok: false,
 							warn: envSetup !== null,
-							label: `${spec.key} is set in ${join(cwd, ".env")} (${envValueShown(fileRaw)}) to a file the worker cannot load, so a service started from it REFUSES TO START: ${verdict.reason}`,
+							label: `${spec.key} is set in ${join(cwd, ".env")} (${envValueShown(fileRaw)}) to a file the worker cannot load, so a service started from it ${spec.fails}: ${verdict.reason}`,
 							fix: envSetup !== null ? `${envSetup} runs after that file and may replace it; if it does not, fix ${envValueShown(fileRaw)} or point the key at a file that loads` : `fix ${envValueShown(fileRaw)}, or point ${spec.key} at a file that loads`,
 						},
 			);
@@ -3017,17 +3065,34 @@ export async function collectChecks(shellVars, seams) {
 		if (typeof shellRaw === "string" && shellRaw.trim() === "") {
 			checks.push({
 				ok: false,
-				label: `${spec.key} is set to an EMPTY value in this shell, which is not unset: the worker keeps it, tries to load "" and REFUSES TO START`,
-				fix: `unset ${spec.key} in this shell (that turns ${spec.noun} off), or give it the absolute path: export ${fixLineFor(spec.key, scaffolded)}`,
+				label: `${spec.key} is set to an EMPTY value in this shell, which is not unset: the worker keeps it, tries to load "" and ${spec.fails}`,
+				fix: `unset ${spec.key} in this shell (that ${spec.whenDeleted}), or give it the absolute path: export ${fixLineFor(spec.key, scaffolded)}`,
 			});
 		} else if (typeof shellRaw === "string") {
 			const verdict = loadVerdict(spec, shellRaw, cwd, seamsForLoad, platform);
 			if (!verdict.ok) {
 				checks.push({
 					ok: false,
-					label: `${spec.key} is set in this shell to a file the worker cannot load, so it REFUSES TO START: ${verdict.reason}`,
+					label: `${spec.key} is set in this shell to a file the worker cannot load, so it ${spec.fails}: ${verdict.reason}`,
 					fix: `fix ${envValueShown(shellRaw)}, or point ${spec.key} at a file that loads`,
 				});
+			}
+		} else if (spec.defaultsToScaffold) {
+			// Issue #503: unset is the scaffold, so it is that file which is judged, when nothing in .env says otherwise and it
+			// is there at all (a missing default file declares nothing, which is valid). Silent when it loads. Before the
+			// unreadable-.env line, which asks whether the service is configured for a feature unset turns off: unset turns
+			// nothing off here.
+			// Asked of `statFile`, the seam the load itself uses, so "missing" is ENOENT from the same place and a missing
+			// default stays silent however `fileExists` is seamed.
+			if (fileRaw === undefined && onlyExported === undefined && alsoExported === undefined && notPlainLine === undefined && !blankInFile && envFile.hazard == null && presentAt(statSeam, scaffolded)) {
+				const verdict = loadVerdict(spec, scaffolded, cwd, seamsForLoad, platform);
+				if (!verdict.ok) {
+					checks.push({
+						ok: false,
+						label: `${spec.key} is unset, so ${spec.unsetMeans}, and it does not load: the worker ${spec.fails}: ${verdict.reason}`,
+						fix: `fix ${envValueShown(scaffolded)}, or empty its "endpoints" list`,
+					});
+				}
 			}
 		} else if (envFile.unreadable === true) {
 			// COULD NOT READ, said as itself. The alternative -- the "unset" line below -- is a positive claim

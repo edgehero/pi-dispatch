@@ -1,4 +1,12 @@
 /**
+ * Issue #503: the variable a keyless provider's `models.json` key names (`"apiKey": "$PI_DISPATCH_KEYLESS"`), so pi
+ * composes the provider. `buildContainerEnv` writes it, with the fixed, non-secret value `keyless`, from a later part of
+ * #503 (the keyless credential gate), and only for a job whose provider is served by keyless model endpoints alone.
+ * Reserved in the set below from now, so neither `run.secrets` nor `PI_FORWARD_ENV` can set it.
+ */
+export const KEYLESS_ENV_NAME = "PI_DISPATCH_KEYLESS";
+
+/**
  * The environment variable names `buildContainerEnv` writes itself, spelled once (issue #225).
  *
  * This exists because `run.secrets` lets a trigger name env variables, and a trigger that names one the
@@ -41,4 +49,6 @@ export const CONTAINER_ENV_NAMES = new Set([
 	// Issue #341: set beside `--user` so a uid with no passwd entry has a writable home. A new reservation, so a
 	// triggers file binding a secret named HOME is now refused at parse (worker, receiver and admin alike).
 	"HOME",
+	// Issue #503: reserved ahead of the part of #503 that emits it (see KEYLESS_ENV_NAME at the top).
+	KEYLESS_ENV_NAME,
 ]);

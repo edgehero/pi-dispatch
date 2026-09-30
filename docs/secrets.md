@@ -45,8 +45,9 @@ assume you might, which is the closest this project came to documenting it befor
 
 **Two readers exist, and it is worth knowing exactly how narrow the first is**, because the sentence
 above is the kind that quietly stops being true. `pi-dispatch doctor` reads the `.env` in its own working
-directory for **two keys**, `PI_PAUSE_WINDOWS_FILE` and `PI_SCOPED_LIMITS_FILE`, and the reason is that
-`pi-dispatch up` writes them there. Writing a line into `.env` configures the **service**, through the
+directory for **three keys**, `PI_PAUSE_WINDOWS_FILE`, `PI_SCOPED_LIMITS_FILE` and `PI_MODEL_ENDPOINTS_FILE`.
+The reason for the first two is that `pi-dispatch up` writes them there. The third names the model endpoints file,
+and doctor loads the file the service would read. Writing a line into `.env` configures the **service**, through the
 slots in the table above, and configures nothing about a shell you later type `pi-dispatch doctor` into.
 Without the read, doctor would warn that those two features are off at exactly the deployments that had
 just been set up correctly.

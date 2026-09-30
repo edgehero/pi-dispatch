@@ -14,6 +14,7 @@ import { parseBackendList, venuesOf } from "./backends.mjs";
 import { deploymentVenueEnv } from "./deployment-venue.mjs";
 import { setEnvKeyIfEmpty } from "./env-file.mjs";
 import { PACKAGED_EGRESS_PROXY_CONF } from "./egress-conf-copy.mjs";
+import { EMPTY_MODEL_ENDPOINTS, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, renderEndpointsInclude } from "./model-endpoints.mjs";
 import { VALKEY_PASSWORD_KEY, newValkeyPassword } from "./valkey-auth.mjs";
 
 const EMPTY_TRIGGERS = `${JSON.stringify({ triggers: [] }, null, 2)}\n`;
@@ -116,6 +117,11 @@ export function runInit(cwd = process.cwd(), deps = {}) {
 		scaffold(fs, results, join(cwd, "subscriptions.json"), EMPTY_SUBSCRIPTIONS, "empty subscription list (declare plan prices for the admin's cost analytics)");
 		scaffold(fs, results, join(cwd, "scoped-limits.json"), EMPTY_SCOPED_LIMITS, "empty scoped-limits list (per repo/folder caps; the folder mutex needs no file)");
 		scaffold(fs, results, join(cwd, "egress-allowlist.conf"), DEFAULT_EGRESS_ALLOWLIST, "egress allowlist (provider + forge + registry; the egress policy is on unless PI_EGRESS=0)");
+		// Issue #503: the declared model endpoints, empty, and the proxy include rendered from them, which is the empty
+		// render (its header only). squid refuses to start on a missing include file and starts on a comments-only one
+		// (measured), so the include exists from the first init even with nothing declared.
+		scaffold(fs, results, join(cwd, MODEL_ENDPOINTS_FILE_NAME), EMPTY_MODEL_ENDPOINTS, "empty model endpoints list (local or LAN model servers a job may reach through the proxy)");
+		scaffold(fs, results, join(cwd, MODEL_ENDPOINTS_INCLUDE_NAME), renderEndpointsInclude([]), "the proxy's rules for those endpoints, none yet (generated: do not edit)");
 		// Issue #480: the proxy's rules, the file beside the allowlist that the docker proxy mounts. Create-only like every
 		// scaffold here, so a clone's own deploy/egress-proxy.conf is reported and kept. The one scaffold whose content is
 		// not this module's: it is the package's file verbatim, read from the package and never through `fs` (the

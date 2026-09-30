@@ -19,6 +19,7 @@ Both exist because getting them wrong is silent.
 | Subscriptions | `./subscriptions.json` | `PI_SUBSCRIPTIONS_FILE` | The plan prices the cost analytics read. Nothing about routing or spend enforcement |
 | Staged pi packages | `./pi-packages.json` | `PI_PACKAGES_FILE` | Which packages a job may load |
 | Egress allowlist | `./egress-allowlist.conf` | (path is passed to the proxy) | The egress policy |
+| Model endpoints | `./model-endpoints.json` | `PI_MODEL_ENDPOINTS_FILE` | The local or LAN model servers a job may reach, and their slots. `model-endpoints.conf` beside it is rendered from it |
 | Credentials | `./.env` | (read by your service manager) | Every secret and every path. Back this up separately and encrypted, and never into a repository |
 | Session transcripts | **no default** | `PI_SESSIONS_DIR` | Resumable sessions. The most PII bearing thing here: issue text, file contents, tool output, the agent's own reasoning. Back it up only if you accept that |
 | GitHub App key | `./github-app-<slug>.pem` | `GITHUB_APP_PRIVATE_KEY_PATH` | Forge authentication |

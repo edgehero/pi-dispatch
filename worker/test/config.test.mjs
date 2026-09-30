@@ -4,6 +4,7 @@ import { delimiter, join } from "node:path";
 import { test } from "node:test";
 import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, accountTempRoot, configError, defaultGraphDir, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, ensureAccountTempRoot, ensureJobsDir, ensureSandboxDir, ensureUnderAccountRoot, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, loadConfig, loadGitLabAuth, logsDirPath, normalizeAppPrivateKey, underOsTempDir } from "../src/config.mjs";
 import { FORGES, FORGE_KINDS } from "../src/forges.mjs";
+import { CONTAINER_ENV_NAMES } from "../src/reserved-env.mjs";
 import { WAIT_INTERVAL_FLOOR_MS } from "../src/wait-for.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -343,6 +344,26 @@ test("scoped-limits file is honored verbatim -- no default path, null means no s
 	assert.equal(loadConfig({}).scopedLimitsFile, null);
 	const c = loadConfig({ PI_SCOPED_LIMITS_FILE: "/abs/scoped-limits.json" });
 	assert.equal(c.scopedLimitsFile, "/abs/scoped-limits.json");
+});
+
+test("model-endpoints file: null means the deployment folder's model-endpoints.json, and an empty value is kept (#503)", () => {
+	assert.equal(loadConfig({}).modelEndpointsFile, null);
+	assert.equal(loadConfig({ PI_MODEL_ENDPOINTS_FILE: "/abs/eps.json" }).modelEndpointsFile, "/abs/eps.json");
+	assert.equal(loadConfig({ PI_MODEL_ENDPOINTS_FILE: "" }).modelEndpointsFile, "", "`??`: the loader refuses an empty value rather than reading the default");
+});
+
+test("PI_FORWARD_ENV refuses PI_DISPATCH_KEYLESS, egress on or off, and a trigger cannot bind it either (#503)", () => {
+	for (const env of [{}, { PI_EGRESS: "0" }]) {
+		for (const list of ["PI_DISPATCH_KEYLESS", "FOO,PI_DISPATCH_KEYLESS"]) {
+			assert.throws(
+				() => loadConfig({ ...env, PI_FORWARD_ENV: list }),
+				(e) => e.piDispatchConfig === true && /PI_FORWARD_ENV must not forward PI_DISPATCH_KEYLESS -- the worker sets it itself/.test(e.message),
+				`${list} ${JSON.stringify(env)}`,
+			);
+		}
+	}
+	assert.deepEqual(loadConfig({ PI_FORWARD_ENV: "OLLAMA_API_KEY" }).forwardEnv, ["OLLAMA_API_KEY"], "an ordinary name still forwards");
+	assert.ok(CONTAINER_ENV_NAMES.has("PI_DISPATCH_KEYLESS"), "reserved, so run.secrets cannot bind it (triggers.test.mjs drives the refusal over the whole set)");
 });
 
 test("configError is tagged for clean CLI reporting", () => {
