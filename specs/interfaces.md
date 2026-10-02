@@ -3089,7 +3089,9 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
       "run": { "kind": "local", "folder": "<absolute HOST path, must exist>", "flow": "<flow name>",
                "command": "<registered pi command [args] — EXACTLY ONE of flow/command, every kind>",
                "task": "<operator-authored prompt text — DATA, lands in /job/prompt.md; NOT beside command>",
-               "provider": "<optional passthrough>", "model": "<optional>", "maxTurns": <optional>,
+               "provider": "<optional: ^[a-z0-9][a-z0-9._-]*$ lowercased, <=64; ALL kinds>",
+               "model": "<optional: the ledger id pattern lowercased, <=64, case kept; ALL kinds>",
+               "maxTurns": <optional int >= 1; ALL kinds>,
                "github": <optional boolean>, "packages": <optional boolean>,
                "resume": <optional boolean>,
                "image": "<optional: docker image ref; absent = PI_JOB_IMAGE>",
@@ -3099,6 +3101,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
     { "on": { "type": "label", "any": [...], "all": [...], "none": [...] },
       "run": { "kind": "github", "flow": "<flow name>",
                "command": "<see cron — exactly one of flow/command>", "packages": <optional boolean>,
+               "provider": "<optional; see cron>", "model": "<optional>", "maxTurns": <optional>,
                "image": "<optional>", "skillsDir": "<optional>",
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
                "replicas": <optional int 2..3; webhook kinds only>,
@@ -3107,6 +3110,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
     { "on": { "type": "comment", "phrase": "<trigger phrase>" },       // at most one
       "run": { "kind": "github", "flow": "<default flow>",
                "command": "<see cron — exactly one of flow/command>", "packages": <optional boolean>,
+               "provider": "<optional; see cron>", "model": "<optional>", "maxTurns": <optional>,
                "image": "<optional>", "skillsDir": "<optional>",
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
                "replicas": <optional int 2..3; webhook kinds only>,
@@ -3125,6 +3129,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                                                                     // beside once: true
       "run": { "kind": "github", "flow": "<flow name>",
                "command": "<see cron — exactly one of flow/command>", "packages": <optional boolean>,
+               "provider": "<optional; see cron>", "model": "<optional>", "maxTurns": <optional>,
                "image": "<optional>", "skillsDir": "<optional>",
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
                "replicas": <optional int 2..3; webhook kinds only; never beside once: true>,
@@ -3411,7 +3416,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   construction — `doctor` is where that becomes visible.
 - **`run.image` (ALL FOUR trigger kinds, optional non-empty string) — a selector, not an arming**: absent
   = the deployment default `PI_JOB_IMAGE`; present = the Docker image this trigger's job containers run in.
-  It is **pure passthrough** in exactly the sense `provider`/`model`/`maxTurns` are (**Why**, below):
+  It is **absent-stays-absent** in exactly the sense `provider`/`model`/`maxTurns` are (**Why**, below):
   omitted → absent from the emitted job data → resolved at job start as `job.image ?? PI_JOB_IMAGE`. Absent
   therefore never means "off"; it means "the deployment's". It is carried on all four kinds for
   `run.packages`' reason and not `run.github`'s: **a toolchain is a capability of the flow**, and a
@@ -3845,14 +3850,63 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   **No model-callable path**, on `run.secrets`' reasoning: `dispatch_trigger_add`/`_edit` carry no
   `waitFor` parameter. A wait is reviewed trigger content, not a runtime control.
 
+- **`run.provider`, `run.model`, `run.maxTurns` (ALL trigger kinds, each optional)**: which model this
+  trigger's jobs run on, and their turn limit (issue #502). Before #502 only cron carried them, copied
+  untouched, so `run.provider: 7` loaded; a forge trigger carried none and its jobs always ran on the
+  deployment default.
+
+  **Validated at load in both services** by `validateModelRef` (`worker/src/model-ref.mjs`, pure, so the
+  receiver and the console share it). `provider` is a string whose lowercase form matches
+  `^(?=.{1,64}$)[a-z0-9][a-z0-9._-]*$`: no `/`, because an allowed-model entry `provider/model` splits at
+  the first one. `model` is a string whose lowercase form matches `MODEL_REF_PATTERN`, the run-history
+  ledger's own id pattern (`INT-RUN-HISTORY-FILE-CONTRACT`), so a model a trigger can name is one whose
+  usage row the host keeps; 64 characters is that pattern's cap. Both must be printable ASCII BEFORE they are
+  lowercased, because lowercasing is not closed over ASCII (the Kelvin sign lowercases to `k`). The value
+  is carried in its ORIGINAL case, since pi matches model ids case-sensitively. `maxTurns` is a positive
+  safe integer. `null` is absent for all three (a cron entry's `"model": null` loaded before #502 and meant the
+  default, since the worker fills these with `??`), so it emits no key. A refusal names the trigger and the
+  key and never echoes the value.
+
+  **Whether the model EXISTS is not checked here**: that needs the pinned catalog and the overlay
+  `models.json`, both per-host facts, and a loader that read them would refuse a reviewed file on one host
+  only. An existing-but-misspelled id is refused in the container today, after the budget reservation.
+
+  **A NEAR-MISS SPELLING IS REFUSED** on `run.backend`'s sweep (homoglyph subsequence branch included),
+  with targets `provider`, `providers`, `providerid`, `providerids`, `providername`, `model`, `modelid`,
+  `modelname`, `models`, `modelids`, `modelnames`, `allowedmodels`, `allowedmodel`, `maxturns`, `maxturn`,
+  `maxcostusd` and `maxcost` (singular and plural, `excludeTools`' rule), and the refusal names the field the
+  matched target belongs to: a dropped `run.modelId` runs the job on the deployment default while the file reads as
+  though it chose. On `on` every spelling is refused, the correct ones included. The exact keys
+  `run.models` and `run.maxCostUsd` are NOT refused: they are fields a later release adds with
+  enforcement, and until then they fall under this file's tolerance of unknown `run` keys, so a file
+  written for that release still loads here. They are not carried into the normalized run.
+
+  **Forwarding: absent stays absent.** A forge normalizer emits each field only when present, the receiver
+  copies all three onto every rule group (`receiver/src/config.mjs`) and forwards each with its own
+  conditional spread at every filter's job literal, and they ride at JOB level, never inside `trigger`. A
+  trigger that names none produces job data byte-identical to the pre-#502 shape. A derived test
+  (`receiver/test/trigger-forwarding.test.mjs`, with a cron twin in `worker/test/`) runs a maximal fixture
+  per forge through the real `parseTriggers` and requires every execution key the loader emits to reach
+  the job through every route of every filter, so the next field cannot be dropped silently.
+
+  **Model-callable**: `dispatch_trigger_add` (every kind, `maxTurns` too) and `dispatch_trigger_edit` take
+  `provider` and `model`, behind the operator confirm, and both run the same validator before the confirm
+  is shown. The console's display record (`normalizeTriggerForDisplay`) carries `provider`, `model` and
+  `maxTurns` on every kind when set, so `dispatch_triggers` and the drill-in show them.
+
+  **Upgrade consequence**: a webhook trigger that already carried these fields was ignored before #502 and
+  now takes effect; a malformed value or a near-miss key that loaded before now refuses the whole file in
+  both services.
+
 - **Why**: The operator's trigger set is one host file — diffable, reviewable, git-trackable — rather than
   two files in two shapes across two services. The schema unifies the *view*; evaluation still splits by
   owner (a `label` is never scheduled; a `cron` never receives a webhook). `on.id` (cron only) must be
   `:`-free because the stall guard parses BullMQ's `repeat:<id>:<millis>` job id by splitting on `:`.
   `run.task` is operator-authored natural language and therefore **DATA** (`CONST-ISSUE-TEXT-IS-DATA`): it
-  lands in `/job/prompt.md`, never in a system prompt. `provider`/`model`/`maxTurns` are **pure
-  passthrough**: omitted → absent from the emitted job data, resolved at job start via the overlay then env
-  (`INT-CONFIG-OVERLAY-CONTRACT`). `image` is passthrough in the same sense with one deliberate difference:
+  lands in `/job/prompt.md`, never in a system prompt. `provider`/`model`/`maxTurns` are **absent stays
+  absent, validated** (issue #502; until then this sentence said "pure passthrough", and it meant unchecked):
+  omitted → absent from the emitted job data, resolved at job start via the overlay then env
+  (`INT-CONFIG-OVERLAY-CONTRACT`); present → checked at load by the bullet above. `image` is passthrough in the same sense with one deliberate difference:
   it resolves against `PI_JOB_IMAGE` **only**, never the settings overlay, so no admin-editable runtime knob
   can change which code every job executes (`DES-RUNTIME-SETTINGS-FILE-OVERLAY`). A `labeled` PR rule (like a `label` rule) requires a positive selector;
   at most one `comment` trigger may be configured.
@@ -5941,3 +5995,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-02 | Issue #503, part 5 (keyless providers pass the credential gate), with PR #520's review rounds 1 and 2 folded in. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: Status (all parts of #503 landed; part 7 moved to #501); the `keyless` key's meaning; a new **Keyless** bullet (the four conditions, every model and not some, the exact `apiKey` and why any other value is refused, the one snapshot per pickup shared by the gate and the env builder, `doctor` on the same verdict, `PI_EGRESS=0` adds nothing to the argv, and the residual of a known provider pointed at a local server; from round 1, no other credential (headers, `oauth`, baseUrl userinfo) and every model entry with a string `id`, plain-JSON parsing failing closed, a transient overlay read retried as infra instead of refused (round 2: the reader itself keeps an fs error's code, so an unreadable file or directory is no longer read as invalid JSON or as absent), and the variable settled after the forward and secrets loops); an Acceptance sentence. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, the env bullet: `PI_DISPATCH_KEYLESS=keyless` is now emitted, only on the keyless branch, in the credential's slot. A provider pi does not know is now answered before `auth.json` is read: its every path through `auth.json` already ended in a refusal (there is no variable to write a key under), whose advice ("set the key in .env, or run `pi login`") no custom provider could follow, and a transient read fault there was retried for a refusal that could never pass. **`INT-EGRESS-POLICY-CONTRACT` UNCHANGED, checked**: no rule, include or mount moves. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: no overlay key reaches the endpoints or the gate. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT`'s Producer/Consumer bullet UNCHANGED, checked, and `doctor` corrected to it**: the bullet already says a bad file refuses boot, which has been true since part 4 (PR #518) loaded the file in start.mjs; `doctor`'s boot-file entry still said a bad file was refused with no endpoint usable, a running-worker posture. It now says `REFUSES TO START` for a file that does not load (a zero-byte file included), a missing named file and an empty value, as the pause-windows and scoped-limits entries do; a valid `{"version":1,"endpoints":[]}` still declares none. **Code evidence**: worker/src/doctor.mjs -> BOOT_FILES; worker/src/model-endpoints.mjs -> keylessVerdict, KEYLESS_API_KEY, KEYLESS_HOW; worker/src/env-allowlist.mjs -> resolveProviderCredential, keylessEndpointsFor, buildContainerEnv; worker/src/processor.mjs; worker/src/run-container.mjs; worker/src/start.mjs; worker/src/doctor.mjs -> noKeyVariableCheck. |
 | 2026-10-02 | Issue #524. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, the `reason` enum gains `local-folder-not-a-repo` (a local job whose folder has no `.git` at its root), `local-folder-no-commit` (an unborn HEAD: a branch with no commit yet) and `local-folder-unreadable-repo` (any other HEAD git cannot resolve: an empty `.git`, a missing worktree gitdir, ownership, a missing commit object, a garbage branch ref), all refused at prepare before the budget reserve, the last two only once the files git needed read back cleanly, so a transient read error is retried instead. The first was recorded as `config-refused`, which names a misconfigured deployment rather than the folder. The other two escaped as untagged throws, failed jobs with no reason that were not retried. |
 | 2026-10-02 | Issues #501 and #502, the shared seams for policy stops (no behaviour change when nothing is set). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the meter's stop is ONE reason, first wins (`meterStop`), and `decideExit` ranks `turn_budget` > `meterStop` > `tokenAborted` (the fallback bus meter's flag alone) > a rejected prompt; two rows reserved, enforced by later changes (`cost-cap`, `model-not-allowed`); one live row, a cost cap or a model list the runner cannot enforce before a call (meter not installed, no hard stop, or no pre-call guard, which is every image until the guards land) refuses after the meter installs and before `createAgentSession` as `model-policy-unenforceable` (checked first) or `cost-cap-unenforceable`; `RUNNER_POLICY_REASONS` grows to five and the source bolt accepts an exported literal; five `tokens` names reserved after `unpriced`. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the `reason` enum gains the four, each with a fixed terminal comment; the `tokens` key list gains `costCapMicros`, `costRefused`, `boundExceeded`, `longContext`, `modelRefused` in that order (admitted by the closed list, written by no runner yet); the ledger id pattern widens to `^(?=.{1,64}$)[~@]?[a-z0-9][a-z0-9._:/@_-]*$` in the new pure `worker/src/model-ref.mjs`. Measured over pi-ai 0.99.1's builtin catalog (42 providers, 1,589 ids): the old pattern refused 55 (19 openrouter `~` ids, 18 `cloudflare-ai-gateway` ids with `@` inside, 18 `cloudflare-workers-ai` ids starting `@cf/`), a `~`-only prefix still refused those 18, the adopted `[~@]?` refuses 0, and a test walks the catalog at the pin. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_MAX_COST_MICROS` and `PI_ALLOWED_MODELS` named and reserved in `CONTAINER_ENV_NAMES` (the worker writes neither yet; an empty value is a config error for both), and the three job-feature capability gates are one table, `CAPABILITY_GATES`, with identical behaviour. **`INT-SDK-SESSION-OPTIONS`**: the snippet shows `onStop` and the policy check. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the new refusal is free and pre-spend inside the container, and no worker gate moved. |
+| 2026-10-02 | Issue #502 part 1. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.provider`, `run.model` and `run.maxTurns` are legal on ALL FOUR kinds and validated at load in both services (before, only cron carried them, copied unchecked, so `run.provider: 7` loaded). The grammar lines name the rule: a provider matches `^(?=.{1,64}$)[a-z0-9][a-z0-9._-]*$` lowercased, a model matches the run-history ledger's id pattern lowercased (`MODEL_REF_PATTERN` in `worker/src/model-ref.mjs`, 64 characters), both printable ASCII before lowercasing, the model kept in its original case, `maxTurns` a positive safe integer, and `null` treated as absent for all three because a cron entry's `"model": null` loaded before and meant the default. A new bullet records the near-miss sweep (`providerId`, `providers`, `modelId`, `modelName`, `maxTurn`, `allowedModels` and case or separator variants refused under `run`, every spelling refused under `on`, the suggestion naming the matched field), the upgrade consequence (webhook fields that were ignored now take effect, and a value or key that loaded before can now refuse the file), the deliberate tolerance of the exact keys `run.models` and `run.maxCostUsd` until the release that enforces them, that existence is NOT checked at load, and the absent-stays-absent forwarding with its derived receiver test, which also drives each route's job through `enqueueForgeJob`. The two "pure passthrough" sentences (the `run.image` bullet and **Why**) now say "absent stays absent", and the **Why** sentence says the fields are validated. **`INT-OUTBOX-CONTRACT` UNCHANGED, checked**: chaining exists only for local jobs, which carried these fields before this change, and a child still does not inherit them. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: the precedence `job.data > overlay > env` is what a forge job's new fields enter. **Measured at pi 0.99.1**: the pattern takes an optional leading `~` or `@` (`^(?=.{1,64}$)[~@]?[a-z0-9][a-z0-9._:/@_-]*$`), because without the `@` the 18 builtin `cloudflare-workers-ai` ids (`@cf/...`) could not be named; with it every builtin id passes (all 1,589 distinct ids over 1,592 catalog entries from `getAllBuiltinModels` across 42 providers, its 57 image and 12 classifier models included, 0 refused), and all 42 builtin provider ids pass the provider rule. The pattern itself is the one #533 moved into `model-ref.mjs`; the trigger rule imports that constant rather than restating it, and a test pins that the loader and the ledger agree on every id shape. **Code evidence**: worker/src/model-ref.mjs -> validateModelRef, MODEL_REF_PATTERN, PROVIDER_REF_PATTERN; worker/src/triggers.mjs -> validateRunModel and the five normalizers; receiver/src/config.mjs; receiver/src/filter.mjs; receiver/src/filter-gitlab.mjs; receiver/src/filter-forgejo.mjs; receiver/src/filter-azure.mjs; admin/src/index.ts -> dispatch_trigger_add, dispatch_trigger_edit, buildTriggerEntry; admin/src/read-model.mjs -> normalizeTriggerForDisplay; admin/src/dashboard.ts; receiver/test/trigger-forwarding.test.mjs; worker/test/trigger-forwarding.test.mjs; worker/test/model-ref.test.mjs. |

@@ -192,6 +192,53 @@ changes what code runs or what it costs.
 - `"github": true` on a cron trigger gets the same per-job GitHub token the webhook path gets. A
   scheduled flow can use `gh`.
 
+## Choosing the model and the turn limit
+
+Any trigger type can name the model its jobs run on, and how many turns a job may take:
+
+```json
+{ "on": { "type": "label", "any": ["pi:triage"] },
+  "run": { "kind": "github", "flow": "triage", "provider": "openai", "model": "gpt-5.4-mini", "maxTurns": 10 } }
+```
+
+- `"provider"` is a pi provider id, such as `anthropic` or `openai`.
+- `"model"` is that provider's model id. Case is kept as you wrote it.
+- `"maxTurns"` is a whole number of 1 or more.
+
+Each one is optional. A field you leave out is not written into the job. The job then takes the value
+from the settings overlay, else from the environment (`PI_PROVIDER`, `PI_MODEL`, `PI_MAX_TURNS`), when it
+starts. A trigger that names only a model runs on the deployment's provider, so name both when they
+belong together.
+
+The file is checked when it loads, in the worker and in the receiver:
+
+- A provider is 1 to 64 characters: letters, digits, `.`, `_` and `-`, starting with a letter or digit.
+- A model is 1 to 64 characters: letters, digits and `.` `_` `-` `:` `/` `@`, starting with a letter or
+  digit, or with `~` or `@` and then one. This is the same rule the run history uses for the model rows it
+  keeps, so any model a trigger can name is one whose usage can be recorded.
+- A number, an empty string, a space, a 65th character or a non-ASCII character is refused. The message
+  names the trigger and the field. It does not repeat the value.
+- A near miss of a field name is refused too: `providerId`, `providers`, `modelId`, `modelName`,
+  `model_id`, `maxTurn`, `max_turns`, `allowedModels` and other case or separator variants. A misspelled key would otherwise be dropped,
+  and the job would run on the default model while the file reads as though it chose one. The same
+  keys under `on` are refused in every spelling.
+
+The load check does not ask whether the model exists. A typo that fits the rule still loads. The job is
+then refused inside the container, after it has taken its budget slot.
+
+`dispatch_trigger_add` and `dispatch_trigger_edit` can set `provider` and `model`, behind the same
+operator confirm as every other trigger write. Both check the value with the same rule before they ask.
+The panel's drill-in and `dispatch_triggers` show a trigger's own model, provider and turn limit on every
+trigger type.
+
+**Upgrading.** Before this release a webhook trigger's `provider`, `model` and `maxTurns` were ignored, and
+its jobs ran on the deployment default. If your file already sets them on a label, comment, pull request
+or issue trigger, they now take effect. A value that loaded before but breaks the rule above (a number, a
+space, more than 64 characters) now refuses the whole file, in the worker and in the receiver alike, as
+does a misspelled key such as `modelId`. A `null` value is still accepted on every trigger type and
+means the deployment default, as it did before. Run `pi-dispatch doctor` after upgrading to see any such
+line.
+
 Everything else is editable from the panel (`a` adds kind-first, `e` edits the flow, `x` deletes) or via
 the confirm-gated AI tools. Every write is validated. Both services reload it live. The worker itself
 writes exactly one thing back, the `on.disarmed` mark. That mark spends a one-shot. Every local job also

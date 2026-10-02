@@ -511,3 +511,31 @@ test("the selector takes back the room a dropped badge frees, before the badges'
   }
   assert.ok(dropped > 0, "some width drops the image badge, which is the case under test");
 });
+
+test("a webhook trigger's own model, provider and turn limit reach the record and the drill-in (#502)", async () => {
+  const { normalizeTriggerForDisplay } = await import("../src/read-model.mjs");
+  // Every kind carries them now; before #502 the record held `model` for cron only, so the model-callable
+  // dispatch_triggers read and this pane said "deployment default" for a webhook trigger that chose one.
+  for (const entry of [
+    { on: { type: "label", any: ["bug"] }, run: { kind: "github", flow: "fix" } },
+    { on: { type: "comment", phrase: "@pi" }, run: { kind: "gitlab", flow: "fix" } },
+    { on: { type: "pull_request", action: ["opened"] }, run: { kind: "forgejo", flow: "fix" } },
+    { on: { type: "issue", action: ["closed"] }, run: { kind: "github", flow: "fix" } },
+    { on: { type: "cron", id: "n", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/p", flow: "fix", task: "t" } },
+  ]) {
+    const named = normalizeTriggerForDisplay({ ...entry, run: { ...entry.run, provider: "openai", model: "gpt-5.4", maxTurns: 7 } });
+    assert.deepEqual([named.provider, named.model, named.maxTurns], ["openai", "gpt-5.4", 7], entry.on.type);
+    // Absent stays absent: a record for a trigger naming none keeps its pre-#502 keys (cron keeps model: null).
+    const bare = normalizeTriggerForDisplay(entry);
+    assert.equal("provider" in bare, false, entry.on.type);
+    assert.equal("maxTurns" in bare, false, entry.on.type);
+    assert.equal("model" in bare, entry.on.type === "cron", entry.on.type);
+  }
+
+  const record = normalizeTriggerForDisplay({ on: { type: "label", any: ["bug"] }, run: { kind: "github", flow: "fix", provider: "openai", model: "gpt-5.4", maxTurns: 7 } });
+  const lines = await openDetail(record, {}, THEME);
+  assert.deepEqual([kvValues(lines, "model"), kvValues(lines, "provider"), kvValues(lines, "maxTurns")], [["gpt-5.4"], ["openai"], ["7"]]);
+  const plain = await openDetail(normalizeTriggerForDisplay({ on: { type: "label", any: ["bug"] }, run: { kind: "github", flow: "fix" } }), {}, THEME);
+  assert.deepEqual(kvValues(plain, "model"), ["deployment default"]);
+  assert.equal(stripAnsi(plain.join("\n")).includes("maxTurns"), false);
+});

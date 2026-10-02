@@ -121,7 +121,8 @@ export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthori
 	if (!resolved.enqueue) return resolved; // carries the drop reason
 
 	// (3) Build the job from the INT-WEBHOOK-PAYLOAD-SUBSET fields only. No sender.login (not in the
-	// subset), no provider/model/maxTurns (the worker fills defaults), no field outside the subset --
+	// subset), provider/model/maxTurns only when the matched rule named them (absent, the worker fills the
+	// deployment default, #502), no field outside the subset --
 	// with two trigger-context additions (issue #49): `matched` is harness-computed, the filter's own
 	// decision record naming the triggers.json entry that fired (not payload data at all); `comment`,
 	// present only on the comment route, carries the invoking comment's body/author_association, both
@@ -156,6 +157,12 @@ export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthori
 		// dropped exclusion runs the job WITH the tool, the destructive absence the loader's own sweep
 		// refuses a misspelling for, arriving through the plumbing instead of the spelling.
 		...(resolved.excludeTools !== undefined ? { excludeTools: resolved.excludeTools } : {}),
+		// #502. One spread PER FIELD, the excludeTools rule above: folded into one conditional, a trigger
+		// that named only a model would have its provider's absence decide whether the model survives,
+		// and a dropped model runs the job on the deployment default while the file reads as chosen.
+		...(resolved.provider !== undefined ? { provider: resolved.provider } : {}),
+		...(resolved.model !== undefined ? { model: resolved.model } : {}),
+		...(resolved.maxTurns !== undefined ? { maxTurns: resolved.maxTurns } : {}),
 		// The trigger's injected skills dir (REQ-PER-TRIGGER-SKILLS), at JOB level beside image/packages and
 		// NEVER inside `trigger`. That placement is sharpest here of all: `trigger` is carried into
 		// /job/event.json, and a worker-host path in an agent-readable file is the leak prepare-local's
@@ -211,6 +218,7 @@ function routeIssueLabel(subset, triggers) {
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools,
+		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
@@ -271,6 +279,7 @@ function routeComment(subset, triggers, knownFlows) {
 		// <flow>` override changes WHICH flow runs, never which triggers.json entry authorized it.
 		packages: triggers.comment.packages,
 		image: triggers.comment.image, backend: triggers.comment.backend, excludeTools: triggers.comment.excludeTools,
+		provider: triggers.comment.provider, model: triggers.comment.model, maxTurns: triggers.comment.maxTurns,
 		skillsDir: triggers.comment.skillsDir,
 		secrets: triggers.comment.secrets,
 		secretsProfile: triggers.comment.secretsProfile,
@@ -369,6 +378,7 @@ function routePullRequest(subset, triggers, action) {
 			...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 			packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 			image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools,
+			provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns,
 			skillsDir: rule.skillsDir,
 			secrets: rule.secrets,
 			secretsProfile: rule.secretsProfile,
@@ -485,6 +495,7 @@ function routeClose(rules, number, closerAuthorized, matchedFor, targetFor) {
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools,
+		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,

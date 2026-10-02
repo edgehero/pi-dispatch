@@ -952,6 +952,41 @@ test("buildTriggerEntry carries run.backend on EVERY kind it is offered for (#22
   }
 });
 
+test("buildTriggerEntry carries provider, model and maxTurns on EVERY kind, and adds no key when unset (#502)", async () => {
+  // The #227 bug one field over: the tool's schema offered model/provider/maxTurns on every kind while the
+  // webhook arms dropped them, so an approved entry silently ran on the deployment default.
+  const { mod } = await loadRegistered();
+  const { buildTriggerEntry } = mod;
+  const ref = { provider: "openai", model: "gpt-5.4", maxTurns: 4 };
+  const cases = [
+    ["cron", { id: "n", pattern: "0 3 * * *", folder: "/p", flow: "f", task: "t" }],
+    ["label", { labels: ["pi"], flow: "f" }],
+    ["comment", { phrase: "@pi", flow: "f" }],
+    ["pull_request", { action: ["opened"], flow: "f" }],
+    ["issue", { action: ["closed"], flow: "f" }],
+  ];
+  for (const [kind, params] of cases) {
+    const run = buildTriggerEntry(kind, { ...params, ...ref }).run;
+    for (const [k, v] of Object.entries(ref)) assert.equal(run[k], v, `${kind} must carry ${k}`);
+    const bare = buildTriggerEntry(kind, params).run;
+    for (const k of Object.keys(ref)) assert.equal(k in bare, false, `${kind} must add no ${k} key when unset`);
+  }
+});
+
+test("dispatch_trigger_edit can send provider and model, and says so (#502)", async () => {
+  const { calls } = await loadRegistered();
+  const tool = toolByName(calls, "dispatch_trigger_edit");
+  const keys = Object.keys(tool.parameters.properties ?? {});
+  for (const k of ["provider", "model"]) assert.ok(keys.includes(k), `dispatch_trigger_edit must be able to send ${k}`);
+  assert.match(tool.description, /provider/);
+  assert.match(tool.description, /model/);
+  // Not a widening by the back door: the later list and cost-cap fields stay off both writers.
+  for (const name of ["dispatch_trigger_add", "dispatch_trigger_edit"]) {
+    const ks = Object.keys(toolByName(calls, name).parameters.properties ?? {});
+    for (const forbidden of ["models", "maxCostUsd"]) assert.equal(ks.includes(forbidden), false, `${name} must expose no ${forbidden}`);
+  }
+});
+
 test("both trigger writers expose a backend picker, and it is not a schema enum (#227)", async () => {
   // A schema enum would be frozen at registration while PI_BACKENDS is read per call, so the allowlist is
   // checked in `execute`. What the schema must do is let the model SEND the field at all -- the exact

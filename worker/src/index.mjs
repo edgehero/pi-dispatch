@@ -894,9 +894,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 
 			// Fill the effective job settings under `job.data > overlay > env` precedence: an explicit per-job
 			// field wins; an omitted one takes the overlay value, else env, resolved at this job's start
-			// (INT-CONFIG-OVERLAY-CONTRACT). Receiver GitHub jobs carry no provider/model/maxTurns, so this fill
-			// supplies the provider the container env allowlist requires -- absent it, the allowlist refuses a job
-			// only after its budget slot is reserved. The `caps`/`softHoldPct` passed to runJob change which
+			// (INT-CONFIG-OVERLAY-CONTRACT). A forge job carries provider/model/maxTurns only when its trigger
+			// named them (#502), so for most jobs this fill supplies the provider the container env allowlist
+			// requires -- absent it, the allowlist refuses a job only after its budget slot is reserved. The `caps`/`softHoldPct` passed to runJob change which
 			// values reserveBudget checks, never when it runs.
 			const effectiveJob = effectiveJobOf(job.data, settings);
 

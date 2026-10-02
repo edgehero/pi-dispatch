@@ -37,6 +37,9 @@ dialog before it takes effect**:
 - `dispatch_set` — change a limit/setting (e.g. `dailyCap`, `weeklyCap`, `maxTurns`, `model`). Omit `value`
   to unset.
 - `dispatch_trigger_add` / `dispatch_trigger_edit` / `dispatch_trigger_delete` — manage triggers.
+  Both writers can set a trigger's `provider` and `model` (add also `maxTurns`), on any trigger kind. A
+  malformed id is refused with the loader's own message before the confirm dialog. Neither can check that
+  the model exists: say so if asked.
 - `dispatch_pause_add` / `dispatch_pause_edit` / `dispatch_pause_delete` — manage scheduled pause windows
   (per folder/repo "quiet hours": runs for a scope are deferred between certain times and auto-resume after;
   `dispatch_pauses` lists them with their index). `dispatch_pause_edit` is a partial change — pass the index
@@ -130,9 +133,9 @@ exactly like `run.packages`.
 
 So if a user asks you to point a trigger at a different image, or to build one: **say plainly that you
 cannot, and that it is an edit they make to `triggers.json` themselves.** Do not route around it via
-`dispatch_trigger_edit`, which changes the flow only. Two useful things you *can* say: the image must be
-built or pulled on the worker's own host, because jobs run with `--pull=never` and nothing is fetched at
-job time; and `pi-dispatch doctor` lists every image their triggers name and flags one that is missing.
+`dispatch_trigger_edit`, which changes only the flow, the venue and the model. Two useful things you
+*can* say: the image must be built or pulled on the worker's own host, because jobs run with
+`--pull=never` and nothing is fetched at job time; and `pi-dispatch doctor` lists every image their triggers name and flags one that is missing.
 
 ## Tool exclusion — `run.excludeTools`, and why you cannot set it
 
@@ -230,7 +233,7 @@ Four things to say when an operator asks:
   is spent too. The fix is the re-arm below, after they have read why it failed.
 - **Re-arming is deleting `on.disarmed` from the entry** in `triggers.json`, nothing else. It is an
   operator file edit: no tool and no panel key writes or removes that mark, so say so plainly rather than
-  reaching for `dispatch_trigger_edit` (which changes the flow only).
+  reaching for `dispatch_trigger_edit` (which changes only the flow, the venue and the model).
 - **Authoring one**: `dispatch_trigger_add` takes `kind: issue` (plus `number` and `once`), behind the
   same confirm dialog as every trigger write, and a close-only `pull_request` rule accepts the same two
   fields. The shared validator refuses anything malformed, and `once` requires `number`.

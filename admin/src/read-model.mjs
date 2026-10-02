@@ -1451,6 +1451,17 @@ export function normalizeTriggerForDisplay(entry) {
   // `replicas` the loader accepts this on cron too.
   const secrets = run.secrets !== null && typeof run.secrets === "object" && !Array.isArray(run.secrets) ? Object.keys(run.secrets).length : 0;
   const secretsProfile = typeof run.secretsProfile === "string" && run.secretsProfile.trim() !== "" ? run.secretsProfile : null;
+  // Which model this trigger's jobs run on (issue #502): every kind may name `provider`, `model` and
+  // `maxTurns` since #502, and before it the record carried `model` for cron only, so the model-callable
+  // dispatch_triggers read and the drill-in said "deployment default" for a webhook trigger that chose one.
+  // Mirrors the loader's shapes (a string, a positive integer) rather than re-validating. Spread only when
+  // present, so a record for a trigger that names none keeps exactly its pre-#502 keys; cron keeps its
+  // long-standing `model: null` sentinel below.
+  const modelRef = {
+    ...(typeof run.provider === "string" && run.provider !== "" && { provider: run.provider }),
+    ...(typeof run.model === "string" && run.model !== "" && { model: run.model }),
+    ...(Number.isSafeInteger(run.maxTurns) && run.maxTurns >= 1 && { maxTurns: run.maxTurns }),
+  };
   switch (on.type) {
     case "cron":
       return {
@@ -1463,6 +1474,7 @@ export function normalizeTriggerForDisplay(entry) {
         // Optional per-cron model override (passthrough into job.data); null when the entry resolves the
         // deployment default. Surfaced so the drill-in shows which schedules pin their own model.
         model: typeof run.model === "string" ? run.model : null,
+        ...modelRef,
         packages,
         image,
         backend,
@@ -1474,9 +1486,9 @@ export function normalizeTriggerForDisplay(entry) {
         secretsProfile,
       };
     case "label":
-      return { type: "label", any: normalizeSelector(on.any), all: normalizeSelector(on.all), none: normalizeSelector(on.none), flow, command, packages, image, backend, excludeTools, skillsDir, instructions, resume, secrets, secretsProfile, replicas, forge };
+      return { type: "label", any: normalizeSelector(on.any), all: normalizeSelector(on.all), none: normalizeSelector(on.none), flow, command, ...modelRef, packages, image, backend, excludeTools, skillsDir, instructions, resume, secrets, secretsProfile, replicas, forge };
     case "comment":
-      return { type: "comment", phrase: typeof on.phrase === "string" ? on.phrase : null, flow, command, packages, image, backend, excludeTools, skillsDir, instructions, resume, secrets, secretsProfile, replicas, forge };
+      return { type: "comment", phrase: typeof on.phrase === "string" ? on.phrase : null, flow, command, ...modelRef, packages, image, backend, excludeTools, skillsDir, instructions, resume, secrets, secretsProfile, replicas, forge };
     case "pull_request": {
       // A close-only PR rule carries the same #231 trio the issue arm does, on the issue arm's terms
       // (see its comments): without them here, a spent PR one-shot renders byte-identical to an armed
@@ -1495,6 +1507,7 @@ export function normalizeTriggerForDisplay(entry) {
         ...(prDisarmed !== null && { disarmed: prDisarmed }),
         flow,
         command,
+        ...modelRef,
         packages,
         image,
         backend,
@@ -1530,6 +1543,7 @@ export function normalizeTriggerForDisplay(entry) {
         ...(disarmed !== null && { disarmed }),
         flow,
         command,
+        ...modelRef,
         packages,
         image,
         backend,

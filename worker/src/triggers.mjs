@@ -32,6 +32,7 @@ import { imageRefProblem } from "./image-ref.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { FORGE_HOST_VARS, FORGE_KINDS, MINTED_TOKEN_VARS, RUN_KINDS, forgeSpec, isForgeKind } from "./forges.mjs";
 import { findDuplicateKey } from "./json-duplicates.mjs";
+import { validateModelRef } from "./model-ref.mjs";
 import { PROVIDER_STEERING_VARS } from "./provider-steering.mjs";
 import { CONTAINER_ENV_NAMES } from "./reserved-env.mjs";
 // The wait grammar's two shared halves (issue #230). `afterInstantMs` is imported rather than restated so
@@ -39,6 +40,10 @@ import { CONTAINER_ENV_NAMES } from "./reserved-env.mjs";
 // how a file that loads clean starts holding for an instant nobody wrote. wait-for.mjs is pure and
 // fs-free, so importing it keeps parseTriggers pure.
 import { WAIT_CONDITION_KEYS, WAIT_CONDITION_MAX, afterInstantMs } from "./wait-for.mjs";
+
+// Re-exported so the console checks a provider or model it is about to write with the loader's own
+// grammar, through the subpath it already imports, rather than a copy that could drift.
+export { validateModelRef };
 
 // EXPORTED for the same reason as PR_ACTIONS: the admin re-states this vocabulary to a MODEL.
 export const ON_TYPES = new Set(["cron", "label", "comment", "pull_request", "issue"]);
@@ -401,6 +406,8 @@ function normalizeCron(on, run, index, path, state) {
 	// A cron job's session narrows like any other: the field selects what the container's agent can do,
 	// which is orthogonal to what triggered it (issue #291).
 	const excludeTools = validateExcludeTools(on, run, `cron trigger "${id}"`, path);
+	// Validated since #502; before it these three were copied untouched, so `run.provider: 7` loaded.
+	const ref = validateRunModel(on, run, `cron trigger "${id}"`, path);
 
 	// provider/model/maxTurns stay absent when omitted so the value resolves at job start against the
 	// settings overlay/env, not a default frozen here (INT-CONFIG-OVERLAY-CONTRACT). github/packages/image stay
@@ -409,7 +416,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }) },
+		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }) },
 	};
 }
 
@@ -1173,6 +1180,64 @@ function validateBackend(on, run, at, path, { localWorkspace }) {
 }
 
 /**
+ * `run.provider`, `run.model` and `run.maxTurns` (issue #502): which model this trigger's job runs on, and
+ * its turn limit. Every kind carries them; before #502 only cron did, and unchecked.
+ *
+ * The value grammar is `model-ref.mjs`'s, shared with the console. This wrapper adds the KEY sweep, in
+ * `validateExcludeTools`' shape and for its reason: a misspelled `run.modelId` loads clean and the job runs
+ * on the deployment default model while the file reads as though it chose one. That is a destructive
+ * absence once a model is policy, and the price difference between two models is the whole point of
+ * naming one.
+ *
+ * `run.models` and `run.maxCostUsd` are fields a later release adds with enforcement. Until then their
+ * EXACT spelling falls through to this file's tolerance of unknown `run` keys (a file written for that
+ * release still loads here), while their misspellings are refused like any other near miss, so the day
+ * the field arrives a typo in it is already loud.
+ */
+function validateRunModel(on, run, at, path) {
+	// What the sweep compares against, case and separators removed. `providerid` and `modelid` are what an
+	// operator copies from a provider's own API docs; `allowedmodels` is the issue's own name for the list.
+	// Deliberately NOT a synonym hunt (`llm`, `engine`): that is the general unknown-key sweep this file's
+	// forward-compatibility posture rejects.
+	// Singular and plural of each, excludeTools' rule: `maxTurn` and `providers` are one grammatical step
+	// from the field, and `modelName` is how several provider SDKs spell the id.
+	const targets = {
+		provider: "run.provider", providers: "run.provider", providerid: "run.provider", providerids: "run.provider", providername: "run.provider",
+		model: "run.model", modelid: "run.model", modelname: "run.model",
+		models: "run.models", modelids: "run.models", modelnames: "run.models", allowedmodels: "run.models", allowedmodel: "run.models",
+		maxturns: "run.maxTurns", maxturn: "run.maxTurns",
+		maxcostusd: "run.maxCostUsd", maxcost: "run.maxCostUsd",
+	};
+	const exact = new Set(["provider", "model", "maxTurns", "models", "maxCostUsd"]);
+	const isSubsequence = (needle, hay) => {
+		let i = 0;
+		for (const ch of hay) if (i < needle.length && needle[i] === ch) i++;
+		return i === needle.length;
+	};
+	for (const [label, source, exactIsLegal] of [
+		["run", run, true],
+		["on", on, false],
+	]) {
+		for (const key of Object.keys(source ?? {})) {
+			if (exactIsLegal && exact.has(key)) continue;
+			const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+			// The homoglyph branch is validateBackend's (its comment carries the rationale), floor 4 included:
+			// `m<U+043E>del` normalizes to `mdel`, and a floor of 5 would let the shortest target's likeliest
+			// homoglyph through. Only a non-ASCII key reaches this branch, so no ASCII field is at risk.
+			// The suggestion names the target that actually MATCHED, so a homoglyph key is pointed at the field
+			// its surviving letters spell rather than at whatever a prefix test would guess.
+			const hit = /^[\x20-\x7E]*$/.test(key)
+				? (Object.hasOwn(targets, normalized) ? normalized : undefined)
+				: normalized.length >= 4 ? Object.keys(targets).find((t) => isSubsequence(normalized, t)) : undefined;
+			if (hit === undefined) continue;
+			const meant = targets[hit];
+			throw configError(`${at}: ${label}.${key} is not a field -- did you mean ${meant}? A model choice the loader drops runs the job on the deployment default while the file reads as though it chose, so a near miss is refused rather than dropped: ${path}`);
+		}
+	}
+	return validateModelRef(run, at, path);
+}
+
+/**
  * `run.excludeTools` -- pi tool names this trigger's session must NOT have (issue #291).
  *
  * The first field here that changes what the agent CAN DO inside the container rather than what the
@@ -1417,9 +1482,10 @@ function normalizeLabel(on, run, index, path) {
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
+	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "label", any: predicate.any, all: predicate.all, none: predicate.none },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...ref },
 	};
 }
 
@@ -1458,9 +1524,10 @@ function normalizeComment(on, run, index, path, state) {
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
+	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "comment", phrase: on.phrase },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...ref },
 	};
 }
 
@@ -1526,6 +1593,7 @@ function normalizeIssue(on, run, index, path) {
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
+	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: {
 			type: "issue",
@@ -1535,7 +1603,7 @@ function normalizeIssue(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...ref },
 	};
 }
 
@@ -1612,6 +1680,7 @@ function normalizePullRequest(on, run, index, path) {
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
+	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: {
 			type: "pull_request",
@@ -1626,7 +1695,7 @@ function normalizePullRequest(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...ref },
 	};
 }
 

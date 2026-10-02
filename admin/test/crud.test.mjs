@@ -288,6 +288,60 @@ test("dispatch_trigger_edit: an approved confirm changes the flow and shows old-
   assert.match(shown[0].message, /old -> new/);
 });
 
+test("dispatch_trigger_edit: provider and model ride the confirm and land on the entry (#502)", async () => {
+  const path = tmpTriggers({ triggers: [{ on: { type: "label", any: ["a"] }, run: { kind: "github", flow: "old", model: "gpt-5.4" } }] });
+  process.env.PI_TRIGGERS_FILE = path;
+  const { ctx, shown } = toolCtx({ answer: true });
+  const out = textOf(await toolByName("dispatch_trigger_edit").execute("id", { index: 0, flow: "old", provider: "anthropic", model: "claude-sonnet-4-5" }, undefined, undefined, ctx));
+  assert.equal(out.applied, true);
+  assert.deepEqual(read(path).triggers[0].run, { kind: "github", flow: "old", model: "claude-sonnet-4-5", provider: "anthropic" });
+  assert.match(shown[0].message, /provider: - -> anthropic/);
+  assert.match(shown[0].message, /model: gpt-5\.4 -> claude-sonnet-4-5/);
+});
+
+test("dispatch_trigger_edit: a malformed model is refused BEFORE the confirm, with the loader's message (#502)", async () => {
+  const initial = { triggers: [{ on: { type: "label", any: ["a"] }, run: { kind: "github", flow: "old" } }] };
+  const path = tmpTriggers(initial);
+  process.env.PI_TRIGGERS_FILE = path;
+  for (const bad of [{ model: "gpt 5" }, { model: "x".repeat(65) }, { provider: "open/ai" }]) {
+    const { ctx, shown } = toolCtx({ answer: true });
+    await assert.rejects(
+      () => toolByName("dispatch_trigger_edit").execute("id", { index: 0, flow: "old", ...bad }, undefined, undefined, ctx),
+      /trigger #1: run\.(model|provider) must be/,
+    );
+    assert.equal(shown.length, 0, "the operator is never asked to approve a value the write would refuse");
+  }
+  assert.deepEqual(read(path), initial);
+});
+
+test("dispatch_trigger_edit: an edit that sends no model keeps the one the entry has (#502)", async () => {
+  const path = tmpTriggers({ triggers: [{ on: { type: "label", any: ["a"] }, run: { kind: "github", flow: "old", provider: "openai", model: "gpt-5.4" } }] });
+  process.env.PI_TRIGGERS_FILE = path;
+  const { ctx, shown } = toolCtx({ answer: true });
+  await toolByName("dispatch_trigger_edit").execute("id", { index: 0, flow: "new", model: "  " }, undefined, undefined, ctx);
+  assert.deepEqual(read(path).triggers[0].run, { kind: "github", flow: "new", provider: "openai", model: "gpt-5.4" });
+  assert.equal(/model:|provider:/.test(shown[0].message), false, "nothing sent, nothing shown as changing");
+});
+
+test("dispatch_trigger_add: a webhook trigger keeps the model it was given (#502)", async () => {
+  const path = tmpTriggers({ triggers: [] });
+  process.env.PI_TRIGGERS_FILE = path;
+  const { ctx } = toolCtx({ answer: true });
+  await toolByName("dispatch_trigger_add").execute("id", { kind: "label", labels: ["pi:go"], flow: "fix", provider: "openai", model: "gpt-5.4", maxTurns: 4 }, undefined, undefined, ctx);
+  assert.deepEqual(read(path).triggers[0].run, { kind: "github", flow: "fix", model: "gpt-5.4", provider: "openai", maxTurns: 4 });
+  // And a malformed one is the loader's own refusal BEFORE the confirm, never an approval wasted on an
+  // entry the write then refuses, and never a silent drop.
+  for (const bad of [{ model: "gpt 5" }, { provider: "open/ai" }, { maxTurns: 0 }]) {
+    const fresh = toolCtx({ answer: true });
+    await assert.rejects(
+      () => toolByName("dispatch_trigger_add").execute("id", { kind: "comment", phrase: "@pi", flow: "fix", ...bad }, undefined, undefined, fresh.ctx),
+      /the new trigger: run\.(model|provider|maxTurns) must be/,
+    );
+    assert.equal(fresh.shown.length, 0, "the operator is never asked to approve a value the write would refuse");
+  }
+  assert.equal(read(path).triggers.length, 1);
+});
+
 test("dispatch_trigger_delete: out-of-range index throws and writes nothing", async () => {
   const path = tmpTriggers({ triggers: [{ on: { type: "label", any: ["a"] }, run: { kind: "github", flow: "f" } }] });
   process.env.PI_TRIGGERS_FILE = path;

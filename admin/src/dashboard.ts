@@ -2160,15 +2160,19 @@ function renderTriggerDetail(raw: any, inner: number, styler: any, sched: any = 
   if (t.type === "cron") {
     out.push(kv("job", "local", "success"));
     out.push(kv("folder", `${t.folder ?? "-"}`, "success"));
-    out.push(kv("model", t.model ?? "deployment default", t.model ? "accent" : "dim"));
   } else {
     // The forge is read from the entry, never assumed: with two forges configured, "which one does this
     // trigger listen to" is the first question the drill-in has to answer, and guessing github would be
     // wrong for half the file.
     out.push(kv("job", t.forge ?? "-", "accent"));
     out.push(kv("target", forgeTargetLabel(t?.forge), "accent"));
-    out.push(kv("model", "deployment default", "dim"));
   }
+  // Every kind may name its model since #502, so the row is shared: the forge branch used to print a
+  // hard "deployment default" that became untrue the day a webhook trigger could choose. Provider and
+  // turn limit get a row only when set, because their absence is already said by the model row's default.
+  out.push(kv("model", t.model ?? "deployment default", t.model ? "accent" : "dim"));
+  if (typeof t.provider === "string" && t.provider !== "") out.push(kv("provider", t.provider, "accent"));
+  if (Number.isInteger(t.maxTurns)) out.push(kv("maxTurns", String(t.maxTurns), "accent"));
   // A command trigger's full `/name args` line (issue #189): the list and header show the name only,
   // and this drill-in is where the args belong -- the reviewed file staged them, the operator's own
   // session shows them. Rendered only when armed, on both branches, because all four kinds can carry

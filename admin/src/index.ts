@@ -104,7 +104,7 @@ import { valkeyDownHint } from "@edgehero/pi-dispatch/valkey-auth";
 // capability lost with no error anywhere. A narrowed one means the model proposes an entry, the operator
 // approves a confirm dialog, and writeTriggers rejects it: a wasted human approval. `blessedBackends`
 // below is the precedent, and its header is a post-mortem of the same mistake.
-import { FORGE_KINDS, ISSUE_ACTIONS, ON_TYPES, PR_ACTIONS, PR_CLOSE_ACTIONS, REVIEW_STATES } from "@edgehero/pi-dispatch/triggers";
+import { FORGE_KINDS, ISSUE_ACTIONS, ON_TYPES, PR_ACTIONS, PR_CLOSE_ACTIONS, REVIEW_STATES, validateModelRef } from "@edgehero/pi-dispatch/triggers";
 import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
 // The worker's OWN window classifier (the same one reserveBudget enforces), so the budget states the
 // insights payload carries are words the page never derives and the panel and enforcement cannot drift.
@@ -535,7 +535,7 @@ function registerTools(pi: ExtensionAPI): void {
       "pull_request trigger may not carry labels[] at all. A github review_submitted trigger may also set " +
       "reviewState[] (" + [...REVIEW_STATES].join("|") + ") to narrow which verdicts fire; omitted, all " +
       "three do. For webhook triggers the repo and the task come from the triggering " +
-      "issue/PR event — set only the match + flow — and they run under the deployment default model. " +
+      "issue/PR event, so set only the match + flow. Every kind may set model/provider/maxTurns (omit = deployment default). " +
       "`backend` (optional, any kind) names WHERE the job's container is built, chosen from the names this " +
       "deployment blesses in PI_BACKENDS; omitted, the job runs on the deployment default. A name this " +
       "deployment does not bless is refused here, and refused again before the job spends.",
@@ -579,6 +579,9 @@ function registerTools(pi: ExtensionAPI): void {
         if (blessed.length === 0) throw new Error("this deployment blesses no backends, so run.backend cannot be set (see PI_BACKENDS)");
         if (!blessed.includes(params.backend)) throw new Error(`backend '${params.backend}' is not blessed by this deployment (PI_BACKENDS: ${blessed.join(", ")})`);
       }
+      // #502, the edit tool's rule: a malformed provider, model or turn limit is refused with the loader's own
+      // message BEFORE the operator is asked, rather than after they approved an entry the write then refuses.
+      validateModelRef({ provider: optStr(params.provider), model: optStr(params.model), maxTurns: params.maxTurns }, "the new trigger", resolvePaths(deploymentEnv()).triggersPath);
       const entry = buildTriggerEntry(params.kind, params);
       if (!entry) throw new Error(`unknown trigger kind '${params.kind}' (cron|label|comment|pull_request|issue)`);
       const result = await confirmedWrite(
@@ -600,10 +603,19 @@ function registerTools(pi: ExtensionAPI): void {
     description:
       "Changes which flow a trigger runs (by array index from dispatch_triggers) and applies it live, and " +
       "optionally which `backend` (venue) its container is built in, chosen from the names PI_BACKENDS " +
-      "blesses. The operator MUST approve a confirm dialog showing the before->after; with no interactive " +
+      "blesses, and which `provider` and `model` its jobs run on (omitted, the trigger keeps what it has). " +
+      "The operator MUST approve a confirm dialog showing the before->after; with no interactive " +
       "operator it is refused.",
     executionMode: "sequential",
-    parameters: Type.Object({ index: Type.Integer({ minimum: 0 }), flow: Type.String(), backend: Type.Optional(Type.String()) }),
+    parameters: Type.Object({
+      index: Type.Integer({ minimum: 0 }),
+      flow: Type.String(),
+      backend: Type.Optional(Type.String()),
+      // #502. Which model the trigger's jobs run on. Checked below with the LOADER's own validator before
+      // the operator is asked, so a confirm dialog never shows a value the write would then refuse.
+      provider: Type.Optional(Type.String()),
+      model: Type.Optional(Type.String()),
+    }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
       const list = triggerList(paths);
@@ -622,18 +634,33 @@ function registerTools(pi: ExtensionAPI): void {
         if (!blessed.includes(backend)) throw new Error(`backend '${backend}' is not blessed by this deployment (PI_BACKENDS: ${blessed.join(", ")})`);
       }
       const venue = backend === undefined ? "" : `, backend: ${(cur as any).backend ?? "-"} -> ${backend}`;
+      // #502. Blank means "not sent", optStr's rule for backend above. A sent value goes through the
+      // worker's validator, the one parseTriggers runs at the write, so a malformed id is refused here
+      // with the loader's own message instead of after the operator approved it.
+      const ref = validateModelRef({ provider: optStr(params.provider), model: optStr(params.model) }, `trigger #${params.index + 1}`, paths.triggersPath);
+      // The display record carries no provider for a forge trigger, so the before half reads the raw
+      // entry; a file that cannot be read shows "-" and the write itself decides.
+      const rawRun = (() => {
+        try {
+          return JSON.parse(String(nodeFs.readFileSync(paths.triggersPath, "utf8")))?.triggers?.[params.index]?.run ?? {};
+        } catch {
+          return {};
+        }
+      })();
+      const modelLine = ["provider", "model"].filter((k) => (ref as any)[k] !== undefined).map((k) => `, ${k}: ${rawRun[k] ?? "-"} -> ${(ref as any)[k]}`).join("");
       const result = await confirmedWrite(
         ctx,
-        { title: `Edit trigger #${params.index + 1}`, message: `trigger #${params.index + 1} (${cur.type}) flow: ${cur.flow ?? "-"} -> ${flow}${venue}` },
+        { title: `Edit trigger #${params.index + 1}`, message: `trigger #${params.index + 1} (${cur.type}) flow: ${cur.flow ?? "-"} -> ${flow}${venue}${modelLine}` },
         () => {
           const res = writeTriggers({
             triggersPath: paths.triggersPath,
-            // `backend` is merged only when the caller sent one, so an edit that changes just the flow
-            // leaves the entry byte-identical in every other key -- including a venue it already had.
-            mutate: (raw: any[]) => raw.map((tr, i) => (i === params.index ? { ...tr, run: { ...tr.run, flow, ...(backend !== undefined && { backend }) } } : tr)),
+            // `backend`, `provider` and `model` are merged only when the caller sent them, so an edit that
+            // changes just the flow leaves the entry byte-identical in every other key -- including a venue
+            // or a model it already had.
+            mutate: (raw: any[]) => raw.map((tr, i) => (i === params.index ? { ...tr, run: { ...tr.run, flow, ...(backend !== undefined && { backend }), ...ref } } : tr)),
           });
           if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, index: params.index, flow, ...(backend !== undefined && { backend }) };
+          return { applied: true, index: params.index, flow, ...(backend !== undefined && { backend }), ...ref };
         },
       );
       return toolText(JSON.stringify(result));
@@ -1095,9 +1122,9 @@ export function blessedBackends(env: NodeJS.ProcessEnv): string[] {
 export function buildTriggerEntry(kind: string, f: any): any {
   if (kind === "cron") {
     // Optional per-entry provider/model/maxTurns pass through to job.data (highest precedence); omitted when
-    // blank so the value still resolves against the settings overlay/env at job start (triggers.mjs:127-131).
-    // undefined keys drop out of the written JSON. Only the local/cron path carries these — github triggers
-    // run under the global overlay/env model, which the loader enforces.
+    // blank so the value still resolves against the settings overlay/env at job start. Since #502 every
+    // kind carries them (`modelRun` below); this arm keeps its own spelling so the cron entry's key order
+    // is byte-identical to what it always wrote.
     const run: any = { kind: "local", folder: f.folder, flow: f.flow, task: f.task };
     const model = optStr(f.model);
     const provider = optStr(f.provider);
@@ -1117,7 +1144,14 @@ export function buildTriggerEntry(kind: string, f: any): any {
   // refused fail-loud at the write instead of silently rewritten to github.
   const repository = optStr(f.repository);
   const backend = optStr(f.backend);
-  const forgeRun = (rest: any) => ({ kind: forge, ...rest, ...(repository ? { repository } : {}), ...(backend ? { backend } : {}) });
+  // #502. The tool's schema has always offered model/provider/maxTurns on every kind, and before #502 a
+  // webhook arm dropped them in silence: the operator approved an entry without the model they asked for.
+  // Carried only when set, so an entry that names none is byte-identical; parseTriggers validates them.
+  const model = optStr(f.model);
+  const provider = optStr(f.provider);
+  const maxTurns = optInt(f.maxTurns);
+  const modelRun = { ...(model ? { model } : {}), ...(provider ? { provider } : {}), ...(maxTurns !== undefined ? { maxTurns } : {}) };
+  const forgeRun = (rest: any) => ({ kind: forge, ...rest, ...(repository ? { repository } : {}), ...(backend ? { backend } : {}), ...modelRun });
   if (kind === "label") return { on: { type: "label", any: asWords(f.labels ?? f.any) }, run: forgeRun({ flow: f.flow }) };
   if (kind === "comment") return { on: { type: "comment", phrase: f.phrase }, run: forgeRun({ flow: f.flow }) };
   if (kind === "pull_request") {
@@ -1134,7 +1168,7 @@ export function buildTriggerEntry(kind: string, f: any): any {
     // `forgeRun` is not used on this arm (it builds `on` itself), so the venue is carried explicitly.
     // Without this the picker VALIDATED a name and then discarded it, and the confirm dialog rendered
     // an entry with no `backend` for the operator to approve -- a pick accepted and dropped in silence.
-    return { on, run: { kind: forge, flow: f.flow, ...(backend ? { backend } : {}) } };
+    return { on, run: { kind: forge, flow: f.flow, ...(backend ? { backend } : {}), ...modelRun } };
   }
   if (kind === "issue") {
     // The close-trigger kind (issue #231). `action` DEFAULTS to this forge's close word -- the only
@@ -1151,7 +1185,7 @@ export function buildTriggerEntry(kind: string, f: any): any {
     // `forgeRun` is not used on this arm (it builds `on` itself), so the venue is carried explicitly.
     // Without this the picker VALIDATED a name and then discarded it, and the confirm dialog rendered
     // an entry with no `backend` for the operator to approve -- a pick accepted and dropped in silence.
-    return { on, run: { kind: forge, flow: f.flow, ...(backend ? { backend } : {}) } };
+    return { on, run: { kind: forge, flow: f.flow, ...(backend ? { backend } : {}), ...modelRun } };
   }
   return null;
 }
