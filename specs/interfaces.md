@@ -1438,7 +1438,9 @@ refactor apart.
     and only to an image that declares `modelPolicy` (the capability row above). `PI_FORWARD_ENV` refuses
     it at config load, with every other name the worker writes (below). `PI_MAX_COST_MICROS` (issue #501),
     **written by the worker whenever the job has a dollar cap**: the smaller of the trigger's `run.maxCostUsd`
-    and the deployment's `maxCostUsd`, each counted only when set (`INT-CONFIG-OVERLAY-CONTRACT`), as integer
+    and the deployment's `maxCostUsd`, each counted only when set (`INT-CONFIG-OVERLAY-CONTRACT`), or `0` for a
+    job a dollar window reserves nothing for because every model it may call is local and zero-rated
+    (`INT-MODEL-ENDPOINTS-FILE-CONTRACT`'s **Cost**, issue #503 part 7), as integer
     micro-dollars, `0` included (`!== null`, never truthiness: 0 is the tightest cap, and a truthy test would
     send none), omitted when there is no cap, so an uncapped job's env is byte-identical, and only to an image
     that declares `costCap` (the capability row above). `PI_FORWARD_ENV` refuses it at config load too, and it
@@ -4295,7 +4297,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -4328,7 +4330,10 @@ validator rather than a second copy of it.
                  "reason": "<fixed enum: resumed|absent|expired|conversation-too-old|resume-chain-too-long|context-too-full|compaction-summary-empty|too-large|unparseable|not-a-regular-file|key-not-a-directory|transcript-diverted|venue-changed|pi-version-changed|transcript-replaced|locked|promote-failed|disabled>" | null,
                  "bytes": <int> | null } | null,   // null when the job had no session at all
     "host":    "<PI_WORKER_NAME, else this machine's sanitized hostname>" | null,   // which machine ran it (#57)
-    "backend": "<run.backend, else the deployment default PI_BACKENDS[0]>" | null }   // the venue it resolved to (#277)
+    "backend": "<run.backend, else the deployment default PI_BACKENDS[0]>" | null,   // the venue it resolved to (#277)
+    "dollars": { "reservedMicros": <int>, "settledMicros": <int>,                             // issue #501: integer micro-dollars
+                 "basis": "metered" | "floor" | "refunded" | "unreserved",
+                 "modelBasis": null } | null }                                                   // modelBasis: reserved for per-model windows; null = no dollar window applied
   ```
   **`attempt` is the 1-based ATTEMPT NUMBER** (decided in the issue #464 round): `1` for a job's first run, `2` for
   the queue's retry. Every record is written while the job is still processing, where BullMQ's `attemptsMade` counts
@@ -4376,6 +4381,52 @@ validator rather than a second copy of it.
   the job data carries an explicit `null` (above). A
   record is an AUDIT of the venue, not a guard on it: it confirms a venue after the job already spent, which
   is why the loader's near-miss sweep on `run.backend` stays.
+
+  **`dollars` (issue #501) is the dollar reservation's outcome, and is additive, an explicit literal REBUILT
+  from named fields, and TAIL position** after `backend`. UNCONDITIONAL like `host` and `backend`: it is
+  `null` when no dollar window applied to the job, which is every record of a deployment that sets no
+  `dailyCostUsd`, `weeklyCostUsd` or `monthlyCostUsd` (a per-job `maxCostUsd` alone reserves nothing), and
+  every refusal decided before the reservation step. Otherwise `reservedMicros` is what the job held in every
+  active window (its effective per-job cap, `0` when it held nothing), `settledMicros` what the windows were
+  left charged, and `basis` one fixed token (`DES-DOLLAR-RESERVE-AND-SETTLE`):
+  - `metered`: the container ran, its exit line is TRUSTED, and its metered cost was COMPLETE, so the windows were
+    charged `ceil(tokens.cost x 1e6)`, the overshoot above the reservation included. Trusted means the container
+    exited on its own (the worker did not time it out, cancel it, stop it at shutdown or find it detached) AND the
+    last exit line's own `code` equals the container's exit code: the job's own tools can write a line to the
+    runner's stdout, so a line read after a stop is never believed. Complete means ALL of:
+    `tokens.metered` is `true`; `tokens.costCapMicros` is present and not above `reservedMicros`; `unresolved`,
+    `unpriced`, `boundExceeded`, `longContext`, `costUnjudged` and `costUnanswered` are each PRESENT and `0`; and
+    `usage` is not null, or the run made no provider call (`tokens.calls` `0` and `tokens.cost` `0`; `costRefused`
+    may be above 0, since a refused call is never sent), which settles at `0`. An ABSENT counter counts as
+    non-zero: a runner that did not write it did not measure it;
+  - `floor`: the cost is not fully known. That is: an exit line that is not trusted (above); no exit line
+    (`tokens: null`); the fallback meter; a counter
+    that is non-zero or absent; a cap wider than the reservation; calls with no ledger; a Valkey fault that
+    adjusted none of the window keys; a dollar give-back or release that could not reach a key; or an unexpected
+    throw that left the hold standing. `settledMicros` is AT LEAST `reservedMicros`, and never less than a metered
+    cost the exit line reported: `max(reservedMicros, ceil(tokens.cost x 1e6))` when `tokens.cost` is a valid
+    number. **A 401 before any answer settles at the floor**: the call counts as `costUnanswered`, and the exit
+    line's `provider-auth-refused` label, which the runner derives from the provider's error text, does not lower
+    the charge. When a fault stopped the settlement part-way, the keys it did adjust hold `settledMicros` and the
+    rest still hold the reservation; the record says the computed basis and the log says `dollar_settle_error`
+    with how many keys were adjusted;
+  - `refunded`: no container ran, so the reservation was given back whole and `settledMicros` is `0`: a
+    never-started exit, a `config-refused` job, or the `dollar-cap` refusal itself (whose `reservedMicros` is
+    the per-job cap that did not fit);
+  - `unreserved`: the job could not spend, so nothing was reserved (`reservedMicros` and `settledMicros` `0`):
+    every model it may call is served by a declared endpoint and zero-rated (`INT-MODEL-ENDPOINTS-FILE-CONTRACT`),
+    or its effective per-job cap was already `0` (a malformed queued `run.maxCostUsd` reads as 0); either way it
+    ran under a per-job cap of `0`.
+  `modelBasis` is RESERVED for the per-model dollar windows (issue #502 part 6) and is always `null` until they
+  land, so the shape does not change when it fills. Integers and fixed tokens only, so the record stays PII-free;
+  a malformed source object records `null`. The record is one file per job id, last write wins, so a retried
+  job's record shows its LAST attempt's `dollars`; the window counters are the truth for what every attempt charged.
+
+  **`dollar-cap`** (issue #501) is a pre-spend refusal: a dollar window had no room for the job's per-job cap. It is
+  decided after both job-count reserves and before the container, gives back both job-count slots and every
+  dollar it added (per key, best effort), and so records `budgetReserved: false` unless the job-count refund itself
+  failed (then `true`, the slot still out there). It comments one fixed sentence naming the window (today's, this
+  week's, this month's) and no amount. Like every free refusal it pages nobody.
 
   Field order is the serialisation order (`JSON.stringify` emits insertion order). The filename uses the
   **sanitized** id (`:` → `_`, because `repeat:<sched>:<millis>` is NTFS-illegal); the record **body**
@@ -5096,7 +5147,7 @@ validator rather than a second copy of it.
     "concurrency": <optional, int 1-10>,             // worker slot count
     "softHoldPct": <optional, int 1-99>,             // soft-hold band as a % of each active cap; unset -> band disabled
     "maxCostUsd":     <optional, dollar amount>,      // issue #501: per-job dollar cap, sent to the runner; unset -> no dollar cap
-    "dailyCostUsd":   <optional, dollar amount>,      // issue #501: dollar windows, REFUSED until enforced (see below)
+    "dailyCostUsd":   <optional, dollar amount>,      // issue #501: dollar windows (UTC day, Monday week, month); each needs maxCostUsd; unset -> window disabled
     "weeklyCostUsd":  <optional, dollar amount>,
     "monthlyCostUsd": <optional, dollar amount>
   }
@@ -5114,11 +5165,16 @@ validator rather than a second copy of it.
   (`secretProfiles` stays out). **Cross-key invariant**: a dollar window without `maxCostUsd` is invalid,
   because a window reserves each job's per-job cap. It is checked on the **merged** overlay-over-env values
   (`resolveSettings`, per job, giving `settings-overlay-invalid`) and on env alone at boot (a refusal), never
-  per key: a window in one source with the cap in the other is valid. **The three windows are refused until
-  they are enforced**: a window key whose value parses still makes the overlay invalid (`<key> is not
-  supported yet`), at the admin's write and at the worker's read, and a window variable in env refuses boot.
-  Accepted-and-unenforced would show a cap the deployment does not keep, and dropped-and-logged would do the
-  same more quietly; the change that enforces the windows lifts both refusals.
+  per key: a window in one source with the cap in the other is valid. **The three windows are enforced**
+  (issue #501, part 3; `DES-DOLLAR-RESERVE-AND-SETTLE`): a window key whose value parses is accepted, at the
+  admin's write and at the worker's read, and so is a window variable in env, under the invariant above. Each
+  job reserves its per-job cap in every window set before its container starts (refused `dollar-cap` when one
+  has no room), and settles after it. They were refused by name until this change, so a window could never
+  read as kept while it was not. Because the invariant is per job and a broken merge refuses EVERY job, the admin's
+  write of a dollar key (`dispatch_set`, console `set`/`unset`) judges the MERGED overlay and the env it can see and
+  WARNS, in the confirm before the write and in the console's answer, never refuses: the worker's cap may come from
+  its service unit or `--env-setup` script, which the admin cannot see. `doctor` names a valid overlay whose merge
+  with `.env` breaks it.
   All keys are optional; a missing file is an empty overlay. **Write protocol** (admin extension): validate
   the candidate object, serialise it, write a same-directory `settings.json.tmp`, then `rename` it over
   `settings.json` — an atomic replace, with one EPERM retry on Windows. When the existing file is invalid,
@@ -5145,7 +5201,8 @@ validator rather than a second copy of it.
 - **Why**: The worker resolves the effective job settings at job start — precedence
   `job.data > overlay > env > default` — so this file is the shared, durable truth between the admin
   extension and the worker: a write made while the worker is down is simply read at the next job start.
-  `dailyCap`/`weeklyCap`/`monthlyCap`/`softHoldPct` are resolved at the existing pre-container cap check, so
+  `dailyCap`/`weeklyCap`/`monthlyCap`/`softHoldPct` are resolved at the existing pre-container cap check, and the
+  three dollar windows at the dollar reserve right after it, so
   the overlay changes *which values* the caps and band take, never *when* they are checked
   (`CONST-BUDGET-BEFORE-TOKENS`, `REQ-SPEND-CAPS-MULTI-WINDOW`). An unset `weeklyCap`/`monthlyCap` disables
   that window; an unset `softHoldPct` disables the band. The two token knobs (`REQ-TOKEN-ACCOUNTING-AND-CAPS`)
@@ -5170,9 +5227,11 @@ validator rather than a second copy of it.
   container; given a concurrent write, when the worker reads, then it never observes a partial file (atomic
   rename); given an unknown key, when read, then it is ignored and logged, and the file remains valid. Given
   `maxCostUsd: "1.1234567"` or `0`, when read or written, then the whole file is invalid and the reason names
-  `maxCostUsd` and not the value; given `dailyCostUsd` set (anywhere), then the overlay or the boot is refused
-  by name until the windows are enforced; given an env `PI_MAX_COST_USD` and a window in the overlay, then the
-  invariant holds on the merged values (only the window refusal applies).
+  `maxCostUsd` and not the value; given `dailyCostUsd` set (anywhere) with `maxCostUsd` set (anywhere), then the
+  overlay and the boot accept it and the next job reserves its per-job cap in that window before its container;
+  given a window with no `maxCostUsd` in either source, then the overlay (`settings-overlay-invalid`) or the boot
+  is refused naming the window; given an env `PI_MAX_COST_USD` and a window in the overlay, then the invariant
+  holds on the merged values.
 
 ---
 
@@ -5352,7 +5411,7 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   leases are LANDED (#503, part 4; `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`): see **Slots** below. The doctor rows below
   are LANDED (#503, part 6). The keyless credential gate and `PI_DISPATCH_KEYLESS` are LANDED (#503, part 5): see
   **Keyless** below. All parts of #503 have landed; part 7 (no dollar reservation for a zero-rated local job) moved
-  to #501.
+  to #501 and is LANDED with #501's dollar windows: see **Cost** below.
 - **Producer/Consumer**: the operator writes it by hand. The worker loads it at boot (a bad file refuses boot,
   `configError`), watches it and reloads it on change, keeping the last good declaration on a bad edit
   (`model_endpoints_reload_invalid`), and reads the current one at each pickup, so a `slots` edit applies to the
@@ -5472,6 +5531,28 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   prints ✓ `keyless: served by declared endpoint <id>`, or names why not. With `PI_EGRESS=0` the job dials the
   endpoint directly on the default network and the worker adds no `--add-host` and no network to its argv.
   RESIDUAL: a provider pi knows whose baseUrl an operator points at a local server still needs its key.
+- **Cost** (#503 part 7, landed with #501 part 3; `DES-DOLLAR-RESERVE-AND-SETTLE`): when a dollar window is set, a
+  job reserves NOTHING in it exactly when EVERY model it may call is (a) served by a declared endpoint (Derivation
+  above) and (b) zero-rated, as pi would compose its cost: the overlay entry's `cost` when the overlay's
+  `providers.<p>.models` defines the model (an entry with no `cost` is all zeros, pi's own default for a
+  `models.json` model, and it replaces the builtin model's cost whatever that was), else the builtin catalog's;
+  then a `modelOverrides.<id>.cost` field by field over it, on a chat model only, as pi applies it. Zero-rated means
+  `input`, `output`, `cacheRead` and `cacheWrite` are each exactly `0`, in the table and in every tier; a rate that
+  is absent or not a number is not `0`. "Every model it may call" is the job's EFFECTIVE allowed-model list (the
+  same list as the endpoint set, `run.models` else `PI_ALLOWED_MODELS`) together with its main model, and the main
+  model alone when it has no list: with a list, the main model alone is never enough, because the job may switch to
+  a listed hosted model. Such a job's container runs under `PI_MAX_COST_MICROS=0`, so the runner's cost guard
+  refuses any call whose bound is above 0 before it is made, and its spend is 0 by construction rather than by
+  trust in the table: an extension that changes a model's cost in the job meets the cap, not the window. The image
+  must declare `costCap`, which the capability gate already requires of any job with a cap (and a window needs one),
+  so an image that would ignore the `0` is refused before this, pre-spend. The record says `dollars.basis:
+  "unreserved"` and no `budget:usd:*` key is written. A job whose effective per-job cap is already `0` (a malformed
+  queued `run.maxCostUsd` reads as 0) is unreserved the same way, whatever its models: there is nothing to hold. The check is the pure `zeroRatedVerdict`
+  (`worker/src/model-endpoints.mjs`), handed the pickup's one snapshot and the builtin catalog's model lookup
+  (`builtinModel`, `worker/src/model-catalog.mjs`); with no endpoint declared, or an overlay `models.json` that could
+  not be read, nothing is zero-rated and the job reserves as usual (fail closed). Any other job reserves its per-job
+  cap. RESIDUAL, as for Slots: without a list, an unrestricted job's mid-run switch to another model is not judged
+  here, and the cap of `0` is what holds it.
 - **Render**: the include is deterministic, endpoints sorted by id, after a fixed header (generated, do not edit,
   regenerate with `pi-dispatch egress render`). Per endpoint:
   `acl pde_<id>_host dstdomain -n <host>`, `acl pde_<id>_port port <port>`,
@@ -6319,3 +6400,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-02 | Issue #501 part 1 (the money type, the dollar settings, `run.maxCostUsd`, and the per-job cap reaching the container). **`INT-CONFIG-OVERLAY-CONTRACT` AMENDED**: four dollar keys (`maxCostUsd`, `dailyCostUsd`, `weeklyCostUsd`, `monthlyCostUsd`), each a dollar amount parsed by the pure `worker/src/money.mjs` (`^(0\|[1-9]\d{0,6})(\.\d{1,6})?$` on the value's decimal text, above 0, at most 1,000,000, integer-only conversion to micro-dollars, the key named and the value never), kept as written in the overlay and in env (`PI_MAX_COST_USD` and three window variables); `KNOWN_KEYS` grows from ten to fourteen; the cross-key invariant (a window needs `maxCostUsd`) runs on MERGED values per job (`resolveSettings`, giving `settings-overlay-invalid`) and on env at boot, never per key; the three windows are refused by name (at the admin's write, at the worker's read and at boot) until a later change enforces them, chosen over accepted-and-unenforced because a window the worker does not keep must not read as kept. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.maxCostUsd` on all four kinds, validated at load in both services, carried as written, `null` absent, forwarded through every group copy, filter route, `enqueueForgeJob` and the cron schedule (the derived bolt grows by itself, and failed on `enqueueForgeJob` before it carried the field); it only narrows (the job's cap is the smaller of trigger and deployment, each counted only when set, so a trigger-only cap applies), a value above env `PI_MAX_COST_USD` refuses the worker's load at boot and on reload, and doctor names it; the near-miss sweep keeps its targets and the exact key stops being a tolerated unknown. **`INT-OUTBOX-CONTRACT` AMENDED**, the acceptance only: a child carries its parent's `maxCostUsd` verbatim and a request file's own key changes nothing (the inheritance itself landed with #502's worker half). The version-skew check gains a `maxCostUsd` row in `AUTHORED_NARROWING_FIELDS` (`INT-TRIGGERS-FILE-CONTRACT`), with the upgrade note that adding the field to a trigger refuses its already-queued jobs as `trigger-skew`. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the worker writes `PI_MAX_COST_MICROS` whenever a job has a cap, 0 included (`!== null`), and omits it otherwise; the `costCap` row joins `CAPABILITY_GATES` (last), needed by every capped job, refusing pre-spend with `job-image-cost-cap-unsupported` and `budgetReserved: false`, landing with the first emission of the variable (PR #533's review). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the unenforceable row's last sentence says which variable the worker now writes. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `job-image-cost-cap-unsupported`; `RUNNER_POLICY_REASONS` UNCHANGED, checked (the new reason is the worker's own, never a runner's). The overlay also refuses, whole-file, a duplicate key and a near miss of a dollar key (an exact match after a fixed normalisation of case, separators and look-alike letters, against the keys, their env names, and the micro-dollar, bare and `costUsd` spellings; any other unknown key is still dropped and logged); a write over an invalid overlay is refused, never rebuilt from `{}`, unless the file is blank; doctor reports an invalid overlay with a fix that follows the reason; the confirm says when the worker's environment is not visible; the worker logs a malformed queued cap (`job_cost_cap_malformed`, key only); the `dispatch_set` confirm shows a dollar key's effective before-value and its source; a JSON number is documented as read by its value (`1e2` is $100) and a string as written. The webhook-trigger caveat is stated: the over-cap refusal holds where the worker reads the triggers file, and the receiver still serves an edited webhook trigger under the smaller cap. Dollar windows, reservation and settlement are NOT in this change. **Code evidence**: worker/src/money.mjs; worker/src/config.mjs -> usdSetting, refuseDollarSettings; worker/src/runtime-settings.mjs -> validateOverlay, effectiveSettings, resolveSettings; worker/src/start.mjs -> getSettings; worker/src/triggers.mjs -> validateMaxCostUsd; worker/src/schedules.mjs -> loadSchedules; worker/src/index.mjs -> effectiveJobOf; worker/src/env-allowlist.mjs -> buildContainerEnv (the cap backstop after the forward and secrets loops); worker/src/run-container.mjs; worker/src/image-preflight.mjs -> CAPABILITY_GATES; worker/src/queue.mjs; worker/src/outbox.mjs; worker/src/doctor.mjs -> dollarChecks; receiver/src/config.mjs and the four filters; admin/src/index.ts -> coerceSettingValue, dispatch_set; admin/src/read-model.mjs -> writeSettings, settingShown, PANEL_SERVICE_KEYS; worker/src/runtime-settings.mjs -> overlayKeyShape. |
 | 2026-10-02 | Issue #535. **`INT-SESSION-STORE-CONTRACT` AMENDED**: the read path gains a last arm, always on: a transcript holding ANY compaction entry whose summary is empty cold-starts with `compaction-summary-empty`. Measured at pi 0.99.1: when the runner's brake refuses a compaction's summary call (the token cap or the cost cap), pi does not fail the compaction. The hard stop is `stopReason: "aborted"` and pi fails one only on `"error"` or `"length"`, so it stores the empty answer inside its own text: `""` for a whole turn, the split-turn marker with an empty turn summary for a split one (with an empty history, or `No prior history.`), then the file lists. A resumed session sees that text as its `compactionSummary` and only the kept turns. The check strips pi's text and calls the summary empty when any part is blank; a missing summary is empty. Cold start rather than a failed job, as every other arm: only a completed run replaces the transcript, so failing the job would fail every later job on the key. LAST, because it is the only arm that reads past the header. Stated plainly: a run whose brake refused a summary stops with a policy exit and is never promoted, so the arm is for the same shape from a completed run (an empty provider answer, an extension's empty compaction, a transcript promoted before the arm). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `compaction-summary-empty` joins the closed `session.reason` enum and the resolve producer row. **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: the runner, its meter and its exit codes are untouched. **`INT-SDK-SESSION-OPTIONS` UNCHANGED, checked**: pi is not changed and no option moved. The file-list strip takes pi's lists from the end only: exactly, rebuilt from the entry's `details`, when it has them, and otherwise from each list's closer and last opener. It is linear and uses no regular expression. A residual on the fallback is named: a model-chosen path holding a list header. **Code evidence**: worker/src/session-store.mjs -> fileListSuffix, compactionSummaryIsEmpty, hasEmptyCompaction, readCanonical; worker/src/run-history.mjs -> SESSION_REASONS; worker/test/session-store.test.mjs; worker/test/run-history.test.mjs; worker/test/processor.test.mjs; image/runner/test/compaction-refused.integration.test.mjs. |
 | 2026-10-02 | Issue #502, part 4 (the runner's model guard). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the `model-not-allowed` row is live, no longer reserved: the model guard refuses, before it is sent, a call whose requested `provider/model` is not on `PI_ALLOWED_MODELS` (exact, case-sensitive, on all five ModelRuntime methods and a legacy compat call, on one copy of the model; a virtual model judged by its routed physical call on `streamSimple` and as itself elsewhere), BEFORE the cost check, so an unlisted call under a cap is `model-not-allowed`. PR #538's review: a listed call whose request would name another model is refused too (samplingParams naming a routing key, `providerOptions` included, on the three merging apis, any other key passing, a caller's `fetch`, a per-call azure deployment, an unlisted anthropic fallback pair), and an admitted call whose `onPayload` (the session's `before_provider_request` hooks included) changes the payload outside the keys a hook may edit (deny by default, at any depth: the top-level messages, system prompt and sampling knobs only, a key set to `undefined` counting as absent), or returns a non-plain object or one with a `toJSON` or an accessor, fails before it is sent, and pi is handed a fresh object built from the hook's editable keys and a snapshot of the rest. The refusal logs `model_refused` with `method`, `why` and a count; a listed fallback that answered is logged `model_fallback`, and an openai-completions alias is not read; under a list alone a displaced compat entry stops the job (`model_guard_displaced`, `modelRefused: 0`). The `model-policy-unenforceable` row now refuses only a list the runner cannot enforce (no meter, no hard stop, or no model guard). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the worker's free `model-not-allowed` also covers a listed model whose declared fallbacks are not all listed (`why: fallback-unlisted`); `modelRefused` is written, only when a list is set, after the cost fields; its semantics are stated, absence meaning no list; `model-not-allowed` is live as the runner's paid stop on an image that declares `modelPolicy`, beside the worker's free refusal. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `modelPolicy` joins the capability tokens, with a run as its evidence (a job with a fake key and no network whose list lacks its model must exit `2` / `model-not-allowed` with `modelRefused: 1`), the CI workflow binds the token to this repo's image, and a runner from such an image enforces `PI_ALLOWED_MODELS`; the paragraph sits after `costCap`'s and names the worker's `CAPABILITY_GATES` row, and the stale "until an image declares it" sentence now says this repo's image declares it. **`INT-SDK-SESSION-OPTIONS`**: the snippet builds the one policy guard. **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the guard runs inside the container before each call and moves no worker gate. **Code evidence**: image/runner/src/usage-meter.mjs -> createModelGuard, createPolicyGuard, samplingOverridesRequest, wrapModelRuntime, wrapProviderStreams, installProcessUsageMeter (arm); image/runner/run-job.mjs; image/Dockerfile; image/verify-image.sh; .github/workflows/pi-upgrade-check.yml; worker/src/run-history.mjs (comments only); worker/src/model-catalog.mjs -> declaredFallbacks, checkModelsKnown; worker/src/processor.mjs. |
+| 2026-10-02 | Issue #501, parts 3 and 4, and #503 part 7 (dollar windows, reserved before the run and settled after it). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the record gains `dollars` in tail position after `backend`, unconditional and null when no dollar window applied, `{ reservedMicros, settledMicros, basis, modelBasis }` rebuilt from named fields, with the four bases (`metered` only when `tokens.metered`, `costCapMicros` present, every floor counter present and 0 and a ledger; `floor`; `refunded`; `unreserved`) and `modelBasis` reserved and null; the reason enum gains `dollar-cap`, a free refusal with both job-count slots given back. **`INT-CONFIG-OVERLAY-CONTRACT` AMENDED**: the three dollar windows are accepted at the admin's write and the worker's read and in env, under the unchanged merged-values invariant; the Acceptance clause that refused them now accepts them with a cap and refuses them without one. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: NEW **Cost** bullet (#503 part 7): a job reserves nothing when every model it may call (the effective list with the main model, else the main model) is served by a declared endpoint and zero-rated as pi composes its cost (the overlay entry's cost, all zeros when absent, else the builtin's, then `modelOverrides` on a chat model), and runs under `PI_MAX_COST_MICROS=0`; fail closed with no endpoint or no readable overlay; the Status says part 7 landed. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, the `PI_MAX_COST_MICROS` sentence: `0` for such a job. **Code evidence**: worker/src/dollar-budget.mjs; worker/src/processor.mjs; worker/src/run-history.mjs -> buildRecord; worker/src/runtime-settings.mjs -> validateOverlay; worker/src/config.mjs. PR #542's review, folded in: `metered` admits a zero-call run (calls 0, cost 0, no ledger) at 0 and requires `costCapMicros` not above the reservation; `floor` is at least the reservation and never less than a reported metered cost, its cases listed in full, a 401 before any answer among them, and the partial-fault wording corrected; `unreserved` covers a cap already 0 (also in `INT-MODEL-ENDPOINTS-FILE-CONTRACT`'s Cost); the record shows a retried job's last attempt; `dollar-cap` records `budgetReserved: false` unless the job-count refund failed. `INT-CONFIG-OVERLAY-CONTRACT`: the admin's dollar-key write judges the merged overlay and env and warns, and doctor names a valid overlay whose merge breaks the invariant. Round 2: that check is a warning in every layout, never a refusal, since the worker's cap may come from a source the admin cannot see. Round 3: `metered` needs a TRUSTED exit line (the container exited on its own and the line's `code` is its exit code); an untrusted line is a floor. |

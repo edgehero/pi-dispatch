@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { test } from "node:test";
-import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
+import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
 import { MODEL_REF_PATTERN } from "../src/model-ref.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 
@@ -275,9 +275,9 @@ test("the record carries a host, in tail position, and null when nobody named on
 
 	const withHost = buildRecord({ ...args, host: "mac-mini-1" });
 	const keys = Object.keys(withHost);
-	// `host` was the tail when it landed; `backend` (#277) took the tail after it, on the same argument.
-	assert.equal(keys.at(-2), "host", "tail position when it landed: field order is the contract");
-	assert.equal(keys.length, 26);
+	// `host` was the tail when it landed; `backend` (#277) took the tail after it, and `dollars` (#501) after that.
+	assert.equal(keys.at(-3), "host", "tail position when it landed: field order is the contract");
+	assert.equal(keys.length, 27);
 	assert.equal(withHost.host, "mac-mini-1");
 
 	// UNCONDITIONAL. `tokens`/`usage`/`session` set the precedent that null-with-the-key-present is this
@@ -300,7 +300,7 @@ test("the record names the RESOLVED venue in tail position, read from the job DA
 	const record = (job, over = {}) => buildRecord({ job, result: { outcome: "completed", exitCode: 0 }, ...at, ...over });
 
 	const unflagged = record(wrap(data), { defaultBackend: "local" });
-	assert.equal(Object.keys(unflagged).at(-1), "backend", "the newest field takes the tail");
+	assert.equal(Object.keys(unflagged).at(-2), "backend", "tail position when it landed; `dollars` (#501) took the tail after it");
 	assert.equal(unflagged.backend, "local", "a trigger that names no venue records the default it resolved to, never an absent key");
 	assert.equal(record(wrap({ ...data, backend: "far" }), { defaultBackend: "local" }).backend, "far", "a named venue wins over the default");
 	assert.equal(
@@ -326,10 +326,11 @@ test("a deployment that never names a backend keeps the first twenty-five fields
 		"provider", "model", "budgetReserved", "attempt", "parentJobId", "chainDepth", "chainRefused", "replica", "replicas",
 		"triggerIndex", "triggerType", "session", "host",
 	]);
-	// Byte-level: everything a pre-#277 reader parsed serialises identically, and the new field is appended.
-	const { backend, ...before } = rec;
+	// Byte-level: everything a pre-#277 reader parsed serialises identically, and the new fields are appended.
+	const { backend, dollars, ...before } = rec;
 	assert.equal(backend, "local");
-	assert.equal(JSON.stringify(rec), `${JSON.stringify(before).slice(0, -1)},"backend":"local"}`);
+	assert.equal(dollars, null);
+	assert.equal(JSON.stringify(rec), `${JSON.stringify(before).slice(0, -1)},"backend":"local","dollars":null}`);
 });
 
 test("parseExitTokens REBUILDS: a key the runner never had no reach into the record", () => {
@@ -1481,4 +1482,35 @@ test("a 16 KB provider error body keeps the exit-2 label: the runner caps the ex
 		// The premise, so this test cannot pass for a reason other than the cap: uncapped, the label is lost.
 		assert.equal(await drive(line(outcome)), null);
 	}
+});
+
+test("the record's dollars (#501) is REBUILT from named fields: four keys, integers and a fixed basis, else null", () => {
+	const job = { id: "gh-1", name: "github", attemptsMade: 0, data: { kind: "github", repo: "acme/web", target: { number: 7 } } };
+	const rec = (dollars) => buildRecord({ job, result: { outcome: "completed", exitCode: 0, dollars } }).dollars;
+	assert.deepEqual(rec({ reservedMicros: 2_000_000, settledMicros: 300_001, basis: "metered", modelBasis: "x", leaked: "/Users/rob" }), { reservedMicros: 2_000_000, settledMicros: 300_001, basis: "metered", modelBasis: null });
+	for (const basis of ["metered", "floor", "refunded", "unreserved"]) assert.equal(rec({ reservedMicros: 0, settledMicros: 0, basis }).basis, basis);
+	for (const bad of [undefined, null, "x", { reservedMicros: 1.5, settledMicros: 0, basis: "floor" }, { reservedMicros: 1, settledMicros: -1, basis: "floor" }, { reservedMicros: 1, settledMicros: 1, basis: "free" }]) assert.equal(rec(bad), null, JSON.stringify(bad));
+	assert.equal(buildRecord({ job, error: Object.assign(new Error("x"), { dollars: { reservedMicros: 1, settledMicros: 1, basis: "floor" } }) }).dollars.basis, "floor", "read off a throw too");
+	assert.equal(Object.keys(buildRecord({ job, result: { outcome: "completed" } })).at(-1), "dollars", "the newest field takes the tail");
+});
+
+test("parseExitCode: the LAST exit line's own integer code, else null; the sink reports it as exitLineCode (#501, PR #542 round 3)", async () => {
+	assert.equal(parseExitCode('{"event":"exit","code":2,"reason":"cost-cap"}'), 2);
+	assert.equal(parseExitCode('{"event":"exit","code":0}\n{"event":"exit","code":1}'), 1, "the last line wins");
+	assert.equal(parseExitCode('{"event":"exit","tokens":{"total":1}}'), null, "no code");
+	assert.equal(parseExitCode('{"event":"exit","code":"0"}'), null, "a string is not a code");
+	assert.equal(parseExitCode('{"event":"exit","code":1.5}'), null);
+	assert.equal(parseExitCode("noise"), null);
+	assert.equal(parseExitCode(null), null);
+	const openJobLog = makeLogSink({ logsDir: "/logs", enabled: false, fs: makeFakeFs({ stream: makeFakeStream({ emitOn: "finish" }) }) });
+	const jobLog = openJobLog("gh-1");
+	jobLog.write(Buffer.from('{"event":"exit","code":0,"tokens":{"total":0,"cost":0,"metered":true,"calls":0}}\n'));
+	assert.equal((await jobLog.close()).exitLineCode, 0);
+});
+
+test("the runner writes the code it exits with on BOTH exit lines (pinned: the settlement compares it with the container's)", () => {
+	const src = readFileSync(new URL("../../image/runner/run-job.mjs", import.meta.url), "utf8");
+	assert.match(src, /log\("exit", \{ \.\.\.capExitMessage\(outcome\), turns: /, "the decided path spreads the outcome, whose `code` is the exit code");
+	assert.match(src, /\n\treturn outcome\.code;\n\}/, "and returns that same code as the process exit code");
+	assert.match(src, /log\("exit", \{ code: capped\.code, reason: capped\.reason, message: capped\.message \}\)/, "the catch path writes its code too");
 });

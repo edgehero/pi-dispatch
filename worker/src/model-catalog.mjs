@@ -54,6 +54,17 @@ export function isBuiltinModel(provider, id, { chatOnly = false } = {}) {
 	return builtins()[chatOnly ? "chat" : "any"].get(provider)?.has(id) === true;
 }
 
+/**
+ * The builtin catalog's model object for `provider`/`id` (chat, image or classifier), or null (issue #503 part 7). The
+ * zero-rated check (`zeroRatedVerdict`, model-endpoints.mjs) reads its `cost` and `type` for a model the overlay does
+ * not redefine; that module never imports pi, so this is handed to it. Own entries only, exact match, like the rest.
+ */
+export function builtinModel(provider, id) {
+	if (typeof provider !== "string" || typeof id !== "string") return null;
+	if (!getBuiltinProviders().includes(provider)) return null;
+	return getAllBuiltinModels(provider).find((m) => m?.id === id) ?? null;
+}
+
 /** Does the overlay `models.json` (already parsed, or null) declare `provider`/`id`? Own keys only. */
 export function isOverlayModel(overlay, provider, id) {
 	return overlayDeclares(overlay, provider, id) && overlayProviderProblem(overlay.providers[provider], provider) === null;

@@ -126,20 +126,20 @@ test("launches docker with the isolation argv and returns the container's exit c
 test("exit 1 (infra) is returned, not thrown -- it is retryable, not a spawn error", { skip }, async () => {
 	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn({}, 1) });
 	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
-	assert.deepEqual(result, { code: 1, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null });
+	assert.deepEqual(result, { code: 1, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null });
 });
 
 test("close 137 while the worker aborted => {code:137, aborted:true} (our docker stop is POLICY)", { skip }, async () => {
 	const ac = new AbortController();
 	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawnAbortedThenClose(ac, 137) });
 	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: ac.signal });
-	assert.deepEqual(result, { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null });
+	assert.deepEqual(result, { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null });
 });
 
 test("close 137 with a signal that never aborted => {code:137, aborted:false} (kernel OOM stays infra)", { skip }, async () => {
 	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn({}, 137) });
 	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
-	assert.deepEqual(result, { code: 137, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null });
+	assert.deepEqual(result, { code: 137, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null });
 });
 
 test("refuses before spawning if the provider is unconfigured (pre-spend guard)", { skip }, async () => {
@@ -304,7 +304,7 @@ test("hostile sink: a throwing write and a rejecting close neither hang nor cras
 		spawnFn: fakeSpawnWithData({}, { chunks: ["x"], exitCode: 0 }),
 	});
 	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
-	assert.deepEqual(result, { code: 0, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }, "the swallowed sink faults leave code/aborted intact and turns/tokens/session/usage/context/exitReason null");
+	assert.deepEqual(result, { code: 0, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null }, "the swallowed sink faults leave code/aborted intact and turns/tokens/session/usage/context/exitReason null");
 });
 
 test("never-started: the sink is still closed (best-effort teardown) and the reject reason is unchanged", { skip }, async () => {
@@ -799,4 +799,12 @@ test("issue #503: a keyless job with PI_EGRESS=0 dials its endpoint directly; th
 	assert.ok(!local.args.some((a) => /^--add-host|^--network|^--net=/.test(a)), "no --add-host and no network");
 	const swap = { "PI_PROVIDER=local-ollama": "PI_PROVIDER=anthropic", "PI_MODEL=qwen": "PI_MODEL=m", "PI_DISPATCH_KEYLESS=keyless": "ANTHROPIC_API_KEY=sk-real" };
 	assert.deepEqual(local.args.map((a) => swap[a] ?? a), hosted.args, "otherwise the argv is the hosted job's, flag for flag");
+});
+
+test("the sink's exitLineCode reaches the result, so the settlement can compare it with the real exit code (#501, PR #542 round 3)", { skip }, async () => {
+	const sink = { write() {}, close: async () => ({ turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: 0 }) };
+	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn({}, 137), openJobLog: () => sink });
+	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
+	assert.equal(result.code, 137);
+	assert.equal(result.exitLineCode, 0, "passed through as read, never adjusted");
 });

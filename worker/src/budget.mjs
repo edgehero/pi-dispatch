@@ -54,10 +54,11 @@ export function tokenDayKey(now = new Date(), prefix = "budget") {
 
 // Each window's TTL outlives its bucket with slack, so a stale counter is reclaimed shortly after the
 // window rolls over. Set once, on first reservation only (reserved === 1), so a busy window cannot push
-// its own expiry forward indefinitely.
-const DAY_TTL_SECONDS = 2 * 24 * 60 * 60; // outlives the UTC day
-const WEEK_TTL_SECONDS = 9 * 24 * 60 * 60; // outlives the Mon-Sun week
-const MONTH_TTL_SECONDS = 40 * 24 * 60 * 60; // outlives the longest month
+// its own expiry forward indefinitely. EXPORTED for the dollar windows (dollar-budget.mjs, issue #501), so a
+// dollar counter and a job-count counter for the same window live and expire on the same terms.
+export const DAY_TTL_SECONDS = 2 * 24 * 60 * 60; // outlives the UTC day
+export const WEEK_TTL_SECONDS = 9 * 24 * 60 * 60; // outlives the Mon-Sun week
+export const MONTH_TTL_SECONDS = 40 * 24 * 60 * 60; // outlives the longest month
 
 /**
  * Classify one window's reserved count against its cap and the soft-hold band. PURE, and exported so the

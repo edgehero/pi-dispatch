@@ -231,6 +231,15 @@ What the slots do not cover:
 - Removing or renaming an endpoint while a job holds its slot: that slot is not released by name any more and
   expires on its own, at most 35 minutes after it was taken.
 
+### Dollar windows
+
+With dollar windows set (`PI_DAILY_COST_USD` and its siblings, `docs/triggers.md`), a job holds nothing in
+them when every model it may call runs on a declared server and costs nothing: no cost table in `models.json`,
+or one that is all zeros. "Every model" is the main model AND every model on the trigger's `models` list (or
+`PI_ALLOWED_MODELS`) when there is one, else the main model alone. Such a job runs under a per-job cap of 0, so a call that could cost anything is
+stopped before it is sent. Its run record says `dollars.basis: "unreserved"`. Any other job holds its cap as
+usual.
+
 ### What `doctor` says about them
 
 With nothing declared, `doctor` says nothing about model endpoints and starts no extra container. With

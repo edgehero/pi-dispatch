@@ -782,20 +782,25 @@ test("set dailyCap 5 coerces the numeric string, persists it, and acks via notif
   assert.equal(calls.sendMessage.length, 0);
 });
 
-test("set maxCostUsd keeps the typed dollar text, refuses a widened spelling, and a dollar window is refused at the write (#501)", async () => {
+test("set maxCostUsd keeps the typed dollar text, refuses a widened spelling, and a dollar window is written as typed (#501)", async () => {
   const { def } = await loadRegistered();
   const file = withSettingsFile();
   const ok = fakeCtx();
   await def.handler("set maxCostUsd 2.50", ok.ctx);
   assert.equal(ok.notes[0][1], "info");
   assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { maxCostUsd: "2.50" }, "as typed, never Number()'d");
-  for (const [line, why] of [["set maxCostUsd 1e3", /maxCostUsd must be a dollar amount/], ["set maxCostUsd 0x10", /maxCostUsd must be a dollar amount/], ["set dailyCostUsd 25", /dailyCostUsd is not supported yet/]]) {
+  for (const [line, why] of [["set maxCostUsd 1e3", /maxCostUsd must be a dollar amount/], ["set maxCostUsd 0x10", /maxCostUsd must be a dollar amount/], ["set dailyCostUsd 1.1234567", /dailyCostUsd must be a dollar amount/]]) {
     const ctx = fakeCtx();
     await def.handler(line, ctx.ctx);
     assert.equal(ctx.notes[0][1], "error", line);
     assert.match(ctx.notes[0][0], why, line);
   }
   assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { maxCostUsd: "2.50" }, "the refused writes left the file alone");
+  // The windows are enforced (issue #501, part 3), so a valid one is written like any other dollar key, as typed.
+  const win = fakeCtx();
+  await def.handler("set dailyCostUsd 25.00", win.ctx);
+  assert.equal(win.notes[0][1], "info");
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { maxCostUsd: "2.50", dailyCostUsd: "25.00" });
 });
 
 test("unset removes a key, leaving a valid empty overlay", async () => {
@@ -1403,4 +1408,34 @@ test("index.ts resolves paths and the worker name only through deploymentEnv (#4
   assert.doesNotMatch(src, /process\.env\.PI_WORKER_NAME/);
   assert.match(src, /enqueueDispatchRun\(\{ folder, flow, task, aiInvoked: false, env: deploymentEnv\(\) \}\)/);
   assert.match(src, /aiInvoked: true,\n\s*env: deploymentEnv\(\),/);
+});
+
+test("console set dailyCostUsd / unset maxCostUsd with no cap anywhere WRITE and WARN, never refuse (#501, PR #542)", async () => {
+  // No deployment pointer in this file: the env seen is this session's, not the worker's.
+  const saved = process.env.PI_MAX_COST_USD;
+  delete process.env.PI_MAX_COST_USD;
+  try {
+    const { def } = await loadRegistered();
+    const file = withSettingsFile();
+    const set = fakeCtx();
+    await def.handler("set dailyCostUsd 10", set.ctx);
+    const setNote = set.notes.find(([m]) => /^set dailyCostUsd = 10/.test(m));
+    assert.ok(setNote, JSON.stringify(set.notes));
+    assert.equal(setNote[1], "warning");
+    assert.match(setNote[0], /warning: dailyCostUsd needs maxCostUsd.*this session's environment \(not the worker's\).*not visible here/);
+    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { dailyCostUsd: "10" }, "written");
+    await def.handler("set maxCostUsd 2", fakeCtx().ctx);
+    const unset = fakeCtx();
+    await def.handler("unset maxCostUsd", unset.ctx);
+    const unsetNote = unset.notes.find(([m]) => /^unset maxCostUsd/.test(m));
+    assert.equal(unsetNote[1], "warning");
+    assert.match(unsetNote[0], /warning: dailyCostUsd needs maxCostUsd/);
+    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { dailyCostUsd: "10" }, "unset written");
+    // A dollar write that keeps the invariant says nothing extra.
+    const ok = fakeCtx();
+    await def.handler("set maxCostUsd 3", ok.ctx);
+    assert.deepEqual(ok.notes.find(([m]) => /^set maxCostUsd/.test(m)), ["set maxCostUsd = 3", "info"]);
+  } finally {
+    if (saved !== undefined) process.env.PI_MAX_COST_USD = saved;
+  }
 });

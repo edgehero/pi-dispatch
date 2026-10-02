@@ -658,8 +658,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   **with an operator's approval**: a settings write (dailyCap and maxCostUsd included) is either operator-typed or a
   confirm-gated tool the model **cannot self-approve** — the model emits the call, the human answers the
   confirm — so a prompt-injected session cannot raise the cap without a human keypress it cannot forge.
-  The three dollar windows (`dailyCostUsd`, `weeklyCostUsd`, `monthlyCostUsd`) are settings keys too and are
-  refused at the write until they are enforced. A trigger's `run.maxCostUsd` is not settable by any tool.
+  The three dollar windows (`dailyCostUsd`, `weeklyCostUsd`, `monthlyCostUsd`) are settings keys too, behind the
+  same operator-typed or confirm-gated write, and are enforced since issue #501's part 3. A trigger's
+  `run.maxCostUsd` is not settable by any tool.
   `CONST-BUDGET-BEFORE-TOKENS`'s ordering is untouched (the cap is still checked before tokens; only its
   value changes, under human approval); `CONST-TRIGGER-AUTHOR-GATE`'s webhook author-gating is untouched (the
   confirm is the human approval for a locally-configured trigger). `dispatch_run` takes no spend-knob argument
@@ -765,16 +766,34 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   band). Week/month are disabled when their cap is unset; the soft-hold band is disabled when its percentage
   is unset. All three windows and the band are overlay/env tunable (`weeklyCap`, `monthlyCap`, `softHoldPct`;
   `PI_WEEKLY_CAP`, `PI_MONTHLY_CAP`, `PI_SOFT_HOLD_PCT`) and resolve `job.data > overlay > env` per job.
+  **Dollar windows** (issue #501): beside the job count, a deployment MAY bound what its jobs spend in dollars
+  per UTC day, Monday week and calendar month (`dailyCostUsd`, `weeklyCostUsd`, `monthlyCostUsd`;
+  `PI_DAILY_COST_USD`, `PI_WEEKLY_COST_USD`, `PI_MONTHLY_COST_USD`), each optional, each disabled when unset, and
+  each valid only with a per-job cost cap (`maxCostUsd`), which is the amount every job reserves. After both
+  job-count reserves and before the container, the job's per-job cap is reserved in every active dollar window;
+  a window it does not fit refuses it pre-container as `dollar-cap` (the window named in the comment and the
+  log), its dollars and both job-count slots given back. After the run the reservation is replaced by the
+  metered cost when the cost is fully known (a run that made no provider call meters 0), and kept whole (a floor,
+  at least the reservation and never less than a reported metered cost) when it is not; a run that never started
+  is refunded. Amounts are integer micro-dollars. A job whose every allowed model is local and zero-rated
+  reserves nothing. The soft-hold band stays a job-count brake only.
 - **Why**: A daily cap alone bounds a single day's blast radius but not a slow bleed — a flow that stays
   under 25/day every day still spends unboundedly across a month. The weekly and monthly ceilings close that
   gap on longer horizons. The soft-hold band is a distinct operator brake **before** the hard wall: crossing
   it pauses new starts (in-flight containers finish, since the reservation is pre-container) and turns the
   panel meter amber, so an operator is warned and can raise a cap or intervene rather than discovering the
-  ceiling only when jobs start refusing. These remain **job-count** caps (container starts), not tokens —
-  the thing knowable *before* a run — so `CONST-BUDGET-BEFORE-TOKENS` is unchanged; the token controls are a
-  separate, structurally lagging problem addressed by `REQ-TOKEN-ACCOUNTING-AND-CAPS` (`OQ-010`).
+  ceiling only when jobs start refusing. The three job-count windows remain **job-count** caps (container
+  starts), not tokens (the thing knowable *before* a run), and their ordering under `CONST-BUDGET-BEFORE-TOKENS`
+  is unchanged (the dollar windows join that constraint as its second ledger); the token controls are a
+  separate, structurally lagging problem addressed by `REQ-TOKEN-ACCOUNTING-AND-CAPS` (`OQ-010`). The dollar
+  windows answer what a job count cannot: 25 jobs a day is $2.50 on a small model and hundreds of dollars on a
+  large one. They can be checked BEFORE the run because the per-job cost cap is enforced before every provider
+  call, so a reservation of that cap is a true bound on the run (`DES-DOLLAR-RESERVE-AND-SETTLE`). A refused
+  dollar reservation is given back at once, unlike a refused job-count slot: kept, five refused $2 reservations
+  would empty a $10 window with nothing run.
 - **Traces to**: `CONST-BUDGET-BEFORE-TOKENS`, `DES-RUNTIME-SETTINGS-FILE-OVERLAY`,
-  `INT-CONFIG-OVERLAY-CONTRACT`, `REQ-RUNTIME-SETTINGS-PICKUP`
+  `INT-CONFIG-OVERLAY-CONTRACT`, `REQ-RUNTIME-SETTINGS-PICKUP`, `DES-DOLLAR-RESERVE-AND-SETTLE`,
+  `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-MODEL-ENDPOINTS-FILE-CONTRACT`
 - **Acceptance**: Given any active window over its cap, when a job starts, then it is refused `over-budget`
   before `reserveBudget` admits a container, and the refusal names the blocking window; given a reservation
   that lands inside the soft-hold band of any active window but under every hard cap, when a job starts, then
@@ -782,6 +801,18 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (and no `PI_WEEKLY_CAP`), when a job starts, then the weekly window is neither counted nor evaluated; given
   a `softHoldPct` set live in the overlay, when the next job starts, then the band takes effect with no
   restart; given a refused reservation, when the window rolls over, then its counter is reclaimed by TTL.
+  Dollars: given a $10 week window and a $2 per-job cap, when twenty jobs reserve at once, then at most five are
+  admitted, and a sixth is refused `dollar-cap` before its container starts with its job-count slots and dollars
+  given back; given a finished job whose metered cost is complete, then its windows show that cost, not its
+  reservation, and an overshoot above the reservation is charged in full; given a job with no exit line, or any of
+  `unresolved`, `unpriced`, `boundExceeded`, `longContext`, `costUnjudged`, `costUnanswered` non-zero or absent,
+  then it settles at the floor, `basis: "floor"`, charging its reservation or the reported metered cost, whichever is
+  larger; given a run that made no provider call (the first call refused by the guard, a command job, an early
+  exit), then it settles metered at 0; given a job reserved at 23:59:59 UTC that settles after
+  midnight, then the settlement lands on the day it reserved; given a job whose container never started, then its
+  reservation is refunded whole; given a job whose every allowed model is served by a declared endpoint and
+  zero-rated, then no `budget:usd:*` key is written and it runs under a per-job cap of 0; given no dollar setting,
+  then no `budget:usd:*` key is written and the job data and the exit line are unchanged.
 
 ## REQ-SCOPED-LIMITS
 
@@ -2790,6 +2821,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-02 | Issue #501, parts 3 and 4, and #503 part 7 (dollar windows, reserved before the run and settled after it). **`REQ-SPEND-CAPS-MULTI-WINDOW` AMENDED**: the Statement gains the optional dollar windows (`dailyCostUsd`, `weeklyCostUsd`, `monthlyCostUsd` and their `PI_*_COST_USD` variables), each needing `maxCostUsd`, reserved after both job-count reserves and before the container, refused pre-container as `dollar-cap` with both job-count slots and the dollars given back, settled after the run to the metered cost when it is fully known and kept whole when it is not, refunded when no container ran, in integer micro-dollars, and nothing reserved for a job whose every allowed model is local and zero-rated; the soft-hold band stays a job-count brake. The Why says why the windows can be check-before (the per-job cap is enforced before every call) and why a refused dollar reservation is given back. The Acceptance gains the concurrent-reservation, metered, floor, 23:59:59, never-started, zero-rated and nothing-set clauses; the job-count clauses are UNCHANGED, checked. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**, the Why: the three dollar windows are settings keys behind the same operator-typed or confirm-gated write, no longer refused at the write. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` UNCHANGED, checked**: (d), the per-job cap, is what the windows reserve, and its enforcement did not move. **`REQ-JOB-STATUS-COMMENTS` UNCHANGED, checked**: `dollar-cap` is a free refusal with its own refusal comment, like `over-budget`, not a terminal sentence. **Code evidence**: worker/src/dollar-budget.mjs; worker/src/processor.mjs -> runJob; worker/src/model-endpoints.mjs -> zeroRatedVerdict. PR #542's review, folded in: the Statement and Acceptance say a run that made no provider call meters 0 and a floor charges at least the reservation and never less than a reported metered cost; the Why's "`CONST-BUDGET-BEFORE-TOKENS` is unchanged" is limited to the job-count windows, since the dollar windows join that constraint as its second ledger. |
 | 2026-10-02 | Issue #502, part 4 (the runner's model guard). **`REQ-MODEL-POLICY` AMENDED**, the runner half: a job limited by a list never sends a call to a model outside it; every call in the runner process is checked before it is sent (a mid-run `setModel`, a second in-process session, an extension's direct call, classifiers and image models, a virtual model by its routed physical model), exact and case-sensitive on provider and model, and a miss ends the job `2` / `model-not-allowed`. PR #538's review: a listed call is also refused when its request would name another model (a routing key in samplingParams, `providerOptions` included, any other key passing, a payload hook, which is deny by default: it may change only the top-level messages, system prompt and sampling settings, a per-call Azure deployment, a caller's own `fetch`, an unlisted Anthropic fallback); a listed fallback that answers is logged; the worker half refuses, before any spend, a list naming a model whose declared fallbacks are not all listed (`why: fallback-unlisted`), which at the pin is `anthropic/claude-fable-5` without both opus fallbacks, and retries rather than refuses when the overlay cannot be read just then; a runner that cannot enforce the list refuses before any call. The Scope, Why, Traces and Acceptance gain the runner clauses. **`REQ-JOB-STATUS-COMMENTS` AMENDED**, the who-authors clause: `model-not-allowed` is live as the runner's paid stop on an image that declares `modelPolicy`, beside the worker's free refusal; the sentences themselves are unchanged. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` UNCHANGED, checked**: the cost cap's rules stand; an unlisted call under a cap is refused by the list before the cap is asked. **Code evidence**: image/runner/src/usage-meter.mjs -> createModelGuard, createPolicyGuard; image/runner/run-job.mjs; worker/src/model-catalog.mjs -> declaredFallbacks; worker/src/processor.mjs. |
 | 2026-10-02 | Issue #535. **`REQ-RESUMABLE-SESSION` AMENDED**: a transcript holding a compaction with an empty summary is one more fail-open cause, a cold start named `compaction-summary-empty`, and the Acceptance says so. It is not an opt-in bound: a session resumed on such a summary would carry on without the turns it replaced, and nothing would say so. **Code evidence**: worker/src/session-store.mjs -> readCanonical, hasEmptyCompaction; worker/test/session-store.test.mjs; image/runner/test/compaction-refused.integration.test.mjs. |
 | 2026-10-02 | Issue #501 part 1. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**, the Why: the sentence on raising the daily cap names the per-job dollar cap `maxCostUsd` too (a settings key behind the same operator-typed or confirm-gated write), says the three dollar windows are settings keys refused at the write until they are enforced, and that no tool sets a trigger's `run.maxCostUsd`. `REQ-TOKEN-ACCOUNTING-AND-CAPS` and `REQ-SPEND-CAPS-MULTI-WINDOW` UNCHANGED, checked: the runner's enforcement and the windows land in later changes of #501. `CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked: the new image refusal is free and runs before the mint, the clone and every reservation. |

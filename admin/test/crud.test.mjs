@@ -822,3 +822,38 @@ test("the gate returns the CALLER's option, so a dirty row can still be edited (
   assert.ok(notes.some((m) => /updated \(live\)/.test(m)), `the edit LANDED rather than returning silently; notes were ${JSON.stringify(notes)}`);
   assert.notEqual(readFileSync(pauseWindowsPath, "utf8"), before, "and the file changed");
 });
+
+test("dispatch_set: a window that would leave no maxCostUsd anywhere is warned in the confirm when the worker's env is not visible (#501, PR #542)", async () => {
+  const saved = process.env.PI_MAX_COST_USD;
+  try {
+    delete process.env.PI_MAX_COST_USD;
+    withSettings({});
+    const probe = toolCtx({ answer: false });
+    await toolByName("dispatch_set").execute("id", { key: "dailyCostUsd", value: "10" }, undefined, undefined, probe.ctx);
+    assert.match(probe.shown[0].message, /\n\nWarning: dailyCostUsd needs maxCostUsd/);
+    assert.match(probe.shown[0].message, /this session's environment \(not the worker's\)/);
+    // The warning is shown BEFORE the write: declined, nothing is written; approved, the change is written as asked.
+    const settingsFile = withSettings({ maxCostUsd: "2" });
+    const declined = toolCtx({ answer: false });
+    await toolByName("dispatch_set").execute("id", { key: "maxCostUsd" }, undefined, undefined, declined.ctx);
+    assert.doesNotMatch(declined.shown[0].message, /Warning/);
+    assert.deepEqual(read(settingsFile), { maxCostUsd: "2" }, "no warning without a window");
+    writeFileSync(settingsFile, JSON.stringify({ maxCostUsd: "2", dailyCostUsd: "10" }));
+    const no = toolCtx({ answer: false });
+    const outNo = textOf(await toolByName("dispatch_set").execute("id", { key: "maxCostUsd" }, undefined, undefined, no.ctx));
+    assert.match(no.shown[0].message, /\n\nWarning: dailyCostUsd needs maxCostUsd/);
+    assert.equal(outNo.applied, false);
+    assert.deepEqual(read(settingsFile), { maxCostUsd: "2", dailyCostUsd: "10" }, "declined: nothing written");
+    const yes = toolCtx({ answer: true });
+    const outYes = textOf(await toolByName("dispatch_set").execute("id", { key: "maxCostUsd" }, undefined, undefined, yes.ctx));
+    assert.equal(outYes.applied, true, "never refused on the merged invariant");
+    assert.deepEqual(read(settingsFile), { dailyCostUsd: "10" }, "approved: written");
+    process.env.PI_MAX_COST_USD = "2";
+    const fine = toolCtx({ answer: false });
+    await toolByName("dispatch_set").execute("id", { key: "dailyCostUsd", value: "10" }, undefined, undefined, fine.ctx);
+    assert.doesNotMatch(fine.shown[0].message, /Warning/);
+  } finally {
+    if (saved === undefined) delete process.env.PI_MAX_COST_USD;
+    else process.env.PI_MAX_COST_USD = saved;
+  }
+});

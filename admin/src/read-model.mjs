@@ -21,7 +21,7 @@ import { join, delimiter, sep, isAbsolute, resolve as resolvePath } from "node:p
 import { execFileSync } from "node:child_process";
 import { logsDirPath, defaultSandboxDir, defaultGraphDir, accountTempRoot, ensureAccountTempRoot, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
-import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS } from "@edgehero/pi-dispatch/money";
+import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant } from "@edgehero/pi-dispatch/money";
 import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
@@ -619,13 +619,17 @@ function hourKey(nowMs) {
  * normal empty overlay and writes as before, and so does a BLANK one (whitespace or a byte-order mark only), which
  * holds nothing that could be lost.
  */
-export function writeSettings({ settingsFile, mutate, fs = nodeFs }) {
+export function writeSettings({ settingsFile, mutate, fs = nodeFs, dollarEnv = undefined, deploymentDir = null }) {
   const res = readOverlay(settingsFile, { fs });
   if (res.invalid && !blankFile(settingsFile, fs)) return { invalid: overlayInvalidRefusal(res.invalid) };
   const next = mutate({ ...(res.overlay ?? {}) });
+  // Issue #501 (PR #542's review): a write that touches a dollar key is judged on the MERGED values when the caller
+  // passes the env, and the answer is a WARNING returned beside the result, never a refusal: the worker's cap may come
+  // from a source not visible here (`mergedDollarProblem`). Other keys are not judged.
+  const warning = dollarEnv === undefined ? undefined : mergedDollarProblem(next, dollarEnv, { deploymentDir })?.warning;
   const w = writeOverlay(settingsFile, next, { fs });
   if (w.invalid) return { invalid: w.invalid };
-  return { ok: true, overlay: next };
+  return { ok: true, overlay: next, ...(warning ? { warning } : {}) };
 }
 
 // A settings file whose text is nothing but whitespace or a byte-order mark: invalid to the worker (not JSON), but it
@@ -666,6 +670,34 @@ export function settingShown(key, overlay, env, { deploymentDir = null } = {}) {
   const fromEnv = env?.[name];
   if (typeof fromEnv === "string" && fromEnv !== "") return `${fromEnv} (env ${name})`;
   return deploymentDir === null ? "(not in the overlay; the worker's environment is not visible here)" : "(unset: no cap)";
+}
+
+/**
+ * Would this overlay, merged over the env the admin can see, break the dollar invariant (a window with no
+ * `maxCostUsd`, issue #501)? The worker checks it per job (`resolveSettings`) and refuses EVERY job as
+ * `settings-overlay-invalid` when it breaks, so the operator should hear about it before a `set dailyCostUsd` or an
+ * `unset maxCostUsd` lands.
+ *
+ * Returns null when the merged values hold, else `{ warning }`, and NEVER a refusal (PR #542's review, round 2). The
+ * admin cannot see every source of the worker's env: a service unit's `Environment=` line or a `--env-setup` script
+ * can set `PI_MAX_COST_USD` with nothing in `.env`, so a refusal here would block a valid change (and could make
+ * `unset maxCostUsd` impossible). The worker still fails closed per job, and `doctor` on the worker reads its real
+ * env. The warning names what was seen: the overlay plus the deployment's `.env` with a pointer, else this session's
+ * environment, which is not the worker's. An empty env value is unset, the worker's own reading.
+ */
+export function mergedDollarProblem(overlay, env, { deploymentDir = null } = {}) {
+  const merged = {};
+  for (const key of DOLLAR_SETTING_KEYS) {
+    if (overlay?.[key] !== undefined) merged[key] = overlay[key];
+    else {
+      const fromEnv = env?.[DOLLAR_ENV_NAMES[key]];
+      if (typeof fromEnv === "string" && fromEnv !== "") merged[key] = fromEnv;
+    }
+  }
+  const broken = checkDollarInvariant(merged);
+  if (broken === null) return null;
+  const seen = deploymentDir === null ? "the settings overlay and this session's environment (not the worker's)" : "the settings overlay and the deployment's .env";
+  return { warning: `${broken.invalid}. Neither ${seen} sets maxCostUsd (PI_MAX_COST_USD). A cap set elsewhere, such as the worker's service unit or its --env-setup script, is not visible here; if the worker has none, it refuses every job as settings-overlay-invalid. Run \`pi-dispatch doctor\` on the worker to check` };
 }
 
 /**

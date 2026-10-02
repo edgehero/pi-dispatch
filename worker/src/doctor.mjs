@@ -3433,6 +3433,12 @@ export async function collectChecks(shellVars, seams) {
 						? "remove the repeated key from that file, keeping the value you mean (a duplicate key is refused since issue #501; it used to take the last value), or delete the file to start from an empty overlay"
 						: "fix what the reason names in that file, or delete the file to start from an empty overlay",
 				});
+			} else {
+				// Issue #501 (PR #542's review): a VALID overlay can still break the dollar invariant once merged over env
+				// (a window in one, no maxCostUsd in either), which the worker checks per job and answers by refusing every
+				// job. The env-only half is `dollarChecks`; this is the merged half, said only when env alone is fine.
+				const merged = overlayDollarProblem(overlay.overlay, env);
+				if (merged) checks.push({ ok: false, label: `settings overlay ${settingsFile}: ${merged} -- the worker refuses every job as settings-overlay-invalid`, fix: "set maxCostUsd in the overlay (or PI_MAX_COST_USD in .env), or remove the dollar window" });
 			}
 		}
 		if (noHome) {
@@ -4110,11 +4116,28 @@ function readScopedLimitFacts(env, fileExists) {
 /**
  * The dollar settings (issue #501), read from env with the worker's own parser (`money.mjs`), so doctor and
  * the boot refusal cannot disagree. Silent when nothing is set. Each setting that does not parse, a window
- * without the per-job cap, any window at all (refused until dollar windows are enforced), and every trigger
+ * without the per-job cap, and every trigger
  * whose `run.maxCostUsd` is above `PI_MAX_COST_USD`: a FAILURE when the worker loads the triggers file
  * (`workerReadsTriggers`, it refuses to start on it), a warning otherwise (the job still runs under the
  * smaller cap, so the higher one is a value that reads as allowed and is not).
  */
+/**
+ * The merged-values half of the dollar invariant (issue #501, PR #542's review): `overlay` over `env`, the worker's
+ * own merge, checked by the worker's own rule. Returns the reason, or null when it holds, or when env ALONE already
+ * breaks it (that is `dollarChecks`' line, and the worker refuses to start on it).
+ */
+export function overlayDollarProblem(overlay, env) {
+	const fromEnv = {};
+	for (const key of DOLLAR_SETTING_KEYS) {
+		const raw = env?.[DOLLAR_ENV_NAMES[key]];
+		if (raw !== undefined && raw !== "") fromEnv[key] = raw;
+	}
+	if (checkDollarInvariant(fromEnv) !== null) return null;
+	const merged = { ...fromEnv };
+	for (const key of DOLLAR_SETTING_KEYS) if (overlay?.[key] !== undefined && overlay[key] !== null) merged[key] = overlay[key];
+	return checkDollarInvariant(merged)?.invalid ?? null;
+}
+
 export function dollarChecks(env, costCaps, workerReadsTriggers) {
 	const envName = DOLLAR_ENV_NAMES;
 	const checks = [];
@@ -4133,9 +4156,6 @@ export function dollarChecks(env, costCaps, workerReadsTriggers) {
 	if (broken) {
 		const window = DOLLAR_SETTING_KEYS.find((key) => key !== "maxCostUsd" && values[key] !== undefined);
 		checks.push({ ok: false, label: `${envName[window]} is set without PI_MAX_COST_USD -- the worker refuses to start`, fix: "a dollar window reserves each job's per-job cap, so set PI_MAX_COST_USD too" });
-	}
-	for (const key of DOLLAR_SETTING_KEYS.filter((k) => k !== "maxCostUsd" && values[k] !== undefined)) {
-		checks.push({ ok: false, label: `${envName[key]} is set, and dollar windows are not supported yet -- the worker refuses to start`, fix: `remove ${envName[key]}; PI_MAX_COST_USD (the per-job cap) works now` });
 	}
 	if (values.maxCostUsd !== undefined) {
 		const deployment = parseUsdMicros(values.maxCostUsd, "PI_MAX_COST_USD");

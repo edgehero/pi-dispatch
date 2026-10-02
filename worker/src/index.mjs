@@ -13,6 +13,7 @@ import { hash16 } from "./fleet-lease.mjs";
 import { endpointsForModel } from "./model-endpoints.mjs";
 import { splitModelEntry } from "./model-ref.mjs";
 import { effectiveCostCapMicros } from "./money.mjs";
+import { dollarWindowCaps } from "./dollar-budget.mjs";
 import { budgetCapsFor, canonicalScope, concurrencyFor, makeInFlight } from "./scoped-limits.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
 import { makeWaitState } from "./wait-state.mjs";
@@ -939,6 +940,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// gate above read -- one read per pickup, so gate and ledger agree for this job's whole
 				// life. Null when no row carries a money window for this scope.
 				scopedCaps: budgetCapsFor(job.data, limits),
+				// Issue #501: the deployment's dollar windows in micro-dollars, resolved this job-start under overlay > env
+				// like the caps above, or null when none is set (then nothing is reserved and no dollar key is written).
+				dollarCaps: dollarWindowCaps(settings),
 				// The endpoint gate's snapshot (issue #503): the declared endpoints, the overlay models and this job's
 				// derived set, read once at pickup. Absent on a wiring with no endpoint seam, so a bare processor's
 				// runJob context is unchanged.
@@ -1091,7 +1095,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			const endCancelled = async ({ retryable }) => {
 				const spent = error?.budgetReserved === true;
 				const beforeStart = retryable && !spent;
-				const result = { outcome: "policy", reason: "operator-cancel", exitCode: spent ? (error.exitCode ?? null) : null, turns: spent ? (error.turns ?? null) : null, tokens: spent ? (error.tokens ?? null) : null, ...(spent && error.usage ? { usage: error.usage } : {}), provider: error?.provider ?? null, model: error?.model ?? null, session: error?.session ?? null, budgetReserved: retryable ? spent : (error?.budgetReserved ?? null) };
+				const result = { outcome: "policy", reason: "operator-cancel", exitCode: spent ? (error.exitCode ?? null) : null, turns: spent ? (error.turns ?? null) : null, tokens: spent ? (error.tokens ?? null) : null, ...(spent && error.usage ? { usage: error.usage } : {}), provider: error?.provider ?? null, model: error?.model ?? null, session: error?.session ?? null, budgetReserved: retryable ? spent : (error?.budgetReserved ?? null), ...(error?.dollars ? { dollars: error.dollars } : {}) };
 				deps?.log?.("job_cancelled_instead_of_retry", { jobId: job.id, spent, retryable, ...(retryable ? {} : { failure: scrubCredentials(String(error?.message ?? error)).slice(0, 300) }) });
 				if (deps?.comment) await Promise.resolve(deps.comment(job.data, beforeStart ? CANCELLED_BEFORE_START_COMMENT : TERMINAL_COMMENTS["operator-cancel"])).catch(() => {});
 				recordRun({ job, result, startedAt, endedAt: new Date().toISOString() });

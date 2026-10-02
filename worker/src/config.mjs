@@ -375,8 +375,8 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		dailyTokenCap: optionalBoundedInt(env, "PI_DAILY_TOKEN_CAP", 1), // issue #25; null = daily token counter disabled (check-AFTER, host-side)
 		// Issue #501. The dollar settings, each an operator's decimal (`"2.50"`) kept AS WRITTEN once it parses, so
 		// the overlay and env carry one kind of value and `effectiveJobOf` converts both to micro-dollars the same
-		// way. Unset or empty is null: no per-job cap, no window. The cross-key rule and the windows' refusal are
-		// below, after the object is built.
+		// way. Unset or empty is null: no per-job cap, no window. The cross-key rule is below, after the object is
+		// built.
 		maxCostUsd: usdSetting(env, "PI_MAX_COST_USD"),
 		dailyCostUsd: usdSetting(env, "PI_DAILY_COST_USD"),
 		weeklyCostUsd: usdSetting(env, "PI_WEEKLY_COST_USD"),
@@ -542,23 +542,15 @@ function usdSetting(env, name) {
 	return raw;
 }
 
-// The env half of the dollar rules (issue #501). The overlay half runs on MERGED values per job (start.mjs);
-// this one runs on env alone at boot, where an operator is present to read the refusal.
-//
-// 1. A window without a per-job cap: `checkDollarInvariant`, the rule that holds for good.
-// 2. Any window at all, refused BY NAME until the dollar windows are enforced (a later change of #501 lifts
-//    this). Accepting one now would be a cap the deployment does not keep while the file reads as kept, the
-//    silent no-op this project refuses; a boot refusal is the loud answer an operator can act on.
+// The env half of the dollar rule (issue #501). The overlay half runs on MERGED values per job (start.mjs);
+// this one runs on env alone at boot, where an operator is present to read the refusal: a window without a
+// per-job cap (`checkDollarInvariant`), because a window reserves each job's per-job cap and without one there
+// is no amount to reserve. The windows themselves are enforced (dollar-budget.mjs, processor.mjs).
 function refuseDollarSettings(config) {
-	const envName = DOLLAR_ENV_NAMES;
 	const broken = checkDollarInvariant(config);
 	if (broken) {
 		const window = DOLLAR_WINDOW_KEYS.find((key) => config[key] !== null);
-		throw configError(`${envName[window]} needs PI_MAX_COST_USD: a dollar window reserves each job's per-job cost cap before it starts, so it cannot be set without one`);
-	}
-	const window = DOLLAR_WINDOW_KEYS.find((key) => config[key] !== null);
-	if (window !== undefined) {
-		throw configError(`${envName[window]} is not supported yet: dollar windows are enforced from a later release, and a window this worker would not keep must not look kept. Unset it; PI_MAX_COST_USD (the per-job cap) works now`);
+		throw configError(`${DOLLAR_ENV_NAMES[window]} needs PI_MAX_COST_USD: a dollar window reserves each job's per-job cost cap before it starts, so it cannot be set without one`);
 	}
 }
 

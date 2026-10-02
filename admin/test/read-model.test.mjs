@@ -26,6 +26,7 @@ import {
   killSwitchSet,
   panelValkeyContext,
   writeSettings,
+  mergedDollarProblem,
   writeTriggers,
   readPauseWindows,
   writePauseWindows,
@@ -2573,4 +2574,36 @@ test("the panel's Valkey reads fail open, naming it, on a database that Valkey d
   const said = /names database 999999, which that Valkey does not have/;
   assert.match((await rm.readFleetQueues({ url })).blind, said);
   for (const r of [await rm.readQueueState({ url }), await rm.readHeldJobs({ url }), await rm.readHosts({ url })]) assert.match(r.unreachable, said);
+});
+
+test("mergedDollarProblem: a window with no maxCostUsd in the MERGED overlay and env is a WARNING naming what was seen, never a refusal (#501, PR #542)", () => {
+  const dir = "/deploy";
+  assert.equal(mergedDollarProblem({ dailyCostUsd: "10" }, { PI_MAX_COST_USD: "2" }, { deploymentDir: dir }), null, "the cap in env");
+  assert.equal(mergedDollarProblem({ dailyCostUsd: "10", maxCostUsd: "2" }, {}, { deploymentDir: dir }), null, "the cap in the overlay");
+  assert.equal(mergedDollarProblem({ maxCostUsd: "2" }, { PI_WEEKLY_COST_USD: "50" }, { deploymentDir: dir }), null, "the window in env");
+  assert.equal(mergedDollarProblem({}, {}, { deploymentDir: dir }), null, "nothing set");
+  const pointed = mergedDollarProblem({ dailyCostUsd: "10" }, {}, { deploymentDir: dir });
+  assert.equal(pointed.invalid, undefined, "the worker's unit or --env-setup script may hold the cap: never a refusal");
+  assert.match(pointed.warning, /^dailyCostUsd needs maxCostUsd.*Neither the settings overlay and the deployment's \.env sets maxCostUsd/);
+  assert.match(pointed.warning, /service unit or its --env-setup script, is not visible here/);
+  assert.match(mergedDollarProblem({}, { PI_WEEKLY_COST_USD: "50", PI_MAX_COST_USD: "" }, { deploymentDir: dir }).warning, /^weeklyCostUsd needs maxCostUsd/, "an empty variable is unset");
+  const blind = mergedDollarProblem({ dailyCostUsd: "10" }, {}, { deploymentDir: null });
+  assert.equal(blind.invalid, undefined);
+  assert.match(blind.warning, /this session's environment \(not the worker's\)/);
+});
+
+test("writeSettings: with the env passed, a write that breaks the merged invariant is WRITTEN and returns a warning (#501, PR #542)", () => {
+  const dir = tempDir("pi-merged-");
+  const file = join(dir, "settings.json");
+  writeFileSync(file, JSON.stringify({ maxCostUsd: "2", dailyCostUsd: "10" }));
+  const unsetCap = writeSettings({ settingsFile: file, mutate: (o) => { delete o.maxCostUsd; return o; }, dollarEnv: {}, deploymentDir: dir });
+  assert.equal(unsetCap.ok, true);
+  assert.match(unsetCap.warning, /^dailyCostUsd needs maxCostUsd/);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { dailyCostUsd: "10" }, "written");
+  const fine = writeSettings({ settingsFile: file, mutate: (o) => ({ ...o, maxCostUsd: "3" }), dollarEnv: {}, deploymentDir: dir });
+  assert.deepEqual([fine.ok, fine.warning], [true, undefined]);
+  // A non-merged problem is still refused by writeSettings' own validation.
+  assert.match(writeSettings({ settingsFile: file, mutate: (o) => ({ ...o, weeklyCostUsd: "1.1234567" }), dollarEnv: {}, deploymentDir: dir }).invalid, /^weeklyCostUsd must be a dollar amount/);
+  // Without the env (every non-dollar key), no judgement at all.
+  assert.deepEqual(Object.keys(writeSettings({ settingsFile: file, mutate: (o) => ({ ...o, dailyCap: 5 }) })), ["ok", "overlay"]);
 });

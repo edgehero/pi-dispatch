@@ -381,8 +381,18 @@ such a job before it spends (`trigger-skew`, naming the field), when it can read
 check is strict: adding `maxCostUsd` to a trigger refuses the jobs of it that were already queued
 (`trigger-skew`). Re-run them. Upgrade the worker and the receiver together.
 
-The daily, weekly and monthly dollar windows (`PI_DAILY_COST_USD` and its siblings) come in a later
-release. Set now, they stop the worker from starting, so a window can never look kept while it is not.
+**Dollar windows.** A deployment can also cap what all its jobs spend per UTC day, Monday week and month:
+`PI_DAILY_COST_USD`, `PI_WEEKLY_COST_USD` and `PI_MONTHLY_COST_USD` (or `dailyCostUsd`, `weeklyCostUsd` and
+`monthlyCostUsd` in the panel). Each needs `PI_MAX_COST_USD`.
+
+- Before a job starts, its cap (the smaller of the trigger's `maxCostUsd` and the deployment's) is held in
+  every window that is set. A job that does not fit is refused with reason `dollar-cap`, and nothing is spent.
+- After the run, the hold is replaced by what the job really cost. When that cost is not fully known (the job
+  died before it reported, or some calls could not be priced), the window is charged at least the whole hold,
+  and the measured cost when that is higher.
+- A lower `maxCostUsd` on a trigger holds less, so more of its jobs fit in a window.
+- A job whose every allowed model runs on a declared local model server and costs nothing holds nothing
+  (`docs/egress.md`, "Local model servers").
 
 ## Flows in detail
 
