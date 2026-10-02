@@ -80,7 +80,13 @@ test("templates: the proxy runs the compose file's digest, under the name the wo
 	assert.equal(composeNet, "pi-dispatch-egress-out");
 	assert.match(template("pi-dispatch-egress-out.network"), new RegExp(`^NetworkName=${composeNet}$`, "m"));
 	// The SELinux label matches compose's choice: shared `z`, since a host running both mounts the same allowlist twice.
-	assert.equal([...proxy.matchAll(/^Volume=.*:ro,z$/gm)].length, 2, "both config mounts carry :ro,z");
+	assert.equal([...proxy.matchAll(/^Volume=.*:ro,z$/gm)].length, 3, "every config mount carries :ro,z");
+	// The same three destinations as the compose service's mounts (issue #503: squid will not start without the include,
+	// so every way of starting the proxy mounts it).
+	const composeProxy = compose.slice(compose.indexOf("  egress-proxy:"), compose.indexOf("\nnetworks:"));
+	const composeTargets = [...composeProxy.matchAll(/^\s+- \S+:(\/etc\/\S+):ro,z$/gm)].map((m) => m[1]);
+	assert.deepEqual([...proxy.matchAll(/^Volume=[^:]+:([^:]+):ro,z$/gm)].map((m) => m[1]), composeTargets);
+	assert.ok(composeTargets.includes("/etc/pi-dispatch/model-endpoints.conf"));
 	assert.doesNotMatch(proxy, /,Z$/m, "never the private label");
 	// dash has no /dev/tcp: the check must be the exec (JSON array) form running bash, as compose's CMD form does.
 	assert.match(proxy, /^HealthCmd=\["bash", "-c", "exec 3<>\/dev\/tcp\/127\.0\.0\.1\/3128"\]$/m);
@@ -228,6 +234,9 @@ test("planStack: the proxy mounts an ACCOUNT-OWNED copy of the rules and the dep
 	assert.match(proxy, new RegExp(`^Volume=${CONF_COPY}:/etc/squid/squid.conf:ro,z$`, "m"));
 	assert.doesNotMatch(proxy, new RegExp(DEPLOY_DIR), "the package directory is never mounted");
 	assert.match(proxy, new RegExp(`^Volume=${ALLOWLIST}:/etc/pi-dispatch/allowlist.conf:ro,z$`, "m"));
+	// Issue #503: the deployment folder's own include, mounted directly as the allowlist is (never a copy: the render
+	// writes that file in place, and the reload reads the mounted inode).
+	assert.match(proxy, new RegExp(`^Volume=${ALLOWLIST.replace("egress-allowlist.conf", "model-endpoints.conf")}:/etc/pi-dispatch/model-endpoints.conf:ro,z$`, "m"));
 	assert.doesNotMatch(proxy, /^Volume=\/opt\/pi-dispatch/m, "no placeholder survives");
 	assert.deepEqual(plan.start, ["pi-dispatch-valkey.service", "pi-dispatch-egress-proxy.service"]);
 	assert.deepEqual(plan.actions.at(-1), { kind: "run", argv: ["systemctl", "--user", "start", "pi-dispatch-valkey.service", "pi-dispatch-egress-proxy.service"] });
@@ -302,7 +311,10 @@ const fakeLookup = (dns = DNS) => async (host) => {
 	return dns[host];
 };
 
-function svc({ argv = ["install"], files = {}, plan = {}, listening = false, listenerUid = 1234, host = null, env = { XDG_RUNTIME_DIR: "/run/user/1234" }, platform = "linux", cwd = DEPLOY_AT, realpath = (p) => p, extra = {} } = {}) {
+function svc({ argv = ["install"], files = {}, plan = {}, listening = false, listenerUid = 1234, host = null, env = { XDG_RUNTIME_DIR: "/run/user/1234" }, platform = "linux", cwd = DEPLOY_AT, realpath = (p) => p, extra = {}, includeFile = true } = {}) {
+	// Issue #503: `init` writes the model endpoints' include beside the allowlist, so a folder holding the one holds the
+	// other unless a test says otherwise.
+	if (includeFile && `${cwd}/egress-allowlist.conf` in files && !(`${cwd}/model-endpoints.conf` in files)) files = { ...files, [`${cwd}/model-endpoints.conf`]: "# generated\n" };
 	const hostRead = host ?? hostFiles(listening ? listenerUid : null);
 	const failWrites = new Map();
 	const failUnlinks = new Map();
@@ -1876,4 +1888,12 @@ test("service uninstall (#468): the Valkey's password file goes with its unit; t
 	assert.equal(await h.run(), 0, h.errText());
 	assert.ok(!h.store.has(VALKEY_ENV));
 	assert.equal(h.store.get(ENV_PATH), `VALKEY_PASSWORD=${TEST_PASSWORD}\n`);
+});
+
+test("service install on podman refuses a folder without model-endpoints.conf, since the proxy's rules include it (#503)", async () => {
+	const h = svc({ files: { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "x\n" }, includeFile: false });
+	assert.equal(await h.run(), 1);
+	assert.match(h.errText(), /model-endpoints\.conf does not exist: the proxy's rules include it, and squid will not start without it/);
+	assert.ok(!h.calls.some((c) => c[0] === "systemctl" && c.includes("start")), "nothing started");
+	assert.equal(h.writes.length, 0, "nothing written");
 });

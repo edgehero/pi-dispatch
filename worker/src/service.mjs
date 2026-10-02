@@ -52,8 +52,9 @@ import { parseBackendList, venuesOf } from "./backends.mjs";
 import { sharedShellIgnored } from "./deployment-venue.mjs";
 import { egressArmed, egressProxyName } from "./egress.mjs";
 import { updateEnvFile } from "./env-file.mjs";
+import { MODEL_ENDPOINTS_INCLUDE_NAME } from "./model-endpoints.mjs";
 import { VALKEY_HEALTH_SCRIPT, VALKEY_PASSWORD_KEY, VALKEY_START_SCRIPT, dollarsDoubled, newValkeyPassword, valkeyPasswordDecision } from "./valkey-auth.mjs";
-import { ALL_QUADLET_FILES, ALLOWLIST_PLACEHOLDER, NETNS_KEEPER, NETNS_KEEPER_FORMAT, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, PROXY_CONF_PLACEHOLDER, QUADLET_FILES, applyStack, decideValkey, describeAction, passwdNameFrom, readSubuidRanges, readValkeyKeys, valkeySharedOn, VALKEY_SHARED_KEY, describeRollBack, journalWrite, rollBackWrites, foreignContainerRefusal, foreignContainers, lingerNote, planStack, proxyConfCopyPath, proxyRestartWarning, quadletDir, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal, valkeyEnvPath, valkeyPasswordRestartWarning, workerUnitDeps } from "./podman-stack.mjs";
+import { ALL_QUADLET_FILES, ALLOWLIST_PLACEHOLDER, MODEL_ENDPOINTS_PLACEHOLDER, NETNS_KEEPER, NETNS_KEEPER_FORMAT, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, PROXY_CONF_PLACEHOLDER, QUADLET_FILES, applyStack, decideValkey, describeAction, passwdNameFrom, readSubuidRanges, readValkeyKeys, valkeySharedOn, VALKEY_SHARED_KEY, describeRollBack, journalWrite, rollBackWrites, foreignContainerRefusal, foreignContainers, lingerNote, planStack, proxyConfCopyPath, proxyRestartWarning, quadletDir, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal, valkeyEnvPath, valkeyPasswordRestartWarning, workerUnitDeps } from "./podman-stack.mjs";
 
 // src/ is where this module lives in BOTH layouts (worker/src in a checkout,
 // node_modules/@edgehero/pi-dispatch/src under npm). Deploy templates resolve one level up from it
@@ -169,6 +170,7 @@ export const TEMPLATE_PINS = {
 	"pi-dispatch-egress-proxy.container": [
 		`Volume=${PROXY_CONF_PLACEHOLDER}:/etc/squid/squid.conf:ro,z`, // → the account-owned COPY of the package's egress-proxy.conf (~/.config/pi-dispatch/egress-proxy.conf, podman-stack.mjs proxyConfCopyPath), because `z` cannot relabel a root-owned package file (measured)
 		`Volume=${ALLOWLIST_PLACEHOLDER}:/etc/pi-dispatch/allowlist.conf:ro,z`, // → <deployDir>/egress-allowlist.conf, the list `init` scaffolds
+		`Volume=${MODEL_ENDPOINTS_PLACEHOLDER}:/etc/pi-dispatch/model-endpoints.conf:ro,z`, // → <deployDir>/model-endpoints.conf, the include `init` scaffolds and `egress render` rewrites in place (issue #503)
 		"ContainerName=pi-dispatch-egress-proxy",
 		"Network=pi-dispatch-egress-out.network",
 		"WantedBy=default.target",
@@ -1055,6 +1057,12 @@ async function stackRefusal(ctx, paths, stack) {
 	const allowlist = join(ctx.deployDir, "egress-allowlist.conf");
 	if (stack.components.proxy && !ctx.fs.existsSync(allowlist)) {
 		blocking.push(`the egress policy is on, and ${allowlist} does not exist: a proxy unit mounting a missing file makes Podman create a DIRECTORY there and squid fail confusingly. Run \`pi-dispatch init\` in ${ctx.deployDir} first (it never overwrites), or set PI_EGRESS=0 in .env to opt out of the policy`);
+	}
+	// Issue #503: the rules include the declared model endpoints' file, and squid will not start when it is missing. Said
+	// only beside an allowlist that exists: without one, the reason above already names `init`, which writes both.
+	const endpointsInclude = join(ctx.deployDir, MODEL_ENDPOINTS_INCLUDE_NAME);
+	if (stack.components.proxy && ctx.fs.existsSync(allowlist) && !ctx.fs.existsSync(endpointsInclude)) {
+		blocking.push(`the egress policy is on, and ${endpointsInclude} does not exist: the proxy's rules include it, and squid will not start without it. Run \`pi-dispatch init\` in ${ctx.deployDir} first (it never overwrites), or set PI_EGRESS=0 in .env to opt out of the policy`);
 	}
 	const bus = stack.plan.actions.length > 0 ? userBusRefusal({ env: ctx.env, user: ctx.user, euid: ctx.euid }) : null;
 	if (bus) blocking.push(bus);

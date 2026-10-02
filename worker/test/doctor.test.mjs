@@ -130,7 +130,7 @@ function stripFlowLines(output) {
 // A container `up` or compose made in the folder doctor runs from carries the pinned squid and that folder's two files.
 const PROXY_KEY = 'docker inspect --format={"status":';
 const PINNED_SQUID = "ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029";
-const proxyAnswer = (health, status, { image = PINNED_SQUID, cwd = process.cwd(), conf = join(cwd, "deploy/egress-proxy.conf"), allowlist = join(cwd, "egress-allowlist.conf"), entrypoint = ["entrypoint.sh"], cmd = ["-f", "/etc/squid/squid.conf", "-NYC"], stderr } = {}) => ({
+const proxyAnswer = (health, status, { image = PINNED_SQUID, cwd = process.cwd(), conf = join(cwd, "deploy/egress-proxy.conf"), allowlist = join(cwd, "egress-allowlist.conf"), include = null, entrypoint = ["entrypoint.sh"], cmd = ["-f", "/etc/squid/squid.conf", "-NYC"], stderr } = {}) => ({
 	code: 0,
 	output: `${JSON.stringify({
 		status,
@@ -141,6 +141,8 @@ const proxyAnswer = (health, status, { image = PINNED_SQUID, cwd = process.cwd()
 		mounts: [
 			{ Type: "bind", Source: conf, Destination: "/etc/squid/squid.conf" },
 			{ Type: "bind", Source: allowlist, Destination: "/etc/pi-dispatch/allowlist.conf" },
+			// Issue #503: the third mount, the model endpoints' include, on a proxy made since.
+			...(include ? [{ Type: "bind", Source: include, Destination: "/etc/pi-dispatch/model-endpoints.conf" }] : []),
 			{ Type: "volume", Source: "/var/lib/docker/volumes/a1/_data", Destination: "/var/log/squid" },
 			{ Type: "volume", Source: "/var/lib/docker/volumes/b2/_data", Destination: "/var/spool/squid" },
 		],
@@ -2982,8 +2984,8 @@ test("doctor --fix: a missing .env is delegated to init's create-only scaffolds,
 	const { out, text } = capture();
 	const code = await runDoctor(
 		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" },
-		// The proxy's mounts are this folder's (issue #480): init now scaffolds both files it mounts, so doctor compares them.
-		{ out, cwd, spawn: fakeSpawn({ ...green, [PROXY_KEY]: proxyAnswer("healthy", "running", { cwd }) }), probeValkey: async () => true, nodeVersion: "22.19.0", fix: true, promptFn },
+		// The proxy's mounts are this folder's (issue #480): init now scaffolds the files it mounts, so doctor compares them.
+		{ out, cwd, spawn: fakeSpawn({ ...green, [PROXY_KEY]: proxyAnswer("healthy", "running", { cwd, include: join(cwd, "model-endpoints.conf") }) }), probeValkey: async () => true, nodeVersion: "22.19.0", fix: true, promptFn },
 	);
 	assert.equal(prompts.length, 0, "scaffold delegation is silent -- init is create-only by contract and can overwrite nothing");
 	assert.ok(existsSync(join(cwd, ".env")), "init created the .env");
@@ -3011,8 +3013,8 @@ test("doctor --fix: accepting the overlay auth.json offer deletes the file and c
 	const code = await runDoctor(overlayEnv(dir, { GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" }), {
 		out,
 		cwd,
-		// This folder's mounts (issue #480): the --fix pass runs init here, which scaffolds both files the proxy mounts.
-		spawn: fakeSpawn({ ...green, [PROXY_KEY]: proxyAnswer("healthy", "running", { cwd }) }),
+		// This folder's mounts (issue #480): the --fix pass runs init here, which scaffolds the files the proxy mounts.
+		spawn: fakeSpawn({ ...green, [PROXY_KEY]: proxyAnswer("healthy", "running", { cwd, include: join(cwd, "model-endpoints.conf") }) }),
 		probeValkey: async () => true,
 		nodeVersion: "22.19.0",
 		fix: true,
@@ -3461,6 +3463,58 @@ test("doctor: a directory where one of the proxy's two files belongs is a failur
 	assert.doesNotMatch(custom.text(), /in this folder is a directory/);
 });
 
+// Issue #503's governing rule: the folder's rules include model-endpoints.conf only together with a proxy that mounts
+// it. So what a missing include file or a missing third mount costs is decided by whether the rules this proxy runs
+// include the file; endpoints declared under rules that predate #503 are the rules refresh's, named in one line.
+const PRE_503_RULES = "http_port 3128\n";
+const INCLUDE_503_RULES = "http_port 3128\ninclude /etc/pi-dispatch/model-endpoints.conf\n";
+function folder503(rules, { include = true, endpoints = null } = {}) {
+	const cwd = tempDir("pi-doctor-503-");
+	mkdirSync(join(cwd, "deploy"));
+	writeFileSync(join(cwd, "deploy", "egress-proxy.conf"), rules);
+	writeFileSync(join(cwd, "egress-allowlist.conf"), "api.anthropic.com\n");
+	if (include) writeFileSync(join(cwd, "model-endpoints.conf"), "# generated\n");
+	if (endpoints) writeFileSync(join(cwd, "model-endpoints.json"), JSON.stringify({ version: 1, endpoints }));
+	return cwd;
+}
+async function doctor503(cwd, answer = proxyAnswer("healthy", "running", { cwd })) {
+	const c = capture();
+	const code = await runDoctor(ghEnv({ PI_EGRESS: "1" }), { ...ghDeps(c.out, egressPlan({ [PROXY_KEY]: answer, "gh auth status": { code: 0, output: ghStatusOutput } })), cwd });
+	return { code, text: c.text() };
+}
+
+test("doctor: a missing model-endpoints.conf is ✗ under rules that include it, ⚠ under rules that predate #503; a directory there is ✗ (#503)", async () => {
+	const strict = await doctor503(folder503(INCLUDE_503_RULES, { include: false }));
+	assert.equal(strict.code, 1);
+	assert.match(strict.text, /✗ model-endpoints\.conf is not in this folder\n {4}→ the egress proxy mounts it and its rules include it, and squid will not start without it: `pi-dispatch init` writes it \(create-only\)/);
+	const old = await doctor503(folder503(PRE_503_RULES, { include: false }));
+	assert.match(old.text, /⚠ model-endpoints\.conf is not in this folder\n {4}→ the proxy's rules here predate #503 and run without it/);
+	assert.doesNotMatch(old.text, /✗ model-endpoints\.conf/);
+	const cwd = folder503(PRE_503_RULES, { include: false });
+	mkdirSync(join(cwd, "model-endpoints.conf"));
+	const dir = await doctor503(cwd);
+	assert.match(dir.text, /✗ model-endpoints\.conf in this folder is a directory, not a file/);
+	assert.doesNotMatch(dir.text, /model-endpoints\.conf is not in this folder/);
+});
+
+test("doctor: a two-mount proxy is out of date only under rules that include the file; endpoints under older rules name the rules refresh, never a replace (#503)", async () => {
+	const STALE = /✗ Egress proxy is this deployment's proxy but out of date \(pi-dispatch-egress-proxy\): nothing is mounted at \/etc\/pi-dispatch\/model-endpoints\.conf[^\n]*this folder's rules include it, and squid will not start again without it/;
+	const current = await doctor503(folder503(PRE_503_RULES));
+	assert.doesNotMatch(current.text, /out of date|not this deployment's/, "rules from before #503: a two-mount proxy is current");
+	const ENDPOINT = [{ id: "m", host: "host.docker.internal", port: 11434, slots: 1 }];
+	const declared = await doctor503(folder503(PRE_503_RULES, { endpoints: ENDPOINT }));
+	assert.match(declared.text, /⚠ model endpoints are declared, but deploy\/egress-proxy\.conf predates #503 and does not include model-endpoints\.conf, so the endpoints stay unreachable until the rules are refreshed: `pi-dispatch up`, and accept the refresh/);
+	assert.doesNotMatch(declared.text, /out of date|not this deployment's/, "not drift: a replace would cut tunnels and fix nothing");
+	const includes = folder503(INCLUDE_503_RULES, { endpoints: ENDPOINT });
+	const stale = await doctor503(includes);
+	assert.match(stale.text, STALE);
+	assert.doesNotMatch(stale.text, /predates #503/);
+	assert.doesNotMatch((await doctor503(includes, proxyAnswer("healthy", "running", { cwd: includes, include: join(includes, "model-endpoints.conf") }))).text, /out of date|not this deployment's/);
+	const elsewhere = tempDir("pi-doctor-503-other-");
+	writeFileSync(join(elsewhere, "model-endpoints.conf"), "# other\n");
+	assert.match((await doctor503(includes, proxyAnswer("healthy", "running", { cwd: includes, include: join(elsewhere, "model-endpoints.conf") }))).text, /not this deployment's[^\n]*its \/etc\/pi-dispatch\/model-endpoints\.conf is .*pi-doctor-503-other-.*model-endpoints\.conf, not /);
+});
+
 test("doctor: a proxy that exists but is STOPPED says so, because the fix is a different one", async () => {
 	const { out, text } = capture();
 	await runDoctor(
@@ -3531,7 +3585,7 @@ test("doctor: a RUNNING shipped proxy from another squid, command or folder is �
 	assert.equal(desktopMount.code, 1);
 	assert.match(
 		desktopMount.text,
-		new RegExp(`✗ Egress proxy is running but is not this deployment's \\(pi-dispatch-egress-proxy\\): its /etc/pi-dispatch/allowlist\\.conf is ${esc(join(other, "egress-allowlist.conf"))}, not ${esc(join(folder, "egress-allowlist.conf"))}\\n {4}→ check its mounts \\(\`docker inspect --format '\\{\\{json \\.Mounts\\}\\}' pi-dispatch-egress-proxy\`\\), then \`docker rm -f pi-dispatch-egress-proxy\` and \`pi-dispatch up\` from the deployment folder replace it with the shipped one; \`up\` does not offer to on its own while one of its mounts cannot be compared here;`),
+		new RegExp(`✗ Egress proxy is running but is not this deployment's \\(pi-dispatch-egress-proxy\\): its /etc/pi-dispatch/allowlist\\.conf is ${esc(join(other, "egress-allowlist.conf"))}, not ${esc(join(folder, "egress-allowlist.conf"))}\\n {4}→ check its mounts \\(\`docker inspect --format '\\{\\{json \\.Mounts\\}\\}' pi-dispatch-egress-proxy\`\\), then \`docker rm -f -v pi-dispatch-egress-proxy\` and \`pi-dispatch up\` from the deployment folder replace it with the shipped one; \`up\` does not offer to on its own while one of its mounts cannot be compared here;`),
 	);
 	// The operator's own proxy is never judged against the shipped one.
 	assert.doesNotMatch((await run(proxyAnswer("healthy", "running", { image: "my/squid:1" }), { env: { PI_EGRESS_PROXY: "my-squid" } })).text, /is not this deployment's|could not be compared/);
@@ -7746,6 +7800,8 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 		pauseWindowsFilePath: (e) => cfg.pauseWindowsFilePath(e),
 		scopedLimitsFilePath: (e) => cfg.scopedLimitsFilePath(e),
 		modelEndpointsFilePath: (e) => cfg.modelEndpointsFilePath(e),
+		// Issue #503: whether endpoints are declared, read as the service reads PI_MODEL_ENDPOINTS_FILE.
+		endpointsDeclaredIn: async (e) => (await import("../src/egress-cli.mjs")).endpointsDeclaredIn({ env: e, cwd: "/nonexistent-503", fs: { readFileSync: enoent, existsSync: () => false }, platform: "linux" }),
 	};
 	assert.deepEqual([...handedEnv].filter((n) => !Object.hasOwn(probes, n)).sort(), [], "every imported helper doctor hands env to is probed here");
 	const probedReads = {};
@@ -8599,7 +8655,7 @@ test("doctor: a STOPPED shipped proxy that is not this deployment's gets up's re
 	writeFileSync(join(other, "egress-allowlist.conf"), "evil.example\n");
 	const { out, text } = capture();
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), { ...ghDeps(out, egressPlan({ [PROXY_KEY]: proxyAnswer("none", "exited", { cwd: folder, allowlist: join(other, "egress-allowlist.conf") }), "gh auth status": { code: 0, output: ghStatusOutput } })), cwd: folder, proxyFilesExist: () => true });
-	assert.match(text(), /✗ Egress proxy is stopped \(pi-dispatch-egress-proxy\)\n {4}→ it is not this deployment's either \(its \/etc\/pi-dispatch\/allowlist\.conf is [^)]*\): `pi-dispatch up` from the deployment folder offers to replace it with the shipped one \(docker rm -f pi-dispatch-egress-proxy, then the shipped run\) -- /);
+	assert.match(text(), /✗ Egress proxy is stopped \(pi-dispatch-egress-proxy\)\n {4}→ it is not this deployment's either \(its \/etc\/pi-dispatch\/allowlist\.conf is [^)]*\): `pi-dispatch up` from the deployment folder offers to replace it with the shipped one \(docker rm -f -v pi-dispatch-egress-proxy, then the shipped run\) -- /);
 	assert.doesNotMatch(text(), /✗ Egress proxy is stopped \(pi-dispatch-egress-proxy\)\n {4}→ docker compose/);
 });
 
@@ -10319,7 +10375,7 @@ test("doctor warns when this folder's deploy/egress-proxy.conf differs from the 
 	};
 	const stale = await run("http_port 3128\nacl allowed dstdomain -n \"/etc/pi-dispatch/allowlist.conf\"\n");
 	assert.match(stale.text, /⚠ deploy\/egress-proxy\.conf in this folder differs from the package's copy \([^)]+\) \(0 lines of it not in the package's copy, 1 line of the package's not in it\), so the egress proxy runs rules this version did not ship\n/);
-	assert.match(stale.text, /→ an upgrade does not rewrite it, so this is either an older version's rules or your own edit: `diff \S+\/deploy\/egress-proxy\.conf \S+egress-proxy\.conf` shows which\. To take this version's, `pi-dispatch up` from this folder offers to replace it with the package's copy, keeping this one as a backup, and then to restart the proxy, since squid reads its rules only at start\. Leave it if the difference is yours/);
+	assert.match(stale.text, /→ an upgrade does not rewrite it, so this is either an older version's rules or your own edit: `diff \S+\/deploy\/egress-proxy\.conf \S+egress-proxy\.conf` shows which\. To take this version's, `pi-dispatch up` from this folder offers to replace it with the package's copy, keeping this one as a backup, and then to restart the proxy, since squid reads its rules only at start; a proxy made before #503, which lacks the model-endpoints\.conf mount the new rules need, is REPLACED in the same step instead, asked once\. Leave it if the difference is yours/);
 	assert.doesNotMatch(stale.text, /✗ deploy\/egress-proxy\.conf/, "a warning, never a failure: a differing copy still enforces the allowlist");
 	const same = await run("http_port 3128\n");
 	assert.doesNotMatch(same.text, /egress-proxy\.conf in this folder (differs|could not)/);

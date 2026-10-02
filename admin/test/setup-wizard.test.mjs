@@ -934,7 +934,7 @@ test("wizard: every relative path in the compose file it writes resolves inside 
   const rel = [];
   for (const m of code.matchAll(/^\s*env_file:\s*(\S+)\s*$/gm)) rel.push(m[1]);
   for (const m of code.matchAll(/^\s*-\s*"?(\.{1,2}\/[^:"\s]+):/gm)) rel.push(m[1]);
-  assert.deepEqual(rel.sort(), ["../.env", "../egress-allowlist.conf", "../triggers.json", "./egress-proxy.conf"], "the scan reaches every relative path the shipped file names");
+  assert.deepEqual(rel.sort(), ["../.env", "../egress-allowlist.conf", "../model-endpoints.conf", "../triggers.json", "./egress-proxy.conf"], "the scan reaches every relative path the shipped file names");
   const { resolve, dirname, sep } = await import("node:path");
   for (const p of rel) {
     const at = resolve(dirname(written), p);
@@ -943,6 +943,8 @@ test("wizard: every relative path in the compose file it writes resolves inside 
   // And each lands on what the deployment holds under that name.
   assert.ok(existsSync(resolve(dirname(written), "./egress-proxy.conf")), "the rules file beside it");
   assert.equal(resolve(dirname(written), "../.env"), join(dir, ".env"), "the .env `--env-file .env` names from the folder");
+  // Issue #503: the model endpoints' include is the deployment folder's, where `init` scaffolds it.
+  assert.equal(resolve(dirname(written), "../model-endpoints.conf"), join(dir, "model-endpoints.conf"));
 });
 
 test("wizard: the edge's compose answer degrades when the runtime ships no compose file", async () => {

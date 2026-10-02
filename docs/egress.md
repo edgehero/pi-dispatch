@@ -16,7 +16,7 @@ pi-dispatch doctor
 ```
 
 `up` shows the proxy's `docker run` and asks before it runs it, and it works in any folder `pi-dispatch init`
-made, since init writes both files the proxy mounts. From a clone, or a folder holding `deploy/docker-compose.yml`,
+made, since init writes the three files the proxy mounts. From a clone, or a folder holding `deploy/docker-compose.yml`,
 compose starts the same proxy instead:
 
 ```bash
@@ -54,7 +54,11 @@ symlink. squid reads its rules only at start, and a running or paused container 
 started with, so `up` then offers `docker restart pi-dispatch-egress-proxy` for a proxy already running, and
 `docker unpause` followed by that restart for a paused one (asked, not taken by `--yes`, while jobs are
 attached to it); a stopped proxy it starts, or one it creates or replaces, in the same pass reads the new
-file anyway. On the Podman venue the rules live in an account-owned
+file anyway. **Rules that include `model-endpoints.conf` (issue #503) go in only together with a proxy that
+mounts it**: a proxy made before #503 mounts two files, and a restart on the new rules would exit on the
+missing include. So for such a proxy `up` asks once for both, the refresh and the proxy's replacement. If you
+decline, or the replace cannot happen, the rules are not written; if the new proxy fails to start, the old
+rules are put back. On the Podman venue the rules live in an account-owned
 copy instead, which `doctor` compares the same way and `pi-dispatch service install --force` refreshes
 ([`podman.md`](podman.md)).
 
@@ -77,12 +81,66 @@ calls an API you added, or installs from a private registry, reaches hosts that 
 `doctor` names what it can. The rest you have to know, and a browsing flow will drive an allowlist wider
 than everything else combined.
 
+## Local model servers
+
+A job can reach a model server on your own machine or LAN (Ollama, vLLM, llama.cpp, LM Studio) through the
+proxy, one host and one port at a time. A fuller guide comes with the doctor probes for it; this is the short
+form.
+
+**Jobs cannot use a local model yet.** This part of #503 opens the route through the proxy. The keyless credential
+gate and the slot leases come in later parts of the same issue; until then a job's provider check still refuses
+a provider without a key, and a declared endpoint takes no slot.
+
+1. **Declare it** in `model-endpoints.json` in the deployment folder. `pi-dispatch init` writes it empty.
+
+   ```json
+   { "version": 1, "endpoints": [ { "id": "mac-ollama", "host": "host.docker.internal", "port": 11434, "slots": 2 } ] }
+   ```
+
+2. **Render** the proxy's rules for it, from the deployment folder:
+
+   ```sh
+   pi-dispatch egress render
+   ```
+
+   It writes `model-endpoints.conf` in the deployment folder (also when `PI_MODEL_ENDPOINTS_FILE` names a JSON
+   file elsewhere), in place, and prints the reload. The file is the proxy's
+   include: every endpoint becomes a CONNECT tunnel to exactly that host and port, and nothing else. It must
+   exist even with nothing declared, because squid will not start without it. `init` writes it.
+
+3. **Reload** the proxy with the command it printed:
+
+   ```sh
+   docker exec pi-dispatch-egress-proxy squid -k reconfigure   # Docker
+   podman exec pi-dispatch-egress-proxy squid -k reconfigure   # the rootless podman venue
+   ```
+
+   A reload keeps running jobs and their tunnels. Do not restart the proxy for this: a restart cuts every running
+   job off.
+
+How the proxy reaches your own machine:
+
+- **Docker Desktop**: `host.docker.internal` just works, and it reaches the Mac's loopback too, so a server bound
+  to `127.0.0.1` answers (measured).
+- **Docker Engine (Linux)**: the proxy is started with `host.docker.internal:host-gateway`, which is the bridge
+  gateway, so the server must listen on that address (`172.17.0.1`, for Ollama `OLLAMA_HOST=172.17.0.1:11434`) or
+  on `0.0.0.0`. A server bound to `127.0.0.1` cannot be reached.
+- **Rootless Podman**: use `host.containers.internal`, with the server bound to the host's LAN address or to
+  `0.0.0.0`. A server bound to `127.0.0.1` cannot be reached.
+
+An existing deployment needs the new file, the new rules and the new mount: run `pi-dispatch init` (it only adds
+what is missing), then `pi-dispatch up`, which offers the rules refresh and the proxy's replacement as one step.
+On the rootless podman venue `pi-dispatch service install --force` refreshes the account's rules and the unit
+together. With compose, use the new compose file (see "Right after an upgrade" below), then
+`docker compose ... --profile egress up -d` recreates the proxy. Until the rules include the file, `up`, `doctor`
+and `egress render` all say the endpoints stay unreachable until the rules are refreshed.
+
 ## The shape
 
 | | |
 |---|---|
 | One `--internal` network **per job** | `pi-job-<id>-net`, created at job start and removed at job end. Holds exactly two endpoints: the container and the proxy. If the worker dies before it can remove one, the next boot removes it, detaching whatever is still on it first, and says so in the log if it cannot. |
-| One long-lived proxy | `pi-dispatch-egress-proxy`, squid, filtering by hostname. Exactly two shapes pass, both to a listed host: a `CONNECT` tunnel to port 443, or a plain (untunnelled) request to port 80. Nothing else passes (issue #508). "A plain request to port 80" also covers squid's own gateways for other schemes, but only to port 80 (`ftp://host:80/`, `https://host:80/`); every other scheme and port is refused. A plain forward request for an `https://` URL on 443, where the proxy would open the TLS itself, is refused too. A listed name that resolves to one of this host's fixed loopback or link-local addresses (or slirp4netns's `10.0.2.2`) is refused (issue #428). The allowlist is matched as written (`dstdomain -n`): an IP-literal request is refused unless that literal is itself listed, and the proxy makes no reverse lookup of it. A host mapped to another address (pasta's `--map-host-loopback <address>` or `--map-gw`, slirp4netns's `cidr=`) is not covered here; on the `podman` venue the worker refuses the containers.conf that would do that, and the account's running rootless network while it still does after the key is gone (issue #450). Publishes no port. |
+| One long-lived proxy | `pi-dispatch-egress-proxy`, squid, filtering by hostname. Exactly two shapes pass, both to a listed host: a `CONNECT` tunnel to port 443, or a plain (untunnelled) request to port 80. Nothing else passes (issue #508), except a model server you declare, which is a `CONNECT` tunnel to its one host and port ("Local model servers" above, issue #503). "A plain request to port 80" also covers squid's own gateways for other schemes, but only to port 80 (`ftp://host:80/`, `https://host:80/`); every other scheme and port is refused. A plain forward request for an `https://` URL on 443, where the proxy would open the TLS itself, is refused too. A listed name that resolves to one of this host's fixed loopback or link-local addresses (or slirp4netns's `10.0.2.2`) is refused (issue #428). The allowlist is matched as written (`dstdomain -n`): an IP-literal request is refused unless that literal is itself listed, and the proxy makes no reverse lookup of it. A host mapped to another address (pasta's `--map-host-loopback <address>` or `--map-gw`, slirp4netns's `cidr=`) is not covered here; on the `podman` venue the worker refuses the containers.conf that would do that, and the account's running rootless network while it still does after the key is gone (issue #450). Publishes no port. |
 | One upstream network | `pi-dispatch-egress-out`. Only the proxy is on it. |
 
 **Per job, not one shared network**, and that is the part worth understanding. A shared network is a shared
@@ -211,8 +269,13 @@ refused, which needs control of the provider's own answer.
 **Right after an upgrade this line can fail.** squid reads its rules only at start, so until the proxy restarts on
 the refreshed `egress-proxy.conf` it still runs the old rules: the line reads `Egress policy lets plain HTTP through
 to api.anthropic.com on port 443, ...` and `--live`'s egress verdict fails. `pi-dispatch up` refreshes the file and
-restarts the proxy; on the `podman` venue `pi-dispatch service install --force` does. A proxy you started by hand
-needs the updated file in its mount and a restart (`docker restart pi-dispatch-egress-proxy`, or `podman restart`).
+restarts the proxy (or replaces it, when it lacks the third mount); on the `podman` venue `pi-dispatch service
+install --force` does. A proxy you started by hand must be RECREATED, never just restarted, since the new rules
+include `model-endpoints.conf` and it does not mount that file: remove it (`docker rm -f -v
+pi-dispatch-egress-proxy`, or `podman rm -f -v`) and start it again with the third mount (`pi-dispatch up` does
+this, or the recipe in [podman.md](podman.md)). With compose, the compose file must be the new one too: in a
+folder `/dispatch setup` laid out, `deploy/docker-compose.yml` is a create-only copy no upgrade refreshes, so copy
+it again from the installed package (or pull the clone), or use `pi-dispatch up` instead.
 
 **With the policy on, a forge must be served over `https://` on port 443.** A job gets the proxy variables in
 uppercase only, and git ignores `HTTP_PROXY` for an `http://` remote, so it never sends one through the proxy: from

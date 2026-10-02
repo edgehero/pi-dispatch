@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { EGRESS_PROXY_CMD, EGRESS_PROXY_ENTRYPOINT, EGRESS_PROXY_IMAGE, jobNetworksOf, parseProxyState, shippedProxyDrift } from "../src/egress-proxy-state.mjs";
+import { EGRESS_PROXY_CMD, EGRESS_PROXY_ENTRYPOINT, EGRESS_PROXY_IMAGE, jobNetworksOf, parseProxyState, rulesIncludeEndpoints, shippedProxyDrift } from "../src/egress-proxy-state.mjs";
 
 // Issue #453, gate round 2: `PROXY_STATE_FORMAT`'s answer for the shipped proxy on a real Docker Engine (29.8.1,
 // compose 5.5.1, Ubuntu, rootful), copied byte for byte from round-446/pr3/m453/raw-m453-docker-engine.txt. C1 was made
@@ -95,4 +95,36 @@ test("the same measured proxy judged from another folder, and where a source can
 	const linuxGone = shippedProxyDrift(state, { cwd: "/var/tmp/m453/dep", platform: "linux", realpath: nothing });
 	assert.equal(linuxGone.unknown, null, "on Linux a source that does not resolve is gone");
 	assert.equal(linuxGone.drift.length, 2);
+});
+
+// Issue #503: the third mount, the model endpoints' include. A proxy made before #503 mounts two files and stays
+// current; a third bind is compared like the other two; a missing third is drift only once it is needed.
+test("the include mount: two mounts current, three current, a third from elsewhere stale, two stale only once the rules include it, and then out of date (#503)", () => {
+	const two = parseProxyState(MEASURED_COMPOSE);
+	const cwd = "/var/tmp/m453/dep";
+	const plain = (p) => p;
+	assert.deepEqual(shippedProxyDrift(two, { cwd, realpath: plain }).drift, [], "two mounts, nothing needed: current");
+	const third = (source) => ({ ...two, mounts: [...two.mounts, { type: "bind", source, destination: "/etc/pi-dispatch/model-endpoints.conf" }] });
+	assert.deepEqual(shippedProxyDrift(third(`${cwd}/model-endpoints.conf`), { cwd, realpath: plain, rulesInclude: true }).drift, [], "three mounts, this folder's: current");
+	assert.deepEqual(shippedProxyDrift(third("/srv/other/model-endpoints.conf"), { cwd, realpath: plain }).drift, ["its /etc/pi-dispatch/model-endpoints.conf is /srv/other/model-endpoints.conf, not /var/tmp/m453/dep/model-endpoints.conf"], "a third bind is compared even when not needed");
+	// Endpoints declared under rules without the include are NOT drift (the governing rule): a replace fixes nothing.
+	assert.deepEqual(shippedProxyDrift(two, { cwd, realpath: plain, endpointsDeclared: true }).drift, [], "only the rules decide");
+	const stale = shippedProxyDrift(two, { cwd, realpath: plain, rulesInclude: true });
+	assert.deepEqual(stale.drift, ["nothing is mounted at /etc/pi-dispatch/model-endpoints.conf, where /var/tmp/m453/dep/model-endpoints.conf belongs: this folder's rules include it, and squid will not start again without it"]);
+	assert.equal(stale.outOfDate, true, "this folder's proxy, out of date");
+	assert.ok(!shippedProxyDrift(two, { cwd: "/srv/other", realpath: plain, rulesInclude: true }).outOfDate, "another folder's proxy is not merely out of date");
+	// Any other extra mount is still drift, beside a correct third.
+	const extra = { ...third(`${cwd}/model-endpoints.conf`), mounts: [...third(`${cwd}/model-endpoints.conf`).mounts, { type: "bind", source: "/tmp/x.conf", destination: "/etc/pi-dispatch/x.conf" }] };
+	assert.deepEqual(shippedProxyDrift(extra, { cwd, realpath: plain }).drift, ["it has a bind at /etc/pi-dispatch/x.conf (from /tmp/x.conf) that the shipped proxy does not"]);
+	// A third bind under a Desktop VM path is unknown, like the other two.
+	assert.match(shippedProxyDrift(third(`/host_mnt${cwd}/model-endpoints.conf`), { cwd, platform: "linux", realpath: (p) => { if (p.startsWith("/host_mnt")) throw new Error("ENOENT"); return p; } }).unknown ?? "", /^\/host_mnt\/var\/tmp\/m453\/dep\/model-endpoints\.conf is a path this host cannot resolve/);
+});
+
+test("rulesIncludeEndpoints reads an uncommented include of exactly the mounted path (#503)", () => {
+	assert.equal(rulesIncludeEndpoints("http_port 3128\ninclude /etc/pi-dispatch/model-endpoints.conf\n"), true);
+	assert.equal(rulesIncludeEndpoints("  include   /etc/pi-dispatch/model-endpoints.conf  \n"), true);
+	assert.equal(rulesIncludeEndpoints("# include /etc/pi-dispatch/model-endpoints.conf\n"), false);
+	assert.equal(rulesIncludeEndpoints("include /etc/pi-dispatch/model-endpoints.conf.bak\n"), false);
+	assert.equal(rulesIncludeEndpoints("include /etc/pi-dispatch/model-endpointsXconf\n"), false);
+	assert.equal(rulesIncludeEndpoints(""), false);
 });

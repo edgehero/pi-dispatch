@@ -3,10 +3,10 @@
 # this account's own rootless Podman.
 #
 # Installed by `pi-dispatch service install` (user scope, with podman in PI_BACKENDS and PI_EGRESS armed) and by
-# `pi-dispatch up`. Unlike the Valkey unit this one is RENDERED: the two /opt/pi-dispatch paths below are
+# `pi-dispatch up`. Unlike the Valkey unit this one is RENDERED: the three /opt/pi-dispatch paths below are
 # placeholders, replaced with an account-owned copy of the package's egress-proxy.conf (written beside this account's
 # config, because `z` cannot relabel a root-owned package file: measured, exit 126) and with the deployment folder's
-# egress-allowlist.conf. Never `systemctl --user enable` it (a generated unit refuses that); the [Install] section is
+# egress-allowlist.conf and model-endpoints.conf. Never `systemctl --user enable` it (a generated unit refuses that); the [Install] section is
 # read by the generator itself.
 #
 # A RESTART DROPS EVERY PER-JOB NETWORK (measured on Podman 5.8.1). The generated unit runs `podman run --replace
@@ -34,6 +34,12 @@ Network=pi-dispatch-egress-out.network
 # on a host that also runs the compose proxy the same allowlist file is mounted by both.
 Volume=/opt/pi-dispatch/deploy/egress-proxy.conf:/etc/squid/squid.conf:ro,z
 Volume=/opt/pi-dispatch/egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro,z
+# The declared model endpoints' rules (issue #503), the deployment folder's own file like the list, never a copy:
+# `pi-dispatch egress render` rewrites it in place, and a copy would not be the file the render wrote. `init`
+# scaffolds it empty. It must exist, since squid will not start when an included file is missing. After a render,
+# `podman exec pi-dispatch-egress-proxy squid -k reconfigure` reloads it; a restart is not needed and drops every job
+# network (above). No host-gateway line: rootless Podman resolves host.containers.internal with no flag.
+Volume=/opt/pi-dispatch/model-endpoints.conf:/etc/pi-dispatch/model-endpoints.conf:ro,z
 # The exec form, a JSON array, for the reason the compose file gives: a plain string runs under /bin/sh, which on
 # this image is dash, where /dev/tcp does not exist and the check would fail forever while squid serves.
 HealthCmd=["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3128"]

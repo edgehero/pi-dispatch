@@ -516,8 +516,8 @@ folder is a legitimate job. The run record of such a refusal says `runner-policy
 `:Z` relabels a directory recursively on every run, so a forge job whose clone is large pays for relabelling it
 before the container starts. That cost was not measured.
 
-The compose file's config mounts (`egress-proxy.conf`, `egress-allowlist.conf`, `triggers.json`), and the two mounts of
-the proxy that `pi-dispatch up` starts, carry `:ro,z`:
+The compose file's config mounts (`egress-proxy.conf`, `egress-allowlist.conf`, `model-endpoints.conf`, `triggers.json`),
+and the three mounts of the proxy that `pi-dispatch up` starts, carry `:ro,z`:
 shared, because they are single files the services read, not a job's directory. Measured: without it squid
 crash-looped with `FATAL: Unable to open configuration file: /etc/squid/squid.conf: (13) Permission denied`; with it
 the proxy reached `healthy`. The receiver's `triggers.json` and `pi-dispatch up`'s proxy carry it for the same reason
@@ -825,7 +825,7 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    A container that already has a unit's name and was not started by that unit (the hand-started proxy below, or an
    older setup's Valkey) is never replaced silently: the unit's `podman run --replace` would remove it, and a proxy
    takes every running job's per-job network with it. Both commands say so and install nothing; remove it yourself
-   (`podman rm -f pi-dispatch-egress-proxy`), or let `service install --force` replace it. A podman that cannot say
+   (`podman rm -f -v pi-dispatch-egress-proxy`), or let `service install --force` replace it. A podman that cannot say
    whether such a container exists (anything but "no such container", a locked store say) installs nothing, `--force`
    or not. `service install --force` over a Quadlet file that changed RESTARTS that unit (a `start` would do nothing to
    a running one) and warns first when that unit is the proxy. `service install` lists every reason it refuses at once
@@ -1017,8 +1017,8 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    measured, a container on Podman's default rootless network (pasta or slirp4netns) is refused with `"pasta" is not
    supported: invalid network mode`. To start it by hand instead of as a unit (it will not come back after a reboot,
    and `up` and `service install` will then refuse to install the unit over it until you remove it),
-   from the directory holding your `.env` and the `egress-allowlist.conf` and `deploy/egress-proxy.conf` that
-   `pi-dispatch init` wrote, and the keeper FIRST with the same flags its unit generates (a keeper started
+   from the directory holding your `.env` and the `egress-allowlist.conf`, `model-endpoints.conf` and
+   `deploy/egress-proxy.conf` that `pi-dispatch init` wrote, and the keeper FIRST with the same flags its unit generates (a keeper started
    more than 15 s after the proxy reads as one that restarted under it):
 
    <!-- PODMAN-NATIVE-PROXY -->
@@ -1032,11 +1032,15 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    podman run -d --name pi-dispatch-egress-proxy --network pi-dispatch-egress-out \
      -v "$PWD/deploy/egress-proxy.conf:/etc/squid/squid.conf:ro,z" \
      -v "$PWD/egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro,z" \
+     -v "$PWD/model-endpoints.conf:/etc/pi-dispatch/model-endpoints.conf:ro,z" \
      docker.io/ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029
    ```
    <!-- /PODMAN-NATIVE-PROXY -->
 
    The image is the compose file's, by the same digest, and `:ro,z` is there for SELinux as in the compose file.
+   `model-endpoints.conf` must exist, even with no endpoints declared: the rules include it, and squid will not start
+   without it. After `pi-dispatch egress render`, reload with `podman exec pi-dispatch-egress-proxy squid -k
+   reconfigure` (docs/egress.md, "Local model servers").
    Measured from a job's `--internal` network: the proxy answers by name, and nothing on the host does (the host's
    own addresses, `host.containers.internal` and the gateway all refuse or are unreachable), which is stricter than
    the Docker API route, where a host service listening on `0.0.0.0` answers a job. The units in the previous

@@ -39,6 +39,9 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
                            run the worker (or --receiver) as an OS service — the deploy/ templates
                            rendered with this host's real paths, installed user-level;
                            \`service restart --drain\` lets the in-flight job finish first
+  pi-dispatch egress render
+                           write model-endpoints.conf here from model-endpoints.json (in place), then print
+                           the command that reloads the egress proxy; it never reloads the proxy itself
   pi-dispatch pause        stop taking new jobs (durable; survives worker restart)
   pi-dispatch resume       resume taking jobs
   pi-dispatch status       show paused state + job counts
@@ -105,6 +108,11 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 	if (cmd === "service") {
 		const { runService } = await import("./service.mjs");
 		return runService(argv.slice(1), { env });
+	}
+
+	if (cmd === "egress") {
+		const { runEgress } = await import("./egress-cli.mjs");
+		return runEgress(argv.slice(1), { env, out: write });
 	}
 
 	if (cmd === "run") {

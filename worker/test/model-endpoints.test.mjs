@@ -101,6 +101,10 @@ test("parseModelEndpoints refuses a host that is not a name or a literal a URL a
 		"host.docker.internal:11434": /carries a port/,
 		"192.168.5.2:11434": /carries a port/,
 		"[fd00::2]:8080": /carries a port/,
+		// An empty port is still a port separator (#515 review): not "an IPv6 address with an IPv4 tail".
+		"a.lan:": /carries a port: put the host alone/,
+		"192.168.5.2:": /carries a port/,
+		"[fd00::2]:": /carries a port/,
 		"-bad.lan": /not a DNS name/,
 		"a..b": /not a DNS name/,
 		"a b": /not a DNS name/,

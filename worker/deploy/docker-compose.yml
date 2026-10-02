@@ -134,6 +134,18 @@ services:
       # never clobbers an edited allowlist. Mounting a path that does not exist makes Docker create it as a
       # DIRECTORY and squid then fails confusingly, which is why init writes it first.
       - ../egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro,z
+      # The declared model endpoints' rules (issue #503), rendered from model-endpoints.json by
+      # `pi-dispatch egress render` and read by the rules' `include`. `init` scaffolds it empty. It must exist:
+      # squid refuses to start when an included file is missing. After a render, reload with
+      # `docker exec pi-dispatch-egress-proxy squid -k reconfigure`, not a restart.
+      - ../model-endpoints.conf:/etc/pi-dispatch/model-endpoints.conf:ro,z
+    # How the proxy reaches a model server on this host (issue #503). On Docker Engine (Linux) this name does
+    # not exist without the line, and host-gateway is the bridge gateway (docker0, 172.17.0.1). Docker
+    # Desktop already resolves the name, and host-gateway there is the same host address, so the line is kept
+    # for both. It is on the PROXY only: a job never gets it, and reaches the host only through a declared
+    # endpoint's CONNECT rule.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - egress-out
     restart: unless-stopped

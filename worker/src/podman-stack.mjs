@@ -26,6 +26,7 @@ import { execFileSync } from "node:child_process";
 import { connect as netConnect } from "node:net";
 import { dirname, join } from "node:path";
 import { DEFAULT_EGRESS_PROXY, egressProxyName } from "./egress.mjs";
+import { MODEL_ENDPOINTS_INCLUDE_NAME } from "./model-endpoints.mjs";
 import { VALKEY_PASSWORD_KEY, valkeyEnvFileText } from "./valkey-auth.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envFileSystemdHazard, envFileValueLines, invisibleCharacter, quotedRegions, readEnvAssignments } from "./env-file.mjs";
 import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_NOW_FORMAT, STARTED_AT_FORMAT, NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_AFTER_PROXY_GRACE_MS, judgeNetnsKeeper, podmanNeedsNetnsKeeper, makeDetachGate, detachBlockedSentence, DETACH_GATE_READ_TIMEOUT_MS, DETACH_GATE_READ_MAX_BUFFER, runtimeFromFacts } from "./netns-keeper.mjs";
@@ -89,9 +90,17 @@ export const QUADLET_FILES = Object.freeze({
 /** Every Quadlet file this project ships, for uninstall and status, which act on what exists rather than on a plan. */
 export const ALL_QUADLET_FILES = Object.freeze(Object.values(QUADLET_FILES));
 
-/** The two placeholders the proxy's template carries, and what each becomes (TEMPLATE_PINS in service.mjs pins both). */
+/** The three placeholders the proxy's template carries, and what each becomes (TEMPLATE_PINS in service.mjs pins them). */
 export const PROXY_CONF_PLACEHOLDER = "/opt/pi-dispatch/deploy/egress-proxy.conf";
 export const ALLOWLIST_PLACEHOLDER = "/opt/pi-dispatch/egress-allowlist.conf";
+/**
+ * The declared model endpoints' rules (issue #503): the deployment folder's own `model-endpoints.conf`, mounted
+ * directly as the allowlist is, never copied like the rules are. `pi-dispatch egress render` rewrites that file in
+ * place and the proxy's reload reads the mounted inode, so a copy here would be a file the render never wrote. The
+ * rules are copied only because `z` cannot relabel a root-owned package file; this one is the operator's, as the
+ * allowlist is.
+ */
+export const MODEL_ENDPOINTS_PLACEHOLDER = "/opt/pi-dispatch/model-endpoints.conf";
 
 /**
  * Where the proxy's RULES are mounted from: an account-owned COPY of the package's `egress-proxy.conf`, never the
@@ -691,8 +700,9 @@ export function planStack({ components, templatesDir, deployDir, home, fs, readT
 	if (components.keeper) picked.push(QUADLET_FILES.keeperNetwork, QUADLET_FILES.keeper);
 	const conf = proxyConfCopyPath(home);
 	const allowlist = join(deployDir, "egress-allowlist.conf");
+	const endpointsInclude = join(deployDir, MODEL_ENDPOINTS_INCLUDE_NAME);
 	if (components.proxy) {
-		for (const p of [conf, allowlist]) {
+		for (const p of [conf, allowlist, endpointsInclude]) {
 			if (UNSAFE_VOLUME_PATH.test(p)) {
 				return { error: `the egress proxy's Quadlet unit would mount ${JSON.stringify(p)}, and a Quadlet Volume= cannot carry a colon, whitespace, %, $, a quote, a backslash or a control byte in a path (each is split or expanded on the way to podman run). Move the deployment folder, or start the proxy by hand (docs/podman.md)` };
 			}
@@ -702,7 +712,10 @@ export function planStack({ components, templatesDir, deployDir, home, fs, readT
 		let text = String(readTemplate(file));
 		if (file === QUADLET_FILES.proxy.file) {
 			// Function replacements: a computed path is the REPLACEMENT, and String.replace reads `$&` out of a string one.
-			text = text.replace(`Volume=${PROXY_CONF_PLACEHOLDER}:`, () => `Volume=${conf}:`).replace(`Volume=${ALLOWLIST_PLACEHOLDER}:`, () => `Volume=${allowlist}:`);
+			text = text
+				.replace(`Volume=${PROXY_CONF_PLACEHOLDER}:`, () => `Volume=${conf}:`)
+				.replace(`Volume=${ALLOWLIST_PLACEHOLDER}:`, () => `Volume=${allowlist}:`)
+				.replace(`Volume=${MODEL_ENDPOINTS_PLACEHOLDER}:`, () => `Volume=${endpointsInclude}:`);
 		}
 		if (file === QUADLET_FILES.valkey.file && Number.isInteger(components.valkeyPort) && components.valkeyPort !== DEFAULT_VALKEY_PORT) {
 			// Issue #464: VALKEY_URL's loopback port, where this account's own Valkey is published (the container still

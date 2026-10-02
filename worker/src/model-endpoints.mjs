@@ -83,8 +83,9 @@ function canonicalHost(raw) {
 	if (typeof raw !== "string" || raw === "") throw new Error("host must be a non-empty string");
 	if (raw !== raw.trim()) throw new Error("host must not carry spaces");
 	const lower = raw.toLowerCase();
-	// `name:port` or `[v6]:port`, the shape a URL writes, caught before the IPv6 test would call it a bad address.
-	if (/^[^:[\]]+:[0-9]+$/.test(lower) || /^\[[^\]]*\]:[0-9]+$/.test(lower)) {
+	// `name:port` or `[v6]:port`, the shape a URL writes, caught before the IPv6 test would call it a bad address. The
+	// port may be empty (`a.lan:`): that is still a host with a port separator, not an IPv6 address with an IPv4 tail.
+	if (/^[^:[\]]+:[0-9]*$/.test(lower) || /^\[[^\]]*\]:[0-9]*$/.test(lower)) {
 		throw new Error(`host ${JSON.stringify(raw)} carries a port: put the host alone in "host" and the port in "port"`);
 	}
 	if (isIPv4(lower)) {

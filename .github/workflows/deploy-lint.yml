@@ -101,9 +101,9 @@ jobs:
           set -eu
           units="$RUNNER_TEMP/quadlet"
           mkdir -p "$units"
-          # A deployment folder the planner accepts, with the allowlist the proxy mounts.
+          # A deployment folder the planner accepts, with the allowlist and the model endpoints' include the proxy mounts.
           deploy="$RUNNER_TEMP/deploy"
-          mkdir -p "$deploy" && : > "$deploy/egress-allowlist.conf"
+          mkdir -p "$deploy" && : > "$deploy/egress-allowlist.conf" && : > "$deploy/model-endpoints.conf"
           node --input-type=module -e "
             import { readFileSync, writeFileSync, existsSync } from 'node:fs';
             import { basename, join, resolve } from 'node:path';

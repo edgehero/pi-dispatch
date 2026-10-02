@@ -267,9 +267,10 @@ let mounts = [];
 try {
 	mounts = JSON.parse(await inspect(proxy, "{{json .Mounts}}"));
 } catch {}
-// Both of the proxy's sources; the receiver's triggers.json carries the same option but is not started here.
+// Each of the proxy's sources (the third, the model endpoints' include, since issue #503); the receiver's triggers.json
+// carries the same option but is not started here.
 const composeSources = [];
-for (const destination of ["/etc/squid/squid.conf", "/etc/pi-dispatch/allowlist.conf"]) {
+for (const destination of ["/etc/squid/squid.conf", "/etc/pi-dispatch/allowlist.conf", "/etc/pi-dispatch/model-endpoints.conf"]) {
 	const source = mounts.find((m) => m.Destination === destination)?.Source;
 	composeSources.push({ source: source ?? `no ${destination} mount`, label: source ? await labelOf(source) : "" });
 }

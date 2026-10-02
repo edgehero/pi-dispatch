@@ -12,7 +12,14 @@
  *     of it, or a "present" that leaves it running, keeps that policy. Compared: the image's digest, the entrypoint and
  *     command against the pinned image's own (read from its registry config, identical on every platform in the
  *     manifest list), and the mounts: the two bind sources against this folder's `deploy/egress-proxy.conf` and
- *     `egress-allowlist.conf`, the image's two anonymous volumes allowed, anything else stale.
+ *     `egress-allowlist.conf`, the image's two anonymous volumes allowed, anything else stale. A third bind, of
+ *     `model-endpoints.conf` (issue #503), must be this folder's file when it is there. When it is not there, the proxy
+ *     is still current (one made before #503 mounts two files) unless this folder's rules `include` the file: squid
+ *     refuses to start without it, so that proxy's next restart would crash-loop. That is the one rule, and it is the
+ *     only thing that makes a missing third mount drift. Endpoints declared under rules without the include are NOT
+ *     drift: replacing the proxy would cut every tunnel and change nothing, since its rules still lack the include.
+ *     That state is the rules refresh's to fix, and `up`, `doctor` and `egress render` name it alike
+ *     (`rulesPredateEndpointsLine` in egress-cli.mjs).
  *
  * MEASURED (Docker Engine 29.8.1, compose 5.5.1, rootful, gate round 2; pinned in egress-proxy-state.test.mjs): a proxy
  * made by `docker compose --profile egress up -d` and one made by `up`'s argv carry the pinned reference exactly as
@@ -52,9 +59,19 @@ const VM_PREFIXES = Object.freeze(["/host_mnt/", "/run/desktop/mnt/host/"]);
 export const PROXY_STATE_FORMAT =
 	'--format={"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}},"image":{{json .Config.Image}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}}}';
 
-/** Where the proxy's two files are mounted inside it (compose's and `up`'s mounts alike). */
+/** Where the proxy's files are mounted inside it (compose's and `up`'s mounts alike). */
 const SQUID_CONF = "/etc/squid/squid.conf";
 const ALLOWLIST = "/etc/pi-dispatch/allowlist.conf";
+/** The declared model endpoints' rules (issue #503), the path the shipped rules `include`. */
+export const MODEL_ENDPOINTS_TARGET = "/etc/pi-dispatch/model-endpoints.conf";
+
+/**
+ * Whether a copy of the proxy's rules `include`s the model endpoints' file (issue #503): an uncommented include line
+ * naming exactly that path. A copy from before #503 does not, and a proxy started on it needs no third mount.
+ */
+export function rulesIncludeEndpoints(text) {
+	return new RegExp(`^[ \\t]*include[ \\t]+${MODEL_ENDPOINTS_TARGET.replace(/[.]/g, "\\.")}[ \\t]*$`, "m").test(String(text ?? ""));
+}
 
 /**
  * `{ status, health, image, entrypoint, cmd, mounts, networks }` from `PROXY_STATE_FORMAT`'s stdout, or null when it
@@ -97,9 +114,12 @@ const sameList = (a, b) => Array.isArray(a) && a.length === b.length && a.every(
  * sentences that make it stale, `unknown` why the mounts could not be compared here (null when they were).
  * `realpath` throws for a path that does not resolve on this host. `compareMounts: false` judges the image, entrypoint and
  * command alone, for a caller that does not know which folder the service uses. `platform` decides whether a source
- * that does not resolve can be a path of the runtime's own VM (below).
+ * that does not resolve can be a path of the runtime's own VM (below). `rulesInclude` (this folder's rules include the
+ * model endpoints' file, `rulesIncludeEndpoints`) makes an absent third mount drift (issue #503); without it, a proxy
+ * mounting the two files is current, as every proxy made before #503 does. `outOfDate` is true when the missing third
+ * mount is the ONLY drift: the proxy is this folder's, made before #503.
  */
-export function shippedProxyDrift(state, { cwd, realpath = (p) => p, compareMounts = true, platform = "linux" }) {
+export function shippedProxyDrift(state, { cwd, realpath = (p) => p, compareMounts = true, platform = "linux", rulesInclude = false }) {
 	const drift = [];
 	if (digestOf(state.image) !== digestOf(EGRESS_PROXY_IMAGE)) drift.push(`it was created from ${state.image || "an unnamed image"}, not the pinned ${EGRESS_PROXY_IMAGE}`);
 	if (!sameList(state.entrypoint, EGRESS_PROXY_ENTRYPOINT)) drift.push(`its entrypoint is ${JSON.stringify(state.entrypoint)}, not the image's ${JSON.stringify(EGRESS_PROXY_ENTRYPOINT)}`);
@@ -128,6 +148,15 @@ export function shippedProxyDrift(state, { cwd, realpath = (p) => p, compareMoun
 			return false;
 		}
 	};
+	// The third bind (issue #503): compared like the two when it is there; its absence is drift only when it is needed.
+	const endpointsWant = resolve(cwd, "model-endpoints.conf");
+	const endpointsBind = binds.find((m) => m.destination === MODEL_ENDPOINTS_TARGET);
+	if (endpointsBind) expected[MODEL_ENDPOINTS_TARGET] = endpointsWant;
+	let includeMissing = false;
+	if (!endpointsBind && rulesInclude) {
+		includeMissing = true;
+		drift.push(`nothing is mounted at ${MODEL_ENDPOINTS_TARGET}, where ${endpointsWant} belongs: this folder's rules include it, and squid will not start again without it`);
+	}
 	const unknownSources = [];
 	for (const [destination, want] of Object.entries(expected)) {
 		const bind = binds.find((m) => m.destination === destination);
@@ -142,7 +171,8 @@ export function shippedProxyDrift(state, { cwd, realpath = (p) => p, compareMoun
 		drift.push(`it has a ${m.type || "mount"} at ${m.destination} (from ${m.source || "nowhere named"}) that the shipped proxy does not`);
 	}
 	const unknown = unknownSources.length > 0 ? `${unknownSources.join(", ")} ${unknownSources.length === 1 ? "is a path" : "are paths"} this host cannot resolve (the runtime's own VM's, as Docker Desktop reports its sources), so ${unknownSources.length === 1 ? "that mount cannot" : "those mounts cannot"} be compared from here` : null;
-	return { drift, unknown };
+	// `outOfDate` only when true, so a current proxy's judgement keeps its two-key shape.
+	return includeMissing && drift.length === 1 && unknown === null ? { drift, unknown, outOfDate: true } : { drift, unknown };
 }
 
 /** The job and sandbox networks attached to the proxy, which a removal would cut off (issue #453, gate round 2). */

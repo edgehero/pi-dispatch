@@ -63,7 +63,10 @@ const PASSWORD = "5eca1ed0".repeat(8);
 
 // Everything injected, everything recorded. `files` seeds the in-memory fs (path → text); the fake
 // init deliberately creates nothing, so a test that wants a .env after init seeds it up front.
-function harness({ plan = {}, listening = true, answers = [], files = {}, doctorCode = 0, argv = [], env = { PI_PROVIDER: "anthropic" }, cwd = "/deploy", platform = "linux", logsDirPathFn, settingsFilePathFn, extra = {}, failWrites = {}, failUnlinks = {}, links = new Set(), packagedConf = "conf\n" } = {}) {
+function harness({ plan = {}, listening = true, answers = [], files = {}, doctorCode = 0, argv = [], env = { PI_PROVIDER: "anthropic" }, cwd = "/deploy", platform = "linux", logsDirPathFn, settingsFilePathFn, extra = {}, failWrites = {}, failUnlinks = {}, links = new Set(), packagedConf = "conf\n", includeFile = true } = {}) {
+	// Issue #503: `init` scaffolds the model endpoints' include beside the allowlist, and this harness fakes init, so a
+	// folder that holds the allowlist holds the include too unless a test says otherwise (`includeFile: false`).
+	if (includeFile && `${cwd}/egress-allowlist.conf` in files && !(`${cwd}/model-endpoints.conf` in files)) files = { ...files, [`${cwd}/model-endpoints.conf`]: "# generated\n" };
 	// The podman tests (those that inject a podman info reader) get what a real login has unless they say otherwise: a
 	// user manager to talk to (XDG_RUNTIME_DIR, round 2 E8) and a podman that answers "no such container" for the two
 	// names the stack would claim (E3: any other failure now refuses).
@@ -687,7 +690,7 @@ const PINNED_SQUID = "ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38c
 // The pinned image's own entrypoint and command and its two anonymous volumes (its registry config, 2026-09-27).
 const SQUID_ENTRYPOINT = ["entrypoint.sh"];
 const SQUID_CMD = ["-f", "/etc/squid/squid.conf", "-NYC"];
-const proxyState = (status, { image = PINNED_SQUID, conf = "/deploy/deploy/egress-proxy.conf", allowlist = "/deploy/egress-allowlist.conf", entrypoint = SQUID_ENTRYPOINT, cmd = SQUID_CMD, extra = [], networks = ["pi-dispatch-egress-out"], stderr } = {}) => ({
+const proxyState = (status, { image = PINNED_SQUID, conf = "/deploy/deploy/egress-proxy.conf", allowlist = "/deploy/egress-allowlist.conf", include = null, entrypoint = SQUID_ENTRYPOINT, cmd = SQUID_CMD, extra = [], networks = ["pi-dispatch-egress-out"], stderr } = {}) => ({
 	code: 0,
 	output: `${JSON.stringify({
 		status,
@@ -698,6 +701,7 @@ const proxyState = (status, { image = PINNED_SQUID, conf = "/deploy/deploy/egres
 		mounts: [
 			...(conf ? [{ Type: "bind", Source: conf, Destination: "/etc/squid/squid.conf" }] : []),
 			...(allowlist ? [{ Type: "bind", Source: allowlist, Destination: "/etc/pi-dispatch/allowlist.conf" }] : []),
+			...(include ? [{ Type: "bind", Source: include, Destination: "/etc/pi-dispatch/model-endpoints.conf" }] : []),
 			{ Type: "volume", Source: "/var/lib/docker/volumes/a1/_data", Destination: "/var/log/squid" },
 			{ Type: "volume", Source: "/var/lib/docker/volumes/b2/_data", Destination: "/var/spool/squid" },
 			...extra,
@@ -712,6 +716,8 @@ const EGRESS_RUN = [
 	"--network", "pi-dispatch-egress-out",
 	"-v", "./deploy/egress-proxy.conf:/etc/squid/squid.conf:ro,z",
 	"-v", "./egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro,z",
+	"-v", "./model-endpoints.conf:/etc/pi-dispatch/model-endpoints.conf:ro,z",
+	"--add-host", "host.docker.internal:host-gateway",
 	"ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029",
 ];
 
@@ -1036,7 +1042,7 @@ test("up on docker: a stopped shipped proxy, declined or failing to start, is sa
 	assert.match(declined.text(), /egress\s+skipped \(declined\): every job is refused pre-spend until the proxy is up/);
 	const failing = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("exited"), "docker start": 1 }, listening: true, files: { "/deploy/egress-allowlist.conf": "x\n", "/deploy/deploy/egress-proxy.conf": "conf\n" }, argv: ["--yes"] });
 	assert.equal(await failing.run(), 0, "doctor is the judge of what remains");
-	assert.match(failing.text(), /✗ could not start the egress proxy; `docker rm -f pi-dispatch-egress-proxy` and re-run `pi-dispatch up` recreates it/);
+	assert.match(failing.text(), /✗ could not start the egress proxy; `docker rm -f -v pi-dispatch-egress-proxy` and re-run `pi-dispatch up` recreates it/);
 	assert.ok(!failing.calls.some((c) => c.args[0] === "run" || c.args[0] === "rm"), "never removes or recreates it by itself");
 	// No allowlist here: declined before any offer, as for an absent proxy.
 	const bare = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("exited") }, listening: true, argv: ["--yes"] });
@@ -1064,7 +1070,7 @@ test("up on docker: a PI_EGRESS_PROXY container that exists but is stopped is re
 	assert.match(running.text(), /✓ Egress proxy present \(my-squid, named by PI_EGRESS_PROXY\)/);
 });
 
-const EGRESS_RM = ["rm", "-f", "pi-dispatch-egress-proxy"];
+const EGRESS_RM = ["rm", "-f", "-v", "pi-dispatch-egress-proxy"];
 const PROXY_FILES = { "/deploy/egress-allowlist.conf": "x\n", "/deploy/deploy/egress-proxy.conf": "conf\n" };
 // Mutations only: the quiet `network inspect` before a create is a read (exec round 3).
 const dockerMutations = (h) => h.calls.filter((c) => c.cmd === "docker" && ["start", "unpause", "run", "network", "rm"].includes(c.args[0]) && c.args[1] !== "inspect").map((c) => c.args);
@@ -1207,12 +1213,12 @@ test("up's recreate creates the proxy's network only where it does not exist, so
 	// `--yes` runs exactly the lines shown (PR #456's final check), so every shown line is a command, and the create is
 	// shown only where it runs: the old `... create pi-dispatch-egress-out   (only if it does not exist yet)` ran nowhere.
 	const shown = (h) => h.text().split("\n").filter((l) => l.startsWith("  docker "));
-	assert.deepEqual(shown(there), ["  docker rm -f pi-dispatch-egress-proxy", `  docker ${EGRESS_RUN.join(" ")}`], "a network that exists: no create line");
+	assert.deepEqual(shown(there), ["  docker rm -f -v pi-dispatch-egress-proxy", `  docker ${EGRESS_RUN.join(" ")}`], "a network that exists: no create line");
 	assert.doesNotMatch(there.text(), /only if it does not exist yet/);
 	const absent = harness({ env: EGRESS_ENV, plan: plan(false), listening: true, files: PROXY_FILES, argv: ["--yes"] });
 	await absent.run();
 	assert.deepEqual(dockerMutations(absent), [EGRESS_RM, EGRESS_NET, EGRESS_RUN]);
-	assert.deepEqual(shown(absent), ["  docker rm -f pi-dispatch-egress-proxy", "  docker network create pi-dispatch-egress-out", `  docker ${EGRESS_RUN.join(" ")}`], "a missing network: its create, as a runnable line");
+	assert.deepEqual(shown(absent), ["  docker rm -f -v pi-dispatch-egress-proxy", "  docker network create pi-dispatch-egress-out", `  docker ${EGRESS_RUN.join(" ")}`], "a missing network: its create, as a runnable line");
 	// The first start of an absent proxy follows the same rule, both ways.
 	for (const exists of [true, false]) {
 		const fresh = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: 1, "docker network inspect pi-dispatch-egress-out": exists ? 0 : { code: 1, stderr: "Error: no such network\n" }, "docker network create": 0, "docker run -d --name pi-dispatch-egress-proxy": 0 }, listening: true, files: PROXY_FILES, argv: ["--yes"] });
@@ -1253,6 +1259,23 @@ test("up's proxy image is the compose file's and the Quadlet unit's, one pinned 
 	assert.match(compose, new RegExp(`^\\s*image: ${PINNED_SQUID.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}\\s*$`, "m"));
 	assert.ok(quadlet.includes(`Image=docker.io/${PINNED_SQUID}\n`));
 	assert.equal(EGRESS_RUN.at(-1), PINNED_SQUID);
+});
+
+// Issue #503: up's run argv and the compose service start one proxy, so they mount the same three files and give it the
+// same host entry. Read off both copies of the compose file; up's argv is the golden above.
+test("up's proxy mounts and host entry are the compose service's, the model endpoints' include and host-gateway among them (#503)", () => {
+	for (const path of ["../../deploy/docker-compose.yml", "../deploy/docker-compose.yml"]) {
+		const compose = readFileSync(new URL(path, import.meta.url), "utf8");
+		const service = compose.slice(compose.indexOf("  egress-proxy:"), compose.indexOf("\nnetworks:"));
+		const composeMounts = [...service.matchAll(/^\s+- \S+:(\/etc\/\S+:ro,z)$/gm)].map((m) => m[1]);
+		const upMounts = EGRESS_RUN.filter((a, i) => EGRESS_RUN[i - 1] === "-v").map((v) => v.slice(v.indexOf(":") + 1));
+		assert.deepEqual(upMounts, composeMounts, path);
+		assert.ok(upMounts.includes("/etc/pi-dispatch/model-endpoints.conf:ro,z"), path);
+		assert.match(service, /^ {4}extra_hosts:\n {6}- "host\.docker\.internal:host-gateway"$/m, `${path}: the proxy's host entry`);
+		assert.deepEqual(EGRESS_RUN.filter((a, i) => EGRESS_RUN[i - 1] === "--add-host"), ["host.docker.internal:host-gateway"]);
+		// The PROXY only: no other service is given the host.
+		assert.equal(compose.split("\n").filter((l) => !/^\s*#/.test(l) && l.includes("host-gateway")).length, 1, `${path}: one host entry, the proxy's`);
+	}
 });
 
 // Issue #480: `mkdir x && cd x && npx @edgehero/pi-dispatch up`, driven through up's seams with the REAL init on a real
@@ -2381,4 +2404,149 @@ test("up's offer names a copy that differs only in its line endings as that (PR 
 	const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running") }, listening: true, files: { ...PROXY_FILES, [CONF]: "conf\r\n" }, argv: ["--yes"], answers: ["n"] });
 	await h.run();
 	assert.match(h.text(), /⚠ deploy\/egress-proxy\.conf differs from the package's copy[^:]*: only in its line endings, CRLF here and LF in the package's\. /);
+});
+
+// --- issue #503: the model endpoints' include, the third file the shipped proxy mounts ----------------------------------
+
+const INCLUDE_RULES = `${NEW_RULES}include /etc/pi-dispatch/model-endpoints.conf\n`;
+
+test("up on docker: no model-endpoints.conf in the folder means no proxy is started, since squid would not start (#503)", async () => {
+	const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: 1 }, listening: true, files: PROXY_FILES, includeFile: false, argv: ["--yes"] });
+	assert.equal(await h.run(), 0);
+	assert.match(h.text(), /✗ the egress policy is on but model-endpoints\.conf is not here, so no proxy is started without it/);
+	assert.deepEqual(dockerMutations(h), [], "nothing created or started");
+	const real = tempDir("pi-up-503-dir-");
+	realFs.mkdirSync(join(real, "deploy"), { recursive: true });
+	realFs.writeFileSync(join(real, "deploy", "egress-proxy.conf"), "conf\n");
+	realFs.writeFileSync(join(real, "egress-allowlist.conf"), "api.anthropic.com\n");
+	realFs.mkdirSync(join(real, "model-endpoints.conf"));
+	const dir = harness({ plan: { "docker version": 0, "docker image inspect": 0, [PROXY_INSPECT]: 1, "docker network create": 0, "docker run -d --name pi-dispatch-egress-proxy": 0 }, listening: true, argv: ["--yes"], cwd: real, extra: { fs: realFs, runInitFn: () => 0 } });
+	await dir.run();
+	assert.match(dir.text(), /✗ the egress policy is on but model-endpoints\.conf here is a directory, not a file, so no proxy is started without it/);
+	assert.ok(!dir.calls.some((c) => c.args[0] === "run" && c.args.includes("pi-dispatch-egress-proxy")), "nothing started");
+});
+
+test("up on docker: a two-mount proxy is current under rules without the include, and stale under rules with it (#503)", async () => {
+	const old = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running") }, listening: true, files: PROXY_FILES, argv: ["--yes"] });
+	await old.run();
+	assert.match(old.text(), /✓ Egress proxy already present/);
+	const files = { ...PROXY_FILES, [CONF]: INCLUDE_RULES };
+	const stale = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running") }, listening: true, files, argv: ["--yes"], packagedConf: INCLUDE_RULES });
+	await stale.run();
+	assert.match(stale.text(), /✗ pi-dispatch-egress-proxy exists \(running\) and is this deployment's proxy but out of date: nothing is mounted at \/etc\/pi-dispatch\/model-endpoints\.conf, where \/deploy\/model-endpoints\.conf belongs: this folder's rules include it, and squid will not start again without it/);
+	assert.doesNotMatch(stale.text(), /not this deployment's proxy/);
+	assert.deepEqual(dockerMutations(stale).at(-1), EGRESS_RUN, "replaced with the shipped three-mount proxy");
+	const current = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running", { include: "/deploy/model-endpoints.conf" }) }, listening: true, files, argv: ["--yes"], packagedConf: INCLUDE_RULES });
+	await current.run();
+	assert.match(current.text(), /✓ Egress proxy already present/);
+	assert.deepEqual(dockerMutations(current), []);
+});
+
+// Issue #503's governing rule, round-1 gate (A517-1): the folder's rules include model-endpoints.conf only together with
+// a proxy that mounts it. The refresh and the replacement of a proxy without the third mount are one step, asked once;
+// declined or blocked, nothing is written; a failed replace puts the old rules back.
+const RUN_OK = { "docker network inspect pi-dispatch-egress-out": 0, "docker run -d --name pi-dispatch-egress-proxy": 0, "docker rm": 0 };
+
+test("up on docker: refreshing to rules that include the file and replacing a two-mount proxy are ONE step, asked once, never a restart (#503)", async () => {
+	const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running"), ...RUN_OK }, listening: true, files: PROXY_FILES, argv: ["--yes"], answers: ["y"], packagedConf: INCLUDE_RULES });
+	assert.equal(await h.run(), 0);
+	const text = h.text();
+	assert.equal(h.promptCalls.length, 1, "one question for both");
+	assert.match(text, /up would replace deploy\/egress-proxy\.conf with the package's copy[^\n]*and replace the proxy \(running\) with the shipped one in the same step/);
+	assert.equal(h.store.get(CONF), INCLUDE_RULES);
+	assert.deepEqual(restarts(h), [], "never restarted on a missing mount");
+	assert.deepEqual(dockerMutations(h), [EGRESS_RM, EGRESS_RUN], "removed, then run with the third mount, once");
+	assert.match(text, /✓ replaced deploy\/egress-proxy\.conf with the package's copy \([^)]*\) \(yours is kept as deploy\/egress-proxy\.conf\.bak-20260929T101500Z\) and the proxy with the shipped one/);
+	// With the third mount already there, the refresh restarts it as before (#484), and is not coupled.
+	const three = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running", { include: "/deploy/model-endpoints.conf" }), "docker restart": 0 }, listening: true, files: PROXY_FILES, argv: ["--yes"], answers: ["y"], packagedConf: INCLUDE_RULES });
+	await three.run();
+	assert.deepEqual(restarts(three), [RESTART]);
+	assert.deepEqual(dockerMutations(three), []);
+});
+
+test("up on docker: a declined coupled refresh writes nothing and leaves the proxy; jobs attached are named and --yes does not answer (#503)", async () => {
+	const busy = proxyState("running", { networks: ["pi-dispatch-egress-out", "pi-job-abc-net"] });
+	const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: busy, ...RUN_OK }, listening: true, files: PROXY_FILES, argv: ["--yes"], answers: ["n"], packagedConf: INCLUDE_RULES });
+	assert.equal(await h.run(), 0);
+	assert.equal(h.promptCalls.length, 1);
+	assert.match(h.text(), /It is attached to pi-job-abc-net: removing it cuts those jobs off/);
+	assert.equal(h.store.get(CONF), "conf\n", "the rules are not written");
+	assert.ok(![...h.store.keys()].some((k) => k.includes(".bak-")), "no backup either");
+	assert.deepEqual(dockerMutations(h), []);
+	assert.deepEqual(restarts(h), []);
+	assert.match(h.text(), /skipped: deploy\/egress-proxy\.conf and the proxy are left as they are/);
+});
+
+test("up on docker: a coupled replace that fails puts the old rules back from the backup it wrote (#503)", async () => {
+	const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("exited"), "docker network inspect pi-dispatch-egress-out": 0, "docker rm": 0, "docker run -d --name pi-dispatch-egress-proxy": 1 }, listening: true, files: PROXY_FILES, argv: ["--yes"], answers: ["y"], packagedConf: INCLUDE_RULES });
+	assert.equal(await h.run(), 0);
+	assert.equal(h.store.get(CONF), "conf\n", "the old rules, exactly");
+	assert.ok(!h.store.has(BACKUP), "the backup was moved back into place");
+	assert.match(h.text(), /✗ could not start the shipped proxy; deploy\/egress-proxy\.conf is put back as it was \(from deploy\/egress-proxy\.conf\.bak-20260929T101500Z\)/);
+	// The proxy step then runs on the old rules, as after a decline (round 2 of PR #517): whatever it starts reads them.
+	assert.match(h.text(), /Continuing; doctor below will re-check it/);
+});
+
+test("up on docker: a coupled refresh that cannot replace the proxy here writes nothing and asks nothing (#503)", async () => {
+	// No include file to mount: the shipped run could not start.
+	const missing = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running"), ...RUN_OK }, listening: true, files: PROXY_FILES, includeFile: false, argv: ["--yes"], answers: ["y"], packagedConf: INCLUDE_RULES });
+	await missing.run();
+	assert.equal(missing.promptCalls.length, 0);
+	assert.equal(missing.store.get(CONF), "conf\n");
+	assert.match(missing.text(), /not replaced: the new rules include model-endpoints\.conf, which this proxy does not mount[^\n]*model-endpoints\.conf is not a file in this folder/);
+	assert.deepEqual(dockerMutations(missing), []);
+	// Mounts that cannot be compared here (Docker Desktop's VM paths): up never removes such a proxy on its mounts.
+	const desktop = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running", { conf: "/host_mnt/deploy/deploy/egress-proxy.conf", allowlist: "/host_mnt/deploy/egress-allowlist.conf" }), ...RUN_OK }, listening: true, files: PROXY_FILES, argv: ["--yes"], answers: ["y"], packagedConf: INCLUDE_RULES });
+	desktop.deps.fs.realpathSync = (p) => {
+		if (p.startsWith("/host_mnt/")) throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+		return p;
+	};
+	await desktop.run();
+	assert.equal(desktop.promptCalls.length, 0);
+	assert.equal(desktop.store.get(CONF), "conf\n");
+	assert.match(desktop.text(), /up cannot replace the proxy here: its mounts could not be compared on this host/);
+	assert.deepEqual(dockerMutations(desktop), []);
+});
+
+test("up on docker: endpoints declared under rules without the include are not drift; up names the rules refresh instead (#503)", async () => {
+	const files = { ...PROXY_FILES, "/deploy/model-endpoints.json": JSON.stringify({ version: 1, endpoints: [{ id: "m", host: "host.docker.internal", port: 11434, slots: 1 }] }) };
+	const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running") }, listening: true, files, argv: ["--yes"] });
+	await h.run();
+	assert.match(h.text(), /✓ Egress proxy already present/);
+	assert.match(h.text(), /⚠ model endpoints are declared, but deploy\/egress-proxy\.conf predates #503 and does not include model-endpoints\.conf, so the endpoints stay unreachable until the rules are refreshed: `pi-dispatch up`, and accept the refresh/);
+	assert.deepEqual(dockerMutations(h), [], "no replace: it would cut tunnels and fix nothing");
+});
+
+// Round 2 of PR #517: a coupled step that did not replace leaves the proxy step to do its usual work on the old rules.
+test("up on docker: after a declined or blocked coupled refresh, a stopped proxy is still started and a paused one unpaused (#503)", async () => {
+	for (const [status, verb] of [["exited", "start"], ["paused", "unpause"]]) {
+		const declined = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState(status), [`docker ${verb}`]: 0, ...RUN_OK }, listening: true, files: PROXY_FILES, argv: ["--yes"], answers: ["n"], packagedConf: INCLUDE_RULES });
+		await declined.run();
+		assert.equal(declined.store.get(CONF), "conf\n", `${status}: the rules are not written`);
+		assert.deepEqual(dockerMutations(declined), [[verb, "pi-dispatch-egress-proxy"]], `${status}: declined, then ${verb}ed as it is`);
+		const blocked = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState(status), [`docker ${verb}`]: 0, ...RUN_OK }, listening: true, files: { ...PROXY_FILES, "/deploy/model-endpoints.json": JSON.stringify({ version: 1, endpoints: [{ id: "m", host: "host.docker.internal", port: 11434, slots: 1 }] }) }, includeFile: false, argv: ["--yes"], packagedConf: INCLUDE_RULES });
+		await blocked.run();
+		assert.match(blocked.text(), /To take the new rules, remove the proxy with `docker rm -f -v pi-dispatch-egress-proxy` \(fix a missing file first with `pi-dispatch init`\), then run `pi-dispatch up` again/);
+		assert.equal(blocked.store.get(CONF), "conf\n");
+		// The usual proxy step then runs: a missing include is said there too, and nothing is started on a missing file.
+		assert.match(blocked.text(), /✗ the egress policy is on but model-endpoints\.conf is not here/);
+	}
+	// And the endpoints line, after a decline under a running proxy.
+	const files = { ...PROXY_FILES, "/deploy/model-endpoints.json": JSON.stringify({ version: 1, endpoints: [{ id: "m", host: "host.docker.internal", port: 11434, slots: 1 }] }) };
+	const named = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running"), ...RUN_OK }, listening: true, files, argv: ["--yes"], answers: ["n"], packagedConf: INCLUDE_RULES });
+	await named.run();
+	assert.match(named.text(), /⚠ model endpoints are declared, but deploy\/egress-proxy\.conf predates #503/);
+	assert.match(named.text(), /model endpoints\s+unreachable: deploy\/egress-proxy\.conf predates #503/);
+	assert.match(named.text(), /✓ Egress proxy already present/);
+});
+
+test("up's proxy removal takes its anonymous volumes with it (#503 review)", () => {
+	assert.deepEqual(EGRESS_RM, ["rm", "-f", "-v", "pi-dispatch-egress-proxy"]);
+});
+
+test("up on podman: no model-endpoints.conf in the folder means no proxy unit is installed (#503)", async () => {
+	const h = harness({ env: { PI_BACKENDS: "podman" }, plan: podmanPlan(), listening: true, argv: ["--yes"], files: { "/deploy/egress-allowlist.conf": "x\n" }, includeFile: false, extra: podmanExtra() });
+	await h.run();
+	assert.match(h.text(), /✗ the egress policy is on but model-endpoints\.conf is not here, and the proxy's rules include it/);
+	assert.ok(!h.calls.some((c) => c.cmd === "podman" && c.args.includes("pi-dispatch-egress-proxy") && c.args[0] === "run"));
 });

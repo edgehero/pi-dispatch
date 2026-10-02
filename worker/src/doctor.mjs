@@ -60,7 +60,8 @@ import { randomBytes } from "node:crypto";
 import { DEFAULT_VALKEY_URL, accountTempRoot, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
-import { MODEL_ENDPOINTS_FILE_NAME, loadModelEndpoints } from "./model-endpoints.mjs";
+import { MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, loadModelEndpoints } from "./model-endpoints.mjs";
+import { endpointsDeclaredIn, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
 import { loadPauseWindows } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
 import { isForgeKind } from "./forges.mjs";
@@ -74,7 +75,7 @@ import { resolveBackendName } from "./backend-registry.mjs";
 import { deploymentVenueEnv, sharedShellIgnored } from "./deployment-venue.mjs";
 import { readDeploymentEnv, resolveServiceEnv, serviceEnvFileOf, serviceEnvLoader } from "./service-env.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
-import { PROXY_STATE_FORMAT, parseProxyState, shippedProxyDrift } from "./egress-proxy-state.mjs";
+import { PROXY_STATE_FORMAT, parseProxyState, rulesIncludeEndpoints, shippedProxyDrift } from "./egress-proxy-state.mjs";
 import { PACKAGED_EGRESS_PROXY_CONF, judgeProxyConfCopy, packageCopyName, readPackagedProxyConf } from "./egress-conf-copy.mjs";
 import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, observePodman, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
@@ -215,6 +216,8 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		proxyFilesExist,
 		// PR #488's review: whether a path of the proxy's two files is a DIRECTORY, which docker would mount as the file.
 		proxyFileIsDirectory,
+		// Issue #503: whether the shipped proxy's third mount is needed (`proxyIncludeNeeds`), for tests.
+		includeNeeds,
 		// Issue #484: how a copy of the proxy's rules is read, and the installed package's copy it is compared with.
 		readProxyConf,
 		readPackagedProxyConf: readPackagedConf,
@@ -329,7 +332,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -4572,7 +4575,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 			name: "deploy/egress-proxy.conf in this folder",
 			seams,
 			skip: () => proxyFileIsDirectory(join(seams.cwd, "deploy/egress-proxy.conf")),
-			refresh: `\`pi-dispatch up\` from this folder offers to replace it with the package's copy, keeping this one as a backup, and then to restart the proxy, since squid reads its rules only at start`,
+			refresh: `\`pi-dispatch up\` from this folder offers to replace it with the package's copy, keeping this one as a backup, and then to restart the proxy, since squid reads its rules only at start; a proxy made before #503, which lacks the model-endpoints.conf mount the new rules need, is REPLACED in the same step instead, asked once`,
 		});
 		if (stale) checks.push(stale);
 	}
@@ -4635,23 +4638,42 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// know which folder the service uses), and only where every bind source resolves on this host; otherwise that half
 	// is said to be unknown, never stale.
 	const inFolder = ["egress-allowlist.conf", "deploy/egress-proxy.conf"].every((f) => proxyFilesExist(join(seams.cwd, f)));
-	// A DIRECTORY at either path (PR #488's review): docker bind-mounts it where squid reads a file, and the proxy cannot
-	// start from it. Said for the shipped proxy, whose run and compose file mount this folder's two paths.
+	// A DIRECTORY at any of its paths (PR #488's review): docker bind-mounts it where squid reads a file, and the proxy
+	// cannot start from it. Said for the shipped proxy, whose run and compose file mount this folder's paths. The model
+	// endpoints' include (issue #503) is one of them: a directory there parses as NO rules with no warning (measured on
+	// Docker Desktop), and `egress render` refuses to write it.
 	if (!custom) {
-		for (const f of ["egress-allowlist.conf", "deploy/egress-proxy.conf"]) {
+		for (const f of ["egress-allowlist.conf", "deploy/egress-proxy.conf", MODEL_ENDPOINTS_INCLUDE_NAME]) {
 			if (proxyFileIsDirectory(join(seams.cwd, f))) {
 				checks.push({ ok: false, label: `${f} in this folder is a directory, not a file`, fix: `the egress proxy mounts it where squid reads a file, so it cannot start from this folder: remove the directory, then \`pi-dispatch init\` writes the file (create-only)` });
 			}
 		}
 	}
-	const judged = !custom && parsed ? shippedProxyDrift(parsed, { cwd: seams.cwd, platform: seams.platform ?? process.platform, realpath: (p) => realpathSync(p), compareMounts: inFolder }) : { drift: [], unknown: null };
+	// Issue #503's governing rule: what the third mount and the include file cost is decided by whether the rules this
+	// proxy runs (the folder's deploy/egress-proxy.conf) include the file. `includeNeeds` is a seam for tests.
+	const { includeNeeds = ({ env: e, cwd, platform }) => ({ rulesInclude: rulesFileIncludes(join(cwd, "deploy/egress-proxy.conf"), { readFileSync }), endpointsDeclared: endpointsDeclaredIn({ env: e, cwd, fs: { readFileSync, existsSync }, platform }) }) } = seams;
+	const needs = !custom && inFolder ? includeNeeds({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform }) : { rulesInclude: false, endpointsDeclared: false };
+	if (!custom && inFolder) {
+		// MISSING in a deployment folder: ✗ when the rules include it, since squid then refuses to start (measured); ⚠
+		// otherwise, since a proxy on rules from before #503 runs without it, and the rules refresh needs it.
+		if (!proxyFilesExist(join(seams.cwd, MODEL_ENDPOINTS_INCLUDE_NAME))) {
+			checks.push(
+				needs.rulesInclude
+					? { ok: false, label: `${MODEL_ENDPOINTS_INCLUDE_NAME} is not in this folder`, fix: `the egress proxy mounts it and its rules include it, and squid will not start without it: \`pi-dispatch init\` writes it (create-only), then \`pi-dispatch up\` starts the proxy` }
+					: { ok: false, warn: true, label: `${MODEL_ENDPOINTS_INCLUDE_NAME} is not in this folder`, fix: "the proxy's rules here predate #503 and run without it, but the next rules refresh includes it and the proxy will not start without it then: `pi-dispatch init` writes it (create-only)" },
+			);
+		}
+		// Endpoints declared under rules that predate #503: the one line up, doctor and egress render share.
+		if (needs.endpointsDeclared && !needs.rulesInclude) checks.push({ ok: false, warn: true, label: rulesPredateEndpointsLine("docker"), fix: "a reload or a proxy replace changes nothing here: the rules themselves must include the file, and the refresh `pi-dispatch up` offers replaces the proxy with them" });
+	}
+	const judged = !custom && parsed ? shippedProxyDrift(parsed, { cwd: seams.cwd, platform: seams.platform ?? process.platform, realpath: (p) => realpathSync(p), compareMounts: inFolder, rulesInclude: needs.rulesInclude }) : { drift: [], unknown: null };
 	// What `up` does with it, told the way `up` decides it (PR #456's final check): a proxy stale by its image, entrypoint
 	// or command is offered for replacement whatever its mounts; one stale on its mounts alone is not while one of its own
 	// two mounts is unknown, so the fix names the commands rather than an offer that `up` would not make.
 	const mountsOnly = judged.unknown !== null && judged.drift.length > 0 && shippedProxyDrift(parsed, { cwd: seams.cwd, compareMounts: false }).drift.length === 0;
 	const replaceFix = mountsOnly
-		? `check its mounts (\`docker inspect --format '{{json .Mounts}}' ${proxy}\`), then \`docker rm -f ${proxy}\` and \`pi-dispatch up\` from the deployment folder replace it with the shipped one; \`up\` does not offer to on its own while one of its mounts cannot be compared here`
-		: `\`pi-dispatch up\` from the deployment folder offers to replace it with the shipped one (docker rm -f ${proxy}, then the shipped run)`;
+		? `check its mounts (\`docker inspect --format '{{json .Mounts}}' ${proxy}\`), then \`docker rm -f -v ${proxy}\` and \`pi-dispatch up\` from the deployment folder replace it with the shipped one; \`up\` does not offer to on its own while one of its mounts cannot be compared here`
+		: `\`pi-dispatch up\` from the deployment folder offers to replace it with the shipped one (docker rm -f -v ${proxy}, then the shipped run)`;
 	// The worker's simple rule (egress.mjs): paused, exited, dead and created (`STOPPED_PROXY_STATES`) refuse every job,
 	// so ✗; any other state is one the worker retries through (restarting, stopping, removing, ...), so ⚠, and the fix
 	// says jobs wait rather than fail. `restarting` is a crash loop that fails every job (one retry, then failed), so ✗;
@@ -4679,7 +4701,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 			: custom
 			? `PI_EGRESS_PROXY names your own proxy, which neither compose nor \`pi-dispatch up\` starts: ${state.code === 0 ? `\`docker ${parsed?.status === "paused" ? "unpause" : "start"} ${proxy}\`` : `create and start ${proxy} yourself`} -- the egress policy refuses every job pre-spend while it is down, which costs no budget but runs nothing (PI_EGRESS=0 opts out)`
 			: judged.drift.length > 0
-				? `it is not this deployment's either (${judged.drift.join("; ")}): ${replaceFix} -- the egress policy refuses every job pre-spend while it is down, which costs no budget but runs nothing (PI_EGRESS=0 opts out)`
+				? `${judged.outOfDate ? "it is this deployment's proxy but out of date" : "it is not this deployment's either"} (${judged.drift.join("; ")}): ${replaceFix} -- the egress policy refuses every job pre-spend while it is down, which costs no budget but runs nothing (PI_EGRESS=0 opts out)`
 				: parsed?.status === "paused"
 					? `docker unpause ${proxy}  -- as \`pi-dispatch up\` offers; the egress policy refuses every job pre-spend while it is paused, which costs no budget but runs nothing (PI_EGRESS=0 opts out)`
 					: "`pi-dispatch up` from the deployment folder starts it  -- the egress policy refuses every job pre-spend while this is down, which costs no budget but runs nothing (PI_EGRESS=0 opts out)",
@@ -4693,7 +4715,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 		if (judged.drift.length > 0) {
 			checks.push({
 				ok: false,
-				label: `Egress proxy is running but is not this deployment's (${proxy}): ${judged.drift.join("; ")}`,
+				label: judged.outOfDate ? `Egress proxy is this deployment's proxy but out of date (${proxy}): ${judged.drift.join("; ")}` : `Egress proxy is running but is not this deployment's (${proxy}): ${judged.drift.join("; ")}`,
 				fix: `${replaceFix}; until then every job's egress runs through a policy this deployment did not ship`,
 				proxyState: proxyCheck.proxyState,
 			});
@@ -4703,7 +4725,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 				ok: false,
 				warn: true,
 				label: `Egress proxy's mounts could not be compared on this host (${proxy}): ${judged.unknown}`,
-				fix: "its image, entrypoint and command were compared; check its two mounts by hand (`docker inspect --format '{{json .Mounts}}' " + proxy + "`): /etc/squid/squid.conf must be this deployment's deploy/egress-proxy.conf and /etc/pi-dispatch/allowlist.conf its egress-allowlist.conf",
+				fix: "its image, entrypoint and command were compared; check its mounts by hand (`docker inspect --format '{{json .Mounts}}' " + proxy + "`): /etc/squid/squid.conf must be this deployment's deploy/egress-proxy.conf, /etc/pi-dispatch/allowlist.conf its egress-allowlist.conf, and /etc/pi-dispatch/model-endpoints.conf its model-endpoints.conf",
 			});
 		}
 	}
@@ -6120,6 +6142,16 @@ export async function podmanChecks(env, seams, { jobImage, jobImageNote = "" }) 
 				refresh: "`pi-dispatch service install` lists it among what differs and `pi-dispatch service install --force` replaces it and restarts the proxy (squid reads its rules only at start); --force also replaces every other item that list names",
 			});
 			if (stale) checks.push(stale);
+			// Issue #503: endpoints declared while the account copy predates the include, said as docker's venue says it.
+			let rulesInclude = false;
+			try {
+				rulesInclude = rulesIncludeEndpoints(String((seams.readProxyConf ?? ((p) => readFileSync(p, "utf8")))(proxyConfCopyPath(home))));
+			} catch {
+				// No copy yet: `service install` writes the current rules, include and all.
+				rulesInclude = true;
+			}
+			const declared = (seams.includeNeeds ? seams.includeNeeds({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform }).endpointsDeclared : endpointsDeclaredIn({ env, cwd: seams.cwd, fs: { readFileSync, existsSync }, platform: seams.platform ?? process.platform }));
+			if (declared && !rulesInclude) checks.push({ ok: false, warn: true, label: `podman: ${rulesPredateEndpointsLine("podman")}`, fix: "a reload changes nothing here: the rules themselves must include the file, and `service install --force` writes them with the unit that mounts it" });
 		}
 		const keeper = await netnsKeeperCheck(spawn, info?.version, { proxy, now: typeof seams.wallClock === "function" ? seams.wallClock : Date.now });
 		keeperBlocked = keeper.keeperBlocked ?? null;

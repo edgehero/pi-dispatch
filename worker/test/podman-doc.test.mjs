@@ -403,6 +403,37 @@ test("the native setup's proxy is the compose file's image, under the name the w
 	assert.match(block, new RegExp(`--name ${DEFAULT_EGRESS_PROXY} `), "the name the worker attaches to each job network");
 });
 
+// Issue #503: squid will not start when an included file is missing, so every way the proxy is started mounts the same
+// files. The by-hand proxy's mount destinations are read off the block and must be the Quadlet unit's, which are the
+// compose service's (podman-stack.test.mjs and compose-mirror tests bind those).
+test("the native setup's by-hand proxy mounts exactly the Quadlet unit's files, the model endpoints' include among them (#503)", () => {
+	const start = doc.indexOf("<!-- PODMAN-NATIVE-PROXY -->");
+	const end = doc.indexOf("<!-- /PODMAN-NATIVE-PROXY -->");
+	const proxyLine = doc.slice(start, end).replace(/\\\n\s*/g, "").split("\n").map((l) => l.trim()).find((l) => l.includes(`--name ${DEFAULT_EGRESS_PROXY} `));
+	assert.ok(proxyLine, "the proxy's run line");
+	const fromDoc = [...proxyLine.matchAll(/-v "\$PWD\/([^:"]+):([^:"]+):ro,z"/g)].map((m) => [m[1], m[2]]);
+	const unit = readFileSync(new URL("../../deploy/pi-dispatch-egress-proxy.container", import.meta.url), "utf8");
+	const fromUnit = [...unit.matchAll(/^Volume=[^:]+:([^:]+):ro,z$/gm)].map((m) => m[1]);
+	assert.deepEqual(fromDoc.map(([, d]) => d), fromUnit, "the same destinations, in the unit's order");
+	assert.ok(fromDoc.some(([src, d]) => src === "model-endpoints.conf" && d === "/etc/pi-dispatch/model-endpoints.conf"), "the include, from the deployment folder");
+});
+
+// Issue #503: the two CI places that start or read the proxy by hand restate the unit's mounts too. The required
+// conformance check starts its own proxy (squid would exit there without the include), and the host check reads each
+// mount's SELinux label.
+test("podman-conformance.yml's proxy and podman-host-check.mjs's mount list are the Quadlet unit's destinations (#503)", () => {
+	const unit = readFileSync(new URL("../../deploy/pi-dispatch-egress-proxy.container", import.meta.url), "utf8");
+	const fromUnit = [...unit.matchAll(/^Volume=[^:]+:([^:]+):ro,z$/gm)].map((m) => m[1]);
+	const workflow = readFileSync(new URL("../../.github/workflows/podman-conformance.yml", import.meta.url), "utf8");
+	const run = workflow.slice(workflow.indexOf("podman run -d --name pi-dispatch-egress-proxy"));
+	const block = run.slice(0, run.indexOf('"docker.io/$image"'));
+	assert.deepEqual([...block.matchAll(/-v "[^:"]+:([^:"]+):ro,z"/g)].map((m) => m[1]), fromUnit);
+	const check = readFileSync(new URL("../../.github/scripts/podman-host-check.mjs", import.meta.url), "utf8");
+	const list = /for \(const destination of (\[[^\]]+\])\)/.exec(check)?.[1];
+	assert.ok(list, "the host check's mount loop");
+	assert.deepEqual(JSON.parse(list), fromUnit);
+});
+
 // Issue #458: the by-hand keeper restates its Quadlet unit, and a hand-started keeper with a flag the unit does not
 // set (or without one it does) would be a different container than the one the page says is safe. So the command is
 // DERIVED from the shipped unit, key by key, and must be exactly that: no published port, no mount, nothing extra.
@@ -513,7 +544,7 @@ test("the compose row's argv word is what the compose file's config mounts carry
 	assert.ok(word, row.result);
 	for (const path of ["../../deploy/docker-compose.yml", "../deploy/docker-compose.yml"]) {
 		const compose = readFileSync(new URL(path, import.meta.url), "utf8");
-		for (const target of ["/etc/squid/squid.conf", "/etc/pi-dispatch/allowlist.conf", "/config/triggers.json"]) {
+		for (const target of ["/etc/squid/squid.conf", "/etc/pi-dispatch/allowlist.conf", "/etc/pi-dispatch/model-endpoints.conf", "/config/triggers.json"]) {
 			const mount = compose.split("\n").map((line) => line.trim()).find((line) => line.startsWith("- ") && line.includes(`:${target}`));
 			assert.ok(mount, `${path} mounts ${target}`);
 			assert.equal(mount.slice(mount.indexOf(`:${target}`) + target.length + 1), `:${word}`, `${path}: ${mount}`);

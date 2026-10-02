@@ -1021,7 +1021,8 @@ async function offerTriggerEdge(
     //
     // Into `<dir>/deploy/`, the layout the file is written for: its relative paths resolve against its OWN directory
     // (the Compose spec, for `env_file` and bind mounts alike), and it names `../.env`, `../triggers.json`,
-    // `../egress-allowlist.conf` and `./egress-proxy.conf`. Copied to `<dir>/docker-compose.yml`, as it was until issue
+    // `../egress-allowlist.conf`, `../model-endpoints.conf` (issue #503, scaffolded by `init`, which `up` runs earlier in
+    // this wizard) and `./egress-proxy.conf`. Copied to `<dir>/docker-compose.yml`, as it was until issue
     // #468's follow-up, every `../` reached the folder ABOVE the deployment, so the receiver container read another
     // directory's .env and triggers. Beside it goes the proxy's rules file its `./egress-proxy.conf` names, also
     // create-only, so `--profile egress` finds it too. The command is then the one the docs give, run from `dir`:

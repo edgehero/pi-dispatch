@@ -14,6 +14,7 @@ const COMMAND_SAYS = Object.freeze({
 	up: "up would drive the shell's venue",
 	init: "init's next steps would be for the shell's venue",
 	doctor: "doctor would judge the shell's venue",
+	egress: "the render would name the shell's venue's reload",
 });
 
 /**

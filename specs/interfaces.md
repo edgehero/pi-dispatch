@@ -1904,6 +1904,59 @@ contract governs the argv of one container, this governs the estate that argv jo
     fails on any port, and a `CONNECT` to any port but 443 is refused. The clone runs on the host, so what fails is a
     job's git push and fetch, and its API calls too off port 80 (glab and tea use `HTTP_PROXY`). `doctor` warns (⚠) when the policy is armed and the `GITLAB_URL` or
     `FORGEJO_URL` of a forge the triggers name is anything but `https://` on 443.
+  - **The declared model endpoints are an include** (issue #503, `INT-MODEL-ENDPOINTS-FILE-CONTRACT`). The rules
+    carry `include /etc/pi-dispatch/model-endpoints.conf` directly after `http_access deny allowed to_host_local`
+    and before `http_access deny CONNECT !SSL_ports`. The ORDER is the property: pi tunnels every provider call,
+    `http://` included, so a call to a model server reaches the proxy as `CONNECT <host>:<port>`, and first match
+    wins, so the port-443 deny would refuse it before any later allow was read. The include only adds a CONNECT
+    allow per declared host and port pair, and a deny for such a host that resolves to loopback; it cannot open
+    anything else, and it is the header alone when nothing is declared. So beside #508's two shapes, a declared
+    endpoint is a third: a `CONNECT` to its one host and port. A test parses the shipped rules and holds the order.
+    - **Mounted everywhere the proxy starts**, read-only, `z` where the other two mounts have it, from the
+      deployment folder's own `model-endpoints.conf`: the compose service (and its mirror), `up`'s run argv, the
+      Quadlet unit (a third placeholder rendered to `<deployDir>/model-endpoints.conf`, mounted directly as the
+      allowlist is and never copied as the rules are, because the render writes that file in place), the
+      hand-started Podman recipe in `docs/podman.md`, and `podman-conformance.yml`'s proxy. squid refuses to start
+      when an included file is missing, and a directory at the path parses as no rules with no warning (both
+      measured on squid 6.13, 2026-09-30), so `init` scaffolds the file, `up` and `service install` refuse to start
+      a proxy without it, and `doctor` names it missing or a directory in a deployment folder.
+    - **Rendered by `pi-dispatch egress render`**, which loads the declaration through the worker's own loader,
+      renders it in memory and only then writes the include IN PLACE: opened without `O_CREAT`, with `O_NOFOLLOW`
+      where the platform has it, truncated, written, fsynced. A temp file renamed over the path is a new inode that a
+      running container's single-file bind mount never sees, and `squid -k reconfigure` then reloads the OLD rules
+      silently (measured on Docker 29.1.3 and rootless and rootful Podman 4.9.3 and 5.8.1 on Linux, 2026-09-30).
+      A symlink, a directory, any other non-regular file and a missing file are refused; a missing one is not
+      created, so a render from the wrong folder says so. An unchanged render writes nothing and says so.
+    - **Reloaded by `squid -k reconfigure`**, through `docker exec <proxy>` or `podman exec <proxy>`, which the verb
+      prints for the deployment's venues and never runs: it re-reads the include and the allowlist, keeps the same
+      squid, its networks and addresses, and every open tunnel (measured on every venue the same day). A restart
+      kills every tunnel, takes about 11 s with this image, and changes the proxy's addresses on Podman.
+    - **How the proxy reaches the host.** The compose service and `up`'s argv add
+      `host.docker.internal:host-gateway` to the PROXY (never to a job): on Docker Engine the name does not exist
+      otherwise and host-gateway is the bridge gateway; Docker Desktop resolves the name already and its host-gateway
+      is the same host address, so one line serves both. The rootless Podman venue adds nothing:
+      `host.containers.internal` resolves with no flag.
+    - **One governing rule: the folder's rules include `model-endpoints.conf` only together with a proxy that
+      mounts it** (PR #517's review). The drift rule (`egress-proxy-state.mjs`): a proxy mounting the two files is
+      current, as every proxy made before #503 is; a third bind must be this folder's `model-endpoints.conf`; an
+      absent one is drift ONLY when this folder's rules include the file, since that proxy's next restart exits on
+      the missing include (measured: `docker start` gave Exited (1), squid's FATAL). Such a proxy of this folder is
+      said to be this deployment's proxy but out of date. `up`'s rules refresh and the replace of a proxy without
+      the mount are one step, asked once and never under `--yes`: declined, or not possible here (a file the run
+      mounts missing, a mount not comparable on this host), nothing is written; a replace that fails puts the old
+      rules back from the backup. A replaced proxy is removed with `rm -f -v`, so its anonymous squid volumes go
+      with it (the podman unit's `--rm` already removes them).
+    - **Endpoints declared under rules that predate #503** are NOT drift: a replace would cut every tunnel and
+      change nothing, since those rules do not read the include. `up`, `doctor` (⚠) and `egress render` print the
+      one line `rulesPredateEndpointsLine` builds, naming the rules the proxy runs (docker: the folder's
+      `deploy/egress-proxy.conf`; podman: the account copy) and the refresh (`pi-dispatch up`, or `pi-dispatch
+      service install --force`). `doctor` says a missing `model-endpoints.conf` with ✗ when those rules include it
+      and ⚠ when they predate it.
+    - **The render's failure modes**: the include is truncated only after it is judged a regular file with one
+      link (a hard-linked include is refused, unchanged); a write that fails after the truncate leaves it EMPTY,
+      never a prefix (a prefix ending at an allow line opened every port of that host, measured), and says so.
+      `PI_MODEL_ENDPOINTS_FILE` in this shell and in `.env` are compared as resolved paths, and a value only this
+      shell sets is warned about, since the service does not see it.
   - **The proxy image is digest-pinned**, and the `valkey/valkey:8` precedent one service over deliberately
     does not transfer: a floating tag on a queue breaks loudly and spends nothing, while this container **is
     the allowlist**, so a floating tag would let an upstream rebuild change what every job may reach with no
@@ -1947,7 +2000,13 @@ contract governs the argv of one container, this governs the estate that argv jo
   the delayed set until it is 3 s old plus 1 s with `attemptsMade` unchanged and no run record, and runs on that same
   attempt once the keeper holds; given a keeper that started again, or left its bridge, while the job waited, or a
   hold that has lasted 30 s, the job throws `netns-keeper-crash-loop` before any reservation, and it IS retried; its
-  next attempt that fails on the keeper, whatever it found, throws `netns-keeper-crash-loop` again.
+  next attempt that fails on the keeper, whatever it found, throws `netns-keeper-crash-loop` again. Given a declared
+  model endpoint (issue #503) rendered by `pi-dispatch egress render` and the proxy reloaded with `squid -k
+  reconfigure`, a `CONNECT` from a job's network to exactly that host and port passes; a `CONNECT` to the same host on
+  the next port up and a plain `GET` to the declared port are refused by the proxy (403). Given rules that include
+  `model-endpoints.conf` and a proxy without its mount, `up` replaces that proxy in the same step as the rules
+  refresh, or writes neither; given endpoints declared under rules that predate #503, `up`, `doctor` and `egress
+  render` each say the rules refresh is needed, and nothing replaces the proxy.
 
 ## INT-SANDBOX-CONTRACT
 
@@ -4819,11 +4878,13 @@ validator rather than a second copy of it.
 LM Studio) a job may reach through the egress proxy, each by one host and one port (issue #503).
 
 - **Status**: the file, its parser, the endpoint derivation and the proxy include's render are LANDED (#503, part
-  1). PENDING, in later parts of #503 that land before any release: the `include` line in
-  `deploy/egress-proxy.conf` and the include's mounts (compose, the Podman recipe, the Quadlet unit,
-  `podman-conformance.yml`); the `pi-dispatch egress render` verb that the scaffolded include's header already
-  names; how the proxy reaches the host per venue; the slot leases; the keyless credential gate and
-  `PI_DISPATCH_KEYLESS`; the doctor probes. Until then a declaration changes no proxy rule and no job.
+  1). The `include` line in `deploy/egress-proxy.conf`, the include's mounts (compose, `up`, the Quadlet unit, the
+  Podman recipe, `podman-conformance.yml`), the `pi-dispatch egress render` verb and its reload, and the proxy's
+  `host.docker.internal:host-gateway` on Docker are LANDED (#503, part 2; `INT-EGRESS-POLICY-CONTRACT`). So a
+  rendered and reloaded declaration now opens its CONNECT tunnel through the proxy. PENDING, in later parts of #503
+  that land before any release: the rootless Podman route table in the venue's capability table; the slot leases;
+  the keyless credential gate and `PI_DISPATCH_KEYLESS`; the doctor probes. Until then a declared endpoint is
+  reachable but takes no slot lease, and a keyless provider is still refused at the credential gate.
 - **Producer/Consumer**: the operator writes it by hand. The worker reads it for the render and, in a later change,
   at each pickup, so a `slots` edit applies to the next job.
   `doctor` loads it through the worker's own loader. It is NOT settable by a model-callable tool or by the settings
@@ -4849,7 +4910,7 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
     rendered `_local` ACL is built from); a trailing dot (a URL keeps it, so a stripped
     declaration would not match the baseUrl it was written for); an IPv6 literal with a zone id, an IPv4 tail, an
     IPv4-mapped (`::ffff:0:0/96`) or IPv4-compatible (first 96 bits zero) address, which squid and a URL spell
-    differently; a `host:port` or `[v6]:port` value (the port goes in `port`); a name whose last label is a number or `0x...`, which a URL reads as an IPv4 address (`127.1`
+    differently; a `host:port` or `[v6]:port` value, an empty port included (the port goes in `port`); a name whose last label is a number or `0x...`, which a URL reads as an IPv4 address (`127.1`
     is `127.0.0.1`); anything else that is not a name or a literal.
   - `port` (required): 1 to 65535. Refused when it is the proxy's own 3128 or the job queue's port (`VALKEY_URL`'s,
     6379 when the URL names none).
@@ -5653,3 +5714,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-30 | Issue #508 (plain HTTP reached every port of a listed host). **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the rules bullet, the object table and the Acceptance: exactly two shapes pass, both to a listed host, a `CONNECT` to 443 or a plain request to 80, by `acl Safe_ports port 80` and `http_access deny !Safe_ports !CONNECT` directly before `http_access allow allowed`, which resolves nothing and never matches a `CONNECT`; a plain forward `GET https://` is now refused; the canary probe slugs are `provider`, `unlisted` and `plainhttp`; a job reaches a forge only over `https://` on 443 (git ignores `HTTP_PROXY` for `http://`), and `doctor` warns on an armed policy with a triggered forge's `GITLAB_URL` or `FORGEJO_URL` that is anything else; the Acceptance gains a plain request to a listed host on any port but 80 refused by the proxy. **`INT-LIVE-PROBE-CONTRACT` AMENDED**, the `egress` bullet and the Acceptance: three probes, each `readBack` carrying `probe` and each probe required exactly once by that name, the third a raw `node:http` forward request counted as refused only on squid's 403 with `X-Squid-Error` `ERR_ACCESS_DENIED`. |
 | 2026-09-30 | Issue #503 (declared model endpoints), the first change: the file, its derivation and its squid rules, with nothing enforced yet. Added **`INT-MODEL-ENDPOINTS-FILE-CONTRACT`**: `model-endpoints.json` in the deployment folder (`PI_MODEL_ENDPOINTS_FILE` overrides; a missing default declares none, a missing named file or an empty value is refused), scaffolded empty by `init` beside `model-endpoints.conf`, the empty render; the schema and its refusals (unknown keys refused, not dropped, because this file decides proxy rules); the derivation (a model's own baseUrl beats its provider's, host AND port, main model only until #502, a named residual); the render (CONNECT rules only, the host ACL first, `dstdomain -n` for IP literals too because `dst <ip>` is a DNS channel, IPv6 in brackets, both measured on squid 6.13 on 2026-09-30; the loopback deny is `to_host_local` minus the link-local ranges, because Podman 5.3+ reaches the host at 169.254.1.2); one trailing dot on a baseUrl host is dropped, since squid tunnels it to the same server; a `$VAR` baseUrl matches nothing, a named residual; the parts of #503 still pending are listed in Status; not settable by a model-callable tool or the settings overlay. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, the env bullet: `PI_DISPATCH_KEYLESS` is reserved (not yet emitted), so `run.secrets` cannot bind it and `PI_FORWARD_ENV` refuses it at load. **`INT-EGRESS-POLICY-CONTRACT` UNCHANGED, checked**: `deploy/egress-proxy.conf`, its mounts and the proxy argv are untouched; the include line lands in a later change. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: no overlay key reaches the endpoints. **Code evidence**: worker/src/model-endpoints.mjs -> parseModelEndpoints, loadModelEndpoints, endpointsForModel, renderEndpointsInclude; worker/src/init.mjs -> runInit; worker/src/reserved-env.mjs -> KEYLESS_ENV_NAME; worker/src/config.mjs -> forwardEnvList; worker/src/doctor.mjs -> BOOT_FILES. |
 | 2026-10-02 | Issue #503, part 3. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, the `host` bullet: `10.0.2.2` is refused too. It was always in the rendered `_local` deny, so a declaration of it could never answer; the parser and the rule now read one set, `PROXY_LOCAL_ADDRESSES` in `worker/src/backends.mjs`, from which `LOCAL_ADDRESSES` is built. Every other refusal and message is unchanged. **Code evidence**: worker/src/backends.mjs -> PROXY_LOCAL_ADDRESSES, isProxyLocalHost; worker/src/model-endpoints.mjs -> LOCAL_ADDRESSES; worker/test/model-endpoints.test.mjs. |
+| 2026-09-30 | Issue #503 (declared model endpoints), the second change: the proxy includes them. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, a new bullet beside the rules one: `deploy/egress-proxy.conf` (and its mirror) carries `include /etc/pi-dispatch/model-endpoints.conf` after `http_access deny allowed to_host_local` and before `http_access deny CONNECT !SSL_ports`, because pi tunnels every provider call and first match wins; the include is mounted read-only from the deployment folder by the compose service, `up`'s argv, the Quadlet unit (a third placeholder, the folder's own file, never a copy), the hand-started Podman recipe and `podman-conformance.yml`; `pi-dispatch egress render` validates in memory, then writes the include IN PLACE (no `O_CREAT`, `O_NOFOLLOW`, truncate, fsync) and refuses a symlink, a directory or a missing file, because a renamed file is invisible to a running single-file bind mount and `squid -k reconfigure` then reloads the old rules silently (measured on Docker 29.1.3 and Podman 4.9.3 and 5.8.1, 2026-09-30); the verb prints the reload (`docker exec` or `podman exec` of `squid -k reconfigure`) and never runs it; the proxy gets `host.docker.internal:host-gateway` on Docker (compose and `up`), nothing on rootless Podman; the governing rule (PR #517's review): the folder's rules include `model-endpoints.conf` only together with a proxy that mounts it, so a two-mount proxy is drift only when the folder's rules include the file, `up` refreshes the rules and replaces such a proxy as one step (declined or blocked, nothing written; a failed replace puts the old rules back), a replaced proxy is removed with `rm -f -v`, endpoints declared under older rules are named by `up`, `doctor` and `egress render` alike as the rules refresh's to fix, and a third bind must be the folder's file; the render empties the include on a failed write, refuses a hard-linked one, and compares `PI_MODEL_ENDPOINTS_FILE` as resolved paths. The Acceptance gains the endpoint case. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, Status: the include, its mounts, the render verb and the host route on Docker are landed; the Podman route table, the slot leases, the keyless gate and the doctor probes stay pending. Shape: a host with a port separator and an empty port (`a.lan:`) is refused as carrying a port, not as an IPv6 address with an IPv4 tail (PR #515's review). **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no job flag, mount or variable moves; the host entry is the proxy's only. **Code evidence**: deploy/egress-proxy.conf; deploy/docker-compose.yml; deploy/pi-dispatch-egress-proxy.container; worker/src/egress-cli.mjs -> runEgress, writeInPlace, proxyIncludeNeeds; worker/src/egress-proxy-state.mjs -> shippedProxyDrift, rulesIncludeEndpoints; worker/src/up.mjs -> EGRESS_RUN_ARGS; worker/src/podman-stack.mjs -> MODEL_ENDPOINTS_PLACEHOLDER, planStack; worker/src/service.mjs -> TEMPLATE_PINS, stackRefusal; worker/src/doctor.mjs -> egressChecks. |
