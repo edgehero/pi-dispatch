@@ -11,7 +11,7 @@
  * operator's FULL-scope gh login, which then reaches every token-carrying job container — the opposite of
  * the App path's per-repo short-lived tokens (CONST-TOKEN-SCOPED-PER-JOB) — so doctor names the scopes it
  * carries; and gh is preflighted inside the job image, since a token that works host-side but not
- * in-container fails jobs mid-run, not at submit. Token values travel via the spawn env only, never argv.
+ * in-container fails jobs mid-run, not at submit. Token values travel via the spawn env or stdin, never argv.
  *
  * Issue #80 adds the RECEIVER's half of the preflight. Doctor runs on the worker host, but the triggers
  * file names forges whose deliveries only ever arrive if the receiver can boot -- and the receiver is
@@ -125,9 +125,22 @@ const PODMAN_JOB_IMAGE_PULL = "podman pull ghcr.io/edgehero/pi-job:latest && pod
 const TRIGGER_IMAGE_ENTRYPOINT_FIX = "build your job image FROM this repo's image/Dockerfile so it keeps /entrypoint.sh -- an image without the runner can exit 0 without ever starting the agent, and the queue records that as success (docs/job-image.md)";
 
 // The in-image gh probe's argv after the runtime's name, shared by docker and podman (issue #433) so the two cannot
-// drift: the token rides value-less `-e` flags, which the CLI fills from the spawn env, so it never enters argv
-// (visible in `ps`) and never reaches doctor's output. Not the job builder's argv: the probe asks whether the image's gh
-// can reach the forge with this token, which is a question about the image and the network, not about a job's bounds.
+// drift. Not the job builder's argv: the probe asks whether the image's gh can reach the forge with this token, which is
+// a question about the image and the network, not about a job's bounds.
+//
+// The token rides STDIN (issue #521), never the container's environment. It used to ride value-less `-e` flags, which
+// kept it out of argv and out of doctor's output but put it in the container create request, and Docker Desktop's
+// backend log (`~/Library/Containers/com.docker.docker/Data/log/host/com.docker.backend.log`) writes that request,
+// environment included, to disk in plain text. Measured on 2026-10-02 (Docker Desktop 4.37.2, engine 27.4.0): one
+// doctor run left a dummy token in that log twice (GH_TOKEN and GITHUB_TOKEN) with `-e`, and zero times with stdin.
+// This token is the operator's own, so unlike a job's minted one it does not expire within the hour. `-i` attaches
+// stdin, the entrypoint becomes `sh`, and the script reads one line and exports it to the `gh auth status` it execs,
+// so the value lives only in that process's memory. Rejected: `--env-file` (the CLI expands it into the same create
+// request) and a mounted file (a host temp file that must be written, protected and removed, and on rootless Podman
+// made readable across a uid map, to say what one pipe says). An image without `sh` (or `gh`) fails the probe with
+// exit 126 or 127, and the line says gh could not be run inside the job image; an image built FROM image/Dockerfile
+// has both. `gh auth status` stays separate argv words after the script's `$0`, so the probe still reads as what it
+// runs.
 //
 // EXCEPT the venue's pins, on podman (review round 1): the account's containers.conf may default what the argv does not
 // name, and two of those defaults hand the probe far more than the token. `env_host = true` (which the podman venue
@@ -135,8 +148,9 @@ const TRIGGER_IMAGE_ENTRYPOINT_FIX = "build your job image FROM this repo's imag
 // provider keys, GITHUB_PAT and WEBHOOK_SECRET with it, and `http_proxy` copies the proxy variables. So a podman probe
 // carries `PODMAN_PINNED_FLAGS` whole, the same array every podman job carries: `--env-host=false` and
 // `--http-proxy=false` for that, and the private namespaces so the probe is no less contained than a job. docker has no
-// such defaults to pin (its CLI forwards only what `-e` names), so its argv is what it always was.
-const ghProbeArgs = (image, bin) => ["run", "--rm", "--pull=never", ...(bin === "podman" ? PODMAN_PINNED_FLAGS : []), "-e", "GH_TOKEN", "-e", "GITHUB_TOKEN", "--entrypoint", "gh", image, "auth", "status"];
+// such defaults to pin (its CLI forwards only what `-e` names, and the probe names nothing), so its argv carries no pins.
+const GH_PROBE_SCRIPT = 'read -r t; export GH_TOKEN="$t" GITHUB_TOKEN="$t"; exec "$@"';
+const ghProbeArgs = (image, bin) => ["run", "--rm", "-i", "--pull=never", ...(bin === "podman" ? PODMAN_PINNED_FLAGS : []), "--entrypoint", "sh", image, "-c", GH_PROBE_SCRIPT, "sh", "gh", "auth", "status"];
 
 
 // Issue #471: `shellVars` is THIS shell's environment and is read in exactly the places a test pins (the venue and
@@ -2111,7 +2125,7 @@ export async function collectChecks(shellVars, seams) {
 			}
 			if (token && ghProbeBin === "docker" && endpoint.local !== true) {
 				// NOT RUN on a daemon that is not observed on this host (#278). The probe hands the operator's own gh
-				// token -- full scope and non-expiring by default -- to `docker run -e`, and on a redirected CLI that
+				// token -- full scope and non-expiring by default -- to `docker run` (on stdin since #521), and on a redirected CLI that
 				// token rides to another machine. A check must not do the thing the credentialTransit line warns
 				// about. Only once there IS a token: app mode and an unset PAT never run the probe at all.
 				checks.push({
@@ -2121,8 +2135,11 @@ export async function collectChecks(shellVars, seams) {
 					fix: "point the docker CLI at this host and re-run doctor to check it",
 				});
 			} else if (token) {
-				// Value-less `-e` flags: the CLI forwards GH_TOKEN/GITHUB_TOKEN from the spawn env, so the
-				// token value never enters argv (visible in `ps`) and never reaches doctor's output.
+				// On stdin (issue #521, `ghProbeArgs`): the token never enters argv (visible in `ps`), the container
+				// create request (which Docker Desktop logs) or doctor's output, and doctor adds no copy of it to the
+				// CLI's environment. That environment may already hold it (a PAT source reads it from this shell's
+				// GITHUB_PAT), and that copy stays out of the container because docker forwards nothing `-e` does not
+				// name and podman's probe carries `--env-host=false`.
 				//
 				// The CLI's own environment stays doctor's whole one on both runtimes, and that is deliberate rather than
 				// left over (review round 1 asked): what keeps it OUT of the container is the pinned argv above, while
@@ -2130,16 +2147,25 @@ export async function collectChecks(shellVars, seams) {
 				// variables) is what decides WHICH Podman and which store answer. The podman section read that service
 				// with this same environment, so a trimmed one could send the token to a service nothing here checked.
 				// An allowlist of what Podman needs was rejected for that reason: it is a list nothing derives.
-				const probe = await runCmdCapture(spawn, ghProbeBin, ghProbeArgs(jobImage, ghProbeBin), { env: { ...spawnEnv, GH_TOKEN: token, GITHUB_TOKEN: token } });
+				const probe = await runCmdCapture(spawn, ghProbeBin, ghProbeArgs(jobImage, ghProbeBin), { env: spawnEnv, input: `${token}\n` });
 				const where = ghProbeBin === "podman" ? "podman: " : "";
+				// 126 and 127 are the runtime's and the shell's "could not run that program" (measured on docker 27.4: a
+				// missing entrypoint and a missing exec target both exit 127, a non-executable one 126); `gh auth status`
+				// itself exits 0, 1, 2, 4 or 8. Since the probe's entrypoint became `sh` (#521), an image without one
+				// lands here, and naming it as an auth failure would send the operator to check egress for nothing.
+				const cannotRun = probe.code === 126 || probe.code === 127;
 				checks.push({
 					ok: probe.code === 0,
 					warn: true,
 					label:
 						probe.code === 0
 							? `${where}gh authenticates inside the job image (${jobImage})`
-							: `${where}gh cannot authenticate inside the job image (${jobImage})`,
-					fix: "check network egress from containers or rebuild/pull the job image -- jobs that use gh will fail mid-run",
+							: cannotRun
+								? `${where}gh could not be run inside the job image (${jobImage}): it has no sh or no gh (exit ${probe.code})`
+								: `${where}gh cannot authenticate inside the job image (${jobImage})`,
+					fix: cannotRun
+						? "rebuild or pull the job image: every image built FROM this repo's image/Dockerfile has both -- jobs that use gh will fail mid-run"
+						: "check network egress from containers or rebuild/pull the job image -- jobs that use gh will fail mid-run",
 				});
 			} else if (patFromFile) {
 				// The service's PAT is in `.env`, which hands no program anything (PR #474's round cap): named, not run.
@@ -5889,14 +5915,22 @@ function buildScriptsOf(packageDir, fileExists) {
 function runCmdCapture(spawn, cmd, args, opts = {}) {
 	// `stdoutOnly` for a caller that PARSES the answer (issue #345): Podman's docker emulation prints a banner on
 	// stderr ("Emulate Docker CLI using podman ..."), which a merged capture puts in front of the value.
-	const { timeoutMs = 30000, stdoutOnly = false } = opts;
+	// `input` for a caller that hands the child a secret (issue #521): written to its stdin and closed, so the value is in
+	// neither argv nor any environment. Without it stdin stays ignored, as every other caller wants.
+	const { timeoutMs = 30000, stdoutOnly = false, input } = opts;
 	return new Promise((resolve) => {
 		let child;
 		try {
-			child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], ...(opts.env ? { env: opts.env } : {}), ...(opts.cwd ? { cwd: opts.cwd } : {}) });
+			child = spawn(cmd, args, { stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"], ...(opts.env ? { env: opts.env } : {}), ...(opts.cwd ? { cwd: opts.cwd } : {}) });
 		} catch {
 			resolve({ code: null, output: "" });
 			return;
+		}
+		if (input !== undefined) {
+			// A child that exits before reading (a missing image, a CLI that refuses the argv) closes the pipe under the
+			// write: EPIPE is that child's answer, which its exit code already carries, not doctor's crash.
+			child.stdin?.on("error", () => {});
+			child.stdin?.end(input);
 		}
 		let output = "";
 		let done = false;

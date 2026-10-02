@@ -927,6 +927,22 @@ passing, on the record — issue #80.)
   operator-facing form. On GitLab there is no stronger option to prefer, and the same warning applies with
   no mitigation available beyond rotating the token.
 
+  **The engine's own log, added for issue #521.** "Dies with the container" is not true on every venue.
+  Docker Desktop for macOS writes each container create request, environment included, in plain text to
+  `~/Library/Containers/com.docker.docker/Data/log/host/com.docker.backend.log` (measured on 2026-10-02,
+  Docker Desktop 4.37.2, engine 27.4.0). So every job's forge token rests on the operator's disk there.
+  pi-dispatch cannot stop that write and does not scrub the log: the job contract is env based
+  (`INT-CONTAINER-RUNTIME-CONTRACT`), and that is unchanged. The bound is again the expiry: a minted
+  installation token is dead within about an hour, a long-lived PAT or a `gh` login is not. The forge token
+  is not alone there: each job's create request also carries the provider API key and every
+  `run.secretsProfile` value it names and every `PI_FORWARD_ENV` value, which have no expiry, so for those the bound is the provider-side
+  spend limit this article already names, rotation, and treating that log folder as a secret store. The
+  App path does not close it. Outside jobs, the Valkey password (`pi-dispatch up`'s `-e VALKEY_PASSWORD`, the
+  compose file's `environment:`) and, under compose, the receiver's whole `.env` (`env_file`) land there the
+  same way. doctor's own in-image `gh` probe hands the operator's long-lived token to its container on stdin
+  instead, so that token is in no create request. `SECURITY.md` and `docs/backends.md` carry the
+  operator-facing form.
+
 ## CONST-PI-VERSION-PINNED
 
 - **Statement**: The job image shall pin an exact pi version (currently **0.99.1**). Upgrading is an
@@ -974,6 +990,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-10-02 | Issue #521. **`CONST-TOKEN-SCOPED-PER-JOB` AMENDED**, a paragraph after the durable-media clause. That clause said an env value lives in container memory and dies with the container. On Docker Desktop for macOS it does not: the backend log records each container create request, environment included, in plain text, so a job's forge token rests there. The paragraph names the path, says pi-dispatch neither prevents nor scrubs it, and places the bound where the article already does, on the expiry: a minted installation token expires in about an hour, a long-lived PAT or a `gh` login does not. It also names what has no expiry and rests there all the same: the provider API key and every `run.secretsProfile` value a job carries (spend limit, rotation, and the log folder treated as a secret store), and, outside jobs, the Valkey password and a compose receiver's whole `.env`. doctor's in-image `gh` probe no longer puts the operator's token in a create request (stdin, measured: two copies of a dummy token per doctor run before, zero after). The Statement and the Acceptance are UNCHANGED, checked: the container credential is still env injected, and the log is the engine's, not one this project writes. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the probe gains `-i` and a `sh` entrypoint and loses its two `-e` flags; the podman probe keeps every pinned flag. **`CONST-MERGE-NEVER-AUTOMATIC` and `CONST-PI-VERSION-PINNED` UNCHANGED, checked**: no merge string and no pin added. |
 | 2026-10-02 | Issue #503, part 4 (model endpoint slot leases). **No article changed.** **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the endpoint slot lease is taken at pickup, after the scope gate and before the kill timer, the mint, the clone, the token-cap read and the budget reservation, and a full endpoint is a free deferral that releases every slot it took. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: a full endpoint moves the job to the delayed set without an attempt, neither a refusal nor a retry, and a settings read that throws is still recorded and handled where it was. |
 | 2026-09-30 | Issue #511 (the steering scan misses lowercase twins, a second SDK hop and pi's own reads). **No article changed.** **`CONST-PI-VERSION-PINNED`**: the evidence's second upgrade gate, `PROVIDER_STEERING_VARS`, now also covers pi's own `PI_*` reads and a second declared-dependency hop; the rule, the pin and the first gate UNCHANGED, checked. |
 | 2026-09-30 | Issue #509, the pi 0.80.7 -> 0.99.1 bump. **No article changed.** **`CONST-PI-VERSION-PINNED`**: the statement's version string reads **0.99.1**, and the evidence records that the `[Unreleased]` model/auth change it cited has shipped; the rule, and its two upgrade gates (`findEnvKeys` and `PROVIDER_STEERING_VARS`), UNCHANGED, checked: the steering gate named every new and stale name at this bump. The evidence convention gains one parenthetical: the pin moved and `ModelRuntime` now exists at it, the lesson did not move. **`CONST-NO-CONTEXT-FILES-MANDATORY` evidence re-verified at 0.99.1** (the trust branch, the `projectTrusted ?? true` default, the loader's two merge branches and `extensionsOverride`, at new line numbers; `SettingsManager.inMemory` now accepts options the runner does not pass), the 0.80.7 block kept as the record. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: the new `retry-unresumable` exit `2` is a determinate stop after a paid turn and its tool effects, which a queue retry would repeat on a fresh budget, not an infrastructure failure; its #449 evidence block stays the 0.80.7 record. `CONST-MERGE-NEVER-AUTOMATIC`, `CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked. |

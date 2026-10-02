@@ -308,6 +308,39 @@ Each row is bound to the exact version it was measured on. `hostRouteFor` takes 
 | rootless Podman, pasta | another machine on the LAN | reachable | Another machine on the LAN (192.168.5.2) answered through the proxy. | 2026-09-30, Podman 5.8.1 rootless, pasta, Fedora |
 | every venue | a loopback or host-local address | refuted | From the proxy this is the proxy's own host-local address, and the proxy denies it. A server that listens on loopback only answers on Docker Desktop alone, through host.docker.internal. | 2026-09-30, true on every runtime by construction, and measured on the four VM runtimes |
 
+## Docker Desktop writes container env to its log
+
+On Docker Desktop for macOS, the engine's backend log records each container create request in plain text,
+environment included:
+
+```
+~/Library/Containers/com.docker.docker/Data/log/host/com.docker.backend.log
+```
+
+Docker Desktop rotates it into `com.docker.backend.log.0` to `.8` beside it. A job's forge token is in its
+container's environment (`INT-CONTAINER-RUNTIME-CONTRACT`), so every job's token lands in that log. This was
+measured on 2026-10-02 with Docker Desktop 4.37.2 (engine 27.4.0). pi-dispatch cannot stop the write and does
+not scrub the log.
+
+What bounds it is the token's expiry. A GitHub App installation token is minted per job and expires in about
+an hour, so the copy in the log is dead soon after. A long-lived PAT, a `gh` login (`GITHUB_AUTH_SOURCE=gh`),
+a GitLab project token or a Forgejo token does not expire that way, and its copy stays usable for as long as
+the token does.
+
+The forge token is not the only secret there. Each job's create request also carries the provider API key
+every value its `run.secretsProfile` names and every `PI_FORWARD_ENV` value, as `-e NAME=VALUE`, and those do not expire at all. The
+provider key can spend money. Preferring the App path does not close that. Set a spend limit on the
+provider key, rotate any key or secret you suspect, and treat the log folder as a secret store.
+
+Containers that are not jobs land there too. `pi-dispatch up`, and the `docker run` that doctor's Valkey fix
+shows, start Valkey with `-e VALKEY_PASSWORD`, and the compose file's Valkey sets it in `environment:`. On a
+compose deployment the receiver reads the whole `.env` with `env_file: ../.env`, so its webhook secrets and
+forge credentials are in its create request.
+
+doctor's own in-image `gh` check does not add the operator's token to this log. It hands the token to the
+probe container on stdin, not in its environment. `--env-file` would not help: the docker CLI expands the file
+into the same create request, and the value lands in the log the same way.
+
 ## Running the conformance suite
 
 ```js

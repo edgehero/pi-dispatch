@@ -63,6 +63,17 @@ function fakeSpawn(plan, calls = []) {
 		const child = {
 			stdout: stream(),
 			stderr: stream(),
+			// What the caller wrote to the child's stdin is RECORDED (issue #521): the in-image gh probe hands its token
+			// there, and a test that cannot see the write cannot tell a token delivered from one dropped on the floor.
+			stdin: {
+				on() {
+					return this;
+				},
+				end(data) {
+					entry.stdin = (entry.stdin ?? "") + (data ?? "");
+					entry.stdinEnded = true;
+				},
+			},
 			kill(sig) {
 				entry.kills.push(sig);
 			},
@@ -859,7 +870,7 @@ test("doctor: source gh with gh missing warns 'auth status failed', still exits 
 	assert.match(text(), /run `gh auth login` \(or switch GITHUB_AUTH_SOURCE\)/);
 });
 
-test("doctor: the in-image probe passes the token via the spawn env, never argv", async () => {
+test("doctor: the in-image probe passes the token on stdin, never in argv or any environment (#521)", async () => {
 	const calls = [];
 	const { out, text } = capture();
 	const plan = {
@@ -874,17 +885,43 @@ test("doctor: the in-image probe passes the token via the spawn env, never argv"
 	// no longer the same thing as "the one this test is about".
 	const run = calls.find((c) => c.cmd === "docker" && c.args[0] === "run" && c.args.includes("gh"));
 	assert.ok(run, "the in-image probe spawned docker run");
-	assert.equal(run.args[run.args.indexOf("--entrypoint") + 1], "gh", "the image entrypoint is overridden to gh");
+	assert.equal(run.args[run.args.indexOf("--entrypoint") + 1], "sh", "the image entrypoint is overridden to the reading shell");
 	// Exact (issue #433 review round 1): the podman venue's pins ride only the podman probe; docker's CLI has no
 	// containers.conf defaults to pin, and a podman-only flag here would make docker refuse the probe.
-	assert.deepEqual(run.args, ["run", "--rm", "--pull=never", "-e", "GH_TOKEN", "-e", "GITHUB_TOKEN", "--entrypoint", "gh", "pi-job:latest", "auth", "status"]);
-	// value-less -e flags: only the names appear in argv, the values ride the spawn env
-	assert.deepEqual(run.args.filter((_, i) => run.args[i - 1] === "-e"), ["GH_TOKEN", "GITHUB_TOKEN"]);
+	const script = run.args[run.args.indexOf("-c") + 1];
+	assert.deepEqual(run.args, ["run", "--rm", "-i", "--pull=never", "--entrypoint", "sh", "pi-job:latest", "-c", script, "sh", "gh", "auth", "status"]);
+	// Issue #521: no `-e` and no `--env-file` at all. Either one puts the value in the container create request, which
+	// Docker Desktop's backend log writes to disk in plain text (measured: two copies per doctor run with `-e`).
+	assert.ok(!run.args.some((a) => a === "-e" || a === "--env" || a.startsWith("--env=") || a.startsWith("--env-file")), "no environment flag");
 	assert.ok(!run.args.some((a) => a.includes("gho_fake_mint_123")), "the token never enters argv");
-	assert.equal(run.opts.env.GH_TOKEN, "gho_fake_mint_123");
-	assert.equal(run.opts.env.GITHUB_TOKEN, "gho_fake_mint_123");
+	// The token is the one line on stdin, and the docker CLI's own environment does not carry it either.
+	assert.equal(run.opts.stdio[0], "pipe", "stdin is a pipe, or the write below goes nowhere");
+	assert.equal(run.stdin, "gho_fake_mint_123\n");
+	assert.equal(run.stdinEnded, true, "stdin is closed, so the probe's read returns");
+	assert.ok(!Object.values(run.opts.env).includes("gho_fake_mint_123"), "the CLI's environment holds no copy");
+	assert.equal(run.opts.env.GH_TOKEN, undefined);
+	assert.equal(run.opts.env.GITHUB_TOKEN, undefined);
 	assert.match(text(), /✓ gh authenticates inside the job image \(pi-job:latest\)/);
 	assert.doesNotMatch(text(), /gho_fake_mint_123/, "the token never reaches output");
+});
+
+// The probe's script, run by a real `sh` (issue #521). Not docker: the question is what the script does with one line of
+// stdin, and only a shell answers it. The probe's tail (`gh auth status`) is swapped for a command that prints what the
+// exec'd program received, so a script that reads the line but does not EXPORT it, or splits or unescapes it, fails here.
+test("doctor: the in-image probe's script hands the stdin line to gh as GH_TOKEN and GITHUB_TOKEN, and nothing else does (#521)", async () => {
+	const calls = [];
+	const { out } = capture();
+	await runDoctor(ghEnv(), ghDeps(out, { ...green, "gh auth status": { code: 0, output: ghStatusOutput }, "gh auth token": { code: 0, output: "gho_x\n" }, "docker run": 0 }, calls));
+	const run = calls.find((c) => c.cmd === "docker" && c.args[0] === "run" && c.args.includes("gh"));
+	const at = run.args.indexOf("-c");
+	assert.deepEqual(run.args.slice(at + 2), ["sh", "gh", "auth", "status"], "the script's $0, then the command it execs");
+	const show = ["sh", "sh", "-c", 'printf "%s|%s|%s" "$GH_TOKEN" "$GITHUB_TOKEN" "$t"'];
+	for (const token of ["ghp_i521fixture", "a b\\c d"]) {
+		const r = spawnSync("sh", ["-c", run.args[at + 1], ...show], { input: `${token}\n`, env: { PATH: process.env.PATH }, encoding: "utf8" });
+		assert.equal(r.status, 0, r.stderr);
+		// Both names, the line verbatim (no word splitting, no backslash escapes), and `t` itself not exported.
+		assert.equal(r.stdout, `${token}|${token}|`, `token ${JSON.stringify(token)}`);
+	}
 });
 
 test("doctor: an in-image gh auth failure warns with the egress fix, exits 0", async () => {
@@ -894,6 +931,21 @@ test("doctor: an in-image gh auth failure warns with the egress fix, exits 0", a
 	assert.equal(code, 0, "an in-container auth failure warns but never fails doctor");
 	assert.match(text(), /⚠ gh cannot authenticate inside the job image \(pi-job:latest\)/);
 	assert.match(text(), /check network egress from containers/);
+});
+
+test("doctor: an in-image probe that could not run (exit 126 or 127) names the missing sh or gh, not auth (#521)", async () => {
+	for (const code of [126, 127]) {
+		const { out, text } = capture();
+		const plan = { ...green, "gh auth status": { code: 0, output: ghStatusOutput }, "gh auth token": { code: 0, output: "gho_x\n" }, "docker run": code };
+		assert.equal(await runDoctor(ghEnv(), ghDeps(out, plan)), 0, "still a warning");
+		assert.match(text(), new RegExp(`⚠ gh could not be run inside the job image \\(pi-job:latest\\): it has no sh or no gh \\(exit ${code}\\)\n {4}→ rebuild or pull the job image: every image built FROM this repo's image/Dockerfile has both`));
+		assert.doesNotMatch(text(), /gh cannot authenticate|check network egress from containers/);
+	}
+	// Podman's label carries the venue, as the other two do.
+	const { docker: _d, ...podmanOnly } = podmanPlan();
+	const failed = capture();
+	await runDoctor(podmanEnv({ GITHUB_AUTH_SOURCE: "gh" }), podmanDeps(failed.out, { ...podmanOnly, ...green, "gh auth status": { code: 0, output: ghStatusOutput }, "gh auth token": { code: 0, output: "gho_x\n" }, "podman run": 127 }, []));
+	assert.match(failed.text(), /⚠ podman: gh could not be run inside the job image \(pi-job:latest\): it has no sh or no gh \(exit 127\)/);
 });
 
 test("doctor: no in-image probe when docker is not green (gating)", async () => {
@@ -5913,7 +5965,7 @@ test("doctor: the canary's bounds are pinned as NUMBERS, not derived (#350)", as
 	const src = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8");
 	assert.match(src, /const CANARY_STEP_TIMEOUT_MS = 10_000;/, "10s: long enough for a network call, short enough that a wedged daemon does not own the doctor run");
 	// And it must stay BELOW the probes' own bound, or the teardown becomes the slow part of a doctor run.
-	assert.match(src, /const \{ timeoutMs = 30000, stdoutOnly = false \} = opts;/, "runCmdCapture's probe bound");
+	assert.match(src, /const \{ timeoutMs = 30000, stdoutOnly = false, input \} = opts;/, "runCmdCapture's probe bound");
 });
 
 // The scenarios that reach every canary shape, each one the same fixture the shape's own test uses. They
@@ -7914,8 +7966,10 @@ test("a podman-only deployment on a host that also has docker: docker is not ask
 	assert.equal(probes.length, 1, "one probe");
 	// Review round 1: with the podman venue's pins, written out rather than imported, so a probe that drops one fails here.
 	// Without `--env-host=false` an account's `env_host = true` would copy doctor's whole environment into the container.
-	assert.deepEqual(probes[0].args, ["run", "--rm", "--pull=never", "--pid=private", "--ipc=private", "--uts=private", "--cgroupns=private", "--env-host=false", "--http-proxy=false", "-e", "GH_TOKEN", "-e", "GITHUB_TOKEN", "--entrypoint", "gh", "pi-job:latest", "auth", "status"]);
-	assert.equal(probes[0].opts?.env?.GH_TOKEN, "gho_x");
+	assert.deepEqual(probes[0].args, ["run", "--rm", "-i", "--pull=never", "--pid=private", "--ipc=private", "--uts=private", "--cgroupns=private", "--env-host=false", "--http-proxy=false", "--entrypoint", "sh", "pi-job:latest", "-c", probes[0].args[probes[0].args.indexOf("-c") + 1], "sh", "gh", "auth", "status"]);
+	// Issue #521: on stdin here too, and in no environment (the pins keep doctor's own out; the token is not in it).
+	assert.equal(probes[0].stdin, "gho_x\n");
+	assert.equal(probes[0].opts?.env?.GH_TOKEN, undefined);
 	assert.ok(!probes[0].args.some((a) => a.includes("gho_x")), "never in argv");
 	assert.match(text(), /⚠ GITHUB_AUTH_SOURCE=gh forwards[^\n]*\n[^\n]*\n✓ podman: gh authenticates inside the job image \(pi-job:latest\)\n/);
 	// A failing probe says so, with podman named.
@@ -8150,7 +8204,7 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 		/^const spawnEnv = seams\.spawnEnv \?\? shellVars;$/,
 		/^const shellValue = \(name\) => \(Object\.hasOwn\(spawnEnv, name\) \? spawnEnv\[name\] : undefined\);$/,
 		/^const \{ cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom\(spawnEnv\), readHostPiFn = readHostPi, /,
-		/^const probe = await runCmdCapture\(spawn, ghProbeBin, ghProbeArgs\(jobImage, ghProbeBin\), \{ env: \{ \.\.\.spawnEnv, GH_TOKEN: token, GITHUB_TOKEN: token \} \}\);$/,
+		/^const probe = await runCmdCapture\(spawn, ghProbeBin, ghProbeArgs\(jobImage, ghProbeBin\), \{ env: spawnEnv, input: `\$\{token\}\\n` \}\);$/,
 		/^const res = await runCmdCapture\(spawn, process\.execPath, \[cli, "import-pi", "--with-packages", "--no-host-packages", "--to", overlay\], \{ env: spawnEnv, cwd, timeoutMs: 600000 \}\);$/,
 		/^const res = await runCmdCapture\(spawn, file, args, \{ env: spawnEnv, cwd, timeoutMs: 15000 \}\);$/,
 	];
@@ -8422,7 +8476,7 @@ test("a .env-only secret never rides into a process doctor starts, and a PAT onl
 	assert.match(named.text, /in-image gh auth: not checked, because GITHUB_PAT_VAR comes from/);
 	// This shell's own PAT: the probe runs with it, as before #471.
 	const shell = await envDoctor("GITHUB_AUTH_SOURCE=pat\n", { GITHUB_PAT: "ghp_shell_789" }, { plan });
-	assert.equal(shell.calls.find((c) => c.args[0] === "run" && c.args.includes("gh"))?.opts.env.GH_TOKEN, "ghp_shell_789");
+	assert.equal(shell.calls.find((c) => c.args[0] === "run" && c.args.includes("gh"))?.stdin, "ghp_shell_789\n");
 	// A PAT set differently in both places is a disagreement on a credential: named, never shown.
 	const both = await envDoctor("GITHUB_AUTH_SOURCE=pat\nGITHUB_PAT=ghp_file_789\n", { GITHUB_PAT: "ghp_shell_000" }, { plan });
 	assert.ok(both.text.includes(`GITHUB_PAT is set differently in this shell and in ${both.envPath} (neither value is shown)`), both.text);
@@ -10470,10 +10524,13 @@ test("no program doctor starts receives an environment derived from .env values 
 	const envOptions = [...code.matchAll(/\b(?:runCmdCapture|spawn)\([^\n]*?\{ (?:[^\n]*?, )?env: (\{ \.\.\.[^}]*\}|[A-Za-z_$][\w$.]*)/g)].map((m) => m[1].trim());
 	assert.ok(envOptions.length >= 3, "the scan sees doctor's own spawn environments");
 	// `opts.env` is runCmdCapture forwarding its caller's, which is one of the others.
-	for (const e of envOptions) assert.match(e, /^(?:spawnEnv|opts\.env|\{ \.\.\.spawnEnv, GH_TOKEN: token, GITHUB_TOKEN: token \})$/, `a spawn environment built from something other than this shell's: ${e}`);
+	// Issue #521: the probe's extended environment is gone (its token rides stdin), so the shell's own is the only form.
+	for (const e of envOptions) assert.match(e, /^(?:spawnEnv|opts\.env)$/, `a spawn environment built from something other than this shell's: ${e}`);
+	// The one stdin a child is handed: the probe's token, which comes from this shell (pinned just below).
+	assert.deepEqual([...code.matchAll(/\binput: ([^\n]*?) \}\);/g)].map((m) => m[1]), ["`${token}\\n`"]);
 	assert.equal(envOptions.filter((e) => e === "opts.env").length, 1, "one forwarder");
 	assert.doesNotMatch(code, /\bcliSpawn\b|\bspawnWith\b/, "no spawn wrapper that could add to it");
-	// The token the one extended environment carries never comes from .env (the probe is skipped instead).
+	// The token that one stdin carries never comes from .env (the probe is skipped instead).
 	assert.match(code, /token = patFromFile \? "" : \(shellPat \?\? ""\)\.trim\(\);/);
 	assert.match(code, /const shellPat = shellValue\(patVar\);/);
 
@@ -10493,6 +10550,7 @@ test("no program doctor starts receives an environment derived from .env values 
 		assert.ok(calls.some((c) => c.cmd === "docker" || c.cmd === "podman"), "a container runtime among them");
 		for (const c of calls) {
 			for (const [k, v] of Object.entries(c.opts?.env ?? {})) assert.doesNotMatch(String(v), /from-env-/, `${c.cmd} ${c.args.join(" ")} was handed ${k} from .env`);
+			assert.doesNotMatch(c.stdin ?? "", /from-env-/, `${c.cmd} ${c.args.join(" ")} was handed a .env value on stdin`);
 			if (c.opts?.env) for (const k of cliKeys) assert.equal(c.opts.env[k], shell[k], `${c.cmd} got ${k} only as this shell has it`);
 		}
 		// Each CLI variable is named once, as not handed on; its value shown only for a path.
@@ -10510,13 +10568,16 @@ test("a shell GITHUB_PAT_VAR naming a venue key only .env sets hands the probe n
 	const plan = { ...green, "docker run": 0 };
 	for (const [key, value] of [["PI_BACKENDS", "local"], ["PI_EGRESS", "on"], ["PI_EGRESS_PROXY", "from-dotenv-proxy"]]) {
 		const r = await envDoctor(`GITHUB_AUTH_SOURCE=pat\n${key}=${value}\n`, { GITHUB_PAT_VAR: key, ...(key === "PI_BACKENDS" ? {} : { PI_BACKENDS: "local" }) }, { plan });
-		for (const c of r.calls) assert.notEqual(c.opts?.env?.GH_TOKEN, value, `${key}: the file's value reached ${c.cmd} as GH_TOKEN`);
+		for (const c of r.calls) {
+			assert.notEqual(c.opts?.env?.GH_TOKEN, value, `${key}: the file's value reached ${c.cmd} as GH_TOKEN`);
+			assert.ok(!(c.stdin ?? "").includes(value), `${key}: the file's value reached ${c.cmd} on stdin`);
+		}
 		assert.ok(!r.calls.some((c) => c.args[0] === "run" && c.args.includes("gh")), `${key}: the probe is skipped`);
 		assert.ok(r.text.includes(`⚠ in-image gh auth: not checked, because ${key} comes from ${r.envPath} and doctor hands nothing from that file to a program it starts`), `${key}: ${r.text}`);
 	}
 	// This shell's own value of the same key: its own, handed on as before.
 	const own = await envDoctor("GITHUB_AUTH_SOURCE=pat\n", { GITHUB_PAT_VAR: "PI_EGRESS_PROXY", PI_EGRESS_PROXY: "shell-token", PI_BACKENDS: "local" }, { plan });
-	assert.equal(own.calls.find((c) => c.args[0] === "run" && c.args.includes("gh"))?.opts.env.GH_TOKEN, "shell-token");
+	assert.equal(own.calls.find((c) => c.args[0] === "run" && c.args.includes("gh"))?.stdin, "shell-token\n");
 });
 
 test("cliNotHandedLines: one ⚠ per CLI variable the file sets, the value only for a path, and the chain check named for its three (#471 round cap)", () => {

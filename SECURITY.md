@@ -668,6 +668,20 @@ Stated openly rather than discovered later:
   path or a short-expiry fine-grained PAT before arming `run.resume`**, so the exposure is bounded by an
   expiry rather than by whether an agent ever ran a verbose curl. On GitLab there is no stronger option to
   prefer, so the same warning applies with no mitigation beyond rotating the token.
+- **On Docker Desktop, "dies with the container" is not true either.** Docker Desktop for macOS writes each
+  container create request, environment included, in plain text to
+  `~/Library/Containers/com.docker.docker/Data/log/host/com.docker.backend.log` (rotated to `.0` to `.8`
+  beside it). Every job's forge token rests there. pi-dispatch cannot stop that and does not scrub it. A
+  minted App installation token expires in about an hour, so its copy is dead soon after; a long-lived PAT,
+  a `gh` login, a GitLab or a Forgejo token stays usable there for as long as the token does. The provider
+  API key, every `run.secretsProfile` value and every `PI_FORWARD_ENV` value a job carries rest there too, as the same `-e NAME=VALUE`
+  the paragraph on secret profiles describes, and those have no expiry at all; the provider key can spend
+  money. The App path does not close that. Set a spend limit on the provider key, rotate any key or secret
+  you suspect, and treat that folder as a secret store. Outside jobs, the same log gets the Valkey password
+  (`pi-dispatch up`, and the `docker run` doctor's Valkey fix shows, pass `-e VALKEY_PASSWORD`; the compose
+  file's Valkey sets it in `environment:`) and, on a compose deployment, the receiver's whole `.env`
+  (`env_file: ../.env`: webhook secrets and forge credentials). doctor's in-image `gh` check passes your
+  token on stdin, so doctor itself adds no copy. See `docs/backends.md`.
 - **`PI_SESSIONS_DIR` is a PII store, and it has no default.** Unset means the feature is unavailable and
   a trigger that asked for it is refused before it costs anything — deliberately, because a default would
   turn that refusal into a silent success, writing the most PII-bearing thing this system holds to a path
