@@ -2807,6 +2807,14 @@ export async function collectChecks(shellVars, seams) {
 			label: `${listing} trigger(s) name run.models, which needs a worker and a receiver that carry issue #502 (a service below that drops the list silently; the worker refuses such a job as trigger-skew rather than running it unrestricted, and only when it can read the triggers file itself)`,
 		});
 	}
+	if (costCaps.length > 0) {
+		// Issue #540: the run.models line's twin for run.maxCostUsd (#501), for its reason. A service below the floor
+		// tolerated the key as unknown and dropped it, so the job would run under the deployment's cap, or none.
+		checks.push({
+			ok: true,
+			label: `${costCaps.length} trigger(s) set run.maxCostUsd, which needs a worker and a receiver that carry issue #501 (a service below that drops the cap silently; the worker refuses such a job as trigger-skew rather than running it under the deployment's cap or none, and only when it can read the triggers file itself)`,
+		});
+	}
 
 	// REQ-TRIGGER-SECRETS. Only reported when a trigger actually binds one, on the run.resume block's
 	// reasoning below: a deployment that uses no secrets should not be told about a variable it has no

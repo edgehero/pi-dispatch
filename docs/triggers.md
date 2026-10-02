@@ -379,7 +379,8 @@ Any trigger type can set the most one of its jobs may spend, in US dollars:
 release drops `maxCostUsd`, and its job would run under the deployment's cap or none. The worker refuses
 such a job before it spends (`trigger-skew`, naming the field), when it can read the triggers file. The
 check is strict: adding `maxCostUsd` to a trigger refuses the jobs of it that were already queued
-(`trigger-skew`). Re-run them. Upgrade the worker and the receiver together.
+(`trigger-skew`). Re-run them. Upgrade the worker and the receiver together. `pi-dispatch doctor` reminds you
+of this once when a trigger sets `maxCostUsd`, as it does for `models`.
 
 **Dollar windows.** A deployment can also cap what all its jobs spend per UTC day, Monday week and month:
 `PI_DAILY_COST_USD`, `PI_WEEKLY_COST_USD` and `PI_MONTHLY_COST_USD` (or `dailyCostUsd`, `weeklyCostUsd` and
