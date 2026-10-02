@@ -14,7 +14,7 @@ import { endpointsForModel } from "./model-endpoints.mjs";
 import { splitModelEntry } from "./model-ref.mjs";
 import { effectiveCostCapMicros } from "./money.mjs";
 import { dollarWindowCaps } from "./dollar-budget.mjs";
-import { budgetCapsFor, canonicalScope, concurrencyFor, makeInFlight } from "./scoped-limits.mjs";
+import { budgetCapsFor, canonicalScope, concurrencyFor, dollarCapsFor, makeInFlight, modelDollarRows } from "./scoped-limits.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 
@@ -943,6 +943,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// Issue #501: the deployment's dollar windows in micro-dollars, resolved this job-start under overlay > env
 				// like the caps above, or null when none is set (then nothing is reserved and no dollar key is written).
 				dollarCaps: dollarWindowCaps(settings),
+				// Issues #501 part 5 and #502 part 6: this job's repo or folder dollar windows and the model dollar windows it
+				// reserves in, from the SAME limits snapshot. The model rows follow the job's EFFECTIVE list (the trigger's,
+				// else PI_ALLOWED_MODELS); a job with none reserves in every model row (`modelDollarRows` says why).
+				scopedDollars: dollarCapsFor(job.data, limits),
+				modelDollars: modelDollarRows(limits, effectiveJob.models ?? null),
 				// The endpoint gate's snapshot (issue #503): the declared endpoints, the overlay models and this job's
 				// derived set, read once at pickup. Absent on a wiring with no endpoint seam, so a bare processor's
 				// runJob context is unchanged.

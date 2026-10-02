@@ -237,8 +237,9 @@ With dollar windows set (`PI_DAILY_COST_USD` and its siblings, `docs/triggers.md
 them when every model it may call runs on a declared server and costs nothing: no cost table in `models.json`,
 or one that is all zeros. "Every model" is the main model AND every model on the trigger's `models` list (or
 `PI_ALLOWED_MODELS`) when there is one, else the main model alone. Such a job runs under a per-job cap of 0, so a call that could cost anything is
-stopped before it is sent. Its run record says `dollars.basis: "unreserved"`. Any other job holds its cap as
-usual.
+stopped before it is sent. Its run record says `dollars.basis: "unreserved"`. Such a job holds nothing in a
+repo, folder or model window of `scoped-limits.json` either ([scoped limits](scoped-limits.md)). Any other job
+holds its cap as usual.
 
 ### What `doctor` says about them
 

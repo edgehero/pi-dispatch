@@ -39,7 +39,7 @@ import { scrubCredentials } from "./redact.mjs";
 import { makeCheckOnceSpent, makeCheckWaitSkew, makeDisarmOnce } from "./triggers-file.mjs";
 import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "./watch-closer.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
-import { loadScopedLimits } from "./scoped-limits.mjs";
+import { dollarRowsWithoutCap, loadScopedLimits } from "./scoped-limits.mjs";
 import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
@@ -249,13 +249,24 @@ function watchPauseWindowsFile(config, ref, log, atBoot) {
  * last-good property carries its own test). A bad edit keeps `ref.current` untouched and logs
  * `scoped_limits_reload_invalid` -- the pause-windows posture, INT-SCOPED-LIMITS-FILE-CONTRACT.
  */
-export function reloadScopedLimits(config, ref, log) {
+export function reloadScopedLimits(config, ref, log, deploymentCap = null) {
 	try {
 		ref.current = loadScopedLimits(config);
 		log("scoped_limits_reloaded", { count: ref.current.length });
+		if (deploymentCap) warnDollarRowsWithoutCap(ref.current, deploymentCap(), log);
 	} catch (err) {
 		log("scoped_limits_reload_invalid", { reason: err?.message });
 	}
+}
+
+/**
+ * PR #549's review: a `scoped-limits.json` dollar row on a deployment with no per-job cap (env and overlay merged)
+ * refuses every job it applies to as `config-refused`, unless that job's trigger sets `run.maxCostUsd`. So it is a
+ * WARNING at load and at each reload, never a refusal: the rows by index and kind, never a scope string.
+ */
+export function warnDollarRowsWithoutCap(limits, deploymentMaxCostUsd, log) {
+	const rows = dollarRowsWithoutCap(limits, deploymentMaxCostUsd);
+	if (rows.length > 0) log("scoped_limits_dollar_rows_without_cap", { rows });
 }
 
 /**
@@ -263,7 +274,7 @@ export function reloadScopedLimits(config, ref, log) {
  * for atomic tmp+rename robustness, filtered to the one basename, debounced. Best-effort; the FSWatcher is
  * unref'd and the returned closer stops the watch with the worker (issue #295).
  */
-function watchScopedLimitsFile(config, ref, log, atBoot) {
+function watchScopedLimitsFile(config, ref, log, atBoot, deploymentCap = null) {
 	const path = config.scopedLimitsFile;
 	const dir = dirname(path) || ".";
 	const file = basename(path);
@@ -276,7 +287,7 @@ function watchScopedLimitsFile(config, ref, log, atBoot) {
 			if (handles.closed) return; // see makeWatchCloser: by construction, not by a delivery rule
 			if (changed && changed !== file) return;
 			clearTimeout(handles.timer);
-			handles.timer = setTimeout(() => reloadScopedLimits(config, ref, closer.reloadLog), WATCH_DEBOUNCE_MS);
+			handles.timer = setTimeout(() => reloadScopedLimits(config, ref, closer.reloadLog, deploymentCap), WATCH_DEBOUNCE_MS);
 		});
 		handles.watcher.unref?.();
 		log("scoped_limits_watching", { path });
@@ -285,7 +296,7 @@ function watchScopedLimitsFile(config, ref, log, atBoot) {
 	}
 	if (changedWhileArming(handles, readFile)) {
 		log("scoped_limits_reread_after_arming", { path });
-		reloadScopedLimits(config, ref, closer.reloadLog);
+		reloadScopedLimits(config, ref, closer.reloadLog, deploymentCap);
 	}
 	return closer;
 }
@@ -441,6 +452,9 @@ export async function startWorker(
 		// literal address every Valkey client of this worker then connects to. A seam: the real one reads /proc, probes
 		// this host's addresses and resolves the name, none of which belongs in a wiring test.
 		judgeValkey = defaultJudgeValkey,
+		// The scoped-limits watcher, injectable so a test can see what it is armed with (PR #549's review: the cap
+		// thunk the reload warning reads). Production passes nothing and gets the real watcher.
+		watchScopedLimits: watchScopedLimitsFn = watchScopedLimitsFile,
 	} = {},
 ) {
 	const config = loadConfigFn(env);
@@ -1090,6 +1104,13 @@ export async function startWorker(
 	// the per-job path enforce the refusal (getSettings already logged the invalid reason).
 	const bootSettings = getSettings();
 	const bootConcurrency = bootSettings.invalid ? config.concurrency : bootSettings.concurrency;
+	// PR #549's review: the merged per-job cap, for the scoped-limits dollar-row warning at boot and at each reload.
+	// An invalid overlay falls back to the env value, the same fallback as the slot count above.
+	const deploymentMaxCostUsd = () => {
+		const s = getSettings();
+		return s.invalid ? config.maxCostUsd : s.maxCostUsd;
+	};
+	warnDollarRowsWithoutCap(scopedLimits.current, bootSettings.invalid ? config.maxCostUsd : bootSettings.maxCostUsd, log);
 
 	// INT-OUTBOX-CONTRACT chain collector: the host-side reader of a completed local parent's /outbox. It
 	// enqueues chained children onto the CRON queue via enqueueLocalJob -- this host's own when one is
@@ -1947,7 +1968,7 @@ export async function startWorker(
 
 		// Issue #242 live edit: hot-swap the scoped limits on file change, keeping last-good on a bad edit.
 		if (config.scopedLimitsFile) {
-			extraClosers.push(watchScopedLimitsFile(config, scopedLimits, log, atBoot.scopedLimits));
+			extraClosers.push(watchScopedLimitsFn(config, scopedLimits, log, atBoot.scopedLimits, deploymentMaxCostUsd));
 		}
 
 		// Issue #503 live edit: the model endpoints, keep-last-good on a bad edit.

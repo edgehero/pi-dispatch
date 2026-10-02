@@ -429,6 +429,13 @@ test("renderTriggers marks a replicating trigger, and an unflagged line is byte-
   assert.equal(all.split("[x").length - 1, 3, "label, comment and pull_request each show their count");
 });
 
+test("renderScopedLimits shows version 2 dollar windows, a model row's included (PR #549's review)", () => {
+  const limits = { limits: [{ scope: "model:openai/gpt-x", day: null, week: null, month: null, concurrent: null, dayUsd: "3.00", weekUsd: null, monthUsd: null }] };
+  const out = renderScopedLimits({ limits, scopedBudget: { rows: [{ usdMicros: { day: 1_250_000 } }] } });
+  assert.match(out, /model:openai\/gpt-x: day \$1\.25\/\$3\.00/);
+  assert.match(renderScopedLimits({ limits }), /day \$-\/\$3\.00/);
+});
+
 test("renderScopedLimits: rows with used/cap and config-only concurrency; null when nothing configured; invalid degrades", () => {
   const limits = { limits: [{ scope: "acme/web", day: 10, week: 40, month: null, concurrent: 1 }, { scope: "/srv/site", day: null, week: null, month: 60, concurrent: null }] };
   const out = renderScopedLimits({ limits, scopedBudget: { rows: [{ day: 3, week: null }, { month: 12 }] } });

@@ -23,20 +23,60 @@
  * worker drops would be a silently WIDENED spend limit. Pause-windows shipping without a version is a
  * sunk decision, not a precedent to extend to enforcement config.
  *
+ * Version 2 (issues #501 part 5, #502 part 6) is exactly that case made real: dollar windows (`dayUsd`,
+ * `weekUsd`, `monthUsd`) on a scope row, and `model:<provider>/<model>` rows carrying those alone. They are
+ * DOLLAR ledgers (dollar-budget.mjs, built here by `dollarCapsFor` and `modelDollarRows`), never job-count ones,
+ * so `budgetCapsFor`, `concurrencyFor` and the mutex never see them.
+ *
  * Custom: scoped limits validated inline per triggers.mjs/pause-windows.mjs precedent; zod not in deps
  */
 
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { configError } from "./config.mjs";
+import { DOLLAR_KEY_PREFIX } from "./dollar-budget.mjs";
 import { hash16 } from "./fleet-lease.mjs";
+import { splitModelEntry } from "./model-ref.mjs";
+import { formatMicros, parseUsdMicros } from "./money.mjs";
 import { scopeOf } from "./pause-windows.mjs";
 
-/** The schema version this build reads and writes. A file declaring a higher one is refused loudly. */
-export const SCOPED_LIMITS_VERSION = 1;
+/**
+ * The highest schema version this build reads. A file declaring a higher one is refused loudly. The admin writes the
+ * LOWEST version that expresses a file (`scopedLimitsVersionFor`), so a file with no dollar or model row stays 1.
+ *
+ * Version 2 (issues #501 part 5 and #502 part 6) adds dollar windows: `dayUsd`, `weekUsd` and `monthUsd` on a repo or
+ * folder row, and `model:<provider>/<model>` rows that carry those three fields only. A version 1 file that uses
+ * either is refused with an error naming version 2: a version 1 worker drops unknown fields, so a file that says 1
+ * while it means 2 would read as a narrower cap on one build and no cap on another.
+ */
+export const SCOPED_LIMITS_VERSION = 2;
 
-/** The four limit fields a row may carry, in display order. */
+/** The four job-count limit fields a row may carry, in display order. */
 const LIMIT_FIELDS = ["day", "week", "month", "concurrent"];
+
+/** The three dollar window fields (version 2), in display order. Each maps to a dollar window: day, week, month. */
+export const USD_LIMIT_FIELDS = Object.freeze(["dayUsd", "weekUsd", "monthUsd"]);
+
+/**
+ * The scope prefix of a per-model row (issue #502 part 6): `model:<provider>/<model>`. Reserved in BOTH versions. A
+ * version 1 file naming it is refused (naming version 2) rather than read as a folder called `model:...`.
+ */
+export const MODEL_SCOPE_PREFIX = "model:";
+
+/** The dollar key prefix of a repo or folder row: `budget:usd:s:<hash16>` (the deployment's is `budget:usd`). */
+export const SCOPE_DOLLAR_KEY_PREFIX = `${DOLLAR_KEY_PREFIX}:s`;
+/** The dollar key prefix of a model row: `budget:usd:mdl:<hash16>`. `budget:usd:p:` stays reserved for #499. */
+export const MODEL_DOLLAR_KEY_PREFIX = `${DOLLAR_KEY_PREFIX}:mdl`;
+
+/** A scope that LOOKS like a model row (any case, `models`, spaces before the colon) but is not the exact prefix form. */
+const MODEL_NEAR_MISS = /^models?\s*:/i;
+/** The reserved project prefix and its near misses (`project:`, `Projects :`). */
+const PROJECT_PREFIX = /^projects?\s*:/i;
+
+/** Is this row scope a per-model row? */
+export function isModelScope(scope) {
+	return typeof scope === "string" && scope.startsWith(MODEL_SCOPE_PREFIX);
+}
 
 function isNonEmptyString(value) {
 	return typeof value === "string" && value.trim() !== "";
@@ -75,7 +115,8 @@ export function canonicalScope(job) {
 
 /**
  * Parse, validate, and normalize the scoped-limits file TEXT. Returns the normalized `limits` array
- * (every row rebuilt as an explicit `{ scope, day, week, month, concurrent }` literal, `null` for absent
+ * (every row rebuilt as an explicit `{ scope, day, week, month, concurrent }` literal in a version 1 file, and
+ * `{ scope, day, week, month, concurrent, dayUsd, weekUsd, monthUsd }` in a version 2 one, `null` for absent
  * fields, unknown fields dropped -- the operator-file policy). Throws `configError` (fail-loud) on any
  * malformed entry. `path` is for error messages only -- this function touches no filesystem.
  */
@@ -91,7 +132,7 @@ export function parseScopedLimits(text, path) {
 	}
 	const version = parsed.version;
 	if (!Number.isInteger(version) || version < 1) {
-		throw configError(`scoped-limits file must have "version": 1 (an integer >= 1): ${path}`);
+		throw configError(`scoped-limits file must have "version": 1 or ${SCOPED_LIMITS_VERSION} (an integer >= 1): ${path}`);
 	}
 	if (version > SCOPED_LIMITS_VERSION) {
 		throw configError(`scoped-limits file written by a newer pi-dispatch (version ${version}; this build understands ${SCOPED_LIMITS_VERSION}): ${path}`);
@@ -99,26 +140,72 @@ export function parseScopedLimits(text, path) {
 	if (!Array.isArray(parsed.limits)) {
 		throw configError(`scoped-limits file must have a "limits" array: ${path}`);
 	}
-	const rows = parsed.limits.map((row, index) => normalizeLimit(row, index, path));
+	const rows = parsed.limits.map((row, index) => normalizeLimit(row, index, path, version));
 	const seen = new Map();
 	rows.forEach((row, index) => {
-		if (seen.has(row.scope)) {
+		// A model row's identity is its LOWERCASED ref, the one its dollar key hashes (`modelDollarKeyPrefix`): two rows
+		// differing only in case would be two caps on one counter.
+		const id = isModelScope(row.scope) ? row.scope.toLowerCase() : row.scope;
+		if (seen.has(id)) {
 			// Two rows for one scope is a precedence question with no right answer; the admin's
 			// edit-in-place never produces one, so a duplicate is always a hand-edit mistake.
-			throw configError(`scoped limit at index ${index}: duplicate scope ${JSON.stringify(row.scope)} (first at index ${seen.get(row.scope)}): ${path}`);
+			throw configError(`scoped limit at index ${index}: duplicate scope ${JSON.stringify(row.scope)} (first at index ${seen.get(id)}): ${path}`);
 		}
-		seen.set(row.scope, index);
+		seen.set(id, index);
 	});
 	return rows;
 }
 
-function normalizeLimit(row, index, path) {
+/** A dollar field's value, or the refusal: `parseUsdMicros`'s rules (strings recommended), named by row and field. */
+function usdField(value, field, at, path) {
+	try {
+		return parseUsdMicros(value, field);
+	} catch (error) {
+		throw configError(`${at}: ${error.message}: ${path}`);
+	}
+}
+
+/**
+ * A per-model row (version 2): `{ scope: "model:<provider>/<model>", dayUsd?, weekUsd?, monthUsd? }`. The ref follows
+ * the allowed-model list's rule (`splitModelEntry`: split at the first `/`, each half a valid id). `day`, `week`,
+ * `month` and `concurrent` are refused here: a model is not a scope a job runs IN, so a job-count cap or a
+ * concurrency limit on it would read as enforced while nothing counts it.
+ */
+function normalizeModelLimit(row, trimmed, at, path, version) {
+	if (version < 2) throw configError(`${at}: a "model:" row needs "version": 2 (this file says ${version}): ${path}`);
+	const ref = splitModelEntry(trimmed.slice(MODEL_SCOPE_PREFIX.length));
+	if (ref === null) throw configError(`${at}: a model row's scope must be model:<provider>/<model> (each 1 to 64 characters, no spaces): ${path}`);
+	// The runner folds model-less and overflow calls into an `other/other` usage row, so a row naming that pair
+	// could never be told apart from the fold.
+	if (`${ref.provider}/${ref.model}`.toLowerCase() === "other/other") throw configError(`${at}: model:other/other names the usage ledger's fold row, not a model: ${path}`);
+	for (const field of LIMIT_FIELDS) {
+		if (row[field] !== undefined && row[field] !== null) throw configError(`${at}: a model row carries dayUsd, weekUsd and monthUsd only (${field} is refused): ${path}`);
+	}
+	const norm = { scope: `${MODEL_SCOPE_PREFIX}${ref.provider}/${ref.model}`, day: null, week: null, month: null, concurrent: null, dayUsd: null, weekUsd: null, monthUsd: null };
+	let any = false;
+	for (const field of USD_LIMIT_FIELDS) {
+		if (row[field] === undefined || row[field] === null) continue;
+		norm[field] = formatMicros(usdField(row[field], field, at, path));
+		any = true;
+	}
+	if (!any) throw configError(`${at}: a model row needs at least one of dayUsd, weekUsd, monthUsd: ${path}`);
+	return norm;
+}
+
+function normalizeLimit(row, index, path, version = SCOPED_LIMITS_VERSION) {
 	const at = `scoped limit at index ${index}`;
 	if (row === null || typeof row !== "object" || Array.isArray(row)) {
 		throw configError(`${at}: must be an object: ${path}`);
 	}
 	if (!isNonEmptyString(row.scope)) throw configError(`${at}: scope must be a non-empty string: ${path}`);
 	const trimmed = row.scope.trim().normalize("NFC"); // the same NFC canonicalScope applies job-side
+	if (isModelScope(trimmed)) return normalizeModelLimit(row, trimmed, at, path, version);
+	// A NEAR MISS of a reserved prefix is refused, never read as a repo or folder row (PR #549's review): a
+	// mistyped `Model:openai/x`, `models:...` or `model :...` would otherwise parse as a repo scope no job ever has,
+	// a dollar cap that governs nothing while the file reads as capping a model.
+	if (MODEL_NEAR_MISS.test(trimmed)) throw configError(`${at}: a model row's scope is written exactly model:<provider>/<model> (lowercase "model", no space before the colon): ${path}`);
+	// `project:` is reserved for project windows (#499) in every version, so that change needs no version 3.
+	if (PROJECT_PREFIX.test(trimmed)) throw configError(`${at}: a "project:" scope is reserved for project windows (#499) and is not read by this build: ${path}`);
 	if (trimmed === "*") {
 		// "*" as ONE shared counter is redundant with the global caps, so the only useful reading is a
 		// per-scope default -- the OPPOSITE of what "*" means one file over (pause-windows: one rule
@@ -142,8 +229,19 @@ function normalizeLimit(row, index, path) {
 		week: null,
 		month: null,
 		concurrent: null,
+		// Version 2's dollar windows, each the canonical decimal string (`formatMicros`), so the admin's
+		// read-modify-write writes back exactly what the parser accepts. `dollarCapsFor` turns them into integers.
+		// Only in a version 2 file's rows: a version 1 file reads into exactly the five-key literal it always did.
+		...(version >= 2 ? { dayUsd: null, weekUsd: null, monthUsd: null } : {}),
 	};
 	let any = false;
+	for (const field of USD_LIMIT_FIELDS) {
+		const value = row[field];
+		if (value === undefined || value === null) continue;
+		if (version < 2) throw configError(`${at}: ${field} needs "version": 2 (this file says ${version}): ${path}`);
+		norm[field] = formatMicros(usdField(value, field, at, path));
+		any = true;
+	}
 	for (const field of LIMIT_FIELDS) {
 		const value = row[field];
 		// Absent-or-null (subscriptions.mjs's rule): null is the normalizer's OWN output for an unset
@@ -161,7 +259,7 @@ function normalizeLimit(row, index, path) {
 		any = true;
 	}
 	if (!any) {
-		throw configError(`${at}: at least one of day, week, month, concurrent is required (a row that limits nothing is a row an operator sets and then trusts): ${path}`);
+		throw configError(`${at}: at least one of day, week, month, concurrent${version >= 2 ? ", dayUsd, weekUsd, monthUsd" : ""} is required (a row that limits nothing is a row an operator sets and then trusts): ${path}`);
 	}
 	return norm;
 }
@@ -184,7 +282,8 @@ export function loadScopedLimits(config, { readFileSync = fsReadFileSync, exists
  */
 export function limitFor(limits, scope) {
 	if (!Array.isArray(limits) || !isNonEmptyString(scope)) return null;
-	return limits.find((l) => l.scope === scope) ?? null;
+	// A model row is never a job's scope: it caps a model wherever it runs (`modelDollarRows`).
+	return limits.find((l) => l.scope === scope && !isModelScope(l.scope)) ?? null;
 }
 
 /**
@@ -197,6 +296,98 @@ export function budgetCapsFor(job, limits) {
 	const row = limitFor(limits, scope);
 	if (!row || (row.day === null && row.week === null && row.month === null)) return null;
 	return { scope, caps: { day: row.day, week: row.week, month: row.month } };
+}
+
+/** A row's dollar windows as integer micro-dollars `{ day, week, month }`, each null when unset, or null when none is. */
+function usdCaps(row) {
+	const caps = {};
+	for (const [field, name] of [["dayUsd", "day"], ["weekUsd", "week"], ["monthUsd", "month"]]) {
+		caps[name] = row?.[field] === null || row?.[field] === undefined ? null : parseUsdMicros(row[field], field);
+	}
+	return caps.day === null && caps.week === null && caps.month === null ? null : caps;
+}
+
+/**
+ * The repo or folder dollar windows this job reserves in (issue #501 part 5), or null when its scope's row has none
+ * (or there is no row). Ledger-shaped for `reserveDollars`: `{ scope, keyPrefix, caps }`, the caps in integer
+ * micro-dollars and `keyPrefix` `budget:usd:s:<hash16>` of the same CANONICAL scope the job-count windows hash. A
+ * sibling of `budgetCapsFor`, which is unchanged: the job-count and dollar windows of one row are separate ledgers.
+ */
+export function dollarCapsFor(job, limits) {
+	const scope = canonicalScope(job);
+	const row = limitFor(limits, scope);
+	const caps = row ? usdCaps(row) : null;
+	return caps === null ? null : { scope, keyPrefix: scopeDollarKeyPrefix(scope), caps };
+}
+
+/**
+ * The model dollar windows this job reserves in (issue #502 part 6), as ledgers `{ ref, keyPrefix, caps }` in file
+ * order, where `ref` is the row's lowercased `provider/model`. `models` is the job's EFFECTIVE allowed-model list:
+ *   - a list reserves in the rows of its listed models, compared ignoring case (the ledger lowercases ids, so the
+ *     row and the usage row it settles from meet in lowercase);
+ *   - no list (`null` or `undefined`) reserves in EVERY model row. An unrestricted job may switch to any model
+ *     mid-run, so it could spend in any of them; reserving in none would let it run up a model's window unseen.
+ *     This fails closed: an unrestricted job is refused when any model window is full, and the remedy is a list.
+ * A job that reserves nothing at all (the zero-reservation rule, the processor's) reserves in none of these either.
+ */
+export function modelDollarRows(limits, models) {
+	if (!Array.isArray(limits)) return [];
+	const rows = limits.filter((l) => isModelScope(l?.scope));
+	let wanted = null;
+	if (Array.isArray(models)) wanted = new Set(models.filter((m) => typeof m === "string").map((m) => m.toLowerCase()));
+	const out = [];
+	for (const row of rows) {
+		const ref = row.scope.slice(MODEL_SCOPE_PREFIX.length).toLowerCase();
+		if (wanted !== null && !wanted.has(ref)) continue;
+		const caps = usdCaps(row);
+		if (caps !== null) out.push({ ref, keyPrefix: modelDollarKeyPrefix(ref), caps });
+	}
+	return out;
+}
+
+/**
+ * The rows that carry a dollar window, as `[{ index, kind }]` (`kind` is `scope` or `model`), when the deployment has
+ * NO per-job cap (`deploymentMaxCostUsd` null or undefined: env and overlay merged by the caller), else `[]` (PR #549's
+ * review). Such a row refuses every job it applies to as `config-refused` unless the job's trigger sets its own
+ * `run.maxCostUsd`, so the worker and doctor WARN, never refuse: a trigger may legitimately supply the cap. Index and
+ * kind only, never the scope string (a folder scope is a host path).
+ */
+export function dollarRowsWithoutCap(limits, deploymentMaxCostUsd) {
+	if (deploymentMaxCostUsd !== null && deploymentMaxCostUsd !== undefined) return [];
+	const out = [];
+	(limits ?? []).forEach((row, index) => {
+		if (USD_LIMIT_FIELDS.some((f) => row?.[f] !== null && row?.[f] !== undefined)) out.push({ index, kind: isModelScope(row.scope) ? "model" : "scope" });
+	});
+	return out;
+}
+
+/**
+ * The windows of dollar rows whose cap is BELOW the deployment's per-job cap, as `[{ index, kind, window }]` (PR
+ * #549's review). A job reserves its whole per-job cap, so such a window refuses every job it applies to, every time,
+ * until the cap is raised or the per-job cap lowered (a trigger's smaller `run.maxCostUsd` still fits). Doctor names
+ * them; `[]` when no deployment cap is set or none is below it.
+ */
+export function dollarRowsBelowJobCap(limits, deploymentMaxCostUsd) {
+	if (deploymentMaxCostUsd === null || deploymentMaxCostUsd === undefined) return [];
+	const jobCap = parseUsdMicros(deploymentMaxCostUsd, "maxCostUsd");
+	const out = [];
+	(limits ?? []).forEach((row, index) => {
+		for (const [field, window] of [["dayUsd", "day"], ["weekUsd", "week"], ["monthUsd", "month"]]) {
+			if (row?.[field] === null || row?.[field] === undefined) continue;
+			if (parseUsdMicros(row[field], field) < jobCap) out.push({ index, kind: isModelScope(row.scope) ? "model" : "scope", window });
+		}
+	});
+	return out;
+}
+
+/**
+ * The lowest file version that expresses `rows` (normalized or as the admin builds them): 2 when any row carries a
+ * dollar field or is a model row, else 1. The admin writes this, so a file with job-count rows only stays a version 1
+ * file that an older worker still reads.
+ */
+export function scopedLimitsVersionFor(rows) {
+	const v2 = (rows ?? []).some((l) => isModelScope(typeof l?.scope === "string" ? l.scope.trim() : l?.scope) || USD_LIMIT_FIELDS.some((f) => l?.[f] !== null && l?.[f] !== undefined));
+	return v2 ? 2 : 1;
 }
 
 /**
@@ -234,6 +425,26 @@ export function concurrencyFor(job, limits) {
  */
 export function scopeKeyPrefix(scope) {
 	return `budget:s:${hash16(scope)}`;
+}
+
+/** A repo or folder's DOLLAR key prefix: `budget:usd:s:<hash16(scope)>`, the same hash as `scopeKeyPrefix`. */
+export function scopeDollarKeyPrefix(scope) {
+	return `${SCOPE_DOLLAR_KEY_PREFIX}:${hash16(scope)}`;
+}
+
+/**
+ * A model's DOLLAR key prefix: `budget:usd:mdl:<hash16(lowercase provider/model)>`. LOWERCASED before hashing,
+ * because the run record's ledger lowercases ids (`parseExitUsage`) and a model row settles from that ledger: one
+ * model must be one counter whatever case a row, a list or the runner spells it in. `ref` is `provider/model`,
+ * without the `model:` prefix.
+ */
+export function modelDollarKeyPrefix(ref) {
+	return `${MODEL_DOLLAR_KEY_PREFIX}:${hash16(String(ref).toLowerCase())}`;
+}
+
+/** The dollar key prefix of one normalized row, scope or model: what the admin reads its counters under. */
+export function dollarKeyPrefixFor(row) {
+	return isModelScope(row?.scope) ? modelDollarKeyPrefix(row.scope.slice(MODEL_SCOPE_PREFIX.length)) : scopeDollarKeyPrefix(row?.scope);
 }
 
 /**

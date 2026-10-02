@@ -133,7 +133,7 @@ test("a full dollar window refuses dollar-cap, gives back BOTH job-count slots a
 	assert.equal(redis.store.get(DAY), 9 * USD, "the refused dollars are back");
 	assert.match(calls.find((c) => c[0] === "comment")[1], /^Refused: today's dollar budget/);
 	assert.doesNotMatch(calls.find((c) => c[0] === "comment")[1], /\d/, "no amount in the comment");
-	assert.deepEqual(logs.find((l) => l[0] === "over_dollar_budget")[1], { window: "day", reservedMicros: 11 * USD, capMicros: 10 * USD, amountMicros: 2 * USD, refunded: true });
+	assert.deepEqual(logs.find((l) => l[0] === "over_dollar_budget")[1], { ledger: "deployment", window: "day", reservedMicros: 11 * USD, capMicros: 10 * USD, amountMicros: 2 * USD, refunded: true });
 	assert.equal(buildRecord({ job: { id: "j", data: {} }, result: r }).reason, "dollar-cap");
 });
 

@@ -252,7 +252,8 @@ Cap how many jobs a repo or folder may run per day, week or month, and how many 
 job is refused before any spend; over the concurrency ceiling it waits. Local jobs also have a fixed guard:
 one job per folder at a time, because two agents editing one working tree race each other with no gate
 and no undo. The guard lives in the worker process, and one worker per container daemon is the supported
-setup. Manage limits with `m` in the panel ([`docs/scoped-limits.md`](docs/scoped-limits.md)).
+setup. Version 2 of the file adds dollar caps per day, week and month for a repo, a folder or a model.
+Manage limits with `m` in the panel ([`docs/scoped-limits.md`](docs/scoped-limits.md)).
 
 ### Waiting on a condition
 

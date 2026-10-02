@@ -4311,7 +4311,7 @@ validator rather than a second copy of it.
                    "modelRefused": <int> } | null,                                             // issue #502: written only when a model list was set
     "usage":     { "v": <int>,                                                                  // ledger block version; readers treat an unknown v as opaque-but-present
                    "piAi": "<major.minor.patch>" | null,                                        // the pi-ai the meter priced with, read from the resolved package at install; a rates PROVENANCE stamp
-                   "truncated": <int>,                                                          // named rows folded into the "other" row at the 8-row cap; 0 = none
+                   "truncated": <int> | null,                                                   // named rows folded into the "other" row at the 8-row cap; 0 = none; null = not reported
                    "models": [ { "provider": "<id>", "model": "<id>",                           // lowercased, host-validated ^(?=.{1,64}$)[~@]?[a-z0-9][a-z0-9._:/@_-]*$
                                  "calls": <int>, "input": <int>, "output": <int>,
                                  "cacheRead": <int>, "cacheWrite": <int>, "cacheWrite1h": <int>,
@@ -4335,7 +4335,7 @@ validator rather than a second copy of it.
     "backend": "<run.backend, else the deployment default PI_BACKENDS[0]>" | null,   // the venue it resolved to (#277)
     "dollars": { "reservedMicros": <int>, "settledMicros": <int>,                             // issue #501: integer micro-dollars
                  "basis": "metered" | "floor" | "refunded" | "unreserved",
-                 "modelBasis": null } | null }                                                   // modelBasis: reserved for per-model windows; null = no dollar window applied
+                 "modelBasis": "metered" | "floor" | "refunded" | null } | null }             // modelBasis: how the model windows settled (#502 part 6); null = none held
   ```
   **`attempt` is the 1-based ATTEMPT NUMBER** (decided in the issue #464 round): `1` for a job's first run, `2` for
   the queue's retry. Every record is written while the job is still processing, where BullMQ's `attemptsMade` counts
@@ -4419,8 +4419,18 @@ validator rather than a second copy of it.
     every model it may call is served by a declared endpoint and zero-rated (`INT-MODEL-ENDPOINTS-FILE-CONTRACT`),
     or its effective per-job cap was already `0` (a malformed queued `run.maxCostUsd` reads as 0); either way it
     ran under a per-job cap of `0`.
-  `modelBasis` is RESERVED for the per-model dollar windows (issue #502 part 6) and is always `null` until they
-  land, so the shape does not change when it fills. Integers and fixed tokens only, so the record stays PII-free;
+  `modelBasis` (issue #502 part 6) is how the job's MODEL dollar windows (`INT-SCOPED-LIMITS-FILE-CONTRACT`, model
+  rows) settled, and `null` when the job held none. Each model window settles from that model's OWN row of
+  `usage.models`, matched on the lowercased `provider/model` (every row that matches, summed), never from the job's total: `metered` charges
+  `ceil(row.cost x 1e6)`, `0` for a model with no row. It is `floor` (at least the reservation, never less than
+  the row's own cost) when ANY of these holds: `basis` is not `metered`; the exit line is not trusted; `usage` is
+  null while calls were made (an absent `tokens.calls` counts as calls); `usage.truncated` is not present and `0`
+  (the parser keeps an absent `truncated` as `null`, so this condition is live)
+  (folded rows hide part of a model's spend); or an `other`/`other` row has a cost above `0` (spend attributed to
+  no model). A Valkey fault that adjusted none of a model window's keys is `floor` too. `refunded` is the
+  never-started, `config-refused` and `dollar-cap` cases, where every model window was given back (`floor` if a
+  give-back could not reach a key). With several model windows the record says `floor` when any one settled at
+  the floor. The repo and folder windows settle with `basis`, like the deployment's. Integers and fixed tokens only, so the record stays PII-free;
   a malformed source object records `null`. The record is one file per job id, last write wins, so a retried
   job's record shows its LAST attempt's `dollars`; the window counters are the truth for what every attempt charged.
 
@@ -5310,9 +5320,10 @@ validator rather than a second copy of it.
   empty file, or any file, and no row can raise it (`min(configured, 1)` for a local scope — scope strings
   are not reliably typeable folder-vs-repo, so the clamp is silent rather than a parse refusal that would
   misfire on `"a/b"`).
-- **Shape**: `{ "version": 1, "limits": [ { scope, day?, week?, month?, concurrent? } ] }`.
+- **Shape**: `{ "version": 1 | 2, "limits": [ { scope, day?, week?, month?, concurrent?, dayUsd?, weekUsd?, monthUsd? } ] }`.
+  The dollar fields and model rows need version 2 (below).
   - `version` (required): integer ≥ 1, fail-loud on newer (`scoped-limits file written by a newer
-    pi-dispatch (version N; this build understands 1)`). Adopted from `INT-SUBSCRIPTIONS-FILE-CONTRACT`
+    pi-dispatch (version N; this build understands 2)`). Adopted from `INT-SUBSCRIPTIONS-FILE-CONTRACT`
     because this is a MONEY file: unknown fields are silently dropped per the operator-file policy, so a
     v2 cap field an old worker dropped would be a silently WIDENED spend limit. The protection covers
     STAMPED files only — a hand-edit that plants a future field in a `version: 1` file drops in silence,
@@ -5332,7 +5343,27 @@ validator rather than a second copy of it.
     calendar month, counted per scope beside the global windows. `0` is refused — "never run this scope"
     already has two honest spellings (delete the trigger; a pause window).
   - `concurrent` (optional): integer ≥ 1, the scope's in-flight ceiling, enforced by DEFERRAL through the
-    delayed set — never a refusal, a busy scope is transient state. At least one of the four is required.
+    delayed set, never a refusal: a busy scope is transient state. At least one limit field is required.
+  - `dayUsd` / `weekUsd` / `monthUsd` (optional, version 2; issue #501 part 5): dollar windows for the scope,
+    on the same UTC day, Monday week and month. Each value follows `parseUsdMicros` (`worker/src/money.mjs`),
+    the overlay's rules: above 0, at most 1000000, at most 6 decimals, no exponent in a string. Strings are
+    recommended, because a JSON number is read by the value JavaScript prints. The parser stores each as its
+    canonical decimal string (`"2.5"` reads back as `"2.50"`), so the admin writes back what it read.
+  - **Model rows** (version 2; issue #502 part 6): `{ "scope": "model:<provider>/<model>", dayUsd?, weekUsd?,
+    monthUsd? }`. The ref splits at the first `/` and each half follows the allowed-model list's rule
+    (`splitModelEntry`). A model row carries the dollar fields only: `day`, `week`, `month` and `concurrent` are
+    refused on it, and it needs at least one dollar field. `model:other/other` is refused, because the usage
+    ledger folds model-less and overflow calls into that pair. Two model rows that differ only in case are a
+    duplicate. A model row is never a job's scope: the job-count windows, the concurrency gate and the mutex
+    never match it.
+  - **Version rule**: a version 1 file that uses a dollar field or a `model:` row is REFUSED with a message
+    naming version 2, so a file cannot carry a dollar cap that one build reads and another drops. A version 1
+    file with neither stays valid and reads exactly as before (the five-key row). The `model:` prefix is
+    reserved in both versions, so a version 1 relative folder spelled `model:...` is refused too (no
+    working tree is named that way). A NEAR MISS of it (`Model:`, `models:`, `model :`, any case, spaces before
+    the colon) is refused with the exact form named, never read as a repo row that would cap nothing. `project:`
+    and its near misses are reserved for project windows (#499) and refused in both versions, so that change
+    needs no version 3.
 - **Canonicalization**: a local job's scope is `path.resolve(folder.trim())` and an absolute-path-shaped
   row is stored resolved, so every spelling of one directory (`/srv/site/`, `/srv//site`, `/srv/x/../site`)
   converges on one counter and one mutex slot, and Unicode is NFC-normalized on both sides (macOS's
@@ -5348,7 +5379,9 @@ validator rather than a second copy of it.
 - **Validation**: the SHARED `parseScopedLimits` (worker `./scoped-limits`) validates the WHOLE file
   fail-loud (`configError`, positional labels); the admin reads AND writes through it and the worker
   boot-loads through it, so the sides cannot drift (mirrors `INT-PAUSE-WINDOWS-FILE-CONTRACT`).
-- **Write protocol**: atomic tmp + rename, validated through `parseScopedLimits` before the write. A
+- **Write protocol**: atomic tmp + rename, validated through `parseScopedLimits` before the write. The writer
+  stamps the LOWEST version that expresses the file (`scopedLimitsVersionFor`): 1 unless a row carries a dollar
+  field or is a model row, so a file without either stays readable by a worker that predates version 2. A
   MISSING file starts from the empty v1 shape; an EXISTING file with a missing or newer `version` refuses
   the write (`{ invalid }`) — read and write both refuse, never a silent repair. This deliberately differs
   from `INT-SUBSCRIPTIONS-FILE-CONTRACT`'s repair rule: repairing an analytics file risks nothing, while
@@ -5384,7 +5417,26 @@ validator rather than a second copy of it.
   byte-identically, key for key and record for record, EXCEPT where the mutex serializes two same-folder
   local jobs — which is the feature, visible in wall-clock and the queue's delayed count, never in keys or
   records.
-- **Acceptance**: Given a file with `version: 2`, when either side reads it, then it is refused loudly
+- **Dollar enforcement** (issues #501 part 5, #502 part 6; `DES-DOLLAR-RESERVE-AND-SETTLE`): a job reserves its
+  per-job cap in ONE `reserveDollars` call over the deployment's windows, its scope row's dollar windows under
+  `budget:usd:s:<16-hex sha256 of the canonical scope>` (the same hash as the job-count key), and each model row it
+  may reach under `budget:usd:mdl:<16-hex sha256 of the LOWERCASED provider/model>`, each with the `:YYYY-MM-DD`,
+  `:w:<Monday>` and `:m:YYYY-MM` suffixes of the deployment's keys. `budget:usd:p:` stays reserved for project
+  windows (#499). A job with an allowed-model list reserves in the rows of its listed models (compared ignoring
+  case); a job with no list reserves in EVERY model row, because it may switch to any model mid-run (fail closed:
+  a full model window refuses an unrestricted job, and the remedy is a list); a job that reserves nothing
+  (`unreserved`) reserves in none. A refusal in any window gives back every key the call added, the deployment's
+  included, and returns `reason: "dollar-cap"`; the log names the ledger (`deployment`, `scope` or `model`), the
+  key prefix (a hash) and, for a model, its ref, never a scope string. A dollar row with no per-job cap to
+  reserve (no `maxCostUsd` and no `run.maxCostUsd`) refuses the job as `config-refused`, the deployment
+  invariant's rule. That is a WARNING, never a refusal, where it can be seen ahead (a trigger may supply the cap):
+  the worker logs `scoped_limits_dollar_rows_without_cap` (row indexes and kinds) at boot and at each reload, and
+  `doctor` warns, with env and overlay merged; doctor also warns about a row window below `maxCostUsd`, which
+  refuses every job that reaches it. A refusal by a window whose cap is below the job's cap says so (the comment
+  says the budget is smaller than the run's cost limit, the log carries `capBelowJob: true`), apart from a window
+  that merely has no room left. The scope windows settle with the deployment basis; each model window settles from that
+  model's own row of `usage.models` (`INT-RUN-HISTORY-FILE-CONTRACT`, `modelBasis`).
+- **Acceptance**: Given a file with `version: 3`, when either side reads it, then it is refused loudly
   naming both versions, and a write against it is refused without touching the file. Given a row with
   `scope: "*"`, `0` for any bound, a duplicate scope, or no limit field at all, when parsed, then the whole
   file is refused with a positional message. Given rows `/srv/site` and `/srv/site/`, when parsed, then the
@@ -5398,7 +5450,12 @@ validator rather than a second copy of it.
   used day/week/month counts come from the scoped redis keys recomputed through the shared
   `scopeKeyPrefix`, `null`/`?` when the queue is unreachable, never an invented zero. Given no
   `PI_SCOPED_LIMITS_FILE`, then the worker loads
-  `[]` and no scoped key is ever created.
+  `[]` and no scoped key is ever created. Given a version 1 file with `dayUsd` or a `model:` row, when parsed,
+  then it is refused naming version 2. Given a model row with a `day` or `concurrent`, when parsed, then it is
+  refused. Given a model window with room for one job's cap, when a second job that may reach that model
+  arrives, then it is refused `dollar-cap` and every other window it reserved is given back. Given an edit of a
+  count field through the admin, then a dollar field the row carries is kept, and a file with no dollar or model
+  row is written as version 1. `readScopedBudget` also reads each row's dollar keys (`usdMicros`), for the panel.
 
 ---
 
@@ -6407,3 +6464,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-02 | Issue #502, part 4 (the runner's model guard). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the `model-not-allowed` row is live, no longer reserved: the model guard refuses, before it is sent, a call whose requested `provider/model` is not on `PI_ALLOWED_MODELS` (exact, case-sensitive, on all five ModelRuntime methods and a legacy compat call, on one copy of the model; a virtual model judged by its routed physical call on `streamSimple` and as itself elsewhere), BEFORE the cost check, so an unlisted call under a cap is `model-not-allowed`. PR #538's review: a listed call whose request would name another model is refused too (samplingParams naming a routing key, `providerOptions` included, on the three merging apis, any other key passing, a caller's `fetch`, a per-call azure deployment, an unlisted anthropic fallback pair), and an admitted call whose `onPayload` (the session's `before_provider_request` hooks included) changes the payload outside the keys a hook may edit (deny by default, at any depth: the top-level messages, system prompt and sampling knobs only, a key set to `undefined` counting as absent), or returns a non-plain object or one with a `toJSON` or an accessor, fails before it is sent, and pi is handed a fresh object built from the hook's editable keys and a snapshot of the rest. The refusal logs `model_refused` with `method`, `why` and a count; a listed fallback that answered is logged `model_fallback`, and an openai-completions alias is not read; under a list alone a displaced compat entry stops the job (`model_guard_displaced`, `modelRefused: 0`). The `model-policy-unenforceable` row now refuses only a list the runner cannot enforce (no meter, no hard stop, or no model guard). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the worker's free `model-not-allowed` also covers a listed model whose declared fallbacks are not all listed (`why: fallback-unlisted`); `modelRefused` is written, only when a list is set, after the cost fields; its semantics are stated, absence meaning no list; `model-not-allowed` is live as the runner's paid stop on an image that declares `modelPolicy`, beside the worker's free refusal. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `modelPolicy` joins the capability tokens, with a run as its evidence (a job with a fake key and no network whose list lacks its model must exit `2` / `model-not-allowed` with `modelRefused: 1`), the CI workflow binds the token to this repo's image, and a runner from such an image enforces `PI_ALLOWED_MODELS`; the paragraph sits after `costCap`'s and names the worker's `CAPABILITY_GATES` row, and the stale "until an image declares it" sentence now says this repo's image declares it. **`INT-SDK-SESSION-OPTIONS`**: the snippet builds the one policy guard. **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the guard runs inside the container before each call and moves no worker gate. **Code evidence**: image/runner/src/usage-meter.mjs -> createModelGuard, createPolicyGuard, samplingOverridesRequest, wrapModelRuntime, wrapProviderStreams, installProcessUsageMeter (arm); image/runner/run-job.mjs; image/Dockerfile; image/verify-image.sh; .github/workflows/pi-upgrade-check.yml; worker/src/run-history.mjs (comments only); worker/src/model-catalog.mjs -> declaredFallbacks, checkModelsKnown; worker/src/processor.mjs. |
 | 2026-10-02 | Issue #501, parts 3 and 4, and #503 part 7 (dollar windows, reserved before the run and settled after it). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the record gains `dollars` in tail position after `backend`, unconditional and null when no dollar window applied, `{ reservedMicros, settledMicros, basis, modelBasis }` rebuilt from named fields, with the four bases (`metered` only when `tokens.metered`, `costCapMicros` present, every floor counter present and 0 and a ledger; `floor`; `refunded`; `unreserved`) and `modelBasis` reserved and null; the reason enum gains `dollar-cap`, a free refusal with both job-count slots given back. **`INT-CONFIG-OVERLAY-CONTRACT` AMENDED**: the three dollar windows are accepted at the admin's write and the worker's read and in env, under the unchanged merged-values invariant; the Acceptance clause that refused them now accepts them with a cap and refuses them without one. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: NEW **Cost** bullet (#503 part 7): a job reserves nothing when every model it may call (the effective list with the main model, else the main model) is served by a declared endpoint and zero-rated as pi composes its cost (the overlay entry's cost, all zeros when absent, else the builtin's, then `modelOverrides` on a chat model), and runs under `PI_MAX_COST_MICROS=0`; fail closed with no endpoint or no readable overlay; the Status says part 7 landed. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, the `PI_MAX_COST_MICROS` sentence: `0` for such a job. **Code evidence**: worker/src/dollar-budget.mjs; worker/src/processor.mjs; worker/src/run-history.mjs -> buildRecord; worker/src/runtime-settings.mjs -> validateOverlay; worker/src/config.mjs. PR #542's review, folded in: `metered` admits a zero-call run (calls 0, cost 0, no ledger) at 0 and requires `costCapMicros` not above the reservation; `floor` is at least the reservation and never less than a reported metered cost, its cases listed in full, a 401 before any answer among them, and the partial-fault wording corrected; `unreserved` covers a cap already 0 (also in `INT-MODEL-ENDPOINTS-FILE-CONTRACT`'s Cost); the record shows a retried job's last attempt; `dollar-cap` records `budgetReserved: false` unless the job-count refund failed. `INT-CONFIG-OVERLAY-CONTRACT`: the admin's dollar-key write judges the merged overlay and env and warns, and doctor names a valid overlay whose merge breaks the invariant. Round 2: that check is a warning in every layout, never a refusal, since the worker's cap may come from a source the admin cannot see. Round 3: `metered` needs a TRUSTED exit line (the container exited on its own and the line's `code` is its exit code); an untrusted line is a floor. |
 | 2026-10-02 | Issue #540, three follow-ups from the review of #537. **`INT-CONFIG-OVERLAY-CONTRACT` AMENDED**, wording only: the blank-file sentence now names all three writers (console `set`/`unset`, `dispatch_set`, `/dispatch secrets`) and says a file that cannot be read is never blank. The `dispatch_set` tool refused a blank settings file (whitespace or a byte-order mark only) before its confirm, and `/dispatch secrets` refused it on its read (PR #548's review), because a blank file reads as invalid; both now read it as a missing file, using `writeSettings`' own blank test (`blankSettingsFile`, exported for it). A file that is invalid and not blank is still refused before any confirm, and a read error is tested as not blank, so an unreadable file holding a cap is never written over. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `doctor` states a version-floor line for `run.maxCostUsd`, once and as `ok`, when any trigger sets a cap (a `null` cap is absent), the twin of the `run.models` line. The skew wrapper in `makeProcessor` gains a test with a deployment cap set, so a wrapper that filled an arrived-without cap from the deployment's would fail. The worker's job path is unchanged. **Code evidence**: admin/src/read-model.mjs -> blankSettingsFile, writeSettings; admin/src/index.ts -> dispatch_set; admin/src/secrets-command.ts -> runSecretsCommand; worker/src/doctor.mjs -> collectChecks; admin/test/crud.test.mjs; admin/test/read-model.test.mjs; worker/test/model-policy.test.mjs; worker/test/doctor.test.mjs. |
+| 2026-10-02 | Issues #501 part 5 and #502 part 6 (scoped-limits version 2). **`INT-SCOPED-LIMITS-FILE-CONTRACT` AMENDED**: `SCOPED_LIMITS_VERSION` is 2; repo and folder rows gain `dayUsd`, `weekUsd` and `monthUsd` (the overlay's `parseUsdMicros` rules, stored as canonical decimal strings), and `model:<provider>/<model>` rows carry those three only (counts and `concurrent` refused, `model:other/other` refused, case-insensitive duplicates refused; near misses of `model:` refused naming the exact form, and `project:` reserved for #499 in both versions); a version 1 file using either is refused naming version 2, and a version 1 file without them reads unchanged; the admin writes the lowest version that expresses the file and carries dollar fields through a count edit; new Dollar enforcement bullet: one reservation over the deployment, `budget:usd:s:<hash16>` and `budget:usd:mdl:<hash16 of the lowercased ref>` windows, listed jobs in their listed rows, unrestricted jobs in every model row (fail closed), unreserved jobs in none, a refusal anywhere giving back every key, `budget:usd:p:` still reserved for #499. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `dollars.modelBasis` fills (`metered`, `floor`, `refunded`, or null when no model window was held), each model window settled from its own `usage.models` row, with the five floor conditions (basis not metered, untrusted line, no ledger with calls, `truncated` absent or above 0, an `other`/`other` cost); a model's case-differing usage rows are summed; the ledger's `truncated` is `null` when the exit line omits it (it was 0). The dollar enforcement bullet gains the warnings (worker log at boot and reload, doctor, with env and overlay merged) and the refusal that tells a window below one job's cap from a full one. **Code evidence**: worker/src/scoped-limits.mjs -> parseScopedLimits, dollarCapsFor, modelDollarRows, scopedLimitsVersionFor; worker/src/dollar-budget.mjs -> modelDollarSettlement, holdPart; worker/src/processor.mjs -> runJob; worker/src/run-history.mjs -> buildRecord; admin/src/read-model.mjs -> writeScopedLimits, readScopedBudget. |

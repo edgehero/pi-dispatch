@@ -11,7 +11,7 @@ import { RUNNER_POLICY_REASONS } from "./run-history.mjs";
 import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
 import { CAPABILITY_GATES } from "./image-preflight.mjs";
 import { modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
-import { DOLLAR_CAP_REASON, dollarLedgers, dollarSettlement, dollarsRecord, meteredMicros, releaseDollars, reserveDollars, settleDollars } from "./dollar-budget.mjs";
+import { DOLLAR_CAP_REASON, DOLLAR_KEY_PREFIX, dollarLedgers, dollarSettlement, dollarsRecord, holdPart, meteredMicros, modelDollarSettlement, releaseDollars, reserveDollars, settleDollars } from "./dollar-budget.mjs";
 import { zeroRatedVerdict } from "./model-endpoints.mjs";
 
 /**
@@ -154,6 +154,11 @@ export function isNeverStartedExit({ code, aborted, detached }, neverStartedCode
 	if (detached === true || aborted) return false;
 	if (code === EXIT_COMPLETED || code === EXIT_POLICY || code === EXIT_INFRA) return false;
 	return (neverStartedCodes ?? []).includes(code);
+}
+
+/** The key prefixes of a job's model dollar ledgers (`modelDollarRows`), to tell a model window's keys in a hold apart. */
+function modelPrefixesOf(modelDollars) {
+	return new Set((modelDollars ?? []).map((m) => m.keyPrefix));
 }
 
 /**
@@ -303,6 +308,12 @@ export async function runJob(job, deps) {
 		// null when no window is set. Null is the default and the off switch: nothing is reserved or settled and no
 		// `budget:usd:*` key is written, so a deployment with no dollar setting is byte-identical.
 		dollarCaps = null,
+		// Issues #501 part 5 and #502 part 6 (scoped-limits.json version 2): this job's repo or folder dollar windows,
+		// `{ scope, keyPrefix, caps }` from `dollarCapsFor`, or null; and the model dollar windows it reserves in,
+		// `[{ ref, keyPrefix, caps }]` from `modelDollarRows` over its effective list (every model row when it has
+		// none). Both default to nothing, so an unwired processor reserves exactly what it did before.
+		scopedDollars = null,
+		modelDollars = [],
 		// Issue #503 part 7: the builtin catalog's model object for (provider, id), or null (model-catalog.mjs
 		// `builtinModel`). Read only by the zero-rated check; the default knows no builtin model, so an unwired
 		// processor judges overlay models alone and reserves for every other.
@@ -1046,10 +1057,16 @@ export async function runJob(job, deps) {
 		// a refusal anywhere above never touches a dollar counter. The amount is the job's per-job cost cap, which the
 		// runner enforces before every call, so it bounds what the run can spend; the worker needs no prices.
 		let containerJob = job;
-		if (dollarCaps) {
-			// A window needs a per-job cap (the settings invariant, `checkDollarInvariant`), so a job with none here is a
-			// defect or a hand-built queue entry: refused as configuration, before anything is reserved, and the config
-			// arm below refunds both job-count slots.
+		// Every dollar ledger this job reserves in: the deployment's windows, its repo or folder row's, and each model
+		// row it may reach (scoped-limits.json version 2). ONE reservation over all of them, so a refusal in any window
+		// gives back every key, the deployment's included.
+		const ledgers = dollarLedgers(dollarCaps, { scope: scopedDollars, models: modelDollars });
+		const modelPrefixes = new Map((modelDollars ?? []).map((m) => [m.keyPrefix, m.ref]));
+		if (ledgers.length > 0) {
+			// A window needs a per-job cap (the settings invariant, `checkDollarInvariant`; for a scoped or model row, the
+			// same rule), so a job with none here is a defect, a hand-built queue entry, or a dollar row in
+			// scoped-limits.json on a deployment with no `maxCostUsd`: refused as configuration, before anything is
+			// reserved, and the config arm below refunds both job-count slots.
 			if (job.maxCostMicros === null || job.maxCostMicros === undefined) throw configError("a dollar window is set but this job has no per-job cost cap to reserve");
 			// Issue #503 part 7: a job that CANNOT spend reserves nothing. Every model it may call is served by a declared
 			// endpoint and zero-rated, so its container runs under a per-job cap of 0, which the runner's cost guard holds
@@ -1066,7 +1083,7 @@ export async function runJob(job, deps) {
 			} else {
 				let reservation;
 				try {
-					reservation = await reserveDollars(redis, { ledgers: dollarLedgers(dollarCaps), amountMicros: job.maxCostMicros, now, log });
+					reservation = await reserveDollars(redis, { ledgers, amountMicros: job.maxCostMicros, now, log });
 				} catch (error) {
 					// Valkey did not answer. reserveDollars tried to give back what it had added, key by key (a key it could
 					// not is logged, dollar_giveback_error), so nothing is held by this job; the job-count
@@ -1092,14 +1109,29 @@ export async function runJob(job, deps) {
 						log("budget_release_failed", { at: DOLLAR_CAP_REASON, code: releaseError?.code ?? null });
 					}
 					// The window is named and the amounts are not: the comment's reader may be an issue author, and the
-					// amounts are the operator's, which the log carries.
+					// amounts are the operator's, which the log carries. Which ledger refused is named too: the deployment,
+					// the repo (a forge scope IS the repo the comment posts on), "this folder" (a local scope is a host path,
+					// kept out of the comment and the log), or the model (operator configuration, never payload). The log
+					// names a scoped or model ledger by its key prefix, a hash, never the scope string.
 					const period = { day: "today's", week: "this week's", month: "this month's" }[reservation.window] ?? "a";
-					await comment(job, `Refused: ${period} dollar budget for this deployment has no room left for this run's cost limit, so no container was started and nothing was spent. Not run.`);
-					log("over_dollar_budget", { window: reservation.window, reservedMicros: reservation.reservedMicros, capMicros: reservation.capMicros, amountMicros: job.maxCostMicros, refunded });
-					return { outcome: "policy", reason: DOLLAR_CAP_REASON, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: !refunded, dollars: reservation.stranded > 0 ? dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: job.maxCostMicros, basis: "floor" }) : dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: 0, basis: "refunded" }) }; // return => not retried
+					// Two different states, told apart (PR #549's review): a window whose cap is BELOW one job's cap refuses every
+					// such job until the operator changes a setting, which "no room left" would hide behind a wait that never ends.
+					const capBelowJob = reservation.capMicros < job.maxCostMicros;
+					const refusedBy = reservation.ledger === DOLLAR_KEY_PREFIX ? "deployment" : modelPrefixes.has(reservation.ledger) ? "model" : "scope";
+					const whose = refusedBy === "deployment" ? "this deployment" : refusedBy === "model" ? `the model ${modelPrefixes.get(reservation.ledger)}` : job.kind === "local" ? "this folder" : scopedDollars.scope;
+					await comment(
+						job,
+						capBelowJob
+							? `Refused: the ${{ day: "daily", week: "weekly", month: "monthly" }[reservation.window] ?? ""} dollar budget for ${whose} is smaller than this run's cost limit, so no run with this limit can start until the operator raises the budget or lowers the limit. No container was started and nothing was spent. Not run.`
+							: `Refused: ${period} dollar budget for ${whose} has no room left for this run's cost limit, so no container was started and nothing was spent. Not run.`,
+					);
+					log("over_dollar_budget", { ledger: refusedBy, ...(refusedBy === "deployment" ? {} : { key: reservation.ledger }), ...(refusedBy === "model" ? { model: modelPrefixes.get(reservation.ledger) } : {}), window: reservation.window, reservedMicros: reservation.reservedMicros, capMicros: reservation.capMicros, amountMicros: job.maxCostMicros, ...(capBelowJob ? { capBelowJob: true } : {}), refunded });
+					const stranded = reservation.stranded > 0;
+					const modelBasis = modelPrefixes.size === 0 ? null : stranded ? "floor" : "refunded";
+					return { outcome: "policy", reason: DOLLAR_CAP_REASON, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: !refunded, dollars: stranded ? dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: job.maxCostMicros, basis: "floor", modelBasis }) : dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: 0, basis: "refunded", modelBasis }) }; // return => not retried
 				}
 				dollarHold = reservation.hold;
-				dollars = dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: job.maxCostMicros, basis: "floor" });
+				dollars = dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: job.maxCostMicros, basis: "floor", modelBasis: modelPrefixes.size > 0 ? "floor" : null });
 			}
 		}
 
@@ -1129,14 +1161,30 @@ export async function runJob(job, deps) {
 			// out or detach it, so the runner had the chance to write its genuine last line) AND that line's own `code` is
 			// the container's real exit code (PR #542's review, round 3: a job's tool can forge a $0 line before a stop).
 			const trusted = !aborted && detached !== true && Number.isSafeInteger(exitLineCode) && exitLineCode === code;
-			const { settledMicros, basis } = dollarSettlement({ tokens, usage: usage ?? null, reservedMicros: dollarHold.amountMicros, trusted });
-			const { applied, of } = await settleDollars(redis, dollarHold, settledMicros, { log });
+			const reservedMicros = dollarHold.amountMicros;
+			const { settledMicros, basis } = dollarSettlement({ tokens, usage: usage ?? null, reservedMicros, trusted });
+			// The deployment and the repo or folder windows settle to the job's cost; each model window to its own row of
+			// the usage ledger (`modelDollarSettlement`), never to the job's total.
+			const jobPart = holdPart(dollarHold, (prefix) => !modelPrefixes.has(prefix));
+			const { applied, of } = await settleDollars(redis, jobPart, settledMicros, { log });
+			let modelBasis = null;
+			for (const part of dollarHold.ledgers ?? []) {
+				const ref = modelPrefixes.get(part.keyPrefix);
+				if (ref === undefined) continue;
+				const m = modelDollarSettlement({ ref, basis, tokens, usage: usage ?? null, reservedMicros, trusted });
+				const done = await settleDollars(redis, { amountMicros: reservedMicros, keys: part.keys }, m.settledMicros, { log });
+				// The deployment rule below, per model window: a fault that adjusted none of its keys left the reservation.
+				const mBasis = done.applied === 0 && done.of > 0 && m.settledMicros !== reservedMicros ? "floor" : m.basis;
+				modelBasis = modelBasis === "floor" || mBasis === "floor" ? "floor" : "metered";
+				// The model is operator configuration (a scoped-limits row), and the key a hash; no value but the amounts.
+				log("dollar_model_settled", { model: ref, key: part.keyPrefix, settledMicros: m.settledMicros, basis: mBasis });
+			}
 			// A fault that adjusted no key leaves the whole reservation in every window, which is a floor whatever the
 			// basis would have been, and the record says so. A partial one is logged (dollar_settle_error) and recorded
 			// as computed: the keys that were adjusted hold the settled amount.
-			dollars = applied === 0 && of > 0 && settledMicros !== dollarHold.amountMicros ? dollarsRecord({ reservedMicros: dollarHold.amountMicros, settledMicros: dollarHold.amountMicros, basis: "floor" }) : dollarsRecord({ reservedMicros: dollarHold.amountMicros, settledMicros, basis });
+			dollars = applied === 0 && of > 0 && settledMicros !== reservedMicros ? dollarsRecord({ reservedMicros, settledMicros: reservedMicros, basis: "floor", modelBasis }) : dollarsRecord({ reservedMicros, settledMicros, basis, modelBasis });
 			dollarHold = null;
-			log("dollar_settled", { reservedMicros: dollars.reservedMicros, settledMicros: dollars.settledMicros, basis: dollars.basis });
+			log("dollar_settled", { reservedMicros: dollars.reservedMicros, settledMicros: dollars.settledMicros, basis: dollars.basis, ...(modelBasis !== null ? { modelBasis } : {}) });
 		} else if (dollars?.basis === "unreserved") {
 			// Nothing was held, so nothing is written. A metered cost above 0 here would mean the runner's cap of 0 let a
 			// priced call through, which it cannot by construction; it is logged so it cannot pass unseen.
@@ -1285,10 +1333,12 @@ export async function runJob(job, deps) {
 			dollarHold = null;
 			if ((e?.piDispatchConfig === true && !containerRan) || isNeverStartedRetry(e)) {
 				const { applied, of } = await releaseDollars(redis, hold, { log });
-				dollars = dollarsRecord({ reservedMicros: hold.amountMicros, settledMicros: applied === of ? 0 : hold.amountMicros, basis: applied === of ? "refunded" : "floor" });
+				const heldModel = (hold.ledgers ?? []).some((l) => modelPrefixesOf(modelDollars).has(l.keyPrefix));
+				dollars = dollarsRecord({ reservedMicros: hold.amountMicros, settledMicros: applied === of ? 0 : hold.amountMicros, basis: applied === of ? "refunded" : "floor", modelBasis: heldModel ? (applied === of ? "refunded" : "floor") : null });
 			} else {
 				log("dollar_hold_unsettled", { reservedMicros: hold.amountMicros, error: e instanceof InfraRetry ? "infra-retry" : (e?.name ?? "error") });
-				dollars = dollarsRecord({ reservedMicros: hold.amountMicros, settledMicros: hold.amountMicros, basis: "floor" });
+				const heldModel = (hold.ledgers ?? []).some((l) => modelPrefixesOf(modelDollars).has(l.keyPrefix));
+				dollars = dollarsRecord({ reservedMicros: hold.amountMicros, settledMicros: hold.amountMicros, basis: "floor", modelBasis: heldModel ? "floor" : null });
 			}
 		}
 		// The record reads `dollars` off the error on every throw path (buildRecord), so a retried or failed attempt says

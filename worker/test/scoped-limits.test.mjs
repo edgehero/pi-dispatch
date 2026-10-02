@@ -11,7 +11,14 @@ import {
 	concurrencyFor,
 	scopeKeyPrefix,
 	makeInFlight,
+	dollarCapsFor,
+	modelDollarRows,
+	scopeDollarKeyPrefix,
+	modelDollarKeyPrefix,
+	dollarKeyPrefixFor,
+	scopedLimitsVersionFor,
 } from "../src/scoped-limits.mjs";
+import { createHash } from "node:crypto";
 
 const wrap = (limits, version = 1) => JSON.stringify({ version, limits });
 const parse = (limits) => parseScopedLimits(wrap(limits), "sl.json");
@@ -45,7 +52,7 @@ test("parseScopedLimits round-trips its own output (null is absent, the subscrip
 test("parseScopedLimits rejects malformed files fail-loud", () => {
 	assert.throws(() => parseScopedLimits("{ not json", "sl.json"), /not valid JSON/);
 	assert.throws(() => parseScopedLimits(JSON.stringify([]), "sl.json"), /must be an object with "version" and "limits"/);
-	assert.throws(() => parseScopedLimits(JSON.stringify({ limits: [] }), "sl.json"), /must have "version": 1 \(an integer >= 1\)/);
+	assert.throws(() => parseScopedLimits(JSON.stringify({ limits: [] }), "sl.json"), /must have "version": 1 or 2 \(an integer >= 1\)/);
 	assert.throws(() => parseScopedLimits(JSON.stringify({ version: 0, limits: [] }), "sl.json"), /must have "version": 1/);
 	assert.throws(() => parseScopedLimits(JSON.stringify({ version: "1", limits: [] }), "sl.json"), /must have "version": 1/);
 	assert.throws(() => parseScopedLimits(JSON.stringify({ version: 1 }), "sl.json"), /must have a "limits" array/);
@@ -65,10 +72,10 @@ test("parseScopedLimits rejects malformed files fail-loud", () => {
 
 test("parseScopedLimits refuses a newer version loudly, naming both", () => {
 	assert.throws(
-		() => parseScopedLimits(wrap([], 2), "sl.json"),
-		/written by a newer pi-dispatch \(version 2; this build understands 1\)/,
+		() => parseScopedLimits(wrap([], 3), "sl.json"),
+		/written by a newer pi-dispatch \(version 3; this build understands 2\)/,
 	);
-	assert.equal(SCOPED_LIMITS_VERSION, 1);
+	assert.equal(SCOPED_LIMITS_VERSION, 2);
 });
 
 test('parseScopedLimits refuses "*" with the per-scope-default reversal note', () => {
@@ -264,4 +271,117 @@ test("makeInFlight: Infinity always admits and scopes are independent", () => {
 	assert.equal(m.tryAcquire("b", 1), false);
 	assert.equal(m.count("a"), 20);
 	assert.equal(m.count("b"), 1);
+});
+
+// ── version 2: dollar windows on repo and folder rows (#501 part 5) and model rows (#502 part 6) ─────────────────
+
+const parse2 = (limits) => parseScopedLimits(wrap(limits, 2), "sl.json");
+const sha16 = (v) => createHash("sha256").update(v).digest("hex").slice(0, 16);
+
+test("v2: a repo row carries dayUsd/weekUsd/monthUsd as canonical decimals, beside its counts; the literal has eight keys", () => {
+	const [row] = parse2([{ scope: "acme/web", day: 3, dayUsd: "2.5", weekUsd: 10, monthUsd: "0.000001" }]);
+	assert.deepEqual(row, { scope: "acme/web", day: 3, week: null, month: null, concurrent: null, dayUsd: "2.50", weekUsd: "10.00", monthUsd: "0.000001" });
+	// A dollar-only row is a row: it limits something.
+	assert.equal(parse2([{ scope: "acme/web", weekUsd: "1" }])[0].weekUsd, "1.00");
+	// The overlay's number rules: no exponent in a string, at most 6 decimals, above 0.
+	assert.throws(() => parse2([{ scope: "acme/web", dayUsd: "1e3" }]), /index 0: dayUsd must be a dollar amount above 0/);
+	assert.throws(() => parse2([{ scope: "acme/web", dayUsd: "0.1234567" }]), /dayUsd must be a dollar amount/);
+	assert.throws(() => parse2([{ scope: "acme/web", monthUsd: 0 }]), /monthUsd must be a dollar amount above 0/);
+	assert.throws(() => parse2([{ scope: "acme/web" }]), /at least one of day, week, month, concurrent, dayUsd, weekUsd, monthUsd is required/);
+	// The parser accepts its own output back (the admin's read-modify-write).
+	const again = parse2(parse2([{ scope: "acme/web", dayUsd: "2.5" }]));
+	assert.equal(again[0].dayUsd, "2.50");
+});
+
+test("v1 stays v1: read unchanged (the five-key literal), and a v1 file using dollar fields or a model row is REFUSED naming version 2", () => {
+	assert.deepEqual(parse([{ scope: "acme/web", day: 3 }]), [{ scope: "acme/web", day: 3, week: null, month: null, concurrent: null }]);
+	assert.throws(() => parse([{ scope: "acme/web", day: 3, dayUsd: "5" }]), /index 0: dayUsd needs "version": 2 \(this file says 1\)/);
+	assert.throws(() => parse([{ scope: "acme/web", monthUsd: 5 }]), /monthUsd needs "version": 2/);
+	assert.throws(() => parse([{ scope: "model:openai/gpt-x", dayUsd: "5" }]), /a "model:" row needs "version": 2 \(this file says 1\)/);
+	// A null dollar field is absent, in v1 as in v2 (the subscriptions rule).
+	assert.equal(parse([{ scope: "acme/web", day: 3, dayUsd: null }])[0].day, 3);
+});
+
+test("v2 model rows: model:<provider>/<model> with *Usd fields only; counts and concurrency refused; ids checked; duplicates by case refused", () => {
+	const [m] = parse2([{ scope: " model:OpenAI/gpt-X ", monthUsd: "40" }]);
+	assert.deepEqual(m, { scope: "model:OpenAI/gpt-X", day: null, week: null, month: null, concurrent: null, dayUsd: null, weekUsd: null, monthUsd: "40.00" });
+	for (const field of ["day", "week", "month", "concurrent"]) {
+		assert.throws(() => parse2([{ scope: "model:openai/gpt-x", dayUsd: "1", [field]: 1 }]), new RegExp(`carries dayUsd, weekUsd and monthUsd only \\(${field} is refused\\)`));
+	}
+	assert.throws(() => parse2([{ scope: "model:openai/gpt-x" }]), /a model row needs at least one of dayUsd, weekUsd, monthUsd/);
+	assert.throws(() => parse2([{ scope: "model:gpt-x", dayUsd: "1" }]), /model:<provider>\/<model>/);
+	assert.throws(() => parse2([{ scope: "model:open ai/x", dayUsd: "1" }]), /model:<provider>\/<model>/);
+	assert.throws(() => parse2([{ scope: "model:other/other", dayUsd: "1" }]), /fold row/);
+	// A model id may carry a slash (openrouter vendor/model): split at the FIRST slash, as the allowed list does.
+	assert.equal(parse2([{ scope: "model:openrouter/anthropic/claude-x", dayUsd: "1" }])[0].scope, "model:openrouter/anthropic/claude-x");
+	assert.throws(() => parse2([{ scope: "model:openai/gpt-x", dayUsd: "1" }, { scope: "model:OpenAI/GPT-x", weekUsd: "1" }]), /duplicate scope/);
+});
+
+test("model rows are never a job's scope: limitFor, budgetCapsFor and concurrencyFor ignore them", () => {
+	const limits = parse2([{ scope: "model:openai/gpt-x", dayUsd: "1" }]);
+	assert.equal(limitFor(limits, "model:openai/gpt-x"), null);
+	assert.equal(budgetCapsFor(ghJob("model:openai/gpt-x"), limits), null);
+	assert.equal(concurrencyFor(ghJob("model:openai/gpt-x"), limits), Infinity);
+});
+
+test("dollarCapsFor: the scope row's dollar windows in integer micro-dollars under budget:usd:s:<hash16 of the canonical scope>", () => {
+	const limits = parse2([
+		{ scope: "acme/web", day: 3, dayUsd: "2.5", monthUsd: "100" },
+		{ scope: "/srv/site/", weekUsd: "1.25" },
+		{ scope: "acme/count", day: 3 },
+	]);
+	assert.deepEqual(dollarCapsFor(ghJob("acme/web"), limits), { scope: "acme/web", keyPrefix: `budget:usd:s:${sha16("acme/web")}`, caps: { day: 2_500_000, week: null, month: 100_000_000 } });
+	const local = dollarCapsFor(localJob("/srv//site"), limits);
+	assert.deepEqual(local.caps, { day: null, week: 1_250_000, month: null });
+	assert.equal(local.keyPrefix, `budget:usd:s:${sha16(resolve("/srv/site"))}`, "the same canonical scope the job-count windows hash");
+	assert.equal(local.keyPrefix.slice("budget:usd:s:".length), scopeKeyPrefix(resolve("/srv/site")).slice("budget:s:".length), "the SAME hash as the job-count key");
+	assert.equal(dollarCapsFor(ghJob("acme/count"), limits), null, "a count-only row has no dollar window");
+	assert.equal(dollarCapsFor(ghJob("acme/other"), limits), null);
+	assert.deepEqual(budgetCapsFor(ghJob("acme/web"), limits), { scope: "acme/web", caps: { day: 3, week: null, month: null } }, "budgetCapsFor unchanged");
+});
+
+test("modelDollarRows: a list reserves in its listed rows (ignoring case); NO list reserves in EVERY row; key = hash16 of the LOWERCASED ref", () => {
+	const limits = parse2([
+		{ scope: "acme/web", dayUsd: "1" },
+		{ scope: "model:OpenAI/GPT-x", dayUsd: "1" },
+		{ scope: "model:ollama/qwen3:0.6b", weekUsd: "0.05" },
+	]);
+	const gpt = { ref: "openai/gpt-x", keyPrefix: `budget:usd:mdl:${sha16("openai/gpt-x")}`, caps: { day: 1_000_000, week: null, month: null } };
+	const qwen = { ref: "ollama/qwen3:0.6b", keyPrefix: `budget:usd:mdl:${sha16("ollama/qwen3:0.6b")}`, caps: { day: null, week: 50_000, month: null } };
+	assert.deepEqual(modelDollarRows(limits, ["openai/gpt-x"]), [gpt]);
+	assert.deepEqual(modelDollarRows(limits, ["ollama/qwen3:0.6b", "anthropic/claude-x"]), [qwen]);
+	assert.deepEqual(modelDollarRows(limits, null), [gpt, qwen], "unrestricted: every model row (fail closed)");
+	assert.deepEqual(modelDollarRows(limits, undefined), [gpt, qwen]);
+	assert.deepEqual(modelDollarRows([], null), []);
+	// One model is one counter whatever case it is spelled in, and the ledger's lowercased ids meet it.
+	assert.equal(modelDollarKeyPrefix("OpenAI/GPT-x"), modelDollarKeyPrefix("openai/gpt-x"));
+	assert.equal(modelDollarKeyPrefix("OpenAI/GPT-x"), `budget:usd:mdl:${sha16("openai/gpt-x")}`);
+	assert.equal(dollarKeyPrefixFor(limits[1]), gpt.keyPrefix);
+	assert.equal(dollarKeyPrefixFor(limits[0]), scopeDollarKeyPrefix("acme/web"));
+	assert.ok(!gpt.keyPrefix.startsWith("budget:usd:p:") && !scopeDollarKeyPrefix("x").startsWith("budget:usd:p:"), "budget:usd:p: stays reserved for #499");
+});
+
+test("scopedLimitsVersionFor: 1 unless a row carries a dollar field or is a model row", () => {
+	assert.equal(scopedLimitsVersionFor([]), 1);
+	assert.equal(scopedLimitsVersionFor([{ scope: "a/b", day: 1, dayUsd: null }]), 1);
+	assert.equal(scopedLimitsVersionFor([{ scope: "a/b", day: 1 }, { scope: "c/d", weekUsd: "1" }]), 2);
+	assert.equal(scopedLimitsVersionFor([{ scope: "model:a/b", dayUsd: "1" }]), 2);
+});
+
+test("a NEAR MISS of a model row is refused, never read as an inert repo row; project: is reserved in both versions (PR #549's review)", () => {
+	for (const scope of ["Model:openai/gpt-x", "MODEL:openai/gpt-x", "models:openai/gpt-x", "model :openai/gpt-x", "Models  :x/y"]) {
+		assert.throws(() => parse2([{ scope, dayUsd: "1" }]), /written exactly model:<provider>\/<model>/, scope);
+		assert.throws(() => parse([{ scope, day: 1 }]), /written exactly model:<provider>\/<model>/, `${scope} (v1)`);
+	}
+	for (const scope of ["project:abc", "Project:abc", "projects :abc"]) {
+		assert.throws(() => parse2([{ scope, dayUsd: "1" }]), /reserved for project windows \(#499\)/, scope);
+		assert.throws(() => parse([{ scope, day: 1 }]), /reserved for project windows \(#499\)/, `${scope} (v1)`);
+	}
+	// Not near misses: a repo or folder whose name merely starts with the word.
+	assert.equal(parse([{ scope: "modelsco/web", day: 1 }])[0].scope, "modelsco/web");
+	assert.equal(parse([{ scope: "projectx/web", day: 1 }])[0].scope, "projectx/web");
+});
+
+test("a case-colliding duplicate model row names the FIRST row's index (PR #549's review)", () => {
+	assert.throws(() => parse2([{ scope: "acme/web", day: 1 }, { scope: "model:openai/gpt-x", dayUsd: "1" }, { scope: "model:OpenAI/gpt-x", weekUsd: "1" }]), /\(first at index 1\)/);
 });

@@ -73,7 +73,7 @@ scaffolds the empty form.
 }
 ```
 
-- `version` — required, `1`. A file stamped by a newer pi-dispatch refuses loudly on both sides rather
+- `version`: required, `1` (or `2` for the dollar fields below). A file stamped by a newer pi-dispatch refuses loudly on both sides rather
   than being read with its new fields silently dropped (a dropped cap field would be a silently widened
   spend limit). The tools refuse to write over a newer or version-less file for the same reason.
 - `scope` — a forge `"owner/name"` or a local folder path, matched **exactly** against the job's scope.
@@ -85,7 +85,67 @@ scaffolds the empty form.
   UTC week, per calendar month. Counted beside the global windows; whichever refuses first refuses the
   job.
 - `concurrent` — optional integer, at least 1: the scope's in-flight ceiling, enforced by deferral.
-- At least one of the four is required per row; duplicate scopes refuse the file.
+- At least one limit field is required per row; duplicate scopes refuse the file.
+
+### Dollar windows and model rows (version 2)
+
+Version 2 adds dollar caps (issues #501 and #502). Set `"version": 2` to use them:
+
+```json
+{
+  "version": 2,
+  "limits": [
+    { "scope": "acme/web", "day": 10, "dayUsd": "5", "monthUsd": "60" },
+    { "scope": "model:openai/gpt-5.4", "weekUsd": "25" }
+  ]
+}
+```
+
+- `dayUsd` / `weekUsd` / `monthUsd` on a repo or folder row: what that scope's jobs may spend per UTC day,
+  Monday week and month, in dollars. Write them as strings (`"2.50"`). The rules are the overlay's: above 0,
+  at most 1000000, at most 6 decimals, no exponent.
+- A `model:<provider>/<model>` row caps what every job spends on that model, in every scope. It carries only
+  the three dollar fields. `day`, `week`, `month` and `concurrent` are refused on it.
+- A version 1 file that uses either is refused, and the error names version 2. A version 1 file without them
+  works as before, with one exception: a row whose scope starts with `project:` or `model:`, in any spelling
+  (`Models:x`, `model :x`), is now refused at load, so the worker will not start. Such a row never matched any
+  job, so fix it or remove it. The panel and the tools write version 1 until a row needs version 2.
+- Each job reserves its per-job cost cap (`maxCostUsd`) in every window that applies, together with the
+  deployment's dollar windows. If any window has no room, the job is refused (`dollar-cap`) and everything it
+  reserved is given back. So a dollar row needs a per-job cap: a job with none is refused `config-refused`.
+- Which model rows a job reserves in: a job with an allowed-model list (`run.models` or `PI_ALLOWED_MODELS`)
+  reserves only in the rows of its listed models. A job with **no list** reserves in **every** model row,
+  because it can switch to any model while it runs. Give such triggers a list if a full model window should
+  not stop them.
+- After the run, a repo or folder window is charged what the job cost, like the deployment's. A model window
+  is charged what that model cost, from the run's per-model usage. When that split is not known (a folded usage
+  ledger, spend on no named model, no ledger, or a cost that is not fully known), the model window keeps at
+  least the whole hold. The run record says which under `dollars.modelBasis`.
+- The dollar counters live under `budget:usd:s:<16 hex>` (a scope) and `budget:usd:mdl:<16 hex>` (a model,
+  hashed in lowercase).
+- A scope must be written exactly. `Model:openai/x`, `models:openai/x` and `model :openai/x` are refused rather
+  than read as a repo name. `project:` scopes are reserved for project windows (issue #499) and are refused too.
+
+Things to know before you add a model row:
+
+- **One model row can block jobs that never use it.** An unrestricted job (no list) holds its cap in every model
+  row, so a full row for one model refuses unrestricted jobs that only call another. Give such triggers a
+  `models` list, or set `PI_ALLOWED_MODELS`.
+- **A window below the per-job cap refuses every job that reaches it, every time.** A job holds its whole cap,
+  so a `dayUsd` of 1 with a `maxCostUsd` of 2 never admits one. The refusal says the budget is smaller than the
+  run's cost limit (not "no room left"), and `pi-dispatch doctor` warns about such a row. A trigger with a
+  smaller `run.maxCostUsd` still fits.
+- **A dollar row needs a per-job cap.** With no `maxCostUsd` set (env or overlay), every job a dollar row applies
+  to is refused `config-refused`, unless its trigger sets `run.maxCostUsd`. The worker logs
+  `scoped_limits_dollar_rows_without_cap` at boot and on each reload, and doctor warns.
+- **A floor charges every model row it held.** When a run's cost is not fully known (for example a 401 before
+  any answer, or a run the worker stopped), each model window it held keeps at least the whole cap, whether the
+  job called that model or not. With N model rows, one such run charges N caps across them.
+- **A listed fallback is charged to the requested model.** When a provider answers with one of the model's
+  allowed fallbacks, the usage ledger names the requested model, so its window pays.
+- **An extension can dodge a model window.** A provider or alias an extension registers inside the job gets
+  its own ledger row, which matches no model row. A model row bounds the ids it names; a `models` list is what
+  stops a job from reaching others.
 
 ## How it works
 
@@ -132,8 +192,8 @@ Three doors, same as quiet hours:
 | Piece | Value |
 |---|---|
 | Env var | `PI_SCOPED_LIMITS_FILE` (absolute path; unset = no scoped limits. An EMPTY value is NOT unset: the worker keeps it and refuses to start, so fill the line in or delete it, and doctor fails on it) |
-| File | `{ "version": 1, "limits": [ { scope, day?, week?, month?, concurrent? } ] }` |
-| Refusal reason | `scope-cap` (pre-spend, never retried) |
+| File | `{ "version": 1, "limits": [ { scope, day?, week?, month?, concurrent? } ] }`; version 2 adds `dayUsd?`, `weekUsd?`, `monthUsd?` and `model:` rows |
+| Refusal reason | `scope-cap` (pre-spend, never retried); `dollar-cap` for a dollar window |
 | Deferral | delayed set, fixed re-check, never dropped |
 | Panel key | `m` |
 | Tools | `dispatch_limits`, `dispatch_limit_add`, `dispatch_limit_edit`, `dispatch_limit_delete` |
