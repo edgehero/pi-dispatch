@@ -32,7 +32,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdirSync, readFileSync as readPackageFile } from "node:fs";
 import { connect as netConnect } from "node:net";
 import { lookup as dnsLookup } from "node:dns/promises";
@@ -44,7 +44,7 @@ import { venuesOf } from "./backends.mjs";
 import { jobImageFrom, logsDirPath, settingsFilePath } from "./config.mjs";
 import { jobImageFix, pullOffered, registryQualified } from "./image-ref.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed as egressArmedFn, egressProxyName } from "./egress.mjs";
-import { envKeyIsBlank, envValueShown, readEnvAssignments, updateEnvFile } from "./env-file.mjs";
+import { ENV_WRITER_FS, ENV_VALUE_UNWRITABLE, envKeyIsBlank, envValueShown, readEnvAssignments, updateEnvFile } from "./env-file.mjs";
 import { COMPOSE_FILE, COMPOSE_VALKEY_OVERRIDE, OWNER_MARKER_KEY, VALKEY_PASSWORD_KEY, VALKEY_PORT_KEY, OWNER_CHECK_CONTAINER, OWNER_CHECK_EXEC, VALKEY_VOLUME_RECORD, adoptVolumeQuestion, composeArgs, ownerCheckAnswer, readVolumeRecord, valkeyOwnerCheckArgs, volumeRecordMatches, volumeRecordText, composeProjectName, foreignContainerSentence, foreignMarkerRefusal, foreignVolumeLabelRefusal, foreignVolumeRefusal, foreignVolumeUsers, isLoopbackHost, newValkeyPassword, unadoptedVolumeRefusal, valkeyContainerOwner, valkeyDockerRunArgs, valkeyPasswordDecision, valkeyPortEnvDecision, valkeyVolumeCreateArgs, valkeyVolumeOwner } from "./valkey-auth.mjs";
 import { deploymentValkeyEnv, deploymentVenueEnv } from "./deployment-venue.mjs";
 import { resolveServiceEnv, serviceEnvFileOf, serviceEnvLoader } from "./service-env.mjs";
@@ -53,6 +53,9 @@ import { EGRESS_PROXY_IMAGE, MODEL_ENDPOINTS_TARGET, PROXY_STATE_FORMAT, jobNetw
 import { endpointsDeclaredIn, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
 import { MODEL_ENDPOINTS_INCLUDE_NAME } from "./model-endpoints.mjs";
 import { DEFAULT_VALKEY_PORT, proxyConfCopyPath, NETNS_KEEPER, NETNS_KEEPER_FORMAT, QUADLET_FILES, STACK_KEYS, applyStack, decideValkey, describeRollBack, passwdNameFrom, readSubuidRanges, rollBackWrites, valkeySharedOn, VALKEY_SHARED_KEY, readValkeyKeys, valkeyTarget, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal } from "./podman-stack.mjs";
+
+/** This command's default fs seam: its own calls, and every call the `.env` writer makes (`ENV_WRITER_FS`, issue #522). */
+export const UP_FS = { existsSync, lstatSync, ...ENV_WRITER_FS };
 
 // The shipped Quadlet templates, module-relative like service.mjs's: worker/deploy in a checkout, <pkg>/deploy under npm.
 const TEMPLATES_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "deploy");
@@ -159,7 +162,7 @@ export async function runUp(argv = [], deps = {}) {
 		// regular file. It calls it optionally, so leaving it out here made that repair dead code in the
 		// only production caller, and the test that covered it attached the method to its own fake.
 		// `lstatSync` for the rules refresh (issue #484), which follows no symlink.
-		fs = { existsSync, lstatSync, readFileSync, writeFileSync, renameSync, statSync, chmodSync, realpathSync, unlinkSync },
+		fs = UP_FS,
 		probeTcp = defaultProbeTcp,
 		// Issue #468: whether the Valkey on 127.0.0.1:6379 answers a client that sends NO password ("ok" when it does),
 		// through the project's one connection function. Real only where the TCP probe is: a test that stands in for the
@@ -481,8 +484,13 @@ export async function runUp(argv = [], deps = {}) {
 			try {
 				({ changed } = updateEnvFile(envPath, key, value, { fs, platform }));
 			} catch (err) {
+				// Advice about THE VALUE only where the value is what was refused (issue #522). Every other refusal of the writer
+				// is about the file and ends in its own fix; this sentence once followed all of them, so a gid mismatch was told
+				// to move the deployment somewhere "without that character in its path". Where the value came from decides the
+				// advice: the two folder keys are this folder's own paths, the two durable ones the account default or this shell.
+				const valueAdvice = err?.code !== ENV_VALUE_UNWRITABLE ? "" : durable ? ". Set it by hand, to a path without that character" : ". Set it by hand, or move the deployment somewhere without that character in its path";
 				out(`✗ ${key} could not be written: ${err?.message}\n`);
-				summary.push([key, `NOT written: ${err?.message}. Set it by hand, or move the deployment somewhere without that character in its path`]);
+				summary.push([key, `NOT written: ${err?.message}${valueAdvice}`]);
 				continue;
 			}
 			if (changed) {

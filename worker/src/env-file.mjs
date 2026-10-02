@@ -17,7 +17,7 @@
  * Deliberately dependency-free (node:fs only, and only in the thin wrapper): it must stay importable
  * from any future setup command without dragging worker config or queue deps along.
  */
-import { chmodSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, closeSync, constants as fsConstants, fchmodSync, fchownSync, fstatSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 
 /**
  * Pure transform over .env TEXT: set `key` to `value` only where nothing is set yet.
@@ -104,6 +104,15 @@ function replacementLines(key, value, bare, wasComment, opts) {
  * character, a `"`, a `%`, a `!`, a `^`, a character outside ASCII, and an `=` at the start of the value. Each
  * row there says whether it is cmd's documented behaviour or a cautious refusal. `'` is ordinary there.
  */
+/**
+ * The `code` on every error `renderEnvValue` throws (issue #522): the VALUE cannot be written, so a caller may add advice
+ * about the value (`up` says where its path came from). Every other refusal of the writer is about the FILE and carries
+ * its own fix, and `up` once gave those this one's advice, telling a gid mismatch to move the deployment somewhere
+ * "without that character in its path".
+ */
+export const ENV_VALUE_UNWRITABLE = "ENV_VALUE_UNWRITABLE";
+const unwritableValue = (message) => Object.assign(new Error(message), { code: ENV_VALUE_UNWRITABLE });
+
 export function renderEnvValue(value, { platform = process.platform } = {}) {
 	const v = String(value);
 	// The Windows loader keeps surrounding quotes as part of the value ("Values MUST be UNQUOTED", its own
@@ -111,16 +120,16 @@ export function renderEnvValue(value, { platform = process.platform } = {}) {
 	// refused rather than dressed in quotes that become part of a path.
 	if (platform === "win32") {
 		const bad = cmdValueRefusal(v);
-		if (bad !== null) throw new Error(`cannot write this value into a .env on Windows: it contains ${bad}, and the .cmd wrapper (deploy/worker-env-wrapper.cmd) cannot be shown to read that back as written. Choose a value without it, or give the service this key through its own environment (pi-dispatch service install --env-setup)`);
+		if (bad !== null) throw unwritableValue(`cannot write this value into a .env on Windows: it contains ${bad}, and the .cmd wrapper (deploy/worker-env-wrapper.cmd) cannot be shown to read that back as written. Choose a value without it, or give the service this key through its own environment (pi-dispatch service install --env-setup)`);
 		return v;
 	}
 	if (UNQUOTED_PLAIN.test(v)) return v;
-	if (v.includes("'") || /[\n\r]/.test(v)) throw new Error(`cannot write this value into a .env safely: ${v.includes("'") ? "it contains a single quote" : "it contains a newline"}`);
+	if (v.includes("'") || /[\n\r]/.test(v)) throw unwritableValue(`cannot write this value into a .env safely: ${v.includes("'") ? "it contains a single quote" : "it contains a newline"}`);
 	// Gate round 2 of PR #478: a control or invisible character is read alike by every loader inside single quotes, but
 	// the reader never vouches for it (`QUOTED_CONTROL`: printing it rewrites a terminal), so writing it quoted gave doctor
 	// a line it calls unread. Refused instead, naming the character, never the value.
 	const hidden = invisibleCharacter(v);
-	if (hidden !== null) throw new Error(`cannot write this value into a .env safely: it contains ${hidden}, which doctor would not show back. Remove it`);
+	if (hidden !== null) throw unwritableValue(`cannot write this value into a .env safely: it contains ${hidden}, which doctor would not show back. Remove it`);
 	return `'${v}'`;
 }
 
@@ -870,6 +879,104 @@ export function envFileEditCheck(content, path, key, value, opts = {}) {
 }
 
 /**
+ * The group-mismatch refusal (issue #522), its own sentence with its own fix. The group is named where `/etc/group`
+ * names it, because "gid 0" sends an operator to look it up and `wheel` does not. It is reached only where the writer
+ * could not keep the group (`updateEnvFile` gives the new file the old one wherever this account is in it), and only
+ * for a file this account OWNS (the owner refusal comes first), so "run it as another account" is no fix: any other
+ * account, a member of that group or root, gets the owner refusal instead. The two fixes are this account joining that
+ * group (a new login picks it up), or a group this account is in: `own`, this process's primary group, which an
+ * owner can always give its file, and which every later rewrite then keeps. The second is the operator's decision where
+ * a service reads the file through its present group, so the sentence says so rather than issuing the chgrp.
+ */
+export function groupRefusal(target, group, made, own, groupName = groupNameOf) {
+	const named = (id) => {
+		const name = groupName(id);
+		return name ? `${name} (gid ${id})` : `gid ${id}`;
+	};
+	const fix = own === null ? "" : `; or, if nothing reads this file through its present group, run \`chgrp ${groupName(own) ?? own} ${quotedForShell(target)}\` and run this again`;
+	return `refusing to edit ${target}: its group is ${named(group)}, which this account could not give the new file, and a new file written beside it gets ${named(made)}, so rewriting it (a new file renamed over it) would change its group, which is how a .env the service reads through its group stops being readable. To fix it, add this account to ${groupName(group) ?? `gid ${group}`} and log in again${fix}; otherwise edit the file by hand. Nothing was written`;
+}
+
+/** A group's name from `/etc/group`, or `null` (no such line, no such file, or not a POSIX host). */
+export function groupNameOf(id, read = () => readFileSync("/etc/group", "utf8")) {
+	try {
+		for (const line of String(read()).split("\n")) {
+			if (line.startsWith("#")) continue;
+			const [name, , gid] = line.split(":");
+			// A digits-only field, so an empty one (which `Number` reads as 0) never names gid 0.
+			if (name && /^\d+$/.test(gid ?? "") && Number(gid) === id) return name;
+		}
+	} catch {
+		// No group database to read: the number alone is said.
+	}
+	return null;
+}
+
+/** `p` as one shell word: bare when it is plainly safe, single-quoted otherwise. */
+function quotedForShell(p) {
+	return /^[A-Za-z0-9_./@%+=:,-]+$/.test(p) ? p : `'${String(p).replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Every call `updateEnvFile` makes, for a production caller's fs seam to spread (issue #522's review). The descriptor
+ * calls are optional on the seam, because a test fake has none, so a seam that drops one does not fail: the writer
+ * quietly goes back to chowning and chmodding the tmp BY PATH, which a swapped tmp redirects. One list, spread by
+ * `up`, `service install` and `setup github`, and pinned by a test that reads all four objects.
+ */
+export const ENV_WRITER_FS = Object.freeze({ readFileSync, writeFileSync, renameSync, statSync, chmodSync, chownSync, realpathSync, unlinkSync, openSync, fstatSync, fchownSync, fchmodSync, fsyncSync, closeSync });
+
+/** `open(2)` flags for the tmp: created here or refused, never through a link (`O_NOFOLLOW` is POSIX-only; 0 elsewhere). */
+const EXCLUSIVE_CREATE = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0);
+
+/**
+ * The tmp, created exclusively at 0600 with `content`, and the four things the writer does to it. Through a DESCRIPTOR
+ * where the seam has one (every production seam), so a path swapped after the create is never what is chowned or
+ * chmodded; a seam without `openSync` (a test fake) gets the same calls by path, still with the exclusive create.
+ */
+function createTmp(fs, tmp, content) {
+	if (typeof fs.openSync === "function") {
+		const fd = fs.openSync(tmp, EXCLUSIVE_CREATE, 0o600);
+		try {
+			fs.writeFileSync(fd, content);
+		} catch (err) {
+			fs.closeSync(fd);
+			try {
+				fs.unlinkSync?.(tmp);
+			} catch {
+				// The write's error is the one to report.
+			}
+			throw err;
+		}
+		let open = true;
+		const shut = () => {
+			if (open) fs.closeSync(fd);
+			open = false;
+		};
+		return {
+			gid: () => fs.fstatSync(fd).gid,
+			chgrp: (g) => fs.fchownSync(fd, -1, g),
+			chmod: (m) => fs.fchmodSync(fd, m),
+			close: () => {
+				try {
+					fs.fsyncSync?.(fd);
+				} finally {
+					shut();
+				}
+			},
+			abandon: shut,
+		};
+	}
+	fs.writeFileSync(tmp, content, { mode: 0o600, flag: "wx" });
+	return {
+		gid: () => fs.statSync(tmp).gid,
+		chgrp: (g) => fs.chownSync(tmp, -1, g),
+		chmod: (m) => fs.chmodSync(tmp, m),
+		close: () => {},
+		abandon: () => {},
+	};
+}
+
+/**
  * Read → transform → write back ATOMICALLY (tmp + rename, the same shape as the admin's
  * writeTriggers), so a watcher or a concurrent reader never sees a half-written .env. When the
  * transform is a no-op the file is not touched at all — no tmp, no rename, no mtime churn — and
@@ -895,7 +1002,7 @@ export function updateEnvFile(path, key, value, deps = {}) {
 	// and the cmd wrapper kept the quotes, making the path the worker loads wrong behind a ✓ on the key
 	// that decides forge auth. A rendering rule that every writer of this file must remember is a rule one
 	// of them will forget.
-	const { fs = { readFileSync, writeFileSync, renameSync, statSync, chmodSync, realpathSync }, overwrite = false, platform = process.platform, narrow = false } = deps;
+	const { fs = ENV_WRITER_FS, overwrite = false, platform = process.platform, narrow = false } = deps;
 	// Every refusal is `planEnvEdit`'s (bytes first, never clobber, read back), made before anything is written.
 	const plan = planEnvEdit(fs.readFileSync(path), path, key, value, { overwrite, platform, verify: deps.verify });
 	if (plan.error) throw new Error(plan.error);
@@ -911,42 +1018,104 @@ export function updateEnvFile(path, key, value, deps = {}) {
 	} catch {
 		// Not resolvable (a dangling link, a fs without the call): edit the path we were given.
 	}
-	// OWNERSHIP, before anything is written. `renameSync` makes a new inode owned by whoever runs this, so
+	// OWNERSHIP, before the file is replaced. `renameSync` makes a new inode owned by whoever runs this, so
 	// a root- or `pi`-owned `.env` at 0640 that the service reads through its group comes back owned by the
 	// operator: the service account loses read access, and `deploy/worker.service` uses a bare
 	// `EnvironmentFile=` (fatal, not `-`), so the unit stops starting. Widening the mode to compensate
 	// would publish a file holding WEBHOOK_SECRET. Refusing is the only honest third option, and the caller
-	// turns it into a line rather than a stack trace.
+	// turns it into a line rather than a stack trace. Each refusal carries its own fix (issue #522).
 	const uid = typeof process.getuid === "function" ? process.getuid() : null;
 	const gid = typeof process.getgid === "function" ? process.getgid() : null;
+	let group = null;
 	if (uid !== null) {
 		try {
-			const { uid: owner, gid: group } = fs.statSync(target);
-			// GID as well as UID, because the layout this protects is a `.env` at 0640 read by the service
-			// THROUGH ITS GROUP. With `bob:pi 0640` and the operator in group `pi` the uid matches, the
-			// rename still makes a new inode with the writer's primary gid, and the `pi` service loses read
-			// access exactly as it would have on a uid mismatch.
-			if (typeof owner === "number" && owner !== uid) throw new Error(`refusing to edit ${target}: it is owned by uid ${owner} and this process is uid ${uid}, and rewriting it would hand it to the wrong account`);
-			if (typeof group === "number" && gid !== null && group !== gid) throw new Error(`refusing to edit ${target}: its group is gid ${group} and this process is gid ${gid}, and rewriting it would hand it to the wrong group, which is how a 0640 .env stops being readable by the service`);
+			const { uid: owner, gid: had } = fs.statSync(target);
+			if (typeof owner === "number" && owner !== uid) throw new Error(`refusing to edit ${target}: it is owned by uid ${owner} and this process is uid ${uid}, and rewriting it (a new file renamed over it) would give it to this account, which is how a .env the service reads stops being readable. To fix it, run this as the account that owns it, or edit the file by hand. Nothing was written`);
+			if (typeof had === "number") group = had;
 		} catch (err) {
 			if (err instanceof Error && err.message.startsWith("refusing to edit")) throw err;
 			// Cannot stat: fall through to the write, which will fail on its own terms if it must.
 		}
 	}
 	const tmp = `${target}.tmp`;
-	fs.writeFileSync(tmp, next, { mode: 0o600 });
+	// CREATED HERE, exclusively, or not at all (issue #522's review). The folder may be one another account can write (a
+	// setgid 2770 folder shared with the service's group), and a `.env.tmp` planted there as a symlink was followed by
+	// the write, by the chown that keeps the group, and by the chmod: content at the link's target, and that file's
+	// group and mode changed. `O_EXCL` refuses any existing path, a symlink included (POSIX: not followed), and
+	// `O_NOFOLLOW` says so twice where the platform has it; everything after the create goes through the descriptor, so
+	// a tmp swapped after the create is not what is chowned or chmodded. An existing tmp is refused and left alone: it is
+	// not this writer's to remove.
+	let handle;
 	try {
-		// The operator's mode, whatever it is, not just 0600. `.env` holds WEBHOOK_SECRET and provider
-		// keys, and a rename from a fresh tmp lands at the process umask: 0640 and 0400 both came back
-		// 0644, world-readable, on the one file this project says must never reach a scrollback.
-		// `narrow` keeps only the owner's bits of it.
-		const mode = fs.statSync(target).mode & 0o7777;
-		fs.chmodSync(tmp, narrow ? mode & 0o7700 : mode);
-	} catch {
-		// The file vanished between read and write, or the fs cannot stat: the tmp keeps the 0600 it was
-		// created with rather than failing an edit that is otherwise sound.
+		handle = createTmp(fs, tmp, next);
+	} catch (err) {
+		if (err?.code === "EEXIST" || err?.code === "ELOOP") throw new Error(`refusing to edit ${target}: ${tmp} already exists (left by an edit that was interrupted, or put there by another account that can write this folder), and this writer only writes through a file it has just created. Remove it, then run this again. Nothing was written`);
+		throw err;
 	}
-	fs.renameSync(tmp, target);
+	// GROUP, as well as owner, because the layout this protects is a `.env` at 0640 read by the service THROUGH ITS GROUP:
+	// with `bob:pi 0640` and the operator in group `pi`, the uid matches and the rename can still change the group.
+	// MEASURED on the tmp, not predicted from this process's gid (issue #522). Which group a new file gets is the
+	// folder's business: on macOS and the BSDs it is always the folder's group, and on Linux it is the folder's group
+	// where the folder is setgid (or mounted `grpid`), else this process's. The prediction refused every edit to a
+	// `.env` that `init` had just made in a folder of group `wheel` (gid 0, as `/private/tmp` is): the file took the
+	// folder's group, this process's was `staff`, and the rewrite would have kept `wheel` all along. The tmp holds the
+	// new content at 0600 and is removed before the refusal, so nothing the operator reads has changed.
+	// EVERYTHING after the create removes the tmp on any failure (issue #522's review, round 2): a flush or a rename that
+	// throws (EPERM from a Windows scanner holding the file, a full disk at fsync) left this writer's OWN tmp behind, and
+	// every later edit then refused it as one that "already exists". Removing it here is safe where removing one found at
+	// the create is not: this one was created by this call, exclusively. The original error is rethrown; where the tmp
+	// cannot be removed, its message says where the new content was left instead of claiming nothing was written.
+	try {
+		if (group !== null) {
+			let made = null;
+			try {
+				made = handle.gid();
+			} catch {
+				// Cannot stat what was just written: predict as a folder without setgid would make it.
+			}
+			if (typeof made !== "number") made = gid;
+			// KEPT where this account may keep it: an owner may give a file any group it is in, so the tmp takes the file's
+			// group and the rewrite changes nothing (`bob:pi` with the operator in `pi`, or a `staff` file in a `wheel`
+			// folder). Refused only where that fails, which is a group this account is not in.
+			if (made !== null && made !== group) {
+				try {
+					handle.chgrp(group);
+					made = handle.gid();
+				} catch {
+					// EPERM, a group this account is not in: the refusal below says so.
+				}
+			}
+			if (made !== null && made !== group) {
+				throw new Error(groupRefusal(target, group, made, gid, deps.groupName ?? groupNameOf));
+			}
+		}
+		try {
+			// The operator's mode, whatever it is, not just 0600. `.env` holds WEBHOOK_SECRET and provider
+			// keys, and a rename from a fresh tmp lands at the process umask: 0640 and 0400 both came back
+			// 0644, world-readable, on the one file this project says must never reach a scrollback.
+			// `narrow` keeps only the owner's bits of it.
+			const mode = fs.statSync(target).mode & 0o7777;
+			handle.chmod(narrow ? mode & 0o7700 : mode);
+		} catch {
+			// The file vanished between read and write, or the fs cannot stat: the tmp keeps the 0600 it was
+			// created with rather than failing an edit that is otherwise sound.
+		}
+		handle.close();
+		fs.renameSync(tmp, target);
+	} catch (err) {
+		handle.abandon();
+		let removed = typeof fs.unlinkSync === "function";
+		try {
+			if (removed) fs.unlinkSync(tmp);
+		} catch {
+			removed = false;
+		}
+		if (!removed && err instanceof Error) {
+			const left = `${target} itself was not changed, but the new content was left in ${tmp} (mode 0600), which could not be removed: remove it`;
+			err.message = err.message.endsWith(". Nothing was written") ? `${err.message.slice(0, -"Nothing was written".length)}${left}` : `${err.message}. ${left}`;
+		}
+		throw err;
+	}
 	return { changed: true, ...(narrow ? { narrowed: true } : {}) };
 }
 

@@ -545,6 +545,34 @@ test("up edits a symlinked .env through the link, with the REAL fs seam (#357)",
 	assert.match(readFileSync(shared, "utf8"), /^WEBHOOK_SECRET=/m, "and the shared file is what was edited");
 });
 
+test("up keeps a .env's group with the REAL fs seam, where this account is in that group (#522)", async (t) => {
+	// The same shape of defect as the link above: `updateEnvFile` keeps the group with an OPTIONAL call, so a seam
+	// missing `chownSync` (or `unlinkSync`, which removes a refused tmp) makes the repair silently inert. Driven with a
+	// real file whose group is one this account is in and new files in its folder do NOT get.
+	const dir = tempDir("pi-up-group-");
+	writeFileSync(join(dir, "probe"), "");
+	const folderGives = realFs.statSync(join(dir, "probe")).gid;
+	const other = (process.getgroups?.() ?? []).find((g) => g !== folderGives);
+	if (other === undefined) return t.skip("this account is in no group other than the one this folder gives new files");
+	writeFileSync(join(dir, ".env"), "WEBHOOK_SECRET=\n");
+	realFs.chownSync(join(dir, ".env"), -1, other);
+	const buf = [];
+	await runUp(["--yes"], {
+		env: { PI_PROVIDER: "anthropic" },
+		cwd: dir,
+		out: (s) => buf.push(s),
+		spawn: fakeSpawn(green, []),
+		prompt: async () => "n",
+		probeTcp: async () => true,
+		randomHex: () => SECRET,
+		newPassword: () => PASSWORD,
+		runInitFn: () => 0,
+		runDoctorFn: () => 0,
+	});
+	assert.match(readFileSync(join(dir, ".env"), "utf8"), /^WEBHOOK_SECRET=[0-9a-f]+$/m, buf.join(""));
+	assert.equal(realFs.statSync(join(dir, ".env")).gid, other, "and the rewritten file still has its group");
+});
+
 test("up reports a .env it cannot write at all, rather than dying with a stack trace (#357)", async () => {
 	// A read-only deployment directory, a full disk, or a `.env` this account does not own. The
 	// WEBHOOK_SECRET write is the first one and used to be the unwrapped one.
@@ -567,6 +595,36 @@ test("up refuses a value this .env cannot represent, rather than writing one not
 	await h.run();
 	assert.match(h.text(), /PI_PAUSE_WINDOWS_FILE could not be written: .*single quote/);
 	assert.match(h.text(), /NOT written/);
+	// The value's advice, where the value is what was refused: this folder's path, so moving the folder fixes it.
+	assert.match(h.text(), /PI_PAUSE_WINDOWS_FILE +NOT written: cannot write this value into a \.env safely: it contains a single quote\. Set it by hand, or move the deployment somewhere without that character in its path\n/);
+});
+
+test("up: a DURABLE path it cannot write is told to pick a path, not to move the deployment (#522)", async () => {
+	// PI_LOGS_DIR and PI_SETTINGS_FILE are the account default (or this shell's), never this folder, so moving the
+	// deployment changes nothing about them.
+	const h = harness({ plan: green, files: { "/deploy/.env": "" }, logsDirPathFn: () => "/home/o'brien/.pi-dispatch/logs" });
+	await h.run();
+	assert.match(h.text(), /PI_LOGS_DIR +NOT written: cannot write this value into a \.env safely: it contains a single quote\. Set it by hand, to a path without that character\n/);
+	assert.match(h.store.get("/deploy/.env"), /^PI_PAUSE_WINDOWS_FILE=\/deploy\/pause-windows\.json$/m, "and the folder keys, whose paths are fine, are written");
+});
+
+test("up: a .env refused for its GROUP says the group's fix, never a value's advice (#522)", async () => {
+	// The reported run: every write refused, and the four path rows ended "move the deployment somewhere without that
+	// character in its path" about a path with no such character. A refusal about the FILE ends in its own fix.
+	const own = process.getgid?.() ?? 0;
+	const h = harness({ plan: green, files: { "/deploy/.env": "" } });
+	h.deps.fs.statSync = (p) => ({ mode: 0o100600, uid: process.getuid?.() ?? 0, gid: p.endsWith(".tmp") ? own : own + 1 });
+	h.deps.fs.chownSync = () => {
+		throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+	};
+	await h.run();
+	const rows = h.text().split("\n").filter((l) => / NOT written: refusing to edit \/deploy\/\.env: its group is /.test(l));
+	assert.deepEqual(rows.map((l) => l.trim().split(" ")[0]), ["WEBHOOK_SECRET", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "VALKEY_PASSWORD"]);
+	for (const row of rows) {
+		assert.match(row, /run `chgrp \S+ \/deploy\/\.env` and run this again; otherwise edit the file by hand\. Nothing was written(\. The Valkey up starts then has no password)?$/, row);
+		assert.doesNotMatch(row, /that character/, row);
+	}
+	assert.equal(h.store.has("/deploy/.env.tmp"), false, "no tmp is left behind by a refusal");
 });
 
 test("up: a sibling folder with the same prefix is not 'inside' this one (#357)", async () => {

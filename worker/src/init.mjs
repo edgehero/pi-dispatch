@@ -106,6 +106,10 @@ export function runInit(cwd = process.cwd(), deps = {}) {
 			// Issue #468: the new file carries this deployment's own Valkey password (the example's `# VALKEY_PASSWORD=` line
 			// filled in, never shown) and is created readable by this account alone: it holds that password and, soon, the
 			// provider key. `wx`: a file that appeared since the check above is never overwritten (init's contract).
+			// Its GROUP is the folder's choice and left so (issue #522): on macOS a new file takes the folder's group (`wheel`
+			// under `/private/tmp`), and on Linux a setgid folder's, which is how a shared deployment gives the service its
+			// group. Setting this account's group here was considered and rejected: it would undo that shared layout, and the
+			// writer `up` uses keeps whatever group a new file there gets, so the fresh file is never refused for it.
 			const text = setEnvKeyIfEmpty(String(fs.readFileSync(source, "utf8")), VALKEY_PASSWORD_KEY, newPassword(), { platform });
 			if (createOnly(fs, envPath, text, { mode: 0o600 })) results.push(["created", ".env", `from .env.example, mode 0600, with a generated ${VALKEY_PASSWORD_KEY} (value not shown): set your provider key next`]);
 			else results.push(["kept", ".env", KEPT]);

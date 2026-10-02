@@ -33,13 +33,16 @@
  * defaulting to the real thing — the up.mjs convention — so the whole flow is testable offline.
  */
 import { createSign } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { updateEnvFile } from "./env-file.mjs";
+import { ENV_WRITER_FS, updateEnvFile } from "./env-file.mjs";
 import { openBrowser as defaultOpenBrowser } from "./open-browser.mjs";
 import { defaultPrompt } from "./up.mjs";
+
+/** This command's default fs seam: its own calls, and every call the `.env` writer makes (`ENV_WRITER_FS`, issue #522). */
+export const SETUP_GITHUB_FS = { existsSync, ...ENV_WRITER_FS };
 
 const API_ROOT = "https://api.github.com";
 // GitHub rejects requests without a User-Agent, and node's fetch does not always send one.
@@ -69,7 +72,7 @@ export async function runGithubAppSetup(argv = [], deps = {}) {
 		openBrowser = defaultOpenBrowser,
 		out = (s) => process.stdout.write(s),
 		prompt = defaultPrompt,
-		fs = { existsSync, readFileSync, writeFileSync, renameSync, statSync, chmodSync },
+		fs = SETUP_GITHUB_FS,
 		cwd = process.cwd(),
 		now = () => Date.now(),
 		codeTimeoutMs = 600000, // ~10 min for a human to click through GitHub's create-app page

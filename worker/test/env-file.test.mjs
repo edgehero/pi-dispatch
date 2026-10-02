@@ -1,10 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { EXEC_ONE_MAX, EXEC_TOTAL_MAX, SYSTEMD_HAZARD_SHAPES, WRAPPER_INTERNAL_KEYS, decodeEnvFile, envFileEditCheck, envFileEditRefusal, envFileValueLines, envFileHazard, envFileWrapperInternal, envFileLoadHazard, envFileSystemdHazard, firstInvalidUtf8, systemdReading, systemdUtf8, envKeyIsBlank, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, setEnvKey, setEnvKeyIfEmpty, updateEnvFile } from "../src/env-file.mjs";
+import { EXEC_ONE_MAX, EXEC_TOTAL_MAX, SYSTEMD_HAZARD_SHAPES, WRAPPER_INTERNAL_KEYS, decodeEnvFile, envFileEditCheck, envFileEditRefusal, envFileValueLines, envFileHazard, envFileWrapperInternal, envFileLoadHazard, envFileSystemdHazard, firstInvalidUtf8, systemdReading, systemdUtf8, envKeyIsBlank, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, setEnvKey, setEnvKeyIfEmpty, updateEnvFile, ENV_VALUE_UNWRITABLE, ENV_WRITER_FS, groupNameOf, groupRefusal } from "../src/env-file.mjs";
+import { UP_FS } from "../src/up.mjs";
+import { SERVICE_FS } from "../src/service.mjs";
+import { SETUP_GITHUB_FS } from "../src/github-app-setup.mjs";
 import { SYSTEMD_259_ENV_BYTES, SYSTEMD_259_ENV_FILES } from "./helpers/systemd-env-259.mjs";
 import { readStackKeys } from "../src/podman-stack.mjs";
 
@@ -968,7 +971,9 @@ function fakeFs(path, text, mode = 0o644) {
 				ops.push(["read", p]);
 				return files.get(p);
 			},
-			writeFileSync: (p, data) => {
+			writeFileSync: (p, data, opts) => {
+				// The exclusive create the writer asks for (issue #522's review), modelled: an existing path is refused.
+				if (opts?.flag === "wx" && files.has(p)) throw Object.assign(new Error(`EEXIST: file already exists, open '${p}'`), { code: "EEXIST" });
 				ops.push(["write", p, data]);
 				files.set(p, data);
 			},
@@ -1042,7 +1047,13 @@ test("updateEnvFile: a file this process does not own is refused, not rewritten 
 		ops.push(["stat", p]);
 		return { mode: 0o100640, uid: (process.getuid?.() ?? 0) + 1 };
 	};
-	assert.throws(() => updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs }), /owned by uid .* and this process is uid/);
+	const uid = process.getuid?.() ?? 0;
+	// Its own sentence and its own fix (issue #522), pinned whole: `up` once followed every refusal of this writer with
+	// the value refusal's advice, "without that character in its path".
+	assert.throws(
+		() => updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs }),
+		{ message: `refusing to edit /deploy/.env: it is owned by uid ${uid + 1} and this process is uid ${uid}, and rewriting it (a new file renamed over it) would give it to this account, which is how a .env the service reads stops being readable. To fix it, run this as the account that owns it, or edit the file by hand. Nothing was written` },
+	);
 	assert.equal(files.get("/deploy/.env"), "WEBHOOK_SECRET=\n", "and nothing was written on the way to finding out");
 	assert.equal(ops.filter(([op]) => op === "write").length, 0);
 });
@@ -1066,18 +1077,228 @@ test("updateEnvFile derives the rendering rule itself, so no writer has to remem
 	assert.equal(derived.files.get("/d/.env"), `K=${renderEnvValue("/srv/pi/app key.pem", { platform: process.platform })}\n`);
 });
 
-test("updateEnvFile: a file whose GROUP is not this process's is refused too", () => {
-	// The layout the uid check protects is a `.env` at 0640 read by the service THROUGH ITS GROUP. With
-	// `bob:pi 0640` and the operator in group `pi`, the uid matches, the rename still makes a new inode
-	// with the writer's primary gid, and the `pi` service loses read access exactly as on a uid mismatch.
+/**
+ * A `.env` of group `had`, in a folder whose new files get `made` (issue #522): the tmp's stat says what the folder gave
+ * it, and `keep` says whether this account may give the tmp the file's group (`chownSync`), as an owner in that group can.
+ */
+function groupFs({ had, made, keep = false }) {
 	const { fs, files, ops } = fakeFs("/deploy/.env", "WEBHOOK_SECRET=\n", 0o640);
+	let tmpGid = made;
 	fs.statSync = (p) => {
 		ops.push(["stat", p]);
-		return { mode: 0o100640, uid: process.getuid?.() ?? 0, gid: (process.getgid?.() ?? 0) + 1 };
+		return { mode: 0o100640, uid: process.getuid?.() ?? 0, gid: p.endsWith(".tmp") ? tmpGid : had };
 	};
-	assert.throws(() => updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs }), /its group is gid .* and this process is gid/);
+	fs.chownSync = (p, u, g) => {
+		ops.push(["chown", p, u, g]);
+		if (!keep) throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+		tmpGid = g;
+	};
+	fs.unlinkSync = (p) => {
+		ops.push(["unlink", p]);
+		files.delete(p);
+	};
+	return { fs, files, ops };
+}
+
+test("updateEnvFile: a group the rewrite would change, and this account cannot keep, is refused with its own fix (#522)", () => {
+	// The layout the uid check protects is a `.env` at 0640 read by the service THROUGH ITS GROUP. With `bob:pi 0640`
+	// the uid matches, and a rename can still change the group. Refused only where it WOULD (the tmp says so) and this
+	// account cannot give the new file the old group; the sentence names both groups and the two fixes.
+	const own = process.getgid?.() ?? 0;
+	const names = new Map([[own, "me"], [own + 1, "pi"], [own + 2, "wheel"]]);
+	const groupName = (id) => names.get(id) ?? null;
+	const { fs, files, ops } = groupFs({ had: own + 1, made: own + 2 });
+	assert.throws(
+		() => updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs, groupName }),
+		{ message: `refusing to edit /deploy/.env: its group is pi (gid ${own + 1}), which this account could not give the new file, and a new file written beside it gets wheel (gid ${own + 2}), so rewriting it (a new file renamed over it) would change its group, which is how a .env the service reads through its group stops being readable. To fix it, add this account to pi and log in again; or, if nothing reads this file through its present group, run \`chgrp me /deploy/.env\` and run this again; otherwise edit the file by hand. Nothing was written` },
+	);
+	assert.equal(files.get("/deploy/.env"), "WEBHOOK_SECRET=\n", "the file is untouched");
+	assert.equal(files.has("/deploy/.env.tmp"), false, "and the tmp holding the new content is gone");
+	assert.deepEqual(ops.find(([op]) => op === "chown"), ["chown", "/deploy/.env.tmp", -1, own + 1], "keeping the group was tried first");
+	assert.equal(ops.filter(([op]) => op === "rename").length, 0);
+});
+
+test("updateEnvFile: a .env with the group its folder gives new files is written, whatever this process's group (#522)", () => {
+	// The reported case. On macOS a new file takes its FOLDER's group, so `init` in a `wheel` folder (`/private/tmp`)
+	// makes a `.env` of gid 0 while this process is `staff`. The old check compared the file with this process's gid and
+	// refused every write `up` makes; the tmp, written in the same folder, gets gid 0 too, so the rewrite changes nothing.
+	const own = process.getgid?.() ?? 0;
+	const folder = own === 0 ? 1 : 0;
+	const { fs, files, ops } = groupFs({ had: folder, made: folder });
+	assert.deepEqual(updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs }), { changed: true });
+	assert.equal(files.get("/deploy/.env"), "WEBHOOK_SECRET=abc123\n");
+	assert.equal(ops.filter(([op]) => op === "chown").length, 0, "nothing to keep, so nothing is changed");
+});
+
+test("updateEnvFile: a group this account is in is KEPT on the new file rather than refused (#522)", () => {
+	// An owner may give its file any group it is in. A `staff` file in a `wheel` folder, or `bob:pi` with the operator in
+	// `pi` on Linux: the tmp takes the file's group before the rename, so the service keeps reading it.
+	const own = process.getgid?.() ?? 0;
+	const { fs, files, ops } = groupFs({ had: own + 1, made: own, keep: true });
+	assert.deepEqual(updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs }), { changed: true });
+	assert.equal(files.get("/deploy/.env"), "WEBHOOK_SECRET=abc123\n");
+	const chown = ops.findIndex(([op]) => op === "chown");
+	assert.deepEqual(ops[chown], ["chown", "/deploy/.env.tmp", -1, own + 1]);
+	assert.ok(chown < ops.findIndex(([op]) => op === "rename"), "before the rename, so the file never has the wrong group");
+});
+
+test("updateEnvFile: where the tmp cannot be measured, the group is predicted as this process's (#522)", () => {
+	// A fs that cannot stat what was just written falls back to the old prediction: a folder without setgid gives a new
+	// file this process's group. So a file of another group is refused there, conservatively, not written blind.
+	const own = process.getgid?.() ?? 0;
+	const { fs, files } = groupFs({ had: own + 1, made: own });
+	const stat = fs.statSync;
+	fs.statSync = (p) => {
+		if (p.endsWith(".tmp")) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+		return stat(p);
+	};
+	assert.throws(() => updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs, groupName: () => null }), new RegExp(`^Error: refusing to edit /deploy/\\.env: its group is gid ${own + 1}, which this account could not give the new file, and a new file written beside it gets gid ${own},`));
 	assert.equal(files.get("/deploy/.env"), "WEBHOOK_SECRET=\n");
-	assert.equal(ops.filter(([op]) => op === "write").length, 0);
+});
+
+test("updateEnvFile: a group refusal whose tmp cannot be removed says where the new content was left (#522)", () => {
+	// "Nothing was written" would be false: the tmp holds the new content, secrets included, at 0600.
+	const own = process.getgid?.() ?? 0;
+	const { fs, files } = groupFs({ had: own + 1, made: own + 2 });
+	fs.unlinkSync = () => {
+		throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+	};
+	assert.throws(() => updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs, groupName: () => null }), (err) => {
+		assert.match(err.message, /otherwise edit the file by hand\. \/deploy\/\.env itself was not changed, but the new content was left in \/deploy\/\.env\.tmp \(mode 0600\), which could not be removed: remove it$/);
+		assert.doesNotMatch(err.message, /Nothing was written/);
+		return true;
+	});
+	assert.equal(files.get("/deploy/.env"), "WEBHOOK_SECRET=\n");
+});
+
+test("updateEnvFile: a rename that throws removes the writer's OWN tmp and rethrows, so the next edit is not refused (#522 review 2)", () => {
+	// EPERM from a Windows scanner holding the file: the tmp was left, and every later edit refused it as "already exists".
+	const { fs, files } = fakeFs("/deploy/.env", "WEBHOOK_SECRET=\n");
+	const rename = fs.renameSync;
+	const eperm = Object.assign(new Error("EPERM: operation not permitted, rename"), { code: "EPERM" });
+	fs.renameSync = () => {
+		throw eperm;
+	};
+	fs.unlinkSync = (p) => files.delete(p);
+	assert.throws(() => updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs }), (err) => err === eperm && err.message === "EPERM: operation not permitted, rename", "the original error, unchanged");
+	assert.equal(files.has("/deploy/.env.tmp"), false, "no tmp is left behind");
+	assert.equal(files.get("/deploy/.env"), "WEBHOOK_SECRET=\n");
+	fs.renameSync = rename;
+	assert.deepEqual(updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs }), { changed: true }, "and the next run succeeds");
+	assert.equal(files.get("/deploy/.env"), "WEBHOOK_SECRET=abc123\n");
+	// Where the tmp cannot be removed either, the error says where the new content was left.
+	const stuck = fakeFs("/deploy/.env", "WEBHOOK_SECRET=\n");
+	stuck.fs.renameSync = () => {
+		throw Object.assign(new Error("EPERM: operation not permitted, rename"), { code: "EPERM" });
+	};
+	stuck.fs.unlinkSync = () => {
+		throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+	};
+	assert.throws(() => updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs: stuck.fs }), (err) => err.code === "EPERM" && err.message === "EPERM: operation not permitted, rename. /deploy/.env itself was not changed, but the new content was left in /deploy/.env.tmp (mode 0600), which could not be removed: remove it");
+});
+
+test("updateEnvFile: a flush that throws on the REAL descriptor path removes the tmp too (#522 review 2)", () => {
+	const dir = realpathSync(tempDir("pi-envtmp-fsync-"));
+	const env = join(dir, ".env");
+	writeFileSync(env, "WEBHOOK_SECRET=\n");
+	const enospc = Object.assign(new Error("ENOSPC: no space left on device, fsync"), { code: "ENOSPC" });
+	const fs = { ...ENV_WRITER_FS, fsyncSync: () => {
+		throw enospc;
+	} };
+	assert.throws(() => updateEnvFile(env, "WEBHOOK_SECRET", "abc123", { fs }), (err) => err === enospc);
+	assert.equal(existsSync(`${env}.tmp`), false);
+	assert.equal(readFileSync(env, "utf8"), "WEBHOOK_SECRET=\n");
+	assert.deepEqual(updateEnvFile(env, "WEBHOOK_SECRET", "abc123"), { changed: true });
+});
+
+test("updateEnvFile: a planted .env.tmp SYMLINK is refused, never followed (#522 review)", () => {
+	// In a folder another account can write (a setgid 2770 folder shared with the service's group), a `.env.tmp` link
+	// to a file of this account's was followed by the write, the chown and the chmod. The tmp is created exclusively.
+	const dir = realpathSync(tempDir("pi-envtmp-link-"));
+	const env = join(dir, ".env");
+	const victim = join(dir, "victim");
+	writeFileSync(env, "WEBHOOK_SECRET=\n");
+	writeFileSync(victim, "mine\n");
+	chmodSync(victim, 0o600);
+	symlinkSync(victim, `${env}.tmp`);
+	assert.throws(() => updateEnvFile(env, "WEBHOOK_SECRET", "abc123"), {
+		message: `refusing to edit ${env}: ${env}.tmp already exists (left by an edit that was interrupted, or put there by another account that can write this folder), and this writer only writes through a file it has just created. Remove it, then run this again. Nothing was written`,
+	});
+	assert.equal(readFileSync(victim, "utf8"), "mine\n", "the link's target is not written");
+	assert.equal(statSync(victim).mode & 0o777, 0o600, "nor chmodded");
+	assert.ok(lstatSync(`${env}.tmp`).isSymbolicLink(), "and the link is left: it is not this writer's to remove");
+	assert.equal(readFileSync(env, "utf8"), "WEBHOOK_SECRET=\n");
+	// A DANGLING link too, which a create that follows links would make at the link's target.
+	const dangling = realpathSync(tempDir("pi-envtmp-dangling-"));
+	writeFileSync(join(dangling, ".env"), "WEBHOOK_SECRET=\n");
+	symlinkSync(join(dangling, "elsewhere"), join(dangling, ".env.tmp"));
+	assert.throws(() => updateEnvFile(join(dangling, ".env"), "WEBHOOK_SECRET", "abc123"), /\.env\.tmp already exists/);
+	assert.equal(existsSync(join(dangling, "elsewhere")), false, "nothing is created where the link points");
+});
+
+test("updateEnvFile: a planted or leftover regular .env.tmp is refused and left as it was (#522 review)", () => {
+	const dir = realpathSync(tempDir("pi-envtmp-file-"));
+	const env = join(dir, ".env");
+	writeFileSync(env, "WEBHOOK_SECRET=\n");
+	writeFileSync(`${env}.tmp`, "planted\n");
+	assert.throws(() => updateEnvFile(env, "WEBHOOK_SECRET", "abc123"), /\.env\.tmp already exists .* Remove it, then run this again\. Nothing was written$/);
+	assert.equal(readFileSync(`${env}.tmp`, "utf8"), "planted\n");
+	assert.equal(readFileSync(env, "utf8"), "WEBHOOK_SECRET=\n");
+	// The same rule on a seam without descriptors (a fake): the create is exclusive there too.
+	const { fs, files } = fakeFs("/deploy/.env", "WEBHOOK_SECRET=\n");
+	files.set("/deploy/.env.tmp", "planted\n");
+	assert.throws(() => updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs }), /\/deploy\/\.env\.tmp already exists/);
+	assert.equal(files.get("/deploy/.env.tmp"), "planted\n");
+});
+
+test("updateEnvFile: with the REAL fs the tmp goes through a descriptor, and the mode is carried (#522 review)", () => {
+	const dir = realpathSync(tempDir("pi-envtmp-fd-"));
+	const env = join(dir, ".env");
+	writeFileSync(env, "WEBHOOK_SECRET=\n");
+	chmodSync(env, 0o640);
+	assert.deepEqual(updateEnvFile(env, "WEBHOOK_SECRET", "abc123"), { changed: true });
+	assert.equal(readFileSync(env, "utf8"), "WEBHOOK_SECRET=abc123\n");
+	assert.equal(statSync(env).mode & 0o777, 0o640, "fchmod on the descriptor before the rename");
+	assert.equal(existsSync(`${env}.tmp`), false);
+});
+
+test("every production fs seam handed to updateEnvFile carries the descriptor calls (#522 review)", () => {
+	// The descriptor calls are OPTIONAL on the seam (a test fake has none), so a production seam that drops one does not
+	// fail: the writer goes back to chowning and chmodding the tmp by path, which a swapped tmp redirects, and every
+	// other test still passes. The realpathSync story (#357) is the same shape. So each default is read here.
+	const needed = ["openSync", "writeFileSync", "fstatSync", "fchownSync", "fchmodSync", "fsyncSync", "closeSync", "unlinkSync", "renameSync", "statSync", "realpathSync", "readFileSync"];
+	for (const [name, seam] of Object.entries({ ENV_WRITER_FS, UP_FS, SERVICE_FS, SETUP_GITHUB_FS })) {
+		for (const call of needed) assert.equal(typeof seam[call], "function", `${name}.${call}`);
+	}
+});
+
+test("groupRefusal: a group /etc/group does not name is said as its number, and no chgrp is offered without one (#522)", () => {
+	const text = groupRefusal("/my deploy/.env", 0, 20, null, () => null);
+	assert.match(text, /^refusing to edit \/my deploy\/\.env: its group is gid 0, which this account could not give the new file, and a new file written beside it gets gid 20,/);
+	assert.match(text, /To fix it, add this account to gid 0 and log in again; otherwise edit the file by hand\. Nothing was written$/);
+	assert.doesNotMatch(text, /chgrp|that character/);
+	// A path with a space is one shell word in the command it offers.
+	assert.match(groupRefusal("/my deploy/.env", 0, 20, 20, (id) => (id === 20 ? "staff" : null)), /run `chgrp staff '\/my deploy\/\.env'` and run this again/);
+});
+
+test("groupNameOf reads /etc/group's shape: comments skipped, an empty gid field never taken for gid 0 (#522)", () => {
+	const etc = "##\n# User Database\n##\nnogroup:*::\nwheel:*:0:root\nstaff:*:20:root\n";
+	assert.equal(groupNameOf(0, () => etc), "wheel");
+	assert.equal(groupNameOf(20, () => etc), "staff");
+	assert.equal(groupNameOf(4242, () => etc), null);
+	assert.equal(groupNameOf(0, () => "nogroup:*::\n"), null, "`Number(\"\")` is 0, so an empty field must not match");
+	assert.equal(groupNameOf(0, () => {
+		throw new Error("ENOENT");
+	}), null, "no group database: the number alone is said");
+});
+
+test("renderEnvValue: every value refusal carries ENV_VALUE_UNWRITABLE, so a caller can tell it from a file refusal (#522)", () => {
+	for (const [value, platform] of [["/it's/x", "linux"], ["/a\nb", "linux"], ["/a\u200bb", "darwin"], ["C:/a%b", "win32"]]) {
+		assert.throws(() => renderEnvValue(value, { platform }), (err) => err.code === ENV_VALUE_UNWRITABLE, JSON.stringify(value));
+	}
+	// And it reaches the writer's caller unchanged, where `up` reads it.
+	const { fs } = fakeFs("/deploy/.env", "K=\n");
+	assert.throws(() => updateEnvFile("/deploy/.env", "K", "/it's", { fs, platform: "linux" }), (err) => err.code === ENV_VALUE_UNWRITABLE);
 });
 
 test("updateEnvFile: the DEFAULT fs can resolve a link, or the repair above is dead code", () => {

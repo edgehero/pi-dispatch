@@ -41,7 +41,7 @@
  * the rest of the config is broken.
  */
 import { spawn as nodeSpawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { connect as netConnect } from "node:net";
 import { homedir, networkInterfaces, tmpdir, userInfo } from "node:os";
@@ -51,10 +51,13 @@ import { parseArgs } from "node:util";
 import { parseBackendList, venuesOf } from "./backends.mjs";
 import { sharedShellIgnored } from "./deployment-venue.mjs";
 import { egressArmed, egressProxyName } from "./egress.mjs";
-import { updateEnvFile } from "./env-file.mjs";
+import { ENV_WRITER_FS, updateEnvFile } from "./env-file.mjs";
 import { MODEL_ENDPOINTS_INCLUDE_NAME } from "./model-endpoints.mjs";
 import { VALKEY_HEALTH_SCRIPT, VALKEY_PASSWORD_KEY, VALKEY_START_SCRIPT, dollarsDoubled, newValkeyPassword, valkeyPasswordDecision } from "./valkey-auth.mjs";
 import { ALL_QUADLET_FILES, ALLOWLIST_PLACEHOLDER, MODEL_ENDPOINTS_PLACEHOLDER, NETNS_KEEPER, NETNS_KEEPER_FORMAT, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, PROXY_CONF_PLACEHOLDER, QUADLET_FILES, applyStack, decideValkey, describeAction, passwdNameFrom, readSubuidRanges, readValkeyKeys, valkeySharedOn, VALKEY_SHARED_KEY, describeRollBack, journalWrite, rollBackWrites, foreignContainerRefusal, foreignContainers, lingerNote, planStack, proxyConfCopyPath, proxyRestartWarning, quadletDir, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal, valkeyEnvPath, valkeyPasswordRestartWarning, workerUnitDeps } from "./podman-stack.mjs";
+
+/** This command's default fs seam: its own calls, and every call the `.env` writer makes (`ENV_WRITER_FS`, issue #522). */
+export const SERVICE_FS = { existsSync, mkdirSync, ...ENV_WRITER_FS };
 
 // src/ is where this module lives in BOTH layouts (worker/src in a checkout,
 // node_modules/@edgehero/pi-dispatch/src under npm). Deploy templates resolve one level up from it
@@ -345,7 +348,7 @@ export async function runService(argv = [], deps = {}) {
 		// this command. An operator changes it by running the command as someone else, not by declaring it.
 		user = env.USER || userInfo().username,
 		tmp = tmpdir(),
-		fs = { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, chmodSync, statSync, renameSync, realpathSync },
+		fs = SERVICE_FS,
 		spawn = nodeSpawn,
 		out = (s) => process.stdout.write(s),
 		err = (s) => process.stderr.write(s),
