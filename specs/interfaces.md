@@ -6175,6 +6175,7 @@ abstains.
     tz              the host's IANA zone, because a cron PATTERN carries none
     fpCron          this host's schedule-set fingerprint, or "" when cron is disabled (= ABSTAIN)
     cronCount       how many cron entries that fingerprint covers -- for the MESSAGE, never the rule
+    fpUsd           a fingerprint of the dollar caps this host judges the shared dollar counters against
 ```
 
 **Every row is one host's SELF-DESCRIPTION.** No writer touches another host's row, and the keyspace
@@ -6192,6 +6193,26 @@ entry and BullMQ hands the pattern to cron-parser with no zone, so it resolves i
 system time. On one host that is exactly what an operator means. On two hosts in different zones the same
 pattern is two different instants, with nothing anywhere saying so -- unlike `pause-windows.json`, whose
 every window carries an explicit `tz` and is therefore already fleet-correct.
+
+**`fpUsd` is numbers and counter hashes only** (issue #501, part 6). The dollar counters (`budget:usd:*`) are
+shared keys, but each host reads its caps from its own env, overlay and scoped-limits file, so two hosts can judge
+one counter against two caps. `fpUsd` is `fingerprint.mjs`'s 16-hex digest of: the four dollar settings
+(`maxCostUsd`, `dailyCostUsd`, `weeklyCostUsd`, `monthlyCostUsd`) as integer micro-dollars or null, the overlay
+over env as a job resolves them (with an invalid overlay, or merged values that break the dollar rule, the env
+values; such a host refuses every job as `settings-overlay-invalid`); every scoped-limits row that carries a dollar
+window, as its counter prefix (`budget:usd:s:<hash16>` or `budget:usd:mdl:<hash16>`) and its three caps in
+micro-dollars, sorted by prefix; and the sorted counter prefixes of the model rows a job with no list of its own
+reserves in under `PI_ALLOWED_MODELS` (every model row when it is unset). Never a scope string, a model id, a value
+as written or an amount in clear: the input holds only integers, nulls, the word `invalid` for an amount that does
+not parse, and the prefixes. Published
+as a thunk, so an overlay or scoped-limits edit shows within one beat; an env change needs the restart it always
+needs. It never ABSTAINS, unlike `fpCron`: a host with no dollar setting publishes the empty fingerprint, because a
+host that reserves no dollars against a counter its peers cap is the disagreement worth seeing. Only `doctor` reads
+it, and only to WARN (`dollar-fingerprint.mjs`, `doctor.mjs -> fleetDollarChecks`): a host that differs, or one that
+publishes none while dollar caps are in use, which is this host's or a peer's published fingerprint not being the
+empty one, or else a dollar counter found on the Valkey (best effort, asked only then: `EXISTS` on the deployment's
+current day, week and month keys, then a bounded `SCAN` for `budget:usd:*`, within two seconds; a capped host from
+before `fpUsd` leaves its counters, but a host with only a per-job cap leaves no counter). Nothing refuses on it.
 
 **The TTL is refreshed on EVERY beat**, which reverses this project's stated set-once rule (`budget.mjs`:
 *"set the TTL only when the key is first created, so a long window cannot push its expiry forward"*). The
@@ -6611,3 +6632,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-03 | Issue #544. **`INT-SDK-SESSION-OPTIONS` AMENDED**: `additionalExtensionPaths` carries the overlay's extension ENTRIES (`discoverExtensionEntries`, pi's own rule for `~/.pi/agent/extensions` at the pin) instead of the `/opt/pi-global/extensions` folder, which pi read as one extension that failed to import; `extensionsOverride` reports pi's load errors first, as one `extension_load_failed` line (entry relative to its root, the root, `load` or `conflict`, never the error text), leaving out errors for absent paths; a manifest entry naming a directory is skipped and reported as `manifest-dir`, an unloadable ignore matcher withholds the overlay (`overlay_extensions_withheld`), a pre-#544 package layout, or a root `pi.extensions` with glob or exclude entries, is named once (`overlay_extensions_layout`), and the recursion guard also tests the first folder under each root. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: the permanent "path does not exist" entry for `/job/pi/extensions` is now read and left out by that line, not unread. **INT-CONTAINER-RUNTIME-CONTRACT UNCHANGED, checked**: no mount or env moved. |
 | 2026-10-03 | Issue #552, with PR #553's review rounds 1 to 3 folded in. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, the pre-spend model refusals gain `overlay-unreadable` (an overlay `models.json` the worker cannot read with an errno it does not read as absence and that is not one of the transient four, EIO, EAGAIN, EMFILE and ENFILE; the job then loads none of the file, since the existence check in image/runner/run-job.mjs, or pi's own read fails) and `overlay-link` (a `models.json` that is a link of any kind, dangling included: the job's read-only mount does not resolve links the way the host does); a transient read now retries every job once, a builtin one with no list included. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, the reader paragraph: `models.json` is `lstat`ed first and a link is refused; ENOENT, and ELOOP, ENOTDIR and ENAMETOOLONG from the folder's path, are no file; `doctor` says ✗ for a non-transient errno and for a link. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, a new bullet before Mounts: `PI_GLOBAL_PI_DIR` must be absolute, since a relative value is resolved differently by the worker and the container runtime. **Code evidence**: worker/src/model-catalog.mjs -> checkModelsKnown, isTransientOverlayRead; worker/src/model-endpoints.mjs -> readOverlayModels; worker/src/config.mjs -> resolveGlobalPiDir; worker/src/doctor.mjs; worker/src/index.mjs. |
 | 2026-10-03 | Issue #556. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, the pre-spend model refusals gain `overlay-not-a-file`: a `models.json` that is a named pipe, a socket or a device refuses every job, judged from the reader's `lstat` and never opened. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, the reader paragraph: such a file is a `configError` marked `overlayNotAFile`, so neither the pickup nor `doctor` opens it, and `doctor` says ✗. **Code evidence**: worker/src/model-endpoints.mjs -> readOverlayModels; worker/src/model-catalog.mjs -> checkModelsKnown; worker/src/doctor.mjs; worker/src/index.mjs. |
+| 2026-10-03 | Issue #501, part 6 (the fleet fingerprint). **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: the row gains `fpUsd`, a digest of the four dollar settings (integer micro-dollars, the overlay over env as a job resolves them; with an invalid overlay the env values, and such a host refuses every job as `settings-overlay-invalid`), of every scoped-limits dollar row as its counter prefix and three caps, sorted, and (PR #551's review) of the model-row counters a job without its own list reserves in under `PI_ALLOWED_MODELS` (doctor's disagreement line names it); never a scope string, a model id or an amount in clear; a thunk, so an overlay or scoped-limits edit shows within one beat; it never abstains; `doctor` warns on a differing host and on a host that publishes none while dollar caps are in use (a published fingerprint, or, best effort, a dollar counter found by `EXISTS` on the current deployment keys and a bounded `SCAN`; a host with only a per-job cap leaves no counter), and nothing refuses on it. The content rule, the TTL, the close gating and the falsification test are UNCHANGED, checked: deleting the keyspace loses a warning, never a decision. **`INT-LIVE-PROBE-CONTRACT` UNCHANGED, checked**: the comparison with pi's own model loader runs in doctor's own process, never in a probe container. **Code evidence**: worker/src/dollar-fingerprint.mjs -> usdFingerprint, usdFingerprintInput; worker/src/start.mjs -> startWorker (`fpUsd`); worker/src/doctor.mjs -> fleetDollarChecks. |

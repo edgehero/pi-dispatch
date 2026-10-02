@@ -57,11 +57,14 @@ import { basename, dirname, isAbsolute, join, delimiter, posix, resolve, win32 }
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { DEFAULT_VALKEY_URL, accountTempRoot, allowedModelsFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, allowedModelsFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
+import { parseModelsJson, stripBom, stripJsonComments } from "./models-json.mjs";
 import { isTransientOverlayRead, overlayProviderProblem } from "./model-catalog.mjs";
-import { KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, OVERLAY_NOT_A_FILE_FIX, baseUrlTarget, keylessVerdict, loadModelEndpoints, readOverlayModels, renderEndpointsInclude } from "./model-endpoints.mjs";
+import { EMPTY_USD_FINGERPRINT, usdFingerprint } from "./dollar-fingerprint.mjs";
+import { splitModelEntry } from "./model-ref.mjs";
+import { KEYLESS_API_KEY, KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, OVERLAY_NOT_A_FILE_FIX, baseUrlTarget, keylessVerdict, loadModelEndpoints, readOverlayModels, renderEndpointsInclude } from "./model-endpoints.mjs";
 import { declaredEndpointsIn, endpointsDeclaredIn, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
 import { loadPauseWindows } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
@@ -98,8 +101,10 @@ import { parseSecretProfiles } from "./secret-profiles.mjs";
 // can share them: doctor NAMES a variable and env-allowlist WRITES one, and they must never differ.
 import { apiKeyVariable, nonApiKeyKind } from "./provider-key.mjs";
 import { parseTriggers } from "./triggers.mjs";
-import { readOverlay } from "./runtime-settings.mjs";
-import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, optionalUsdMicros, parseUsdMicros } from "./money.mjs";
+import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
+import { DOLLAR_KEY_PREFIX } from "./dollar-budget.mjs";
+import { dayKey, monthKey, weekKey } from "./budget.mjs";
+import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, effectiveCostCapMicros, formatMicros, optionalUsdMicros, parseUsdMicros } from "./money.mjs";
 import { cronPlacement } from "./schedules.mjs";
 
 const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
@@ -198,6 +203,11 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// without uninstalling a dependency. Threaded like every other seam: a seam collectChecks honours
 		// and runDoctor silently drops is a seam that cannot pin an EXIT CODE, only a check object.
 		providerOracle = defaultProviderOracle,
+		// Issues #501 and #502: the worker's model catalog and pi's own model loader, both imported lazily. Seams, so a test
+		// can drive the not-installed arm and a disagreement without editing pi. Undefined means the defaults.
+		modelCatalog,
+		piModelLoader,
+		dollarKeysExist,
 		// --live (issue #278, INT-LIVE-PROBE-CONTRACT): read the backend declarations back off short-lived real containers.
 		// STRICTLY `=== true`, so only the CLI's own flag arms it: a truthy string from a caller that forwarded an
 		// option bag runs nothing. The fs, PID-liveness and nonce are seams so the sequence is driven without Docker.
@@ -358,7 +368,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -594,7 +604,7 @@ export const CLI_SERVICE_KEYS = Object.freeze({
 	gh: Object.freeze(["GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "GH_HOST", "XDG_CONFIG_HOME", "HOME"]),
 });
 const CLI_KEY_NAMES = [...new Set(Object.values(CLI_SERVICE_KEYS).flat())];
-export const SERVICE_ENV_KEYS = Object.freeze([...STACK_KEYS, "VALKEY_URL", VALKEY_SHARED_KEY, VALKEY_PASSWORD_KEY, VALKEY_PORT_KEY, "PI_PROVIDER", ...GITHUB_SERVICE_KEYS, "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", "PI_WORKER_NAME", ...WORKER_SERVICE_KEYS, ...RECEIVER_SERVICE_KEYS, ...CLI_KEY_NAMES]);
+export const SERVICE_ENV_KEYS = Object.freeze([...STACK_KEYS, "VALKEY_URL", VALKEY_SHARED_KEY, VALKEY_PASSWORD_KEY, VALKEY_PORT_KEY, "PI_PROVIDER", "PI_MODEL", ...GITHUB_SERVICE_KEYS, "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", "PI_WORKER_NAME", ...WORKER_SERVICE_KEYS, ...RECEIVER_SERVICE_KEYS, ...CLI_KEY_NAMES]);
 
 /** Issue #471 (gate round 1): what a service manager gives every service itself, so a `.env` need not carry it. */
 const AMBIENT_SERVICE_KEYS = Object.freeze(["TMPDIR", "TEMP", "XDG_RUNTIME_DIR", "HOME"]);
@@ -1334,7 +1344,7 @@ export async function collectChecks(shellVars, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, costCaps, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName);
+	const { requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, costCaps, modelRuns, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName);
 	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
@@ -2371,6 +2381,20 @@ export async function collectChecks(shellVars, seams) {
 				fix: "check that those workers are running and that the clocks agree -- a stale row is either a dead worker or a skewed clock, and both matter",
 			});
 		}
+
+		// Issue #501 part 6: the dollar counters are shared, the caps they are judged against are per host. This host's
+		// fingerprint is computed here from the service's own settings, by the worker's function, never read back from
+		// its registry row: doctor answers for the configuration, which a worker that has not restarted may not run yet.
+		// The scoped-limits rows are the parsed file's, or none when it does not load (the worker refuses to boot then).
+		const dollarsHere = deploymentSettingsOf(env, settingsFilePath(env, home), fileExists);
+		let envListHere = null;
+		try {
+			envListHere = allowedModelsFrom(env);
+		} catch {
+			// A malformed list is its own line below; the worker refuses to boot on it.
+		}
+		const usdHere = usdFingerprint(dollarsHere, scopedLimitFacts.parseError === null ? scopedLimitFacts.limits : [], envListHere);
+		checks.push(...(await fleetDollarChecks(usdHere, peers, { dollarKeysExist: () => (seams.dollarKeysExist ?? defaultDollarKeysExist)(valkeyTalkUrl) })));
 	} else if (fleet.unreachable) {
 		// Said, rather than silently absent: "no peers" and "could not ask" are different facts.
 		checks.push({ ok: true, label: `Fleet: could not read the host registry (${printable(fleet.unreachable)})` });
@@ -2565,6 +2589,17 @@ export async function collectChecks(shellVars, seams) {
 						fix: `every job that runs or lists a model of ${JSON.stringify(name)} is refused as model-unknown (overlay-provider-invalid): give each model an api and a baseUrl (its own or the provider's), a contextWindow and maxTokens above zero, and set a baseUrl beside oauth`,
 					});
 				}
+			}
+			// Issue #502's open question: pi's own loader against the worker's catalog, on the file as it is, whenever the reader
+			// found one (a file the worker refuses is the first case worth comparing). `pi-model-loader.mjs` says why it is
+			// the pi beside the worker rather than a container of the job image. Only a file that was READ: one the worker
+			// refuses for its text (unparseable, or against pi's schema) is compared, while a link, an unreadable file or
+			// anything else the reader refuses before reading (PR #553: overlay-link, overlay-unreadable; PR #557:
+			// overlay-not-a-file) is not, since the job never loads it and the line above already says every job is refused.
+			const refusedForText = modelsRead?.piDispatchConfig === true && typeof modelsRead.code !== "string" && modelsRead.overlayLink !== true && modelsRead.overlayNotAFile !== true && /^overlay models\.json (is not valid JSON|does not match)/.test(String(modelsRead.message));
+			if (overlayModels !== null || refusedForText) {
+				const catalog = await (seams.modelCatalog ?? defaultModelCatalog)();
+				if (catalog) checks.push(...(await overlayLoaderParityChecks(modelsPath, { pi: await (seams.piModelLoader ?? defaultPiModelLoader)(), checkModelsKnown: catalog.checkModelsKnown })));
 			}
 			// Issue #503: a model whose baseUrl is localhost or a loopback literal can never be reached from a job, egress on
 			// or off, because inside a job that address is the job's own container. Said whatever is declared: an overlay
@@ -2875,6 +2910,42 @@ export async function collectChecks(shellVars, seams) {
 			ok: true,
 			label: `${costCaps.length} trigger(s) set run.maxCostUsd, which needs a worker and a receiver that carry issue #501 (a service below that drops the cap silently; the worker refuses such a job as trigger-skew rather than running it under the deployment's cap or none, and only when it can read the triggers file itself)`,
 		});
+	}
+
+	// Issues #501 and #502 (the round's doctor half): three lines about the models a job may use, asked of the worker's
+	// own catalog (model-catalog.mjs, imported lazily: it loads pi-ai, which this module never does at load) with the
+	// overlay models.json the worker reads and the deployment's settings resolved as a job resolves them. Nothing when
+	// pi-ai does not load: the provider key line below already fails on that. A triggers file that did not load
+	// contributes no trigger (its own line says so), and the deployment's default is still judged for its cap.
+	{
+		const catalog = await (seams.modelCatalog ?? defaultModelCatalog)();
+		if (catalog) {
+			const overlayDir = typeof env.PI_GLOBAL_PI_DIR === "string" && env.PI_GLOBAL_PI_DIR !== "" ? resolve(cwd, env.PI_GLOBAL_PI_DIR) : null;
+			const readOverlayDoc = () => (overlayDir === null ? null : readOverlayModels(overlayDir, { readFileSync: seams.readOverlayFile ?? ((p, enc) => readFileSync(p, enc)), ...(seams.lstatOverlayFile ? { lstatSync: seams.lstatOverlayFile } : {}) }));
+			let overlayDoc = null;
+			try {
+				overlayDoc = readOverlayDoc();
+			} catch {
+				// Unreadable or refused: the overlay lines say which. The checks below then judge builtin models only.
+			}
+			let envList = null;
+			try {
+				envList = allowedModelsFrom(env);
+			} catch {
+				// A malformed PI_ALLOWED_MODELS is its own line above (the worker refuses to boot on it).
+			}
+			const subjects = modelSubjects({ runs: parseError ? [] : modelRuns, deployment: deploymentSettingsOf(env, settingsFilePath(env, home), fileExists), envList });
+			checks.push(...unknownModelChecks(subjects, catalog.checkModelsKnown, readOverlayDoc));
+			checks.push(...costCapFitChecks(subjects, (ref) => boundModelOf(ref, { builtinModel: catalog.builtinModel, overlay: overlayDoc })));
+			checks.push(
+				...listedProviderCredentialChecks(subjects, {
+					candidatesOf: (name) => (typeof oracle?.providerKeyCandidates === "function" ? oracle.providerKeyCandidates(name) : []),
+					forwarded: (env.PI_FORWARD_ENV ?? "").split(",").map((name) => name.trim()).filter((name) => name !== ""),
+					env,
+					overlay: overlayDoc,
+				}),
+			);
+		}
 	}
 
 	// REQ-TRIGGER-SECRETS. Only reported when a trigger actually binds one, on the run.resume block's
@@ -4291,6 +4362,398 @@ export function dollarChecks(env, costCaps, workerReadsTriggers) {
 }
 
 /**
+ * Issue #501 part 6: do this host's dollar caps match its peers'? `mine` is this host's `fpUsd` as doctor computes it
+ * from the service's settings (`deploymentSettingsOf`, `usdFingerprint`), `peers` the registry rows of every OTHER
+ * host. WARNINGS only, never a failure, the fleet block's rule: this command runs on one machine and must not refuse
+ * a deployment for a condition that machine cannot fix.
+ *
+ *   - A peer whose `fpUsd` differs: the dollar counters are shared, so the host with the larger cap admits a job the
+ *     other would refuse, and each host's view of "full" is its own.
+ *   - A peer with no `fpUsd` (or an empty one): it runs a worker from before hosts published one, so whether it holds
+ *     the same caps is unknown. Said only when dollar caps are in use somewhere: this host's fingerprint, or any
+ *     peer's, is not the empty one, or else a dollar counter (`budget:usd:*`) exists on this Valkey
+ *     (`dollarKeysExist`, asked only then). The counters are the one trace a capped host that publishes nothing
+ *     leaves (PR #551's review: an old capped host beside a new uncapped one was silent). A fleet that never used a
+ *     dollar setting hears nothing new on upgrade.
+ *
+ * Hosts are named, never their caps: the registry carries a digest, so "different" is all a reader can know.
+ */
+export async function fleetDollarChecks(mine, peers, { dollarKeysExist = async () => false } = {}) {
+	const checks = [];
+	const opinions = peers.filter((h) => typeof h.fpUsd === "string" && h.fpUsd !== "");
+	const differing = opinions.filter((h) => h.fpUsd !== mine);
+	if (differing.length > 0) {
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `Hosts disagree about the dollar caps: ${differing.map((h) => h.name).join(", ")} ${differing.length === 1 ? "judges" : "judge"} the shared dollar counters against a different per-job cap, dollar windows, scoped-limits dollar rows or PI_ALLOWED_MODELS than this host's settings`,
+			fix: "set PI_MAX_COST_USD, PI_DAILY_COST_USD, PI_WEEKLY_COST_USD, PI_MONTHLY_COST_USD, the overlay's dollar keys, the scoped-limits file's dollar rows and PI_ALLOWED_MODELS (it picks the model rows a job without its own list reserves in) alike on every host: the counters are shared, so a host with a larger cap admits a job another would refuse. An env change needs a restart; an overlay or scoped-limits edit shows within one beat",
+		});
+	}
+	const silent = peers.filter((h) => typeof h.fpUsd !== "string" || h.fpUsd === "");
+	if (silent.length === 0) return checks;
+	let inUse = mine !== EMPTY_USD_FINGERPRINT || opinions.some((h) => h.fpUsd !== EMPTY_USD_FINGERPRINT);
+	let byCounters = false;
+	if (!inUse) {
+		byCounters = (await Promise.resolve().then(dollarKeysExist).catch(() => false)) === true;
+		inUse = byCounters;
+	}
+	if (inUse) {
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `${silent.map((h) => h.name).join(", ")} ${silent.length === 1 ? "publishes no fingerprint of its" : "publish no fingerprint of their"} dollar caps, so whether ${silent.length === 1 ? "it holds" : "they hold"} the same caps as this host is unknown${byCounters ? " (no host that publishes one sets a dollar cap, but dollar counters exist on this Valkey, so some host reserved dollars recently)" : ""}`,
+			fix: "upgrade every worker on this Valkey to the same release: a worker from before hosts compared their dollar caps may judge the shared dollar counters against other caps, or reserve no dollars at all",
+		});
+	}
+	return checks;
+}
+
+/**
+ * The runner's own input overhead (`BOUND_OVERHEAD_TOKENS`, image/runner/src/usage-meter.mjs), which its bound adds to
+ * every call. Copied, because the worker package does not ship the runner; `doctor.test.mjs` holds the two equal.
+ */
+export const FIRST_CALL_OVERHEAD_TOKENS = 8192;
+/**
+ * The least a job's FIRST call carries before its task, in bytes: pi 0.99.1's default system prompt (1,753 bytes) and
+ * the schemas of its four default tools (2,712 bytes) serialise to 4,465 bytes, and PR #542's lab measured 10,667 for
+ * a short task. 4,096 is below both, so the bound below stays a lower bound for a job that adds nothing.
+ */
+export const FIRST_CALL_MIN_CONTEXT_BYTES = 4096;
+
+/**
+ * A LOWER BOUND, in integer micro-dollars, on what the runner's cost guard (`callCostBound`) reserves for a job's
+ * first call on `model`, or null when this cannot say. The guard refuses a call when its bound would pass the cap, so
+ * a per-job cap below this number can never admit a call on the model: with the main model, the job makes no call at
+ * all (PR #542's lab: the default model's first call was bounded at $1.03 under a $1 cap).
+ *
+ * The guard's bound is (request bytes + 8,192) x the dearest input rate + the output limit x the dearest output rate,
+ * times a service-tier multiplier, over the model's table, its tiers and its fallbacks. This takes the parts of that
+ * which cannot be smaller: the model's own table (not its tiers or fallbacks, which only raise the bound), the output
+ * limit `model.maxTokens` (pi sends none of its own, so the guard uses the model's), an input of the overhead plus
+ * `FIRST_CALL_MIN_CONTEXT_BYTES`, and the runner's own service-tier multiplier (`serviceTierMultiplier`). The input
+ * rate is the guard's: the highest of input, cache read and cache write (not the 1h write, which needs long
+ * retention). Null for a table or limit it cannot read.
+ */
+export function firstCallFloorMicros(model) {
+	const cost = model?.cost;
+	const usable = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+	if (!cost || !["input", "output", "cacheRead", "cacheWrite"].every((field) => usable(cost[field]))) return null;
+	const maxTokens = model.maxTokens;
+	if (!(typeof maxTokens === "number" && Number.isFinite(maxTokens) && maxTokens > 0)) return null;
+	const inputRate = Math.max(cost.input, cost.cacheRead, cost.cacheWrite);
+	return Math.ceil(((FIRST_CALL_OVERHEAD_TOKENS + FIRST_CALL_MIN_CONTEXT_BYTES) * inputRate + maxTokens * cost.output) * serviceTierMultiplier(model));
+}
+
+/**
+ * The runner's service-tier multiplier (`callCostBound` step 7, image/runner/src/usage-meter.mjs), copied like the
+ * overhead above: pi multiplies a settled cost by the tier the RESPONSE reports on these two apis, which can be the
+ * account's default rather than the request's, so the runner always bounds at the dearest tier. Leaving it out
+ * (PR #551's review) let doctor stay silent on a cap the runner refuses every call under: openai/gpt-5.5 under $5.
+ * `fleet-dollars.test.mjs` derives the runner's multiplier from its own bound for every priced api and holds this
+ * equal to it.
+ */
+export function serviceTierMultiplier(model) {
+	if (model?.api !== "openai-responses" && model?.api !== "openai-codex-responses") return 1;
+	return model.id === "gpt-5.5" ? 2.5 : 2;
+}
+
+/**
+ * The model object the floor above is computed from: the builtin catalog's (`builtinModel`, model-catalog.mjs), or a
+ * CUSTOM model the overlay `models.json` defines (its own `cost` and `maxTokens`). Null, so the model is not judged,
+ * when the overlay redefines or overrides a builtin model: pi composes the two, and this does not copy that rule.
+ */
+export function boundModelOf({ provider, id }, { builtinModel, overlay = null }) {
+	const providers = overlay?.providers;
+	const entry = providers !== null && typeof providers === "object" && !Array.isArray(providers) && Object.hasOwn(providers, provider) ? providers[provider] : null;
+	const builtin = builtinModel(provider, id);
+	if (entry !== null && typeof entry === "object") {
+		const overrides = entry.modelOverrides;
+		if (overrides !== null && typeof overrides === "object" && Object.hasOwn(overrides, id)) return null;
+		const definition = Array.isArray(entry.models) ? entry.models.find((m) => m !== null && typeof m === "object" && m.id === id) : undefined;
+		if (definition !== undefined) return builtin ? null : definition;
+	}
+	return builtin;
+}
+
+/**
+ * Who runs on which models under which cap (issues #501 and #502), as the worker resolves a job: the deployment's own
+ * default, then every trigger. `deployment` is `{ provider, model, maxCostUsd }` (overlay over env,
+ * `deploymentSettingsOf`); `runs` the trigger facts; `envList` the parsed `PI_ALLOWED_MODELS`, or null. Each subject
+ * is `{ label, main, list, cap, secretNames, named }`: `main` and `list` are `{ provider, id }`, `list` is the
+ * trigger's `run.models` or else the env list, `cap` the effective per-job cap in micro-dollars (the smaller of the
+ * trigger's and the deployment's, `effectiveCostCapMicros`) or null, and `named` says the trigger names a provider, a
+ * model or a list of its own.
+ */
+export function modelSubjects({ runs = [], deployment, envList = null }) {
+	const listOf = (list) => (Array.isArray(list) ? list.map(splitModelEntry).filter((ref) => ref !== null).map((ref) => ({ provider: ref.provider, id: ref.model })) : []);
+	const capOf = (triggerValue) => {
+		try {
+			return effectiveCostCapMicros(triggerValue, deployment.maxCostUsd);
+		} catch {
+			return null; // a deployment cap that does not parse is `dollarChecks`' line
+		}
+	};
+	const subjects = [{ label: "the deployment default", main: { provider: deployment.provider, id: deployment.model }, list: listOf(envList), cap: capOf(undefined), secretNames: [], named: false, deployment: true }];
+	for (const run of runs) {
+		subjects.push({
+			label: run.label,
+			main: { provider: run.provider ?? deployment.provider, id: run.model ?? deployment.model },
+			list: listOf(run.models ?? envList),
+			cap: capOf(run.maxCostUsd),
+			secretNames: run.secretNames ?? [],
+			named: run.provider !== undefined || run.model !== undefined || run.models !== undefined,
+		});
+	}
+	return subjects;
+}
+
+/**
+ * Issue #501's open question, answered with a warning: a per-job cap below one full-output call of the main model,
+ * or of a listed model, is a cap the runner can never admit that call under (`firstCallFloorMicros`). One line,
+ * grouped by model and cap so a deployment default every trigger inherits is named once.
+ */
+export function costCapFitChecks(subjects, modelOf) {
+	const groups = new Map();
+	for (const s of subjects) {
+		if (s.cap === null || s.cap === undefined) continue;
+		const seen = new Set();
+		for (const ref of [s.main, ...s.list]) {
+			const name = `${ref.provider}/${ref.id}`;
+			if (seen.has(name)) continue;
+			seen.add(name);
+			const floor = firstCallFloorMicros(modelOf(ref));
+			if (floor === null || s.cap >= floor) continue;
+			const main = ref === s.main;
+			const key = `${name}\u0000${s.cap}\u0000${main}`;
+			if (!groups.has(key)) groups.set(key, { name, floor, cap: s.cap, main, labels: [] });
+			groups.get(key).labels.push(s.label);
+		}
+	}
+	if (groups.size === 0) return [];
+	const items = [...groups.values()].map((g) => `${printable(g.name)}${g.main ? " (the main model, so such a job makes no call at all)" : ""} needs at least $${formatMicros(g.floor)} a call under a $${formatMicros(g.cap)} cap (${g.labels.join(", ")})`);
+	return [
+		{
+			ok: false,
+			warn: true,
+			label: `The per-job cost cap is below one full-output call of a model a job may use, so the runner refuses every call to that model before it is sent: ${items.join("; ")}`,
+			fix: "raise PI_MAX_COST_USD (or the trigger's run.maxCostUsd) above the amount named, or use a model with a smaller output limit. The amount is a lower bound: the runner's own bound adds the whole request, so a cap just above it can still refuse a call",
+		},
+	];
+}
+
+/**
+ * Issue #502 part 2: a trigger whose model, or a model on its list, the worker's free gate would refuse, asked of the
+ * worker's own gate (`checkModelsKnown`, model-catalog.mjs) with the overlay `models.json` it reads. Every trigger kind,
+ * cron included, and only triggers that name a provider, a model or a list of their own: a trigger that names none
+ * runs on the deployment's settings, which get one line of their own (the deployment subject). An overlay that cannot be read just now
+ * (`unavailable`) says nothing: the worker retries such a job.
+ */
+export function unknownModelChecks(subjects, checkModelsKnown, readOverlay) {
+	const unknown = [];
+	const fallbacks = [];
+	const checks = [];
+	// The deployment's own default model and PI_ALLOWED_MODELS (PR #551's review): a typo there refuses every job
+	// whose trigger names neither, so it gets a line of its own, worded for the settings that hold it.
+	for (const s of subjects.filter((x) => x.deployment === true)) {
+		const verdict = checkModelsKnown([{ ...s.main, main: true }, ...s.list], { readOverlay });
+		const ref = verdict?.unknown ?? verdict?.fallbackUnlisted;
+		if (!ref) continue;
+		// A broken overlay is the overlay lines' to name (they say every job is refused); blaming .env here would send
+		// the operator to the wrong file (PR #551's review, round 2).
+		if (verdict.unknown && typeof verdict.why === "string" && verdict.why.startsWith("overlay-")) continue;
+		checks.push({
+			ok: false,
+			warn: true,
+			label: verdict.unknown
+				? `The deployment's default model (PI_PROVIDER/PI_MODEL, or the panel's provider/model) or a model on PI_ALLOWED_MODELS is one this deployment does not know: ${printable(`${ref.provider}/${ref.id}`)} (${verdict.why}), so every job whose trigger names no model of its own is refused before it starts (model-unknown)`
+				: `A model on PI_ALLOWED_MODELS declares server-side fallbacks the list does not name: ${printable(`${ref.provider}/${ref.id}`)}, so every job whose trigger names no list of its own is refused before it starts (model-not-allowed)`,
+			fix: verdict.unknown ? "fix the id in .env (or the panel's model setting): the worker knows pi's builtin catalog at its pin and the models the overlay models.json declares" : "add that model's fallback models to PI_ALLOWED_MODELS, under the same provider, or remove it",
+		});
+	}
+	for (const s of subjects) {
+		if (!s.named) continue;
+		const verdict = checkModelsKnown([{ ...s.main, main: true }, ...s.list], { readOverlay });
+		if (verdict?.unknown) unknown.push(`${s.label}: ${printable(`${verdict.unknown.provider}/${verdict.unknown.id}`)} (${verdict.why})`);
+		else if (verdict?.fallbackUnlisted) fallbacks.push(`${s.label}: ${printable(`${verdict.fallbackUnlisted.provider}/${verdict.fallbackUnlisted.id}`)}`);
+	}
+	if (unknown.length > 0) {
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `${unknown.length} trigger(s) name a model this deployment does not know, so every job of them is refused before it starts (model-unknown): ${unknown.join("; ")}`,
+			fix: "fix the provider or model id: the worker knows pi's builtin catalog at its pin and the models the overlay models.json declares. not-in-catalog is a typo or a model only an extension defines (declare it in the overlay models.json); an overlay reason names the file as the problem",
+		});
+	}
+	if (fallbacks.length > 0) {
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `${fallbacks.length} trigger(s) list a model whose server-side fallbacks are not on the list, so every job of them is refused before it starts (model-not-allowed): ${fallbacks.join("; ")}`,
+			fix: "list that model's fallback models too, under the same provider, or remove it from the list",
+		});
+	}
+	return checks;
+}
+
+/**
+ * Issue #502's open question, answered with a warning: only the main provider's key is resolved for a job; any other
+ * provider on its list needs a key that arrives by `run.secrets` or `PI_FORWARD_ENV`. A listed provider with neither
+ * starts the job and then fails the first call to it, after the budget is reserved. The names looked for are pi's
+ * own (`candidatesOf`, the provider oracle), or the variable the overlay's `apiKey` for that provider references.
+ * Said nothing about a provider it cannot judge: no names at all (Bedrock reads the AWS chain), the keyless marker
+ * (#503), or an `apiKey` that is not a variable reference.
+ */
+export function listedProviderCredentialChecks(subjects, { candidatesOf, forwarded = [], env = {}, overlay = null }) {
+	const providers = overlay?.providers;
+	const namesFor = (provider) => {
+		const entry = providers !== null && typeof providers === "object" && !Array.isArray(providers) && Object.hasOwn(providers, provider) ? providers[provider] : null;
+		const apiKey = entry !== null && typeof entry === "object" ? entry.apiKey : undefined;
+		if (typeof apiKey === "string" && apiKey !== "") {
+			if (apiKey === KEYLESS_API_KEY) return [];
+			const ref = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(apiKey);
+			return ref ? [ref[1]] : [];
+		}
+		return candidatesOf(provider) ?? [];
+	};
+	const missing = new Map();
+	for (const s of subjects) {
+		for (const provider of new Set(s.list.map((ref) => ref.provider))) {
+			if (provider === s.main.provider) continue;
+			const names = namesFor(provider);
+			if (names.length === 0) continue;
+			if (names.some((n) => s.secretNames.includes(n) || (forwarded.includes(n) && typeof env[n] === "string" && env[n] !== ""))) continue;
+			if (!missing.has(provider)) missing.set(provider, { names, labels: [] });
+			missing.get(provider).labels.push(s.label);
+		}
+	}
+	if (missing.size === 0) return [];
+	const items = [...missing.entries()].map(([provider, m]) => `${printable(provider)} (${m.labels.join(", ")}; looked for ${m.names.join(" or ")})`);
+	return [
+		{
+			ok: false,
+			warn: true,
+			label: `A provider on an allowed-model list, other than the job's main one, has no credential this deployment hands its jobs, so a call to it fails inside the container, after the job started: ${items.join("; ")}`,
+			fix: "only the main provider's key is resolved for a job. Bind another provider's key with run.secrets on the trigger, or name it in PI_FORWARD_ENV and set it in .env; or take the provider off the list",
+		},
+	];
+}
+
+/**
+ * The deployment's provider, model and dollar settings as the worker resolves them for a job: the overlay over env
+ * (`resolveSettings`), falling back to env when the overlay is invalid or the merged dollar values break the
+ * invariant, which is the fallback `start.mjs` takes for its slot count and its `fpUsd`. Values as written; nothing
+ * here throws.
+ */
+export function deploymentSettingsOf(env, settingsFile, fileExists) {
+	const fromEnv = { provider: env.PI_PROVIDER ?? DEFAULT_PROVIDER, model: env.PI_MODEL ?? DEFAULT_MODEL };
+	for (const key of DOLLAR_SETTING_KEYS) {
+		const raw = env[DOLLAR_ENV_NAMES[key]];
+		fromEnv[key] = raw === undefined || raw === "" ? null : raw;
+	}
+	let read;
+	try {
+		read = fileExists(settingsFile) ? readOverlay(settingsFile) : { overlay: {} };
+	} catch {
+		return fromEnv;
+	}
+	const resolved = resolveSettings(fromEnv, read);
+	if (resolved.invalid) return fromEnv;
+	return Object.fromEntries(Object.keys(fromEnv).map((key) => [key, resolved[key] ?? null]));
+}
+
+/** The worker's model catalog (model-catalog.mjs), imported lazily for `defaultProviderOracle`'s reason, or null. */
+async function defaultModelCatalog() {
+	try {
+		return await import("./model-catalog.mjs");
+	} catch {
+		return null;
+	}
+}
+
+/** pi's own model loader (pi-model-loader.mjs), imported lazily like the catalog, or null. */
+async function defaultPiModelLoader() {
+	try {
+		const { loadPiModelLoader } = await import("./pi-model-loader.mjs");
+		return await loadPiModelLoader();
+	} catch {
+		return null;
+	}
+}
+
+/** The `provider/id` pairs a models.json text declares, read leniently: a file pi drops still names ids worth asking about. */
+function declaredOverlayModels(text) {
+	// Read as pi reads text (BOM, comments and trailing commas stripped; PR #551's review: plain JSON.parse found no
+	// model in a JSONC overlay), without pi's schema, so a file pi refuses still names ids worth asking about.
+	let doc = parseModelsJson(text).value;
+	if (doc === undefined || doc === null) {
+		try {
+			doc = JSON.parse(stripJsonComments(stripBom(text)));
+		} catch {
+			return [];
+		}
+	}
+	const out = [];
+	const providers = doc?.providers;
+	if (providers === null || typeof providers !== "object" || Array.isArray(providers)) return out;
+	for (const [provider, entry] of Object.entries(providers)) {
+		if (entry === null || typeof entry !== "object") continue;
+		for (const m of Array.isArray(entry.models) ? entry.models : []) if (typeof m?.id === "string" && m.id !== "") out.push([provider, m.id]);
+	}
+	return out;
+}
+
+/**
+ * Issue #502's open question: does pi's own loader read the overlay `models.json` as the worker's catalog does? The
+ * worker admits or refuses a job by its copy of pi's rules (`parseModelsJson`, `checkModelsKnown`); pi decides what
+ * runs. A disagreement is a model the worker calls known that pi lacks (a paid job that exits 2) or the reverse (a
+ * working model refused), and either is a defect in the copy or a pi beside the worker that is not the image's. Asked
+ * per file (loads or not) and per declared model. `pi` is `defaultPiModelLoader`'s answer, or null.
+ */
+export async function overlayLoaderParityChecks(modelsPath, { pi, checkModelsKnown, readText = (p) => readFileSync(p, "utf8") }) {
+	if (pi === null || pi === undefined) {
+		return [{ ok: true, label: "Overlay models.json was not compared with pi's own loader: pi-coding-agent is not installed beside the worker (a checkout of this repository has it after npm ci)" }];
+	}
+	// Only the pinned pi speaks for the job image (PR #551's review): a global layout can put any pi beside the worker.
+	if (typeof pi.pinned !== "string" || pi.version !== pi.pinned) {
+		return [{ ok: true, label: `Overlay models.json was not compared with pi's own loader: pi ${printable(String(pi.version))} beside the worker is not the worker's pinned pi-ai ${typeof pi.pinned === "string" ? printable(pi.pinned) : "(pin unknown)"}` }];
+	}
+	let text;
+	let theirs;
+	try {
+		text = readText(modelsPath);
+		theirs = await pi.read(modelsPath);
+	} catch (error) {
+		return [{ ok: false, warn: true, label: `Overlay models.json could not be compared with pi ${printable(String(pi.version))}'s own loader (${printable(String(error?.code ?? error?.message ?? "error"))})`, fix: "re-run doctor; if it persists, report it with the error" }];
+	}
+	const parsed = parseModelsJson(text);
+	const ours = parsed.error === undefined;
+	const readOverlay = () => {
+		if (parsed.error !== undefined) throw Object.assign(new Error(parsed.error), { piDispatchConfig: true });
+		return parsed.value;
+	};
+	const items = [];
+	if (theirs.loads !== ours) items.push(`pi ${theirs.loads ? "loads the file and the worker refuses it" : "drops the file and the worker reads it"}`);
+	const declared = declaredOverlayModels(text);
+	for (const [provider, id] of declared) {
+		const piHas = theirs.has(provider, id) === true;
+		const workerHas = checkModelsKnown([{ provider, id, main: true }], { readOverlay })?.ok === true;
+		if (piHas !== workerHas) items.push(`${printable(`${provider}/${id}`)}: pi ${piHas ? "has it" : "lacks it"}, the worker calls it ${workerHas ? "known" : "unknown"}`);
+	}
+	if (items.length > 0) {
+		return [
+			{
+				ok: false,
+				warn: true,
+				label: `pi ${printable(String(pi.version))}'s own loader and the worker's model catalog disagree about overlay models.json: ${items.join("; ")}`,
+				fix: "the worker gates jobs by its own reading of this file and pi decides what runs, so a model the worker knows and pi lacks is a paid job that exits 2, and the reverse is a working model refused. Report it with the file's shape (not its keys); until then, avoid the construct named",
+			},
+		];
+	}
+	return [{ ok: true, label: `Overlay models.json reads the same in pi ${printable(String(pi.version))}'s own loader as in the worker's model catalog (${declared.length} declared model(s))` }];
+}
+
+/**
  * How a line names its trigger: cron entries by their id, id-less webhook entries by raw file position (the admin's
  * trigger:<index> identity). One function, because the flow lines and the venue lines must name a trigger alike.
  */
@@ -4299,7 +4762,7 @@ function triggerLabel(t, index) {
 }
 
 function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
-	const none = { requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], costCaps: [], parseError: null, path: null };
+	const none = { requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], costCaps: [], modelRuns: [], parseError: null, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -4423,6 +4886,17 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
 			// Issue #501: every trigger that sets run.maxCostUsd, with the label the cap check names it by. The value
 			// already parsed (the loader validated it), so the check below only compares.
 			costCaps: triggers.map((t, index) => ({ label: triggerLabel(t, index), maxCostUsd: t.run.maxCostUsd })).filter((r) => r.maxCostUsd !== undefined && r.maxCostUsd !== null),
+			// Issues #501 and #502 (PR 9 of that round): every trigger's model choice, list, cap and bound secret NAMES, for the
+			// unknown-model, cap-fit and listed-provider credential lines. Every kind, cron included, whatever host serves it:
+			// a model the worker does not know is refused wherever the job runs.
+			modelRuns: triggers.map((t, index) => ({
+				label: triggerLabel(t, index),
+				provider: typeof t.run.provider === "string" ? t.run.provider : undefined,
+				model: typeof t.run.model === "string" ? t.run.model : undefined,
+				models: Array.isArray(t.run.models) ? t.run.models : undefined,
+				maxCostUsd: t.run.maxCostUsd ?? undefined,
+				secretNames: t.run.secrets !== undefined && t.run.secrets !== null ? Object.keys(t.run.secrets) : [],
+			})),
 			// Explicit on the success path too (issue #242): the dead-scope advisory distinguishes
 			// "facts read clean" (path set, no error) from the zeroed `none` -- an implicit undefined
 			// here made that test silently false for every deployment.
@@ -6304,6 +6778,63 @@ async function defaultReadHosts(url) {
 		}
 	} catch (err) {
 		return { unreachable: err?.message ?? "registry unreadable" };
+	}
+}
+
+/**
+ * Has any host reserved dollars on this Valkey recently? For `fleetDollarChecks`, asked only when a peer publishes no
+ * `fpUsd` and nothing else says dollar caps are in use. BEST EFFORT, and it says so wherever it is described:
+ *   1. EXISTS on the deployment's current day, week and month keys (`budget:usd:YYYY-MM-DD`, `:w:<Monday>`,
+ *      `:m:YYYY-MM`, `budget.mjs`'s key functions at `now`), the counters any host with a dollar window writes;
+ *   2. else a bounded SCAN for `budget:usd:*` (at most ten passes of COUNT 1000), for scope and model windows.
+ * The whole read is bounded by `deadlineMs`, so a large keyspace or a hung server answers "not seen". Any fault is
+ * false: the answer can add a warning, never remove one. A host whose only dollar setting is the per-job cap writes no
+ * counter at all, so it is not found this way (PR #551's review, round 2).
+ */
+export async function dollarKeysExistWith(client, { now = () => new Date(), deadlineMs = 2000 } = {}) {
+	let timer;
+	const deadline = new Promise((resolve) => {
+		// NOT unref'd, `host-registry.mjs`'s reason: an unref'd timer does not fire when the hung call is the last thing
+		// holding the loop, which is the case it is for. It is cleared as soon as the answer is in.
+		timer = setTimeout(() => resolve(false), deadlineMs);
+	});
+	const ask = (async () => {
+		const at = now();
+		const current = [dayKey(at, DOLLAR_KEY_PREFIX), weekKey(at, DOLLAR_KEY_PREFIX), monthKey(at, DOLLAR_KEY_PREFIX)];
+		if (Number(await client.exists(...current)) > 0) return true;
+		let cursor = "0";
+		for (let pass = 0; pass < 10; pass++) {
+			const [next, keys] = await client.scan(cursor, "MATCH", `${DOLLAR_KEY_PREFIX}:*`, "COUNT", 1000);
+			if (Array.isArray(keys) && keys.length > 0) return true;
+			cursor = String(next);
+			if (cursor === "0") return false;
+		}
+		return false;
+	})();
+	ask.catch(() => {});
+	try {
+		return (await Promise.race([ask, deadline])) === true;
+	} catch {
+		return false;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/** `dollarKeysExistWith` over a fail-fast client on `url`, always disconnected. */
+export async function defaultDollarKeysExist(url) {
+	try {
+		const { makeRedisClient } = await import("./connection.mjs");
+		const client = makeRedisClient(url, { failFast: true, lazyConnect: true });
+		client.on("error", () => {});
+		try {
+			await client.connect();
+			return await dollarKeysExistWith(client);
+		} finally {
+			client.disconnect();
+		}
+	} catch {
+		return false;
 	}
 }
 

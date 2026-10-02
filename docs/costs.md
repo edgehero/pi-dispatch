@@ -266,7 +266,9 @@ is an open issue.
 - **Contention near a cap.** Each job holds its whole per-job cap while it runs. A window with $1 left refuses a
   $2-capped job that would have spent $0.30. The refusal is final for that delivery.
 - **Hosts may disagree on caps.** The counters are shared, but each host judges them against its own cap values.
-  Keep the dollar settings the same on every host.
+  Each host publishes a fingerprint of its dollar caps (`fpUsd`), and `pi-dispatch doctor` names a host whose
+  fingerprint differs from this one's, or that publishes none while dollar caps are in use. Nothing refuses a job
+  over it, so keep the dollar settings the same on every host.
 - **Uncatalogued fees** (server-side tools, Bedrock regional pricing) are outside both the bound and pi's cost.
 - **A failed stream** counts at its bound only against the per-job cap during the run. The windows settle from
   pi's partial cost, which can be below what the provider billed: an undercount, not an overcharge.
@@ -305,6 +307,18 @@ is an open issue.
   cannot read the file (no permission on it or its folder), and when `models.json` is a link: copy the file in
   instead. A read that fails for a moment retries the
   job once, then fails it ([global overlay](global-pi-overlay.md#custom-providers)).
+
+`pi-dispatch doctor` checks a few things about these caps before a job finds them:
+
+- **A cap too small for one call.** The runner refuses a call when the most it could cost would pass the cap.
+  That bound includes the model's whole output limit, so a small cap can refuse a model's first call every time.
+  Doctor warns when the per-job cap (the deployment's, or a trigger's smaller one) is below one full-output call of
+  the job's main model or of a model on its list, and names the amount. The amount is a lower bound: the model's
+  output limit at its output rate, plus a minimal first request, times the service-tier multiplier the runner
+  applies on the OpenAI responses apis. On the default model it is $1.00608, so a $1 cap
+  runs nothing. Raise the cap above the amount named, with room for the request itself.
+- **Hosts with different caps.** On a fleet, doctor names a host whose dollar caps differ from this one's
+  (the bullet above, and [multi-host](multi-host.md)).
 
 Specs: [`REQ-SPEND-CAPS-MULTI-WINDOW`](../specs/requirements.md#req-spend-caps-multi-window),
 [`REQ-TOKEN-ACCOUNTING-AND-CAPS`](../specs/requirements.md#req-token-accounting-and-caps),

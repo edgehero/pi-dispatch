@@ -25,6 +25,10 @@ import { DOLLAR_ENV_NAMES, DOLLAR_WINDOW_KEYS, checkDollarInvariant, optionalUsd
  * that the worker refuses. valkey-endpoint.mjs re-exports it.
  */
 export const DEFAULT_VALKEY_URL = "redis://127.0.0.1:6379";
+/** The model a job runs on when nothing names one (`PI_MODEL` unset): one copy, for `loadConfig` and doctor. */
+export const DEFAULT_MODEL = "claude-sonnet-4-5-20250929";
+/** The provider a job runs on when nothing names one (`PI_PROVIDER` unset). */
+export const DEFAULT_PROVIDER = "anthropic";
 
 export function configError(message) {
 	const error = new Error(message);
@@ -351,7 +355,7 @@ export function globalExtensionsEnabled(env) {
  * spend caps above, the per-job token scoping, or the admin-extension recursion block.
  */
 export function loadConfig(env = process.env, { fileExists = existsSync } = {}) {
-	const model = env.PI_MODEL ?? "claude-sonnet-4-5-20250929"; // dated snapshot; deterministic per CONST-PI-VERSION-PINNED
+	const model = env.PI_MODEL ?? DEFAULT_MODEL; // dated snapshot; deterministic per CONST-PI-VERSION-PINNED
 	// #227. Hoisted above the object because `defaultBackend` INDEXES `backends`, and a property cannot read
 	// a sibling of the literal it is in. (Calling the parser twice would be harmless -- `egressEnabled` is
 	// called twice a few properties down for the same reason -- so this is about the index, not the throw.)
@@ -372,7 +376,7 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		weeklyCap: optionalBoundedInt(env, "PI_WEEKLY_CAP", 1), // REQ-SPEND-CAPS-MULTI-WINDOW; null = weekly window disabled
 		monthlyCap: optionalBoundedInt(env, "PI_MONTHLY_CAP", 1), // null = monthly window disabled
 		softHoldPct: optionalBoundedInt(env, "PI_SOFT_HOLD_PCT", 1, 99), // null = soft-hold band disabled
-		provider: env.PI_PROVIDER ?? "anthropic",
+		provider: env.PI_PROVIDER ?? DEFAULT_PROVIDER,
 		model,
 		maxTurns: positiveInt(env, "PI_MAX_TURNS", 30), // pi has no turn limit; we impose one
 		allowedModels: allowedModelsFrom(env), // issue #502: the deployment's allowed-model list; null = unrestricted. ENV ONLY, never the settings overlay
