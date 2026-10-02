@@ -106,6 +106,18 @@ test("model-not-allowed: a main model off the effective list is refused pre-spen
 	assert.equal((await runJob(job(), d2)).outcome, "completed");
 });
 
+test("model-not-allowed: a listed model whose fallbacks are not listed is refused pre-spend, naming no model in the comment", async () => {
+	const fable = { provider: "anthropic", id: "claude-fable-5" };
+	const { deps: d, calls, redis } = deps({ checkModelsKnown: () => ({ fallbackUnlisted: fable, why: "fallback-unlisted" }) });
+	const r = await runJob(job({ provider: "anthropic", model: "claude-fable-5", models: ["anthropic/claude-fable-5"] }), d);
+	assert.deepEqual([r.reason, r.budgetReserved, redis.incrCalls], ["model-not-allowed", false, 0]);
+	for (const step of SPEND) assert.ok(!calls.includes(step), `${step} never ran`);
+	const comment = calls.find((c) => typeof c === "string" && c.startsWith("comment:"));
+	assert.match(comment, /^comment:Refused: a model this job is allowed to use declares fallback models that are not on the job's list/);
+	assert.ok(!/fable|opus|claude/.test(comment), "the comment names no model");
+	assert.deepEqual(calls.find((c) => c.event === "refused_model_not_allowed").fields, { provider: "anthropic", model: "claude-fable-5", why: "fallback-unlisted" });
+});
+
 test("model-unknown is decided before model-not-allowed, and both before the credential gate", async () => {
 	const { deps: d, calls } = deps({ checkModelsKnown: (refs) => ({ unknown: refs[0], why: "not-in-catalog" }), checkProviderCredential: () => (calls.push("credential"), { ok: false, message: "x" }) });
 	assert.equal((await runJob(job({ models: ["anthropic/claude-x"] }), d)).reason, "model-unknown");

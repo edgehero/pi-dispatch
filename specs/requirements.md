@@ -422,7 +422,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   refusal of the credential or of access (an authentication or permission error, whatever its HTTP
   status), and its sentence tells the requester the operator must check the provider key and what it is
   allowed to use; and, since issues #501/#502, the four policy stops, each with its own fixed sentence:
-  `cost-cap` ("Stopped: the next AI call could have taken this run past its cost limit, so it was not made. Partial work may exist. Not retried.") and `model-not-allowed` ("Stopped: the run tried to call an AI model this trigger does not allow, so the call was not made. Partial work may exist. Not retried."), `cost-cap` live on an image that declares `costCap` (its runner's pre-call cost guard stopped a call) and `model-not-allowed`, as the runner's paid stop, still reserved for the model guard (#502 part 4; the same token is already live as the worker's FREE pre-spend refusal of a main model off the job's list, which posts its own refusal comment and pages nobody); and `cost-cap-unenforceable` ("Stopped: this run has a cost limit, and the job image could not enforce it before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.") and `model-policy-unenforceable` ("Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried."), live now, the runner having refused before any call a cost cap or a model list it cannot enforce before a call), and the final infrastructure failure.
+  `cost-cap` ("Stopped: the next AI call could have taken this run past its cost limit, so it was not made. Partial work may exist. Not retried.") and `model-not-allowed` ("Stopped: the run tried to call an AI model this trigger does not allow, so the call was not made. Partial work may exist. Not retried."), `cost-cap` live on an image that declares `costCap` (its runner's pre-call cost guard stopped a call) and `model-not-allowed` live on an image that declares `modelPolicy` (its runner's pre-call model guard stopped a call to a model the list does not name; the same token is also the worker's FREE pre-spend refusal of a main model off the job's list, which posts its own refusal comment and pages nobody); and `cost-cap-unenforceable` ("Stopped: this run has a cost limit, and the job image could not enforce it before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.") and `model-policy-unenforceable` ("Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried."), live now, the runner having refused before any call a cost cap or a model list it cannot enforce before a call), and the final infrastructure failure.
   Once-ness for the infra class is BullMQ's own terminal decision
   (`finishedOn`, set only on the non-retry branch): a retried attempt comments nothing, so a flaky
   daemon cannot post three comments for one recovery, and the seam that reads it also covers the
@@ -1423,9 +1423,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   before anything is spent. The worker half (issue #502 parts 2, 3 and 5): a job whose main model or any
   listed model is in neither pi's builtin catalog at the pin nor the overlay `models.json` is refused
   pre-spend (`model-unknown`); a job whose main model is not on its effective list is refused pre-spend
-  (`model-not-allowed`); the effective list reaches the container as `PI_ALLOWED_MODELS`, only on an image
+  (`model-not-allowed`), and so is a job with a list that names a model whose declared server-side fallbacks
+  (`compat.allowedFallbackModels`, builtin catalog or overlay) are not all listed under its provider (`model-not-allowed`,
+  logged `why: fallback-unlisted`); the effective list reaches the container as `PI_ALLOWED_MODELS`, only on an image
   that declares it can enforce one (`modelPolicy`); and a chained child keeps its parent's provider, model
-  and list. The runner half (part 4) stops a call on an unlisted model at the provider wrapper. Absent
+  and list. The runner half (part 4): a job limited by a list never sends a call to a model outside it.
+  Every provider call the job makes is checked before it is sent, and a call whose requested provider and
+  model are not on the list, or whose request would name another model, is not sent; the job stops with exit
+  `2` / `model-not-allowed`. Absent
   everywhere, a trigger's job data and its container environment are byte-identical to before; the free
   model-exists gate is the one thing every job now passes through, and an outbox child now carries its
   parent's trigger provider and model (absent when the parent's trigger named none).
@@ -1441,13 +1446,32 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   provider pi would not compose is unknown, and so is a builtin model of that provider, which would
   otherwise run without the overlay's endpoint), held to pi's own code at the pin by a differential test. A list the receiver dropped (version skew, or a stale single-file
   mount) is refused as `trigger-skew` when the worker can read the triggers file itself.
+  The runner half covers every model call made in the job's runner process: the session's own turns,
+  compaction and branch summaries, a model switched to mid-run, a second in-process session, an extension's
+  direct model call (its `ctx.modelRegistry`, or pi-ai's legacy global functions), classifiers and image
+  models. A virtual model is judged by the physical model each request is routed to. Matching is exact and
+  case-sensitive on both the provider and the model id. A listed call is still refused when its request would
+  name another model: a routing key (`model`, `modelId`, `models`, `fallbacks`, `providerOptions`) in samplingParams
+  (any other samplingParams key passes under a list), a per-call Azure deployment, a caller's own `fetch`, or an
+  Anthropic fallback (`compat.allowedFallbackModels`, sent with every anthropic-messages call) that is not itself on
+  the list under the model's provider. A payload hook (an extension's `before_provider_request`, or a call's
+  `onPayload`) is DENY BY DEFAULT: it may change only the top-level messages, system prompt and sampling settings,
+  and any other change to the request, at any depth, refuses the call before it is sent (a field set to `undefined`
+  counts as absent). A listed fallback that answers is logged.
+  Out of scope, named as residuals in `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER`: code that reaches a provider
+  around pi's model runtime, a listed model sent to another `baseUrl` (the egress proxy's job), and a `pi`
+  subprocess.
 - **Why**: An unknown model used to cost a container and a budget slot to discover (the runner asked pi,
   after both reserves, and exited 2). A model choice that is only a preference lets a cheap triage trigger
   chain a child on the deployment's dearest model, and a deployment that must never reach a model had no
   way to say so short of a separate deployment. The hazard is the SILENT half again: a list an old image
   ignores runs every model it forbids on a clean exit, so the image capability refuses first; a list the
-  overlay could carry is one a model-callable tool could widen, so it is env-only.
-- **Traces to**: `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`,
+  overlay could carry is one a model-callable tool could widen, so it is env-only. And a list that is only
+  checked when a job starts is a preference: a flow can switch model, start a second session or call a model
+  directly, and each would run, and bill, a model the operator ruled out, with a clean exit. So the runner
+  checks where every call passes, and a runner that cannot enforce the list before each call refuses the job
+  before any call (`model-policy-unenforceable`) rather than run it unenforced.
+- **Traces to**: `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`,
   `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-OUTBOX-CONTRACT`, `INT-MODEL-ENDPOINTS-FILE-CONTRACT`,
   `INT-RUNNER-EXIT-CODE-PROTOCOL`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`
 - **Acceptance**: Given a malformed, empty, oversized or duplicate-carrying `run.models`, or one that omits
@@ -1468,6 +1492,20 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   request file says. Given a job with a list whose models are served by declared model endpoints, it holds
   one slot of every such endpoint. Given no list anywhere, a trigger's job data and the container argv are
   byte-identical to before; an outbox child differs only by inheriting its parent's trigger provider and model.
+  Given a list naming `anthropic/claude-fable-5` (the one builtin model with server-side fallbacks) without both
+  `anthropic/claude-opus-4-8` and `anthropic/claude-opus-5`, the job is refused `model-not-allowed` pre-spend, its
+  comment naming no model; with both listed it runs.
+  Runner half: given a list without the job's model, on the image that declares `modelPolicy`, with a fake key
+  and no network, the job exits `2` / `model-not-allowed` with `modelRefused: 1` and dials nothing. Given a list
+  naming model A and not model B, each of `setModel(B)`, a second in-process session on B, an extension's
+  `ctx.modelRegistry.streamSimple(B)` and a virtual router routing to B ends the job `2` / `model-not-allowed`
+  with no call reaching B and no ledger row for it, while calls on A are admitted. Given a listed call whose
+  samplingParams name another model (while `min_p` passes), or whose call option `onPayload` or session
+  `before_provider_request` hook
+  rewrites the model, nothing reaches the provider and the job ends `2` / `model-not-allowed`. Given a list and a
+  cost cap, a call to an unlisted model is `model-not-allowed`, never `cost-cap`. Given a list on a runner that
+  cannot enforce it before a call, the job is refused `model-policy-unenforceable` before any call. Given no
+  list, the exit line is byte-identical to before.
 
 ## REQ-GLOBAL-PI-OVERLAY
 
@@ -2752,6 +2790,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-02 | Issue #502, part 4 (the runner's model guard). **`REQ-MODEL-POLICY` AMENDED**, the runner half: a job limited by a list never sends a call to a model outside it; every call in the runner process is checked before it is sent (a mid-run `setModel`, a second in-process session, an extension's direct call, classifiers and image models, a virtual model by its routed physical model), exact and case-sensitive on provider and model, and a miss ends the job `2` / `model-not-allowed`. PR #538's review: a listed call is also refused when its request would name another model (a routing key in samplingParams, `providerOptions` included, any other key passing, a payload hook, which is deny by default: it may change only the top-level messages, system prompt and sampling settings, a per-call Azure deployment, a caller's own `fetch`, an unlisted Anthropic fallback); a listed fallback that answers is logged; the worker half refuses, before any spend, a list naming a model whose declared fallbacks are not all listed (`why: fallback-unlisted`), which at the pin is `anthropic/claude-fable-5` without both opus fallbacks, and retries rather than refuses when the overlay cannot be read just then; a runner that cannot enforce the list refuses before any call. The Scope, Why, Traces and Acceptance gain the runner clauses. **`REQ-JOB-STATUS-COMMENTS` AMENDED**, the who-authors clause: `model-not-allowed` is live as the runner's paid stop on an image that declares `modelPolicy`, beside the worker's free refusal; the sentences themselves are unchanged. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` UNCHANGED, checked**: the cost cap's rules stand; an unlisted call under a cap is refused by the list before the cap is asked. **Code evidence**: image/runner/src/usage-meter.mjs -> createModelGuard, createPolicyGuard; image/runner/run-job.mjs; worker/src/model-catalog.mjs -> declaredFallbacks; worker/src/processor.mjs. |
 | 2026-10-02 | Issue #535. **`REQ-RESUMABLE-SESSION` AMENDED**: a transcript holding a compaction with an empty summary is one more fail-open cause, a cold start named `compaction-summary-empty`, and the Acceptance says so. It is not an opt-in bound: a session resumed on such a summary would carry on without the turns it replaced, and nothing would say so. **Code evidence**: worker/src/session-store.mjs -> readCanonical, hasEmptyCompaction; worker/test/session-store.test.mjs; image/runner/test/compaction-refused.integration.test.mjs. |
 | 2026-10-02 | Issue #501 part 1. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**, the Why: the sentence on raising the daily cap names the per-job dollar cap `maxCostUsd` too (a settings key behind the same operator-typed or confirm-gated write), says the three dollar windows are settings keys refused at the write until they are enforced, and that no tool sets a trigger's `run.maxCostUsd`. `REQ-TOKEN-ACCOUNTING-AND-CAPS` and `REQ-SPEND-CAPS-MULTI-WINDOW` UNCHANGED, checked: the runner's enforcement and the windows land in later changes of #501. `CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked: the new image refusal is free and runs before the mint, the clone and every reservation. |
 | 2026-10-02 | Issue #502 parts 2, 3 and 5. **NEW `REQ-MODEL-POLICY`** (the worker half; the runner half lands with part 4): a trigger's `run.models` and the deployment's env-only `PI_ALLOWED_MODELS` name the models a job may call, the trigger's replacing the deployment's, unrestricted when neither is set; a job whose main or listed model is unknown to pi's catalog and the overlay `models.json` is refused `model-unknown` pre-spend; a main model off the effective list is refused `model-not-allowed` pre-spend and pages nobody; a list reaches only an image declaring `modelPolicy`; a chained child keeps its parent's provider, model and list; a listed job holds every listed model's endpoint slot. **`REQ-PER-TRIGGER-TOOL-EXCLUSIONS` UNCHANGED, checked** (its inheritance rule is the precedent, not changed). **`REQ-OPERATOR-FAILURE-NOTIFICATION` UNCHANGED, checked**: its Excluded clause already names every free pre-spend refusal; the hook now honours it for the one reason that is both. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: both new gates are free and sit with the free gates, before the mint, the clone, the token-cap read and every reservation. PR #536's review, folded in: a list the receiver dropped is refused `trigger-skew` where the worker can read the triggers file; the overlay is read as pi reads it; the main model must be a chat model; the Statement's byte-identical claim is narrowed to job data and container env, since the free model-exists gate now runs for every job. Review round 2: the overlay claim is narrowed to pi 0.99.1's loader and provider composition, both held by the differential test; the byte-identical claim names the outbox child's inherited provider and model; the skew check stays strict, a job queued before the field was added included; a builtin model whose provider has an overlay entry pi would not compose is refused, since pi would drop that entry's endpoint. **`REQ-WAIT-FOR` UNCHANGED, checked**: its skew stays strict, and `models` joins it on the same terms. **`REQ-JOB-STATUS-COMMENTS` AMENDED**: `model-not-allowed`'s sentence says the token is live as the worker's free refusal while the runner's stop stays reserved for #502 part 4. |

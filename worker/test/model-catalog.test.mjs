@@ -3,7 +3,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { getAllBuiltinModels, getBuiltinClassifierModels, getBuiltinImageModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
-import { checkModelsKnown, isBuiltinModel, knownModel } from "../src/model-catalog.mjs";
+import { checkModelsKnown, declaredFallbacks, isBuiltinModel, knownModel } from "../src/model-catalog.mjs";
 import { readOverlayModels } from "../src/model-endpoints.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -84,4 +84,48 @@ test("an absent overlay is no overlay; an unparseable one refuses with its own w
 	assert.deepEqual(checkModelsKnown(ref, { readOverlay: eio }), { unavailable: "EIO" });
 	// A defect is neither: it is rethrown, never turned into a permanent public refusal.
 	assert.throws(() => checkModelsKnown(ref, { readOverlay: () => { throw new TypeError("bug"); } }), TypeError);
+});
+
+test("a listed model's server-side fallbacks must be listed too: claude-fable-5 is the one builtin that declares any", () => {
+	// pi 0.99.1's catalog: exactly anthropic/claude-fable-5 declares compat.allowedFallbackModels.
+	assert.deepEqual(declaredFallbacks("anthropic", "claude-fable-5"), ["claude-opus-4-8", "claude-opus-5"]);
+	assert.deepEqual(declaredFallbacks("anthropic", "claude-haiku-4-5"), []);
+	const fable = { provider: "anthropic", id: "claude-fable-5" };
+	const opus48 = { provider: "anthropic", id: "claude-opus-4-8" };
+	const opus5 = { provider: "anthropic", id: "claude-opus-5" };
+	assert.deepEqual(checkModelsKnown([{ ...fable, main: true }, fable]), { fallbackUnlisted: fable, why: "fallback-unlisted" });
+	assert.deepEqual(checkModelsKnown([{ ...fable, main: true }, fable, opus48]), { fallbackUnlisted: fable, why: "fallback-unlisted" }, "both fallbacks, not one");
+	assert.deepEqual(checkModelsKnown([{ ...fable, main: true }, fable, opus48, opus5]), { ok: true });
+	// No list (the main model alone): nothing to judge fallbacks against, as today.
+	assert.deepEqual(checkModelsKnown([{ ...fable, main: true }]), { ok: true });
+	// The pair is the MODEL's provider and the fallback id, which is all pi sends.
+	const readOverlay = () => ({ providers: { proxy: { baseUrl: "http://127.0.0.1:1", api: "anthropic-messages", apiKey: "k", models: [{ id: "fable-like", compat: { allowedFallbackModels: [{ provider: "anthropic", model: "claude-opus-5" }] } }, { id: "claude-opus-5" }] } } });
+	const proxied = { provider: "proxy", id: "fable-like" };
+	assert.deepEqual(checkModelsKnown([{ ...proxied, main: true }, proxied, opus5], { readOverlay }), { fallbackUnlisted: proxied, why: "fallback-unlisted" }, "anthropic/claude-opus-5 is not proxy/claude-opus-5");
+	assert.deepEqual(checkModelsKnown([{ ...proxied, main: true }, proxied, { provider: "proxy", id: "claude-opus-5" }], { readOverlay }), { ok: true });
+});
+
+test("declaredFallbacks reads the overlay the way pi composes it: provider compat, a model definition, then modelOverrides", () => {
+	const overlay = (entry) => ({ providers: { anthropic: entry } });
+	const fb = (...ids) => ({ allowedFallbackModels: ids.map((model) => ({ provider: "anthropic", model })) });
+	assert.deepEqual(declaredFallbacks("anthropic", "claude-haiku-4-5", overlay({ compat: fb("x") })), ["x"], "the provider's compat reaches a builtin model");
+	assert.deepEqual(declaredFallbacks("anthropic", "claude-fable-5", overlay({ modelOverrides: { "claude-fable-5": { compat: fb() } } })), [], "an override that empties the list");
+	assert.deepEqual(declaredFallbacks("anthropic", "my-model", overlay({ models: [{ id: "my-model", compat: fb("y") }] })), ["y"]);
+	assert.deepEqual(declaredFallbacks("anthropic", "my-model", overlay({ compat: fb("z"), models: [{ id: "my-model" }] })), ["z"], "a definition without its own compat takes the provider's");
+	assert.deepEqual(declaredFallbacks("ollama", "qwen3:0.6b", null), []);
+	// A definition that redefines a builtin id REPLACES that model, as pi composes it: without its own compat (and with
+	// none on the provider) the builtin fallbacks are gone.
+	assert.deepEqual(declaredFallbacks("anthropic", "claude-fable-5", overlay({ models: [{ id: "claude-fable-5" }] })), []);
+	assert.deepEqual(checkModelsKnown([{ provider: "anthropic", id: "claude-fable-5", main: true }, { provider: "anthropic", id: "claude-fable-5" }], { readOverlay: () => overlay({ models: [{ id: "claude-fable-5" }] }) }), { ok: true });
+});
+
+test("a transient overlay read under a list is retried, never a permanent fallback-unlisted refusal", () => {
+	const eacces = () => {
+		throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+	};
+	const fable = { provider: "anthropic", id: "claude-fable-5" };
+	// The overlay might clear fable-5's fallbacks, so the answer waits for a read that works.
+	assert.deepEqual(checkModelsKnown([{ ...fable, main: true }, fable], { readOverlay: eacces }), { unavailable: "EACCES" });
+	// No list: nothing is judged that needs the overlay, as before.
+	assert.deepEqual(checkModelsKnown([{ ...fable, main: true }], { readOverlay: eacces }), { ok: true });
 });

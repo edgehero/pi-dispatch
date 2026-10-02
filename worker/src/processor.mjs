@@ -605,6 +605,15 @@ export async function runJob(job, deps) {
 				log("refused_model_not_allowed", { provider: job.provider ?? null, model: job.model ?? null });
 				return { outcome: "policy", reason: "model-not-allowed", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 			}
+			// A listed model whose declared fallbacks are not all listed (model-catalog.mjs `declaredFallbacks`): on
+			// anthropic-messages pi sends them with every call, so the runner's guard would refuse every call to it after
+			// the container started; on any other api the worker is stricter than the runner, by decision. Refused here, free. The log names the listed model, the operator's own configuration; the
+			// comment names none.
+			if (known?.fallbackUnlisted) {
+				await comment(job, "Refused: a model this job is allowed to use declares fallback models that are not on the job's list, so no container was started and nothing was spent. Ask the operator to list those models too, or remove that model. Not run.");
+				log("refused_model_not_allowed", { provider: known.fallbackUnlisted.provider ?? null, model: known.fallbackUnlisted.id ?? null, why: "fallback-unlisted" });
+				return { outcome: "policy", reason: "model-not-allowed", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			}
 		}
 
 		// Is there a credential to run this job with at all? FREE, determinate and I/O-light: a pure function

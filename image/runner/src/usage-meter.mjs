@@ -433,6 +433,15 @@ function zeroUsage() {
 	};
 }
 
+/**
+ * A shallow copy of the model a call was made on, read once (issue #502, PR #538's review). Spreading reads each
+ * own enumerable field exactly once, so a getter cannot answer the guard and the provider differently; a model
+ * whose id lives on a prototype getter loses it in the copy and is refused, the safe side.
+ */
+function snapshotModel(model) {
+	return model !== null && typeof model === "object" ? { ...model } : model;
+}
+
 /** The verdict for a call the guard judged and let through: dispatch it, and bind it to its settle. */
 const ADMITTED = Symbol("admitted");
 
@@ -478,9 +487,9 @@ function judge({ meter, hardStop, guard, method, model, args, skip }) {
  *      braked. An admitted call is handed to `guard.bind` once dispatched (judge() above has the contract).
  *      The guard is consulted only while a brake exists, because a refusal with no hard stop to answer with
  *      would have to dispatch the call it just refused; the runner refuses before the first prompt when a
- *      policy is set and the brake is missing (assertPoliciesEnforceable). The cost guard (createCostGuard) is
- *      the one guard this build ships, installed only when a cost cap is set; with no guard every call goes
- *      through exactly as before.
+ *      policy is set and the brake is missing (assertPoliciesEnforceable). The guard is createPolicyGuard's: the
+ *      model guard (issue #502, only when a list is set) and then the cost guard (issue #501, only when a cap
+ *      is set); with neither there is no guard, and every call goes through exactly as before.
  *   4. Everything else is the original method, its stream observed (or its promise, for classify and
  *      generateImages) with the (provider, model) pair read off the Model object dispatched on and the
  *      sessionId off the options -- never parsed back out of a settled message, whose provider/model a
@@ -503,16 +512,25 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 	// Steps 1 and 3 above, shared by every method: the stop reason that ends this call, or null to dispatch it
 	// unjudged, or ADMITTED when the guard judged it and let it through (it is then bound to its settle below).
 	// Only streamSimple re-enters with the physical model (trap #4); a virtual model on any other method is judged as
-	// itself, and under a cost cap that is an unboundable call, refused.
+	// itself: under a cost cap that is an unboundable call, refused, and under a list it is refused unless the list
+	// names the virtual entry itself (pi then fails such an unrouted call without reaching a provider).
 	const verdictFor = (method, model, args) => judge({ meter, hardStop, guard, method, model, args, skip: method === "streamSimple" && model?.api === VIRTUAL_MODEL_API });
+	// The call's arguments as the guard prepared them for an admitted call (the model guard wraps options.onPayload).
+	const prepareFor = (verdict, method, model, args) => (verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method, model, args, stop: (reason) => meter.stop(reason) }) : args);
+	// Judged and dispatched on ONE copy (issue #502, PR #538's review): a model whose fields are getters could
+	// answer the guard with one id and the provider with another. Only while a guard can judge, so a job with no
+	// policy dispatches the caller's own object exactly as before.
+	const judgedModel = (model) => (guard !== null && hardStop ? snapshotModel(model) : model);
 
 	for (const name of RUNTIME_STREAM_METHODS) {
 		const original = proto?.[name];
 		if (typeof original !== "function") continue;
-		const wrapper = function (model, ...rest) {
-			if (!active) return original.call(this, model, ...rest);
-			const verdict = verdictFor(name, model, rest);
+		const wrapper = function (requested, ...given) {
+			if (!active) return original.call(this, requested, ...given);
+			const model = judgedModel(requested);
+			const verdict = verdictFor(name, model, given);
 			if (verdict !== null && verdict !== ADMITTED) return hardStop(model, STOP_MESSAGES[verdict]);
+			const rest = prepareFor(verdict, name, model, given);
 			// Trap #5: everything this call dispatches, across its awaits, runs marked as ours.
 			const stream = dispatch.run(true, () => original.call(this, model, ...rest));
 			if (verdict === ADMITTED) guard.bind?.(stream);
@@ -527,10 +545,12 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 	for (const name of RUNTIME_RESULT_METHODS) {
 		const original = proto?.[name];
 		if (typeof original !== "function") continue;
-		const wrapper = function (model, context, options) {
-			if (!active) return original.call(this, model, context, options);
-			const verdict = verdictFor(name, model, [context, options]);
+		const wrapper = function (requested, context, given) {
+			if (!active) return original.call(this, requested, context, given);
+			const model = judgedModel(requested);
+			const verdict = verdictFor(name, model, [context, given]);
 			if (verdict !== null && verdict !== ADMITTED) return Promise.resolve(hardStopResult(name, model, STOP_MESSAGES[verdict]));
+			const [, options] = prepareFor(verdict, name, model, [context, given]);
 			const promise = dispatch.run(true, () => original.call(this, model, context, options));
 			if (verdict === ADMITTED) guard.bind?.(promise);
 			if (model?.api === VIRTUAL_MODEL_API) return promise;
@@ -589,10 +609,13 @@ export function defaultHardStopResult(method, model, message = STOP_MESSAGES[TOK
  * There is deliberately NO try/catch, for the reason wrapModelRuntime gives.
  */
 export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, guard = null, dispatch = null }) {
-	function route(kind, model, context, options) {
+	function route(kind, requested, context, given) {
+		// One copy, judged and dispatched (wrapModelRuntime's judgedModel has the why).
+		const model = guard !== null && hardStop ? snapshotModel(requested) : requested;
 		// Checked before dispatch, so a stop ends the NEXT call rather than merely recording it.
-		const verdict = judge({ meter, hardStop, guard, method: kind, model, args: [context, options], skip: dispatch?.getStore() === true });
+		const verdict = judge({ meter, hardStop, guard, method: kind, model, args: [context, given], skip: dispatch?.getStore() === true });
 		if (verdict !== null && verdict !== ADMITTED) return hardStop(model, STOP_MESSAGES[verdict]);
+		const options = verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method: kind, model, args: [context, given], stop: (reason) => meter.stop(reason) })[1] : given;
 		const provider = fallbackModels?.getProvider?.(model.provider);
 		const builtin = provider?.getModels?.().some((candidate) => candidate.api === model.api) ? provider : null;
 		const stream = builtin
@@ -960,6 +983,15 @@ export async function installProcessUsageMeter({
 				meter.stop(COST_CAP);
 			}
 		}
+		// The same gap under a model list (issue #502): a legacy compat call through the displaced entry reached a
+		// provider without the list being asked, so it may have called a model the list forbids. Fail closed the
+		// same way. Under a cap as well, the cap's stop above has already won (first wins, with `costUnjudged` as its
+		// evidence); under a list alone the stop is `model-not-allowed`, and its record tells it apart from a refused
+		// call by `modelRefused: 0`.
+		if (displaced > 0 && meter.allowed !== null && meter.state.stopReason === null) {
+			log("model_guard_displaced", { apis: displaced });
+			meter.stop(MODEL_NOT_ALLOWED);
+		}
 		return handle;
 	}
 
@@ -1025,7 +1057,8 @@ export async function installProcessUsageMeter({
  *   - a hard stop to answer a refused call with (`brake`), which needs the compat copy's stream factory;
  *   - a guard that judges each call FOR THAT POLICY (`enforces` lists the stop reasons the installed guard can
  *     refuse for: COST_CAP for the cap, MODEL_NOT_ALLOWED for the list). The cost guard (createCostGuard) enforces
- *     COST_CAP; no model guard ships in this build, so every list still refuses (issue #502 adds it).
+ *     COST_CAP and the model guard (createModelGuard, issue #502) MODEL_NOT_ALLOWED; run-job installs each only
+ *     for its own policy (createPolicyGuard), so a guard for one can never pass for the other.
  * Missing any one, the job is refused as a tagged configError: exit 2, not retried, before any spend. The
  * model list is checked first: a job that would be refused for both is named by the policy that decides
  * which provider is called at all. Names only, never values: the cap and the list are not echoed.
@@ -1259,14 +1292,25 @@ const SAMPLING_OUTPUT_KEYS = Object.freeze(["max_tokens", "max_completion_tokens
 export const SAMPLING_SAFE_KEYS = Object.freeze(["temperature", "top_p", "top_k", "seed", "stop", "presence_penalty", "frequency_penalty", ...SAMPLING_OUTPUT_KEYS, "n"]);
 
 /**
+ * Whether a call's samplingParams (the model's, then the call's) hold a key outside SAMPLING_SAFE_KEYS on an api that
+ * merges them into the request AFTER it is built, so the key overrides the request itself: its price for the cost
+ * guard, and for the model guard its `model` (issue #502, PR #538's review). One rule, read by both guards.
+ */
+export function samplingOverridesRequest(model, options) {
+	if (!SAMPLING_OVERRIDE_APIS.has(model?.api)) return false;
+	const merged = { ...(model?.samplingParams ?? {}), ...(options?.samplingParams ?? {}) };
+	return Object.keys(merged).some((key) => !SAMPLING_SAFE_KEYS.includes(key));
+}
+
+/**
  * The output bound once samplingParams have had their say: the larger of the bound and any output-cap key there,
  * times `n` (completions answer n choices, each up to the cap). A key that is present but not a positive finite
  * number (null sends the provider's default; a string is whatever the server makes of it) is Infinity.
  */
 function samplingOutput(model, options, output) {
 	if (!SAMPLING_OVERRIDE_APIS.has(model.api)) return output;
+	if (samplingOverridesRequest(model, options)) return Infinity;
 	const merged = { ...(model.samplingParams ?? {}), ...(options?.samplingParams ?? {}) };
-	if (Object.keys(merged).some((key) => !SAMPLING_SAFE_KEYS.includes(key))) return Infinity;
 	const positive = (value) => typeof value === "number" && Number.isFinite(value) && value > 0;
 	let bound = output;
 	for (const key of SAMPLING_OUTPUT_KEYS) {
@@ -1489,4 +1533,357 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 	}
 
 	return { enforces: Object.freeze([COST_CAP]), admit, bind, snapshot, unjudged, state };
+}
+
+// ── Issue #502, part 4: the allowed-model list, checked before every provider call ────────────────────────
+
+/** The one spelling of a (provider, model) pair the guard compares: NUL cannot appear in either id. */
+function pairKey(provider, model) {
+	return `${provider}\u0000${model}`;
+}
+
+/**
+ * The api that sends a model's `compat.allowedFallbackModels` to the provider (as `params.fallbacks`, model ids only)
+ * and names a fallback answer in `responseModel`. Pinned by needle: it is the only api module that reads the field.
+ */
+const FALLBACK_API = "anthropic-messages";
+
+/**
+ * The samplingParams keys that pick, or widen, the model that answers, refused under a list on the three apis that
+ * merge samplingParams into the request after it is built: `model` (bedrock's `modelId`), an OpenAI-compatible
+ * router's `models` fallback list, anthropic's `fallbacks`, and `providerOptions`, where the Vercel AI Gateway reads
+ * its own model fallbacks (`gateway.models`) and upstream order (PR #538's review, round 3).
+ */
+const SAMPLING_ROUTING_KEYS = Object.freeze(["model", "modelId", "models", "fallbacks", "providerOptions"]);
+
+/**
+ * Whether a call's samplingParams (the model's, then the call's) name a routing key (SAMPLING_ROUTING_KEYS), on the three
+ * apis that merge them into the request after it is built (`Object.assign(params, model.samplingParams,
+ * options?.samplingParams)`, pinned). Only those keys, by decision (PR #538's review, round 2): any other key (`min_p`,
+ * `reasoning_effort`, `chat_template_kwargs`, `service_tier`) changes how the model answers, never which model
+ * answers, so it passes under a list alone. The cost guard keeps its own, wider price rule (`samplingOverridesRequest`).
+ */
+function samplingRoutes(model, options) {
+	if (!SAMPLING_OVERRIDE_APIS.has(model?.api)) return false;
+	const merged = { ...(model?.samplingParams ?? {}), ...(options?.samplingParams ?? {}) };
+	return SAMPLING_ROUTING_KEYS.some((key) => Object.hasOwn(merged, key));
+}
+
+/**
+ * THE ONE TABLE of what a payload hook may change under a list (PR #538's review, round 3, a lead decision): the
+ * payload check is DENY BY DEFAULT. After the caller's `onPayload` (the session's `before_provider_request` hooks
+ * included) runs, its result is compared with the payload pi built on EVERY key, at every depth, except these. A hook
+ * may rewrite what is said and how it is sampled; anything else it adds, removes or changes (a model id, a fallback
+ * list, google's `config.httpOptions`, whose URL path picks the model, a gateway's `providerOptions`, a field no one
+ * has thought of yet) refuses the call. Enumerating the fields that route a request was tried first and missed two in
+ * review; a list of what may change cannot miss a new way to route.
+ *   - `top`: the message and content keys (`messages`, openai-responses' `input`, google's `contents`, anthropic's and
+ *     bedrock's `system`, google's `systemInstruction`, `instructions`) and the sampling knobs, as TOP-LEVEL names only.
+ *     Fail closed: a setting an api keeps elsewhere (bedrock's `inferenceConfig`, mistral's camelCase `maxTokens`,
+ *     pi-messages' `context` and `options`) is not editable. Not `prompt` (on openai-responses a reference to a stored
+ *     server-side prompt) and not `metadata` (a proxy such as LiteLLM can route on its tags);
+ *   - `config`: inside google's `config` (google-generative-ai, google-vertex), only its sampling fields and its system
+ *     instruction. Never `httpOptions`, and nothing else in it.
+ */
+const PAYLOAD_EDITABLE = Object.freeze({
+	top: Object.freeze(["messages", "input", "contents", "system", "systemInstruction", "instructions", "temperature", "top_p", "top_k", "min_p", "stop", "seed", "presence_penalty", "frequency_penalty", "max_tokens", "max_output_tokens", "max_completion_tokens"]),
+	config: Object.freeze(["temperature", "topP", "topK", "maxOutputTokens", "stopSequences", "systemInstruction"]),
+});
+
+/** A plain object: `{}` or `Object.create(null)`, never a class instance (an AbortSignal, a Date). */
+function isPlain(value) {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+	const proto = Object.getPrototypeOf(value);
+	return proto === Object.prototype || proto === null;
+}
+
+/**
+ * A deep copy of pi's payload, taken BEFORE the hook runs, so a hook that edits it in place cannot also edit what it is
+ * compared with. Plain objects and arrays are copied, typed arrays (bedrock's image bytes) are copied byte for byte,
+ * and anything else (an AbortSignal in google's `config`, a function) is kept by reference, as pi built it. Each value is
+ * read once, so a getter cannot answer the copy and the wire differently.
+ */
+function snapshotPayload(value, seen = new Map()) {
+	if (value === null || typeof value !== "object") return value;
+	if (ArrayBuffer.isView(value)) return value instanceof DataView ? value : value.slice();
+	if (seen.has(value)) return seen.get(value);
+	if (Array.isArray(value)) {
+		const out = [];
+		seen.set(value, out);
+		for (const item of value) out.push(snapshotPayload(item, seen));
+		return out;
+	}
+	if (!isPlain(value)) return value;
+	const out = {};
+	seen.set(value, out);
+	for (const key of Object.keys(value)) out[key] = snapshotPayload(value[key], seen);
+	return out;
+}
+
+/** Deep structural equality, as the wire sees it: plain objects by own keys, arrays and typed arrays by content, the rest by identity. */
+function samePayloadValue(a, b, depth = 0) {
+	if (Object.is(a, b)) return true;
+	if (depth > 64) return false;
+	if (ArrayBuffer.isView(a) || ArrayBuffer.isView(b)) {
+		if (!ArrayBuffer.isView(a) || !ArrayBuffer.isView(b) || a.constructor !== b.constructor || a.byteLength !== b.byteLength) return false;
+		return Buffer.from(a.buffer, a.byteOffset, a.byteLength).equals(Buffer.from(b.buffer, b.byteOffset, b.byteLength));
+	}
+	if (Array.isArray(a) || Array.isArray(b)) {
+		if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+		return a.every((item, index) => samePayloadValue(item, b[index], depth + 1));
+	}
+	if (!isPlain(a) || !isPlain(b)) return false;
+	// Each value read ONCE (Object.entries), so a nested getter cannot answer the count and the comparison differently.
+	const left = Object.entries(a).filter(([, value]) => value !== undefined);
+	const right = new Map(Object.entries(b).filter(([, value]) => value !== undefined));
+	if (left.length !== right.size) return false;
+	return left.every(([key, value]) => right.has(key) && samePayloadValue(value, right.get(key), depth + 1));
+}
+
+/**
+ * A key whose value is `undefined` is ABSENT, on both sides and at every level (PR #538's final review): pi's payloads
+ * carry such keys (openai-completions' `prompt_cache_key`, bedrock's `additionalModelRequestFields`, pi-messages'
+ * `options.*`), JSON drops them on the wire, and so does a hook that JSON-clones the payload, the common redaction
+ * pattern. Counting them would refuse a hook whose request is byte-identical.
+ */
+function present(object, key) {
+	return Object.hasOwn(object, key) && object[key] !== undefined;
+}
+function definedKeys(object) {
+	return Object.keys(object).filter((key) => object[key] !== undefined);
+}
+
+/**
+ * The payload to send after a hook, or null to refuse the call (PAYLOAD_EDITABLE has the rule). `before` is pi's payload
+ * as snapshotted before the hook; `result` is the hook's return value, or pi's own object when the hook returned
+ * nothing (it may have been edited in place). Refused: a result that is not a plain object (an array, a class instance),
+ * one with a `toJSON` (own or inherited, which would replace the whole body when serialised) or an accessor on any key,
+ * and any difference outside the editable keys. The object returned is FRESH: the editable keys as the hook left them,
+ * every other key from the snapshot, which equals what the hook produced and which the hook never held. So the object
+ * checked is the object sent, and pi never sends the hook's own object.
+ */
+function payloadAfterHook(before, result) {
+	// A `toJSON` needs no rule of its own: an own one is an added key, an inherited one makes the result not plain.
+	if (!isPlain(result)) return null;
+	for (const key of Object.keys(result)) {
+		if (!Object.hasOwn(Object.getOwnPropertyDescriptor(result, key), "value")) return null;
+	}
+	const sent = {};
+	for (const key of definedKeys(result)) {
+		if (PAYLOAD_EDITABLE.top.includes(key)) sent[key] = result[key];
+		else if (!present(before, key)) return null;
+	}
+	for (const key of definedKeys(before)) {
+		if (PAYLOAD_EDITABLE.top.includes(key)) continue;
+		if (!present(result, key)) return null;
+		if (key === "config" && isPlain(before.config) && isPlain(result.config)) {
+			const config = {};
+			for (const sub of definedKeys(result.config)) {
+				if (PAYLOAD_EDITABLE.config.includes(sub)) config[sub] = result.config[sub];
+				else if (!present(before.config, sub)) return null;
+			}
+			for (const sub of definedKeys(before.config)) {
+				if (PAYLOAD_EDITABLE.config.includes(sub)) continue;
+				if (!present(result.config, sub) || !samePayloadValue(before.config[sub], result.config[sub])) return null;
+				config[sub] = before.config[sub];
+			}
+			sent.config = config;
+			continue;
+		}
+		if (!samePayloadValue(before[key], result[key])) return null;
+		sent[key] = before[key];
+	}
+	// The hook's own key order, so a hook that changes nothing sends the same bytes pi would have.
+	const ordered = {};
+	for (const key of Object.keys(result)) if (Object.hasOwn(sent, key)) ordered[key] = sent[key];
+	return ordered;
+}
+
+/** The azure-openai-responses options that pick the deployed model instead of model.id (azure-openai-responses.js, pinned). */
+const AZURE_API = "azure-openai-responses";
+const AZURE_DEPLOYMENT_MAP = "AZURE_OPENAI_DEPLOYMENT_NAME_MAP";
+
+/**
+ * The fallback that answered a settled call, or null: on anthropic-messages only (the one api that sends fallbacks),
+ * a `responseModel` other than the requested id that is one of the requested model's `compat.allowedFallbackModels`.
+ * Matched on the model id alone, whatever the entry's provider field says, because pi sends only the ids
+ * (`{ model: fallback.model }`), so the provider may answer with any of them. Not every `responseModel` is a fallback:
+ * openai-completions sets it for any chunk model other than the requested id, a provider's alias for the model asked
+ * for, so other apis are never read here.
+ */
+function fallbackOf(model, message) {
+	if (model?.api !== FALLBACK_API) return null;
+	const answered = message?.responseModel;
+	if (typeof answered !== "string" || answered === model.id) return null;
+	const fallbacks = Array.isArray(model.compat?.allowedFallbackModels) ? model.compat.allowedFallbackModels : [];
+	return fallbacks.find((fallback) => fallback?.model === answered) ?? null;
+}
+
+/**
+ * THE MODEL GUARD (issue #502, part 4; REQ-MODEL-POLICY, DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER). A guard for the
+ * meter's seam: `{ enforces: [MODEL_NOT_ALLOWED], admit, prepare, bind, snapshot }`.
+ *
+ * admit(call) refuses a call whose REQUESTED model, `${model.provider}/${model.id}`, is not on the list. Exact and
+ * case-sensitive, on BOTH halves of the pair: the same model id under another provider is another route, another
+ * credential and another bill. Every method is judged the same way, so a classifier or an image model a flow uses
+ * must be on the list like a chat model. A virtual model is never seen here on streamSimple (the wrapper skips it and
+ * judges the physical call pi makes next); on any other method it is judged as itself.
+ *
+ * The id on the call is not the only thing that picks the model that answers (PR #538's review), so admit also refuses
+ * a listed call whose request would name another one:
+ *   - samplingParams naming a routing key (`samplingRoutes`, SAMPLING_ROUTING_KEYS) on the three apis that merge them
+ *     after the request is built: a `model` key there replaces the requested one;
+ *   - a call option `fetch`, which sends the request after every hook and so could rewrite it unseen (pi passes none);
+ *   - on azure-openai-responses, `options.azureDeploymentName` or a per-call `options.env` deployment map, either of
+ *     which picks the deployment instead of model.id;
+ *   - on anthropic-messages, a `compat.allowedFallbackModels` entry whose pair (the model's provider and the
+ *     fallback's id, which is what pi sends) is not on the list: pi sends those ids as `fallbacks`, and the provider
+ *     may answer with any of them.
+ * prepare(call) wraps the admitted call's `options.onPayload`, always, also when the caller passed none, because pi
+ * hands the session's `before_provider_request` hooks to the provider through it. Deny by default (PAYLOAD_EDITABLE):
+ * the wrapper snapshots pi's payload, runs the caller's hook, and refuses any difference outside the keys a hook may
+ * edit (the messages and the sampling knobs), at any depth; it hands pi a fresh object built from the two
+ * (`payloadAfterHook`). A refused payload makes the hook throw, so pi fails the call before it is sent, and the job
+ * stops as for any refusal.
+ *
+ * A refusal counts `modelRefused`, logs `model_refused` with numbers and a fixed token only (`method`, `refused`,
+ * `why`; never a model id, which the job chose), and returns or stops with MODEL_NOT_ALLOWED.
+ *
+ * bind(stream) watches the admitted call's answer for a server-side fallback (fallbackOf) and logs `model_fallback`
+ * with the requested and the answering ids. With the fallback rule above every such answer is a listed model; the
+ * line says which one answered. Single-slot, like the cost guard's: admit, prepare and the dispatch after them are
+ * synchronous and adjacent in both wrappers.
+ */
+export function createModelGuard({ allowedModels, log = () => {} }) {
+	if (!Array.isArray(allowedModels) || allowedModels.length === 0) throw new Error("invalid PI_ALLOWED_MODELS: want a non-empty list");
+	const allowed = new Set(allowedModels.map((entry) => pairKey(entry.provider, entry.model)));
+	const state = { refused: 0 };
+	let pending = null;
+
+	function refuse(method, why) {
+		state.refused += 1;
+		log("model_refused", { method, why, refused: state.refused });
+		return MODEL_NOT_ALLOWED;
+	}
+
+	/** Why a call on this model with these options would be answered by a model the list does not name, or null. */
+	function offList(model, options) {
+		const provider = model?.provider;
+		const id = model?.id;
+		if (typeof provider !== "string" || typeof id !== "string" || !allowed.has(pairKey(provider, id))) return "unlisted";
+		if (samplingRoutes(model, options)) return "sampling";
+		// A caller's own `fetch` sends the request after every hook ran, so it could rewrite the body unseen. pi never
+		// passes one itself (only a caller does), so under a list it is refused rather than trusted.
+		if (options?.fetch !== undefined) return "fetch";
+		if (model.api === AZURE_API && (options?.azureDeploymentName !== undefined || options?.env?.[AZURE_DEPLOYMENT_MAP] !== undefined)) return "deployment";
+		if (model.api === FALLBACK_API) {
+			const fallbacks = Array.isArray(model.compat?.allowedFallbackModels) ? model.compat.allowedFallbackModels : [];
+			if (fallbacks.some((fallback) => !allowed.has(pairKey(provider, fallback?.model)))) return "fallback";
+		}
+		return null;
+	}
+
+	function admit({ method, model, args }) {
+		pending = null;
+		const why = offList(model, args?.[1]);
+		if (why !== null) return refuse(method, why);
+		pending = model;
+		return null;
+	}
+
+	function prepare({ method, args, stop }) {
+		const options = args?.[1];
+		const theirs = options?.onPayload;
+		// A `function`, so the caller's hook runs with the `this` pi gives it: pi calls `options.onPayload(...)` as a method
+		// of the options object the provider received, which is this wrapper's `this` too.
+		const onPayload = async function (payload, payloadModel) {
+			let before = null;
+			try {
+				before = isPlain(payload) ? snapshotPayload(payload) : null;
+			} catch {
+				before = null;
+			}
+			const next = typeof theirs === "function" ? await theirs.call(this, payload, payloadModel) : undefined;
+			// The hook's result, or pi's payload as the hook may have changed it in place: compared, then sent as a fresh object.
+			let sent = null;
+			try {
+				sent = before === null ? null : payloadAfterHook(before, next === undefined ? payload : next);
+			} catch {
+				sent = null;
+			}
+			if (sent === null) {
+				refuse(method, "payload");
+				stop(MODEL_NOT_ALLOWED);
+				throw new Error(STOP_MESSAGES[MODEL_NOT_ALLOWED]);
+			}
+			return sent;
+		};
+		const prepared = [...(args ?? [])];
+		prepared[1] = { ...(options ?? {}), onPayload };
+		return prepared;
+	}
+
+	function bind(stream) {
+		const model = pending;
+		pending = null;
+		if (model === null || typeof stream?.result !== "function") return;
+		stream.result().then((message) => {
+			const fallback = fallbackOf(model, message);
+			if (fallback !== null) log("model_fallback", { provider: model.provider, requested: model.id, answered: fallback.model });
+		}, () => {});
+	}
+
+	/** The exit line's model field, present only when a list is set (createPolicyGuard spreads it into `tokens`). */
+	function snapshot() {
+		return { modelRefused: state.refused };
+	}
+
+	return { enforces: Object.freeze([MODEL_NOT_ALLOWED]), admit, prepare, bind, snapshot, state };
+}
+
+/**
+ * The one guard the runner hands both meter halves (issues #501, #502): the model guard and the cost guard, in
+ * THAT order, or null when neither policy is set (and then every call goes through exactly as before).
+ *
+ * MODEL FIRST, then cost. The list decides which provider may be called at all, so a call it forbids must be
+ * refused as `model-not-allowed` whatever its price; judged the other way round, an unlisted call that also passed
+ * the cap would be recorded as `cost-cap`, and an operator would raise a cap to fix a model choice. The order is
+ * also the safe one for the cost guard's single slot: the cost guard is asked only for a call the model guard
+ * already admitted, so a bound it takes into flight always belongs to a call that is then dispatched.
+ *
+ * `enforces` is the union, so assertPoliciesEnforceable sees each policy only when its own guard is here.
+ * `snapshot()` is the cost fields (only with a cap) then `modelRefused` (only with a list), the worker's TOKEN_KEYS
+ * order, so with no list the exit line is byte-identical to before. `unjudged` reaches the cost guard only: it is
+ * the cap's counter of displaced compat entries.
+ */
+export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, log = () => {}, env = process.env }) {
+	const model = allowedModels === null ? null : createModelGuard({ allowedModels, log });
+	const cost = maxCostMicros === null ? null : createCostGuard({ capMicros: maxCostMicros, env, log });
+	const guards = [model, cost].filter((guard) => guard !== null);
+	if (guards.length === 0) return null;
+	return {
+		enforces: Object.freeze(guards.flatMap((guard) => [...guard.enforces])),
+		admit(call) {
+			for (const guard of guards) {
+				const refused = guard.admit(call);
+				if (refused !== null && refused !== undefined) return refused;
+			}
+			return null;
+		},
+		// Only the model guard prepares a call; the cost guard reads the options as given.
+		prepare(call) {
+			return model ? model.prepare(call) : call.args;
+		},
+		bind(result) {
+			for (const guard of guards) guard.bind?.(result);
+		},
+		unjudged(count) {
+			cost?.unjudged(count);
+		},
+		snapshot() {
+			return { ...(cost ? cost.snapshot() : {}), ...(model ? model.snapshot() : {}) };
+		},
+		model,
+		cost,
+	};
 }

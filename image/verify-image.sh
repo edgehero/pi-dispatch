@@ -155,6 +155,25 @@ else
 				[ "$cost_code" = 2 ] && echo "$cost_exit" | grep -q '"reason":"cost-cap"' && echo "$cost_exit" | grep -Eq '"costRefused":1[,}]' \
 					|| fail "the image declares 'costCap' but a job under PI_MAX_COST_MICROS=0 was not stopped before its first call (exit $cost_code: $cost_exit)"
 				;;
+			modelPolicy)
+				# Issue #502. The claim is that a job under PI_ALLOWED_MODELS is stopped BEFORE a call to a model the list does
+				# not name. Proved by running one: the default model, a list that names only another model, a fake key and no
+				# network. The guard must refuse the very first call, so the runner exits 2 with reason model-not-allowed and
+				# modelRefused 1, and nothing is dialled. A runner that ignored the variable would try the call and exit on the
+				# network error instead; one that could not enforce the list would exit 2 with model-policy-unenforceable.
+				# Both fail here.
+				model_job=$(mktemp -d)
+				echo "Reply with the single word ok." >"$model_job/prompt.md"
+				chmod -R a+rX "$model_job"
+				model_out=$(docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges -v "$model_job:/job:ro" \
+					-e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+					-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_ALLOWED_MODELS=anthropic/claude-haiku-4-5-20251001 \
+					"$IMAGE_REF" 2>&1) && model_code=0 || model_code=$?
+				rm -rf "$model_job"
+				model_exit=$(echo "$model_out" | grep '"event":"exit"' | tail -1)
+				[ "$model_code" = 2 ] && echo "$model_exit" | grep -Eq '"reason":"model-not-allowed"[,}]' && echo "$model_exit" | grep -Eq '"modelRefused":1[,}]' \
+					|| fail "the image declares 'modelPolicy' but a job whose PI_ALLOWED_MODELS lacks its model was not stopped before its first call (exit $model_code: $model_exit)"
+				;;
 			excludeTools)
 				# Same evidence style as 'commands': the baked runner config must actually read the variable.
 				# A runner that does not would run a "read-only" trigger's job with every tool it says to

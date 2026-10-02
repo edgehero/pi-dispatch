@@ -123,9 +123,9 @@ export function parseExitTurns(text) {
  * The last four are the policy stops of issues #501 (a per-job dollar cap) and #502 (an allowed-model list):
  * `cost-cap` and `model-not-allowed` when the runner's pre-call guard stopped a call, and
  * `cost-cap-unenforceable` and `model-policy-unenforceable` when the runner refused, before any call, a policy
- * it could not enforce before a call. The two refusals are live from the first image that knows the variables
- * (a list refuses until its guard lands). `cost-cap` is live from the image that declares `costCap`, whose runner
- * carries the cost guard; `model-not-allowed` is reserved for the model guard.
+ * it could not enforce before a call. The two refusals are live from the first image that knows the variables.
+ * `cost-cap` is live from the image that declares `costCap`, whose runner carries the cost guard, and
+ * `model-not-allowed` from the image that declares `modelPolicy`, whose runner carries the model guard.
  */
 export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable"]);
 
@@ -290,7 +290,7 @@ export function parseExitContext(text) {
  * threshold the catalog does not tier), `costUnjudged` (compat entries found displaced under the cap, so calls
  * may have run unjudged and unmetered), `costUnanswered` (failed calls that never started, charged their metered
  * cost though a provider may have billed one), `modelRefused` (calls the model guard stopped). The cost guard
- * writes the first six whenever a cost cap is set; `modelRefused` is still reserved for the model guard. All seven are on
+ * writes the first six whenever a cost cap is set, and the model guard `modelRefused` whenever a list is. All seven are on
  * this closed list because a key missing from it is DROPPED, and the dollar settlement reads them to decide
  * whether a metered cost is complete: a dropped counter would read as an honest zero.
  */

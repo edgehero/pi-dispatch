@@ -254,11 +254,13 @@ test("run-job refuses an unenforceable cost cap or model list after the meter in
 	// Issue #501, PR 3 (PR #533's review): the stop handler is the tested one, so a cost stop cannot log token_budget_exceeded.
 	assert.match(src, /onStop: meterStopHandler\(\{ onTokenAbort, abort: \(\) => void session\?\.abort\(\) \}\),/, "the meter's stop goes through meterStopHandler");
 	assert.doesNotMatch(src, /reason === TOKEN_BUDGET/, "no second, untested copy of the token-only rule");
-	// The cost guard: built only for a cap, handed to the install, and its fields spread only when it exists.
-	assert.match(src, /const costGuard = cfg\.maxCostMicros === null \? null : createCostGuard\(\{ capMicros: cfg\.maxCostMicros, log \}\);/);
-	assert.ok(src.indexOf("const costGuard =") < install, "the guard exists before the install that hands it to both halves");
-	assert.match(src, /installProcessUsageMeter\(\{ ModelRuntime, runtime: modelRuntime, meter, log, guard: costGuard \}\)/);
-	assert.match(src, /\{ \.\.\.meter\.snapshot\(\), \.\.\.\(costGuard \? costGuard\.snapshot\(\) : \{\}\) \}/, "the cost fields ride the exit line only when a cap is set");
+	// The policy guard (issues #501, #502): built from both policies (null when neither is set, its order and its
+	// snapshot driven in model-guard.test.mjs), handed to the install, and its fields spread only when it exists.
+	assert.match(src, /const policyGuard = createPolicyGuard\(\{ maxCostMicros: cfg\.maxCostMicros, allowedModels: cfg\.allowedModels, log \}\);/);
+	assert.ok(src.indexOf("const policyGuard =") < install, "the guard exists before the install that hands it to both halves");
+	assert.match(src, /installProcessUsageMeter\(\{ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard \}\)/);
+	assert.match(src, /\{ \.\.\.meter\.snapshot\(\), \.\.\.\(policyGuard \? policyGuard\.snapshot\(\) : \{\}\) \}/, "the policy fields ride the exit line only when a policy is set");
+	assert.doesNotMatch(src, /createCostGuard|createModelGuard/, "no guard built beside the policy guard, which fixes their order");
 	assert.match(src, /maxCostMicros: cfg\.maxCostMicros,\s*allowedModels: cfg\.allowedModels,\s*rootSessionId/, "the meter carries both policies, so the brake is armed for them");
 	assert.match(src, /meterStop: usageMeter\.ok \? meter\.state\.stopReason : null,/, "the exit decision reads the meter's stop by reason");
 	assert.match(src, /tokenAborted: usageMeter\.ok \? false : tokenBudget\.state\.aborted,/, "the flag is the fallback meter's alone");
