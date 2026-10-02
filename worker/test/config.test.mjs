@@ -302,12 +302,16 @@ test("a dollar window without PI_MAX_COST_USD refuses boot (the invariant), nami
 	}
 });
 
-test("a dollar window refuses boot BY NAME until the windows are enforced, even with PI_MAX_COST_USD set", () => {
-	// Never accepted-and-ignored: a window the worker does not keep must not read as kept.
-	for (const name of ["PI_DAILY_COST_USD", "PI_WEEKLY_COST_USD", "PI_MONTHLY_COST_USD"]) {
-		assert.throws(() => loadConfig({ PI_MAX_COST_USD: "2", [name]: "25" }), (e) => e.piDispatchConfig === true && e.message.startsWith(`${name} is not supported yet`), name);
+test("a dollar window with PI_MAX_COST_USD set loads, kept as written (issue #501, the windows are enforced)", () => {
+	const keys = { PI_DAILY_COST_USD: "dailyCostUsd", PI_WEEKLY_COST_USD: "weeklyCostUsd", PI_MONTHLY_COST_USD: "monthlyCostUsd" };
+	for (const [name, key] of Object.entries(keys)) {
+		const c = loadConfig({ PI_MAX_COST_USD: "2", [name]: "25.50" });
+		assert.equal(c[key], "25.50", name);
 	}
-	assert.doesNotThrow(() => loadConfig({ PI_MAX_COST_USD: "2", PI_DAILY_COST_USD: "" }), "an empty window is unset");
+	const all = loadConfig({ PI_MAX_COST_USD: "2", PI_DAILY_COST_USD: "10", PI_WEEKLY_COST_USD: "50", PI_MONTHLY_COST_USD: "150" });
+	assert.deepEqual([all.maxCostUsd, all.dailyCostUsd, all.weeklyCostUsd, all.monthlyCostUsd], ["2", "10", "50", "150"]);
+	assert.equal(loadConfig({ PI_MAX_COST_USD: "2", PI_DAILY_COST_USD: "" }).dailyCostUsd, null, "an empty window is unset");
+	assert.throws(() => loadConfig({ PI_MAX_COST_USD: "2", PI_DAILY_COST_USD: "1.1234567" }), (e) => e.piDispatchConfig === true && e.message.startsWith("PI_DAILY_COST_USD must be"), "a malformed window is still refused by name");
 });
 
 test("env overrides every field", () => {

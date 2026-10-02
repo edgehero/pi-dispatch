@@ -104,11 +104,12 @@ test("readOverlay: a malformed maxCostUsd fails the WHOLE overlay, naming the ke
 	assert.equal(readObj({ maxCostUsd: "sk-ant-secret" }).invalid.includes("sk-ant"), false);
 });
 
-test("readOverlay: a dollar WINDOW is refused by name until the windows are enforced, after its value is checked", () => {
+test("readOverlay: a dollar WINDOW is accepted and kept AS WRITTEN, and a malformed one is refused by name (issue #501)", () => {
 	for (const key of ["dailyCostUsd", "weeklyCostUsd", "monthlyCostUsd"]) {
-		assert.match(readObj({ [key]: "25", maxCostUsd: "2" }).invalid, new RegExp(`^${key} is not supported yet`), `${key} with a cap`);
-		assert.match(readObj({ [key]: "25" }).invalid, new RegExp(`^${key} is not supported yet`), `${key} alone`);
+		assert.deepEqual(readObj({ [key]: "25", maxCostUsd: "2" }), { overlay: { [key]: "25", maxCostUsd: "2" } }, `${key} with a cap`);
+		assert.deepEqual(readObj({ [key]: 25.5 }), { overlay: { [key]: 25.5 } }, `${key} alone passes the per-key check; the merged-values invariant is resolveSettings'`);
 		assert.match(readObj({ [key]: "nope" }).invalid, new RegExp(`^${key} must be a dollar amount`), `${key} malformed is named as malformed`);
+		assert.equal(readObj({ [key]: "sk-ant-secret" }).invalid.includes("sk-ant"), false, "never the value");
 	}
 });
 
@@ -139,19 +140,19 @@ test("readOverlay: a duplicate key is refused, naming the key and never a value 
 	assert.deepEqual(readRaw(written), { overlay: { maxCostUsd: "1", dailyCap: 2 } });
 });
 
-test("writeOverlay: a dollar window is refused at the WRITE, so dispatch_set never leaves one for a job to trip on", () => {
+test("writeOverlay: a dollar window is written like any other key, and a malformed one is refused at the WRITE (issue #501)", () => {
 	const fs = makeFakeFs();
-	const res = writeOverlay("/s/settings.json", { dailyCostUsd: "25", maxCostUsd: "2" }, { fs });
-	assert.match(res.invalid, /^dailyCostUsd is not supported yet/);
-	assert.deepEqual(fs.ops, [], "nothing touched");
-	assert.deepEqual(writeOverlay("/s/settings.json", { maxCostUsd: "2" }, { fs: makeFakeFs() }), { ok: true });
+	assert.deepEqual(writeOverlay("/s/settings.json", { dailyCostUsd: "25", maxCostUsd: "2" }, { fs }), { ok: true });
+	assert.deepEqual(JSON.parse(fs.ops.find((o) => o.op === "write").data), { dailyCostUsd: "25", maxCostUsd: "2" });
+	const bad = makeFakeFs();
+	assert.match(writeOverlay("/s/settings.json", { weeklyCostUsd: "1.1234567", maxCostUsd: "2" }, { fs: bad }).invalid, /^weeklyCostUsd must be a dollar amount/);
+	assert.deepEqual(bad.ops, [], "nothing touched");
 });
 
 test("resolveSettings: the dollar invariant runs on MERGED values, never on the overlay alone", () => {
 	const config = { provider: "p", model: "m", maxTurns: 30, dailyCap: 25, weeklyCap: null, monthlyCap: null, maxTokens: null, dailyTokenCap: null, concurrency: 3, softHoldPct: null, maxCostUsd: null, dailyCostUsd: null, weeklyCostUsd: null, monthlyCostUsd: null };
-	// The inputs are passed as already validated. Today config.mjs (boot) and validateOverlay (per read) both
-	// refuse a window before it reaches here, so these cases pin the rule the later change that enforces the
-	// windows makes reachable, and it cannot then arrive as a per-key check.
+	// The inputs are passed as already validated. The windows are enforced (issue #501), so a window reaches here
+	// from either source, and the cross-key rule must not be a per-key check.
 	for (const window of ["dailyCostUsd", "weeklyCostUsd", "monthlyCostUsd"]) {
 		// A window in the overlay, the cap in env: valid. A per-key check of the overlay would refuse it.
 		const ok = resolveSettings({ ...config, maxCostUsd: "2" }, { overlay: { [window]: "25" } });

@@ -6,7 +6,7 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { dollarChecks, startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryPlainScript, egressCanaryProbeArgs, forgeUrlEgressChecks, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep, undeclaredPortNear, ENDPOINT_PROBE_SLUGS, allowlistHostAliases, egressEndpointScript, lanIPv4Addresses, overlayLoopbackModels } from "../src/doctor.mjs";
+import { dollarChecks, overlayDollarProblem, startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryPlainScript, egressCanaryProbeArgs, forgeUrlEgressChecks, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep, undeclaredPortNear, ENDPOINT_PROBE_SLUGS, allowlistHostAliases, egressEndpointScript, lanIPv4Addresses, overlayLoopbackModels } from "../src/doctor.mjs";
 import { valkeyPasswordFor } from "../src/valkey-endpoint.mjs";
 import { serviceEnvFileOf } from "../src/service-env.mjs";
 import { VALKEY_SHARED_KEY as VALKEY_SHARED_NAME } from "../src/podman-stack.mjs";
@@ -11082,10 +11082,8 @@ test("doctor: dollarChecks is silent with nothing set, and names each env refusa
 	assert.doesNotMatch(bad[0].label, /1\.1234567/, "never the value");
 	const noCap = dollarChecks({ PI_WEEKLY_COST_USD: "50" }, [], true);
 	assert.ok(noCap.some((c) => c.ok === false && /^PI_WEEKLY_COST_USD is set without PI_MAX_COST_USD/.test(c.label)), "the invariant");
-	assert.ok(noCap.some((c) => c.ok === false && /^PI_WEEKLY_COST_USD is set, and dollar windows are not supported yet/.test(c.label)), "and the window refusal");
-	const window = dollarChecks({ PI_MAX_COST_USD: "2", PI_DAILY_COST_USD: "25" }, [], true);
-	assert.equal(window.length, 1);
-	assert.match(window[0].label, /^PI_DAILY_COST_USD is set, and dollar windows are not supported yet/);
+	assert.equal(noCap.length, 1, "the invariant is the one refusal: the windows are enforced (issue #501)");
+	assert.deepEqual(dollarChecks({ PI_MAX_COST_USD: "2", PI_DAILY_COST_USD: "25", PI_WEEKLY_COST_USD: "100", PI_MONTHLY_COST_USD: "300" }, [], true), [], "windows with the per-job cap: nothing to say");
 });
 
 test("doctor: a trigger cap above PI_MAX_COST_USD FAILS when the worker loads the file and warns when it does not", () => {
@@ -11113,8 +11111,25 @@ test("doctor: the dollar settings are read from the deployment's .env, as the wo
 	// refuses to start.
 	const r = await envDoctor("PI_WEEKLY_COST_USD=50\n", {});
 	assert.match(r.text, /PI_WEEKLY_COST_USD is set without PI_MAX_COST_USD -- the worker refuses to start/);
-	assert.match(r.text, /PI_WEEKLY_COST_USD is set, and dollar windows are not supported yet/);
+	assert.doesNotMatch(r.text, /not supported yet/, "the windows are enforced (issue #501): the invariant is the only refusal");
 	for (const name of ["PI_MAX_COST_USD", "PI_DAILY_COST_USD", "PI_WEEKLY_COST_USD", "PI_MONTHLY_COST_USD"]) assert.ok(WORKER_SERVICE_KEYS.includes(name), name);
+});
+
+test("doctor: a VALID overlay whose merge with .env leaves a window with no maxCostUsd FAILS, naming the window (#501, PR #542)", async () => {
+	const dir = tempDir("pi-542-overlay-");
+	const file = join(dir, "settings.json");
+	writeFileSync(file, '{"dailyCostUsd":"10"}');
+	const bad = await envDoctor(`PI_SETTINGS_FILE=${file}\n`, {});
+	assert.ok(bad.text.includes(`settings overlay ${file}: dailyCostUsd needs maxCostUsd`), bad.text);
+	assert.match(bad.text, /the worker refuses every job as settings-overlay-invalid/);
+	assert.equal(bad.code, 1);
+	assert.doesNotMatch((await envDoctor(`PI_SETTINGS_FILE=${file}\nPI_MAX_COST_USD=2\n`, {})).text, /dailyCostUsd needs maxCostUsd/, "the cap in .env");
+	writeFileSync(file, '{"maxCostUsd":"2"}');
+	assert.doesNotMatch((await envDoctor(`PI_SETTINGS_FILE=${file}\nPI_WEEKLY_COST_USD=50\n`, {})).text, /needs maxCostUsd/, "the window in .env, the cap in the overlay");
+	assert.equal(overlayDollarProblem({}, { PI_WEEKLY_COST_USD: "50" }), null, "env alone broken is dollarChecks' line, not repeated");
+	assert.match(overlayDollarProblem({ dailyCostUsd: "10" }, { PI_MAX_COST_USD: "" }), /^dailyCostUsd needs maxCostUsd/, "an EMPTY PI_MAX_COST_USD is unset, the worker's own reading");
+	assert.equal(overlayDollarProblem({ dailyCostUsd: "10" }, { PI_MAX_COST_USD: "2" }), null);
+	assert.equal(overlayDollarProblem({ monthlyCostUsd: 5 }, {}), "monthlyCostUsd needs maxCostUsd: a dollar window reserves each job's per-job cost cap before it starts, so it cannot be set without one");
 });
 
 test("doctor: an invalid settings overlay FAILS with the reader's reason, keys only, and a missing one says nothing (#501)", async () => {

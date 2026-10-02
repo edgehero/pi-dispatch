@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { builtinModel } from "../src/model-catalog.mjs";
 import {
 	EMPTY_MODEL_ENDPOINTS,
 	ENDPOINTS_INCLUDE_HEADER,
@@ -10,6 +11,7 @@ import {
 	baseUrlTarget,
 	endpointsForModel,
 	endpointsForProvider,
+	zeroRatedVerdict,
 	loadModelEndpoints,
 	modelEndpointsPath,
 	parseModelEndpoints,
@@ -392,4 +394,59 @@ test("renderEndpointsInclude refuses what the parser would never produce", () =>
 	assert.throws(() => renderEndpointsInclude([{ id: "x\nhttp_access allow all", host: "a.lan", port: 1 }]), /bad id/);
 	assert.throws(() => renderEndpointsInclude([{ id: "x", host: "a.lan\nhttp_access allow all", port: 1 }]), /bad host/);
 	assert.throws(() => renderEndpointsInclude([{ id: "x", host: "a.lan", port: "1 2" }]), /bad port/);
+});
+
+// ---- issue #503 part 7: zero-rated jobs on declared endpoints reserve nothing ----
+
+const ZR_ENDPOINTS = [{ id: "mac-ollama", host: "host.docker.internal", port: 11434, slots: 2, keyless: true }];
+const ZR_URL = "http://host.docker.internal:11434/v1";
+const zr = (models, refs, extra = {}) => zeroRatedVerdict({ models, endpoints: ZR_ENDPOINTS, refs, builtinModel, ...extra });
+
+test("zeroRatedVerdict: an overlay model with NO cost table on a declared endpoint is zero-rated (pi's own default is zeros)", () => {
+	const models = { providers: { local: { baseUrl: ZR_URL, api: "openai-completions", models: [{ id: "q" }] } } };
+	assert.deepEqual(zr(models, [{ provider: "local", id: "q" }]), { zeroRated: true });
+	const zeros = { providers: { local: { baseUrl: ZR_URL, models: [{ id: "q", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, tiers: [{ inputTokensAbove: 1000, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }] } }] } } };
+	assert.deepEqual(zr(zeros, [{ provider: "local", id: "q" }]), { zeroRated: true });
+});
+
+test("zeroRatedVerdict: any priced rate, in the table or a tier, is not zero-rated", () => {
+	for (const cost of [{ input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, { input: 0, output: 0, cacheRead: 0.1, cacheWrite: 0 }, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, tiers: [{ inputTokensAbove: 5, input: 0, output: 2, cacheRead: 0, cacheWrite: 0 }] }]) {
+		const models = { providers: { local: { baseUrl: ZR_URL, models: [{ id: "q", cost }] } } };
+		assert.equal(zr(models, [{ provider: "local", id: "q" }]).zeroRated, false, JSON.stringify(cost));
+	}
+});
+
+test("zeroRatedVerdict: modelOverrides cost applies field by field over the base, as pi composes it", () => {
+	const priced = { providers: { local: { baseUrl: ZR_URL, models: [{ id: "q" }], modelOverrides: { q: { cost: { output: 3 } } } } } };
+	assert.match(zr(priced, [{ provider: "local", id: "q" }]).why, /local\/q is not zero-rated/);
+	const zeroed = { providers: { local: { baseUrl: ZR_URL, models: [{ id: "q", cost: { input: 5, output: 0, cacheRead: 0, cacheWrite: 0 } }], modelOverrides: { q: { cost: { input: 0 } } } } } };
+	assert.deepEqual(zr(zeroed, [{ provider: "local", id: "q" }]), { zeroRated: true });
+});
+
+test("zeroRatedVerdict: a BUILTIN model routed to a declared endpoint takes the builtin cost, unless the overlay redefines it", () => {
+	const routed = { providers: { openai: { baseUrl: ZR_URL } } };
+	assert.ok(builtinModel("openai", "gpt-4o-mini")?.cost?.input > 0, "the pin prices it");
+	assert.match(zr(routed, [{ provider: "openai", id: "gpt-4o-mini" }]).why, /openai\/gpt-4o-mini is not zero-rated/);
+	const overridden = { providers: { openai: { baseUrl: ZR_URL, modelOverrides: { "gpt-4o-mini": { cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } } } } } };
+	assert.deepEqual(zr(overridden, [{ provider: "openai", id: "gpt-4o-mini" }]), { zeroRated: true });
+	const redefined = { providers: { openai: { models: [{ id: "gpt-4o-mini", api: "openai-completions", baseUrl: ZR_URL }] } } };
+	assert.deepEqual(zr(redefined, [{ provider: "openai", id: "gpt-4o-mini" }]), { zeroRated: true }, "an overlay entry replaces the builtin, cost and all");
+	assert.equal(zr({ providers: { nope: { baseUrl: ZR_URL } } }, [{ provider: "nope", id: "x" }]).zeroRated, false, "neither overlay nor builtin: unknown cost");
+});
+
+test("zeroRatedVerdict: every ref must be on a declared endpoint, the list is read whole, and missing inputs fail closed", () => {
+	const models = { providers: { local: { baseUrl: ZR_URL, models: [{ id: "q" }, { id: "far", baseUrl: "http://gpu.lan:8000/v1" }] } } };
+	assert.match(zr(models, [{ provider: "local", id: "q" }, { provider: "local", id: "far" }]).why, /local\/far is not served by a declared endpoint/);
+	assert.match(zr(models, [{ provider: "local", id: "q" }, { provider: "anthropic", id: "claude-sonnet-4-5" }]).why, /anthropic\/claude-sonnet-4-5 is not served/);
+	assert.equal(zr(models, [{ provider: "local", id: "q" }, null]).zeroRated, false, "an entry that did not split");
+	assert.equal(zr(null, [{ provider: "local", id: "q" }]).zeroRated, false, "no overlay");
+	assert.equal(zeroRatedVerdict({ models, endpoints: [], refs: [{ provider: "local", id: "q" }], builtinModel }).zeroRated, false, "no endpoints");
+	assert.equal(zr(models, []).zeroRated, false, "no refs");
+});
+
+test("builtinModel: the catalog object for any kind, null for an unknown provider or id", () => {
+	assert.equal(builtinModel("openai", "gpt-4o-mini").id, "gpt-4o-mini");
+	assert.equal(builtinModel("openai", "no-such-model"), null);
+	assert.equal(builtinModel("no-such-provider", "x"), null);
+	assert.equal(builtinModel(null, "x"), null);
 });

@@ -156,6 +156,30 @@ export function parseExitReason(text) {
 }
 
 /**
+ * The LAST runner exit line's own `code`, an integer, or `null` (issue #501, PR #542's review round 3). Scanned from
+ * the end exactly as its siblings are, repairing a glued line through `parseTailLine`, and NEVER throws.
+ *
+ * Read for ONE purpose: the dollar settlement trusts an exit line's cost only when the line's `code` equals the
+ * container's real exit code (processor.mjs). The runner writes the code it exits with on both exit lines
+ * (`image/runner/run-job.mjs`: `...capExitMessage(outcome)` then `return outcome.code` on the decided path, and
+ * `code: capped.code` on the catch path; pinned by a test), so a genuine last line always matches, while a line a
+ * job's own tool forged before a `docker stop` (exit 137, no genuine line after it) does not. It never feeds the
+ * retry class (INT-RUNNER-EXIT-CODE-PROTOCOL).
+ */
+export function parseExitCode(text) {
+	if (typeof text !== "string") return null;
+	const lines = text.split("\n");
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i].trim();
+		if (line === "") continue;
+		const parsed = parseTailLine(line);
+		if (parsed?.event !== "exit") continue;
+		return Number.isSafeInteger(parsed?.code) ? parsed.code : null;
+	}
+	return null;
+}
+
+/**
  * Recover the agent's token usage from buffered container stdout, or `null` if it is not reported.
  *
  * Mirrors `parseExitTurns`: scan from the end for the last `exit` event and read its `tokens` object
@@ -446,7 +470,7 @@ function rebuildUsage(u) {
  * path stay out of the record -- for local jobs only the folder's `basename` is kept, because the full
  * path embeds the operator's OS account name.
  *
- * `reason` is a fixed enum passthrough (worker-abort | over-budget | unprotected-branch |
+ * `reason` is a fixed enum passthrough (worker-abort | over-budget | dollar-cap | unprotected-branch |
  * runner-policy | provider-auth-refused | job-image-missing | egress-proxy-missing | ...), never free-form or payload text. `exitCode`, `turns`, and `budgetReserved`
  * default to `null` when the outcome does not carry them, so the record shape is stable whether or not
  * the source reports those fields.
@@ -561,7 +585,23 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// default was passed (a dependency-injection seam; `recordRun` in start.mjs always passes one) or
 		// where the job data carries an explicit null, which no producer writes and the blessed gate refuses.
 		backend: resolveBackendName(data, defaultBackend),
+		// The dollar reservation's outcome (issue #501, INT-RUN-HISTORY-FILE-CONTRACT). Additive, nullable, an explicit
+		// literal REBUILT here (never the source's object), TAIL position after `backend` on the same contract: field order
+		// is the serialisation order. `{ reservedMicros, settledMicros, basis, modelBasis }`: two integers of micro-dollars,
+		// one fixed token (`metered` | `floor` | `refunded` | `unreserved`), and `modelBasis`, reserved for the per-model
+		// windows and null until they land. Null when no dollar window applied to the job (no dollar setting, or a
+		// refusal before the reservation step), which is every record of a deployment that sets none.
+		dollars: dollarsOf(source.dollars),
 	};
+}
+
+const DOLLAR_BASES = new Set(["metered", "floor", "refunded", "unreserved"]);
+
+/** The record's `dollars`, rebuilt from named fields only, or null when the source carries none or a malformed one. */
+function dollarsOf(d) {
+	if (d === null || typeof d !== "object") return null;
+	if (!Number.isSafeInteger(d.reservedMicros) || d.reservedMicros < 0 || !Number.isSafeInteger(d.settledMicros) || d.settledMicros < 0 || !DOLLAR_BASES.has(d.basis)) return null;
+	return { reservedMicros: d.reservedMicros, settledMicros: d.settledMicros, basis: d.basis, modelBasis: null };
 }
 
 /**
@@ -647,6 +687,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			// when raw logs are off: a label that vanished with log capture would make the record depend on an
 			// opt-in PII switch.
 			const exitReason = parseExitReason(tail);
+			const exitLineCode = parseExitCode(tail);
 			const turns = parseExitTurns(tail);
 			const tokens = parseExitTokens(tail);
 			const session = parseExitSession(tail);
@@ -675,7 +716,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			} catch (err) {
 				log("log_sink_error", { jobId, reason: err?.message });
 			}
-			return { turns, tokens, session, usage, context, exitReason };
+			return { turns, tokens, session, usage, context, exitReason, exitLineCode };
 		}
 
 		return { write, close };

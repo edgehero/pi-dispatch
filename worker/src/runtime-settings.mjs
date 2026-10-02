@@ -12,8 +12,8 @@ import { checkDollarInvariant, parseUsdMicros } from "./money.mjs";
  * (int 1-99), and the dollar keys `maxCostUsd`, `dailyCostUsd`, `weeklyCostUsd`, `monthlyCostUsd`
  * (a decimal string or number, `parseUsdMicros`) -- read by the worker at each job start and written
  * atomically by the admin extension (tmp + rename). `maxTokens`/`dailyTokenCap` are the optional token
- * controls (issue #25); the dollar keys are issue #501's, and the three windows are refused until they are
- * enforced (see `validateOverlay`).
+ * controls (issue #25); the dollar keys are issue #501's (a window needs `maxCostUsd`, checked on the merged
+ * values by `resolveSettings`).
  *
  * `readOverlay` NEVER throws: a bad settings file returns a discriminated `{ invalid }` rather than an
  * exception, so the processor RETURNS a policy refusal (`settings-overlay-invalid`) instead of letting
@@ -166,9 +166,14 @@ function validateOverlay(candidate, log) {
 				break;
 			}
 			case "maxCostUsd":
-				// Issue #501, the per-job dollar cap. Kept AS WRITTEN (a string or a number) once it parses, so the
-				// file the admin writes back holds what the operator typed, never a converted number; the worker
-				// converts it to micro-dollars per job, exactly as it converts env's.
+			case "dailyCostUsd":
+			case "weeklyCostUsd":
+			case "monthlyCostUsd":
+				// Issue #501: the per-job dollar cap and the three dollar windows. Kept AS WRITTEN (a string or a number)
+				// once it parses, so the file the admin writes back holds what the operator typed, never a converted
+				// number; the worker converts it to micro-dollars per job, exactly as it converts env's. A window needs
+				// `maxCostUsd`, a cross-key rule this per-key check cannot see: `resolveSettings` applies it to the
+				// merged values.
 				try {
 					parseUsdMicros(value, key);
 				} catch (error) {
@@ -176,20 +181,6 @@ function validateOverlay(candidate, log) {
 				}
 				overlay[key] = value;
 				break;
-			case "dailyCostUsd":
-			case "weeklyCostUsd":
-			case "monthlyCostUsd":
-				// Issue #501's dollar windows. The value is checked first, so a malformed one is named as such; then
-				// the key is REFUSED until the windows are enforced (a later change of #501 removes this branch).
-				// Not dropped and not accepted: dropped, the default branch would log and ignore it; accepted, the
-				// panel would show a weekly dollar cap no job is held to. Either is a cap that looks kept and is
-				// not. A refusal here also stops `dispatch_set` at the write, before any job is refused for it.
-				try {
-					parseUsdMicros(value, key);
-				} catch (error) {
-					return { invalid: error.message };
-				}
-				return { invalid: `${key} is not supported yet: dollar windows are enforced from a later release (maxCostUsd, the per-job cap, works now)` };
 			case "softHoldPct":
 				// A percentage of each active cap; 100 would equal the hard wall (no band) and 0 has no meaning,
 				// so the enforced band is 1-99. Absence disables the soft-hold entirely.

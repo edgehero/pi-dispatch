@@ -79,6 +79,7 @@ import {
   writeSettings,
   overlayInvalidRefusal,
   settingShown,
+  mergedDollarProblem,
   writeTriggers,
   writePauseWindows,
   writeScopedLimits,
@@ -499,12 +500,18 @@ function registerTools(pi: ExtensionAPI): void {
       const unset = params.value === undefined || params.value.trim() === "";
       const newVal = unset ? undefined : coerceSettingValue(params.key, params.value.trim());
       // The AFTER side of an unset is what the key falls back to, by the same rule as the before side.
-      const after = unset ? settingShown(params.key, Object.fromEntries(Object.entries(view?.overlay ?? {}).filter(([k]) => k !== params.key)), env, shown) : String(newVal);
+      const afterOverlay = unset ? Object.fromEntries(Object.entries(view?.overlay ?? {}).filter(([k]) => k !== params.key)) : { ...(view?.overlay ?? {}), [params.key]: newVal };
+      const after = unset ? settingShown(params.key, afterOverlay, env, shown) : String(newVal);
+      // Issue #501 (PR #542's review): a dollar change that would leave a window with no maxCostUsd in the MERGED overlay
+      // and the env visible here is WARNED in the confirm, never refused: the worker's cap may come from its service unit
+      // or --env-setup script, which the admin cannot see (`mergedDollarProblem`). The operator decides.
+      const isDollarKey = (DOLLAR_SETTING_KEYS as readonly string[]).includes(params.key);
+      const problem = isDollarKey ? mergedDollarProblem(afterOverlay, env, shown) : null;
       const result = await confirmedWrite(
         ctx,
         {
           title: unset ? `Unset ${params.key}` : `Set ${params.key}`,
-          message: `${params.key}: ${settingShown(params.key, view?.overlay, env, shown)} -> ${after}`,
+          message: `${params.key}: ${settingShown(params.key, view?.overlay, env, shown)} -> ${after}${problem?.warning ? `\n\nWarning: ${problem.warning}` : ""}`,
         },
         () => {
           const res = unset
@@ -2450,12 +2457,22 @@ function applySet(settingsFile: string, tokens: string[], notify: Notify): void 
     return;
   }
   const value = coerceSettingValue(key, valueTokens[0]);
-  const res = writeSettings({ settingsFile, mutate: (o) => ({ ...o, [key]: value }) });
+  const res = writeSettings({ settingsFile, mutate: (o) => ({ ...o, [key]: value }), ...dollarCheckFor(key) });
   if (res.invalid) {
     notify?.(`set: ${res.invalid}`, "error");
     return;
   }
-  notify?.(`set ${key} = ${value}`, "info");
+  notify?.(`set ${key} = ${value}${res.warning ? ` (warning: ${res.warning})` : ""}`, res.warning ? "warning" : "info");
+}
+
+/**
+ * The merged-values dollar check (issue #501, PR #542's review) for a console write of `key`: the deployment's env and
+ * whether it is visible, for a dollar key only, so `writeSettings` returns a WARNING beside the write (never a refusal).
+ * Every other key writes as before.
+ */
+function dollarCheckFor(key: string): { dollarEnv?: any; deploymentDir?: string | null } {
+  if (!(DOLLAR_SETTING_KEYS as readonly string[]).includes(key)) return {};
+  return { dollarEnv: deploymentEnv(), deploymentDir: pointerState().deploymentDir ?? null };
 }
 
 /**
@@ -2474,12 +2491,13 @@ function applyUnset(settingsFile: string, tokens: string[], notify: Notify): voi
       delete o[key];
       return o;
     },
+    ...dollarCheckFor(key),
   });
   if (res.invalid) {
     notify?.(`unset: ${res.invalid}`, "error");
     return;
   }
-  notify?.(`unset ${key}`, "info");
+  notify?.(`unset ${key}${res.warning ? ` (warning: ${res.warning})` : ""}`, res.warning ? "warning" : "info");
 }
 
 /**

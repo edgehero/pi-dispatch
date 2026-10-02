@@ -223,12 +223,15 @@ export function makeRunContainer({
 				// RUNNER_POLICY_REASONS set and to a line that itself said code 2. The processor still decides
 				// the retry class from `code` alone; this only picks the label inside exit 2.
 				let exitReason = null;
+				// Issue #501 (PR #542's review, round 3): the LAST exit line's own `code`, which the dollar settlement
+				// compares with the container's real exit code before it trusts that line's cost.
+				let exitLineCode = null;
 				try {
 					// `context = null` is a DEFAULT rather than a plain destructure: an injected sink that
 					// predates the field returns no such key, and `undefined` would then reach the record's
 					// shape where every other absence is spelled `null`.
 					// `exitReason` defaults the same way, for the same reason.
-					({ turns, tokens, session, usage, context = null, exitReason = null } = await sink.close());
+					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null } = await sink.close());
 				} catch {
 					turns = null;
 					tokens = null;
@@ -236,8 +239,9 @@ export function makeRunContainer({
 					usage = null;
 					context = null;
 					exitReason = null;
+					exitLineCode = null;
 				}
-				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason });
+				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode });
 			});
 		});
 

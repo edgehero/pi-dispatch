@@ -341,6 +341,79 @@ export function endpointsForProvider({ models, provider, endpoints }) {
 	return modelsOf(entry).map((m) => ({ modelId: m.id, endpoints: matching(typeof m.baseUrl === "string" ? m.baseUrl : entry.baseUrl, endpoints) }));
 }
 
+/**
+ * The cost table pi would bill one model by, as the overlay composes it (issue #503 part 7), or `null` when that
+ * cannot be told. pi 0.99.1's provider composer (`pi-coding-agent/dist/core/provider-composer.js`) builds it in two
+ * steps, mirrored here:
+ *   1. the BASE: a model the overlay's `providers.<p>.models` defines takes that entry's `cost`, and an entry with no
+ *      `cost` gets all zeros (`modelFromJson`: "an absent cost table counts as zero"), whatever the builtin catalog
+ *      says, because the overlay entry REPLACES the builtin model. Any other model takes the builtin catalog's cost
+ *      (`builtinModel(provider, id)`, injected so this module never imports pi). Neither: `null`;
+ *   2. the OVERRIDE: `modelOverrides.<id>.cost`, field by field over the base (`applyModelOverride`), and only on a
+ *      chat model (pi skips the override on an image or classifier model). The overlay's own models are chat models.
+ */
+function composedCost({ models, provider, modelId, builtinModel }) {
+	const entry = providerOf(models, provider);
+	const defined = modelsOf(entry).find((m) => m.id === modelId);
+	let base;
+	let chat = true;
+	if (defined !== undefined) {
+		base = defined.cost === undefined ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } : defined.cost;
+	} else {
+		const builtin = typeof builtinModel === "function" ? builtinModel(provider, modelId) : null;
+		if (builtin === null || builtin === undefined || typeof builtin !== "object") return null;
+		base = builtin.cost;
+		chat = (builtin.type ?? "chat") === "chat";
+	}
+	if (base === null || typeof base !== "object" || Array.isArray(base)) return null;
+	const overrides = entry?.modelOverrides;
+	const override = chat && overrides !== null && typeof overrides === "object" && !Array.isArray(overrides) && Object.hasOwn(overrides, modelId) ? overrides[modelId] : undefined;
+	const cost = override !== null && typeof override === "object" ? override.cost : undefined;
+	if (cost === undefined || cost === null) return base;
+	if (typeof cost !== "object" || Array.isArray(cost)) return null;
+	return { input: cost.input ?? base.input, output: cost.output ?? base.output, cacheRead: cost.cacheRead ?? base.cacheRead, cacheWrite: cost.cacheWrite ?? base.cacheWrite, tiers: cost.tiers ?? base.tiers };
+}
+
+const RATE_KEYS = ["input", "output", "cacheRead", "cacheWrite"];
+
+/** Every rate of a cost table and of each of its tiers is exactly 0. A rate that is absent or not a number is not 0. */
+function isZeroCost(cost) {
+	if (cost === null || typeof cost !== "object") return false;
+	if (!RATE_KEYS.every((k) => cost[k] === 0)) return false;
+	if (cost.tiers === undefined || cost.tiers === null) return true;
+	return Array.isArray(cost.tiers) && cost.tiers.every((t) => t !== null && typeof t === "object" && RATE_KEYS.every((k) => t[k] === 0));
+}
+
+/**
+ * Can this job spend nothing, so that a dollar window needs to hold nothing for it (issue #503 part 7, issue #501)?
+ * `{ zeroRated: true }` only when EVERY model the job may call is BOTH:
+ *   - served by a declared endpoint (`endpointsForModel`): a local or LAN server the operator runs, not a hosted
+ *     provider that bills; and
+ *   - zero-rated as pi would compose it (`composedCost`: the overlay entry's cost, else the builtin's, then the
+ *     override): every rate of every table 0.
+ * Else `{ zeroRated: false, why }`, a fixed phrase naming the first model that is not (for the log, never a comment).
+ *
+ * "Every model the job may call" is `refs`: the job's effective allowed-model list when it has one (issue #502), else
+ * its main model alone. With a list, the MAIN model alone is not enough: the job may switch to any listed model, and
+ * a hosted one would then spend with nothing reserved. Without a list a mid-run switch to another model is the named
+ * residual of #503 (an unrestricted job's endpoint set is its main model's), and the runner still holds such a job to
+ * a per-job cap of 0, which refuses every priced call before it is made.
+ *
+ * `models` null (no overlay, or one that could not be read) or no endpoints is never zero-rated: fail closed, and the
+ * job reserves as usual. Pure: it reads only what it is handed, so the processor and any later reader agree by input.
+ */
+export function zeroRatedVerdict({ models, endpoints, refs, builtinModel = () => null }) {
+	if (!Array.isArray(refs) || refs.length === 0) return { zeroRated: false, why: "no model to judge" };
+	if (models === null || models === undefined || !Array.isArray(endpoints) || endpoints.length === 0) return { zeroRated: false, why: "no declared endpoint or no overlay models.json" };
+	for (const ref of refs) {
+		if (ref === null || typeof ref?.provider !== "string" || typeof ref?.id !== "string") return { zeroRated: false, why: "a list entry is not provider/model" };
+		const label = `${ref.provider}/${ref.id}`;
+		if (endpointsForModel({ models, provider: ref.provider, modelId: ref.id, endpoints }).length === 0) return { zeroRated: false, why: `${label} is not served by a declared endpoint` };
+		if (!isZeroCost(composedCost({ models, provider: ref.provider, modelId: ref.id, builtinModel }))) return { zeroRated: false, why: `${label} is not zero-rated` };
+	}
+	return { zeroRated: true };
+}
+
 /** The exact `apiKey` a keyless provider's models.json entry carries: pi resolves `$NAME` from the job's environment. */
 export const KEYLESS_API_KEY = `$${KEYLESS_ENV_NAME}`;
 

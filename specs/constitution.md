@@ -661,11 +661,14 @@ passing, on the record — issue #80.)
 
 ## CONST-BUDGET-BEFORE-TOKENS
 
-- **Statement**: The spend cap shall be checked and incremented **before** an agent run begins — before
-  any provider call is made. The cap is a **job count** (container starts), not tokens. What is counted may
-  span several windows (day/week/month) and carry a soft-hold band (`REQ-SPEND-CAPS-MULTI-WINDOW`); this
-  constraint governs only the **ordering** — check-and-increment before the container — which is invariant
-  across however many windows exist.
+- **Statement**: Every spend cap shall be checked and reserved **before** an agent run begins, before any
+  provider call is made. There are two ledgers: a **job count** (container starts) and, when configured,
+  **dollars**. A dollar reservation is the job's per-job cost cap, held against every dollar window that
+  applies and replaced after the run by the metered cost, or by at least the reservation when the cost is not
+  fully known. The per-job cost cap is enforced inside the container before each provider call, against a bound
+  of each call's worst cost, so what a job can spend is bounded before it runs; the residuals where a charge can
+  pass that bound are named in `DES-DOLLAR-RESERVE-AND-SETTLE`. This constraint governs the **ordering**, which is
+  the same for both ledgers.
 - **Why**: The ordering **is** the mechanism. Check-after-spend means fifty junk triggers cost fifty jobs
   of real money before the cap engages, which is the exact scenario the cap exists for. Adopted from
   pi-routines, the one idea worth taking from it, whose README states the principle exactly: the cap is
@@ -680,11 +683,20 @@ passing, on the record — issue #80.)
   container still resolves it for real where it always did, and the gate is a probe that discards what
   it resolves: threading a live credential through the processor would put it in scope for every log
   line and record between the two.
+  **Dollars join the ordering, not replace it** (issue #501). Both ledgers may span several windows
+  (day/week/month, `REQ-SPEND-CAPS-MULTI-WINDOW`), and the job-count ledger alone carries a soft-hold band. The
+  dollar reserve runs after both job-count reserves and before the container, so every free gate and every
+  job-count refusal costs no dollar counter. Its amount is the per-job cap because the runner enforces that cap
+  before every call, so a reservation is a true bound on the run, which a reservation of an estimate would not
+  be. A refused dollar reservation is given back at once, the one departure from the job-count ledger's "a
+  refused slot still counts": a refusal there costs one slot, here it would cost a whole per-job cap of a
+  window that ran nothing. A job that cannot spend (every model it may call local and zero-rated) reserves
+  nothing and runs under a per-job cap of 0, so the ordering still holds: the cap is checked before each call.
 - **Evidence (upstream)**: `Davidcreador/pi-routines @ 6d2aa64 (v0.5.1)` — `maxRunsPerDay`
 - **Traces to**: `REQ-RUNNER-TURN-BUDGET`, `CONST-RETRY-INFRA-ONLY`, `REQ-SPEND-CAPS-MULTI-WINDOW`
 - **Acceptance**: Given the cap is exhausted, a new trigger consumes zero provider tokens and comments
-  on the issue. A deployment with no usable provider credential refuses before minting a token, cloning
-  a repository or reserving a slot.
+  on the issue. Given a dollar window is exhausted, a new trigger consumes zero provider tokens. A deployment
+  with no usable provider credential refuses before minting a token, cloning a repository or reserving a slot.
 
 ## CONST-RETRY-INFRA-ONLY
 
@@ -990,6 +1002,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-10-02 | Issue #501, parts 3 and 4, and #503 part 7 (dollar windows, reserved before the run and settled after it). **`CONST-BUDGET-BEFORE-TOKENS` AMENDED**: the Statement is the issue's: every spend cap is checked and reserved before a run, there are two ledgers (a job count and, when configured, dollars), a dollar reservation is the job's per-job cap held against every window that applies and replaced after the run by the metered cost or kept whole when the cost is not fully known, and the per-job cap is enforced in the container before each call; the constraint governs the ordering, the same for both ledgers. The Why gains why dollars reserve after both job-count reserves and before the container, why the amount is the per-job cap, why a refused dollar reservation is given back (the one departure from "a refused slot still counts"), and why a zero-rated local job reserves nothing yet keeps the ordering (a cap of 0 before each call). The Acceptance gains: given a dollar window is exhausted, a new trigger consumes zero provider tokens. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: `dollar-cap` is a returned policy refusal; a Valkey fault in the dollar reserve is a never-started retry that refunds both ledgers. **Code evidence**: worker/src/dollar-budget.mjs; worker/src/processor.mjs -> runJob, isNeverStartedExit. The Statement says at least the reservation when the cost is not fully known, and that the per-job cap bounds what a job can spend before it runs, with the residuals named in `DES-DOLLAR-RESERVE-AND-SETTLE`, rather than that a job cannot spend more than it reserved. |
 | 2026-10-02 | Issues #501 and #502, the shared seams for policy stops. **No article changed.** **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the new refusal of a cost cap or a model list the runner cannot enforce before a call is free and runs inside the container after the meter installs and before the session exists, so nothing is sent to a provider, and no worker gate moved. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: that refusal is a determinate exit `2`, not retried. |
 | 2026-10-02 | Issue #521. **`CONST-TOKEN-SCOPED-PER-JOB` AMENDED**, a paragraph after the durable-media clause. That clause said an env value lives in container memory and dies with the container. On Docker Desktop for macOS it does not: the backend log records each container create request, environment included, in plain text, so a job's forge token rests there. The paragraph names the path, says pi-dispatch neither prevents nor scrubs it, and places the bound where the article already does, on the expiry: a minted installation token expires in about an hour, a long-lived PAT or a `gh` login does not. It also names what has no expiry and rests there all the same: the provider API key and every `run.secretsProfile` value a job carries (spend limit, rotation, and the log folder treated as a secret store), and, outside jobs, the Valkey password and a compose receiver's whole `.env`. doctor's in-image `gh` probe no longer puts the operator's token in a create request (stdin, measured: two copies of a dummy token per doctor run before, zero after). The Statement and the Acceptance are UNCHANGED, checked: the container credential is still env injected, and the log is the engine's, not one this project writes. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the probe gains `-i` and a `sh` entrypoint and loses its two `-e` flags; the podman probe keeps every pinned flag. **`CONST-MERGE-NEVER-AUTOMATIC` and `CONST-PI-VERSION-PINNED` UNCHANGED, checked**: no merge string and no pin added. |
 | 2026-10-02 | Issue #503, part 4 (model endpoint slot leases). **No article changed.** **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the endpoint slot lease is taken at pickup, after the scope gate and before the kill timer, the mint, the clone, the token-cap read and the budget reservation, and a full endpoint is a free deferral that releases every slot it took. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: a full endpoint moves the job to the delayed set without an attempt, neither a refusal nor a retry, and a settings read that throws is still recorded and handled where it was. |

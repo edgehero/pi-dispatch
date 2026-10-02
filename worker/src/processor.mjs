@@ -11,6 +11,8 @@ import { RUNNER_POLICY_REASONS } from "./run-history.mjs";
 import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
 import { CAPABILITY_GATES } from "./image-preflight.mjs";
 import { modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
+import { DOLLAR_CAP_REASON, dollarLedgers, dollarSettlement, dollarsRecord, meteredMicros, releaseDollars, reserveDollars, settleDollars } from "./dollar-budget.mjs";
+import { zeroRatedVerdict } from "./model-endpoints.mjs";
 
 /**
  * The forge comment's reason for each observation a floor refusal missed (issues #278 and #345), keyed like
@@ -136,6 +138,36 @@ function egressProxyFix(venue, proxy = DEFAULT_EGRESS_PROXY) {
 	if (venue === PODMAN_BACKEND) return "Start it under the worker account's own rootless podman, on a named bridge network (docs/podman.md)";
 	if (proxy !== DEFAULT_EGRESS_PROXY) return `PI_EGRESS_PROXY names your own proxy, which \`pi-dispatch up\` does not start: start ${proxy} yourself`;
 	return "Start it with `pi-dispatch up` from the deployment folder";
+}
+
+/**
+ * Did the runtime never hand control to the runner (issue #227)? ONE answer for the two places that ask it (issue
+ * #501): the exit-code switch, which refunds such an exit as `container-never-started`, and the dollar settlement,
+ * which must not settle a container that never ran (the refund in the catch gives its reservation back instead).
+ * Two answers could drift: a never-started exit settled at the floor AND refunded would give back twice, and one
+ * neither settled nor refunded would leave its hold standing.
+ *
+ * A detached container (issue #345) DID start, and an aborted one is classified by its flag first, so neither is
+ * never-started whatever its code. The runner's own three codes are never the venue's never-started set's to claim.
+ */
+export function isNeverStartedExit({ code, aborted, detached }, neverStartedCodes) {
+	if (detached === true || aborted) return false;
+	if (code === EXIT_COMPLETED || code === EXIT_POLICY || code === EXIT_INFRA) return false;
+	return (neverStartedCodes ?? []).includes(code);
+}
+
+/**
+ * The models a job may call (issue #501, #503 part 7), as `{ provider, id }` refs: its main model, and every entry of
+ * its effective allowed-model list when it has one. A list entry that does not split is kept as `null`, which the
+ * zero-rated check reads as "not zero-rated" (fail closed).
+ */
+function callableModelRefs(job) {
+	const refs = [{ provider: job.provider, id: job.model }];
+	for (const entry of Array.isArray(job.models) ? job.models : []) {
+		const ref = splitModelEntry(entry);
+		refs.push(ref === null ? null : { provider: ref.provider, id: ref.model });
+	}
+	return refs;
 }
 
 export async function runJob(job, deps) {
@@ -267,6 +299,14 @@ export async function runJob(job, deps) {
 		// or a github job with no /outbox -- chains nothing. It NEVER throws (outbox.mjs), so its counts are
 		// additive telemetry that can never flip the parent's completed outcome (CONST-RETRY-INFRA-ONLY).
 		collectChain = async () => ({ enqueued: 0, refused: 0 }),
+		// Issue #501: the deployment's dollar windows `{ day, week, month }` in micro-dollars (each null when unset), or
+		// null when no window is set. Null is the default and the off switch: nothing is reserved or settled and no
+		// `budget:usd:*` key is written, so a deployment with no dollar setting is byte-identical.
+		dollarCaps = null,
+		// Issue #503 part 7: the builtin catalog's model object for (provider, id), or null (model-catalog.mjs
+		// `builtinModel`). Read only by the zero-rated check; the default knows no builtin model, so an unwired
+		// processor judges overlay models alone and reserves for every other.
+		builtinModel = () => null,
 		now = new Date(),
 	} = deps;
 
@@ -295,6 +335,11 @@ export async function runJob(job, deps) {
 	// A spawn fault that fails between is an InfraRetry carrying `container-never-started`, refunded by the
 	// arm below, which has a discriminator of its own.
 	let containerRan = false;
+	// Issue #501. `dollarHold` is the dollar reservation still standing (reserveDollars' hold), null when none was
+	// taken or once it has been settled or given back, so no path can settle or refund it twice. `dollars` is what
+	// the record says about it (INT-RUN-HISTORY-FILE-CONTRACT), null until the reservation step ran.
+	let dollarHold = null;
+	let dollars = null;
 
 	try {
 		// The one-shot pre-spend check (issue #231), FIRST on the ladder: one file read, cheaper than
@@ -996,8 +1041,70 @@ export async function runJob(job, deps) {
 			return { outcome: "policy", reason: budget.reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: true }; // return => not retried
 		}
 
+		// DOLLAR windows (issue #501, part 3), after BOTH job-count reserves and before the container: the last gate
+		// before the spend line (CONST-BUDGET-BEFORE-TOKENS). Every free gate and both job-count ledgers come first, so
+		// a refusal anywhere above never touches a dollar counter. The amount is the job's per-job cost cap, which the
+		// runner enforces before every call, so it bounds what the run can spend; the worker needs no prices.
+		let containerJob = job;
+		if (dollarCaps) {
+			// A window needs a per-job cap (the settings invariant, `checkDollarInvariant`), so a job with none here is a
+			// defect or a hand-built queue entry: refused as configuration, before anything is reserved, and the config
+			// arm below refunds both job-count slots.
+			if (job.maxCostMicros === null || job.maxCostMicros === undefined) throw configError("a dollar window is set but this job has no per-job cost cap to reserve");
+			// Issue #503 part 7: a job that CANNOT spend reserves nothing. Every model it may call is served by a declared
+			// endpoint and zero-rated, so its container runs under a per-job cap of 0, which the runner's cost guard holds
+			// before every call: a call whose bound is above 0 is refused, so the job's spend is 0 by construction, not
+			// by trust in the cost table. The capability gate above already required `costCap` of this job's image (the
+			// job carried a non-null cap), so an image that would ignore the 0 never gets here. A cap that is ALREADY 0
+			// (a malformed queued value reads as 0, `effectiveCostCapMicros`) has nothing to reserve either.
+			const refs = callableModelRefs(job);
+			const zero = job.maxCostMicros === 0 ? { zeroRated: true } : zeroRatedVerdict({ models: modelEndpoints?.models ?? null, endpoints: modelEndpoints?.endpoints ?? [], refs, builtinModel });
+			if (zero.zeroRated) {
+				containerJob = { ...job, maxCostMicros: 0 };
+				dollars = dollarsRecord({ reservedMicros: 0, settledMicros: 0, basis: "unreserved" });
+				log("dollar_unreserved", { models: refs.length });
+			} else {
+				let reservation;
+				try {
+					reservation = await reserveDollars(redis, { ledgers: dollarLedgers(dollarCaps), amountMicros: job.maxCostMicros, now, log });
+				} catch (error) {
+					// Valkey did not answer. reserveDollars tried to give back what it had added, key by key (a key it could
+					// not is logged, dollar_giveback_error), so nothing is held by this job; the job-count
+					// slots are refunded by the never-started arm below, and the job is retried: nothing started.
+					log("dollar_reserve_error", { code: typeof error?.code === "string" ? error.code : "error" });
+					throw new InfraRetry("the dollar windows could not be reserved", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+				}
+				if (!reservation.allowed) {
+					// Refused, and every dollar key it touched given back, best effort per key (the departure from the job-count
+					// rule, see dollar-budget.mjs; a key that could not be is logged and the record says floor). Both job-count
+					// slots go back too: a ledger that did not issue the refusal gives
+					// back, the rule the scoped ledger follows when the global one refuses above.
+					let refunded = true;
+					try {
+						if (scopedReserved && scopedCaps) {
+							await releaseBudget(redis, { caps: scopedCaps.caps, now, keyPrefix: scopeKeyPrefix(scopedCaps.scope) });
+							scopedReserved = false;
+						}
+						await releaseBudget(redis, { caps, now });
+						reserved = false;
+					} catch (releaseError) {
+						refunded = false;
+						log("budget_release_failed", { at: DOLLAR_CAP_REASON, code: releaseError?.code ?? null });
+					}
+					// The window is named and the amounts are not: the comment's reader may be an issue author, and the
+					// amounts are the operator's, which the log carries.
+					const period = { day: "today's", week: "this week's", month: "this month's" }[reservation.window] ?? "a";
+					await comment(job, `Refused: ${period} dollar budget for this deployment has no room left for this run's cost limit, so no container was started and nothing was spent. Not run.`);
+					log("over_dollar_budget", { window: reservation.window, reservedMicros: reservation.reservedMicros, capMicros: reservation.capMicros, amountMicros: job.maxCostMicros, refunded });
+					return { outcome: "policy", reason: DOLLAR_CAP_REASON, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: !refunded, dollars: reservation.stranded > 0 ? dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: job.maxCostMicros, basis: "floor" }) : dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: 0, basis: "refunded" }) }; // return => not retried
+				}
+				dollarHold = reservation.hold;
+				dollars = dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: job.maxCostMicros, basis: "floor" });
+			}
+		}
+
 		// The user the gate above decided is the user that runs: one answer, never two call sites that agree.
-		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason } = await runContainer({ job, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}) });
+		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitLineCode = null } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}) });
 		containerRan = true;
 		log("container_exit", { exitCode: code, aborted, ...(detached === true ? { detached: true } : {}) });
 
@@ -1012,12 +1119,37 @@ export async function runJob(job, deps) {
 			await recordSpend(redis, tokensSpent, { now }).catch((err) => log("token_spend_error", { reason: err?.message }));
 		}
 
+		// SETTLE the dollar reservation (issue #501, part 4), ONCE, here, for every exit where the container ran:
+		// completed, runner policy, a worker abort or cancel, exit 1, an unknown exit, and a detached container. A
+		// never-started exit is not settled: the catch refunds it whole, and `isNeverStartedExit` is the one answer both
+		// ask. Before any classification below, so every return and every throw carries the same `dollars`.
+		const neverStarted = isNeverStartedExit({ code, aborted, detached }, neverStartedExits(job));
+		if (dollarHold !== null && !neverStarted) {
+			// The exit line is trusted only when the container exited ON ITS OWN (the worker did not abort, cancel, time
+			// out or detach it, so the runner had the chance to write its genuine last line) AND that line's own `code` is
+			// the container's real exit code (PR #542's review, round 3: a job's tool can forge a $0 line before a stop).
+			const trusted = !aborted && detached !== true && Number.isSafeInteger(exitLineCode) && exitLineCode === code;
+			const { settledMicros, basis } = dollarSettlement({ tokens, usage: usage ?? null, reservedMicros: dollarHold.amountMicros, trusted });
+			const { applied, of } = await settleDollars(redis, dollarHold, settledMicros, { log });
+			// A fault that adjusted no key leaves the whole reservation in every window, which is a floor whatever the
+			// basis would have been, and the record says so. A partial one is logged (dollar_settle_error) and recorded
+			// as computed: the keys that were adjusted hold the settled amount.
+			dollars = applied === 0 && of > 0 && settledMicros !== dollarHold.amountMicros ? dollarsRecord({ reservedMicros: dollarHold.amountMicros, settledMicros: dollarHold.amountMicros, basis: "floor" }) : dollarsRecord({ reservedMicros: dollarHold.amountMicros, settledMicros, basis });
+			dollarHold = null;
+			log("dollar_settled", { reservedMicros: dollars.reservedMicros, settledMicros: dollars.settledMicros, basis: dollars.basis });
+		} else if (dollars?.basis === "unreserved") {
+			// Nothing was held, so nothing is written. A metered cost above 0 here would mean the runner's cap of 0 let a
+			// priced call through, which it cannot by construction; it is logged so it cannot pass unseen.
+			const spent = meteredMicros(tokens?.cost);
+			if (spent !== null && spent > 0) log("dollar_unreserved_spent", { meteredMicros: spent });
+		}
+
 		// Issue #345: `docker run` exited with a never-started code, but THIS attempt's container was found by its cidfile,
 		// still there, and was stopped and removed (run-container.mjs, measured on Podman with its API service killed
 		// mid-job). It DID start, so this is never refunded as never-started: it keeps its slot and retries as infrastructure,
 		// BEFORE the exit-code switch, where the same code would read as a free never-started exit.
 		if (detached === true) {
-			throw new InfraRetry(`the container outlived its docker run, exit ${code}`, { reason: "container-detached", exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session) });
+			throw new InfraRetry(`the container outlived its docker run, exit ${code}`, { reason: "container-detached", exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars });
 		}
 
 		// A WORKER-initiated stop (30-min timeout via cancelJob, graceful-shutdown docker stop, or an
@@ -1035,7 +1167,7 @@ export async function runJob(job, deps) {
 			// Awaited bare like every determinate refusal above: the adapter never throws by contract, and
 			// the one swallowed comment in this file (the catch's) justifies itself by its position.
 			await comment(job, TERMINAL_COMMENTS[reason]);
-			return { outcome: "policy", reason, exitCode: code, turns, tokens, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true };
+			return { outcome: "policy", reason, exitCode: code, turns, tokens, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}) };
 		}
 
 		switch (code) {
@@ -1069,6 +1201,7 @@ export async function runJob(job, deps) {
 					budgetReserved: true,
 					chainEnqueued: chain.enqueued,
 					chainRefused: chain.refused,
+					...(dollars ? { dollars } : {}),
 				};
 			}
 			case EXIT_POLICY: {
@@ -1091,7 +1224,7 @@ export async function runJob(job, deps) {
 				// Every other reason the runner gives still reads as runner-policy.
 				const reason = RUNNER_POLICY_REASONS.has(exitReason) && code === 2 ? exitReason : "runner-policy";
 				await comment(job, TERMINAL_COMMENTS[reason]);
-				return { outcome: "policy", reason, exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true };
+				return { outcome: "policy", reason, exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}) };
 			}
 			case EXIT_INFRA:
 				// NO comment on any infra throw, here or in the catch: an InfraRetry may be retried and
@@ -1099,7 +1232,7 @@ export async function runJob(job, deps) {
 				// the whole infra class lives at the terminal seam -- start.mjs's failed listener, guarded on
 				// BullMQ's own finishedOn -- which also catches the stall-kill and wait-gate paths this
 				// function never sees (issue #288).
-				throw new InfraRetry(`infra failure, container exit ${code}`, { exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session) });
+				throw new InfraRetry(`infra failure, container exit ${code}`, { exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars });
 			default:
 				// THE RUNTIME NEVER HANDED CONTROL TO THE RUNNER, in whatever integers this venue spells that
 				// (issue #227). For docker it is 125 (`docker run` itself failed), 126 (the entrypoint exists
@@ -1113,10 +1246,11 @@ export async function runJob(job, deps) {
 				// silently wrong for any venue where 125 is a real runner exit, and the assumption was
 				// invisible while there was one runtime. An adapter declares its own set, or declares none
 				// and normalises to this outcome itself.
-				if ((neverStartedExits(job) ?? []).includes(code)) {
+				if (neverStarted) {
+					// No `dollars` here: the hold is still standing, and the catch refunds it whole with the job-count slots.
 					throw new InfraRetry(`the runtime could not start the container, exit ${code}`, { reason: "container-never-started", exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session) });
 				}
-				throw new InfraRetry(`unknown container exit ${code}`, { exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session) });
+				throw new InfraRetry(`unknown container exit ${code}`, { exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), dollars });
 		}
 	} catch (e) {
 		// A CONFIG-tagged throw is a determinate policy refusal wearing an exception, and issue #310 is the
@@ -1141,6 +1275,32 @@ export async function runJob(job, deps) {
 		// rather than merely true today. Every config-tagged throw site in the worker is pre-container, so this
 		// changes nothing now; the day one is added after a paid run, that run keeps its slot and falls through
 		// to the untagged path instead of being refunded and publicly declared free.
+		// Issue #501: a dollar hold still standing here was neither settled nor refunded. Two kinds of throw give it back
+		// whole, because no container ran: never-started (the arm below) and config-refused (the next arm). Any other
+		// throw may have followed a container that ran (runContainer itself throwing, a defect), so the hold STAYS, the
+		// floor, which errs toward overcounting, and `dollar_hold_unsettled` says so. Released FIRST and never throwing
+		// (releaseDollars), so a Valkey fault cannot replace either arm's classification.
+		if (dollarHold !== null) {
+			const hold = dollarHold;
+			dollarHold = null;
+			if ((e?.piDispatchConfig === true && !containerRan) || isNeverStartedRetry(e)) {
+				const { applied, of } = await releaseDollars(redis, hold, { log });
+				dollars = dollarsRecord({ reservedMicros: hold.amountMicros, settledMicros: applied === of ? 0 : hold.amountMicros, basis: applied === of ? "refunded" : "floor" });
+			} else {
+				log("dollar_hold_unsettled", { reservedMicros: hold.amountMicros, error: e instanceof InfraRetry ? "infra-retry" : (e?.name ?? "error") });
+				dollars = dollarsRecord({ reservedMicros: hold.amountMicros, settledMicros: hold.amountMicros, basis: "floor" });
+			}
+		}
+		// The record reads `dollars` off the error on every throw path (buildRecord), so a retried or failed attempt says
+		// what its windows were charged.
+		if (dollars !== null && e !== null && typeof e === "object") {
+			try {
+				e.dollars = dollars;
+			} catch {
+				// a frozen error keeps its own fields; the log lines above are the record of the hold
+			}
+		}
+
 		if (e?.piDispatchConfig === true && !containerRan) {
 			// GUARDED, and the flags are the record of what actually happened. `releaseBudget` is a loop of
 			// DECRs over the active windows and can reject part-way (a read-only replica, a dropped
@@ -1179,7 +1339,7 @@ export async function runJob(job, deps) {
 			log("refused_config", { kind: job.kind ?? null, refunded });
 			// budgetReserved reflects the LEDGER: false when the refund landed, true when it did not and the
 			// slot is still out there.
-			return { outcome: "policy", reason: "config-refused", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: !refunded }; // return => not retried
+			return { outcome: "policy", reason: "config-refused", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: !refunded, ...(dollars ? { dollars } : {}) }; // return => not retried
 		}
 
 		// A spawn fault (docker daemon down / binary missing) reserved a slot but never started a
@@ -1189,8 +1349,8 @@ export async function runJob(job, deps) {
 		// once per invocation; a BullMQ retry reserves afresh, so this cannot double-release.
 		// budgetReserved reflects whether a slot stays spent: false when never-started refunds below,
 		// true for a real container that ran and spent (exit-1 infra / unknown exit).
-		if (e instanceof InfraRetry) e.budgetReserved = reserved && e.reason !== "container-never-started";
-		if (e instanceof InfraRetry && e.reason === "container-never-started") {
+		if (e instanceof InfraRetry) e.budgetReserved = reserved && !isNeverStartedRetry(e);
+		if (isNeverStartedRetry(e)) {
 			// Both-or-neither (issue #242): a never-started container can only follow BOTH reserves (the
 			// scoped one precedes the global one, and the container follows both), so they refund
 			// together -- and a scoped refusal returned above without ever touching the global ledger.
@@ -1272,8 +1432,17 @@ const SECRET_FAILURES = {
 	nul: "printed a value containing a NUL byte, which cannot survive the container's argv",
 };
 
+/**
+ * Is this throw the "the runner never ran" retry (issue #227), whichever path raised it: a never-started exit
+ * (`isNeverStartedExit`), a spawn fault, or a pre-start gate? The catch's refunds (the job-count slots and, issue
+ * #501, the dollar hold) key off this one test.
+ */
+function isNeverStartedRetry(e) {
+	return e instanceof InfraRetry && e.reason === "container-never-started";
+}
+
 export class InfraRetry extends Error {
-	constructor(message, { cause, reason, exitCode, turns, tokens, session, usage, provider, model, budgetReserved } = {}) {
+	constructor(message, { cause, reason, exitCode, turns, tokens, session, usage, provider, model, budgetReserved, dollars } = {}) {
 		super(message, cause ? { cause } : undefined);
 		this.name = "InfraRetry";
 		this.piDispatchRetry = true;
@@ -1292,6 +1461,9 @@ export class InfraRetry extends Error {
 		this.provider = provider ?? null;
 		this.model = model ?? null;
 		this.budgetReserved = budgetReserved ?? null;
+		// Issue #501: the dollar reservation's outcome (`dollarsRecord`), or null when no dollar window applied. Set by
+		// the processor on a throw after the reservation, so a retried attempt's record says what its window was charged.
+		this.dollars = dollars ?? null;
 	}
 }
 

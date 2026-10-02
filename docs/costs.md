@@ -116,6 +116,26 @@ labeled `unmeasured (OQ-002)`.
 | `PI_DISPATCH_ASCII` | unset | `1` = ASCII glyphs (frames, meters, sparkline ramp) for glyph-hostile terminals |
 | `PI_LOG_RETENTION_DAYS` | `30` | bounds the analyzable history (`0` = keep forever; scan still caps at 92 days) |
 
+## Dollar caps
+
+This page reports spend after the fact. Two settings act on it before the fact (issue #501):
+
+- `PI_MAX_COST_USD`: the most one job may spend. The runner checks it before every model call.
+- `PI_DAILY_COST_USD`, `PI_WEEKLY_COST_USD`, `PI_MONTHLY_COST_USD`: what all jobs may spend per UTC day,
+  Monday week and month. Each job holds its per-job cap in every window before it starts, and is refused
+  (`dollar-cap`) when one has no room. After the run the hold becomes the metered cost, or at least the whole hold
+  when the cost is not fully known. Each run record says which, under `dollars.basis`: `metered`, `floor`, `refunded`
+  or `unreserved`.
+
+A job that calls no model (a command job, or one whose first call the cap refused) is charged $0. A job whose
+cost is not fully known is charged at least its cap, and more when the part that was measured already costs more.
+
+A `pi` subprocess that a package starts inside a job (issue #500) spends outside the runner's meter, so neither
+the per-job cap nor the windows see it: a window can undercount such jobs.
+
+Prepaid coding plans that pi prices (`kimi-coding`, `zai`, `zai-coding-cn`) meter their API-equivalent price,
+so a dollar window on them caps that implied price, not your bill.
+
 ## Honest limits
 
 - Totals are **floors**: a `pi` subprocess spawned by a staged package is unmetered (`OQ-011`), and a

@@ -21,7 +21,7 @@ import { makeAzureHost } from "./azure-host.mjs";
 import { makeEgressPreflight } from "./egress.mjs";
 import { checkSlotKey, endpointSlotKey, hash16, makeClaimSweeper, makeFleetLease, makeScopeClaimSweeper, scopeSlotKey } from "./fleet-lease.mjs";
 import { MAX_SLOTS, loadModelEndpoints, modelEndpointsPath, readOverlayModels } from "./model-endpoints.mjs";
-import { checkModelsKnown } from "./model-catalog.mjs";
+import { builtinModel, checkModelsKnown } from "./model-catalog.mjs";
 import { capabilityTokens, serializeCaps } from "./capabilities.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
 import { makeHostRegistry } from "./host-registry.mjs";
@@ -1694,6 +1694,9 @@ export async function startWorker(
 			// job and only when a model is not builtin, so the operator's edits apply without a restart. The SAME file
 			// the endpoint gate reads, through the same reader, so absent, unreadable and unparseable mean one thing.
 			checkModelsKnown: (refs) => checkModelsKnown(refs, { readOverlay: () => readOverlayModels(config.globalPiDir) }),
+			// Issue #503 part 7: the builtin catalog's model object, for the zero-rated check that lets a job on local
+			// zero-rated models reserve nothing in the dollar windows (processor.mjs, `zeroRatedVerdict`).
+			builtinModel,
 			// Issue #502. The deployment's allowed-model list (PI_ALLOWED_MODELS), null = unrestricted. Env only, and
 			// handed to the processor here rather than through the settings overlay, which a model-callable tool writes.
 			// index.mjs folds it into the effective job (`effectiveJobOf`) under the trigger's own `run.models`.
@@ -1848,7 +1851,7 @@ export async function startWorker(
 		// comment and the signal for CONST-PI-VERSION-PINNED's silent-no-op mode -- a missing line is
 		// what tells a human a run did nothing. The container's own output already streams via
 		// runContainer's onOutput during the run.
-		// `reason` is a fixed enum (worker-abort | over-budget | unprotected-branch | runner-policy |
+		// `reason` is a fixed enum (worker-abort | over-budget | dollar-cap | unprotected-branch | runner-policy |
 		// provider-auth-refused | job-image-missing), never
 		// user content. Included only when present so success lines stay clean; a shutdown-aborted job logs
 		// { outcome: "policy", reason: "worker-abort" }, making a restart-dropped job visible.
