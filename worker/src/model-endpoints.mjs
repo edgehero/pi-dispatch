@@ -25,6 +25,7 @@
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync } from "node:fs";
 import { isIPv4 } from "node:net";
 import { join, resolve } from "node:path";
+import { PROXY_LOCAL_ADDRESSES, isProxyLocalHost } from "./backends.mjs";
 import { configError } from "./config.mjs";
 
 /** The schema version this build reads. A file declaring a higher one is refused loudly. */
@@ -87,9 +88,15 @@ function canonicalHost(raw) {
 		throw new Error(`host ${JSON.stringify(raw)} carries a port: put the host alone in "host" and the port in "port"`);
 	}
 	if (isIPv4(lower)) {
-		const [a] = lower.split(".").map(Number);
-		if (a === 127) throw new Error(`host ${JSON.stringify(raw)} is a loopback address, which inside the proxy is the proxy itself: declare the host's own address or host.docker.internal`);
-		if (lower === "0.0.0.0") throw new Error(`host ${JSON.stringify(raw)} is the unspecified address, which is loopback on Linux`);
+		if (isProxyLocalHost("ipv4", lower)) {
+			const why =
+				lower === "0.0.0.0"
+					? "the unspecified address, which is loopback on Linux"
+					: lower.startsWith("127.")
+						? "a loopback address, which inside the proxy is the proxy itself: declare the host's own address or host.docker.internal"
+						: "slirp4netns's host alias, which the proxy denies as host-local: declare host.containers.internal";
+			throw new Error(`host ${JSON.stringify(raw)} is ${why}`);
+		}
 		return lower;
 	}
 	if (lower.includes(":") || lower.startsWith("[")) return canonicalIPv6(raw, lower);
@@ -108,7 +115,7 @@ function canonicalIPv6(raw, lower) {
 	}
 	// The first 96 bits zero: `::`, `::1`, and the deprecated IPv4-compatible block, whose text squid and a URL spell
 	// differently (inet_ntop writes `::1.2.3.4`, a URL `::102:304`), so a rule for it would never match.
-	if (/^\[::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})?)?\]$/.test(host)) {
+	if (isProxyLocalHost("ipv6", host.slice(1, -1)) || /^\[::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})?)?\]$/.test(host)) {
 		throw new Error(`host ${JSON.stringify(raw)} is a loopback, unspecified or IPv4-compatible IPv6 address`);
 	}
 	// IPv4-mapped (::ffff:0:0/96): the same spelling split, and it is an IPv4 address anyway.
@@ -131,7 +138,7 @@ function canonicalName(raw, lower) {
 	if (/^[0-9]+$/.test(last) || /^0x[0-9a-f]*$/.test(last)) {
 		throw new Error(`host ${JSON.stringify(raw)} is neither a DNS name nor an IPv4 address in dotted-decimal form`);
 	}
-	if (lower === "localhost" || lower.endsWith(".localhost")) {
+	if (isProxyLocalHost("name", lower)) {
 		throw new Error(`host ${JSON.stringify(raw)} is loopback, which inside the proxy is the proxy itself: declare the host's own address or host.docker.internal`);
 	}
 	return lower;
@@ -314,9 +321,10 @@ export function endpointsForProvider({ models, provider, endpoints }) {
  * The loopback addresses a declared name must not resolve to: `to_host_local`'s set (deploy/egress-proxy.conf) minus
  * 169.254.0.0/16 and fe80::/10. Those two are left out on purpose: on Podman 5.3 and later `host.containers.internal`
  * is 169.254.1.2 (pasta's --map-guest-addr, measured 2026-09-30 on Podman 5.8.1), which is how a rootless job reaches a
- * server on its own host. 10.0.2.2 (slirp4netns's host alias) stays, as in `to_host_local`.
+ * server on its own host. 10.0.2.2 (slirp4netns's host alias) stays, as in `to_host_local`. Built from
+ * `PROXY_LOCAL_ADDRESSES` in backends.mjs, the one source the parser's refusal and `hostRouteFor` read too.
  */
-export const LOCAL_ADDRESSES = "127.0.0.0/8 0.0.0.0/32 10.0.2.2/32 ::1 ::/128";
+export const LOCAL_ADDRESSES = PROXY_LOCAL_ADDRESSES.join(" ");
 
 /** The header every rendered include starts with. A comments-only file is one squid starts on (measured). */
 export const ENDPOINTS_INCLUDE_HEADER = [

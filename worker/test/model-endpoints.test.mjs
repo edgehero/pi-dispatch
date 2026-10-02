@@ -17,6 +17,7 @@ import {
 	renderEndpointsInclude,
 	valkeyPortOf,
 } from "../src/model-endpoints.mjs";
+import { PROXY_LOCAL_ADDRESSES } from "../src/backends.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 const tmp = () => tempDir("pi-endpoints-");
@@ -68,6 +69,10 @@ test("parseModelEndpoints refuses a loopback, localhost or unspecified host", ()
 	for (const host of ["localhost", "LOCALHOST", "ollama.localhost", "127.0.0.1", "127.1.2.3", "0.0.0.0", "::1", "[::1]", "::", "[::]", "0:0:0:0:0:0:0:1"]) {
 		assert.throws(() => parse([ep({ host })]), /loopback|unspecified/, host);
 	}
+	// Issue #503 part 3: the parser refuses every address the proxy denies as host-local, from the one shared set, so
+	// slirp4netns's host alias is refused too: the rendered `_local` deny would block a declaration of it anyway.
+	assert.throws(() => parse([ep({ host: "10.0.2.2" })]), /slirp4netns's host alias, which the proxy denies as host-local/);
+	assert.equal(parse([ep({ host: "10.0.2.3" })])[0].host, "10.0.2.3", "only the /32");
 });
 
 test("parseModelEndpoints canonicalises a host: lowercase names, bracketed compressed IPv6, dotted IPv4", () => {
@@ -317,7 +322,9 @@ test("every http_access line the render emits is a CONNECT rule, and every allow
 test("the loopback ACL is to_host_local's set minus the link-local ranges a rootless job reaches its host through", () => {
 	const conf = readFileSync(new URL("../../deploy/egress-proxy.conf", import.meta.url), "utf8");
 	const hostLocal = /^acl to_host_local dst (.+)$/m.exec(conf)[1].split(" ");
-	const local = LOCAL_ADDRESSES.split(" ");
+	// The shared source in backends.mjs is what LOCAL_ADDRESSES is built from, so this pins both.
+	assert.equal(LOCAL_ADDRESSES, PROXY_LOCAL_ADDRESSES.join(" "));
+	const local = [...PROXY_LOCAL_ADDRESSES];
 	// Left out on purpose: host.containers.internal is 169.254.1.2 on Podman 5.3 and later (measured 2026-09-30).
 	assert.deepEqual(hostLocal.filter((a) => !local.includes(a)), ["169.254.0.0/16", "fe80::/10"]);
 	assert.deepEqual(local.filter((a) => !hostLocal.includes(a)), [], "and nothing to_host_local does not have");

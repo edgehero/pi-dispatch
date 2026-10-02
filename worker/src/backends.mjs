@@ -699,6 +699,7 @@ const BACKENDS_TABLE = {
 			// Measured rootless: an `--internal` network reaches NOTHING on the host (its IP, host.containers.internal,
 			// 10.0.2.2 and the gateway all fail), and a proxy started on a NAMED bridge network under the same rootless
 			// Podman can be `network connect`ed to it (a pasta or slirp4netns one cannot: exit 125).
+			// The PROXY does reach a server on the host, a reachability fact kept apart in `HOST_ROUTES` (issue #503).
 			egress: ENFORCED,
 			// Same switch: the job and the proxy are the only endpoints on an `--internal` network. Measured, a peer on
 			// another job's network is unreachable (ENOTFOUND / ENETUNREACH).
@@ -1044,4 +1045,222 @@ export function backendRefusals({ backends = [], backendFloor = {}, egress = fal
 	}
 
 	return out;
+}
+
+/**
+ * HOW THE EGRESS PROXY REACHES A MODEL SERVER ON THE HOST (issue #503). A REACHABILITY FACT, not a security
+ * property: nothing here is a declaration word, nothing is compared against `PI_BACKEND_FLOOR`, and no row can
+ * make a boot or a job refuse. The job's own network is unchanged and still reaches nothing on the host but the
+ * proxy (the `egress` entries above); these rows are about where the PROXY dials.
+ *
+ * Keyed by venue, each row `{ name, when, status, needs, measured }`:
+ *   - `name` is an alias (`host.docker.internal`, `host.containers.internal`) or one of three classes:
+ *     `HOST_ROUTE_OWN_ADDRESS`, `HOST_ROUTE_OTHER_MACHINE` and `HOST_ROUTE_LOOPBACK`.
+ *   - `when` is what the runtime must report for the row to apply (`hostRouteFor` says what each field is), the
+ *     version matched EXACTLY.
+ *   - `status` is `works` or `refuted` for a route to THIS host, or `reachable` for the informational
+ *     other-machine rows, which are an ordinary outbound route and never make `hostRouteFor` answer `works`.
+ *   - `measured` is the date and the runtime it was measured on.
+ * Every row states only what the two measurement comments on issue #503 (2026-09-30 and its addendum) publish:
+ * CONNECT tunnels through the shipped proxy image, the way pi sends. Of those, M1, M3, M4 (Podman 5.8.1), M6 and
+ * M8 were re-run independently the same day; M5 (Docker Engine and rootful Podman) and the 4.9.3 routes were not.
+ * `docs/backends.md` generates its section from this table, and `docs/podman.md` its Podman rows.
+ */
+export const HOST_ROUTE_WORKS = "works";
+export const HOST_ROUTE_REFUTED = "refuted";
+export const HOST_ROUTE_UNMEASURED = "unmeasured";
+export const HOST_ROUTE_REACHABLE = "reachable";
+export const HOST_ROUTE_LAN = "lan";
+export const HOST_ROUTE_OWN_ADDRESS = "this host's own LAN address";
+export const HOST_ROUTE_OTHER_MACHINE = "another machine on the LAN";
+export const HOST_ROUTE_LOOPBACK = "a loopback or host-local address";
+
+/**
+ * The addresses the proxy treats as this host's own loopback: `to_host_local` in deploy/egress-proxy.conf minus
+ * 169.254.0.0/16 and fe80::/10. Those two stay OUT on purpose: Podman 5.3 and later reaches the host at
+ * 169.254.1.2 (`host.containers.internal`, measured 2026-09-30 on 5.8.1). 10.0.2.2, slirp4netns's host alias, stays
+ * IN. THE ONE SOURCE: `model-endpoints.mjs` builds its rendered `_local` ACL from it, its parser refuses a declared
+ * host in it, and `hostRouteFor` refutes one, each through `isProxyLocalHost`. IPv6 entries are single addresses.
+ */
+export const PROXY_LOCAL_ADDRESSES = Object.freeze(["127.0.0.0/8", "0.0.0.0/32", "10.0.2.2/32", "::1", "::/128"]);
+
+const ipv4Number = (host) => host.split(".").reduce((n, octet) => n * 256 + Number(octet), 0);
+
+/**
+ * Whether a CANONICAL host is in `PROXY_LOCAL_ADDRESSES` (`ipv4`: dotted quad; `ipv6`: compressed, lowercase, no
+ * brackets), or a `name` that is `localhost` or `*.localhost`. Anything else, an unknown kind included, is not.
+ */
+export function isProxyLocalHost(kind, host) {
+	if (kind === "name") return host === "localhost" || host.endsWith(".localhost");
+	for (const entry of PROXY_LOCAL_ADDRESSES) {
+		const [base, bits] = entry.split("/");
+		if (kind === "ipv4" && !base.includes(":")) {
+			const shift = 2 ** (32 - Number(bits));
+			if (Math.floor(ipv4Number(host) / shift) === Math.floor(ipv4Number(base) / shift)) return true;
+		}
+		if (kind === "ipv6" && base.includes(":") && base === host) return true;
+	}
+	return false;
+}
+
+const HDI = "host.docker.internal";
+const HCI = "host.containers.internal";
+const MEASURED_DESKTOP = "2026-09-30, Docker Desktop 4.37.2 (engine 27.4.0), macOS";
+const MEASURED_ENGINE = "2026-09-30, Docker Engine 29.1.3, Ubuntu 24.04";
+const MEASURED_ROOTFUL = "2026-09-30, Podman 5.8.1 rootful, Fedora";
+const MEASURED_SLIRP = "2026-09-30, Podman 4.9.3 rootless, slirp4netns, Ubuntu 24.04";
+const MEASURED_PASTA = "2026-09-30, Podman 5.8.1 rootless, pasta, Fedora";
+const DESKTOP = { backend: "docker", desktop: true, os: "darwin", version: "27.4.0" };
+const ENGINE = { backend: "docker", desktop: false, version: "29.1.3" };
+const ROOTFUL = { backend: "podman", rootless: false, version: "5.8.1" };
+const SLIRP = { backend: "podman", rootless: true, helper: "slirp4netns", version: "4.9.3" };
+const PASTA = { backend: "podman", rootless: true, helper: "pasta", version: "5.8.1" };
+const BOUND = "The server is bound to that address.";
+const LAN = "Another machine on the LAN (192.168.5.2) answered through the proxy.";
+
+const HOST_ROUTES_TABLE = {
+	"docker-desktop": [
+		{ name: HDI, when: DESKTOP, status: HOST_ROUTE_WORKS, needs: "Nothing to add. It reaches a server that listens on loopback only.", measured: MEASURED_DESKTOP },
+	],
+	"docker-engine": [
+		{ name: HDI, when: ENGINE, status: HOST_ROUTE_WORKS, needs: "`--add-host host.docker.internal:host-gateway` on the proxy gives 172.17.0.1, which answers from the proxy's own bridge, even with docker0 down. The server listens on 172.17.0.1 or 0.0.0.0. A host with UFW active is unmeasured.", measured: MEASURED_ENGINE },
+		{ name: HCI, when: ENGINE, status: HOST_ROUTE_REFUTED, needs: "The name is not defined on Docker Engine. Declare host.docker.internal.", measured: MEASURED_ENGINE },
+		{ name: HOST_ROUTE_OWN_ADDRESS, when: ENGINE, status: HOST_ROUTE_WORKS, needs: BOUND, measured: MEASURED_ENGINE },
+		{ name: HOST_ROUTE_OTHER_MACHINE, when: ENGINE, status: HOST_ROUTE_REACHABLE, needs: LAN, measured: MEASURED_ENGINE },
+	],
+	"podman-rootful": [
+		{ name: HCI, when: ROOTFUL, status: HOST_ROUTE_WORKS, needs: "The name is the network gateway, and the server listens on 0.0.0.0 only.", measured: MEASURED_ROOTFUL },
+		{ name: HOST_ROUTE_OWN_ADDRESS, when: ROOTFUL, status: HOST_ROUTE_WORKS, needs: BOUND, measured: MEASURED_ROOTFUL },
+		{ name: HOST_ROUTE_OTHER_MACHINE, when: ROOTFUL, status: HOST_ROUTE_REACHABLE, needs: LAN, measured: MEASURED_ROOTFUL },
+	],
+	"podman-rootless-slirp4netns": [
+		{ name: HCI, when: SLIRP, status: HOST_ROUTE_WORKS, needs: "No flag and no containers.conf key. The name resolves to 192.168.5.15, and the server listens on its LAN address or 0.0.0.0.", measured: MEASURED_SLIRP },
+		{ name: HOST_ROUTE_OWN_ADDRESS, when: SLIRP, status: HOST_ROUTE_WORKS, needs: BOUND, measured: MEASURED_SLIRP },
+		{ name: HOST_ROUTE_OTHER_MACHINE, when: SLIRP, status: HOST_ROUTE_REACHABLE, needs: LAN, measured: MEASURED_SLIRP },
+	],
+	"podman-rootless-pasta": [
+		{ name: HCI, when: PASTA, status: HOST_ROUTE_WORKS, needs: "No flag and no containers.conf key. The name resolves to 169.254.1.2, and the server listens on its LAN address or 0.0.0.0.", measured: MEASURED_PASTA },
+		{ name: HOST_ROUTE_OWN_ADDRESS, when: PASTA, status: HOST_ROUTE_REFUTED, needs: "Refused under pasta. Declare host.containers.internal.", measured: MEASURED_PASTA },
+		{ name: HOST_ROUTE_OTHER_MACHINE, when: PASTA, status: HOST_ROUTE_REACHABLE, needs: LAN, measured: MEASURED_PASTA },
+	],
+	"every-venue": [
+		{ name: HOST_ROUTE_LOOPBACK, when: {}, status: HOST_ROUTE_REFUTED, needs: "From the proxy this is the proxy's own host-local address, and the proxy denies it. A server that listens on loopback only answers on Docker Desktop alone, through host.docker.internal.", measured: "2026-09-30, true on every runtime by construction, and measured on the four VM runtimes" },
+	],
+};
+
+/** FROZEN, rows and their `when` included, for `BACKENDS`' reason: a table a consumer could rewrite is not a table. */
+export const HOST_ROUTES = Object.freeze(
+	Object.fromEntries(Object.entries(HOST_ROUTES_TABLE).map(([venue, rows]) => [venue, Object.freeze(rows.map((row) => Object.freeze({ ...row, when: Object.freeze({ ...row.when }) })))])),
+);
+
+const ALIASES = new Set([HDI, HCI]);
+const HELPERS = new Set(["slirp4netns", "pasta"]);
+const IPV4_RE = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+const LABEL_RE = /^[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$/;
+
+/**
+ * A host in the form `parseModelEndpoints` stores it, as `{ kind, host }`, or null for anything else. Doctor passes
+ * the PARSED endpoint host, so a host this refuses was never declarable: a dotted-quad IPv4 with no leading zero, a
+ * compressed lowercase IPv6 equal to its URL form (bracketed as the parser stores it, or bare), or a lowercase DNS
+ * name whose last label is not a number. One trailing dot on a name is dropped, as the parser drops it on a baseUrl.
+ */
+function declaredHostForm(raw) {
+	if (typeof raw !== "string") return null;
+	if (IPV4_RE.test(raw)) return { kind: "ipv4", host: raw };
+	if (raw.includes(":")) {
+		const bare = raw.startsWith("[") && raw.endsWith("]") ? raw.slice(1, -1) : raw;
+		try {
+			return new URL(`http://[${bare}]/`).hostname === `[${bare}]` ? { kind: "ipv6", host: bare } : null;
+		} catch {
+			return null;
+		}
+	}
+	const name = raw.endsWith(".") ? raw.slice(0, -1) : raw;
+	if (name.length === 0 || name.length > 253) return null;
+	const labels = name.split(".");
+	if (!labels.every((label) => LABEL_RE.test(label))) return null;
+	if (/^(?:\d+|0x[0-9a-f]*)$/.test(labels[labels.length - 1])) return null;
+	return { kind: "name", host: name };
+}
+
+/** Which runtime input is missing or invalid, or null. */
+function runtimeInputProblem(runtime) {
+	if (!runtime || typeof runtime !== "object") return "the runtime (an object)";
+	if (runtime.backend !== "docker" && runtime.backend !== "podman") return 'backend ("docker" or "podman")';
+	if (typeof runtime.version !== "string" || runtime.version.trim() === "") return "version (a string)";
+	if (runtime.backend === "docker" && typeof runtime.desktop !== "boolean") return "desktop (a boolean, for docker)";
+	if (runtime.backend === "docker" && runtime.desktop && typeof runtime.os !== "string") return 'os (a string such as "darwin", for Docker Desktop)';
+	if (runtime.backend === "podman" && typeof runtime.rootless !== "boolean") return "rootless (a boolean, for podman)";
+	if (runtime.backend === "podman" && runtime.rootless && !(typeof runtime.helper === "string" && HELPERS.has(runtime.helper.toLowerCase()))) {
+		return 'helper ("slirp4netns" or "pasta", for rootless podman)';
+	}
+	return null;
+}
+
+function rowApplies(when, runtime) {
+	if (when.backend === undefined) return true;
+	if (when.backend !== runtime.backend || when.version !== runtime.version.trim().replace(/^v/, "")) return false;
+	if (when.backend === "docker") return when.desktop === runtime.desktop && (!when.desktop || when.os === runtime.os);
+	if (when.rootless !== runtime.rootless) return false;
+	return !when.rootless || when.helper === runtime.helper.toLowerCase();
+}
+
+/** The runtimes another machine on the LAN was measured reachable on, from the informational rows. */
+const LAN_MEASURED_ON = Object.values(HOST_ROUTES_TABLE)
+	.flat()
+	.filter((row) => row.name === HOST_ROUTE_OTHER_MACHINE)
+	.map((row) => row.measured.slice("2026-09-30, ".length))
+	.join("; ");
+
+/**
+ * What the egress proxy on this runtime does with `endpointHost`, as `{ status, sentence }`. Pure: it reads no system.
+ * `endpointHost` is a host as `parseModelEndpoints` stored it. The runtime is what the runtime itself reports:
+ *   - `backend`: `"docker"` or `"podman"`, the RUNTIME and not the venue name, so rootful Podman reached through its
+ *     Docker API is `"podman"`;
+ *   - `version`: a string, matched exactly (a leading `v` is ignored, a pre-release suffix is another version);
+ *   - `desktop`: a boolean, for docker, and `os` (`process.platform`'s word) for Docker Desktop;
+ *   - `rootless`: a boolean, for podman, and `helper`, `"slirp4netns"` or `"pasta"`, for rootless podman;
+ *   - `hostAddresses`: optional, this host's own IPv4 addresses, each a plain dotted quad.
+ * The rule, and the only answers:
+ *   1. a host not in a declared form, or a missing runtime field: `unmeasured`, naming which;
+ *   2. an address in `PROXY_LOCAL_ADDRESSES`, or `localhost`: `refuted`, on every runtime;
+ *   3. one of the two alias names: its measured row, else `unmeasured`;
+ *   4. an IPv6 literal, a link-local IPv4 (pasta's host is 169.254.1.2), or an IPv4 literal with no `hostAddresses`:
+ *      `unmeasured`, since each may be this host's own; `hostAddresses` given but empty, or with an entry that is not
+ *      a plain IPv4, is `unmeasured` naming it, whatever the host;
+ *   5. an IPv4 literal in `hostAddresses`: the own-address row, else `unmeasured`;
+ *   6. anything else, another IPv4 or any other DNS name: `lan`, an ordinary outbound route that is not a route to
+ *      this host, and never `works`.
+ */
+export function hostRouteFor(runtime, endpointHost) {
+	const unmeasured = (sentence) => ({ status: HOST_ROUTE_UNMEASURED, sentence });
+	const target = declaredHostForm(endpointHost);
+	if (!target) return unmeasured(`The endpoint host ${JSON.stringify(endpointHost ?? null)} is not a declared host form.`);
+	const verdict = (row) => ({ status: row.status, sentence: `${target.host} ${row.status === HOST_ROUTE_WORKS ? "works" : "does not work"} from the proxy (measured ${row.measured}). ${row.needs}` });
+	if (isProxyLocalHost(target.kind, target.host)) return verdict(HOST_ROUTES["every-venue"][0]);
+	const problem = runtimeInputProblem(runtime);
+	if (problem) return unmeasured(`The runtime's ${problem} is missing or invalid, so no measured route applies to ${target.host}.`);
+	if (runtime.hostAddresses !== undefined) {
+		if (!Array.isArray(runtime.hostAddresses) || runtime.hostAddresses.length === 0) return unmeasured(`No host addresses were given (hostAddresses must list this host's IPv4 addresses), so no route to ${target.host} is judged.`);
+		const bad = runtime.hostAddresses.find((a) => typeof a !== "string" || !IPV4_RE.test(a));
+		if (bad !== undefined) return unmeasured(`The host address ${JSON.stringify(bad)} is not a plain IPv4 address, so no route to ${target.host} is judged.`);
+	}
+	const rows = Object.values(HOST_ROUTES).flat().filter((row) => rowApplies(row.when, runtime));
+	const what = [runtime.backend, runtime.version, runtime.backend === "podman" ? (runtime.rootless ? `rootless ${runtime.helper}` : "rootful") : runtime.desktop ? `desktop ${runtime.os}` : "engine"].join(" ");
+	const none = () => unmeasured(`No route from the proxy to ${target.host} was measured on ${what}. docs/backends.md lists the measured ones.`);
+	if (target.kind === "name" && ALIASES.has(target.host)) {
+		const row = rows.find((r) => r.name === target.host);
+		return row ? verdict(row) : none();
+	}
+	if (target.kind === "ipv6") return unmeasured(`${target.host} is an IPv6 literal: no IPv6 route was measured, and hostAddresses holds IPv4 only.`);
+	if (target.kind === "ipv4") {
+		if (runtime.hostAddresses === undefined) return unmeasured(`No host addresses were given, so ${target.host} may be this host's own and no route is judged.`);
+		// pasta reaches this host at 169.254.1.2, an address the host does not hold, so link-local is never "not this host".
+		if (target.host.startsWith("169.254.")) return unmeasured(`${target.host} is link-local, which may be this host as a rootless helper maps it; only the alias name was measured.`);
+		if (runtime.hostAddresses.includes(target.host)) {
+			const row = rows.find((r) => r.name === HOST_ROUTE_OWN_ADDRESS);
+			return row ? verdict(row) : none();
+		}
+	}
+	return { status: HOST_ROUTE_LAN, sentence: `${target.host} is not a route to this host: an ordinary outbound route through the proxy. Another machine on the LAN was measured reachable (IPv4, 192.168.5.2) on ${LAN_MEASURED_ON}.` };
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ABSENT, ASSERTED, BACKENDS, BACKEND_NAMES, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, declarationOf, effectiveWord, isDeclaration, isProperty, meets, parseBackendList, shortfall } from "../src/backends.mjs";
+import { ABSENT, HOST_ROUTE_LAN, HOST_ROUTE_LOOPBACK, HOST_ROUTE_OTHER_MACHINE, HOST_ROUTE_OWN_ADDRESS, HOST_ROUTE_REACHABLE, HOST_ROUTE_REFUTED, HOST_ROUTE_UNMEASURED, HOST_ROUTE_WORKS, HOST_ROUTES, PROXY_LOCAL_ADDRESSES, hostRouteFor, isProxyLocalHost, ASSERTED, BACKENDS, BACKEND_NAMES, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, declarationOf, effectiveWord, isDeclaration, isProperty, meets, parseBackendList, shortfall } from "../src/backends.mjs";
 
 test("the table is a LEAF -- it imports nothing", () => {
 	// `forges.mjs`'s reason, and it is why doctor and the config loader can read a declaration without
@@ -349,4 +349,207 @@ test("the podman venue declares every word ENFORCED, three of them only while po
 	}
 	assert.ok(Object.isFrozen(entry) && Object.isFrozen(entry.declares) && Object.isFrozen(entry.asserts) && Object.isFrozen(entry.observedBy));
 	assert.deepEqual(parseBackendList("podman"), ["podman"], "PI_BACKENDS=podman alone is a deployment through the real table");
+});
+
+// Issue #503: the measured routes from the egress proxy to a model server on the host.
+const LAN_HOST = ["192.168.5.15"];
+const PASTA = { backend: "podman", rootless: true, helper: "pasta", version: "5.8.1", hostAddresses: LAN_HOST };
+const SLIRP = { backend: "podman", rootless: true, helper: "slirp4netns", version: "4.9.3", hostAddresses: LAN_HOST };
+const ROOTFUL = { backend: "podman", rootless: false, version: "5.8.1", hostAddresses: LAN_HOST };
+const ENGINE = { backend: "docker", desktop: false, version: "29.1.3", hostAddresses: LAN_HOST };
+const DESKTOP = { backend: "docker", desktop: true, os: "darwin", version: "27.4.0" };
+const RUNTIMES = [DESKTOP, ENGINE, ROOTFUL, SLIRP, PASTA];
+
+test("HOST_ROUTES is frozen to the row, and is no part of the declaration vocabulary (#503)", () => {
+	assert.ok(Object.isFrozen(HOST_ROUTES) && Object.isFrozen(PROXY_LOCAL_ADDRESSES));
+	for (const [venue, rows] of Object.entries(HOST_ROUTES)) {
+		assert.ok(Object.isFrozen(rows), venue);
+		for (const row of rows) {
+			assert.ok(Object.isFrozen(row) && Object.isFrozen(row.when), `${venue} ${row.name}`);
+			assert.deepEqual(Object.keys(row).sort(), ["measured", "name", "needs", "status", "when"], `${venue} ${row.name}`);
+			const informational = row.name === HOST_ROUTE_OTHER_MACHINE;
+			assert.ok(informational ? row.status === HOST_ROUTE_REACHABLE : [HOST_ROUTE_WORKS, HOST_ROUTE_REFUTED].includes(row.status), `${venue} ${row.name}: ${row.status}`);
+			assert.equal(isDeclaration(row.status), false, "a route status is never a declaration word");
+			assert.match(row.measured, /^2026-09-30, /, `${venue} ${row.name}: dated`);
+			assert.ok(!(row.needs + row.measured).includes("|"), `${venue} ${row.name}: no pipe, since the docs render it in a table`);
+		}
+	}
+	assert.throws(() => {
+		HOST_ROUTES["docker-engine"][0].status = HOST_ROUTE_REFUTED;
+	}, TypeError);
+	for (const name of BACKEND_NAMES) assert.equal(Object.hasOwn(BACKENDS[name], "hostRoutes"), false, "routes stay out of the backend entries");
+});
+
+test("the table holds exactly what the two published measurement comments state (#503)", () => {
+	const routes = Object.fromEntries(Object.entries(HOST_ROUTES).map(([venue, rows]) => [venue, rows.map((r) => `${r.name}=${r.status}`)]));
+	assert.deepEqual(routes, {
+		"docker-desktop": ["host.docker.internal=works"],
+		"docker-engine": ["host.docker.internal=works", "host.containers.internal=refuted", `${HOST_ROUTE_OWN_ADDRESS}=works`, `${HOST_ROUTE_OTHER_MACHINE}=reachable`],
+		"podman-rootful": ["host.containers.internal=works", `${HOST_ROUTE_OWN_ADDRESS}=works`, `${HOST_ROUTE_OTHER_MACHINE}=reachable`],
+		"podman-rootless-slirp4netns": ["host.containers.internal=works", `${HOST_ROUTE_OWN_ADDRESS}=works`, `${HOST_ROUTE_OTHER_MACHINE}=reachable`],
+		"podman-rootless-pasta": ["host.containers.internal=works", `${HOST_ROUTE_OWN_ADDRESS}=refuted`, `${HOST_ROUTE_OTHER_MACHINE}=reachable`],
+		"every-venue": [`${HOST_ROUTE_LOOPBACK}=refuted`],
+	});
+	assert.equal(HOST_ROUTES["docker-desktop"][0].when.os, "darwin", "Docker Desktop was measured on macOS only");
+	assert.equal(HOST_ROUTES["every-venue"][0].measured, "2026-09-30, true on every runtime by construction, and measured on the four VM runtimes");
+	// Details the comments do not publish stay out of the rows.
+	const text = Object.values(HOST_ROUTES).flat().map((r) => `${r.needs} ${r.measured}`).join(" ");
+	for (const unpublished of ["Fedora 44", "passt", "netavark", "UFW inactive", "alone is refused", "namespace"]) assert.ok(!text.includes(unpublished), unpublished);
+});
+
+test("hostRouteFor answers each measured row (#503)", () => {
+	const cases = [
+		[DESKTOP, "host.docker.internal", HOST_ROUTE_WORKS, /Nothing to add/],
+		[ENGINE, "host.docker.internal", HOST_ROUTE_WORKS, /--add-host host\.docker\.internal:host-gateway` on the proxy/],
+		[ENGINE, "host.containers.internal", HOST_ROUTE_REFUTED, /not defined on Docker Engine/],
+		[ENGINE, "192.168.5.15", HOST_ROUTE_WORKS, /bound to that address/],
+		[ROOTFUL, "host.containers.internal", HOST_ROUTE_WORKS, /0\.0\.0\.0 only/],
+		[ROOTFUL, "192.168.5.15", HOST_ROUTE_WORKS, /bound to that address/],
+		[SLIRP, "host.containers.internal", HOST_ROUTE_WORKS, /192\.168\.5\.15/],
+		[SLIRP, "192.168.5.15", HOST_ROUTE_WORKS, /bound to that address/],
+		[PASTA, "host.containers.internal", HOST_ROUTE_WORKS, /169\.254\.1\.2/],
+		[PASTA, "192.168.5.15", HOST_ROUTE_REFUTED, /Declare host\.containers\.internal/],
+	];
+	for (const [runtime, host, status, needs] of cases) {
+		const got = hostRouteFor(runtime, host);
+		assert.equal(got.status, status, `${JSON.stringify(runtime)} ${host}: ${got.sentence}`);
+		assert.match(got.sentence, needs, host);
+		assert.match(got.sentence, /measured 2026-09-30, /, host);
+	}
+	// Every works or refuted row is reached by a case, so a new one cannot land untested.
+	const reached = cases.map(([runtime, host]) => hostRouteFor(runtime, host).sentence);
+	for (const row of Object.values(HOST_ROUTES).flat().filter((r) => r.name !== HOST_ROUTE_LOOPBACK && r.name !== HOST_ROUTE_OTHER_MACHINE)) {
+		assert.ok(reached.some((s) => s.endsWith(row.needs) && s.includes(row.measured)), `a case reaches ${row.name} (${row.measured})`);
+	}
+});
+
+test("another machine is lan, an ordinary outbound route, and never works (#503)", () => {
+	for (const runtime of RUNTIMES) {
+		for (const host of ["192.168.5.2", "8.8.8.8", "100.64.0.1", "10.0.2.3", "172.17.0.1", "ollama.lan", "myhost.local", "gpu_box.lan", "ollama.example.com"]) {
+			const got = hostRouteFor({ ...runtime, hostAddresses: LAN_HOST }, host);
+			assert.equal(got.status, HOST_ROUTE_LAN, `${JSON.stringify(runtime)} ${host}: ${got.sentence}`);
+			assert.match(got.sentence, /is not a route to this host: an ordinary outbound route through the proxy\. Another machine on the LAN was measured reachable \(IPv4, 192\.168\.5\.2\) on Docker Engine 29\.1\.3, Ubuntu 24\.04; Podman 5\.8\.1 rootful, Fedora; Podman 4\.9\.3 rootless, slirp4netns, Ubuntu 24\.04; Podman 5\.8\.1 rootless, pasta, Fedora\.$/);
+		}
+	}
+	// A name needs no host addresses to be lan: no name but the two aliases is ever this host's route.
+	assert.equal(hostRouteFor({ ...ENGINE, hostAddresses: undefined }, "ollama.lan").status, HOST_ROUTE_LAN);
+});
+
+test("an address the proxy denies as host-local is refuted on every runtime, from the one shared set (#503)", () => {
+	for (const runtime of [...RUNTIMES, {}, null, undefined]) {
+		for (const host of ["localhost", "localhost.", "ollama.localhost", "127.0.0.1", "127.1.2.3", "0.0.0.0", "10.0.2.2", "::1", "[::1]", "::", "[::]"]) {
+			const got = hostRouteFor(runtime, host);
+			assert.equal(got.status, HOST_ROUTE_REFUTED, `${JSON.stringify(runtime)} ${host}: ${got.sentence}`);
+			assert.match(got.sentence, /host-local address, and the proxy denies it/);
+		}
+	}
+	assert.deepEqual([...PROXY_LOCAL_ADDRESSES], ["127.0.0.0/8", "0.0.0.0/32", "10.0.2.2/32", "::1", "::/128"]);
+	for (const entry of PROXY_LOCAL_ADDRESSES) {
+		const base = entry.split("/")[0];
+		assert.equal(isProxyLocalHost(base.includes(":") ? "ipv6" : "ipv4", base), true, entry);
+	}
+	// Link-local stays out, as in LOCAL_ADDRESSES: it is how pasta reaches this host.
+	assert.equal(isProxyLocalHost("ipv4", "169.254.1.2"), false);
+	assert.equal(isProxyLocalHost("ipv6", "fe80::1"), false);
+	assert.equal(isProxyLocalHost("ipv4", "10.0.2.3"), false, "10.0.2.2 is a /32");
+	assert.equal(isProxyLocalHost("ipv4", "128.0.0.1"), false);
+	assert.equal(isProxyLocalHost("other", "::1"), false, "an unknown kind is never local by default");
+});
+
+test("pasta 5.8.1 refuses the host's own LAN address, where slirp4netns 4.9.3 takes it (#503)", () => {
+	// The one row where the two rootless helpers split, and the reason the issue's "LAN endpoints only for 4.x" fallback
+	// is refuted: 4.9.3 reaches the host, and 5.8.1 reaches it only by host.containers.internal.
+	assert.equal(hostRouteFor(PASTA, "192.168.5.15").status, HOST_ROUTE_REFUTED);
+	assert.equal(hostRouteFor(SLIRP, "192.168.5.15").status, HOST_ROUTE_WORKS);
+	// Without the host's addresses no IPv4 literal is judged: it may be this host's own.
+	assert.equal(hostRouteFor({ ...PASTA, hostAddresses: undefined }, "192.168.5.15").status, HOST_ROUTE_UNMEASURED);
+	assert.equal(hostRouteFor({ ...SLIRP, hostAddresses: undefined }, "192.168.5.2").status, HOST_ROUTE_UNMEASURED);
+});
+
+test("host addresses must each be a plain IPv4, or nothing is judged (#503)", () => {
+	for (const bad of ["192.168.5.15/24", "%eth0", "garbage", "[]", "fe80::1", " 192.168.5.15", 7, null]) {
+		for (const host of ["192.168.5.15", "192.168.5.2", "ollama.lan", "host.containers.internal"]) {
+			const got = hostRouteFor({ ...PASTA, hostAddresses: [...LAN_HOST, bad] }, host);
+			assert.equal(got.status, HOST_ROUTE_UNMEASURED, `${JSON.stringify(bad)} ${host}`);
+			assert.ok(got.sentence.startsWith(`The host address ${JSON.stringify(bad)} is not a plain IPv4 address`), got.sentence);
+		}
+	}
+	for (const empty of [[], "192.168.5.15", {}]) {
+		const got = hostRouteFor({ ...PASTA, hostAddresses: empty }, "192.168.5.15");
+		assert.equal(got.status, HOST_ROUTE_UNMEASURED);
+		assert.match(got.sentence, /^No host addresses were given/);
+	}
+});
+
+test("Docker Engine's host.docker.internal names host-gateway on the proxy and the server's bind (#503)", () => {
+	const row = HOST_ROUTES["docker-engine"].find((r) => r.name === "host.docker.internal");
+	assert.match(row.needs, /`--add-host host\.docker\.internal:host-gateway` on the proxy gives 172\.17\.0\.1/);
+	assert.match(row.needs, /even with docker0 down/);
+	assert.match(row.needs, /The server listens on 172\.17\.0\.1 or 0\.0\.0\.0\./);
+	assert.match(row.needs, /UFW active is unmeasured/);
+});
+
+test("anything not measured reads unmeasured, never works (#503)", () => {
+	const unmeasured = [
+		[SLIRP, "169.254.1.2"],
+		[PASTA, "169.254.1.2"],
+		[ENGINE, "2001:db8::1"],
+		[ENGINE, "[fd00::16]"],
+		[ENGINE, "64:ff9b::7f00:1"],
+		[ENGINE, "::ffff:a00:1"],
+		[ENGINE, "fe80::1"],
+		[{ ...PASTA, version: "5.8.2" }, "host.containers.internal"],
+		[{ ...PASTA, version: "5.8.1-dev" }, "host.containers.internal"],
+		[{ ...SLIRP, version: "5.0.0" }, "192.168.5.15"],
+		[{ ...ENGINE, version: "28.0.0" }, "host.docker.internal"],
+		[{ ...DESKTOP, os: "linux" }, "host.docker.internal"],
+		[{ ...DESKTOP, os: "win32" }, "host.docker.internal"],
+		[DESKTOP, "host.containers.internal"],
+		[ROOTFUL, "host.docker.internal"],
+		[SLIRP, "host.docker.internal"],
+		[PASTA, "host.docker.internal"],
+		[{ ...DESKTOP, hostAddresses: LAN_HOST }, "192.168.5.15"],
+	];
+	for (const [runtime, host] of unmeasured) {
+		const got = hostRouteFor(runtime, host);
+		assert.equal(got.status, HOST_ROUTE_UNMEASURED, `${JSON.stringify(runtime)} ${host}: ${got.sentence}`);
+	}
+	assert.equal(hostRouteFor({ ...SLIRP, version: "v4.9.3" }, "host.containers.internal").status, HOST_ROUTE_WORKS, "a leading v is the same version");
+	assert.equal(hostRouteFor({ ...SLIRP, helper: "SLIRP4NETNS" }, "host.containers.internal").status, HOST_ROUTE_WORKS, "the helper is lowercased");
+	assert.equal(hostRouteFor({ ...ROOTFUL, helper: undefined }, "host.containers.internal").status, HOST_ROUTE_WORKS, "a rootful podman's helper is not read");
+});
+
+test("only a host in a declared form is judged: what parseModelEndpoints stores (#503)", async () => {
+	const notDeclared = [null, undefined, 12345, "", " ", "1.2.3", "127.1", "2130706433", "0x7f000001", "0177.0.0.1", "010.1.1.1", "1.2.3.256", "HOST.docker.internal", " host.docker.internal", "host.docker.internal\n", "host.docker.internal..", ".host.docker.internal", "a@b", "http://x", "host name", "::ffff:127.0.0.1", "0:0:0:0:0:0:0:1", "[FD00::2]", "[fd00:0::2]", "fe80::1%eth0", "[zz::1]"];
+	for (const host of notDeclared) {
+		const got = hostRouteFor(ENGINE, host);
+		assert.equal(got.status, HOST_ROUTE_UNMEASURED, JSON.stringify(host));
+		assert.match(got.sentence, /is not a declared host form\.$/, JSON.stringify(host));
+	}
+	assert.equal(hostRouteFor(ENGINE, "host.containers.internal.").status, HOST_ROUTE_REFUTED, "one trailing dot is dropped");
+	assert.match(hostRouteFor(ENGINE, "host.docker.internal.").sentence, /host-gateway/);
+	// Every host the parser stores is in a declared form, so doctor can pass the parsed host straight through.
+	const { parseModelEndpoints } = await import("../src/model-endpoints.mjs");
+	const parsed = parseModelEndpoints(JSON.stringify({ version: 1, endpoints: ["Ollama.LAN", "192.168.5.2", "fd00:0:0::2", "host.docker.internal", "gpu_box.lan"].map((host, i) => ({ id: `e${i}`, host, port: 11434, slots: 1 })) }), "/x/model-endpoints.json");
+	for (const { host } of parsed) assert.notEqual(hostRouteFor(ENGINE, host).sentence.endsWith("is not a declared host form."), true, host);
+});
+
+test("an invalid runtime input reads unmeasured and names what is missing (#503)", () => {
+	const inputs = [
+		[null, /the runtime \(an object\)/],
+		[{ ...ENGINE, backend: "local" }, /backend \("docker" or "podman"\)/],
+		[{ ...ENGINE, version: undefined }, /version \(a string\)/],
+		[{ ...ENGINE, version: 29 }, /version/],
+		[{ ...ENGINE, desktop: undefined }, /desktop \(a boolean, for docker\)/],
+		[{ ...DESKTOP, os: undefined }, /os \(a string such as "darwin", for Docker Desktop\)/],
+		[{ ...ROOTFUL, rootless: "false" }, /rootless \(a boolean, for podman\)/],
+		[{ ...PASTA, helper: undefined }, /helper \("slirp4netns" or "pasta", for rootless podman\)/],
+		[{ ...PASTA, helper: "vopono" }, /helper/],
+	];
+	for (const [runtime, problem] of inputs) {
+		const got = hostRouteFor(runtime, "host.docker.internal");
+		assert.equal(got.status, HOST_ROUTE_UNMEASURED, JSON.stringify(runtime));
+		assert.match(got.sentence, problem, JSON.stringify(runtime));
+		assert.match(got.sentence, /is missing or invalid, so no measured route applies to host\.docker\.internal\.$/);
+	}
 });

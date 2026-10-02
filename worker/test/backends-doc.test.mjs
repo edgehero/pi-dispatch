@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { PODMAN_JOB_USER_FIX } from "../src/backend-podman.mjs";
-import { DEFAULT_BACKEND, PODMAN_BACKEND } from "../src/backends.mjs";
+import { DEFAULT_BACKEND, HOST_ROUTES, PODMAN_BACKEND } from "../src/backends.mjs";
 import { JOB_USER_FIX } from "../src/job-user.mjs";
 import { jobUserBootRefusal, podmanBootRefusal } from "../src/start.mjs";
 
@@ -144,4 +144,37 @@ test("no cause stops a boot when `local` is not the default venue (#357)", () =>
 	for (const decision of [{ mode: "unknown", reason: "no-daemon-facts" }, { mode: "worker", user: "1000:1000" }, { mode: "image", cause: "desktop-platform" }, null]) {
 		assert.equal(jobUserBootRefusal(decision, DEFAULT_BACKEND), null, JSON.stringify(decision));
 	}
+});
+
+// Issue #503: the page's host-route table is GENERATED from `HOST_ROUTES`, one line per row, and each line is required
+// verbatim and once, for this file's reason above: one correct string per row, so a hiding place buys nothing. The
+// venue labels are the page's words and live here; every venue the table has must have one. The rows are in the
+// table's own order, and the whole block must be exactly these lines, so a row the table dropped cannot linger.
+const HOST_ROUTE_VENUE_LABELS = {
+	"docker-desktop": "Docker Desktop on macOS",
+	"docker-engine": "Docker Engine on Linux",
+	"podman-rootful": "rootful Podman",
+	"podman-rootless-slirp4netns": "rootless Podman, slirp4netns",
+	"podman-rootless-pasta": "rootless Podman, pasta",
+	"every-venue": "every venue",
+};
+const hostRouteName = (name) => (/^[a-z0-9.:-]+$/.test(name) ? `\`${name}\`` : name);
+const HOST_ROUTE_LINES = Object.entries(HOST_ROUTES).flatMap(([venue, rows]) =>
+	rows.map((row) => `| ${HOST_ROUTE_VENUE_LABELS[venue]} | ${hostRouteName(row.name)} | ${row.status} | ${row.needs} | ${row.measured} |`),
+);
+
+test("the page's host-route table is HOST_ROUTES, row for row, verbatim (#503)", () => {
+	assert.deepEqual(Object.keys(HOST_ROUTES).filter((venue) => !HOST_ROUTE_VENUE_LABELS[venue]), [], "every venue in HOST_ROUTES has a label on the page");
+	for (const line of HOST_ROUTE_LINES) assert.ok(!line.slice(1, -1).split(" | ").some((cell) => cell.includes("|")), `no cell carries a bare pipe: ${line}`);
+	const start = VISIBLE.indexOf("## Reaching a model server on the host");
+	assert.ok(start >= 0, "the page has the section");
+	const end = VISIBLE.indexOf("\n## ", start + 1);
+	const rows = VISIBLE.slice(start, end === -1 ? undefined : end)
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line.startsWith("|"));
+	assert.deepEqual(rows.slice(0, 2), ["| Venue | Endpoint host | Route | What it needs | Measured |", "|---|---|---|---|---|"]);
+	assert.deepEqual(rows.slice(2), HOST_ROUTE_LINES, `docs/backends.md's host-route table must be exactly:\n${HOST_ROUTE_LINES.join("\n")}`);
+	const lines = VISIBLE.split("\n").map((line) => line.trim());
+	for (const want of HOST_ROUTE_LINES) assert.equal(lines.filter((line) => line === want).length, 1, `once on the page: ${want}`);
 });

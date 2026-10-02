@@ -267,6 +267,47 @@ runtime can exit one of those codes while the container it created runs on (a lo
 Podman), stop that container and add `detached: true` to the result: the processor then retries the job as
 `container-detached` and keeps the slot (issue #345).
 
+## Reaching a model server on the host
+
+A job with egress on reaches the network only through the egress proxy (issue #503). So a model server on
+the host is reached by the proxy, and the name to declare depends on the runtime. `HOST_ROUTES` in
+`worker/src/backends.mjs` records what was measured, and `hostRouteFor` answers for one runtime and one
+endpoint host. It is a reachability fact, not a declaration word: it never refuses a boot or a job, and
+`PI_BACKEND_FLOOR` does not read it.
+
+Each row is bound to the exact version it was measured on. `hostRouteFor` takes an endpoint host as
+`model-endpoints.json`'s parser stores it, and answers in this order:
+
+- An address the proxy denies as host-local (`PROXY_LOCAL_ADDRESSES`, the same set as the proxy's own rule)
+  or `localhost` is `refuted` on every runtime.
+- `host.docker.internal` and `host.containers.internal` take their measured rows.
+- An IPv4 address in the host's own address list takes the own-address row. The list must be given, and
+  each entry must be a plain IPv4 address.
+- Another IPv4 address or any other name is `lan`: an ordinary outbound route, not a route to this host.
+  The `reachable` rows below are what was measured for that case. They never make an answer `works`.
+- Anything else is `unmeasured`: an IPv6 address, a link-local one, an address with no host list, or a
+  runtime or version with no row.
+
+<!-- worker/test/backends-doc.test.mjs GENERATES the table rows below from `HOST_ROUTES` and requires
+     exactly these rows, in order. Edit the table in the source, then paste what that test prints. -->
+| Venue | Endpoint host | Route | What it needs | Measured |
+|---|---|---|---|---|
+| Docker Desktop on macOS | `host.docker.internal` | works | Nothing to add. It reaches a server that listens on loopback only. | 2026-09-30, Docker Desktop 4.37.2 (engine 27.4.0), macOS |
+| Docker Engine on Linux | `host.docker.internal` | works | `--add-host host.docker.internal:host-gateway` on the proxy gives 172.17.0.1, which answers from the proxy's own bridge, even with docker0 down. The server listens on 172.17.0.1 or 0.0.0.0. A host with UFW active is unmeasured. | 2026-09-30, Docker Engine 29.1.3, Ubuntu 24.04 |
+| Docker Engine on Linux | `host.containers.internal` | refuted | The name is not defined on Docker Engine. Declare host.docker.internal. | 2026-09-30, Docker Engine 29.1.3, Ubuntu 24.04 |
+| Docker Engine on Linux | this host's own LAN address | works | The server is bound to that address. | 2026-09-30, Docker Engine 29.1.3, Ubuntu 24.04 |
+| Docker Engine on Linux | another machine on the LAN | reachable | Another machine on the LAN (192.168.5.2) answered through the proxy. | 2026-09-30, Docker Engine 29.1.3, Ubuntu 24.04 |
+| rootful Podman | `host.containers.internal` | works | The name is the network gateway, and the server listens on 0.0.0.0 only. | 2026-09-30, Podman 5.8.1 rootful, Fedora |
+| rootful Podman | this host's own LAN address | works | The server is bound to that address. | 2026-09-30, Podman 5.8.1 rootful, Fedora |
+| rootful Podman | another machine on the LAN | reachable | Another machine on the LAN (192.168.5.2) answered through the proxy. | 2026-09-30, Podman 5.8.1 rootful, Fedora |
+| rootless Podman, slirp4netns | `host.containers.internal` | works | No flag and no containers.conf key. The name resolves to 192.168.5.15, and the server listens on its LAN address or 0.0.0.0. | 2026-09-30, Podman 4.9.3 rootless, slirp4netns, Ubuntu 24.04 |
+| rootless Podman, slirp4netns | this host's own LAN address | works | The server is bound to that address. | 2026-09-30, Podman 4.9.3 rootless, slirp4netns, Ubuntu 24.04 |
+| rootless Podman, slirp4netns | another machine on the LAN | reachable | Another machine on the LAN (192.168.5.2) answered through the proxy. | 2026-09-30, Podman 4.9.3 rootless, slirp4netns, Ubuntu 24.04 |
+| rootless Podman, pasta | `host.containers.internal` | works | No flag and no containers.conf key. The name resolves to 169.254.1.2, and the server listens on its LAN address or 0.0.0.0. | 2026-09-30, Podman 5.8.1 rootless, pasta, Fedora |
+| rootless Podman, pasta | this host's own LAN address | refuted | Refused under pasta. Declare host.containers.internal. | 2026-09-30, Podman 5.8.1 rootless, pasta, Fedora |
+| rootless Podman, pasta | another machine on the LAN | reachable | Another machine on the LAN (192.168.5.2) answered through the proxy. | 2026-09-30, Podman 5.8.1 rootless, pasta, Fedora |
+| every venue | a loopback or host-local address | refuted | From the proxy this is the proxy's own host-local address, and the proxy denies it. A server that listens on loopback only answers on Docker Desktop alone, through host.docker.internal. | 2026-09-30, true on every runtime by construction, and measured on the four VM runtimes |
+
 ## Running the conformance suite
 
 ```js

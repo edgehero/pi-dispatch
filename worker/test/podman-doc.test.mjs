@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { PODMAN_JOB_USER_FIX, WIDENING_KEY, podmanConfRefusal, podmanConfWidening, podmanJobUserRefusal } from "../src/backend-podman.mjs";
-import { BACKENDS, DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, PODMAN_BACKEND, PODMAN_HARMLESS_KEYS, PODMAN_NETWORK_HELPER_KEYS, PODMAN_ROOTFUL_INERT_KEYS, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_ROOTLESS_INERT_KEYS, PODMAN_WIDENING_KEYS, PROPERTIES, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, effectiveWord, meets } from "../src/backends.mjs";
+import { BACKENDS, DAEMON_APPLIES_BOUNDS, HOST_ROUTES, DOCKER_ENDPOINT_LOCAL, PODMAN_BACKEND, PODMAN_HARMLESS_KEYS, PODMAN_NETWORK_HELPER_KEYS, PODMAN_ROOTFUL_INERT_KEYS, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_ROOTLESS_INERT_KEYS, PODMAN_WIDENING_KEYS, PROPERTIES, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, effectiveWord, meets } from "../src/backends.mjs";
 import { buildDockerRunArgs } from "../src/docker-run.mjs";
 import { DEFAULT_EGRESS_PROXY } from "../src/egress.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, JOB_USER_FIX, jobUserRefusal } from "../src/job-user.mjs";
@@ -568,4 +568,36 @@ test("every list of the refused containers.conf keys is exactly PODMAN_WIDENING_
 	assert.equal(new Set([...PODMAN_ROOTFUL_WIDENING_KEYS, ...PODMAN_ROOTFUL_INERT_KEYS]).size, PODMAN_ROOTFUL_WIDENING_KEYS.length + PODMAN_ROOTFUL_INERT_KEYS.length);
 	// And the check itself matches exactly these keys.
 	assert.deepEqual(WIDENING_KEY.source.match(/\(([a-z_|]+)\)/)?.[1].split("|"), [...PODMAN_WIDENING_KEYS]);
+});
+
+// Issue #503: the page's model-server route table is GENERATED from `HOST_ROUTES`' Podman venues, one line per row in
+// the table's order, and the block between the markers must be exactly those lines. The version and the date are read
+// off the row (`when.version`, the `measured` prefix), so neither can be typed onto the page by hand.
+function podmanRouteLines() {
+	return Object.entries(HOST_ROUTES)
+		.filter(([venue]) => venue.startsWith("podman-"))
+		.flatMap(([, rows]) =>
+			rows.map((row) => {
+				const mode = row.when.rootless ? `rootless, ${row.when.helper}` : "rootful";
+				const name = /^[a-z0-9.:-]+$/.test(row.name) ? `\`${row.name}\`` : row.name;
+				return `| ${row.when.version} | ${mode} | ${name} | ${row.status} | ${row.measured.slice(0, 10)} |`;
+			}),
+		);
+}
+
+test("the page's model-server routes are HOST_ROUTES' Podman rows, verbatim (#503)", () => {
+	const start = doc.indexOf("<!-- PODMAN-MODEL-ROUTES -->");
+	const end = doc.indexOf("<!-- /PODMAN-MODEL-ROUTES -->");
+	assert.ok(start >= 0 && end > start, "the page carries the route table between its markers");
+	const rows = doc
+		.slice(start, end)
+		.split("\n")
+		.filter((line) => line.startsWith("|"));
+	assert.deepEqual(rows.slice(0, 2), ["| Podman | Mode | Endpoint host | Route | Date |", "|---|---|---|---|---|"]);
+	const want = podmanRouteLines();
+	assert.equal(want.length, 9, "rootful, slirp4netns and pasta rows");
+	assert.deepEqual(rows.slice(2), want, `docs/podman.md's route table must be exactly:\n${want.join("\n")}`);
+	for (const row of Object.values(HOST_ROUTES).flat().filter((r) => r.when.backend === "podman")) {
+		assert.match(row.when.version, /^\d+\.\d+\.\d+$/, `${row.name}: a Podman row names one measured version`);
+	}
 });

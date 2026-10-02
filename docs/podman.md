@@ -1426,6 +1426,39 @@ as the worker's account, from the deployment directory. It refuses to record any
 systemd is running, netavark uses nftables and cgroups are v2, and it prints the rows that held in this table's
 shape, ready to paste between the markers.
 
+## Reaching a model server on the host
+
+A job's own `--internal` network still reaches nothing on the host. The egress proxy does, and that is how a job
+reaches a model server on the host (issue #503). Measured on 2026-09-30 with a CONNECT tunnel through the proxy,
+the way pi sends. The rootless 5.8.1 rows were re-run independently the same day; the 4.9.3 and rootful rows were
+not:
+
+- `host.containers.internal` works on rootless Podman with no flag and no containers.conf key. The server
+  listens on the host's LAN address or on `0.0.0.0`.
+- On rootful Podman `host.containers.internal` is the network gateway, and the server listens on `0.0.0.0` only.
+- The host's own LAN address works under slirp4netns and on rootful Podman, and is refused under pasta. So
+  "LAN endpoints only for Podman 4.x" is not needed: 4.9.3 reaches the host too.
+- Another machine on the LAN was reachable on all three. That is an ordinary outbound route, not a route to the
+  host. A server that listens on loopback only is never reached.
+- `host.docker.internal` was not measured as a route on Podman, so it has no Podman row.
+
+`HOST_ROUTES` in `worker/src/backends.mjs` holds these rows with what each needs, and `docs/backends.md` lists the
+Docker ones too. A version not in the table is unmeasured.
+
+<!-- PODMAN-MODEL-ROUTES -->
+| Podman | Mode | Endpoint host | Route | Date |
+|---|---|---|---|---|
+| 5.8.1 | rootful | `host.containers.internal` | works | 2026-09-30 |
+| 5.8.1 | rootful | this host's own LAN address | works | 2026-09-30 |
+| 5.8.1 | rootful | another machine on the LAN | reachable | 2026-09-30 |
+| 4.9.3 | rootless, slirp4netns | `host.containers.internal` | works | 2026-09-30 |
+| 4.9.3 | rootless, slirp4netns | this host's own LAN address | works | 2026-09-30 |
+| 4.9.3 | rootless, slirp4netns | another machine on the LAN | reachable | 2026-09-30 |
+| 5.8.1 | rootless, pasta | `host.containers.internal` | works | 2026-09-30 |
+| 5.8.1 | rootless, pasta | this host's own LAN address | refuted | 2026-09-30 |
+| 5.8.1 | rootless, pasta | another machine on the LAN | reachable | 2026-09-30 |
+<!-- /PODMAN-MODEL-ROUTES -->
+
 ## Not measured
 
 `podman machine` on macOS or Windows, Podman Desktop, Docker Desktop for Linux, OrbStack and Colima. Each is unmeasured,
