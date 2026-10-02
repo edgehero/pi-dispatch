@@ -2,17 +2,21 @@ import assert from "node:assert/strict";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { test } from "node:test";
 import {
+	assertPoliciesEnforceable,
 	createUsageMeter,
+	defaultHardStopResult,
 	installProcessUsageMeter,
 	makeHardStopStream,
 	METER_PROVIDER_PREFIX,
 	resolvePiAiCompat,
 	RUNTIME_RESULT_METHODS,
 	RUNTIME_STREAM_METHODS,
+	STOP_MESSAGES,
 	VIRTUAL_MODEL_API,
 	wrapModelRuntime,
 	wrapProviderStreams,
 } from "../src/usage-meter.mjs";
+import { COST_CAP, COST_CAP_UNENFORCEABLE, EXIT_POLICY, MODEL_NOT_ALLOWED, MODEL_POLICY_UNENFORCEABLE, TOKEN_BUDGET } from "../src/outcome.mjs";
 
 /**
  * These tests are PURE: no pi import, no skip gate, no filesystem. Every pi-shaped dependency of
@@ -141,28 +145,30 @@ test("with no rootSessionId every attributed call is other, never root", () => {
 	assert.equal(meter.state.looseTotal, 5);
 });
 
-test("onBreach fires exactly once, synchronously, on the first crossing record", () => {
+test("onStop fires exactly once, synchronously, on the first crossing record, naming the token cap", () => {
 	const fired = [];
-	const meter = createUsageMeter({ maxTokens: 1000, onBreach: (total) => fired.push(total) });
+	const meter = createUsageMeter({ maxTokens: 1000, onStop: (reason, total) => fired.push([reason, total]) });
 
 	meter.record(usage({ total: 500 }));
 	assert.deepEqual(fired, [], "must not fire at or below the cap");
 	assert.equal(meter.state.breached, false);
+	assert.equal(meter.state.stopReason, null);
 
 	meter.record(usage({ total: 600 })); // 1100 cumulative -> over
-	assert.deepEqual(fired, [1100], "fires inside record(), before it returns");
+	assert.deepEqual(fired, [["token_budget", 1100]], "fires inside record(), before it returns");
 	assert.equal(meter.state.breached, true);
+	assert.equal(meter.state.stopReason, "token_budget");
 
 	meter.record(usage({ total: 900 }));
 	meter.record(usage({ total: 900 }));
-	assert.deepEqual(fired, [1100], "exactly once, however much more arrives");
+	assert.deepEqual(fired, [["token_budget", 1100]], "exactly once, however much more arrives");
 	assert.equal(meter.state.total, 2900, "accumulation continues so the overshoot stays visible");
 });
 
 test("a null or absent cap is a pure meter, not an error", () => {
 	assert.doesNotThrow(() => createUsageMeter({ maxTokens: null }));
 	assert.doesNotThrow(() => createUsageMeter({}));
-	const meter = createUsageMeter({ maxTokens: null, onBreach: () => assert.fail("no cap, no breach") });
+	const meter = createUsageMeter({ maxTokens: null, onStop: () => assert.fail("no cap, no stop") });
 	meter.record(usage({ total: 10_000_000 }));
 	assert.equal(meter.state.breached, false);
 });
@@ -958,6 +964,8 @@ test("installs the runtime half and the compat half, and says so on one line", a
 				fallback: false,
 				fallbackError: "ERR_MODULE_NOT_FOUND",
 				capped: false,
+				costCapped: false,
+				listed: false,
 				brake: false,
 			},
 		},
@@ -990,6 +998,8 @@ test("a healthy meter reports its catalog and its brake as present", async () =>
 		apis: ["anthropic-messages"],
 		fallback: true,
 		capped: true,
+		costCapped: false,
+		listed: false,
 		brake: true,
 	});
 	assert.equal("fallbackError" in logged[0].fields, false, "a healthy load must not report a reason");
@@ -1083,6 +1093,8 @@ test("no provable compat copy degrades the meter LOUDLY and leaves the runtime h
 			tried: ["nested", "hoisted"],
 			apis: [],
 			capped: true,
+			costCapped: false,
+			listed: false,
 			// The brake's stream factory comes from the accepted copy, so without one the cap is
 			// enforced only through session.abort(): capped-but-brakeless, said out loud.
 			brake: false,
@@ -1254,4 +1266,177 @@ test("a failed version probe is silent -- no extra log line, no path, and the me
 		handle.uninstall();
 	}
 	assert.deepEqual(logged.map((entry) => entry.event), ["usage_meter", "usage_meter_teardown"]);
+});
+
+// ── Issues #501/#502, PR 1: one stop for every policy ─────────────────────────────────────────────────
+//
+// The seams the cost cap and the model list sit on. No guard ships yet, so these hold the shape: one stop
+// reason, first wins; a brake armed by any of the three policies; a guard hook offered every physical call;
+// and a runner that refuses a policy it cannot enforce before a call.
+
+test("the meter's stop is first-wins: a later stop never overwrites the reason, and onStop fires once", () => {
+	const fired = [];
+	const meter = createUsageMeter({ maxTokens: 10, maxCostMicros: 0, onStop: (reason) => fired.push(reason) });
+	assert.equal(meter.stop(COST_CAP), true, "the first stop wins");
+	assert.equal(meter.state.stopReason, COST_CAP);
+	assert.equal(meter.stop(MODEL_NOT_ALLOWED), false, "a second stop is refused");
+	meter.record(usage({ total: 99 })); // crosses the token cap AFTER the cost stop
+	assert.equal(meter.state.stopReason, COST_CAP, "the cause stays the first stop, not the last thing to notice");
+	assert.equal(meter.state.breached, false, "breached means the token cap was the stop, and it was not");
+	assert.deepEqual(fired, [COST_CAP]);
+	assert.throws(() => meter.stop("made-up"), /unknown meter stop/, "a reason with no message is a bug, never a silent stop");
+});
+
+test("STOP_MESSAGES names every meter stop, and breached is a read-only view of the token stop", () => {
+	assert.deepEqual(Object.keys(STOP_MESSAGES).sort(), [COST_CAP, MODEL_NOT_ALLOWED, TOKEN_BUDGET].sort());
+	assert.equal(STOP_MESSAGES[TOKEN_BUDGET], "pi-dispatch: token cap exceeded", "the token stop's message is unchanged");
+	assert.ok(Object.isFrozen(STOP_MESSAGES));
+	const meter = createUsageMeter({ maxTokens: null });
+	meter.stop(TOKEN_BUDGET);
+	assert.equal(meter.state.breached, true);
+	assert.equal(defaultHardStopResult("classify", MODEL).errorMessage, STOP_MESSAGES[TOKEN_BUDGET]);
+});
+
+test("the meter carries the cost cap and the list, 0 included, and refuses nonsense", () => {
+	assert.equal(createUsageMeter({}).costCap, null);
+	assert.equal(createUsageMeter({}).allowed, null);
+	assert.equal(createUsageMeter({ maxCostMicros: 0 }).costCap, 0, "0 is the strictest cap, never 'off'");
+	const list = [{ provider: "anthropic", model: "claude-x" }];
+	assert.deepEqual(createUsageMeter({ allowedModels: list }).allowed, list);
+	for (const bad of [-1, 1.5, Number.NaN, "5"]) assert.throws(() => createUsageMeter({ maxCostMicros: bad }), /invalid PI_MAX_COST_MICROS/);
+	for (const bad of [[], "a/b"]) assert.throws(() => createUsageMeter({ allowedModels: bad }), /invalid PI_ALLOWED_MODELS/);
+});
+
+test("the brake answers each stop with that stop's own message, on both halves", async () => {
+	const { FakeRuntime, calls } = fakeRuntimeClass();
+	const meter = createUsageMeter({ maxCostMicros: 0 });
+	const hardStop = makeHardStopStream({ createStream: () => new FakeStream() });
+	const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter, hardStop });
+	try {
+		meter.stop(COST_CAP);
+		const runtime = new FakeRuntime();
+		for (const method of RUNTIME_STREAM_METHODS) {
+			assert.equal((await runtime[method](MODEL, [], {}).result()).errorMessage, "pi-dispatch: cost cap reached", method);
+		}
+		for (const method of RUNTIME_RESULT_METHODS) {
+			assert.equal((await runtime[method](MODEL, {}, {})).errorMessage, "pi-dispatch: cost cap reached", method);
+		}
+		const inner = fakeInner();
+		const compat = wrapProviderStreams({ inner, fallbackModels: null, meter, hardStop });
+		assert.equal((await compat.streamSimple(MODEL, [], {}).result()).errorMessage, "pi-dispatch: cost cap reached");
+		assert.equal(calls.length + inner.calls.length, 0, "a stopped job reaches no provider, whichever policy stopped it");
+	} finally {
+		layer.restore();
+	}
+});
+
+test("the guard seam: a physical call is offered to the guard before dispatch, and a refusal stops the job", async () => {
+	const { FakeRuntime, calls } = fakeRuntimeClass();
+	const fired = [];
+	const meter = createUsageMeter({ allowedModels: [{ provider: "anthropic", model: "claude-physical" }], onStop: (reason) => fired.push(reason) });
+	const hardStop = makeHardStopStream({ createStream: () => new FakeStream() });
+	const offered = [];
+	const guard = {
+		enforces: [MODEL_NOT_ALLOWED],
+		admit: ({ method, model }) => {
+			offered.push(`${method}:${model.id}`);
+			return model.id === "claude-physical" ? null : MODEL_NOT_ALLOWED;
+		},
+	};
+	const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter, hardStop, guard });
+	try {
+		const runtime = new FakeRuntime();
+		// A virtual model is NOT offered: its physical re-entry is, so one request is judged once.
+		await runtime.streamSimple(VIRTUAL, [], {}).result();
+		assert.deepEqual(offered, ["streamSimple:claude-physical"]);
+		assert.equal(meter.state.stopReason, null);
+		// The refused call is the FIRST one braked: it never reaches the provider.
+		const refused = await runtime.classify(MODEL, {}, {});
+		assert.equal(refused.errorMessage, "pi-dispatch: model not allowed");
+		assert.equal(meter.state.stopReason, MODEL_NOT_ALLOWED);
+		assert.deepEqual(fired, [MODEL_NOT_ALLOWED]);
+		assert.deepEqual(calls.map((c) => c.model), ["auto", "claude-physical"], "the refused classify was never dispatched");
+		// And once stopped, the guard is not asked again: the stop answers first.
+		await runtime.streamSimple(PHYSICAL, [], {}).result();
+		assert.equal(offered.length, 2);
+	} finally {
+		layer.restore();
+	}
+});
+
+test("the guard is never consulted without a brake, nor by the compat half inside a runtime dispatch", async () => {
+	const { FakeRuntime, calls } = fakeRuntimeClass();
+	const meter = createUsageMeter({ maxCostMicros: 0 });
+	const guard = { admit: () => assert.fail("no brake, so no refusal could be answered: the guard must not be asked") };
+	const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter, hardStop: null, guard });
+	try {
+		new FakeRuntime().streamSimple(MODEL, [], {});
+		assert.equal(calls.length, 1);
+	} finally {
+		layer.restore();
+	}
+	// The compat half: a call from inside the runtime half's dispatch was judged there already.
+	const dispatch = new AsyncLocalStorage();
+	const inner = fakeInner();
+	const hardStop = makeHardStopStream({ createStream: () => new FakeStream() });
+	const asked = [];
+	const compat = wrapProviderStreams({ inner, fallbackModels: null, meter, hardStop, dispatch, guard: { admit: ({ model }) => (asked.push(model.id), COST_CAP) } });
+	dispatch.run(true, () => compat.streamSimple(MODEL, [], {}));
+	assert.deepEqual([asked.length, inner.calls.length], [0, 1], "inside the runtime dispatch: routed, never judged twice");
+	const refused = await compat.streamSimple(MODEL, [], {}).result();
+	assert.deepEqual([asked.length, inner.calls.length, refused.errorMessage], [1, 1, "pi-dispatch: cost cap reached"], "a legacy call is judged and refused here");
+	assert.equal(meter.state.stopReason, COST_CAP);
+});
+
+test("the brake is armed by ANY policy: a cost cap alone, or a list alone, arms it like a token cap", async () => {
+	for (const [label, meterArgs, costCapped, listed] of [
+		["cost cap", { maxCostMicros: 0 }, true, false],
+		["model list", { allowedModels: [{ provider: "anthropic", model: "claude-x" }] }, false, true],
+	]) {
+		const copy = fakeCopy(["anthropic-messages"]);
+		const logged = [];
+		const handle = await installProcessUsageMeter({
+			...installArgs({ copy }),
+			meter: createUsageMeter(meterArgs),
+			log: (event, fields) => logged.push({ event, fields }),
+		});
+		handle.uninstall();
+		assert.equal(handle.brake, true, `${label}: armed`);
+		assert.deepEqual(handle.enforces, [], `${label}: no guard ships in this build`);
+		assert.deepEqual([logged[0].fields.capped, logged[0].fields.costCapped, logged[0].fields.listed, logged[0].fields.brake], [false, costCapped, listed, true], label);
+	}
+	// And none of the three: no brake, which is today's line for an uncapped job.
+	const handle = await installProcessUsageMeter({ ...installArgs({ copy: fakeCopy(["anthropic-messages"]) }) });
+	handle.uninstall();
+	assert.equal(handle.brake, false);
+});
+
+test("assertPoliciesEnforceable: a cap or a list the runner cannot enforce before a call is refused, the list first", () => {
+	const healthy = { meterOk: true, brake: true, enforces: [COST_CAP, MODEL_NOT_ALLOWED] };
+	const list = [{ provider: "anthropic", model: "claude-x" }];
+	assert.doesNotThrow(() => assertPoliciesEnforceable({ ...healthy, maxCostMicros: 5, allowedModels: list }));
+	// Neither policy set: nothing to enforce, whatever the meter's state. This is every job today.
+	assert.doesNotThrow(() => assertPoliciesEnforceable({ meterOk: false, brake: false }));
+	// Per policy: a guard for one does not pass for the other.
+	assert.doesNotThrow(() => assertPoliciesEnforceable({ ...healthy, enforces: [COST_CAP], maxCostMicros: 5 }));
+	assert.throws(() => assertPoliciesEnforceable({ ...healthy, enforces: [COST_CAP], maxCostMicros: 5, allowedModels: list }), (error) => error.piDispatchReason === MODEL_POLICY_UNENFORCEABLE);
+	assert.throws(() => assertPoliciesEnforceable({ ...healthy, enforces: [MODEL_NOT_ALLOWED], maxCostMicros: 5, allowedModels: list }), (error) => error.piDispatchReason === COST_CAP_UNENFORCEABLE);
+	for (const [label, broken] of [
+		["meter not installed (the fallback bus meter)", { meterOk: false }],
+		["no hard-stop stream", { brake: false }],
+		["no guard", { enforces: [] }],
+	]) {
+		const state = { ...healthy, ...broken };
+		for (const [policy, args, reason] of [
+			["cost cap", { maxCostMicros: 0 }, COST_CAP_UNENFORCEABLE],
+			["list", { allowedModels: list }, MODEL_POLICY_UNENFORCEABLE],
+			["both, the list named first", { maxCostMicros: 1, allowedModels: list }, MODEL_POLICY_UNENFORCEABLE],
+		]) {
+			assert.throws(
+				() => assertPoliciesEnforceable({ ...state, ...args }),
+				(error) => error.piDispatchExit === EXIT_POLICY && error.piDispatchReason === reason && !error.message.includes("claude-x"),
+				`${label}, ${policy}`,
+			);
+		}
+	}
 });

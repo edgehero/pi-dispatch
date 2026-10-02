@@ -293,3 +293,46 @@ test("PI_EXCLUDE_TOOLS parses shape-only: unset is [], entries ride verbatim, em
 	// names what the operator actually wrote.
 	assert.deepEqual(parseRunnerEnv({ ...base, PI_EXCLUDE_TOOLS: " bash" }).excludeTools, [" bash"]);
 });
+
+// ── Issues #501/#502: the two policy inputs ──────────────────────────────────────────────────────────
+
+/** The tagged verdict for one env, or null when it parsed. */
+function verdict(env) {
+	try {
+		parseRunnerEnv({ ...base, ...env });
+		return null;
+	} catch (error) {
+		return error.piDispatchExit;
+	}
+}
+
+test("PI_MAX_COST_MICROS: absent is no cap, 0 is the strictest cap, the bounds are 0 to 1e12", () => {
+	assert.equal(parseRunnerEnv(base).maxCostMicros, null);
+	assert.equal(parseRunnerEnv({ ...base, PI_MAX_COST_MICROS: "0" }).maxCostMicros, 0, "0 is legal: a zero-rated job's cap, never 'off'");
+	assert.equal(parseRunnerEnv({ ...base, PI_MAX_COST_MICROS: "2000000" }).maxCostMicros, 2_000_000);
+	assert.equal(parseRunnerEnv({ ...base, PI_MAX_COST_MICROS: "1000000000000" }).maxCostMicros, 1e12);
+	for (const bad of ["1000000000001", "-1", "1.5", "1e6", "+5", "007", " 5", "5 ", "abc", "99999999999999999999"]) {
+		assert.equal(verdict({ PI_MAX_COST_MICROS: bad }), EXIT_POLICY, `PI_MAX_COST_MICROS=${JSON.stringify(bad)}`);
+	}
+});
+
+test("an EMPTY PI_MAX_COST_MICROS is a config error, not 'no cap' (an empty money knob must not fail open)", () => {
+	assert.equal(verdict({ PI_MAX_COST_MICROS: "" }), EXIT_POLICY);
+});
+
+test("PI_ALLOWED_MODELS: absent is unrestricted; entries split at the FIRST slash, verbatim", () => {
+	assert.equal(parseRunnerEnv(base).allowedModels, null);
+	assert.deepEqual(parseRunnerEnv({ ...base, PI_ALLOWED_MODELS: "anthropic/claude-x,openrouter/~anthropic/claude-y,cloudflare-workers-ai/@cf/meta/llama" }).allowedModels, [
+		{ provider: "anthropic", model: "claude-x" },
+		{ provider: "openrouter", model: "~anthropic/claude-y" },
+		{ provider: "cloudflare-workers-ai", model: "@cf/meta/llama" },
+	]);
+	assert.deepEqual(parseRunnerEnv({ ...base, PI_ALLOWED_MODELS: "openai/Qwen2.5:0.5B" }).allowedModels, [{ provider: "openai", model: "Qwen2.5:0.5B" }], "case is kept: matching is exact");
+});
+
+test("an EMPTY PI_ALLOWED_MODELS, or a malformed entry, is a config error", () => {
+	assert.equal(verdict({ PI_ALLOWED_MODELS: "" }), EXIT_POLICY, "empty is neither 'unrestricted' nor 'nothing allowed': refused");
+	for (const bad of ["anthropic", "/claude-x", "anthropic/", "a/b,,c/d", "a/b,", ",a/b", " a/b", "a/b ", "a/ b", "a/b\nc/d", "a/b\tc"]) {
+		assert.equal(verdict({ PI_ALLOWED_MODELS: bad }), EXIT_POLICY, `PI_ALLOWED_MODELS=${JSON.stringify(bad)}`);
+	}
+});

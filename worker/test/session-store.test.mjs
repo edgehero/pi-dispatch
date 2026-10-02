@@ -558,6 +558,25 @@ test("a reading stamped with another model is not a reading about this one", () 
 	assert.equal(bare.store.resolveSession(ghIssue, { jobDir: bare.jobDir, piVersion: PI }).reason, "context-too-full");
 });
 
+test("an @cf or ~alias model gets a sidecar identity, so another model's reading is not used for it (issues #501, #502)", () => {
+	// The identity is held to the run record's own id rule (MODEL_REF_PATTERN). It used to carry the record's
+	// OLD pattern, which refused these catalog shapes: the job then had no identity, counted as unknown, and
+	// a reading stamped by a different model on the same key was used for it.
+	const { store, jobDir, sessionsDir } = fixture({ maxContextPct: 70 });
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key);
+	writeFileSync(join(sessionsDir, key, "context"), "25000 32000 anthropic/small-window");
+	for (const [provider, model] of [["cloudflare-workers-ai", "@cf/meta/llama-4-scout-17b-16e-instruct"], ["openrouter", "~anthropic/claude-sonnet-latest"], ["cloudflare-ai-gateway", "workers-ai/@cf/openai/gpt-oss-20b"]]) {
+		assert.equal(store.resolveSession({ ...ghIssue, provider, model }, { jobDir, piVersion: PI }).reason, "resumed", `${provider}/${model} is a different model, so the foreign reading is ignored`);
+	}
+	// Its OWN reading applies to it: the stamp round-trips through the whitespace-delimited sidecar.
+	writeFileSync(join(sessionsDir, key, "context"), "25000 32000 cloudflare-workers-ai/@cf/meta/llama-4-scout-17b-16e-instruct");
+	assert.equal(store.resolveSession({ ...ghIssue, provider: "cloudflare-workers-ai", model: "@cf/meta/llama-4-scout-17b-16e-instruct" }, { jobDir, piVersion: PI }).reason, "context-too-full");
+	// And a half outside the rule (a space would split the sidecar record) is still no identity.
+	writeFileSync(join(sessionsDir, key, "context"), "25000 32000 anthropic/small-window");
+	assert.equal(store.resolveSession({ ...ghIssue, provider: "anthropic", model: "big window" }, { jobDir, piVersion: PI }).reason, "context-too-full", "unknown identity: the reading stays usable");
+});
+
 test("a promotion that landed is never reported as promote-failed by its own bookkeeping", () => {
 	// The sidecars are written AFTER the transcript is swapped in. Letting one throw returned
 	// `promote-failed` for a promotion that demonstrably happened, which tells an operator the next run

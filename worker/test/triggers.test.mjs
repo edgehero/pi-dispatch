@@ -1065,6 +1065,8 @@ test("a run.secrets key the worker sets itself is refused, from every set and de
 	assert.ok(reserved.includes("GITHUB_TOKEN") && reserved.includes("GITLAB_HOST"), "the fixture must span both columns");
 	assert.ok(reserved.includes("GITHUB_APP_PRIVATE_KEY") && reserved.includes("HTTPS_PROXY") && reserved.includes("PI_OFFLINE"));
 	assert.ok(reserved.includes("PI_DISPATCH_KEYLESS"), "issue #503: the keyless marker is the worker's alone");
+	// Issues #501, #502: a trigger binding its own cost cap or model list would be the policy choosing itself.
+	assert.ok(reserved.includes("PI_MAX_COST_MICROS") && reserved.includes("PI_ALLOWED_MODELS"), "the two policy inputs are the worker's alone");
 	for (const name of reserved) {
 		assert.throws(
 			() => parse([withRun(LABEL, { secrets: { [name]: "op://a/b/c" } })]),

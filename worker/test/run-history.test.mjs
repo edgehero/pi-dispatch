@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { test } from "node:test";
-import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, RUNNER_POLICY_REASONS, sanitizeJobId } from "../src/run-history.mjs";
+import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
+import { MODEL_REF_PATTERN } from "../src/model-ref.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 
 /**
@@ -354,9 +355,23 @@ test("parseExitTokens round-trips a conformant runner's object BYTE-IDENTICALLY"
 	assert.equal(JSON.stringify(parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(metered)}}`)), JSON.stringify(metered));
 	const fallback = { input: 1, output: 2, total: 3, cost: 0.5, metered: false };
 	assert.equal(JSON.stringify(parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(fallback)}}`)), JSON.stringify(fallback));
-	// An omitted key stays OMITTED rather than becoming null: the fallback carries five of the twelve, and
+	// An omitted key stays OMITTED rather than becoming null: the fallback carries five of the seventeen, and
 	// a null would read as "measured zero" for a number nobody measured.
 	assert.ok(!("otherTotal" in parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(fallback)}}`)));
+});
+
+test("the policy counters (issues #501, #502) survive the rebuild, in emission order, and only as numbers", () => {
+	// Admitted before any runner writes them: a key missing from TOKEN_KEYS is DROPPED, and the dollar
+	// settlement reads these to decide whether a metered cost is complete, so a dropped counter would read as
+	// an honest zero. Each one asserted by name, so dropping any single entry fails here.
+	const policy = { costCapMicros: 2_000_000, costRefused: 1, boundExceeded: 0, longContext: 2, modelRefused: 3 };
+	assert.deepEqual(TOKEN_KEYS.slice(-5), Object.keys(policy), "appended after unpriced, in the runner's emission order");
+	const metered = { input: 1, output: 2, total: 3, cost: 0.5, metered: true, rootTotal: 3, otherTotal: 0, looseTotal: 0, sessions: 1, calls: 4, unresolved: 0, unpriced: 0, ...policy };
+	const out = parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(metered)}}`);
+	assert.equal(JSON.stringify(out), JSON.stringify(metered), "byte-identical round trip, key order included");
+	for (const key of Object.keys(policy)) assert.equal(out[key], policy[key], key);
+	assert.equal(parseExitTokens('{"event":"exit","tokens":{"total":1,"costRefused":"many"}}').costRefused, undefined, "a string in a policy slot is dropped like any other");
+	assert.ok(Object.isFrozen(TOKEN_KEYS));
 });
 
 test("parseExitSession refuses a reason outside the CLOSED enum", () => {
@@ -506,6 +521,11 @@ test("parseExitUsage charset: the id allowlist rejects length, symbols and a lea
 	assert.notEqual(parseExitUsage(withProvider("a".repeat(64))), null, "64 IS the cap: 1 first-class char + 63 tail");
 	assert.equal(parseExitUsage(withProvider("bad provider!")), null, "space and ! are outside the class");
 	assert.equal(parseExitUsage(withProvider("../etc")), null, "a leading dot fails the first-char class -- no path shapes");
+	// Issues #501/#502: the shapes the old pattern refused on real catalog ids, which nulled the whole block.
+	const withModel = (model) => usageLine({ v: 1, models: [{ ...GOOD_ROW, provider: "cloudflare-workers-ai", model }] });
+	assert.equal(parseExitUsage(withModel("@cf/meta/llama-4-scout-17b-16e-instruct"))?.models[0].model, "@cf/meta/llama-4-scout-17b-16e-instruct");
+	assert.notEqual(parseExitUsage(withModel("~anthropic/claude-sonnet-latest")), null);
+	assert.notEqual(parseExitUsage(withModel("qwen2.5:0.5b-instruct-q4_K_M")), null, "an Ollama tag's underscore, lowercased first");
 });
 
 test("parseExitUsage numerics: absent rebuilds as 0, but a negative, a null, or an Infinity nulls the block", () => {
@@ -578,8 +598,8 @@ test("the usage trio keeps the record PII-free: host-fact provider/model, charse
 	assert.equal(record.provider, "anthropic", "the host fact, not a container string");
 	assert.equal(record.model, "claude-x");
 	for (const row of record.usage.models) {
-		assert.match(row.provider, /^[a-z0-9][a-z0-9._:/-]{0,63}$/, "every stored ledger id passed the allowlist");
-		assert.match(row.model, /^[a-z0-9][a-z0-9._:/-]{0,63}$/);
+		assert.match(row.provider, MODEL_REF_PATTERN, "every stored ledger id passed the allowlist");
+		assert.match(row.model, MODEL_REF_PATTERN);
 	}
 	const json = JSON.stringify(record);
 	assert.ok(!json.includes("SECRET_T"), "title must not leak past the trio either");
@@ -1400,7 +1420,13 @@ test("every RUNNER_POLICY_REASONS member is a literal the runner itself writes (
 	const runnerSrc = readFileSync(new URL("../../image/runner/src/outcome.mjs", import.meta.url), "utf8");
 	assert.ok(RUNNER_POLICY_REASONS.size > 0);
 	for (const reason of RUNNER_POLICY_REASONS) {
-		assert.ok(runnerSrc.includes(`reason: "${reason}"`), `image/runner/src/outcome.mjs no longer emits reason "${reason}"`);
+		// Either written inline, or (issues #501, #502) as an exported literal the runner's meter and policy
+		// check emit through, `export const NAME = "reason";`, which is the one spelling those use.
+		const exported = new RegExp(`export const [A-Z_]+ = "${reason}";`);
+		assert.ok(runnerSrc.includes(`reason: "${reason}"`) || exported.test(runnerSrc), `image/runner/src/outcome.mjs no longer emits reason "${reason}"`);
+	}
+	for (const reason of ["cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable"]) {
+		assert.ok(RUNNER_POLICY_REASONS.has(reason), `${reason} is a runner reason the worker keeps`);
 	}
 	assert.ok(runnerSrc.includes('reason: "provider-auth-refused"'), "the runner's issue #437 literal moved");
 });

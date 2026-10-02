@@ -42,10 +42,9 @@ export function resolveJobImage(job, defaultImage) {
  *   { missing: image }    -- the daemon answered and does not have it  => POLICY, refuse, do not retry
  *   { unavailable: image} -- docker itself did not answer              => INFRA, retry
  *   { forgeUnsupported }  -- present, but declares it cannot serve this job's forge => POLICY, refuse
- *   { replicaUnsupported }-- present, but does not declare replica support for a replica job => POLICY
- *   { commandUnsupported }-- present, but does not declare command support for a command job => POLICY
- *   { excludeToolsUnsupported } -- present, but does not declare exclude-tools support for a job that
- *                            carries exclusions => POLICY
+ *   { <gate.result>, declared } -- present, but does not declare a capability this job needs, one key per
+ *                            CAPABILITY_GATES row (replicaUnsupported, commandUnsupported,
+ *                            excludeToolsUnsupported) => POLICY
  *
  * A non-zero `docker image inspect` is AMBIGUOUS -- an absent image and an unreachable daemon both exit 1 --
  * so the failure path disambiguates POSITIVELY with `docker info` rather than by matching docker's stderr.
@@ -97,26 +96,13 @@ export function makeImagePreflight({ image, spawnFn = spawn, bin = "docker" }) {
 			// asymmetry is deliberate rather than an oversight. `forges` is an EXCLUSION list, so no claim
 			// excludes nothing; `capabilities` is an INCLUSION list, so no claim includes nothing. One rule
 			// underlies both -- an image that declares nothing gets no benefit of the doubt about what it
-			// contains -- and neither costs an UNFLAGGED job anything: this branch is unreachable unless the
-			// job actually carries a replica index.
-			if (job?.replica !== undefined && !(capabilities ?? []).includes("replicas")) {
-				return { replicaUnsupported: wanted, declared: capabilities ?? [] };
-			}
-			// Same inclusion-list polarity as `replicas` directly above, and the same class of stale-image
-			// failure it guards (issue #189): a runner that predates run.command reads no PI_COMMAND, so
-			// the bare `/name args` prompt reaches the model as PROSE -- no handler runs, the agent
-			// improvises, and the queue records a clean exit 0. Unreachable for a commandless job, so the
-			// existing fleet pays nothing for it.
-			if (job?.command !== undefined && !(capabilities ?? []).includes("commands")) {
-				return { commandUnsupported: wanted, declared: capabilities ?? [] };
-			}
-			// Same inclusion-list polarity again, and here the stale-image failure is a PERMISSION quietly
-			// not enforced (issue #291): a runner that predates run.excludeTools reads no PI_EXCLUDE_TOOLS,
-			// so a "read-only" trigger's job would run with every tool the file says to remove and record a
-			// clean exit -- the silent fail-open this field exists to close. Unreachable for a job without
-			// exclusions, so the existing fleet pays nothing for it.
-			if (job?.excludeTools !== undefined && !(capabilities ?? []).includes("excludeTools")) {
-				return { excludeToolsUnsupported: wanted, declared: capabilities ?? [] };
+			// contains -- and neither costs an UNFLAGGED job anything: each gate below is unreachable unless
+			// the job actually carries the feature it guards. The gates, their order and why each exists are
+			// the CAPABILITY_GATES table; the first one this job needs and the image lacks refuses.
+			for (const gate of CAPABILITY_GATES) {
+				if (gate.needed(job) && !(capabilities ?? []).includes(gate.token)) {
+					return { [gate.result]: wanted, declared: capabilities ?? [] };
+				}
 			}
 			// `capabilities` rides the ok result for issue #341's job-user gate, which needs `anyUid` and runs after
 			// this preflight; an image that declares nothing reads as [].
@@ -126,6 +112,61 @@ export function makeImagePreflight({ image, spawnFn = spawn, bin = "docker" }) {
 		return { unavailable: wanted };
 	};
 }
+
+/**
+ * The image capability gates, ONE table (issues #501, #502 made it one; each row predates them). A row is a
+ * feature a job may carry and the `dev.pi-dispatch.capabilities` token an image must declare before a job
+ * carrying it runs there, because an image built before the feature silently ignores it: the runner reads no
+ * such variable and the job records a clean exit having done something else. The preflight refuses the first
+ * row whose `needed(job)` holds and whose `token` the image does not declare, before any spend.
+ *
+ *   token    the capability the image must declare
+ *   needed   whether this job carries the feature (a job that does not pays nothing for the row)
+ *   result   the key the preflight result names the image under, which the processor branches on
+ *   reason   the run record's reason for the refusal
+ *   event    the worker log event
+ *   comment  the forge comment, given the image and the `declared` phrase the processor builds; it names
+ *            the FIX rather than the label that noticed it, because an operator reading "rebuild the image"
+ *            is already where they need to be
+ *
+ * A new image-gated feature (`costCap`, `modelPolicy`) is a row here, not another branch in two files. Order
+ * is the order the branches had, so a job carrying several features is refused for the same one as before.
+ */
+export const CAPABILITY_GATES = Object.freeze([
+	// REQ-REPLICA-RUNS: an image built before it bakes a HARD_RULES.md whose rule 3 hard-codes `pi/issue-<n>`
+	// as a SYSTEM rule, which the model treats as authoritative over the user prompt naming `pi/issue-<n>-r2`.
+	// Both replicas would push to one branch: the push race the feature exists to avoid, two runs billed.
+	Object.freeze({
+		token: "replicas",
+		needed: (job) => job?.replica !== undefined,
+		result: "replicaUnsupported",
+		reason: "job-image-replicas-unsupported",
+		event: "refused_image_replicas_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare replica support (\`dev.pi-dispatch.capabilities\` ${declared}), so its baked guardrails would name the wrong branch. Rebuild the image from a version that has this feature. Not run.`,
+	}),
+	// Issue #189: a runner that predates run.command reads no PI_COMMAND, so the bare `/name args` prompt
+	// reaches the model as PROSE -- no handler runs, the agent improvises, and the queue records a clean exit 0.
+	// The runner's own command-unregistered refusal does not exist on such an image, so the host refuses first.
+	Object.freeze({
+		token: "commands",
+		needed: (job) => job?.command !== undefined,
+		result: "commandUnsupported",
+		reason: "job-image-commands-unsupported",
+		event: "refused_image_commands_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare command support (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would not dispatch \`run.command\`. Rebuild the image from a version that has this feature. Not run.`,
+	}),
+	// Issue #291: a runner that predates run.excludeTools reads no PI_EXCLUDE_TOOLS, so a "read-only" trigger's
+	// job would run with every tool the file says to remove and record a clean exit: a PERMISSION quietly not
+	// enforced, the silent fail-open this repo brands the worst outcome available.
+	Object.freeze({
+		token: "excludeTools",
+		needed: (job) => job?.excludeTools !== undefined,
+		result: "excludeToolsUnsupported",
+		reason: "job-image-exclude-tools-unsupported",
+		event: "refused_image_exclude_tools_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare exclude-tools support (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would ignore \`run.excludeTools\` and run this trigger with every tool it says to remove. Rebuild the image from a version that has this feature. Not run.`,
+	}),
+]);
 
 /**
  * Exported so the test cannot drift from the format string above. `|` because an image id is

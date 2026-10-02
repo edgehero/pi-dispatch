@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { configError, COST_CAP, COST_CAP_UNENFORCEABLE, MODEL_NOT_ALLOWED, MODEL_POLICY_UNENFORCEABLE, TOKEN_BUDGET } from "./outcome.mjs";
 
 /**
  * Process-wide usage meter (issue #58; REQ-TOKEN-ACCOUNTING-AND-CAPS, CONST-BUDGET-BEFORE-TOKENS).
@@ -94,6 +95,19 @@ export const VIRTUAL_MODEL_API = "pi-virtual";
 export const RUNTIME_STREAM_METHODS = Object.freeze(["streamSimple", "stream", "streamDeferred"]);
 export const RUNTIME_RESULT_METHODS = Object.freeze(["classify", "generateImages"]);
 
+/**
+ * The one table of the meter's stops (issues #501, #502): each reason the meter can stop a job for, and the
+ * `errorMessage` its hard stop carries. One table so every stopped call says WHICH policy stopped it, in the
+ * session's own transcript as well as on the exit line, and so a new stop is a row here rather than a new
+ * flag beside `breached`. Frozen: the meter refuses a reason that is not a key (meter.stop throws), so a typo
+ * cannot become a stop with an `undefined` message.
+ */
+export const STOP_MESSAGES = Object.freeze({
+	[TOKEN_BUDGET]: "pi-dispatch: token cap exceeded",
+	[COST_CAP]: "pi-dispatch: cost cap reached",
+	[MODEL_NOT_ALLOWED]: "pi-dispatch: model not allowed",
+});
+
 /** Coerce a possibly-absent numeric usage field. Never propagates NaN into the totals. */
 function finite(value) {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
@@ -140,12 +154,31 @@ function foldRow(into, row) {
  * `maxTokens` is validated with attachTokenBudget's exact semantics and error text, because both read
  * the same PI_MAX_TOKENS env knob and an operator must not get two different verdicts on one value.
  * null/undefined means uncapped -- the meter is ALWAYS on so totals land in run history either way.
+ *
+ * `maxCostMicros` (issue #501) and `allowedModels` (issue #502) are the two policies the brake must also
+ * serve. This meter only CARRIES them (as `costCap` and `allowed`) so the installer arms the brake for them
+ * and the exit decision can name their stops; the per-call checks that act on them are the guard's
+ * (wrapModelRuntime's `guard`). Each is null when unset, which is today's behaviour.
+ *
+ * ONE STOP, FIRST WINS. `state.stopReason` is null until the first stop and is never overwritten: a job that
+ * a cost refusal stopped and whose late settles then cross the token cap is a cost-cap stop, and the exit
+ * line must name the cause rather than the last thing to notice. `onStop(reason, detail)` fires once, on
+ * that first stop. `state.breached` stays, read-only, as "the stop was the token cap", so every reader of
+ * the old flag keeps its meaning.
  */
-export function createUsageMeter({ maxTokens, rootSessionId, onBreach } = {}) {
+export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModels = null, rootSessionId, onStop } = {}) {
 	if (maxTokens !== null && maxTokens !== undefined && (!Number.isInteger(maxTokens) || maxTokens < 1)) {
 		throw new Error(`invalid PI_MAX_TOKENS: ${maxTokens}`);
 	}
+	if (maxCostMicros !== null && (!Number.isSafeInteger(maxCostMicros) || maxCostMicros < 0)) {
+		throw new Error(`invalid PI_MAX_COST_MICROS: ${maxCostMicros}`);
+	}
+	if (allowedModels !== null && (!Array.isArray(allowedModels) || allowedModels.length === 0)) {
+		throw new Error("invalid PI_ALLOWED_MODELS: want a non-empty list or null");
+	}
 	const cap = maxTokens ?? null;
+	const costCap = maxCostMicros;
+	const allowed = allowedModels === null ? null : Object.freeze(allowedModels.map((entry) => Object.freeze({ ...entry })));
 	// Only a non-empty string can be the root. An undefined rootSessionId must NOT match an undefined
 	// options.sessionId -- that would file every unattributed call as root and hide the fanout.
 	const root = typeof rootSessionId === "string" && rootSessionId.length > 0 ? rootSessionId : null;
@@ -173,9 +206,28 @@ export function createUsageMeter({ maxTokens, rootSessionId, onBreach } = {}) {
 		// Calls whose usage carried no finite cost.total. Counted, never guessed: a silent 0 would read
 		// as "this call was free", which is the one thing a spend control must never claim.
 		unpriced: 0,
-		breached: false,
+		// The first stop's reason (a STOP_MESSAGES key), or null. Set once by stop(), never overwritten.
+		stopReason: null,
+		// The pre-#501 flag, kept as a read-only view: true exactly when the stop was the token cap.
+		get breached() {
+			return this.stopReason === TOKEN_BUDGET;
+		},
 		sessionIds: new Set(),
 	};
+
+	/**
+	 * Stop the job for `reason`: the brake answers every later call with that reason's hard stop. First wins,
+	 * and `onStop` fires only for the stop that won. SYNCHRONOUS, for record()'s reason below. A reason with
+	 * no STOP_MESSAGES row throws: it is a bug in this file, and a stop with no message would brake with
+	 * nothing to say.
+	 */
+	function stop(reason, detail) {
+		if (!Object.hasOwn(STOP_MESSAGES, reason)) throw new Error(`unknown meter stop: ${reason}`);
+		if (state.stopReason !== null) return false;
+		state.stopReason = reason;
+		onStop?.(reason, detail);
+		return true;
+	}
 
 	// Streams already accounted for. Two meters can sit in one dispatch chain -- a compat-half wrapper
 	// re-armed over a third party's re-registration of it, or a prototype wrapper a second install layered
@@ -252,10 +304,7 @@ export function createUsageMeter({ maxTokens, rootSessionId, onBreach } = {}) {
 			unpriced: priced ? 0 : 1,
 		});
 
-		if (cap !== null && state.total > cap && !state.breached) {
-			state.breached = true;
-			onBreach?.(state.total);
-		}
+		if (cap !== null && state.total > cap) stop(TOKEN_BUDGET, state.total);
 		// Accumulation continues past the breach on purpose: the overshoot is the interesting number
 		// (it is what the lag actually cost), and hiding it would make the cap look tighter than it is.
 		return state;
@@ -362,7 +411,7 @@ export function createUsageMeter({ maxTokens, rootSessionId, onBreach } = {}) {
 		if (typeof version === "string" && version.length > 0) piAiVersion = version;
 	}
 
-	return { state, cap, record, observe, observeResult, snapshot, usageSnapshot, setPiAiVersion };
+	return { state, cap, costCap, allowed, stop, record, observe, observeResult, snapshot, usageSnapshot, setPiAiVersion };
 }
 
 
@@ -383,13 +432,22 @@ function zeroUsage() {
  * runner's own and any an extension creates -- is metered, and return how to undo it.
  *
  * Per call, in this order:
- *   1. The brake. Checked before dispatch, so a breach stops the NEXT call rather than merely recording it.
- *      A stream method answers with `hardStop(model)` (makeHardStopStream below); a result method answers
- *      with an aborted result of its own kind, zero usage, and never calls the provider. Virtual or not:
- *      past the cap nothing is dispatched.
- *   2. A virtual model passes straight through UNOBSERVED (trap #4 in the header): ModelRuntime routes it
- *      and calls `this.streamSimple` again with the physical model, which is the call that is counted.
- *   3. Everything else is the original method, its stream observed (or its promise, for classify and
+ *   1. The brake. Checked before dispatch, so a stop ends the NEXT call rather than merely recording it.
+ *      A stream method answers with `hardStop(model, message)` (makeHardStopStream below), the message
+ *      being the stop reason's STOP_MESSAGES row; a result method answers with an aborted result of its own
+ *      kind, zero usage, and never calls the provider. Virtual or not: once stopped nothing is dispatched.
+ *   2. A virtual model passes straight through UNOBSERVED and UNGUARDED (trap #4 in the header):
+ *      ModelRuntime routes it and calls `this.streamSimple` again with the physical model, which is the call
+ *      that is guarded and counted, so one request is judged once and on the model that will answer it.
+ *   3. THE GUARD SEAM (issues #501, #502). A physical call is offered to `guard.admit({ method, model, args })`
+ *      before dispatch (a guard is `{ enforces, admit }`, `enforces` listing the stop reasons it can refuse
+ *      for, which is what assertPoliciesEnforceable reads). It answers null to let the call through, or a STOP_MESSAGES reason to refuse it: the
+ *      meter stops with that reason and this call gets the hard stop, so the refused call is the first one
+ *      braked. The guard is consulted only while a brake exists, because a refusal with no hard stop to
+ *      answer with would have to dispatch the call it just refused; the runner refuses before the first
+ *      prompt when a policy is set and the brake is missing (assertPoliciesEnforceable). No guard exists in
+ *      this build (null), so every call goes through exactly as before.
+ *   4. Everything else is the original method, its stream observed (or its promise, for classify and
  *      generateImages) with the (provider, model) pair read off the Model object dispatched on and the
  *      sessionId off the options -- never parsed back out of a settled message, whose provider/model a
  *      provider is free to normalise, alias or omit.
@@ -402,19 +460,30 @@ function zeroUsage() {
  * later install layered on top is never torn out from under it; in that case this layer is switched to
  * pass-through instead, so it stops counting without breaking the chain.
  */
-export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardStopResult = defaultHardStopResult, dispatch = new AsyncLocalStorage() }) {
+export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardStopResult = defaultHardStopResult, guard = null, dispatch = new AsyncLocalStorage() }) {
 	const proto = ModelRuntime?.prototype;
 	const originals = new Map();
 	const wrappers = new Map();
 	let active = true;
 	const ctxOf = (model, options) => ({ sessionId: options?.sessionId, provider: model?.provider, modelId: model?.id });
+	// Steps 1 and 3 above, shared by every method: the stop reason that ends this call, or null to dispatch it.
+	const stopFor = (method, model, args) => {
+		if (!hardStop) return null;
+		if (meter.state.stopReason !== null) return meter.state.stopReason;
+		if (guard === null || model?.api === VIRTUAL_MODEL_API) return null;
+		const refused = guard.admit({ method, model, args });
+		if (refused === null || refused === undefined) return null;
+		meter.stop(refused);
+		return meter.state.stopReason;
+	};
 
 	for (const name of RUNTIME_STREAM_METHODS) {
 		const original = proto?.[name];
 		if (typeof original !== "function") continue;
 		const wrapper = function (model, ...rest) {
 			if (!active) return original.call(this, model, ...rest);
-			if (hardStop && meter.state.breached) return hardStop(model);
+			const stopped = stopFor(name, model, rest);
+			if (stopped !== null) return hardStop(model, STOP_MESSAGES[stopped]);
 			// Trap #5: everything this call dispatches, across its awaits, runs marked as ours.
 			const stream = dispatch.run(true, () => original.call(this, model, ...rest));
 			if (model?.api === VIRTUAL_MODEL_API) return stream;
@@ -430,7 +499,8 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 		if (typeof original !== "function") continue;
 		const wrapper = function (model, context, options) {
 			if (!active) return original.call(this, model, context, options);
-			if (hardStop && meter.state.breached) return Promise.resolve(hardStopResult(name, model));
+			const stopped = stopFor(name, model, [context, options]);
+			if (stopped !== null) return Promise.resolve(hardStopResult(name, model, STOP_MESSAGES[stopped]));
 			const promise = dispatch.run(true, () => original.call(this, model, context, options));
 			if (model?.api === VIRTUAL_MODEL_API) return promise;
 			return meter.observeResult(promise, ctxOf(model, options));
@@ -461,7 +531,7 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
  * classifierErrorResult/imageErrorResult build (pi-ai 0.99.1, utils/model-operations.js), with zero usage
  * and `stopReason: "aborted"`, for the reason makeHardStopStream gives.
  */
-function defaultHardStopResult(method, model, message = "pi-dispatch: token cap exceeded") {
+export function defaultHardStopResult(method, model, message = STOP_MESSAGES[TOKEN_BUDGET]) {
 	const base = { api: model?.api, provider: model?.provider, model: model?.id, usage: zeroUsage(), stopReason: "aborted", errorMessage: message, timestamp: Date.now() };
 	return method === "generateImages" ? { ...base, output: [] } : { ...base, answers: {} };
 }
@@ -481,14 +551,23 @@ function defaultHardStopResult(method, model, message = "pi-dispatch: token cap 
  * always takes it here.
  *
  * A call made from inside the same install's runtime dispatch (`dispatch`, trap #5) is routed the same way
- * and NOT observed: the runtime half already counted it.
+ * and NOT observed: the runtime half already counted it. Nor is it offered to the `guard`: the runtime half
+ * already judged it, and judging one request twice would count its bound twice. A legacy call from outside
+ * that dispatch is guarded here exactly as wrapModelRuntime's step 3 guards a runtime call.
  *
  * There is deliberately NO try/catch, for the reason wrapModelRuntime gives.
  */
-export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, dispatch = null }) {
+export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, guard = null, dispatch = null }) {
 	function route(kind, model, context, options) {
-		// Checked before dispatch, so the breach stops the NEXT call rather than merely recording it.
-		if (hardStop && meter.state.breached) return hardStop(model);
+		// Checked before dispatch, so a stop ends the NEXT call rather than merely recording it.
+		if (hardStop && meter.state.stopReason !== null) return hardStop(model, STOP_MESSAGES[meter.state.stopReason]);
+		if (hardStop && guard !== null && dispatch?.getStore() !== true) {
+			const refused = guard.admit({ method: kind, model, args: [context, options] });
+			if (refused !== null && refused !== undefined) {
+				meter.stop(refused);
+				return hardStop(model, STOP_MESSAGES[meter.state.stopReason]);
+			}
+		}
 		const provider = fallbackModels?.getProvider?.(model.provider);
 		const builtin = provider?.getModels?.().some((candidate) => candidate.api === model.api) ? provider : null;
 		const stream = builtin
@@ -518,10 +597,13 @@ export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, di
  * `createStream` is injected -- that is what keeps this function pure and this file free of any static
  * pi import. installProcessUsageMeter passes the real `createAssistantMessageEventStream` it pulled off
  * the accepted compat module; tests pass a fake.
+ *
+ * The returned function is `(model, message)`: the wrappers pass the stop reason's STOP_MESSAGES row, so one
+ * brake serves every stop. `message` given here is only the default for a caller that passes none.
  */
-export function makeHardStopStream({ createStream, message = "pi-dispatch: token cap exceeded" }) {
+export function makeHardStopStream({ createStream, message: defaultMessage = STOP_MESSAGES[TOKEN_BUDGET] }) {
 	if (typeof createStream !== "function") throw new Error("makeHardStopStream requires createStream");
-	return (model) => {
+	return (model, message = defaultMessage) => {
 		const stream = createStream();
 		const aborted = {
 			role: "assistant",
@@ -691,6 +773,7 @@ export async function installProcessUsageMeter({
 	loadExtensionModules = () => defaultLoadExtensionModules({ ...(resolve ? { resolve } : {}), load }),
 	readText = (path) => readFileSync(path, "utf8"),
 	platform = process.platform,
+	guard = null,
 }) {
 	// --- the compat half's copy, decided first: it supplies the brake's stream factory to BOTH halves ---
 	const candidates = resolvePiAiCompat({ resolve, exists });
@@ -735,15 +818,18 @@ export async function installProcessUsageMeter({
 		}
 	}
 
-	// Only armed when a cap exists -- an uncapped job must never have a call stopped.
+	// Armed only when a POLICY exists -- a token cap, a cost cap or a model list -- so a job with none of them
+	// can never have a call stopped. All three, not the token cap alone (issues #501, #502): the cost cap and
+	// the list are enforced BEFORE a call, by the guard, and a refusal needs this hard stop to answer with.
+	// The stream factory comes from the accepted compat copy, so a compat half that did not install leaves no
+	// brake for either half, and the runner then refuses a cost cap or a list before the first prompt.
 	const createStream = typeof module?.createAssistantMessageEventStream === "function"
 		? module.createAssistantMessageEventStream
 		: typeof module?.AssistantMessageEventStream === "function"
 			? () => new module.AssistantMessageEventStream()
 			: null;
-	const hardStop = meter.cap !== null && createStream
-		? makeHardStopStream({ createStream, message: "pi-dispatch: token cap exceeded" })
-		: null;
+	const armed = meter.cap !== null || meter.costCap !== null || meter.allowed !== null;
+	const hardStop = armed && createStream ? makeHardStopStream({ createStream }) : null;
 
 	// --- the runtime half: THE choke point. Without it there is no process-wide meter. ---
 	const methodsPresent = typeof ModelRuntime?.prototype?.streamSimple === "function" && typeof ModelRuntime?.prototype?.stream === "function";
@@ -754,7 +840,7 @@ export async function installProcessUsageMeter({
 	}
 	// One per install, shared by both halves (trap #5).
 	const dispatch = new AsyncLocalStorage();
-	const runtimeLayer = wrapModelRuntime({ ModelRuntime, meter, hardStop, dispatch });
+	const runtimeLayer = wrapModelRuntime({ ModelRuntime, meter, hardStop, guard, dispatch });
 	if (runtime !== null && !runtimeLayer.covers(runtime)) {
 		runtimeLayer.restore();
 		log("usage_meter_unavailable", { reason: "runtime-not-covered" });
@@ -790,6 +876,11 @@ export async function installProcessUsageMeter({
 
 	const handle = {
 		ok: true,
+		// Whether a hard stop exists, and which stops the installed guard can refuse for: the two facts
+		// assertPoliciesEnforceable reads before the first prompt. Per policy, not one flag, so a guard that
+		// enforces the cost cap cannot pass for one that enforces the model list.
+		brake: hardStop !== null,
+		enforces: Object.freeze([...(guard?.enforces ?? [])]),
 		methods: runtimeLayer.methods,
 		module,
 		tag: accepted?.candidate.tag ?? null,
@@ -812,7 +903,7 @@ export async function installProcessUsageMeter({
 			const api = entry?.api;
 			if (typeof api !== "string") continue;
 			if (wrapped.has(entry)) continue;
-			const streams = wrapProviderStreams({ inner: entry, fallbackModels, meter, hardStop, dispatch });
+			const streams = wrapProviderStreams({ inner: entry, fallbackModels, meter, hardStop, guard, dispatch });
 			// One sourceId per api id, and registerApiProvider keys the registry by api id, so re-arming
 			// replaces our entry instead of piling up registrations.
 			module.registerApiProvider({ api, ...streams }, `${METER_PROVIDER_PREFIX}:${api}`);
@@ -850,6 +941,8 @@ export async function installProcessUsageMeter({
 	// half sends builtin models to the wrong entry. `brake` is whether a hard-stop stream exists; `capped`
 	// rides along because it is what makes `brake` readable: an uncapped job has no brake BY DESIGN, so
 	// `capped:true` with `brake:false` is the alarm -- a cap that can only be enforced after the fact.
+	// `costCapped` and `listed` (issues #501, #502) are the other two policies that arm the brake, so the
+	// same reading holds for them: either true beside `brake:false` is a policy the runner then refuses.
 	// Reporting a plain `ok:true` over any of these would be a degraded meter calling itself healthy.
 	log("usage_meter", {
 		ok: true,
@@ -860,6 +953,8 @@ export async function installProcessUsageMeter({
 		...(accepted ? { fallback: fallbackModels !== null } : {}),
 		...(fallbackError ? { fallbackError } : {}),
 		capped: meter.cap !== null,
+		costCapped: meter.costCap !== null,
+		listed: meter.allowed !== null,
 		brake: hardStop !== null,
 	});
 
@@ -871,4 +966,35 @@ export async function installProcessUsageMeter({
 	timer.unref?.();
 
 	return handle;
+}
+
+/**
+ * Refuse, before the first prompt, a cost cap or a model list this runner cannot enforce BEFORE a call
+ * (issues #501, #502; INT-RUNNER-EXIT-CODE-PROTOCOL). Both policies are pre-call by definition: a cost cap
+ * checked after a call has already let one call past it, and one call can cost more than the cap, and a model
+ * list checked after a call has already paid the model it forbids. So each needs, together:
+ *   - the process-wide meter installed (`meterOk`). The fallback bus meter (run-job's attachTokenBudget) sees a
+ *     call only after it settled, which is exactly the after-the-fact enforcement these policies rule out;
+ *   - a hard stop to answer a refused call with (`brake`), which needs the compat copy's stream factory;
+ *   - a guard that judges each call FOR THAT POLICY (`enforces` lists the stop reasons the installed guard can
+ *     refuse for: COST_CAP for the cap, MODEL_NOT_ALLOWED for the list). No guard ships in this build, so
+ *     every cap or list refuses.
+ * Missing any one, the job is refused as a tagged configError: exit 2, not retried, before any spend. The
+ * model list is checked first: a job that would be refused for both is named by the policy that decides
+ * which provider is called at all. Names only, never values: the cap and the list are not echoed.
+ */
+export function assertPoliciesEnforceable({ maxCostMicros = null, allowedModels = null, meterOk, brake, enforces = [] }) {
+	const missing = (stop) => (!meterOk
+		? "the process-wide usage meter did not install"
+		: !brake
+			? "the usage meter has no hard-stop stream"
+			: !enforces.includes(stop)
+				? "this runner has no pre-call guard for it"
+				: null);
+	if (allowedModels !== null && missing(MODEL_NOT_ALLOWED) !== null) {
+		throw configError(`PI_ALLOWED_MODELS is set but cannot be enforced before a call: ${missing(MODEL_NOT_ALLOWED)}`, MODEL_POLICY_UNENFORCEABLE);
+	}
+	if (maxCostMicros !== null && missing(COST_CAP) !== null) {
+		throw configError(`PI_MAX_COST_MICROS is set but cannot be enforced before a call: ${missing(COST_CAP)}`, COST_CAP_UNENFORCEABLE);
+	}
 }

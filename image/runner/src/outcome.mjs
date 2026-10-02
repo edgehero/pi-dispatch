@@ -9,6 +9,23 @@ export const EXIT_INFRA = 1; // retryable: provider 5xx/429, network, our own bu
 export const EXIT_POLICY = 2; // not retried: turn budget, cap, config error, provider refused the credential
 
 /**
+ * The policy-stop reasons the meter and the pre-spend policy check name (issues #501, #502). Exported literals,
+ * one spelling each, because three places must agree on them: the meter's stop (usage-meter.mjs), decideExit's
+ * `meterStop`, and the worker's closed RUNNER_POLICY_REASONS, which cannot import this file and so reads this
+ * source for `= "<reason>"` (worker/test/run-history.test.mjs).
+ *
+ * `token_budget` keeps its underscore: it is the reason every existing record and dashboard already carries.
+ * The four new ones are hyphenated like every other worker reason. Two are STOPS (the run spent and a cap or
+ * a list ended it), two are REFUSALS before any call (a cap or a list this runner cannot enforce before a
+ * call, which it refuses rather than run with the policy unenforced).
+ */
+export const TOKEN_BUDGET = "token_budget";
+export const COST_CAP = "cost-cap";
+export const MODEL_NOT_ALLOWED = "model-not-allowed";
+export const COST_CAP_UNENFORCEABLE = "cost-cap-unenforceable";
+export const MODEL_POLICY_UNENFORCEABLE = "model-policy-unenforceable";
+
+/**
  * pi-ai@0.99.1 dist/types.d.ts:311 -- all seven, in the union's own order. Enumerated so "length" (or a
  * reason a pin bump adds) cannot hide in a default branch; outcome.test.mjs pins the list against that line.
  */
@@ -131,12 +148,19 @@ export function captureTerminal(previous, event) {
 // `rejected` is classifyPromptRejection's verdict on a prompt() that rejected, or null. It ranks BELOW both
 // budget aborts (a cap that fired is the better-named cause of whatever pi did next) and above everything
 // the terminal message could say, because a rejected prompt's last message is not the job's outcome.
-export function decideExit({ budgetAborted, budgetTurns, tokenAborted, terminal, command = null, isRetryable = null, rejected = null }) {
+// `meterStop` is the process-wide meter's first stop reason (`state.stopReason`: TOKEN_BUDGET, COST_CAP or
+// MODEL_NOT_ALLOWED), or null. It ranks below the turn budget only for the stable order the turn budget always
+// had, and above `tokenAborted`, which since the meter learned more than one stop is the FALLBACK bus meter's
+// flag alone: a runner whose meter installed passes its token stop here, as `meterStop`, never as both.
+export function decideExit({ budgetAborted, budgetTurns, meterStop = null, tokenAborted, terminal, command = null, isRetryable = null, rejected = null }) {
 	if (budgetAborted) {
 		return { code: EXIT_POLICY, reason: "turn_budget", turns: budgetTurns };
 	}
+	if (meterStop) {
+		return { code: EXIT_POLICY, reason: meterStop };
+	}
 	if (tokenAborted) {
-		return { code: EXIT_POLICY, reason: "token_budget" };
+		return { code: EXIT_POLICY, reason: TOKEN_BUDGET };
 	}
 	if (rejected) return rejected;
 	// A command job (issue #189, run.command): session.prompt("/name args") dispatches a registered

@@ -27,6 +27,7 @@ import {
 	decideExit,
 	EXIT_INFRA,
 	loadRetryPredicate,
+	TOKEN_BUDGET,
 } from "./src/outcome.mjs";
 import { restoreEnvProxyDispatcher } from "./src/env-proxy.mjs";
 import { createJobModelRuntime } from "./src/model-runtime.mjs";
@@ -40,7 +41,7 @@ import { attachTurnBudget } from "./src/turn-budget.mjs";
 // never a static import. Never add a pi-ai package specifier to this file's imports: two copies of that
 // package are installed and a plain specifier binds the HOISTED one, which pi does not use.
 // pinned-api.test.mjs guards this file against exactly that string.
-import { createUsageMeter, installProcessUsageMeter, resolvePiAiCompat } from "./src/usage-meter.mjs";
+import { assertPoliciesEnforceable, createUsageMeter, installProcessUsageMeter, resolvePiAiCompat } from "./src/usage-meter.mjs";
 
 const JOB_DIR = "/job";
 const PROMPT_PATH = `${JOB_DIR}/prompt.md`;
@@ -227,7 +228,7 @@ async function main() {
 	const { sessionManager, resumed: sessionResumed, reason: sessionReason } = openSessionManager({ sessionFile: cfg.sessionFile, cwd: WORKSPACE, log });
 	const rootSessionId = sessionManager.getSessionId();
 
-	// Declared before the meter so onBreach can close over it; assigned the moment the session exists.
+	// Declared before the meter so onStop can close over it; assigned the moment the session exists.
 	let session;
 	// Read off the session before it is disposed, reported on the exit line, and persisted host-side
 	// beside the transcript so the NEXT job on this key can bound what it resumes into.
@@ -247,9 +248,13 @@ async function main() {
 	// first call is already metered.
 	const meter = createUsageMeter({
 		maxTokens: cfg.maxTokens,
+		maxCostMicros: cfg.maxCostMicros,
+		allowedModels: cfg.allowedModels,
 		rootSessionId,
-		onBreach: (tokens) => {
-			onTokenAbort(tokens);
+		// The meter's ONE stop (issues #501, #502): the token cap today, the cost cap and the model list once
+		// their guard lands. Fires once, for the first stop only, whichever policy it was.
+		onStop: (reason, detail) => {
+			if (reason === TOKEN_BUDGET) onTokenAbort(detail);
 			// Same synchronous-abort discipline as attachTokenBudget's onAbort: abort() flips the
 			// AbortController before its first await, so the signal is set the instant we call it.
 			// Awaiting here would let the next turn start under a cap we already know is blown.
@@ -257,6 +262,19 @@ async function main() {
 		},
 	});
 	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log });
+	// A cost cap or a model list must be enforced BEFORE each call, so a runner that cannot do that refuses
+	// here, after the install it depends on and before createAgentSession, while nothing has been spent
+	// (INT-RUNNER-EXIT-CODE-PROTOCOL): exit 2, `model-policy-unenforceable` or `cost-cap-unenforceable`. The
+	// fallback bus meter below is the `ok: false` case, and it can only see a call after it was paid for. No
+	// guard is installed by this build, so a job carrying either policy is refused; a job carrying neither
+	// passes untouched.
+	assertPoliciesEnforceable({
+		maxCostMicros: cfg.maxCostMicros,
+		allowedModels: cfg.allowedModels,
+		meterOk: usageMeter.ok,
+		brake: usageMeter.ok && usageMeter.brake,
+		enforces: usageMeter.ok ? usageMeter.enforces : [],
+	});
 	// pi-ai's own transient-error predicate, from the compat copy the meter just accepted (issue #437): a 401/403
 	// shape pi calls retryable (a gateway's "Provider returned error", an HTML "please retry" page) is not
 	// a refusal of the credential. Without it every provider error stays retryable, so say so on the log.
@@ -411,9 +429,11 @@ async function main() {
 	const outcome = decideExit({
 		budgetAborted: budget.state.aborted,
 		budgetTurns: budget.state.turns,
-		// Whichever meter was actually counting. outcome.mjs needs no change: either flag maps to the
-		// same reason:"token_budget" / exit 2.
-		tokenAborted: usageMeter.ok ? meter.state.breached : tokenBudget.state.aborted,
+		// Whichever meter was actually counting, and never both: the process-wide meter reports its first
+		// stop by reason (token_budget, cost-cap, model-not-allowed), the fallback bus meter its token abort
+		// by flag. A token stop maps to the same reason:"token_budget" / exit 2 from either.
+		meterStop: usageMeter.ok ? meter.state.stopReason : null,
+		tokenAborted: usageMeter.ok ? false : tokenBudget.state.aborted,
 		terminal,
 		// Null for every prompt job, so their decision tree is byte-identical to before run.command.
 		command: cfg.command ? { failed: commandFailed } : null,

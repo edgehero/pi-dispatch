@@ -239,3 +239,18 @@ test("run-job checks /job for every job and logs the mount advisories before any
 	assert.doesNotMatch(between, /\bthrow\b|configError\(|process\.exit/, "an advisory must never become an exit: nothing between the advisories and getAgentDir may throw or exit");
 	assert.doesNotMatch(src, /function readPrompt/, "readPrompt lives in src/config.mjs, where its EACCES split is tested");
 });
+
+test("run-job refuses an unenforceable cost cap or model list after the meter installs and before the session exists (issues #501, #502)", () => {
+	// Source-guard tactic again. The order is the whole point: the check reads the install's verdict (meter ok,
+	// brake, guard), so it must follow installProcessUsageMeter; and it must precede createAgentSession, because
+	// a session can spend on its own (an extension factory's call, a cache warm) before the first prompt.
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	const install = src.indexOf("await installProcessUsageMeter(");
+	const check = src.indexOf("assertPoliciesEnforceable({");
+	const session = src.indexOf("await createAgentSession(");
+	assert.ok(install > 0 && check > install && session > check, "install, then the policy check, then the session");
+	assert.match(src, /meterOk: usageMeter\.ok,/, "the fallback bus meter (ok:false) can only see a call after it was paid for");
+	assert.match(src, /maxCostMicros: cfg\.maxCostMicros,\s*allowedModels: cfg\.allowedModels,\s*rootSessionId/, "the meter carries both policies, so the brake is armed for them");
+	assert.match(src, /meterStop: usageMeter\.ok \? meter\.state\.stopReason : null,/, "the exit decision reads the meter's stop by reason");
+	assert.match(src, /tokenAborted: usageMeter\.ok \? false : tokenBudget\.state\.aborted,/, "the flag is the fallback meter's alone");
+});

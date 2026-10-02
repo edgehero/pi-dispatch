@@ -353,7 +353,7 @@ test("the brake: past the cap, the next call is stopped before it reaches the pr
 		const meter = createUsageMeter({
 			maxTokens: 2 * SENTINEL_TOTAL - 1,
 			rootSessionId: rootManager.getSessionId(),
-			onBreach: (total) => breaches.push(total),
+			onStop: (reason, total) => breaches.push([reason, total]),
 		});
 		const logged = [];
 		installed = await installProcessUsageMeter({ ModelRuntime: pi.ModelRuntime, runtime: fx.modelRuntime, meter, log: (event, fields) => logged.push({ event, fields }) });
@@ -374,7 +374,8 @@ test("the brake: past the cap, the next call is stopped before it reaches the pr
 		await flush();
 
 		assert.equal(meter.state.breached, true, "two sentinel calls must exceed a cap one token below their sum");
-		assert.deepEqual(breaches, [2 * SENTINEL_TOTAL], "onBreach fires exactly once, carrying the running total");
+		assert.equal(meter.state.stopReason, "token_budget", "the token cap is the stop, by reason");
+		assert.deepEqual(breaches, [["token_budget", 2 * SENTINEL_TOTAL]], "onStop fires exactly once, naming the token cap and carrying the running total");
 		assert.equal(calls.length, 2);
 
 		// The third request. captureTerminal's two event shapes are covered in compose.test.mjs; here the
@@ -389,6 +390,7 @@ test("the brake: past the cap, the next call is stopped before it reaches the pr
 
 		assert.equal(calls.length, 2, "the capped call must NOT have reached the provider");
 		assert.equal(terminal?.stopReason, "aborted", "the hard stop must surface as an abort, not an error");
+		assert.equal(terminal?.errorMessage, "pi-dispatch: token cap exceeded", "the hard stop names the stop it answers for");
 		// "aborted" rather than "error" is load-bearing: pi's isRetryableAssistantError returns false
 		// unless stopReason === "error", so an "error" here would make the cap trigger PAID auto-retries.
 		assert.equal(terminal?.usage?.totalTokens, 0, "nothing was spent, so nothing may be recorded as spent");

@@ -19,6 +19,7 @@ import { scrubCredentials } from "./redact.mjs";
 import { sessionKeyFor } from "./session-key.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { UNATTRIBUTED_BACKEND } from "./backends.mjs";
+import { MODEL_REF_PATTERN } from "./model-ref.mjs";
 
 /**
  * session-store.mjs -- the host side of a resumable session (INT-SESSION-STORE-CONTRACT).
@@ -152,9 +153,16 @@ const SIDECAR_MAX_BYTES = 4096;
  * The host-effective provider and model as one token, or null when the job names neither.
  *
  * CONSERVATIVE BY CONSTRUCTION: the sidecar is whitespace-delimited, so a value carrying a space would
- * split the record and be read back as a different field. Rather than escape, refuse: anything outside
- * the charset the run record already validates model ids against is no identity, and no identity means
- * the reading stays usable rather than being thrown away.
+ * split the record and be read back as a different field. Rather than escape, refuse: a provider or model
+ * that fails the run record's own id rule (MODEL_REF_PATTERN, model-ref.mjs) is no identity, and no
+ * identity means the reading stays usable rather than being thrown away.
+ *
+ * Each HALF is held to that rule, not the joined string, so this cannot drift from the record's charset
+ * again: it used to carry its own copy of the record's old pattern, and when issues #501/#502 widened the
+ * record to admit `@cf/...` and `~alias` ids, a job on one of those got no stamp and its reading was used
+ * for any other model on the same key. The old 128-character cap on the joined id was never load-bearing:
+ * the reader splits on whitespace and compares the whole token, and the sidecar is bounded by
+ * SIDECAR_MAX_BYTES; two 64-character halves make at most 129.
  */
 function modelIdentity(job) {
 	const provider = typeof job?.provider === "string" ? job.provider : "";
@@ -163,8 +171,10 @@ function modelIdentity(job) {
 	// Lowercased first, the same normalisation the run record's own model ids get, so a trigger written
 	// `Claude-Sonnet` and one written `claude-sonnet` are one model rather than two -- and so that a
 	// perfectly ordinary id does not fall out of the charset below and silently stop stamping.
-	const id = `${provider}/${model}`.toLowerCase();
-	return /^[a-z0-9][a-z0-9._:/-]{0,127}$/.test(id) ? id : null;
+	const lowerProvider = provider.toLowerCase();
+	const lowerModel = model.toLowerCase();
+	if (!MODEL_REF_PATTERN.test(lowerProvider) || !MODEL_REF_PATTERN.test(lowerModel)) return null;
+	return `${lowerProvider}/${lowerModel}`;
 }
 
 /**

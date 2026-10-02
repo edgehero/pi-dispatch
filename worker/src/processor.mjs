@@ -9,6 +9,7 @@ import { RESERVED_ENV_NAMES } from "./triggers.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
 import { RUNNER_POLICY_REASONS } from "./run-history.mjs";
 import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
+import { CAPABILITY_GATES } from "./image-preflight.mjs";
 
 /**
  * The forge comment's reason for each observation a floor refusal missed (issues #278 and #345), keyed like
@@ -89,6 +90,12 @@ export const TERMINAL_COMMENTS = {
 	// Issue #437. Names the cause but never the provider's own message, which may echo a key fragment. "Or
 	// access" because a 403 is as often a key that works but may not use this model or route as a bad key.
 	"provider-auth-refused": "Stopped: the AI provider refused this worker's credentials or access (an authentication or permission error). The operator needs to check the provider key and what it is allowed to use. Not retried.",
+	// Issues #501, #502. The two stops name the policy, never the amount or the model: both are operator
+	// configuration, and the comment's reader may be an issue author who can act on neither.
+	"cost-cap": "Stopped: the next AI call could have taken this run past its cost limit, so it was not made. Partial work may exist. Not retried.",
+	"model-not-allowed": "Stopped: the run tried to call an AI model this trigger does not allow, so the call was not made. Partial work may exist. Not retried.",
+	"cost-cap-unenforceable": "Stopped: this run has a cost limit, and the job image could not enforce it before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.",
+	"model-policy-unenforceable": "Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.",
 };
 
 // Issue #341: the forge comments for a `job-user-unmappable` refusal, keyed by cause. Shorter than the operator
@@ -491,57 +498,16 @@ export async function runJob(job, deps) {
 			log("refused_image_forge_unsupported", { image: img.forgeUnsupported, kind: img.kind, declared: img.declared });
 			return { outcome: "policy", reason: "job-image-forge-unsupported", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
-		if (img.replicaUnsupported) {
-			// The image is present and does not declare replica support (REQ-REPLICA-RUNS), so its baked
-			// HARD_RULES.md predates the amendment and still hard-codes `pi/issue-<n>` as a SYSTEM rule --
-			// which the model treats as authoritative over the user prompt naming `pi/issue-<n>-r2`. Both
-			// replicas would push to one branch: not an error, just the push race the feature exists to
-			// avoid, with two runs billed and one pull request to show for it.
-			//
-			// Determinate, so a refusal rather than a retry, and pre-spend, because no version of this gets
-			// better by running. Like the forge branch above, the message names the FIX rather than the label
-			// that noticed it -- an operator reading "rebuild the image" is already where they need to be.
-			await comment(
-				job,
-				`Refused: the job image "${img.replicaUnsupported}" does not declare replica support (\`dev.pi-dispatch.capabilities\` ${img.declared.length > 0 ? `declares: ${img.declared.join(", ")}` : "is absent"}), so its baked guardrails would name the wrong branch. Rebuild the image from a version that has this feature. Not run.`,
-			);
-			log("refused_image_replicas_unsupported", { image: img.replicaUnsupported, declared: img.declared });
-			return { outcome: "policy", reason: "job-image-replicas-unsupported", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
-		}
-		if (img.commandUnsupported) {
-			// The image is present and does not declare command support (issue #189), so its runner
-			// predates run.command: it reads no PI_COMMAND, and the bare `/name args` prompt reaches the
-			// model as PROSE -- no handler runs, the agent improvises, and the queue records a clean exit
-			// 0. The in-container half of the gate (the runner's own command-unregistered refusal) does
-			// not exist on such an image, which is exactly why the host must refuse first.
-			//
-			// Determinate, so a refusal rather than a retry, and pre-spend, because no version of this
-			// gets better by running. Like the replica branch above, the message names the FIX rather
-			// than the label that noticed it.
-			await comment(
-				job,
-				`Refused: the job image "${img.commandUnsupported}" does not declare command support (\`dev.pi-dispatch.capabilities\` ${img.declared.length > 0 ? `declares: ${img.declared.join(", ")}` : "is absent"}), so its runner would not dispatch \`run.command\`. Rebuild the image from a version that has this feature. Not run.`,
-			);
-			log("refused_image_commands_unsupported", { image: img.commandUnsupported, declared: img.declared });
-			return { outcome: "policy", reason: "job-image-commands-unsupported", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
-		}
-		if (img.excludeToolsUnsupported) {
-			// The image is present and does not declare exclude-tools support (issue #291), so its runner
-			// predates run.excludeTools: it reads no PI_EXCLUDE_TOOLS, and the job would run with every
-			// tool the trigger says to remove -- a "read-only" trigger with a working editor and shell,
-			// recording a clean exit. That is a PERMISSION quietly not enforced, the silent fail-open this
-			// repo brands the worst outcome available, which is exactly why the host refuses before spend
-			// rather than letting the container fail open.
-			//
-			// Determinate, so a refusal rather than a retry, and pre-spend, because no version of this
-			// gets better by running. Like the command branch above, the message names the FIX rather
-			// than the label that noticed it.
-			await comment(
-				job,
-				`Refused: the job image "${img.excludeToolsUnsupported}" does not declare exclude-tools support (\`dev.pi-dispatch.capabilities\` ${img.declared.length > 0 ? `declares: ${img.declared.join(", ")}` : "is absent"}), so its runner would ignore \`run.excludeTools\` and run this trigger with every tool it says to remove. Rebuild the image from a version that has this feature. Not run.`,
-			);
-			log("refused_image_exclude_tools_unsupported", { image: img.excludeToolsUnsupported, declared: img.declared });
-			return { outcome: "policy", reason: "job-image-exclude-tools-unsupported", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		// The image capability gates (one table, CAPABILITY_GATES in image-preflight.mjs): the image is present and
+		// does not declare a feature this job carries, so its runner would silently ignore it. Determinate, so a
+		// refusal rather than a retry, and pre-spend, because no version of this gets better by running. Like the
+		// forge branch above, each row's comment names the FIX rather than the label that noticed it.
+		const gate = CAPABILITY_GATES.find((row) => img[row.result]);
+		if (gate) {
+			const image = img[gate.result];
+			await comment(job, gate.comment(image, img.declared.length > 0 ? `declares: ${img.declared.join(", ")}` : "is absent"));
+			log(gate.event, { image, declared: img.declared });
+			return { outcome: "policy", reason: gate.reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 		if (img.unavailable) {
 			// docker itself did not answer -- transient infra, NOT a determinate refusal. THROWN so BullMQ

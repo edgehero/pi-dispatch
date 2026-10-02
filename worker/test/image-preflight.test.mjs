@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
-import { FIELD_SEP, makeImagePreflight, normalizeImageId, resolveJobImage } from "../src/image-preflight.mjs";
+import { CAPABILITY_GATES, FIELD_SEP, makeImagePreflight, normalizeImageId, resolveJobImage } from "../src/image-preflight.mjs";
 
 // No skip guard, deliberately: unlike run-container.mjs this module imports nothing but node:child_process,
 // and it decides whether a budget slot is spent. A money gate must not have skippable tests.
@@ -314,5 +314,30 @@ test("Podman's bare-hex image id is published in docker's sha256: spelling, and 
 	assert.equal(normalizeImageId(`sha256:${hex}`), `sha256:${hex}`, "docker's own form is untouched");
 	for (const other of ["a".repeat(63), "a".repeat(65), "A".repeat(64), `sha512:${hex}`, "abc", null]) {
 		assert.equal(normalizeImageId(other), other, JSON.stringify(other));
+	}
+});
+
+// --- the capability gates are ONE table (issues #501, #502) ---
+
+test("CAPABILITY_GATES: the three gates in their old order, each keyed once, each free for a job without its feature", async () => {
+	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools"], "the order the branches had, so a job carrying several is refused for the same one");
+	for (const key of ["token", "result", "reason", "event"]) {
+		assert.equal(new Set(CAPABILITY_GATES.map((gate) => gate[key])).size, CAPABILITY_GATES.length, `${key} is unique per row`);
+	}
+	const label = (caps) => `sha256:abc${FIELD_SEP}0.99.1${FIELD_SEP}github${FIELD_SEP}${caps}\n`;
+	// A job carrying EVERY gated feature, on an image that declares none: the first row refuses.
+	const all = { kind: "local", replica: 2, replicas: 2, command: "wf run", excludeTools: ["bash"] };
+	const none = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label("")) });
+	assert.deepEqual(await none(all), { replicaUnsupported: "i", declared: [] });
+	// Declare tokens one at a time: each declaration moves the refusal to the next row, then passes.
+	for (let i = 0; i < CAPABILITY_GATES.length; i++) {
+		const declared = CAPABILITY_GATES.slice(0, i + 1).map((gate) => gate.token);
+		const preflight = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label(declared.join(","))) });
+		const next = CAPABILITY_GATES[i + 1];
+		assert.deepEqual(await preflight(all), next ? { [next.result]: "i", declared } : { ok: true, image: "i", piVersion: "0.99.1", imageDigest: "sha256:abc", capabilities: declared });
+	}
+	for (const gate of CAPABILITY_GATES) {
+		assert.equal(gate.needed({ kind: "github" }), false, `${gate.token}: an unflagged job pays nothing`);
+		assert.match(gate.comment("img", "is absent"), /^Refused: the job image "img" does not declare .* \(`dev\.pi-dispatch\.capabilities` is absent\).* Rebuild the image from a version that has this feature\. Not run\.$/);
 	}
 });

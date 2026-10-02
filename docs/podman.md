@@ -510,7 +510,7 @@ job that meets such a folder anyway is refused before it spends: the runner chec
 `/opt/pi-global` and `/workspace`, and exits 2 as `job-inputs-unreadable`, naming the path. A `/workspace` the job
 can read but not write still runs, with the advisory `workspace_not_writable`, because a read-only review of such a
 folder is a legitimate job. The run record of such a refusal says `runner-policy`, as every runner reason does except
-`provider-auth-refused` (the one the record names itself); the worker's log carries its exit line, where
+the reasons in the worker's `RUNNER_POLICY_REASONS` (the ones the record names itself); the worker's log carries its exit line, where
 `job-inputs-unreadable` and the path are named.
 
 `:Z` relabels a directory recursively on every run, so a forge job whose clone is large pays for relabelling it

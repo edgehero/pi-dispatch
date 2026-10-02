@@ -3,6 +3,7 @@ import { scrubCredentials } from "./redact.mjs";
 import { basename, join } from "node:path";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { isForgeKind, targetSeparator } from "./forges.mjs";
+import { MODEL_REF_PATTERN as USAGE_ID_PATTERN } from "./model-ref.mjs";
 
 /**
  * Durable per-run history.
@@ -118,8 +119,14 @@ export function parseExitTurns(text) {
  * below admits nothing else. A test requires a TERMINAL_COMMENTS row per member. The runner writes the
  * literal in `image/runner/src/outcome.mjs`, which the shipped worker cannot import, so a test reads that
  * source and requires every member here to appear there verbatim.
+ *
+ * The last four are the policy stops of issues #501 (a per-job dollar cap) and #502 (an allowed-model list):
+ * `cost-cap` and `model-not-allowed` when the runner's pre-call guard stopped a call, and
+ * `cost-cap-unenforceable` and `model-policy-unenforceable` when the runner refused, before any call, a policy
+ * it could not enforce before a call. The two refusals are live from the first image that knows the variables
+ * (any cap or list refuses until the guards land); the two stops are reserved for the guards.
  */
-export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused"]);
+export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable"]);
 
 /**
  * The reason off the LAST runner exit line, or `null`: a member of `RUNNER_POLICY_REASONS` and only when
@@ -274,8 +281,15 @@ export function parseExitContext(text) {
  * (`image/runner/run-job.mjs` -> `pickTotals`, which sends the first four and `metered: false`). Order
  * matters because it is what makes a conformant runner's object round-trip byte-identically through the
  * rebuild below, so the record's bytes do not move for anyone running a real image.
+ *
+ * The last five are the policy counters of issues #501 and #502, in the order the runner will emit them
+ * after `unpriced`: `costCapMicros` (the job's cap), `costRefused` (calls the cost guard stopped),
+ * `boundExceeded` (calls that cost more than their bound), `longContext` (calls priced past a long-context
+ * threshold the catalog does not tier), `modelRefused` (calls the model guard stopped). Admitted here before
+ * any runner writes them, because a key missing from this closed list is DROPPED, and the dollar settlement
+ * reads them to decide whether a metered cost is complete: a dropped counter would read as an honest zero.
  */
-const TOKEN_KEYS = ["input", "output", "total", "cost", "metered", "rootTotal", "otherTotal", "looseTotal", "sessions", "calls", "unresolved", "unpriced"];
+export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "metered", "rootTotal", "otherTotal", "looseTotal", "sessions", "calls", "unresolved", "unpriced", "costCapMicros", "costRefused", "boundExceeded", "longContext", "modelRefused"]);
 
 /**
  * Rebuild the billed totals from a closed key list rather than passing the container's object through.
@@ -289,7 +303,7 @@ const TOKEN_KEYS = ["input", "output", "total", "cost", "metered", "rootTotal", 
  * did not, and the asymmetry was an oversight rather than a decision.
  *
  * A key the runner omitted stays OMITTED rather than becoming null: the fallback shape legitimately
- * carries only five of the twelve, and a null there would read as "measured zero" for a number nobody
+ * carries only five of the seventeen, and a null there would read as "measured zero" for a number nobody
  * measured. `typeof === "number"` rather than `Number.isFinite`, deliberately, so this narrows WHICH
  * KEYS survive and never which objects are admitted -- the admission gate above is unchanged.
  */
@@ -319,10 +333,6 @@ export function parseExitTokens(text) {
 	}
 	return null;
 }
-
-/** The id allowlist for a ledger row's provider/model, applied AFTER lowercasing. The first-char class
- *  has no dot, colon or slash, so `.hidden`, `../etc` and `:` shapes fail at character one. */
-const USAGE_ID_PATTERN = /^[a-z0-9][a-z0-9._:/-]{0,63}$/;
 
 /** The ten per-row counters, in the row's serialisation order. Absent is an honest zero; anything
  *  present must be a finite non-negative number or the whole block is refused. */
@@ -392,6 +402,7 @@ function rebuildUsage(u) {
 		// itself never has to admit uppercase.
 		const provider = row.provider.toLowerCase();
 		const model = row.model.toLowerCase();
+		// The id allowlist (model-ref.mjs, widened for issues #501/#502 so every builtin catalog id passes).
 		if (!USAGE_ID_PATTERN.test(provider) || !USAGE_ID_PATTERN.test(model)) return null;
 		const nums = {};
 		for (const key of USAGE_ROW_NUMERIC_KEYS) {

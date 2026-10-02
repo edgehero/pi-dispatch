@@ -8,14 +8,19 @@ import {
 	classifyStopReason,
 	classifyThrow,
 	configError,
+	COST_CAP,
+	COST_CAP_UNENFORCEABLE,
 	decideExit,
 	EXIT_COMPLETED,
 	EXIT_INFRA,
 	EXIT_MESSAGE_MAX_CHARS,
 	EXIT_POLICY,
 	loadRetryPredicate,
+	MODEL_NOT_ALLOWED,
+	MODEL_POLICY_UNENFORCEABLE,
 	providerAuthRefused,
 	STOP_REASONS,
+	TOKEN_BUDGET,
 } from "../src/outcome.mjs";
 import { attachTurnBudget } from "../src/turn-budget.mjs";
 import { agentEnd, assistantError, assistantText, promptTurn, retryTurn } from "./helpers/pi-retry-events.mjs";
@@ -634,4 +639,31 @@ test("decideExit ranks a classified rejection below both budget aborts and above
 	assert.deepEqual(decideExit({ budgetAborted: false, tokenAborted: false, terminal, rejected, command: { failed: true } }), rejected, "a command job's rejection is classified the same way");
 	// Absent, the decision tree is byte-identical to before.
 	assert.deepEqual(decideExit({ budgetAborted: false, tokenAborted: false, terminal }), { code: EXIT_COMPLETED, reason: "toolUse" });
+});
+
+// ── Issues #501/#502: the meter's stop reaches the exit decision by reason ────────────────────────────
+
+test("the four policy reasons are exported literals, spelled once", () => {
+	assert.deepEqual([TOKEN_BUDGET, COST_CAP, MODEL_NOT_ALLOWED, COST_CAP_UNENFORCEABLE, MODEL_POLICY_UNENFORCEABLE], ["token_budget", "cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable"]);
+});
+
+test("decideExit: turn_budget > meterStop > tokenAborted > rejected > the terminal message", () => {
+	const ok = { role: "assistant", stopReason: "stop" };
+	const rejected = { code: EXIT_POLICY, reason: "retry-unresumable", message: "x" };
+	for (const stop of [TOKEN_BUDGET, COST_CAP, MODEL_NOT_ALLOWED]) {
+		assert.deepEqual(decideExit({ budgetAborted: false, meterStop: stop, tokenAborted: false, terminal: ok }), { code: EXIT_POLICY, reason: stop }, stop);
+		assert.equal(decideExit({ budgetAborted: true, budgetTurns: 3, meterStop: stop, terminal: ok }).reason, "turn_budget", `turn budget outranks ${stop}`);
+		assert.equal(decideExit({ budgetAborted: false, meterStop: stop, tokenAborted: false, terminal: ok, rejected }).reason, stop, `${stop} outranks a rejected prompt`);
+		assert.equal(decideExit({ budgetAborted: false, meterStop: stop, tokenAborted: false, terminal: ok, command: { failed: true } }).reason, stop, `${stop} outranks a failed command`);
+	}
+	assert.equal(decideExit({ budgetAborted: false, meterStop: COST_CAP, tokenAborted: true, terminal: ok }).reason, COST_CAP, "the meter's stop outranks the fallback's flag");
+	assert.equal(decideExit({ budgetAborted: false, meterStop: null, tokenAborted: true, terminal: ok, rejected }).reason, TOKEN_BUDGET, "the fallback bus meter still names a token stop");
+	assert.deepEqual(decideExit({ budgetAborted: false, tokenAborted: false, terminal: ok }), { code: EXIT_COMPLETED, reason: "stop" }, "no stop at all: unchanged");
+});
+
+test("classifyThrow honours the tag of both unenforceable refusals: exit 2, its own reason", () => {
+	for (const reason of [COST_CAP_UNENFORCEABLE, MODEL_POLICY_UNENFORCEABLE]) {
+		const outcome = classifyThrow(configError("PI_MAX_COST_MICROS is set but cannot be enforced before a call: no guard", reason));
+		assert.deepEqual([outcome.code, outcome.reason], [EXIT_POLICY, reason]);
+	}
 });
