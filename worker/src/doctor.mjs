@@ -60,8 +60,8 @@ import { randomBytes } from "node:crypto";
 import { DEFAULT_VALKEY_URL, accountTempRoot, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
-import { MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, loadModelEndpoints } from "./model-endpoints.mjs";
-import { endpointsDeclaredIn, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
+import { MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, baseUrlTarget, loadModelEndpoints, renderEndpointsInclude } from "./model-endpoints.mjs";
+import { declaredEndpointsIn, endpointsDeclaredIn, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
 import { loadPauseWindows } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
 import { isForgeKind } from "./forges.mjs";
@@ -77,12 +77,12 @@ import { readDeploymentEnv, resolveServiceEnv, serviceEnvFileOf, serviceEnvLoade
 import { imageRefProblem } from "./image-ref.mjs";
 import { PROXY_STATE_FORMAT, parseProxyState, rulesIncludeEndpoints, shippedProxyDrift } from "./egress-proxy-state.mjs";
 import { PACKAGED_EGRESS_PROXY_CONF, judgeProxyConfCopy, packageCopyName, readPackagedProxyConf } from "./egress-conf-copy.mjs";
-import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
-import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, observePodman, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
+import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, HOST_ROUTE_LAN, HOST_ROUTE_REFUTED, HOST_ROUTE_WORKS, declarationOf, floorShortfall, hostRouteFor, isProxyLocalHost, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
+import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, observePodman, observeRootlessNetns, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { PODMAN_PINNED_FLAGS, buildPodmanRunArgs, containerSpec, podmanArgsFromSpec } from "./docker-run.mjs";
 import { PODMAN_SERVICE_TIMEOUT_MS, PODMAN_SERVICE_UNIT, makePodmanServiceReader, observeHost, observeRootfulConf, readRootfulService, rootfulConfFix, rootfulConfRetries, rootfulConfResidual, rootfulUnreadList } from "./runtime-observations.mjs";
 import { endpointShown, makeDockerEndpointResolver, quotedShown } from "./backend-local.mjs";
-import { DEFAULT_EGRESS_PROXY, STOPPED_PROXY_STATES, EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, egressArmed, egressCanaryNetwork, egressCanaryProbe, egressEnv, egressProxyName, egressProxyUrl, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
+import { DEFAULT_EGRESS_PROXY, STOPPED_PROXY_STATES, EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, EGRESS_ENDPOINT_PROBE_PREFIX, egressArmed, egressCanaryNetwork, egressCanaryProbe, egressEndpointProbe, egressEnv, egressProxyName, egressProxyUrl, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { detachBlockedSentence, makeDetachGate, runtimeFromFacts } from "./netns-keeper.mjs";
 import { runLiveProbes } from "./live-probes.mjs";
 import { VALKEY_PASSWORD_KEY, VALKEY_PASSWORD_HOWTO, VALKEY_PORT_KEY, isLoopbackHost, valkeyPasswordProblem, valkeyPortConflict } from "./valkey-auth.mjs";
@@ -218,6 +218,10 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		proxyFileIsDirectory,
 		// Issue #503: whether the shipped proxy's third mount is needed (`proxyIncludeNeeds`), for tests.
 		includeNeeds,
+		// Issue #503 (part 6): the declared model endpoints as the service reads them, and this host's own LAN IPv4
+		// addresses for the measured route table, both for tests. The real reads are the defaults where they are used.
+		declaredEndpoints,
+		hostAddresses,
 		// Issue #484: how a copy of the proxy's rules is read, and the installed package's copy it is compared with.
 		readProxyConf,
 		readPackagedProxyConf: readPackagedConf,
@@ -332,7 +336,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -1624,6 +1628,32 @@ export async function collectChecks(shellVars, seams) {
 	const readFactsOnce = () => (factsRead ??= makeDaemonFactsReader({ run: dockerRunVia(spawn, DAEMON_FACTS_TIMEOUT_MS) })());
 	const egress = localUsed ? await egressChecks(env, { ...seams, readFactsOnce }, { dockerCode, imageCode, jobImage, endpoint }) : [];
 	checks.push(...egress);
+	// Issue #503: an allowlist naming a host alias, once for every venue (both mount this folder's allowlist). Read only with
+	// the policy armed, which is when the file is a policy at all; a file that is not there or cannot be read says nothing.
+	let allowlistArmed = false;
+	try {
+		allowlistArmed = egressArmed(env) === true;
+	} catch {
+		// A malformed PI_EGRESS: the .env check reports it.
+	}
+	if (allowlistArmed) {
+		let aliases = [];
+		try {
+			aliases = allowlistHostAliases(readFileSync(join(seams.cwd, "egress-allowlist.conf"), "utf8"));
+		} catch {
+			// No allowlist in this folder.
+		}
+		for (const { alias, entry } of aliases) {
+			// The entry as written, when it is not the alias itself, is quoted: it is the operator's own file, but still text.
+			const named = entry.toLowerCase().replace(/^\./, "") === alias ? alias : `${quotedShown(entry)}, which admits ${alias}`;
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `egress-allowlist.conf lists ${named}, which lets a job open a CONNECT to that host's port 443 and send plain HTTP to its port 80, and reaches no model server's port`,
+				fix: `remove it, and declare the model server in model-endpoints.json instead, which opens a tunnel to exactly its host and port: docs/egress.md, "Local model servers"`,
+			});
+		}
+	}
 	if (facts) {
 		let armed;
 		try {
@@ -2393,6 +2423,26 @@ export async function collectChecks(shellVars, seams) {
 				}
 			}
 			checks.push({ ok: modelsOk, label: "Overlay models.json is credential-free", fix: modelsFix });
+			// Issue #503: a model whose baseUrl is localhost or a loopback literal can never be reached from a job, egress on
+			// or off, because inside a job that address is the job's own container. Said whatever is declared: an overlay
+			// pointed at localhost is the first thing an operator tries, and the fix is the declaration. Nothing when the file
+			// is absent or does not parse (the line above names that).
+			if (fileExists(modelsPath)) {
+				let loopback = [];
+				try {
+					loopback = overlayLoopbackModels(JSON.parse(readFileSync(modelsPath, "utf8")));
+				} catch {
+					// The line above says it is not valid JSON.
+				}
+				if (loopback.length > 0) {
+					checks.push({
+						ok: false,
+						warn: true,
+						label: `Overlay models.json points ${loopback.join(", ")} at a loopback address, which inside a job is the job's own container, so no job reaches that server`,
+						fix: "serve the model on an address the egress proxy reaches, declare it in model-endpoints.json (host.docker.internal on Docker, host.containers.internal on Podman), and point the baseUrl there: docs/egress.md, \"Local model servers\"",
+					});
+				}
+			}
 			// Staged extensions load unless the operator opted out, so this pair reports what WILL run, not
 			// what is switched on. The ⚠ sits on the loading case: it is the one where code the operator may
 			// have staged months ago is executing against adversarial input right now. It stays a warning and
@@ -4265,7 +4315,11 @@ export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bi
 	// three lines below, so today there is nothing to escape and escaping it would say the set is untrusted
 	// when it is this file's own. It is here so that whoever adds a slug with a `.` or a `-` in it sees the
 	// obligation: a metacharacter there widens what this `rm -f` matches (issue #360, item 6).
-	const probeOf = (owner) => new RegExp(`^${EGRESS_CANARY_PROBE_PREFIX}(?:${CANARY_PROBE_SLUGS.join("|")})-${owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
+	//
+	// The model endpoint probes (issue #503) are matched the same way, their slugs from `ENDPOINT_PROBE_SLUGS` and the id
+	// by the parser's own rule (`MODEL_ENDPOINT_ID_RE`, its anchors dropped), never `\\S+`: a name that matches is one
+	// this file builds, and the class cannot drift from what the parser accepts.
+	const probeOf = (owner) => new RegExp(`^(?:${EGRESS_CANARY_PROBE_PREFIX}(?:${CANARY_PROBE_SLUGS.join("|")})|${EGRESS_ENDPOINT_PROBE_PREFIX}(?:${ENDPOINT_PROBE_SLUGS.join("|")})-${ENDPOINT_ID_CLASS})-${owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
 	const checks = [];
 	for (const name of String(listed.stdout ?? "").split("\n").map((n) => n.trim()).filter(Boolean)) {
 		const m = shape.exec(name);
@@ -4666,6 +4720,18 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 		// Endpoints declared under rules that predate #503: the one line up, doctor and egress render share.
 		if (needs.endpointsDeclared && !needs.rulesInclude) checks.push({ ok: false, warn: true, label: rulesPredateEndpointsLine("docker"), fix: "a reload or a proxy replace changes nothing here: the rules themselves must include the file, and the refresh `pi-dispatch up` offers replaces the proxy with them" });
 	}
+	// Issue #503: the declared model endpoints, read as the service reads them. None declared is no line and no container,
+	// so a deployment without them prints what it always did. Under rules that predate the include the line just above is
+	// the whole story (a probe would only fail it again), so nothing more is said there. A proxy PI_EGRESS_PROXY names
+	// must include the file itself, and is read like the shipped one.
+	const { declaredEndpoints = ({ env: e, cwd, platform }) => declaredEndpointsIn({ env: e, cwd, fs: { readFileSync, existsSync }, platform }), hostAddresses = () => lanIPv4Addresses(networkInterfaces()) } = seams;
+	const declared = declaredEndpoints({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform });
+	const endpoints = declared.length > 0 && !(!custom && inFolder && !needs.rulesInclude) ? declared : [];
+	if (endpoints.length > 0) {
+		const runtime = routeRuntimeFromFacts(seams.readFactsOnce ? await seams.readFactsOnce() : null, seams.platform ?? process.platform);
+		const addresses = hostAddresses();
+		checks.push(...endpointRouteChecks({ runtime: runtime && addresses ? { ...runtime, hostAddresses: addresses } : runtime, endpoints, prefix: "", proof: "The endpoint probes below are the proof, once the proxy runs and the job image is here." }));
+	}
 	const judged = !custom && parsed ? shippedProxyDrift(parsed, { cwd: seams.cwd, platform: seams.platform ?? process.platform, realpath: (p) => realpathSync(p), compareMounts: inFolder, rulesInclude: needs.rulesInclude }) : { drift: [], unknown: null };
 	// What `up` does with it, told the way `up` decides it (PR #456's final check): a proxy stale by its image, entrypoint
 	// or command is offered for replacement whatever its mounts; one stale on its mounts alone is not while one of its own
@@ -4753,12 +4819,21 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// Credential-free by construction: `api.anthropic.com` answers 401 to an unauthenticated request, so
 	// reaching the provider and being refused for the key proves the entire path and costs nothing. That is
 	// docs/egress.md's own method, promoted from prose to a check.
+	// Issue #503: the include as the running proxy sees it. Not for a shipped proxy already judged stale above: its mounts
+	// are that line's to name, and a two-mount proxy has no include to read.
+	if (endpoints.length > 0 && !(!custom && judged.drift.length > 0)) {
+		const inside = await runCmdCapture(spawn, "docker", ["exec", proxy, "cat", ENDPOINTS_INCLUDE_IN_PROXY], { stdoutOnly: true, timeoutMs: CANARY_STEP_TIMEOUT_MS });
+		// The file the proxy ACTUALLY mounts there, by its bind source from the inspect above, for the shipped proxy and
+		// an operator's alike: never this folder's, which may not be the one mounted (gate round 2).
+		const mounted = readIncludeBindSource(parsed?.mounts);
+		checks.push(endpointsIncludeCheck({ answer: inside, endpoints, bin: "docker", proxy, prefix: "", mounted, recreate: custom ? `recreate ${proxy} so it mounts the file anew` : `\`docker rm -f -v ${proxy}\`, then \`pi-dispatch up\` starts it on the file anew (a restart cuts running jobs' tunnels)` }));
+	}
 	if (imageCode !== 0) return checks;
 	// Issue #431: the canary itself is `runEgressCanary`, shared with the podman venue's `--live` and the conformance
 	// script. docker's probes keep `runCmdCapture` (its 30 s bound, stderr merged, SIGTERM at the bound) rather than the
 	// bounded step runner, so docker's spawns, and what a probe that never launched leaves for the teardown, are exactly
 	// what they were: pinned in doctor.test.mjs against the output and argv captured before the move.
-	const canary = await runEgressCanary({ run: liveRunVia(spawn), probeRun: (args) => runCmdCapture(spawn, "docker", args), proxy, image: jobImage, pid, gate });
+	const canary = await runEgressCanary({ run: liveRunVia(spawn), probeRun: (args) => runCmdCapture(spawn, "docker", args), proxy, image: jobImage, pid, gate, endpoints });
 	// Through a stale proxy the canary reads THAT proxy's policy (exec round 3): a failure is the proxy's to fix, never
 	// this deployment's allowlist, which it may not even mount.
 	checks.push(...(staleRunning ? canary.checks.map((c) => (c.ok ? c : { ...c, fix: `the canary ran through ${proxy}, which is not this deployment's proxy (above), so this says nothing about egress-allowlist.conf: ${replaceFix}, then re-run doctor` })) : canary.checks));
@@ -4773,6 +4848,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
  *
  * `script` is what the container runs, the runner's route (`egressCanaryScript`) unless a probe says otherwise: the
  * plain HTTP probe (issue #508) passes `egressCanaryPlainScript`, and its argv differs from the others in nothing else.
+ * A model endpoint's probe (issue #503) passes its own `name` and `httpProxy`, which adds the job's HTTP_PROXY on docker.
  *
  * podman's is a JOB's, built by the podman venue's own builder (`podmanArgsFromSpec` over `containerSpec`, the path
  * `buildPodmanRunArgs` takes), never a hand-rolled argv: `ISOLATION_FLAGS`, the job's memory and cpu bounds,
@@ -4790,8 +4866,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
  * then replaced by none; `CANARY_NO_WORKSPACE` is a path nothing creates, so if a later edit ever kept the mount, the
  * run would fail on a missing source rather than bind a real directory.
  */
-export function egressCanaryProbeArgs({ bin = "docker", slug, pid, network, proxy, image, url, user = null, script = egressCanaryScript(url) }) {
-	const name = egressCanaryProbe(slug, pid);
+export function egressCanaryProbeArgs({ bin = "docker", slug, pid, network, proxy, image, url, user = null, script = egressCanaryScript(url), name = egressCanaryProbe(slug, pid), httpProxy = false }) {
 	if (bin !== "podman") {
 		return [
 			"run",
@@ -4806,6 +4881,9 @@ export function egressCanaryProbeArgs({ bin = "docker", slug, pid, network, prox
 			`--network=${network}`,
 			"-e",
 			`HTTPS_PROXY=http://${proxy}:3128`,
+			// Only for a model endpoint's probe (issue #503), whose URL is `http://`: the runner's dispatcher sends that to
+			// HTTP_PROXY, as a job's does. The canary's own three argv are unchanged.
+			...(httpProxy ? ["-e", `HTTP_PROXY=http://${proxy}:3128`] : []),
 			"-e",
 			"NODE_USE_ENV_PROXY=1",
 			"--entrypoint",
@@ -4844,8 +4922,11 @@ const CANARY_NO_WORKSPACE = "/nonexistent/pi-dispatch-egress-canary-mounts-nothi
  * measured), which a 30 s bound would read as a probe that did not run. `user` is the job user, required on podman,
  * whose builder refuses a keep-id argv without one. What it does NOT check is the proxy: every caller has read the
  * proxy's state on its own runtime first, and runs this only when it is up and the job image is present.
+ *
+ * `endpoints` (issue #503) are the declared model endpoints to prove on the same network after the three
+ * (`runEndpointProbes`), `[]` by default, so the conformance script and a deployment with none run exactly the three.
  */
-export async function runEgressCanary({ run, bin = "docker", proxy, image, pid = process.pid, user = null, probeRun = null, gate = makeDetachGate((args, opts) => run(args, { timeoutMs: opts?.timeoutMs ?? CANARY_STEP_TIMEOUT_MS }), { bin }) }) {
+export async function runEgressCanary({ run, bin = "docker", proxy, image, pid = process.pid, user = null, probeRun = null, endpoints = [], gate = makeDetachGate((args, opts) => run(args, { timeoutMs: opts?.timeoutMs ?? CANARY_STEP_TIMEOUT_MS }), { bin }) }) {
 	const venue = canaryVenueFor(bin);
 	const probe = probeRun ?? ((args) => run(args, { timeoutMs: bin === "podman" ? PODMAN_FIRST_START_TIMEOUT_MS : RUN_TIMEOUTS.cmd }));
 	const checks = [];
@@ -4858,6 +4939,8 @@ export async function runEgressCanary({ run, bin = "docker", proxy, image, pid =
 	// Probe containers this run may have left BEHIND its CLI, see the `code === null` branch below.
 	const unfinished = [];
 	let created = false;
+	// The canary stopped on an image with no runner module: the endpoint probes take the same route, so they are not run.
+	let staleRunner = false;
 	// FIRST, before anything exists (issue #452, gate round 3): this canary's own teardown detaches the running proxy, which
 	// on a rootless Podman 4.x without a holding keeper cuts its route out, through `podman`, `podman-docker` or the Docker
 	// API alike (measured). So the detach gate every teardown goes through is asked up front, and a refusal runs nothing:
@@ -4944,6 +5027,7 @@ export async function runEgressCanary({ run, bin = "docker", proxy, image, pid =
 					fix: `use a job image built after issue #427 (ghcr.io/edgehero/pi-job:latest, or rebuild yours FROM it), or set PI_EGRESS=0 until you can`,
 					readBack: { property: "egress", want, reached: null, probe: slug },
 				});
+				staleRunner = true;
 				break;
 			}
 			if (answer.code !== 0 && answer.code !== 3) {
@@ -4991,6 +5075,15 @@ export async function runEgressCanary({ run, bin = "docker", proxy, image, pid =
 					: `check egress-allowlist.conf: a rule wider than you meant (a bare domain where you wanted a subdomain) lets a job reach hosts you did not list`,
 			});
 		}
+		// Issue #503: each declared model endpoint, on this same network, after the canary's own three. Its lines carry no
+		// `readBack`, so `egressVerdict` reads exactly the three readings it always did.
+		if (endpoints.length > 0) {
+			if (staleRunner) {
+				checks.push({ ok: false, warn: true, label: `${venue.prefix}Model endpoints: not probed, because the job image has no runner module (above), and their probes take the runner's route`, fix: "use a job image built after issue #427, then re-run doctor" });
+			} else {
+				checks.push(...(await runEndpointProbes({ probe, bin, pid, network: net, proxy, image, user, endpoints, venue, unfinished })));
+			}
+		}
 	} finally {
 		// The probes FIRST, by the name carrying this pid, then the network: a member still attached is exactly
 		// why the old `network rm` failed, and it failed silently. `rm -f` of a name that is not there is docker
@@ -5026,6 +5119,407 @@ export async function runEgressCanary({ run, bin = "docker", proxy, image, pid =
 /** The canary's readings, `[{ property, want, reached }]`, off its checks: what `egressVerdict` reads. */
 function readingsOf(checks) {
 	return checks.filter((c) => c.readBack?.property === "egress").map((c) => c.readBack);
+}
+
+/**
+ * The probes doctor runs per declared model endpoint (issue #503, REQ-EGRESS-ALLOWLIST), in this order, and ONE list:
+ * the loop names its containers from it and the dead-pid sweep matches on it, as `CANARY_PROBE_SLUGS` is shared. Not
+ * folded into `CANARY_PROBE_SLUGS`, whose three readings are what `egressVerdict` reads; these never reach it.
+ *   - `models`: `GET http://<host>:<port>/v1/models` by the runner's route, which tunnels it, as a job's provider call
+ *     goes. Must answer 200: Ollama, llama-server, vLLM and LM Studio all serve that path.
+ *   - `nextport`: the same, to the nearest port above that no declaration for that host uses and that the allowlist's
+ *     own rules do not open (`undeclaredPortNear`). Must get the proxy's 403 on the CONNECT, which proves the
+ *     endpoint's rule is port-exact.
+ *   - `plain`: a plain forward `GET` to the declared port. Must get squid's 403, which proves the include adds a tunnel
+ *     and nothing else.
+ */
+export const ENDPOINT_PROBE_SLUGS = Object.freeze(["models", "nextport", "plain"]);
+
+/** The parser's id rule without its anchors, for the sweep's pattern. */
+const ENDPOINT_ID_CLASS = MODEL_ENDPOINT_ID_RE.source.replace(/^\^/, "").replace(/\$$/, "");
+
+/** How long an endpoint probe waits for its answer inside the container: a server that takes the tunnel and never answers. */
+const ENDPOINT_PROBE_TIMEOUT_MS = 15_000;
+
+/** Where the proxy reads the include, in every venue's mount (compose, the Quadlet unit, the hand-started recipe). */
+export const ENDPOINTS_INCLUDE_IN_PROXY = "/etc/pi-dispatch/model-endpoints.conf";
+
+/**
+ * The tunnelled endpoint probes' in-container script: the runner's route (`loadPiThenRestore`), then one `GET`. It is
+ * `egressCanaryScript` with two differences. It sends a GET, the method a model list is read with. And it reports the
+ * PROXY's answer to the CONNECT when there is one: a refused or failed tunnel reaches the caller only as an error whose
+ * cause chain carries undici's `Proxy response (<status>) !== 200 when HTTP Tunneling` (measured on 2026-09-30, M9:
+ * a job sees squid's 503, "allowed but nothing answered", and its 403, "not declared", alike as "Connection error"). So
+ * the script walks the chain for that text, and doctor shows the status. The text is pinned at the 0.99.1 pin's undici
+ * 8.10.2 (`lib/dispatcher/proxy-agent.js`) by a test that runs this script against a fake proxy.
+ *
+ * Prints ONE line: `reached <status>` (exit 0), `tunnel <status>` (exit 3), `blocked <code>` (exit 6: no answer, and no
+ * proxy status, as for a request that went around the proxy or timed out), `error ...` (exit 5, or 4 for an image with
+ * no runner module).
+ */
+export function egressEndpointScript(url, { timeoutMs = ENDPOINT_PROBE_TIMEOUT_MS } = {}) {
+	return `import(${JSON.stringify(EGRESS_CANARY_RUNNER_MODULE)}).then(m=>m.loadPiThenRestore(),e=>{console.log("error",e.code??e.message);process.exit(e.code==="ERR_MODULE_NOT_FOUND"?${EGRESS_CANARY_STALE_RUNNER}:5)}).then(()=>fetch(${JSON.stringify(url)},{signal:AbortSignal.timeout(${Number(timeoutMs)})}).then(r=>{console.log("reached",r.status);process.exit(0)},e=>{let c=e,s=null;for(let i=0;c&&i<8&&s===null;i++){const m=/Proxy response \\((\\d{3})\\) !== 200 when HTTP Tunneling/.exec(String(c.message??""));if(m)s=m[1];c=c.cause}if(s!==null){console.log("tunnel",s);process.exit(3)}console.log("blocked",e.cause?.code??e.name??"error");process.exit(6)}),e=>{console.log("error",e.message);process.exit(5)})`;
+}
+
+/**
+ * What one endpoint probe printed, as `{ kind, status, detail }`, or null. Read from the LAST line of that shape, since
+ * a runtime may print its own lines first. `detail` is kept only when it is a short code word: the plain probe's is the
+ * `X-Squid-Error` header, which a server that answered instead of the proxy writes, and a terminal is not handed that.
+ */
+function endpointProbeReading(answer) {
+	const lines = String(answer?.output ?? answer?.stdout ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const m = /^(reached|tunnel|blocked|error)(?: (\d{3}))?(?: (\S+))?/.exec(lines[i]);
+		if (m) return { kind: m[1], status: m[2] ? Number(m[2]) : null, detail: m[3] && /^[A-Za-z_]{1,40}$/.test(m[3]) ? m[3] : "" };
+	}
+	return null;
+}
+
+/** `host:port` as a URL writes it (an IPv6 host is stored in brackets already). */
+function endpointAddress(host, port) {
+	return `${host}:${port}`;
+}
+
+/** Endpoints in id order, the order the include is rendered in. */
+function endpointsById(endpoints) {
+	return [...endpoints].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/** The exits each probe's script ends a READING with; any other exit is a container that did not run it. */
+const ENDPOINT_PROBE_READ_EXITS = Object.freeze({ models: [0, 3, 6], nextport: [0, 3, 6], plain: [0, 3] });
+
+/**
+ * One endpoint probe's line. Every line names the endpoint id and shows the proxy's status, and every one is warn-tier,
+ * as the canary's are: each needs the network to answer. What passes, and nothing else:
+ *   - `models`: the server answered 200 through the tunnel;
+ *   - `nextport`: the proxy refused the TUNNEL with 403. A 503 there means the proxy let the CONNECT through and found
+ *     nothing listening, so the rule is not port-exact; a server's own 403 through a tunnel is the same finding;
+ *   - `plain`: a 403 carrying squid's `X-Squid-Error: ERR_ACCESS_DENIED`. A bare 403 may be the server's own answer to a
+ *     request the proxy forwarded.
+ */
+function endpointProbeCheck({ slug, endpoint, answer, venue, bin, proxy, next }) {
+	const head = `${venue.prefix}Model endpoint ${endpoint.id}`;
+	const at = endpointAddress(endpoint.host, endpoint.port);
+	const reading = endpointProbeReading(answer);
+	const tag = { id: endpoint.id, probe: slug, kind: reading?.kind ?? null, status: reading?.status ?? null };
+	if (!ENDPOINT_PROBE_READ_EXITS[slug].includes(answer?.code) || !reading || reading.kind === "error") {
+		return {
+			ok: false,
+			warn: true,
+			label: `${head}: the ${slug} probe did not run (${answer?.code === null || answer?.code === undefined ? `${bin} run did not finish` : `${bin} run exited ${answer.code}`})`,
+			fix: "re-run doctor; if it persists, run the job image by hand to see why a container on this network will not start",
+			endpointProbe: tag,
+		};
+	}
+	const reload = reloadCommand(bin, proxy);
+	if (slug === "models") {
+		if (reading.kind === "reached" && reading.status === 200) return { ok: true, warn: true, label: `${head} answers through the proxy (GET http://${at}/v1/models through a CONNECT tunnel: 200)`, endpointProbe: tag };
+		// The SERVER refused the request for want of a key (vLLM --api-key, a gateway in front): the route and the rule are
+		// proved, since only an open tunnel carries the server's own answer. Said apart from a fault, still warn-tier.
+		if (reading.kind === "reached" && (reading.status === 401 || reading.status === 403)) {
+			return {
+				ok: false,
+				warn: true,
+				label: `${head}: the route through the proxy works (the tunnel to ${at} opened), and the server wants a key (GET /v1/models answered ${reading.status})`,
+				fix: "declare it without \"keyless\" and give its provider its key, as for any provider that needs one; nothing about the egress proxy needs changing",
+				endpointProbe: tag,
+			};
+		}
+		// A server that took the connection and never answered is not one to start: say what was seen.
+		const timedOut = reading.kind === "blocked" && reading.detail === "TimeoutError";
+		const why =
+			reading.kind === "tunnel"
+				? reading.status === 503
+					? `the proxy allowed the tunnel to ${at} and answered 503, so nothing answered there`
+					: reading.status === 403
+						? `the proxy refused the tunnel to ${at} with 403, so the rules it runs do not allow this endpoint`
+						: `the proxy answered ${reading.status} to the CONNECT to ${at}`
+				: reading.kind === "reached"
+					? `the tunnel to ${at} was let through, but GET /v1/models answered ${reading.status}, not 200`
+					: timedOut
+						? `it accepted the connection but did not answer /v1/models within ${ENDPOINT_PROBE_TIMEOUT_MS / 1000} s`
+						: `no answer came back through the proxy (${reading.detail || "no reason given"})`;
+		const fix =
+			reading.kind === "tunnel" && reading.status === 403
+				? `\`pi-dispatch egress render\` in the deployment folder, then \`${reload}\`; the include line above says whether the proxy holds the declared rules`
+				: reading.kind === "reached"
+					? "check that this port is the model server's and that it serves the OpenAI-compatible API under /v1 (Ollama, llama-server, vLLM and LM Studio do)"
+					: timedOut
+						? "the server is there but stuck or busy (a model still loading, every slot taken): check its own log, then re-run doctor"
+						: bin === "podman"
+							? `start the model server, bound to this host's LAN address or 0.0.0.0 (never 127.0.0.1 alone), and declare a server on this host as host.containers.internal (docs/egress.md, "Local model servers"). A job meets this as "Connection error"`
+							: `start the model server, and check it listens where the proxy reaches it (docs/egress.md, "Local model servers"; on Docker Engine that is 172.17.0.1 or 0.0.0.0, never 127.0.0.1 alone). A job meets this as "Connection error"`;
+		return { ok: false, warn: true, label: `${head} does NOT answer: ${why}`, fix, endpointProbe: tag };
+	}
+	const wider = `the proxy's rules are wider than model-endpoints.conf renders: compare the include inside it (\`${bin} exec ${proxy} cat ${ENDPOINTS_INCLUDE_IN_PROXY}\`) with \`pi-dispatch egress render\`'s, check egress-allowlist.conf does not list ${endpoint.host}, then \`${reload}\``;
+	if (slug === "nextport") {
+		const nextAt = endpointAddress(endpoint.host, next);
+		if (reading.kind === "tunnel" && reading.status === 403) return { ok: true, warn: true, label: `${head}'s rule is port-exact (a CONNECT to ${nextAt}, a port nobody declared, got the proxy's 403)`, endpointProbe: tag };
+		const what =
+			reading.kind === "tunnel"
+				? reading.status === 503
+					? `the proxy let a CONNECT to ${nextAt}, a port nobody declared, through and answered 503 (nothing listens there)`
+					: `the proxy answered ${reading.status} to a CONNECT to ${nextAt}, not its 403`
+				: reading.kind === "reached"
+					? `a CONNECT to ${nextAt}, a port nobody declared, was let through, and something there answered ${reading.status}`
+					: `a CONNECT to ${nextAt} got no answer from the proxy (${reading.detail || "no reason given"}), so the refusal was not seen`;
+		return { ok: false, warn: true, label: `${head}'s rule is NOT shown to be port-exact: ${what}`, fix: wider, endpointProbe: tag };
+	}
+	if (reading.status === 403 && reading.detail.startsWith("ERR_ACCESS_DENIED")) return { ok: true, warn: true, label: `${head} admits no plain forward request (GET http://${at}/v1/models without a tunnel got the proxy's 403 ${reading.detail})`, endpointProbe: tag };
+	return {
+		ok: false,
+		warn: true,
+		label: `${head} admits a plain forward request: GET http://${at}/v1/models without a tunnel got ${reading.status ?? "no status"}${reading.detail ? ` ${reading.detail}` : ""}, not the proxy's 403 ERR_ACCESS_DENIED`,
+		fix: wider,
+		endpointProbe: tag,
+	};
+}
+
+/**
+ * The port the `nextport` probe asks for (issue #503): the first one above the declared port that no declaration for the
+ * same host uses, wrapping below the declared port past 65535. Never 443 or 80, which the allowlist admits for a listed
+ * host (a CONNECT to 443, plain HTTP to 80): a host that is also listed would pass there by that rule, and the line would
+ * blame the endpoint's. Skipped whether or not the host is listed, which costs nothing and reads no file. The port
+ * itself is shown on the line. `null` only when every other port of the host is declared, which no real file does.
+ */
+export function undeclaredPortNear(endpoint, endpoints) {
+	const taken = new Set((endpoints ?? []).filter((e) => e.host === endpoint.host).map((e) => e.port));
+	const free = (p) => p !== endpoint.port && !taken.has(p) && p !== 443 && p !== 80;
+	for (let p = endpoint.port + 1; p <= 65535; p++) if (free(p)) return p;
+	for (let p = endpoint.port - 1; p >= 1; p--) if (free(p)) return p;
+	return null;
+}
+
+/**
+ * The three probes for each declared endpoint (issue #503), in id order, on the canary's network and through the
+ * canary's own runner, so the teardown that removes the canary's probes removes these too (`unfinished` is the
+ * canary's list). Each container is built by `egressCanaryProbeArgs`, a job's shape, with the job's plain-HTTP proxy
+ * variable as well on docker: the runner's dispatcher sends an `http://` origin to HTTP_PROXY, which docker's canary
+ * argv does not otherwise carry (podman's is a job's environment and has it).
+ */
+async function runEndpointProbes({ probe, bin, pid, network, proxy, image, user, endpoints, venue, unfinished }) {
+	const checks = [];
+	for (const endpoint of endpointsById(endpoints)) {
+		const next = undeclaredPortNear(endpoint, endpoints);
+		const models = `http://${endpointAddress(endpoint.host, endpoint.port)}/v1/models`;
+		const nextUrl = `http://${endpointAddress(endpoint.host, next)}/v1/models`;
+		const runs = [
+			[ENDPOINT_PROBE_SLUGS[0], models, egressEndpointScript(models)],
+			...(next === null ? [] : [[ENDPOINT_PROBE_SLUGS[1], nextUrl, egressEndpointScript(nextUrl)]]),
+			[ENDPOINT_PROBE_SLUGS[2], models, egressCanaryPlainScript(models, { proxyUrl: egressProxyUrl(proxy) })],
+		];
+		for (const [slug, url, script] of runs) {
+			const name = egressEndpointProbe(slug, endpoint.id, pid);
+			const answer = await probe(egressCanaryProbeArgs({ bin, slug, name, pid, network, proxy, image, url, user, script, httpProxy: true }));
+			if (answer?.code === null && answer.ended !== "error") unfinished.push(name);
+			checks.push(endpointProbeCheck({ slug, endpoint, answer, venue, bin, proxy, next }));
+		}
+	}
+	return checks;
+}
+
+/**
+ * The include as the RUNNING proxy sees it, against what the declaration renders (issue #503). Read inside the
+ * container, never from this folder's file: a single-file bind mount holds the inode, so a file replaced by a rename
+ * leaves the container on the OLD one, and a reload then silently loads the old rules (measured on 2026-09-30, M3, on
+ * Docker and Podman on Linux). `answer` is the `<bin> exec <proxy> cat` capture; `recreate` is the venue's way to start
+ * the proxy on the file anew.
+ */
+function endpointsIncludeCheck({ answer, endpoints, bin, proxy, prefix, recreate, mounted = null }) {
+	const read = `${bin} exec ${proxy} cat ${ENDPOINTS_INCLUDE_IN_PROXY}`;
+	if (answer?.code !== 0) {
+		return {
+			ok: false,
+			warn: true,
+			label: `${prefix}Model endpoints: the include inside the running proxy could not be read (\`${read}\` ${answer?.code === null || answer?.code === undefined ? "did not finish" : `exited ${answer.code}`})`,
+			fix: `the proxy must mount this deployment's model-endpoints.conf at ${ENDPOINTS_INCLUDE_IN_PROXY}, as the shipped proxy does; run the command yourself to see why it fails`,
+		};
+	}
+	const ids = endpointsById(endpoints).map((e) => e.id).join(", ");
+	// The file the proxy mounts, by its bind source, against what the container holds, FIRST (issue #503, gate rounds 1
+	// and 2): a file replaced by a rename on the host leaves the container on the old inode, so the two differ, and no
+	// render or reload reaches the proxy until it is started on the file anew. Without this, a hand-replaced file whose
+	// JSON did not change read ✓. `mounted` is null when there is no such bind or it cannot be read here: no compare.
+	if (mounted && mounted.text !== String(answer.output)) {
+		return {
+			ok: false,
+			label: `${prefix}Model endpoints: the proxy is mounted on a replaced file: the file it mounts (${mounted.path}) differs from what ${proxy} reads at ${ENDPOINTS_INCLUDE_IN_PROXY}, so it was replaced (a rename, an editor's save) rather than written in place, and no reload reaches the proxy`,
+			fix: `recreate the proxy so it mounts the file anew: ${recreate}. From then on, change the file only with \`pi-dispatch egress render\`, which writes in place`,
+		};
+	}
+	if (String(answer.output) === renderEndpointsInclude(endpoints)) {
+		return { ok: true, label: `${prefix}Model endpoints: the include inside the running proxy matches model-endpoints.json (${ids})` };
+	}
+	return {
+		ok: false,
+		label: `${prefix}Model endpoints: the include inside the running proxy (${ENDPOINTS_INCLUDE_IN_PROXY} in ${proxy}) does not match model-endpoints.json (${ids}), so a reload would not load the declared rules`,
+		fix: `\`pi-dispatch egress render\` in the deployment folder, then \`${reloadCommand(bin, proxy)}\`. If the render says the file already matches and this line stays, the proxy holds an earlier copy of a file that was replaced rather than written in place, which a reload never sees: ${recreate}`,
+	};
+}
+
+/**
+ * The text of the host file a proxy bind-mounts at the include's path (issue #503, gate round 2), from its inspected
+ * `[{ type, source, destination }]`, or null: no such bind, or a source this host cannot read (Docker Desktop reports the
+ * real macOS path, so it reads there), and then the replaced-file compare is skipped rather than guessed.
+ */
+function readIncludeBindSource(mounts) {
+	const bind = (Array.isArray(mounts) ? mounts : []).find((m) => m?.type === "bind" && m.destination === ENDPOINTS_INCLUDE_IN_PROXY);
+	if (!bind || typeof bind.source !== "string" || !isAbsolute(bind.source)) return null;
+	const text = readTextOrNull(bind.source);
+	return text === null ? null : { path: bind.source, text };
+}
+
+/** `{{json .Mounts}}` as `[{ type, source, destination }]`, the shape `parseProxyState` gives docker's; `[]` when unreadable. */
+function mountsFromJson(output) {
+	try {
+		const list = JSON.parse(String(output ?? "").trim());
+		return (Array.isArray(list) ? list : []).filter((m) => m && typeof m === "object").map((m) => ({ type: String(m.Type ?? ""), source: String(m.Source ?? ""), destination: String(m.Destination ?? "") }));
+	} catch {
+		return [];
+	}
+}
+
+/** A regular file's text, or null for anything else or any failure: a compare that has nothing to compare says nothing. */
+function readTextOrNull(path) {
+	try {
+		return statSync(path).isFile() ? readFileSync(path, "utf8") : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The route from the egress proxy to each endpoint's host on THIS runtime (issue #503), from the measured table
+ * (`hostRouteFor`, `HOST_ROUTES` in backends.mjs). Only a REFUTED route fails: the proxy cannot reach that host here,
+ * whatever is listening. A measured route is a ✓ saying what it needs. One that is not measured on this runtime, or is
+ * another machine's ordinary outbound route, is said as information and NOT warned about: nearly every runtime version
+ * is unmeasured, so a ⚠ there would be on every run, and the endpoint probe is what proves the route.
+ */
+function endpointRouteChecks({ runtime, endpoints, prefix, proof }) {
+	return endpointsById(endpoints).map((endpoint) => {
+		const { status, sentence } = hostRouteFor(runtime, endpoint.host);
+		const head = `${prefix}Model endpoint ${endpoint.id} (${endpointAddress(endpoint.host, endpoint.port)})`;
+		if (status === HOST_ROUTE_REFUTED) {
+			return { ok: false, label: `${head} has no route from the egress proxy on this runtime: ${sentence}`, fix: "declare the host this runtime reaches (docs/backends.md lists the measured routes per venue: host.docker.internal on Docker, host.containers.internal on Podman), then `pi-dispatch egress render` and the reload it prints" };
+		}
+		if (status === HOST_ROUTE_WORKS) return { ok: true, label: `${head}: ${sentence}` };
+		// Another machine: an ordinary route out, said as such, never prefixed "not measured" before a sentence that names
+		// where it WAS measured.
+		if (status === HOST_ROUTE_LAN) return { ok: true, label: `${head}: ${sentence} ${proof}` };
+		// A rootless Podman that did not say which helper it runs: the table's rows are per helper, so none applies. Said as
+		// what this Podman did not report, never as a fault of the host or the endpoint.
+		if (runtime?.backend === "podman" && runtime.rootless === true && typeof runtime.helper !== "string") {
+			return { ok: true, label: `${head}: the rootless network helper was not reported by this Podman, so the route is not judged here. ${proof}` };
+		}
+		return { ok: true, label: `${head}: the route from the proxy is not measured here. ${sentence} ${proof}` };
+	});
+}
+
+/**
+ * The runtime `hostRouteFor` reads, from the `docker info` answer doctor already holds (`makeDaemonFactsReader`), or
+ * null. Docker Desktop is the daemon that calls its OS `Docker Desktop`, as the job-user line reads it; rootful Podman
+ * through its Docker API is `podman`. Nothing else is asked: a field doctor does not have stays missing and the route
+ * reads unmeasured.
+ */
+function routeRuntimeFromFacts(answer, platform) {
+	const facts = answer?.answered === true ? answer.facts : null;
+	if (!facts) return null;
+	const version = facts.serverVersion ?? "";
+	if (facts.podman === true) return { backend: "podman", version, ...(typeof facts.rootless === "boolean" ? { rootless: facts.rootless } : {}) };
+	const desktop = facts.os === "Docker Desktop";
+	return { backend: "docker", version, desktop, ...(desktop ? { os: platform } : {}) };
+}
+
+/**
+ * The rootless network helper this account is running (`slirp4netns` or `pasta`), from `observeRootlessNetns`, or null
+ * when none runs, the read fails, or two kinds run at once. Podman 4.9.3's `podman info` names no helper, so this is how
+ * its slirp4netns is known there; with no bridge container running there is no helper to see, and the route reads
+ * unjudged rather than guessed from the version.
+ */
+function runningNetnsHelper({ fs, euid, runRoot }) {
+	if (!fs || !Number.isInteger(euid)) return null;
+	try {
+		const seen = observeRootlessNetns({ fs, euid, runRoot });
+		const kinds = [...new Set((seen.helpers ?? []).map((h) => h.kind))];
+		return kinds.length === 1 ? kinds[0] : null;
+	} catch {
+		return null;
+	}
+}
+
+/** The interface names whose addresses are a runtime's own bridges or a VM's, never this host's LAN address. */
+const NOT_LAN_INTERFACE = /^(?:docker|br-|virbr|veth|cni|podman|flannel|cali|vmnet|vboxnet|utun|bridge|lima)/;
+
+/**
+ * This host's own IPv4 LAN addresses for `hostRouteFor` (`hostAddresses`), or undefined for none: plain dotted quads,
+ * not loopback, not link-local, and not on a container bridge (docker0, a compose `br-`, podman's), whose address a
+ * declaration naming it would reach by another route than the own-address row was measured on.
+ */
+export function lanIPv4Addresses(interfaces) {
+	const found = [];
+	for (const [name, list] of Object.entries(interfaces ?? {})) {
+		if (NOT_LAN_INTERFACE.test(name) || !Array.isArray(list)) continue;
+		for (const a of list) {
+			if ((a?.family !== "IPv4" && a?.family !== 4) || a.internal === true || typeof a.address !== "string") continue;
+			if (!/^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/.test(a.address) || a.address.startsWith("169.254.") || a.address.startsWith("127.")) continue;
+			if (!found.includes(a.address)) found.push(a.address);
+		}
+	}
+	return found.length > 0 ? found : undefined;
+}
+
+/** Whether a host as `baseUrlTarget` gives it is loopback or host-local from inside a job (`PROXY_LOCAL_ADDRESSES`). */
+function loopbackTarget(host) {
+	if (host.startsWith("[") && host.endsWith("]")) return isProxyLocalHost("ipv6", host.slice(1, -1));
+	if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return isProxyLocalHost("ipv4", host);
+	return isProxyLocalHost("name", host);
+}
+
+/**
+ * The overlay models.json's models whose effective baseUrl (the model's own, else its provider's) names localhost or
+ * a loopback literal (issue #503), as `provider/model (host:port)` strings. Inside a job that address is the job's own
+ * container, egress on or off, so no job reaches the server. A provider that lists no models is named by itself.
+ */
+export function overlayLoopbackModels(models) {
+	const providers = models?.providers;
+	if (providers === null || typeof providers !== "object" || Array.isArray(providers)) return [];
+	const found = [];
+	for (const [name, entry] of Object.entries(providers)) {
+		if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+		const listed = Array.isArray(entry.models) ? entry.models.filter((m) => m !== null && typeof m === "object" && typeof m.id === "string") : [];
+		const check = (baseUrl, who) => {
+			const target = baseUrlTarget(baseUrl);
+			if (target && loopbackTarget(target.host)) found.push(`${who} (${target.host}:${target.port})`);
+		};
+		if (listed.length === 0) check(entry.baseUrl, quotedShown(name));
+		for (const m of listed) check(typeof m.baseUrl === "string" ? m.baseUrl : entry.baseUrl, `${quotedShown(name)}/${quotedShown(m.id)}`);
+	}
+	return found;
+}
+
+/** The two host aliases a model server on this machine is declared by, never listed in the allowlist. */
+const HOST_ALIASES = Object.freeze(["host.docker.internal", "host.containers.internal"]);
+
+/**
+ * Host aliases the allowlist admits (issue #503), from its text, as `[{ alias, entry }]` with the first entry that admits
+ * each: squid's `dstdomain` file, one entry per word, `#` comments, and an entry with a leading dot admitting that domain
+ * and every name under it, so `.internal` and `.docker.internal` admit `host.docker.internal` as surely as the name
+ * itself. Admitting one opens that host's port 443 by CONNECT and its port 80 by plain HTTP, and no model server's port,
+ * which is the confusion this names.
+ */
+export function allowlistHostAliases(text) {
+	const found = new Map();
+	for (const line of String(text ?? "").split(/\r?\n/)) {
+		for (const word of line.replace(/#.*/, "").trim().split(/\s+/)) {
+			const entry = word.toLowerCase();
+			if (entry === "") continue;
+			for (const alias of HOST_ALIASES) {
+				const admits = entry.startsWith(".") ? alias === entry.slice(1) || alias.endsWith(entry) : alias === entry;
+				if (admits && !found.has(alias)) found.set(alias, word);
+			}
+		}
+	}
+	return HOST_ALIASES.filter((a) => found.has(a)).map((alias) => ({ alias, entry: found.get(alias) }));
 }
 
 /**
@@ -6096,6 +6590,10 @@ export async function podmanChecks(env, seams, { jobImage, jobImageNote = "" }) 
 	let proxyRunning = null;
 	// Issue #458: why `--live` must not tear a network down under the proxy here, or null where nothing stops it.
 	let keeperBlocked = null;
+	// Issue #503: the declared model endpoints `--live` probes on this venue, `[]` for none; and whether the rules the
+	// proxy runs include their file (only the shipped proxy's account copy is read; another proxy must include it).
+	let endpoints = [];
+	let endpointRulesInclude = true;
 	if (armed !== false) {
 		// `.State.Status` (issue #453): only `running` carries traffic; Podman reports paused and between-restarts states
 		// with their own words (measured on 4.9.3 and 5.8.1).
@@ -6152,6 +6650,30 @@ export async function podmanChecks(env, seams, { jobImage, jobImageNote = "" }) 
 			}
 			const declared = (seams.includeNeeds ? seams.includeNeeds({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform }).endpointsDeclared : endpointsDeclaredIn({ env, cwd: seams.cwd, fs: { readFileSync, existsSync }, platform: seams.platform ?? process.platform }));
 			if (declared && !rulesInclude) checks.push({ ok: false, warn: true, label: `podman: ${rulesPredateEndpointsLine("podman")}`, fix: "a reload changes nothing here: the rules themselves must include the file, and `service install --force` writes them with the unit that mounts it" });
+			endpointRulesInclude = rulesInclude;
+		}
+		// Issue #503: the declared model endpoints on this venue, as docker's section reads them. The route rows and the
+		// include read here; the three probes per endpoint run with `--live`, beside the canary they share a network with.
+		// None declared, or rules that predate the include (the line above says it all), is nothing more.
+		const { declaredEndpoints = ({ env: e, cwd, platform: p }) => declaredEndpointsIn({ env: e, cwd, fs: { readFileSync, existsSync }, platform: p }), hostAddresses = () => lanIPv4Addresses(networkInterfaces()) } = seams;
+		const declaredList = declaredEndpoints({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform });
+		if (declaredList.length > 0 && endpointRulesInclude) {
+			endpoints = declaredList;
+			// The helper as Podman 5 names it in `podman info` (`rootlessNetworkCmd`), else as this account's running rootless
+			// network shows it (`observeRootlessNetns`, the record or the 4.x argv the worker's widening check reads), else
+			// not known, which the route row says as such.
+			const helper = info?.rootless === true ? (info.rootlessNetworkCmd ?? runningNetnsHelper({ fs: observationFs, euid: ids.euid, runRoot: info.runRoot })) : null;
+			const runtime = info ? { backend: "podman", version: info.version ?? "", ...(typeof info.rootless === "boolean" ? { rootless: info.rootless } : {}), ...(helper ? { helper } : {}) } : null;
+			const addresses = hostAddresses();
+			checks.push(...endpointRouteChecks({ runtime: runtime && addresses ? { ...runtime, hostAddresses: addresses } : runtime, endpoints, prefix: "podman: ", proof: seams.live === true ? "The endpoint probes in this --live run are the proof." : "`pi-dispatch doctor --live` probes it, which is the proof." }));
+			if (proxyRunning) {
+				const inside = await runCmdCapture(spawn, "podman", ["exec", proxy, "cat", ENDPOINTS_INCLUDE_IN_PROXY], { stdoutOnly: true, timeoutMs: CANARY_STEP_TIMEOUT_MS });
+				// The file the proxy actually mounts there, from its own inspect (the Quadlet unit mounts the deployment folder's,
+				// which need not be the folder doctor runs in). Podman gives the source as a plain host path (4.9.3, 5.8.1).
+				const mounts = await runCmdCapture(spawn, "podman", ["inspect", "--format", "{{json .Mounts}}", proxy], { stdoutOnly: true, timeoutMs: CANARY_STEP_TIMEOUT_MS });
+				const mounted = mounts.code === 0 ? readIncludeBindSource(mountsFromJson(mounts.output)) : null;
+				checks.push(endpointsIncludeCheck({ answer: inside, endpoints, bin: "podman", proxy, prefix: "podman: ", mounted, recreate: proxy === DEFAULT_EGRESS_PROXY ? "`systemctl --user restart pi-dispatch-egress-proxy.service` starts a new container on the file (a restart cuts running jobs' tunnels)" : `recreate ${proxy} so it mounts the file anew` }));
+			}
 		}
 		const keeper = await netnsKeeperCheck(spawn, info?.version, { proxy, now: typeof seams.wallClock === "function" ? seams.wallClock : Date.now });
 		keeperBlocked = keeper.keeperBlocked ?? null;
@@ -6160,7 +6682,7 @@ export async function podmanChecks(env, seams, { jobImage, jobImageNote = "" }) 
 		if (keeperNetwork) checks.push(keeperNetwork);
 	}
 
-	forLive = { run: true, user, relabel, info, imagePresent, egress: { armed, proxy, proxyRunning, keeperBlocked } };
+	forLive = { run: true, user, relabel, info, imagePresent, egress: { armed, proxy, proxyRunning, keeperBlocked, endpoints } };
 	return { checks, observed, relabel, imagesReadable, imageDigest, forLive };
 }
 
@@ -6660,8 +7182,11 @@ async function podmanEgressCanary({ podman, readInfo, run, image, pid, isAlive, 
 	// Announced, as `runLiveProbes` announces its own containers: these start before it, and a cold first keep-id start
 	// can take half a minute each, which is a long silence on an operator's terminal.
 	const probes = CANARY_PROBE_SLUGS.map((slug) => egressCanaryProbe(slug, pid));
-	announce(`starting ${probes.slice(0, -1).join(", ")} and ${probes.at(-1)} from ${image} (as the job user ${podman.user}) on the --internal network ${egressCanaryNetwork(pid)}, with ${podman.egress.proxy} attached, to read the egress allowlist back; all three are removed when the canary ends`);
-	const canary = await runEgressCanary({ run, bin: "podman", proxy: podman.egress.proxy, image, pid, user: podman.user, gate });
+	// Issue #503: three more per declared model endpoint, said in a second sentence so the canary's own stays as it was.
+	const endpoints = podman.egress.endpoints ?? [];
+	const more = endpoints.length > 0 ? `; then three per declared model endpoint (${endpointsById(endpoints).map((e) => e.id).join(", ")}), named ${EGRESS_ENDPOINT_PROBE_PREFIX}<probe>-<id>-${pid}, removed the same way` : "";
+	announce(`starting ${probes.slice(0, -1).join(", ")} and ${probes.at(-1)} from ${image} (as the job user ${podman.user}) on the --internal network ${egressCanaryNetwork(pid)}, with ${podman.egress.proxy} attached, to read the egress allowlist back; all three are removed when the canary ends${more}`);
+	const canary = await runEgressCanary({ run, bin: "podman", proxy: podman.egress.proxy, image, pid, user: podman.user, gate, endpoints });
 	return { checks: [...checks, ...canary.checks], results: canary.results };
 }
 

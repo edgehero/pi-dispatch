@@ -88,6 +88,28 @@ export function decideWait(exitCode) {
 }
 
 /**
+ * A listener for an error on the CLI's stdout (issue #503, gate round 1): a write to a pipe whose reader has exited
+ * fails with EPIPE, which Node emits as an `error` event, and with no listener that is an uncaught exception printed
+ * with its whole stack after the verb had already done its work. Installed by the worker's CLI for every verb. It only
+ * quiets the trace: the exit code stays what that uncaught exception gave (1), or the verb's own when it set one.
+ */
+export function installStdoutPipeGuard({ stream = process.stdout, proc = process, write = (line) => process.stderr.write(line) } = {}) {
+	stream.on("error", (error) => {
+		// The reader went away (`pi-dispatch egress render | head -1`). The guard removes the stack trace and NOTHING
+		// else (gate round 2): the exit code is the one an unhandled EPIPE gave, 1, unless the verb had already set its
+		// own. Exiting 0 here told systemd's Restart=on-failure and launchd's SuccessfulExit=false that a long-running
+		// worker whose log reader died had finished cleanly, so neither restarted it (measured).
+		if (error?.code === "EPIPE") {
+			proc.exit(typeof proc.exitCode === "number" ? proc.exitCode : EXIT_INFRA);
+			return;
+		}
+		// Anything else on stdout is a fault worth one line on stderr, and infra's exit code, as Node's own default would be.
+		write(`error: writing to stdout failed: ${error?.code ?? error?.message ?? "unknown"}\n`);
+		proc.exit(EXIT_INFRA);
+	});
+}
+
+/**
  * A process-level printer for a promise nobody handled (PR #475's review, round 2): Node prints such a rejection's
  * reason WHOLE, and a Valkey client's error may carry what it sent (connection.mjs scrubs that at the source; this is
  * the second line of defence for anything else). It prints the message alone and exits 1, which is what Node's own

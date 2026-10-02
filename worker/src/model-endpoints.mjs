@@ -43,7 +43,12 @@ export const PROXY_PORT = 3128;
 /** The largest `slots` value: a bound this large is already no bound for one server. */
 export const MAX_SLOTS = 64;
 
-const ID_RE = /^[a-z0-9-]{1,32}$/;
+/**
+ * An endpoint id. EXPORTED for doctor's dead-pid sweep, which matches a probe container's name by this same class:
+ * one rule, so the sweep cannot drift from what the parser accepts.
+ */
+export const MODEL_ENDPOINT_ID_RE = /^[a-z0-9-]{1,32}$/;
+const ID_RE = MODEL_ENDPOINT_ID_RE;
 const ENDPOINT_KEYS = new Set(["id", "host", "port", "slots", "keyless"]);
 const FILE_KEYS = new Set(["version", "endpoints"]);
 // A DNS label as the proxy and a URL both read it, lowercased. `_` is allowed because a container or compose name

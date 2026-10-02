@@ -84,18 +84,24 @@ than everything else combined.
 ## Local model servers
 
 A job can reach a model server on your own machine or LAN (Ollama, vLLM, llama.cpp, LM Studio) through the
-proxy, one host and one port at a time. A fuller guide comes with the doctor probes for it; this is the short
-form.
+proxy, one host and one port at a time. Each one you declare becomes a `CONNECT` tunnel to exactly that host and
+port, and nothing else: no other port of that host, and no plain forward request to it.
 
-**Jobs cannot use a local model yet.** This part of #503 opens the route through the proxy. The keyless credential
-gate and the slot leases come in later parts of the same issue; until then a job's provider check still refuses
-a provider without a key, and a declared endpoint takes no slot.
+**Jobs cannot use a local model as their main model yet.** The route through the proxy and the `doctor` proof
+below are in. The keyless credential gate and the slot leases come in other parts of #503: until they land, a
+job's provider check still refuses a provider with no key, and a declared endpoint takes no slot.
+
+### Declare, render, reload
 
 1. **Declare it** in `model-endpoints.json` in the deployment folder. `pi-dispatch init` writes it empty.
 
    ```json
    { "version": 1, "endpoints": [ { "id": "mac-ollama", "host": "host.docker.internal", "port": 11434, "slots": 2 } ] }
    ```
+
+   `id` names the endpoint in every line about it. `host` is the name or address the proxy dials: never
+   `localhost` or `127.0.0.1`, which inside the proxy is the proxy itself. `slots` is how many requests the server
+   runs at once. The file's full rules are in `INT-MODEL-ENDPOINTS-FILE-CONTRACT` (specs/interfaces.md).
 
 2. **Render** the proxy's rules for it, from the deployment folder:
 
@@ -104,9 +110,10 @@ a provider without a key, and a declared endpoint takes no slot.
    ```
 
    It writes `model-endpoints.conf` in the deployment folder (also when `PI_MODEL_ENDPOINTS_FILE` names a JSON
-   file elsewhere), in place, and prints the reload. The file is the proxy's
-   include: every endpoint becomes a CONNECT tunnel to exactly that host and port, and nothing else. It must
-   exist even with nothing declared, because squid will not start without it. `init` writes it.
+   file elsewhere), in place, and prints the reload. The file is the proxy's include. It must exist even with
+   nothing declared, because squid will not start without it. `init` writes it. Do not edit it by hand, and do
+   not replace it with another file (an editor that saves by rename does that): the running proxy keeps reading
+   the old one.
 
 3. **Reload** the proxy with the command it printed:
 
@@ -118,7 +125,19 @@ a provider without a key, and a declared endpoint takes no slot.
    A reload keeps running jobs and their tunnels. Do not restart the proxy for this: a restart cuts every running
    job off.
 
-How the proxy reaches your own machine:
+4. **Check it** with `pi-dispatch doctor` (on the rootless podman venue, `pi-dispatch doctor --live`). The lines
+   are below.
+
+Then point the model at it in the overlay `models.json`, with the same host and port as the declaration:
+
+```json
+{"providers":{"local-ollama":{"api":"openai-completions","baseUrl":"http://host.docker.internal:11434/v1","apiKey":"$PI_DISPATCH_KEYLESS","models":[{"id":"qwen2.5:0.5b","contextWindow":32768,"maxTokens":2048}]}}}
+```
+
+A model uses an endpoint when its `baseUrl` (its own, else its provider's) has the endpoint's host and port. Host
+alone does not match.
+
+### How the proxy reaches your own machine
 
 - **Docker Desktop**: `host.docker.internal` just works, and it reaches the Mac's loopback too, so a server bound
   to `127.0.0.1` answers (measured).
@@ -127,13 +146,75 @@ How the proxy reaches your own machine:
   on `0.0.0.0`. A server bound to `127.0.0.1` cannot be reached.
 - **Rootless Podman**: use `host.containers.internal`, with the server bound to the host's LAN address or to
   `0.0.0.0`. A server bound to `127.0.0.1` cannot be reached.
+- **Another machine on your LAN**: declare its name or address. That is an ordinary route out through the proxy.
+
+The measured routes, per runtime and version, with what each needs, are in
+[`backends.md`, "Reaching a model server on the host"](backends.md#reaching-a-model-server-on-the-host). `doctor`
+reads the same table.
+
+### What `doctor` says about them
+
+With nothing declared, `doctor` says nothing about model endpoints and starts no extra container. With
+`mac-ollama` above declared, on Docker Desktop:
+
+```
+✓ Model endpoint mac-ollama (host.docker.internal:11434): host.docker.internal works from the proxy (measured 2026-09-30, ...). Nothing to add. ...
+✓ Model endpoints: the include inside the running proxy matches model-endpoints.json (mac-ollama)
+✓ Model endpoint mac-ollama answers through the proxy (GET http://host.docker.internal:11434/v1/models through a CONNECT tunnel: 200)
+✓ Model endpoint mac-ollama's rule is port-exact (a CONNECT to host.docker.internal:11435, a port nobody declared, got the proxy's 403)
+✓ Model endpoint mac-ollama admits no plain forward request (GET http://host.docker.internal:11434/v1/models without a tunnel got the proxy's 403 ERR_ACCESS_DENIED)
+```
+
+What each line means:
+
+| Line | What it checks | When it fails |
+|---|---|---|
+| the route | whether the proxy can reach that host on this runtime, from the measured table. On rootless Podman the table is per network helper, which Podman 5 names in `podman info`; when this Podman names none, the line says so | ✗ when the table says it cannot (for example `host.containers.internal` on Docker Engine, where that name does not exist). A route nobody measured on your runtime version is said, not warned: the probes are the proof. Another machine on your LAN is said as the ordinary route out it is |
+| the include | the include file as the running proxy sees it. It is compared with the file the proxy mounts (from the proxy's own inspect), and then byte for byte with what your declaration renders | ✗ when the mounted file differs from the proxy's copy: the file was replaced (a rename, an editor's save) instead of written in place, and the proxy still reads the old one, so recreate the proxy. ✗ when the proxy's copy differs from the render: run `pi-dispatch egress render`, then the reload |
+| answers | a `GET /v1/models` sent the way a job sends it, through a tunnel. Ollama, llama-server, vLLM and LM Studio all serve that path | ⚠ with the proxy's status. **503** means the proxy let the tunnel through and nothing answered: the server is down, or listens where the proxy cannot reach it. **403** from the proxy means its rules do not allow it: render and reload. A **401 or 403 from the server** means the route works and the server wants a key. **No answer within 15 s** means the server took the connection and is stuck or busy |
+| port-exact | a tunnel to the same host on the nearest port above yours that you did not declare for that host (never 80 or 443, which the allowlist opens for a listed host) | ⚠ when the proxy lets it through (a 503 there means it tried to connect): the rules allow more than you declared |
+| plain request | a plain forward `GET` to the declared port, as a tool that does not tunnel would send it | ⚠ when anything but squid's own refusal comes back: the rules allow more than a tunnel |
+
+A job never sees the proxy's status. Both a refused tunnel (403) and a server that is down (503) reach it as
+`Connection error`, which is why `doctor` shows the number.
+
+Two more warnings, whatever you declared:
+
+- **An overlay model whose `baseUrl` is `localhost` or a loopback address.** Inside a job that address is the
+  job's own container, with egress on or off, so no job ever reaches that server. Serve it where the proxy reaches
+  it, declare it, and point the `baseUrl` there.
+- **`host.docker.internal` or `host.containers.internal` in `egress-allowlist.conf`**, or an entry such as
+  `.internal` that covers it. That opens the host's port 443 and port 80 to every job, and no model server port.
+  Remove it and declare the server instead.
+
+On the rootless podman venue a plain `doctor` reads the route and the include, and `doctor --live` runs the three
+probes, beside the egress canary and on its network. The probe containers are named
+`pi-dispatch-egress-probe-endpoint-<probe>-<id>-<pid>` and are removed with the canary's own; a run that was
+killed leaves them to the next run's sweep, like the canary's.
+
+### Walkthrough: Ollama on a Mac with Docker Desktop
+
+Zero spend.
+
+1. On the Mac: `ollama pull qwen2.5:0.5b`.
+2. Put the overlay `models.json` above in your overlay folder (`PI_GLOBAL_PI_DIR`).
+3. Declare `mac-ollama` as in step 1 of "Declare, render, reload", with `"slots": 1`.
+4. `pi-dispatch egress render`, then the reload it prints.
+5. `pi-dispatch doctor`. Expect the five lines above: the route, the include, a 200, a 403 for the CONNECT to port
+   11435, and a 403 for the plain `GET` to port 11434.
+
+Running a job on it (`--provider local-ollama --model qwen2.5:0.5b`) needs the keyless gate, and two jobs waiting
+for one slot need the slot leases, from the other parts of #503.
+
+### Upgrading a deployment from before #503
 
 An existing deployment needs the new file, the new rules and the new mount: run `pi-dispatch init` (it only adds
 what is missing), then `pi-dispatch up`, which offers the rules refresh and the proxy's replacement as one step.
 On the rootless podman venue `pi-dispatch service install --force` refreshes the account's rules and the unit
 together. With compose, use the new compose file (see "Right after an upgrade" below), then
 `docker compose ... --profile egress up -d` recreates the proxy. Until the rules include the file, `up`, `doctor`
-and `egress render` all say the endpoints stay unreachable until the rules are refreshed.
+and `egress render` all say the endpoints stay unreachable until the rules are refreshed, and `doctor` says
+nothing more about them.
 
 ## The shape
 
@@ -218,7 +299,7 @@ them.
 ### Lines about leftovers
 
 You may also see a line about a leftover. Those are the canary's own objects, `pi-dispatch-egress-doctor-<pid>`
-and its three probe containers. The rule is simple enough to rely on: **every one of them is removed at the end
+and its three probe containers, plus three more per declared model endpoint. The rule is simple enough to rely on: **every one of them is removed at the end
 of the run that made it, or reported in that same run** -- so what a later run finds is what a run that was
 KILLED left behind, and doctor does not have to guess which. What it knows is that the process in the name is
 no longer alive. The next run sweeps whatever belongs to a process that is no longer alive

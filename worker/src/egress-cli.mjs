@@ -295,12 +295,20 @@ export function rulesPredateEndpointsLine(venue) {
  * not load counts as none here: doctor names why it does not load, and the worker refuses it.
  */
 export function endpointsDeclaredIn({ env, cwd, fs, platform = process.platform }) {
+	return declaredEndpointsIn({ env, cwd, fs, platform }).length > 0;
+}
+
+/**
+ * The declared model endpoints for this deployment, read as the service reads them (the same rule as
+ * `endpointsDeclaredIn`, which counts them): `[]` for none, and for a declaration that does not load, which doctor's
+ * boot-file line names. Doctor's endpoint rows (issue #503) are built from this list and from nothing else.
+ */
+export function declaredEndpointsIn({ env, cwd, fs, platform = process.platform }) {
 	try {
 		const setting = endpointsFileSetting({ env, cwd, platform, readEnv: (p) => fs.readFileSync(p), exists: (p) => fs.existsSync(p) });
-		if (setting.error) return false;
-		const endpoints = loadModelEndpoints({ modelEndpointsFile: setting.value, valkeyUrl: null }, { cwd, readFileSync: (p, enc) => fs.readFileSync(p, enc), existsSync: (p) => fs.existsSync(p) });
-		return endpoints.length > 0;
+		if (setting.error) return [];
+		return loadModelEndpoints({ modelEndpointsFile: setting.value, valkeyUrl: null }, { cwd, readFileSync: (p, enc) => fs.readFileSync(p, enc), existsSync: (p) => fs.existsSync(p) });
 	} catch {
-		return false;
+		return [];
 	}
 }

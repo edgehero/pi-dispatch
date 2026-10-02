@@ -1681,6 +1681,7 @@ contract governs the argv of one container, this governs the estate that argv jo
     | upstream network | `pi-dispatch-egress-out` | an ordinary bridge; only the proxy is on it |
     | doctor canary network | `pi-dispatch-egress-doctor-<pid>` | `--internal`, one per doctor PROCESS, built and removed inside one `runEgressCanary` run (`egressCanaryNetwork`), on the runtime of the venue it reads: docker's on every `doctor` of a deployment with `local`, this account's Podman on `doctor --live` for the `podman` venue (issue #431) |
     | doctor canary probes | `pi-dispatch-egress-probe-<slug>-<pid>` | `--rm`, one per probe on that network (`egressCanaryProbe`), the slugs `provider`, `unlisted` and `plainhttp` (issue #508), in that order. On docker the canary's own short argv; on podman a JOB's, from the podman builder (`egressCanaryProbeArgs`): the job user, `--userns=keep-id`, `PODMAN_PINNED_FLAGS`, a job's egress variables and HOME, and no mount |
+    | doctor model endpoint probes | `pi-dispatch-egress-probe-endpoint-<probe>-<id>-<pid>` | `--rm`, three per declared model endpoint on that same network, after the canary's three (`egressEndpointProbe`, issue #503): `models`, `nextport` and `plain`, in that order, endpoints in id order. Built as the canary probes are, plus a job's HTTP_PROXY on docker. Removed by the same teardown, and matched by the same dead-pid sweep with the id held to the parser's `[a-z0-9-]{1,32}` (`INT-MODEL-ENDPOINTS-FILE-CONTRACT`) |
     | proxy component | `pi-dispatch-egress-proxy` | squid, `http_port 3128`, **no published port**. Overridable by `PI_EGRESS_PROXY`, and then the operator's own: `up` and `service install` look for the overriding name and start only the shipped one (issue #430). On the native `podman` venue it is the Quadlet unit `pi-dispatch-egress-proxy.service`, on the same-named upstream network. |
     | rootless network keeper (`podman` venue only) | `pi-dispatch-netns-keeper`, on its own network of that name | one idle container (`sleep` in the proxy's image and digest), on an `--internal`, DNS-disabled network no job and no proxy is on; `--read-only`, `--cap-drop=all`, `no-new-privileges`, uid 65534, no port, no mount. It exists so this account's rootless network helper always has a running bridge member: on Podman 4.9 the per-job network's teardown otherwise cuts the proxy's route out (issue #458, measured). It counts only RUNNING, in bridge mode, ON that network: one on `--network none`, slirp4netns, pasta or host holds nothing open (measured). The Quadlet unit `pi-dispatch-netns-keeper.service`, installed while the policy is armed whatever `PI_EGRESS_PROXY` names. Outside every prefix below that anything removes, and never removed by pi-dispatch; `doctor` reads it (✗ on Podman 4.x when it does not hold), and so does the worker's egress preflight on 4.x, which retries the job pre-spend while it does not hold. |
 
@@ -2703,7 +2704,10 @@ is its only entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`)
     reading is about the proxy this venue's jobs use and the argv they get. Its lines are printed before the
     verdicts, prefixed `podman: `, and a plain `doctor` on this venue says the allowlist is read back by `--live`
     rather than reading it. `.github/scripts/podman-conformance.mjs` runs the same canary instead of a copy of its
-    own. The verdicts
+    own. With model endpoints declared (issue #503, `INT-MODEL-ENDPOINTS-FILE-CONTRACT`), the same canary then runs
+    three probes per endpoint on its network, named `pi-dispatch-egress-probe-endpoint-<probe>-<id>-<pid>` and
+    removed by the same teardown and dead-pid sweep; their lines carry no reading, so the `egress` verdict reads the
+    canary's three and nothing else. The verdicts
     are this module's, unchanged; the few whose detail
     named the docker CLI name the runtime they ran on, and their wording on `local` is byte-identical. A failed
     verdict's fix is `local`'s text with the CLI's name swapped, except `isolation` on podman (issue #453), which has
@@ -2759,7 +2763,9 @@ is its only entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`)
   provider reached, an unlisted host denied and plain HTTP off port 80 refused is `egress` held, an unlisted host
   reached or plain HTTP off port 80 let through fails it; given a podman
   venue refusal, a service re-read as remote, or the policy off, no canary object is made; and a dead run's canary
-  network in this account's Podman is swept through `podman` under the same name filter.
+  network in this account's Podman is swept through `podman` under the same name filter. Given a declared model
+  endpoint (issue #503), each of its three probes is a podman job's argv on the canary network, its lines say
+  `podman: Model endpoint <id> ...`, and the `egress` verdict is what it is without them.
 
 ## INT-WEBHOOK-PAYLOAD-SUBSET
 
@@ -4938,10 +4944,11 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   1). The `include` line in `deploy/egress-proxy.conf`, the include's mounts (compose, `up`, the Quadlet unit, the
   Podman recipe, `podman-conformance.yml`), the `pi-dispatch egress render` verb and its reload, and the proxy's
   `host.docker.internal:host-gateway` on Docker are LANDED (#503, part 2; `INT-EGRESS-POLICY-CONTRACT`). So a
-  rendered and reloaded declaration now opens its CONNECT tunnel through the proxy. PENDING, in later parts of #503
-  that land before any release: the rootless Podman route table in the venue's capability table; the slot leases;
-  the keyless credential gate and `PI_DISPATCH_KEYLESS`; the doctor probes. Until then a declared endpoint is
-  reachable but takes no slot lease, and a keyless provider is still refused at the credential gate.
+  rendered and reloaded declaration now opens its CONNECT tunnel through the proxy. The measured routes from the
+  proxy to the host (`HOST_ROUTES`, `hostRouteFor` in `worker/src/backends.mjs`) are LANDED (#503, part 3), and so
+  are the doctor rows below (#503, part 6). PENDING, in later parts of #503 that land before any release: the slot
+  leases; the keyless credential gate and `PI_DISPATCH_KEYLESS`. Until then a declared endpoint is reachable but
+  takes no slot lease, and a keyless provider is still refused at the credential gate.
 - **Producer/Consumer**: the operator writes it by hand. The worker reads it for the render and, in a later change,
   at each pickup, so a `slots` edit applies to the next job.
   `doctor` loads it through the worker's own loader. It is NOT settable by a model-callable tool or by the settings
@@ -5005,13 +5012,53 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   For IPv6, squid compares the bracketed canonical form, so `dstdomain -n [fd00::2]` matches `[fd00:0:0::2]` and
   `[FD00::2]` and a bare `fd00::2` matches nothing (measured the same day). The render of no endpoints is the
   header alone.
+- **Doctor** (#503, part 6; `REQ-EGRESS-ALLOWLIST`): with the policy armed and at least one endpoint declared under
+  rules that include the file (under rules that predate it, the one `rulesPredateEndpointsLine` says everything and
+  nothing below runs), per endpoint in id order:
+  - the route from the proxy to its host on this runtime, from `hostRouteFor` with what `docker info` or
+    `podman info` already said and this host's own LAN IPv4 addresses (container bridges and link-local left out).
+    `refuted` is ✗ naming the sentence and the venue's alias; `works` is ✓ with what it needs; `lan` is said as the
+    ordinary route out it is, and `unmeasured` on a ✓ line, not warned, since nearly every runtime version is
+    unmeasured and the probe below is the proof. On rootless Podman the helper is `podman info`'s
+    `host.rootlessNetworkCmd` (Podman 5, measured `pasta` on 5.8.1), else the running helper's kind as the worker's
+    widening check reads it (`observeRootlessNetns`, which is how 4.9.3's slirp4netns is known), else it is said not
+    to have been reported, never worded as a fault;
+  - with the proxy running, the include as the running proxy holds it (`<runtime> exec <proxy> cat
+    /etc/pi-dispatch/model-endpoints.conf`). It is first compared with the host file the proxy actually mounts there,
+    the bind source its own inspect names (the shipped proxy's and an operator's alike; skipped when there is no such
+    bind or the source cannot be read here): a difference is ✗, the proxy mounted on a replaced file, naming its recreation,
+    since a single-file bind mount holds the inode and after a rename the container keeps the old file, so a reload
+    silently loads the old rules (measured 2026-09-30 on Docker and Podman on Linux). Then it is byte-compared with
+    the render of the declaration: a difference is ✗ naming `pi-dispatch egress render` and the reload. The proxy's
+    copy is what decides; the mounted file is read only to catch the replacement;
+  - three probe containers on the egress canary's network, after its three, built as its are and named
+    `pi-dispatch-egress-probe-endpoint-<probe>-<id>-<pid>`: `models`, the runner's tunnelled `GET
+    http://<host>:<port>/v1/models`, must answer 200 (the server's own 401 or 403 is said apart: the route and the
+    rule are proved and the server wants a key; a timeout says the server took the connection and never answered);
+    `nextport`, the same to the nearest port above the declared one that no declaration for that host uses and that
+    is neither 443 nor 80, which the allowlist opens for a listed host (wrapping below at 65535), must get the proxy's
+    403 on the CONNECT; `plain`, a plain forward `GET` to the declared port, must get
+    squid's 403 with `X-Squid-Error: ERR_ACCESS_DENIED`. Each line names the id and shows the proxy's status, which a
+    job never sees (a refused and a failed tunnel both reach it as "Connection error", measured). A 503 on `nextport`
+    means the CONNECT was let through to a port nobody declared, so the rule is not port-exact; a 403 the server
+    sent, through a tunnel or a forwarded request, is not the proxy's. Warn-tier, as the canary's lines are. On
+    docker they run with every `doctor`; on the `podman` venue with `doctor --live`.
+  Whatever is declared: a ⚠ naming each overlay `models.json` model (or model-less provider) whose effective
+  baseUrl is `localhost` or a loopback literal, unreachable from any job; and, with the policy armed, a ⚠ for an
+  allowlist entry admitting `host.docker.internal` or `host.containers.internal`, the name itself or a dotted suffix
+  over it (`.internal`, `.docker.internal`), which opens that host's ports 443 and 80 and no model server's. No declaration is no line and no container, and doctor's output is unchanged.
 - **Acceptance**: Given a file with `version: 2`, a loopback or `localhost` host, port 3128 or the queue's port, a
   duplicate id, one host and port under two ids, `slots` of 0 or 65, or an unknown key, when parsed, then the
   whole file is refused naming the endpoint. Given a model whose own baseUrl names another host than its
   provider's, then the model's wins. Given a baseUrl on the right host and another port, then no endpoint
   matches. Given the render of any parsed file, then every `http_access` line is a CONNECT rule, every allow is
   `allow CONNECT pde_<id>_host pde_<id>_port`, and no host ACL is a `dst` ACL. Given no file at the default path,
-  then the worker's loader returns no endpoints and `doctor` says nothing about it.
+  then the worker's loader returns no endpoints and `doctor` says nothing about it. Given a declared endpoint, a
+  running proxy and the job image, `doctor` runs its three probes and passes each only on 200, the proxy's 403 to
+  the CONNECT, and squid's own 403 respectively; a 503 on the first names the id and the status, a 503 on the second
+  fails as not port-exact, and any answer but squid's denial on the third fails. Given an include inside the proxy
+  that differs from the render, whatever the folder's file holds, `doctor` fails. Given a route the table refutes on
+  this runtime, `doctor` fails naming it.
 
 ---
 
@@ -5773,3 +5820,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-30 | Issue #511 (the steering scan misses lowercase twins, a second SDK hop and pi's own reads), folding its PR #513 gate rounds 1 and 2. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the steering family: every name the derivation finds is reserved, matched exactly; the scan reads both copies of pi-ai (hoisted, and the runner's copy nested under pi-coding-agent), goes two hops deep through each SDK's declared dependencies (google-auth-library, `@smithy/core`, the AWS credential chain, `debug`, `ws`), and, after stripping comments (checked against esbuild's parser), COUNTS every occurrence that can reach the environment (every `env` token, every `process["env"]`, every use of an alias of one such as `const v = env()`, every call of a helper, the helpers derived from their own parameter reads) instead of matching a list of accessor spellings: an occurrence names a variable (members, keys, calls, `in`, destructuring, selector arguments, keys resolved through string constants) or is a site, and every file's sites are pinned with a count, so a new occurrence anywhere fails the bolt; forms with no `env` token (`Reflect.get(process, "env")` and the like) are stated as a limit, none occurring at the pin. It adds pi's own `PI_*` reads from pi-coding-agent's dist (not `dist/bundle/`) and the pi packages it declares, minus `CONTAINER_ENV_NAMES` and the runner's own writes (`PI_OFFLINE`, `PI_TELEMETRY`), and pins the names pi reads outside that namespace. The lowercase twins google-auth-library reads are literal members. The hand-written residuals go from nine to four (`AWS_ENDPOINT_URL`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, `all_proxy`, `no_proxy` are now derived); `HOMEDRIVE` and `HOMEPATH` join the runtime subtractions; the limits are restated (hop 3 by name, pi-coding-agent's third-party dependencies, the `llama.cpp` extension's reads found and left outside). The pre-spend clause gains the re-check: a queued job binding a load-time reserved name is refused as `secret-name-reserved` at the call site, before the secrets resolver is called. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, two places: the stale claim that the container gets `PI_CODING_AGENT_DIR` is corrected (the worker never sets it; pi falls back to `$HOME/.pi/agent`, and a trigger cannot bind it now), and the note on `PROVIDER_STEERING_VARS` says its derivation now covers the second hop and pi's own reads. The closed container env map itself UNCHANGED, checked. |
 | 2026-10-02 | Issue #503, part 3. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, the `host` bullet: `10.0.2.2` is refused too. It was always in the rendered `_local` deny, so a declaration of it could never answer; the parser and the rule now read one set, `PROXY_LOCAL_ADDRESSES` in `worker/src/backends.mjs`, from which `LOCAL_ADDRESSES` is built. Every other refusal and message is unchanged. **Code evidence**: worker/src/backends.mjs -> PROXY_LOCAL_ADDRESSES, isProxyLocalHost; worker/src/model-endpoints.mjs -> LOCAL_ADDRESSES; worker/test/model-endpoints.test.mjs. |
 | 2026-09-30 | Issue #503 (declared model endpoints), the second change: the proxy includes them. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, a new bullet beside the rules one: `deploy/egress-proxy.conf` (and its mirror) carries `include /etc/pi-dispatch/model-endpoints.conf` after `http_access deny allowed to_host_local` and before `http_access deny CONNECT !SSL_ports`, because pi tunnels every provider call and first match wins; the include is mounted read-only from the deployment folder by the compose service, `up`'s argv, the Quadlet unit (a third placeholder, the folder's own file, never a copy), the hand-started Podman recipe and `podman-conformance.yml`; `pi-dispatch egress render` validates in memory, then writes the include IN PLACE (no `O_CREAT`, `O_NOFOLLOW`, truncate, fsync) and refuses a symlink, a directory or a missing file, because a renamed file is invisible to a running single-file bind mount and `squid -k reconfigure` then reloads the old rules silently (measured on Docker 29.1.3 and Podman 4.9.3 and 5.8.1, 2026-09-30); the verb prints the reload (`docker exec` or `podman exec` of `squid -k reconfigure`) and never runs it; the proxy gets `host.docker.internal:host-gateway` on Docker (compose and `up`), nothing on rootless Podman; the governing rule (PR #517's review): the folder's rules include `model-endpoints.conf` only together with a proxy that mounts it, so a two-mount proxy is drift only when the folder's rules include the file, `up` refreshes the rules and replaces such a proxy as one step (declined or blocked, nothing written; a failed replace puts the old rules back), a replaced proxy is removed with `rm -f -v`, endpoints declared under older rules are named by `up`, `doctor` and `egress render` alike as the rules refresh's to fix, and a third bind must be the folder's file; the render empties the include on a failed write, refuses a hard-linked one, and compares `PI_MODEL_ENDPOINTS_FILE` as resolved paths. The Acceptance gains the endpoint case. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, Status: the include, its mounts, the render verb and the host route on Docker are landed; the Podman route table, the slot leases, the keyless gate and the doctor probes stay pending. Shape: a host with a port separator and an empty port (`a.lan:`) is refused as carrying a port, not as an IPv6 address with an IPv4 tail (PR #515's review). **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no job flag, mount or variable moves; the host entry is the proxy's only. **Code evidence**: deploy/egress-proxy.conf; deploy/docker-compose.yml; deploy/pi-dispatch-egress-proxy.container; worker/src/egress-cli.mjs -> runEgress, writeInPlace, proxyIncludeNeeds; worker/src/egress-proxy-state.mjs -> shippedProxyDrift, rulesIncludeEndpoints; worker/src/up.mjs -> EGRESS_RUN_ARGS; worker/src/podman-stack.mjs -> MODEL_ENDPOINTS_PLACEHOLDER, planStack; worker/src/service.mjs -> TEMPLATE_PINS, stackRefusal; worker/src/doctor.mjs -> egressChecks. |
+| 2026-10-02 | Issue #503, part 6. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: a Doctor bullet (the route row from `hostRouteFor`, the include byte-compared INSIDE the running proxy, three probes per endpoint and what passes each, the loopback baseUrl and allowlisted-alias warnings, and nothing at all with no declaration) and two Acceptance sentences; the Status now records parts 3 and 6 as landed and leaves the slot leases and the keyless gate pending. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the object table: the endpoint probe containers, under the canary probe prefix so every leftover line stays true, with the sweep's id class. **`INT-LIVE-PROBE-CONTRACT` AMENDED**: the podman `--live` canary runs the endpoint probes on its network, and their lines carry no reading, so the `egress` verdict reads the canary's three alone. Measured facts cited, not re-measured: M3 (a renamed file is not seen in the container) and M9 (a job sees 503 and 403 alike), 2026-09-30. Folding PR #519 gate round 1: the port-exact probe skips the same host's declared ports and 443 and 80; the include check also catches a folder file replaced under the proxy; the rootless helper is read from `podman info` or the running helper; the `lan` row and a server's own 401 or 403 are worded as what they are; dotted allowlist entries count. Gate round 2: the replaced-file compare reads the bind source the proxy mounts, never the folder doctor runs in, and covers an operator's proxy too. |

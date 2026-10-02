@@ -141,6 +141,9 @@ export function parsePodmanInfo(stdout) {
 	const controllers = Array.isArray(host.cgroupControllers) ? host.cgroupControllers.filter((c) => typeof c === "string" && /^[a-z][a-z0-9_]{0,31}$/.test(c)) : null;
 	return {
 		rootless: bool(host.security?.rootless),
+		// Issue #503: the rootless network helper Podman 5 names (`host.rootlessNetworkCmd`, measured `pasta` on 5.8.1;
+		// 4.9.3 has no such field). One of the two known words, lowercased, else no fact.
+		rootlessNetworkCmd: typeof host.rootlessNetworkCmd === "string" && /^(?:pasta|slirp4netns)$/i.test(host.rootlessNetworkCmd) ? host.rootlessNetworkCmd.toLowerCase() : null,
 		serviceIsRemote: bool(host.serviceIsRemote),
 		selinux: bool(host.security?.selinuxEnabled),
 		// "v2" or "v1"; anything else is no fact rather than a string an operator's terminal is handed.

@@ -138,6 +138,18 @@ export function egressCanaryProbe(slug, pid) {
 }
 
 /**
+ * The probe containers doctor runs per declared model endpoint (issue #503), on the same canary network. UNDER the
+ * canary's probe prefix on purpose: every line and page that tells an operator what a leftover probe looks like
+ * (`pi-dispatch-egress-probe-...`) stays true, and the dead-pid sweep matches these by an anchored pattern of its own.
+ */
+export const EGRESS_ENDPOINT_PROBE_PREFIX = `${EGRESS_CANARY_PROBE_PREFIX}endpoint-`;
+
+/** One endpoint probe container: per probe, per endpoint id (`[a-z0-9-]{1,32}`, the parser's rule) and per doctor process. */
+export function egressEndpointProbe(slug, id, pid) {
+	return `${EGRESS_ENDPOINT_PROBE_PREFIX}${slug}-${id}-${pid}`;
+}
+
+/**
  * How a container reaches the proxy: by NAME, resolved by docker's embedded DNS on the user-defined
  * network. `docs/sandbox.md`'s recipe had to write a bare gateway IP because the DEFAULT bridge has no
  * name resolution; a user-defined network does, which is what removes the host-specific literal.

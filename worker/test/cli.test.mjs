@@ -150,3 +150,64 @@ test("`pi-dispatch init` off Linux with PI_BACKENDS=podman in the shell says the
 	const printed = execFileSync(process.execPath, [cli, "init"], { cwd: dir, env: { ...process.env, PI_BACKENDS: "podman" }, encoding: "utf8" });
 	assert.match(printed, /\nNext: PI_BACKENDS lists only the podman venue, which runs on Linux alone/);
 });
+
+// Issue #503, gate round 1: a reader that closes early (`pi-dispatch egress render | head -1`) left an uncaught EPIPE
+// after the verb's work was done. The CLI now ends quietly with the verb's own exit code. Run as the real bin, with the
+// pipe closed before the child writes anything, so every write the verb makes meets EPIPE.
+test("a pi-dispatch verb whose stdout reader has gone ends quietly, with no uncaught EPIPE (#503)", async () => {
+	const { spawn } = await import("node:child_process");
+	const cwd = tempDir("pi-cli-epipe-");
+	writeFileSync(join(cwd, "model-endpoints.json"), '{"version":1,"endpoints":[]}\n');
+	writeFileSync(join(cwd, "model-endpoints.conf"), "");
+	const bin = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
+	const { PI_MODEL_ENDPOINTS_FILE: _f, ...env } = process.env;
+	for (let i = 0; i < 3; i++) {
+		const result = await new Promise((resolve) => {
+			const child = spawn(process.execPath, [bin, "egress", "render"], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+			child.stdout.destroy();
+			let stderr = "";
+			child.stderr.on("data", (d) => (stderr += d));
+			child.on("close", (code) => resolve({ code, stderr }));
+		});
+		// The exit code an unhandled EPIPE gave, 1: the guard quiets the trace and changes nothing else (gate round 2).
+		assert.equal(result.code, 1, result.stderr);
+		assert.doesNotMatch(result.stderr, /EPIPE|Unhandled 'error' event|at /, result.stderr);
+	}
+});
+
+// Gate round 2: the guard never turns a broken pipe into success. A long-running writer (the worker, whose log reader
+// died) must exit non-zero so systemd's Restart=on-failure and launchd's SuccessfulExit=false restart it; a verb that
+// set its own exit code keeps it; any other stdout error is one stderr line and exit 1.
+test("installStdoutPipeGuard keeps the exit code an unhandled EPIPE gives, or the verb's own (#503)", async () => {
+	const { EventEmitter } = await import("node:events");
+	const { installStdoutPipeGuard } = await import("../src/exit-code.mjs");
+	const run = (exitCode, error) => {
+		const stream = new EventEmitter();
+		const exits = [];
+		const lines = [];
+		installStdoutPipeGuard({ stream, proc: { exitCode, exit: (c) => exits.push(c) }, write: (l) => lines.push(l) });
+		stream.emit("error", error);
+		return { exits, lines };
+	};
+	const epipe = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+	assert.deepEqual(run(undefined, epipe), { exits: [1], lines: [] }, "nothing set: 1, as the uncaught exception gave");
+	assert.deepEqual(run(2, epipe), { exits: [2], lines: [] }, "a verb's own code is kept");
+	assert.deepEqual(run(0, epipe), { exits: [0], lines: [] }, "an explicit 0 the verb set is its own too");
+	assert.deepEqual(run(undefined, Object.assign(new Error("no space"), { code: "ENOSPC" })), { exits: [1], lines: ["error: writing to stdout failed: ENOSPC\n"] });
+	const { spawn } = await import("node:child_process");
+	const guard = fileURLToPath(new URL("../src/exit-code.mjs", import.meta.url));
+	const script = `import(${JSON.stringify(guard)}).then((m)=>{m.installStdoutPipeGuard();setInterval(()=>process.stdout.write("tick\\n"),5)})`;
+	const result = await new Promise((resolve) => {
+		const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "pipe"] });
+		child.stdout.destroy();
+		let stderr = "";
+		child.stderr.on("data", (d) => (stderr += d));
+		const timer = setTimeout(() => child.kill("SIGKILL"), 20_000);
+		child.on("close", (code) => {
+			clearTimeout(timer);
+			resolve({ code, stderr });
+		});
+	});
+	assert.equal(result.code, 1, `a long-running writer whose reader died exits non-zero, so its supervisor restarts it: ${result.stderr}`);
+	assert.equal(result.stderr, "", "and quietly");
+});

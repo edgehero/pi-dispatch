@@ -6,19 +6,20 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryPlainScript, egressCanaryProbeArgs, forgeUrlEgressChecks, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep } from "../src/doctor.mjs";
+import { startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryPlainScript, egressCanaryProbeArgs, forgeUrlEgressChecks, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep, undeclaredPortNear, ENDPOINT_PROBE_SLUGS, allowlistHostAliases, egressEndpointScript, lanIPv4Addresses, overlayLoopbackModels } from "../src/doctor.mjs";
 import { valkeyPasswordFor } from "../src/valkey-endpoint.mjs";
 import { serviceEnvFileOf } from "../src/service-env.mjs";
 import { VALKEY_SHARED_KEY as VALKEY_SHARED_NAME } from "../src/podman-stack.mjs";
 import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS, runInit } from "../src/init.mjs";
-import { EMPTY_MODEL_ENDPOINTS, loadModelEndpoints } from "../src/model-endpoints.mjs";
-import { EGRESS_CANARY_NET_PREFIX, egressCanaryProbe } from "../src/egress.mjs";
+import { EMPTY_MODEL_ENDPOINTS, MODEL_ENDPOINT_ID_RE, loadModelEndpoints, parseModelEndpoints, renderEndpointsInclude } from "../src/model-endpoints.mjs";
+import { EGRESS_CANARY_NET_PREFIX, egressCanaryProbe, egressEndpointProbe } from "../src/egress.mjs";
 import { LIVE_PREFIX, egressVerdict } from "../src/live-probes.mjs";
 import { JOB_USER_FIX, parseDaemonFacts } from "../src/job-user.mjs";
 import { OBSERVATION_FIX } from "../src/backends.mjs";
 import { PODMAN_JOB_USER_FIX } from "../src/backend-podman.mjs";
 import { loadConfig, underOsTempDir } from "../src/config.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { quotedShown } from "../src/backend-local.mjs";
 
 // env-allowlist imports @earendil-works/pi-ai, which needs node >=22.19.0 and installed deps. doctor.mjs
 // itself reaches it through `await import` for exactly that reason, and a STATIC import here would undo
@@ -1713,6 +1714,20 @@ function scaffoldedCwd() {
 }
 const scaffoldDeps = (out, cwd) => ({ out, cwd, spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0" });
 
+/** Doctor's output without the model endpoint rows (issue #503, part 6) and the fix line under each. */
+function withoutEndpointRows(output) {
+	const lines = output.split("\n");
+	const kept = [];
+	for (let i = 0; i < lines.length; i++) {
+		if (/^. (?:podman: )?Model endpoints?\b/.test(lines[i])) {
+			if (lines[i + 1]?.startsWith("    →")) i++;
+			continue;
+		}
+		kept.push(lines[i]);
+	}
+	return kept.join("\n");
+}
+
 // Issue #503: the model endpoints file defaults to the deployment folder's copy, so unset is not off and the scaffold is
 // what doctor loads, through the worker's own loader.
 test("doctor: an unset PI_MODEL_ENDPOINTS_FILE loads model-endpoints.json from the deployment folder, silent when it loads or is absent (#503)", async () => {
@@ -1721,7 +1736,9 @@ test("doctor: an unset PI_MODEL_ENDPOINTS_FILE loads model-endpoints.json from t
 		if (content !== null) writeFileSync(join(cwd, "model-endpoints.json"), content);
 		const { out, text } = capture();
 		const code = await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
-		assert.doesNotMatch(text(), /PI_MODEL_ENDPOINTS_FILE|model-endpoints/, String(content));
+		// The boot-file line is what this pins. A declared endpoint also gets the egress section's own rows (#503, part 6),
+		// which name it by design and are pinned on their own below, so they are set aside here.
+		assert.doesNotMatch(withoutEndpointRows(text()), /PI_MODEL_ENDPOINTS_FILE|model-endpoints/, String(content));
 		assert.doesNotMatch(text(), /exists but PI_MODEL_ENDPOINTS_FILE is unset/, "unset is not off for this key");
 		assert.equal(code, 0);
 	}
@@ -3513,6 +3530,401 @@ test("doctor: a two-mount proxy is out of date only under rules that include the
 	const elsewhere = tempDir("pi-doctor-503-other-");
 	writeFileSync(join(elsewhere, "model-endpoints.conf"), "# other\n");
 	assert.match((await doctor503(includes, proxyAnswer("healthy", "running", { cwd: includes, include: join(elsewhere, "model-endpoints.conf") }))).text, /not this deployment's[^\n]*its \/etc\/pi-dispatch\/model-endpoints\.conf is .*pi-doctor-503-other-.*model-endpoints\.conf, not /);
+});
+
+// Issue #503, part 6: each declared model endpoint proved through the proxy, the include read inside the proxy, the
+// measured route per runtime, and the two static warnings. The canary's own three probes run first and read as before.
+const MAC = { id: "mac-ollama", host: "host.docker.internal", port: 11434, slots: 1 };
+const ENDPOINT_PROBE = "docker run --rm --name pi-dispatch-egress-probe-endpoint-";
+const INCLUDE_CAT = "docker exec pi-dispatch-egress-proxy cat /etc/pi-dispatch/model-endpoints.conf";
+const declaredInclude = (endpoints) => renderEndpointsInclude(parseModelEndpoints(JSON.stringify({ version: 1, endpoints }), "test"));
+const ENDPOINT_OK = { models: { code: 0, output: "reached 200\n" }, nextport: { code: 3, output: "tunnel 403\n" }, plain: { code: 3, output: "blocked 403 ERR_ACCESS_DENIED 0\n" } };
+const DESKTOP_FACTS = { ServerVersion: "27.4.0", OperatingSystem: "Docker Desktop", SecurityOptions: ["name=seccomp,profile=builtin"], PidsLimit: true, MemoryLimit: true };
+const ENGINE_2913_FACTS = { ServerVersion: "29.1.3", OperatingSystem: "Ubuntu 24.04", SecurityOptions: ["name=seccomp,profile=builtin"], PidsLimit: true, MemoryLimit: true };
+async function doctorEndpoints({ endpoints = [MAC], answers = {}, inside, insideAnswer, hostFile, includeSource, proxy = "pi-dispatch-egress-proxy", facts = DESKTOP_FACTS, rules = INCLUDE_503_RULES, cwd = folder503(rules, { endpoints: endpoints.length > 0 ? endpoints : null }), home = tempDir("pi-home-503-"), calls = [] } = {}) {
+	writeFileSync(join(cwd, "model-endpoints.conf"), hostFile ?? declaredInclude(endpoints));
+	const probes = Object.fromEntries(endpoints.flatMap((e) => ENDPOINT_PROBE_SLUGS.map((slug) => [`${ENDPOINT_PROBE}${slug}-${e.id}-`, answers[slug] ?? ENDPOINT_OK[slug]])));
+	const plan = {
+		...probes,
+		[`docker exec ${proxy} cat /etc/pi-dispatch/model-endpoints.conf`]: insideAnswer ?? { code: 0, output: inside ?? declaredInclude(endpoints) },
+		...egressPlan({ [PROXY_KEY]: proxyAnswer("healthy", "running", { cwd, include: includeSource === undefined ? join(cwd, "model-endpoints.conf") : includeSource }), "gh auth status": { code: 0, output: ghStatusOutput } }),
+		"docker info": { code: 0, output: `${JSON.stringify(facts)}\n` },
+	};
+	const checks = await collectChecks(ghEnv({ PI_EGRESS: "1", ...(proxy === "pi-dispatch-egress-proxy" ? {} : { PI_EGRESS_PROXY: proxy }) }), { ...ghDeps(() => {}, plan, calls, { pid: 7, platform: "darwin", home, hostAddresses: () => undefined }), cwd });
+	let text = "";
+	const failed = render(checks, (s) => (text += s));
+	return { checks, text, failed, calls, cwd };
+}
+
+test("doctor: each declared model endpoint is proved through the proxy by three probes named by its id, and the canary reads as before (#503)", async () => {
+	const { checks, text, failed, calls } = await doctorEndpoints();
+	assert.equal(failed, false, text);
+	assert.match(text, /✓ Model endpoint mac-ollama \(host\.docker\.internal:11434\): host\.docker\.internal works from the proxy \(measured 2026-09-30, Docker Desktop 4\.37\.2 \(engine 27\.4\.0\), macOS\)\. Nothing to add\./);
+	assert.match(text, /✓ Model endpoints: the include inside the running proxy matches model-endpoints\.json \(mac-ollama\)\n/);
+	assert.match(text, /✓ Model endpoint mac-ollama answers through the proxy \(GET http:\/\/host\.docker\.internal:11434\/v1\/models through a CONNECT tunnel: 200\)\n/);
+	assert.match(text, /✓ Model endpoint mac-ollama's rule is port-exact \(a CONNECT to host\.docker\.internal:11435, a port nobody declared, got the proxy's 403\)\n/);
+	assert.match(text, /✓ Model endpoint mac-ollama admits no plain forward request \(GET http:\/\/host\.docker\.internal:11434\/v1\/models without a tunnel got the proxy's 403 ERR_ACCESS_DENIED\)\n/);
+	assert.ok(calls.some((c) => c.args.join(" ") === "exec pi-dispatch-egress-proxy cat /etc/pi-dispatch/model-endpoints.conf"), "the include is read inside the proxy");
+	const runs = calls.filter((c) => c.args[0] === "run").map((c) => c.args);
+	assert.deepEqual(
+		runs.map((a) => a[a.indexOf("--name") + 1]),
+		[...CANARY_PROBE_SLUGS.map((s) => egressCanaryProbe(s, 7)), ...ENDPOINT_PROBE_SLUGS.map((s) => egressEndpointProbe(s, "mac-ollama", 7))],
+		"the canary's three, then the endpoint's three, on one network",
+	);
+	assert.ok(runs.slice(3).every((a) => a.includes("--network=pi-dispatch-egress-doctor-7") && a.includes("HTTP_PROXY=http://pi-dispatch-egress-proxy:3128")), "a job's plain-HTTP proxy rides the endpoint probes");
+	assert.ok(!runs.slice(0, 3).some((a) => a.includes("HTTP_PROXY=http://pi-dispatch-egress-proxy:3128")), "the canary's own argv is unchanged");
+	assert.equal(runs[3].at(-1), egressEndpointScript("http://host.docker.internal:11434/v1/models"));
+	assert.equal(runs[4].at(-1), egressEndpointScript("http://host.docker.internal:11435/v1/models"));
+	assert.equal(runs[5].at(-1), egressCanaryPlainScript("http://host.docker.internal:11434/v1/models", { proxyUrl: "http://pi-dispatch-egress-proxy:3128" }));
+	assert.deepEqual(checks.filter((c) => c.readBack).map((c) => c.readBack.probe), ["provider", "unlisted", "plainhttp"], "the egress verdict reads exactly the canary's three");
+	assert.ok(calls.findIndex((c) => c.args.slice(0, 2).join(" ") === "network rm") > calls.findLastIndex((c) => c.args[0] === "run"), "the network goes after the last endpoint probe");
+	// docs/egress.md's sample is these lines, in this order: generated here, so the page cannot drift from what doctor prints.
+	const doc = readFileSync(new URL("../../docs/egress.md", import.meta.url), "utf8");
+	const sample = checks.filter((c) => c.endpointProbe || /^Model endpoints: the include/.test(c.label)).map((c) => `✓ ${c.label}\n`).join("");
+	assert.ok(doc.includes(sample), "docs/egress.md shows the include line and the three probe lines exactly");
+});
+
+test("doctor: an endpoint probe fails on a silent server, a rule that is not port-exact and a plain request let through, and shows the proxy's status (#503)", async () => {
+	const line = async (answers, slug) => {
+		const { checks } = await doctorEndpoints({ answers });
+		const found = checks.filter((c) => c.endpointProbe?.probe === slug);
+		assert.equal(found.length, 1);
+		assert.equal(found[0].ok, false, found[0].label);
+		assert.equal(found[0].warn, true, "the network has to answer, so a probe line is warn-tier, as the canary's are");
+		return found[0];
+	};
+	const silent = await line({ models: { code: 3, output: "tunnel 503\n" } }, "models");
+	assert.equal(silent.label, "Model endpoint mac-ollama does NOT answer: the proxy allowed the tunnel to host.docker.internal:11434 and answered 503, so nothing answered there");
+	assert.match(silent.fix, /start the model server/);
+	assert.match((await line({ models: { code: 3, output: "tunnel 403\n" } }, "models")).label, /refused the tunnel to host\.docker\.internal:11434 with 403/);
+	assert.match((await line({ models: { code: 0, output: "reached 404\n" } }, "models")).label, /GET \/v1\/models answered 404, not 200$/);
+	// Gate round 1, item 5: a server that took the connection and never answered is not told to start.
+	const stuck = await line({ models: { code: 6, output: "blocked TimeoutError\n" } }, "models");
+	assert.equal(stuck.label, "Model endpoint mac-ollama does NOT answer: it accepted the connection but did not answer /v1/models within 15 s");
+	assert.doesNotMatch(stuck.fix, /start the model server/);
+	assert.match((await line({ models: { code: 6, output: "blocked ECONNREFUSED\n" } }, "models")).label, /no answer came back through the proxy \(ECONNREFUSED\)/);
+	// Gate round 1, item 6: the server's own 401 or 403 through the tunnel proves the route and the rule; it wants a key.
+	for (const status of [401, 403]) {
+		const keyed = await line({ models: { code: 0, output: `reached ${status}\n` } }, "models");
+		assert.equal(keyed.label, `Model endpoint mac-ollama: the route through the proxy works (the tunnel to host.docker.internal:11434 opened), and the server wants a key (GET /v1/models answered ${status})`);
+		assert.match(keyed.fix, /declare it without "keyless" and give its provider its key/);
+	}
+	assert.match(silent.fix, /on Docker Engine that is 172\.17\.0\.1 or 0\.0\.0\.0/, "docker's advice on docker");
+	assert.match((await line({ models: 125 }, "models")).label, /^Model endpoint mac-ollama: the models probe did not run \(docker run exited 125\)$/);
+	const open = await line({ nextport: { code: 3, output: "tunnel 503\n" } }, "nextport");
+	assert.equal(open.label, "Model endpoint mac-ollama's rule is NOT shown to be port-exact: the proxy let a CONNECT to host.docker.internal:11435, a port nobody declared, through and answered 503 (nothing listens there)");
+	// A 403 that the SERVER sent through an open tunnel is not the proxy's refusal.
+	assert.match((await line({ nextport: { code: 0, output: "reached 403\n" } }, "nextport")).label, /was let through, and something there answered 403/);
+	const plain = await line({ plain: { code: 0, output: "reached 200 \n" } }, "plain");
+	assert.equal(plain.label, "Model endpoint mac-ollama admits a plain forward request: GET http://host.docker.internal:11434/v1/models without a tunnel got 200, not the proxy's 403 ERR_ACCESS_DENIED");
+	// A bare 403, with no squid error header, may be the server's own answer to a request the proxy forwarded.
+	assert.match((await line({ plain: { code: 0, output: "reached 403 \n" } }, "plain")).label, /got 403, not the proxy's 403 ERR_ACCESS_DENIED/);
+});
+
+test("doctor: the include is compared INSIDE the running proxy, so a stale copy there is ✗ even when this folder's file matches (#503)", async () => {
+	// Not rendered since the declaration changed: the folder and the proxy agree with each other and not with the JSON.
+	const old = declaredInclude([]);
+	const stale = await doctorEndpoints({ inside: old, hostFile: old });
+	assert.equal(stale.failed, true);
+	assert.match(stale.text, /✗ Model endpoints: the include inside the running proxy \(\/etc\/pi-dispatch\/model-endpoints\.conf in pi-dispatch-egress-proxy\) does not match model-endpoints\.json \(mac-ollama\), so a reload would not load the declared rules\n {4}→ `pi-dispatch egress render` in the deployment folder, then `docker exec pi-dispatch-egress-proxy squid -k reconfigure`\. If the render says the file already matches and this line stays, the proxy holds an earlier copy of a file that was replaced rather than written in place, which a reload never sees: `docker rm -f -v pi-dispatch-egress-proxy`, then `pi-dispatch up`/);
+	// Rendered, but the folder's file was REPLACED: the container keeps the old inode (measured), so it reads the old rules.
+	const replaced = await doctorEndpoints({ inside: old });
+	assert.equal(replaced.failed, true);
+	assert.match(replaced.text, /✗ Model endpoints: the proxy is mounted on a replaced file: the file it mounts \(\S+model-endpoints\.conf\) differs from what pi-dispatch-egress-proxy reads at \/etc\/pi-dispatch\/model-endpoints\.conf, so it was replaced \(a rename, an editor's save\) rather than written in place, and no reload reaches the proxy\n {4}→ recreate the proxy so it mounts the file anew: `docker rm -f -v pi-dispatch-egress-proxy`, then `pi-dispatch up`/);
+	// Gate round 1, item 9: a file replaced by hand with the JSON unchanged, so what the PROXY holds still matches the
+	// declaration. The folder's file differing from the proxy's is the finding, whichever of the two matches the JSON.
+	const handReplaced = await doctorEndpoints({ hostFile: `${declaredInclude([MAC])}# a hand edit\n` });
+	assert.equal(handReplaced.failed, true);
+	assert.match(handReplaced.text, /✗ Model endpoints: the proxy is mounted on a replaced file/);
+	assert.doesNotMatch(handReplaced.text, /✓ Model endpoints: the include inside the running proxy matches/);
+	// Gate round 2: the compare reads the file the proxy MOUNTS (its bind source), never the folder doctor runs in. A
+	// proxy mounting another folder's current file is fine, whatever this folder holds.
+	const mounted = join(tempDir("pi-doctor-503-mounted-"), "model-endpoints.conf");
+	writeFileSync(mounted, declaredInclude([MAC]));
+	// Doctor run from a second folder (not the deployment folder, so the proxy's mounts are not judged against it) that
+	// holds an include of its own: the proxy mounts the deployment folder's, which is current.
+	const second = tempDir("pi-doctor-503-second-");
+	writeFileSync(join(second, "model-endpoints.json"), JSON.stringify({ version: 1, endpoints: [MAC] }));
+	const elsewhere = await doctorEndpoints({ cwd: second, hostFile: "# this folder's own, not mounted\n", includeSource: mounted });
+	assert.match(elsewhere.text, /✓ Model endpoints: the include inside the running proxy matches/);
+	assert.doesNotMatch(elsewhere.text, /replaced file/);
+	writeFileSync(mounted, "# replaced under the proxy\n");
+	assert.match((await doctorEndpoints({ cwd: second, includeSource: mounted })).text, /✗ Model endpoints: the proxy is mounted on a replaced file/, "the mounted file is what is compared");
+	// An operator's own proxy (PI_EGRESS_PROXY) is compared the same way, by its own mount.
+	const custom = await doctorEndpoints({ proxy: "my-squid", includeSource: mounted });
+	assert.match(custom.text, /✗ Model endpoints: the proxy is mounted on a replaced file: the file it mounts \(\S+pi-doctor-503-mounted-\S+model-endpoints\.conf\) differs from what my-squid reads/);
+	// No bind at that path, or a source this host cannot read: the compare is skipped, never guessed.
+	for (const includeSource of [null, join(tempDir("pi-doctor-503-gone-"), "absent.conf")]) {
+		const skipped = await doctorEndpoints({ proxy: "my-squid", hostFile: "# differs\n", includeSource });
+		assert.match(skipped.text, /✓ Model endpoints: the include inside the running proxy matches/, String(includeSource));
+		assert.doesNotMatch(skipped.text, /replaced file/);
+	}
+	const unread = await doctorEndpoints({ insideAnswer: { code: 1, output: "" } });
+	assert.match(unread.text, /⚠ Model endpoints: the include inside the running proxy could not be read \(`docker exec pi-dispatch-egress-proxy cat \/etc\/pi-dispatch\/model-endpoints\.conf` exited 1\)\n/);
+	assert.doesNotMatch(unread.text, /does not match/, "an unread file is not called a mismatch");
+});
+
+test("doctor: a route the measurements refute on this runtime is ✗ naming the venue's alias; an unmeasured one is said, not warned (#503)", async () => {
+	const HCI = { id: "hci", host: "host.containers.internal", port: 11434, slots: 1 };
+	const refuted = await doctorEndpoints({ endpoints: [HCI], facts: ENGINE_2913_FACTS });
+	assert.equal(refuted.failed, true);
+	assert.match(refuted.text, /✗ Model endpoint hci \(host\.containers\.internal:11434\) has no route from the egress proxy on this runtime: host\.containers\.internal does not work from the proxy \(measured 2026-09-30, Docker Engine 29\.1\.3, Ubuntu 24\.04\)\. The name is not defined on Docker Engine\. Declare host\.docker\.internal\.\n {4}→ declare the host this runtime reaches \(docs\/backends\.md/);
+	const unmeasured = await doctorEndpoints({ facts: { ...ENGINE_2913_FACTS, ServerVersion: "28.0.1" } });
+	assert.equal(unmeasured.failed, false, unmeasured.text);
+	assert.match(unmeasured.text, /✓ Model endpoint mac-ollama \(host\.docker\.internal:11434\): the route from the proxy is not measured here\. No route from the proxy to host\.docker\.internal was measured on docker 28\.0\.1 engine\. docs\/backends\.md lists the measured ones\. The endpoint probes below are the proof/);
+});
+
+test("doctor: no declared endpoint is no new line and no new container, and rules that predate the include say only the refresh (#503)", async () => {
+	const cwd = folder503(INCLUDE_503_RULES);
+	const home = tempDir("pi-home-503-");
+	const before = await doctorEndpoints({ endpoints: [], cwd, home });
+	writeFileSync(join(cwd, "model-endpoints.json"), EMPTY_MODEL_ENDPOINTS);
+	const empty = await doctorEndpoints({ endpoints: [], cwd, home });
+	assert.equal(empty.text, before.text, "an empty declaration prints what no file prints");
+	for (const run of [before, empty]) {
+		assert.doesNotMatch(run.text, /Model endpoint/);
+		assert.ok(!run.calls.some((c) => c.args[0] === "exec" || c.args.some((a) => String(a).includes("egress-probe-endpoint-"))), "no exec and no endpoint probe");
+	}
+	const old = await doctorEndpoints({ rules: PRE_503_RULES });
+	assert.match(old.text, /⚠ model endpoints are declared, but deploy\/egress-proxy\.conf predates #503/);
+	assert.doesNotMatch(old.text, /Model endpoint/, "the refresh line is the whole story there");
+	assert.ok(!old.calls.some((c) => c.args[0] === "exec" || c.args.some((a) => String(a).includes("egress-probe-endpoint-"))));
+});
+
+test("doctor: an overlay model on a loopback baseUrl is ⚠, named with its provider, whatever is declared (#503)", async () => {
+	assert.deepEqual(
+		overlayLoopbackModels({
+			providers: {
+				"local-ollama": { baseUrl: "http://localhost:11434/v1", models: [{ id: "qwen" }, { id: "remote", baseUrl: "http://host.docker.internal:11434/v1" }] },
+				lms: { baseUrl: "http://127.0.0.1:1234/v1" },
+				v6: { baseUrl: "http://[::1]:8000/v1", models: [{ id: "a" }] },
+				gpu: { baseUrl: "http://gpu.lan:8000/v1", models: [{ id: "m", baseUrl: "http://0.0.0.0:8000" }, { id: "n" }] },
+				anthropic: { baseUrl: "https://api.anthropic.com" },
+				"bad\u202e": { baseUrl: "http://LOCALHOST./v1" },
+			},
+		}),
+		['"local-ollama"/"qwen" (localhost:11434)', '"lms" (127.0.0.1:1234)', '"v6"/"a" ([::1]:8000)', '"gpu"/"m" (0.0.0.0:8000)', `${quotedShown("bad\u202e")} (localhost:80)`],
+	);
+	assert.deepEqual(overlayLoopbackModels(null), []);
+	assert.deepEqual(overlayLoopbackModels({ providers: [] }), []);
+	const overlay = tempDir("pi-overlay-503-");
+	writeFileSync(join(overlay, "models.json"), JSON.stringify({ providers: { "local-ollama": { baseUrl: "http://localhost:11434/v1", apiKey: "$PI_DISPATCH_KEYLESS", models: [{ id: "qwen2.5:0.5b" }] } } }));
+	const { out, text } = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "0", PI_GLOBAL_PI_DIR: overlay }), { ...ghDeps(out, { ...green, "gh auth status": { code: 0, output: ghStatusOutput } }), fileExists: existsSync });
+	assert.match(text(), /⚠ Overlay models\.json points "local-ollama"\/"qwen2\.5:0\.5b" \(localhost:11434\) at a loopback address, which inside a job is the job's own container, so no job reaches that server\n {4}→ serve the model on an address the egress proxy reaches, declare it in model-endpoints\.json/);
+});
+
+test("doctor: an allowlist naming a host alias is ⚠, pointing at model-endpoints.json (#503)", async () => {
+	assert.deepEqual(allowlistHostAliases("api.anthropic.com\n.HOST.docker.internal # mine\n# host.containers.internal\nfoo.host.containers.internal\n"), [{ alias: "host.docker.internal", entry: ".HOST.docker.internal" }]);
+	assert.deepEqual(allowlistHostAliases("host.containers.internal host.docker.internal\n"), [{ alias: "host.docker.internal", entry: "host.docker.internal" }, { alias: "host.containers.internal", entry: "host.containers.internal" }]);
+	// Gate round 1, item 7: a dotted entry admits every name under it, so it covers an alias as surely as the alias.
+	assert.deepEqual(allowlistHostAliases(".internal\n"), [{ alias: "host.docker.internal", entry: ".internal" }, { alias: "host.containers.internal", entry: ".internal" }]);
+	assert.deepEqual(allowlistHostAliases(".docker.internal .containers.internal\n"), [{ alias: "host.docker.internal", entry: ".docker.internal" }, { alias: "host.containers.internal", entry: ".containers.internal" }]);
+	assert.deepEqual(allowlistHostAliases("internal\ndocker.internal\n.ost.docker.internal\n"), [], "a bare name admits itself only, and a suffix must end at a dot");
+	const cwd = folder503(INCLUDE_503_RULES);
+	writeFileSync(join(cwd, "egress-allowlist.conf"), "api.anthropic.com\nhost.docker.internal\n");
+	const { text } = await doctorEndpoints({ endpoints: [], cwd });
+	const dotted = folder503(INCLUDE_503_RULES);
+	writeFileSync(join(dotted, "egress-allowlist.conf"), "api.anthropic.com\n.internal\n");
+	assert.match((await doctorEndpoints({ endpoints: [], cwd: dotted })).text, /⚠ egress-allowlist\.conf lists "\.internal", which admits host\.docker\.internal, which lets a job open a CONNECT/);
+	assert.match(text, /⚠ egress-allowlist\.conf lists host\.docker\.internal, which lets a job open a CONNECT to that host's port 443 and send plain HTTP to its port 80, and reaches no model server's port\n {4}→ remove it, and declare the model server in model-endpoints\.json instead/);
+	const { out, text: off } = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "0" }), { ...ghDeps(out, { ...green, "gh auth status": { code: 0, output: ghStatusOutput } }), cwd });
+	assert.doesNotMatch(off(), /egress-allowlist\.conf lists/, "with the policy off the file is no policy");
+});
+
+// Gate round 1, item 1: the port-exact probe must ask for a port nobody declared, or a neighbour's own rule answers it.
+test("the port-exact probe asks for the nearest port no declaration for that host uses, never 80 or 443 (#503)", async () => {
+	const at = (port, host = "srv.lan") => ({ id: `p${port}`, host, port, slots: 1 });
+	assert.equal(undeclaredPortNear(at(18080), [at(18080), at(18081), at(18082), at(18083, "other.lan")]), 18083, "skips the same host's declared ports, not another host's");
+	assert.equal(undeclaredPortNear(at(442), [at(442)]), 444, "never 443, which the allowlist opens for a listed host");
+	assert.equal(undeclaredPortNear(at(79), [at(79)]), 81, "never 80, which the allowlist opens for plain HTTP");
+	assert.equal(undeclaredPortNear(at(65535), [at(65535), at(65534)]), 65533, "wraps below the declared port at the top");
+	const SRV = { id: "srv", host: "srv.lan", port: 18080, slots: 1 };
+	const SRV2 = { id: "srv2", host: "srv.lan", port: 18081, slots: 1 };
+	const { text, calls } = await doctorEndpoints({ endpoints: [SRV, SRV2], facts: ENGINE_2913_FACTS });
+	const nextport = calls.filter((c) => c.args[0] === "run" && String(c.args[c.args.indexOf("--name") + 1]).includes("-nextport-")).map((c) => c.args.at(-1));
+	assert.deepEqual(nextport, [egressEndpointScript("http://srv.lan:18082/v1/models"), egressEndpointScript("http://srv.lan:18082/v1/models")], "neither probes the other's declared port");
+	assert.match(text, /✓ Model endpoint srv's rule is port-exact \(a CONNECT to srv\.lan:18082, a port nobody declared/);
+	// Gate round 1, item 3: another machine is an ordinary route out, said plainly, not "not measured here" before a
+	// sentence naming this very runtime as measured.
+	assert.match(text, /✓ Model endpoint srv \(srv\.lan:18080\): srv\.lan is not a route to this host: an ordinary outbound route through the proxy\. Another machine on the LAN was measured reachable/);
+	assert.doesNotMatch(text, /srv\.lan:18080\): the route from the proxy is not measured here/);
+});
+
+test("doctor on the podman venue judges the route by the helper Podman names, and says so plainly when it names none (#503)", async () => {
+	const HCI = { id: "hci", host: "host.containers.internal", port: 11434, slots: 1 };
+	const rules = (p) => {
+		if (p === `${PODMAN_HOME}/.config/pi-dispatch/egress-proxy.conf`) return INCLUDE_503_RULES;
+		throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+	};
+	const run = async (info) => {
+		const { out, text } = capture();
+		await runDoctor(podmanEnv({ PI_EGRESS: "1" }), podmanDeps(out, { "podman exec pi-dispatch-egress-proxy cat": { code: 0, output: declaredInclude([HCI]) }, ...podmanPlan({ proxy: "running", info }) }, [], { platform: "linux", readProxyConf: rules, declaredEndpoints: () => [HCI], hostAddresses: () => undefined }));
+		return text();
+	};
+	assert.match(await run(PODMAN_INFO({ rootlessNetworkCmd: "pasta" })), /✓ podman: Model endpoint hci \(host\.containers\.internal:11434\): host\.containers\.internal works from the proxy \(measured 2026-09-30, Podman 5\.8\.1 rootless, pasta, Fedora\)/);
+	const unnamed = await run(PODMAN_INFO());
+	assert.match(unnamed, /✓ podman: Model endpoint hci \(host\.containers\.internal:11434\): the rootless network helper was not reported by this Podman, so the route is not judged here\. `pi-dispatch doctor --live` probes it, which is the proof\.\n/);
+	assert.doesNotMatch(unnamed, /missing or invalid/, "never worded as a fault");
+});
+
+test("a podman endpoint that does not answer gets the podman venue's advice, not docker's (#503)", async () => {
+	const HCI = { id: "hci", host: "host.containers.internal", port: 11434, slots: 1 };
+	const env = liveEnv({ PI_EGRESS: "1", PI_BACKENDS: "podman" });
+	const probe = (slug, answer) => ({ [`podman run --name=pi-dispatch-egress-probe-endpoint-${slug}-hci-`]: answer });
+	const held = await podmanLiveChecks(env, podmanEgressSeams({ ...probe("models", { code: 3, output: "tunnel 503\n" }), ...probe("nextport", { code: 3, output: "tunnel 403\n" }), ...probe("plain", { code: 3, output: "blocked 403 ERR_ACCESS_DENIED 0\n" }), [`${PODMAN_PROBE}provider`]: 0, [`${PODMAN_PROBE}unlisted`]: 3 }), podmanEgressFacts({ endpoints: [HCI] }));
+	const down = held.find((c) => c.endpointProbe?.probe === "models");
+	assert.equal(down.label, "podman: Model endpoint hci does NOT answer: the proxy allowed the tunnel to host.containers.internal:11434 and answered 503, so nothing answered there");
+	assert.match(down.fix, /bound to this host's LAN address or 0\.0\.0\.0 \(never 127\.0\.0\.1 alone\), and declare a server on this host as host\.containers\.internal/);
+	assert.doesNotMatch(down.fix, /Docker Engine|172\.17\.0\.1/);
+});
+
+test("doctor: the leftover sweep removes a dead run's endpoint probes by their exact shape, and only those (#503)", async () => {
+	const calls = [];
+	const members = ["pi-dispatch-egress-probe-endpoint-models-mac-ollama-4242", "pi-dispatch-egress-probe-endpoint-plain-a-1-4242", `pi-dispatch-egress-probe-endpoint-models-${"a".repeat(33)}-4242`, "pi-dispatch-egress-probe-endpoint-models-mac-ollama-42420", "pi-dispatch-egress-probe-endpoint-other-mac-4242", "pi-dispatch-egress-probe-endpoint-models-MAC-4242", "pi-dispatch-egress-probe-endpoint-nextport-x.y-4242"];
+	const plan = {
+		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" },
+		"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242": { code: 0, output: JSON.stringify(Object.fromEntries(members.map((Name, i) => [`c${i}`, { Name }]))) },
+		"docker rm -f": 0,
+		...green,
+		"gh auth status": { code: 0, output: ghStatusOutput },
+	};
+	const { out } = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => false, pid: 1 }));
+	assert.deepEqual(calls.filter((c) => c.args[0] === "rm").map((c) => c.args.at(-1)), members.slice(0, 2), "a probe this file builds, for the dead pid, is removed");
+	const detached = calls.filter((c) => c.args.slice(0, 2).join(" ") === "network disconnect" && c.args.includes("pi-dispatch-egress-doctor-4242")).map((c) => c.args.at(-1));
+	// Gate round 1, item 8: the id class IS the parser's, so an id the parser refuses (33 characters) is never removed.
+	assert.equal(MODEL_ENDPOINT_ID_RE.test("a".repeat(33)), false);
+	assert.deepEqual(detached.sort(), members.slice(2).sort(), "another pid, an unknown probe, or an id the parser refuses is merely detached");
+});
+
+test("lanIPv4Addresses keeps this host's own LAN IPv4 addresses and leaves out loopback, link-local and container bridges (#503)", () => {
+	assert.deepEqual(
+		lanIPv4Addresses({
+			lo: [{ family: "IPv4", address: "127.0.0.1", internal: true }],
+			eth0: [{ family: "IPv4", address: "192.168.5.15", internal: false }, { family: "IPv6", address: "fe80::1", internal: false }],
+			en1: [{ family: 4, address: "10.0.0.7", internal: false }, { family: "IPv4", address: "169.254.3.4", internal: false }],
+			docker0: [{ family: "IPv4", address: "172.17.0.1", internal: false }],
+			"br-1a2b": [{ family: "IPv4", address: "172.18.0.1", internal: false }],
+			podman1: [{ family: "IPv4", address: "10.89.0.1", internal: false }],
+			wlan0: [{ family: "IPv4", address: "192.168.5.15", internal: false }],
+		}),
+		["192.168.5.15", "10.0.0.7"],
+	);
+	assert.equal(lanIPv4Addresses({ lo: [{ family: "IPv4", address: "127.0.0.1", internal: true }] }), undefined, "none is omitted, never an empty list");
+	assert.equal(lanIPv4Addresses(undefined), undefined);
+});
+
+// The tunnelled endpoint script, run for real against a fake proxy in this process, with the repo's own runner module
+// in place of the image's: undici's tunnel error text is what doctor's status comes from (measured M9), so it is pinned
+// at the version the runner actually loads.
+test("the endpoint probe script reports the proxy's status for a refused tunnel, and the server's for one let through (#503)", async () => {
+	const { createServer } = await import("node:http");
+	const { connect } = await import("node:net");
+	const { spawn: spawnChild } = await import("node:child_process");
+	const { fileURLToPath } = await import("node:url");
+	const runner = join(dirname(fileURLToPath(import.meta.url)), "../../image/runner/src/env-proxy.mjs");
+	const model = createServer((req, res) => res.writeHead(req.url === "/v1/models" ? 200 : 404).end("{}"));
+	await new Promise((r) => model.listen(0, "127.0.0.1", r));
+	const runAgainst = (onConnect) =>
+		new Promise((resolve) => {
+			const seen = [];
+			const proxy = createServer((req, res) => {
+				seen.push(`${req.method} ${req.url}`);
+				res.writeHead(500).end();
+			});
+			proxy.on("connect", (req, socket) => {
+				seen.push(`CONNECT ${req.url}`);
+				onConnect(socket);
+			});
+			proxy.listen(0, "127.0.0.1", () => {
+				const script = egressEndpointScript("http://model.test:11434/v1/models", { timeoutMs: 3000 }).replace(JSON.stringify(EGRESS_CANARY_RUNNER_MODULE), JSON.stringify(runner));
+				const { HTTP_PROXY: _a, http_proxy: _b, HTTPS_PROXY: _c, https_proxy: _d, NO_PROXY: _e, no_proxy: _f, ...base } = process.env;
+				const child = spawnChild(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "pipe"], env: { ...base, NODE_USE_ENV_PROXY: "1", HTTP_PROXY: `http://127.0.0.1:${proxy.address().port}` } });
+				let stdout = "";
+				let stderr = "";
+				child.stdout.on("data", (d) => (stdout += d));
+				child.stderr.on("data", (d) => (stderr += d));
+				child.on("close", (status) => {
+					proxy.closeAllConnections();
+					proxy.close(() => resolve({ status, stdout, stderr, seen }));
+				});
+			});
+		});
+	try {
+		for (const code of [403, 503]) {
+			const refused = await runAgainst((socket) => socket.end(`HTTP/1.1 ${code} ${code === 403 ? "Forbidden" : "Service Unavailable"}\r\nContent-Length: 0\r\n\r\n`));
+			assert.equal(refused.status, 3, refused.stdout + refused.stderr);
+			assert.equal(refused.stdout, `tunnel ${code}\n`);
+			assert.deepEqual(refused.seen, ["CONNECT model.test:11434"], "sent as a CONNECT, the way pi sends an http:// provider call");
+		}
+		const through = await runAgainst((socket) => {
+			const upstream = connect(model.address().port, "127.0.0.1", () => {
+				socket.write("HTTP/1.1 200 Connection established\r\n\r\n");
+				upstream.pipe(socket);
+				socket.pipe(upstream);
+			});
+			socket.on("error", () => upstream.destroy());
+			upstream.on("error", () => socket.destroy());
+		});
+		assert.equal(through.status, 0, through.stdout + through.stderr);
+		assert.equal(through.stdout, "reached 200\n");
+	} finally {
+		model.closeAllConnections();
+		await new Promise((r) => model.close(r));
+	}
+});
+
+test("doctor on the podman venue reads the include inside its proxy, and --live probes each endpoint beside the canary (#503)", async () => {
+	const HCI = { id: "hci", host: "host.containers.internal", port: 11434, slots: 1 };
+	const rules = (p) => {
+		if (p === `${PODMAN_HOME}/.config/pi-dispatch/egress-proxy.conf`) return INCLUDE_503_RULES;
+		throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+	};
+	const run = async (inside, mounts) => {
+		const { out, text } = capture();
+		const calls = [];
+		const code = await runDoctor(podmanEnv({ PI_EGRESS: "1" }), podmanDeps(out, { "podman exec pi-dispatch-egress-proxy cat": { code: 0, output: inside }, ...(mounts ? { "podman inspect --format {{json .Mounts}} pi-dispatch-egress-proxy": { code: 0, output: `${JSON.stringify(mounts)}\n` } } : {}), ...podmanPlan({ proxy: "running" }) }, calls, { platform: "linux", readProxyConf: rules, declaredEndpoints: () => [HCI], hostAddresses: () => undefined }));
+		return { code, text: text(), calls };
+	};
+	const same = await run(declaredInclude([HCI]));
+	assert.match(same.text, /✓ podman: Model endpoint hci \(host\.containers\.internal:11434\): .*`pi-dispatch doctor --live` probes it, which is the proof\.\n/);
+	assert.match(same.text, /✓ podman: Model endpoints: the include inside the running proxy matches model-endpoints\.json \(hci\)\n/);
+	assert.ok(same.calls.some((c) => c.cmd === "podman" && c.args.join(" ") === "exec pi-dispatch-egress-proxy cat /etc/pi-dispatch/model-endpoints.conf"));
+	// Gate round 2: the replaced-file compare reads the bind source the proxy mounts, from `podman inspect`, wherever doctor
+	// runs: the Quadlet unit mounts the deployment folder's file, which need not be this one.
+	const deployed = join(tempDir("pi-doctor-503-quadlet-"), "model-endpoints.conf");
+	writeFileSync(deployed, declaredInclude([HCI]));
+	const bind = [{ Type: "bind", Source: deployed, Destination: "/etc/pi-dispatch/model-endpoints.conf" }];
+	const current = await run(declaredInclude([HCI]), bind);
+	assert.match(current.text, /✓ podman: Model endpoints: the include inside the running proxy matches/);
+	assert.ok(current.calls.some((c) => c.args.join(" ") === "inspect --format {{json .Mounts}} pi-dispatch-egress-proxy"));
+	writeFileSync(deployed, "# replaced under the proxy\n");
+	assert.match((await run(declaredInclude([HCI]), bind)).text, /✗ podman: Model endpoints: the proxy is mounted on a replaced file: the file it mounts \(\S+pi-doctor-503-quadlet-\S+\)/);
+	assert.doesNotMatch((await run(declaredInclude([HCI]), [{ Type: "volume", Source: deployed, Destination: "/etc/pi-dispatch/model-endpoints.conf" }])).text, /replaced file/, "no bind there, no compare");
+	const stale = await run(declaredInclude([]));
+	assert.match(stale.text, /✗ podman: Model endpoints: the include inside the running proxy \([^)]+\) does not match model-endpoints\.json \(hci\)[^\n]*\n {4}→ `pi-dispatch egress render` in the deployment folder, then `podman exec pi-dispatch-egress-proxy squid -k reconfigure`\..*`systemctl --user restart pi-dispatch-egress-proxy\.service`/);
+
+	const env = liveEnv({ PI_EGRESS: "1", PI_BACKENDS: "podman" });
+	const calls = [];
+	const lines = [];
+	const probe = (slug, answer) => ({ [`podman run --name=pi-dispatch-egress-probe-endpoint-${slug}-hci-`]: answer });
+	const held = await podmanLiveChecks(
+		env,
+		{ ...podmanEgressSeams({ ...probe("models", { code: 0, output: "reached 200\n" }), ...probe("nextport", { code: 3, output: "tunnel 403\n" }), ...probe("plain", { code: 3, output: "blocked 403 ERR_ACCESS_DENIED 0\n" }), [`${PODMAN_PROBE}provider`]: 0, [`${PODMAN_PROBE}unlisted`]: 3 }, calls), out: (s) => lines.push(s) },
+		podmanEgressFacts({ endpoints: [HCI] }),
+	);
+	const named = calls.filter((c) => c.args[0] === "run" && String(c.args[1]).startsWith("--name=pi-dispatch-egress-probe-")).map((c) => c.args[1]);
+	assert.deepEqual(named, [...CANARY_PROBE_SLUGS.map((s) => `--name=${egressCanaryProbe(s, 1)}`), ...ENDPOINT_PROBE_SLUGS.map((s) => `--name=${egressEndpointProbe(s, "hci", 1)}`)]);
+	const models = calls.find((c) => c.args[1] === `--name=${egressEndpointProbe("models", "hci", 1)}`).args;
+	assert.deepEqual(models, [...podmanProbeArgv("models", "http://host.containers.internal:11434/v1/models").slice(0, -1).map((a) => a.replace("--name=pi-dispatch-egress-probe-models-1", `--name=${egressEndpointProbe("models", "hci", 1)}`)), egressEndpointScript("http://host.containers.internal:11434/v1/models")], "a podman job's argv, with its own name and the tunnelled GET");
+	assert.ok(held.some((c) => c.ok && c.label === "podman: Model endpoint hci answers through the proxy (GET http://host.containers.internal:11434/v1/models through a CONNECT tunnel: 200)"));
+	assert.ok(held.some((c) => c.ok && c.label.startsWith("podman: Model endpoint hci's rule is port-exact")));
+	assert.ok(held.some((c) => c.ok && c.label.startsWith("podman: Model endpoint hci admits no plain forward request")));
+	assert.deepEqual(held.filter((c) => c.readBack).map((c) => c.readBack.probe), ["provider", "unlisted", "plainhttp"]);
+	assert.ok(held.some((c) => c.ok && c.label.startsWith("read back on podman: egress holds")), "the verdict reads the canary's three alone");
+	assert.match(lines.join(""), /all three are removed when the canary ends; then three per declared model endpoint \(hci\), named pi-dispatch-egress-probe-endpoint-<probe>-<id>-1, removed the same way\n/);
 });
 
 test("doctor: a proxy that exists but is STOPPED says so, because the fix is a different one", async () => {
@@ -6716,7 +7128,9 @@ test("doctor's two docker runners spawn the bin they are given, and docker when 
 	// runtime from a variable, the in-image gh probe, which is docker's with `local` and podman's without it. A new podman
 	// spawn, or a docker one turned into a variable, lands here as a diff rather than going unseen.
 	const direct = [...doctorSource.matchAll(/runCmd(?:Capture)?\(\w*[sS]pawn, "podman", \[("[^"]*", "[^"]*")/g)].map((m) => m[1]);
-	assert.deepEqual(direct, ['"image", "inspect"', '"image", "inspect"', '"pull", "ghcr.io/edgehero/pi-job:latest"', '"tag", "ghcr.io/edgehero/pi-job:latest"', '"inspect", "--format={{.State.Status}}"', '"network", "inspect"']);
+	// Issue #503 added one (PR #519 gate round 2): the proxy's mounts, read for the include's bind source. Its `exec ... cat`
+	// of the include names the proxy by a variable, so the matcher above cannot see it.
+	assert.deepEqual(direct, ['"image", "inspect"', '"image", "inspect"', '"pull", "ghcr.io/edgehero/pi-job:latest"', '"tag", "ghcr.io/edgehero/pi-job:latest"', '"inspect", "--format={{.State.Status}}"', '"inspect", "--format"', '"network", "inspect"']);
 	// Issue #458 added the last (PR #463 round 3): the keeper network's options. And the rootless network keeper's read, whose format is the shared constant (podman-stack.mjs), so the
 	// literal matcher above cannot see it; it is pinned by its own shape, exactly once.
 	assert.equal([...doctorSource.matchAll(/runCmd(?:Capture)?\(\w*[sS]pawn, "podman", \["inspect", NETNS_KEEPER_FORMAT, NETNS_KEEPER\]/g)].length, 1);

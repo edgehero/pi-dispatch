@@ -31,6 +31,8 @@ function infoBody(over = {}) {
 				serviceIsRemote: false,
 				remoteSocket: { path: "/run/user/1234/podman/podman.sock", exists: false },
 				security: { rootless: true, selinuxEnabled: true, seccompEnabled: true },
+				// Issue #503: Podman 5's own name for the rootless network helper (measured `pasta` on 5.8.1).
+				rootlessNetworkCmd: "pasta",
 				...host,
 			},
 			store: { graphRoot: "/home/op/.local/share/containers/storage", runRoot: "/run/user/1234/containers" },
@@ -42,7 +44,7 @@ function infoBody(over = {}) {
 }
 // An escape byte built at run time: a literal one in source survives a copy and paste and then does not.
 const ESC = String.fromCharCode(27);
-const INFO = () => ({ rootless: true, serviceIsRemote: false, selinux: true, cgroupVersion: "v2", cgroupManager: "systemd", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1", graphRoot: "/home/op/.local/share/containers/storage", runRoot: "/run/user/1234/containers" });
+const INFO = () => ({ rootless: true, serviceIsRemote: false, selinux: true, cgroupVersion: "v2", cgroupManager: "systemd", controllers: ["cpuset", "cpu", "io", "memory", "pids"], version: "5.8.1", graphRoot: "/home/op/.local/share/containers/storage", runRoot: "/run/user/1234/containers", rootlessNetworkCmd: "pasta" });
 const answered = (over = {}) => ({ answered: true, info: { ...INFO(), ...over } });
 
 /**
@@ -91,9 +93,9 @@ test("parsePodmanInfo reads the measured shape and nothing else", { skip }, () =
 	}
 	// Every field null when absent or the wrong type: a missing `rootless` is never read as rootless, nor a missing
 	// `serviceIsRemote` as local.
-	assert.deepEqual(mod.parsePodmanInfo(JSON.stringify({ host: {} })), { rootless: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, cgroupManager: null, controllers: null, version: null, graphRoot: null, runRoot: null });
-	const odd = mod.parsePodmanInfo(infoBody({ host: { serviceIsRemote: "false", security: { rootless: 1, selinuxEnabled: "true" }, cgroupVersion: `v2${ESC}[2J`, cgroupManager: `systemd${ESC}[2J`, cgroupControllers: ["pids", 7, "memory\n", "cpu"] }, version: { Version: `5.8.1${ESC}]0;x` } }));
-	assert.deepEqual(odd, { rootless: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, cgroupManager: null, controllers: ["pids", "cpu"], version: null, graphRoot: "/home/op/.local/share/containers/storage", runRoot: "/run/user/1234/containers" });
+	assert.deepEqual(mod.parsePodmanInfo(JSON.stringify({ host: {} })), { rootless: null, rootlessNetworkCmd: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, cgroupManager: null, controllers: null, version: null, graphRoot: null, runRoot: null });
+	const odd = mod.parsePodmanInfo(infoBody({ host: { serviceIsRemote: "false", security: { rootless: 1, selinuxEnabled: "true" }, cgroupVersion: `v2${ESC}[2J`, cgroupManager: `systemd${ESC}[2J`, cgroupControllers: ["pids", 7, "memory\n", "cpu"], rootlessNetworkCmd: `pasta${ESC}[2J` }, version: { Version: `5.8.1${ESC}]0;x` } }));
+	assert.deepEqual(odd, { rootless: null, rootlessNetworkCmd: null, serviceIsRemote: null, selinux: null, cgroupVersion: null, cgroupManager: null, controllers: ["pids", "cpu"], version: null, graphRoot: "/home/op/.local/share/containers/storage", runRoot: "/run/user/1234/containers" });
 	// The store is a path or nothing: a relative one, a non-string or one carrying a control byte is no fact.
 	for (const graphRoot of ["relative/path", 7, `/home/op${ESC}[2J`, ""]) assert.equal(mod.parsePodmanInfo(JSON.stringify({ host: {}, store: { graphRoot } })).graphRoot, null, JSON.stringify(graphRoot));
 	// And so is its runtime state (issue #450), under which Podman 5 records the rootless network helper.
