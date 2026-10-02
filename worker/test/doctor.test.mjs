@@ -391,6 +391,33 @@ test("doctor: a literal key in the overlay models.json is a hard failure", async
 	assert.match(text(), /Overlay models\.json is credential-free/);
 });
 
+test("doctor: an overlay entry pi will not compose is ✗ naming the provider; a dropped file's fix names the public endpoint (issue #539)", async () => {
+	const uncomposable = overlay({ models: JSON.stringify({ providers: { openai: { baseUrl: "http://proxy.lan:8080/v1", models: [{ id: "my-ft", maxTokens: 0 }] }, ollama: { baseUrl: "http://gpu.lan:11434/v1", api: "openai-completions", models: [{ id: "q" }] } } }) });
+	const a = capture();
+	assert.equal(await runDoctor(overlayEnv(uncomposable), overlayDeps(a.out)), 1);
+	assert.match(a.text(), /✗ Overlay models\.json entry "openai" is one pi will not compose \(maxTokens\), so pi drops all of it, its baseUrl and headers included\n {4}→ every job that runs or lists a model of "openai" is refused as model-unknown \(overlay-provider-invalid\)/);
+	assert.doesNotMatch(a.text(), /entry "ollama"/, "an entry pi composes has no line");
+	assert.match(a.text(), /✓ Overlay models\.json is credential-free/, "the file itself loads");
+	for (const [text, fix] of [
+		[JSON.stringify({ providers: { openai: { baseUrl: "http://proxy.lan:8080/v1" }, lan: { models: [{ id: "m", contextWindow: "big" }] } } }), /does not match pi's models\.json schema, so pi loads none of it: every job is refused as model-unknown \(overlay-unparseable\) until the file is fixed, since pi would run even a builtin model against its provider's public endpoint/],
+		['{ "providers": { "openai": { "baseUrl": "http://proxy.lan:8080/v1" } }', /is not valid JSON, so pi loads none of it: every job is refused as model-unknown \(overlay-unparseable\) until the file is fixed/],
+	]) {
+		const b = capture();
+		assert.equal(await runDoctor(overlayEnv(overlay({ models: text })), overlayDeps(b.out)), 1);
+		assert.match(b.text(), fix, text);
+		assert.doesNotMatch(b.text(), /will not compose/, "a file pi drops is the one line above, not a line per entry");
+	}
+});
+
+test("doctor: an overlay models.json that is a directory is ✗: every job is refused until it is a file (issue #539)", async () => {
+	const dir = overlay();
+	mkdirSync(join(dir, "models.json"));
+	const { out, text } = capture();
+	assert.equal(await runDoctor(overlayEnv(dir), overlayDeps(out)), 1);
+	assert.match(text(), /✗ Overlay models\.json is a directory, so pi loads none of it and every job is refused as model-unknown \(overlay-is-a-directory\)\n {4}→ replace .*models\.json with a models\.json file, or remove it; no job runs until then/);
+	assert.doesNotMatch(text(), /could not be read \(EISDIR\)/);
+});
+
 test("doctor: a clean overlay passes; staged extensions warn that they LOAD, with no flag set", async () => {
 	const clean = overlay({ models: JSON.stringify({ providers: { anthropic: { name: "Anthropic" } } }) });
 	const { out: o1, text: t1 } = capture();

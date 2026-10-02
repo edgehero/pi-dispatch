@@ -61,6 +61,7 @@ import { DEFAULT_VALKEY_URL, accountTempRoot, allowedModelsFrom, defaultLogsDir,
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
 import { parseModelsJson } from "./models-json.mjs";
+import { overlayProviderProblem } from "./model-catalog.mjs";
 import { KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, baseUrlTarget, keylessVerdict, loadModelEndpoints, readOverlayModels, renderEndpointsInclude } from "./model-endpoints.mjs";
 import { declaredEndpointsIn, endpointsDeclaredIn, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
 import { loadPauseWindows } from "./pause-windows.mjs";
@@ -2479,7 +2480,15 @@ export async function collectChecks(shellVars, seams) {
 			} catch (error) {
 				modelsRead = error;
 			}
-			if (typeof modelsRead?.code === "string") {
+			if (modelsRead?.code === "EISDIR") {
+				// Issue #539: pi fails to read a directory the same way, so it loads no models.json, and the worker refuses
+				// every job (not retried: no retry turns a directory into a file).
+				checks.push({
+					ok: false,
+					label: "Overlay models.json is a directory, so pi loads none of it and every job is refused as model-unknown (overlay-is-a-directory)",
+					fix: `replace ${modelsPath} with a models.json file, or remove it; no job runs until then`,
+				});
+			} else if (typeof modelsRead?.code === "string") {
 				checks.push({
 					ok: false,
 					warn: true,
@@ -2491,7 +2500,10 @@ export async function collectChecks(shellVars, seams) {
 				let modelsFix = "";
 				if (modelsRead !== null) {
 					modelsOk = false;
-					modelsFix = /not valid JSON/.test(String(modelsRead?.message)) ? "overlay models.json is not valid JSON" : "overlay models.json does not match pi's models.json schema, so pi loads none of it and every job on one of its models is refused as model-unknown";
+					// Issue #539: pi then drops every entry, so a builtin model of a provider the file routes would run against
+					// that provider's public endpoint. The worker refuses every job until the file is fixed, for either cause.
+					const cause = /not valid JSON/.test(String(modelsRead?.message)) ? "is not valid JSON" : "does not match pi's models.json schema";
+					modelsFix = `overlay models.json ${cause}, so pi loads none of it: every job is refused as model-unknown (overlay-unparseable) until the file is fixed, since pi would run even a builtin model against its provider's public endpoint instead of the route the file sets`;
 				} else if (overlayModels !== null) {
 					const leak = findLiteralSecret(overlayModels);
 					if (leak) {
@@ -2500,6 +2512,18 @@ export async function collectChecks(shellVars, seams) {
 					}
 				}
 				checks.push({ ok: modelsOk, label: "Overlay models.json is credential-free", fix: modelsFix });
+				// Issue #539: an entry the file loads with but pi will not compose (the model gate's own rule,
+				// `overlayProviderProblem`). pi drops that whole entry, so the worker refuses every job on the provider.
+				const providers = overlayModels?.providers;
+				for (const name of providers !== null && typeof providers === "object" && !Array.isArray(providers) ? Object.keys(providers) : []) {
+					const problem = overlayProviderProblem(providers[name], name);
+					if (problem === null) continue;
+					checks.push({
+						ok: false,
+						label: `Overlay models.json entry ${JSON.stringify(name)} is one pi will not compose (${problem}), so pi drops all of it, its baseUrl and headers included`,
+						fix: `every job that runs or lists a model of ${JSON.stringify(name)} is refused as model-unknown (overlay-provider-invalid): give each model an api and a baseUrl (its own or the provider's), a contextWindow and maxTokens above zero, and set a baseUrl beside oauth`,
+					});
+				}
 			}
 			// Issue #503: a model whose baseUrl is localhost or a loopback literal can never be reached from a job, egress on
 			// or off, because inside a job that address is the job's own container. Said whatever is declared: an overlay

@@ -140,16 +140,25 @@ export function knownModel({ provider, id, overlay = null, chatOnly = false }) {
  * A BUILTIN model is judged by the overlay too (PR #536's review, round 3): when its provider has an overlay entry pi
  * would not compose (`overlayProviderProblem`), pi drops that WHOLE entry, its `baseUrl`, `headers`, `apiKey` and
  * `compat` included, and the builtin model then runs against the provider's public endpoint while the operator's
- * file reads as though it routed it. Refused as `overlay-provider-invalid`. A builtin model whose overlay cannot be
- * read or parsed stays known, as before: that judgement needs a provider entry, and there is none to judge.
+ * file reads as though it routed it. Refused as `overlay-provider-invalid`.
+ *
+ * A file pi drops WHOLE refuses EVERY job (issue #539, PR #546's review, the simpler rule after its third round). pi
+ * drops an overlay that exists and fails to load for any reason (a schema error under one provider, a block comment,
+ * a truncated write, a UTF-16 save, an empty file, a directory: all measured against pi 0.99.1's `ModelConfig.load`),
+ * and every provider entry goes with it, so `openai: { baseUrl: <proxy> }` stops applying and `openai/gpt-4o` runs
+ * against `api.openai.com`. Which providers the broken file meant to route cannot be read from a file that does not
+ * load, and three rounds of reading it anyway kept finding cases, so the gate does not try: every main and listed
+ * ref, builtin or overlay, is refused (`overlay-unparseable`, or `overlay-is-a-directory`) until the operator fixes
+ * the file. Louder than needed for a job whose provider the file never mentions, and safe in direction. An absent
+ * file is no overlay, as for pi. A transient read is not a verdict: a builtin job with no list runs, and a job that
+ * needs the overlay (an overlay model, or a list whose fallbacks it could change) is retried.
  *
  * Returns one of:
  *   - `{ ok: true }`;
  *   - `{ unknown: { provider, id }, why }`: the first unknown ref. `why` is `"not-in-catalog"`,
- *     `"overlay-unparseable"` when pi would not load the overlay, `"overlay-provider-invalid"` when the ref's provider
- *     has an overlay entry pi would not compose, or `"overlay-is-a-directory"`, so the operator learns the file is the
- *     problem rather than the id. pi drops the WHOLE file when it fails its own validation, so a model only that
- *     file declares does not exist in the job either: refusing is the honest answer, not a guess;
+ *     `"overlay-unparseable"` for every ref when pi would not load the overlay, `"overlay-is-a-directory"` for every
+ *     ref when it is a directory (pi fails the same way), or `"overlay-provider-invalid"` when the ref's provider has
+ *     an overlay entry pi would not compose, so the operator learns the file is the problem rather than the id;
  *   - `{ fallbackUnlisted: { provider, id }, why: "fallback-unlisted" }`: the job has a list, every ref is known, and
  *     a listed model declares a server-side fallback (`declaredFallbacks`) that is not on the list under its provider;
  *   - `{ unavailable: code }`: the overlay could not be READ for a transient reason (an errno other than EISDIR
@@ -169,8 +178,8 @@ export function checkModelsKnown(refs, { readOverlay = () => null } = {}) {
 		} catch (err) {
 			// An errno string is a read that may succeed later; a configError (pi would not load the text) is the
 			// file's content, which no retry changes. EISDIR is DETERMINATE here (PR #536's review): pi's own read of a
-			// directory fails the same way in the job, so pi loads no models.json and a model only it declares does
-			// not exist there. Refused as such rather than retried, since no retry turns a directory into a file. The
+			// directory fails the same way in the job (measured: "Failed to load models.json: EISDIR"), so pi drops it like
+			// any file it cannot load, and every job is refused, as for one that does not parse. Refused rather than retried, since no retry turns a directory into a file. The
 			// keyless gate (#503) keeps retrying EISDIR: that posture is #503's and unchanged here, and both paths are
 			// pre-spend, so the only difference is how soon the operator hears about it.
 			if (err?.code === "EISDIR") unparseable = "overlay-is-a-directory";
@@ -182,6 +191,8 @@ export function checkModelsKnown(refs, { readOverlay = () => null } = {}) {
 	};
 	for (const ref of refs) {
 		load();
+		// pi drops the whole file, every provider entry with it: no job runs until it is fixed (see above).
+		if (unparseable !== null) return { unknown: { provider: ref.provider, id: ref.id }, why: unparseable };
 		// The provider's overlay entry, when the file was read and has one: pi drops all of it if it cannot compose it.
 		const providers = overlay?.providers;
 		const entry = providers !== null && typeof providers === "object" && Object.hasOwn(providers, ref.provider) ? providers[ref.provider] : undefined;
@@ -190,7 +201,7 @@ export function checkModelsKnown(refs, { readOverlay = () => null } = {}) {
 		// models are chat models: pi registers every models.json entry as one.
 		if (isBuiltinModel(ref.provider, ref.id, { chatOnly: ref.main === true })) continue;
 		if (unavailable !== null) return { unavailable };
-		if (!isOverlayModel(overlay, ref.provider, ref.id)) return { unknown: { provider: ref.provider, id: ref.id }, why: unparseable ?? "not-in-catalog" };
+		if (!isOverlayModel(overlay, ref.provider, ref.id)) return { unknown: { provider: ref.provider, id: ref.id }, why: "not-in-catalog" };
 	}
 	// A job WITH a list (any ref beyond the main one): every listed model's server-side fallbacks must be listed too.
 	const listed = refs.filter((ref) => ref.main !== true);

@@ -110,7 +110,9 @@ PI_FORWARD_ENV=MY_PROVIDER_KEY      # comma-separated NAMES; forwarded by exact 
 **Upgrade: models the worker can see.** Since issue #502 the worker checks, before a job spends anything, that
 its main model exists in pi's catalog or in this `models.json` (and every model on its allowed list, see
 [`docs/triggers.md`](triggers.md)). The file is read the way pi reads it: comments and a byte order mark are fine,
-but if pi would drop the file (one wrong-typed field anywhere), the worker refuses every model only it declares.
+but if pi would drop the file (one wrong-typed field anywhere, a block comment, a UTF-16 save, an empty file), the
+worker refuses every job until the file is fixed. pi would lose every entry with the rest of the file, and send
+even a builtin model, such as `openai` behind a `baseUrl`, to the provider's public endpoint.
 A main model that only an extension defines (`pi.registerProvider`) was already refused inside the container,
 after the budget slot; it is now refused for free. Declare it here. A virtual model cannot be the main model:
 set `PI_MODEL` or `run.model` to a physical one.

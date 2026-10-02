@@ -23,9 +23,78 @@ export function stripBom(text) {
 	return text.startsWith("\uFEFF") ? text.slice(1) : text;
 }
 
-/** pi's `stripJsonComments` (`utils/json.js`), verbatim: `//` line comments and trailing commas, strings untouched. */
+/**
+ * pi's `stripJsonComments` (`utils/json.js`): `//` line comments and trailing commas, strings untouched. pi writes it
+ * as two global regex replaces (a string or a `//` comment, then a string or a comma before `}` or `]`), which
+ * are QUADRATIC on an unterminated string (PR #546's review: `'"' + '\\"'.repeat(n)` at 160 KB took 13 s on the
+ * worker's event loop, once per job). This is the same function as one linear scan per pass, held to pi's own output
+ * by a differential test over the corpus and adversarial cases (`models-json.test.mjs`).
+ *
+ * How it stays linear and exact. At a `"` the regex tries a string: escapes `\` plus any one code unit but a line
+ * terminator (`.` without the `s` flag), other code units but `"` and `\`, up to the first unescaped `"`. When that
+ * fails (end of text, or a `\` before a line terminator or at the end), the regex moves ONE code unit on. Every `"`
+ * up to the failure point is then an escaped one in the failed attempt's reading, so a string tried there reads the
+ * same code units from the next boundary on and fails at the same point. Those starts are skipped, not retried.
+ */
+const isLineTerminator = (c) => c === "\n" || c === "\r" || c === "\u2028" || c === "\u2029";
+
+/** Where the string opened at `start` closes (the index of its closing `"`), else `{ failAt }`. */
+function stringEnd(input, start) {
+	let j = start + 1;
+	while (j < input.length) {
+		const c = input[j];
+		if (c === '"') return { end: j };
+		if (c === "\\") {
+			if (j + 1 >= input.length || isLineTerminator(input[j + 1])) return { failAt: j };
+			j += 2;
+		} else j += 1;
+	}
+	return { failAt: input.length };
+}
+
+/** One pass: strings kept, and at any other code unit `other(i)` returns `[text to emit, next index]` or null. */
+function scanPass(input, other) {
+	let out = "";
+	let i = 0;
+	let failedUntil = -1; // a `"` at or before this index cannot open a string (see above)
+	while (i < input.length) {
+		if (input[i] === '"' && i > failedUntil) {
+			const r = stringEnd(input, i);
+			if (r.end !== undefined) {
+				out += input.slice(i, r.end + 1);
+				i = r.end + 1;
+				continue;
+			}
+			failedUntil = r.failAt;
+		}
+		const step = input[i] === '"' ? null : other(i);
+		if (step === null) {
+			out += input[i];
+			i += 1;
+		} else {
+			out += step[0];
+			i = step[1];
+		}
+	}
+	return out;
+}
+
+const isJsSpace = (c) => /\s/.test(c);
+
 export function stripJsonComments(input) {
-	return input.replace(/"(?:\\.|[^"\\])*"|\/\/[^\n]*/g, (m) => (m[0] === '"' ? m : "")).replace(/"(?:\\.|[^"\\])*"|,(\s*[}\]])/g, (m, tail) => tail ?? (m[0] === '"' ? m : ""));
+	const noComments = scanPass(input, (i) => {
+		if (input[i] !== "/" || input[i + 1] !== "/") return null;
+		let j = i + 2;
+		while (j < input.length && input[j] !== "\n") j += 1;
+		return ["", j];
+	});
+	return scanPass(noComments, (i) => {
+		if (noComments[i] !== ",") return null;
+		let j = i + 1;
+		while (j < noComments.length && isJsSpace(noComments[j])) j += 1;
+		if (noComments[j] !== "}" && noComments[j] !== "]") return null;
+		return [noComments.slice(i + 1, j + 1), j + 1];
+	});
 }
 
 // A minimal interpreter for the TypeBox kinds pi's schema uses. TypeBox's defaults, as compiled at the pin: an
