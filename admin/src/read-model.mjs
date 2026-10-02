@@ -21,6 +21,7 @@ import { join, delimiter, sep, isAbsolute, resolve as resolvePath } from "node:p
 import { execFileSync } from "node:child_process";
 import { logsDirPath, defaultSandboxDir, defaultGraphDir, accountTempRoot, ensureAccountTempRoot, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
+import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS } from "@edgehero/pi-dispatch/money";
 import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
@@ -147,7 +148,9 @@ export const DEPLOYMENT_SCAFFOLD_FILES = Object.freeze([".env", "triggers.json",
  * PI_BACKENDS, PI_BACKEND_FLOOR, PI_EGRESS, PI_EGRESS_PROXY, DOCKER_HOST and PI_DISPATCH_RUN_ROOTS stay this process's
  * own on purpose (`OQ-038`, `INT-DEPLOYMENT-POINTER-CONTRACT`), and so do the panel's own settings (PI_DISPATCH_*).
  */
-export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_GRAPH_DIR", "PI_WORKER_NAME", "TMPDIR", "TEMP"]);
+export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_GRAPH_DIR", "PI_WORKER_NAME", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+// The dollar settings (issue #501) are among them: `dispatch_set`'s confirm states a dollar key's effective value, and
+// in a pointer deployment the cap the worker runs under lives in the deployment's `.env`, not in pi's environment.
 // Of those, the paths: a relative one in `.env` is relative to the service's working directory, the deployment folder.
 const PANEL_PATH_KEYS = new Set(["PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_GRAPH_DIR", "TMPDIR", "TEMP"]);
 
@@ -604,19 +607,65 @@ function hourKey(nowMs) {
 }
 
 /**
- * Read-modify-write the settings overlay: read the current file, apply `mutate` to a copy of the base
- * overlay, and write the result through the worker's own atomic `writeOverlay`. When the existing file is
- * invalid, the base is empty `{}` and `rebuiltFrom` carries the read reason so the caller can surface the
- * loud repair notice (INT-CONFIG-OVERLAY-CONTRACT write protocol). Validation stays in `writeOverlay`; a
- * rejected candidate returns `{ invalid }`. Returns `{ ok: true, overlay, rebuiltFrom? }`.
+ * Read-modify-write the settings overlay: read the current file, apply `mutate` to a copy of the overlay, and write
+ * the result through the worker's own atomic `writeOverlay`. Validation stays in `writeOverlay`; a rejected candidate
+ * returns `{ invalid }`. Returns `{ ok: true, overlay }`.
+ *
+ * A present-but-INVALID current file is REFUSED, never rebuilt (issue #501). It used to be rebuilt from `{}` with a
+ * loud notice, which turned any later `set` into an eraser: a hand-edited file that is invalid only for a duplicate
+ * key still carries its `maxCostUsd` and `secretProfiles`, and the rebuild dropped both, so jobs went from refused
+ * (fail closed) to running at the env cap or with none. The refusal names the read reason (key names, never values)
+ * and the two ways out: fix the file, or delete it to start from an empty overlay. A MISSING file is still the
+ * normal empty overlay and writes as before, and so does a BLANK one (whitespace or a byte-order mark only), which
+ * holds nothing that could be lost.
  */
 export function writeSettings({ settingsFile, mutate, fs = nodeFs }) {
   const res = readOverlay(settingsFile, { fs });
-  const base = res.overlay ?? {};
-  const next = mutate({ ...base });
+  if (res.invalid && !blankFile(settingsFile, fs)) return { invalid: overlayInvalidRefusal(res.invalid) };
+  const next = mutate({ ...(res.overlay ?? {}) });
   const w = writeOverlay(settingsFile, next, { fs });
   if (w.invalid) return { invalid: w.invalid };
-  return res.invalid ? { ok: true, overlay: next, rebuiltFrom: res.invalid } : { ok: true, overlay: next };
+  return { ok: true, overlay: next };
+}
+
+// A settings file whose text is nothing but whitespace or a byte-order mark: invalid to the worker (not JSON), but it
+// holds no key, so a write over it loses nothing and is allowed, as a missing file is. Any read error is not blank.
+function blankFile(path, fs) {
+  try {
+    return String(fs.readFileSync(path, "utf8")).replace(/^\uFEFF/, "").trim() === "";
+  } catch {
+    return false;
+  }
+}
+
+/** The words for a write refused over an invalid settings file (issue #501). `reason` is `readOverlay`'s, key-only. */
+export function overlayInvalidRefusal(reason) {
+  return `the settings file is invalid (${reason}), so nothing was written and no key in it was lost. Fix the file, or delete it to start from an empty overlay, then set again`;
+}
+
+/**
+ * The value a `dispatch_set` confirm shows for a key (issue #501), before or after the change. For a dollar key it is
+ * the EFFECTIVE value and where it comes from, because the overlay alone misleads exactly there: with
+ * `PI_MAX_COST_USD=2` in the deployment's env and no overlay key, "maxCostUsd: (unset) -> 1000000" reads as adding a
+ * cap while it raises one 500,000 times, and unsetting an overlay key falls back to the env cap, not to none. `env` is
+ * `deploymentEnv()`, whose `panelEnv` reads the dollar variables from the deployment's `.env` (`PANEL_SERVICE_KEYS`).
+ * Every other key keeps the overlay value, because its env default lives in the worker's config and a second copy of
+ * those defaults here would drift.
+ *
+ * `deploymentDir` says whether the worker's environment is visible here at all. With a deployment pointer the panel
+ * reads the deployment's `.env` (the file the worker reads), so a variable absent from it really is unset. With no
+ * pointer the panel sees only pi's own environment, which is not the worker's (a service unit, another shell), so an
+ * absent variable proves nothing and the confirm says so rather than claiming "no cap". An empty value is unset, the
+ * worker's own reading (`usdSetting`).
+ */
+export function settingShown(key, overlay, env, { deploymentDir = null } = {}) {
+  const own = overlay?.[key];
+  if (!DOLLAR_SETTING_KEYS.includes(key)) return own === undefined ? "(unset)" : String(own);
+  if (own !== undefined) return `${own} (overlay)`;
+  const name = DOLLAR_ENV_NAMES[key];
+  const fromEnv = env?.[name];
+  if (typeof fromEnv === "string" && fromEnv !== "") return `${fromEnv} (env ${name})`;
+  return deploymentDir === null ? "(not in the overlay; the worker's environment is not visible here)" : "(unset: no cap)";
 }
 
 /**

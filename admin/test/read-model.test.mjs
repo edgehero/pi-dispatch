@@ -8,6 +8,7 @@ import {
   resolvePaths,
   panelEnv,
   PANEL_SERVICE_KEYS,
+  settingShown,
   DEPLOYMENT_SCAFFOLD_FILES,
   readQueueState,
   readSchedulers,
@@ -950,14 +951,28 @@ test("writeSettings merges into the existing overlay, preserving prior keys", ()
   assert.deepEqual(JSON.parse(fs.files.get(path)), { model: "m1", dailyCap: 5, maxTurns: 12 });
 });
 
-test("writeSettings rebuilds from scratch over an invalid file, keeping only the new key and reporting rebuiltFrom", () => {
+test("writeSettings REFUSES over an invalid file instead of rebuilding it, so nothing in it is erased (#501)", () => {
+  // It used to rebuild from {}: a file invalid only for a duplicate key lost its maxCostUsd and secretProfiles to the
+  // next unrelated `set`, and jobs went from refused to running at the env cap or uncapped.
   const path = "/s/settings.json";
-  const fs = memFs({ [path]: "{ not valid json" });
-  const res = writeSettings({ settingsFile: path, mutate: (o) => ({ ...o, dailyCap: 7 }), fs });
-  assert.equal(res.ok, true);
-  assert.ok(res.rebuiltFrom, "carries the read reason so the caller can warn loudly");
-  assert.deepEqual(res.overlay, { dailyCap: 7 }, "base was empty; only the new key persists");
-  assert.deepEqual(JSON.parse(fs.files.get(path)), { dailyCap: 7 });
+  for (const text of ["{ not valid json", '{"maxCostUsd":"1","maxCostUsd":"1","secretProfiles":{"vault":"/r"}}']) {
+    const fs = memFs({ [path]: text });
+    const res = writeSettings({ settingsFile: path, mutate: (o) => ({ ...o, concurrency: 2 }), fs });
+    assert.equal(res.ok, undefined);
+    assert.match(res.invalid, /^the settings file is invalid \(.+\), so nothing was written and no key in it was lost\. Fix the file, or delete it to start from an empty overlay/);
+    assert.equal(fs.files.get(path), text, "the file is byte-identical");
+  }
+  // A MISSING file is the normal empty overlay and still writes.
+  const fs = memFs({});
+  assert.deepEqual(writeSettings({ settingsFile: path, mutate: (o) => ({ ...o, dailyCap: 7 }), fs }), { ok: true, overlay: { dailyCap: 7 } });
+  // A BLANK file (whitespace or a byte-order mark only) holds nothing to lose, so it is written over like a missing one.
+  for (const text of ["", "  \n\t", "\uFEFF", "\uFEFF \n"]) {
+    const blank = memFs({ [path]: text });
+    assert.deepEqual(writeSettings({ settingsFile: path, mutate: (o) => ({ ...o, dailyCap: 7 }), fs: blank }), { ok: true, overlay: { dailyCap: 7 } }, JSON.stringify(text));
+    assert.deepEqual(JSON.parse(blank.files.get(path)), { dailyCap: 7 });
+  }
+  // A text that is not blank but not valid either stays refused.
+  assert.ok(writeSettings({ settingsFile: path, mutate: (o) => o, fs: memFs({ [path]: "\uFEFF x" }) }).invalid);
 });
 
 test("writeSettings passes through writeOverlay's { invalid } and leaves the file untouched", () => {
@@ -2376,6 +2391,28 @@ test("panelEnv: the pointed deployment's .env fills what pi's environment does n
   assert.equal(paths.logsDir, join(dir, "logs"));
   assert.equal(paths.valkeyUrl, "redis://127.0.0.1:16471");
   for (const key of ["PI_BACKENDS", "PI_BACKEND_FLOOR", "PI_EGRESS", "PI_EGRESS_PROXY", "DOCKER_HOST", "PI_DISPATCH_RUN_ROOTS", "PI_DISPATCH_RUN_PER_HOUR"]) assert.ok(!PANEL_SERVICE_KEYS.includes(key), key);
+});
+
+test("panelEnv + settingShown: a pointer deployment's .env dollar cap is what the dispatch_set confirm states (#501)", () => {
+  // The worker reads PI_MAX_COST_USD from the deployment's .env; pi's own environment does not carry it. Before the
+  // dollar names joined PANEL_SERVICE_KEYS the confirm said "(unset: no cap)" while the worker ran at $2.
+  const dir = scaffoldedDeployment("PI_MAX_COST_USD=2.00\n");
+  const { env } = panelEnv({ env: { HOME: "/h" }, pointerDir: dir, platform: "linux" });
+  assert.equal(env.PI_MAX_COST_USD, "2.00");
+  assert.equal(settingShown("maxCostUsd", {}, env, { deploymentDir: dir }), "2.00 (env PI_MAX_COST_USD)");
+  assert.equal(settingShown("maxCostUsd", { maxCostUsd: "1.50" }, env, { deploymentDir: dir }), "1.50 (overlay)");
+  // With a deployment the worker's .env IS visible, so absent (or empty, the worker's own reading) is no cap.
+  assert.equal(settingShown("maxCostUsd", {}, { HOME: "/h" }, { deploymentDir: dir }), "(unset: no cap)");
+  const emptyDir = scaffoldedDeployment("PI_MAX_COST_USD=\n", "pi-501-empty-");
+  const empty = panelEnv({ env: { HOME: "/h" }, pointerDir: emptyDir, platform: "linux" }).env;
+  assert.equal(settingShown("maxCostUsd", {}, empty, { deploymentDir: emptyDir }), "(unset: no cap)");
+  // With no deployment, pi's environment is not the worker's: absence proves nothing, and the confirm says so.
+  assert.equal(settingShown("maxCostUsd", {}, { HOME: "/h" }), "(not in the overlay; the worker's environment is not visible here)");
+  assert.equal(settingShown("maxCostUsd", {}, { PI_MAX_COST_USD: "" }), "(not in the overlay; the worker's environment is not visible here)");
+  assert.equal(settingShown("maxCostUsd", {}, { PI_MAX_COST_USD: "3" }), "3 (env PI_MAX_COST_USD)", "pi's own export is still shown");
+  assert.equal(settingShown("dailyCap", { dailyCap: 5 }, env), "5", "non-dollar keys keep the overlay value");
+  assert.equal(settingShown("dailyCap", {}, env), "(unset)");
+  for (const name of ["PI_MAX_COST_USD", "PI_DAILY_COST_USD", "PI_WEEKLY_COST_USD", "PI_MONTHLY_COST_USD"]) assert.ok(PANEL_SERVICE_KEYS.includes(name), name);
 });
 
 test("panelEnv: with no pointer no .env is read, not even from a cwd carrying init's whole scaffold (#471, gate round 1)", () => {

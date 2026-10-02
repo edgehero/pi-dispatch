@@ -319,14 +319,14 @@ test("Podman's bare-hex image id is published in docker's sha256: spelling, and 
 
 // --- the capability gates are ONE table (issues #501, #502) ---
 
-test("CAPABILITY_GATES: the old three in their old order, then modelPolicy (#502), each keyed once, each free for a job without its feature", async () => {
-	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools", "modelPolicy"], "the order the branches had, so a job carrying several is refused for the same one; a new row appends");
+test("CAPABILITY_GATES: the old three in their old order, then modelPolicy (#502), then costCap (#501), each keyed once, each free for a job without its feature", async () => {
+	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools", "modelPolicy", "costCap"], "the order the branches had, so a job carrying several is refused for the same one; a new row appends, in the order the features landed");
 	for (const key of ["token", "result", "reason", "event"]) {
 		assert.equal(new Set(CAPABILITY_GATES.map((gate) => gate[key])).size, CAPABILITY_GATES.length, `${key} is unique per row`);
 	}
 	const label = (caps) => `sha256:abc${FIELD_SEP}0.99.1${FIELD_SEP}github${FIELD_SEP}${caps}\n`;
 	// A job carrying EVERY gated feature, on an image that declares none: the first row refuses.
-	const all = { kind: "local", replica: 2, replicas: 2, command: "wf run", excludeTools: ["bash"], models: ["anthropic/claude-x"] };
+	const all = { kind: "local", replica: 2, replicas: 2, command: "wf run", excludeTools: ["bash"], models: ["anthropic/claude-x"], maxCostMicros: 2_500_000 };
 	const none = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label("")) });
 	assert.deepEqual(await none(all), { replicaUnsupported: "i", declared: [] });
 	// Declare tokens one at a time: each declaration moves the refusal to the next row, then passes.
@@ -352,4 +352,25 @@ test("modelPolicy (#502): a job with an effective allowed-model list on an image
 	assert.equal(row.reason, "job-image-model-policy-unsupported");
 	const fresh = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label("modelPolicy")) });
 	assert.equal((await fresh({ kind: "github", models: ["openai/gpt-x"] })).ok, true);
+});
+
+test("costCap (issue #501): any job carrying a dollar cap, 0 included, needs it; a job with none never does", async () => {
+	const label = (caps) => `sha256:abc${FIELD_SEP}0.99.1${FIELD_SEP}github${FIELD_SEP}${caps}\n`;
+	const old = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label("replicas,commands,excludeTools,anyUid")) });
+	// An image built before the cost guard: its runner reads no PI_MAX_COST_MICROS, so a capped job would run
+	// UNCAPPED and record a clean exit. Refused pre-spend for every cap, the tightest (0) included.
+	for (const maxCostMicros of [0, 1, 2_500_000]) {
+		assert.deepEqual(await old({ kind: "github", maxCostMicros }), { costCapUnsupported: "i", declared: ["replicas", "commands", "excludeTools", "anyUid"] }, `cap ${maxCostMicros}`);
+	}
+	// No cap: the row costs nothing, so a deployment that set no dollar cap runs its old image as before.
+	for (const job of [{ kind: "github", maxCostMicros: null }, { kind: "github" }]) {
+		assert.equal((await old(job)).ok, true, JSON.stringify(job));
+	}
+	// The image that declares it runs the capped job.
+	const current = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label("replicas,commands,excludeTools,anyUid,costCap")) });
+	assert.equal((await current({ kind: "github", maxCostMicros: 0 })).ok, true);
+	const row = CAPABILITY_GATES.find((gate) => gate.token === "costCap");
+	assert.equal(row.reason, "job-image-cost-cap-unsupported");
+	assert.equal(row.event, "refused_image_cost_cap_unsupported");
+	assert.match(row.comment("img", "is absent"), /per-job dollar cap/);
 });

@@ -715,11 +715,12 @@ test("junk insights arguments answer usage with zero side effects; the removed v
 
 test("argument completion offers the known settings keys for `set`/`unset`", async () => {
   const { def } = await loadRegistered();
-  // "da" prefixes both dailyCap and dailyTokenCap, in KNOWN_KEYS order.
+  // "da" prefixes dailyCap, dailyTokenCap and (issue #501) dailyCostUsd, in KNOWN_KEYS order.
   const set = await def.getArgumentCompletions("set da");
   assert.deepEqual(set, [
     { value: "set dailyCap", label: "dailyCap" },
     { value: "set dailyTokenCap", label: "dailyTokenCap" },
+    { value: "set dailyCostUsd", label: "dailyCostUsd" },
   ]);
   const unset = await def.getArgumentCompletions("unset con");
   assert.deepEqual(unset, [{ value: "unset concurrency", label: "concurrency" }]);
@@ -779,6 +780,22 @@ test("set dailyCap 5 coerces the numeric string, persists it, and acks via notif
   assert.match(ctx.notes[0][0], /set dailyCap = 5/);
   assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { dailyCap: 5 }, "coerced to a JSON number");
   assert.equal(calls.sendMessage.length, 0);
+});
+
+test("set maxCostUsd keeps the typed dollar text, refuses a widened spelling, and a dollar window is refused at the write (#501)", async () => {
+  const { def } = await loadRegistered();
+  const file = withSettingsFile();
+  const ok = fakeCtx();
+  await def.handler("set maxCostUsd 2.50", ok.ctx);
+  assert.equal(ok.notes[0][1], "info");
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { maxCostUsd: "2.50" }, "as typed, never Number()'d");
+  for (const [line, why] of [["set maxCostUsd 1e3", /maxCostUsd must be a dollar amount/], ["set maxCostUsd 0x10", /maxCostUsd must be a dollar amount/], ["set dailyCostUsd 25", /dailyCostUsd is not supported yet/]]) {
+    const ctx = fakeCtx();
+    await def.handler(line, ctx.ctx);
+    assert.equal(ctx.notes[0][1], "error", line);
+    assert.match(ctx.notes[0][0], why, line);
+  }
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { maxCostUsd: "2.50" }, "the refused writes left the file alone");
 });
 
 test("unset removes a key, leaving a valid empty overlay", async () => {

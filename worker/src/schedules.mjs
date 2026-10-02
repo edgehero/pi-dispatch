@@ -15,6 +15,7 @@
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { configError } from "./config.mjs";
+import { triggerCapAboveDeployment } from "./money.mjs";
 import { parseTriggers } from "./triggers.mjs";
 
 /**
@@ -32,6 +33,16 @@ export function loadSchedules(config, { readFileSync = fsReadFileSync, existsSyn
 	}
 
 	const triggers = parseTriggers(readFileSync(path, "utf8"), path);
+	// Issue #501: a trigger's run.maxCostUsd above this deployment's PI_MAX_COST_USD refuses the file, at boot
+	// (an operator is present) and on a live reload (the running schedules are kept). Every kind is checked,
+	// not only cron: the worker runs the forge jobs too, and this is the one load it does of the file. Here and
+	// not in parseTriggers, which is pure and shared with the receiver, which never sees the worker's env. The
+	// job itself runs under the smaller of the two whatever this finds (effectiveJobOf), so this is the loud
+	// half, never the only one. Env only: an overlay cap can change between jobs and is applied per job.
+	const above = triggerCapAboveDeployment(triggers, config.maxCostUsd);
+	if (above !== -1) {
+		throw configError(`trigger at index ${above}: run.maxCostUsd is above this deployment's PI_MAX_COST_USD. A trigger can only narrow the per-job cost cap, so lower it or remove it (${path})`);
+	}
 
 	return triggers.filter((t) => t.on.type === "cron").map((t) => normalizeCronSchedule(t, path, existsSync, fleet));
 }
@@ -150,7 +161,7 @@ function normalizeCronSchedule({ on, run }, path, existsSync, fleet) {
 	// key. A command trigger carries no flow/task at all (the validator enforces the XOR), so those two
 	// keys hold undefined here and drop at JSON serialization -- the command schedule's data is exactly
 	// kind/folder/command plus the shared fields.
-	const data = { kind: "local", folder: run.folder, flow: run.flow, task: run.task, ...(run.command !== undefined && { command: run.command }), provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages: run.packages, image: run.image, ...(run.backend !== undefined && { backend: run.backend }), ...(run.excludeTools !== undefined && { excludeTools: run.excludeTools }), ...(run.models !== undefined && { models: run.models }), ...(run.skillsDir !== undefined && { skillsDir: run.skillsDir }), ...(run.secrets !== undefined && { secrets: run.secrets }), ...(run.secretsProfile !== undefined && { secretsProfile: run.secretsProfile }), resume: run.resume, trigger: { id: on.id, pattern: on.pattern } };
+	const data = { kind: "local", folder: run.folder, flow: run.flow, task: run.task, ...(run.command !== undefined && { command: run.command }), provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages: run.packages, image: run.image, ...(run.backend !== undefined && { backend: run.backend }), ...(run.excludeTools !== undefined && { excludeTools: run.excludeTools }), ...(run.models !== undefined && { models: run.models }), ...(run.maxCostUsd !== undefined && { maxCostUsd: run.maxCostUsd }), ...(run.skillsDir !== undefined && { skillsDir: run.skillsDir }), ...(run.secrets !== undefined && { secrets: run.secrets }), ...(run.secretsProfile !== undefined && { secretsProfile: run.secretsProfile }), resume: run.resume, trigger: { id: on.id, pattern: on.pattern } };
 	// Retention only; the deterministic repeat:<id>:<millis> jobId supplies dedup, so no jobId here, and
 	// scheduler jobs are not retried (DES-CRON-VIA-BULLMQ-SCHEDULER) so no attempts/backoff.
 	const opts = { removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } };

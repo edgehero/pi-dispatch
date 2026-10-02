@@ -12,6 +12,7 @@ import { isPerMachineHost } from "./backends.mjs";
 import { hash16 } from "./fleet-lease.mjs";
 import { endpointsForModel } from "./model-endpoints.mjs";
 import { splitModelEntry } from "./model-ref.mjs";
+import { effectiveCostCapMicros } from "./money.mjs";
 import { budgetCapsFor, canonicalScope, concurrencyFor, makeInFlight } from "./scoped-limits.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
 import { makeWaitState } from "./wait-state.mjs";
@@ -149,7 +150,7 @@ export function mainModelEndpoints({ models, job, endpoints }) {
  * ONE function for the two readers (the endpoint gate at pickup and the runJob call), so the gate can never lease
  * for a model other than the one the container is started with.
  */
-export function effectiveJobOf(data, settings, allowedModels = null) {
+export function effectiveJobOf(data, settings, allowedModels = null, log = () => {}) {
 	// Issue #502: the allowed-model list is the trigger's, else the deployment's PI_ALLOWED_MODELS, else none. The
 	// env list arrives as its own argument and never through `settings`, which the overlay (and so `dispatch_set`)
 	// writes. Absent stays absent, so an unrestricted job's effective job has no `models` key at all.
@@ -161,6 +162,13 @@ export function effectiveJobOf(data, settings, allowedModels = null) {
 		maxTurns: data.maxTurns ?? settings.maxTurns,
 		maxTokens: data.maxTokens ?? settings.maxTokens, // optional per-job token budget (issue #25); null => runner meter only
 		...(models !== null ? { models } : {}),
+		// Issue #501: the per-job dollar cap in integer micro-dollars, or null for none. NOT `??` like the fields
+		// above: a trigger's `run.maxCostUsd` may only NARROW, so this is the smaller of the trigger's and the
+		// deployment's, each counted only when set (`effectiveCostCapMicros` says why a trigger-only cap applies
+		// and what a malformed job value reads as). buildContainerEnv sends it as PI_MAX_COST_MICROS, and the
+		// image preflight requires `costCap` of any job that carries one.
+		// A malformed queued value is logged by KEY only (`job_cost_cap_malformed`), never by value.
+		maxCostMicros: effectiveCostCapMicros(data.maxCostUsd, settings.maxCostUsd, (key) => log("job_cost_cap_malformed", { key })),
 	};
 }
 
@@ -914,7 +922,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// named them (#502), so for most jobs this fill supplies the provider the container env allowlist
 			// requires -- absent it, the allowlist refuses a job only after its budget slot is reserved. The `caps`/`softHoldPct` passed to runJob change which
 			// values reserveBudget checks, never when it runs.
-			const effectiveJob = effectiveJobOf(job.data, settings, deps?.allowedModels ?? null);
+			// The one call that logs a malformed queued cap (#501): the endpoint gate above computes the same job and
+			// stays quiet, so it is reported once per pickup.
+			const effectiveJob = effectiveJobOf(job.data, settings, deps?.allowedModels ?? null, (event, fields) => deps?.log?.(event, { jobId: job.id, ...fields }));
 
 			const result = await runJob(effectiveJob, {
 				redis,
@@ -937,7 +947,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// Issue #502: the skew check must see `models` as the job ARRIVED, not as `effectiveJobOf` filled it from
 				// PI_ALLOWED_MODELS, or a trigger list a stale receiver dropped would read as present and the job would run on
 				// the deployment's list. Only when the wiring supplies the check, so a bare processor keeps the default.
-				...(deps?.checkWaitSkew ? { checkWaitSkew: (j, ...rest) => deps.checkWaitSkew({ ...j, models: job.data?.models }, ...rest) } : {}),
+				// The same for `maxCostUsd` (#501): `effectiveJobOf` keeps the arrived value under its own key and writes the
+				// resolved cap as `maxCostMicros`, but it is read off `job.data` here too, so no later fill can hide a drop.
+				...(deps?.checkWaitSkew ? { checkWaitSkew: (j, ...rest) => deps.checkWaitSkew({ ...j, models: job.data?.models, maxCostUsd: job.data?.maxCostUsd }, ...rest) } : {}),
 				// #227. BOUNDED AFTER THE ABORT, and this is what makes `abortable` an honest declaration.
 				//
 				// `makeRunContainer`'s promise settles ONLY on the docker child's `close` or `error`. Nothing

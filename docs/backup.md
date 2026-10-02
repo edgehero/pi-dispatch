@@ -50,6 +50,19 @@ The same asymmetry runs the other way. The overlay is a file and the **pause fla
 restoring files without the volume can leave you running with caps you never set, and restoring the
 volume without the files can leave you paused with nothing on disk explaining why.
 
+### An overlay that does not load stops every job
+
+A settings file that is present but invalid is the opposite case: the worker refuses every job with
+`settings-overlay-invalid` rather than guess. The panel and `dispatch_set` also refuse to write over
+it, so a later `set` cannot erase the keys it still holds (it used to rebuild the file from nothing).
+Fix the key the message names, or delete the file to start from an empty overlay. `pi-dispatch doctor`
+reports such a file, with the reason, and never prints a value.
+
+**Upgrading.** Since issue #501 a settings file with the same key twice is refused. Before, the last
+value silently won. A hand-edited file that loaded before can stop every job after the upgrade. Run
+`pi-dispatch doctor` after upgrading to find one. A misspelled dollar key (`maxcostusd`, `max_cost_usd`,
+`PI_MAX_COST_USD` written into the file) is refused by name too, rather than ignored.
+
 ## What is deliberately not backed up
 
 These are all regenerated or bounded, and copying them buys nothing:

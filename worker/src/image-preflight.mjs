@@ -44,7 +44,7 @@ export function resolveJobImage(job, defaultImage) {
  *   { forgeUnsupported }  -- present, but declares it cannot serve this job's forge => POLICY, refuse
  *   { <gate.result>, declared } -- present, but does not declare a capability this job needs, one key per
  *                            CAPABILITY_GATES row (replicaUnsupported, commandUnsupported,
- *                            excludeToolsUnsupported, modelPolicyUnsupported) => POLICY
+ *                            excludeToolsUnsupported, modelPolicyUnsupported, costCapUnsupported) => POLICY
  *
  * A non-zero `docker image inspect` is AMBIGUOUS -- an absent image and an unreachable daemon both exit 1 --
  * so the failure path disambiguates POSITIVELY with `docker info` rather than by matching docker's stderr.
@@ -178,6 +178,18 @@ export const CAPABILITY_GATES = Object.freeze([
 		reason: "job-image-model-policy-unsupported",
 		event: "refused_image_model_policy_unsupported",
 		comment: (image, declared) => `Refused: the job image "${image}" does not declare allowed-model support (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner cannot hold this job to the models it may use. Rebuild the image from a version that has this feature. Not run.`,
+	}),
+	// Issue #501: a runner that predates the cost guard reads no PI_MAX_COST_MICROS, so a job with a dollar cap
+	// would run UNCAPPED and record a clean exit: a money limit quietly not kept. Needed whenever the job carries
+	// a cap, 0 included (`!== null`, buildContainerEnv's rule: 0 is the tightest cap, not none). The refusal is
+	// pre-spend like every row: nothing minted, nothing cloned, no budget reserved (`budgetReserved: false`).
+	Object.freeze({
+		token: "costCap",
+		needed: (job) => job?.maxCostMicros !== null && job?.maxCostMicros !== undefined,
+		result: "costCapUnsupported",
+		reason: "job-image-cost-cap-unsupported",
+		event: "refused_image_cost_cap_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare cost-cap support (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would ignore the per-job dollar cap and run this job with no cap at all. Rebuild the image from a version that has this feature. Not run.`,
 	}),
 ]);
 

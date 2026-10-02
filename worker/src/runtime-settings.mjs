@@ -1,14 +1,19 @@
 import * as nodeFs from "node:fs";
 import { dirname } from "node:path";
 import { ensureUnderAccountRoot } from "./config.mjs";
+import { findDuplicateKey } from "./json-duplicates.mjs";
+import { checkDollarInvariant, parseUsdMicros } from "./money.mjs";
 
 /**
  * Runtime-settings overlay: the shared, durable truth between the admin extension and the worker
- * (INT-CONFIG-OVERLAY-CONTRACT, DES-RUNTIME-SETTINGS-FILE-OVERLAY). A flat `settings.json` with ten
+ * (INT-CONFIG-OVERLAY-CONTRACT, DES-RUNTIME-SETTINGS-FILE-OVERLAY). A flat `settings.json` with fourteen
  * optional keys -- `model`, `provider` (non-empty strings), `maxTurns`, `dailyCap`, `weeklyCap`,
  * `monthlyCap`, `maxTokens`, `dailyTokenCap` (int >= 1), `concurrency` (int 1-10), `softHoldPct`
- * (int 1-99) -- read by the worker at each job start and written atomically by the admin extension
- * (tmp + rename). `maxTokens`/`dailyTokenCap` are the optional token controls (issue #25).
+ * (int 1-99), and the dollar keys `maxCostUsd`, `dailyCostUsd`, `weeklyCostUsd`, `monthlyCostUsd`
+ * (a decimal string or number, `parseUsdMicros`) -- read by the worker at each job start and written
+ * atomically by the admin extension (tmp + rename). `maxTokens`/`dailyTokenCap` are the optional token
+ * controls (issue #25); the dollar keys are issue #501's, and the three windows are refused until they are
+ * enforced (see `validateOverlay`).
  *
  * `readOverlay` NEVER throws: a bad settings file returns a discriminated `{ invalid }` rather than an
  * exception, so the processor RETURNS a policy refusal (`settings-overlay-invalid`) instead of letting
@@ -25,7 +30,7 @@ import { ensureUnderAccountRoot } from "./config.mjs";
  * Custom: overlay validated inline per config.mjs precedent; zod not in deps
  */
 
-export const KNOWN_KEYS = ["model", "provider", "maxTurns", "dailyCap", "weeklyCap", "monthlyCap", "maxTokens", "dailyTokenCap", "concurrency", "softHoldPct"];
+export const KNOWN_KEYS = ["model", "provider", "maxTurns", "dailyCap", "weeklyCap", "monthlyCap", "maxTokens", "dailyTokenCap", "concurrency", "softHoldPct", "maxCostUsd", "dailyCostUsd", "weeklyCostUsd", "monthlyCostUsd"];
 
 /**
  * Overlay keys the OVERLAY accepts but no model-callable tool may set. `secretProfiles` maps a profile name
@@ -42,6 +47,39 @@ export const KNOWN_KEYS = ["model", "provider", "maxTurns", "dailyCap", "weeklyC
  * its own user-input path, and every declared path is bounded by PI_SECRET_RESOLVER_ROOTS in the worker.
  */
 export const OPERATOR_ONLY_KEYS = ["secretProfiles"];
+
+// The dollar keys' near-miss spellings (issue #501), already normalised (`overlayKeyShape`), each mapped to the key it
+// meant: the four keys, their env names (`PI_MAX_COST_USD` pasted into settings.json is the likeliest slip of all),
+// the micro-dollar spelling, `costUsd`, and the bare `maxCost` forms.
+const DOLLAR_NEAR_MISSES = Object.freeze({
+	maxcostusd: "maxCostUsd", pimaxcostusd: "maxCostUsd", maxcostmicros: "maxCostUsd", costusd: "maxCostUsd", maxcost: "maxCostUsd",
+	dailycostusd: "dailyCostUsd", pidailycostusd: "dailyCostUsd", dailycostmicros: "dailyCostUsd", dailycost: "dailyCostUsd",
+	weeklycostusd: "weeklyCostUsd", piweeklycostusd: "weeklyCostUsd", weeklycostmicros: "weeklyCostUsd", weeklycost: "weeklyCostUsd",
+	monthlycostusd: "monthlyCostUsd", pimonthlycostusd: "monthlyCostUsd", monthlycostmicros: "monthlyCostUsd", monthlycost: "monthlyCostUsd",
+});
+
+// A small FIXED look-alike table, to ASCII: Cyrillic а е о р с у х к м т н в і and Greek ο α ε ρ ν τ κ ι (lowercase
+// forms; the key is lowercased first, which maps their capitals onto these). Fullwidth forms are mapped by code point.
+const LOOK_ALIKES = new Map(Object.entries({
+	"\u0430": "a", "\u0435": "e", "\u043E": "o", "\u0440": "p", "\u0441": "c", "\u0443": "y", "\u0445": "x", "\u043A": "k", "\u043C": "m", "\u0442": "t", "\u043D": "h", "\u0432": "b", "\u0456": "i",
+	"\u03BF": "o", "\u03B1": "a", "\u03B5": "e", "\u03C1": "p", "\u03BD": "v", "\u03C4": "t", "\u03BA": "k", "\u03B9": "i",
+}));
+
+/**
+ * An overlay key's shape for the dollar near-miss check (issue #501): fullwidth forms to ASCII, lowercased, the fixed
+ * look-alike table applied, and the separators `_`, `-`, `.` and space dropped. Nothing else is removed, so a key with
+ * any other character (`host_ü`, `notés`) keeps it and can never EQUAL a target. That is the whole rule: the overlay
+ * refuses only an exact match after this, never a subsequence or a distance, because a refusal here stops every job
+ * and a false one is worse than a drop. The trigger loader keeps its own, wider sweep (`validateRunModel`): a
+ * triggers file is reviewed content refused at load, where a false hit costs an edit, not a day of jobs.
+ */
+function overlayKeyShape(key) {
+	let out = "";
+	for (const ch of key.replace(/[\uFF01-\uFF5E]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0)).toLowerCase()) {
+		out += LOOK_ALIKES.get(ch) ?? ch;
+	}
+	return out.replace(/[_\-. ]/g, "");
+}
 
 function isNonEmptyString(value) {
 	return typeof value === "string" && value.trim() !== "";
@@ -127,14 +165,47 @@ function validateOverlay(candidate, log) {
 				overlay[key] = { ...value };
 				break;
 			}
+			case "maxCostUsd":
+				// Issue #501, the per-job dollar cap. Kept AS WRITTEN (a string or a number) once it parses, so the
+				// file the admin writes back holds what the operator typed, never a converted number; the worker
+				// converts it to micro-dollars per job, exactly as it converts env's.
+				try {
+					parseUsdMicros(value, key);
+				} catch (error) {
+					return { invalid: error.message };
+				}
+				overlay[key] = value;
+				break;
+			case "dailyCostUsd":
+			case "weeklyCostUsd":
+			case "monthlyCostUsd":
+				// Issue #501's dollar windows. The value is checked first, so a malformed one is named as such; then
+				// the key is REFUSED until the windows are enforced (a later change of #501 removes this branch).
+				// Not dropped and not accepted: dropped, the default branch would log and ignore it; accepted, the
+				// panel would show a weekly dollar cap no job is held to. Either is a cap that looks kept and is
+				// not. A refusal here also stops `dispatch_set` at the write, before any job is refused for it.
+				try {
+					parseUsdMicros(value, key);
+				} catch (error) {
+					return { invalid: error.message };
+				}
+				return { invalid: `${key} is not supported yet: dollar windows are enforced from a later release (maxCostUsd, the per-job cap, works now)` };
 			case "softHoldPct":
 				// A percentage of each active cap; 100 would equal the hard wall (no band) and 0 has no meaning,
 				// so the enforced band is 1-99. Absence disables the soft-hold entirely.
 				if (!isIntInRange(value, 1, 99)) return { invalid: "softHoldPct must be an integer 1-99" };
 				overlay[key] = value;
 				break;
-			default:
+			default: {
+				// Issue #501: a near miss of a DOLLAR key is refused when its shape (`overlayKeyShape`: case, the
+				// separators, a fixed look-alike table) EXACTLY equals a known misspelling: `maxcostusd`, `MaxCostUsd`,
+				// `max_cost_usd`, `max<U+0421>ostUsd`, `PI_MAX_COST_USD`, `maxCostMicros`, `costUsd`. Dropped and logged,
+				// the operator's cap would not apply while the file reads as setting one. Every other unknown key keeps
+				// the forward-compatible drop-and-log, `host_<U+00FC>` and `maxCostCents` included.
+				const meant = Object.hasOwn(DOLLAR_NEAR_MISSES, overlayKeyShape(key)) ? DOLLAR_NEAR_MISSES[overlayKeyShape(key)] : undefined;
+				if (meant !== undefined) return { invalid: `${key} is not a settings key -- did you mean ${meant}? A dollar cap the worker drops would not apply while the file reads as set` };
 				log("settings_overlay_unknown_key", { key });
+			}
 		}
 	}
 	return { overlay };
@@ -163,15 +234,20 @@ export function readOverlay(path, { fs = nodeFs, log = () => {} } = {}) {
 	} catch {
 		return { invalid: "settings file is not valid JSON" };
 	}
+	// Issue #501: a duplicate key is refused, the triggers file's rule. JSON.parse keeps the LAST value, so
+	// `{"maxCostUsd":"1","maxCostUsd":"999"}` would run under $999 while the first line reads as $1. Only the KEY
+	// is named, never a value. `writeOverlay` serialises an object, so a file it wrote never has one.
+	const duplicate = findDuplicateKey(text);
+	if (duplicate) return { invalid: `settings file has a duplicate key ${JSON.stringify(duplicate.key)}: JSON keeps the last value, so the file that reads and the file that runs differ` };
 	return validateOverlay(parsed, log);
 }
 
 /**
- * Resolve the ten effective settings from `config` and a validated `overlay`: overlay value where the
+ * Resolve the fourteen effective settings from `config` and a validated `overlay`: overlay value where the
  * overlay sets it, else the config value. Precedence is overlay > env > default only -- `config`
- * already carries env > default. `weeklyCap`/`monthlyCap`/`maxTokens`/`dailyTokenCap`/`softHoldPct` may
- * resolve to `null` (their config value when unset), meaning that window / cap / band is disabled.
- * `job.data` is NOT merged here; that layer is the processor's.
+ * already carries env > default. `weeklyCap`/`monthlyCap`/`maxTokens`/`dailyTokenCap`/`softHoldPct` and the
+ * four dollar keys may resolve to `null` (their config value when unset), meaning that window / cap / band is
+ * disabled. `job.data` is NOT merged here; that layer is the processor's.
  */
 export function effectiveSettings(config, overlay) {
 	const o = overlay ?? {};
@@ -186,7 +262,35 @@ export function effectiveSettings(config, overlay) {
 		dailyTokenCap: o.dailyTokenCap ?? config.dailyTokenCap,
 		concurrency: o.concurrency ?? config.concurrency,
 		softHoldPct: o.softHoldPct ?? config.softHoldPct,
+		maxCostUsd: o.maxCostUsd ?? config.maxCostUsd,
+		dailyCostUsd: o.dailyCostUsd ?? config.dailyCostUsd,
+		weeklyCostUsd: o.weeklyCostUsd ?? config.weeklyCostUsd,
+		monthlyCostUsd: o.monthlyCostUsd ?? config.monthlyCostUsd,
 	};
+}
+
+/**
+ * The per-job settings the worker runs with, from `config` and a `readOverlay` result: `{ invalid }` when the
+ * overlay is invalid or the MERGED values break a cross-key rule, else the effective settings plus
+ * `secretProfiles`. Pure, so the processor's one settings read (start.mjs `getSettings`) is testable without
+ * booting a worker.
+ *
+ * The dollar invariant (issue #501) runs HERE, on merged values, because `validateOverlay` sees one key at a
+ * time and the overlay alone: a window in the overlay with the per-job cap in env is valid, and a check of
+ * the overlay alone would refuse it. An invalid result becomes the `settings-overlay-invalid` refusal, before
+ * any spend.
+ *
+ * `secretProfiles` (REQ-TRIGGER-SECRETS) rides ALONGSIDE the effective keys rather than inside them:
+ * `effectiveSettings` resolves `overlay > env` over a fixed literal whose tests pin its key set, and this key
+ * deliberately has no such precedence (a name declared in both sources is refused per delivery, not silently
+ * won by either).
+ */
+export function resolveSettings(config, read) {
+	if (read.invalid) return { invalid: read.invalid };
+	const settings = effectiveSettings(config, read.overlay);
+	const broken = checkDollarInvariant(settings);
+	if (broken) return broken;
+	return { ...settings, secretProfiles: read.overlay?.secretProfiles ?? {} };
 }
 
 /**

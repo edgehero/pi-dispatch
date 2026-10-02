@@ -441,7 +441,8 @@ jobs:
       # --- INT-CONTAINER-RUNTIME-CONTRACT (costCap, issue #501) ---
       # The checklist above proves a CLAIMED capability; it cannot notice one this image stopped claiming. Dropping
       # `costCap` from the Dockerfile label would otherwise pass every check here, and the worker reads the label to
-      # decide whether a cost-capped job may run on this image, so the token this repo's image must carry is bound here.
+      # decide whether a cost-capped job may run on this image (refusing it as job-image-cost-cap-unsupported when the token
+      # is missing), so the token this repo's image must carry is bound here.
       - name: "RUNNER: the built image declares costCap"
         run: |
           docker image inspect --format '{{index .Config.Labels "dev.pi-dispatch.capabilities"}}' "$IMAGE_REF" | tr ',' '\n' | grep -qx "costCap" \

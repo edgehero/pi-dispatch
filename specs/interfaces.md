@@ -579,7 +579,7 @@ refactor apart.
   | The **process-wide** token budget breaches mid-fanout (a subagent session's call trips it) | `stopReason: "aborted"` on the root; every later call **by any session** is answered with a synthetic aborted stream | `2` / `token_budget`, the same row as above by design: neither meter gets its own exit code, so an operator never has to learn which one fired. Since issues #501/#502 the process-wide meter reports its stop by REASON (`meterStop`, the meter's first stop) and the fallback bus meter by flag (`tokenAborted`); `decideExit` ranks `turn_budget` > `meterStop` > `tokenAborted` > a rejected prompt > the terminal message |
   | The per-job **cost cap** (issue #501, `PI_MAX_COST_MICROS`) stops a call before it is sent: the cost guard refuses any call whose bound would take `spent + in-flight bounds + bound` past the cap, any call it cannot bound (an api outside `PRICED_APIS`, `generateImages`, `streamDeferred`, a virtual model on any method but `streamSimple`, a classifier with an output rate, a context that does not serialise, a present `maxTokens` that is not a finite number, an output-cap `samplingParams` key that is not a positive finite number, or a `samplingParams` key outside the price-neutral safe list on the three apis that merge them last), and, fail closed, the rest of a job whose compat half was found displaced (a legacy call may have passed the cap unseen; logged `cost_guard_displaced` and counted as `costUnjudged` on the exit line) | `stopReason: "aborted"` on the root, the refused call answered with the hard stop `pi-dispatch: cost cap reached`; the refusal is logged `cost_refused` with numbers only (`bound`, `spent`, `inflight`, `cap`, or `why: "unboundable"`) | `2` / `cost-cap`. The meter's stop is ONE reason, first wins: a later stop never overwrites it, so a job a cost refusal stopped stays `cost-cap` even when late settles then cross the token cap. Live from the image that declares `costCap`; the bound and the settle rules are `DES-DOLLAR-RESERVE-AND-SETTLE` |
   | **Reserved; enforced by later changes** (issue #502): the **allowed-model list** stops a call to a model not on it | `stopReason: "aborted"` on the root, the refused call answered with the hard stop `pi-dispatch: model not allowed` | `2` / `model-not-allowed`. Same single first-wins stop. No runner emits it until the model guard lands |
-  | A cost cap (`PI_MAX_COST_MICROS`) or a model list (`PI_ALLOWED_MODELS`) is set, and the runner **cannot enforce it before a call**: the process-wide meter did not install (the fallback bus meter sees a call only after it was paid for), the meter has no hard-stop stream, or this runner has no pre-call guard for that policy (the installed guard lists the stops it can refuse for, so a cost guard cannot pass for a model guard) | **throws a tagged `configError`** after the meter installs and before `createAgentSession` | `2` / `model-policy-unenforceable` (checked first) or `cost-cap-unenforceable`. Nothing was sent. Live from the first image that reads either variable: until the model guard lands, that image refuses EVERY job carrying a list, which is the fail-closed answer for a policy it cannot keep; a cost cap passes on an image with the cost guard and a working meter. No worker writes either variable yet, so no job carries one |
+  | A cost cap (`PI_MAX_COST_MICROS`) or a model list (`PI_ALLOWED_MODELS`) is set, and the runner **cannot enforce it before a call**: the process-wide meter did not install (the fallback bus meter sees a call only after it was paid for), the meter has no hard-stop stream, or this runner has no pre-call guard for that policy (the installed guard lists the stops it can refuse for, so a cost guard cannot pass for a model guard) | **throws a tagged `configError`** after the meter installs and before `createAgentSession` | `2` / `model-policy-unenforceable` (checked first) or `cost-cap-unenforceable`. Nothing was sent. Live from the first image that reads either variable: until the model guard lands, that image refuses EVERY job carrying a list, which is the fail-closed answer for a policy it cannot keep; a cost cap passes on an image with the cost guard and a working meter. The worker writes `PI_MAX_COST_MICROS` since issue #501 part 1, only to an image declaring `costCap`, and `PI_ALLOWED_MODELS` since #502, only to an image declaring `modelPolicy` (`INT-CONTAINER-RUNTIME-CONTRACT`) |
   | **pi's own retry cannot resume** (issue #509): a retry-shaped error after the turn's tools ran; pi omits the failed attempt and its continue() refuses a transcript ending on the assistant | `session.prompt()` REJECTS with `Cannot continue from message role: ...` while a retry is in flight (auto_retry_start seen, no auto_retry_end) | `2` / `retry-unresumable` -- the paid call and the tool already happened; a queue retry would re-run them on a fresh budget, the uncounted re-run #449/#455's rule forbids. Both conditions are required; any other rejection keeps the preflight rows above |
   | The provider **deferred** the response (pi-ai 0.99.1 deferred responses) | `stopReason: "deferred"` | `2` / `deferred` -- the job has no answer, the provider still completes and bills it, and whatever asked for deferral (the runner never does) asks again on a retry |
   | A terminal still **pending** | `stopReason: "pending"` | `1` / `pending` -- the stream stopped before the provider finished: no evidence the agent ran, the no-terminal-message verdict under its own name |
@@ -1262,9 +1262,7 @@ refactor apart.
     `costRefused: 1` on its exit line, so nothing is dialled and nothing is spent. A runner that ignored the
     variable would try the call and die on the network; one that could not enforce it would exit
     `cost-cap-unenforceable`. The pi-upgrade-check workflow also requires this repo's image to carry the token.
-    No worker row requires it yet: the worker writes no `PI_MAX_COST_MICROS` until the per-job cap reaches it, and
-    that change adds the `CAPABILITY_GATES` row with it.
-    The worker's side of the three job-feature tokens (`replicas`, `commands`, `excludeTools`) is ONE table
+    The worker's side of the five job-feature tokens (`replicas`, `commands`, `excludeTools`, `modelPolicy`, `costCap`) is ONE table
     since issues #501/#502, `CAPABILITY_GATES` in `worker/src/image-preflight.mjs`: per row the token, which
     jobs need it, the result key, the record reason, the log event and the comment. The preflight refuses the
     first row a job needs and the image lacks, in the order the branches had, so the behaviour is unchanged
@@ -1277,6 +1275,13 @@ refactor apart.
     `model-policy-unenforceable`, after the reservation. The token joins the image label and
     `verify-image.sh` with the runner's model guard (#502 part 4); until an image declares it, every job
     with a list is refused here, fail closed, never silently run unrestricted.
+    A fifth row, **`costCap`** (issue #501 part 1), appended after it: it is needed by every job carrying a dollar cap
+    (`maxCostMicros !== null`, 0 included) and by no other, and an image that does not declare it refuses such
+    a job pre-spend with reason `job-image-cost-cap-unsupported` (nothing minted or cloned, no budget reserved,
+    `budgetReserved: false`), because a runner that predates the cost guard reads no `PI_MAX_COST_MICROS` and
+    would run the job with no cap at all. It lands with the first worker that writes the variable, so no
+    worker ever sends a cap to an image that would ignore it. A deployment that sets no dollar cap needs no
+    image change.
     `anyUid` (issue #341) declares that
     the image runs correctly as an ARBITRARY non-root uid given `HOME=/home/pi`: the home is writable by any
     uid, and Chromium renders as one. Its evidence is not a grep but two runs as uid `4242` (no passwd entry
@@ -1421,8 +1426,14 @@ refactor apart.
     deployment's own `PI_ALLOWED_MODELS`), comma-joined `provider/model` entries verbatim, which the runner
     splits at each entry's first `/`; emitted ONLY when the list is non-empty, never as an empty string,
     and only to an image that declares `modelPolicy` (the capability row above). `PI_FORWARD_ENV` refuses
-    it at config load, with every other name the worker writes (below). `PI_MAX_COST_MICROS` (issue #501), a
-    **reserved name the worker does not write yet**. The runner reads both (the per-job dollar cap as an integer
+    it at config load, with every other name the worker writes (below). `PI_MAX_COST_MICROS` (issue #501),
+    **written by the worker whenever the job has a dollar cap**: the smaller of the trigger's `run.maxCostUsd`
+    and the deployment's `maxCostUsd`, each counted only when set (`INT-CONFIG-OVERLAY-CONTRACT`), as integer
+    micro-dollars, `0` included (`!== null`, never truthiness: 0 is the tightest cap, and a truthy test would
+    send none), omitted when there is no cap, so an uncapped job's env is byte-identical, and only to an image
+    that declares `costCap` (the capability row above). `PI_FORWARD_ENV` refuses it at config load too, and it
+    is settled again AFTER the `PI_FORWARD_ENV` and `run.secrets` loops, `PI_DISPATCH_KEYLESS`'s backstop: a
+    forwarded or secret value can neither replace the computed cap nor add one to an uncapped job. The runner reads both (the per-job dollar cap as an integer
     number of micro-dollars from `0` to `1e12`, `0` legal; for both an EMPTY value is a config error, exit 2,
     never "unset", because an empty money or allow knob read as unset would fail open). A runner from an image
     declaring `costCap` ENFORCES the cost cap before every provider call (the cost guard,
@@ -3135,6 +3146,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "provider": "<optional: ^[a-z0-9][a-z0-9._-]*$ lowercased, <=64; ALL kinds>",
                "model": "<optional: the ledger id pattern lowercased, <=64, case kept; ALL kinds>",
                "maxTurns": <optional int >= 1; ALL kinds>,
+               "maxCostUsd": <optional dollar amount (INT-CONFIG-OVERLAY-CONTRACT); only narrows; ALL kinds>,
                "github": <optional boolean>, "packages": <optional boolean>,
                "resume": <optional boolean>,
                "image": "<optional: docker image ref; absent = PI_JOB_IMAGE>",
@@ -3145,6 +3157,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
       "run": { "kind": "github", "flow": "<flow name>",
                "command": "<see cron — exactly one of flow/command>", "packages": <optional boolean>,
                "provider": "<optional; see cron>", "model": "<optional>", "maxTurns": <optional>,
+               "maxCostUsd": <optional; see cron>,
                "image": "<optional>", "skillsDir": "<optional>",
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
                "replicas": <optional int 2..3; webhook kinds only>,
@@ -3154,6 +3167,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
       "run": { "kind": "github", "flow": "<default flow>",
                "command": "<see cron — exactly one of flow/command>", "packages": <optional boolean>,
                "provider": "<optional; see cron>", "model": "<optional>", "maxTurns": <optional>,
+               "maxCostUsd": <optional; see cron>,
                "image": "<optional>", "skillsDir": "<optional>",
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
                "replicas": <optional int 2..3; webhook kinds only>,
@@ -3173,6 +3187,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
       "run": { "kind": "github", "flow": "<flow name>",
                "command": "<see cron — exactly one of flow/command>", "packages": <optional boolean>,
                "provider": "<optional; see cron>", "model": "<optional>", "maxTurns": <optional>,
+               "maxCostUsd": <optional; see cron>,
                "image": "<optional>", "skillsDir": "<optional>",
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
                "replicas": <optional int 2..3; webhook kinds only; never beside once: true>,
@@ -3921,9 +3936,8 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `maxcostusd` and `maxcost` (singular and plural, `excludeTools`' rule), and the refusal names the field the
   matched target belongs to: a dropped `run.modelId` runs the job on the deployment default while the file reads as
   though it chose. On `on` every spelling is refused, the correct ones included. The exact key
-  `run.maxCostUsd` is NOT refused: it is a field a later release adds with enforcement, and until then it
-  falls under this file's tolerance of unknown `run` keys, so a file written for that release still loads
-  here. It is not carried into the normalized run. `run.models` is a field since #502 part 3 (below).
+  `run.models` (#502 part 3) and `run.maxCostUsd` (#501) are fields, each in its own bullet below; their
+  exact spellings are not near misses.
 
   **Forwarding: absent stays absent.** A forge normalizer emits each field only when present, the receiver
   copies all three (and `run.models`, below) onto every rule group (`receiver/src/config.mjs`) and forwards each with its own
@@ -3972,9 +3986,9 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `:ro` mount sees an older file) would enqueue the job WITHOUT its list, and the job would run on the
   deployment's list or on none while every record reads like a correct run. The worker's own read of the
   triggers file catches it, `run.waitFor`'s skew check generalised to a table of authored NARROWING fields
-  (`AUTHORED_NARROWING_FIELDS`, `worker/src/triggers-file.mjs`; `models` today, one row per future field): when
-  the entry at the job's matched index (identity-checked on flow, command, kind and on-type) lists models and
-  the job ARRIVED with none (`job.data.models`, read before the env fill), the job is refused pre-spend as
+  (`AUTHORED_NARROWING_FIELDS`, `worker/src/triggers-file.mjs`; `models` and, since #501, `maxCostUsd`): when
+  the entry at the job's matched index (identity-checked on flow, command, kind and on-type) sets the field and
+  the job ARRIVED without it (`job.data.models` or `job.data.maxCostUsd`, read before the env fill), the job is refused pre-spend as
   `trigger-skew`, naming the field. The same limits as the wait check: it reads `PI_TRIGGERS_FILE`, else
   `./triggers.json` at the worker's cwd, and fails OPEN on a file it cannot read or an entry that changed, so a
   worker with no readable triggers file cannot see the skew; cron and CLI jobs carry no matched index and are
@@ -4002,6 +4016,42 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   **Model-callable: none.** Neither `dispatch_trigger_add` nor `dispatch_trigger_edit` takes `models`: a
   list is reviewed trigger content, `run.secrets`' reasoning. An edit that moves a trigger's
   `provider`/`model` off its own list is refused by the write's `parseTriggers` like any other invalid file.
+
+- **`run.maxCostUsd` (ALL trigger kinds, optional)**: the per-job dollar cap for this trigger's jobs
+  (issue #501). A dollar amount (`INT-CONFIG-OVERLAY-CONTRACT`: a string or number, above 0, at most
+  1,000,000, at most 6 decimals), validated at load in both services by the shared pure `money.mjs` and
+  carried **as written**; `null` is absent, the model keys' rule. A refusal names the trigger and the key,
+  never the value. Its near misses (`maxCost`, `max_cost_usd`, `maxCostUSD`, homoglyphs) are refused by the
+  sweep above, and the exact key is no longer an unknown one.
+
+  **It only NARROWS** (#501's recommendation, taken): the job runs under the smaller of it and the
+  deployment's `maxCostUsd` (overlay over env), each counted only when set, so a trigger can lower the cap
+  for its jobs and never raise it. When the deployment sets no cap, the trigger's applies on its own: a
+  deployment with no cap asked for none, and a trigger that asks for one is still a narrowing. A value
+  **above the env `PI_MAX_COST_USD` refuses the file in the worker** (`loadSchedules`, every kind, at boot
+  and on a live reload, which keeps the running schedules), because it can only be a mistake that reads as
+  allowing more; this loader is pure and cannot read env, so the check is the worker's, and `doctor` names
+  it too. That refusal holds only where the worker reads the triggers file (`PI_TRIGGERS_FILE` set for it):
+  the receiver live-reloads webhook triggers by itself and never sees the worker's env, so it keeps serving
+  an edited webhook trigger whose cap is too high, and that trigger's jobs run under the smaller of the two
+  caps. The refusal is the loud half; the minimum is the guarantee. An overlay cap is applied per job by the
+  same minimum, never at load. A malformed value that
+  reaches a job anyway (a hand-built queue entry) reads as a cap of 0, never as the deployment cap or none.
+
+  **Forwarding**: absent stays absent, `run.provider`'s rule and the same derived test: the receiver's group
+  copies, one conditional spread at every filter's job literal, `enqueueForgeJob`, and the cron twin
+  (`schedules.mjs`) carry it at JOB level, never inside `trigger`. A chained child inherits it off the
+  parent's validated job data (`INT-OUTBOX-CONTRACT`), on `excludeTools`' reasoning: dropped, the child would
+  run under a wider cap than its parent's trigger chose.
+
+  **Version skew is refused, as for `run.models`**: `maxCostUsd` is a row of `AUTHORED_NARROWING_FIELDS`, so a
+  job whose matched trigger sets a cap but which ARRIVED without one (a receiver from before #501 tolerated the
+  key as unknown and dropped it) is refused pre-spend as `trigger-skew`, naming the field, rather than run under
+  the deployment's wider cap. **Upgrade note**: the check is strict, so adding `run.maxCostUsd` to a trigger
+  refuses that trigger's already-queued jobs as `trigger-skew`; re-run them.
+
+  **Not model-callable**: neither trigger tool (`dispatch_trigger_add`, `dispatch_trigger_edit`) takes it,
+  and an edit keeps an entry's existing value byte-identical. It is reviewed trigger content.
 
 - **Why**: The operator's trigger set is one host file — diffable, reviewable, git-trackable — rather than
   two files in two shapes across two services. The schema unifies the *view*; evaluation still splits by
@@ -4234,7 +4284,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -4624,7 +4674,8 @@ validator rather than a second copy of it.
   rejected; given a **retried** parent, when its outbox is re-collected, then the idempotent child id
   dedups and no second child is enqueued; given a parent whose data carries `excludeTools`, when a valid
   request is collected, then the child's data carries the parent's exclusions verbatim and no value from
-  the request file's own `excludeTools` key appears anywhere in it.
+  the request file's own `excludeTools` key appears anywhere in it. Given a parent whose data carries `maxCostUsd`, then the child's data
+  carries it verbatim, and a request file's own `maxCostUsd` key changes nothing.
 
 ## INT-SESSION-STORE-CONTRACT
 
@@ -4981,18 +5032,54 @@ validator rather than a second copy of it.
     "maxTokens":     <optional, int >= 1>,           // per-job token budget (in-run abort); unset -> per-job token budget disabled
     "dailyTokenCap": <optional, int >= 1>,           // daily token cap (check-AFTER; refuses next job); unset -> daily token counter disabled
     "concurrency": <optional, int 1-10>,             // worker slot count
-    "softHoldPct": <optional, int 1-99>              // soft-hold band as a % of each active cap; unset -> band disabled
+    "softHoldPct": <optional, int 1-99>,             // soft-hold band as a % of each active cap; unset -> band disabled
+    "maxCostUsd":     <optional, dollar amount>,      // issue #501: per-job dollar cap, sent to the runner; unset -> no dollar cap
+    "dailyCostUsd":   <optional, dollar amount>,      // issue #501: dollar windows, REFUSED until enforced (see below)
+    "weeklyCostUsd":  <optional, dollar amount>,
+    "monthlyCostUsd": <optional, dollar amount>
   }
   ```
+  A **dollar amount** (issue #501, `worker/src/money.mjs` `parseUsdMicros`) is a JSON string or number whose
+  decimal text matches the pattern below. A string is checked as written, which is the recommended form. A
+  number is checked by its VALUE, as `String(n)`, so JSON has already applied its float reading: `1e2`
+  unquoted is 100 and passes, and digits a float cannot hold are lost before the check. The text must match
+  `^(0|[1-9]\d{0,6})(\.\d{1,6})?$` and the amount must be above 0 and at most 1,000,000: at most 6 decimals,
+  no sign, no exponent, no whitespace (for a number, in the form JavaScript prints). It is converted to integer
+  micro-dollars by integer arithmetic only, never `Math.round(n * 1e6)`, and a refusal names the key, never the
+  value. The overlay keeps the value **as written** (the admin's `set` passes a dollar key's typed text through
+  unconverted), and env (`PI_MAX_COST_USD`, `PI_DAILY_COST_USD`, `PI_WEEKLY_COST_USD`, `PI_MONTHLY_COST_USD`)
+  is held the same way, so both sources carry one kind of value. `KNOWN_KEYS` holds all fourteen keys
+  (`secretProfiles` stays out). **Cross-key invariant**: a dollar window without `maxCostUsd` is invalid,
+  because a window reserves each job's per-job cap. It is checked on the **merged** overlay-over-env values
+  (`resolveSettings`, per job, giving `settings-overlay-invalid`) and on env alone at boot (a refusal), never
+  per key: a window in one source with the cap in the other is valid. **The three windows are refused until
+  they are enforced**: a window key whose value parses still makes the overlay invalid (`<key> is not
+  supported yet`), at the admin's write and at the worker's read, and a window variable in env refuses boot.
+  Accepted-and-unenforced would show a cap the deployment does not keep, and dropped-and-logged would do the
+  same more quietly; the change that enforces the windows lifts both refusals.
   All keys are optional; a missing file is an empty overlay. **Write protocol** (admin extension): validate
   the candidate object, serialise it, write a same-directory `settings.json.tmp`, then `rename` it over
   `settings.json` — an atomic replace, with one EPERM retry on Windows. When the existing file is invalid,
-  a write rebuilds it from scratch with the sanitized candidate and surfaces a loud, key-only notice that
-  it replaced an invalid file — the write path is the documented repair for a broken overlay, so the
-  fail-closed guarantee lives only on the worker's job-start read, which is unchanged. **Read protocol** (worker): read at
+  a write is REFUSED (since issue #501) with the read reason, key names only, and nothing is written:
+  rebuilding it from `{}` erased whatever valid keys it still held (a `maxCostUsd`, a `secretProfiles`),
+  turning a refused-every-job state into one that runs at the env cap or uncapped. The repair is the
+  operator's: fix the named key, or delete the file, which is the empty overlay. A blank file (whitespace or
+  a byte-order mark only) holds nothing to lose and is written over like a missing one. `doctor` reports an
+  invalid overlay with the same reason. The `dispatch_set` confirm shows a dollar key's effective value and
+  its source; with no deployment pointer the worker's environment is not visible to the console, so an
+  absent variable reads "not in the overlay; the worker's environment is not visible here", never "no cap". The fail-closed guarantee on the worker's job-start read is unchanged. **Read protocol** (worker): read at
   **each job start**; a missing file is an empty overlay and is normal; an unknown key is ignored and
   logged, leaving the file valid; an invalid known key (wrong type or out of bounds) or unparseable JSON
-  makes the **whole file** invalid.
+  makes the **whole file** invalid. Two refusals since issue #501, both whole-file: a **duplicate key**
+  (`findDuplicateKey`, the triggers file's check; JSON keeps the last value, so a file reading `"1"` could
+  run under `"999"`), and a **near miss of a dollar key**, named with the key it meant. The rule is an
+  EXACT match after a fixed normalisation (fullwidth forms to ASCII, lowercase, a fixed look-alike table of
+  Cyrillic and Greek letters, the separators `_` `-` `.` and space dropped) against a fixed list: the four
+  keys, their `PI_*` env names, the `...CostMicros` and bare `...Cost` spellings, and `costUsd`. So
+  `maxcostusd`, `MAX_COST_USD`, `max-cost-usd` and `max<U+0421>ostUsd` refuse, while `host_<U+00FC>`,
+  `not<U+00E9>s` and `maxCostCents` are dropped and logged like every other unknown key: a refusal here
+  stops every job, so it must never fire on a key that merely resembles one. Dropped, a real misspelling
+  would leave a cap unapplied while the file reads as set. The trigger loader keeps its own wider sweep.
 - **Why**: The worker resolves the effective job settings at job start — precedence
   `job.data > overlay > env > default` — so this file is the shared, durable truth between the admin
   extension and the worker: a write made while the worker is down is simply read at the next job start.
@@ -5007,6 +5094,10 @@ validator rather than a second copy of it.
   post-run. This is the one overlay knob whose enforcement is not at the same pre-container check point as
   the rest; `CONST-BUDGET-BEFORE-TOKENS` (job count, check-before) is unchanged. See
   `DES-RUNTIME-SETTINGS-FILE-OVERLAY` for why a file, why atomic, and why a present-but-invalid file fails closed.
+  `maxCostUsd` resolves by the same precedence with one exception: a trigger's `run.maxCostUsd`
+  (`INT-TRIGGERS-FILE-CONTRACT`) does not REPLACE it, it NARROWS it. The job's cap is the smaller of the two,
+  each counted only when set (`effectiveJobOf`), and it is sent as `PI_MAX_COST_MICROS`
+  (`INT-CONTAINER-RUNTIME-CONTRACT`), where the runner enforces it before each provider call.
 - **Traces to**: `DES-RUNTIME-SETTINGS-FILE-OVERLAY`, `DES-ADMIN-VIA-PI-EXTENSION`,
   `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `REQ-SPEND-CAPS-MULTI-WINDOW`, `REQ-TOKEN-ACCOUNTING-AND-CAPS`
 - **Acceptance**: Given a present-but-invalid file, when a job starts, then the processor returns a policy
@@ -5015,7 +5106,11 @@ validator rather than a second copy of it.
   the value falls to the overlay, then env, then default — not a value frozen at enqueue; given `dailyCap`
   lowered below today's reserved count, when the next job starts, then it is refused over-budget before any
   container; given a concurrent write, when the worker reads, then it never observes a partial file (atomic
-  rename); given an unknown key, when read, then it is ignored and logged, and the file remains valid.
+  rename); given an unknown key, when read, then it is ignored and logged, and the file remains valid. Given
+  `maxCostUsd: "1.1234567"` or `0`, when read or written, then the whole file is invalid and the reason names
+  `maxCostUsd` and not the value; given `dailyCostUsd` set (anywhere), then the overlay or the boot is refused
+  by name until the windows are enforced; given an env `PI_MAX_COST_USD` and a window in the overlay, then the
+  invariant holds on the merged values (only the window refusal applies).
 
 ---
 
@@ -6159,3 +6254,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-02 | Issue #502 part 1. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.provider`, `run.model` and `run.maxTurns` are legal on ALL FOUR kinds and validated at load in both services (before, only cron carried them, copied unchecked, so `run.provider: 7` loaded). The grammar lines name the rule: a provider matches `^(?=.{1,64}$)[a-z0-9][a-z0-9._-]*$` lowercased, a model matches the run-history ledger's id pattern lowercased (`MODEL_REF_PATTERN` in `worker/src/model-ref.mjs`, 64 characters), both printable ASCII before lowercasing, the model kept in its original case, `maxTurns` a positive safe integer, and `null` treated as absent for all three because a cron entry's `"model": null` loaded before and meant the default. A new bullet records the near-miss sweep (`providerId`, `providers`, `modelId`, `modelName`, `maxTurn`, `allowedModels` and case or separator variants refused under `run`, every spelling refused under `on`, the suggestion naming the matched field), the upgrade consequence (webhook fields that were ignored now take effect, and a value or key that loaded before can now refuse the file), the deliberate tolerance of the exact keys `run.models` and `run.maxCostUsd` until the release that enforces them, that existence is NOT checked at load, and the absent-stays-absent forwarding with its derived receiver test, which also drives each route's job through `enqueueForgeJob`. The two "pure passthrough" sentences (the `run.image` bullet and **Why**) now say "absent stays absent", and the **Why** sentence says the fields are validated. **`INT-OUTBOX-CONTRACT` UNCHANGED, checked**: chaining exists only for local jobs, which carried these fields before this change, and a child still does not inherit them. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: the precedence `job.data > overlay > env` is what a forge job's new fields enter. **Measured at pi 0.99.1**: the pattern takes an optional leading `~` or `@` (`^(?=.{1,64}$)[~@]?[a-z0-9][a-z0-9._:/@_-]*$`), because without the `@` the 18 builtin `cloudflare-workers-ai` ids (`@cf/...`) could not be named; with it every builtin id passes (all 1,589 distinct ids over 1,592 catalog entries from `getAllBuiltinModels` across 42 providers, its 57 image and 12 classifier models included, 0 refused), and all 42 builtin provider ids pass the provider rule. The pattern itself is the one #533 moved into `model-ref.mjs`; the trigger rule imports that constant rather than restating it, and a test pins that the loader and the ledger agree on every id shape. **Code evidence**: worker/src/model-ref.mjs -> validateModelRef, MODEL_REF_PATTERN, PROVIDER_REF_PATTERN; worker/src/triggers.mjs -> validateRunModel and the five normalizers; receiver/src/config.mjs; receiver/src/filter.mjs; receiver/src/filter-gitlab.mjs; receiver/src/filter-forgejo.mjs; receiver/src/filter-azure.mjs; admin/src/index.ts -> dispatch_trigger_add, dispatch_trigger_edit, buildTriggerEntry; admin/src/read-model.mjs -> normalizeTriggerForDisplay; admin/src/dashboard.ts; receiver/test/trigger-forwarding.test.mjs; worker/test/trigger-forwarding.test.mjs; worker/test/model-ref.test.mjs. |
 | 2026-10-02 | Issue #501, part 2 (the runner's cost guard). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the `cost-cap` row is enforced, no longer reserved: the cost guard refuses a call before it is sent when `spent + in-flight bounds + bound` would pass `PI_MAX_COST_MICROS`, or when the call cannot be bounded (an api outside `PRICED_APIS`, `generateImages`, `streamDeferred`, a classifier with an output rate), and, fail closed, stops a job whose compat half was found displaced (PR #533's review: a legacy call may have passed the cap unseen, and judging cost in the runtime half alone cannot see a legacy call); the refusal logs `cost_refused` with numbers only. The `cost-cap-unenforceable` row now refuses only a cap the runner cannot enforce (a list still refuses until its guard lands). The six cost counters (`costCapMicros`, `costRefused`, `boundExceeded`, `longContext`, `costUnjudged`, the compat entries found displaced under the cap, and `costUnanswered`, the failed calls that never started, both added to the worker's TOKEN_KEYS before `modelRefused`) are written only when a cap is set, so every other exit line is byte-identical except that a rejected call now counts in `unpriced`; `modelRefused` stays reserved. A virtual model is skipped only on `streamSimple`; on any other method it is judged, and refused as unboundable. A samplingParams key outside the price-neutral safe list is unboundable on the three apis that merge them last, and a failed call that STARTED (any content block or output token) is charged at least its bound, and one that never started is charged its metered cost and counted as `costUnanswered`, on every api alike. **`INT-RUN-HISTORY-FILE-CONTRACT`**: `cost-cap` is live on an image that declares `costCap`; only `model-not-allowed` stays reserved. **`unpriced` WIDENS**: a call whose result rejected now counts as unpriced, on its own ledger row, because its cost is unknown; it was counted in `calls` and nowhere else. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the field semantics of the six cost counters, stated as the present contract a later dollar settlement reads, absence meaning no cap, and the `unpriced` change. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `costCap` joins the capability tokens, with a run as its evidence (a job with a fake key and no network under a cap of 0 must exit `2` / `cost-cap` with `costRefused: 1`), the CI workflow binds the token to this repo's image, and a runner from such an image enforces `PI_MAX_COST_MICROS`; the worker still writes neither variable and has no gate row for the token yet. **`INT-SDK-SESSION-OPTIONS`**: the snippet shows the guard and the stop handler. **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: no trigger field yet. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the guard runs inside the container before each call and moves no worker gate. **Code evidence**: image/runner/src/usage-meter.mjs -> callCostBound, PRICED_APIS, createCostGuard, judge, installProcessUsageMeter (arm); image/runner/run-job.mjs; image/Dockerfile; image/verify-image.sh; .github/workflows/pi-upgrade-check.yml. |
 | 2026-10-02 | Issue #502 parts 2, 3 and 5 (the worker half of the model policy). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: NEW `run.models` bullet, on all kinds: 1 to 16 `provider/model` entries split at the first `/`, each half under the `run.provider`/`run.model` rule, `[]` and case-insensitive duplicates refused, `null` absent; the main model must be an exact entry when one trigger names all three; the effective list is `job.data.models ?? PI_ALLOWED_MODELS ?? unrestricted`, the deployment list env-only; no model-callable tool takes it. The `run.provider` bullet's "whether the model exists is not checked" now points at the worker's pre-spend `model-unknown`, and its near-miss paragraph keeps only `run.maxCostUsd` as a tolerated unknown key. **`INT-OUTBOX-CONTRACT` AMENDED**: a chained child inherits `provider`, `model`, `models` (and `maxCostUsd` when present) off the parent's `job.data`, never the request file; the old "deliberately not inherited" reason held only while a model was a preference. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_ALLOWED_MODELS` is written now (the effective list, comma-joined, only when non-empty), `PI_FORWARD_ENV` refuses it at boot, and the capability table gains the `modelPolicy` row (`job-image-model-policy-unsupported`), landing with the first emission of the variable so an image without the runner's guard is refused pre-spend, fail closed. `PI_MAX_COST_MICROS` stays reserved and unwritten. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `model-unknown` and `job-image-model-policy-unsupported`, and a paragraph states the three pre-spend model refusals and that `budgetReserved` tells the free `model-not-allowed` from the paid one. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: the endpoint set is the union over the main model and every entry of the effective list; the keyless verdict is unchanged (every model of the provider); the residual narrows to unrestricted jobs. **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked** (the runner's `model-not-allowed` row lands with part 4). **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: no overlay key added; `KNOWN_KEYS` is pinned to carry no list. **Code evidence**: worker/src/model-ref.mjs -> modelListProblem, splitModelEntry, modelOnList; worker/src/model-catalog.mjs; worker/src/processor.mjs -> the model gates; worker/src/index.mjs -> effectiveJobOf, mainModelEndpoints; worker/src/config.mjs -> allowedModelsFrom; worker/src/env-allowlist.mjs; worker/src/image-preflight.mjs -> CAPABILITY_GATES; worker/src/outbox.mjs; worker/src/queue.mjs; worker/src/schedules.mjs; receiver/src/config.mjs and the four filters; worker/test/model-catalog.test.mjs; worker/test/model-policy.test.mjs; worker/src/models-json.mjs; worker/test/models-json.test.mjs (the differential test against pi's own loader); worker/src/triggers-file.mjs -> AUTHORED_NARROWING_FIELDS; receiver/test/trigger-forwarding.test.mjs. PR #536's review, folded in: `run.models` gains version-skew protection (`trigger-skew`, the wait skew check generalised to a table of authored narrowing fields, failing open where the worker cannot read the triggers file), the main model is checked against chat models only, a present but malformed list refuses (`list-malformed`), an overlay that is a directory refuses (`overlay-is-a-directory`), the overlay `models.json` is read the way pi's `ModelConfig.load` reads it (BOM, comments and trailing commas accepted; a schema error anywhere refuses the whole file), which also changes what the keyless verdict and doctor read, `PI_FORWARD_ENV` refuses every `CONTAINER_ENV_NAMES` member but `HOME`, `PI_ALLOWED_MODELS` refuses whitespace, `dispatch_trigger_edit` validates the merged run, and **`INT-ON-FAILURE-HOOK-CONTRACT` AMENDED**: a policy result pages unless it says `budgetReserved: false`. Review rounds 2 and 3: the skew check stays STRICT (a fail-open on the file's mtime was tried and rejected, since any later write of the file would reopen it), and a model under an overlay provider pi would not COMPOSE (no resolvable `api` or `baseUrl`, a `contextWindow` or `maxTokens` at or below zero, `oauth` without `baseUrl`) is unknown with why `overlay-provider-invalid`, and so is a BUILTIN model of that provider (pi drops the whole entry, so it would run against the public endpoint), held to pi's own `ModelRuntime` by the differential test, which is pinned to pi 0.99.1. |
+| 2026-10-02 | Issue #501 part 1 (the money type, the dollar settings, `run.maxCostUsd`, and the per-job cap reaching the container). **`INT-CONFIG-OVERLAY-CONTRACT` AMENDED**: four dollar keys (`maxCostUsd`, `dailyCostUsd`, `weeklyCostUsd`, `monthlyCostUsd`), each a dollar amount parsed by the pure `worker/src/money.mjs` (`^(0\|[1-9]\d{0,6})(\.\d{1,6})?$` on the value's decimal text, above 0, at most 1,000,000, integer-only conversion to micro-dollars, the key named and the value never), kept as written in the overlay and in env (`PI_MAX_COST_USD` and three window variables); `KNOWN_KEYS` grows from ten to fourteen; the cross-key invariant (a window needs `maxCostUsd`) runs on MERGED values per job (`resolveSettings`, giving `settings-overlay-invalid`) and on env at boot, never per key; the three windows are refused by name (at the admin's write, at the worker's read and at boot) until a later change enforces them, chosen over accepted-and-unenforced because a window the worker does not keep must not read as kept. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.maxCostUsd` on all four kinds, validated at load in both services, carried as written, `null` absent, forwarded through every group copy, filter route, `enqueueForgeJob` and the cron schedule (the derived bolt grows by itself, and failed on `enqueueForgeJob` before it carried the field); it only narrows (the job's cap is the smaller of trigger and deployment, each counted only when set, so a trigger-only cap applies), a value above env `PI_MAX_COST_USD` refuses the worker's load at boot and on reload, and doctor names it; the near-miss sweep keeps its targets and the exact key stops being a tolerated unknown. **`INT-OUTBOX-CONTRACT` AMENDED**, the acceptance only: a child carries its parent's `maxCostUsd` verbatim and a request file's own key changes nothing (the inheritance itself landed with #502's worker half). The version-skew check gains a `maxCostUsd` row in `AUTHORED_NARROWING_FIELDS` (`INT-TRIGGERS-FILE-CONTRACT`), with the upgrade note that adding the field to a trigger refuses its already-queued jobs as `trigger-skew`. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the worker writes `PI_MAX_COST_MICROS` whenever a job has a cap, 0 included (`!== null`), and omits it otherwise; the `costCap` row joins `CAPABILITY_GATES` (last), needed by every capped job, refusing pre-spend with `job-image-cost-cap-unsupported` and `budgetReserved: false`, landing with the first emission of the variable (PR #533's review). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the unenforceable row's last sentence says which variable the worker now writes. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `job-image-cost-cap-unsupported`; `RUNNER_POLICY_REASONS` UNCHANGED, checked (the new reason is the worker's own, never a runner's). The overlay also refuses, whole-file, a duplicate key and a near miss of a dollar key (an exact match after a fixed normalisation of case, separators and look-alike letters, against the keys, their env names, and the micro-dollar, bare and `costUsd` spellings; any other unknown key is still dropped and logged); a write over an invalid overlay is refused, never rebuilt from `{}`, unless the file is blank; doctor reports an invalid overlay with a fix that follows the reason; the confirm says when the worker's environment is not visible; the worker logs a malformed queued cap (`job_cost_cap_malformed`, key only); the `dispatch_set` confirm shows a dollar key's effective before-value and its source; a JSON number is documented as read by its value (`1e2` is $100) and a string as written. The webhook-trigger caveat is stated: the over-cap refusal holds where the worker reads the triggers file, and the receiver still serves an edited webhook trigger under the smaller cap. Dollar windows, reservation and settlement are NOT in this change. **Code evidence**: worker/src/money.mjs; worker/src/config.mjs -> usdSetting, refuseDollarSettings; worker/src/runtime-settings.mjs -> validateOverlay, effectiveSettings, resolveSettings; worker/src/start.mjs -> getSettings; worker/src/triggers.mjs -> validateMaxCostUsd; worker/src/schedules.mjs -> loadSchedules; worker/src/index.mjs -> effectiveJobOf; worker/src/env-allowlist.mjs -> buildContainerEnv (the cap backstop after the forward and secrets loops); worker/src/run-container.mjs; worker/src/image-preflight.mjs -> CAPABILITY_GATES; worker/src/queue.mjs; worker/src/outbox.mjs; worker/src/doctor.mjs -> dollarChecks; receiver/src/config.mjs and the four filters; admin/src/index.ts -> coerceSettingValue, dispatch_set; admin/src/read-model.mjs -> writeSettings, settingShown, PANEL_SERVICE_KEYS; worker/src/runtime-settings.mjs -> overlayKeyShape. |

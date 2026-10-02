@@ -17,6 +17,7 @@ import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, parseWaitProfiles } 
 import { imageRefProblem } from "./image-ref.mjs";
 import { CONTAINER_ENV_NAMES, KEYLESS_ENV_NAME } from "./reserved-env.mjs";
 import { modelListProblem } from "./model-ref.mjs";
+import { DOLLAR_ENV_NAMES, DOLLAR_WINDOW_KEYS, checkDollarInvariant, optionalUsdMicros } from "./money.mjs";
 
 /**
  * The VALKEY_URL the worker uses when none is set. ONE constant (issue #503's review): doctor judges the model endpoints
@@ -372,6 +373,14 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		allowedModels: allowedModelsFrom(env), // issue #502: the deployment's allowed-model list; null = unrestricted. ENV ONLY, never the settings overlay
 		maxTokens: optionalBoundedInt(env, "PI_MAX_TOKENS", 1), // issue #25; null = per-job token budget disabled (lagging in-run backstop)
 		dailyTokenCap: optionalBoundedInt(env, "PI_DAILY_TOKEN_CAP", 1), // issue #25; null = daily token counter disabled (check-AFTER, host-side)
+		// Issue #501. The dollar settings, each an operator's decimal (`"2.50"`) kept AS WRITTEN once it parses, so
+		// the overlay and env carry one kind of value and `effectiveJobOf` converts both to micro-dollars the same
+		// way. Unset or empty is null: no per-job cap, no window. The cross-key rule and the windows' refusal are
+		// below, after the object is built.
+		maxCostUsd: usdSetting(env, "PI_MAX_COST_USD"),
+		dailyCostUsd: usdSetting(env, "PI_DAILY_COST_USD"),
+		weeklyCostUsd: usdSetting(env, "PI_WEEKLY_COST_USD"),
+		monthlyCostUsd: usdSetting(env, "PI_MONTHLY_COST_USD"),
 		jobImage: jobImageFrom(env), // || (not ??) so an empty string falls back; "" is falsy and would throw inside buildDockerRunArgs AFTER a budget slot was reserved
 		globalPiDir: resolveGlobalPiDir(env, fileExists), // REQ-GLOBAL-PI-OVERLAY: operator's ~/.pi/agent subset, :ro-mounted; null = off
 		allowGlobalExtensions: globalExtensionsEnabled(env), // REQ-GLOBAL-PI-OVERLAY: ON unless PI_GLOBAL_ALLOW_EXTENSIONS=0
@@ -517,8 +526,40 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 	// #227, and it runs AFTER the object is built rather than inside it: the refusal reads `egress` as well
 	// as the two backend fields, and a check woven between properties would depend on key order.
 	refuseBackendShortfall(config);
+	// Issue #501, after the object for the same reason: both rules read more than one key.
+	refuseDollarSettings(config);
 
 	return config;
+}
+
+// An optional dollar amount from env (issue #501): unset or empty is null, anything else must parse as money
+// (`parseUsdMicros`) and is kept as the string the operator wrote. The refusal names the variable, never the
+// value, which is `parseUsdMicros`' own rule.
+function usdSetting(env, name) {
+	const raw = env[name];
+	if (raw === undefined || raw === "") return null;
+	optionalUsdMicros(raw, name);
+	return raw;
+}
+
+// The env half of the dollar rules (issue #501). The overlay half runs on MERGED values per job (start.mjs);
+// this one runs on env alone at boot, where an operator is present to read the refusal.
+//
+// 1. A window without a per-job cap: `checkDollarInvariant`, the rule that holds for good.
+// 2. Any window at all, refused BY NAME until the dollar windows are enforced (a later change of #501 lifts
+//    this). Accepting one now would be a cap the deployment does not keep while the file reads as kept, the
+//    silent no-op this project refuses; a boot refusal is the loud answer an operator can act on.
+function refuseDollarSettings(config) {
+	const envName = DOLLAR_ENV_NAMES;
+	const broken = checkDollarInvariant(config);
+	if (broken) {
+		const window = DOLLAR_WINDOW_KEYS.find((key) => config[key] !== null);
+		throw configError(`${envName[window]} needs PI_MAX_COST_USD: a dollar window reserves each job's per-job cost cap before it starts, so it cannot be set without one`);
+	}
+	const window = DOLLAR_WINDOW_KEYS.find((key) => config[key] !== null);
+	if (window !== undefined) {
+		throw configError(`${envName[window]} is not supported yet: dollar windows are enforced from a later release, and a window this worker would not keep must not look kept. Unset it; PI_MAX_COST_USD (the per-job cap) works now`);
+	}
 }
 
 /**

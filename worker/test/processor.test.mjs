@@ -1524,6 +1524,42 @@ test("a job carrying exclusions on an image that does not declare exclude-tools 
 	assert.ok(posted[0]?.includes("Rebuild"), "and names the fix, not merely the symptom");
 });
 
+test("a job carrying a dollar cap on an image without `costCap` refuses pre-spend, pre-reserve, through the REAL preflight table (#501)", async () => {
+	// An image built before the cost guard reads no PI_MAX_COST_MICROS: the job would run with NO cap and record
+	// a clean exit. Driven through makeImagePreflight itself (a fake docker printing the labels), so removing
+	// the table row fails here, not only in the table's own test.
+	const { makeImagePreflight, FIELD_SEP } = await import("../src/image-preflight.mjs");
+	const { EventEmitter } = await import("node:events");
+	const docker = (caps) => (_cmd, _args, opts) => {
+		const child = new EventEmitter();
+		if (opts?.stdio?.[1] === "pipe") {
+			const out = new EventEmitter();
+			out.setEncoding = () => {};
+			child.stdout = out;
+			queueMicrotask(() => out.emit("data", `sha256:abc${FIELD_SEP}0.99.1${FIELD_SEP}github${FIELD_SEP}${caps}\n`));
+		}
+		queueMicrotask(() => child.emit("close", 0));
+		return child;
+	};
+	const job = { kind: "local", folder: "/proj", flow: "f", task: "t", provider: "anthropic", model: "m", maxTurns: 5, maxCostMicros: 0 };
+	const redis = fakeRedis();
+	const posted = [];
+	const { deps: d, calls } = deps({ redis, comment: async (_j, t) => posted.push(t), imagePreflight: makeImagePreflight({ image: "pi-job:stale", spawnFn: docker("replicas,commands,excludeTools,anyUid") }) });
+	const r = await runJob(job, d);
+	assert.equal(r.outcome, "policy", "a policy RETURN, never a throw");
+	assert.equal(r.reason, "job-image-cost-cap-unsupported");
+	assert.equal(r.budgetReserved, false);
+	assert.equal(redis.incrCalls, 0, "no budget slot to find out");
+	assert.ok(!calls.includes("prepare"), "no clone");
+	assert.ok(!calls.includes("run-container"), "no container: an uncapped run is exactly what this gate exists to stop");
+	assert.ok(posted[0]?.includes("dev.pi-dispatch.capabilities") && posted[0]?.includes("Rebuild"), "names the label and the fix");
+
+	// The same job with NO cap on the same old image is not this gate's business.
+	const { deps: d2 } = deps({ redis: fakeRedis(), imagePreflight: makeImagePreflight({ image: "pi-job:stale", spawnFn: docker("replicas,commands,excludeTools,anyUid") }) });
+	const r2 = await runJob({ ...job, maxCostMicros: null }, d2);
+	assert.notEqual(r2.reason, "job-image-cost-cap-unsupported");
+});
+
 // ---- REQ-PER-TRIGGER-SKILLS: a trigger that named a skills dir the worker cannot see.
 
 test("an absent run.skillsDir refuses BEFORE the mint, the clone and the budget", async () => {

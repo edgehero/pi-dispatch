@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { dirname } from "node:path";
 import { test } from "node:test";
 import { defaultSettingsFile } from "../src/config.mjs";
-import { KNOWN_KEYS, effectiveSettings, readOverlay, settingsFilePath, writeOverlay } from "../src/runtime-settings.mjs";
+import { KNOWN_KEYS, effectiveSettings, readOverlay, resolveSettings, settingsFilePath, writeOverlay } from "../src/runtime-settings.mjs";
 
 /**
  * A fake fs exposing only what the overlay module touches, with an ordered `ops` log so a test can
@@ -85,6 +85,93 @@ test("readOverlay: valid known keys are accepted and returned as the overlay", (
 	assert.deepEqual(readObj(obj), { overlay: obj });
 });
 
+// ---- the dollar keys (issue #501) ----
+
+test("readOverlay: maxCostUsd is accepted as a decimal string or a number and kept AS WRITTEN", () => {
+	assert.deepEqual(readObj({ maxCostUsd: "2.50" }), { overlay: { maxCostUsd: "2.50" } });
+	assert.deepEqual(readObj({ maxCostUsd: 2.5 }), { overlay: { maxCostUsd: 2.5 } });
+	assert.deepEqual(readObj({ maxCostUsd: "0.000001" }), { overlay: { maxCostUsd: "0.000001" } });
+	assert.deepEqual(readObj({ maxCostUsd: 1000000 }), { overlay: { maxCostUsd: 1000000 } });
+});
+
+test("readOverlay: a malformed maxCostUsd fails the WHOLE overlay, naming the key and never the value", () => {
+	for (const bad of [0, "0", -1, "1.1234567", 1e-7, "abc", true, null, [], 1000001]) {
+		const res = readObj({ maxCostUsd: bad, dailyCap: 5 });
+		assert.ok(res.invalid, `${JSON.stringify(bad)} must be invalid`);
+		assert.match(res.invalid, /^maxCostUsd must be a dollar amount/);
+		assert.equal(res.overlay, undefined, "no partial overlay");
+	}
+	assert.equal(readObj({ maxCostUsd: "sk-ant-secret" }).invalid.includes("sk-ant"), false);
+});
+
+test("readOverlay: a dollar WINDOW is refused by name until the windows are enforced, after its value is checked", () => {
+	for (const key of ["dailyCostUsd", "weeklyCostUsd", "monthlyCostUsd"]) {
+		assert.match(readObj({ [key]: "25", maxCostUsd: "2" }).invalid, new RegExp(`^${key} is not supported yet`), `${key} with a cap`);
+		assert.match(readObj({ [key]: "25" }).invalid, new RegExp(`^${key} is not supported yet`), `${key} alone`);
+		assert.match(readObj({ [key]: "nope" }).invalid, new RegExp(`^${key} must be a dollar amount`), `${key} malformed is named as malformed`);
+	}
+});
+
+test("readOverlay: a near miss of a dollar key (case, separator, look-alike letters, wrong names) is refused by name, never dropped (#501)", () => {
+	for (const [key, meant] of [["maxcostusd", "maxCostUsd"], ["MaxCostUsd", "maxCostUsd"], ["max_cost_usd", "maxCostUsd"], ["max-cost-usd", "maxCostUsd"], ["maxCostUSD", "maxCostUsd"], ["maxCost", "maxCostUsd"], ["daily_cost_usd", "dailyCostUsd"], ["WeeklyCostUsd", "weeklyCostUsd"], ["monthlyCost", "monthlyCostUsd"], ["max\u0421ostUsd", "maxCostUsd"], ["d\u0430ilyCostUsd", "dailyCostUsd"], ["PI_MAX_COST_USD", "maxCostUsd"], ["maxCostMicros", "maxCostUsd"], ["costUsd", "maxCostUsd"], ["PI_WEEKLY_COST_USD", "weeklyCostUsd"], ["MAX_COST_USD", "maxCostUsd"], ["PI_DAILY_COST_USD", "dailyCostUsd"], ["pi.monthly.cost.usd", "monthlyCostUsd"], ["m\u03B1xCostUsd", "maxCostUsd"], ["\uFF4D\uFF41\uFF58CostUsd", "maxCostUsd"]]) {
+		const res = readObj({ [key]: "2" });
+		assert.ok((res.invalid ?? "").startsWith(`${key} is not a settings key -- did you mean ${meant}?`), `${key}: ${res.invalid}`);
+	}
+	// Any other unknown key keeps the forward-compatible drop-and-log. The rule is an EXACT match after the shape
+	// (case, separators, a fixed look-alike table), so a key with any other non-ASCII letter, or a different word, can
+	// never refuse the file: a false refusal here would stop every job.
+	for (const key of ["temperature", "host_\u00FC", "not\u00E9s", "maxCostCents", "maxCostUsdx", "max\u00FCCostUsd", "\u00FCmaxCostUsd"]) {
+		const logged = [];
+		assert.deepEqual(readObj({ [key]: 1, dailyCap: 3 }, (event, f) => logged.push([event, f])), { overlay: { dailyCap: 3 } }, key);
+		assert.deepEqual(logged, [["settings_overlay_unknown_key", { key }]], key);
+	}
+});
+
+test("readOverlay: a duplicate key is refused, naming the key and never a value (#501)", () => {
+	const res = readRaw('{"maxCostUsd":"1","maxCostUsd":"999"}');
+	assert.match(res.invalid, /^settings file has a duplicate key "maxCostUsd"/);
+	assert.equal(res.invalid.includes("999"), false);
+	assert.match(readRaw('{"dailyCap":1,"dailyCap":2}').invalid, /duplicate key "dailyCap"/);
+	// A file writeOverlay wrote never has one: it serialises an object.
+	const fs = makeFakeFs();
+	writeOverlay("/s/settings.json", { maxCostUsd: "1", dailyCap: 2 }, { fs });
+	const written = fs.ops.find((o) => o.op === "write").data;
+	assert.deepEqual(readRaw(written), { overlay: { maxCostUsd: "1", dailyCap: 2 } });
+});
+
+test("writeOverlay: a dollar window is refused at the WRITE, so dispatch_set never leaves one for a job to trip on", () => {
+	const fs = makeFakeFs();
+	const res = writeOverlay("/s/settings.json", { dailyCostUsd: "25", maxCostUsd: "2" }, { fs });
+	assert.match(res.invalid, /^dailyCostUsd is not supported yet/);
+	assert.deepEqual(fs.ops, [], "nothing touched");
+	assert.deepEqual(writeOverlay("/s/settings.json", { maxCostUsd: "2" }, { fs: makeFakeFs() }), { ok: true });
+});
+
+test("resolveSettings: the dollar invariant runs on MERGED values, never on the overlay alone", () => {
+	const config = { provider: "p", model: "m", maxTurns: 30, dailyCap: 25, weeklyCap: null, monthlyCap: null, maxTokens: null, dailyTokenCap: null, concurrency: 3, softHoldPct: null, maxCostUsd: null, dailyCostUsd: null, weeklyCostUsd: null, monthlyCostUsd: null };
+	// The inputs are passed as already validated. Today config.mjs (boot) and validateOverlay (per read) both
+	// refuse a window before it reaches here, so these cases pin the rule the later change that enforces the
+	// windows makes reachable, and it cannot then arrive as a per-key check.
+	for (const window of ["dailyCostUsd", "weeklyCostUsd", "monthlyCostUsd"]) {
+		// A window in the overlay, the cap in env: valid. A per-key check of the overlay would refuse it.
+		const ok = resolveSettings({ ...config, maxCostUsd: "2" }, { overlay: { [window]: "25" } });
+		assert.equal(ok.invalid, undefined, `${window} in the overlay, cap in env`);
+		assert.equal(ok[window], "25");
+		// A window in env, the cap in the overlay: valid too.
+		assert.equal(resolveSettings({ ...config, [window]: "25" }, { overlay: { maxCostUsd: 2 } }).invalid, undefined, `${window} in env, cap in the overlay`);
+		// Neither source has a cap: invalid, by the window's name.
+		assert.match(resolveSettings(config, { overlay: { [window]: "25" } }).invalid, new RegExp(`^${window} needs maxCostUsd`));
+		assert.match(resolveSettings({ ...config, [window]: "25" }, { overlay: {} }).invalid, new RegExp(`^${window} needs maxCostUsd`));
+	}
+});
+
+test("resolveSettings: an invalid read passes through; a valid one is the effective settings plus secretProfiles", () => {
+	const config = { provider: "p", model: "m", maxTurns: 30, dailyCap: 25, weeklyCap: null, monthlyCap: null, maxTokens: null, dailyTokenCap: null, concurrency: 3, softHoldPct: null, maxCostUsd: "5", dailyCostUsd: null, weeklyCostUsd: null, monthlyCostUsd: null };
+	assert.deepEqual(resolveSettings(config, { invalid: "settings file is not valid JSON" }), { invalid: "settings file is not valid JSON" });
+	assert.deepEqual(resolveSettings(config, { overlay: {} }), { ...config, secretProfiles: {} });
+	assert.deepEqual(resolveSettings(config, { overlay: { maxCostUsd: "1", secretProfiles: { a: "/x" } } }), { ...config, maxCostUsd: "1", secretProfiles: { a: "/x" } });
+});
+
 test("readOverlay: softHoldPct boundaries 1 and 99 are accepted", () => {
 	assert.deepEqual(readObj({ softHoldPct: 1 }), { overlay: { softHoldPct: 1 } });
 	assert.deepEqual(readObj({ softHoldPct: 99 }), { overlay: { softHoldPct: 99 } });
@@ -165,9 +252,14 @@ test("readOverlay never throws across the nasty corpus", () => {
 
 // ---- effectiveSettings ----
 
-test("effectiveSettings: overlay wins where set, config fills the rest, result has exactly ten keys", () => {
-	const config = { provider: "anthropic", model: "cfg-model", maxTurns: 30, dailyCap: 25, weeklyCap: null, monthlyCap: null, maxTokens: null, dailyTokenCap: null, concurrency: 3, softHoldPct: null, valkeyUrl: "x", jobImage: "y" };
-	const res = effectiveSettings(config, { model: "ovl-model", dailyCap: 5, weeklyCap: 100, softHoldPct: 80, maxTokens: 500000, dailyTokenCap: 2000000 });
+// FOURTEEN since issue #501 (was ten): the four dollar keys resolve overlay > env like every other key. The
+// pins below moved with the reason, not around it: the key set is still exact, and an empty overlay still
+// returns the config verbatim.
+test("effectiveSettings: overlay wins where set, config fills the rest, result has exactly fourteen keys", () => {
+	const config = { provider: "anthropic", model: "cfg-model", maxTurns: 30, dailyCap: 25, weeklyCap: null, monthlyCap: null, maxTokens: null, dailyTokenCap: null, concurrency: 3, softHoldPct: null, maxCostUsd: "5", dailyCostUsd: null, weeklyCostUsd: null, monthlyCostUsd: null, valkeyUrl: "x", jobImage: "y" };
+	const res = effectiveSettings(config, { model: "ovl-model", dailyCap: 5, weeklyCap: 100, softHoldPct: 80, maxTokens: 500000, dailyTokenCap: 2000000, maxCostUsd: 1.25 });
+	assert.equal(res.maxCostUsd, 1.25, "the overlay's dollar cap wins over env's, as written");
+	assert.equal(res.weeklyCostUsd, null, "an absent dollar window falls to config's null");
 	assert.equal(res.model, "ovl-model", "overlay wins");
 	assert.equal(res.dailyCap, 5, "overlay wins");
 	assert.equal(res.weeklyCap, 100, "overlay sets an otherwise-disabled window");
@@ -178,11 +270,11 @@ test("effectiveSettings: overlay wins where set, config fills the rest, result h
 	assert.equal(res.maxTurns, 30, "absent overlay key falls to config");
 	assert.equal(res.monthlyCap, null, "absent overlay key falls to config's null (disabled)");
 	assert.equal(res.concurrency, 3, "absent overlay key falls to config");
-	assert.deepEqual(Object.keys(res).sort(), ["concurrency", "dailyCap", "dailyTokenCap", "maxTokens", "maxTurns", "model", "monthlyCap", "provider", "softHoldPct", "weeklyCap"]);
+	assert.deepEqual(Object.keys(res).sort(), ["concurrency", "dailyCap", "dailyCostUsd", "dailyTokenCap", "maxCostUsd", "maxTokens", "maxTurns", "model", "monthlyCap", "monthlyCostUsd", "provider", "softHoldPct", "weeklyCap", "weeklyCostUsd"]);
 });
 
-test("effectiveSettings: an empty overlay yields the config values verbatim for all ten keys", () => {
-	const config = { provider: "anthropic", model: "cfg-model", maxTurns: 30, dailyCap: 25, weeklyCap: null, monthlyCap: null, maxTokens: null, dailyTokenCap: null, concurrency: 3, softHoldPct: null };
+test("effectiveSettings: an empty overlay yields the config values verbatim for all fourteen keys", () => {
+	const config = { provider: "anthropic", model: "cfg-model", maxTurns: 30, dailyCap: 25, weeklyCap: null, monthlyCap: null, maxTokens: null, dailyTokenCap: null, concurrency: 3, softHoldPct: null, maxCostUsd: "2.50", dailyCostUsd: null, weeklyCostUsd: null, monthlyCostUsd: null };
 	assert.deepEqual(effectiveSettings(config, {}), config);
 });
 
@@ -268,10 +360,10 @@ test("writeOverlay never throws when mkdir or write fails", () => {
 
 // ---- KNOWN_KEYS ----
 
-test("KNOWN_KEYS is exported and lists exactly the ten overlay keys", () => {
+test("KNOWN_KEYS is exported and lists exactly the fourteen overlay keys (the four dollar keys since issue #501)", () => {
 	assert.deepEqual(
 		[...KNOWN_KEYS].sort(),
-		["concurrency", "dailyCap", "dailyTokenCap", "maxTokens", "maxTurns", "model", "monthlyCap", "provider", "softHoldPct", "weeklyCap"],
+		["concurrency", "dailyCap", "dailyCostUsd", "dailyTokenCap", "maxCostUsd", "maxTokens", "maxTurns", "model", "monthlyCap", "monthlyCostUsd", "provider", "softHoldPct", "weeklyCap", "weeklyCostUsd"],
 	);
 });
 

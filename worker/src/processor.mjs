@@ -327,7 +327,7 @@ export async function runJob(job, deps) {
 		{
 			const skew = await checkWaitSkew(job);
 			// Issue #502: an authored NARROWING field the job arrived without (`AUTHORED_NARROWING_FIELDS`, triggers-file.mjs),
-			// today `run.models`. The same two causes as a dropped wait, and the same refusal shape; without it the job would
+			// today `run.models` and `run.maxCostUsd`. The same two causes as a dropped wait, and the same refusal shape; without it the job would
 			// run on the deployment's list, or on none, while every record reads like a correct run. The FIELD is named,
 			// never its value: the comment's reader may be an issue author.
 			if (skew.skewed && typeof skew.field === "string") {

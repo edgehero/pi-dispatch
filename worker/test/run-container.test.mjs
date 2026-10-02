@@ -237,6 +237,19 @@ test("the trigger's excludeTools reach the container env, and an unflagged job e
 	assert.ok(!junk.some((a) => String(a).startsWith("PI_EXCLUDE_TOOLS")));
 });
 
+test("the job's dollar cap reaches the container env as PI_MAX_COST_MICROS, 0 included, and an uncapped job emits none (#501)", { skip }, async () => {
+	// The hop from the effective job to buildContainerEnv. Dropped here, every capped job would pass the costCap
+	// gate and then run with NO cap on Docker and Podman alike, so this asserts the argv itself.
+	for (const maxCostMicros of [0, 500_000]) {
+		const argv = await argvFor({ ...JOB, maxCostMicros });
+		assert.ok(argv.includes(`PI_MAX_COST_MICROS=${maxCostMicros}`), `cap ${maxCostMicros} must reach the runner`);
+	}
+	for (const job of [{ ...JOB, maxCostMicros: null }, JOB]) {
+		const argv = await argvFor(job);
+		assert.ok(!argv.some((a) => String(a).startsWith("PI_MAX_COST_MICROS")), "no cap: no variable at all");
+	}
+});
+
 test("overlay extensions: the factory default emits nothing, and only an explicit false emits the opt-out", { skip }, async () => {
 	const on = await argvFor(JOB);
 	assert.ok(!on.some((a) => String(a).startsWith("PI_GLOBAL_ALLOW_EXTENSIONS")), "loading is the absence of the variable, on both sides");

@@ -276,6 +276,40 @@ test("token controls take explicit positive values, default to disabled, and rej
 	}
 });
 
+test("the dollar cap (issue #501): PI_MAX_COST_USD is kept as written once it parses, unset or empty is null", () => {
+	assert.equal(loadConfig({ PI_MAX_COST_USD: "2.50" }).maxCostUsd, "2.50", "as written, so env and the overlay carry one kind of value");
+	assert.equal(loadConfig({ PI_MAX_COST_USD: "0.000001" }).maxCostUsd, "0.000001");
+	assert.equal(loadConfig({}).maxCostUsd, null, "absent: no per-job dollar cap");
+	assert.equal(loadConfig({ PI_MAX_COST_USD: "" }).maxCostUsd, null, "empty is unset, like every optional knob here");
+	for (const key of ["dailyCostUsd", "weeklyCostUsd", "monthlyCostUsd"]) assert.equal(loadConfig({})[key], null, `${key} is off by default`);
+});
+
+test("the dollar settings refuse a malformed value at boot, naming the variable and never the value", () => {
+	for (const name of ["PI_MAX_COST_USD", "PI_DAILY_COST_USD", "PI_WEEKLY_COST_USD", "PI_MONTHLY_COST_USD"]) {
+		for (const bad of ["0", "-1", "abc", "1.1234567", "1e3", "1000001", " 2"]) {
+			assert.throws(
+				() => loadConfig({ PI_MAX_COST_USD: "5", [name]: bad }),
+				(e) => e.piDispatchConfig === true && e.message.startsWith(`${name} must be a dollar amount`) && !e.message.includes(JSON.stringify(bad)),
+				`${name}=${bad}`,
+			);
+		}
+	}
+});
+
+test("a dollar window without PI_MAX_COST_USD refuses boot (the invariant), naming the window", () => {
+	for (const name of ["PI_DAILY_COST_USD", "PI_WEEKLY_COST_USD", "PI_MONTHLY_COST_USD"]) {
+		assert.throws(() => loadConfig({ [name]: "25" }), (e) => e.piDispatchConfig === true && e.message.startsWith(`${name} needs PI_MAX_COST_USD`), name);
+	}
+});
+
+test("a dollar window refuses boot BY NAME until the windows are enforced, even with PI_MAX_COST_USD set", () => {
+	// Never accepted-and-ignored: a window the worker does not keep must not read as kept.
+	for (const name of ["PI_DAILY_COST_USD", "PI_WEEKLY_COST_USD", "PI_MONTHLY_COST_USD"]) {
+		assert.throws(() => loadConfig({ PI_MAX_COST_USD: "2", [name]: "25" }), (e) => e.piDispatchConfig === true && e.message.startsWith(`${name} is not supported yet`), name);
+	}
+	assert.doesNotThrow(() => loadConfig({ PI_MAX_COST_USD: "2", PI_DAILY_COST_USD: "" }), "an empty window is unset");
+});
+
 test("env overrides every field", () => {
 	const c = loadConfig({
 		VALKEY_URL: "redis://valkey:6379",

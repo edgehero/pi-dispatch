@@ -33,6 +33,7 @@ import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { FORGE_HOST_VARS, FORGE_KINDS, MINTED_TOKEN_VARS, RUN_KINDS, forgeSpec, isForgeKind } from "./forges.mjs";
 import { findDuplicateKey } from "./json-duplicates.mjs";
 import { validateModelRef } from "./model-ref.mjs";
+import { parseUsdMicros } from "./money.mjs";
 import { PROVIDER_STEERING_VARS } from "./provider-steering.mjs";
 import { CONTAINER_ENV_NAMES } from "./reserved-env.mjs";
 // The wait grammar's two shared halves (issue #230). `afterInstantMs` is imported rather than restated so
@@ -416,7 +417,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(ref.models !== undefined && { models: ref.models }) },
+		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }) },
 	};
 }
 
@@ -1189,11 +1190,15 @@ function validateBackend(on, run, at, path, { localWorkspace }) {
  * absence once a model is policy, and the price difference between two models is the whole point of
  * naming one.
  *
+ * `run.maxCostUsd` (issue #501) is validated here too, since the sweep below already owns its near misses:
+ * the per-job dollar cap, a plain decimal string or number (`parseUsdMicros`: above 0, at most 1,000,000,
+ * at most 6 decimals), carried AS WRITTEN and emitted only when present (`null` is absent, the model keys'
+ * rule). It can only NARROW: the worker runs the job under the smaller of it and the deployment's cap, and
+ * refuses a file with one above the env cap when it loads it (`loadSchedules`, at boot and on a live reload;
+ * this loader stays pure, so it cannot read env).
+ *
  * `run.models` (the allowed-model list) is validated with them since #502's second part, and its misspellings
- * were refused here before it was. `run.maxCostUsd` is a field a later release adds with enforcement. Until
- * then its EXACT spelling falls through to this file's tolerance of unknown `run` keys (a file written for
- * that release still loads here), while its misspellings are refused like any other near miss, so the day
- * the field arrives a typo in it is already loud.
+ * were refused here before it was.
  */
 function validateRunModel(on, run, at, path) {
 	// What the sweep compares against, case and separators removed. `providerid` and `modelid` are what an
@@ -1235,7 +1240,19 @@ function validateRunModel(on, run, at, path) {
 			throw configError(`${at}: ${label}.${key} is not a field -- did you mean ${meant}? A model choice the loader drops runs the job on the deployment default while the file reads as though it chose, so a near miss is refused rather than dropped: ${path}`);
 		}
 	}
-	return validateModelRef(run, at, path);
+	return { ...validateModelRef(run, at, path), ...validateMaxCostUsd(run, at, path) };
+}
+
+// `run.maxCostUsd` (issue #501): `{ maxCostUsd }` when present and valid, `{}` when absent or null. The
+// refusal names the trigger and the key and never the value, `parseUsdMicros`' rule.
+function validateMaxCostUsd(run, at, path) {
+	if (run?.maxCostUsd === null || run?.maxCostUsd === undefined) return {};
+	try {
+		parseUsdMicros(run.maxCostUsd, "run.maxCostUsd");
+	} catch (error) {
+		throw configError(`${at}: ${error.message}: ${path}`);
+	}
+	return { maxCostUsd: run.maxCostUsd };
 }
 
 /**

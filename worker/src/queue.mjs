@@ -285,7 +285,7 @@ export async function enqueueGitLabJob(queue, fields) {
  * window, replicas never coalesce against each other, and an unflagged job's dedup id is the same string it
  * has always been.
  */
-export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, packages, image, backend, excludeTools, skillsDir, instructions, resume, secrets, secretsProfile, waitFor, replica, replicas }) {
+export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, maxCostUsd, packages, image, backend, excludeTools, skillsDir, instructions, resume, secrets, secretsProfile, waitFor, replica, replicas }) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	// `packages` (whether to load the operator-staged pi packages) and `image` (which container image to run)
 	// come off the MATCHED trigger (INT-TRIGGERS-FILE-CONTRACT / REQ-GLOBAL-PI-OVERLAY) and land on `data`
@@ -326,6 +326,9 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 		// same reason: `trigger` is copied verbatim into /job/event.json, and a permission boundary is the
 		// worker's business, never agent-visible input to reason about.
 		...(excludeTools !== undefined && { excludeTools }),
+		// #501. The trigger's per-job dollar cap, as written. Conditional like `excludeTools`, at JOB level for its
+		// reason, and a narrowing like it: the worker runs the job under the smaller of this and the deployment cap.
+		...(maxCostUsd !== undefined && { maxCostUsd }),
 		// The host directory of operator-authored skills this trigger injects (REQ-PER-TRIGGER-SKILLS).
 		// Conditional like `image`, so an unflagged job's data stays byte-identical, and at JOB level rather
 		// than inside `trigger` because a worker-host path is an execution knob, not a fact about the

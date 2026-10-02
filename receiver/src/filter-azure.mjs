@@ -124,6 +124,9 @@ export function filterAzure(subset, triggers, knownFlows, selfId, authorized, de
 		...(resolved.model !== undefined ? { model: resolved.model } : {}),
 		...(resolved.maxTurns !== undefined ? { maxTurns: resolved.maxTurns } : {}),
 		...(resolved.models !== undefined ? { models: resolved.models } : {}),
+		// #501. Its own spread, the rule above: a dropped cap runs the job under the deployment's cap, or none,
+		// while the file reads as narrowed.
+		...(resolved.maxCostUsd !== undefined ? { maxCostUsd: resolved.maxCostUsd } : {}),
 		// The trigger's injected skills dir (REQ-PER-TRIGGER-SKILLS), at JOB level beside image/packages and
 		// NEVER inside `trigger`. That placement is sharpest here of all: `trigger` is carried into
 		// /job/event.json, and a worker-host path in an agent-readable file is the leak prepare-local's
@@ -201,7 +204,7 @@ function matchLabelRules(subset, triggers, labels, action) {
 		repository: rule.repository,
 		packages: rule.packages,
 		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools,
-		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models,
+		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, maxCostUsd: rule.maxCostUsd,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
@@ -246,7 +249,7 @@ function routeComment(subset, triggers, knownFlows, targetType) {
 		repository: triggers.comment.repository,
 		packages: triggers.comment.packages,
 		image: triggers.comment.image, backend: triggers.comment.backend, excludeTools: triggers.comment.excludeTools,
-		provider: triggers.comment.provider, model: triggers.comment.model, maxTurns: triggers.comment.maxTurns, models: triggers.comment.models,
+		provider: triggers.comment.provider, model: triggers.comment.model, maxTurns: triggers.comment.maxTurns, models: triggers.comment.models, maxCostUsd: triggers.comment.maxCostUsd,
 		skillsDir: triggers.comment.skillsDir,
 		secrets: triggers.comment.secrets,
 		secretsProfile: triggers.comment.secretsProfile,
@@ -280,7 +283,7 @@ function routePullRequest(subset, triggers, action) {
 			repository: rule.repository,
 			packages: rule.packages,
 			image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools,
-			provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models,
+			provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, maxCostUsd: rule.maxCostUsd,
 			skillsDir: rule.skillsDir,
 			secrets: rule.secrets,
 			secretsProfile: rule.secretsProfile,

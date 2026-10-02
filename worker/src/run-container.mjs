@@ -89,6 +89,7 @@ export function makeRunContainer({
 			model: job.model,
 			maxTurns: job.maxTurns,
 			maxTokens: job.maxTokens, // optional per-job token budget (issue #25); undefined => runner meter only
+			maxCostMicros: job.maxCostMicros ?? null, // issue #501: effectiveJobOf's min of trigger and deployment; null => no cap
 			jobId: name,
 			githubToken: token ?? undefined,
 			// Which forge minted it, so the token lands in that forge's own variable names and no other.

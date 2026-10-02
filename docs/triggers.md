@@ -312,6 +312,47 @@ writes exactly one thing back, the `on.disarmed` mark. That mark spends a one-sh
 receives a read-only `/job/event.json`. It contains source, folder, and HEAD sha. Cron adds its id,
 pattern and schedule instants. A scheduled flow can triage only what changed since its last run.
 
+## A dollar cap per job
+
+Any trigger type can set the most one of its jobs may spend, in US dollars:
+
+```json
+{ "on": { "type": "label", "any": ["pi:triage"] },
+  "run": { "kind": "github", "flow": "triage", "maxCostUsd": "0.50" } }
+```
+
+- `"maxCostUsd"` is a plain decimal: above 0, at most 1000000, with at most 6 decimals. Write it as a
+  string, such as `"0.50"`. A string is checked exactly as you typed it, so `"0"`, `"-1"`, `"1e3"` and
+  `"0.1234567"` are refused when the file loads, in the worker and in the receiver. The message names the
+  trigger and the field, never the value.
+- A JSON number also works (`0.5`, `2`), but it is read by its value, not by what you typed. JSON turns
+  `1e3` into 1000 before anything sees it, so `1e3` unquoted loads as $1000, and digits past what a float
+  can hold are lost. Quote the amount to have it checked as written.
+- The runner checks it before every model call. A call that could take the job past the cap is not sent,
+  and the run stops with reason `cost-cap`.
+- It can only lower the cap. The job runs under the smaller of this value and the deployment's
+  `PI_MAX_COST_USD` (or the panel's `maxCostUsd`). When the deployment sets no cap, the trigger's applies on
+  its own.
+- A value above `PI_MAX_COST_USD` is a mistake. When the worker reads the triggers file (`PI_TRIGGERS_FILE`
+  is set for it), it refuses to load such a file: at startup it will not start, and on a live edit it keeps
+  the cron triggers it had. The receiver reloads webhook triggers on its own and does not know the worker's
+  cap, so it still serves an edited webhook trigger. Its jobs then run under the smaller of the two caps,
+  never the trigger's higher one. `pi-dispatch doctor` names the trigger either way.
+- A job with a cap needs a job image that declares the `costCap` capability. The shipped image does. On an
+  older image the job is refused before it costs anything, with reason `job-image-cost-cap-unsupported`.
+  That image's runner would ignore the cap. A deployment that sets no dollar cap anywhere needs no new image.
+- A chained job (job chaining) keeps its parent's cap.
+- No AI tool can set or change it. `dispatch_trigger_edit` leaves it as it is.
+
+**Upgrading, and services out of step.** The same as for `models` above: a receiver from before this
+release drops `maxCostUsd`, and its job would run under the deployment's cap or none. The worker refuses
+such a job before it spends (`trigger-skew`, naming the field), when it can read the triggers file. The
+check is strict: adding `maxCostUsd` to a trigger refuses the jobs of it that were already queued
+(`trigger-skew`). Re-run them. Upgrade the worker and the receiver together.
+
+The daily, weekly and monthly dollar windows (`PI_DAILY_COST_USD` and its siblings) come in a later
+release. Set now, they stop the worker from starting, so a window can never look kept while it is not.
+
 ## Flows in detail
 
 **A skill arrives whole.** Put `references/`, templates or scripts next to your `SKILL.md`. They are

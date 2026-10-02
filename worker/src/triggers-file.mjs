@@ -457,7 +457,7 @@ export function makeCheckOnceSpent({ triggersPath, fs = nodeFs }) {
  * this entry authored conditions, this job carries none -- refuses.
  */
 /**
- * The authored NARROWING fields the skew check covers besides `waitFor` (issue #502): a `run` key whose absence
+ * The authored NARROWING fields the skew check covers besides `waitFor` (issues #502, #501): a `run` key whose absence
  * WIDENS the job, so a service that drops it (a receiver below the version floor, or a current one reading a dead
  * inode through compose's single-file `:ro` mount) turns a narrowed trigger into an unrestricted job that records
  * as a clean run. `authored` says whether the entry in the file carries the field; the job is skewed when it does
@@ -471,6 +471,10 @@ export function makeCheckOnceSpent({ triggersPath, fs = nodeFs }) {
  */
 export const AUTHORED_NARROWING_FIELDS = Object.freeze([
 	Object.freeze({ key: "models", authored: (v) => Array.isArray(v) && v.length > 0 }),
+	// Issue #501: a trigger's per-job dollar cap. Dropped by a receiver from before #501 (which tolerated the key as
+	// unknown), the job would run under the deployment's wider cap, or with none, on a clean record. Any present
+	// value counts as authored; whether it is a valid amount is the loader's question, not this one.
+	Object.freeze({ key: "maxCostUsd", authored: (v) => v !== undefined && v !== null }),
 ]);
 
 export function makeCheckWaitSkew({ triggersPath, fs = nodeFs }) {

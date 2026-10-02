@@ -223,12 +223,10 @@ test("the model keys refuse under on in EVERY spelling, the correct one included
 	}
 });
 
-test("run.maxCostUsd is tolerated as an unknown key until the release that enforces it; run.models is a field now", () => {
-	// The forward-compatibility posture every unknown run key gets: a file written for the later release
-	// still loads here. maxCostUsd is NOT carried into the normalized run, so nothing downstream acts on it.
+test("run.models and run.maxCostUsd are fields now, carried into the normalized run (#502, #501)", () => {
 	const [t] = parse([withRun(KINDS.label, { models: ["openai/gpt-5.4"], maxCostUsd: 2 })]);
 	assert.deepEqual(t.run.models, ["openai/gpt-5.4"], "#502 part 3: the list rides the normalized run");
-	assert.equal("maxCostUsd" in t.run, false);
+	assert.equal(t.run.maxCostUsd, 2, "#501: validated and carried as written");
 	// An unrelated unknown key, ASCII or not, still loads.
 	parse([withRun(KINDS.label, { modelNotes: "x", fl\u00F6w: "x", temperature: 1 })]);
 });
@@ -312,4 +310,37 @@ test("validateModelRef returns only the present fields and leaves the input alon
 	const run = { provider: "anthropic", flow: "x" };
 	assert.deepEqual(validateModelRef(run, "at", PATH), { provider: "anthropic" });
 	assert.deepEqual(run, { provider: "anthropic", flow: "x" });
+});
+
+// ---- run.maxCostUsd (issue #501) ----
+
+test("run.maxCostUsd is accepted on every kind, carried AS WRITTEN, and absent (or null) emits no key", () => {
+	for (const [name, entry] of Object.entries(KINDS)) {
+		for (const value of ["2.50", 2.5, "0.000001", 1000000]) {
+			const [t] = parse([withRun(entry, { maxCostUsd: value })]);
+			assert.equal(t.run.maxCostUsd, value, `${name} ${JSON.stringify(value)}`);
+		}
+		const [plain] = parse([entry]);
+		assert.equal("maxCostUsd" in plain.run, false, `${name}: absent emits no key`);
+		const [nulled] = parse([withRun(entry, { maxCostUsd: null })]);
+		assert.equal("maxCostUsd" in nulled.run, false, `${name}: null is absent, the model keys' rule`);
+	}
+});
+
+test("a malformed run.maxCostUsd refuses the file on every kind, naming the trigger and the key, never the value", () => {
+	for (const [name, entry] of Object.entries(KINDS)) {
+		for (const bad of [0, "0", -2, "2.1234567", 1e-7, "abc", "2 ", true, [], {}, "1000001", "1e2"]) {
+			assert.throws(
+				() => parse([withRun(entry, { maxCostUsd: bad })]),
+				(e) => isConfigError(e) && /run\.maxCostUsd must be a dollar amount/.test(e.message) && e.message.includes(PATH),
+				`${name} ${JSON.stringify(bad)}`,
+			);
+		}
+	}
+	// The value is never echoed (checked on values long enough to be told apart from the message's own digits).
+	for (const bad of ["2.1234567", "sk-ant-wrong-field", "-12.5"]) {
+		assert.throws(() => parse([withRun(KINDS.label, { maxCostUsd: bad })]), (e) => !e.message.includes(bad), bad);
+	}
+	assert.throws(() => parse([withRun(KINDS.cron, { maxCostUsd: "x" })]), (e) => /^cron trigger "nightly": run\.maxCostUsd/.test(e.message));
+	assert.throws(() => parse([KINDS.cron, withRun(KINDS.label, { maxCostUsd: "x" })]), (e) => /trigger at index 1: run\.maxCostUsd/.test(e.message));
 });

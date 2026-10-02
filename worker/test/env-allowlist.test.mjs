@@ -263,6 +263,27 @@ test("PI_MAX_TOKENS is forwarded only when the per-job budget is set", { skip },
 	assert.equal(noCap.PI_MAX_TOKENS, undefined, "an unset cap is omitted, never an empty string");
 });
 
+test("PI_MAX_COST_MICROS (issue #501) carries the per-job dollar cap whenever one is set, 0 included, and is absent otherwise", { skip }, () => {
+	const env = (maxCostMicros) => buildContainerEnv({ provider: "anthropic", model: "m", maxTurns: 5, maxCostMicros, jobId: "j", hostEnv: HOST });
+	assert.equal(env(2_500_000).PI_MAX_COST_MICROS, "2500000", "integer micro-dollars as a string");
+	// 0 is the tightest cap (no priced call at all), never "no cap": a truthiness test here would send a job
+	// that asked for 0 out with no cap whatsoever.
+	assert.equal(env(0).PI_MAX_COST_MICROS, "0");
+	assert.equal(env(1_000_000_000_000).PI_MAX_COST_MICROS, "1000000000000");
+	assert.equal(env(null).PI_MAX_COST_MICROS, undefined, "no cap: omitted, never an empty string (the runner refuses an empty one)");
+	assert.equal(env(undefined).PI_MAX_COST_MICROS, undefined);
+	assert.equal(buildContainerEnv({ provider: "anthropic", model: "m", maxTurns: 5, jobId: "j", hostEnv: HOST }).PI_MAX_COST_MICROS, undefined, "a caller that says nothing sends nothing");
+});
+
+test("PI_MAX_COST_MICROS is the worker's alone: a forwarded or secret value neither replaces the cap nor adds one (#501)", { skip }, () => {
+	const hostEnv = { ...HOST, PI_MAX_COST_MICROS: "1000000000000" };
+	const env = (maxCostMicros, extra = {}) => buildContainerEnv({ provider: "anthropic", model: "m", maxTurns: 5, maxCostMicros, jobId: "j", hostEnv, ...extra });
+	assert.equal(env(500_000, { forwardEnv: ["PI_MAX_COST_MICROS"] }).PI_MAX_COST_MICROS, "500000", "PI_FORWARD_ENV cannot raise the computed cap");
+	assert.equal(env(0, { secrets: { PI_MAX_COST_MICROS: "999" } }).PI_MAX_COST_MICROS, "0", "nor can a secret");
+	assert.equal(env(null, { forwardEnv: ["PI_MAX_COST_MICROS"] }).PI_MAX_COST_MICROS, undefined, "an uncapped job carries none, whatever was forwarded");
+	assert.equal(env(undefined, { secrets: { PI_MAX_COST_MICROS: "5" } }).PI_MAX_COST_MICROS, undefined);
+});
+
 test("an unconfigured provider throws a config-tagged error (=> pre-spend refusal)", { skip }, () => {
 	assert.throws(
 		() => buildContainerEnv({ provider: "google", model: "m", maxTurns: 5, jobId: "j", hostEnv: HOST }),

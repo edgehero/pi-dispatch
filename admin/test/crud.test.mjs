@@ -198,6 +198,63 @@ test("dispatch_set: an approved confirm writes the coerced value", async () => {
   assert.equal(read(settingsFile).dailyCap, 30, "written as a coerced JSON number");
 });
 
+test("dispatch_set: a dollar key's confirm shows the EFFECTIVE before-value and its source (#501)", async () => {
+  // With PI_MAX_COST_USD=2 in env and no overlay key, "(unset) -> 1000000" would read as adding a cap while it
+  // raises one 500,000 times.
+  const saved = process.env.PI_MAX_COST_USD;
+  try {
+    process.env.PI_MAX_COST_USD = "2";
+    withSettings({});
+    let probe = toolCtx({ answer: false });
+    await toolByName("dispatch_set").execute("id", { key: "maxCostUsd", value: "1000000" }, undefined, undefined, probe.ctx);
+    assert.match(probe.shown[0].message, /^maxCostUsd: 2 \(env PI_MAX_COST_USD\) -> 1000000$/);
+    withSettings({ maxCostUsd: "1.50" });
+    probe = toolCtx({ answer: false });
+    await toolByName("dispatch_set").execute("id", { key: "maxCostUsd", value: "3" }, undefined, undefined, probe.ctx);
+    assert.match(probe.shown[0].message, /^maxCostUsd: 1\.50 \(overlay\) -> 3$/);
+    delete process.env.PI_MAX_COST_USD;
+    withSettings({});
+    probe = toolCtx({ answer: false });
+    await toolByName("dispatch_set").execute("id", { key: "maxCostUsd", value: "3" }, undefined, undefined, probe.ctx);
+    // No deployment pointer here: pi's environment is not the worker's, so an absent variable proves nothing.
+    assert.match(probe.shown[0].message, /^maxCostUsd: \(not in the overlay; the worker's environment is not visible here\) -> 3$/);
+    // An EMPTY variable is unset, the worker's own reading.
+    process.env.PI_MAX_COST_USD = "";
+    probe = toolCtx({ answer: false });
+    await toolByName("dispatch_set").execute("id", { key: "maxCostUsd", value: "3" }, undefined, undefined, probe.ctx);
+    assert.match(probe.shown[0].message, /^maxCostUsd: \(not in the overlay; the worker's environment is not visible here\) -> 3$/);
+    delete process.env.PI_MAX_COST_USD;
+    // The AFTER side of an unset is the value the key falls back to, by the same rule.
+    process.env.PI_MAX_COST_USD = "2.00";
+    withSettings({ maxCostUsd: "1.50" });
+    probe = toolCtx({ answer: false });
+    await toolByName("dispatch_set").execute("id", { key: "maxCostUsd" }, undefined, undefined, probe.ctx);
+    assert.match(probe.shown[0].message, /^maxCostUsd: 1\.50 \(overlay\) -> 2\.00 \(env PI_MAX_COST_USD\)$/);
+    delete process.env.PI_MAX_COST_USD;
+    withSettings({ maxCostUsd: "1.50" });
+    probe = toolCtx({ answer: false });
+    await toolByName("dispatch_set").execute("id", { key: "maxCostUsd", value: "" }, undefined, undefined, probe.ctx);
+    assert.match(probe.shown[0].message, /^maxCostUsd: 1\.50 \(overlay\) -> \(not in the overlay; the worker's environment is not visible here\)$/);
+  } finally {
+    if (saved === undefined) delete process.env.PI_MAX_COST_USD;
+    else process.env.PI_MAX_COST_USD = saved;
+  }
+});
+
+test("dispatch_set: an invalid current overlay is refused BEFORE the confirm, and the file is left alone (#501)", async () => {
+  const settingsFile = join(tempDir("pi-set-"), "settings.json");
+  const text = '{"maxCostUsd":"1","maxCostUsd":"1","dailyCap":4}';
+  writeFileSync(settingsFile, text);
+  process.env.PI_SETTINGS_FILE = settingsFile;
+  const { ctx, shown } = toolCtx({ answer: true });
+  await assert.rejects(
+    () => toolByName("dispatch_set").execute("id", { key: "concurrency", value: "2" }, undefined, undefined, ctx),
+    /rejected: the settings file is invalid \(settings file has a duplicate key "maxCostUsd".*\), so nothing was written/,
+  );
+  assert.equal(shown.length, 0, "the operator is never asked to approve a write that would be refused");
+  assert.equal(readFileSync(settingsFile, "utf8"), text);
+});
+
 test("dispatch_set: an unknown key throws before any confirm", async () => {
   withSettings({ dailyCap: 25 });
   const { ctx } = toolCtx({ answer: true });

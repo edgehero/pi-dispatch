@@ -17,7 +17,7 @@
  * Failure doctrine: a broken pointer must leave `/dispatch` exactly as functional as before the pointer
  * existed (env then cwd defaults). So `readPointer` NEVER throws -- unparseable JSON, a non-object, a
  * missing/invalid version, a newer version all come back as `{ ignored: reason }` -- and the apply path
- * retains a one-line notice for the next `/dispatch` to surface (the REBUILT_NOTICE idiom: a surfaced
+ * retains a one-line notice for the next `/dispatch` to surface (a surfaced
  * warning, never a throw). This is deliberately weaker than the subscriptions file's loud refusal; the
  * reconciliation is recorded in the spec: the pointer is an availability aid, not a data file.
  *

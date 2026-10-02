@@ -77,6 +77,8 @@ import {
   killSwitchSet,
   installPanelValkeyContext,
   writeSettings,
+  overlayInvalidRefusal,
+  settingShown,
   writeTriggers,
   writePauseWindows,
   writeScopedLimits,
@@ -105,6 +107,7 @@ import { valkeyDownHint } from "@edgehero/pi-dispatch/valkey-auth";
 // approves a confirm dialog, and writeTriggers rejects it: a wasted human approval. `blessedBackends`
 // below is the precedent, and its header is a post-mortem of the same mistake.
 import { FORGE_KINDS, ISSUE_ACTIONS, ON_TYPES, PR_ACTIONS, PR_CLOSE_ACTIONS, REVIEW_STATES, validateModelRef } from "@edgehero/pi-dispatch/triggers";
+import { DOLLAR_SETTING_KEYS } from "@edgehero/pi-dispatch/money";
 import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
 // The worker's OWN window classifier (the same one reserveBudget enforces), so the budget states the
 // insights payload carries are words the page never derives and the panel and enforcement cannot drift.
@@ -202,8 +205,6 @@ export function _setPiVersionAdvisoryForTests(message: string | undefined): void
 
 const CHANNEL = "pi-dispatch-admin";
 
-const REBUILT_NOTICE = (reason: string) =>
-  `replaced invalid settings file (${reason}) — other keys were lost`;
 
 const USAGE =
   "usage: /dispatch <status|pause|resume|run|runs|logs|budget|insights|triggers|settings|set|unset|setup|secrets>";
@@ -489,22 +490,28 @@ function registerTools(pi: ExtensionAPI): void {
         throw new Error(`unknown key '${params.key}'. valid keys: ${KNOWN_KEYS.join(", ")}`);
       }
       const paths = resolvePaths(deploymentEnv());
+      const env = deploymentEnv(); // the dollar settings' source for the confirm (settingShown)
+      const shown = { deploymentDir: pointerState().deploymentDir ?? null };
       const view = readSettingsView({ settingsFile: paths.settingsFile });
-      const oldVal = view?.overlay?.[params.key];
+      // Issue #501: refused BEFORE the confirm over an invalid file, so the operator is never asked to approve a write
+      // that would be refused (and could not rebuild the file without erasing what it holds).
+      if (view?.invalid) throw new Error(`rejected: ${overlayInvalidRefusal(view.invalid)}`);
       const unset = params.value === undefined || params.value.trim() === "";
       const newVal = unset ? undefined : coerceSettingValue(params.key, params.value.trim());
+      // The AFTER side of an unset is what the key falls back to, by the same rule as the before side.
+      const after = unset ? settingShown(params.key, Object.fromEntries(Object.entries(view?.overlay ?? {}).filter(([k]) => k !== params.key)), env, shown) : String(newVal);
       const result = await confirmedWrite(
         ctx,
         {
           title: unset ? `Unset ${params.key}` : `Set ${params.key}`,
-          message: `${params.key}: ${oldVal ?? "(unset)"} -> ${unset ? "(unset)" : newVal}`,
+          message: `${params.key}: ${settingShown(params.key, view?.overlay, env, shown)} -> ${after}`,
         },
         () => {
           const res = unset
             ? writeSettings({ settingsFile: paths.settingsFile, mutate: (o) => { delete o[params.key]; return o; } })
             : writeSettings({ settingsFile: paths.settingsFile, mutate: (o) => ({ ...o, [params.key]: newVal }) });
           if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, key: params.key, value: unset ? null : newVal, rebuiltFrom: res.rebuiltFrom ?? null };
+          return { applied: true, key: params.key, value: unset ? null : newVal };
         },
       );
       return toolText(JSON.stringify(result));
@@ -1271,7 +1278,7 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
   setGlyphs(paths.asciiGlyphs);
 
   // Drain the deployment pointer's retained one-line notice (a broken or newer pointer file) into the
-  // operator's face exactly once -- the REBUILT_NOTICE idiom: a surfaced warning, never a throw, and
+  // operator's face exactly once: a surfaced warning, never a throw, and
   // never into model context.
   const pnote = takePointerNotice();
   if (pnote) notify?.(pnote, "warning");
@@ -2428,8 +2435,8 @@ type Notify = ((message: string, type?: string) => void) | undefined;
  * `set <key> <value>`: the key must be a known settings key (checked BEFORE the write, since
  * `writeOverlay` silently drops unknown keys and would report ok on a no-op), the value is coerced by the
  * key's type, and exactly one value token is accepted (model ids carry no spaces). A rejected candidate
- * surfaces `writeOverlay`'s key-only reason; a rebuild over an invalid file adds a loud replaced-file
- * notice so a lost prior overlay is never silent.
+ * surfaces `writeOverlay`'s key-only reason, and a present-but-invalid file is refused rather than rebuilt
+ * (`writeSettings`, issue #501), so no prior overlay is ever lost to a set.
  */
 function applySet(settingsFile: string, tokens: string[], notify: Notify): void {
   const key = tokens[1] ?? "";
@@ -2449,13 +2456,11 @@ function applySet(settingsFile: string, tokens: string[], notify: Notify): void 
     return;
   }
   notify?.(`set ${key} = ${value}`, "info");
-  if (res.rebuiltFrom) notify?.(REBUILT_NOTICE(res.rebuiltFrom), "warning");
 }
 
 /**
  * `unset <key>`: the key must be a known settings key; the mutation deletes it, and an empty result `{}`
- * is a valid written state (no overrides). The same loud replaced-file notice fires when the write repaired
- * an invalid file.
+ * is a valid written state (no overrides). Over a present-but-invalid file it is refused like `set`.
  */
 function applyUnset(settingsFile: string, tokens: string[], notify: Notify): void {
   const key = tokens[1] ?? "";
@@ -2475,19 +2480,23 @@ function applyUnset(settingsFile: string, tokens: string[], notify: Notify): voi
     return;
   }
   notify?.(`unset ${key}`, "info");
-  if (res.rebuiltFrom) notify?.(REBUILT_NOTICE(res.rebuiltFrom), "warning");
 }
 
 /**
- * Coerce a raw token to the settings value its key expects: `model` and `provider` keep the raw string;
- * every other overlay key is numeric and parses via `Number` (a non-numeric token becomes `NaN`, which
- * `writeOverlay` then rejects with a key-only reason). Keying off the two string exceptions rather than an
+ * Coerce a raw token to the settings value its key expects: `model`, `provider` and the four dollar keys keep
+ * the raw string; every other overlay key is numeric and parses via `Number` (a non-numeric token becomes `NaN`, which
+ * `writeOverlay` then rejects with a key-only reason). Keying off the string exceptions rather than an
  * enumerated numeric list keeps this in lockstep with `KNOWN_KEYS` -- a new numeric knob (weekly/monthly
  * caps, the token caps) is coerced without a second edit here. Bounds and integer-ness stay in
  * `writeOverlay`, the single validator.
  */
 function coerceSettingValue(key: string, raw: string): number | string {
   if (key === "model" || key === "provider") return raw;
+  // Issue #501: a dollar key keeps the operator's text, because the overlay stores it AS WRITTEN and
+  // `Number` would quietly widen the money grammar (`1e3` and `0x10` become plain dollars, `2.50` loses its
+  // zero). `writeOverlay`'s `parseUsdMicros` is then the one judge of the exact string that was typed. The
+  // worker's own list, never a guess from the name.
+  if ((DOLLAR_SETTING_KEYS as readonly string[]).includes(key)) return raw;
   return Number(raw);
 }
 

@@ -465,10 +465,44 @@ test("the endpoint re-check has a wake instant of its own, distinct from every o
 
 test("effectiveJobOf is the one precedence, and the endpoint set follows the model it names", { skip }, async () => {
 	const settings = LOCAL_MODEL();
-	assert.deepEqual(mod.effectiveJobOf({ kind: "local", folder: "/f" }, settings), { kind: "local", folder: "/f", provider: "local-ollama", model: "qwen", maxTurns: 30, maxTokens: undefined });
+	assert.deepEqual(mod.effectiveJobOf({ kind: "local", folder: "/f" }, settings), { kind: "local", folder: "/f", provider: "local-ollama", model: "qwen", maxTurns: 30, maxTokens: undefined, maxCostMicros: null });
 	assert.equal(mod.effectiveJobOf({ provider: "anthropic", model: "m2" }, settings).model, "m2", "an explicit per-job field wins");
 	assert.deepEqual(mod.mainModelEndpoints({ models: OVERLAY, job: { provider: "local-ollama", model: "qwen" }, endpoints: [OLLAMA] }), [OLLAMA]);
 	assert.deepEqual(mod.mainModelEndpoints({ models: OVERLAY, job: { provider: "anthropic", model: "m" }, endpoints: [OLLAMA] }), [], "a hosted model uses no endpoint");
+});
+
+test("effectiveJobOf: maxCostMicros is the SMALLER of the trigger's run.maxCostUsd and the deployment's maxCostUsd (#501)", { skip }, () => {
+	const cap = (data, maxCostUsd) => mod.effectiveJobOf(data, { ...LOCAL_MODEL(), maxCostUsd }).maxCostMicros;
+	assert.equal(cap({}, null), null, "neither sets one: no cap, so no PI_MAX_COST_MICROS and no costCap needed");
+	assert.equal(cap({}, "5"), 5_000_000, "the deployment's alone");
+	assert.equal(cap({ maxCostUsd: "1.25" }, null), 1_250_000, "the trigger's alone applies");
+	assert.equal(cap({ maxCostUsd: "1.25" }, "5"), 1_250_000, "a lower trigger narrows");
+	assert.equal(cap({ maxCostUsd: 9 }, 5), 5_000_000, "a higher trigger can NOT raise it: never the max");
+	assert.equal(cap({ maxCostUsd: "nope" }, "5"), 0, "a malformed queued value fails closed to the tightest cap");
+	assert.equal(cap({ maxCostMicros: 99_000_000 }, "5"), 5_000_000, "job data cannot carry its own micro-dollar cap past this");
+	// The fail-closed read is LOGGED, by key only; a well-formed or absent value logs nothing.
+	const logs = [];
+	const log = (event, fields) => logs.push([event, fields]);
+	assert.equal(mod.effectiveJobOf({ maxCostUsd: "sk-ant-oops" }, { ...LOCAL_MODEL(), maxCostUsd: "5" }, null, log).maxCostMicros, 0);
+	assert.deepEqual(logs, [["job_cost_cap_malformed", { key: "maxCostUsd" }]]);
+	assert.equal(JSON.stringify(logs).includes("sk-ant"), false, "never the value");
+	mod.effectiveJobOf({ maxCostUsd: "2" }, LOCAL_MODEL(), null, log);
+	mod.effectiveJobOf({}, LOCAL_MODEL(), null, log);
+	assert.equal(logs.length, 1);
+});
+
+test("the processor logs a malformed queued cap as job_cost_cap_malformed with the job id and the key, and runs it at a cap of 0 (#501)", { skip }, async () => {
+	let ran;
+	const h = harness({ onContainer: (ctx) => (ran = ctx.job) });
+	const j = spyJob("bad-cap", { kind: "local", folder: "/srv/cap", flow: "tidy", task: "t", maxCostUsd: "sk-ant-not-money" });
+	const done = h.processor(j.job, "tok", new AbortController().signal);
+	await h.untilStarted(1);
+	h.releaseNext();
+	await done;
+	assert.equal(ran.maxCostMicros, 0, "fail closed: the tightest cap, never the deployment's or none");
+	const hits = h.seen.logs.filter((l) => l.event === "job_cost_cap_malformed");
+	assert.deepEqual(hits, [{ event: "job_cost_cap_malformed", fields: { jobId: "bad-cap", key: "maxCostUsd" } }], "once per pickup, with the job id");
+	assert.equal(JSON.stringify(h.seen.logs).includes("sk-ant"), false, "never the value");
 });
 
 test("local AND forge jobs take an endpoint slot (both halves), a full endpoint defers the next one, and the finally gives both back", { skip }, async () => {

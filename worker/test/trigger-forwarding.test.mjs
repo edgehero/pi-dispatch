@@ -30,6 +30,8 @@ const BASE = {
 	maxTurns: 9,
 	// #502 part 3. Lists the main model, which the loader requires when one trigger names all three.
 	models: ["openai/gpt-5.4", "anthropic/claude-haiku-4-5"],
+	// #501. A NUMBER here (the receiver twin uses a string), so both spellings the loader keeps are carried.
+	maxCostUsd: 2.5,
 };
 // flow+task and command are exclusive, so the twin loads each.
 const VARIANTS = { flow: { flow: "tidy", task: "run the tidy pass" }, command: { command: "wf run" } };
@@ -54,13 +56,13 @@ for (const [name, variant] of Object.entries(VARIANTS)) {
 		for (const k of execKeys(normalized)) {
 			assert.deepEqual(data[k], normalized.run[k], `schedules.mjs dropped run.${k} on the way to the job`);
 		}
-		for (const k of ["provider", "model", "maxTurns", "models"]) assert.equal(k in data.trigger, false, `${k} leaked into trigger`);
+		for (const k of ["provider", "model", "maxTurns", "models", "maxCostUsd"]) assert.equal(k in data.trigger, false, `${k} leaked into trigger`);
 	});
 }
 
-test("cron absent stays absent: no model named serializes to job data with no provider, model or maxTurns", () => {
+test("cron absent stays absent: no model or cap named serializes to job data with no provider, model, maxTurns, models or maxCostUsd", () => {
 	const json = JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/proj", flow: "tidy", task: "t" } }] });
 	const [schedule] = loadSchedules({ triggersFile: "/t.json" }, { readFileSync: () => json, existsSync: () => true });
 	const wire = JSON.parse(JSON.stringify(schedule.data));
-	for (const k of ["provider", "model", "maxTurns", "models"]) assert.equal(k in wire, false, k);
+	for (const k of ["provider", "model", "maxTurns", "models", "maxCostUsd"]) assert.equal(k in wire, false, k);
 });

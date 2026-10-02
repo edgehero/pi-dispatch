@@ -207,3 +207,23 @@ test("cronPlacement is the rule loadSchedules places by, row for row (issue #433
 		else assert.equal(run()[0].unserved, placement === "elsewhere" ? "folder-absent" : undefined);
 	}
 });
+
+// Issue #501: a trigger's run.maxCostUsd may only NARROW the deployment's PI_MAX_COST_USD, so the worker's load of
+// the file (boot, and every live reload, which keeps the running schedules on a throw) refuses one above it.
+test("a trigger whose run.maxCostUsd is above PI_MAX_COST_USD refuses the load, any kind, naming the trigger and never the value", () => {
+	const capped = { ...CONFIG, maxCostUsd: "5" };
+	const over = (entry, maxCostUsd) => ({ on: entry.on, run: { ...entry.run, maxCostUsd } });
+	const cron2 = { on: { ...CRON.on, id: "weekly-tidy" }, run: CRON.run };
+	for (const [i, triggers] of [[1, [CRON, over(cron2, "5.000001")]], [1, [LABEL, over(PR, 9)]], [0, [over(LABEL, "6"), CRON]]]) {
+		assert.throws(
+			() => load(triggers, { config: capped }),
+			(e) => isConfigError(e) && e.message.startsWith(`trigger at index ${i}: run.maxCostUsd is above this deployment's PI_MAX_COST_USD`) && !e.message.includes("5.000001") && e.message.includes("/triggers.json"),
+		);
+	}
+	// At or below the cap loads, and so does any value when the deployment sets no cap (the trigger's cap applies alone).
+	assert.equal(load([over(CRON, "5"), over(LABEL, 0.5)], { config: capped }).length, 1);
+	assert.equal(load([over(CRON, "500")]).length, 1);
+	assert.equal(load([over(CRON, "500")], { config: { ...CONFIG, maxCostUsd: null } }).length, 1);
+	// The cron schedule carries the trigger's cap into its job data, as written.
+	assert.equal(load([over(CRON, "2.50")], { config: capped })[0].data.maxCostUsd, "2.50");
+});

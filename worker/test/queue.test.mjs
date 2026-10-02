@@ -821,7 +821,7 @@ test("excludeTools rides local and forge job data only when supplied, and never 
 	assert.equal(captured.opts.deduplication.id, dedupFlagged, "the semantic window coalesces flagged and unflagged alike");
 });
 
-test("models (and an inherited maxCostUsd) ride local and forge job data only when supplied, and never move a dedup key (#502)", async () => {
+test("models and maxCostUsd ride local and forge job data, as written, only when supplied, and never move a dedup key (#502, #501)", async () => {
 	const { enqueueLocalJob, enqueueGitHubJob } = await import("../src/queue.mjs");
 	let captured;
 	const fakeQueue = { add: (name, data, opts) => ((captured = { name, data, opts }), { id: opts.jobId }) };
@@ -842,11 +842,14 @@ test("models (and an inherited maxCostUsd) ride local and forge job data only wh
 		flow: "fix",
 		trigger: { event: "issues", action: "labeled", deliveryId: "guid-md", sender: { id: 42 }, matched: { index: 0, type: "label", label: "bug" } },
 	};
-	await enqueueGitHubJob(fakeQueue, { ...forgeBase, models: ["openai/gpt-x"] });
+	await enqueueGitHubJob(fakeQueue, { ...forgeBase, models: ["openai/gpt-x"], maxCostUsd: "2.50" });
 	assert.deepEqual(captured.data.models, ["openai/gpt-x"]);
+	assert.equal(captured.data.maxCostUsd, "2.50", "a trigger's cap rides forge job data as written (#501)");
 	assert.equal("models" in captured.data.trigger, false, "an execution knob never rides /job/event.json");
+	assert.equal("maxCostUsd" in captured.data.trigger, false);
 	const dedupFlagged = captured.opts.deduplication.id;
 	await enqueueGitHubJob(fakeQueue, forgeBase);
 	assert.equal("models" in captured.data, false);
+	assert.equal("maxCostUsd" in captured.data, false);
 	assert.equal(captured.opts.deduplication.id, dedupFlagged);
 });

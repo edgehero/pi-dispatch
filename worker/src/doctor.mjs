@@ -98,6 +98,8 @@ import { parseSecretProfiles } from "./secret-profiles.mjs";
 // can share them: doctor NAMES a variable and env-allowlist WRITES one, and they must never differ.
 import { apiKeyVariable, nonApiKeyKind } from "./provider-key.mjs";
 import { parseTriggers } from "./triggers.mjs";
+import { readOverlay } from "./runtime-settings.mjs";
+import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, optionalUsdMicros, parseUsdMicros } from "./money.mjs";
 import { cronPlacement } from "./schedules.mjs";
 
 const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
@@ -563,7 +565,7 @@ export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "P
 export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY"]);
 /** Issue #471: the worker's settings doctor judges, which it read from this shell alone while the service read them from
  *  `.env`. TEMP is TMPDIR's twin in the worker's temp root; PI_CODING_AGENT_DIR is where the worker reads auth.json. */
-export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "GITHUB_PAT_VAR", "TEMP"]);
+export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 /** Issue #471: the receiver's keys doctor judges its boot by (the receiver's unit reads the same `.env`). */
 export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
 /**
@@ -1327,7 +1329,7 @@ export async function collectChecks(shellVars, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName);
+	const { requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, costCaps, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName);
 	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
@@ -1359,6 +1361,7 @@ export async function collectChecks(shellVars, seams) {
 			fix: `fix ${triggersFilePath} so it loads (the message above names the entry and the reason), then re-run doctor -- every trigger-derived check below is skipped until it loads`,
 		});
 	}
+	checks.push(...dollarChecks(env, costCaps, triggersSet !== undefined));
 
 	// Only meaningful if docker itself responds; otherwise the image check is noise on top of a down daemon. Issue #433:
 	// and never without `local`, where the podman section's line (the image in THIS ACCOUNT'S store) is the image check.
@@ -3415,6 +3418,23 @@ export async function collectChecks(shellVars, seams) {
 			const refused = inRoot.length > 0 && !said ? accountRootRefusal(root, { uid, fs: seams.jobsDirFs, ownerName: (id) => ownerNameFromPasswd(seams.passwd, id), what: `this account's ${inRoot.map((st) => (st.key === "PI_LOGS_DIR" ? "run history" : "settings overlay")).join(" and ")} (no home directory, so the default is here)` }) : null;
 			if (refused) checks.push({ ok: false, label: refused.label, fix: `${refused.fix}; or set ${inRoot.map((st) => st.key).join(" and ")} to a path this account owns` });
 		}
+		// Issue #501: the overlay itself, read by the worker's own reader. A present-but-invalid file refuses EVERY job
+		// (`settings-overlay-invalid`) while the worker otherwise runs clean, and since #501 a file that loaded before can
+		// become invalid on upgrade: a duplicate key, which used to take the last value, is now refused. The reason names
+		// keys only, never values. Absent is the normal empty overlay and says nothing.
+		if (fileExists(settingsFile)) {
+			const overlay = readOverlay(settingsFile);
+			if (overlay.invalid) {
+				checks.push({
+					ok: false,
+					label: `settings overlay ${settingsFile} is invalid (${overlay.invalid}) -- the worker refuses every job as settings-overlay-invalid until it is fixed, and the panel refuses to write over it`,
+					// The fix follows the reason: only a duplicate key gets the upgrade note, since only it loaded before #501.
+					fix: /duplicate key/.test(overlay.invalid)
+						? "remove the repeated key from that file, keeping the value you mean (a duplicate key is refused since issue #501; it used to take the last value), or delete the file to start from an empty overlay"
+						: "fix what the reason names in that file, or delete the file to start from an empty overlay",
+				});
+			}
+		}
 		if (noHome) {
 			checks.push({
 				ok: false,
@@ -4088,6 +4108,52 @@ function readScopedLimitFacts(env, fileExists) {
 }
 
 /**
+ * The dollar settings (issue #501), read from env with the worker's own parser (`money.mjs`), so doctor and
+ * the boot refusal cannot disagree. Silent when nothing is set. Each setting that does not parse, a window
+ * without the per-job cap, any window at all (refused until dollar windows are enforced), and every trigger
+ * whose `run.maxCostUsd` is above `PI_MAX_COST_USD`: a FAILURE when the worker loads the triggers file
+ * (`workerReadsTriggers`, it refuses to start on it), a warning otherwise (the job still runs under the
+ * smaller cap, so the higher one is a value that reads as allowed and is not).
+ */
+export function dollarChecks(env, costCaps, workerReadsTriggers) {
+	const envName = DOLLAR_ENV_NAMES;
+	const checks = [];
+	const values = {};
+	for (const key of DOLLAR_SETTING_KEYS) {
+		const raw = env[envName[key]];
+		if (raw === undefined || raw === "") continue;
+		try {
+			optionalUsdMicros(raw, envName[key]);
+			values[key] = raw;
+		} catch (error) {
+			checks.push({ ok: false, label: `${error.message} -- the worker refuses to start`, fix: `set ${envName[key]} to a plain dollar amount such as 2.50, or remove it` });
+		}
+	}
+	const broken = checkDollarInvariant(values);
+	if (broken) {
+		const window = DOLLAR_SETTING_KEYS.find((key) => key !== "maxCostUsd" && values[key] !== undefined);
+		checks.push({ ok: false, label: `${envName[window]} is set without PI_MAX_COST_USD -- the worker refuses to start`, fix: "a dollar window reserves each job's per-job cap, so set PI_MAX_COST_USD too" });
+	}
+	for (const key of DOLLAR_SETTING_KEYS.filter((k) => k !== "maxCostUsd" && values[k] !== undefined)) {
+		checks.push({ ok: false, label: `${envName[key]} is set, and dollar windows are not supported yet -- the worker refuses to start`, fix: `remove ${envName[key]}; PI_MAX_COST_USD (the per-job cap) works now` });
+	}
+	if (values.maxCostUsd !== undefined) {
+		const deployment = parseUsdMicros(values.maxCostUsd, "PI_MAX_COST_USD");
+		for (const cap of costCaps.filter((c) => parseUsdMicros(c.maxCostUsd, "run.maxCostUsd") > deployment)) {
+			checks.push({
+				ok: false,
+				...(workerReadsTriggers ? {} : { warn: true }),
+				label: workerReadsTriggers
+					? `${cap.label}: run.maxCostUsd is above PI_MAX_COST_USD -- the worker refuses to start (a trigger can only narrow the per-job cost cap)`
+					: `${cap.label}: run.maxCostUsd is above PI_MAX_COST_USD -- its jobs run under PI_MAX_COST_USD anyway (a trigger can only narrow the per-job cost cap)`,
+				fix: "lower that trigger's run.maxCostUsd to PI_MAX_COST_USD or below, or remove it",
+			});
+		}
+	}
+	return checks;
+}
+
+/**
  * How a line names its trigger: cron entries by their id, id-less webhook entries by raw file position (the admin's
  * trigger:<index> identity). One function, because the flow lines and the venue lines must name a trigger alike.
  */
@@ -4096,7 +4162,7 @@ function triggerLabel(t, index) {
 }
 
 function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
-	const none = { requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], parseError: null, path: null };
+	const none = { requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], costCaps: [], parseError: null, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -4217,6 +4283,9 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
 					packages: t.run.packages !== false,
 				}))
 				.filter((f) => typeof f.flow === "string"),
+			// Issue #501: every trigger that sets run.maxCostUsd, with the label the cap check names it by. The value
+			// already parsed (the loader validated it), so the check below only compares.
+			costCaps: triggers.map((t, index) => ({ label: triggerLabel(t, index), maxCostUsd: t.run.maxCostUsd })).filter((r) => r.maxCostUsd !== undefined && r.maxCostUsd !== null),
 			// Explicit on the success path too (issue #242): the dead-scope advisory distinguishes
 			// "facts read clean" (path set, no error) from the zeroed `none` -- an implicit undefined
 			// here made that test silently false for every deployment.

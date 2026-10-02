@@ -56,7 +56,7 @@ import { resolveProviderCredential } from "./env-allowlist.mjs";
 import { makeSecretsResolver } from "./secrets.mjs";
 import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, RUNNER_POLICY_REASONS, sanitizeJobId } from "./run-history.mjs";
 import { makeRunMirror } from "./run-mirror.mjs";
-import { effectiveSettings, readOverlay } from "./runtime-settings.mjs";
+import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
 import { authoredCron, loadSchedules, servedSchedules } from "./schedules.mjs";
 import { makeStallGuard } from "./scheduler-stall-guard.mjs";
 
@@ -1068,23 +1068,21 @@ export async function startWorker(
 	};
 
 	// INT-CONFIG-OVERLAY-CONTRACT: the worker reads the runtime-settings overlay at EACH job start, so this
-	// closure -- not a value frozen at boot -- is what the processor calls per job. It resolves the eight
+	// closure -- not a value frozen at boot -- is what the processor calls per job. It resolves the fourteen
 	// effective settings from the overlay over env; an invalid overlay returns `{ invalid }` (logged loudly,
 	// key-name-only per no-pii-in-logs) so the processor RETURNS a settings-overlay-invalid refusal instead
 	// of the run.
 	const settingsFile = config.settingsFile;
 	const getSettings = () => {
-		const res = readOverlay(settingsFile, { log });
+		// `resolveSettings` merges overlay over env and then checks the cross-key dollar rule on the MERGED values
+		// (issue #501), so an overlay window with an env per-job cap is valid. `secretProfiles` rides alongside the
+		// effective keys; that function says why.
+		const res = resolveSettings(config, readOverlay(settingsFile, { log }));
 		if (res.invalid) {
 			log("settings_overlay_invalid", { reason: res.invalid, settingsFile });
 			return { invalid: res.invalid };
 		}
-		// REQ-TRIGGER-SECRETS rides ALONGSIDE the ten tunables rather than inside them. `effectiveSettings`
-		// resolves `overlay > env` over a fixed ten-key literal, and its own tests pin that key set and
-		// assert an empty overlay returns the config verbatim -- so an eleventh key there would break both,
-		// and would also claim a precedence this key deliberately does not have (a name declared in both
-		// sources is refused per delivery, not silently won by either).
-		return { ...effectiveSettings(config, res.overlay), secretProfiles: res.overlay?.secretProfiles ?? {} };
+		return res;
 	};
 
 	// Resolve the Worker constructor's slot count once from the overlay: a present overlay may raise or lower
