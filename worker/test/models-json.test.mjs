@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { checkModelsKnown } from "../src/model-catalog.mjs";
-import { parseModelsJson } from "../src/models-json.mjs";
+import { readOverlayModels } from "../src/model-endpoints.mjs";
+import { parseModelsJson, stripJsonComments } from "../src/models-json.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
@@ -17,11 +19,13 @@ const PI = new URL("../../node_modules/@earendil-works/pi-coding-agent/", import
 process.env.PI_OFFLINE = "1";
 let ModelConfig;
 let ModelRuntime;
+let piStripJsonComments;
 let piVersion;
 let importError;
 try {
 	({ ModelConfig } = await import(new URL("dist/core/model-config.js", PI).href));
 	({ ModelRuntime } = await import(new URL("dist/core/model-runtime.js", PI).href));
+	({ stripJsonComments: piStripJsonComments } = await import(new URL("dist/utils/json.js", PI).href));
 	piVersion = JSON.parse(readFileSync(new URL("package.json", PI), "utf8")).version;
 } catch (error) {
 	importError = error;
@@ -187,14 +191,13 @@ test("the worker reads every corpus file exactly as pi's ModelConfig.load does a
 		if (!piOk) piRefused += 1;
 		if (piOk !== ours) mismatches.push(`${label}: pi ${piOk ? "loads" : "drops"}, worker ${ours ? "loads" : "drops"}`);
 		// And past the loader, at pi's provider COMPOSITION: for every string model id the file declares, does pi's own
-		// runtime have the model, exactly when the worker's gate calls it known? Asked as the MAIN model, which is chat.
+		// runtime have the model AS THE FILE DECLARES IT, exactly when the worker's gate calls it known? Asked as the MAIN
+		// model, which is chat. A file pi drops declares nothing it keeps: a builtin id under it is the public model, which
+		// the worker refuses since issue #539 (its provider has an entry in the file).
 		const runtime = await ModelRuntime.create({ modelsPath: file, authPath: join(dir, "auth.json"), refreshOnCreate: false });
-		const readOverlay = () => {
-			if (parsed.error !== undefined) throw Object.assign(new Error(parsed.error), { piDispatchConfig: true });
-			return parsed.value;
-		};
+		const readOverlay = () => readOverlayModels(dir);
 		for (const [provider, id] of declared(text)) {
-			const piHas = runtime.getModel(provider, id) !== undefined;
+			const piHas = piOk && runtime.getModel(provider, id) !== undefined;
 			const workerHas = checkModelsKnown([{ provider, id, main: true }], { readOverlay }).ok === true;
 			composed += 1;
 			if (piHas !== workerHas) mismatches.push(`${label}: ${provider}/${id}: pi ${piHas ? "has" : "lacks"} it, the worker calls it ${workerHas ? "known" : "unknown"}`);
@@ -220,6 +223,97 @@ test("pi drops a provider entry it cannot compose, endpoint included, and the wo
 		assert.equal(model?.baseUrl === proxy, routed, `${label}: pi ${routed ? "routes" : "does not route"} gpt-4o through the entry's baseUrl`);
 		const verdict = checkModelsKnown([{ provider: "openai", id: "gpt-4o", main: true }], { readOverlay: () => parseModelsJson(JSON.stringify(doc)).value });
 		assert.equal(verdict.ok === true, routed, `${label}: the worker admits the job exactly when pi keeps the entry (${JSON.stringify(verdict)})`);
+	}
+});
+
+test("a file pi drops sends every builtin provider's entry to the public endpoint, and the worker refuses it (issue #539)", { skip }, async () => {
+	// Asked of pi's own ModelConfig.load and ModelRuntime at the pin, for every builtin provider: an entry that routes
+	// the provider through a proxy, beside a schema error under another provider. pi drops the whole file, so the
+	// builtin model resolves to its public baseUrl; the worker refuses every job until the file is fixed.
+	const dir = tempDir("pi-models-dropped-");
+	const file = join(dir, "models.json");
+	const proxy = "http://proxy.lan:8080/v1";
+	const bad = { models: [{ id: "m", contextWindow: "big" }] };
+	let providers = 0;
+	for (const provider of getBuiltinProviders()) {
+		const main = getBuiltinModels(provider)[0];
+		if (main === undefined) continue;
+		providers += 1;
+		const ref = { provider, id: main.id };
+		for (const [label, doc, routed] of [["valid", { providers: { [provider]: { baseUrl: proxy } } }, true], ["schema error elsewhere", { providers: { [provider]: { baseUrl: proxy }, "zz-other": bad } }, false]]) {
+			writeFileSync(file, JSON.stringify(doc));
+			assert.equal((await ModelConfig.load(file)).getError() === undefined, routed, `${provider} ${label}: pi ${routed ? "loads" : "drops"} the file`);
+			const runtime = await ModelRuntime.create({ modelsPath: file, authPath: join(dir, "auth.json"), refreshOnCreate: false });
+			assert.equal(runtime.getModel(provider, main.id)?.baseUrl === proxy, routed, `${provider} ${label}: pi ${routed ? "routes" : "does not route"} ${main.id} through the entry`);
+			const verdict = checkModelsKnown([{ ...ref, main: true }], { readOverlay: () => readOverlayModels(dir) });
+			assert.deepEqual(verdict, routed ? { ok: true } : { unknown: ref, why: "overlay-unparseable" }, `${provider} ${label}`);
+		}
+	}
+	assert.ok(providers > 30, `every builtin provider with a chat model (${providers})`);
+	// PR #546's review: pi drops a file for many reasons beside its schema, and every one loses the entry the same
+	// way. Since round 3 the worker refuses every job then, whichever provider it runs or lists. Each reason is asked of
+	// pi's own loader, so the empty, whitespace-only and BOM-only files are pinned as files pi DROPS (an error), not as
+	// "no overlay": refusing them is pi's own verdict.
+	const entry = `{ "baseUrl": "${proxy}" }`;
+	for (const [label, text] of [
+		["a block comment", `/* team proxy */ { "providers": { "openai": ${entry} } }`],
+		["a truncated write", `{ "providers": { "openai": { "baseUrl": "${proxy.slice(0, 12)}`],
+		["a UTF-16 save", Buffer.from(`\uFEFF{ "providers": { "openai": ${entry} } }`, "utf16le")],
+		["a UTF-16 save without a BOM", Buffer.from(`{ "providers": { "openai": ${entry} } }`, "utf16le")],
+		["a valid entry beside an unrelated error", `{ "providers": { "openai": ${entry}, "lan": 7 } }`],
+		["an empty file", ""],
+		["whitespace only", " \n\t\r\n"],
+		["a byte order mark only", "\uFEFF"],
+		["a comment only", "// nothing yet\n"],
+	]) {
+		writeFileSync(file, text);
+		assert.notEqual((await ModelConfig.load(file)).getError(), undefined, `${label}: pi drops it`);
+		const runtime = await ModelRuntime.create({ modelsPath: file, authPath: join(dir, "auth.json"), refreshOnCreate: false });
+		assert.notEqual(runtime.getModel("openai", "gpt-4o")?.baseUrl, proxy, `${label}: pi runs gpt-4o on its public endpoint`);
+		for (const ref of [{ provider: "openai", id: "gpt-4o" }, { provider: "anthropic", id: "claude-haiku-4-5" }]) {
+			assert.deepEqual(checkModelsKnown([{ ...ref, main: true }], { readOverlay: () => readOverlayModels(dir) }), { unknown: ref, why: "overlay-unparseable" }, `${label}: ${ref.provider}`);
+		}
+	}
+	// And an absent file is no overlay, for pi and for the worker.
+	rmSync(file);
+	assert.equal((await ModelConfig.load(file)).getError(), undefined);
+	assert.deepEqual(checkModelsKnown([{ provider: "openai", id: "gpt-4o", main: true }], { readOverlay: () => readOverlayModels(dir) }), { ok: true });
+});
+
+// Adversarial inputs for the strip: the shapes that made pi's regex strip quadratic, and the edges of its
+// string rule (an escape before a line terminator, a backslash at the end, U+2028 and U+2029).
+function adversarial() {
+	const out = [];
+	for (const n of [0, 1, 2, 3, 7]) {
+		out.push(`"${'\\"'.repeat(n)}`, '"'.repeat(n), `,${" ".repeat(n)}}`, `"a\\${"\n".repeat(n)}"//x"`);
+	}
+	const atoms = ['"', "\\", "/", "//", ",", " ", "\n", "\r", "\u2028", "\u2029", "}", "]", "a", "\u00a0", "\ufeff", "/*", "*/"];
+	let seed = 7;
+	const rand = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+	for (let k = 0; k < 4000; k += 1) {
+		let s = "";
+		const len = 1 + Math.floor(rand() * 14);
+		for (let i = 0; i < len; i += 1) s += atoms[Math.floor(rand() * atoms.length)];
+		out.push(s);
+	}
+	return out;
+}
+
+test("stripJsonComments is pi's own, output for output, over the corpus and adversarial cases", { skip }, () => {
+	const texts = [...corpus().values(), ...adversarial()];
+	const differ = texts.filter((t) => stripJsonComments(t) !== piStripJsonComments(t));
+	assert.ok(texts.length > 5000, `${texts.length} texts`);
+	assert.deepEqual(differ.slice(0, 5).map((t) => JSON.stringify(t)), [], `${differ.length} texts strip differently`);
+});
+
+test("the strip is linear: the shapes that took pi's strip seconds take milliseconds here", () => {
+	const n = 100_000;
+	for (const text of [`"${'\\"'.repeat(n)}`, '"'.repeat(n), `{"providers":{"${"\\".repeat(n)}`, `,${" ".repeat(n)}`, "//".repeat(n), `"${"a\\\n".repeat(n)}`]) {
+		const started = performance.now();
+		stripJsonComments(text);
+		parseModelsJson(text);
+		const ms = performance.now() - started;
+		assert.ok(ms < 2000, `${text.length} code units took ${ms.toFixed(0)} ms (pi's strip took 13 s on 160 KB)`);
 	}
 });
 

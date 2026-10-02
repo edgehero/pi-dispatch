@@ -228,13 +228,20 @@ pi version and overlay. The worker asks instead, when a job starts and before it
 model that is in neither pi's model catalog nor the overlay `models.json` is refused as `model-unknown`.
 No token is minted, nothing is cloned and no budget slot is taken. The model a job runs on must be a
 chat model; an image or classifier model can only be a list entry (below). The overlay `models.json` is
-read the way pi reads it: comments, a byte order mark and trailing commas are fine, but one wrong-typed
-field anywhere makes pi drop the whole file, so the worker refuses every model only that file declares
-(`model-unknown`, with `overlay-unparseable` in the worker log). pi also drops a provider it cannot put
+read the way pi reads it: `//` comments, a byte order mark and trailing commas are fine. One wrong-typed
+field anywhere, a `/* */` comment, a truncated write, a misspelled `providers`, a file saved as UTF-16, or an
+empty file makes pi drop the whole file. pi then also loses the file's entries for builtin providers, such
+as a `baseUrl` for `openai`, and would run their models against the provider's public endpoint. So while
+the overlay `models.json` is broken, the worker refuses every job (`model-unknown`, with
+`overlay-unparseable` in the worker log), whichever model it runs or lists. The same holds when
+`models.json` is a directory (`overlay-is-a-directory`). `pi-dispatch doctor` says so. Fix the file, or
+remove it: a missing `models.json` is no overlay, and jobs run. pi also drops a provider it cannot put
 together: a model with no `api` or `baseUrl` to be found, a `contextWindow` or `maxTokens` of zero or less, or
 `oauth` without a `baseUrl`. pi then ignores that provider's whole entry, its `baseUrl` and headers
-included, so every job on that provider is refused (`overlay-provider-invalid`): an overlay model of it does
-not exist, and a builtin one would quietly run against the provider's public endpoint instead of yours.
+included. So every job that runs or lists a model of that provider is refused (`overlay-provider-invalid`),
+also a job that only lists one and never calls it: an overlay model of it does not exist, and a builtin one
+would quietly run against the provider's public endpoint instead of yours. `pi-dispatch doctor` names each
+such entry.
 
 **Upgrading: the model check.** It covers the deployment default too (`PI_MODEL`, or the settings overlay), not
 only a trigger's own model. A main model that only an extension defines inside the job
@@ -334,7 +341,11 @@ deployment's list, or on none. The worker reads the triggers file itself and ref
 spends (`trigger-skew`, naming the field), the way it refuses a job that lost its `waitFor`. It can only do
 that when it can read the file: `PI_TRIGGERS_FILE`, else `triggers.json` in the worker's folder. A worker
 that cannot read it cannot see the gap. The check is strict: adding `models` to a trigger refuses the jobs of
-it that were already queued (`trigger-skew`), and the comment says so. Re-run them. Upgrade the worker and the receiver together, and restart the
+it that were already queued (`trigger-skew`), and the comment says so. Re-run them. The worker finds a job's
+trigger by its position in the file. Inserting a trigger with the same flow, kind and type ahead of others
+moves the ones after it down. A queued job of a moved trigger can then be checked against its neighbour, and
+refused as `trigger-skew` when that neighbour sets `models` or `maxCostUsd`. The comment says the trigger
+changed after the job was queued. Re-run those jobs too. Upgrade the worker and the receiver together, and restart the
 receiver after editing the file.
 
 Everything else is editable from the panel (`a` adds kind-first, `e` edits the flow, `x` deletes) or via

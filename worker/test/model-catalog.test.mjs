@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { getAllBuiltinModels, getBuiltinClassifierModels, getBuiltinImageModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -75,8 +75,8 @@ test("an absent overlay is no overlay; an unparseable one refuses with its own w
 	for (const text of ["{ not json", "[]", "null"]) {
 		assert.deepEqual(checkModelsKnown(ref, { readOverlay: () => readOverlayModels(overlayDir(text)) }), { unknown: ref[0], why: "overlay-unparseable" }, text);
 	}
-	// And builtins still pass beside a broken overlay: the file is only read when a ref needs it.
-	assert.deepEqual(checkModelsKnown([{ provider: "anthropic", id: "claude-haiku-4-5" }], { readOverlay: () => readOverlayModels(overlayDir("{ not json")) }), { ok: true });
+	// And builtins too since issue #539: pi drops every entry with the file, so no job runs until it is fixed.
+	assert.deepEqual(checkModelsKnown([{ provider: "anthropic", id: "claude-haiku-4-5" }], { readOverlay: () => readOverlayModels(overlayDir("{ not json")) }), { unknown: { provider: "anthropic", id: "claude-haiku-4-5" }, why: "overlay-unparseable" });
 	// A transient errno is no verdict: the processor retries it rather than refusing for good.
 	const eio = () => {
 		throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
@@ -128,4 +128,43 @@ test("a transient overlay read under a list is retried, never a permanent fallba
 	assert.deepEqual(checkModelsKnown([{ ...fable, main: true }, fable], { readOverlay: eacces }), { unavailable: "EACCES" });
 	// No list: nothing is judged that needs the overlay, as before.
 	assert.deepEqual(checkModelsKnown([{ ...fable, main: true }], { readOverlay: eacces }), { ok: true });
+});
+
+test("an overlay pi drops, for any reason, refuses every job until it is fixed (issue #539)", () => {
+	// PR #546's review, after its third round: which providers a broken file meant to route cannot be read from
+	// it, so no job runs. pi drops every one of these (pinned against pi in models-json.test.mjs).
+	const gpt = { provider: "openai", id: "gpt-4o" };
+	const haiku = { provider: "anthropic", id: "claude-haiku-4-5" };
+	const qwen = { provider: "ollama", id: "qwen3:0.6b" };
+	const proxy = '{ "baseUrl": "http://proxy.lan:8080/v1" }';
+	for (const [label, text] of [
+		["a schema error under another provider", `{ "providers": { "openai": ${proxy}, "lan": { "models": [ { "id": "m", "contextWindow": "big" } ] } } }`],
+		["a block comment", `/* team proxy */ { "providers": { "openai": ${proxy} } }`],
+		["a truncated write", `{ "providers": { "openai": { "baseUrl": "http://proxy.la`],
+		["a UTF-16 save (PowerShell 5.1's default)", Buffer.from(`﻿{ "providers": { "openai": ${proxy} } }`, "utf16le")],
+		["a valid entry for an unrelated provider beside an error", `{ "providers": { "lan": ${proxy}, "z": 7 } }`],
+		["an empty file", ""],
+		["whitespace only", " \n\t\r\n"],
+		["a byte order mark only", "﻿"],
+	]) {
+		const readOverlay = () => readOverlayModels(overlayDir(text));
+		assert.throws(readOverlay, (e) => e.piDispatchConfig === true, `${label}: pi would drop it`);
+		assert.deepEqual(checkModelsKnown([{ ...gpt, main: true }], { readOverlay }), { unknown: gpt, why: "overlay-unparseable" }, `${label}: a builtin main model`);
+		assert.deepEqual(checkModelsKnown([{ ...haiku, main: true }, gpt], { readOverlay }), { unknown: haiku, why: "overlay-unparseable" }, `${label}: a provider the file never mentions`);
+		assert.deepEqual(checkModelsKnown([{ ...qwen, main: true }], { readOverlay }), { unknown: qwen, why: "overlay-unparseable" }, `${label}: an overlay model`);
+	}
+	// A directory: pi fails to read it the same way, so every job is refused too, with its own why, never retried.
+	const dir = overlayDir();
+	mkdirSync(join(dir, "models.json"));
+	assert.deepEqual(checkModelsKnown([{ ...haiku, main: true }], { readOverlay: () => readOverlayModels(dir) }), { unknown: haiku, why: "overlay-is-a-directory" });
+	// A valid file and an absent one are unchanged.
+	const valid = () => readOverlayModels(overlayDir(`{ "providers": { "openai": ${proxy} } }`));
+	assert.deepEqual(checkModelsKnown([{ ...gpt, main: true }, haiku], { readOverlay: valid }), { ok: true });
+	assert.deepEqual(checkModelsKnown([{ ...gpt, main: true }], { readOverlay: () => readOverlayModels(overlayDir()) }), { ok: true });
+	// A transient read is still no verdict: a builtin job with no list runs, one needing the overlay retries.
+	const eio = () => {
+		throw Object.assign(new Error("EIO"), { code: "EIO" });
+	};
+	assert.deepEqual(checkModelsKnown([{ ...gpt, main: true }], { readOverlay: eio }), { ok: true });
+	assert.deepEqual(checkModelsKnown([{ ...gpt, main: true }, qwen], { readOverlay: eio }), { unavailable: "EIO" });
 });
