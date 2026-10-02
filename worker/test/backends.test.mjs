@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ABSENT, HOST_ROUTE_LAN, HOST_ROUTE_LOOPBACK, HOST_ROUTE_OTHER_MACHINE, HOST_ROUTE_OWN_ADDRESS, HOST_ROUTE_REACHABLE, HOST_ROUTE_REFUTED, HOST_ROUTE_UNMEASURED, HOST_ROUTE_WORKS, HOST_ROUTES, PROXY_LOCAL_ADDRESSES, hostRouteFor, isProxyLocalHost, ASSERTED, BACKENDS, BACKEND_NAMES, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, declarationOf, effectiveWord, isDeclaration, isProperty, meets, parseBackendList, shortfall } from "../src/backends.mjs";
+import { ABSENT, HOST_ROUTE_LAN, HOST_ROUTE_LOOPBACK, HOST_ROUTE_OTHER_MACHINE, HOST_ROUTE_OWN_ADDRESS, HOST_ROUTE_REACHABLE, HOST_ROUTE_REFUTED, HOST_ROUTE_UNMEASURED, HOST_ROUTE_WORKS, HOST_ROUTES, PROXY_LOCAL_ADDRESSES, hostRouteFor, isPerMachineHost, isProxyLocalHost, ASSERTED, BACKENDS, BACKEND_NAMES, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, declarationOf, effectiveWord, isDeclaration, isProperty, meets, parseBackendList, shortfall } from "../src/backends.mjs";
 
 test("the table is a LEAF -- it imports nothing", () => {
 	// `forges.mjs`'s reason, and it is why doctor and the config loader can read a declaration without
@@ -552,4 +552,11 @@ test("an invalid runtime input reads unmeasured and names what is missing (#503)
 		assert.match(got.sentence, problem, JSON.stringify(runtime));
 		assert.match(got.sentence, /is missing or invalid, so no measured route applies to host\.docker\.internal\.$/);
 	}
+});
+
+test("isPerMachineHost: only the two alias NAMES are a different server on every machine; every address is shared, link-local included", () => {
+	// The endpoint slot lease reads this (issue #503, PR #518's gates). A link-local address is unique on its LINK: several
+	// hosts on one bridge can reach one neighbour server at 169.254.x.y, so it must take the fleet claim.
+	for (const host of ["host.docker.internal", "host.containers.internal", "host.docker.internal."]) assert.equal(isPerMachineHost(host), true, host);
+	for (const host of ["169.254.1.2", "[fe80::1]", "fe80::1", "[febf::1]", "gpu.lan", "192.168.5.2", "172.17.0.1", "[fd00::2]", "docker.internal", "", null]) assert.equal(isPerMachineHost(host), false, String(host));
 });

@@ -115,7 +115,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -276,6 +276,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			...(makeRetentionSweep ? { makeRetentionSweep } : {}),
 			...(makeHostRegistry ? { makeHostRegistry } : {}),
 			...(makeScopeClaimSweeper ? { makeScopeClaimSweeper } : {}),
+			...(makeClaimSweeper ? { makeClaimSweeper } : {}),
 			...(makeGitLabAuth ? { makeGitLabAuth } : {}),
 			...(makeGitLabHost ? { makeGitLabHost } : {}),
 			...(now ? { now } : {}),
@@ -1346,6 +1347,92 @@ test("reloadScopedLimits keeps LAST-GOOD on a bad edit and hot-swaps on a good o
 		mod.reloadScopedLimits(config, ref, log);
 		assert.equal(ref.current[0].day, 9, "a good edit swaps the ref");
 		assert.deepEqual(logs[1], { event: "scoped_limits_reloaded", fields: { count: 1 } });
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// ── model endpoints wiring (issue #503) ─────────────────────────────────────────────────────────────
+
+const ENDPOINTS_FILE = (slots = 2) => `${JSON.stringify({ version: 1, endpoints: [{ id: "mac-ollama", host: "host.docker.internal", port: 11434, slots, keyless: true }] })}\n`;
+
+test("model endpoints: a declared file boot-loads into the per-pickup closure, arms its watcher, and rides worker_started", { skip }, async () => {
+	const dir = tempDir("pi-me-");
+	try {
+		const file = join(dir, "model-endpoints.json");
+		writeFileSync(file, ENDPOINTS_FILE());
+		const { captured, logs } = await runStart({ env: { PI_MODEL_ENDPOINTS_FILE: file } });
+		assert.equal(typeof captured.modelEndpoints, "function");
+		assert.deepEqual(captured.modelEndpoints().map((e) => [e.id, e.slots]), [["mac-ollama", 2]]);
+		assert.equal(typeof captured.overlayModels, "function", "the overlay models.json is read per pickup too");
+		assert.equal(captured.endpointLease, null, "no declared worker name: the in-process bound only, a named residual");
+		assert.ok(logs.some((l) => l.event === "model_endpoints_watching" && l.path === file), "the live-edit watcher armed");
+		assert.equal(logs.find((l) => l.event === "worker_started").modelEndpoints, 1);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("model endpoints: no file means [] from the closure, no watcher, and 0 in worker_started", { skip }, async () => {
+	const { captured, logs } = await runStart({});
+	assert.deepEqual(captured.modelEndpoints(), []);
+	assert.ok(!logs.some((l) => l.event === "model_endpoints_watching"), "no file, no watcher");
+	assert.equal(logs.find((l) => l.event === "worker_started").modelEndpoints, 0);
+});
+
+test("model endpoints: an invalid file refuses BOOT fail-loud (configError)", { skip }, async () => {
+	const dir = tempDir("pi-me-");
+	try {
+		const file = join(dir, "model-endpoints.json");
+		writeFileSync(file, ENDPOINTS_FILE(0));
+		await assert.rejects(
+			() => runStart({ env: { PI_MODEL_ENDPOINTS_FILE: file } }),
+			(e) => e.piDispatchConfig === true && /slots must be an integer from 1 to 64/.test(e.message),
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("model endpoints: a declared worker name arms the fleet lease and sweeps this host's slot:m: claims at boot", { skip }, async () => {
+	const dir = tempDir("pi-me-");
+	try {
+		const file = join(dir, "model-endpoints.json");
+		writeFileSync(file, `${JSON.stringify({ version: 1, endpoints: [{ id: "mac-ollama", host: "host.docker.internal", port: 11434, slots: 2 }, { id: "gpu-box", host: "gpu.lan", port: 8000, slots: 4 }] })}\n`);
+		const swept = [];
+		const { captured } = await runStart({
+			env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL, PI_MODEL_ENDPOINTS_FILE: file },
+			makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+			makeHost: () => fakeHost(),
+			makeReaper: () => async () => ({ reaped: true }),
+			makeScopeClaimSweeper: () => async () => ({ swept: 0, skipped: false }),
+			makeClaimSweeper: (args) => async (opts) => (swept.push({ workerName: args.workerName, key: args.keyFor("h", 0), rows: args.rows, event: args.event, ...opts }), { swept: 0, skipped: false }),
+		});
+		assert.equal(typeof captured.endpointLease?.acquire, "function");
+		const { hash16 } = await import("../src/fleet-lease.mjs");
+		assert.deepEqual(swept, [{ workerName: "mac-mini-1", key: "slot:m:h:0", rows: [{ hash: hash16("gpu-box"), count: 64 }], event: "endpoint_claims", reaped: true }], "every index up to the parse ceiling, since slots can be lowered live; a host alias takes no fleet claim, so it has none to sweep");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("reloadModelEndpoints keeps LAST-GOOD on a bad edit and hot-swaps on a good one", { skip }, async () => {
+	const dir = tempDir("pi-me-");
+	try {
+		const file = join(dir, "model-endpoints.json");
+		const config = { modelEndpointsFile: file };
+		const good = [{ id: "mac-ollama", host: "host.docker.internal", port: 11434, slots: 2, keyless: true }];
+		const ref = { current: good };
+		const logs = [];
+		const log = (event, fields) => logs.push({ event, fields });
+		writeFileSync(file, "{ not json");
+		mod.reloadModelEndpoints(config, ref, log);
+		assert.equal(ref.current, good, "the SAME array: last-good untouched");
+		assert.equal(logs[0].event, "model_endpoints_reload_invalid");
+		writeFileSync(file, ENDPOINTS_FILE(5));
+		mod.reloadModelEndpoints(config, ref, log);
+		assert.equal(ref.current[0].slots, 5, "a slots edit applies to the next pickup");
+		assert.deepEqual(logs[1], { event: "model_endpoints_reloaded", fields: { count: 1 } });
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
@@ -2526,7 +2613,7 @@ test("one debounce, shared: the 150ms literal is written once (issue #386)", asy
 	}
 });
 
-test("all FOUR live-edit watches apply the boot-race rule, not just the one with an end-to-end test (#386)", () => {
+test("all FIVE live-edit watches apply the boot-race rule, not just the one with an end-to-end test (#386, #503)", () => {
 	// BY SHAPE, and the limit is the point rather than an apology. The rule itself is pinned behaviourally
 	// above, and the receiver's watch is driven end to end through its read seam. The worker's three are
 	// private functions armed from deep inside `startWorker`, so driving each would mean three full worker
@@ -2542,7 +2629,9 @@ test("all FOUR live-edit watches apply the boot-race rule, not just the one with
 	};
 	// One watch per `watch(dir, ...)` arming, which is how all four are written.
 	const armings = Object.entries(sources).map(([name, src]) => [name, (src.match(/handles\.watcher = watch\(/g) ?? []).length]);
-	assert.deepEqual(armings, [["worker/src/start.mjs", 3], ["receiver/src/start.mjs", 1]], "four watches, and if that count moves this test must be read again rather than updated");
+	// Five since issue #503 added the model-endpoints watch, which reads before arming and compares after like the rest
+	// (read again, as the message below asks, and its caller is checked at the end).
+	assert.deepEqual(armings, [["worker/src/start.mjs", 4], ["receiver/src/start.mjs", 1]], "five watches, and if that count moves this test must be read again rather than updated");
 	for (const [name, src] of Object.entries(sources)) {
 		const arms = (src.match(/handles\.watcher = watch\(/g) ?? []).length;
 		assert.equal((src.match(/readBeforeArming\(/g) ?? []).length, arms, `${name}: every watch reads before it arms`);
@@ -2574,6 +2663,12 @@ test("all FOUR live-edit watches apply the boot-race rule, not just the one with
 		// every boot reloads: measured, a mismatched pair logs a reload and a Valkey reconcile on EVERY start.
 		assert.match(worker, new RegExp(`recording\\("${key}", config\\.${key === "triggers" ? "triggersFile" : key + "File"}\\)`), `${key}'s baseline is captured from its own file`);
 	}
+	// The model-endpoints file has no config key of its own (its default path is the deployment folder), so its
+	// baseline is captured from the RESOLVED path the loader reads.
+	const endpoints = worker.match(/extraClosers\.push\(watchModelEndpointsFile\(([^;]*)\)\);/);
+	assert.ok(endpoints, "watchModelEndpointsFile is armed from startWorker");
+	assert.match(endpoints[1], /atBoot\.modelEndpoints\b/);
+	assert.match(worker, /recording\("modelEndpoints", modelEndpointsAt\.path\)/);
 });
 
 // ── issue #354: `local` is no longer mandatory ─────────────────────────────────────────────────────────

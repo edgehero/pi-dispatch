@@ -1,5 +1,5 @@
 /**
- * Fleet-wide leases for the two bounds that stopped meaning what they say when a second host appeared
+ * Fleet-wide leases for the bounds that stopped meaning what they say when a second host appeared
  * (issue #57).
  *
  * `PI_WAIT_CHECK_SLOTS` and a `scoped-limits.json` row's `concurrent` are both enforced by
@@ -27,6 +27,12 @@
  *   a second source of truth: it is the SAME source writing down what it just established. Making the
  *   reaper the claim's owner removes the contradiction rather than arguing around it.
  *
+ *   The ENDPOINT claim (issue #503) is the third, and it is a scope claim in every property that matters
+ *   here: a job takes one slot of a declared model server at pickup and holds it until its container is
+ *   gone, so the claim is for a container, its TTL is the scope claim's, and the boot reaper owns it the
+ *   same way. Local jobs take it too, where they skip the scope claim: a folder path names nothing across
+ *   hosts, but an endpoint is one physical server.
+ *
  * N INDEPENDENT KEYS, NEVER ONE COUNTER. A counter with one TTL loses every claim when it expires and
  * leaks a permanent `+1` on a crash; N `SET NX PX` keys mean a lost release costs exactly one slot for
  * exactly the TTL and never the whole semaphore. `wait:key:<dedupId>` is the in-repo precedent.
@@ -36,9 +42,23 @@
  * `concurrent: 2` scope frees the other holder's slot.
  */
 
-/** Slot keys. Both live under a prefix an operator can see whole with one `KEYS`. */
+import { createHash } from "node:crypto";
+
+/**
+ * Sixteen hex of a sha256: the `localJobId` idiom, shared by the scope budget keys (`scopeKeyPrefix`) and the
+ * two hashed slot keys below, so one spelling of "the hash of this name" exists. A hash rather than the name
+ * itself because a scope legally contains `:` and `/`, which would collide with the key grammar.
+ */
+export const hash16 = (value) => createHash("sha256").update(String(value)).digest("hex").slice(0, 16);
+
+/** Slot keys. All live under a prefix an operator can see whole with one `KEYS`. */
 export const checkSlotKey = (i) => `wait:check:${i}`;
 export const scopeSlotKey = (hash, i) => `slot:s:${hash}:${i}`;
+/**
+ * A model endpoint's slots (issue #503): `slot:m:<hash16(id)>:<i>`. Hashed although an endpoint id is already
+ * `[a-z0-9-]{1,32}`, so the three slot keys share one shape and the sweeper one argument list.
+ */
+export const endpointSlotKey = (hash, i) => `slot:m:${hash}:${i}`;
 
 /**
  * Build a lease over `slots` numbered keys.
@@ -50,6 +70,16 @@ export const scopeSlotKey = (hash, i) => `slot:s:${hash}:${i}`;
  * deployment or stop every scoped job; the in-process bound is still there underneath, so failing open
  * degrades the fleet bound to the per-host one, which is exactly the behaviour before this existed.
  */
+/**
+ * Compare-and-delete, in ONE server-side step (PR #518's gate). A GET followed by a DEL is not release-if-mine: between
+ * the two, the claim can expire and another host take it, and the DEL then frees THAT host's slot (measured). The
+ * script deletes only while the value is still ours.
+ */
+export const RELEASE_IF_MINE = 'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end';
+
+/** The sweep's twin: delete only while the value starts with this host's `<workerName>#` prefix. */
+export const DELETE_IF_PREFIX = 'local v = redis.call("get", KEYS[1]) if v and string.sub(v, 1, #ARGV[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end';
+
 export function makeFleetLease({ redis, holderPrefix, keyFor, ttlMs, now = () => Date.now(), log = () => {}, timeoutMs = 2_000 }) {
 	// Bounded for `host-registry.mjs`'s reason, which applies to every module sharing this client:
 	// `maxRetriesPerRequest: null` makes a command against an unreachable server QUEUE rather than reject,
@@ -76,24 +106,27 @@ export function makeFleetLease({ redis, holderPrefix, keyFor, ttlMs, now = () =>
 			if (!Number.isFinite(slots) || slots < 1) return { ok: true, release: async () => {}, refresh: async () => true };
 			const holder = `${holderPrefix}#${id}`;
 			const start = Math.abs(hashCode(String(id))) % slots;
+			const releaseIfMine = async (key) => {
+				try {
+					await bounded(redis.eval(RELEASE_IF_MINE, 1, key, holder));
+				} catch {
+					// The TTL is the backstop. A lost release costs one slot for one TTL.
+				}
+			};
+			const attempted = [];
 			for (let n = 0; n < slots; n++) {
 				const key = keyFor(...keyArgs, (start + n) % slots);
+				attempted.push(key);
 				try {
 					const won = await bounded(redis.set(key, holder, "PX", perCall ?? ttlMs, "NX"));
 					if (!won) continue;
 					return {
 						ok: true,
 						key,
-						async release() {
-							try {
-								// Release-if-MINE, which is what makes this idempotent where the in-process map is
-								// not: a double release cannot free another holder's slot, because the second call
-								// finds a value that is no longer ours.
-								if ((await bounded(redis.get(key))) === holder) await bounded(redis.del(key));
-							} catch {
-								// The TTL is the backstop. A lost release costs one slot for one TTL.
-							}
-						},
+						// Release-if-MINE, which is what makes this idempotent where the in-process map is not: a double
+						// release cannot free another holder's slot, because the second call finds a value that is no
+						// longer ours. Atomic, so a release after the TTL cannot free a claim another host took since.
+						release: () => releaseIfMine(key),
 						async refresh(nextMs = ttlMs) {
 							try {
 								if ((await bounded(redis.get(key))) !== holder) return false;
@@ -108,7 +141,13 @@ export function makeFleetLease({ redis, holderPrefix, keyFor, ttlMs, now = () =>
 					// Granting is the safe direction: the in-process bound is still underneath, so this
 					// degrades the fleet-wide ceiling to the per-host one rather than to nothing.
 					log("fleet_lease_unavailable", { reason: err?.message });
-					return { ok: true, degraded: true, release: async () => {}, refresh: async () => true };
+					// A TIMED-OUT SET IS NOT A FAILED ONE (PR #518's gate). The shared client queues commands rather
+					// than rejecting them, so the SET this call gave up on can still land later and hold the slot for
+					// a whole TTL in another host's way, with nobody left to release it (measured with a slow Valkey).
+					// So the degraded handle still releases, best-effort and compare-and-delete, every key it tried:
+					// only a key holding our own value is deleted, so a key that was never ours is left alone. A
+					// release that runs before the late SET lands misses it, and the TTL is the backstop then.
+					return { ok: true, degraded: true, release: async () => void (await Promise.all(attempted.map(releaseIfMine))), refresh: async () => true };
 				}
 			}
 			return null;
@@ -139,31 +178,52 @@ function hashCode(s) {
  * No `KEYS`, no `SCAN`, and no index set to leak.
  */
 export function makeScopeClaimSweeper({ redis, workerName, limits, log = () => {}, timeoutMs = 2_000 }) {
+	return makeClaimSweeper({ redis, workerName, keyFor: scopeSlotKey, rows: (limits ?? []).map((row) => ({ hash: row?.hash, count: Number(row?.concurrent) })), event: "scope_claims", log, timeoutMs });
+}
+
+/**
+ * The sweep itself, over any hashed slot key (issue #503 added the endpoint slots beside the scope slots). Each row is
+ * `{ hash, count }`: the hash the key is built from and how many indexes can carry a claim. `event` names the two log
+ * lines, `<event>_sweep_skipped` and `<event>_swept`, so each lease's sweep says which it is.
+ *
+ * An endpoint's claim is for a container exactly as a scope's is (a job holds its slot for its whole run), so the
+ * same precondition decides it: only after a reaper that enumerated.
+ */
+export function makeClaimSweeper({ redis, workerName, keyFor, rows, event, log = () => {}, timeoutMs = 2_000 }) {
 	return async function sweep({ reaped }) {
 		if (!reaped) {
-			log("scope_claims_sweep_skipped", { reason: "reaper-skipped" });
+			log(`${event}_sweep_skipped`, { reason: "reaper-skipped" });
 			return { swept: 0, skipped: true };
 		}
 		const prefix = `${workerName}#`;
 		let swept = 0;
-		for (const row of limits ?? []) {
-			const n = Number(row?.concurrent);
+		for (const row of rows ?? []) {
+			const n = Number(row?.count);
 			if (!Number.isFinite(n) || n < 1 || !row?.hash) continue;
 			for (let i = 0; i < n; i++) {
-				const key = scopeSlotKey(row.hash, i);
+				const key = keyFor(row.hash, i);
 				try {
-					const held = await withTimeout(redis.get(key), timeoutMs);
-					if (typeof held === "string" && held.startsWith(prefix)) {
-						await withTimeout(redis.del(key), timeoutMs);
-						swept++;
+					// One atomic compare-and-delete per key, the release's own rule: a GET then DEL could delete a claim
+					// another host took in between.
+					if (Number(await withTimeout(redis.eval(DELETE_IF_PREFIX, 1, key, prefix), timeoutMs)) > 0) swept++;
+				} catch (err) {
+					// A REPLY error is about THIS key (a WRONGTYPE on a key someone else wrote under the prefix): the server
+					// answered, so the next key is worth asking. Logged by key, never by value, and the sweep goes on
+					// (PR #518's second gate).
+					if (err?.name === "ReplyError") {
+						log(`${event}_sweep_key_error`, { key, reason: String(err.message).slice(0, 200) });
+						continue;
 					}
-				} catch {
-					// Best-effort by contract: this is an OPTIMISATION over the TTL, never the mechanism, so a
-					// fault here costs at most one TTL of a stale claim and must never block boot.
+					// Best-effort by contract: this is an OPTIMISATION over the TTL, never the mechanism, so it must never
+					// block boot. It STOPS at the first fault (PR #518's gate): a Valkey that does not answer would
+					// otherwise cost one timeout per key, 64 per endpoint, before the worker starts. A timeout or a connection
+					// fault is about the server, so no other key would fare better.
+					log(`${event}_sweep_skipped`, { reason: "valkey-fault", detail: err?.message, swept });
+					return { swept, skipped: true };
 				}
 			}
 		}
-		if (swept > 0) log("scope_claims_swept", { count: swept });
+		if (swept > 0) log(`${event}_swept`, { count: swept });
 		return { swept, skipped: false };
 	};
 }

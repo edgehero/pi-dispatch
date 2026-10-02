@@ -26,10 +26,10 @@
  * Custom: scoped limits validated inline per triggers.mjs/pause-windows.mjs precedent; zod not in deps
  */
 
-import { createHash } from "node:crypto";
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { configError } from "./config.mjs";
+import { hash16 } from "./fleet-lease.mjs";
 import { scopeOf } from "./pause-windows.mjs";
 
 /** The schema version this build reads and writes. A file declaring a higher one is refused loudly. */
@@ -233,8 +233,7 @@ export function concurrencyFor(job, limits) {
  * accepted cost.
  */
 export function scopeKeyPrefix(scope) {
-	const h = createHash("sha256").update(String(scope)).digest("hex").slice(0, 16);
-	return `budget:s:${h}`;
+	return `budget:s:${hash16(scope)}`;
 }
 
 /**

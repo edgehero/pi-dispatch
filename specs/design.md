@@ -3942,12 +3942,56 @@ a tunnel.
   capacity shortage the bound exists to report.
 - **Release is idempotent here, which the in-process map is not.** It deletes only a key whose value is
   still ours; `makeInFlight().release` clamps at zero but a double release on a `concurrent: 2` scope
-  frees the other holder's slot.
+  frees the other holder's slot. The compare and the delete are ONE script (PR #518's gate): a GET then a
+  DEL let a release that came after the TTL delete the claim another host had taken since (measured). The
+  boot sweep deletes by the same rule, on its `<worker name>#` prefix, and stops at its first connection or
+  timeout fault rather than paying one timeout per key before boot goes on. A per-key reply error (a
+  WRONGTYPE key under the prefix) is the server answering, so that key is logged and the sweep goes on.
 - **A fault GRANTS.** The in-process bound is still underneath, so failing open degrades the fleet ceiling
   to the per-host one -- the behaviour before this existed. Failing closed would turn a Valkey blip into
-  "no wait in this deployment can be answered", which is the wedge every other gate here refuses.
+  "no wait in this deployment can be answered", which is the wedge every other gate here refuses. A
+  degraded grant still compare-and-deletes every key it tried when it is released: the shared client queues
+  a command rather than rejecting it, so a write the lease gave up on can land later and would otherwise
+  hold a slot for a whole TTL (PR #518's gate, measured with a slow Valkey).
+- **The third lease: a model endpoint's slots** (issue #503, `INT-MODEL-ENDPOINTS-FILE-CONTRACT`). A declared
+  local model server has a fixed number of parallel requests (`slots`), and nothing else bounds how many jobs
+  call it: three per host on several hosts, each metering $0, so no dollar window holds them either. Keys are
+  `slot:m:<hash16(id)>:<i>`, one sha256-first-16-hex helper shared with the scope keys and the scope budget
+  prefix. The lease is taken at pickup right after the scope lease, for each endpoint in the job's set IN ID
+  ORDER (so two jobs needing the same two endpoints cannot each hold one and wait on the other), on top of an
+  in-process `makeInFlight` keyed by endpoint id with limit `slots`, shared by both Workers like the host
+  slot. Without a declared worker name only that in-process bound applies, per host, a named residual.
+  - **How it answers `OQ-008`**: exactly as the scope claim does, because it IS a claim for a container. A job
+    holds its slot from pickup until its container is gone, so the TTL is the scope claim's (`JOB_TIMEOUT_MS`
+    plus slack, never refreshed), and the boot reaper owns it: after a reaper that enumerated, the boot sweep
+    deletes this host's `slot:m:` claims, every index up to the parse ceiling of 64 because `slots` can be
+    lowered live; after one that did not, it sweeps nothing. One generic sweeper serves both keys.
+  - **Local jobs take it**, where they skip the scope claim. The scope claim's reason for skipping them is
+    that a path names nothing across hosts; an endpoint is one physical server whoever calls it.
+  - **Unless the host names a different server on each machine.** The alias names `host.docker.internal`
+    and `host.containers.internal` are the machine's own server, so two Macs each declaring the documented
+    `mac-ollama` would share one fleet bound for two servers (measured on PR #518's gate). Such an endpoint
+    takes no fleet claim, and the in-process bound is exact for it. NAMES ONLY: every literal address takes
+    the fleet claim, link-local included, because a link-local address is unique on its link, not on its
+    machine, and several hosts on one bridge can reach one neighbour server at 169.254.x.y (PR #518's second
+    gate). Treating it as per-machine would put N times `slots` on that server; treating a truly per-machine
+    address as shared only tightens the bound. The rule errs on the side that never oversubscribes. The fleet key is
+    the id, so a LAN server shared by several hosts must carry the same id and `slots` in every host's file:
+    one server, one id. Keying by host and port instead was rejected: two spellings of one server (a name
+    and its address) would still split it, and the id is what the operator already names it by.
+  - **A miss is a free deferral**, never a refusal: everything taken so far goes back (endpoint holds, the
+    scope's fleet claim and in-process slot, the host slot), the log says `endpoint_busy_deferred` with the
+    endpoint id, and the job is moved to `now + ENDPOINT_BUSY_RECHECK_MS` (7 s, distinct from every other
+    deferral's instant, since the instant is the only trace of why a job is delayed). Nothing has been
+    minted, cloned or reserved (`CONST-BUDGET-BEFORE-TOKENS`).
+  - **The settings read moved above it**, once per pickup, because the job's effective provider and model
+    can come from the overlay. Its throw is captured and raised at its old place, so the record and the
+    retry decision are what they were. Invalid or unreadable settings take no endpoint slot.
+  - **Residuals**: the set is the job's MAIN model until allowed-model lists land (#502); a job holds one slot
+    per endpoint for its whole run, so fan-out inside one job can exceed `slots` (the server then queues);
+    fleet-wide only with a declared worker name.
 - **Traces to**: `DES-CONCURRENCY-3`, `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `INT-SCOPED-LIMITS-FILE-CONTRACT`,
-  `INT-WAIT-PROFILES-CONTRACT`, `OQ-008`, `OQ-030`
+  `INT-WAIT-PROFILES-CONTRACT`, `INT-MODEL-ENDPOINTS-FILE-CONTRACT`, `OQ-008`, `OQ-030`
 
 
 ## DES-CONTAINER-BACKEND-REGISTRY
@@ -6460,3 +6504,4 @@ a tunnel.
 | 2026-09-30 | Issue #511 (the steering scan misses lowercase twins, a second SDK hop and pi's own reads). **`DES-TRIGGERS-UNIFIED-FILE` AMENDED**, the narrowing list: #511 reserves more names in `run.secrets` (the second SDK hop, the lowercase twins, pi's own `PI_*` reads), refusing files that used to load, and already queued jobs binding such a name refuse pre-spend; the release notes must name it and point at `PI_FORWARD_ENV`. Every other decision in the entry UNCHANGED, checked. |
 | 2026-10-02 | Issue #503, part 3 (the measured host routes). **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` AMENDED**, one Why bullet: the routes from the egress proxy to a model server on the host, measured 2026-09-30 on rootless Podman 4.9.3 (slirp4netns), rootless 5.8.1 (pasta) and rootful 5.8.1, stating only what the issue's measurement comment and its addendum publish; the host's own LAN address is refuted under pasta only, and the issue's "LAN endpoints only for Podman 4.x" fallback is refuted. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**, one bullet: `HOST_ROUTES` and `hostRouteFor` sit in the same leaf as a separate table, a reachability fact that is no declaration word, never read by the floor and refusing nothing. `hostRouteFor` answers `works` or `refuted` only for a host-local address (refuted everywhere), the two alias names and an IPv4 address in the host's own address list; another address or name is `lan`, an ordinary outbound route that is never `works`; anything else, a host not in a declared form, a bad host address entry, an IPv6 or link-local literal, an inexact version or a missing runtime field, is `unmeasured`. `PROXY_LOCAL_ADDRESSES` in the leaf is the one host-local set: `model-endpoints.mjs` builds `LOCAL_ADDRESSES` from it and refuses a declared host in it. Nothing reads the table yet (doctor and the proxy come in later parts). **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no job flag moves. **Code evidence**: worker/src/backends.mjs -> HOST_ROUTES, hostRouteFor, PROXY_LOCAL_ADDRESSES, isProxyLocalHost; worker/src/model-endpoints.mjs -> LOCAL_ADDRESSES; worker/test/backends.test.mjs, backends-doc.test.mjs, podman-doc.test.mjs, model-endpoints.test.mjs; docs/backends.md, docs/podman.md. |
 | 2026-09-30 | Issue #503 (declared model endpoints), the second change. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED**, a new bullet: a local model server is reached through the proxy, as one more CONNECT allow for one host and one port in an included file, and the proxy (never the job) is given the way to the host (`host.docker.internal:host-gateway` on Docker, nothing on rootless Podman). Rejected: the host network or the host on the job's network (every host port, the queue among them, and the policy no longer in one file); a plain-HTTP allow (pi only tunnels, and dropping the runner's tunnelling would reopen #508's hole); a restart to load new endpoints (it cuts every running job off, where `squid -k reconfigure` keeps open tunnels, measured 2026-09-30), hence the in-place render. The per-job network, its cleanup and the canary are UNCHANGED, checked. |
+| 2026-10-02 | Issue #503, part 4 (slot leases). **`DES-FLEET-LEASES-FOR-SHARED-BOUNDS` AMENDED**: the third lease, a model endpoint's `slots`, keyed `slot:m:<hash16(id)>:<i>` with one hash helper shared with the scope keys; taken at pickup after the scope lease, in id order, over an in-process bound shared by both Workers; local jobs take it too; a miss releases everything taken (endpoint holds, the scope's fleet claim and in-process slot, the host slot) and defers to `ENDPOINT_BUSY_RECHECK_MS`, free and never a refusal; a Valkey fault grants and the in-process bound holds the host. How it answers `OQ-008`: the claim is for a container, with the scope claim's TTL, and the boot reaper owns it through one generic sweeper (every index up to 64, since `slots` can be lowered live). The one settings read per pickup moved above the gate; its throw is raised at its old place. With PR #518's gate: an endpoint named by a host alias takes no fleet claim (it is a different server on each machine), while every address, link-local included, does (unique on its link, not its machine), so the fleet key means one server, one id; the release and the sweep are atomic compare-and-delete scripts, a degraded grant still releases the keys it tried, and the sweep stops at its first connection or timeout fault while a per-key reply error is logged and skipped. Residuals named: main model only until #502, one slot per job for its whole run, fleet-wide only with a declared worker name. **`DES-CONCURRENCY-3` UNCHANGED, checked**: the in-process maps stay the per-host bound. **Code evidence**: worker/src/fleet-lease.mjs -> hash16, endpointSlotKey, makeClaimSweeper, makeScopeClaimSweeper; worker/src/index.mjs -> makeProcessor, effectiveJobOf, mainModelEndpoints, ENDPOINT_BUSY_RECHECK_MS; worker/src/start.mjs -> startWorker, reloadModelEndpoints; worker/src/scoped-limits.mjs -> scopeKeyPrefix. |

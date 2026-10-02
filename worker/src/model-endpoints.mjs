@@ -6,8 +6,9 @@
  * This module is pure and fs-injectable, in scoped-limits.mjs' style: `parseModelEndpoints` validates the file TEXT
  * and refuses, never repairs; `loadModelEndpoints` layers the one fs read on top; `endpointsForModel` derives which
  * endpoints a model uses from the overlay `models.json`; `renderEndpointsInclude` writes the squid include the proxy
- * reads. Nothing here enforces anything yet: the proxy include line, the mounts, the slot leases and the keyless
- * credential gate are later changes of the same issue, and they bind to this one implementation.
+ * reads. The module enforces nothing itself: the proxy include enforces the route, and the pickup gate in index.mjs
+ * enforces `slots` through a lease per endpoint (`DES-FLEET-LEASES-FOR-SHARED-BOUNDS`). The keyless credential gate
+ * is a later change of the same issue. All of them bind to this one implementation.
  *
  * Which models use an endpoint is DERIVED, never listed twice: a model uses endpoint E when its effective `baseUrl`
  * (the model's own, else its provider's) has E's host and port. A second list of model names here could disagree

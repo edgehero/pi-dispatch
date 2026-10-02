@@ -1232,6 +1232,25 @@ const LAN_MEASURED_ON = Object.values(HOST_ROUTES_TABLE)
  *   6. anything else, another IPv4 or any other DNS name: `lan`, an ordinary outbound route that is not a route to
  *      this host, and never `works`.
  */
+/**
+ * Whether a declared endpoint host names a DIFFERENT server on every machine that declares it (issue #503): the two
+ * host alias NAMES, each resolving to the machine the proxy runs on. Takes the host as `parseModelEndpoints` stores
+ * it; one trailing dot is read as the name without it, as the baseUrl derivation reads it.
+ *
+ * The slot lease reads it: a fleet key built from the endpoint's id would make two Macs that each declare
+ * `host.docker.internal:11434` share one bound for two servers (measured on PR #518's gate), so such an endpoint is
+ * bounded per host only, which is exact for a server only that host can reach.
+ *
+ * NAMES ONLY, never an address, link-local included (PR #518's second gate). A link-local address is unique on its
+ * LINK, not on its machine: several hosts on one Thunderbolt bridge reach ONE neighbour at 169.254.x.y, and each
+ * skipping the fleet lease would put N times `slots` on that server. Every literal takes the fleet lease, so the
+ * worst case is a bound tighter than needed (pasta's host address shared by name), never an oversubscribed server.
+ */
+export function isPerMachineHost(endpointHost) {
+	const target = declaredHostForm(endpointHost);
+	return target !== null && target.kind === "name" && ALIASES.has(target.host);
+}
+
 export function hostRouteFor(runtime, endpointHost) {
 	const unmeasured = (sentence) => ({ status: HOST_ROUTE_UNMEASURED, sentence });
 	const target = declaredHostForm(endpointHost);

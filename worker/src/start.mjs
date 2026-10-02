@@ -18,7 +18,8 @@ import { makeForgejoHost } from "./forgejo-host.mjs";
 import { makeAzureAuth } from "./azure-auth.mjs";
 import { makeAzureHost } from "./azure-host.mjs";
 import { makeEgressPreflight } from "./egress.mjs";
-import { checkSlotKey, makeFleetLease, makeScopeClaimSweeper, scopeSlotKey } from "./fleet-lease.mjs";
+import { checkSlotKey, endpointSlotKey, hash16, makeClaimSweeper, makeFleetLease, makeScopeClaimSweeper, scopeSlotKey } from "./fleet-lease.mjs";
+import { MAX_SLOTS, loadModelEndpoints, modelEndpointsPath, readOverlayModels } from "./model-endpoints.mjs";
 import { capabilityTokens, serializeCaps } from "./capabilities.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
 import { makeHostRegistry } from "./host-registry.mjs";
@@ -36,7 +37,7 @@ import { scrubCredentials } from "./redact.mjs";
 import { makeCheckOnceSpent, makeCheckWaitSkew, makeDisarmOnce } from "./triggers-file.mjs";
 import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "./watch-closer.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
-import { loadScopedLimits, scopeKeyPrefix } from "./scoped-limits.mjs";
+import { loadScopedLimits } from "./scoped-limits.mjs";
 import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
@@ -44,7 +45,7 @@ import { hostQueueName, makeQueue } from "./queue.mjs";
 import { endpointShown, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
 import { NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_YOUNG_MARGIN_MS, runtimeFromFacts } from "./netns-keeper.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
-import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
+import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, backendFor, isPerMachineHost, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_INFO_TIMEOUT_MS, cachedPodmanInfo, decidePodmanJobUser, makePodmanBackend, makePodmanInfoReader, makePodmanReaper, observePodman, podmanConfRefusal, unavailableFor, podmanConfWidening, podmanJobUserRefusal, resolvePodmanImageUser } from "./backend-podman.mjs";
 import { PODMAN_RESTART_HOLD_EXPIRED, makePodmanServiceReader, onceFs, makeRootfulMemory, observeHost, observeRootfulConf, readRootfulService, rootfulConfRefusal, rootfulConfRetries, rootfulUnreadList, runtimeObservationKey } from "./runtime-observations.mjs";
 
@@ -288,6 +289,52 @@ function watchScopedLimitsFile(config, ref, log, atBoot) {
 }
 
 /**
+ * The model-endpoints reload (issue #503), exported apart from its watcher for `reloadScopedLimits`' reason: the
+ * last-good property is testable without fs.watch. A bad edit keeps `ref.current` and logs
+ * `model_endpoints_reload_invalid`; a good one swaps it, so a `slots` edit applies to the next pickup.
+ */
+export function reloadModelEndpoints(config, ref, log) {
+	try {
+		ref.current = loadModelEndpoints(config);
+		log("model_endpoints_reloaded", { count: ref.current.length });
+	} catch (err) {
+		log("model_endpoints_reload_invalid", { reason: err?.message });
+	}
+}
+
+/**
+ * Watch the model-endpoints file (issue #503) as the scoped-limits watcher does. Armed only when the file is named
+ * or exists at boot: the default path is the deployment folder, and a worker started elsewhere must not watch an
+ * arbitrary directory for a file nobody declared. A default file created later is read at the next restart.
+ */
+function watchModelEndpointsFile(config, ref, log, atBoot) {
+	const { path } = modelEndpointsPath(config);
+	const dir = dirname(path) || ".";
+	const file = basename(path);
+	const handles = { watcher: null, timer: null, closed: false };
+	const closer = makeWatchCloser(handles, log);
+	const readFile = () => readFileSync(path, "utf8");
+	readBeforeArming(handles, readFile, atBoot);
+	try {
+		handles.watcher = watch(dir, (_event, changed) => {
+			if (handles.closed) return;
+			if (changed && changed !== file) return;
+			clearTimeout(handles.timer);
+			handles.timer = setTimeout(() => reloadModelEndpoints(config, ref, closer.reloadLog), WATCH_DEBOUNCE_MS);
+		});
+		handles.watcher.unref?.();
+		log("model_endpoints_watching", { path });
+	} catch (err) {
+		log("model_endpoints_watch_unavailable", { reason: err?.message });
+	}
+	if (changedWhileArming(handles, readFile)) {
+		log("model_endpoints_reread_after_arming", { path });
+		reloadModelEndpoints(config, ref, closer.reloadLog);
+	}
+	return closer;
+}
+
+/**
  * The runnable worker. Reads config, connects to Valkey, wires every REAL dependency the processor
  * needs, and starts draining the queue. `createWorker` already installs the timeout, the
  * abort->docker-stop, and the SIGTERM/SIGINT graceful shutdown.
@@ -341,6 +388,7 @@ export async function startWorker(
 		makeSecretsResolver: makeSecretsResolverFn = makeSecretsResolver,
 		makeImagePreflight: makeImagePreflightFn = makeImagePreflight,
 		makeScopeClaimSweeper: makeScopeClaimSweeperFn = makeScopeClaimSweeper,
+		makeClaimSweeper: makeClaimSweeperFn = makeClaimSweeper,
 		makeHostRegistry: makeHostRegistryFn = makeHostRegistry,
 		makeEgressPreflight: makeEgressPreflightFn = makeEgressPreflight,
 		// Which docker endpoint this host's CLI resolves (issue #278). A seam because the real one spawns the
@@ -463,7 +511,7 @@ export async function startWorker(
 	// this race lives in is between these lines and the arming a thousand lines below -- the endpoint probe,
 	// forge auth, the reaper, Valkey -- not the microseconds around the arming itself, which is what a first
 	// attempt measured. `null` where a file is not configured, which reads as "nothing to compare".
-	const atBoot = { triggers: null, pauseWindows: null, scopedLimits: null };
+	const atBoot = { triggers: null, pauseWindows: null, scopedLimits: null, modelEndpoints: null };
 	const recording = (into, path) => ({
 		readFileSync: (file, enc) => {
 			const text = readFileSync(file, enc);
@@ -481,6 +529,13 @@ export async function startWorker(
 	// Issue #242: same posture for the scoped-limits file -- fail-loud with the operator present, mutable
 	// ref for the live-reload watcher, [] when unset (the folder mutex is code and needs no file).
 	const scopedLimits = { current: loadScopedLimits(config, recording("scopedLimits", config.scopedLimitsFile)) };
+
+	// Issue #503: the declared model endpoints, same posture (INT-MODEL-ENDPOINTS-FILE-CONTRACT): a bad file refuses
+	// boot with the operator present, a mutable ref for the live reload, [] when there is no file. Read per pickup
+	// from the ref, so a `slots` edit applies to the next job.
+	const modelEndpointsAt = modelEndpointsPath(config);
+	const modelEndpoints = { current: loadModelEndpoints(config, recording("modelEndpoints", modelEndpointsAt.path)) };
+	const watchModelEndpoints = modelEndpointsAt.explicit || atBoot.modelEndpoints !== null;
 
 	// Issue #278: WHICH DOCKER DAEMON the job containers' credentials will travel to. Asked of the CLI at boot,
 	// AFTER the free file validations above (a wedged CLI costs up to its bound, and must not delay them) and
@@ -904,9 +959,19 @@ export async function startWorker(
 	// mechanism, so a fault costs one TTL of a stale claim and never a boot.
 	try {
 		if (config.workerNameDeclared)
-			await makeScopeClaimSweeperFn({ redis, workerName: config.workerName, limits: scopedLimits.current.map((r) => ({ concurrent: r.concurrent, hash: scopeKeyPrefix(r.scope).slice("budget:s:".length) })), log })({ reaped });
+			await makeScopeClaimSweeperFn({ redis, workerName: config.workerName, limits: scopedLimits.current.map((r) => ({ concurrent: r.concurrent, hash: hash16(r.scope) })), log })({ reaped });
 	} catch (err) {
 		log("scope_claims_sweep_skipped", { reason: scrubCredentials(err?.message) });
+	}
+	// Issue #503: this host's stale model endpoint claims, on the same precondition and for the same reason (each is a
+	// claim for a container). Every index up to the parse ceiling, not up to today's `slots`: `slots` can be lowered
+	// live, and a claim on an index above the new value is still this host's to clear. A per-machine endpoint (a host
+	// alias name) takes no fleet claim, so it has none to sweep. The sweep stops at its first fault.
+	try {
+		if (config.workerNameDeclared && modelEndpoints.current.length > 0)
+			await makeClaimSweeperFn({ redis, workerName: config.workerName, keyFor: endpointSlotKey, rows: modelEndpoints.current.filter((e) => !isPerMachineHost(e.host)).map((e) => ({ hash: hash16(e.id), count: MAX_SLOTS })), event: "endpoint_claims", log })({ reaped });
+	} catch (err) {
+		log("endpoint_claims_sweep_skipped", { reason: scrubCredentials(err?.message) });
 	}
 
 	// The persistent runtime queue: the stall guard tears schedulers down through it, AND the outbox
@@ -1567,6 +1632,14 @@ export async function startWorker(
 		// the operator limited to one. Nothing refreshes this claim, deliberately: a refresher would be a
 		// second thing to get wrong for a window that cannot be reached.
 		scopeLease: hostQueue ? makeFleetLease({ redis, holderPrefix: config.workerName, keyFor: scopeSlotKey, ttlMs: SCOPE_CLAIM_TTL_MS, log }) : null,
+		// Issue #503: the fleet-wide half of a model endpoint's `slots`, armed like the scope lease (declaring a name is
+		// declaring a fleet) and with its TTL for its reason: the claim lives as long as the job's container, which
+		// `JOB_TIMEOUT_MS` bounds. Without a declared name only the in-process bound applies, per host.
+		endpointLease: hostQueue ? makeFleetLease({ redis, holderPrefix: config.workerName, keyFor: endpointSlotKey, ttlMs: SCOPE_CLAIM_TTL_MS, log }) : null,
+		// The endpoint gate's snapshot, read per pickup: the live-reloaded declaration and the overlay models.json, which
+		// the operator edits without a restart too. Read only when an endpoint is declared (the gate's own rule).
+		modelEndpoints: () => modelEndpoints.current,
+		overlayModels: () => readOverlayModels(config.globalPiDir),
 		checkLease: hostQueue
 			? makeFleetLease({
 					redis,
@@ -1858,6 +1931,11 @@ export async function startWorker(
 			extraClosers.push(watchScopedLimitsFile(config, scopedLimits, log, atBoot.scopedLimits));
 		}
 
+		// Issue #503 live edit: the model endpoints, keep-last-good on a bad edit.
+		if (watchModelEndpoints) {
+			extraClosers.push(watchModelEndpointsFile(config, modelEndpoints, log, atBoot.modelEndpoints));
+		}
+
 		// issue #292 / OQ-007: re-run the three retention sweeps on a timer, because the supported deployment
 		// is a service that restarts only on failure, so the healthy worker was the one that never re-swept.
 		// Armed HERE, at the end of boot beside the watches: all three closures exist, boot's own sweeps have
@@ -1912,6 +1990,7 @@ export async function startWorker(
 			softHoldPct: config.softHoldPct, // null when the soft-hold band is disabled
 			scopedLimitsFile: config.scopedLimitsFile, // null = no scoped caps/concurrency (the folder mutex holds regardless)
 			scopedLimits: scopedLimits.current.length, // row count -- money config deserves boot visibility; the watcher logs only changes
+			modelEndpoints: modelEndpoints.current.length, // issue #503: declared model endpoints, each a slot lease at pickup
 			image: config.jobImage,
 			valkey: config.valkeyUrl,
 			// Issue #464: the literal address every Valkey client of this worker dials, beside the URL as written; null

@@ -8,7 +8,10 @@ import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, TERMINAL
 import { NETNS_KEEPER_YOUNG_HOLD_MAX_MS, netnsKeeperCrashLoopSentence, netnsKeeperLoopAgainSentence } from "./netns-keeper.mjs";
 import { PODMAN_RESTART_HOLD_EXPIRED, PODMAN_RESTART_HOLD_MAX_MS, PODMAN_RESTART_HOLD_RECHECK_MS } from "./runtime-observations.mjs";
 import { targetFor } from "./run-history.mjs";
-import { budgetCapsFor, canonicalScope, concurrencyFor, makeInFlight, scopeKeyPrefix } from "./scoped-limits.mjs";
+import { isPerMachineHost } from "./backends.mjs";
+import { hash16 } from "./fleet-lease.mjs";
+import { endpointsForModel } from "./model-endpoints.mjs";
+import { budgetCapsFor, canonicalScope, concurrencyFor, makeInFlight } from "./scoped-limits.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 
@@ -25,6 +28,13 @@ export const JOB_TIMEOUT_MS = 30 * 60 * 1000; // REQ-JOB-TIMEOUT-30M
 // folder -- pays exactly one re-check, not fifteen seconds of dead air. No jitter: one worker per
 // docker daemon bounds any herd by its own concurrency, and a contended wake just re-defers.
 export const SCOPE_BUSY_RECHECK_MS = 5_000;
+
+// The endpoint-busy re-check (issue #503): a job whose model server has every slot held re-tests on a fixed
+// cadence, for the scope re-check's reason (a held slot has no natural "until"). Its own value rather than a
+// borrow of 5s, because nothing records WHY a job sits in the delayed set and the wake instant is the only
+// evidence an operator has: 7s is distinct from the scope re-check, the wait throttle floor and the supersede
+// re-ask, and a test keeps all four apart. Short, because a local model run is often short too.
+export const ENDPOINT_BUSY_RECHECK_MS = 7_000;
 
 // How long a job waits before re-asking whether a target's holder is still alive (issue #230). Reached only
 // when the liveness probe could not answer, which is a redis or queue fault rather than a normal state, so
@@ -111,8 +121,35 @@ function boundAfterAbort(run, signal, job, log, graceMs = ABORT_GRACE_MS) {
  * under `job.data > overlay > env` precedence and re-binds the worker slot count via `applyConcurrency`.
  * The overlay changes which values the spend caps take, never when they are checked -- reserveBudget still
  * runs inside runJob against the freshly passed caps (CONST-BUDGET-BEFORE-TOKENS).
+ *
+ * The read happens once per pickup, right after the scope gate and before the model endpoint gate (issue #503),
+ * because that gate needs the effective provider and model, which the overlay can supply.
  */
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
+/**
+ * A job's endpoint set (issue #503): the endpoints its MAIN model is served by. A seam, because the set grows when
+ * allowed-model lists land (#502) and the gate's loop is written for more than one endpoint already; the default is
+ * the whole rule today, and the residual is that a model the agent switches to mid-run is not counted.
+ */
+export function mainModelEndpoints({ models, job, endpoints }) {
+	return endpointsForModel({ models, provider: job.provider, modelId: job.model, endpoints });
+}
+
+/**
+ * The job runJob is handed: `job.data > overlay > env` precedence, field by field (INT-CONFIG-OVERLAY-CONTRACT).
+ * ONE function for the two readers (the endpoint gate at pickup and the runJob call), so the gate can never lease
+ * for a model other than the one the container is started with.
+ */
+export function effectiveJobOf(data, settings) {
+	return {
+		...data,
+		provider: data.provider ?? settings.provider,
+		model: data.model ?? settings.model,
+		maxTurns: data.maxTurns ?? settings.maxTurns,
+		maxTokens: data.maxTokens ?? settings.maxTokens, // optional per-job token budget (issue #25); null => runner meter only
+	};
+}
+
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
 	return async function processor(job, token, signal) {
 		// Scoped pause windows (REQ-SCOPED-PAUSE-WINDOWS): if this job's folder/repo is inside an active pause
 		// window, DEFER it to the window end via BullMQ's delayed set -- the job keeps its identity/dedup and
@@ -448,7 +485,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		}
 
 		// Per-scope concurrency and the one-job-per-folder mutex (issue #242,
-		// INT-SCOPED-LIMITS-FILE-CONTRACT). LAST of the three gates, after the pause gate (a paused job must
+		// INT-SCOPED-LIMITS-FILE-CONTRACT). After the pause gate (a paused job must
 		// not burn re-check wakes) and after the wait gate (a job holding until tomorrow must not sit on a
 		// folder while it does), and STRICTLY above the `try` below, like the pause gate and for the same two
 		// reasons: a DelayedError thrown inside the try would be converted to UnrecoverableError by the
@@ -519,7 +556,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// And an unlimited forge scope never claims either: `concurrencyFor` returns Infinity with no
 			// matching row, so a deployment with no scoped-limits file issues no command at all.
 			if (scopeLease && job.data?.kind !== "local" && Number.isFinite(ceiling)) {
-				scopeSlot = await scopeLease.acquire(job.id, { slots: ceiling, keyArgs: [scopeKeyPrefix(scope).slice("budget:s:".length)] });
+				scopeSlot = await scopeLease.acquire(job.id, { slots: ceiling, keyArgs: [hash16(scope)] });
 				if (!scopeSlot) {
 					// The local slot goes back BEFORE we defer: `makeInFlight().release` is not idempotent, so a
 					// slot held across a deferral is a slot this host never gets back.
@@ -533,6 +570,123 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					await job.moveToDelayed(nowMs + SCOPE_BUSY_RECHECK_MS, token);
 					throw new DelayedError();
 				}
+			}
+		}
+
+		// THE ONE SETTINGS READ (issue #503), hoisted here from the top of the main `try` below because the
+		// endpoint gate after it needs the effective provider and model, which the overlay can supply. Still ONE
+		// call per pickup: two reads could straddle an overlay edit, and the gate would then lease for one model
+		// while the container ran another. A throw is CAPTURED, never raised here: it is re-raised at the old spot
+		// inside the main `try`, so its record, its retry decision and the releases are exactly what they were.
+		let settings = null;
+		let settingsError = null;
+		let settingsThrew = false;
+		try {
+			settings = await getSettings();
+		} catch (error) {
+			settingsThrew = true;
+			settingsError = error;
+		}
+
+		// THE MODEL ENDPOINT GATE (issue #503, INT-MODEL-ENDPOINTS-FILE-CONTRACT). A declared local model server
+		// has a fixed number of parallel slots, and nothing else bounds how many jobs pile onto it: three per host
+		// on several hosts, each metering $0. So a job whose MAIN model is served by a declared endpoint takes one
+		// of its slots here and holds it until its container is gone. The main model only: an allowed-model list
+		// does not exist yet (#502), so a model the agent switches to mid-run is not counted, a named residual.
+		//
+		// LOCAL JOBS TAKE IT TOO, where they skip the fleet scope lease: a folder path carries no identity across
+		// hosts, but an endpoint is one physical server whoever calls it.
+		//
+		// Two halves, like the scope's: the in-process bound (`endpointSlots`, shared by both Workers like the host
+		// slot) and the fleet lease, which exists only with a declared worker name. A Valkey fault fails the fleet
+		// half OPEN, and the in-process bound underneath is then the whole bound for this host, said in the log.
+		//
+		// In ID ORDER, so two jobs on two shared endpoints cannot each hold one and wait on the other: every job
+		// asks in the same order, which is what rules the cycle out. On any miss EVERYTHING taken so far goes back
+		// (endpoint holds, the scope's fleet claim, its in-process slot, the host slot) before the deferral: an
+		// in-process release is not idempotent, so a slot kept across a deferral is one this host never gets back,
+		// and a deferred job holding slots would starve the jobs that could run.
+		//
+		// A deferral, never a refusal: a full server is transient state (CONST-RETRY-INFRA-ONLY), and it is free,
+		// decided before any token, clone or reservation (CONST-BUDGET-BEFORE-TOKENS). Skipped when the settings
+		// are unreadable or invalid: that job is refused or retried below without starting anything.
+		//
+		// One snapshot per pickup (the endpoints, the overlay models, the derived set), handed to runJob as
+		// `modelEndpoints` so a later gate reads the same declaration this one leased against. With no endpoints
+		// declared the overlay is not even read, and the job touches nothing new: no command, no key, no field.
+		const endpointHolds = [];
+		let endpointSnapshot = null;
+		// Drains the holds, so a second call releases nothing: the in-process map's release is not idempotent.
+		// The in-process half goes back synchronously, so a caller that cannot await (the setup guard) still frees
+		// every local slot before it rethrows; the fleet half is release-if-mine and awaited where it can be.
+		const releaseEndpointHolds = () => {
+			const taken = endpointHolds.splice(0).reverse();
+			for (const hold of taken) endpointSlots.release(hold.id);
+			return Promise.all(taken.map((hold) => hold.fleet?.release?.()));
+		};
+		if (modelEndpoints && !settingsThrew && !settings?.invalid) {
+			let endpoints = [];
+			let models = null;
+			let set = [];
+			try {
+				endpoints = modelEndpoints() ?? [];
+				if (endpoints.length > 0) {
+					try {
+						models = overlayModels();
+					} catch (err) {
+						// FAIL OPEN, and say so: an overlay models.json that does not parse names no endpoint for any model, and
+						// refusing here would refuse every job on a hosted model too. The job runs without an endpoint slot.
+						// A FIXED reason, never the error's message: a JSON.parse message quotes the file's text around the fault,
+						// and models.json holds keys (PR #518's gate measured one in this line). The settings reader's posture.
+						const reason = /not valid JSON/.test(String(err?.message)) ? "overlay models.json is not valid JSON" : typeof err?.code === "string" ? err.code : "overlay models.json is unreadable";
+						deps?.log?.("endpoint_models_unreadable", { jobId: job.id, reason });
+					}
+					// ONE hold per endpoint id: a set naming an endpoint twice would take its slot and then wait on itself,
+					// forever on `slots: 1`. Deduplicated before the sort, so the order rule sees each endpoint once.
+					const byId = new Map();
+					for (const e of endpointSetFor({ models, job: effectiveJobOf(job.data, settings), endpoints })) if (!byId.has(e.id)) byId.set(e.id, e);
+					set = [...byId.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+				}
+			} catch (err) {
+				// The derivation reads data only, so this is a defect, not a state: the job runs unbounded and the log says so.
+				deps?.log?.("endpoint_gate_unavailable", { jobId: job.id, reason: scrubCredentials(err?.message) });
+				set = [];
+			}
+			endpointSnapshot = { endpoints, models, set };
+			for (const endpoint of set) {
+				let where = null;
+				let fleet = null;
+				if (!endpointSlots.tryAcquire(endpoint.id, endpoint.slots)) {
+					where = "host";
+				} else if (endpointLease && !isPerMachineHost(endpoint.host)) {
+					// A host alias NAME is a DIFFERENT server on every machine (PR #518's gate: two Macs each declaring
+					// host.docker.internal shared one fleet bound), so every other host, any address included, takes the
+					// fleet half; the in-process bound above is exact for a server only this host reaches.
+					fleet = await endpointLease.acquire(job.id, { slots: endpoint.slots, keyArgs: [hash16(endpoint.id)] });
+					if (!fleet) {
+						endpointSlots.release(endpoint.id);
+						where = "fleet";
+					} else if (fleet.degraded) {
+						deps?.log?.("endpoint_lease_degraded", { jobId: job.id, endpoint: endpoint.id });
+					}
+				}
+				if (where !== null) {
+					await releaseEndpointHolds();
+					await scopeSlot?.release?.();
+					scopeSlot = null;
+					if (held) {
+						inFlight.release(scope);
+						held = false;
+					}
+					if (hostHeld) {
+						hostBound.slots.release(HOST_SLOT_KEY);
+						hostHeld = false;
+					}
+					deps?.log?.("endpoint_busy_deferred", { jobId: job.id, endpoint: endpoint.id, where, delayMs: ENDPOINT_BUSY_RECHECK_MS });
+					await job.moveToDelayed(nowMs + ENDPOINT_BUSY_RECHECK_MS, token);
+					throw new DelayedError();
+				}
+				endpointHolds.push({ id: endpoint.id, fleet });
 			}
 		}
 
@@ -703,13 +857,15 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			}
 			void scopeSlot?.release?.();
 			scopeSlot = null;
+			void releaseEndpointHolds();
 			clearTimeout(timer);
 			clearInterval(cancelPoll);
 			throw error;
 		}
 
 		try {
-			const settings = await getSettings();
+			// The read itself happened once, above the endpoint gate; its throw lands HERE, where it always did.
+			if (settingsThrew) throw settingsError;
 			if (settings.invalid) {
 				// A present-but-invalid overlay is a POLICY refusal, RETURNED (never thrown) so BullMQ marks the
 				// job completed and does not retry a file that can never parse (CONST-RETRY-INFRA-ONLY). Resolved
@@ -733,13 +889,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// supplies the provider the container env allowlist requires -- absent it, the allowlist refuses a job
 			// only after its budget slot is reserved. The `caps`/`softHoldPct` passed to runJob change which
 			// values reserveBudget checks, never when it runs.
-			const effectiveJob = {
-				...job.data,
-				provider: job.data.provider ?? settings.provider,
-				model: job.data.model ?? settings.model,
-				maxTurns: job.data.maxTurns ?? settings.maxTurns,
-				maxTokens: job.data.maxTokens ?? settings.maxTokens, // optional per-job token budget (issue #25); null => runner meter only
-			};
+			const effectiveJob = effectiveJobOf(job.data, settings);
 
 			const result = await runJob(effectiveJob, {
 				redis,
@@ -754,6 +904,10 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// gate above read -- one read per pickup, so gate and ledger agree for this job's whole
 				// life. Null when no row carries a money window for this scope.
 				scopedCaps: budgetCapsFor(job.data, limits),
+				// The endpoint gate's snapshot (issue #503): the declared endpoints, the overlay models and this job's
+				// derived set, read once at pickup. Absent on a wiring with no endpoint seam, so a bare processor's
+				// runJob context is unchanged.
+				...(endpointSnapshot ? { modelEndpoints: endpointSnapshot } : {}),
 				...deps,
 				// #227. BOUNDED AFTER THE ABORT, and this is what makes `abortable` an honest declaration.
 				//
@@ -994,6 +1148,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// full re-check interval while the slot it wanted went free behind it. The finally is already inside
 			// an async function, and `release` never throws.
 			await scopeSlot?.release?.();
+			// The endpoint holds, the same way and for the same reasons (issue #503).
+			await releaseEndpointHolds();
 			clearTimeout(timer);
 			clearInterval(cancelPoll);
 			signal.removeEventListener("abort", onAbort);
@@ -1035,7 +1191,7 @@ export function keeperHoldState(job, at) {
 	return { at, since, startedMs };
 }
 
-export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), extraClosers = [] }) {
+export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [] }) {
 	// One Worker per queue name (issue #57). A host-affine job -- one whose folder, secret resolver or wait
 	// check lives on THIS machine -- is enqueued to `pi-jobs@<name>` rather than filtered for at pickup,
 	// because BullMQ has no selective pop and the put-it-back alternative does not work: promotion out of
@@ -1094,6 +1250,12 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			inFlight,
 			hostBound,
 			scopeLease,
+			// Issue #503: the model endpoint bound. `endpointSlots` is SHARED across both Workers for the host
+			// slot's reason: it bounds this host's calls on one server, and two maps would double it.
+			endpointSlots,
+			endpointLease,
+			modelEndpoints,
+			overlayModels,
 			// Issue #230. Undefined pass-throughs take makeProcessor's own defaults (a wait state over the same
 			// redis client, and the shared 30-day `after` ceiling), so a bare wiring behaves like a wired one.
 			waitState,

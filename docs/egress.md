@@ -87,9 +87,9 @@ A job can reach a model server on your own machine or LAN (Ollama, vLLM, llama.c
 proxy, one host and one port at a time. Each one you declare becomes a `CONNECT` tunnel to exactly that host and
 port, and nothing else: no other port of that host, and no plain forward request to it.
 
-**Jobs cannot use a local model as their main model yet.** The route through the proxy and the `doctor` proof
-below are in. The keyless credential gate and the slot leases come in other parts of #503: until they land, a
-job's provider check still refuses a provider with no key, and a declared endpoint takes no slot.
+**Jobs cannot use a local model as their main model yet.** The route through the proxy, the `doctor` proof below
+and the slot leases are in. The keyless credential gate comes in another part of #503: until it lands, a job's
+provider check still refuses a provider with no key.
 
 ### Declare, render, reload
 
@@ -152,6 +152,47 @@ The measured routes, per runtime and version, with what each needs, are in
 [`backends.md`, "Reaching a model server on the host"](backends.md#reaching-a-model-server-on-the-host). `doctor`
 reads the same table.
 
+### Slots: how many jobs use a server at once
+
+`slots` is how many requests the server runs at once (Ollama's `OLLAMA_NUM_PARALLEL`, llama.cpp's
+`--parallel`, vLLM's `--max-num-seqs`, LM Studio's default of 4). A job whose model is served by the endpoint takes
+one slot when it is picked up and keeps it until it ends. When every slot is taken, the next such job waits: the
+log says `endpoint_busy_deferred` with the endpoint id, and the job is tried again 7 seconds later. It is never
+refused and never fails for this, and it spends nothing while it waits. Local and forge jobs both take a slot.
+
+The worker rereads the file when you edit it, so a new `slots` applies to the next job; a broken edit is logged as
+`model_endpoints_reload_invalid` and the last good file stays in force. It watches the file only when
+`PI_MODEL_ENDPOINTS_FILE` names it or it existed when the worker started. If you create `model-endpoints.json`
+later, restart the worker: until then `pi-dispatch egress render` has already opened the route, but no job takes a
+slot.
+
+**One server, one id.** A server on a LAN machine that several workers use (with `PI_WORKER_NAME` set on each) must
+be declared with the same `id` and `slots` in every worker's file. The slots are counted under the id, so two ids
+for one server, or different `slots` values, give it separate or uneven bounds. The two names
+`host.docker.internal` and `host.containers.internal` are different: each one is a server on that worker's own
+machine, so its slots are counted on that machine only, whatever the id. Every address, `169.254.x.x` included, is
+counted across workers: a link-local address can be one neighbour that several machines share. If other workers
+reach a server by its address, declare it on its own machine by that same address and id too: under the name its
+slots would be counted twice, once on that machine and once across the others. Use the name only for a server no
+other worker uses.
+
+What the slots do not cover:
+
+- **One slot per job, for the whole run.** A job that sends several requests at once (sub-agents, parallel tool
+  calls) can go over `slots`. The server then queues them, or refuses past its own limit (Ollama answers 503 past
+  `OLLAMA_MAX_QUEUE`).
+- **Only the job's main model counts.** A model the agent switches to during the run takes no slot.
+- **Across machines only with a worker name.** With `PI_WORKER_NAME` set, the slots are shared by every worker on
+  the same Valkey. Without it, each worker counts only its own jobs, so two machines can each fill the server.
+- If Valkey does not answer, a job takes the slot anyway (`endpoint_lease_degraded` in the log), and the count on
+  this machine still holds.
+- If the overlay `models.json` cannot be parsed, jobs run without taking a slot, and the log says
+  `endpoint_models_unreadable`.
+- Lowering `slots` while jobs run: a new job can take a lower slot while an older job still holds a higher one, so
+  for a short while more jobs run than the new value. It settles as those jobs end.
+- Removing or renaming an endpoint while a job holds its slot: that slot is not released by name any more and
+  expires on its own, at most 35 minutes after it was taken.
+
 ### What `doctor` says about them
 
 With nothing declared, `doctor` says nothing about model endpoints and starts no extra container. With
@@ -203,8 +244,8 @@ Zero spend.
 5. `pi-dispatch doctor`. Expect the five lines above: the route, the include, a 200, a 403 for the CONNECT to port
    11435, and a 403 for the plain `GET` to port 11434.
 
-Running a job on it (`--provider local-ollama --model qwen2.5:0.5b`) needs the keyless gate, and two jobs waiting
-for one slot need the slot leases, from the other parts of #503.
+Running a job on it (`--provider local-ollama --model qwen2.5:0.5b`) needs the keyless gate, from another part of
+#503. Once it runs, two such jobs share the one slot: the second logs `endpoint_busy_deferred` until the first ends.
 
 ### Upgrading a deployment from before #503
 

@@ -4945,12 +4945,16 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   Podman recipe, `podman-conformance.yml`), the `pi-dispatch egress render` verb and its reload, and the proxy's
   `host.docker.internal:host-gateway` on Docker are LANDED (#503, part 2; `INT-EGRESS-POLICY-CONTRACT`). So a
   rendered and reloaded declaration now opens its CONNECT tunnel through the proxy. The measured routes from the
-  proxy to the host (`HOST_ROUTES`, `hostRouteFor` in `worker/src/backends.mjs`) are LANDED (#503, part 3), and so
-  are the doctor rows below (#503, part 6). PENDING, in later parts of #503 that land before any release: the slot
-  leases; the keyless credential gate and `PI_DISPATCH_KEYLESS`. Until then a declared endpoint is reachable but
-  takes no slot lease, and a keyless provider is still refused at the credential gate.
-- **Producer/Consumer**: the operator writes it by hand. The worker reads it for the render and, in a later change,
-  at each pickup, so a `slots` edit applies to the next job.
+  proxy to the host (`HOST_ROUTES`, `hostRouteFor` in `worker/src/backends.mjs`) are LANDED (#503, part 3). The slot
+  leases are LANDED (#503, part 4; `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`): see **Slots** below. The doctor rows below
+  are LANDED (#503, part 6). PENDING, in the last part of #503 (part 5), which lands before any release: the
+  keyless credential gate and `PI_DISPATCH_KEYLESS`. Until then a keyless provider is still refused at the
+  credential gate.
+- **Producer/Consumer**: the operator writes it by hand. The worker loads it at boot (a bad file refuses boot,
+  `configError`), watches it and reloads it on change, keeping the last good declaration on a bad edit
+  (`model_endpoints_reload_invalid`), and reads the current one at each pickup, so a `slots` edit applies to the
+  next job. The watch is armed when the file is named or exists at boot; a default file created later is read at
+  the next restart. The render reads it too.
   `doctor` loads it through the worker's own loader. It is NOT settable by a model-callable tool or by the settings
   overlay: the proxy rules derive from it, so a write would widen egress.
 - **Location**: `model-endpoints.json` in the deployment folder (the worker's working directory), which
@@ -4965,7 +4969,7 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   - `version` (required): an integer of at least 1. A newer version is refused, naming both. Refuse, never repair.
   - Unknown keys, at the top level or in an endpoint, are REFUSED rather than dropped. This file decides proxy
     rules, so a key an old worker dropped would be a rule the operator believes in and does not have.
-  - `id` (required): `[a-z0-9-]{1,32}`, unique. It names the squid ACLs (`pde_<id>_...`) and, later, the slot keys.
+  - `id` (required): `[a-z0-9-]{1,32}`, unique. It names the squid ACLs (`pde_<id>_...`) and the slot keys.
   - `host` (required): a DNS name, an IPv4 literal in dotted-decimal form, or an IPv6 literal. A name is
     lowercased. An IPv6 literal is stored in brackets, compressed and lowercase (`[fd00::2]`), the form a URL's
     `hostname` and squid both use. Refused: `localhost` and any `*.localhost`, `127.0.0.0/8`, `0.0.0.0`, `::1`,
@@ -4978,7 +4982,7 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
     is `127.0.0.1`); anything else that is not a name or a literal.
   - `port` (required): 1 to 65535. Refused when it is the proxy's own 3128 or the job queue's port (`VALKEY_URL`'s,
     6379 when the URL names none).
-  - `slots` (required): 1 to 64, the server's parallel requests. Later changes lease one per job.
+  - `slots` (required): 1 to 64, the server's parallel requests. A job leases one per endpoint in its set.
   - `keyless` (optional): a boolean, default `false`. Later changes let a provider whose every model sits on a
     keyless endpoint pass the credential gate.
   - One `host` and `port` pair is declared once. Two ids for one server would split its slots.
@@ -4995,6 +4999,35 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   written as a literal URL. A job's
   endpoint set is its MAIN model's endpoints for now. The models on a job's allowed list join it with #502; until
   then that is a named residual.
+- **Slots** (#503, part 4): at pickup, after the scope gate and the one settings read, a job whose endpoint set
+  is not empty takes one slot of each endpoint in it, in id order: first an in-process slot (per host, limit
+  `slots`), then, when `PI_WORKER_NAME` is declared, a fleet slot, the Valkey key `slot:m:<h>:<i>` where `h` is
+  the first 16 hex of the sha256 of the id and `i` is 0 to `slots - 1`, holding `<worker name>#<job id>` with the
+  scope claim's TTL. Local and forge jobs both take it. An endpoint whose host is `host.docker.internal` or
+  `host.containers.internal` (a NAME, one trailing dot read as none) takes NO fleet slot: that name is a different
+  server on every machine, so a key built from the id would make two machines share one bound
+  for two servers. Its in-process slot is the whole bound, and an exact one. Every address takes the fleet slot,
+  link-local included: a link-local address is unique on its link, and several machines can reach one neighbour
+  server behind it, so the rule errs toward a tighter bound, never an oversubscribed server. So the fleet bound is keyed by id:
+  ONE SERVER, ONE ID. A LAN server shared by several workers must be declared with the same id and the same
+  `slots` in every worker's file, or its bounds are separate, and on its own machine too: declared there by a host
+  alias name instead, its slots would count twice, once on that machine and once across the others. A release is an atomic compare-and-delete, so a
+  release after the TTL never frees a claim another host took since; a fleet grant degraded by a Valkey fault
+  still compare-and-deletes the keys it tried, because a timed-out write can land late. A set naming an endpoint
+  twice takes it once. When any slot is full, every slot the job took (and its
+  scope and host slots) is released, the log says `endpoint_busy_deferred` with the job id, the endpoint id and
+  `where` (`host` or `fleet`), and the job is delayed 7 s (`ENDPOINT_BUSY_RECHECK_MS`). A deferral is free and is
+  never a refusal; nothing is recorded. A Valkey fault grants the fleet slot (`fleet_lease_unavailable`,
+  `endpoint_lease_degraded` with the endpoint id) and the in-process slot still bounds the host. The slots are
+  released when the job ends, however it ends. At boot, after a reaper that enumerated, a named worker deletes
+  its own `slot:m:` claims for every declared endpoint that takes a fleet slot, stopping at the first connection or timeout fault; a per-key reply error (a WRONGTYPE key under the prefix) is logged by key, `endpoint_claims_sweep_key_error`, and the sweep goes on. The endpoint set, the endpoints and the overlay
+  `models.json` are read once per pickup and handed to the job's run as one snapshot. Invalid or unreadable
+  settings take no slot. With no endpoint declared the overlay `models.json` is not read and no command is sent.
+  RESIDUALS: the set is the main model's only until #502; a job holds its slot for its whole run, so fan-out
+  inside one job can exceed `slots` and the server queues; without a declared worker name the bound is per host;
+  an overlay `models.json` that does not parse fails open (`endpoint_models_unreadable`, a fixed reason that
+  quotes nothing of the file), no slot taken; lowering `slots` live lets a new job take a lower index while an
+  older holder of a higher one runs, until it ends; a removed or renamed endpoint's claims expire by their TTL.
 - **Render**: the include is deterministic, endpoints sorted by id, after a fixed header (generated, do not edit,
   regenerate with `pi-dispatch egress render`). Per endpoint:
   `acl pde_<id>_host dstdomain -n <host>`, `acl pde_<id>_port port <port>`,
@@ -5059,6 +5092,9 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   fails as not port-exact, and any answer but squid's denial on the third fails. Given an include inside the proxy
   that differs from the render, whatever the folder's file holds, `doctor` fails. Given a route the table refutes on
   this runtime, `doctor` fails naming it.
+  Given an endpoint with `slots: 1` and a job holding it, when a second job whose main model uses it is picked
+  up on any host, then it is deferred, holding nothing, and runs once the first ends. Given no endpoints, then a
+  job's container argv and its record are byte-identical to before.
 
 ---
 
@@ -5821,3 +5857,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-02 | Issue #503, part 3. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, the `host` bullet: `10.0.2.2` is refused too. It was always in the rendered `_local` deny, so a declaration of it could never answer; the parser and the rule now read one set, `PROXY_LOCAL_ADDRESSES` in `worker/src/backends.mjs`, from which `LOCAL_ADDRESSES` is built. Every other refusal and message is unchanged. **Code evidence**: worker/src/backends.mjs -> PROXY_LOCAL_ADDRESSES, isProxyLocalHost; worker/src/model-endpoints.mjs -> LOCAL_ADDRESSES; worker/test/model-endpoints.test.mjs. |
 | 2026-09-30 | Issue #503 (declared model endpoints), the second change: the proxy includes them. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, a new bullet beside the rules one: `deploy/egress-proxy.conf` (and its mirror) carries `include /etc/pi-dispatch/model-endpoints.conf` after `http_access deny allowed to_host_local` and before `http_access deny CONNECT !SSL_ports`, because pi tunnels every provider call and first match wins; the include is mounted read-only from the deployment folder by the compose service, `up`'s argv, the Quadlet unit (a third placeholder, the folder's own file, never a copy), the hand-started Podman recipe and `podman-conformance.yml`; `pi-dispatch egress render` validates in memory, then writes the include IN PLACE (no `O_CREAT`, `O_NOFOLLOW`, truncate, fsync) and refuses a symlink, a directory or a missing file, because a renamed file is invisible to a running single-file bind mount and `squid -k reconfigure` then reloads the old rules silently (measured on Docker 29.1.3 and Podman 4.9.3 and 5.8.1, 2026-09-30); the verb prints the reload (`docker exec` or `podman exec` of `squid -k reconfigure`) and never runs it; the proxy gets `host.docker.internal:host-gateway` on Docker (compose and `up`), nothing on rootless Podman; the governing rule (PR #517's review): the folder's rules include `model-endpoints.conf` only together with a proxy that mounts it, so a two-mount proxy is drift only when the folder's rules include the file, `up` refreshes the rules and replaces such a proxy as one step (declined or blocked, nothing written; a failed replace puts the old rules back), a replaced proxy is removed with `rm -f -v`, endpoints declared under older rules are named by `up`, `doctor` and `egress render` alike as the rules refresh's to fix, and a third bind must be the folder's file; the render empties the include on a failed write, refuses a hard-linked one, and compares `PI_MODEL_ENDPOINTS_FILE` as resolved paths. The Acceptance gains the endpoint case. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, Status: the include, its mounts, the render verb and the host route on Docker are landed; the Podman route table, the slot leases, the keyless gate and the doctor probes stay pending. Shape: a host with a port separator and an empty port (`a.lan:`) is refused as carrying a port, not as an IPv6 address with an IPv4 tail (PR #515's review). **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no job flag, mount or variable moves; the host entry is the proxy's only. **Code evidence**: deploy/egress-proxy.conf; deploy/docker-compose.yml; deploy/pi-dispatch-egress-proxy.container; worker/src/egress-cli.mjs -> runEgress, writeInPlace, proxyIncludeNeeds; worker/src/egress-proxy-state.mjs -> shippedProxyDrift, rulesIncludeEndpoints; worker/src/up.mjs -> EGRESS_RUN_ARGS; worker/src/podman-stack.mjs -> MODEL_ENDPOINTS_PLACEHOLDER, planStack; worker/src/service.mjs -> TEMPLATE_PINS, stackRefusal; worker/src/doctor.mjs -> egressChecks. |
 | 2026-10-02 | Issue #503, part 6. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: a Doctor bullet (the route row from `hostRouteFor`, the include byte-compared INSIDE the running proxy, three probes per endpoint and what passes each, the loopback baseUrl and allowlisted-alias warnings, and nothing at all with no declaration) and two Acceptance sentences; the Status now records parts 3 and 6 as landed and leaves the slot leases and the keyless gate pending. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the object table: the endpoint probe containers, under the canary probe prefix so every leftover line stays true, with the sweep's id class. **`INT-LIVE-PROBE-CONTRACT` AMENDED**: the podman `--live` canary runs the endpoint probes on its network, and their lines carry no reading, so the `egress` verdict reads the canary's three alone. Measured facts cited, not re-measured: M3 (a renamed file is not seen in the container) and M9 (a job sees 503 and 403 alike), 2026-09-30. Folding PR #519 gate round 1: the port-exact probe skips the same host's declared ports and 443 and 80; the include check also catches a folder file replaced under the proxy; the rootless helper is read from `podman info` or the running helper; the `lan` row and a server's own 401 or 403 are worded as what they are; dotted allowlist entries count. Gate round 2: the replaced-file compare reads the bind source the proxy mounts, never the folder doctor runs in, and covers an operator's proxy too. |
+| 2026-10-02 | Issue #503, part 4 (slot leases). **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: Status (the measured host routes of part 3 and the slot leases are landed beside part 6's doctor rows; the keyless gate of part 5 stays pending); Producer/Consumer (boot load refuses a bad file, a watched live reload keeps the last good one, the current one is read at each pickup); a new **Slots** bullet (in-process then fleet `slot:m:<hash16(id)>:<i>` per endpoint in id order, local and forge jobs alike, no fleet slot for a host alias name (every address, link-local included, takes one), one server one id, atomic compare-and-delete release, a degraded grant still releasing the keys it tried, a set deduplicated by id, a miss releases everything and defers 7 s as `endpoint_busy_deferred`, a Valkey fault grants, the boot sweep, one snapshot per pickup, the residuals); the `id` and `slots` bullets; the Acceptance gains the slot case and the no-endpoints case. **`INT-SCOPED-LIMITS-FILE-CONTRACT` UNCHANGED, checked**: the scope gate, its keys and its deferral are what they were. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: the overlay is still read once per job and the same precedence fills provider and model; the read now happens before the endpoint gate instead of inside the run. **`INT-WAIT-PROFILES-CONTRACT` UNCHANGED, checked**: the wait gate still runs above the settings read. **Code evidence**: worker/src/index.mjs -> makeProcessor, effectiveJobOf, ENDPOINT_BUSY_RECHECK_MS; worker/src/fleet-lease.mjs -> endpointSlotKey, makeClaimSweeper; worker/src/start.mjs -> startWorker, reloadModelEndpoints; worker/test/scope-mutex.test.mjs; worker/test/fleet-lease.test.mjs. |
