@@ -3,7 +3,7 @@ import * as realFs from "node:fs";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { makeSessionStore, SESSION_FILE_NAME } from "../src/session-store.mjs";
+import { compactionSummaryIsEmpty, fileListSuffix, hasEmptyCompaction, makeSessionStore, SESSION_FILE_NAME } from "../src/session-store.mjs";
 import { sessionKeyFor } from "../src/session-key.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -2641,4 +2641,182 @@ test("a promotion whose own identity reads fail REFUSES, rather than passing on 
 	const res = store.promoteSession(s0, { piVersion: PI });
 	assert.equal(res.promoted, false, "it cannot tell, so it must not claim");
 	assert.equal(res.reason, "transcript-diverted");
+});
+
+// ── Issue #535: a compaction with an empty summary is never resumed ─────────────────────────────────────────
+//
+// The three summaries pi 0.99.1 wrote when the runner's brake refused the summary call, measured with the token
+// cap and the cost cap (image/runner/test/compaction-refused.integration.test.mjs holds them against pi itself),
+// and the file lists pi appends after any of them. `compaction()` writes no `details` unless a test passes them, so
+// the fallback strip is what most tests here exercise; the exact strip from `details` has its own tests below.
+const SPLIT = "\n\n---\n\n**Turn Context (split turn):**\n\n";
+const REFUSED_SUMMARIES = {
+	"one refused call": "",
+	"a split turn, both calls refused": SPLIT,
+	"a split turn with no history, its one call refused": `No prior history.${SPLIT}`,
+};
+const FILE_LISTS = "\n\n<read-files>\nsrc/a.mjs\n</read-files>\n\n<modified-files>\nsrc/b.mjs\n</modified-files>";
+const message = (id, role, text) => `${JSON.stringify({ type: "message", id, parentId: null, timestamp: "2026-10-02T00:00:00.000Z", message: { role, content: [{ type: "text", text }] } })}\n`;
+const compaction = (id, fields) => `${JSON.stringify({ type: "compaction", id, parentId: "m2", timestamp: "2026-10-02T00:00:00.000Z", firstKeptEntryId: "m2", tokensBefore: 4242, fromHook: false, ...fields })}\n`;
+const transcriptWith = (...entries) => HEADER + message("m1", "user", "fix the bug") + message("m2", "assistant", "done") + entries.join("");
+
+test("a compaction the brake refused is never resumed: every measured summary cold-starts by name, with or without file lists", () => {
+	for (const [shape, summary] of Object.entries(REFUSED_SUMMARIES)) {
+		for (const [tail, details] of [
+			["", { readFiles: [], modifiedFiles: [] }],
+			[FILE_LISTS, { readFiles: ["src/a.mjs"], modifiedFiles: ["src/b.mjs"] }],
+			["\n\n<read-files>\nsrc/a.mjs\n</read-files>", { readFiles: ["src/a.mjs"], modifiedFiles: [] }],
+		]) {
+			// Each shape twice: with the `details` pi records (the exact strip) and without (the fallback).
+			for (const fields of [{ details }, {}]) {
+				const f = fixture();
+				seed(f.sessionsDir, sessionKeyFor(ghIssue), { body: transcriptWith(compaction("c1", { summary: summary + tail, ...fields })) });
+				const s = f.store.resolveSession(ghIssue, { jobDir: f.jobDir, piVersion: PI });
+				const label = `${shape}, tail ${JSON.stringify(tail)}, ${fields.details ? "details" : "no details"}`;
+				assert.equal(s.resume, false, label);
+				assert.equal(s.reason, "compaction-summary-empty", label);
+				// The cold-start shape every other arm stages: 0 bytes, so pi starts fresh and nothing of the old
+				// conversation reaches the container.
+				assert.equal(statSync(join(s.hostDir, SESSION_FILE_NAME)).size, 0, label);
+				// Refused BY NAME in the log, and by name only: no task content rides the line.
+				const resolved = f.logs.find(([event]) => event === "session_resolved");
+				assert.deepEqual(resolved[1], { key: sessionKeyFor(ghIssue), resume: false, reason: "compaction-summary-empty" }, label);
+				assert.equal(JSON.stringify(f.logs).includes("fix the bug"), false, label);
+			}
+		}
+	}
+});
+
+test("a blank or missing summary is empty: whitespace only, no summary field, null, a number", () => {
+	for (const fields of [{ summary: " \n\t " }, { summary: `  ${SPLIT}\n` }, { summary: ` \n${FILE_LISTS}` }, {}, { summary: null }, { summary: 42 }]) {
+		const f = fixture();
+		seed(f.sessionsDir, sessionKeyFor(ghIssue), { body: transcriptWith(compaction("c1", fields)) });
+		assert.equal(f.store.resolveSession(ghIssue, { jobDir: f.jobDir, piVersion: PI }).reason, "compaction-summary-empty", JSON.stringify(fields));
+	}
+});
+
+test("a compaction with the model's text in every part still resumes, file lists and split turns included", () => {
+	for (const summary of [
+		"## Goal\nFix the bug.",
+		`## Goal\nFix the bug.${FILE_LISTS}`,
+		`## Goal\nFix the bug.${SPLIT}The turn began by reading src/a.mjs.`,
+		`No prior history.${SPLIT}The turn began by reading src/a.mjs.${FILE_LISTS}`,
+		// The model's own text may mention a file list; only pi's tail is stripped, so this is a summary.
+		"Read the <read-files> block from the last run.",
+	]) {
+		const f = fixture();
+		seed(f.sessionsDir, sessionKeyFor(ghIssue), { body: transcriptWith(compaction("c1", { summary })) });
+		const s = f.store.resolveSession(ghIssue, { jobDir: f.jobDir, piVersion: PI });
+		assert.equal(s.reason, "resumed", JSON.stringify(summary));
+		assert.equal(statSync(join(s.hostDir, SESSION_FILE_NAME)).size > 0, true);
+	}
+});
+
+test("a split turn whose history WAS summarised but whose turn summary was refused is still empty", () => {
+	// Under the cost cap the first call can be admitted and the second refused. The turn's opening is then
+	// in no summary at all, which is the loss this arm exists for.
+	const f = fixture();
+	seed(f.sessionsDir, sessionKeyFor(ghIssue), { body: transcriptWith(compaction("c1", { summary: `## Goal\nFix the bug.${SPLIT}${FILE_LISTS}` })) });
+	assert.equal(f.store.resolveSession(ghIssue, { jobDir: f.jobDir, piVersion: PI }).reason, "compaction-summary-empty");
+});
+
+test("an EARLIER empty compaction refuses too, under a later one that has a summary", () => {
+	// The later summary is built on the earlier one, so whatever the empty one replaced is in neither.
+	const f = fixture();
+	seed(f.sessionsDir, sessionKeyFor(ghIssue), { body: transcriptWith(compaction("c1", { summary: "" }), message("m3", "user", "next"), compaction("c2", { summary: "## Goal\nFix the bug." })) });
+	assert.equal(f.store.resolveSession(ghIssue, { jobDir: f.jobDir, piVersion: PI }).reason, "compaction-summary-empty");
+});
+
+test("only a compaction ENTRY is judged: the word in a message, an unparseable line and other entry types pass", () => {
+	const f = fixture();
+	const body = transcriptWith(
+		// Inside a message the quotes are escaped, so the cheap filter skips the line without parsing it.
+		message("m3", "user", 'what does "compaction" mean, and is {"type":"compaction","summary":""} one?'),
+		'{"type":"compaction","summary":"" this line does not parse\n',
+		// These two DO name "compaction" as a JSON string and parse, so only the type check keeps them out: an
+		// extension's custom entry with no summary, and a branch summary that is empty.
+		`${JSON.stringify({ type: "custom", id: "x1", parentId: "m2", customType: "compaction", data: {} })}\n`,
+		`${JSON.stringify({ type: "branch_summary", id: "b1", parentId: "m2", summary: "", details: { from: "compaction" } })}\n`,
+		compaction("c1", { summary: "## Goal\nFix the bug." }),
+	);
+	seed(f.sessionsDir, sessionKeyFor(ghIssue), { body });
+	assert.equal(f.store.resolveSession(ghIssue, { jobDir: f.jobDir, piVersion: PI }).reason, "resumed");
+});
+
+test("the empty-compaction arm is LAST: a corrupt or aged-out transcript names itself first", () => {
+	const corrupt = fixture();
+	seed(corrupt.sessionsDir, sessionKeyFor(ghIssue), { body: `not a header\n${compaction("c1", { summary: "" })}` });
+	assert.equal(corrupt.store.resolveSession(ghIssue, { jobDir: corrupt.jobDir, piVersion: PI }).reason, "unparseable");
+
+	const old = fixture({ maxAgeDays: 30 });
+	seed(old.sessionsDir, sessionKeyFor(ghIssue), { body: headerAt(daysAgo(45)) + compaction("c1", { summary: "" }) });
+	assert.equal(old.store.resolveSession(ghIssue, { jobDir: old.jobDir, piVersion: PI }).reason, "conversation-too-old");
+});
+
+// ── PR #541's review: the file-list strip ───────────────────────────────────────────────────────────────────
+
+test("the strip is linear: a 2 MiB summary of list openers an agent planted is judged in well under a second", () => {
+	// The agent owns /session, so it can plant any summary, and every resolve of the key judges it. A strip that
+	// searched again from every opener would grow with the square of this. The bound is generous on purpose;
+	// linear takes milliseconds.
+	const unit = "\n\n<read-files>\n";
+	const summary = `x${unit.repeat(Math.floor((2 * 1048576) / unit.length))}`;
+	const transcript = HEADER + compaction("c1", { summary });
+	const started = performance.now();
+	assert.equal(hasEmptyCompaction(transcript), false, "the text before the openers is the model's");
+	const ms = performance.now() - started;
+	assert.ok(ms < 1000, `judged in ${ms.toFixed(0)} ms`);
+});
+
+test("only pi's lists at the END are stripped: a quoted list mid-text stays, and so does the model's own trailing copy", () => {
+	// A list the model quoted, followed by its own words. Taking it from anywhere would leave nothing.
+	assert.equal(compactionSummaryIsEmpty("\n\n<read-files>\nsrc/a.mjs\n</read-files>\nThen fixed the bug."), false);
+	// The model's whole answer is a copied modified list, and pi appends its own two after it. pi's two come off,
+	// once each, and the model's copy is what is left: a summary, not an empty one.
+	assert.equal(compactionSummaryIsEmpty(`\n\n<modified-files>\nsrc/c.mjs\n</modified-files>${FILE_LISTS}`), false);
+});
+
+test("the LAST split-turn marker is the one split on: a reused summary carries a marker of its own", () => {
+	// A split turn with no new history reuses the previous summary as its history, and that summary was itself a
+	// split turn's. The turn summary after the LAST marker is empty, so the compaction is.
+	assert.equal(compactionSummaryIsEmpty(`## Goal\nPrior work.${SPLIT}The old turn.${SPLIT}`), true);
+	assert.equal(compactionSummaryIsEmpty(`## Goal\nPrior work.${SPLIT}The old turn.${SPLIT}The new turn.`), false);
+});
+
+test("a list closer with no newline before it is not pi's, and is not stripped", () => {
+	// pi writes `\n</read-files>`. Without the newline the block is the model's text, so the summary is not empty.
+	assert.equal(compactionSummaryIsEmpty("\n\n<read-files>\nsrc/a.mjs</read-files>"), false);
+	assert.equal(compactionSummaryIsEmpty("\n\n<modified-files>\nsrc/b.mjs</modified-files>"), false);
+});
+
+test("a split-turn marker with no blank line before it is not pi's, and is not split on", () => {
+	// pi joins with `\n\n---\n\n**Turn Context (split turn):**\n\n`. The same words after a single newline are the
+	// model's, so the summary is one non-blank part.
+	assert.equal(compactionSummaryIsEmpty("## Goal\n---\n\n**Turn Context (split turn):**\n\n"), false);
+	assert.equal(compactionSummaryIsEmpty("## Goal---\n\n**Turn Context (split turn):**\n\n"), false);
+});
+
+test("with pi's `details`, the exact suffix is stripped, so a path holding a list header cannot hide an empty summary", () => {
+	// pi copies a tool call's path verbatim into the lists. A path holding an opener moves where the fallback cuts
+	// (it finds the opener inside the path), and the empty summary reads as text; the exact suffix does not.
+	const details = { readFiles: ["x\n\n<read-files>\ny"], modifiedFiles: [] };
+	const summary = `No prior history.${SPLIT}${fileListSuffix(details)}`;
+	assert.equal(compactionSummaryIsEmpty(summary), false, "the fallback alone is fooled: the named residual");
+	assert.equal(compactionSummaryIsEmpty(summary, details), true);
+	const f = fixture();
+	seed(f.sessionsDir, sessionKeyFor(ghIssue), { body: transcriptWith(compaction("c1", { summary, details })) });
+	assert.equal(f.store.resolveSession(ghIssue, { jobDir: f.jobDir, piVersion: PI }).reason, "compaction-summary-empty");
+});
+
+test("with `details`, the model's own trailing list is kept, and a summary that does not end in pi's suffix falls back", () => {
+	// pi listed nothing, so a list at the end is the model's words.
+	assert.equal(compactionSummaryIsEmpty("\n\n<read-files>\nsrc/a.mjs\n</read-files>", { readFiles: [], modifiedFiles: [] }), false);
+	// `details` that do not match the text (an extension's entry, say) leave the fallback to strip.
+	assert.equal(compactionSummaryIsEmpty(FILE_LISTS, { readFiles: ["src/other.mjs"], modifiedFiles: [] }), true);
+	// `details` that are not two lists of strings are no suffix at all.
+	for (const details of [null, {}, { readFiles: "src/a.mjs", modifiedFiles: [] }, { readFiles: [1], modifiedFiles: [] }]) {
+		assert.equal(fileListSuffix(details), null, JSON.stringify(details));
+		assert.equal(compactionSummaryIsEmpty(FILE_LISTS, details), true, JSON.stringify(details));
+	}
+	assert.equal(fileListSuffix({ readFiles: [], modifiedFiles: [] }), "");
 });

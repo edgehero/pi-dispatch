@@ -194,6 +194,7 @@ export const SESSION_REASONS = new Set([
 	"conversation-too-old",
 	"resume-chain-too-long",
 	"context-too-full",
+	"compaction-summary-empty",
 	"too-large",
 	"unparseable",
 	"not-a-regular-file",
