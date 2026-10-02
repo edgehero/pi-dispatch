@@ -193,6 +193,106 @@ function normaliseVenue(venue) {
  */
 const COLD = (reason) => ({ resume: false, reason, bytes: null });
 
+/**
+ * The text pi 0.99.1 puts around a model's words in a compaction summary (issue #535). pi's `compact()`
+ * joins a split turn's two summaries with SPLIT_TURN_MARKER (`compaction.js`), and then appends the files
+ * the folded turns read and changed (`formatFileOperations`, `utils.js`). None of it is the model's, so
+ * none of it counts as a summary. A pin bump that rewords either is held by the runner's integration test
+ * (`compaction-refused.integration.test.mjs`), which feeds pi's own output through this check.
+ */
+const SPLIT_TURN_MARKER = "\n\n---\n\n**Turn Context (split turn):**\n\n";
+/**
+ * pi's two lists, in the REVERSE of the order `formatFileOperations` appends them (read, then modified), because
+ * they are taken off the end. Each is `\n\n<tag>\n...\n</tag>`, and either may be absent.
+ */
+const FILE_LIST_TAGS_FROM_END = ["modified-files", "read-files"];
+
+/**
+ * pi's exact file-list suffix for the lists a compaction entry records in `details`, or null when `details`
+ * does not hold two lists of strings. The same text pi's `formatFileOperations` builds (utils.js, held to it
+ * by the runner's integration test): each non-empty list as `<tag>\n<path per line>\n</tag>`, read first,
+ * joined by a blank line, and the whole led by one. No lists is the empty string.
+ */
+export function fileListSuffix(details) {
+	const read = details?.readFiles;
+	const modified = details?.modifiedFiles;
+	const strings = (list) => Array.isArray(list) && list.every((item) => typeof item === "string");
+	if (!strings(read) || !strings(modified)) return null;
+	const sections = [];
+	if (read.length > 0) sections.push(`<read-files>\n${read.join("\n")}\n</read-files>`);
+	if (modified.length > 0) sections.push(`<modified-files>\n${modified.join("\n")}\n</modified-files>`);
+	return sections.length === 0 ? "" : `\n\n${sections.join("\n\n")}`;
+}
+
+/**
+ * Whether a compaction summary holds nothing the model wrote, so a resumed session would go on without
+ * the turns it replaced.
+ *
+ * pi writes a refused summarization call as an EMPTY summary, not as a failed compaction: the runner's
+ * hard stop is `stopReason: "aborted"`, and pi rejects only `"error"` and `"length"`. Three shapes were
+ * measured at the pin, each optionally followed by the file lists:
+ *   - `""`, when the cut fell on a user message and the one call was refused;
+ *   - `"\n\n---\n\n**Turn Context (split turn):**\n\n"`, a split turn whose two calls were both refused;
+ *   - `"No prior history." + marker`, a split turn with no history to summarise and its one call refused.
+ * So the check strips pi's file lists from the END only (exactly, from the entry's `details`, when it has
+ * them), splits on the LAST marker, and calls the summary empty when ANY part is blank. A summary of the history with no summary of the split turn still lost that
+ * turn's opening. The last marker, because the history part can be a previous summary that holds a marker of
+ * its own.
+ *
+ * A summary that is not a string is empty: an entry with no summary carries none. Whitespace is blank, so
+ * a provider that answered a summary with only a newline is caught too.
+ */
+export function compactionSummaryIsEmpty(summary, details) {
+	if (typeof summary !== "string") return true;
+	let text = summary;
+	// FIRST CHOICE: the entry's own `details` say which files pi listed, so the exact suffix pi appended is
+	// rebuilt and taken off with one `endsWith`. That is the only strip a path cannot fool: pi copies a
+	// tool call's path verbatim, so a path holding a list header would misplace any search for one.
+	const exact = fileListSuffix(details);
+	if (exact !== null && text.endsWith(exact)) {
+		text = text.slice(0, text.length - exact.length);
+	} else {
+		// FALLBACK, for an entry with no usable `details`: pi appends at most two lists, read then modified, so
+		// they come off the END, modified first, each at most once. A list is taken only when the text ENDS in
+		// its closer, and from that list's LAST opener: nothing before it is searched, so a list the model
+		// quoted mid-text, or one inside a previous summary that pi reused as a split turn's history, is never
+		// taken for pi's own. Linear, with no regular expression.
+		for (const tag of FILE_LIST_TAGS_FROM_END) {
+			if (!text.endsWith(`\n</${tag}>`)) continue;
+			const open = text.lastIndexOf(`\n\n<${tag}>\n`);
+			if (open !== -1) text = text.slice(0, open);
+		}
+	}
+	const at = text.lastIndexOf(SPLIT_TURN_MARKER);
+	const parts = at === -1 ? [text] : [text.slice(0, at), text.slice(at + SPLIT_TURN_MARKER.length)];
+	return parts.some((part) => part.trim() === "");
+}
+
+/**
+ * Whether a transcript holds ANY compaction whose summary is empty (issue #535).
+ *
+ * Any, not only the last. A later compaction is built on the earlier one's summary, so an empty one
+ * anywhere means the turns it replaced are gone from every summary after it. A compaction on a branch
+ * the session has left is judged too; that can only cost a cold start, the safe direction.
+ *
+ * A line is parsed only when it names `"compaction"` at all, and a line that does not parse is skipped,
+ * as pi's own reader skips it. Never throws.
+ */
+export function hasEmptyCompaction(transcript) {
+	if (typeof transcript !== "string") return false;
+	for (const line of transcript.split("\n")) {
+		if (!line.includes('"compaction"')) continue;
+		let entry;
+		try {
+			entry = JSON.parse(line);
+		} catch {
+			continue;
+		}
+		if (entry?.type === "compaction" && compactionSummaryIsEmpty(entry.summary, entry.details)) return true;
+	}
+	return false;
+}
+
 export function makeSessionStore({
 	sessionsDir,
 	ttlDays,
@@ -928,8 +1028,10 @@ export function makeSessionStore({
 		// the container's degrade path for genuine surprises rather than for a file we could already tell
 		// was wrong.
 		let header = null;
+		let transcript = "";
 		try {
-			const head = String(fs.readFileSync(file, "utf8")).split("\n", 1)[0];
+			transcript = String(fs.readFileSync(file, "utf8"));
+			const head = transcript.split("\n", 1)[0];
 			header = JSON.parse(head);
 			if (header?.type !== "session") return COLD("unparseable");
 		} catch {
@@ -964,6 +1066,19 @@ export function makeSessionStore({
 			if (!Number.isFinite(started)) return COLD("conversation-too-old");
 			if (now() - started > maxAgeDays * 86400000) return COLD("conversation-too-old");
 		}
+
+		// A compaction with nothing in its summary (issue #535). pi replaces the turns a compaction folds away
+		// with its summary, so a resumed job would go on without that context and nothing would say so. The
+		// runner's brake is the measured cause: pi records a refused summarization call as an empty summary
+		// rather than failing the compaction. That run stops with a policy exit and is never promoted, but a
+		// provider that answers a summary with no text writes the same shape on a run that completes.
+		//
+		// ALWAYS ON, unlike the bounds above: it is not an operator's limit but a transcript that cannot be
+		// resumed as what it claims to be. LAST, because it is the one arm that reads past the header, and a
+		// damaged or aged-out transcript should name itself first. A cold start, like every arm here, and not
+		// a failed job: only a completed run replaces the canonical transcript, so a refusal that failed the
+		// job would refuse that key on every later run as well.
+		if (hasEmptyCompaction(transcript)) return COLD("compaction-summary-empty");
 		return { resume: true, reason: "resumed", bytes: check.bytes, ident: check.ident, dirIdent: dirCheck.ident };
 	}
 
