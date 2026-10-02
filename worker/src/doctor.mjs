@@ -59,7 +59,7 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { DEFAULT_VALKEY_URL, accountTempRoot, allowedModelsFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
-import { canonicalScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
+import { canonicalScope, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
 import { parseModelsJson } from "./models-json.mjs";
 import { KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, baseUrlTarget, keylessVerdict, loadModelEndpoints, readOverlayModels, renderEndpointsInclude } from "./model-endpoints.mjs";
 import { declaredEndpointsIn, endpointsDeclaredIn, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
@@ -3297,7 +3297,8 @@ export async function collectChecks(shellVars, seams) {
 	if (scopedLimitFacts.parseError === null && scopedLimitFacts.limits.length > 0 && parseError === null && triggersFilePath !== null) {
 		const folderSet = new Set(folders);
 		const folderOnly = (s) => s.startsWith("/") || s.startsWith("./") || s.startsWith("../") || s.includes("\\") || !s.includes("/") || /^[A-Za-z]:/.test(s);
-		const dead = scopedLimitFacts.limits.map((l) => l.scope).filter((s) => folderOnly(s) && !folderSet.has(s));
+		// A model row (version 2) names a model, never a folder, so it is never "a folder no trigger runs in".
+		const dead = scopedLimitFacts.limits.map((l) => l.scope).filter((s) => !isModelScope(s) && folderOnly(s) && !folderSet.has(s));
 		if (dead.length > 0) {
 			checks.push({
 				ok: false,
@@ -3448,6 +3449,14 @@ export async function collectChecks(shellVars, seams) {
 				const merged = overlayDollarProblem(overlay.overlay, env);
 				if (merged) checks.push({ ok: false, label: `settings overlay ${settingsFile}: ${merged} -- the worker refuses every job as settings-overlay-invalid`, fix: "set maxCostUsd in the overlay (or PI_MAX_COST_USD in .env), or remove the dollar window" });
 			}
+		}
+		// PR #549's review: the scoped-limits dollar rows against the deployment's per-job cap, env and overlay merged
+		// the worker's way (an overlay value wins; an invalid overlay leaves env).
+		if (scopedLimitFacts.parseError === null && scopedLimitFacts.limits.length > 0) {
+			const overlay = fileExists(settingsFile) ? readOverlay(settingsFile) : { overlay: {} };
+			const fromOverlay = overlay.invalid ? undefined : overlay.overlay?.maxCostUsd;
+			const envCap = env.PI_MAX_COST_USD === undefined || env.PI_MAX_COST_USD === "" ? undefined : env.PI_MAX_COST_USD;
+			checks.push(...scopedDollarRowChecks(scopedLimitFacts.limits, fromOverlay ?? envCap, scopedLimitFacts.path));
 		}
 		if (noHome) {
 			checks.push({
@@ -4144,6 +4153,43 @@ export function overlayDollarProblem(overlay, env) {
 	const merged = { ...fromEnv };
 	for (const key of DOLLAR_SETTING_KEYS) if (overlay?.[key] !== undefined && overlay[key] !== null) merged[key] = overlay[key];
 	return checkDollarInvariant(merged)?.invalid ?? null;
+}
+
+/**
+ * The scoped-limits dollar rows (issues #501 part 5, #502 part 6) against the deployment's per-job cap, WARNINGS only
+ * (PR #549's review). With no per-job cap, a dollar row refuses every job it applies to as `config-refused` unless the
+ * job's trigger sets `run.maxCostUsd`. With one, a row window BELOW it refuses every job it applies to, every time
+ * (a job reserves its whole cap), until one of the two changes. Rows are named by index and kind, and only the caps
+ * are compared, never a scope string (a folder scope is a host path). `maxCostUsd` is the merged value or undefined;
+ * one that does not parse is `dollarChecks`' line, so this says nothing more.
+ */
+export function scopedDollarRowChecks(limits, maxCostUsd, path) {
+	const checks = [];
+	const label = (r) => `#${r.index} (${r.kind === "model" ? "a model row" : "a repo or folder row"})`;
+	const missing = dollarRowsWithoutCap(limits, maxCostUsd);
+	if (missing.length > 0) {
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `scoped limit(s) ${missing.map(label).join(", ")} in ${path} set a dollar window, but the deployment has no per-job cost cap (maxCostUsd) -- every job such a row applies to is refused as config-refused unless its trigger sets run.maxCostUsd`,
+			fix: "set PI_MAX_COST_USD in .env (or maxCostUsd in the overlay), or give each trigger that reaches the row a run.maxCostUsd",
+		});
+	}
+	let below = [];
+	try {
+		below = dollarRowsBelowJobCap(limits, maxCostUsd);
+	} catch {
+		return checks;
+	}
+	if (below.length > 0) {
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `scoped limit window(s) ${below.map((r) => `${label(r)} ${r.window}`).join(", ")} in ${path} are below the per-job cost cap (maxCostUsd) -- a job reserves its whole cap, so every job that reaches such a window is refused dollar-cap, every time`,
+			fix: "raise the window to at least maxCostUsd, or lower maxCostUsd (a trigger's smaller run.maxCostUsd also fits)",
+		});
+	}
+	return checks;
 }
 
 export function dollarChecks(env, costCaps, workerReadsTriggers) {

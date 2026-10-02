@@ -533,7 +533,9 @@ test("parseExitUsage charset: the id allowlist rejects length, symbols and a lea
 test("parseExitUsage numerics: absent rebuilds as 0, but a negative, a null, or an Infinity nulls the block", () => {
 	// Absent is an honest zero and the 12-key row shape stays stable regardless of what was emitted.
 	const bare = parseExitUsage(usageLine({ v: 1, models: [{ provider: "a", model: "m" }] }));
-	assert.deepEqual(bare, { v: 1, piAi: null, truncated: 0, models: [{ provider: "a", model: "m", calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 0, cost: 0, unpriced: 0 }] });
+	// ...but an absent `truncated` is null, not 0 (PR #549's review): nobody measured it, and the model dollar
+	// windows floor on it.
+	assert.deepEqual(bare, { v: 1, piAi: null, truncated: null, models: [{ provider: "a", model: "m", calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 0, cost: 0, unpriced: 0 }] });
 	assert.equal(parseExitUsage(usageLine({ v: 1, models: [{ ...GOOD_ROW, input: -1 }] })), null, "a negative count nulls the block");
 	assert.equal(parseExitUsage(usageLine({ v: 1, models: [{ ...GOOD_ROW, cost: null }] })), null, "null is present-and-wrong, not absent");
 	// JSON.parse cannot produce NaN, but it CAN produce Infinity -- 1e999 overflows to it -- so the
@@ -1489,6 +1491,9 @@ test("the record's dollars (#501) is REBUILT from named fields: four keys, integ
 	const rec = (dollars) => buildRecord({ job, result: { outcome: "completed", exitCode: 0, dollars } }).dollars;
 	assert.deepEqual(rec({ reservedMicros: 2_000_000, settledMicros: 300_001, basis: "metered", modelBasis: "x", leaked: "/Users/rob" }), { reservedMicros: 2_000_000, settledMicros: 300_001, basis: "metered", modelBasis: null });
 	for (const basis of ["metered", "floor", "refunded", "unreserved"]) assert.equal(rec({ reservedMicros: 0, settledMicros: 0, basis }).basis, basis);
+	// #502 part 6: modelBasis is one of three fixed tokens, else null.
+	for (const modelBasis of ["metered", "floor", "refunded"]) assert.equal(rec({ reservedMicros: 1, settledMicros: 1, basis: "floor", modelBasis }).modelBasis, modelBasis);
+	assert.equal(rec({ reservedMicros: 1, settledMicros: 1, basis: "floor", modelBasis: "unreserved" }).modelBasis, null);
 	for (const bad of [undefined, null, "x", { reservedMicros: 1.5, settledMicros: 0, basis: "floor" }, { reservedMicros: 1, settledMicros: -1, basis: "floor" }, { reservedMicros: 1, settledMicros: 1, basis: "free" }]) assert.equal(rec(bad), null, JSON.stringify(bad));
 	assert.equal(buildRecord({ job, error: Object.assign(new Error("x"), { dollars: { reservedMicros: 1, settledMicros: 1, basis: "floor" } }) }).dollars.basis, "floor", "read off a throw too");
 	assert.equal(Object.keys(buildRecord({ job, result: { outcome: "completed" } })).at(-1), "dollars", "the newest field takes the tail");

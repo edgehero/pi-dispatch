@@ -394,6 +394,10 @@ of this once when a trigger sets `maxCostUsd`, as it does for `models`.
 - A lower `maxCostUsd` on a trigger holds less, so more of its jobs fit in a window.
 - A job whose every allowed model runs on a declared local model server and costs nothing holds nothing
   (`docs/egress.md`, "Local model servers").
+- `scoped-limits.json` version 2 adds the same windows per repo or folder, and per model. A trigger's `models`
+  list (or `PI_ALLOWED_MODELS`) decides which model windows its jobs hold their cap in: the listed models only.
+  A job with no list holds its cap in every model window, since it may switch to any model. See
+  [scoped limits](scoped-limits.md#dollar-windows-and-model-rows-version-2).
 
 ## Flows in detail
 

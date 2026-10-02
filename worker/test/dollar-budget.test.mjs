@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DAY_TTL_SECONDS, MONTH_TTL_SECONDS, WEEK_TTL_SECONDS } from "../src/budget.mjs";
-import { DOLLAR_BASIS, DOLLAR_KEY_PREFIX, FLOOR_COUNTERS, PROJECT_DOLLAR_KEY_PREFIX, SETTLE_SCRIPT, dollarLedgers, dollarSettlement, dollarWindowCaps, dollarsRecord, meteredMicros, releaseDollars, reserveDollars, settleDollars } from "../src/dollar-budget.mjs";
+import { DOLLAR_BASIS, DOLLAR_KEY_PREFIX, FLOOR_COUNTERS, PROJECT_DOLLAR_KEY_PREFIX, SETTLE_SCRIPT, dollarLedgers, dollarSettlement, dollarWindowCaps, dollarsRecord, holdPart, meteredMicros, modelDollarSettlement, releaseDollars, reserveDollars, settleDollars } from "../src/dollar-budget.mjs";
 
 /**
  * A keyed fake of the ioredis calls dollar-budget.mjs makes. Each call awaits once before it acts, so parallel
@@ -76,6 +76,7 @@ test("the keys are budget:usd:<day>, budget:usd:w:<Monday> and budget:usd:m:<mon
 	assert.deepEqual(res.hold, {
 		amountMicros: 2 * USD,
 		keys: ["budget:usd:2026-10-07", "budget:usd:w:2026-10-05", "budget:usd:m:2026-10"],
+		ledgers: [{ keyPrefix: "budget:usd", keys: ["budget:usd:2026-10-07", "budget:usd:w:2026-10-05", "budget:usd:m:2026-10"] }],
 	});
 	assert.deepEqual([...redis.ttls.entries()], [["budget:usd:2026-10-07", DAY_TTL_SECONDS], ["budget:usd:w:2026-10-05", WEEK_TTL_SECONDS], ["budget:usd:m:2026-10", MONTH_TTL_SECONDS]]);
 	assert.deepEqual([...redis.store.entries()], [["budget:usd:2026-10-07", 2 * USD], ["budget:usd:w:2026-10-05", 2 * USD], ["budget:usd:m:2026-10", 2 * USD]]);
@@ -89,7 +90,7 @@ test("only ACTIVE windows are counted: a null cap is no window, and no window at
 	const res = await reserveDollars(redis, { ledgers: dollarLedgers(caps(null, 50 * USD, null)), amountMicros: USD, now: NOW });
 	assert.deepEqual(res.hold.keys, ["budget:usd:w:2026-10-05"]);
 	const none = await reserveDollars(keyedRedis(), { ledgers: [], amountMicros: USD, now: NOW });
-	assert.deepEqual(none, { allowed: true, hold: { amountMicros: USD, keys: [] } });
+	assert.deepEqual(none, { allowed: true, hold: { amountMicros: USD, keys: [], ledgers: [] } });
 });
 
 test("dollarWindowCaps: null with no window set (the off switch), micro-dollars otherwise", () => {
@@ -340,8 +341,76 @@ test("the metered float becomes integer micro-dollars ROUNDED UP: Math.ceil(cost
 	assert.equal(meteredMicros("1"), null);
 });
 
-test("dollarsRecord: the four-key literal, modelBasis null until per-model windows land", () => {
+test("dollarsRecord: the four-key literal; modelBasis null with no model window, else one fixed token", () => {
 	assert.deepEqual(dollarsRecord({ reservedMicros: 1, settledMicros: 2, basis: "metered" }), { reservedMicros: 1, settledMicros: 2, basis: "metered", modelBasis: null });
+	for (const t of ["metered", "floor", "refunded"]) assert.equal(dollarsRecord({ reservedMicros: 1, settledMicros: 2, basis: "floor", modelBasis: t }).modelBasis, t);
+	assert.equal(dollarsRecord({ reservedMicros: 1, settledMicros: 2, basis: "floor", modelBasis: "/Users/x" }).modelBasis, null);
+});
+
+// ── model windows (#502 part 6): each settles from its OWN usage row; every floor condition ──────────────────────
+
+const ROW = (provider, model, cost, extra = {}) => ({ provider, model, calls: 1, input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 2, cost, unpriced: 0, ...extra });
+const TWO = { v: 1, piAi: null, truncated: 0, models: [ROW("openai", "gpt-x", 0.25), ROW("anthropic", "claude-x", 1.5)] };
+
+test("modelDollarSettlement: metered settles each model to ITS row (ceil micros), 0 for a model with no row, never the job total", () => {
+	const at = (ref, usage = TWO) => modelDollarSettlement({ ref, basis: "metered", tokens: { calls: 2, cost: 1.75 }, usage, reservedMicros: 2 * USD, trusted: true });
+	assert.deepEqual(at("openai/gpt-x"), { settledMicros: 250_000, basis: "metered" });
+	assert.deepEqual(at("anthropic/claude-x"), { settledMicros: 1_500_000, basis: "metered" });
+	assert.deepEqual(at("ollama/qwen"), { settledMicros: 0, basis: "metered" }, "no row: it made no call");
+	assert.deepEqual(at("openai/gpt-x", { ...TWO, models: [ROW("openai", "gpt-x", 0.1 + 0.2)] }), { settledMicros: 300_001, basis: "metered" }, "rounded UP");
+	assert.deepEqual(at("openai/gpt-x", { ...TWO, models: [ROW("openai", "gpt-x", 3)] }), { settledMicros: 3 * USD, basis: "metered" }, "an overshoot is charged in full");
+	// The zero-call run: no ledger and calls 0 is metered 0.
+	assert.deepEqual(modelDollarSettlement({ ref: "openai/gpt-x", basis: "metered", tokens: { calls: 0, cost: 0 }, usage: null, reservedMicros: 2 * USD, trusted: true }), { settledMicros: 0, basis: "metered" });
+});
+
+test("modelDollarSettlement: usage rows that differ only in CASE are one model, and every one is charged (PR #549's review)", () => {
+	const split = { v: 1, piAi: null, truncated: 0, models: [ROW("openai", "gpt-x", 1), ROW("OpenAI", "GPT-x", 0.75), ROW("anthropic", "claude-x", 0.5)] };
+	assert.deepEqual(modelDollarSettlement({ ref: "openai/gpt-x", basis: "metered", tokens: { calls: 3, cost: 2.25 }, usage: split, reservedMicros: 3 * USD, trusted: true }), { settledMicros: 1_750_000, basis: "metered" });
+	// And at the floor, never below the summed cost.
+	assert.deepEqual(modelDollarSettlement({ ref: "openai/gpt-x", basis: "floor", tokens: { calls: 3, cost: 2.25 }, usage: split, reservedMicros: USD, trusted: true }), { settledMicros: 1_750_000, basis: "floor" });
+});
+
+test("modelDollarSettlement: an ABSENT truncated, as the REAL parser leaves it, floors the model window (PR #549's review)", async () => {
+	const { parseExitUsage } = await import("../src/run-history.mjs");
+	const usage = parseExitUsage(`${JSON.stringify({ event: "exit", usage: { v: 1, models: [ROW("openai", "gpt-x", 0.25)] } })}\n`);
+	assert.equal(usage.truncated, null, "the parser keeps absent distinct");
+	assert.deepEqual(modelDollarSettlement({ ref: "openai/gpt-x", basis: "metered", tokens: { calls: 1, cost: 0.25 }, usage, reservedMicros: 2 * USD, trusted: true }), { settledMicros: 2 * USD, basis: "floor" });
+	const counted = parseExitUsage(`${JSON.stringify({ event: "exit", usage: { v: 1, truncated: 0, models: [ROW("openai", "gpt-x", 0.25)] } })}\n`);
+	assert.equal(modelDollarSettlement({ ref: "openai/gpt-x", basis: "metered", tokens: { calls: 1, cost: 0.25 }, usage: counted, reservedMicros: 2 * USD, trusted: true }).basis, "metered");
+});
+
+test("holdPart: a hold with no ledgers has no parts, so nothing is adjusted and the reservation stands", () => {
+	assert.deepEqual(holdPart({ amountMicros: USD, keys: ["budget:usd:2026-10-07"] }, () => true), { amountMicros: USD, keys: [], ledgers: [] });
+});
+
+test("modelDollarSettlement: the FLOOR when any condition holds, at least the reservation and never below the row's own cost", () => {
+	const base = { ref: "anthropic/claude-x", basis: "metered", tokens: { calls: 2, cost: 1.75 }, usage: TWO, reservedMicros: 2 * USD, trusted: true };
+	const floor = { settledMicros: 2 * USD, basis: "floor" };
+	assert.deepEqual(modelDollarSettlement(base).basis, "metered", "the baseline is metered");
+	assert.deepEqual(modelDollarSettlement({ ...base, basis: "floor" }), floor, "the deployment basis is floor");
+	assert.deepEqual(modelDollarSettlement({ ...base, trusted: false }), floor, "the exit line is not trusted");
+	assert.deepEqual(modelDollarSettlement({ ...base, ref: "x/y", trusted: undefined }), floor, "trusted defaults to false");
+	assert.deepEqual(modelDollarSettlement({ ...base, usage: { ...TWO, truncated: 1 } }), floor, "truncated above 0");
+	const { truncated: _t, ...noTruncated } = TWO;
+	assert.deepEqual(modelDollarSettlement({ ...base, usage: noTruncated }), floor, "an ABSENT truncated is not 0");
+	assert.deepEqual(modelDollarSettlement({ ...base, usage: { ...TWO, models: [...TWO.models, ROW("other", "other", 0.01)] } }), floor, "an other/other row with a cost");
+	assert.deepEqual(modelDollarSettlement({ ...base, usage: { ...TWO, models: [...TWO.models, ROW("other", "other", 0)] } }).basis, "metered", "an other/other row at 0 is not a floor");
+	assert.deepEqual(modelDollarSettlement({ ...base, usage: null }), floor, "usage null while calls were made");
+	assert.deepEqual(modelDollarSettlement({ ...base, usage: null, tokens: { cost: 0 } }), floor, "an absent call count is calls made");
+	// Never below a cost the row reported.
+	const dear = { ...TWO, truncated: 2, models: [ROW("anthropic", "claude-x", 5)] };
+	assert.deepEqual(modelDollarSettlement({ ...base, usage: dear }), { settledMicros: 5 * USD, basis: "floor" });
+	assert.throws(() => modelDollarSettlement({ ...base, reservedMicros: 1.5 }), /safe integer/);
+});
+
+test("holdPart: a hold's keys split by LEDGER, never by key text (budget:usd prefixes every dollar key)", async () => {
+	const redis = keyedRedis();
+	const ledgers = [{ keyPrefix: "budget:usd", caps: { day: 10 * USD, week: null, month: null } }, { keyPrefix: "budget:usd:mdl:abc", caps: { day: 10 * USD, week: 10 * USD, month: null } }];
+	const { hold } = await reserveDollars(redis, { ledgers, amountMicros: USD, now: NOW });
+	assert.deepEqual(holdPart(hold, (p) => p !== "budget:usd:mdl:abc").keys, ["budget:usd:2026-10-07"]);
+	assert.deepEqual(holdPart(hold, (p) => p === "budget:usd:mdl:abc").keys, ["budget:usd:mdl:abc:2026-10-07", "budget:usd:mdl:abc:w:2026-10-05"]);
+	assert.equal(holdPart(hold, () => true).amountMicros, USD);
+	assert.deepEqual(dollarLedgers(null, { scope: { keyPrefix: "budget:usd:s:x", caps: { day: 1 } }, models: [{ keyPrefix: "budget:usd:mdl:y", caps: { week: 2 } }] }), [{ keyPrefix: "budget:usd:s:x", caps: { day: 1 } }, { keyPrefix: "budget:usd:mdl:y", caps: { week: 2 } }]);
 });
 
 test("an exit line that is NOT trusted (the worker stopped the container, or its code is not the container's) settles at the floor, the zero-call rule included", () => {

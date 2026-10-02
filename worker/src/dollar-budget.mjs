@@ -15,8 +15,9 @@
  * share their UTC boundaries (the day, the week from Monday, the month) and their TTLs:
  *   - `budget:usd:YYYY-MM-DD`, `budget:usd:w:<Monday>`, `budget:usd:m:YYYY-MM`: the deployment's windows;
  *   - `budget:usd:p:` is RESERVED for project windows (issue #499) and never written here;
- *   - `budget:usd:s:` (a repo or folder) and `budget:usd:mdl:` (a model) are left for the scoped and per-model
- *     windows, which reach `reserveDollars` as further ledgers with their own `keyPrefix`.
+ *   - `budget:usd:s:<hash16>` (a repo or folder) and `budget:usd:mdl:<hash16>` (a model): the scoped and per-model
+ *     windows of `scoped-limits.json` version 2, which reach `reserveDollars` as further ledgers with their own
+ *     `keyPrefix` (scoped-limits.mjs builds them).
  * None of those sub-namespaces can collide with a day key, whose first segment after the prefix is a 4-digit year.
  *
  * Unlike the job-count ledger, a REFUSED dollar reservation is given back at once (`budget.mjs` keeps a refused
@@ -61,9 +62,16 @@ export function dollarWindowCaps(settings) {
 	return { day, week, month };
 }
 
-/** The ledgers for one job: the deployment's, when it has any window. Scoped and per-model ledgers join later. */
-export function dollarLedgers(caps) {
-	return caps ? [{ keyPrefix: DOLLAR_KEY_PREFIX, caps }] : [];
+/**
+ * The ledgers for one job, in reservation order: the deployment's (when it has any window), then its repo or folder
+ * row's (`dollarCapsFor`), then each model row it reserves in (`modelDollarRows`). One `reserveDollars` call over all
+ * of them, so a refusal in any window gives back every key, the deployment's included.
+ */
+export function dollarLedgers(caps, { scope = null, models = [] } = {}) {
+	const out = caps ? [{ keyPrefix: DOLLAR_KEY_PREFIX, caps }] : [];
+	if (scope) out.push({ keyPrefix: scope.keyPrefix, caps: scope.caps });
+	for (const m of models ?? []) out.push({ keyPrefix: m.keyPrefix, caps: m.caps });
+	return out;
 }
 
 /** Every ACTIVE window of every ledger, in ledger order and day, week, month within each. A null cap is no window. */
@@ -152,7 +160,34 @@ export async function reserveDollars(redis, { ledgers, amountMicros, now = new D
 		const stranded = await giveBack(redis, touched, amountMicros, log);
 		return { ...refusal, stranded };
 	}
-	return { allowed: true, hold: { amountMicros, keys: touched.map((w) => w.key) } };
+	return { allowed: true, hold: { amountMicros, keys: touched.map((w) => w.key), ledgers: holdLedgers(touched) } };
+}
+
+/**
+ * The hold's keys grouped by ledger, `[{ keyPrefix, keys }]` in ledger order (issues #501 part 5, #502 part 6), so a
+ * caller can settle each ledger to its own amount: the deployment and scope windows to the job's cost, a model window
+ * to that model's. Grouped by the ledger each window came from, never by matching key text: the deployment's prefix
+ * `budget:usd` is a prefix of every other dollar key.
+ */
+function holdLedgers(touched) {
+	const out = [];
+	for (const w of touched) {
+		const last = out[out.length - 1];
+		if (last && last.keyPrefix === w.ledger) last.keys.push(w.key);
+		else out.push({ keyPrefix: w.ledger, keys: [w.key] });
+	}
+	return out;
+}
+
+/**
+ * The part of `hold` that belongs to the ledgers `keep(keyPrefix)` selects, as a hold of its own
+ * (`{ amountMicros, keys, ledgers }`) for `settleDollars`. A hold with no `ledgers` (built by hand, never by
+ * `reserveDollars`) has no parts: every selection is empty, so a settlement through it adjusts nothing and its keys
+ * keep the whole reservation, the money-safe side.
+ */
+export function holdPart(hold, keep) {
+	const ledgers = (Array.isArray(hold?.ledgers) ? hold.ledgers : []).filter((l) => keep(l.keyPrefix));
+	return { amountMicros: hold?.amountMicros, keys: ledgers.flatMap((l) => l.keys), ledgers };
 }
 
 /**
@@ -275,10 +310,53 @@ export function dollarSettlement({ tokens, usage, reservedMicros, trusted = fals
 }
 
 /**
- * The run record's `dollars` object (INT-RUN-HISTORY-FILE-CONTRACT): an explicit literal of integers and one fixed
- * token. `modelBasis` is RESERVED for the per-model windows (a later change of #501/#502) and is always `null` here,
- * present so the shape does not change when it fills.
+ * How ONE model window settles (issue #502 part 6). PURE. Returns `{ settledMicros, basis }`. A model window settles
+ * from that model's own row in the exit line's `usage.models`, never from the job's total: a job that spent $1.80 on
+ * one model and $0.20 on another charges each model window its own share.
+ *
+ * `basis` is the job's deployment basis (`dollarSettlement`), which already folds in the trusted exit line, every
+ * floor counter and "calls with no ledger". The model window is at the FLOOR when ANY of these holds:
+ *   - the deployment basis is not `metered`;
+ *   - the exit line is not trusted (checked here too, so the rule does not rest on the caller's order);
+ *   - `usage` is null while the run made calls (`tokens.calls` not 0, an absent count included): the per-model
+ *     split is unknown;
+ *   - `usage.truncated` is not PRESENT and 0: rows past the ledger's limit were folded together, so a model's own
+ *     row may be missing part of its spend. Absent is not 0, the `FLOOR_COUNTERS` rule;
+ *   - an `other/other` row has a cost above 0: some spend is attributed to no model.
+ * At the floor it settles at least the reservation and never less than the model row's own reported cost. Metered,
+ * it settles `ceil(row.cost x 1e6)`, 0 when the model has no row (it made no call), and an overshoot is charged in
+ * full. `ref` is the lowercased `provider/model`; the ledger's ids are lowercased by `parseExitUsage`.
  */
-export function dollarsRecord({ reservedMicros, settledMicros, basis }) {
-	return { reservedMicros, settledMicros, basis, modelBasis: null };
+export function modelDollarSettlement({ ref, basis, tokens, usage, reservedMicros, trusted = false }) {
+	assertMicros(reservedMicros, "reservedMicros", { positive: false });
+	const rows = usage !== null && typeof usage === "object" && Array.isArray(usage.models) ? usage.models : [];
+	// EVERY row whose lowercased ref is this model's, summed (PR #549's review): the parser lowercases ids, so two rows
+	// that differ only in case are one model, and charging the first alone would undercount it. Each row's cost is
+	// turned into integer micro-dollars on its own, so the sum is integers; one unconvertible row makes it unknown.
+	let reported = 0;
+	for (const r of rows) {
+		if (typeof r?.provider !== "string" || typeof r?.model !== "string" || `${r.provider}/${r.model}`.toLowerCase() !== ref) continue;
+		const micros = meteredMicros(r.cost);
+		reported = reported === null || micros === null ? null : reported + micros;
+	}
+	const floor = { settledMicros: reported === null ? reservedMicros : Math.max(reservedMicros, reported), basis: "floor" };
+	if (basis !== "metered" || trusted !== true) return floor;
+	if (usage === null || usage === undefined) return tokens?.calls === 0 ? { settledMicros: 0, basis: "metered" } : floor;
+	if (typeof usage !== "object" || usage.truncated !== 0) return floor;
+	if (rows.some((r) => r?.provider === "other" && r?.model === "other" && !(r.cost === 0))) return floor;
+	if (reported === null) return floor;
+	return { settledMicros: reported, basis: "metered" };
+}
+
+/** The `modelBasis` tokens a record may carry (INT-RUN-HISTORY-FILE-CONTRACT), or null when no model window applied. */
+export const MODEL_BASIS = Object.freeze(["metered", "floor", "refunded"]);
+
+/**
+ * The run record's `dollars` object (INT-RUN-HISTORY-FILE-CONTRACT): an explicit literal of integers and fixed
+ * tokens. `modelBasis` is how the job's MODEL windows settled (issue #502 part 6): `metered` when every one settled
+ * to its own usage row, `floor` when any kept at least its reservation, `refunded` when they were given back, and
+ * `null` when the job held no model window.
+ */
+export function dollarsRecord({ reservedMicros, settledMicros, basis, modelBasis = null }) {
+	return { reservedMicros, settledMicros, basis, modelBasis: MODEL_BASIS.includes(modelBasis) ? modelBasis : null };
 }

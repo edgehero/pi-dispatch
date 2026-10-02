@@ -415,7 +415,10 @@ function rebuildUsage(u) {
 		if (typeof u.piAi !== "string" || !/^\d+\.\d+\.\d+$/.test(u.piAi)) return null;
 		piAi = u.piAi;
 	}
-	let truncated = 0;
+	// ABSENT stays null, never 0 (PR #549's review): a runner that did not report how many rows it folded did not
+	// measure it, and the per-model dollar settlement floors on anything but a present 0. Readers that count folded
+	// ledgers treat null as none (`?? 0`).
+	let truncated = null;
 	if (u.truncated !== undefined) {
 		if (!Number.isInteger(u.truncated) || u.truncated < 0) return null;
 		truncated = u.truncated;
@@ -588,20 +591,22 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// The dollar reservation's outcome (issue #501, INT-RUN-HISTORY-FILE-CONTRACT). Additive, nullable, an explicit
 		// literal REBUILT here (never the source's object), TAIL position after `backend` on the same contract: field order
 		// is the serialisation order. `{ reservedMicros, settledMicros, basis, modelBasis }`: two integers of micro-dollars,
-		// one fixed token (`metered` | `floor` | `refunded` | `unreserved`), and `modelBasis`, reserved for the per-model
-		// windows and null until they land. Null when no dollar window applied to the job (no dollar setting, or a
+		// one fixed token (`metered` | `floor` | `refunded` | `unreserved`), and `modelBasis`, how the per-model windows
+		// settled (`metered` | `floor` | `refunded`, null when the job held none). Null when no dollar window applied to the job (no dollar setting, or a
 		// refusal before the reservation step), which is every record of a deployment that sets none.
 		dollars: dollarsOf(source.dollars),
 	};
 }
 
 const DOLLAR_BASES = new Set(["metered", "floor", "refunded", "unreserved"]);
+// How the job's MODEL windows settled (issue #502 part 6); anything else, null included, records null.
+const MODEL_BASES = new Set(["metered", "floor", "refunded"]);
 
 /** The record's `dollars`, rebuilt from named fields only, or null when the source carries none or a malformed one. */
 function dollarsOf(d) {
 	if (d === null || typeof d !== "object") return null;
 	if (!Number.isSafeInteger(d.reservedMicros) || d.reservedMicros < 0 || !Number.isSafeInteger(d.settledMicros) || d.settledMicros < 0 || !DOLLAR_BASES.has(d.basis)) return null;
-	return { reservedMicros: d.reservedMicros, settledMicros: d.settledMicros, basis: d.basis, modelBasis: null };
+	return { reservedMicros: d.reservedMicros, settledMicros: d.settledMicros, basis: d.basis, modelBasis: MODEL_BASES.has(d.modelBasis) ? d.modelBasis : null };
 }
 
 /**

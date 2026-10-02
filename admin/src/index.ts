@@ -948,7 +948,8 @@ function registerTools(pi: ExtensionAPI): void {
     description:
       "Changes fields of an existing scoped limit (by array index from dispatch_limits) and applies it live. " +
       "Provide only the fields to change (scope/day/week/month/concurrent); the rest keep their current value " +
-      "(to drop one cap from an entry, delete it and re-add without that field). The operator MUST approve a " +
+      "(dayUsd/weekUsd/monthUsd are kept as they are; these tools cannot set them yet, so to drop a cap from an " +
+      "entry, edit scoped-limits.json by hand rather than delete and re-add it, which would lose them). The operator MUST approve a " +
       "confirm dialog showing the before->after; refused with no interactive operator.",
     executionMode: "sequential",
     parameters: Type.Object({
@@ -974,6 +975,11 @@ function registerTools(pi: ExtensionAPI): void {
         week: params.week ?? cur.week,
         month: params.month ?? cur.month,
         concurrent: params.concurrent ?? cur.concurrent,
+        // The dollar windows (version 2) are not editable here yet (issue #501 part 7); they are CARRIED, never
+        // dropped, so an edit of a count field cannot silently remove a dollar cap.
+        dayUsd: cur.dayUsd,
+        weekUsd: cur.weekUsd,
+        monthUsd: cur.monthUsd,
       });
       const result = await confirmedWrite(
         ctx,
@@ -1243,6 +1249,10 @@ function buildScopedLimit(f: any): any {
     const v = optInt(f[k]);
     if (v !== undefined) l[k] = v;
   }
+  // Version 2's dollar windows ride through as the parser's own decimal strings; the shared parser validates them.
+  for (const k of ["dayUsd", "weekUsd", "monthUsd"]) {
+    if (typeof f[k] === "string" && f[k].trim() !== "") l[k] = f[k].trim();
+  }
   return l;
 }
 
@@ -1253,6 +1263,10 @@ function limitSummary(l: any): string {
   if (Number.isInteger(l?.week)) bits.push(`week ${l.week}`);
   if (Number.isInteger(l?.month)) bits.push(`month ${l.month}`);
   if (Number.isInteger(l?.concurrent)) bits.push(`≤${l.concurrent} at once`);
+  // Version 2's dollar windows (issues #501, #502), so a model or dollar-only row never summarizes as nothing.
+  if (typeof l?.dayUsd === "string") bits.push(`day $${l.dayUsd}`);
+  if (typeof l?.weekUsd === "string") bits.push(`week $${l.weekUsd}`);
+  if (typeof l?.monthUsd === "string") bits.push(`month $${l.monthUsd}`);
   return bits.join(" · ");
 }
 
@@ -2224,6 +2238,10 @@ async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): P
     week: keep(week, cur.week),
     month: keep(month, cur.month),
     concurrent: keep(concurrent, cur.concurrent),
+    // Carried unchanged (see dispatch_limit_edit): editing a count must never drop a dollar cap.
+    dayUsd: cur.dayUsd,
+    weekUsd: cur.weekUsd,
+    monthUsd: cur.monthUsd,
   });
   const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, mutate: (l: any[]) => l.map((w, i) => (i === index ? merged : w)) });
   notify?.(res.ok ? `scoped limit #${index + 1} updated (live) — ${merged.scope} ${limitSummary(merged)}` : `edit rejected: ${res.invalid}`, res.ok ? "info" : "error");

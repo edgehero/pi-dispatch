@@ -744,6 +744,24 @@ test("dispatch_limit_edit: an approved partial edit changes one field and keeps 
   assert.match(shown[0].message, /→/, "the confirm shows before→after");
 });
 
+test("dispatch_limit_edit KEEPS a row's dollar window and the file stays version 2 (PR #549's review)", async () => {
+  const path = tmpLimits({ version: 2, limits: [{ scope: "acme/web", day: 3, dayUsd: "5" }] });
+  const { ctx, shown } = toolCtx({ answer: true });
+  const out = textOf(await toolByName("dispatch_limit_edit").execute("id", { index: 0, day: 5 }, undefined, undefined, ctx));
+  assert.equal(out.applied, true);
+  const file = read(path);
+  assert.equal(file.version, 2);
+  assert.deepEqual(file.limits[0], { scope: "acme/web", day: 5, dayUsd: "5.00" });
+  assert.match(shown[0].message, /dayUsd/, "the confirm shows the dollar field it keeps");
+});
+
+test("dispatch_limit_delete's confirm summarizes a model row by its dollar caps (PR #549's review)", async () => {
+  tmpLimits({ version: 2, limits: [{ scope: "model:openai/gpt-x", weekUsd: "25" }] });
+  const { ctx, shown } = toolCtx({ answer: false });
+  await toolByName("dispatch_limit_delete").execute("id", { index: 0 }, undefined, undefined, ctx);
+  assert.match(shown[0].message, /model:openai\/gpt-x week \$25\.00/);
+});
+
 test("dispatch_limit_edit / _delete: out-of-range index throws and writes nothing", async () => {
   const path = tmpLimits({ version: 1, limits: [{ scope: "acme/web", day: 1 }] });
   const { ctx } = toolCtx({ answer: true });

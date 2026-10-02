@@ -27,7 +27,7 @@ import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/bu
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 // The scoped-limits validator is shared for the anti-drift reason the pause/subscriptions ones are: the
 // write goes through the exact parser the worker boot-loads, so the sides cannot disagree on the schema.
-import { parseScopedLimits, SCOPED_LIMITS_VERSION, scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
+import { dollarKeyPrefixFor, isModelScope, parseScopedLimits, scopedLimitsVersionFor, scopeKeyPrefix, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
 import { removeHeldJob } from "@edgehero/pi-dispatch/cancel-state";
 import { HELD_SET, jobKey } from "@edgehero/pi-dispatch/wait-state";
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
@@ -812,7 +812,9 @@ export function writeScopedLimits({ scopedLimitsPath, mutate, fs = nodeFs }) {
   }
   const next = mutate(current.map((l) => ({ ...l })));
   const rows = next.map((l) => Object.fromEntries(Object.entries(l).filter(([, v]) => v !== null && v !== undefined)));
-  const text = `${JSON.stringify({ version: SCOPED_LIMITS_VERSION, limits: rows }, null, 2)}\n`;
+  // The LOWEST version that expresses the file (issues #501 part 5, #502 part 6): 1 unless a row carries a dollar
+  // window or is a model row, so a job-count-only file stays readable by a worker that predates version 2.
+  const text = `${JSON.stringify({ version: scopedLimitsVersionFor(rows), limits: rows }, null, 2)}\n`;
   try {
     parseScopedLimits(text, scopedLimitsPath); // the loader's own validator -- never write a file it would reject
   } catch (e) {
@@ -841,12 +843,25 @@ export async function readScopedBudget({ url, limits, redisFn = makeRedisClient,
     const now = new Date();
     const settled = Promise.all(
       limits.map(async (l) => {
-        const prefix = scopeKeyPrefix(l.scope);
         const cell = async (key) => Number((await redis.get(key)) ?? 0);
         const row = {};
-        if (l.day !== null && l.day !== undefined) row.day = await cell(dayKey(now, prefix));
-        if (l.week !== null && l.week !== undefined) row.week = await cell(weekKey(now, prefix));
-        if (l.month !== null && l.month !== undefined) row.month = await cell(monthKey(now, prefix));
+        // A model row has no job-count windows (issue #502 part 6), and its scope is not a job's scope.
+        if (!isModelScope(l.scope)) {
+          const prefix = scopeKeyPrefix(l.scope);
+          if (l.day !== null && l.day !== undefined) row.day = await cell(dayKey(now, prefix));
+          if (l.week !== null && l.week !== undefined) row.week = await cell(weekKey(now, prefix));
+          if (l.month !== null && l.month !== undefined) row.month = await cell(monthKey(now, prefix));
+        }
+        // The dollar windows (version 2), in integer micro-dollars held or settled so far, under the keys the worker
+        // composes from the same shared export (`dollarKeyPrefixFor`). Only the windows the row caps.
+        if (USD_LIMIT_FIELDS.some((f) => l[f] !== null && l[f] !== undefined)) {
+          const prefix = dollarKeyPrefixFor(l);
+          const usd = {};
+          if (l.dayUsd !== null && l.dayUsd !== undefined) usd.day = await cell(dayKey(now, prefix));
+          if (l.weekUsd !== null && l.weekUsd !== undefined) usd.week = await cell(weekKey(now, prefix));
+          if (l.monthUsd !== null && l.monthUsd !== undefined) usd.month = await cell(monthKey(now, prefix));
+          row.usdMicros = usd;
+        }
         return row;
       }),
     ).then(

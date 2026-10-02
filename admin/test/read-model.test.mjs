@@ -2064,7 +2064,7 @@ test("readFolderSkills attaches the prose-loop hints from the SKILL.md body", ()
 
 // ── scoped limits (issue #242, INT-SCOPED-LIMITS-FILE-CONTRACT) ──────────────────────────────────────
 
-import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
+import { modelDollarKeyPrefix, scopeDollarKeyPrefix, scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 test("readScopedLimits: valid file, missing file, invalid file (incl. a NEWER version, fail-loud)", () => {
@@ -2072,8 +2072,8 @@ test("readScopedLimits: valid file, missing file, invalid file (incl. a NEWER ve
   const ok = readScopedLimits({ scopedLimitsPath: "sl.json", fs });
   assert.equal(ok.limits[0].day, 3);
   assert.deepEqual(readScopedLimits({ scopedLimitsPath: "absent.json", fs }), { missing: true });
-  const newer = readScopedLimits({ scopedLimitsPath: "v2.json", fs: memFs({ "v2.json": JSON.stringify({ version: 2, limits: [] }) }) });
-  assert.match(newer.invalid, /newer pi-dispatch \(version 2; this build understands 1\)/);
+  const newer = readScopedLimits({ scopedLimitsPath: "v3.json", fs: memFs({ "v3.json": JSON.stringify({ version: 3, limits: [] }) }) });
+  assert.match(newer.invalid, /newer pi-dispatch \(version 3; this build understands 2\)/);
 });
 
 test("writeScopedLimits: a MISSING file starts from the empty v1 shape and the write creates it", () => {
@@ -2094,11 +2094,11 @@ test("writeScopedLimits REFUSES a version-less or newer existing file -- read an
   const r1 = writeScopedLimits({ scopedLimitsPath: "sl.json", fs: versionless, mutate: (l) => l });
   assert.match(r1.invalid, /must have "version": 1/);
   assert.equal(JSON.parse(versionless.files.get("sl.json")).version, undefined, "the file bytes were not touched");
-  const v2text = JSON.stringify({ version: 2, limits: [{ scope: "a/b", day: 1, hour: 2 }] });
-  const v2 = memFs({ "sl.json": v2text });
-  const r2 = writeScopedLimits({ scopedLimitsPath: "sl.json", fs: v2, mutate: (l) => l });
+  const v3text = JSON.stringify({ version: 3, limits: [{ scope: "a/b", day: 1, hour: 2 }] });
+  const v3 = memFs({ "sl.json": v3text });
+  const r2 = writeScopedLimits({ scopedLimitsPath: "sl.json", fs: v3, mutate: (l) => l });
   assert.match(r2.invalid, /newer pi-dispatch/);
-  assert.equal(v2.files.get("sl.json"), v2text, "never re-stamped v1");
+  assert.equal(v3.files.get("sl.json"), v3text, "never re-stamped down");
 });
 
 test("writeScopedLimits validates the RESULT through the shared parser and leaves bytes untouched on reject", () => {
@@ -2132,6 +2132,51 @@ test("readScopedBudget GETs only the windows a row caps; absent keys are honest 
   const dead = await readScopedBudget({ url: "not-a-url", limits });
   assert.ok(dead.unreachable, "junk URL degrades synchronously, never a timeout burn");
   assert.deepEqual(await readScopedBudget({ url: "redis://x", limits: [] }), { rows: [] });
+});
+
+test("writeScopedLimits writes the LOWEST version that expresses the file: v1 stays v1, a dollar or model row makes v2 (#501 p5, #502 p6)", () => {
+  const fs = memFs({ "sl.json": JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 3 }] }) });
+  assert.equal(writeScopedLimits({ scopedLimitsPath: "sl.json", fs, mutate: (l) => [...l, { scope: "acme/api", week: 9 }] }).ok, true);
+  assert.equal(JSON.parse(fs.files.get("sl.json")).version, 1, "count rows only: still version 1, readable by an older worker");
+  assert.equal(writeScopedLimits({ scopedLimitsPath: "sl.json", fs, mutate: (l) => [...l, { scope: "acme/ops", dayUsd: "2.5" }] }).ok, true);
+  const v2 = JSON.parse(fs.files.get("sl.json"));
+  assert.equal(v2.version, 2);
+  assert.deepEqual(v2.limits[2], { scope: "acme/ops", dayUsd: "2.5" }, "nulls omitted");
+  // Deleting the last dollar row steps back down to version 1.
+  assert.equal(writeScopedLimits({ scopedLimitsPath: "sl.json", fs, mutate: (l) => l.filter((r) => r.scope !== "acme/ops") }).ok, true);
+  assert.equal(JSON.parse(fs.files.get("sl.json")).version, 1);
+  assert.equal(writeScopedLimits({ scopedLimitsPath: "sl.json", fs, mutate: (l) => [...l, { scope: "model:openai/gpt-x", monthUsd: 40 }] }).ok, true);
+  const m = JSON.parse(fs.files.get("sl.json"));
+  assert.equal(m.version, 2, "a model row needs version 2");
+  assert.deepEqual(m.limits.at(-1), { scope: "model:openai/gpt-x", monthUsd: 40 });
+  // An edit of the count fields keeps a dollar field the row already had (read-modify-write through the parser).
+  assert.equal(writeScopedLimits({ scopedLimitsPath: "sl.json", fs, mutate: (l) => l.map((r) => (r.scope === "model:openai/gpt-x" ? { ...r, dayUsd: "1" } : r)) }).ok, true);
+  assert.deepEqual(JSON.parse(fs.files.get("sl.json")).limits.at(-1), { scope: "model:openai/gpt-x", dayUsd: "1", monthUsd: "40.00" });
+});
+
+test("readScopedBudget also reads the DOLLAR keys a row caps, scope and model, under the worker's own prefixes", async () => {
+  const limits = [
+    { scope: "acme/web", day: 3, week: null, month: null, concurrent: null, dayUsd: "5.00", weekUsd: null, monthUsd: null },
+    { scope: "model:OpenAI/gpt-x", day: null, week: null, month: null, concurrent: null, dayUsd: null, weekUsd: "10.00", monthUsd: null },
+    { scope: "acme/count", day: 1 }, // a version 1 row: no dollar GET at all
+  ];
+  const now = new Date();
+  const values = new Map([
+    [dayKey(now, scopeDollarKeyPrefix("acme/web")), "1500000"],
+    [weekKey(now, modelDollarKeyPrefix("openai/gpt-x")), "250000"],
+  ]);
+  const commands = [];
+  const redis = {
+    async get(key) {
+      commands.push(key);
+      return values.get(key) ?? null;
+    },
+    disconnect() {},
+  };
+  const res = await readScopedBudget({ url: "redis://x", limits, redisFn: () => redis });
+  assert.deepEqual(res.rows, [{ day: 0, usdMicros: { day: 1_500_000 } }, { usdMicros: { week: 250_000 } }, { day: 0 }]);
+  assert.equal(commands.length, 4, "one GET per capped window; a model row has no job-count GET");
+  assert.ok(commands.some((k) => k.startsWith(`${modelDollarKeyPrefix("openai/gpt-x")}:`)), "the model key hashes the LOWERCASED ref");
 });
 
 // --- the fleet (issue #57) ------------------------------------------------------------------------------

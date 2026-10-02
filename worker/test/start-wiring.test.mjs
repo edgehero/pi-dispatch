@@ -115,7 +115,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -281,6 +281,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			...(makeGitLabHost ? { makeGitLabHost } : {}),
 			...(now ? { now } : {}),
 			...(sleep ? { sleep } : {}),
+			...(watchScopedLimits ? { watchScopedLimits } : {}),
 			...(authResolveTimeoutMs ? { authResolveTimeoutMs } : {}),
 			...(ensureJobsDir ? { ensureJobsDir } : {}),
 			...(ensureUnderAccountRoot ? { ensureUnderAccountRoot } : {}),
@@ -1401,6 +1402,59 @@ test("reloadScopedLimits keeps LAST-GOOD on a bad edit and hot-swaps on a good o
 		mod.reloadScopedLimits(config, ref, log);
 		assert.equal(ref.current[0].day, 9, "a good edit swaps the ref");
 		assert.deepEqual(logs[1], { event: "scoped_limits_reloaded", fields: { count: 1 } });
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("boot: a dollar row with no per-job cap WARNS, and an overlay-only maxCostUsd silences it; the watcher gets the merged cap thunk (PR #549's review)", { skip }, async () => {
+	const dir = tempDir("pi-sl-usd-");
+	try {
+		const file = join(dir, "scoped-limits.json");
+		const settingsFile = join(dir, "settings.json");
+		writeFileSync(file, `${JSON.stringify({ version: 2, limits: [{ scope: "acme/web", dayUsd: "5" }] })}\n`);
+		const armed = [];
+		const watchScopedLimits = (...args) => (armed.push(args), { close() {} });
+		const bare = await runStart({ env: { PI_SCOPED_LIMITS_FILE: file, PI_SETTINGS_FILE: settingsFile }, watchScopedLimits });
+		assert.deepEqual(bare.logs.find((l) => l.event === "scoped_limits_dollar_rows_without_cap")?.rows, [{ index: 0, kind: "scope" }], "no cap anywhere: the boot warning");
+		const thunk = armed[0][4];
+		assert.equal(typeof thunk, "function", "the watcher receives the cap thunk");
+		assert.equal(thunk(), null, "no cap yet");
+		// The reload path the watcher drives: a no-cap dollar row warns.
+		const reloadLogs = [];
+		mod.reloadScopedLimits({ scopedLimitsFile: file }, { current: [] }, (event, fields) => reloadLogs.push({ event, fields }), thunk);
+		assert.ok(reloadLogs.some((l) => l.event === "scoped_limits_dollar_rows_without_cap"), "the reload warns");
+		// An OVERLAY-only cap: the thunk reads it (merged, not env only), and the boot warning is silent.
+		writeFileSync(settingsFile, JSON.stringify({ maxCostUsd: "2" }));
+		assert.equal(thunk(), "2", "the thunk re-reads the merged settings");
+		armed.length = 0;
+		const capped = await runStart({ env: { PI_SCOPED_LIMITS_FILE: file, PI_SETTINGS_FILE: settingsFile }, watchScopedLimits });
+		assert.ok(!capped.logs.some((l) => l.event === "scoped_limits_dollar_rows_without_cap"), "the overlay's cap silences the boot warning");
+		assert.equal(armed[0][4](), "2");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("reloadScopedLimits WARNS (never refuses) on a dollar row when the deployment has no per-job cap (PR #549's review)", { skip }, async () => {
+	const dir = tempDir("pi-sl-");
+	try {
+		const file = join(dir, "scoped-limits.json");
+		const config = { scopedLimitsFile: file };
+		const ref = { current: [] };
+		const logs = [];
+		const log = (event, fields) => logs.push({ event, fields });
+		writeFileSync(file, JSON.stringify({ version: 2, limits: [{ scope: "/srv/secret-path", day: 2 }, { scope: "/srv/secret-path2", dayUsd: "5" }, { scope: "model:openai/gpt-x", weekUsd: "9" }] }));
+		mod.reloadScopedLimits(config, ref, log, () => null);
+		assert.equal(ref.current.length, 3, "loaded, not refused");
+		assert.deepEqual(logs[1], { event: "scoped_limits_dollar_rows_without_cap", fields: { rows: [{ index: 1, kind: "scope" }, { index: 2, kind: "model" }] } });
+		assert.ok(!JSON.stringify(logs).includes("secret-path"), "never a scope string");
+		logs.length = 0;
+		mod.reloadScopedLimits(config, ref, log, () => "2");
+		assert.deepEqual(logs.map((l) => l.event), ["scoped_limits_reloaded"], "a per-job cap: no warning");
+		logs.length = 0;
+		mod.warnDollarRowsWithoutCap(ref.current, undefined, log);
+		assert.equal(logs[0].event, "scoped_limits_dollar_rows_without_cap", "the boot call, same rule");
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
@@ -2723,7 +2777,9 @@ test("all FIVE live-edit watches apply the boot-race rule, not just the one with
 	// resolution; the worker's three are armed a thousand lines into `startWorker`, behind a live Valkey,
 	// so they are covered here.
 	const worker = sources["worker/src/start.mjs"];
-	for (const [fn, key] of [["watchTriggersFile", "triggers"], ["watchPauseWindowsFile", "pauseWindows"], ["watchScopedLimitsFile", "scopedLimits"]]) {
+	// The scoped-limits watcher is armed through its injectable seam (PR #549's review), which defaults to the real one.
+	assert.match(worker, /watchScopedLimits: watchScopedLimitsFn = watchScopedLimitsFile,/, "the seam defaults to the real watcher");
+	for (const [fn, key] of [["watchTriggersFile", "triggers"], ["watchPauseWindowsFile", "pauseWindows"], ["watchScopedLimitsFn", "scopedLimits"]]) {
 		const call = worker.match(new RegExp(`extraClosers\\.push\\(${fn}\\(([^;]*)\\)\\);`));
 		assert.ok(call, `${fn} is armed from startWorker`);
 		assert.match(call[1], new RegExp(`atBoot\\.${key}\\b`), `${fn} is handed the boot baseline of ITS OWN file, not another's`);

@@ -827,6 +827,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   concurrency shall be operator-editable live via the confirm-gated tools and the `/dispatch` panel
   (`INT-SCOPED-LIMITS-FILE-CONTRACT`; that admin surface lands in a later slice of issue #242 — the
   file-and-watcher half is live now); the mutex alone is code.
+- **Dollar windows** (issues #501 part 5 and #502 part 6, file version 2): a repo or folder row may also cap
+  what the scope's jobs spend per day, week and month in dollars (`dayUsd`, `weekUsd`, `monthUsd`), and a
+  `model:<provider>/<model>` row caps what every job spends on that model, across every scope. Each is reserved
+  before the container with the deployment's dollar windows, in one step that gives everything back on a
+  refusal (`dollar-cap`), and settled after the run (`DES-DOLLAR-RESERVE-AND-SETTLE`). A version 1 file that uses
+  either is refused naming version 2; a version 1 file without them keeps working unchanged.
 - **Why**: Every prior limit was deployment-global: one noisy repo emptied the daily cap for every other
   scope with nothing naming the culprit, and nothing serialized a working tree — two same-folder jobs ran
   containers concurrently in one read-write bind mount, reachable by a single cron trigger with no
@@ -847,6 +853,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   and the second defers on a fixed re-check — with no file configured. Given a deployment that configures
   nothing new, then it behaves byte-identically, key for key and record for record, except where the
   mutex serializes — which is the feature.
+  Given a repo row with `dayUsd` and a job whose cap does not fit, then the job is refused `dollar-cap` before
+  any container, and the deployment's dollar reservation is given back. Given a version 1 file with a dollar
+  field or a model row, then the file is refused naming version 2. Given a dollar row on a deployment with no
+  per-job cap, then the worker and `doctor` warn, and a job its trigger does not cap is refused `config-refused`.
+  Given a row window below the per-job cap, then `doctor` warns, and the refusal says the budget is smaller than
+  the run's cost limit rather than that no room is left.
 
 ## REQ-WAIT-FOR
 
@@ -1537,6 +1549,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   cost cap, a call to an unlisted model is `model-not-allowed`, never `cost-cap`. Given a list on a runner that
   cannot enforce it before a call, the job is refused `model-policy-unenforceable` before any call. Given no
   list, the exit line is byte-identical to before.
+  Per-model dollar windows (part 6): given a `scoped-limits.json` version 2 row `model:<provider>/<model>` with
+  `dayUsd`, every job that may reach that model reserves its per-job cap in that model's window: a job with a
+  list when the model is on it, and a job with NO list always, since it may switch to any model (fail closed).
+  Given a window with room for one job, the second such job is refused `dollar-cap` pre-spend, its other
+  dollar reservations given back. After a run, the window settles to that model's own cost from the exit line's
+  usage ledger; it keeps at least its reservation when the ledger cannot say what the model spent (a folded
+  ledger, spend on no model, no ledger, an untrusted exit line, or a job-wide floor). The record's
+  `dollars.modelBasis` says which (`INT-RUN-HISTORY-FILE-CONTRACT`).
 
 ## REQ-GLOBAL-PI-OVERLAY
 
@@ -2821,6 +2841,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-02 | Issues #501 part 5 and #502 part 6 (scoped-limits version 2). **`REQ-SCOPED-LIMITS` AMENDED**: a new Dollar windows bullet (repo and folder rows gain `dayUsd`, `weekUsd`, `monthUsd`; `model:` rows cap a model across scopes; reserved with the deployment's dollar windows in one step that gives everything back, settled after the run; a version 1 file using either is refused naming version 2), and the Acceptance gains the scope dollar refusal, the version clause, and (PR #549's review) the no-cap and cap-below-job warnings; the job-count, concurrency and mutex clauses are UNCHANGED, checked. **`REQ-MODEL-POLICY` AMENDED**, the Acceptance: per-model dollar windows (part 6), with the unrestricted job reserving in every model row, the second-job refusal, and the per-model settlement with its floor. **`REQ-SPEND-CAPS-MULTI-WINDOW` UNCHANGED, checked**: the deployment windows did not move. **Code evidence**: worker/src/scoped-limits.mjs; worker/src/dollar-budget.mjs -> modelDollarSettlement; worker/src/processor.mjs -> runJob. |
 | 2026-10-02 | Issue #501, parts 3 and 4, and #503 part 7 (dollar windows, reserved before the run and settled after it). **`REQ-SPEND-CAPS-MULTI-WINDOW` AMENDED**: the Statement gains the optional dollar windows (`dailyCostUsd`, `weeklyCostUsd`, `monthlyCostUsd` and their `PI_*_COST_USD` variables), each needing `maxCostUsd`, reserved after both job-count reserves and before the container, refused pre-container as `dollar-cap` with both job-count slots and the dollars given back, settled after the run to the metered cost when it is fully known and kept whole when it is not, refunded when no container ran, in integer micro-dollars, and nothing reserved for a job whose every allowed model is local and zero-rated; the soft-hold band stays a job-count brake. The Why says why the windows can be check-before (the per-job cap is enforced before every call) and why a refused dollar reservation is given back. The Acceptance gains the concurrent-reservation, metered, floor, 23:59:59, never-started, zero-rated and nothing-set clauses; the job-count clauses are UNCHANGED, checked. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**, the Why: the three dollar windows are settings keys behind the same operator-typed or confirm-gated write, no longer refused at the write. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` UNCHANGED, checked**: (d), the per-job cap, is what the windows reserve, and its enforcement did not move. **`REQ-JOB-STATUS-COMMENTS` UNCHANGED, checked**: `dollar-cap` is a free refusal with its own refusal comment, like `over-budget`, not a terminal sentence. **Code evidence**: worker/src/dollar-budget.mjs; worker/src/processor.mjs -> runJob; worker/src/model-endpoints.mjs -> zeroRatedVerdict. PR #542's review, folded in: the Statement and Acceptance say a run that made no provider call meters 0 and a floor charges at least the reservation and never less than a reported metered cost; the Why's "`CONST-BUDGET-BEFORE-TOKENS` is unchanged" is limited to the job-count windows, since the dollar windows join that constraint as its second ledger. |
 | 2026-10-02 | Issue #502, part 4 (the runner's model guard). **`REQ-MODEL-POLICY` AMENDED**, the runner half: a job limited by a list never sends a call to a model outside it; every call in the runner process is checked before it is sent (a mid-run `setModel`, a second in-process session, an extension's direct call, classifiers and image models, a virtual model by its routed physical model), exact and case-sensitive on provider and model, and a miss ends the job `2` / `model-not-allowed`. PR #538's review: a listed call is also refused when its request would name another model (a routing key in samplingParams, `providerOptions` included, any other key passing, a payload hook, which is deny by default: it may change only the top-level messages, system prompt and sampling settings, a per-call Azure deployment, a caller's own `fetch`, an unlisted Anthropic fallback); a listed fallback that answers is logged; the worker half refuses, before any spend, a list naming a model whose declared fallbacks are not all listed (`why: fallback-unlisted`), which at the pin is `anthropic/claude-fable-5` without both opus fallbacks, and retries rather than refuses when the overlay cannot be read just then; a runner that cannot enforce the list refuses before any call. The Scope, Why, Traces and Acceptance gain the runner clauses. **`REQ-JOB-STATUS-COMMENTS` AMENDED**, the who-authors clause: `model-not-allowed` is live as the runner's paid stop on an image that declares `modelPolicy`, beside the worker's free refusal; the sentences themselves are unchanged. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` UNCHANGED, checked**: the cost cap's rules stand; an unlisted call under a cap is refused by the list before the cap is asked. **Code evidence**: image/runner/src/usage-meter.mjs -> createModelGuard, createPolicyGuard; image/runner/run-job.mjs; worker/src/model-catalog.mjs -> declaredFallbacks; worker/src/processor.mjs. |
 | 2026-10-02 | Issue #535. **`REQ-RESUMABLE-SESSION` AMENDED**: a transcript holding a compaction with an empty summary is one more fail-open cause, a cold start named `compaction-summary-empty`, and the Acceptance says so. It is not an opt-in bound: a session resumed on such a summary would carry on without the turns it replaced, and nothing would say so. **Code evidence**: worker/src/session-store.mjs -> readCanonical, hasEmptyCompaction; worker/test/session-store.test.mjs; image/runner/test/compaction-refused.integration.test.mjs. |

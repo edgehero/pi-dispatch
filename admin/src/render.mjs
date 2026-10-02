@@ -12,6 +12,7 @@
  */
 
 import { windowState } from "@edgehero/pi-dispatch/budget";
+import { formatMicros } from "@edgehero/pi-dispatch/money";
 // Pure-to-pure, the same standing as the windowState import above: panel.mjs is the admin's other no-I/O
 // text module (asserted so by panel.test.mjs), and fmtCost is THE single renderer of typed cost values,
 // so the what-if below routes every dollar through it rather than grow a second money formatter here.
@@ -231,6 +232,14 @@ export function renderScopedLimits({ limits, scopedBudget } = {}) {
       bits.push(`${key} ${u}/${l[key]}`);
     }
     if (Number.isInteger(l.concurrent)) bits.push(`<=${l.concurrent} at once`);
+    // Version 2's dollar windows (issues #501, #502): the cap, and what is held or settled when the counter was read.
+    for (const key of ["day", "week", "month"]) {
+      const cap = l[`${key}Usd`];
+      if (typeof cap !== "string") continue;
+      const micros = used?.usdMicros?.[key];
+      const u = Number.isSafeInteger(micros) && micros >= 0 ? formatMicros(micros) : "-";
+      bits.push(`${key} $${u}/$${cap}`);
+    }
     lines.push(`  ${l.scope}: ${bits.join(" · ")}`);
   });
   return lines.join("\n");

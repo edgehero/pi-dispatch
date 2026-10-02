@@ -127,6 +127,10 @@ This page reports spend after the fact. Two settings act on it before the fact (
   when the cost is not fully known. Each run record says which, under `dollars.basis`: `metered`, `floor`, `refunded`
   or `unreserved`.
 
+`scoped-limits.json` version 2 adds the same windows per repo or folder, and per model
+([scoped limits](scoped-limits.md#dollar-windows-and-model-rows-version-2)). A model window is charged that
+model's own cost, and the record says how under `dollars.modelBasis`.
+
 A job that calls no model (a command job, or one whose first call the cap refused) is charged $0. A job whose
 cost is not fully known is charged at least its cap, and more when the part that was measured already costs more.
 

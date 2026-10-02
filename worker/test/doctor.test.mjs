@@ -6,7 +6,7 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { dollarChecks, overlayDollarProblem, startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryPlainScript, egressCanaryProbeArgs, forgeUrlEgressChecks, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep, undeclaredPortNear, ENDPOINT_PROBE_SLUGS, allowlistHostAliases, egressEndpointScript, lanIPv4Addresses, overlayLoopbackModels } from "../src/doctor.mjs";
+import { dollarChecks, overlayDollarProblem, scopedDollarRowChecks, startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, collectChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryPlainScript, egressCanaryProbeArgs, forgeUrlEgressChecks, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, runDoctor, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep, undeclaredPortNear, ENDPOINT_PROBE_SLUGS, allowlistHostAliases, egressEndpointScript, lanIPv4Addresses, overlayLoopbackModels } from "../src/doctor.mjs";
 import { valkeyPasswordFor } from "../src/valkey-endpoint.mjs";
 import { serviceEnvFileOf } from "../src/service-env.mjs";
 import { VALKEY_SHARED_KEY as VALKEY_SHARED_NAME } from "../src/podman-stack.mjs";
@@ -4509,7 +4509,7 @@ test("doctor: with PI_SCOPED_LIMITS_FILE set to the file, no trap line; an EMPTY
 test("doctor: a configured scoped-limits file that will not load is a FAILURE naming the boot refusal, never-tier", async () => {
 	const dir = tempDir("pi-sl-bad-");
 	const path = join(dir, "scoped-limits.json");
-	writeFileSync(path, JSON.stringify({ version: 2, limits: [] }));
+	writeFileSync(path, JSON.stringify({ version: 3, limits: [] }));
 	const checks = await collectChecks(imgEnv({ PI_SCOPED_LIMITS_FILE: path }), collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true }));
 	const c = checks.find((x) => /PI_SCOPED_LIMITS_FILE is set in this shell to a file the worker cannot load/.test(x.label));
 	assert.ok(c, "the check is present");
@@ -11176,4 +11176,33 @@ test("doctor: an invalid settings overlay FAILS with the reader's reason, keys o
 	writeFileSync(file, '{"maxCostUsd":"1"}');
 	assert.doesNotMatch((await envDoctor(`PI_SETTINGS_FILE=${file}\n`, {})).text, /settings overlay .* is invalid/);
 	assert.doesNotMatch((await envDoctor(`PI_SETTINGS_FILE=${join(dir, "absent.json")}\n`, {})).text, /settings overlay .* is invalid/);
+});
+
+test("doctor: scoped-limits dollar rows WARN with no per-job cap, and a row window below the per-job cap (PR #549's review)", async () => {
+	const rows = [
+		{ scope: "/srv/secret", day: 3, week: null, month: null, concurrent: null, dayUsd: null, weekUsd: null, monthUsd: null },
+		{ scope: "acme/web", day: null, week: null, month: null, concurrent: null, dayUsd: "1.00", weekUsd: "10.00", monthUsd: null },
+		{ scope: "model:openai/gpt-x", day: null, week: null, month: null, concurrent: null, dayUsd: "3.00", weekUsd: null, monthUsd: null },
+	];
+	const none = scopedDollarRowChecks(rows, undefined, "sl.json");
+	assert.equal(none.length, 1);
+	assert.equal(none[0].warn, true);
+	assert.match(none[0].label, /#1 \(a repo or folder row\), #2 \(a model row\) in sl\.json set a dollar window, but the deployment has no per-job cost cap/);
+	const below = scopedDollarRowChecks(rows, "2", "sl.json");
+	assert.equal(below.length, 1);
+	assert.match(below[0].label, /#1 \(a repo or folder row\) day in sl\.json are below the per-job cost cap/);
+	assert.ok(!below[0].label.includes("week"), "a window at or above the cap is fine");
+	assert.deepEqual(scopedDollarRowChecks(rows, "1", "sl.json"), []);
+	assert.ok(!JSON.stringify(none).includes("/srv/secret"), "never a scope string");
+	// Wired: the overlay's maxCostUsd counts, merged over env.
+	const dir = tempDir("pi-sl-usd-");
+	const path = join(dir, "scoped-limits.json");
+	writeFileSync(path, JSON.stringify({ version: 2, limits: [{ scope: "acme/web", dayUsd: "5" }] }));
+	const settings = join(dir, "settings.json");
+	const seams = collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true });
+	const bare = await collectChecks(imgEnv({ PI_SCOPED_LIMITS_FILE: path, PI_SETTINGS_FILE: settings }), seams);
+	assert.ok(bare.some((c) => c.warn === true && /set a dollar window, but the deployment has no per-job cost cap/.test(c.label)));
+	writeFileSync(settings, JSON.stringify({ maxCostUsd: "2" }));
+	const capped = await collectChecks(imgEnv({ PI_SCOPED_LIMITS_FILE: path, PI_SETTINGS_FILE: settings }), seams);
+	assert.ok(!capped.some((c) => /no per-job cost cap \(maxCostUsd\) --/.test(c.label)), "the overlay's cap is seen");
 });
