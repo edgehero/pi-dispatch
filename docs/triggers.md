@@ -331,8 +331,10 @@ A chained job (`/outbox`) keeps its parent's provider, model and list. A request
 If a listed model is served by a declared model endpoint ([`docs/egress.md`](egress.md)), the job holds
 a slot on that endpoint too, not only on its main model's.
 
-No AI tool can set `models`. Edit the file. `dispatch_trigger_edit` refuses, before it asks, a new
-provider or model that is not on the trigger's own list.
+No AI tool can set `models`. Edit the file. `dispatch_trigger_add` and `dispatch_trigger_edit` refuse a
+call that carries `models`, and an edit keeps the list the entry has. `dispatch_trigger_edit` also refuses,
+before it asks, a new provider or model that is not on the trigger's own list. `dispatch_triggers` and the
+panel show the list.
 
 **Upgrading, and services out of step.** A receiver from before this release does not know `models` and
 drops it, and so does a current one that still reads an old copy of the triggers file (compose's
@@ -384,7 +386,8 @@ Any trigger type can set the most one of its jobs may spend, in US dollars:
   older image the job is refused before it costs anything, with reason `job-image-cost-cap-unsupported`.
   That image's runner would ignore the cap. A deployment that sets no dollar cap anywhere needs no new image.
 - A chained job (job chaining) keeps its parent's cap.
-- No AI tool can set or change it. `dispatch_trigger_edit` leaves it as it is.
+- No AI tool can set or change it. `dispatch_trigger_add` and `dispatch_trigger_edit` refuse a call that
+  carries it, and an edit leaves it as it is. `dispatch_triggers` and the panel show it.
 
 **Upgrading, and services out of step.** The same as for `models` above: a receiver from before this
 release drops `maxCostUsd`, and its job would run under the deployment's cap or none. The worker refuses

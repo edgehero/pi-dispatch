@@ -368,20 +368,24 @@ function triggerLine(t) {
   // worker only ever disarms a once rule -- and absent otherwise, so every existing line is
   // byte-identical.
   const shot = t?.disarmed ? "  [spent]" : t?.once === true ? "  [once]" : "";
+  // The two spend narrowings no tool can set (issues #501 and #502): which models the trigger's jobs may call, and
+  // its per-job dollar cap. Listed in full: the models a job can reach are not a fact to summarize as a count.
+  // Absent when unset, appended last, so every existing line is byte-identical.
+  const pol = `${Array.isArray(t?.models) && t.models.length > 0 ? `  [models ${t.models.join(", ")}]` : ""}${t?.maxCostUsd ? `  [max $${t.maxCostUsd}]` : ""}`;
   switch (t?.type) {
     case "cron":
-      return `cron  ${t.id ?? "-"}  ${t.pattern ?? "-"} → ${t.folder ?? "-"}/${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}`;
+      return `cron  ${t.id ?? "-"}  ${t.pattern ?? "-"} → ${t.folder ?? "-"}/${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${pol}`;
     case "label":
-      return `label  ${ruleClauses(t) || "(no selector)"} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}`;
+      return `label  ${ruleClauses(t) || "(no selector)"} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${pol}`;
     case "comment":
-      return `comment  "${t.phrase ?? "-"}" → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}`;
+      return `comment  "${t.phrase ?? "-"}" → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${pol}`;
     case "pull_request": {
       const clauses = ruleClauses(t);
       const action = `action[${(t.action ?? []).join(",")}]`;
       // A close-only rule's `#<n>` narrowing renders exactly as the issue arm's does (issue #231): a
       // one-shot on PR #40 that renders like "every close" hides exactly what the operator armed.
       const num = Number.isInteger(t.number) ? ` #${t.number}` : "";
-      return `pull_request  ${action}${num}${clauses ? ` ${clauses}` : ""} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${shot}`;
+      return `pull_request  ${action}${num}${clauses ? ` ${clauses}` : ""} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${pol}${shot}`;
     }
     case "issue": {
       // pull_request's shape with `#<n>` in the clause slot (issue #231): this plain line and the colored
@@ -390,7 +394,7 @@ function triggerLine(t) {
       // item number it may be narrowed to.
       const action = `action[${(t.action ?? []).join(",")}]`;
       const num = Number.isInteger(t.number) ? ` #${t.number}` : "";
-      return `issue  ${action}${num} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${shot}`;
+      return `issue  ${action}${num} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}${pol}${shot}`;
     }
     default:
       return "(unknown trigger)";

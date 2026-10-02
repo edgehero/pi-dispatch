@@ -51,6 +51,7 @@ import { isForgeKind } from "@edgehero/pi-dispatch/forges";
 // supplies them bytes, never the other way around -- the dependency points read-model -> graph-model.
 import { parseSkillMeta, findSiblingMentions, findLoopHints, triggerMatchLabel } from "./graph-model.mjs";
 import { repoOfTarget } from "./costs.mjs";
+import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindowsSinceMs } from "./dollar-windows.mjs";
 // Issue #471: the ONE resolver of a deployment's service keys, shared with `doctor` (the package boundary allows it: the
 // admin already takes its config helpers from the worker the same way).
 import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
@@ -699,7 +700,7 @@ export function mergedDollarProblem(overlay, env, { deploymentDir = null } = {})
   }
   const broken = checkDollarInvariant(merged);
   if (broken === null) return null;
-  const seen = deploymentDir === null ? "the settings overlay and this session's environment (not the worker's)" : "the settings overlay and the deployment's .env";
+  const seen = deploymentDir === null ? "the settings overlay nor this session's environment (not the worker's)" : "the settings overlay nor the deployment's .env";
   return { warning: `${broken.invalid}. Neither ${seen} sets maxCostUsd (PI_MAX_COST_USD). A cap set elsewhere, such as the worker's service unit or its --env-setup script, is not visible here; if the worker has none, it refuses every job as settings-overlay-invalid. Run \`pi-dispatch doctor\` on the worker to check` };
 }
 
@@ -840,6 +841,7 @@ export async function readScopedBudget({ url, limits, redisFn = makeRedisClient,
   try {
     parseConnection(url, { failFast: true }); // throws on junk before any client exists
     redis = redisFn(url);
+    redis.on?.("error", () => {}); // a down Valkey is `{ unreachable }`, never ioredis stack traces (PR #550's review)
     const now = new Date();
     const settled = Promise.all(
       limits.map(async (l) => {
@@ -880,6 +882,64 @@ export async function readScopedBudget({ url, limits, redisFn = makeRedisClient,
       }
     }
   }
+}
+
+/**
+ * The dollar windows' counters (issue #501, part 7): ONE MGET of `keys`, the window keys `dollarWindowSpecs` composed
+ * with the worker's own key functions. Returns `{ [key]: value }` (an absent key is absent from the map, an honest 0
+ * to the caller), or `{ unreachable }`. A plain GET, never an INCR, so looking at a window cannot hold anything in it.
+ * One client, one timeout, `readBudget`'s posture exactly.
+ */
+export async function readDollarCounters({ url, keys, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
+  if (!Array.isArray(keys) || keys.length === 0) return {};
+  let redis;
+  try {
+    parseConnection(url, { failFast: true }); // throws on junk before any client exists
+    redis = redisFn(url);
+    // A down Valkey must degrade to `{ unreachable }`, not print ioredis' "Unhandled error event" stack on every
+    // reconnect attempt (readFleetQueues' rule): dispatch_costs touched no Valkey at all before the dollar windows.
+    redis.on?.("error", () => {});
+    const settled = redis.mget(...keys).then(
+      (values) => Object.fromEntries(keys.flatMap((k, i) => (values?.[i] === null || values?.[i] === undefined ? [] : [[k, Number(values[i])]]))),
+      (err) => ({ unreachable: err?.message ?? String(err) }),
+    );
+    return await withTimeout(settled, timeoutMs, { unreachable: "timed out reaching the queue" });
+  } catch (err) {
+    return { unreachable: err?.message ?? String(err) };
+  } finally {
+    if (redis) {
+      try {
+        redis.disconnect();
+      } catch {
+        // already closed
+      }
+    }
+  }
+}
+
+/**
+ * Every active dollar window as rows (`dollar-windows.mjs`): the deployment's caps from the overlay and `env` merged
+ * the worker's way, then the scoped-limits file's dollar rows; each with its counter (spent and held, fleet-wide)
+ * and the records' side (settled, basis counts, boundExceeded) from the run records this host can read since the
+ * oldest window began. `{ windows, invalid?, limits? }`: `invalid` names a dollar setting that does not parse (shown,
+ * never guessed), `limits` carries the scoped-limits file's own `{ missing }` or `{ invalid }`.
+ */
+export async function readDollarWindows({ paths, env = {}, now = new Date(), fs = nodeFs, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
+  const view = readSettingsView({ settingsFile: paths.settingsFile, fs });
+  const { caps, jobCapMicros, invalid } = deploymentDollarCaps(view?.overlay ?? {}, env);
+  const sl = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, fs });
+  const specs = dollarWindowSpecs({ caps, limits: Array.isArray(sl?.limits) ? sl.limits : [], now });
+  const out = { windows: [] };
+  if (invalid.length > 0) out.invalid = invalid;
+  if (view?.invalid) out.settingsInvalid = true;
+  if (!Array.isArray(sl?.limits) && sl?.invalid) out.limits = { invalid: sl.invalid };
+  if (specs.length === 0) return out;
+  const counters = await readDollarCounters({ url: paths.valkeyUrl, keys: specs.map((s) => s.key), redisFn, timeoutMs });
+  const records = scanRunRecords({ logsDir: paths.logsDir, sinceMs: dollarWindowsSinceMs(specs, now), nowMs: now.getTime(), fs });
+  out.windows = dollarWindowRows({ specs, counters, records: Array.isArray(records) ? records : [], jobCapMicros });
+  if (counters?.unreachable) out.countersUnreachable = counters.unreachable;
+  if (!Array.isArray(records)) out.recordsUnreachable = records?.unreachable ?? "unreadable";
+  return out;
 }
 
 /**
@@ -1560,6 +1620,13 @@ export function normalizeTriggerForDisplay(entry) {
     ...(typeof run.provider === "string" && run.provider !== "" && { provider: run.provider }),
     ...(typeof run.model === "string" && run.model !== "" && { model: run.model }),
     ...(Number.isSafeInteger(run.maxTurns) && run.maxTurns >= 1 && { maxTurns: run.maxTurns }),
+    // The two spend narrowings no tool can set (issue #501, part 7): the allowed-model list (a fresh copy,
+    // all strings, the loader's shape; the obligation from PR #536's review) and the per-job dollar cap, as written.
+    // Shown because they decide what the trigger's jobs can reach and spend, and only the file says so. Model ids and
+    // a dollar amount, the operator's own words, never a value a job chose. Spread only when present, so a trigger
+    // that sets neither keeps exactly its keys.
+    ...(Array.isArray(run.models) && run.models.length > 0 && run.models.every((m) => typeof m === "string") && { models: [...run.models] }),
+    ...((typeof run.maxCostUsd === "string" || typeof run.maxCostUsd === "number") && { maxCostUsd: String(run.maxCostUsd) }),
   };
   switch (on.type) {
     case "cron":

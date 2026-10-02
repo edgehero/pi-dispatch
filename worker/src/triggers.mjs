@@ -1181,6 +1181,46 @@ function validateBackend(on, run, at, path, { localWorkspace }) {
 }
 
 /**
+ * The `run` field a key spells or nearly spells (`run.provider`, `run.model`, `run.models`, `run.maxTurns`,
+ * `run.maxCostUsd`), or null. The exact field names match too: the CALLER decides whether an exact name is legal
+ * where it found it (the loader allows them under `run`, never under `on`; the console's trigger tools refuse
+ * `run.models` and `run.maxCostUsd` in any spelling, issue #501 part 7). One sweep, so the two cannot disagree on
+ * what a near miss is.
+ */
+export function runModelFieldNearMiss(key) {
+	// What the sweep compares against, case and separators removed. `providerid` and `modelid` are what an
+	// operator copies from a provider's own API docs; `allowedmodels` is the issue's own name for the list.
+	// Deliberately NOT a synonym hunt (`llm`, `engine`): that is the general unknown-key sweep this file's
+	// forward-compatibility posture rejects.
+	// Singular and plural of each, excludeTools' rule: `maxTurn` and `providers` are one grammatical step
+	// from the field, and `modelName` is how several provider SDKs spell the id.
+	const targets = RUN_MODEL_NEAR_MISS_TARGETS;
+	const isSubsequence = (needle, hay) => {
+		let i = 0;
+		for (const ch of hay) if (i < needle.length && needle[i] === ch) i++;
+		return i === needle.length;
+	};
+	const normalized = String(key).replace(/[^a-z0-9]/gi, "").toLowerCase();
+	// The homoglyph branch is validateBackend's (its comment carries the rationale), floor 4 included:
+	// `m<U+043E>del` normalizes to `mdel`, and a floor of 5 would let the shortest target's likeliest
+	// homoglyph through. Only a non-ASCII key reaches this branch, so no ASCII field is at risk.
+	// The suggestion names the target that actually MATCHED, so a homoglyph key is pointed at the field
+	// its surviving letters spell rather than at whatever a prefix test would guess.
+	const hit = /^[\x20-\x7E]*$/.test(key)
+		? (Object.hasOwn(targets, normalized) ? normalized : undefined)
+		: normalized.length >= 4 ? Object.keys(targets).find((t) => isSubsequence(normalized, t)) : undefined;
+	return hit === undefined ? null : targets[hit];
+}
+
+const RUN_MODEL_NEAR_MISS_TARGETS = Object.freeze({
+	provider: "run.provider", providers: "run.provider", providerid: "run.provider", providerids: "run.provider", providername: "run.provider",
+	model: "run.model", modelid: "run.model", modelname: "run.model",
+	models: "run.models", modelids: "run.models", modelnames: "run.models", allowedmodels: "run.models", allowedmodel: "run.models",
+	maxturns: "run.maxTurns", maxturn: "run.maxTurns",
+	maxcostusd: "run.maxCostUsd", maxcost: "run.maxCostUsd",
+});
+
+/**
  * `run.provider`, `run.model` and `run.maxTurns` (issue #502): which model this trigger's job runs on, and
  * its turn limit. Every kind carries them; before #502 only cron did, and unchecked.
  *
@@ -1201,42 +1241,15 @@ function validateBackend(on, run, at, path, { localWorkspace }) {
  * were refused here before it was.
  */
 function validateRunModel(on, run, at, path) {
-	// What the sweep compares against, case and separators removed. `providerid` and `modelid` are what an
-	// operator copies from a provider's own API docs; `allowedmodels` is the issue's own name for the list.
-	// Deliberately NOT a synonym hunt (`llm`, `engine`): that is the general unknown-key sweep this file's
-	// forward-compatibility posture rejects.
-	// Singular and plural of each, excludeTools' rule: `maxTurn` and `providers` are one grammatical step
-	// from the field, and `modelName` is how several provider SDKs spell the id.
-	const targets = {
-		provider: "run.provider", providers: "run.provider", providerid: "run.provider", providerids: "run.provider", providername: "run.provider",
-		model: "run.model", modelid: "run.model", modelname: "run.model",
-		models: "run.models", modelids: "run.models", modelnames: "run.models", allowedmodels: "run.models", allowedmodel: "run.models",
-		maxturns: "run.maxTurns", maxturn: "run.maxTurns",
-		maxcostusd: "run.maxCostUsd", maxcost: "run.maxCostUsd",
-	};
 	const exact = new Set(["provider", "model", "maxTurns", "models", "maxCostUsd"]);
-	const isSubsequence = (needle, hay) => {
-		let i = 0;
-		for (const ch of hay) if (i < needle.length && needle[i] === ch) i++;
-		return i === needle.length;
-	};
 	for (const [label, source, exactIsLegal] of [
 		["run", run, true],
 		["on", on, false],
 	]) {
 		for (const key of Object.keys(source ?? {})) {
 			if (exactIsLegal && exact.has(key)) continue;
-			const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
-			// The homoglyph branch is validateBackend's (its comment carries the rationale), floor 4 included:
-			// `m<U+043E>del` normalizes to `mdel`, and a floor of 5 would let the shortest target's likeliest
-			// homoglyph through. Only a non-ASCII key reaches this branch, so no ASCII field is at risk.
-			// The suggestion names the target that actually MATCHED, so a homoglyph key is pointed at the field
-			// its surviving letters spell rather than at whatever a prefix test would guess.
-			const hit = /^[\x20-\x7E]*$/.test(key)
-				? (Object.hasOwn(targets, normalized) ? normalized : undefined)
-				: normalized.length >= 4 ? Object.keys(targets).find((t) => isSubsequence(normalized, t)) : undefined;
-			if (hit === undefined) continue;
-			const meant = targets[hit];
+			const meant = runModelFieldNearMiss(key);
+			if (meant === null) continue;
 			throw configError(`${at}: ${label}.${key} is not a field -- did you mean ${meant}? A model choice the loader drops runs the job on the deployment default while the file reads as though it chose, so a near miss is refused rather than dropped: ${path}`);
 		}
 	}

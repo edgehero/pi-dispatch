@@ -446,15 +446,22 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   cap at all. pi-dispatch bounds **jobs** (`CONST-BUDGET-BEFORE-TOKENS`) and **turns**
   (`REQ-RUNNER-TURN-BUDGET`) but never tokens; the only $ ceiling today is provider-side
   (`CONST-TOKEN-SCOPED-PER-JOB`, the broad-key exception). This answer removes the blocker.
-  **No longer only provider-side (issue #501, 2026-10-02).** The provider's own limit is now one of three dollar
-  ceilings. A per-job cost cap (`maxCostUsd`, `PI_MAX_COST_MICROS`) is enforced by the runner BEFORE each
-  provider call, against a worst-case bound of that call, so it is not a lagging control
-  (`REQ-TOKEN-ACCOUNTING-AND-CAPS` (d)); and deployment dollar windows (`dailyCostUsd`, `weeklyCostUsd`,
-  `monthlyCostUsd`) reserve that cap before the container and settle to the metered cost after it
-  (`REQ-SPEND-CAPS-MULTI-WINDOW`, `DES-DOLLAR-RESERVE-AND-SETTLE`). What makes a dollar ceiling proactive where a
-  token cap could not be is the bound: the per-job cap is checked against what the next call could cost, not
-  what earlier calls did, so the reservation is a true bound and the windows can be check-before like the job
-  count. The lagging constraint below still describes the TOKEN caps, which are unchanged.
+  **No longer only provider-side (issue #501, final wording 2026-10-03).** The provider's own limit is one of four
+  dollar ceilings, all in place. First, a per-job cost cap (`maxCostUsd`, `PI_MAX_COST_MICROS`, narrowed per
+  trigger by `run.maxCostUsd`), enforced by the runner BEFORE each provider call against a worst-case bound of that
+  call, so it is not a lagging control (`REQ-TOKEN-ACCOUNTING-AND-CAPS` (d)); the bound includes a generic
+  long-context tier above 200,000 input tokens on the `anthropic-messages` and `bedrock-converse-stream` apis for
+  a rate table that has none, and a call priced at it is counted (`longContext`) and settles at the floor. Second,
+  deployment dollar windows (`dailyCostUsd`, `weeklyCostUsd`, `monthlyCostUsd`) that reserve that cap before the
+  container and settle after it, to the metered cost when it is fully known and at the floor when it is not
+  (`REQ-SPEND-CAPS-MULTI-WINDOW`, `DES-DOLLAR-RESERVE-AND-SETTLE`). Third, the same windows per repo or folder and
+  per model (`scoped-limits.json` version 2, `REQ-SCOPED-LIMITS`), in the same reservation. Fourth, the provider's
+  own limit. The operator sees them in the panel and the tools (`REQ-ADMIN-VIA-PI-EXTENSION`), with each window's
+  counter beside what the run records say settled, and `docs/costs.md` states their limits. What makes a dollar
+  ceiling proactive where a token cap could not be is the bound: the per-job cap is checked against what the next
+  call could cost, not what earlier calls did, so the reservation bounds what the runner meters (the gaps are
+  named in `DES-DOLLAR-RESERVE-AND-SETTLE`) and the windows can be check-before like the job count. Spend the runner's meter cannot see stays outside every one of them (`OQ-011`, issue #500).
+  The lagging constraint below still describes the TOKEN caps, which are unchanged.
 - **Design constraint (recorded)**: a token cap is structurally a **lagging** control — a job's token
   cost is known only *after* a turn runs, unlike a job *count*, which is knowable *before* and is exactly
   what makes `CONST-BUDGET-BEFORE-TOKENS` a proactive check. So even with usage data: a **daily** token
@@ -1779,3 +1786,4 @@ adversarial passes did.
 | 2026-09-30 | Issue #509, the pi 0.80.7 -> 0.99.1 bump. **`OQ-005` CLOSED**: the modelRuntime migration landed at the 0.99.1 pin and the runner uses it; the Action on bump was carried out against the tarball (the option set, `excludeTools` as `string[]`, eight built-in tools, unknown exclusion names still ignored silently); the rest of the row is kept as the record. **`OQ-010` AMENDED**, one parenthetical, status stays CLOSED: its pointer to the meter's choke point now names ModelRuntime.prototype. **`OQ-018` AMENDED**, status stays `ACCEPTED RISK`: pi 0.99.1's `builtin:<name>` entries in the `extensions` list are dropped by the mirror before any verdict, pinned by two new needles; the file grammar did not move. |
 | 2026-10-02 | Issue #501, parts 3 and 4. **`OQ-010` AMENDED**, in "Why it mattered": "the only $ ceiling today is provider-side" is no longer true. A paragraph names the three dollar ceilings now in place (the provider's, the per-job cost cap the runner enforces before each call, and the deployment dollar windows reserved before the container and settled after it) and says why a dollar ceiling can be check-before where a token cap could not: the per-job cap is judged against a bound of the next call, so the reservation is a true bound. The lagging-control constraint is UNCHANGED, checked: it describes the token caps, which did not change. Status and answer UNCHANGED. |
 | 2026-10-03 | Issue #545. **`OQ-003` AMENDED**: the adversarial half of the forged exit line is closed on an image declaring `exitAuth` by a line the agent cannot sign (a per-run key on stdin, an exec-only runner node, a worker that reads only verified lines), measured on Docker Desktop, rootful Docker and rootless Podman 4.9 and 5.8. It stays open on an image without `exitAuth` and for code inside the runner process. Status UNCHANGED: the row's own question (whether the prefix survives compaction) is not answered by this. |
+| 2026-10-03 | Issue #501, part 7. **`OQ-010` AMENDED**, its final wording, in "Why it mattered": the dollar ceilings are four and all in place (the per-job cap with its long-context tier and `longContext` floor, the deployment windows, the scoped and per-model windows, and the provider's own limit), the operator surfaces and `docs/costs.md` are named, and spend outside the meter (`OQ-011`) is said to stay outside every ceiling. Written as prose rather than a numbered list, which rendered with the following paragraph run into its last item, and "a true bound" became "bounds what the runner meters" (PR #550's review); the long-context tier is named by its two apis. The lagging-control constraint is UNCHANGED, checked: it describes the token caps. Status and answer UNCHANGED. **`OQ-011` UNCHANGED, checked**: a `pi` subprocess is still unmetered (issue #500), now also listed in `docs/costs.md`. |
