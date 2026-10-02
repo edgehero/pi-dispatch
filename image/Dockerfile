@@ -264,7 +264,11 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # runs both as uid 4242). An older image run with `--user` gets HOME=/ (Docker) or HOME=/workspace
 # (Podman, measured), so auth.json lands nowhere or in the operator's repository, and Chromium does not
 # start. The label is how the worker can tell the two apart before it spends anything.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid"
+# `costCap` (issue #501) tells the worker this runner reads PI_MAX_COST_MICROS and refuses, before each provider
+# call, a call whose worst-case cost would take the job past it. An older runner handed the variable would ignore
+# it and spend without a cap, reporting a clean exit: a MONEY limit quietly not enforced. The worker refuses that
+# pairing pre-spend by this token; verify-image.sh runs an offline job with a fake key under a cap of 0 to prove the claim.
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap"
 
 USER pi
 WORKDIR /workspace

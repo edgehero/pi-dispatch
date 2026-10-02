@@ -27,7 +27,6 @@ import {
 	decideExit,
 	EXIT_INFRA,
 	loadRetryPredicate,
-	TOKEN_BUDGET,
 } from "./src/outcome.mjs";
 import { restoreEnvProxyDispatcher } from "./src/env-proxy.mjs";
 import { createJobModelRuntime } from "./src/model-runtime.mjs";
@@ -41,7 +40,15 @@ import { attachTurnBudget } from "./src/turn-budget.mjs";
 // never a static import. Never add a pi-ai package specifier to this file's imports: two copies of that
 // package are installed and a plain specifier binds the HOISTED one, which pi does not use.
 // pinned-api.test.mjs guards this file against exactly that string.
-import { assertPoliciesEnforceable, createUsageMeter, installProcessUsageMeter, resolvePiAiCompat } from "./src/usage-meter.mjs";
+import {
+	assertPoliciesEnforceable,
+	createCostGuard,
+	createUsageMeter,
+	installProcessUsageMeter,
+	meterStopHandler,
+	policyEnforcement,
+	resolvePiAiCompat,
+} from "./src/usage-meter.mjs";
 
 const JOB_DIR = "/job";
 const PROMPT_PATH = `${JOB_DIR}/prompt.md`;
@@ -251,29 +258,27 @@ async function main() {
 		maxCostMicros: cfg.maxCostMicros,
 		allowedModels: cfg.allowedModels,
 		rootSessionId,
-		// The meter's ONE stop (issues #501, #502): the token cap today, the cost cap and the model list once
-		// their guard lands. Fires once, for the first stop only, whichever policy it was.
-		onStop: (reason, detail) => {
-			if (reason === TOKEN_BUDGET) onTokenAbort(detail);
-			// Same synchronous-abort discipline as attachTokenBudget's onAbort: abort() flips the
-			// AbortController before its first await, so the signal is set the instant we call it.
-			// Awaiting here would let the next turn start under a cap we already know is blown.
-			void session?.abort();
-		},
+		// The meter's ONE stop (issues #501, #502): the token cap, the cost cap, and the model list once its guard
+		// lands. Fires once, for the first stop only, whichever policy it was; only a token stop logs
+		// token_budget_exceeded (meterStopHandler). Same synchronous-abort discipline as attachTokenBudget's
+		// onAbort: abort() flips the AbortController before its first await, so the signal is set the instant we
+		// call it. Awaiting here would let the next turn start under a cap we already know is blown.
+		onStop: meterStopHandler({ onTokenAbort, abort: () => void session?.abort() }),
 	});
-	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log });
+	// The per-job cost cap (issue #501): judged BEFORE every provider call by the guard both meter halves consult.
+	// Built only when a cap is set, so a job without one has no guard and runs exactly as before.
+	const costGuard = cfg.maxCostMicros === null ? null : createCostGuard({ capMicros: cfg.maxCostMicros, log });
+	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: costGuard });
 	// A cost cap or a model list must be enforced BEFORE each call, so a runner that cannot do that refuses
 	// here, after the install it depends on and before createAgentSession, while nothing has been spent
 	// (INT-RUNNER-EXIT-CODE-PROTOCOL): exit 2, `model-policy-unenforceable` or `cost-cap-unenforceable`. The
-	// fallback bus meter below is the `ok: false` case, and it can only see a call after it was paid for. No
-	// guard is installed by this build, so a job carrying either policy is refused; a job carrying neither
+	// fallback bus meter below is the `ok: false` case, and it can only see a call after it was paid for. The cost
+	// guard enforces the cap; no model guard ships yet, so a list is still refused; a job carrying neither policy
 	// passes untouched.
 	assertPoliciesEnforceable({
 		maxCostMicros: cfg.maxCostMicros,
 		allowedModels: cfg.allowedModels,
-		meterOk: usageMeter.ok,
-		brake: usageMeter.ok && usageMeter.brake,
-		enforces: usageMeter.ok ? usageMeter.enforces : [],
+		...policyEnforcement(usageMeter),
 	});
 	// pi-ai's own transient-error predicate, from the compat copy the meter just accepted (issue #437): a 401/403
 	// shape pi calls retryable (a gateway's "Provider returned error", an HTML "please retry" page) is not
@@ -442,7 +447,8 @@ async function main() {
 	});
 	// `metered: true` on the process-wide snapshot is what tells the daily token counter that this
 	// total includes every in-process session, not just the root's turns.
-	const tokens = usageMeter.ok ? meter.snapshot() : { ...pickTotals(tokenBudget.state), metered: false };
+	// The cost fields (issue #501) ride only when a cap is set, so every other exit line stays byte-identical.
+	const tokens = usageMeter.ok ? { ...meter.snapshot(), ...(costGuard ? costGuard.snapshot() : {}) } : { ...pickTotals(tokenBudget.state), metered: false };
 	// The per-(provider,model) ledger (issue #53, INT-RUN-HISTORY-FILE-CONTRACT) -- a SIBLING of
 	// `tokens`, never a widening of it: `tokens` rides through the worker verbatim because it holds
 	// nothing but numbers, while the ledger carries id STRINGS the host re-validates through its own

@@ -7,7 +7,8 @@ import { test } from "node:test";
 // Pure -- no static pi import in its module graph -- so it needs none of the gating below. Importing
 // the runner's OWN candidate resolver is deliberate: the layout fact it encodes is the thing that
 // breaks silently, so pin the function the runner actually calls rather than a copy of its reasoning.
-import { resolvePiAiCompat, RUNTIME_RESULT_METHODS, RUNTIME_STREAM_METHODS, VIRTUAL_MODEL_API } from "../src/usage-meter.mjs";
+import { BOUND_OVERHEAD_TOKENS, callCostBound, IMAGE_RESIZE_MAX, PRICED_APIS, resolvePiAiCompat, RUNTIME_RESULT_METHODS, RUNTIME_STREAM_METHODS, VIRTUAL_MODEL_API } from "../src/usage-meter.mjs";
+import * as catalogModels from "./helpers/catalog-models.mjs";
 import { classifyPromptRejection, classifyStopReason, decideExit, loadRetryPredicate, STOP_REASONS } from "../src/outcome.mjs";
 import { jobSettings } from "../src/config.mjs";
 import { createJobModelRuntime, jobModelRuntimeOptions } from "../src/model-runtime.mjs";
@@ -552,7 +553,7 @@ test("the runner never imports pi-ai directly -- a static import makes the meter
 	// first call goes unmetered. Without the arm() after createAgentSession, an api id an extension
 	// registered in the legacy registry during session construction stays unwrapped until the meter's own
 	// interval catches it.
-	assert.match(runJob, /installProcessUsageMeter\(\{ ModelRuntime, runtime: modelRuntime, meter, log \}\)/, "run-job.mjs must install the process-wide meter on the class it imports and the instance the session uses");
+	assert.match(runJob, /installProcessUsageMeter\(\{ ModelRuntime, runtime: modelRuntime, meter, log, guard: costGuard \}\)/, "run-job.mjs must install the process-wide meter on the class it imports and the instance the session uses");
 	assert.ok(runJob.indexOf("createJobModelRuntime({") < runJob.indexOf("installProcessUsageMeter({"), "the meter installs after the runtime exists");
 	assert.ok(runJob.indexOf("installProcessUsageMeter({") < runJob.indexOf("createAgentSession({"), "the meter installs before the session exists");
 	assert.match(runJob, /\n\t\tmodelRuntime,\n\t\tmodel,\n/, "the session must be created on the SAME runtime the meter proved");
@@ -1366,4 +1367,142 @@ test("google-vertex ADC, external_account: the family's own stream() turns a tok
 	assert.equal(terminal.errorMessage, "Error code invalid_grant: The audience in ID Token does not match the expected audience.", "the external_account refusal form moved");
 	assert.equal(isRetryable(terminal), false, "pi-ai now calls the external_account refusal transient");
 	assert.deepEqual(classifyStopReason(terminal, isRetryable), { code: 1, reason: "error", message: terminal.errorMessage }, "the ADC residual moved");
+});
+
+// ── Issue #501: every pi-ai fact the cost bound rests on, pinned at the copy pi uses ─────────────────────────
+//
+// callCostBound (image/runner/src/usage-meter.mjs) restates pi-ai's pricing rules as a worst case. A restated
+// rule is pinned or it drifts (CLAUDE.md), and here a drift is not a wrong number in a report: it is a cap that
+// lets a call past it. So each rule the bound encodes is read out of the NESTED pi-ai copy (the one pi calls)
+// and held here. A pin bump that changes any of them fails this file, and the fix is the bound, never the needle.
+
+/** The nested pi-ai dist the runner's meter accepts, and one of its files. */
+function nestedPiAi(...segments) {
+	return readFileSync(join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), ...segments), "utf8");
+}
+
+test("PRICED_APIS is exactly the set of pi-ai api modules that reach calculateCost (issue #501)", { skip }, () => {
+	const apiDir = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "api");
+	const modules = readdirSync(apiDir).filter((name) => name.endsWith(".js") && !name.endsWith(".lazy.js")).map((name) => name.slice(0, -3));
+	const source = new Map(modules.map((name) => [name, readFileSync(join(apiDir, `${name}.js`), "utf8")]));
+	// Direct: imports calculateCost from ../models.js. Then the fixpoint over sibling imports (the two shared
+	// modules carry it for the responses family and the system-one classifiers).
+	const reaches = new Set(modules.filter((name) => /import \{[^}]*\bcalculateCost\b[^}]*\} from "\.\.\/models\.js";/.test(source.get(name))));
+	assert.ok(reaches.has("openai-responses-shared") && reaches.has("system-one-shared"), "the premise: the two shared modules price");
+	for (let grew = true; grew; ) {
+		grew = false;
+		for (const name of modules) {
+			if (reaches.has(name)) continue;
+			const siblings = [...source.get(name).matchAll(/from "\.\/([a-z0-9-]+)\.js";/g)].map((match) => match[1]);
+			if (siblings.some((sibling) => reaches.has(sibling))) {
+				reaches.add(name);
+				grew = true;
+			}
+		}
+	}
+	// An api module is one pi loads for an api id: it has a `.lazy.js` that imports it, and the catalog files it
+	// under that id.
+	const catalogApis = new Set();
+	const dataDir = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "providers", "data");
+	for (const file of readdirSync(dataDir).filter((name) => name.endsWith(".json"))) {
+		for (const key of Object.keys(JSON.parse(readFileSync(join(dataDir, file), "utf8")))) catalogApis.add(key);
+	}
+	const served = [...reaches].filter((name) => existsSync(join(apiDir, `${name}.lazy.js`)) && new RegExp(`"\\./${name}\\.(?:js|ts)"`).test(readFileSync(join(apiDir, `${name}.lazy.js`), "utf8"))).sort();
+	assert.deepEqual(served, [...PRICED_APIS], "the priced apis moved -- update PRICED_APIS, the bound refuses everything else under a cap");
+	for (const api of PRICED_APIS) assert.ok(catalogApis.has(api), `${api} is not an api id the catalog files models under`);
+	// And the ones that do NOT price from the table, by name, so the refusal of each is a decision on record.
+	for (const api of ["pi-messages", "openrouter-images", "llama-cpp-classify"]) assert.ok(!PRICED_APIS.includes(api) && modules.includes(api), api);
+});
+
+test("calculateCost: one table per call, the highest tier the input passes, and a 1h write at 2 x that table's input", { skip }, () => {
+	const models = nestedPiAi("models.js");
+	const fn = models.match(/export function calculateCost\(model, usage\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+	assert.match(fn, /const inputTokens = usage\.input \+ usage\.cacheRead \+ usage\.cacheWrite;/, "tiers select on input + cache read + cache write");
+	assert.match(fn, /if \(inputTokens > tier\.inputTokensAbove && tier\.inputTokensAbove > matchedThreshold\) \{\s*rates = tier;/, "strictly above a threshold, and ONE table");
+	assert.match(fn, /usage\.cost\.cacheWrite = \(rates\.cacheWrite \* shortWrite \+ rates\.input \* 2 \* longWrite\) \/ 1000000;/, "the 1h write rate is 2 x the table's input");
+	assert.match(fn, /usage\.cost\.output = \(rates\.output \/ 1000000\) \* usage\.output;/, "rates are dollars per million tokens, so tokens x rate is micro-dollars");
+	// Only the two Anthropic apis report a 1h write; the bound's 2 x input applies to exactly them.
+	const apiDir = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "api");
+	const reporting = readdirSync(apiDir).filter((name) => name.endsWith(".js") && !name.endsWith(".lazy.js") && readFileSync(join(apiDir, name), "utf8").includes("cacheWrite1h")).sort();
+	assert.deepEqual(reporting, ["anthropic-messages.js", "bedrock-converse-stream.js"]);
+	// Retention resolves as callCostBound resolves it: the option, else the env (scoped, then the process).
+	for (const file of ["anthropic-messages.js", "bedrock-converse-stream.js"]) {
+		assert.match(nestedPiAi("api", file), /function resolveCacheRetention\(cacheRetention, env\) \{\s*if \(cacheRetention\) \{\s*return cacheRetention;\s*\}\s*if \(getProviderEnvValue\("PI_CACHE_RETENTION", env\) === "long"\) \{\s*return "long";/, file);
+	}
+	assert.match(nestedPiAi("utils", "provider-env.js"), /return \(env\?\.\[name\] \|\|\s*\(typeof process !== "undefined" \? process\.env\[name\] : undefined\) \|\|/, "a scoped env value wins over the process env");
+	// A fallback answer is priced at the fallback's table (its own tiers included), and only anthropic-messages has fallbacks.
+	const anthropic = nestedPiAi("api", "anthropic-messages.js");
+	assert.match(anthropic, /model\.compat\?\.allowedFallbackModels\?\.find\(\(fallback\) => fallback\.provider === model\.provider && fallback\.model === responseModel\)\?\.cost;/);
+	assert.match(anthropic, /usageModel = fallbackCost \? \{ \.\.\.model, id: responseModel, cost: fallbackCost \} : model;/);
+	const withFallbacks = readdirSync(apiDir).filter((name) => name.endsWith(".js") && readFileSync(join(apiDir, name), "utf8").includes("allowedFallbackModels"));
+	assert.deepEqual(withFallbacks, ["anthropic-messages.js"]);
+});
+
+test("the service-tier multipliers the bound assumes, and azure applying none (issue #501)", { skip }, () => {
+	// The worst tier is what the bound multiplies by: pi prices the tier the RESPONSE reports.
+	const responses = nestedPiAi("api", "openai-responses.js").match(/function getServiceTierCostMultiplier\(model, serviceTier\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+	assert.match(responses, /case "flex":\s*return 0\.5;\s*case "priority":\s*case "fast":\s*return model\.id === "gpt-5\.5" \? 2\.5 : 2;\s*default:\s*return 1;/);
+	const codex = nestedPiAi("api", "openai-codex-responses.js").match(/function getServiceTierCostMultiplier\(model, serviceTier\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+	assert.match(codex, /case "flex":\s*return 0\.5;\s*case "priority":\s*return model\.id === "gpt-5\.5" \? 2\.5 : 2;\s*default:\s*return 1;/);
+	const azure = nestedPiAi("api", "azure-openai-responses.js");
+	assert.doesNotMatch(azure, /ServiceTier/, "azure gained a service-tier price: callCostBound's multiplier must cover it");
+	assert.match(nestedPiAi("api", "openai-responses-shared.js"), /if \(options\?\.applyServiceTierPricing\) \{/, "the shared stream applies a tier only when its caller hands one");
+	// Exactly these two modules apply a tier at all.
+	const apiDir = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "api");
+	const tiered = readdirSync(apiDir).filter((name) => name.endsWith(".js") && /function applyServiceTierPricing/.test(readFileSync(join(apiDir, name), "utf8"))).sort();
+	assert.deepEqual(tiered, ["openai-codex-responses.js", "openai-responses.js"]);
+});
+
+test("the output-bound rules: who sends maxTokens, the 16 floor, the reasoning ceiling, the context clamp (issue #501)", { skip }, () => {
+	const simple = nestedPiAi("api", "simple-options.js");
+	assert.match(simple, /return Math\.min\(maxTokens, Math\.max\(MIN_MAX_TOKENS, available\)\);/, "the context clamp only ever LOWERS the output cap");
+	assert.match(simple, /const maxTokens = baseMaxTokens === undefined \? modelMaxTokens : Math\.min\(baseMaxTokens \+ thinkingBudget, modelMaxTokens\);/, "a thinking budget lifts the cap no higher than model.maxTokens");
+	for (const file of ["openai-responses.js", "azure-openai-responses.js"]) {
+		const src = nestedPiAi("api", file);
+		assert.match(src, /const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;/, file);
+		assert.match(src, /params\.max_output_tokens = Math\.max\(options\.maxTokens, OPENAI_RESPONSES_MIN_OUTPUT_TOKENS\);/, file);
+	}
+	const responses = nestedPiAi("api", "openai-responses.js");
+	assert.match(responses, /if \(options\?\.maxTokens && compat\.supportsMaxOutputTokens && !omitUnsupportedFields\) \{/, "when openai-responses drops the caller's cap");
+	assert.match(responses, /const omitUnsupportedFields = isChatGPTSignIn\(model, options\?\.apiKey\);/);
+	assert.match(responses, /return \(model\.provider === "openai" &&\s*model\.baseUrl === "https:\/\/api\.openai\.com\/v1" &&\s*apiKey !== undefined &&\s*!apiKey\.startsWith\("sk-"\)\);/);
+	// The three that never put the caller's cap on the request: no maxTokens anywhere in their source.
+	for (const file of ["openai-codex-responses.js", "cloudflare-workers-ai-system-one.js", "typesafe-system-one.js", "system-one-shared.js"]) {
+		assert.doesNotMatch(nestedPiAi("api", file), /maxTokens|max_output_tokens|max_tokens/, `${file} now sends an output cap -- callCostBound may use the caller's maxTokens there`);
+	}
+	// openai-completions drops a falsy cap; the bound reads only a positive one as asked.
+	assert.match(nestedPiAi("api", "openai-completions.js"), /if \(options\?\.maxTokens\) \{/);
+});
+
+test("the catalog rows the bound tests price against are the pinned catalog's (issue #501)", { skip }, () => {
+	const dataDir = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "providers", "data");
+	for (const [name, [file, api, key]] of Object.entries(catalogModels.CATALOG_ROWS)) {
+		const row = JSON.parse(readFileSync(join(dataDir, file), "utf8"))[api]?.[key];
+		assert.ok(row, `${name}: ${file} ${api} ${key} is gone`);
+		const fixture = catalogModels[name];
+		for (const field of ["id", "api", "provider", "baseUrl", "cost", "contextWindow", "maxTokens"]) {
+			assert.deepEqual(fixture[field], row[field], `${name}.${field} drifted from the pinned catalog`);
+		}
+		assert.deepEqual(fixture.compat?.allowedFallbackModels, row.compat?.allowedFallbackModels, `${name}'s fallbacks drifted`);
+	}
+	// The default model's bound, end to end on the pinned row: the issue's "about $1 per call" made exact.
+	const sonnet = catalogModels.SONNET_4_5;
+	assert.equal(callCostBound("streamSimple", sonnet, "", {}, {}), Math.ceil((2 + BOUND_OVERHEAD_TOKENS) * 3.75 + 64_000 * 15));
+});
+
+test("review of #534: the samplingParams merge comes after the output cap, and pi's image resize box (issue #501)", { skip }, () => {
+	// PR #534's review: on exactly these three apis a samplingParams key overrides the cap the request was built with, so
+	// callCostBound reads the merged keys (samplingOutput). Placed AFTER the cap is the whole point of the needle.
+	const apiDir = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "api");
+	const merging = readdirSync(apiDir).filter((name) => name.endsWith(".js") && readFileSync(join(apiDir, name), "utf8").includes("Object.assign(params, model.samplingParams, options?.samplingParams);")).sort();
+	assert.deepEqual(merging, ["azure-openai-responses.js", "openai-completions.js", "openai-responses.js"]);
+	for (const [file, cap] of [["openai-completions.js", "params.max_completion_tokens = options.maxTokens;"], ["openai-responses.js", "params.max_output_tokens = Math.max(options.maxTokens, OPENAI_RESPONSES_MIN_OUTPUT_TOKENS);"], ["azure-openai-responses.js", "params.max_output_tokens = Math.max(options.maxTokens, OPENAI_RESPONSES_MIN_OUTPUT_TOKENS);"]]) {
+		const src = nestedPiAi("api", file);
+		assert.ok(src.indexOf(cap) > 0 && src.indexOf(cap) < src.indexOf("Object.assign(params, model.samplingParams, options?.samplingParams);"), `${file}: samplingParams no longer merge after the cap`);
+	}
+	// PR #534's review: the box pi fits an image into before it enters the conversation, the per-image ceiling's input.
+	const resize = agentDistFile("utils", "image-resize-core.js");
+	assert.match(resize, new RegExp(`maxWidth: ${IMAGE_RESIZE_MAX.width},\\s*maxHeight: ${IMAGE_RESIZE_MAX.height},`), "pi's default image resize box moved -- IMAGE_RESIZE_MAX must follow it");
+	// And a model may declare its own box, which callCostBound reads off the model object.
+	assert.match(nestedPiAi("types.d.ts"), /export interface ModelImageResizeOptions \{\s*maxWidth\?: number;\s*maxHeight\?: number;/);
 });

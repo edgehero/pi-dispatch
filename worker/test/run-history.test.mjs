@@ -355,17 +355,18 @@ test("parseExitTokens round-trips a conformant runner's object BYTE-IDENTICALLY"
 	assert.equal(JSON.stringify(parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(metered)}}`)), JSON.stringify(metered));
 	const fallback = { input: 1, output: 2, total: 3, cost: 0.5, metered: false };
 	assert.equal(JSON.stringify(parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(fallback)}}`)), JSON.stringify(fallback));
-	// An omitted key stays OMITTED rather than becoming null: the fallback carries five of the seventeen, and
+	// An omitted key stays OMITTED rather than becoming null: the fallback carries five of the nineteen, and
 	// a null would read as "measured zero" for a number nobody measured.
 	assert.ok(!("otherTotal" in parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(fallback)}}`)));
 });
 
 test("the policy counters (issues #501, #502) survive the rebuild, in emission order, and only as numbers", () => {
-	// Admitted before any runner writes them: a key missing from TOKEN_KEYS is DROPPED, and the dollar
+	// The cost guard writes the first six under a cap and modelRefused is still reserved; a key missing from
+	// TOKEN_KEYS is DROPPED, and the dollar
 	// settlement reads these to decide whether a metered cost is complete, so a dropped counter would read as
 	// an honest zero. Each one asserted by name, so dropping any single entry fails here.
-	const policy = { costCapMicros: 2_000_000, costRefused: 1, boundExceeded: 0, longContext: 2, modelRefused: 3 };
-	assert.deepEqual(TOKEN_KEYS.slice(-5), Object.keys(policy), "appended after unpriced, in the runner's emission order");
+	const policy = { costCapMicros: 2_000_000, costRefused: 1, boundExceeded: 0, longContext: 2, costUnjudged: 4, costUnanswered: 5, modelRefused: 3 };
+	assert.deepEqual(TOKEN_KEYS.slice(-7), Object.keys(policy), "appended after unpriced, in the runner's emission order");
 	const metered = { input: 1, output: 2, total: 3, cost: 0.5, metered: true, rootTotal: 3, otherTotal: 0, looseTotal: 0, sessions: 1, calls: 4, unresolved: 0, unpriced: 0, ...policy };
 	const out = parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(metered)}}`);
 	assert.equal(JSON.stringify(out), JSON.stringify(metered), "byte-identical round trip, key order included");

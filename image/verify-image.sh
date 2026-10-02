@@ -136,6 +136,25 @@ else
 					|| fail "the image declares 'anyUid' but /home/pi is not writable by an arbitrary uid -- a job run as the worker's own uid would lose auth.json and every tool cache"
 				any_uid=1
 				;;
+			costCap)
+				# Issue #501. The claim is that a job under PI_MAX_COST_MICROS is stopped BEFORE a call that could pass it.
+				# Proved by running one: a cap of 0, the default priced model, a fake key and no network. The
+				# guard must refuse the very first call (its bound is about a dollar), so the runner exits 2 with
+				# reason cost-cap and costRefused 1, and nothing is dialled. A runner that ignored the variable would try
+				# the call and exit on the network error instead; one that could not enforce the cap would exit 2 with
+				# cost-cap-unenforceable. Both fail here.
+				cost_job=$(mktemp -d)
+				echo "Reply with the single word ok." >"$cost_job/prompt.md"
+				chmod -R a+rX "$cost_job"
+				cost_out=$(docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges -v "$cost_job:/job:ro" \
+					-e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+					-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_MAX_COST_MICROS=0 \
+					"$IMAGE_REF" 2>&1) && cost_code=0 || cost_code=$?
+				rm -rf "$cost_job"
+				cost_exit=$(echo "$cost_out" | grep '"event":"exit"' | tail -1)
+				[ "$cost_code" = 2 ] && echo "$cost_exit" | grep -q '"reason":"cost-cap"' && echo "$cost_exit" | grep -Eq '"costRefused":1[,}]' \
+					|| fail "the image declares 'costCap' but a job under PI_MAX_COST_MICROS=0 was not stopped before its first call (exit $cost_code: $cost_exit)"
+				;;
 			excludeTools)
 				# Same evidence style as 'commands': the baked runner config must actually read the variable.
 				# A runner that does not would run a "read-only" trigger's job with every tool it says to

@@ -2925,6 +2925,183 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `CONST-PI-VERSION-PINNED`, `INT-SDK-SESSION-OPTIONS`, `INT-RUNNER-EXIT-CODE-PROTOCOL`,
   `INT-RUN-HISTORY-FILE-CONTRACT`, `OQ-010`, `OQ-011`
 
+## DES-DOLLAR-RESERVE-AND-SETTLE
+
+- **Decision**: A per-job dollar cap (`PI_MAX_COST_MICROS`, integer micro-dollars) is enforced by the RUNNER,
+  before every provider call, by a cost guard on the usage meter's guard seam (`createCostGuard`,
+  `image/runner/src/usage-meter.mjs`). This entry records the runner half (issue #501, part 2); the worker's
+  reservation against dollar windows and the settlement after the run are its other half (parts 3 and 4) and
+  land with their own changes. Per call, in both meter halves:
+  1. a job already stopped answers with the hard stop;
+  2. a virtual model (`pi-virtual`) on `streamSimple` passes unjudged, and its physical re-entry is judged, so one
+     request is bounded once and on the model that answers it. Only `streamSimple` re-enters that way; a virtual
+     model on any other method is judged as itself, and under a cap that is an unboundable call, refused;
+  3. the model check (issue #502) will sit here;
+  4. the guard computes the call's BOUND (`callCostBound`) and refuses when
+     `spent + in-flight bounds + bound > cap`, or when the bound is `Infinity`. A refusal counts `costRefused`,
+     logs `cost_refused` with numbers only, stops the job with `cost-cap` (the meter's one first-wins stop, which
+     aborts the root session) and answers this call with the hard stop. An admitted call's bound is held in
+     flight until it settles.
+  When the call settles, its bound leaves the in-flight sum and `ceil(cost x 1e6)`, never below zero (pi's
+  short-write term can go negative), joins `spent`. A charge above the bound counts `boundExceeded`. A call
+  whose cost is unknown (no finite `cost.total`, or a rejected result) stays charged at its bound, and the meter
+  counts it unpriced.
+  **A failed call: started or not** (PR #534's review). A call that settled `error` or `aborted` carries a
+  partial usage: openai-completions and openai-responses report usage only at the end of the stream, and
+  anthropic-messages what message_start carried (the input and one output token) until message_delta, so a stream
+  cut after thousands of output deltas settles at about 0, and pi then auto-retries it. One rule decides, on every
+  api alike, from the message pi settles with:
+  - a failed call that STARTED (its message holds any content block: text, thinking, a tool call or an image; or
+    an images result has output) is charged `max(ceil(cost x 1e6), bound)`. Usage counts do not decide it, the
+    output count included: pi copies message_start's `output_tokens` (Anthropic sends 1) into the usage, so an
+    in-band `overloaded_error` right after message_start reports one output token and no content;
+  - a failed call that never started (a 429 or a 5xx before the stream, an in-band error before any content, a
+    connection lost before the answer) is charged its metered cost, `max(ceil(cost x 1e6), 0)`, and counted as
+    `costUnanswered` on the exit line.
+  A SUCCESSFUL call that reports no input at all is broken usage reporting and is charged its bound.
+  The six counters (`costCapMicros`, `costRefused`, `boundExceeded`, `longContext`, `costUnjudged`,
+  `costUnanswered`) ride the exit line only when a cap is set. A job that ends by an abort or a stop while a call
+  that has not started is in flight settles that call unstarted too, so it gets `costUnanswered > 0` and settles
+  at the floor: conservative by design. A non-zero `costUnanswered` is part of the contract
+  the dollar settlement (a later part of issue #501) reads: such a job's metered cost is a floor, and the
+  settlement keeps its reservation, as for `boundExceeded` and `longContext`.
+- **The bound**, every term an upper bound and every pi-ai fact under it pinned by needle in
+  `image/runner/test/pinned-api.test.mjs`:
+  - only the 11 api ids whose module reaches pi-ai's `calculateCost` price from the catalog (`PRICED_APIS`,
+    derived from the pinned source by that test); any other api is `Infinity`;
+  - the tables are the model's cost, each allowed fallback's cost (anthropic-messages bills a fallback answer
+    at the fallback's rates), each tier the input could reach, and a synthetic long-context tier (below);
+  - all-zero rates are `0`, so a zero-rated local model runs under a cap of `0`;
+  - input is the UTF-8 byte length of the serialised context plus 8,192, NOT capped by the context window
+    (pi does not enforce it, and gpt-5.4 prices a tier above its own listed window). The assumption that one
+    token is at least one byte is stated in the code and checked by use: `boundExceeded`;
+  - an IMAGE block counts at least a per-image ceiling, not just its base64 bytes (PR #534's review): providers
+    bill pixels, and a 2000 x 2000 one-bit PNG is 756 bytes and about 1,590 Anthropic tokens. The ceilings are for
+    the resize box pi fits an image into (2000 x 2000 in `image-resize-core.js`, pinned; scaled by area for a
+    model whose own `inputLimits.images.resize` is larger). The ceiling is the larger of the API's (48,169 on the
+    four openai apis, gpt-4o-mini's high detail, 2,833 + 8 tiles x 5,667 at the worst aspect in the box; 15,750 on
+    mistral-conversations, Pixtral's 16 px patches, 125 x 125 + 125; 5,334 elsewhere, Anthropic's w x h / 750,
+    with Gemini's 768 px tiles at 2,322) and the model FAMILY's, read off the id: an OpenAI id (any `gpt-`, or an
+    o-series id) is 48,169, a Mistral id (pixtral, mistral, ministral, magistral, devstral, codestral) is 15,750.
+    A gateway serves one family over another's api (vercel-ai-gateway's gpt-4o-mini on anthropic-messages,
+    Bedrock's Pixtral on bedrock-converse-stream), and the family decides how its images are billed. Its limits
+    are named under Residuals;
+  - output is the caller's positive `maxTokens` on an api that sends it, else `model.maxTokens`; raised to
+    `model.maxTokens` when reasoning is on (a thinking budget can lift it that far); at least 16 on
+    openai-responses and azure; `0` for a classifier, which is `Infinity` if it has an output rate. The apis
+    that never put the caller's cap on the request (openai-codex-responses and the two system-one
+    classifiers), openai-responses with `supportsMaxOutputTokens: false`, and openai on api.openai.com without
+    an `sk-` key the caller passed (Sign in with ChatGPT drops the field; the key is resolved after the guard)
+    all use `model.maxTokens`. A present `maxTokens` that is not a finite number is `Infinity` (PR #534's review):
+    pi's context clamp turns NaN into a null on the wire (the provider's default) and Infinity into the
+    remaining window. On openai-completions, openai-responses and azure, `samplingParams` (the model's and the
+    call's) are merged into the request AFTER the cap (pinned), so an output-cap key there
+    (`max_tokens`, `max_completion_tokens`, `max_output_tokens`) widens the bound when larger, `n` multiplies it,
+    and a present value that is not a positive finite number (an integer for `n`) is `Infinity` (PR #534's review).
+    Because that merge comes last, ANY key overrides the request (`model`, `service_tier`, `tools`), so a
+    samplingParams holding a key outside a fixed safe list (`temperature`, `top_p`, `top_k`, `seed`, `stop`,
+    `presence_penalty`, `frequency_penalty`, the three output-cap keys, `n`) makes the call `Infinity` too;
+  - the input rate is the dearest of input, cache read and cache write, and twice input when a 1h cache write
+    can happen (anthropic-messages or bedrock-converse-stream with retention `long`, resolved in pi's order:
+    the option, the call's env, the process env);
+  - the multiplier is 2.5 for gpt-5.5 and 2 otherwise on openai-responses and openai-codex-responses, because
+    pi prices the tier the RESPONSE reports, which an account default can set; 1 elsewhere, azure included;
+  - the result is the dearest table's `input x rate + output x rate`, times the multiplier, rounded up.
+  Examples at the pin: the default model (`claude-sonnet-4-5-20250929`) with a 50,000 byte request and no
+  output cap of its own is (58,192 x 3.75 + 64,000 x 15) micro-dollars, about $1.18 a call; gpt-5.5 on
+  openai-responses at an input bound of 200,000 is (200,000 x 5 + 128,000 x 30) x 2.5, $12.10.
+- **Long context (user decision, 2026-10-02)**: the catalog carries no Anthropic long-context prices, and the
+  provider bills input above 200,000 tokens higher. The bound adds a GENERIC tier on the two Anthropic apis
+  for a table with no tiers of its own: above 200,000 input tokens, 2 x input, cache read and cache write and
+  1.5 x output. The runner counts such settled calls (`longContext`) and charges them at that tier in-run,
+  because pi metered them at base rates; the dollar settlement (a later part of issue #501) treats a job with
+  `longContext > 0` as incomplete and settles it at its reservation.
+  No hand-kept price table: a model the provider does not bill higher is over-charged, the safe direction.
+- **The compat re-arm gap under a cap** (review of #533): when the compat half finds an api id it had wrapped
+  replaced (`resetApiProviders()` from `AgentSession.reload()`, or an extension re-registering it), a legacy
+  call on that api may have reached a provider unguarded in between, and nothing can tell whether one did.
+  Under a cost cap that stops the job (`cost_guard_displaced`, then `cost-cap`), fail closed. Judging cost only
+  in the runtime half would not close it: a legacy compat call never enters a `ModelRuntime`. The displaced
+  entries are counted as `costUnjudged` on the exit line (PR #534's review), because the stop's reason is the same
+  `cost-cap` a plain refusal gives and a settlement must be able to tell that calls may have run unmetered.
+  Without a cap the re-arm keeps its old behaviour: the teardown's `rearms` count and `usage_meter_teardown`
+  line, whose comment says the window can hide only a legacy extension call, stay the evidence for an uncapped
+  job; under a cap that same window is a stop, so the comment's "hidden" call can no longer go unanswered.
+- **Why**: one call's dollars are not bounded by the cap's scale. On the default model one call can cost
+  several dollars, so a cap checked after a call is a soft limit one call can pass by more than the cap. The
+  in-flight sum is what makes parallel sessions safe: each is judged against the other's worst case, not
+  against a total neither has added to yet.
+- **Rejected**:
+  - **Check the cap after each call** (the token cap's shape): the overshoot is one call, and one call can cost
+    more than the cap.
+  - **Reserve "the cap plus one worst call"** in the worker: several dollars per job on the default model, it
+    needs prices in the worker, and it still leaves the cap soft.
+  - **`min(contextWindow, bytes)` for the input**: pi does not enforce the window, and a tier above it exists.
+  - **Dearest input rate and dearest output rate across tables, separately**: also an upper bound, but looser
+    than needed: pi prices one call with exactly one table, so the bound takes the dearest table.
+  - **Guard at `before_provider_request`**: its event carries only the payload and a throwing handler is
+    logged and ignored, so it cannot refuse a call.
+  - **Guard at pi-ai's api-provider registry only**: at 0.99.1 a session never dispatches through it.
+  - **Lower `maxTokens` to fit the remaining budget**: deferred (an open question on #501). The guard bounds
+    what each call asks for and refuses; it does not rewrite the request.
+  - **A hand-kept long-context price table**: drifts, and is the derivable-table class this repo pins or
+    avoids. The generic tier errs high instead.
+  - **Trust `cacheWarming: "off"`**: it holds for the runner's own session only; warm calls are bounded like
+    any other.
+  - **Ask Valkey mid-run** (the container checking a shared dollar counter before a call): `DES-JOB-OUTBOX-CHAINING`
+    rejects a container-to-Valkey channel, and the worker's reservation already bounds the run; the per-job cap
+    is all the container needs to know.
+  - **Charge a failed call its partial cost** (the first version of this guard): the partial cost is often 0,
+    and pi's own retries then loop under the cap (PR #534's review).
+  - **Charge every failed call its bound** (the second version): a 429 bills nothing, and pi's retries then
+    stopped a rate-limited job as `cost-cap` with nothing spent.
+  - **Observe the response status through pi's `onResponse`** (the third version: a failed call with no 2xx seen
+    is metered): the openai and anthropic SDKs throw on an error status BEFORE pi reaches the hook, so the rule
+    could only be "no 2xx seen", and an in-band error after a 200 (Anthropic's `overloaded_error`, Bedrock
+    throttling inside the stream) had seen its 2xx and so was charged its bound, though no answer came. It also needed a
+    per-api list of which apis call the hook, and composing a hook into the caller's options. Parsing the status
+    out of the error message was rejected too: it is text, per api.
+  - **A hand-kept image price per model**: the ceiling is per api and per family, at the dearest rule each implies.
+- **Residuals, named**:
+  - extension code in the job can still reach a provider the meter never sees: pi-ai's per-api stream
+    functions imported directly, legacy `generateImages`, or a raw fetch. The meter is accounting and a
+    boundary against the agent's ordinary calls, not against the code it runs beside;
+  - an `onPayload` hook (`before_provider_request`) can raise the request's output cap after the guard
+    judged it, and a stored credential's own `env` can set `PI_CACHE_RETENTION`; both can push a call past its
+    bound, and `boundExceeded` is the evidence;
+  - a compaction whose summarization call is refused is still recorded by pi, with an empty summary
+    (measured at the pin, `usage-meter.integration.test.mjs`). The job stops either way; a resumed
+    conversation then carries that empty summary. The token cap's brake has always done the same;
+  - a provider whose server output limit exceeds the catalog's `maxTokens`, on an api that does not send the
+    caller's cap, can exceed the bound; `boundExceeded` again;
+  - **api-id trust**: the bound believes `model.api`. An overlay or extension model that names a priced api but
+    is served by something that bills differently (a gateway with its own fees, a mislabelled api) is bounded by
+    the table it declares, not by what is billed;
+  - **uncatalogued fees**: server-side tools (web search, code execution), Bedrock regional or cross-region
+    pricing and any other charge the catalog does not carry are outside both the bound and pi's cost;
+  - **aborted and failed streams** are charged at their bound, not their real (unknown) cost: safe, and an
+    over-charge for a call that failed before sending;
+  - **images**: the per-image ceilings assume pi's resize box and the families named above. An image an
+    extension puts in the context without pi's resize, or a family whose id matches neither name and whose image
+    billing is dearer than its api's ceiling, can exceed it; one the provider downscales further is over-bounded,
+    the safe side;
+  - **a failed call that never started may have been billed**: a request the provider accepted whose answer was
+    lost (a connection dropped after the request was sent) is charged its metered cost, usually 0, so the per-job
+    cap does not count it, and nothing bounds how many such calls a run makes. `costUnanswered` counts every one,
+    and a non-zero value makes the settlement keep the job's reservation as the floor rather than its metered cost.
+    That bounds what the window is charged afterwards, not what the provider may have billed during the run;
+  - **a call cut after hidden reasoning** (a reasoning model that streamed no visible content before the cut) is
+    unstarted by this rule: metered, counted, settled at the floor;
+  - **a `pi` subprocess** a package spawns spends outside this process, so outside the cap and outside the meter
+    (`OQ-011`; detecting it is issue #500);
+  - **a legacy compat call made inside a runtime call's provider hook** (`before_provider_request`,
+    `after_provider_response`, a credential resolver) runs in that call's dispatch context, so the compat half
+    neither judges nor counts it (the meter's trap #5 residual). Extension code, the same trust class as a raw
+    fetch.
+- **Traces to**: `REQ-TOKEN-ACCOUNTING-AND-CAPS`, `INT-RUNNER-EXIT-CODE-PROTOCOL`,
+  `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`, `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`,
+  `CONST-BUDGET-BEFORE-TOKENS`, `OQ-010`, `OQ-011`
+
 ## DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE
 
 - **Decision**: `run.instructions` is rendered into the USER prompt's **envelope** -- above the fenced
@@ -4799,7 +4976,7 @@ a tunnel.
   `code` must be 2, its reason a member of the closed `RUNNER_POLICY_REASONS`), and only inside its exit-2
   branch, so every other runner reason still reads `runner-policy`.
   **Issues #501 and #502 add four rows**, each fixed, path-free and naming neither the amount nor the
-  model: `cost-cap` ("Stopped: the next AI call could have taken this run past its cost limit, so it was not made. Partial work may exist. Not retried.") and `model-not-allowed` ("Stopped: the run tried to call an AI model this trigger does not allow, so the call was not made. Partial work may exist. Not retried."), both reserved and enforced by later changes, the runner's pre-call guard having stopped a call; and `cost-cap-unenforceable` ("Stopped: this run has a cost limit, and the job image could not enforce it before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.") and `model-policy-unenforceable` ("Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried."), live now, the runner having refused before any call a cost cap or a model list it cannot enforce before a call. The hook pages for every member of `RUNNER_POLICY_REASONS`, these included, because its
+  model: `cost-cap` ("Stopped: the next AI call could have taken this run past its cost limit, so it was not made. Partial work may exist. Not retried.") and `model-not-allowed` ("Stopped: the run tried to call an AI model this trigger does not allow, so the call was not made. Partial work may exist. Not retried."), `cost-cap` live on an image that declares `costCap` (its runner's pre-call cost guard stopped a call) and `model-not-allowed` still reserved for the model guard; and `cost-cap-unenforceable` ("Stopped: this run has a cost limit, and the job image could not enforce it before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.") and `model-policy-unenforceable` ("Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried."), live now, the runner having refused before any call a cost cap or a model list it cannot enforce before a call. The hook pages for every member of `RUNNER_POLICY_REASONS`, these included, because its
   set spreads that one.
 - **Rejected**, each with its why: an in-project transport (webhook/ntfy/Slack/mail: a dependency, a
   queue and a retry policy this layer has no business growing -- the argv IS the feature);
@@ -6559,3 +6736,4 @@ a tunnel.
 | 2026-10-02 | Issue #524. **`DES-CLI-TRIGGER-FOR-LOCAL` AMENDED**, two bullets. (1) The folder must be a repository's root with a commit: `pi-dispatch run` and the admin's `/dispatch run` and `dispatch_run` refuse anything else before queueing, through one shared function, naming the fix, and for a folder inside a repository both fixes, with the root only as git confirms it. The worker's own check now RETURNS `local-folder-not-a-repo`, `local-folder-no-commit` or `local-folder-unreadable-repo` from prepare before the reserve, by git's exit code with follow-ups, and only after the files git needed read back cleanly (a transient read error is retried), instead of a config error the processor could only call `config-refused` and untagged throws that failed with no reason. A job dir is removed, guarded, when its preparer throws, which left one `jobs/job-*` per such job. (2) The one-minute local dedup stays, and both typed producers now say when it fired, by a per-call nonce read back after the add, so exactly one of any concurrent identical runs says queued. PR #528's review refuted the first version's timestamp comparison and parent `.git` walk. Traces gain `CONST-RETRY-INFRA-ONLY`. |
 | 2026-10-02 | Issue #530, three findings of #503's acceptance run. No Decision text changes. **`DES-CONTAINER-BACKEND-REGISTRY` UNCHANGED, checked**: its host-routes bullet names `HOST_ROUTES` and the rule `hostRouteFor` answers by, not the rows, and the table gains one row, Docker Desktop 27.4.0 on macOS reaching this host's own LAN address with the server bound to it (works, measured 2026-10-02 on Docker Desktop 4.37.2: a CONNECT to 192.168.68.54:18434 with the server listening only there answered 200), bound to that exact version, `desktop` and `os` like the alias row beside it. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` UNCHANGED, checked**: its route bullet lists the Podman venues only. **`DES-CLI-SURFACE` UNCHANGED, checked**: `run`'s output is not specified there; its closing line now says what the job's queue shows (connected workers through bullmq's `getWorkers`, counted only on the queue client's own database since CLIENT LIST spans them all, a paused queue first) and falls back to a line true either way when the queue cannot say. The GitHub clients the worker and the receiver build (`makeGitHubAuth`, `makeGitHubHost`) take the caller's logger, so Octokit's own `GET /user - 401 ...` line no longer prints beside the JSON log, and a client warning (a deprecation, an App clock skew) is one JSON event, `github_client_warning`. The dropped line carried GitHub's request id, so the identity failure lines (`github_auth_unavailable`, the receiver's `identity_retry`, `identity_retry_exhausted` and `receiver_start_failed`) now carry `status` and `requestId` when the error, or its `cause`, is an Octokit RequestError, and nothing else from it. |
 | 2026-10-02 | Issues #501 and #502, the shared seams for policy stops. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: `TERMINAL_COMMENTS` gains the four policy-stop rows (`cost-cap` and `model-not-allowed` reserved, enforced by later changes; `cost-cap-unenforceable` and `model-policy-unenforceable` live), quoted in full, and the hook pages for each through its spread of `RUNNER_POLICY_REASONS`. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the install-line bullet: a cost cap and a model list arm the brake like a token cap, reported as `costCapped` and `listed`, and either one beside `brake:false` is refused before the first call. The meter design, the fallback rule and the observe-only accounting are UNCHANGED, checked. **Code evidence**: worker/src/processor.mjs -> TERMINAL_COMMENTS; image/runner/src/usage-meter.mjs -> installProcessUsageMeter, assertPoliciesEnforceable. |
+| 2026-10-02 | Issue #501, part 2. **NEW `DES-DOLLAR-RESERVE-AND-SETTLE`**, the runner half: the per-job cost cap is judged before every provider call against a bound that is an upper bound by construction (the 11 catalog-priced apis, pinned by deriving them from the pinned source; every table that could price the call, fallbacks and reachable tiers included; request bytes plus 8,192 as input, not capped by the window; the output cap the request really carries, raised for reasoning, floored at 16 where pi floors it, widened by an output-cap `samplingParams` key and multiplied by `n` on the three apis that merge them after the cap, and unboundable for a present non-finite `maxTokens`; each image block at least the larger of its api's and its model family's per-image pixel ceiling for pi's 2000 x 2000 resize box; any samplingParams key outside a price-neutral safe list unboundable on those three apis; a 1h cache write when retention is long; the worst service tier), with an in-flight sum for parallel calls and a settle that replaces each bound by its cost, never below zero, and by at least the bound for a failed call that started (any content block, never a usage count, since pi copies Anthropic's message_start output token: its usage is partial, and pi's retries would otherwise loop under the cap) or a successful call reporting no input, while a failed call that never started (a 429, an in-band error before content, a lost answer) is charged its metered cost and counted as `costUnanswered`, so a 429 streak does not stop a job at $0 spent. The user's long-context decision is recorded: a generic Anthropic tier above 200,000 input tokens on a table with no tiers, a `longContext` count, the in-run charge at that tier, and a worker settlement at the reservation. Also recorded: the compat re-arm gap under a cap stops the job (PR #533's review) and is counted as `costUnjudged`, a virtual model is skipped only on `streamSimple`, the rejected approaches (after-the-call checks, cap-plus-one-worst-call reservations, the window as the input cap, per-rate maxima, `before_provider_request`, the registry alone, lowering `maxTokens`, a hand-kept table, trusting `cacheWarming: off`, a Valkey call mid-run, charging a failed call its partial cost, charging every failed call its bound, observing the response status through `onResponse`), and the residuals (extension code outside both meter halves, an `onPayload` raise, a stored credential's env, pi recording an empty summary for a refused compaction, a server limit above the catalog's, api-id trust, uncatalogued fees, failed streams charged at the bound, the image ceilings' limits, a legacy compat call inside a runtime call's provider hook, an unstarted failed call that may have been billed, counted as `costUnanswered`, a pi subprocess outside the cap with `OQ-011` added to Traces). **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: `cost-cap` is live on an image that declares `costCap`; only `model-not-allowed` stays reserved. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` UNCHANGED, checked**: the meter's design and its fallback rule stand; the guard sits on the seam it already had. **Code evidence**: image/runner/src/usage-meter.mjs; image/runner/test/cost-guard.test.mjs; image/runner/test/pinned-api.test.mjs; image/runner/test/usage-meter.integration.test.mjs. |

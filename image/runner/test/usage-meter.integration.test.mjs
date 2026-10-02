@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createServer } from "node:http";
 import { test } from "node:test";
 // Both of these are pure -- no static pi import anywhere in their module graph -- so they load
 // unconditionally and the gate below applies only to pi itself.
 import { attachTokenBudget } from "../src/token-budget.mjs";
 import { createJobModelRuntime } from "../src/model-runtime.mjs";
-import { createUsageMeter, installProcessUsageMeter } from "../src/usage-meter.mjs";
+import { callCostBound, createCostGuard, createUsageMeter, installProcessUsageMeter, resolvePiAiCompat } from "../src/usage-meter.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
@@ -80,7 +81,7 @@ const FAKE_KEY = "pi-dispatch-fake-key-sentinel";
  * registry at arm() time and never unwraps (re-registering the builtin would need a resetApiProviders()),
  * and a per-test api id keeps one test's registrations out of the next test's way.
  */
-async function fixture(api) {
+async function fixture(api, modelOverrides = {}) {
 	const root = tempDir("pi-dispatch-meter-");
 	const modelsPath = join(root, "models.json");
 	writeFileSync(
@@ -105,6 +106,7 @@ async function fixture(api) {
 								cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
 								contextWindow: 100000,
 								maxTokens: 4096,
+								...modelOverrides,
 							},
 						],
 					},
@@ -132,15 +134,16 @@ async function fixture(api) {
  * calls this streamSimple for the api (provider-composer.js). `calls` records what actually reached the
  * provider, which is how the hard-stop test proves a capped call never got there.
  */
-function registerFakeProvider({ modelRuntime, compat, api, calls }) {
+function registerFakeProvider({ modelRuntime, compat, api, calls, usage = SENTINEL_USAGE, delayMs = 0 }) {
 	modelRuntime.registerProvider(PROVIDER, {
 		api,
 		streamSimple(model, _context, options) {
 			calls.push({ sessionId: options?.sessionId, apiKey: options?.apiKey });
 			const stream = compat.createAssistantMessageEventStream();
 			// A terminal "done" resolves result() via EventStream's completion predicate -- the exact
-			// channel meter.observe() reads, and the one the agent loop awaits.
-			stream.push({
+			// channel meter.observe() reads, and the one the agent loop awaits. `delayMs` holds the call in
+			// flight, which is how the cost-cap test makes two sessions' calls overlap.
+			const finish = () => stream.push({
 				type: "done",
 				reason: "stop",
 				message: {
@@ -149,11 +152,13 @@ function registerFakeProvider({ modelRuntime, compat, api, calls }) {
 					api: model.api,
 					provider: model.provider,
 					model: model.id,
-					usage: SENTINEL_USAGE,
+					usage,
 					stopReason: "stop",
 					timestamp: Date.now(),
 				},
 			});
+			if (delayMs > 0) setTimeout(finish, delayMs);
+			else finish();
 			return stream;
 		},
 	});
@@ -184,8 +189,8 @@ function registerFakeProvider({ modelRuntime, compat, api, calls }) {
  * is what makes `calls` mean what the assertions say it means. The loader posture is pinned where it IS
  * the subject -- image/runner/test/loader.test.mjs, which builds through buildResourceLoader itself.
  */
-async function openSession({ fx, modelRuntime, sessionManager }) {
-	const settingsManager = pi.SettingsManager.inMemory({});
+async function openSession({ fx, modelRuntime, sessionManager, settings = {} }) {
+	const settingsManager = pi.SettingsManager.inMemory(settings);
 	const resourceLoader = new pi.DefaultResourceLoader({
 		cwd: fx.root,
 		agentDir: pi.getAgentDir(),
@@ -408,5 +413,326 @@ test("the brake: past the cap, the next call is stopped before it reaches the pr
 		for (const session of sessions) session.dispose();
 		installed?.uninstall();
 		fx.cleanup();
+	}
+});
+
+// ── Issue #501: the per-job cost cap, checked BEFORE each call, through the real dispatch chain ────────────
+//
+// The model is priced on `openai-completions`, one of the PRICED_APIS, so the guard bounds it from the catalog row
+// models.json declares, exactly as it would a real provider's: input $1/M, output $100/M, maxTokens 10000. A
+// session turn passes no maxTokens, so every call's bound is (request bytes + 8192) x 1 + 10000 x 100: just over
+// one dollar (1,000,000 micro-dollars of output plus about 10,000 of input). Each call then SETTLES at a fixed $0.40.
+// The margins below are hundreds of thousands of micro-dollars wide, so the request's exact byte count cannot
+// move an outcome.
+const PRICED_API = "openai-completions";
+const PRICED_MODEL = { cost: { input: 1, output: 100, cacheRead: 0, cacheWrite: 0 }, maxTokens: 10000 };
+const FORTY_CENTS = { input: 1000, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 1100, cost: { input: 0.001, output: 0.399, cacheRead: 0, cacheWrite: 0, total: 0.4 } };
+
+/** One install with a cost cap, as run-job.mjs builds it: the meter carries the cap, the guard enforces it. */
+async function installCapped({ fx, capMicros, rootSessionId }) {
+	const stops = [];
+	const logged = [];
+	const meter = createUsageMeter({ maxTokens: null, maxCostMicros: capMicros, rootSessionId, onStop: (reason) => stops.push(reason) });
+	const guard = createCostGuard({ capMicros, log: (event, fields) => logged.push({ event, fields }) });
+	const installed = await installProcessUsageMeter({ ModelRuntime: pi.ModelRuntime, runtime: fx.modelRuntime, meter, guard, log: (event, fields) => logged.push({ event, fields }) });
+	assert.equal(installed.ok, true, `logged ${JSON.stringify(logged)}`);
+	assert.equal(installed.brake, true, "a cost cap needs its brake at the pin");
+	assert.deepEqual([...installed.enforces], ["cost-cap"]);
+	return { meter, guard, installed, stops, logged };
+}
+
+test("cost cap, sequential: the call whose bound would pass the cap is refused before dispatch, and the total stays under it", { skip }, async () => {
+	const fx = await fixture(PRICED_API, PRICED_MODEL);
+	const sessions = [];
+	let installed;
+	try {
+		const rootManager = pi.SessionManager.inMemory(fx.root);
+		// 0.40 settled per call, a bound of about 1.01: the first two calls fit (0 + 1.01, 0.40 + 1.01), the third
+		// (0.80 + 1.01 = 1.81) does not.
+		const capped = await installCapped({ fx, capMicros: 1_750_000, rootSessionId: rootManager.getSessionId() });
+		installed = capped.installed;
+		const calls = [];
+		await registerFakeProvider({ modelRuntime: fx.modelRuntime, compat: installed.module, api: PRICED_API, calls, usage: FORTY_CENTS });
+		const session = await openSession({ fx, modelRuntime: fx.modelRuntime, sessionManager: rootManager });
+		sessions.push(session);
+		let terminal;
+		session.subscribe((event) => {
+			if (event.type === "turn_end") terminal = event.message ?? terminal;
+		});
+
+		await session.prompt("one");
+		await session.prompt("two");
+		await flush();
+		assert.equal(calls.length, 2);
+		assert.equal(capped.guard.state.spent, 800_000, "two settled calls at their real cost");
+		assert.equal(capped.meter.state.stopReason, null);
+
+		await session.prompt("three");
+		await flush();
+		assert.equal(calls.length, 2, "the third call never reached the provider");
+		assert.equal(capped.meter.state.stopReason, "cost-cap");
+		assert.deepEqual(capped.stops, ["cost-cap"]);
+		assert.equal(terminal?.errorMessage, "pi-dispatch: cost cap reached");
+		assert.equal(terminal?.stopReason, "aborted", "aborted, so pi does not auto-retry it");
+		assert.deepEqual(capped.guard.snapshot(), { costCapMicros: 1_750_000, costRefused: 1, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0 });
+		assert.ok(capped.meter.state.cost * 1e6 <= 1_750_000, "the job's metered total never passed its cap");
+		const refusal = capped.logged.find((entry) => entry.event === "cost_refused");
+		assert.equal(refusal.fields.spent, 800_000);
+		assert.ok(refusal.fields.bound > 1_000_000 && refusal.fields.bound < 1_100_000, `the bound is about a dollar: ${refusal.fields.bound}`);
+	} finally {
+		for (const session of sessions) session.dispose();
+		installed?.uninstall();
+		fx.cleanup();
+	}
+});
+
+test("cost cap, two sessions in parallel: the second call is judged against the first one's bound while it is in flight", { skip }, async () => {
+	const fx = await fixture(PRICED_API, PRICED_MODEL);
+	const sessions = [];
+	let installed;
+	try {
+		const rootManager = pi.SessionManager.inMemory(fx.root);
+		const otherManager = pi.SessionManager.inMemory(fx.root);
+		// One bound (about 1.01) fits under 1.75; two at once (about 2.02) do not, though either alone would.
+		const capped = await installCapped({ fx, capMicros: 1_750_000, rootSessionId: rootManager.getSessionId() });
+		installed = capped.installed;
+		const otherRuntime = await fx.runtime();
+		const calls = [];
+		// Each call stays in flight for 300 ms, far longer than a session takes to reach its first call.
+		await registerFakeProvider({ modelRuntime: fx.modelRuntime, compat: installed.module, api: PRICED_API, calls, usage: FORTY_CENTS, delayMs: 300 });
+		await registerFakeProvider({ modelRuntime: otherRuntime, compat: installed.module, api: PRICED_API, calls, usage: FORTY_CENTS, delayMs: 300 });
+		const rootSession = await openSession({ fx, modelRuntime: fx.modelRuntime, sessionManager: rootManager });
+		const otherSession = await openSession({ fx, modelRuntime: otherRuntime, sessionManager: otherManager });
+		sessions.push(rootSession, otherSession);
+
+		await Promise.all([rootSession.prompt("root"), otherSession.prompt("other")]);
+		await flush();
+		assert.equal(calls.length, 1, "exactly one of the two overlapping calls was dispatched");
+		assert.deepEqual([capped.guard.state.refused, capped.meter.state.stopReason], [1, "cost-cap"]);
+		assert.deepEqual([capped.guard.state.spent, capped.guard.state.inflight], [400_000, 0], "the admitted one settled at its real cost");
+		const refusal = capped.logged.find((entry) => entry.event === "cost_refused");
+		assert.ok(refusal.fields.inflight > 1_000_000, `the refusal counted the other call in flight: ${JSON.stringify(refusal.fields)}`);
+	} finally {
+		for (const session of sessions) session.dispose();
+		installed?.uninstall();
+		fx.cleanup();
+	}
+});
+
+test("cost cap: session.compact() is a provider call like any other, and is refused when its bound would pass the cap", { skip }, async () => {
+	const fx = await fixture(PRICED_API, PRICED_MODEL);
+	const sessions = [];
+	let installed;
+	try {
+		const rootManager = pi.SessionManager.inMemory(fx.root);
+		// One turn fits (about 1.01); the compaction call after it (0.40 + about 1.01) does not.
+		const capped = await installCapped({ fx, capMicros: 1_300_000, rootSessionId: rootManager.getSessionId() });
+		installed = capped.installed;
+		const calls = [];
+		await registerFakeProvider({ modelRuntime: fx.modelRuntime, compat: installed.module, api: PRICED_API, calls, usage: FORTY_CENTS });
+		const session = await openSession({ fx, modelRuntime: fx.modelRuntime, sessionManager: rootManager, settings: { compaction: { keepRecentTokens: 1, reserveTokens: 20_000 } } });
+		sessions.push(session);
+		await session.prompt("one");
+		await flush();
+		assert.equal(calls.length, 1);
+		assert.equal(capped.guard.state.spent, 400_000);
+		// The compaction's summarization call goes through the session's streamFn, so it is the runtime half's
+		// call to judge. With one exchange and keepRecentTokens 1 pi summarises the split turn's prefix, asking for
+		// maxTokens = min(0.5 x reserveTokens, model.maxTokens) = 10000 here, so its bound is a turn's (about 1.01) and
+		// 0.40 + 1.01 passes 1.30. (With pi's default reserve it asks for 8192, and its bound is smaller: the guard
+		// bounds what each call asks for, not a fixed worst case.)
+		await session.compact();
+		await flush();
+		// MEASURED at the pin, and pinned here as a residual rather than a guarantee: pi does not reject compact()
+		// for an aborted summarization. It records the compaction with that call's (empty) text as the split turn's
+		// summary. The job is stopped either way (cost-cap, exit 2), so nothing more is spent; what the residual
+		// costs is a resumed conversation (run.resume) carrying a summary with nothing in it. The token cap's
+		// brake has always done the same to a compaction it answers. If pi starts refusing the compaction instead,
+		// this goes red: drop the residual from DES-DOLLAR-RESERVE-AND-SETTLE.
+		const compactions = rootManager.getEntries().filter((entry) => entry.type === "compaction");
+		assert.equal(compactions.length, 1);
+		assert.match(compactions[0].summary, /\*\*Turn Context \(split turn\):\*\*\n\n$/, "the refused call's empty text is the prefix summary");
+		assert.equal(calls.length, 1, "the compaction's call never reached the provider");
+		assert.deepEqual([capped.guard.state.refused, capped.meter.state.stopReason], [1, "cost-cap"]);
+		assert.equal(capped.guard.state.spent, 400_000);
+	} finally {
+		for (const session of sessions) session.dispose();
+		installed?.uninstall();
+		fx.cleanup();
+	}
+});
+
+// ── PR #534's review: a failed call that never started is metered and counted; one that started pays its bound ──
+//
+// These run pi's REAL openai-completions module against a loopback server: the HTTP status, the SDK's error and
+// the message pi settles with are all real. Loopback only, and a literal key, so nothing leaves the machine.
+
+/** A local OpenAI-shaped server. `plan` answers each request in turn: "429", "ok", "lost" (no answer), "inband" (200, then an error before content) or "cut" (200, content deltas, then the socket dies). */
+async function loopbackOpenAI(plan) {
+	const seen = [];
+	const server = createServer((req, res) => {
+		let body = "";
+		req.on("data", (chunk) => (body += chunk));
+		req.on("end", () => {
+			const step = plan[Math.min(seen.length, plan.length - 1)];
+			seen.push(step);
+			if (step === "lost") {
+				// The request arrived whole; the connection dies before any answer.
+				res.socket.destroy();
+				return;
+			}
+			if (step === "429") {
+				res.writeHead(429, { "content-type": "application/json", "retry-after": "0", "x-should-retry": "false" });
+				res.end(JSON.stringify({ error: { message: "rate limited", type: "rate_limit" } }));
+				return;
+			}
+			res.writeHead(200, { "content-type": "text/event-stream" });
+			const chunk = (o) => res.write(`data: ${JSON.stringify(o)}\n\n`);
+			const base = { id: "x", object: "chat.completion.chunk", created: 1, model: "priced" };
+			if (step === "inband") {
+				// A 200, then an error event in the stream before any content (the shape of Anthropic's overloaded_error).
+				res.write(`data: ${JSON.stringify({ error: { message: "overloaded", type: "overloaded_error" } })}\n\n`);
+				res.end();
+				return;
+			}
+			if (step === "cut") {
+				for (let i = 0; i < 50; i++) chunk({ ...base, choices: [{ index: 0, delta: { content: "word " } }] });
+				setTimeout(() => res.socket.destroy(), 10);
+				return;
+			}
+			chunk({ ...base, choices: [{ index: 0, delta: { role: "assistant", content: "ok" } }] });
+			chunk({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+			chunk({ ...base, choices: [], usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 } });
+			res.end("data: [DONE]\n\n");
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const root = tempDir("pi-dispatch-loopback-");
+	const modelsPath = join(root, "models.json");
+	// Under the BUILTIN openai provider, with a model-level baseUrl, so pi dispatches through the provider's own api
+	// object. A provider pi does not know would be composed onto the compat registry's openai-completions entry
+	// (trap #5), which earlier tests in this file left wrapped by installs whose meters are stopped.
+	writeFileSync(modelsPath, JSON.stringify({ providers: { openai: { apiKey: "loopback-literal-key",
+		models: [{ id: "loopback-priced", name: "priced", api: "openai-completions", baseUrl: `http://127.0.0.1:${server.address().port}/v1`, reasoning: false, input: ["text"], cost: { input: 1, output: 100, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 10000 }] } } }));
+	// The compat registry is process-wide and an install never unwraps it, so the cost-cap tests above left its
+	// openai-completions entry wrapped by meters they stopped. pi's own reset puts the builtins back, as
+	// AgentSession.reload() would, so this test's install arms a clean registry.
+	(await import(resolvePiAiCompat()[0].url)).resetApiProviders();
+	const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir: root, modelsPath });
+	const model = modelRuntime.getModel("openai", "loopback-priced");
+	assert.ok(model, "the loopback model must resolve under the builtin openai provider");
+	return { seen, root, modelRuntime, model, close: () => new Promise((resolve) => server.close(resolve)) };
+}
+
+test("cost cap: a 429 is charged its metered cost and counted, so pi's retry after it is admitted and the job completes", { skip }, async () => {
+	const lb = await loopbackOpenAI(["429", "ok"]);
+	let installed;
+	let session;
+	try {
+		const capped = await installCapped({ fx: { modelRuntime: lb.modelRuntime }, capMicros: 1_500_000, rootSessionId: undefined });
+		installed = capped.installed;
+		// pi's session retry is on: the 429 ends the first call, and the retry is a second call through the guard.
+		const settingsManager = pi.SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } });
+		const resourceLoader = new pi.DefaultResourceLoader({ cwd: lb.root, agentDir: pi.getAgentDir(), settingsManager, noContextFiles: true, noSkills: true, noExtensions: true });
+		await resourceLoader.reload();
+		({ session } = await pi.createAgentSession({ cwd: lb.root, agentDir: pi.getAgentDir(), modelRuntime: lb.modelRuntime, model: lb.model, settingsManager, sessionManager: pi.SessionManager.inMemory(lb.root), resourceLoader, noTools: "all" }));
+		let terminal;
+		session.subscribe((event) => {
+			if (event.type === "turn_end") terminal = event.message ?? terminal;
+		});
+		await session.prompt("hello");
+		await flush();
+		// One bound (about 1.01) fits under 1.50 and two do not: had the 429 been charged its bound, the retry would
+		// have been refused and the job stopped as cost-cap at $0 metered.
+		assert.deepEqual(lb.seen, ["429", "ok"]);
+		assert.equal(capped.meter.state.stopReason, null);
+		assert.equal(capped.guard.state.refused, 0);
+		assert.equal(terminal?.stopReason, "stop");
+		assert.equal(capped.guard.state.spent, Math.ceil(capped.meter.state.cost * 1e6), "spent is the successful call's cost alone");
+		assert.equal(capped.guard.snapshot().costUnanswered, 1, "the 429 is counted: a settlement reads the cost as a floor");
+	} finally {
+		session?.dispose();
+		installed?.uninstall();
+		await lb.close();
+	}
+});
+
+test("cost cap: a 200 cut after content is charged its bound, so a retry loop of cut streams cannot run under the cap", { skip }, async () => {
+	const lb = await loopbackOpenAI(["cut"]);
+	let installed;
+	try {
+		const capped = await installCapped({ fx: { modelRuntime: lb.modelRuntime }, capMicros: 100_000_000, rootSessionId: undefined });
+		installed = capped.installed;
+		const context = { systemPrompt: "s", messages: [{ role: "user", content: "hello", timestamp: 1 }] };
+		const options = { maxRetries: 0 };
+		const message = await lb.modelRuntime.streamSimple(lb.model, context, options).result();
+		await flush();
+		assert.equal(message.stopReason, "error", `the cut stream ended in error: ${message.errorMessage}`);
+		assert.equal(message.usage.cost.total, 0, "the premise: openai-completions reports usage only at the end");
+		assert.ok(message.content.length > 0, "the premise: content came back before the cut");
+		assert.equal(capped.guard.state.spent, callCostBound("streamSimple", lb.model, context, options), "it started, so it is charged its bound");
+		assert.equal(capped.guard.snapshot().costUnanswered, 0);
+	} finally {
+		installed?.uninstall();
+		await lb.close();
+	}
+});
+
+for (const [step, label] of [["inband", "a 200 then an in-band error before any content"], ["lost", "a connection lost before any answer"]]) {
+	test(`cost cap: ${label} never started, so it is charged its metered cost and counted as costUnanswered`, { skip }, async () => {
+		const lb = await loopbackOpenAI([step]);
+		let installed;
+		try {
+			const capped = await installCapped({ fx: { modelRuntime: lb.modelRuntime }, capMicros: 100_000_000, rootSessionId: undefined });
+			installed = capped.installed;
+			const context = { systemPrompt: "s", messages: [{ role: "user", content: "hello", timestamp: 1 }] };
+			const message = await lb.modelRuntime.streamSimple(lb.model, context, { maxRetries: 0 }).result();
+			await flush();
+			assert.deepEqual(lb.seen, [step], "the request reached the server");
+			assert.equal(message.stopReason, "error", `it failed: ${message.errorMessage}`);
+			assert.equal(message.content.length, 0, "the premise: nothing came back");
+			assert.deepEqual([capped.guard.state.spent, capped.guard.snapshot().costUnanswered], [0, 1]);
+		} finally {
+			installed?.uninstall();
+			await lb.close();
+		}
+	});
+}
+
+test("cost cap: anthropic-messages' message_start (one output token) then an in-band overloaded_error never started: metered, costUnanswered 1", { skip }, async () => {
+	// pi's REAL anthropic-messages module copies message_start's usage, output_tokens 1 included, before the error
+	// event ends the stream. With no content block the call never started, whatever its output count says.
+	const server = createServer((req, res) => {
+		req.resume();
+		req.on("end", () => {
+			res.writeHead(200, { "content-type": "text/event-stream" });
+			const start = { type: "message_start", message: { id: "msg_x", type: "message", role: "assistant", model: "loopback-priced", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 25, output_tokens: 1 } } };
+			res.write(`event: message_start\ndata: ${JSON.stringify(start)}\n\n`);
+			res.end(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "Overloaded" } })}\n\n`);
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const root = tempDir("pi-dispatch-loopback-");
+	const modelsPath = join(root, "models.json");
+	writeFileSync(modelsPath, JSON.stringify({ providers: { anthropic: { apiKey: "loopback-literal-key",
+		models: [{ id: "loopback-priced", name: "priced", api: "anthropic-messages", baseUrl: `http://127.0.0.1:${server.address().port}`, reasoning: false, input: ["text"], cost: { input: 1, output: 100, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 10000 }] } } }));
+	(await import(resolvePiAiCompat()[0].url)).resetApiProviders();
+	const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir: root, modelsPath });
+	const model = modelRuntime.getModel("anthropic", "loopback-priced");
+	let installed;
+	try {
+		assert.ok(model, "the loopback model must resolve under the builtin anthropic provider");
+		const capped = await installCapped({ fx: { modelRuntime }, capMicros: 100_000_000, rootSessionId: undefined });
+		installed = capped.installed;
+		const message = await modelRuntime.streamSimple(model, { systemPrompt: "s", messages: [{ role: "user", content: "hello", timestamp: 1 }] }, { maxRetries: 0 }).result();
+		await flush();
+		assert.equal(message.stopReason, "error", `it failed: ${message.errorMessage}`);
+		assert.deepEqual([message.content.length, message.usage.input, message.usage.output], [0, 25, 1], "the premise: no content, message_start's usage copied");
+		assert.equal(capped.guard.state.spent, Math.ceil(message.usage.cost.total * 1e6), "charged its metered cost, not its bound");
+		assert.equal(capped.guard.snapshot().costUnanswered, 1);
+		assert.equal(capped.meter.state.stopReason, null);
+	} finally {
+		installed?.uninstall();
+		await new Promise((resolve) => server.close(resolve));
 	}
 });

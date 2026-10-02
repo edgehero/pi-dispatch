@@ -124,7 +124,8 @@ export function parseExitTurns(text) {
  * `cost-cap` and `model-not-allowed` when the runner's pre-call guard stopped a call, and
  * `cost-cap-unenforceable` and `model-policy-unenforceable` when the runner refused, before any call, a policy
  * it could not enforce before a call. The two refusals are live from the first image that knows the variables
- * (any cap or list refuses until the guards land); the two stops are reserved for the guards.
+ * (a list refuses until its guard lands). `cost-cap` is live from the image that declares `costCap`, whose runner
+ * carries the cost guard; `model-not-allowed` is reserved for the model guard.
  */
 export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "cost-cap-unenforceable", "model-policy-unenforceable"]);
 
@@ -282,14 +283,17 @@ export function parseExitContext(text) {
  * matters because it is what makes a conformant runner's object round-trip byte-identically through the
  * rebuild below, so the record's bytes do not move for anyone running a real image.
  *
- * The last five are the policy counters of issues #501 and #502, in the order the runner will emit them
- * after `unpriced`: `costCapMicros` (the job's cap), `costRefused` (calls the cost guard stopped),
+ * The last seven are the policy counters of issues #501 and #502, in the order the runner emits them after
+ * `unpriced`: `costCapMicros` (the job's cap), `costRefused` (calls the cost guard stopped),
  * `boundExceeded` (calls that cost more than their bound), `longContext` (calls priced past a long-context
- * threshold the catalog does not tier), `modelRefused` (calls the model guard stopped). Admitted here before
- * any runner writes them, because a key missing from this closed list is DROPPED, and the dollar settlement
- * reads them to decide whether a metered cost is complete: a dropped counter would read as an honest zero.
+ * threshold the catalog does not tier), `costUnjudged` (compat entries found displaced under the cap, so calls
+ * may have run unjudged and unmetered), `costUnanswered` (failed calls that never started, charged their metered
+ * cost though a provider may have billed one), `modelRefused` (calls the model guard stopped). The cost guard
+ * writes the first six whenever a cost cap is set; `modelRefused` is still reserved for the model guard. All seven are on
+ * this closed list because a key missing from it is DROPPED, and the dollar settlement reads them to decide
+ * whether a metered cost is complete: a dropped counter would read as an honest zero.
  */
-export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "metered", "rootTotal", "otherTotal", "looseTotal", "sessions", "calls", "unresolved", "unpriced", "costCapMicros", "costRefused", "boundExceeded", "longContext", "modelRefused"]);
+export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "metered", "rootTotal", "otherTotal", "looseTotal", "sessions", "calls", "unresolved", "unpriced", "costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "modelRefused"]);
 
 /**
  * Rebuild the billed totals from a closed key list rather than passing the container's object through.
@@ -303,7 +307,7 @@ export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "me
  * did not, and the asymmetry was an oversight rather than a decision.
  *
  * A key the runner omitted stays OMITTED rather than becoming null: the fallback shape legitimately
- * carries only five of the seventeen, and a null there would read as "measured zero" for a number nobody
+ * carries only five of the nineteen, and a null there would read as "measured zero" for a number nobody
  * measured. `typeof === "number"` rather than `Number.isFinite`, deliberately, so this narrows WHICH
  * KEYS survive and never which objects are admitted -- the admission gate above is unchanged.
  */

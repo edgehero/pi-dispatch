@@ -132,12 +132,15 @@ Evidence convention as in `constitution.md`.
   // Process-wide usage meter (REQ-TOKEN-ACCOUNTING-AND-CAPS). Wraps ModelRuntime.prototype (the class run-job
   // imports, handed over) AFTER the runtime exists -- the install checks that THIS instance dispatches through
   // the wrappers -- and BEFORE createAgentSession, so the first call of the run is already metered. See (g), (h), (m).
-  // ONE stop for every policy (issues #501, #502): onStop(reason) fires once, for the first stop, first wins.
-  const meter      = createUsageMeter({ maxTokens, maxCostMicros, allowedModels, rootSessionId, onStop: () => { void session?.abort(); } });
-  const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter });
+  // ONE stop for every policy (issues #501, #502): onStop(reason) fires once, for the first stop, first wins;
+  // every stop aborts the root, and only a token stop logs token_budget_exceeded.
+  const meter      = createUsageMeter({ maxTokens, maxCostMicros, allowedModels, rootSessionId, onStop: meterStopHandler({ onTokenAbort, abort: () => void session?.abort() }) });
+  // The cost cap (issue #501) is judged before every call by a guard both meter halves consult; none without a cap.
+  const costGuard  = maxCostMicros === null ? null : createCostGuard({ capMicros: maxCostMicros, log });
+  const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: costGuard });
   // A cost cap or a model list this runner cannot enforce BEFORE a call refuses here, pre-spend
-  // (INT-RUNNER-EXIT-CODE-PROTOCOL): meter not installed, no hard stop, or no guard in this build.
-  assertPoliciesEnforceable({ maxCostMicros, allowedModels, meterOk: usageMeter.ok, brake: usageMeter.brake, enforces: usageMeter.enforces });
+  // (INT-RUNNER-EXIT-CODE-PROTOCOL): meter not installed, no hard stop, or no guard for that policy.
+  assertPoliciesEnforceable({ maxCostMicros, allowedModels, ...policyEnforcement(usageMeter) });
 
   ({ session } = await createAgentSession({
     cwd: "/workspace",
@@ -574,9 +577,9 @@ refactor apart.
   | Our turn budget or timeout aborts | `stopReason: "aborted"` | `2` |
   | Our per-job **token budget** aborts | `stopReason: "aborted"` | `2` — `decideExit` intercepts it as `reason: "token_budget"` BEFORE the generic `"aborted"`, exactly as the turn budget is intercepted (`REQ-TOKEN-ACCOUNTING-AND-CAPS`) |
   | The **process-wide** token budget breaches mid-fanout (a subagent session's call trips it) | `stopReason: "aborted"` on the root; every later call **by any session** is answered with a synthetic aborted stream | `2` / `token_budget`, the same row as above by design: neither meter gets its own exit code, so an operator never has to learn which one fired. Since issues #501/#502 the process-wide meter reports its stop by REASON (`meterStop`, the meter's first stop) and the fallback bus meter by flag (`tokenAborted`); `decideExit` ranks `turn_budget` > `meterStop` > `tokenAborted` > a rejected prompt > the terminal message |
-  | **Reserved; enforced by later changes** (issue #501): the per-job **cost cap** stops a call before it is sent | `stopReason: "aborted"` on the root, the refused call answered with the hard stop `pi-dispatch: cost cap reached` | `2` / `cost-cap`. The meter's stop is ONE reason, first wins: a later stop never overwrites it, so a job a cost refusal stopped stays `cost-cap` even when late settles then cross the token cap. No runner emits it until the cost guard lands |
+  | The per-job **cost cap** (issue #501, `PI_MAX_COST_MICROS`) stops a call before it is sent: the cost guard refuses any call whose bound would take `spent + in-flight bounds + bound` past the cap, any call it cannot bound (an api outside `PRICED_APIS`, `generateImages`, `streamDeferred`, a virtual model on any method but `streamSimple`, a classifier with an output rate, a context that does not serialise, a present `maxTokens` that is not a finite number, an output-cap `samplingParams` key that is not a positive finite number, or a `samplingParams` key outside the price-neutral safe list on the three apis that merge them last), and, fail closed, the rest of a job whose compat half was found displaced (a legacy call may have passed the cap unseen; logged `cost_guard_displaced` and counted as `costUnjudged` on the exit line) | `stopReason: "aborted"` on the root, the refused call answered with the hard stop `pi-dispatch: cost cap reached`; the refusal is logged `cost_refused` with numbers only (`bound`, `spent`, `inflight`, `cap`, or `why: "unboundable"`) | `2` / `cost-cap`. The meter's stop is ONE reason, first wins: a later stop never overwrites it, so a job a cost refusal stopped stays `cost-cap` even when late settles then cross the token cap. Live from the image that declares `costCap`; the bound and the settle rules are `DES-DOLLAR-RESERVE-AND-SETTLE` |
   | **Reserved; enforced by later changes** (issue #502): the **allowed-model list** stops a call to a model not on it | `stopReason: "aborted"` on the root, the refused call answered with the hard stop `pi-dispatch: model not allowed` | `2` / `model-not-allowed`. Same single first-wins stop. No runner emits it until the model guard lands |
-  | A cost cap (`PI_MAX_COST_MICROS`) or a model list (`PI_ALLOWED_MODELS`) is set, and the runner **cannot enforce it before a call**: the process-wide meter did not install (the fallback bus meter sees a call only after it was paid for), the meter has no hard-stop stream, or this runner has no pre-call guard for that policy (the installed guard lists the stops it can refuse for, so a cost guard cannot pass for a model guard) | **throws a tagged `configError`** after the meter installs and before `createAgentSession` | `2` / `model-policy-unenforceable` (checked first) or `cost-cap-unenforceable`. Nothing was sent. Live from the first image that reads either variable: until the guards land, that image refuses EVERY job carrying either one, which is the fail-closed answer for a policy it cannot keep. No worker writes either variable yet, so no job carries one |
+  | A cost cap (`PI_MAX_COST_MICROS`) or a model list (`PI_ALLOWED_MODELS`) is set, and the runner **cannot enforce it before a call**: the process-wide meter did not install (the fallback bus meter sees a call only after it was paid for), the meter has no hard-stop stream, or this runner has no pre-call guard for that policy (the installed guard lists the stops it can refuse for, so a cost guard cannot pass for a model guard) | **throws a tagged `configError`** after the meter installs and before `createAgentSession` | `2` / `model-policy-unenforceable` (checked first) or `cost-cap-unenforceable`. Nothing was sent. Live from the first image that reads either variable: until the model guard lands, that image refuses EVERY job carrying a list, which is the fail-closed answer for a policy it cannot keep; a cost cap passes on an image with the cost guard and a working meter. No worker writes either variable yet, so no job carries one |
   | **pi's own retry cannot resume** (issue #509): a retry-shaped error after the turn's tools ran; pi omits the failed attempt and its continue() refuses a transcript ending on the assistant | `session.prompt()` REJECTS with `Cannot continue from message role: ...` while a retry is in flight (auto_retry_start seen, no auto_retry_end) | `2` / `retry-unresumable` -- the paid call and the tool already happened; a queue retry would re-run them on a fresh budget, the uncounted re-run #449/#455's rule forbids. Both conditions are required; any other rejection keeps the preflight rows above |
   | The provider **deferred** the response (pi-ai 0.99.1 deferred responses) | `stopReason: "deferred"` | `2` / `deferred` -- the job has no answer, the provider still completes and bills it, and whatever asked for deferral (the runner never does) asks again on a retry |
   | A terminal still **pending** | `stopReason: "pending"` | `1` / `pending` -- the stream stopped before the provider finished: no evidence the agent ran, the no-terminal-message verdict under its own name |
@@ -739,11 +742,24 @@ refactor apart.
   branch summary's), `sessions` (distinct session ids observed), `calls` (stream dispatches the meter observed, not turns: including one pi-ai ended as aborted before sending, and excluding a call the meter's own hard stop answered, which reaches no provider),
   `unresolved` (streams still unsettled when the job ended — non-zero means the totals are a **floor**, not
   a total) and `unpriced` (calls whose usage carried no finite cost; counted rather than guessed, because a
-  silent `0` would read as "this call was free"). The four original keys keep their meaning and position,
-  so a reader that only knows them is unaffected. Five more names are **reserved** after `unpriced`, in this
+  silent `0` would read as "this call was free"; since issue #501 a call whose result REJECTED counts here
+  too, on its own ledger row, because what it spent is unknown and a dollar settlement must not read unknown
+  as zero). The four original keys keep their meaning and position,
+  so a reader that only knows them is unaffected. Seven more names follow `unpriced`, in this
   order, for the cost cap and the model list (issues #501, #502): `costCapMicros`, `costRefused`,
-  `boundExceeded`, `longContext`, `modelRefused`. No runner writes them yet; the worker's closed key list
-  admits them already, so the first image that does is recorded rather than dropped. The fallback line carries `metered: false` and the four
+  `boundExceeded`, `longContext`, `costUnjudged`, `costUnanswered`, `modelRefused`. The first six are written by the cost guard, and ONLY when a
+  cost cap is set: with no cap no guard is installed and no cost counter is emitted, and the one change such a
+  job can see is that a call whose result rejected now counts as unpriced. `costCapMicros` (the cap the job ran under),
+  `costRefused` (calls the guard refused before dispatch), `boundExceeded` (settled calls whose charge passed
+  their bound: the evidence that the one-byte-per-token assumption broke) and `longContext` (calls on
+  `anthropic-messages` or `bedrock-converse-stream` with no catalog tiers whose settled input plus cache read
+  plus cache write passed 200,000 tokens, which pi prices at base rates the provider does not bill) and
+  `costUnjudged` (compat api entries the meter found displaced under the cap: legacy calls there may have run
+  unjudged and unmetered, and the job was stopped `cost-cap` for it, so a non-zero value is the only exit-line
+  evidence that tells such a stop from a plain refusal) and `costUnanswered` (failed calls that never started:
+  no content block, so charged their metered cost rather than their bound; a provider that
+  accepted such a request and lost the answer may still bill it).
+  `modelRefused` stays reserved for the model guard. The worker's closed key list admits all seven. The fallback line carries `metered: false` and the four
   originals only. The sibling `usage` key (the per-model ledger, `REQ-TOKEN-ACCOUNTING-AND-CAPS`) is the
   same class of read-only telemetry: recovered by its own validating parser (`parseExitUsage`), absent on
   the fallback and catch-path lines, and **feeding classification exactly as much as `tokens` does —
@@ -1232,13 +1248,22 @@ refactor apart.
     reason `job-image-replicas-unsupported`. One rule underlies both — an image that declares nothing gets
     no benefit of the doubt about what it contains — and neither costs an unflagged job anything.
     `verify-image.sh` greps the baked guardrails when the label claims `replicas`, so this label cannot lie
-    any more than `forges` can. The token set at this version is `replicas`, `commands`, `excludeTools` and
-    `anyUid` -- the third (issue #291) declares that the baked runner reads `PI_EXCLUDE_TOOLS`, and
+    any more than `forges` can. The token set at this version is `replicas`, `commands`, `excludeTools`,
+    `anyUid` and `costCap` -- the third (issue #291) declares that the baked runner reads `PI_EXCLUDE_TOOLS`, and
     a job carrying exclusions on an image without it is refused pre-spend
     (`job-image-exclude-tools-unsupported`), because an older runner would ignore the variable and run a
     "read-only" trigger with every tool the file says to remove: a permission quietly not enforced.
     `verify-image.sh` fails on any UNKNOWN token and checks each claimed one (a grep of the baked runner, or
     for `anyUid` runs as uid 4242), so a new capability cannot ship its label without shipping its evidence.
+    `costCap` (issue #501) declares that the baked runner reads `PI_MAX_COST_MICROS` and stops a job before any
+    provider call whose bound could take it past that cap (`INT-RUNNER-EXIT-CODE-PROTOCOL`, the `cost-cap` row).
+    Its evidence is a run, not a grep: a job with a fake key (`ANTHROPIC_API_KEY=sk-ant-not-a-real-key`) on the default
+    priced model, with `--network none` and `PI_MAX_COST_MICROS=0`, must exit `2` with reason `cost-cap` and
+    `costRefused: 1` on its exit line, so nothing is dialled and nothing is spent. A runner that ignored the
+    variable would try the call and die on the network; one that could not enforce it would exit
+    `cost-cap-unenforceable`. The pi-upgrade-check workflow also requires this repo's image to carry the token.
+    No worker row requires it yet: the worker writes no `PI_MAX_COST_MICROS` until the per-job cap reaches it, and
+    that change adds the `CAPABILITY_GATES` row with it.
     The worker's side of the three job-feature tokens (`replicas`, `commands`, `excludeTools`) is ONE table
     since issues #501/#502, `CAPABILITY_GATES` in `worker/src/image-preflight.mjs`: per row the token, which
     jobs need it, the result key, the record reason, the log event and the comment. The preflight refuses the
@@ -1388,8 +1413,9 @@ refactor apart.
     `PI_ALLOWED_MODELS` (issues #501, #502), **reserved names the worker does not write yet**: the runner reads
     them (the per-job dollar cap as an integer number of micro-dollars from `0` to `1e12`, `0` legal; the
     allowed models as comma-separated `provider/model`, split at the first `/`; for both an EMPTY value is a
-    config error, exit 2, never "unset", because an empty money or allow knob read as unset would fail open),
-    and a runner with either set refuses before any call while it has no pre-call guard for it
+    config error, exit 2, never "unset", because an empty money or allow knob read as unset would fail open).
+    A runner from an image declaring `costCap` ENFORCES the cost cap before every provider call (the cost
+    guard, `DES-DOLLAR-RESERVE-AND-SETTLE`); a runner with a list set, or with a cap it cannot enforce, refuses before any call
     (`INT-RUNNER-EXIT-CODE-PROTOCOL`). They are in `CONTAINER_ENV_NAMES` already, so a trigger's `run.secrets`
     cannot bind either; and each name in `PI_FORWARD_ENV` (an explicit operator
     allowlist of extra host vars — e.g. a custom provider's key — forwarded by exact `-e NAME=VALUE`, never a
@@ -4136,8 +4162,9 @@ validator rather than a second copy of it.
                    "metered": <bool>,                                                          // true = process-wide meter; false = the subscribe() fallback (then the keys below are absent)
                    "rootTotal": <int>, "otherTotal": <int>, "looseTotal": <int>,                // attribution split; sums to `total`
                    "sessions": <int>, "calls": <int>, "unresolved": <int>, "unpriced": <int>,
-                   "costCapMicros": <int>, "costRefused": <int>, "boundExceeded": <int>,         // reserved (issues #501, #502): admitted by the
-                   "longContext": <int>, "modelRefused": <int> } | null,                        // closed key list, written by no runner yet
+                   "costCapMicros": <int>, "costRefused": <int>, "boundExceeded": <int>,         // issue #501: written only when a cost cap was set
+                   "longContext": <int>, "costUnjudged": <int>, "costUnanswered": <int>,         // issue #501: written only when a cost cap was set
+                   "modelRefused": <int> } | null,                                             // modelRefused: reserved (issue #502), written by no runner yet
     "usage":     { "v": <int>,                                                                  // ledger block version; readers treat an unknown v as opaque-but-present
                    "piAi": "<major.minor.patch>" | null,                                        // the pi-ai the meter priced with, read from the resolved package at install; a rates PROVENANCE stamp
                    "truncated": <int>,                                                          // named rows folded into the "other" row at the 8-row cap; 0 = none
@@ -4220,7 +4247,8 @@ validator rather than a second copy of it.
   **A container exit `2` records `runner-policy` unless the runner named a reason the worker keeps**
   (issue #437). Five such reasons: `provider-auth-refused`, the provider refused the credential (a 401/403,
   or a Google or Bedrock refusal shape since issue #451); and since issues #501/#502 `cost-cap` and
-  `model-not-allowed` (reserved; enforced by later changes: the runner's pre-call guard stopped a call) and
+  `model-not-allowed` (the runner's pre-call guard stopped a call: `cost-cap` live on an image that declares
+  `costCap`, `model-not-allowed` still reserved for the model guard) and
   `cost-cap-unenforceable` and `model-policy-unenforceable` (the runner refused, before any call, a cost cap
   or a model list it could not enforce before a call). Each has its own fixed terminal comment and pages
   the operator like any other runner reason. The parse rule is
@@ -4353,6 +4381,21 @@ validator rather than a second copy of it.
   compaction/summarisation calls that never surfaced as a root `turn_end`, so at identical real spend the
   counter fills faster than it used to. That is the correction the meter exists for, and `metered` is what
   lets a reader tell a corrected total from a legacy one.
+  **The cost guard's six counters (issue #501)** ride the same object and the same closed key list, and only
+  on a run that had a cost cap: `costCapMicros` is the cap in integer micro-dollars, `costRefused` the calls the
+  guard refused before dispatch (normally `1`, the call that stopped the job), `boundExceeded` the settled calls
+  whose charge passed their pre-call bound, `longContext` the Anthropic calls past 200,000 input tokens on a
+  model with no catalog tiers, `costUnjudged` the compat api entries found displaced under the cap, and
+  `costUnanswered` the failed calls that never started. A non-zero `boundExceeded`, `longContext`,
+  `costUnjudged` or `costUnanswered` says `cost` is not the whole truth: the first that the bound's
+  one-byte-per-token assumption broke, the second that pi priced a call at base rates the provider bills
+  higher, the third that legacy calls may have run unmetered, the fourth that a request the provider accepted
+  may have been billed though its answer was lost. The record carries them as numbers and
+  classifies nothing on them; they are the contract a dollar settlement (a later part of issue #501) reads to
+  tell a complete metered cost from a floor.
+  Absent means no cap, never zero refusals. The meaning of `unpriced` WIDENED with them: a call whose result
+  rejected now counts as unpriced (its cost is unknown), where before it was counted in `calls` and nowhere
+  else; a run record from before this change can carry such a call in neither.
   The `usage` ledger is a **SIBLING of `tokens`, not a widening of it** — and the reason is the same one
   that made `parseExitSession` a sibling. `tokens` rides through `parseExitTokens` verbatim only because it
   holds nothing but numbers; the ledger carries `provider`/`model` **strings emitted by the container**,
@@ -5996,3 +6039,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-02 | Issue #524. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, the `reason` enum gains `local-folder-not-a-repo` (a local job whose folder has no `.git` at its root), `local-folder-no-commit` (an unborn HEAD: a branch with no commit yet) and `local-folder-unreadable-repo` (any other HEAD git cannot resolve: an empty `.git`, a missing worktree gitdir, ownership, a missing commit object, a garbage branch ref), all refused at prepare before the budget reserve, the last two only once the files git needed read back cleanly, so a transient read error is retried instead. The first was recorded as `config-refused`, which names a misconfigured deployment rather than the folder. The other two escaped as untagged throws, failed jobs with no reason that were not retried. |
 | 2026-10-02 | Issues #501 and #502, the shared seams for policy stops (no behaviour change when nothing is set). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the meter's stop is ONE reason, first wins (`meterStop`), and `decideExit` ranks `turn_budget` > `meterStop` > `tokenAborted` (the fallback bus meter's flag alone) > a rejected prompt; two rows reserved, enforced by later changes (`cost-cap`, `model-not-allowed`); one live row, a cost cap or a model list the runner cannot enforce before a call (meter not installed, no hard stop, or no pre-call guard, which is every image until the guards land) refuses after the meter installs and before `createAgentSession` as `model-policy-unenforceable` (checked first) or `cost-cap-unenforceable`; `RUNNER_POLICY_REASONS` grows to five and the source bolt accepts an exported literal; five `tokens` names reserved after `unpriced`. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the `reason` enum gains the four, each with a fixed terminal comment; the `tokens` key list gains `costCapMicros`, `costRefused`, `boundExceeded`, `longContext`, `modelRefused` in that order (admitted by the closed list, written by no runner yet); the ledger id pattern widens to `^(?=.{1,64}$)[~@]?[a-z0-9][a-z0-9._:/@_-]*$` in the new pure `worker/src/model-ref.mjs`. Measured over pi-ai 0.99.1's builtin catalog (42 providers, 1,589 ids): the old pattern refused 55 (19 openrouter `~` ids, 18 `cloudflare-ai-gateway` ids with `@` inside, 18 `cloudflare-workers-ai` ids starting `@cf/`), a `~`-only prefix still refused those 18, the adopted `[~@]?` refuses 0, and a test walks the catalog at the pin. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_MAX_COST_MICROS` and `PI_ALLOWED_MODELS` named and reserved in `CONTAINER_ENV_NAMES` (the worker writes neither yet; an empty value is a config error for both), and the three job-feature capability gates are one table, `CAPABILITY_GATES`, with identical behaviour. **`INT-SDK-SESSION-OPTIONS`**: the snippet shows `onStop` and the policy check. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the new refusal is free and pre-spend inside the container, and no worker gate moved. |
 | 2026-10-02 | Issue #502 part 1. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.provider`, `run.model` and `run.maxTurns` are legal on ALL FOUR kinds and validated at load in both services (before, only cron carried them, copied unchecked, so `run.provider: 7` loaded). The grammar lines name the rule: a provider matches `^(?=.{1,64}$)[a-z0-9][a-z0-9._-]*$` lowercased, a model matches the run-history ledger's id pattern lowercased (`MODEL_REF_PATTERN` in `worker/src/model-ref.mjs`, 64 characters), both printable ASCII before lowercasing, the model kept in its original case, `maxTurns` a positive safe integer, and `null` treated as absent for all three because a cron entry's `"model": null` loaded before and meant the default. A new bullet records the near-miss sweep (`providerId`, `providers`, `modelId`, `modelName`, `maxTurn`, `allowedModels` and case or separator variants refused under `run`, every spelling refused under `on`, the suggestion naming the matched field), the upgrade consequence (webhook fields that were ignored now take effect, and a value or key that loaded before can now refuse the file), the deliberate tolerance of the exact keys `run.models` and `run.maxCostUsd` until the release that enforces them, that existence is NOT checked at load, and the absent-stays-absent forwarding with its derived receiver test, which also drives each route's job through `enqueueForgeJob`. The two "pure passthrough" sentences (the `run.image` bullet and **Why**) now say "absent stays absent", and the **Why** sentence says the fields are validated. **`INT-OUTBOX-CONTRACT` UNCHANGED, checked**: chaining exists only for local jobs, which carried these fields before this change, and a child still does not inherit them. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: the precedence `job.data > overlay > env` is what a forge job's new fields enter. **Measured at pi 0.99.1**: the pattern takes an optional leading `~` or `@` (`^(?=.{1,64}$)[~@]?[a-z0-9][a-z0-9._:/@_-]*$`), because without the `@` the 18 builtin `cloudflare-workers-ai` ids (`@cf/...`) could not be named; with it every builtin id passes (all 1,589 distinct ids over 1,592 catalog entries from `getAllBuiltinModels` across 42 providers, its 57 image and 12 classifier models included, 0 refused), and all 42 builtin provider ids pass the provider rule. The pattern itself is the one #533 moved into `model-ref.mjs`; the trigger rule imports that constant rather than restating it, and a test pins that the loader and the ledger agree on every id shape. **Code evidence**: worker/src/model-ref.mjs -> validateModelRef, MODEL_REF_PATTERN, PROVIDER_REF_PATTERN; worker/src/triggers.mjs -> validateRunModel and the five normalizers; receiver/src/config.mjs; receiver/src/filter.mjs; receiver/src/filter-gitlab.mjs; receiver/src/filter-forgejo.mjs; receiver/src/filter-azure.mjs; admin/src/index.ts -> dispatch_trigger_add, dispatch_trigger_edit, buildTriggerEntry; admin/src/read-model.mjs -> normalizeTriggerForDisplay; admin/src/dashboard.ts; receiver/test/trigger-forwarding.test.mjs; worker/test/trigger-forwarding.test.mjs; worker/test/model-ref.test.mjs. |
+| 2026-10-02 | Issue #501, part 2 (the runner's cost guard). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the `cost-cap` row is enforced, no longer reserved: the cost guard refuses a call before it is sent when `spent + in-flight bounds + bound` would pass `PI_MAX_COST_MICROS`, or when the call cannot be bounded (an api outside `PRICED_APIS`, `generateImages`, `streamDeferred`, a classifier with an output rate), and, fail closed, stops a job whose compat half was found displaced (PR #533's review: a legacy call may have passed the cap unseen, and judging cost in the runtime half alone cannot see a legacy call); the refusal logs `cost_refused` with numbers only. The `cost-cap-unenforceable` row now refuses only a cap the runner cannot enforce (a list still refuses until its guard lands). The six cost counters (`costCapMicros`, `costRefused`, `boundExceeded`, `longContext`, `costUnjudged`, the compat entries found displaced under the cap, and `costUnanswered`, the failed calls that never started, both added to the worker's TOKEN_KEYS before `modelRefused`) are written only when a cap is set, so every other exit line is byte-identical except that a rejected call now counts in `unpriced`; `modelRefused` stays reserved. A virtual model is skipped only on `streamSimple`; on any other method it is judged, and refused as unboundable. A samplingParams key outside the price-neutral safe list is unboundable on the three apis that merge them last, and a failed call that STARTED (any content block or output token) is charged at least its bound, and one that never started is charged its metered cost and counted as `costUnanswered`, on every api alike. **`INT-RUN-HISTORY-FILE-CONTRACT`**: `cost-cap` is live on an image that declares `costCap`; only `model-not-allowed` stays reserved. **`unpriced` WIDENS**: a call whose result rejected now counts as unpriced, on its own ledger row, because its cost is unknown; it was counted in `calls` and nowhere else. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the field semantics of the six cost counters, stated as the present contract a later dollar settlement reads, absence meaning no cap, and the `unpriced` change. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `costCap` joins the capability tokens, with a run as its evidence (a job with a fake key and no network under a cap of 0 must exit `2` / `cost-cap` with `costRefused: 1`), the CI workflow binds the token to this repo's image, and a runner from such an image enforces `PI_MAX_COST_MICROS`; the worker still writes neither variable and has no gate row for the token yet. **`INT-SDK-SESSION-OPTIONS`**: the snippet shows the guard and the stop handler. **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: no trigger field yet. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the guard runs inside the container before each call and moves no worker gate. **Code evidence**: image/runner/src/usage-meter.mjs -> callCostBound, PRICED_APIS, createCostGuard, judge, installProcessUsageMeter (arm); image/runner/run-job.mjs; image/Dockerfile; image/verify-image.sh; .github/workflows/pi-upgrade-check.yml. |

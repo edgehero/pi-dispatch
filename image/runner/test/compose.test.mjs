@@ -249,7 +249,16 @@ test("run-job refuses an unenforceable cost cap or model list after the meter in
 	const check = src.indexOf("assertPoliciesEnforceable({");
 	const session = src.indexOf("await createAgentSession(");
 	assert.ok(install > 0 && check > install && session > check, "install, then the policy check, then the session");
-	assert.match(src, /meterOk: usageMeter\.ok,/, "the fallback bus meter (ok:false) can only see a call after it was paid for");
+	// The verdict comes from policyEnforcement, whose ok:false and brake rules usage-meter.test.mjs drives.
+	assert.match(src, /assertPoliciesEnforceable\(\{\s*maxCostMicros: cfg\.maxCostMicros,\s*allowedModels: cfg\.allowedModels,\s*\.\.\.policyEnforcement\(usageMeter\),\s*\}\);/, "the fallback bus meter (ok:false) can only see a call after it was paid for");
+	// Issue #501, PR 3 (PR #533's review): the stop handler is the tested one, so a cost stop cannot log token_budget_exceeded.
+	assert.match(src, /onStop: meterStopHandler\(\{ onTokenAbort, abort: \(\) => void session\?\.abort\(\) \}\),/, "the meter's stop goes through meterStopHandler");
+	assert.doesNotMatch(src, /reason === TOKEN_BUDGET/, "no second, untested copy of the token-only rule");
+	// The cost guard: built only for a cap, handed to the install, and its fields spread only when it exists.
+	assert.match(src, /const costGuard = cfg\.maxCostMicros === null \? null : createCostGuard\(\{ capMicros: cfg\.maxCostMicros, log \}\);/);
+	assert.ok(src.indexOf("const costGuard =") < install, "the guard exists before the install that hands it to both halves");
+	assert.match(src, /installProcessUsageMeter\(\{ ModelRuntime, runtime: modelRuntime, meter, log, guard: costGuard \}\)/);
+	assert.match(src, /\{ \.\.\.meter\.snapshot\(\), \.\.\.\(costGuard \? costGuard\.snapshot\(\) : \{\}\) \}/, "the cost fields ride the exit line only when a cap is set");
 	assert.match(src, /maxCostMicros: cfg\.maxCostMicros,\s*allowedModels: cfg\.allowedModels,\s*rootSessionId/, "the meter carries both policies, so the brake is armed for them");
 	assert.match(src, /meterStop: usageMeter\.ok \? meter\.state\.stopReason : null,/, "the exit decision reads the meter's stop by reason");
 	assert.match(src, /tokenAborted: usageMeter\.ok \? false : tokenBudget\.state\.aborted,/, "the flag is the fallback meter's alone");

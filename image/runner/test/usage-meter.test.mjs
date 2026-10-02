@@ -215,14 +215,21 @@ test("unresolved rises on observe and falls on settle; a hung stream stays count
 	assert.equal(meter.state.calls, 2);
 });
 
-test("a rejected result() is swallowed and still clears unresolved", async () => {
+test("a rejected result() is swallowed, clears unresolved, and counts as unpriced on its own row", async () => {
 	const meter = createUsageMeter({ maxTokens: null });
 	const stream = new FakeStream();
-	meter.observe(stream);
+	meter.observe(stream, { provider: MODEL.provider, modelId: MODEL.id });
 	stream.fail(new Error("transport died"));
 	await flush();
 	assert.equal(meter.state.unresolved, 0);
 	assert.equal(meter.state.total, 0);
+	// Issue #501: what a rejected call spent is unknown, and a dollar settlement must not read unknown as zero.
+	assert.equal(meter.state.unpriced, 1);
+	assert.deepEqual(meter.usageSnapshot().models.map((row) => [row.model, row.calls, row.unpriced]), [[MODEL.id, 1, 1]]);
+	const promised = Promise.reject(new Error("no"));
+	meter.observeResult(promised, {});
+	await flush();
+	assert.equal(meter.state.unpriced, 2, "the result methods too");
 });
 
 test("observing the same stream twice counts it once", async () => {

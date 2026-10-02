@@ -422,7 +422,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   refusal of the credential or of access (an authentication or permission error, whatever its HTTP
   status), and its sentence tells the requester the operator must check the provider key and what it is
   allowed to use; and, since issues #501/#502, the four policy stops, each with its own fixed sentence:
-  `cost-cap` ("Stopped: the next AI call could have taken this run past its cost limit, so it was not made. Partial work may exist. Not retried.") and `model-not-allowed` ("Stopped: the run tried to call an AI model this trigger does not allow, so the call was not made. Partial work may exist. Not retried."), both reserved and enforced by later changes, the runner's pre-call guard having stopped a call; and `cost-cap-unenforceable` ("Stopped: this run has a cost limit, and the job image could not enforce it before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.") and `model-policy-unenforceable` ("Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried."), live now, the runner having refused before any call a cost cap or a model list it cannot enforce before a call), and the final infrastructure failure.
+  `cost-cap` ("Stopped: the next AI call could have taken this run past its cost limit, so it was not made. Partial work may exist. Not retried.") and `model-not-allowed` ("Stopped: the run tried to call an AI model this trigger does not allow, so the call was not made. Partial work may exist. Not retried."), `cost-cap` live on an image that declares `costCap` (its runner's pre-call cost guard stopped a call) and `model-not-allowed` still reserved for the model guard; and `cost-cap-unenforceable` ("Stopped: this run has a cost limit, and the job image could not enforce it before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.") and `model-policy-unenforceable` ("Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried."), live now, the runner having refused before any call a cost cap or a model list it cannot enforce before a call), and the final infrastructure failure.
   Once-ness for the infra class is BullMQ's own terminal decision
   (`finishedOn`, set only on the non-retry branch): a retried attempt comments nothing, so a flaky
   daemon cannot post three comments for one recovery, and the seam that reads it also covers the
@@ -906,8 +906,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   stream, or an aborted classify/images result) and the root session is
   aborted — exiting policy (`2`) with `reason: "token_budget"`; and (c) provide an **optional daily token
   cap** (`dailyTokenCap` / `PI_DAILY_TOKEN_CAP`) that refuses a new job pre-container once the day's recorded
-  spend has reached it. Both caps are unset-means-disabled and resolve `job.data > overlay > env` per job;
-  accounting is always on.
+  spend has reached it; and (d) enforce an **optional per-job cost cap** (`PI_MAX_COST_MICROS`, integer
+  micro-dollars, issue #501) **before every provider call**: the runner bounds each call's worst-case cost from
+  the model's catalog rates (`DES-DOLLAR-RESERVE-AND-SETTLE`) and refuses it, answering with the meter's hard
+  stop and aborting the root session, when what settled calls cost plus the bounds of calls still in flight plus
+  this call's bound would pass the cap, or when the call cannot be bounded; it exits policy (`2`) with
+  `reason: "cost-cap"`. A runner that cannot enforce a cap before a call refuses the job before any call
+  (`cost-cap-unenforceable`). Every cap is unset-means-disabled and the token caps resolve
+  `job.data > overlay > env` per job; accounting is always on.
 - **Why**: pi bounds neither tokens nor money; before this, spend was visible only on the provider bill.
   Accounting is the high-value piece — per-job token/cost in the run history is what lets an operator tune the
   **proactive** levers (`maxTurns`, the job-count caps). The two token caps are **backstops**, and both are
@@ -921,6 +927,18 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   relaxation of it. Under concurrency the daily counter is best-effort — N in-flight jobs each pass the check
   before any records, so the day can overshoot by up to N per-job budgets — which is acceptable for a lagging
   backstop and is not the job-count cap's atomic guarantee.
+  **Why the cost cap is the opposite shape (d).** A token cap may lag by one call because one call's tokens are
+  bounded by the cap's own scale; one call's DOLLARS are not. At the 0.99.1 pin one call on the default model
+  can cost several dollars (about a million input tokens and 64,000 output tokens, priced at the cache-write
+  rate), so a dollar cap checked after a call is a soft limit that one call can overshoot by more than the cap.
+  So (d) is checked before the call, against a bound that is an upper bound by construction: the request's
+  UTF-8 bytes plus 8,192 as input tokens (one token is at least one byte, checked by use through the
+  `boundExceeded` counter), the call's output cap, the dearest table that could price it (tiers, fallback
+  models, a 1h cache write, a generic Anthropic long-context tier) and the worst service tier. Calls the bound
+  cannot cover (`pi-messages` and other self-priced apis, image generation, deferred fetches, a classifier
+  with an output rate) are refused under a cap rather than guessed. With no cap set no guard is installed and
+  no cost counters are emitted; the one change such a job can see is that a call whose result rejected now
+  counts as unpriced.
   **Why the accounting is process-wide, and not per-session.**
   *Negative fact — this scope exists because of an upstream absence.* A session's event bus is **per
   instance**: `AgentSession._eventListeners` is an array on the instance and `Agent.listeners` a `Set` on
@@ -957,7 +975,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 - **Traces to**: `OQ-010`, `OQ-011`, `REQ-RUNNER-TURN-BUDGET`, `REQ-UPSTREAM-CONTRACT-TESTS`,
   `CONST-BUDGET-BEFORE-TOKENS`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-RUN-HISTORY-FILE-CONTRACT`,
   `INT-CONFIG-OVERLAY-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-SDK-SESSION-OPTIONS`,
-  `REQ-SPEND-CAPS-MULTI-WINDOW`, `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`
+  `REQ-SPEND-CAPS-MULTI-WINDOW`, `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`, `DES-DOLLAR-RESERVE-AND-SETTLE`
 - **Acceptance**: Given any completed job, when it ends, then its run record carries a `tokens`
   `{ input, output, total, cost }` object and the admin run views show its total and cost; given `maxTokens`
   set and a job whose cumulative usage exceeds it, when the budget is hit, then the runner aborts, exits `2`
@@ -976,6 +994,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   log, not on the meter's totals) and the run exits `2` with `reason: "token_budget"`; given the meter
   **could not install**, then the `subscribe()` fallback is attached instead, the exit line reports
   `metered: false`, and the exit codes and record shape are unchanged.
+  **Cost-cap clauses (d).** Given a cost cap and an offline provider whose calls settle at a fixed cost, when
+  the next call's bound would take the settled total past the cap, then that call never reaches the provider,
+  the run exits `2` with `reason: "cost-cap"` and `costRefused: 1`, and the job's metered cost is at or under
+  the cap; given two sessions calling at once, then each is judged against the other's bound while it is in
+  flight; given `session.compact()` as the call that would pass the cap, then it is refused the same way; given
+  a cap of `0`, then a zero-rated model runs and a priced one is refused before its first call; given no cap,
+  then no guard is installed and the exit line carries none of the cost counters.
 
 ## REQ-COST-ANALYTICS
 
@@ -2668,6 +2693,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-02 | Issue #501, part 2 (the runner's cost guard). **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**: a new (d), the optional per-job cost cap `PI_MAX_COST_MICROS`, enforced by the runner before every provider call against a worst-case bound (`DES-DOLLAR-RESERVE-AND-SETTLE`), exit `2` / `cost-cap`, and refused before any call by a runner that cannot enforce it; the Why says why a dollar cap cannot lag the way a token cap does, and the Acceptance gains the offline sequential, parallel, compaction, cap-of-0 and no-cap clauses. (a), (b) and (c) are UNCHANGED, checked, except that a call whose result rejected now counts as unpriced. **`REQ-COST-ANALYTICS` UNCHANGED, checked**: its floor rule (d) already renders any run with `unpriced > 0` as a floor, so the widened `unpriced` only marks more runs as floors, the honest direction, and no label or fold changes. **`REQ-JOB-STATUS-COMMENTS` AMENDED**, the who-authors clause: `cost-cap` is live on an image that declares `costCap` and only `model-not-allowed` stays reserved; the sentences themselves are unchanged. **Code evidence**: image/runner/src/usage-meter.mjs -> callCostBound, createCostGuard; image/runner/run-job.mjs. |
 | 2026-10-02 | Issues #501 and #502, the shared seams for policy stops. **`REQ-JOB-STATUS-COMMENTS` AMENDED**, the who-authors clause: the worker's fixed terminal sentences gain the four policy stops, `cost-cap` and `model-not-allowed` (reserved, enforced by later changes) and `cost-cap-unenforceable` and `model-policy-unenforceable` (live: a job image that cannot enforce a cost cap or a model list before a call refuses before any call). Each is fixed and path-free and names neither the amount nor the model. The Statement and the Acceptance are UNCHANGED, checked: exactly one completion or failure comment per job, still. **Code evidence**: worker/src/processor.mjs -> TERMINAL_COMMENTS; worker/src/run-history.mjs -> RUNNER_POLICY_REASONS. |
 | 2026-10-02 | Issue #524. **`REQ-AI-TRIGGERED-RUNS` AMENDED**, the Acceptance: `dispatch_run` and `/dispatch run` refuse a folder that is not a repository's root with a commit, with the CLI's own sentence, and say when the one-minute dedup swallowed a run instead of reporting a new job. The Statement, Scope and gate are UNCHANGED, checked: both checks are free and run before the enqueue, and neither path gains a force option. |
 | 2026-10-02 | Issue #503, part 5 of the build list (keyless providers pass the credential gate). **`REQ-EGRESS-ALLOWLIST` AMENDED**, the Acceptance: a provider pi does not know, defined in the overlay `models.json` with `"apiKey": "$PI_DISPATCH_KEYLESS"` and every one of its models on a declared `keyless` endpoint, passes the free credential gate with no credential and gets `PI_DISPATCH_KEYLESS=keyless`; every other case is refused or keyed as before, and the refusal names both ways in; with `PI_EGRESS=0` the argv gains nothing. Every model and not some, because the agent can switch to any model of its provider. The exact `apiKey` is required because any other value is refused for what it is (a literal key in a mounted file, an unset `$VAR` that fails after the container started, or a `!cmd` shell), and (PR #520 round 1) a keyless provider carries no other credential of any kind (no `headers`, `oauth` or baseUrl userinfo) and no model entry without a string `id`; a transient overlay read at pickup is retried as infra, never refused. A provider pi knows stays keyed even with its baseUrl on a keyless endpoint, a named residual. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, the doctor credential clause: a keyless provider is ✓ exactly when the worker's verdict passes it, from the same function on the same declaration, and the ✗ for an unknown provider names the keyless way in. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the keyless branch is a pure read of the pickup's snapshot inside the same free gate, after the image and job-user preflights and before the egress probe, the mint, the clone, the token-cap read and both reserves, so a refused keyless provider spends nothing (pinned in worker/test/scope-mutex.test.mjs). **`REQ-SPEND-CAPS-MULTI-WINDOW` UNCHANGED, checked**: the keyless branch reserves as any job does; part 7 (no dollar reservation for a zero-rated local job) moved to #501. **Code evidence**: worker/src/model-endpoints.mjs -> keylessVerdict, KEYLESS_HOW; worker/src/env-allowlist.mjs -> resolveProviderCredential, keylessEndpointsFor; worker/src/processor.mjs; worker/src/run-container.mjs; worker/src/start.mjs; worker/src/doctor.mjs -> noKeyVariableCheck; worker/test/env-allowlist.test.mjs; worker/test/scope-mutex.test.mjs; worker/test/doctor.test.mjs; worker/test/run-container.test.mjs. |
