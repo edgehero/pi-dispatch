@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { GIT_READ_FLAGS } from "../src/git-hardening.mjs";
 import { PI_LIMITS } from "../src/materialize.mjs";
-import { prepareLocalWorkspace } from "../src/prepare-local.mjs";
+import { LOCAL_FOLDER_NO_COMMIT, LOCAL_FOLDER_NOT_A_REPO, LOCAL_FOLDER_UNREADABLE_REPO, prepareLocalWorkspace } from "../src/prepare-local.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 function git(dir, args) {
@@ -137,12 +137,129 @@ test("a cron-shaped event lands as the full frozen cron shape with nulls preserv
 	);
 });
 
-test("a non-git folder is a clear config error, not a crash", async () => {
+test("a non-git folder is refused by its own reason, RETURNED, before anything is written (#524)", async () => {
+	// It was a config THROW, which the processor can only report as `config-refused` ("this deployment is
+	// misconfigured"), about a folder `git init` fixes. Returned, it is a prepare-stage policy refusal like sha-gone.
 	const plain = tempDir("pi-plain-");
-	await assert.rejects(
-		() => prepareLocalWorkspace({ folder: plain, task: "x", jobDir: tempDir("j-") }),
-		(e) => e.piDispatchConfig === true && /not a git repository/.test(e.message),
-	);
+	const jobDir = join(tempDir("j-"), "job");
+	const result = await prepareLocalWorkspace({ folder: plain, task: "x", jobDir, git: async () => assert.fail("git ran on a folder with no .git") });
+	assert.deepEqual(result, { outcome: "policy", reason: LOCAL_FOLDER_NOT_A_REPO });
+	assert.equal(LOCAL_FOLDER_NOT_A_REPO, "local-folder-not-a-repo");
+	assert.equal(existsSync(jobDir), false, "nothing is written for a refused folder");
+});
+
+test("a repository with no commit is refused by its own reason, RETURNED, writing nothing (#524)", async () => {
+	// It used to escape `rev-parse HEAD` as an untagged throw: a failed job with no reason, behind the hint `git init`.
+	const empty = tempDir("pi-empty-");
+	git(empty, ["init", "-q"]);
+	const jobDir = join(tempDir("j-"), "job");
+	const result = await prepareLocalWorkspace({ folder: empty, task: "x", jobDir });
+	assert.deepEqual(result, { outcome: "policy", reason: LOCAL_FOLDER_NO_COMMIT });
+	assert.equal(LOCAL_FOLDER_NO_COMMIT, "local-folder-no-commit");
+	assert.equal(existsSync(jobDir), false, "nothing is written for a refused folder");
+});
+
+test("git's exit codes decide only with the follow-ups: unborn is no-commit, any other 1 or 128 is unreadable-repo, anything else throws (#524)", async () => {
+	const fs = { ...realFs, statSync: () => ({ isDirectory: () => true }) };
+	const code = (c) => Object.assign(new Error(`git failed: ${c}`), { code: c });
+	// A scripted git: the answer per subcommand, so each branch of the decision is driven on its own.
+	const scripted = (answers) => {
+		const said = [];
+		const git = async (_d, args) => {
+			said.push(args);
+			const key = args.join(" ");
+			if (!(key in answers) || answers[key] === 0) return "deadbeef\n";
+			throw code(answers[key]);
+		};
+		return { git, said };
+	};
+	const run = (git) => prepareLocalWorkspace({ folder: "/mnt/project", task: "x", jobDir: "/tmp/x", fs, git });
+	const unborn = scripted({ "rev-parse --verify --quiet HEAD^{commit}": 1, "rev-parse --verify --quiet HEAD": 1, "symbolic-ref -q HEAD": 0 });
+	assert.deepEqual(await run(unborn.git), { outcome: "policy", reason: LOCAL_FOLDER_NO_COMMIT });
+	assert.deepEqual(unborn.said, [["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], ["rev-parse", "--verify", "--quiet", "HEAD"], ["symbolic-ref", "-q", "HEAD"]]);
+	// HEAD names an object that is not a reachable commit: not "commit once".
+	assert.deepEqual(await run(scripted({ "rev-parse --verify --quiet HEAD^{commit}": 1, "rev-parse --verify --quiet HEAD": 0 }).git), { outcome: "policy", reason: LOCAL_FOLDER_UNREADABLE_REPO });
+	// A branch ref git cannot read: symbolic-ref fails (measured: 128 for a garbage ref and an EACCES refs/heads).
+	assert.deepEqual(await run(scripted({ "rev-parse --verify --quiet HEAD^{commit}": 1, "rev-parse --verify --quiet HEAD": 1, "symbolic-ref -q HEAD": 128 }).git), { outcome: "policy", reason: LOCAL_FOLDER_UNREADABLE_REPO });
+	assert.deepEqual(await run(scripted({ "rev-parse --verify --quiet HEAD^{commit}": 128 }).git), { outcome: "policy", reason: LOCAL_FOLDER_UNREADABLE_REPO });
+	for (const c of [129, "ENOENT", undefined]) {
+		await assert.rejects(() => run(scripted({ "rev-parse --verify --quiet HEAD^{commit}": c }).git), /git failed/, String(c));
+	}
+});
+
+function committedRepo(prefix) {
+	const dir = tempDir(prefix);
+	git(dir, ["init", "-q"]);
+	git(dir, ["commit", "-q", "--allow-empty", "-m", "x"]);
+	return dir;
+}
+const asRoot = process.getuid?.() === 0 ? "root ignores file modes" : false;
+
+test("a garbage branch ref and a missing commit object are unreadable-repo, never no-commit (PR #528 review, round 2)", async () => {
+	for (const [label, content] of [["garbage", "zzzz-not-a-sha\n"], ["missing object", `${"1".repeat(40)}\n`]]) {
+		const folder = committedRepo("pi-badref-");
+		const branch = git(folder, ["symbolic-ref", "HEAD"]).trim();
+		realFs.writeFileSync(join(folder, ".git", branch), content);
+		const result = await prepareLocalWorkspace({ folder, task: "x", jobDir: join(tempDir("j-"), "job") });
+		assert.deepEqual(result, { outcome: "policy", reason: "local-folder-unreadable-repo" }, label);
+	}
+});
+
+test("an empty .git directory is unreadable-repo: git's 128 and nothing transient behind it (PR #528 review, round 2)", async () => {
+	const folder = tempDir("pi-emptygit-");
+	realFs.mkdirSync(join(folder, ".git"));
+	assert.deepEqual(await prepareLocalWorkspace({ folder, task: "x", jobDir: join(tempDir("j-"), "job") }), { outcome: "policy", reason: "local-folder-unreadable-repo" });
+});
+
+test("an unreadable .git/HEAD is retried, never refused for good: git says 128 for it as for an empty .git (PR #528 review, round 2)", { skip: asRoot }, async () => {
+	const folder = committedRepo("pi-eacces-");
+	const head = join(folder, ".git", "HEAD");
+	realFs.chmodSync(head, 0o000);
+	try {
+		await assert.rejects(
+			() => prepareLocalWorkspace({ folder, task: "x", jobDir: join(tempDir("j-"), "job") }),
+			(e) => e.piDispatchRetry === true && /EACCES/.test(e.message) && !e.message.includes(folder),
+		);
+	} finally {
+		realFs.chmodSync(head, 0o644);
+	}
+});
+
+test("an unreadable refs/heads is retried too: git says exit 1 for it as for an unborn HEAD (PR #528 review, round 2)", { skip: asRoot }, async () => {
+	const folder = committedRepo("pi-eaccesref-");
+	const heads = join(folder, ".git", "refs", "heads");
+	realFs.chmodSync(heads, 0o000);
+	try {
+		await assert.rejects(() => prepareLocalWorkspace({ folder, task: "x", jobDir: join(tempDir("j-"), "job") }), (e) => e.piDispatchRetry === true);
+	} finally {
+		realFs.chmodSync(heads, 0o755);
+	}
+});
+
+test("a .git git refuses (exit 128) is refused as local-folder-unreadable-repo, writing nothing (PR #528 review)", async () => {
+	// A worktree whose gitdir is gone: `.git` is there, so the not-a-repo check passes, and git exits 128 on every
+	// retry. It used to throw untagged, a failed job with no reason. Ownership (`safe.directory`) is the other
+	// common 128; it is not built here because GIT_TEST_ASSUME_DIFFERENT_OWNER did not make git refuse on CI's runner.
+	const folder = tempDir("pi-orphan-");
+	realFs.writeFileSync(join(folder, ".git"), `gitdir: ${join(folder, "gone")}\n`);
+	const jobDir = join(tempDir("j-"), "job");
+	const result = await prepareLocalWorkspace({ folder, task: "x", jobDir });
+	assert.deepEqual(result, { outcome: "policy", reason: "local-folder-unreadable-repo" });
+	assert.equal(existsSync(jobDir), false, "nothing is written for a refused folder");
+});
+
+test("every determinate absence of .git is the not-a-repo refusal; the folder's own absence stays a config error (#524)", async () => {
+	for (const code of ["ENOENT", "ENOTDIR", "ELOOP", "ENAMETOOLONG"]) {
+		const fs = {
+			...realFs,
+			statSync: (p) => {
+				if (String(p).endsWith(".git")) throw Object.assign(new Error(`${code}: simulated`), { code });
+				return { isDirectory: () => true };
+			},
+		};
+		const result = await prepareLocalWorkspace({ folder: "/mnt/project", task: "x", jobDir: "/tmp/x", fs });
+		assert.deepEqual(result, { outcome: "policy", reason: "local-folder-not-a-repo" }, code);
+	}
 });
 
 test("a missing folder is a clear config error", async () => {

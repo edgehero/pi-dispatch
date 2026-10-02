@@ -25,7 +25,8 @@ npx @edgehero/pi-dispatch run ./my-project --task "add type hints" --flow tidy
 ```
 
 A local job edits your folder **in place**, and there is no undo, so commit first. The worker refuses a
-folder with uncommitted changes unless you pass `--force`.
+folder with uncommitted changes unless you pass `--force`. The folder must be the root of a git repository
+with at least one commit, and `run` refuses any other folder before it queues anything.
 
 ## Commands
 

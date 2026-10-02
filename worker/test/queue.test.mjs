@@ -111,6 +111,78 @@ test("enqueueLocalJob uses an explicit jobId override instead of the computed lo
 	assert.notEqual(captured.opts.jobId, localJobId({ folder: "/proj", flow: "tidy", task: "t", minute: "2026-07-16T12:00" }));
 });
 
+// Issue #524: whether the one-minute dedup swallowed this enqueue. The fake keeps BullMQ's shape: the first add of an
+// id is stored, a later one is dropped, and every add answers a Job built locally with the SAME timestamp, which is
+// what calls inside one millisecond get (PR #528's review measured it). Only the stored nonce can tell them apart.
+function dedupFakeQueue({ seeded, state = "completed", getJob, getState } = {}) {
+	const store = new Map(seeded ? [[seeded.id, { data: { enqueueNonce: "someone-else" }, timestamp: seeded.timestamp }]] : []);
+	return {
+		add: async (_name, data, opts) => {
+			if (!store.has(opts.jobId)) store.set(opts.jobId, { data, timestamp: 1000 });
+			return { id: opts.jobId, timestamp: 1000 };
+		},
+		getJob:
+			getJob ??
+			(async (id) => {
+				const j = store.get(id);
+				return j && { id, data: j.data, timestamp: j.timestamp, getState: getState ?? (async () => state) };
+			}),
+	};
+}
+
+test("enqueueLocalJobReporting: a fresh add reads as created, a swallowed one names the first job's time and state (#524)", async () => {
+	const { enqueueLocalJobReporting } = await import("../src/queue.mjs");
+	const args = { folder: "/proj", flow: "tidy", task: "t", now: new Date("2026-07-16T12:00:00Z") };
+	const id = localJobId({ folder: "/proj", flow: "tidy", task: "t", minute: "2026-07-16T12:00" });
+	assert.deepEqual(await enqueueLocalJobReporting(dedupFakeQueue(), args), { id, existing: null });
+	assert.deepEqual(await enqueueLocalJobReporting(dedupFakeQueue({ seeded: { id, timestamp: 900 } }), args), { id, existing: { queuedAt: 900, state: "completed" } });
+});
+
+test("enqueueLocalJobReporting: two adds sharing one timestamp are told apart by the nonce, sequential or concurrent (PR #528 review)", async () => {
+	const { enqueueLocalJobReporting } = await import("../src/queue.mjs");
+	const args = { folder: "/proj", flow: "tidy", task: "t", now: new Date("2026-07-16T12:00:00Z") };
+	const q = dedupFakeQueue();
+	const first = await enqueueLocalJobReporting(q, args);
+	const second = await enqueueLocalJobReporting(q, args);
+	assert.equal(first.existing, null);
+	assert.deepEqual(second.existing, { queuedAt: 1000, state: "completed" }, "same timestamp, still a duplicate");
+	const q2 = dedupFakeQueue();
+	const all = await Promise.all(Array.from({ length: 5 }, () => enqueueLocalJobReporting(q2, args)));
+	assert.equal(all.filter((r) => r.existing === null).length, 1, "exactly one of the concurrent calls made the job");
+});
+
+test("enqueueLocalJobReporting: an unreadable state is null (\"already queued or done\"), and a failed read is undefined, never a guess (#524)", async () => {
+	const { enqueueLocalJobReporting } = await import("../src/queue.mjs");
+	const args = { folder: "/proj", task: "t", now: new Date("2026-07-16T12:00:00Z") };
+	const id = localJobId({ folder: "/proj", flow: undefined, task: "t", minute: "2026-07-16T12:00" });
+	const thrown = await enqueueLocalJobReporting(dedupFakeQueue({ seeded: { id, timestamp: 900 }, getState: async () => { throw new Error("gone"); } }), args);
+	assert.deepEqual(thrown.existing, { queuedAt: 900, state: null });
+	const unknown = await enqueueLocalJobReporting(dedupFakeQueue({ seeded: { id, timestamp: 900 }, state: "unknown" }), args);
+	assert.deepEqual(unknown.existing, { queuedAt: 900, state: null });
+	const vanished = await enqueueLocalJobReporting(dedupFakeQueue({ getJob: async () => undefined }), args);
+	assert.equal(vanished.existing, null, "a job removed between the add and the read reads as the add answered: created");
+	const unreadable = await enqueueLocalJobReporting(dedupFakeQueue({ getJob: async () => { throw new Error("ECONNRESET"); } }), args);
+	assert.equal(unreadable.existing, undefined, "a failed read says nothing either way");
+});
+
+test("only enqueueLocalJobReporting marks job data; a plain enqueue's data is unchanged (#524)", async () => {
+	const { enqueueLocalJob, enqueueLocalJobReporting } = await import("../src/queue.mjs");
+	const args = { folder: "/proj", flow: "tidy", task: "t", provider: "anthropic", model: "m", maxTurns: 5, now: new Date("2026-07-16T12:00:00Z") };
+	const seen = [];
+	const q = { add: async (_n, data, opts) => (seen.push(data), { id: opts.jobId }), getJob: async () => undefined };
+	await enqueueLocalJob(q, args);
+	await enqueueLocalJobReporting(q, args);
+	assert.deepEqual(Object.keys(seen[0]), NON_CHAINED_KEYS);
+	assert.deepEqual(Object.keys(seen[1]), [...NON_CHAINED_KEYS, "enqueueNonce"]);
+	assert.match(seen[1].enqueueNonce, /^[0-9a-f-]{36}$/);
+});
+
+test("enqueueLocalJob still answers a bare id and never reads the job back (the outbox and the admin pay one round trip)", async () => {
+	const { enqueueLocalJob } = await import("../src/queue.mjs");
+	const q = { add: async (_n, _d, opts) => ({ id: opts.jobId, timestamp: 1 }), getJob: async () => assert.fail("enqueueLocalJob read the job back") };
+	assert.equal(typeof (await enqueueLocalJob(q, { folder: "/proj", task: "t", now: new Date("2026-07-16T12:00:00Z") })), "string");
+});
+
 // The enqueue contract, verified without a live Valkey: a fake queue captures the (name, data, opts)
 // that enqueueGitHubJob hands to queue.add. This asserts the money-path invariants -- exact-per-GUID
 // jobId, the additive semantic dedup window, 31d retention, and the absence of a `sha` field.
@@ -417,6 +489,31 @@ test("enqueue + dedup against a real Valkey", { skip }, async () => {
 		const job = await q.getJob(id1);
 		assert.equal(job.data.kind, "local");
 		assert.equal(job.data.folder, "/proj");
+	} finally {
+		await q.obliterate({ force: true }).catch(() => {});
+		await q.close();
+	}
+});
+
+test("enqueueLocalJobReporting against a real Valkey: the second identical enqueue in a minute is reported, with the first job's state (#524)", { skip }, async () => {
+	const { parseConnection } = await import("../src/connection.mjs");
+	const { makeQueue, enqueueLocalJobReporting } = await import("../src/queue.mjs");
+	const q = makeQueue(parseConnection(url), { name: `qtest-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` });
+	try {
+		const args = { folder: "/proj", flow: "tidy", task: "t", now: new Date("2026-07-16T12:00:00Z") };
+		const first = await enqueueLocalJobReporting(q, args);
+		assert.equal(first.existing, null, "the first enqueue made the job");
+		const stored = await q.getJob(first.id);
+		const second = await enqueueLocalJobReporting(q, args);
+		assert.equal(second.id, first.id);
+		assert.deepEqual(second.existing, { queuedAt: stored.timestamp, state: "waiting" });
+		assert.equal((await q.getJobCounts("waiting")).waiting, 1, "the dedup itself is unchanged");
+		// PR #528's review: calls in one millisecond. Exactly one of any concurrent batch may say it made the job.
+		for (let round = 0; round < 5; round++) {
+			const batch = { ...args, task: `parallel ${round}` };
+			const all = await Promise.all(Array.from({ length: 10 }, () => enqueueLocalJobReporting(q, batch)));
+			assert.equal(all.filter((r) => r.existing === null).length, 1, `round ${round}`);
+		}
 	} finally {
 		await q.obliterate({ force: true }).catch(() => {});
 		await q.close();

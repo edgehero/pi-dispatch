@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Queue } from "bullmq";
 import { assertJudgedConnection, onValkeyError } from "./connection.mjs";
 import { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId } from "./job-id.mjs";
@@ -84,7 +85,73 @@ export function makeQueue(connection, { name = QUEUE } = {}) {
  * removeOnComplete keeps the dedup window ~= the retention. Unlike webhooks, local jobs are not
  * redelivered, so a modest window is enough.
  */
-export async function enqueueLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, image, backend, excludeTools, skillsDir, secrets, secretsProfile, chainDepth, parentJobId, jobId, now = new Date() }) {
+export async function enqueueLocalJob(queue, fields) {
+	return (await addLocalJob(queue, fields)).id;
+}
+
+/**
+ * `enqueueLocalJob` for a caller that must SAY whether anything was queued (issue #524): the operator's
+ * `pi-dispatch run`. Returns `{ id, existing }`, where `existing` is null for a job this call created, and
+ * `{ queuedAt, state }` when the one-minute dedup answered with a job an identical earlier call made.
+ *
+ * The CLI printed "queued <id>" either way, so a second `run` inside the same minute announced a job while
+ * running nothing, under the id of one that had already finished. The dedup itself is deliberate and stays.
+ *
+ * How a duplicate is told apart, and why not by asking first. BullMQ answers a jobId that already exists by
+ * returning the existing id inside a Job object it built LOCALLY for this call, so the return value says nothing
+ * about whether anything was stored. Each call therefore puts a random nonce of its own on the job's data
+ * (`enqueueNonce`) and reads the stored job back AFTER the add: the stored nonce is this call's exactly when
+ * this call's add is the one BullMQ kept. Exactly one of any number of concurrent identical calls finds its own.
+ * The first version compared the add's timestamp instead, and PR #528's review refuted it: calls in the same
+ * millisecond share a timestamp, and ten in parallel all reported "created" while one job existed. A lookup
+ * BEFORE the add has the same flaw by construction, since every concurrent caller can see nothing.
+ *
+ * The nonce is on job data, never inside `trigger`, which is the object copied into /job/event.json: it is the
+ * producer's bookkeeping and the agent has no use for it. Only this function adds it, so a job from the outbox
+ * collector or a cron tick keeps exactly the data it had.
+ *
+ * A separate function rather than a change to `enqueueLocalJob`'s return, because the outbox collector consumes
+ * that as a bare id and prints nothing to a person. It also keeps its one Valkey round trip: only this function
+ * pays for the read back.
+ *
+ * `state` is BullMQ's own word for where the job is (`waiting`, `active`, `completed`, `failed`, `delayed`
+ * and the rest), or null when the state could not be read; the caller then says it is already queued or
+ * done rather than inventing one. A read that fails outright returns `existing: undefined`: whether this
+ * call queued anything is then unknown, and the caller says so instead of guessing either way.
+ */
+export async function enqueueLocalJobReporting(queue, fields) {
+	const enqueueNonce = randomUUID();
+	const { id } = await addLocalJob(queue, { ...fields, enqueueNonce });
+	let stored;
+	try {
+		stored = await queue.getJob(id);
+	} catch {
+		return { id, existing: undefined };
+	}
+	// No stored job: it was removed between the add and this read (a `cancel` racing it). Nothing says it was
+	// a duplicate, so it reads as created, which is what the add itself answered.
+	if (!stored || stored.data?.enqueueNonce === enqueueNonce) return { id, existing: null };
+	let state = null;
+	try {
+		const s = await stored.getState();
+		state = typeof s === "string" && s !== "unknown" ? s : null;
+	} catch {}
+	return { id, existing: { queuedAt: Number.isFinite(stored.timestamp) ? stored.timestamp : null, state } };
+}
+
+/**
+ * The one sentence for a swallowed local enqueue (issue #524), shared by `pi-dispatch run` and the admin's
+ * `/dispatch run` so the two producers an operator types cannot drift apart. `existing` is
+ * `enqueueLocalJobReporting`'s: the time is the first job's own, in this process's local time, and a state the
+ * queue could not give is said as "already queued or done" rather than guessed.
+ */
+export function swallowedRunSentence(jobId, existing) {
+	const at = Number.isFinite(existing?.queuedAt) ? new Date(existing.queuedAt) : null;
+	const hhmm = at ? ` at ${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}` : "";
+	return `an identical run was queued${hhmm} as ${jobId} (${existing?.state ?? "already queued or done"}); nothing new was queued.`;
+}
+
+async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, image, backend, excludeTools, skillsDir, secrets, secretsProfile, chainDepth, parentJobId, jobId, enqueueNonce, now = new Date() }) {
 	const minute = now.toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM -- the dedup window
 	// A caller-supplied jobId (the outbox collector's retry-idempotent chainedJobId) wins; otherwise the
 	// minute-windowed localJobId is the dedup key. A command job (issue #189) fills the flow slot with
@@ -132,6 +199,8 @@ export async function enqueueLocalJob(queue, { folder, flow, task, command, prov
 		...(secretsProfile !== undefined && { secretsProfile }),
 		...(chainDepth !== undefined && { chainDepth }),
 		...(parentJobId !== undefined && { parentJobId }),
+		// Issue #524: `enqueueLocalJobReporting`'s own mark, so it can tell whether ITS add is the one stored.
+		...(enqueueNonce !== undefined && { enqueueNonce }),
 	};
 	await queue.add("local", data, {
 		jobId: id,
@@ -140,7 +209,7 @@ export async function enqueueLocalJob(queue, { folder, flow, task, command, prov
 		removeOnComplete: { age: 24 * 3600 },
 		removeOnFail: { age: 7 * 24 * 3600 },
 	});
-	return id;
+	return { id };
 }
 
 // Coalesces rapid re-label spam; the GUID jobId + 31d retention handle exact redelivery, so this

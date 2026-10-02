@@ -5,7 +5,7 @@ import { parseArgs } from "node:util";
 import { loadConfig } from "./config.mjs";
 import { EXIT_POLICY, installRejectionPrinter, installStdoutPipeGuard } from "./exit-code.mjs";
 import { isEntryModule } from "./entry.mjs";
-import { gitDirty } from "./git-dirty.mjs";
+import { gitDirty, localRepoProblem } from "./git-dirty.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
 
 /** How long the kill switch waits on the host registry before acting on the shared queue alone. */
@@ -57,7 +57,7 @@ with a consent per action:  pi install npm:@edgehero/pi-dispatch-admin`;
 	// injects a collector instead of reassigning `process.stdout.write`. That matters because `node --test`
 	// runs each file in a child process that serialises its own results over that same stdout, so a test
 	// holding a replacement across an `await` swallows the runner's result frames (issue #266).
-export async function main(argv = process.argv.slice(2), env = process.env, { write = (chunk) => process.stdout.write(chunk), valkeyRefusal = valkeyRefusalAtStart } = {}) {
+export async function main(argv = process.argv.slice(2), env = process.env, { write = (chunk) => process.stdout.write(chunk), valkeyRefusal = valkeyRefusalAtStart, now = () => new Date() } = {}) {
 	const cmd = argv[0];
 
 	if (cmd === "init") {
@@ -139,10 +139,16 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 			if (problem) return fail(`--image ${problem.reason} (got ${JSON.stringify(values.image)})`);
 		}
 
+		// The worker's folder rule, before anything is queued (issue #524): `.git` at the folder itself and a commit at
+		// HEAD. A folder that fails it used to be queued anyway and refused at pickup as a generic `config-refused`.
+		// Not waved away by --force: that flag accepts uncommitted work, and the worker refuses this either way.
+		const notARepo = localRepoProblem(folder);
+		if (notARepo) return fail(`${notARepo} Nothing was queued.`);
+
 		// A local job edits the folder IN PLACE with no undo (SECURITY.md). Refuse a dirty working
 		// tree unless --force, so a bad run cannot mix with uncommitted work the operator can't
-		// cleanly separate. A non-git folder is caught later by prepare (v1 requires a git repo).
-		if (existsSync(`${folder}/.git`) && !values.force) {
+		// cleanly separate.
+		if (!values.force) {
 			const dirty = gitDirty(folder);
 			if (dirty === null) return fail(`${folder} is not a usable git repository`);
 			if (dirty) return fail(`${folder} has uncommitted changes. Commit or stash them, or pass --force.`);
@@ -153,7 +159,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		// PR #475's review: VALKEY_URL as the password is read, this shell's else the deployment .env's (a disagreement
 		// named), not the shell's alone: from the folder of a Valkey on another port, `run` dialled 6379.
 		const valkeyUrl = cliValkeyUrl(env);
-		const { makeQueue, enqueueLocalJob, hostQueueName } = await import("./queue.mjs");
+		const { makeQueue, enqueueLocalJobReporting, hostQueueName, swallowedRunSentence } = await import("./queue.mjs");
 		// failFast: a one-shot enqueue must not hang forever if Valkey is down -- error clearly.
 		// Onto THIS host's queue when the deployment declares a name (issue #57). The folder was checked
 		// against this machine's filesystem a few lines up, so this machine is the only one that can run it;
@@ -167,7 +173,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		try {
 			// Absent flags stay absent (undefined) so the value resolves at job start against the
 			// settings overlay/env, not a default frozen here (INT-CONFIG-OVERLAY-CONTRACT).
-			const jobId = await enqueueLocalJob(queue, {
+			const { id: jobId, existing } = await enqueueLocalJobReporting(queue, {
 				folder,
 				task: values.task,
 				flow: values.flow,
@@ -177,8 +183,9 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 				// || not the raw value: `--image ""` must collapse to absent rather than becoming a falsy string that
 				// throws inside buildDockerRunArgs after a budget slot is reserved.
 				image: values.image || undefined,
+				now: now(),
 			});
-			write(`queued ${jobId} — folder ${folder}\nrun \`pi-dispatch worker\` to process it.\n`);
+			write(runQueuedLine({ jobId, existing, folder }, { swallowedRunSentence }));
 		} catch (error) {
 			return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${(await import("./connection.mjs")).urlShown(valkeyUrl)}: ${(await import("./valkey-auth.mjs")).valkeyDownHint(valkeyUrl)}\n  ${error.message}`);
 		} finally {
@@ -330,6 +337,23 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 		for (const q of queues) await q.close().catch(() => {});
 	}
 	return 0;
+}
+
+/**
+ * What `run` prints once the queue has answered (issue #524). Three answers, because the queue gives three.
+ *
+ * A local job's id is derived from the folder, the flow, the task and the minute (`localJobId`), so the same `run`
+ * twice inside one minute is the same id and the queue keeps the first. That dedup is deliberate (a hasty second
+ * Enter must not pay twice) and stays; what changes is that it is said. The time is the first job's own, in this
+ * terminal's local time, and the state is the queue's word for it, or "already queued or done" when it could not be
+ * read. No flag is offered to force a second job, because none exists: a later minute is a different id.
+ * The sentence itself is `queue.mjs`'s, shared with the admin's `/dispatch run`, and handed in because this module
+ * imports the queue lazily.
+ */
+export function runQueuedLine({ jobId, existing, folder }, { swallowedRunSentence }) {
+	if (existing) return `${swallowedRunSentence(jobId, existing)}\nthe same folder and task queue a new run from the next minute on.\n`;
+	const unknown = existing === undefined ? "could not check whether an identical run from this minute already held this id.\n" : "";
+	return `queued ${jobId} for folder ${folder}\n${unknown}run \`pi-dispatch worker\` to process it.\n`;
 }
 
 function fail(message) {

@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS } from "../src/backends.mjs";
 import { test } from "node:test";
 import { scopeKeyPrefix } from "../src/scoped-limits.mjs";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { InfraRetry, runJob, OBSERVATION_COMMENT, OBSERVATION_COMMENT_UNNAMED, TERMINAL_COMMENTS } from "../src/processor.mjs";
 import { buildRecord, RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
+import { makePrepareWorkspace } from "../src/prepare.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 /** A fake redis whose counter we can preset, to force over/under budget. `decrCalls` spies
  *  releaseBudget, so tests assert the slot is (or is not) given back and never double-released.
@@ -90,6 +92,53 @@ test("a prepare policy outcome (sha-gone) RETURNS before reserveBudget -- no cap
 	assert.equal(r.reason, "sha-gone");
 	assert.equal(redis.incrCalls, 0, "reserveBudget never reached on a determinate prepare policy outcome");
 	assert.ok(!calls.includes("run-container"), "a sha-gone prepare must never spend on a container");
+});
+
+// Issue #524: a local job on a folder that is not a repository, through the REAL dispatcher and local preparer. It
+// reached the config arm as a throw and was recorded as `config-refused` under "this deployment is misconfigured",
+// with its job dir left behind. Now it is its own reason, before the reserve, and the jobs dir is empty after it.
+test("a local job whose folder is not a git repository is refused as local-folder-not-a-repo, spending nothing (#524)", async () => {
+	const jobsDir = tempDir("pi-jobs-");
+	const redis = fakeRedis();
+	const { deps: d, calls } = deps({ redis, prepareWorkspace: makePrepareWorkspace({ jobsDir, jobImage: "pi-job:latest" }) });
+	const r = await runJob({ kind: "local", folder: tempDir("pi-plain-"), task: "t", provider: "anthropic", model: "m" }, d);
+	assert.equal(r.outcome, "policy");
+	assert.equal(r.reason, "local-folder-not-a-repo");
+	assert.equal(redis.incrCalls, 0, "refused before the reserve");
+	assert.ok(!calls.includes("run-container"));
+	assert.ok(!calls.some((c) => c.startsWith("comment:Refused: thi")), "not the misconfigured-deployment sentence");
+	assert.deepEqual(readdirSync(jobsDir), [], "no jobs/job-* dir remains");
+});
+
+test("a local job whose repository has no commit is refused as local-folder-no-commit, spending nothing (#524)", async () => {
+	const { execFileSync } = await import("node:child_process");
+	const jobsDir = tempDir("pi-jobs-");
+	const folder = tempDir("pi-empty-");
+	execFileSync("git", ["-C", folder, "init", "-q"]);
+	const redis = fakeRedis();
+	const { deps: d, calls } = deps({ redis, prepareWorkspace: makePrepareWorkspace({ jobsDir, jobImage: "pi-job:latest" }) });
+	const r = await runJob({ kind: "local", folder, task: "t", provider: "anthropic", model: "m" }, d);
+	assert.equal(r.outcome, "policy");
+	assert.equal(r.reason, "local-folder-no-commit");
+	assert.equal(redis.incrCalls, 0, "refused before the reserve");
+	assert.ok(!calls.includes("run-container"));
+	assert.deepEqual(readdirSync(jobsDir), [], "no jobs/job-* dir remains");
+});
+
+test("a local job whose .git git refuses (exit 128) is refused as local-folder-unreadable-repo, spending nothing (PR #528 review)", async () => {
+	const { writeFileSync } = await import("node:fs");
+	const { join } = await import("node:path");
+	const jobsDir = tempDir("pi-jobs-");
+	const folder = tempDir("pi-orphan-");
+	writeFileSync(join(folder, ".git"), `gitdir: ${join(folder, "gone")}\n`);
+	const redis = fakeRedis();
+	const { deps: d, calls } = deps({ redis, prepareWorkspace: makePrepareWorkspace({ jobsDir, jobImage: "pi-job:latest" }) });
+	const r = await runJob({ kind: "local", folder, task: "t", provider: "anthropic", model: "m" }, d);
+	assert.equal(r.outcome, "policy", "returned, so never retried");
+	assert.equal(r.reason, "local-folder-unreadable-repo");
+	assert.equal(redis.incrCalls, 0, "refused before the reserve");
+	assert.ok(!calls.includes("run-container"));
+	assert.deepEqual(readdirSync(jobsDir), [], "no jobs/job-* dir remains");
 });
 
 test("container exit 0 => success, no retry", async () => {

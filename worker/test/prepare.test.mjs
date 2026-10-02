@@ -595,3 +595,88 @@ test("the default ensureDir recreates a jobs dir removed under a running worker 
 		cleanup();
 	}
 });
+
+// Issue #524. A folder that is not a git repository was refused by a THROW from inside the preparer, after this
+// dispatcher had made the job dir, and a throw hands the processor nothing to tear down: one empty `jobs/job-*`
+// per refused job. Driven through the REAL local preparer, so the reason and the directory are both the shipped ones.
+test("a local job on a folder that is not a git repository is refused by name and leaves no job dir (#524)", async () => {
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		const folder = tempDir("pi-plain-");
+		writeFileSync(join(folder, "notes.txt"), "not a repository\n");
+		const prepareWorkspace = makePrepareWorkspace({ jobsDir, jobImage: "pi-job:latest" });
+		const refused = await prepareWorkspace({ kind: "local", folder, task: "t" }, null, { queueJobId: "local-1" });
+		assert.deepEqual(refused, { outcome: "policy", reason: "local-folder-not-a-repo" });
+		assert.deepEqual(readdirSync(jobsDir), [], "the refused job's directory was left on disk");
+	} finally {
+		cleanup();
+	}
+});
+
+test("a local job on a repository with no commit is refused by name and leaves no job dir (#524)", async () => {
+	const { execFileSync } = await import("node:child_process");
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		const folder = tempDir("pi-empty-");
+		execFileSync("git", ["-C", folder, "init", "-q"]);
+		const prepareWorkspace = makePrepareWorkspace({ jobsDir, jobImage: "pi-job:latest" });
+		const refused = await prepareWorkspace({ kind: "local", folder, task: "t" }, null, { queueJobId: "local-2" });
+		assert.deepEqual(refused, { outcome: "policy", reason: "local-folder-no-commit" });
+		assert.deepEqual(readdirSync(jobsDir), [], "the refused job's directory was left on disk");
+	} finally {
+		cleanup();
+	}
+});
+
+test("a preparer that THROWS leaves no job dir either, for every kind, and the error still escapes (#524)", async () => {
+	// The thrown half of the leak `discardOnPolicy` closes for returned refusals: a config refusal (a local folder
+	// that does not exist) and an infrastructure fault (a clone that failed) both escaped with the directory behind.
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		const configRefusal = Object.assign(new Error("local folder does not exist: /gone"), { piDispatchConfig: true });
+		const cloneFault = new Error("clone failed");
+		const prepareWorkspace = makePrepareWorkspace({
+			jobsDir,
+			jobImage: "pi-job:latest",
+			prepareLocal: async ({ jobDir }) => {
+				assert.equal(existsSync(jobDir), true);
+				throw configRefusal;
+			},
+			preparers: {
+				github: async (_job, _token, { jobDir }) => {
+					writeFileSync(join(jobDir, "partial-clone"), "x");
+					throw cloneFault;
+				},
+			},
+			forgeFor: () => ({ host: {} }),
+		});
+		await assert.rejects(() => prepareWorkspace({ kind: "local", folder: "/gone", task: "t" }, null, {}), (e) => e === configRefusal);
+		await assert.rejects(() => prepareWorkspace({ kind: "github", repo: "a/b" }, "tok", {}), (e) => e === cloneFault);
+		await assert.rejects(() => prepareWorkspace({ kind: "nope" }, "tok", {}), /unknown job kind/);
+		assert.deepEqual(readdirSync(jobsDir), [], "a thrown refusal left its job dir on disk");
+	} finally {
+		cleanup();
+	}
+});
+
+test("a job dir that cannot be removed never replaces the preparer's own error (PR #528 review)", async () => {
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		const cloneFault = new Error("clone failed");
+		const tried = [];
+		const prepareWorkspace = makePrepareWorkspace({
+			jobsDir,
+			jobImage: "pi-job:latest",
+			removeDir: (dir) => {
+				tried.push(dir);
+				throw Object.assign(new Error("EBUSY: simulated"), { code: "EBUSY" });
+			},
+			preparers: { github: async () => { throw cloneFault; } },
+			forgeFor: () => ({ host: {} }),
+		});
+		await assert.rejects(() => prepareWorkspace({ kind: "github", repo: "a/b" }, "tok", {}), (e) => e === cloneFault);
+		assert.equal(tried.length, 1, "the removal was attempted");
+	} finally {
+		cleanup();
+	}
+});

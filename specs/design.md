@@ -806,7 +806,51 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   the handoff the child builds on — not a human's uncommitted work. A chain targeting a **different**
   folder is out of this slice and would still enforce the guard; the exception is scoped to same-folder
   chaining only.
-- **Traces to**: `CONST-BUDGET-BEFORE-TOKENS`, `DES-ADMIN-VIA-PI-EXTENSION`, `DES-AI-TRIGGER-FLOW-GATE`,
+- **The folder must be a repository's root, and the CLI says so before queueing** (issue #524). The worker
+  needs `.git` at the folder itself and a commit at HEAD, because it reads the job's instructions from HEAD.
+  `pi-dispatch run` checks both before anything is queued, `--force` or not, and names the fix: `git init`
+  and a commit for a plain folder, a first commit for an empty repository, `git -C <folder> status` for one
+  git refuses to read. For a folder inside a repository it names BOTH fixes, `git init` here or the
+  repository's root, and that root only as git itself confirms it (`rev-parse --show-toplevel`, hardened).
+  A walk up the parents for a `.git` entry named an empty `.git` directory as a repository, and the root
+  alone as the fix is a trap under a dotfiles repository in the home directory: "run it on <home>" reads
+  clean and hands the agent the whole home directory (PR #528's review). The worker keeps its own check,
+  because a folder can stop being a repository between queue and pickup and a cron trigger's folder is not
+  checked when it fires. From prepare, before the budget reserve, it RETURNS `local-folder-not-a-repo`,
+  `local-folder-no-commit` or `local-folder-unreadable-repo`, and none of them spends or retries
+  (`CONST-RETRY-INFRA-ONLY`). The last two come from git's `rev-parse --verify --quiet HEAD^{commit}`,
+  by exit code (never a message a locale can translate; git's own text is not kept because it names host
+  paths), and an exit code says only that git could not, never why (PR #528's review, round 2, measured).
+  Exit 1 is an unborn HEAD, but also a missing commit object, a garbage branch ref or an unreadable
+  `refs/heads`; so `local-folder-no-commit` needs the follow-ups too: `rev-parse --verify --quiet HEAD`
+  also exits 1 and `symbolic-ref -q HEAD` succeeds. Exit 128 is an empty `.git`, a worktree whose gitdir
+  is gone or `safe.directory` ownership, but also an EACCES on `.git/HEAD` or `.git/objects`, with the
+  same words. So before either refusal the worker reads back what git needed (`.git`, the gitdir a `.git`
+  file names, `HEAD`, `config`, the branch ref HEAD names) under the rule `presentAt` applies: an error
+  outside the determinate allow-list (`transient.mjs`, where EACCES and EIO are transient on purpose)
+  throws InfraRetry and the job is retried. Only what reads back cleanly is refused. Before this the first
+  threw a config error, which the processor can only record as `config-refused` ("this deployment is
+  misconfigured"), and the other two escaped as untagged throws, which `index.mjs` turns into an
+  `UnrecoverableError`: a failed job with no reason, not retried. Any other git failure still throws. The admin's
+  `/dispatch run` and `dispatch_run` apply the same rule through the same function (`localRepoProblem`),
+  on both paths, before the dirty-tree guard: that guard alone accepted a subfolder, because `git status`
+  answers from any depth. Every job dir the dispatcher makes is removed when its preparer throws, not only
+  when it returns a refusal: a throw hands the processor nothing to tear down, so each such job left one
+  empty `jobs/job-*` behind. A removal that fails is swallowed, so it never replaces the job's own error.
+- **A local job's id is its own one-minute dedup, and `run` says when it fired** (issue #524). The id is a
+  hash of the folder, the flow, the task and the UTC minute, so a hasty second Enter is the same id and the
+  queue keeps the first job. That stays. `run` puts a random nonce of its own on the job's data
+  (`enqueueNonce`, never inside `trigger`) and reads the stored job back after the add: a stored nonce that
+  is not this call's means the add was swallowed, and it prints "an identical run was queued at HH:MM as
+  <id> (<state>); nothing new was queued" instead of "queued". Of any number of concurrent identical calls,
+  exactly one finds its own nonce and says "queued". Comparing the add's timestamp instead was refuted in
+  PR #528's review: calls in one millisecond share it, and ten in parallel all said "queued" for one job.
+  A lookup before the add fails the same way. No flag forces a second job inside the minute, and none is
+  offered; a later minute is a new id. The admin's `/dispatch run` and `dispatch_run` report the same way
+  with the same sentence (`swallowedRunSentence`), and the tool answers `queued: false` so a model never
+  reports a run that was not queued. The outbox collector keeps the bare id, its job data and the single
+  round trip.
+- **Traces to**: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `DES-ADMIN-VIA-PI-EXTENSION`, `DES-AI-TRIGGER-FLOW-GATE`,
   `DES-JOB-OUTBOX-CHAINING`, `REQ-LOCAL-JOB-VISIBILITY`
 
 ## DES-CLI-SURFACE
@@ -6506,3 +6550,4 @@ a tunnel.
 | 2026-09-30 | Issue #503 (declared model endpoints), the second change. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED**, a new bullet: a local model server is reached through the proxy, as one more CONNECT allow for one host and one port in an included file, and the proxy (never the job) is given the way to the host (`host.docker.internal:host-gateway` on Docker, nothing on rootless Podman). Rejected: the host network or the host on the job's network (every host port, the queue among them, and the policy no longer in one file); a plain-HTTP allow (pi only tunnels, and dropping the runner's tunnelling would reopen #508's hole); a restart to load new endpoints (it cuts every running job off, where `squid -k reconfigure` keeps open tunnels, measured 2026-09-30), hence the in-place render. The per-job network, its cleanup and the canary are UNCHANGED, checked. |
 | 2026-10-02 | Issue #503, part 4 (slot leases). **`DES-FLEET-LEASES-FOR-SHARED-BOUNDS` AMENDED**: the third lease, a model endpoint's `slots`, keyed `slot:m:<hash16(id)>:<i>` with one hash helper shared with the scope keys; taken at pickup after the scope lease, in id order, over an in-process bound shared by both Workers; local jobs take it too; a miss releases everything taken (endpoint holds, the scope's fleet claim and in-process slot, the host slot) and defers to `ENDPOINT_BUSY_RECHECK_MS`, free and never a refusal; a Valkey fault grants and the in-process bound holds the host. How it answers `OQ-008`: the claim is for a container, with the scope claim's TTL, and the boot reaper owns it through one generic sweeper (every index up to 64, since `slots` can be lowered live). The one settings read per pickup moved above the gate; its throw is raised at its old place. With PR #518's gate: an endpoint named by a host alias takes no fleet claim (it is a different server on each machine), while every address, link-local included, does (unique on its link, not its machine), so the fleet key means one server, one id; the release and the sweep are atomic compare-and-delete scripts, a degraded grant still releases the keys it tried, and the sweep stops at its first connection or timeout fault while a per-key reply error is logged and skipped. Residuals named: main model only until #502, one slot per job for its whole run, fleet-wide only with a declared worker name. **`DES-CONCURRENCY-3` UNCHANGED, checked**: the in-process maps stay the per-host bound. **Code evidence**: worker/src/fleet-lease.mjs -> hash16, endpointSlotKey, makeClaimSweeper, makeScopeClaimSweeper; worker/src/index.mjs -> makeProcessor, effectiveJobOf, mainModelEndpoints, ENDPOINT_BUSY_RECHECK_MS; worker/src/start.mjs -> startWorker, reloadModelEndpoints; worker/src/scoped-limits.mjs -> scopeKeyPrefix. |
 | 2026-10-02 | Issue #521. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**, one clause: doctor's in-image `gh` probe still does not run on a docker CLI not observed local, and the reason now says the token rides the probe's stdin, not `docker run -e`. The probe moved because Docker Desktop's backend log writes each container create request, environment included, to disk (measured on Docker Desktop 4.37.2, engine 27.4.0: a dummy token twice per doctor run with `-e`, zero with stdin). `--env-file` was rejected because the CLI expands it into the same request, and a mounted file because it is a host secret file to write, protect, remove and on rootless Podman make readable across a uid map. Since the entrypoint is now `sh`, an exit of 126 or 127 (the runtime or the shell could not run the program; `gh auth status` itself never exits so) gets its own line naming a missing `sh` or `gh` and a rebuild or pull, not the auth line's egress advice. **`DES-PODMAN-NATIVE-ROOTLESS-BACKEND` UNCHANGED, checked**: the podman probe still uses docker's argv (`ghProbeArgs`) plus every `PODMAN_PINNED_FLAGS` entry, so `--env-host=false` still keeps doctor's environment out, and the token is now in none of it. **Code evidence**: `worker/src/doctor.mjs` -> `ghProbeArgs`, `GH_PROBE_SCRIPT`, `runCmdCapture` (`input`). |
+| 2026-10-02 | Issue #524. **`DES-CLI-TRIGGER-FOR-LOCAL` AMENDED**, two bullets. (1) The folder must be a repository's root with a commit: `pi-dispatch run` and the admin's `/dispatch run` and `dispatch_run` refuse anything else before queueing, through one shared function, naming the fix, and for a folder inside a repository both fixes, with the root only as git confirms it. The worker's own check now RETURNS `local-folder-not-a-repo`, `local-folder-no-commit` or `local-folder-unreadable-repo` from prepare before the reserve, by git's exit code with follow-ups, and only after the files git needed read back cleanly (a transient read error is retried), instead of a config error the processor could only call `config-refused` and untagged throws that failed with no reason. A job dir is removed, guarded, when its preparer throws, which left one `jobs/job-*` per such job. (2) The one-minute local dedup stays, and both typed producers now say when it fired, by a per-call nonce read back after the add, so exactly one of any concurrent identical runs says queued. PR #528's review refuted the first version's timestamp comparison and parent `.git` walk. Traces gain `CONST-RETRY-INFRA-ONLY`. |

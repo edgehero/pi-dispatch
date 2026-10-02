@@ -35,10 +35,10 @@ import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch
 import { parseConnection, makeRedisClient, killSwitchValkeyUrls, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
 import { pointerState } from "./deployment-pointer.mjs";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
-import { QUEUE, makeQueue, enqueueLocalJob, fleetQueueNames, hostQueueName, discoverHostQueues, unionQueueNames } from "@edgehero/pi-dispatch/queue";
+import { QUEUE, makeQueue, enqueueLocalJobReporting, swallowedRunSentence, fleetQueueNames, hostQueueName, discoverHostQueues, unionQueueNames } from "@edgehero/pi-dispatch/queue";
 import { hostsIn, mergeRuns, readMirroredRuns } from "@edgehero/pi-dispatch/run-mirror";
 import { readFlowGate, aiTriggerAllows, SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
-import { gitDirty } from "@edgehero/pi-dispatch/git-dirty";
+import { gitDirty, localRepoProblem } from "@edgehero/pi-dispatch/git-dirty";
 import { readStageManifest, readStagedSkills } from "@edgehero/pi-dispatch/packages";
 // The skill enumeration reuses the worker's OWN listing parsers (issue #54), the same anti-drift rule
 // as parseTriggers/readOverlay above: selectEntries keeps only regular blobs at allowed paths, and
@@ -444,6 +444,7 @@ export function revParseHead(folder, { exec = execFileSync } = {}) {
  * nothing here, so every bound refuses BEFORE any container starts; the daily cap stays the worker
  * processor's job (CONST-BUDGET-BEFORE-TOKENS). Returns a discriminated
  * `{ ok, jobId } | { refused } | { unreachable }` (mirrors setQueuePaused's failFast open/close-in-finally).
+ * An `ok` the one-minute dedup swallowed also carries `deduplicated: true`, `existing` and `said` (issue #524).
  *
  * `aiInvoked` selects the bound set from the six-control analysis (DES-ADMIN-VIA-PI-EXTENSION):
  *   - `true`  (the `dispatch_run` tool): folder allowlist + committed flow gate + per-hour rate limit,
@@ -464,6 +465,7 @@ export async function enqueueDispatchRun({
   parseConnectionFn = parseConnection,
   readFlowGateFn = readFlowGate,
   gitDirtyFn = gitDirty,
+  localRepoProblemFn = localRepoProblem,
   revParseHeadFn = revParseHead,
   redisFn = makeRedisClient,
   now = () => Date.now(),
@@ -494,7 +496,13 @@ export async function enqueueDispatchRun({
     return { refused: "folder not under PI_DISPATCH_RUN_ROOTS" };
   }
 
-  // 3. dirty-tree, no force (BOTH paths). A local run edits the folder in place with no undo.
+  // 3. the worker's folder rule (BOTH paths, issue #524): `.git` at the folder itself and a commit at HEAD. The
+  // worker's own sentence, shared rather than restated, so this and `pi-dispatch run` cannot drift. `gitDirty` alone
+  // let a subfolder of a repository through (`git status` answers from any depth), and the worker then refused it.
+  const notARepo = localRepoProblemFn(folder);
+  if (notARepo) return { refused: notARepo };
+
+  // 3b. dirty-tree, no force (BOTH paths). A local run edits the folder in place with no undo.
   const dirty = gitDirtyFn(folder);
   if (dirty === null) return { refused: "not a usable git repository" };
   if (dirty) {
@@ -552,7 +560,10 @@ export async function enqueueDispatchRun({
     // shared queue, where any host could pop it. Never from the pointer, whose allowlist does not carry it.
     const workerName = env.PI_WORKER_NAME;
     queue = makeQueueFn(parseConnectionFn(valkeyUrl, { failFast: true }), { ...(workerName ? { name: hostQueueName(workerName) } : {}) });
-    const jobId = await enqueueLocalJob(queue, { folder, flow, task });
+    // Reporting (issue #524): the one-minute dedup can swallow this enqueue, and then nothing new is queued. The
+    // caller must not say "queued" for that, so it gets `existing` and the shared sentence to say instead.
+    const { id: jobId, existing } = await enqueueLocalJobReporting(queue, { folder, flow, task });
+    if (existing) return { ok: true, jobId, deduplicated: true, existing, said: swallowedRunSentence(jobId, existing) };
     return { ok: true, jobId };
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };

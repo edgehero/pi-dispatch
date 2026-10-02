@@ -70,6 +70,73 @@ test("run refuses a dirty git working tree (edits are in place, no undo)", async
 	assert.equal(await main(["run", dir, "--task", "x"], env), 1);
 });
 
+// Issue #524: the worker's folder rule, said before anything is queued. No Valkey is reachable here and the refusal
+// seam fails the test if it is asked, so "before anything is queued" is what is measured, not assumed.
+test("run refuses a folder that is not a git repository before queueing, naming it and the fix (#524)", async () => {
+	const { mkdirSync } = await import("node:fs");
+	const plain = tempDir("cli-plain-");
+	const repo = gitRepo({ dirty: false });
+	const sub = join(repo, "pkg");
+	mkdirSync(sub);
+	const empty = tempDir("cli-empty-");
+	execFileSync("git", ["-C", empty, "init", "-q"]);
+	const cases = [
+		[plain, /is not a git repository\. A local job needs one: run `git init` there and commit/],
+		[sub, /is not the root of a git repository, and a local job needs one\. Run `git init` here and commit, or, if this folder belongs to the repository at /],
+		[empty, /no commit yet/],
+	];
+	for (const [folder, said] of cases) {
+		for (const force of [[], ["--force"]]) {
+			const err = [];
+			const realErr = process.stderr.write;
+			process.stderr.write = (chunk) => (err.push(String(chunk)), true);
+			let code;
+			try {
+				code = await main(["run", folder, "--task", "t", ...force], { VALKEY_URL: "redis://127.0.0.1:1" }, { valkeyRefusal: async () => assert.fail("reached Valkey") });
+			} finally {
+				process.stderr.write = realErr;
+			}
+			assert.equal(code, 1, `${folder} ${force}`);
+			assert.match(err.join(""), said);
+			assert.match(err.join(""), /Nothing was queued\./);
+		}
+	}
+});
+
+test("runQueuedLine says a deduplicated run queued nothing, with the first job's time, id and state (#524)", { skip: needsDeps }, async () => {
+	const { runQueuedLine: line } = await import("../src/cli.mjs");
+	const { swallowedRunSentence } = await import("../src/queue.mjs");
+	const runQueuedLine = (args) => line(args, { swallowedRunSentence });
+	const at = new Date(2026, 9, 2, 9, 5, 30).getTime(); // local 09:05, the terminal's own clock
+	assert.equal(
+		runQueuedLine({ jobId: "local-abc", existing: { queuedAt: at, state: "completed" }, folder: "/f" }),
+		"an identical run was queued at 09:05 as local-abc (completed); nothing new was queued.\nthe same folder and task queue a new run from the next minute on.\n",
+	);
+	assert.match(runQueuedLine({ jobId: "local-abc", existing: { queuedAt: at, state: null }, folder: "/f" }), /as local-abc \(already queued or done\); nothing new was queued/);
+	assert.doesNotMatch(runQueuedLine({ jobId: "local-abc", existing: { queuedAt: at, state: "waiting" }, folder: "/f" }), /^queued /m, "never the queued line");
+	assert.match(runQueuedLine({ jobId: "local-abc", existing: null, folder: "/f" }), /^queued local-abc for folder \/f\n/);
+	assert.match(runQueuedLine({ jobId: "local-abc", existing: undefined, folder: "/f" }), /could not check whether an identical run/);
+});
+
+test("run twice in one minute: the second says an identical run was queued and queued nothing (#524)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL" }, async () => {
+	const dir = gitRepo({ dirty: false });
+	const env2 = { VALKEY_URL: process.env.VALKEY_TEST_URL };
+	const now = () => new Date("2026-10-02T10:15:20Z"); // both runs inside one minute, by construction
+	let out = "";
+	const write = (chunk) => ((out += chunk), true);
+	assert.equal(await main(["run", dir, "--task", "dedup me", "--force"], env2, { write, now }), 0);
+	const jobId = /^queued (\S+) for folder /m.exec(out)?.[1];
+	assert.ok(jobId, `the first run queues (got: ${out})`);
+	out = "";
+	try {
+		assert.equal(await main(["run", dir, "--task", "dedup me", "--force"], env2, { write, now }), 0);
+		assert.match(out, new RegExp(`^an identical run was queued at \\d\\d:\\d\\d as ${jobId} \\(waiting\\); nothing new was queued\\.$`, "m"));
+		assert.doesNotMatch(out, /^queued /m);
+	} finally {
+		await main(["cancel", jobId], env2, { write: () => true });
+	}
+});
+
 test("run enqueues against a real Valkey (VALKEY_TEST_URL) and prints the job id", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL" }, async () => {
 	const dir = gitRepo({ dirty: false });
 	const code = await main(["run", dir, "--task", "tidy the imports", "--force"], { VALKEY_URL: process.env.VALKEY_TEST_URL });

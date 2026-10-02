@@ -448,6 +448,8 @@ function registerTools(pi: ExtensionAPI): void {
       });
       if (res.refused) throw new Error(res.refused);
       if (res.unreachable) throw new Error(`could not reach the queue: ${res.unreachable}`);
+      // Issue #524: a swallowed duplicate is said as one, so the model never reports a run that was not queued.
+      if (res.deduplicated) return toolText(JSON.stringify({ jobId: res.jobId, folder: params.folder, flow: params.flow, queued: false, note: res.said }));
       return toolText(JSON.stringify({ jobId: res.jobId, folder: params.folder, flow: params.flow }));
     },
   });
@@ -1373,7 +1375,11 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
         notify?.(`could not reach the queue: ${res.unreachable}`, "error");
         return;
       }
-      notify?.(`queued ${res.jobId} — ${folder} (${flow})`, "info");
+      if (res.deduplicated) {
+        notify?.(res.said, "info");
+        return;
+      }
+      notify?.(`queued ${res.jobId} for ${folder} (${flow})`, "info");
       return;
     }
     case "logs":

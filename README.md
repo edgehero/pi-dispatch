@@ -116,7 +116,8 @@ value yet, without a prompt and without ever overwriting one. Then it runs the `
 </details>
 
 A local job edits your folder **in place**, and there is no undo. `pi-dispatch run` refuses a folder with
-uncommitted changes unless you pass `--force`. A cron trigger's folder is not checked when it fires, so
+uncommitted changes unless you pass `--force`. The folder must be the root of a git repository with at
+least one commit, and `run` refuses any other folder before it queues anything. A cron trigger's folder is not checked when it fires, so
 keep that folder committed yourself.
 
 A clone of this repo (`git clone`, `npm ci`, then `npx pi-dispatch init`, `doctor`, `worker`) is only

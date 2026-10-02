@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
@@ -1009,6 +1009,7 @@ function dispatchFakes(overrides = {}) {
     }),
     parseConnectionFn: () => ({}),
     gitDirtyFn: () => false,
+    localRepoProblemFn: () => null,
     revParseHeadFn: (folder) => {
       revCalls.push(folder);
       return "deadbeef";
@@ -1114,6 +1115,70 @@ test("enqueueDispatchRun refuses a dirty tree and a non-repo (both paths, no for
     ...dispatchFakes({ env, gitDirtyFn: () => null }).fakes,
   });
   assert.match(nonRepo.refused, /not a usable git repository/);
+});
+
+// Issue #524: the worker's folder rule, shared. A subfolder of a repository passed `gitDirty` (git status answers from
+// any depth) and was queued for the worker to refuse; an unborn HEAD likewise. Driven through the REAL rule.
+test("enqueueDispatchRun refuses a subfolder of a repository, a plain folder and an empty repository, on both paths, before queueing (#524)", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { localRepoProblem } = await import("@edgehero/pi-dispatch/git-dirty");
+  const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+  const { root, folder: repo } = tempRootAndFolder("dr-rule-");
+  execFileSync("git", ["-C", repo, "init", "-q"], { env: gitEnv });
+  writeFileSync(join(repo, "f.txt"), "x\n");
+  execFileSync("git", ["-C", repo, "add", "-A"], { env: gitEnv });
+  execFileSync("git", ["-C", repo, "commit", "-qm", "init"], { env: gitEnv });
+  const sub = join(repo, "pkg");
+  mkdirSync(sub);
+  const plain = join(root, "plain");
+  mkdirSync(plain);
+  const empty = join(root, "empty");
+  mkdirSync(empty);
+  execFileSync("git", ["-C", empty, "init", "-q"], { env: gitEnv });
+  const env = { VALKEY_URL: "redis://x", PI_DISPATCH_RUN_ROOTS: root, PI_DISPATCH_RUN_PER_HOUR: "3" };
+  for (const [folder, said] of [[sub, /is not the root of a git repository/], [plain, /is not a git repository/], [empty, /no commit yet/]]) {
+    for (const aiInvoked of [true, false]) {
+      const { fakes, added } = dispatchFakes({ env, localRepoProblemFn: localRepoProblem });
+      const res = await enqueueDispatchRun({ folder, flow: "fix", task: "t", aiInvoked, ...fakes });
+      assert.match(res.refused ?? "", said, `${folder} aiInvoked:${aiInvoked}`);
+      assert.equal(res.refused, localRepoProblem(folder), "the worker's own sentence, not a restatement");
+      assert.equal(added.length, 0, "nothing was enqueued");
+    }
+  }
+  const { fakes, added } = dispatchFakes({ env, localRepoProblemFn: localRepoProblem });
+  const ok = await enqueueDispatchRun({ folder: repo, flow: "fix", task: "t", aiInvoked: false, ...fakes });
+  assert.equal(ok.ok, true, "the repository's root is accepted");
+  assert.equal(added.length, 1);
+});
+
+test("enqueueDispatchRun says a swallowed duplicate queued nothing, with the shared sentence (#524)", async () => {
+  const { swallowedRunSentence } = await import("@edgehero/pi-dispatch/queue");
+  const stored = new Map();
+  const makeQueueFn = () => ({
+    async add(_name, data, opts) {
+      // BullMQ keeps the first add of an id and drops the rest; the stored data carries the first call's nonce.
+      if (!stored.has(opts.jobId)) stored.set(opts.jobId, { data, timestamp: 1000, getState: async () => "completed" });
+      return { id: opts.jobId, timestamp: 1000 };
+    },
+    async getJob(id) {
+      return stored.get(id);
+    },
+    async close() {},
+  });
+  const first = await enqueueDispatchRun({ folder: "/f", flow: "fix", task: "t", aiInvoked: false, ...dispatchFakes({ makeQueueFn }).fakes });
+  assert.deepEqual(first, { ok: true, jobId: first.jobId }, "a created job is said as before");
+  const second = await enqueueDispatchRun({ folder: "/f", flow: "fix", task: "t", aiInvoked: false, ...dispatchFakes({ makeQueueFn }).fakes });
+  assert.equal(second.deduplicated, true);
+  assert.equal(second.jobId, first.jobId);
+  assert.deepEqual(second.existing, { queuedAt: 1000, state: "completed" });
+  assert.equal(second.said, swallowedRunSentence(first.jobId, { queuedAt: 1000, state: "completed" }));
+  assert.match(second.said, /\(completed\); nothing new was queued\.$/);
+});
+
+test("index.ts never says queued for a swallowed duplicate, on the tool or the command (#524)", () => {
+  const src = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+  assert.match(src, /if \(res\.deduplicated\) return toolText\(JSON\.stringify\(\{ jobId: res\.jobId, folder: params\.folder, flow: params\.flow, queued: false, note: res\.said \}\)\);/);
+  assert.match(src, /if \(res\.deduplicated\) \{\n\s*notify\?\.\(res\.said, "info"\);\n\s*return;\n\s*\}\n\s*notify\?\.\(`queued \$\{res\.jobId\}/);
 });
 
 test("enqueueDispatchRun (aiInvoked) refuses when the flow gate denies or has no skill", async () => {

@@ -70,11 +70,32 @@ export function makePrepareWorkspace({
 	// not only here: a temp cleaner (systemd-tmpfiles ages /tmp) can remove an idle jobs dir, and a name under the temp
 	// dir that is gone is one any account can create next.
 	ensureDir = (dir) => ensureJobsDir(dir),
+	// Issue #524: how a thrown preparer's job dir is removed. A seam so the guard around it is testable.
+	removeDir = (dir) => rmSync(dir, { recursive: true, force: true }),
 }) {
 	ensureDir(jobsDir);
 	return async function prepareWorkspace(job, token, { queueJobId, piVersion = null, jobUser = null, podmanStore = null } = {}) {
 		ensureDir(jobsDir);
 		const jobDir = mkdtempSync(join(jobsDir, "job-"));
+		// Issue #524: a THROW out of anything below leaves `jobDir` to nobody. The processor tears down only what
+		// it was handed, and a throw hands it nothing, so every config refusal raised in a preparer (a local folder
+		// that does not exist, a forge kind with no preparer) and every infrastructure throw (a clone that failed)
+		// left one empty `jobs/job-*` per attempt, forever. `discardOnPolicy` covers the RETURNED refusals; this
+		// covers the thrown ones, in one place for every kind, rather than in each preparer that can throw.
+		// A retry makes a fresh directory, so nothing is lost by removing this one.
+		try {
+			return await prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore });
+		} catch (error) {
+			// GUARDED: a removal that fails (a busy mount, a permission flipped mid-job) must never replace the error
+			// that is the job's actual outcome. The directory is then left, which is what happened before this catch.
+			try {
+				removeDir(jobDir);
+			} catch {}
+			throw error;
+		}
+	};
+
+	async function prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore }) {
 		// The trigger's injected skills (REQ-PER-TRIGGER-SKILLS, issue #60), COPIED here rather than
 		// mounted, and copied ONCE for every job kind because this is where local and forge converge.
 		//
@@ -151,7 +172,7 @@ export function makePrepareWorkspace({
 			);
 		}
 		throw new Error(`unknown job kind: ${job.kind}`);
-	};
+	}
 }
 
 /**
