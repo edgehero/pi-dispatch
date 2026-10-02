@@ -273,6 +273,21 @@ test("a run that made NO provider call settles metered at 0: the guard refused c
 	}
 });
 
+test("a runner's config refusal AFTER a spent load-time call (issue #543) settles on the exit line, never refunded", async () => {
+	// The runner writes its tokens on every exit line once the meter is installed, so a job whose extension spent at
+	// load and that then failed a pre-prompt check (command-unregistered) settles at what it spent. A runner
+	// config exit is a container that ran, so it is settled, never refunded like the worker's own config refusal;
+	// without tokens (an older runner) it stays at the floor.
+	const spent = { code: 2, aborted: false, exitLineCode: 2, exitReason: "command-unregistered", tokens: COMPLETE_TOKENS, usage: LEDGER };
+	const { deps: d, redis } = deps({ runContainer: async () => spent });
+	const out = await runJob(job, d).catch((error) => error);
+	assert.deepEqual(out.dollars, { reservedMicros: 2 * USD, settledMicros: 300_000, basis: "metered", modelBasis: null });
+	assert.equal(redis.store.get(DAY), 300_000, "the window keeps what the load-time call spent");
+	const old = deps({ runContainer: async () => ({ ...spent, tokens: null, usage: null }) });
+	const floored = await runJob(job, old.deps).catch((error) => error);
+	assert.deepEqual(floored.dollars, { reservedMicros: 2 * USD, settledMicros: 2 * USD, basis: "floor", modelBasis: null });
+});
+
 test("a floor never charges less than a reported metered cost: $5 metered with boundExceeded under a $2 hold charges $5", async () => {
 	const { deps: d, redis } = deps({ runContainer: async () => ({ code: 0, aborted: false, exitLineCode: 0, tokens: { ...COMPLETE_TOKENS, cost: 5, boundExceeded: 1 }, usage: LEDGER }) });
 	const r = await runJob(job, d);

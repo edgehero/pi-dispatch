@@ -1540,7 +1540,7 @@ export async function collectChecks(shellVars, seams) {
 	// is advisory and carries no fixAction (triggers content is the never tier). A deployment with no
 	// command triggers adds no line at all, so its output is byte-identical.
 	if (commands > 0) {
-		checks.push({ ok: true, label: `${commands} command trigger(s): a command is only verifiable in-container -- the runner refuses an unregistered one pre-spend (command-unregistered)` });
+		checks.push({ ok: true, label: `${commands} command trigger(s): a command is only verifiable in-container -- the runner refuses an unregistered one before the prompt is sent (command-unregistered)` });
 	}
 
 	// Issue #41: every DISTINCT image a trigger names in run.image, minus the deployment default already

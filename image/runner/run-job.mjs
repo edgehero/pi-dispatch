@@ -69,6 +69,20 @@ function pickTotals({ input, output, total, cost }) {
 	return { input, output, total, cost };
 }
 
+/**
+ * What the process-wide meter has counted, as the exit line carries it: `tokens` and, when it observed a call, `usage`.
+ * Empty until the meter installs; then set, so EVERY exit line after that carries them, the outer catch's included
+ * (issue #543): a call an extension made while it loaded may have spent before a later check refused the job
+ * (command-unregistered, say), and an exit line without tokens would hide that spend from the settlement.
+ */
+let meteredExitFields = () => ({});
+/**
+ * The meter's stop, if it stopped, as the outcome decideExit ranks it, else null. Set with meteredExitFields. A throw
+ * after a stop (a load-time call refused, then command-unregistered) exits with the STOP's reason, the same ranking
+ * decideExit gives a stop over a rejected prompt, so the record says why the job really ended (PR #547's review).
+ */
+let meterStopAtExit = () => null;
+
 async function main() {
 	const cfg = parseRunnerEnv(process.env);
 
@@ -144,6 +158,73 @@ async function main() {
 	// Retry pinned, cache warming off, telemetry off: every key and why, in src/config.mjs jobSettings.
 	const settingsManager = SettingsManager.inMemory(jobSettings(cfg.retry));
 
+	// HOISTED so the root session id exists BEFORE the meter does. createAgentSession would otherwise
+	// build its own SessionManager and the id would only be readable afterwards -- too late, because
+	// createUsageMeter must know which session is the root to split rootTotal from otherTotal, and an
+	// undefined root would file every call as unattributed and hide the fanout the meter exists to see.
+	// Persisted when the trigger armed run.resume and the host resolved a key, in-memory otherwise --
+	// and openSessionManager is TOTAL, so the hoist below holds on every path including a degraded one.
+	const { sessionManager, resumed: sessionResumed, reason: sessionReason } = openSessionManager({ sessionFile: cfg.sessionFile, cwd: WORKSPACE, log });
+	const rootSessionId = sessionManager.getSessionId();
+
+	// Declared before the meter so onStop can close over it; assigned the moment the session exists.
+	let session;
+	// Read off the session before it is disposed, reported on the exit line, and persisted host-side
+	// beside the transcript so the NEXT job on this key can bound what it resumes into.
+	let contextUsage;
+
+	/** One log shape for both meters -- an operator must not have to learn which one fired. */
+	const onTokenAbort = (tokens) => log("token_budget_exceeded", { tokens, maxTokens: cfg.maxTokens });
+
+	// REQ-TOKEN-ACCOUNTING-AND-CAPS / CONST-BUDGET-BEFORE-TOKENS, issue #58.
+	//
+	// The per-session event bus cannot see a subagent session an extension spawns: the bus is per
+	// AgentSession instance and no event carries a sessionId, so a 16-wide fanout registers on our bus
+	// as roughly ONE turn. Metering at ModelRuntime.prototype -- the one choke point every in-process
+	// session's model calls go through at 0.99.1 -- counts calls instead of turns and gets per-session
+	// attribution for free from options.sessionId. Installed AFTER the runtime exists (the install checks
+	// that THIS instance dispatches through the wrappers) and BEFORE the resource loader is built (issue #543):
+	// an extension factory runs inside the loader's reload(), and a model call it makes there, through a
+	// ModelRuntime of its own or pi-ai's legacy global stream functions, is already metered and judged. The
+	// session's first call is metered for the same reason.
+	const meter = createUsageMeter({
+		maxTokens: cfg.maxTokens,
+		maxCostMicros: cfg.maxCostMicros,
+		allowedModels: cfg.allowedModels,
+		rootSessionId,
+		// The meter's ONE stop (issues #501, #502): the token cap, the cost cap and the model list. Fires once,
+		// for the first stop only, whichever policy it was; only a token stop logs token_budget_exceeded
+		// (meterStopHandler). Same synchronous-abort discipline as attachTokenBudget's
+		// onAbort: abort() flips the AbortController before its first await, so the signal is set the instant we
+		// call it. Awaiting here would let the next turn start under a cap we already know is blown.
+		onStop: meterStopHandler({ onTokenAbort, abort: () => void session?.abort() }),
+	});
+	// The allowed-model list (issue #502) and the per-job cost cap (issue #501): judged BEFORE every provider call by
+	// the one guard both meter halves consult, the list first. Each part is built only when its policy is set, and
+	// with neither there is no guard, so such a job runs exactly as before.
+	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log });
+	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard });
+	if (usageMeter.ok) {
+		meteredExitFields = () => {
+			const usage = meter.usageSnapshot();
+			return { tokens: { ...meter.snapshot(), ...(policyGuard ? policyGuard.snapshot() : {}) }, ...(usage ? { usage } : {}) };
+		};
+		meterStopAtExit = () => (meter.state.stopReason === null ? null : decideExit({ budgetAborted: false, meterStop: meter.state.stopReason }));
+	}
+	// A cost cap or a model list must be enforced BEFORE each call, so a runner that cannot do that refuses
+	// here, after the install it depends on and before any extension loads, while nothing has been spent
+	// (INT-RUNNER-EXIT-CODE-PROTOCOL): exit 2, `model-policy-unenforceable` or `cost-cap-unenforceable`. The
+	// fallback bus meter below is the `ok: false` case, and it can only see a call after it was paid for. The cost
+	// guard enforces the cap and the model guard the list; a job carrying neither policy passes untouched.
+	assertPoliciesEnforceable({
+		maxCostMicros: cfg.maxCostMicros,
+		allowedModels: cfg.allowedModels,
+		...policyEnforcement(usageMeter),
+	});
+
+	// Built only now, after the meter and the guards are installed (issue #543). Extension factories run in here,
+	// and one that makes a model call while it loads is metered, and judged against the cost cap and the model
+	// list, like any other call. A stop it causes ends the job before its prompt (below).
 	// `log` is handed over so the loader's own findings arrive on THIS writer, with this job's id: the
 	// recursion guard drops an extension during reload() (see dropAdminExtensions), and a drop that
 	// landed on a second, id-less writer would be an operator's only clue to a missing tool while being
@@ -168,7 +249,8 @@ async function main() {
 	// prompt hint (prepare.mjs), deployments legitimately run flows as loose hints over repos with no
 	// .pi/skills, and the runner cannot tell that steady state from breakage. Refusing would break
 	// them on an image upgrade for a value their reviewed file has carried all along. The line sits
-	// at the pre-spend moment anyway, so flipping report to refusal is a one-line change here plus a
+	// before the prompt anyway (after the extensions load, so a load-time call may already have spent), so flipping
+	// report to refusal is a one-line change here plus a
 	// spec row (DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS records the choice). Doctor's host-side tier
 	// lines are the other advisory layer; this one is exact because it reads what actually loaded.
 	// Flow name, never task content: run.flow is operator config out of the reviewed triggers file.
@@ -226,61 +308,7 @@ async function main() {
 		});
 	}
 
-	// HOISTED so the root session id exists BEFORE the meter does. createAgentSession would otherwise
-	// build its own SessionManager and the id would only be readable afterwards -- too late, because
-	// createUsageMeter must know which session is the root to split rootTotal from otherTotal, and an
-	// undefined root would file every call as unattributed and hide the fanout the meter exists to see.
-	// Persisted when the trigger armed run.resume and the host resolved a key, in-memory otherwise --
-	// and openSessionManager is TOTAL, so the hoist below holds on every path including a degraded one.
-	const { sessionManager, resumed: sessionResumed, reason: sessionReason } = openSessionManager({ sessionFile: cfg.sessionFile, cwd: WORKSPACE, log });
-	const rootSessionId = sessionManager.getSessionId();
-
-	// Declared before the meter so onStop can close over it; assigned the moment the session exists.
-	let session;
-	// Read off the session before it is disposed, reported on the exit line, and persisted host-side
-	// beside the transcript so the NEXT job on this key can bound what it resumes into.
-	let contextUsage;
-
-	/** One log shape for both meters -- an operator must not have to learn which one fired. */
-	const onTokenAbort = (tokens) => log("token_budget_exceeded", { tokens, maxTokens: cfg.maxTokens });
-
-	// REQ-TOKEN-ACCOUNTING-AND-CAPS / CONST-BUDGET-BEFORE-TOKENS, issue #58.
-	//
-	// The per-session event bus cannot see a subagent session an extension spawns: the bus is per
-	// AgentSession instance and no event carries a sessionId, so a 16-wide fanout registers on our bus
-	// as roughly ONE turn. Metering at ModelRuntime.prototype -- the one choke point every in-process
-	// session's model calls go through at 0.99.1 -- counts calls instead of turns and gets per-session
-	// attribution for free from options.sessionId. Installed AFTER the runtime exists (the install checks
-	// that THIS instance dispatches through the wrappers) and BEFORE createAgentSession, so the session's
-	// first call is already metered.
-	const meter = createUsageMeter({
-		maxTokens: cfg.maxTokens,
-		maxCostMicros: cfg.maxCostMicros,
-		allowedModels: cfg.allowedModels,
-		rootSessionId,
-		// The meter's ONE stop (issues #501, #502): the token cap, the cost cap and the model list. Fires once,
-		// for the first stop only, whichever policy it was; only a token stop logs token_budget_exceeded
-		// (meterStopHandler). Same synchronous-abort discipline as attachTokenBudget's
-		// onAbort: abort() flips the AbortController before its first await, so the signal is set the instant we
-		// call it. Awaiting here would let the next turn start under a cap we already know is blown.
-		onStop: meterStopHandler({ onTokenAbort, abort: () => void session?.abort() }),
-	});
-	// The allowed-model list (issue #502) and the per-job cost cap (issue #501): judged BEFORE every provider call by
-	// the one guard both meter halves consult, the list first. Each part is built only when its policy is set, and
-	// with neither there is no guard, so such a job runs exactly as before.
-	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log });
-	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard });
-	// A cost cap or a model list must be enforced BEFORE each call, so a runner that cannot do that refuses
-	// here, after the install it depends on and before createAgentSession, while nothing has been spent
-	// (INT-RUNNER-EXIT-CODE-PROTOCOL): exit 2, `model-policy-unenforceable` or `cost-cap-unenforceable`. The
-	// fallback bus meter below is the `ok: false` case, and it can only see a call after it was paid for. The cost
-	// guard enforces the cap and the model guard the list; a job carrying neither policy passes untouched.
-	assertPoliciesEnforceable({
-		maxCostMicros: cfg.maxCostMicros,
-		allowedModels: cfg.allowedModels,
-		...policyEnforcement(usageMeter),
-	});
-	// pi-ai's own transient-error predicate, from the compat copy the meter just accepted (issue #437): a 401/403
+	// pi-ai's own transient-error predicate, from the compat copy the meter accepted (issue #437): a 401/403
 	// shape pi calls retryable (a gateway's "Provider returned error", an HTML "please retry" page) is not
 	// a refusal of the credential. Without it every provider error stays retryable, so say so on the log.
 	const isRetryable = await loadRetryPredicate({ module: usageMeter.ok ? usageMeter.module : null, candidates: resolvePiAiCompat() });
@@ -309,8 +337,8 @@ async function main() {
 		log("tools_excluded", { excludeTools: cfg.excludeTools, active: session.getActiveToolNames() });
 	}
 
-	// Deterministic re-arm of the meter's COMPAT half. An extension factory that registered an api id in
-	// pi-ai's legacy registry during createAgentSession left it unwrapped until now; the unref'd interval
+	// Deterministic re-arm of the meter's COMPAT half. An extension that registered an api id in pi-ai's legacy
+	// registry while it loaded or during createAgentSession left it unwrapped until now; the unref'd interval
 	// inside the meter would eventually catch it, and this closes the window before the first prompt. (The
 	// runtime half needs no re-arm: a provider an extension registers with pi.registerProvider is served by
 	// the ModelRuntime, whose prototype is already wrapped.)
@@ -335,7 +363,8 @@ async function main() {
 		});
 	}
 
-	// A command job dispatches BEFORE any spend, so verify the command is actually registered first
+	// A command job dispatches before its prompt spends anything (a call an extension made while it loaded is already
+	// metered and judged), so verify the command is actually registered first
 	// (issue #189). pi's fallthrough is the hazard being closed: an unregistered "/name" is not an
 	// error to session.prompt() -- it falls through to prompt-template expansion and then to the
 	// MODEL as literal text, a full paid turn for a config typo, or (with a same-named template
@@ -350,7 +379,8 @@ async function main() {
 				"command-unregistered",
 			);
 		}
-		log("command_dispatch", { command: name });
+		// Only when the command will run: after a stop at load the prompt is not sent (below), so nothing dispatches.
+		if (meter.state.stopReason === null) log("command_dispatch", { command: name });
 	}
 
 	// A throwing command handler is SWALLOWED by pi -- emitError, handled=true, prompt() resolves
@@ -398,7 +428,10 @@ async function main() {
 	// the catch at the bottom, the preflight path it has always taken. The finally runs either way.
 	let rejected = null;
 	try {
-		await session.prompt(prompt);
+		// A stop that came before the prompt (a call an extension made while it loaded, or while the session was
+		// built) found no session to abort, so it ends the job here instead: the prompt is never sent, and the exit
+		// line names the stop (issue #543).
+		if (meter.state.stopReason === null) await session.prompt(prompt);
 	} catch (error) {
 		rejected = classifyPromptRejection(error, { retryInFlight });
 		if (!rejected) throw error;
@@ -449,7 +482,7 @@ async function main() {
 	// total includes every in-process session, not just the root's turns.
 	// The cost fields (issue #501) ride only when a cap is set and `modelRefused` (issue #502) only when a list is,
 	// so every other exit line stays byte-identical.
-	const tokens = usageMeter.ok ? { ...meter.snapshot(), ...(policyGuard ? policyGuard.snapshot() : {}) } : { ...pickTotals(tokenBudget.state), metered: false };
+	const tokens = usageMeter.ok ? meteredExitFields().tokens : { ...pickTotals(tokenBudget.state), metered: false };
 	// The per-(provider,model) ledger (issue #53, INT-RUN-HISTORY-FILE-CONTRACT) -- a SIBLING of
 	// `tokens`, never a widening of it: `tokens` rides through the worker verbatim because it holds
 	// nothing but numbers, while the ledger carries id STRINGS the host re-validates through its own
@@ -457,7 +490,7 @@ async function main() {
 	// call to a model), and a metered run with zero provider calls has no rows to report -- both come
 	// back null, and the key is then OMITTED rather than emitted as null, so those exit lines stay
 	// byte-identical to what every pre-ledger consumer already parses.
-	const usage = usageMeter.ok ? meter.usageSnapshot() : null;
+	const usage = usageMeter.ok ? (meteredExitFields().usage ?? null) : null;
 	// `session` reports what pi ACTUALLY did, not what the host intended. The host records its own
 	// intent separately, and the pair is what makes a degrade visible: a host that resolved a key while
 	// the container reports resumed:false is a real event, and without both numbers it is indist-
@@ -484,8 +517,14 @@ main()
 		process.exitCode = code;
 	})
 	.catch((error) => {
-		const outcome = classifyThrow(error);
+		// The meter's fields ride here too once it installed (issue #543); before that there is nothing to report.
+		const thrown = classifyThrow(error);
+		const stopped = meterStopAtExit();
+		// The stop wins the exit reason, and the throw it outranked is named on its own line so the second cause is not
+		// lost: its classified reason and the error's class, never its message (names only).
+		if (stopped !== null) log("throw_after_stop", { reason: thrown.reason, error: typeof error?.name === "string" ? error.name : null });
+		const outcome = stopped ?? thrown;
 		const capped = capExitMessage(outcome);
-		log("exit", { code: capped.code, reason: capped.reason, message: capped.message });
+		log("exit", { code: capped.code, reason: capped.reason, message: capped.message, ...meteredExitFields() });
 		process.exitCode = outcome.code ?? EXIT_INFRA;
 	});

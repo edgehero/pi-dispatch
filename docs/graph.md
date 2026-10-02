@@ -38,7 +38,7 @@ registered extension command, not a skill, so there is no `SKILL.md` for an edge
 renders alone, labelled `/name`, with the full `command: /name args` line in its tip. That is not the
 dangling-trigger state: dangling means a *flow* failed to resolve in every checkable tier, while a
 command's existence is only knowable inside the container, where the runner refuses an unregistered one
-before any model call (`command-unregistered`). What the command does when it dispatches is the workflow
+before the job's prompt is sent (`command-unregistered`). What the command does when it dispatches is the workflow
 extension's business, not the graph's — see [`workflows.md`](workflows.md).
 
 A trigger row also states its schedule and its money, when the model knows them: a cron trigger

@@ -237,9 +237,9 @@ the leading slash (the runner prepends it), arguments verbatim:
   "run": { "kind": "github", "command": "wf run" } }
 ```
 
-The job's whole prompt is that `/wf …` line. The runner verifies the command is registered before any
-model call and refuses with `command-unregistered` (exit 2, never retried) when it is not — a typo costs
-nothing. The job image must declare the `commands` capability, and the worker refuses pre-spend when it
+The job's whole prompt is that `/wf …` line. The runner verifies the command is registered before the
+prompt is sent and refuses with `command-unregistered` (exit 2, never retried) when it is not, so a typo
+costs nothing beyond what the job's extensions spend while they load. The job image must declare the `commands` capability, and the worker refuses pre-spend when it
 does not ([`job-image.md`](job-image.md)). On the graph, a command trigger renders as `/wf` with no flow
 edge ([`graph.md`](graph.md)).
 

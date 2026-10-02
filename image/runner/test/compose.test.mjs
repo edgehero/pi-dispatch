@@ -142,8 +142,9 @@ test("run-job.mjs verifies the flow against the LOADED skill set, unconditionall
 	//     jobs with staged packages, which is exactly the blindness being closed;
 	// (2) the flow_not_loaded line exists and carries the flow -- a flow that resolves in no tier
 	//     must leave a named, greppable trace, so "a silent exit 0 for this case" is a failing test;
-	// (3) the check sits before openSessionManager -- the pre-spend moment, so flipping report to
-	//     refusal (DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS) stays a one-line change at this site.
+	// (3) the check sits before createAgentSession -- before the prompt, so flipping report to
+	//     refusal (DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS) stays a one-line change at this site. (It read
+	//     openSessionManager until issue #543 moved the session manager and the meter above the loader.)
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
 	assert.ok(
 		src.indexOf("resourceLoader.getSkills()") < src.indexOf("if (cfg.packages.length"),
@@ -151,8 +152,8 @@ test("run-job.mjs verifies the flow against the LOADED skill set, unconditionall
 	);
 	assert.match(src, /log\("flow_not_loaded",\s*\{[^}]*flow:/, "the miss must leave a named line carrying the flow");
 	assert.ok(
-		src.indexOf('log("flow_not_loaded"') < src.indexOf("openSessionManager("),
-		"the flow check must sit at the pre-spend moment",
+		src.indexOf('log("flow_not_loaded"') < src.indexOf("await createAgentSession("),
+		"the flow check must sit before the prompt",
 	);
 });
 
@@ -238,6 +239,40 @@ test("run-job checks /job for every job and logs the mount advisories before any
 	const between = src.slice(src.indexOf("mountAdvisories()"), src.indexOf("getAgentDir()"));
 	assert.doesNotMatch(between, /\bthrow\b|configError\(|process\.exit/, "an advisory must never become an exit: nothing between the advisories and getAgentDir may throw or exit");
 	assert.doesNotMatch(src, /function readPrompt/, "readPrompt lives in src/config.mjs, where its EACCES split is tested");
+});
+
+test("run-job installs the meter and the guards before any extension loads, and a stop before the prompt sends no prompt (issue #543)", () => {
+	// Source-guard tactic again; usage-meter.integration.test.mjs drives this order with the real loader. An extension
+	// factory runs inside buildLoadedResourceLoader, so a call it makes while it loads is metered and judged only when
+	// the install comes first. The policy check stays after the install it reads and before anything loads.
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	const runtime = src.indexOf("await createJobModelRuntime({");
+	const sessionManager = src.indexOf("openSessionManager({");
+	const meter = src.indexOf("const meter = createUsageMeter({");
+	const install = src.indexOf("await installProcessUsageMeter(");
+	const check = src.indexOf("assertPoliciesEnforceable({");
+	const loader = src.indexOf("await buildLoadedResourceLoader({");
+	assert.ok(runtime > 0 && sessionManager > runtime && meter > sessionManager && install > meter && check > install && loader > check, "the runtime, the root session id, the meter, the install, the policy check, then the loader");
+	assert.equal(src.split("buildLoadedResourceLoader(").length, 2, "one loader, built once");
+	// A stop that came before the prompt had no session to abort, so the prompt is not sent.
+	assert.match(src, /\n\t\tif \(meter\.state\.stopReason === null\) await session\.prompt\(prompt\);\n/, "a stop before the prompt must keep the prompt from being sent");
+	// And nothing says the command dispatched when the prompt is not sent.
+	assert.match(src, /\n\t\tif \(meter\.state\.stopReason === null\) log\("command_dispatch", \{ command: name \}\);\n/, "command_dispatch only when the command will run");
+	// Every exit line after the install carries the meter's tokens and usage, the outer catch's too: a load-time call
+	// that spent before a later refusal (command-unregistered) must reach the settlement.
+	const armed = src.indexOf("\t\tmeteredExitFields = () => {");
+	assert.ok(armed > install && armed < loader, "the exit fields are armed right after the install, before any extension loads");
+	assert.match(src, /log\("exit", \{ code: capped\.code, reason: capped\.reason, message: capped\.message, \.\.\.meteredExitFields\(\) \}\);/, "the outer catch's exit line carries the meter's fields");
+	assert.match(src, /const tokens = usageMeter\.ok \? meteredExitFields\(\)\.tokens :/, "the success line reads the same fields");
+	// `usage` rides only when a call was observed: a run with none keeps the key absent, never `usage: null`.
+	assert.match(src, /\{ tokens: \{ \.\.\.meter\.snapshot\(\), \.\.\.\(policyGuard \? policyGuard\.snapshot\(\) : \{\}\) \}, \.\.\.\(usage \? \{ usage \} : \{\}\) \}/, "usage is omitted when no call was observed");
+	// A throw after a stop (a refused load-time call, then command-unregistered) exits with the stop, as decideExit ranks it.
+	assert.match(src, /meterStopAtExit = \(\) => \(meter\.state\.stopReason === null \? null : decideExit\(\{ budgetAborted: false, meterStop: meter\.state\.stopReason \}\)\);/, "the stop is decided by decideExit");
+	assert.match(src, /const thrown = classifyThrow\(error\);\n\t\tconst stopped = meterStopAtExit\(\);/, "the throw is classified and the stop read");
+	assert.match(src, /const outcome = stopped \?\? thrown;/, "the stop wins the catch path's exit reason");
+	// The outranked throw keeps a trace: its classified reason and its class, never its message.
+	assert.match(src, /if \(stopped !== null\) log\("throw_after_stop", \{ reason: thrown\.reason, error: typeof error\?\.name === "string" \? error\.name : null \}\);/, "the second cause is logged, names only");
+	assert.ok(src.indexOf("\t\tmeterStopAtExit = () =>") > install && src.indexOf("\t\tmeterStopAtExit = () =>") < loader, "armed with the exit fields, before any extension loads");
 });
 
 test("run-job refuses an unenforceable cost cap or model list after the meter installs and before the session exists (issues #501, #502)", () => {

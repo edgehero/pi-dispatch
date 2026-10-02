@@ -15,6 +15,8 @@ import {
 	VIRTUAL_MODEL_API,
 	wrapModelRuntime,
 	wrapProviderStreams,
+	DISPATCH_MARK,
+	dispatchToken,
 } from "../src/usage-meter.mjs";
 import { COST_CAP, COST_CAP_UNENFORCEABLE, EXIT_POLICY, MODEL_NOT_ALLOWED, MODEL_POLICY_UNENFORCEABLE, TOKEN_BUDGET } from "../src/outcome.mjs";
 
@@ -1388,7 +1390,8 @@ test("the guard is never consulted without a brake, nor by the compat half insid
 	const hardStop = makeHardStopStream({ createStream: () => new FakeStream() });
 	const asked = [];
 	const compat = wrapProviderStreams({ inner, fallbackModels: null, meter, hardStop, dispatch, guard: { admit: ({ model }) => (asked.push(model.id), COST_CAP) } });
-	dispatch.run(true, () => compat.streamSimple(MODEL, [], {}));
+	const token = dispatchToken(MODEL);
+	dispatch.run(token, () => compat.streamSimple(MODEL, [], { [DISPATCH_MARK]: token }));
 	assert.deepEqual([asked.length, inner.calls.length], [0, 1], "inside the runtime dispatch: routed, never judged twice");
 	const refused = await compat.streamSimple(MODEL, [], {}).result();
 	assert.deepEqual([asked.length, inner.calls.length, refused.errorMessage], [1, 1, "pi-dispatch: cost cap reached"], "a legacy call is judged and refused here");

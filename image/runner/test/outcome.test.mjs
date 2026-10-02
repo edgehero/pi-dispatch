@@ -523,6 +523,12 @@ test("run-job.mjs logs retry_predicate_unavailable when no pinned retry predicat
 	);
 });
 
+test("decideExit ranks a meter stop over everything but the turn budget: the catch path reuses it after a stop (issue #543)", () => {
+	for (const reason of ["cost-cap", "model-not-allowed", "token_budget"]) {
+		assert.deepEqual(decideExit({ budgetAborted: false, meterStop: reason }), { code: EXIT_POLICY, reason });
+	}
+});
+
 test("run-job.mjs caps every exit line and hands decideExit the pinned retry predicate", () => {
 	// Both are wiring the unit tests above cannot see: an exit line that bypasses the cap loses the label
 	// host-side on a big body, and a decideExit call without isRetryable silently turns #437 off.
@@ -530,7 +536,7 @@ test("run-job.mjs caps every exit line and hands decideExit the pinned retry pre
 	const exitLines = src.match(/log\("exit", \{[^\n]*/g) ?? [];
 	assert.equal(exitLines.length, 2, "the runner has two exit-line paths (the decided outcome and the preflight throw)");
 	assert.match(exitLines[0], /\.\.\.capExitMessage\(outcome\)/, "the decided outcome's exit line must be capped");
-	assert.match(src, /const capped = capExitMessage\(outcome\);\s*log\("exit", \{ code: capped\.code, reason: capped\.reason, message: capped\.message \}\)/, "the throw path's exit line must be capped");
+	assert.match(src, /const capped = capExitMessage\(outcome\);\s*log\("exit", \{ code: capped\.code, reason: capped\.reason, message: capped\.message, \.\.\.meteredExitFields\(\) \}\)/, "the throw path's exit line must be capped");
 	assert.match(src, /loadRetryPredicate\(\{ module: usageMeter\.ok \? usageMeter\.module : null, candidates: resolvePiAiCompat\(\) \}\)/);
 	assert.match(src, /decideExit\(\{[\s\S]*?\n\t\tisRetryable,\n\t\trejected,\n\t\}\);/, "decideExit must receive isRetryable, and the classified rejection");
 });

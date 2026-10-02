@@ -17,6 +17,8 @@ import {
 	VIRTUAL_MODEL_API,
 	wrapModelRuntime,
 	wrapProviderStreams,
+	DISPATCH_MARK,
+	dispatchToken,
 } from "../src/usage-meter.mjs";
 import { COST_CAP, MODEL_NOT_ALLOWED, TOKEN_BUDGET } from "../src/outcome.mjs";
 import { AZURE_GPT_5_4, CODEX_SPARK, FABLE_5, GPT_5_4, GPT_5_5, GPT_5_5_CODEX, SONNET_4_5 } from "./helpers/catalog-models.mjs";
@@ -371,6 +373,132 @@ test("every runtime method is judged: the stream methods and both result methods
 	}
 });
 
+test("issue #543: inside a runtime call's context the compat half skips only that call's own re-entry on its own pair, once", async () => {
+	// The context alone used to decide, so a legacy call a hook, an onPayload or a timer scheduled there made was
+	// judged and counted by neither half. Now only the call whose options carry the context's token, on the token's
+	// model, the first time, is the runtime call's own dispatch.
+	const meter = createUsageMeter({ maxCostMicros: 1_000_000 });
+	const asked = [];
+	// The api is recorded when it is not FLAT's, so the test can tell which same-pair call was skipped.
+	const guard = { enforces: [COST_CAP], admit: ({ model }) => (asked.push(model.api === FLAT.api ? model.id : `${model.id}@${model.api}`), null) };
+	const hardStop = makeHardStopStream({ createStream: () => new FakeStream() });
+	const reached = [];
+	const inner = {
+		streamSimple: (model) => {
+			reached.push(model.id);
+			const stream = new FakeStream();
+			stream.end(message(0.0003));
+			return stream;
+		},
+	};
+	const dispatch = new AsyncLocalStorage();
+	const compat = wrapProviderStreams({ inner, fallbackModels: null, meter, hardStop, guard, dispatch });
+	const OTHER = { ...FLAT, id: "other" };
+	const token = dispatchToken(FLAT);
+	let late;
+	await dispatch.run(token, async () => {
+		await compat.streamSimple(FLAT, {}, { [DISPATCH_MARK]: token }).result(); // the re-entry: skipped
+		await compat.streamSimple(FLAT, {}, {}).result(); // a hook's call on the same model, no mark: judged
+		await compat.streamSimple(FLAT, {}, { [DISPATCH_MARK]: token }).result(); // the token again: already used
+		await compat.streamSimple(OTHER, {}, { [DISPATCH_MARK]: dispatchToken(OTHER) }).result(); // another call's token
+		late = new Promise((resolve) => setTimeout(() => resolve(compat.streamSimple(OTHER, {}, {}).result()), 1)); // scheduled here
+	});
+	await late;
+	// Another runtime call: its token on ANOTHER pair is a forward, a full call judged and counted on its own model
+	// (PR #547's reviews); it does not use the token up, so the call's own re-entry on its pair is still skipped once.
+	const second = dispatchToken(FLAT);
+	await dispatch.run(second, async () => {
+		await compat.streamSimple(OTHER, {}, { [DISPATCH_MARK]: second }).result(); // the forward: judged, counted
+		await compat.streamSimple({ ...FLAT, api: "openai-responses" }, {}, { [DISPATCH_MARK]: second }).result(); // same pair, another api: judged
+		await compat.streamSimple(FLAT, {}, { [DISPATCH_MARK]: second }).result(); // the re-entry: skipped
+	});
+	await flush();
+	assert.deepEqual(reached, ["flat", "flat", "flat", "other", "other", "other", "flat", "flat"], "every call reached its provider");
+	assert.deepEqual(asked, ["flat", "flat", "other", "other", "other", "flat@openai-responses"], "all but the two exact re-entries were judged: the other api is not one");
+	assert.equal(meter.state.calls, 6, "and counted");
+});
+
+/**
+ * A proxy provider behind the runtime half (PR #547's review, round 3): its streamSimple forwards, after an await, to
+ * pi-ai's legacy streamSimple on another model with the options spread, and answers with what the forward answered
+ * (`answer: "pass"`) or with a zero-usage message of its own (`answer: "zero"`, a proxy that drops usage).
+ */
+function proxyRig({ capMicros = null, bounds = {}, answer = "pass", forwardUsage = message(0.0005) }) {
+	const meter = createUsageMeter({ maxCostMicros: capMicros });
+	const guard = capMicros === null ? null : createCostGuard({ capMicros, bound: (_method, model) => bounds[model.id] });
+	const hardStop = makeHardStopStream({ createStream: () => new FakeStream() });
+	const dispatch = new AsyncLocalStorage();
+	const reached = [];
+	const inner = {
+		streamSimple: (model) => {
+			reached.push(model.id);
+			const stream = new FakeStream();
+			stream.end(forwardUsage);
+			return stream;
+		},
+	};
+	const compatEntry = wrapProviderStreams({ inner, fallbackModels: null, meter, hardStop, guard, dispatch });
+	const DEAR = { ...FLAT, id: "dear", provider: "upstream" };
+	class ProxyRuntime {
+		streamSimple(_model, context, options) {
+			const outer = new FakeStream();
+			(async () => {
+				await flush();
+				const forwarded = await compatEntry.streamSimple(DEAR, context, { ...options }).result();
+				outer.end(answer === "pass" || forwarded.stopReason === "aborted" ? forwarded : message(0, { input: 0, totalTokens: 0 }));
+			})();
+			return outer;
+		}
+		stream() {
+			return new FakeStream();
+		}
+	}
+	const layer = wrapModelRuntime({ ModelRuntime: ProxyRuntime, meter, hardStop, guard, dispatch });
+	const CHEAP = { ...FLAT, id: "cheap", provider: "proxy" };
+	return { meter, guard, reached, layer, run: () => new ProxyRuntime().streamSimple(CHEAP, {}, {}).result() };
+}
+
+test("a proxy's forward to another model is a full call on its own bound, and the runtime call keeps its own (PR #547's reviews)", async () => {
+	// Cheap outer, dear target, under a cap the target's bound passes: refused before it is sent.
+	const capped = proxyRig({ capMicros: 1000, bounds: { cheap: 100, dear: 2000 } });
+	try {
+		const refused = await capped.run();
+		await flush();
+		assert.equal(refused.errorMessage, "pi-dispatch: cost cap reached");
+		assert.deepEqual([capped.reached, capped.meter.state.stopReason, capped.guard.state.inflight, capped.meter.state.calls], [[], COST_CAP, 0, 1], "nothing sent; only the runtime call counted");
+	} finally {
+		capped.layer.restore();
+	}
+	// Both bounds held at once (100 + 800 fits 1000; with 950 it would not), and both calls charged and counted: a
+	// passthrough proxy is counted for both calls, the documented residual.
+	const fits = proxyRig({ capMicros: 1000, bounds: { cheap: 100, dear: 800 } });
+	try {
+		const answered = await fits.run();
+		await flush();
+		assert.equal(answered.stopReason, "stop");
+		assert.deepEqual([fits.reached, fits.guard.state.inflight, fits.guard.state.spent, fits.meter.state.calls, fits.meter.usageSnapshot().models.map((row) => row.model).sort()], [["dear"], 0, 1000, 2, ["cheap", "dear"]]);
+	} finally {
+		fits.layer.restore();
+	}
+	const both = proxyRig({ capMicros: 1000, bounds: { cheap: 100, dear: 950 } });
+	try {
+		const refused = await both.run();
+		await flush();
+		assert.equal(refused.errorMessage, "pi-dispatch: cost cap reached", "the runtime call's bound stays in flight while its forward is judged");
+	} finally {
+		both.layer.restore();
+	}
+	// A proxy that drops usage: the forward's usage is still counted.
+	const zero = proxyRig({ answer: "zero" });
+	try {
+		await zero.run();
+		await flush();
+		assert.deepEqual([zero.meter.state.calls, zero.meter.state.total], [2, 10], "the target's 10 tokens counted, the runtime call's zero beside it");
+	} finally {
+		zero.layer.restore();
+	}
+});
+
 test("the compat half judges a legacy call and settles it, and skips a call the runtime half already judged", async () => {
 	const meter = createUsageMeter({ maxCostMicros: 1000 });
 	const guard = createCostGuard({ capMicros: 1000, bound: () => 600 });
@@ -387,7 +515,8 @@ test("the compat half judges a legacy call and settles it, and skips a call the 
 	const dispatch = new AsyncLocalStorage();
 	const compat = wrapProviderStreams({ inner, fallbackModels: null, meter, hardStop, guard, dispatch });
 	// Inside the runtime half's dispatch: routed, never judged twice, never settled twice.
-	await dispatch.run(true, () => compat.streamSimple(FLAT, {}, {})).result();
+	const token = dispatchToken(FLAT);
+	await dispatch.run(token, () => compat.streamSimple(FLAT, {}, { [DISPATCH_MARK]: token })).result();
 	await flush();
 	assert.deepEqual([guard.state.spent, guard.state.inflight, reached.length], [0, 0, 1]);
 	await compat.streamSimple(FLAT, {}, {}).result(); // 0 + 0 + 600: admitted, settles at 300
