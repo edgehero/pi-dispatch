@@ -74,7 +74,7 @@ import { GIT_READ_FLAGS } from "./git-hardening.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { deploymentVenueEnv, sharedShellIgnored } from "./deployment-venue.mjs";
 import { readDeploymentEnv, resolveServiceEnv, serviceEnvFileOf, serviceEnvLoader } from "./service-env.mjs";
-import { imageRefProblem } from "./image-ref.mjs";
+import { imageRefProblem, jobImageFix, pullOffered } from "./image-ref.mjs";
 import { PROXY_STATE_FORMAT, parseProxyState, rulesIncludeEndpoints, shippedProxyDrift } from "./egress-proxy-state.mjs";
 import { PACKAGED_EGRESS_PROXY_CONF, judgeProxyConfCopy, packageCopyName, readPackagedProxyConf } from "./egress-conf-copy.mjs";
 import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, HOST_ROUTE_LAN, HOST_ROUTE_REFUTED, HOST_ROUTE_WORKS, declarationOf, floorShortfall, hostRouteFor, isProxyLocalHost, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
@@ -119,7 +119,7 @@ const PODMAN_BOUNDS_FIX = Object.freeze({
 
 // The podman venue's pull of the deployment's default job image into this account's store (issue #433): the fix line's
 // words and `--fix`'s prompt, one string so the two cannot name different commands.
-const PODMAN_JOB_IMAGE_PULL = "podman pull ghcr.io/edgehero/pi-job:latest && podman tag ghcr.io/edgehero/pi-job:latest pi-job:latest";
+const PODMAN_JOB_IMAGE_PULL = jobImageFix("podman", "pi-job:latest");
 
 // The fix for a trigger-named image without the runner entrypoint, one sentence for either runtime (issue #433).
 const TRIGGER_IMAGE_ENTRYPOINT_FIX = "build your job image FROM this repo's image/Dockerfile so it keeps /entrypoint.sh -- an image without the runner can exit 0 without ever starting the agent, and the queue records that as success (docs/job-image.md)";
@@ -1353,7 +1353,11 @@ export async function collectChecks(shellVars, seams) {
 		fix:
 			imageRun.ended === "timeout"
 				? "restart Docker first: this asked the same daemon that did not answer above, so whether the image is present is unknown rather than false"
-				: "docker pull ghcr.io/edgehero/pi-job:latest && docker tag ghcr.io/edgehero/pi-job:latest pi-job:latest  (or build image/Dockerfile)",
+				: jobImage === "pi-job:latest"
+					? `${jobImageFix("docker", jobImage)}  (or build image/Dockerfile)`
+					: // Issue #523 (review): the image the worker runs, by the rule `up` follows, never ghcr's latest for an
+						// overriding name (which would not make THEIR image exist) and never a pull of a short name.
+						jobImageFix("docker", jobImage),
 		// Prompt tier, and ONLY for the deployment default: a PI_JOB_IMAGE the operator overrode is a trust
 		// choice this command cannot honestly satisfy (pulling ghcr's pi-job would not make THEIR image
 		// exist), so an overridden name keeps the plain fix line -- the same never-tier reasoning as the
@@ -6536,7 +6540,8 @@ export async function podmanChecks(env, seams, { jobImage, jobImageNote = "" }) 
 		checks.push({
 			ok: false,
 			label: `podman: job image is not in this account's Podman store (${jobImage})`,
-			fix: `pull or load it AS THE WORKER'S ACCOUNT, since rootless Podman keeps one image store per account: ${jobImage === "pi-job:latest" ? PODMAN_JOB_IMAGE_PULL : `podman pull ${jobImage}`} -- jobs run with --pull=never, so the worker never fetches it`,
+			// A name no pull is offered for (issue #523, round 2) is built or loaded, never pulled.
+			fix: `${jobImage === "pi-job:latest" || pullOffered(jobImage) ? "pull or load" : "build or load"} it AS THE WORKER'S ACCOUNT, since rootless Podman keeps one image store per account: ${jobImageFix("podman", jobImage)} -- jobs run with --pull=never, so the worker never fetches it`,
 			...(!localUsed && jobImage === "pi-job:latest"
 				? {
 						fixAction: {

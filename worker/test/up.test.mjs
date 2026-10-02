@@ -5,6 +5,7 @@ import { lstatSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { defaultPrompt, runUp, valkeyContainerPublishes } from "../src/up.mjs";
+import { jobImageFix, registryQualified } from "../src/image-ref.mjs";
 import { NETNS_KEEPER_FORMAT } from "../src/podman-stack.mjs";
 import { runInit } from "../src/init.mjs";
 import { readPackagedProxyConf } from "../src/egress-conf-copy.mjs";
@@ -667,6 +668,188 @@ test("up: a failed accepted pull is reported, skips the tag, and still reaches d
 	assert.equal(h.calls.map((c) => c.args).find((a) => a[0] === "tag"), undefined, "no tag of an image that never arrived");
 	assert.equal(h.doctorCalls.length, 1);
 	assert.match(h.text(), /pull FAILED/);
+});
+
+// Issue #523: up checks, and pulls, only the image the worker will run. PI_JOB_IMAGE resolves as the worker resolves it
+// (`PI_JOB_IMAGE || "pi-job:latest"`), from this shell where it sets it and otherwise from the deployment's `.env`. A plan
+// key for one image goes BEFORE `green`'s "docker image inspect": the fake answers with the first prefix that matches.
+const PINNED = "ghcr.io/edgehero/pi-job:2.1.0";
+// A `.env` this account cannot read: present, and its read throws EACCES.
+const EACCES = Symbol("eacces");
+function eaccesOn(h, path) {
+	const read = h.deps.fs.readFileSync;
+	h.deps.fs.readFileSync = (p, ...rest) => {
+		if (p === path) throw Object.assign(new Error(`EACCES: permission denied, open '${p}'`), { code: "EACCES" });
+		return read(p, ...rest);
+	};
+}
+const imageCalls = (h) => h.calls.filter((c) => (c.cmd === "docker" || c.cmd === "podman") && (c.args[0] === "pull" || c.args[0] === "tag" || (c.args[0] === "image" && (c.args[1] === "inspect" || c.args[1] === "exists")))).map((c) => [c.cmd, ...c.args]);
+
+test("up: a PI_JOB_IMAGE that is present is checked by its own name, and nothing is pulled or tagged (#523)", async () => {
+	for (const [label, env, files, from] of [
+		["the shell", { PI_PROVIDER: "anthropic", PI_JOB_IMAGE: PINNED }, {}, "this shell"],
+		["the deployment .env", { PI_PROVIDER: "anthropic" }, { "/deploy/.env": `PI_JOB_IMAGE=${PINNED}\n` }, "/deploy/.env"],
+	]) {
+		const h = harness({ env, files, plan: { [`docker image inspect ${PINNED}`]: 0, "docker image inspect pi-job:latest": 1, ...green, "docker pull": 0, "docker tag": 0 }, listening: true, argv: ["--yes"] });
+		assert.equal(await h.run(), 0, label);
+		assert.deepEqual(imageCalls(h), [["docker", "image", "inspect", PINNED]], `${label}: only the worker's image is asked about`);
+		assert.match(h.text(), new RegExp(`✓ Job image present \\(${PINNED.replace(/\./g, "\\.")}, PI_JOB_IMAGE from ${from.replace(/\./g, "\\.")}\\)`), label);
+		assert.match(h.text(), /job image\s+already present \(ghcr\.io\/edgehero\/pi-job:2\.1\.0\)/, label);
+		assert.doesNotMatch(h.text(), /pull ghcr\.io\/edgehero\/pi-job:latest|tag ghcr|Job image present \(pi-job:latest\)/, `${label}: the default image is never checked or offered`);
+	}
+});
+
+test("up: an absent PI_JOB_IMAGE is pulled by its own name, with no tag, after the command is shown (#523)", async () => {
+	const custom = "registry.example/team/job:7";
+	const h = harness({ env: { PI_PROVIDER: "anthropic", PI_JOB_IMAGE: custom }, plan: { [`docker image inspect ${custom}`]: 1, ...green, "docker pull": 0, "docker tag": 0 }, listening: true, argv: ["--yes"] });
+	assert.equal(await h.run(), 0);
+	assert.deepEqual(imageCalls(h), [["docker", "image", "inspect", custom], ["docker", "pull", custom]]);
+	assert.match(h.text(), /The job image PI_JOB_IMAGE from this shell names \(registry\.example\/team\/job:7\) is not on this host\. up would run:\n {2}docker pull registry\.example\/team\/job:7\n/);
+	assert.match(h.text(), /job image\s+pulled registry\.example\/team\/job:7\n/);
+	// Declined: nothing runs, and the summary names the image that is missing.
+	const no = harness({ env: { PI_PROVIDER: "anthropic", PI_JOB_IMAGE: custom }, plan: { [`docker image inspect ${custom}`]: 1, ...green }, listening: true, answers: [""] });
+	await no.run();
+	assert.deepEqual(imageCalls(no), [["docker", "image", "inspect", custom]]);
+	assert.match(no.text(), /job image\s+skipped \(declined\): registry\.example\/team\/job:7 is not present/);
+});
+
+test("up: an absent SHORT PI_JOB_IMAGE is never pulled, under --yes too, and up says how to provide it (#523 review)", async () => {
+	for (const short of ["pi-job:2.1.0", "my-job:dev", "team/job:7", "my.job:dev"]) {
+		const h = harness({ env: { PI_PROVIDER: "anthropic", PI_JOB_IMAGE: short }, plan: { [`docker image inspect ${short}`]: 1, ...green, "docker pull": 0, "docker tag": 0 }, listening: true, argv: ["--yes"] });
+		assert.equal(await h.run(), 0, short);
+		assert.deepEqual(imageCalls(h), [["docker", "image", "inspect", short]], `${short}: checked, never pulled`);
+		assert.match(h.text(), /and up does not pull it: .* names no registry host/, short);
+		assert.ok(h.text().includes(`and up does not pull it: ${jobImageFix("docker", short)}\n`), `${short}: the one text doctor's fix line uses too`);
+		assert.match(h.text(), /build it on this host, `docker tag` an image you have as .*, or set PI_JOB_IMAGE to a registry-qualified name/, short);
+		assert.doesNotMatch(h.text(), /up would run:\n {2}docker pull/, short);
+		assert.equal(h.doctorCalls.length, 1, `${short}: doctor still runs and judges the missing image`);
+	}
+	// The same on podman, in this account's store.
+	const p = harness({ env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "podman", PI_JOB_IMAGE: "pi-job:2.1.0" }, plan: { "podman image exists": 1, "podman inspect": 1, systemctl: 0, "loginctl show-user": { code: 0, output: "Linger=yes\n" }, "podman pull": 0 }, listening: false, argv: ["--yes"], files: { "/deploy/egress-allowlist.conf": "x\n", "/deploy/deploy/egress-proxy.conf": "conf\n" }, extra: podmanExtra() });
+	assert.equal(await p.run(), 0);
+	assert.deepEqual(imageCalls(p), [["podman", "image", "exists", "pi-job:2.1.0"]]);
+	assert.match(p.text(), /`podman tag` an image you have as pi-job:2\.1\.0/);
+});
+
+test("up: an absent localhost/ name is a locally built one, never offered as a pull; localhost:<port>/ is a registry and is (#523 round 2)", async () => {
+	for (const bin of ["docker", "podman"]) {
+		const local = "localhost/my-job:dev";
+		const podman = bin === "podman";
+		const h = harness({
+			env: { PI_PROVIDER: "anthropic", PI_JOB_IMAGE: local, ...(podman ? { PI_BACKENDS: "podman" } : {}) },
+			plan: podman ? { "podman image exists": 1, "podman inspect": 1, systemctl: 0, "loginctl show-user": { code: 0, output: "Linger=yes\n" }, "podman pull": 0 } : { [`docker image inspect ${local}`]: 1, ...green, "docker pull": 0 },
+			listening: !podman,
+			argv: ["--yes"],
+			...(podman ? { files: { "/deploy/egress-allowlist.conf": "x\n", "/deploy/deploy/egress-proxy.conf": "conf\n" }, extra: podmanExtra() } : {}),
+		});
+		assert.equal(await h.run(), 0, bin);
+		assert.deepEqual(imageCalls(h), [[bin, "image", podman ? "exists" : "inspect", local]], `${bin}: checked, never pulled`);
+		assert.ok(h.text().includes(`and up does not pull it: localhost/my-job:dev is a locally built name (localhost/ is no registry to pull from): build it on this host, or \`${bin} tag\` an image you have as localhost/my-job:dev\n`), bin);
+		assert.match(h.text(), /not pulled, since it is a locally built name/, bin);
+	}
+	const port = "localhost:5000/team/job:7";
+	const h = harness({ env: { PI_PROVIDER: "anthropic", PI_JOB_IMAGE: port }, plan: { [`docker image inspect ${port}`]: 1, ...green, "docker pull": 0 }, listening: true, argv: ["--yes"] });
+	await h.run();
+	assert.deepEqual(imageCalls(h), [["docker", "image", "inspect", port], ["docker", "pull", port]]);
+});
+
+test("registryQualified: the docker reference grammar's registry host (#523 review)", () => {
+	for (const q of ["ghcr.io/edgehero/pi-job:2.1.0", "registry.example/team/job:7", "localhost:5000/job", "localhost/pi-job:dev", "host:5000/a/b@sha256:abc"]) assert.equal(registryQualified(q), true, q);
+	for (const s of ["pi-job:2.1.0", "my.job:dev", "team/job:7", "edgehero/pi-job:latest", "ghcr.io", "local/job"]) assert.equal(registryQualified(s), false, s);
+});
+
+test("up: PI_JOB_IMAGE unset, empty or pi-job:latest is today's default: pi-job:latest checked, ghcr's latest pulled and tagged (#523)", async () => {
+	for (const [label, env, files] of [
+		["unset", { PI_PROVIDER: "anthropic" }, {}],
+		["empty in .env (the worker's ||)", { PI_PROVIDER: "anthropic" }, { "/deploy/.env": "PI_JOB_IMAGE=\n" }],
+		["named as the default", { PI_PROVIDER: "anthropic", PI_JOB_IMAGE: "pi-job:latest" }, {}],
+	]) {
+		const h = harness({ env, files, plan: { ...green, "docker image inspect": 1, "docker pull": 0, "docker tag": 0 }, listening: true, argv: ["--yes"] });
+		assert.equal(await h.run(), 0, label);
+		assert.deepEqual(imageCalls(h), [["docker", "image", "inspect", "pi-job:latest"], ["docker", ...PULL], ["docker", ...TAG]], label);
+	}
+});
+
+test("up: when it cannot tell which image the worker runs, it checks and pulls none, and says why (#523)", async () => {
+	for (const [label, env, files, said, platform = "linux"] of [
+		["shell and .env disagree", { PI_PROVIDER: "anthropic", PI_JOB_IMAGE: PINNED }, { "/deploy/.env": "PI_JOB_IMAGE=pi-job:latest\n" }, /PI_JOB_IMAGE is "ghcr\.io\/edgehero\/pi-job:2\.1\.0" in this shell and "pi-job:latest" in \/deploy\/\.env, so up cannot tell which job image the worker runs: it checks and pulls none/],
+		["a value the worker refuses at boot", { PI_PROVIDER: "anthropic", PI_JOB_IMAGE: "--help" }, {}, /PI_JOB_IMAGE must not start with "-".*the worker refuses to boot on it, so up checks and pulls no job image/],
+		["a .env line the loader reads differently", { PI_PROVIDER: "anthropic" }, { "/deploy/.env": "PI_JOB_IMAGE='x'y\n" }, /has a line in it that the service's loader may read differently from this reader, so up cannot tell which job image the worker runs/],
+		// A file the service's loader reads differently somewhere that names the key: no value from it, said (hazardSkipped).
+		// Off Linux, since on Linux the venue read refuses such a file before any image step (pinned below).
+		["a .env holding a NUL (macOS)", { PI_PROVIDER: "anthropic" }, { "/deploy/.env": Buffer.from(`PI_JOB_IMAGE=${PINNED}\nA=\u0000\n`) }, /has a line in it that the service's loader may read differently/, "darwin"],
+		["a .env with an open quote after it (macOS)", { PI_PROVIDER: "anthropic" }, { "/deploy/.env": `PI_JOB_IMAGE=${PINNED}\nA="x\n` }, /has a line in it that the service's loader may read differently/, "darwin"],
+		// Round 2: the shell sets the key and the file names ANOTHER value after a hazard line. The resolver records nothing
+		// for a key the shell sets, so this was credited to .env and the disagreement went unseen.
+		["the shell sets it and .env names another after a hazard (macOS)", { PI_PROVIDER: "anthropic", PI_JOB_IMAGE: PINNED }, { "/deploy/.env": `A="x\nPI_JOB_IMAGE=registry.example/other:1\n` }, /has a line in it that the service's loader may read differently from this reader \(line 1\), so up cannot tell/, "darwin"],
+		// Unreadable is not unset: the service may read a PI_JOB_IMAGE this account cannot.
+		["an EACCES .env and no shell value", { PI_PROVIDER: "anthropic" }, { "/deploy/.env": EACCES }, /\/deploy\/\.env could not be read, so up cannot tell which job image the worker runs \(PI_JOB_IMAGE\): it checks and pulls none/],
+	]) {
+		const h = harness({ env, files, platform, plan: { ...green, "docker image inspect": 1, "docker pull": 0, "docker tag": 0 }, listening: true, argv: ["--yes"] });
+		if (files["/deploy/.env"] === EACCES) eaccesOn(h, "/deploy/.env");
+		assert.equal(await h.run(), 0, label);
+		assert.deepEqual(imageCalls(h), [], `${label}: no image is asked about or pulled`);
+		assert.match(h.text(), said, label);
+		assert.match(h.text(), /job image\s+not checked: which image the worker runs is unknown/, label);
+	}
+	// On Linux such a file stops up before any image step, so nothing is pulled there either.
+	for (const raw of [Buffer.from(`PI_JOB_IMAGE=${PINNED}\nA=\u0000\n`), Buffer.concat([Buffer.from(`PI_JOB_IMAGE=${PINNED}\nA=`), Buffer.from([0xff, 0x0a])])]) {
+		const h = harness({ env: { PI_PROVIDER: "anthropic" }, files: { "/deploy/.env": raw }, plan: { ...green, "docker pull": 0 }, listening: true, argv: ["--yes"] });
+		assert.equal(await h.run(), 1);
+		assert.deepEqual(imageCalls(h), []);
+	}
+	// The podman step skips on the same verdict: never `podman image exists undefined`.
+	const p = harness({ env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "podman", PI_JOB_IMAGE: PINNED }, plan: { "podman image exists": 1, "podman inspect": 1, systemctl: 0, "loginctl show-user": { code: 0, output: "Linger=yes\n" }, "podman pull": 0, "podman tag": 0 }, listening: false, argv: ["--yes"], files: { "/deploy/egress-allowlist.conf": "x\n", "/deploy/deploy/egress-proxy.conf": "conf\n", "/deploy/.env": "PI_BACKENDS=podman\nPI_JOB_IMAGE=pi-job:latest\n" }, extra: podmanExtra() });
+	assert.equal(await p.run(), 0);
+	assert.deepEqual(imageCalls(p), [], "podman: no image is asked about or pulled");
+	assert.match(p.text(), /podman job image\s+not checked: which image the worker runs is unknown/);
+});
+
+test("up: the shell and .env spelling the SAME image differently is not a disagreement (#523 review)", async () => {
+	// "" is the worker's default (`||`), as pi-job:latest is: the default step runs, and nothing is refused.
+	const h = harness({ env: { PI_PROVIDER: "anthropic", PI_JOB_IMAGE: "" }, files: { "/deploy/.env": "PI_JOB_IMAGE=pi-job:latest\n" }, plan: { ...green, "docker image inspect": 1, "docker pull": 0, "docker tag": 0 }, listening: true, argv: ["--yes"] });
+	assert.equal(await h.run(), 0);
+	assert.doesNotMatch(h.text(), /cannot tell which job image/);
+	assert.deepEqual(imageCalls(h), [["docker", "image", "inspect", "pi-job:latest"], ["docker", ...PULL], ["docker", ...TAG]]);
+});
+
+test("up: a PI_JOB_IMAGE from this shell only says an installed service reads .env instead (#523 review)", async () => {
+	const said = /⚠ PI_JOB_IMAGE comes from this shell only: a worker started from this shell runs ghcr\.io\/edgehero\/pi-job:2\.1\.0, but an installed service reads \/deploy\/\.env, not this shell \(init writes PI_JOB_IMAGE=pi-job:latest there\)/;
+	for (const [label, files] of [["no .env", {}], [".env without the key", { "/deploy/.env": "A=1\n" }]]) {
+		const h = harness({ env: { PI_PROVIDER: "anthropic", PI_JOB_IMAGE: PINNED }, files, plan: { [`docker image inspect ${PINNED}`]: 0, ...green }, listening: true });
+		await h.run();
+		assert.match(h.text(), said, label);
+		assert.match(h.text(), /PI_JOB_IMAGE from this shell\)/, label);
+	}
+	// Both setting the same value, or only the file, or neither: no such line.
+	for (const [label, env, files] of [["both", { PI_PROVIDER: "anthropic", PI_JOB_IMAGE: PINNED }, { "/deploy/.env": `PI_JOB_IMAGE=${PINNED}\n` }], ["file only", { PI_PROVIDER: "anthropic" }, { "/deploy/.env": `PI_JOB_IMAGE=${PINNED}\n` }], ["neither", { PI_PROVIDER: "anthropic" }, {}]]) {
+		const h = harness({ env, files, plan: { [`docker image inspect ${PINNED}`]: 0, ...green }, listening: true });
+		await h.run();
+		assert.doesNotMatch(h.text(), /comes from this shell only/, label);
+	}
+});
+
+test("jobImageFix: one text for up and doctor: the default pull and tag, a qualified pull, a short name never pulled (#523 review)", () => {
+	assert.equal(jobImageFix("docker", "pi-job:latest"), "docker pull ghcr.io/edgehero/pi-job:latest && docker tag ghcr.io/edgehero/pi-job:latest pi-job:latest");
+	assert.equal(jobImageFix("podman", PINNED), `podman pull ${PINNED}`);
+	const short = jobImageFix("podman", "pi-job:2.1.0");
+	assert.doesNotMatch(short, /podman pull/);
+	assert.match(short, /^pi-job:2\.1\.0 names no registry host.*build it on this host, `podman tag` an image you have as pi-job:2\.1\.0, or set PI_JOB_IMAGE to a registry-qualified name/);
+	assert.equal(jobImageFix("docker", "localhost/my-job:dev"), "localhost/my-job:dev is a locally built name (localhost/ is no registry to pull from): build it on this host, or `docker tag` an image you have as localhost/my-job:dev");
+	assert.equal(jobImageFix("docker", "localhost:5000/job"), "docker pull localhost:5000/job");
+});
+
+test("up on podman: the same rule, in this account's store: a present PI_JOB_IMAGE is left alone, an absent one is pulled untagged (#523)", async () => {
+	const base = { "podman inspect": 1, systemctl: 0, "loginctl show-user": { code: 0, output: "Linger=yes\n" }, "podman pull": 0, "podman tag": 0 };
+	const files = { "/deploy/egress-allowlist.conf": "api.anthropic.com\n", "/deploy/deploy/egress-proxy.conf": "conf\n", "/deploy/.env": `PI_BACKENDS=podman\nPI_JOB_IMAGE=${PINNED}\n` };
+	const present = harness({ env: { PI_PROVIDER: "anthropic" }, plan: { [`podman image exists ${PINNED}`]: 0, "podman image exists": 1, ...base }, listening: false, argv: ["--yes"], files: { ...files }, extra: podmanExtra() });
+	assert.equal(await present.run(), 0);
+	assert.deepEqual(imageCalls(present), [["podman", "image", "exists", PINNED]]);
+	assert.match(present.text(), /✓ Job image present in this account's Podman store \(ghcr\.io\/edgehero\/pi-job:2\.1\.0, PI_JOB_IMAGE from \/deploy\/\.env\)/);
+	const absent = harness({ env: { PI_PROVIDER: "anthropic" }, plan: { "podman image exists": 1, ...base }, listening: false, argv: ["--yes"], files: { ...files }, extra: podmanExtra() });
+	assert.equal(await absent.run(), 0);
+	assert.deepEqual(imageCalls(absent), [["podman", "image", "exists", PINNED], ["podman", "pull", PINNED]]);
+	assert.match(absent.text(), /podman job image\s+pulled ghcr\.io\/edgehero\/pi-job:2\.1\.0\n/);
 });
 
 test("defaultPrompt: non-TTY stdin declines immediately without readline (the event-loop-drain trap)", async () => {

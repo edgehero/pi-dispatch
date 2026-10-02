@@ -7635,6 +7635,31 @@ test("the podman job image is read from THIS account's store, and its anyUid rul
 	assert.match(imageUid.text, /✓ podman: jobs run as uid:gid 1001:1001 \(passed as --user, with --userns=keep-id\)/, "uid 1001 is the image's own, anyUid or not");
 });
 
+test("doctor's missing-job-image fix follows up's rule: the default pull and tag, a qualified name's own pull, a short name never pulled (#523)", async () => {
+	// docker: the fix line for the image PI_JOB_IMAGE names, never ghcr's latest for an overriding name.
+	for (const [image, fix] of [
+		["pi-job:latest", "docker pull ghcr.io/edgehero/pi-job:latest && docker tag ghcr.io/edgehero/pi-job:latest pi-job:latest  (or build image/Dockerfile)"],
+		["ghcr.io/edgehero/pi-job:2.1.0", "docker pull ghcr.io/edgehero/pi-job:2.1.0"],
+		["pi-job:2.1.0", "pi-job:2.1.0 names no registry host, so a pull would fetch whatever a public registry holds under that name: build it on this host, `docker tag` an image you have as pi-job:2.1.0, or set PI_JOB_IMAGE to a registry-qualified name (such as ghcr.io/edgehero/pi-job:<version>)"],
+	]) {
+		const { out, text } = capture();
+		await runDoctor({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_JOB_IMAGE: image }, { out, cwd: tmpdir(), spawn: fakeSpawn({ ...EGRESS_OK, "docker info": 0, "docker image": 1 }), probeValkey: async () => false, fileExists: () => true, nodeVersion: "22.19.0" });
+		assert.ok(text().includes(`✗ Job image present (${image})\n    → ${fix}\n`), `${image}: ${text()}`);
+	}
+	// podman: the same helper inside the account-store sentence.
+	// Round 2: the lead-in never suggests a pull for a name no pull is offered for (short, or localhost/).
+	for (const [image, lead, fix] of [
+		["ghcr.io/edgehero/pi-job:2.1.0", "pull or load", "podman pull ghcr.io/edgehero/pi-job:2.1.0"],
+		["pi-job:2.1.0", "build or load", "pi-job:2.1.0 names no registry host, so a pull would fetch whatever a public registry holds under that name: build it on this host, `podman tag` an image you have as pi-job:2.1.0"],
+		["localhost/my-job:dev", "build or load", "localhost/my-job:dev is a locally built name (localhost/ is no registry to pull from): build it on this host, or `podman tag` an image you have as localhost/my-job:dev"],
+	]) {
+		const { out, text } = capture();
+		await runDoctor(podmanEnv({ PI_JOB_IMAGE: image }), podmanDeps(out, podmanPlan({ image: false })));
+		assert.ok(text().includes(`→ ${lead} it AS THE WORKER'S ACCOUNT, since rootless Podman keeps one image store per account: ${fix}`), `${image}: ${text()}`);
+		assert.doesNotMatch(text(), image.startsWith("ghcr") ? /podman pull ghcr\.io\/edgehero\/pi-job:latest/ : new RegExp(`podman pull ${image.replace(/[./]/g, "\\$&")}`), image);
+	}
+});
+
 test("with egress armed the podman proxy is read under podman, and the docker egress checks do not run for a podman-only deployment (#354)", async () => {
 	const run = async (proxy) => {
 		const { out, text } = capture();

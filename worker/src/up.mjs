@@ -8,8 +8,10 @@
  * Doctrine this module must never drift from:
  *   - init's never-clobber is contractual: up always calls runInit, and it always leaves existing
  *     files (and an existing WEBHOOK_SECRET value) untouched — see env-file.mjs.
- *   - up only ever pulls the repo's OWN default image (ghcr.io/edgehero/pi-job:latest, re-tagged
- *     pi-job:latest). NEVER a trigger-named run.image: those are operator-declared and doctor's
+ *   - up only ever pulls the image the worker will run as its deployment default, and only when it is
+ *     absent (issue #523): the repo's own ghcr.io/edgehero/pi-job:latest, re-tagged pi-job:latest, when
+ *     PI_JOB_IMAGE is unset, and otherwise exactly the image PI_JOB_IMAGE names, with no tag.
+ *     NEVER a trigger-named run.image: those are operator-declared and doctor's
  *     presence check covers them — a setup convenience must not become "pull whatever the triggers
  *     file happens to name" (the same reasoning as jobs running with --pull=never).
  *   - no secrets printed: the generated WEBHOOK_SECRET is announced, never echoed.
@@ -39,11 +41,13 @@ import { dirname, join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PODMAN_BOOT_REFUSING_CAUSES, makePodmanInfoReader, decidePodmanJobUser, podmanJobUserRefusal } from "./backend-podman.mjs";
 import { venuesOf } from "./backends.mjs";
-import { logsDirPath, settingsFilePath } from "./config.mjs";
+import { jobImageFrom, logsDirPath, settingsFilePath } from "./config.mjs";
+import { jobImageFix, pullOffered, registryQualified } from "./image-ref.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed as egressArmedFn, egressProxyName } from "./egress.mjs";
 import { envKeyIsBlank, envValueShown, readEnvAssignments, updateEnvFile } from "./env-file.mjs";
 import { COMPOSE_FILE, COMPOSE_VALKEY_OVERRIDE, OWNER_MARKER_KEY, VALKEY_PASSWORD_KEY, VALKEY_PORT_KEY, OWNER_CHECK_CONTAINER, OWNER_CHECK_EXEC, VALKEY_VOLUME_RECORD, adoptVolumeQuestion, composeArgs, ownerCheckAnswer, readVolumeRecord, valkeyOwnerCheckArgs, volumeRecordMatches, volumeRecordText, composeProjectName, foreignContainerSentence, foreignMarkerRefusal, foreignVolumeLabelRefusal, foreignVolumeRefusal, foreignVolumeUsers, isLoopbackHost, newValkeyPassword, unadoptedVolumeRefusal, valkeyContainerOwner, valkeyDockerRunArgs, valkeyPasswordDecision, valkeyPortEnvDecision, valkeyVolumeCreateArgs, valkeyVolumeOwner } from "./valkey-auth.mjs";
 import { deploymentValkeyEnv, deploymentVenueEnv } from "./deployment-venue.mjs";
+import { resolveServiceEnv, serviceEnvFileOf, serviceEnvLoader } from "./service-env.mjs";
 import { PACKAGED_EGRESS_PROXY_CONF, judgeProxyConfCopy, packageCopyName, readPackagedProxyConf, replaceProxyConfCopy } from "./egress-conf-copy.mjs";
 import { EGRESS_PROXY_IMAGE, MODEL_ENDPOINTS_TARGET, PROXY_STATE_FORMAT, jobNetworksOf, parseProxyState, rulesIncludeEndpoints, shippedProxyDrift } from "./egress-proxy-state.mjs";
 import { endpointsDeclaredIn, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
@@ -53,9 +57,12 @@ import { DEFAULT_VALKEY_PORT, proxyConfCopyPath, NETNS_KEEPER, NETNS_KEEPER_FORM
 // The shipped Quadlet templates, module-relative like service.mjs's: worker/deploy in a checkout, <pkg>/deploy under npm.
 const TEMPLATES_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "deploy");
 
-// The one image up may ever fetch, and the local name jobs run under. Literal on purpose (not
-// env.PI_JOB_IMAGE): an operator who pointed PI_JOB_IMAGE elsewhere has outgrown the quickstart, and
-// up pulling an arbitrary configured name would break the only-our-own-image doctrine above.
+// The default image up fetches, and the local name jobs run under when PI_JOB_IMAGE is unset: the worker's own default
+// (`jobImageFrom`, `PI_JOB_IMAGE || "pi-job:latest"`) is a local-only tag with no registry behind it, so the re-tag is
+// what makes the pulled image the one the worker runs. It is load-bearing for that default ONLY. Issue #523: up used to
+// check and pull these two whatever PI_JOB_IMAGE said, so a deployment running ghcr.io/edgehero/pi-job:2.1.0, present
+// on the host, was handed a 3 GB pull of an image its worker never runs. An image PI_JOB_IMAGE names is now checked
+// under that name and, when absent, pulled under that name (`overrideImageStep`), and these two are never touched.
 const UPSTREAM_IMAGE = "ghcr.io/edgehero/pi-job:latest";
 const LOCAL_IMAGE = "pi-job:latest";
 const PULL_ARGS = ["pull", UPSTREAM_IMAGE];
@@ -253,6 +260,12 @@ export async function runUp(argv = [], deps = {}) {
 	else
 	out("pi-dispatch up — one pass over the quickstart; every docker action asks first (--yes accepts)\n\n");
 
+	// Issue #523: the image the worker will run as its deployment default, resolved as the worker resolves it, from where
+	// the service reads it. Both image steps below check (and offer to pull) this image and no other.
+	const jobImage = deploymentJobImage({ env, fs, envPath: join(cwd, ".env"), platform });
+	if (jobImage.skip) out(`⚠ ${jobImage.skip}\n`);
+	if (jobImage.note) out(`⚠ ${jobImage.note}\n`);
+
 	if (dockerUsed) {
 	// (a) docker binary + daemon, before anything is offered: every mutation below runs through the
 	// docker CLI, so with the daemon down the prompts would only collect consent for failures.
@@ -266,7 +279,9 @@ export async function runUp(argv = [], deps = {}) {
 	out("✓ Docker daemon reachable\n");
 
 	// (b) the default job image. Presence first, so the happy path re-run prompts for nothing.
-	if (await runCmd(spawn, "docker", ["image", "inspect", LOCAL_IMAGE]) === 0) {
+	if (jobImage.skip) summary.push(["job image", "not checked: which image the worker runs is unknown (see above)"]);
+	else if (!jobImage.isDefault) await overrideImageStep({ bin: "docker", jobImage, spawn, out, yes, prompt, summary });
+	else if (await runCmd(spawn, "docker", ["image", "inspect", LOCAL_IMAGE]) === 0) {
 		out(`✓ Job image present (${LOCAL_IMAGE})\n`);
 		summary.push(["job image", `already present (${LOCAL_IMAGE})`]);
 	} else {
@@ -307,7 +322,7 @@ export async function runUp(argv = [], deps = {}) {
 			out("  the docker steps above are unaffected; the podman steps below are skipped\n");
 		} else {
 			podmanReady = true;
-			await podmanImageStep({ spawn, out, yes, prompt, summary });
+			await podmanImageStep({ jobImage, spawn, out, yes, prompt, summary });
 		}
 	}
 
@@ -1119,8 +1134,120 @@ async function podmanGate({ readPodmanInfo, platform, euid, egid, out }) {
 	return { ok: false, why };
 }
 
+/**
+ * The job image the worker will run as its deployment default (issue #523), as `up` must judge it:
+ * `{ image, isDefault, from, skip }`. The worker's own rule (`jobImageFrom`: `PI_JOB_IMAGE || "pi-job:latest"`, then
+ * the one image rule), over the value the service reads (`resolveServiceEnv`, doctor's resolver): this shell's where
+ * it sets the key, else the deployment `.env`'s, read with the service's own loader. Where `up` cannot tell which image
+ * that is (the shell and the file disagree, the file's line or the file itself is one the loader reads differently,
+ * or the worker refuses the value at boot), `skip` says why and nothing is checked or pulled: a guess here is exactly
+ * the 3 GB pull of an image the worker never runs that this exists to stop. Doctor, below, names each of those cases.
+ */
+export function deploymentJobImage({ env, fs, envPath, platform }) {
+	let file = null;
+	let unreadable = false;
+	if (fs.existsSync(envPath)) {
+		try {
+			// Bytes, as the service's loader meets them (`serviceEnvFileOf` judges what systemd refuses to load).
+			file = serviceEnvFileOf(fs.readFileSync(envPath), envPath, serviceEnvLoader(platform));
+		} catch {
+			// Unreadable is not unset: the service may well read a PI_JOB_IMAGE this account cannot.
+			unreadable = true;
+			if (typeof env.PI_JOB_IMAGE !== "string") return { skip: `${envPath} could not be read, so up cannot tell which job image the worker runs (PI_JOB_IMAGE): it checks and pulls none` };
+		}
+	}
+	// A file the service's loader reads differently somewhere, which spells the key, gives no value (round 2): where this
+	// shell sets the key `resolveServiceEnv` records nothing for it, so the shell's value was credited to `.env` and a
+	// different value on a line after the hazard went unseen. Cannot tell, whoever sets it.
+	if (file?.hazard && file.text.includes("PI_JOB_IMAGE")) {
+		return { skip: `${envPath} has a line in it that the service's loader may read differently from this reader (line ${file.hazard.line}), so up cannot tell which job image the worker runs: it checks and pulls none. Doctor below names the line` };
+	}
+	const read = resolveServiceEnv({ env, file, keys: ["PI_JOB_IMAGE"] });
+	// Compared as the worker READS them (review), as `deploymentVenueEnv` compares the venue keys: an empty value and
+	// `pi-job:latest` are both the default, and refusing them sent an operator to reconcile two values that agree.
+	const [disagreement] = read.disagreements.filter((d) => jobImageMeaning(d.shell) !== jobImageMeaning(d.file));
+	if (disagreement) {
+		return { skip: `PI_JOB_IMAGE is ${JSON.stringify(disagreement.shell)} in this shell and ${JSON.stringify(disagreement.file)} in ${envPath}, so up cannot tell which job image the worker runs: it checks and pulls none. Make them agree (the service runs the file's), then re-run` };
+	}
+	// `hazardSkipped` is answered above, before the resolver, whoever sets the key.
+	if (read.unread.length > 0) {
+		return { skip: `${envPath} has a line in it that the service's loader may read differently from this reader, so up cannot tell which job image the worker runs: it checks and pulls none. Doctor below names the line` };
+	}
+	let image;
+	try {
+		image = jobImageFrom(read.env);
+	} catch (err) {
+		return { skip: `${err.message}: the worker refuses to boot on it, so up checks and pulls no job image. Fix PI_JOB_IMAGE, then re-run` };
+	}
+	const shellSet = typeof env.PI_JOB_IMAGE === "string" && env.PI_JOB_IMAGE !== "";
+	// The file sets no PI_JOB_IMAGE of its own: there is none, or `resolveServiceEnv` found the key in this shell only.
+	const fileLacks = !unreadable && (file === null || read.shellOnly.includes("PI_JOB_IMAGE"));
+	const from = shellSet && (fileLacks || unreadable) ? "this shell" : Object.hasOwn(read.fromFile, "PI_JOB_IMAGE") || shellSet ? envPath : null;
+	// Said, never silent (review): a worker started by hand from this shell runs this image, an installed service does
+	// not, since it reads `.env` (where init writes PI_JOB_IMAGE=pi-job:latest), so the image up readies may not be its.
+	const note = shellSet && fileLacks ? `PI_JOB_IMAGE comes from this shell only: a worker started from this shell runs ${image}, but an installed service reads ${envPath}, not this shell (init writes PI_JOB_IMAGE=pi-job:latest there), so put it there if the service should run it` : null;
+	return { image, isDefault: image === LOCAL_IMAGE, from, note, skip: null };
+}
+
+/** What a PI_JOB_IMAGE value means to the worker (`jobImageFrom`), for comparing two spellings of it; a refused value keeps its raw spelling. */
+function jobImageMeaning(value) {
+	try {
+		return `image:${jobImageFrom({ PI_JOB_IMAGE: value })}`;
+	} catch {
+		return `raw:${value}`;
+	}
+}
+
+/**
+ * The image an overriding PI_JOB_IMAGE names (issue #523), into the store `bin` reads: present is left alone, absent is
+ * offered as ONE pull of exactly that name when it names its registry (a short name is never pulled). No tag: the worker runs the name as configured, so `pi-job:latest` means
+ * nothing to it, and re-pointing that tag would change what a later unset PI_JOB_IMAGE runs. The name is the operator's
+ * own configuration, shown in full before consent, and jobs still run with --pull=never.
+ */
+async function overrideImageStep({ bin, jobImage, spawn, out, yes, prompt, summary }) {
+	const { image, from } = jobImage;
+	const podman = bin === "podman";
+	const row = podman ? "podman job image" : "job image";
+	const where = podman ? "in this account's Podman store" : "on this host";
+	const named = `PI_JOB_IMAGE from ${from}`;
+	const pullArgs = ["pull", image];
+	if ((await runCmd(spawn, bin, podman ? ["image", "exists", image] : ["image", "inspect", image])) === 0) {
+		out(`✓ Job image present ${podman ? "in this account's Podman store " : ""}(${image}, ${named})\n`);
+		summary.push([row, `already present (${image})`]);
+		return;
+	}
+	// A SHORT name is never pulled (issue #523, review): with no registry host the runtime resolves it on Docker Hub (or
+	// podman's search registries), where anyone can publish `pi-job:2.1.0` or `my-job:dev`, and under --yes that would
+	// fetch and later run a stranger's image unprompted. Such a name is almost always one built or tagged here, so up
+	// says how to provide it and pulls nothing; doctor below still fails on the missing image. A `localhost/` name
+	// (round 2) is a locally built one with no registry behind it, so it is never offered as a pull either.
+	if (!pullOffered(image)) {
+		out(`✗ The job image ${named} names (${image}) is not ${where}, and up does not pull it: ${jobImageFix(bin, image)}\n`);
+		summary.push([row, `${image} is not present: not pulled, since ${registryQualified(image) ? "it is a locally built name" : "it names no registry host"} (build or tag it here)`]);
+		return;
+	}
+	const accepted = await consent(`The job image ${named} names (${image}) is not ${where}. up would run:`, [`${bin} ${pullArgs.join(" ")}`], { yes, out, prompt });
+	if (!accepted) {
+		out("skipped: pull it later with the command above\n");
+		summary.push([row, `skipped (declined): ${image} is not present, and jobs run with --pull=never, so nothing fetches it later`]);
+	} else if ((await runStreamed(spawn, bin, pullArgs, out)) !== 0) {
+		out(`✗ ${bin} pull failed: continuing; doctor below will re-check the image\n`);
+		summary.push([row, `pull of ${image} FAILED: re-run \`pi-dispatch up\`, or pull it by hand`]);
+	} else {
+		out(`✓ pulled ${image}${podman ? " into this account's Podman store" : ""}\n`);
+		summary.push([row, `pulled ${image}`]);
+	}
+}
+
 /** The default job image into this account's Podman store, mirroring the docker step (b) line for line. */
-async function podmanImageStep({ spawn, out, yes, prompt, summary }) {
+async function podmanImageStep({ jobImage, spawn, out, yes, prompt, summary }) {
+	// The same rule as docker's step (issue #523): only the image the worker runs, under its own name when PI_JOB_IMAGE
+	// names one. The podman venue reads the same key (`jobImageFrom`), so its store needs exactly that image too.
+	if (jobImage.skip) {
+		summary.push(["podman job image", "not checked: which image the worker runs is unknown (see above)"]);
+		return;
+	}
+	if (!jobImage.isDefault) return overrideImageStep({ bin: "podman", jobImage, spawn, out, yes, prompt, summary });
 	if ((await runCmd(spawn, "podman", PODMAN_EXISTS_ARGS)) === 0) {
 		out(`✓ Job image present in this account's Podman store (${LOCAL_IMAGE})\n`);
 		summary.push(["podman job image", `already present (${LOCAL_IMAGE})`]);

@@ -119,8 +119,13 @@ the loader flags carry the posture you expect. Running a container can observe b
 1. **Build or pull it on the machine running the worker.** Jobs launch with `--pull=never`, so the worker
    will **never** fetch an image at job time. This is on purpose: an image name is per-trigger config, and
    a typo must not become a silent pull-and-execute of whatever answers to that name in a registry.
-   `pi-dispatch up` will do the pull and the re-tag for you (consent prompted per action), but **only for the
-   deployment default**: `ghcr.io/edgehero/pi-job:latest`, tagged `pi-job:latest`. It never pulls a
+   `pi-dispatch up` will do the pull for you (consent prompted per action), but **only for the deployment
+   default**, and only when it is absent. With `PI_JOB_IMAGE` unset that is `ghcr.io/edgehero/pi-job:latest`,
+   tagged `pi-job:latest`. With `PI_JOB_IMAGE` set (in your shell or in `.env`), it is exactly the image that
+   names, pulled under that name with no tag, and `up` prints which image it checked. A short name with no
+   registry host (`pi-job:2.1.0`, `my-job:dev`) is never pulled, since a public registry would answer for it,
+   and neither is a `localhost/` name, which is one built on the host: build or `docker tag` it on the host, or
+   set `PI_JOB_IMAGE` to a registry-qualified name. It never pulls a
    trigger-named `run.image`, and `doctor --fix` does not offer to either. Each custom image is a per-flow
    trust posture you chose, so fetching it stays yours.
 2. **Name it** in `triggers.json` as `run.image`.
