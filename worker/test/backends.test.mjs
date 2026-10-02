@@ -359,6 +359,8 @@ const ROOTFUL = { backend: "podman", rootless: false, version: "5.8.1", hostAddr
 const ENGINE = { backend: "docker", desktop: false, version: "29.1.3", hostAddresses: LAN_HOST };
 const DESKTOP = { backend: "docker", desktop: true, os: "darwin", version: "27.4.0" };
 const RUNTIMES = [DESKTOP, ENGINE, ROOTFUL, SLIRP, PASTA];
+// Issue #530: the Mac's own LAN address in #503's acceptance run.
+const DESKTOP_HOST = ["192.168.68.54"];
 
 test("HOST_ROUTES is frozen to the row, and is no part of the declaration vocabulary (#503)", () => {
 	assert.ok(Object.isFrozen(HOST_ROUTES) && Object.isFrozen(PROXY_LOCAL_ADDRESSES));
@@ -370,7 +372,7 @@ test("HOST_ROUTES is frozen to the row, and is no part of the declaration vocabu
 			const informational = row.name === HOST_ROUTE_OTHER_MACHINE;
 			assert.ok(informational ? row.status === HOST_ROUTE_REACHABLE : [HOST_ROUTE_WORKS, HOST_ROUTE_REFUTED].includes(row.status), `${venue} ${row.name}: ${row.status}`);
 			assert.equal(isDeclaration(row.status), false, "a route status is never a declaration word");
-			assert.match(row.measured, /^2026-09-30, /, `${venue} ${row.name}: dated`);
+			assert.match(row.measured, /^2026-(?:09-30|10-02), /, `${venue} ${row.name}: dated`);
 			assert.ok(!(row.needs + row.measured).includes("|"), `${venue} ${row.name}: no pipe, since the docs render it in a table`);
 		}
 	}
@@ -383,14 +385,19 @@ test("HOST_ROUTES is frozen to the row, and is no part of the declaration vocabu
 test("the table holds exactly what the two published measurement comments state (#503)", () => {
 	const routes = Object.fromEntries(Object.entries(HOST_ROUTES).map(([venue, rows]) => [venue, rows.map((r) => `${r.name}=${r.status}`)]));
 	assert.deepEqual(routes, {
-		"docker-desktop": ["host.docker.internal=works"],
+		"docker-desktop": ["host.docker.internal=works", `${HOST_ROUTE_OWN_ADDRESS}=works`],
 		"docker-engine": ["host.docker.internal=works", "host.containers.internal=refuted", `${HOST_ROUTE_OWN_ADDRESS}=works`, `${HOST_ROUTE_OTHER_MACHINE}=reachable`],
 		"podman-rootful": ["host.containers.internal=works", `${HOST_ROUTE_OWN_ADDRESS}=works`, `${HOST_ROUTE_OTHER_MACHINE}=reachable`],
 		"podman-rootless-slirp4netns": ["host.containers.internal=works", `${HOST_ROUTE_OWN_ADDRESS}=works`, `${HOST_ROUTE_OTHER_MACHINE}=reachable`],
 		"podman-rootless-pasta": ["host.containers.internal=works", `${HOST_ROUTE_OWN_ADDRESS}=refuted`, `${HOST_ROUTE_OTHER_MACHINE}=reachable`],
 		"every-venue": [`${HOST_ROUTE_LOOPBACK}=refuted`],
 	});
-	assert.equal(HOST_ROUTES["docker-desktop"][0].when.os, "darwin", "Docker Desktop was measured on macOS only");
+	for (const row of HOST_ROUTES["docker-desktop"]) assert.deepEqual({ ...row.when }, { backend: "docker", desktop: true, os: "darwin", version: "27.4.0" }, "Docker Desktop was measured on macOS, engine 27.4.0, only");
+	// Issue #530: the one row measured after the two comments, in #503's acceptance run.
+	assert.deepEqual(
+		Object.values(HOST_ROUTES).flat().filter((r) => !r.measured.startsWith("2026-09-30, ")).map((r) => `${r.name} ${r.measured}`),
+		[`${HOST_ROUTE_OWN_ADDRESS} 2026-10-02, Docker Desktop 4.37.2 (engine 27.4.0), macOS`],
+	);
 	assert.equal(HOST_ROUTES["every-venue"][0].measured, "2026-09-30, true on every runtime by construction, and measured on the four VM runtimes");
 	// Details the comments do not publish stay out of the rows.
 	const text = Object.values(HOST_ROUTES).flat().map((r) => `${r.needs} ${r.measured}`).join(" ");
@@ -400,6 +407,7 @@ test("the table holds exactly what the two published measurement comments state 
 test("hostRouteFor answers each measured row (#503)", () => {
 	const cases = [
 		[DESKTOP, "host.docker.internal", HOST_ROUTE_WORKS, /Nothing to add/],
+		[{ ...DESKTOP, hostAddresses: DESKTOP_HOST }, "192.168.68.54", HOST_ROUTE_WORKS, /measured 2026-10-02, .*bound to that address/],
 		[ENGINE, "host.docker.internal", HOST_ROUTE_WORKS, /--add-host host\.docker\.internal:host-gateway` on the proxy/],
 		[ENGINE, "host.containers.internal", HOST_ROUTE_REFUTED, /not defined on Docker Engine/],
 		[ENGINE, "192.168.5.15", HOST_ROUTE_WORKS, /bound to that address/],
@@ -414,7 +422,7 @@ test("hostRouteFor answers each measured row (#503)", () => {
 		const got = hostRouteFor(runtime, host);
 		assert.equal(got.status, status, `${JSON.stringify(runtime)} ${host}: ${got.sentence}`);
 		assert.match(got.sentence, needs, host);
-		assert.match(got.sentence, /measured 2026-09-30, /, host);
+		assert.match(got.sentence, /measured 2026-(?:09-30|10-02), /, host);
 	}
 	// Every works or refuted row is reached by a case, so a new one cannot land untested.
 	const reached = cases.map(([runtime, host]) => hostRouteFor(runtime, host).sentence);
@@ -508,7 +516,14 @@ test("anything not measured reads unmeasured, never works (#503)", () => {
 		[ROOTFUL, "host.docker.internal"],
 		[SLIRP, "host.docker.internal"],
 		[PASTA, "host.docker.internal"],
-		[{ ...DESKTOP, hostAddresses: LAN_HOST }, "192.168.5.15"],
+		// Issue #530: the Desktop own-address row is bound to what was measured, and widens to nothing else.
+		[DESKTOP, "192.168.68.54"],
+		[{ ...DESKTOP, version: "27.4.1", hostAddresses: DESKTOP_HOST }, "192.168.68.54"],
+		[{ ...DESKTOP, version: "27.5.0", hostAddresses: DESKTOP_HOST }, "192.168.68.54"],
+		[{ ...DESKTOP, os: "linux", hostAddresses: DESKTOP_HOST }, "192.168.68.54"],
+		[{ ...DESKTOP, os: "win32", hostAddresses: DESKTOP_HOST }, "192.168.68.54"],
+		[{ ...DESKTOP, desktop: false, hostAddresses: DESKTOP_HOST }, "192.168.68.54"],
+		[{ ...DESKTOP, hostAddresses: DESKTOP_HOST }, "169.254.1.2"],
 	];
 	for (const [runtime, host] of unmeasured) {
 		const got = hostRouteFor(runtime, host);

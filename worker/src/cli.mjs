@@ -185,7 +185,10 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 				image: values.image || undefined,
 				now: now(),
 			});
-			write(runQueuedLine({ jobId, existing, folder }, { swallowedRunSentence }));
+			// Issue #530: the closing line used to say "run `pi-dispatch worker` to process it" while workers ran. It now
+			// says what this queue shows, asked on the connection the enqueue already holds, and only when a job was queued.
+			const hint = existing ? null : await workerHint(queue);
+			write(runQueuedLine({ jobId, existing, folder, hint }, { swallowedRunSentence }));
 		} catch (error) {
 			return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${(await import("./connection.mjs")).urlShown(valkeyUrl)}: ${(await import("./valkey-auth.mjs")).valkeyDownHint(valkeyUrl)}\n  ${error.message}`);
 		} finally {
@@ -254,6 +257,52 @@ async function killSwitchUrls(args, env) {
 	if (picked.error) return picked;
 	if (picked.note) process.stderr.write(`warning: ${picked.note}\n`);
 	return { ...picked, positionals: parsed.positionals };
+}
+
+/** `workerHint`'s line when the queue cannot say, true whether or not a worker runs. */
+export const WORKER_HINT_UNKNOWN = "a worker picks it up; start one with `pi-dispatch worker` if none is running.";
+
+/**
+ * `run`'s closing line (issue #530): true with or without a running worker.
+ *
+ * It asks the queue the job went to, on the connection the enqueue already opened: `getWorkers()` (one CLIENT LIST,
+ * matched on the client names BullMQ gives a Worker of THIS queue, so a named host queue counts only that host's
+ * workers) and `isPaused()`. Measured on bullmq 5.80.4: 0 with no Worker, 1 with one, back to 0 once it closed, and
+ * the Queue's own client is never counted. A paused queue is said first, since a connected worker does not take a
+ * job from it. Any doubt falls back to a line that is true either way:
+ *   - either call fails or takes over `timeoutMs` (a Valkey whose ACL refuses CLIENT LIST, one that went away);
+ *   - an answer that is not what bullmq returns;
+ *   - bullmq's own marker for a server with no CLIENT LIST, a fake row that would read as "1 worker".
+ * A server that ignores CLIENT SETNAME lists no worker at all, which is why zero says "shows as connected" and names
+ * the command rather than claiming none runs.
+ *
+ * CLIENT LIST spans every database, and bullmq matches its rows by client NAME alone, so a Worker of a same-named
+ * queue on database 8 was counted for a job queued on database 9 (measured in PR #531's review: "1 worker is
+ * connected ... will pick it up", and no worker ever would). Only rows whose `db` is the queue client's own count; a
+ * row with no `db` field, or a client whose database cannot be read, is a doubt.
+ */
+export async function workerHint(queue, { timeoutMs = 2000 } = {}) {
+	let timer;
+	try {
+		const answer = Promise.all([queue.getWorkers(), queue.isPaused(), Promise.resolve(queue.client).then((c) => c?.options?.db ?? 0)]);
+		answer.catch(() => {});
+		const late = new Promise((resolve) => {
+			timer = setTimeout(resolve, timeoutMs, null);
+		});
+		const got = await Promise.race([answer, late]);
+		if (got === null) return WORKER_HINT_UNKNOWN;
+		const [workers, paused, db] = got;
+		if (!Array.isArray(workers) || typeof paused !== "boolean" || !Number.isInteger(Number(db))) return WORKER_HINT_UNKNOWN;
+		if (workers.some((w) => w?.name === "GCP does not support client list" || typeof w?.db !== "string")) return WORKER_HINT_UNKNOWN;
+		if (paused) return "the queue is paused: no worker takes it until `pi-dispatch resume`.";
+		const n = workers.filter((w) => w.db === String(db)).length;
+		if (n === 0) return "no worker shows as connected to this queue: start one with `pi-dispatch worker`.";
+		return `${n} ${n === 1 ? "worker is" : "workers are"} connected to this queue and will pick it up.`;
+	} catch {
+		return WORKER_HINT_UNKNOWN;
+	} finally {
+		clearTimeout(timer);
+	}
 }
 
 /** One Valkey's pause, resume or status: every queue the deployment drains there (issue #57). Returns the exit code. */
@@ -348,12 +397,12 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
  * terminal's local time, and the state is the queue's word for it, or "already queued or done" when it could not be
  * read. No flag is offered to force a second job, because none exists: a later minute is a different id.
  * The sentence itself is `queue.mjs`'s, shared with the admin's `/dispatch run`, and handed in because this module
- * imports the queue lazily.
+ * imports the queue lazily. `hint` is `workerHint`'s closing line (issue #530); without one, the line true either way.
  */
-export function runQueuedLine({ jobId, existing, folder }, { swallowedRunSentence }) {
+export function runQueuedLine({ jobId, existing, folder, hint = WORKER_HINT_UNKNOWN }, { swallowedRunSentence }) {
 	if (existing) return `${swallowedRunSentence(jobId, existing)}\nthe same folder and task queue a new run from the next minute on.\n`;
 	const unknown = existing === undefined ? "could not check whether an identical run from this minute already held this id.\n" : "";
-	return `queued ${jobId} for folder ${folder}\n${unknown}run \`pi-dispatch worker\` to process it.\n`;
+	return `queued ${jobId} for folder ${folder}\n${unknown}${hint}\n`;
 }
 
 function fail(message) {

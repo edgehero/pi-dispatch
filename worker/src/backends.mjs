@@ -1064,6 +1064,8 @@ export function backendRefusals({ backends = [], backendFloor = {}, egress = fal
  * Every row states only what the two measurement comments on issue #503 (2026-09-30 and its addendum) publish:
  * CONNECT tunnels through the shipped proxy image, the way pi sends. Of those, M1, M3, M4 (Podman 5.8.1), M6 and
  * M8 were re-run independently the same day; M5 (Docker Engine and rootful Podman) and the 4.9.3 routes were not.
+ * One row is later: Docker Desktop's own LAN address, measured 2026-10-02 in #503's acceptance run (issue #530), a
+ * CONNECT to 192.168.68.54:18434 with the server listening only on that address answering 200.
  * `docs/backends.md` generates its section from this table, and `docs/podman.md` its Podman rows.
  */
 export const HOST_ROUTE_WORKS = "works";
@@ -1106,6 +1108,8 @@ export function isProxyLocalHost(kind, host) {
 const HDI = "host.docker.internal";
 const HCI = "host.containers.internal";
 const MEASURED_DESKTOP = "2026-09-30, Docker Desktop 4.37.2 (engine 27.4.0), macOS";
+// Issue #530: the own-address route, measured in the #503 acceptance run on the same Desktop two days later.
+const MEASURED_DESKTOP_OWN = "2026-10-02, Docker Desktop 4.37.2 (engine 27.4.0), macOS";
 const MEASURED_ENGINE = "2026-09-30, Docker Engine 29.1.3, Ubuntu 24.04";
 const MEASURED_ROOTFUL = "2026-09-30, Podman 5.8.1 rootful, Fedora";
 const MEASURED_SLIRP = "2026-09-30, Podman 4.9.3 rootless, slirp4netns, Ubuntu 24.04";
@@ -1121,6 +1125,7 @@ const LAN = "Another machine on the LAN (192.168.5.2) answered through the proxy
 const HOST_ROUTES_TABLE = {
 	"docker-desktop": [
 		{ name: HDI, when: DESKTOP, status: HOST_ROUTE_WORKS, needs: "Nothing to add. It reaches a server that listens on loopback only.", measured: MEASURED_DESKTOP },
+		{ name: HOST_ROUTE_OWN_ADDRESS, when: DESKTOP, status: HOST_ROUTE_WORKS, needs: BOUND, measured: MEASURED_DESKTOP_OWN },
 	],
 	"docker-engine": [
 		{ name: HDI, when: ENGINE, status: HOST_ROUTE_WORKS, needs: "`--add-host host.docker.internal:host-gateway` on the proxy gives 172.17.0.1, which answers from the proxy's own bridge, even with docker0 down. The server listens on 172.17.0.1 or 0.0.0.0. A host with UFW active is unmeasured.", measured: MEASURED_ENGINE },

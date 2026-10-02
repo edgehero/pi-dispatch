@@ -203,7 +203,8 @@ export async function startPoller(env = process.env, deps = {}) {
 	// `auth ??= await ...` assigns only when the mint RESOLVES, so a retried getAuth re-invokes
 	// makeAuth. Caching the PROMISE instead would memoize the first failure and turn the retry loop
 	// into a rethrow spinner -- pinned by the poller's retry test.
-	const getAuth = async () => (auth ??= await makeAuth(cfg.github));
+	// Issue #530: the GitHub client's own warnings go through this JSON log, never Octokit's plain console lines.
+	const getAuth = async () => (auth ??= await makeAuth(cfg.github, { log: (event, fields) => out({ event, ...fields }) }));
 	const selfId = await retryIdentity(
 		() => (selfIdFn ? selfIdFn(cfg.github) : getAuth().then((a) => a.selfId)),
 		{ forge: "github", windowMs: cfg.identityRetryWindowMs, log: out, now, sleep: sleepFn },

@@ -72,7 +72,8 @@ export async function resolveSelfId(auth) {
 		if (!isDeterminateFetchFailure(error) && status !== undefined && isTransientStatus(status, octokitHeaderReader(error), error?.message)) {
 			throw transientError(`resolveSelfId: could not reach GitHub to resolve self identity: ${error.message}`, error);
 		}
-		throw configError(`resolveSelfId: could not resolve self identity: ${error.message}`);
+		// The RequestError rides as `cause` (issue #530's review), so the failure line can name GitHub's request id.
+		throw Object.assign(configError(`resolveSelfId: could not resolve self identity: ${error.message}`), { cause: error });
 	}
 
 	if (!Number.isInteger(id)) {

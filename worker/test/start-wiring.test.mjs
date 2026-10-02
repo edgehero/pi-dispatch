@@ -419,6 +419,41 @@ test("auth unavailable: the worker still boots; mintToken fails github jobs clos
 	);
 });
 
+test("a refused PAT at boot: the GitHub client's own output joins the worker's JSON log, never a plain line (#530)", { skip }, async () => {
+	// The real auth and the real Octokit, with only its fetch replaced (Octokit's own `request.fetch` option, so no
+	// global is touched). GitHub refuses the token, and that answer carries a deprecation header, so the client has
+	// something of its own to say. The worker must hand its logger to the auth it builds: the warning then arrives in
+	// this stream as an event with the worker's host on it, and the client's `GET /user - 401 ...` line never prints.
+	const { makeGitHubAuth } = await import("../src/get-token.mjs");
+	const { Octokit } = await import("@octokit/rest");
+	const refused = async () =>
+		new Response(JSON.stringify({ message: "Bad credentials" }), {
+			status: 401,
+			headers: { "content-type": "application/json", "x-github-request-id": "C0DE:530", deprecation: "true", sunset: "2027-01-01" },
+		});
+	class RefusingOctokit extends Octokit {
+		constructor(options) {
+			super({ ...options, request: { ...options.request, fetch: refused } });
+		}
+	}
+	const makeAuth = (_cfg, deps) => makeGitHubAuth({ source: "pat" }, { ...deps, Octokit: RefusingOctokit, env: { GITHUB_PAT: "ghp_refused" } });
+	const { logs } = await runStart({ makeAuth, makeHost: () => fakeHost() });
+
+	assert.deepEqual(logs.filter((l) => "raw" in l), [], "every line the worker wrote is JSON");
+	const unavailable = logs.find((l) => l.event === "github_auth_unavailable");
+	assert.equal(unavailable?.transient, false, JSON.stringify(logs));
+	// The request id Octokit's dropped line carried is on the worker's own failure line, with the status, and the
+	// token the error holds is not.
+	assert.equal(unavailable.status, 401);
+	assert.equal(unavailable.requestId, "C0DE:530");
+	assert.ok(!JSON.stringify(logs).includes("ghp_refused"), "the token never reaches the log");
+	const warning = logs.find((l) => l.event === "github_client_warning");
+	assert.ok(warning, "the client's warning reached the worker's own log");
+	assert.match(warning.message, /"GET https:\/\/api\.github\.com\/user" is deprecated/);
+	assert.equal(typeof warning.host, "string", "through the worker's logger, so it carries the host like every line");
+	assert.ok(!logs.some((l) => JSON.stringify(l).includes("with id")), "the request line is never logged");
+});
+
 test("a TRANSIENT boot auth failure is re-resolved on the next job, not carried for the process lifetime", { skip }, async () => {
 	// Issue #316, and the most expensive shape in it. Boot auth is best-effort inside a try/catch, and any
 	// throw used to leave `auth` null forever. So a forge that was merely unreachable for the seconds this

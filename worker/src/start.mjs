@@ -11,6 +11,7 @@ import { makeGitHubAuth } from "./get-token.mjs";
 import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING } from "./processor.mjs";
 import { transientError } from "./transient.mjs";
 import { makeGitHubHost } from "./github-host.mjs";
+import { githubFailureFields } from "./octokit-log.mjs";
 import { makeGitLabAuth } from "./gitlab-auth.mjs";
 import { makeGitLabHost } from "./gitlab-host.mjs";
 import { makeForgejoAuth } from "./forgejo-auth.mjs";
@@ -698,7 +699,9 @@ export async function startWorker(
 	// `doctor` reports as healthy. The boot posture is unchanged for a DETERMINATE failure, which is what
 	// the local-only case is (no `gh` on PATH is `ENOENT`); a TRANSIENT one now leaves a re-resolver
 	// behind instead of a permanent null.
-	const forges = { github: { auth: null, host: makeHost() } };
+	// Issue #530: the GitHub clients take this worker's logger, so a client's own warning is one more JSON line here and
+	// its plain request lines (`GET /user - 401 ...`) are never printed (`octokitLog`).
+	const forges = { github: { auth: null, host: makeHost({ log }) } };
 	// Per forge kind, what it would take to resolve its auth again: the closure, and the `idOf` its log
 	// line needs. Present only while the last attempt failed transiently -- a determinate failure removes
 	// it, because retrying a wrong credential is how a deployment pays to be told the same thing twice.
@@ -725,7 +728,7 @@ export async function startWorker(
 			// modules throw untagged for a fetch rejection, a transient status and an unparseable body.
 			const transient = err?.piDispatchConfig !== true;
 			if (transient) authRetries.set(kind, { resolve: () => make(cfg), idOf });
-			log(`${kind}_auth_unavailable`, { kind, reason: err?.message, transient });
+			log(`${kind}_auth_unavailable`, { kind, reason: err?.message, ...githubFailureFields(err), transient });
 		}
 	};
 
@@ -766,7 +769,7 @@ export async function startWorker(
 					authLastError.set(kind, err);
 					if (err?.piDispatchConfig === true) {
 						authRetries.delete(kind);
-						log(`${kind}_auth_unavailable`, { kind, reason: err?.message, transient: false });
+						log(`${kind}_auth_unavailable`, { kind, reason: err?.message, ...githubFailureFields(err), transient: false });
 					} else {
 						authCooldownUntil.set(kind, now() + AUTH_RETRY_COOLDOWN_MS);
 					}
@@ -813,7 +816,7 @@ export async function startWorker(
 		}
 	};
 
-	await attachAuth("github", makeAuth, config.github);
+	await attachAuth("github", (cfg) => makeAuth(cfg, { log }), config.github);
 	// GitLab joins the same map on the same best-effort terms. It appears only when configured: a forge
 	// with no entry refuses its jobs at mint time with a message naming what is missing, which is a better
 	// answer than an entry that exists and cannot authenticate.

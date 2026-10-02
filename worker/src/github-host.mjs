@@ -25,13 +25,15 @@
 
 import { Octokit } from "@octokit/rest";
 import { configError } from "./config.mjs";
+import { octokitLogOptions } from "./octokit-log.mjs";
 import { InfraRetry } from "./processor.mjs";
 
 /**
- * Build the host surface. `octokitFor` is `(token) => new Octokit({ auth: token })`; inject a fake
- * to test offline. Returns `{ resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment }`.
+ * Build the host surface. `octokitFor` is `(token) => new Octokit({ auth: token, ...octokitLogOptions(log) })`; inject a fake
+ * to test offline. `log` is the caller's `(event, fields)` logger for the client's own warnings
+ * (`octokitLog`, issue #530). Returns `{ resolveDefaultBranchSha, isDefaultBranchProtected, postStatusComment }`.
  */
-export function makeGitHubHost({ octokitFor = (token) => new Octokit({ auth: token }) } = {}) {
+export function makeGitHubHost({ log, octokitFor = (token) => new Octokit({ auth: token, ...octokitLogOptions(log) }) } = {}) {
 	/**
 	 * Resolve the default branch and its tip SHA with FRESH API calls only -- never a webhook field.
 	 * `GET /repos/{owner}/{repo}` yields `default_branch`; `GET .../branches/{branch}` yields the tip.

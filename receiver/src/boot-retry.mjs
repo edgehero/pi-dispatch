@@ -41,10 +41,13 @@
  *    deadline and was skipped -- a forge that came back at t=50 was missed, and "retries for the
  *    whole window" was false in the letter. The clamp is also what makes an uncancellable injected
  *    `sleep` safe: every sleep awaited here runs to completion, always followed by one more attempt.
- *  - Log lines carry `err?.message` only, never a value -- the `receiver_start_failed` posture.
+ *  - Log lines carry `err?.message` only, never a value -- the `receiver_start_failed` posture. A GitHub
+ *    answer adds its status and request id (`githubFailureFields`, issue #530), never a header beyond that.
  *
  * Total wall clock: the helper settles within `windowMs + attemptTimeoutMs`.
  */
+
+import { githubFailureFields } from "@edgehero/pi-dispatch/octokit-log";
 
 // The first gap is what `RestartSec=5` gave, now in-process: a blip recovers exactly as fast as the
 // supervisor loop it replaces. It doubles to a cap borrowed from the worker's AUTH_RETRY_COOLDOWN_MS
@@ -127,13 +130,13 @@ export async function retryIdentity(
 			if (err?.piDispatchConfig === true) throw err;
 			const remainingMs = deadline - now();
 			if (remainingMs <= 0) {
-				log({ event: "identity_retry_exhausted", forge, attempts: attempt, windowMs, reason: err?.message });
+				log({ event: "identity_retry_exhausted", forge, attempts: attempt, windowMs, reason: err?.message, ...githubFailureFields(err) });
 				throw err;
 			}
 			// Clamped, so the last gap ends exactly at the deadline and the final attempt runs at the
 			// window's edge -- see the header for the measured 35s-of-60s failure the clamp removes.
 			const gapMs = Math.min(delay, remainingMs);
-			log({ event: "identity_retry", forge, attempt, reason: err?.message, delayMs: gapMs });
+			log({ event: "identity_retry", forge, attempt, reason: err?.message, ...githubFailureFields(err), delayMs: gapMs });
 			await sleep(gapMs);
 			delay = Math.min(delay * 2, delayCapMs);
 		}

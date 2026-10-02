@@ -293,6 +293,7 @@ Each row is bound to the exact version it was measured on. `hostRouteFor` takes 
 | Venue | Endpoint host | Route | What it needs | Measured |
 |---|---|---|---|---|
 | Docker Desktop on macOS | `host.docker.internal` | works | Nothing to add. It reaches a server that listens on loopback only. | 2026-09-30, Docker Desktop 4.37.2 (engine 27.4.0), macOS |
+| Docker Desktop on macOS | this host's own LAN address | works | The server is bound to that address. | 2026-10-02, Docker Desktop 4.37.2 (engine 27.4.0), macOS |
 | Docker Engine on Linux | `host.docker.internal` | works | `--add-host host.docker.internal:host-gateway` on the proxy gives 172.17.0.1, which answers from the proxy's own bridge, even with docker0 down. The server listens on 172.17.0.1 or 0.0.0.0. A host with UFW active is unmeasured. | 2026-09-30, Docker Engine 29.1.3, Ubuntu 24.04 |
 | Docker Engine on Linux | `host.containers.internal` | refuted | The name is not defined on Docker Engine. Declare host.docker.internal. | 2026-09-30, Docker Engine 29.1.3, Ubuntu 24.04 |
 | Docker Engine on Linux | this host's own LAN address | works | The server is bound to that address. | 2026-09-30, Docker Engine 29.1.3, Ubuntu 24.04 |

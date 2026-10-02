@@ -4,7 +4,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { main } from "../src/cli.mjs";
+import { WORKER_HINT_UNKNOWN, main, workerHint } from "../src/cli.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // cli.mjs dynamic-imports bullmq/ioredis (in the `run` enqueue and `worker` paths), so the
@@ -116,6 +116,10 @@ test("runQueuedLine says a deduplicated run queued nothing, with the first job's
 	assert.doesNotMatch(runQueuedLine({ jobId: "local-abc", existing: { queuedAt: at, state: "waiting" }, folder: "/f" }), /^queued /m, "never the queued line");
 	assert.match(runQueuedLine({ jobId: "local-abc", existing: null, folder: "/f" }), /^queued local-abc for folder \/f\n/);
 	assert.match(runQueuedLine({ jobId: "local-abc", existing: undefined, folder: "/f" }), /could not check whether an identical run/);
+	// Issue #530: the closing line is the hint `run` asked the queue for, and without one the line true either way.
+	assert.equal(runQueuedLine({ jobId: "local-abc", existing: null, folder: "/f", hint: "1 worker is connected to this queue and will pick it up." }), "queued local-abc for folder /f\n1 worker is connected to this queue and will pick it up.\n");
+	assert.equal(runQueuedLine({ jobId: "local-abc", existing: null, folder: "/f" }), `queued local-abc for folder /f\n${WORKER_HINT_UNKNOWN}\n`);
+	assert.doesNotMatch(runQueuedLine({ jobId: "local-abc", existing: { queuedAt: at, state: "waiting" }, folder: "/f", hint: "x" }), /^x$/m, "a run that queued nothing gets no hint");
 });
 
 test("run twice in one minute: the second says an identical run was queued and queued nothing (#524)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL" }, async () => {
@@ -139,8 +143,100 @@ test("run twice in one minute: the second says an identical run was queued and q
 
 test("run enqueues against a real Valkey (VALKEY_TEST_URL) and prints the job id", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL" }, async () => {
 	const dir = gitRepo({ dirty: false });
-	const code = await main(["run", dir, "--task", "tidy the imports", "--force"], { VALKEY_URL: process.env.VALKEY_TEST_URL });
+	let out = "";
+	const code = await main(["run", dir, "--task", "tidy the imports", "--force"], { VALKEY_URL: process.env.VALKEY_TEST_URL }, { write: (chunk) => ((out += chunk), true) });
 	assert.equal(code, 0, "a clean enqueue against a real Valkey returns 0");
+	// Issue #530: the closing line is what the queue shows. Other files may run a worker on this shared queue at the
+	// same moment, so any of the queue's answers is right here; the hint's own tests below pin which is which.
+	const [first, second, ...rest] = out.split("\n");
+	assert.match(first, /^queued \S+ for folder /);
+	assert.equal(first.slice(first.indexOf(" for folder ") + " for folder ".length), dir);
+	assert.match(second, /^(?:no worker shows as connected to this queue: start one with `pi-dispatch worker`\.|\d+ workers? (?:is|are) connected to this queue and will pick it up\.|the queue is paused: no worker takes it until `pi-dispatch resume`\.)$/);
+	assert.deepEqual(rest, [""]);
+	assert.ok(!out.includes("to process it"), "the old line, false while a worker runs, is gone");
+});
+
+// Issue #530: `run`'s closing line used to say "run `pi-dispatch worker` to process it" while workers were running.
+// Rows as bullmq's getWorkers returns them: CLIENT LIST fields, `db` a string. The fake client is on database 0.
+const row = (name, db = "0") => ({ name, db });
+const fakeQueue = ({ workers = [], paused = false, client = { options: { db: 0 } } } = {}) => ({
+	getWorkers: typeof workers === "function" ? workers : async () => workers,
+	isPaused: typeof paused === "function" ? paused : async () => paused,
+	client: typeof client === "function" ? client() : Promise.resolve(client),
+});
+
+test("workerHint says what the queue shows, and falls back to a line true either way (#530)", async () => {
+	assert.equal(await workerHint(fakeQueue()), "no worker shows as connected to this queue: start one with `pi-dispatch worker`.");
+	assert.equal(await workerHint(fakeQueue({ workers: [row("a")] })), "1 worker is connected to this queue and will pick it up.");
+	assert.equal(await workerHint(fakeQueue({ workers: [row("a"), row("b")] })), "2 workers are connected to this queue and will pick it up.");
+	// PR #531's review: CLIENT LIST spans databases, so only the queue client's own database counts.
+	assert.equal(await workerHint(fakeQueue({ workers: [row("a", "8")] })), "no worker shows as connected to this queue: start one with `pi-dispatch worker`.");
+	assert.equal(await workerHint(fakeQueue({ workers: [row("a", "8"), row("b", "9")], client: { options: { db: 9 } } })), "1 worker is connected to this queue and will pick it up.");
+	assert.equal(await workerHint(fakeQueue({ workers: [row("a")], client: { options: {} } })), "1 worker is connected to this queue and will pick it up.", "no db option is database 0");
+	// A connected worker takes nothing from a paused queue, so that is said first.
+	assert.equal(await workerHint(fakeQueue({ workers: [row("a")], paused: true })), "the queue is paused: no worker takes it until `pi-dispatch resume`.");
+	const doubts = {
+		"CLIENT LIST refused": fakeQueue({ workers: async () => { throw new Error("NOPERM this user has no permissions to run the 'client|list' command"); } }),
+		"isPaused failed": fakeQueue({ workers: [row("a")], paused: async () => { throw new Error("Connection is closed."); } }),
+		"a row with no db": fakeQueue({ workers: [{ name: "a" }] }),
+		"the client's database unreadable": fakeQueue({ workers: [row("a")], client: () => Promise.reject(new Error("closed")) }),
+		"a database that is not a number": fakeQueue({ workers: [row("a")], client: { options: { db: "x" } } }),
+		"bullmq's no-CLIENT-LIST row": fakeQueue({ workers: [{ name: "GCP does not support client list" }] }),
+		"not an array": fakeQueue({ workers: 3 }),
+		"not a boolean": fakeQueue({ paused: "0" }),
+		"a synchronous throw": { getWorkers() { throw new Error("boom"); }, isPaused: async () => false, client: Promise.resolve({ options: { db: 0 } }) },
+	};
+	for (const [why, queue] of Object.entries(doubts)) assert.equal(await workerHint(queue), WORKER_HINT_UNKNOWN, why);
+	// An answer that never comes is not waited on past the bound.
+	const start = Date.now();
+	assert.equal(await workerHint(fakeQueue({ workers: () => new Promise(() => {}) }), { timeoutMs: 20 }), WORKER_HINT_UNKNOWN);
+	assert.ok(Date.now() - start < 2000);
+	assert.equal(WORKER_HINT_UNKNOWN, "a worker picks it up; start one with `pi-dispatch worker` if none is running.");
+});
+
+test("workerHint against a real Valkey: another database's worker, then one, then paused, on a queue of its own (#530, VALKEY_TEST_URL)", { skip: needsDeps || (process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL") }, async () => {
+	const { Worker } = await import("bullmq");
+	const { parseConnection } = await import("../src/connection.mjs");
+	const { makeQueue } = await import("../src/queue.mjs");
+	const onDb = (db) => {
+		const u = new URL(process.env.VALKEY_TEST_URL);
+		u.pathname = `/${db}`;
+		return u.toString();
+	};
+	const name = `pi-jobs-test-530-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	const queue = makeQueue(parseConnection(onDb(9), { failFast: true }), { name });
+	const elsewhere = makeQueue(parseConnection(onDb(8), { failFast: true }), { name });
+	const workers = [];
+	const startWorker = async (db) => {
+		const worker = new Worker(name, async () => {}, { connection: { ...parseConnection(onDb(db)), maxRetriesPerRequest: null }, name: `host530-db${db}` });
+		worker.on("error", () => {});
+		workers.push(worker);
+		await worker.waitUntilReady();
+	};
+	const seen = async (n) => {
+		const deadline = Date.now() + 10_000;
+		while ((await queue.getWorkers()).length < n && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+		assert.equal((await queue.getWorkers()).length, n, "bullmq's own list sees every same-named worker, whatever its database");
+	};
+	try {
+		await queue.add("t", {}, { delay: 600_000 });
+		assert.equal(await workerHint(queue), "no worker shows as connected to this queue: start one with `pi-dispatch worker`.");
+		// PR #531's review: a same-named queue's Worker on database 8 never takes a job queued on database 9.
+		await startWorker(8);
+		await seen(1);
+		assert.equal(await workerHint(queue), "no worker shows as connected to this queue: start one with `pi-dispatch worker`.");
+		await startWorker(9);
+		await seen(2);
+		assert.equal(await workerHint(queue), "1 worker is connected to this queue and will pick it up.");
+		await queue.pause();
+		assert.equal(await workerHint(queue), "the queue is paused: no worker takes it until `pi-dispatch resume`.");
+	} finally {
+		for (const worker of workers) await worker.close();
+		for (const q of [queue, elsewhere]) {
+			await q.obliterate({ force: true }).catch(() => {});
+			await q.close();
+		}
+	}
 });
 
 // Issue #464 (gate round 3): a refused Valkey is said as its refusal before anything is sent, from any directory.

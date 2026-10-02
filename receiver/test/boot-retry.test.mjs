@@ -77,6 +77,31 @@ test("transient failures retry with the documented gaps, then the answer comes b
 	assert.deepEqual(logs.map((l) => l.delayMs), [5_000, 10_000]);
 });
 
+test("a GitHub answer adds its status and request id to the retry lines, and nothing else from the error (#530)", async () => {
+	// Octokit's own error line, which carried the request id GitHub support asks for, is no longer printed, so the
+	// receiver's own line names it. The error's request headers hold the token: none of it may reach a line.
+	const githubError = (n) =>
+		Object.assign(new Error(`Service Unavailable ${n}`), {
+			name: "HttpError",
+			status: 503,
+			request: { method: "GET", url: "https://api.github.com/user", headers: { authorization: "token ghp_secret530" } },
+			response: { status: 503, headers: { "x-github-request-id": `C0DE:53${n}` } },
+		});
+	let n = 0;
+	const { opts, logs } = makeRun({ windowMs: 12_000, forge: "github" });
+	await retryIdentity(async () => {
+		n += 1;
+		throw githubError(n);
+	}, opts).catch(() => {});
+	assert.deepEqual(logs.map((l) => Object.keys(l)), [
+		["event", "forge", "attempt", "reason", "status", "requestId", "delayMs"],
+		["event", "forge", "attempt", "reason", "status", "requestId", "delayMs"],
+		["event", "forge", "attempts", "windowMs", "reason", "status", "requestId"],
+	]);
+	assert.deepEqual(logs.map((l) => [l.status, l.requestId]), [[503, "C0DE:531"], [503, "C0DE:532"], [503, "C0DE:533"]]);
+	assert.ok(!JSON.stringify(logs).includes("ghp_secret530"), "the token never reaches a line");
+});
+
 test("the backoff doubles to the cap and stays there", async () => {
 	// Window sized so the sixth sleep ends EXACTLY at the deadline: the schedule, the cap and the
 	// exhaustion edge are all visible in one array, and no gap needed clamping to get there.

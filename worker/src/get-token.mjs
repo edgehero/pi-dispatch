@@ -27,6 +27,7 @@ import { createAppAuth as realCreateAppAuth } from "@octokit/auth-app";
 import { Octokit as RealOctokit } from "@octokit/rest";
 import { configError } from "./config.mjs";
 import { resolveSelfId } from "./identity.mjs";
+import { octokitLogOptions } from "./octokit-log.mjs";
 import { InfraRetry } from "./processor.mjs";
 import { isDeterminateFetchFailure, isDeterminateFsCode, isTransientStatus, octokitHeaderReader } from "./transient.mjs";
 
@@ -54,14 +55,18 @@ export async function makeGitHubAuth(cfg, deps = {}) {
 		execFile = realExecFile,
 		readFile = realReadFile,
 		env = process.env,
+		// Issue #530: the caller's `(event, fields)` logger, which a GitHub client's own warnings go through. Every client
+		// here is built with `octokitLog`, so none prints Octokit's plain `GET /user - 401 ...` line into a JSON stream.
+		log,
 	} = deps;
+	const quiet = octokitLogOptions(log);
 
 	const source = cfg?.source;
 
 	if (source === "pat") {
 		const patVar = cfg.patVar ?? "GITHUB_PAT";
 		const token = requireToken(env[patVar], patVar);
-		const octokit = new Octokit({ auth: token });
+		const octokit = new Octokit({ auth: token, ...quiet });
 		const selfId = await resolveSelfId({ source: "pat", octokit });
 		const mintToken = async () => requireToken(token, patVar);
 		return { mintToken, selfId, source };
@@ -71,7 +76,7 @@ export async function makeGitHubAuth(cfg, deps = {}) {
 		const execFileAsync = promisify(execFile);
 		const ghToken = () => runGhAuthToken(execFileAsync);
 		// Resolve identity from a token minted once here; each job mints its own below.
-		const octokit = new Octokit({ auth: await ghToken() });
+		const octokit = new Octokit({ auth: await ghToken(), ...quiet });
 		const selfId = await resolveSelfId({ source: "gh", octokit });
 		const mintToken = async (job) => {
 			assertResumeAllowedOnGhSource(job, allowGhResume);
@@ -89,10 +94,16 @@ export async function makeGitHubAuth(cfg, deps = {}) {
 		// The key is either already in hand (GITHUB_APP_PRIVATE_KEY, normalised and shape-checked at config
 		// load) or on disk. loadGitHubAuth refuses both-set, so this is a fallback, never a precedence rule.
 		const privateKey = cfg.privateKey ?? (await readPem(readFile, cfg.privateKeyPath));
-		const auth = { appId: cfg.appId, privateKey, installationId: cfg.installationId };
+		// `log` rides in the auth options too: the per-job `createAppAuth` below builds no Octokit, and
+		// `@octokit/auth-app` otherwise defaults its own warnings to `console.warn`.
+		const auth = { appId: cfg.appId, privateKey, installationId: cfg.installationId, log: quiet.log };
+		// And its `request`: auth-app's default one is a bare `@octokit/request`, whose deprecation warning goes to
+		// `console`. An unauthenticated Octokit's `request` carries the quiet logger and adds no auth hook; the identity
+		// client below is not changed, since Octokit already hands its own request to its auth strategy.
+		const mintRequest = new Octokit({ ...quiet }).request;
 
 		// App-JWT client: resolveSelfId's app path reads GET /app then GET /users/{slug}[bot].
-		const octokit = new Octokit({ authStrategy: createAppAuth, auth });
+		const octokit = new Octokit({ authStrategy: createAppAuth, auth, ...quiet });
 		const selfId = await resolveSelfId({ source: "app", octokit });
 
 		const mintToken = async (job) => {
@@ -112,7 +123,7 @@ export async function makeGitHubAuth(cfg, deps = {}) {
 			const permissions = job?.permissions;
 			let minted;
 			try {
-				const appAuth = createAppAuth(auth);
+				const appAuth = createAppAuth({ ...auth, request: mintRequest });
 				minted = await appAuth({ type: "installation", repositoryNames, ...(permissions && { permissions }) });
 			} catch (error) {
 				throw classifyAppMintError(error);

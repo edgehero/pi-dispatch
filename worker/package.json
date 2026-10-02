@@ -79,6 +79,7 @@
     "./forgejo-identity": "./src/forgejo-identity.mjs",
     "./azure-identity": "./src/azure-identity.mjs",
     "./get-token": "./src/get-token.mjs",
+    "./octokit-log": "./src/octokit-log.mjs",
     "./runtime-settings": "./src/runtime-settings.mjs",
     "./run-history": "./src/run-history.mjs",
     "./run-mirror": "./src/run-mirror.mjs",

@@ -49,6 +49,7 @@ import { makeQueue } from "@edgehero/pi-dispatch/queue";
 import { makeForgeRouter } from "./route.mjs";
 import { judgeValkeyAtStart, parseConnection, valkeyClientContext } from "@edgehero/pi-dispatch/connection";
 import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "@edgehero/pi-dispatch/watch-closer";
+import { githubFailureFields } from "@edgehero/pi-dispatch/octokit-log";
 import { retryIdentity } from "./boot-retry.mjs";
 
 /**
@@ -145,7 +146,8 @@ export async function startReceiver(
 		// one credential decision -- an arm that resolved its identity is exactly the arm that can answer
 		// a permission question. This is also why the github handler's missing-resolver 503 is unreachable
 		// in a wired receiver: a boot that fails here mounts no `/` at all.
-		const auth = await retryIdentity(() => makeAuth(cfg.github), { forge: "github", ...retryOpts });
+		// Issue #530: the GitHub client's own warnings go through this JSON log, never Octokit's plain console lines.
+		const auth = await retryIdentity(() => makeAuth(cfg.github, { log: (event, fields) => log({ event, ...fields }) }), { forge: "github", ...retryOpts });
 		selfId = auth.selfId;
 		log({ event: "self_identity", id: selfId, source: cfg.github.source });
 		// The lookup token asks the mint to narrow to metadata:read -- the App path honors it GitHub-side,
@@ -372,7 +374,7 @@ if (isEntryModule(import.meta.url)) {
 	// An unhandled rejection is printed as its message alone (PR #475's review), never Node's print of the whole reason.
 	installRejectionPrinter();
 	startReceiver(process.env).catch((err) => {
-		process.stderr.write(`${JSON.stringify({ event: "receiver_start_failed", reason: err?.message })}\n`);
+		process.stderr.write(`${JSON.stringify({ event: "receiver_start_failed", reason: err?.message, ...githubFailureFields(err) })}\n`);
 		// entryExitCode, NOT a bare 1. This file is what `receiver.service` execs -- cli.mjs is not on that
 		// path -- so the mapping cli.mjs documents ("a supervisor restarting on exit 2 would loop on a config
 		// that can never parse") only reaches a real deployment from here. A tagged config refusal exits 2
