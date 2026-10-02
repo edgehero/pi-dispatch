@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1168 428" width="1168" height="428" role="img" aria-label="~/pi-work · pi-dispatch init">
-  <rect width="1168" height="428" rx="10" fill="#0d1117" stroke="#30363d"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1168 466" width="1168" height="466" role="img" aria-label="~/pi-work · pi-dispatch init">
+  <rect width="1168" height="466" rx="10" fill="#0d1117" stroke="#30363d"/>
   <rect width="1168" height="34" rx="10" fill="#161b22"/>
   <rect y="24" width="1168" height="10" fill="#161b22"/>
   <circle cx="20" cy="17" r="6" fill="#ff5f57"/>
@@ -14,16 +14,18 @@
   <text x="16" y="142" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">created subscriptions.json       empty subscription list (declare plan prices for the admin's cost analytics)</tspan></text>
   <text x="16" y="161" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">created scoped-limits.json       empty scoped-limits list (per repo/folder caps; the folder mutex needs no file)</tspan></text>
   <text x="16" y="180" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">created egress-allowlist.conf    egress allowlist (provider + forge + registry; the egress policy is on unless PI_EGRESS=0)</tspan></text>
-  <text x="16" y="199" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">created deploy/egress-proxy.conf the egress proxy's rules, the package's copy (shipped, not edited; the hosts go in the allowlist)</tspan></text>
-  <text x="16" y="218" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"></text>
-  <text x="16" y="237" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">Next:</tspan></text>
-  <text x="16" y="256" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">  1. docker pull ghcr.io/edgehero/pi-job:latest &amp;&amp; docker tag ghcr.io/edgehero/pi-job:latest pi-job:latest</tspan></text>
-  <text x="16" y="275" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">                                                        # the prebuilt job image (or build your own from a clone)</tspan></text>
-  <text x="16" y="294" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">  2. pi-dispatch up                                     # Valkey and the egress proxy (unless PI_EGRESS=0)</tspan></text>
-  <text x="16" y="313" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">  3. edit .env                                          # set ANTHROPIC_API_KEY (or your provider's key)</tspan></text>
-  <text x="16" y="332" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">  4. pi-dispatch doctor                                 # verify Docker, Valkey, image, and key</tspan></text>
-  <text x="16" y="351" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">  5. pi-dispatch worker                                 # drain the queue</tspan></text>
-  <text x="16" y="370" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"></text>
-  <text x="16" y="389" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">Operator panel (optional): pi install npm:@edgehero/pi-dispatch-admin   then   /dispatch</tspan></text>
-  <text x="16" y="408" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">  (or let the panel do all of the above: /dispatch setup walks these steps with a consent per action)</tspan></text>
+  <text x="16" y="199" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">created model-endpoints.json     empty model endpoints list (local or LAN model servers a job may reach through the proxy)</tspan></text>
+  <text x="16" y="218" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">created model-endpoints.conf     the proxy's rules for those endpoints, none yet (generated: do not edit)</tspan></text>
+  <text x="16" y="237" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">created deploy/egress-proxy.conf the egress proxy's rules, the package's copy (shipped, not edited; the hosts go in the allowlist)</tspan></text>
+  <text x="16" y="256" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"></text>
+  <text x="16" y="275" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">Next:</tspan></text>
+  <text x="16" y="294" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">  1. docker pull ghcr.io/edgehero/pi-job:latest &amp;&amp; docker tag ghcr.io/edgehero/pi-job:latest pi-job:latest</tspan></text>
+  <text x="16" y="313" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">                                                        # the prebuilt job image (or build your own from a clone)</tspan></text>
+  <text x="16" y="332" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">  2. pi-dispatch up                                     # Valkey and the egress proxy (unless PI_EGRESS=0)</tspan></text>
+  <text x="16" y="351" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">  3. edit .env                                          # set ANTHROPIC_API_KEY (or your provider's key)</tspan></text>
+  <text x="16" y="370" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">  4. pi-dispatch doctor                                 # verify Docker, Valkey, image, and key</tspan></text>
+  <text x="16" y="389" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">  5. pi-dispatch worker                                 # drain the queue</tspan></text>
+  <text x="16" y="408" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"></text>
+  <text x="16" y="427" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">Operator panel (optional): pi install npm:@edgehero/pi-dispatch-admin   then   /dispatch</tspan></text>
+  <text x="16" y="446" xml:space="preserve" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"><tspan fill="#c9d1d9">  (or let the panel do all of the above: /dispatch setup walks these steps with a consent per action)</tspan></text>
 </svg>

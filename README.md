@@ -104,14 +104,14 @@ account on the host can read the queue. It starts the egress proxy that jobs rea
 It writes the config files (`init` on its own does only that part) and fills in `.env` lines that have no
 value yet, without a prompt and without ever overwriting one. Then it runs the `doctor` preflight:
 
-![pi-dispatch init creating the deployment files, then the next steps](docs/images/cli-init.svg?v=2.0.0)
+![pi-dispatch init creating the deployment files, then the next steps](docs/images/cli-init.svg?v=2026-10-02)
 
-![pi-dispatch doctor: one line per check, a warning with its fix, and the ready verdict](docs/images/cli-doctor.svg?v=2.0.0)
+![pi-dispatch doctor: one line per check, including the three egress policy probes, two warnings with their fixes, and the ready verdict](docs/images/cli-doctor.svg?v=2026-10-02)
 
 <details>
 <summary>What a whole <code>up</code> pass prints</summary>
 
-![pi-dispatch up in an empty folder: the files init writes, the generated secrets, Valkey started with its password, the egress proxy network and container, and the closing summary](docs/images/cli-up.svg?v=2.0.0)
+![pi-dispatch up in an empty folder: the files init writes, the generated secrets, Valkey started with its password, the egress proxy network and container with its model endpoints rules mounted, doctor's checks folded into one counted line, and the closing summary](docs/images/cli-up.svg?v=2026-10-02)
 
 </details>
 

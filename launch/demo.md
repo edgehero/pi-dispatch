@@ -91,3 +91,39 @@ An `.cast` file can also be uploaded to asciinema.org and embedded (autoplaying)
   [launch-kit.md](launch-kit.md#packaging-the-extension), and submission context is in the same file.
 
 Keep the file small (< ~3 MB): trim to ~25s, cap width at ~1200px, and prefer the GIF for GitHub autoplay.
+
+## The CLI transcript images
+
+`docs/images/cli-init.svg`, `cli-up.svg`, `cli-doctor.svg` and `cli-service-windows.svg` are real command
+output drawn as a terminal window by `launch/transcript-svg.mjs`. Regenerate them when the output changes:
+
+1. On a Linux host with Docker, as a throwaway account `you` (uid 1000) that is in the `docker` group and has
+   nothing listening on 127.0.0.1:6379, and with `pi-job:latest`, `valkey/valkey:8` and the egress proxy
+   image already pulled (so no pull progress lands in the transcript):
+   - `pi-dispatch init > init.txt` in an empty folder.
+   - `pi-dispatch up --yes > up.txt 2>&1` in an empty `~/pi-work`, with a pi login holding a dummy
+     Anthropic key in `~/.pi/agent/auth.json`, so the folded doctor ends ready.
+   - `pi-dispatch doctor > doctor.txt 2>&1` in the same folder, after removing that pi login, setting a
+     dummy `ANTHROPIC_API_KEY` in `.env`, and adding a github label trigger with flow `fix` and a
+     `run.skillsDir` of `~/pi-work/skills` holding one skill. No gh login, so its warning shows.
+2. Replace the account's home with `~` in each file. Nothing else in them names the host:
+
+   ```sh
+   sed -i -e 's#/home/you/#~/#g' -e 's#/home/you\b#~#g' init.txt up.txt doctor.txt
+   ```
+
+   This turns `/home/you/pi-work` into `~/pi-work` and `/home/you/.pi-dispatch` into `~/.pi-dispatch`.
+   Keep `/tmp/pi-dispatch-1000` (the jobs dir of uid 1000) and `HOME=/home/pi` (the job container's home,
+   not the host's) as printed.
+3. Render:
+
+   ```sh
+   node launch/transcript-svg.mjs --fit --title "~/pi-work · pi-dispatch init" --prompt '$ pi-dispatch init' init.txt > docs/images/cli-init.svg
+   node launch/transcript-svg.mjs --fold-doctor --title "~/pi-work · pi-dispatch up --yes" --prompt '$ pi-dispatch up --yes' up.txt > docs/images/cli-up.svg
+   node launch/transcript-svg.mjs --title "~/pi-work · pi-dispatch doctor" --prompt '$ pi-dispatch doctor' doctor.txt > docs/images/cli-doctor.svg
+   ```
+
+4. Bump the `?v=` on each changed image in the README, so GitHub's image cache fetches the new one.
+
+`cli-service-windows.svg` is `service render` with `platform: "win32"` and Windows paths passed through
+`runService`'s seams, titled `PowerShell · C:\Users\you\pi-work`.
