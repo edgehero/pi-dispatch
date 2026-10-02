@@ -152,13 +152,16 @@ export async function runJob(job, deps) {
 		// Issue #230. Admit-everything by default, like checkOnceSpent above and for its reason: an
 		// unwired seam must not refuse, and the wiring is what turns the check on.
 		checkWaitSkew = async () => ({ ok: true }),
-		// () => { ok } | { message }. Issue #310. Resolves this deployment's provider credential the way
+		// () => { ok } | { message } | { unavailable } (issue #503: a transient overlay read, retried). Issue #310. Resolves this deployment's provider credential the way
 		// buildContainerEnv will, and answers whether it exists AT ALL, so an unconfigured provider refuses
 		// here rather than inside runContainer with the budget already reserved. Admit-everything by default,
 		// like the two above and for their reason. A PROBE, deliberately: it discards whatever it resolves and
 		// the real read happens where it always did, because threading a live credential through the processor
 		// would put it in scope for every log line and record between here and the container.
 		checkProviderCredential = () => ({ ok: true }),
+		// Issue #503: the pickup's endpoint snapshot `{ endpoints, models, set }` (index.mjs), read once per pickup. Null on
+		// a wiring with no endpoint seam, which leaves the credential gate and the container env exactly as before.
+		modelEndpoints = null,
 		// REQ-EGRESS-ALLOWLIST. Default admits everything, so a wiring that omits it behaves exactly as a
 		// deployment with no egress policy does -- which is also what the real factory returns when unarmed.
 		egressPreflight = async () => ({ ok: true }),
@@ -231,7 +234,7 @@ export async function runJob(job, deps) {
 		mintToken,
 		isDefaultBranchProtected, // (job, token) => boolean; same reason -- the forge is the job's, not the process's
 		prepareWorkspace, // (job, token) => { workspaceDir, jobDir }  (clone+materialise+prompt)
-		// runContainer({ job, token, prepared, secrets, name, signal, user, home }) => { code, aborted, abortReason, turns, tokens, session, usage, context, exitReason }.
+		// runContainer({ job, token, prepared, secrets, name, signal, user, home, modelEndpoints? }) => { code, aborted, abortReason, turns, tokens, session, usage, context, exitReason }.
 		// `exitReason` (issue #437) is parseExitReason's closed-set label, read only inside the exit-2 branch.
 		// `user`/`home` are the job-user gate's answer (issue #341), null for the image's own USER.
 		// `secrets` is the resolved map from the gate above: values, already fetched, host-side. It MUST honour
@@ -591,7 +594,17 @@ export async function runJob(job, deps) {
 		// The refusal names no path. `credentialFromPiAuth`'s messages carry auth.json's location, `comment`
 		// posts publicly on the issue, and the reason an operator needs is the same either way: their
 		// deployment has no usable provider credential and `doctor` will say exactly which variable.
-		const credential = await checkProviderCredential(job);
+		// `modelEndpoints` is the pickup's snapshot (issue #503), handed to the gate and to runContainer alike, so a
+		// keyless provider passes here and gets its PI_DISPATCH_KEYLESS there from ONE read of the declaration. runContainer
+		// is handed it only when an endpoint is declared, so with none its context is byte-identical to before.
+		const credential = await checkProviderCredential(job, { modelEndpoints });
+		if (credential.unavailable) {
+			// Issue #503: the overlay models.json could not be read at this pickup for a transient reason, so the gate has no
+			// verdict for a provider that may be keyless. Retried, never refused: a refusal is permanent and public, and the
+			// next attempt may read the file. The code is a fixed errno token, never file text.
+			log("provider_credential_unavailable", { provider: job.provider ?? null, reason: credential.unavailable });
+			throw new InfraRetry("the provider credential could not be decided", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+		}
 		if (!credential.ok) {
 			// The PROVIDER is named and the message is not. The provider is operator-authored config, already
 			// on the record and the mirror, and named freely by the sibling refusals (`backend-unblessed` names
@@ -940,7 +953,7 @@ export async function runJob(job, deps) {
 		}
 
 		// The user the gate above decided is the user that runs: one answer, never two call sites that agree.
-		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason } = await runContainer({ job, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true });
+		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason } = await runContainer({ job, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}) });
 		containerRan = true;
 		log("container_exit", { exitCode: code, aborted, ...(detached === true ? { detached: true } : {}) });
 

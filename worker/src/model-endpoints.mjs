@@ -7,8 +7,9 @@
  * and refuses, never repairs; `loadModelEndpoints` layers the one fs read on top; `endpointsForModel` derives which
  * endpoints a model uses from the overlay `models.json`; `renderEndpointsInclude` writes the squid include the proxy
  * reads. The module enforces nothing itself: the proxy include enforces the route, and the pickup gate in index.mjs
- * enforces `slots` through a lease per endpoint (`DES-FLEET-LEASES-FOR-SHARED-BOUNDS`). The keyless credential gate
- * is a later change of the same issue. All of them bind to this one implementation.
+ * enforces `slots` through a lease per endpoint (`DES-FLEET-LEASES-FOR-SHARED-BOUNDS`), and the credential gate
+ * passes a custom provider served by keyless endpoints alone (`keylessVerdict`). All of them bind to this one
+ * implementation.
  *
  * Which models use an endpoint is DERIVED, never listed twice: a model uses endpoint E when its effective `baseUrl`
  * (the model's own, else its provider's) has E's host and port. A second list of model names here could disagree
@@ -28,6 +29,8 @@ import { isIPv4 } from "node:net";
 import { join, resolve } from "node:path";
 import { PROXY_LOCAL_ADDRESSES, isProxyLocalHost } from "./backends.mjs";
 import { configError } from "./config.mjs";
+import { KEYLESS_ENV_NAME } from "./reserved-env.mjs";
+import { isDeterminateFsCode } from "./transient.mjs";
 
 /** The schema version this build reads. A file declaring a higher one is refused loudly. */
 export const MODEL_ENDPOINTS_VERSION = 1;
@@ -243,16 +246,31 @@ export function loadModelEndpoints(config, { readFileSync = fsReadFileSync, exis
 /**
  * The overlay's `models.json` (`<globalPiDir>/models.json`), parsed as JSON and nothing else: no `$VAR` expansion,
  * because the host's environment is not the job's, and a derivation that expanded one would describe a server the
- * job never dials. `null` when there is no overlay or no file. Malformed JSON is a `configError`.
+ * job never dials. ONE rule for every caller (the pickup snapshot in index.mjs, doctor), in three outcomes:
+ *   - `null` when there is no overlay, or the read fails with an errno `isDeterminateFsCode` calls absence (ENOENT,
+ *     ENOTDIR, ELOOP, ENAMETOOLONG);
+ *   - ANY other fs error is RETHROWN as-is, its `code` intact (EACCES, EIO, EMFILE, EISDIR...): the file may be readable
+ *     in a minute, so a caller must be able to tell this from a verdict, and the keyless gate retries on it;
+ *   - text that does not parse, or is not an object, is a `configError`: a determinate fault the operator fixes.
+ * The read is NOT inside the parse's try, and there is no `existsSync` first. Both were here (PR #520 round 2): the
+ * try turned EACCES and EIO into "not valid JSON", a permanent public refusal, and `existsSync` answers false for a
+ * file under an unreadable directory, which read as absence. A read that throws is the only honest question.
  */
-export function readOverlayModels(globalPiDir, { readFileSync = fsReadFileSync, existsSync = fsExistsSync } = {}) {
+export function readOverlayModels(globalPiDir, { readFileSync = fsReadFileSync } = {}) {
 	if (typeof globalPiDir !== "string" || globalPiDir === "") return null;
 	const path = join(globalPiDir, "models.json");
-	if (!existsSync(path)) return null;
+	let text;
+	try {
+		text = String(readFileSync(path, "utf8"));
+	} catch (error) {
+		if (isDeterminateFsCode(error?.code)) return null;
+		throw error;
+	}
 	let parsed;
 	try {
-		parsed = JSON.parse(String(readFileSync(path, "utf8")));
+		parsed = JSON.parse(text);
 	} catch (error) {
+		if (!(error instanceof SyntaxError)) throw error;
 		throw configError(`overlay models.json is not valid JSON: ${path} (${error.message})`);
 	}
 	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw configError(`overlay models.json must be an object: ${path}`);
@@ -322,6 +340,91 @@ export function endpointsForProvider({ models, provider, endpoints }) {
 	const entry = providerOf(models, provider);
 	if (entry === null) return [];
 	return modelsOf(entry).map((m) => ({ modelId: m.id, endpoints: matching(typeof m.baseUrl === "string" ? m.baseUrl : entry.baseUrl, endpoints) }));
+}
+
+/** The exact `apiKey` a keyless provider's models.json entry carries: pi resolves `$NAME` from the job's environment. */
+export const KEYLESS_API_KEY = `$${KEYLESS_ENV_NAME}`;
+
+/**
+ * The second way into the credential gate, said once for every refusal and doctor line that names it (issue #503).
+ */
+export const KEYLESS_HOW = `for a custom provider served by a local model server, declare that server in model-endpoints.json with "keyless": true and set "apiKey": "${KEYLESS_API_KEY}" on the provider in models.json (docs/egress.md, "Local model servers")`;
+
+/**
+ * Is this overlay provider keyless (issue #503, part 4)? `{ keyless: true, endpoints: [ids] }` only when ALL of these
+ * hold, else `{ keyless: false, why }` (`why` null when the overlay does not define the provider at all):
+ *   - the overlay `models.json` defines the provider and lists at least one model;
+ *   - EVERY one of its models (effective baseUrl) is served by a declared endpoint, and every such endpoint is
+ *     `keyless: true`. EVERY and not SOME: the job may switch to any model of its provider, and one model on a hosted
+ *     server would then run with no key the gate ever looked at;
+ *   - its `apiKey` is exactly `"$PI_DISPATCH_KEYLESS"`. pi composes a models.json provider only with SOME key (at 0.99.1,
+ *     `provider-composer.js` "no authentication method configured"), and the worker sets that one variable, fixed and
+ *     non-secret, on this branch alone. Any other value means pi sends something the gate never saw: a literal key (a
+ *     secret in a mounted file, which `import-pi` already refuses), another `$VAR` (unset in the closed container env,
+ *     so the runner exits 2 after the container started), or `!cmd` (a shell in the job). Refused rather than guessed;
+ *   - it carries NO other credential of any kind: no `headers` on the provider, on any model or in any
+ *     `modelOverrides` entry, no `oauth`, and no userinfo (`user:pass@`) in the provider's or any model's baseUrl.
+ *     Keyless means no credentials, and this is the simple rule rather than a judgement of which header looks like a
+ *     secret. Nothing of it would reach a hosted service (every model must be on a declared endpoint), but a header
+ *     value is a pi config value too (`!cmd` runs a shell, `$VAR` is unset in the closed env), and a secret in the
+ *     overlay is a secret in a mounted file;
+ *   - every model entry is an object with a non-empty string `id`. pi validates models.json strictly and refuses the
+ *     WHOLE file over one bad entry, so skipping it here would pass a job whose runner then exits 2 in a container.
+ *
+ * The overlay is read as plain JSON (`readOverlayModels`), so a file pi would still read (comments, a BOM) is
+ * unreadable here and nothing in it is keyless: fail closed.
+ *
+ * Whether pi itself knows the provider is NOT asked here: this module never imports pi. The callers ask that first,
+ * with the same predicate as the credential gate (`env-allowlist.mjs`), and only an unknown provider reaches this.
+ * Pure: it reads the snapshot it is handed and nothing else, so the gate, the env writer and doctor agree by input.
+ */
+export function keylessVerdict({ models, provider, endpoints }) {
+	const entry = providerOf(models, provider);
+	if (entry === null) return { keyless: false, why: null };
+	if (entry.apiKey !== KEYLESS_API_KEY) return { keyless: false, why: `its models.json "apiKey" is not "${KEYLESS_API_KEY}"` };
+	const credential = otherCredential(entry);
+	if (credential !== null) return { keyless: false, why: `it sets ${credential}, and keyless means no credentials of any kind` };
+	if (entry.models !== undefined && (!Array.isArray(entry.models) || entry.models.some((m) => m === null || typeof m !== "object" || Array.isArray(m) || typeof m.id !== "string" || m.id === ""))) {
+		return { keyless: false, why: 'a model entry in models.json is not an object with a non-empty string "id", so pi would refuse the file' };
+	}
+	const served = endpointsForProvider({ models, provider, endpoints });
+	if (served.length === 0) return { keyless: false, why: "it lists no models in models.json" };
+	const ids = new Set();
+	for (const { modelId, endpoints: used } of served) {
+		if (used.length === 0) return { keyless: false, why: `its model ${JSON.stringify(modelId)} is not served by a declared model endpoint` };
+		for (const e of used) {
+			if (e.keyless !== true) return { keyless: false, why: `the endpoint ${e.id} serving its model ${JSON.stringify(modelId)} is not "keyless": true` };
+			ids.add(e.id);
+		}
+	}
+	return { keyless: true, endpoints: [...ids].sort() };
+}
+
+/** The first credential a keyless provider must not carry besides its apiKey, named for the refusal; null when none. */
+function otherCredential(entry) {
+	if (entry.headers !== undefined) return "provider headers";
+	if (entry.oauth !== undefined) return '"oauth"';
+	if (hasUserinfo(entry.baseUrl)) return "a user or password in its baseUrl";
+	for (const m of Array.isArray(entry.models) ? entry.models : []) {
+		if (m === null || typeof m !== "object") continue;
+		if (m.headers !== undefined) return `headers on its model ${JSON.stringify(m.id)}`;
+		if (hasUserinfo(m.baseUrl)) return `a user or password in the baseUrl of its model ${JSON.stringify(m.id)}`;
+	}
+	const overrides = entry.modelOverrides;
+	if (overrides !== null && typeof overrides === "object") {
+		for (const [id, o] of Object.entries(overrides)) if (o !== null && typeof o === "object" && o.headers !== undefined) return `headers in modelOverrides ${JSON.stringify(id)}`;
+	}
+	return null;
+}
+
+function hasUserinfo(baseUrl) {
+	if (typeof baseUrl !== "string") return false;
+	try {
+		const url = new URL(baseUrl);
+		return url.username !== "" || url.password !== "";
+	} catch {
+		return false;
+	}
 }
 
 /**

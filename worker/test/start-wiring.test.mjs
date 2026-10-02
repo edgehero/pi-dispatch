@@ -1035,6 +1035,20 @@ test("the free credential gate resolves against the SAME inputs buildContainerEn
 	assert.match(verdict.message, /no configured credential/);
 	// A different provider on the SAME wired gate: the verdict follows the job, not the boot.
 	assert.equal(gate({ provider: "openai" }).ok, false, "the gate reads job.provider, not a captured one");
+
+	// Issue #503: the wired gate takes the pickup's snapshot as its second argument, so a keyless custom provider passes
+	// on it, and the same provider without it is refused with both ways in named.
+	const snapshot = {
+		endpoints: [{ id: "mac-ollama", host: "host.docker.internal", port: 11434, slots: 1, keyless: true }],
+		models: { providers: { "local-ollama": { baseUrl: "http://host.docker.internal:11434/v1", apiKey: "$PI_DISPATCH_KEYLESS", models: [{ id: "qwen" }] } } },
+		set: [],
+	};
+	assert.deepEqual(gate({ provider: "local-ollama" }, { modelEndpoints: snapshot }), { ok: true });
+	const custom = gate({ provider: "local-ollama" });
+	assert.equal(custom.ok, false);
+	assert.match(custom.message, /"keyless": true/);
+	// PR #520 round 1: a transient overlay read at pickup is `{ unavailable }` (the processor retries it), not a refusal.
+	assert.deepEqual(gate({ provider: "local-ollama" }, { modelEndpoints: { ...snapshot, models: null, modelsUnreadable: { code: "EIO" } } }), { ok: false, unavailable: "EIO" });
 });
 
 test("the secrets resolver and the container builder are handed the SAME host env and forward list", { skip }, async () => {

@@ -659,6 +659,99 @@ test("doctor: PI_PROVIDER=gemini says pi has no such provider, and derives the o
 	assert.match(text(), /set PI_PROVIDER=google/, "the suggestion comes from pi's own table");
 });
 
+test("doctor: a keyless custom provider is ✓ exactly when the worker's gate passes it, on the same declaration (#503)", { skip: skipNoPi }, async () => {
+	// The agreement bolt: doctor's line and the worker's buildContainerEnv are driven on the SAME endpoints and the SAME
+	// overlay models.json, case by case. A disagreement is a green setup line over a refused job, or the reverse.
+	const { buildContainerEnv } = await import("../src/env-allowlist.mjs");
+	const MAC = { id: "mac-ollama", host: "host.docker.internal", port: 11434, slots: 1, keyless: true };
+	const provider = (extra = {}) => ({ providers: { "local-ollama": { api: "openai-completions", baseUrl: "http://host.docker.internal:11434/v1", apiKey: "$PI_DISPATCH_KEYLESS", models: [{ id: "qwen" }], ...extra } } });
+	const cases = [
+		{ name: "keyless", endpoints: [MAC], models: provider(), keyless: true },
+		{ name: "endpoint not keyless", endpoints: [{ ...MAC, keyless: false }], models: provider(), keyless: false, why: /the endpoint mac-ollama serving its model "qwen" is not "keyless": true/ },
+		{ name: "one model off-endpoint", endpoints: [MAC], models: provider({ models: [{ id: "qwen" }, { id: "big", baseUrl: "https://api.example.com/v1" }] }), keyless: false, why: /its model "big" is not served by a declared model endpoint/ },
+		{ name: "literal key", endpoints: [MAC], models: provider({ apiKey: "ollama" }), keyless: false, why: /its models\.json "apiKey" is not "\$PI_DISPATCH_KEYLESS"/ },
+		{ name: "nothing declared", endpoints: [], models: provider(), keyless: false },
+	];
+	for (const c of cases) {
+		const overlay = tempDir("pi-overlay-keyless-");
+		writeFileSync(join(overlay, "models.json"), JSON.stringify(c.models));
+		const { out, text } = capture();
+		await runDoctor(provEnv({ PI_PROVIDER: "local-ollama", PI_GLOBAL_PI_DIR: overlay, PI_EGRESS: "0" }), { ...provDeps(out), declaredEndpoints: () => c.endpoints });
+		let workerPasses = true;
+		try {
+			buildContainerEnv({ provider: "local-ollama", model: "qwen", maxTurns: 5, jobId: "j", hostEnv: {}, modelEndpoints: { endpoints: c.endpoints, models: c.models, set: [] } });
+		} catch (error) {
+			if (error?.piDispatchConfig !== true) throw error;
+			workerPasses = false;
+		}
+		assert.equal(workerPasses, c.keyless, `${c.name}: the worker's verdict`);
+		if (c.keyless) {
+			assert.match(text(), /✓ Provider key: none needed \(local-ollama is keyless: served by declared endpoint mac-ollama\)/, c.name);
+		} else {
+			assert.match(text(), /✗ PI_PROVIDER is "local-ollama", which is not a provider pi has/, c.name);
+			assert.match(text(), /declare that server in model-endpoints\.json with "keyless": true and set "apiKey": "\$PI_DISPATCH_KEYLESS"/, `${c.name}: the fix names the keyless way in`);
+			if (c.why) assert.match(text(), c.why, `${c.name}: and why this one is not`);
+		}
+	}
+});
+
+test("doctor: the keyless line reads the folder's own files as the service would, queue port included (PR #520 round 1)", { skip: skipNoPi }, async () => {
+	// No `declaredEndpoints` seam: the real read, from the deployment folder, with a RELATIVE PI_GLOBAL_PI_DIR resolved
+	// against it (the worker's working directory), and the queue port the worker's boot refuses.
+	for (const [port, keyless] of [[11434, true], [6379, false]]) {
+		const cwd = tempDir("pi-keyless-folder-");
+		mkdirSync(join(cwd, "overlay"));
+		writeFileSync(join(cwd, "overlay", "models.json"), JSON.stringify({ providers: { "local-ollama": { baseUrl: `http://ollama.lan:${port}/v1`, apiKey: "$PI_DISPATCH_KEYLESS", models: [{ id: "qwen" }] } } }));
+		writeFileSync(join(cwd, "model-endpoints.json"), JSON.stringify({ version: 1, endpoints: [{ id: "lan-ollama", host: "ollama.lan", port, slots: 1, keyless: true }] }));
+		const { out, text } = capture();
+		await runDoctor(provEnv({ PI_PROVIDER: "local-ollama", PI_GLOBAL_PI_DIR: "overlay", PI_EGRESS: "0" }), { ...provDeps(out), cwd, fileExists: existsSync });
+		if (keyless) assert.match(text(), /✓ Provider key: none needed \(local-ollama is keyless: served by declared endpoint lan-ollama\)/);
+		else assert.doesNotMatch(text(), /keyless: served by/, "an endpoint on the queue's port refuses the worker's boot, so it is not keyless");
+	}
+});
+
+test("doctor: an overlay models.json it cannot read is ⚠ naming the errno, never ✗ unknown or \"not valid JSON\" (PR #520 round 2)", { skip: skipNoPi || (typeof process.getuid === "function" && process.getuid() === 0 ? "root reads a mode-000 file" : false) }, async () => {
+	const cwd = tempDir("pi-keyless-000-");
+	mkdirSync(join(cwd, "overlay"));
+	const models = join(cwd, "overlay", "models.json");
+	writeFileSync(models, JSON.stringify({ providers: { "local-ollama": { baseUrl: "http://ollama.lan:11434/v1", apiKey: "$PI_DISPATCH_KEYLESS", models: [{ id: "qwen" }] } } }));
+	writeFileSync(join(cwd, "model-endpoints.json"), JSON.stringify({ version: 1, endpoints: [{ id: "lan-ollama", host: "ollama.lan", port: 11434, slots: 1, keyless: true }] }));
+	chmodSync(models, 0o000);
+	try {
+		const { out, text } = capture();
+		await runDoctor(provEnv({ PI_PROVIDER: "local-ollama", PI_GLOBAL_PI_DIR: join(cwd, "overlay"), PI_EGRESS: "0" }), { ...provDeps(out), cwd, fileExists: existsSync });
+		assert.match(text(), /⚠ Provider key: could not read models\.json \(EACCES\), so whether "local-ollama" is keyless is not known; the worker retries such a job/);
+		assert.doesNotMatch(text(), /✗ PI_PROVIDER is "local-ollama"/);
+		assert.match(text(), /could not read models\.json \(EACCES\)/);
+		assert.doesNotMatch(text(), /overlay models\.json is not valid JSON/, "a read error is not a parse error");
+	} finally {
+		chmodSync(models, 0o600);
+	}
+});
+
+test("doctor: the credential-free check reads through the one reader: a models.json under a mode-000 overlay is ⚠, never a silent pass (PR #520)", { skip: typeof process.getuid === "function" && process.getuid() === 0 ? "root reads a mode-000 directory" : false }, async () => {
+	const overlay = join(tempDir("pi-overlay-dir000-"), "overlay");
+	mkdirSync(overlay);
+	writeFileSync(join(overlay, "models.json"), JSON.stringify({ providers: { p: { apiKey: "sk-literal-secret-value" } } }));
+	chmodSync(overlay, 0o000);
+	try {
+		const { out, text } = capture();
+		await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_GLOBAL_PI_DIR: overlay }), { ...provDeps(out), fileExists: existsSync });
+		assert.match(text(), /⚠ Overlay models\.json could not be read \(EACCES\), so whether it is credential-free is not known/);
+		assert.doesNotMatch(text(), /✓ Overlay models\.json is credential-free/, "an unread file is not a clean one");
+	} finally {
+		chmodSync(overlay, 0o700);
+	}
+	// Readable again: the same file's literal key is the ✗ it always was, and a non-object is ✗ too, never "unreadable".
+	const { out, text } = capture();
+	await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_GLOBAL_PI_DIR: overlay }), { ...provDeps(out), fileExists: existsSync });
+	assert.match(text(), /✗ Overlay models\.json is credential-free/);
+	writeFileSync(join(overlay, "models.json"), "[]");
+	const again = capture();
+	await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_GLOBAL_PI_DIR: overlay }), { ...provDeps(again.out), fileExists: existsSync });
+	assert.match(again.text(), /✗ Overlay models\.json is credential-free\n {4}→ overlay models\.json is not a valid models\.json/);
+});
+
 test("doctor: a provider pi DOES know, with its key set, still passes", { skip: skipNoPi }, async () => {
 	for (const [provider, variable] of [["anthropic", "ANTHROPIC_API_KEY"], ["openai", "OPENAI_API_KEY"], ["google", "GEMINI_API_KEY"], ["xai", "XAI_API_KEY"]]) {
 		const { out, text } = capture();
@@ -1798,6 +1891,7 @@ test("doctor: an unset PI_MODEL_ENDPOINTS_FILE loads model-endpoints.json from t
 
 test("doctor: a default model-endpoints.json that does not load fails, with the loader's own reason (#503)", async () => {
 	const cases = [
+		["", /not valid JSON/], // a zero-byte file is not the empty declaration: it does not parse, and refuses the start
 		[JSON.stringify({ version: 2, endpoints: [] }), /written by a newer pi-dispatch/],
 		[JSON.stringify({ version: 1, endpoints: [{ id: "lo", host: "localhost", port: 11434, slots: 1 }] }), /loopback/],
 		[JSON.stringify({ version: 1, endpoints: [{ id: "q", host: "valkey.lan", port: 6390, slots: 1 }] }), /job queue's \(VALKEY_URL\)/],
@@ -1807,7 +1901,8 @@ test("doctor: a default model-endpoints.json that does not load fails, with the 
 		writeFileSync(join(cwd, "model-endpoints.json"), content);
 		const { out, text } = capture();
 		const code = await runDoctor(imgEnv({ VALKEY_URL: "redis://127.0.0.1:6390" }), scaffoldDeps(out, cwd));
-		assert.match(text(), /✗ PI_MODEL_ENDPOINTS_FILE is unset, so the worker reads model-endpoints\.json in the deployment folder, and it does not load: the worker REFUSES THE FILE and uses no model endpoint: /, content);
+		// The worker loads this file at boot (start.mjs), so a bad one refuses the start, said in the other boot files' words.
+		assert.match(text(), /✗ PI_MODEL_ENDPOINTS_FILE is unset, so the worker reads model-endpoints\.json in the deployment folder, and it does not load: the worker REFUSES TO START: /, content);
 		assert.match(text(), reason, content);
 		assert.equal(code, 1);
 	}
@@ -1829,7 +1924,7 @@ test("doctor: with VALKEY_URL unset, an endpoint on 6379 fails as the worker's d
 
 test("doctor: a PI_MODEL_ENDPOINTS_FILE naming no file, or set empty, fails in this shell (#503)", async () => {
 	const cwd = scaffoldedCwd();
-	for (const [value, re] of [[join(cwd, "nope.json"), /✗ PI_MODEL_ENDPOINTS_FILE is set in this shell to a file the worker cannot load, so it REFUSES THE FILE and uses no model endpoint: .*nope\.json does not exist/], ["", /✗ PI_MODEL_ENDPOINTS_FILE is set to an EMPTY value in this shell/]]) {
+	for (const [value, re] of [[join(cwd, "nope.json"), /✗ PI_MODEL_ENDPOINTS_FILE is set in this shell to a file the worker cannot load, so it REFUSES TO START: .*nope\.json does not exist/], ["", /✗ PI_MODEL_ENDPOINTS_FILE is set to an EMPTY value in this shell, which is not unset: the worker keeps it, tries to load "" and REFUSES TO START/]]) {
 		const { out, text } = capture();
 		const code = await runDoctor(imgEnv({ PI_MODEL_ENDPOINTS_FILE: value }), scaffoldDeps(out, cwd));
 		assert.match(text(), re);
@@ -1919,6 +2014,19 @@ test("doctor: a BLANK line in the .env is a refused boot, and it FAILS (#365, #3
 	assert.match(text(), /REFUSES TO START/);
 	assert.match(text(), /delete the PI_PAUSE_WINDOWS_FILE line from that \.env, or give it a path/, "and the fix is about a blank value, not about an unset one");
 	assert.equal(code, 1, "a deployment whose worker cannot boot must not exit 0");
+});
+
+test("doctor: a BLANK PI_MODEL_ENDPOINTS_FILE in the .env is a refused boot, in the other boot files' words (#503)", async () => {
+	// The worker loads the endpoints file at boot (start.mjs, since PR #518), so an empty value refuses the start like
+	// the two keys above, and deleting the line falls back to the folder's copy rather than turning anything off.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "PI_MODEL_ENDPOINTS_FILE=\n");
+	const { out, text } = capture();
+	const code = await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
+	assert.match(text(), /✗ PI_MODEL_ENDPOINTS_FILE is assigned an EMPTY value in .*\.env, which is not unset: .* the worker tries to load "" and REFUSES TO START/);
+	assert.match(text(), /Deleting it reads model-endpoints\.json in the deployment folder instead; an empty value turns the worker off/);
+	assert.doesNotMatch(text(), /no endpoint usable|REFUSES THE FILE/);
+	assert.equal(code, 1);
 });
 
 test("doctor: a blank value with NO scaffolded file still fails (#384)", async () => {

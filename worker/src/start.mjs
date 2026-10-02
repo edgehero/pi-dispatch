@@ -1673,14 +1673,17 @@ export async function startWorker(
 			//
 			// A PROBE: whatever it resolves is dropped on the floor. The credential itself is read where it always
 			// was, inside buildContainerEnv, so no live key is ever in scope in the processor.
-			checkProviderCredential: (job) => {
+			// Issue #503: `modelEndpoints` is the pickup's snapshot, the same one runContainer hands buildContainerEnv.
+			checkProviderCredential: (job, { modelEndpoints = null } = {}) => {
 				try {
-					resolveProviderCredential({ provider: job.provider, hostEnv: env, authFromPi: config.authFromPi, forwardEnv: config.forwardEnv });
+					resolveProviderCredential({ provider: job.provider, hostEnv: env, authFromPi: config.authFromPi, forwardEnv: config.forwardEnv, modelEndpoints });
 					return { ok: true };
 				} catch (error) {
 					// Only OUR determinate refusal. Anything else (a bug here, an fs fault the module does not model)
 					// must not become a policy refusal on the operator's issue: it rethrows into runJob's catch, which
 					// classifies it the way it always did.
+					// Issue #503: a transient overlay read at this pickup is no verdict; the processor retries it as infra.
+					if (error?.piDispatchTransient === true) return { ok: false, unavailable: error.code ?? "unreadable" };
 					if (error?.piDispatchConfig !== true) throw error;
 					return { ok: false, message: error.message };
 				}

@@ -57,9 +57,20 @@ test("the processor declares arity 3 -- the silent trap that would disable the t
 });
 
 test("the timeout fires cancelJob after timeoutMs", { skip }, async () => {
+	// AWAITS THE EVENT, never a fixed wall-clock wait (PR #520 round 2). It used to sleep 60 ms against a 20 ms timer,
+	// but the timer is armed only after the pickup gates, so on a loaded machine those gates alone could outrun the
+	// sleep and the assertion read `null` (seen once in review, on main too). Waiting for cancelJob itself is exact. A
+	// timer that never fires must FAIL, and nothing else would make it: no --test-timeout is set, and an unresolved await
+	// only ends the file when the event loop drains. So the wait is raced against an explicit, generous bound (10 s, 500
+	// times the timer), which a working timer never comes near and a broken one always reaches.
 	let cancelled = null;
+	let fired;
+	const cancelledOnce = new Promise((resolve) => (fired = resolve));
 	const processor = mod.makeProcessor({
-		cancelJob: (id, reason) => (cancelled = { id, reason }),
+		cancelJob: (id, reason) => {
+			cancelled = { id, reason };
+			fired();
+		},
 		stopContainer: () => {},
 		redis: { async incr() { return 1; }, async expire() {} },
 		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
@@ -79,7 +90,10 @@ test("the timeout fires cancelJob after timeoutMs", { skip }, async () => {
 	const ac = new AbortController();
 	const job = { id: "j1", data: { kind: "github", repo: "o/r" } };
 	const running = processor(job, "tok", ac.signal).catch(() => {});
-	await new Promise((r) => setTimeout(r, 60));
+	let bound;
+	const outcome = await Promise.race([cancelledOnce.then(() => "cancelled"), new Promise((resolve) => (bound = setTimeout(() => resolve("bound"), 10_000)))]);
+	clearTimeout(bound);
+	assert.equal(outcome, "cancelled", "the job timer never fired cancelJob within the bound");
 	assert.equal(cancelled?.id, "j1");
 	assert.equal(cancelled?.reason, "job-timeout-30m");
 	ac.abort(); // let the hung runContainer's abort path settle

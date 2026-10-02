@@ -60,7 +60,7 @@ import { randomBytes } from "node:crypto";
 import { DEFAULT_VALKEY_URL, accountTempRoot, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
-import { MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, baseUrlTarget, loadModelEndpoints, renderEndpointsInclude } from "./model-endpoints.mjs";
+import { KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, baseUrlTarget, keylessVerdict, loadModelEndpoints, readOverlayModels, renderEndpointsInclude } from "./model-endpoints.mjs";
 import { declaredEndpointsIn, endpointsDeclaredIn, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
 import { loadPauseWindows } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
@@ -970,8 +970,8 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 }
 
 /**
- * The files a worker LOADS, and the one place that knows what each is and how to ask. Two are read at boot; the
- * third, the model endpoints file (issue #503), defaults to the deployment folder's copy and is judged the same way.
+ * The files a worker LOADS at boot, and the one place that knows what each is and how to ask. The third, the model
+ * endpoints file (issue #503), defaults to the deployment folder's copy where the other two are off when unset.
  *
  * `load` calls the worker's own loader (issue #384). Doctor used to carry its own parse for scoped limits
  * and nothing at all for pause windows, so "will the worker start" had two answers and one silence. The
@@ -1010,9 +1010,13 @@ const BOOT_FILES = Object.freeze([
 		load: (path, io) => loadScopedLimits({ scopedLimitsFile: path }, io),
 	}),
 	// Issue #503. Not off when unset: the worker then reads the scaffold in the deployment folder, so `defaultsToScaffold`
-	// swaps the "exists but unset" warning for a load of that file. Nothing in the worker reads it yet (its proxy
-	// include, leases and keyless gate are later changes of the issue), so a bad file is named for what it costs, no
-	// usable endpoint, and not as a refused start.
+	// swaps the "exists but unset" warning for a load of that file. The worker loads it at boot exactly like the two
+	// above (start.mjs, `loadModelEndpoints`), so a file that does not load, a named file that is missing and an empty
+	// value all REFUSE THE START; a live edit that does not load keeps the last good declaration instead
+	// (`model_endpoints_reload_invalid`), which is a running worker's posture and not the one predicted here. A valid
+	// `{"version":1,"endpoints":[]}` declares none, and only a missing DEFAULT file means the same. The file decides the
+	// proxy include, the slot leases at pickup and the keyless credential gate, so a start on a bad one would be a
+	// deployment whose rules and bounds the operator believes in and does not have.
 	Object.freeze({
 		key: "PI_MODEL_ENDPOINTS_FILE",
 		noun: "declared model endpoints",
@@ -1021,10 +1025,10 @@ const BOOT_FILES = Object.freeze([
 		unsetMeans: `the worker reads ${MODEL_ENDPOINTS_FILE_NAME} in the deployment folder`,
 		unit: "endpoint",
 		nothing: "model endpoints",
-		fails: "REFUSES THE FILE and uses no model endpoint",
+		fails: "REFUSES TO START",
 		whenDeleted: `reads ${MODEL_ENDPOINTS_FILE_NAME} in the deployment folder instead`,
-		whenEmpty: "leaves no endpoint usable",
-		emptyCost: "leaves no endpoint usable",
+		whenEmpty: "turns the worker off",
+		emptyCost: "refuses the boot",
 		resolve: modelEndpointsFilePath,
 		// The worker's own default when VALKEY_URL is unset, so both refuse an endpoint on 6379 alike.
 		load: (path, io, env) => loadModelEndpoints({ modelEndpointsFile: path, valkeyUrl: env?.VALKEY_URL ?? DEFAULT_VALKEY_URL }, io),
@@ -2382,7 +2386,29 @@ export async function collectChecks(shellVars, seams) {
 	const keyFromFile = keyCandidates.some((name) => (env[name] ?? "") !== "") ? {} : keyRes.fromFile;
 	// And auth.json where the SERVICE's worker reads it: the agent dir the file names, where this shell names none.
 	const keyAgentDir = fileSays("PI_CODING_AGENT_DIR").length > 0 ? agentDirFrom(env) : agentDir;
-	const keyCheck = providerKeyCheck({ provider, env: { ...env, ...keyFromFile }, agentDir: keyAgentDir, oracle, nodeOk: checks[0]?.ok });
+	// Issue #503: a provider pi does not know may be keyless, judged by the worker's own verdict on the declared endpoints
+	// and the overlay models.json, read here as the service reads them. Read only for such a provider, and only when an
+	// endpoint is declared, which is the worker's own rule (index.mjs reads the overlay only then).
+	const unknownToPi = keyCandidates.length === 0 && typeof oracle?.piProviders === "function" && !oracle.piProviders().includes(provider);
+	// Through doctor's own seams (the boot-file loader's io), and with the queue port the worker refuses: an endpoint on
+	// it refuses the worker's boot, so it must not read as keyless here.
+	const keylessIo = { existsSync: (p) => fileExists(p), readFileSync: readEnvFile ? (p, enc) => asText(readEnvFile(p), enc) : readFileSync };
+	const keylessValkey = env.VALKEY_URL ?? DEFAULT_VALKEY_URL;
+	const keylessEndpoints = unknownToPi ? (seams.declaredEndpoints ?? ((a) => declaredEndpointsIn({ ...a, fs: keylessIo })))({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform, valkeyUrl: keylessValkey }) : [];
+	let keylessModels = null;
+	let keylessUnreadable = null;
+	if (keylessEndpoints.length > 0 && typeof env.PI_GLOBAL_PI_DIR === "string" && env.PI_GLOBAL_PI_DIR !== "") {
+		try {
+			// Relative to the deployment folder, which is the worker's working directory, never to doctor's own.
+			keylessModels = readOverlayModels(resolve(seams.cwd, env.PI_GLOBAL_PI_DIR), keylessIo);
+		} catch (error) {
+			// The reader's one rule (PR #520 round 2): an errno it rethrows is a read that may succeed later, and the worker
+			// retries such a job rather than refusing it, so doctor says that rather than calling the provider unknown.
+			// Invalid JSON is the overlay check's line below; here it only means nothing is keyless.
+			if (typeof error?.code === "string") keylessUnreadable = error.code;
+		}
+	}
+	const keyCheck = providerKeyCheck({ provider, env: { ...env, ...keyFromFile }, agentDir: keyAgentDir, oracle, nodeOk: checks[0]?.ok, keyless: { endpoints: keylessEndpoints, models: keylessModels, unreadable: keylessUnreadable } });
 	const keyNamed = Object.keys(keyFromFile).filter((name) => keyCheck.label?.includes(`: ${name})`));
 	// Issue #481 (PR #485 review round 2): a key found nowhere doctor can look is one an env-setup script may export, which
 	// is the documented home for a provider key fetched from a secrets manager (docs/secrets.md).
@@ -2438,21 +2464,39 @@ export async function collectChecks(shellVars, seams) {
 				},
 			});
 			const modelsPath = join(overlay, "models.json");
-			let modelsOk = true;
-			let modelsFix = "";
-			if (fileExists(modelsPath)) {
-				try {
-					const leak = findLiteralSecret(JSON.parse(readFileSync(modelsPath, "utf8")));
+			// Through the one reader (`readOverlayModels`, PR #520): an exists test answered false for a file under an
+			// unreadable directory, so this line passed in silence on a file nobody had read. Absent is a pass (nothing to
+			// leak); an errno the reader rethrows is ⚠ naming the code, a read that may succeed later and that the worker
+			// retries; text that does not parse, or is not an object, is ✗.
+			let overlayModels = null;
+			let modelsRead = null;
+			try {
+				overlayModels = readOverlayModels(overlay, { readFileSync: (p, enc) => readFileSync(p, enc) });
+			} catch (error) {
+				modelsRead = error;
+			}
+			if (typeof modelsRead?.code === "string") {
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `Overlay models.json could not be read (${modelsRead.code}), so whether it is credential-free is not known`,
+					fix: `make ${modelsPath} readable by the account the worker runs as, then re-run doctor`,
+				});
+			} else {
+				let modelsOk = true;
+				let modelsFix = "";
+				if (modelsRead !== null) {
+					modelsOk = false;
+					modelsFix = /not valid JSON/.test(String(modelsRead?.message)) ? "overlay models.json is not valid JSON" : "overlay models.json is not a valid models.json (it must be a JSON object)";
+				} else if (overlayModels !== null) {
+					const leak = findLiteralSecret(overlayModels);
 					if (leak) {
 						modelsOk = false;
 						modelsFix = `literal secret at ${leak} — move it to env/auth.json or a "$VAR" reference`;
 					}
-				} catch {
-					modelsOk = false;
-					modelsFix = "overlay models.json is not valid JSON";
 				}
+				checks.push({ ok: modelsOk, label: "Overlay models.json is credential-free", fix: modelsFix });
 			}
-			checks.push({ ok: modelsOk, label: "Overlay models.json is credential-free", fix: modelsFix });
 			// Issue #503: a model whose baseUrl is localhost or a loopback literal can never be reached from a job, egress on
 			// or off, because inside a job that address is the job's own container. Said whatever is declared: an overlay
 			// pointed at localhost is the first thing an operator tries, and the fix is the declaration. Nothing when the file
@@ -3584,7 +3628,7 @@ async function defaultProviderOracle() {
  * Never carries a fixAction (the never tier): doctor cannot know which provider an operator meant, and
  * never mints a credential.
  */
-function providerKeyCheck({ provider, env, agentDir, oracle, nodeOk }) {
+function providerKeyCheck({ provider, env, agentDir, oracle, nodeOk, keyless = null }) {
 	if (!oracle?.providerKeyCandidates) {
 		// pi did not load: below-floor Node, or a tree with no dependencies installed.
 		//
@@ -3610,7 +3654,7 @@ function providerKeyCheck({ provider, env, agentDir, oracle, nodeOk }) {
 		};
 	}
 	const candidates = oracle.providerKeyCandidates(provider);
-	if (candidates.length === 0) return noKeyVariableCheck(provider, oracle);
+	if (candidates.length === 0) return noKeyVariableCheck(provider, oracle, keyless);
 
 	// Presence by PI'S truthiness, not a stricter one. This used to trim, and trimming made doctor pick a
 	// DIFFERENT variable than the worker will: with a whitespace `ANTHROPIC_OAUTH_TOKEN` beside a real
@@ -3773,7 +3817,7 @@ function usablePiLoginKey(agentDir, provider) {
  * the distinction `findEnvKeys`'s single `undefined` cannot make, and the reason issue #286 needed a
  * second question at all.
  */
-function noKeyVariableCheck(provider, oracle) {
+function noKeyVariableCheck(provider, oracle, keyless = null) {
 	if (oracle.piProviders().includes(provider)) {
 		// `amazon-bedrock` wants AWS credentials or a profile, `openai-codex` an OAuth login. Both are
 		// credential SOURCES the closed container env has no door for, so buildContainerEnv refuses every
@@ -3788,14 +3832,31 @@ function noKeyVariableCheck(provider, oracle) {
 	// `<PROVIDER>_API_KEY`. For the case that motivated this -- PI_PROVIDER=gemini -- GEMINI_API_KEY is
 	// `google`'s variable, so the answer is exact. Nothing edit-distance-based would find it (gemini and
 	// google differ by five characters), which is why this matches on the VARIABLE, not on the name.
+	// Issue #503: the worker's own keyless verdict (model-endpoints.mjs), on the same predicate and in the same order as
+	// the credential gate (no key variable, not in pi's catalog), so this line and the worker cannot disagree.
+	const endpoints = Array.isArray(keyless?.endpoints) ? keyless.endpoints : [];
+	if (endpoints.length > 0 && typeof keyless?.unreadable === "string") {
+		return {
+			ok: false,
+			warn: true,
+			label: `Provider key: could not read models.json (${keyless.unreadable}), so whether ${JSON.stringify(provider)} is keyless is not known; the worker retries such a job until it can read it`,
+			fix: "make the overlay's models.json readable by the account the worker runs as, then re-run doctor",
+		};
+	}
+	const verdict = endpoints.length > 0 ? keylessVerdict({ models: keyless.models, provider, endpoints }) : { keyless: false, why: null };
+	if (verdict.keyless) {
+		return { ok: true, label: `Provider key: none needed (${provider} is keyless: served by declared endpoint ${verdict.endpoints.join(", ")})` };
+	}
 	const wanted = `${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
 	const owner = oracle.piProviders().find((id) => oracle.providerKeyCandidates(id).includes(wanted));
+	// Why a custom provider the overlay defines is not keyless, when it is one: the one fact the operator has to change.
+	const why = verdict.why ? `; it is not keyless because ${verdict.why}` : "";
 	return {
 		ok: false,
-		label: `PI_PROVIDER is ${JSON.stringify(provider)}, which is not a provider pi has`,
+		label: `PI_PROVIDER is ${JSON.stringify(provider)}, which is not a provider pi has${why}`,
 		fix: owner
-			? `set PI_PROVIDER=${owner}, the provider pi reads ${wanted} from -- or unset it for the default \`anthropic\``
-			: `set PI_PROVIDER to a provider id pi has, or unset it for the default \`anthropic\`: ${oracle.piProviders().join(", ")}`,
+			? `set PI_PROVIDER=${owner}, the provider pi reads ${wanted} from -- or unset it for the default \`anthropic\`; or, ${KEYLESS_HOW}`
+			: `set PI_PROVIDER to a provider id pi has, or unset it for the default \`anthropic\`: ${oracle.piProviders().join(", ")}; or, ${KEYLESS_HOW}`,
 	};
 }
 

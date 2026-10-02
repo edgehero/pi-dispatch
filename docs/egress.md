@@ -87,21 +87,21 @@ A job can reach a model server on your own machine or LAN (Ollama, vLLM, llama.c
 proxy, one host and one port at a time. Each one you declare becomes a `CONNECT` tunnel to exactly that host and
 port, and nothing else: no other port of that host, and no plain forward request to it.
 
-**Jobs cannot use a local model as their main model yet.** The route through the proxy, the `doctor` proof below
-and the slot leases are in. The keyless credential gate comes in another part of #503: until it lands, a job's
-provider check still refuses a provider with no key.
+A job can use a local model as its main model. A model server that takes no key is declared `"keyless": true`, and
+then its provider needs no key at all ("A provider with no key" below).
 
 ### Declare, render, reload
 
 1. **Declare it** in `model-endpoints.json` in the deployment folder. `pi-dispatch init` writes it empty.
 
    ```json
-   { "version": 1, "endpoints": [ { "id": "mac-ollama", "host": "host.docker.internal", "port": 11434, "slots": 2 } ] }
+   { "version": 1, "endpoints": [ { "id": "mac-ollama", "host": "host.docker.internal", "port": 11434, "slots": 2, "keyless": true } ] }
    ```
 
    `id` names the endpoint in every line about it. `host` is the name or address the proxy dials: never
    `localhost` or `127.0.0.1`, which inside the proxy is the proxy itself. `slots` is how many requests the server
-   runs at once. The file's full rules are in `INT-MODEL-ENDPOINTS-FILE-CONTRACT` (specs/interfaces.md).
+   runs at once. `keyless` says the server takes no key (default `false`). The file's full rules are in
+   `INT-MODEL-ENDPOINTS-FILE-CONTRACT` (specs/interfaces.md).
 
 2. **Render** the proxy's rules for it, from the deployment folder:
 
@@ -136,6 +136,41 @@ Then point the model at it in the overlay `models.json`, with the same host and 
 
 A model uses an endpoint when its `baseUrl` (its own, else its provider's) has the endpoint's host and port. Host
 alone does not match.
+
+### A provider with no key
+
+pi needs some key for a provider, even when the server ignores it. So the worker sets one fixed variable,
+`PI_DISPATCH_KEYLESS=keyless`, in a job whose provider qualifies, and the provider names it as
+`"apiKey": "$PI_DISPATCH_KEYLESS"`, as in the `models.json` above. A provider qualifies when all of these hold:
+
+- pi does not know it (it is your own name, like `local-ollama`, not `openai` or `anthropic`);
+- the overlay `models.json` defines it, with at least one model;
+- every one of its models is served by a declared endpoint marked `"keyless": true`. One model elsewhere, or on an
+  endpoint without the flag, and the provider needs a key like any other;
+- its `apiKey` is exactly `"$PI_DISPATCH_KEYLESS"`. A literal key, another variable or a `!command` is refused;
+- it carries no other credential of any kind: no `headers` (on the provider, on a model, or in `modelOverrides`), no
+  `oauth`, and no `user:password@` in a `baseUrl`. Keyless means no credentials at all;
+- every model entry has a non-empty string `id`. pi refuses the whole file over one bad entry.
+
+The worker reads `models.json` as plain JSON. pi also accepts comments and a byte order mark; the worker does not, so
+a file with either is unreadable here and no provider in it is keyless.
+
+If the worker cannot read the file (no permission on it or its folder, a disk error, too many open files), the job
+is tried again later rather than refused, and `doctor` warns `could not read models.json (EACCES)` with the error code.
+
+Then `--provider local-ollama` runs with no key in `.env` and none in pi's `auth.json`. A provider that does not
+qualify is refused before anything is spent, and the refusal names both ways in: a key, or a keyless endpoint.
+`doctor` says which, with the same rules:
+
+```
+✓ Provider key: none needed (local-ollama is keyless: served by declared endpoint mac-ollama)
+```
+
+A provider pi knows (`openai`, say) still needs its key, even with its `baseUrl` pointed at your server.
+
+With `PI_EGRESS=0` the job is on the default network and dials the server directly, by the same `baseUrl`. The worker
+adds nothing to the job for it, so the name must resolve inside the container (`host.docker.internal` does on Docker
+Desktop; on Docker Engine use an address the job can reach).
 
 ### How the proxy reaches your own machine
 
@@ -242,10 +277,13 @@ Zero spend.
 3. Declare `mac-ollama` as in step 1 of "Declare, render, reload", with `"slots": 1`.
 4. `pi-dispatch egress render`, then the reload it prints.
 5. `pi-dispatch doctor`. Expect the five lines above: the route, the include, a 200, a 403 for the CONNECT to port
-   11435, and a 403 for the plain `GET` to port 11434.
-
-Running a job on it (`--provider local-ollama --model qwen2.5:0.5b`) needs the keyless gate, from another part of
-#503. Once it runs, two such jobs share the one slot: the second logs `endpoint_busy_deferred` until the first ends.
+   11435, and a 403 for the plain `GET` to port 11434, and the provider line `keyless: served by declared endpoint
+   mac-ollama` when `PI_PROVIDER=local-ollama`.
+6. Run a job on it with `--provider local-ollama --model qwen2.5:0.5b`. It needs no key. Its record shows cost `$0`.
+   A worker you start by hand reads your shell's environment, not `.env` (`doctor` says so): export the `.env`
+   first, or run the installed service.
+7. Start two such jobs at once. They share the one slot: the second logs `endpoint_busy_deferred` until the first
+   ends, then runs.
 
 ### Upgrading a deployment from before #503
 

@@ -384,6 +384,38 @@ test("the credential gate runs for a LOCAL job too -- a provider is a provider",
 	assert.ok(!calls.includes("run-container"), "a local job spends real money too");
 });
 
+test("issue #503: the credential gate and runContainer are handed the SAME pickup snapshot, and nothing without endpoints", async () => {
+	// One read per pickup (index.mjs), so the gate that admits a keyless provider and the env that writes its
+	// PI_DISPATCH_KEYLESS decide on one declaration. Identity, not equality: a second read would be a second object.
+	const snapshot = { endpoints: [{ id: "mac-ollama", host: "host.docker.internal", port: 11434, slots: 1, keyless: true }], models: { providers: {} }, set: [] };
+	const gateSaw = [];
+	const containerSaw = [];
+	const { deps: d } = deps({
+		modelEndpoints: snapshot,
+		checkProviderCredential: (_job, extra) => (gateSaw.push(extra), { ok: true }),
+		runContainer: async (ctx) => (containerSaw.push(ctx), { code: 0, aborted: false }),
+	});
+	await runJob(ghJob, d);
+	assert.equal(gateSaw[0].modelEndpoints, snapshot);
+	assert.equal(containerSaw[0].modelEndpoints, snapshot);
+	// None declared (or no seam): the gate is told null-or-empty and the container context gains no key at all.
+	for (const modelEndpoints of [undefined, { endpoints: [], models: null, set: [] }]) {
+		const saw = [];
+		const { deps: e } = deps({ ...(modelEndpoints ? { modelEndpoints } : {}), runContainer: async (ctx) => (saw.push(ctx), { code: 0, aborted: false }) });
+		await runJob(ghJob, e);
+		assert.equal("modelEndpoints" in saw[0], false);
+	}
+});
+
+test("PR #520 round 1: a gate with no verdict ({ unavailable }) is an infra retry before any spend, never a refusal", async () => {
+	const redis = fakeRedis();
+	const { deps: d, calls } = deps({ redis, checkProviderCredential: () => ({ ok: false, unavailable: "EIO" }) });
+	await assert.rejects(() => runJob(ghJob, d), (e) => e.name === "InfraRetry" && e.reason === "container-never-started");
+	assert.equal(redis.incrCalls, 0);
+	assert.ok(!calls.includes("run-container"));
+	assert.ok(!calls.some((c) => c.startsWith("mint:")));
+});
+
 test("a gate that throws something UNTAGGED propagates, rather than becoming a policy refusal", async () => {
 	// The seam's own guard, pinned in the processor and not only in the wiring. A bug in the gate, or an fs
 	// fault the credential module does not model, must not be reported to the issue author as "your

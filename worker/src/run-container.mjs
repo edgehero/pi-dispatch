@@ -67,7 +67,9 @@ export function makeRunContainer({
 	// `relabel` (issue #355) is the processor's, off the same job-user answer as `user`: true where the daemon confines
 	// containers with SELinux, so the worker's own per-job mounts carry `:Z`. Defaults off, so a caller that predates it
 	// builds exactly the argv it always did.
-	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false }) {
+	// `modelEndpoints` (issue #503) is the pickup's endpoint snapshot, the one the free credential gate decided on, so a
+	// keyless provider's PI_DISPATCH_KEYLESS is written from the same declaration and never from a second read.
+	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
 		// Issue #341. `user` and `home` travel as a PAIR: a uid with no passwd entry in the image gets `HOME=/` from
 		// Docker and `HOME=/workspace` from Podman (measured), so a `--user` without this HOME is refused here rather
@@ -127,6 +129,7 @@ export function makeRunContainer({
 			// record may carry nor a deployment setting, it is a live credential, and `token` is its precedent.
 			secrets,
 			home: user !== null ? home : null, // issue #341: HOME only beside --user, assigned after the forward loops
+			modelEndpoints, // issue #503: the keyless branch of the credential, from the gate's own snapshot
 		});
 
 		// `-net` on this container's own name (egress.mjs). null when no policy is armed, and docker-run's

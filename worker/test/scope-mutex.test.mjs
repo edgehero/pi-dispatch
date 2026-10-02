@@ -44,7 +44,7 @@ function spyJob(id, data) {
  * of the demonstration that measured 301ms of live same-folder container overlap on main before this
  * gate existed.
  */
-function harness({ limits = [], inFlight = makeInFlight(), pauseUntil = () => null, redis = fakeRedis(), hostBound = null, getSettings = SETTINGS, extra = {}, onContainer = () => {} } = {}) {
+function harness({ limits = [], inFlight = makeInFlight(), pauseUntil = () => null, redis = fakeRedis(), hostBound = null, getSettings = SETTINGS, extra = {}, extraDeps = {}, onContainer = () => {} } = {}) {
 	const seen = { started: 0, records: [], logs: [] };
 	const releases = [];
 	const processor = mod.makeProcessor({
@@ -73,6 +73,7 @@ function harness({ limits = [], inFlight = makeInFlight(), pauseUntil = () => nu
 			cleanup: async () => {},
 			comment: async () => {},
 			log: (event, fields) => seen.logs.push({ event, fields }),
+			...extraDeps,
 		},
 		...extra,
 	});
@@ -686,6 +687,168 @@ test("NO endpoints declared: no lease command, no overlay read, and the containe
 	const golden = (ctx) => JSON.stringify(ctx, (k, v) => (k === "signal" ? "<signal>" : v));
 	assert.equal(golden(seenCtx[0]), golden(seenCtx[1]), "the container context, the job argv's source, is byte-identical");
 	assert.deepEqual(Object.keys(wired.seen.records[0].result).sort(), Object.keys(bare.seen.records[0].result).sort(), "and the record carries no new field");
+});
+
+test("issue #503: a keyless provider runs on ONE overlay read per pickup, gate and container env deciding on the same snapshot", { skip }, async () => {
+	// The real gate and the real env builder (env-allowlist.mjs), wired as start.mjs wires them, around the pickup's
+	// snapshot. Imported here, not at the top: env-allowlist needs pi-ai, and the file's other tests do not.
+	const { buildContainerEnv, resolveProviderCredential } = await import("../src/env-allowlist.mjs");
+	const KEYLESS_OVERLAY = { providers: { "local-ollama": { ...OVERLAY.providers["local-ollama"], apiKey: "$PI_DISPATCH_KEYLESS" } } };
+	const gate = (seen) => (job, { modelEndpoints = null } = {}) => {
+		seen.push(modelEndpoints);
+		try {
+			resolveProviderCredential({ provider: job.provider, hostEnv: {}, modelEndpoints });
+			return { ok: true };
+		} catch (error) {
+			return { ok: false, message: error.message };
+		}
+	};
+	for (const [endpoint, admitted] of [[OLLAMA, true], [{ ...OLLAMA, keyless: false }, false]]) {
+		let overlayReads = 0;
+		const w = endpointWiring({ endpoints: [endpoint] });
+		w.extra.overlayModels = () => (overlayReads++, KEYLESS_OVERLAY);
+		const gateSaw = [];
+		const envs = [];
+		const h = harness({
+			getSettings: LOCAL_MODEL,
+			extra: w.extra,
+			extraDeps: { checkProviderCredential: gate(gateSaw) },
+			onContainer: (ctx) => {
+				assert.equal(ctx.modelEndpoints, gateSaw[0], "the container is handed the very snapshot the gate decided on");
+				envs.push(buildContainerEnv({ provider: ctx.job.provider, model: ctx.job.model, maxTurns: 5, jobId: "j", hostEnv: {}, modelEndpoints: ctx.modelEndpoints }));
+			},
+		});
+		const p = h.processor(localJob("l-1", "/f").job, "tok", new AbortController().signal);
+		if (admitted) {
+			await h.untilStarted(1);
+			h.releaseNext();
+			assert.equal((await p).outcome, "completed");
+			assert.equal(envs[0].PI_DISPATCH_KEYLESS, "keyless");
+		} else {
+			const r = await p;
+			assert.equal(r.outcome, "policy");
+			assert.equal(r.reason, "provider-unconfigured");
+			assert.equal(h.seen.started, 0, "no container");
+			// CONST-BUDGET-BEFORE-TOKENS: the refusal is free, before any reservation.
+			assert.equal(h.redis.incrCalls, 0, "nothing reserved");
+		}
+		assert.equal(overlayReads, 1, "models.json is read once per pickup, never again by the gate or the env");
+		assert.equal(w.endpointSlots.count("lan-ollama"), 0, "and the slot came back either way");
+	}
+});
+
+test("PR #520 round 1: a TRANSIENT overlay read at pickup retries a keyless job as infra; a determinate one refuses it", { skip }, async () => {
+	// The gate as start.mjs wires it: a transient verdict becomes `{ unavailable }`, a config refusal `{ ok: false }`.
+	const { resolveProviderCredential } = await import("../src/env-allowlist.mjs");
+	const gate = (job, { modelEndpoints = null } = {}) => {
+		try {
+			resolveProviderCredential({ provider: job.provider, hostEnv: {}, modelEndpoints });
+			return { ok: true };
+		} catch (error) {
+			if (error?.piDispatchTransient === true) return { ok: false, unavailable: error.code };
+			if (error?.piDispatchConfig !== true) throw error;
+			return { ok: false, message: error.message };
+		}
+	};
+	// Absence arrives as null, never as a thrown ENOENT: the reader's own rule (round 2), pinned with the real reader below.
+	const fault = (code) => () => {
+		throw Object.assign(new Error(`${code}: read failed`), { code });
+	};
+	for (const [read, retried] of [[fault("EIO"), true], [fault("EMFILE"), true], [() => null, false], [() => { throw new Error("overlay models.json is not valid JSON: x"); }, false]]) {
+		const w = endpointWiring({ endpoints: [OLLAMA] });
+		w.extra.overlayModels = read;
+		const h = harness({ getSettings: LOCAL_MODEL, extra: w.extra, extraDeps: { checkProviderCredential: gate } });
+		const p = h.processor(localJob("l-1", "/f").job, "tok", new AbortController().signal);
+		if (retried) {
+			await assert.rejects(p, (e) => e.name === "InfraRetry", "retried, never a permanent public refusal");
+			assert.ok(h.seen.logs.some((l) => l.event === "provider_credential_unavailable"));
+		} else {
+			const r = await p;
+			assert.equal(r.reason, "provider-unconfigured", "absent or invalid stays a determinate refusal");
+		}
+		assert.equal(h.seen.started, 0);
+		assert.equal(h.redis.incrCalls, 0, "free either way");
+		assert.equal(w.endpointSlots.count("lan-ollama"), 0);
+	}
+});
+
+test("PR #520 round 2: end to end with the REAL overlay reader: unreadable retries as infra, invalid or absent refuses", { skip: typeof process.getuid === "function" && process.getuid() === 0 ? "root reads a mode-000 file" : skip }, async () => {
+	const { resolveProviderCredential } = await import("../src/env-allowlist.mjs");
+	const { readOverlayModels } = await import("../src/model-endpoints.mjs");
+	const { chmodSync, mkdirSync, writeFileSync } = await import("node:fs");
+	const { join } = await import("node:path");
+	const { tempDir } = await import("./helpers/temp-dir.mjs");
+	const gate = (job, { modelEndpoints = null } = {}) => {
+		try {
+			resolveProviderCredential({ provider: job.provider, hostEnv: {}, modelEndpoints });
+			return { ok: true };
+		} catch (error) {
+			if (error?.piDispatchTransient === true) return { ok: false, unavailable: error.code };
+			if (error?.piDispatchConfig !== true) throw error;
+			return { ok: false, message: error.message };
+		}
+	};
+	const KEYLESS = JSON.stringify({ providers: { "local-ollama": { ...OVERLAY.providers["local-ollama"], apiKey: "$PI_DISPATCH_KEYLESS" } } });
+	const fileMode000 = () => {
+		const dir = tempDir("pi-overlay-000-");
+		writeFileSync(join(dir, "models.json"), KEYLESS);
+		chmodSync(join(dir, "models.json"), 0o000);
+		return { read: () => readOverlayModels(dir), restore: () => chmodSync(join(dir, "models.json"), 0o600) };
+	};
+	const parentMode000 = () => {
+		const dir = join(tempDir("pi-overlay-parent-"), "overlay");
+		mkdirSync(dir);
+		writeFileSync(join(dir, "models.json"), KEYLESS);
+		chmodSync(dir, 0o000);
+		return { read: () => readOverlayModels(dir), restore: () => chmodSync(dir, 0o700) };
+	};
+	const eio = () => ({ read: () => readOverlayModels("/overlay", { readFileSync: () => { throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" }); } }), restore: () => {} });
+	const invalid = () => {
+		const dir = tempDir("pi-overlay-bad-");
+		writeFileSync(join(dir, "models.json"), "{ nope");
+		return { read: () => readOverlayModels(dir), restore: () => {} };
+	};
+	const notObject = () => {
+		const dir = tempDir("pi-overlay-array-");
+		writeFileSync(join(dir, "models.json"), "[]");
+		return { read: () => readOverlayModels(dir), restore: () => {} };
+	};
+	const absent = () => {
+		const dir = tempDir("pi-overlay-none-");
+		return { read: () => readOverlayModels(dir), restore: () => {} };
+	};
+	const working = () => {
+		const dir = tempDir("pi-overlay-ok-");
+		writeFileSync(join(dir, "models.json"), KEYLESS);
+		return { read: () => readOverlayModels(dir), restore: () => {} };
+	};
+	for (const [name, make, expect] of [["mode-000 file", fileMode000, "retry"], ["mode-000 parent", parentMode000, "retry"], ["EIO", eio, "retry"], ["invalid JSON", invalid, "refuse"], ["not an object", notObject, "refuse"], ["absent", absent, "refuse"], ["readable", working, "run"]]) {
+		const fixture = make();
+		try {
+			const w = endpointWiring({ endpoints: [OLLAMA] });
+			w.extra.overlayModels = fixture.read;
+			const h = harness({ getSettings: LOCAL_MODEL, extra: w.extra, extraDeps: { checkProviderCredential: gate } });
+			const p = h.processor(localJob("l-1", "/f").job, "tok", new AbortController().signal);
+			if (expect === "retry") {
+				await assert.rejects(p, (e) => e.name === "InfraRetry" && e.reason === "container-never-started", name);
+			} else if (expect === "refuse") {
+				assert.equal((await p).reason, "provider-unconfigured", name);
+			} else {
+				await h.untilStarted(1);
+				h.releaseNext();
+				assert.equal((await p).outcome, "completed", name);
+			}
+			if (expect !== "run") assert.equal(h.seen.started, 0, name);
+			if (expect !== "run") assert.equal(h.redis.incrCalls, 0, `${name}: nothing reserved`);
+			const unreadable = h.seen.logs.find((l) => l.event === "endpoint_models_unreadable");
+			if (expect === "retry") assert.match(unreadable.fields.reason, /^E[A-Z]+$/, `${name}: the log names the errno, not "not valid JSON"`);
+			// A determinate fault is named as one, never with the fs-error wording.
+			if (name === "not an object") assert.equal(unreadable.fields.reason, "overlay models.json is not a valid models.json");
+			if (name === "invalid JSON") assert.equal(unreadable.fields.reason, "overlay models.json is not valid JSON");
+		} finally {
+			fixture.restore();
+		}
+	}
 });
 
 test("a hosted-model job with endpoints declared takes no slot", { skip }, async () => {

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	EMPTY_MODEL_ENDPOINTS,
@@ -181,6 +181,37 @@ test("readOverlayModels parses <globalPiDir>/models.json as JSON only, null with
 	assert.throws(() => readOverlayModels(dir), /overlay models\.json is not valid JSON/);
 	writeFileSync(join(dir, "models.json"), "[]");
 	assert.throws(() => readOverlayModels(dir), /overlay models\.json must be an object/);
+});
+
+// PR #520 round 2: the READ is outside the parse's try and has no existsSync before it, so an unreadable file is a
+// transient error carrying its code (the keyless gate retries on it), never "not valid JSON" and never absence.
+const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
+test("readOverlayModels: absence is null, every other read error is rethrown with its code, only a parse error is a configError", { skip: asRoot ? "root reads a mode-000 file" : false }, () => {
+	const dir = tmp();
+	writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: {} }));
+	chmodSync(join(dir, "models.json"), 0o000);
+	try {
+		assert.throws(() => readOverlayModels(dir), (e) => e.code === "EACCES" && e.piDispatchConfig !== true, "a mode-000 file");
+	} finally {
+		chmodSync(join(dir, "models.json"), 0o600);
+	}
+	const parent = tmp();
+	const overlay = join(parent, "overlay");
+	mkdirSync(overlay);
+	writeFileSync(join(overlay, "models.json"), "{}");
+	chmodSync(overlay, 0o000);
+	try {
+		// existsSync answers false here, which is why it is not asked: this is not absence.
+		assert.throws(() => readOverlayModels(overlay), (e) => e.code === "EACCES" && e.piDispatchConfig !== true, "a mode-000 parent directory");
+	} finally {
+		chmodSync(overlay, 0o700);
+	}
+	const eio = Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
+	assert.throws(() => readOverlayModels(dir, { readFileSync: () => { throw eio; } }), (e) => e === eio, "rethrown as-is");
+	for (const code of ["ENOENT", "ENOTDIR", "ELOOP", "ENAMETOOLONG"]) {
+		assert.equal(readOverlayModels(dir, { readFileSync: () => { throw Object.assign(new Error(code), { code }); } }), null, code);
+	}
+	assert.throws(() => readOverlayModels(dir, { readFileSync: () => "{ nope" }), (e) => e.piDispatchConfig === true && /not valid JSON/.test(e.message));
 });
 
 // ── derivation ─────────────────────────────────────────────────────────────────────────────────────────

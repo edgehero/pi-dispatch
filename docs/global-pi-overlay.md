@@ -92,7 +92,15 @@ overlay then carries no custom model definitions, so read that row.
 
 ### Custom providers
 
-If your model uses a provider whose key variable pi's built-in table doesn't know, forward it explicitly:
+A provider you define in `models.json` (one pi does not know) has no key variable in pi's table, so the worker
+cannot hand it a key. As a job's **main** provider (`PI_PROVIDER`, or a trigger's provider) it runs only when it
+is served by a local model server that takes no key: declare that server in `model-endpoints.json` with
+`"keyless": true` and set `"apiKey": "$PI_DISPATCH_KEYLESS"` on the provider. Every one of its models must be on
+such a server. See [`egress.md`, "Local model servers"](egress.md#local-model-servers). Any other custom provider
+is refused as a main provider, before anything is spent.
+
+For a custom provider that is **not** the job's main one (a model the agent switches to), forward its key by name
+and reference it as `"apiKey": "$MY_PROVIDER_KEY"`:
 
 ```bash
 # .env

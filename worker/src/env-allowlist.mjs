@@ -33,6 +33,8 @@ import { egressEnv } from "./egress.mjs";
 import { forgeSpec } from "./forges.mjs";
 import { apiKeyVariable } from "./provider-key.mjs";
 import { isDeterminateFsCode } from "./transient.mjs";
+import { KEYLESS_HOW, keylessVerdict } from "./model-endpoints.mjs";
+import { KEYLESS_ENV_NAME } from "./reserved-env.mjs";
 
 function configError(message) {
 	const error = new Error(message);
@@ -111,8 +113,15 @@ export function piProviders() {
  * API-key credentials only; an OAuth/subscription login is refused (it expires, the container cannot refresh
  * it, and it is not the credential for an unattended service). Throws a config-tagged error (pre-spend
  * refusal) when neither source yields a credential.
+ *
+ * Third way in (issue #503), only for a provider pi does not know: a custom provider in the overlay `models.json`
+ * whose every model is served by a declared `keyless` model endpoint passes with no credential, and the answer is
+ * `{ PI_DISPATCH_KEYLESS: "keyless" }`, the fixed value its `"apiKey": "$PI_DISPATCH_KEYLESS"` resolves to in the job.
+ * `modelEndpoints` is the pickup's snapshot `{ endpoints, models }` (never a read of its own), so the free gate and
+ * the container env decide on the same declaration. A builtin provider whose baseUrl an operator pointed at a local
+ * server is NOT keyless (a named residual): pi knows it, so it still needs its key.
  */
-export function resolveProviderCredential({ provider, hostEnv, authFromPi = false, agentDir, readFile = readFileSync, forwardEnv = [] }) {
+export function resolveProviderCredential({ provider, hostEnv, authFromPi = false, agentDir, readFile = readFileSync, forwardEnv = [], modelEndpoints = null }) {
 	// The NAMES come from pi, the VALUES from `hostEnv`, and this asks each question of the thing that can
 	// answer it (issue #311). It used to be one `providerKeyVars(provider, hostEnv)` call, which conflates
 	// them: that is `findEnvKeys`, whose presence test falls back to the REAL `process.env` for any name the
@@ -129,7 +138,32 @@ export function resolveProviderCredential({ provider, hostEnv, authFromPi = fals
 	// is the DI seam that was dishonest, which is worth fixing where the seam is the whole test surface.
 	// ONE read per name, checked and returned, for the same reason: two reads could decide on one value and
 	// ship another.
-	const held = providerKeyCandidates(provider)
+	const candidates = providerKeyCandidates(provider);
+	// Issue #503: a provider pi does not know at all. The same two questions, in the same order, as the auth.json
+	// refusal below and doctor's `noKeyVariableCheck`: no key variable, and not in pi's catalog. Such a provider can
+	// never take a key through this gate (there is no variable to write it under), so it is answered HERE, before
+	// auth.json is read: either it is keyless, or it is refused with both ways in named. That used to be decided
+	// after an auth.json read, which could only end in a refusal too, and whose wording ("set the key in .env, or run
+	// `pi login`") was advice no custom provider can follow.
+	if (candidates.length === 0 && !piProviders().includes(provider)) {
+		const ids = keylessEndpointsFor(provider, modelEndpoints);
+		// The one variable this branch writes, fixed and non-secret. It is the credential's slot in the closed map,
+		// so buildContainerEnv carries it exactly when this gate passes keyless, and on no other job.
+		if (ids !== null) return { [KEYLESS_ENV_NAME]: KEYLESS_VALUE };
+		// The overlay could not be read at this pickup for a TRANSIENT reason (index.mjs, `modelsUnreadable`): the provider
+		// may well be keyless, so this is no verdict at all. UNTAGGED and marked transient, never `piDispatchConfig`: a
+		// config refusal is permanent, refunded and commented publicly, and the same job may pass on the next attempt. The
+		// processor turns this into an infra retry (CONST-RETRY-INFRA-ONLY); absent or invalid JSON stays determinate.
+		const unreadable = modelEndpoints?.modelsUnreadable;
+		if (unreadable && Array.isArray(modelEndpoints?.endpoints) && modelEndpoints.endpoints.length > 0) {
+			const error = new Error(`the overlay models.json could not be read at this pickup (${unreadable.code}), so whether provider "${provider}" is keyless is not known yet`);
+			error.piDispatchTransient = true;
+			error.code = unreadable.code;
+			throw error;
+		}
+		throw configError(unknownProviderMessage(provider));
+	}
+	const held = candidates
 		.map((name) => [name, hostEnv[name]])
 		.filter(([, value]) => value);
 	// EVERY held candidate is forwarded, in pi's order, including the two that are not API keys: a host
@@ -157,7 +191,26 @@ export function resolveProviderCredential({ provider, hostEnv, authFromPi = fals
 		const { name, value } = credentialFromPiAuth(provider, agentDir ?? defaultAgentDir(hostEnv), readFile, { hostEnv, forwardEnv });
 		return { [name]: value };
 	}
-	throw configError(`provider ${provider} has no configured credential in the worker environment`);
+	throw configError(`provider ${provider} has no configured credential in the worker environment. Set its key there, or, ${KEYLESS_HOW}.`);
+}
+
+/** The value of `PI_DISPATCH_KEYLESS`: fixed and non-secret, since the model server takes no key. */
+export const KEYLESS_VALUE = "keyless";
+
+/**
+ * The keyless endpoint ids serving this provider, or null (issue #503). Asked only for a provider pi does not know (the
+ * caller's predicate), against the pickup's snapshot `{ endpoints, models }` (index.mjs, one read per pickup). No
+ * snapshot, or no endpoint declared, is null: with nothing declared the overlay is never read, and nothing is keyless.
+ */
+export function keylessEndpointsFor(provider, modelEndpoints) {
+	const endpoints = modelEndpoints?.endpoints;
+	if (!Array.isArray(endpoints) || endpoints.length === 0) return null;
+	const verdict = keylessVerdict({ models: modelEndpoints.models, provider, endpoints });
+	return verdict.keyless ? verdict.endpoints : null;
+}
+
+function unknownProviderMessage(provider) {
+	return `pi has no provider "${provider}", so there is no key variable to give it a key. Use one of pi's provider ids with its key in the worker environment or in pi's auth.json, or, ${KEYLESS_HOW}.`;
 }
 
 function defaultAgentDir(hostEnv) {
@@ -245,7 +298,9 @@ function credentialFromPiAuth(provider, agentDir, readFile, { hostEnv = {}, forw
 				`pi authenticates "${provider}" without an API-key environment variable (an AWS profile or an OAuth login), and the container env is a closed set of variables, so it has no way in. Configure a provider whose credential is a single environment variable.`,
 			);
 		}
-		throw configError(`could not determine the environment variable pi expects for provider "${provider}" — pi has no such provider, so check PI_PROVIDER against pi's own ids`);
+		// Unreachable through resolveProviderCredential, which answers an unknown provider before auth.json is read. Kept
+		// as the backstop with the same words, so a later caller cannot reopen the old advice.
+		throw configError(unknownProviderMessage(provider));
 	}
 	return { name, value: cred.key };
 }
@@ -296,12 +351,14 @@ function resolveEnvName(provider) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync }) {
+export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
 	// (issue #310); the same call is made by its free credential gate, before anything is reserved at all.
-	const credEnv = resolveProviderCredential({ provider, hostEnv, authFromPi, agentDir, readFile, forwardEnv });
+	// `modelEndpoints` is the pickup's snapshot (issue #503): the keyless branch answers `PI_DISPATCH_KEYLESS` in this
+	// map, so the variable is set exactly when the gate passed keyless and is absent on every other job.
+	const credEnv = resolveProviderCredential({ provider, hostEnv, authFromPi, agentDir, readFile, forwardEnv, modelEndpoints });
 
 	const env = {
 		PI_PROVIDER: provider,
@@ -430,6 +487,12 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId,
 	// `HOME=/workspace` (Podman, measured), and pi's auth.json lands nowhere or in the operator's repository.
 	// env-internal HOME: written into the job's closed env map here, never read from the worker's environment.
 	if (typeof home === "string" && home !== "") env.HOME = home;
+
+	// Issue #503: PI_DISPATCH_KEYLESS is the credential gate's answer and nothing else's, so it is settled AFTER the
+	// PI_FORWARD_ENV and secrets loops, as HOME and the egress variables are: both lists refuse the name upstream, and
+	// this is the backstop that keeps a value from either one from replacing it, or from appearing on a keyed job.
+	if (credEnv[KEYLESS_ENV_NAME] === KEYLESS_VALUE) env[KEYLESS_ENV_NAME] = KEYLESS_VALUE;
+	else delete env[KEYLESS_ENV_NAME];
 
 	// Forge-backed jobs, and local cron jobs that opted in via run.github. Other local-folder jobs have
 	// no token (CONST-TOKEN-SCOPED-PER-JOB). The mint goes into BOTH of its forge's variables because

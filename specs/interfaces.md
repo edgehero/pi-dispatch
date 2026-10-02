@@ -1360,10 +1360,11 @@ refactor apart.
     `tools_excluded` with the session's active tool list read back. Enforcement, refusal and read-back
     are `INT-TRIGGERS-FILE-CONTRACT`'s `run.excludeTools` bullet); `HOME=/home/pi` (issue #341: set ONLY beside
     `--user`, assigned after the `PI_FORWARD_ENV` and `run.secrets` loops so neither can move it, and reserved so a
-    trigger cannot bind it); `PI_DISPATCH_KEYLESS` is RESERVED (issue #503) and not yet emitted: a later change
-    sets it to the fixed, non-secret `keyless` only for a job whose provider has every model on a keyless model
-    endpoint (`INT-MODEL-ENDPOINTS-FILE-CONTRACT`), so a keyless `models.json` provider can name
-    `"apiKey": "$PI_DISPATCH_KEYLESS"`. Only the worker may set it: a trigger's `run.secrets` cannot bind it, and
+    trigger cannot bind it); `PI_DISPATCH_KEYLESS=keyless` (issue #503), fixed and non-secret, set ONLY when the credential gate passed the
+    job's provider keyless: a provider pi does not know whose every model is on a `keyless` model endpoint and whose
+    `models.json` key is `"apiKey": "$PI_DISPATCH_KEYLESS"` (`INT-MODEL-ENDPOINTS-FILE-CONTRACT`, Keyless). It takes
+    the provider credential's place in the map, so a keyless job carries no key and every other job lacks the
+    variable. Only the worker may set it: a trigger's `run.secrets` cannot bind it, and
     `PI_FORWARD_ENV` refuses it at config load whatever the egress policy; and each name in `PI_FORWARD_ENV` (an explicit operator
     allowlist of extra host vars — e.g. a custom provider's key — forwarded by exact `-e NAME=VALUE`, never a
     pass-through, so it satisfies `no-broad-env-into-container`; **every** minted-token name is refused in
@@ -4947,9 +4948,9 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   rendered and reloaded declaration now opens its CONNECT tunnel through the proxy. The measured routes from the
   proxy to the host (`HOST_ROUTES`, `hostRouteFor` in `worker/src/backends.mjs`) are LANDED (#503, part 3). The slot
   leases are LANDED (#503, part 4; `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`): see **Slots** below. The doctor rows below
-  are LANDED (#503, part 6). PENDING, in the last part of #503 (part 5), which lands before any release: the
-  keyless credential gate and `PI_DISPATCH_KEYLESS`. Until then a keyless provider is still refused at the
-  credential gate.
+  are LANDED (#503, part 6). The keyless credential gate and `PI_DISPATCH_KEYLESS` are LANDED (#503, part 5): see
+  **Keyless** below. All parts of #503 have landed; part 7 (no dollar reservation for a zero-rated local job) moved
+  to #501.
 - **Producer/Consumer**: the operator writes it by hand. The worker loads it at boot (a bad file refuses boot,
   `configError`), watches it and reloads it on change, keeping the last good declaration on a bad edit
   (`model_endpoints_reload_invalid`), and reads the current one at each pickup, so a `slots` edit applies to the
@@ -4983,8 +4984,8 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   - `port` (required): 1 to 65535. Refused when it is the proxy's own 3128 or the job queue's port (`VALKEY_URL`'s,
     6379 when the URL names none).
   - `slots` (required): 1 to 64, the server's parallel requests. A job leases one per endpoint in its set.
-  - `keyless` (optional): a boolean, default `false`. Later changes let a provider whose every model sits on a
-    keyless endpoint pass the credential gate.
+  - `keyless` (optional): a boolean, default `false`. `true` says the server takes no key, and lets a custom provider
+    whose every model sits on such an endpoint pass the credential gate (**Keyless** below).
   - One `host` and `port` pair is declared once. Two ids for one server would split its slots.
 - **Derivation**: which models use an endpoint is DERIVED from the overlay `models.json`
   (`<PI_GLOBAL_PI_DIR>/models.json`, read as JSON only, with no `$VAR` expansion), never listed twice. A model's
@@ -5028,6 +5029,41 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   an overlay `models.json` that does not parse fails open (`endpoint_models_unreadable`, a fixed reason that
   quotes nothing of the file), no slot taken; lowering `slots` live lets a new job take a lower index while an
   older holder of a higher one runs, until it ends; a removed or renamed endpoint's claims expire by their TTL.
+- **Keyless** (#503, part 5; `REQ-EGRESS-ALLOWLIST`): the free credential gate (`resolveProviderCredential`) passes a
+  job's main provider with NO credential exactly when (a) pi does not know it: no key variable in pi's table and not
+  in pi's catalog, the same two questions in the same order the gate and `doctor` already asked; (b) the overlay
+  `models.json` of the pickup's snapshot defines it; (c) it lists at least one model, and EVERY model's effective
+  baseUrl (Derivation above) is served by a declared endpoint, and every such endpoint is `"keyless": true`; and (d)
+  its `apiKey` is exactly `"$PI_DISPATCH_KEYLESS"`. Every and not some, because the agent can switch to any model of
+  its provider. (d) because pi composes a `models.json` provider only with some key (0.99.1,
+  `provider-composer.js`, "no authentication method configured") and resolves `$NAME` from the job's environment
+  (measured 2026-09-30: unset, the runner exits 2 `no configured auth`), so any other value is refused: a literal key
+  (a secret in a mounted file, which `import-pi` already refuses), another `$VAR` (unset in the closed env), or `!cmd`
+  (a shell in the job); (e) it carries no other credential of any kind: no `headers` on the provider, any model or any
+  `modelOverrides` entry, no `oauth`, no userinfo in the provider's or a model's baseUrl. Nothing of those would reach
+  a hosted service (every model is on a declared endpoint), but a header is a pi config value too and a secret in the
+  overlay is a secret in a mounted file, so the rule is the simple one: keyless means no credentials; and (f) every
+  model entry is an object with a non-empty string `id`, since pi refuses the whole file over one bad entry and the
+  runner would exit 2 in a started container. The overlay is parsed as plain JSON, so a file pi tolerates (comments,
+  a BOM) is unreadable here and nothing in it is keyless (fail closed). The reader (`readOverlayModels`, the one rule
+  for the pickup and `doctor`, its keyless line and its credential-free overlay check alike) reads with no existence check first and keeps the read out of the parse's try: an errno
+  `isDeterminateFsCode` calls absence is no file, any other errno (EACCES on the file or its directory, EIO, EMFILE,
+  EISDIR) is rethrown with its code, and only a `SyntaxError` or a non-object is a `configError`. A TRANSIENT failure to
+  read it at pickup is carried in the snapshot as `modelsUnreadable` with its code (the log names the code), and
+  `doctor` says ⚠ "could not read models.json (<code>)" rather than calling the provider unknown or the overlay
+  credential-free; a file that is read and is not an object is logged as "not a valid models.json", never "unreadable";
+  and for a provider pi does not know the gate then gives no verdict: the processor retries the job as infra
+  (`provider_credential_unavailable`), never refuses it; an absent or invalid file stays a determinate refusal. The
+  env builder settles the variable after the `PI_FORWARD_ENV` and `run.secrets` loops, so neither can replace it.
+  On that branch, and on no other, the container env
+  carries `PI_DISPATCH_KEYLESS=keyless` (`INT-CONTAINER-RUNTIME-CONTRACT`), written as the credential's slot in the
+  closed map. A provider pi does not know is answered before `auth.json` is read: keyless, or refused with both ways
+  in named (a key for one of pi's providers, or a keyless endpoint). The gate and the env builder read the ONE
+  snapshot taken at pickup (Slots above), so `models.json` is read once per pickup; with no endpoint declared nothing
+  is keyless and nothing new is read. `doctor` asks the same `keylessVerdict` of the same declaration and overlay and
+  prints ✓ `keyless: served by declared endpoint <id>`, or names why not. With `PI_EGRESS=0` the job dials the
+  endpoint directly on the default network and the worker adds no `--add-host` and no network to its argv.
+  RESIDUAL: a provider pi knows whose baseUrl an operator points at a local server still needs its key.
 - **Render**: the include is deterministic, endpoints sorted by id, after a fixed header (generated, do not edit,
   regenerate with `pi-dispatch egress render`). Per endpoint:
   `acl pde_<id>_host dstdomain -n <host>`, `acl pde_<id>_port port <port>`,
@@ -5094,7 +5130,10 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   this runtime, `doctor` fails naming it.
   Given an endpoint with `slots: 1` and a job holding it, when a second job whose main model uses it is picked
   up on any host, then it is deferred, holding nothing, and runs once the first ends. Given no endpoints, then a
-  job's container argv and its record are byte-identical to before.
+  job's container argv and its record are byte-identical to before. Given a provider pi does not know, with
+  `"apiKey": "$PI_DISPATCH_KEYLESS"` and every model on a `keyless` endpoint, the credential gate passes and the env
+  carries `PI_DISPATCH_KEYLESS=keyless`; given one model off every endpoint, an endpoint not keyless, any other
+  `apiKey`, or a provider pi knows, the gate refuses or keys exactly as before and the env has no such variable.
 
 ---
 
@@ -5858,3 +5897,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-30 | Issue #503 (declared model endpoints), the second change: the proxy includes them. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, a new bullet beside the rules one: `deploy/egress-proxy.conf` (and its mirror) carries `include /etc/pi-dispatch/model-endpoints.conf` after `http_access deny allowed to_host_local` and before `http_access deny CONNECT !SSL_ports`, because pi tunnels every provider call and first match wins; the include is mounted read-only from the deployment folder by the compose service, `up`'s argv, the Quadlet unit (a third placeholder, the folder's own file, never a copy), the hand-started Podman recipe and `podman-conformance.yml`; `pi-dispatch egress render` validates in memory, then writes the include IN PLACE (no `O_CREAT`, `O_NOFOLLOW`, truncate, fsync) and refuses a symlink, a directory or a missing file, because a renamed file is invisible to a running single-file bind mount and `squid -k reconfigure` then reloads the old rules silently (measured on Docker 29.1.3 and Podman 4.9.3 and 5.8.1, 2026-09-30); the verb prints the reload (`docker exec` or `podman exec` of `squid -k reconfigure`) and never runs it; the proxy gets `host.docker.internal:host-gateway` on Docker (compose and `up`), nothing on rootless Podman; the governing rule (PR #517's review): the folder's rules include `model-endpoints.conf` only together with a proxy that mounts it, so a two-mount proxy is drift only when the folder's rules include the file, `up` refreshes the rules and replaces such a proxy as one step (declined or blocked, nothing written; a failed replace puts the old rules back), a replaced proxy is removed with `rm -f -v`, endpoints declared under older rules are named by `up`, `doctor` and `egress render` alike as the rules refresh's to fix, and a third bind must be the folder's file; the render empties the include on a failed write, refuses a hard-linked one, and compares `PI_MODEL_ENDPOINTS_FILE` as resolved paths. The Acceptance gains the endpoint case. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, Status: the include, its mounts, the render verb and the host route on Docker are landed; the Podman route table, the slot leases, the keyless gate and the doctor probes stay pending. Shape: a host with a port separator and an empty port (`a.lan:`) is refused as carrying a port, not as an IPv6 address with an IPv4 tail (PR #515's review). **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no job flag, mount or variable moves; the host entry is the proxy's only. **Code evidence**: deploy/egress-proxy.conf; deploy/docker-compose.yml; deploy/pi-dispatch-egress-proxy.container; worker/src/egress-cli.mjs -> runEgress, writeInPlace, proxyIncludeNeeds; worker/src/egress-proxy-state.mjs -> shippedProxyDrift, rulesIncludeEndpoints; worker/src/up.mjs -> EGRESS_RUN_ARGS; worker/src/podman-stack.mjs -> MODEL_ENDPOINTS_PLACEHOLDER, planStack; worker/src/service.mjs -> TEMPLATE_PINS, stackRefusal; worker/src/doctor.mjs -> egressChecks. |
 | 2026-10-02 | Issue #503, part 6. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: a Doctor bullet (the route row from `hostRouteFor`, the include byte-compared INSIDE the running proxy, three probes per endpoint and what passes each, the loopback baseUrl and allowlisted-alias warnings, and nothing at all with no declaration) and two Acceptance sentences; the Status now records parts 3 and 6 as landed and leaves the slot leases and the keyless gate pending. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the object table: the endpoint probe containers, under the canary probe prefix so every leftover line stays true, with the sweep's id class. **`INT-LIVE-PROBE-CONTRACT` AMENDED**: the podman `--live` canary runs the endpoint probes on its network, and their lines carry no reading, so the `egress` verdict reads the canary's three alone. Measured facts cited, not re-measured: M3 (a renamed file is not seen in the container) and M9 (a job sees 503 and 403 alike), 2026-09-30. Folding PR #519 gate round 1: the port-exact probe skips the same host's declared ports and 443 and 80; the include check also catches a folder file replaced under the proxy; the rootless helper is read from `podman info` or the running helper; the `lan` row and a server's own 401 or 403 are worded as what they are; dotted allowlist entries count. Gate round 2: the replaced-file compare reads the bind source the proxy mounts, never the folder doctor runs in, and covers an operator's proxy too. |
 | 2026-10-02 | Issue #503, part 4 (slot leases). **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: Status (the measured host routes of part 3 and the slot leases are landed beside part 6's doctor rows; the keyless gate of part 5 stays pending); Producer/Consumer (boot load refuses a bad file, a watched live reload keeps the last good one, the current one is read at each pickup); a new **Slots** bullet (in-process then fleet `slot:m:<hash16(id)>:<i>` per endpoint in id order, local and forge jobs alike, no fleet slot for a host alias name (every address, link-local included, takes one), one server one id, atomic compare-and-delete release, a degraded grant still releasing the keys it tried, a set deduplicated by id, a miss releases everything and defers 7 s as `endpoint_busy_deferred`, a Valkey fault grants, the boot sweep, one snapshot per pickup, the residuals); the `id` and `slots` bullets; the Acceptance gains the slot case and the no-endpoints case. **`INT-SCOPED-LIMITS-FILE-CONTRACT` UNCHANGED, checked**: the scope gate, its keys and its deferral are what they were. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: the overlay is still read once per job and the same precedence fills provider and model; the read now happens before the endpoint gate instead of inside the run. **`INT-WAIT-PROFILES-CONTRACT` UNCHANGED, checked**: the wait gate still runs above the settings read. **Code evidence**: worker/src/index.mjs -> makeProcessor, effectiveJobOf, ENDPOINT_BUSY_RECHECK_MS; worker/src/fleet-lease.mjs -> endpointSlotKey, makeClaimSweeper; worker/src/start.mjs -> startWorker, reloadModelEndpoints; worker/test/scope-mutex.test.mjs; worker/test/fleet-lease.test.mjs. |
+| 2026-10-02 | Issue #503, part 5 (keyless providers pass the credential gate), with PR #520's review rounds 1 and 2 folded in. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: Status (all parts of #503 landed; part 7 moved to #501); the `keyless` key's meaning; a new **Keyless** bullet (the four conditions, every model and not some, the exact `apiKey` and why any other value is refused, the one snapshot per pickup shared by the gate and the env builder, `doctor` on the same verdict, `PI_EGRESS=0` adds nothing to the argv, and the residual of a known provider pointed at a local server; from round 1, no other credential (headers, `oauth`, baseUrl userinfo) and every model entry with a string `id`, plain-JSON parsing failing closed, a transient overlay read retried as infra instead of refused (round 2: the reader itself keeps an fs error's code, so an unreadable file or directory is no longer read as invalid JSON or as absent), and the variable settled after the forward and secrets loops); an Acceptance sentence. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, the env bullet: `PI_DISPATCH_KEYLESS=keyless` is now emitted, only on the keyless branch, in the credential's slot. A provider pi does not know is now answered before `auth.json` is read: its every path through `auth.json` already ended in a refusal (there is no variable to write a key under), whose advice ("set the key in .env, or run `pi login`") no custom provider could follow, and a transient read fault there was retried for a refusal that could never pass. **`INT-EGRESS-POLICY-CONTRACT` UNCHANGED, checked**: no rule, include or mount moves. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: no overlay key reaches the endpoints or the gate. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT`'s Producer/Consumer bullet UNCHANGED, checked, and `doctor` corrected to it**: the bullet already says a bad file refuses boot, which has been true since part 4 (PR #518) loaded the file in start.mjs; `doctor`'s boot-file entry still said a bad file was refused with no endpoint usable, a running-worker posture. It now says `REFUSES TO START` for a file that does not load (a zero-byte file included), a missing named file and an empty value, as the pause-windows and scoped-limits entries do; a valid `{"version":1,"endpoints":[]}` still declares none. **Code evidence**: worker/src/doctor.mjs -> BOOT_FILES; worker/src/model-endpoints.mjs -> keylessVerdict, KEYLESS_API_KEY, KEYLESS_HOW; worker/src/env-allowlist.mjs -> resolveProviderCredential, keylessEndpointsFor, buildContainerEnv; worker/src/processor.mjs; worker/src/run-container.mjs; worker/src/start.mjs; worker/src/doctor.mjs -> noKeyVariableCheck. |

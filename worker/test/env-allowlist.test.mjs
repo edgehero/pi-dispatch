@@ -584,7 +584,8 @@ test("a provider pi reads no key variable for still refuses, rather than guessin
 				authFromPi: true,
 				readFile: authReader({ gemini: { type: "api_key", key: "sk-x" } }),
 			}),
-		(e) => e.piDispatchConfig === true && /could not determine the environment variable/.test(e.message),
+		// Issue #503 reworded it to name both ways in: a key for one of pi's providers, or a keyless endpoint.
+		(e) => e.piDispatchConfig === true && /^pi has no provider "gemini", so there is no key variable/.test(e.message) && /"keyless": true/.test(e.message) && /"apiKey": "\$PI_DISPATCH_KEYLESS"/.test(e.message),
 	);
 });
 
@@ -599,6 +600,8 @@ test("a prototype-key provider id refuses instead of coercing a name out of pi's
 	// `cred.type !== "api_key"` guard three lines earlier without ever reaching the name resolution. That
 	// version passed while the string filter was deleted. `JSON.parse` of the same text DOES create an own
 	// data property, so this reaches the code the comment is about, and the assertion names the message.
+	// Since issue #503 the refusal arrives from the unknown-provider branch, which the filtered (empty) candidate list
+	// is what selects; without the filter the list is non-empty and the auth.json path builds that key again.
 	assert.throws(
 		() =>
 			buildContainerEnv({
@@ -608,7 +611,7 @@ test("a prototype-key provider id refuses instead of coercing a name out of pi's
 				authFromPi: true,
 				readFile: authReader('{"__proto__":{"type":"api_key","key":"sk-x"}}'),
 			}),
-		(e) => e.piDispatchConfig === true && /could not determine the environment variable/.test(e.message),
+		(e) => e.piDispatchConfig === true && /^pi has no provider "__proto__"/.test(e.message),
 	);
 });
 
@@ -1104,4 +1107,149 @@ test("HOME is written only when a home is passed, and neither a forwarded nor a 
 	assert.equal(withHome.HOME, "/home/pi", "beside --user the harness's HOME is assigned after both loops");
 	for (const empty of [null, undefined, ""]) assert.equal("HOME" in mod.buildContainerEnv({ ...secretsBase, home: empty }), false, String(empty));
 	assert.ok(CONTAINER_ENV_NAMES.has("HOME"), "reserved, so a trigger's run.secrets cannot bind it");
+});
+
+// ── Issue #503, part 4: a custom provider served by keyless model endpoints passes the credential gate ─────────
+//
+// The snapshot is what index.mjs hands runJob at pickup: the parsed endpoints and the overlay models.json, read once.
+// `readFile` throws on every call, so a pass proves no auth.json (and no second models.json) was read.
+const KL_MAC = { id: "mac-ollama", host: "host.docker.internal", port: 11434, slots: 2, keyless: true };
+const KL_LAN = { id: "lan-vllm", host: "gpu.lan", port: 8000, slots: 1, keyless: true };
+const KL_KEYED = { id: "keyed-vllm", host: "vllm.lan", port: 8000, slots: 1, keyless: false };
+const klModels = (provider = {}) => ({
+	providers: {
+		"local-ollama": {
+			api: "openai-completions",
+			baseUrl: "http://host.docker.internal:11434/v1",
+			apiKey: "$PI_DISPATCH_KEYLESS",
+			models: [{ id: "qwen2.5:0.5b" }, { id: "llama3", baseUrl: "http://gpu.lan:8000/v1" }],
+			...provider,
+		},
+	},
+});
+const klSnapshot = (models = klModels(), endpoints = [KL_MAC, KL_LAN, KL_KEYED]) => ({ endpoints, models, set: [] });
+const noRead = () => {
+	throw new Error("no file may be read on the keyless branch");
+};
+const klBase = { provider: "local-ollama", model: "qwen2.5:0.5b", maxTurns: 5, jobId: "j", hostEnv: { HOME: "/root" }, authFromPi: true, readFile: noRead };
+const isKeylessRefusal = (e) => e.piDispatchConfig === true && /^pi has no provider "local-ollama"/.test(e.message) && /"keyless": true/.test(e.message);
+
+test("keyless: a custom provider whose EVERY model is on a keyless endpoint passes, with PI_DISPATCH_KEYLESS=keyless and no file read", { skip }, () => {
+	assert.deepEqual(mod.resolveProviderCredential({ ...klBase, modelEndpoints: klSnapshot() }), { PI_DISPATCH_KEYLESS: "keyless" });
+	const env = buildContainerEnv({ ...klBase, modelEndpoints: klSnapshot() });
+	assert.equal(env.PI_DISPATCH_KEYLESS, "keyless");
+	assert.equal(env.PI_PROVIDER, "local-ollama");
+	// Model-level baseUrl beats the provider's: llama3 is on lan-vllm, not on the provider's mac-ollama.
+	assert.deepEqual(mod.keylessEndpointsFor("local-ollama", klSnapshot()), ["lan-vllm", "mac-ollama"]);
+});
+
+test("keyless: ONE model off every declared endpoint refuses the whole provider (every, not some)", { skip }, () => {
+	const models = klModels({ models: [{ id: "qwen2.5:0.5b" }, { id: "hosted", baseUrl: "https://api.example.com/v1" }] });
+	assert.throws(() => buildContainerEnv({ ...klBase, modelEndpoints: klSnapshot(models) }), isKeylessRefusal);
+	// The same host on another port is another server, so it does not count either.
+	const offPort = klModels({ models: [{ id: "qwen2.5:0.5b" }, { id: "other", baseUrl: "http://host.docker.internal:11435/v1" }] });
+	assert.throws(() => buildContainerEnv({ ...klBase, modelEndpoints: klSnapshot(offPort) }), isKeylessRefusal);
+});
+
+test("keyless: a model on an endpoint WITHOUT \"keyless\": true refuses (the flag is the operator's word)", { skip }, () => {
+	const models = klModels({ models: [{ id: "qwen2.5:0.5b" }, { id: "big", baseUrl: "http://vllm.lan:8000/v1" }] });
+	assert.throws(() => buildContainerEnv({ ...klBase, modelEndpoints: klSnapshot(models) }), isKeylessRefusal);
+	// And every model on the one non-keyless endpoint.
+	const allKeyed = klModels({ baseUrl: "http://vllm.lan:8000/v1", models: [{ id: "big" }] });
+	assert.throws(() => buildContainerEnv({ ...klBase, modelEndpoints: klSnapshot(allKeyed) }), isKeylessRefusal);
+});
+
+test("keyless: the apiKey must be exactly \"$PI_DISPATCH_KEYLESS\"; a literal, another variable, a command or none refuses", { skip }, () => {
+	for (const apiKey of ["ollama", "$OLLAMA_KEY", "${PI_DISPATCH_KEYLESS}", "!echo x", undefined]) {
+		assert.throws(() => buildContainerEnv({ ...klBase, modelEndpoints: klSnapshot(klModels({ apiKey })) }), isKeylessRefusal, String(apiKey));
+	}
+});
+
+test("keyless: no models, no overlay entry, no endpoint declared, or no snapshot at all refuses", { skip }, () => {
+	assert.throws(() => buildContainerEnv({ ...klBase, modelEndpoints: klSnapshot(klModels({ models: [] })) }), isKeylessRefusal, "no models");
+	assert.throws(() => buildContainerEnv({ ...klBase, modelEndpoints: klSnapshot({ providers: {} }) }), isKeylessRefusal, "not in the overlay");
+	assert.throws(() => buildContainerEnv({ ...klBase, modelEndpoints: klSnapshot(klModels(), []) }), isKeylessRefusal, "nothing declared");
+	assert.throws(() => buildContainerEnv({ ...klBase, modelEndpoints: { endpoints: [KL_MAC], models: null, set: [] } }), isKeylessRefusal, "overlay unreadable");
+	assert.throws(() => buildContainerEnv({ ...klBase }), isKeylessRefusal, "no snapshot (an unwired caller)");
+	// The env-only posture names the same way in.
+	assert.throws(() => buildContainerEnv({ ...klBase, authFromPi: false }), isKeylessRefusal, "PI_AUTH_FROM_PI=0");
+});
+
+test("keyless: a provider pi KNOWS is unchanged, even pointed at a keyless endpoint with the keyless apiKey", { skip }, () => {
+	// `openai` reads OPENAI_API_KEY: with it, the key is forwarded and no keyless variable appears; without it, the
+	// refusal is the one it always was. A builtin baseUrl pointed at a local server is a named residual, never keyless.
+	const asOpenai = (models) => ({ providers: { openai: models.providers["local-ollama"] } });
+	const snap = klSnapshot(asOpenai(klModels()));
+	const keyed = buildContainerEnv({ ...klBase, provider: "openai", hostEnv: { OPENAI_API_KEY: "sk-o" }, authFromPi: false, modelEndpoints: snap });
+	assert.equal(keyed.OPENAI_API_KEY, "sk-o");
+	assert.equal("PI_DISPATCH_KEYLESS" in keyed, false);
+	assert.throws(
+		() => buildContainerEnv({ ...klBase, provider: "openai", authFromPi: false, modelEndpoints: snap }),
+		(e) => e.piDispatchConfig === true && /^provider openai has no configured credential in the worker environment\. Set its key there, or, for a custom provider served by a local model server, declare/.test(e.message),
+	);
+	// `amazon-bedrock` is in pi's catalog with NO key variable: it must keep its own refusal, not fall to keyless.
+	const bedrock = { providers: { "amazon-bedrock": klModels().providers["local-ollama"] } };
+	assert.throws(
+		() => buildContainerEnv({ ...klBase, provider: "amazon-bedrock", authFromPi: false, modelEndpoints: klSnapshot(bedrock) }),
+		(e) => e.piDispatchConfig === true && /no configured credential/.test(e.message),
+	);
+	assert.throws(
+		() => buildContainerEnv({ ...klBase, provider: "amazon-bedrock", readFile: authReader({ "amazon-bedrock": { type: "api_key", key: "sk-x" } }), modelEndpoints: klSnapshot(bedrock) }),
+		(e) => e.piDispatchConfig === true && /without an API-key environment variable/.test(e.message),
+	);
+});
+
+test("keyless: PI_DISPATCH_KEYLESS is in the env ONLY on the keyless branch", { skip }, () => {
+	// A hosted job beside a declared keyless provider: the snapshot is there, the variable is not.
+	const hosted = buildContainerEnv({ provider: "anthropic", model: "m", maxTurns: 5, jobId: "j", hostEnv: HOST, modelEndpoints: klSnapshot() });
+	assert.equal("PI_DISPATCH_KEYLESS" in hosted, false);
+	const bare = buildContainerEnv({ provider: "anthropic", model: "m", maxTurns: 5, jobId: "j", hostEnv: HOST });
+	assert.equal("PI_DISPATCH_KEYLESS" in bare, false);
+	// Nothing the operator or a trigger names can put it there either: PI_FORWARD_ENV refuses it at load (config.test)
+	// and run.secrets cannot bind a reserved name; this map is the only writer.
+	assert.ok(CONTAINER_ENV_NAMES.has("PI_DISPATCH_KEYLESS"));
+});
+
+// ── PR #520 review round 1 ────────────────────────────────────────────────────────────────────────────────────────
+
+test("keyless: any other credential refuses: headers anywhere, oauth, or a user or password in a baseUrl", { skip }, () => {
+	const cases = {
+		"provider headers": klModels({ headers: { "X-Trace": "1" } }),
+		"model headers": klModels({ models: [{ id: "qwen2.5:0.5b", headers: { Authorization: "Bearer x" } }] }),
+		"modelOverrides headers": klModels({ modelOverrides: { "qwen2.5:0.5b": { headers: { "X-Key": "!cat /x" } } } }),
+		oauth: klModels({ oauth: "radius" }),
+		"provider userinfo": klModels({ baseUrl: "http://u:p@host.docker.internal:11434/v1" }),
+		"model userinfo": klModels({ models: [{ id: "qwen2.5:0.5b", baseUrl: "http://tok@host.docker.internal:11434/v1" }] }),
+	};
+	for (const [name, models] of Object.entries(cases)) {
+		assert.throws(() => buildContainerEnv({ ...klBase, modelEndpoints: klSnapshot(models) }), isKeylessRefusal, name);
+	}
+	// The control: a modelOverrides entry without headers is not a credential.
+	assert.equal(buildContainerEnv({ ...klBase, modelEndpoints: klSnapshot(klModels({ modelOverrides: { "qwen2.5:0.5b": { contextWindow: 8192 } } })) }).PI_DISPATCH_KEYLESS, "keyless");
+});
+
+test("keyless: a model entry pi's schema would refuse refuses the provider, rather than being skipped", { skip }, () => {
+	for (const models of [[{ id: "qwen2.5:0.5b" }, { name: "no id" }], [{ id: "" }], [{ id: "qwen2.5:0.5b" }, null], [{ id: 7 }], "qwen"]) {
+		assert.throws(() => buildContainerEnv({ ...klBase, modelEndpoints: klSnapshot(klModels({ models })) }), isKeylessRefusal, JSON.stringify(models));
+	}
+});
+
+test("keyless: a TRANSIENT overlay read at pickup is no verdict (untagged, retryable); absence stays a refusal", { skip }, () => {
+	const snapshot = { endpoints: [KL_MAC], models: null, set: [], modelsUnreadable: { code: "EIO" } };
+	assert.throws(
+		() => buildContainerEnv({ ...klBase, modelEndpoints: snapshot }),
+		(e) => e.piDispatchConfig !== true && e.piDispatchTransient === true && e.code === "EIO" && !/keyless": true/.test(e.message),
+	);
+	// A provider pi knows is decided as before, the read does not matter to it.
+	assert.equal(buildContainerEnv({ ...klBase, provider: "anthropic", hostEnv: HOST, modelEndpoints: snapshot }).ANTHROPIC_API_KEY, "sk-ant-real");
+	// No marker (absent file, invalid JSON, a determinate errno): the determinate refusal.
+	assert.throws(() => buildContainerEnv({ ...klBase, modelEndpoints: { endpoints: [KL_MAC], models: null, set: [] } }), isKeylessRefusal);
+});
+
+test("keyless: PI_DISPATCH_KEYLESS is settled after the forward and secrets loops, so neither can replace or add it", { skip }, () => {
+	// Both lists refuse the name upstream (config.mjs, the reserved set); this pins the backstop at the seam.
+	const keyless = buildContainerEnv({ ...klBase, hostEnv: { HOME: "/root", PI_DISPATCH_KEYLESS: "forwarded" }, forwardEnv: ["PI_DISPATCH_KEYLESS"], secrets: { PI_DISPATCH_KEYLESS: "secret" }, modelEndpoints: klSnapshot() });
+	assert.equal(keyless.PI_DISPATCH_KEYLESS, "keyless");
+	const keyed = buildContainerEnv({ provider: "anthropic", model: "m", maxTurns: 5, jobId: "j", hostEnv: { ...HOST, PI_DISPATCH_KEYLESS: "forwarded" }, forwardEnv: ["PI_DISPATCH_KEYLESS"], secrets: { PI_DISPATCH_KEYLESS: "secret" } });
+	assert.equal("PI_DISPATCH_KEYLESS" in keyed, false);
 });

@@ -303,11 +303,13 @@ export function endpointsDeclaredIn({ env, cwd, fs, platform = process.platform 
  * `endpointsDeclaredIn`, which counts them): `[]` for none, and for a declaration that does not load, which doctor's
  * boot-file line names. Doctor's endpoint rows (issue #503) are built from this list and from nothing else.
  */
-export function declaredEndpointsIn({ env, cwd, fs, platform = process.platform }) {
+export function declaredEndpointsIn({ env, cwd, fs, platform = process.platform, valkeyUrl = null }) {
 	try {
 		const setting = endpointsFileSetting({ env, cwd, platform, readEnv: (p) => fs.readFileSync(p), exists: (p) => fs.existsSync(p) });
 		if (setting.error) return [];
-		return loadModelEndpoints({ modelEndpointsFile: setting.value, valkeyUrl: null }, { cwd, readFileSync: (p, enc) => fs.readFileSync(p, enc), existsSync: (p) => fs.existsSync(p) });
+		// `valkeyUrl` null skips the queue-port refusal; doctor's keyless line passes the service's (issue #503), so an
+		// endpoint on the queue's port, which refuses the worker's boot, is not called keyless.
+		return loadModelEndpoints({ modelEndpointsFile: setting.value, valkeyUrl }, { cwd, readFileSync: (p, enc) => fs.readFileSync(p, enc), existsSync: (p) => fs.existsSync(p) });
 	} catch {
 		return [];
 	}

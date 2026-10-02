@@ -1,8 +1,9 @@
 /**
  * Issue #503: the variable a keyless provider's `models.json` key names (`"apiKey": "$PI_DISPATCH_KEYLESS"`), so pi
- * composes the provider. `buildContainerEnv` writes it, with the fixed, non-secret value `keyless`, from a later part of
- * #503 (the keyless credential gate), and only for a job whose provider is served by keyless model endpoints alone.
- * Reserved in the set below from now, so neither `run.secrets` nor `PI_FORWARD_ENV` can set it.
+ * composes the provider. `buildContainerEnv` writes it, with the fixed, non-secret value `keyless`, only when the
+ * credential gate passed the job's provider keyless (env-allowlist.mjs, `resolveProviderCredential`): a provider pi does
+ * not know, served by keyless model endpoints alone. Reserved in the set below, so neither `run.secrets` nor
+ * `PI_FORWARD_ENV` can set it.
  */
 export const KEYLESS_ENV_NAME = "PI_DISPATCH_KEYLESS";
 
@@ -49,6 +50,6 @@ export const CONTAINER_ENV_NAMES = new Set([
 	// Issue #341: set beside `--user` so a uid with no passwd entry has a writable home. A new reservation, so a
 	// triggers file binding a secret named HOME is now refused at parse (worker, receiver and admin alike).
 	"HOME",
-	// Issue #503: reserved ahead of the part of #503 that emits it (see KEYLESS_ENV_NAME at the top).
+	// Issue #503: written only on the keyless branch of the credential gate (see KEYLESS_ENV_NAME at the top).
 	KEYLESS_ENV_NAME,
 ]);

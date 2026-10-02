@@ -189,8 +189,10 @@ and `doctor` checks that it is set.
   it: pi reads either one before `ANTHROPIC_API_KEY`.
 - **Not supported at all:** providers that do not use a single key variable (an AWS profile for Bedrock,
   for example). The job is refused before anything is spent.
-- **A custom provider** goes in your pi `models.json`, staged with `import-pi`, with its key named in
-  `PI_FORWARD_ENV` ([`docs/global-pi-overlay.md`](docs/global-pi-overlay.md)).
+- **A custom provider** goes in your pi `models.json`, staged with `import-pi`. As a job's main provider it
+  runs when a local model server that takes no key serves every one of its models
+  ([`docs/egress.md`, "Local model servers"](docs/egress.md#local-model-servers)). For any other model the
+  agent uses, name its key in `PI_FORWARD_ENV` ([`docs/global-pi-overlay.md`](docs/global-pi-overlay.md)).
 
 ## Triggers
 

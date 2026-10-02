@@ -758,3 +758,23 @@ test("a job's teardown uses the runtime it was ADMITTED on, so a failed, errorin
 	assert.ok(!unread.calls.includes("network rm pi-job-j1-net"));
 	assert.deepEqual(unread.logs, [["job_network_not_removed", { network: "pi-job-j1-net", reason: "runtime-unreadable" }]]);
 });
+
+test("issue #503: a keyless job with PI_EGRESS=0 dials its endpoint directly; the argv gains no --add-host and no network, only the env", { skip }, async () => {
+	// With egress off the job is on the default network, and the endpoint's host is whatever the job's own resolver
+	// says. The worker adds nothing for it: the only difference from a hosted job is the provider, the model and the
+	// credential slot, which carries PI_DISPATCH_KEYLESS=keyless instead of a key.
+	const snapshot = {
+		endpoints: [{ id: "lan-ollama", host: "gpu.lan", port: 11434, slots: 1, keyless: true }],
+		models: { providers: { "local-ollama": { api: "openai-completions", baseUrl: "http://gpu.lan:11434/v1", apiKey: "$PI_DISPATCH_KEYLESS", models: [{ id: "qwen" }] } } },
+		set: [],
+	};
+	const hosted = {};
+	const local = {};
+	await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn(hosted) })({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
+	await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn(local) })({ job: { ...JOB, provider: "local-ollama", model: "qwen" }, prepared: PREPARED, name: "j1", signal: new AbortController().signal, modelEndpoints: snapshot });
+	assert.ok(local.args.includes("PI_DISPATCH_KEYLESS=keyless"));
+	assert.ok(!local.args.some((a) => a.startsWith("ANTHROPIC_")), "the host's key does not ride along on a keyless job");
+	assert.ok(!local.args.some((a) => /^--add-host|^--network|^--net=/.test(a)), "no --add-host and no network");
+	const swap = { "PI_PROVIDER=local-ollama": "PI_PROVIDER=anthropic", "PI_MODEL=qwen": "PI_MODEL=m", "PI_DISPATCH_KEYLESS=keyless": "ANTHROPIC_API_KEY=sk-real" };
+	assert.deepEqual(local.args.map((a) => swap[a] ?? a), hosted.args, "otherwise the argv is the hosted job's, flag for flag");
+});
