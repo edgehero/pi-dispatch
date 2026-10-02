@@ -4678,6 +4678,29 @@ test("doctor: run.models states its version floor once, naming trigger-skew, and
 	assert.equal(quiet.some((c) => /name run\.models/.test(c.label)), false);
 });
 
+function costCapTriggersFile(caps) {
+	const path = join(tempDir("pi-triggers-cost-"), "triggers.json");
+	writeFileSync(path, JSON.stringify({ triggers: caps.map((maxCostUsd, i) => ({ on: { type: "label", any: [`pi:go${i}`] }, run: { kind: "github", flow: "fix", maxCostUsd } })) }));
+	return path;
+}
+
+test("doctor: run.maxCostUsd states its version floor once, naming trigger-skew, and only when a trigger sets one (#540)", async () => {
+	const capping = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: costCapTriggersFile(["2.50", 1, null]) }, secretsSeams());
+	const floor = capping.filter((c) => /set run\.maxCostUsd, which needs a worker and a receiver/.test(c.label));
+	assert.equal(floor.length, 1, "once, not once per trigger");
+	assert.equal(floor[0].ok, true, "a fact, not a defect: doctor cannot see the receiver's version");
+	assert.match(floor[0].label, /^2 trigger\(s\) set run\.maxCostUsd/, "a null cap is absent and not counted");
+	assert.match(floor[0].label, /issue #501/);
+	assert.match(floor[0].label, /trigger-skew/);
+	// Exactly one cap, beside a null one: still said, and counted as one.
+	const one = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: costCapTriggersFile([null, "0.01"]) }, secretsSeams());
+	const single = one.filter((c) => /set run\.maxCostUsd, which needs a worker and a receiver/.test(c.label));
+	assert.equal(single.length, 1, "one trigger with a cap is enough");
+	assert.match(single[0].label, /^1 trigger\(s\) set run\.maxCostUsd/);
+	const quiet = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: modelsTriggersFile() }, secretsSeams());
+	assert.equal(quiet.some((c) => /run\.maxCostUsd, which needs/.test(c.label)), false, "no trigger sets a cap: nothing to say");
+});
+
 test("doctor: PI_ALLOWED_MODELS is judged by the worker's own rule, a spaced value included (#502)", async () => {
 	const base = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: waitTriggersFile() };
 	const good = await collectChecks({ ...base, PI_ALLOWED_MODELS: "anthropic/claude-haiku-4-5,openai/gpt-x" }, secretsSeams());

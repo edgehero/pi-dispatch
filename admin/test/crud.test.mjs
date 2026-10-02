@@ -255,6 +255,33 @@ test("dispatch_set: an invalid current overlay is refused BEFORE the confirm, an
   assert.equal(readFileSync(settingsFile, "utf8"), text);
 });
 
+test("dispatch_set: a blank settings file (whitespace or a BOM only) is written over like a missing one (#540)", async () => {
+  for (const text of ["", " \n\t\r\n", "﻿", "﻿ \n"]) {
+    const settingsFile = join(tempDir("pi-set-"), "settings.json");
+    writeFileSync(settingsFile, text);
+    process.env.PI_SETTINGS_FILE = settingsFile;
+    const declined = toolCtx({ answer: false });
+    const outNo = textOf(await toolByName("dispatch_set").execute("id", { key: "dailyCap", value: "7" }, undefined, undefined, declined.ctx));
+    assert.equal(outNo.applied, false);
+    assert.equal(declined.shown.length, 1, `the operator is asked, as over a missing file (${JSON.stringify(text)})`);
+    assert.match(declined.shown[0].message, /^dailyCap: \(unset\) -> 7$/);
+    assert.equal(readFileSync(settingsFile, "utf8"), text, "a decline leaves the blank file alone");
+    const approved = toolCtx({ answer: true });
+    const outYes = textOf(await toolByName("dispatch_set").execute("id", { key: "dailyCap", value: "7" }, undefined, undefined, approved.ctx));
+    assert.equal(outYes.applied, true);
+    assert.deepEqual(read(settingsFile), { dailyCap: 7 }, "approved, the blank file is written over");
+  }
+  // An unset over a blank file is the same: asked, then written as an empty overlay.
+  const settingsFile = join(tempDir("pi-set-"), "settings.json");
+  writeFileSync(settingsFile, "﻿\n");
+  process.env.PI_SETTINGS_FILE = settingsFile;
+  const { ctx, shown } = toolCtx({ answer: true });
+  const out = textOf(await toolByName("dispatch_set").execute("id", { key: "dailyCap" }, undefined, undefined, ctx));
+  assert.equal(out.applied, true);
+  assert.equal(shown.length, 1);
+  assert.deepEqual(read(settingsFile), {});
+});
+
 test("dispatch_set: an unknown key throws before any confirm", async () => {
   withSettings({ dailyCap: 25 });
   const { ctx } = toolCtx({ answer: true });
@@ -586,6 +613,47 @@ test("declaring a profile writes the overlay only after a confirm showing the EX
   assert.match(shown[0], /PI_SECRET_RESOLVER_ROOTS/, "and that the worker still has to admit it");
   assert.deepEqual(JSON.parse(files["/s/settings.json"]), { secretProfiles: { prod: "/opt/pi/resolve.sh" } });
   assert.ok(notes.some((n) => /triggers\.json/.test(n)), "and the operator is told binding it is still a file edit");
+});
+
+test("/dispatch secrets reads a blank settings file (whitespace or a BOM only) as a missing one (#540)", async () => {
+  const { runSecretsCommand } = await jiti.import("../src/secrets-command.ts");
+  const memFs = (text) => {
+    const files = { "/s/settings.json": text };
+    return {
+      files,
+      readFileSync: (p) => {
+        if (!(p in files)) { const e = new Error("ENOENT"); e.code = "ENOENT"; throw e; }
+        return files[p];
+      },
+      writeFileSync: (p, d) => (files[p] = d),
+      renameSync: (a, b) => { files[b] = files[a]; delete files[a]; },
+      mkdirSync: () => {},
+    };
+  };
+  const ctx = (shown) => ({ ui: { input: async (t) => (/profile name/.test(t) ? "prod" : "/opt/pi/resolve.sh"), confirm: async (_t, m) => (shown.push(m), true), notify: () => {} } });
+  for (const text of ["", " \n", "﻿", "﻿ \n"]) {
+    const label = JSON.stringify(text);
+    let notes = [];
+    await runSecretsCommand({ settingsFile: "/s/settings.json" }, ctx([]), (m) => notes.push(m), ["list"], { fs: memFs(text) });
+    assert.deepEqual(notes, ["No resolver profiles are declared in the settings overlay."], label);
+    const fs = memFs(text);
+    const shown = [];
+    notes = [];
+    await runSecretsCommand({ settingsFile: "/s/settings.json" }, ctx(shown), (m) => notes.push(m), ["add"], { fs });
+    assert.equal(shown.length, 1, `the operator is asked, as over a missing file (${label})`);
+    assert.deepEqual(JSON.parse(fs.files["/s/settings.json"]), { secretProfiles: { prod: "/opt/pi/resolve.sh" } }, label);
+    notes = [];
+    await runSecretsCommand({ settingsFile: "/s/settings.json" }, ctx([]), (m) => notes.push(m), ["remove", "prod"], { fs: memFs(text) });
+    assert.match(notes[0], /^no such profile\. No resolver profiles are declared/, label);
+  }
+  // A file that is invalid and NOT blank is still refused, with nothing asked and nothing written.
+  const fs = memFs('{"secretProfiles":{"a":"/x"},"secretProfiles":{}}');
+  const shown = [];
+  const notes = [];
+  await runSecretsCommand({ settingsFile: "/s/settings.json" }, ctx(shown), (m) => notes.push(m), ["add"], { fs });
+  assert.equal(shown.length, 0);
+  assert.match(notes[0], /^settings overlay is unreadable \(settings file has a duplicate key/);
+  assert.equal(fs.files["/s/settings.json"], '{"secretProfiles":{"a":"/x"},"secretProfiles":{}}');
 });
 
 test("declining the confirm writes nothing at all", async () => {

@@ -78,6 +78,7 @@ import {
   installPanelValkeyContext,
   writeSettings,
   overlayInvalidRefusal,
+  blankSettingsFile,
   settingShown,
   mergedDollarProblem,
   writeTriggers,
@@ -495,8 +496,10 @@ function registerTools(pi: ExtensionAPI): void {
       const shown = { deploymentDir: pointerState().deploymentDir ?? null };
       const view = readSettingsView({ settingsFile: paths.settingsFile });
       // Issue #501: refused BEFORE the confirm over an invalid file, so the operator is never asked to approve a write
-      // that would be refused (and could not rebuild the file without erasing what it holds).
-      if (view?.invalid) throw new Error(`rejected: ${overlayInvalidRefusal(view.invalid)}`);
+      // that would be refused (and could not rebuild the file without erasing what it holds). Issue #540: a BLANK
+      // file (whitespace or a byte-order mark only) holds no key, so it is read as a missing one, the rule
+      // `writeSettings` applies to the write itself.
+      if (view?.invalid && !blankSettingsFile(paths.settingsFile)) throw new Error(`rejected: ${overlayInvalidRefusal(view.invalid)}`);
       const unset = params.value === undefined || params.value.trim() === "";
       const newVal = unset ? undefined : coerceSettingValue(params.key, params.value.trim());
       // The AFTER side of an unset is what the key falls back to, by the same rule as the before side.

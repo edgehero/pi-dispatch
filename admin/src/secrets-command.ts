@@ -19,7 +19,7 @@
  * would be cosmetic.
  */
 
-import { readSettingsView, writeSettings } from "./read-model.mjs";
+import { blankSettingsFile, readSettingsView, writeSettings } from "./read-model.mjs";
 import { gateDialogs } from "./dialog-gate.mjs";
 
 const PROFILE_NAME = /^[A-Za-z0-9._-]+$/;
@@ -41,8 +41,9 @@ export async function runSecretsCommand(paths: any, rawCtx: any, notify: any, to
   const fsSeam = deps.fs ? { fs: deps.fs } : {};
   const view = readSettingsView({ settingsFile: paths.settingsFile, ...fsSeam });
   // Fail-soft on read, like every other display path: an operator whose overlay is broken still needs to
-  // be told what is wrong rather than handed nothing.
-  if (view.invalid) {
+  // be told what is wrong rather than handed nothing. A BLANK file (whitespace or a byte-order mark only, issue #540)
+  // holds no key, so it reads as a missing one, the rule `writeSettings` applies to the write itself.
+  if (view.invalid && !blankSettingsFile(paths.settingsFile, deps.fs)) {
     notify?.(`settings overlay is unreadable (${view.invalid}) — fix it before declaring a profile`, "error");
     return;
   }

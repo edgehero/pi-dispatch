@@ -290,6 +290,27 @@ test("the processor hands the skew check maxCostUsd as the job ARRIVED, and refu
 	assert.equal(h.seen.ctx.length, 0, "no container");
 });
 
+test("a deployment cap never fills a maxCostUsd the job arrived without, before the skew check (#540)", { skip }, async () => {
+	// The harness above sets no deployment cap, so a wrapper that fell back to it (`job.data?.maxCostUsd ??
+	// settings.maxCostUsd`) still handed the check undefined. Here the overlay holds a cap, the SAME value the trigger
+	// authored, so such a fill would make the dropped cap read as present and the job would run.
+	for (const deployment of ["2.50", "9"]) {
+		const seen = [];
+		const checkWaitSkew = makeCheckWaitSkew({ triggersPath: "/t.json", fs: skewFile({ maxCostUsd: "2.50" }) });
+		const h = harness({ getSettings: SETTINGS({ maxCostUsd: deployment }), extraDeps: { checkWaitSkew: (j) => (seen.push(j.maxCostUsd), checkWaitSkew(j)) } });
+		const r = await h.processor(qJob("j-cap", { kind: "github", repo: "o/r", flow: "fix", target: { number: 1 }, trigger: { matched: { index: 0, type: "label" } } }), "tok", new AbortController().signal);
+		assert.equal(r.reason, "trigger-skew", `deployment cap ${deployment}`);
+		assert.equal(r.budgetReserved, false);
+		assert.deepEqual(seen, [undefined], "the check sees the job as it arrived");
+		assert.equal(h.seen.ctx.length, 0, "no container");
+	}
+	// The arrived cap still reaches the check, beside a deployment cap.
+	const seen = [];
+	const h = harness({ getSettings: SETTINGS({ maxCostUsd: "9" }), extraDeps: { checkWaitSkew: (j) => (seen.push(j.maxCostUsd), { ok: true }) } });
+	await h.processor(qJob("j-cap", { kind: "github", repo: "o/r", flow: "fix", target: { number: 1 }, maxCostUsd: "2.50", trigger: { matched: { index: 0, type: "label" } } }), "tok", new AbortController().signal);
+	assert.deepEqual(seen, ["2.50"]);
+});
+
 test("a trigger-skew refusal is pre-spend and names the field, never its value", async () => {
 	const { deps: d, calls, redis } = deps({ checkWaitSkew: async () => ({ skewed: true, field: "models" }) });
 	const r = await runJob(job(), d);

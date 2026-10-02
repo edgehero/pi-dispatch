@@ -621,7 +621,7 @@ function hourKey(nowMs) {
  */
 export function writeSettings({ settingsFile, mutate, fs = nodeFs, dollarEnv = undefined, deploymentDir = null }) {
   const res = readOverlay(settingsFile, { fs });
-  if (res.invalid && !blankFile(settingsFile, fs)) return { invalid: overlayInvalidRefusal(res.invalid) };
+  if (res.invalid && !blankSettingsFile(settingsFile, fs)) return { invalid: overlayInvalidRefusal(res.invalid) };
   const next = mutate({ ...(res.overlay ?? {}) });
   // Issue #501 (PR #542's review): a write that touches a dollar key is judged on the MERGED values when the caller
   // passes the env, and the answer is a WARNING returned beside the result, never a refusal: the worker's cap may come
@@ -632,9 +632,12 @@ export function writeSettings({ settingsFile, mutate, fs = nodeFs, dollarEnv = u
   return { ok: true, overlay: next, ...(warning ? { warning } : {}) };
 }
 
-// A settings file whose text is nothing but whitespace or a byte-order mark: invalid to the worker (not JSON), but it
-// holds no key, so a write over it loses nothing and is allowed, as a missing file is. Any read error is not blank.
-function blankFile(path, fs) {
+/**
+ * A settings file whose text is nothing but whitespace or a byte-order mark: invalid to the worker (not JSON), but it
+ * holds no key, so a write over it loses nothing and is allowed, as a missing file is. Any read error is not blank.
+ * `writeSettings` and the `dispatch_set` tool's pre-confirm check (issue #540) share this one test.
+ */
+export function blankSettingsFile(path, fs = nodeFs) {
   try {
     return String(fs.readFileSync(path, "utf8")).replace(/^\uFEFF/, "").trim() === "";
   } catch {

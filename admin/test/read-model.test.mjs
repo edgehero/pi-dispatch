@@ -26,6 +26,7 @@ import {
   killSwitchSet,
   panelValkeyContext,
   writeSettings,
+  blankSettingsFile,
   mergedDollarProblem,
   writeTriggers,
   readPauseWindows,
@@ -974,6 +975,30 @@ test("writeSettings REFUSES over an invalid file instead of rebuilding it, so no
   }
   // A text that is not blank but not valid either stays refused.
   assert.ok(writeSettings({ settingsFile: path, mutate: (o) => o, fs: memFs({ [path]: "\uFEFF x" }) }).invalid);
+});
+
+test("a settings file that cannot be READ is not blank, so writeSettings refuses and erases nothing (#540)", () => {
+  // blankSettingsFile has two callers (writeSettings and the dispatch_set tool's pre-confirm check). A read error
+  // read as blank would let a write replace a mode-000 file that still holds a cap with an overlay that has none.
+  const path = "/s/settings.json";
+  const held = '{"maxCostUsd":"1"}';
+  for (const code of ["EACCES", "EISDIR", "EIO"]) {
+    const fs = memFs({ [path]: held });
+    fs.readFileSync = () => {
+      const e = new Error(`${code}: ${path}`);
+      e.code = code;
+      throw e;
+    };
+    assert.equal(blankSettingsFile(path, fs), false, code);
+    const res = writeSettings({ settingsFile: path, mutate: (o) => ({ ...o, dailyCap: 7 }), fs });
+    assert.equal(res.ok, undefined, code);
+    assert.match(res.invalid, new RegExp(`^the settings file is invalid \\(settings file unreadable \\(${code}\\)\\), so nothing was written`), code);
+    assert.equal(fs.files.get(path), held, `${code}: the file still holds its cap`);
+  }
+  // The helper's own answers, for contrast: blank text is blank, a key is not, and a missing file is not either.
+  assert.equal(blankSettingsFile(path, memFs({ [path]: "\uFEFF \n" })), true);
+  assert.equal(blankSettingsFile(path, memFs({ [path]: held })), false);
+  assert.equal(blankSettingsFile(path, memFs({})), false);
 });
 
 test("writeSettings passes through writeOverlay's { invalid } and leaves the file untouched", () => {
