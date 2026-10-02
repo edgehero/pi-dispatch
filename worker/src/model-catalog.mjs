@@ -139,6 +139,8 @@ export function knownModel({ provider, id, overlay = null, chatOnly = false }) {
  *     has an overlay entry pi would not compose, or `"overlay-is-a-directory"`, so the operator learns the file is the
  *     problem rather than the id. pi drops the WHOLE file when it fails its own validation, so a model only that
  *     file declares does not exist in the job either: refusing is the honest answer, not a guess;
+ *   - `{ fallbackUnlisted: { provider, id }, why: "fallback-unlisted" }`: the job has a list, every ref is known, and
+ *     a listed model declares a server-side fallback (`declaredFallbacks`) that is not on the list under its provider;
  *   - `{ unavailable: code }`: the overlay could not be READ for a transient reason (an errno other than EISDIR
  *     `readOverlayModels` rethrows) and a ref needed it. The caller retries rather than refusing, because a refusal
  *     is permanent and public and the next attempt may read the file.
@@ -179,5 +181,53 @@ export function checkModelsKnown(refs, { readOverlay = () => null } = {}) {
 		if (unavailable !== null) return { unavailable };
 		if (!isOverlayModel(overlay, ref.provider, ref.id)) return { unknown: { provider: ref.provider, id: ref.id }, why: unparseable ?? "not-in-catalog" };
 	}
+	// A job WITH a list (any ref beyond the main one): every listed model's server-side fallbacks must be listed too.
+	const listed = refs.filter((ref) => ref.main !== true);
+	if (listed.length > 0) {
+		// The overlay can add or clear a model's fallbacks, so one that could not be READ just now leaves the answer
+		// undecided: retried, never turned into a permanent refusal (PR #538's review, round 3).
+		if (unavailable !== null) return { unavailable };
+		const allowed = new Set(listed.map((ref) => `${ref.provider}\u0000${ref.id}`));
+		for (const ref of listed) {
+			for (const fallback of declaredFallbacks(ref.provider, ref.id, overlay)) {
+				if (!allowed.has(`${ref.provider}\u0000${fallback}`)) return { fallbackUnlisted: { provider: ref.provider, id: ref.id }, why: "fallback-unlisted" };
+			}
+		}
+	}
 	return { ok: true };
+}
+
+/**
+ * The server-side fallback ids a model declares (`compat.allowedFallbackModels`), as pi 0.99.1 composes them
+ * (provider-composer.js): the builtin model's own compat, then the overlay provider entry's `compat`, then an
+ * overlay model definition's (which replaces the builtin model of that id, with the provider's compat beneath it),
+ * then `modelOverrides[id].compat`; each later layer that sets the key replaces it (`mergeCompat` is shallow for it).
+ *
+ * Why the worker asks (issue #502, PR #538's review): pi sends these ids with EVERY call on the model
+ * (anthropic-messages `params.fallbacks`) and the provider may answer with any of them, so the runner's model guard
+ * refuses a listed model whose fallbacks are not listed under its provider. In pi's builtin catalog exactly one model
+ * declares any, anthropic/claude-fable-5 (claude-opus-4-8 and claude-opus-5). A list naming it alone would pass every
+ * free gate and then have every call refused inside a paid container; refused here instead, before any spend. Read
+ * for every api, which is stricter than the runner: only anthropic-messages sends fallbacks, and the runner judges them
+ * there only. Accepted (PR #538's review, round 3): a list is the operator saying which models may be named, and the
+ * refusal says only that the model declares fallbacks not on the list, which is true on every api.
+ */
+export function declaredFallbacks(provider, id, overlay = null) {
+	const fallbackIds = (compat) => (Array.isArray(compat?.allowedFallbackModels) ? compat.allowedFallbackModels.map((entry) => entry?.model) : undefined);
+	const has = (compat) => compat !== null && typeof compat === "object" && Object.hasOwn(compat, "allowedFallbackModels");
+	let found;
+	if (getBuiltinProviders().includes(provider)) {
+		const model = getAllBuiltinModels(provider).find((m) => m?.id === id);
+		if (model) found = fallbackIds(model.compat);
+	}
+	const providers = overlay?.providers;
+	const entry = providers !== null && typeof providers === "object" && !Array.isArray(providers) && Object.hasOwn(providers, provider) ? providers[provider] : null;
+	if (entry !== null && typeof entry === "object") {
+		if (has(entry.compat)) found = fallbackIds(entry.compat);
+		const definition = Array.isArray(entry.models) ? entry.models.find((m) => m !== null && typeof m === "object" && m.id === id) : undefined;
+		if (definition !== undefined) found = has(definition.compat) ? fallbackIds(definition.compat) : has(entry.compat) ? fallbackIds(entry.compat) : undefined;
+		const override = entry.modelOverrides !== null && typeof entry.modelOverrides === "object" && Object.hasOwn(entry.modelOverrides, id) ? entry.modelOverrides[id] : null;
+		if (has(override?.compat)) found = fallbackIds(override.compat);
+	}
+	return found ?? [];
 }

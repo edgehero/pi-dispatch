@@ -268,7 +268,11 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # call, a call whose worst-case cost would take the job past it. An older runner handed the variable would ignore
 # it and spend without a cap, reporting a clean exit: a MONEY limit quietly not enforced. The worker refuses that
 # pairing pre-spend by this token (its `costCap` capability row, reason job-image-cost-cap-unsupported); verify-image.sh runs an offline job with a fake key under a cap of 0 to prove the claim.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap"
+# `modelPolicy` (issue #502) tells the worker this runner reads PI_ALLOWED_MODELS and refuses, before each provider call,
+# a call to a model the list does not name. An older runner handed the variable would ignore it and call any model,
+# reporting a clean exit: a model choice quietly not enforced. The worker sends the list only to an image declaring this
+# token; verify-image.sh runs an offline job with a fake key and a list that lacks its model to prove the claim.
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy"
 
 USER pi
 WORKDIR /workspace

@@ -282,7 +282,38 @@ it, so no AI tool can widen it.
 Before a job spends anything, the worker checks every model on its list exists (`model-unknown`), and
 that the model the job runs on is on the list (`model-not-allowed`). The second catches a default model
 that is not on `PI_ALLOWED_MODELS`, and a `dispatch_set model` that moves the default off a trigger's list.
-Inside the container the runner stops any call to a model that is not on the list.
+Inside the container the runner checks every call before it is sent:
+
+- The first call to a model that is not on the list stops the whole job (`model-not-allowed`). The
+  call is not sent.
+- Matching is exact and case-sensitive, on both the provider and the model id.
+- A classifier or image model a flow uses must be on the list like a chat model.
+- A virtual model (a router an extension registers) is judged by the model it routes each request to.
+- A model can declare server-side fallbacks (`compat.allowedFallbackModels`, in pi's builtin catalog or
+  set in `models.json`). Each must be on the list too, under the model's own provider. In the builtin
+  catalog only `anthropic/claude-fable-5` has any: a list naming it must also name
+  `anthropic/claude-opus-4-8` and `anthropic/claude-opus-5`. The worker refuses a list that misses one
+  before the job spends anything (`model-not-allowed`), on any api. Only the `anthropic-messages` api
+  sends fallbacks with a call, and there the provider may answer with any of them, so the runner refuses
+  such a call too. A listed fallback that answers is logged as `model_fallback`.
+- A hook that changes the request (an extension's `before_provider_request`, or an `onPayload` option)
+  is denied by default. It may change only these TOP-LEVEL fields of the request: the messages
+  (`messages`, `input`, `contents`), the system prompt (`system`, `systemInstruction`, `instructions`)
+  and the sampling settings `temperature`, `top_p`, `top_k`, `min_p`, `stop`, `seed`,
+  `presence_penalty`, `frequency_penalty`, `max_tokens`, `max_output_tokens` and
+  `max_completion_tokens`; for Google, also the sampling fields and system instruction inside `config`.
+  Any other change refuses the call before it is sent: a new model, a fallback list, Google's
+  `config.httpOptions`, a gateway's `providerOptions`, `prompt`, `metadata`, or any field added, removed
+  or changed. That includes sampling settings an api keeps somewhere else, such as Bedrock's
+  `inferenceConfig`, Mistral's `maxTokens` or pi-messages' `context` and `options`: they are refused,
+  not translated. A field set to nothing (`undefined`) counts as absent, so a hook that copies the
+  request through JSON passes.
+- A call that would name another model some other way is refused too: `model`, `modelId`, `models`,
+  `fallbacks` or `providerOptions` in `samplingParams`, an Azure deployment chosen per call, or a
+  caller's own `fetch`. Other `samplingParams` keys, such as `min_p`, `reasoning_effort`,
+  `chat_template_kwargs` or `service_tier`, change how a model answers, not which one, and pass. A hook
+  that edits those same settings is refused, because hooks are denied by default: `samplingParams` is
+  checked against a short list of keys that route, a hook against a short list of keys it may change.
 
 The list reaches the container only on a job image that declares the `modelPolicy` capability. On an
 older image a job with a list is refused before it spends (`job-image-model-policy-unsupported`), never

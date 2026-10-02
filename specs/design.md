@@ -2946,7 +2946,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   2. a virtual model (`pi-virtual`) on `streamSimple` passes unjudged, and its physical re-entry is judged, so one
      request is bounded once and on the model that answers it. Only `streamSimple` re-enters that way; a virtual
      model on any other method is judged as itself, and under a cap that is an unboundable call, refused;
-  3. the model check (issue #502) will sit here;
+  3. the model check (issue #502, `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER`) refuses a call to a model the list
+     does not name, before the cost guard is asked, so such a call is never bounded or held in flight;
   4. the guard computes the call's BOUND (`callCostBound`) and refuses when
      `spent + in-flight bounds + bound > cap`, or when the bound is `Infinity`. A refusal counts `costRefused`,
      logs `cost_refused` with numbers only, stops the job with `cost-cap` (the meter's one first-wins stop, which
@@ -3113,6 +3114,137 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Traces to**: `REQ-TOKEN-ACCOUNTING-AND-CAPS`, `INT-RUNNER-EXIT-CODE-PROTOCOL`,
   `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`, `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`,
   `CONST-BUDGET-BEFORE-TOKENS`, `OQ-010`, `OQ-011`
+
+## DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER
+
+- **Decision**: An allowed-model list (`PI_ALLOWED_MODELS`, comma-separated `provider/model`) is enforced by the
+  RUNNER, before every provider call, by a model guard on the usage meter's guard seam (`createModelGuard`,
+  `image/runner/src/usage-meter.mjs`), the same seam and the same hard stop as the cost guard
+  (`DES-DOLLAR-RESERVE-AND-SETTLE`). This entry records the runner half (issue #502, part 4); the worker's free
+  gates and its emission of the list to the container are `REQ-MODEL-POLICY`'s worker half. Per call, in both
+  meter halves, on ONE shallow copy of the model read once (so a getter cannot answer the guard with one id and the
+  provider with another):
+  1. a job already stopped answers with the hard stop;
+  2. a virtual model on `streamSimple` passes unjudged, and the physical call pi makes next through
+     `this.streamSimple(route.model, ...)` is judged, so a router is judged on each request's pick, whatever the
+     virtual model is called. On any other method a virtual model is judged as itself;
+  3. the model check: the REQUESTED model's `${model.provider}/${model.id}` must be a list entry, compared exactly
+     and case-sensitively on both halves of the pair. The same id under another provider is another route, key
+     and bill, so it is refused. The id on the call is not the only thing that picks the model that answers (PR
+     #538's review), so a listed call is also refused when its request would name another model:
+     - samplingParams (the model's or the call's) naming a routing key (`model`, `modelId`, `models`, `fallbacks`
+       or `providerOptions`, where the Vercel AI Gateway reads its model fallbacks), on the three apis that merge
+       them into the request after it is built (`samplingRoutes`): a `model` key there replaces the requested one.
+       Only those keys, by decision (PR #538's review, rounds 2 and 3): any other key (`min_p`, `reasoning_effort`,
+       `chat_template_kwargs`, `service_tier`) changes how the model answers, never which one, and passes under a
+       list alone; the cost guard keeps its own wider price rule under a cap;
+     - a caller's own `fetch` option, which sends the request after every hook and could rewrite it unseen (pi
+       never passes one itself, pinned);
+     - on azure-openai-responses, a per-call `azureDeploymentName` or `options.env` deployment map, either of
+       which picks the deployment before `model.id`;
+     - on anthropic-messages, a `compat.allowedFallbackModels` entry whose pair (the model's provider and the
+       fallback's id, the only part pi sends, as `fallbacks`) is not on the list: the provider may answer with
+       any fallback it was sent;
+  4. the cost check, only for a call the model check admitted;
+  5. for an admitted call, the guard wraps `options.onPayload`, always, also when the caller passed none, because
+     pi hands the session's `before_provider_request` hooks (a serviced repo's `.pi/extensions` load in every job)
+     to the provider through it. The check is DENY BY DEFAULT (a lead decision after PR #538's review, round 3, where
+     an enumerated list of routing fields had missed google's `config.httpOptions`, whose URL path picks the
+     model): the wrapper snapshots pi's payload before the hook, runs the hook with the `this` pi gives it, and
+     compares the result with the snapshot on EVERY key, at every depth, except one table of TOP-LEVEL keys a hook
+     may edit (`PAYLOAD_EDITABLE`: the messages and content keys, the system prompt, the top-level sampling knobs,
+     and inside google's `config` only its sampling fields and system instruction, never `httpOptions`). Top-level
+     names only, fail closed: a sampling setting an api keeps elsewhere (bedrock's `inferenceConfig`, mistral's
+     camelCase `maxTokens`, pi-messages' `context` and `options`) is refused, not mapped. Not `prompt` (a stored
+     prompt reference on openai-responses) and not `metadata` (a proxy such as LiteLLM can route on its tags). A key
+     whose value is `undefined` is absent on both sides, at every level (PR #538's final review): pi's payloads carry
+     such keys, and a hook that JSON-clones the payload drops them with byte-identical results. Any other
+     difference, added, removed or changed, refuses; so does a result that is not a plain object (an array, a class
+     instance), or one with a `toJSON` (own or inherited) or an accessor. pi is handed a fresh object: the editable
+     keys as the hook left them, every other key from the snapshot, which the hook never held, so the object
+     checked is the object sent. A refusal throws, so pi fails the call before it is sent, and the job stops as for
+     any refusal. A hook that changes nothing, a top-level temperature edit, and a JSON clone of the payload each
+     send what the same hook sends with no list, on all nine request-building apis (measured against a loopback
+     server).
+  A miss counts `modelRefused`, logs `model_refused` with numbers and a fixed token only (`method`, `refused`,
+  `why`: `unlisted`, `sampling`, `fetch`, `deployment`, `fallback` or `payload`), stops the job with
+  `model-not-allowed` (the meter's one first-wins stop, which aborts the root session) and answers this call with
+  the hard stop `pi-dispatch: model not allowed`. All five ModelRuntime methods are judged (`streamSimple`,
+  `stream`, `streamDeferred`, `classify`, `generateImages`), and so is a legacy compat call made outside a runtime
+  dispatch. So a classifier or an image model a flow uses must be on the list like a chat model.
+- **Fallbacks**: Anthropic may answer with any model it was sent as a fallback, so every fallback pi would send
+  must be on the list, and the call is refused BEFORE it is sent otherwise. The worker refuses such a list before
+  any spend too (`model-not-allowed`, logged `why: fallback-unlisted`), reading the fallbacks as pi composes them
+  from the builtin catalog and the overlay `models.json`; at the pin only `anthropic/claude-fable-5` declares any, so
+  listing it alone would otherwise start a container whose every call is refused. A fallback that does answer was listed;
+  the runner logs `model_fallback` with the requested and the answering id when a settled answer's `responseModel`
+  is one of the requested model's fallback ids (on anthropic-messages only, matched on the id alone because that is
+  all pi sends). openai-completions also sets `responseModel`, for any chunk model other than the requested id,
+  which is a provider's alias for the model asked for; it is never read. Both facts are pinned by needle.
+- **Why model first**: the list decides which provider may be called at all. Judged the other way round, an
+  unlisted call that would also pass a cap is recorded as `cost-cap`, and the operator raises a cap to fix a
+  model choice. It also keeps the cost guard's single in-flight slot honest: the cost guard is asked only about
+  a call that is then dispatched. One guard object (`createPolicyGuard`) fixes the order, so run-job builds no
+  guard beside it.
+- **Exit line**: `tokens.modelRefused` only when a list is set, after the cost fields (the worker's `TOKEN_KEYS`
+  order); with no list the exit line is byte-identical. `decideExit` maps the stop to exit `2` /
+  `model-not-allowed`.
+- **Fail closed**:
+  - a list on a runner that cannot enforce it before a call (the fallback bus meter, no hard stop, or no model
+    guard installed) refuses before the first prompt as `model-policy-unenforceable`; the install handle's
+    `enforces` lists `model-not-allowed` only when the model guard is installed, so a cost guard cannot pass for
+    it;
+  - the compat re-arm gap: a compat entry found displaced (`resetApiProviders()`, or an extension
+    re-registering an api) means a legacy call may have reached a provider without the list being asked. Under a
+    list alone the job stops `model-not-allowed` and logs `model_guard_displaced`; its record carries
+    `modelRefused: 0`, which tells it from a refused call. Under a cap as well, the cap's displacement stop wins
+    (first wins, with `costUnjudged` as its evidence).
+- **Image**: the `modelPolicy` capability token. `verify-image.sh` proves it with an offline job on the default
+  model whose list names only another model: exit `2`, `model-not-allowed`, `modelRefused: 1`, nothing dialled.
+- **Rejected**:
+  - **Checking only at session start** (the main model against the list, once): a job changes model after that
+    by `setModel`, a second in-process session, an extension's direct `ctx.modelRegistry` call or a virtual
+    router, and none of those is a session start. The worker's free gate checks the main model before any spend;
+    that is a cheap early refusal, not the enforcement.
+  - **Extension-level hooks**: `before_provider_request` carries no model at the pin, a throwing handler is
+    logged and ignored, and each session has its own extension runner, so a second session may not carry the
+    hook. `model_select` fires when a session changes model, not on each call and not for a new session, and with
+    a virtual model selected it names the virtual entry, never the model each request is routed to.
+  - **A proxy allowlist** (the egress proxy refusing requests for other models): the proxy sees hosts, not
+    models. One provider host serves every model of that provider, on a TLS provider the model id is inside an
+    encrypted request body the proxy does not open, and a declared endpoint can serve several models.
+  - **Withholding credentials as the policy** (giving the container keys for the listed providers only): a key
+    is per provider, not per model, so it cannot tell two models of one provider apart, which is the common
+    case; and an operator overlay or `run.secrets` can still supply one.
+  - **Logging the refused pair**: the refused model is the one the JOB chose (a flow, an extension, a hook), not
+    operator configuration, so its id is job-chosen text and stays out of the run log. The line carries the
+    method, the count and a fixed `why`; the operator reads the list to see what was allowed.
+  - **Enumerating the payload fields that route a request**: rounds 1 and 2 compared a list of routing fields; round
+    3 found two the list missed (google's `config.httpOptions`, a gateway's `providerOptions`). A list of what a hook
+    may change cannot miss a new way to route; a list of what routes always can.
+  - **Refusing a fallback after it answered**: the provider has already answered and billed; the only place a
+    fallback can be refused is before the call that sends it, which is where the guard refuses it.
+  - **The old api-provider registry alone**: at the pin a session's calls never enter it, so a check there sees
+    only legacy extension calls.
+- **Residuals, named**:
+  - extension code in the job can still reach a provider the meter never sees (pi-ai's per-api stream functions
+    imported directly, pi-ai's legacy global `generateImages` through its images api registry, or a raw fetch),
+    as for the cost cap;
+  - a legacy compat call made inside a runtime call's provider hook runs in that call's dispatch context and is
+    judged by neither half (the meter's trap #5 residual);
+  - **request changes outside the payload**: a header hook (`transformHeaders`, `before_provider_headers`) or a
+    stored credential's own `env` (an azure deployment map there, resolved inside pi after the guard). The payload
+    itself is deny by default, so no payload field is a residual;
+  - **a listed model sent to another `baseUrl`** (a credential or an overlay entry pointing it elsewhere) reaches
+    whatever answers there under the listed name; where requests may go is the egress proxy's job
+    (`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK`), not the list's;
+  - the list names physical models only. A virtual entry on the list admits only that entry's own unrouted
+    calls, which pi fails before any provider;
+  - a `pi` subprocess a package spawns, including a stock subagent's child `pi`, is outside this process and
+    outside the list (`OQ-011`).
+- **Traces to**: `REQ-MODEL-POLICY`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-RUN-HISTORY-FILE-CONTRACT`,
+  `INT-CONTAINER-RUNTIME-CONTRACT`, `DES-DOLLAR-RESERVE-AND-SETTLE`, `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`,
+  `CONST-BUDGET-BEFORE-TOKENS`, `OQ-011`
 
 ## DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE
 
@@ -4998,7 +5130,7 @@ a tunnel.
   `code` must be 2, its reason a member of the closed `RUNNER_POLICY_REASONS`), and only inside its exit-2
   branch, so every other runner reason still reads `runner-policy`.
   **Issues #501 and #502 add four rows**, each fixed, path-free and naming neither the amount nor the
-  model: `cost-cap` ("Stopped: the next AI call could have taken this run past its cost limit, so it was not made. Partial work may exist. Not retried.") and `model-not-allowed` ("Stopped: the run tried to call an AI model this trigger does not allow, so the call was not made. Partial work may exist. Not retried."), `cost-cap` live on an image that declares `costCap` (its runner's pre-call cost guard stopped a call) and `model-not-allowed`, as the runner's paid stop, still reserved for the model guard (#502 part 4; the same token is already live as the worker's FREE pre-spend refusal of a main model off the job's list, which posts its own refusal comment, not this one); and `cost-cap-unenforceable` ("Stopped: this run has a cost limit, and the job image could not enforce it before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.") and `model-policy-unenforceable` ("Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried."), live now, the runner having refused before any call a cost cap or a model list it cannot enforce before a call. The hook pages for every member of `RUNNER_POLICY_REASONS`, these included, because its
+  model: `cost-cap` ("Stopped: the next AI call could have taken this run past its cost limit, so it was not made. Partial work may exist. Not retried.") and `model-not-allowed` ("Stopped: the run tried to call an AI model this trigger does not allow, so the call was not made. Partial work may exist. Not retried."), `cost-cap` live on an image that declares `costCap` (its runner's pre-call cost guard stopped a call) and `model-not-allowed` live on an image that declares `modelPolicy` (its runner's pre-call model guard stopped a call to a model the list does not name; the same token is also the worker's FREE pre-spend refusal of a main model off the job's list, which posts its own refusal comment, not this one); and `cost-cap-unenforceable` ("Stopped: this run has a cost limit, and the job image could not enforce it before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.") and `model-policy-unenforceable` ("Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried."), live now, the runner having refused before any call a cost cap or a model list it cannot enforce before a call. The hook pages for every member of `RUNNER_POLICY_REASONS`, these included, because its
   set spreads that one, unless the result says `budgetReserved: false` (issue #502):
   `model-not-allowed` is also the worker's FREE pre-spend refusal of a main model outside the job's list,
   which comments and must page nobody, and the reason token alone cannot tell the two apart. Every paid
@@ -6765,3 +6897,4 @@ a tunnel.
 | 2026-10-02 | Issue #502 parts 2, 3 and 5, the worker half of the model policy. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: the hook pages a policy result unless it says `budgetReserved: false`, because `model-not-allowed` is now both the runner's paid stop and the worker's free pre-spend refusal of a main model outside the job's effective list, and a free refusal comments and pages nobody; every paid terminal already carries `budgetReserved: true`. Rejected: a second reason token for the free case, which would split one operator answer (the model is not on the list) across two words in the record and the panel. **`DES-FLEET-LEASES-FOR-SHARED-BOUNDS` AMENDED**, its residual: the endpoint set is the main model plus every model on the effective list, so only an unrestricted job's mid-run switch goes uncounted; each endpoint is still one lease in id order. **`DES-CONCURRENCY-3` UNCHANGED, checked**. **Code evidence**: worker/src/start.mjs -> the failed-hook guard; worker/test/model-policy.test.mjs. |
 | 2026-10-02 | Issue #501 part 1. **`DES-RUNTIME-SETTINGS-FILE-OVERLAY` AMENDED**: the key list gains the four dollar keys (kept as written), the window refusal and the merged-values invariant, the admin's write over an invalid file is refused rather than rebuilt from `{}`, and the precedence gains its one exception, `maxCostUsd`, which a trigger narrows (the smaller applies) rather than replaces. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` AMENDED**, the rejected per-trigger `run.*` limit: `run.maxCostUsd` is a per-trigger field and not that limit returning, because it bounds one job (the shape of `run.maxTurns`) rather than a scope, it can only narrow the deployment's cap (the smaller of the two applies, and a value above the env cap refuses the worker's load where the worker reads the triggers file; the receiver still serves an edited webhook trigger, under the smaller cap), and no tool can set it, so reviewed content tightens a runtime control and never loosens it. A repo's or folder's dollar budget stays a scope limit, for `scoped-limits.json`. **Code evidence**: worker/src/money.mjs -> effectiveCostCapMicros, triggerCapAboveDeployment; worker/src/schedules.mjs -> loadSchedules; worker/src/runtime-settings.mjs -> validateOverlay, resolveSettings; worker/src/index.mjs -> effectiveJobOf. |
 | 2026-10-02 | Issue #535. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**, one residual: a compaction whose summary call is refused is still recorded by pi with an empty summary, and that is now bounded. The run stops with a policy exit, so its transcript is never promoted, and a stored transcript holding an empty compaction for any other reason is cold-started as `compaction-summary-empty` (`INT-SESSION-STORE-CONTRACT`). The host check was chosen over a runner-side not-resumable flag: it needs no runner or image change, it covers every cause of the shape and not only the brake, and it holds for transcripts written before it. **Code evidence**: worker/src/session-store.mjs -> fileListSuffix, compactionSummaryIsEmpty, hasEmptyCompaction, readCanonical; worker/test/session-store.test.mjs; image/runner/test/compaction-refused.integration.test.mjs. |
+| 2026-10-02 | Issue #502, part 4. **NEW `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER`**, the runner half: the allowed-model list is enforced by a model guard on the meter's guard seam, before every provider call, in both meter halves and on all five ModelRuntime methods, on one copy of the model; the requested model's provider and id are compared exactly; a virtual model is judged by its routed physical call; the model check runs before the cost check, fixed by one policy guard (`createPolicyGuard`). PR #538's review: a listed call is refused when its request would name another model (samplingParams naming a routing key, `providerOptions` included, by decision any other key passing, a caller's `fetch`, a per-call azure deployment, an unlisted anthropic fallback, which pi sends before the call, so the old "nothing before the call could refuse it" was wrong), and the admitted call's `onPayload` is always wrapped and the payload check is deny by default (a lead decision after review round 3, where an enumerated routing list missed google's `config.httpOptions` and a gateway's `providerOptions`): a hook may change only the TOP-LEVEL messages, system prompt and sampling knobs (`PAYLOAD_EDITABLE`, without `prompt` or `metadata`; a setting an api keeps below the top is refused), anything else at any depth refuses, a key set to `undefined` counts as absent so a JSON-cloning hook passes, and pi is handed a fresh object built from the hook's editable keys and a snapshot of the rest; the worker refuses a list whose model declares unlisted fallbacks before any spend; a listed fallback that answers is logged `model_fallback`, and an openai-completions alias is never read; fail closed when the list cannot be enforced, and on a displaced compat entry under a list alone. Rejected: checking only at session start, extension-level hooks (`before_provider_request`, `model_select`), a proxy allowlist, withholding credentials as the policy, logging the refused pair (job-chosen), enumerating the payload fields that route, refusing a fallback after it answered, the old api-provider registry alone. Residuals: code around pi's model runtime (legacy `generateImages` included), a legacy call inside a provider hook, header and stored-credential changes outside the payload, a listed model sent to another `baseUrl` (the egress proxy's job), a virtual entry named on the list, a `pi` subprocess including a stock subagent's child. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**, step 3 of the per-call order: the model check is live and runs before the cost guard is asked. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: `model-not-allowed` is live as the runner's paid stop on an image that declares `modelPolicy`, beside the worker's free refusal and its `budgetReserved: false` paging rule. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` UNCHANGED, checked**: the guard sits on the seam it already had. **Code evidence**: image/runner/src/usage-meter.mjs; image/runner/test/model-guard.test.mjs; image/runner/test/usage-meter.integration.test.mjs; image/runner/test/pinned-api.test.mjs. |

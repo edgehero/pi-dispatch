@@ -42,7 +42,7 @@ import { attachTurnBudget } from "./src/turn-budget.mjs";
 // pinned-api.test.mjs guards this file against exactly that string.
 import {
 	assertPoliciesEnforceable,
-	createCostGuard,
+	createPolicyGuard,
 	createUsageMeter,
 	installProcessUsageMeter,
 	meterStopHandler,
@@ -258,23 +258,23 @@ async function main() {
 		maxCostMicros: cfg.maxCostMicros,
 		allowedModels: cfg.allowedModels,
 		rootSessionId,
-		// The meter's ONE stop (issues #501, #502): the token cap, the cost cap, and the model list once its guard
-		// lands. Fires once, for the first stop only, whichever policy it was; only a token stop logs
-		// token_budget_exceeded (meterStopHandler). Same synchronous-abort discipline as attachTokenBudget's
+		// The meter's ONE stop (issues #501, #502): the token cap, the cost cap and the model list. Fires once,
+		// for the first stop only, whichever policy it was; only a token stop logs token_budget_exceeded
+		// (meterStopHandler). Same synchronous-abort discipline as attachTokenBudget's
 		// onAbort: abort() flips the AbortController before its first await, so the signal is set the instant we
 		// call it. Awaiting here would let the next turn start under a cap we already know is blown.
 		onStop: meterStopHandler({ onTokenAbort, abort: () => void session?.abort() }),
 	});
-	// The per-job cost cap (issue #501): judged BEFORE every provider call by the guard both meter halves consult.
-	// Built only when a cap is set, so a job without one has no guard and runs exactly as before.
-	const costGuard = cfg.maxCostMicros === null ? null : createCostGuard({ capMicros: cfg.maxCostMicros, log });
-	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: costGuard });
+	// The allowed-model list (issue #502) and the per-job cost cap (issue #501): judged BEFORE every provider call by
+	// the one guard both meter halves consult, the list first. Each part is built only when its policy is set, and
+	// with neither there is no guard, so such a job runs exactly as before.
+	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log });
+	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard });
 	// A cost cap or a model list must be enforced BEFORE each call, so a runner that cannot do that refuses
 	// here, after the install it depends on and before createAgentSession, while nothing has been spent
 	// (INT-RUNNER-EXIT-CODE-PROTOCOL): exit 2, `model-policy-unenforceable` or `cost-cap-unenforceable`. The
 	// fallback bus meter below is the `ok: false` case, and it can only see a call after it was paid for. The cost
-	// guard enforces the cap; no model guard ships yet, so a list is still refused; a job carrying neither policy
-	// passes untouched.
+	// guard enforces the cap and the model guard the list; a job carrying neither policy passes untouched.
 	assertPoliciesEnforceable({
 		maxCostMicros: cfg.maxCostMicros,
 		allowedModels: cfg.allowedModels,
@@ -447,8 +447,9 @@ async function main() {
 	});
 	// `metered: true` on the process-wide snapshot is what tells the daily token counter that this
 	// total includes every in-process session, not just the root's turns.
-	// The cost fields (issue #501) ride only when a cap is set, so every other exit line stays byte-identical.
-	const tokens = usageMeter.ok ? { ...meter.snapshot(), ...(costGuard ? costGuard.snapshot() : {}) } : { ...pickTotals(tokenBudget.state), metered: false };
+	// The cost fields (issue #501) ride only when a cap is set and `modelRefused` (issue #502) only when a list is,
+	// so every other exit line stays byte-identical.
+	const tokens = usageMeter.ok ? { ...meter.snapshot(), ...(policyGuard ? policyGuard.snapshot() : {}) } : { ...pickTotals(tokenBudget.state), metered: false };
 	// The per-(provider,model) ledger (issue #53, INT-RUN-HISTORY-FILE-CONTRACT) -- a SIBLING of
 	// `tokens`, never a widening of it: `tokens` rides through the worker verbatim because it holds
 	// nothing but numbers, while the ledger carries id STRINGS the host re-validates through its own

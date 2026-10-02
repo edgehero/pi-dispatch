@@ -1409,7 +1409,7 @@ test("the brake is armed by ANY policy: a cost cap alone, or a list alone, arms 
 		});
 		handle.uninstall();
 		assert.equal(handle.brake, true, `${label}: armed`);
-		assert.deepEqual(handle.enforces, [], `${label}: no guard ships in this build`);
+		assert.deepEqual(handle.enforces, [], `${label}: no guard handed to this install`);
 		assert.deepEqual([logged[0].fields.capped, logged[0].fields.costCapped, logged[0].fields.listed, logged[0].fields.brake], [false, costCapped, listed, true], label);
 	}
 	// And none of the three: no brake, which is today's line for an uncapped job.

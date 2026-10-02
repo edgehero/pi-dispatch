@@ -361,7 +361,7 @@ test("parseExitTokens round-trips a conformant runner's object BYTE-IDENTICALLY"
 });
 
 test("the policy counters (issues #501, #502) survive the rebuild, in emission order, and only as numbers", () => {
-	// The cost guard writes the first six under a cap and modelRefused is still reserved; a key missing from
+	// The cost guard writes the first six under a cap and the model guard modelRefused under a list; a key missing from
 	// TOKEN_KEYS is DROPPED, and the dollar
 	// settlement reads these to decide whether a metered cost is complete, so a dropped counter would read as
 	// an honest zero. Each one asserted by name, so dropping any single entry fails here.

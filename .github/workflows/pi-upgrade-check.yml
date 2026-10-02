@@ -434,7 +434,8 @@ jobs:
       # from what the docs promise: pi present, CapEff=0, non-root, /job:ro enforced by the kernel, a
       # writable agent dir, guardrails present AND unwritable, Chromium rendering a real page, fonts, and
       # for an image claiming anyUid a writable home and a render as an arbitrary uid (issue #341), and for one
-      # claiming costCap an offline job with a fake key under a cap of 0 stopped before its first call (issue #501).
+      # claiming costCap an offline job with a fake key under a cap of 0 stopped before its first call (issue #501), and
+      # for one claiming modelPolicy an offline job whose list lacks its model stopped before its first call (issue #502).
       - name: "CORE: the conformance checklist any nameable image must pass"
         run: ./image/verify-image.sh "$IMAGE_REF"
 
@@ -448,6 +449,15 @@ jobs:
           docker image inspect --format '{{index .Config.Labels "dev.pi-dispatch.capabilities"}}' "$IMAGE_REF" | tr ',' '\n' | grep -qx "costCap" \
             || { echo "::error::the built image's capabilities label does not declare costCap -- a cost-capped job could not be admitted on this image."; exit 1; }
           echo "OK: the label declares costCap, and the CORE checklist ran its proof"
+
+      # --- INT-CONTAINER-RUNTIME-CONTRACT (modelPolicy, issue #502) ---
+      # Same reason as costCap above: the checklist proves a claimed token and cannot notice a dropped one, and the
+      # worker sends PI_ALLOWED_MODELS only to an image that declares modelPolicy, so this repo's image must carry it.
+      - name: "RUNNER: the built image declares modelPolicy"
+        run: |
+          docker image inspect --format '{{index .Config.Labels "dev.pi-dispatch.capabilities"}}' "$IMAGE_REF" | tr ',' '\n' | grep -qx "modelPolicy" \
+            || { echo "::error::the built image's capabilities label does not declare modelPolicy -- a job with an allowed-model list could not be admitted on this image."; exit 1; }
+          echo "OK: the label declares modelPolicy, and the CORE checklist ran its proof"
 
       # --- DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST (issue #341) ---
       # The runner's own user is uid 1001, the image's, which is exactly the one host shape that can never show

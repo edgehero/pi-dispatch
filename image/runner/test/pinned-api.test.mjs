@@ -553,7 +553,7 @@ test("the runner never imports pi-ai directly -- a static import makes the meter
 	// first call goes unmetered. Without the arm() after createAgentSession, an api id an extension
 	// registered in the legacy registry during session construction stays unwrapped until the meter's own
 	// interval catches it.
-	assert.match(runJob, /installProcessUsageMeter\(\{ ModelRuntime, runtime: modelRuntime, meter, log, guard: costGuard \}\)/, "run-job.mjs must install the process-wide meter on the class it imports and the instance the session uses");
+	assert.match(runJob, /installProcessUsageMeter\(\{ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard \}\)/, "run-job.mjs must install the process-wide meter on the class it imports and the instance the session uses");
 	assert.ok(runJob.indexOf("createJobModelRuntime({") < runJob.indexOf("installProcessUsageMeter({"), "the meter installs after the runtime exists");
 	assert.ok(runJob.indexOf("installProcessUsageMeter({") < runJob.indexOf("createAgentSession({"), "the meter installs before the session exists");
 	assert.match(runJob, /\n\t\tmodelRuntime,\n\t\tmodel,\n/, "the session must be created on the SAME runtime the meter proved");
@@ -1436,6 +1436,58 @@ test("calculateCost: one table per call, the highest tier the input passes, and 
 	assert.match(anthropic, /usageModel = fallbackCost \? \{ \.\.\.model, id: responseModel, cost: fallbackCost \} : model;/);
 	const withFallbacks = readdirSync(apiDir).filter((name) => name.endsWith(".js") && readFileSync(join(apiDir, name), "utf8").includes("allowedFallbackModels"));
 	assert.deepEqual(withFallbacks, ["anthropic-messages.js"]);
+});
+
+test("a server-side fallback is a responseModel from the requested model's allowedFallbackModels; a completions responseModel is an alias (issue #502)", { skip }, () => {
+	// The model guard's model_fallback line (createModelGuard's bind) matches a settled message's responseModel against
+	// the REQUESTED model's compat.allowedFallbackModels, by provider and id, exactly as pi prices a fallback answer.
+	assert.match(nestedPiAi("types.d.ts"), /export interface AssistantMessage \{[^}]*\n\s*responseModel\?: string;/, "AssistantMessage.responseModel moved");
+	const anthropic = nestedPiAi("api", "anthropic-messages.js");
+	assert.match(anthropic, /const responseModel = event\.message\.model;\s*if \(responseModel !== model\.id\)\s*output\.responseModel = responseModel;/, "anthropic-messages names a fallback answer in responseModel");
+	assert.match(anthropic, /model\.compat\?\.allowedFallbackModels\?\.find\(\(fallback\) => fallback\.provider === model\.provider && fallback\.model === responseModel\)/, "a fallback is matched by provider and model, as fallbackOf matches it");
+	// openai-completions sets responseModel for ANY chunk model other than the requested id: a provider's alias for the
+	// model asked for (a dated snapshot), which is why the guard does not log every responseModel as a fallback.
+	assert.match(nestedPiAi("api", "openai-completions.js"), /if \(typeof chunk\.model === "string" && chunk\.model\.length > 0 && chunk\.model !== model\.id\) \{\s*output\.responseModel \|\|= chunk\.model;/, "openai-completions' alias rule moved");
+	// Exactly these two api modules write responseModel; a third would need the same reading.
+	const apiDir = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "api");
+	const writing = readdirSync(apiDir).filter((name) => name.endsWith(".js") && !name.endsWith(".lazy.js") && /\.responseModel (?:\|\|)?= /.test(readFileSync(join(apiDir, name), "utf8"))).sort();
+	assert.deepEqual(writing, ["anthropic-messages.js", "openai-completions.js"]);
+});
+
+test("what else picks the model that answers, as the model guard reads it (issue #502, PR #538's review)", { skip }, () => {
+	const apiDir = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "api");
+	const modules = readdirSync(apiDir).filter((name) => name.endsWith(".js") && !name.endsWith(".lazy.js"));
+	// onPayload: every module that sends a request hands the built payload to options.onPayload and uses what it
+	// returns, so the guard's wrapper sees the final routing fields. A new module without it is a payload the guard
+	// cannot read, and fails here.
+	const hooked = modules.filter((name) => /await options\??\.onPayload\?\.\((?:params|payload|commandInput|body), model\)/.test(readFileSync(join(apiDir, name), "utf8"))).sort();
+	assert.deepEqual(hooked, ["anthropic-messages.js", "azure-openai-responses.js", "bedrock-converse-stream.js", "google-generative-ai.js", "google-vertex.js", "llama-cpp-classify.js", "mistral-conversations.js", "openai-codex-responses.js", "openai-completions.js", "openai-responses.js", "openrouter-images.js", "pi-messages.js", "system-one-shared.js"]);
+	assert.match(nestedPiAi("api", "simple-options.js"), /onPayload: options\?\.onPayload,/, "streamSimple's options keep the caller's onPayload");
+	assert.match(agentDistFile("core", "model-runtime.js"), /const \{ transformHeaders, \.\.\.rawProviderOptions \} = options \?\? \{\};[\s\S]*?options: \{\s*\.\.\.providerOptions,/, "prepareRequest passes the caller's options, onPayload included, to the provider");
+	// The session's before_provider_request hooks reach the provider through that same option.
+	assert.match(agentDistFile("core", "sdk.js"), /onPayload: transformProviderPayload,/);
+	assert.match(agentDistFile("core", "sdk.js"), /return runner\.emitBeforeProviderRequest\(payload\);/);
+	assert.match(readFileSync(join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "..", "node_modules", "@earendil-works", "pi-agent-core", "dist", "agent.js"), "utf8"), /onPayload: this\.onPayload,/, "the agent loop hands its onPayload to each request");
+	// The routing fields PAYLOAD_ROUTING_KEYS compares: `model` everywhere, `modelId` on bedrock, `fallbacks` on anthropic.
+	assert.match(nestedPiAi("api", "bedrock-converse-stream.js"), /modelId: model\.id,/);
+	assert.match(nestedPiAi("api", "anthropic-messages.js"), /params\.fallbacks = allowedFallbackModels\.map\(\(fallback\) => \(\{ model: fallback\.model \}\)\);/, "pi sends fallback ids only, so the guard pairs them with the model's provider");
+	// samplingParams are merged after the request is built, so a `model` key there replaces the requested one.
+	for (const file of ["openai-completions.js", "openai-responses.js", "azure-openai-responses.js"]) {
+		assert.match(nestedPiAi("api", file), /Object\.assign\(params, model\.samplingParams, options\?\.samplingParams\);/, file);
+	}
+	// azure picks its deployment from the call before model.id.
+	assert.match(nestedPiAi("api", "azure-openai-responses.js"), /if \(options\?\.azureDeploymentName\) \{\s*return options\.azureDeploymentName;\s*\}\s*const mappedDeployment = parseDeploymentNameMap\(getProviderEnvValue\("AZURE_OPENAI_DEPLOYMENT_NAME_MAP", options\?\.env\)\)\.get\(model\.id\);/);
+	// A caller's own fetch sends the request after every hook: the guard refuses it, and pi passes none itself.
+	assert.doesNotMatch(agentDistFile("core", "sdk.js"), /\bfetch: /, "pi's session now passes a fetch of its own: the guard's fetch refusal would stop every listed job");
+	// ...nor does the agent loop's per-request config, nor the cache warmer's call (the other two places that build the
+	// options a session call carries).
+	const agentCore = readFileSync(join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "..", "node_modules", "@earendil-works", "pi-agent-core", "dist", "agent.js"), "utf8");
+	const loopConfig = agentCore.match(/\n {4}createLoopConfig\(options = \{\}\) \{([\s\S]*?)\n {4}\}\n/)?.[1];
+	assert.ok(loopConfig, "createLoopConfig moved: re-check what options the agent loop passes");
+	assert.doesNotMatch(loopConfig, /\bfetch\b/, "the agent loop now passes a fetch");
+	const warm = agentDistFile("core", "cache-warmer.js").match(/\.streamSimple\(run\.model, run\.context, \{([\s\S]*?)\}\)/)?.[1];
+	assert.ok(warm, "the cache warmer's call moved");
+	assert.doesNotMatch(warm, /\bfetch\b/, "the cache warmer now passes a fetch");
 });
 
 test("the service-tier multipliers the bound assumes, and azure applying none (issue #501)", { skip }, () => {

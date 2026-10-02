@@ -7,7 +7,8 @@ import { test } from "node:test";
 // unconditionally and the gate below applies only to pi itself.
 import { attachTokenBudget } from "../src/token-budget.mjs";
 import { createJobModelRuntime } from "../src/model-runtime.mjs";
-import { callCostBound, createCostGuard, createUsageMeter, installProcessUsageMeter, resolvePiAiCompat } from "../src/usage-meter.mjs";
+import { assertPoliciesEnforceable, callCostBound, createCostGuard, createPolicyGuard, createUsageMeter, installProcessUsageMeter, policyEnforcement, resolvePiAiCompat } from "../src/usage-meter.mjs";
+import { decideExit, EXIT_POLICY, MODEL_NOT_ALLOWED } from "../src/outcome.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
@@ -81,7 +82,7 @@ const FAKE_KEY = "pi-dispatch-fake-key-sentinel";
  * registry at arm() time and never unwraps (re-registering the builtin would need a resetApiProviders()),
  * and a per-test api id keeps one test's registrations out of the next test's way.
  */
-async function fixture(api, modelOverrides = {}) {
+async function fixture(api, modelOverrides = {}, extraModelIds = []) {
 	const root = tempDir("pi-dispatch-meter-");
 	const modelsPath = join(root, "models.json");
 	writeFileSync(
@@ -96,19 +97,18 @@ async function fixture(api, modelOverrides = {}) {
 						// reaches the wire fails here instead of silently talking to something.
 						baseUrl: "http://127.0.0.1:1",
 						api,
-						models: [
-							{
-								id: MODEL_ID,
-								name: "pi-dispatch fake",
-								api,
-								reasoning: false,
-								input: ["text"],
-								cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-								contextWindow: 100000,
-								maxTokens: 4096,
-								...modelOverrides,
-							},
-						],
+						// `extraModelIds`: more models on the same provider and api (issue #502's tests switch to one).
+						models: [MODEL_ID, ...extraModelIds].map((id) => ({
+							id,
+							name: "pi-dispatch fake",
+							api,
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 100000,
+							maxTokens: 4096,
+							...modelOverrides,
+						})),
 					},
 				},
 			},
@@ -138,7 +138,7 @@ function registerFakeProvider({ modelRuntime, compat, api, calls, usage = SENTIN
 	modelRuntime.registerProvider(PROVIDER, {
 		api,
 		streamSimple(model, _context, options) {
-			calls.push({ sessionId: options?.sessionId, apiKey: options?.apiKey });
+			calls.push({ sessionId: options?.sessionId, apiKey: options?.apiKey, model: model.id });
 			const stream = compat.createAssistantMessageEventStream();
 			// A terminal "done" resolves result() via EventStream's completion predicate -- the exact
 			// channel meter.observe() reads, and the one the agent loop awaits. `delayMs` holds the call in
@@ -189,7 +189,7 @@ function registerFakeProvider({ modelRuntime, compat, api, calls, usage = SENTIN
  * is what makes `calls` mean what the assertions say it means. The loader posture is pinned where it IS
  * the subject -- image/runner/test/loader.test.mjs, which builds through buildResourceLoader itself.
  */
-async function openSession({ fx, modelRuntime, sessionManager, settings = {} }) {
+async function openSession({ fx, modelRuntime, sessionManager, settings = {}, model = fx.model, extensionFactories = [] }) {
 	const settingsManager = pi.SettingsManager.inMemory(settings);
 	const resourceLoader = new pi.DefaultResourceLoader({
 		cwd: fx.root,
@@ -198,13 +198,15 @@ async function openSession({ fx, modelRuntime, sessionManager, settings = {} }) 
 		noContextFiles: true,
 		noSkills: true,
 		noExtensions: true,
+		// Inline factories only: an extension a test defines itself, never one discovered on the machine.
+		extensionFactories,
 	});
 	await resourceLoader.reload();
 	const { session } = await pi.createAgentSession({
 		cwd: fx.root,
 		agentDir: pi.getAgentDir(),
 		modelRuntime,
-		model: fx.model,
+		model,
 		settingsManager,
 		sessionManager,
 		resourceLoader,
@@ -734,5 +736,325 @@ test("cost cap: anthropic-messages' message_start (one output token) then an in-
 	} finally {
 		installed?.uninstall();
 		await new Promise((resolve) => server.close(resolve));
+	}
+});
+
+// ── Issue #502, part 4: the allowed-model list against the real SDK ────────────────────────────────────────
+//
+// Model A (the fixture's) is on the list, model B, on the same provider and api, is not. Each case reaches B by a
+// different door pi offers, and each must end as exit 2 / model-not-allowed with B never called: no provider call
+// on B and no ledger row for it. Per-test api ids, for the fixture's reason (the compat half never unwraps).
+
+const MODEL_B = "fake-2";
+
+/** One install with a model list, as run-job.mjs builds it, and the enforcement check run-job makes before the session. */
+async function installListed({ fx, rootSessionId }) {
+	const stops = [];
+	const logged = [];
+	const list = [{ provider: PROVIDER, model: MODEL_ID }];
+	const log = (event, fields) => logged.push({ event, fields });
+	const meter = createUsageMeter({ maxTokens: null, allowedModels: list, rootSessionId, onStop: (reason) => stops.push(reason) });
+	const guard = createPolicyGuard({ allowedModels: list, log });
+	const installed = await installProcessUsageMeter({ ModelRuntime: pi.ModelRuntime, runtime: fx.modelRuntime, meter, guard, log });
+	assert.equal(installed.ok, true, `logged ${JSON.stringify(logged)}`);
+	assert.deepEqual([installed.brake, [...installed.enforces]], [true, [MODEL_NOT_ALLOWED]]);
+	assert.doesNotThrow(() => assertPoliciesEnforceable({ allowedModels: list, ...policyEnforcement(installed) }), "a list is enforceable with the model guard installed");
+	return { meter, guard, installed, stops, logged };
+}
+
+/** Exit 2 / model-not-allowed, B never called, and B's ledger row absent (0 calls). */
+function assertStoppedBeforeB({ listed, calls, label }) {
+	const outcome = decideExit({ budgetAborted: false, budgetTurns: 1, meterStop: listed.meter.state.stopReason, tokenAborted: false, terminal: undefined });
+	assert.deepEqual([outcome.code, outcome.reason], [EXIT_POLICY, MODEL_NOT_ALLOWED], label);
+	assert.deepEqual(listed.stops, [MODEL_NOT_ALLOWED], label);
+	assert.equal(calls.filter((entry) => entry.model === MODEL_B).length, 0, `${label}: B reached the provider`);
+	const rowB = listed.meter.usageSnapshot()?.models.find((row) => row.model === MODEL_B);
+	assert.equal(rowB?.calls ?? 0, 0, `${label}: B's ledger row`);
+	assert.equal(listed.guard.snapshot().modelRefused, 1, label);
+	assert.ok(listed.logged.some((entry) => entry.event === "model_refused"), label);
+}
+
+test("model list: session.setModel(B) mid-run is stopped at B's first call", { skip }, async () => {
+	const api = "pi-dispatch-fake-api-list-setmodel";
+	const fx = await fixture(api, {}, [MODEL_B]);
+	const sessions = [];
+	let installed;
+	try {
+		const rootManager = pi.SessionManager.inMemory(fx.root);
+		const listed = await installListed({ fx, rootSessionId: rootManager.getSessionId() });
+		installed = listed.installed;
+		const calls = [];
+		await registerFakeProvider({ modelRuntime: fx.modelRuntime, compat: installed.module, api, calls });
+		const session = await openSession({ fx, modelRuntime: fx.modelRuntime, sessionManager: rootManager });
+		sessions.push(session);
+		let terminal;
+		session.subscribe((event) => {
+			if (event.type === "turn_end") terminal = event.message ?? terminal;
+		});
+		await session.prompt("on A");
+		await flush();
+		assert.deepEqual([calls.map((entry) => entry.model), listed.meter.state.stopReason], [[MODEL_ID], null], "A is listed and answers");
+		const modelB = fx.modelRuntime.getModel(PROVIDER, MODEL_B);
+		assert.ok(modelB);
+		await session.setModel(modelB);
+		await session.prompt("on B");
+		await flush();
+		assert.equal(terminal?.errorMessage, "pi-dispatch: model not allowed");
+		assert.equal(terminal?.stopReason, "aborted", "aborted, so pi does not auto-retry it");
+		assertStoppedBeforeB({ listed, calls, label: "setModel" });
+	} finally {
+		for (const session of sessions) session.dispose();
+		installed?.uninstall();
+		fx.cleanup();
+	}
+});
+
+test("model list: a second in-process session on B is stopped at its first call", { skip }, async () => {
+	const api = "pi-dispatch-fake-api-list-second";
+	const fx = await fixture(api, {}, [MODEL_B]);
+	const sessions = [];
+	let installed;
+	try {
+		const rootManager = pi.SessionManager.inMemory(fx.root);
+		const listed = await installListed({ fx, rootSessionId: rootManager.getSessionId() });
+		installed = listed.installed;
+		const calls = [];
+		// The second session runs on its OWN runtime, as a subagent extension that builds one would.
+		const otherRuntime = await fx.runtime();
+		await registerFakeProvider({ modelRuntime: fx.modelRuntime, compat: installed.module, api, calls });
+		await registerFakeProvider({ modelRuntime: otherRuntime, compat: installed.module, api, calls });
+		const root = await openSession({ fx, modelRuntime: fx.modelRuntime, sessionManager: rootManager });
+		const other = await openSession({ fx, modelRuntime: otherRuntime, sessionManager: pi.SessionManager.inMemory(fx.root), model: otherRuntime.getModel(PROVIDER, MODEL_B) });
+		sessions.push(root, other);
+		await root.prompt("on A");
+		await other.prompt("on B");
+		await flush();
+		assert.deepEqual(calls.map((entry) => entry.model), [MODEL_ID]);
+		assertStoppedBeforeB({ listed, calls, label: "second session" });
+	} finally {
+		for (const session of sessions) session.dispose();
+		installed?.uninstall();
+		fx.cleanup();
+	}
+});
+
+test("model list: an extension's ctx.modelRegistry.streamSimple(B) is answered with the hard stop", { skip }, async () => {
+	const api = "pi-dispatch-fake-api-list-registry";
+	const fx = await fixture(api, {}, [MODEL_B]);
+	const sessions = [];
+	let installed;
+	try {
+		const rootManager = pi.SessionManager.inMemory(fx.root);
+		const listed = await installListed({ fx, rootSessionId: rootManager.getSessionId() });
+		installed = listed.installed;
+		const calls = [];
+		await registerFakeProvider({ modelRuntime: fx.modelRuntime, compat: installed.module, api, calls });
+		let probed;
+		// A command handler runs no model turn of its own, so the only provider call is the extension's.
+		const probe = (extension) => {
+			extension.registerCommand("probe", {
+				description: "call model B directly",
+				handler: async (_args, ctx) => {
+					const modelB = ctx.modelRegistry.find(PROVIDER, MODEL_B);
+					probed = await ctx.modelRegistry.streamSimple(modelB, { messages: [{ role: "user", content: "hi", timestamp: 1 }] }, {}).result();
+				},
+			});
+		};
+		const session = await openSession({ fx, modelRuntime: fx.modelRuntime, sessionManager: rootManager, extensionFactories: [probe] });
+		sessions.push(session);
+		await session.prompt("/probe");
+		await flush();
+		assert.equal(probed?.errorMessage, "pi-dispatch: model not allowed", `the extension's call: ${JSON.stringify(probed)}`);
+		assert.deepEqual(calls, []);
+		assertStoppedBeforeB({ listed, calls, label: "ctx.modelRegistry" });
+	} finally {
+		for (const session of sessions) session.dispose();
+		installed?.uninstall();
+		fx.cleanup();
+	}
+});
+
+test("model list: a virtual router is judged on each request's pick, so its route to B is stopped", { skip }, async () => {
+	const api = "pi-dispatch-fake-api-list-virtual";
+	const fx = await fixture(api, {}, [MODEL_B]);
+	const sessions = [];
+	let installed;
+	try {
+		const rootManager = pi.SessionManager.inMemory(fx.root);
+		const listed = await installListed({ fx, rootSessionId: rootManager.getSessionId() });
+		installed = listed.installed;
+		const calls = [];
+		await registerFakeProvider({ modelRuntime: fx.modelRuntime, compat: installed.module, api, calls });
+		// The router's pick is a variable, so one session shows both verdicts: A admitted, then B refused. The list
+		// names neither the router nor its virtual entry.
+		let pick = MODEL_ID;
+		// registerVirtualModel starts a refresh it does not await (model-runtime.js, `void this.refresh(...)`), and that
+		// refresh reads credentials, which writes auth.json into the fixture root. Unawaited, it lands after
+		// fx.cleanup() and recreates the root (the leftover the suite's TMPDIR check names). So the one refresh it
+		// starts is captured, through the instance's own `this.refresh`, and awaited here.
+		const started = [];
+		const refresh = fx.modelRuntime.refresh;
+		fx.modelRuntime.refresh = function (...args) {
+			const promise = refresh.apply(this, args);
+			started.push(promise);
+			return promise;
+		};
+		try {
+			fx.modelRuntime.registerVirtualModel({
+				provider: "pi-dispatch-router",
+				id: "auto",
+				name: "router",
+				route: () => ({ model: fx.modelRuntime.getModel(PROVIDER, pick), thinkingLevel: "off" }),
+			});
+		} finally {
+			delete fx.modelRuntime.refresh;
+		}
+		assert.equal(started.length, 1, "registerVirtualModel started exactly one refresh");
+		await Promise.all(started);
+		const virtual = fx.modelRuntime.getModel("pi-dispatch-router", "auto");
+		assert.equal(virtual?.api, "pi-virtual");
+		const session = await openSession({ fx, modelRuntime: fx.modelRuntime, sessionManager: rootManager, model: virtual });
+		sessions.push(session);
+		await session.prompt("routed to A");
+		await flush();
+		assert.deepEqual([calls.map((entry) => entry.model), listed.meter.state.stopReason], [[MODEL_ID], null], "the virtual entry passed; its route to A was judged and admitted");
+		pick = MODEL_B;
+		await session.prompt("routed to B");
+		await flush();
+		assertStoppedBeforeB({ listed, calls, label: "virtual router" });
+	} finally {
+		for (const session of sessions) session.dispose();
+		installed?.uninstall();
+		fx.cleanup();
+	}
+});
+
+// ── PR #538's review: what else picks the model that answers, against a real provider ────────────────────────
+//
+// The builtin openai provider on a loopback server that records the `model` of every request it receives, so "the
+// unlisted model was never asked" is read off the wire, not off a fake. Two models under it, one listed.
+
+async function loopbackListed() {
+	const sentModels = [];
+	const server = createServer((req, res) => {
+		let body = "";
+		req.on("data", (chunk) => (body += chunk));
+		req.on("end", () => {
+			try {
+				sentModels.push(JSON.parse(body).model);
+			} catch {
+				sentModels.push("<unparsed>");
+			}
+			res.writeHead(200, { "content-type": "text/event-stream" });
+			const chunk = (o) => res.write(`data: ${JSON.stringify(o)}\n\n`);
+			const base = { id: "x", object: "chat.completion.chunk", created: 1, model: "loopback-listed" };
+			chunk({ ...base, choices: [{ index: 0, delta: { role: "assistant", content: "ok" } }] });
+			chunk({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+			chunk({ ...base, choices: [], usage: { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 } });
+			res.end("data: [DONE]\n\n");
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const root = tempDir("pi-dispatch-loopback-");
+	const modelsPath = join(root, "models.json");
+	const row = (id) => ({ id, name: id, api: "openai-completions", baseUrl: `http://127.0.0.1:${server.address().port}/v1`, reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 });
+	writeFileSync(modelsPath, JSON.stringify({ providers: { openai: { apiKey: "loopback-literal-key", models: [row("loopback-listed"), row("loopback-unlisted")] } } }));
+	// Earlier installs in this file left the compat registry wrapped by stopped meters; pi's own reset puts the builtins back.
+	(await import(resolvePiAiCompat()[0].url)).resetApiProviders();
+	const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir: root, modelsPath });
+	const model = modelRuntime.getModel("openai", "loopback-listed");
+	assert.ok(model, "the loopback model must resolve under the builtin openai provider");
+	const list = [{ provider: "openai", model: "loopback-listed" }];
+	const stops = [];
+	const logged = [];
+	const log = (event, fields) => logged.push({ event, fields });
+	const meter = createUsageMeter({ maxTokens: null, allowedModels: list, onStop: (reason) => stops.push(reason) });
+	const guard = createPolicyGuard({ allowedModels: list, log });
+	const installed = await installProcessUsageMeter({ ModelRuntime: pi.ModelRuntime, runtime: modelRuntime, meter, guard, log });
+	assert.equal(installed.ok, true);
+	return { sentModels, root, modelRuntime, model, meter, guard, stops, logged, installed, close: () => new Promise((resolve) => server.close(resolve)) };
+}
+
+const HELLO = { systemPrompt: "s", messages: [{ role: "user", content: "hello", timestamp: 1 }] };
+
+test("model list, on the wire: a listed call is sent as asked; samplingParams or an onPayload naming another model never leave", { skip }, async () => {
+	const lb = await loopbackListed();
+	try {
+		const ok = await lb.modelRuntime.streamSimple(lb.model, HELLO, { maxRetries: 0 }).result();
+		assert.equal(ok.stopReason, "stop", `the listed call: ${ok.errorMessage}`);
+		assert.deepEqual(lb.sentModels, ["loopback-listed"]);
+		const sampled = await lb.modelRuntime.streamSimple(lb.model, HELLO, { maxRetries: 0, samplingParams: { model: "loopback-unlisted" } }).result();
+		assert.equal(sampled.errorMessage, "pi-dispatch: model not allowed");
+		assert.deepEqual([lb.sentModels, lb.meter.state.stopReason, lb.guard.snapshot().modelRefused], [["loopback-listed"], "model-not-allowed", 1]);
+		assert.deepEqual(lb.logged.filter((entry) => entry.event === "model_refused").map((entry) => entry.fields.why), ["sampling"]);
+	} finally {
+		lb.installed.uninstall();
+		await lb.close();
+	}
+});
+
+test("model list, on the wire: a call option onPayload that rewrites the model fails the call before it is sent", { skip }, async () => {
+	const lb = await loopbackListed();
+	try {
+		const rewritten = await lb.modelRuntime.streamSimple(lb.model, HELLO, { maxRetries: 0, onPayload: (payload) => ({ ...payload, model: "loopback-unlisted" }) }).result();
+		assert.equal(rewritten.stopReason, "error");
+		assert.match(rewritten.errorMessage, /pi-dispatch: model not allowed/);
+		assert.deepEqual([lb.sentModels, lb.meter.state.stopReason, lb.guard.snapshot().modelRefused], [[], "model-not-allowed", 1], "nothing reached the server");
+		assert.deepEqual(lb.logged.filter((entry) => entry.event === "model_refused").map((entry) => entry.fields.why), ["payload"]);
+	} finally {
+		lb.installed.uninstall();
+		await lb.close();
+	}
+});
+
+test("model list, on the wire: a session's before_provider_request hook that rewrites the model fails the call before it is sent", { skip }, async () => {
+	const lb = await loopbackListed();
+	let session;
+	try {
+		// The shape of a serviced repo's .pi/extensions hook: it sees every payload the session sends.
+		const hook = (extension) => {
+			extension.on("before_provider_request", (event) => ({ ...event.payload, model: "loopback-unlisted" }));
+		};
+		const settingsManager = pi.SettingsManager.inMemory({});
+		const resourceLoader = new pi.DefaultResourceLoader({ cwd: lb.root, agentDir: pi.getAgentDir(), settingsManager, noContextFiles: true, noSkills: true, noExtensions: true, extensionFactories: [hook] });
+		await resourceLoader.reload();
+		({ session } = await pi.createAgentSession({ cwd: lb.root, agentDir: pi.getAgentDir(), modelRuntime: lb.modelRuntime, model: lb.model, settingsManager, sessionManager: pi.SessionManager.inMemory(lb.root), resourceLoader, noTools: "all" }));
+		let terminal;
+		session.subscribe((event) => {
+			if (event.type === "turn_end") terminal = event.message ?? terminal;
+		});
+		await session.prompt("hello");
+		await flush();
+		assert.match(terminal?.errorMessage ?? "", /pi-dispatch: model not allowed/);
+		assert.deepEqual([lb.sentModels, lb.meter.state.stopReason], [[], "model-not-allowed"], "the hook's model never reached the server");
+		const outcome = decideExit({ budgetAborted: false, budgetTurns: 1, meterStop: lb.meter.state.stopReason, tokenAborted: false, terminal });
+		assert.deepEqual([outcome.code, outcome.reason], [EXIT_POLICY, MODEL_NOT_ALLOWED]);
+	} finally {
+		session?.dispose();
+		lb.installed.uninstall();
+		await lb.close();
+	}
+});
+
+test("model list, on the wire: a session hook that hides the model behind toJSON fails the call before it is sent", { skip }, async () => {
+	const lb = await loopbackListed();
+	let session;
+	try {
+		const hook = (extension) => {
+			extension.on("before_provider_request", (event) => ({ ...event.payload, toJSON() {
+				return { ...event.payload, model: "loopback-unlisted" };
+			} }));
+		};
+		const settingsManager = pi.SettingsManager.inMemory({});
+		const resourceLoader = new pi.DefaultResourceLoader({ cwd: lb.root, agentDir: pi.getAgentDir(), settingsManager, noContextFiles: true, noSkills: true, noExtensions: true, extensionFactories: [hook] });
+		await resourceLoader.reload();
+		({ session } = await pi.createAgentSession({ cwd: lb.root, agentDir: pi.getAgentDir(), modelRuntime: lb.modelRuntime, model: lb.model, settingsManager, sessionManager: pi.SessionManager.inMemory(lb.root), resourceLoader, noTools: "all" }));
+		await session.prompt("hello");
+		await flush();
+		assert.deepEqual([lb.sentModels, lb.meter.state.stopReason], [[], "model-not-allowed"], "the toJSON body never reached the server");
+	} finally {
+		session?.dispose();
+		lb.installed.uninstall();
+		await lb.close();
 	}
 });
