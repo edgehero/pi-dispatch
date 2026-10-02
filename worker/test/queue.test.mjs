@@ -820,3 +820,33 @@ test("excludeTools rides local and forge job data only when supplied, and never 
 	assert.equal("excludeTools" in captured.data, false);
 	assert.equal(captured.opts.deduplication.id, dedupFlagged, "the semantic window coalesces flagged and unflagged alike");
 });
+
+test("models (and an inherited maxCostUsd) ride local and forge job data only when supplied, and never move a dedup key (#502)", async () => {
+	const { enqueueLocalJob, enqueueGitHubJob } = await import("../src/queue.mjs");
+	let captured;
+	const fakeQueue = { add: (name, data, opts) => ((captured = { name, data, opts }), { id: opts.jobId }) };
+
+	const localBase = { folder: "/proj", flow: "tidy", task: "t", provider: "anthropic", model: "m", maxTurns: 5, now: new Date("2026-07-16T12:00:00Z") };
+	await enqueueLocalJob(fakeQueue, { ...localBase, models: ["anthropic/m"], maxCostUsd: 0.25 });
+	assert.deepEqual(captured.data.models, ["anthropic/m"]);
+	assert.equal(captured.data.maxCostUsd, 0.25, "the outbox child's inherited cap reaches its data");
+	const flaggedLocalId = captured.opts.jobId;
+	await enqueueLocalJob(fakeQueue, localBase);
+	assert.equal("models" in captured.data, false, "an unflagged job's data keeps exactly the keys it has today");
+	assert.equal("maxCostUsd" in captured.data, false);
+	assert.equal(captured.opts.jobId, flaggedLocalId, "the list is not identity");
+
+	const forgeBase = {
+		repo: "owner/repo",
+		target: { type: "issue", number: 7, title: "t", body: "b" },
+		flow: "fix",
+		trigger: { event: "issues", action: "labeled", deliveryId: "guid-md", sender: { id: 42 }, matched: { index: 0, type: "label", label: "bug" } },
+	};
+	await enqueueGitHubJob(fakeQueue, { ...forgeBase, models: ["openai/gpt-x"] });
+	assert.deepEqual(captured.data.models, ["openai/gpt-x"]);
+	assert.equal("models" in captured.data.trigger, false, "an execution knob never rides /job/event.json");
+	const dedupFlagged = captured.opts.deduplication.id;
+	await enqueueGitHubJob(fakeQueue, forgeBase);
+	assert.equal("models" in captured.data, false);
+	assert.equal(captured.opts.deduplication.id, dedupFlagged);
+});

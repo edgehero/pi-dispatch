@@ -152,8 +152,9 @@ pi needs some key for a provider, even when the server ignores it. So the worker
   `oauth`, and no `user:password@` in a `baseUrl`. Keyless means no credentials at all;
 - every model entry has a non-empty string `id`. pi refuses the whole file over one bad entry.
 
-The worker reads `models.json` as plain JSON. pi also accepts comments and a byte order mark; the worker does not, so
-a file with either is unreadable here and no provider in it is keyless.
+The worker reads `models.json` the way pi does: comments, a byte order mark and trailing commas are fine. A file pi
+would refuse (one wrong-typed field anywhere is enough, because pi then drops the whole file) is refused here too, and
+no provider in it is keyless.
 
 If the worker cannot read the file (no permission on it or its folder, a disk error, too many open files), the job
 is tried again later rather than refused, and `doctor` warns `could not read models.json (EACCES)` with the error code.
@@ -216,7 +217,9 @@ What the slots do not cover:
 - **One slot per job, for the whole run.** A job that sends several requests at once (sub-agents, parallel tool
   calls) can go over `slots`. The server then queues them, or refuses past its own limit (Ollama answers 503 past
   `OLLAMA_MAX_QUEUE`).
-- **Only the job's main model counts.** A model the agent switches to during the run takes no slot.
+- **Only the models a job names count.** A job takes a slot for its main model and for every model on its
+  allowed list (`run.models` or `PI_ALLOWED_MODELS`, [`docs/triggers.md`](triggers.md)). A job with no list takes
+  one for its main model only, so a model it switches to during the run takes no slot.
 - **Across machines only with a worker name.** With `PI_WORKER_NAME` set, the slots are shared by every worker on
   the same Valkey. Without it, each worker counts only its own jobs, so two machines can each fill the server.
 - If Valkey does not answer, a job takes the slot anyway (`endpoint_lease_degraded` in the log), and the count on

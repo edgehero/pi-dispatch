@@ -151,7 +151,7 @@ export function swallowedRunSentence(jobId, existing) {
 	return `an identical run was queued${hhmm} as ${jobId} (${existing?.state ?? "already queued or done"}); nothing new was queued.`;
 }
 
-async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, image, backend, excludeTools, skillsDir, secrets, secretsProfile, chainDepth, parentJobId, jobId, enqueueNonce, now = new Date() }) {
+async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, models, maxCostUsd, image, backend, excludeTools, skillsDir, secrets, secretsProfile, chainDepth, parentJobId, jobId, enqueueNonce, now = new Date() }) {
 	const minute = now.toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM -- the dedup window
 	// A caller-supplied jobId (the outbox collector's retry-idempotent chainedJobId) wins; otherwise the
 	// minute-windowed localJobId is the dedup key. A command job (issue #189) fills the flow slot with
@@ -176,6 +176,11 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 		provider,
 		model,
 		maxTurns,
+		// Issue #502: the allowed-model list, conditional like `image`, so a job whose trigger named none keeps its
+		// data byte-identical. An outbox child carries its parent's (outbox.mjs), never one its request file names.
+		...(models !== undefined && { models }),
+		// Issue #501: the per-job dollar cap, passed through for the outbox child that inherits its parent's.
+		...(maxCostUsd !== undefined && { maxCostUsd }),
 		...(image !== undefined && { image }),
 		// #227. WHERE this job's container is built. Conditional like `image`, so a trigger that named no
 		// venue produces byte-identical job data -- and at JOB level, never inside `trigger`, for the reason
@@ -280,7 +285,7 @@ export async function enqueueGitLabJob(queue, fields) {
  * window, replicas never coalesce against each other, and an unflagged job's dedup id is the same string it
  * has always been.
  */
-export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, packages, image, backend, excludeTools, skillsDir, instructions, resume, secrets, secretsProfile, waitFor, replica, replicas }) {
+export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, packages, image, backend, excludeTools, skillsDir, instructions, resume, secrets, secretsProfile, waitFor, replica, replicas }) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	// `packages` (whether to load the operator-staged pi packages) and `image` (which container image to run)
 	// come off the MATCHED trigger (INT-TRIGGERS-FILE-CONTRACT / REQ-GLOBAL-PI-OVERLAY) and land on `data`
@@ -306,6 +311,9 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 		provider,
 		model,
 		maxTurns,
+		// Issue #502: the allowed-model list, conditional like `packages` below so an unflagged trigger's job data is
+		// byte-identical, and at JOB level, never inside `trigger` (copied verbatim into /job/event.json).
+		...(models !== undefined && { models }),
 		...(packages !== undefined && { packages }),
 		...(image !== undefined && { image }),
 		// #227. WHERE this job's container is built. Conditional like `image`, so a trigger that named no

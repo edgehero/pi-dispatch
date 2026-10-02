@@ -10,6 +10,7 @@ import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
 import { RUNNER_POLICY_REASONS } from "./run-history.mjs";
 import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
 import { CAPABILITY_GATES } from "./image-preflight.mjs";
+import { modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
 
 /**
  * The forge comment's reason for each observation a floor refusal missed (issues #278 and #345), keyed like
@@ -98,6 +99,9 @@ export const TERMINAL_COMMENTS = {
 	"model-policy-unenforceable": "Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.",
 };
 
+// Issue #502: the `model-unknown` refusal's comment. Names no model: the reader may be an issue author.
+const MODEL_UNKNOWN_COMMENT = "Refused: this job names an AI model that this deployment does not know (it is in neither pi's model catalog nor the overlay models.json), so no container was started and nothing was spent. Ask the operator to check the trigger's model settings. Not run.";
+
 // Issue #341: the forge comments for a `job-user-unmappable` refusal, keyed by cause. Shorter than the operator
 // texts in job-user.mjs on purpose: a comment's reader may be an issue author, who can act on none of it.
 const JOB_USER_COMMENTS = Object.freeze({
@@ -166,6 +170,11 @@ export async function runJob(job, deps) {
 		// the real read happens where it always did, because threading a live credential through the processor
 		// would put it in scope for every log line and record between here and the container.
 		checkProviderCredential = () => ({ ok: true }),
+		// (refs) => { ok } | { unknown: { provider, id }, why } | { unavailable: code } (issue #502). Is each of this
+		// job's models, its main one and every listed one, a model pi knows (model-catalog.mjs `checkModelsKnown`,
+		// the builtin catalog plus the overlay models.json)? Admit-everything by default, like the credential probe
+		// above and for its reason: an unwired seam must not refuse, and the wiring is what turns the check on.
+		checkModelsKnown = () => ({ ok: true }),
 		// Issue #503: the pickup's endpoint snapshot `{ endpoints, models, set }` (index.mjs), read once per pickup. Null on
 		// a wiring with no endpoint seam, which leaves the credential gate and the container env exactly as before.
 		modelEndpoints = null,
@@ -317,6 +326,18 @@ export async function runJob(job, deps) {
 		// standing between a stale receiver and a paid job that ran when the operator wrote "wait".
 		{
 			const skew = await checkWaitSkew(job);
+			// Issue #502: an authored NARROWING field the job arrived without (`AUTHORED_NARROWING_FIELDS`, triggers-file.mjs),
+			// today `run.models`. The same two causes as a dropped wait, and the same refusal shape; without it the job would
+			// run on the deployment's list, or on none, while every record reads like a correct run. The FIELD is named,
+			// never its value: the comment's reader may be an issue author.
+			if (skew.skewed && typeof skew.field === "string") {
+				// Three causes, the likeliest first (PR #536's review, round 3, made the check strict): the trigger gained the
+				// field after this job was queued, a service is below the version that carries it, or one still reads an
+				// older copy of the triggers file. The first is fixed by re-running the job, so the comment says so.
+				await comment(job, `Refused: this trigger sets \`run.${skew.field}\`, but the job reached the worker without it, so it would have run without that limit. Either the trigger changed after this job was queued (re-run it), or a service in this deployment is stale: below the version that carries the field, or still reading an older copy of the triggers file and in need of a restart. Not run.`);
+				log("refused_trigger_skew", { triggerIndex: job.trigger?.matched?.index ?? null, field: skew.field, causes: "trigger-changed-after-queue-or-stale-service" });
+				return { outcome: "policy", reason: "trigger-skew", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
+			}
 			if (skew.skewed) {
 				// Named for the operator, not the payload: how many conditions were authored, never what
 				// they say. The fix is a version, so the comment says which one.
@@ -536,6 +557,54 @@ export async function runJob(job, deps) {
 			// The reason is a fixed token (`daemon-unreachable`, `timeout`, `endpoint-unresolved`...), never CLI text.
 			log("job_user_unavailable", { reason: jobUser.reason ?? null });
 			throw new InfraRetry("the job user could not be decided", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+		}
+
+		// Issue #502, two free gates on the job's models, BEFORE the credential gate so a typo in a model or provider
+		// id is named as itself rather than as a missing key, and so before the egress probe, the secret resolvers,
+		// the mint, the clone, the token-cap read and both reserves (CONST-BUDGET-BEFORE-TOKENS). Both read the
+		// EFFECTIVE job (index.mjs `effectiveJobOf`): the main model after the `job.data > overlay > env` fill, and
+		// the list as `job.data.models ?? PI_ALLOWED_MODELS`. Checking `job.data` alone would wave through a model
+		// the overlay or the env supplied, which is the common case: most forge triggers name none.
+		//
+		// The model ids are operator configuration, so the log names them; the forge comment does not, for the
+		// terminal comments' reason: its reader may be an issue author, who can act on neither.
+		{
+			// A list that is PRESENT but not a valid list (a string, `{}`, `0`, `false`, `""`, a bad entry) refuses here
+			// rather than reading as "no list": the loader and the env parser both refuse such a value, so it is a
+			// hand-built or foreign job, and treating it as absent would let it run unrestricted (or hide the
+			// deployment's own list behind it). Same refusal as an unknown model, with its own `why`.
+			if (job.models !== undefined && job.models !== null && modelListProblem(job.models) !== null) {
+				await comment(job, MODEL_UNKNOWN_COMMENT);
+				log("refused_model_unknown", { provider: job.provider ?? null, model: job.model ?? null, why: "list-malformed" });
+				return { outcome: "policy", reason: "model-unknown", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			}
+			const refs = [{ provider: job.provider, id: job.model, main: true }];
+			for (const entry of Array.isArray(job.models) ? job.models : []) {
+				const ref = splitModelEntry(entry);
+				refs.push({ provider: ref.provider, id: ref.model });
+			}
+			const known = await checkModelsKnown(refs);
+			if (known?.unavailable) {
+				// The overlay models.json could not be READ just now (an errno, never file text). Retried, never
+				// refused, the credential gate's rule for the same file below.
+				log("model_catalog_unavailable", { provider: job.provider ?? null, model: job.model ?? null, reason: known.unavailable });
+				throw new InfraRetry("whether this job's models exist could not be decided", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			}
+			if (known?.unknown) {
+				await comment(job, MODEL_UNKNOWN_COMMENT);
+				// `why` is a fixed token: `overlay-unparseable` tells the operator the file is the problem, not the id.
+				log("refused_model_unknown", { provider: known.unknown.provider ?? null, model: known.unknown.id ?? null, why: known.why ?? null });
+				return { outcome: "policy", reason: "model-unknown", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			}
+			// The main model must be on the job's list. The loader refuses this when one trigger names all three, so
+			// what reaches here is a model or provider the overlay or the env supplied: a `PI_ALLOWED_MODELS` that
+			// does not list `PI_MODEL`, or a `dispatch_set model` that moved the default off a trigger's list. Both
+			// halves are compared, exact (`modelOnList`), the runner guard's rule.
+			if (Array.isArray(job.models) && !modelOnList(job.models, job.provider, job.model)) {
+				await comment(job, "Refused: the AI model this job would run on is not on the list of models it is allowed to use, so no container was started and nothing was spent. Ask the operator to check the trigger's model settings. Not run.");
+				log("refused_model_not_allowed", { provider: job.provider ?? null, model: job.model ?? null });
+				return { outcome: "policy", reason: "model-not-allowed", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			}
 		}
 
 		// Is there a credential to run this job with at all? FREE, determinate and I/O-light: a pure function

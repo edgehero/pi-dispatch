@@ -44,7 +44,7 @@ export function resolveJobImage(job, defaultImage) {
  *   { forgeUnsupported }  -- present, but declares it cannot serve this job's forge => POLICY, refuse
  *   { <gate.result>, declared } -- present, but does not declare a capability this job needs, one key per
  *                            CAPABILITY_GATES row (replicaUnsupported, commandUnsupported,
- *                            excludeToolsUnsupported) => POLICY
+ *                            excludeToolsUnsupported, modelPolicyUnsupported) => POLICY
  *
  * A non-zero `docker image inspect` is AMBIGUOUS -- an absent image and an unreachable daemon both exit 1 --
  * so the failure path disambiguates POSITIVELY with `docker info` rather than by matching docker's stderr.
@@ -165,6 +165,19 @@ export const CAPABILITY_GATES = Object.freeze([
 		reason: "job-image-exclude-tools-unsupported",
 		event: "refused_image_exclude_tools_unsupported",
 		comment: (image, declared) => `Refused: the job image "${image}" does not declare exclude-tools support (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would ignore \`run.excludeTools\` and run this trigger with every tool it says to remove. Rebuild the image from a version that has this feature. Not run.`,
+	}),
+	// Issue #502: a runner that predates the model guard either ignores PI_ALLOWED_MODELS (an image older than the
+	// policy seams) or refuses it before any call as `model-policy-unenforceable`, after the budget was reserved. The
+	// first runs every model the list forbids on a clean exit, the second spends a slot to learn what the label
+	// already says. `needed` reads the EFFECTIVE list (index.mjs `effectiveJobOf`), so a deployment-wide
+	// PI_ALLOWED_MODELS is gated the same as a trigger's `run.models`.
+	Object.freeze({
+		token: "modelPolicy",
+		needed: (job) => Array.isArray(job?.models) && job.models.length > 0,
+		result: "modelPolicyUnsupported",
+		reason: "job-image-model-policy-unsupported",
+		event: "refused_image_model_policy_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare allowed-model support (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner cannot hold this job to the models it may use. Rebuild the image from a version that has this feature. Not run.`,
 	}),
 ]);
 

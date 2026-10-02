@@ -749,7 +749,7 @@ test("doctor: the credential-free check reads through the one reader: a models.j
 	writeFileSync(join(overlay, "models.json"), "[]");
 	const again = capture();
 	await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_GLOBAL_PI_DIR: overlay }), { ...provDeps(again.out), fileExists: existsSync });
-	assert.match(again.text(), /✗ Overlay models\.json is credential-free\n {4}→ overlay models\.json is not a valid models\.json/);
+	assert.match(again.text(), /✗ Overlay models\.json is credential-free\n {4}→ overlay models\.json does not match pi's models\.json schema/);
 });
 
 test("doctor: a provider pi DOES know, with its key set, still passes", { skip: skipNoPi }, async () => {
@@ -4662,6 +4662,46 @@ test("doctor: the version floor is stated ONCE as a fact, and only when somethin
 	assert.equal(quiet.some((c) => /hold their jobs/.test(c.label)), false);
 });
 
+function modelsTriggersFile(models = ["anthropic/claude-haiku-4-5"]) {
+	const path = join(tempDir("pi-triggers-models-"), "triggers.json");
+	writeFileSync(path, JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:go"] }, run: { kind: "github", flow: "fix", models } }] }));
+	return path;
+}
+
+test("doctor: run.models states its version floor once, naming trigger-skew, and only when a trigger lists (#502)", async () => {
+	const listing = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: modelsTriggersFile() }, secretsSeams());
+	const floor = listing.filter((c) => /name run\.models, which needs a worker and a receiver/.test(c.label));
+	assert.equal(floor.length, 1);
+	assert.equal(floor[0].ok, true, "a fact, not a defect: doctor cannot see the receiver's version");
+	assert.match(floor[0].label, /trigger-skew/);
+	const quiet = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: waitTriggersFile() }, secretsSeams());
+	assert.equal(quiet.some((c) => /name run\.models/.test(c.label)), false);
+});
+
+test("doctor: PI_ALLOWED_MODELS is judged by the worker's own rule, a spaced value included (#502)", async () => {
+	const base = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: waitTriggersFile() };
+	const good = await collectChecks({ ...base, PI_ALLOWED_MODELS: "anthropic/claude-haiku-4-5,openai/gpt-x" }, secretsSeams());
+	const fact = good.find((c) => /^PI_ALLOWED_MODELS limits/.test(c.label));
+	assert.equal(fact.ok, true);
+	assert.match(fact.label, /2 model\(s\): anthropic\/claude-haiku-4-5, openai\/gpt-x/);
+	for (const bad of ["anthropic/claude-haiku-4-5, openai/gpt-x", "anthropic", "a/b,,c/d"]) {
+		const checks = await collectChecks({ ...base, PI_ALLOWED_MODELS: bad }, secretsSeams());
+		const hit = checks.find((c) => c.label === "PI_ALLOWED_MODELS is not a valid list");
+		assert.ok(hit && hit.ok === false, JSON.stringify(bad));
+		assert.match(hit.fix, /refuses to boot/);
+	}
+	assert.equal((await collectChecks(base, secretsSeams())).some((c) => /PI_ALLOWED_MODELS/.test(c.label)), false, "unset says nothing");
+});
+
+test("doctor: a spaced PI_ALLOWED_MODELS in a .env a shell sources is named, since that shell leaves it unset (#502)", async () => {
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "PI_ALLOWED_MODELS=anthropic/claude-haiku-4-5, openai/gpt-x\n");
+	const { out, text } = capture();
+	const { PI_BACKENDS: _b, ...shell } = podmanEnv();
+	await runDoctor(shell, { ...podmanDeps(out, podmanPlan(), []), cwd, platform: "darwin", readEnvFile: (path) => readFileSync(path, "utf8") });
+	assert.match(text(), /✗ [^\n]*line 1 [^\n]*PI_ALLOWED_MODELS/, "the service's own value is unknown, and the line says which key");
+});
+
 test("doctor: an `after`-only wait needs no profile table at all", async () => {
 	// The free tier declares nothing, so a deployment using only instants must not be told to declare a
 	// profile it has no use for.
@@ -8385,6 +8425,7 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 		logsDirPath: (e) => (cfg.logsDirPath(e, "/h"), cfg.logsDirPath(e, null)),
 		settingsFilePath: (e) => (cfg.settingsFilePath(e, "/h"), cfg.settingsFilePath(e, null)),
 		globalExtensionsEnabled: (e) => cfg.globalExtensionsEnabled(e),
+		allowedModelsFrom: (e) => cfg.allowedModelsFrom(e),
 		defaultLogsDir: (e) => cfg.defaultLogsDir(e, null),
 		defaultSettingsFile: (e) => cfg.defaultSettingsFile(e, null),
 		jobsDirPath: (e) => cfg.jobsDirPath(e),
@@ -9278,7 +9319,7 @@ test("doctor's .env reads pass ONE allowlist and ONE loader mapping (#453 gate 3
 	// round 1 the Valkey opt-in, the TMPDIR the default jobs root lives under, and the worker's name.
 	// Issue #471: and every other key the service reads that doctor judges, the worker's and the receiver's.
 	assert.deepEqual([...SERVICE_ENV_KEYS], ["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY", "VALKEY_URL", "PI_VALKEY_SHARED", "VALKEY_PASSWORD", "PI_VALKEY_PORT", "PI_PROVIDER", "GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY", "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", "PI_WORKER_NAME", ...WORKER_SERVICE_KEYS, ...RECEIVER_SERVICE_KEYS, ...new Set(Object.values(CLI_SERVICE_KEYS).flat())]);
-	for (const key of ["PI_JOB_IMAGE", "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "AZURE_ORG_URL", "AZURE_WEBHOOK_MODE", "WEBHOOK_SECRET", "RECEIVER_PORT", "GITHUB_PAT_VAR"]) {
+	for (const key of ["PI_JOB_IMAGE", "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "AZURE_ORG_URL", "AZURE_WEBHOOK_MODE", "WEBHOOK_SECRET", "RECEIVER_PORT", "GITHUB_PAT_VAR"]) {
 		assert.ok(SERVICE_ENV_KEYS.includes(key), `${key}, which issue #471 lists, is a service key`);
 	}
 	// Every key whose value steers a spawn, a connection or a write says how it is judged, and is a service key.

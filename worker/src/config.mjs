@@ -15,7 +15,8 @@ import { SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS } from "./retention-swee
 import { parseSecretProfiles } from "./secret-profiles.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, parseWaitProfiles } from "./wait-for.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
-import { KEYLESS_ENV_NAME } from "./reserved-env.mjs";
+import { CONTAINER_ENV_NAMES, KEYLESS_ENV_NAME } from "./reserved-env.mjs";
+import { modelListProblem } from "./model-ref.mjs";
 
 /**
  * The VALKEY_URL the worker uses when none is set. ONE constant (issue #503's review): doctor judges the model endpoints
@@ -179,6 +180,16 @@ function forwardEnvList(raw, egressArmed = false) {
 	if (names.includes(KEYLESS_ENV_NAME)) {
 		throw configError(`PI_FORWARD_ENV must not forward ${KEYLESS_ENV_NAME} -- the worker sets it itself, only for a job whose provider has every model on a keyless model endpoint (model-endpoints.json)`);
 	}
+	// Issue #502 (PR #536's review): every name the worker writes into a job's container itself. The forward loop runs
+	// AFTER that write, so a forwarded host value REPLACES the per-job one: `PI_MODEL` or `PI_PROVIDER` would run a model
+	// the pre-spend gates never checked, `PI_ALLOWED_MODELS` would swap a trigger's narrower list for the deployment's,
+	// `PI_MAX_TURNS` would lift the turn limit. One rule over the whole closed set rather than a list of the ones that
+	// happen to matter today. HOME is the one exception, and an old one: forwarding it is supported, the job-user path
+	// overrides it beside `--user` and says so at boot (`forward_env_home_overridden`).
+	const owned = names.filter((n) => CONTAINER_ENV_NAMES.has(n) && n !== "HOME" && n !== KEYLESS_ENV_NAME);
+	if (owned.length > 0) {
+		throw configError(`PI_FORWARD_ENV must not forward ${owned.join(", ")} -- the worker writes ${owned.length === 1 ? "it" : "them"} into every job's container itself, and a forwarded host value would replace the per-job one (a forwarded PI_MODEL runs a model the pre-spend checks never saw)`);
+	}
 	const egress = egressArmed ? names.filter((n) => EGRESS_ENV_VARS.has(n)) : [];
 	if (egress.length > 0) {
 		throw configError(
@@ -186,6 +197,32 @@ function forwardEnvList(raw, egressArmed = false) {
 		);
 	}
 	return names;
+}
+
+/**
+ * PI_ALLOWED_MODELS (issue #502): the deployment's allowed-model list, comma-separated `provider/model`, the
+ * grammar a trigger's `run.models` has (`modelListProblem`, model-ref.mjs), so a list means the same thing in
+ * either place. A job's effective list is its trigger's, else this one, else none (unrestricted).
+ *
+ * ENV ONLY, and never a settings-overlay key, for the reason `run.image` resolves against env only: the overlay is
+ * writable by a model-callable tool (`dispatch_set`), and a list a tool could widen is not a policy. Refused at boot
+ * when malformed, like every other knob here. Unset or empty is unrestricted: an empty env var is how an `.env`
+ * template says "not set", unlike an empty `run.models`, which a reviewed file only holds by mistake.
+ *
+ * NO WHITESPACE anywhere in the value (PR #536's lab review). The launchd and other non-systemd wrappers SOURCE the
+ * `.env` with a shell, which reads `PI_ALLOWED_MODELS=a/b, c/d` as a one-off assignment followed by a command named
+ * `c/d`: the variable is never set and every job runs unrestricted, with nothing failing. A worker that does see the
+ * spaced value (systemd reads it whole) therefore refuses it rather than trimming it, so the same line cannot mean a
+ * list on one host and no list on another. An empty segment between two commas is refused too, never skipped.
+ */
+export function allowedModelsFrom(env) {
+	const raw = env.PI_ALLOWED_MODELS;
+	if (raw === undefined || raw === "") return null;
+	if (/\s/.test(raw)) throw configError("invalid PI_ALLOWED_MODELS: write the list with no spaces (a/b,c/d) -- a shell that sources .env cuts an unquoted value at the first space and leaves the variable unset, so jobs would run with no list");
+	const list = raw.split(",");
+	const problem = modelListProblem(list);
+	if (problem !== null) throw configError(`invalid PI_ALLOWED_MODELS: the list ${problem}`);
+	return list;
 }
 
 /**
@@ -332,6 +369,7 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		provider: env.PI_PROVIDER ?? "anthropic",
 		model,
 		maxTurns: positiveInt(env, "PI_MAX_TURNS", 30), // pi has no turn limit; we impose one
+		allowedModels: allowedModelsFrom(env), // issue #502: the deployment's allowed-model list; null = unrestricted. ENV ONLY, never the settings overlay
 		maxTokens: optionalBoundedInt(env, "PI_MAX_TOKENS", 1), // issue #25; null = per-job token budget disabled (lagging in-run backstop)
 		dailyTokenCap: optionalBoundedInt(env, "PI_DAILY_TOKEN_CAP", 1), // issue #25; null = daily token counter disabled (check-AFTER, host-side)
 		jobImage: jobImageFrom(env), // || (not ??) so an empty string falls back; "" is falsy and would throw inside buildDockerRunArgs AFTER a budget slot was reserved

@@ -366,6 +366,39 @@ test("PI_FORWARD_ENV refuses PI_DISPATCH_KEYLESS, egress on or off, and a trigge
 	assert.ok(CONTAINER_ENV_NAMES.has("PI_DISPATCH_KEYLESS"), "reserved, so run.secrets cannot bind it (triggers.test.mjs drives the refusal over the whole set)");
 });
 
+test("PI_ALLOWED_MODELS: unset or empty is unrestricted, a list is read verbatim, a malformed or spaced one refuses the boot (#502)", () => {
+	assert.equal(loadConfig({}).allowedModels, null);
+	assert.equal(loadConfig({ PI_ALLOWED_MODELS: "" }).allowedModels, null, "an empty .env line is how a template says unset");
+	assert.deepEqual(loadConfig({ PI_ALLOWED_MODELS: "anthropic/claude-x,openrouter/~anthropic/Claude-y" }).allowedModels, ["anthropic/claude-x", "openrouter/~anthropic/Claude-y"], "verbatim, case kept");
+	// Any whitespace refuses the boot (PR #536's lab review): a sourcing shell cuts `a/b, c/d` at the space and leaves
+	// the variable UNSET, so the same line must not mean a list under systemd and no list under launchd.
+	for (const spaced of ["anthropic/claude-x, openai/gpt-x", " anthropic/claude-x", "anthropic/claude-x\t", "   "]) {
+		assert.throws(() => loadConfig({ PI_ALLOWED_MODELS: spaced }), (e) => e.piDispatchConfig === true && /write the list with no spaces/.test(e.message), JSON.stringify(spaced));
+	}
+	for (const bad of ["anthropic", "a/b,,c/d", "a/b,", "a/b,A/B", Array.from({ length: 17 }, (_, i) => `a/m${i}`).join(","), "a/\u212A"]) {
+		assert.throws(() => loadConfig({ PI_ALLOWED_MODELS: bad }), (e) => e.piDispatchConfig === true && /^invalid PI_ALLOWED_MODELS: the list /.test(e.message), JSON.stringify(bad));
+	}
+});
+
+test("PI_FORWARD_ENV refuses every name the worker writes into a job's container, HOME excepted (#502)", () => {
+	// A forwarded host value lands AFTER the worker's own write and replaces it: PI_MODEL would run a model the
+	// pre-spend gates never checked, PI_ALLOWED_MODELS would swap a trigger's list for the deployment's.
+	const owned = [...CONTAINER_ENV_NAMES].filter((n) => n !== "HOME" && n !== "PI_DISPATCH_KEYLESS");
+	assert.ok(owned.includes("PI_MODEL") && owned.includes("PI_PROVIDER") && owned.includes("PI_ALLOWED_MODELS"), "the set the rule covers is the closed map's own");
+	for (const env of [{}, { PI_EGRESS: "0" }]) {
+		for (const name of owned) {
+			assert.throws(() => loadConfig({ ...env, PI_FORWARD_ENV: `FOO,${name}` }), (e) => e.piDispatchConfig === true && new RegExp(`PI_FORWARD_ENV must not forward ${name} -- the worker writes it into every job's container itself`).test(e.message), name);
+		}
+	}
+	// HOME stays forwardable: the job-user path overrides it beside --user and says so at boot.
+	assert.deepEqual(loadConfig({ PI_FORWARD_ENV: "HOME" }).forwardEnv, ["HOME"]);
+});
+
+test("the allowed-model list is env only: no settings-overlay key can carry it (#502)", async () => {
+	const { KNOWN_KEYS } = await import("../src/runtime-settings.mjs");
+	for (const key of ["models", "allowedModels"]) assert.equal(KNOWN_KEYS.includes(key), false, `${key} must not be an overlay key, which dispatch_set writes`);
+});
+
 test("configError is tagged for clean CLI reporting", () => {
 	assert.equal(configError("x").piDispatchConfig, true);
 });

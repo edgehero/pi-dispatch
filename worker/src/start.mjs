@@ -21,6 +21,7 @@ import { makeAzureHost } from "./azure-host.mjs";
 import { makeEgressPreflight } from "./egress.mjs";
 import { checkSlotKey, endpointSlotKey, hash16, makeClaimSweeper, makeFleetLease, makeScopeClaimSweeper, scopeSlotKey } from "./fleet-lease.mjs";
 import { MAX_SLOTS, loadModelEndpoints, modelEndpointsPath, readOverlayModels } from "./model-endpoints.mjs";
+import { checkModelsKnown } from "./model-catalog.mjs";
 import { capabilityTokens, serializeCaps } from "./capabilities.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
 import { makeHostRegistry } from "./host-registry.mjs";
@@ -1691,6 +1692,14 @@ export async function startWorker(
 					return { ok: false, message: error.message };
 				}
 			},
+			// Issue #502. The model-exists gate: pi's builtin catalog, then the overlay models.json, read at most once per
+			// job and only when a model is not builtin, so the operator's edits apply without a restart. The SAME file
+			// the endpoint gate reads, through the same reader, so absent, unreadable and unparseable mean one thing.
+			checkModelsKnown: (refs) => checkModelsKnown(refs, { readOverlay: () => readOverlayModels(config.globalPiDir) }),
+			// Issue #502. The deployment's allowed-model list (PI_ALLOWED_MODELS), null = unrestricted. Env only, and
+			// handed to the processor here rather than through the settings overlay, which a model-callable tool writes.
+			// index.mjs folds it into the effective job (`effectiveJobOf`) under the trigger's own `run.models`.
+			allowedModels: config.allowedModels,
 			// Issue #230. The same file and the same fail-open posture, but its own mtime-cached read: this one
 			// asks whether the AUTHORED entry declares wait conditions the job arrived without, which is how a
 			// service below the version floor turns a wait into a paid run nothing can tell from a correct
@@ -1854,7 +1863,10 @@ export async function startWorker(
 			// and never in the failed listener -- a failed-only mount would miss exactly the paid terminals
 			// the feature exists for. Folded into the existing listener body, never a second w.on: the
 			// start-wiring harness records ONE handler per event, and two would race the log line's pin.
-			if (onFailure && result?.outcome === "policy" && HOOK_POLICY_REASONS.has(result.reason)) {
+			// `budgetReserved !== false` (issue #502): `model-not-allowed` is both a runner stop (paid, pages) and a
+			// pre-spend refusal of a main model outside the job's list (free, comments, pages nobody), and the reason
+			// alone cannot tell them apart. Every paid terminal above carries `budgetReserved: true`.
+			if (onFailure && result?.outcome === "policy" && HOOK_POLICY_REASONS.has(result.reason) && result.budgetReserved !== false) {
 				onFailure({ jobId: job?.id, outcome: "policy", reason: result.reason });
 			}
 		});

@@ -1269,7 +1269,14 @@ refactor apart.
     jobs need it, the result key, the record reason, the log event and the comment. The preflight refuses the
     first row a job needs and the image lacks, in the order the branches had, so the behaviour is unchanged
     and a new image-gated feature is a row rather than a branch in two files. `anyUid` is not a row: it is
-    read by the job-user gate after the preflight.
+    read by the job-user gate after the preflight. A fourth row, **`modelPolicy`** (issue #502), lands with
+    the first emission of `PI_ALLOWED_MODELS`: a job whose EFFECTIVE allowed-model list is non-empty (its
+    trigger's `run.models`, else the deployment's `PI_ALLOWED_MODELS`) is refused pre-spend on an image
+    that does not declare it, reason `job-image-model-policy-unsupported`. An older runner either ignores
+    the variable (a list quietly not enforced) or refuses it before the first call as
+    `model-policy-unenforceable`, after the reservation. The token joins the image label and
+    `verify-image.sh` with the runner's model guard (#502 part 4); until an image declares it, every job
+    with a list is refused here, fail closed, never silently run unrestricted.
     `anyUid` (issue #341) declares that
     the image runs correctly as an ARBITRARY non-root uid given `HOME=/home/pi`: the home is writable by any
     uid, and Chromium renders as one. Its evidence is not a grep but two runs as uid `4242` (no passwd entry
@@ -1409,15 +1416,19 @@ refactor apart.
     `models.json` key is `"apiKey": "$PI_DISPATCH_KEYLESS"` (`INT-MODEL-ENDPOINTS-FILE-CONTRACT`, Keyless). It takes
     the provider credential's place in the map, so a keyless job carries no key and every other job lacks the
     variable. Only the worker may set it: a trigger's `run.secrets` cannot bind it, and
-    `PI_FORWARD_ENV` refuses it at config load whatever the egress policy; `PI_MAX_COST_MICROS` and
-    `PI_ALLOWED_MODELS` (issues #501, #502), **reserved names the worker does not write yet**: the runner reads
-    them (the per-job dollar cap as an integer number of micro-dollars from `0` to `1e12`, `0` legal; the
-    allowed models as comma-separated `provider/model`, split at the first `/`; for both an EMPTY value is a
-    config error, exit 2, never "unset", because an empty money or allow knob read as unset would fail open).
-    A runner from an image declaring `costCap` ENFORCES the cost cap before every provider call (the cost
-    guard, `DES-DOLLAR-RESERVE-AND-SETTLE`); a runner with a list set, or with a cap it cannot enforce, refuses before any call
-    (`INT-RUNNER-EXIT-CODE-PROTOCOL`). They are in `CONTAINER_ENV_NAMES` already, so a trigger's `run.secrets`
-    cannot bind either; and each name in `PI_FORWARD_ENV` (an explicit operator
+    `PI_FORWARD_ENV` refuses it at config load whatever the egress policy; `PI_ALLOWED_MODELS` (issue #502),
+    the job's EFFECTIVE allowed-model list (`INT-TRIGGERS-FILE-CONTRACT`'s `run.models`, else the
+    deployment's own `PI_ALLOWED_MODELS`), comma-joined `provider/model` entries verbatim, which the runner
+    splits at each entry's first `/`; emitted ONLY when the list is non-empty, never as an empty string,
+    and only to an image that declares `modelPolicy` (the capability row above). `PI_FORWARD_ENV` refuses
+    it at config load, with every other name the worker writes (below). `PI_MAX_COST_MICROS` (issue #501), a
+    **reserved name the worker does not write yet**. The runner reads both (the per-job dollar cap as an integer
+    number of micro-dollars from `0` to `1e12`, `0` legal; for both an EMPTY value is a config error, exit 2,
+    never "unset", because an empty money or allow knob read as unset would fail open). A runner from an image
+    declaring `costCap` ENFORCES the cost cap before every provider call (the cost guard,
+    `DES-DOLLAR-RESERVE-AND-SETTLE`); a runner with a list set, or with a cap it cannot enforce, refuses before
+    any call (`INT-RUNNER-EXIT-CODE-PROTOCOL`).
+    Both are in `CONTAINER_ENV_NAMES`, so a trigger's `run.secrets` cannot bind either; and each name in `PI_FORWARD_ENV` (an explicit operator
     allowlist of extra host vars — e.g. a custom provider's key — forwarded by exact `-e NAME=VALUE`, never a
     pass-through, so it satisfies `no-broad-env-into-container`; **every** minted-token name is refused in
     the allowlist at config load — derived from the forge table rather than enumerated here, currently
@@ -1429,7 +1440,13 @@ refactor apart.
     tokens for every repository the App is installed on — strictly broader than the per-job token
     `CONST-TOKEN-SCOPED-PER-JOB` bounds, and handed to a process reading adversarial issue text. The
     matching `GITHUB_APP_PRIVATE_KEY_PATH` is deliberately NOT refused: a path with no mount behind it is
-    inert in a container, and a refusal that fires on harmless things stops being read). Note `PI_DAILY_TOKEN_CAP` is **worker-only and is
+    inert in a container, and a refusal that fires on harmless things stops being read). **Every
+    `CONTAINER_ENV_NAMES` member is refused in `PI_FORWARD_ENV` too** (issue #502, PR #536's review), `HOME`
+    excepted: the forward loop runs AFTER the worker's own write, so a forwarded host value REPLACES the per-job
+    one, and `PI_MODEL`/`PI_PROVIDER` would run a model the pre-spend gates never checked, `PI_ALLOWED_MODELS`
+    would swap a trigger's list for the deployment's, `PI_MAX_TURNS` would lift the turn limit. `HOME` stays
+    forwardable, as before: the job-user path overrides it beside `--user` and says so at boot
+    (`forward_env_home_overridden`). `PI_DISPATCH_KEYLESS` keeps its own message. Note `PI_DAILY_TOKEN_CAP` is **worker-only and is
     NOT forwarded** — the daily token counter is enforced host-side, and the container stays queue/budget-blind.
   - **`PI_OFFLINE=1` is set UNCONDITIONALLY, on every job — the one env addition here that is not opt-in.**
     Every other variable above is forwarded only when something armed it; this one is not, and the reason is
@@ -3895,20 +3912,21 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
 
   **Whether the model EXISTS is not checked here**: that needs the pinned catalog and the overlay
   `models.json`, both per-host facts, and a loader that read them would refuse a reviewed file on one host
-  only. An existing-but-misspelled id is refused in the container today, after the budget reservation.
+  only. The worker asks it instead, among the free gates before any spend (`model-unknown`,
+  `REQ-MODEL-POLICY`, since #502 part 2).
 
   **A NEAR-MISS SPELLING IS REFUSED** on `run.backend`'s sweep (homoglyph subsequence branch included),
   with targets `provider`, `providers`, `providerid`, `providerids`, `providername`, `model`, `modelid`,
   `modelname`, `models`, `modelids`, `modelnames`, `allowedmodels`, `allowedmodel`, `maxturns`, `maxturn`,
   `maxcostusd` and `maxcost` (singular and plural, `excludeTools`' rule), and the refusal names the field the
   matched target belongs to: a dropped `run.modelId` runs the job on the deployment default while the file reads as
-  though it chose. On `on` every spelling is refused, the correct ones included. The exact keys
-  `run.models` and `run.maxCostUsd` are NOT refused: they are fields a later release adds with
-  enforcement, and until then they fall under this file's tolerance of unknown `run` keys, so a file
-  written for that release still loads here. They are not carried into the normalized run.
+  though it chose. On `on` every spelling is refused, the correct ones included. The exact key
+  `run.maxCostUsd` is NOT refused: it is a field a later release adds with enforcement, and until then it
+  falls under this file's tolerance of unknown `run` keys, so a file written for that release still loads
+  here. It is not carried into the normalized run. `run.models` is a field since #502 part 3 (below).
 
   **Forwarding: absent stays absent.** A forge normalizer emits each field only when present, the receiver
-  copies all three onto every rule group (`receiver/src/config.mjs`) and forwards each with its own
+  copies all three (and `run.models`, below) onto every rule group (`receiver/src/config.mjs`) and forwards each with its own
   conditional spread at every filter's job literal, and they ride at JOB level, never inside `trigger`. A
   trigger that names none produces job data byte-identical to the pre-#502 shape. A derived test
   (`receiver/test/trigger-forwarding.test.mjs`, with a cron twin in `worker/test/`) runs a maximal fixture
@@ -3923,6 +3941,67 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   **Upgrade consequence**: a webhook trigger that already carried these fields was ignored before #502 and
   now takes effect; a malformed value or a near-miss key that loaded before now refuses the whole file in
   both services.
+
+- **`run.models` (ALL trigger kinds, optional)**: the models this trigger's jobs may call, the
+  allowed-model list (issue #502 part 3, `REQ-MODEL-POLICY`). An array of 1 to 16 strings, each
+  `provider/model` split at the FIRST `/` (a provider id carries none, a model id may: `openrouter`'s
+  `vendor/model`, cloudflare's `@cf/vendor/model`), each half passing the rule `run.provider` and
+  `run.model` pass above, printable ASCII checked before lowercasing. Validated by the same
+  `validateModelRef`, through the shared `modelListProblem` (`worker/src/model-ref.mjs`), which the
+  worker's `PI_ALLOWED_MODELS` uses too, so a list means the same thing in either place. Refused: a
+  non-array; `[]` (an empty allow list is neither "unrestricted", which fails open, nor "nothing allowed",
+  and a reviewed file holds one only by mistake); a 17th entry; a malformed entry; and a duplicate compared
+  IGNORING case (matching is exact, so `openai/GPT-x` beside `openai/gpt-x` is a typo the file should not
+  keep, and the ledger lowercases ids, where the two would be one row). `null` is absent. A refusal names
+  the entry's position and never echoes it.
+
+  **The main model must be on its own list.** When one trigger names `run.provider`, `run.model` and
+  `run.models`, the pair must be an entry, compared EXACTLY on both halves (pi resolves ids
+  case-sensitively, and the runner's guard compares the same way), or the file is refused at load: every job
+  it started would be refused. When the provider or the model comes from the deployment default, the file
+  cannot answer it, and the worker refuses the job pre-spend instead (`model-not-allowed`).
+
+  The normalized run carries it only when present, the receiver forwards it like `run.provider` (its own
+  conditional spread at every job literal, at JOB level, never inside `trigger`; the derived forwarding test
+  covers it, its maximal fixture carrying a list), cron's scheduler data carries it the same way, and
+  `enqueueForgeJob` and `addLocalJob` (`worker/src/queue.mjs`) write it only when supplied, so an
+  unrestricted trigger's job data is byte-identical. It is not part of any job id or dedup key.
+
+  **Version skew is refused, not run (PR #536's review).** A service that drops the field (a receiver from
+  before #502 tolerates it as an unknown key; a current one reading a dead inode through compose's single-file
+  `:ro` mount sees an older file) would enqueue the job WITHOUT its list, and the job would run on the
+  deployment's list or on none while every record reads like a correct run. The worker's own read of the
+  triggers file catches it, `run.waitFor`'s skew check generalised to a table of authored NARROWING fields
+  (`AUTHORED_NARROWING_FIELDS`, `worker/src/triggers-file.mjs`; `models` today, one row per future field): when
+  the entry at the job's matched index (identity-checked on flow, command, kind and on-type) lists models and
+  the job ARRIVED with none (`job.data.models`, read before the env fill), the job is refused pre-spend as
+  `trigger-skew`, naming the field. The same limits as the wait check: it reads `PI_TRIGGERS_FILE`, else
+  `./triggers.json` at the worker's cwd, and fails OPEN on a file it cannot read or an entry that changed, so a
+  worker with no readable triggers file cannot see the skew; cron and CLI jobs carry no matched index and are
+  not checked (their data comes from the worker itself). The check is STRICT, as the `waitFor` one has been
+  since #230: a job queued BEFORE the operator added the field to its trigger is refused as `trigger-skew` too,
+  and its comment names that cause first and says to re-run the job. A fail-open fenced on the file's mtime was
+  considered and rejected: any later write of the file (the worker's own one-shot disarm, a console edit, a
+  touch, an `rsync -t` mtime in the future) would have reopened the hole for every skewed job after it. Refusing
+  an already-queued job is the safe direction.
+
+  `dispatch_trigger_edit` checks the MERGED run (`{ ...entry.run, ...sent }`) with the same validator before its
+  confirm, so a new provider or model that falls off the trigger's own list is refused before the operator is
+  asked.
+
+  **The effective list** is `job.data.models ?? PI_ALLOWED_MODELS ?? unrestricted`: the trigger's REPLACES
+  the deployment's, it does not intersect it. Absent everywhere is unrestricted, today's behaviour, and
+  deliberately not "the main model only", which would break every flow that switches models today with no
+  edit of its own. The deployment's list is read from the ENV only, never from the settings overlay, for
+  the reason `run.image` resolves against env only: the overlay is writable by a model-callable tool, and a
+  list a tool could widen is not a policy. `PI_ALLOWED_MODELS` must carry NO whitespace and the worker refuses
+  one that does at boot: a shell that sources `.env` (the launchd and other non-systemd wrappers) reads
+  `a/b, c/d` as a one-off assignment plus a command, leaves the variable unset, and every job would run
+  unrestricted; `doctor` judges the service's value with the worker's own rule and names such a line.
+
+  **Model-callable: none.** Neither `dispatch_trigger_add` nor `dispatch_trigger_edit` takes `models`: a
+  list is reviewed trigger content, `run.secrets`' reasoning. An edit that moves a trigger's
+  `provider`/`model` off its own list is refused by the write's `parseTriggers` like any other invalid file.
 
 - **Why**: The operator's trigger set is one host file — diffable, reviewable, git-trackable — rather than
   two files in two shapes across two services. The schema unifies the *view*; evaluation still splits by
@@ -4155,7 +4234,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|once-already-spent|scope-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -4248,7 +4327,8 @@ validator rather than a second copy of it.
   (issue #437). Five such reasons: `provider-auth-refused`, the provider refused the credential (a 401/403,
   or a Google or Bedrock refusal shape since issue #451); and since issues #501/#502 `cost-cap` and
   `model-not-allowed` (the runner's pre-call guard stopped a call: `cost-cap` live on an image that declares
-  `costCap`, `model-not-allowed` still reserved for the model guard) and
+  `costCap`, `model-not-allowed` still reserved for the model guard until #502 part 4; the same token is
+  already live as the worker's free pre-spend refusal, described below, which is not an exit 2) and
   `cost-cap-unenforceable` and `model-policy-unenforceable` (the runner refused, before any call, a cost cap
   or a model list it could not enforce before a call). Each has its own fixed terminal comment and pages
   the operator like any other runner reason. The parse rule is
@@ -4259,6 +4339,26 @@ validator rather than a second copy of it.
   ever relabels an exit `2` (the exit code alone decides the retry class,
   `INT-RUNNER-EXIT-CODE-PROTOCOL`), and it is a fixed token, so the record stays PII-free: the
   provider's message on the same exit line is never read.
+
+  **Four pre-spend model refusals (issue #502)**, each `budgetReserved: false`, decided before the
+  credential gate, the mint, the clone and any reservation, each commenting a fixed sentence that names no
+  model: `model-unknown` (the job's main model or an entry of its effective allowed-model list is in
+  neither pi's builtin catalog at the pin nor the overlay `models.json`, the MAIN model counted against CHAT
+  models only because the runner's `getModel` resolves nothing else, a list entry against every kind; or a
+  `models` value that is present but not a valid list; the log line's `why` is `not-in-catalog`,
+  `overlay-unparseable` (pi would not load the file, read as pi reads it), `overlay-provider-invalid` (pi loads
+  the file but would not compose the overlay entry of the model's provider, so it drops that whole entry: an
+  overlay model of it does not exist, and a BUILTIN model of it would run without the entry's `baseUrl`,
+  headers and key, against the provider's public endpoint), `overlay-is-a-directory`, or
+  `list-malformed`); `trigger-skew` (the authored trigger lists models the job arrived without,
+  `INT-TRIGGERS-FILE-CONTRACT`'s `run.models` bullet); `model-not-allowed` (the main model, after the
+  `job.data > overlay > env` fill, is not on the job's effective list: a `PI_ALLOWED_MODELS` that does not
+  list `PI_MODEL`, or a `dispatch_set model` that moved the default off a trigger's list); and
+  `job-image-model-policy-unsupported` (the job has a list and its image does not declare `modelPolicy`,
+  `INT-CONTAINER-RUNTIME-CONTRACT`). `model-not-allowed` is therefore BOTH a paid runner stop and a free
+  refusal; `budgetReserved` tells them apart, and only the paid one pages (the failure hook pages unless the
+  result says `budgetReserved: false`). A transient read of the overlay is not a refusal: the job is retried as infra,
+  `container-never-started`, with nothing reserved.
 
   `session.reason` reads as one flat list but has **three producers**, which is why a token can look
   unreachable from whichever half of the code you happen to be in. The enum has always been documented
@@ -4480,6 +4580,15 @@ validator rather than a second copy of it.
   because ignoring THAT key would enqueue the wrong work. The inheritance itself is mandatory and its
   destructive direction is INVERTED from image/skillsDir's: dropping it would not starve the child of a
   toolchain, it would WIDEN it -- a read-only triage parent chaining a child that can edit and run bash.
+  **`provider`, `model` and `models` are inherited the same way (issue #502)**, and so is `maxCostUsd`
+  whenever the parent's data carries it (#501): all off the parent's validated `job.data`, never off the
+  request file, so the same keys in a request are ignored like `excludeTools`. They were deliberately NOT
+  inherited before #502 ("a fallback provider still runs the flow"), which held while a model was only a
+  preference; once a trigger can name the models its jobs may call, a child on the deployment default is
+  outside the parent's policy. `job.data` holds the trigger's own fields, before the overlay and env fill,
+  so a parent whose trigger named none chains a child that resolves the default at its own start, and a
+  parent governed by the deployment's `PI_ALLOWED_MODELS` chains a child the same list governs.
+  `chainedJobId` is unchanged: none of them is part of the child's identity.
   Commands may chain OUT — a local command job keeps its `/outbox`, its requests naming flows
   under the same gate — but nothing chains INTO a command. `task` is agent-authored **DATA**
   (`CONST-ISSUE-TEXT-IS-DATA`, one layer down): it becomes the child's `/job/prompt.md` user prompt and
@@ -5134,8 +5243,11 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   nothing, and that includes a `$VAR` or `!command` baseUrl, which pi expands in the job and this derivation does
   not: RESIDUAL, such a model takes no slot lease and does not pass the keyless gate, so a keyless endpoint must be
   written as a literal URL. A job's
-  endpoint set is its MAIN model's endpoints for now. The models on a job's allowed list join it with #502; until
-  then that is a named residual.
+  endpoint set (issue #502) is the union, deduplicated by endpoint id, of the endpoints its main model uses and
+  the endpoints every entry of its EFFECTIVE allowed-model list uses (`run.models`, else `PI_ALLOWED_MODELS`;
+  `INT-TRIGGERS-FILE-CONTRACT`), so a job that may switch to a listed model on another local server holds that
+  server's slot too. With no list it is the main model's endpoints alone. The keyless verdict does not read the
+  set: it stays "every model of the provider", a question about the provider's credential, not the job's list.
 - **Slots** (#503, part 4): at pickup, after the scope gate and the one settings read, a job whose endpoint set
   is not empty takes one slot of each endpoint in it, in id order: first an in-process slot (per host, limit
   `slots`), then, when `PI_WORKER_NAME` is declared, a fleet slot, the Valkey key `slot:m:<h>:<i>` where `h` is
@@ -5160,7 +5272,8 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   its own `slot:m:` claims for every declared endpoint that takes a fleet slot, stopping at the first connection or timeout fault; a per-key reply error (a WRONGTYPE key under the prefix) is logged by key, `endpoint_claims_sweep_key_error`, and the sweep goes on. The endpoint set, the endpoints and the overlay
   `models.json` are read once per pickup and handed to the job's run as one snapshot. Invalid or unreadable
   settings take no slot. With no endpoint declared the overlay `models.json` is not read and no command is sent.
-  RESIDUALS: the set is the main model's only until #502; a job holds its slot for its whole run, so fan-out
+  RESIDUALS: an UNRESTRICTED job's set is its main model's only, so its mid-run switch to another declared model
+  takes no slot (a job with a list holds every listed model's endpoint); a job holds its slot for its whole run, so fan-out
   inside one job can exceed `slots` and the server queues; without a declared worker name the bound is per host;
   an overlay `models.json` that does not parse fails open (`endpoint_models_unreadable`, a fixed reason that
   quotes nothing of the file), no slot taken; lowering `slots` live lets a new job take a lower index while an
@@ -5180,11 +5293,13 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   a hosted service (every model is on a declared endpoint), but a header is a pi config value too and a secret in the
   overlay is a secret in a mounted file, so the rule is the simple one: keyless means no credentials; and (f) every
   model entry is an object with a non-empty string `id`, since pi refuses the whole file over one bad entry and the
-  runner would exit 2 in a started container. The overlay is parsed as plain JSON, so a file pi tolerates (comments,
-  a BOM) is unreadable here and nothing in it is keyless (fail closed). The reader (`readOverlayModels`, the one rule
+  runner would exit 2 in a started container. The overlay is parsed the way pi's `ModelConfig.load` parses it (issue
+  #502, `worker/src/models-json.mjs`, held to pi by a differential test at the pin): a BOM, `//` comments and trailing
+  commas are accepted, and a schema error anywhere refuses the whole document, because pi then loads none of it, so
+  nothing in such a file is keyless (fail closed). The reader (`readOverlayModels`, the one rule
   for the pickup and `doctor`, its keyless line and its credential-free overlay check alike) reads with no existence check first and keeps the read out of the parse's try: an errno
   `isDeterminateFsCode` calls absence is no file, any other errno (EACCES on the file or its directory, EIO, EMFILE,
-  EISDIR) is rethrown with its code, and only a `SyntaxError` or a non-object is a `configError`. A TRANSIENT failure to
+  EISDIR) is rethrown with its code, and only text pi would not load is a `configError`. A TRANSIENT failure to
   read it at pickup is carried in the snapshot as `modelsUnreadable` with its code (the log names the code), and
   `doctor` says ⚠ "could not read models.json (<code>)" rather than calling the provider unknown or the overlay
   credential-free; a file that is read and is not an object is logged as "not a valid models.json", never "unreadable";
@@ -5854,7 +5969,10 @@ this project never grows one.
   fails every job until they act, which is the case this hook exists for. It fits the reason shape, so
   it crosses into argv as itself. The hook's set SPREADS the worker's `RUNNER_POLICY_REASONS` rather
   than listing its members, so every named runner reason pages as `runner-policy` did before it had a
-  label. Never for completions, pre-spend refusals, retried attempts, or `operator-cancel`.
+  label. Never for completions, pre-spend refusals, retried attempts, or `operator-cancel`. A policy result
+  pages unless it says `budgetReserved: false` (issue #502): `model-not-allowed` is both the runner's
+  paid stop and the worker's free pre-spend refusal of a main model off the job's list, and the reason token
+  alone cannot tell them apart. Every paid terminal carries `budgetReserved: true`.
 - **At most once per job, best effort, and NOTHING flows back**: the hook cannot change an outcome
   (fired from listeners outside every deciding try, and `fire` never throws); its exit code and signal
   land in one `on_failure` log line -- pinned key set `{ jobId, code, detail }`, detail one of
@@ -6040,3 +6158,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-02 | Issues #501 and #502, the shared seams for policy stops (no behaviour change when nothing is set). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the meter's stop is ONE reason, first wins (`meterStop`), and `decideExit` ranks `turn_budget` > `meterStop` > `tokenAborted` (the fallback bus meter's flag alone) > a rejected prompt; two rows reserved, enforced by later changes (`cost-cap`, `model-not-allowed`); one live row, a cost cap or a model list the runner cannot enforce before a call (meter not installed, no hard stop, or no pre-call guard, which is every image until the guards land) refuses after the meter installs and before `createAgentSession` as `model-policy-unenforceable` (checked first) or `cost-cap-unenforceable`; `RUNNER_POLICY_REASONS` grows to five and the source bolt accepts an exported literal; five `tokens` names reserved after `unpriced`. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the `reason` enum gains the four, each with a fixed terminal comment; the `tokens` key list gains `costCapMicros`, `costRefused`, `boundExceeded`, `longContext`, `modelRefused` in that order (admitted by the closed list, written by no runner yet); the ledger id pattern widens to `^(?=.{1,64}$)[~@]?[a-z0-9][a-z0-9._:/@_-]*$` in the new pure `worker/src/model-ref.mjs`. Measured over pi-ai 0.99.1's builtin catalog (42 providers, 1,589 ids): the old pattern refused 55 (19 openrouter `~` ids, 18 `cloudflare-ai-gateway` ids with `@` inside, 18 `cloudflare-workers-ai` ids starting `@cf/`), a `~`-only prefix still refused those 18, the adopted `[~@]?` refuses 0, and a test walks the catalog at the pin. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_MAX_COST_MICROS` and `PI_ALLOWED_MODELS` named and reserved in `CONTAINER_ENV_NAMES` (the worker writes neither yet; an empty value is a config error for both), and the three job-feature capability gates are one table, `CAPABILITY_GATES`, with identical behaviour. **`INT-SDK-SESSION-OPTIONS`**: the snippet shows `onStop` and the policy check. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the new refusal is free and pre-spend inside the container, and no worker gate moved. |
 | 2026-10-02 | Issue #502 part 1. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.provider`, `run.model` and `run.maxTurns` are legal on ALL FOUR kinds and validated at load in both services (before, only cron carried them, copied unchecked, so `run.provider: 7` loaded). The grammar lines name the rule: a provider matches `^(?=.{1,64}$)[a-z0-9][a-z0-9._-]*$` lowercased, a model matches the run-history ledger's id pattern lowercased (`MODEL_REF_PATTERN` in `worker/src/model-ref.mjs`, 64 characters), both printable ASCII before lowercasing, the model kept in its original case, `maxTurns` a positive safe integer, and `null` treated as absent for all three because a cron entry's `"model": null` loaded before and meant the default. A new bullet records the near-miss sweep (`providerId`, `providers`, `modelId`, `modelName`, `maxTurn`, `allowedModels` and case or separator variants refused under `run`, every spelling refused under `on`, the suggestion naming the matched field), the upgrade consequence (webhook fields that were ignored now take effect, and a value or key that loaded before can now refuse the file), the deliberate tolerance of the exact keys `run.models` and `run.maxCostUsd` until the release that enforces them, that existence is NOT checked at load, and the absent-stays-absent forwarding with its derived receiver test, which also drives each route's job through `enqueueForgeJob`. The two "pure passthrough" sentences (the `run.image` bullet and **Why**) now say "absent stays absent", and the **Why** sentence says the fields are validated. **`INT-OUTBOX-CONTRACT` UNCHANGED, checked**: chaining exists only for local jobs, which carried these fields before this change, and a child still does not inherit them. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: the precedence `job.data > overlay > env` is what a forge job's new fields enter. **Measured at pi 0.99.1**: the pattern takes an optional leading `~` or `@` (`^(?=.{1,64}$)[~@]?[a-z0-9][a-z0-9._:/@_-]*$`), because without the `@` the 18 builtin `cloudflare-workers-ai` ids (`@cf/...`) could not be named; with it every builtin id passes (all 1,589 distinct ids over 1,592 catalog entries from `getAllBuiltinModels` across 42 providers, its 57 image and 12 classifier models included, 0 refused), and all 42 builtin provider ids pass the provider rule. The pattern itself is the one #533 moved into `model-ref.mjs`; the trigger rule imports that constant rather than restating it, and a test pins that the loader and the ledger agree on every id shape. **Code evidence**: worker/src/model-ref.mjs -> validateModelRef, MODEL_REF_PATTERN, PROVIDER_REF_PATTERN; worker/src/triggers.mjs -> validateRunModel and the five normalizers; receiver/src/config.mjs; receiver/src/filter.mjs; receiver/src/filter-gitlab.mjs; receiver/src/filter-forgejo.mjs; receiver/src/filter-azure.mjs; admin/src/index.ts -> dispatch_trigger_add, dispatch_trigger_edit, buildTriggerEntry; admin/src/read-model.mjs -> normalizeTriggerForDisplay; admin/src/dashboard.ts; receiver/test/trigger-forwarding.test.mjs; worker/test/trigger-forwarding.test.mjs; worker/test/model-ref.test.mjs. |
 | 2026-10-02 | Issue #501, part 2 (the runner's cost guard). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the `cost-cap` row is enforced, no longer reserved: the cost guard refuses a call before it is sent when `spent + in-flight bounds + bound` would pass `PI_MAX_COST_MICROS`, or when the call cannot be bounded (an api outside `PRICED_APIS`, `generateImages`, `streamDeferred`, a classifier with an output rate), and, fail closed, stops a job whose compat half was found displaced (PR #533's review: a legacy call may have passed the cap unseen, and judging cost in the runtime half alone cannot see a legacy call); the refusal logs `cost_refused` with numbers only. The `cost-cap-unenforceable` row now refuses only a cap the runner cannot enforce (a list still refuses until its guard lands). The six cost counters (`costCapMicros`, `costRefused`, `boundExceeded`, `longContext`, `costUnjudged`, the compat entries found displaced under the cap, and `costUnanswered`, the failed calls that never started, both added to the worker's TOKEN_KEYS before `modelRefused`) are written only when a cap is set, so every other exit line is byte-identical except that a rejected call now counts in `unpriced`; `modelRefused` stays reserved. A virtual model is skipped only on `streamSimple`; on any other method it is judged, and refused as unboundable. A samplingParams key outside the price-neutral safe list is unboundable on the three apis that merge them last, and a failed call that STARTED (any content block or output token) is charged at least its bound, and one that never started is charged its metered cost and counted as `costUnanswered`, on every api alike. **`INT-RUN-HISTORY-FILE-CONTRACT`**: `cost-cap` is live on an image that declares `costCap`; only `model-not-allowed` stays reserved. **`unpriced` WIDENS**: a call whose result rejected now counts as unpriced, on its own ledger row, because its cost is unknown; it was counted in `calls` and nowhere else. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the field semantics of the six cost counters, stated as the present contract a later dollar settlement reads, absence meaning no cap, and the `unpriced` change. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `costCap` joins the capability tokens, with a run as its evidence (a job with a fake key and no network under a cap of 0 must exit `2` / `cost-cap` with `costRefused: 1`), the CI workflow binds the token to this repo's image, and a runner from such an image enforces `PI_MAX_COST_MICROS`; the worker still writes neither variable and has no gate row for the token yet. **`INT-SDK-SESSION-OPTIONS`**: the snippet shows the guard and the stop handler. **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: no trigger field yet. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the guard runs inside the container before each call and moves no worker gate. **Code evidence**: image/runner/src/usage-meter.mjs -> callCostBound, PRICED_APIS, createCostGuard, judge, installProcessUsageMeter (arm); image/runner/run-job.mjs; image/Dockerfile; image/verify-image.sh; .github/workflows/pi-upgrade-check.yml. |
+| 2026-10-02 | Issue #502 parts 2, 3 and 5 (the worker half of the model policy). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: NEW `run.models` bullet, on all kinds: 1 to 16 `provider/model` entries split at the first `/`, each half under the `run.provider`/`run.model` rule, `[]` and case-insensitive duplicates refused, `null` absent; the main model must be an exact entry when one trigger names all three; the effective list is `job.data.models ?? PI_ALLOWED_MODELS ?? unrestricted`, the deployment list env-only; no model-callable tool takes it. The `run.provider` bullet's "whether the model exists is not checked" now points at the worker's pre-spend `model-unknown`, and its near-miss paragraph keeps only `run.maxCostUsd` as a tolerated unknown key. **`INT-OUTBOX-CONTRACT` AMENDED**: a chained child inherits `provider`, `model`, `models` (and `maxCostUsd` when present) off the parent's `job.data`, never the request file; the old "deliberately not inherited" reason held only while a model was a preference. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_ALLOWED_MODELS` is written now (the effective list, comma-joined, only when non-empty), `PI_FORWARD_ENV` refuses it at boot, and the capability table gains the `modelPolicy` row (`job-image-model-policy-unsupported`), landing with the first emission of the variable so an image without the runner's guard is refused pre-spend, fail closed. `PI_MAX_COST_MICROS` stays reserved and unwritten. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `model-unknown` and `job-image-model-policy-unsupported`, and a paragraph states the three pre-spend model refusals and that `budgetReserved` tells the free `model-not-allowed` from the paid one. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: the endpoint set is the union over the main model and every entry of the effective list; the keyless verdict is unchanged (every model of the provider); the residual narrows to unrestricted jobs. **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked** (the runner's `model-not-allowed` row lands with part 4). **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: no overlay key added; `KNOWN_KEYS` is pinned to carry no list. **Code evidence**: worker/src/model-ref.mjs -> modelListProblem, splitModelEntry, modelOnList; worker/src/model-catalog.mjs; worker/src/processor.mjs -> the model gates; worker/src/index.mjs -> effectiveJobOf, mainModelEndpoints; worker/src/config.mjs -> allowedModelsFrom; worker/src/env-allowlist.mjs; worker/src/image-preflight.mjs -> CAPABILITY_GATES; worker/src/outbox.mjs; worker/src/queue.mjs; worker/src/schedules.mjs; receiver/src/config.mjs and the four filters; worker/test/model-catalog.test.mjs; worker/test/model-policy.test.mjs; worker/src/models-json.mjs; worker/test/models-json.test.mjs (the differential test against pi's own loader); worker/src/triggers-file.mjs -> AUTHORED_NARROWING_FIELDS; receiver/test/trigger-forwarding.test.mjs. PR #536's review, folded in: `run.models` gains version-skew protection (`trigger-skew`, the wait skew check generalised to a table of authored narrowing fields, failing open where the worker cannot read the triggers file), the main model is checked against chat models only, a present but malformed list refuses (`list-malformed`), an overlay that is a directory refuses (`overlay-is-a-directory`), the overlay `models.json` is read the way pi's `ModelConfig.load` reads it (BOM, comments and trailing commas accepted; a schema error anywhere refuses the whole file), which also changes what the keyless verdict and doctor read, `PI_FORWARD_ENV` refuses every `CONTAINER_ENV_NAMES` member but `HOME`, `PI_ALLOWED_MODELS` refuses whitespace, `dispatch_trigger_edit` validates the merged run, and **`INT-ON-FAILURE-HOOK-CONTRACT` AMENDED**: a policy result pages unless it says `budgetReserved: false`. Review rounds 2 and 3: the skew check stays STRICT (a fail-open on the file's mtime was tried and rejected, since any later write of the file would reopen it), and a model under an overlay provider pi would not COMPOSE (no resolvable `api` or `baseUrl`, a `contextWindow` or `maxTokens` at or below zero, `oauth` without `baseUrl`) is unknown with why `overlay-provider-invalid`, and so is a BUILTIN model of that provider (pi drops the whole entry, so it would run against the public endpoint), held to pi's own `ModelRuntime` by the differential test, which is pinned to pi 0.99.1. |

@@ -162,15 +162,29 @@ export function makeCollectChain({ queue, enqueue = enqueueLocalJob, readFlowGat
 					folder: prepared.workspace,
 					flow,
 					task,
-					// The child runs the parent's OWN folder, so it needs the parent's toolchain by definition -- and
-					// this is where `image` differs from provider/model, which are deliberately NOT inherited. A
-					// fallback provider still runs the flow; a fallback IMAGE gives a child that cannot find its tools,
-					// writes a plausible report and exits 0, which is the queue-reports-success failure class arriving
-					// by the back door. Read off `job.data` -- the parent's own validated job data -- and NEVER off
-					// `req`: the agent cannot choose its child's image any more than it can choose its folder or depth
-					// (INT-OUTBOX-CONTRACT's explicit-property-reads rule). Undefined stays undefined, so a parent with
-					// no image chains a child whose data is byte-identical to today's.
+					// The child runs the parent's OWN folder, so it needs the parent's toolchain by definition: a
+					// fallback IMAGE gives a child that cannot find its tools, writes a plausible report and exits 0,
+					// which is the queue-reports-success failure class arriving by the back door. Read off `job.data`
+					// -- the parent's own validated job data -- and NEVER off `req`: the agent cannot choose its
+					// child's image any more than it can choose its folder or depth (INT-OUTBOX-CONTRACT's
+					// explicit-property-reads rule). Undefined stays undefined, so a parent with no image chains a
+					// child whose data is byte-identical to today's.
 					image: job.data?.image,
+					// Issue #502: provider, model and the allowed-model list are INHERITED, and they used not to be.
+					// The old reason was "a fallback provider still runs the flow", true while a model was only a
+					// preference. Once a trigger can name the models its jobs may call, a child on the deployment
+					// default is a child outside the parent's policy: a cheap-model triage trigger would chain a
+					// child on the dearest model, and a listed parent would chain an unlisted child. Off `job.data`
+					// (the parent's own trigger fields, before the overlay and env fill), never off `req`, so the
+					// agent can neither pick its child's model nor drop the list by omitting a key. A parent whose
+					// trigger named none chains a child that resolves the default at its own start, as before, and
+					// a parent on the deployment's PI_ALLOWED_MODELS chains a child the same env list governs.
+					provider: job.data?.provider,
+					model: job.data?.model,
+					models: job.data?.models,
+					// Issue #501's per-job dollar cap, by the same narrowing rule: a child that dropped it would run
+					// uncapped. Passed through whenever the parent's data carries it; absent stays absent.
+					maxCostUsd: job.data?.maxCostUsd,
 					// #227, and INHERITED for the reason `image` directly above is: a chained child continues its
 					// parent's work, so it belongs in the venue the parent's trigger chose, not silently back on
 					// the deployment default. Written down rather than left to inference because this file's

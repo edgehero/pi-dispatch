@@ -171,7 +171,7 @@ test("loadModelEndpoints refuses an endpoint on VALKEY_URL's port, read from the
 	assert.equal(loadModelEndpoints({ modelEndpointsFile: null, valkeyUrl: "redis://10.0.0.5:6379" }, { cwd: dir }).length, 1);
 });
 
-test("readOverlayModels parses <globalPiDir>/models.json as JSON only, null with no overlay or no file", () => {
+test("readOverlayModels parses <globalPiDir>/models.json as pi does, null with no overlay or no file", () => {
 	const dir = tmp();
 	assert.equal(readOverlayModels(null), null);
 	assert.equal(readOverlayModels(dir), null, "no models.json");
@@ -180,7 +180,12 @@ test("readOverlayModels parses <globalPiDir>/models.json as JSON only, null with
 	writeFileSync(join(dir, "models.json"), "{ nope");
 	assert.throws(() => readOverlayModels(dir), /overlay models\.json is not valid JSON/);
 	writeFileSync(join(dir, "models.json"), "[]");
-	assert.throws(() => readOverlayModels(dir), /overlay models\.json must be an object/);
+	assert.throws(() => readOverlayModels(dir), /overlay models\.json does not match pi's models\.json schema/);
+	// Issue #502: what pi accepts is read, and what pi drops is refused (models-json.test.mjs holds the rule to pi).
+	writeFileSync(join(dir, "models.json"), '\uFEFF{ // overlay\n "providers": { "p": { "models": [ { "id": "m" }, ] } } }');
+	assert.deepEqual(readOverlayModels(dir), { providers: { p: { models: [{ id: "m" }] } } });
+	writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: { p: { models: [{ id: "m", contextWindow: "big" }] } } }));
+	assert.throws(() => readOverlayModels(dir), (e) => e.piDispatchConfig === true && !/big/.test(e.message));
 });
 
 // PR #520 round 2: the READ is outside the parse's try and has no existsSync before it, so an unreadable file is a

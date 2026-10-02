@@ -276,6 +276,11 @@ So the worker no longer trusts the job alone. At the gate it re-reads `triggers.
 that fired against what actually arrived, and refuses **`wait-skew`** before any spend when the file says
 wait and the job does not.
 
+The check is strict on purpose. If you add `waitFor` to a trigger while a job of it is already queued (behind a
+pause window, say), that job is refused `wait-skew` too: re-run it. The worker cannot tell an edit made after
+queueing from a stale service by the file's modification time, because any later write of the file would
+change it.
+
 Two things about that backstop you have to know, because neither announces itself. It **fails open in
 silence**: a `triggers.json` it cannot read means the job runs, and nothing is logged and nothing lands in
 the record. And it reads `PI_TRIGGERS_FILE`, falling back to `triggers.json` in the worker's *current

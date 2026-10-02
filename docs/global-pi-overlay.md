@@ -107,6 +107,14 @@ and reference it as `"apiKey": "$MY_PROVIDER_KEY"`:
 PI_FORWARD_ENV=MY_PROVIDER_KEY      # comma-separated NAMES; forwarded by exact -e NAME=VALUE, never a pass-through
 ```
 
+**Upgrade: models the worker can see.** Since issue #502 the worker checks, before a job spends anything, that
+its main model exists in pi's catalog or in this `models.json` (and every model on its allowed list, see
+[`docs/triggers.md`](triggers.md)). The file is read the way pi reads it: comments and a byte order mark are fine,
+but if pi would drop the file (one wrong-typed field anywhere), the worker refuses every model only it declares.
+A main model that only an extension defines (`pi.registerProvider`) was already refused inside the container,
+after the budget slot; it is now refused for free. Declare it here. A virtual model cannot be the main model:
+set `PI_MODEL` or `run.model` to a physical one.
+
 ### The key is already in pi (on by default)
 
 Logged into pi already? You don't have to restate the key in `.env`. When the provider key is absent from

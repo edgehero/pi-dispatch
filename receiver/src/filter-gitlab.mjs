@@ -140,6 +140,7 @@ export function filterGitLab(subset, triggers, knownFlows, selfId, authorized, d
 		...(resolved.provider !== undefined ? { provider: resolved.provider } : {}),
 		...(resolved.model !== undefined ? { model: resolved.model } : {}),
 		...(resolved.maxTurns !== undefined ? { maxTurns: resolved.maxTurns } : {}),
+		...(resolved.models !== undefined ? { models: resolved.models } : {}),
 		// The trigger's injected skills dir (REQ-PER-TRIGGER-SKILLS), at JOB level beside image/packages and
 		// NEVER inside `trigger`. That placement is sharpest here of all: `trigger` is carried into
 		// /job/event.json, and a worker-host path in an agent-readable file is the leak prepare-local's
@@ -190,7 +191,7 @@ function routeLabel(subset, triggers, targetType) {
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages,
 		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools,
-		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns,
+		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
@@ -255,7 +256,7 @@ function mrResult(subset, rule, matched) {
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages,
 		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools,
-		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns,
+		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
@@ -302,7 +303,7 @@ function routeIssueClose(subset, triggers, authorized) {
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools,
-		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns,
+		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
@@ -337,7 +338,7 @@ function routeMergeRequestClose(subset, triggers, authorized) {
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages,
 		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools,
-		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns,
+		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
@@ -390,7 +391,7 @@ function routeNote(subset, triggers, knownFlows) {
 		...(command !== undefined ? { command } : { flow }),
 		packages: triggers.comment.packages,
 		image: triggers.comment.image, backend: triggers.comment.backend, excludeTools: triggers.comment.excludeTools,
-		provider: triggers.comment.provider, model: triggers.comment.model, maxTurns: triggers.comment.maxTurns,
+		provider: triggers.comment.provider, model: triggers.comment.model, maxTurns: triggers.comment.maxTurns, models: triggers.comment.models,
 		skillsDir: triggers.comment.skillsDir,
 		secrets: triggers.comment.secrets,
 		secretsProfile: triggers.comment.secretsProfile,

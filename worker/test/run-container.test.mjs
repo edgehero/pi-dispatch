@@ -214,6 +214,15 @@ test("the trigger's command reaches the container env, and a commandless job emi
 	assert.ok(!blank.some((a) => String(a).startsWith("PI_COMMAND")));
 });
 
+test("the job's effective model list reaches the container env, and an unrestricted job emits no PI_ALLOWED_MODELS (#502)", { skip }, async () => {
+	const withList = await argvFor({ ...JOB, models: ["anthropic/m", "openai/gpt-x"] });
+	assert.ok(withList.includes("PI_ALLOWED_MODELS=anthropic/m,openai/gpt-x"), "the list must reach the runner, comma-joined");
+	const without = await argvFor(JOB);
+	assert.ok(!without.some((a) => String(a).startsWith("PI_ALLOWED_MODELS")), "an unrestricted job emits no PI_ALLOWED_MODELS at all");
+	const junk = await argvFor({ ...JOB, models: [] });
+	assert.ok(!junk.some((a) => String(a).startsWith("PI_ALLOWED_MODELS")));
+});
+
 test("the trigger's excludeTools reach the container env, and an unflagged job emits no PI_EXCLUDE_TOOLS", { skip }, async () => {
 	// Issue #291: run.excludeTools rides env like PI_COMMAND (a permission boundary is not a fact about
 	// the delivery), so the runner can withhold the tools structurally at createAgentSession.

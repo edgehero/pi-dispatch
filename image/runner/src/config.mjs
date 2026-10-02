@@ -145,8 +145,10 @@ function parseCostMicros(env, name) {
  *     Matching is exact and case-sensitive at the guard, so a padded entry would silently match nothing.
  * Entry text is echoed in the error: it is operator configuration, never payload, like PI_EXCLUDE_TOOLS.
  */
-// env-internal PI_ALLOWED_MODELS: the worker's own per-job input (INT-CONTAINER-RUNTIME-CONTRACT), resolved from
-// the trigger and the deployment default; the container env is BUILT, never inherited, and `run.secrets` cannot bind it.
+// The worker's own per-job input (INT-CONTAINER-RUNTIME-CONTRACT): the job's effective list, resolved from the trigger
+// and the deployment's PI_ALLOWED_MODELS. No env-internal marker since issue #502, because .env.example documents the
+// name (the worker's deployment default), like PI_PROVIDER. The container env is BUILT, never inherited, and neither
+// `run.secrets` nor PI_FORWARD_ENV can set it.
 function parseAllowedModels(env, name) {
 	const raw = env[name];
 	if (raw === undefined) return null;

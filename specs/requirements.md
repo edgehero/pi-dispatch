@@ -422,7 +422,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   refusal of the credential or of access (an authentication or permission error, whatever its HTTP
   status), and its sentence tells the requester the operator must check the provider key and what it is
   allowed to use; and, since issues #501/#502, the four policy stops, each with its own fixed sentence:
-  `cost-cap` ("Stopped: the next AI call could have taken this run past its cost limit, so it was not made. Partial work may exist. Not retried.") and `model-not-allowed` ("Stopped: the run tried to call an AI model this trigger does not allow, so the call was not made. Partial work may exist. Not retried."), `cost-cap` live on an image that declares `costCap` (its runner's pre-call cost guard stopped a call) and `model-not-allowed` still reserved for the model guard; and `cost-cap-unenforceable` ("Stopped: this run has a cost limit, and the job image could not enforce it before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.") and `model-policy-unenforceable` ("Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried."), live now, the runner having refused before any call a cost cap or a model list it cannot enforce before a call), and the final infrastructure failure.
+  `cost-cap` ("Stopped: the next AI call could have taken this run past its cost limit, so it was not made. Partial work may exist. Not retried.") and `model-not-allowed` ("Stopped: the run tried to call an AI model this trigger does not allow, so the call was not made. Partial work may exist. Not retried."), `cost-cap` live on an image that declares `costCap` (its runner's pre-call cost guard stopped a call) and `model-not-allowed`, as the runner's paid stop, still reserved for the model guard (#502 part 4; the same token is already live as the worker's FREE pre-spend refusal of a main model off the job's list, which posts its own refusal comment and pages nobody); and `cost-cap-unenforceable` ("Stopped: this run has a cost limit, and the job image could not enforce it before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.") and `model-policy-unenforceable` ("Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried."), live now, the runner having refused before any call a cost cap or a model list it cannot enforce before a call), and the final infrastructure failure.
   Once-ness for the infra class is BullMQ's own terminal decision
   (`finishedOn`, set only on the non-retry branch): a retried attempt comments nothing, so a flaky
   daemon cannot post three comments for one recovery, and the seam that reads it also covers the
@@ -1412,6 +1412,59 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `job-image-exclude-tools-unsupported`, no token minted and no budget reserved. Given a chained child
   of a parent carrying exclusions, the child's data carries them verbatim regardless of the request
   file's contents.
+
+## REQ-MODEL-POLICY
+
+- **Statement**: A trigger may name the models its jobs may call (`run.models`, an allowed-model list),
+  a deployment may name a default list (`PI_ALLOWED_MODELS`), and a job's models shall be known to exist
+  before anything is spent. The worker half (issue #502 parts 2, 3 and 5): a job whose main model or any
+  listed model is in neither pi's builtin catalog at the pin nor the overlay `models.json` is refused
+  pre-spend (`model-unknown`); a job whose main model is not on its effective list is refused pre-spend
+  (`model-not-allowed`); the effective list reaches the container as `PI_ALLOWED_MODELS`, only on an image
+  that declares it can enforce one (`modelPolicy`); and a chained child keeps its parent's provider, model
+  and list. The runner half (part 4) stops a call on an unlisted model at the provider wrapper. Absent
+  everywhere, a trigger's job data and its container environment are byte-identical to before; the free
+  model-exists gate is the one thing every job now passes through, and an outbox child now carries its
+  parent's trigger provider and model (absent when the parent's trigger named none).
+- **Scope**: All five run kinds. The effective list is the trigger's if present, else the deployment's,
+  else unrestricted (today's behaviour); the trigger's REPLACES the deployment's. Operator-authored config
+  only: the deployment list is read from the environment, never the settings overlay, and no model-callable
+  tool can set or widen either list. Only the main provider's credential is checked pre-spend; another
+  listed provider's key may legitimately arrive through `run.secrets`, resolved later. Models an extension
+  defines inside the job (`pi.registerProvider`, a virtual model) cannot be seen by the worker, so a list
+  naming one is refused as unknown: a flow that needs one declares the physical models in the overlay
+  `models.json` and lists those. The overlay is judged as pi 0.99.1 judges it, at its loader (a file pi
+  would drop is refused, a file pi accepts is read) and at its provider composition (a model under a
+  provider pi would not compose is unknown, and so is a builtin model of that provider, which would
+  otherwise run without the overlay's endpoint), held to pi's own code at the pin by a differential test. A list the receiver dropped (version skew, or a stale single-file
+  mount) is refused as `trigger-skew` when the worker can read the triggers file itself.
+- **Why**: An unknown model used to cost a container and a budget slot to discover (the runner asked pi,
+  after both reserves, and exited 2). A model choice that is only a preference lets a cheap triage trigger
+  chain a child on the deployment's dearest model, and a deployment that must never reach a model had no
+  way to say so short of a separate deployment. The hazard is the SILENT half again: a list an old image
+  ignores runs every model it forbids on a clean exit, so the image capability refuses first; a list the
+  overlay could carry is one a model-callable tool could widen, so it is env-only.
+- **Traces to**: `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`,
+  `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-OUTBOX-CONTRACT`, `INT-MODEL-ENDPOINTS-FILE-CONTRACT`,
+  `INT-RUNNER-EXIT-CODE-PROTOCOL`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`
+- **Acceptance**: Given a malformed, empty, oversized or duplicate-carrying `run.models`, or one that omits
+  the trigger's own `run.provider`/`run.model`, the file refuses at load in every service. Given a job whose
+  main model or a listed model is unknown, the job is refused `model-unknown` with no token minted, no clone
+  and no reservation. Given `PI_ALLOWED_MODELS` without the deployment's default model, or a
+  `dispatch_set model` that moves a trigger's default off its list, the job is refused `model-not-allowed`
+  pre-spend, and the failure hook stays silent. Given an overlay `models.json` that cannot be read for a
+  transient reason, the job is retried as infra, not refused. Given an overlay `models.json` pi would drop
+  (a wrong-typed field anywhere), a job on one of its models is refused `model-unknown`; given one pi
+  accepts with comments or a BOM, the model is known. Given a trigger whose authored `run.models` the job
+  arrived without, the job is refused `trigger-skew` pre-spend, also when the field was added after the job
+  was queued (strict, because any later write of the file would otherwise defeat the check; the comment says
+  to re-run it). Given an image or classifier model as the
+  main model, the job is refused `model-unknown`. Given a job with a list on an image that does
+  not declare `modelPolicy`, it is refused `job-image-model-policy-unsupported` pre-spend. Given a chained
+  child of a listed parent, the child's data carries the parent's provider, model and list whatever the
+  request file says. Given a job with a list whose models are served by declared model endpoints, it holds
+  one slot of every such endpoint. Given no list anywhere, a trigger's job data and the container argv are
+  byte-identical to before; an outbox child differs only by inheriting its parent's trigger provider and model.
 
 ## REQ-GLOBAL-PI-OVERLAY
 
@@ -2693,6 +2746,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-02 | Issue #502 parts 2, 3 and 5. **NEW `REQ-MODEL-POLICY`** (the worker half; the runner half lands with part 4): a trigger's `run.models` and the deployment's env-only `PI_ALLOWED_MODELS` name the models a job may call, the trigger's replacing the deployment's, unrestricted when neither is set; a job whose main or listed model is unknown to pi's catalog and the overlay `models.json` is refused `model-unknown` pre-spend; a main model off the effective list is refused `model-not-allowed` pre-spend and pages nobody; a list reaches only an image declaring `modelPolicy`; a chained child keeps its parent's provider, model and list; a listed job holds every listed model's endpoint slot. **`REQ-PER-TRIGGER-TOOL-EXCLUSIONS` UNCHANGED, checked** (its inheritance rule is the precedent, not changed). **`REQ-OPERATOR-FAILURE-NOTIFICATION` UNCHANGED, checked**: its Excluded clause already names every free pre-spend refusal; the hook now honours it for the one reason that is both. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: both new gates are free and sit with the free gates, before the mint, the clone, the token-cap read and every reservation. PR #536's review, folded in: a list the receiver dropped is refused `trigger-skew` where the worker can read the triggers file; the overlay is read as pi reads it; the main model must be a chat model; the Statement's byte-identical claim is narrowed to job data and container env, since the free model-exists gate now runs for every job. Review round 2: the overlay claim is narrowed to pi 0.99.1's loader and provider composition, both held by the differential test; the byte-identical claim names the outbox child's inherited provider and model; the skew check stays strict, a job queued before the field was added included; a builtin model whose provider has an overlay entry pi would not compose is refused, since pi would drop that entry's endpoint. **`REQ-WAIT-FOR` UNCHANGED, checked**: its skew stays strict, and `models` joins it on the same terms. **`REQ-JOB-STATUS-COMMENTS` AMENDED**: `model-not-allowed`'s sentence says the token is live as the worker's free refusal while the runner's stop stays reserved for #502 part 4. |
 | 2026-10-02 | Issue #501, part 2 (the runner's cost guard). **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**: a new (d), the optional per-job cost cap `PI_MAX_COST_MICROS`, enforced by the runner before every provider call against a worst-case bound (`DES-DOLLAR-RESERVE-AND-SETTLE`), exit `2` / `cost-cap`, and refused before any call by a runner that cannot enforce it; the Why says why a dollar cap cannot lag the way a token cap does, and the Acceptance gains the offline sequential, parallel, compaction, cap-of-0 and no-cap clauses. (a), (b) and (c) are UNCHANGED, checked, except that a call whose result rejected now counts as unpriced. **`REQ-COST-ANALYTICS` UNCHANGED, checked**: its floor rule (d) already renders any run with `unpriced > 0` as a floor, so the widened `unpriced` only marks more runs as floors, the honest direction, and no label or fold changes. **`REQ-JOB-STATUS-COMMENTS` AMENDED**, the who-authors clause: `cost-cap` is live on an image that declares `costCap` and only `model-not-allowed` stays reserved; the sentences themselves are unchanged. **Code evidence**: image/runner/src/usage-meter.mjs -> callCostBound, createCostGuard; image/runner/run-job.mjs. |
 | 2026-10-02 | Issues #501 and #502, the shared seams for policy stops. **`REQ-JOB-STATUS-COMMENTS` AMENDED**, the who-authors clause: the worker's fixed terminal sentences gain the four policy stops, `cost-cap` and `model-not-allowed` (reserved, enforced by later changes) and `cost-cap-unenforceable` and `model-policy-unenforceable` (live: a job image that cannot enforce a cost cap or a model list before a call refuses before any call). Each is fixed and path-free and names neither the amount nor the model. The Statement and the Acceptance are UNCHANGED, checked: exactly one completion or failure comment per job, still. **Code evidence**: worker/src/processor.mjs -> TERMINAL_COMMENTS; worker/src/run-history.mjs -> RUNNER_POLICY_REASONS. |
 | 2026-10-02 | Issue #524. **`REQ-AI-TRIGGERED-RUNS` AMENDED**, the Acceptance: `dispatch_run` and `/dispatch run` refuse a folder that is not a repository's root with a commit, with the CLI's own sentence, and say when the one-minute dedup swallowed a run instead of reporting a new job. The Statement, Scope and gate are UNCHANGED, checked: both checks are free and run before the enqueue, and neither path gains a force option. |

@@ -223,8 +223,25 @@ The file is checked when it loads, in the worker and in the receiver:
   and the job would run on the default model while the file reads as though it chose one. The same
   keys under `on` are refused in every spelling.
 
-The load check does not ask whether the model exists. A typo that fits the rule still loads. The job is
-then refused inside the container, after it has taken its budget slot.
+The load check does not ask whether the model exists, because the answer depends on each worker's
+pi version and overlay. The worker asks instead, when a job starts and before it spends anything: a
+model that is in neither pi's model catalog nor the overlay `models.json` is refused as `model-unknown`.
+No token is minted, nothing is cloned and no budget slot is taken. The model a job runs on must be a
+chat model; an image or classifier model can only be a list entry (below). The overlay `models.json` is
+read the way pi reads it: comments, a byte order mark and trailing commas are fine, but one wrong-typed
+field anywhere makes pi drop the whole file, so the worker refuses every model only that file declares
+(`model-unknown`, with `overlay-unparseable` in the worker log). pi also drops a provider it cannot put
+together: a model with no `api` or `baseUrl` to be found, a `contextWindow` or `maxTokens` of zero or less, or
+`oauth` without a `baseUrl`. pi then ignores that provider's whole entry, its `baseUrl` and headers
+included, so every job on that provider is refused (`overlay-provider-invalid`): an overlay model of it does
+not exist, and a builtin one would quietly run against the provider's public endpoint instead of yours.
+
+**Upgrading: the model check.** It covers the deployment default too (`PI_MODEL`, or the settings overlay), not
+only a trigger's own model. A main model that only an extension defines inside the job
+(`pi.registerProvider`) was already refused before this release, inside the container and after the job
+had taken its budget slot. It is now refused before anything is spent. Declare such a model in the overlay
+`models.json`. A virtual model (`pi.registerVirtualModel`) cannot be the main model: set `PI_MODEL` or
+`run.model` to a physical one.
 
 `dispatch_trigger_add` and `dispatch_trigger_edit` can set `provider` and `model`, behind the same
 operator confirm as every other trigger write. Both check the value with the same rule before they ask.
@@ -238,6 +255,56 @@ space, more than 64 characters) now refuses the whole file, in the worker and in
 does a misspelled key such as `modelId`. A `null` value is still accepted on every trigger type and
 means the deployment default, as it did before. Run `pi-dispatch doctor` after upgrading to see any such
 line.
+
+## Limiting which models a job may call
+
+`"models"` lists the models a trigger's jobs may call, on any trigger type:
+
+```json
+{ "on": { "type": "label", "any": ["pi:triage"] },
+  "run": { "kind": "github", "flow": "triage", "provider": "openai", "model": "gpt-5.4-mini",
+           "models": ["openai/gpt-5.4-mini", "anthropic/claude-haiku-4-5"] } }
+```
+
+- Each entry is `provider/model`. It is split at the first `/`, so a model id may carry more slashes
+  (`openrouter/~anthropic/claude-sonnet-latest`). Each half follows the rules above.
+- A list has 1 to 16 entries. An empty list is refused: leave the field out for no limit.
+- An entry that repeats another, ignoring case, is refused.
+- When the trigger names `provider`, `model` and `models` together, the main model must be on the list,
+  spelled exactly as in the list. Otherwise the file is refused, because every job would be.
+
+A deployment can set a default list with `PI_ALLOWED_MODELS` in `.env`, in the same form, comma
+separated, with no spaces (a shell that sources `.env` cuts the value at a space and leaves it unset, so
+the worker refuses a spaced value at boot, and `pi-dispatch doctor` names it). A trigger's own `models` replaces it for that trigger's jobs. With neither, a job may call any
+model, as before. The default list is read from the environment only. The settings overlay cannot set
+it, so no AI tool can widen it.
+
+Before a job spends anything, the worker checks every model on its list exists (`model-unknown`), and
+that the model the job runs on is on the list (`model-not-allowed`). The second catches a default model
+that is not on `PI_ALLOWED_MODELS`, and a `dispatch_set model` that moves the default off a trigger's list.
+Inside the container the runner stops any call to a model that is not on the list.
+
+The list reaches the container only on a job image that declares the `modelPolicy` capability. On an
+older image a job with a list is refused before it spends (`job-image-model-policy-unsupported`), never
+run without its limit.
+
+A chained job (`/outbox`) keeps its parent's provider, model and list. A request file cannot change them.
+
+If a listed model is served by a declared model endpoint ([`docs/egress.md`](egress.md)), the job holds
+a slot on that endpoint too, not only on its main model's.
+
+No AI tool can set `models`. Edit the file. `dispatch_trigger_edit` refuses, before it asks, a new
+provider or model that is not on the trigger's own list.
+
+**Upgrading, and services out of step.** A receiver from before this release does not know `models` and
+drops it, and so does a current one that still reads an old copy of the triggers file (compose's
+single-file `:ro` mount keeps the old file until the receiver restarts). The job would then run on the
+deployment's list, or on none. The worker reads the triggers file itself and refuses such a job before it
+spends (`trigger-skew`, naming the field), the way it refuses a job that lost its `waitFor`. It can only do
+that when it can read the file: `PI_TRIGGERS_FILE`, else `triggers.json` in the worker's folder. A worker
+that cannot read it cannot see the gap. The check is strict: adding `models` to a trigger refuses the jobs of
+it that were already queued (`trigger-skew`), and the comment says so. Re-run them. Upgrade the worker and the receiver together, and restart the
+receiver after editing the file.
 
 Everything else is editable from the panel (`a` adds kind-first, `e` edits the flow, `x` deletes) or via
 the confirm-gated AI tools. Every write is validated. Both services reload it live. The worker itself

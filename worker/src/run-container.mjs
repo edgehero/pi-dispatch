@@ -123,6 +123,9 @@ export function makeRunContainer({
 			// non-empty validated array; the guard is the same defensive shape `flow` above wears, so a
 			// hand-built job with junk in the field emits no variable rather than an empty one.
 			excludeTools: Array.isArray(job.excludeTools) && job.excludeTools.length > 0 ? job.excludeTools : undefined,
+			// Issue #502: the effective allowed-model list, off `job` like excludeTools. index.mjs `effectiveJobOf` folds
+			// the deployment's PI_ALLOWED_MODELS in under the trigger's own, so `job.models` is already the one list.
+			allowedModels: Array.isArray(job.models) && job.models.length > 0 ? job.models : null,
 			authFromPi, // source the provider key from pi's auth.json when the env has none
 			// REQ-TRIGGER-SECRETS: this trigger's resolved secrets, fetched by the processor BEFORE anything
 			// spent. Off the call bag rather than off `job` or the closure: it is neither a per-job fact the

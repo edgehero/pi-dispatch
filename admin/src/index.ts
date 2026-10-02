@@ -647,6 +647,9 @@ function registerTools(pi: ExtensionAPI): void {
           return {};
         }
       })();
+      // #502 (PR #536's review): the MERGED run, before the confirm. A new provider or model checked alone passes, and
+      // only the write's parse would then find it off the trigger's own `run.models`, after the operator approved it.
+      validateModelRef({ ...rawRun, ...ref }, `trigger #${params.index + 1}`, paths.triggersPath);
       const modelLine = ["provider", "model"].filter((k) => (ref as any)[k] !== undefined).map((k) => `, ${k}: ${rawRun[k] ?? "-"} -> ${(ref as any)[k]}`).join("");
       const result = await confirmedWrite(
         ctx,

@@ -32,7 +32,7 @@ export const MODEL_REF_PATTERN = /^(?=.{1,64}$)[~@]?[a-z0-9][a-z0-9._:/@_-]*$/;
  */
 export const PROVIDER_REF_PATTERN = /^(?=.{1,64}$)[a-z0-9][a-z0-9._-]*$/;
 /**
- * Validate the optional `run.provider`, `run.model` and `run.maxTurns` of one trigger (issue #502) and return
+ * Validate the optional `run.provider`, `run.model`, `run.maxTurns` and `run.models` of one trigger (issue #502) and return
  * the fields that were present, so a normalizer can spread them and an absent field stays absent. Shared by
  * the trigger loader and the console, so both refuse with the same words.
  *
@@ -75,5 +75,77 @@ export function validateModelRef(run, at, path) {
 		}
 		out.maxTurns = run.maxTurns;
 	}
+	// `run.models` (issue #502): the models this trigger's job may call. Null is absent, the rule above.
+	if (run?.models != null) {
+		const problem = modelListProblem(run.models);
+		if (problem !== null) throw configError(`${at}: run.models ${problem}: ${path}`);
+		// The main model must be on its own list, refused HERE when the trigger names all three, because the
+		// file alone answers it. When the provider or the model comes from the deployment default instead,
+		// the worker answers it at job start (`model-not-allowed`, pre-spend).
+		if (out.provider !== undefined && out.model !== undefined && !modelOnList(run.models, out.provider, out.model)) {
+			throw configError(`${at}: run.models does not list this trigger's own run.provider/run.model, so every job it starts would be refused: ${path}`);
+		}
+		out.models = [...run.models];
+	}
 	return out;
+}
+
+/** The most entries an allowed-model list may carry (issue #502). Past this a list is a catalog, not a policy. */
+export const MAX_ALLOWED_MODELS = 16;
+
+/**
+ * One allowed-model entry, `provider/model`, split at the FIRST `/` (issue #502): a provider id carries no `/`
+ * while a model id may (`openrouter`'s `vendor/model`, cloudflare's `@cf/vendor/model`). The runner splits the
+ * same way (`image/runner/src/config.mjs`). Each half passes the same rule `run.provider` and `run.model` do,
+ * ASCII checked before lowercasing for the reason `validateModelRef` gives. Returns `{ provider, model }` in
+ * the ORIGINAL case, or `null` when the entry is malformed.
+ */
+export function splitModelEntry(entry) {
+	if (typeof entry !== "string" || !/^[\x21-\x7E]+$/.test(entry)) return null;
+	const slash = entry.indexOf("/");
+	if (slash <= 0) return null;
+	const provider = entry.slice(0, slash);
+	const model = entry.slice(slash + 1);
+	if (!PROVIDER_REF_PATTERN.test(provider.toLowerCase()) || !MODEL_REF_PATTERN.test(model.toLowerCase())) return null;
+	return { provider, model };
+}
+
+/**
+ * An allowed-model list (issue #502), from a trigger's `run.models` or the deployment's `PI_ALLOWED_MODELS`:
+ * the problem as a sentence, or null when the list is good. ONE rule for both sources, so a list an operator
+ * moves from a trigger into the env (or back) means the same thing in both places.
+ *   - 1 to 16 entries. EMPTY is refused, never read as "unrestricted" or as "nothing allowed": the first fails
+ *     open, the second refuses every call of a job whose operator meant something else, and an empty list in a
+ *     reviewed file is more likely a template bug than either. Absent (or null) is how a list says "none".
+ *   - every entry `provider/model`, see `splitModelEntry`.
+ *   - no duplicates, compared CASE-INSENSITIVELY. Matching at the runner is exact, so `openai/GPT-x` beside
+ *     `openai/gpt-x` is at best a dead entry and at worst the one that was meant; either way it is a typo the
+ *     file should not keep, and the run record's ledger lowercases ids, where the two would be one row.
+ * The entry text is never echoed: the position is, and the console renders this message to a model.
+ */
+export function modelListProblem(list) {
+	if (!Array.isArray(list)) return "must be an array of provider/model strings";
+	if (list.length === 0) return "must not be empty (leave it out for no restriction)";
+	if (list.length > MAX_ALLOWED_MODELS) return `must have at most ${MAX_ALLOWED_MODELS} entries`;
+	const seen = new Set();
+	for (let i = 0; i < list.length; i++) {
+		if (splitModelEntry(list[i]) === null) return `entry ${i + 1} must be provider/model: a provider id, a slash, then a model id (each 1 to 64 characters, no spaces)`;
+		const key = list[i].toLowerCase();
+		if (seen.has(key)) return `entry ${i + 1} repeats an earlier entry (compared ignoring case)`;
+		seen.add(key);
+	}
+	return null;
+}
+
+/**
+ * Is `provider/model` on the list? EXACT and case-sensitive, the runner guard's rule, because pi resolves model
+ * ids case-sensitively: an entry differing only in case names a model pi would not pick. Both halves are
+ * compared, so a list naming `openai/x` does not admit `azure-openai-responses/x`.
+ */
+export function modelOnList(list, provider, model) {
+	if (!Array.isArray(list)) return true;
+	return list.some((entry) => {
+		const ref = splitModelEntry(entry);
+		return ref !== null && ref.provider === provider && ref.model === model;
+	});
 }

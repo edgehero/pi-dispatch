@@ -31,6 +31,7 @@ import { PROXY_LOCAL_ADDRESSES, isProxyLocalHost } from "./backends.mjs";
 import { configError } from "./config.mjs";
 import { KEYLESS_ENV_NAME } from "./reserved-env.mjs";
 import { isDeterminateFsCode } from "./transient.mjs";
+import { parseModelsJson } from "./models-json.mjs";
 
 /** The schema version this build reads. A file declaring a higher one is refused loudly. */
 export const MODEL_ENDPOINTS_VERSION = 1;
@@ -251,7 +252,9 @@ export function loadModelEndpoints(config, { readFileSync = fsReadFileSync, exis
  *     ENOTDIR, ELOOP, ENAMETOOLONG);
  *   - ANY other fs error is RETHROWN as-is, its `code` intact (EACCES, EIO, EMFILE, EISDIR...): the file may be readable
  *     in a minute, so a caller must be able to tell this from a verdict, and the keyless gate retries on it;
- *   - text that does not parse, or is not an object, is a `configError`: a determinate fault the operator fixes.
+ *   - text pi would not load is a `configError`: a determinate fault the operator fixes. "Would not load" is pi's own
+ *     rule since issue #502 (`parseModelsJson`): a BOM, `//` comments and trailing commas are fine, and a schema
+ *     error anywhere in the document refuses all of it, because pi drops the whole file over one.
  * The read is NOT inside the parse's try, and there is no `existsSync` first. Both were here (PR #520 round 2): the
  * try turned EACCES and EIO into "not valid JSON", a permanent public refusal, and `existsSync` answers false for a
  * file under an unreadable directory, which read as absence. A read that throws is the only honest question.
@@ -266,15 +269,11 @@ export function readOverlayModels(globalPiDir, { readFileSync = fsReadFileSync }
 		if (isDeterminateFsCode(error?.code)) return null;
 		throw error;
 	}
-	let parsed;
-	try {
-		parsed = JSON.parse(text);
-	} catch (error) {
-		if (!(error instanceof SyntaxError)) throw error;
-		throw configError(`overlay models.json is not valid JSON: ${path} (${error.message})`);
-	}
-	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw configError(`overlay models.json must be an object: ${path}`);
-	return parsed;
+	// Parsed the way pi parses it (issue #502, `models-json.mjs`): a BOM, `//` comments and trailing commas are
+	// accepted, and a document pi's schema refuses anywhere is refused whole, because pi then loads none of it.
+	const { value, error } = parseModelsJson(text);
+	if (error !== undefined) throw configError(`overlay models.json ${error}: ${path}`);
+	return value;
 }
 
 /**
@@ -371,8 +370,8 @@ export const KEYLESS_HOW = `for a custom provider served by a local model server
  *   - every model entry is an object with a non-empty string `id`. pi validates models.json strictly and refuses the
  *     WHOLE file over one bad entry, so skipping it here would pass a job whose runner then exits 2 in a container.
  *
- * The overlay is read as plain JSON (`readOverlayModels`), so a file pi would still read (comments, a BOM) is
- * unreadable here and nothing in it is keyless: fail closed.
+ * The overlay is read the way pi reads it (`readOverlayModels`, issue #502): a file pi loads (comments, a BOM, a
+ * trailing comma) is read here too, and a file pi drops is refused here, so nothing in it is keyless: fail closed.
  *
  * Whether pi itself knows the provider is NOT asked here: this module never imports pi. The callers ask that first,
  * with the same predicate as the credential gate (`env-allowlist.mjs`), and only an unknown provider reaches this.

@@ -163,6 +163,7 @@ export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthori
 		...(resolved.provider !== undefined ? { provider: resolved.provider } : {}),
 		...(resolved.model !== undefined ? { model: resolved.model } : {}),
 		...(resolved.maxTurns !== undefined ? { maxTurns: resolved.maxTurns } : {}),
+		...(resolved.models !== undefined ? { models: resolved.models } : {}),
 		// The trigger's injected skills dir (REQ-PER-TRIGGER-SKILLS), at JOB level beside image/packages and
 		// NEVER inside `trigger`. That placement is sharpest here of all: `trigger` is carried into
 		// /job/event.json, and a worker-host path in an agent-readable file is the leak prepare-local's
@@ -218,7 +219,7 @@ function routeIssueLabel(subset, triggers) {
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools,
-		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns,
+		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
@@ -279,7 +280,7 @@ function routeComment(subset, triggers, knownFlows) {
 		// <flow>` override changes WHICH flow runs, never which triggers.json entry authorized it.
 		packages: triggers.comment.packages,
 		image: triggers.comment.image, backend: triggers.comment.backend, excludeTools: triggers.comment.excludeTools,
-		provider: triggers.comment.provider, model: triggers.comment.model, maxTurns: triggers.comment.maxTurns,
+		provider: triggers.comment.provider, model: triggers.comment.model, maxTurns: triggers.comment.maxTurns, models: triggers.comment.models,
 		skillsDir: triggers.comment.skillsDir,
 		secrets: triggers.comment.secrets,
 		secretsProfile: triggers.comment.secretsProfile,
@@ -378,7 +379,7 @@ function routePullRequest(subset, triggers, action) {
 			...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 			packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 			image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools,
-			provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns,
+			provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models,
 			skillsDir: rule.skillsDir,
 			secrets: rule.secrets,
 			secretsProfile: rule.secretsProfile,
@@ -495,7 +496,7 @@ function routeClose(rules, number, closerAuthorized, matchedFor, targetFor) {
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools,
-		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns,
+		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,

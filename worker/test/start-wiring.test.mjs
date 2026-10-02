@@ -2122,6 +2122,20 @@ test("PI_ON_FAILURE fires for the paid terminals only: terminal-failed and polic
 	assert.equal((await fired(() => handlers.completed({ id: "j5" }, { outcome: "policy", reason: "over-budget" }))).length, 0, "a free pre-spend refusal already comments; a delivery storm must not page");
 	assert.equal((await fired(() => handlers.completed({ id: "j6" }, { outcome: "policy", reason: "operator-cancel" }))).length, 0, "the operator initiated it; a push saying what they just did is noise");
 	assert.equal((await fired(() => handlers.failed({ id: "j7", data: { kind: "github", repo: "o/r" }, attemptsMade: 1 }, new Error("x")))).length, 0, "a retried attempt pages nobody");
+	// Issue #502: `model-not-allowed` is also the worker's FREE pre-spend refusal, and only the paid one pages.
+	assert.equal((await fired(() => handlers.completed({ id: "j8" }, { outcome: "policy", reason: "model-not-allowed", budgetReserved: false }))).length, 0, "the free refusal of a main model off the list pages nobody");
+	assert.equal((await fired(() => handlers.completed({ id: "j9" }, { outcome: "policy", reason: "model-not-allowed", budgetReserved: true }))).length, 1, "the runner's paid stop still pages");
+});
+
+test("issue #502: the model gates are wired: the real catalog, and PI_ALLOWED_MODELS from env into the processor's deps", { skip }, async () => {
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const listed = await runStart({ env: { PI_ALLOWED_MODELS: "anthropic/claude-haiku-4-5,openai/gpt-x" }, makeAuth, makeHost: () => fakeHost() });
+	assert.deepEqual(listed.deps.allowedModels, ["anthropic/claude-haiku-4-5", "openai/gpt-x"], "the env list reaches the processor through deps");
+	assert.equal(typeof listed.deps.checkModelsKnown, "function", "the model-exists gate is wired, not left at its admit-everything default");
+	assert.deepEqual(listed.deps.checkModelsKnown([{ provider: "anthropic", id: "claude-sonnet-9", main: true }]), { unknown: { provider: "anthropic", id: "claude-sonnet-9" }, why: "not-in-catalog" });
+	assert.deepEqual(listed.deps.checkModelsKnown([{ provider: "anthropic", id: "claude-haiku-4-5", main: true }]), { ok: true });
+	const plain = await runStart({ makeAuth, makeHost: () => fakeHost() });
+	assert.equal(plain.deps.allowedModels, null, "unset is unrestricted");
 });
 
 test("with PI_ON_FAILURE unset, a terminal failure produces no on_failure line and the existing lines are unchanged", { skip }, async () => {

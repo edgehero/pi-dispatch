@@ -11,6 +11,7 @@ import { targetFor } from "./run-history.mjs";
 import { isPerMachineHost } from "./backends.mjs";
 import { hash16 } from "./fleet-lease.mjs";
 import { endpointsForModel } from "./model-endpoints.mjs";
+import { splitModelEntry } from "./model-ref.mjs";
 import { budgetCapsFor, canonicalScope, concurrencyFor, makeInFlight } from "./scoped-limits.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
 import { makeWaitState } from "./wait-state.mjs";
@@ -126,12 +127,21 @@ function boundAfterAbort(run, signal, job, log, graceMs = ABORT_GRACE_MS) {
  * because that gate needs the effective provider and model, which the overlay can supply.
  */
 /**
- * A job's endpoint set (issue #503): the endpoints its MAIN model is served by. A seam, because the set grows when
- * allowed-model lists land (#502) and the gate's loop is written for more than one endpoint already; the default is
- * the whole rule today, and the residual is that a model the agent switches to mid-run is not counted.
+ * A job's endpoint set (issues #503, #502): the endpoints its main model AND every model on its effective allowed
+ * list are served by, so a job that may switch to a listed model on another local server holds that server's slot
+ * too. The caller deduplicates by endpoint id. With no list it is the main model's alone, and the residual stays
+ * as #503 named it: an unrestricted job's mid-run switch to an undeclared model takes no slot. The keyless verdict
+ * is a different question ("every model of the provider", `keylessVerdict`) and does not read this set.
+ *
+ * `models` here is the parsed overlay models.json (the endpoint module's name for it); the list is `job.models`.
  */
 export function mainModelEndpoints({ models, job, endpoints }) {
-	return endpointsForModel({ models, provider: job.provider, modelId: job.model, endpoints });
+	const set = endpointsForModel({ models, provider: job.provider, modelId: job.model, endpoints });
+	for (const entry of Array.isArray(job.models) ? job.models : []) {
+		const ref = splitModelEntry(entry);
+		if (ref !== null) set.push(...endpointsForModel({ models, provider: ref.provider, modelId: ref.model, endpoints }));
+	}
+	return set;
 }
 
 /**
@@ -139,13 +149,18 @@ export function mainModelEndpoints({ models, job, endpoints }) {
  * ONE function for the two readers (the endpoint gate at pickup and the runJob call), so the gate can never lease
  * for a model other than the one the container is started with.
  */
-export function effectiveJobOf(data, settings) {
+export function effectiveJobOf(data, settings, allowedModels = null) {
+	// Issue #502: the allowed-model list is the trigger's, else the deployment's PI_ALLOWED_MODELS, else none. The
+	// env list arrives as its own argument and never through `settings`, which the overlay (and so `dispatch_set`)
+	// writes. Absent stays absent, so an unrestricted job's effective job has no `models` key at all.
+	const models = data.models ?? allowedModels ?? null;
 	return {
 		...data,
 		provider: data.provider ?? settings.provider,
 		model: data.model ?? settings.model,
 		maxTurns: data.maxTurns ?? settings.maxTurns,
 		maxTokens: data.maxTokens ?? settings.maxTokens, // optional per-job token budget (issue #25); null => runner meter only
+		...(models !== null ? { models } : {}),
 	};
 }
 
@@ -590,9 +605,10 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 
 		// THE MODEL ENDPOINT GATE (issue #503, INT-MODEL-ENDPOINTS-FILE-CONTRACT). A declared local model server
 		// has a fixed number of parallel slots, and nothing else bounds how many jobs pile onto it: three per host
-		// on several hosts, each metering $0. So a job whose MAIN model is served by a declared endpoint takes one
-		// of its slots here and holds it until its container is gone. The main model only: an allowed-model list
-		// does not exist yet (#502), so a model the agent switches to mid-run is not counted, a named residual.
+		// on several hosts, each metering $0. So a job whose main model, or any model on its effective allowed-model
+		// list (issue #502: `run.models`, else PI_ALLOWED_MODELS), is served by a declared endpoint takes one of each
+		// such endpoint's slots here and holds it until its container is gone (`endpointSetFor`). An UNRESTRICTED job's
+		// set is its main model's alone, so its mid-run switch to another declared model is not counted, a named residual.
 		//
 		// LOCAL JOBS TAKE IT TOO, where they skip the fleet scope lease: a folder path carries no identity across
 		// hosts, but an endpoint is one physical server whoever calls it.
@@ -653,7 +669,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					// ONE hold per endpoint id: a set naming an endpoint twice would take its slot and then wait on itself,
 					// forever on `slots: 1`. Deduplicated before the sort, so the order rule sees each endpoint once.
 					const byId = new Map();
-					for (const e of endpointSetFor({ models, job: effectiveJobOf(job.data, settings), endpoints })) if (!byId.has(e.id)) byId.set(e.id, e);
+					for (const e of endpointSetFor({ models, job: effectiveJobOf(job.data, settings, deps?.allowedModels ?? null), endpoints })) if (!byId.has(e.id)) byId.set(e.id, e);
 					set = [...byId.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 				}
 			} catch (err) {
@@ -898,7 +914,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// named them (#502), so for most jobs this fill supplies the provider the container env allowlist
 			// requires -- absent it, the allowlist refuses a job only after its budget slot is reserved. The `caps`/`softHoldPct` passed to runJob change which
 			// values reserveBudget checks, never when it runs.
-			const effectiveJob = effectiveJobOf(job.data, settings);
+			const effectiveJob = effectiveJobOf(job.data, settings, deps?.allowedModels ?? null);
 
 			const result = await runJob(effectiveJob, {
 				redis,
@@ -918,6 +934,10 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// runJob context is unchanged.
 				...(endpointSnapshot ? { modelEndpoints: endpointSnapshot } : {}),
 				...deps,
+				// Issue #502: the skew check must see `models` as the job ARRIVED, not as `effectiveJobOf` filled it from
+				// PI_ALLOWED_MODELS, or a trigger list a stale receiver dropped would read as present and the job would run on
+				// the deployment's list. Only when the wiring supplies the check, so a bare processor keeps the default.
+				...(deps?.checkWaitSkew ? { checkWaitSkew: (j, ...rest) => deps.checkWaitSkew({ ...j, models: job.data?.models }, ...rest) } : {}),
 				// #227. BOUNDED AFTER THE ABORT, and this is what makes `abortable` an honest declaration.
 				//
 				// `makeRunContainer`'s promise settles ONLY on the docker child's `close` or `error`. Nothing

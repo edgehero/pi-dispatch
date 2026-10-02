@@ -20,7 +20,7 @@ failure comment exists on the issue", REQ-JOB-STATUS-COMMENTS):
 | the operator cancelled the run (`pi-dispatch cancel`) | `Stopped: the operator cancelled this run. ... Not retried.` |
 | the run ended inside the container (turn or token budget, an in-container config refusal, exit 2), for every runner reason except the ones named below | `Stopped: the run ended inside the container before finishing ... Not retried.` |
 | the AI provider refused the key as an authentication or permission error (exit 2, reason `provider-auth-refused`): a bad or revoked key, or a key that may not use this model or route | `Stopped: the AI provider refused this worker's credentials or access (an authentication or permission error). The operator needs to check the provider key and what it is allowed to use. Not retried.` |
-| a per-job cost limit or an allowed-model list stopped the next AI call (exit 2, reasons `cost-cap` and `model-not-allowed`; `cost-cap` is live on a job image that declares `costCap`, `model-not-allowed` is reserved and no job image stops for it yet) | `Stopped: the next AI call could have taken this run past its cost limit ...` or `Stopped: the run tried to call an AI model this trigger does not allow ...`, each ending `Not retried.` |
+| a per-job cost limit or an allowed-model list stopped the next AI call (exit 2, reasons `cost-cap` and `model-not-allowed`; `cost-cap` is live on a job image that declares `costCap`, `model-not-allowed` is reserved here: no job image stops for it yet. The worker also uses `model-not-allowed` for a job it refuses before starting, when the model it would run on is not on the job's list; that refusal posts its own comment, spends nothing and pages nobody) | `Stopped: the next AI call could have taken this run past its cost limit ...` or `Stopped: the run tried to call an AI model this trigger does not allow ...`, each ending `Not retried.` |
 | the job image could not enforce a cost limit or an allowed-model list before each AI call, so it refused before calling the provider (exit 2, reasons `cost-cap-unenforceable` and `model-policy-unenforceable`) | `Stopped: this run has a cost limit, and the job image could not enforce it ...` or `Stopped: this run is limited to certain AI models, and the job image could not enforce that ...`, each ending `The operator needs to update the job image. Not retried.` |
 | the FINAL infrastructure failure (retries exhausted, a stalled worker's job, an internal error) | `Failed: an error stopped this job and it will not be retried further. Ask the operator to check the worker log.` |
 
@@ -59,7 +59,8 @@ arguments:
   (the AI provider refused the key as an authentication or permission error: the key is bad, revoked, or
   not allowed this model or route, and every job fails the same way until the operator fixes it),
   `cost-cap`, `model-not-allowed`, `cost-cap-unenforceable`, `model-policy-unenforceable` (the cost limit and
-  allowed-model rows above), `container-never-started`, `container-detached`, `secret-resolver-unreachable`, any other fixed token a failure legitimately
+  allowed-model rows above; the hook fires only for a run that took its budget slot, so the worker's free
+  `model-not-allowed` refusal never reaches it), `container-never-started`, `container-detached`, `secret-resolver-unreachable`, any other fixed token a failure legitimately
   carries, or `infra` when it carried none. Anything message-shaped is flattened to `infra` before it can
   reach your argv.
 - `host` is the worker's declared name, possibly empty.

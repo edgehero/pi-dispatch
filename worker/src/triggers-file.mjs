@@ -433,7 +433,8 @@ export function makeCheckOnceSpent({ triggersPath, fs = nodeFs }) {
 }
 
 /**
- * Detect the version skew `run.waitFor` opens (issue #230), pre-spend, from the worker's own file read.
+ * Detect the version skew `run.waitFor` opens (issue #230), pre-spend, from the worker's own file read, and the
+ * same skew for every field in `AUTHORED_NARROWING_FIELDS` (issue #502).
  *
  * The hazard is `DES-TRIGGERS-UNIFIED-FILE`'s widening rule arriving somewhere it has never bitten. Unknown
  * keys DROP, which for every previous field was a harmless no-op: an old parser meeting `run.image` gives
@@ -455,6 +456,23 @@ export function makeCheckOnceSpent({ triggersPath, fs = nodeFs }) {
  * "run", because a broken read must never wedge every job. Only a positive, identity-confirmed mismatch --
  * this entry authored conditions, this job carries none -- refuses.
  */
+/**
+ * The authored NARROWING fields the skew check covers besides `waitFor` (issue #502): a `run` key whose absence
+ * WIDENS the job, so a service that drops it (a receiver below the version floor, or a current one reading a dead
+ * inode through compose's single-file `:ro` mount) turns a narrowed trigger into an unrestricted job that records
+ * as a clean run. `authored` says whether the entry in the file carries the field; the job is skewed when it does
+ * and the job arrived with the key absent or null. A new field of this class is ONE row here. `waitFor` keeps its
+ * own branch below because its refusal counts conditions and has its own reason (`wait-skew`); every row here is
+ * refused as `trigger-skew`, naming the field.
+ *
+ * The job checked must be the job as it ARRIVED (`job.data`), never one the worker filled: the effective job
+ * carries the deployment's PI_ALLOWED_MODELS as `models`, which would hide exactly the drop this exists to see.
+ * index.mjs hands this check the arrived value.
+ */
+export const AUTHORED_NARROWING_FIELDS = Object.freeze([
+	Object.freeze({ key: "models", authored: (v) => Array.isArray(v) && v.length > 0 }),
+]);
+
 export function makeCheckWaitSkew({ triggersPath, fs = nodeFs }) {
 	// Cached by mtime, unlike `checkOnceSpent` which re-reads every time. The difference is which jobs each
 	// one runs for: the one-shot check is gated on `matched.once === true`, so it is rare by construction and
@@ -478,19 +496,28 @@ export function makeCheckWaitSkew({ triggersPath, fs = nodeFs }) {
 		}
 	};
 
+	// STRICT, like `waitFor` since #230 (PR #536's review, round 3): a job whose authored entry carries a narrowing
+	// field it arrived without is refused, even when the operator ADDED that field after the job was queued. A
+	// fail-open fenced on the file's mtime was tried and removed: ANY later write of the file (the worker's own
+	// one-shot disarm, a console edit, a touch, an `rsync -t` mtime in the future) reopened the hole for every job.
+	// Refusing a job queued before the edit is the safe direction, and its comment says to re-run it.
 	return async function checkWaitSkew(job) {
 		if (typeof triggersPath !== "string" || triggersPath === "") return { ok: true };
 		// Cron and CLI jobs carry no matched index, and cannot carry `waitFor` at all.
 		const index = job?.trigger?.matched?.index;
 		if (!Number.isInteger(index)) return { ok: true };
 		// The field arrived. Whether its conditions are SATISFIED is the gate's business, not this check's.
-		if (Array.isArray(job?.waitFor) && job.waitFor.length > 0) return { ok: true };
+		const waitArrived = Array.isArray(job?.waitFor) && job.waitFor.length > 0;
+		const missing = AUTHORED_NARROWING_FIELDS.filter((row) => job?.[row.key] === undefined || job[row.key] === null);
+		if (waitArrived && missing.length === 0) return { ok: true };
 
 		const triggers = read();
 		if (triggers === null) return { ok: true };
 		const entry = triggers[index];
 		const authored = entry?.run?.waitFor;
-		if (!Array.isArray(authored) || authored.length === 0) return { ok: true };
+		const waitSkewed = !waitArrived && Array.isArray(authored) && authored.length > 0;
+		const dropped = missing.find((row) => row.authored(entry?.run?.[row.key]));
+		if (!waitSkewed && dropped === undefined) return { ok: true };
 
 		// The identity guard readDisarmState keeps, and WIDER than flow alone. `triggerIndex` is a RAW array
 		// position, so an insertion, a reorder, or a stray `triggers.json` at the worker's cwd can all put a
@@ -505,7 +532,8 @@ export function makeCheckWaitSkew({ triggersPath, fs = nodeFs }) {
 		const onType = job?.trigger?.matched?.type;
 		if (typeof onType === "string" && entry?.on?.type !== onType) return { ok: true };
 
-		return { skewed: true, conditions: authored.length };
+		if (waitSkewed) return { skewed: true, conditions: authored.length };
+		return { skewed: true, field: dropped.key };
 	};
 }
 

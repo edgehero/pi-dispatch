@@ -351,7 +351,7 @@ function resolveEnvName(provider) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null }) {
+export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -413,6 +413,13 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId,
 		// second-validator rule directly above). Absent means the full pinned default set, never an empty
 		// string, for PI_PACKAGES' reason.
 		PI_EXCLUDE_TOOLS: excludeTools.length > 0 ? excludeTools.join(",") : undefined,
+		// The job's EFFECTIVE allowed-model list (issue #502): its trigger's `run.models`, else the deployment's
+		// PI_ALLOWED_MODELS. Comma-joined `provider/model` entries, which the runner splits at each entry's first `/`
+		// (image/runner/src/config.mjs). Comma is safe because both list parsers refuse an entry carrying one. NULL is
+		// unrestricted and emits NO variable, never an empty string: the runner refuses an empty value as a config
+		// error, because an empty allow list read as "unset" would fail open. An image too old to enforce a list is
+		// refused before this is ever built (`modelPolicy`, CAPABILITY_GATES).
+		PI_ALLOWED_MODELS: Array.isArray(allowedModels) && allowedModels.length > 0 ? allowedModels.join(",") : undefined,
 		// Kill switch for job-time package installation, UNCONDITIONAL for every job. pi's resolver shells out
 		// to a REAL `npm install` for any npm:/git: source unless offline mode is on, and `~/.pi/agent` IS
 		// writable in the container. We emit only local paths, so nothing should reach that branch -- this

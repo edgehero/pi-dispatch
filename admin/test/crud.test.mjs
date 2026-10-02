@@ -314,6 +314,19 @@ test("dispatch_trigger_edit: a malformed model is refused BEFORE the confirm, wi
   assert.deepEqual(read(path), initial);
 });
 
+test("dispatch_trigger_edit: a model that falls off the trigger's own run.models is refused BEFORE the confirm (#502)", async () => {
+  const initial = { triggers: [{ on: { type: "label", any: ["a"] }, run: { kind: "github", flow: "old", provider: "openai", model: "gpt-5.4", models: ["openai/gpt-5.4"] } }] };
+  const path = tmpTriggers(initial);
+  process.env.PI_TRIGGERS_FILE = path;
+  const { ctx, shown } = toolCtx({ answer: true });
+  await assert.rejects(
+    () => toolByName("dispatch_trigger_edit").execute("id", { index: 0, flow: "old", model: "gpt-5.4-mini" }, undefined, undefined, ctx),
+    /trigger #1: run\.models does not list this trigger's own run\.provider\/run\.model/,
+  );
+  assert.equal(shown.length, 0, "the merged run is checked, so the operator is never asked to approve an entry the write refuses");
+  assert.deepEqual(read(path), initial);
+});
+
 test("dispatch_trigger_edit: an edit that sends no model keeps the one the entry has (#502)", async () => {
   const path = tmpTriggers({ triggers: [{ on: { type: "label", any: ["a"] }, run: { kind: "github", flow: "old", provider: "openai", model: "gpt-5.4" } }] });
   process.env.PI_TRIGGERS_FILE = path;

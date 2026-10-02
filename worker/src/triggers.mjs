@@ -416,7 +416,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }) },
+		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(ref.models !== undefined && { models: ref.models }) },
 	};
 }
 
@@ -1189,9 +1189,10 @@ function validateBackend(on, run, at, path, { localWorkspace }) {
  * absence once a model is policy, and the price difference between two models is the whole point of
  * naming one.
  *
- * `run.models` and `run.maxCostUsd` are fields a later release adds with enforcement. Until then their
- * EXACT spelling falls through to this file's tolerance of unknown `run` keys (a file written for that
- * release still loads here), while their misspellings are refused like any other near miss, so the day
+ * `run.models` (the allowed-model list) is validated with them since #502's second part, and its misspellings
+ * were refused here before it was. `run.maxCostUsd` is a field a later release adds with enforcement. Until
+ * then its EXACT spelling falls through to this file's tolerance of unknown `run` keys (a file written for
+ * that release still loads here), while its misspellings are refused like any other near miss, so the day
  * the field arrives a typo in it is already loud.
  */
 function validateRunModel(on, run, at, path) {

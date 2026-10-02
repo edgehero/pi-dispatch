@@ -57,9 +57,10 @@ import { basename, dirname, isAbsolute, join, delimiter, posix, resolve, win32 }
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { DEFAULT_VALKEY_URL, accountTempRoot, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
+import { DEFAULT_VALKEY_URL, accountTempRoot, allowedModelsFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
+import { parseModelsJson } from "./models-json.mjs";
 import { KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, baseUrlTarget, keylessVerdict, loadModelEndpoints, readOverlayModels, renderEndpointsInclude } from "./model-endpoints.mjs";
 import { declaredEndpointsIn, endpointsDeclaredIn, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
 import { loadPauseWindows } from "./pause-windows.mjs";
@@ -562,7 +563,7 @@ export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "P
 export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY"]);
 /** Issue #471: the worker's settings doctor judges, which it read from this shell alone while the service read them from
  *  `.env`. TEMP is TMPDIR's twin in the worker's temp root; PI_CODING_AGENT_DIR is where the worker reads auth.json. */
-export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "GITHUB_PAT_VAR", "TEMP"]);
+export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "GITHUB_PAT_VAR", "TEMP"]);
 /** Issue #471: the receiver's keys doctor judges its boot by (the receiver's unit reads the same `.env`). */
 export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
 /**
@@ -1326,7 +1327,7 @@ export async function collectChecks(shellVars, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { requiring, waiting, waitProfiles, waitAfters, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName);
+	const { requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName);
 	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
@@ -2487,7 +2488,7 @@ export async function collectChecks(shellVars, seams) {
 				let modelsFix = "";
 				if (modelsRead !== null) {
 					modelsOk = false;
-					modelsFix = /not valid JSON/.test(String(modelsRead?.message)) ? "overlay models.json is not valid JSON" : "overlay models.json is not a valid models.json (it must be a JSON object)";
+					modelsFix = /not valid JSON/.test(String(modelsRead?.message)) ? "overlay models.json is not valid JSON" : "overlay models.json does not match pi's models.json schema, so pi loads none of it and every job on one of its models is refused as model-unknown";
 				} else if (overlayModels !== null) {
 					const leak = findLiteralSecret(overlayModels);
 					if (leak) {
@@ -2504,7 +2505,7 @@ export async function collectChecks(shellVars, seams) {
 			if (fileExists(modelsPath)) {
 				let loopback = [];
 				try {
-					loopback = overlayLoopbackModels(JSON.parse(readFileSync(modelsPath, "utf8")));
+					loopback = overlayLoopbackModels(parseModelsJson(readFileSync(modelsPath, "utf8")).value ?? null);
 				} catch {
 					// The line above says it is not valid JSON.
 				}
@@ -2774,6 +2775,33 @@ export async function collectChecks(shellVars, seams) {
 		checks.push({
 			ok: true,
 			label: `run.waitFor needs worker >= 1.6.0, receiver >= 1.4.0 and admin >= 1.6.0 (a service below the floor drops the field silently; the worker refuses such a job as wait-skew rather than running it unheld)`,
+		});
+	}
+
+	// Issue #502, allowed-model lists. The deployment list is judged unconditionally, `PI_WAIT_PROFILES`' rule: a
+	// malformed or spaced value is a worker that will not boot. Its grammar is the worker's own (`allowedModelsFrom`).
+	// The value doctor reads is the SERVICE's (`WORKER_SERVICE_KEYS`), so a spaced value in a `.env` a shell sources is
+	// already named above as a line that loader reads differently, which is the case where the list silently vanishes.
+	if (typeof env.PI_ALLOWED_MODELS === "string" && env.PI_ALLOWED_MODELS !== "") {
+		let list = null;
+		let why = null;
+		try {
+			list = allowedModelsFrom(env);
+		} catch (err) {
+			why = err?.message ?? "invalid";
+		}
+		checks.push(
+			why === null
+				? { ok: true, label: `PI_ALLOWED_MODELS limits every job whose trigger names no run.models to ${list.length} model(s): ${list.join(", ")}` }
+				: { ok: false, label: "PI_ALLOWED_MODELS is not a valid list", fix: `${why} -- the worker refuses to boot until this is fixed` },
+		);
+	}
+	if (listing > 0) {
+		// The version-floor disclosure, the run.waitFor line's twin and for its reason: doctor cannot see the
+		// receiver's version from here, and the worker's own skew check refuses a job that arrives without its list.
+		checks.push({
+			ok: true,
+			label: `${listing} trigger(s) name run.models, which needs a worker and a receiver that carry issue #502 (a service below that drops the list silently; the worker refuses such a job as trigger-skew rather than running it unrestricted, and only when it can read the triggers file itself)`,
 		});
 	}
 
@@ -4068,7 +4096,7 @@ function triggerLabel(t, index) {
 }
 
 function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
-	const none = { requiring: 0, waiting: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], parseError: null, path: null };
+	const none = { requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], parseError: null, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -4138,6 +4166,8 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
 			// deduped like `secretProfiles` and for its reason: each name costs a lookup, and two triggers
 			// waiting on one profile are one question.
 			waiting: triggers.filter((t) => Array.isArray(t.run.waitFor) && t.run.waitFor.length > 0).length,
+			// Issue #502: how many triggers name an allowed-model list, for the version-floor line.
+			listing: triggers.filter((t) => Array.isArray(t.run.models) && t.run.models.length > 0).length,
 			// The `after` instants as WRITTEN, deduped. Not parsed here: `readTriggerFacts` is a fact reader and
 			// the ceiling it is measured against is env, which belongs at the check. Two triggers naming one
 			// instant are one finding, and the raw string is what the operator has to go and edit.

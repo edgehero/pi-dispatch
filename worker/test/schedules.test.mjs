@@ -184,6 +184,13 @@ test("a cron trigger's excludeTools reaches the scheduler data, and an unflagged
 	assert.equal("excludeTools" in plain.data, false);
 });
 
+test("a cron trigger's models reach the scheduler data, and an unlisted one carries no key (#502)", () => {
+	const [s] = load([{ ...CRON, run: { ...CRON.run, models: ["openai/qwen2.5:0.5b"] } }]);
+	assert.deepEqual(s.data.models, ["openai/qwen2.5:0.5b"]);
+	const [plain] = load([CRON]);
+	assert.equal("models" in plain.data, false, "an unrestricted schedule's stored data keeps its keys");
+});
+
 test("cronPlacement is the rule loadSchedules places by, row for row (issue #433: doctor asks the same function)", () => {
 	// The four rows, and what the worker's own loader does with each, so the exported predicate and the loader cannot
 	// part ways: doctor judges a trigger's venue by this predicate alone, and must judge exactly what the worker runs.

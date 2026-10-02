@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { getAllBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { readFileSync } from "node:fs";
 import { configError } from "../src/config.mjs";
-import { MODEL_REF_PATTERN, PROVIDER_REF_PATTERN, validateModelRef } from "../src/model-ref.mjs";
+import { MAX_ALLOWED_MODELS, MODEL_REF_PATTERN, PROVIDER_REF_PATTERN, modelListProblem, modelOnList, splitModelEntry, validateModelRef } from "../src/model-ref.mjs";
 import { parseExitUsage } from "../src/run-history.mjs";
 import { parseTriggers, validateModelRef as reexported } from "../src/triggers.mjs";
 
@@ -223,14 +223,87 @@ test("the model keys refuse under on in EVERY spelling, the correct one included
 	}
 });
 
-test("run.models and run.maxCostUsd are tolerated as unknown keys until the release that enforces them", () => {
+test("run.maxCostUsd is tolerated as an unknown key until the release that enforces it; run.models is a field now", () => {
 	// The forward-compatibility posture every unknown run key gets: a file written for the later release
-	// still loads here. They are NOT carried into the normalized run, so nothing downstream acts on them.
+	// still loads here. maxCostUsd is NOT carried into the normalized run, so nothing downstream acts on it.
 	const [t] = parse([withRun(KINDS.label, { models: ["openai/gpt-5.4"], maxCostUsd: 2 })]);
-	assert.equal("models" in t.run, false);
+	assert.deepEqual(t.run.models, ["openai/gpt-5.4"], "#502 part 3: the list rides the normalized run");
 	assert.equal("maxCostUsd" in t.run, false);
 	// An unrelated unknown key, ASCII or not, still loads.
 	parse([withRun(KINDS.label, { modelNotes: "x", fl\u00F6w: "x", temperature: 1 })]);
+});
+
+// Issue #502 part 3: run.models, the allowed-model list, on every trigger kind.
+
+test("run.models loads on every kind, verbatim and in order, and an absent or null list leaves no key", () => {
+	const list = ["openai/gpt-5.4", "openrouter/~anthropic/claude-sonnet-latest", "cloudflare-workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast", "openai/qwen2.5:0.5b"];
+	for (const [name, entry] of Object.entries(KINDS)) {
+		const [t] = parse([withRun(entry, { models: list })]);
+		assert.deepEqual(t.run.models, list, name);
+		const [bare] = parse([entry]);
+		assert.equal(bare.run.models, undefined, `${name}: absent stays absent`);
+		assert.equal(Object.hasOwn(bare.run, "models") && bare.run.models !== undefined, false, name);
+		const [nulled] = parse([withRun(entry, { models: null })]);
+		assert.equal(nulled.run.models, undefined, `${name}: null is absent, the rule provider and model follow`);
+	}
+	// 16 entries is the cap, and it loads.
+	const sixteen = Array.from({ length: 16 }, (_, i) => `openai/m${i}`);
+	assert.equal(parse([withRun(KINDS.label, { models: sixteen })])[0].run.models.length, 16);
+});
+
+test("run.models refuses an empty list, a 17th entry, a non-array and every malformed entry, on every kind", () => {
+	const bad = [
+		[[], /run\.models must not be empty/],
+		[Array.from({ length: 17 }, (_, i) => `openai/m${i}`), /at most 16 entries/],
+		["openai/gpt-5.4", /must be an array/],
+		[{ 0: "openai/x" }, /must be an array/],
+		[["openai"], /entry 1 must be provider\/model/],
+		[["/gpt"], /entry 1 must be provider\/model/],
+		[["openai/"], /entry 1 must be provider\/model/],
+		[["openai/gpt", "open ai/gpt"], /entry 2 must be provider\/model/],
+		[["openai/gpt x"], /entry 1/],
+		[["op:enai/gpt"], /entry 1/],
+		[[`openai/${"a".repeat(65)}`], /entry 1/],
+		[[`${"a".repeat(65)}/x`], /entry 1/],
+		[["openai/\u212Aimi"], /entry 1/],
+		[[7], /entry 1/],
+		[[null], /entry 1/],
+		[["openai/.hidden"], /entry 1/],
+		[["openai/gpt-x", "OpenAI/GPT-X"], /entry 2 repeats an earlier entry/],
+	];
+	for (const [name, entry] of Object.entries(KINDS)) {
+		for (const [models, pattern] of bad) refused(withRun(entry, { models }), pattern);
+		// Never echoes the value: the console renders this message to a model.
+		assert.throws(() => parse([withRun(entry, { models: ["secretish provider/x"] })]), (e) => !/secretish/.test(e.message), name);
+	}
+});
+
+test("run.models must list the trigger's own provider/model when the trigger names both: exact, both halves", () => {
+	const ok = withRun(KINDS.label, { provider: "openai", model: "gpt-5.4", models: ["anthropic/claude-x", "openai/gpt-5.4"] });
+	assert.deepEqual(parse([ok])[0].run.models, ["anthropic/claude-x", "openai/gpt-5.4"]);
+	for (const entry of Object.values(KINDS)) {
+		refused(withRun(entry, { provider: "openai", model: "gpt-5.4", models: ["anthropic/claude-x"] }), /run\.models does not list this trigger's own run\.provider\/run\.model/);
+		// The PROVIDER half counts: the same id under another provider is another model (a mutation comparing ids only).
+		refused(withRun(entry, { provider: "openai", model: "gpt-5.4", models: ["azure-openai-responses/gpt-5.4"] }), /does not list/);
+		// Case counts: pi resolves ids case-sensitively, so the runner would refuse this pair.
+		refused(withRun(entry, { provider: "openai", model: "gpt-5.4", models: ["openai/GPT-5.4"] }), /does not list/);
+	}
+	// Only one half in the file: the other comes from the deployment default at job start, which the worker
+	// checks pre-spend (model-not-allowed), so the file alone cannot answer it and it loads.
+	assert.deepEqual(parse([withRun(KINDS.label, { model: "gpt-5.4", models: ["anthropic/claude-x"] })])[0].run.models, ["anthropic/claude-x"]);
+	assert.deepEqual(parse([withRun(KINDS.label, { provider: "openai", models: ["anthropic/claude-x"] })])[0].run.models, ["anthropic/claude-x"]);
+});
+
+test("splitModelEntry splits at the FIRST slash and modelOnList compares both halves exactly", () => {
+	assert.deepEqual(splitModelEntry("openrouter/~anthropic/claude"), { provider: "openrouter", model: "~anthropic/claude" });
+	assert.deepEqual(splitModelEntry("cloudflare-workers-ai/@cf/meta/x"), { provider: "cloudflare-workers-ai", model: "@cf/meta/x" });
+	for (const bad of ["", "x", "/x", "x/", "a b/c", "a/b c", "a:b/c", 7, null]) assert.equal(splitModelEntry(bad), null, JSON.stringify(bad));
+	assert.equal(modelOnList(null, "openai", "x"), true, "no list is unrestricted");
+	assert.equal(modelOnList(["openai/x"], "openai", "x"), true);
+	assert.equal(modelOnList(["openai/x"], "azure-openai-responses", "x"), false);
+	assert.equal(modelOnList(["openai/X"], "openai", "x"), false);
+	assert.equal(modelListProblem(["a/b"]), null);
+	assert.equal(modelListProblem(Array.from({ length: MAX_ALLOWED_MODELS }, (_, i) => `a/m${i}`)), null);
 });
 
 test("validateModelRef returns only the present fields and leaves the input alone", () => {

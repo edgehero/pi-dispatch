@@ -776,6 +776,17 @@ test("PI_EXCLUDE_TOOLS is emitted only when the job carries exclusions, and neve
 	assert.equal(buildContainerEnv({ ...args, excludeTools: ["bash", "edit"] }).PI_EXCLUDE_TOOLS, "bash,edit");
 });
 
+test("PI_ALLOWED_MODELS is emitted only when the job has a list, comma-joined and verbatim, never empty (#502)", { skip }, () => {
+	const args = { provider: "anthropic", model: "m", maxTurns: 10, jobId: "j", hostEnv: HOST };
+	// Null is unrestricted, and the runner refuses an EMPTY value as a config error: an empty allow list read
+	// as unset would fail open. So nothing at all is emitted for an unrestricted job.
+	for (const allowedModels of [undefined, null, []]) {
+		assert.equal(buildContainerEnv({ ...args, allowedModels }).PI_ALLOWED_MODELS, undefined, `allowedModels ${JSON.stringify(allowedModels)} must not become a value`);
+	}
+	// Verbatim: case and the model half's own slashes survive, for the runner's first-slash split.
+	assert.equal(buildContainerEnv({ ...args, allowedModels: ["anthropic/m", "openrouter/~anthropic/Claude"] }).PI_ALLOWED_MODELS, "anthropic/m,openrouter/~anthropic/Claude");
+});
+
 test("a job kind with no table entry refuses, rather than inheriting the github token names", { skip }, () => {
 	// This was an `if gitlab / else github`, and the `else` was the hazard: any kind the table did not name
 	// -- a forge wired up everywhere but here, a typo that survived validation -- got its credential
