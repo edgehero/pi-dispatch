@@ -1384,14 +1384,6 @@ function dollarRowsOf(l: any, used: any): any {
 }
 
 /** One scoped limit as a display summary: `day 10 · week 40 · ≤1 at once` (set fields only). */
-/**
- * "live" for a scoped-limits write the worker takes on its next reload, or the reason it will not yet (issue #499 part
- * B: a `project:<id>` row still names a project the projects file lacks, so the worker keeps its last good limits).
- */
-function liveOr(res: any): string {
-  return res?.pending ? `applies once the worker accepts both files: ${res.pending}` : "live";
-}
-
 function limitSummary(l: any): string {
   const bits: string[] = [];
   if (Number.isInteger(l?.day)) bits.push(`day ${l.day}`);
@@ -1403,6 +1395,15 @@ function limitSummary(l: any): string {
   if (typeof l?.weekUsd === "string") bits.push(`week $${l.weekUsd}`);
   if (typeof l?.monthUsd === "string") bits.push(`month $${l.monthUsd}`);
   return bits.join(" · ");
+}
+
+/**
+ * "live" for a scoped-limits write the worker takes on its next reload. With `pending` (issue #499 part B: a
+ * `project:<id>` row names a project the projects file on disk lacks), only what the admin can know: written, and the
+ * worker applies it once its live projects define the id.
+ */
+function liveOr(res: any): string {
+  return res?.pending ? `written; ${res.pending}` : "live";
 }
 
 /** Normalise a labels/action field to a trimmed non-empty string list, accepting an array or a string. */

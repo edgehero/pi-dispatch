@@ -2136,7 +2136,7 @@ test("writeScopedLimits refuses to add or change a project:<id> row whose id is 
   fs.files.set("projects.json", JSON.stringify({ version: 1, projects: [] }));
   const other = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "projects.json", fs, mutate: (l) => l.map((r, i) => (i === 0 ? { ...r, day: 4 } : r)) });
   assert.equal(other.ok, true, "an unchanged dangling row is not re-judged");
-  assert.match(other.pending, /project:shop still names a project/, "and the worker will keep its last good limits, so not 'live'");
+  assert.match(other.pending, /^project:shop names a project that is not in the projects file projects\.json; the worker applies this once its live projects define shop; if they do not, it keeps its last good limits/, "only what the admin can know");
   // ...the dangling row itself cannot be edited into a new state...
   const edit = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "projects.json", fs, mutate: (l) => l.map((r) => (r.scope === "project:shop" ? { ...r, day: 9 } : r)) });
   assert.match(edit.invalid, /project:shop names a project/);
@@ -2145,6 +2145,22 @@ test("writeScopedLimits refuses to add or change a project:<id> row whose id is 
   assert.deepEqual(del, { ok: true }, "deleting the dangling row is always allowed");
   assert.deepEqual(JSON.parse(fs.files.get("sl.json")).limits, [{ scope: "acme/web", day: 4 }]);
 });
+
+// The three ways an unchanged project row can dangle on disk (the round-2 review's cases). The worker takes such a write
+// live while its LIVE projects still define the id (start-wiring pins that half); the admin cannot see those, so it
+// says only that the worker applies the write once they define the id, never that it keeps its last good limits.
+for (const variant of ["projects.json drops shop", "projects.json missing", "projects.json mid-edit"]) {
+  test(`writeScopedLimits, an unchanged dangling project row (${variant}): written, and pending says only what the admin can know`, () => {
+    const fs = memFs({ "sl.json": JSON.stringify({ version: 2, limits: [{ scope: "acme/web", day: 3 }, { scope: "project:shop", day: 2 }] }) });
+    if (variant === "projects.json drops shop") fs.files.set("projects.json", JSON.stringify({ version: 1, projects: [] }));
+    if (variant === "projects.json mid-edit") fs.files.set("projects.json", '{ "version": 1, "proj');
+    const res = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "projects.json", fs, mutate: (l) => l.map((r) => (r.scope === "acme/web" ? { ...r, day: 4 } : r)) });
+    assert.equal(res.ok, true);
+    assert.equal(JSON.parse(fs.files.get("sl.json")).limits[0].day, 4, "the edit is written");
+    assert.match(res.pending, /the worker applies this once its live projects define shop; if they do not, it keeps its last good limits\. Run pi-dispatch doctor$/);
+    assert.doesNotMatch(res.pending, /keeps its last good limits until/, "no claim that the write is not live");
+  });
+}
 
 test("resolvePaths: projectsFile is the worker's reading of PI_PROJECTS_FILE (null when unset), apart from the panel default", () => {
   assert.equal(resolvePaths({}).projectsFile, null);

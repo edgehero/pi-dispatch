@@ -206,7 +206,7 @@ test("budgetReserved is ONE rule, global-only: a refund whose global give-back l
 	}
 });
 
-test("a Valkey fault inside the count reservations gives back every slot that landed before it rethrows", async () => {
+test("a Valkey fault inside the count reservations gives back every ledger that landed whole before it rethrows", async () => {
 	const redis = keyedRedis({}, { failIncrOn: G_DAY });
 	const d = deps(web, { redis });
 	await assert.rejects(() => runJob(web, d.deps), (e) => e.code === "ECONNRESET");
@@ -214,6 +214,21 @@ test("a Valkey fault inside the count reservations gives back every slot that la
 	assert.equal(redis.store.get(WEB_DAY), 0, "the repo slot went back");
 	assert.equal(redis.store.get(P_DAY), 0, "the project slot went back");
 	assert.deepEqual(redis.ops.filter((o) => o[0] === "decr").map((o) => o[1]), [P_DAY, WEB_DAY], "last first");
+});
+
+test("a fault on a LATER window of one ledger gives back the whole ledgers before it; that ledger's own earlier window stays counted", async () => {
+	// The project row has a day and a week; its week INCR faults after its day INCR landed. The repo ledger, whole, goes
+	// back. The project's day stays counted: reserveBudget does not say which of its windows landed, so a give-back
+	// could DECR a window that never rose (the pre-existing mid-reserve posture of one ledger, said in processor.mjs).
+	const limits = parseScopedLimits(JSON.stringify({ version: 2, limits: [{ scope: "github:acme/web", day: 5 }, { scope: "project:shop", day: 2, week: 9 }] }), "sl.json");
+	const P_WEEK = `${P_PREFIX}:w:2026-07-13`;
+	const redis = keyedRedis({}, { failIncrOn: P_WEEK });
+	const d = deps(web, { redis, scopedLedgers: scopedLedgers(web, limits, "shop") });
+	await assert.rejects(() => runJob(web, d.deps), (e) => e.code === "ECONNRESET");
+	assert.deepEqual(redis.ops.map((o) => o.join(" ")), [`incr ${WEB_DAY}`, `incr ${P_DAY}`, `incr ${P_WEEK}`, `decr ${WEB_DAY}`]);
+	assert.equal(redis.store.get(WEB_DAY), 0, "the repo ledger, whole, went back");
+	assert.equal(redis.store.get(P_DAY), 1, "the faulted ledger's earlier window stays counted, as documented");
+	assert.equal(redis.store.has(G_DAY), false, "the global ledger was never reached");
 });
 
 // ── dollars: the project tier ────────────────────────────────────────────────────────────────────────────

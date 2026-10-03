@@ -1026,8 +1026,11 @@ export async function runJob(job, deps) {
 		// deliberately GLOBAL-ONLY: the band is one operator brake on overall spend, not a per-row knob; scoped windows
 		// are hard caps (DES-SCOPED-LIMITS-AND-FOLDER-MUTEX).
 		//
-		// A redis fault mid-walk gives back every reservation that landed (`held` is exact) and rethrows. The INCR that
-		// faulted itself may or may not have landed; that one key keeps the pre-existing mid-reserve posture.
+		// A redis fault mid-walk gives back every LEDGER that landed whole (`held` is exact) and rethrows. Inside the
+		// ledger that faulted, the windows INCRed before the fault stay counted (a week INCR that faults leaves that
+		// ledger's day counted, an EXPIRE that faults leaves its key without a TTL): `reserveBudget` does not say which of
+		// its windows landed, so giving them back could DECR a window that never rose. That is the pre-existing
+		// mid-reserve posture of one ledger, unchanged.
 		globalLedger = { scope: null, keyPrefix: null, caps, softHoldPct, reason: null };
 		let counted;
 		try {

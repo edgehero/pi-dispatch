@@ -809,7 +809,8 @@ export function readScopedLimits({ scopedLimitsPath, fs = nodeFs }) {
  * projects file as the WORKER reads it (null when PI_PROJECTS_FILE is unset: no projects), or the write is refused: the
  * worker would refuse to start on it, and a running worker would keep its last good limits. A row already in the file,
  * unchanged, is not re-judged, so a row left dangling by a projects.json edit can still be deleted, and other rows
- * edited, while doctor names it; such a write returns `pending`, because the worker takes it only once both files agree.
+ * edited, while doctor names it; such a write returns `pending`, which says the worker applies it once its LIVE projects
+ * define the id (the admin cannot see those, so it claims neither way).
  */
 export function writeScopedLimits({ scopedLimitsPath, projectsPath = null, mutate, fs = nodeFs }) {
   let current = [];
@@ -850,37 +851,46 @@ export function writeScopedLimits({ scopedLimitsPath, projectsPath = null, mutat
  * Judge a write's `project:<id>` rows against the projects file the worker reads (`projectsPath`, null when
  * PI_PROJECTS_FILE is unset: no projects, the worker's reading), issue #499 part B. Returns `{ refusal }` when a row the
  * write adds or changes names a missing project, or the file cannot be read or parsed while such a row is in play;
- * `{ pending }` when only an UNCHANGED row still dangles (the write is allowed, so that row can be deleted, but the
- * worker keeps its last good limits until the pair agrees, so the caller must not say "live"); else `{}`.
+ * `{ pending }` when only an UNCHANGED row names a project the file on disk does not define; else `{}`.
+ *
+ * `pending` says only what the admin can know. The worker judges a limits edit against its LIVE projects too, and those
+ * usually still define the id (the projects edit that dropped it was kept out), so the write is then live; the admin
+ * cannot see the worker's live projects, so it neither claims that nor its opposite.
  */
 function judgeProjectRows(before, after, projectsPath, fs) {
   const rows = after.filter((row) => isProjectScope(row.scope));
   if (rows.length === 0) return {};
   const unchanged = new Set(before.map((row) => JSON.stringify(row)));
   const touched = rows.filter((row) => !unchanged.has(JSON.stringify(row)));
+  const waitFor = (list) => {
+    const ids = [...new Set(list.map((row) => row.scope.slice("project:".length)))].join(", ");
+    return `the worker applies this once its live projects define ${ids}; if they do not, it keeps its last good limits. Run pi-dispatch doctor`;
+  };
   let projects = [];
   if (projectsPath !== null && projectsPath !== undefined) {
     let text;
+    let why = null;
     try {
       text = fs.readFileSync(projectsPath, "utf8");
     } catch (e) {
       // Set but unreadable (missing included): the worker cannot load it either. Named as unreadable, never as a
       // missing project, so the operator fixes the file rather than adding a project that is already there.
-      const why = `the projects file ${projectsPath} could not be read (${typeof e?.code === "string" ? e.code : "error"})`;
-      return touched.length > 0 ? { refusal: `${why}, so a project row cannot be checked; fix it first. Nothing was written` } : { pending: `${why}; the worker keeps its last good limits until it can` };
+      why = `the projects file ${projectsPath} could not be read (${typeof e?.code === "string" ? e.code : "error"})`;
     }
-    try {
-      projects = parseProjects(text, projectsPath);
-    } catch (e) {
-      const why = `the projects file does not load (${e?.message ?? String(e)})`;
-      return touched.length > 0 ? { refusal: `${why}, so a project row cannot be checked; fix it first. Nothing was written` } : { pending: `${why}; the worker keeps its last good limits until it can` };
+    if (why === null) {
+      try {
+        projects = parseProjects(text, projectsPath);
+      } catch (e) {
+        why = `the projects file does not load (${e?.message ?? String(e)})`;
+      }
     }
+    if (why !== null) return touched.length > 0 ? { refusal: `${why}, so a project row cannot be checked; fix it first. Nothing was written` } : { pending: `${why}; ${waitFor(rows)}` };
   }
   const missing = danglingProjectRows(rows, projects).map((d) => rows[d.index]);
   const where = projectsPath ? `the projects file ${projectsPath}` : "the projects file (PI_PROJECTS_FILE is unset, so there are no projects)";
   const added = missing.filter((row) => touched.includes(row)).map((row) => row.scope);
   if (added.length > 0) return { refusal: `${added.join(", ")} names a project that is not in ${where}; add the project there first. Nothing was written` };
-  if (missing.length > 0) return { pending: `${missing.map((row) => row.scope).join(", ")} still names a project that is not in ${where}, so the worker keeps its last good limits until both files agree` };
+  if (missing.length > 0) return { pending: `${missing.map((row) => row.scope).join(", ")} names a project that is not in ${where}; ${waitFor(missing)}` };
   return {};
 }
 

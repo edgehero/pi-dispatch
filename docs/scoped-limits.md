@@ -166,8 +166,9 @@ A `project:<id>` row caps every repo and folder of one project as one. The id is
   it, naming the row and both files). The worker judges the two files together, so you can save them in either
   order: adding a project with its row, or renaming a project in both files, applies once both are saved. The
   panel and the tools refuse to write such a row. They check the projects file the worker reads, so with
-  `PI_PROJECTS_FILE` unset there are no projects. If a row already dangles, they still let you delete it, and say
-  the change applies once the worker accepts both files.
+  `PI_PROJECTS_FILE` unset there are no projects. If a row already dangles, they still let you delete it or edit
+  other rows, and say the worker applies the change once its live projects define that id. The worker's live
+  projects usually still do, because it kept out the projects edit that dropped it. Run `pi-dispatch doctor`.
 - The counters live under the same hashed keys as every other row, built from `project:<id>`. Renaming a
   project starts a new count.
 

@@ -271,11 +271,12 @@ export function reloadScopedLimits(config, ref, log, deploymentCap = null, pair 
 
 /**
  * The two files a project row joins (issue #499 part B): scoped-limits.json names `project:<id>`, projects.json defines
- * the id. `{ limits, projects }` are the two live refs. A reload of either file is judged as a PAIR (`pairWith`), so the
+ * the id. `{ limits, projects }` are the two live refs, and `deploymentCap` the merged per-job cap thunk the
+ * dollar-rows-without-cap warning reads (null on a bare wiring). A reload of either file is judged as a PAIR (`pairWith`), so the
  * two live lists never disagree and a correct pair applies whatever order its files were saved in.
  */
-export function makeProjectPair(limits, projects) {
-	return { limits, projects };
+export function makeProjectPair(limits, projects, deploymentCap = null) {
+	return { limits, projects, deploymentCap };
 }
 
 /**
@@ -366,6 +367,8 @@ export function reloadProjects(config, ref, log, pair = null) {
 		if (other) {
 			pair.limits.current = other;
 			log("scoped_limits_reloaded", { count: other.length, with: "projects" });
+			// Every limits list that goes live is warned on, whichever file's reload committed it.
+			if (pair.deploymentCap) warnDollarRowsWithoutCap(other, pair.deploymentCap(), log);
 		}
 	} catch (err) {
 		log("projects_reload_invalid", { reason: err?.message });
@@ -658,7 +661,6 @@ export async function startWorker(
 	// Issue #499 part B: a `project:<id>` row whose id is not a project refuses BOOT, naming the row and the id: it would
 	// read as a cap on a group that no job can belong to. The live reloads of either file hold the same rule (`pair`).
 	checkProjectRows(scopedLimits.current, projects.current, config.scopedLimitsFile, config.projectsFile ?? null);
-	const projectPair = makeProjectPair(scopedLimits, projects);
 
 	// Issue #503: the declared model endpoints, same posture (INT-MODEL-ENDPOINTS-FILE-CONTRACT): a bad file refuses
 	// boot with the operator present, a mutable ref for the live reload, [] when there is no file. Read per pickup
@@ -2098,6 +2100,9 @@ export async function startWorker(
 			extraClosers.push(watchPauseWindowsFile(config, pauseWindows, log, atBoot.pauseWindows));
 		}
 
+		// Issue #499 part B: the two files a project row joins reload as a pair; the deployment cap rides along so a limits
+		// list either reload commits gets the dollar-rows-without-cap warning.
+		const projectPair = makeProjectPair(scopedLimits, projects, deploymentMaxCostUsd);
 		// Issue #242 live edit: hot-swap the scoped limits on file change, keeping last-good on a bad edit.
 		if (config.scopedLimitsFile) {
 			extraClosers.push(watchScopedLimitsFn(config, scopedLimits, log, atBoot.scopedLimits, deploymentMaxCostUsd, projectPair));
