@@ -174,6 +174,33 @@ else
 				[ "$model_code" = 2 ] && echo "$model_exit" | grep -Eq '"reason":"model-not-allowed"[,}]' && echo "$model_exit" | grep -Eq '"modelRefused":1[,}]' \
 					|| fail "the image declares 'modelPolicy' but a job whose PI_ALLOWED_MODELS lacks its model was not stopped before its first call (exit $model_code: $model_exit)"
 				;;
+			exitAuth)
+				# Issue #545. Two claims, both checked by running them. First, the runner signs its exit line with the key the
+				# worker writes to its stdin: the same offline job as costCap's (a cap of 0 stops it before any call), handed a
+				# key the way run-container.mjs hands one (-i, PI_EXIT_AUTH=stdin), must end on a line whose HMAC-SHA256 under
+				# that key is right. Second, the runner runs under the exec-only node, so a child of it (a job's tool) cannot
+				# read its /proc entries, where the key lives in memory: a plain node runner's were readable on Docker Desktop.
+				auth_job=$(mktemp -d)
+				echo "Reply with the single word ok." >"$auth_job/prompt.md"
+				chmod -R a+rX "$auth_job"
+				auth_key=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+				auth_out=$(printf '%s\n' "$auth_key" | docker run -i --rm --init --network none --cap-drop=ALL --security-opt no-new-privileges -v "$auth_job:/job:ro" \
+					-e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+					-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_MAX_COST_MICROS=0 -e PI_EXIT_AUTH=stdin \
+					"$IMAGE_REF" 2>&1) || true
+				rm -rf "$auth_job"
+				auth_exit=$(echo "$auth_out" | grep '"event":"exit"' | tail -1)
+				auth_mac=$(echo "$auth_exit" | sed -nE 's/.*,"auth":"([0-9a-f]{64})"\}$/\1/p')
+				auth_body=$(echo "$auth_exit" | sed -E 's/,"auth":"[0-9a-f]{64}"\}$/}/')
+				auth_want=$(printf '%s' "$auth_body" | openssl dgst -sha256 -hmac "$auth_key" | awk '{print $NF}')
+				[ -n "$auth_mac" ] && [ "$auth_mac" = "$auth_want" ] \
+					|| fail "the image declares 'exitAuth' but a job handed a key on stdin did not end on an exit line signed with it ($auth_exit)"
+				docker run --rm --init --cap-drop=ALL --security-opt no-new-privileges --entrypoint grep "$IMAGE_REF" -q "exec /opt/pi-dispatch/runner-node " /entrypoint.sh 2>/dev/null \
+					|| fail "the image declares 'exitAuth' but its entrypoint does not run the runner under /opt/pi-dispatch/runner-node"
+				docker run --rm --init --cap-drop=ALL --security-opt no-new-privileges --entrypoint /opt/pi-dispatch/runner-node "$IMAGE_REF" \
+					-e 'const r = require("node:child_process").spawnSync("sh", ["-c", "cat /proc/$PPID/environ"], { stdio: "ignore" }); process.exit(r.status === 0 ? 1 : 0)' >/dev/null 2>&1 \
+					|| fail "the image declares 'exitAuth' but a child of /opt/pi-dispatch/runner-node can read its /proc entries -- the job's tools could read the exit line's key out of the runner"
+				;;
 			excludeTools)
 				# Same evidence style as 'commands': the baked runner config must actually read the variable.
 				# A runner that does not would run a "read-only" trigger's job with every tool it says to

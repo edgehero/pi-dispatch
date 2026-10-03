@@ -47,7 +47,7 @@ test("decideExit: no terminal message and no abort is infra, not success", () =>
 
 test("decideExit's non-abort branch carries NO turns of its own -- the premise the source-guard rests on", () => {
 	// WHY the guard below exists: on the success path, `turns` reaches the exit log SOLELY from
-	// run-job.mjs's `log("exit", { ...capExitMessage(outcome), turns: budget.state.turns, ... })`.
+	// run-job.mjs's `exitWriter.writeExit({ ...capExitMessage(outcome), turns: budget.state.turns, ... })`.
 	// decideExit's non-abort branch returns classifyStopReason, which has no `turns` field (only the
 	// budget-abort branch carries one -- see "a blown budget wins" above). So if that line ever dropped `turns`,
 	// nothing in outcome.mjs would put it back, and the worker's parseExitTurns (which requires a
@@ -61,13 +61,13 @@ test("run-job.mjs staples `turns` onto the success-path exit line -- worker pars
 	// A stdout-capture test would EXECUTE the runner (main() self-runs on import and `log` is
 	// unexported), so this guards the worker<->runner contract against the source instead -- the same
 	// tactic worker/test/wiring.test.mjs uses for wiring it cannot exercise at runtime. The regex
-	// matches a `log("exit", { ... turns: ... })` call whose object literal carries a `turns:` key
+	// matches an `exitWriter.writeExit({ ... turns: ... })` call (issue #545: every exit line goes through the one writer) whose object literal carries a `turns:` key
 	// before its closing brace: specific enough that dropping `turns` from the success spread fails
 	// it, tolerant of whitespace and property reordering.
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
 	assert.match(
 		src,
-		/log\("exit",\s*\{[^}]*turns:/,
+		/exitWriter\.writeExit\(\s*\{[^}]*turns:/,
 		"run-job.mjs exit line must carry turns -- worker parseExitTurns depends on it",
 	);
 	// The catch-path exit line (classifyThrow, a preflight throw) legitimately OMITS turns: no budget
@@ -85,7 +85,7 @@ test("run-job.mjs staples `context` onto the success-path exit line -- worker pa
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
 	assert.match(
 		src,
-		/log\("exit",[^\n]*\bcontext\b/,
+		/exitWriter\.writeExit\([^\n]*\bcontext\b/,
 		"run-job.mjs success exit line must carry the context reading -- worker parseExitContext depends on it",
 	);
 	// ...and it must come from pi's own accounting rather than a hand-rolled estimate. There is no
@@ -121,7 +121,7 @@ test("run-job.mjs staples `usage` onto the success-path exit line -- worker pars
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
 	assert.match(
 		src,
-		/log\("exit",\s*\{[^}]*\busage\b/,
+		/exitWriter\.writeExit\(\s*\{[^}]*\busage\b/,
 		"run-job.mjs success exit line must carry the usage ledger -- worker parseExitUsage depends on it",
 	);
 	// ...and the value must come from the meter's ledger emitter, the only producer of the bounded,
@@ -262,7 +262,7 @@ test("run-job installs the meter and the guards before any extension loads, and 
 	// that spent before a later refusal (command-unregistered) must reach the settlement.
 	const armed = src.indexOf("\t\tmeteredExitFields = () => {");
 	assert.ok(armed > install && armed < loader, "the exit fields are armed right after the install, before any extension loads");
-	assert.match(src, /log\("exit", \{ code: capped\.code, reason: capped\.reason, message: capped\.message, \.\.\.meteredExitFields\(\) \}\);/, "the outer catch's exit line carries the meter's fields");
+	assert.match(src, /exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, message: capped\.message, \.\.\.meteredExitFields\(\) \}\);/, "the outer catch's exit line carries the meter's fields");
 	assert.match(src, /const tokens = usageMeter\.ok \? meteredExitFields\(\)\.tokens :/, "the success line reads the same fields");
 	// `usage` rides only when a call was observed: a run with none keeps the key absent, never `usage: null`.
 	assert.match(src, /\{ tokens: \{ \.\.\.meter\.snapshot\(\), \.\.\.\(policyGuard \? policyGuard\.snapshot\(\) : \{\}\) \}, \.\.\.\(usage \? \{ usage \} : \{\}\) \}/, "usage is omitted when no call was observed");

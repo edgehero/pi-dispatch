@@ -770,6 +770,36 @@ refactor apart.
   `image/runner/src/outcome.mjs`, since the worker cannot import the runner: each member appears there as
   `reason: "<member>"` or, for the four policy reasons, as an exported literal (`export const COST_CAP = "cost-cap";`)
   that the meter and the policy check emit through.
+  **The exit line is signed, and a stop still writes one (issue #545).** The container's stdout is not the
+  runner's alone: a job's own tool can write to it through `/proc/1/fd/1` or the runner's `/proc/<pid>/fd/1`
+  (measured on Docker Desktop 27.4, rootful Docker 29.1, rootless Podman 4.9 and 5.8), so a line a tool forged
+  used to be read whenever it was the last one. On an image that declares `exitAuth`, the worker mints a random
+  32-byte key per run, writes it as 64 hex characters and a newline to the container's stdin (`-i`), closes it,
+  and sets `PI_EXIT_AUTH=stdin`. The runner drains stdin to EOF before anything else runs and signs each exit
+  line with HMAC-SHA256 over the line's unsigned bytes, keyed by those 64 characters, appended as the LAST key,
+  `"auth":"<64 hex>"`. The worker then reads only lines whose MAC verifies (`authenticExitLines`); with none, every
+  exit-line field is null, exactly as for a container that wrote no line. Why the job's tools cannot sign: the key
+  never reaches the environment (readable by every process from `/proc/1/environ`, measured), the argv or a
+  file; once drained it reads as EOF from `/proc/1/fd/0` and from the runner's fd 0; and the runner runs under
+  an exec-only node (`/opt/pi-dispatch/runner-node`, `0711`, root-owned), which the kernel marks not dumpable, so
+  its `/proc/<pid>/mem`, `environ` and `fd` are refused to the job's uid under `--cap-drop=ALL`. That last part is
+  load-bearing: a plain node runner's memory gave up the key to a tool child on Docker Desktop (no Yama) and on
+  Fedora (Yama `ptrace_scope` 0), and only Ubuntu's `ptrace_scope` 1 refused it. A MAC rather than the bare key
+  on the line, because a tool can open the container's stdout pipe for READING (measured): a stolen signed line is
+  only the genuine line again, and one taken off the pipe and not put back reads as missing (the floor). What
+  stays outside this: code that runs INSIDE the runner process (an extension), which is trusted at the runner's
+  own level and could reach the key; and an image that does not declare `exitAuth` (any image built before it),
+  read exactly as before. The runner also handles **SIGTERM** now: `docker stop` reaches it through the init
+  process, and it writes its exit line once, with `code: 143`, `reason: "terminated"`, the turn count, the
+  session and whatever the meter counted (`tokens`, `usage`), then exits `143`, well inside the stop's grace
+  period. The line is written synchronously to fd 1, every byte, before the exit, because an asynchronous stdout
+  write followed at once by `process.exit` can lose a large line's tail on a pipe (measured with a 1 MB line). A
+  line already written is not written again, and the process then exits with THAT line's code, so the
+  container's code and the last line agree. The worker still classifies a worker stop by its abort flag, so
+  `143` changes no class; what changes is that the token record of a stopped run carries the runner's real count.
+  The forge is closed only when BOTH the worker and the image are from #545 or later: an older worker sends no
+  key to any image, and a newer worker sends none to an image without `exitAuth`, so every other pairing runs
+  unsigned, exactly as before.
   **`tokens` gained eight keys with the process-wide meter** (`REQ-TOKEN-ACCOUNTING-AND-CAPS`), and **not
   one of them feeds classification either**: `metered` (`true` from the process-wide meter, `false` from
   the `subscribe()` fallback — the flag that tells a reader whether the total covers every in-process
@@ -1287,7 +1317,7 @@ refactor apart.
     no benefit of the doubt about what it contains — and neither costs an unflagged job anything.
     `verify-image.sh` greps the baked guardrails when the label claims `replicas`, so this label cannot lie
     any more than `forges` can. The token set at this version is `replicas`, `commands`, `excludeTools`,
-    `anyUid`, `costCap` and `modelPolicy` -- the third (issue #291) declares that the baked runner reads `PI_EXCLUDE_TOOLS`, and
+    `anyUid`, `costCap`, `modelPolicy` and `exitAuth` -- the third (issue #291) declares that the baked runner reads `PI_EXCLUDE_TOOLS`, and
     a job carrying exclusions on an image without it is refused pre-spend
     (`job-image-exclude-tools-unsupported`), because an older runner would ignore the variable and run a
     "read-only" trigger with every tool the file says to remove: a permission quietly not enforced.
@@ -1328,6 +1358,16 @@ refactor apart.
     would run the job with no cap at all. It lands with the first worker that writes the variable, so no
     worker ever sends a cap to an image that would ignore it. A deployment that sets no dollar cap needs no
     image change.
+    **`exitAuth`** (issue #545) declares that the baked runner reads the exit line's key from stdin when
+    `PI_EXIT_AUTH=stdin`, signs its exit line with it, writes a real exit line on SIGTERM, and is started by the
+    entrypoint under the exec-only `/opt/pi-dispatch/runner-node` (`INT-RUNNER-EXIT-CODE-PROTOCOL`). It is NOT a
+    `CAPABILITY_GATES` row: no job is refused for lacking it. The processor hands a key to an image that declares
+    it and reads only a signed exit line from it; an image without it is handed nothing and read as before,
+    under the #542 trust rule alone. Its evidence is three runs: the offline `costCap` job handed a key on stdin
+    must end on a line whose HMAC under that key verifies (`openssl dgst -sha256 -hmac`); the entrypoint must
+    `exec /opt/pi-dispatch/runner-node`; and a child of that node must fail to read its parent's
+    `/proc/<pid>/environ`. A derived image that keeps the label and replaces the entrypoint with plain `node` fails
+    the second, and one that makes the copy readable fails the third (both measured).
     `anyUid` (issue #341) declares that
     the image runs correctly as an ARBITRARY non-root uid given `HOME=/home/pi`: the home is writable by any
     uid, and Chromium renders as one. Its evidence is not a grep but two runs as uid `4242` (no passwd entry
@@ -1488,6 +1528,12 @@ refactor apart.
     `DES-DOLLAR-RESERVE-AND-SETTLE`), and a runner from an image declaring `modelPolicy` ENFORCES the list before
     every provider call (the model guard, `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER`); a runner with a list or a
     cap it cannot enforce refuses before any call (`INT-RUNNER-EXIT-CODE-PROTOCOL`).
+    `PI_EXIT_AUTH` (issue #545), the fixed value `stdin`, written ONLY to a run the worker hands a key, which is a
+    run on an image declaring `exitAuth`; that run's argv carries `-i` and its `docker run` (or `podman run`)
+    child's stdin is a pipe the worker writes the key to and closes at once. Every other run keeps
+    `stdio[0] = "ignore"`, no `-i` and no variable, so its argv and env are byte-identical. The key itself is in
+    no argv token (a host `ps` would show it), no env value (the container's `/proc/1/environ` would) and no log.
+    In `CONTAINER_ENV_NAMES`, and settled after the `PI_FORWARD_ENV` and `run.secrets` loops like the cap.
     Both are in `CONTAINER_ENV_NAMES`, so a trigger's `run.secrets` cannot bind either; and each name in `PI_FORWARD_ENV` (an explicit operator
     allowlist of extra host vars — e.g. a custom provider's key — forwarded by exact `-e NAME=VALUE`, never a
     pass-through, so it satisfies `no-broad-env-into-container`; **every** minted-token name is refused in
@@ -1682,7 +1728,7 @@ refactor apart.
     it is `:ro` and **credential-free by construction** (`import-pi` refuses a literal-key `models.json` and never
     copies `auth.json`; `CONST-TOKEN-SCOPED-PER-JOB`). No credential is ever written to `/outbox` or `/opt/pi-global`
     (same rule as `/workspace`).
-  - No TTY (`-it` absent)
+  - No TTY (`-t` absent; `-i` only on a run handed an exit key, a stdin the worker closes after one line)
   - **The home must be writable by the non-root runtime user, and by ANY non-root uid when the image claims
     `anyUid`.** pi lazily creates `~/.pi/agent/` (mode `0700`) and `auth.json` (mode `0600`, contents `{}`) on
     the **first credential operation** (both `withLock` and `withLockAsync` call `ensureParentDir()` +
@@ -4641,6 +4687,14 @@ validator rather than a second copy of it.
   one truncated at the HEAD is skipped when no anchor survives the cut and correctly repaired when the
   cut fell in a glued line's stray prefix -- either way a fragment is never misread as a value. A
   repaired value remains read-only telemetry -- classification stays the container exit code's job.
+  **With a key, only the runner's signed lines are read (issue #545).** When the job image declares `exitAuth`
+  the sink is opened with the run's key, and every one of these parsers scans `authenticExitLines(tail, key)`
+  instead of the raw tail: the lines whose `"auth"` MAC verifies, each with the `auth` key removed
+  (`INT-RUNNER-EXIT-CODE-PROTOCOL`). A forged line, before or after the genuine one, glued or not, is not in
+  that text. A run with a key and no verified line reads as a container that wrote no exit line: `turns`,
+  `tokens`, `usage`, `session`, `context` and the exit code all `null`, so the token record says unknown and the
+  dollar settlement floors. The sink then reports `exitAuth: "verified"` or `"unverified"`, logged on
+  `container_exit`; without a key it reports no `exitAuth` and reads the whole tail as before.
   **The process-wide meter widened the object, not the contract.** `tokens` grew `metered`, the
   `rootTotal`/`otherTotal`/`looseTotal` split, and the `sessions`/`calls`/`unresolved`/`unpriced` counters
   — additive inside an already-additive field, and still **nullable as a whole** (a container that died
@@ -6512,3 +6566,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-02 | Issues #501 part 5 and #502 part 6 (scoped-limits version 2). **`INT-SCOPED-LIMITS-FILE-CONTRACT` AMENDED**: `SCOPED_LIMITS_VERSION` is 2; repo and folder rows gain `dayUsd`, `weekUsd` and `monthUsd` (the overlay's `parseUsdMicros` rules, stored as canonical decimal strings), and `model:<provider>/<model>` rows carry those three only (counts and `concurrent` refused, `model:other/other` refused, case-insensitive duplicates refused; near misses of `model:` refused naming the exact form, and `project:` reserved for #499 in both versions); a version 1 file using either is refused naming version 2, and a version 1 file without them reads unchanged; the admin writes the lowest version that expresses the file and carries dollar fields through a count edit; new Dollar enforcement bullet: one reservation over the deployment, `budget:usd:s:<hash16>` and `budget:usd:mdl:<hash16 of the lowercased ref>` windows, listed jobs in their listed rows, unrestricted jobs in every model row (fail closed), unreserved jobs in none, a refusal anywhere giving back every key, `budget:usd:p:` still reserved for #499. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `dollars.modelBasis` fills (`metered`, `floor`, `refunded`, or null when no model window was held), each model window settled from its own `usage.models` row, with the five floor conditions (basis not metered, untrusted line, no ledger with calls, `truncated` absent or above 0, an `other`/`other` cost); a model's case-differing usage rows are summed; the ledger's `truncated` is `null` when the exit line omits it (it was 0). The dollar enforcement bullet gains the warnings (worker log at boot and reload, doctor, with env and overlay merged) and the refusal that tells a window below one job's cap from a full one. **Code evidence**: worker/src/scoped-limits.mjs -> parseScopedLimits, dollarCapsFor, modelDollarRows, scopedLimitsVersionFor; worker/src/dollar-budget.mjs -> modelDollarSettlement, holdPart; worker/src/processor.mjs -> runJob; worker/src/run-history.mjs -> buildRecord; admin/src/read-model.mjs -> writeScopedLimits, readScopedBudget. |
 | 2026-10-02 | Issue #539, follow-ups from PR #536's review. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, the four pre-spend model refusals: `overlay-unparseable` (and `overlay-is-a-directory`) now refuse EVERY ref of every job while the overlay is a file pi drops, whatever broke it, since pi would run even a builtin model against its provider's public endpoint; a missing file is no overlay, and an empty, whitespace-only or BOM-only file is one pi drops (measured). The transient-read sentence is narrowed to jobs that need the overlay (an overlay model, or a list whose fallbacks it could change), a dropped file's order against `fallback-unlisted` is stated, and doctor's new line for an overlay entry pi will not compose is named. **Code evidence**: worker/src/models-json.mjs -> parseModelsJson, stripJsonComments (a linear scan, differential-tested against pi's own); worker/src/model-catalog.mjs -> checkModelsKnown; worker/src/doctor.mjs; worker/test/model-catalog.test.mjs; worker/test/models-json.test.mjs; worker/test/doctor.test.mjs. |
 | 2026-10-02 | Issue #543. **`INT-SDK-SESSION-OPTIONS` AMENDED**, the order: the contract block now builds the runtime, the root session id, the meter and the guard, installs, runs `assertPoliciesEnforceable`, and only then builds the resource loader, because an extension factory runs inside the loader's `reload()` and a model call it makes there must already be metered and judged. Trap (h) gains the reason, measured at pi 0.99.1: at load a factory's pi API has no ctx (actions throw, `pi.registerProvider` is queued for the session), so its call goes through a `ModelRuntime` of its own or pi-ai's legacy global stream functions; the loader's `reload()` never calls `resetApiProviders()`, so installing first displaces nothing. A stop before the prompt sends no prompt. With no policy the exit line is unchanged except that a load-time call is now counted, and the only log change is ordering: `usage_meter` (and `session_resume_degraded`, when written) now precede the loader's lines. A legacy extension that re-registers an already-registered api id while it loads now counts in `rearms`, and stops a capped or listed job, like the same re-registration during the run. PR #547's review: trap (h)'s residual (a legacy call from a provider hook of a runtime call, counted by neither half) is CLOSED by a per-call dispatch token the call's options carry, so only the call's own registry re-entry is skipped, once. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the catch-path exit line omits `tokens` and `usage` only before the meter installed; after it, every exit line carries them, and `command-unregistered` is "before the prompt", no longer "pre-spend", because a load-time call may already have spent. The later review rounds: only the composer's re-entry on the same pair is skipped, once; a provider's forward to another pair is a full call (listed, prepared, bounded and counted under its own model) and the runtime call stays bound and counted, with the residual named in trap (h): a provider that forwards to another model through the legacy API is counted for both calls; trap (h) now lists every no-policy change (log ordering, load-time and in-context legacy calls counted, the catch line's tokens); a throw after a meter stop exits with the stop's code and reason. |
+| 2026-10-03 | Issue #545. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the exit line is signed. On an image declaring `exitAuth` the worker writes a per-run 32-byte key (64 hex characters) to the container's stdin with `-i` and sets `PI_EXIT_AUTH=stdin`; the runner drains stdin before anything runs and appends `"auth":"<HMAC-SHA256 of the unsigned line>"` as the line's last key; the worker reads only lines that verify. The channel choice is measured: the environment is readable from `/proc/1/environ` on every venue, a drained stdin reads as EOF, and the runner's memory gave the key to a tool child on Docker Desktop and Fedora until the runner ran under an exec-only node, after which `/proc/<pid>/mem`, `environ` and `fd` were EACCES on all four venues. The runner now handles SIGTERM: one exit line, `code: 143`, `reason: "terminated"`, with the meter's counts, then exit 143; a line already written is not repeated. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: with a key every exit-line parser scans only the verified lines (`authenticExitLines`), and none verified reads as no exit line; `exitAuth` is reported only when a key was issued. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the `exitAuth` capability token (not a gate) and its three verify-image proofs, and `PI_EXIT_AUTH` with the `-i` stdin pipe, written only to a run handed a key. Its `No TTY` line now reads `-t` absent, with `-i` only on a run handed an exit key (a stdin the worker closes after one line). The signed line closes the forge only when both the worker and the image are from #545 or later; every other pairing runs unsigned exactly as before. Exit codes, classes and every other field UNCHANGED, checked. |

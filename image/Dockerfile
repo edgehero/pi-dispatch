@@ -198,6 +198,15 @@ RUN mkdir -p /home/pi/.pi/agent && chown -R pi:pi /home/pi \
 COPY guardrails/HARD_RULES.md /opt/pi-dispatch/HARD_RULES.md
 COPY guardrails/OUTBOX_PROTOCOL.md /opt/pi-dispatch/OUTBOX_PROTOCOL.md
 
+# The runner's own node: an EXEC-ONLY, root-owned copy (issue #545). The kernel marks a process that exec'd a binary its
+# user cannot read as not dumpable, and a non-dumpable process's /proc/<pid>/mem, environ and fd are refused to the
+# same uid without CAP_SYS_PTRACE, which --cap-drop=ALL removes. That is what keeps the per-job exit-line key, read
+# from stdin into the runner's memory, out of reach of the job's own tools: measured, a tool child read the key out of
+# a plain node runner's memory on Docker Desktop (no Yama) and on Fedora (Yama ptrace_scope 0), and got EACCES from
+# this copy on every venue. A COPY, not a chmod of /usr/local/bin/node: every tool's node stays an ordinary readable
+# binary, and both cost the same one 120MB layer. The entrypoint execs this one.
+RUN install -o root -g root -m 0711 /usr/local/bin/node /opt/pi-dispatch/runner-node
+
 # Source last: everything above is cacheable and this layer changes on every commit.
 COPY image/runner /app/image/runner
 COPY image/entrypoint.sh /entrypoint.sh
@@ -272,7 +281,12 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # a call to a model the list does not name. An older runner handed the variable would ignore it and call any model,
 # reporting a clean exit: a model choice quietly not enforced. The worker sends the list only to an image declaring this
 # token; verify-image.sh runs an offline job with a fake key and a list that lacks its model to prove the claim.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy"
+# `exitAuth` (issue #545) tells the worker this runner reads a per-job key from stdin (PI_EXIT_AUTH=stdin), signs its exit
+# line with it, writes a real exit line on SIGTERM, and runs under the exec-only node above, so the job's own tools can
+# neither read the key nor sign a line. The worker hands a key only to an image declaring it, and then reads only a
+# signed line; an image without it is read as before. verify-image.sh runs a job with a key and checks the MAC, and
+# checks from a tool child that the runner's memory is closed.
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,exitAuth"
 
 USER pi
 WORKDIR /workspace

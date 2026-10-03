@@ -194,6 +194,14 @@ export const CAPABILITY_GATES = Object.freeze([
 ]);
 
 /**
+ * The capability an image declares when its runner signs its exit line with a per-job key read from stdin, and runs
+ * under an exec-only node its job's tools cannot read (issue #545). NOT a gate: no job is refused for lacking it. The
+ * processor hands a key only to an image that declares it, and reads only a signed exit line from such an image; an
+ * image without it runs and is read exactly as before, under the #542 trust rule alone.
+ */
+export const EXIT_AUTH_CAPABILITY = "exitAuth";
+
+/**
  * Exported so the test cannot drift from the format string above. `|` because an image id is
  * `sha256:<hex>` and a version is a version, so neither can contain one -- and because a literal control
  * character in source is the kind of thing that survives a copy/paste and then does not.

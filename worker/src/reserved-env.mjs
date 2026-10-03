@@ -48,6 +48,9 @@ export const CONTAINER_ENV_NAMES = new Set([
 	// `run.secrets`: a trigger setting its own cap, or its own list, would be the policy choosing itself.
 	"PI_MAX_COST_MICROS",
 	"PI_ALLOWED_MODELS",
+	// Issue #545: tells the runner the exit line's key waits on stdin. A trigger setting it would block its own runner
+	// on a stdin no one writes, or turn the signed line off.
+	"PI_EXIT_AUTH",
 	"PI_OFFLINE",
 	"PLAYWRIGHT_BROWSERS_PATH",
 	"PLAYWRIGHT_MCP_BROWSER",

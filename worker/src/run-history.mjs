@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
 import * as nodeFs from "node:fs";
 import { scrubCredentials } from "./redact.mjs";
 import { basename, join } from "node:path";
@@ -638,6 +639,49 @@ export function targetFor(kind, data) {
 /** Retain only the last ~8KB of container output for turn recovery, so per-job memory stays flat. */
 const TAIL_CAP_BYTES = 8 * 1024;
 
+/** A signed exit line's tail: `,"auth":"<64 hex>"}`, the MAC as the LAST key (image/runner/src/exit-line.mjs). */
+const SIGNED_TAIL = /,"auth":"([0-9a-f]{64})"\}$/;
+
+/**
+ * The runner exit lines in `text` that carry a valid MAC under `key`, each with its `auth` key removed, joined by
+ * newlines in their original order; "" when there is none (issue #545, INT-RUNNER-EXIT-CODE-PROTOCOL).
+ *
+ * The worker hands each job a fresh random key on the container's stdin, and the runner signs its exit line with
+ * HMAC-SHA256 over the line's unsigned bytes. A job's own tool can write any bytes it likes to the container's stdout,
+ * but not that MAC: the key left the pipe before any tool existed and the runner's memory is closed to the job's uid
+ * (the image's exec-only node). So when a key was issued, only these lines are the runner's, and every `parseExit*`
+ * scanner runs over this text instead of the raw tail: a forged line, before or after the genuine one, is not in it.
+ *
+ * Each candidate starts at a `{"event":"exit"` anchor, the `parseTailLine` repair's reasoning: those raw bytes cannot
+ * occur inside a runner line, so a line glued to stray bytes before it is still found, and an anchor inside the stray
+ * bytes simply fails the MAC. The comparison is `timingSafeEqual` on equal-length digests. Never throws.
+ */
+export function authenticExitLines(text, key) {
+	if (typeof text !== "string" || typeof key !== "string" || key === "") return "";
+	const verified = [];
+	for (const raw of text.split("\n")) {
+		const line = raw.trim();
+		const match = SIGNED_TAIL.exec(line);
+		if (match === null) continue;
+		const signed = line.slice(0, match.index);
+		let from = signed.indexOf('{"event":"exit"');
+		while (from !== -1) {
+			const body = `${signed.slice(from)}}`;
+			try {
+				const expected = createHmac("sha256", key).update(body, "utf8").digest();
+				if (timingSafeEqual(expected, Buffer.from(match[1], "hex"))) {
+					verified.push(body);
+					break;
+				}
+			} catch {
+				// a digest that will not compare is not a match
+			}
+			from = signed.indexOf('{"event":"exit"', from + 1);
+		}
+	}
+	return verified.join("\n");
+}
+
 /**
  * The durable log sink: the I/O layer that streams a job's raw container output to a per-job `.log`
  * file and recovers the turn count from a bounded tail of that same output.
@@ -665,7 +709,10 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 		log("logs_dir_error", { reason: err?.message });
 	}
 
-	return function openJobLog(jobId) {
+	// `exitKey` (issue #545): the key this job's runner signs its exit line with, or null when none was issued (an image
+	// that does not declare `exitAuth`, or a caller that predates the field). With a key, the exit-line fields are read
+	// from the AUTHENTICATED lines only, and none at all reads exactly like a container that wrote no exit line.
+	return function openJobLog(jobId, { exitKey = null } = {}) {
 		let tail = "";
 		let stream = null;
 
@@ -691,13 +738,19 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			// The tail accumulates whether or not `enabled` is set, which is what keeps exitReason in the record
 			// when raw logs are off: a label that vanished with log capture would make the record depend on an
 			// opt-in PII switch.
-			const exitReason = parseExitReason(tail);
-			const exitLineCode = parseExitCode(tail);
-			const turns = parseExitTurns(tail);
-			const tokens = parseExitTokens(tail);
-			const session = parseExitSession(tail);
-			const usage = parseExitUsage(tail);
-			const context = parseExitContext(tail);
+			// With a key, the scanners see only the lines the runner signed (`authenticExitLines`), so a line a job's tool
+			// wrote, before or after the genuine one, is never the one they read. `exitAuth` says which case this was:
+			// absent (no key issued: today's whole-tail read), "verified" or "unverified" (a key, and no line carried it).
+			const keyed = typeof exitKey === "string" && exitKey !== "";
+			const exitText = keyed ? authenticExitLines(tail, exitKey) : tail;
+			const exitAuth = exitText === "" ? "unverified" : "verified";
+			const exitReason = parseExitReason(exitText);
+			const exitLineCode = parseExitCode(exitText);
+			const turns = parseExitTurns(exitText);
+			const tokens = parseExitTokens(exitText);
+			const session = parseExitSession(exitText);
+			const usage = parseExitUsage(exitText);
+			const context = parseExitContext(exitText);
 			try {
 				if (stream !== null) {
 					const s = stream;
@@ -721,7 +774,8 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			} catch (err) {
 				log("log_sink_error", { jobId, reason: err?.message });
 			}
-			return { turns, tokens, session, usage, context, exitReason, exitLineCode };
+			// `exitAuth` only when a key was issued, so a keyless close returns exactly the object it always did.
+			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(keyed ? { exitAuth } : {}) };
 		}
 
 		return { write, close };

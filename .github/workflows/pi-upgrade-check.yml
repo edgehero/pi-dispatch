@@ -459,6 +459,15 @@ jobs:
             || { echo "::error::the built image's capabilities label does not declare modelPolicy -- a job with an allowed-model list could not be admitted on this image."; exit 1; }
           echo "OK: the label declares modelPolicy, and the CORE checklist ran its proof"
 
+      # --- INT-RUNNER-EXIT-CODE-PROTOCOL (exitAuth, issue #545) ---
+      # Same reason again: an image that dropped exitAuth would still pass, and the worker would quietly go back to
+      # reading an exit line the job's own tools can forge. The CORE checklist proves the claim when it is made.
+      - name: "RUNNER: the built image declares exitAuth"
+        run: |
+          docker image inspect --format '{{index .Config.Labels "dev.pi-dispatch.capabilities"}}' "$IMAGE_REF" | tr ',' '\n' | grep -qx "exitAuth" \
+            || { echo "::error::the built image's capabilities label does not declare exitAuth -- the worker would read an exit line the job's tools can forge."; exit 1; }
+          echo "OK: the label declares exitAuth, and the CORE checklist ran its proof"
+
       # --- DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST (issue #341) ---
       # The runner's own user is uid 1001, the image's, which is exactly the one host shape that can never show
       # the bug: every job mount works for it with no --user at all. So the check runs as a DIFFERENT uid, 1234

@@ -29,6 +29,7 @@ import {
 	loadRetryPredicate,
 } from "./src/outcome.mjs";
 import { restoreEnvProxyDispatcher } from "./src/env-proxy.mjs";
+import { createExitWriter, readExitKey, writeAllSync } from "./src/exit-line.mjs";
 import { createJobModelRuntime } from "./src/model-runtime.mjs";
 import { countPackageResources, findShadowedSkills, isFlowLoaded, owningRoot } from "./src/packages.mjs";
 import { openSessionManager } from "./src/session.mjs";
@@ -82,8 +83,34 @@ let meteredExitFields = () => ({});
  * decideExit gives a stop over a rejected prompt, so the record says why the job really ended (PR #547's review).
  */
 let meterStopAtExit = () => null;
+/**
+ * The turn count and the session as they stand, for an exit line written by the SIGTERM handler (issue #545). Empty
+ * until the turn budget is attached; then set, so a line written on a stop carries what the decided line would have.
+ */
+let liveExitFields = () => ({});
+
+// The exit line's key (issue #545), read FIRST, before main and so before any extension loads or any tool can run:
+// the worker wrote it to stdin and closed it, and draining the pipe here is what leaves nothing in it for a tool to
+// read later. Read whatever happens next, so the catch path's line is signed too. No PI_EXIT_AUTH, no read.
+const exitKey = readExitKey(process.env);
+const exitWriter = createExitWriter({
+	key: exitKey.key,
+	// env-internal PI_JOB_ID: set by the worker on the container, so the exit line can name its job.
+	jobId: process.env.PI_JOB_ID,
+	// Synchronously, every byte, to fd 1 (writeAllSync): the SIGTERM path exits the moment the line is written.
+	write: (line) => writeAllSync(1, line),
+	exit: (code) => process.exit(code),
+});
+// SIGTERM is the worker's stop (the job timeout, an operator's cancel, a shutdown): `docker stop` delivers it to the
+// init process, which forwards it here. Without a handler node died at once and no genuine exit line followed, so a
+// line a tool wrote earlier was the last one in the log. Now the real line is written, with what the meter counted,
+// and the runner exits 143 well inside the stop's grace period. A line already written is not written again.
+process.on("SIGTERM", () => exitWriter.terminate({ ...liveExitFields(), ...meteredExitFields() }));
 
 async function main() {
+	// A worker that asked for a signed exit line and did not deliver a usable key: the run goes on with an unsigned
+	// line, which that worker reads as no line at all (the floor, tokens unknown). Said here, by kind only.
+	if (exitKey.problem !== null) log("exit_key_unread", { problem: exitKey.problem });
 	const cfg = parseRunnerEnv(process.env);
 
 	// FIRST, before the prompt is read and before any auth or model lookup: a staged package root
@@ -416,6 +443,7 @@ async function main() {
 	const budget = attachTurnBudget(session, cfg.maxTurns, {
 		onAbort: (turns) => log("turn_budget_exceeded", { turns, maxTurns: cfg.maxTurns }),
 	});
+	liveExitFields = () => ({ turns: budget.state.turns, retryTurns: budget.state.retryTurns, session: { resumed: sessionResumed, reason: sessionReason } });
 
 	// FALLBACK ONLY. The process-wide meter is the single source of truth whenever it installed, so
 	// the per-session accumulator is attached only when it did NOT -- the two are never both counting
@@ -504,7 +532,7 @@ async function main() {
 	const context = Number.isFinite(contextUsage?.tokens) && Number.isFinite(contextUsage?.contextWindow) && contextUsage.contextWindow > 0 ? { tokens: contextUsage.tokens, window: contextUsage.contextWindow } : null;
 	// capExitMessage: a provider's error body is unbounded, and the worker reads this line from a bounded
 	// tail, so an uncapped message can push `code` and `reason` out of what the host ever sees.
-	log("exit", { ...capExitMessage(outcome), turns: budget.state.turns, retryTurns: budget.state.retryTurns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason } });
+	exitWriter.writeExit({ ...capExitMessage(outcome), turns: budget.state.turns, retryTurns: budget.state.retryTurns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason } });
 	return outcome.code;
 }
 
@@ -525,6 +553,6 @@ main()
 		if (stopped !== null) log("throw_after_stop", { reason: thrown.reason, error: typeof error?.name === "string" ? error.name : null });
 		const outcome = stopped ?? thrown;
 		const capped = capExitMessage(outcome);
-		log("exit", { code: capped.code, reason: capped.reason, message: capped.message, ...meteredExitFields() });
+		exitWriter.writeExit({ code: capped.code, reason: capped.reason, message: capped.message, ...meteredExitFields() });
 		process.exitCode = outcome.code ?? EXIT_INFRA;
 	});

@@ -533,10 +533,10 @@ test("run-job.mjs caps every exit line and hands decideExit the pinned retry pre
 	// Both are wiring the unit tests above cannot see: an exit line that bypasses the cap loses the label
 	// host-side on a big body, and a decideExit call without isRetryable silently turns #437 off.
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
-	const exitLines = src.match(/log\("exit", \{[^\n]*/g) ?? [];
+	const exitLines = src.match(/exitWriter\.writeExit\(\{[^\n]*/g) ?? [];
 	assert.equal(exitLines.length, 2, "the runner has two exit-line paths (the decided outcome and the preflight throw)");
 	assert.match(exitLines[0], /\.\.\.capExitMessage\(outcome\)/, "the decided outcome's exit line must be capped");
-	assert.match(src, /const capped = capExitMessage\(outcome\);\s*log\("exit", \{ code: capped\.code, reason: capped\.reason, message: capped\.message, \.\.\.meteredExitFields\(\) \}\)/, "the throw path's exit line must be capped");
+	assert.match(src, /const capped = capExitMessage\(outcome\);\s*exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, message: capped\.message, \.\.\.meteredExitFields\(\) \}\)/, "the throw path's exit line must be capped");
 	assert.match(src, /loadRetryPredicate\(\{ module: usageMeter\.ok \? usageMeter\.module : null, candidates: resolvePiAiCompat\(\) \}\)/);
 	assert.match(src, /decideExit\(\{[\s\S]*?\n\t\tisRetryable,\n\t\trejected,\n\t\}\);/, "decideExit must receive isRetryable, and the classified rejection");
 });
@@ -611,7 +611,7 @@ test("max-turns 1: a 429 that outlasts pi's retries exits 1, a retried infra fai
 
 test("run-job.mjs puts the turn budget's retryTurns on the decided exit line beside turns", () => {
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
-	const decided = (src.match(/log\("exit", \{[^\n]*/g) ?? [])[0] ?? "";
+	const decided = (src.match(/exitWriter\.writeExit\(\{[^\n]*/g) ?? [])[0] ?? "";
 	assert.match(decided, /turns: budget\.state\.turns, retryTurns: budget\.state\.retryTurns,/);
 });
 
