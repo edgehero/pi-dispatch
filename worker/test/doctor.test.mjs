@@ -5213,6 +5213,16 @@ test("issue #499 part C: doctor names a peer whose projects differ, from the ser
 	assert.ok(!none.some((x) => /projects/.test(x.label) && /fingerprint|disagree/.test(x.label)), "no projects anywhere: nothing new on upgrade");
 });
 
+test("PR #569's review: with THIS host's projects.json not loading, doctor fails on it and does not blame a healthy peer", async () => {
+	const file = join(tempDir("pi-fp-projects-bad-"), "projects.json");
+	writeFileSync(file, "{ not json");
+	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+	const peer = projectsFingerprint([{ id: "shop", name: null, members: ["/srv/a"] }]);
+	const checks = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1", PI_PROJECTS_FILE: file, PI_SETTINGS_FILE: noOverlay() }, fleetSeams([{ name: "mini2", tz, fpProjects: peer }]));
+	assert.ok(checks.some((c) => c.ok === false && !c.warn && /PI_PROJECTS_FILE/.test(c.label)), "the load failure is named");
+	assert.ok(!checks.some((c) => /about the projects|fingerprint of its projects/.test(c.label)), "no peer comparison against a file that does not load");
+});
+
 test("doctor's fingerprint covers the scoped-limits dollar rows and the overlay, as the worker resolves them", async () => {
 	const dir = tempDir("pi-fp-usd-rows-");
 	const limits = join(dir, "scoped-limits.json");

@@ -847,7 +847,7 @@ export function makeDashboard({
         // The projects view (issue #499 part C): a cursor over the projects and the "(no project)" row; Enter filters
         // the runs list to the cursor's project (Enter on the filtered one clears it) and backs out to the list, where
         // the runs divider names the filter. Esc backs out unchanged; everything else is inert.
-        const rows = projectRows(snapshot);
+        const rows = projectRows(snapshot, projectsInfo);
         if (projectsSelected > rows.length - 1) projectsSelected = Math.max(0, rows.length - 1);
         if (matchesKey(data, "escape")) {
           view = "LIST";
@@ -2161,10 +2161,19 @@ function projectRowNote(l: any, projects: any): { text: string; missing: boolean
   return { text: `${n} member${n === 1 ? "" : "s"}`, missing: false };
 }
 
-/** The PROJECTS view's selectable rows: each project, then the "(no project)" bucket (key null). */
-function projectRows(snapshot: any): any[] {
+/**
+ * The PROJECTS view's selectable rows: each project in the file, then each id the month's records carry that the file
+ * no longer defines (a deleted or renamed project, or every id when the file does not load: PR #569's lab), marked
+ * so, then the "(no project)" bucket (key null). The rows add up to the month: spend recorded under an id is never
+ * dropped because today's file lacks it.
+ */
+function projectRows(snapshot: any, info: any = null): any[] {
   const list: any[] = Array.isArray(snapshot?.projects?.projects) ? snapshot.projects.projects : [];
-  return [...list.map((p: any) => ({ key: p.id, project: p })), { key: null, project: null }];
+  const known = new Set(list.map((p: any) => p?.id));
+  const orphans = (Array.isArray(info?.byProject) ? info.byProject : [])
+    .map((r: any) => r?.key)
+    .filter((k: any) => typeof k === "string" && k !== "" && !known.has(k));
+  return [...list.map((p: any) => ({ key: p.id, project: p })), ...orphans.map((k: string) => ({ key: k, project: null, orphan: true })), { key: null, project: null }];
 }
 
 /**
@@ -2184,6 +2193,7 @@ function projectsView(snapshot: any, info: any, selected: number, runProject: an
   const lines: string[] = [];
   if (pv?.unset) lines.push(styler.cell("PI_PROJECTS_FILE is unset: the worker reads no projects", iw, { color: "dim" }));
   else if (pv?.missing) lines.push(styler.cell("(the projects file is missing)", iw, { color: "error" }));
+  else if (pv?.unreadable) lines.push(styler.cell(`(the projects file is unreadable: ${cellOf(pv.unreadable)})`, iw, { color: "error" }));
   else if (pv?.invalid) lines.push(styler.cell(`(projects file invalid: ${cellOf(pv.invalid)})`, iw, { color: "error" }));
   const spend = new Map<any, any>();
   if (info?.unreachable) lines.push(styler.cell(`spend unreadable (${cellOf(info.unreachable)})`, iw, { color: "error" }));
@@ -2191,12 +2201,16 @@ function projectsView(snapshot: any, info: any, selected: number, runProject: an
     for (const r of info.byProject) spend.set(r?.key ?? null, r);
     lines.push(styler.cell("spend this month, by the project each run recorded", iw, { color: "dim" }));
   } else lines.push(styler.cell("spend not read (no records scan wired)", iw, { color: "dim" }));
-  const rows = projectRows(snapshot);
+  const rows = projectRows(snapshot, info);
   rows.forEach((row: any, i: number) => {
     const cursor = i === selected ? styler.fg("accent", "›") : " ";
     const s = spend.get(row.key);
     const money = s ? `${fmtCost(s.cost)} · ${s.runs} run${s.runs === 1 ? "" : "s"}` : "no runs";
     const filtering = runProject === row.key ? styler.fg("warning", " · filtering runs") : "";
+    if (row.orphan) {
+      lines.push(fitLine(`${cursor} ${styler.fg("accent", cellOf(row.key))}  ${styler.fg("warning", "not in projects.json")}  ${styler.fg("text", money)}${filtering}`, iw, styler));
+      return;
+    }
     if (row.project === null) {
       lines.push(fitLine(`${cursor} ${styler.fg("muted", "(no project)")}  ${styler.fg("text", money)}${filtering}`, iw, styler));
       return;
@@ -2205,7 +2219,7 @@ function projectsView(snapshot: any, info: any, selected: number, runProject: an
     const n = Array.isArray(p.members) ? p.members.length : 0;
     const name = typeof p.name === "string" && p.name !== "" ? styler.fg("dim", ` · ${escapeInterpreted(p.name)}`) : "";
     lines.push(fitLine(`${cursor} ${styler.fg("accent", cellOf(p.id))}  ${styler.fg("muted", `${n} member${n === 1 ? "" : "s"}`)}  ${styler.fg("text", money)}${filtering}${name}`, iw, styler));
-    for (const m of Array.isArray(p.members) ? p.members : []) lines.push(fitLine(`    ${styler.fg("dim", cellOf(m))}`, iw, styler));
+    for (const m of Array.isArray(p.members) ? p.members : []) lines.push(fitLine(`    ${styler.fg("dim", cellOf(escapeInterpreted(String(m))))}`, iw, styler));
   });
   return { title, lines };
 }

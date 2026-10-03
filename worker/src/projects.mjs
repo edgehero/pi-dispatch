@@ -51,6 +51,28 @@ const NAME_MAX = 120;
  * a scope listed twice in one project, and an empty `members`.
  */
 export function parseProjects(text, path) {
+	try {
+		return parseProjectsText(text, path);
+	} catch (error) {
+		// Every refusal ESCAPED at the source (PR #569's review): a folder member may hold a C1 or bidi character, and this
+		// message reaches the worker's `projects_reload_invalid` log line, doctor and an admin tool's error. JSON quoting
+		// keeps C0 visible but leaves C1, bidi and zero-width characters raw.
+		if (error?.piDispatchConfig === true) error.message = escapeControls(error.message);
+		throw error;
+	}
+}
+
+/**
+ * Text with the characters that change what a reader SEES written out as `\u{XXXX}`: C0 and DEL (when not already
+ * JSON-escaped), C1, the bidi controls and isolates, the zero-width and invisible format characters, the line and
+ * paragraph separators, and the tag block. For a message about operator text that reaches a log line or a terminal.
+ * The worker's twin of the panel's `escapeInterpreted` for the cases a log can meet; it imports nothing.
+ */
+export function escapeControls(text) {
+	return String(text ?? "").replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb\u{e0000}-\u{e007f}]/gu, (ch) => `\\u{${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}}`);
+}
+
+function parseProjectsText(text, path) {
 	let parsed;
 	try {
 		parsed = JSON.parse(text);
@@ -146,7 +168,7 @@ function normalizeMember(raw, at, path) {
 export function loadProjects(config, { readFileSync = fsReadFileSync, existsSync = fsExistsSync } = {}) {
 	const path = config.projectsFile;
 	if (path === null || path === undefined) return [];
-	if (!existsSync(path)) throw configError(`projects file does not exist: ${path}`);
+	if (!existsSync(path)) throw configError(`projects file does not exist: ${escapeControls(path)}`);
 	return parseProjects(readFileSync(path, "utf8"), path);
 }
 

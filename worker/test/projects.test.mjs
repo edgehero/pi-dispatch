@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { EMPTY_PROJECTS_FINGERPRINT, PROJECTS_VERSION, PROJECT_ID_RE, isProjectId, loadProjects, parseProjects, projectOf, projectsFingerprint, projectsFingerprintInput } from "../src/projects.mjs";
+import { EMPTY_PROJECTS_FINGERPRINT, escapeControls, PROJECTS_VERSION, PROJECT_ID_RE, isProjectId, loadProjects, parseProjects, projectOf, projectsFingerprint, projectsFingerprintInput } from "../src/projects.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 const wrap = (projects, version = 1) => JSON.stringify({ version, projects });
@@ -192,4 +192,14 @@ test("fpProjects moves with an id and with membership, and not with a name or th
 	assert.notEqual(projectsFingerprint(parse([{ id: "shop", members: ["forgejo:acme/web", "/srv/a"] }, { id: "ops", members: ["/srv/b"] }])), fp, "the same repo on another forge disagrees");
 	assert.equal(projectsFingerprint([]), EMPTY_PROJECTS_FINGERPRINT, "no projects is a fingerprint of its own, never an abstention");
 	assert.notEqual(fp, EMPTY_PROJECTS_FINGERPRINT);
+});
+
+test("a refusal escapes C1, bidi and zero-width characters a folder member may hold (PR #569's review)", () => {
+	const evil = "/srv/a\u202egnp\u009b\u200b";
+	assert.throws(
+		() => parse([{ id: "shop", members: [evil] }, { id: "ops", members: [evil] }]),
+		(e) => /claimed by both/.test(e.message) && !/[\u202e\u009b\u200b]/.test(e.message) && e.message.includes("\\u{202E}") && e.message.includes("\\u{009B}"),
+	);
+	assert.equal(escapeControls("a\u2066b\u{e0041}c"), "a\\u{2066}b\\u{E0041}c");
+	assert.equal(escapeControls("plain /srv/caf\u00e9 \u05d0"), "plain /srv/caf\u00e9 \u05d0", "letters of any script are kept");
 });

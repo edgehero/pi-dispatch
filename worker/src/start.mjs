@@ -40,7 +40,7 @@ import { makeCheckOnceSpent, makeCheckWaitSkew, makeDisarmOnce } from "./trigger
 import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "./watch-closer.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
 import { checkProjectRows, danglingProjectRows, dollarRowsWithoutCap, loadScopedLimits, scopeClaimRows } from "./scoped-limits.mjs";
-import { loadProjects, projectOf, projectsFingerprint } from "./projects.mjs";
+import { escapeControls, loadProjects, projectOf, projectsFingerprint } from "./projects.mjs";
 import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
@@ -371,7 +371,8 @@ export function reloadProjects(config, ref, log, pair = null) {
 			if (pair.deploymentCap) warnDollarRowsWithoutCap(other, pair.deploymentCap(), log);
 		}
 	} catch (err) {
-		log("projects_reload_invalid", { reason: err?.message });
+		// Escaped (PR #569's review): the parser's own refusals already are, and an fs error quoting the path is too.
+		log("projects_reload_invalid", { reason: escapeControls(err?.message) });
 	}
 }
 

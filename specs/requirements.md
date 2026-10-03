@@ -682,9 +682,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   confirm-gated tool the model **cannot self-approve** — the model emits the call, the human answers the
   confirm — so a prompt-injected session cannot raise the cap without a human keypress it cannot forge.
   The three dollar windows (`dailyCostUsd`, `weeklyCostUsd`, `monthlyCostUsd`) are settings keys too, behind the
-  same operator-typed or confirm-gated write, and are enforced since issue #501's part 3. A trigger's
+  same operator-typed or confirm-gated write, and are enforced since issue #501's part 3.
   A project write is confirm-gated for the same reason: which project a repo is in decides which project row counts
-  it, so moving a repo out of a capped project widens what it may spend.
+  it, so moving a repo out of a capped project widens what it may spend. A trigger's
   `run.maxCostUsd` and `run.models` are not settable by any tool, confirm or no confirm: each decides what the
   trigger's jobs can spend or reach, so removing or raising one is a widening, and it is written by hand in the
   reviewed triggers file. A tool call that carries either is REFUSED rather than dropped, because a dropped field

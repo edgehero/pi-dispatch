@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildInsightsHtml, layoutDailyChart, layoutBarList, layoutFlowLines, layoutCumulative, INSIGHTS_COST_CLASSES } from "../src/insights-html.mjs";
+import { buildInsightsHtml, layoutDailyChart, layoutBarList, layoutFlowLines, layoutCumulative, INSIGHTS_COST_CLASSES, INSIGHTS_PROJECT_ID_RE } from "../src/insights-html.mjs";
+import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { buildGraphModel } from "../src/graph-model.mjs";
 import { buildGraphScene, drawnColumns } from "../src/graph-html.mjs";
 import { COST_CLASSES, foldTriggerCosts } from "../src/costs.mjs";
@@ -881,4 +882,21 @@ test("the breakdown gains a by-project list keyed by id, with names escaped and 
 test("a fold without byProject draws no by-project section, never an empty list that reads as no spend", () => {
   const out = buildInsightsHtml(CANNED_PAYLOAD(), { now: NOW });
   assert.ok(!out.includes("by project"));
+});
+
+test("the page's restated project id rule is the worker's rule (PR #569's review: the third copy, bolted)", () => {
+  assert.equal(INSIGHTS_PROJECT_ID_RE.source, PROJECT_ID_RE.source);
+  assert.equal(INSIGHTS_PROJECT_ID_RE.flags, PROJECT_ID_RE.flags);
+});
+
+test("a key that is not an id JOINS the one (no project) bar, never a second one with the same label", () => {
+  const p = CANNED_PAYLOAD();
+  p.fold.byProject = [
+    { key: null, label: "(no project)", runs: 1, tokens: 10, cost: usd(1, "metered") },
+    { key: "Bad Key", label: "Bad Key", runs: 2, tokens: 5, cost: usd(2, "metered") },
+    { key: "shop", label: "shop", runs: 1, tokens: 1, cost: usd(0.5, "metered") },
+  ];
+  const out = buildInsightsHtml(p, { now: NOW });
+  assert.equal(out.split(">(no project)</text>").length - 1, 1, "one bar");
+  assert.ok(out.includes("$3.00"), "it carries both rows' spend");
 });

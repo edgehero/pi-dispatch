@@ -54,6 +54,13 @@ is refused when no one is there to answer it.
 
 - The tools write the file `PI_PROJECTS_FILE` names. They check the result with the worker's own loader, and
   replace the file in one rename, so the worker never reads half a file.
+- If `projects.json` is a symlink (to one shared copy, say), the tools write through it: the link stays and the
+  shared copy gets the edit. The file keeps its mode.
+- A file that is there but cannot be read (a permission error, say) refuses the write. Only a missing file starts
+  from no projects. The same holds for `scoped-limits.json`.
+- Right before the rename, a write reads `projects.json` and `scoped-limits.json` again. If either changed since it
+  was checked (another session wrote it), nothing is written and the tool says so; try again. Two writes that land
+  in the same instant after that check can still race, because the two files have no lock.
 - An edit cannot change an id. To rename `shop` to `store`: add `store`, point the row at `project:store`, then
   delete `shop`. The row's count starts over under the new id.
 - Removing a member from a capped project widens what that member may spend, because the project row no longer
@@ -122,10 +129,24 @@ Every host of one fleet must carry the same `projects.json`. Each host resolves 
 while the project rows' counters are shared, so two different files put the same repo in two projects, depending on
 which host ran it.
 
+A folder mounted at different paths on different hosts (`/srv/shop` here, `/mnt/data/shop` there) belongs in the
+one shared file under both paths: `"members": ["/srv/shop", "/mnt/data/shop"]`. Each host then matches its own
+path, and the fingerprints agree.
+
 Each host publishes a fingerprint of its projects in the host registry (`fpProjects`): the ids and a hash of each
 member, never a name or a member in clear. `pi-dispatch doctor` warns and names a host whose fingerprint differs
 from this host's, and a host that publishes none (an older worker) while projects are in use. A live edit shows in
-the fingerprint within one heartbeat.
+the fingerprint within one heartbeat. When this host's own `projects.json` does not load, doctor fails on that and
+skips the comparison.
+
+## When projects.json is gone
+
+- **`PI_PROJECTS_FILE` still set:** doctor fails with `PI_PROJECTS_FILE is set ... to a file the worker cannot load,
+  so it REFUSES TO START: ... does not exist`. It names the file. A running worker keeps its last good projects and
+  logs `projects_reload_invalid`.
+- **`PI_PROJECTS_FILE` unset as well:** there are no projects, so doctor names each `project:<id>` row instead:
+  `scoped limit(s) #0 (project:shop) in ... name a project that is not in the projects file -- the worker refuses to
+  start`.
 
 ## Matching rules
 
@@ -143,6 +164,7 @@ the fingerprint within one heartbeat.
 - Webhook triggers are not grouped by project, only their runs are.
 - The project is decided per attempt, so a retry after an edit may record a different project.
 - Hosts must carry the same file; doctor warns when they do not.
+- Two admin writes approved in the same instant can still race past the re-check (no lock across the two files).
 
 ## Reference
 

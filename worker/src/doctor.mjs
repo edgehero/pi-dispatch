@@ -2419,10 +2419,11 @@ export async function collectChecks(shellVars, seams) {
 		const usdHere = usdFingerprint(dollarsHere, scopedLimitFacts.parseError === null ? scopedLimitFacts.limits : [], envListHere);
 		checks.push(...(await fleetDollarChecks(usdHere, peers, { dollarKeysExist: () => (seams.dollarKeysExist ?? defaultDollarKeysExist)(valkeyTalkUrl) })));
 		// Issue #499 part C: each host resolves its jobs' project from its OWN projects.json, while the project rows' counters
-		// are shared. This host's `fpProjects` from the file the service names (none when it does not load: the worker
-		// refuses to boot then, and the BOOT_FILES line says so), against every peer's published one.
+		// are shared. This host's `fpProjects` from the file the service names, against every peer's published one. SKIPPED
+		// when this host's file does not load (PR #569's review): the BOOT_FILES line already fails on it, and comparing
+		// "no projects" against healthy peers would send the operator to the wrong host.
 		const projectFactsHere = readProjectFacts(env, fileExists);
-		checks.push(...fleetProjectsChecks(projectsFingerprint(projectFactsHere.parseError === null ? projectFactsHere.projects : []), peers));
+		if (projectFactsHere.parseError === null) checks.push(...fleetProjectsChecks(projectsFingerprint(projectFactsHere.projects), peers));
 	} else if (fleet.unreachable) {
 		// Said, rather than silently absent: "no peers" and "could not ask" are different facts.
 		checks.push({ ok: true, label: `Fleet: could not read the host registry (${printable(fleet.unreachable)})` });

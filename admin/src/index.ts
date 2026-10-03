@@ -1085,13 +1085,11 @@ function registerTools(pi: ExtensionAPI): void {
     async execute() {
       const paths = resolvePaths(deploymentEnv());
       const p: any = readProjects({ projectsPath: paths.projectsFile });
-      if (!Array.isArray(p?.projects)) return toolText(JSON.stringify(p));
+      if (!Array.isArray(p?.projects)) return toolText(JSON.stringify(p?.invalid ? { invalid: escapeInterpreted(p.invalid) } : p));
       const sl: any = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
       const limits: any[] = Array.isArray(sl?.limits) ? sl.limits : [];
       const projects = p.projects.map((pr: any) => ({
-        id: pr.id,
-        name: pr.name === null ? null : escapeInterpreted(pr.name),
-        members: pr.members,
+        ...projectShown(pr),
         limitRows: limits.flatMap((l: any, i: number) => (l?.scope === `project:${pr.id}` ? [i] : [])),
       }));
       return toolText(JSON.stringify(sl?.invalid ? { projects, limitsInvalid: true } : { projects }));
@@ -1120,15 +1118,15 @@ function registerTools(pi: ExtensionAPI): void {
       const entry = { id: params.id, name: params.name ?? null, members: params.members };
       const mutate = (list: any[]) => [...list, entry];
       const plan: any = planProjectsWrite({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate });
-      if (plan.invalid) throw new Error(`rejected: ${plan.invalid}`);
+      if (plan.invalid) throw new Error(`rejected: ${escapeInterpreted(plan.invalid)}`);
       const added = plan.projects.find((p: any) => p.id === params.id);
       const result = await confirmedWrite(
         ctx,
         { title: "Add project", message: `Add to projects.json:\n${JSON.stringify(projectShown(added))}\nRuns of these members record project ${added.id} from their next pickup.` },
         () => {
           const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate });
-          if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, added: projectShown(added), ...(res.pending ? { pending: res.pending } : {}) };
+          if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
+          return { applied: true, added: projectShown(added), ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
         },
       );
       return toolText(JSON.stringify(result));
@@ -1161,17 +1159,17 @@ function registerTools(pi: ExtensionAPI): void {
       };
       const mutate = (list: any[]) => list.map((p) => (p.id === cur.id ? merged : p));
       const plan: any = planProjectsWrite({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate });
-      if (plan.invalid) throw new Error(`rejected: ${plan.invalid}`);
+      if (plan.invalid) throw new Error(`rejected: ${escapeInterpreted(plan.invalid)}`);
       const after = plan.projects.find((p: any) => p.id === cur.id);
       const leaving = cur.members.filter((m: string) => !after.members.includes(m));
-      const note = leaving.length > 0 ? `\n${leaving.join(", ")} leave${leaving.length === 1 ? "s" : ""} the project: a project:${cur.id} row no longer counts ${leaving.length === 1 ? "it" : "them"}, which widens what ${leaving.length === 1 ? "it" : "they"} may spend.` : "";
+      const note = leaving.length > 0 ? `\n${leaving.map((m: string) => escapeInterpreted(m)).join(", ")} leave${leaving.length === 1 ? "s" : ""} the project: a project:${cur.id} row no longer counts ${leaving.length === 1 ? "it" : "them"}, which widens what ${leaving.length === 1 ? "it" : "they"} may spend.` : "";
       const result = await confirmedWrite(
         ctx,
         { title: `Edit project ${cur.id}`, message: `project ${cur.id}:\n${JSON.stringify(projectShown(cur))}\n→ ${JSON.stringify(projectShown(after))}${note}` },
         () => {
           const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate });
-          if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, project: projectShown(after), ...(res.pending ? { pending: res.pending } : {}) };
+          if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
+          return { applied: true, project: projectShown(after), ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
         },
       );
       return toolText(JSON.stringify(result));
@@ -1194,14 +1192,14 @@ function registerTools(pi: ExtensionAPI): void {
       const mutate = (list: any[]) => list.filter((p) => p.id !== cur.id);
       // Judged BEFORE the confirm: a row naming the project refuses here, so the operator is never asked to approve it.
       const plan: any = planProjectsWrite({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate });
-      if (plan.invalid) throw new Error(`rejected: ${plan.invalid}`);
+      if (plan.invalid) throw new Error(`rejected: ${escapeInterpreted(plan.invalid)}`);
       const result = await confirmedWrite(
         ctx,
         { title: `Delete project ${cur.id}`, message: `Remove project ${cur.id} (${cur.members.length} member${cur.members.length === 1 ? "" : "s"}). Its members' runs record no project from their next pickup; records already written keep the id.` },
         () => {
           const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate });
-          if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, deleted: cur.id, ...(res.pending ? { pending: res.pending } : {}) };
+          if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
+          return { applied: true, deleted: cur.id, ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
         },
       );
       return toolText(JSON.stringify(result));
@@ -1264,19 +1262,25 @@ async function confirmedWrite(
 }
 
 /**
- * A project as a tool shows it (issue #499 part C): the `name` ESCAPED, so a bidi override or an invisible character in
- * it is visible text in a confirm dialog and a tool result, never a reordering. The id and members are charset- or
- * grammar-checked by the parser and shown as stored.
+ * A project as a tool shows it (issue #499 part C): the `name` and every member ESCAPED, so a bidi override or an
+ * invisible character in either is visible text in a confirm dialog and a tool result, never a reordering. The id is
+ * charset-checked by the parser and shown as stored.
  */
 function projectShown(p: any): any {
-  return { id: p?.id, name: p?.name === null || p?.name === undefined ? null : escapeInterpreted(p.name), members: p?.members };
+  return {
+    id: p?.id,
+    name: p?.name === null || p?.name === undefined ? null : escapeInterpreted(p.name),
+    // Members too (PR #569's review): a folder member may hold a C1 or bidi character the parser admits.
+    members: Array.isArray(p?.members) ? p.members.map((m: any) => escapeInterpreted(String(m))) : p?.members,
+  };
 }
 
 /** The project `id` names in the file the worker reads, or a throw that says why there is none. */
 function currentProject(paths: any, id: string): any {
   const p: any = readProjects({ projectsPath: paths.projectsFile });
   if (p?.unset) throw new Error("PI_PROJECTS_FILE is unset, so the worker reads no projects; set it in the deployment's .env (pi-dispatch up does) and restart the worker");
-  if (p?.invalid) throw new Error(`the projects file does not load: ${p.invalid}`);
+  if (p?.invalid) throw new Error(`the projects file does not load: ${escapeInterpreted(p.invalid)}`);
+  if (p?.unreadable) throw new Error(`the projects file ${escapeInterpreted(String(paths.projectsFile))} could not be read (${p.unreadable})`);
   const list: any[] = Array.isArray(p?.projects) ? p.projects : [];
   const cur = list.find((x) => x.id === id);
   if (!cur) throw new Error(`no project with id ${JSON.stringify(String(id)).slice(0, 40)} (dispatch_projects lists them)`);

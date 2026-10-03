@@ -240,12 +240,24 @@ function normFold(fold) {
   // its absence never reads as "nothing spent in any project". A key that is not an id is the "(no project)" bucket.
   let byProject = null;
   if (Array.isArray(fold.byProject)) {
-    byProject = [];
+    // Keyed in a Map, and a key that is not an id JOINS the one "(no project)" row (PR #569's review): two bars with one
+    // label would read as two buckets. Merged costs keep their class only when both agree; else "estimated".
+    const rows = new Map();
     for (const r of fold.byProject) {
       if (r === null || typeof r !== "object") continue;
       const key = typeof r.key === "string" && PROJECT_ID.test(r.key) ? r.key : null;
-      byProject.push({ key, label: key ?? "(no project)", runs: posInt(r.runs), tokens: posInt(r.tokens), cost: normCost(r.cost) ?? unknownCost() });
+      const row = { key, label: key ?? "(no project)", runs: posInt(r.runs), tokens: posInt(r.tokens), cost: normCost(r.cost) ?? unknownCost() };
+      const had = rows.get(key);
+      if (!had) {
+        rows.set(key, row);
+        continue;
+      }
+      const cls = had.cost.class === row.cost.class ? had.cost.class : "estimated";
+      had.runs += row.runs;
+      had.tokens += row.tokens;
+      had.cost = { usd: had.cost.usd + row.cost.usd, class: cls, floor: had.cost.floor === true || row.cost.floor === true };
     }
+    byProject = [...rows.values()];
     byProject.sort((a, b) => b.cost.usd - a.cost.usd || cmpStr(a.label, b.label));
   }
 
@@ -306,8 +318,12 @@ function normFold(fold) {
   };
 }
 
-/** The project id rule (worker/src/project-id.mjs), restated: this module loads nothing from the worker. */
-const PROJECT_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
+/**
+ * The project id rule (worker/src/project-id.mjs), restated: this module loads nothing from the worker. Exported for
+ * its bolt: `insights-html.test.mjs` holds it equal to the worker's `PROJECT_ID_RE`.
+ */
+export const INSIGHTS_PROJECT_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const PROJECT_ID = INSIGHTS_PROJECT_ID_RE;
 
 /**
  * The projects' display names, `id -> name` (issue #499 part C), from the payload's `projects` list. A name is the

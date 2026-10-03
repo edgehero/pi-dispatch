@@ -3248,3 +3248,30 @@ test("issue #499 part C: the limits view says how many members a project row cap
   assert.match(plain, /project:shop: day 1\/2 · 2 members/);
   assert.match(plain, /project:gone: day 0\/1 · not in projects\.json/);
 });
+
+test("PR #569's lab: the projects view lists ids the month's records carry that projects.json no longer defines, so it adds up", async () => {
+  const info = { byProject: [...PROJECT_INFO.byProject, { key: "tools", label: "tools", runs: 1, tokens: 10, cost: { usd: 0.15, class: "metered", floor: false } }] };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => PROJECT_SNAPSHOT, projectsInfo: () => info }) });
+  await flush();
+  comp.handleInput("j");
+  const out = stripAnsi(comp.render(120).join("\n"));
+  assert.match(out, /tools {2}not in projects\.json {2}\$0\.15 · 1 run/, "a deleted project's spend is still shown, marked");
+  // Its row is selectable: shop, constructor, tools, (no project).
+  comp.handleInput("\u001b[B");
+  comp.handleInput("\u001b[B");
+  comp.handleInput("\r");
+  const filtered = stripAnsi(comp.render(120).join("\n"));
+  await comp.dispose();
+  assert.match(filtered, /j project tools/);
+});
+
+test("PR #569's review: an unreadable projects file is said to be unreadable, not missing", async () => {
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...PROJECT_SNAPSHOT, projects: { unreadable: "EACCES" } }), projectsInfo: () => PROJECT_INFO }) });
+  await flush();
+  comp.handleInput("j");
+  const out = stripAnsi(comp.render(120).join("\n"));
+  await comp.dispose();
+  assert.match(out, /the projects file is unreadable: EACCES/);
+  assert.ok(!/missing/.test(out));
+  assert.match(out, /shop {2}not in projects\.json {2}\$1\.20 · 4 runs/, "its recorded spend still shows");
+});

@@ -115,7 +115,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -282,6 +282,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			...(now ? { now } : {}),
 			...(sleep ? { sleep } : {}),
 			...(watchScopedLimits ? { watchScopedLimits } : {}),
+			...(watchProjects ? { watchProjects } : {}),
 			...(authResolveTimeoutMs ? { authResolveTimeoutMs } : {}),
 			...(ensureJobsDir ? { ensureJobsDir } : {}),
 			...(ensureUnderAccountRoot ? { ensureUnderAccountRoot } : {}),
@@ -4063,14 +4064,18 @@ test("per job: a service older than its conf, and a chain file deleted under the
 	assert.match(refused.message, /^Refused: \/etc\/containers\/containers\.conf\.d\/zz\.conf could not be read \(EACCES\)/);
 });
 
-test("the host row's fpProjects is a thunk over the LIVE projects ref (#499 part C)", { skip }, async () => {
+test("the host row's fpProjects follows the LIVE projects ref through a reload (#499 part C)", { skip }, async () => {
 	const { makeHostRegistry } = await import("../src/host-registry.mjs");
 	const { projectsFingerprint, parseProjects } = await import("../src/projects.mjs");
 	const dir = tempDir("pi-fp-projects-wiring-");
 	const projectsFile = join(dir, "projects.json");
 	writeFileSync(projectsFile, JSON.stringify({ version: 1, projects: [{ id: "shop", name: "Name", members: ["github:acme/web"] }] }));
 	let fields = null;
+	// The watcher is faked so the test holds the ref it would reload, and reloads it the way the watcher does.
+	let armed = null;
+	const watchProjects = (config, ref, log, atBoot, pair) => ((armed = { config, ref, log, pair }), { close() {} });
 	await runStart({
+		watchProjects,
 		env: { VALKEY_URL, PI_WORKER_NAME: "fp-projects-1", PI_PROJECTS_FILE: projectsFile },
 		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
 		makeHost: () => fakeHost(),
@@ -4083,6 +4088,13 @@ test("the host row's fpProjects is a thunk over the LIVE projects ref (#499 part
 	const first = projectsFingerprint(parseProjects(readFileSync(projectsFile, "utf8"), projectsFile));
 	assert.equal(fields.fpProjects(), first, "the booted projects");
 	assert.notEqual(first, projectsFingerprint([]), "and not the empty one");
+	// LIVE, not captured at boot (PR #569's review): an edit the watcher reloads shows in the next value.
+	writeFileSync(projectsFile, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web", "/srv/new"] }] }));
+	const second = projectsFingerprint(parseProjects(readFileSync(projectsFile, "utf8"), projectsFile));
+	const { reloadProjects } = await import("../src/start.mjs");
+	assert.ok(armed, "the projects watcher was armed with the live ref");
+	reloadProjects(armed.config, armed.ref, () => {}, armed.pair);
+	assert.equal(fields.fpProjects(), second, "the reloaded projects, on the next beat's read");
 });
 
 test("the host row's fpUsd is the dollar fingerprint of the live settings and scoped-limits rows, re-read on every beat (#501 part 6)", { skip }, async () => {

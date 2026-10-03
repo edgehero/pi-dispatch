@@ -1,11 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import * as realFs from "node:fs";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { planProjectsWrite, readProjects, writeProjects } from "../src/read-model.mjs";
+import { planProjectsWrite, readProjects, writeProjects, writeScopedLimits } from "../src/read-model.mjs";
+import { checkProjectRows, parseScopedLimits } from "@edgehero/pi-dispatch/scoped-limits";
 import { escapeInterpreted } from "../src/panel.mjs";
 import { parseProjects } from "@edgehero/pi-dispatch/projects";
 
@@ -76,8 +78,12 @@ test("writeProjects writes through the worker's parser, by tmp and rename, never
   const fs = memFs({ "p.json": PROJECTS([]) });
   const res = writeProjects({ projectsPath: "p.json", scopedLimitsPath: "sl.json", fs, mutate: (l) => [...l, { id: "shop", name: "Webshop", members: ["github:acme/web", "/srv/shop//tools/"] }] });
   assert.deepEqual(res, { ok: true });
-  assert.deepEqual(fs.ops, [["write", "p.json.tmp"], ["rename", "p.json.tmp", "p.json"]], "one write to the tmp file, then one rename over the real one");
-  assert.ok(!fs.files.has("p.json.tmp"), "no tmp file left behind");
+  assert.equal(fs.ops.length, 2, "one write, one rename");
+  const [[w, tmp], [r, from, to]] = fs.ops;
+  assert.equal(w, "write");
+  assert.match(tmp, new RegExp(`^p\\.json\\.${process.pid}\\.[0-9a-f]{12}\\.tmp$`), "a tmp file of its own: pid and random");
+  assert.deepEqual([r, from, to], ["rename", tmp, "p.json"], "renamed over the real one");
+  assert.ok(![...fs.files.keys()].some((k) => k.endsWith(".tmp")), "no tmp file left behind");
   const written = fs.files.get("p.json");
   assert.deepEqual(parseProjects(written, "p.json"), [{ id: "shop", name: "Webshop", members: ["github:acme/web", "/srv/shop/tools"] }], "the loader reads it back, members in their stored spelling");
   assert.deepEqual(JSON.parse(written), { version: 1, projects: [{ id: "shop", name: "Webshop", members: ["github:acme/web", "/srv/shop/tools"] }] });
@@ -259,4 +265,143 @@ test("dispatch_costs: byProject in the fold, and the project filter scopes every
   } finally {
     delete process.env.VALKEY_URL;
   }
+});
+
+// ── PR #569's review: unreadable files, the tmp name, the re-check, symlinks, the mode, escaping ────────────
+
+const asRoot = process.getuid?.() === 0;
+
+test("only ENOENT is missing: an UNREADABLE projects.json refuses the write and the reader says unreadable", { skip: asRoot }, () => {
+  const d = deployment({ projects: [{ id: "shop", members: ["/srv/a"] }, { id: "ops", members: ["/srv/b"] }] });
+  chmodSync(d.p, 0o200);
+  let res;
+  let read;
+  try {
+    read = readProjects({ projectsPath: d.p });
+    res = writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, mutate: (l) => [...l, { id: "new", members: ["/srv/c"] }] });
+  } finally {
+    chmodSync(d.p, 0o644);
+  }
+  assert.deepEqual(read, { unreadable: "EACCES" });
+  assert.match(res.invalid, /could not be read \(EACCES\), so its projects cannot be kept; nothing was written/);
+  assert.deepEqual(d.read().projects.map((p) => p.id), ["shop", "ops"], "every project kept");
+});
+
+test("only ENOENT is missing: an UNREADABLE scoped-limits file cannot rule a row out, so a removal is refused", { skip: asRoot }, () => {
+  const d = deployment({ projects: [{ id: "shop", members: ["/srv/a"] }], limits: [{ scope: "project:shop", day: 1 }] });
+  chmodSync(d.sl, 0o200);
+  let res;
+  try {
+    res = writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, mutate: (l) => l.filter((p) => p.id !== "shop") });
+  } finally {
+    chmodSync(d.sl, 0o644);
+  }
+  assert.match(res.invalid, /scoped-limits file .* could not be read \(EACCES\), so a row naming shop cannot be ruled out/);
+  checkProjectRows(parseScopedLimits(readFileSync(d.sl, "utf8"), d.sl), parseProjects(readFileSync(d.p, "utf8"), d.p), d.sl, d.p);
+});
+
+test("writeScopedLimits: an UNREADABLE limits file refuses rather than starting from no rows", { skip: asRoot }, () => {
+  const d = deployment({ projects: [], limits: [{ scope: "acme/web", day: 3 }] });
+  chmodSync(d.sl, 0o200);
+  let res;
+  try {
+    res = writeScopedLimits({ scopedLimitsPath: d.sl, projectsPath: d.p, mutate: (l) => [...l, { scope: "acme/api", day: 1 }] });
+  } finally {
+    chmodSync(d.sl, 0o644);
+  }
+  assert.match(res.invalid, /could not be read \(EACCES\); nothing was written/);
+  assert.deepEqual(parseScopedLimits(readFileSync(d.sl, "utf8"), d.sl).map((l) => l.scope), ["acme/web"]);
+});
+
+test("a second session's write between this one's read and its rename is refused, never silently lost", () => {
+  const d = deployment({ projects: [{ id: "shop", members: ["/srv/a"] }] });
+  let fired = false;
+  const fsA = {
+    ...realFs,
+    readFileSync: (p, e) => {
+      const out = realFs.readFileSync(p, e);
+      if (!fired && p === d.p) {
+        fired = true;
+        assert.deepEqual(writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, mutate: (l) => [...l, { id: "bbb", members: ["/srv/b"] }] }), { ok: true });
+      }
+      return out;
+    },
+  };
+  const a = writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, fs: fsA, mutate: (l) => [...l, { id: "aaa", members: ["/srv/c"] }] });
+  assert.match(a.invalid, /changed while this write was being prepared.*nothing was written/);
+  assert.deepEqual(d.read().projects.map((p) => p.id), ["shop", "bbb"], "B's approved write stands");
+  assert.ok(!readdirSync(join(d.p, "..")).some((f) => f.endsWith(".tmp")), "A's tmp file is removed");
+});
+
+test("a second session's write between this one's tmp write and its rename: separate tmp files, and the re-check refuses", () => {
+  const d = deployment({ projects: [{ id: "shop", members: ["/srv/a"] }] });
+  let fired = false;
+  const fsA = {
+    ...realFs,
+    writeFileSync: (p, data, o) => {
+      realFs.writeFileSync(p, data, o);
+      if (!fired) {
+        fired = true;
+        assert.deepEqual(writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, mutate: (l) => [...l, { id: "bbb", members: ["/srv/b"] }] }), { ok: true });
+      }
+    },
+  };
+  assert.match(writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, fs: fsA, mutate: (l) => [...l, { id: "aaa", members: ["/srv/c"] }] }).invalid, /changed while/);
+  assert.deepEqual(d.read().projects.map((p) => p.id), ["shop", "bbb"]);
+});
+
+test("across the two files: a project delete judged before a row add lands is refused by the re-check", () => {
+  const d = deployment({ projects: [{ id: "shop", members: ["/srv/a"] }], limits: [] });
+  let fired = false;
+  const fsA = {
+    ...realFs,
+    readFileSync: (p, e) => {
+      const out = realFs.readFileSync(p, e);
+      if (!fired && p === d.sl) {
+        fired = true;
+        assert.equal(writeScopedLimits({ scopedLimitsPath: d.sl, projectsPath: d.p, mutate: (l) => [...l, { scope: "project:shop", day: 1 }] }).ok, true);
+      }
+      return out;
+    },
+  };
+  assert.match(writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, fs: fsA, mutate: (l) => l.filter((p) => p.id !== "shop") }).invalid, /changed while/);
+  checkProjectRows(parseScopedLimits(readFileSync(d.sl, "utf8"), d.sl), parseProjects(readFileSync(d.p, "utf8"), d.p), d.sl, d.p);
+});
+
+test("a write goes THROUGH a symlink to the shared copy, and keeps the file's mode", () => {
+  const d = deployment({});
+  const target = join(d.p, "..", "shared-projects.json");
+  writeFileSync(target, PROJECTS([{ id: "shop", members: ["/srv/a"] }]));
+  chmodSync(target, 0o600);
+  symlinkSync(target, d.p);
+  assert.deepEqual(writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, mutate: (l) => [...l, { id: "ops", members: ["/srv/b"] }] }), { ok: true });
+  assert.equal(lstatSync(d.p).isSymbolicLink(), true, "the link stays");
+  assert.deepEqual(JSON.parse(readFileSync(target, "utf8")).projects.map((p) => p.id), ["shop", "ops"], "the shared copy has the edit");
+  assert.equal(statSync(target).mode & 0o777, 0o600, "a private file stays private");
+  // The scoped-limits writer follows the same rule.
+  const slTarget = join(d.p, "..", "shared-limits.json");
+  writeFileSync(slTarget, LIMITS([{ scope: "acme/web", day: 1 }]));
+  chmodSync(slTarget, 0o640);
+  symlinkSync(slTarget, d.sl);
+  assert.equal(writeScopedLimits({ scopedLimitsPath: d.sl, projectsPath: d.p, mutate: (l) => [...l, { scope: "acme/api", day: 2 }] }).ok, true);
+  assert.equal(lstatSync(d.sl).isSymbolicLink(), true);
+  assert.equal(statSync(slTarget).mode & 0o777, 0o640);
+  assert.equal(parseScopedLimits(readFileSync(slTarget, "utf8"), slTarget).length, 2);
+  assert.ok(!existsSync(`${d.p}.tmp`));
+});
+
+test("members and refusals are escaped in tool results, dispatch_projects and errors", async () => {
+  deployment({ projects: [] });
+  const { ctx, shown } = toolCtx({ answer: true });
+  const evil = "/srv/x\u202egnp.cod\u009b";
+  const res = await toolByName("dispatch_project_add").execute("id", { id: "shop", members: [evil] }, undefined, undefined, ctx);
+  const text = res.content[0].text;
+  for (const ch of ["\u202e", "\u009b"]) assert.ok(!text.includes(ch) && !shown[0].message.includes(ch), `U+${ch.codePointAt(0).toString(16)} escaped`);
+  assert.ok(text.includes("\\\\u{202E}"), "shown as visible text");
+  const list = (await toolByName("dispatch_projects").execute("id", {}, undefined, undefined, undefined)).content[0].text;
+  assert.ok(!list.includes("\u202e") && !list.includes("\u009b"));
+  await assert.rejects(
+    () => toolByName("dispatch_project_add").execute("id", { id: "ops", members: [evil] }, undefined, undefined, ctx),
+    (e) => /claimed by both/.test(e.message) && !e.message.includes("\u202e") && !e.message.includes("\u009b") && e.message.includes("\\u{202E}"),
+  );
 });

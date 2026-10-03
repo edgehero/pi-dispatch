@@ -175,6 +175,8 @@ A `project:<id>` row caps every repo and folder of one project as one. The id is
   `not in projects.json` when its project is missing. The DOLLAR WINDOWS section folds a project row's records by
   the `project` id each record carries.
 - `dispatch_project_delete` refuses while a row names the project. Delete or change the row first.
+- The panel and the tools write this file through a symlink (the link stays), keep its mode, refuse a file they
+  cannot read, and refuse a write when this file or `projects.json` changed after the write was checked.
 
 Things to know before you add a model row:
 

@@ -5768,7 +5768,12 @@ folders. A job whose scope is a member belongs to that project, and its run reco
 - **Producer/Consumer**: the operator writes the file by hand, or through the admin's confirm-gated tools
   `dispatch_project_add`, `dispatch_project_edit` and `dispatch_project_delete` (issue #499 part C). They write the
   file `PI_PROJECTS_FILE` names (refused while it is unset: the worker then reads no projects), through
-  `parseProjects`, by tmp and rename, so the watcher never reads half a file. The admin also reads it for the
+  `parseProjects`, by tmp and rename, so the watcher never reads half a file. Since PR #569's review: only `ENOENT`
+  is a missing file (an unreadable one refuses the write, and the admin reader says `unreadable`); the tmp file is
+  `<file>.<pid>.<random>.tmp`, created exclusively, with the file's mode kept; a symlinked file is written THROUGH,
+  beside its target; and both files the write was judged against are read again right before the rename, a change
+  refusing the write. Residual: two writes landing between that re-check and the rename can still race (no lock
+  across the two files). The admin also reads it for the
   `dispatch_projects` tool, the panel's projects view and the insights page's project names. The worker reads it at boot, refusing to start on a file that does not load, and holds it in a
   watched ref: a live edit that loads replaces it (`projects_reloaded`), one that does not keeps the last good copy
   (`projects_reload_invalid`). The receiver does not read it. Those log events are telemetry, not contract. They name
@@ -5789,7 +5794,10 @@ folders. A job whose scope is a member belongs to that project, and its run reco
   - `name` (optional): display text, 1 to 120 characters, no control characters. It appears only on the admin's
     surfaces (the panel, the insights page, a confirm and a tool result), each time ESCAPED (an invisible or bidi
     character such as U+202E, which this rule admits, shows as `\u{202E}`) and ISOLATED (last on its panel line, in a
-    `<bdi>` on the page). It NEVER enters a record, a log line or the host registry, and no refusal quotes it; a file that is not valid JSON is refused without
+    `<bdi>` on the page). It NEVER enters a record, a log line or the host registry, and no refusal quotes it.
+    A member may hold a C1, bidi or zero-width character (a folder path admits one); every refusal escapes such a
+    character as `\u{...}` (`escapeControls`), so neither `projects_reload_invalid`, doctor nor a tool error carries
+    it raw, and the admin escapes members in tool results; a file that is not valid JSON is refused without
     the parser's own message, which quotes file text.
   - `members` (required, non-empty): scopes in the grammar of `parseScopeString` (issue #498). A forge member is
     forge-qualified, `<kind>:owner/name`, and stored so. A local member is an absolute folder, stored resolved
@@ -5818,8 +5826,9 @@ folders. A job whose scope is a member belongs to that project, and its run reco
   missing project does not block an unrelated write; that write returns `pending` (the worker applies it once its
   live scoped limits no longer name that id).
 - **Fleet** (issue #499 part C): the file is per host while the project rows' counters are shared, so hosts of one
-  fleet must carry the same file. Each host publishes `fpProjects` (`INT-HOST-REGISTRY-CONTRACT`), a digest of its
-  live projects' ids and member hashes, and doctor names a peer whose digest differs.
+  fleet must carry the same file (a folder mounted at different paths is listed under every path in it). Each host
+  publishes `fpProjects` (`INT-HOST-REGISTRY-CONTRACT`), a digest of its live projects' ids and member hashes, and
+  doctor names a peer whose digest differs; it skips the comparison when this host's own file does not load.
 - **Residuals**: records are never re-attributed from current membership, so an old record, and every record
   written before issue #499, keeps `project: null` and folds into "(no project)" in every cost view. One project per
   scope. Webhook triggers are not grouped by project: a webhook trigger fires for whichever repo delivers, so only its
@@ -6467,7 +6476,8 @@ project as well as the dollar rows, so it matters on a fleet that sets no dollar
 thunk over the live projects ref, so an edit shows within one beat. It never ABSTAINS: a host with no projects file
 publishes the digest of no projects. Only `doctor` reads it, to WARN (`doctor.mjs -> fleetProjectsChecks`): a peer
 whose digest differs, or one that publishes none while projects are in use (this host's or a peer's digest is not the
-one of no projects). Nothing refuses on it.
+one of no projects). When this host's own projects file does not load, doctor fails on that and makes no comparison,
+so a healthy peer is not blamed. Nothing refuses on it.
 
 **The TTL is refreshed on EVERY beat**, which reverses this project's stated set-once rule (`budget.mjs`:
 *"set the TTL only when the key is first created, so a long window cannot push its expiry forward"*). The
@@ -6901,3 +6911,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-03 | Issue #500, part E: the parent's fold. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: `tokens` gains `childTotal`, `childProcesses` and `unmeteredChildren` between `unpriced` and the cost fields, on every line of the process-wide meter (zeros with no children, every other key then byte-identical); with children the totals, counts and `usage` rows include theirs. One table row: the job's pi children past a cap or a list, or a pi child with no ledger, stop with the existing reasons (`token_budget`, `cost-cap`, `model-not-allowed`); no new exit code or reason, checked. The worker's closed key list drops the three keys until part F, and the `total` it keeps already includes the children. `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked: the record's `tokens` is rebuilt from the worker's closed list, which part F widens. `INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked: no name, mount or flag changes. **Code evidence**: image/runner/src/child-watch.mjs -> createChildWatch; image/runner/run-job.mjs; worker/src/run-history.mjs -> TOKEN_KEYS, rebuildTokens. |
 | 2026-10-03 | Issue #500, part E, the review's fixes. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**, the child keys paragraph: `unmeteredChildren` also counts the parent's own lost ledger directory or failed control write; the guard counters the parent writes (`costRefused`, `boundExceeded`, `longContext`, `costUnjudged`, `costUnanswered`, `modelRefused`) include the children's; every exit line of a metered run, the SIGTERM line and the outer catch's included, carries the children's final fold. No new key, exit code or reason, checked. `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked. **Code evidence**: image/runner/src/child-watch.mjs -> guardFields; image/runner/run-job.mjs -> finishMeter. |
 | 2026-10-03 | Issue #499, part C (the operator surfaces). **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: a host row gains `fpProjects`, the digest of the host's live projects as ids and the hash of each member, never a name or a member in clear; a separate field rather than a part of `fpUsd`, because membership decides the job-count project rows and the recorded project as well as the dollar rows, so it matters on a fleet with no dollar cap, and a projects warning names the file to copy; it never abstains (no projects file is the digest of no projects); doctor warns on a peer that differs, and on one that publishes none while projects are in use (`fleetProjectsChecks`). Ships with part B's project rows in one release. **`INT-PROJECTS-FILE-CONTRACT` AMENDED**: the admin's project tools are producers (the file `PI_PROJECTS_FILE` names, refused while it is unset, the worker's parser, tmp and rename); the name rule says where a name renders and that it is escaped and isolated there; the Caps bullet says how the tools hold the pair rule; a Fleet bullet names `fpProjects`; the Residuals say old records fold into `(no project)`, one project per scope, webhook triggers not grouped, the project is per attempt, and one forge kind on two instances is one member. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the `project` field is read, not changed. **Code evidence**: worker/src/projects.mjs -> projectsFingerprint, projectsFingerprintInput; worker/src/start.mjs -> fpProjects; worker/src/doctor.mjs -> fleetProjectsChecks. |
+| 2026-10-03 | Issue #499, part C, PR #569's review. **`INT-PROJECTS-FILE-CONTRACT` AMENDED**: the admin writer's rules (only `ENOENT` is missing, a unique tmp file, the mode kept, a symlink written through, both judged files re-checked before the rename, the two-writer race as a residual); every refusal escapes a C1, bidi or zero-width character a member may hold (`escapeControls`), so `projects_reload_invalid`, doctor and a tool error never carry one raw; a folder mounted at different paths is listed under each in the one shared file. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: doctor makes no `fpProjects` comparison when this host's own projects file does not load (it fails on that already). **Code evidence**: worker/src/projects.mjs -> escapeControls; worker/src/start.mjs -> reloadProjects; worker/src/doctor.mjs. |
