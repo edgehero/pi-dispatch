@@ -1814,7 +1814,7 @@ test("doctor: a command trigger prints ONE advisory line, and the flow-tier bloc
 	const { out, text } = capture();
 	const code = await runDoctor(imgEnv({ PI_TRIGGERS_FILE: commandTriggersFile() }), imgDeps(out, green));
 	assert.equal(code, 0, "advisory only -- a command is not host-verifiable, so nothing may fail on it");
-	assert.match(text(), /✓ 1 command trigger\(s\): a command is only verifiable in-container -- the runner refuses an unregistered one pre-spend \(command-unregistered\)/);
+	assert.match(text(), /✓ 1 command trigger\(s\): a command is only verifiable in-container -- the runner refuses an unregistered one before the prompt is sent \(command-unregistered\)/);
 	// A command trigger carries no run.flow, so the flow-resolution probes must drop it naturally rather
 	// than warn about a "flow" that was never named.
 	assert.doesNotMatch(text(), /Trigger flow/, "the flow-tier block prints NO line for a command trigger");

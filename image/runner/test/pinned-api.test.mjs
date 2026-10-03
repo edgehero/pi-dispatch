@@ -556,6 +556,7 @@ test("the runner never imports pi-ai directly -- a static import makes the meter
 	assert.match(runJob, /installProcessUsageMeter\(\{ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard \}\)/, "run-job.mjs must install the process-wide meter on the class it imports and the instance the session uses");
 	assert.ok(runJob.indexOf("createJobModelRuntime({") < runJob.indexOf("installProcessUsageMeter({"), "the meter installs after the runtime exists");
 	assert.ok(runJob.indexOf("installProcessUsageMeter({") < runJob.indexOf("createAgentSession({"), "the meter installs before the session exists");
+	assert.ok(runJob.indexOf("installProcessUsageMeter({") < runJob.indexOf("await buildLoadedResourceLoader({"), "the meter installs before any extension loads (issue #543)");
 	assert.match(runJob, /\n\t\tmodelRuntime,\n\t\tmodel,\n/, "the session must be created on the SAME runtime the meter proved");
 	assert.match(runJob, /usageMeter\.arm\(\)/, "run-job.mjs must re-arm the meter AFTER createAgentSession");
 });
@@ -668,6 +669,36 @@ test("pi hands extensions ITS OWN pi-ai and pi-coding-agent, not a second copy",
 	assert.equal(VIRTUAL_MODULES["@earendil-works/pi-coding-agent"].ModelRuntime, mod.ModelRuntime, "an extension's ModelRuntime is not the class run-job.mjs wraps");
 	const nestedCompat = await import(resolvePiAiCompat()[0].url);
 	assert.equal(VIRTUAL_MODULES["@earendil-works/pi-ai"], nestedCompat, "the pi-ai an extension gets is not the nested compat the meter's compat half arms");
+});
+
+test("an extension factory runs inside the resource loader's reload(), with no ctx, and that reload never resets the api registry (issue #543)", { skip }, () => {
+	// What run-job.mjs's order rests on: it installs the meter and the guards BEFORE it builds the loader, because
+	// the loader is where a factory runs. If a factory ran later (in createAgentSession, say), the order would still
+	// be safe; if the loader's reload() reset pi-ai's legacy registry, installing first would make every compat
+	// entry look displaced, and every capped or listed job would stop before its first prompt.
+	const loader = agentDistFile("core", "extensions", "loader.js");
+	assert.match(loader, /\n {8}await factory\(load\.api\);\n {8}load\.commit\(\);/, "a factory no longer runs while its extension is loaded");
+	assert.match(agentDistFile("core", "resource-loader.js"), /await loadExtensionsCached\(extensionPaths, this\.cwd, this\.eventBus\);/, "the resource loader's reload() no longer loads the extensions");
+	// At load the factory's pi API has no ctx: its action methods throw, and pi.registerProvider is queued until the
+	// session binds. So a call it makes at load goes through a ModelRuntime of its own or pi-ai's legacy global
+	// stream functions, never the job's runtime.
+	assert.match(loader, /throw new Error\("Extension runtime not initialized\. Action methods cannot be called during extension loading\."\);/, "actions at load no longer throw");
+	assert.match(loader, /registerProvider: \(name, config, extensionPath = "<unknown>"\) => \{\n\s*runtime\.pendingProviderRegistrations\.push\(/, "a provider registered at load is no longer queued for the session");
+	// ModelRuntime's one static method builds an instance, so every model call it can make is on the prototype.
+	assert.deepEqual(Object.getOwnPropertyNames(mod.ModelRuntime).filter((name) => typeof mod.ModelRuntime[name] === "function"), ["create"]);
+	// Only AgentSession.reload() resets the registry, and the runner never calls it.
+	const core = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
+	const resetting = [];
+	const walk = (dir) => {
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			const path = join(dir, entry.name);
+			if (entry.isDirectory()) walk(path);
+			else if (entry.name.endsWith(".js") && readFileSync(path, "utf8").includes("resetApiProviders()")) resetting.push(path.slice(core.length + 1));
+		}
+	};
+	walk(join(core, "core"));
+	assert.deepEqual(resetting, [join("core", "agent-session.js")], "a second caller of resetApiProviders() appeared");
+	assert.match(agentDistFile("core", "agent-session.js"), /\n {8}resetApiProviders\(\);\n {8}await this\._resourceLoader\.reload\(\);/, "AgentSession.reload() no longer resets the registry before it reloads");
 });
 
 // ── Issue #291: run.excludeTools' pin surface ─────────────────────────────────────────────────────

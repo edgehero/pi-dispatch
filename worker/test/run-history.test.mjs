@@ -1517,5 +1517,5 @@ test("the runner writes the code it exits with on BOTH exit lines (pinned: the s
 	const src = readFileSync(new URL("../../image/runner/run-job.mjs", import.meta.url), "utf8");
 	assert.match(src, /log\("exit", \{ \.\.\.capExitMessage\(outcome\), turns: /, "the decided path spreads the outcome, whose `code` is the exit code");
 	assert.match(src, /\n\treturn outcome\.code;\n\}/, "and returns that same code as the process exit code");
-	assert.match(src, /log\("exit", \{ code: capped\.code, reason: capped\.reason, message: capped\.message \}\)/, "the catch path writes its code too");
+	assert.match(src, /log\("exit", \{ code: capped\.code, reason: capped\.reason, message: capped\.message, \.\.\.meteredExitFields\(\) \}\)/, "the catch path writes its code too (and, after the meter installed, its counts: issue #543)");
 });

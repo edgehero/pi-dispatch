@@ -2671,8 +2671,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   dispatch grammar at the pin fires only when the entire text starts with `/`, parses the name to the
   first space, and hands everything after (newlines included) to the handler as args verbatim. Before
   prompting, the runner verifies the name via `session.extensionRunner.getCommand()` and refuses an
-  unregistered one as `command-unregistered` (exit 2, pre-spend). A handler throw — which pi SWALLOWS,
-  resolving `prompt()` cleanly — is observed via the public `extensionRunner.onError` channel, the only
+  unregistered one as `command-unregistered` (exit 2, before the prompt; a call an extension made while it loaded
+  may already have spent, so the exit line carries the meter's counts, issue #543). A handler throw, which pi
+  SWALLOWS, resolving `prompt()` cleanly, is observed via the public `extensionRunner.onError` channel, the only
   place it surfaces at the pin, and classified `command-error`. A clean headless return is
   `command-completed`, exit 0. The docs' old premise ("an extension that registers a slash command has
   nobody to type it inside a job") is contradicted by the pinned contract itself: `session.prompt()`
@@ -2855,11 +2856,16 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   same decision (meter calls process-wide at the one shared choke point, observe without consuming, keep the
   bus meter as the fallback) now applies at `ModelRuntime.prototype`: its streamSimple, stream,
   streamDeferred, classify and generateImages are wrapped, with the class injected by run-job.mjs, installed
-  before createAgentSession and accepted only when the session's own runtime instance dispatches through the
-  wrappers. The registry half is kept, re-armable as before, for extensions that call pi-ai's legacy global
+  before the resource loader is built (issue #543: an extension factory runs inside the loader's `reload()`, so
+  this is also before createAgentSession) and accepted only when the session's own runtime instance dispatches
+  through the wrappers. The registry half is kept, re-armable as before, for extensions that call pi-ai's legacy global
   stream functions; its copy is accepted by identity with the module pi hands extensions. Where the halves
   meet (a composed provider with no builtin base resolves its api in the registry), an AsyncLocalStorage keeps
-  one call from being counted twice.
+  one call from being counted twice: since issue #543 it holds a per-call TOKEN that the call's options carry too,
+  and the first compat call whose options carry the context's unused token on the same pair is the composer's
+  re-entry and is skipped, once; a token-carrying call on another pair is a provider's forward, a full call
+  counted under its own model beside the runtime call (`DES-DOLLAR-RESERVE-AND-SETTLE`). Any other legacy call in a runtime call's context (a `before_provider_request` hook, an
+  `onPayload`, a timer scheduled there) is judged and counted like an outside call.
 - **Why**: The bus is **per instance** and no event carries a session id, so a subagent session an extension
   spawns is invisible to it — a 16-wide fanout registers as roughly **one** turn, and both the cap and the
   run record then understate spend on exactly the most expensive jobs. The registry is the one choke point
@@ -3028,8 +3034,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `longContext > 0` as incomplete and settles it at the floor, at least its reservation.
   No hand-kept price table: a model the provider does not bill higher is over-charged, the safe direction.
 - **The compat re-arm gap under a cap** (review of #533): when the compat half finds an api id it had wrapped
-  replaced (`resetApiProviders()` from `AgentSession.reload()`, or an extension re-registering it), a legacy
-  call on that api may have reached a provider unguarded in between, and nothing can tell whether one did.
+  replaced (`resetApiProviders()` from `AgentSession.reload()`, or an extension re-registering it, also while it
+  loads), a legacy call on that api may have reached a provider unguarded in between, and nothing can tell
+  whether one did.
   Under a cost cap that stops the job (`cost_guard_displaced`, then `cost-cap`), fail closed. Judging cost only
   in the runtime half would not close it: a legacy compat call never enters a `ModelRuntime`. The displaced
   entries are counted as `costUnjudged` on the exit line (PR #534's review), because the stop's reason is the same
@@ -3037,6 +3044,36 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   Without a cap the re-arm keeps its old behaviour: the teardown's `rearms` count and `usage_meter_teardown`
   line, whose comment says the window can hide only a legacy extension call, stay the evidence for an uncapped
   job; under a cap that same window is a stop, so the comment's "hidden" call can no longer go unanswered.
+- **From the first extension load** (issue #543): the meter and the guard are installed, and an unenforceable cap
+  refused, BEFORE the resource loader is built. An extension factory runs inside the loader's `reload()` with no
+  ctx (its action methods throw and `pi.registerProvider` is queued for the session, measured at the pin), so a
+  model call it makes while it loads goes through a `ModelRuntime` of its own or pi-ai's legacy global stream
+  functions, and both halves are wrapped by then: the call is bounded and refused like any other, or admitted and
+  counted on the exit line. The loader's `reload()` never resets pi-ai's registry (pinned), so installing first
+  displaces nothing. A stop at load has no session to abort, so the runner does not send the prompt; the exit is
+  `2` / `cost-cap`. A legacy extension that re-registers an api id the registry already held, while it loads, is a
+  displaced entry (the re-arm gap above), so it stops a capped job too. Once the meter is installed EVERY exit line
+  carries its `tokens` and `usage`, the runner's outer catch included, so a load-time call that spent before a
+  later refusal (`command-unregistered`) is settled at what it spent, never read as a run with no exit counts. A
+  throw after a stop (a refused load-time call, then `command-unregistered`) exits with the stop's reason.
+- **A legacy call inside a runtime call's context** (PR #547's review): a runtime call runs under its own dispatch
+  TOKEN (an AsyncLocalStorage value, also carried in the call's options).
+  - The first compat call whose options carry that unused token on the SAME (provider, model) pair and the same api
+    is the runtime call's own dispatch (pi's composer re-enters on the same model): skipped by the guard and the meter, which judged
+    and count the runtime call. That claim uses the token up; a later call carrying it is an ordinary call.
+  - A token-carrying call on ANOTHER pair is a FORWARD (an extension provider calling pi-ai's legacy streamSimple
+    with the options spread), and a FULL call: judged on the list, prepared by the model guard (an `onPayload` that
+    rewrites the payload's model is refused, `why: payload`), judged on cost with ITS OWN bound, and observed and
+    counted under its own model. The runtime call stays bound and counted as an ordinary call: nothing can prove its
+    answer is the forward's (a fallback or router provider answers itself after a forward that failed, threw or was
+    refused, and that spend must count, PR #547's final review). So a cheap proxy in front of a dear or unboundable
+    target is refused as the target called directly is, and a proxy that answers with zero usage of its own cannot
+    hide the target's spend. With no policy the same accounting applies.
+  A legacy call a `before_provider_request` hook, an `onPayload`, or
+  a timer or promise scheduled from them makes is judged against the cap, the in-flight bound of the call it runs
+  inside included, and counted. Before the token any call in that context was skipped, and this was a named
+  residual; at load, where an extension's own runtime call can carry such an `onPayload`, it was reachable without
+  a session.
 - **The worker half** (issue #501, parts 3 and 4, and #503 part 7; `worker/src/dollar-budget.mjs`,
   `worker/src/processor.mjs`). A deployment may set dollar WINDOWS (`dailyCostUsd`, `weeklyCostUsd`,
   `monthlyCostUsd`, each needing `maxCostUsd`, `INT-CONFIG-OVERLAY-CONTRACT`):
@@ -3217,8 +3254,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     give-back rule.
 - **Residuals, named**:
   - extension code in the job can still reach a provider the meter never sees: pi-ai's per-api stream
-    functions imported directly, legacy `generateImages`, or a raw fetch. The meter is accounting and a
-    boundary against the agent's ordinary calls, not against the code it runs beside;
+    functions imported directly, an api id it registers in pi-ai's legacy registry and calls before the next
+    re-arm (its own stream function, while it loads or during the run), legacy `generateImages`, or a raw fetch.
+    The meter is accounting and a boundary against the agent's ordinary calls, not against the code it runs beside;
   - an `onPayload` hook (`before_provider_request`) can raise the request's output cap after the guard
     judged it, and a stored credential's own `env` can set `PI_CACHE_RETENTION`; both can push a call past its
     bound, and `boundExceeded` is the evidence;
@@ -3250,10 +3288,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     unstarted by this rule: metered, counted, settled at the floor;
   - **a `pi` subprocess** a package spawns spends outside this process, so outside the cap and outside the meter
     (`OQ-011`; detecting it is issue #500);
-  - **a legacy compat call made inside a runtime call's provider hook** (`before_provider_request`,
-    `after_provider_response`, a credential resolver) runs in that call's dispatch context, so the compat half
-    neither judges nor counts it (the meter's trap #5 residual). Extension code, the same trust class as a raw
-    fetch;
+  - **a provider that forwards to another model through the legacy API is counted for both calls** (PR #547's final review): its own runtime call and the forward are both bounded while in flight and
+    both counted, so a pure passthrough proxy's usage is counted twice. That errs on the safe side for money, but such
+    a proxy can reach a token or cost cap early;
+  - **a provider's own legacy call on the exact pair and api of its runtime call**, with the options spread, is still
+    skipped once as the composer's re-entry, as on main; a call on the same pair through another api is judged;
   - **server-side fallbacks are billed on the requested model's row**: an Anthropic answer from a model in
     `compat.allowedFallbackModels` is priced by pi at the fallback's rates but recorded on the requested model's
     ledger row. The bound already takes the dearest fallback table, so the cap holds; the per-model attribution
@@ -3276,11 +3315,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   - **a pi subprocess's spend is not seen** (`OQ-011`, issue #500): a package that spawns `pi` spends outside the
     runner's meter, so outside the per-job cap and outside `tokens.cost`. A window can therefore undercount such
     jobs, and a metered settlement of one is lower than its bill;
-  - **a model call made while extensions load, before the meter is installed, is neither judged nor counted**: the
-    runner loads extensions (`buildLoadedResourceLoader`, `image/runner/run-job.mjs`) before it installs the meter
-    and the cost guard, so an extension that calls a model at load time spends outside both. Such a run can report
-    `calls: 0` and settle metered at 0 though it spent. Installing the guard before extensions load is a separate
-    runner issue;
+  - **a model call made while extensions load** is no longer a residual (issue #543): the runner installs the meter
+    and the guards before it loads extensions, so such a call is judged and counted like any other. That makes the
+    zero-call rule in **Basis** safe for it: a run whose extension spent at load reports `calls` of at least 1, so it
+    is never read as a run that made no provider call;
   - **a counter deleted by hand mid-run**: the settle step skips a missing key, but a key deleted and then recreated
     by another job's reservation is present again, so this job's negative delta lands on the new key and can erase
     part of the other job's hold (clamped at 0, never negative). Only a hand delete or a flush does this in a
@@ -3372,13 +3410,20 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Exit line**: `tokens.modelRefused` only when a list is set, after the cost fields (the worker's `TOKEN_KEYS`
   order); with no list the exit line is byte-identical. `decideExit` maps the stop to exit `2` /
   `model-not-allowed`.
+- **From the first extension load** (issue #543): the guard is installed, and an unenforceable list refused,
+  BEFORE the resource loader is built, as for the cost cap (`DES-DOLLAR-RESERVE-AND-SETTLE`). A call an extension
+  factory makes while it loads, through a `ModelRuntime` of its own or pi-ai's legacy global stream functions, is
+  judged on the list like any other; a refusal then stops the job before its prompt is sent (`model-not-allowed`).
+- **Forwards** (PR #547's reviews): a provider's forward to another (provider, model) pair is judged on the list as
+  that pair, and prepared like any call, so a forward to an unlisted model, or one whose `onPayload` rewrites the
+  payload's model, is refused (`DES-DOLLAR-RESERVE-AND-SETTLE` has the token rule).
 - **Fail closed**:
   - a list on a runner that cannot enforce it before a call (the fallback bus meter, no hard stop, or no model
-    guard installed) refuses before the first prompt as `model-policy-unenforceable`; the install handle's
+    guard installed) refuses before any extension loads as `model-policy-unenforceable`; the install handle's
     `enforces` lists `model-not-allowed` only when the model guard is installed, so a cost guard cannot pass for
     it;
   - the compat re-arm gap: a compat entry found displaced (`resetApiProviders()`, or an extension
-    re-registering an api) means a legacy call may have reached a provider without the list being asked. Under a
+    re-registering an api, also while it loads) means a legacy call may have reached a provider without the list being asked. Under a
     list alone the job stops `model-not-allowed` and logs `model_guard_displaced`; its record carries
     `modelRefused: 0`, which tells it from a refused call. Under a cap as well, the cap's displacement stop wins
     (first wins, with `costUnjudged` as its evidence).
@@ -3411,10 +3456,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     only legacy extension calls.
 - **Residuals, named**:
   - extension code in the job can still reach a provider the meter never sees (pi-ai's per-api stream functions
-    imported directly, pi-ai's legacy global `generateImages` through its images api registry, or a raw fetch),
-    as for the cost cap;
-  - a legacy compat call made inside a runtime call's provider hook runs in that call's dispatch context and is
-    judged by neither half (the meter's trap #5 residual);
+    imported directly, an api id it registers in pi-ai's legacy registry and calls before the next re-arm,
+    pi-ai's legacy global `generateImages` through its images api registry, or a raw fetch), as for the cost cap;
   - **request changes outside the payload**: a header hook (`transformHeaders`, `before_provider_headers`) or a
     stored credential's own `env` (an azure deployment map there, resolved inside pi after the guard). The payload
     itself is deny by default, so no payload field is a residual;
@@ -3424,7 +3467,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   - the list names physical models only. A virtual entry on the list admits only that entry's own unrouted
     calls, which pi fails before any provider;
   - a `pi` subprocess a package spawns, including a stock subagent's child `pi`, is outside this process and
-    outside the list (`OQ-011`).
+    outside the list (`OQ-011`);
+  - **a provider that forwards to another model through the legacy API is counted for both calls**: both calls are
+    judged on the list and counted, so a passthrough proxy's usage is counted twice (`DES-DOLLAR-RESERVE-AND-SETTLE`).
 - **Traces to**: `REQ-MODEL-POLICY`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-RUN-HISTORY-FILE-CONTRACT`,
   `INT-CONTAINER-RUNTIME-CONTRACT`, `DES-DOLLAR-RESERVE-AND-SETTLE`, `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`,
   `CONST-BUDGET-BEFORE-TOKENS`, `OQ-011`
@@ -7095,3 +7140,4 @@ a tunnel.
 | 2026-10-02 | Issue #502, part 4. **NEW `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER`**, the runner half: the allowed-model list is enforced by a model guard on the meter's guard seam, before every provider call, in both meter halves and on all five ModelRuntime methods, on one copy of the model; the requested model's provider and id are compared exactly; a virtual model is judged by its routed physical call; the model check runs before the cost check, fixed by one policy guard (`createPolicyGuard`). PR #538's review: a listed call is refused when its request would name another model (samplingParams naming a routing key, `providerOptions` included, by decision any other key passing, a caller's `fetch`, a per-call azure deployment, an unlisted anthropic fallback, which pi sends before the call, so the old "nothing before the call could refuse it" was wrong), and the admitted call's `onPayload` is always wrapped and the payload check is deny by default (a lead decision after review round 3, where an enumerated routing list missed google's `config.httpOptions` and a gateway's `providerOptions`): a hook may change only the TOP-LEVEL messages, system prompt and sampling knobs (`PAYLOAD_EDITABLE`, without `prompt` or `metadata`; a setting an api keeps below the top is refused), anything else at any depth refuses, a key set to `undefined` counts as absent so a JSON-cloning hook passes, and pi is handed a fresh object built from the hook's editable keys and a snapshot of the rest; the worker refuses a list whose model declares unlisted fallbacks before any spend; a listed fallback that answers is logged `model_fallback`, and an openai-completions alias is never read; fail closed when the list cannot be enforced, and on a displaced compat entry under a list alone. Rejected: checking only at session start, extension-level hooks (`before_provider_request`, `model_select`), a proxy allowlist, withholding credentials as the policy, logging the refused pair (job-chosen), enumerating the payload fields that route, refusing a fallback after it answered, the old api-provider registry alone. Residuals: code around pi's model runtime (legacy `generateImages` included), a legacy call inside a provider hook, header and stored-credential changes outside the payload, a listed model sent to another `baseUrl` (the egress proxy's job), a virtual entry named on the list, a `pi` subprocess including a stock subagent's child. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**, step 3 of the per-call order: the model check is live and runs before the cost guard is asked. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: `model-not-allowed` is live as the runner's paid stop on an image that declares `modelPolicy`, beside the worker's free refusal and its `budgetReserved: false` paging rule. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` UNCHANGED, checked**: the guard sits on the seam it already had. **Code evidence**: image/runner/src/usage-meter.mjs; image/runner/test/model-guard.test.mjs; image/runner/test/usage-meter.integration.test.mjs; image/runner/test/pinned-api.test.mjs. |
 | 2026-10-02 | Issue #501, parts 3 and 4, and #503 part 7. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**, the worker half beside the runner half (which is UNCHANGED, checked; its two "a later part of issue #501" pointers now name the worker half): the `budget:usd` keys on budget.mjs's key functions and TTLs (`p:` reserved for #499, `s:` and `mdl:` left for the scoped and per-model windows); the reserve after both job-count reserves and before the container, its amount the per-job cap, `total > cap` refusing with every touched key given back, `dollar-cap` with both job-count slots given back; the one settle after the token record for every exit where the container ran, on the hold's own keys, never throwing; `isNeverStartedExit` as the one answer for settle and refund; the refunds (never-started, config-refused) and the hold an unexpected throw leaves (`dollar_hold_unsettled`); the metered basis (every floor counter present and 0, an absent one non-zero, `Math.ceil(cost x 1e6)`, the overshoot charged); the zero reservation for a job whose every model is local and zero-rated, under a cap of 0, and why an image without `costCap` never reaches it. Rejected gains: keeping a refused dollar reservation, floats in Valkey, settling a partial count as metered, settling with the settle-time date, zero-reserving on the main model alone under a list, and a crash-repair sweep. Residuals gain: server-side fallbacks billed on the requested model's row, a crash holding its reservation until the TTL, prepaid plans filling windows at their implied price, contention near a cap, and hosts disagreeing on caps. **`DES-RUNTIME-SETTINGS-FILE-OVERLAY` AMENDED**: the three dollar windows are enforced, no longer refused. **Code evidence**: worker/src/dollar-budget.mjs; worker/src/processor.mjs -> runJob, isNeverStartedExit; worker/src/model-endpoints.mjs -> zeroRatedVerdict; worker/src/model-catalog.mjs -> builtinModel. PR #542's review, folded in: a floor charges `max(reservation, ceil(cost x 1e6))` and never less than a reported metered cost; a run that made no provider call (calls 0, cost 0, no ledger, `costRefused` allowed) meters 0; a runner cap wider than the reservation is a floor; each settle step is one atomic Lua script that skips a missing key and clamps below 0; the give-back on refusal is best effort per key and a stranded key records a floor; `reserveDollars` itself reserves nothing for an amount of 0; a 401 before any answer settles at the floor, because `provider-auth-refused` is classified from the error text in the container; the record shows a retried job's last attempt only and the window counters are the truth; NEW item 8, the merged invariant at the admin's write and in doctor. Residuals gain clock skew at a window boundary, a pi subprocess's unseen spend (`OQ-011`, #500), and the runner's `spent` missing from the exit line (a follow-up). The runner-half pointers say the floor charges at least the reservation. Round 2: item 8 is a WARNING in every layout, never a refusal, because the worker's cap may come from its service unit or `--env-setup` script, which the admin cannot see; the worker still fails closed and doctor keeps its line. Residuals gain a model call made while extensions load (before the meter and guard are installed) and a counter deleted by hand mid-run. Round 3: item 5 believes an exit line only when the container exited on its own (not aborted, cancelled, timed out or detached) and the line's own `code` equals the container's exit code, else the floor, the zero-call rule included; a residual names a forged line with the right code written after the real one. |
 | 2026-10-02 | Issues #501 part 5 and #502 part 6 (scoped-limits version 2). **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**, the worker half: item 1 names the `budget:usd:s:<hash16>` and `budget:usd:mdl:<hash16>` keys as live; new item 9 (scope and model windows): one `reserveDollars` call over the deployment, scope and model ledgers, so a refusal anywhere gives back every key; a listed job reserves in its listed model windows, an unrestricted job in every one (fail closed), an unreserved job in none; the hold records its keys per ledger; the scope keys settle with the deployment basis and each model's keys from its own `usage.models` row, at the floor when the deployment basis is the floor, the exit line is untrusted, `usage` is null with calls, `truncated` is absent or above 0, or an `other`/`other` row has a cost; `dollars.modelBasis` fills; PR #549's review: case-differing usage rows summed, an absent `truncated` floors through the real parser, the no-cap and cap-below-job warnings, and a refusal that names a too-small window. Four Rejected entries: an unrestricted job reserving in no model window, settling a model window to the job total, a second reservation, and a near miss read as a repo row. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` AMENDED**: a Dollar windows and model rows paragraph (why a version bump, why the writer stamps the lowest version, why model rows live in this file). **Code evidence**: worker/src/scoped-limits.mjs; worker/src/dollar-budget.mjs -> holdPart, modelDollarSettlement; worker/src/processor.mjs -> runJob; worker/src/index.mjs -> makeProcessor. |
+| 2026-10-02 | Issue #543. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: NEW "From the first extension load" bullet: the meter and the cost guard are installed, and an unenforceable cap refused, before the resource loader is built, because an extension factory runs inside the loader's `reload()` with no ctx and a call it makes there goes through a `ModelRuntime` of its own or pi-ai's legacy global stream functions (measured at pi 0.99.1 with an offline provider: before this change such a call reached the provider unjudged and uncounted under a cap, a list or neither; after it, it is refused `cost-cap` or `model-not-allowed`, or counted as `calls: 1`). A stop at load has no session to abort, so the runner does not send the prompt. The re-arm gap names a displacement while an extension loads, and the extension-code residual names an api id an extension registers in the legacy registry and calls before the next re-arm. **`DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER` AMENDED**: the same bullet for the list, the unenforceable refusal moves to before any extension loads, and the same two residual and re-arm wordings. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, one clause: the runtime half is installed before the resource loader, so before any factory and before createAgentSession. Pinned: a factory runs in the loader's `reload()`, actions throw and `registerProvider` is queued at load, `ModelRuntime` has no static method but `create`, and only `AgentSession.reload()` calls `resetApiProviders()`. PR #547's review: NEW bullet "A legacy call inside a runtime call's context": a runtime call runs under its own dispatch token, carried in its options too, and the compat half skips only that call's own re-entry (the token's model, once), so a legacy call from a `before_provider_request` hook, an `onPayload` or a timer scheduled there is judged and counted; the residual that named it is REMOVED here and in `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER`, and `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` names the token. Every exit line after the install carries the meter's `tokens` and `usage`, the catch line included, so a load-time spend before `command-unregistered` is settled on what it spent (the worker's existing settle path, no worker change); `DES-COMMAND-ENTRY-POINT` AMENDED, one clause, to say so instead of "pre-spend". The worker half's residual "a model call made while extensions load" (issue #542) is REPLACED by a note that it is closed, so the zero-call metered rule is safe for load-time calls. The later review rounds: the token is skipped only for the composer's re-entry on the same pair, once; a token-carrying call on another pair is a provider's FORWARD, a full call (listed, prepared, bounded on its own model, counted under it), and the runtime call stays bound and counted as an ordinary call, because nothing proves its answer is the forward's (a fallback provider answers itself after a failed forward). So a cheap proxy cannot carry a dear target past the cap, and a NEW residual is named in both entries: a provider that forwards to another model through the legacy API is counted for both calls. `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER` gains a "Forwards" bullet. The re-entry is the exact (provider, id, api) of the runtime call, so a provider's own legacy call on the same pair through another api is judged; one on the same api is still skipped once, as on main, and named as a residual. A throw after a meter stop exits with the stop's reason and logs the outranked throw's reason and class. |

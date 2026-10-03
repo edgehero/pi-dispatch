@@ -69,20 +69,59 @@ import { configError, COST_CAP, COST_CAP_UNENFORCEABLE, MODEL_NOT_ALLOWED, MODEL
  *    pi so that its stream resolves `getApiProvider(model.api)` in the compat registry
  *    (provider-composer.js, `streamWith`), which is our compat wrapper. The runtime half observes the
  *    outer stream and the compat wrapper the inner one, two different objects, so the `observed` set cannot
- *    dedupe them. An AsyncLocalStorage shared by the two halves of one install marks "inside this meter's
- *    runtime dispatch" (it follows the lazyStream setup across its awaits), and the compat wrapper routes
- *    such a call without counting it again. Measured by usage-meter.fidelity.test.mjs: counted once. The
- *    residual this buys, named rather than hidden: a LEGACY compat call an extension makes from inside a
- *    provider hook of a runtime call (before_provider_request, after_provider_response, a credential
- *    resolver) runs in that marked context and is counted by neither half. Extension code is the same trust
- *    class as a raw fetch to the provider, which no meter sees either; this meter is accounting, not a
- *    boundary against the code it runs beside.
+ *    dedupe them. So each runtime call carries a TOKEN of its own (issue #543): an AsyncLocalStorage shared by
+ *    the two halves of one install holds it across the lazyStream setup's awaits, and the call's options carry
+ *    it under DISPATCH_MARK (pi spreads the options into the provider's, so the mark reaches the composer's
+ *    registry call). The first compat call whose options carry the context's unused token on the SAME (provider,
+ *    model) pair is the runtime call's own dispatch (pi's composer), already judged and counted, so the compat
+ *    wrapper skips it, once (measured by usage-meter.fidelity.test.mjs: counted once). A token-carrying call on
+ *    ANOTHER pair (a provider forwarding to pi-ai's legacy streamSimple with the options spread) is a full call,
+ *    judged, prepared, bounded and counted on its own model, and the runtime call stays bound and counted as well:
+ *    nothing proves the runtime call's answer is the forward's (a fallback provider answers itself after a failed
+ *    forward), so a passthrough proxy is counted for both calls, the safe side. Every other legacy call in that context -- one an
+ *    extension makes from a before_provider_request hook or an onPayload, or from a timer or a promise
+ *    scheduled there -- is judged and counted like a call from outside. Before the token, the context alone
+ *    decided, and such a call was judged and counted by neither half.
  *
  * The TOKEN cap here is still structurally LAGGING for the same reason token-budget.mjs's is: usage is known
  * only after a call completes, so its hard stop is a runaway backstop, not a before-the-spend cap. The COST cap
  * (issue #501) is the opposite shape: the cost guard at the bottom of this file judges each call's worst case
  * BEFORE it is sent, through the same seam and the same hard stop.
  */
+
+/** Where a runtime call's options carry its dispatch token (trap #5 above): a symbol, so it is never serialised. */
+export const DISPATCH_MARK = Symbol("pi-dispatch.usage-meter.dispatch");
+
+/** A runtime call's dispatch token: the model it dispatches, and whether its one compat re-entry has been seen. */
+export function dispatchToken(model) {
+	return { provider: model?.provider, id: model?.id, api: model?.api, used: false };
+}
+
+/** The call's arguments with its options (the second argument after the model, in all three stream methods) marked. */
+function markOptions(args, token) {
+	const marked = [...args];
+	marked[1] = { ...(marked[1] ?? {}), [DISPATCH_MARK]: token };
+	return marked;
+}
+
+/**
+ * Whether a compat call is the runtime call's own re-entry (trap #5): its options carry the UNUSED token of the
+ * context it runs in, on the same (provider, model) pair and the same api. That is pi's composer dispatching the runtime call itself,
+ * which the runtime half judged and counts, so it is skipped; the claim uses the token up, so it answers true once.
+ * A token-carrying call on ANOTHER pair (an extension provider forwarding to pi-ai's legacy streamSimple with the
+ * options spread) is NOT a re-entry: it is a full call, judged, prepared, bounded and counted on its own model, and
+ * the runtime call stays bound and counted too. Nothing here can tell that the runtime call's answer is the
+ * forward's (a fallback provider answers itself after a failed forward), so a passthrough proxy is counted for both
+ * calls: the safe side (PR #547's final review).
+ */
+function claimReentry(token, model, options) {
+	if (token === undefined || token === null || token.used || options?.[DISPATCH_MARK] !== token) return false;
+	// The exact (provider, id, api) the runtime call dispatched: a call on the same pair through ANOTHER api (a provider's
+	// own legacy call) is not the composer's re-entry, and is judged and counted like any other.
+	if (model?.provider !== token.provider || model?.id !== token.id || model?.api !== token.api) return false;
+	token.used = true;
+	return true;
+}
 
 /** The sourceId the compat half's per-api registrations are filed under in pi-ai's registry. */
 export const METER_PROVIDER_PREFIX = "pi-dispatch-usage-meter";
@@ -530,9 +569,11 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 			const model = judgedModel(requested);
 			const verdict = verdictFor(name, model, given);
 			if (verdict !== null && verdict !== ADMITTED) return hardStop(model, STOP_MESSAGES[verdict]);
-			const rest = prepareFor(verdict, name, model, given);
-			// Trap #5: everything this call dispatches, across its awaits, runs marked as ours.
-			const stream = dispatch.run(true, () => original.call(this, model, ...rest));
+			// Trap #5: everything this call dispatches, across its awaits, runs under this call's own token, and its
+			// options carry the token, so the compat half can tell this call's re-entry from any other call there.
+			const token = dispatchToken(model);
+			const rest = markOptions(prepareFor(verdict, name, model, given), token);
+			const stream = dispatch.run(token, () => original.call(this, model, ...rest));
 			if (verdict === ADMITTED) guard.bind?.(stream);
 			if (model?.api === VIRTUAL_MODEL_API) return stream;
 			// streamSimple/stream take (model, context, options); streamDeferred takes (model, handle, options).
@@ -551,7 +592,8 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 			const verdict = verdictFor(name, model, [context, given]);
 			if (verdict !== null && verdict !== ADMITTED) return Promise.resolve(hardStopResult(name, model, STOP_MESSAGES[verdict]));
 			const [, options] = prepareFor(verdict, name, model, [context, given]);
-			const promise = dispatch.run(true, () => original.call(this, model, context, options));
+			// A token too, though no result method re-enters the compat half: a legacy call made inside it is never its own.
+			const promise = dispatch.run(dispatchToken(model), () => original.call(this, model, context, options));
 			if (verdict === ADMITTED) guard.bind?.(promise);
 			if (model?.api === VIRTUAL_MODEL_API) return promise;
 			return meter.observeResult(promise, ctxOf(model, options));
@@ -601,10 +643,13 @@ export function defaultHardStopResult(method, model, message = STOP_MESSAGES[TOK
  * gone; the collection's auth layer is correct whichever it was (it lets an explicit key win), so cloudflare
  * always takes it here.
  *
- * A call made from inside the same install's runtime dispatch (`dispatch`, trap #5) is routed the same way
- * and NOT observed: the runtime half already counted it. Nor is it offered to the `guard`: the runtime half
- * already judged it, and judging one request twice would count its bound twice. A legacy call from outside
- * that dispatch is guarded here exactly as wrapModelRuntime's step 3 guards a runtime call.
+ * The ONE call that is a runtime call's own re-entry (`dispatch`, trap #5: its options carry the unused token of the
+ * context it runs in, on the same (provider, model) pair) is routed the same way and NOT observed: the runtime half
+ * already counted it. Nor is it offered to the guard: the runtime half already judged it, and judging one request
+ * twice would count its bound twice. A FORWARD (the token on another pair) is a full call here: judged, prepared,
+ * bounded and observed below under its own model, while the runtime call keeps its own bound and count. Every other legacy call, made
+ * inside a runtime call's context (a hook, an onPayload, a timer scheduled there) or outside any, is guarded and
+ * observed here exactly as wrapModelRuntime's step 3 guards a runtime call (issue #543).
  *
  * There is deliberately NO try/catch, for the reason wrapModelRuntime gives.
  */
@@ -613,7 +658,9 @@ export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, gu
 		// One copy, judged and dispatched (wrapModelRuntime's judgedModel has the why).
 		const model = guard !== null && hardStop ? snapshotModel(requested) : requested;
 		// Checked before dispatch, so a stop ends the NEXT call rather than merely recording it.
-		const verdict = judge({ meter, hardStop, guard, method: kind, model, args: [context, given], skip: dispatch?.getStore() === true });
+		// The runtime call's own re-entry is skipped; any other call, a forward to another pair included, is judged.
+		const reentry = claimReentry(dispatch?.getStore(), model, given);
+		const verdict = judge({ meter, hardStop, guard, method: kind, model, args: [context, given], skip: reentry });
 		if (verdict !== null && verdict !== ADMITTED) return hardStop(model, STOP_MESSAGES[verdict]);
 		const options = verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method: kind, model, args: [context, given], stop: (reason) => meter.stop(reason) })[1] : given;
 		const provider = fallbackModels?.getProvider?.(model.provider);
@@ -624,7 +671,7 @@ export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, gu
 				: builtin[kind](model, context, options)
 			: inner[kind](model, context, options);
 		if (verdict === ADMITTED) guard.bind?.(stream);
-		if (dispatch?.getStore() === true) return stream;
+		if (reentry) return stream;
 		return meter.observe(stream, { sessionId: options?.sessionId, provider: model.provider, modelId: model.id });
 	}
 	return {

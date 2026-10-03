@@ -12,6 +12,8 @@ import {
 	VIRTUAL_MODEL_API,
 	wrapModelRuntime,
 	wrapProviderStreams,
+	DISPATCH_MARK,
+	dispatchToken,
 } from "../src/usage-meter.mjs";
 import { COST_CAP, decideExit, EXIT_POLICY, MODEL_NOT_ALLOWED, MODEL_POLICY_UNENFORCEABLE } from "../src/outcome.mjs";
 import { FABLE_5 } from "./helpers/catalog-models.mjs";
@@ -201,6 +203,75 @@ test("only streamSimple skips a virtual model: on any other method it is judged 
 	}
 });
 
+test("a runtime call's forward to another model is a full call on the list: judged, prepared and counted (PR #547's review, round 3)", async () => {
+	const PROXY = Object.freeze({ ...LISTED, id: "proxy-1", provider: "proxy" });
+	// Another model on the SAME provider is another pair too.
+	const SIBLING = Object.freeze({ ...LISTED, id: "listed-2" });
+	const list = [...LIST, { provider: "proxy", model: "proxy-1" }, { provider: "local", model: "listed-2" }];
+	const meter = createUsageMeter({ allowedModels: list });
+	const logged = [];
+	const guard = createPolicyGuard({ allowedModels: list, log: (event, fields) => logged.push({ event, fields }) });
+	const hardStop = makeHardStopStream({ createStream: () => new FakeStream() });
+	const reached = [];
+	const sent = [];
+	const inner = {
+		streamSimple: (model, _context, options) => {
+			reached.push(model.id);
+			const stream = new FakeStream();
+			(async () => {
+				try {
+					const payload = (await options?.onPayload?.({ model: model.id, messages: [] }, model)) ?? { model: model.id };
+					sent.push(payload.model);
+					stream.end(answer());
+				} catch (error) {
+					stream.end({ role: "assistant", stopReason: "error", errorMessage: error.message, usage: answer().usage });
+				}
+			})();
+			return stream;
+		},
+	};
+	const dispatch = new AsyncLocalStorage();
+	const compat = wrapProviderStreams({ inner, fallbackModels: null, meter, hardStop, guard, dispatch });
+	const forward = async (to, options = {}) => {
+		const token = dispatchToken(PROXY);
+		return dispatch.run(token, () => compat.streamSimple(to, {}, { ...options, [DISPATCH_MARK]: token }).result());
+	};
+	// A listed forward, to another model on the same provider: dispatched and counted under its own model.
+	const listed = await forward(SIBLING);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual([listed.stopReason, reached, meter.state.calls, guard.snapshot().modelRefused], ["stop", ["listed-2"], 1, 0]);
+	// A forward whose own onPayload rewrites the model is prepared like any call: refused, why payload.
+	const rewritten = await forward(SIBLING, { onPayload: (payload) => ({ ...payload, model: "unlisted-x" }) });
+	assert.match(rewritten.errorMessage, /model not allowed/);
+	assert.deepEqual([sent, logged.at(-1)?.fields?.why], [["listed-2"], "payload"], "the rewritten model never reached a request");
+	// An unlisted forward: refused on the list before it is sent.
+	const refused = await forward(UNLISTED);
+	assert.equal(refused.errorMessage, "pi-dispatch: model not allowed");
+	assert.deepEqual([reached, meter.state.stopReason], [["listed-2", "listed-2"], MODEL_NOT_ALLOWED]);
+});
+
+test("a listed forward on anthropic-messages logs model_fallback when a fallback answered, like any listed call", async () => {
+	const REQUESTED = Object.freeze({ ...LISTED, api: "anthropic-messages", provider: "anthropic", id: "big-1", compat: { allowedFallbackModels: [{ provider: "anthropic", model: "small-1" }] } });
+	const list = [{ provider: "anthropic", model: "big-1" }, { provider: "anthropic", model: "small-1" }, { provider: "proxy", model: "proxy-1" }];
+	const meter = createUsageMeter({ allowedModels: list });
+	const logged = [];
+	const guard = createPolicyGuard({ allowedModels: list, log: (event, fields) => logged.push({ event, fields }) });
+	const hardStop = makeHardStopStream({ createStream: () => new FakeStream() });
+	const inner = {
+		streamSimple: () => {
+			const stream = new FakeStream();
+			stream.end({ ...answer(), responseModel: "small-1" });
+			return stream;
+		},
+	};
+	const dispatch = new AsyncLocalStorage();
+	const compat = wrapProviderStreams({ inner, fallbackModels: null, meter, hardStop, guard, dispatch });
+	const token = dispatchToken({ provider: "proxy", id: "proxy-1", api: "proxy-api" });
+	await dispatch.run(token, () => compat.streamSimple(REQUESTED, {}, { [DISPATCH_MARK]: token }).result());
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(logged.filter((line) => line.event === "model_fallback").map((line) => line.fields), [{ provider: "anthropic", requested: "big-1", answered: "small-1" }]);
+});
+
 test("the compat half judges a legacy call on the list, and skips a call the runtime half already judged", async () => {
 	const meter = createUsageMeter({ allowedModels: LIST });
 	const guard = createPolicyGuard({ allowedModels: LIST });
@@ -222,7 +293,9 @@ test("the compat half judges a legacy call on the list, and skips a call the run
 	};
 	const dispatch = new AsyncLocalStorage();
 	const compat = wrapProviderStreams({ inner, fallbackModels: null, meter, hardStop, guard, dispatch });
-	await dispatch.run(true, () => compat.streamSimple(UNLISTED, {}, {})).result();
+	// The runtime call's own re-entry (its token, in its options, on its model): judged there, not here.
+	const token = dispatchToken(UNLISTED);
+	await dispatch.run(token, () => compat.streamSimple(UNLISTED, {}, { [DISPATCH_MARK]: token })).result();
 	assert.deepEqual([reached, guard.snapshot().modelRefused], [["unlisted-1"], 0], "inside the runtime dispatch: judged there, not here");
 	await compat.stream(LISTED, {}, {}).result();
 	const refused = await compat.streamSimple(UNLISTED, {}, {}).result();
@@ -476,7 +549,9 @@ test("a payload hook that changes the model fails the call before it is sent and
 	try {
 		const options = { maxTokens: 10 };
 		await new Spy().streamSimple(LISTED, {}, options).result();
-		assert.equal(seen[0], options, "a cap alone hands the caller's own options object");
+		// The caller's own keys and nothing else: no onPayload is added. The copy carries only the dispatch mark (issue
+		// #543), a symbol, so it never reaches a payload.
+		assert.deepEqual([Object.keys(seen[0]), seen[0].maxTokens, Object.getOwnPropertySymbols(seen[0])], [["maxTokens"], 10, [DISPATCH_MARK]], "a cap alone adds no onPayload");
 	} finally {
 		layer3.restore();
 	}

@@ -44,6 +44,33 @@ Evidence convention as in `constitution.md`.
   if (!model) throw configError(`unknown model`);   // configError tags exit 2 -- see below
   if (!modelRuntime.hasConfiguredAuth(model.provider)) throw configError(`no configured auth`);  // takes the PROVIDER id now
 
+  // HOISTED: the ROOT session id must exist BEFORE the meter does. createAgentSession would otherwise
+  // build its own SessionManager and the id would be readable only afterwards, too late to split
+  // rootTotal from otherTotal, and an undefined root files every call as unattributed.
+  // CONDITIONAL since issue #48: in-memory when PI_SESSION_FILE is unset (the default, and every job
+  // before that change), a persisted manager when it is set (REQ-RESUMABLE-SESSION). See (l).
+  const { sessionManager } = openSessionManager({ sessionFile, cwd: "/workspace" });
+  const rootSessionId  = sessionManager.getSessionId();
+
+  // Declared BEFORE the meter so onStop can close over it; assigned the moment the session exists.
+  let session;
+
+  // Process-wide usage meter (REQ-TOKEN-ACCOUNTING-AND-CAPS). Wraps ModelRuntime.prototype (the class run-job
+  // imports, handed over) AFTER the runtime exists -- the install checks that THIS instance dispatches through
+  // the wrappers -- and BEFORE the resource loader is built (issue #543): an extension factory runs inside the
+  // loader's reload(), so a call it makes while it loads is already metered and judged. See (g), (h), (m).
+  // ONE stop for every policy (issues #501, #502): onStop(reason) fires once, for the first stop, first wins;
+  // every stop aborts the root, and only a token stop logs token_budget_exceeded.
+  const meter      = createUsageMeter({ maxTokens, maxCostMicros, allowedModels, rootSessionId, onStop: meterStopHandler({ onTokenAbort, abort: () => void session?.abort() }) });
+  // The model list (issue #502) and the cost cap (issue #501) are judged before every call by one guard both meter
+  // halves consult, the list first; each part only for its own policy, and no guard with neither.
+  const policyGuard = createPolicyGuard({ maxCostMicros, allowedModels, log });
+  const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard });
+  // A cost cap or a model list this runner cannot enforce BEFORE a call refuses here, pre-spend
+  // (INT-RUNNER-EXIT-CODE-PROTOCOL): meter not installed, no hard stop, or no guard for that policy. Before any
+  // extension loads, so nothing has been spent.
+  assertPoliciesEnforceable({ maxCostMicros, allowedModels, ...policyEnforcement(usageMeter) });
+
   // Guardrails read EXPLICITLY from a path we own — never via discovery. See (e).
   const guardrails     = readFileSync("/opt/pi-dispatch/HARD_RULES.md", "utf8");
   const globalPersona  = readIfExists("/opt/pi-global/APPEND_SYSTEM.md"); // operator overlay, :ro (REQ-GLOBAL-PI-OVERLAY)
@@ -118,31 +145,6 @@ Evidence convention as in `constitution.md`.
   // the project being untrusted: the in-memory settings default to TRUSTED, and that default is what
   // makes repo-extension discovery fire at all. See (f).
 
-  // HOISTED: the ROOT session id must exist BEFORE the meter does. createAgentSession would otherwise
-  // build its own SessionManager and the id would be readable only afterwards — too late to split
-  // rootTotal from otherTotal, and an undefined root files every call as unattributed.
-  // CONDITIONAL since issue #48: in-memory when PI_SESSION_FILE is unset (the default, and every job
-  // before that change), a persisted manager when it is set (REQ-RESUMABLE-SESSION). See (l).
-  const { sessionManager } = openSessionManager({ sessionFile, cwd: "/workspace" });
-  const rootSessionId  = sessionManager.getSessionId();
-
-  // Declared BEFORE the meter so onStop can close over it; assigned the moment the session exists.
-  let session;
-
-  // Process-wide usage meter (REQ-TOKEN-ACCOUNTING-AND-CAPS). Wraps ModelRuntime.prototype (the class run-job
-  // imports, handed over) AFTER the runtime exists -- the install checks that THIS instance dispatches through
-  // the wrappers -- and BEFORE createAgentSession, so the first call of the run is already metered. See (g), (h), (m).
-  // ONE stop for every policy (issues #501, #502): onStop(reason) fires once, for the first stop, first wins;
-  // every stop aborts the root, and only a token stop logs token_budget_exceeded.
-  const meter      = createUsageMeter({ maxTokens, maxCostMicros, allowedModels, rootSessionId, onStop: meterStopHandler({ onTokenAbort, abort: () => void session?.abort() }) });
-  // The model list (issue #502) and the cost cap (issue #501) are judged before every call by one guard both meter
-  // halves consult, the list first; each part only for its own policy, and no guard with neither.
-  const policyGuard = createPolicyGuard({ maxCostMicros, allowedModels, log });
-  const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard });
-  // A cost cap or a model list this runner cannot enforce BEFORE a call refuses here, pre-spend
-  // (INT-RUNNER-EXIT-CODE-PROTOCOL): meter not installed, no hard stop, or no guard for that policy.
-  assertPoliciesEnforceable({ maxCostMicros, allowedModels, ...policyEnforcement(usageMeter) });
-
   ({ session } = await createAgentSession({
     cwd: "/workspace",
     agentDir: getAgentDir(),
@@ -154,8 +156,10 @@ Evidence convention as in `constitution.md`.
     resourceLoader,
   }));
 
-  usageMeter.arm();   // the COMPAT half only: an extension factory that registered an api id in pi-ai's legacy
-                      // registry during createAgentSession is unwrapped until this deterministic re-arm.
+  usageMeter.arm();   // the COMPAT half only: an extension that registered an api id in pi-ai's legacy registry
+                      // while it loaded or during createAgentSession is unwrapped until this deterministic re-arm.
+  // A stop before the prompt (a call made while an extension loaded, or while the session was built) found no
+  // session to abort, so the prompt is not sent: if (meter.state.stopReason === null) await session.prompt(prompt).
   // The per-session accumulator is the FALLBACK, attached ONLY when the meter could not install, so the
   // two are never both counting: attachTokenBudget(session, maxTokens) if (!usageMeter.ok).
   ```
@@ -301,9 +305,36 @@ Evidence convention as in `constitution.md`.
   for its api (an overlay models.json provider on `openai-completions`), which pi composes so that its stream
   resolves the api in the compat registry (provider-composer.js). An AsyncLocalStorage shared by both halves of
   one install makes the compat wrapper route such a call without counting it again (measured: counted once
-  with it, twice without). Residual, recorded: a legacy compat call an extension makes from inside a provider
-  hook of a runtime call is counted by neither half; extension code is the same trust class as a raw fetch,
-  which no in-process meter sees either.
+  with it, twice without). Since issue #543 its value is a per-call TOKEN, also carried in the call's options
+  (pi's `prepareRequest` spreads them into the provider's, so the mark reaches the composer's registry call): the
+  first compat call whose options carry the context's unused token on the same (provider, model) pair and api is
+  the composer's re-entry and is skipped, once. A token-carrying call on another pair is a provider's FORWARD, and a
+  full call: judged on the list, prepared (a rewritten payload model is refused), bounded on its own model and
+  counted under it, so a cheap proxy cannot carry a dear target past the cap. The runtime call stays bound and
+  counted as an ordinary call, because nothing proves its answer is the forward's (a fallback provider answers
+  itself after a failed forward). Residual, named: a provider that forwards to another model through the legacy API is counted for both calls, so a passthrough
+  proxy's usage is counted twice (the safe side for money; it can reach a token or cost cap early).
+  A legacy call an extension makes from a provider hook of a runtime call, or from a timer scheduled there, runs
+  in the same context but carries no token, so it is judged and counted like any other; until the token it was
+  counted by neither half.
+  **The install comes BEFORE the resource loader (issue #543).** An extension factory runs inside the loader's
+  `reload()` (`await factory(load.api)` in core/extensions/loader.js), and its pi API has no ctx then: every action
+  method throws "Extension runtime not initialized" and `pi.registerProvider` is only queued until the session
+  binds. A model call a factory makes while it loads therefore goes through a `ModelRuntime` of its own (the
+  prototype) or pi-ai's legacy global stream functions (the registry), and both are wrapped only if the install
+  ran first. So the runner builds the runtime, the root session id, the meter and the guard, installs, runs the
+  policy check, and only then builds the loader. The loader's `reload()` never calls `resetApiProviders()` (only
+  `AgentSession.reload()` does, pinned), so the install's registry wrappers survive it. A stop at load has no
+  session to abort, so the runner does not send the prompt, and the exit line names the stop. With no policy
+  three things change. Log ordering: the `usage_meter` line (and a `session_resume_degraded` line, when one is
+  written) now comes before the loader's lines (`extension_dropped`, `flow_not_loaded`, `package_skill_shadowed`,
+  `packages_loaded`). Counting: a load-time call, and a legacy call made inside a runtime call's context (a
+  `before_provider_request` hook, an `onPayload`, a timer scheduled there), are counted like any other. The
+  catch-path exit line after the install carries `tokens` (and `usage` when a call was observed), and a throw
+  after a meter stop exits with the stop's reason. A legacy extension that re-registers an api
+  id the registry already held, while it loads, is now a displaced entry like one during the run: `rearms` counts
+  it, and under a cap or a list it stops the job, because a call through that entry before the re-arm was
+  unjudged.
 
   **(i) Skill precedence is decided by `skillsOverride`, not by path order -- and there are now THREE protected roots, `/job/pi/skills`, `/job/trigger-skills` and `/opt/pi-global/skills`, consulted in that order (`REQ-PER-TRIGGER-SKILLS`).** `additionalSkillPaths` sets
   the order *among our own* paths (repo before overlay), but pi builds `skillPaths` as
@@ -702,7 +733,7 @@ refactor apart.
 
   | Command-job event | Surfaces as | Exit / reason |
   |---|---|---|
-  | The named command is not registered by any loaded extension | pre-prompt `getCommand()` miss → tagged `configError` | `2` / `command-unregistered` — deterministic, pre-spend, and forecloses pi's fall-through (an unregistered `/name` is not an error to pi: it would ride through template expansion into a paid model call) |
+  | The named command is not registered by any loaded extension | pre-prompt `getCommand()` miss → tagged `configError` | `2` / `command-unregistered`: deterministic, before the prompt (a call an extension made while it loaded may already have spent, so the line carries the meter's `tokens` and `usage`, issue #543), and forecloses pi's fall-through (an unregistered `/name` is not an error to pi: it would ride through template expansion into a paid model call) |
   | The handler ran and returned; no assistant message exists | `session.prompt()` resolves with no terminal | `0` / `command-completed` — before this reason, a SUCCESSFUL headless command was the retryable `no-terminal-message` shape, and the queue re-billed a success |
   | The handler THREW | pi swallows it (`handled=true`, clean resolve); observed only via `extensionRunner.onError` (`event: "command"`) | `1` / `command-error` — **retryable by explicit choice**: pi surfaces a message string, transient-vs-deterministic is undecidable, and the accepted cost (a deterministic extension bug retries until attempts run out) is recorded on `DES-COMMAND-ENTRY-POINT` |
   | The handler drove the model (`sendUserMessage`/`waitForIdle`) | a real terminal message exists | its `stopReason` verdict stands unchanged — a provider 429 inside a handler-driven turn stays `1`/retryable |
@@ -715,7 +746,12 @@ refactor apart.
   `tokens` (`{ input, output, total, cost }`, the per-job usage totals). Both are recovered host-side
   (`parseExitTurns` / `parseExitTokens`) into the run record and **must not feed exit-code or retry
   classification** — that is this protocol's job. The catch-path exit line (a preflight throw, no session
-  ran) omits both, so each parses to `null`.
+  ran) omits `turns`; it omits `tokens` (and `usage`) only when it comes before the process-wide meter installed.
+  After the install every catch-path line carries the meter's `tokens` and `usage` (issue #543), because a call an
+  extension made while it loaded may have spent before a later refusal such as `command-unregistered`. A throw
+  after the meter stopped (a load-time call refused, then `command-unregistered`) exits with the STOP's code and
+  reason (`2` / `cost-cap` or `model-not-allowed`), the ranking `decideExit` gives a stop over a rejected prompt,
+  and a `throw_after_stop` line before it names the outranked throw by its classified `reason` and error class only.
   Beside `turns` the decided exit line carries `retryTurns` (issue #449): the `turn_start`s that opened
   pi's own auto-retries, which the turn budget does not count (`REQ-RUNNER-TURN-BUDGET`). It is
   diagnostic, read from the container log only: the worker does not parse it into the run record, whose
@@ -764,7 +800,7 @@ refactor apart.
   ONLY when a list is set, after the cost fields; with no list the exit line is byte-identical to before. The worker's closed key list admits all seven. The fallback line carries `metered: false` and the four
   originals only. The sibling `usage` key (the per-model ledger, `REQ-TOKEN-ACCOUNTING-AND-CAPS`) is the
   same class of read-only telemetry: recovered by its own validating parser (`parseExitUsage`), absent on
-  the fallback and catch-path lines, and **feeding classification exactly as much as `tokens` does —
+  the fallback line and on a catch-path line from before the meter installed, and **feeding classification exactly as much as `tokens` does:
   not at all**.
   **`context` is a third sibling** (`{ tokens, window }`, issue #186): how full the session's context was
   when the run ended, read from pi's own `getContextUsage()` before the session is disposed. A sibling
@@ -6475,3 +6511,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-02 | Issue #540, three follow-ups from the review of #537. **`INT-CONFIG-OVERLAY-CONTRACT` AMENDED**, wording only: the blank-file sentence now names all three writers (console `set`/`unset`, `dispatch_set`, `/dispatch secrets`) and says a file that cannot be read is never blank. The `dispatch_set` tool refused a blank settings file (whitespace or a byte-order mark only) before its confirm, and `/dispatch secrets` refused it on its read (PR #548's review), because a blank file reads as invalid; both now read it as a missing file, using `writeSettings`' own blank test (`blankSettingsFile`, exported for it). A file that is invalid and not blank is still refused before any confirm, and a read error is tested as not blank, so an unreadable file holding a cap is never written over. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `doctor` states a version-floor line for `run.maxCostUsd`, once and as `ok`, when any trigger sets a cap (a `null` cap is absent), the twin of the `run.models` line. The skew wrapper in `makeProcessor` gains a test with a deployment cap set, so a wrapper that filled an arrived-without cap from the deployment's would fail. The worker's job path is unchanged. **Code evidence**: admin/src/read-model.mjs -> blankSettingsFile, writeSettings; admin/src/index.ts -> dispatch_set; admin/src/secrets-command.ts -> runSecretsCommand; worker/src/doctor.mjs -> collectChecks; admin/test/crud.test.mjs; admin/test/read-model.test.mjs; worker/test/model-policy.test.mjs; worker/test/doctor.test.mjs. |
 | 2026-10-02 | Issues #501 part 5 and #502 part 6 (scoped-limits version 2). **`INT-SCOPED-LIMITS-FILE-CONTRACT` AMENDED**: `SCOPED_LIMITS_VERSION` is 2; repo and folder rows gain `dayUsd`, `weekUsd` and `monthUsd` (the overlay's `parseUsdMicros` rules, stored as canonical decimal strings), and `model:<provider>/<model>` rows carry those three only (counts and `concurrent` refused, `model:other/other` refused, case-insensitive duplicates refused; near misses of `model:` refused naming the exact form, and `project:` reserved for #499 in both versions); a version 1 file using either is refused naming version 2, and a version 1 file without them reads unchanged; the admin writes the lowest version that expresses the file and carries dollar fields through a count edit; new Dollar enforcement bullet: one reservation over the deployment, `budget:usd:s:<hash16>` and `budget:usd:mdl:<hash16 of the lowercased ref>` windows, listed jobs in their listed rows, unrestricted jobs in every model row (fail closed), unreserved jobs in none, a refusal anywhere giving back every key, `budget:usd:p:` still reserved for #499. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `dollars.modelBasis` fills (`metered`, `floor`, `refunded`, or null when no model window was held), each model window settled from its own `usage.models` row, with the five floor conditions (basis not metered, untrusted line, no ledger with calls, `truncated` absent or above 0, an `other`/`other` cost); a model's case-differing usage rows are summed; the ledger's `truncated` is `null` when the exit line omits it (it was 0). The dollar enforcement bullet gains the warnings (worker log at boot and reload, doctor, with env and overlay merged) and the refusal that tells a window below one job's cap from a full one. **Code evidence**: worker/src/scoped-limits.mjs -> parseScopedLimits, dollarCapsFor, modelDollarRows, scopedLimitsVersionFor; worker/src/dollar-budget.mjs -> modelDollarSettlement, holdPart; worker/src/processor.mjs -> runJob; worker/src/run-history.mjs -> buildRecord; admin/src/read-model.mjs -> writeScopedLimits, readScopedBudget. |
 | 2026-10-02 | Issue #539, follow-ups from PR #536's review. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, the four pre-spend model refusals: `overlay-unparseable` (and `overlay-is-a-directory`) now refuse EVERY ref of every job while the overlay is a file pi drops, whatever broke it, since pi would run even a builtin model against its provider's public endpoint; a missing file is no overlay, and an empty, whitespace-only or BOM-only file is one pi drops (measured). The transient-read sentence is narrowed to jobs that need the overlay (an overlay model, or a list whose fallbacks it could change), a dropped file's order against `fallback-unlisted` is stated, and doctor's new line for an overlay entry pi will not compose is named. **Code evidence**: worker/src/models-json.mjs -> parseModelsJson, stripJsonComments (a linear scan, differential-tested against pi's own); worker/src/model-catalog.mjs -> checkModelsKnown; worker/src/doctor.mjs; worker/test/model-catalog.test.mjs; worker/test/models-json.test.mjs; worker/test/doctor.test.mjs. |
+| 2026-10-02 | Issue #543. **`INT-SDK-SESSION-OPTIONS` AMENDED**, the order: the contract block now builds the runtime, the root session id, the meter and the guard, installs, runs `assertPoliciesEnforceable`, and only then builds the resource loader, because an extension factory runs inside the loader's `reload()` and a model call it makes there must already be metered and judged. Trap (h) gains the reason, measured at pi 0.99.1: at load a factory's pi API has no ctx (actions throw, `pi.registerProvider` is queued for the session), so its call goes through a `ModelRuntime` of its own or pi-ai's legacy global stream functions; the loader's `reload()` never calls `resetApiProviders()`, so installing first displaces nothing. A stop before the prompt sends no prompt. With no policy the exit line is unchanged except that a load-time call is now counted, and the only log change is ordering: `usage_meter` (and `session_resume_degraded`, when written) now precede the loader's lines. A legacy extension that re-registers an already-registered api id while it loads now counts in `rearms`, and stops a capped or listed job, like the same re-registration during the run. PR #547's review: trap (h)'s residual (a legacy call from a provider hook of a runtime call, counted by neither half) is CLOSED by a per-call dispatch token the call's options carry, so only the call's own registry re-entry is skipped, once. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the catch-path exit line omits `tokens` and `usage` only before the meter installed; after it, every exit line carries them, and `command-unregistered` is "before the prompt", no longer "pre-spend", because a load-time call may already have spent. The later review rounds: only the composer's re-entry on the same pair is skipped, once; a provider's forward to another pair is a full call (listed, prepared, bounded and counted under its own model) and the runtime call stays bound and counted, with the residual named in trap (h): a provider that forwards to another model through the legacy API is counted for both calls; trap (h) now lists every no-policy change (log ordering, load-time and in-context legacy calls counted, the catch line's tokens); a throw after a meter stop exits with the stop's code and reason. |
