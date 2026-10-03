@@ -2600,23 +2600,24 @@ export const CHILD_METER_HANDOFF = Symbol.for("pi-dispatch.child-meter");
  *     asynchronous loader hooks (`module.register`, `--loader`). The price is named in DES: a Node older than 18.19
  *     refuses `--import` in NODE_OPTIONS and does not start.
  * The process that calls this is unaffected: NODE_OPTIONS is read when a Node process starts. Returns `{ dir }`, or
- * `{ error }` (a code, never a path) with both names DELETED from `env` and NODE_OPTIONS untouched, so with no
+ * `{ error }` (a code, never a path) with CHILD_LEDGER_ENV DELETED from `env` and NODE_OPTIONS untouched, so with no
  * directory no child is pointed anywhere, not even at an inherited one, and every pi child stays unmetered, which the
- * parent's detector then counts. Never throws.
+ * parent's detector then counts. RUNNER_PID_ENV is set either way (issue #500 part D): it is what tells a nested copy
+ * of the runner that it is one, and a nested runner with no directory stops with exit 2 instead of running the job
+ * again. Never throws.
  */
 export function openChildLedger({ env, pid, preloadUrl, mkdtemp = mkdtempSync, tmp = tmpdir }) {
+	// env-internal PI_DISPATCH_RUNNER_PID: set by the runner in its own environment, never by the worker.
+	env.PI_DISPATCH_RUNNER_PID = String(pid);
 	let dir;
 	try {
 		dir = resolvePath(mkdtemp(join(tmp(), "pi-dispatch-meter-")));
 	} catch (error) {
 		// env-internal PI_DISPATCH_CHILD_LEDGER: set by the runner in its own environment, never by the worker.
 		delete env.PI_DISPATCH_CHILD_LEDGER;
-		// env-internal PI_DISPATCH_RUNNER_PID: set by the runner in its own environment, never by the worker.
-		delete env.PI_DISPATCH_RUNNER_PID;
 		return { error: reasonOf(error) };
 	}
 	env.PI_DISPATCH_CHILD_LEDGER = dir;
-	env.PI_DISPATCH_RUNNER_PID = String(pid);
 	// A file URL carries no whitespace (it is percent-encoded), so NODE_OPTIONS splits it as one argument.
 	const flag = `--import=${preloadUrl}`;
 	// env-internal NODE_OPTIONS: Node's own variable, extended here for the runner's descendants, never a deployment key.

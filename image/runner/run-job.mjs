@@ -32,6 +32,7 @@ import { restoreEnvProxyDispatcher } from "./src/env-proxy.mjs";
 import { createExitWriter, readExitKey, writeAllSync } from "./src/exit-line.mjs";
 import { createJobModelRuntime } from "./src/model-runtime.mjs";
 import { countPackageResources, findShadowedSkills, isFlowLoaded, owningRoot } from "./src/packages.mjs";
+import { isNestedRunner, runAsPiCli } from "./src/child-route.mjs";
 import { openSessionManager } from "./src/session.mjs";
 import { attachTokenBudget } from "./src/token-budget.mjs";
 import { assertExcludeToolsKnown } from "./src/tools.mjs";
@@ -51,6 +52,15 @@ import {
 	policyEnforcement,
 	resolvePiAiCompat,
 } from "./src/usage-meter.mjs";
+
+// FIRST, before anything else this file does (issue #500): is this the job's runner, or a NESTED copy of it that a
+// tool started as a pi CLI? pi's stock subagent example spawns `process.execPath process.argv[1] <pi args>`, which in a
+// job is this file, and before this check such a child ran the whole job prompt again (OQ-011 M1). A nested runner runs
+// as the pi CLI instead, metered through the job runner's ledger directory (child-route.mjs runAsPiCli): it reads no
+// exit key, writes no exit line, installs no SIGTERM handler, never reaches main() (the block at the end of this file
+// is the job runner's alone), never reads /job and opens no ledger directory of its own.
+const nestedRunner = isNestedRunner(process.env, process.pid);
+if (nestedRunner) await runAsPiCli();
 
 const JOB_DIR = "/job";
 const PROMPT_PATH = `${JOB_DIR}/prompt.md`;
@@ -90,28 +100,9 @@ let meterStopAtExit = () => null;
  */
 let liveExitFields = () => ({});
 
-// The exit line's key (issue #545), read FIRST, before main and so before any extension loads or any tool can run:
-// the worker wrote it to stdin and closed it, and draining the pipe here is what leaves nothing in it for a tool to
-// read later. Read whatever happens next, so the catch path's line is signed too. No PI_EXIT_AUTH, no read.
-const exitKey = readExitKey(process.env);
-// And at once out of this process's environment (issue #500): every descendant inherits it, and a nested copy of this
-// runner (the stock subagent example spawns one) or any child that reads it as this runner does would drain a stdin
-// that is not its own, or wait on one no one writes.
-// env-internal PI_EXIT_AUTH: written by the worker into the job's closed env map, removed here once read.
-delete process.env.PI_EXIT_AUTH;
-const exitWriter = createExitWriter({
-	key: exitKey.key,
-	// env-internal PI_JOB_ID: set by the worker on the container, so the exit line can name its job.
-	jobId: process.env.PI_JOB_ID,
-	// Synchronously, every byte, to fd 1 (writeAllSync): the SIGTERM path exits the moment the line is written.
-	write: (line) => writeAllSync(1, line),
-	exit: (code) => process.exit(code),
-});
-// SIGTERM is the worker's stop (the job timeout, an operator's cancel, a shutdown): `docker stop` delivers it to the
-// init process, which forwards it here. Without a handler node died at once and no genuine exit line followed, so a
-// line a tool wrote earlier was the last one in the log. Now the real line is written, with what the meter counted,
-// and the runner exits 143 well inside the stop's grace period. A line already written is not written again.
-process.on("SIGTERM", () => exitWriter.terminate({ ...liveExitFields(), ...meteredExitFields() }));
+/** The exit line's key (issue #545) and its one writer, both set in the job runner's block at the end of this file before main runs. */
+let exitKey;
+let exitWriter;
 
 async function main() {
 	// A worker that asked for a signed exit line and did not deliver a usable key: the run goes on with an unsigned
@@ -551,23 +542,49 @@ async function main() {
 	return outcome.code;
 }
 
-// Preflight throws; the agent loop swallows. Both paths are real and cover disjoint failure sets
-// -- see INT-RUNNER-EXIT-CODE-PROTOCOL. Without this catch, a missing API key is an unhandled
-// rejection exiting Node's default 1, which the protocol defines as RETRYABLE, so the queue would
-// pay to retry a job that can never succeed.
-main()
-	.then((code) => {
-		process.exitCode = code;
-	})
-	.catch((error) => {
-		// The meter's fields ride here too once it installed (issue #543); before that there is nothing to report.
-		const thrown = classifyThrow(error);
-		const stopped = meterStopAtExit();
-		// The stop wins the exit reason, and the throw it outranked is named on its own line so the second cause is not
-		// lost: its classified reason and the error's class, never its message (names only).
-		if (stopped !== null) log("throw_after_stop", { reason: thrown.reason, error: typeof error?.name === "string" ? error.name : null });
-		const outcome = stopped ?? thrown;
-		const capped = capExitMessage(outcome);
-		exitWriter.writeExit({ code: capped.code, reason: capped.reason, message: capped.message, ...meteredExitFields() });
-		process.exitCode = outcome.code ?? EXIT_INFRA;
+// The job runner's block: everything this file does at module level, apart from the nested check at the top, and none
+// of it for a nested runner.
+if (!nestedRunner) {
+	// The exit line's key (issue #545), read FIRST, before main and so before any extension loads or any tool can run:
+	// the worker wrote it to stdin and closed it, and draining the pipe here is what leaves nothing in it for a tool to
+	// read later. Read whatever happens next, so the catch path's line is signed too. No PI_EXIT_AUTH, no read.
+	exitKey = readExitKey(process.env);
+	// And at once out of this process's environment (issue #500): every descendant inherits it, and any child that reads
+	// it as this runner does would drain a stdin that is not its own, or wait on one no one writes.
+	// env-internal PI_EXIT_AUTH: written by the worker into the job's closed env map, removed here once read.
+	delete process.env.PI_EXIT_AUTH;
+	exitWriter = createExitWriter({
+		key: exitKey.key,
+		// env-internal PI_JOB_ID: set by the worker on the container, so the exit line can name its job.
+		jobId: process.env.PI_JOB_ID,
+		// Synchronously, every byte, to fd 1 (writeAllSync): the SIGTERM path exits the moment the line is written.
+		write: (line) => writeAllSync(1, line),
+		exit: (code) => process.exit(code),
 	});
+	// SIGTERM is the worker's stop (the job timeout, an operator's cancel, a shutdown): `docker stop` delivers it to the
+	// init process, which forwards it here. Without a handler node died at once and no genuine exit line followed, so a
+	// line a tool wrote earlier was the last one in the log. Now the real line is written, with what the meter counted,
+	// and the runner exits 143 well inside the stop's grace period. A line already written is not written again.
+	process.on("SIGTERM", () => exitWriter.terminate({ ...liveExitFields(), ...meteredExitFields() }));
+
+	// Preflight throws; the agent loop swallows. Both paths are real and cover disjoint failure sets
+	// -- see INT-RUNNER-EXIT-CODE-PROTOCOL. Without this catch, a missing API key is an unhandled
+	// rejection exiting Node's default 1, which the protocol defines as RETRYABLE, so the queue would
+	// pay to retry a job that can never succeed.
+	main()
+		.then((code) => {
+			process.exitCode = code;
+		})
+		.catch((error) => {
+			// The meter's fields ride here too once it installed (issue #543); before that there is nothing to report.
+			const thrown = classifyThrow(error);
+			const stopped = meterStopAtExit();
+			// The stop wins the exit reason, and the throw it outranked is named on its own line so the second cause is not
+			// lost: its classified reason and the error's class, never its message (names only).
+			if (stopped !== null) log("throw_after_stop", { reason: thrown.reason, error: typeof error?.name === "string" ? error.name : null });
+			const outcome = stopped ?? thrown;
+			const capped = capExitMessage(outcome);
+			exitWriter.writeExit({ code: capped.code, reason: capped.reason, message: capped.message, ...meteredExitFields() });
+			process.exitCode = outcome.code ?? EXIT_INFRA;
+		});
+}

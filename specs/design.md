@@ -3032,15 +3032,16 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     provider that reports a negative amount is clamped to 0, which can under-count by that amount; a forged
     smaller SPENT, or a deleted STOP, only weakens a child's pre-call check, because the parent never reads SPENT
     and a child's overshoot lands in its own ledger, charged in full.
-- **The child route (issue #500 part C)**: how a child's meter gets into the child. The parent's fold, STOP
+- **The child route (issue #500 parts C and D)**: how a child's meter gets into the child. The parent's fold, STOP
   writer and detector are not wired yet (part E), so today a child's ledger is written and nothing reads it.
   - **The runner.** Before its own meter installs, and so before any extension loads, `run-job.mjs` opens the
     ledger directory (`openChildLedger`): `mkdtemp` under the OS temp directory, made absolute (a relative `TMPDIR`
     would give each child its own directory), mode 0700. It puts three things in its own environment, which every
     descendant inherits: `PI_DISPATCH_CHILD_LEDGER` (the directory), `PI_DISPATCH_RUNNER_PID` (its pid) and
     `NODE_OPTIONS` with `--import=<child-preload.mjs>` appended (an existing value is kept). A directory that cannot
-    be made logs `child_ledger_unavailable` with a code and deletes both names, so no child is pointed at an
-    inherited directory either. The directory is not removed at exit: the parent's last fold reads it at teardown,
+    be made logs `child_ledger_unavailable` with a code and deletes `PI_DISPATCH_CHILD_LEDGER`, so no child is
+    pointed at an inherited directory either. `PI_DISPATCH_RUNNER_PID` is set either way (part D): it is how a
+    nested runner knows it is one, and with no directory a nested runner exits 2 rather than run the job again. The directory is not removed at exit: the parent's last fold reads it at teardown,
     and it goes with the container. Right after reading the exit key the runner deletes `PI_EXIT_AUTH` from its
     environment, so no descendant drains a stdin.
   - **The preload** (`child-preload.mjs`) runs first in every Node child. It is an ES module loaded with `--import`.
@@ -3055,6 +3056,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
       `--version` and `--export` exit before any extension loads, having spent nothing, so an exit handler ends
       their stub `done` with zeros instead of leaving it `starting`. It does so only when the meter never started:
       any other run that exits before the meter starts keeps its `starting` stub for the parent to judge.
+    - A NESTED RUNNER takes the same route (part D, `nestedRunnerKind`): the realpath of `argv[1]` is this image's
+      `run-job.mjs` and `PI_DISPATCH_RUNNER_PID` names another process. It gets the stub and `-e` first, and no
+      library hook (below).
     - In any other Node process or worker thread where `module.registerHooks` exists, it registers a RESOLVE hook
       (never a load hook). Its fast path is one substring test of the resolved URL. Measured in the image (Node
       22.23, 2 CPUs, median of 15 runs, with no preload / this one): a 2000-module CommonJS require 60.0 / 76.1 ms
@@ -3080,6 +3084,43 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
       with `loadSync is not a function`. A load hook registered from `--import`, even one that only passes through,
       broke `node --import tsx` (tsx's own load chain then fails validation). A resolve hook under `--import` runs
       with all of them: measured with `module.register`, `--loader` and tsx 4 on 22.19 and 23.5, and tested.
+  - **The nested runner (part D).** pi's stock subagent example spawns `process.execPath process.argv[1] <pi
+    args>`, which in a job is `runner-node run-job.mjs`. Before part D that child ran the whole job prompt again
+    (OQ-011 M1), with its own meter, its own exit line on the example's pipe and its own ledger directory. Now the
+    first statement of `run-job.mjs` after its imports is `isNestedRunner(env, pid)` (`child-route.mjs`): nested
+    when `PI_DISPATCH_RUNNER_PID` is set and is not this process's pid. The job's runner starts without that name
+    (the worker deletes it) and sets it to its own pid, so every process below it that carries the name is nested
+    and the job's runner never is. Any value that is not exactly this pid counts as nested, because the doubt
+    belongs on the side that never re-runs the job.
+    - A nested runner runs `runAsPiCli` and nothing else. It reads no exit key, makes no exit writer, installs no
+      SIGTERM handler, never reaches `main()`, reads nothing under `/job` and opens no ledger directory of its own:
+      the job runner's whole module-level work is one block guarded by the check. Its exit codes are pi's, and its
+      signals are handled as in a pi process.
+    - It needs the inherited ledger directory: set, absolute, a directory itself (not a link) and writable. If it is
+      not, one line on stderr naming a code (never the path) and exit code 2, set as the exit code so the line is
+      flushed. pi is never loaded. A child that cannot be metered does not run.
+    - Otherwise it puts `-e child-meter.ts` first (`injectChildMeter`, the subcommand rule included), unless the
+      preload already did, and imports pi's UNBUNDLED `dist/cli.js` (`setupCli()`, then `main(process.argv.slice(2))`).
+      Unbundled, because the runner's own imports already loaded that copy of pi: the CLI runs on the same module
+      graph, one copy of pi in the process, and the extension's bare imports reach the class the sessions use. The
+      bundle would be a second copy of pi beside the first. With the preload missing (a spawner that replaced
+      `NODE_OPTIONS` but kept the ledger name) the injection is made here and the extension still meters the process.
+    - One meter per process. The preload gives a nested runner the pi CLI's route and registers no library hook. With
+      the hook as well, the runner's own import of pi would start a lazy install of the meter before the extension's
+      (measured: a nested `--help` then left its stub `starting`, because the lazy meter writes nothing until a call).
+    - Tested with real processes: a nested run leaves exactly one ledger, its own pid's, in the inherited directory,
+      equal to the fake usage; it reads nothing under `/job` (a probe preload records every fs path); its stdout has
+      no `"event":"exit"`; an rpc session on an open stdin with `PI_EXIT_AUTH=stdin` inherited runs (a key read would
+      drain the prompt); a missing or unset directory exits 2 with one line. The image-contract job runs a nested
+      runner under `runner-node` as an arbitrary uid.
+    - **Rejected**: keeping the runner path for a nested runner and only skipping its prompt (it would still open a
+      ledger directory of its own and point its descendants at it, which the parent never reads, measured in part
+      C's lab); importing the bundle (a second copy of pi in the process); an unsettled top-level `await` to hold the
+      module after pi starts (Node 22 and 23 then exit 13 with a warning when pi's work drains, measured);
+      a nested runner that runs unmetered when the directory is missing (the spend would be invisible).
+    - **Residual**: a spawner that clears the environment (`env: {}`) starts a runner with no
+      `PI_DISPATCH_RUNNER_PID`, which is the job's runner as far as it can tell. It runs the job prompt again with
+      its own meter, as before part D. The parent's detector (part E) sees it as a pi process with no ledger.
   - **The child's meter** (`startChildMeter`, called by the `child-meter.ts` extension at load, or by the library
     hook). It installs on the class the child's sessions use, with the child's own compat copy (`compat`),
     `brake: true`, and `isStopped` reading `STOP`. Its guard is built from the inherited `PI_ALLOWED_MODELS` and
@@ -7445,3 +7486,4 @@ a tunnel.
 | 2026-10-03 | Issue #500, part C, the review's fixes. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the child route bullet: the preload is CommonJS loaded with `--require` (Node older than 18.18 refuses `--import` in `NODE_OPTIONS`), with its measured cost; a fifth entry, the bundle's `cli-runtime.js`; the load hook matches `model-runtime.js` on the URL path, adds the compat import only when that copy's pi-ai exports `./compat`, and records a process that loads the pinned bundle by path as `metered: false`; a library-mode ledger is written before the first call, not at import; a failed ledger write stops the child (the earlier "reads as stale" sentence was false: the fold has no staleness rule); every write to the directory creates its temporary file exclusively under a random name; `--version` and `--export` end their stub `done`; a relative `TMPDIR` gives an absolute directory, and a directory that cannot be made deletes both names; new residuals (`node --permission` children, a child's own policy environment, unmeterable library imports). **Code evidence**: image/runner/src/child-preload.cjs; image/runner/src/usage-meter.mjs -> openChildLedger, writeFileAtomic, startChildMeter; image/runner/test/child-meter.test.mjs, child-meter.integration.test.mjs. |
 | 2026-10-03 | Issue #500, part C, the second review. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the child route bullet: the preload is an ES module loaded with `--import` again, because a hook registered from a `--require` preload broke every child that uses `module.register` or `--loader`; its library hook is a RESOLVE hook that points `model-runtime.js` at a wrapper module, because a load hook, even a pass-through one, broke `node --import tsx`; the new measured cost; a Node older than 18.19 in a job does not start (a residual, also in `docs/costs.md`); the pinned-bundle rule never fires in a worker thread (a metered pi CLI that reads an image ran its resize worker from a bundle chunk and wrote a false `metered: false`); every call is written to the ledger, in flight, before it is dispatched, and a failed write refuses it (the call that used to escape with the failed write no longer can); new residuals: a renamed copy of pi or a symlink under `--preserve-symlinks`, and a foreign pi version recorded `metered: false` at import. The previous row's "CommonJS loaded with `--require`" and "Node older than 18.18" are superseded by this one. **Code evidence**: image/runner/src/child-preload.mjs -> makeLibraryResolveHook, wrapperSource, preload; image/runner/src/usage-meter.mjs -> openChildLedger, startChildMeter; image/runner/test/child-meter.test.mjs, child-meter.integration.test.mjs; docs/costs.md. |
 | 2026-10-03 | Issue #499, part A. **`DES-WATCHERS-CLOSE-WITH-THE-WORKER` AMENDED**, one bullet: the `model-endpoints.json` watch (#503) and the new `projects.json` watch return the same stop handle, join `extraClosers` and read once after arming; the decision is unchanged. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` UNCHANGED, checked**: the pickup gate reads the projects ref once beside the limits snapshot, and no key, slot or lease is derived from a project in this part. **Code evidence**: worker/src/start.mjs -> watchProjectsFile; worker/test/start-wiring.test.mjs. |
+| 2026-10-03 | Issue #500, part D: the nested runner. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the child route bullet gains The nested runner: the first statement of `run-job.mjs` after its imports is `isNestedRunner(env, pid)` (nested when `PI_DISPATCH_RUNNER_PID` is set and is not this pid); a nested runner reads no exit key, writes no exit line, installs no SIGTERM handler, never reaches `main()`, never reads `/job` and opens no ledger directory; with the inherited directory missing or unusable it exits 2 with one stderr line; otherwise it puts `-e child-meter.ts` first (unless the preload did) and imports pi's unbundled `dist/cli.js`, on the module graph the runner already loaded. The preload gives a nested runner the pi CLI's route and no library hook, so one meter per process. `openChildLedger` keeps `PI_DISPATCH_RUNNER_PID` when the directory cannot be made. Rejected alternatives and one residual (an `env: {}` spawner still starts a job runner) recorded. **Code evidence**: image/runner/run-job.mjs; image/runner/src/child-route.mjs -> isNestedRunner, nestedRunnerKind, ledgerDirProblem, runAsPiCli; image/runner/src/child-preload.mjs -> preload; image/runner/src/usage-meter.mjs -> openChildLedger; image/runner/test/child-route.test.mjs, child-meter.integration.test.mjs, compose.test.mjs; .github/workflows/pi-upgrade-check.yml. |

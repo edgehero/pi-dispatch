@@ -78,14 +78,16 @@ test("openChildLedger: a relative TMPDIR still gives an absolute directory", () 
 	}
 });
 
-test("openChildLedger: a directory that cannot be made deletes both names, leaves NODE_OPTIONS alone, and names a code, never a path", () => {
+test("openChildLedger: a directory that cannot be made deletes the directory name, keeps this runner's pid, leaves NODE_OPTIONS alone, and names a code, never a path", () => {
 	const env = { NODE_OPTIONS: "--x", PI_DISPATCH_CHILD_LEDGER: "/inherited", PI_DISPATCH_RUNNER_PID: "9" };
 	const mkdtemp = () => {
 		throw Object.assign(new Error("EROFS: /tmp/secret"), { code: "EROFS" });
 	};
 	const opened = openChildLedger({ env, pid: 1, preloadUrl: "file:///p.mjs", mkdtemp, tmp: () => "/nowhere" });
 	assert.deepEqual(opened, { error: "EROFS" });
-	assert.deepEqual(env, { NODE_OPTIONS: "--x" }, "no child is pointed anywhere, not even at an inherited directory");
+	// No child is pointed anywhere, not even at an inherited directory. The pid stays (issue #500 part D): a nested
+	// runner below this one must still know it is nested, and then stops with exit 2 rather than run the job again.
+	assert.deepEqual(env, { NODE_OPTIONS: "--x", PI_DISPATCH_RUNNER_PID: "1" });
 });
 
 // ── the control files ─────────────────────────────────────────────────────────────────────────────────────
@@ -362,7 +364,7 @@ test("entryKind: the five pinned entries by realpath (the .bin link included); a
 	assert.equal(entryKind(`${ROOT}/dist/bundle/rpc-entry.js`, options), "rpc");
 	assert.equal(entryKind(`${ROOT}/dist/rpc-entry.js`, options), "rpc");
 	assert.equal(entryKind("/workspace/cli.js", options), null, "a file merely named cli.js");
-	assert.equal(entryKind("/app/image/runner/run-job.mjs", options), null, "the nested runner is part D's");
+	assert.equal(entryKind("/app/image/runner/run-job.mjs", options), null, "not an entry: the nested runner is nestedRunnerKind's (child-route.mjs)");
 	assert.equal(entryKind("/gone.js", options), null);
 	assert.equal(entryKind(undefined, options), null);
 	assert.equal(entryKind(`${ROOT}/dist/cli.js`, { ...options, packageDir: () => { throw new Error("no pi"); } }), null);
