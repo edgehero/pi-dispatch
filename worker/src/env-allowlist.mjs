@@ -351,7 +351,7 @@ function resolveEnvName(provider) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null }) {
+export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -514,6 +514,15 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCos
 	// env-internal PI_MAX_COST_MICROS: written into the job's closed env map here, never read from the worker's environment.
 	if (maxCostMicros === null || maxCostMicros === undefined) delete env.PI_MAX_COST_MICROS;
 	else env.PI_MAX_COST_MICROS = String(maxCostMicros);
+
+	// Issue #545: the exit line's key waits on the container's stdin, and this variable tells the runner to read it.
+	// The value names the channel and is never the key: the environment is readable from /proc/1/environ by every
+	// process in the container (measured), which is why the key does not travel here. Settled after both loops like
+	// the cap above, and ONLY for a run the worker actually hands a key, so a runner never blocks on a stdin no one
+	// writes. `=== true`, so only run-container's own boolean asks for it.
+	// env-internal PI_EXIT_AUTH: written into the job's closed env map here, never read from the worker's environment.
+	if (exitAuth === true) env.PI_EXIT_AUTH = "stdin";
+	else delete env.PI_EXIT_AUTH;
 
 	// Forge-backed jobs, and local cron jobs that opted in via run.github. Other local-folder jobs have
 	// no token (CONST-TOKEN-SCOPED-PER-JOB). The mint goes into BOTH of its forge's variables because

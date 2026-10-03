@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { test } from "node:test";
-import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
+import { createHmac } from "node:crypto";
+import { authenticExitLines, buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
 import { MODEL_REF_PATTERN } from "../src/model-ref.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 
@@ -1515,7 +1516,56 @@ test("parseExitCode: the LAST exit line's own integer code, else null; the sink 
 
 test("the runner writes the code it exits with on BOTH exit lines (pinned: the settlement compares it with the container's)", () => {
 	const src = readFileSync(new URL("../../image/runner/run-job.mjs", import.meta.url), "utf8");
-	assert.match(src, /log\("exit", \{ \.\.\.capExitMessage\(outcome\), turns: /, "the decided path spreads the outcome, whose `code` is the exit code");
+	assert.match(src, /exitWriter\.writeExit\(\{ \.\.\.capExitMessage\(outcome\), turns: /, "the decided path spreads the outcome, whose `code` is the exit code");
 	assert.match(src, /\n\treturn outcome\.code;\n\}/, "and returns that same code as the process exit code");
-	assert.match(src, /log\("exit", \{ code: capped\.code, reason: capped\.reason, message: capped\.message, \.\.\.meteredExitFields\(\) \}\)/, "the catch path writes its code too (and, after the meter installed, its counts: issue #543)");
+	assert.match(src, /exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, message: capped\.message, \.\.\.meteredExitFields\(\) \}\)/, "the catch path writes its code too (and, after the meter installed, its counts: issue #543)");
+});
+
+// ---- issue #545: with a key, only the runner's signed exit line is read ----
+
+const EXIT_KEY = "a1".repeat(32);
+/** The runner's signing rule, restated here on purpose: the runner-side test checks the two against each other. */
+const signLine = (obj, key = EXIT_KEY) => {
+	const body = JSON.stringify(obj);
+	return `${body.slice(0, -1)},"auth":"${createHmac("sha256", key).update(body).digest("hex")}"}`;
+};
+const GENUINE = { event: "exit", jobId: "j", code: 0, reason: "completed", turns: 4, tokens: { input: 9, output: 1, total: 10, cost: 1.5, metered: true, calls: 2, unresolved: 0, unpriced: 0 }, session: { resumed: false, reason: "absent" }, context: { tokens: 50, window: 100 } };
+const FORGED_LINE = { event: "exit", jobId: "j", code: 0, reason: "completed", turns: 0, tokens: { input: 0, output: 0, total: 0, cost: 0, metered: true, calls: 0, unresolved: 0, unpriced: 0 } };
+
+async function readKeyed(text, opts) {
+	const sink = makeLogSink({ logsDir: "/logs", enabled: false, fs: makeFakeFs({ stream: makeFakeStream() }) })("gh-1", opts);
+	sink.write(Buffer.from(text));
+	return sink.close();
+}
+
+test("with a key, a forged line AFTER the genuine one is not read: every exit field comes from the signed line", async () => {
+	const out = await readKeyed(`${signLine(GENUINE)}\n${JSON.stringify(FORGED_LINE)}\n`, { exitKey: EXIT_KEY });
+	assert.equal(out.exitAuth, "verified");
+	assert.equal(out.tokens.total, 10);
+	assert.equal(out.tokens.cost, 1.5);
+	assert.equal(out.turns, 4);
+	assert.equal(out.exitLineCode, 0);
+	assert.deepEqual(out.session, { resumed: false, reason: "absent" });
+	assert.deepEqual(out.context, { tokens: 50, window: 100 });
+});
+
+test("with a key, a forged line signed with a made-up key, or no signed line at all, reads as NO exit line (unverified)", async () => {
+	for (const text of [`${JSON.stringify(FORGED_LINE)}\n`, `${signLine(FORGED_LINE, "f".repeat(64))}\n`, "", `${signLine({ ...GENUINE, tokens: { ...GENUINE.tokens } }).replace('"total":10', '"total":1')}\n`]) {
+		const out = await readKeyed(text, { exitKey: EXIT_KEY });
+		assert.deepEqual(out, { turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null, exitAuth: "unverified" }, JSON.stringify(text));
+	}
+});
+
+test("without a key the sink reads the whole tail exactly as before: the last line wins and no exitAuth is reported", async () => {
+	const out = await readKeyed(`${signLine(GENUINE)}\n${JSON.stringify(FORGED_LINE)}\n`);
+	assert.equal("exitAuth" in out, false);
+	assert.equal(out.tokens.total, 0, "today's rule, kept for an image that does not sign (the #542 trust rule still applies downstream)");
+});
+
+test("authenticExitLines keeps every signed line in order and drops the auth key", () => {
+	const second = { ...GENUINE, code: 143, reason: "terminated" };
+	const text = `${signLine(GENUINE)}\nnoise\n${signLine(second)}\n`;
+	assert.equal(authenticExitLines(text, EXIT_KEY), `${JSON.stringify(GENUINE)}\n${JSON.stringify(second)}`);
+	assert.equal(parseExitCode(authenticExitLines(text, EXIT_KEY)), 143);
+	assert.equal(authenticExitLines(text, "b2".repeat(32)), "");
 });

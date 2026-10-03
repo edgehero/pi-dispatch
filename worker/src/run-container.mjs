@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
 import { DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
 import { CONTAINER_HOME } from "./container-spec.mjs";
@@ -61,6 +62,8 @@ export function makeRunContainer({
 	// `log` names a teardown the gate refused, which leaves the job's network for the boot reaper.
 	teardownRuntime = null,
 	log = () => {},
+	// Issue #545: the per-job exit-line key, 32 random bytes as hex. A seam so a test can name the key it verifies with.
+	mintExitKey = () => randomBytes(32).toString("hex"),
 }) {
 	// async so a synchronous throw (e.g. buildContainerEnv on an unconfigured provider) surfaces as
 	// a rejection, uniformly awaitable by the processor and by tests.
@@ -69,8 +72,14 @@ export function makeRunContainer({
 	// builds exactly the argv it always did.
 	// `modelEndpoints` (issue #503) is the pickup's endpoint snapshot, the one the free credential gate decided on, so a
 	// keyless provider's PI_DISPATCH_KEYLESS is written from the same declaration and never from a second read.
-	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null }) {
+	// `exitAuth` (issue #545) is the processor's, off the image preflight: true when the job image declares `exitAuth`, so
+	// its runner reads a key from stdin and signs its exit line with it. Defaults off, so a caller that predates it, and
+	// every image that does not declare it, runs exactly as before and is read exactly as before.
+	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
+		// Minted per attempt, held in this closure and the sink's, and handed to the container on its stdin only: never in
+		// the argv (a host `ps` shows it), never in the env (the container's /proc/1/environ shows it), never logged.
+		const exitKey = exitAuth === true ? mintExitKey() : null;
 		// Issue #341. `user` and `home` travel as a PAIR: a uid with no passwd entry in the image gets `HOME=/` from
 		// Docker and `HOME=/workspace` from Podman (measured), so a `--user` without this HOME is refused here rather
 		// than started. The builder does not insist, because `doctor --live`'s probes run `--user` with no environment.
@@ -134,6 +143,7 @@ export function makeRunContainer({
 			secrets,
 			home: user !== null ? home : null, // issue #341: HOME only beside --user, assigned after the forward loops
 			modelEndpoints, // issue #503: the keyless branch of the credential, from the gate's own snapshot
+			exitAuth: exitKey !== null, // issue #545: PI_EXIT_AUTH=stdin, only when a key is actually handed over below
 		});
 
 		// `-net` on this container's own name (egress.mjs). null when no policy is armed, and docker-run's
@@ -175,6 +185,9 @@ export function makeRunContainer({
 			// Both facts, the kind the preparers branch on AND containment in this job's own directory, so a kind added later
 			// that works on a folder in place fails closed rather than relabelling it.
 			workspaceOwned: job?.kind !== "local" && insideDir(prepared.jobDir, prepared.workspace),
+			// Issue #545: `-i`, so the container's stdin is the pipe the key is written to. Absent otherwise, and the argv is
+			// byte-identical to one built before the signed exit line.
+			...(exitKey !== null ? { extraFlags: ["-i"] } : {}),
 		});
 
 		// REQ-EGRESS-ALLOWLIST. This job's own --internal network, created here rather than at boot because
@@ -191,10 +204,17 @@ export function makeRunContainer({
 
 		// Host-side per-job log sink, teed off `onOutput`. `name` is `pi-job-<jobId>`; the sink
 		// sanitizes internally. No container mount, no env var -- the sink lives on this side only.
-		const sink = openJobLog(name);
+		const sink = openJobLog(name, { exitKey });
 
 		const run = new Promise((resolve, reject) => {
-			const child = spawnFn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+			const child = spawnFn(bin, args, { stdio: [exitKey !== null ? "pipe" : "ignore", "pipe", "pipe"] });
+			if (exitKey !== null) {
+				// Written and closed at once: the runner drains stdin to EOF before anything else runs, so the key is out of
+				// the pipe before any tool exists. A CLI that died first makes this EPIPE, which is the run failing, reported
+				// by `error` or `close` below; the listener only keeps the write's own error from crashing the worker.
+				child.stdin?.on("error", () => {});
+				child.stdin?.end(`${exitKey}\n`);
+			}
 			// A throwing sink.write is swallowed so a misbehaving sink cannot break the tee or hang the run.
 			const tee = (chunk) => {
 				onOutput(chunk);
@@ -226,12 +246,14 @@ export function makeRunContainer({
 				// Issue #501 (PR #542's review, round 3): the LAST exit line's own `code`, which the dollar settlement
 				// compares with the container's real exit code before it trusts that line's cost.
 				let exitLineCode = null;
+				// Issue #545: null (no key issued), "verified" or "unverified" (a key, and no exit line carried it).
+				let exitAuthResult = null;
 				try {
 					// `context = null` is a DEFAULT rather than a plain destructure: an injected sink that
 					// predates the field returns no such key, and `undefined` would then reach the record's
 					// shape where every other absence is spelled `null`.
 					// `exitReason` defaults the same way, for the same reason.
-					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null } = await sink.close());
+					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitAuth: exitAuthResult = null } = await sink.close());
 				} catch {
 					turns = null;
 					tokens = null;
@@ -240,8 +262,23 @@ export function makeRunContainer({
 					context = null;
 					exitReason = null;
 					exitLineCode = null;
+					// The sink could not say, and a key was issued: nothing it returned was verified.
+					exitAuthResult = exitKey !== null ? "unverified" : null;
 				}
-				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode });
+				// A sink that predates the field returned none; with a key issued, that is still nothing verified.
+				if (exitKey !== null && exitAuthResult !== "verified") {
+					exitAuthResult = "unverified";
+					turns = null;
+					tokens = null;
+					session = null;
+					usage = null;
+					context = null;
+					exitReason = null;
+					exitLineCode = null;
+				}
+				// Spread only when a key was issued, so a run without one resolves the very object it always did.
+				const auth = exitKey !== null ? { exitAuth: exitAuthResult } : {};
+				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...auth } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...auth });
 			});
 		});
 

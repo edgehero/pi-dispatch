@@ -808,3 +808,97 @@ test("the sink's exitLineCode reaches the result, so the settlement can compare 
 	assert.equal(result.code, 137);
 	assert.equal(result.exitLineCode, 0, "passed through as read, never adjusted");
 });
+
+// ---- issue #545: the exit line's key, handed over on stdin ----
+
+/** A fake `docker` child with a writable stdin, recording what the worker writes to it and how it was spawned. */
+function fakeSpawnStdin(recorder, exitCode = 0) {
+	return (cmd, args, options) => {
+		recorder.cmd = cmd;
+		recorder.args = args;
+		recorder.stdio = options?.stdio;
+		recorder.stdin = "";
+		const child = new EventEmitter();
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		child.stdin = new EventEmitter();
+		child.stdin.end = (data) => {
+			recorder.stdin += data ?? "";
+			recorder.ended = true;
+		};
+		queueMicrotask(() => child.emit("close", exitCode));
+		return child;
+	};
+}
+
+const MINTED = "c3".repeat(32);
+
+test("exitAuth: a key minted per run goes to stdin with -i and PI_EXIT_AUTH=stdin, never into the argv, and to the sink", { skip }, async () => {
+	const rec = {};
+	const opened = [];
+	const runContainer = mod.makeRunContainer({
+		image: "pi-job:x",
+		hostEnv: HOST,
+		spawnFn: fakeSpawnStdin(rec),
+		mintExitKey: () => MINTED,
+		openJobLog: (name, opts) => (opened.push([name, opts]), { write() {}, close: async () => ({ turns: 3, tokens: { total: 5 }, session: null, usage: null, context: null, exitReason: null, exitLineCode: 0, exitAuth: "verified" }) }),
+	});
+	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal, exitAuth: true });
+	assert.deepEqual(rec.stdio, ["pipe", "pipe", "pipe"]);
+	assert.equal(rec.stdin, `${MINTED}\n`, "the key, then EOF");
+	assert.equal(rec.ended, true);
+	assert.ok(rec.args.includes("-i"), "-i, so the container's stdin is that pipe");
+	assert.ok(rec.args.includes("PI_EXIT_AUTH=stdin"));
+	assert.equal(rec.args.some((a) => a.includes(MINTED)), false, "the key is in no argv token (a host ps would show it) and in no env value");
+	assert.deepEqual(opened, [["j1", { exitKey: MINTED }]]);
+	assert.equal(result.exitAuth, "verified");
+	assert.equal(result.tokens.total, 5);
+});
+
+test("exitAuth: a sink that verified nothing (or predates the field) nulls every exit field: tokens unknown, settlement at the floor", { skip }, async () => {
+	for (const closed of [{ turns: 3, tokens: { total: 0 }, exitLineCode: 0, exitAuth: "unverified" }, { turns: 3, tokens: { total: 0 }, exitLineCode: 0 }]) {
+		const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawnStdin({}), mintExitKey: () => MINTED, openJobLog: () => ({ write() {}, close: async () => closed }) });
+		const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal, exitAuth: true });
+		assert.deepEqual(result, { code: 0, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null, exitAuth: "unverified" }, JSON.stringify(closed));
+	}
+});
+
+test("exitAuth off (an image that does not declare it): stdin ignored, no -i, no PI_EXIT_AUTH, no key minted, result unchanged", { skip }, async () => {
+	const rec = {};
+	let minted = 0;
+	const opened = [];
+	const runContainer = mod.makeRunContainer({
+		image: "pi-job:x",
+		hostEnv: HOST,
+		spawnFn: fakeSpawnStdin(rec, 1),
+		mintExitKey: () => (minted++, MINTED),
+		openJobLog: (name, opts) => (opened.push(opts), { write() {}, close: async () => ({ turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }) }),
+	});
+	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
+	assert.deepEqual(rec.stdio, ["ignore", "pipe", "pipe"]);
+	assert.equal(rec.stdin, "");
+	assert.equal(rec.args.includes("-i"), false);
+	assert.equal(rec.args.some((a) => a.startsWith("PI_EXIT_AUTH=")), false);
+	assert.equal(minted, 0);
+	assert.deepEqual(opened, [{ exitKey: null }]);
+	assert.deepEqual(result, { code: 1, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null });
+});
+
+test("exitAuth: the default key is 32 random bytes of hex, fresh per run", { skip }, async () => {
+	const keys = [];
+	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawnStdin({}), openJobLog: (name, opts) => (keys.push(opts.exitKey), { write() {}, close: async () => ({}) }) });
+	for (let i = 0; i < 2; i++) await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal, exitAuth: true });
+	assert.match(keys[0], /^[0-9a-f]{64}$/);
+	assert.notEqual(keys[0], keys[1]);
+});
+
+test("exitAuth on a podman venue: the same key, -i on the podman argv", { skip }, async () => {
+	const { buildPodmanRunArgs } = await import("../src/docker-run.mjs");
+	const rec = {};
+	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawnStdin(rec), bin: "podman", buildArgs: buildPodmanRunArgs, mintExitKey: () => MINTED });
+	await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal, exitAuth: true, user: "1000:1000", home: "/home/pi" });
+	assert.equal(rec.cmd, "podman");
+	assert.ok(rec.args.includes("-i"));
+	assert.ok(rec.args.includes("--userns=keep-id"));
+	assert.equal(rec.stdin, `${MINTED}\n`);
+});

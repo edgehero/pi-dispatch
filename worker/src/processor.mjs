@@ -9,7 +9,7 @@ import { RESERVED_ENV_NAMES } from "./triggers.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
 import { RUNNER_POLICY_REASONS } from "./run-history.mjs";
 import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
-import { CAPABILITY_GATES } from "./image-preflight.mjs";
+import { CAPABILITY_GATES, EXIT_AUTH_CAPABILITY } from "./image-preflight.mjs";
 import { modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
 import { DOLLAR_CAP_REASON, DOLLAR_KEY_PREFIX, dollarLedgers, dollarSettlement, dollarsRecord, holdPart, meteredMicros, modelDollarSettlement, releaseDollars, reserveDollars, settleDollars } from "./dollar-budget.mjs";
 import { zeroRatedVerdict } from "./model-endpoints.mjs";
@@ -1136,9 +1136,16 @@ export async function runJob(job, deps) {
 		}
 
 		// The user the gate above decided is the user that runs: one answer, never two call sites that agree.
-		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitLineCode = null } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}) });
+		// Issue #545: an image that declares `exitAuth` is handed a per-job key on stdin and signs its exit line with it, and
+		// then only a signed line is read (run-container.mjs, run-history.mjs `authenticExitLines`). An image that does not
+		// declare it is read as before, under the #542 trust rule below alone.
+		const exitAuth = (img.capabilities ?? []).includes(EXIT_AUTH_CAPABILITY);
+		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, exitLineCode = null, exitAuth: exitAuthResult = null } = await runContainer({ job: containerJob, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}) });
 		containerRan = true;
-		log("container_exit", { exitCode: code, aborted, ...(detached === true ? { detached: true } : {}) });
+		// `exitAuth: "unverified"` is a run whose image signs its exit line and no signed line was found: the runner died
+		// before writing one, or a line was forged or taken off the pipe. Its tokens read as unknown and its dollars settle
+		// at the floor, the same as a container that wrote no exit line at all.
+		log("container_exit", { exitCode: code, aborted, ...(detached === true ? { detached: true } : {}), ...(exitAuthResult !== null ? { exitAuth: exitAuthResult } : {}) });
 
 		// Record token spend post-run (the check-AFTER half of the lagging token cap). The container ran,
 		// so it spent real tokens on EVERY path that reaches here -- abort, completed, policy, AND the infra

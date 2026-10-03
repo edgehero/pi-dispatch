@@ -964,8 +964,9 @@ test("the reserved-name list triggers.mjs refuses covers every STATIC name this 
 	// The drift guard. reserved-env.mjs is a hand-written list in a module with no imports (so the shared
 	// validator and the admin bundle can have it for free), and a variable added to the closed map without
 	// being added there would open a hole a trigger could drive through. This is the test that closes it.
-	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", excludeTools: ["bash"], allowGlobalExtensions: false, home: "/home/pi" });
+	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", excludeTools: ["bash"], allowGlobalExtensions: false, home: "/home/pi", exitAuth: true });
 	assert.equal(env.HOME, "/home/pi", "the drift check must see HOME, or a reservation it needs would go unchecked");
+	assert.equal(env.PI_EXIT_AUTH, "stdin", "the drift check must see PI_EXIT_AUTH too (issue #545)");
 	const dynamic = new Set(["ANTHROPIC_API_KEY", "GITHUB_TOKEN", "GH_TOKEN"]); // provider + mint: deployment state, refused pre-spend instead
 	for (const name of Object.keys(env)) {
 		if (dynamic.has(name)) continue;
@@ -1284,4 +1285,14 @@ test("keyless: PI_DISPATCH_KEYLESS is settled after the forward and secrets loop
 	assert.equal(keyless.PI_DISPATCH_KEYLESS, "keyless");
 	const keyed = buildContainerEnv({ provider: "anthropic", model: "m", maxTurns: 5, jobId: "j", hostEnv: { ...HOST, PI_DISPATCH_KEYLESS: "forwarded" }, forwardEnv: ["PI_DISPATCH_KEYLESS"], secrets: { PI_DISPATCH_KEYLESS: "secret" } });
 	assert.equal("PI_DISPATCH_KEYLESS" in keyed, false);
+});
+
+test("PI_EXIT_AUTH names the stdin channel only when run-container hands a key over, and nothing else can set it (issue #545)", { skip }, () => {
+	assert.equal(mod.buildContainerEnv({ ...secretsBase, exitAuth: true }).PI_EXIT_AUTH, "stdin");
+	assert.equal("PI_EXIT_AUTH" in mod.buildContainerEnv({ ...secretsBase }), false, "absent by default, so a runner never blocks on a stdin no one writes");
+	assert.equal("PI_EXIT_AUTH" in mod.buildContainerEnv({ ...secretsBase, exitAuth: "yes" }), false, "only the boolean true asks for it");
+	// A secret or a forwarded variable of that name (each refused upstream) is still overruled by the backstop.
+	assert.equal("PI_EXIT_AUTH" in mod.buildContainerEnv({ ...secretsBase, secrets: { PI_EXIT_AUTH: "stdin" } }), false);
+	assert.equal(mod.buildContainerEnv({ ...secretsBase, secrets: { PI_EXIT_AUTH: "off" }, exitAuth: true }).PI_EXIT_AUTH, "stdin");
+	assert.ok(CONTAINER_ENV_NAMES.has("PI_EXIT_AUTH"), "reserved, so run.secrets cannot bind it");
 });

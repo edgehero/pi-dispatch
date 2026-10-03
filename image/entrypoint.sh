@@ -15,4 +15,6 @@
 # "bad interpreter" inside the container: a confusing error with a boring cause.
 set -eu
 
-exec node /app/image/runner/run-job.mjs
+# The exec-only node (issue #545, image/Dockerfile): the runner holds the exit line's key, and a process started from a
+# binary its user cannot read is closed to that user's /proc reads. Plain `node` here would reopen them.
+exec /opt/pi-dispatch/runner-node /app/image/runner/run-job.mjs

@@ -560,3 +560,42 @@ test("makeProcessor: a job the operator cancelled while it was failing records i
 	assert.deepEqual(result.dollars, { reservedMicros: 2 * USD, settledMicros: 2 * USD, basis: "floor", modelBasis: null });
 	assert.deepEqual(seen.records.at(-1).result.dollars, result.dollars);
 });
+
+// ---- issue #545: an image that signs its exit line ----
+
+test("an image declaring exitAuth gets a key (runContainer exitAuth: true); one that does not, runs as before", async () => {
+	for (const [capabilities, want] of [[["costCap", "exitAuth"], true], [["costCap"], undefined], [undefined, undefined]]) {
+		let seen = "unset";
+		const { deps: d, logs } = deps({
+			imagePreflight: async () => ({ ok: true, image: "pi-job:x", ...(capabilities ? { capabilities } : {}) }),
+			runContainer: async (args) => ((seen = args.exitAuth), { code: 0, aborted: false, exitLineCode: 0, tokens: COMPLETE_TOKENS, usage: LEDGER, ...(want ? { exitAuth: "verified" } : {}) }),
+		});
+		const r = await runJob(job, d);
+		assert.equal(seen, want, JSON.stringify(capabilities));
+		assert.equal(r.dollars.basis, "metered");
+		const exit = logs.find(([event]) => event === "container_exit")[1];
+		assert.equal(exit.exitAuth, want ? "verified" : undefined);
+	}
+});
+
+test("an unverified run (a key issued, no signed line) settles at the FLOOR and records tokens as unknown", async () => {
+	const { deps: d, redis, logs } = deps({
+		imagePreflight: async () => ({ ok: true, image: "pi-job:x", capabilities: ["exitAuth"] }),
+		runContainer: async () => ({ code: 0, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null, exitAuth: "unverified" }),
+	});
+	const r = await runJob(job, d);
+	assert.equal(r.dollars.basis, "floor");
+	assert.equal(r.tokens, null);
+	assert.equal(redis.store.get(DAY), 2 * USD);
+	assert.equal(logs.find(([event]) => event === "container_exit")[1].exitAuth, "unverified");
+});
+
+test("a verified line still meets the #542 rule: a stopped container's signed line settles at the floor", async () => {
+	const { deps: d } = deps({
+		imagePreflight: async () => ({ ok: true, image: "pi-job:x", capabilities: ["exitAuth"] }),
+		runContainer: async () => ({ code: 143, aborted: true, exitLineCode: 143, tokens: COMPLETE_TOKENS, usage: LEDGER, exitAuth: "verified" }),
+	});
+	const r = await runJob(job, d);
+	assert.equal(r.dollars.basis, "floor");
+	assert.equal(r.tokens.total, 15, "the token record keeps the runner's real count, which the SIGTERM handler now writes");
+});
