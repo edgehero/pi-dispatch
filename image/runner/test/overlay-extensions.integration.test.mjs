@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { createJobModelRuntime } from "../src/model-runtime.mjs";
 import { createUsageMeter, installProcessUsageMeter } from "../src/usage-meter.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { trackPiRefreshes } from "./helpers/track-pi-refreshes.mjs";
 
 /**
  * Issue #544, end to end: a loose `extensions/foo.js` in the operator overlay loads in a job and acts during
@@ -24,6 +25,7 @@ let loaderModule;
 let importError;
 try {
 	pi = await import("@earendil-works/pi-coding-agent");
+	trackPiRefreshes(pi.ModelRuntime);
 	loaderModule = await import("../src/loader.mjs");
 } catch (error) {
 	importError = error;
