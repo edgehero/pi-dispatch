@@ -46,7 +46,8 @@ Pause windows are shared correctly too, and for a reason worth knowing: every wi
 
 Each worker publishes one small row about itself, refreshed every fifteen seconds and expiring after
 ninety: its name, version, the image it runs, that image's digest, its timezone, its live concurrency,
-a fingerprint of the cron triggers it can see, and the names of the secret and wait profiles it declares.
+a fingerprint of the cron triggers it can see, a fingerprint of its dollar caps, and the names of the secret
+and wait profiles it declares.
 Nothing in that row is an instruction to anybody. It is how a host is *seen*.
 
 Profile **names** only, never the resolver paths or check scripts behind them. A path is operator topology
@@ -229,8 +230,21 @@ strays and kill a running job.
 ## What the panel and doctor show you
 
 `pi-dispatch doctor` names the fleet, warns when peers exist and nobody declared a name, reports a job
-image whose digest differs from the others, explains a timezone disagreement, and flags a host row that
-has gone stale. Every one of those lines is absent on a single-host deployment.
+image whose digest differs from the others, explains a timezone disagreement, flags a host row that
+has gone stale, and names a host whose dollar caps differ from this one's. Every one of those lines is
+absent on a single-host deployment.
+
+**Dollar caps are per host, the dollar counters are shared.** Each host reads `PI_MAX_COST_USD`, the three
+`PI_*_COST_USD` windows, the overlay's dollar keys, the scoped-limits file's dollar rows and `PI_ALLOWED_MODELS`
+(which model rows a job without its own list reserves in) itself, so two
+hosts can judge one counter against two caps, and the one with the larger cap admits a job the other would
+refuse. Each host publishes a fingerprint of those values (numbers and hashes only, never a repo name or
+folder), and doctor warns when a peer's differs (naming the per-job cap, the windows, the scoped-limits rows and
+`PI_ALLOWED_MODELS` as what to align), or when a peer publishes none while dollar caps are in use. A dollar counter
+on the shared Valkey counts as in use, best effort: an older capped host with a dollar window leaves counters, but
+a host with only a per-job cap leaves none.
+It never refuses a job over it. Set the same values on every host. An `.env` change needs a restart; an
+overlay or scoped-limits edit shows within fifteen seconds.
 
 What it does **not** check yet: whether two hosts are sharing a directory they should not be. That one is
 on you.
@@ -261,6 +275,7 @@ produce different digests legitimately. It means "check", not "broken".
 | `host:live` | the set of live worker names |
 | `host:h:<name>` | one host's own description, refreshed every 15s, expiring after 90s |
 | `host:h:<name>` field `caps` | the secret and wait profile NAMES this host declares, comma separated |
+| `host:h:<name>` field `fpUsd` | a fingerprint of this host's dollar caps, scoped-limits dollar rows and `PI_ALLOWED_MODELS` model rows |
 | `wait:check:<i>` | the fleet-wide wait-check slots |
 | `slot:s:<hash>:<i>` | the fleet-wide slots for a limited forge scope |
 | `runs:index` | the merged run history's index, newest first |

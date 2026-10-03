@@ -1064,7 +1064,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   the cap; given two sessions calling at once, then each is judged against the other's bound while it is in
   flight; given `session.compact()` as the call that would pass the cap, then it is refused the same way; given
   a cap of `0`, then a zero-rated model runs and a priced one is refused before its first call; given no cap,
-  then no guard is installed and the exit line carries none of the cost counters.
+  then no guard is installed and the exit line carries none of the cost counters. Given a per-job cap below one full-output
+  call of a job's main model or of a model on its list (the model's output limit at its output rate, plus the
+  runner's 8,192-token overhead and a 4,096-byte first request at its dearest input rate, times the runner's
+  service-tier multiplier, a lower bound of the runner's own bound), then `pi-dispatch doctor` warns, naming the model, the amount and the cap; with the default
+  model and a $1 cap it says $1.00608 (issue #501's open question).
 
 ## REQ-COST-ANALYTICS
 
@@ -1546,7 +1550,16 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-OUTBOX-CONTRACT`, `INT-MODEL-ENDPOINTS-FILE-CONTRACT`,
   `INT-RUNNER-EXIT-CODE-PROTOCOL`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`
 - **Acceptance**: Given a malformed, empty, oversized or duplicate-carrying `run.models`, or one that omits
-  the trigger's own `run.provider`/`run.model`, the file refuses at load in every service. Given a job whose
+  the trigger's own `run.provider`/`run.model`, the file refuses at load in every service. Given a trigger
+  of any kind, cron included, whose own model or listed model the worker's gate would refuse (unknown, or a
+  listed model whose fallbacks are unlisted), then `pi-dispatch doctor` warns, naming the trigger, the model and
+  the reason; given the deployment's own default model or a `PI_ALLOWED_MODELS` entry the gate would refuse, then
+  doctor warns once, naming the settings, since every job whose trigger names none is refused. Given a listed provider other than the main one for which neither the trigger's `run.secrets` nor
+  `PI_FORWARD_ENV` (named and set) carries a variable pi reads for it, or that its overlay `apiKey` references,
+  then doctor warns, naming the provider and the variables it looked for. Given an overlay `models.json`, then
+  doctor asks pi's own loader (the pi-coding-agent installed beside the worker, and only when it is the worker's
+  pinned pi; said when there is none or it is another version) whether it loads the file and which declared models it has, and warns on any answer the worker's
+  catalog does not share. Given a job whose
   main model or a listed model is unknown, the job is refused `model-unknown` with no token minted, no clone
   and no reservation. Given `PI_ALLOWED_MODELS` without the deployment's default model, or a
   `dispatch_set model` that moves a trigger's default off its list, the job is refused `model-not-allowed`
@@ -2854,6 +2867,13 @@ instead of drifting.
   first beat is not awaited.
 - Given the whole `host:*` keyspace is deleted while the fleet runs, then every host behaves exactly as it
   did before the keyspace existed.
+- Given two hosts on one Valkey whose dollar caps differ (the four dollar settings as a job resolves them, or
+  the scoped-limits file's dollar rows), when `pi-dispatch doctor` runs on either, then it warns and names the
+  other host, never a cap; given a peer that publishes no dollar fingerprint while dollar caps are in use on
+  this host or a peer, or while a dollar counter is found on the Valkey (best effort: an old capped host leaves its
+  counters, a host with only a per-job cap leaves none), then doctor names it. Two hosts whose `PI_ALLOWED_MODELS` makes jobs without their own list reserve in different
+  model rows differ too. The fingerprint carries numbers and counter hashes only
+  (`INT-HOST-REGISTRY-CONTRACT`), and nothing refuses on it.
 
 - **Host-affine work goes to a host queue** (`pi-jobs@<name>`), decided by whoever ENQUEUES it rather
   than by whoever pops it. A cron trigger's folder, a local job's folder and a chained child's working
@@ -2886,6 +2906,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-03 | Issue #501 part 6 and the doctor recommendations of #501 and #502. **`REQ-MULTI-HOST-COORDINATION` AMENDED**, the Acceptance: two hosts whose dollar caps (or whose `PI_ALLOWED_MODELS` choice of model rows) differ are named by doctor, and so is a peer publishing no dollar fingerprint while dollar caps are in use, a dollar counter on the Valkey counting as in use, best effort; the fingerprint is numbers and counter hashes only and nothing refuses on it. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**, the cost-cap clauses (d): doctor warns when the per-job cap is below one full-output call of the main or a listed model, a stated lower bound of the runner's own bound that carries its service-tier multiplier ($1.00608 for the default model). **`REQ-MODEL-POLICY` AMENDED**, the Acceptance: doctor names a trigger of any kind whose model the worker's gate would refuse, and the deployment's own default model or `PI_ALLOWED_MODELS` entry, a listed non-main provider with no credential source, and any disagreement between pi's own loader and the worker's catalog on the overlay `models.json` (the pinned pi beside the worker, compared only at the pin, in doctor's process, not the job image: the two share one lockfile, and a probe container would need the canary's venue, user and SELinux handling on every run). **`REQ-SPEND-CAPS-MULTI-WINDOW` and `REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: no window moves, and every new doctor line is a warning that never fails a run. **Code evidence**: worker/src/dollar-fingerprint.mjs; worker/src/doctor.mjs -> fleetDollarChecks, costCapFitChecks, unknownModelChecks, listedProviderCredentialChecks, overlayLoaderParityChecks; worker/src/pi-model-loader.mjs -> loadPiModelLoader. |
 | 2026-10-03 | Issue #556. **`REQ-MODEL-POLICY` AMENDED**, Scope and Acceptance: a `models.json` that is a named pipe, a socket or a device refuses every job `model-unknown` pre-spend (`overlay-not-a-file`). It is judged from the reader's `lstat` and never opened, so a pipe with no writer blocks neither the worker's read on every pickup nor `doctor`, which says ✗. A folder keeps its own refusal (`overlay-is-a-directory`). **Code evidence**: worker/src/model-endpoints.mjs -> readOverlayModels; worker/src/model-catalog.mjs -> checkModelsKnown; worker/src/doctor.mjs; worker/test/model-endpoints.test.mjs; worker/test/model-catalog.test.mjs; worker/test/doctor.test.mjs. |
 | 2026-10-03 | Issue #552, with PR #553's review rounds 1 to 3 folded in. **`REQ-MODEL-POLICY` AMENDED**, Scope and Acceptance. An overlay `models.json` the worker cannot read was a transient read, so a builtin job with no list ran while the job, reading the file through the same read-only mount, loaded none of it (the existence check in image/runner/run-job.mjs, or pi's own read, fails) and sent a builtin provider the file routes to its public endpoint. Now only EIO, EAGAIN, EMFILE and ENFILE are transient, and they retry EVERY job once, a builtin one with no list included, then fail it; EACCES, EPERM and every errno not listed refuse every job `model-unknown` (`overlay-unreadable`) pre-spend, and `doctor` says ✗. Measured in the job image: the mount does not resolve a `models.json` link the way the host does (an absolute target, one outside the folder, a trailing slash, a `..` through a file), so after two rounds of following links as the mount does, the simpler rule: a `models.json` that is a link of any kind, dangling included, refuses every job (`overlay-link`); the folder may be a link. A missing file, or a folder path that loops or runs through a file, stays no overlay, as in the job. Upgrade: a `models.json` that is a symlink is now refused; copy the file in. **`REQ-GLOBAL-PI-OVERLAY` AMENDED**, the Statement: `PI_GLOBAL_PI_DIR` must be an absolute path, and a relative one refuses the worker's boot, since it is resolved differently by the worker and the container runtime, and `pi-dispatch import-pi` prints the absolute path to set. **Code evidence**: worker/src/model-catalog.mjs -> checkModelsKnown, isTransientOverlayRead; worker/src/model-endpoints.mjs -> readOverlayModels; worker/src/config.mjs -> resolveGlobalPiDir; worker/src/import-pi.mjs; worker/src/doctor.mjs; worker/test/model-catalog.test.mjs; worker/test/model-endpoints.test.mjs; worker/test/models-json.test.mjs; worker/test/doctor.test.mjs; worker/test/config.test.mjs; worker/test/import-pi.test.mjs. |
 | 2026-10-03 | Issue #544. **`REQ-GLOBAL-PI-OVERLAY` AMENDED**, Acceptance: a loose `extensions/foo.js` in the overlay loads in a job, and a failed load is logged as `extension_load_failed` by its path inside `extensions/`. Before, the runner handed pi the folder, which pi read as one extension at the folder; it failed to import, and nothing read the error, so only `extensions/index.js` ever loaded. The overlay's entries are now listed by pi's own rule for `~/.pi/agent/extensions`. `REQ-AI-TRIGGERED-RUNS` **UNCHANGED, checked**: an identical run in the same minute still dedups; a run that differs only in its model fields is no longer identical (`DES-CLI-TRIGGER-FOR-LOCAL`). **Code evidence**: image/runner/src/loader.mjs -> discoverExtensionEntries, reportExtensionLoadErrors; worker/src/job-id.mjs -> localJobId. |

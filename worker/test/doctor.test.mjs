@@ -19,6 +19,8 @@ import { OBSERVATION_FIX } from "../src/backends.mjs";
 import { PODMAN_JOB_USER_FIX } from "../src/backend-podman.mjs";
 import { loadConfig, underOsTempDir } from "../src/config.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { usdFingerprint } from "../src/dollar-fingerprint.mjs";
+import { parseScopedLimits } from "../src/scoped-limits.mjs";
 import { quotedShown } from "../src/backend-local.mjs";
 
 // env-allowlist imports @earendil-works/pi-ai, which needs node >=22.19.0 and installed deps. doctor.mjs
@@ -3459,6 +3461,8 @@ const collectSeams = (plan, extra = {}) => ({
 	// Issue #57: no fleet unless a test says so, which is what keeps every existing doctor assertion --
 	// and a single-host deployment's real output -- byte-identical.
 	readHosts: async () => ({ hosts: [] }),
+	// PR #551's review: never the default, which opens a Valkey connection to scan for dollar counters.
+	dollarKeysExist: async () => false,
 	fileExists: existsSync,
 	nodeVersion: "20.10.0",
 	...extra,
@@ -5034,6 +5038,117 @@ test("an unreadable registry is SAID, never silently absent", async () => {
 	const c = checks.find((c) => /could not read the host registry/.test(c.label));
 	assert.ok(c);
 	assert.equal(c.ok, true, "not knowing is not a fault of this host");
+});
+
+// ── issue #501 part 6: the fleet's dollar caps, and the round's doctor lines about models ───────────────
+
+// A settings file that does not exist, so no test reads the developer's own overlay.
+const noOverlay = () => join(tempDir("pi-fp-usd-"), "settings.json");
+
+test("doctor names a peer whose dollar caps differ from this host's, and is silent when they agree", async () => {
+	const env = { VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1", PI_MAX_COST_USD: "2", PI_DAILY_COST_USD: "20", PI_SETTINGS_FILE: noOverlay() };
+	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+	const same = usdFingerprint({ maxCostUsd: "2", dailyCostUsd: "20" }, []);
+	const other = usdFingerprint({ maxCostUsd: "5", dailyCostUsd: "20" }, []);
+	const differ = await collectChecks(env, fleetSeams([{ name: "mini2", tz, fpUsd: other }]));
+	const c = differ.find((x) => /^Hosts disagree about the dollar caps/.test(x.label));
+	assert.ok(c, "the disagreement is named");
+	assert.equal(c.warn, true);
+	assert.ok(c.label.includes("mini2"));
+	const agree = await collectChecks(env, fleetSeams([{ name: "mini2", tz, fpUsd: same }]));
+	assert.ok(!agree.some((x) => /dollar caps/.test(x.label)), "agreement is silent: doctor computes this host's fingerprint as the worker does");
+	const old = await collectChecks(env, fleetSeams([{ name: "mini2", tz }]));
+	assert.ok(old.some((x) => /^mini2 publishes no fingerprint of its dollar caps/.test(x.label)), "a peer from before fpUsd is named while dollars are in use");
+	const quiet = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1", PI_SETTINGS_FILE: noOverlay() }, fleetSeams([{ name: "mini2", tz }]));
+	assert.ok(!quiet.some((x) => /dollar caps/.test(x.label)), "no dollar setting anywhere: nothing new on upgrade");
+	const counters = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1", PI_SETTINGS_FILE: noOverlay() }, fleetSeams([{ name: "mini2", tz }], { dollarKeysExist: async () => true }));
+	assert.ok(counters.some((x) => /^mini2 publishes no fingerprint of its dollar caps.*dollar counters exist on this Valkey/.test(x.label)), "an old capped host beside an uncapped one: its counters show it");
+});
+
+test("doctor's fingerprint covers the scoped-limits dollar rows and the overlay, as the worker resolves them", async () => {
+	const dir = tempDir("pi-fp-usd-rows-");
+	const limits = join(dir, "scoped-limits.json");
+	writeFileSync(limits, JSON.stringify({ version: 2, limits: [{ scope: "acme/web", dayUsd: "5" }] }));
+	const settings = join(dir, "settings.json");
+	writeFileSync(settings, JSON.stringify({ weeklyCostUsd: "40" }));
+	const env = { VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1", PI_MAX_COST_USD: "2", PI_SCOPED_LIMITS_FILE: limits, PI_SETTINGS_FILE: settings };
+	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+	const rows = parseScopedLimits(readFileSync(limits, "utf8"), limits);
+	const worker = usdFingerprint({ maxCostUsd: "2", weeklyCostUsd: "40" }, rows);
+	const agree = await collectChecks(env, fleetSeams([{ name: "mini2", tz, fpUsd: worker }]));
+	assert.ok(!agree.some((x) => /dollar caps/.test(x.label)), "the same rows and overlay: one fingerprint");
+	const noRows = await collectChecks(env, fleetSeams([{ name: "mini2", tz, fpUsd: usdFingerprint({ maxCostUsd: "2", weeklyCostUsd: "40" }, []) }]));
+	assert.ok(noRows.some((x) => /^Hosts disagree about the dollar caps/.test(x.label)), "a peer without the row disagrees");
+	// PR #551's review: the env list picks the model rows a job without its own list reserves in.
+	const modelRows = join(dir, "model-limits.json");
+	writeFileSync(modelRows, JSON.stringify({ version: 2, limits: [{ scope: "model:openai/gpt-4o", dayUsd: "5" }] }));
+	const mRows = parseScopedLimits(readFileSync(modelRows, "utf8"), modelRows);
+	const listed = { ...env, PI_SCOPED_LIMITS_FILE: modelRows, PI_ALLOWED_MODELS: "anthropic/claude-sonnet-4-5-20250929" };
+	const sameList = await collectChecks(listed, fleetSeams([{ name: "mini2", tz, fpUsd: usdFingerprint({ maxCostUsd: "2", weeklyCostUsd: "40" }, mRows, ["anthropic/claude-sonnet-4-5-20250929"]) }]));
+	assert.ok(!sameList.some((x) => /^Hosts disagree about the dollar caps/.test(x.label)), "the same env list agrees");
+	const noList = await collectChecks(listed, fleetSeams([{ name: "mini2", tz, fpUsd: usdFingerprint({ maxCostUsd: "2", weeklyCostUsd: "40" }, mRows, null) }]));
+	assert.ok(noList.some((x) => /^Hosts disagree about the dollar caps/.test(x.label)), "a peer with no list reserves in the model row, this host does not");
+});
+
+test("doctor names, end to end: a cron trigger's unknown model, a cap below the default model's first call, a listed provider with no key", async () => {
+	const path = triggersFile(undefined, undefined, { provider: "openai", model: "gpt-9-turbo" });
+	const listed = join(tempDir("pi-model-lines-"), "triggers.json");
+	writeFileSync(
+		listed,
+		JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:x"] }, run: { kind: "github", flow: "fix", provider: "anthropic", model: "claude-sonnet-4-5-20250929", models: ["anthropic/claude-sonnet-4-5-20250929", "openai/gpt-4o"] } }] }),
+	);
+	const env = { VALKEY_URL: "redis://x", PI_TRIGGERS_FILE: path, PI_MAX_COST_USD: "1", PI_SETTINGS_FILE: noOverlay() };
+	const checks = await collectChecks(env, fleetSeams([]));
+	assert.ok(checks.some((c) => c.warn === true && /^1 trigger\(s\) name a model this deployment does not know.*cron "nightly": openai\/gpt-9-turbo \(not-in-catalog\)/.test(c.label)), "cron is judged");
+	assert.ok(checks.some((c) => c.warn === true && /^The per-job cost cap is below one full-output call.*anthropic\/claude-sonnet-4-5-20250929 \(the main model, so such a job makes no call at all\) needs at least \$1\.00608 a call under a \$1\.00 cap \(the deployment default\)/.test(c.label)));
+	const second = await collectChecks({ ...env, PI_TRIGGERS_FILE: listed, PI_MAX_COST_USD: "50" }, fleetSeams([]));
+	assert.ok(second.some((c) => c.warn === true && /no credential this deployment hands its jobs.*openai \(label trigger #0; looked for OPENAI_API_KEY\)/.test(c.label)));
+	assert.ok(!second.some((c) => /per-job cost cap is below/.test(c.label)), "a $50 cap fits");
+	const forwarded = await collectChecks({ ...env, PI_TRIGGERS_FILE: listed, PI_MAX_COST_USD: "50", PI_FORWARD_ENV: "OPENAI_API_KEY", OPENAI_API_KEY: "sk-o" }, fleetSeams([]));
+	assert.ok(!forwarded.some((c) => /no credential this deployment hands its jobs/.test(c.label)), "forwarded and set");
+});
+
+test("an overlay the reader refuses before reading it (a link, an unreadable file, a pipe) is never compared, and never blamed on .env (PR #553)", async () => {
+	const disagrees = async () => ({ version: "0.99.1", pinned: "0.99.1", read: async () => ({ loads: false, has: () => false }) });
+	const doc = JSON.stringify({ providers: { ollama: { baseUrl: "http://gpu:11434/v1", api: "openai-completions", models: [{ id: "qwen" }] } } });
+	const linked = tempDir("pi-parity-link-");
+	writeFileSync(join(linked, "real.json"), doc);
+	symlinkSync(join(linked, "real.json"), join(linked, "models.json"));
+	const viaLink = await collectChecks({ VALKEY_URL: "redis://x", PI_GLOBAL_PI_DIR: linked, PI_SETTINGS_FILE: noOverlay() }, fleetSeams([], { piModelLoader: disagrees }));
+	assert.ok(viaLink.some((c) => /overlay-link/.test(c.label)), "the reader's own line is there");
+	assert.ok(!viaLink.some((c) => /own loader/.test(c.label)), "a link is not compared: the job never loads it");
+	assert.ok(!viaLink.some((c) => /^The deployment's default model/.test(c.label)), "and the default model is not blamed");
+	const plain = tempDir("pi-parity-eacces-");
+	writeFileSync(join(plain, "models.json"), doc);
+	const eacces = () => {
+		throw Object.assign(new Error("denied"), { code: "EACCES" });
+	};
+	const unreadable = await collectChecks({ VALKEY_URL: "redis://x", PI_GLOBAL_PI_DIR: plain, PI_SETTINGS_FILE: noOverlay() }, fleetSeams([], { piModelLoader: disagrees, readOverlayFile: eacces }));
+	assert.ok(unreadable.some((c) => /overlay-unreadable/.test(c.label)));
+	assert.ok(!unreadable.some((c) => /own loader/.test(c.label)), "an unreadable file is not compared");
+	assert.ok(!unreadable.some((c) => /^The deployment's default model/.test(c.label)));
+	// PR #557: a named pipe is refused unopened (overlay-not-a-file), and is not compared either.
+	const fifoDir = tempDir("pi-parity-fifo-");
+	execFileSync("mkfifo", [join(fifoDir, "models.json")]);
+	const viaFifo = await collectChecks({ VALKEY_URL: "redis://x", PI_GLOBAL_PI_DIR: fifoDir, PI_SETTINGS_FILE: noOverlay() }, fleetSeams([], { piModelLoader: disagrees }));
+	assert.ok(viaFifo.some((c) => /overlay-not-a-file/.test(c.label)), "the reader's own line is there");
+	assert.ok(!viaFifo.some((c) => /own loader/.test(c.label)), "a pipe is not compared, and never opened");
+	assert.ok(!viaFifo.some((c) => /^The deployment's default model/.test(c.label)));
+	writeFileSync(join(plain, "models.json"), "{ not json");
+	const unparseable = await collectChecks({ VALKEY_URL: "redis://x", PI_GLOBAL_PI_DIR: plain, PI_SETTINGS_FILE: noOverlay() }, fleetSeams([], { piModelLoader: async () => ({ version: "0.99.1", pinned: "0.99.1", read: async () => ({ loads: false, has: () => false }) }) }));
+	assert.ok(unparseable.some((c) => c.ok === true && /reads the same in pi 0\.99\.1's own loader/.test(c.label)), "a file refused for its text is still compared");
+});
+
+test("doctor compares the overlay models.json with pi's own loader through its seam, and says when it cannot", async () => {
+	const dir = tempDir("pi-parity-wiring-");
+	writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: { ollama: { baseUrl: "http://gpu:11434/v1", api: "openai-completions", models: [{ id: "qwen" }] } } }));
+	const env = { VALKEY_URL: "redis://x", PI_GLOBAL_PI_DIR: dir, PI_SETTINGS_FILE: noOverlay() };
+	const lacking = await collectChecks(env, fleetSeams([], { piModelLoader: async () => ({ version: "0.99.1", pinned: "0.99.1", read: async () => ({ loads: true, has: () => false }) }) }));
+	assert.ok(lacking.some((c) => c.warn === true && /^pi 0\.99\.1's own loader and the worker's model catalog disagree.*ollama\/qwen: pi lacks it, the worker calls it known/.test(c.label)));
+	const absent = await collectChecks(env, fleetSeams([], { piModelLoader: async () => null }));
+	assert.ok(absent.some((c) => c.ok === true && /not compared with pi's own loader/.test(c.label)));
+	const noCatalog = await collectChecks(env, fleetSeams([], { modelCatalog: async () => null, piModelLoader: async () => null }));
+	assert.ok(!noCatalog.some((c) => /pi's own loader/.test(c.label)), "without the worker's catalog there is nothing to compare against");
 });
 
 // ── issue #290: the durable-state block ──────────────────────────────────────────────────────────────
@@ -9462,7 +9577,7 @@ test("doctor's .env reads pass ONE allowlist and ONE loader mapping (#453 gate 3
 	// PR #466 gate round 2 added the GitHub auth source and App keys; issue #464 the jobs and sandbox dirs, and in its gate
 	// round 1 the Valkey opt-in, the TMPDIR the default jobs root lives under, and the worker's name.
 	// Issue #471: and every other key the service reads that doctor judges, the worker's and the receiver's.
-	assert.deepEqual([...SERVICE_ENV_KEYS], ["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY", "VALKEY_URL", "PI_VALKEY_SHARED", "VALKEY_PASSWORD", "PI_VALKEY_PORT", "PI_PROVIDER", "GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY", "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", "PI_WORKER_NAME", ...WORKER_SERVICE_KEYS, ...RECEIVER_SERVICE_KEYS, ...new Set(Object.values(CLI_SERVICE_KEYS).flat())]);
+	assert.deepEqual([...SERVICE_ENV_KEYS], ["PI_BACKENDS", "PI_EGRESS", "PI_EGRESS_PROXY", "VALKEY_URL", "PI_VALKEY_SHARED", "VALKEY_PASSWORD", "PI_VALKEY_PORT", "PI_PROVIDER", "PI_MODEL", "GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY", "PI_JOBS_DIR", "PI_SANDBOX_DIR", "TMPDIR", "PI_WORKER_NAME", ...WORKER_SERVICE_KEYS, ...RECEIVER_SERVICE_KEYS, ...new Set(Object.values(CLI_SERVICE_KEYS).flat())]);
 	for (const key of ["PI_JOB_IMAGE", "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_BACKEND_FLOOR", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_ALLOWED_MODELS", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "AZURE_ORG_URL", "AZURE_WEBHOOK_MODE", "WEBHOOK_SECRET", "RECEIVER_PORT", "GITHUB_PAT_VAR"]) {
 		assert.ok(SERVICE_ENV_KEYS.includes(key), `${key}, which issue #471 lists, is a service key`);
 	}

@@ -57,6 +57,7 @@ import { makeSecretsResolver } from "./secrets.mjs";
 import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, RUNNER_POLICY_REASONS, sanitizeJobId } from "./run-history.mjs";
 import { makeRunMirror } from "./run-mirror.mjs";
 import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
+import { usdFingerprint } from "./dollar-fingerprint.mjs";
 import { authoredCron, loadSchedules, servedSchedules } from "./schedules.mjs";
 import { makeStallGuard } from "./scheduler-stall-guard.mjs";
 
@@ -1313,6 +1314,17 @@ export async function startWorker(
 		// here is no opinion at all, and such a host must never be able to disagree with one that has one.
 		fpCron: () => cronFingerprint(authoredCron(config), { tz: hostTz }) ?? "",
 		cronCount: () => schedules.current.length,
+		// Issue #501 part 6: a fingerprint of the dollar caps this host judges the SHARED dollar counters against (the four
+		// settings as a job resolves them, and the scoped-limits dollar rows), so doctor can name two hosts that would
+		// admit different jobs against one counter. A thunk for `fpCron`'s reason: the overlay and the scoped-limits file
+		// change without a restart. Read without a log, so an invalid overlay is not logged on every beat (each job
+		// logs it already). With an invalid overlay it hashes the env values, the slot count's fallback above; such a
+		// host refuses every job (settings-overlay-invalid) until the file is fixed. The env list rides along: it decides
+		// which model rows a job without its own list reserves in.
+		fpUsd: () => {
+			const settings = resolveSettings(config, readOverlay(settingsFile));
+			return usdFingerprint(settings.invalid ? config : settings, scopedLimits.current, config.allowedModels);
+		},
 	});
 
 

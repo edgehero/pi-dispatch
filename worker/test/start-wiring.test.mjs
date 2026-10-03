@@ -3776,3 +3776,33 @@ test("per job: a service older than its conf, and a chain file deleted under the
 	assert.deepEqual([refused?.key, refused?.retry], [null, undefined]);
 	assert.match(refused.message, /^Refused: \/etc\/containers\/containers\.conf\.d\/zz\.conf could not be read \(EACCES\)/);
 });
+
+test("the host row's fpUsd is the dollar fingerprint of the live settings and scoped-limits rows, re-read on every beat (#501 part 6)", { skip }, async () => {
+	const { makeHostRegistry } = await import("../src/host-registry.mjs");
+	const { usdFingerprint } = await import("../src/dollar-fingerprint.mjs");
+	const { parseScopedLimits } = await import("../src/scoped-limits.mjs");
+	const dir = tempDir("pi-fp-usd-wiring-");
+	const settingsFile = join(dir, "settings.json");
+	const limitsFile = join(dir, "scoped-limits.json");
+	writeFileSync(limitsFile, JSON.stringify({ version: 2, limits: [{ scope: "acme/web", dayUsd: "5" }, { scope: "model:openai/gpt-4o", weekUsd: "9" }] }));
+	let fields = null;
+	await runStart({
+		env: { VALKEY_URL, PI_WORKER_NAME: "fp-usd-1", PI_MAX_COST_USD: "2", PI_DAILY_COST_USD: "20", PI_SETTINGS_FILE: settingsFile, PI_SCOPED_LIMITS_FILE: limitsFile, PI_ALLOWED_MODELS: "anthropic/claude-sonnet-4-5-20250929" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		makeHostRegistry: (args) => {
+			const real = makeHostRegistry(args);
+			return { ...real, start: async (f, opts) => ((fields = f), real.start(f, opts)) };
+		},
+	});
+	assert.equal(typeof fields?.fpUsd, "function", "a thunk, so a peer compares against what this host believes now");
+	const rows = parseScopedLimits(readFileSync(limitsFile, "utf8"), limitsFile);
+	const LIST = ["anthropic/claude-sonnet-4-5-20250929"];
+	assert.equal(fields.fpUsd(), usdFingerprint({ maxCostUsd: "2", dailyCostUsd: "20" }, rows, LIST), "env settings and the dollar rows");
+	assert.notEqual(fields.fpUsd(), usdFingerprint({ maxCostUsd: "2", dailyCostUsd: "20" }, []), "the rows are in it");
+	assert.notEqual(fields.fpUsd(), usdFingerprint({ maxCostUsd: "2", dailyCostUsd: "20" }, rows, null), "and the env list: with it, a job without its own list reserves in no model row here");
+	writeFileSync(settingsFile, JSON.stringify({ weeklyCostUsd: "40" }));
+	assert.equal(fields.fpUsd(), usdFingerprint({ maxCostUsd: "2", dailyCostUsd: "20", weeklyCostUsd: "40" }, rows, LIST), "an overlay edit shows on the next beat, merged over env");
+	writeFileSync(settingsFile, "{ not json");
+	assert.equal(fields.fpUsd(), usdFingerprint({ maxCostUsd: "2", dailyCostUsd: "20" }, rows, LIST), "an invalid overlay falls back to env, as the slot count does");
+});

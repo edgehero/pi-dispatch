@@ -296,6 +296,20 @@ it, so no AI tool can widen it.
 Before a job spends anything, the worker checks every model on its list exists (`model-unknown`), and
 that the model the job runs on is on the list (`model-not-allowed`). The second catches a default model
 that is not on `PI_ALLOWED_MODELS`, and a `dispatch_set model` that moves the default off a trigger's list.
+
+`pi-dispatch doctor` asks the same questions of the triggers file before any job does:
+
+- It names a trigger, of any kind, whose own model or a model on its list would be refused, with the reason,
+  and the deployment's own default model or a `PI_ALLOWED_MODELS` entry that would be (a typo there refuses
+  every job that names no model of its own).
+- Only the job's main provider gets its key automatically. Doctor warns when another provider on a list has
+  no key the job can receive: none of pi's variables for it is bound by the trigger's `run.secrets`, or named in
+  `PI_FORWARD_ENV` and set. Such a job starts, then fails its first call to that provider.
+- It asks pi's own loader how it reads the overlay `models.json` and warns where pi and the worker disagree
+  about the file or about one of its models. It runs only where the pinned pi is installed beside the worker,
+  which is a checkout of this repository after `npm ci` (the same pi the job image is built with). Otherwise it
+  says the comparison was not made: no pi, or a pi of another version, such as a global `pi` install.
+
 Inside the container the runner checks every call before it is sent:
 
 - The first call to a model that is not on the list stops the whole job (`model-not-allowed`). The
