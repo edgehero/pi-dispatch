@@ -1786,7 +1786,12 @@ test("the child route's own files: the preload imports no pi module, the child m
 		'import { basename, dirname, join, sep } from "node:path";',
 		'import { fileURLToPath, pathToFileURL } from "node:url";',
 		'import { isMainThread } from "node:worker_threads";',
+		'import { CHILD_METER_PATH, injectChildMeter, ledgerDirProblem, nestedRunnerKind, PI_SUBCOMMANDS } from "./child-route.mjs";',
 	], "child-preload.mjs imports changed: no pi module, and node:module only as a namespace");
+	// child-route.mjs is loaded by the preload in every Node child too (issue #500 part D): built-ins only, and its one
+	// dynamic import, pi's dist/cli.js, happens only in a nested runner.
+	const routeSrc = readFileSync(fileURLToPath(new URL("../src/child-route.mjs", import.meta.url)), "utf8");
+	assert.deepEqual([...routeSrc.matchAll(/^import\s[^\n]*?from\s+"([^"]+)";$/gm)].map((match) => match[1]), ["node:fs", "node:path", "node:url"], "child-route.mjs imports changed: built-ins only");
 	assert.match(preloadSrc, /registerHooks\(\{ resolve: makeLibraryResolveHook\(/, "a resolve hook only: a load hook breaks `node --import tsx`");
 	// Every pinned session entry ships, including the bundle's cli-runtime.js, which the bin loads and which runs the CLI
 	// on its own.

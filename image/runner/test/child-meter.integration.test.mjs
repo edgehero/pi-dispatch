@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import { test } from "node:test";
@@ -89,7 +89,7 @@ function world({ api = "pi-dispatch-child-fake" } = {}) {
 	return { root, agentDir, ledger, provider, calls, env, callCount: () => readFileSync(calls, "utf8").split("\n").filter(Boolean).length };
 }
 
-/** Run `node <args>` to its exit, stdin closed unless `drive` takes it. Resolves `{ code, stdout, stderr }`. */
+/** Run `node <args>` to its exit, stdin closed unless `drive` takes it. Resolves `{ code, stdout, stderr, pid }`. */
 function run(args, { env, cwd, drive = null, timeoutMs = 60_000 }) {
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, args, { env, cwd, stdio: [drive ? "pipe" : "ignore", "pipe", "pipe"] });
@@ -109,7 +109,7 @@ function run(args, { env, cwd, drive = null, timeoutMs = 60_000 }) {
 		child.on("error", reject);
 		child.on("close", (code) => {
 			clearTimeout(timer);
-			resolve({ code, stdout, stderr });
+			resolve({ code, stdout, stderr, pid: child.pid });
 		});
 		drive?.start(child);
 	});
@@ -494,4 +494,144 @@ test("children that use asynchronous loader hooks still run: module.register, --
 	writeFileSync(join(w.root, "legacy.cts"), `module.exports = " and cjs ok";\n`);
 	writeFileSync(typed, `const greeting: string = "typed ok";\nconst { default: legacy } = await import("./legacy.cts");\nprocess.stdout.write(greeting + legacy);\n`);
 	assert.equal(await sameWithPreload(w, ["--no-warnings", "--experimental-strip-types", typed], { nodeOptions: `--import=${pathToFileURL(tsxLike).href}` }), "typed ok and cjs ok");
+});
+
+// ── the nested runner (issue #500 part D) ────────────────────────────────────────────────────────────────
+
+const RUN_JOB = fileURLToPath(new URL("../run-job.mjs", import.meta.url));
+
+/**
+ * A probe preload that records every path under /job any fs call of the process names (sync, callback and promise
+ * forms, the ES named imports included through syncBuiltinESMExports), appended to JOB_PROBE.
+ */
+const JOB_PROBE = `import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+const seen = (path) => {
+	const text = path instanceof URL ? path.pathname : typeof path === "string" ? path : Buffer.isBuffer(path) ? path.toString() : "";
+	if (text === "/job" || text.startsWith("/job/")) fs.appendFileSync(process.env.JOB_PROBE, text + "\\n");
+};
+const wrap = (owner, name) => {
+	const real = owner[name];
+	if (typeof real !== "function") return;
+	owner[name] = Object.assign(function (path, ...rest) {
+		seen(path);
+		return real.call(this, path, ...rest);
+	}, real);
+};
+for (const name of ["readFileSync", "existsSync", "statSync", "lstatSync", "accessSync", "openSync", "readdirSync", "realpathSync", "readFile", "stat", "lstat", "access", "open", "readdir", "createReadStream"]) wrap(fs, name);
+for (const name of ["readFile", "stat", "lstat", "access", "open", "readdir"]) wrap(fs.promises, name);
+syncBuiltinESMExports();
+`;
+
+/**
+ * One nested runner's world: the pi child world, plus PI_DISPATCH_RUNNER_PID naming another process (this test's, as
+ * the job's runner would be its parent) and the /job probe loaded before the preload.
+ */
+function nestedWorld() {
+	const w = world();
+	const probe = join(w.root, "job-probe.mjs");
+	const jobReads = join(w.root, "job-reads.log");
+	writeFileSync(probe, JOB_PROBE);
+	writeFileSync(jobReads, "");
+	const env = { ...w.env, PI_DISPATCH_RUNNER_PID: String(process.pid), JOB_PROBE: jobReads, NODE_OPTIONS: `--import=${pathToFileURL(probe).href} ${w.env.NODE_OPTIONS}` };
+	return { ...w, probe, env, jobReads: () => readFileSync(jobReads, "utf8").split("\n").filter(Boolean) };
+}
+
+/** The ledger directories a process made under `root` (its TMPDIR): openChildLedger's prefix. */
+const ownLedgerDirs = (root) => readdirSync(root).filter((name) => name.startsWith("pi-dispatch-meter-"));
+
+test("the /job probe sees a read through an ES named import, so an empty probe log means something (issue #500)", { skip }, async () => {
+	const w = nestedWorld();
+	const result = await run(["--input-type=module", "-e", 'import { existsSync } from "node:fs"; existsSync("/job/prompt.md");'], { env: w.env, cwd: w.root });
+	assert.equal(result.code, 0, result.stderr);
+	assert.deepEqual(w.jobReads(), ["/job/prompt.md"]);
+});
+
+test("a nested runner runs as the pi CLI: metered once in the INHERITED ledger, no /job read, no exit line, no ledger dir of its own (issue #500)", { skip }, async () => {
+	const w = nestedWorld();
+	const result = await run([RUN_JOB, ...printArgs(w), "hello"], { env: w.env, cwd: w.root });
+	assert.equal(result.code, 0, result.stderr);
+	assert.equal(w.callCount(), 1, "one call, the CLI's prompt: the job prompt was not run");
+	// pi's own JSON events, as the stock subagent example parses them.
+	assert.match(result.stdout, /"type":"agent_end"/);
+	assert.doesNotMatch(result.stdout, /"event":"exit"/, "a nested runner writes no exit line");
+	assert.doesNotMatch(result.stdout, /"event":/, "and none of the runner's log lines");
+	assertMetered(w.ledger);
+	assert.equal(ledgers(w.ledger).names[0].split(".")[0], String(result.pid), "the one ledger is the nested runner's own");
+	assert.deepEqual(w.jobReads(), [], "nothing under /job was read");
+	assert.deepEqual(ownLedgerDirs(w.root), [], "no ledger directory of its own");
+});
+
+test("a nested runner that makes no call ends its one ledger `done`, as a pi CLI child does: one meter, not the library hook's too (issue #500)", { skip }, async () => {
+	const w = nestedWorld();
+	// --help loads the extensions (so the meter starts) and exits without a call.
+	const result = await run([RUN_JOB, "--help"], { env: w.env, cwd: w.root });
+	assert.equal(result.code, 0, result.stderr);
+	assert.equal(w.callCount(), 0);
+	const { parsed, fold } = ledgers(w.ledger);
+	assert.equal(parsed.length, 1, `exactly one ledger, got ${JSON.stringify(readdirSync(w.ledger))}`);
+	assert.equal(parsed[0].raw.state, "done");
+	assert.equal(parsed[0].raw.metered, true);
+	assert.equal(parsed[0].raw.totals.calls, 0);
+	assert.equal(fold.unmetered, 0);
+});
+
+test("a nested runner whose spawner replaced NODE_OPTIONS still loads the meter itself, -e first (issue #500)", { skip }, async () => {
+	const w = nestedWorld();
+	const result = await run([RUN_JOB, ...printArgs(w), "hello"], { env: { ...w.env, NODE_OPTIONS: "--no-warnings" }, cwd: w.root });
+	assert.equal(result.code, 0, result.stderr);
+	assert.equal(w.callCount(), 1);
+	assertMetered(w.ledger);
+});
+
+test("a nested runner with an open stdin and an inherited PI_EXIT_AUTH drains nothing: an rpc session on that stdin runs (issue #500)", { skip }, async () => {
+	const w = nestedWorld();
+	// readExitKey would block here until stdin closed, swallowing the prompt below as a key; the driver closes stdin
+	// only after agent_end, so a drain is a timeout.
+	const result = await run([RUN_JOB, "--mode", "rpc", "--no-session", "-e", w.provider, "--model", "fake/m1"], { env: { ...w.env, PI_EXIT_AUTH: "stdin" }, cwd: w.root, drive: rpcDriver(["hello"]), timeoutMs: 30_000 });
+	assert.equal(result.code, 0, result.stderr);
+	assert.equal(w.callCount(), 1);
+	assert.doesNotMatch(result.stdout, /"event":"exit"/);
+	assertMetered(w.ledger);
+});
+
+for (const [label, ledgerEnv] of [["missing", (w) => join(w.root, "gone")], ["unset (the job runner could not make one)", () => undefined]]) {
+	test(`a nested runner whose ledger directory is ${label} exits 2 with one stderr line, before pi runs (issue #500)`, { skip }, async () => {
+		const w = nestedWorld();
+		const env = { ...w.env };
+		const dir = ledgerEnv(w);
+		if (dir === undefined) delete env.PI_DISPATCH_CHILD_LEDGER;
+		else env.PI_DISPATCH_CHILD_LEDGER = dir;
+		const result = await run([RUN_JOB, ...printArgs(w), "hello"], { env, cwd: w.root });
+		assert.equal(result.code, 2);
+		assert.equal(result.stderr.split("\n").filter(Boolean).length, 1, result.stderr);
+		assert.match(result.stderr, /nested runner cannot be metered/);
+		assert.equal(result.stdout, "");
+		assert.equal(w.callCount(), 0);
+		assert.deepEqual(w.jobReads(), []);
+		assert.deepEqual(ownLedgerDirs(w.root), []);
+	});
+}
+
+test("a nested runner loaded some other way than `node run-job.mjs` (imported from `node -e`) exits 2 and runs nothing (issue #500)", { skip }, async () => {
+	const w = nestedWorld();
+	const result = await run(["--input-type=module", "-e", `await import(${JSON.stringify(pathToFileURL(RUN_JOB).href)});`], { env: w.env, cwd: w.root });
+	assert.equal(result.code, 2);
+	assert.equal(result.stderr.split("\n").filter(Boolean).length, 1, result.stderr);
+	assert.match(result.stderr, /\(not-run-job\); exit 2/);
+	assert.equal(result.stdout, "");
+	assert.equal(w.callCount(), 0);
+	assert.deepEqual(readdirSync(w.ledger), []);
+	assert.deepEqual(w.jobReads(), []);
+});
+
+test("a nested runner whose ledger directory is a link exits 2, and nothing is written through the link (issue #500)", { skip }, async () => {
+	const w = nestedWorld();
+	const link = join(w.root, "ledger-link");
+	symlinkSync(w.ledger, link);
+	const result = await run([RUN_JOB, ...printArgs(w), "hello"], { env: { ...w.env, PI_DISPATCH_CHILD_LEDGER: link }, cwd: w.root });
+	assert.equal(result.code, 2);
+	assert.match(result.stderr, /\(not-a-directory\); exit 2/);
+	assert.equal(w.callCount(), 0);
+	assert.deepEqual(readdirSync(w.ledger), [], "no orphan `starting` stub");
 });

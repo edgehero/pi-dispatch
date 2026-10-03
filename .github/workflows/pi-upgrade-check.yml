@@ -759,6 +759,40 @@ jobs:
                 console.log(\"OK: one metered child ledger, 777 tokens, done\");" "$L"' \
             || { echo "::error::A pi child in the image did not meter itself into the ledger. Check, in order: child-preload.mjs and child-meter.ts are in the image and readable by any uid, image/runner/src/child-preload.mjs still recognises the package bin by realpath, and child-meter.ts still gets the child's own pi-ai and ModelRuntime from pi's loader (image/runner/test/child-meter.integration.test.mjs runs the same route outside the image)."; exit 1; }
 
+      # Issue #500 part D: a NESTED runner (pi's stock subagent example spawns `node run-job.mjs <pi args>`) runs as the pi
+      # CLI, metered into the job runner's ledger, and never as a second job. Asserted inside the image, as an arbitrary
+      # uid, under the runner's own exec-only node, the way the example spawns it (process.execPath): one ledger of 777
+      # tokens, `done`, and no exit line on stdout. With no ledger directory it exits 2 before pi runs.
+      - name: "RUNNER: a nested runner runs as the pi CLI and meters itself into the inherited ledger, as an arbitrary uid"
+        run: |
+          PROVIDER='import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+          export default function (pi) {
+            pi.registerProvider("fake", { baseUrl: "http://127.0.0.1:1", apiKey: "k", api: "fake-api",
+              models: [{ id: "m1", name: "m1", api: "fake-api", reasoning: false, input: ["text"], cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 4096 }],
+              streamSimple(model) { const s = createAssistantMessageEventStream(); queueMicrotask(() => s.push({ type: "done", reason: "stop", message: { role: "assistant", content: [{ type: "text", text: "ok" }], api: model.api, provider: model.provider, model: model.id, usage: { input: 500, output: 277, cacheRead: 0, cacheWrite: 0, totalTokens: 777, cost: { input: 0.0005, output: 0.000277, cacheRead: 0, cacheWrite: 0, total: 0.000777 } }, stopReason: "stop", timestamp: Date.now() } })); return s; } });
+          }'
+          docker run --rm --network none --user 4242:4242 -e HOME=/tmp -e PROVIDER="$PROVIDER" \
+            --entrypoint sh "$IMAGE_REF" -c '
+              set -eu
+              cd /tmp
+              printf "%s\n" "$PROVIDER" > /tmp/fake-provider.ts
+              L=$(mktemp -d /tmp/pi-dispatch-meter-XXXXXX)
+              rc=0
+              PI_DISPATCH_RUNNER_PID=1 PI_DISPATCH_CHILD_LEDGER=/tmp/gone /opt/pi-dispatch/runner-node /app/image/runner/run-job.mjs -p hello < /dev/null > /dev/null 2>&1 || rc=$?
+              [ "$rc" = 2 ] || { echo "a nested runner with no ledger exited $rc, not 2"; exit 1; }
+              PI_CODING_AGENT_DIR=$(mktemp -d) PI_OFFLINE=1 PI_DISPATCH_RUNNER_PID=1 PI_DISPATCH_CHILD_LEDGER="$L" NODE_OPTIONS=--import=file:///app/image/runner/src/child-preload.mjs \
+                /opt/pi-dispatch/runner-node /app/image/runner/run-job.mjs --mode json -p --no-session -e /tmp/fake-provider.ts --model fake/m1 hello < /dev/null > /tmp/nested.out
+              if grep -q "\"event\":\"exit\"" /tmp/nested.out; then echo "a nested runner wrote an exit line"; exit 1; fi
+              grep -q "\"type\":\"agent_end\"" /tmp/nested.out || { echo "a nested runner did not run as the pi CLI"; exit 1; }
+              ls /tmp | grep -c "^pi-dispatch-meter-" | grep -qx 1 || { echo "a nested runner made a ledger directory of its own"; exit 1; }
+              node --input-type=module -e "
+                import { foldChildLedgers } from \"file:///app/image/runner/src/usage-meter.mjs\";
+                const fold = foldChildLedgers({ dir: process.argv[1] });
+                const [entry] = fold.files.values();
+                if (fold.processes !== 1 || fold.unmetered !== 0 || fold.totals.total !== 777 || entry?.state !== \"done\") { console.error(JSON.stringify({ processes: fold.processes, unmetered: fold.unmetered, totals: fold.totals, state: entry?.state })); process.exit(1); }
+                console.log(\"OK: a nested runner is one metered child ledger, 777 tokens, done\");" "$L"' \
+            || { echo "::error::A nested runner in the image did not run as a metered pi CLI. Check, in order: run-job.mjs calls isNestedRunner before anything else, child-route.mjs runAsPiCli loads pi's dist/cli.js, and child-preload.mjs gives a nested runner the pi CLI's route (image/runner/test/child-meter.integration.test.mjs runs the same route outside the image)."; exit 1; }
+
   admin-extension-canary:
     # The admin extension is the default front door (issue #96): it is TESTED against an exact pi
     # (SUPPORTED_PI_VERSION, locked to the admin devDependency pin by admin/test/load.test.mjs) but

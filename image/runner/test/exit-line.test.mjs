@@ -107,8 +107,8 @@ test("terminate writes a terminated line with the caller's counts and exits 143;
 test("run-job.mjs reads the key and installs the SIGTERM handler before main, and writes every exit line through the writer", () => {
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
 	const handler = src.indexOf('process.on("SIGTERM", () => exitWriter.terminate({ ...liveExitFields(), ...meteredExitFields() }));');
-	const keyRead = src.indexOf("const exitKey = readExitKey(process.env);");
-	const mainCall = src.indexOf("\nmain()");
+	const keyRead = src.indexOf("\texitKey = readExitKey(process.env);");
+	const mainCall = src.indexOf("\n\tmain()");
 	assert.ok(keyRead !== -1 && handler !== -1 && mainCall !== -1, "the key read, the handler and the main call are all there");
 	assert.ok(keyRead < handler && handler < mainCall, "the key is read and the handler installed before main runs");
 	assert.equal((src.match(/log\("exit"/g) ?? []).length, 0, "no exit line bypasses the writer, so none goes out unsigned");
@@ -207,5 +207,5 @@ test("a large exit line written on SIGTERM and exited on at once arrives whole a
 
 test("run-job.mjs writes the exit line synchronously to fd 1", () => {
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
-	assert.match(src, /\n\twrite: \(line\) => writeAllSync\(1, line\),\n/);
+	assert.match(src, /\n\t\twrite: \(line\) => writeAllSync\(1, line\),\n/);
 });

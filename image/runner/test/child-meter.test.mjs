@@ -49,12 +49,16 @@ import {
 test("openChildLedger: a 0700 directory under the temp root, absolute, the two variables, and the preload imported once through NODE_OPTIONS", () => {
 	const root = tempDir("pi-dispatch-ledger-root-");
 	const env = { NODE_OPTIONS: "--max-old-space-size=512" };
-	const opened = openChildLedger({ env, pid: 4242, preloadUrl: "file:///app/image/runner/src/child-preload.mjs", tmp: () => root });
+	const opened = openChildLedger({ env, pid: 4242, preloadUrl: "file:///app/image/runner/src/child-preload.mjs", tmp: () => root, pidNamespace: () => null });
 	assert.equal(opened.error, undefined);
 	assert.ok(opened.dir.startsWith(join(root, "pi-dispatch-meter-")), opened.dir);
 	assert.equal(statSync(opened.dir).mode & 0o777, 0o700);
 	assert.equal(env[CHILD_LEDGER_ENV], opened.dir);
-	assert.equal(env[RUNNER_PID_ENV], "4242");
+	assert.equal(env[RUNNER_PID_ENV], "4242", "no /proc: the pid alone");
+	// With a pid namespace (Linux), it rides beside the pid, so a process in another namespace with this pid is nested.
+	const linux = {};
+	openChildLedger({ env: linux, pid: 7, preloadUrl: "file:///p.mjs", tmp: () => root, pidNamespace: () => "4026532560" });
+	assert.equal(linux[RUNNER_PID_ENV], "7:4026532560");
 	// --import, never --require: a hook registered from --require breaks every child that uses module.register or
 	// --loader. The operator's value is kept, in front.
 	assert.equal(env.NODE_OPTIONS, "--max-old-space-size=512 --import=file:///app/image/runner/src/child-preload.mjs");
@@ -78,14 +82,16 @@ test("openChildLedger: a relative TMPDIR still gives an absolute directory", () 
 	}
 });
 
-test("openChildLedger: a directory that cannot be made deletes both names, leaves NODE_OPTIONS alone, and names a code, never a path", () => {
+test("openChildLedger: a directory that cannot be made deletes the directory name, keeps this runner's pid, leaves NODE_OPTIONS alone, and names a code, never a path", () => {
 	const env = { NODE_OPTIONS: "--x", PI_DISPATCH_CHILD_LEDGER: "/inherited", PI_DISPATCH_RUNNER_PID: "9" };
 	const mkdtemp = () => {
 		throw Object.assign(new Error("EROFS: /tmp/secret"), { code: "EROFS" });
 	};
-	const opened = openChildLedger({ env, pid: 1, preloadUrl: "file:///p.mjs", mkdtemp, tmp: () => "/nowhere" });
+	const opened = openChildLedger({ env, pid: 1, preloadUrl: "file:///p.mjs", mkdtemp, tmp: () => "/nowhere", pidNamespace: () => null });
 	assert.deepEqual(opened, { error: "EROFS" });
-	assert.deepEqual(env, { NODE_OPTIONS: "--x" }, "no child is pointed anywhere, not even at an inherited directory");
+	// No child is pointed anywhere, not even at an inherited directory. The pid stays (issue #500 part D): a nested
+	// runner below this one must still know it is nested, and then stops with exit 2 rather than run the job again.
+	assert.deepEqual(env, { NODE_OPTIONS: "--x", PI_DISPATCH_RUNNER_PID: "1" });
 });
 
 // ── the control files ─────────────────────────────────────────────────────────────────────────────────────
@@ -362,7 +368,7 @@ test("entryKind: the five pinned entries by realpath (the .bin link included); a
 	assert.equal(entryKind(`${ROOT}/dist/bundle/rpc-entry.js`, options), "rpc");
 	assert.equal(entryKind(`${ROOT}/dist/rpc-entry.js`, options), "rpc");
 	assert.equal(entryKind("/workspace/cli.js", options), null, "a file merely named cli.js");
-	assert.equal(entryKind("/app/image/runner/run-job.mjs", options), null, "the nested runner is part D's");
+	assert.equal(entryKind("/app/image/runner/run-job.mjs", options), null, "not an entry: the nested runner is nestedRunnerKind's (child-route.mjs)");
 	assert.equal(entryKind("/gone.js", options), null);
 	assert.equal(entryKind(undefined, options), null);
 	assert.equal(entryKind(`${ROOT}/dist/cli.js`, { ...options, packageDir: () => { throw new Error("no pi"); } }), null);

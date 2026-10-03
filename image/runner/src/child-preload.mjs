@@ -19,7 +19,7 @@
  * cleared the environment) runs exactly as it would without it.
  *
  * Two routes, decided once per process:
- *   1. A pi SESSION ENTRY: the realpath of argv[1] is one of the pinned pi's five session entries (the bundle CLI, which
+ *   1. A pi SESSION ENTRY, or a nested runner (below): the realpath of argv[1] is one of the pinned pi's five session entries (the bundle CLI, which
  *      is the package bin, the bundle's cli-runtime.js it loads, the unbundled dist/cli.js, and the two rpc entries).
  *      The preload writes the `starting` stub ledger, inserts `-e <child-meter.ts>` FIRST in the arguments (so the
  *      meter loads before every other extension and before any `--`, after which arguments are messages), and hands
@@ -27,6 +27,11 @@
  *      dispatches those on args[0], and an `-e` in front turns `pi list` into a chat turn (measured). `--version` and
  *      `--export` exit before any extension loads, so the meter never starts; an exit handler marks such a stub `done`
  *      (zeros) rather than leave it `starting` for good. Every other flag is injected like any run (measured).
+ *      A NESTED RUNNER takes this route too (child-route.mjs nestedRunnerKind: argv[1] is this image's run-job.mjs and
+ *      PI_DISPATCH_RUNNER_PID is another process's): it runs as the pi CLI, so it gets the CLI's stub and `-e`, and no
+ *      library hook. With the hook as well, the runner's own import of pi would start a second, lazy install of the
+ *      meter before the extension's (one meter per process is the rule), and a nested runner that never calls would
+ *      leave its stub `starting` for good.
  *   2. ANY OTHER Node process (or worker thread), where `module.registerHooks` exists: a RESOLVE hook. Its fast path is
  *      one substring test of the resolved URL. A resolve hook, not a load hook: a load hook, even one that only passes
  *      through, breaks `node --import tsx` (measured on 22.19 and 23.5: tsx's own load chain then fails validation),
@@ -52,12 +57,12 @@ import * as nodeModule from "node:module";
 import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isMainThread } from "node:worker_threads";
+import { CHILD_METER_PATH, injectChildMeter, ledgerDirProblem, nestedRunnerKind, PI_SUBCOMMANDS } from "./child-route.mjs";
+
+export { CHILD_METER_PATH, injectChildMeter, PI_SUBCOMMANDS };
 
 /** usage-meter.mjs CHILD_METER_HANDOFF, spelled again because this file does not load that one up front. A test holds them equal. */
 const HANDOFF = Symbol.for("pi-dispatch.child-meter");
-
-/** The pi subcommands, dispatched on args[0] before any option is parsed (pinned in pinned-api.test.mjs). */
-export const PI_SUBCOMMANDS = Object.freeze(["auth", "config", "install", "list", "mcp", "remove", "uninstall", "update"]);
 
 /** The flags with which pi exits before it loads any extension: the meter never starts, and nothing is spent. */
 const EXITS_BEFORE_EXTENSIONS = Object.freeze(["--version", "-v", "--export"]);
@@ -85,7 +90,6 @@ const MODEL_RUNTIME_CLASS = /^export class ModelRuntime \{/m;
 const REAL_MARK = "pi-dispatch-real=1";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const CHILD_METER_PATH = join(HERE, "child-meter.ts");
 export const USAGE_METER_PATH = join(HERE, "usage-meter.mjs");
 export const USAGE_METER_URL = pathToFileURL(USAGE_METER_PATH).href;
 
@@ -131,17 +135,6 @@ export function entryKind(argv1, { packageDir = defaultPackageDir, realpath = re
 		}
 	}
 	return null;
-}
-
-/**
- * Insert `-e <meterPath>` first in a pi entry's arguments (argv[2] on), in place. False, and argv untouched, for a CLI
- * whose first argument is a subcommand. First, not last and not before the first `--`: everything after `--` is a
- * message, and in front of the spawner's own `-e`s is what loads the meter before them (measured in both CLIs).
- */
-export function injectChildMeter(argv, kind, meterPath = CHILD_METER_PATH) {
-	if (kind === "cli" && PI_SUBCOMMANDS.includes(argv[2])) return false;
-	argv.splice(2, 0, "-e", meterPath);
-	return true;
 }
 
 /** Whether pi's own arguments (before any `--`) carry a flag that exits before extensions load. */
@@ -214,10 +207,15 @@ export function makeLibraryResolveHook({ packageDir = defaultPackageDir, onBundl
 	};
 }
 
-/** Write the `starting` stub for this process's ledger, once. */
+/**
+ * Write the `starting` stub for this process's ledger, once. Not into a directory the nested runner would refuse
+ * (ledgerDirProblem: a link, not a directory, not writable): a nested runner exits 2 on such a directory before its
+ * meter starts, and a stub written through a link would stay `starting` for good in whatever the link names.
+ */
 function writeStub(state, meter) {
 	if (state.stubbed) return;
 	state.stubbed = true;
+	if (ledgerDirProblem(state.dir) !== null) return;
 	try {
 		meter.writeFileAtomic({ dir: state.dir, name: state.name, text: JSON.stringify(meter.childLedger({ state: "starting" })) });
 	} catch {
@@ -244,7 +242,8 @@ export async function preload({
 	// env-internal PI_DISPATCH_CHILD_LEDGER: set by the runner in its own environment and inherited, never by the worker.
 	const dir = env.PI_DISPATCH_CHILD_LEDGER;
 	if (typeof dir !== "string" || dir === "") return "none";
-	const kind = entryKind(argv[1], { packageDir, realpath });
+	// A nested runner (child-route.mjs) takes a pi CLI's route: it is about to run as one.
+	const kind = entryKind(argv[1], { packageDir, realpath }) ?? nestedRunnerKind(argv[1], { env, pid, realpath });
 	if (kind !== null) {
 		const quick = exitsBeforeExtensions(argv.slice(2));
 		if (!injectChildMeter(argv, kind)) return "subcommand";
@@ -257,7 +256,7 @@ export async function preload({
 			if (quick) {
 				onExit(() => {
 					try {
-						if (state.child === undefined) state.meter.writeFileAtomic({ dir, name: state.name, text: JSON.stringify(state.meter.childLedger({ state: "done" })) });
+						if (state.child === undefined && ledgerDirProblem(dir) === null) state.meter.writeFileAtomic({ dir, name: state.name, text: JSON.stringify(state.meter.childLedger({ state: "done" })) });
 					} catch {
 						// The stub stays `starting`.
 					}

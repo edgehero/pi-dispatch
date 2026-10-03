@@ -268,7 +268,7 @@ test("run-job installs the meter and the guards before any extension loads, and 
 	assert.match(src, /\{ tokens: \{ \.\.\.meter\.snapshot\(\), \.\.\.\(policyGuard \? policyGuard\.snapshot\(\) : \{\}\) \}, \.\.\.\(usage \? \{ usage \} : \{\}\) \}/, "usage is omitted when no call was observed");
 	// A throw after a stop (a refused load-time call, then command-unregistered) exits with the stop, as decideExit ranks it.
 	assert.match(src, /meterStopAtExit = \(\) => \(meter\.state\.stopReason === null \? null : decideExit\(\{ budgetAborted: false, meterStop: meter\.state\.stopReason \}\)\);/, "the stop is decided by decideExit");
-	assert.match(src, /const thrown = classifyThrow\(error\);\n\t\tconst stopped = meterStopAtExit\(\);/, "the throw is classified and the stop read");
+	assert.match(src, /const thrown = classifyThrow\(error\);\n\t\t\tconst stopped = meterStopAtExit\(\);/, "the throw is classified and the stop read");
 	assert.match(src, /const outcome = stopped \?\? thrown;/, "the stop wins the catch path's exit reason");
 	// The outranked throw keeps a trace: its classified reason and its class, never its message.
 	assert.match(src, /if \(stopped !== null\) log\("throw_after_stop", \{ reason: thrown\.reason, error: typeof error\?\.name === "string" \? error\.name : null \}\);/, "the second cause is logged, names only");
@@ -306,11 +306,38 @@ test("run-job takes PI_EXIT_AUTH out of its environment right after reading the 
 	// runner (the stock subagent example spawns one) that saw it would drain a stdin that is not its own. The ledger:
 	// a child can be spawned from the first extension factory on, and the three variables must be in place by then.
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
-	assert.match(src, /\nconst exitKey = readExitKey\(process\.env\);\n(?:\/\/[^\n]*\n)*delete process\.env\.PI_EXIT_AUTH;\n/, "the delete is the next statement after the key read");
+	assert.match(src, /\n\texitKey = readExitKey\(process\.env\);\n(?:\t\/\/[^\n]*\n)*\tdelete process\.env\.PI_EXIT_AUTH;\n/, "the delete is the next statement after the key read");
 	const ledger = src.indexOf("openChildLedger({ env: process.env, pid: process.pid, preloadUrl: new URL(\"./src/child-preload.mjs\", import.meta.url).href })");
 	assert.ok(ledger > 0, "the ledger is opened on the runner's own environment, with the preload beside it");
 	assert.ok(ledger < src.indexOf("await installProcessUsageMeter("), "before the meter installs");
 	assert.ok(ledger < src.indexOf("await buildLoadedResourceLoader("), "before any extension loads");
 	assert.ok(ledger < src.indexOf("await createAgentSession("), "before the session exists");
 	assert.match(src, /if \(childLedger\.error !== undefined\) log\("child_ledger_unavailable", \{ reason: childLedger\.error \}\);/, "a ledger that could not be opened is said, by code");
+});
+
+test("run-job decides nested or not FIRST, and a nested runner never reaches the key read, the SIGTERM handler or main (issue #500 part D)", () => {
+	// Source-guard tactic: the runner's module top cannot be run in-process. child-meter.integration.test.mjs runs a
+	// nested runner for real; this pins the ORDER, which a run cannot show for every path.
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	const check = src.indexOf("\nconst nestedRunner = isNestedRunner(process.env, process.pid);\n");
+	assert.ok(check > 0, "the check is there, on this process's environment and pid");
+	// The first statement after the imports: only comments and blank lines between the last import and the check.
+	const lastImport = src.lastIndexOf('} from "./src/usage-meter.mjs";\n');
+	assert.ok(lastImport > 0 && lastImport < check);
+	const between = src.slice(lastImport + '} from "./src/usage-meter.mjs";\n'.length, check + 1);
+	assert.ok(between.split("\n").every((line) => line === "" || line.startsWith("//")), `only comments before the check, got: ${between}`);
+	assert.ok(src.indexOf("import ") < check && src.lastIndexOf("\nimport ") < check, "every import is above it");
+	// The nested path is the next statement, and it is the CLI.
+	assert.ok(src.includes("const nestedRunner = isNestedRunner(process.env, process.pid);\nif (nestedRunner) await runAsPiCli();\n"));
+	// Everything else the module does at its top level is the job runner's block, below the check and guarded by it.
+	const block = src.indexOf("\nif (!nestedRunner) {\n");
+	assert.ok(block > check, "the job runner's block");
+	for (const call of ["readExitKey(", "delete process.env.PI_EXIT_AUTH", "createExitWriter(", 'process.on("SIGTERM"', "\tmain()"]) {
+		const at = src.indexOf(call);
+		assert.ok(at > check, `${call} comes after the nested check`);
+		assert.ok(at > block, `${call} is inside the job runner's block`);
+	}
+	assert.equal((src.match(/readExitKey\(/g) ?? []).length, 1, "one key read");
+	assert.equal((src.match(/^\s*main\(\)$/gm) ?? []).length, 1, "one main call");
+	assert.equal((src.match(/process\.on\("SIGTERM"/g) ?? []).length, 1, "one handler");
 });
