@@ -473,7 +473,8 @@ test("a qualified row must have a forge repo's shape: each refused shape is name
 		"github:/acme/web", // leading slash
 		"github:acme/web/", // trailing slash
 		"github:acme//web", // empty segment
-		"github:acme/we b", // whitespace
+		"github:acme /web", // whitespace at a segment's end
+		"github:acme/ web", // whitespace at a segment's start
 		"github:acme/web\tx", // control character
 		"github:acme/web\u0000", // NUL
 		"github:acme/web#12", // a pasted run target
@@ -482,4 +483,9 @@ test("a qualified row must have a forge repo's shape: each refused shape is name
 	];
 	for (const scope of refused) assert.throws(() => parse2([{ scope, day: 1 }]), (e) => /index 0/.test(e.message) && /is not a forge repo/.test(e.message), scope);
 	for (const scope of ["github:acme/web", "gitlab:group/sub/proj", "azure:proj/repo", "forgejo:a.b-c/d_e"]) assert.equal(parse2([{ scope, day: 1 }])[0].scope, scope);
+	// Azure DevOps project and repository names may hold spaces, and the receiver copies them verbatim: inside a
+	// segment, whitespace is allowed for every forge (the simplest rule), and such a row caps that Azure job.
+	const azure = parse2([{ scope: "azure:Fabrikam Fiber/Web App", day: 1 }]);
+	assert.equal(azure[0].scope, "azure:Fabrikam Fiber/Web App");
+	assert.equal(limitFor(azure, { kind: "azure", repo: "Fabrikam Fiber/Web App" }).scope, "azure:Fabrikam Fiber/Web App");
 });

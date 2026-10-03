@@ -82,12 +82,13 @@ scaffolds the empty form.
   `"gitlab:..."`, `"forgejo:..."` or `"azure:..."`. Then a GitHub job and a Forgejo job for `acme/web` count
   separately. An unknown prefix such as `"gitub:acme/web"` refuses the file, and so does a bare row beside a
   qualified row for the same repo: keep one form. The repo after the prefix is written as the forge shows it:
-  `owner/name`, or `group/sub/project` on GitLab, with no trailing `/`, spaces or `#12`. A qualified row needs
+  `owner/name`, `group/sub/project` on GitLab or `project/repo` on Azure DevOps, with no trailing `/`, no `#12` and
+  no space at the start or end of a part (a space inside one, as Azure allows, is fine). A qualified row needs
   `"version": 2`, which the panel and the tools write for you; an older worker then refuses the file instead of
   silently ignoring the row. A bare row keeps the count it had before qualified scopes existed. Rewriting a row's
   scope (bare to qualified, or any rename) starts a new count; the old one expires on its own. Jobs already running
-  keep their slot under the old scope until they finish, so until then one more job than `concurrent` allows can
-  start. Doctor warns about a bare row when your triggers use more than one forge. Write local
+  keep their slot under the old scope until they finish, and the new row counts from zero, so with `concurrent: N`
+  up to 2N jobs can run until then. Doctor warns about a bare row when your triggers use more than one forge. Write local
   folder scopes as **absolute paths**: the worker resolves a job's folder before matching, so a relative
   row can never match a local job (doctor flags dead folder scopes, when `PI_SCOPED_LIMITS_FILE` is
   set). Spelling variants of one directory (trailing slash, `..` segments) collapse onto one scope.

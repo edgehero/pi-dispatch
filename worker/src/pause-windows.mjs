@@ -225,8 +225,15 @@ export function qualifiedScopeOf(job) {
 	return `${job.kind}:${job.repo}`.normalize("NFC");
 }
 
-/** A forge repo path: `/`-separated segments (at least two), none empty, none holding whitespace, `#`, `:` or a control character. */
-const QUALIFIED_REPO = /^[^/\s#:\u0000-\u001f\u007f]+(?:\/[^/\s#:\u0000-\u001f\u007f]+)+$/u;
+/**
+ * One segment of a forge repo path: no `/`, `#`, `:` or control character, and no whitespace at its start or end.
+ * Whitespace INSIDE a segment is allowed for every forge, because Azure DevOps project and repository names may hold
+ * spaces (`Fabrikam Fiber/Web App`) and the receiver copies them verbatim. One rule for every kind is the simpler one;
+ * its cost is that `github:acme web` loads as a cap that guards nothing, as a mistyped bare row always has.
+ */
+const REPO_SEGMENT = "[^/\\s#:\\u0000-\\u001f\\u007f](?:[^/#:\\u0000-\\u001f\\u007f]*[^/\\s#:\\u0000-\\u001f\\u007f])?";
+/** A forge repo path: two or more `REPO_SEGMENT`s joined by single `/`, so none is empty. */
+const QUALIFIED_REPO = new RegExp(`^${REPO_SEGMENT}(?:/${REPO_SEGMENT})+$`, "u");
 
 /**
  * Classify a scope as written in an operator file (issue #498): `{ type, kind, repo }` where `type` is
@@ -237,7 +244,8 @@ const QUALIFIED_REPO = /^[^/\s#:\u0000-\u001f\u007f]+(?:\/[^/\s#:\u0000-\u001f\u
  * A `<word>:` prefix (no `/` before the first `:`) that is not a forge kind THROWS a `configError` naming the known
  * kinds: `gitub:acme/web` would otherwise be a row that guards nothing while it reads as a cap. For the same reason a
  * qualified repo must have a forge repo's shape (`QUALIFIED_REPO`): two or more `/`-separated segments, so no leading
- * or trailing `/` and no `//`, and no whitespace, control character, `#` or `:` in any segment. That refuses the
+ * or trailing `/` and no `//`, no control character, `#` or `:` in any segment, and no whitespace at a segment's start
+ * or end (inside one it is allowed: Azure DevOps names may hold spaces). That refuses the
  * likely slips (`github:acme/web/`, a `#12` pasted from a run target, a doubled `github:github:` prefix), each of which
  * no delivery's repo can ever equal. The split is at the
  * FIRST `:`, which is safe because no forge allows `:` in a repo or project path: GitHub, GitLab and Forgejo names
@@ -253,7 +261,7 @@ export function parseScopeString(text) {
 	if (!isForgeKind(m[1])) throw configError(`scope ${JSON.stringify(scope)} starts with an unknown prefix "${m[1]}:" (a forge-qualified scope starts with one of ${FORGE_KINDS.join(", ")}, such as github:owner/name)`);
 	if (m[2].trim() === "") throw configError(`scope ${JSON.stringify(scope)} names a forge and no repo (write ${m[1]}:owner/name)`);
 	const repo = m[2].trim();
-	if (!QUALIFIED_REPO.test(repo)) throw configError(`scope ${JSON.stringify(scope)} is not a forge repo after "${m[1]}:" (write ${m[1]}:owner/name: segments separated by single "/", no spaces, "#", ":" or control characters), so it would guard nothing`);
+	if (!QUALIFIED_REPO.test(repo)) throw configError(`scope ${JSON.stringify(scope)} is not a forge repo after "${m[1]}:" (write ${m[1]}:owner/name: segments separated by single "/", no "#", ":" or control characters, and no space at the start or end of a segment), so it would guard nothing`);
 	return { type: "qualified", kind: m[1], repo };
 }
 

@@ -4756,6 +4756,24 @@ test("doctor: a bare repo row or bare pause window warns when triggers name two 
 	assert.ok(!qualified.find((x) => /name a bare repo/.test(x.label)), "qualified only: no line");
 });
 
+test("doctor: every forge-qualified spelling the bare-repo warning suggests parses, an Azure name with spaces included (issue #498)", async () => {
+	const dir = tempDir("pi-sl-azure-spaces-");
+	const triggersPath = join(dir, "triggers.json");
+	writeFileSync(triggersPath, JSON.stringify({ triggers: [
+		{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } },
+		{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "azure", flow: "fix", repository: "webapp" } },
+	] }));
+	const limitsPath = join(dir, "scoped-limits.json");
+	writeFileSync(limitsPath, JSON.stringify({ version: 1, limits: [{ scope: "Fabrikam Fiber/Web App", day: 3 }] }));
+	const checks = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: triggersPath, PI_SCOPED_LIMITS_FILE: limitsPath }), collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true }));
+	const c = checks.find((x) => /name a bare repo/.test(x.label));
+	assert.ok(c, "the warning is present");
+	for (const spelling of ["azure:Fabrikam Fiber/Web App", "github:Fabrikam Fiber/Web App"]) {
+		assert.ok(c.fix.includes(spelling), spelling);
+		assert.equal(parseScopedLimits(JSON.stringify({ version: 2, limits: [{ scope: spelling, day: 3 }] }), "sl.json")[0].scope, spelling, "the worker accepts the spelling doctor recommends");
+	}
+});
+
 // --- run.waitFor (issue #230) --------------------------------------------------------------------------
 
 function waitTriggersFile({ profiles = ["jira"], after } = {}) {

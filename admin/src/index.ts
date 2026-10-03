@@ -1001,7 +1001,8 @@ function registerTools(pi: ExtensionAPI): void {
       "No field can be removed here: to drop a cap from an entry, edit scoped-limits.json by hand. Changing `scope` " +
       "(such as a bare \"acme/web\" rewritten to \"github:acme/web\") starts a NEW count under a new key: the old " +
       "row's used runs and dollars do not carry over, and jobs already running keep their slot under the old scope " +
-      "until they finish, so one more job than `concurrent` allows can start meanwhile. The file stays " +
+      "until they finish while the new row counts from zero, so with `concurrent: N` up to 2N jobs can run until " +
+      "then. The file stays " +
       "version 1 unless a row needs version 2. The operator MUST approve a confirm dialog showing the before->after; " +
       "refused with no interactive operator.",
     executionMode: "sequential",
@@ -2380,7 +2381,7 @@ async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): P
  */
 export function scopeChangeNote(before: any, after: any): string {
   if (before?.scope === after?.scope) return "";
-  return "\nThe scope changes, so this row starts a NEW count under a new key: the used runs and dollars of the old scope do not carry over. Jobs already running keep their slot under the old scope until they finish, so until then one more job than `concurrent` allows can start.";
+  return "\nThe scope changes, so this row starts a NEW count under a new key: the used runs and dollars of the old scope do not carry over. Jobs already running keep their slot under the old scope until they finish, and the new row counts from zero, so with `concurrent: N` up to 2N jobs can run until then.";
 }
 
 /** Delete a scoped limit: select which, confirm, remove. */

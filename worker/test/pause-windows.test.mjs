@@ -179,7 +179,8 @@ test("parseScopeString refuses a qualified scope whose repo is not a forge repo'
 		"leading slash": "github:/acme/web",
 		"trailing slash": "github:acme/web/",
 		"empty segment": "github:acme//web",
-		whitespace: "github:acme/we b",
+		"whitespace at a segment's end": "github:acme /web",
+		"whitespace at a segment's start": "github:acme/ web",
 		"control character": "github:acme/web\tx",
 		NUL: "github:acme/web\u0000",
 		"a # tail": "github:acme/web#12",
@@ -191,4 +192,10 @@ test("parseScopeString refuses a qualified scope whose repo is not a forge repo'
 		assert.throws(() => parse([{ scope, from: "09:00", to: "17:00" }]), (e) => /pause window at index 0/.test(e.message) && /is not a forge repo/.test(e.message), `window: ${what}`);
 	}
 	assert.equal(parseScopeString("gitlab:group/sub/proj").repo, "group/sub/proj");
+	// Azure DevOps names may hold spaces inside a segment: the window parses and pauses that Azure job only.
+	const [w] = parse([{ scope: "azure:Fabrikam Fiber/Web App", from: "09:00", to: "17:00" }]);
+	assert.equal(w.scope, "azure:Fabrikam Fiber/Web App");
+	const now = UTC(2026, 7, 23, 12);
+	assert.equal(pauseUntilMs([w], { kind: "azure", repo: "Fabrikam Fiber/Web App" }, now), UTC(2026, 7, 23, 17));
+	assert.equal(pauseUntilMs([w], { kind: "github", repo: "Fabrikam Fiber/Web App" }, now), null);
 });
