@@ -282,7 +282,7 @@ test("init's ladders name no file the folder does not have, docker and podman (#
 test("init's file column is as wide as the longest name, so every note starts in one column (#480)", () => {
 	const { text } = nextFor({});
 	const rows = text.slice(0, text.indexOf("\nNext:")).split("\n").filter(Boolean);
-	assert.equal(rows.length, 10, text);
+	assert.equal(rows.length, 11, text); // 11 since issue #499 scaffolds projects.json
 	const starts = new Set(rows.map((row) => row.match(/^\S+\s+\S+\s+/)[0].length));
 	assert.equal(starts.size, 1, `every note starts in one column:\n${rows.join("\n")}`);
 	assert.ok(rows.some((row) => row.includes("egress-allowlist.conf ")), "the 21-character name is followed by a space before its note");

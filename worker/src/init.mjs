@@ -35,6 +35,9 @@ const EMPTY_SUBSCRIPTIONS = `${JSON.stringify({ version: 1, subscriptions: [] },
 // Versioned for the subscriptions reason, sharpened: this is enforcement config, and a silently
 // down-read newer file would be a silently widened spend limit.
 export const EMPTY_SCOPED_LIMITS = `${JSON.stringify({ version: 1, limits: [] }, null, 2)}\n`;
+// Projects (issue #499): named groups of repos and folders, recorded per run. Empty is inert: every run records no
+// project. Versioned for the scoped-limits reason, since part B of the issue caps a project as one.
+export const EMPTY_PROJECTS = `${JSON.stringify({ version: 1, projects: [] }, null, 2)}\n`;
 /**
  * The egress allowlist (REQ-EGRESS-ALLOWLIST): the hosts a job container may reach, one bare hostname per
  * line. Scaffolded with the three a job cannot work without, and NOT empty -- unlike every other scaffold
@@ -120,6 +123,7 @@ export function runInit(cwd = process.cwd(), deps = {}) {
 		scaffold(fs, results, join(cwd, "pi-packages.json"), EMPTY_PACKAGES, "empty pi package list (stage with import-pi --with-packages)");
 		scaffold(fs, results, join(cwd, "subscriptions.json"), EMPTY_SUBSCRIPTIONS, "empty subscription list (declare plan prices for the admin's cost analytics)");
 		scaffold(fs, results, join(cwd, "scoped-limits.json"), EMPTY_SCOPED_LIMITS, "empty scoped-limits list (per repo/folder caps; the folder mutex needs no file)");
+		scaffold(fs, results, join(cwd, "projects.json"), EMPTY_PROJECTS, "empty projects list (group repos and folders into a project, recorded per run)");
 		scaffold(fs, results, join(cwd, "egress-allowlist.conf"), DEFAULT_EGRESS_ALLOWLIST, "egress allowlist (provider + forge + registry; the egress policy is on unless PI_EGRESS=0)");
 		// Issue #503: the declared model endpoints, empty, and the proxy include rendered from them, which is the empty
 		// render (its header only). squid refuses to start on a missing include file and starts on a comments-only one

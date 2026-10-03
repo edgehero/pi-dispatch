@@ -213,4 +213,5 @@ Three doors, same as quiet hours:
 | Deferral | delayed set, fixed re-check, never dropped |
 | Panel key | `m` |
 | Tools | `dispatch_limits`, `dispatch_limit_add`, `dispatch_limit_edit`, `dispatch_limit_delete` |
+| Projects | `PI_PROJECTS_FILE` groups repos and folders into a project, recorded per run. It is wired like this key. See [projects.md](projects.md) |
 | The folder mutex | always on for local jobs, max 1 per folder, no configuration anywhere |

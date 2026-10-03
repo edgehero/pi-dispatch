@@ -304,8 +304,8 @@ test("up: WEBHOOK_SECRET is generated into an empty .env and the value NEVER rea
 	// Issue #468: and the deployment's Valkey password, generated like the webhook secret, never printed either.
 	assert.equal(
 		h.store.get("/deploy/.env"),
-		`A=1\nWEBHOOK_SECRET=${SECRET}\nPI_PAUSE_WINDOWS_FILE=/deploy/pause-windows.json\nPI_SCOPED_LIMITS_FILE=/deploy/scoped-limits.json\nPI_LOGS_DIR=/home/op/.pi-dispatch/logs\nPI_SETTINGS_FILE=/home/op/.pi-dispatch/settings.json\nVALKEY_PASSWORD=${PASSWORD}\n`,
-		"the key was filled, the four paths and the password appended, other lines untouched",
+		`A=1\nWEBHOOK_SECRET=${SECRET}\nPI_PAUSE_WINDOWS_FILE=/deploy/pause-windows.json\nPI_SCOPED_LIMITS_FILE=/deploy/scoped-limits.json\nPI_PROJECTS_FILE=/deploy/projects.json\nPI_LOGS_DIR=/home/op/.pi-dispatch/logs\nPI_SETTINGS_FILE=/home/op/.pi-dispatch/settings.json\nVALKEY_PASSWORD=${PASSWORD}\n`,
+		"the key was filled, the five paths (projects since #499) and the password appended, other lines untouched",
 	);
 	assert.ok(!h.text().includes(SECRET), "the secret value must never be printed");
 	assert.ok(!h.text().includes(PASSWORD), "the Valkey password must never be printed");
@@ -619,7 +619,7 @@ test("up: a .env refused for its GROUP says the group's fix, never a value's adv
 	};
 	await h.run();
 	const rows = h.text().split("\n").filter((l) => / NOT written: refusing to edit \/deploy\/\.env: its group is /.test(l));
-	assert.deepEqual(rows.map((l) => l.trim().split(" ")[0]), ["WEBHOOK_SECRET", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "VALKEY_PASSWORD"]);
+	assert.deepEqual(rows.map((l) => l.trim().split(" ")[0]), ["WEBHOOK_SECRET", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "VALKEY_PASSWORD"]);
 	for (const row of rows) {
 		assert.match(row, /run `chgrp \S+ \/deploy\/\.env` and run this again; otherwise edit the file by hand\. Nothing was written(\. The Valkey up starts then has no password)?$/, row);
 		assert.doesNotMatch(row, /that character/, row);
@@ -664,18 +664,19 @@ test("up hands its OWN doctor call what it just wrote, or it warns about what it
 	assert.equal(h.doctorCalls.length, 1);
 	assert.equal(h.doctorCalls[0].PI_PAUSE_WINDOWS_FILE, "/deploy/pause-windows.json");
 	assert.equal(h.doctorCalls[0].PI_SCOPED_LIMITS_FILE, "/deploy/scoped-limits.json");
+	assert.equal(h.doctorCalls[0].PI_PROJECTS_FILE, "/deploy/projects.json", "the projects key too (#499)");
 	assert.equal(h.doctorCalls[0].PI_LOGS_DIR, "/home/op/.pi-dispatch/logs");
 	assert.equal(h.doctorCalls[0].PI_PROVIDER, "anthropic", "and the layer adds, it does not replace the environment");
 });
 
-test("up leaves every one of the four alone when the operator already set it (#357)", async () => {
-	const mine = ["PI_PAUSE_WINDOWS_FILE=/elsewhere/windows.json", "PI_SCOPED_LIMITS_FILE=/elsewhere/limits.json", "PI_LOGS_DIR=/var/log/pi", "PI_SETTINGS_FILE=/etc/pi/settings.json"].join("\n");
+test("up leaves every one of the five alone when the operator already set it (#357, #499)", async () => {
+	const mine = ["PI_PAUSE_WINDOWS_FILE=/elsewhere/windows.json", "PI_SCOPED_LIMITS_FILE=/elsewhere/limits.json", "PI_PROJECTS_FILE=/elsewhere/projects.json", "PI_LOGS_DIR=/var/log/pi", "PI_SETTINGS_FILE=/etc/pi/settings.json"].join("\n");
 	const h = harness({ plan: green, files: { "/deploy/.env": `${mine}\nWEBHOOK_SECRET=x\nVALKEY_PASSWORD=${PASSWORD}\n` } });
 	await h.run();
-	assert.equal(h.store.get("/deploy/.env"), `${mine}\nWEBHOOK_SECRET=x\nVALKEY_PASSWORD=${PASSWORD}\n`, "four keys, four chances to clobber, none taken (and the password, #468)");
+	assert.equal(h.store.get("/deploy/.env"), `${mine}\nWEBHOOK_SECRET=x\nVALKEY_PASSWORD=${PASSWORD}\n`, "five keys, five chances to clobber, none taken (and the password, #468)");
 	// And the layer must not put back what the operator overrode: `wrote` holds only keys that were empty.
 	assert.equal(h.doctorCalls[0].PI_LOGS_DIR, undefined, "an operator value stays the environment's business");
-	for (const key of ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE"]) {
+	for (const key of ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE"]) {
 		assert.match(h.text(), new RegExp(`${key}\\s+already set`), `${key} says it was left alone`);
 	}
 	assert.doesNotMatch(h.text(), /written into \.env/, "and nothing claims a write that did not happen");

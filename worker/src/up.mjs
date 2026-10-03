@@ -360,7 +360,7 @@ export async function runUp(argv = [], deps = {}) {
 	// `loadPauseWindows`/`loadScopedLimits` unconditionally at boot, which throw on a path that does not
 	// exist: the worker does not ignore the feature, it refuses to start. `PI_LOGS_DIR` and
 	// `PI_SETTINGS_FILE` use `||` and fall back to the account default; `WEBHOOK_SECRET` reads as absent.
-	const EMPTY_REFUSES_BOOT = new Set(["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"]);
+	const EMPTY_REFUSES_BOOT = new Set(["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE"]);
 	const emptyNote = (key) =>
 		EMPTY_REFUSES_BOOT.has(key)
 			? `left untouched: the line is there and its value is EMPTY, which is not the same as no line -- a shell that sources this file exports it as "", the worker keeps it and REFUSES TO BOOT. up never clobbers a key an operator wrote, so fill it in or delete the line`
@@ -417,13 +417,13 @@ export async function runUp(argv = [], deps = {}) {
 		// `.env.example`). Same never-clobber discipline as WEBHOOK_SECRET, at key granularity: a value the
 		// operator set survives untouched.
 		//
-		// TWO get the deployment folder and TWO get the RESOLVED ACCOUNT DEFAULT, and the split is the
-		// sharpest edge in this change rather than an inconsistency. `pause-windows.json` and
-		// `scoped-limits.json` are scaffolded by `init` into this folder, and the panel defaults to this
-		// folder, so pointing the worker here is what makes the three agree. `PI_LOGS_DIR` and
+		// THREE get the deployment folder and TWO get the RESOLVED ACCOUNT DEFAULT, and the split is the
+		// sharpest edge in this change rather than an inconsistency. `pause-windows.json`,
+		// `scoped-limits.json` and (issue #499) `projects.json` are scaffolded by `init` into this folder, and the
+		// panel defaults to this folder, so pointing the worker here is what makes the three agree. `PI_LOGS_DIR` and
 		// `PI_SETTINGS_FILE` are different in kind: `makeLogReaper` unlinks EVERY `.log` and `.json` in
 		// `PI_LOGS_DIR` past the window with no name shape and no ownership check, so a deployment folder
-		// there would eat `triggers.json`, `pause-windows.json`, `scoped-limits.json` and
+		// there would eat `triggers.json`, `pause-windows.json`, `scoped-limits.json`, `projects.json` and
 		// `subscriptions.json` thirty days in, silently, and the worker would then run nothing while
 		// reporting success. `<deployment>/logs` is no better: `service.mjs` creates exactly that directory
 		// at install time and the plist puts `worker.out.log` in it. So these two get what
@@ -433,6 +433,7 @@ export async function runUp(argv = [], deps = {}) {
 		for (const [key, raw, durable] of [
 			["PI_PAUSE_WINDOWS_FILE", join(cwd, "pause-windows.json"), false],
 			["PI_SCOPED_LIMITS_FILE", join(cwd, "scoped-limits.json"), false],
+			["PI_PROJECTS_FILE", join(cwd, "projects.json"), false],
 			["PI_LOGS_DIR", logsDirPathFn(env), true],
 			["PI_SETTINGS_FILE", settingsFilePathFn(env), true],
 		]) {
@@ -449,8 +450,8 @@ export async function runUp(argv = [], deps = {}) {
 			//
 			// RELATIVE is the sharper of the two and it is not hypothetical: `PI_LOGS_DIR=.` resolves against
 			// the unit's `WorkingDirectory`, which IS the deployment folder, so the retention sweep then
-			// deletes `triggers.json`, `pause-windows.json`, `scoped-limits.json` and `subscriptions.json`
-			// thirty days in. All three deploy templates document this key as absolute for exactly that
+			// deletes `triggers.json`, `pause-windows.json`, `scoped-limits.json`, `projects.json` and
+			// `subscriptions.json` thirty days in. All three deploy templates document this key as absolute for exactly that
 			// reason. INSIDE THIS FOLDER is the same harm reached with an absolute path.
 			//
 			// The refusals live here and not in the resolver, because the resolver is right for the worker:
@@ -503,7 +504,7 @@ export async function runUp(argv = [], deps = {}) {
 		}
 	} else {
 		summary.push(["WEBHOOK_SECRET", "no .env here — skipped (set it wherever your env lives)"]);
-		for (const key of ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE"]) {
+		for (const key of ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE"]) {
 			summary.push([key, "no .env here — skipped (set it wherever your env lives)"]);
 		}
 	}

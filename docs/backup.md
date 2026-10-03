@@ -16,6 +16,7 @@ Both exist because getting them wrong is silent.
 | Triggers | `./triggers.json` | `PI_TRIGGERS_FILE` | The trigger set, **and the one-shot disarm marks** (`on.disarmed`). Two processes write this file: the panel and the worker |
 | Pause windows | `./pause-windows.json` | `PI_PAUSE_WINDOWS_FILE` | Quiet hours |
 | Scoped limits | `./scoped-limits.json` | `PI_SCOPED_LIMITS_FILE` | Per repo and per folder caps, and per scope concurrency |
+| Projects | `./projects.json` | `PI_PROJECTS_FILE` | Which repos and folders form a project. Run records keep the project id either way |
 | Subscriptions | `./subscriptions.json` | `PI_SUBSCRIPTIONS_FILE` | The plan prices the cost analytics read. Nothing about routing or spend enforcement |
 | Staged pi packages | `./pi-packages.json` | `PI_PACKAGES_FILE` | Which packages a job may load |
 | Egress allowlist | `./egress-allowlist.conf` | (path is passed to the proxy) | The egress policy |

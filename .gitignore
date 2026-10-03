@@ -89,6 +89,10 @@ coverage/
 /scoped-limits.json
 !scoped-limits.example.json
 
+# Projects (issue #499): named groups of repos and folders. Holds local folder paths (the members), so an
+# operator's real file must never land in a checkout by accident. Resolved only via PI_PROJECTS_FILE.
+/projects.json
+
 # The egress allowlist (issue #202): the hosts THIS deployment's jobs may reach. init scaffolds it into
 # the cwd, so without this rule the scaffold is committable by accident. There is no committed template
 # beside it, deliberately: the shipped default lives in init.mjs, and an example file here would be one

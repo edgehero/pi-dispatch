@@ -15,6 +15,7 @@ import { splitModelEntry } from "./model-ref.mjs";
 import { effectiveCostCapMicros } from "./money.mjs";
 import { dollarWindowCaps } from "./dollar-budget.mjs";
 import { budgetCapsFor, concurrencyFor, dollarCapsFor, makeInFlight, modelDollarRows, rowScopeFor } from "./scoped-limits.mjs";
+import { projectOf } from "./projects.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 
@@ -173,7 +174,7 @@ export function effectiveJobOf(data, settings, allowedModels = null, log = () =>
 	};
 }
 
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
 	return async function processor(job, token, signal) {
 		// Scoped pause windows (REQ-SCOPED-PAUSE-WINDOWS): if this job's folder/repo is inside an active pause
 		// window, DEFER it to the window end via BullMQ's delayed set -- the job keeps its identity/dedup and
@@ -544,6 +545,17 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		}
 
 		const limits = scopedLimits();
+		// The job's project (issue #499, INT-PROJECTS-FILE-CONTRACT), resolved ONCE here from one read of the projects ref,
+		// beside the limits snapshot and for its reason: the gate, the ledger and the record agree for this attempt,
+		// whatever an operator does to projects.json mid-run. A retry or a deferral is a new pickup and resolves again.
+		// Every record below this line carries it (through `recordAfterGate`); a record written before this gate carries
+		// none and is resolved from the live ref (start.mjs). An id or null, never a name.
+		const project = projectOf(job.data, projects());
+		// THE ONE RECORDER BELOW THE GATE, bound once, so the pickup project is a property of the path and not of each call
+		// site: every record from here on goes through it, and none can drop the field and fall back to the live ref in
+		// start.mjs, which would disagree with the pickup value exactly when projects.json was edited mid-run. A bolt in
+		// project-pickup.test.mjs refuses a bare `recordRun(` call below this line.
+		const recordAfterGate = (args) => recordRun({ ...args, project });
 		// The MATCHED ROW's scope keys both the in-process slot and the fleet lease (issue #498), the same string
 		// `budgetCapsFor` hashes below and the boot sweeper hashes from the file: a qualified `github:acme/web` row holds
 		// GitHub jobs only, a bare `acme/web` row holds every forge's under the key it always had. With no row it is the
@@ -915,7 +927,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// refusals are the others): each is decided before or during the settings read, so no honest effective
 				// value exists yet -- buildRecord defaults both null.
 				const result = { outcome: "policy", reason: "settings-overlay-invalid", exitCode: null, turns: null, tokens: null, budgetReserved: false };
-				recordRun({ job, result, startedAt, endedAt: new Date().toISOString() });
+				recordAfterGate({ job, result, startedAt, endedAt: new Date().toISOString() });
 				return result;
 			}
 
@@ -1056,7 +1068,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				deps.log?.("cancel_acked_before_result", { jobId: job.id, was: `${result?.outcome}/${result?.reason ?? ""}` });
 				outcome = { ...result, outcome: "policy", reason: "operator-cancel" };
 			}
-			recordRun({ job, result: outcome, startedAt, endedAt: new Date().toISOString() });
+			recordAfterGate({ job, result: outcome, startedAt, endedAt: new Date().toISOString() });
 			return outcome;
 		} catch (error) {
 			// Issue #448 (gate round 2 of PR #473): a local job held until rootful Podman's service restarts goes back to the
@@ -1109,7 +1121,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				const result = { outcome: "policy", reason: "operator-cancel", exitCode: spent ? (error.exitCode ?? null) : null, turns: spent ? (error.turns ?? null) : null, tokens: spent ? (error.tokens ?? null) : null, ...(spent && error.usage ? { usage: error.usage } : {}), provider: error?.provider ?? null, model: error?.model ?? null, session: error?.session ?? null, budgetReserved: retryable ? spent : (error?.budgetReserved ?? null), ...(error?.dollars ? { dollars: error.dollars } : {}) };
 				deps?.log?.("job_cancelled_instead_of_retry", { jobId: job.id, spent, retryable, ...(retryable ? {} : { failure: scrubCredentials(String(error?.message ?? error)).slice(0, 300) }) });
 				if (deps?.comment) await Promise.resolve(deps.comment(job.data, beforeStart ? CANCELLED_BEFORE_START_COMMENT : TERMINAL_COMMENTS["operator-cancel"])).catch(() => {});
-				recordRun({ job, result, startedAt, endedAt: new Date().toISOString() });
+				recordAfterGate({ job, result, startedAt, endedAt: new Date().toISOString() });
 				return result;
 			};
 			// STOP THE POLL BEFORE ASKING (gate round 2 of PR #479). The poll ran until the finally below, so a request that
@@ -1142,7 +1154,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					throw new DelayedError();
 				}
 				const expired = Object.assign(new UnrecoverableError(`held ${Math.round((heldAt - since) / 60_000)} min for rootful Podman's service to restart, and it did not: ${error.message}`), { reason: PODMAN_RESTART_HOLD_EXPIRED, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
-				recordRun({ job, error: expired, startedAt, endedAt: new Date().toISOString() });
+				recordAfterGate({ job, error: expired, startedAt, endedAt: new Date().toISOString() });
 				throw expired;
 			}
 			// Issue #476: a job whose egress preflight found the rootless network keeper running on its own bridge but younger
@@ -1167,14 +1179,14 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				const was = keeperHold.startedMs ?? young.startedMs;
 				await markKeeperLoop(job, was === young.startedMs ? [was] : [was, young.startedMs]);
 				const loop = new InfraRetry(netnsKeeperCrashLoopSentence({ was, now: young.startedMs, heldMs, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
-				recordRun({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
+				recordAfterGate({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
 				throw loop;
 			}
 			if (error?.reason === NETNS_KEEPER_NOT_HOLDING && keeperHold.startedMs !== null) {
 				// The keeper this job was waiting on is no longer running on its bridge: it died young, the loop's other face.
 				await markKeeperLoop(job, [keeperHold.startedMs]);
 				const loop = new InfraRetry(netnsKeeperCrashLoopSentence({ was: keeperHold.startedMs, now: null, problem: error.keeperProblem ?? null, heldMs: keeperHold.at - keeperHold.since, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
-				recordRun({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
+				recordAfterGate({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
 				throw loop;
 			}
 			// A LATER ATTEMPT OF A JOB THAT SAW THE LOOP (gate of PR #479). The loop's retry comes after the queue's 60 s
@@ -1185,10 +1197,10 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			const loopSeen = job.data?.netnsKeeperLoopSeen;
 			if (error?.reason === NETNS_KEEPER_NOT_HOLDING && Array.isArray(loopSeen) && loopSeen.length > 0) {
 				const loop = new InfraRetry(netnsKeeperLoopAgainSentence({ seen: loopSeen, problem: error.keeperProblem ?? null, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
-				recordRun({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
+				recordAfterGate({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
 				throw loop;
 			}
-			recordRun({ job, error, startedAt, endedAt: new Date().toISOString() });
+			recordAfterGate({ job, error, startedAt, endedAt: new Date().toISOString() });
 			if (error instanceof InfraRetry) throw error; // retryable: BullMQ retries per attempts
 			// A non-retryable, non-infra error (our bug) must not retry forever. UnrecoverableError
 			// records it as failed-and-distinct in the queue's failed set without a retry.
@@ -1247,7 +1259,7 @@ export function keeperHoldState(job, at) {
 	return { at, since, startedMs };
 }
 
-export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [] }) {
+export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, projects, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [] }) {
 	// One Worker per queue name (issue #57). A host-affine job -- one whose folder, secret resolver or wait
 	// check lives on THIS machine -- is enqueued to `pi-jobs@<name>` rather than filtered for at pickup,
 	// because BullMQ has no selective pop and the put-it-back alternative does not work: promotion out of
@@ -1303,6 +1315,7 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			// folder mutex, the per-scope ceiling and the wait-check lease all bound the HOST, so two
 			// independent maps would double every one of them exactly as two Workers double concurrency.
 			scopedLimits,
+			projects,
 			inFlight,
 			hostBound,
 			scopeLease,

@@ -228,8 +228,15 @@ test("resolvePaths reads env with safe defaults and never calls loadConfig", () 
     graphRoot: null,
     pauseWindowsPath: "./pause-windows.json",
     scopedLimitsPath: "./scoped-limits.json",
+    projectsPath: "./projects.json",
     subscriptionsPath: "/subs.json",
   });
+});
+
+test("resolvePaths: the projects file is PI_PROJECTS_FILE, else init's cwd scaffold, and the panel's .env carries the key (#499)", () => {
+  assert.equal(resolvePaths({ PI_PROJECTS_FILE: "/d/projects.json" }).projectsPath, "/d/projects.json");
+  assert.equal(resolvePaths({}).projectsPath, "./projects.json");
+  assert.ok(PANEL_SERVICE_KEYS.includes("PI_PROJECTS_FILE"), "the service reads it from its .env, so the panel resolves it the same way");
 });
 
 test("the admin and the worker resolve the SAME durable defaults from an empty env (issue #290)", async () => {

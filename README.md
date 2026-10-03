@@ -253,7 +253,8 @@ job is refused before any spend; over the concurrency ceiling it waits. Local jo
 one job per folder at a time, because two agents editing one working tree race each other with no gate
 and no undo. The guard lives in the worker process, and one worker per container daemon is the supported
 setup. Version 2 of the file adds dollar caps per day, week and month for a repo, a folder or a model.
-Manage limits with `m` in the panel ([`docs/scoped-limits.md`](docs/scoped-limits.md)).
+Manage limits with `m` in the panel ([`docs/scoped-limits.md`](docs/scoped-limits.md)). Group repos and folders into
+projects, recorded per run, with [`docs/projects.md`](docs/projects.md).
 
 ### Waiting on a condition
 
