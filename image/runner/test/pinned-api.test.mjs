@@ -1786,7 +1786,7 @@ test("the child route's own files: the preload imports no pi module, the child m
 		'import { basename, dirname, join, sep } from "node:path";',
 		'import { fileURLToPath, pathToFileURL } from "node:url";',
 		'import { isMainThread } from "node:worker_threads";',
-		'import { CHILD_METER_PATH, injectChildMeter, nestedRunnerKind, PI_SUBCOMMANDS } from "./child-route.mjs";',
+		'import { CHILD_METER_PATH, injectChildMeter, ledgerDirProblem, nestedRunnerKind, PI_SUBCOMMANDS } from "./child-route.mjs";',
 	], "child-preload.mjs imports changed: no pi module, and node:module only as a namespace");
 	// child-route.mjs is loaded by the preload in every Node child too (issue #500 part D): built-ins only, and its one
 	// dynamic import, pi's dist/cli.js, happens only in a nested runner.

@@ -57,7 +57,7 @@ import * as nodeModule from "node:module";
 import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isMainThread } from "node:worker_threads";
-import { CHILD_METER_PATH, injectChildMeter, nestedRunnerKind, PI_SUBCOMMANDS } from "./child-route.mjs";
+import { CHILD_METER_PATH, injectChildMeter, ledgerDirProblem, nestedRunnerKind, PI_SUBCOMMANDS } from "./child-route.mjs";
 
 export { CHILD_METER_PATH, injectChildMeter, PI_SUBCOMMANDS };
 
@@ -207,10 +207,15 @@ export function makeLibraryResolveHook({ packageDir = defaultPackageDir, onBundl
 	};
 }
 
-/** Write the `starting` stub for this process's ledger, once. */
+/**
+ * Write the `starting` stub for this process's ledger, once. Not into a directory the nested runner would refuse
+ * (ledgerDirProblem: a link, not a directory, not writable): a nested runner exits 2 on such a directory before its
+ * meter starts, and a stub written through a link would stay `starting` for good in whatever the link names.
+ */
 function writeStub(state, meter) {
 	if (state.stubbed) return;
 	state.stubbed = true;
+	if (ledgerDirProblem(state.dir) !== null) return;
 	try {
 		meter.writeFileAtomic({ dir: state.dir, name: state.name, text: JSON.stringify(meter.childLedger({ state: "starting" })) });
 	} catch {
@@ -251,7 +256,7 @@ export async function preload({
 			if (quick) {
 				onExit(() => {
 					try {
-						if (state.child === undefined) state.meter.writeFileAtomic({ dir, name: state.name, text: JSON.stringify(state.meter.childLedger({ state: "done" })) });
+						if (state.child === undefined && ledgerDirProblem(dir) === null) state.meter.writeFileAtomic({ dir, name: state.name, text: JSON.stringify(state.meter.childLedger({ state: "done" })) });
 					} catch {
 						// The stub stays `starting`.
 					}

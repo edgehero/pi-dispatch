@@ -8,7 +8,7 @@
  * file it ran the whole job prompt again, with its own meter, its own exit line and its own ledger directory. Now it
  * runs as the pi CLI it was spawned to be (runAsPiCli), metered like any pi CLI child through the parent's ledger.
  */
-import { accessSync, constants, lstatSync, realpathSync } from "node:fs";
+import { accessSync, constants, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -22,17 +22,46 @@ export const RUN_JOB_PATH = join(HERE, "..", "run-job.mjs");
 export const PI_SUBCOMMANDS = Object.freeze(["auth", "config", "install", "list", "mcp", "remove", "uninstall", "update"]);
 
 /**
- * Whether this process is a NESTED runner: PI_DISPATCH_RUNNER_PID is set and is not this process's pid. The job's
- * runner sets that variable to its own pid for every descendant (openChildLedger), and the worker never passes it in,
- * so the job's runner starts without it and any other process that carries it was started below the runner. Any value
- * that is not exactly this pid counts as nested: a nested runner that wrongly thinks it is the job's runner re-runs the
- * job, and one that wrongly thinks it is nested runs a pi CLI or stops with exit 2, so the doubt goes to nested.
+ * This process's pid namespace, as the inode number in `readlink /proc/self/ns/pid` (`pid:[4026532560]` gives
+ * "4026532560"), or null where it cannot be read (no /proc: macOS, where the tests also run).
  */
-export function isNestedRunner(env, pid) {
+export function readPidNamespace({ readlink = readlinkSync } = {}) {
+	try {
+		const match = /^pid:\[([0-9]+)\]$/.exec(readlink("/proc/self/ns/pid"));
+		return match ? match[1] : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The value the job's runner puts in PI_DISPATCH_RUNNER_PID (openChildLedger): its pid, and its pid namespace where it
+ * can read one, as `<pid>:<namespace>`. A pid alone is not an identity: a process in a NEW pid namespace (`unshare
+ * -Upf`, a sandbox wrapper that runs its command as the first child) can have the job runner's pid (measured: 2 under
+ * Podman, 7 under Docker Desktop, both reached from inside a job). With the namespace beside it, that process is nested.
+ */
+export function runnerIdentity(pid, namespace = readPidNamespace()) {
+	return namespace === null ? String(pid) : `${pid}:${namespace}`;
+}
+
+/**
+ * Whether this process is a NESTED runner: PI_DISPATCH_RUNNER_PID is set and does not name this process, by pid and,
+ * where one was recorded, by pid namespace. The job's runner sets that variable for every descendant
+ * (openChildLedger), and the worker never passes it in, so the job's runner starts without it and any other process
+ * that carries it was started below the runner. Nested when the pid differs, when the recorded namespace differs or
+ * cannot be read here, or when the value is not `<pid>` or `<pid>:<namespace>` at all. A nested runner that wrongly
+ * thinks it is the job's runner re-runs the job, and one that wrongly thinks it is nested runs a pi CLI or stops with
+ * exit 2, so the doubt goes to nested. Where no namespace was recorded (no /proc) only the pid compares.
+ */
+export function isNestedRunner(env, pid, { pidNamespace = readPidNamespace } = {}) {
 	// Read by name, not through usage-meter.mjs RUNNER_PID_ENV: this file loads nothing heavy. child-route.test.mjs drives it with that constant.
 	// env-internal PI_DISPATCH_RUNNER_PID: set by the runner in its own environment and inherited, never by the worker.
 	const runner = env.PI_DISPATCH_RUNNER_PID;
-	return runner !== undefined && runner !== String(pid);
+	if (runner === undefined) return false;
+	const match = /^([1-9][0-9]*)(?::([0-9]+))?$/.exec(runner);
+	if (!match || match[1] !== String(pid)) return true;
+	if (match[2] === undefined) return false;
+	return pidNamespace() !== match[2];
 }
 
 /**
@@ -56,12 +85,18 @@ export function hasChildMeter(argv, meterPath = CHILD_METER_PATH) {
  * preload's route for such a process is then the pi CLI's: the `starting` stub, `-e` first, no library hook. So a nested
  * runner is metered by exactly the route a pi CLI child is, with one meter, the extension's.
  */
-export function nestedRunnerKind(argv1, { env, pid, realpath = realpathSync, runJob = RUN_JOB_PATH }) {
-	if (!isNestedRunner(env, pid) || typeof argv1 !== "string" || argv1 === "") return null;
+export function nestedRunnerKind(argv1, { env, pid, realpath = realpathSync, runJob = RUN_JOB_PATH, pidNamespace = readPidNamespace }) {
+	if (!isNestedRunner(env, pid, { pidNamespace })) return null;
+	return isRunJob(argv1, realpath, runJob) ? "cli" : null;
+}
+
+/** Whether `argv1` is this image's run-job.mjs, by realpath. */
+function isRunJob(argv1, realpath = realpathSync, runJob = RUN_JOB_PATH) {
+	if (typeof argv1 !== "string" || argv1 === "") return false;
 	try {
-		return realpath(argv1) === realpath(runJob) ? "cli" : null;
+		return realpath(argv1) === realpath(runJob);
 	} catch {
-		return null;
+		return false;
 	}
 }
 
@@ -90,6 +125,7 @@ function defaultCliUrl() {
  * The nested runner's whole life (run-job.mjs calls this and nothing else when isNestedRunner). It reads no exit key,
  * writes no exit line, installs no SIGTERM handler, reads nothing under /job and opens no ledger directory of its own.
  *
+ *   - argv[1] must be run-job.mjs (by realpath), the shape pi's arguments assume; otherwise one line and exit 2.
  *   - The parent's ledger directory must be usable. If it is not, one line on stderr and exit code 2 (a config error,
  *     never retried), set as the exit code so the line is flushed: a child that cannot be metered does not run.
  *   - `-e child-meter.ts` first, unless the preload already put it there (it does, through nestedRunnerKind): with the
@@ -109,9 +145,17 @@ export async function runAsPiCli({
 		process.exitCode = code;
 	},
 	check = ledgerDirProblem,
+	realpath = realpathSync,
 	cliUrl = defaultCliUrl,
 	load = (url) => import(url),
 } = {}) {
+	// Only as `<node> run-job.mjs <pi args>`: pi reads its arguments from argv[2] on, so a runner loaded some other way
+	// (imported from `node -e`, argv[1] absent) would hand pi the meter's path as a message and load no meter.
+	if (!isRunJob(argv[1], realpath)) {
+		warn("pi-dispatch: a nested runner must be started as `node run-job.mjs <pi args>` (not-run-job); exit 2\n");
+		setExitCode(2);
+		return "refused";
+	}
 	// env-internal PI_DISPATCH_CHILD_LEDGER: set by the runner in its own environment and inherited, never by the worker.
 	const problem = check(env.PI_DISPATCH_CHILD_LEDGER);
 	if (problem !== null) {

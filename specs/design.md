@@ -3088,17 +3088,25 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     args>`, which in a job is `runner-node run-job.mjs`. Before part D that child ran the whole job prompt again
     (OQ-011 M1), with its own meter, its own exit line on the example's pipe and its own ledger directory. Now the
     first statement of `run-job.mjs` after its imports is `isNestedRunner(env, pid)` (`child-route.mjs`): nested
-    when `PI_DISPATCH_RUNNER_PID` is set and is not this process's pid. The job's runner starts without that name
-    (the worker deletes it) and sets it to its own pid, so every process below it that carries the name is nested
-    and the job's runner never is. Any value that is not exactly this pid counts as nested, because the doubt
-    belongs on the side that never re-runs the job.
+    when `PI_DISPATCH_RUNNER_PID` is set and does not name this process. The job's runner starts without that name
+    (the worker deletes it) and sets it to its identity: its pid, plus its pid namespace where `/proc/self/ns/pid`
+    can be read, as `<pid>:<namespace>` (`runnerIdentity`). A pid alone is not enough: a process in a new pid
+    namespace (`unshare -Upf` works unprivileged in a job, and a sandbox wrapper runs its command as the first child)
+    can have the job runner's pid, measured as 2 under Podman and 7 under Docker Desktop. So a process is nested when
+    the pid differs, when the recorded namespace differs or cannot be read, or when the value is anything else. Where
+    no namespace was recorded (no `/proc`, the macOS tests) only the pid compares. The doubt belongs on the side that
+    never re-runs the job.
     - A nested runner runs `runAsPiCli` and nothing else. It reads no exit key, makes no exit writer, installs no
       SIGTERM handler, never reaches `main()`, reads nothing under `/job` and opens no ledger directory of its own:
       the job runner's whole module-level work is one block guarded by the check. Its exit codes are pi's, and its
       signals are handled as in a pi process.
+    - It must have been started as `<node> run-job.mjs <pi args>` (argv[1] realpaths to `run-job.mjs`): pi reads its
+      arguments from argv[2] on, and a runner imported from `node -e` would hand pi the meter's path as a message.
+      Otherwise one line on stderr (`not-run-job`) and exit code 2.
     - It needs the inherited ledger directory: set, absolute, a directory itself (not a link) and writable. If it is
       not, one line on stderr naming a code (never the path) and exit code 2, set as the exit code so the line is
-      flushed. pi is never loaded. A child that cannot be metered does not run.
+      flushed. pi is never loaded. A child that cannot be metered does not run. The preload applies the same rule
+      to its `starting` stub, so a link in the variable leaves no orphan stub where it points.
     - Otherwise it puts `-e child-meter.ts` first (`injectChildMeter`, the subcommand rule included), unless the
       preload already did, and imports pi's UNBUNDLED `dist/cli.js` (`setupCli()`, then `main(process.argv.slice(2))`).
       Unbundled, because the runner's own imports already loaded that copy of pi: the CLI runs on the same module
@@ -3118,9 +3126,12 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
       C's lab); importing the bundle (a second copy of pi in the process); an unsettled top-level `await` to hold the
       module after pi starts (Node 22 and 23 then exit 13 with a warning when pi's work drains, measured);
       a nested runner that runs unmetered when the directory is missing (the spend would be invisible).
-    - **Residual**: a spawner that clears the environment (`env: {}`) starts a runner with no
-      `PI_DISPATCH_RUNNER_PID`, which is the job's runner as far as it can tell. It runs the job prompt again with
-      its own meter, as before part D. The parent's detector (part E) sees it as a pi process with no ledger.
+    - **Residual**: a spawner that clears `PI_DISPATCH_RUNNER_PID` (`env: {}` included) or sets it to the new
+      process's own identity (an exec chain can) starts what is, as far as it can tell, the job's runner. It runs the
+      job prompt again with its own meter, as before part D. Its exit line is unsigned (the real runner drained and
+      deleted the key) and goes to the spawner's pipe, so it cannot pass as the job's result; the spend is what is
+      missed, and the parent's detector (part E) is what sees it: a process running `run-job.mjs` that is not the
+      job's runner and has no ledger in the parent's directory is unmetered.
   - **The child's meter** (`startChildMeter`, called by the `child-meter.ts` extension at load, or by the library
     hook). It installs on the class the child's sessions use, with the child's own compat copy (`compat`),
     `brake: true`, and `isStopped` reading `STOP`. Its guard is built from the inherited `PI_ALLOWED_MODELS` and
@@ -7487,3 +7498,4 @@ a tunnel.
 | 2026-10-03 | Issue #500, part C, the second review. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the child route bullet: the preload is an ES module loaded with `--import` again, because a hook registered from a `--require` preload broke every child that uses `module.register` or `--loader`; its library hook is a RESOLVE hook that points `model-runtime.js` at a wrapper module, because a load hook, even a pass-through one, broke `node --import tsx`; the new measured cost; a Node older than 18.19 in a job does not start (a residual, also in `docs/costs.md`); the pinned-bundle rule never fires in a worker thread (a metered pi CLI that reads an image ran its resize worker from a bundle chunk and wrote a false `metered: false`); every call is written to the ledger, in flight, before it is dispatched, and a failed write refuses it (the call that used to escape with the failed write no longer can); new residuals: a renamed copy of pi or a symlink under `--preserve-symlinks`, and a foreign pi version recorded `metered: false` at import. The previous row's "CommonJS loaded with `--require`" and "Node older than 18.18" are superseded by this one. **Code evidence**: image/runner/src/child-preload.mjs -> makeLibraryResolveHook, wrapperSource, preload; image/runner/src/usage-meter.mjs -> openChildLedger, startChildMeter; image/runner/test/child-meter.test.mjs, child-meter.integration.test.mjs; docs/costs.md. |
 | 2026-10-03 | Issue #499, part A. **`DES-WATCHERS-CLOSE-WITH-THE-WORKER` AMENDED**, one bullet: the `model-endpoints.json` watch (#503) and the new `projects.json` watch return the same stop handle, join `extraClosers` and read once after arming; the decision is unchanged. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` UNCHANGED, checked**: the pickup gate reads the projects ref once beside the limits snapshot, and no key, slot or lease is derived from a project in this part. **Code evidence**: worker/src/start.mjs -> watchProjectsFile; worker/test/start-wiring.test.mjs. |
 | 2026-10-03 | Issue #500, part D: the nested runner. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the child route bullet gains The nested runner: the first statement of `run-job.mjs` after its imports is `isNestedRunner(env, pid)` (nested when `PI_DISPATCH_RUNNER_PID` is set and is not this pid); a nested runner reads no exit key, writes no exit line, installs no SIGTERM handler, never reaches `main()`, never reads `/job` and opens no ledger directory; with the inherited directory missing or unusable it exits 2 with one stderr line; otherwise it puts `-e child-meter.ts` first (unless the preload did) and imports pi's unbundled `dist/cli.js`, on the module graph the runner already loaded. The preload gives a nested runner the pi CLI's route and no library hook, so one meter per process. `openChildLedger` keeps `PI_DISPATCH_RUNNER_PID` when the directory cannot be made. Rejected alternatives and one residual (an `env: {}` spawner still starts a job runner) recorded. **Code evidence**: image/runner/run-job.mjs; image/runner/src/child-route.mjs -> isNestedRunner, nestedRunnerKind, ledgerDirProblem, runAsPiCli; image/runner/src/child-preload.mjs -> preload; image/runner/src/usage-meter.mjs -> openChildLedger; image/runner/test/child-route.test.mjs, child-meter.integration.test.mjs, compose.test.mjs; .github/workflows/pi-upgrade-check.yml. |
+| 2026-10-03 | Issue #500, part D, the review's fixes. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the nested runner: `PI_DISPATCH_RUNNER_PID` carries the job runner's pid namespace beside its pid (`<pid>:<namespace>` where `/proc/self/ns/pid` reads, the pid alone where it does not), and a process whose namespace differs or cannot be read is nested, because a process in a new pid namespace can have the runner's pid (measured: 2 under Podman, 7 under Docker Desktop, via `unshare -Upf` in a job); a nested runner not started as `node run-job.mjs` exits 2 (`not-run-job`); the preload writes no stub into a ledger directory the nested runner would refuse (a link); the residual now names a spawner that clears or sets the variable, with its unsigned exit line and the detector as what sees it. **Code evidence**: image/runner/src/child-route.mjs -> readPidNamespace, runnerIdentity, isNestedRunner, runAsPiCli; image/runner/src/usage-meter.mjs -> openChildLedger; image/runner/src/child-preload.mjs -> writeStub; image/runner/test/child-route.test.mjs, child-meter.test.mjs, child-meter.integration.test.mjs. |

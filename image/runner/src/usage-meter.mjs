@@ -3,6 +3,7 @@ import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdtempSync, op
 import { tmpdir } from "node:os";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { readPidNamespace, runnerIdentity } from "./child-route.mjs";
 import { parseAllowedModels, parseCostMicros } from "./config.mjs";
 import { configError, COST_CAP, COST_CAP_UNENFORCEABLE, MODEL_NOT_ALLOWED, MODEL_POLICY_UNENFORCEABLE, TOKEN_BUDGET } from "./outcome.mjs";
 
@@ -2594,7 +2595,8 @@ export const CHILD_METER_HANDOFF = Symbol.for("pi-dispatch.child-meter");
  * under the OS temp directory, made absolute (a relative TMPDIR would give each child a different directory), never
  * `/workspace` (the operator's tree) or `/job` (read-only). Sets, in `env`:
  *   - CHILD_LEDGER_ENV, the directory;
- *   - RUNNER_PID_ENV, `pid`;
+ *   - RUNNER_PID_ENV, `pid`, with this process's pid namespace where it can be read (`<pid>:<namespace>`,
+ *     child-route.mjs runnerIdentity), so a process in another pid namespace that happens to have this pid is nested;
  *   - NODE_OPTIONS, what it held plus ` --import=<preloadUrl>` (once: a value that already carries it is left alone).
  *     `--import`, not `--require`: a load hook registered from a `--require` preload breaks every child that then uses
  *     asynchronous loader hooks (`module.register`, `--loader`). The price is named in DES: a Node older than 18.19
@@ -2606,9 +2608,9 @@ export const CHILD_METER_HANDOFF = Symbol.for("pi-dispatch.child-meter");
  * of the runner that it is one, and a nested runner with no directory stops with exit 2 instead of running the job
  * again. Never throws.
  */
-export function openChildLedger({ env, pid, preloadUrl, mkdtemp = mkdtempSync, tmp = tmpdir }) {
+export function openChildLedger({ env, pid, preloadUrl, mkdtemp = mkdtempSync, tmp = tmpdir, pidNamespace = readPidNamespace }) {
 	// env-internal PI_DISPATCH_RUNNER_PID: set by the runner in its own environment, never by the worker.
-	env.PI_DISPATCH_RUNNER_PID = String(pid);
+	env.PI_DISPATCH_RUNNER_PID = runnerIdentity(pid, pidNamespace());
 	let dir;
 	try {
 		dir = resolvePath(mkdtemp(join(tmp(), "pi-dispatch-meter-")));

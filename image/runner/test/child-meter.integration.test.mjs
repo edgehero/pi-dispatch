@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import { test } from "node:test";
@@ -612,3 +612,26 @@ for (const [label, ledgerEnv] of [["missing", (w) => join(w.root, "gone")], ["un
 		assert.deepEqual(ownLedgerDirs(w.root), []);
 	});
 }
+
+test("a nested runner loaded some other way than `node run-job.mjs` (imported from `node -e`) exits 2 and runs nothing (issue #500)", { skip }, async () => {
+	const w = nestedWorld();
+	const result = await run(["--input-type=module", "-e", `await import(${JSON.stringify(pathToFileURL(RUN_JOB).href)});`], { env: w.env, cwd: w.root });
+	assert.equal(result.code, 2);
+	assert.equal(result.stderr.split("\n").filter(Boolean).length, 1, result.stderr);
+	assert.match(result.stderr, /\(not-run-job\); exit 2/);
+	assert.equal(result.stdout, "");
+	assert.equal(w.callCount(), 0);
+	assert.deepEqual(readdirSync(w.ledger), []);
+	assert.deepEqual(w.jobReads(), []);
+});
+
+test("a nested runner whose ledger directory is a link exits 2, and nothing is written through the link (issue #500)", { skip }, async () => {
+	const w = nestedWorld();
+	const link = join(w.root, "ledger-link");
+	symlinkSync(w.ledger, link);
+	const result = await run([RUN_JOB, ...printArgs(w), "hello"], { env: { ...w.env, PI_DISPATCH_CHILD_LEDGER: link }, cwd: w.root });
+	assert.equal(result.code, 2);
+	assert.match(result.stderr, /\(not-a-directory\); exit 2/);
+	assert.equal(w.callCount(), 0);
+	assert.deepEqual(readdirSync(w.ledger), [], "no orphan `starting` stub");
+});
