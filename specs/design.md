@@ -3329,19 +3329,21 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `monthlyCostUsd`, each needing `maxCostUsd`, `INT-CONFIG-OVERLAY-CONTRACT`):
   1. **Keys**: `budget:usd:YYYY-MM-DD`, `budget:usd:w:<Monday>`, `budget:usd:m:YYYY-MM`, built by `budget.mjs`'s own
      `dayKey`/`weekKey`/`monthKey` through the `keyPrefix` seam with its TTLs, so a dollar window and a job-count
-     window share their UTC boundaries and expiry. `budget:usd:p:` is reserved for project windows (#499) and never
-     written; `budget:usd:s:<hash16>` (a repo or folder) and `budget:usd:mdl:<hash16>` (a model) are the scoped and
-     per-model windows (item 9), further ledgers in the same reservation. Every amount is integer micro-dollars and
+     window share their UTC boundaries and expiry. `budget:usd:s:<hash16>` (a repo or folder, and since issue #499
+     part B a project: the hash of its row scope `project:<id>`) and `budget:usd:mdl:<hash16>` (a model) are the
+     scoped, project and per-model windows (item 9), further ledgers in the same reservation. `budget:usd:p:` was
+     reserved for project windows and is WITHDRAWN (issue #499 part B): one key rule, every row keyed by its row scope,
+     and no second keyspace for the admin to recompute or the fingerprint to hash. Every amount is integer micro-dollars and
      every write is an `INCRBY`.
-  2. **Reserve** (`reserveDollars`), after BOTH job-count reserves and before `runContainer`, the last gate before the
+  2. **Reserve** (`reserveDollars`), after every job-count reserve and before `runContainer`, the last gate before the
      spend line: the amount is the job's effective per-job cap (`maxCostMicros`), which the runner enforces before
      every call, so it bounds the run and the worker needs no prices. Per active window `INCRBY key amount`, the TTL on
      the first write, then `total > cap` refuses (equal fits). A refusal gives back every key it touched at once,
      BEST EFFORT PER KEY: each key's `DECRBY` is tried whatever happened to the one before, and a key that fails is
      logged (`dollar_giveback_error`, with the key) and left holding the amount, which the record then shows as a
-     `floor`. The job returns `{ outcome: "policy", reason: "dollar-cap" }` with both job-count slots given back (a
+     `floor`. The job returns `{ outcome: "policy", reason: "dollar-cap" }` with every job-count slot given back (a
      ledger that did not issue the refusal gives back, the scoped ledger's rule), so `budgetReserved` is `false`
-     unless that job-count refund itself failed. A fixed comment names the window and no amount, and the log says
+     unless the global slot's own give-back failed (global-only, the one rule every path uses since issue #499 part B). A fixed comment names the window and no amount, and the log says
      `over_dollar_budget`. The reservation returns a HOLD listing the exact keys it added to. An amount of `0`
      reserves nothing and touches no key (a cap of 0 cannot make a priced call), answered by `reserveDollars` itself
      so no caller can turn it into a `TypeError` retried for ever. A Valkey fault in the reserve gives back what it
@@ -3423,11 +3425,12 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
      `model:<provider>/<model>` row is one under `budget:usd:mdl:<hash16 of the lowercased provider/model>`
      (`modelDollarRows`). Lowercased because the record's usage ledger lowercases ids, and a model window settles
      from that ledger: one model is one counter, whatever case a row, a list or pi spells it in.
-     - **One reservation**: the deployment's, the scope's and the model ledgers go to ONE `reserveDollars` call,
-       deployment first, so a refusal in any window gives back every key the call added (best effort per key, as
-       above), the deployment's included, and both job-count slots go back as for any `dollar-cap`. The log names
-       the refusing ledger (`deployment`, `scope` or `model`) with its key prefix, a hash, and a model's ref; the
-       comment names the repo for a forge job, "this folder" for a local one, or the model. A scoped or model
+     - **One reservation**: the deployment's, the scope's, the project's (issue #499 part B) and the model ledgers go
+       to ONE `reserveDollars` call, in that order, so a refusal in any window gives back every key the call added
+       (best effort per key, as above), the deployment's included, and every job-count slot goes back as for any
+       `dollar-cap`. The log names the refusing ledger (`deployment`, `scope`, `project` or `model`) with its key
+       prefix, a hash, and a model's ref; the comment names the repo for a forge job, "this folder" for a local one,
+       "this project" for a project row, or the model. A scoped or model
        window needs a per-job cap like a deployment window, so a job with none is `config-refused`.
      - **Which model windows**: a job with an effective allowed-model list reserves in the windows of its listed
        models, compared ignoring case. A job with NO list reserves in EVERY model window: it may switch model
@@ -3435,7 +3438,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
        fails closed: such a job is refused while any model window is full, and the remedy is a list. A job that
        reserves nothing (`unreserved`, item 6) reserves in no model window.
      - **Settle**: the hold records its keys per ledger (`hold.ledgers`; never split by key text, since
-       `budget:usd` prefixes every dollar key). The deployment and scope keys settle with the basis of item 5. Each
+       `budget:usd` prefixes every dollar key). The deployment, scope and project keys settle with the basis of item
+       5, to the job's cost: the processor names those prefixes (`holdPart` over a set of the three), rather than
+       taking "everything not a model", so a ledger kind added later settles nowhere until it is named. Each
        model's keys settle from that model's OWN row of `usage.models` (`modelDollarSettlement`): `metered` is
        `ceil(row.cost x 1e6)`, `0` for a model with no row. A model window settles at the floor (at least the
        reservation, never less than the row's own cost) when ANY of these holds: the deployment basis is the floor;
@@ -4124,6 +4129,35 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     `concurrent: N`, up to 2N jobs can run until the old ones finish.
     Counting both spellings at the gate is more machinery than a transient edit window deserves; the edit confirm
     and the docs say so instead.
+- **Project rows and ordered ledgers** (issue #499 part B): a `project:<id>` row caps every member of a project as
+  one. Its keys come from its ROW scope like every other row's (`scopeKeyPrefix("project:<id>")`,
+  `scopeDollarKeyPrefix("project:<id>")`, `slot:s:<hash16("project:<id>")>`), so the admin's reads, the boot sweeper
+  and the fingerprint need no new rule. A job's job-count ledgers are ONE ordered list from ONE builder
+  (`scopedLedgers`: repo or folder row, then project row; the processor appends the global ledger), reserved in order
+  by `reserveLedgers` and given back in reverse by `releaseLedgers` over the processor's single `held` list. Every
+  refund path walks that list: a later ledger's refusal, a dollar refusal, a config-refused job and a never-started
+  container. Narrowest first for the scoped ledger's original reason: a refusal never consumes a slot in a wider
+  ledger, so a noisy repo cannot drain its project's day and a full project cannot drain the deployment's. A project
+  refusal is `project-cap`. The project's `concurrent` is a slot and fleet lease at the pickup gate, taken after the
+  repo slot in that order for every job (no two jobs each hold one and wait on the other) and given back with it by
+  one drain at every exit of the gate. A local member takes the project's fleet lease although its folder slot is
+  in-process only, because a project id names one thing on every host where a folder path does not.
+  **Rejected**:
+  - *A `budget:p:` or `budget:usd:p:` keyspace.* Two key rules for one kind of row; the reserved `budget:usd:p:` is
+    withdrawn rather than used.
+  - *Hand-written releases per ledger* (the shape before: a `scopedReserved` flag and four scoped and three global
+    release sites). Adding the project ledger by the same pattern would have meant ten sites, and the class #499
+    names is the one where a new ledger is reserved and one refund path forgets it. One list, one helper.
+  - *The project ledger before the repo's.* A full repo would then consume project slots on every refusal.
+  - *Project caps in projects.json.* Caps have one home, this file, with its version rule and its admin surface.
+  - *Dropping a dangling row silently.* A row naming a missing project caps nothing while the file reads as a cap; it
+    refuses the boot, and a reload of either file is judged as a pair: against the other file as it is on disk (both
+    taken together when they agree, so a rename in both files applies in either save order), else against the other's
+    live copy, else last good is kept. A one-time retry of the refused side was rejected in review: a rename refuses
+    both sides in turn and leaves each waiting on the other.
+  - *Project rows in a version 1 file.* The released 2.1.0 reads `project:shop` as a plain repo row no job has, so a
+    version 1 file would carry a cap one build enforces and another silently drops. A project row needs version 2 in
+    every field, the qualified row's rule.
 - **Why a file and not the overlay**: the deferral gate runs ABOVE the per-job settings read, so
   gate-read config must come from a watched mutable ref; and `KNOWN_KEYS` is a flat scalar list whose
   one map-shaped resident (`secretProfiles`) is deliberately model-unreachable — the opposite of the
@@ -7499,3 +7533,4 @@ a tunnel.
 | 2026-10-03 | Issue #499, part A. **`DES-WATCHERS-CLOSE-WITH-THE-WORKER` AMENDED**, one bullet: the `model-endpoints.json` watch (#503) and the new `projects.json` watch return the same stop handle, join `extraClosers` and read once after arming; the decision is unchanged. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` UNCHANGED, checked**: the pickup gate reads the projects ref once beside the limits snapshot, and no key, slot or lease is derived from a project in this part. **Code evidence**: worker/src/start.mjs -> watchProjectsFile; worker/test/start-wiring.test.mjs. |
 | 2026-10-03 | Issue #500, part D: the nested runner. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the child route bullet gains The nested runner: the first statement of `run-job.mjs` after its imports is `isNestedRunner(env, pid)` (nested when `PI_DISPATCH_RUNNER_PID` is set and is not this pid); a nested runner reads no exit key, writes no exit line, installs no SIGTERM handler, never reaches `main()`, never reads `/job` and opens no ledger directory; with the inherited directory missing or unusable it exits 2 with one stderr line; otherwise it puts `-e child-meter.ts` first (unless the preload did) and imports pi's unbundled `dist/cli.js`, on the module graph the runner already loaded. The preload gives a nested runner the pi CLI's route and no library hook, so one meter per process. `openChildLedger` keeps `PI_DISPATCH_RUNNER_PID` when the directory cannot be made. Rejected alternatives and one residual (an `env: {}` spawner still starts a job runner) recorded. **Code evidence**: image/runner/run-job.mjs; image/runner/src/child-route.mjs -> isNestedRunner, nestedRunnerKind, ledgerDirProblem, runAsPiCli; image/runner/src/child-preload.mjs -> preload; image/runner/src/usage-meter.mjs -> openChildLedger; image/runner/test/child-route.test.mjs, child-meter.integration.test.mjs, compose.test.mjs; .github/workflows/pi-upgrade-check.yml. |
 | 2026-10-03 | Issue #500, part D, the review's fixes. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the nested runner: `PI_DISPATCH_RUNNER_PID` carries the job runner's pid namespace beside its pid (`<pid>:<namespace>` where `/proc/self/ns/pid` reads, the pid alone where it does not), and a process whose namespace differs or cannot be read is nested, because a process in a new pid namespace can have the runner's pid (measured: 2 under Podman, 7 under Docker Desktop, via `unshare -Upf` in a job); a nested runner not started as `node run-job.mjs` exits 2 (`not-run-job`); the preload writes no stub into a ledger directory the nested runner would refuse (a link); the residual now names a spawner that clears or sets the variable, with its unsigned exit line and the detector as what sees it. **Code evidence**: image/runner/src/child-route.mjs -> readPidNamespace, runnerIdentity, isNestedRunner, runAsPiCli; image/runner/src/usage-meter.mjs -> openChildLedger; image/runner/src/child-preload.mjs -> writeStub; image/runner/test/child-route.test.mjs, child-meter.test.mjs, child-meter.integration.test.mjs. |
+| 2026-10-03 | Issue #499, part B (project rows). **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` AMENDED**, a new bullet: a `project:<id>` row caps every member of a project as one, keyed by its row scope like every row; the job-count ledgers are one ordered list from one builder (repo or folder row, project row, then global), reserved in order and given back in reverse through one helper on every refund path, replacing four hand-written scoped and three global release sites; the project `concurrent` is a slot and fleet lease taken after the repo slot and given back by one drain; rejected: a project keyspace, per-ledger release sites, project before repo, caps in projects.json, a silently dropped dangling row, a one-time reload retry (a rename strands both sides; replaced by judging the pair against the other file on disk), project rows in a version 1 file (2.1.0 reads them as inert repo rows). `budgetReserved` is one rule, global-only, on every path, and a Valkey fault inside the count reservations gives back every ledger that landed whole; inside the ledger that faulted, its windows INCRed before the fault stay counted, the pre-existing posture. Code evidence: `worker/src/scoped-limits.mjs` (`scopedLedgers`, `projectRowFor`, `projectDollarCapsFor`, `checkProjectRows`, `scopeClaimRows`, version 2 for project rows), `worker/src/budget.mjs` (`reserveLedgers`, `releaseLedgers`), `worker/src/processor.mjs` (`held`, `refundLedgers`, `globalHeld`, `jobCostPrefixes`), `worker/src/index.mjs` (`scopeHolds`, `releaseScopeHolds`, `deferScope`), `worker/src/start.mjs` (`pairWith`), `worker/src/dollar-budget.mjs` (`dollarLedgers` project tier); tests `worker/test/processor-projects.test.mjs`, `scope-mutex.test.mjs`, `start-wiring.test.mjs`. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: item 1, `budget:usd:p:` is withdrawn (one key rule; a project's dollar keys are `budget:usd:s:<hash16("project:<id>")>`); item 2, the reserve follows every job-count reserve and a refusal gives back every job-count slot; item 9, the one reservation gains the project tier (deployment, scope, project, models), the log and comment name a project refusal, and the job-cost settlement names its three ledger prefixes instead of taking every non-model part. |

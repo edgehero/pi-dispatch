@@ -4414,7 +4414,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|dollar-cap|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-cost-cap-unsupported|model-unknown|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -4574,10 +4574,18 @@ validator rather than a second copy of it.
   refusals) resolves it from the live file with the same function. `null` when no projects file is set, when the job's scope is in no project, and in every record
   written before issue #499. Records are never re-attributed from current membership: an old record keeps `null`.
 
+  **`project-cap`** (issue #499 part B) is a pre-spend policy refusal: a `project:<id>` row's day, week or month
+  window in `INT-SCOPED-LIMITS-FILE-CONTRACT` is full. It is decided after the repo or folder ledger and before the
+  global one, gives back the repo or folder slot it followed, and records `budgetReserved: false` (the global ledger was
+  never touched), exactly as `scope-cap` does. A fixed token: the comment says "this project", and the record's own
+  `project` field says which. Never retried, and like every free refusal it pages nobody.
+
   **`dollar-cap`** (issue #501) is a pre-spend refusal: a dollar window had no room for the job's per-job cap. It is
-  decided after both job-count reserves and before the container, gives back both job-count slots and every
-  dollar it added (per key, best effort), and so records `budgetReserved: false` unless the job-count refund itself
-  failed (then `true`, the slot still out there). It comments one fixed sentence naming the window (today's, this
+  decided after every job-count reserve and before the container, gives back every job-count slot and every
+  dollar it added (per key, best effort), and so records `budgetReserved: false` unless the GLOBAL slot's own give-back
+  failed (then `true`, that slot still out there). Since issue #499 part B every path reads the field the same way,
+  global-only: a dollar-cap, a config-refused job and an InfraRetry all record whether the global slot is still held
+  after the refund; a scoped or project slot a failed refund left behind is in the `budget_release_failed` log line. It comments one fixed sentence naming the window (today's, this
   week's, this month's) and no amount. Like every free refusal it pages nobody.
 
   Field order is the serialisation order (`JSON.stringify` emits insertion order). The filename uses the
@@ -5498,7 +5506,7 @@ validator rather than a second copy of it.
   are not reliably typeable folder-vs-repo, so the clamp is silent rather than a parse refusal that would
   misfire on `"a/b"`).
 - **Shape**: `{ "version": 1 | 2, "limits": [ { scope, day?, week?, month?, concurrent?, dayUsd?, weekUsd?, monthUsd? } ] }`.
-  The dollar fields and model rows need version 2 (below).
+  The dollar fields, model rows and `project:<id>` rows (issue #499 part B, below) need version 2.
   - `version` (required): integer ≥ 1, fail-loud on newer (`scoped-limits file written by a newer
     pi-dispatch (version N; this build understands 2)`). Adopted from `INT-SUBSCRIPTIONS-FILE-CONTRACT`
     because this is a MONEY file: unknown fields are silently dropped per the operator-file policy, so a
@@ -5547,14 +5555,36 @@ validator rather than a second copy of it.
     ledger folds model-less and overflow calls into that pair. Two model rows that differ only in case are a
     duplicate. A model row is never a job's scope: the job-count windows, the concurrency gate and the mutex
     never match it.
+  - **Project rows** (issue #499 part B): `{ "scope": "project:<id>", day?, week?, month?, concurrent?, dayUsd?,
+    weekUsd?, monthUsd? }`, where `<id>` is a project's id in `INT-PROJECTS-FILE-CONTRACT`. The row caps every member
+    of that project as ONE: its windows count every member's jobs together, and its `concurrent` bounds them together.
+    Written exactly `project:<id>`, the id following the projects file's id rule; a malformed id (`project:Shop`,
+    `project:a:b`, `project:`) is refused. A project row needs `"version": 2` in EVERY field, its job counts and
+    `concurrent` included, for the forge-qualified row's reason: the last released build (2.1.0) reads `project:shop`
+    as a plain repo string no job has, so a version 1 file holding one would be a cap and a concurrency limit one
+    build enforces and another silently drops. The writer stamps version 2 for it, and that build refuses the file as
+    newer. A project row is never a job's own scope: it applies through the job's project
+    (resolved once at pickup, `projectOf`), never because a scope string happens to equal it. **A row whose id is not
+    a project** in the projects file (the file unset counts as no projects) refuses the worker's BOOT, naming the
+    row's index and id (`checkProjectRows`); a live reload of EITHER file is judged as a PAIR: the new
+    file against the other file as it is on disk (both are taken together when they agree, so a rename or a project
+    added with its row applies in either save order), else against the other's live copy; when neither agrees, that
+    file's last good copy stays and the worker logs (`scoped_limits_reload_invalid` or `projects_reload_invalid`, the
+    reason naming the row's index, its id and both files). The admin judges a row against the projects file the
+    WORKER reads (PI_PROJECTS_FILE; unset is no projects), refuses to write a row it adds or changes whose id is not a
+    project (an unreadable projects file is named as unreadable), and, while an unchanged row names a project the file on
+    disk lacks, writes and says only what it can know: the worker applies the write once its LIVE projects define that
+    id, and keeps its last good limits otherwise (the admin cannot see the live projects, which usually still define it,
+    because the projects edit that dropped it was kept out). A row already in the file is not re-judged, so a dangling
+    row can still be deleted. Doctor fails on one.
   - **Version rule**: a version 1 file that uses a dollar field or a `model:` row is REFUSED with a message
     naming version 2, so a file cannot carry a dollar cap that one build reads and another drops. A version 1
     file with neither stays valid and reads exactly as before (the five-key row). The `model:` prefix is
     reserved in both versions, so a version 1 relative folder spelled `model:...` is refused too (no
     working tree is named that way). A NEAR MISS of it (`Model:`, `models:`, `model :`, any case, spaces before
-    the colon) is refused with the exact form named, never read as a repo row that would cap nothing. `project:`
-    and its near misses are reserved for project windows (#499) and refused in both versions, so that change
-    needs no version 3. A forge-qualified row (issue #498) needs version 2 as well: every build before it reads
+    the colon) is refused with the exact form named, never read as a repo row that would cap nothing. A near miss
+    of `project:` (`Project:`, `projects:`, `project :`) is refused the same way (issue #499 part B); the exact form
+    is a project row (above), and a version 1 file holding one is refused naming version 2. A forge-qualified row (issue #498) needs version 2 as well: every build before it reads
     `github:acme/web` as a plain repo string no job has, so a version 1 file holding one would carry a cap, a
     concurrency limit and a lease that one build enforces and another silently drops. The writer stamps version 2
     for a qualified row, and an older build refuses the file loudly.
@@ -5599,6 +5629,22 @@ validator rather than a second copy of it.
   re-stamping an enforcement file's version would launder a newer file's dropped fields into a valid v1 —
   the exact widening the version field exists to prevent. The worker's directory watch hot-swaps on change
   and keeps the last-good set on a bad edit.
+- **Reserve order** (issue #499 part B): a job's job-count ledgers are ONE ordered list, narrowest first: its
+  repo or folder row, then its project's row, then the global windows (`scopedLedgers` builds the scoped part,
+  the processor appends the global ledger). One helper reserves them in that order (`reserveLedgers`) and one gives
+  them back in REVERSE (`releaseLedgers`); every refund path (a later ledger's refusal, a dollar refusal, a
+  config-refused job, a never-started container) gives back exactly the ledgers still held, through that one list.
+  A refusal by the project row returns `reason: "project-cap"` pre-spend and gives back the repo or folder slot
+  before it; the global ledger is untouched (`budgetReserved` false) and the project row keeps its refused
+  reservation, refused-still-counts per ledger. A GLOBAL refusal gives back the project slot and the repo slot. The
+  forge comment says "this project", never the id or a member, and the log line adds `ledger: "project"` to
+  `over_scope_budget`, the key still a hash. A project row's job-count keys are `scopeKeyPrefix("project:<id>")`, its
+  dollar keys `scopeDollarKeyPrefix("project:<id>")`: the row-keyed rule of every row, no keyspace of its own. A
+  project row's `concurrent` takes an in-process slot under `project:<id>` and a fleet lease
+  `slot:s:<hash16("project:<id>")>` at the pickup gate, AFTER the repo or folder slot and in that order for every
+  job, and is given back with it, last first, on every deferral and at the job's end. A local member takes the fleet
+  half too (a project id names one thing on every host, where a folder path does not). The boot sweeper walks the same
+  hash from the row (`scopeClaimRows`).
 - **Enforcement** (issue #242): scoped windows reserve FIRST, between the token-cap read and
   the global `reserveBudget`, under redis keys `budget:s:<16-hex sha256 of the matched row's scope>` (issue #498;
   for a bare or folder row this is the canonical scope it always was) composed
@@ -5634,12 +5680,15 @@ validator rather than a second copy of it.
   per-job cap in ONE `reserveDollars` call over the deployment's windows, its scope row's dollar windows under
   `budget:usd:s:<16-hex sha256 of the matched row's scope>` (the same hash as the job-count key, issue #498), and each model row it
   may reach under `budget:usd:mdl:<16-hex sha256 of the LOWERCASED provider/model>`, each with the `:YYYY-MM-DD`,
-  `:w:<Monday>` and `:m:YYYY-MM` suffixes of the deployment's keys. `budget:usd:p:` stays reserved for project
-  windows (#499). A job with an allowed-model list reserves in the rows of its listed models (compared ignoring
+  `:w:<Monday>` and `:m:YYYY-MM` suffixes of the deployment's keys. Since issue #499 part B the hold has a project
+  tier: deployment, scope row, project row (`budget:usd:s:<16-hex sha256 of "project:<id>">`, the row-keyed rule),
+  then models, all in the one call. The `budget:usd:p:` prefix that was reserved for project windows is WITHDRAWN:
+  one key rule, no second keyspace. The project part settles like the scope part, to the job's cost; a refusal in
+  it is `dollar-cap`, the comment names "this project" and the log `ledger: "project"`. A job with an allowed-model list reserves in the rows of its listed models (compared ignoring
   case); a job with no list reserves in EVERY model row, because it may switch to any model mid-run (fail closed:
   a full model window refuses an unrestricted job, and the remedy is a list); a job that reserves nothing
   (`unreserved`) reserves in none. A refusal in any window gives back every key the call added, the deployment's
-  included, and returns `reason: "dollar-cap"`; the log names the ledger (`deployment`, `scope` or `model`), the
+  included, and returns `reason: "dollar-cap"`; the log names the ledger (`deployment`, `scope`, `project` or `model`), the
   key prefix (a hash) and, for a model, its ref, never a scope string. A dollar row with no per-job cap to
   reserve (no `maxCostUsd` and no `run.maxCostUsd`) refuses the job as `config-refused`, the deployment
   invariant's rule. That is a WARNING, never a refusal, where it can be seen ahead (a trigger may supply the cap):
@@ -5681,6 +5730,20 @@ validator rather than a second copy of it.
   writes such a row as version 2. Given `github:acme/web/` or `github:acme/web#12`, then it is refused as not a forge
   repo. Given an edit that changes a row's scope, then the confirm says the count starts over and that running jobs
   keep their old slot until they finish.
+  Given a project `shop` over two folders and a row `project:shop` with `day: 2` (issue #499 part B), then the third
+  member job that day is refused `project-cap`, its folder slot is given back and the global ledger is untouched;
+  given a full global window, then a member job gives back its project and repo slots; given a never-started
+  container or a config-refused job, then all three slots are given back. Given `concurrent: 1` on the project row,
+  then a second member's job defers while the first runs, and an unrelated scope runs. Given a project `dayUsd`
+  window with no room for a job's cap, then the job is refused `dollar-cap` naming "this project", and every job-count
+  and dollar ledger it took is given back. Given `project:shop` with no project `shop`, then the worker refuses to
+  start, a reload that would create it keeps last good, the admin refuses to write it and doctor fails on it. Given
+  `Project:shop`, `projects:shop` or `project:Shop`, then the file is refused. Given `project:shop` with `day: 2` in a
+  version 1 file, then the file is refused naming version 2, and the admin writes any project row as version 2. Given
+  a rename of a project in both files (`shop` to `store`), saved in either order, then the worker ends on the new pair
+  with no restart. Given a Valkey fault in the job-count reservations, then every ledger that landed whole is
+  given back before the error escapes; inside the ledger that faulted, its windows INCRed before the fault stay
+  counted (the pre-existing mid-reserve posture of one ledger).
 
 ---
 
@@ -5728,6 +5791,10 @@ folders. A job whose scope is a member belongs to that project, and its run reco
   resolved PER ATTEMPT: a retry or a deferred job is picked up again and resolves again, so after an edit a retry may
   record a different project than its first attempt, and its record overwrites the earlier one (one record per job id,
   last write wins). Each attempt reserves and releases its own ledgers, so each carries its own project.
+- **Caps** (issue #499 part B): caps live in `INT-SCOPED-LIMITS-FILE-CONTRACT` only, never in this file. A
+  `project:<id>` row there caps every member of the project as one, and its id must be a project here: a scoped-limits
+  row naming an id this file does not define refuses the worker's boot, and an edit of THIS file that would drop or
+  rename a project a row still names is kept out on a live reload (`projects_reload_invalid`), so remove the row first.
 - **Residuals**: records are never re-attributed from current membership, so an old record, and every record
   written before issue #499, keeps `project: null`. Webhook triggers are not grouped by project: a webhook trigger
   fires for whichever repo delivers, so only its runs are. The file is per host while counters are shared: hosts of
@@ -6790,3 +6857,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-03 | Issue #499, part A, review fixes. **`INT-PROJECTS-FILE-CONTRACT` AMENDED**, Resolution: the project is resolved PER ATTEMPT; a retry or a deferred job is picked up again and resolves again, so after an edit a later attempt may record a different project and its record overwrites the earlier one (one record per job id, last write wins), since each attempt reserves its own ledgers. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, the `project` paragraph says the same. Below the pickup gate every record goes through one recorder bound to the pickup project, so no record path can fall back to the live file; the id rule moved to an import-free module, so the record module never loads the projects parser or config. **`INT-DEPLOYMENT-POINTER-CONTRACT` UNCHANGED, checked**. **Code evidence**: worker/src/index.mjs -> makeProcessor (recordAfterGate); worker/src/project-id.mjs -> PROJECT_ID_RE, isProjectId; worker/src/doctor.mjs -> BOOT_FILES (panelWrites); worker/test/project-pickup.test.mjs; worker/test/run-history.test.mjs. |
 | 2026-10-03 | Issue #500, part D: the nested runner. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**, one paragraph under the container table: a nested copy of the runner is not a participant. It runs as the pi CLI, its exit code goes to the tool that spawned it, it writes no exit line, and its one code of its own is `2` (one stderr line) when the job runner's ledger directory is missing or unusable. The container's codes and the exit line are UNCHANGED, checked. `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked: no field, name, mount or flag changes (`PI_DISPATCH_RUNNER_PID` is now kept when the ledger directory cannot be made, inside the container). **Code evidence**: image/runner/run-job.mjs; image/runner/src/child-route.mjs -> isNestedRunner, runAsPiCli. |
 | 2026-10-03 | Issue #500, part D, the review's fixes. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**, its nested-runner paragraph: the nested runner's code `2` also covers a runner not started as `node run-job.mjs <pi args>`. `INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked: `PI_DISPATCH_RUNNER_PID` now carries `<pid>:<namespace>` inside the container, and the worker's refusal and deletion of the two reserved names are by name, so they still match. **Code evidence**: image/runner/src/child-route.mjs -> runAsPiCli, runnerIdentity; worker/src/reserved-env.mjs -> RUNNER_ENV_NAMES. |
+| 2026-10-03 | Issue #499, part B (project rows). **`INT-SCOPED-LIMITS-FILE-CONTRACT` AMENDED**: a `project:<id>` row carries `day`, `week`, `month`, `concurrent`, `dayUsd`, `weekUsd` and `monthUsd`, needs version 2 in every field (the released 2.1.0 reads a version 1 `project:` row as an inert repo row), and caps every member of the project as one; near misses and a malformed id stay refused; a row whose id is not a project refuses the boot, a reload of either file is judged as a pair (against the other file on disk, both taken when they agree, so a rename applies in either save order; else against the other's live copy; else last good is kept, the reason naming the row and both files), the admin judges rows against the projects file the worker reads (unset is no projects), refuses to write a dangling row, names an unreadable projects file as such and, while an unchanged row dangles on disk, says only that the worker applies the write once its live projects define the id, and doctor fails on one. New **Reserve order**: the job-count ledgers are one ordered list (repo or folder row, project row, global) reserved by one helper and given back in reverse by one helper on every refund path; a project refusal is `project-cap` and gives back the repo slot; a global refusal gives back both. Keys are row-keyed (`scopeKeyPrefix("project:<id>")`, `scopeDollarKeyPrefix("project:<id>")`); the project `concurrent` takes a slot and a fleet lease `slot:s:<hash16("project:<id>")>` after the repo slot, given back last first on every deferral, local members included, and swept at boot. Dollar enforcement gains the project tier (deployment, scope, project, models, one hold) and `budget:usd:p:` is withdrawn. A Valkey fault inside the count reservations gives back every ledger that landed whole; inside the ledger that faulted, its windows INCRed before the fault stay counted, the pre-existing posture. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `project-cap` joins the `reason` enum, described beside `dollar-cap`, whose text now says every job-count slot and states one global-only `budgetReserved` rule for every path. **`INT-PROJECTS-FILE-CONTRACT` AMENDED**: a Caps bullet (caps live in scoped-limits.json; an edit dropping a project a row names is kept out). UNCHANGED, checked: `INT-DEPLOYMENT-POINTER-CONTRACT` (no new key), `INT-HOST-REGISTRY-CONTRACT` (the fingerprint is part C). Code evidence: `worker/src/scoped-limits.mjs` (`normalizeLimit` project branch, `scopedLimitsVersionFor`, `scopedLedgers`, `checkProjectRows`, `scopeClaimRows`), `worker/src/budget.mjs` (`reserveLedgers`, `releaseLedgers`), `worker/src/processor.mjs` (`held`, `refundLedgers`, `globalHeld`), `worker/src/index.mjs` (`scopeHolds`, `deferScope`), `worker/src/start.mjs` (`pairWith`, the boot `checkProjectRows`), `worker/src/doctor.mjs` (`projectRowChecks`), `admin/src/read-model.mjs` (`judgeProjectRows`, `projectsFile`); tests `worker/test/scoped-limits.test.mjs`, `processor-projects.test.mjs`, `scope-mutex.test.mjs`, `start-wiring.test.mjs`, `doctor.test.mjs`, `admin/test/read-model.test.mjs`. |

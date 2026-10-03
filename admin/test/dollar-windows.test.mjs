@@ -9,7 +9,7 @@ import { stripAnsi } from "../src/style.mjs";
 import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindowsSinceMs, foldWindowRecords, renderDollarWindows, runDollars, UNATTRIBUTED } from "../src/dollar-windows.mjs";
 import { dayKey, monthKey, weekKey } from "@edgehero/pi-dispatch/budget";
 import { readDollarCounters } from "../src/read-model.mjs";
-import { modelDollarKeyPrefix, scopeDollarKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
+import { modelDollarKeyPrefix, parseScopedLimits, scopeDollarKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 
 /**
  * Issue #501, part 7: the dollar windows the panel and `dispatch_costs` show. Two sources, never blended: the
@@ -135,6 +135,15 @@ test("a repo row folds its own forge runs; a folder or model row says why its ru
   assert.equal(rows[2].records, null);
   assert.equal(rows[2].unattributed, UNATTRIBUTED.model);
   assert.equal(foldWindowRecords(records, specs[2]).unattributed, UNATTRIBUTED.model);
+});
+
+test("issue #499 part B: a project row's dollar window says its runs are matched later, never a window nobody spent in", () => {
+  const limits = parseScopedLimits(JSON.stringify({ version: 2, limits: [{ scope: "project:shop", dayUsd: "5" }] }), "sl.json");
+  const specs = dollarWindowSpecs({ caps: {}, limits, now: NOW });
+  assert.deepEqual(specs.map((s) => [s.ledger, s.name]), [["scope", "project:shop"]]);
+  const [row] = dollarWindowRows({ specs, counters: {}, records: [record()] });
+  assert.equal(row.records, null);
+  assert.equal(row.unattributed, UNATTRIBUTED.project);
 });
 
 test("issue #498: a qualified repo row folds only its own forge's runs; a bare row folds every forge's", () => {

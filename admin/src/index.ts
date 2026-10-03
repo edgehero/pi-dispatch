@@ -929,7 +929,10 @@ function registerTools(pi: ExtensionAPI): void {
       "required, each an integer >= 1. `dayUsd`/`weekUsd`/`monthUsd` are DOLLAR windows (a decimal string such as " +
       "\"2.50\": above 0, at most 1000000, at most 6 decimals): what the scope's jobs may spend per UTC day, Monday " +
       "week and month; a job that does not fit is refused dollar-cap. A scope of model:<provider>/<model> caps one " +
-      "model across every scope and takes the three dollar fields only. A bare row and a qualified row for the same " +
+      "model across every scope and takes the three dollar fields only. A scope of project:<id> (an id from " +
+      "projects.json) caps every member of that project as one: a job over its day/week/month is refused " +
+      "project-cap, over its dollar window dollar-cap, and its `concurrent` defers; the id must already be in " +
+      "projects.json. A bare row and a qualified row for the same " +
       "repo are refused together: keep one form. A dollar window needs a per-job cap " +
       "(maxCostUsd). The file stays version 1 unless a row needs version 2. The operator MUST approve a confirm " +
       "dialog showing the entry; refused with no interactive operator.",
@@ -954,9 +957,9 @@ function registerTools(pi: ExtensionAPI): void {
         ctx,
         { title: "Add scoped limit", message: `Add to scoped-limits.json:\n${JSON.stringify(l)}` },
         () => {
-          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, mutate: (list: any[]) => [...list, l] });
+          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (list: any[]) => [...list, l] });
           if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, added: l };
+          return { applied: true, added: l, ...(res.pending ? { pending: res.pending } : {}) };
         },
       );
       return toolText(JSON.stringify(result));
@@ -981,9 +984,9 @@ function registerTools(pi: ExtensionAPI): void {
         ctx,
         { title: `Delete scoped limit #${params.index + 1}`, message: `Remove scoped limit #${params.index + 1}: ${cur.scope} ${limitSummary(cur)}` },
         () => {
-          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, mutate: (l: any[]) => l.filter((_, i) => i !== params.index) });
+          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (l: any[]) => l.filter((_, i) => i !== params.index) });
           if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, deletedIndex: params.index };
+          return { applied: true, deletedIndex: params.index, ...(res.pending ? { pending: res.pending } : {}) };
         },
       );
       return toolText(JSON.stringify(result));
@@ -1045,9 +1048,9 @@ function registerTools(pi: ExtensionAPI): void {
         ctx,
         { title: `Edit scoped limit #${params.index + 1}`, message: `scoped limit #${params.index + 1}:\n${JSON.stringify(before)}\n→ ${JSON.stringify(merged)}${scopeChangeNote(before, merged)}` },
         () => {
-          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, mutate: (l: any[]) => l.map((w, i) => (i === params.index ? merged : w)) });
+          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (l: any[]) => l.map((w, i) => (i === params.index ? merged : w)) });
           if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, index: params.index, limit: merged };
+          return { applied: true, index: params.index, limit: merged, ...(res.pending ? { pending: res.pending } : {}) };
         },
       );
       return toolText(JSON.stringify(result));
@@ -1392,6 +1395,15 @@ function limitSummary(l: any): string {
   if (typeof l?.weekUsd === "string") bits.push(`week $${l.weekUsd}`);
   if (typeof l?.monthUsd === "string") bits.push(`month $${l.monthUsd}`);
   return bits.join(" · ");
+}
+
+/**
+ * "live" for a scoped-limits write the worker takes on its next reload. With `pending` (issue #499 part B: a
+ * `project:<id>` row names a project the projects file on disk lacks), only what the admin can know: written, and the
+ * worker applies it once its live projects define the id.
+ */
+function liveOr(res: any): string {
+  return res?.pending ? `written; ${res.pending}` : "live";
 }
 
 /** Normalise a labels/action field to a trimmed non-empty string list, accepting an array or a string. */
@@ -2330,8 +2342,8 @@ async function addScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Pr
   const concurrent = await ui.input("concurrent — max jobs in flight for this scope, extras deferred (blank = no limit)", "");
   if (concurrent === undefined) return;
   const l = buildScopedLimit({ scope, day, week, month, concurrent });
-  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, mutate: (list: any[]) => [...list, l] });
-  notify?.(res.ok ? `scoped limit added (live) — ${l.scope} ${limitSummary(l)}` : `add rejected: ${res.invalid}`, res.ok ? "info" : "error");
+  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (list: any[]) => [...list, l] });
+  notify?.(res.ok ? `scoped limit added (${liveOr(res)}): ${l.scope} ${limitSummary(l)}` : `add rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
 /** Edit a scoped limit: select which, re-prompt each field with its current value — blank keeps it. */
@@ -2370,8 +2382,8 @@ async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): P
   });
   const note = scopeChangeNote(buildScopedLimit(cur), merged);
   if (note !== "" && !(await ui.confirm(`Edit scoped limit #${index + 1}`, `${cur.scope} → ${merged.scope}.${note}`))) return;
-  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, mutate: (l: any[]) => l.map((w, i) => (i === index ? merged : w)) });
-  notify?.(res.ok ? `scoped limit #${index + 1} updated (live) — ${merged.scope} ${limitSummary(merged)}` : `edit rejected: ${res.invalid}`, res.ok ? "info" : "error");
+  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (l: any[]) => l.map((w, i) => (i === index ? merged : w)) });
+  notify?.(res.ok ? `scoped limit #${index + 1} updated (${liveOr(res)}): ${merged.scope} ${limitSummary(merged)}` : `edit rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
 /**
@@ -2396,8 +2408,8 @@ async function deleteScopedLimitViaDialogs(paths: any, ui: any, notify: Notify):
   if (index < 0) return;
   const ok = await ui.confirm("Delete scoped limit", `Remove ${labels[index]}?`);
   if (!ok) return;
-  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, mutate: (l: any[]) => l.filter((_, i) => i !== index) });
-  notify?.(res.ok ? `scoped limit #${index + 1} deleted (live)` : `delete rejected: ${res.invalid}`, res.ok ? "info" : "error");
+  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (l: any[]) => l.filter((_, i) => i !== index) });
+  notify?.(res.ok ? `scoped limit #${index + 1} deleted (${liveOr(res)})` : `delete rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
 /** Pause-window management: pick add / edit / delete, then run the matching dialog. One overlay key (`w`). */

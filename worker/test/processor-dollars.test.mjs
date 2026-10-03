@@ -6,6 +6,9 @@ import { buildRecord } from "../src/run-history.mjs";
 import { scopeKeyPrefix } from "../src/scoped-limits.mjs";
 import { DOCKER_NEVER_STARTED_EXITS } from "../src/backends.mjs";
 
+// The job-count ledger list the processor takes (issue #499 part B), from a `budgetCapsFor`-shaped object.
+const asLedgers = (c) => (c ? [{ scope: c.scope, keyPrefix: scopeKeyPrefix(c.scope), caps: c.caps, reason: "scope-cap" }] : []);
+
 // Issue #501, parts 3 and 4 (DES-DOLLAR-RESERVE-AND-SETTLE, the worker half), and #503 part 7: the processor reserves
 // a job's per-job cap in the dollar windows after both job-count reserves and before the container, settles it once
 // for every exit where the container ran, and refunds it whole where none did.
@@ -104,7 +107,7 @@ test("no dollar setting: nothing reserved or settled, no budget:usd key, the con
 });
 
 test("ORDER: the scoped and global job-count reserves, then the dollar reserve, then the container, then one settle", async () => {
-	const { deps: d, redis } = deps({ scopedCaps: { scope: "org/repo", caps: { day: 5, week: null, month: null } } });
+	const { deps: d, redis } = deps({ scopedLedgers: asLedgers({ scope: "org/repo", caps: { day: 5, week: null, month: null } }) });
 	const marks = [];
 	const run = d.runContainer;
 	d.runContainer = async (ctx) => (marks.push(redis.ops.length), run(ctx));
@@ -124,7 +127,7 @@ test("ORDER: the scoped and global job-count reserves, then the dollar reserve, 
 
 test("a full dollar window refuses dollar-cap, gives back BOTH job-count slots and its own dollars, and starts nothing", async () => {
 	const scope = { scope: "org/repo", caps: { day: 5, week: null, month: null } };
-	const { deps: d, calls, logs, redis } = deps({ redis: keyedRedis({ [DAY]: 9 * USD }), scopedCaps: scope });
+	const { deps: d, calls, logs, redis } = deps({ redis: keyedRedis({ [DAY]: 9 * USD }), scopedLedgers: asLedgers(scope) });
 	const r = await runJob(job, d);
 	assert.deepEqual(r, { outcome: "policy", reason: "dollar-cap", exitCode: null, turns: null, tokens: null, provider: "anthropic", model: "m", budgetReserved: false, dollars: { reservedMicros: 2 * USD, settledMicros: 0, basis: "refunded", modelBasis: null } });
 	assert.ok(!calls.some((c) => c[0] === "run-container"), "no container");

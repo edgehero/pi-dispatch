@@ -28,7 +28,7 @@ import { dayKey, monthKey, weekKey } from "@edgehero/pi-dispatch/budget";
 import { isAbsolute } from "node:path";
 import { DOLLAR_BASIS, DOLLAR_KEY_PREFIX, MODEL_BASIS } from "@edgehero/pi-dispatch/dollar-budget";
 import { DOLLAR_ENV_NAMES, formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
-import { dollarKeyPrefixFor, isModelScope, MODEL_SCOPE_PREFIX } from "@edgehero/pi-dispatch/scoped-limits";
+import { dollarKeyPrefixFor, isModelScope, isProjectScope, MODEL_SCOPE_PREFIX } from "@edgehero/pi-dispatch/scoped-limits";
 import { recordInRepo } from "./costs.mjs";
 
 const WINDOWS = [
@@ -43,6 +43,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export const UNATTRIBUTED = Object.freeze({
   folder: "a run record names a local folder by its basename only",
   model: "a run record does not say which model windows the job reserved in",
+  // Issue #499 part B enforces project rows; their records are matched by `record.project` in part C. Until then the
+  // section says so, rather than matching no record and reading as a window nobody spent in.
+  project: "project windows are matched to their runs in a later release",
 });
 
 /**
@@ -166,6 +169,7 @@ function belongs(record, spec) {
  */
 export function foldWindowRecords(records, spec) {
   if (spec.ledger === "model") return { records: null, unattributed: UNATTRIBUTED.model };
+  if (spec.ledger === "scope" && isProjectScope(spec.name)) return { records: null, unattributed: UNATTRIBUTED.project };
   if (spec.ledger === "scope" && typeof spec.name === "string" && isAbsolute(spec.name)) return { records: null, unattributed: UNATTRIBUTED.folder };
   const basis = Object.fromEntries(DOLLAR_BASIS.map((b) => [b, 0]));
   let runs = 0;

@@ -27,7 +27,10 @@ import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/bu
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 // The scoped-limits validator is shared for the anti-drift reason the pause/subscriptions ones are: the
 // write goes through the exact parser the worker boot-loads, so the sides cannot disagree on the schema.
-import { dollarKeyPrefixFor, isModelScope, parseScopedLimits, scopedLimitsVersionFor, scopeKeyPrefix, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
+import { danglingProjectRows, dollarKeyPrefixFor, isModelScope, isProjectScope, parseScopedLimits, scopedLimitsVersionFor, scopeKeyPrefix, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
+// The projects parser, for the same anti-drift reason: a `project:<id>` row is written only when the id is a project the
+// worker would load (issue #499 part B).
+import { parseProjects } from "@edgehero/pi-dispatch/projects";
 import { removeHeldJob } from "@edgehero/pi-dispatch/cancel-state";
 import { HELD_SET, jobKey } from "@edgehero/pi-dispatch/wait-state";
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
@@ -88,6 +91,10 @@ export function resolvePaths(env = process.env) {
     scopedLimitsPath: env.PI_SCOPED_LIMITS_FILE ?? "./scoped-limits.json",
     // Issue #499: the projects file, with the same cwd default as its siblings (what `init` scaffolds).
     projectsPath: env.PI_PROJECTS_FILE ?? "./projects.json",
+    // The projects file AS THE WORKER READS IT, for judging a scoped-limits `project:<id>` row (issue #499 part B): null
+    // when the key is unset, which the worker reads as no projects. Not the panel's cwd default above, which would let
+    // the panel accept a row against a file the worker never loads.
+    projectsFile: env.PI_PROJECTS_FILE ?? null,
     subscriptionsPath: env.PI_SUBSCRIPTIONS_FILE ?? "./subscriptions.json",
     // The operator's global pi overlay dir (REQ-GLOBAL-PI-OVERLAY), where the staged third-party pi
     // packages live under `packages/`. `|| null` so unset AND empty both read as "no overlay" -- the
@@ -796,9 +803,16 @@ export function readScopedLimits({ scopedLimitsPath, fs = nodeFs }) {
  * why this money file refuses where the analytics twin (`writeSubscriptions`) repairs. Only a MISSING
  * file starts from the empty v1 shape. The result is re-serialized (absent windows omitted, not
  * null-padded — the committed example's shape), re-validated fail-closed, and written tmp + rename.
- * Returns `{ ok }` or `{ invalid }`.
+ * Returns `{ ok }` (with `pending` when the worker will not take it live, below) or `{ invalid }`.
+ *
+ * Issue #499 part B: a `project:<id>` row this write adds or changes must name a project in `projectsPath`, the
+ * projects file as the WORKER reads it (null when PI_PROJECTS_FILE is unset: no projects), or the write is refused: the
+ * worker would refuse to start on it, and a running worker would keep its last good limits. A row already in the file,
+ * unchanged, is not re-judged, so a row left dangling by a projects.json edit can still be deleted, and other rows
+ * edited, while doctor names it; such a write returns `pending`, which says the worker applies it once its LIVE projects
+ * define the id (the admin cannot see those, so it claims neither way).
  */
-export function writeScopedLimits({ scopedLimitsPath, mutate, fs = nodeFs }) {
+export function writeScopedLimits({ scopedLimitsPath, projectsPath = null, mutate, fs = nodeFs }) {
   let current = [];
   let existing = null;
   try {
@@ -819,15 +833,65 @@ export function writeScopedLimits({ scopedLimitsPath, mutate, fs = nodeFs }) {
   // dollar window, is a model row or has a forge-qualified scope, so a file of bare and folder job-count rows stays
   // readable by a worker that predates version 2.
   const text = `${JSON.stringify({ version: scopedLimitsVersionFor(rows), limits: rows }, null, 2)}\n`;
+  let written;
   try {
-    parseScopedLimits(text, scopedLimitsPath); // the loader's own validator -- never write a file it would reject
+    written = parseScopedLimits(text, scopedLimitsPath); // the loader's own validator -- never write a file it would reject
   } catch (e) {
     return { invalid: e?.message ?? String(e) };
   }
+  const judged = judgeProjectRows(current, written, projectsPath, fs);
+  if (judged.refusal) return { invalid: judged.refusal };
   const tmp = `${scopedLimitsPath}.tmp`;
   fs.writeFileSync(tmp, text, { mode: 0o644 });
   fs.renameSync(tmp, scopedLimitsPath);
-  return { ok: true };
+  return judged.pending ? { ok: true, pending: judged.pending } : { ok: true };
+}
+
+/**
+ * Judge a write's `project:<id>` rows against the projects file the worker reads (`projectsPath`, null when
+ * PI_PROJECTS_FILE is unset: no projects, the worker's reading), issue #499 part B. Returns `{ refusal }` when a row the
+ * write adds or changes names a missing project, or the file cannot be read or parsed while such a row is in play;
+ * `{ pending }` when only an UNCHANGED row names a project the file on disk does not define; else `{}`.
+ *
+ * `pending` says only what the admin can know. The worker judges a limits edit against its LIVE projects too, and those
+ * usually still define the id (the projects edit that dropped it was kept out), so the write is then live; the admin
+ * cannot see the worker's live projects, so it neither claims that nor its opposite.
+ */
+function judgeProjectRows(before, after, projectsPath, fs) {
+  const rows = after.filter((row) => isProjectScope(row.scope));
+  if (rows.length === 0) return {};
+  const unchanged = new Set(before.map((row) => JSON.stringify(row)));
+  const touched = rows.filter((row) => !unchanged.has(JSON.stringify(row)));
+  const waitFor = (list) => {
+    const ids = [...new Set(list.map((row) => row.scope.slice("project:".length)))].join(", ");
+    return `the worker applies this once its live projects define ${ids}; if they do not, it keeps its last good limits. Run pi-dispatch doctor`;
+  };
+  let projects = [];
+  if (projectsPath !== null && projectsPath !== undefined) {
+    let text;
+    let why = null;
+    try {
+      text = fs.readFileSync(projectsPath, "utf8");
+    } catch (e) {
+      // Set but unreadable (missing included): the worker cannot load it either. Named as unreadable, never as a
+      // missing project, so the operator fixes the file rather than adding a project that is already there.
+      why = `the projects file ${projectsPath} could not be read (${typeof e?.code === "string" ? e.code : "error"})`;
+    }
+    if (why === null) {
+      try {
+        projects = parseProjects(text, projectsPath);
+      } catch (e) {
+        why = `the projects file does not load (${e?.message ?? String(e)})`;
+      }
+    }
+    if (why !== null) return touched.length > 0 ? { refusal: `${why}, so a project row cannot be checked; fix it first. Nothing was written` } : { pending: `${why}; ${waitFor(rows)}` };
+  }
+  const missing = danglingProjectRows(rows, projects).map((d) => rows[d.index]);
+  const where = projectsPath ? `the projects file ${projectsPath}` : "the projects file (PI_PROJECTS_FILE is unset, so there are no projects)";
+  const added = missing.filter((row) => touched.includes(row)).map((row) => row.scope);
+  if (added.length > 0) return { refusal: `${added.join(", ")} names a project that is not in ${where}; add the project there first. Nothing was written` };
+  if (missing.length > 0) return { pending: `${missing.map((row) => row.scope).join(", ")} names a project that is not in ${where}; ${waitFor(missing)}` };
+  return {};
 }
 
 /**

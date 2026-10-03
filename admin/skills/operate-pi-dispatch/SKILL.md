@@ -66,7 +66,9 @@ dialog before it takes effect**:
   lists them with their index and used counts). `dispatch_limit_edit` is a partial change — pass the index
   plus only the fields to alter. Scopes match exactly (a repo `owner/name` or an ABSOLUTE folder path, no
   globs). Both writers also take dollar windows, `dayUsd`/`weekUsd`/`monthUsd`, as decimal strings (`"2.50"`);
-  a `model:<provider>/<model>` scope caps one model and takes only those three. A malformed amount is refused
+  a `model:<provider>/<model>` scope caps one model and takes only those three. A `project:<id>` scope (an id
+  from projects.json) caps every member of that project as one: its job-count refusal is `project-cap`, its
+  dollar refusal `dollar-cap`, and the id must already be a project. A malformed amount is refused
   before the confirm. Read `dispatch_costs` (`dollars.windows`) for what each dollar window holds now.
 
 Use them like this:
@@ -314,6 +316,11 @@ the scope's own counter still counts the refusal), and `concurrent` caps how man
 is deferred to the delayed set and runs when a slot frees — never dropped, no budget spent while waiting).
 Edits apply live: the worker hot-reloads the file and keeps the last good version on a bad edit.
 
+A `project:<id>` row caps every repo and folder of one project (projects.json) together. A job reserves in
+its own repo or folder row first, then its project's row, then the global caps. A full project window refuses
+with reason `project-cap` (the repo's slot is given back); a full project dollar window refuses `dollar-cap`.
+A row naming an id that projects.json does not define stops the worker from starting, so add the project first.
+
 Separate from all of that, **local jobs carry a built-in one-job-per-folder mutex: at most one job per
 folder at a time, always on, with NO configuration, NO tool, and NO panel key.** If an operator asks to
 disable it, say plainly that there is no switch, deliberately: two agents editing one working tree race
@@ -322,7 +329,7 @@ value on a folder scope can never raise the mutex's one-at-a-time (the lower bou
 
 Three more things to say when asked:
 
-- **A `scope-cap` refusal is final for that window.** The counter is not resettable from any tool; the
+- **A `scope-cap` or `project-cap` refusal is final for that window.** The counter is not resettable from any tool; the
   window rolls over on its own (day/week/month, UTC). Raising the cap via `dispatch_limit_edit` takes
   effect at the next job.
 - **Deferrals are visible only as the queue's delayed count** (the panel's status line shows it when it

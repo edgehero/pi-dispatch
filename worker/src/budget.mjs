@@ -142,6 +142,41 @@ export async function releaseBudget(redis, { caps, now = new Date(), keyPrefix =
 }
 
 /**
+ * Reserve one slot in each job-count LEDGER, in order (issue #499 part B, DES-SCOPED-LIMITS-AND-FOLDER-MUTEX). A ledger
+ * is `{ scope, keyPrefix, caps, softHoldPct?, reason }`: the repo or folder row's, the project row's, then the global
+ * one (`scope` null, the default key prefix, the soft-hold band), as `scopedLedgers` and the processor build them.
+ *
+ * Each ledger that ADMITS is pushed onto `held`, the caller's list of reservations still standing, the moment its
+ * reservation lands. The first ledger that refuses stops the walk and is returned as `refusedBy` with its result; it is
+ * NOT pushed, because a refused reservation still counts (`reserveBudget`) and is never given back. The ledgers before it
+ * are in `held`, and the caller gives them back with `releaseLedgers`: a ledger that did not issue the refusal gives
+ * back, the rule the scoped ledger has followed since issue #242. A Valkey fault mid-walk throws with `held` exact.
+ */
+export async function reserveLedgers(redis, ledgers, held, { now = new Date() } = {}) {
+	for (const ledger of ledgers ?? []) {
+		const result = await reserveBudget(redis, { caps: ledger.caps, softHoldPct: ledger.softHoldPct ?? null, now, ...(ledger.keyPrefix ? { keyPrefix: ledger.keyPrefix } : {}) });
+		if (!result.allowed) return { allowed: false, refusedBy: ledger, result };
+		held.push(ledger);
+	}
+	return { allowed: true, refusedBy: null, result: null };
+}
+
+/**
+ * Give back every reservation in `held`, LAST FIRST (the reverse of `reserveLedgers`), removing each from `held` once
+ * its release has landed. THE one release of job-count slots: every refund path in the processor calls this with the
+ * same list, so no path can give back one ledger and forget another, and none can give one back twice (a second call
+ * finds `held` empty; `releaseBudget` is a floorless DECR). A Valkey fault throws with the unreleased ledgers still in
+ * `held`, so the caller's record of what stays reserved is exact.
+ */
+export async function releaseLedgers(redis, held, { now = new Date() } = {}) {
+	while (held.length > 0) {
+		const ledger = held[held.length - 1];
+		await releaseBudget(redis, { caps: ledger.caps, now, ...(ledger.keyPrefix ? { keyPrefix: ledger.keyPrefix } : {}) });
+		held.pop();
+	}
+}
+
+/**
  * The daily TOKEN cap check -- read-only, no increment. Returns `{ allowed, reason, spent, cap }`.
  *
  * This is the deliberate ASYMMETRY to `reserveBudget` (issue #25 / OQ-010). A job's token cost is

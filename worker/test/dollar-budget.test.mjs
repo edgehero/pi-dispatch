@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DAY_TTL_SECONDS, MONTH_TTL_SECONDS, WEEK_TTL_SECONDS } from "../src/budget.mjs";
-import { DOLLAR_BASIS, DOLLAR_KEY_PREFIX, FLOOR_COUNTERS, PROJECT_DOLLAR_KEY_PREFIX, SETTLE_SCRIPT, dollarLedgers, dollarSettlement, dollarWindowCaps, dollarsRecord, holdPart, meteredMicros, modelDollarSettlement, releaseDollars, reserveDollars, settleDollars } from "../src/dollar-budget.mjs";
+import { DOLLAR_BASIS, DOLLAR_KEY_PREFIX, FLOOR_COUNTERS, SETTLE_SCRIPT, dollarLedgers, dollarSettlement, dollarWindowCaps, dollarsRecord, holdPart, meteredMicros, modelDollarSettlement, releaseDollars, reserveDollars, settleDollars } from "../src/dollar-budget.mjs";
 
 /**
  * A keyed fake of the ioredis calls dollar-budget.mjs makes. Each call awaits once before it acts, so parallel
@@ -81,8 +81,8 @@ test("the keys are budget:usd:<day>, budget:usd:w:<Monday> and budget:usd:m:<mon
 	assert.deepEqual([...redis.ttls.entries()], [["budget:usd:2026-10-07", DAY_TTL_SECONDS], ["budget:usd:w:2026-10-05", WEEK_TTL_SECONDS], ["budget:usd:m:2026-10", MONTH_TTL_SECONDS]]);
 	assert.deepEqual([...redis.store.entries()], [["budget:usd:2026-10-07", 2 * USD], ["budget:usd:w:2026-10-05", 2 * USD], ["budget:usd:m:2026-10", 2 * USD]]);
 	assert.equal(DOLLAR_KEY_PREFIX, "budget:usd");
-	assert.equal(PROJECT_DOLLAR_KEY_PREFIX, "budget:usd:p", "reserved for #499");
-	assert.ok(![...redis.store.keys()].some((k) => k.startsWith("budget:usd:p:")), "no project key is ever written");
+	// Issue #499 part B withdrew the `budget:usd:p:` reservation: a project's keys come from its row scope.
+	assert.ok(![...redis.store.keys()].some((k) => k.startsWith("budget:usd:p:")), "no key under the withdrawn project prefix");
 });
 
 test("only ACTIVE windows are counted: a null cap is no window, and no window at all is an empty hold", async () => {

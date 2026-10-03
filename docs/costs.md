@@ -252,10 +252,9 @@ is an open issue.
 - **A Node older than 18.19 in a job does not start.** To meter `pi` child processes, the runner adds
   `--import=<child preload>` to `NODE_OPTIONS` for every process in the job (issue #500), and such a Node refuses that
   flag. The image ships Node 22. An agent that installs an older Node in a job must clear `NODE_OPTIONS` for it.
-- **No project windows yet** (issue #499). You cannot cap a group of repos and folders as one. The key space
-  `budget:usd:p:` and the `project:` scope are reserved for it.
-- **Scopes collide across forges** (issue #498). A GitHub `acme/web` and a Forgejo `acme/web` share one repo row
-  and one counter.
+- **Project windows are not attributed in the panel yet** (issue #499). A `project:<id>` row's dollar windows are
+  enforced ([scoped limits](scoped-limits.md#project-rows)), but the DOLLAR WINDOWS section cannot yet match its
+  records to it, and the per-project cost view comes later.
 - **A forged exit line**, on an image that does not declare `exitAuth`, or a worker and image pair older than
   #545. The job's own tools can write a fake exit line, and a forgery after the real line, with the right code,
   is still read as the last one. The per-job cap bounds what such a run can have spent. With `exitAuth` on both

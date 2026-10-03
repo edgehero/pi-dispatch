@@ -860,6 +860,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   before the container with the deployment's dollar windows, in one step that gives everything back on a
   refusal (`dollar-cap`), and settled after the run (`DES-DOLLAR-RESERVE-AND-SETTLE`). A version 1 file that uses
   either is refused naming version 2; a version 1 file without them keeps working unchanged.
+- **Project rows** (issue #499 part B): a `project:<id>` row (file version 2) caps every member of a project
+  (`INT-PROJECTS-FILE-CONTRACT`) as one, with `day`/`week`/`month` (refused pre-spend under the fixed reason
+  `project-cap`), `concurrent` (a deferral, like a repo's) and, in version 2, `dayUsd`/`weekUsd`/`monthUsd` (refused
+  `dollar-cap`). A job reserves narrowest first: its repo or folder row, then its project's row, then the global
+  windows; a refusal by any ledger gives back the ones before it, and every path that refunds gives back every ledger
+  still held. A row naming a project that does not exist refuses the worker's start, never caps nothing in silence.
 - **Why**: Every prior limit was deployment-global: one noisy repo emptied the daily cap for every other
   scope with nothing naming the culprit, and nothing serialized a working tree — two same-folder jobs ran
   containers concurrently in one read-write bind mount, reachable by a single cron trigger with no
@@ -892,6 +898,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   unknown forge prefix, then the file is refused naming both indexes or the known kinds. Given a qualified row in a
   version 1 file, then the file is refused naming version 2, so no build reads it as an inert repo string. Given a bare row and
   triggers on more than one forge kind, then `doctor` warns with the qualified spellings.
+  Given a project of two folders and a `project:` row with `day: 2` (issue #499 part B), then the third member job
+  that day is refused `project-cap` before any spend, its folder's slot is given back and the global ledger is not
+  touched; given a full global window, then the project and folder slots are given back; given a container that never
+  started or a config-refused job, then all three are. Given `concurrent: 1` on the project row, then a second member's
+  job defers while the first runs. Given a project `dayUsd` window with no room, then the job is refused `dollar-cap`.
+  Given a row naming a project the projects file does not define, then the worker refuses to start, a live edit that
+  would create one is kept out, the admin refuses to write it and `doctor` fails naming it.
 
 ## REQ-WAIT-FOR
 
@@ -2928,6 +2941,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-03 | Issue #499, part B (project rows). **`REQ-SCOPED-LIMITS` AMENDED**: a Project rows bullet (a `project:<id>` row, version 2 in every field, caps every member of a project as one, with job counts refused `project-cap`, `concurrent` deferring, and dollar windows refused `dollar-cap`; reserve narrowest first, repo or folder row, project row, global, and every refund gives back every ledger still held; a row naming a missing project refuses the start) and the matching Acceptance. UNCHANGED, checked: `REQ-ADMIN-VIA-PI-EXTENSION` (no tool added; `dispatch_limit_add`'s description names project rows and `project-cap`), `REQ-COST-ANALYTICS` (the per-project fold is part C). Code evidence: `worker/src/scoped-limits.mjs`, `worker/src/budget.mjs`, `worker/src/processor.mjs`, `worker/src/index.mjs`, `worker/src/start.mjs`; tests `worker/test/processor-projects.test.mjs`, `scope-mutex.test.mjs`, `start-wiring.test.mjs`. |
 | 2026-10-03 | Issue #499, part A. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, the `up` bullet: `up` also fills `PI_PROJECTS_FILE` with this folder's `projects.json`, which `init` now scaffolds empty, under the same never-clobber rule; an empty value refuses the boot, as for the scoped-limits key. **`REQ-SCOPED-LIMITS` UNCHANGED, checked**: projects are recorded per run in this part and capped in part B. **Code evidence**: worker/src/up.mjs; worker/src/init.mjs -> EMPTY_PROJECTS; worker/test/up.test.mjs. |
 | 2026-10-03 | Issue #498, forge-qualified scopes. **`REQ-SCOPED-LIMITS` AMENDED**: Statement and Acceptance, a row may name one forge's repo as `<kind>:owner/name`, a job matches its qualified row before its bare row, a file with both for one repo is refused, and every counter, slot and lease is keyed by the matched row, so a bare row keeps its pre-upgrade count; doctor warns about a bare row when triggers name more than one forge kind. **`REQ-SCOPED-PAUSE-WINDOWS` AMENDED**: Statement and Acceptance, a qualified window pauses one forge's repo while a bare window still pauses it on every forge, and an unknown prefix is refused. A qualified row needs file version 2, and a qualified repo must have a forge repo's shape. **Code evidence**: worker/src/scoped-limits.mjs -> limitFor, rowScopeFor, refuseMixedForms; worker/src/pause-windows.mjs -> qualifiedScopeOf, parseScopeString, pauseUntilMs; worker/src/doctor.mjs; admin/src/costs.mjs -> repoKeyOf, recordInRepo; worker/test/scope-mutex.test.mjs; worker/test/processor.test.mjs. |
 | 2026-10-03 | The leftovers of the #501 and #502 round's reviews. **`REQ-JOB-STATUS-COMMENTS` AMENDED**, the `model-not-allowed` stop sentence now also names a request change the trigger does not allow ("...this trigger does not allow, or to change an AI request in a way it does not allow..."), since the runner's model guard also stops a call whose request a hook rewrote or whose sampling settings route it, and the old sentence read as a model swap in those cases. **Code evidence**: worker/src/processor.mjs -> TERMINAL_COMMENTS. |

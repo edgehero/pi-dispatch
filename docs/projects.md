@@ -1,7 +1,8 @@
 # Projects
 
 A project groups repos and folders under one name. Every run of a member records the project's id, so you can
-see which runs belong together. Caps per project, the cost views and the panel come in later releases.
+see which runs belong together, and a `project:<id>` row in `scoped-limits.json` caps the members as one. The cost
+views and the panel come in a later release.
 
 ## Enable it
 
@@ -49,6 +50,25 @@ project.
 Only a run is grouped. A webhook trigger fires for whichever repo delivers, so the trigger itself belongs to no
 project.
 
+## Capping a project
+
+Caps live in [`scoped-limits.json`](scoped-limits.md#project-rows), never in this file. A row with the scope
+`project:shop` caps every member of `shop` together:
+
+```json
+{ "version": 2, "limits": [ { "scope": "project:shop", "day": 20, "concurrent": 2 } ] }
+```
+
+- Over its `day`, `week` or `month`, a member's job is refused with reason `project-cap`.
+- Over its `concurrent`, a member's job waits until a slot frees, on any host.
+- Dollar windows (`dayUsd`, `weekUsd`, `monthUsd`) refuse with `dollar-cap`.
+- A project row needs `"version": 2` in `scoped-limits.json`, even with counts only. The panel and the tools write it.
+
+The row's id must be a project here. A row naming a missing project stops the worker from starting, and a live
+edit that would leave one is kept out (the worker logs `scoped_limits_reload_invalid` or `projects_reload_invalid`,
+naming the row and both files). The worker judges the two files together, so a project added with its row, or
+renamed in both files, applies in either save order. Doctor names such a row.
+
 ## Matching rules
 
 - A folder matches by its path as written, resolved but not followed: a symlinked folder and its target are two
@@ -65,4 +85,5 @@ project.
 | Env var | `PI_PROJECTS_FILE` (absolute path; unset = no projects. An EMPTY value is NOT unset: the worker keeps it and refuses to start, so fill the line in or delete it, and doctor fails on it) |
 | File | `{ "version": 1, "projects": [ { id, name?, members } ] }` |
 | Record field | `project`: the id, or `null` |
+| Caps | a `project:<id>` row in `scoped-limits.json`; refusal reason `project-cap` |
 | Spec | `INT-PROJECTS-FILE-CONTRACT` |
