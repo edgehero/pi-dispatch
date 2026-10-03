@@ -2342,7 +2342,7 @@ async function addScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Pr
   if (concurrent === undefined) return;
   const l = buildScopedLimit({ scope, day, week, month, concurrent });
   const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (list: any[]) => [...list, l] });
-  notify?.(res.ok ? `scoped limit added (${liveOr(res)}) — ${l.scope} ${limitSummary(l)}` : `add rejected: ${res.invalid}`, res.ok ? "info" : "error");
+  notify?.(res.ok ? `scoped limit added (${liveOr(res)}): ${l.scope} ${limitSummary(l)}` : `add rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
 /** Edit a scoped limit: select which, re-prompt each field with its current value — blank keeps it. */
@@ -2382,7 +2382,7 @@ async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): P
   const note = scopeChangeNote(buildScopedLimit(cur), merged);
   if (note !== "" && !(await ui.confirm(`Edit scoped limit #${index + 1}`, `${cur.scope} → ${merged.scope}.${note}`))) return;
   const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (l: any[]) => l.map((w, i) => (i === index ? merged : w)) });
-  notify?.(res.ok ? `scoped limit #${index + 1} updated (${liveOr(res)}) — ${merged.scope} ${limitSummary(merged)}` : `edit rejected: ${res.invalid}`, res.ok ? "info" : "error");
+  notify?.(res.ok ? `scoped limit #${index + 1} updated (${liveOr(res)}): ${merged.scope} ${limitSummary(merged)}` : `edit rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
 /**
