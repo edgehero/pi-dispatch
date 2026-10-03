@@ -49,7 +49,8 @@ const RULES = [
 	{ what: "the bullmq library", re: LIB("bullmq"), allowed: ["worker/src/queue.mjs", "worker/src/index.mjs"] },
 	// The two that load pi's own packages (undici, pi-coding-agent's keys) by pi's install path; neither names a Valkey library.
 	{ what: "createRequire", re: /\bcreateRequire\b/, allowed: ["admin/src/keys.mjs", "image/runner/src/env-proxy.mjs", "image/runner/src/loader.mjs"] },
-	{ what: "a computed dynamic import", re: /\bimport\(\s*(?:[^"'`\s)]|`[^`]*\$\{)/, allowed: ["image/runner/src/env-proxy.mjs", "image/runner/src/usage-meter.mjs", "image/runner/src/outcome.mjs", "worker/src/doctor.mjs", "worker/src/pi-model-loader.mjs"] },
+	{ what: "a computed dynamic import", re: /\bimport\(\s*(?:[^"'`\s)]|`[^`]*\$\{)/, allowed: ["image/runner/src/env-proxy.mjs", "image/runner/src/usage-meter.mjs", "image/runner/src/outcome.mjs", "image/runner/src/child-preload.mjs", "image/runner/src/child-meter.ts", "worker/src/doctor.mjs", "worker/src/pi-model-loader.mjs"] },
+	// (issue #500: the child preload and the child meter import usage-meter.mjs by its own file URL, nothing else.)
 	{ what: "an ioredis client constructor", re: /new\s+(Redis|IORedis|ioredis|Cluster)\s*\(|\bcreateClient\s*\(/, allowed: ["worker/src/connection.mjs"] },
 	{ what: "a BullMQ Queue, QueueEvents or FlowProducer", re: /new\s+(Queue|QueueEvents|FlowProducer)\s*\(/, allowed: ["worker/src/queue.mjs"] },
 	{ what: "a BullMQ Worker", re: /new\s+Worker\s*\(/, allowed: ["worker/src/index.mjs"] },

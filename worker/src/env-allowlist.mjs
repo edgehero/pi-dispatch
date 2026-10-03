@@ -524,6 +524,14 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, maxCos
 	if (exitAuth === true) env.PI_EXIT_AUTH = "stdin";
 	else delete env.PI_EXIT_AUTH;
 
+	// Issue #500: the runner sets these two in its own environment, for its child processes, and no value from outside
+	// may arrive first. Both lists refuse them upstream (config.mjs for PI_FORWARD_ENV, the triggers loader for
+	// run.secrets, through RUNNER_ENV_NAMES); this is the line that holds if either refusal is ever bypassed.
+	// env-internal PI_DISPATCH_CHILD_LEDGER: set by the runner inside the container, never by the worker, so removed here.
+	delete env.PI_DISPATCH_CHILD_LEDGER;
+	// env-internal PI_DISPATCH_RUNNER_PID: set by the runner inside the container, never by the worker, so removed here.
+	delete env.PI_DISPATCH_RUNNER_PID;
+
 	// Forge-backed jobs, and local cron jobs that opted in via run.github. Other local-folder jobs have
 	// no token (CONST-TOKEN-SCOPED-PER-JOB). The mint goes into BOTH of its forge's variables because
 	// each CLI has its own preference -- gh prefers GH_TOKEN over GITHUB_TOKEN, glab prefers GITLAB_TOKEN

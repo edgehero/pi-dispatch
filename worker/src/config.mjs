@@ -15,7 +15,7 @@ import { SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS } from "./retention-swee
 import { parseSecretProfiles } from "./secret-profiles.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, parseWaitProfiles } from "./wait-for.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
-import { CONTAINER_ENV_NAMES, KEYLESS_ENV_NAME } from "./reserved-env.mjs";
+import { CONTAINER_ENV_NAMES, KEYLESS_ENV_NAME, RUNNER_ENV_NAMES } from "./reserved-env.mjs";
 import { modelListProblem } from "./model-ref.mjs";
 import { DOLLAR_ENV_NAMES, DOLLAR_WINDOW_KEYS, checkDollarInvariant, optionalUsdMicros } from "./money.mjs";
 
@@ -194,6 +194,12 @@ function forwardEnvList(raw, egressArmed = false) {
 	const owned = names.filter((n) => CONTAINER_ENV_NAMES.has(n) && n !== "HOME" && n !== KEYLESS_ENV_NAME);
 	if (owned.length > 0) {
 		throw configError(`PI_FORWARD_ENV must not forward ${owned.join(", ")} -- the worker writes ${owned.length === 1 ? "it" : "them"} into every job's container itself, and a forwarded host value would replace the per-job one (a forwarded PI_MODEL runs a model the pre-spend checks never saw)`);
+	}
+	// Issue #500: the two names the runner sets in its own environment for its descendants (RUNNER_ENV_NAMES). A forwarded
+	// host value would sit in the runner's environment before the runner sets its own.
+	const runnerOwned = names.filter((n) => RUNNER_ENV_NAMES.has(n));
+	if (runnerOwned.length > 0) {
+		throw configError(`PI_FORWARD_ENV must not forward ${runnerOwned.join(", ")} -- the job's runner sets ${runnerOwned.length === 1 ? "it" : "them"} inside the container for its own child processes, and a forwarded value would point their usage ledger at a directory nobody reads`);
 	}
 	const egress = egressArmed ? names.filter((n) => EGRESS_ENV_VARS.has(n)) : [];
 	if (egress.length > 0) {

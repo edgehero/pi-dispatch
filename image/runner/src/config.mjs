@@ -116,7 +116,7 @@ export const MAX_COST_MICROS_LIMIT = 1_000_000_000_000;
  */
 // env-internal PI_MAX_COST_MICROS: the worker's own per-job input (INT-CONTAINER-RUNTIME-CONTRACT), derived from
 // the operator's dollar settings; the container env is BUILT, never inherited, and `run.secrets` cannot bind it.
-function parseCostMicros(env, name) {
+export function parseCostMicros(env, name) {
 	const raw = env[name];
 	if (raw === undefined) return null;
 	if (!/^(?:0|[1-9][0-9]*)$/.test(raw)) {
@@ -149,7 +149,7 @@ function parseCostMicros(env, name) {
 // and the deployment's PI_ALLOWED_MODELS. No env-internal marker since issue #502, because .env.example documents the
 // name (the worker's deployment default), like PI_PROVIDER. The container env is BUILT, never inherited, and neither
 // `run.secrets` nor PI_FORWARD_ENV can set it.
-function parseAllowedModels(env, name) {
+export function parseAllowedModels(env, name) {
 	const raw = env[name];
 	if (raw === undefined) return null;
 	if (raw === "") throw configError(`invalid ${name}: empty (omit it for an unrestricted job, or list provider/model entries)`);

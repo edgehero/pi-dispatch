@@ -15,6 +15,7 @@ import { classifyPromptRejection, classifyStopReason, decideExit, loadRetryPredi
 import { jobSettings } from "../src/config.mjs";
 import { createJobModelRuntime, jobModelRuntimeOptions } from "../src/model-runtime.mjs";
 import { attachTokenBudget } from "../src/token-budget.mjs";
+import { MODEL_RUNTIME_SUFFIX, patchModelRuntime, PI_SUBCOMMANDS } from "../src/child-preload.mjs";
 import { attachTurnBudget } from "../src/turn-budget.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -1769,6 +1770,36 @@ test("-ne keeps explicit -e paths, \"--\" ends option parsing, and the subcomman
 	const help = agentDistFile("cli", "args.js").match(/\$\{chalk\.bold\("Commands:"\)\}\n([\s\S]*?)\n\n/);
 	const listed = [...new Set([...help[1].matchAll(/\$\{APP_NAME\} ([a-z]+) /g)].map((match) => match[1]))].sort();
 	assert.deepEqual(listed, ["auth", "config", "install", "list", "mcp", "remove", "uninstall", "update"], "pi's subcommand set changed");
+	// And the preload's own copy of the set is that set (issue #500 part C).
+	assert.deepEqual([...PI_SUBCOMMANDS].sort(), listed, "child-preload.mjs PI_SUBCOMMANDS no longer matches pi's subcommands");
+});
+
+test("the child route's own files: the preload imports no pi module, the child meter imports only the child's own copies, and the library hook's two lines are at the pin (issue #500)", { skip }, () => {
+	// The preload runs in every Node child the job starts, so a static pi import there would load a second pi into npm,
+	// and a named import from node:module (registerHooks is newer than some Node 22 releases) is a SyntaxError that
+	// would kill every one of them.
+	const preloadSrc = readFileSync(fileURLToPath(new URL("../src/child-preload.mjs", import.meta.url)), "utf8");
+	const preloadImports = [...preloadSrc.matchAll(/^import\s[^\n]*?from\s+"([^"]+)";$/gm)].map((match) => match[0]);
+	assert.deepEqual(preloadImports, [
+		'import { realpathSync } from "node:fs";',
+		'import * as nodeModule from "node:module";',
+		'import { basename, dirname, join } from "node:path";',
+		'import { fileURLToPath } from "node:url";',
+	], "child-preload.mjs imports changed: no pi module, and node:module only as a namespace");
+	// The child meter: exactly the three bare specifiers pi's loader maps to the child's own copies, and no static
+	// usage-meter.mjs (the preload hands it over). Never pi's dist/index.js by path: in a bundled child that is a second
+	// copy of the class no session uses.
+	const meterSrc = readFileSync(fileURLToPath(new URL("../src/child-meter.ts", import.meta.url)), "utf8");
+	assert.deepEqual([...meterSrc.matchAll(/^import\s[^\n]*?from\s+"([^"]+)";$/gm)].map((match) => match[1]), ["@earendil-works/pi-ai", "@earendil-works/pi-ai/providers/all", "@earendil-works/pi-coding-agent"]);
+	assert.deepEqual([...meterSrc.matchAll(/\bimport\(([^)]*\))/g)].map((match) => match[1]), ['new URL("./usage-meter.mjs", import.meta.url)'], "the child meter's one dynamic import is usage-meter.mjs, the fallback when no preload handed it over");
+	// The library hook appends code that names `ModelRuntime` and `builtinProviderCatalog`; both must still be what
+	// model-runtime.js declares, and the file must still sit where the hook looks for it.
+	const runtimePath = join(agentPackageDir(), "dist", "core", "model-runtime.js");
+	assert.ok(pathToFileURL(runtimePath).href.endsWith(MODEL_RUNTIME_SUFFIX), "model-runtime.js moved -- the library hook watches the old path");
+	const runtimeSrc = readFileSync(runtimePath, "utf8");
+	assert.match(runtimeSrc, /^export class ModelRuntime \{/m, "model-runtime.js no longer declares the class the hook hands over");
+	assert.ok(runtimeSrc.includes('import * as builtinProviderCatalog from "@earendil-works/pi-ai/providers/all";'), "model-runtime.js no longer imports the catalog the hook hands over");
+	assert.match(patchModelRuntime(runtimeSrc), /library\?\.\(\{ ModelRuntime, compat: __piDispatchCompat,/, "the hook would hand over no class at this pin");
 });
 
 test("a child extension reaches its OWN ModelRuntime through ctx.modelRegistry.runtime, and the bundle's is not dist/index.js's (issue #500)", { skip }, () => {

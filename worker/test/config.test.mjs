@@ -4,7 +4,7 @@ import { delimiter, join } from "node:path";
 import { test } from "node:test";
 import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, accountTempRoot, configError, defaultGraphDir, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, ensureAccountTempRoot, ensureJobsDir, ensureSandboxDir, ensureUnderAccountRoot, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, loadConfig, loadGitLabAuth, logsDirPath, normalizeAppPrivateKey, underOsTempDir } from "../src/config.mjs";
 import { FORGES, FORGE_KINDS } from "../src/forges.mjs";
-import { CONTAINER_ENV_NAMES } from "../src/reserved-env.mjs";
+import { CONTAINER_ENV_NAMES, RUNNER_ENV_NAMES } from "../src/reserved-env.mjs";
 import { WAIT_INTERVAL_FLOOR_MS } from "../src/wait-for.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -436,6 +436,15 @@ test("PI_FORWARD_ENV refuses every name the worker writes into a job's container
 	}
 	// HOME stays forwardable: the job-user path overrides it beside --user and says so at boot.
 	assert.deepEqual(loadConfig({ PI_FORWARD_ENV: "HOME" }).forwardEnv, ["HOME"]);
+});
+
+test("PI_FORWARD_ENV refuses the two names the runner sets for its child processes (issue #500)", () => {
+	assert.deepEqual([...RUNNER_ENV_NAMES].sort(), ["PI_DISPATCH_CHILD_LEDGER", "PI_DISPATCH_RUNNER_PID"]);
+	for (const env of [{}, { PI_EGRESS: "0" }]) {
+		for (const name of RUNNER_ENV_NAMES) {
+			assert.throws(() => loadConfig({ ...env, PI_FORWARD_ENV: `FOO,${name}` }), (e) => e.piDispatchConfig === true && new RegExp(`PI_FORWARD_ENV must not forward ${name} -- the job's runner sets it inside the container`).test(e.message), name);
+		}
+	}
 });
 
 test("the allowed-model list is env only: no settings-overlay key can carry it (#502)", async () => {

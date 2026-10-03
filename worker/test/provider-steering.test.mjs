@@ -4,7 +4,7 @@ import { builtinModules, createRequire } from "node:module";
 import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { CONTAINER_ENV_NAMES } from "../src/reserved-env.mjs";
+import { CONTAINER_ENV_NAMES, RUNNER_ENV_NAMES } from "../src/reserved-env.mjs";
 import { classifyFile, classifyFiles, lex, skeleton, stringConstants } from "./helpers/env-reads.mjs";
 import { PROVIDER_STEERING_VARS } from "../src/provider-steering.mjs";
 
@@ -209,7 +209,9 @@ function runnerAssigned(prefix) {
 	const assigned = new Map();
 	const re = new RegExp(String.raw`\benv\.(${prefix}[A-Z0-9_]+)\s*=(?!=)`, "g");
 	for (const file of sourcesUnder(`${RUNNER_DIR}/src`)) {
-		for (const m of readFileSync(file, "utf8").matchAll(re)) assigned.set(m[1], file);
+		// The runner's OWN names (issue #500, RUNNER_ENV_NAMES) share pi's prefix but are not pi's: they are set for the
+		// runner's child processes and reserved on their own. Left out here, and checked below to be names pi never reads.
+		for (const m of readFileSync(file, "utf8").matchAll(re)) if (!RUNNER_ENV_NAMES.has(m[1])) assigned.set(m[1], file);
 	}
 	return assigned;
 }
@@ -467,6 +469,9 @@ test("the runner's own writes are derived, and only those are subtracted from pi
 	const { assigned } = await derive();
 	// Pinned for the reader, derived for the bolt: the assertion that matters is in the equality test.
 	assert.deepEqual([...assigned.keys()].sort(), ["PI_OFFLINE", "PI_TELEMETRY"]);
+	// The runner's own names are pi's prefix and nothing of pi's: if pi ever read one, a child would act on it.
+	const { pi } = await derive();
+	for (const name of RUNNER_ENV_NAMES) assert.equal(pi.names.has(name), false, `pi now reads ${name}, a name the runner sets for its children`);
 	// And a write is not a read: pi assigns PI_CODING_AGENT for its children and never reads it.
 	assert.equal(PROVIDER_STEERING_VARS.has("PI_CODING_AGENT"), false, "PI_CODING_AGENT is written by pi, not read");
 });

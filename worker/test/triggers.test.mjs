@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { EGRESS_ENV_VARS, WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
 import { FORGE_HOST_VARS, MINTED_TOKEN_VARS } from "../src/forges.mjs";
 import { PROVIDER_STEERING_VARS } from "../src/provider-steering.mjs";
-import { CONTAINER_ENV_NAMES } from "../src/reserved-env.mjs";
+import { CONTAINER_ENV_NAMES, RUNNER_ENV_NAMES } from "../src/reserved-env.mjs";
 import { PR_ACTIONS, parseTriggers } from "../src/triggers.mjs";
 
 // parseTriggers is pure over the file TEXT -- no fs, no bullmq. `parse` serializes triggers and feeds
@@ -1061,7 +1061,9 @@ test("a run.secrets key the worker sets itself is refused, from every set and de
 	// FORGE_HOST_VARS is the one that was missing when this was first designed -- `hostVar` is a separate
 	// column from `tokenVars`, so GITLAB_HOST was in NO refusal set while buildContainerEnv wrote it
 	// after the mint, which would have silently discarded the trigger's value.
-	const reserved = [...MINTED_TOKEN_VARS, ...FORGE_HOST_VARS, ...WORKER_ONLY_SECRET_VARS, ...EGRESS_ENV_VARS, ...CONTAINER_ENV_NAMES];
+	const reserved = [...MINTED_TOKEN_VARS, ...FORGE_HOST_VARS, ...WORKER_ONLY_SECRET_VARS, ...EGRESS_ENV_VARS, ...CONTAINER_ENV_NAMES, ...RUNNER_ENV_NAMES];
+	// Issue #500: the two names the runner sets for its own child processes.
+	assert.ok(reserved.includes("PI_DISPATCH_CHILD_LEDGER") && reserved.includes("PI_DISPATCH_RUNNER_PID"), "the runner's child-ledger names are its alone");
 	assert.ok(reserved.includes("GITHUB_TOKEN") && reserved.includes("GITLAB_HOST"), "the fixture must span both columns");
 	assert.ok(reserved.includes("GITHUB_APP_PRIVATE_KEY") && reserved.includes("HTTPS_PROXY") && reserved.includes("PI_OFFLINE"));
 	assert.ok(reserved.includes("PI_DISPATCH_KEYLESS"), "issue #503: the keyless marker is the worker's alone");
