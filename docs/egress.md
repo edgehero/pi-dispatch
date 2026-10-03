@@ -156,8 +156,10 @@ The worker reads `models.json` the way pi does: comments, a byte order mark and 
 would refuse (one wrong-typed field anywhere is enough, because pi then drops the whole file) is refused here too, and
 no provider in it is keyless.
 
-If the worker cannot read the file (no permission on it or its folder, a disk error, too many open files), the job
-is tried again later rather than refused, and `doctor` warns `could not read models.json (EACCES)` with the error code.
+If the worker cannot read the file for a moment (a disk error, too many open files), the job is retried once, then
+failed, and `doctor` warns `could not read models.json (EIO)` with the error code. If it cannot read it for any other
+reason (no permission on it or its folder), the job cannot either and loads none of the file, so every job is refused
+until the file is readable by the worker's account, and `doctor` says so.
 
 Then `--provider local-ollama` runs with no key in `.env` and none in pi's `auth.json`. A provider that does not
 qualify is refused before anything is spent, and the refusal names both ways in: a key, or a keyless endpoint.

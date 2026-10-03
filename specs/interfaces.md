@@ -1732,6 +1732,8 @@ refactor apart.
     was a no-op. What was broken was the DI seam, which is this module's entire test surface, and a test
     that failed only on a laptop exporting `HF_TOKEN` is how it surfaced. An embedder passing a narrower
     env would have met it for real.
+  - The overlay's host path: `PI_GLOBAL_PI_DIR` must be an absolute path. A relative value is resolved differently
+    by the worker and the container runtime, so it refuses the worker's boot (PR #553's review).
   - Mounts: `/job:ro`, `/workspace:rw`, — **local jobs only** — `/outbox:rw`, and — **only when
     `PI_GLOBAL_PI_DIR` is configured** — `/opt/pi-global:ro` — delivered by host bind mounts
     (`-v <hostPath>:<containerPath>`, with `Z` in the option list where the SELinux relabel bullet above applies,
@@ -4577,7 +4579,13 @@ validator rather than a second copy of it.
   the file but would not compose the overlay entry of the model's provider, so it drops that whole entry: an
   overlay model of it does not exist, and a BUILTIN model of it would run without the entry's `baseUrl`,
   headers and key, against the provider's public endpoint), `overlay-is-a-directory` (every ref too: pi fails to
-  read a directory the same way; refused, never retried), or
+  read a directory the same way; refused, never retried), `overlay-unreadable` (every ref too, issue #552: the
+  worker's read failed with an errno it does not read as absence and that is not one of the transient four below,
+  such as EACCES or EPERM on the file or its folder, or any errno not listed; the job reads the file through the
+  same read-only mount and pi in the job loads none of the file (the existence check in image/runner/run-job.mjs, or pi's own read, fails); refused, never retried), `overlay-link` (every ref too, PR #553's review:
+  `models.json` is a link of any kind, dangling included; the job's read-only mount does not resolve a link the
+  way the host does, so the host could read the routing while the job runs with no overlay; refused, never
+  retried), or
   `list-malformed`); `trigger-skew` (the authored trigger lists models the job arrived without,
   `INT-TRIGGERS-FILE-CONTRACT`'s `run.models` bullet); `model-not-allowed` (the main model, after the
   `job.data > overlay > env` fill, is not on the job's effective list: a `PI_ALLOWED_MODELS` that does not
@@ -4588,12 +4596,17 @@ validator rather than a second copy of it.
   `job-image-model-policy-unsupported` (the job has a list and its image does not declare `modelPolicy`,
   `INT-CONTAINER-RUNTIME-CONTRACT`). `model-not-allowed` is therefore BOTH a paid runner stop and a free
   refusal; `budgetReserved` tells them apart, and only the paid one pages (the failure hook pages unless the
-  result says `budgetReserved: false`). A transient read of the overlay is not a refusal: a job that needs the overlay (an overlay model, or
-  a list, whose fallbacks the overlay could change) is retried as infra, `container-never-started`, with
-  nothing reserved, and a job of builtin models only with no list runs, as there is nothing to judge. With
-  a file pi drops, every job is refused before the fallback check. `doctor` says ✗ for each overlay entry pi
+  result says `budgetReserved: false`). A transient read of the overlay (EIO, EAGAIN, EMFILE or ENFILE, the
+  list `isTransientOverlayRead` names, and no other errno) is not a refusal: since issue #552 EVERY job is
+  retried as infra, `container-never-started`, with nothing reserved, a job of builtin models only with no list
+  included, since the file may route its provider; the queue gives a job two attempts, so it is retried once,
+  then failed. With a file pi drops, every job is refused before the
+  fallback check. `doctor` says ✗ for each overlay entry pi
   will not compose, naming the provider and the rule it breaks, the one these jobs are refused by, and for a
-  `models.json` pi drops or that is a directory, that every job is refused until it is fixed (issue #539).
+  `models.json` pi drops or that is a directory, that every job is refused until it is fixed (issue #539), and
+  for one the worker cannot read with an errno that is not transient, that every job is refused until the
+  worker's user can read it (issue #552), and for a `models.json` that is a link, that every job is refused until
+  the operator replaces it with the file itself (PR #553's review).
 
   `session.reason` reads as one flat list but has **three producers**, which is why a token can look
   unreachable from whichever half of the code you happen to be in. The enum has always been documented
@@ -5693,12 +5706,17 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   #502, `worker/src/models-json.mjs`, held to pi by a differential test at the pin): a BOM, `//` comments and trailing
   commas are accepted, and a schema error anywhere refuses the whole document, because pi then loads none of it, so
   nothing in such a file is keyless (fail closed). The reader (`readOverlayModels`, the one rule
-  for the pickup and `doctor`, its keyless line and its credential-free overlay check alike) reads with no existence check first and keeps the read out of the parse's try: an errno
-  `isDeterminateFsCode` calls absence is no file, any other errno (EACCES on the file or its directory, EIO, EMFILE,
-  EISDIR) is rethrown with its code, and only text pi would not load is a `configError`. A TRANSIENT failure to
-  read it at pickup is carried in the snapshot as `modelsUnreadable` with its code (the log names the code), and
-  `doctor` says ⚠ "could not read models.json (<code>)" rather than calling the provider unknown or the overlay
-  credential-free; a file that is read and is not an object is logged as "not a valid models.json", never "unreadable";
+  for the pickup and `doctor`, its keyless line and its credential-free overlay check alike) reads with no existence check first and keeps the read out of the parse's try. It
+  `lstat`s `models.json` first (PR #553's review): a link of any kind, dangling included, is a `configError`
+  marked `overlayLink`, since the job's mount does not resolve links the way the host does; ENOENT is no file, and
+  so are ELOOP, ENOTDIR and ENAMETOOLONG, which can then come only from the folder's path and which the runner's
+  existence check (image/runner/run-job.mjs) answers false for; any other errno (EACCES on the file or its
+  directory, EPERM, EIO, EMFILE, EISDIR) is rethrown with its code; and only text pi would not load is a plain
+  `configError`. The folder may be a link: the runtime follows it when it mounts the folder. A failure to read it at pickup is carried in the snapshot as `modelsUnreadable` with its code
+  (the log names the code); the model gate, which runs first and reads the file too, has by then refused every
+  job on an errno that is not transient and retried one that is (`REQ-MODEL-POLICY`). `doctor` names the code
+  ("could not read models.json (<code>)") rather than calling the provider unknown or the overlay
+  credential-free, ⚠ for a transient errno and ✗ for any other; a file that is read and is not an object is logged as "not a valid models.json", never "unreadable";
   and for a provider pi does not know the gate then gives no verdict: the processor retries the job as infra
   (`provider_credential_unavailable`), never refuses it; an absent or invalid file stays a determinate refusal. The
   env builder settles the variable after the `PI_FORWARD_ENV` and `run.secrets` loops, so neither can replace it.
@@ -6588,3 +6606,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-03 | Issue #545. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the exit line is signed. On an image declaring `exitAuth` the worker writes a per-run 32-byte key (64 hex characters) to the container's stdin with `-i` and sets `PI_EXIT_AUTH=stdin`; the runner drains stdin before anything runs and appends `"auth":"<HMAC-SHA256 of the unsigned line>"` as the line's last key; the worker reads only lines that verify. The channel choice is measured: the environment is readable from `/proc/1/environ` on every venue, a drained stdin reads as EOF, and the runner's memory gave the key to a tool child on Docker Desktop and Fedora until the runner ran under an exec-only node, after which `/proc/<pid>/mem`, `environ` and `fd` were EACCES on all four venues. The runner now handles SIGTERM: one exit line, `code: 143`, `reason: "terminated"`, with the meter's counts, then exit 143; a line already written is not repeated. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: with a key every exit-line parser scans only the verified lines (`authenticExitLines`), and none verified reads as no exit line; `exitAuth` is reported only when a key was issued. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the `exitAuth` capability token (not a gate) and its three verify-image proofs, and `PI_EXIT_AUTH` with the `-i` stdin pipe, written only to a run handed a key. Its `No TTY` line now reads `-t` absent, with `-i` only on a run handed an exit key (a stdin the worker closes after one line). The signed line closes the forge only when both the worker and the image are from #545 or later; every other pairing runs unsigned exactly as before. Exit codes, classes and every other field UNCHANGED, checked. |
 | 2026-10-03 | Issue #501, part 7. **`INT-SCOPED-LIMITS-FILE-CONTRACT` AMENDED**, the Acceptance: the admin's add and edit tools set `dayUsd`, `weekUsd` and `monthUsd`, judged by `parseUsdMicros` and canonical before the confirm (a number is read by its value; one that does not print as a plain decimal of at most 6 places is refused), and the writer's lowest-version stamp is stated in both directions. The file grammar is UNCHANGED. Two stale "later" clauses dropped (PR #550's review): the scoped-limits admin wiring "in a later slice of issue #242" (landed), and the settlement "a later part of issue #501" in `INT-RUN-HISTORY-FILE-CONTRACT`'s cost-counter paragraph (landed in #542; the text now names `dollarSettlement`). **`INT-RUN-HISTORY-FILE-CONTRACT`**, otherwise UNCHANGED, checked: the admin reads `dollars` and `tokens.boundExceeded` as written, and folds them by the run's start into the window key the worker would have reserved under. **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: `run.models` and `run.maxCostUsd` keep their grammar; the display record now carries both, and no tool writes either. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: `dispatch_set` judges a dollar value with the same parser before its confirm instead of only at the write. **Code evidence**: admin/src/index.ts -> dollarFieldsOf, dispatch_limit_add, dispatch_limit_edit; admin/src/read-model.mjs -> writeScopedLimits, normalizeTriggerForDisplay. |
 | 2026-10-03 | Issue #544. **`INT-SDK-SESSION-OPTIONS` AMENDED**: `additionalExtensionPaths` carries the overlay's extension ENTRIES (`discoverExtensionEntries`, pi's own rule for `~/.pi/agent/extensions` at the pin) instead of the `/opt/pi-global/extensions` folder, which pi read as one extension that failed to import; `extensionsOverride` reports pi's load errors first, as one `extension_load_failed` line (entry relative to its root, the root, `load` or `conflict`, never the error text), leaving out errors for absent paths; a manifest entry naming a directory is skipped and reported as `manifest-dir`, an unloadable ignore matcher withholds the overlay (`overlay_extensions_withheld`), a pre-#544 package layout, or a root `pi.extensions` with glob or exclude entries, is named once (`overlay_extensions_layout`), and the recursion guard also tests the first folder under each root. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: the permanent "path does not exist" entry for `/job/pi/extensions` is now read and left out by that line, not unread. **INT-CONTAINER-RUNTIME-CONTRACT UNCHANGED, checked**: no mount or env moved. |
+| 2026-10-03 | Issue #552, with PR #553's review rounds 1 to 3 folded in. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, the pre-spend model refusals gain `overlay-unreadable` (an overlay `models.json` the worker cannot read with an errno it does not read as absence and that is not one of the transient four, EIO, EAGAIN, EMFILE and ENFILE; the job then loads none of the file, since the existence check in image/runner/run-job.mjs, or pi's own read fails) and `overlay-link` (a `models.json` that is a link of any kind, dangling included: the job's read-only mount does not resolve links the way the host does); a transient read now retries every job once, a builtin one with no list included. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**, the reader paragraph: `models.json` is `lstat`ed first and a link is refused; ENOENT, and ELOOP, ENOTDIR and ENAMETOOLONG from the folder's path, are no file; `doctor` says ✗ for a non-transient errno and for a link. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, a new bullet before Mounts: `PI_GLOBAL_PI_DIR` must be absolute, since a relative value is resolved differently by the worker and the container runtime. **Code evidence**: worker/src/model-catalog.mjs -> checkModelsKnown, isTransientOverlayRead; worker/src/model-endpoints.mjs -> readOverlayModels; worker/src/config.mjs -> resolveGlobalPiDir; worker/src/doctor.mjs; worker/src/index.mjs. |

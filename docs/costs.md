@@ -301,8 +301,10 @@ is an open issue.
   it forwards are both bounded and both counted, so its usage counts twice. That errs on the safe side for money,
   but such a proxy can reach a cost or token cap early.
 - **A broken overlay `models.json` refuses every job.** If pi would drop the file, the worker refuses every job
-  until it is fixed, rather than send a provider's models to its public endpoint
-  ([global overlay](global-pi-overlay.md#custom-providers)).
+  until it is fixed, rather than send a provider's models to its public endpoint. The same holds when the worker
+  cannot read the file (no permission on it or its folder), and when `models.json` is a link: copy the file in
+  instead. A read that fails for a moment retries the
+  job once, then fails it ([global overlay](global-pi-overlay.md#custom-providers)).
 
 Specs: [`REQ-SPEND-CAPS-MULTI-WINDOW`](../specs/requirements.md#req-spend-caps-multi-window),
 [`REQ-TOKEN-ACCOUNTING-AND-CAPS`](../specs/requirements.md#req-token-accounting-and-caps),

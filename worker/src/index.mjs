@@ -653,9 +653,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			let endpoints = [];
 			let models = null;
 			let set = [];
-			// A TRANSIENT failure to read the overlay (any errno `readOverlayModels` rethrows: EIO, EMFILE, EACCES, EISDIR...),
-			// carried in the snapshot with its code, so the credential gate retries a keyless job rather
-			// than refusing it for good on a read that may succeed in a minute. Absent, or not valid JSON, is determinate.
+			// A failure to READ the overlay (any errno `readOverlayModels` rethrows), carried in the snapshot with its code,
+			// so the credential gate gives no keyless verdict on it. The model gate runs first and reads the file too: it
+			// refuses every job on a permanent errno (EACCES, EISDIR...) or a models.json that is a link, and retries a
+			// transient errno (issue #552), so the credential gate sees this only when the read failed here and not there.
+			// Absent, or not valid JSON, is determinate.
 			let modelsUnreadable = null;
 			try {
 				endpoints = modelEndpoints() ?? [];
@@ -668,10 +670,10 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						// A FIXED reason, never the error's message: a JSON.parse message quotes the file's text around the fault,
 						// and models.json holds keys (PR #518's gate measured one in this line). The settings reader's posture.
 						// An fs error is named by its code: `readOverlayModels` returns null for absence and rethrows every other
-						// errno as-is, so a string code here IS a transient read (PR #520 round 2), carried for the gate to retry.
+						// errno as-is (PR #520 round 2), carried for the gate, which retries rather than calling the provider keyless.
 						// A configError is determinate: the file was read and is not JSON, or not an object (`[]`), and is named as
 						// such, never as "unreadable", which is the fs-error wording.
-						const reason = typeof err?.code === "string" ? err.code : /not valid JSON/.test(String(err?.message)) ? "overlay models.json is not valid JSON" : err?.piDispatchConfig === true ? "overlay models.json is not a valid models.json" : "overlay models.json is unreadable";
+						const reason = typeof err?.code === "string" ? err.code : err?.overlayLink === true ? "overlay models.json is a link" : /not valid JSON/.test(String(err?.message)) ? "overlay models.json is not valid JSON" : err?.piDispatchConfig === true ? "overlay models.json is not a valid models.json" : "overlay models.json is unreadable";
 						deps?.log?.("endpoint_models_unreadable", { jobId: job.id, reason });
 						if (typeof err?.code === "string") modelsUnreadable = { code: err.code };
 					}

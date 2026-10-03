@@ -296,10 +296,15 @@ export function jobImageFrom(env) {
 
 // The operator's global pi overlay dir (REQ-GLOBAL-PI-OVERLAY). Unset/empty = feature off. When set it
 // must EXIST at boot -- a typo pointing at nothing would silently drop the operator's whole setup on
-// every job, so fail loud like every other config error rather than degrade to nothing.
+// every job, so fail loud like every other config error rather than degrade to nothing. And it must be
+// ABSOLUTE (PR #553's review): the value becomes the source of the job's `-v <dir>:/opt/pi-global:ro`, and a
+// relative one is resolved differently by the worker and the container runtime (the worker against its own
+// working directory; the runtime against the client's, or a bare name as a named volume or an error), so the
+// job could mount another folder, or none, than the one the worker judged. Every relative value is refused.
 function resolveGlobalPiDir(env, fileExists) {
 	const dir = env.PI_GLOBAL_PI_DIR;
 	if (dir === undefined || dir === "") return null;
+	if (!isAbsolute(dir)) throw configError(`PI_GLOBAL_PI_DIR must be an absolute path (got ${JSON.stringify(dir)}): a relative value is resolved differently by the worker and the container runtime, so a job could mount another folder than the one the worker checks`);
 	if (!fileExists(dir)) throw configError(`PI_GLOBAL_PI_DIR does not exist: ${dir}`);
 	return dir;
 }

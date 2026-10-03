@@ -44,6 +44,21 @@ function hostAgent({ models, withAuth = true, withExtensions = false, settings, 
 const overlayDir = () => tempDir("pi-overlay-");
 const run = (from, to, extra = [], out, deps = {}) => runImportPi(["--from", from, "--to", to, ...extra], { out, ...deps });
 
+test("import-pi stages into an absolute path and prints it as the PI_GLOBAL_PI_DIR to set, even from a relative --to (PR #553's review)", async () => {
+	// The worker refuses a relative PI_GLOBAL_PI_DIR (the worker and the container runtime resolve it differently), so
+	// the next step must name the folder absolutely, resolved against the working directory the import ran in.
+	const from = hostAgent();
+	const cwd = tempDir("pi-import-cwd-");
+	for (const [rel, where] of [["./overlay", join(cwd, "overlay")], ["nested/pi", join(cwd, "nested", "pi")], [undefined, join(cwd, "pi-global")]]) {
+		const { out, text } = capture();
+		const code = await runImportPi(["--from", from, ...(rel === undefined ? [] : ["--to", rel])], { out, cwd });
+		assert.equal(code, 0, String(rel));
+		assert.ok(existsSync(join(where, "models.json")), `${rel}: staged under the working directory`);
+		assert.ok(text().includes(`Set PI_GLOBAL_PI_DIR=${where} in .env`), `${rel}: the absolute path is printed`);
+		assert.ok(!text().includes(`Set PI_GLOBAL_PI_DIR=${rel} in .env`), `${rel}: never the relative one`);
+	}
+});
+
 test("import-pi copies models/skills/persona and NEVER auth.json", async () => {
 	const from = hostAgent();
 	const to = overlayDir();

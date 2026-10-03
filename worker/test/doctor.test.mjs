@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdtempSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdtempSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -723,21 +723,21 @@ test("doctor: a keyless custom provider is ✓ exactly when the worker's gate pa
 });
 
 test("doctor: the keyless line reads the folder's own files as the service would, queue port included (PR #520 round 1)", { skip: skipNoPi }, async () => {
-	// No `declaredEndpoints` seam: the real read, from the deployment folder, with a RELATIVE PI_GLOBAL_PI_DIR resolved
-	// against it (the worker's working directory), and the queue port the worker's boot refuses.
+	// No `declaredEndpoints` seam: the real read, from the deployment folder, with the absolute PI_GLOBAL_PI_DIR the
+	// worker requires (PR #553's review), and the queue port the worker's boot refuses.
 	for (const [port, keyless] of [[11434, true], [6379, false]]) {
 		const cwd = tempDir("pi-keyless-folder-");
 		mkdirSync(join(cwd, "overlay"));
 		writeFileSync(join(cwd, "overlay", "models.json"), JSON.stringify({ providers: { "local-ollama": { baseUrl: `http://ollama.lan:${port}/v1`, apiKey: "$PI_DISPATCH_KEYLESS", models: [{ id: "qwen" }] } } }));
 		writeFileSync(join(cwd, "model-endpoints.json"), JSON.stringify({ version: 1, endpoints: [{ id: "lan-ollama", host: "ollama.lan", port, slots: 1, keyless: true }] }));
 		const { out, text } = capture();
-		await runDoctor(provEnv({ PI_PROVIDER: "local-ollama", PI_GLOBAL_PI_DIR: "overlay", PI_EGRESS: "0" }), { ...provDeps(out), cwd, fileExists: existsSync });
+		await runDoctor(provEnv({ PI_PROVIDER: "local-ollama", PI_GLOBAL_PI_DIR: join(cwd, "overlay"), PI_EGRESS: "0" }), { ...provDeps(out), cwd, fileExists: existsSync });
 		if (keyless) assert.match(text(), /✓ Provider key: none needed \(local-ollama is keyless: served by declared endpoint lan-ollama\)/);
 		else assert.doesNotMatch(text(), /keyless: served by/, "an endpoint on the queue's port refuses the worker's boot, so it is not keyless");
 	}
 });
 
-test("doctor: an overlay models.json it cannot read is ⚠ naming the errno, never ✗ unknown or \"not valid JSON\" (PR #520 round 2)", { skip: skipNoPi || (typeof process.getuid === "function" && process.getuid() === 0 ? "root reads a mode-000 file" : false) }, async () => {
+test("doctor: an overlay models.json it cannot read names the errno and the refusal, never ✗ unknown or \"not valid JSON\" (PR #520 round 2, issue #552)", { skip: skipNoPi || (typeof process.getuid === "function" && process.getuid() === 0 ? "root reads a mode-000 file" : false) }, async () => {
 	const cwd = tempDir("pi-keyless-000-");
 	mkdirSync(join(cwd, "overlay"));
 	const models = join(cwd, "overlay", "models.json");
@@ -747,7 +747,8 @@ test("doctor: an overlay models.json it cannot read is ⚠ naming the errno, nev
 	try {
 		const { out, text } = capture();
 		await runDoctor(provEnv({ PI_PROVIDER: "local-ollama", PI_GLOBAL_PI_DIR: join(cwd, "overlay"), PI_EGRESS: "0" }), { ...provDeps(out), cwd, fileExists: existsSync });
-		assert.match(text(), /⚠ Provider key: could not read models\.json \(EACCES\), so whether "local-ollama" is keyless is not known; the worker retries such a job/);
+		assert.match(text(), /✗ Provider key: could not read models\.json \(EACCES\), so whether "local-ollama" is keyless is not known; the worker refuses every job until it can read it \(overlay-unreadable\)/);
+		assert.match(text(), /✗ Overlay models\.json cannot be read by the worker \(EACCES\), so a job loads none of it and every job is refused as model-unknown \(overlay-unreadable\)/);
 		assert.doesNotMatch(text(), /✗ PI_PROVIDER is "local-ollama"/);
 		assert.match(text(), /could not read models\.json \(EACCES\)/);
 		assert.doesNotMatch(text(), /overlay models\.json is not valid JSON/, "a read error is not a parse error");
@@ -756,7 +757,7 @@ test("doctor: an overlay models.json it cannot read is ⚠ naming the errno, nev
 	}
 });
 
-test("doctor: the credential-free check reads through the one reader: a models.json under a mode-000 overlay is ⚠, never a silent pass (PR #520)", { skip: typeof process.getuid === "function" && process.getuid() === 0 ? "root reads a mode-000 directory" : false }, async () => {
+test("doctor: the credential-free check reads through the one reader: a models.json under a mode-000 overlay is ✗, never a silent pass (PR #520, issue #552)", { skip: typeof process.getuid === "function" && process.getuid() === 0 ? "root reads a mode-000 directory" : false }, async () => {
 	const overlay = join(tempDir("pi-overlay-dir000-"), "overlay");
 	mkdirSync(overlay);
 	writeFileSync(join(overlay, "models.json"), JSON.stringify({ providers: { p: { apiKey: "sk-literal-secret-value" } } }));
@@ -764,7 +765,7 @@ test("doctor: the credential-free check reads through the one reader: a models.j
 	try {
 		const { out, text } = capture();
 		await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_GLOBAL_PI_DIR: overlay }), { ...provDeps(out), fileExists: existsSync });
-		assert.match(text(), /⚠ Overlay models\.json could not be read \(EACCES\), so whether it is credential-free is not known/);
+		assert.match(text(), /✗ Overlay models\.json cannot be read by the worker \(EACCES\), so a job loads none of it and every job is refused as model-unknown \(overlay-unreadable\)\n {4}→ make .*models\.json and its folder readable by the account the worker runs as; every job is refused until then/);
 		assert.doesNotMatch(text(), /✓ Overlay models\.json is credential-free/, "an unread file is not a clean one");
 	} finally {
 		chmodSync(overlay, 0o700);
@@ -777,6 +778,76 @@ test("doctor: the credential-free check reads through the one reader: a models.j
 	const again = capture();
 	await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_GLOBAL_PI_DIR: overlay }), { ...provDeps(again.out), fileExists: existsSync });
 	assert.match(again.text(), /✗ Overlay models\.json is credential-free\n {4}→ overlay models\.json does not match pi's models\.json schema/);
+});
+
+test("doctor: each overlay read errno is ✗ refused with a fix for its reason, unless it is one the worker retries, which is ⚠ (issue #552)", async () => {
+	const overlay = join(tempDir("pi-overlay-errno-"), "overlay");
+	mkdirSync(overlay);
+	writeFileSync(join(overlay, "models.json"), "{}");
+	const failing = (code) => (path, enc) => {
+		if (path.endsWith("models.json")) throw Object.assign(new Error(`${code}: read failed`), { code });
+		return readFileSync(path, enc);
+	};
+	const doctor = async (code) => {
+		const { out, text } = capture();
+		const exit = await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_GLOBAL_PI_DIR: overlay }), { ...provDeps(out), fileExists: existsSync, readOverlayFile: failing(code) });
+		return { exit, text: text() };
+	};
+	for (const [code, fix] of [["EACCES", /→ make .*models\.json and its folder readable by the account the worker runs as; every job is refused until then/], ["EPERM", /→ make .*models\.json and its folder readable/], ["EROFS", /→ check .*models\.json on the worker host \(the read failed with EROFS\); every job is refused until the worker can read it/], ["EWHATEVER", /→ check .*models\.json on the worker host \(the read failed with EWHATEVER\)/]]) {
+		const { exit, text } = await doctor(code);
+		assert.equal(exit, 1, code);
+		assert.match(text, new RegExp(`✗ Overlay models\\.json cannot be read by the worker \\(${code}\\), so a job loads none of it and every job is refused as model-unknown \\(overlay-unreadable\\)`), code);
+		assert.match(text, fix, code);
+	}
+	for (const code of ["EIO", "EAGAIN", "EMFILE", "ENFILE"]) {
+		const { text } = await doctor(code);
+		assert.match(text, new RegExp(`⚠ Overlay models\\.json could not be read just now \\(${code}\\), so whether it is credential-free is not known; the worker retries each job once, then fails it`), code);
+		assert.doesNotMatch(text, /overlay-unreadable/, code);
+	}
+	// What the job reads as no file is no overlay here too (PR #553's review).
+	for (const code of ["ELOOP", "ENOTDIR", "ENAMETOOLONG"]) {
+		const { text } = await doctor(code);
+		assert.doesNotMatch(text, /overlay-unreadable|could not be read/, code);
+		assert.match(text, /✓ Overlay models\.json is credential-free/, code);
+	}
+});
+
+test("doctor: a models.json that is a link is ✗: every job is refused until it is the file itself (PR #553's review)", async () => {
+	const root = tempDir("pi-overlay-link-");
+	const body = JSON.stringify({ providers: {} });
+	writeFileSync(join(root, "outside.json"), body);
+	const overlay = join(root, "overlay");
+	mkdirSync(overlay);
+	writeFileSync(join(overlay, "real.json"), body);
+	const run = async (env) => {
+		const { out, text } = capture();
+		const exit = await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", ...env }), { ...provDeps(out), fileExists: existsSync });
+		return { exit, text: text() };
+	};
+	for (const target of [join(root, "outside.json"), "real.json", "../outside.json", "nowhere.json"]) {
+		try {
+			unlinkSync(join(overlay, "models.json"));
+		} catch {}
+		symlinkSync(target, join(overlay, "models.json"));
+		const { exit, text } = await run({ PI_GLOBAL_PI_DIR: overlay });
+		assert.equal(exit, 1, target);
+		assert.match(text, /✗ Overlay models\.json is a link, so every job is refused as model-unknown \(overlay-link\)\n {4}→ models\.json in the overlay folder is a link; replace it with the file itself \(the job's read-only mount cannot follow links reliably\): .*models\.json; no job runs until then/, target);
+		assert.doesNotMatch(text, /✓ Overlay models\.json is credential-free/, target);
+	}
+	// The overlay FOLDER may be a link: the runtime follows it at mount time, and both sides read the same file.
+	unlinkSync(join(overlay, "models.json"));
+	writeFileSync(join(overlay, "models.json"), body);
+	symlinkSync(overlay, join(root, "overlay-link"));
+	const folder = await run({ PI_GLOBAL_PI_DIR: join(root, "overlay-link") });
+	assert.match(folder.text, /✓ Overlay models\.json is credential-free/);
+	assert.doesNotMatch(folder.text, /model-unknown \(overlay-link\)/);
+});
+
+test("doctor: a relative PI_GLOBAL_PI_DIR is ✗ naming the variable, and neither overlay read runs on it (PR #553's review)", async () => {
+	const { out, text } = capture();
+	assert.equal(await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_GLOBAL_PI_DIR: "pi-global" }), { ...provDeps(out), fileExists: () => true }), 1);
+	assert.match(text(), /✗ PI_GLOBAL_PI_DIR is "pi-global", which is not an absolute path, so the worker refuses to boot\n {4}→ set PI_GLOBAL_PI_DIR to the overlay folder's absolute path/);
+	assert.doesNotMatch(text(), /Global overlay dir exists|Overlay models\.json/);
 });
 
 test("doctor: a provider pi DOES know, with its key set, still passes", { skip: skipNoPi }, async () => {
