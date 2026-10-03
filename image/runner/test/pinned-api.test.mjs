@@ -1742,13 +1742,28 @@ test("-ne keeps explicit -e paths, \"--\" ends option parsing, and the subcomman
 	const start = mainSource.indexOf("export async function main(args, options) {");
 	const end = mainSource.indexOf("const parsed = parseArgs(args);", start);
 	assert.ok(start >= 0 && end > start, "main() or its parseArgs call moved");
-	const dispatch = mainSource.slice(start, end);
-	assert.deepEqual([...dispatch.matchAll(/if \(await (\w+)\(args\b/g)].map((match) => match[1]), ["runAuthCommand", "handlePackageCommand", "handleConfigCommand"], "main() dispatches a different set of command handlers before parseArgs");
-	assert.deepEqual([...dispatch.matchAll(/args\[0\] === "([a-z-]+)"/g)].map((match) => match[1]), ["update", "mcp"], "main() reads args[0] for a different set of words before parseArgs");
-	assert.deepEqual([...dispatch.matchAll(/args\[0\]/g)].length, 2, "main() reads args[0] somewhere new before parseArgs");
+	// The bundle's main() is the one a child runs, so the same dispatch is read from both copies.
+	const chunkDir = join(agentPackageDir(), "dist", "bundle", "chunks");
+	const bundleMain = readdirSync(chunkDir).map((name) => readFileSync(join(chunkDir, name), "utf8")).filter((text) => text.includes("async function main(args,options){"));
+	assert.equal(bundleMain.length, 1, "expected one bundle chunk that defines main()");
+	const bundleStart = bundleMain[0].indexOf("async function main(args,options){");
+	const bundleEnd = bundleMain[0].indexOf("parseArgs(args)", bundleStart);
+	assert.ok(bundleEnd > bundleStart, "the bundle's main() no longer calls parseArgs(args)");
+	for (const [copy, dispatch] of [["dist/main.js", mainSource.slice(start, end)], ["the bundle", bundleMain[0].slice(bundleStart, bundleEnd)]]) {
+		// Every call that hands args to a command handler (the minified bundle uses comma expressions, not `if`).
+		assert.deepEqual([...dispatch.matchAll(/await (\w+)\(args\b/g)].map((match) => match[1]), ["runAuthCommand", "handlePackageCommand", "handleConfigCommand", "runMcpCommand"], `${copy}: main() dispatches a different set of command handlers before parseArgs`);
+		// "update" here is not a subcommand branch: it is the Windows exit quirk inside the package-command branch. If
+		// pi drops that quirk this fails harmlessly; re-read main() and update the list.
+		assert.deepEqual([...dispatch.matchAll(/args\[0\]\s*===\s*"([a-z-]+)"/g)].map((match) => match[1]), ["update", "mcp"], `${copy}: main() reads args[0] for a different set of words before parseArgs ("update" is the Windows exit quirk, "mcp" the only direct dispatch)`);
+		assert.equal([...dispatch.matchAll(/args\[0\]/g)].length, 2, `${copy}: main() reads args[0] somewhere new before parseArgs`);
+	}
 	assert.match(agentDistFile("cli", "auth-command.js"), /if \(args\[0\] !== "auth"\)\n\s*return undefined;/);
 	const packages = agentDistFile("package-manager-cli.js");
-	assert.match(packages, /if \(rawCommand === "uninstall"\) \{[\s\S]{0,80}?else if \(rawCommand === "install" \|\| rawCommand === "remove" \|\| rawCommand === "update" \|\| rawCommand === "list"\) \{/);
+	// The package-manager words, exactly: parsePackageCommand from its start to its "no command" return.
+	const parseStart = packages.indexOf("function parsePackageCommand(args) {");
+	const parseEnd = packages.indexOf("if (!command) {", parseStart);
+	assert.ok(parseStart >= 0 && parseEnd > parseStart, "parsePackageCommand moved");
+	assert.deepEqual([...packages.slice(parseStart, parseEnd).matchAll(/rawCommand === "([a-z-]+)"/g)].map((match) => match[1]), ["uninstall", "install", "remove", "update", "list"], "pi's package-manager command words changed");
 	assert.match(packages, /const \[command, \.\.\.rest\] = args;\n\s*if \(command !== "config"\) \{/);
 	// And the help text lists exactly that set, so a new subcommand shows up here as well as in main().
 	const help = agentDistFile("cli", "args.js").match(/\$\{chalk\.bold\("Commands:"\)\}\n([\s\S]*?)\n\n/);
