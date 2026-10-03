@@ -796,7 +796,8 @@ function registerTools(pi: ExtensionAPI): void {
     description:
       "Changes fields of an existing pause window (by array index from dispatch_pauses) and applies it live. " +
       "Provide only the fields to change (scope/from/to/tz/days/dateFrom/dateTo); the rest keep their current " +
-      "value. The operator MUST approve a confirm dialog showing the before->after; refused with no interactive " +
+      "value. `scope` is a repo \"owner/name\" on every forge, a forge-qualified \"<forge>:owner/name\" such as " +
+      "\"github:acme/web\" for that forge only, a local folder path, or \"*\" for all. The operator MUST approve a confirm dialog showing the before->after; refused with no interactive " +
       "operator.",
     executionMode: "sequential",
     parameters: Type.Object({
@@ -995,10 +996,12 @@ function registerTools(pi: ExtensionAPI): void {
     description:
       "Changes fields of an existing scoped limit (by array index from dispatch_limits) and applies it live. " +
       "Provide only the fields to change (scope/day/week/month/concurrent/dayUsd/weekUsd/monthUsd); the rest keep " +
-      "their current value. `dayUsd`/`weekUsd`/`monthUsd` are dollar windows, written as a decimal string (\"2.50\"). " +
+      "their current value. `scope` is a repo \"owner/name\" on every forge, a forge-qualified " +
+      "\"<forge>:owner/name\" such as \"github:acme/web\" for that forge only, or an ABSOLUTE local folder path. `dayUsd`/`weekUsd`/`monthUsd` are dollar windows, written as a decimal string (\"2.50\"). " +
       "No field can be removed here: to drop a cap from an entry, edit scoped-limits.json by hand. Changing `scope` " +
       "(such as a bare \"acme/web\" rewritten to \"github:acme/web\") starts a NEW count under a new key: the old " +
-      "row's used runs and dollars do not carry over. The file stays " +
+      "row's used runs and dollars do not carry over, and jobs already running keep their slot under the old scope " +
+      "until they finish, so one more job than `concurrent` allows can start meanwhile. The file stays " +
       "version 1 unless a row needs version 2. The operator MUST approve a confirm dialog showing the before->after; " +
       "refused with no interactive operator.",
     executionMode: "sequential",
@@ -2343,7 +2346,7 @@ async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): P
   const cur = list[index];
   const ask = async (label: string, current: string) => ui.input(`${label} — blank keeps "${current}"`, current);
   const keep = (v: string | undefined, current: any) => (v === undefined || v.trim() === "" ? current : v);
-  const scope = await ask("scope", cur.scope ?? "");
+  const scope = await ask("scope: \"owner/name\" (every forge), \"<forge>:owner/name\" (one forge) or an ABSOLUTE folder path", cur.scope ?? "");
   if (scope === undefined) return;
   const day = await ask("day cap", String(cur.day ?? ""));
   if (day === undefined) return;
@@ -2377,7 +2380,7 @@ async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): P
  */
 export function scopeChangeNote(before: any, after: any): string {
   if (before?.scope === after?.scope) return "";
-  return "\nThe scope changes, so this row starts a NEW count under a new key: the used runs and dollars of the old scope do not carry over.";
+  return "\nThe scope changes, so this row starts a NEW count under a new key: the used runs and dollars of the old scope do not carry over. Jobs already running keep their slot under the old scope until they finish, so until then one more job than `concurrent` allows can start.";
 }
 
 /** Delete a scoped limit: select which, confirm, remove. */
@@ -2441,7 +2444,7 @@ async function editPauseWindowViaDialogs(paths: any, ui: any, notify: Notify): P
   // Each field's current value is the placeholder; a blank answer keeps it (undefined = the operator cancelled).
   const ask = async (label: string, current: string) => ui.input(`${label} — blank keeps "${current}"`, current);
   const keep = (v: string | undefined, current: any) => (v === undefined || v.trim() === "" ? current : v);
-  const scope = await ask("scope", cur.scope ?? "");
+  const scope = await ask("scope: \"owner/name\" (every forge), \"<forge>:owner/name\" (one forge), a folder path or \"*\"", cur.scope ?? "");
   if (scope === undefined) return;
   const from = await ask("from (HH:MM)", cur.from ?? "");
   if (from === undefined) return;

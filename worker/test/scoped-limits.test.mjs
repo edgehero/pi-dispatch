@@ -394,26 +394,26 @@ test("a case-colliding duplicate model row names the FIRST row's index (PR #549'
 const fjJob = (repo) => ({ kind: "forgejo", repo });
 
 test("a qualified row parses for every forge kind (derived from FORGE_KINDS) and stores <kind>:<repo>", () => {
-	const limits = parse(FORGE_KINDS.map((kind) => ({ scope: ` ${kind}:acme/web `, day: 1 })));
+	const limits = parse2(FORGE_KINDS.map((kind) => ({ scope: ` ${kind}:acme/web `, day: 1 })));
 	assert.deepEqual(limits.map((l) => l.scope), FORGE_KINDS.map((kind) => `${kind}:acme/web`));
 	// Two forges' qualified rows for one repo are two rows, not a duplicate.
 	assert.equal(limits.length, FORGE_KINDS.length);
 });
 
 test("an unknown forge prefix is refused naming the known kinds; a drive letter keeps today's handling", () => {
-	assert.throws(() => parse([{ scope: "gitub:acme/web", day: 1 }]), (e) => /index 0/.test(e.message) && /unknown prefix "gitub:"/.test(e.message) && FORGE_KINDS.every((k) => e.message.includes(k)));
-	assert.throws(() => parse([{ scope: "GitHub:acme/web", day: 1 }]), /unknown prefix "GitHub:"/);
-	assert.throws(() => parse([{ scope: "github:", day: 1 }]), /names a forge and no repo/);
+	assert.throws(() => parse2([{ scope: "gitub:acme/web", day: 1 }]), (e) => /index 0/.test(e.message) && /unknown prefix "gitub:"/.test(e.message) && FORGE_KINDS.every((k) => e.message.includes(k)));
+	assert.throws(() => parse2([{ scope: "GitHub:acme/web", day: 1 }]), /unknown prefix "GitHub:"/);
+	assert.throws(() => parse2([{ scope: "github:", day: 1 }]), /names a forge and no repo/);
 	// A one-letter drive prefix is a folder, stored verbatim on a POSIX worker exactly as before.
 	assert.equal(parse([{ scope: "C:\\srv\\site", day: 1 }])[0].scope, "C:\\srv\\site");
 });
 
 test("a bare row and a qualified row for one repo refuse the file, naming both indexes (count rows)", () => {
-	assert.throws(() => parse([{ scope: "acme/web", day: 5 }, { scope: "github:acme/web", concurrent: 1 }]), (e) => /index 1/.test(e.message) && /at index 0/.test(e.message) && /same repo/.test(e.message));
+	assert.throws(() => parse2([{ scope: "acme/web", day: 5 }, { scope: "github:acme/web", concurrent: 1 }]), (e) => /index 1/.test(e.message) && /at index 0/.test(e.message) && /same repo/.test(e.message));
 	// Order does not matter: the qualified row first is refused the same way.
-	assert.throws(() => parse([{ scope: "forgejo:acme/web", week: 2 }, { scope: "acme/web", month: 9 }]), (e) => /index 0/.test(e.message) && /at index 1/.test(e.message));
+	assert.throws(() => parse2([{ scope: "forgejo:acme/web", week: 2 }, { scope: "acme/web", month: 9 }]), (e) => /index 0/.test(e.message) && /at index 1/.test(e.message));
 	// Two forges' qualified rows, or a bare row for ANOTHER repo, are fine.
-	assert.equal(parse([{ scope: "github:acme/web", day: 1 }, { scope: "forgejo:acme/web", day: 1 }, { scope: "acme/api", day: 1 }]).length, 3);
+	assert.equal(parse2([{ scope: "github:acme/web", day: 1 }, { scope: "forgejo:acme/web", day: 1 }, { scope: "acme/api", day: 1 }]).length, 3);
 });
 
 test("a bare row and a qualified row for one repo refuse the file when both carry dollar windows only", () => {
@@ -421,7 +421,7 @@ test("a bare row and a qualified row for one repo refuse the file when both carr
 });
 
 test("limitFor matches the qualified row first, then the bare row; the other forge falls through", () => {
-	const qualified = parse([{ scope: "github:acme/web", day: 3 }]);
+	const qualified = parse2([{ scope: "github:acme/web", day: 3 }]);
 	assert.equal(limitFor(qualified, ghJob("acme/web")).scope, "github:acme/web");
 	assert.equal(limitFor(qualified, fjJob("acme/web")), null);
 	const bare = parse([{ scope: "acme/web", day: 3 }]);
@@ -455,5 +455,31 @@ test("the migration pin: a bare row keeps the exact key it had before qualified 
 	assert.equal(scopeDollarKeyPrefix("acme/web"), "budget:usd:s:86f279ce9c29f106");
 	const limits = parse([{ scope: "acme/web", day: 5 }]);
 	for (const job of [ghJob("acme/web"), fjJob("acme/web")]) assert.equal(scopeKeyPrefix(budgetCapsFor(job, limits).scope), "budget:s:86f279ce9c29f106");
-	assert.equal(scopeKeyPrefix(budgetCapsFor(ghJob("acme/web"), parse([{ scope: "github:acme/web", day: 5 }])).scope), "budget:s:ae5b3b31a94b074d");
+	assert.equal(scopeKeyPrefix(budgetCapsFor(ghJob("acme/web"), parse2([{ scope: "github:acme/web", day: 5 }])).scope), "budget:s:ae5b3b31a94b074d");
+});
+
+test("a forge-qualified row needs version 2, and the admin's version stamp says 2 for one (released builds refuse, never ignore)", () => {
+	// Every released build reads `github:acme/web` as a plain repo string no job has: in a version 1 file it would be a
+	// cap and a lease one build enforces and another silently drops. Version 2 makes the older build refuse instead.
+	assert.throws(() => parse([{ scope: "github:acme/web", day: 1 }]), (e) => /index 0/.test(e.message) && /needs "version": 2/.test(e.message));
+	assert.equal(scopedLimitsVersionFor([{ scope: "github:acme/web", day: 1 }]), 2);
+	assert.equal(scopedLimitsVersionFor([{ scope: " forgejo:acme/web ", concurrent: 1 }]), 2, "as the admin builds it, untrimmed");
+	assert.equal(scopedLimitsVersionFor([{ scope: "acme/web", day: 1 }, { scope: "/srv/site", concurrent: 1 }]), 1, "bare and folder rows stay version 1");
+	assert.equal(scopedLimitsVersionFor([{ scope: "gitub:acme/web", day: 1 }]), 1, "a refused scope is the parser's to name, not the stamp's");
+});
+
+test("a qualified row must have a forge repo's shape: each refused shape is named, the good ones parse", () => {
+	const refused = [
+		"github:/acme/web", // leading slash
+		"github:acme/web/", // trailing slash
+		"github:acme//web", // empty segment
+		"github:acme/we b", // whitespace
+		"github:acme/web\tx", // control character
+		"github:acme/web\u0000", // NUL
+		"github:acme/web#12", // a pasted run target
+		"github:github:acme/web", // a second prefix
+		"github:acme", // one segment: no forge repo has no "/"
+	];
+	for (const scope of refused) assert.throws(() => parse2([{ scope, day: 1 }]), (e) => /index 0/.test(e.message) && /is not a forge repo/.test(e.message), scope);
+	for (const scope of ["github:acme/web", "gitlab:group/sub/proj", "azure:proj/repo", "forgejo:a.b-c/d_e"]) assert.equal(parse2([{ scope, day: 1 }])[0].scope, scope);
 });

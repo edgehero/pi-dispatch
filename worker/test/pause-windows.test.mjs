@@ -173,3 +173,22 @@ test("a qualified window pauses only its forge's job; a bare window pauses every
 	// scopeOf is unchanged: still the bare repo.
 	assert.equal(scopeOf(fjJob("acme/web")), "acme/web");
 });
+
+test("parseScopeString refuses a qualified scope whose repo is not a forge repo's shape, and pause windows share the rule", () => {
+	const refused = {
+		"leading slash": "github:/acme/web",
+		"trailing slash": "github:acme/web/",
+		"empty segment": "github:acme//web",
+		whitespace: "github:acme/we b",
+		"control character": "github:acme/web\tx",
+		NUL: "github:acme/web\u0000",
+		"a # tail": "github:acme/web#12",
+		"a second prefix": "forgejo:github:acme/web",
+		"one segment": "github:site",
+	};
+	for (const [what, scope] of Object.entries(refused)) {
+		assert.throws(() => parseScopeString(scope), (e) => e.piDispatchConfig === true && /is not a forge repo/.test(e.message), what);
+		assert.throws(() => parse([{ scope, from: "09:00", to: "17:00" }]), (e) => /pause window at index 0/.test(e.message) && /is not a forge repo/.test(e.message), `window: ${what}`);
+	}
+	assert.equal(parseScopeString("gitlab:group/sub/proj").repo, "group/sub/proj");
+});

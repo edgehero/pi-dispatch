@@ -3416,6 +3416,12 @@ export async function collectChecks(shellVars, seams) {
 		}
 	}
 
+	// A scope that can only ever be a folder (issue #242's dead-scope rule): a forge repo always contains "/" and never
+	// begins "/", "./" or "../" or carries a backslash. A forge-qualified row (issue #498) names a repo by construction,
+	// so it is never one. Shared by the dead-scope advisory and the bare-repo one below, so one row is never called a
+	// dead folder by one line and a bare repo by the other.
+	const folderOnly = (s) => scopeFormOf(s) !== "qualified" && (s.startsWith("/") || s.startsWith("./") || s.startsWith("../") || s.includes("\\") || !s.includes("/") || /^[A-Za-z]:/.test(s));
+
 	// The dead-scope advisory (issue #242), honest about what doctor can actually judge. A forge repo
 	// always contains "/" and never begins "/", "./" or "../" or carries a backslash, so a scope in any
 	// of THOSE shapes can only ever be a folder -- and a folder row that matches no trigger's canonical
@@ -3429,8 +3435,6 @@ export async function collectChecks(shellVars, seams) {
 	// shape `render` prints the fix line too, which the old `ok: true` never did.
 	if (scopedLimitFacts.parseError === null && scopedLimitFacts.limits.length > 0 && parseError === null && triggersFilePath !== null) {
 		const folderSet = new Set(folders);
-		// A forge-qualified row (issue #498) names a repo by construction, so it is never "a folder no trigger runs in".
-		const folderOnly = (s) => scopeFormOf(s) !== "qualified" && (s.startsWith("/") || s.startsWith("./") || s.startsWith("../") || s.includes("\\") || !s.includes("/") || /^[A-Za-z]:/.test(s));
 		// A model row (version 2) names a model, never a folder, so it is never "a folder no trigger runs in".
 		const dead = scopedLimitFacts.limits.map((l) => l.scope).filter((s) => !isModelScope(s) && folderOnly(s) && !folderSet.has(s));
 		if (dead.length > 0) {
@@ -3448,8 +3452,8 @@ export async function collectChecks(shellVars, seams) {
 	// pauses both. That may be meant, so this is a WARNING naming the qualified spellings, never a failure: refusing bare
 	// rows would stop existing workers from booting. Guarded like the dead-scope advisory, on readable triggers.
 	if (parseError === null && triggersFilePath !== null && forges.length > 1) {
-		const bareRows = scopedLimitFacts.parseError === null ? scopedLimitFacts.limits.map((l) => l.scope).filter((s) => !isModelScope(s) && scopeFormOf(s) === "bare") : [];
-		const bareWindows = pauseWindowFacts.parseError === null ? [...new Set(pauseWindowFacts.windows.map((w) => w.scope).filter((s) => s !== "*" && scopeFormOf(s) === "bare"))] : [];
+		const bareRows = scopedLimitFacts.parseError === null ? scopedLimitFacts.limits.map((l) => l.scope).filter((s) => !isModelScope(s) && scopeFormOf(s) === "bare" && !folderOnly(s)) : [];
+		const bareWindows = pauseWindowFacts.parseError === null ? [...new Set(pauseWindowFacts.windows.map((w) => w.scope).filter((s) => s !== "*" && scopeFormOf(s) === "bare" && !folderOnly(s)))] : [];
 		const named = [...new Set([...bareRows, ...bareWindows])];
 		if (named.length > 0) {
 			const what = [bareRows.length > 0 ? `${bareRows.length} scoped limit(s)` : null, bareWindows.length > 0 ? `${bareWindows.length} pause window(s)` : null].filter(Boolean).join(" and ");

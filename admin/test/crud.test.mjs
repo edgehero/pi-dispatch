@@ -815,7 +815,9 @@ test("issue #498: an edit that rewrites a bare scope to a qualified one says the
   const { ctx, shown } = toolCtx({ answer: true });
   textOf(await toolByName("dispatch_limit_edit").execute("id", { index: 0, scope: "github:acme/web" }, undefined, undefined, ctx));
   assert.match(shown[0].message, /starts a NEW count under a new key/);
+  assert.match(shown[0].message, /Jobs already running keep their slot under the old scope/, "the in-flight window is named too");
   assert.deepEqual(read(path).limits[0], { scope: "github:acme/web", day: 10 });
+  assert.equal(read(path).version, 2, "a qualified row stamps version 2, so a released worker refuses the file instead of ignoring the row");
   // A count-only edit says nothing about it.
   const { ctx: ctx2, shown: shown2 } = toolCtx({ answer: true });
   textOf(await toolByName("dispatch_limit_edit").execute("id", { index: 0, day: 4 }, undefined, undefined, ctx2));

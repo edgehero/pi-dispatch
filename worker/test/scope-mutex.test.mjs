@@ -991,10 +991,12 @@ test("a link-local endpoint takes the FLEET slot: one neighbour on a shared link
 
 // --- forge-qualified scopes (issue #498) ---------------------------------------------------------------
 
+// Forge-qualified rows need version 2 (released builds refuse such a file rather than read an inert repo string).
+const limitsOf2 = (rows) => parseScopedLimits(JSON.stringify({ version: 2, limits: rows }), "sl.json");
 const fjJob = (id, repo) => spyJob(id, { kind: "forgejo", repo, target: { number: 1 }, flow: "fix", trigger: { deliveryId: id, sender: { id: 1 } } });
 
 test("a qualified concurrent: 1 row defers a second GitHub job and admits the Forgejo job for the same repo", { skip }, async () => {
-	const h = harness({ limits: limitsOf([{ scope: "github:acme/web", concurrent: 1 }]) });
+	const h = harness({ limits: limitsOf2([{ scope: "github:acme/web", concurrent: 1 }]) });
 	const first = h.processor(ghJob("g-1", "acme/web").job, "tok", new AbortController().signal);
 	await h.untilStarted(1);
 	await assert.rejects(() => h.processor(ghJob("g-2", "acme/web").job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
@@ -1019,7 +1021,7 @@ test("a bare concurrent: 1 row defers across forges: one key, the one it had bef
 });
 
 test("the fleet lease key is slot:s:<hash16 of the ROW scope>:<i>, the hash the boot sweeper computes from the file", { skip }, async () => {
-	const limits = limitsOf([{ scope: "forgejo:acme/web", concurrent: 1 }]);
+	const limits = limitsOf2([{ scope: "forgejo:acme/web", concurrent: 1 }]);
 	const lease = leaseRedis();
 	const h = harness({ limits, extra: { scopeLease: makeFleetLease({ redis: lease, holderPrefix: "mini1", keyFor: scopeSlotKey, ttlMs: 60_000, timeoutMs: 50 }) } });
 	const run = h.processor(fjJob("f-1", "acme/web").job, "tok", new AbortController().signal);

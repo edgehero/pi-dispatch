@@ -225,6 +225,9 @@ export function qualifiedScopeOf(job) {
 	return `${job.kind}:${job.repo}`.normalize("NFC");
 }
 
+/** A forge repo path: `/`-separated segments (at least two), none empty, none holding whitespace, `#`, `:` or a control character. */
+const QUALIFIED_REPO = /^[^/\s#:\u0000-\u001f\u007f]+(?:\/[^/\s#:\u0000-\u001f\u007f]+)+$/u;
+
 /**
  * Classify a scope as written in an operator file (issue #498): `{ type, kind, repo }` where `type` is
  *   - `local`: an absolute folder path (platform-native `isAbsolute`), or a path with a one-letter drive prefix
@@ -232,7 +235,11 @@ export function qualifiedScopeOf(job) {
  *   - `qualified`: `<forge kind>:<repo>`, `kind` one of `FORGE_KINDS` and `repo` the NFC rest;
  *   - `bare`: anything else, such as `owner/name`, which matches that repo on every forge.
  * A `<word>:` prefix (no `/` before the first `:`) that is not a forge kind THROWS a `configError` naming the known
- * kinds: `gitub:acme/web` would otherwise be a row that guards nothing while it reads as a cap. The split is at the
+ * kinds: `gitub:acme/web` would otherwise be a row that guards nothing while it reads as a cap. For the same reason a
+ * qualified repo must have a forge repo's shape (`QUALIFIED_REPO`): two or more `/`-separated segments, so no leading
+ * or trailing `/` and no `//`, and no whitespace, control character, `#` or `:` in any segment. That refuses the
+ * likely slips (`github:acme/web/`, a `#12` pasted from a run target, a doubled `github:github:` prefix), each of which
+ * no delivery's repo can ever equal. The split is at the
  * FIRST `:`, which is safe because no forge allows `:` in a repo or project path: GitHub, GitLab and Forgejo names
  * are `[A-Za-z0-9._-]` segments, and Azure DevOps refuses `:` in project and repository names. `"*"` is the caller's
  * business (pause windows accept it, scoped limits refuse it) and is not classified here. The message carries no path:
@@ -245,7 +252,9 @@ export function parseScopeString(text) {
 	if (m === null) return { type: "bare", kind: null, repo: null };
 	if (!isForgeKind(m[1])) throw configError(`scope ${JSON.stringify(scope)} starts with an unknown prefix "${m[1]}:" (a forge-qualified scope starts with one of ${FORGE_KINDS.join(", ")}, such as github:owner/name)`);
 	if (m[2].trim() === "") throw configError(`scope ${JSON.stringify(scope)} names a forge and no repo (write ${m[1]}:owner/name)`);
-	return { type: "qualified", kind: m[1], repo: m[2].trim() };
+	const repo = m[2].trim();
+	if (!QUALIFIED_REPO.test(repo)) throw configError(`scope ${JSON.stringify(scope)} is not a forge repo after "${m[1]}:" (write ${m[1]}:owner/name: segments separated by single "/", no spaces, "#", ":" or control characters), so it would guard nothing`);
+	return { type: "qualified", kind: m[1], repo };
 }
 
 /**

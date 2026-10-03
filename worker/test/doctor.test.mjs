@@ -4724,8 +4724,9 @@ test("doctor: a bare repo row or bare pause window warns when triggers name two 
 	];
 	writeFileSync(triggersPath, JSON.stringify({ triggers: twoForges }));
 	const limitsPath = join(dir, "scoped-limits.json");
-	// A bare row (flagged), a qualified row (never flagged, by this line or by the dead-folder one) and a folder row.
-	writeFileSync(limitsPath, JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 9 }, { scope: "github:acme/api", day: 2 }, { scope: "forgejo:acme", day: 1 }] }));
+	// A bare row (flagged), a qualified row (never flagged, by this line or by the dead-folder one), and two relative
+	// folder rows: the dead-folder line names those, and the bare-repo line must not also call them repos.
+	writeFileSync(limitsPath, JSON.stringify({ version: 2, limits: [{ scope: "acme/web", day: 9 }, { scope: "github:acme/api", day: 2 }, { scope: "site", day: 1 }, { scope: "./site", day: 1 }] }));
 	const pausePath = join(dir, "pause-windows.json");
 	writeFileSync(pausePath, JSON.stringify({ windows: [{ scope: "acme/docs", from: "22:00", to: "06:00" }, { scope: "*", from: "01:00", to: "02:00" }, { scope: "forgejo:acme/web", from: "09:00", to: "10:00" }] }));
 	const seams = () => collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true });
@@ -4739,15 +4740,17 @@ test("doctor: a bare repo row or bare pause window warns when triggers name two 
 	assert.equal(c.label, "1 scoped limit(s) and 1 pause window(s) name a bare repo (acme/web, acme/docs) while triggers run on forgejo and github: a bare scope matches that repo on EVERY forge, so one cap, lease or pause covers all of them");
 	assert.match(c.fix, /forgejo:acme\/web or github:acme\/web; forgejo:acme\/docs or github:acme\/docs/);
 	assert.ok(!c.label.includes("acme/api") && !c.label.includes("*"), "qualified rows and \"*\" are not bare");
-	// A qualified row whose repo has no slash is still a repo, never "a folder no trigger runs in".
-	assert.ok(!checks.find((x) => /name a folder no trigger runs in/.test(x.label)), "the dead-folder heuristic never flags a qualified row");
+	assert.ok(!/github:site|forgejo:site/.test(c.fix), "a relative folder row is never offered a forge-qualified spelling");
+	const dead = checks.find((x) => /name a folder no trigger runs in/.test(x.label));
+	assert.match(dead.label, /\(site, \.\/site\)/, "the relative folder rows are the dead-folder line's, and only theirs");
+	assert.ok(!dead.label.includes("github:acme/api"), "the dead-folder heuristic never flags a qualified row");
 	// One forge kind: silent.
 	writeFileSync(triggersPath, JSON.stringify({ triggers: [twoForges[0]] }));
 	const one = await collectChecks(env, seams());
 	assert.ok(!one.find((x) => /name a bare repo/.test(x.label)), "one forge: no line");
 	// Two forges and only qualified scopes: silent.
 	writeFileSync(triggersPath, JSON.stringify({ triggers: twoForges }));
-	writeFileSync(limitsPath, JSON.stringify({ version: 1, limits: [{ scope: "github:acme/web", day: 9 }] }));
+	writeFileSync(limitsPath, JSON.stringify({ version: 2, limits: [{ scope: "github:acme/web", day: 9 }] }));
 	writeFileSync(pausePath, JSON.stringify({ windows: [{ scope: "*", from: "01:00", to: "02:00" }] }));
 	const qualified = await collectChecks(env, seams());
 	assert.ok(!qualified.find((x) => /name a bare repo/.test(x.label)), "qualified only: no line");

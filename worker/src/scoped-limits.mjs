@@ -54,6 +54,11 @@ import { parseScopeString, qualifiedScopeOf, scopeOf } from "./pause-windows.mjs
  * folder row, and `model:<provider>/<model>` rows that carry those three fields only. A version 1 file that uses
  * either is refused with an error naming version 2: a version 1 worker drops unknown fields, so a file that says 1
  * while it means 2 would read as a narrower cap on one build and no cap on another.
+ *
+ * A forge-qualified row (`github:acme/web`, issue #498) needs version 2 as well, for the same reason: every released
+ * build reads `github:acme/web` as a plain repo string no job ever has, so a version 1 file holding one would be a
+ * cap, a concurrency limit and a lease that one build enforces and another silently ignores. Version 2 makes every
+ * older build refuse the file loudly instead.
  */
 export const SCOPED_LIMITS_VERSION = 2;
 
@@ -252,6 +257,7 @@ function normalizeLimit(row, index, path, version = SCOPED_LIMITS_VERSION) {
 	} catch (error) {
 		throw configError(`${at}: ${error.message}: ${path}`);
 	}
+	if (form.type === "qualified" && version < 2) throw configError(`${at}: a forge-qualified scope needs "version": 2 (this file says ${version}), so a build that predates it refuses the file rather than reading an inert repo string: ${path}`);
 	const norm = {
 		// An absolute path is stored resolved so a `/srv/site/` row governs `/srv/site` jobs -- the same
 		// collapse canonicalScope applies on the job side. isAbsolute is PLATFORM-NATIVE on purpose, so a
@@ -435,12 +441,25 @@ export function dollarRowsBelowJobCap(limits, deploymentMaxCostUsd) {
 
 /**
  * The lowest file version that expresses `rows` (normalized or as the admin builds them): 2 when any row carries a
- * dollar field or is a model row, else 1. The admin writes this, so a file with job-count rows only stays a version 1
- * file that an older worker still reads.
+ * dollar field, is a model row or has a forge-qualified scope (issue #498), else 1. The admin writes this, so a file
+ * with bare and folder job-count rows only stays a version 1 file that an older worker still reads.
  */
 export function scopedLimitsVersionFor(rows) {
-	const v2 = (rows ?? []).some((l) => isModelScope(typeof l?.scope === "string" ? l.scope.trim() : l?.scope) || USD_LIMIT_FIELDS.some((f) => l?.[f] !== null && l?.[f] !== undefined));
+	const v2 = (rows ?? []).some((l) => {
+		const scope = typeof l?.scope === "string" ? l.scope.trim() : l?.scope;
+		return isModelScope(scope) || isQualifiedScope(scope) || USD_LIMIT_FIELDS.some((f) => l?.[f] !== null && l?.[f] !== undefined);
+	});
 	return v2 ? 2 : 1;
+}
+
+/** Is this written scope forge-qualified? False for anything `parseScopeString` refuses: the parser names that. */
+function isQualifiedScope(scope) {
+	if (typeof scope !== "string" || scope === "" || isModelScope(scope)) return false;
+	try {
+		return parseScopeString(scope).type === "qualified";
+	} catch {
+		return false;
+	}
 }
 
 /**

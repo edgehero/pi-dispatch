@@ -166,6 +166,19 @@ test("a FULL scope window refuses the job and gives back the deployment reservat
 	assert.ok(!lc.includes("/srv/site"));
 });
 
+test("issue #498: a FULL qualified scope window refuses the job, and the comment names the repo without the forge prefix", async () => {
+	const limits = parseScopedLimits(JSON.stringify({ version: 2, limits: [{ scope: "forgejo:acme/web", dayUsd: "10" }] }), "sl.json");
+	const fj = { ...job, kind: "forgejo", repo: "acme/web" };
+	const scoped = dollarCapsFor(fj, limits);
+	assert.equal(scoped.scope, "forgejo:acme/web", "the matched row's scope");
+	const { deps: d, calls } = deps({ redis: keyedRedis({ [`${scoped.keyPrefix}:2026-10-07`]: 9 * USD }), scopedDollars: scoped, modelDollars: [] });
+	const r = await runJob(fj, d);
+	assert.equal(r.reason, "dollar-cap");
+	const text = calls.find((c) => c[0] === "comment")[1];
+	assert.match(text, /dollar budget for acme\/web has no room/);
+	assert.ok(!text.includes("forgejo:"), "the comment lives on that forge already");
+});
+
 test("an UNRESTRICTED job reserves in every model row; a listed one only in its listed rows; each settles from its OWN usage row", async () => {
 	const redis = keyedRedis();
 	const all = modelDollarRows(LIMITS, null);

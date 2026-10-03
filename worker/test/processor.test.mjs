@@ -1945,7 +1945,7 @@ test("a LOCAL scope-cap keeps the folder path out of the comment text too -- the
 });
 
 test("issue #498: a day: 1 row on forgejo:acme/web refuses the second Forgejo job, the GitHub job reserves, and one budget:s: key moved", async () => {
-	const limits = parseScopedLimits(JSON.stringify({ version: 1, limits: [{ scope: "forgejo:acme/web", day: 1 }] }), "sl.json");
+	const limits = parseScopedLimits(JSON.stringify({ version: 2, limits: [{ scope: "forgejo:acme/web", day: 1 }] }), "sl.json");
 	const fj = { kind: "forgejo", repo: "acme/web", provider: "anthropic", model: "m", maxTurns: 20 };
 	const gh = { kind: "github", repo: "acme/web", provider: "anthropic", model: "m", maxTurns: 20 };
 	const redis = keyedRedis();
