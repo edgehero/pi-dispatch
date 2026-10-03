@@ -843,6 +843,29 @@ test("doctor: a models.json that is a link is ✗: every job is refused until it
 	assert.doesNotMatch(folder.text, /model-unknown \(overlay-link\)/);
 });
 
+test("doctor: a models.json that is a named pipe, socket or device is ✗ and never opened (issue #556)", async () => {
+	const overlay = join(tempDir("pi-overlay-notfile-"), "overlay");
+	mkdirSync(overlay);
+	writeFileSync(join(overlay, "models.json"), "{}");
+	for (const name of ["fifo", "socket", "device"]) {
+		const { out, text } = capture();
+		let opened = false;
+		const exit = await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_GLOBAL_PI_DIR: overlay }), {
+			...provDeps(out),
+			fileExists: existsSync,
+			lstatOverlayFile: () => ({ isSymbolicLink: () => false, isFile: () => false, isDirectory: () => false }),
+			readOverlayFile: () => {
+				opened = true;
+				throw new Error("opened");
+			},
+		});
+		assert.equal(exit, 1, name);
+		assert.equal(opened, false, `${name}: doctor never opens it`);
+		assert.match(text(), /✗ Overlay models\.json is not a regular file \(a named pipe, socket or device\), so every job is refused as model-unknown \(overlay-not-a-file\)\n {4}→ models\.json in the overlay folder is not a regular file .*; replace it with the file itself/, name);
+		assert.doesNotMatch(text(), /✓ Overlay models\.json is credential-free/, name);
+	}
+});
+
 test("doctor: a relative PI_GLOBAL_PI_DIR is ✗ naming the variable, and neither overlay read runs on it (PR #553's review)", async () => {
 	const { out, text } = capture();
 	assert.equal(await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_GLOBAL_PI_DIR: "pi-global" }), { ...provDeps(out), fileExists: () => true }), 1);

@@ -179,14 +179,17 @@ export function isTransientOverlayRead(code) {
  *
  * A `models.json` that is a link of any kind, dangling included (PR #553's review), refuses every job (`overlay-link`):
  * the job's read-only mount does not resolve a link the way the host does, so the host may read the routing while the
- * job runs with no overlay. The file itself is read; the overlay folder may be a link.
+ * job runs with no overlay. The file itself is read; the overlay folder may be a link. A `models.json` that is a named
+ * pipe, a socket or a device (issue #556) refuses every job too (`overlay-not-a-file`), never opened: a FIFO with no
+ * writer would block the read on every pickup.
  *
  * Returns one of:
  *   - `{ ok: true }`;
  *   - `{ unknown: { provider, id }, why }`: the first unknown ref. `why` is `"not-in-catalog"`,
  *     `"overlay-unparseable"` for every ref when pi would not load the overlay, `"overlay-is-a-directory"` for every
  *     ref when it is a directory (pi fails the same way), `"overlay-unreadable"` for every ref when it cannot be read
- *     for a reason no retry changes, `"overlay-link"` for every ref when `models.json` is a link, or `"overlay-provider-invalid"` when the ref's provider has an overlay entry pi
+ *     for a reason no retry changes, `"overlay-link"` for every ref when `models.json` is a link, `"overlay-not-a-file"` for every ref when it is a named pipe,
+ *     socket or device (issue #556), or `"overlay-provider-invalid"` when the ref's provider has an overlay entry pi
  *     would not compose, so the operator learns the file is the problem rather than the id;
  *   - `{ fallbackUnlisted: { provider, id }, why: "fallback-unlisted" }`: the job has a list, every ref is known, and
  *     a listed model declares a server-side fallback (`declaredFallbacks`) that is not on the list under its provider;
@@ -211,6 +214,7 @@ export function checkModelsKnown(refs, { readOverlay = () => null } = {}) {
 			// errno nobody listed, is a file the job loads none of, so every job is refused. Fail closed: an unknown
 			// errno never lets a job run.
 			if (err?.overlayLink === true) unparseable = "overlay-link";
+			else if (err?.overlayNotAFile === true) unparseable = "overlay-not-a-file";
 			else if (err?.code === "EISDIR") unparseable = "overlay-is-a-directory";
 			else if (isTransientOverlayRead(err?.code)) unavailable = err.code;
 			else if (typeof err?.code === "string") unparseable = "overlay-unreadable";

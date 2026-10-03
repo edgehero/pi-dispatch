@@ -261,11 +261,21 @@ function overlayLinkError(path) {
 	return error;
 }
 
+/** The fixed text of the refusal for a `models.json` that is a FIFO, socket or device: what to do, and why. */
+export const OVERLAY_NOT_A_FILE_FIX = "models.json in the overlay folder is not a regular file (a named pipe, socket or device); replace it with the file itself (reading one can block, and pi in the job cannot load it)";
+
+/** The determinate fault of a `models.json` that is neither a regular file nor a folder; `overlayNotAFile` marks it. */
+function overlayNotAFileError(path) {
+	const error = configError(`${OVERLAY_NOT_A_FILE_FIX}: ${path}`);
+	error.overlayNotAFile = true;
+	return error;
+}
+
 /**
  * The overlay's `models.json` (`<globalPiDir>/models.json`), parsed as JSON and nothing else: no `$VAR` expansion,
  * because the host's environment is not the job's, and a derivation that expanded one would describe a server the
  * job never dials. ONE rule for every caller (the pickup snapshot in index.mjs, doctor), judged as the JOB sees the
- * file (PR #553's review), in four outcomes:
+ * file (PR #553's review), in five outcomes:
  *   - `null` when the job has no overlay: `models.json` is missing, or the folder's path fails with ELOOP, ENOTDIR or
  *     ENAMETOOLONG, which the runner's `existsSync` (image/runner/run-job.mjs) answers false for;
  *   - a `configError` marked `overlayLink` when `models.json` is a link of ANY kind, dangling included (`lstat`). The
@@ -273,6 +283,9 @@ function overlayLinkError(path) {
  *     folder, a trailing `/` or a `..` through a file each differ), and two rounds of following links the way the
  *     mount does kept finding cases, so the rule is the simple one: the file itself, never a link. The overlay FOLDER
  *     may be a link: the runtime follows it when it mounts the folder, and both sides then read the same file;
+ *   - a `configError` marked `overlayNotAFile` when `models.json` is a named pipe, a socket or a device (issue #556),
+ *     judged from the same `lstat` and never opened: a FIFO with no writer blocks `readFileSync` forever, on every
+ *     pickup and in doctor. A folder is not this case: its read fails at once with EISDIR, rethrown below;
  *   - ANY other fs error is RETHROWN as-is, its `code` intact (EACCES, EPERM, EISDIR, EIO...), so a caller can tell
  *     it from a verdict. The caller classifies the code: `isTransientOverlayRead` (model-catalog.mjs) names the few
  *     that may pass, and in the job pi loads none of the file for all the rest (the runner's existence check, or
@@ -289,7 +302,9 @@ export function readOverlayModels(globalPiDir, { readFileSync = fsReadFileSync, 
 	const path = join(globalPiDir, "models.json");
 	let text;
 	try {
-		if (lstatSync(path).isSymbolicLink()) throw overlayLinkError(path);
+		const entry = lstatSync(path);
+		if (entry.isSymbolicLink()) throw overlayLinkError(path);
+		if (!entry.isFile() && !entry.isDirectory()) throw overlayNotAFileError(path);
 		text = String(readFileSync(path, "utf8"));
 	} catch (error) {
 		if (OVERLAY_ABSENT_CODES.has(error?.code)) return null;

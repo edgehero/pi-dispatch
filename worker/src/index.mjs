@@ -673,7 +673,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						// errno as-is (PR #520 round 2), carried for the gate, which retries rather than calling the provider keyless.
 						// A configError is determinate: the file was read and is not JSON, or not an object (`[]`), and is named as
 						// such, never as "unreadable", which is the fs-error wording.
-						const reason = typeof err?.code === "string" ? err.code : err?.overlayLink === true ? "overlay models.json is a link" : /not valid JSON/.test(String(err?.message)) ? "overlay models.json is not valid JSON" : err?.piDispatchConfig === true ? "overlay models.json is not a valid models.json" : "overlay models.json is unreadable";
+						const reason = typeof err?.code === "string" ? err.code : err?.overlayLink === true ? "overlay models.json is a link" : err?.overlayNotAFile === true ? "overlay models.json is not a regular file" : /not valid JSON/.test(String(err?.message)) ? "overlay models.json is not valid JSON" : err?.piDispatchConfig === true ? "overlay models.json is not a valid models.json" : "overlay models.json is unreadable";
 						deps?.log?.("endpoint_models_unreadable", { jobId: job.id, reason });
 						if (typeof err?.code === "string") modelsUnreadable = { code: err.code };
 					}

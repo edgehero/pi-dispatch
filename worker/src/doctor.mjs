@@ -61,7 +61,7 @@ import { DEFAULT_VALKEY_URL, accountTempRoot, allowedModelsFrom, defaultLogsDir,
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
 import { isTransientOverlayRead, overlayProviderProblem } from "./model-catalog.mjs";
-import { KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, baseUrlTarget, keylessVerdict, loadModelEndpoints, readOverlayModels, renderEndpointsInclude } from "./model-endpoints.mjs";
+import { KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, OVERLAY_NOT_A_FILE_FIX, baseUrlTarget, keylessVerdict, loadModelEndpoints, readOverlayModels, renderEndpointsInclude } from "./model-endpoints.mjs";
 import { declaredEndpointsIn, endpointsDeclaredIn, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
 import { loadPauseWindows } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
@@ -242,6 +242,8 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// Issue #552: the overlay models.json's read for the credential-free line, for tests that need an errno a real
 		// file cannot give (EIO, EMFILE). The real read is the default where it is used.
 		readOverlayFile,
+		// Issue #556: the overlay models.json's lstat, for tests that need a socket or a device a test cannot make.
+		lstatOverlayFile,
 		// Issue #484: how a copy of the proxy's rules is read, and the installed package's copy it is compared with.
 		readProxyConf,
 		readPackagedProxyConf: readPackagedConf,
@@ -356,7 +358,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -2485,12 +2487,13 @@ export async function collectChecks(shellVars, seams) {
 			// unreadable directory, so this line passed in silence on a file nobody had read. Absent is a pass (nothing to
 			// leak); a transient errno (`isTransientOverlayRead`) is ⚠ naming the code, a read the worker retries once; any
 			// other errno, EACCES among them, is ✗, since the job loads none of the file and the worker refuses every job
-			// (issue #552); so is a models.json that is a link (PR #553's review); text that does not parse, or is
-			// not an object, is ✗.
+			// (issue #552); so is a models.json that is a link (PR #553's review) or a named pipe, socket or device, which
+			// the reader judges from its `lstat` and never opens (issue #556); text that does not parse, or is not an
+			// object, is ✗.
 			let overlayModels = null;
 			let modelsRead = null;
 			try {
-				overlayModels = readOverlayModels(overlay, { readFileSync: seams.readOverlayFile ?? ((p, enc) => readFileSync(p, enc)) });
+				overlayModels = readOverlayModels(overlay, { readFileSync: seams.readOverlayFile ?? ((p, enc) => readFileSync(p, enc)), ...(seams.lstatOverlayFile ? { lstatSync: seams.lstatOverlayFile } : {}) });
 			} catch (error) {
 				modelsRead = error;
 			}
@@ -2500,6 +2503,13 @@ export async function collectChecks(shellVars, seams) {
 					ok: false,
 					label: "Overlay models.json is a link, so every job is refused as model-unknown (overlay-link)",
 					fix: `${OVERLAY_LINK_FIX}: ${modelsPath}; no job runs until then`,
+				});
+			} else if (modelsRead?.overlayNotAFile === true) {
+				// Issue #556: judged by the reader's `lstat` and never opened, so doctor cannot hang on a FIFO with no writer.
+				checks.push({
+					ok: false,
+					label: "Overlay models.json is not a regular file (a named pipe, socket or device), so every job is refused as model-unknown (overlay-not-a-file)",
+					fix: `${OVERLAY_NOT_A_FILE_FIX}: ${modelsPath}; no job runs until then`,
 				});
 			} else if (modelsRead?.code === "EISDIR") {
 				// Issue #539: pi fails to read a directory the same way, so it loads no models.json, and the worker refuses

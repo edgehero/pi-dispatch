@@ -1,3 +1,4 @@
+import { execFileSync, spawnSync } from "node:child_process";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
@@ -224,6 +225,37 @@ test("readOverlayModels: absence is null, every other read error is rethrown wit
 		assert.throws(() => readOverlayModels(dir, { readFileSync: () => { throw Object.assign(new Error(code), { code }); } }), (e) => e.code === code && e.piDispatchConfig !== true, code);
 	}
 	assert.throws(() => readOverlayModels(dir, { readFileSync: () => "{ nope" }), (e) => e.piDispatchConfig === true && /not valid JSON/.test(e.message));
+});
+
+// Issue #556: a FIFO, socket or device at models.json is judged from the reader's lstat and never opened. The read runs
+// in a CHILD with a deadline, because a FIFO with no writer blocks readFileSync for good: a hang there is a red test,
+// never a hung suite.
+const READER = new URL("../src/model-endpoints.mjs", import.meta.url).href;
+const canFifo = process.platform !== "win32" && spawnSync("mkfifo", ["--version"]).error === undefined;
+test("readOverlayModels refuses a models.json that is a FIFO, without opening it (issue #556)", { skip: canFifo ? false : "mkfifo is not available here", timeout: 20000 }, () => {
+	const dir = tmp();
+	execFileSync("mkfifo", [join(dir, "models.json")]);
+	const script = `import { readOverlayModels } from ${JSON.stringify(READER)};
+try { readOverlayModels(${JSON.stringify(dir)}); console.log(JSON.stringify({ read: true })); }
+catch (e) { console.log(JSON.stringify({ notAFile: e.overlayNotAFile === true, config: e.piDispatchConfig === true, code: e.code ?? null })); }`;
+	const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 5000 });
+	assert.equal(child.signal, null, "the read returned at once: a FIFO with no writer would block it until the deadline");
+	assert.deepEqual(JSON.parse(child.stdout.trim()), { notAFile: true, config: true, code: null }, child.stderr);
+});
+
+test("readOverlayModels refuses a models.json that is a socket or a device, and never opens it (issue #556)", () => {
+	const dir = tmp();
+	const kind = (name) => ({ isSymbolicLink: () => false, isFile: () => false, isDirectory: () => false, isFIFO: () => false, isSocket: () => name === "socket", isCharacterDevice: () => name === "char", isBlockDevice: () => name === "block" });
+	for (const name of ["socket", "char", "block"]) {
+		const readFileSync = () => assert.fail(`${name}: opened`);
+		assert.throws(() => readOverlayModels(dir, { lstatSync: () => kind(name), readFileSync }), (e) => e.overlayNotAFile === true && e.piDispatchConfig === true && /not a regular file/.test(e.message), name);
+	}
+	// A regular file is read, and a folder still fails its read with EISDIR (overlay-is-a-directory), never this.
+	writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: {} }));
+	assert.deepEqual(readOverlayModels(dir), { providers: {} });
+	const folder = tmp();
+	mkdirSync(join(folder, "models.json"));
+	assert.throws(() => readOverlayModels(folder), (e) => e.code === "EISDIR" && e.overlayNotAFile !== true);
 });
 
 test("readOverlayModels refuses a models.json that is a link of any kind; the folder may be a link (PR #553's review)", () => {
