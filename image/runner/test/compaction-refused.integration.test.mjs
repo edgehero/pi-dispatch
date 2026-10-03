@@ -11,6 +11,7 @@ import { COST_CAP, decideExit, EXIT_POLICY, TOKEN_BUDGET } from "../src/outcome.
 import { compactionSummaryIsEmpty, fileListSuffix, hasEmptyCompaction, makeSessionStore, SESSION_FILE_NAME } from "../../../worker/src/session-store.mjs";
 import { sessionKeyFor } from "../../../worker/src/session-key.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { trackPiRefreshes } from "./helpers/track-pi-refreshes.mjs";
 
 /**
  * Issue #535: what pi writes when the runner's brake refuses a compaction's summary call, and the host check
@@ -30,6 +31,7 @@ let openSessionManager;
 let importError;
 try {
 	pi = await import("@earendil-works/pi-coding-agent");
+	trackPiRefreshes(pi.ModelRuntime);
 	({ openSessionManager } = await import("../src/session.mjs"));
 } catch (error) {
 	importError = error;

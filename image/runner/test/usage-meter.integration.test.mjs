@@ -10,6 +10,7 @@ import { createJobModelRuntime } from "../src/model-runtime.mjs";
 import { assertPoliciesEnforceable, callCostBound, createCostGuard, createPolicyGuard, createUsageMeter, installProcessUsageMeter, policyEnforcement, resolvePiAiCompat } from "../src/usage-meter.mjs";
 import { decideExit, EXIT_POLICY, MODEL_NOT_ALLOWED } from "../src/outcome.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { trackPiRefreshes } from "./helpers/track-pi-refreshes.mjs";
 
 /**
  * THE PROOF for issue #58 (REQ-TOKEN-ACCOUNTING-AND-CAPS, CONST-BUDGET-BEFORE-TOKENS).
@@ -40,6 +41,7 @@ let pi;
 let importError;
 try {
 	pi = await import("@earendil-works/pi-coding-agent");
+	trackPiRefreshes(pi.ModelRuntime);
 } catch (error) {
 	importError = error;
 }

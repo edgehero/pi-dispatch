@@ -35,10 +35,25 @@ import { join } from "node:path";
 import { after } from "node:test";
 
 const made = [];
+const pending = new Set();
 
-after(() => {
+after(async () => {
+	// Work a test started and did not await (pi's ModelRuntime fires refreshes it never awaits, and a refresh writes
+	// auth.json into its agent dir) must land BEFORE the directories go, or it recreates one after this hook and the
+	// suite's TMPDIR check names it. `settleBeforeCleanup` registers such work; nothing else waits here.
+	while (pending.size > 0) await Promise.allSettled([...pending]);
 	for (const dir of made) rmSync(dir, { recursive: true, force: true });
 });
+
+/** Register a promise this file's cleanup must wait for before it removes any `tempDir()` directory. */
+export function settleBeforeCleanup(promise) {
+	pending.add(promise);
+	Promise.resolve(promise).then(
+		() => pending.delete(promise),
+		() => pending.delete(promise),
+	);
+	return promise;
+}
 
 /** `mkdtempSync(join(tmpdir(), prefix))`, remembered so the file's `after()` can remove it. */
 export function tempDir(prefix) {
