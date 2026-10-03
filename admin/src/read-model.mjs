@@ -701,7 +701,7 @@ export function mergedDollarProblem(overlay, env, { deploymentDir = null } = {})
   const broken = checkDollarInvariant(merged);
   if (broken === null) return null;
   const seen = deploymentDir === null ? "the settings overlay nor this session's environment (not the worker's)" : "the settings overlay nor the deployment's .env";
-  return { warning: `${broken.invalid}. Neither ${seen} sets maxCostUsd (PI_MAX_COST_USD). A cap set elsewhere, such as the worker's service unit or its --env-setup script, is not visible here; if the worker has none, it refuses every job as settings-overlay-invalid. Run \`pi-dispatch doctor\` on the worker to check` };
+  return { warning: `${broken.invalid}. Neither ${seen} sets maxCostUsd (PI_MAX_COST_USD). A cap set elsewhere, such as the worker's service unit or its --env-setup script, is not visible here; if the worker has none, it refuses every job as settings-overlay-invalid (or, when the window is in the worker's own environment, will not start). Run \`pi-dispatch doctor\` on the worker to check` };
 }
 
 /**

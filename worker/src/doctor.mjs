@@ -3435,7 +3435,7 @@ export async function collectChecks(shellVars, seams) {
 			checks.push({
 				ok: false,
 				warn: true,
-				label: `${dead.length} scoped limit(s) name a folder no trigger runs in (${dead.join(", ")}) -- the cap guards nothing; scopes match exactly (no globs, folders by resolved ABSOLUTE path), so check the spelling against triggers.json run.folder or delete the entry`,
+				label: `${dead.length} scoped limit(s) name a folder no trigger runs in (${dead.join(", ")}) -- no trigger runs there, so unless a CLI or local job does, the cap guards nothing; scopes match exactly (no globs, folders by resolved ABSOLUTE path), so check the spelling against triggers.json run.folder or delete the entry`,
 				fix: `edit ${scopedLimitFacts.path} by hand or via dispatch_limit_edit/_delete -- repo-shaped scopes are never flagged here, because a webhook job's repo comes from the delivery, which triggers.json cannot enumerate`,
 			});
 		}
