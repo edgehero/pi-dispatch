@@ -3032,28 +3032,44 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **The child route (issue #500 part C)**: how a child's meter gets into the child. The parent's fold, STOP
   writer and detector are not wired yet (part E), so today a child's ledger is written and nothing reads it.
   - **The runner.** Before its own meter installs, and so before any extension loads, `run-job.mjs` opens the
-    ledger directory (`openChildLedger`): `mkdtemp` under the OS temp directory, mode 0700, never `/workspace` or
-    `/job`. It puts three things in its own environment, which every descendant inherits:
-    `PI_DISPATCH_CHILD_LEDGER` (the directory), `PI_DISPATCH_RUNNER_PID` (its pid) and `NODE_OPTIONS` with
-    `--import=<child-preload.mjs>` appended (an existing value is kept). A directory that cannot be made logs
-    `child_ledger_unavailable` with a code, and no variable is set. The directory is not removed at exit: the
-    parent's last fold reads it at teardown, and it goes with the container. Right after reading the exit key the
-    runner deletes `PI_EXIT_AUTH` from its environment, so no descendant drains a stdin.
-  - **The preload** (`child-preload.mjs`) runs first in every Node child. It imports no pi module, never throws, and
-    does nothing without `PI_DISPATCH_CHILD_LEDGER`. When the realpath of `argv[1]` is one of the pinned pi's four
-    session entries (`dist/bundle/cli.js`, the package bin; `dist/cli.js`; `dist/bundle/rpc-entry.js`;
-    `dist/rpc-entry.js`), it writes the `starting` stub, puts `-e <child-meter.ts>` FIRST in the arguments, and
-    hands its import of `usage-meter.mjs` over on `globalThis` (jiti returns the same functions under another
-    namespace, so one module serves both). A CLI whose first argument is a subcommand (`auth config install list
-    mcp remove uninstall update`, pinned) gets nothing. Flags such as `--version` and `--export` are injected like
-    any run: measured, they behave the same, and none sends a call. In any other Node process it registers a
-    `module.registerHooks` load hook (guarded: `registerHooks` is looked up on the namespace and the call is
-    caught, so an older Node is only unhooked). The hook rewrites pi's unbundled `dist/core/model-runtime.js`, in
-    any copy of pi, by appending an import of that package's own `@earendil-works/pi-ai/compat`, an import of
-    `usage-meter.mjs`, and a call that hands both and the class to the preload. So a child that runs pi as a
-    library (pi-subagents' background runner, measured) is metered from the moment the class exists. A
-    `model-runtime.js` without the two lines the rewrite names is handed over with no class, and the child records
-    itself `metered: false`.
+    ledger directory (`openChildLedger`): `mkdtemp` under the OS temp directory, made absolute (a relative `TMPDIR`
+    would give each child its own directory), mode 0700. It puts three things in its own environment, which every
+    descendant inherits: `PI_DISPATCH_CHILD_LEDGER` (the directory), `PI_DISPATCH_RUNNER_PID` (its pid) and
+    `NODE_OPTIONS` with `--require=<child-preload.cjs>` appended (an existing value is kept). A directory that cannot
+    be made logs `child_ledger_unavailable` with a code and deletes both names, so no child is pointed at an
+    inherited directory either. The directory is not removed at exit: the parent's last fold reads it at teardown,
+    and it goes with the container. Right after reading the exit key the runner deletes `PI_EXIT_AUTH` from its
+    environment, so no descendant drains a stdin.
+  - **The preload** (`child-preload.cjs`) runs first in every Node child. It is CommonJS, loaded with `--require`,
+    because Node older than 18.18 refuses `--import` in `NODE_OPTIONS` and would not start at all (measured on
+    16.20; 16, 18, 20, 22 and 23 all start with it). It loads no pi module, never throws, and does nothing without
+    `PI_DISPATCH_CHILD_LEDGER`.
+    - When the realpath of `argv[1]` is one of the pinned pi's five session entries (`dist/bundle/cli.js`, the
+      package bin; `dist/bundle/cli-runtime.js`, which the bin loads and which runs the CLI on its own;
+      `dist/cli.js`; `dist/bundle/rpc-entry.js`; `dist/rpc-entry.js`), it writes the `starting` stub, puts
+      `-e <child-meter.ts>` FIRST in the arguments, and hands `usage-meter.mjs` over on `globalThis`. A CLI whose
+      first argument is a subcommand (`auth config install list mcp remove uninstall update`, pinned) gets nothing.
+      `--version` and `--export` exit before any extension loads, having spent nothing, so an exit handler ends
+      their stub `done` with zeros instead of leaving it `starting`. It does so only when the meter never started:
+      any other run that exits before the meter starts keeps its `starting` stub for the parent to judge.
+    - In any other Node process where `module.registerHooks` exists, it registers a load hook. The hook's fast path
+      is one substring test of the module URL. Measured in the image (Node 22.23, 2 CPUs, median of 15 runs, with no
+      preload / the earlier ESM `--import` preload / this one): a 2000-module CommonJS require 60.3 / 70.6 / 65.4 ms
+      (about 2.5 microseconds a module now); `npm -v` 35.4 / 36.1 / 34.3 ms; `node -e 0` 9.2 / 11.6 / 9.5 ms. The
+      remaining cost is per module, because `registerHooks` routes every load through the hook; it is the price of
+      metering library-mode children, accepted and named here.
+    - The hook matches pi's unbundled `dist/core/model-runtime.js`, in any copy of pi, on the URL's PATH (a query or
+      a hash cannot dodge it). It appends an import of that package's own `@earendil-works/pi-ai/compat`, an import
+      of `usage-meter.mjs`, and a call that hands both and the class to the preload. So a child that runs pi as a
+      library (pi-subagents' background runner, measured) is metered from the moment the class exists, and its ledger
+      is written when its first call is about to go out: a process that only imports pi leaves no file, so a test
+      suite that imports pi hundreds of times cannot flood the directory. The compat import is added only when
+      `@earendil-works/pi-ai`, resolved from that module (`module.findPackageJSON`), exports `./compat`, and only for
+      a source that still has the two lines the rewrite names. Otherwise the class is not handed over and the
+      process records itself `metered: false`: an import that fails to link would kill the process.
+    - Any file under the PINNED pi's `dist/bundle/` loaded in such a process means the bundle was imported by path
+      (its index exports `main`, and runs a full session no `-e` reached). The bundle defines its class in a hashed
+      chunk the hook cannot name, so the process records itself `metered: false` once.
   - **The child's meter** (`startChildMeter`, called by the `child-meter.ts` extension at load, or by the library
     hook). It installs on the class the child's sessions use, with the child's own compat copy (`compat`),
     `brake: true`, and `isStopped` reading `STOP`. Its guard is built from the inherited `PI_ALLOWED_MODELS` and
@@ -3061,15 +3077,25 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     name)`. A missing `SPENT` is 0, and a malformed or unreadable one refuses. The token cap is not the child's: the
     parent judges it on its own spend plus every child's, and answers through `STOP`. A policy that does not
     parse, a failed install, no class, or a session runtime the install does not cover (checked at every
-    `session_start`) makes the child `metered: false` for good. The ledger is written whole (temporary file and
-    rename) after the install, on every `onChange`, and as `done` at exit. One meter per process: a second class
-    handed over is installed with the same meter and guard.
+    `session_start`) makes the child `metered: false` for good. The ledger is written whole after the install
+    (library mode: before the first call), on every `onChange`, and as `done` at exit. One meter per process: a
+    second class handed over is installed with the same meter and guard.
+  - **A ledger that cannot be written stops the child.** The fold has no notion of a stale file, so a failed write
+    (a full or unwritable `/tmp`) would leave an older, smaller ledger that still says metered. Once a write fails,
+    `isStopped` answers the token cap for every later call and the child is `metered: false` in every later write
+    that succeeds. The call during which the write failed has already gone out: the ledger is written when a call
+    is seen, not before it.
+  - **The writer.** Every file in the directory (the child's ledger now; the parent's `STOP` and `SPENT` in part E)
+    is written by `writeFileAtomic`: a temporary file CREATED with `O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK` under a
+    random name, checked to be a regular file, written through its descriptor, then renamed. The directory is shared
+    with the agent's processes, and a predictable temporary name let a planted FIFO block the writer for good, or a
+    planted symlink redirect it.
   - **The control files.** `STOP` is `{ "v": 1, "reason": <a stop reason> }` (`stopFile`). Once it exists, the
     child's next call is braked with that reason. Any other content, or an unreadable file, is a stop as the token
     cap. `SPENT` is `spentFile`'s object. Both are read on every call through the fold's reader: no link followed,
     no blocking open, a regular file of at most 64 KiB. A missing file means go, or 0.
-  - **Why `child-meter.ts`, not `.mjs`.** pi's loader maps `@earendil-works/pi-ai` and `@earendil-works/pi-coding-agent` to the
-    child's own copies only for a module it transforms. A `.mjs` or `.js` extension is imported natively first,
+  - **Why `child-meter.ts`, not `.mjs`.** pi's loader maps `@earendil-works/pi-ai` and `@earendil-works/pi-coding-agent`
+    to the child's own copies only for a module it transforms. A `.mjs` or `.js` extension is imported natively first,
     and its bare specifiers then bind whatever Node resolves from where the file sits. Measured at 0.99.1: from
     `image/runner/src` in this repository's tree, a `.mjs` meter got the hoisted pi-ai (no compat registry, so no
     brake) and, in a bundled child, `dist/index.js`'s class (so it counted nothing); the same file as `.ts` got the
@@ -3077,13 +3103,17 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     the transform: right only by accident.
   - **Rejected**: injecting `-e` before the first `--` or at the end (after `--` it is a message, and anywhere
     after the spawner's own `-e`s it loads after them, so their load-time calls go unmetered); recognising only
-    the two CLIs (the rpc entries run full sessions, and a library-mode child runs neither); importing the class
-    from `dist/index.js` (a bundled child's sessions use the bundle's own copy); a `.mjs` child meter (above);
-    `-ne` on the injected child (measured unnecessary: `-ne` keeps explicit `-e` paths, and front injection already
-    loads the meter first).
-  - **Residuals added**: a library-mode child whose spawner clears `NODE_OPTIONS`; a CLI that exits before
-    extensions load (`--version`, `--export`) leaves its stub `starting` with zeros; a child on a Node without
-    `module.registerHooks` that runs pi as a library is not metered (the detector's case).
+    the two CLIs (the rpc entries and `cli-runtime.js` run full sessions, and a library-mode child runs neither);
+    importing the class from `dist/index.js` (a bundled child's sessions use the bundle's own copy); a `.mjs` child
+    meter (above); an ESM preload loaded with `--import` (a Node older than 18.18 refuses it and every Node child of
+    the job then fails to start); `-ne` on the injected child (measured unnecessary: `-ne` keeps explicit `-e`
+    paths, and front injection already loads the meter first).
+  - **Residuals added**: a library-mode child whose spawner clears `NODE_OPTIONS`; a child on a Node without
+    `module.registerHooks` that runs pi as a library is not metered (the detector's case); a child started with
+    `node --permission` cannot read the preload and fails to start (a NODE_OPTIONS preload cannot avoid that); a
+    child takes its model list and cost cap from its own environment, which its spawner can change (part E checks
+    every folded row against the parent's list); a library-mode process that loads a foreign copy of pi whose pi-ai
+    has no `./compat`, or the pinned bundle by path, is unmetered even if it never calls.
 - **Traces to**: `REQ-TOKEN-ACCOUNTING-AND-CAPS`, `REQ-RUNNER-TURN-BUDGET`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-PI-VERSION-PINNED`, `INT-SDK-SESSION-OPTIONS`, `INT-RUNNER-EXIT-CODE-PROTOCOL`,
   `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`, `OQ-010`, `OQ-011`
@@ -7392,3 +7422,4 @@ a tunnel.
 | 2026-10-03 | Issue #500, part B, the second review. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the Child processes bullet: a `done` ledger is read like any other (only an unchanged signature skips a read), because a forged `done` with unchanged numbers froze a live child's ledger; the SPENT file's parts are whole micro-dollars rounded up, so `externalFor` never refuses its own writer's file; a new residual, a forged smaller SPENT or a deleted STOP only weakens a child's pre-call check. **Code evidence**: image/runner/src/usage-meter.mjs; image/runner/test/child-ledger.test.mjs. |
 | 2026-10-03 | Issue #498, forge-qualified scopes. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` AMENDED**: a bullet on qualified scopes and row-keyed counters (every key, the pickup slot and lease included, comes from the matched row, so a bare row keeps its key and the gate and the boot sweeper are one rule) with five rejected alternatives: keying by the job's qualified scope, a precedence ladder, the instance host in the scope, rewriting keys, and refusing bare rows. **`DES-FLEET-LEASES-FOR-SHARED-BOUNDS` UNCHANGED, checked**: the lease key keeps its shape `slot:s:<hash16>:<i>`, now hashed from the matched row's scope, which is what the sweeper already hashed. Two more rejected alternatives: a qualified row in a version 1 file (released builds would read it as an inert repo string, so a qualified row needs version 2) and carrying a running job's slot across a scope edit (the edit confirm and the docs name that up to 2N jobs can run under `concurrent: N` until the old ones finish). **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `DES-DOLLAR-RESERVE-AND-SETTLE` (item 9), `DES-CONCURRENCY-3` and `DES-SCOPED-PAUSE-VIA-MOVE-TO-DELAYED` AMENDED (wording)**: their key and matcher sentences now name the matched row's scope and the qualified window. **Code evidence**: worker/src/scoped-limits.mjs -> limitFor, rowScopeFor, refuseMixedForms, scopedLimitsVersionFor; worker/src/pause-windows.mjs -> qualifiedScopeOf, parseScopeString, pauseUntilMs; worker/src/index.mjs; worker/test/scoped-limits.test.mjs; worker/test/scope-mutex.test.mjs. |
 | 2026-10-03 | Issue #500, part C: the child route. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, a new The child route bullet: the runner opens the ledger directory before its meter installs (mkdtemp 0700, the two variables, the preload appended to `NODE_OPTIONS`) and deletes `PI_EXIT_AUTH` right after reading the key; the preload recognises the four pinned session entries by realpath, writes the stub, puts `-e child-meter.ts` first and skips the eight subcommands; any other Node child gets a guarded `module.registerHooks` load hook that meters pi's unbundled `model-runtime.js` in library mode; the child's meter installs on its own class with its own compat copy, `brake: true`, `isStopped` from `STOP`, the inherited model list and cost cap with `external` from `SPENT`, and records itself unmetered for good on any failure; the `STOP` file format; why the child meter is a `.ts` file (measured: a `.mjs` one bound the hoisted pi-ai and `dist/index.js`'s class); the rejected alternatives and three new residuals. The parent's fold, STOP writer and detector stay unwired (part E). Exit line, run record and exit codes UNCHANGED, checked. **Code evidence**: image/runner/run-job.mjs; image/runner/src/child-preload.mjs, child-meter.ts, usage-meter.mjs -> openChildLedger, startChildMeter, readStop, readExternal; image/runner/test/child-meter.test.mjs, child-meter.integration.test.mjs. |
+| 2026-10-03 | Issue #500, part C, the review's fixes. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, the child route bullet: the preload is CommonJS loaded with `--require` (Node older than 18.18 refuses `--import` in `NODE_OPTIONS`), with its measured cost; a fifth entry, the bundle's `cli-runtime.js`; the load hook matches `model-runtime.js` on the URL path, adds the compat import only when that copy's pi-ai exports `./compat`, and records a process that loads the pinned bundle by path as `metered: false`; a library-mode ledger is written before the first call, not at import; a failed ledger write stops the child (the earlier "reads as stale" sentence was false: the fold has no staleness rule); every write to the directory creates its temporary file exclusively under a random name; `--version` and `--export` end their stub `done`; a relative `TMPDIR` gives an absolute directory, and a directory that cannot be made deletes both names; new residuals (`node --permission` children, a child's own policy environment, unmeterable library imports). **Code evidence**: image/runner/src/child-preload.cjs; image/runner/src/usage-meter.mjs -> openChildLedger, writeFileAtomic, startChildMeter; image/runner/test/child-meter.test.mjs, child-meter.integration.test.mjs. |

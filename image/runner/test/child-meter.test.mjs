@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { createRequire } from "node:module";
+import { closeSync as closeSyncReal, constants as constantsReal, fstatSync as fstatSyncReal, mkdirSync, openSync as openSyncReal, readdirSync, readFileSync, renameSync as renameSyncReal, rmSync as rmSyncReal, statSync, symlinkSync, writeFileSync, writeSync as writeSyncReal } from "node:fs";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
 	CHILD_LEDGER_ENV,
@@ -18,9 +19,27 @@ import {
 	stopFile,
 	writeFileAtomic,
 } from "../src/usage-meter.mjs";
+import * as usageMeter from "../src/usage-meter.mjs";
 import { COST_CAP, MODEL_NOT_ALLOWED, TOKEN_BUDGET } from "../src/outcome.mjs";
-import { CHILD_METER_PATH, entryKind, injectChildMeter, libraryLoadHook, MODEL_RUNTIME_SUFFIX, patchModelRuntime, PI_ENTRIES, PI_SUBCOMMANDS, preload, USAGE_METER_URL } from "../src/child-preload.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+
+// The preload is CommonJS (it is loaded with --require); requiring it here runs its top level, which does nothing
+// without PI_DISPATCH_CHILD_LEDGER in this process's environment.
+const {
+	CHILD_METER_PATH,
+	compatResolvesFrom,
+	entryKind,
+	exitsBeforeExtensions,
+	injectChildMeter,
+	makeLibraryLoadHook,
+	MODEL_RUNTIME_SUFFIX,
+	patchModelRuntime,
+	PI_ENTRIES,
+	PI_SUBCOMMANDS,
+	preload,
+	USAGE_METER_PATH,
+	USAGE_METER_URL,
+} = createRequire(import.meta.url)("../src/child-preload.cjs");
 
 /**
  * Issue #500 part C, the pure halves (DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY): the runner's ledger directory, the
@@ -30,32 +49,48 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 
 // ── the runner's side ─────────────────────────────────────────────────────────────────────────────────────
 
-test("openChildLedger: a 0700 directory under the temp root, the two variables, and the preload appended to NODE_OPTIONS once", () => {
+test("openChildLedger: a 0700 directory under the temp root, absolute, the two variables, and the preload required once through NODE_OPTIONS", () => {
 	const root = tempDir("pi-dispatch-ledger-root-");
 	const env = { NODE_OPTIONS: "--max-old-space-size=512" };
-	const opened = openChildLedger({ env, pid: 4242, preloadUrl: "file:///app/image/runner/src/child-preload.mjs", tmp: () => root });
+	const opened = openChildLedger({ env, pid: 4242, preloadPath: "/app/image/runner/src/child-preload.cjs", tmp: () => root });
 	assert.equal(opened.error, undefined);
 	assert.ok(opened.dir.startsWith(join(root, "pi-dispatch-meter-")), opened.dir);
 	assert.equal(statSync(opened.dir).mode & 0o777, 0o700);
 	assert.equal(env[CHILD_LEDGER_ENV], opened.dir);
 	assert.equal(env[RUNNER_PID_ENV], "4242");
-	// What the operator's NODE_OPTIONS held is kept, in front.
-	assert.equal(env.NODE_OPTIONS, "--max-old-space-size=512 --import=file:///app/image/runner/src/child-preload.mjs");
-	openChildLedger({ env, pid: 4242, preloadUrl: "file:///app/image/runner/src/child-preload.mjs", tmp: () => root });
-	assert.equal(env.NODE_OPTIONS, "--max-old-space-size=512 --import=file:///app/image/runner/src/child-preload.mjs", "never twice");
-	const bare = {};
-	openChildLedger({ env: bare, pid: 1, preloadUrl: "file:///p.mjs", tmp: () => root });
-	assert.equal(bare.NODE_OPTIONS, "--import=file:///p.mjs");
+	// --require, which every Node accepts in NODE_OPTIONS (Node 16 refuses --import there). The operator's value is kept, in front.
+	assert.equal(env.NODE_OPTIONS, "--max-old-space-size=512 --require=/app/image/runner/src/child-preload.cjs");
+	openChildLedger({ env, pid: 4242, preloadPath: "/app/image/runner/src/child-preload.cjs", tmp: () => root });
+	assert.equal(env.NODE_OPTIONS, "--max-old-space-size=512 --require=/app/image/runner/src/child-preload.cjs", "never twice");
+	const spaced = {};
+	openChildLedger({ env: spaced, pid: 1, preloadPath: "/a b/child-preload.cjs", tmp: () => root });
+	assert.equal(spaced.NODE_OPTIONS, '--require="/a b/child-preload.cjs"', "a path with a space is quoted");
 });
 
-test("openChildLedger: a directory that cannot be made leaves the environment untouched and names a code, never a path", () => {
-	const env = { NODE_OPTIONS: "--x" };
+test("openChildLedger: a relative TMPDIR still gives an absolute directory", () => {
+	const root = tempDir("pi-dispatch-ledger-rel-");
+	const relative = join(root, "sub");
+	mkdirSync(relative);
+	const cwd = process.cwd();
+	process.chdir(root);
+	try {
+		const env = {};
+		const opened = openChildLedger({ env, pid: 1, preloadPath: "/p.cjs", tmp: () => "sub" });
+		assert.equal(dirname(opened.dir), join(process.cwd(), "sub"), "absolute, so every child resolves the same directory whatever its cwd");
+		assert.equal(env.PI_DISPATCH_CHILD_LEDGER, opened.dir);
+	} finally {
+		process.chdir(cwd);
+	}
+});
+
+test("openChildLedger: a directory that cannot be made deletes both names, leaves NODE_OPTIONS alone, and names a code, never a path", () => {
+	const env = { NODE_OPTIONS: "--x", PI_DISPATCH_CHILD_LEDGER: "/inherited", PI_DISPATCH_RUNNER_PID: "9" };
 	const mkdtemp = () => {
 		throw Object.assign(new Error("EROFS: /tmp/secret"), { code: "EROFS" });
 	};
-	const opened = openChildLedger({ env, pid: 1, preloadUrl: "file:///p.mjs", mkdtemp, tmp: () => "/nowhere" });
+	const opened = openChildLedger({ env, pid: 1, preloadPath: "/p.cjs", mkdtemp, tmp: () => "/nowhere" });
 	assert.deepEqual(opened, { error: "EROFS" });
-	assert.deepEqual(env, { NODE_OPTIONS: "--x" });
+	assert.deepEqual(env, { NODE_OPTIONS: "--x" }, "no child is pointed anywhere, not even at an inherited directory");
 });
 
 // ── the control files ─────────────────────────────────────────────────────────────────────────────────────
@@ -86,6 +121,7 @@ test("SPENT: missing is 0, the job's total less this ledger's own part, malforme
 	assert.equal(readExternal({ dir, name: own }), Infinity);
 });
 
+
 test("writeFileAtomic: whole by rename, nothing left beside the file, and a ledger name is <pid>.<16 hex>.json", () => {
 	const dir = tempDir("pi-dispatch-atomic-");
 	writeFileAtomic({ dir, name: "a.json", text: "one" });
@@ -97,6 +133,34 @@ test("writeFileAtomic: whole by rename, nothing left beside the file, and a ledg
 	assert.match(name, CHILD_LEDGER_NAME);
 	assert.ok(name.startsWith("31337."));
 	assert.notEqual(childLedgerName(31337), name, "a fresh nonce per call");
+});
+
+test("writeFileAtomic: a FIFO or a symlink planted at a temporary name neither blocks the writer nor redirects it", () => {
+	const dir = tempDir("pi-dispatch-atomic-planted-");
+	const victim = join(tempDir("pi-dispatch-atomic-victim-"), "victim");
+	writeFileSync(victim, "untouched");
+	// The old scheme's predictable names, planted: they are simply never used.
+	execFileSync("mkfifo", [join(dir, `STOP.${process.pid}.tmp`)]);
+	symlinkSync(victim, join(dir, `SPENT.${process.pid}.tmp`));
+	writeFileAtomic({ dir, name: "STOP", text: "s" });
+	writeFileAtomic({ dir, name: "SPENT", text: "p" });
+	assert.equal(readFileSync(join(dir, "STOP"), "utf8"), "s");
+	assert.equal(readFileSync(join(dir, "SPENT"), "utf8"), "p");
+	// A planted name that a writer DOES draw (a fixed random source here): created exclusively, so EEXIST, and the next
+	// name is tried. Neither the FIFO (which would block an open for writing) nor the symlink is ever opened.
+	const draws = [[0, 0, 0, 0, 0, 0, 0, 1], [0, 0, 0, 0, 0, 0, 0, 2], [0, 0, 0, 0, 0, 0, 0, 3]];
+	const random = (bytes) => bytes.set(draws.shift()) ?? bytes;
+	execFileSync("mkfifo", [join(dir, "L.json.0000000000000001.tmp")]);
+	symlinkSync(victim, join(dir, "L.json.0000000000000002.tmp"));
+	writeFileAtomic({ dir, name: "L.json", text: "ledger", random });
+	assert.equal(readFileSync(join(dir, "L.json"), "utf8"), "ledger");
+	assert.equal(readFileSync(victim, "utf8"), "untouched", "the symlink's target is never written");
+	assert.equal(statSync(join(dir, "L.json")).isFile(), true);
+	// A writer that cannot find a free name gives up with the error, and leaves nothing of its own behind.
+	const always = (bytes) => bytes.fill(0);
+	writeFileSync(join(dir, "M.json.0000000000000000.tmp"), "planted");
+	assert.throws(() => writeFileAtomic({ dir, name: "M.json", text: "m", random: always }), (error) => error.code === "EEXIST");
+	assert.equal(readdirSync(dir).includes("M.json"), false);
 });
 
 // ── the child's meter ─────────────────────────────────────────────────────────────────────────────────────
@@ -203,6 +267,54 @@ test("startChildMeter: one meter per process; a second class is installed with i
 	assert.equal(fake.calls[1].guard, fake.calls[0].guard);
 });
 
+test("startChildMeter (library, lazy): nothing is written until the first call is about to go out, and a process that never calls leaves no file", async () => {
+	const fake = fakeInstall();
+	const dir = tempDir("pi-dispatch-child-lazy-");
+	const name = "98.0123456789abcdef.json";
+	const exits = [];
+	await startChildMeter({ ModelRuntime: ChildRuntime, compat: FAKE_COMPAT, env: {}, dir, name, lazy: true, install: fake.install, onExit: (listener) => exits.push(listener) });
+	assert.deepEqual(readdirSync(dir), [], "installed, nothing written");
+	exits[0]();
+	assert.deepEqual(readdirSync(dir), [], "and a process that exits without calling leaves nothing");
+
+	const dir2 = tempDir("pi-dispatch-child-lazy2-");
+	const fake2 = fakeInstall();
+	const exits2 = [];
+	await startChildMeter({ ModelRuntime: ChildRuntime, compat: FAKE_COMPAT, env: {}, dir: dir2, name, lazy: true, install: fake2.install, onExit: (listener) => exits2.push(listener) });
+	// judge() asks isStopped before every dispatch: the first ask writes the ledger, before the call goes out.
+	assert.equal(fake2.calls[0].isStopped(), null);
+	assert.deepEqual(JSON.parse(readFileSync(join(dir2, name), "utf8")).state, "running");
+	exits2[0]();
+	assert.equal(JSON.parse(readFileSync(join(dir2, name), "utf8")).state, "done");
+});
+
+test("startChildMeter: once a ledger write fails the child is stopped for every later call and unmetered in every later write", async () => {
+	const fake = fakeInstall();
+	const dir = tempDir("pi-dispatch-child-fail-");
+	const name = "97.0123456789abcdef.json";
+	let failing = false;
+	const writeFs = { ...realWriteFs(), openSync: (...args) => {
+		if (failing) throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
+		return realWriteFs().openSync(...args);
+	} };
+	await startChildMeter({ ModelRuntime: ChildRuntime, compat: FAKE_COMPAT, env: {}, dir, name, writeFs, install: fake.install, onExit: () => {} });
+	const { meter, isStopped } = fake.calls[0];
+	meter.record({ input: 5, output: 5, totalTokens: 10, cost: { total: 0.001 } }, { provider: "fake", model: "m1", sessionId: "s" });
+	assert.equal(isStopped(), null, "a healthy ledger: go");
+	failing = true;
+	meter.record({ input: 5, output: 5, totalTokens: 10, cost: { total: 0.001 } }, { provider: "fake", model: "m1", sessionId: "s" });
+	assert.equal(isStopped(), TOKEN_BUDGET, "the write failed: no further call may go out that the ledger cannot record");
+	failing = false;
+	assert.equal(isStopped(), TOKEN_BUDGET, "and it stays stopped");
+	meter.record({ input: 5, output: 5, totalTokens: 10, cost: { total: 0.001 } }, { provider: "fake", model: "m1", sessionId: "s" });
+	assert.equal(JSON.parse(readFileSync(join(dir, name), "utf8")).metered, false, "the next write that succeeds says unmetered");
+});
+
+/** The real fs functions writeFileAtomic uses, for a test that wraps one of them. */
+function realWriteFs() {
+	return { openSync: openSyncReal, fstatSync: fstatSyncReal, writeSync: writeSyncReal, closeSync: closeSyncReal, renameSync: renameSyncReal, rmSync: rmSyncReal, constants: constantsReal };
+}
+
 // ── the preload ───────────────────────────────────────────────────────────────────────────────────────────
 
 /** A realpath over a fake tree: links resolve through `links`, every other path is itself, `missing` throws. */
@@ -214,10 +326,11 @@ function fakeRealpath({ links = {}, missing = [] } = {}) {
 }
 const ROOT = "/app/node_modules/@earendil-works/pi-coding-agent";
 
-test("entryKind: the four pinned entries by realpath (the .bin link included); anything else, or anything unresolvable, is not pi", () => {
+test("entryKind: the five pinned entries by realpath (the .bin link included); anything else, or anything unresolvable, is not pi", () => {
 	const options = { packageDir: () => ROOT, realpath: fakeRealpath({ links: { "/app/node_modules/.bin/pi": `${ROOT}/dist/bundle/cli.js` }, missing: ["/gone.js"] }) };
 	assert.equal(entryKind(`${ROOT}/dist/bundle/cli.js`, options), "cli");
 	assert.equal(entryKind("/app/node_modules/.bin/pi", options), "cli");
+	assert.equal(entryKind(`${ROOT}/dist/bundle/cli-runtime.js`, options), "cli");
 	assert.equal(entryKind(`${ROOT}/dist/cli.js`, options), "cli");
 	assert.equal(entryKind(`${ROOT}/dist/bundle/rpc-entry.js`, options), "rpc");
 	assert.equal(entryKind(`${ROOT}/dist/rpc-entry.js`, options), "rpc");
@@ -226,7 +339,7 @@ test("entryKind: the four pinned entries by realpath (the .bin link included); a
 	assert.equal(entryKind("/gone.js", options), null);
 	assert.equal(entryKind(undefined, options), null);
 	assert.equal(entryKind(`${ROOT}/dist/cli.js`, { ...options, packageDir: () => { throw new Error("no pi"); } }), null);
-	assert.deepEqual(PI_ENTRIES.map((e) => `${e.kind}:${e.path}`), ["cli:dist/bundle/cli.js", "cli:dist/cli.js", "rpc:dist/bundle/rpc-entry.js", "rpc:dist/rpc-entry.js"]);
+	assert.deepEqual(PI_ENTRIES.map((e) => `${e.kind}:${e.path}`), ["cli:dist/bundle/cli.js", "cli:dist/bundle/cli-runtime.js", "cli:dist/cli.js", "rpc:dist/bundle/rpc-entry.js", "rpc:dist/rpc-entry.js"]);
 });
 
 test("injectChildMeter: -e goes FIRST, before the spawner's own -e and before any `--`; a CLI subcommand is left alone; rpc always", () => {
@@ -247,81 +360,126 @@ test("injectChildMeter: -e goes FIRST, before the spawner's own -e and before an
 	assert.equal(injectChildMeter(rpc, "rpc", "/m.ts"), true);
 	assert.deepEqual(rpc.slice(2), ["-e", "/m.ts", "list"]);
 	assert.ok(CHILD_METER_PATH.endsWith("/image/runner/src/child-meter.ts"));
+	// The flags that exit before extensions load, read before any `--` only.
+	assert.equal(exitsBeforeExtensions(["--version"]), true);
+	assert.equal(exitsBeforeExtensions(["-p", "--export", "s.jsonl"]), true);
+	assert.equal(exitsBeforeExtensions(["-p", "--", "--version"]), false, "after `--` it is a message");
+	assert.equal(exitsBeforeExtensions(["-p", "hi"]), false);
 });
 
-test("patchModelRuntime: the pinned shape gets the class, the module's own compat copy and the catalog; any other shape hands over no class", () => {
+test("patchModelRuntime: the pinned shape gets the class, the module's own compat copy and the catalog; any other shape, or no ./compat, hands over no class", () => {
 	const pinned = 'import * as builtinProviderCatalog from "@earendil-works/pi-ai/providers/all";\nexport class ModelRuntime {\n}\n';
-	const patched = patchModelRuntime(pinned, "file:///app/image/runner/src/usage-meter.mjs");
+	const patched = patchModelRuntime(pinned, { usageMeterUrl: "file:///app/image/runner/src/usage-meter.mjs" });
 	assert.ok(patched.startsWith(pinned), "the module's own source is untouched, only appended to");
 	assert.match(patched, /import \* as __piDispatchCompat from "@earendil-works\/pi-ai\/compat";/);
 	assert.match(patched, /import \* as __piDispatchUsageMeter from "file:\/\/\/app\/image\/runner\/src\/usage-meter\.mjs";/);
 	assert.match(patched, /globalThis\[Symbol\.for\("pi-dispatch\.child-meter"\)\]\?\.library\?\.\(\{ ModelRuntime, compat: __piDispatchCompat, providers: builtinProviderCatalog, meter: __piDispatchUsageMeter \}\);\n$/);
-	const moved = patchModelRuntime("export class ModelRuntime {}\n", "file:///u.mjs");
-	assert.doesNotMatch(moved, /pi-ai\/compat/, "no import that might not resolve");
-	assert.match(moved, /library\?\.\(\{ ModelRuntime: null, compat: null, providers: null, meter: __piDispatchUsageMeter \}\);/);
+	for (const moved of [patchModelRuntime("export class ModelRuntime {}\n", { usageMeterUrl: "file:///u.mjs" }), patchModelRuntime(pinned, { compat: false, usageMeterUrl: "file:///u.mjs" })]) {
+		assert.doesNotMatch(moved, /pi-ai\/compat/, "no import that might not resolve");
+		assert.match(moved, /library\?\.\(\{ ModelRuntime: null, compat: null, providers: null, meter: __piDispatchUsageMeter \}\);/);
+	}
 	assert.equal(USAGE_METER_URL, new URL("../src/usage-meter.mjs", import.meta.url).href);
+	assert.equal(USAGE_METER_PATH, new URL("../src/usage-meter.mjs", import.meta.url).pathname);
 	assert.equal(Symbol.for("pi-dispatch.child-meter"), CHILD_METER_HANDOFF, "the preload's key is usage-meter.mjs's");
 });
 
-test("libraryLoadHook: every other module passes straight through; model-runtime.js is patched; a failure returns pi's own source", () => {
-	const seen = [];
-	const next = (url) => {
-		seen.push(url);
-		return { format: "module", source: new TextEncoder().encode('import * as builtinProviderCatalog from "@earendil-works/pi-ai/providers/all";\nexport class ModelRuntime {}\n') };
-	};
-	const other = libraryLoadHook("file:///app/node_modules/x/index.js", {}, next);
-	assert.ok(other.source instanceof Uint8Array, "untouched");
-	const url = `file://${ROOT}/dist/core/model-runtime.js`;
-	assert.ok(url.endsWith(MODEL_RUNTIME_SUFFIX));
-	const patched = libraryLoadHook(url, {}, next);
-	assert.match(patched.source, /__piDispatchCompat/);
-	assert.deepEqual(libraryLoadHook(url, {}, () => ({ format: "commonjs", source: null })), { format: "commonjs", source: null });
-	const broken = { format: "module", get source() { throw new Error("boom"); } };
-	assert.equal(libraryLoadHook(url, {}, () => broken), broken);
+test("compatResolvesFrom: true only when the pi-ai that url resolves exports ./compat", () => {
+	const root = tempDir("pi-dispatch-compat-");
+	const manifest = join(root, "package.json");
+	writeFileSync(manifest, JSON.stringify({ exports: { ".": "./i.js", "./compat": "./c.js" } }));
+	assert.equal(compatResolvesFrom("file:///x", { findPackageJSON: () => manifest }), true);
+	writeFileSync(manifest, JSON.stringify({ exports: { ".": "./i.js", "./providers/*": "./p/*.js" } }));
+	assert.equal(compatResolvesFrom("file:///x", { findPackageJSON: () => manifest }), false);
+	assert.equal(compatResolvesFrom("file:///x", { findPackageJSON: undefined }), false, "a Node with no findPackageJSON cannot tell: no class");
+	assert.equal(compatResolvesFrom("file:///x", { findPackageJSON: () => { throw new Error("not found"); } }), false);
 });
 
-test("preload: nothing without a ledger directory; an entry is injected and stubbed; a subcommand is not; any other process gets the hook", async () => {
+test("the load hook: every other module passes untouched; model-runtime.js is matched on its path, query or not; a pinned bundle file is reported; a failure returns pi's own source", () => {
+	const source = new TextEncoder().encode('import * as builtinProviderCatalog from "@earendil-works/pi-ai/providers/all";\nexport class ModelRuntime {}\n');
+	const loaded = [];
+	const next = (url) => {
+		loaded.push(url);
+		return { format: "module", source };
+	};
+	let bundles = 0;
+	const hook = makeLibraryLoadHook({ packageDir: () => ROOT, onBundle: () => { bundles += 1; }, compatResolves: () => true });
+	const other = hook("file:///app/node_modules/x/index.js", {}, next);
+	assert.equal(other.source, source, "untouched");
+	const url = `file://${ROOT}/dist/core/model-runtime.js`;
+	assert.ok(url.endsWith(MODEL_RUNTIME_SUFFIX));
+	for (const variant of [url, `${url}?x=1`, `${url}#h`]) assert.match(hook(variant, {}, next).source, /__piDispatchCompat/, variant);
+	const noCompat = makeLibraryLoadHook({ packageDir: () => ROOT, compatResolves: () => false });
+	assert.match(noCompat(url, {}, next).source, /ModelRuntime: null/);
+	assert.deepEqual(hook(url, {}, () => ({ format: "commonjs", source: null })), { format: "commonjs", source: null });
+	const broken = { format: "module", get source() { throw new Error("boom"); } };
+	assert.equal(hook(url, {}, () => broken), broken);
+	// The pinned bundle, any file, with a query too; another copy's bundle is not the pinned one.
+	hook(`file://${ROOT}/dist/bundle/index.js`, {}, next);
+	hook(`file://${ROOT}/dist/bundle/chunks/chunk-X.js?v=2`, {}, next);
+	assert.equal(bundles, 2);
+	hook("file:///workspace/node_modules/@earendil-works/pi-coding-agent/dist/bundle/index.js", {}, next);
+	assert.equal(bundles, 2);
+});
+
+test("preload: nothing without a ledger directory; an entry is injected and stubbed; a subcommand is not; any other process gets the hook", () => {
 	const realpath = fakeRealpath();
 	const packageDir = () => ROOT;
 	const noHooks = () => assert.fail("no hook may be registered here");
-	assert.equal(await preload({ env: {}, argv: ["node", `${ROOT}/dist/cli.js`], global: {}, packageDir, realpath, registerHooks: noHooks }), "none");
+	assert.equal(preload({ env: {}, argv: ["node", `${ROOT}/dist/cli.js`], global: {}, packageDir, realpath, registerHooks: noHooks }), "none");
 
 	const dir = tempDir("pi-dispatch-preload-");
 	const argv = ["node", `${ROOT}/dist/cli.js`, "-p", "hi"];
 	const global = {};
-	const meter = await import(USAGE_METER_URL);
-	assert.equal(await preload({ env: { PI_DISPATCH_CHILD_LEDGER: dir }, argv, pid: 77, global, packageDir, realpath, registerHooks: noHooks, importMeter: async () => meter }), "entry");
+	const exits = [];
+	assert.equal(preload({ env: { PI_DISPATCH_CHILD_LEDGER: dir }, argv, pid: 77, global, packageDir, realpath, registerHooks: noHooks, loadMeter: () => usageMeter, onExit: (l) => exits.push(l) }), "entry");
 	assert.deepEqual(argv.slice(2), ["-e", CHILD_METER_PATH, "-p", "hi"]);
-	assert.equal(global[CHILD_METER_HANDOFF].meter, meter, "the meter module is handed over");
+	assert.equal(global[CHILD_METER_HANDOFF].meter, usageMeter, "the meter module is handed over");
+	assert.equal(exits.length, 0, "a session run has no exit rewrite: the meter's own exit write is the one");
 	const [stub] = readdirSync(dir);
 	assert.match(stub, /^77\.[0-9a-f]{16}\.json$/);
 	assert.equal(global[CHILD_METER_HANDOFF].name, stub);
-	assert.deepEqual(JSON.parse(readFileSync(join(dir, stub), "utf8")), meter.childLedger({ state: "starting" }));
+	assert.deepEqual(JSON.parse(readFileSync(join(dir, stub), "utf8")), usageMeter.childLedger({ state: "starting" }));
 
 	const sub = ["node", `${ROOT}/dist/cli.js`, "install", "npm:x"];
-	assert.equal(await preload({ env: { PI_DISPATCH_CHILD_LEDGER: dir }, argv: sub, global: {}, packageDir, realpath, registerHooks: noHooks }), "subcommand");
+	assert.equal(preload({ env: { PI_DISPATCH_CHILD_LEDGER: dir }, argv: sub, global: {}, packageDir, realpath, registerHooks: noHooks }), "subcommand");
 	assert.deepEqual(sub.slice(2), ["install", "npm:x"]);
 
 	const hooks = [];
 	const plain = {};
-	assert.equal(await preload({ env: { PI_DISPATCH_CHILD_LEDGER: dir }, argv: ["node", "/workspace/script.mjs"], global: plain, packageDir, realpath, registerHooks: (h) => hooks.push(h) }), "library");
+	assert.equal(preload({ env: { PI_DISPATCH_CHILD_LEDGER: dir }, argv: ["node", "/workspace/script.mjs"], global: plain, packageDir, realpath, registerHooks: (h) => hooks.push(h) }), "library");
 	assert.equal(hooks.length, 1);
-	assert.equal(hooks[0].load, libraryLoadHook);
+	assert.equal(typeof hooks[0].load, "function");
 	assert.equal(typeof plain[CHILD_METER_HANDOFF].library, "function");
+});
+
+test("preload: `pi --version` (or --export) ends its stub `done`, not `starting`, unless the meter started after all", () => {
+	const dir = tempDir("pi-dispatch-preload-version-");
+	const exits = [];
+	const global = {};
+	preload({ env: { PI_DISPATCH_CHILD_LEDGER: dir }, argv: ["node", `${ROOT}/dist/bundle/cli.js`, "--version"], pid: 5, global, packageDir: () => ROOT, realpath: fakeRealpath(), registerHooks: undefined, loadMeter: () => usageMeter, onExit: (l) => exits.push(l) });
+	const [file] = readdirSync(dir);
+	assert.equal(JSON.parse(readFileSync(join(dir, file), "utf8")).state, "starting");
+	assert.equal(exits.length, 1);
+	exits[0]();
+	assert.deepEqual(JSON.parse(readFileSync(join(dir, file), "utf8")), usageMeter.childLedger({ state: "done" }));
+	// Had the meter started, its own exit write is the truth and this one stands aside.
+	global[CHILD_METER_HANDOFF].child = {};
+	writeFileAtomic({ dir, name: file, text: "{}" });
+	exits[0]();
+	assert.equal(readFileSync(join(dir, file), "utf8"), "{}");
 });
 
 test("preload: total on a Node without registerHooks, or one where it throws; the library handler never throws either", async () => {
 	const dir = tempDir("pi-dispatch-preload-old-");
 	const options = { env: { PI_DISPATCH_CHILD_LEDGER: dir }, argv: ["node", "/workspace/script.mjs"], packageDir: () => ROOT, realpath: fakeRealpath() };
-	assert.equal(await preload({ ...options, global: {}, registerHooks: undefined }), "library");
+	assert.equal(preload({ ...options, global: {}, registerHooks: undefined }), "library");
 	const global = {};
-	assert.equal(await preload({ ...options, global, registerHooks: () => { throw new Error("unsupported"); } }), "library");
+	assert.equal(preload({ ...options, global, registerHooks: () => { throw new Error("unsupported"); } }), "library");
 	// A handler handed something unusable writes nothing it should not and does not throw.
 	assert.doesNotThrow(() => global[CHILD_METER_HANDOFF].library({ ModelRuntime: null, compat: null, providers: null, meter: null }));
 	assert.deepEqual(readdirSync(dir), []);
-	// With the meter module and no class (a model-runtime.js the hook does not recognise): the child is unmetered.
-	const meter = await import(USAGE_METER_URL);
-	global[CHILD_METER_HANDOFF].library({ ModelRuntime: null, compat: null, providers: null, meter });
+	// With the meter module and no class (a model-runtime.js the hook does not recognise): the child is unmetered at once.
+	global[CHILD_METER_HANDOFF].library({ ModelRuntime: null, compat: null, providers: null, meter: usageMeter });
 	await new Promise((resolve) => setImmediate(resolve));
 	const [file] = readdirSync(dir);
 	assert.equal(JSON.parse(readFileSync(join(dir, file), "utf8")).metered, false);

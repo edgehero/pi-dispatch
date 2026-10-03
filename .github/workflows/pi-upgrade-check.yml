@@ -749,7 +749,7 @@ jobs:
               cd /tmp
               printf "%s\n" "$PROVIDER" > /tmp/fake-provider.ts
               L=$(mktemp -d /tmp/pi-dispatch-meter-XXXXXX)
-              PI_CODING_AGENT_DIR=$(mktemp -d) PI_OFFLINE=1 PI_DISPATCH_CHILD_LEDGER="$L" NODE_OPTIONS=--import=file:///app/image/runner/src/child-preload.mjs \
+              PI_CODING_AGENT_DIR=$(mktemp -d) PI_OFFLINE=1 PI_DISPATCH_CHILD_LEDGER="$L" NODE_OPTIONS=--require=/app/image/runner/src/child-preload.cjs \
                 pi --mode json -p --no-session -e /tmp/fake-provider.ts --model fake/m1 hello < /dev/null > /dev/null
               node --input-type=module -e "
                 import { foldChildLedgers } from \"file:///app/image/runner/src/usage-meter.mjs\";
@@ -757,7 +757,7 @@ jobs:
                 const [entry] = fold.files.values();
                 if (fold.processes !== 1 || fold.unmetered !== 0 || fold.totals.total !== 777 || entry?.state !== \"done\") { console.error(JSON.stringify({ processes: fold.processes, unmetered: fold.unmetered, totals: fold.totals, state: entry?.state })); process.exit(1); }
                 console.log(\"OK: one metered child ledger, 777 tokens, done\");" "$L"' \
-            || { echo "::error::A pi child in the image did not meter itself into the ledger. Check, in order: the preload and child-meter.ts are in the image and readable by any uid, image/runner/src/child-preload.mjs still recognises the package bin by realpath, and child-meter.ts still gets the child's own pi-ai and ModelRuntime from pi's loader (image/runner/test/child-meter.integration.test.mjs runs the same route outside the image)."; exit 1; }
+            || { echo "::error::A pi child in the image did not meter itself into the ledger. Check, in order: child-preload.cjs and child-meter.ts are in the image and readable by any uid, image/runner/src/child-preload.cjs still recognises the package bin by realpath, and child-meter.ts still gets the child's own pi-ai and ModelRuntime from pi's loader (image/runner/test/child-meter.integration.test.mjs runs the same route outside the image)."; exit 1; }
 
   admin-extension-canary:
     # The admin extension is the default front door (issue #96): it is TESTED against an exact pi

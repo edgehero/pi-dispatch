@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -33,7 +33,7 @@ if (!piIndexUrl && required) {
 }
 const skip = piIndexUrl ? false : `pi not installed (node ${process.version} < 22.19.0); CI runs these`;
 
-const PRELOAD_URL = new URL("../src/child-preload.mjs", import.meta.url).href;
+const PRELOAD_PATH = fileURLToPath(new URL("../src/child-preload.cjs", import.meta.url));
 const PI_ROOT = piIndexUrl ? dirname(dirname(fileURLToPath(piIndexUrl))) : "";
 const entry = (path) => join(PI_ROOT, path);
 
@@ -75,10 +75,12 @@ function world({ api = "pi-dispatch-child-fake" } = {}) {
 	writeFileSync(calls, "");
 	const env = {
 		HOME: root,
-		...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
+		// Each child's own temp directory, inside this test's: pi's jiti cache and Node's compile cache land there and go
+		// with it, so the suite's TMPDIR ends empty.
+		TMPDIR: root,
 		PI_CODING_AGENT_DIR: agentDir,
 		PI_OFFLINE: "1",
-		NODE_OPTIONS: `--import=${PRELOAD_URL}`,
+		NODE_OPTIONS: `--require=${PRELOAD_PATH}`,
 		PI_DISPATCH_CHILD_LEDGER: ledger,
 		FAKE_API: api,
 		FAKE_CALLS: calls,
@@ -270,12 +272,12 @@ test("a plain node child gets no injection, starts normally and leaves no ledger
 });
 
 /** A Node script that runs pi as a LIBRARY (pi-subagents' background runner does): its own runtime, one call. */
-function libraryScript(w) {
+function libraryScript(w, { from = piIndexUrl, calls = 1 } = {}) {
 	const modelsPath = join(w.root, "models.json");
 	writeFileSync(modelsPath, JSON.stringify({ providers: { fake: { apiKey: "pi-dispatch-child-fake-key", baseUrl: "http://127.0.0.1:1", api: w.env.FAKE_API, models: [{ id: "m1", name: "m1", api: w.env.FAKE_API, reasoning: false, input: ["text"], cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 4096 }] } } }));
 	const script = join(w.root, "library-child.mjs");
 	writeFileSync(script, `import { appendFileSync } from "node:fs";
-const pi = await import(${JSON.stringify(piIndexUrl)});
+const pi = await import(${JSON.stringify(from)});
 const compat = await import(${JSON.stringify(resolvePiAiCompat()[0].url)});
 const runtime = await pi.ModelRuntime.create({ authPath: ${JSON.stringify(join(w.agentDir, "auth.json"))}, modelsPath: ${JSON.stringify(modelsPath)}, allowModelNetwork: false });
 runtime.registerProvider("fake", {
@@ -288,8 +290,9 @@ runtime.registerProvider("fake", {
 	},
 });
 await runtime.refresh({ allowNetwork: false });
-const message = await runtime.streamSimple(runtime.getModel("fake", "m1"), { messages: [{ role: "user", content: "hello", timestamp: 1 }] }, { sessionId: "library-1", maxRetries: 0 }).result();
-process.stdout.write(JSON.stringify({ stopReason: message.stopReason }));
+let stopReason = null;
+for (let i = 0; i < ${calls}; i += 1) stopReason = (await runtime.streamSimple(runtime.getModel("fake", "m1"), { messages: [{ role: "user", content: "hello", timestamp: 1 }] }, { sessionId: "library-1", maxRetries: 0 }).result()).stopReason;
+process.stdout.write(JSON.stringify({ stopReason }));
 `);
 	return script;
 }
@@ -306,13 +309,102 @@ test("a Node child that runs pi as a library is metered through the preload's lo
 test("the preload on a Node without module.registerHooks does not throw: a library child runs, unmetered (issue #500)", { skip }, async () => {
 	const w = world();
 	// Simulated: a first preload removes registerHooks from node:module before ours reads it.
-	const shim = join(w.root, "no-register-hooks.mjs");
-	writeFileSync(shim, `import { createRequire, syncBuiltinESMExports } from "node:module";\nconst builtin = createRequire(import.meta.url)("node:module");\ndelete builtin.registerHooks;\nsyncBuiltinESMExports();\n`);
-	const env = { ...w.env, NODE_OPTIONS: `--import=${pathToFileURL(shim).href} --import=${PRELOAD_URL}` };
+	const shim = join(w.root, "no-register-hooks.cjs");
+	writeFileSync(shim, `const builtin = require("node:module");\ndelete builtin.registerHooks;\nbuiltin.syncBuiltinESMExports();\n`);
+	const env = { ...w.env, NODE_OPTIONS: `--require=${shim} --require=${PRELOAD_PATH}` };
 	const probe = await run(["--input-type=module", "-e", "import * as m from 'node:module'; process.stdout.write(typeof m.registerHooks)"], { env, cwd: w.root });
 	assert.equal(probe.stdout, "undefined", "the shim must hide registerHooks, or this test proves nothing");
 	const result = await run([libraryScript(w)], { env, cwd: w.root });
 	assert.equal(result.code, 0, result.stderr);
 	assert.equal(w.callCount(), 1);
 	assert.deepEqual(readdirSync(w.ledger), [], "no hook, so no ledger: the parent's detector is what sees this child");
+});
+
+test("a pi child started from the bundle's cli-runtime.js (what the bin loads) is metered too (issue #500)", { skip }, async () => {
+	const w = world();
+	const result = await run([entry("dist/bundle/cli-runtime.js"), ...printArgs(w), "hello"], { env: w.env, cwd: w.root });
+	assert.equal(result.code, 0, result.stderr);
+	assert.equal(w.callCount(), 1);
+	assertMetered(w.ledger);
+});
+
+test("`pi --version` exits before the meter can start, and its ledger ends done with zeros, never `starting` (issue #500)", { skip }, async () => {
+	const w = world();
+	const result = await run([entry("dist/bundle/cli.js"), "--version"], { env: w.env, cwd: w.root });
+	assert.equal(result.code, 0, result.stderr);
+	const { parsed, fold } = ledgers(w.ledger);
+	assert.equal(parsed.length, 1);
+	assert.equal(parsed[0].raw.state, "done");
+	assert.equal(parsed[0].raw.metered, true);
+	assert.equal(parsed[0].raw.totals.calls, 0);
+	assert.equal(fold.unmetered, 0);
+});
+
+test("a library child that only imports pi and never calls leaves no ledger at all (issue #500)", { skip }, async () => {
+	const w = world();
+	const result = await run([libraryScript(w, { calls: 0 })], { env: w.env, cwd: w.root });
+	assert.equal(result.code, 0, result.stderr);
+	assert.deepEqual(readdirSync(w.ledger), [], "a test suite that imports pi hundreds of times cannot flood the directory");
+});
+
+test("model-runtime.js imported with a query string is still metered: the hook matches the path (issue #500)", { skip }, async () => {
+	const w = world();
+	const result = await run([libraryScript(w, { from: `${new URL("./core/model-runtime.js", piIndexUrl).href}?x=1` })], { env: w.env, cwd: w.root });
+	assert.equal(result.code, 0, result.stderr);
+	assert.equal(w.callCount(), 1);
+	assertMetered(w.ledger);
+});
+
+test("a process that loads the pinned bundle by path (no -e reached it) records itself unmetered (issue #500)", { skip }, async () => {
+	const w = world();
+	const result = await run([libraryScript(w, { from: pathToFileURL(entry("dist/bundle/index.js")).href })], { env: w.env, cwd: w.root });
+	assert.equal(result.code, 0, result.stderr);
+	assert.equal(w.callCount(), 1, "the call ran: the bundle's own class is out of the hook's reach");
+	const { parsed, fold } = ledgers(w.ledger);
+	assert.equal(parsed.length, 1);
+	assert.equal(parsed[0].raw.metered, false);
+	assert.equal(fold.unmetered, 1, "the parent counts it unmetered, the floor");
+});
+
+test("a foreign pi copy whose pi-ai has no ./compat is not patched with an import that cannot link: it runs, unmetered (issue #500)", { skip }, async () => {
+	const w = world();
+	const modules = join(w.root, "app", "node_modules", "@earendil-works");
+	const agent = join(modules, "pi-coding-agent");
+	const ai = join(modules, "pi-ai");
+	mkdirSync(join(agent, "dist", "core"), { recursive: true });
+	mkdirSync(ai, { recursive: true });
+	writeFileSync(join(agent, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", type: "module", exports: { ".": "./dist/core/model-runtime.js" } }));
+	writeFileSync(join(agent, "dist", "core", "model-runtime.js"), 'import * as builtinProviderCatalog from "@earendil-works/pi-ai/providers/all";\nexport class ModelRuntime {\n}\nexport const seen = typeof builtinProviderCatalog;\n');
+	writeFileSync(join(ai, "package.json"), JSON.stringify({ name: "@earendil-works/pi-ai", type: "module", exports: { "./providers/all": "./all.js" } }));
+	writeFileSync(join(ai, "all.js"), "export const builtinModels = () => null;\n");
+	const app = join(w.root, "app", "app.mjs");
+	writeFileSync(app, 'import { seen } from "@earendil-works/pi-coding-agent";\nprocess.stdout.write(`hi ${seen}`);\n');
+	const result = await run([app], { env: w.env, cwd: join(w.root, "app") });
+	assert.equal(result.code, 0, result.stderr);
+	assert.equal(result.stdout, "hi object");
+	const { parsed } = ledgers(w.ledger);
+	assert.equal(parsed.length, 1);
+	assert.equal(parsed[0].raw.metered, false);
+});
+
+test("a child whose ledger can no longer be written is stopped: the call after the failed write never reaches the provider (issue #500)", { skip }, async () => {
+	const w = world();
+	const drive = rpcDriver(["one", "two", "three"], { between: (sent) => {
+		// After the first answer the directory becomes unwritable (a full or read-only /tmp behaves the same).
+		if (sent === 1) chmodSync(w.ledger, 0o500);
+	} });
+	let result;
+	try {
+		result = await run([entry("dist/bundle/rpc-entry.js"), "--no-session", "-e", w.provider, "--model", "fake/m1"], { env: w.env, cwd: w.root, drive });
+	} finally {
+		chmodSync(w.ledger, 0o700);
+	}
+	assert.equal(result.code, 0, result.stderr);
+	// Call two went out and its write failed (the ledger cannot be updated before a call, only when it is seen); call
+	// three was braked. Before this fix all three went out under a ledger that said one call and metered.
+	assert.equal(w.callCount(), 2);
+	assert.match(result.stdout, new RegExp(STOP_MESSAGES[TOKEN_BUDGET]));
+	const { parsed } = ledgers(w.ledger);
+	assert.equal(parsed.length, 1);
+	assert.equal(parsed[0].raw.totals.calls, 1, "the last write that succeeded");
 });
