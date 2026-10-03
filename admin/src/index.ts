@@ -70,6 +70,7 @@ import {
   readPauseWindows,
   readScopedLimits,
   readScopedBudget,
+  readDollarWindows,
   readHeldJobs,
   cancelHeldJob,
   listRunIds,
@@ -108,8 +109,10 @@ import { valkeyDownHint } from "@edgehero/pi-dispatch/valkey-auth";
 // capability lost with no error anywhere. A narrowed one means the model proposes an entry, the operator
 // approves a confirm dialog, and writeTriggers rejects it: a wasted human approval. `blessedBackends`
 // below is the precedent, and its header is a post-mortem of the same mistake.
-import { FORGE_KINDS, ISSUE_ACTIONS, ON_TYPES, PR_ACTIONS, PR_CLOSE_ACTIONS, REVIEW_STATES, validateModelRef } from "@edgehero/pi-dispatch/triggers";
-import { DOLLAR_SETTING_KEYS } from "@edgehero/pi-dispatch/money";
+import { FORGE_KINDS, ISSUE_ACTIONS, ON_TYPES, PR_ACTIONS, PR_CLOSE_ACTIONS, REVIEW_STATES, runModelFieldNearMiss, validateModelRef } from "@edgehero/pi-dispatch/triggers";
+import { DOLLAR_SETTING_KEYS, formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
+import { USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
+import { runDollars } from "./dollar-windows.mjs";
 import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
 // The worker's OWN window classifier (the same one reserveBudget enforces), so the budget states the
 // insights payload carries are words the page never derives and the panel and enforcement cannot drift.
@@ -368,7 +371,13 @@ function registerTools(pi: ExtensionAPI): void {
       "Read-only. Folds the PII-free run history against the operator's declared subscriptions and pi-ai's " +
       "rate tables into the costs read-model: window totals, daily buckets, per-flow and per-model rollups, " +
       "per-plan verdicts, and provenance. window = 7d | 30d | mtd (default mtd); flow filters to one flow's " +
-      "runs; repo filters to one repo's runs by the by-repo rollup's key (e.g. \"acme/web\" or \"local:site\").",
+      "runs; repo filters to one repo's runs by the by-repo rollup's key (e.g. \"acme/web\" or \"local:site\"). " +
+      "`dollars` adds the dollar caps: `windows` has one row per active dollar window (the deployment's, then each " +
+      "scoped-limits dollar row), with `counterMicros` (spent and held, the Valkey counter the next job is admitted " +
+      "against, null when unreadable) beside the records' side (settled micro-dollars, how many runs settled metered, " +
+      "floor, refunded or unreserved, and the boundExceeded count; null for a folder or model row, which a run record " +
+      "cannot name); `runs` lists the per-run `dollars` of this window's records, newest first. All amounts are " +
+      "integer micro-dollars (1 USD = 1000000).",
     parameters: Type.Object({ window: Type.Optional(Type.String()), flow: Type.Optional(Type.String()), repo: Type.Optional(Type.String()) }),
     async execute(_toolCallId, params) {
       const window = params.window ?? "mtd";
@@ -378,10 +387,20 @@ function registerTools(pi: ExtensionAPI): void {
       const paths = resolvePaths(deploymentEnv());
       const res = assembleCosts(paths, window, params.flow, params.repo);
       if (res.unreachable) throw new Error(`could not read the run history: ${res.unreachable}`);
+      // Issue #501, part 7: the dollar caps beside the fold. The windows are the CURRENT day, week and month whatever
+      // `window` asked for (that is what a cap counts), each counter read under the worker's own keys; the runs are
+      // this window's records, filtered like the fold. Integers and fixed tokens, so nothing a job chose rides along.
+      const windows = await readDollarWindows({ paths, env: deploymentEnv() });
+      const runs = runDollars(res.records);
+      // ONLY when there is something to say (PR #550's review): no window, no run carrying dollars and no unreadable
+      // setting is a deployment that sets no dollar cap, and its result stays byte-identical to what it always was.
+      const anyDollars = windows.windows.length > 0 || runs.runs.length > 0 || Array.isArray((windows as any).invalid);
+      if (!anyDollars) return toolText(JSON.stringify({ window, fold: res.fold }));
+      const dollars = { ...windows, ...runs };
       // The fold's dollars are TYPED `{ usd, class, floor, ... }` on purpose: the class rides beside every
       // number in this JSON, so a model consuming it cannot launder an estimate into a fact by dropping
       // the label -- the same discipline fmtCost enforces on the text views.
-      return toolText(JSON.stringify({ window, fold: res.fold }));
+      return toolText(JSON.stringify({ window, fold: res.fold, dollars }));
     },
   });
 
@@ -502,6 +521,9 @@ function registerTools(pi: ExtensionAPI): void {
       if (view?.invalid && !blankSettingsFile(paths.settingsFile)) throw new Error(`rejected: ${overlayInvalidRefusal(view.invalid)}`);
       const unset = params.value === undefined || params.value.trim() === "";
       const newVal = unset ? undefined : coerceSettingValue(params.key, params.value.trim());
+      // Issue #501, part 7: a dollar value is judged by the worker's own parser BEFORE the confirm, so the operator is
+      // never asked to approve a value the write would then refuse (the edit tools' rule). The message names the key.
+      if (!unset && (DOLLAR_SETTING_KEYS as readonly string[]).includes(params.key)) parseUsdMicros(newVal, params.key);
       // The AFTER side of an unset is what the key falls back to, by the same rule as the before side.
       const afterOverlay = unset ? Object.fromEntries(Object.entries(view?.overlay ?? {}).filter(([k]) => k !== params.key)) : { ...(view?.overlay ?? {}), [params.key]: newVal };
       const after = unset ? settingShown(params.key, afterOverlay, env, shown) : String(newVal);
@@ -588,6 +610,7 @@ function registerTools(pi: ExtensionAPI): void {
       backend: Type.Optional(Type.String()),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      refuseWideningFields(params, "dispatch_trigger_add");
       const blessed = blessedBackends(process.env);
       if (params.backend !== undefined) {
         // REFUSED UNDER AN EMPTY SET rather than passed through. A deployment that blesses nothing has no
@@ -634,6 +657,7 @@ function registerTools(pi: ExtensionAPI): void {
       model: Type.Optional(Type.String()),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      refuseWideningFields(params, "dispatch_trigger_edit");
       const paths = resolvePaths(deploymentEnv());
       const list = triggerList(paths);
       const cur = list[params.index];
@@ -820,6 +844,9 @@ function registerTools(pi: ExtensionAPI): void {
     description:
       "Read-only. Lists the scoped limits (per repo/folder budget caps and concurrency, scoped-limits.json) " +
       "with their array index and, when the queue is reachable, each scope's used day/week/month run counts. " +
+      "Each row carries `summary` (its caps in words) and, for a row with dollar windows (dayUsd/weekUsd/monthUsd, " +
+      "or a model:<provider>/<model> row), `dollars`: one entry per window with its cap and `counterMicros`, the " +
+      "micro-dollars spent and held in it so far (null when the queue is unreachable). " +
       "Use the index for dispatch_limit_edit / dispatch_limit_delete. The always-on one-job-per-folder mutex " +
       "for local jobs is separate: it has no entry here and no switch anywhere.",
     parameters: Type.Object({}),
@@ -828,7 +855,13 @@ function registerTools(pi: ExtensionAPI): void {
       const p = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
       if (!Array.isArray((p as any)?.limits)) return toolText(JSON.stringify(p));
       const counters = await readScopedBudget({ url: paths.valkeyUrl, limits: (p as any).limits });
-      const rows = (p as any).limits.map((l: any, index: number) => ({ index, ...l, used: (counters as any).rows?.[index] ?? null }));
+      const rows = (p as any).limits.map((l: any, index: number) => {
+        const used = (counters as any).rows?.[index] ?? null;
+        // `summary` and `dollars` only on a row with a dollar window (PR #550's review), so a count-only row reads
+        // exactly as it always did.
+        const usd = dollarRowsOf(l, used);
+        return "dollars" in usd ? { index, ...l, used, summary: limitSummary(l), ...usd } : { index, ...l, used };
+      });
       return toolText(JSON.stringify(rows));
     },
   });
@@ -889,8 +922,12 @@ function registerTools(pi: ExtensionAPI): void {
       "path, ABSOLUTE, matched exactly like pause windows — no globs) exceed the `day`/`week`/`month` " +
       "job-count caps are REFUSED before any spend (reason scope-cap, never retried); jobs over `concurrent` " +
       "are DEFERRED, never dropped, and run when a slot frees. At least one of day/week/month/concurrent is " +
-      "required, each an integer >= 1. The operator MUST approve a confirm dialog showing the entry; refused " +
-      "with no interactive operator.",
+      "required, each an integer >= 1. `dayUsd`/`weekUsd`/`monthUsd` are DOLLAR windows (a decimal string such as " +
+      "\"2.50\": above 0, at most 1000000, at most 6 decimals): what the scope's jobs may spend per UTC day, Monday " +
+      "week and month; a job that does not fit is refused dollar-cap. A scope of model:<provider>/<model> caps one " +
+      "model across every scope and takes the three dollar fields only. A dollar window needs a per-job cap " +
+      "(maxCostUsd). The file stays version 1 unless a row needs version 2. The operator MUST approve a confirm " +
+      "dialog showing the entry; refused with no interactive operator.",
     executionMode: "sequential",
     parameters: Type.Object({
       scope: Type.String(),
@@ -898,10 +935,16 @@ function registerTools(pi: ExtensionAPI): void {
       week: Type.Optional(Type.Integer({ minimum: 1 })),
       month: Type.Optional(Type.Integer({ minimum: 1 })),
       concurrent: Type.Optional(Type.Integer({ minimum: 1 })),
+      // Issue #501, part 7. Strings, the form `parseUsdMicros` reads exactly as written. pi's own validation turns a
+      // JSON number into a string before `execute` (`dollarFieldsOf`), so a number is read by its value; one that does
+      // not print as a plain decimal of at most 6 places is refused.
+      dayUsd: Type.Optional(Type.String()),
+      weekUsd: Type.Optional(Type.String()),
+      monthUsd: Type.Optional(Type.String()),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
-      const l = buildScopedLimit(params);
+      const l = buildScopedLimit({ ...params, ...dollarFieldsOf(params) });
       const result = await confirmedWrite(
         ctx,
         { title: "Add scoped limit", message: `Add to scoped-limits.json:\n${JSON.stringify(l)}` },
@@ -947,10 +990,11 @@ function registerTools(pi: ExtensionAPI): void {
     label: "pi-dispatch edit scoped limit",
     description:
       "Changes fields of an existing scoped limit (by array index from dispatch_limits) and applies it live. " +
-      "Provide only the fields to change (scope/day/week/month/concurrent); the rest keep their current value " +
-      "(dayUsd/weekUsd/monthUsd are kept as they are; these tools cannot set them yet, so to drop a cap from an " +
-      "entry, edit scoped-limits.json by hand rather than delete and re-add it, which would lose them). The operator MUST approve a " +
-      "confirm dialog showing the before->after; refused with no interactive operator.",
+      "Provide only the fields to change (scope/day/week/month/concurrent/dayUsd/weekUsd/monthUsd); the rest keep " +
+      "their current value. `dayUsd`/`weekUsd`/`monthUsd` are dollar windows, written as a decimal string (\"2.50\"). " +
+      "No field can be removed here: to drop a cap from an entry, edit scoped-limits.json by hand. The file stays " +
+      "version 1 unless a row needs version 2. The operator MUST approve a confirm dialog showing the before->after; " +
+      "refused with no interactive operator.",
     executionMode: "sequential",
     parameters: Type.Object({
       index: Type.Integer({ minimum: 0 }),
@@ -959,6 +1003,9 @@ function registerTools(pi: ExtensionAPI): void {
       week: Type.Optional(Type.Integer({ minimum: 1 })),
       month: Type.Optional(Type.Integer({ minimum: 1 })),
       concurrent: Type.Optional(Type.Integer({ minimum: 1 })),
+      dayUsd: Type.Optional(Type.String()),
+      weekUsd: Type.Optional(Type.String()),
+      monthUsd: Type.Optional(Type.String()),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
@@ -966,6 +1013,9 @@ function registerTools(pi: ExtensionAPI): void {
       const list = Array.isArray((p as any)?.limits) ? (p as any).limits : [];
       const cur = list[params.index];
       if (!cur) throw new Error(`no scoped limit at index ${params.index} (have ${list.length})`);
+      // Issue #501, part 7: a dollar field is judged BEFORE the confirm, so the operator is never asked to approve a
+      // value the write would refuse.
+      const usd = dollarFieldsOf(params);
       // A provided field replaces; an omitted one keeps the current value (?? treats undefined as "keep").
       // Rebuild through the shared builder so the result is validated the same way as an add.
       const before = buildScopedLimit(cur);
@@ -975,11 +1025,11 @@ function registerTools(pi: ExtensionAPI): void {
         week: params.week ?? cur.week,
         month: params.month ?? cur.month,
         concurrent: params.concurrent ?? cur.concurrent,
-        // The dollar windows (version 2) are not editable here yet (issue #501 part 7); they are CARRIED, never
-        // dropped, so an edit of a count field cannot silently remove a dollar cap.
-        dayUsd: cur.dayUsd,
-        weekUsd: cur.weekUsd,
-        monthUsd: cur.monthUsd,
+        // The dollar windows (version 2): a sent one replaces, an omitted one is CARRIED, never dropped, so an edit of
+        // a count field cannot silently remove a dollar cap.
+        dayUsd: usd.dayUsd ?? cur.dayUsd,
+        weekUsd: usd.weekUsd ?? cur.weekUsd,
+        monthUsd: usd.monthUsd ?? cur.monthUsd,
       });
       const result = await confirmedWrite(
         ctx,
@@ -1254,6 +1304,70 @@ function buildScopedLimit(f: any): any {
     if (typeof f[k] === "string" && f[k].trim() !== "") l[k] = f[k].trim();
   }
   return l;
+}
+
+/**
+ * The trigger fields NO tool may set (issue #501, part 7): `run.maxCostUsd` (a trigger's per-job dollar cap) and
+ * `run.models` (the models its jobs may call). Either one decides what a trigger's jobs can spend or reach, and
+ * removing or widening it is a widening, so it is written by hand in the reviewed triggers file and never by a
+ * model's call, even behind a confirm. Neither tool's schema names them, and that alone is not the guard: a schema
+ * does not refuse extra keys, and a field silently dropped would let the model report a narrowing that never landed.
+ * So a call that carries one is REFUSED, loudly, before any confirm, and so is a NEAR MISS of either (`MaxCostUsd`,
+ * `max_cost_usd`, `allowedModels`, a homoglyph), at the top level and under a `run` or `on` object the model may
+ * have nested: the loader's own sweep (`runModelFieldNearMiss`), so the console and the loader agree on what a near
+ * miss is. An existing value is never touched: the add tool builds entries without these keys and the edit tool
+ * spreads the entry's own `run` under the fields it sets.
+ */
+const TOOL_PROOF_FIELDS = new Set(["run.maxCostUsd", "run.models"]);
+function refuseWideningFields(params: any, tool: string): void {
+  const objects: [string, any][] = [["", params], ["run.", params?.run], ["on.", params?.on]];
+  for (const [label, source] of objects) {
+    if (source === null || typeof source !== "object" || Array.isArray(source)) continue;
+    for (const key of Object.keys(source)) {
+      const meant = runModelFieldNearMiss(key);
+      if (meant === null || !TOOL_PROOF_FIELDS.has(meant)) continue;
+      const what = meant === "run.models" ? "allowed-model list" : "per-job dollar cap";
+      throw new Error(`${tool} cannot set ${meant} (sent as ${label}${key}): a trigger's ${what} is set by hand in the triggers file, never by a tool`);
+    }
+  }
+}
+
+/**
+ * The dollar fields a scoped-limit tool was SENT (issue #501, part 7), each judged by the worker's own
+ * `parseUsdMicros` and returned in its canonical form (`formatMicros`: "2.5" becomes "2.50"), the form the parser
+ * stores, so a confirm shows exactly what the file will hold. A blank or absent field is not sent. A malformed one
+ * throws with the parser's message (the key named, never the value) before any confirm is shown.
+ */
+function dollarFieldsOf(f: any): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of USD_LIMIT_FIELDS) {
+    const raw = f?.[k];
+    if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) continue;
+    // A JSON number cannot be refused here: pi's own argument validation (`validateToolArguments`, `Value.Convert`)
+    // turns it into a string before `execute` runs, and no schema keeps a string-typed field a number there (PR
+    // #550's review measured `Type.String`, `Type.Unsafe`, `allOf`, `anyOf` and `not`; only a schema with no `type`
+    // refused one, and a tool schema without a type is one some providers reject). So a number is read by its VALUE,
+    // the overlay's documented rule (`INT-CONFIG-OVERLAY-CONTRACT`): `2.5` is $2.50 and `1e-7` is refused.
+    out[k] = formatMicros(parseUsdMicros(typeof raw === "string" ? raw.trim() : raw, k));
+  }
+  return out;
+}
+
+/**
+ * `dispatch_limits`' dollar rows for one scoped limit (issue #501, part 7): `{ dollars: [{ window, cap, capMicros,
+ * counterMicros }] }` for each dollar window the row caps, from `readScopedBudget`'s `usdMicros` (read under
+ * `dollarKeyPrefixFor`, the worker's own key), or `{}` for a row with none. `counterMicros` is spent and held;
+ * null when the counters could not be read, never an invented 0.
+ */
+function dollarRowsOf(l: any, used: any): any {
+  const windows = [["dayUsd", "day"], ["weekUsd", "week"], ["monthUsd", "month"]].filter(([f]) => typeof l?.[f] === "string");
+  if (windows.length === 0) return {};
+  return {
+    dollars: windows.map(([f, w]) => {
+      const counter = used?.usdMicros?.[w];
+      return { window: w, cap: l[f], capMicros: parseUsdMicros(l[f], f), counterMicros: Number.isSafeInteger(counter) ? counter : null };
+    }),
+  };
 }
 
 /** One scoped limit as a display summary: `day 10 · week 40 · ≤1 at once` (set fields only). */
@@ -1567,7 +1681,7 @@ function assembleCosts(paths: any, window: string, flow?: string, repo?: string)
     sinceMs, // the same instant the scan cut at -- proration denominates on the requested window
     triggerJoin,
   });
-  return { fold };
+  return { fold, records: scoped };
 }
 
 /**
@@ -1836,7 +1950,8 @@ async function openDashboard(paths: any, ctx: any, notify: Notify): Promise<void
       tui,
       theme,
       deps: {
-        ...createDashboardDeps(paths),
+        // The dollar caps' env (issue #501, part 7): the deployment's, the source `dispatch_set`'s confirm reads.
+        ...createDashboardDeps(paths, { dollarEnvFn: deploymentEnv }),
         // log read stays here; overlay-only, returns readLogTail's result verbatim
         tailLog: ({ jobId, lines }: { jobId: string; lines: number }) => readLogTail({ logsDir: paths.logsDir, jobId, lines }),
         // REQ-RESURRECTABLE-SANDBOX, both seams. The fs read and the spawn live HERE for the same reason

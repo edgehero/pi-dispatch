@@ -53,7 +53,7 @@ test("pointer + empty .env: dispatch_set dailyCostUsd with no cap anywhere is WA
   const no = toolCtx(false);
   const outNo = JSON.parse((await tool("dispatch_set").execute("id", { key: "dailyCostUsd", value: "10" }, undefined, undefined, no.ctx)).content[0].text);
   assert.match(no.shown[0].message, /\n\nWarning: dailyCostUsd needs maxCostUsd/);
-  assert.match(no.shown[0].message, /the settings overlay and the deployment's \.env/, "names what it could see");
+  assert.match(no.shown[0].message, /the settings overlay nor the deployment's \.env/, "names what it could see");
   assert.match(no.shown[0].message, /service unit or its --env-setup script, is not visible here/);
   assert.equal(outNo.applied, false);
   assert.deepEqual(read(), {}, "declined: nothing written");

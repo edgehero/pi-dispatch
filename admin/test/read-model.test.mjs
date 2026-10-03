@@ -2654,7 +2654,7 @@ test("mergedDollarProblem: a window with no maxCostUsd in the MERGED overlay and
   assert.equal(mergedDollarProblem({}, {}, { deploymentDir: dir }), null, "nothing set");
   const pointed = mergedDollarProblem({ dailyCostUsd: "10" }, {}, { deploymentDir: dir });
   assert.equal(pointed.invalid, undefined, "the worker's unit or --env-setup script may hold the cap: never a refusal");
-  assert.match(pointed.warning, /^dailyCostUsd needs maxCostUsd.*Neither the settings overlay and the deployment's \.env sets maxCostUsd/);
+  assert.match(pointed.warning, /^dailyCostUsd needs maxCostUsd.*Neither the settings overlay nor the deployment's \.env sets maxCostUsd/);
   assert.match(pointed.warning, /service unit or its --env-setup script, is not visible here/);
   assert.match(mergedDollarProblem({}, { PI_WEEKLY_COST_USD: "50", PI_MAX_COST_USD: "" }, { deploymentDir: dir }).warning, /^weeklyCostUsd needs maxCostUsd/, "an empty variable is unset");
   const blind = mergedDollarProblem({ dailyCostUsd: "10" }, {}, { deploymentDir: null });

@@ -26,7 +26,9 @@ import { makeQueue, fleetQueueNames, discoverHostQueues, unionQueueNames } from 
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
-import { cancelHeldJob, listRuns, mergedRunsOn, readSettingsView, mapSchedulers, readTriggersWithInstructions, readPauseWindows, readScopedLimits, readStagedPackages } from "./read-model.mjs";
+import { cancelHeldJob, listRuns, mergedRunsOn, readSettingsView, mapSchedulers, readTriggersWithInstructions, readPauseWindows, readScopedLimits, readStagedPackages, scanRunRecords } from "./read-model.mjs";
+import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindowsSinceMs, renderDollarWindows } from "./dollar-windows.mjs";
+import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
@@ -238,6 +240,13 @@ async function heldJobs(redis: any) {
   return { rows: rows.slice(0, HELD_LIMIT), more: Math.max(0, rows.length - HELD_LIMIT), truncated: ids.length > HELD_HYDRATE_MAX };
 }
 
+/**
+ * How long the panel keeps one scan of the run records for the dollar windows (issue #501, part 7). A month window
+ * folds up to a month of records, which is a directory walk, and the panel refreshes every second: the counters are
+ * read every tick (they are what the next job is admitted against), the records' side at most this often.
+ */
+const DOLLAR_RECORDS_TTL_MS = 15_000;
+
 /** How long the panel waits on the registry before drawing the fleet it last knew. */
 const FLEET_READ_TIMEOUT_MS = 2_000;
 
@@ -255,6 +264,12 @@ export function createDashboardDeps(
     redisFn = makeRedisClient,
     readLiveHostsFn = readLiveHosts,
     discoverHostQueuesFn = discoverHostQueues,
+    // The env the deployment's dollar caps are read from (issue #501, part 7): the console's `deploymentEnv()`, whose
+    // pointer reads the deployment's `.env`. Empty by default, so a test or a caller that passes none sees the
+    // overlay's caps alone.
+    dollarEnvFn = () => ({}),
+    scanRecordsFn = scanRunRecords,
+    nowFn = () => Date.now(),
   }: any = {},
 ) {
   const queue = makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }));
@@ -301,6 +316,26 @@ export function createDashboardDeps(
       if (!pool.has(name)) pool.set(name, makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { name }));
     }
     return unionQueueNames(lastNames, existing).map((n) => pool.get(n));
+  };
+
+  // The last records scan for the dollar windows, `{ at, sinceMs, records }`, reused for DOLLAR_RECORDS_TTL_MS.
+  let dollarRecords: any = null;
+  const dollarWindows = async (overlay: any, limits: any[]) => {
+    const now = new Date(nowFn());
+    const { caps, jobCapMicros, invalid } = deploymentDollarCaps(overlay ?? {}, dollarEnvFn() ?? {});
+    const specs = dollarWindowSpecs({ caps, limits, now });
+    if (specs.length === 0) return invalid.length > 0 ? { rows: [], invalid } : null;
+    // The COUNTERS every tick, in ONE MGET on the held client: spent and held, what the worker admits against.
+    const counters = await redis.mget(...specs.map((s: any) => s.key)).then(
+      (values: any[]) => Object.fromEntries(specs.flatMap((s: any, i: number) => (values?.[i] === null || values?.[i] === undefined ? [] : [[s.key, Number(values[i])]]))),
+      (err: any) => ({ unreachable: err?.message ?? String(err) }),
+    );
+    const sinceMs = dollarWindowsSinceMs(specs, now);
+    if (!dollarRecords || dollarRecords.sinceMs !== sinceMs || now.getTime() - dollarRecords.at >= DOLLAR_RECORDS_TTL_MS) {
+      const scanned = scanRecordsFn({ logsDir: paths.logsDir, sinceMs, nowMs: now.getTime() });
+      dollarRecords = { at: now.getTime(), sinceMs, records: Array.isArray(scanned) ? scanned : [] };
+    }
+    return { rows: dollarWindowRows({ specs, counters, records: dollarRecords.records, jobCapMicros }), ...(invalid.length > 0 && { invalid }) };
   };
 
   return {
@@ -398,11 +433,17 @@ export function createDashboardDeps(
         return { rows, more: Math.max(0, Number(total) - rows.length) };
       })().catch((err: any) => ({ unreachable: err?.message ?? String(err) }));
 
+      // The dollar windows (issue #501, part 7): null when no dollar window is set, so a deployment without one
+      // renders exactly the panel it always did. Caught as a unit, like `held`.
+      const settings = readSettingsView({ settingsFile: paths.settingsFile });
+      const dollars = await dollarWindows((settings as any)?.overlay, limitRows).catch((err: any) => ({ rows: [], unreachable: err?.message ?? String(err) }));
+
       return {
         held,
         failed,
         scopedLimits,
         scopedBudget,
+        dollars,
         queue: { pausedState, pausedPartial, counts, workers, queues: queues.length, fleetDegraded },
         budget: { day: Number(dayRaw ?? 0), week: Number(weekRaw ?? 0), month: Number(monthRaw ?? 0), tokensToday: Number(tokenRaw ?? 0) },
         schedulers: mapSchedulers(schedulerList, Date.now()),
@@ -416,7 +457,7 @@ export function createDashboardDeps(
         runs: merged.runs,
         runHosts: merged.hosts,
         runMirror: merged.mirror,
-        settings: readSettingsView({ settingsFile: paths.settingsFile }),
+        settings,
         triggers: triggersView,
         triggerInstructions,
         pauseWindows: readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath }),
@@ -1283,6 +1324,9 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
   if (scopedText) sections.splice(2, 0, { title: "SCOPED LIMITS", lines: toLines(scopedText) });
   // Held jobs appear only when something is held, for the same reason: a section with no lines renders an
   // empty box, and a deployment that never waits must look exactly as it did before the feature existed.
+  // The dollar windows, after SPEND, only when one is set (issue #501, part 7).
+  const dollarText = renderDollarWindows(snapshot.dollars);
+  if (dollarText) sections.splice(2, 0, { title: "DOLLAR WINDOWS", lines: toLines(dollarText) });
   const heldText = renderHeldJobs({ held: snapshot.held });
   if (heldText) sections.push({ title: "HELD", lines: toLines(heldText) });
   const plain = [title];
@@ -1397,6 +1441,7 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
   const sections: any[] = [
     { key: "status", head: null, body: [statusHeader(snapshot.queue, inner, styler, snapshot.fetchedAt), ...delayedBreakdownLine(snapshot, inner, styler)] },
     { key: "spend", head: ["spend & limits", "jobs & tokens/day · s set"], body: spendLines(snapshot.budget, snapshot.settings, inner, styler, snapshot.fetchedAt), priority: 4, viewKey: "s" },
+    ...dollarSection(snapshot.dollars, inner, styler),
     { key: "triggers", head: ["triggers", `${trg.count} standing · a add · ↵ open`], body: trg.lines, priority: 3, viewKey: "tab" },
     { key: "pauses", head: ["pause windows", `${pw.count} · w manage`], body: pw.lines, priority: 1, viewKey: "w" },
     // Priority 0: the section an operator acts on least often from the panel folds FIRST under the
@@ -1432,6 +1477,53 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
     for (const l of s.body) lines.push(l);
   });
   return lines;
+}
+
+/**
+ * The dollar windows (issue #501, part 7), one row per ACTIVE window: the deployment's, then each scoped-limits row's
+ * (repo or folder, then model), each window day, week, month. Absent when no dollar window is set, so a deployment
+ * without one renders exactly the panel it always did. Numbers, fixed tokens and the operator's own scope and model
+ * names only: no record field that a job could have chosen reaches a row.
+ *
+ * Two sources, never blended (`dollar-windows.mjs`): the counter (spent and held, fleet-wide, what the next job is
+ * admitted against) and the run records this host can read (settled, how each run settled, boundExceeded). A row
+ * whose runs a record cannot name (a folder, a model) says `records n/a` rather than showing a sum of nothing.
+ */
+function dollarSection(dollars: any, inner: number, styler: any): any[] {
+  if (!dollars) return [];
+  const body: string[] = [];
+  if (dollars.unreachable) body.push(styler.cell(`dollar windows unreadable (${cellOf(dollars.unreachable)})`, inner, { color: "error" }));
+  // A dollar setting that does not parse: the worker refuses it, and the panel names the key rather than guess a cap.
+  if (Array.isArray(dollars.invalid) && dollars.invalid.length > 0) body.push(styler.cell(`not a dollar amount: ${dollars.invalid.join(", ")}`, inner, { color: "error" }));
+  const rows: any[] = Array.isArray(dollars.rows) ? dollars.rows : [];
+  for (const r of rows) body.push(dollarRow(r, inner, styler));
+  if (body.length === 0) return [];
+  return [{ key: "dollars", priority: 4, head: ["dollar windows", "spent+held / cap · settled from records"], body }];
+}
+
+/** `$1.20`: integer micro-dollars as dollars, through the worker's own formatter. `-` for a missing number. */
+function usd(micros: any): string {
+  return Number.isSafeInteger(micros) && micros >= 0 ? `$${formatMicros(micros)}` : "-";
+}
+
+function dollarRow(r: any, inner: number, styler: any): string {
+  const name = r.ledger === "deployment" ? "deployment" : r.ledger === "model" ? `model:${r.name ?? "-"}` : String(r.name ?? "-");
+  // Amber when FULL (`dollarWindowRows`): no job at the deployment's per-job cap fits, because a reservation adds
+  // that whole cap, even while the counter itself is still below the window.
+  const full = r.full === true;
+  const bits = [
+    styler.cell(r.window ?? "-", 6, { color: "muted" }) + styler.fg("accent", cellOf(name)),
+    styler.fg(full ? "warning" : "text", `${usd(r.counterMicros)}/${usd(r.capMicros)}${full ? " full" : ""}`),
+  ];
+  if (r.records) {
+    const b = r.records.basis ?? {};
+    const counts = ["metered", "floor", "refunded", "unreserved"].filter((k) => Number(b[k]) > 0).map((k) => `${b[k]} ${k}`);
+    bits.push(styler.fg("dim", `settled ${usd(r.records.settledMicros)} · ${r.records.runs} run${r.records.runs === 1 ? "" : "s"}${counts.length > 0 ? ` (${counts.join(", ")})` : ""}`));
+    bits.push(styler.fg(r.records.boundExceeded > 0 ? "warning" : "dim", `boundExceeded ${r.records.boundExceeded}`));
+  } else {
+    bits.push(styler.fg("dim", "records n/a"));
+  }
+  return fitLine(bits.join(styler.fg("dim", "  ")), inner, styler);
 }
 
 /** How many held rows the section shows before it stops and counts the rest. */
@@ -1787,7 +1879,11 @@ function triggerRow(raw: any, sel: boolean, inner: number, styler: any, sched: a
   const health = sched && (sched.overdueMs || (sched.stallMax > 0 && sched.stalls >= sched.stallMax))
     ? rowBadge("warning", true, sched.overdueMs ? "⚠ overdue" : "⚠ stalled")
     : null;
-  const badges = [pkgs, img, skl, ins, res, rep, sec, shot, health].filter((b): b is RowBadge => b !== null);
+  // The spend narrowings no tool can set (issues #501 and #502): `accent`, the colour of an override that NARROWS
+  // ([once], [image]), never amber. The model list is free text that may be clipped; the drill-in lists it whole.
+  const mdl = Array.isArray(t?.models) && t.models.length > 0 ? rowBadge("accent", false, "[models ", cellOf(t.models.join(", ")), "]") : null;
+  const cap = t?.maxCostUsd ? rowBadge("accent", false, "[max $", cellOf(t.maxCostUsd), "]") : null;
+  const badges = [pkgs, img, skl, ins, res, rep, sec, shot, mdl, cap, health].filter((b): b is RowBadge => b !== null);
   const match = matchColored(t, styler);
   return fitTriggerRow(`${cursor} ${badge} `, match, targetColored(t, styler), badges, inner, styler, rowFloorMatch(t, match, styler));
 }
@@ -2173,6 +2269,11 @@ function renderTriggerDetail(raw: any, inner: number, styler: any, sched: any = 
   out.push(kv("model", t.model ?? "deployment default", t.model ? "accent" : "dim"));
   if (typeof t.provider === "string" && t.provider !== "") out.push(kv("provider", t.provider, "accent"));
   if (Number.isInteger(t.maxTurns)) out.push(kv("maxTurns", String(t.maxTurns), "accent"));
+  // Issues #501 and #502: which models the jobs may call, in full, and the per-job dollar cap, each set by hand in
+  // the triggers file and by no tool. A row only when set, like provider and maxTurns above: absent, the jobs run
+  // under the deployment's list and cap, and a trigger that sets neither keeps exactly the pane it had.
+  if (Array.isArray(t.models) && t.models.length > 0) kvWrap("models", t.models.map((m: any) => cellOf(m)).join(", "), "accent");
+  if (t.maxCostUsd) out.push(kv("max cost", `$${cellOf(t.maxCostUsd)} per job`, "accent"));
   // A command trigger's full `/name args` line (issue #189): the list and header show the name only,
   // and this drill-in is where the args belong -- the reviewed file staged them, the operator's own
   // session shows them. Rendered only when armed, on both branches, because all four kinds can carry

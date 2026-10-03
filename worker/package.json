@@ -89,6 +89,7 @@
     "./budget": "./src/budget.mjs",
     "./pricing": "./src/pricing.mjs",
     "./money": "./src/money.mjs",
+    "./dollar-budget": "./src/dollar-budget.mjs",
     "./scheduler-stall-guard": "./src/scheduler-stall-guard.mjs",
     "./watch-closer": "./src/watch-closer.mjs"
   },

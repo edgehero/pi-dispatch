@@ -166,9 +166,14 @@ Three doors, same as quiet hours:
 - **The panel**: press `m` in `/dispatch` to add, edit or delete a limit through dialogs. The section
   shows each row's used/cap per window; `≤N at once` is configuration (per-scope in-flight lives inside
   the worker process and is not displayed anywhere).
-- **The tools**: `dispatch_limits` lists rows with their indexes and used counts;
+- **The tools**: `dispatch_limits` lists rows with their indexes and used counts, and for a dollar row each
+  window's cap and its counter (spent and held, in micro-dollars);
   `dispatch_limit_add` / `dispatch_limit_edit` / `dispatch_limit_delete` change them behind the same
-  operator confirm dialog as every config write.
+  operator confirm dialog as every config write. The add and edit tools take `dayUsd`, `weekUsd` and
+  `monthUsd` as decimal strings (`"2.50"`) and check them before they ask, with the worker's own rules. They
+  write version 1 until a row needs version 2, and drop back to version 1 when the last dollar row goes.
+- **The dollar windows** of every row, with the deployment's, are in the panel's DOLLAR WINDOWS section and in
+  `dispatch_costs` ([costs](costs.md#where-to-look)).
 - **By hand**: edit the file; the worker hot-reloads it.
 
 ## Caveats

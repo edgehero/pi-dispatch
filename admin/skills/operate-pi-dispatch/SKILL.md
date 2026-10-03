@@ -16,8 +16,11 @@ Observe (no approval needed):
 - `dispatch_runs` — recent run records (PII-free). Raw job logs are never available to tools.
 - `dispatch_costs` — cost analytics folded from the run history: window totals (`window` = `7d`/`30d`/`mtd`),
   daily buckets, per-flow and per-model rollups, subscription plan verdicts, provenance (`flow` filters to
-  one flow). Every dollar in the result is typed `{ usd, class, ... }` — quote the class with the number
+  one flow). Every dollar in the `fold` is typed `{ usd, class, ... }`: quote the class with the number
   (`metered` is measured, `estimated`/`seeded` are not), and never present an estimate as an exact spend.
+  When a dollar cap applies, a `dollars` block sits beside the fold: the dollar windows (each window's counter,
+  spent and held, against its cap, and what settled) and each run's `dollars`. Those amounts are integer
+  micro-dollars (1 USD = 1000000) with no class: they are the caps' own accounting.
   The operator sees the same fold drawn as charts on the insights page (`/dispatch insights
   [7d|30d|mtd]` writes and opens it), and `/dispatch insights whatif <provider/model> --flow <flow>`
   estimates what a flow would cost per run on another model's rates.
@@ -35,11 +38,16 @@ Start a run (paid, already gated producer-side):
 These tools change money-affecting configuration and **each one asks the operator to approve a confirmation
 dialog before it takes effect**:
 - `dispatch_set` — change a limit/setting (e.g. `dailyCap`, `weeklyCap`, `maxTurns`, `model`). Omit `value`
-  to unset.
+  to unset. The dollar caps are settings too: `maxCostUsd` (per job), `dailyCostUsd`, `weeklyCostUsd`,
+  `monthlyCostUsd` (e.g. key `dailyCostUsd`, value `"10"`). A dollar value is a plain decimal string (`"2.50"`,
+  at most 6 decimals, no exponent), checked before the confirm; a window needs a per-job cap, and the confirm
+  warns when none is visible.
 - `dispatch_trigger_add` / `dispatch_trigger_edit` / `dispatch_trigger_delete` — manage triggers.
   Both writers can set a trigger's `provider` and `model` (add also `maxTurns`), on any trigger kind. A
   malformed id is refused with the loader's own message before the confirm dialog. Neither can check that
-  the model exists: say so if asked.
+  the model exists: say so if asked. Neither can set `run.models` (which models a job may call) or
+  `run.maxCostUsd` (its per-job dollar cap): a call that carries one is refused, and an edit keeps the values
+  the entry has. The operator writes those by hand in the triggers file; `dispatch_triggers` shows them.
 - `dispatch_pause_add` / `dispatch_pause_edit` / `dispatch_pause_delete` — manage scheduled pause windows
   (per folder/repo "quiet hours": runs for a scope are deferred between certain times and auto-resume after;
   `dispatch_pauses` lists them with their index). `dispatch_pause_edit` is a partial change — pass the index
@@ -57,7 +65,9 @@ dialog before it takes effect**:
   reason `scope-cap`, never retried; `concurrent` defers the excess, never drops it; `dispatch_limits`
   lists them with their index and used counts). `dispatch_limit_edit` is a partial change — pass the index
   plus only the fields to alter. Scopes match exactly (a repo `owner/name` or an ABSOLUTE folder path, no
-  globs).
+  globs). Both writers also take dollar windows, `dayUsd`/`weekUsd`/`monthUsd`, as decimal strings (`"2.50"`);
+  a `model:<provider>/<model>` scope caps one model and takes only those three. A malformed amount is refused
+  before the confirm. Read `dispatch_costs` (`dollars.windows`) for what each dollar window holds now.
 
 Use them like this:
 

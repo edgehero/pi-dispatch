@@ -644,6 +644,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   false; print/headless). The operator-typed overlay CRUD and the confirm-gated tools reach the **same**
   validated, atomic `writeTriggers`/`writeSettings`. `dispatch_run` still takes **no spend-knob argument**
   (`model`/`maxTurns`/`dailyCap`/`concurrency`).
+  Since issue #501's part 7 the dollar caps have operator surfaces. The panel shows each ACTIVE dollar window
+  (the deployment's, then each scoped-limits dollar row) with its counter (spent and held) and, from the run
+  records, what settled, how each run settled (`metered`, `floor`, `refunded`, `unreserved`) and the
+  `boundExceeded` count; numbers and the operator's own scope and model names only. `dispatch_costs` returns the
+  same windows and each run's `dollars`; `dispatch_limits` gives each row its dollar windows with their counters.
+  The scoped-limit writers take `dayUsd`, `weekUsd` and `monthUsd`, and `dispatch_set` the four dollar keys, each
+  judged by the worker's own parser before the confirm. Neither trigger write tool can set a trigger's
+  `run.maxCostUsd` or `run.models`; the trigger read shows both.
   Since issue #92 the extension also carries the **first-run path**: `/dispatch setup`
   (operator-typed only — deliberately no model-callable tool; `DES-FIRST-RUN-SETUP-WIZARD`), a
   detection tree on bare `/dispatch` that offers setup **only** when no deployment exists anywhere
@@ -661,7 +669,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   confirm — so a prompt-injected session cannot raise the cap without a human keypress it cannot forge.
   The three dollar windows (`dailyCostUsd`, `weeklyCostUsd`, `monthlyCostUsd`) are settings keys too, behind the
   same operator-typed or confirm-gated write, and are enforced since issue #501's part 3. A trigger's
-  `run.maxCostUsd` is not settable by any tool.
+  `run.maxCostUsd` and `run.models` are not settable by any tool, confirm or no confirm: each decides what the
+  trigger's jobs can spend or reach, so removing or raising one is a widening, and it is written by hand in the
+  reviewed triggers file. A tool call that carries either is REFUSED rather than dropped, because a dropped field
+  would let the model report a narrowing that never landed.
   `CONST-BUDGET-BEFORE-TOKENS`'s ordering is untouched (the cap is still checked before tokens; only its
   value changes, under human approval); `CONST-TRIGGER-AUTHOR-GATE`'s webhook author-gating is untouched (the
   confirm is the human approval for a locally-configured trigger). `dispatch_run` takes no spend-knob argument
@@ -697,7 +708,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   issue #96 made this the default route); given a configured deployment whose queue is down, then the
   panel opens with the unreachable banner and never the wizard; given a second pi startup after the
   nudge fired once, then no nudge renders; given a deployment whose installed runtime is older than
-  the console's pin, then bare `/dispatch` surfaces one skew notice pointing at `/dispatch setup`.
+  the console's pin, then bare `/dispatch` surfaces one skew notice pointing at `/dispatch setup`;
+  given a trigger write tool call carrying `maxCostUsd` or `models`, then it is refused before any confirm and
+  nothing is written, and given an approved edit of a trigger that has them, then they are written back
+  unchanged; given a malformed dollar amount for `dispatch_set` or a scoped-limit writer, then it is refused before
+  the confirm, naming the key and not the value; given a scoped-limit write whose rows carry no dollar field and
+  no model row, then the file is written as version 1; given a dollar window, then the panel and
+  `dispatch_costs` show its counter as spent and held, never the records' sum, and a window whose counter cannot
+  be read shows no number rather than 0.
 
 ## REQ-AI-TRIGGERED-RUNS
 
@@ -826,8 +844,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   naming one folder, by resolved path within one worker process, shall never run concurrently — including
   two occurrences of one cron trigger — with no configuration, no tool, and no off-switch. Caps and
   concurrency shall be operator-editable live via the confirm-gated tools and the `/dispatch` panel
-  (`INT-SCOPED-LIMITS-FILE-CONTRACT`; that admin surface lands in a later slice of issue #242 — the
-  file-and-watcher half is live now); the mutex alone is code.
+  (`INT-SCOPED-LIMITS-FILE-CONTRACT`); the mutex alone is code.
 - **Dollar windows** (issues #501 part 5 and #502 part 6, file version 2): a repo or folder row may also cap
   what the scope's jobs spend per day, week and month in dollars (`dayUsd`, `weekUsd`, `monthUsd`), and a
   `model:<provider>/<model>` row caps what every job spends on that model, across every scope. Each is reserved
@@ -1081,8 +1098,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   a subscription is saving money, are exactly the decisions this repo already got burned making from
   unmeasured guesses — the `$0.5–$5/job` non-requirement is *recorded as unmeasured* at `OQ-002` — so the
   screen's first duty is not more numbers but honest ones: the class system exists so that no rendering
-  path, human or model-facing (`dispatch_costs` carries the class on every value), can launder an
-  estimate into a fact. Attribution and re-pricing are possible at all because the ledger records what
+  path, human or model-facing (`dispatch_costs` carries the class on every value of its `fold`), can launder an
+  estimate into a fact. The `dollars` block beside the fold (issue #501, part 7) is not analysis: it holds the
+  dollar caps' enforcement amounts, integer micro-dollars read from the window counters and the run records'
+  `dollars`, facts with no estimate among them, so it carries no class. Attribution and re-pricing are possible at all because the ledger records what
   each model spent (`REQ-TOKEN-ACCOUNTING-AND-CAPS`) and pricing stays pi-ai's
   (`INT-PRICING-EXPORT-CONTRACT`) — pi-dispatch still owns no rate table.
 - **Scope**: Read-only over the run history and operator declarations; bounded by retention and the
@@ -1099,8 +1118,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `insights whatif` on a flow with ledgered history, then the estimate derives from repriced recorded
   quads, is marked estimated, names its rates version, and reports coverage; given a flow with no
   ledgered history, then the only offer is the labeled `unmeasured (OQ-002)` band; given
-  `dispatch_costs`, then every monetary value in the returned JSON
-  carries its `class`; given a run recorded under an older pi-ai pin, then it is counted as
+  `dispatch_costs`, then every monetary value in the returned `fold`
+  carries its `class`, and its `dollars` block (present when a dollar window is set, a dollar setting cannot be
+  read, or a run in the window carries `dollars`) holds integer micro-dollars only; given a run recorded under an older pi-ai pin, then it is counted as
   rates-drifted, and its stored cost is never rewritten; given a sparse window, then plan proration
   denominates on the **requested** window, never the observed run span; given a run whose ledger folded
   rows into `other` past the meter's row cap (`usage.truncated`), then the provenance line counts it as
@@ -2846,6 +2866,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-03 | Issue #501, part 7 (the operator surfaces). **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the Statement says what the panel, `dispatch_costs`, `dispatch_limits`, the scoped-limit writers and `dispatch_set` now do with the dollar caps (the counter as spent and held beside the records' settled amount, basis counts and `boundExceeded`; dollar fields judged before the confirm); the Why says neither `run.maxCostUsd` nor `run.models` is settable by any tool, and why a call carrying one is refused rather than dropped; the Acceptance gains six clauses for those. Review round 1 (PR #550): the trigger tools refuse a near miss of either field too (the loader's own sweep, now exported as `runModelFieldNearMiss`); with no dollar setting the tool results are byte-identical to before; a dollar field the model sends as a number reaches the tool as a string through pi's own validation and is judged by its value. The tool list is UNCHANGED (no tool was added or removed; the wiring scan still holds). **`REQ-COST-ANALYTICS` AMENDED** (PR #550's review): the class rule is scoped to the `fold`; the Why and the Acceptance say the `dollars` block beside it holds the caps' enforcement amounts in integer micro-dollars with no class, present when a dollar window is set, a dollar setting cannot be read, or a run in the window carries `dollars`. **`REQ-SCOPED-LIMITS` AMENDED**, one stale clause dropped: the admin surface it said "lands in a later slice of issue #242" has landed; the file contract is the same, and the tools now write the fields it already accepted. **`REQ-SPEND-CAPS-MULTI-WINDOW` UNCHANGED, checked**: enforcement did not move. **`REQ-MODEL-POLICY` UNCHANGED, checked**: `run.models` was already tool-proof by omission; it is now refused by name. **Code evidence**: admin/src/index.ts -> refuseWideningFields, dollarFieldsOf, dispatch_set; admin/src/dollar-windows.mjs; admin/src/dashboard.ts -> dollarSection. |
 | 2026-10-03 | Issue #545 (PR #555's review). **`REQ-RESURRECTABLE-SANDBOX` AMENDED**, one clause in Why: stdin is `ignore`, or on an image declaring `exitAuth` a pipe the worker writes one key line to and closes at once (`INT-RUNNER-EXIT-CODE-PROTOCOL`), and never a TTY. Nothing can be typed into a live run either way, so the load-bearing fact is UNCHANGED; only its wording was too narrow. |
 | 2026-10-03 | Issue #543 (PR #547's review, round 2). **`REQ-CRON-SCHEDULED-JOBS` AMENDED**, one acceptance line: an unregistered command is refused before the job's prompt is sent, no longer "before any model call", because a call an extension made while it loaded may already have spent; the exit line carries it. |
 | 2026-10-02 | Issue #539, follow-ups from PR #536's review. **`REQ-MODEL-POLICY` AMENDED**, Scope and Acceptance, two overstatements corrected. "A file pi would drop is refused" held only for a job needing an overlay model: the rule now refuses EVERY job while the file is one pi drops, whatever broke it (a schema error, a block comment, a truncation, a UTF-16 save, an empty file, a directory), until the operator fixes it, since pi drops every entry with the file and would run even a builtin model against its provider's public endpoint. PR #546's review tried reading which providers a broken file names, and each round found a case that reading missed, so the simpler rule was chosen. "A transient read is retried as infra" is narrowed to a job that needs the overlay, an overlay model or (since #502 part 4) a list whose fallbacks it could change; a job of builtin models only with no list runs. **Code evidence**: worker/src/models-json.mjs -> parseModelsJson, stripJsonComments; worker/src/model-catalog.mjs -> checkModelsKnown; worker/src/doctor.mjs; worker/test/model-catalog.test.mjs; worker/test/models-json.test.mjs; worker/test/doctor.test.mjs. |
