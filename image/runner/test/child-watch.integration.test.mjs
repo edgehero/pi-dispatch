@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 // Pure: no static pi import in their module graph, so they load unconditionally and the gate below applies to pi only.
 import { createChildWatch, linuxProc } from "../src/child-watch.mjs";
 import { COST_CAP, TOKEN_BUDGET } from "../src/outcome.mjs";
-import { CHILD_LEDGER_NAME, createUsageMeter, STOP_MESSAGES } from "../src/usage-meter.mjs";
+import { CHILD_LEDGER_NAME, childLedger, createUsageMeter, STOP_MESSAGES, writeFileAtomic } from "../src/usage-meter.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
@@ -176,11 +176,14 @@ test("the same under a dollar cap: the child judges against SPENT, the parent st
  */
 function ownProc(pids) {
 	const real = linuxProc();
-	return { scan: () => real.scan().filter((pid) => pids.has(pid)), alive: (pid) => real.alive(pid) };
+	return { scan: () => real.scan().filter((pid) => pids.has(pid)), alive: (pid) => real.alive(pid), cpuMs: (pid) => real.cpuMs(pid), environHas: (pid, entry) => real.environHas(pid, entry) };
 }
 
-/** A pi child that reports through no ledger: its spawner cleared the environment (no preload, no ledger variable). */
-async function unmeteredChild({ maxTokens }) {
+/**
+ * A pi child that reports through no ledger: its spawner cleared the environment (no preload, no ledger variable).
+ * With `forge`, the spawner also writes a `done` ledger with zeros under the child's pid, the moment it has the pid.
+ */
+async function unmeteredChild({ maxTokens, forge = false }) {
 	const w = world();
 	const pids = new Set();
 	const meter = createUsageMeter({ maxTokens, rootSessionId: "root" });
@@ -191,6 +194,7 @@ async function unmeteredChild({ maxTokens }) {
 	const done = rpcChild(w, { env, prompts: [], onSpawn: (spawned) => {
 		child = spawned;
 		pids.add(spawned.pid);
+		if (forge) writeFileAtomic({ dir: w.ledger, name: `${spawned.pid}.0123456789abcdef.json`, text: JSON.stringify(childLedger({ state: "done" })) });
 	} });
 	// The child waits on its stdin; three ticks a little apart, the way the meter's interval runs them.
 	for (let tick = 0; tick < 3; tick += 1) {
@@ -200,7 +204,7 @@ async function unmeteredChild({ maxTokens }) {
 	child.stdin.end();
 	const result = await done;
 	assert.equal(result.code, 0, result.stderr);
-	assert.deepEqual(readdirSync(w.ledger).filter((file) => CHILD_LEDGER_NAME.test(file)), [], "it wrote no ledger");
+	assert.deepEqual(readdirSync(w.ledger).filter((file) => CHILD_LEDGER_NAME.test(file)).length, forge ? 1 : 0, "it wrote no ledger of its own");
 	return { meter, logged, teardown: hook.teardown(), pid: result.pid };
 }
 
@@ -208,8 +212,17 @@ test("a pi child whose spawner cleared the environment (`env: {}`) is unmetered,
 	const { meter, logged, teardown, pid } = await unmeteredChild({ maxTokens: 1_000_000 });
 	assert.equal(meter.state.stopReason, TOKEN_BUDGET);
 	assert.equal(meter.snapshot().unmeteredChildren, 1);
-	assert.deepEqual(logged.filter((line) => line.event === "unmetered_child"), [{ event: "unmetered_child", fields: { why: "no-ledger", pid, unmetered: 1 } }]);
+	// Its environment, read at the first tick, already says it is not this job's child.
+	assert.deepEqual(logged.filter((line) => line.event === "unmetered_child"), [{ event: "unmetered_child", fields: { why: "environ", pid, unmetered: 1 } }]);
 	assert.deepEqual(teardown, { distinct: 1, peak: 1, unmetered: 1 });
+});
+
+test("a forged `done` ledger named after an env-scrubbed pi child does not hide it: its environment lacks this job's directory (issue #500)", { skip: linuxOnly }, async () => {
+	const { meter, logged, teardown, pid } = await unmeteredChild({ maxTokens: 1_000_000, forge: true });
+	assert.equal(meter.state.stopReason, TOKEN_BUDGET);
+	assert.equal(meter.snapshot().unmeteredChildren, 1);
+	assert.deepEqual(logged.filter((line) => line.event === "unmetered_child").map((line) => line.fields), [{ why: "environ", pid, unmetered: 1 }]);
+	assert.equal(teardown.unmetered, 1);
 });
 
 test("an uncapped job does not stop on an unmetered pi child, and records it as a floor (issue #500)", { skip: linuxOnly }, async () => {
@@ -240,5 +253,5 @@ test("a metered pi child seen on every tick is never counted unmetered (issue #5
 	assert.deepEqual(teardown, { distinct: 1, peak: 1, unmetered: 0 });
 	assert.equal(meter.state.stopReason, null);
 	assert.deepEqual([meter.snapshot().childTotal, meter.snapshot().childProcesses], [1554, 1]);
-	assert.equal(existsSync(w.ledger), false, "removed after the final fold");
+	assert.equal(existsSync(join(w.ledger, "STOP")), true, "the directory and its STOP stay after teardown");
 });

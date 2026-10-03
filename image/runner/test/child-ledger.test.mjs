@@ -37,7 +37,7 @@ const row = (provider, model, fields = {}) => ({ provider, model, calls: 0, inpu
 function ledger({ calls = 1, each = 10, cost = 0.5, unresolved = 0, state = "running", metered = true, extra = {} } = {}) {
 	const rows = calls === 0 ? [] : [row("anthropic", "claude-x", { calls, input: calls * each, total: calls * each, cost: calls * cost })];
 	return {
-		v: 1,
+		v: 2,
 		state,
 		metered,
 		totals: { input: calls * each, output: 0, total: calls * each, cost: calls * cost, calls: calls + unresolved, unresolved, unpriced: 0, sessions: 1 },
@@ -46,6 +46,10 @@ function ledger({ calls = 1, each = 10, cost = 0.5, unresolved = 0, state = "run
 		inflightMicros: unresolved * 1000,
 		costRefused: 0,
 		modelRefused: 0,
+		boundExceeded: 0,
+		costUnanswered: 0,
+		longContext: 0,
+		costUnjudged: 0,
 		...extra,
 	};
 }
@@ -139,7 +143,9 @@ test("parseChildLedger refuses the whole file for any one bad part", () => {
 	const bad = {
 		"not json": "{",
 		"an array": "[]",
-		"v 2": json({ ...good, v: 2 }),
+		"v 1 (before the floor counters)": json({ ...good, v: 1 }),
+		"v 3": json({ ...good, v: 3 }),
+		"a floor counter missing": json({ ...good, costUnanswered: undefined }),
 		"an unknown state": json({ ...good, state: "stopped" }),
 		"metered as a string": json({ ...good, metered: "true" }),
 		"no totals": json({ ...good, totals: undefined }),
@@ -278,7 +284,7 @@ test("a child meter's own ledger round-trips through the fold, and the parent's 
 	child.observe({ result: () => new Promise(() => {}) }, { sessionId: "c", provider: "anthropic", modelId: "claude-x" });
 	await new Promise((resolve) => setImmediate(resolve));
 	const { metered, rootTotal, otherTotal, looseTotal, ...totals } = child.snapshot();
-	const text = json({ v: 1, state: "running", metered, totals, rows: child.rows(), spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0 });
+	const text = json({ v: 2, state: "running", metered, totals, rows: child.rows(), spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, longContext: 0, costUnjudged: 0 });
 	const result = fold(fakeFs({ [NAME_A]: text }));
 	assert.equal(result.unmetered, 0, "the meter's own snapshot and rows() make a ledger the fold accepts");
 	const parent = createUsageMeter({ maxTokens: null, rootSessionId: "p" });
@@ -308,7 +314,7 @@ test("a child writing CHILD_LEDGER_ROWS worst-case rows stays under the 64 KiB r
 		cost: longest,
 		unpriced: Number.MAX_SAFE_INTEGER,
 	}));
-	const text = json({ v: 1, state: "running", metered: true, totals: { input: longest, output: longest, total: longest, cost: longest, calls: Number.MAX_SAFE_INTEGER, unresolved: Number.MAX_SAFE_INTEGER, unpriced: Number.MAX_SAFE_INTEGER, sessions: Number.MAX_SAFE_INTEGER }, rows, spentMicros: Number.MAX_SAFE_INTEGER, inflightMicros: Number.MAX_SAFE_INTEGER, costRefused: Number.MAX_SAFE_INTEGER, modelRefused: Number.MAX_SAFE_INTEGER });
+	const text = json({ v: 2, state: "running", metered: true, totals: { input: longest, output: longest, total: longest, cost: longest, calls: Number.MAX_SAFE_INTEGER, unresolved: Number.MAX_SAFE_INTEGER, unpriced: Number.MAX_SAFE_INTEGER, sessions: Number.MAX_SAFE_INTEGER }, rows, spentMicros: Number.MAX_SAFE_INTEGER, inflightMicros: Number.MAX_SAFE_INTEGER, costRefused: Number.MAX_SAFE_INTEGER, modelRefused: Number.MAX_SAFE_INTEGER, boundExceeded: Number.MAX_SAFE_INTEGER, costUnanswered: Number.MAX_SAFE_INTEGER, longContext: Number.MAX_SAFE_INTEGER, costUnjudged: Number.MAX_SAFE_INTEGER });
 	assert.ok(Buffer.byteLength(text) <= CHILD_LEDGER_MAX_BYTES, `${Buffer.byteLength(text)} bytes`);
 	assert.ok(CHILD_LEDGER_ROWS <= CHILD_LEDGER_MAX_ROWS);
 });
@@ -332,7 +338,7 @@ function forged({ rows, calls, unresolved = 0 }) {
 	const t = { input: 0, output: 0, total: 0, cost: 0 };
 	for (const r of rows) for (const k of Object.keys(t)) t[k] += r[k];
 	const settled = rows.reduce((sum, r) => sum + r.calls, 0);
-	return { v: 1, state: "running", metered: true, totals: { ...t, calls: calls ?? settled + unresolved, unresolved, unpriced: 0, sessions: 1 }, rows, spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0 };
+	return { v: 2, state: "running", metered: true, totals: { ...t, calls: calls ?? settled + unresolved, unresolved, unpriced: 0, sessions: 1 }, rows, spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, longContext: 0, costUnjudged: 0 };
 }
 const FORGED_A = "900.aaaaaaaaaaaaaaaa.json";
 const FORGED_B = "901.bbbbbbbbbbbbbbbb.json";
@@ -441,13 +447,17 @@ test("a forged done with unchanged numbers cannot freeze a live child's ledger (
 });
 
 test("SPENT: the parent's spend plus each ledger's spent and in-flight, and a child's external spend excludes its own", () => {
-	const fs = fakeFs({ [NAME_A]: json({ ...ledger({ calls: 1 }), spentMicros: 300, inflightMicros: 50 }), [NAME_B]: json({ ...ledger({ calls: 1 }), spentMicros: 1000, inflightMicros: 0 }) });
+	const fs = fakeFs({ [NAME_A]: json({ ...ledger({ calls: 1, cost: 0.0001 }), spentMicros: 300, inflightMicros: 50 }), [NAME_B]: json({ ...ledger({ calls: 1, cost: 0.0001 }), spentMicros: 1000, inflightMicros: 0 }) });
 	const spent = spentFile(fold(fs), 2000);
 	assert.deepEqual(spent, { v: 1, total: 3350, byLedger: { [NAME_A]: 350, [NAME_B]: 1000 } });
 	const read = JSON.parse(JSON.stringify(spent));
 	assert.equal(externalFor(read, NAME_A), 3000, "the rest of the job, not counting itself twice");
 	assert.equal(externalFor(read, NAME_B), 2350);
 	assert.equal(externalFor(read, "999.0000000000000000.json"), 3350, "a child the parent has not folded yet carries no part");
+	// A ledger whose metered cost is above its guard's spend (a child whose spawner dropped its cost cap: no guard, so
+	// spentMicros 0) is charged its cost (issue #500 part E's review).
+	const unguarded = spentFile(fold(fakeFs({ [NAME_A]: json({ ...ledger({ calls: 1, cost: 0.004 }), spentMicros: 0, inflightMicros: 7 }) })), 0);
+	assert.deepEqual(unguarded, { v: 1, total: 4007, byLedger: { [NAME_A]: 4007 } });
 	for (const bad of [null, [], { v: 2, total: 1, byLedger: {} }, { v: 1, total: -1, byLedger: {} }, { v: 1, total: 1.5, byLedger: {} }, { v: 1, total: 5, byLedger: [] }, { v: 1, total: 5, byLedger: { [NAME_A]: 9 } }, { v: 1, total: 5, byLedger: { [NAME_A]: "1" } }]) {
 		assert.equal(externalFor(bad, NAME_A), Infinity, JSON.stringify(bad));
 	}

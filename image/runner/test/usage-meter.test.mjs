@@ -1787,12 +1787,14 @@ test("setChildren saturates a number it cannot carry at MAX_SAFE_INTEGER, never 
 	for (const r of meter.usageSnapshot().models) for (const [key, value] of Object.entries(r)) if (typeof value === "number") assert.ok(Number.isFinite(value), `${key}: no Infinity reaches the exit line as null`);
 });
 
-test("setChildren keeps a high-water mark: a fold with less never lowers the totals or a row, but unresolved may fall", () => {
+test("setChildren keeps a high-water mark: a fold with less never lowers the totals or a row, but unresolved and unmetered follow the fold", () => {
 	const meter = createUsageMeter({ maxTokens: 1000 });
 	meter.setChildren(childFold({ processes: 2, unmetered: 1, totals: { input: 900, total: 900, cost: 5, calls: 3, unresolved: 1, sessions: 1 }, rows: [ledgerRow("p", "m", { calls: 2, input: 900, total: 900, cost: 5 })] }));
 	meter.setChildren(childFold({ processes: 0, unmetered: 0 }));
 	const snap = meter.snapshot();
-	assert.deepEqual([snap.total, snap.cost, snap.calls, snap.unresolved, snap.childProcesses, snap.unmeteredChildren], [900, 5, 3, 0, 2, 1]);
+	// unmetered follows the fold (issue #500 part E's review): the children hook keeps that count itself, and may
+	// un-count a child that was slow to start.
+	assert.deepEqual([snap.total, snap.cost, snap.calls, snap.unresolved, snap.childProcesses, snap.unmeteredChildren], [900, 5, 3, 0, 2, 0]);
 	assert.deepEqual(meter.usageSnapshot().models.map((row) => [row.model, row.total, row.cost]), [["m", 900, 5]]);
 });
 

@@ -501,12 +501,12 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   constraint that ships unenforced is worse than an honest open risk — it teaches readers that the
   constitution is aspirational, which corrodes every other entry in it. The same reasoning that put
   `OQ-004` here rather than in `constitution.md`.
-- **What detection ships today**: a Linux-only child-process sampler (`/proc/self/task/*/children`),
-  sampled on the meter's re-arm tick. Its counts are reported nowhere: `usage_meter_teardown` carries only
-  `rearms`, `apis` and `rearmMs` (measured 2026-10-03; this row used to say the counts were logged at
-  teardown). It is purely diagnostic. It degrades to nothing off Linux, swallows every error, and can never
-  fail a job. It would detect only that a job **went wide**, never what that went-wide cost. Naming a number
-  it cannot know would be worse than reporting none.
+- **What detection ships today** (corrected 2026-10-03, issue #500 part E: this bullet described the diagnostic
+  sampler, which the runner no longer uses). The runner's children hook (`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`)
+  folds every pi child's ledger into the job's totals and, on Linux, scans `/proc` for pi processes that report
+  through no ledger. Such a child is counted in `unmeteredChildren` and, under any policy, STOPS the job (`cost-cap`,
+  else `token_budget`, else `model-not-allowed`): detection can now fail a job, by design. The teardown line carries
+  `distinct`, `peak` and `unmetered`. The rest of this row is re-decided in part F.
 - **What would close it**: a container-level egress proxy that **terminates TLS** and accounts provider
   traffic per container rather than per process. Reading usage off a subprocess needs to read its HTTP, and
   reading its HTTP needs TLS termination; there is no cheaper version of this for **accounting**. Worth
@@ -1876,3 +1876,4 @@ adversarial passes did.
 | 2026-10-03 | Issue #500, part 1, after review. **`OQ-011` AMENDED, its measurement notes narrowed to the evidence.** M3 and M4 now name the two rpc entry points (`./rpc-entry` and `dist/rpc-entry.js`, title `pi-rpc`) that the preload and the detector must also cover, and the guard a preload needs because `module.registerHooks` is absent before Node 22.15. M4 says the cmdline after `setupCli` is `pi` padded with NUL bytes. M7 says three subcommands were run and five read from the code. M3 says which CLI variants each run covered. No decision moves. |
 | 2026-10-03 | Issue #500, part 1, second review. **`OQ-011` AMENDED, wording only**: M4 says the `pi-rpc` title is read from the code and seen on macOS, not yet read from a Linux `/proc`; the corrected and measured paragraphs are rewrapped. No fact or decision moves. |
 | 2026-10-03 | Issue #500, part D. **`OQ-011` AMENDED**, one note under M1: the nested runner no longer re-runs the job. It runs as the pi CLI, metered into the job runner's ledger directory, and exits 2 when that directory is missing. Status stays ACCEPTED RISK until the rest of #500 re-decides the row. |
+| 2026-10-03 | Issue #500, part E. **`OQ-011` CORRECTED**, its What detection ships today bullet: the diagnostic sampler it described is replaced by the runner's children hook, which folds child ledgers and, on Linux, counts a pi child with no ledger as unmetered and stops a job under any policy, so "can never fail a job" no longer holds. Status UNCHANGED; the row is re-decided in part F. |

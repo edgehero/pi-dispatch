@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createChildWatch, isPiProcess, linuxProc, NO_LEDGER_TICKS, STARTING_GRACE_MS } from "../src/child-watch.mjs";
+import { CMDLINE_BYTES, createChildWatch, isPiProcess, linuxProc, NO_LEDGER_TICKS, PF_FORKNOEXEC, STARTING_GRACE_MS } from "../src/child-watch.mjs";
 import { COST_CAP, MODEL_NOT_ALLOWED, TOKEN_BUDGET } from "../src/outcome.mjs";
-import { createPolicyGuard, createUsageMeter, foldChildLedgers, writeFileAtomic } from "../src/usage-meter.mjs";
+import { childLedger, CHILD_LEDGER_MAX_FILES, createCostGuard, createPolicyGuard, createUsageMeter, foldChildLedgers, writeFileAtomic } from "../src/usage-meter.mjs";
+import { dollarSettlement } from "../../../worker/src/dollar-budget.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
@@ -17,18 +18,23 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 const row = (provider, model, fields = {}) => ({ provider, model, calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 0, cost: 0, unpriced: 0, ...fields });
 
 /** A well-formed ledger: `calls` settled calls of `each` tokens on one pair, plus `unresolved` calls in flight. */
-function ledger({ state = "running", metered = true, calls = 1, each = 100, provider = "fake", model = "m1", unresolved = 0, spentMicros = 0, inflightMicros = 0, costRefused = 0, modelRefused = 0 } = {}) {
-	const rows = calls === 0 ? [] : [row(provider, model, { calls, input: calls * each, total: calls * each, cost: calls * 0.001 })];
+function ledger({ state = "running", metered = true, calls = 1, each = 100, provider = "fake", model = "m1", unresolved = 0, spentMicros = 0, inflightMicros = 0, costRefused = 0, modelRefused = 0, cost = 0.001, floor = {} } = {}) {
+	const rows = calls === 0 ? [] : [row(provider, model, { calls, input: calls * each, total: calls * each, cost: calls * cost })];
 	return {
-		v: 1,
+		v: 2,
 		state,
 		metered,
-		totals: { input: calls * each, output: 0, total: calls * each, cost: calls * 0.001, calls: calls + unresolved, unresolved, unpriced: 0, sessions: calls === 0 ? 0 : 1 },
+		totals: { input: calls * each, output: 0, total: calls * each, cost: calls * cost, calls: calls + unresolved, unresolved, unpriced: 0, sessions: calls === 0 ? 0 : 1 },
 		rows,
 		spentMicros,
 		inflightMicros,
 		costRefused,
 		modelRefused,
+		boundExceeded: 0,
+		costUnanswered: 0,
+		longContext: 0,
+		costUnjudged: 0,
+		...floor,
 	};
 }
 
@@ -39,10 +45,19 @@ function writeLedger(dir, pid, body, nonce = "0123456789abcdef") {
 	return name;
 }
 
-/** A process table: `live` the pi pids scan() finds, `alive` the pids that exist (live ones included). */
-function fakeProc({ live = [], alive = [] } = {}) {
-	const table = { live: [...live], alive: new Set([...live, ...alive]) };
-	return { table, scan: () => [...table.live], alive: (pid) => table.alive.has(pid) };
+/**
+ * A process table: `live` the pi pids scan() finds, `alive` the pids that exist (live ones included), `cpu` a pid's CPU
+ * time in ms (0 unless set), `environ` a pid's answer to environHas (true unless set; null for unreadable).
+ */
+function fakeProc({ live = [], alive = [], cpu = {}, environ = {} } = {}) {
+	const table = { live: [...live], alive: new Set([...live, ...alive]), cpu: { ...cpu }, environ: { ...environ } };
+	return {
+		table,
+		scan: () => [...table.live],
+		alive: (pid) => table.alive.has(pid),
+		cpuMs: (pid) => table.cpu[pid] ?? 0,
+		environHas: (pid) => (Object.hasOwn(table.environ, pid) ? table.environ[pid] : true),
+	};
 }
 
 /** A hook on a fresh directory, with its log. */
@@ -82,7 +97,7 @@ test("with no children the exit line is the one it was, plus the three child key
 	assert.deepEqual(Object.keys(early.snapshot()).slice(-3), ["childTotal", "childProcesses", "unmeteredChildren"]);
 	assert.deepEqual(hook.teardown(), { distinct: null, peak: null, unmetered: 0 }, "no detector off Linux");
 	assert.equal(watched.state.stopReason, null);
-	assert.equal(existsSync(dir), false, "the ledger directory is removed after the final fold");
+	assert.deepEqual(stopOf(dir), { v: 1, reason: TOKEN_BUDGET }, "the directory and its STOP stay: the container ends right after");
 });
 
 test("each tick folds the ledgers into the meter: totals, rows and the three keys (issue #500)", () => {
@@ -150,7 +165,7 @@ test("a child's costRefused is cost-cap under a dollar cap; with no dollar cap i
 	assert.equal(uncapped.state.stopReason, null);
 });
 
-test("under a model list: a child row off the PARENT's list, a model-less child row, or a child's modelRefused is model-not-allowed (issue #500)", () => {
+test("under a model list: a named child row off the PARENT's list, or a child's modelRefused, is model-not-allowed; a model-less row is the child guard's to judge (issue #500)", () => {
 	const listed = [{ provider: "fake", model: "m1" }];
 	for (const [label, body, want] of [
 		["a listed row", ledger({ provider: "fake", model: "m1" }), null],
@@ -165,6 +180,8 @@ test("under a model list: a child row off the PARENT's list, a model-less child 
 		assert.equal(meter.state.stopReason, want, label);
 		if (want !== null) assert.deepEqual(stopOf(dir), { v: 1, reason: want });
 	}
+	// A model-less row: an allowed model whose id the row rule refuses (a long ARN) lands there, so it is not judged by
+	// the parent. The child's own guard judged the call against the list it inherited.
 	const meter = createUsageMeter({ maxTokens: null, allowedModels: listed, rootSessionId: "root" });
 	const { dir, hook } = watch({ meter });
 	const modelless = ledger({ calls: 0 });
@@ -172,7 +189,90 @@ test("under a model list: a child row off the PARENT's list, a model-less child 
 	modelless.rows = [row(null, null, { calls: 1, input: 10, total: 10 })];
 	writeLedger(dir, 5, modelless);
 	hook.sample();
-	assert.equal(meter.state.stopReason, MODEL_NOT_ALLOWED, "a call with no model cannot be on the list");
+	assert.equal(meter.state.stopReason, null);
+});
+
+test("a child's modelRefused with no list on the parent stops nothing: that list was the spawner's, for that child (issue #500)", () => {
+	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
+	const { dir, hook } = watch({ meter });
+	writeLedger(dir, 5, ledger({ calls: 0, modelRefused: 2 }));
+	hook.sample();
+	assert.equal(meter.state.stopReason, null);
+});
+
+test("the cost stop is judged on SETTLED spend: in-flight bounds past the cap do not stop the job (issue #500)", () => {
+	const meter = createUsageMeter({ maxTokens: null, maxCostMicros: 1_000_000, rootSessionId: "root" });
+	const { dir, hook } = watch({ meter, guard: () => ({ spend: () => ({ spentMicros: 900_000, inflightMicros: 50_000 }) }) });
+	writeLedger(dir, 9, ledger({ calls: 0, spentMicros: 90_000, inflightMicros: 200_000 }));
+	hook.sample();
+	assert.equal(meter.state.stopReason, null, "990,000 settled is under 1,000,000, whatever is in flight");
+	assert.equal(hook.external(), 290_000, "but the parent's guard sees the children's in-flight bounds");
+});
+
+test("a child with no cost guard (its spawner dropped PI_MAX_COST_MICROS) is charged its metered cost: the stop, external() and SPENT (issue #500)", () => {
+	const meter = createUsageMeter({ maxTokens: null, maxCostMicros: 1_000_000, rootSessionId: "root" });
+	const { dir, hook } = watch({ meter, guard: () => ({ spend: () => ({ spentMicros: 0, inflightMicros: 0 }) }) });
+	// Five calls at $0.3 each, spentMicros 0: $1.5 against a $1 cap.
+	const name = writeLedger(dir, 9, ledger({ calls: 5, cost: 0.3, spentMicros: 0 }));
+	hook.sample();
+	assert.equal(meter.state.stopReason, COST_CAP);
+	assert.equal(hook.external(), 1_500_000);
+	assert.deepEqual(JSON.parse(readFileSync(join(dir, "SPENT"), "utf8")), { v: 1, total: 1_500_000, byLedger: { [name]: 1_500_000 } });
+});
+
+test("SPENT is written only under a dollar cap (issue #500)", () => {
+	const meter = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
+	const { dir, hook } = watch({ meter });
+	writeLedger(dir, 9, ledger({ spentMicros: 5 }));
+	hook.sample();
+	assert.equal(existsSync(join(dir, "SPENT")), false);
+});
+
+test("a child's floor counters reach the exit line: a child call that never started floors the job exactly as a parent call would (issue #500)", async () => {
+	const cap = 1_000_000;
+	const failed = { role: "assistant", stopReason: "error", content: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } } };
+	const noUsage = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "ok" }] };
+	/** One call through a meter and a cost guard, answered with `message`. */
+	async function call(meter, guard, message) {
+		const stream = { result: () => Promise.resolve(message) };
+		assert.equal(guard.admit({ method: "streamSimple", model: { provider: "fake", id: "m1" }, args: [{}, {}] }), null);
+		guard.bind(stream);
+		meter.observe(stream, { sessionId: "s", provider: "fake", modelId: "m1" });
+		await new Promise((resolve) => setImmediate(resolve));
+	}
+	const settle = (meter, guard, extra = (fields) => fields) => dollarSettlement({ tokens: { ...meter.snapshot(), ...extra(guard.snapshot()) }, usage: meter.usageSnapshot(), reservedMicros: cap, trusted: true });
+	for (const [label, message] of [["a call that never started", failed], ["an answer with no usage", noUsage]]) {
+		// The parent makes the call itself.
+		const parent = createUsageMeter({ maxTokens: null, maxCostMicros: cap, rootSessionId: "root" });
+		const direct = createCostGuard({ capMicros: cap, bound: () => 1000 });
+		await call(parent, direct, message);
+		const own = settle(parent, direct);
+		// A child makes it, and the parent folds its ledger.
+		const childMeter = createUsageMeter({ maxTokens: null, rootSessionId: "child" });
+		const childGuard = createCostGuard({ capMicros: cap, bound: () => 1000 });
+		await call(childMeter, childGuard, message);
+		const folding = createUsageMeter({ maxTokens: null, maxCostMicros: cap, rootSessionId: "root" });
+		const parentOnly = createPolicyGuard({ maxCostMicros: cap, env: {} });
+		const { dir, hook } = watch({ meter: folding, guard: () => parentOnly });
+		writeLedger(dir, 12, childLedger({ state: "done", meter: childMeter, guard: childGuard }));
+		hook.sample();
+		const viaChild = settle(folding, parentOnly, (fields) => hook.guardFields(fields));
+		assert.equal(own.basis, "floor", `${label}: the parent's own call floors`);
+		assert.equal(viaChild.basis, "floor", `${label}: so does the child's`);
+	}
+	// And a clean child call settles metered: the counters are added, not invented.
+	const childMeter = createUsageMeter({ maxTokens: null, rootSessionId: "child" });
+	const childGuard = createCostGuard({ capMicros: cap, bound: () => 1000 });
+	await call(childMeter, childGuard, { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "ok" }], usage: { input: 500, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 510, cost: { total: 0.0005 } } });
+	const folding = createUsageMeter({ maxTokens: null, maxCostMicros: cap, rootSessionId: "root" });
+	const parentOnly = createPolicyGuard({ maxCostMicros: cap, env: {} });
+	const { dir, hook } = watch({ meter: folding, guard: () => parentOnly });
+	writeLedger(dir, 12, childLedger({ state: "done", meter: childMeter, guard: childGuard }));
+	hook.sample();
+	assert.equal(settle(folding, parentOnly, (fields) => hook.guardFields(fields)).basis, "metered");
+	const fields = hook.guardFields(parentOnly.snapshot());
+	assert.deepEqual([fields.costUnanswered, fields.boundExceeded, fields.costRefused], [0, 0, 0]);
+	assert.deepEqual(hook.guardFields({ modelRefused: 1 }), { modelRefused: 1 }, "only the keys the parent's guard writes");
 });
 
 test("the detector: a registered child is metered however long it lives; a pi process with no ledger is unmetered after two ticks (issue #500)", () => {
@@ -190,6 +290,14 @@ test("the detector: a registered child is metered however long it lives; a pi pr
 	hook.sample();
 	assert.equal(meter.snapshot().unmeteredChildren, 1, "counted once");
 	assert.deepEqual(hook.teardown(), { distinct: 2, peak: 2, unmetered: 1 });
+});
+
+test("the unmetered stop carries its cause, so run-job's handler does not log token_budget_exceeded for it (issue #500)", () => {
+	const stops = [];
+	const meter = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root", onStop: (reason, detail) => stops.push([reason, detail]) });
+	const { hook } = watch({ meter, proc: fakeProc({ live: [44] }) });
+	for (let tick = 0; tick <= NO_LEDGER_TICKS; tick += 1) hook.sample();
+	assert.deepEqual(stops, [[TOKEN_BUDGET, { cause: "unmetered-child", unmetered: 1 }]]);
 });
 
 test("an unmetered child's stop: cost-cap under a dollar cap, else token_budget under a token cap, else model-not-allowed under a list; uncapped, a floor only (issue #500)", () => {
@@ -214,6 +322,7 @@ test("a pi process seen alive whose ledger never appeared counts at teardown, ev
 	const { hook } = watch({ meter, proc });
 	hook.sample();
 	proc.table.live = [];
+	proc.table.alive.delete(50);
 	hook.sample();
 	hook.sample();
 	assert.equal(meter.snapshot().unmeteredChildren, 0, "gone before its two ticks");
@@ -221,25 +330,82 @@ test("a pi process seen alive whose ledger never appeared counts at teardown, ev
 	assert.equal(meter.snapshot().unmeteredChildren, 1);
 });
 
-test("a `starting` ledger: a dead pid with zero spend is done, never unmetered; a live one past the grace is unmetered; a dead one with spend is too (issue #500)", () => {
-	let clock = 0;
+test("a pi process that stops looking like one (its title changed after the fact) is still judged at two ticks while it lives (issue #500)", () => {
+	const meter = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
+	const proc = fakeProc({ live: [51] });
+	const { hook } = watch({ meter, proc });
+	hook.sample();
+	proc.table.live = [];
+	hook.sample();
+	assert.equal(meter.snapshot().unmeteredChildren, 0);
+	hook.sample();
+	assert.equal(meter.snapshot().unmeteredChildren, 1, "no longer in the scan, still alive, no ledger");
+	assert.equal(meter.state.stopReason, TOKEN_BUDGET);
+});
+
+test("a pi process whose environment does not carry this job's ledger directory is unmetered, whatever ledger names its pid; an unreadable environment keeps the ledger rule (issue #500)", () => {
+	const meter = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
+	const proc = fakeProc({ live: [60, 61], environ: { 60: false, 61: null } });
+	const { dir, hook, logged } = watch({ meter, proc });
+	// A forged `done` ledger for pid 60 (its spawner scrubbed its environment and wrote this file), and a real one for 61
+	// (a nested runner on the non-dumpable runner-node: its environment cannot be read).
+	writeLedger(dir, 60, ledger({ state: "done", calls: 0 }), "aaaaaaaaaaaaaaaa");
+	writeLedger(dir, 61, ledger(), "bbbbbbbbbbbbbbbb");
+	hook.sample();
+	assert.equal(meter.snapshot().unmeteredChildren, 1);
+	assert.equal(meter.snapshot().childProcesses, 2, "pid 60's process is not counted twice");
+	assert.deepEqual(logged.find((line) => line.event === "unmetered_child").fields, { why: "environ", pid: 60, unmetered: 1 });
+	assert.equal(meter.state.stopReason, TOKEN_BUDGET);
+});
+
+test("the environment is matched on the exact ledger directory entry (issue #500)", () => {
 	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
-	const proc = fakeProc({ live: [61, 62], alive: [] });
-	const { dir, hook } = watch({ meter, proc, now: () => clock });
+	const asked = [];
+	const proc = { ...fakeProc({ live: [62] }), environHas: (pid, entry) => {
+		asked.push(entry);
+		return true;
+	} };
+	const { dir, hook } = watch({ meter, proc });
+	hook.sample();
+	hook.sample();
+	assert.deepEqual(asked, [`PI_DISPATCH_CHILD_LEDGER=${dir}`], "read once per process");
+});
+
+test("a `starting` ledger: a dead pid with zero spend is done; a live one past 10 s of its own CPU is unmetered and un-counted once it runs; a dead one with spend is unmetered (issue #500)", () => {
+	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
+	const proc = fakeProc({ live: [61, 62], alive: [], cpu: { 61: 0, 62: 0 } });
+	const { dir, hook } = watch({ meter, proc, now: () => 1e12 });
 	writeLedger(dir, 60, ledger({ state: "starting", calls: 0 }), "aaaaaaaaaaaaaaaa");
 	writeLedger(dir, 61, ledger({ state: "starting", calls: 0 }), "bbbbbbbbbbbbbbbb");
 	writeLedger(dir, 63, ledger({ state: "starting", calls: 1 }), "cccccccccccccccc");
 	writeLedger(dir, 62, ledger({ state: "starting", calls: 0 }), "dddddddddddddddd");
 	hook.sample();
 	assert.equal(meter.snapshot().unmeteredChildren, 1, "only the dead `starting` ledger with spend in it (pid 63)");
-	clock = STARTING_GRACE_MS;
+	// Wall time means nothing here: a starved child is slow, not stuck. CPU is what counts.
+	proc.table.cpu[61] = STARTING_GRACE_MS;
+	proc.table.cpu[62] = STARTING_GRACE_MS + 1;
+	hook.sample();
+	assert.equal(meter.snapshot().unmeteredChildren, 2, "pid 62 used more than 10 s of CPU without installing; pid 61 exactly 10 s");
 	writeLedger(dir, 62, ledger({ state: "running", calls: 0 }), "dddddddddddddddd");
 	hook.sample();
-	assert.equal(meter.snapshot().unmeteredChildren, 1, "at the grace, not past it; pid 62's meter installed");
+	assert.equal(meter.snapshot().unmeteredChildren, 1, "pid 62 installed after all: judged by its file from here on");
+	assert.equal(hook.teardown().unmetered, 1, "pid 60, dead with zero spend, is done");
+});
+
+test("off Linux (a proc with no cpuMs), the `starting` grace is wall time on a monotonic clock (issue #500)", () => {
+	let clock = 0;
+	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
+	const { cpuMs, ...proc } = fakeProc({ live: [61] });
+	assert.equal(typeof cpuMs, "function");
+	const { dir, hook } = watch({ meter, proc, now: () => clock });
+	writeLedger(dir, 61, ledger({ state: "starting", calls: 0 }));
+	hook.sample();
+	clock = STARTING_GRACE_MS;
+	hook.sample();
+	assert.equal(meter.snapshot().unmeteredChildren, 0);
 	clock = STARTING_GRACE_MS + 1;
 	hook.sample();
-	assert.equal(meter.snapshot().unmeteredChildren, 2, "pid 61 is still `starting` and alive past the grace");
-	assert.equal(hook.teardown().unmetered, 2, "pid 60, dead with zero spend, is done");
+	assert.equal(meter.snapshot().unmeteredChildren, 1);
 });
 
 test("a child killed mid-call leaves `running` with unresolved: counted unresolved, not unmetered (issue #500)", () => {
@@ -254,6 +420,45 @@ test("a child killed mid-call leaves `running` with unresolved: counted unresolv
 	const { unresolved, unmeteredChildren } = meter.snapshot();
 	assert.deepEqual([unresolved, unmeteredChildren], [1, 0]);
 	assert.equal(hook.teardown().unmetered, 0);
+});
+
+test("520 short pi children over a job's life (`pi --version`, `pi list`) do not flood: a dead child's `done` ledger is retired (issue #500)", () => {
+	const meter = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
+	const proc = fakeProc();
+	const { dir, hook, logged } = watch({ meter, proc });
+	for (let child = 0; child < 520; child += 1) {
+		const pid = 1000 + child;
+		// One child at a time, as a loop runs them: alive while it runs, its ledger `done`, then gone.
+		writeLedger(dir, pid, childLedger({ state: "done" }), child.toString(16).padStart(16, "0"));
+		if (child % 10 === 9) hook.sample();
+	}
+	hook.sample();
+	assert.equal(meter.state.stopReason, null);
+	assert.deepEqual([meter.snapshot().childProcesses, meter.snapshot().unmeteredChildren], [520, 0]);
+	assert.equal(logged.filter((line) => line.event === "unmetered_child").length, 0);
+	// A retired file is never read again, so rewriting it changes nothing; its name does not count again.
+	writeLedger(dir, 1000, ledger({ calls: 3 }), "0".repeat(16));
+	hook.sample();
+	assert.deepEqual([meter.snapshot().childProcesses, meter.snapshot().childTotal], [520, 0]);
+});
+
+test("with no retirement (no detector, off Linux) `done` files still do not count against the open-file cap (issue #500)", () => {
+	const meter = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
+	const { dir, hook } = watch({ meter });
+	for (let child = 0; child < CHILD_LEDGER_MAX_FILES + 8; child += 1) writeLedger(dir, 7000 + child, childLedger({ state: "done" }), child.toString(16).padStart(16, "0"));
+	writeLedger(dir, 9999, ledger({ calls: 1 }));
+	hook.sample();
+	assert.deepEqual([meter.snapshot().unmeteredChildren, meter.snapshot().childProcesses, meter.snapshot().childTotal], [0, CHILD_LEDGER_MAX_FILES + 9, 100]);
+	assert.equal(meter.state.stopReason, null);
+});
+
+test("the open-file cap still floods: more than CHILD_LEDGER_MAX_FILES live ledgers at once are unmetered (issue #500)", () => {
+	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
+	const proc = fakeProc({ alive: Array.from({ length: CHILD_LEDGER_MAX_FILES + 3 }, (_, index) => 5000 + index) });
+	const { dir, hook } = watch({ meter, proc });
+	for (let child = 0; child < CHILD_LEDGER_MAX_FILES + 3; child += 1) writeLedger(dir, 5000 + child, ledger({ calls: 0 }), child.toString(16).padStart(16, "0"));
+	hook.sample();
+	assert.equal(meter.snapshot().unmeteredChildren, 3);
 });
 
 test("the parent's own failure to write STOP or SPENT is a breach (issue #500)", () => {
@@ -277,7 +482,19 @@ test("the parent's own failure to write STOP or SPENT is a breach (issue #500)",
 	assert.equal(capped.snapshot().unmeteredChildren, 1);
 });
 
-test("teardown writes STOP FIRST, then folds once more (a child's last write counts), then removes the directory (issue #500)", () => {
+test("a ledger path the agent replaced with a file is not made over; it is counted lost (issue #500)", () => {
+	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
+	const made = [];
+	const { dir, hook } = watch({ meter, mkdir: (path) => made.push(path) });
+	rmSync(dir, { recursive: true });
+	writeFileSync(dir, "not a directory");
+	hook.sample();
+	assert.deepEqual(made, [], "nothing is made over what stands there");
+	assert.equal(meter.snapshot().unmeteredChildren, 1);
+	rmSync(dir);
+});
+
+test("teardown writes STOP FIRST, then folds once more (a child's last write counts); the directory and its STOP stay (issue #500)", () => {
 	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
 	const order = [];
 	let dir;
@@ -295,11 +512,13 @@ test("teardown writes STOP FIRST, then folds once more (a child's last write cou
 	assert.equal(meter.snapshot().unresolved, 1, "a call in flight at the STOP stays unresolved");
 	assert.equal(torn.unmetered, 0);
 	assert.equal(meter.state.stopReason, null, "the teardown STOP brakes the children, not the job's outcome");
-	assert.equal(existsSync(dir), false);
-	// A stop after teardown writes nothing, so the directory is not made again.
-	made.hook.stopped(TOKEN_BUDGET);
+	assert.deepEqual(stopOf(dir), { v: 1, reason: TOKEN_BUDGET }, "STOP stays for any child still alive");
+	// After teardown nothing more is written, and a second teardown is the first one's answer.
+	rmSync(join(dir, "STOP"));
+	made.hook.stopped(COST_CAP);
 	made.hook.sample();
-	assert.equal(existsSync(dir), false);
+	assert.equal(existsSync(join(dir, "STOP")), false);
+	assert.deepEqual(made.hook.teardown(), torn);
 });
 
 test("stopped() writes STOP the moment the meter stops (run-job calls it from onStop) (issue #500)", () => {
@@ -310,7 +529,7 @@ test("stopped() writes STOP the moment the meter stops (run-job calls it from on
 	assert.deepEqual(readdirSync(dir), ["STOP"], "no temporary file left behind");
 });
 
-test("isPiProcess: argv[0] `pi` or `pi-rpc`, or an element that realpaths to a pi entry or run-job.mjs (issue #500)", () => {
+test("isPiProcess: argv[0] `pi` or `pi-rpc`, or argv[1] (the script) realpathing to a pi entry or run-job.mjs; no other argument counts (issue #500)", () => {
 	const targets = new Set(["/app/node_modules/pi/dist/bundle/cli.js", "/app/node_modules/pi/dist/rpc-entry.js", "/app/image/runner/run-job.mjs"]);
 	const links = new Map([["/app/node_modules/.bin/cli.js", "/app/node_modules/pi/dist/bundle/cli.js"], ["/elsewhere/cli.js", "/elsewhere/cli.js"]]);
 	const resolve = (path) => (targets.has(path) ? path : links.get(path) ?? null);
@@ -318,41 +537,111 @@ test("isPiProcess: argv[0] `pi` or `pi-rpc`, or an element that realpaths to a p
 	const is = (argv) => isPiProcess(argv, { basenames, targets, resolve });
 	assert.equal(is(["pi"]), true, "setupCli's title");
 	assert.equal(is(["pi-rpc"]), true, "the rpc entries' title");
-	assert.equal(is(["node", "--no-warnings", "/app/node_modules/pi/dist/rpc-entry.js"]), true, "any element, not only argv[1]");
+	assert.equal(is(["node", "/app/node_modules/pi/dist/rpc-entry.js"]), true);
 	assert.equal(is(["/opt/pi-dispatch/runner-node", "/app/image/runner/run-job.mjs", "-p", "x"]), true, "a runner a spawner started with its marker cleared");
 	assert.equal(is(["node", "/app/node_modules/.bin/cli.js"]), true, "by realpath");
 	assert.equal(is(["node", "/elsewhere/cli.js"]), false, "another file of the same name");
+	assert.equal(is(["tail", "-f", "/app/image/runner/run-job.mjs"]), false, "reading the runner is not running it");
+	assert.equal(is(["less", "/app/image/runner/run-job.mjs"]), true, "argv[1] is the script position, whatever reads it (fail closed)");
+	assert.equal(is(["node", "--no-warnings", "/app/node_modules/pi/dist/rpc-entry.js"]), false, "only argv[1]; such a process is matched by its title once pi sets it");
 	assert.equal(is(["node", "script.mjs", "pi"]), false, "`pi` counts only as argv[0]");
 	assert.equal(is(["pip"]), false);
 	assert.equal(is([]), false);
 });
 
-test("linuxProc: null off Linux; on Linux it skips itself and pid 1, splits the command line on NUL, resolves a relative element in the process's cwd, and a zombie is dead (issue #500)", () => {
+/** A fake /proc for linuxProc: `files` maps a path to its text; reads are counted per path. */
+function fakeProcFs(files, { names, realpath }) {
+	const reads = new Map();
+	const fds = new Map();
+	let next = 3;
+	return {
+		reads,
+		fs: {
+			readdirSync: () => [...names],
+			openSync: (path) => {
+				if (!Object.hasOwn(files, path)) throw Object.assign(new Error("gone"), { code: "ENOENT" });
+				const fd = next++;
+				fds.set(fd, { data: Buffer.from(files[path], "latin1"), at: 0 });
+				reads.set(path, (reads.get(path) ?? 0) + 1);
+				return fd;
+			},
+			readSync: (fd, buffer, offset, length) => {
+				const open = fds.get(fd);
+				const n = open.data.copy(buffer, offset, open.at, open.at + length);
+				open.at += n;
+				return n;
+			},
+			closeSync: (fd) => fds.delete(fd),
+			realpathSync: realpath,
+		},
+	};
+}
+
+const stat = (pid, { state = "S", flags = 0, utime = 0, stime = 0 } = {}) => `${pid} (a) b) ${state} 1 1 1 0 -1 ${flags} 0 0 0 0 ${utime} ${stime} 0 0 20 0 1 0`;
+
+test("linuxProc: null off Linux; on Linux it skips itself, pid 1 and a fork that has not exec'd, splits on NUL, resolves a relative script in the process's cwd; zombies are dead; CPU and environment (issue #500)", () => {
 	assert.equal(linuxProc({ platform: "darwin" }), null);
 	const files = {
 		"/proc/1/cmdline": "pi\0",
 		"/proc/10/cmdline": "pi\0\0\0\0\0\0",
+		"/proc/10/stat": stat(10, { utime: 150, stime: 50 }),
 		"/proc/11/cmdline": "node\0dist/cli.js\0-p\0x\0",
+		"/proc/11/stat": stat(11),
 		"/proc/12/cmdline": "node\0/tmp/other.js\0",
 		"/proc/13/cmdline": "pi-rpc\0",
-		"/proc/20/stat": "20 (pi) S 1 2 3",
-		"/proc/21/stat": "21 (a) b) Z 1 2 3",
+		// The runner forked a tool and the child has not exec'd yet: its command line is still the runner's.
+		"/proc/14/cmdline": "/opt/pi-dispatch/runner-node\0/runner/run-job.mjs\0",
+		"/proc/14/stat": stat(14, { flags: 0x400100 | PF_FORKNOEXEC }),
+		"/proc/15/cmdline": "/opt/pi-dispatch/runner-node\0/runner/run-job.mjs\0",
+		"/proc/15/stat": stat(15, { flags: 0x400100 }),
+		"/proc/21/stat": stat(21, { state: "Z" }),
+		"/proc/10/environ": "HOME=/home/pi\0PI_DISPATCH_CHILD_LEDGER=/tmp/pi-dispatch-meter-x\0",
+		"/proc/11/environ": "PI_DISPATCH_CHILD_LEDGER=/tmp/pi-dispatch-meter-xy\0",
 	};
-	const fs = {
-		readdirSync: () => ["1", "10", "11", "12", "13", "self", "net"],
-		readFileSync: (path) => {
-			if (Object.hasOwn(files, path)) return files[path];
-			throw Object.assign(new Error("gone"), { code: "ENOENT" });
-		},
-		realpathSync: (path) => {
+	const { fs } = fakeProcFs(files, {
+		names: ["1", "10", "11", "12", "13", "14", "15", "self", "net"],
+		realpath: (path) => {
 			if (path === "/proc/11/cwd/dist/cli.js") return "/pkg/dist/cli.js";
 			if (path === "/pkg/dist/cli.js" || path === "/runner/run-job.mjs") return path;
 			throw Object.assign(new Error("no"), { code: "ENOENT" });
 		},
-	};
+	});
 	const proc = linuxProc({ self: 13, platform: "linux", packageDir: () => "/pkg", runJob: "/runner/run-job.mjs", fs });
-	assert.deepEqual(proc.scan(), [10, 11], "pid 1 and itself (13) are skipped; 12 is not pi");
-	assert.equal(proc.alive(20), true);
+	assert.deepEqual(proc.scan(), [10, 11, 15], "pid 1, itself (13) and the unexec'd fork (14) are skipped; 12 is not pi");
+	assert.equal(proc.alive(10), true);
 	assert.equal(proc.alive(21), false, "a zombie has exited");
 	assert.equal(proc.alive(22), false);
+	assert.equal(proc.cpuMs(10), 2000, "utime + stime, at 100 ticks a second");
+	assert.equal(proc.environHas(10, "PI_DISPATCH_CHILD_LEDGER=/tmp/pi-dispatch-meter-x"), true);
+	assert.equal(proc.environHas(11, "PI_DISPATCH_CHILD_LEDGER=/tmp/pi-dispatch-meter-x"), false, "the exact entry, not a prefix");
+	assert.equal(proc.environHas(15, "PI_DISPATCH_CHILD_LEDGER=/tmp/pi-dispatch-meter-x"), null, "unreadable");
+});
+
+test("linuxProc: a command line is read only to CMDLINE_BYTES, and a scan stops at its time budget and goes on next tick (issue #500)", () => {
+	// A process whose argv is `cli.js` a hundred thousand times: one bounded read, and argv[1] alone is resolved.
+	const long = `sh\0${"cli.js\0".repeat(100_000)}`;
+	let resolves = 0;
+	const names = Array.from({ length: 10 }, (_, index) => String(100 + index));
+	const files = Object.fromEntries(names.map((name) => [`/proc/${name}/cmdline`, long]));
+	const { fs } = fakeProcFs(files, { names, realpath: (path) => {
+		resolves += 1;
+		throw Object.assign(new Error("no"), { code: "ENOENT" });
+	} });
+	let clock = 0;
+	const reads = [];
+	const realRead = fs.readSync;
+	fs.readSync = (fd, buffer, offset, length, position) => {
+		reads.push(length);
+		clock += 30;
+		return realRead(fd, buffer, offset, length, position);
+	};
+	const proc = linuxProc({ self: 1, platform: "linux", packageDir: () => "/pkg", runJob: "/runner/run-job.mjs", fs, now: () => clock, budgetMs: 100 });
+	assert.deepEqual(proc.scan(), []);
+	assert.ok(reads.every((length) => length <= CMDLINE_BYTES), "no read past the cap");
+	const first = reads.length;
+	assert.ok(first < names.length, `the budget stopped the scan early (${first} processes)`);
+	proc.scan();
+	assert.ok(reads.length > first, "the next tick goes on where it stopped");
+	// One realpath per process (its script), plus the six targets once: never one per argument.
+	assert.equal(resolves, reads.length + 6, `${resolves} realpath calls`);
 });

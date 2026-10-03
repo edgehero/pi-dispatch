@@ -100,6 +100,14 @@ let meterStopAtExit = () => null;
  * until the turn budget is attached; then set, so a line written on a stop carries what the decided line would have.
  */
 let liveExitFields = () => ({});
+/**
+ * The meter's teardown (issue #500 part E's review): the children hook's final fold, its STOP and its teardown rule, and
+ * the teardown line. Empty until the meter installs; idempotent. The prompt's finally runs it, and so do the SIGTERM
+ * handler and the outer catch before they write their exit line, so every line a metered run writes carries the final
+ * fold and every unmetered child the detector would count. Bounded: the fold reads at most CHILD_LEDGER_MAX_FILES open
+ * files and the /proc scan stops at its time budget, well inside the stop's grace period.
+ */
+let finishMeter = () => {};
 
 /** The exit line's key (issue #545) and its one writer, both set in the job runner's block at the end of this file before main runs. */
 let exitKey;
@@ -252,8 +260,10 @@ async function main() {
 	if (usageMeter.ok) {
 		meteredExitFields = () => {
 			const usage = meter.usageSnapshot();
-			return { tokens: { ...meter.snapshot(), ...(policyGuard ? policyGuard.snapshot() : {}) }, ...(usage ? { usage } : {}) };
+			// The guard's counters with the children's added (childWatch.guardFields): a child's partial count floors the job.
+			return { tokens: { ...meter.snapshot(), ...(policyGuard ? childWatch.guardFields(policyGuard.snapshot()) : {}) }, ...(usage ? { usage } : {}) };
 		};
+		finishMeter = () => usageMeter.uninstall();
 		meterStopAtExit = () => (meter.state.stopReason === null ? null : decideExit({ budgetAborted: false, meterStop: meter.state.stopReason }));
 	}
 	// A cost cap or a model list must be enforced BEFORE each call, so a runner that cannot do that refuses
@@ -577,7 +587,14 @@ if (!nestedRunner) {
 	// init process, which forwards it here. Without a handler node died at once and no genuine exit line followed, so a
 	// line a tool wrote earlier was the last one in the log. Now the real line is written, with what the meter counted,
 	// and the runner exits 143 well inside the stop's grace period. A line already written is not written again.
-	process.on("SIGTERM", () => exitWriter.terminate({ ...liveExitFields(), ...meteredExitFields() }));
+	process.on("SIGTERM", () => {
+		try {
+			finishMeter();
+		} catch {
+			// The line is written whatever the teardown did.
+		}
+		exitWriter.terminate({ ...liveExitFields(), ...meteredExitFields() });
+	});
 
 	// Preflight throws; the agent loop swallows. Both paths are real and cover disjoint failure sets
 	// -- see INT-RUNNER-EXIT-CODE-PROTOCOL. Without this catch, a missing API key is an unhandled
@@ -590,6 +607,12 @@ if (!nestedRunner) {
 		.catch((error) => {
 			// The meter's fields ride here too once it installed (issue #543); before that there is nothing to report.
 			const thrown = classifyThrow(error);
+			// The final fold first, so a stop it makes ranks this exit and its counts are on the line.
+			try {
+				finishMeter();
+			} catch {
+				// The line is written whatever the teardown did.
+			}
 			const stopped = meterStopAtExit();
 			// The stop wins the exit reason, and the throw it outranked is named on its own line so the second cause is not
 			// lost: its classified reason and the error's class, never its message (names only).

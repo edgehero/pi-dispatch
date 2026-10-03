@@ -8,54 +8,71 @@
  * No pi import: this file loads only usage-meter.mjs, child-route.mjs and node built-ins.
  *
  * ONE PASS (tick or teardown), in this order:
- *   1. FOLD. foldChildLedgers with the last pass's result as `prev`. A ledger directory that cannot be listed
- *      (`missing`: the agent removed it) is made again, mode 0700, and counted once as unmetered: what was in it is
- *      gone, and children may have written into nothing.
- *   2. DETECT (Linux only: it reads /proc; elsewhere there is no detector). Every process but this one and pid 1 is
- *      checked; a pi process is one whose argv[0] is `pi` or `pi-rpc` (the titles setupCli and the rpc entries set),
- *      or one with an argv element that realpaths to one of the pinned pi's five session entries or to run-job.mjs.
- *      A pi process is UNMETERED when no ledger names its pid two ticks after it was first seen, or at teardown if it
- *      was ever seen alive and no ledger ever named it. A ledger still `starting` more than STARTING_GRACE_MS after
- *      this parent first saw it, while its process lives, is unmetered (its meter never installed); a `starting`
- *      ledger of a DEAD process with zero spend is a child that ended before its meter started, and is done.
+ *   1. FOLD. foldChildLedgers with the last pass's result as `prev`, retiring the `done` files of processes that are
+ *      gone (Linux; the fold has the rule). A ledger directory that cannot be listed (`missing`: the agent removed it)
+ *      is made again, mode 0700, when nothing else stands at its path, and counted once as unmetered.
+ *   2. DETECT (Linux only: it reads /proc; elsewhere there is no detector). linuxProc() has what a pi process is. A pi
+ *      process is UNMETERED when:
+ *      - its environment, where it can be read, does not carry this job's ledger directory: a ledger named after its
+ *        pid is then not its own (a spawner can write one), whatever it says;
+ *      - no ledger names its pid two ticks after it was first seen, if it is still alive then, whether or not it still
+ *        looks like a pi process (a title can be changed after the fact);
+ *      - it was seen alive and no ledger ever named it, counted at teardown;
+ *      - its ledger is still `starting` after STARTING_GRACE_MS of the process's own CPU time (its meter never
+ *        installed). CPU, not wall time: a starved honest child is slow, not stuck. Un-counted once it is no longer
+ *        `starting`. A `starting` ledger of a DEAD process with zero spend is a child that ended before its meter
+ *        started, and is done; one with spend in it is unmetered.
  *   3. JUDGE. The fold goes to meter.setChildren with `unmetered` and `processes` widened by what the detector found
  *      (the token cap is judged there, on parent plus children). Then, first stop wins:
- *      - under a dollar cap: the parent's settled spend plus every child's `spentMicros` past the cap, or any child
- *        `costRefused`, is `cost-cap`;
- *      - under a model list: any child `modelRefused`, or any child row whose pair is not on the PARENT's list (a
- *        spawner can widen a child's own list), or a child row with no model at all, is `model-not-allowed`;
+ *      - under a dollar cap: the parent's settled spend plus every child's settled spend (ledgerSettled: the larger
+ *        of its guard's spend and its metered cost) past the cap, or any child `costRefused`, is `cost-cap`;
+ *      - under a model list: any child `modelRefused`, or any named child row whose pair is not on the PARENT's list
+ *        (a spawner can widen a child's own list), is `model-not-allowed`. A model-less row is not judged here: the
+ *        child's own guard judged that call against the list it inherited;
  *      - any unmetered child: one `unmetered_child` line (the first time), then the stop an unmetered child gets:
- *        `cost-cap` under a dollar cap, else `token_budget` under a token cap, else `model-not-allowed` under a list.
- *        With no policy it is a floor only, and nothing stops.
- *   4. WRITE (ticks only). SPENT under a dollar cap (spentFile: the parent's spent and in flight plus each ledger's),
- *      and STOP with the meter's reason once it has stopped, rewritten on every tick so a deleted STOP comes back.
- *      The parent's own failure to write either is counted once as unmetered: a child it cannot reach is a child it
- *      cannot hold to the cap.
+ *        `cost-cap` under a dollar cap, else `token_budget` under a token cap, else `model-not-allowed` under a list,
+ *        with `cause: "unmetered-child"` so the token stop does not log `token_budget_exceeded`. With no policy it
+ *        is a floor only, and nothing stops.
+ *   4. WRITE (ticks only). SPENT under a dollar cap (spentFile), and STOP with the meter's reason once it has stopped,
+ *      rewritten on every tick so a deleted STOP comes back. The parent's own failure to write either is counted once
+ *      as unmetered: a child it cannot reach is a child it cannot hold to the cap.
  *
  * TEARDOWN: STOP first (the meter's reason, or `token_budget` when the job ended without a stop: past the final fold no
- * child call could be counted), then the final pass, then the ledger directory is removed. A child call in flight at
- * the STOP shows in the final fold as `unresolved`. The teardown line gains `distinct` and `peak` (pi processes the
- * detector saw, null with no detector) and `unmetered`.
+ * child call could be counted), then the final pass. The directory and its STOP stay: the container ends right after,
+ * and a directory removed while a child lives would let an agent that makes it again run that child unbraked. A child
+ * call in flight at the STOP shows in the final fold as `unresolved`. The teardown line gains `distinct` and `peak` (pi
+ * processes the detector saw, null with no detector) and `unmetered`.
  *
- * The parent's cost guard reads `external()`: every child's `spentMicros + inflightMicros` as of the last fold.
+ * The parent's cost guard reads `external()`: every child's ledgerCharge() (settled plus in flight) as of the last
+ * fold. The exit line's cost and model counters add the children's (`guardFields`).
  */
-import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PI_ENTRIES, RUN_JOB_PATH } from "./child-route.mjs";
 import { COST_CAP, MODEL_NOT_ALLOWED, TOKEN_BUDGET } from "./outcome.mjs";
 import { foldChildLedgers, SPENT_FILE, spentFile, STOP_FILE, stopFile, writeFileAtomic } from "./usage-meter.mjs";
 
-/** How long a ledger may stay `starting` while its process lives: from the preload's stub to the meter's install (M5). */
+/** How much CPU a process may use with its ledger still `starting`: from the preload's stub to the meter's install. */
 export const STARTING_GRACE_MS = 10_000;
 /** How many ticks a pi process may live with no ledger before it is unmetered. */
 export const NO_LEDGER_TICKS = 2;
 /** The command-line titles pi gives itself (setupCli: `pi`; the rpc entries: `pi-rpc`). */
 export const PI_TITLES = Object.freeze(["pi", "pi-rpc"]);
+/** How much of a command line is read: the markers sit in argv[0] and argv[1]. */
+export const CMDLINE_BYTES = 4096;
+/** How much of an environment is read when looking for the ledger directory. */
+export const ENVIRON_BYTES = 64 * 1024;
+/** The time one tick's /proc scan may take; what is left is scanned on the next tick. */
+export const SCAN_BUDGET_MS = 200;
+/** The kernel's PF_FORKNOEXEC: forked and not yet exec'd, so still carrying its parent's command line. */
+export const PF_FORKNOEXEC = 0x40;
+/** The cost and model counters the exit line carries and a child ledger adds to (guardFields). */
+const GUARD_FIELDS = Object.freeze(["costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "modelRefused"]);
 
 /** The fold of a directory with nothing in it: what setChildren gets before the first tick, so the keys are there. */
 function emptyFold() {
-	return { processes: 0, unmetered: 0, flooded: 0, totals: { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0 }, rows: [], spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, missing: false, files: new Map() };
+	return { processes: 0, unmetered: 0, flooded: 0, totals: { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0 }, rows: [], spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, longContext: 0, costUnjudged: 0, settledMicros: 0, chargeMicros: 0, missing: false, files: new Map(), retired: null };
 }
 
 /** Whether a ledger's mark holds any spend at all. */
@@ -65,19 +82,16 @@ function spent(high) {
 
 /**
  * Whether a process with these arguments (from /proc/<pid>/cmdline, split on NUL, empties dropped) is a pi process:
- * argv[0] is one of PI_TITLES, or an element whose basename is one of `basenames` realpaths (`resolve`) to one of
- * `targets`. `resolve(element)` returns a real path or null; a relative element is the caller's to resolve against the
- * process's own working directory.
+ * argv[0] is one of PI_TITLES, or argv[1], the script position, has one of `basenames` and realpaths (`resolve`) to one
+ * of `targets`. No other argument counts: `tail -f run-job.mjs` reads the runner, it does not run it.
  */
 export function isPiProcess(argv, { basenames, targets, resolve }) {
 	if (!Array.isArray(argv) || argv.length === 0) return false;
 	if (PI_TITLES.includes(argv[0])) return true;
-	for (const element of argv) {
-		if (!basenames.has(basename(element))) continue;
-		const real = resolve(element);
-		if (real !== null && targets.has(real)) return true;
-	}
-	return false;
+	const script = argv[1];
+	if (typeof script !== "string" || !basenames.has(basename(script))) return false;
+	const real = resolve(script);
+	return real !== null && targets.has(real);
 }
 
 /** The pinned pi's package root, as this runner resolves it (the copy the preload names too). */
@@ -86,11 +100,41 @@ function defaultPackageDir() {
 }
 
 /**
- * The Linux detector's view of /proc: `scan()` lists the pids of pi processes (this one and pid 1 excluded), `alive(pid)`
- * whether a process exists and is not a zombie. Null off Linux. Never throws: a process that vanishes mid-read, or
- * one whose files cannot be read, is skipped.
+ * The fields of /proc/<pid>/stat this file reads, from its text: `state`, `flags` and `cpuMs` (utime + stime, in
+ * USER_HZ ticks, which Linux fixes at 100 a second). Null when the text is not a stat line.
  */
-export function linuxProc({ self = process.pid, platform = process.platform, packageDir = defaultPackageDir, runJob = RUN_JOB_PATH, fs = { readdirSync, readFileSync, realpathSync } } = {}) {
+export function parseStat(text) {
+	const close = typeof text === "string" ? text.lastIndexOf(")") : -1;
+	if (close === -1) return null;
+	const fields = text.slice(close + 2).split(" ");
+	const flags = Number(fields[6]);
+	const utime = Number(fields[11]);
+	const stime = Number(fields[12]);
+	if (fields[0] === undefined || !Number.isFinite(flags)) return null;
+	return { state: fields[0], flags, cpuMs: Number.isFinite(utime) && Number.isFinite(stime) ? (utime + stime) * 10 : null };
+}
+
+/**
+ * The Linux detector's view of /proc, or null off Linux:
+ *   - `scan()`: the pids of pi processes (isPiProcess), skipping this one, pid 1 and any process forked and not yet
+ *     exec'd (PF_FORKNOEXEC: it still shows its parent's command line, the runner's or a pi child's, for the instant
+ *     before it execs a tool). At most CMDLINE_BYTES of each command line are read, and one scan takes at most
+ *     SCAN_BUDGET_MS of `now()`: what is left is scanned on the next tick, so no number or size of processes can hold
+ *     the runner's event loop.
+ *   - `alive(pid)`: the process exists and is not a zombie. `cpuMs(pid)`: its CPU time, or null.
+ *   - `environHas(pid, entry)`: whether its environment holds `entry` exactly; null when it cannot be read (a
+ *     non-dumpable process, such as a nested runner on the image's runner-node).
+ * Never throws: a process that vanishes mid-read, or whose files cannot be read, is skipped.
+ */
+export function linuxProc({
+	self = process.pid,
+	platform = process.platform,
+	packageDir = defaultPackageDir,
+	runJob = RUN_JOB_PATH,
+	now = () => performance.now(),
+	budgetMs = SCAN_BUDGET_MS,
+	fs = { readdirSync, openSync, readSync, closeSync, realpathSync },
+} = {}) {
 	if (platform !== "linux") return null;
 	let targets = null;
 	const basenames = new Set([...PI_ENTRIES.map((entry) => basename(entry.path)), basename(runJob)]);
@@ -112,22 +156,51 @@ export function linuxProc({ self = process.pid, platform = process.platform, pac
 		}
 		return targets;
 	}
+	/** At most `max` bytes of a file, as latin1. Throws what the fs throws. */
+	function head(path, max) {
+		const fd = fs.openSync(path, "r");
+		try {
+			const buffer = Buffer.alloc(max);
+			let length = 0;
+			while (length < max) {
+				const read = fs.readSync(fd, buffer, length, max - length, null);
+				if (read === 0) break;
+				length += read;
+			}
+			return buffer.subarray(0, length).toString("latin1");
+		} finally {
+			fs.closeSync(fd);
+		}
+	}
+	function stat(pid) {
+		try {
+			return parseStat(head(`/proc/${pid}/stat`, 1024));
+		} catch {
+			return null;
+		}
+	}
+	let queue = [];
+	let cursor = 0;
 	return {
 		scan() {
 			const found = [];
-			let names;
-			try {
-				names = fs.readdirSync("/proc");
-			} catch {
-				return found;
+			const started = now();
+			if (cursor >= queue.length) {
+				try {
+					queue = fs.readdirSync("/proc").filter((name) => /^[1-9][0-9]*$/.test(String(name)));
+				} catch {
+					queue = [];
+				}
+				cursor = 0;
 			}
-			for (const name of names) {
-				if (!/^[1-9][0-9]*$/.test(name)) continue;
-				const pid = Number(name);
+			while (cursor < queue.length) {
+				if (now() - started > budgetMs) break;
+				const pid = Number(queue[cursor]);
+				cursor += 1;
 				if (pid === self || pid === 1) continue;
 				let argv;
 				try {
-					argv = fs.readFileSync(`/proc/${pid}/cmdline`, "latin1").split("\u0000").filter((part) => part !== "");
+					argv = head(`/proc/${pid}/cmdline`, CMDLINE_BYTES).split("\u0000").filter((part) => part !== "");
 				} catch {
 					continue;
 				}
@@ -138,18 +211,28 @@ export function linuxProc({ self = process.pid, platform = process.platform, pac
 						return null;
 					}
 				};
-				if (isPiProcess(argv, { basenames, targets: realTargets(), resolve })) found.push(pid);
+				if (!isPiProcess(argv, { basenames, targets: realTargets(), resolve })) continue;
+				const fields = stat(pid);
+				if (fields !== null && (fields.flags & PF_FORKNOEXEC) !== 0) continue;
+				found.push(pid);
 			}
 			return found;
 		},
 		alive(pid) {
+			const fields = stat(pid);
+			return fields !== null && fields.state !== "Z" && fields.state !== "X" && fields.state !== "x";
+		},
+		cpuMs(pid) {
+			return stat(pid)?.cpuMs ?? null;
+		},
+		environHas(pid, entry) {
+			let text;
 			try {
-				const stat = fs.readFileSync(`/proc/${pid}/stat`, "latin1");
-				const state = stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3);
-				return state !== "Z" && state !== "X" && state !== "x";
+				text = head(`/proc/${pid}/environ`, ENVIRON_BYTES);
 			} catch {
-				return false;
+				return null;
 			}
+			return text.split("\u0000").includes(entry);
 		},
 	};
 }
@@ -157,9 +240,11 @@ export function linuxProc({ self = process.pid, platform = process.platform, pac
 /**
  * The parent's children hook. `dir` is the ledger directory (null when none could be made: then nothing is folded or
  * written, and the detector alone sees the children). `guard()` returns the parent's policy guard or null (late, because
- * the guard's `external` is this hook's). Everything that touches the system is injected for the tests.
- * Returns `{ sample, teardown, external, stopped, view }`: the two hook methods, the parent cost guard's `external`,
- * `stopped()` for the meter's onStop (writes STOP at once rather than on the next tick), and `view()` (the counts).
+ * the guard's `external` is this hook's). `now` is a monotonic clock in ms (the wall-time grace off Linux, where a
+ * proc with no `cpuMs` is used). Everything that touches the system is injected for the tests.
+ * Returns `{ sample, teardown, external, stopped, guardFields, view }`: the two hook methods, the parent cost guard's
+ * `external`, `stopped()` for the meter's onStop (writes STOP at once rather than on the next tick), `guardFields()`
+ * (the exit line's guard counters plus the children's), and `view()` (the counts).
  */
 export function createChildWatch({
 	dir,
@@ -167,22 +252,25 @@ export function createChildWatch({
 	guard = () => null,
 	log = () => {},
 	proc = linuxProc(),
-	now = () => Date.now(),
+	now = () => performance.now(),
 	fold = foldChildLedgers,
 	foldFs,
 	writeFs,
 	mkdir = (path) => mkdirSync(path, { mode: 0o700 }),
 	lstat = lstatSync,
-	remove = (path) => rmSync(path, { recursive: true, force: true }),
 }) {
 	let prev = null;
 	let ticks = 0;
 	let peak = 0;
-	/** pid -> the tick it was first seen alive, for every pi process the detector ever saw. */
+	/** pid -> the tick it was first seen alive as a pi process. */
 	const seen = new Map();
-	/** pids of pi processes no ledger named in time. */
+	/** pids seen with no ledger yet, still to be judged. */
+	const pending = new Set();
+	/** pids of pi processes judged unmetered by the detector. */
 	const noLedger = new Set();
-	/** ledger name -> when this parent first saw it `starting`. */
+	/** pid -> whether its environment carries this job's ledger directory (null: unreadable). */
+	const environ = new Map();
+	/** ledger name -> when this parent first saw it `starting` (wall-time grace only). */
 	const startingSince = new Map();
 	/** ledger names held `starting` past the grace, or dead `starting` with spend. */
 	const stuck = new Set();
@@ -191,13 +279,22 @@ export function createChildWatch({
 	let firstWhy = null;
 	let warned = false;
 	let count = 0;
-	// After teardown nothing is written: the directory is gone, and a write would make it again.
+	// After teardown nothing is written.
 	let closed = false;
+	const needle = dir === null ? null : `PI_DISPATCH_CHILD_LEDGER=${dir}`;
 
 	const current = () => prev ?? emptyFold();
 	const note = (why, pid = null) => {
 		if (firstWhy === null) firstWhy = { why, pid };
 	};
+	const unmeteredPid = (pid, why) => {
+		if (noLedger.has(pid)) return;
+		note(why, pid);
+		noLedger.add(pid);
+		pending.delete(pid);
+	};
+	/** Every pid a ledger ever named: tracked files and retired ones. */
+	const ledgerPids = (view) => new Set([...[...view.files.values()].map((entry) => entry.pid), ...(view.retired?.pids ?? [])]);
 
 	/** The unmetered count: every file the fold or the detector judged, flooded names, and the parent's own losses. */
 	function unmeteredCount(view) {
@@ -218,19 +315,18 @@ export function createChildWatch({
 		return null;
 	}
 
-	function offList(row) {
-		if (row.provider === null || row.model === null) return true;
-		return !meter.allowed.some((entry) => entry.provider === row.provider && entry.model === row.model);
-	}
+	const offList = (row) => row.provider !== null && row.model !== null && !meter.allowed.some((entry) => entry.provider === row.provider && entry.model === row.model);
 
 	/** Step 3: the children into the meter, then the stop rules (first stop wins: meter.stop keeps the first). */
 	function judge() {
 		const view = current();
 		count = unmeteredCount(view);
-		meter.setChildren({ ...view, processes: view.processes + noLedger.size, unmetered: count });
+		const ledgered = ledgerPids(view);
+		const detected = [...noLedger].filter((pid) => !ledgered.has(pid)).length;
+		meter.setChildren({ ...view, processes: view.processes + detected, unmetered: count });
 		if (meter.costCap !== null) {
 			const own = guard()?.spend?.() ?? { spentMicros: 0 };
-			if (own.spentMicros + view.spentMicros > meter.costCap || view.costRefused > 0) meter.stop(COST_CAP);
+			if (own.spentMicros + view.settledMicros > meter.costCap || view.costRefused > 0) meter.stop(COST_CAP);
 		}
 		if (meter.allowed !== null && (view.modelRefused > 0 || view.rows.some(offList))) meter.stop(MODEL_NOT_ALLOWED);
 		if (count > 0) {
@@ -239,7 +335,7 @@ export function createChildWatch({
 				log("unmetered_child", { why: firstWhy?.why ?? "unknown", pid: firstWhy?.pid ?? null, unmetered: count });
 			}
 			const reason = unmeteredStop();
-			if (reason !== null) meter.stop(reason, meter.snapshot().total);
+			if (reason !== null) meter.stop(reason, { cause: "unmetered-child", unmetered: count });
 		}
 	}
 
@@ -282,7 +378,8 @@ export function createChildWatch({
 	function foldAndDetect({ final }) {
 		ticks += 1;
 		if (dir !== null) {
-			const next = fold({ dir, prev, ...(foldFs ? { fs: foldFs } : {}) });
+			const retire = proc === null ? null : (pid) => !proc.alive(pid);
+			const next = fold({ dir, prev, retire, ...(foldFs ? { fs: foldFs } : {}) });
 			if (next.missing) {
 				if (!dirLost) note("missing");
 				dirLost = true;
@@ -301,31 +398,53 @@ export function createChildWatch({
 		}
 		if (proc === null) return;
 		const view = current();
-		const ledgerPids = new Set([...view.files.values()].map((entry) => entry.pid));
+		const ledgered = ledgerPids(view);
 		let live = [];
 		try {
 			live = proc.scan();
 		} catch {
 			live = [];
 		}
+		const liveSet = new Set(live);
 		peak = Math.max(peak, live.length);
 		for (const pid of live) {
-			if (!seen.has(pid)) seen.set(pid, ticks);
-			if (!ledgerPids.has(pid) && ticks - seen.get(pid) >= NO_LEDGER_TICKS && !noLedger.has(pid)) {
-				note("no-ledger", pid);
-				noLedger.add(pid);
+			if (!seen.has(pid)) {
+				seen.set(pid, ticks);
+				if (!ledgered.has(pid)) pending.add(pid);
+			}
+			if (needle !== null && !noLedger.has(pid)) {
+				if (!environ.has(pid)) {
+					let verdict = null;
+					try {
+						verdict = proc.environHas?.(pid, needle) ?? null;
+					} catch {
+						verdict = null;
+					}
+					environ.set(pid, verdict);
+				}
+				if (environ.get(pid) === false) unmeteredPid(pid, "environ");
 			}
 		}
-		if (final) {
-			for (const pid of seen.keys()) {
-				if (!ledgerPids.has(pid) && !noLedger.has(pid)) {
-					note("no-ledger", pid);
-					noLedger.add(pid);
-				}
+		for (const pid of pending) {
+			if (ledgered.has(pid)) {
+				pending.delete(pid);
+				continue;
 			}
+			if (final) {
+				unmeteredPid(pid, "no-ledger");
+				continue;
+			}
+			// Still alive two ticks on, whether or not it still looks like pi: a title can be changed after the fact.
+			if (ticks - seen.get(pid) >= NO_LEDGER_TICKS && (liveSet.has(pid) || proc.alive(pid))) unmeteredPid(pid, "no-ledger");
 		}
 		for (const [name, entry] of view.files) {
-			if (entry.unmetered || entry.state !== "starting" || stuck.has(name)) continue;
+			if (entry.state !== "starting") {
+				// Its meter installed after all: judged by its file from here on.
+				if (!entry.unmetered) stuck.delete(name);
+				startingSince.delete(name);
+				continue;
+			}
+			if (entry.unmetered || stuck.has(name)) continue;
 			if (!proc.alive(entry.pid)) {
 				// Ended before its meter started. With zero spend that is all it did; a `starting` file with spend in it is
 				// not one the preload wrote.
@@ -335,9 +454,15 @@ export function createChildWatch({
 				}
 				continue;
 			}
-			const since = startingSince.get(name) ?? now();
-			startingSince.set(name, since);
-			if (now() - since > STARTING_GRACE_MS) {
+			let used;
+			if (typeof proc.cpuMs === "function") {
+				used = proc.cpuMs(entry.pid) ?? 0;
+			} else {
+				const since = startingSince.get(name) ?? now();
+				startingSince.set(name, since);
+				used = now() - since;
+			}
+			if (used > STARTING_GRACE_MS) {
 				note("starting", entry.pid);
 				stuck.add(name);
 			}
@@ -355,26 +480,26 @@ export function createChildWatch({
 			writeControls();
 		},
 		teardown() {
-			if (closed) return { distinct: proc === null ? null : seen.size, peak: proc === null ? null : peak, unmetered: count };
-			writeStop(meter.state.stopReason ?? TOKEN_BUDGET);
-			foldAndDetect({ final: true });
-			judge();
-			closed = true;
-			if (dir !== null) {
-				try {
-					remove(dir);
-				} catch {
-					// It goes with the container.
-				}
+			if (!closed) {
+				writeStop(meter.state.stopReason ?? TOKEN_BUDGET);
+				foldAndDetect({ final: true });
+				judge();
+				closed = true;
 			}
 			return { distinct: proc === null ? null : seen.size, peak: proc === null ? null : peak, unmetered: count };
 		},
 		external() {
-			const view = current();
-			return view.spentMicros + view.inflightMicros;
+			return current().chargeMicros;
 		},
 		stopped(reason) {
 			if (!closed) writeStop(reason);
+		},
+		/** The guard's exit-line counters, each with the children's added: a child's partial count floors the job too. */
+		guardFields(snapshot) {
+			const view = current();
+			const out = { ...snapshot };
+			for (const key of GUARD_FIELDS) if (typeof out[key] === "number") out[key] += view[key] ?? 0;
+			return out;
 		},
 		view: () => ({ unmetered: count, seen: seen.size, peak, dirLost, writeFailed }),
 	};
