@@ -102,7 +102,12 @@ export const TERMINAL_COMMENTS = {
 };
 
 // Issue #502: the `model-unknown` refusal's comment. Names no model: the reader may be an issue author.
-const MODEL_UNKNOWN_COMMENT = "Refused: this job names an AI model that this deployment does not know (it is in neither pi's model catalog nor the overlay models.json), so no container was started and nothing was spent. Ask the operator to check the trigger's model settings. Not run.";
+export const MODEL_UNKNOWN_COMMENT = "Refused: this job names an AI model that this deployment does not know (it is in neither pi's model catalog nor the overlay models.json), so no container was started and nothing was spent. Ask the operator to check the trigger's model settings. Not run.";
+
+// The `model-unknown` refusal whose `why` is `overlay-*` (PR #558, the end-of-round check of #501 and #502): the deployment's overlay
+// models.json is the problem, not the job's model, so the generic text above would send the author to the wrong
+// place. Fixed text naming no path and no model; the operator finds which file and why in the worker log.
+export const OVERLAY_REFUSED_COMMENT = "Refused before starting: the deployment's model settings file (models.json in the overlay) cannot be used for this job, so no container was started and nothing was spent. The operator needs to fix that file. Not run.";
 
 // Issue #341: the forge comments for a `job-user-unmappable` refusal, keyed by cause. Shorter than the operator
 // texts in job-user.mjs on purpose: a comment's reader may be an issue author, who can act on none of it.
@@ -632,7 +637,7 @@ export async function runJob(job, deps) {
 			if (job.models !== undefined && job.models !== null && modelListProblem(job.models) !== null) {
 				await comment(job, MODEL_UNKNOWN_COMMENT);
 				log("refused_model_unknown", { provider: job.provider ?? null, model: job.model ?? null, why: "list-malformed" });
-				return { outcome: "policy", reason: "model-unknown", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+				return { outcome: "policy", reason: "model-unknown", why: "list-malformed", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 			}
 			const refs = [{ provider: job.provider, id: job.model, main: true }];
 			for (const entry of Array.isArray(job.models) ? job.models : []) {
@@ -647,10 +652,12 @@ export async function runJob(job, deps) {
 				throw new InfraRetry("whether this job's models exist could not be decided", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 			}
 			if (known?.unknown) {
-				await comment(job, MODEL_UNKNOWN_COMMENT);
+				// An `overlay-*` why is the deployment's file, not the job's model: its own comment.
+				const why = typeof known.why === "string" ? known.why : null;
+				await comment(job, why?.startsWith("overlay-") ? OVERLAY_REFUSED_COMMENT : MODEL_UNKNOWN_COMMENT);
 				// `why` is a fixed token: `overlay-unparseable` tells the operator the file is the problem, not the id.
 				log("refused_model_unknown", { provider: known.unknown.provider ?? null, model: known.unknown.id ?? null, why: known.why ?? null });
-				return { outcome: "policy", reason: "model-unknown", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+				return { outcome: "policy", reason: "model-unknown", why, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 			}
 			// The main model must be on the job's list. The loader refuses this when one trigger names all three, so
 			// what reaches here is a model or provider the overlay or the env supplied: a `PI_ALLOWED_MODELS` that
@@ -668,7 +675,7 @@ export async function runJob(job, deps) {
 			if (known?.fallbackUnlisted) {
 				await comment(job, "Refused: a model this job is allowed to use declares fallback models that are not on the job's list, so no container was started and nothing was spent. Ask the operator to list those models too, or remove that model. Not run.");
 				log("refused_model_not_allowed", { provider: known.fallbackUnlisted.provider ?? null, model: known.fallbackUnlisted.id ?? null, why: "fallback-unlisted" });
-				return { outcome: "policy", reason: "model-not-allowed", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+				return { outcome: "policy", reason: "model-not-allowed", why: "fallback-unlisted", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 			}
 		}
 

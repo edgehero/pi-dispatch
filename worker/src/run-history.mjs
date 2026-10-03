@@ -596,8 +596,17 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// settled (`metered` | `floor` | `refunded`, null when the job held none). Null when no dollar window applied to the job (no dollar setting, or a
 		// refusal before the reservation step), which is every record of a deployment that sets none.
 		dollars: dollarsOf(source.dollars),
+		// The refusal's detail (PR #558, the end-of-round check of #501 and #502): which rule of the reason refused the job, the same fixed token
+		// the worker's log line carries, e.g. `overlay-link` under `model-unknown`, so the drill-in can tell the
+		// deployment's file from the job's model. Additive, nullable, an explicit literal, TAIL position after `dollars`
+		// on the same contract. A token of the fixed charset (`WHY_RE`) or null, never a free string, so the record stays
+		// PII-free by construction; null for every reason that carries no detail.
+		why: typeof source.why === "string" && WHY_RE.test(source.why) ? source.why : null,
 	};
 }
+
+/** The charset a record's `why` must match: a lowercase token, the shape of every `why` the processor returns. */
+const WHY_RE = /^[a-z][a-z0-9-]{0,63}$/;
 
 const DOLLAR_BASES = new Set(["metered", "floor", "refunded", "unreserved"]);
 // How the job's MODEL windows settled (issue #502 part 6); anything else, null included, records null.

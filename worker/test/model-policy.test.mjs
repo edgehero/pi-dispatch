@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { InfraRetry, runJob } from "../src/processor.mjs";
+import { InfraRetry, MODEL_UNKNOWN_COMMENT, OVERLAY_REFUSED_COMMENT, runJob } from "../src/processor.mjs";
 import { makeInFlight } from "../src/scoped-limits.mjs";
 import { AUTHORED_NARROWING_FIELDS, makeCheckWaitSkew } from "../src/triggers-file.mjs";
 
@@ -61,7 +61,7 @@ test("model-unknown: refused after the image probe and before the credential gat
 	const seen = [];
 	const { deps: d, calls, redis } = deps({ checkModelsKnown: (refs) => (seen.push(refs), { unknown: refs[2], why: "not-in-catalog" }) });
 	const r = await runJob(job({ models: ["openai/gpt-x", "openrouter/~anthropic/claude"] }), d);
-	assert.deepEqual(r, { outcome: "policy", reason: "model-unknown", exitCode: null, turns: null, tokens: null, provider: "openai", model: "gpt-x", budgetReserved: false });
+	assert.deepEqual(r, { outcome: "policy", reason: "model-unknown", why: "not-in-catalog", exitCode: null, turns: null, tokens: null, provider: "openai", model: "gpt-x", budgetReserved: false });
 	// The main model first, then every listed entry, split at its FIRST slash.
 	assert.deepEqual(seen, [[{ provider: "openai", id: "gpt-x", main: true }, { provider: "openai", id: "gpt-x" }, { provider: "openrouter", id: "~anthropic/claude" }]]);
 	assert.equal(redis.incrCalls, 0, "CONST-BUDGET-BEFORE-TOKENS: no reservation");
@@ -78,6 +78,26 @@ test("model-unknown names its cause when the overlay was unparseable", async () 
 	const { deps: d, calls } = deps({ checkModelsKnown: (refs) => ({ unknown: refs[0], why: "overlay-unparseable" }) });
 	assert.equal((await runJob(job(), d)).reason, "model-unknown");
 	assert.equal(calls.find((c) => c.event === "refused_model_unknown").fields.why, "overlay-unparseable");
+});
+
+test("an overlay-* refusal posts its own comment naming the deployment's file, and carries its why", async () => {
+	for (const why of ["overlay-unparseable", "overlay-is-a-directory", "overlay-unreadable", "overlay-link", "overlay-not-a-file", "overlay-provider-invalid"]) {
+		const { deps: d, calls, redis } = deps({ checkModelsKnown: (refs) => ({ unknown: refs[0], why }) });
+		const r = await runJob(job(), d);
+		assert.deepEqual([r.reason, r.why, r.budgetReserved, redis.incrCalls], ["model-unknown", why, false, 0], why);
+		const comments = calls.filter((c) => typeof c === "string" && c.startsWith("comment:"));
+		assert.equal(comments.length, 1, why);
+		assert.equal(comments[0], `comment:${OVERLAY_REFUSED_COMMENT}`, why);
+		assert.ok(!/gpt-x|openai|\//.test(OVERLAY_REFUSED_COMMENT), "names no model and no path");
+		assert.ok(!comments[0].includes("does not know"), `${why}: never the unknown-model text`);
+	}
+	// A genuine unknown model keeps the old comment.
+	for (const why of ["not-in-catalog", "list-malformed"]) {
+		const { deps: d, calls } = deps({ checkModelsKnown: (refs) => ({ unknown: refs[0], why }) });
+		const r = await runJob(job(), d);
+		assert.equal(r.why, why);
+		assert.equal(calls.find((c) => typeof c === "string" && c.startsWith("comment:")), `comment:${MODEL_UNKNOWN_COMMENT}`, why);
+	}
 });
 
 test("a transient overlay read is retried as infra, never refused, and reserves nothing", async () => {
