@@ -20,6 +20,7 @@ import { PODMAN_JOB_USER_FIX } from "../src/backend-podman.mjs";
 import { loadConfig, underOsTempDir } from "../src/config.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { usdFingerprint } from "../src/dollar-fingerprint.mjs";
+import { projectsFingerprint } from "../src/projects.mjs";
 import { parseScopedLimits } from "../src/scoped-limits.mjs";
 import { quotedShown } from "../src/backend-local.mjs";
 
@@ -5191,6 +5192,35 @@ test("doctor names a peer whose dollar caps differ from this host's, and is sile
 	assert.ok(!quiet.some((x) => /dollar caps/.test(x.label)), "no dollar setting anywhere: nothing new on upgrade");
 	const counters = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1", PI_SETTINGS_FILE: noOverlay() }, fleetSeams([{ name: "mini2", tz }], { dollarKeysExist: async () => true }));
 	assert.ok(counters.some((x) => /^mini2 publishes no fingerprint of its dollar caps.*dollar counters exist on this Valkey/.test(x.label)), "an old capped host beside an uncapped one: its counters show it");
+});
+
+test("issue #499 part C: doctor names a peer whose projects differ, from the service's own projects.json", async () => {
+	const dir = tempDir("pi-fp-projects-");
+	const file = join(dir, "projects.json");
+	writeFileSync(file, JSON.stringify({ version: 1, projects: [{ id: "shop", name: "Hidden", members: ["github:acme/web"] }] }));
+	const env = { VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1", PI_PROJECTS_FILE: file, PI_SETTINGS_FILE: noOverlay() };
+	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+	const same = projectsFingerprint([{ id: "shop", name: null, members: ["github:acme/web"] }]);
+	const agree = await collectChecks(env, fleetSeams([{ name: "mini2", tz, fpProjects: same }]));
+	assert.ok(!agree.some((x) => /about the projects|fingerprint of its projects/.test(x.label)), "the same file: one fingerprint, as the worker computes it");
+	const differ = await collectChecks(env, fleetSeams([{ name: "mini2", tz, fpProjects: projectsFingerprint([]) }]));
+	const c = differ.find((x) => /^Hosts disagree about the projects/.test(x.label));
+	assert.ok(c && c.warn === true && c.label.includes("mini2"), "a peer without the project is named");
+	assert.ok(!c.label.includes("Hidden") && !c.label.includes("acme/web"), "never a name or a member");
+	const old = await collectChecks(env, fleetSeams([{ name: "mini2", tz }]));
+	assert.ok(old.some((x) => /^mini2 publishes no fingerprint of its projects/.test(x.label)), "a peer from before fpProjects is named while projects are in use");
+	const none = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1", PI_SETTINGS_FILE: noOverlay() }, fleetSeams([{ name: "mini2", tz }]));
+	assert.ok(!none.some((x) => /projects/.test(x.label) && /fingerprint|disagree/.test(x.label)), "no projects anywhere: nothing new on upgrade");
+});
+
+test("PR #569's review: with THIS host's projects.json not loading, doctor fails on it and does not blame a healthy peer", async () => {
+	const file = join(tempDir("pi-fp-projects-bad-"), "projects.json");
+	writeFileSync(file, "{ not json");
+	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+	const peer = projectsFingerprint([{ id: "shop", name: null, members: ["/srv/a"] }]);
+	const checks = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1", PI_PROJECTS_FILE: file, PI_SETTINGS_FILE: noOverlay() }, fleetSeams([{ name: "mini2", tz, fpProjects: peer }]));
+	assert.ok(checks.some((c) => c.ok === false && !c.warn && /PI_PROJECTS_FILE/.test(c.label)), "the load failure is named");
+	assert.ok(!checks.some((c) => /about the projects|fingerprint of its projects/.test(c.label)), "no peer comparison against a file that does not load");
 });
 
 test("doctor's fingerprint covers the scoped-limits dollar rows and the overlay, as the worker resolves them", async () => {

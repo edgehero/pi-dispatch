@@ -171,6 +171,14 @@ A `project:<id>` row caps every repo and folder of one project as one. The id is
   projects usually still do, because it kept out the projects edit that dropped it. Run `pi-dispatch doctor`.
 - The counters live under the same hashed keys as every other row, built from `project:<id>`. Renaming a
   project starts a new count.
+- The panel's limits view shows a project row with its counters and how many members it caps, or
+  `not in projects.json` when its project is missing. The DOLLAR WINDOWS section folds a project row's records by
+  the `project` id each record carries.
+- `dispatch_project_delete` refuses while a row names the project. Delete or change the row first.
+- The panel and the tools refuse to write this file when it is a symlink (edit the real file, or set
+  `PI_SCOPED_LIMITS_FILE` to its path), keep its mode, owner and group (or refuse when they cannot), refuse a file
+  they cannot read, and refuse a write when this file or `projects.json` changed after the change was built from
+  them, the confirm dialog included.
 
 Things to know before you add a model row:
 

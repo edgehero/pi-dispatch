@@ -291,6 +291,8 @@ export function foldCosts({ records, subscriptions, pricing, nowMs, piAiPin = nu
     // and a caller that wired no triggers must not render an empty table that looks exhaustive.
     byTrigger: triggerJoin ? buildByTrigger(runs, triggerJoin) : null,
     byRepo: buildByRepo(runs),
+    // Issue #499 part C: by the project the record carries, never by the projects file as it is now.
+    byProject: buildByProject(runs),
     plans: buildPlans(runs, subs, pricing, days),
     provenance: buildProvenance(runs, piAiPin),
   };
@@ -526,6 +528,56 @@ function buildByRepo(runs) {
       key: g.key,
       label: g.label,
       kind: g.kinds.size === 1 ? [...g.kinds][0] : null,
+      runs: g.members.length,
+      tokens: g.members.reduce((sum, m) => sum + (m.record.tokens?.total ?? 0), 0),
+      cost: combineContributions(g.members.map((m) => m.contribution)),
+    });
+  }
+  return rows.sort((a, b) => b.cost.usd - a.cost.usd || a.label.localeCompare(b.label));
+}
+
+/**
+ * The project id rule, restated because this module may import nothing from the worker but `dayKey` (the purity test
+ * pins it). `worker/src/project-id.mjs` owns it, and `costs.test.mjs` holds the two equal.
+ */
+export const PROJECT_KEY_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+/**
+ * A record's by-project key (issue #499 part C): the `project` id it was written with, or null. Null for a record
+ * written before projects existed, for a run outside every project, and for a value that is not an id (a hand-edited
+ * record): those fold into "(no project)". The record's own field and nothing else, deliberately: membership changes,
+ * and a fold that re-derived it from the current projects file would rewrite history (a local record names its folder
+ * by basename only, so it could not be re-derived anyway).
+ */
+export function projectKeyOf(record) {
+  const id = record?.project;
+  return typeof id === "string" && PROJECT_KEY_RE.test(id) ? id : null;
+}
+
+/** Does this record belong to project `id`? An id selects the runs recorded under it; anything else selects none. */
+export function recordInProject(record, id) {
+  return typeof id === "string" && PROJECT_KEY_RE.test(id) && projectKeyOf(record) === id;
+}
+
+/**
+ * Per-project rollup (issue #499 part C), keyed by `projectKeyOf`, with the same typed dollars as every bucket. `key`
+ * null with the "(no project)" label for runs that carry no project. A MAP, not a plain object: `constructor` is a valid
+ * project id, and an object literal already "has" that key through its prototype, so a run recorded under it would
+ * be added to a function and vanish from the fold.
+ */
+function buildByProject(runs) {
+  const groups = new Map();
+  for (const r of runs) {
+    const id = projectKeyOf(r.record);
+    const mapKey = id ?? "\u0000none";
+    if (!groups.has(mapKey)) groups.set(mapKey, { key: id, label: id ?? "(no project)", members: [] });
+    groups.get(mapKey).members.push(r);
+  }
+  const rows = [];
+  for (const g of groups.values()) {
+    rows.push({
+      key: g.key,
+      label: g.label,
       runs: g.members.length,
       tokens: g.members.reduce((sum, m) => sum + (m.record.tokens?.total ?? 0), 0),
       cost: combineContributions(g.members.map((m) => m.contribution)),

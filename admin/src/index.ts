@@ -85,6 +85,10 @@ import {
   writeTriggers,
   writePauseWindows,
   writeScopedLimits,
+  writeInputs,
+  readProjects,
+  planProjectsWrite,
+  writeProjects,
   enqueueDispatchRun,
   scanRunRecords,
   readSubscriptions,
@@ -129,12 +133,12 @@ import { applyDeploymentPointer, pointerPath, pointerState, readPointer, takePoi
 // The only fs use in this module: the skew notice reads one package.json through the wizard's own reader.
 // Everything else fs-shaped goes through read-model.mjs by design.
 import * as nodeFs from "node:fs";
-import { COSTS_WINDOWS, costsSinceMs, foldCosts, foldTriggerCosts, recordInRepo, whatIfFlow } from "./costs.mjs";
+import { COSTS_WINDOWS, PROJECT_KEY_RE, costsSinceMs, foldCosts, foldTriggerCosts, recordInProject, recordInRepo, whatIfFlow } from "./costs.mjs";
 // The REAL pricing façade. costs.mjs may not hold a module-scope worker/pricing import by contract (the
 // fold is pure; tests inject a canned fake) -- index.ts is where the fs-adjacent assembly lives, so the
 // injection happens here.
 import { getPricedModel, isZeroRated, listPricedModels, piAiVersion, reprice } from "@edgehero/pi-dispatch/pricing";
-import { clipData, scrubControls, scrubControlsPerLine, setGlyphs } from "./panel.mjs";
+import { clipData, escapeInterpreted, scrubControls, scrubControlsPerLine, setGlyphs } from "./panel.mjs";
 import { gateDialogs } from "./dialog-gate.mjs";
 import { openSandbox, sandboxEgress, sandboxLauncher, sandboxSyncRefusal, sandboxVenueOf, sandboxVenuePolicy, sandboxWindowRefusal } from "@edgehero/pi-dispatch/sandbox";
 import { readManifest, sandboxDeadline } from "@edgehero/pi-dispatch/sandbox-store";
@@ -302,10 +306,10 @@ function toolText(text: string): { content: { type: "text"; text: string }[]; de
 
 /**
  * Register the LLM-callable tools. Reads: `dispatch_status`, `dispatch_runs`, `dispatch_costs`,
- * `dispatch_triggers`. On/off:
+ * `dispatch_triggers`, `dispatch_projects` (and the other reads below). On/off:
  * `dispatch_pause`/`dispatch_resume` (durable, reversible, money-safe -- no confirm). The gated PAID enqueue:
- * `dispatch_run`. Confirm-gated writes: `dispatch_set` (a limit/setting) and `dispatch_trigger_add`/`_edit`/
- * `_delete`. There is still NO log tool -- raw `.log` bytes never enter model context (DES-ADMIN-VIA-PI-EXTENSION
+ * `dispatch_run`. Confirm-gated writes: `dispatch_set` (a limit/setting), `dispatch_trigger_add`/`_edit`/
+ * `_delete`, and the project writes `dispatch_project_add`/`_edit`/`_delete`. There is still NO log tool -- raw `.log` bytes never enter model context (DES-ADMIN-VIA-PI-EXTENSION
  * injection boundary; REQ acceptance).
  *
  * The write tools do NOT weaken the money/trigger gates: each routes through `confirmedWrite`, which refuses
@@ -372,21 +376,28 @@ function registerTools(pi: ExtensionAPI): void {
       "rate tables into the costs read-model: window totals, daily buckets, per-flow and per-model rollups, " +
       "per-plan verdicts, and provenance. window = 7d | 30d | mtd (default mtd); flow filters to one flow's " +
       "runs; repo filters to one repo's runs: a bare \"acme/web\" selects that repo on every forge, a forge-qualified " +
-      "\"github:acme/web\" (the by-repo rollup's key) one forge, and \"local:site\" a local folder's runs. " +
+      "\"github:acme/web\" (the by-repo rollup's key) one forge, and \"local:site\" a local folder's runs; project " +
+      "filters to the runs recorded under one project id (the by-project rollup's key). `byProject` groups by the " +
+      "project id each run record carries: runs outside every project, and runs recorded before projects existed, are " +
+      "\"(no project)\", and a record is never re-attributed from the projects file as it is now. " +
       "`dollars` adds the dollar caps: `windows` has one row per active dollar window (the deployment's, then each " +
       "scoped-limits dollar row), with `counterMicros` (spent and held, the Valkey counter the next job is admitted " +
       "against, null when unreadable) beside the records' side (settled micro-dollars, how many runs settled metered, " +
       "floor, refunded or unreserved, and the boundExceeded count; null for a folder or model row, which a run record " +
       "cannot name); `runs` lists the per-run `dollars` of this window's records, newest first. All amounts are " +
       "integer micro-dollars (1 USD = 1000000).",
-    parameters: Type.Object({ window: Type.Optional(Type.String()), flow: Type.Optional(Type.String()), repo: Type.Optional(Type.String()) }),
+    parameters: Type.Object({ window: Type.Optional(Type.String()), flow: Type.Optional(Type.String()), repo: Type.Optional(Type.String()), project: Type.Optional(Type.String()) }),
     async execute(_toolCallId, params) {
       const window = params.window ?? "mtd";
       if (!COSTS_WINDOWS.includes(window)) {
         throw new Error(`unknown window '${window}' (7d|30d|mtd)`);
       }
+      // Issue #499 part C: an id or nothing, so a typo is an error rather than a fold of nothing that reads as no spend.
+      if (params.project !== undefined && !PROJECT_KEY_RE.test(String(params.project))) {
+        throw new Error("project must be a project id (lowercase letters, digits and \"-\", 1 to 32 characters); dispatch_projects lists them");
+      }
       const paths = resolvePaths(deploymentEnv());
-      const res = assembleCosts(paths, window, params.flow, params.repo);
+      const res = assembleCosts(paths, window, params.flow, params.repo, params.project);
       if (res.unreachable) throw new Error(`could not read the run history: ${res.unreachable}`);
       // Issue #501, part 7: the dollar caps beside the fold. The windows are the CURRENT day, week and month whatever
       // `window` asked for (that is what a cap counts), each counter read under the worker's own keys; the runs are
@@ -952,12 +963,13 @@ function registerTools(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
+      const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
       const l = buildScopedLimit({ ...params, ...dollarFieldsOf(params) });
       const result = await confirmedWrite(
         ctx,
         { title: "Add scoped limit", message: `Add to scoped-limits.json:\n${JSON.stringify(l)}` },
         () => {
-          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (list: any[]) => [...list, l] });
+          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, mutate: (list: any[]) => [...list, l] });
           if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
           return { applied: true, added: l, ...(res.pending ? { pending: res.pending } : {}) };
         },
@@ -976,6 +988,7 @@ function registerTools(pi: ExtensionAPI): void {
     parameters: Type.Object({ index: Type.Integer({ minimum: 0 }) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
+      const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
       const p = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
       const list = Array.isArray((p as any)?.limits) ? (p as any).limits : [];
       const cur = list[params.index];
@@ -984,7 +997,7 @@ function registerTools(pi: ExtensionAPI): void {
         ctx,
         { title: `Delete scoped limit #${params.index + 1}`, message: `Remove scoped limit #${params.index + 1}: ${cur.scope} ${limitSummary(cur)}` },
         () => {
-          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (l: any[]) => l.filter((_, i) => i !== params.index) });
+          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, mutate: (l: any[]) => l.filter((_, i) => i !== params.index) });
           if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
           return { applied: true, deletedIndex: params.index, ...(res.pending ? { pending: res.pending } : {}) };
         },
@@ -1022,6 +1035,7 @@ function registerTools(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
+      const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
       const p = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
       const list = Array.isArray((p as any)?.limits) ? (p as any).limits : [];
       const cur = list[params.index];
@@ -1048,9 +1062,148 @@ function registerTools(pi: ExtensionAPI): void {
         ctx,
         { title: `Edit scoped limit #${params.index + 1}`, message: `scoped limit #${params.index + 1}:\n${JSON.stringify(before)}\n→ ${JSON.stringify(merged)}${scopeChangeNote(before, merged)}` },
         () => {
-          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (l: any[]) => l.map((w, i) => (i === params.index ? merged : w)) });
+          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, mutate: (l: any[]) => l.map((w, i) => (i === params.index ? merged : w)) });
           if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
           return { applied: true, index: params.index, limit: merged, ...(res.pending ? { pending: res.pending } : {}) };
+        },
+      );
+      return toolText(JSON.stringify(result));
+    },
+  });
+
+  // Issue #499 part C: the projects file (INT-PROJECTS-FILE-CONTRACT). One read tool and three confirm-gated writes,
+  // through `planProjectsWrite`/`writeProjects` (the worker's own parser, tmp + rename). Confirm-gated because which
+  // project a repo is in decides which project row counts it: moving a repo out of a capped project widens what it may
+  // spend. A project's `name` is operator free text and is ESCAPED wherever it is shown (`escapeInterpreted`), so a
+  // bidi override in it is visible and reorders nothing; it never reaches a log line.
+  pi.registerTool({
+    name: "dispatch_projects",
+    label: "pi-dispatch projects",
+    description:
+      "Read-only. Lists the projects (projects.json, PI_PROJECTS_FILE): each project's id, its display name (control and " +
+      "bidi characters shown escaped as \\u{...}), its members (forge-qualified repos such as github:acme/web, and absolute " +
+      "folders), and `limitRows`, the indexes of the scoped-limits rows (project:<id>) that cap it. A run records the id " +
+      "of the project its scope belonged to when it was picked up. Spend per project is dispatch_costs (byProject, or " +
+      "its project filter). `unset` means PI_PROJECTS_FILE is unset and the worker reads no projects.",
+    parameters: Type.Object({}),
+    async execute() {
+      const paths = resolvePaths(deploymentEnv());
+      const p: any = readProjects({ projectsPath: paths.projectsFile });
+      if (!Array.isArray(p?.projects)) return toolText(JSON.stringify(p?.invalid ? { invalid: escapeInterpreted(p.invalid) } : p));
+      const sl: any = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
+      const limits: any[] = Array.isArray(sl?.limits) ? sl.limits : [];
+      const projects = p.projects.map((pr: any) => ({
+        ...projectShown(pr),
+        limitRows: limits.flatMap((l: any, i: number) => (l?.scope === `project:${pr.id}` ? [i] : [])),
+      }));
+      return toolText(JSON.stringify(sl?.invalid ? { projects, limitsInvalid: true } : { projects }));
+    },
+  });
+
+  pi.registerTool({
+    name: "dispatch_project_add",
+    label: "pi-dispatch add project",
+    description:
+      "Adds a project to projects.json and applies it live: a job whose scope is a member records this project's `id` " +
+      "from its next pickup, and a scoped-limits row project:<id> (dispatch_limit_add) caps the members as one. `id`: " +
+      "lowercase letters, digits and \"-\", 1 to 32 characters. `members`: one or more scopes, a forge-qualified repo " +
+      "\"<forge>:owner/name\" such as \"github:acme/web\" (a bare owner/name is refused, it names the repo on every " +
+      "forge) or an ABSOLUTE folder path; a scope already in another project is refused (one project per scope). " +
+      "`name`: optional display text, never written to a run record or a log. Runs recorded before are never moved " +
+      "into the project. The operator MUST approve a confirm dialog showing the entry; refused with no interactive operator.",
+    executionMode: "sequential",
+    parameters: Type.Object({
+      id: Type.String(),
+      name: Type.Optional(Type.String()),
+      members: Type.Array(Type.String(), { minItems: 1 }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const paths = resolvePaths(deploymentEnv());
+      const entry = { id: params.id, name: params.name ?? null, members: params.members };
+      const mutate = (list: any[]) => [...list, entry];
+      const plan: any = planProjectsWrite({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate });
+      if (plan.invalid) throw new Error(`rejected: ${escapeInterpreted(plan.invalid)}`);
+      const added = plan.projects.find((p: any) => p.id === params.id);
+      const result = await confirmedWrite(
+        ctx,
+        { title: "Add project", message: `Add to projects.json:\n${JSON.stringify(projectShown(added))}\nRuns of these members record project ${added.id} from their next pickup.` },
+        () => {
+          const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, expect: plan.inputs });
+          if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
+          return { applied: true, added: projectShown(added), ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
+        },
+      );
+      return toolText(JSON.stringify(result));
+    },
+  });
+
+  pi.registerTool({
+    name: "dispatch_project_edit",
+    label: "pi-dispatch edit project",
+    description:
+      "Changes an existing project (by `id`, from dispatch_projects) and applies it live. `name` replaces the display " +
+      "text (an empty string removes it); `members` replaces the whole member list (same rules as dispatch_project_add). " +
+      "The id cannot be changed here: add the new project, move its scoped-limits row, then delete the old one. A member " +
+      "removed from a capped project is no longer counted by its project:<id> row, which WIDENS what it may spend; " +
+      "records already written keep the project they were recorded under. The operator MUST approve a confirm dialog " +
+      "showing the before->after; refused with no interactive operator.",
+    executionMode: "sequential",
+    parameters: Type.Object({
+      id: Type.String(),
+      name: Type.Optional(Type.String()),
+      members: Type.Optional(Type.Array(Type.String(), { minItems: 1 })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const paths = resolvePaths(deploymentEnv());
+      const cur = currentProject(paths, params.id);
+      const merged = {
+        id: cur.id,
+        name: params.name === undefined ? cur.name : params.name === "" ? null : params.name,
+        members: params.members ?? cur.members,
+      };
+      const mutate = (list: any[]) => list.map((p) => (p.id === cur.id ? merged : p));
+      const plan: any = planProjectsWrite({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate });
+      if (plan.invalid) throw new Error(`rejected: ${escapeInterpreted(plan.invalid)}`);
+      const after = plan.projects.find((p: any) => p.id === cur.id);
+      const leaving = cur.members.filter((m: string) => !after.members.includes(m));
+      const note = leaving.length > 0 ? `\n${leaving.map((m: string) => escapeInterpreted(m)).join(", ")} leave${leaving.length === 1 ? "s" : ""} the project: a project:${cur.id} row no longer counts ${leaving.length === 1 ? "it" : "them"}, which widens what ${leaving.length === 1 ? "it" : "they"} may spend.` : "";
+      const result = await confirmedWrite(
+        ctx,
+        { title: `Edit project ${cur.id}`, message: `project ${cur.id}:\n${JSON.stringify(projectShown(cur))}\n→ ${JSON.stringify(projectShown(after))}${note}` },
+        () => {
+          const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, expect: plan.inputs });
+          if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
+          return { applied: true, project: projectShown(after), ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
+        },
+      );
+      return toolText(JSON.stringify(result));
+    },
+  });
+
+  pi.registerTool({
+    name: "dispatch_project_delete",
+    label: "pi-dispatch delete project",
+    description:
+      "Removes a project (by `id`) from projects.json and applies it live: its members' runs record no project from " +
+      "their next pickup, and records already written keep the id. REFUSED while a scoped-limits row project:<id> names " +
+      "it (the worker would keep its last good projects): delete or change that row first with dispatch_limit_delete or " +
+      "dispatch_limit_edit. The operator MUST approve a confirm dialog naming the project; refused with no interactive operator.",
+    executionMode: "sequential",
+    parameters: Type.Object({ id: Type.String() }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const paths = resolvePaths(deploymentEnv());
+      const cur = currentProject(paths, params.id);
+      const mutate = (list: any[]) => list.filter((p) => p.id !== cur.id);
+      // Judged BEFORE the confirm: a row naming the project refuses here, so the operator is never asked to approve it.
+      const plan: any = planProjectsWrite({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate });
+      if (plan.invalid) throw new Error(`rejected: ${escapeInterpreted(plan.invalid)}`);
+      const result = await confirmedWrite(
+        ctx,
+        { title: `Delete project ${cur.id}`, message: `Remove project ${cur.id} (${cur.members.length} member${cur.members.length === 1 ? "" : "s"}). Its members' runs record no project from their next pickup; records already written keep the id.` },
+        () => {
+          const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, expect: plan.inputs });
+          if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
+          return { applied: true, deleted: cur.id, ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
         },
       );
       return toolText(JSON.stringify(result));
@@ -1110,6 +1263,32 @@ async function confirmedWrite(
   const ok = await ctx.ui.confirm(prompt.title, prompt.message);
   if (!ok) return { applied: false, reason: "operator declined" };
   return doWrite();
+}
+
+/**
+ * A project as a tool shows it (issue #499 part C): the `name` and every member ESCAPED, so a bidi override or an
+ * invisible character in either is visible text in a confirm dialog and a tool result, never a reordering. The id is
+ * charset-checked by the parser and shown as stored.
+ */
+function projectShown(p: any): any {
+  return {
+    id: p?.id,
+    name: p?.name === null || p?.name === undefined ? null : escapeInterpreted(p.name),
+    // Members too (PR #569's review): a folder member may hold a C1 or bidi character the parser admits.
+    members: Array.isArray(p?.members) ? p.members.map((m: any) => escapeInterpreted(String(m))) : p?.members,
+  };
+}
+
+/** The project `id` names in the file the worker reads, or a throw that says why there is none. */
+function currentProject(paths: any, id: string): any {
+  const p: any = readProjects({ projectsPath: paths.projectsFile });
+  if (p?.unset) throw new Error("PI_PROJECTS_FILE is unset, so the worker reads no projects; set it in the deployment's .env (pi-dispatch up does) and restart the worker");
+  if (p?.invalid) throw new Error(`the projects file does not load: ${escapeInterpreted(p.invalid)}`);
+  if (p?.unreadable) throw new Error(`the projects file ${escapeInterpreted(String(paths.projectsFile))} could not be read (${p.unreadable})`);
+  const list: any[] = Array.isArray(p?.projects) ? p.projects : [];
+  const cur = list.find((x) => x.id === id);
+  if (!cur) throw new Error(`no project with id ${JSON.stringify(String(id)).slice(0, 40)} (dispatch_projects lists them)`);
+  return cur;
 }
 
 /** The current triggers as a display list (empty on a missing/invalid file), for index resolution + confirm text. */
@@ -1679,7 +1858,7 @@ const PRICING = { listPricedModels, getPricedModel, isZeroRated, reprice, piAiVe
  * records, so every aggregate -- daily, plans, provenance -- is scoped, not just one table. Returns
  * `{ fold }`, or scanRunRecords' `{ unreachable }` passed through for the caller to surface.
  */
-function assembleCosts(paths: any, window: string, flow?: string, repo?: string): any {
+function assembleCosts(paths: any, window: string, flow?: string, repo?: string, project?: string): any {
   const nowMs = Date.now();
   const sinceMs = costsSinceMs(window, nowMs);
   const records = scanRunRecords({ logsDir: paths.logsDir, sinceMs, nowMs });
@@ -1689,7 +1868,9 @@ function assembleCosts(paths: any, window: string, flow?: string, repo?: string)
   // The repo filter applies at the same records level as the flow one, so EVERY fold arm scopes --
   // one table filtered against unscoped siblings would misread as attribution. `recordInRepo` (issue #498): a bare
   // "acme/web" selects that repo on every forge, a qualified "github:acme/web" (the byRepo rollup's key) one forge.
-  const scoped = typeof repo === "string" && repo !== "" ? flowScoped.filter((r: any) => recordInRepo(r, repo)) : flowScoped;
+  const repoScoped = typeof repo === "string" && repo !== "" ? flowScoped.filter((r: any) => recordInRepo(r, repo)) : flowScoped;
+  // Issue #499 part C: the project filter at the same records level, by the id each record carries (never re-derived).
+  const scoped = typeof project === "string" && project !== "" ? repoScoped.filter((r: any) => recordInProject(r, project)) : repoScoped;
   // The trigger join over the SCOPED records (a flow-filtered fold attributes only what it folds),
   // the same file-read-plus-pure-fold path the dashboard seam takes.
   const triggersView: any = readTriggers({ triggersPath: paths.triggersPath });
@@ -1856,7 +2037,11 @@ async function assembleInsights(paths: any, window: string): Promise<any> {
     const triggerJoin = attributeRunsToTriggers({ records, triggers: Array.isArray(triggersView?.triggers) ? triggersView.triggers : [] });
     costByTrigger = foldTriggerCosts({ records, subscriptions: Array.isArray(subsView?.subscriptions) ? subsView.subscriptions : [], pricing: PRICING, triggerJoin });
   }
-  return { graph, fold, costsUnreachable: null, window, costByTrigger, budget };
+  // Issue #499 part C: the projects' ids and display names for the by-project list. The page escapes and isolates a
+  // name; members are not carried, the page shows spend by id.
+  const pv: any = readProjects({ projectsPath: paths.projectsFile });
+  const projects = Array.isArray(pv?.projects) ? pv.projects.map((x: any) => ({ id: x.id, name: x.name })) : [];
+  return { graph, fold, costsUnreachable: null, window, costByTrigger, budget, projects };
 }
 
 /**
@@ -1981,6 +2166,12 @@ async function openDashboard(paths: any, ctx: any, notify: Notify): Promise<void
         // process of its own. It brackets the launch with tui.stop()/tui.start(); this side only builds
         // the argv and runs it attached to the terminal.
         sandboxInfo: ({ jobId }: { jobId: string }) => readSandboxInfo(paths, jobId),
+        // The PROJECTS view's spend (issue #499 part C): this month's fold by the project each record carries, read once
+        // when the view opens. The records scan lives here with the other fs reads; the panel gets the fold arm only.
+        projectsInfo: () => {
+          const c: any = assembleCosts(paths, "mtd");
+          return c?.unreachable ? { unreachable: String(c.unreachable) } : { byProject: c?.fold?.byProject ?? [] };
+        },
         launchSandbox: ({ jobId }: { jobId: string }) => openSandboxSession(paths, jobId),
         // OSC 52 clipboard write. This hands the terminal the operator's OWN selection: it fires only on
         // an explicit y/Y keypress in RUN_DETAIL, carries id-only strings (a jobId or a derived public
@@ -2331,6 +2522,7 @@ async function manageLimitsViaDialogs(paths: any, ui: any, notify: Notify): Prom
 
 /** Add a scoped limit: scope, then the four optional bounds (blank = omit). Validated + live. */
 async function addScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Promise<void> {
+  const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
   const scope = await ui.input("scope: a repo \"owner/name\" (every forge), \"<forge>:owner/name\" such as github:acme/web (one forge), or an ABSOLUTE local folder path (exact match, no globs)", "");
   if (scope === undefined || scope.trim() === "") return;
   const day = await ui.input("day — max jobs per UTC day for this scope (blank = no day cap)", "");
@@ -2342,12 +2534,13 @@ async function addScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Pr
   const concurrent = await ui.input("concurrent — max jobs in flight for this scope, extras deferred (blank = no limit)", "");
   if (concurrent === undefined) return;
   const l = buildScopedLimit({ scope, day, week, month, concurrent });
-  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (list: any[]) => [...list, l] });
+  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, mutate: (list: any[]) => [...list, l] });
   notify?.(res.ok ? `scoped limit added (${liveOr(res)}): ${l.scope} ${limitSummary(l)}` : `add rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
 /** Edit a scoped limit: select which, re-prompt each field with its current value — blank keeps it. */
 async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Promise<void> {
+  const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
   const p: any = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
   const list: any[] = Array.isArray(p?.limits) ? p.limits : [];
   if (list.length === 0) { notify?.("no scoped limits to edit", "info"); return; }
@@ -2382,7 +2575,7 @@ async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): P
   });
   const note = scopeChangeNote(buildScopedLimit(cur), merged);
   if (note !== "" && !(await ui.confirm(`Edit scoped limit #${index + 1}`, `${cur.scope} → ${merged.scope}.${note}`))) return;
-  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (l: any[]) => l.map((w, i) => (i === index ? merged : w)) });
+  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, mutate: (l: any[]) => l.map((w, i) => (i === index ? merged : w)) });
   notify?.(res.ok ? `scoped limit #${index + 1} updated (${liveOr(res)}): ${merged.scope} ${limitSummary(merged)}` : `edit rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
@@ -2398,6 +2591,7 @@ export function scopeChangeNote(before: any, after: any): string {
 
 /** Delete a scoped limit: select which, confirm, remove. */
 async function deleteScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Promise<void> {
+  const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
   const p: any = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
   const list: any[] = Array.isArray(p?.limits) ? p.limits : [];
   if (list.length === 0) { notify?.("no scoped limits to delete", "info"); return; }
@@ -2408,7 +2602,7 @@ async function deleteScopedLimitViaDialogs(paths: any, ui: any, notify: Notify):
   if (index < 0) return;
   const ok = await ui.confirm("Delete scoped limit", `Remove ${labels[index]}?`);
   if (!ok) return;
-  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (l: any[]) => l.filter((_, i) => i !== index) });
+  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, mutate: (l: any[]) => l.filter((_, i) => i !== index) });
   notify?.(res.ok ? `scoped limit #${index + 1} deleted (${liveOr(res)})` : `delete rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 

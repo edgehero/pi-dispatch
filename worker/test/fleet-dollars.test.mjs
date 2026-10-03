@@ -15,6 +15,7 @@ import {
 	deploymentSettingsOf,
 	firstCallFloorMicros,
 	fleetDollarChecks,
+	fleetProjectsChecks,
 	listedProviderCredentialChecks,
 	modelSubjects,
 	overlayLoaderParityChecks,
@@ -25,6 +26,7 @@ import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/pro
 import { builtinModel, checkModelsKnown } from "../src/model-catalog.mjs";
 import { loadPiModelLoader } from "../src/pi-model-loader.mjs";
 import { parseScopedLimits } from "../src/scoped-limits.mjs";
+import { EMPTY_PROJECTS_FINGERPRINT, parseProjects, projectsFingerprint } from "../src/projects.mjs";
 import { BOUND_OVERHEAD_TOKENS, PRICED_APIS, callCostBound } from "../../image/runner/src/usage-meter.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -471,4 +473,30 @@ test("the real loader writes nothing: no temporary directory, and nothing beside
 	// `pi-fix-auth-*` directory of another file here), so a broad pattern would name their directories.
 	const added = readdirSync(tmpdir()).filter((n) => !before.has(n) && (n.startsWith("pi-dispatch-doctor-models-") || n === "auth.json" || n === "models-store.json"));
 	assert.deepEqual(added, [], "nothing in TMPDIR");
+});
+
+// ── issue #499 part C: the fleet's projects ─────────────────────────────────────────────────────────────
+
+test("doctor warns when a peer's fpProjects differs, naming the host and never a project, a member or a name", () => {
+	const mine = projectsFingerprint(parseProjects(JSON.stringify({ version: 1, projects: [{ id: "shop", name: "Secret Name", members: ["github:acme/web"] }] }), "p.json"));
+	const other = projectsFingerprint(parseProjects(JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web", "/srv/x"] }] }), "p.json"));
+	const checks = fleetProjectsChecks(mine, [{ name: "mini2", fpProjects: other }, { name: "mini3", fpProjects: mine }]);
+	assert.equal(checks.length, 1);
+	assert.equal(checks[0].warn, true);
+	assert.match(checks[0].label, /^Hosts disagree about the projects: mini2 reads a projects\.json/);
+	assert.ok(!/mini3/.test(checks[0].label), "an agreeing peer is not named");
+	for (const secret of ["shop", "Secret Name", "acme/web", "/srv/x"]) assert.ok(!checks[0].label.includes(secret) && !checks[0].fix.includes(secret), `${secret} is not printed`);
+	assert.deepEqual(fleetProjectsChecks(mine, [{ name: "mini3", fpProjects: mine }]), [], "agreement is silent");
+	assert.equal(fleetProjectsChecks(EMPTY_PROJECTS_FINGERPRINT, [{ name: "mini2", fpProjects: mine }]).length, 1, "no projects here against projects there disagrees");
+});
+
+test("a peer that predates fpProjects is named only when projects are in use somewhere", () => {
+	const inUse = projectsFingerprint([{ id: "shop", members: ["/srv/a"] }]);
+	const old = [{ name: "old1" }, { name: "old2", fpProjects: "" }];
+	assert.deepEqual(fleetProjectsChecks(EMPTY_PROJECTS_FINGERPRINT, old), [], "a fleet without projects hears nothing new on upgrade");
+	const here = fleetProjectsChecks(inUse, old);
+	assert.equal(here.length, 1);
+	assert.match(here[0].label, /^old1, old2 publish no fingerprint of their projects/);
+	const there = fleetProjectsChecks(EMPTY_PROJECTS_FINGERPRINT, [...old, { name: "new1", fpProjects: inUse }]);
+	assert.equal(there.length, 2, "a peer with projects makes the silent ones worth naming (and it disagrees)");
 });

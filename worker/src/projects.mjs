@@ -20,6 +20,8 @@
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { configError } from "./config.mjs";
+import { fingerprint } from "./fingerprint.mjs";
+import { hash16 } from "./fleet-lease.mjs";
 import { PROJECT_ID_RE, isProjectId } from "./project-id.mjs";
 import { parseScopeString, qualifiedScopeOf } from "./pause-windows.mjs";
 import { canonicalScope } from "./scoped-limits.mjs";
@@ -49,6 +51,38 @@ const NAME_MAX = 120;
  * a scope listed twice in one project, and an empty `members`.
  */
 export function parseProjects(text, path) {
+	try {
+		return parseProjectsText(text, path);
+	} catch (error) {
+		// Every refusal ESCAPED at the source (PR #569's review): a folder member may hold a C1 or bidi character, and this
+		// message reaches the worker's `projects_reload_invalid` log line, doctor and an admin tool's error. JSON quoting
+		// keeps C0 visible but leaves C1, bidi and zero-width characters raw.
+		if (error?.piDispatchConfig === true) error.message = escapeControls(error.message);
+		throw error;
+	}
+}
+
+/**
+ * The characters `escapeControls` writes out, the SAME set the admin panel's `escapeInterpreted` escapes (PR #569's
+ * second review; `admin/test/projects.test.mjs` compares the two over every code point): the controls (C0, DEL, C1),
+ * every format character (bidi controls and isolates, zero-width and invisible ones, the tag block) but the two joiners
+ * that compose (U+200C, U+200D), the line and paragraph separators, every blank that is not U+0020 but draws one
+ * column (the no-break and fixed-width spaces, U+2800), the Hangul fillers, and the unassigned code points the
+ * terminal draws as nothing (U+2065, U+FFF0-U+FFF8, the special-purpose plane outside its variation selectors).
+ * U+3000 is kept, as the panel keeps it: it draws two columns, an ordinary full-width space.
+ */
+const ESCAPED = /(?![\u200c\u200d\u3000\u{e0100}-\u{e01ef}])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Zs}\u2800\u115f\u1160\u3164\uffa0\u2065\ufff0-\ufff8\u{e0000}-\u{e0fff}]/gu;
+
+/**
+ * Text with the characters that change what a reader SEES written out as `\\u{XXXX}` (`ESCAPED`), U+0020 kept. For a
+ * message about operator text that reaches a log line or a terminal. The worker's twin of the panel's
+ * `escapeInterpreted`; it imports nothing.
+ */
+export function escapeControls(text) {
+	return String(text ?? "").replace(ESCAPED, (ch) => (ch === " " ? ch : `\\u{${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}}`));
+}
+
+function parseProjectsText(text, path) {
 	let parsed;
 	try {
 		parsed = JSON.parse(text);
@@ -144,7 +178,7 @@ function normalizeMember(raw, at, path) {
 export function loadProjects(config, { readFileSync = fsReadFileSync, existsSync = fsExistsSync } = {}) {
 	const path = config.projectsFile;
 	if (path === null || path === undefined) return [];
-	if (!existsSync(path)) throw configError(`projects file does not exist: ${path}`);
+	if (!existsSync(path)) throw configError(`projects file does not exist: ${escapeControls(path)}`);
 	return parseProjects(readFileSync(path, "utf8"), path);
 }
 
@@ -163,3 +197,33 @@ export function projectOf(job, projects) {
 	}
 	return null;
 }
+
+/**
+ * What `fpProjects` hashes (issue #499 part C, INT-HOST-REGISTRY-CONTRACT), exported so a test can read it: one entry
+ * per project, sorted by id, as `{ id, members }` where `members` is the sorted 16-hex hash of each member. Never a
+ * `name`, which is free text, and never a member in clear: a folder member is a host path and a repo member a
+ * repository name, and the registry's content rule keeps both out of a Valkey value, even inside a digest's input.
+ * The id is charset-checked operator text, the same admissibility a run record gives it.
+ *
+ * Membership is what the comparison is about: two hosts that put one scope in two projects, or a scope in a project on
+ * one host and in none on the other, record different projects and count the scope against different project rows.
+ * A `name` decides nothing, so renaming the display text on one host is not a disagreement.
+ */
+export function projectsFingerprintInput(projects) {
+	return (Array.isArray(projects) ? projects : [])
+		.filter((p) => isProjectId(p?.id))
+		.map((p) => ({ id: p.id, members: (Array.isArray(p.members) ? p.members : []).map((m) => hash16(String(m))).sort() }))
+		.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/**
+ * The 16-hex fingerprint `fpProjects` of a host's live projects (`fingerprint.mjs`). It never abstains: a host with no
+ * projects file publishes the fingerprint of no projects, because a host that puts a repo in no project while a peer
+ * puts it in one is the disagreement worth seeing.
+ */
+export function projectsFingerprint(projects) {
+	return fingerprint(projectsFingerprintInput(projects));
+}
+
+/** The fingerprint of no projects: how a reader tells whether projects are in use anywhere on the fleet. */
+export const EMPTY_PROJECTS_FINGERPRINT = projectsFingerprint([]);

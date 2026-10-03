@@ -35,8 +35,9 @@ tab you keep open picks the new fold up through its Reload/auto-reload controls.
 - **Trend lines**: a cumulative window-spend line under the daily columns (dashed from the first
   estimated day onward — once an estimate enters a running total it never leaves), and per-flow
   daily spend as small panels on one shared scale, dashed wherever an estimated day touches.
-- **Breakdowns**: spend by flow, by trigger, by model, by repo, drawn as bars. Clicking a trigger
-  row highlights its node in the topology below.
+- **Breakdowns**: spend by flow, by trigger, by model, by repo and by project, drawn as bars. Clicking a trigger
+  row highlights its node in the topology below. The by-project bars carry the id each run recorded, and runs
+  outside every project, or from before projects existed, are `(no project)` ([projects](projects.md)).
 - **Topology**: the trigger/flow graph, pan/zoom/hover and all ([`graph.md`](graph.md) explains
   every edge and badge), with spend badged under every trigger that spent in the window and each
   cron's next fire or overdue state in its tip. A `run.command` trigger renders as its `/name` with

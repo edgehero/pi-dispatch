@@ -16,6 +16,7 @@
  */
 
 import * as nodeFs from "node:fs";
+import { randomBytes } from "node:crypto";
 import { GIT_READ_FLAGS } from "@edgehero/pi-dispatch/git-hardening";
 import { join, delimiter, sep, isAbsolute, resolve as resolvePath } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -812,14 +813,15 @@ export function readScopedLimits({ scopedLimitsPath, fs = nodeFs }) {
  * edited, while doctor names it; such a write returns `pending`, which says the worker applies it once its LIVE projects
  * define the id (the admin cannot see those, so it claims neither way).
  */
-export function writeScopedLimits({ scopedLimitsPath, projectsPath = null, mutate, fs = nodeFs }) {
+export function writeScopedLimits({ scopedLimitsPath, projectsPath = null, mutate, expect = null, fs = nodeFs }) {
+  const link = symlinkRefusal(fs, scopedLimitsPath, "PI_SCOPED_LIMITS_FILE");
+  if (link) return { invalid: link };
   let current = [];
-  let existing = null;
-  try {
-    existing = fs.readFileSync(scopedLimitsPath, "utf8");
-  } catch {
-    // Missing file: start from the empty v1 shape -- the one repair this writer performs.
-  }
+  // Only a MISSING file starts from the empty v1 shape, the one repair this writer performs (PR #569's review). A file
+  // that is there but cannot be read (EACCES, EISDIR, EIO) refuses, as one that does not parse does: starting from
+  // nothing would write a file that drops every row the operator cannot see from here.
+  const existing = fileSnapshot(fs, scopedLimitsPath);
+  if (isUnreadable(existing)) return { invalid: `the scoped-limits file ${scopedLimitsPath} could not be read (${unreadableCode(existing)}); nothing was written` };
   if (existing !== null) {
     try {
       current = parseScopedLimits(existing, scopedLimitsPath);
@@ -839,12 +841,144 @@ export function writeScopedLimits({ scopedLimitsPath, projectsPath = null, mutat
   } catch (e) {
     return { invalid: e?.message ?? String(e) };
   }
+  const pairText = projectsPath === null || projectsPath === undefined ? null : fileSnapshot(fs, projectsPath);
   const judged = judgeProjectRows(current, written, projectsPath, fs);
   if (judged.refusal) return { invalid: judged.refusal };
-  const tmp = `${scopedLimitsPath}.tmp`;
-  fs.writeFileSync(tmp, text, { mode: 0o644 });
-  fs.renameSync(tmp, scopedLimitsPath);
+  const inputs = [{ path: scopedLimitsPath, text: existing }];
+  if (projectsPath !== null && projectsPath !== undefined) inputs.push({ path: projectsPath, text: pairText });
+  const replaced = replaceFile({ path: scopedLimitsPath, text, inputs, expect, envName: "PI_SCOPED_LIMITS_FILE", fs });
+  if (replaced.invalid) return replaced;
   return judged.pending ? { ok: true, pending: judged.pending } : { ok: true };
+}
+
+/** What `fileSnapshot` returns for a file that is there but cannot be read: a string no file's text can equal. */
+const UNREADABLE = "\u0000unreadable:";
+
+/**
+ * A file's text, `null` when it does not exist (ENOENT, and only ENOENT), or `UNREADABLE` + the error code for any other
+ * read failure (PR #569's review: an EACCES file read as missing let a write drop every project the admin could not
+ * see). The value is also the file's identity for `replaceFile`'s re-check, so it compares as a string.
+ */
+function fileSnapshot(fs, path) {
+  try {
+    return fs.readFileSync(path, "utf8");
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    return `${UNREADABLE}${typeof e?.code === "string" ? e.code : "error"}`;
+  }
+}
+function isUnreadable(snapshot) {
+  return typeof snapshot === "string" && snapshot.startsWith(UNREADABLE);
+}
+function unreadableCode(snapshot) {
+  return snapshot.slice(UNREADABLE.length);
+}
+
+/**
+ * A refusal when the file at `path` is a SYMBOLIC LINK (PR #569's second review), else null. The admin writes only a
+ * regular file. Writing through a link put the rename in the target's directory under the target's name, where the
+ * worker's watcher (which watches the configured path's directory for its basename) never sees it, so a tool said
+ * "applied live" while the worker kept the old caps; replacing the link instead left the shared copy stale. Refusing
+ * is the one rule that cannot lie. `envName` is the variable an operator points at the real file.
+ */
+function symlinkRefusal(fs, path, envName) {
+  if (typeof fs.lstatSync !== "function") return null;
+  try {
+    if (!fs.lstatSync(path).isSymbolicLink()) return null;
+  } catch {
+    return null; // missing (or unreadable: the read reports that)
+  }
+  return `${path} is a symbolic link, and the admin writes only a regular file; edit the file it points to, or point ${envName} at the real path. Nothing was written`;
+}
+
+/**
+ * Replace the file at `path` with `text`, ATOMICALLY, for the two money-file writers (scoped limits and projects).
+ *
+ *   - A SYMLINK is refused (`symlinkRefusal`), never written through or replaced.
+ *   - The tmp file has a name of its own (`<file>.<pid>.<random>.tmp`, created exclusively), so two writers never share
+ *     one and one's rename can never take the other's half-written bytes. A failure to create it is an `{ invalid }`.
+ *   - The file's MODE is kept (a 0600 file stays 0600; a new file is 0644), and so are its OWNER and GROUP (PR #569's
+ *     second review): an admin running as another user than the worker would otherwise leave a file the worker cannot
+ *     read, which it then refuses at its next boot. When the owner cannot be given back (the admin may not chown),
+ *     nothing is written and the write says why.
+ *   - RE-CHECKED right before the rename against `expect`, the files AS THEY WERE when the change was built (the read
+ *     before the operator's confirm; `inputs`, this call's own read, when no earlier read was made). If any changed,
+ *     nothing is written and the write says so. That covers the whole dialog: a second session's write while the
+ *     confirm is open is a refusal, never a silent lost update.
+ *
+ * The residual, stated: a write that lands between the re-check and the rename (microseconds) is still lost or still
+ * pairs badly with the other file. There is no lock across the two files. Returns `{ ok }` or `{ invalid }`.
+ */
+function replaceFile({ path, text, inputs, expect = null, envName, fs }) {
+  const link = symlinkRefusal(fs, path, envName);
+  if (link) return { invalid: link };
+  let before = null;
+  if (typeof fs.statSync === "function") {
+    try {
+      before = fs.statSync(path);
+    } catch {
+      // A new file: 0644, the mode these writers always gave it, owned by whoever writes it.
+    }
+  }
+  const mode = before ? before.mode & 0o777 : 0o644;
+  const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  const drop = () => {
+    try {
+      fs.unlinkSync?.(tmp);
+    } catch {
+      // nothing to drop
+    }
+  };
+  const code = (e) => (typeof e?.code === "string" ? e.code : "error");
+  try {
+    fs.writeFileSync(tmp, text, { mode, flag: "wx" });
+  } catch (e) {
+    drop();
+    return { invalid: `${path} could not be written (${code(e)}: a new file beside it could not be created); nothing was written` };
+  }
+  try {
+    // `mode` on create is masked by the umask; set it exactly.
+    fs.chmodSync?.(tmp, mode);
+  } catch {
+    // best effort: the file was still created with the umask applied
+  }
+  if (before && typeof fs.chownSync === "function" && typeof fs.statSync === "function") {
+    let now = null;
+    try {
+      now = fs.statSync(tmp);
+    } catch {
+      // judged below as a mismatch
+    }
+    if (!now || now.uid !== before.uid || now.gid !== before.gid) {
+      try {
+        fs.chownSync(tmp, before.uid, before.gid);
+      } catch (e) {
+        drop();
+        return { invalid: `${path} is owned by uid ${before.uid} gid ${before.gid}, and the new file could not be given that owner (${code(e)}), so the worker might not read it; run this as that user. Nothing was written` };
+      }
+    }
+  }
+  for (const input of Array.isArray(expect) ? expect : inputs) {
+    if (fileSnapshot(fs, input.path) !== input.text) {
+      drop();
+      return { invalid: `${input.path} changed after this change was built from it (another session wrote it); nothing was written. Look again and retry` };
+    }
+  }
+  try {
+    fs.renameSync(tmp, path);
+  } catch (e) {
+    drop();
+    throw e;
+  }
+  return { ok: true };
+}
+
+/**
+ * The files a write is judged against, as `{ path, text }` snapshots (PR #569's second review): a tool reads them
+ * BEFORE its confirm and passes them back as `expect`, so the re-check before the rename covers the dialog.
+ */
+export function writeInputs({ paths, fs = nodeFs }) {
+  return paths.filter((p) => p !== null && p !== undefined).map((p) => ({ path: p, text: fileSnapshot(fs, p) }));
 }
 
 /**
@@ -892,6 +1026,129 @@ function judgeProjectRows(before, after, projectsPath, fs) {
   if (added.length > 0) return { refusal: `${added.join(", ")} names a project that is not in ${where}; add the project there first. Nothing was written` };
   if (missing.length > 0) return { pending: `${missing.map((row) => row.scope).join(", ")} names a project that is not in ${where}; ${waitFor(missing)}` };
   return {};
+}
+
+/** Why a projects write cannot happen with PI_PROJECTS_FILE unset: the worker reads no projects file then. */
+const PROJECTS_UNSET = "PI_PROJECTS_FILE is unset, so the worker reads no projects file and a project written here would decide nothing. Set it in the deployment's .env (pi-dispatch up does) and restart the worker. Nothing was written";
+
+/**
+ * Read + validate the projects file for display (issue #499 part C, INT-PROJECTS-FILE-CONTRACT), through the SHARED
+ * `parseProjects`. `projectsPath` is the file the WORKER reads (`resolvePaths().projectsFile`): null when
+ * PI_PROJECTS_FILE is unset, which reads `{ unset }` (the worker has no projects then, so the panel shows none rather
+ * than a cwd file the worker never loads). `{ projects }`, or `{ missing }` / `{ invalid }` so the viewer degrades. A
+ * `name` rides in the result for the panel to escape and isolate where it renders; it is never logged.
+ */
+export function readProjects({ projectsPath, fs = nodeFs }) {
+  if (projectsPath === null || projectsPath === undefined) return { unset: true };
+  // Only ENOENT is missing (PR #569's review): a file the admin cannot read is `{ unreadable: <code> }`, and the panel
+  // says so rather than calling it missing.
+  const text = fileSnapshot(fs, projectsPath);
+  if (text === null) return { missing: true };
+  if (isUnreadable(text)) return { unreadable: unreadableCode(text) };
+  try {
+    return { projects: parseProjects(text, projectsPath) };
+  } catch (e) {
+    return { invalid: e?.message ?? String(e) };
+  }
+}
+
+/**
+ * Plan a read-modify-write of the projects file without writing it (issue #499 part C): what `writeProjects` would
+ * write, or why it refuses. The tools call it BEFORE their confirm, so an operator is never asked to approve a change
+ * the write would refuse, and `writeProjects` calls it again after the confirm, so a file that changed in between is
+ * judged as it is then.
+ *
+ * `mutate(projects)` receives copies of the parsed projects (`{ id, name, members }`) and returns the new list. The
+ * existing file goes THROUGH the parser, so a file that does not load, or a newer `version`, refuses the write (this is
+ * a money file: which project a scope is in decides which project row counts it). Only a MISSING file starts from no
+ * projects. The result is re-validated by `parseProjects`, the worker's own loader.
+ *
+ * THE PAIR RULE (issue #499 part B), from the projects side. The worker keeps its last good projects when an edit would
+ * leave a `project:<id>` row in scoped-limits.json naming a project that is gone (`pairWith`), so this refuses a write
+ * that removes an id a row on disk names: delete or change the row first. An id the write does not remove is never
+ * judged, so a row that ALREADY dangles cannot block an unrelated edit; such a write returns `pending`, in the words
+ * `writeScopedLimits` uses, because the admin cannot see what the worker has live. When the scoped-limits file cannot
+ * be read or parsed and the write removes an id, the row cannot be checked, so it is refused.
+ *
+ * Returns `{ text, projects, pending? }` or `{ invalid }`. No message quotes a `name`.
+ */
+export function planProjectsWrite({ projectsPath, scopedLimitsPath = null, mutate, fs = nodeFs }) {
+  if (projectsPath === null || projectsPath === undefined) return { invalid: PROJECTS_UNSET };
+  const link = symlinkRefusal(fs, projectsPath, "PI_PROJECTS_FILE");
+  if (link) return { invalid: link };
+  let current = [];
+  // Only a MISSING file starts from no projects (PR #569's review): an unreadable one read as missing let an add replace
+  // every project with the one added.
+  const existing = fileSnapshot(fs, projectsPath);
+  if (isUnreadable(existing)) return { invalid: `the projects file ${projectsPath} could not be read (${unreadableCode(existing)}), so its projects cannot be kept; nothing was written` };
+  if (existing !== null) {
+    try {
+      current = parseProjects(existing, projectsPath);
+    } catch (e) {
+      return { invalid: e?.message ?? String(e) };
+    }
+  }
+  const next = mutate(current.map((p) => ({ ...p, members: [...p.members] })));
+  // The stored shape: `name` only when there is one, the committed example's shape.
+  const rows = next.map((p) => (p?.name === null || p?.name === undefined ? { id: p?.id, members: p?.members } : { id: p.id, name: p.name, members: p.members }));
+  const text = `${JSON.stringify({ version: 1, projects: rows }, null, 2)}\n`;
+  let written;
+  try {
+    written = parseProjects(text, projectsPath); // the loader's own validator -- never write a file it would refuse
+  } catch (e) {
+    return { invalid: e?.message ?? String(e) };
+  }
+  // Written in the STORED spelling the loader just produced (members resolved and qualified as `projectOf` matches
+  // them, the name trimmed), so the file says what the worker will read rather than what was typed.
+  const stored = written.map((p) => (p.name === null ? { id: p.id, members: p.members } : { id: p.id, name: p.name, members: p.members }));
+  const finalText = `${JSON.stringify({ version: 1, projects: stored }, null, 2)}\n`;
+  const kept = new Set(written.map((p) => p.id));
+  const removed = current.map((p) => p.id).filter((id) => !kept.has(id));
+  let limits = [];
+  let raw = null;
+  if (scopedLimitsPath !== null && scopedLimitsPath !== undefined) {
+    // No scoped-limits file (ENOENT only): no row can name a project. A file that is there but cannot be read, or does
+    // not parse, cannot rule a row out, so a write that removes an id refuses (PR #569's review).
+    raw = fileSnapshot(fs, scopedLimitsPath);
+    if (isUnreadable(raw)) {
+      if (removed.length > 0) return { invalid: `the scoped-limits file ${scopedLimitsPath} could not be read (${unreadableCode(raw)}), so a row naming ${removed.join(", ")} cannot be ruled out; fix it first. Nothing was written` };
+    } else if (raw !== null) {
+      try {
+        limits = parseScopedLimits(raw, scopedLimitsPath);
+      } catch (e) {
+        if (removed.length > 0) return { invalid: `the scoped-limits file does not load (${e?.message ?? String(e)}), so a row naming ${removed.join(", ")} cannot be ruled out; fix it first. Nothing was written` };
+        limits = [];
+      }
+    }
+  }
+  // The two files this plan was judged against, as read: `writeProjects` re-reads both right before its rename.
+  const inputs = [{ path: projectsPath, text: existing }];
+  if (scopedLimitsPath !== null && scopedLimitsPath !== undefined) inputs.push({ path: scopedLimitsPath, text: raw });
+  const dangling = danglingProjectRows(limits, written);
+  const blocking = dangling.filter((d) => removed.includes(d.id));
+  if (blocking.length > 0) {
+    const rows = blocking.map((d) => `project:${d.id} (index ${d.index})`).join(", ");
+    return { invalid: `${rows} in ${scopedLimitsPath} names this project, and the worker keeps its last good projects while a row names a missing one; delete or change that row first (dispatch_limit_delete or dispatch_limit_edit). Nothing was written` };
+  }
+  if (dangling.length > 0) {
+    const ids = [...new Set(dangling.map((d) => d.id))].join(", ");
+    return { text: finalText, projects: written, inputs, pending: `${dangling.map((d) => `project:${d.id}`).join(", ")} in ${scopedLimitsPath} names a project that is not in this file; the worker applies this once its live scoped limits no longer name ${ids}; if they do, it keeps its last good projects. Run pi-dispatch doctor` };
+  }
+  return { text: finalText, projects: written, inputs };
+}
+
+/**
+ * Read-modify-write the projects file (issue #499 part C): `planProjectsWrite`, then `replaceFile` (a symlink refused,
+ * a tmp file of its own, the mode and owner kept, both judged files re-checked before the rename against `expect`, the
+ * tool's pre-confirm plan's `inputs`), so the worker's live-reload watcher never reads half a file. Reached only from
+ * the confirm-gated `dispatch_project_*` tools. Returns `{ ok, pending? }` or `{ invalid }`.
+ */
+export function writeProjects({ projectsPath, scopedLimitsPath = null, mutate, expect = null, fs = nodeFs }) {
+  const plan = planProjectsWrite({ projectsPath, scopedLimitsPath, mutate, fs });
+  if (plan.invalid) return { invalid: plan.invalid };
+  const replaced = replaceFile({ path: projectsPath, text: plan.text, inputs: plan.inputs, expect, envName: "PI_PROJECTS_FILE", fs });
+  if (replaced.invalid) return replaced;
+  return plan.pending ? { ok: true, pending: plan.pending } : { ok: true };
 }
 
 /**

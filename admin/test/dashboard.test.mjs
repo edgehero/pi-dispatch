@@ -3141,3 +3141,137 @@ test("the degrade is a MONOCHROME path, which is what lets it clip by length (#4
   assert.ok(comp.render(80).some((l) => /\u001b\[/.test(String(l))), "the same theme colours the framed pane");
   await comp.dispose();
 });
+
+// ── issue #499 part C: projects in the panel ─────────────────────────────────────────────────────────────
+
+const PROJECT_SNAPSHOT = {
+  ...SNAPSHOT,
+  runs: [
+    { jobId: "j-shop", kind: "github", target: "acme/web#5", flow: "fix", outcome: "completed", reason: null, turns: 4, tokens: { total: 5000, cost: 0.05 }, endedAt: "2026-07-21T00:00:00.000Z", project: "shop" },
+    { jobId: "j-none", kind: "github", target: "acme/api#6", flow: "fix", outcome: "completed", reason: null, turns: 2, tokens: { total: 900, cost: 0.01 }, endedAt: "2026-07-20T00:00:00.000Z", project: null },
+    { jobId: "j-old", kind: "github", target: "acme/web#1", flow: "fix", outcome: "completed", reason: null, turns: 1, tokens: { total: 100, cost: 0.001 }, endedAt: "2026-07-19T00:00:00.000Z" },
+  ],
+  projects: { projects: [{ id: "shop", name: "Web‮shop", members: ["github:acme/web", "/srv/shop-tools"] }, { id: "constructor", name: null, members: ["/srv/ctor"] }] },
+  scopedLimits: { limits: [{ scope: "project:shop", day: 2 }, { scope: "project:gone", day: 1 }, { scope: "acme/web", day: 3 }] },
+  scopedBudget: { rows: [{ day: 1 }, { day: 0 }, { day: 0 }] },
+};
+const PROJECT_INFO = { byProject: [
+  { key: "shop", label: "shop", runs: 4, tokens: 9000, cost: { usd: 1.2, class: "metered", floor: false } },
+  { key: null, label: "(no project)", runs: 2, tokens: 900, cost: { usd: 0.3, class: "metered", floor: false } },
+] };
+
+test("issue #499 part C: j opens the projects view with members and this month's spend, read once through the seam", async () => {
+  let reads = 0;
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => PROJECT_SNAPSHOT, projectsInfo: () => (reads++, PROJECT_INFO) }) });
+  await flush();
+  comp.handleInput("j");
+  const out = stripAnsi(comp.render(100).join("\n"));
+  comp.render(100);
+  await comp.dispose();
+  assert.equal(reads, 1, "one read on entry, never per frame");
+  assert.match(out, /projects · 2/);
+  assert.match(out, /shop {2}2 members {2}\$1\.20 · 4 runs/, "the project, its member count and its spend");
+  assert.match(out, /github:acme\/web/);
+  assert.match(out, /\/srv\/shop-tools/);
+  assert.match(out, /constructor {2}1 member {2}no runs/, "a project with no runs this month says so; a prototype-key id is just an id");
+  assert.match(out, /\(no project\) {2}\$0\.30 · 2 runs/, "the runs under no project");
+});
+
+test("issue #499 part C: a project name is escaped and drawn LAST on its line, so a bidi override reorders nothing", async () => {
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => PROJECT_SNAPSHOT, projectsInfo: () => PROJECT_INFO }) });
+  await flush();
+  comp.handleInput("j");
+  const lines = comp.render(120).map(stripAnsi);
+  const degraded = comp.render(Number.NaN).join("\n");
+  await comp.dispose();
+  const all = lines.join("\n");
+  assert.ok(!all.includes("‮") && !degraded.includes("‮"), "the override never reaches the terminal");
+  const line = lines.find((l) => l.includes("Web\\u{202E}shop"));
+  assert.ok(line, "it is shown escaped, so the operator sees it is there");
+  assert.match(line.trimEnd().replace(/│$/, "").trimEnd(), /· Web\\u\{202E\}shop$/, "nothing follows the name on its line");
+  assert.ok(line.indexOf("shop  2 members") < line.indexOf("Web\\u{202E}shop"), "the id comes before it");
+});
+
+test("issue #499 part C: Enter in the projects view filters the runs list by the id each record carries; Enter again clears it", async () => {
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => PROJECT_SNAPSHOT, projectsInfo: () => PROJECT_INFO }) });
+  await flush();
+  const all = stripAnsi(comp.render(110).join("\n"));
+  assert.match(all, /j-shop/);
+  assert.match(all, /j-none/);
+  assert.match(all, /j projects/, "the runs divider names the key");
+  comp.handleInput("j");
+  comp.handleInput("\r"); // the first row: shop
+  const shop = stripAnsi(comp.render(110).join("\n"));
+  assert.match(shop, /j-shop/);
+  assert.ok(!/j-none|j-old/.test(shop), "a run under no project, and one recorded before projects existed, are not shop's");
+  assert.match(shop, /last 1 · o time · j project shop/, "the divider names the filter and counts what it shows");
+  comp.handleInput("j");
+  comp.handleInput("\u001b[B");
+  comp.handleInput("\u001b[B"); // (no project)
+  comp.handleInput("\r");
+  const none = stripAnsi(comp.render(110).join("\n"));
+  assert.ok(none.includes("j-none") && none.includes("j-old") && !none.includes("j-shop"), "(no project) holds the null and the old record");
+  assert.match(none, /j project \(none\)/);
+  comp.handleInput("j");
+  comp.handleInput("\u001b[B");
+  comp.handleInput("\u001b[B");
+  comp.handleInput("\r"); // the same row again clears it
+  const cleared = stripAnsi(comp.render(110).join("\n"));
+  await comp.dispose();
+  assert.ok(cleared.includes("j-shop") && cleared.includes("j-none"), "Enter on the filtered row clears the filter");
+  assert.match(cleared, /j projects/);
+});
+
+test("issue #499 part C: a run row and the run drill-in show the project a run recorded; a row without one is unchanged", async () => {
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => PROJECT_SNAPSHOT }) });
+  await flush();
+  const lines = comp.render(120).map(stripAnsi);
+  const shopRow = lines.find((l) => l.includes("j-shop"));
+  const noneRow = lines.find((l) => l.includes("j-none"));
+  assert.match(shopRow, /acme\/web#5 · shop · fix/);
+  assert.match(noneRow, /acme\/api#6 · fix/, "no project cell for a run outside every project");
+  // Open the shop run: triggers lead the rows (none here), so the first run row is index 0.
+  comp.handleInput("\r");
+  const detail = stripAnsi(comp.render(100).join("\n"));
+  await comp.dispose();
+  assert.match(detail, /project +shop/);
+});
+
+test("issue #499 part C: the limits view says how many members a project row caps, or that its project is missing", async () => {
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => PROJECT_SNAPSHOT }) });
+  await flush();
+  const out = stripAnsi(comp.render(120).join("\n"));
+  const plain = comp.render(Number.NaN).join("\n"); // the unframed degrade, unclipped
+  await comp.dispose();
+  assert.match(out, /project:shop {2}day 1\/2 {2}2 members/);
+  assert.match(out, /project:gone {2}day 0\/1 {2}not in projects\.json/);
+  assert.match(plain, /project:shop: day 1\/2 · 2 members/);
+  assert.match(plain, /project:gone: day 0\/1 · not in projects\.json/);
+});
+
+test("PR #569's lab: the projects view lists ids the month's records carry that projects.json no longer defines, so it adds up", async () => {
+  const info = { byProject: [...PROJECT_INFO.byProject, { key: "tools", label: "tools", runs: 1, tokens: 10, cost: { usd: 0.15, class: "metered", floor: false } }] };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => PROJECT_SNAPSHOT, projectsInfo: () => info }) });
+  await flush();
+  comp.handleInput("j");
+  const out = stripAnsi(comp.render(120).join("\n"));
+  assert.match(out, /tools {2}not in projects\.json {2}\$0\.15 · 1 run/, "a deleted project's spend is still shown, marked");
+  // Its row is selectable: shop, constructor, tools, (no project).
+  comp.handleInput("\u001b[B");
+  comp.handleInput("\u001b[B");
+  comp.handleInput("\r");
+  const filtered = stripAnsi(comp.render(120).join("\n"));
+  await comp.dispose();
+  assert.match(filtered, /j project tools/);
+});
+
+test("PR #569's review: an unreadable projects file is said to be unreadable, not missing", async () => {
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...PROJECT_SNAPSHOT, projects: { unreadable: "EACCES" } }), projectsInfo: () => PROJECT_INFO }) });
+  await flush();
+  comp.handleInput("j");
+  const out = stripAnsi(comp.render(120).join("\n"));
+  await comp.dispose();
+  assert.match(out, /the projects file is unreadable: EACCES/);
+  assert.ok(!/missing/.test(out));
+  assert.match(out, /shop {2}not in projects\.json {2}\$1\.20 · 4 runs/, "its recorded spend still shows");
+});

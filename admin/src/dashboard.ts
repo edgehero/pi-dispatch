@@ -26,13 +26,14 @@ import { makeQueue, fleetQueueNames, discoverHostQueues, unionQueueNames } from 
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
-import { cancelHeldJob, listRuns, mergedRunsOn, readSettingsView, mapSchedulers, readTriggersWithInstructions, readPauseWindows, readScopedLimits, readStagedPackages, scanRunRecords } from "./read-model.mjs";
+import { cancelHeldJob, listRuns, mergedRunsOn, readSettingsView, mapSchedulers, readTriggersWithInstructions, readPauseWindows, readProjects, readScopedLimits, readStagedPackages, scanRunRecords } from "./read-model.mjs";
 import { deploymentDollarCaps, dollarWindowRows, dollarWindowSpecs, dollarWindowsSinceMs, renderDollarWindows } from "./dollar-windows.mjs";
 import { formatMicros } from "@edgehero/pi-dispatch/money";
+import { projectKeyOf } from "./costs.mjs";
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
-import { box, clip, clipData, cutUnits, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
+import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
 
 const KEY_HINTS = "[p]ause  [r]esume  [q]uit";
@@ -53,6 +54,9 @@ const MIN_WIDTH = 8;
 // Drill-in views (TRIGGER_DETAIL, RUN_DETAIL) are small; they frame to a compact width and center within
 // the wider overlay rather than stretching a handful of key/value lines across the full LIST width.
 const DRILL_WIDTH = 70;
+// The runs list's project filter when it shows every run (issue #499 part C). A symbol, because null is a filter value
+// of its own: the runs recorded under no project.
+const ALL_RUNS = Symbol("all runs");
 
 /** Left-pad each line to center a `blockWidth`-wide frame within the `overlayWidth` overlay. */
 function centerBlock(lines: string[], overlayWidth: number, blockWidth: number): string[] {
@@ -461,6 +465,10 @@ export function createDashboardDeps(
         triggers: triggersView,
         triggerInstructions,
         pauseWindows: readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath }),
+        // The projects as the WORKER reads them (issue #499 part C): `{ unset }` when PI_PROJECTS_FILE is unset. A plain
+        // file read like the ones above, whose fs access lives in read-model.mjs. For the projects view and for the
+        // limits view's project rows; a `name` in it is escaped and isolated wherever a pane draws it.
+        projects: readProjects({ projectsPath: paths.projectsFile }),
         // The operator's staged third-party pi packages (REQ-GLOBAL-PI-OVERLAY), for the armed triggers'
         // trust model. Like the four reads above it is a plain file read whose fs access lives entirely in
         // read-model.mjs -- this module never touches the filesystem -- and it degrades to a safe empty
@@ -579,6 +587,12 @@ export function makeDashboard({
   let pendingCancel: any = null; // { jobId, kind: "active" | "held", target? } | null
   let actionNote: any = null;
   let heldSelected = 0;
+  // The PROJECTS view (issue #499 part C): its cursor, and the spend read ONCE on entry through the injected
+  // `projectsInfo` seam (the month's fold by project; index.ts does the records scan), never per tick. `runProject`
+  // filters the runs list: ALL_RUNS for every run, null for runs recorded under no project, or a project id.
+  let projectsSelected = 0;
+  let projectsInfo: any = null;
+  let runProject: any = ALL_RUNS;
   const refresh = async () => {
     if (fetching || disposed) return;
     fetching = true;
@@ -637,7 +651,7 @@ export function makeDashboard({
     render(width: number): string[] {
       // Clamp the cursor here so a rows list that shrank between ticks can never leave `selected` pointing
       // past the end. `rows` spans the optional ACTIVE row plus the run records.
-      const rows = buildRows(snapshot, runSort);
+      const rows = buildRows(snapshot, runSort, runProject);
       if (selected > rows.length - 1) selected = Math.max(0, rows.length - 1);
       // Clamp the tail scroll so a shrinking log can never scroll past the end; follow mode instead pins
       // the window to the bottom of every fresh tail.
@@ -666,6 +680,9 @@ export function makeDashboard({
         actionNote,
         heldSelected,
         runSort,
+        runProject,
+        projectsSelected,
+        projectsInfo,
         copiedNote,
         copyAvailable: typeof deps?.copyText === "function",
         // Height through the injected seam, read per frame (a resize changes it): null (seam absent, or
@@ -724,7 +741,7 @@ export function makeDashboard({
         // ←/→ walk the run records in place: post-mortems are read in sequence, and Esc-arrow-Enter per
         // record is the tax this removes. The LIST cursor follows, so Esc lands on the run being read.
         if (matchesKey(data, "left") || matchesKey(data, "right")) {
-          const rows = buildRows(snapshot, runSort);
+          const rows = buildRows(snapshot, runSort, runProject);
           const i = rows.findIndex((r) => r.kind === "run" && r.record?.jobId && r.record.jobId === detailRun?.jobId);
           if (i === -1) return;
           const step = matchesKey(data, "left") ? -1 : 1;
@@ -822,6 +839,38 @@ export function makeDashboard({
         // FAILED_LIMIT rows is the same floor the held section takes, and redis-cli holds the rest.
         if (matchesKey(data, "escape")) {
           view = "LIST";
+          tui?.requestRender?.();
+        }
+        return;
+      }
+      if (view === "PROJECTS") {
+        // The projects view (issue #499 part C): a cursor over the projects and the "(no project)" row; Enter filters
+        // the runs list to the cursor's project (Enter on the filtered one clears it) and backs out to the list, where
+        // the runs divider names the filter. Esc backs out unchanged; everything else is inert.
+        const rows = projectRows(snapshot, projectsInfo);
+        if (projectsSelected > rows.length - 1) projectsSelected = Math.max(0, rows.length - 1);
+        if (matchesKey(data, "escape")) {
+          view = "LIST";
+          projectsInfo = null;
+          tui?.requestRender?.();
+          return;
+        }
+        if (matchesKey(data, "up")) {
+          projectsSelected = Math.max(0, projectsSelected - 1);
+          tui?.requestRender?.();
+          return;
+        }
+        if (matchesKey(data, "down")) {
+          projectsSelected = Math.min(Math.max(0, rows.length - 1), projectsSelected + 1);
+          tui?.requestRender?.();
+          return;
+        }
+        if (data === "\r" || data === "\n") {
+          const row = rows[projectsSelected];
+          if (!row) return;
+          runProject = runProject === row.key ? ALL_RUNS : row.key;
+          view = "LIST";
+          projectsInfo = null;
           tui?.requestRender?.();
         }
         return;
@@ -960,7 +1009,7 @@ export function makeDashboard({
         return;
       }
       if (data === "\r" || data === "\n") {
-        const rows = buildRows(snapshot, runSort);
+        const rows = buildRows(snapshot, runSort, runProject);
         const row = rows[selected];
         if (!row) return;
         if (row.kind === "trigger") {
@@ -1007,7 +1056,7 @@ export function makeDashboard({
       }
       // Tab jumps between the two section heads (triggers <-> runs) instead of arrowing through every row.
       if (data === "\t") {
-        const rows = buildRows(snapshot, runSort);
+        const rows = buildRows(snapshot, runSort, runProject);
         if (rows.length === 0) return;
         const trgCount = (snapshot?.triggers?.triggers ?? []).length;
         selected = selected < trgCount && trgCount < rows.length ? trgCount : 0;
@@ -1058,10 +1107,24 @@ export function makeDashboard({
         tui?.requestRender?.();
         return;
       }
+      // `j` opens the PROJECTS view (issue #499 part C) -- the runs divider names it. Not `g`: that was the removed graph
+      // view's key, pinned inert so an old habit opens nothing. The spend is read once, here,
+      // through the injected seam; a panel wired without one shows the projects and their members without spend.
+      if (data === "j" || data === "J") {
+        projectsSelected = 0;
+        try {
+          projectsInfo = typeof deps?.projectsInfo === "function" ? deps.projectsInfo() : null;
+        } catch (err: any) {
+          projectsInfo = { unreachable: err?.message ?? String(err) };
+        }
+        view = "PROJECTS";
+        tui?.requestRender?.();
+        return;
+      }
       // `x` on the ACTIVE row arms the cancel confirm (issue #287). Only there: a run row is history and
       // a trigger row already has its own delete behind Enter. The armed jobId is captured HERE.
       if (data === "x" || data === "X") {
-        const row = buildRows(snapshot, runSort)[selected];
+        const row = buildRows(snapshot, runSort, runProject)[selected];
         if (row?.kind !== "active" || !row.jobId) return;
         pendingCancel = { jobId: row.jobId, kind: "active" };
         tui?.requestRender?.();
@@ -1073,7 +1136,7 @@ export function makeDashboard({
         return;
       }
       if (matchesKey(data, "down")) {
-        selected = Math.min(Math.max(0, buildRows(snapshot, runSort).length - 1), selected + 1);
+        selected = Math.min(Math.max(0, buildRows(snapshot, runSort, runProject).length - 1), selected + 1);
         tui?.requestRender?.();
         return;
       }
@@ -1181,6 +1244,7 @@ function degradeWidth(width: number): number | null {
 
 function renderPanelLines(snapshot: any, width: number, state: any, styler: any): string[] {
   const { view, selected, detailRun, detailTrigger, tailJobId, tail, tailTop, tailFollow, tailAvailable, tailSearchInput, tailQuery, tailMatchLine, detailSandbox, sandboxAvailable, pendingDelete, pendingCancel, actionNote, heldSelected, runSort, copiedNote, copyAvailable, terminalRows } = state;
+  const runProject = "runProject" in (state ?? {}) ? state.runProject : ALL_RUNS;
   const framed = framedAt(width);
   const inner = Math.trunc(width) - 4;
   const title = "pi-dispatch";
@@ -1246,6 +1310,17 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
     return centerBlock(boxed, Math.trunc(width), dw);
   }
 
+  if (view === "PROJECTS") {
+    const dw = framed ? Math.min(Math.trunc(width), DRILL_WIDTH) : Math.trunc(width);
+    const iw = framed ? dw - 4 : 24;
+    const { title: detailTitle, lines } = projectsView(snapshot, state.projectsInfo, state.projectsSelected ?? 0, runProject, iw, styler);
+    if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", "↑↓ select · ↵ filter runs · esc back"];
+    const k = (key: string, label: string) => styler.fg("accent", key) + " " + styler.fg("dim", label);
+    const footer = fitLine([k("↑↓", "select"), k("↵", "filter runs"), k("esc", "back")].join(styler.fg("dim", "  ·  ")), iw, styler);
+    const boxed = frame(styler, { title: detailTitle, width: dw, lines, footer });
+    return centerBlock(boxed, Math.trunc(width), dw);
+  }
+
   if (view === "HELD_LIST") {
     // The held drill-in (issue #287): the section's rows with a cursor and the shared in-frame confirm.
     // Same PII posture as the section -- every cell is the worker's own projection, never a queue job.
@@ -1286,7 +1361,7 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
   // height, when known) drives the section collapse budget in buildListLines; the degraded path below
   // stays uncollapsed -- it is already the everything-else-failed rendering.
   if (framed) {
-    const lines = buildListLines(snapshot, selected, inner, styler, runSort, terminalRows);
+    const lines = buildListLines(snapshot, selected, inner, styler, runSort, terminalRows, runProject);
     return frame(styler, { title, width, lines, footer: listFooter(inner, styler, pendingCancel, actionNote) });
   }
 
@@ -1315,12 +1390,12 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
     // would compete with jobId and target inside one `fitLine(..., inner)` and clip silently at width 80;
     // the title answers the completeness question once rather than fifty times. Absent on a single host,
     // so that output is byte-identical.
-    { title: runsTitle(snapshot), lines: renderRunList(buildRows(snapshot, runSort), selected, 24) },
+    { title: runsTitle(snapshot) + (runProject === ALL_RUNS ? "" : ` · project ${runProject ?? "(none)"}`), lines: renderRunList(buildRows(snapshot, runSort, runProject), selected, 24) },
     { title: "SETTINGS", lines: toLines(renderSettingsView(snapshot.settings)) },
   ];
   // Scoped limits appear only when configured (the mutex needs no line) -- renderScopedLimits returns
   // null for the nothing-configured case, and a section with no lines would render an empty box.
-  const scopedText = renderScopedLimits({ limits: snapshot.scopedLimits, scopedBudget: snapshot.scopedBudget });
+  const scopedText = renderScopedLimits({ limits: snapshot.scopedLimits, scopedBudget: snapshot.scopedBudget, projects: snapshot.projects });
   if (scopedText) sections.splice(2, 0, { title: "SCOPED LIMITS", lines: toLines(scopedText) });
   // Held jobs appear only when something is held, for the same reason: a section with no lines renders an
   // empty box, and a deployment that never waits must look exactly as it did before the feature existed.
@@ -1425,14 +1500,15 @@ function collapseKeys(sections: any[], availableRows: any, focus: string | null,
 /** Compose the colored LIST body lines (RULE marks a `├──┤` separator). With a known terminal height
  * (`availableRows` through the injected seam) sections collapse by priority until the frame fits; an
  * unknown height composes exactly the full panel it always did -- byte-identical by construction. */
-function buildListLines(snapshot: any, selected: number, inner: number, styler: any, runSort = "time", availableRows: any = null): any[] {
+function buildListLines(snapshot: any, selected: number, inner: number, styler: any, runSort = "time", availableRows: any = null, runProject: any = ALL_RUNS): any[] {
   // Triggers are selectable and come FIRST in buildRows, so a trigger's file index == its selection index.
   const trg = triggerLines(snapshot, selected, inner, styler);
   const pw = pauseLines(snapshot.pauseWindows, inner, styler, snapshot.fetchedAt);
-  const sl = limitLines(snapshot.scopedLimits, snapshot.scopedBudget, inner, styler);
+  const sl = limitLines(snapshot.scopedLimits, snapshot.scopedBudget, inner, styler, snapshot.projects);
   // Active + run rows follow the triggers in buildRows, so offset the selection index by the trigger count.
-  const runRows = buildRows(snapshot, runSort).slice(trg.count);
-  const runCount = Array.isArray(snapshot.runs) ? snapshot.runs.length : 0;
+  const runRows = buildRows(snapshot, runSort, runProject).slice(trg.count);
+  // Under a project filter (issue #499 part C) the count is of the runs shown, and the divider names the filter.
+  const runCount = runRows.filter((r: any) => r.kind === "run").length;
   // The panel as an ordered section model. `head` is the divider label+meta (null for the status header),
   // `priority` the collapse order -- pause windows give way first, then settings, then triggers, then
   // spend, roughly inverse to how often an operator acts on them from this panel -- and `viewKey` the key
@@ -1450,7 +1526,7 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
     { key: "limits", head: ["scoped limits", `${sl.count} · m manage`], body: sl.lines, priority: 0, viewKey: "m" },
     ...heldSection(snapshot.held, inner, styler),
     ...failedSection(snapshot.failed, inner, styler),
-    { key: "runs", head: ["runs", `last ${runCount} · o ${runSort}`], body: runLines(runRows, selected - trg.count, inner, styler) },
+    { key: "runs", head: ["runs", `last ${runCount} · o ${runSort} · j ${runProject === ALL_RUNS ? "projects" : `project ${runProject ?? "(none)"}`}`], body: runLines(runRows, selected - trg.count, inner, styler) },
     { key: "settings", head: ["settings", "s edit"], body: settingsLines(snapshot.settings, inner, styler), priority: 2, viewKey: "s" },
   ];
   // The cursor's section is never collapsed out from under it. Runs cannot collapse anyway; the rule is
@@ -2030,17 +2106,17 @@ function pauseRow(w: any, now: number, inner: number, styler: any): string {
 }
 
 /** The scoped limits (issue #242) as colored rows: used/cap per capped window, config-only concurrency. */
-function limitLines(scopedLimits: any, scopedBudget: any, inner: number, styler: any): { count: number; lines: string[] } {
+function limitLines(scopedLimits: any, scopedBudget: any, inner: number, styler: any, projects: any = null): { count: number; lines: string[] } {
   const lines: string[] = [];
   if (scopedLimits && scopedLimits.missing) { lines.push(styler.cell("(no scoped limits · m to manage)", inner, { color: "dim" })); return { count: 0, lines }; }
   if (scopedLimits && scopedLimits.invalid) { lines.push(styler.cell(`(scoped-limits file invalid: ${scopedLimits.invalid})`, inner, { color: "error" })); return { count: 0, lines }; }
   const list = (scopedLimits && scopedLimits.limits) ?? [];
   if (list.length === 0) { lines.push(styler.cell("(no scoped limits · m to manage)", inner, { color: "dim" })); return { count: 0, lines }; }
-  list.forEach((l: any, i: number) => lines.push(limitRow(l, scopedBudget?.rows?.[i] ?? null, inner, styler)));
+  list.forEach((l: any, i: number) => lines.push(limitRow(l, scopedBudget?.rows?.[i] ?? null, inner, styler, projects)));
   return { count: list.length, lines };
 }
 
-function limitRow(l: any, used: any, inner: number, styler: any): string {
+function limitRow(l: any, used: any, inner: number, styler: any, projects: any = null): string {
   // The dot goes amber when any capped window's used count has reached its cap (the next job refuses
   // scope-cap, or project-cap on a `project:<id>` row). Concurrency never drives the dot: per-scope in-flight is worker-process state this
   // panel cannot see, and the panel never invents a number -- `≤K at once` is config, stated as such.
@@ -2056,9 +2132,97 @@ function limitRow(l: any, used: any, inner: number, styler: any): string {
   const dot = atCap ? styler.fg("warning", "●") : styler.fg("dim", "○");
   const bits = [`${dot} ${styler.fg("accent", l.scope ?? "-")}`, ...windows];
   if (Number.isInteger(l.concurrent)) bits.push(styler.fg("muted", `≤${l.concurrent} at once`));
+  // A project row (issue #499 part C) says how many members it caps, or that its project is missing, which the worker
+  // refuses (doctor names it). Read from the projects file the worker reads; nothing when that is unreadable.
+  const note = projectRowNote(l, projects);
+  if (note) bits.push(styler.fg(note.missing ? "warning" : "muted", note.text));
   return fitLine(bits.join(styler.fg("dim", "  ")), inner, styler);
 }
 
+
+/** The project id a run record carries, or null (issue #499 part C). The fold's rule, so the panel and the costs agree. */
+function recordProject(record: any): string | null {
+  return projectKeyOf(record);
+}
+
+/**
+ * A `project:<id>` row's note for the limits view (issue #499 part C): how many members the project has, or that the
+ * project is missing from the projects file the worker reads (the worker refuses such a row; doctor names it). Null
+ * for any other row, and when the projects file does not load (its own line says so; a guess here would not).
+ */
+function projectRowNote(l: any, projects: any): { text: string; missing: boolean } | null {
+  if (typeof l?.scope !== "string" || !l.scope.startsWith("project:")) return null;
+  const id = l.scope.slice("project:".length);
+  if (projects?.unset) return { text: "not in projects.json (PI_PROJECTS_FILE unset)", missing: true };
+  if (!Array.isArray(projects?.projects)) return null;
+  const p = projects.projects.find((x: any) => x?.id === id);
+  if (!p) return { text: "not in projects.json", missing: true };
+  const n = Array.isArray(p.members) ? p.members.length : 0;
+  return { text: `${n} member${n === 1 ? "" : "s"}`, missing: false };
+}
+
+/**
+ * The PROJECTS view's selectable rows: each project in the file, then each id the month's records carry that the file
+ * no longer defines (a deleted or renamed project, or every id when the file does not load: PR #569's lab), marked
+ * so, then the "(no project)" bucket (key null). The rows add up to the month: spend recorded under an id is never
+ * dropped because today's file lacks it.
+ */
+function projectRows(snapshot: any, info: any = null): any[] {
+  const list: any[] = Array.isArray(snapshot?.projects?.projects) ? snapshot.projects.projects : [];
+  const known = new Set(list.map((p: any) => p?.id));
+  const orphans = (Array.isArray(info?.byProject) ? info.byProject : [])
+    .map((r: any) => r?.key)
+    .filter((k: any) => typeof k === "string" && k !== "" && !known.has(k));
+  return [...list.map((p: any) => ({ key: p.id, project: p })), ...orphans.map((k: string) => ({ key: k, project: null, orphan: true })), { key: null, project: null }];
+}
+
+/**
+ * The PROJECTS view (issue #499 part C): each project with its members and its spend this month, then the runs
+ * recorded under no project. Spend is the cost fold's `byProject` (typed dollars through `fmtCost`, the panel's one
+ * money renderer), keyed by the project id each RECORD carries, read once when the view opened.
+ *
+ * THE NAME is the operator's free text, and `projects.json` admits a bidi override or an invisible character in it.
+ * It is ESCAPED (`escapeInterpreted`: such a character becomes visible `\u{...}` text, so the operator sees it is
+ * there) and ISOLATED: it is the LAST thing on its line, so there is nothing after it for it to reorder, and the id it
+ * names is drawn before it. Members are scopes the parser checked; they are drawn through `cellOf` like every cell.
+ */
+function projectsView(snapshot: any, info: any, selected: number, runProject: any, iw: number, styler: any): { title: string; lines: string[] } {
+  const pv = snapshot?.projects;
+  const count = Array.isArray(pv?.projects) ? pv.projects.length : 0;
+  const title = `projects · ${count}`;
+  const lines: string[] = [];
+  if (pv?.unset) lines.push(styler.cell("PI_PROJECTS_FILE is unset: the worker reads no projects", iw, { color: "dim" }));
+  else if (pv?.missing) lines.push(styler.cell("(the projects file is missing)", iw, { color: "error" }));
+  else if (pv?.unreadable) lines.push(styler.cell(`(the projects file is unreadable: ${cellOf(pv.unreadable)})`, iw, { color: "error" }));
+  else if (pv?.invalid) lines.push(styler.cell(`(projects file invalid: ${cellOf(pv.invalid)})`, iw, { color: "error" }));
+  const spend = new Map<any, any>();
+  if (info?.unreachable) lines.push(styler.cell(`spend unreadable (${cellOf(info.unreachable)})`, iw, { color: "error" }));
+  else if (Array.isArray(info?.byProject)) {
+    for (const r of info.byProject) spend.set(r?.key ?? null, r);
+    lines.push(styler.cell("spend this month, by the project each run recorded", iw, { color: "dim" }));
+  } else lines.push(styler.cell("spend not read (no records scan wired)", iw, { color: "dim" }));
+  const rows = projectRows(snapshot, info);
+  rows.forEach((row: any, i: number) => {
+    const cursor = i === selected ? styler.fg("accent", "›") : " ";
+    const s = spend.get(row.key);
+    const money = s ? `${fmtCost(s.cost)} · ${s.runs} run${s.runs === 1 ? "" : "s"}` : "no runs";
+    const filtering = runProject === row.key ? styler.fg("warning", " · filtering runs") : "";
+    if (row.orphan) {
+      lines.push(fitLine(`${cursor} ${styler.fg("accent", cellOf(row.key))}  ${styler.fg("warning", "not in projects.json")}  ${styler.fg("text", money)}${filtering}`, iw, styler));
+      return;
+    }
+    if (row.project === null) {
+      lines.push(fitLine(`${cursor} ${styler.fg("muted", "(no project)")}  ${styler.fg("text", money)}${filtering}`, iw, styler));
+      return;
+    }
+    const p = row.project;
+    const n = Array.isArray(p.members) ? p.members.length : 0;
+    const name = typeof p.name === "string" && p.name !== "" ? styler.fg("dim", ` · ${escapeInterpreted(p.name)}`) : "";
+    lines.push(fitLine(`${cursor} ${styler.fg("accent", cellOf(p.id))}  ${styler.fg("muted", `${n} member${n === 1 ? "" : "s"}`)}  ${styler.fg("text", money)}${filtering}${name}`, iw, styler));
+    for (const m of Array.isArray(p.members) ? p.members : []) lines.push(fitLine(`    ${styler.fg("dim", cellOf(escapeInterpreted(String(m))))}`, iw, styler));
+  });
+  return { title, lines };
+}
 
 /**
  * `RUNS`, or `RUNS · 2 hosts`, or `RUNS · this host only`.
@@ -2143,6 +2307,9 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
   // the `y` copy seam asks `targetUrl` itself. Leaving the call would have been a dead read with a comment
   // explaining a caller that does not exist.
   const targetCell = styler.fg("muted", cell(r.target));
+  // The run's project (issue #499 part C), after its target, only when the record carries one: a run outside every
+  // project, and one recorded before projects existed, keeps the row it always had.
+  const project = recordProject(r);
   const cells = [
     styler.fg("text", cell(r.jobId)),
     // NO HYPERLINK, deliberately (issue #382). The gate over every pane line can only allowlist a SHAPE, and
@@ -2150,6 +2317,7 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
     // shape it cannot tell apart from theirs. `targetUrl` survives for the `y` copy seam, which asks it
     // directly. The target text prints either way; what is lost is a click.
     targetCell,
+    ...(project === null ? [] : [styler.fg("syntaxType", project)]),
     styler.fg("accent", cell(r.flow)),
     outcomeColored(r.outcome, r.reason, styler),
     styler.fg("dim", `${cell(r.turns)}t`),
@@ -2532,7 +2700,7 @@ function countdownText(ms: number): string {
  * dispatches on `kind`. A null or malformed snapshot yields an empty list. No `.log`, no `.data` -- the
  * ACTIVE row carries only the id-only job id.
  */
-function buildRows(snapshot: any, runSort = "time"): any[] {
+function buildRows(snapshot: any, runSort = "time", runProject: any = ALL_RUNS): any[] {
   // Triggers lead the selectable list (Enter -> TRIGGER_DETAIL), then the optional ACTIVE row, then runs.
   // A trigger row carries its RAW file `index` -- the one every display record now carries (issue #54)
   // -- so a CRUD action targets the right entry in triggers.json even when the display dropped an
@@ -2542,7 +2710,10 @@ function buildRows(snapshot: any, runSort = "time"): any[] {
   // record predating the field, where it is the best available claim.
   const triggers = (snapshot?.triggers?.triggers ?? []).map((t: any, i: number) => ({ kind: "trigger", trigger: t, index: Number.isInteger(t?.index) ? t.index : i }));
   const active = snapshot?.activeJobId ? [{ kind: "active", jobId: snapshot.activeJobId }] : [];
-  const runs = (Array.isArray(snapshot?.runs) ? snapshot.runs : []).map((record: any) => ({ kind: "run", record }));
+  // The project filter (issue #499 part C) reads the id the record carries, never the projects file as it is now.
+  const runs = (Array.isArray(snapshot?.runs) ? snapshot.runs : [])
+    .filter((record: any) => runProject === ALL_RUNS || recordProject(record) === runProject)
+    .map((record: any) => ({ kind: "run", record }));
   return [...triggers, ...active, ...sortRuns(runs, runSort)];
 }
 
@@ -2592,7 +2763,8 @@ function renderRunList(rows: any[], selected: number, w: number): string[] {
     // (issue #382, item 1). `clipData` substitutes before clipping, so the line is belt-and-braces: a field
     // added here without `cellOf` still cannot delete a column's worth of width.
     const rep = run?.replica > 0 ? cellOf(`r${run.replica}/${run.replicas ?? "?"} `) : "";
-    const cells = [run?.jobId, run?.target, run?.flow, run?.outcome, run?.turns, run?.tokens?.total].map(cellOf).join(" · ");
+    const project = recordProject(run);
+    const cells = [run?.jobId, run?.target, ...(project === null ? [] : [project]), run?.flow, run?.outcome, run?.turns, run?.tokens?.total].map(cellOf).join(" · ");
     out.push(clipData(`${cursor} ${rep}${cells}`, w));
   }
   const below = rows.length - top - count;
@@ -2757,6 +2929,9 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // and nothing is inferred for it -- the panel shows a record, it decides nothing from one. Unlike the host
   // line, every record this version writes carries the field, so the line is the normal case.
   if (typeof r.backend === "string" && r.backend !== "") out.push(kv("backend", show(r.backend)));
+  // WHICH PROJECT (issue #499 part C): the id the worker resolved at pickup and wrote into the record. Absent for a run
+  // outside every project and for one recorded before projects existed, which are never re-attributed.
+  if (recordProject(r) !== null) out.push(kv("project", recordProject(r)));
 
   // turns · exit · budget slot · attempt (each present only when the field is).
   const turnBits = [`${show(r.turns)} turns`, `exit ${show(r.exitCode)}`];

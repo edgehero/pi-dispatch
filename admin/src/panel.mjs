@@ -234,7 +234,7 @@ function mapInterpreted(s, replace) {
       }
     }
     const ch = String.fromCodePoint(text.codePointAt(i));
-    out += interpreted(ch) ? replace : ch;
+    out += interpreted(ch) ? (typeof replace === "function" ? replace(ch) : replace) : ch;
     i += ch.length;
   }
   return out;
@@ -339,6 +339,17 @@ export function scrubKeepingStyle(s) {
  */
 export function scrubControlsPerLine(s) {
   return String(s ?? "").split("\n").map((line) => scrubControls(line)).join("\n");
+}
+
+/**
+ * The same class, ESCAPED rather than substituted: each member becomes its visible `\u{XXXX}` spelling (issue #499
+ * part C). For OPERATOR FREE TEXT that has no other way to say what it holds -- a project's `name`, which
+ * `projects.json` admits with a bidi override in it. Substituting would show the name with a hole where the override
+ * was; escaping shows that it is there and stops it reordering anything, which is what an operator reading a name
+ * needs to see. Not for record fields or log lines, which keep `scrubControls`' column-for-column substitution.
+ */
+export function escapeInterpreted(s) {
+  return mapInterpreted(s, (ch) => `\\u{${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}}`);
 }
 
 /** Does this string carry one? `search` rather than `.test`, because a `/g` regex carries `lastIndex`. */

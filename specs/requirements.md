@@ -633,11 +633,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   from the overlay (add / edit-flow / delete, writing `triggers.json` — validated by the shared
   `parseTriggers`, atomic — and reloaded **live** by both services, `OQ-008`). The model-callable tools are
   the **reads** `dispatch_status`, `dispatch_runs`, `dispatch_costs`, `dispatch_triggers`,
-  `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`; the **queue controls** `dispatch_pause` and
+  `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`; the **queue controls** `dispatch_pause` and
   `dispatch_resume`; the **gated enqueue** `dispatch_run`; and the **confirm-gated writes** `dispatch_set`,
   `dispatch_trigger_add`, `dispatch_trigger_edit`, `dispatch_trigger_delete`, `dispatch_pause_add`,
   `dispatch_pause_edit`, `dispatch_pause_delete`, `dispatch_limit_add`, `dispatch_limit_edit`,
-  `dispatch_limit_delete`, `dispatch_wait_cancel`. **This list is the pin**: `admin/test/wiring.test.mjs`
+  `dispatch_limit_delete`, `dispatch_wait_cancel`, `dispatch_project_add`, `dispatch_project_edit`,
+  `dispatch_project_delete`. **This list is the pin**: `admin/test/wiring.test.mjs`
   reads this paragraph and fails the build if a registered tool is missing from it, or if a name here is
   registered nowhere — so every name is spelled in full, and a tool discussed as rejected belongs in
   **Why**, which the scan does not read. There is deliberately **no count word** beside the list: a number
@@ -656,6 +657,15 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   The scoped-limit writers take `dayUsd`, `weekUsd` and `monthUsd`, and `dispatch_set` the four dollar keys, each
   judged by the worker's own parser before the confirm. Neither trigger write tool can set a trigger's
   `run.maxCostUsd` or `run.models`; the trigger read shows both.
+  Since issue #499's part C projects have operator surfaces. The panel's `j` key opens a projects view (each
+  project's members and this month's spend, then the runs under no project), Enter there filters the runs list to
+  one project, a run row and the run drill-in show the project a run recorded, and the limits view says how many
+  members a `project:<id>` row caps or that its project is missing. The project tools write `projects.json`
+  through the worker's own parser, tmp and rename, and refuse while `PI_PROJECTS_FILE` is unset (the worker then
+  reads no projects). A write that removes a project a scoped-limits row names is refused, and one that leaves a
+  row dangling that it did not create says `pending` in the words the scoped-limit writers use. A project's
+  `name` is display text: escaped (an invisible or bidi character shows as `\u{...}`) and isolated wherever it
+  renders, and never in a log line.
   Since issue #92 the extension also carries the **first-run path**: `/dispatch setup`
   (operator-typed only — deliberately no model-callable tool; `DES-FIRST-RUN-SETUP-WIZARD`), a
   detection tree on bare `/dispatch` that offers setup **only** when no deployment exists anywhere
@@ -672,7 +682,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   confirm-gated tool the model **cannot self-approve** — the model emits the call, the human answers the
   confirm — so a prompt-injected session cannot raise the cap without a human keypress it cannot forge.
   The three dollar windows (`dailyCostUsd`, `weeklyCostUsd`, `monthlyCostUsd`) are settings keys too, behind the
-  same operator-typed or confirm-gated write, and are enforced since issue #501's part 3. A trigger's
+  same operator-typed or confirm-gated write, and are enforced since issue #501's part 3.
+  A project write is confirm-gated for the same reason: which project a repo is in decides which project row counts
+  it, so moving a repo out of a capped project widens what it may spend. A trigger's
   `run.maxCostUsd` and `run.models` are not settable by any tool, confirm or no confirm: each decides what the
   trigger's jobs can spend or reach, so removing or raising one is a widening, and it is written by hand in the
   reviewed triggers file. A tool call that carries either is REFUSED rather than dropped, because a dropped field
@@ -690,7 +702,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `CONST-ISSUE-TEXT-IS-DATA`, `CONST-BUDGET-BEFORE-TOKENS`, `REQ-DURABLE-RUN-HISTORY`,
   `REQ-AI-TRIGGERED-RUNS`
 - **Acceptance**: Given the extension is loaded, when the operator runs `/dispatch status`, then queue
-  counts, paused state, and budget render with no model involvement; given a model-invoked settings OR
+  counts, paused state, and budget render with no model involvement; given a project tool with no interactive
+  operator, then it refuses and writes nothing; given `dispatch_project_delete` for a project a scoped-limits row
+  names, then it refuses before any confirm and the file is untouched; given an approved project write, then the
+  file is written by tmp and rename and parses with the worker's loader; given a project name holding a bidi
+  override, then the panel, the insights page, a confirm and a tool result show it escaped; given a model-invoked settings OR
   trigger write tool, when no interactive operator is present (`ctx.hasUI` false), then it refuses and writes
   nothing; when an operator is present but declines the confirm, then it writes nothing and reports
   `applied:false`; when the operator approves, then it writes exactly the change the confirm showed; given an
@@ -1114,8 +1130,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   rendering ONE retention-bounded fold (`DES-COST-FOLD-BY-SCAN`) of the run-history
   sidecars: spend per **flow**, per **model**, per **day**, per **trigger** (attributed under
   `REQ-TOPOLOGY-GRAPH` (b)'s index-and-type join, with chained/manual/unattributed runs as explicit
-  buckets pinned to the table's tail, never blended into a trigger's number), and per **repository
-  target** (the forge issue/MR tail stripped by the one shared grammar); subscription burn context from the
+  buckets pinned to the table's tail, never blended into a trigger's number), per **repository
+  target** (the forge issue/MR tail stripped by the one shared grammar), and per **project** (issue #499 part C:
+  keyed by the `project` id each run record carries, with a `(no project)` bucket for runs outside every project
+  and for runs recorded before projects existed, which are never re-attributed from the projects file as it is
+  now; `dispatch_costs` filters by one project id at the records level, so every fold arm scopes); subscription burn context from the
   operator's declarations (`INT-SUBSCRIPTIONS-FILE-CONTRACT`): amortized effective $/run, peak-window
   consumption, and the API-rate comparison line per plan; and a **what-if** that re-prices a flow's
   recorded token profiles under another model through the pricing façade
@@ -1171,7 +1190,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   persisted index+type pair disagrees with the current triggers file, then its spend lands under an
   explicit `(unattributed)` bucket, never under a trigger and never under `(manual/local)`; given a
   fold assembled without a trigger join, then `byTrigger` is null and no surface renders an empty
-  trigger table that looks exhaustive.
+  trigger table that looks exhaustive; given runs recorded under project `shop`, a run with no project and a
+  run recorded before projects existed, then `byProject` folds the first under `shop` and the other two under
+  `(no project)`, a fold over the id `constructor` keeps its own row, and `dispatch_costs` with `project: shop`
+  scopes every fold arm to the first run.
 
 ## REQ-TOPOLOGY-GRAPH
 
@@ -2949,6 +2971,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-03 | Issue #499, part C (the operator surfaces). **`REQ-COST-ANALYTICS` AMENDED**: the fold groups spend per project too, keyed by the `project` id each run record carries, with a `(no project)` bucket for runs outside every project and for runs recorded before projects existed (never re-attributed from the projects file as it is now); `dispatch_costs` gains a `project` filter applied at the records level, so every fold arm scopes; the Acceptance gains the clause (a `constructor` id keeps its own row, because the fold is a Map). **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the model-callable list gains the read `dispatch_projects` and the confirm-gated writes `dispatch_project_add`, `dispatch_project_edit` and `dispatch_project_delete` (the wiring scan holds the list); the Statement says what the panel shows (the `j` projects view with members and spend, the runs filter, the project on a run row and in the drill-in, the member count or missing mark on a `project:<id>` limits row), that the writes refuse while `PI_PROJECTS_FILE` is unset and while a scoped-limits row names a project they would remove, and that a name is escaped and isolated wherever it renders and never logged; the Why says why a project write is confirm-gated (moving a repo out of a capped project widens what it may spend); the Acceptance gains five clauses. **`REQ-SCOPED-LIMITS` UNCHANGED, checked**: enforcement did not move; the panel only reads the rows. Residuals stated in `INT-PROJECTS-FILE-CONTRACT` and `docs/projects.md`: old records fold into `(no project)` and are never re-attributed, one project per scope, webhook triggers are not grouped, the project is per attempt. **Code evidence**: admin/src/costs.mjs -> buildByProject, recordInProject; admin/src/index.ts -> dispatch_projects, dispatch_project_add, dispatch_project_edit, dispatch_project_delete, dispatch_costs; admin/src/dashboard.ts -> projectsView. |
 | 2026-10-03 | Issue #499, part B (project rows). **`REQ-SCOPED-LIMITS` AMENDED**: a Project rows bullet (a `project:<id>` row, version 2 in every field, caps every member of a project as one, with job counts refused `project-cap`, `concurrent` deferring, and dollar windows refused `dollar-cap`; reserve narrowest first, repo or folder row, project row, global, and every refund gives back every ledger still held; a row naming a missing project refuses the start) and the matching Acceptance. UNCHANGED, checked: `REQ-ADMIN-VIA-PI-EXTENSION` (no tool added; `dispatch_limit_add`'s description names project rows and `project-cap`), `REQ-COST-ANALYTICS` (the per-project fold is part C). Code evidence: `worker/src/scoped-limits.mjs`, `worker/src/budget.mjs`, `worker/src/processor.mjs`, `worker/src/index.mjs`, `worker/src/start.mjs`; tests `worker/test/processor-projects.test.mjs`, `scope-mutex.test.mjs`, `start-wiring.test.mjs`. |
 | 2026-10-03 | Issue #500, part E: the parent's fold, STOP and detector. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**, the residual-gap paragraph becomes Child processes: a pi child's ledger is folded into the job's totals every second and at teardown (`childTotal` keeps the four-part split equal to `total`), the token cap, the cost cap and the PARENT's model list are judged on the job as a whole, a stop reaches children through `STOP`, and a pi child with no ledger is unmetered: a floor (`unmeteredChildren`), and under any policy a stop (`cost-cap`, else `token_budget`, else `model-not-allowed`); an uncapped job records the floor only. The old sentence (diagnostic sampling, a fix that needs TLS termination) is withdrawn. The compaction sentence (`otherTotal`, fresh session id) is UNCHANGED, checked. **Code evidence**: image/runner/src/child-watch.mjs -> createChildWatch, linuxProc, isPiProcess; image/runner/run-job.mjs; image/runner/test/child-watch.test.mjs; image/runner/test/child-watch.integration.test.mjs. |
 | 2026-10-03 | Issue #499, part A. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, the `up` bullet: `up` also fills `PI_PROJECTS_FILE` with this folder's `projects.json`, which `init` now scaffolds empty, under the same never-clobber rule; an empty value refuses the boot, as for the scoped-limits key. **`REQ-SCOPED-LIMITS` UNCHANGED, checked**: projects are recorded per run in this part and capped in part B. **Code evidence**: worker/src/up.mjs; worker/src/init.mjs -> EMPTY_PROJECTS; worker/test/up.test.mjs. |

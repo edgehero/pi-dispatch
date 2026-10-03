@@ -40,7 +40,7 @@ import { makeCheckOnceSpent, makeCheckWaitSkew, makeDisarmOnce } from "./trigger
 import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "./watch-closer.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
 import { checkProjectRows, danglingProjectRows, dollarRowsWithoutCap, loadScopedLimits, scopeClaimRows } from "./scoped-limits.mjs";
-import { loadProjects, projectOf } from "./projects.mjs";
+import { escapeControls, loadProjects, projectOf, projectsFingerprint } from "./projects.mjs";
 import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
@@ -371,7 +371,8 @@ export function reloadProjects(config, ref, log, pair = null) {
 			if (pair.deploymentCap) warnDollarRowsWithoutCap(other, pair.deploymentCap(), log);
 		}
 	} catch (err) {
-		log("projects_reload_invalid", { reason: err?.message });
+		// Escaped (PR #569's review): the parser's own refusals already are, and an fs error quoting the path is too.
+		log("projects_reload_invalid", { reason: escapeControls(err?.message) });
 	}
 }
 
@@ -1445,6 +1446,10 @@ export async function startWorker(
 			const settings = resolveSettings(config, readOverlay(settingsFile));
 			return usdFingerprint(settings.invalid ? config : settings, scopedLimits.current, config.allowedModels);
 		},
+		// Issue #499 part C: a fingerprint of the LIVE projects (ids and member hashes, never a name), so doctor can name a
+		// host whose projects.json differs. Each host resolves its own jobs' project from its own copy, while the project
+		// rows' counters are shared, so two copies put one repo in two projects. A thunk, so a live edit shows in one beat.
+		fpProjects: () => projectsFingerprint(projects.current),
 	});
 
 

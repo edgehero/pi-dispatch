@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildInsightsHtml, layoutDailyChart, layoutBarList, layoutFlowLines, layoutCumulative, INSIGHTS_COST_CLASSES } from "../src/insights-html.mjs";
+import { buildInsightsHtml, layoutDailyChart, layoutBarList, layoutFlowLines, layoutCumulative, INSIGHTS_COST_CLASSES, INSIGHTS_PROJECT_ID_RE } from "../src/insights-html.mjs";
+import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { buildGraphModel } from "../src/graph-model.mjs";
 import { buildGraphScene, drawnColumns } from "../src/graph-html.mjs";
 import { COST_CLASSES, foldTriggerCosts } from "../src/costs.mjs";
@@ -850,4 +851,52 @@ test("a trigger's spend badge fits its chip, the whole text in a tooltip (issue 
   assert.ok(m[1].endsWith("…") && 16 + drawnColumns(m[1]) * 6 <= chip.w - 4, `the cut badge ${JSON.stringify(m[1])} fits a ${chip.w}px chip`);
   // A badge that fits is drawn whole and carries no tooltip, byte for byte as before.
   assert.ok(buildInsightsHtml(CANNED_PAYLOAD(), { now: NOW }).includes(">plan:kimi</text>"), "a short badge is untouched");
+});
+
+// ---- issue #499 part C: by project ----
+
+test("the breakdown gains a by-project list keyed by id, with names escaped and isolated under it", () => {
+  const p = CANNED_PAYLOAD();
+  p.fold.byProject = [
+    { key: "shop", label: "shop", runs: 3, tokens: 100, cost: usd(1.25, "metered") },
+    { key: "constructor", label: "constructor", runs: 1, tokens: 10, cost: usd(0.5, "metered") },
+    { key: null, label: "(no project)", runs: 2, tokens: 10, cost: usd(0.25, "metered") },
+    { key: "<script>", label: "<script>", runs: 1, tokens: 1, cost: usd(0.1, "metered") },
+  ];
+  p.projects = [
+    { id: "shop", name: "Web‮shop <b>" },
+    { id: "constructor", name: null },
+    { id: "Bad Id", name: "ignored" },
+  ];
+  const out = buildInsightsHtml(p, { now: NOW });
+  assert.ok(out.includes("<h3>by project</h3>"), "the section renders");
+  assert.ok(out.includes('aria-label="spend by project"'));
+  assert.ok(out.includes(">shop</text>") && out.includes(">constructor</text>") && out.includes(">(no project)</text>"), "bars carry the id, and the no-project bucket");
+  assert.ok(!out.includes(">&lt;script&gt;</text>"), "a non-id key never renders as a bar label");
+  assert.ok(!out.includes("‮"), "the override never reaches the page");
+  assert.ok(out.includes('<span class="pid">shop</span> <bdi>Web\\u{202E}shop &lt;b&gt;</bdi>'), "escaped, HTML-escaped and isolated in a bdi");
+  assert.ok(!out.includes("ignored"), "a name for an id that is not an id is dropped");
+  assert.equal(buildInsightsHtml(p, { now: NOW }), out, "byte-deterministic");
+});
+
+test("a fold without byProject draws no by-project section, never an empty list that reads as no spend", () => {
+  const out = buildInsightsHtml(CANNED_PAYLOAD(), { now: NOW });
+  assert.ok(!out.includes("by project"));
+});
+
+test("the page's restated project id rule is the worker's rule (PR #569's review: the third copy, bolted)", () => {
+  assert.equal(INSIGHTS_PROJECT_ID_RE.source, PROJECT_ID_RE.source);
+  assert.equal(INSIGHTS_PROJECT_ID_RE.flags, PROJECT_ID_RE.flags);
+});
+
+test("a key that is not an id JOINS the one (no project) bar, never a second one with the same label", () => {
+  const p = CANNED_PAYLOAD();
+  p.fold.byProject = [
+    { key: null, label: "(no project)", runs: 1, tokens: 10, cost: usd(1, "metered") },
+    { key: "Bad Key", label: "Bad Key", runs: 2, tokens: 5, cost: usd(2, "metered") },
+    { key: "shop", label: "shop", runs: 1, tokens: 1, cost: usd(0.5, "metered") },
+  ];
+  const out = buildInsightsHtml(p, { now: NOW });
+  assert.equal(out.split(">(no project)</text>").length - 1, 1, "one bar");
+  assert.ok(out.includes("$3.00"), "it carries both rows' spend");
 });

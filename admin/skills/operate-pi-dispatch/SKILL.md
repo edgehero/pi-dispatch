@@ -25,6 +25,10 @@ Observe (no approval needed):
   [7d|30d|mtd]` writes and opens it), and `/dispatch insights whatif <provider/model> --flow <flow>`
   estimates what a flow would cost per run on another model's rates.
 - `dispatch_triggers` — the configured triggers with their array `index` (needed to edit/delete one).
+- `dispatch_projects` - the projects (projects.json): each id, display name, members, and the scoped-limits
+  rows that cap it. `dispatch_costs` folds spend `byProject` by the id each run recorded, and its `project`
+  filter (an id) scopes the whole fold to that project's runs. A run outside every project, or recorded before
+  projects existed, is `(no project)`: say so rather than guessing which project an old run "belongs to".
 
 Control (no approval needed — reversible and money-safe):
 - `dispatch_pause` — stop starting new jobs (running ones finish). This is "turn dispatch off".
@@ -70,6 +74,11 @@ dialog before it takes effect**:
   from projects.json) caps every member of that project as one: its job-count refusal is `project-cap`, its
   dollar refusal `dollar-cap`, and the id must already be a project. A malformed amount is refused
   before the confirm. Read `dispatch_costs` (`dollars.windows`) for what each dollar window holds now.
+- `dispatch_project_add` / `dispatch_project_edit` / `dispatch_project_delete` - manage projects. Members are
+  forge-qualified repos (`github:acme/web`) or absolute folders, one project per scope. An edit changes the
+  name or replaces the members, never the id. Removing a member from a capped project WIDENS what it may
+  spend: say so before you call. A delete is refused while a `project:<id>` scoped-limits row names the project;
+  remove or change that row first. A project's name is display text: quote it as the tool returns it (escaped).
 
 Use them like this:
 
