@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -1660,4 +1661,99 @@ test("review of #534: the samplingParams merge comes after the output cap, and p
 	assert.match(resize, new RegExp(`maxWidth: ${IMAGE_RESIZE_MAX.width},\\s*maxHeight: ${IMAGE_RESIZE_MAX.height},`), "pi's default image resize box moved -- IMAGE_RESIZE_MAX must follow it");
 	// And a model may declare its own box, which callCostBound reads off the model object.
 	assert.match(nestedPiAi("types.d.ts"), /export interface ModelImageResizeOptions \{\s*maxWidth\?: number;\s*maxHeight\?: number;/);
+});
+
+// ── Issue #500: the seams subprocess metering needs ──────────────────────────────────────────────────────────
+//
+// A pi CHILD process has its own ModelRuntime and its own pi-ai, so the runner's meter never sees its calls (OQ-011).
+// The design that closes that rests on the facts below, each measured at 0.99.1 and recorded in OQ-011. They are
+// pinned here first, before any of the design is built, so a pin bump that moves one fails here and not in a job.
+
+/** The pinned pi-coding-agent package root. */
+function agentPackageDir() {
+	return dirname(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))));
+}
+
+test("compaction and branch summaries reuse the session's streamFunction, under a fresh session id (issue #500)", { skip }, () => {
+	// Why compaction lands in otherTotal (REQ-TOKEN-ACCOUNTING-AND-CAPS). The behavioural proof is the compaction test in
+	// usage-meter.integration.test.mjs; these are the three source facts it rests on.
+	const session = agentDistFile("core", "agent-session.js");
+	// 1. pi's own compaction hands compact() the session's streamFunction (it ends in modelRuntime.streamSimple, which
+	//    the meter wraps) and passes NO session id: the last argument is a literal undefined.
+	assert.match(session, /\n {8}return compact\(preparation, request\.model, [^;]*?, this\.agent\.streamFunction, request\.env, [^;]*?, undefined\);/, "compaction no longer gets the session's streamFunction, or now gets a session id");
+	// 2. A branch summary gets the same streamFunction and no session id either.
+	const branch = session.match(/const result = await generateBranchSummary\(entriesToSummarize, \{([\s\S]*?)\n {16}\}\);/);
+	assert.ok(branch, "the branch summary call moved");
+	assert.match(branch[1], /\n\s*streamFn: this\.agent\.streamFunction,/, "branch summaries no longer reuse the session's streamFunction");
+	assert.doesNotMatch(branch[1], /sessionId/, "branch summaries now carry a session id -- re-check where their spend lands");
+	// 3. The one summarisation choke point: a missing id becomes a fresh uuidv7 (one new `sessions` id per call), and
+	//    pi-ai's compat completeSimple is reached only when no streamFn is given at all.
+	const compaction = agentDistFile("core", "compaction", "compaction.js");
+	assert.match(compaction, /\n {8}sessionId: options\.sessionId \?\? uuidv7\(\),/, "a summary call no longer gets a fresh session id");
+	assert.match(compaction, /const produce = async \(\) => streamFn\n\s*\? \(await streamFn\(model, context, requestOptions\)\)\.result\(\)\n\s*: completeSimple\(model, context, requestOptions\);/, "the summary call's streamFn and completeSimple fallback moved");
+});
+
+test("the pi CLI a child runs: the bin is the bundle, dist/cli.js still ships, main is exported, setupCli sets process.title (issue #500)", { skip }, () => {
+	const root = agentPackageDir();
+	const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+	// pi-subagents resolves the CLI from this field, so this is the file a background child runs.
+	assert.deepEqual(manifest.bin, { pi: "dist/bundle/cli.js" }, "the package bin moved -- the child preload matches it by realpath");
+	assert.match(readFileSync(join(root, "dist", "bundle", "cli.js"), "utf8"), /createRequire\(import\.meta\.url\)\("\.\/cli-runtime\.js"\);/, "the bundle bin no longer loads cli-runtime.js");
+	// The bundle's own setupCli, then main: process.title becomes "pi", which rewrites /proc/<pid>/cmdline on Linux,
+	// so a detector must match argv[0] "pi" as well as the cli paths.
+	const runtime = readFileSync(join(root, "dist", "bundle", "cli-runtime.js"), "utf8");
+	assert.match(runtime, /function setupCli\(\)\{process\.title=APP_NAME,/, "the bundle's setupCli no longer sets process.title");
+	assert.match(runtime, /setupCli\(\);main\(process\.argv\.slice\(2\)\);\s*$/, "the bundle no longer runs main on process.argv after setupCli");
+	// The unbundled CLI: the file a nested runner can import to become a pi CLI.
+	assert.match(agentDistFile("cli.js"), /\nsetupCli\(\);\nmain\(process\.argv\.slice\(2\)\);\n/, "dist/cli.js no longer calls setupCli() then main(process.argv.slice(2))");
+	assert.match(agentDistFile("cli", "setup.js"), /\n {4}process\.title = APP_NAME;\n/, "dist/cli/setup.js no longer sets process.title");
+	assert.match(agentDistFile("config.js"), /export const APP_NAME = piConfigName \|\| "pi";/, "APP_NAME is no longer \"pi\" by default");
+	assert.equal(manifest.piConfig?.name, undefined, "the package names its app now -- process.title is no longer \"pi\"");
+	assert.equal(typeof mod.main, "function", "main is no longer exported from dist/index.js");
+});
+
+test("-ne keeps explicit -e paths, \"--\" ends option parsing, and the subcommand set a preload must skip (issue #500)", { skip }, async () => {
+	const { parseArgs } = await import(pathToFileURL(join(agentPackageDir(), "dist", "cli", "args.js")).href);
+	// An -e after "--" is a MESSAGE: a preload that appended its -e at the end would turn it into a paid prompt.
+	const parsed = parseArgs(["-ne", "-e", "first.mjs", "--model", "p/m", "--", "-e", "second.mjs"]);
+	assert.equal(parsed.noExtensions, true);
+	assert.deepEqual(parsed.extensions, ["first.mjs"]);
+	assert.deepEqual(parsed.messages, ["-e", "second.mjs"]);
+	// -ne drops discovery and the built-ins but keeps the explicit -e paths, in both places the loader builds the set.
+	const loader = agentDistFile("core", "resource-loader.js");
+	assert.match(loader, /const extensionPaths = this\.noExtensions\n\s*\? cliEnabledExtensions\n\s*: this\.mergePaths\(cliEnabledExtensions, enabledExtensions\);/, "-ne no longer keeps the explicit -e paths (final set)");
+	assert.match(loader, /const extensionPaths = \(this\.noExtensions \? cliEnabledExtensions : this\.mergePaths\(cliEnabledExtensions, enabledExtensions\)\)\.filter\(/, "-ne no longer keeps the explicit -e paths (current set)");
+	assert.match(agentDistFile("cli", "args.js"), /--no-extensions, -ne {11}Disable extension discovery and built-in extensions \(explicit -e paths still work\)/);
+	// The subcommands main() dispatches on args[0] before it parses any option. An injected -e in front of one turns it
+	// into a prompt (measured: `pi -e x list` runs a chat turn), so the preload must leave these alone.
+	const main = agentDistFile("main.js");
+	assert.match(main, /if \(await runAuthCommand\(args\)\) \{[\s\S]*?if \(await handlePackageCommand\(args, [\s\S]*?if \(await handleConfigCommand\(args, [\s\S]*?if \(args\[0\] === "mcp"\) \{[\s\S]*?const parsed = parseArgs\(args\);/, "main() no longer dispatches its subcommands before parseArgs");
+	assert.match(agentDistFile("cli", "auth-command.js"), /if \(args\[0\] !== "auth"\)\n\s*return undefined;/);
+	const packages = agentDistFile("package-manager-cli.js");
+	assert.match(packages, /if \(rawCommand === "uninstall"\) \{[\s\S]{0,80}?else if \(rawCommand === "install" \|\| rawCommand === "remove" \|\| rawCommand === "update" \|\| rawCommand === "list"\) \{/);
+	assert.match(packages, /const \[command, \.\.\.rest\] = args;\n\s*if \(command !== "config"\) \{/);
+	// And the help text lists exactly that set, so a new subcommand shows up here as well as in main().
+	const help = agentDistFile("cli", "args.js").match(/\$\{chalk\.bold\("Commands:"\)\}\n([\s\S]*?)\n\n/);
+	const listed = [...new Set([...help[1].matchAll(/\$\{APP_NAME\} ([a-z]+) /g)].map((match) => match[1]))].sort();
+	assert.deepEqual(listed, ["auth", "config", "install", "list", "mcp", "remove", "uninstall", "update"], "pi's subcommand set changed");
+});
+
+test("a child extension reaches its OWN ModelRuntime through ctx.modelRegistry.runtime, and the bundle's is not dist/index.js's (issue #500)", { skip }, () => {
+	// The facade keeps its runtime as a plain property (private only in the type file). A child meter takes the class
+	// off that instance, because the bundle carries a second copy of the class that dist/index.js does not export.
+	assert.match(agentDistFile("core", "model-registry.js"), /export class ModelRegistry \{\n {4}runtime;\n {4}constructor\(runtime\) \{\n {8}this\.runtime = runtime;\n/, "ModelRegistry no longer keeps its runtime on a plain property");
+	assert.match(agentDistFile("core", "extensions", "types.d.ts"), /\n {4}modelRegistry: ModelRegistry;/, "ExtensionContext.modelRegistry moved");
+	// The bundle's own virtual modules, read in a child process so its second copy of pi never loads into this one.
+	const chunks = join(agentPackageDir(), "dist", "bundle", "chunks");
+	const virtual = readdirSync(chunks).filter((name) => /^virtual-modules-[A-Z0-9]+\.js$/.test(name));
+	assert.equal(virtual.length, 1, `expected one virtual-modules chunk in the bundle, found ${JSON.stringify(virtual)}`);
+	const probe = `const { VIRTUAL_MODULES: v } = await import(${JSON.stringify(pathToFileURL(join(chunks, virtual[0])).href)});
+const host = await import("@earendil-works/pi-coding-agent");
+process.stdout.write(JSON.stringify({ stream: typeof v["@earendil-works/pi-ai"].createAssistantMessageEventStream, runtime: typeof v["@earendil-works/pi-coding-agent"].ModelRuntime, same: v["@earendil-works/pi-coding-agent"].ModelRuntime === host.ModelRuntime }));`;
+	const seen = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", probe], { cwd: dirname(fileURLToPath(import.meta.url)), encoding: "utf8" }));
+	// An extension in a bundled child gets the bundle's own event-stream factory through a bare pi-ai specifier, so a
+	// child meter's brake needs no compat copy resolved from disk.
+	assert.equal(seen.stream, "function", "the bundle's virtual pi-ai no longer carries createAssistantMessageEventStream");
+	assert.equal(seen.runtime, "function", "the bundle's virtual pi-coding-agent no longer exports ModelRuntime");
+	assert.equal(seen.same, false, "the bundle's ModelRuntime IS dist/index.js's now -- the child route can be simplified");
 });

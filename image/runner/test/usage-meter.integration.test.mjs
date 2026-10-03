@@ -420,6 +420,59 @@ test("the brake: past the cap, the next call is stopped before it reaches the pr
 	}
 });
 
+test("compaction is metered: each summary call lands in otherTotal under a fresh session id, and getSessionStats agrees (issue #500)", { skip }, async () => {
+	// REQ-TOKEN-ACCOUNTING-AND-CAPS says compaction is counted in otherTotal. This is the behavioural pin for that
+	// sentence; pinned-api.test.mjs holds the source needles it rests on (the session's streamFunction is handed to
+	// compact(), no session id is passed, and completeSummarization falls back to uuidv7()). A pin bump that moves
+	// compaction back onto pi-ai's compat completeSimple, or hands it the root id, turns this red.
+	const API = "pi-dispatch-fake-api-compaction";
+	const fx = await fixture(API);
+	const sessions = [];
+	let installed;
+	try {
+		const rootManager = pi.SessionManager.inMemory(fx.root);
+		const rootSessionId = rootManager.getSessionId();
+		const meter = createUsageMeter({ maxTokens: null, rootSessionId });
+		installed = await installProcessUsageMeter({ ModelRuntime: pi.ModelRuntime, runtime: fx.modelRuntime, meter, log: () => {} });
+		assert.equal(installed.ok, true);
+		const calls = [];
+		await registerFakeProvider({ modelRuntime: fx.modelRuntime, compat: installed.module, api: API, calls });
+		const session = await openSession({ fx, modelRuntime: fx.modelRuntime, sessionManager: rootManager, settings: { compaction: { keepRecentTokens: 1 } } });
+		sessions.push(session);
+		for (const text of ["one", "two", "three"]) await session.prompt(text);
+		await flush();
+		const before = meter.snapshot();
+		assert.deepEqual([calls.length, before.calls, before.sessions, before.rootTotal, before.otherTotal], [3, 3, 1, 3 * SENTINEL_TOTAL, 0], "three root turns, nothing else yet");
+
+		await session.compact();
+		await flush();
+		const summaries = calls.slice(3);
+		const after = meter.snapshot();
+		// Measured at the pin: two calls. keepRecentTokens 1 cuts inside the last turn, so pi summarises the history
+		// before it and, separately, the split turn's prefix (compaction.js, compact()).
+		assert.equal(summaries.length, 2, "compact() makes a history summary and a split-turn prefix summary");
+		assert.equal(after.calls, before.calls + summaries.length, "every summary call is a metered call");
+		for (const call of summaries) assert.ok(call.sessionId && call.sessionId !== rootSessionId, `a summary call ran under the root id or none: ${JSON.stringify(call)}`);
+		assert.equal(new Set(summaries.map((call) => call.sessionId)).size, summaries.length, "each summary call has its own fresh id");
+		assert.equal(after.sessions, before.sessions + summaries.length, "sessions rises by one per summary call");
+		assert.equal(after.otherTotal, summaries.length * SENTINEL_TOTAL, "the rise lands in otherTotal");
+		assert.equal(after.rootTotal, before.rootTotal, "the root session's own total does not move");
+		assert.equal(after.looseTotal, 0, "every summary call carried an id");
+		assert.equal(after.rootTotal + after.otherTotal + after.looseTotal, after.total);
+		assert.equal(meter.usageSnapshot().models[0].calls, 3 + summaries.length, "the model row counts the summary calls");
+
+		// pi's own control: at 0.99.1 getSessionStats() sums the compaction entry's usage too, so a mismatch means
+		// one of the two lost a call.
+		const stats = session.getSessionStats();
+		assert.equal(stats.tokens.total, after.total, `getSessionStats() and the meter disagree: ${JSON.stringify(stats.tokens)}`);
+		assert.ok(Math.abs(stats.cost - after.cost) < 1e-12, `cost: ${stats.cost} against ${after.cost}`);
+	} finally {
+		for (const session of sessions) session.dispose();
+		installed?.uninstall();
+		fx.cleanup();
+	}
+});
+
 // ── Issue #501: the per-job cost cap, checked BEFORE each call, through the real dispatch chain ────────────
 //
 // The model is priced on `openai-completions`, one of the PRICED_APIS, so the guard bounds it from the catalog row
