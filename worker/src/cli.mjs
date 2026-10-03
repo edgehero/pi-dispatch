@@ -391,7 +391,7 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 /**
  * What `run` prints once the queue has answered (issue #524). Three answers, because the queue gives three.
  *
- * A local job's id is derived from the folder, the flow, the task and the minute (`localJobId`), so the same `run`
+ * A local job's id is derived from the folder, the flow, the task, the model fields and the minute (`localJobId`), so the same `run`
  * twice inside one minute is the same id and the queue keeps the first. That dedup is deliberate (a hasty second
  * Enter must not pay twice) and stays; what changes is that it is said. The time is the first job's own, in this
  * terminal's local time, and the state is the queue's word for it, or "already queued or done" when it could not be

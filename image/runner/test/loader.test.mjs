@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 // Static import: packages.mjs is pure -- no pi, no fs -- so it needs none of the gating below.
 import { findShadowedSkills } from "../src/packages.mjs";
@@ -546,9 +546,9 @@ function fixturePackage({ skillName = "pkg-skill", nestedDep = false } = {}) {
 function fixtureExtensionDir(prefix, commandName) {
 	const dir = tempDir(prefix);
 	mkdirSync(join(dir, "extensions"), { recursive: true });
-	// index.js, not a loose foo.js: pi adds the DIRECTORY itself as the extension source, so a
-	// directory of loose files resolves to nothing. That is a property of the mount shape, not of
-	// this test -- a bare .js dropped in /job/pi/extensions never loads either.
+	// index.js, not a loose foo.js: this one fixture serves both mounts, and /job/pi/extensions is still
+	// handed to pi as a DIRECTORY, where a folder of loose files resolves to nothing. The overlay's
+	// extensions/ is listed entry by entry since issue #544, so there index.js loads as itself.
 	writeFileSync(
 		join(dir, "extensions", "index.js"),
 		`export default function (api) {\n\tapi.registerCommand("${commandName}", { description: "ordering fixture" });\n}\n`,
@@ -641,7 +641,7 @@ test("PI_GLOBAL_ALLOW_EXTENSIONS=0 makes the OVERLAY dormant and leaves staged p
 
 	const paths = loader.getExtensions().extensions.map((e) => e.path);
 	assert.ok(paths.includes(join(pkg, "ext", "sentinel.js")), `the staged package's extension must still load: ${JSON.stringify(paths)}`);
-	assert.ok(!paths.includes(join(globalPiDir, "extensions")), `the overlay's extensions must be dormant: ${JSON.stringify(paths)}`);
+	assert.ok(!paths.some((path) => path.startsWith(join(globalPiDir, "extensions"))), `the overlay's extensions must be dormant: ${JSON.stringify(paths)}`);
 
 	// Asserted on the loaded SURFACE too, not just the paths: the opt-out has to withhold what the overlay
 	// contributes, and the package's own contribution has to survive it intact.
@@ -664,7 +664,7 @@ test("package extension paths come LAST -- repo, then overlay, then packages", {
 
 	const paths = loader.getExtensions().extensions.map((e) => e.path);
 	const repoIndex = paths.indexOf(join(jobPiDir, "extensions"));
-	const overlayIndex = paths.indexOf(join(globalPiDir, "extensions"));
+	const overlayIndex = paths.indexOf(join(globalPiDir, "extensions", "index.js"));
 	const packageIndex = paths.indexOf(join(pkg, "ext", "sentinel.js"));
 	// All three must be PRESENT first: an indexOf of -1 would satisfy the `<` comparisons for free.
 	assert.ok(repoIndex >= 0 && overlayIndex >= 0 && packageIndex >= 0, `missing one of them: ${JSON.stringify(paths)}`);
@@ -677,6 +677,349 @@ test("package extension paths come LAST -- repo, then overlay, then packages", {
 	const discoveredIndex = paths.indexOf(join(workspace, ".pi", "extensions", "index.js"));
 	assert.ok(discoveredIndex >= 0, `the discovered workspace extension is missing: ${JSON.stringify(paths)}`);
 	assert.ok(packageIndex < discoveredIndex, "a cwd-discovered extension must come after every explicit path");
+});
+
+// --- Issue #544: the overlay's extensions/ is listed by pi's own discovery rule, and a failed load is said ---
+const LOOSE_EXT_SENTINEL = "LOOSE-OVERLAY-EXT-SENTINEL-1a2b";
+const BROKEN_EXT_SENTINEL = "BROKEN-OVERLAY-EXT-SENTINEL-3c4d";
+
+/** An extension that proves it ran: it registers a command named after it. */
+const commandExtension = (name) => `export default function (api) {\n\tapi.registerCommand("${name}", { description: "fixture" });\n}\n`;
+
+/**
+ * An extensions/ folder in every shape pi's rule has a case for: loose .js and .ts files, a subdir with an
+ * index, a subdir with a package.json `pi` manifest, and what the rule skips (a dotfile, node_modules, a
+ * README, a file and a subdir an ignore file names, a subdir with nothing to load). `broken` adds a file
+ * that does not parse, carrying a sentinel in its source so a log line that quoted it would be caught.
+ */
+function looseExtensionsDir(dir, { broken = false } = {}) {
+	mkdirSync(join(dir, "sub"), { recursive: true });
+	mkdirSync(join(dir, "pkg", "src"), { recursive: true });
+	mkdirSync(join(dir, "node_modules"), { recursive: true });
+	mkdirSync(join(dir, "ignored-dir"), { recursive: true });
+	mkdirSync(join(dir, "empty-dir"), { recursive: true });
+	writeFileSync(join(dir, "foo.js"), commandExtension(LOOSE_EXT_SENTINEL));
+	writeFileSync(join(dir, "bar.ts"), commandExtension("loose-bar"));
+	writeFileSync(join(dir, "sub", "index.js"), commandExtension("loose-sub"));
+	writeFileSync(join(dir, "pkg", "src", "main.js"), commandExtension("loose-pkg"));
+	writeFileSync(join(dir, "pkg", "package.json"), `${JSON.stringify({ name: "loose-pkg", pi: { extensions: ["src/main.js"] } })}\n`);
+	writeFileSync(join(dir, ".hidden.js"), commandExtension("loose-hidden"));
+	writeFileSync(join(dir, "node_modules", "dep.js"), commandExtension("loose-node-modules"));
+	writeFileSync(join(dir, "skipped.js"), commandExtension("loose-ignored-file"));
+	writeFileSync(join(dir, "ignored-dir", "index.js"), commandExtension("loose-ignored-dir"));
+	writeFileSync(join(dir, ".gitignore"), "skipped.js\nignored-dir/\n");
+	writeFileSync(join(dir, "README.md"), "not an extension\n");
+	if (broken) writeFileSync(join(dir, "broken.js"), `export default function ( { ${BROKEN_EXT_SENTINEL}\n`);
+	// Issue #544's review: the shapes whose handling no other line here told apart.
+	// A symlinked .js whose target sits outside the folder: pi follows it.
+	const shared = join(dirname(dir), "shared");
+	mkdirSync(shared, { recursive: true });
+	writeFileSync(join(shared, "linked-target.js"), commandExtension("loose-linked"));
+	symlinkSync(join(shared, "linked-target.js"), join(dir, "linked.js"));
+	// node_modules WITH an index: skipped by name, not merely for having no entry.
+	writeFileSync(join(dir, "node_modules", "index.js"), commandExtension("loose-node-modules-index"));
+	// A subfolder manifest saved with a byte order mark: pi strips it, so the manifest wins over the index.
+	mkdirSync(join(dir, "bom", "src"), { recursive: true });
+	writeFileSync(join(dir, "bom", "package.json"), `\uFEFF${JSON.stringify({ name: "bom", pi: { extensions: ["src/main.js"] } })}\n`);
+	writeFileSync(join(dir, "bom", "src", "main.js"), commandExtension("loose-bom"));
+	writeFileSync(join(dir, "bom", "index.js"), commandExtension("loose-bom-index"));
+	// A negated ignore pattern in .ignore: the glob drops neg-drop.js, the negation keeps neg-keep.js.
+	writeFileSync(join(dir, ".ignore"), "# kept out by the glob, one brought back\nneg-*.js\n!neg-keep.js\n");
+	writeFileSync(join(dir, "neg-drop.js"), commandExtension("loose-neg-drop"));
+	writeFileSync(join(dir, "neg-keep.js"), commandExtension("loose-neg-keep"));
+	return dir;
+}
+
+/** An overlay whose extensions/ holds the loose shapes above. */
+function looseOverlay(options) {
+	const dir = tempDir("pi-global-loose-");
+	looseExtensionsDir(join(dir, "extensions"), options);
+	return dir;
+}
+
+const LOOSE_COMMANDS = [LOOSE_EXT_SENTINEL, "loose-bar", "loose-sub", "loose-pkg", "loose-linked", "loose-bom", "loose-neg-keep"];
+const SKIPPED_COMMANDS = ["loose-hidden", "loose-node-modules", "loose-ignored-file", "loose-ignored-dir", "loose-node-modules-index", "loose-bom-index", "loose-neg-drop"];
+
+test("a loose extensions/foo.js in the overlay loads, with every other shape pi's rule loads (issue #544)", { skip }, async () => {
+	// The bug: the overlay's extensions/ went to pi as ONE directory path, and pi reads a plain folder of loose files
+	// as a single extension at the folder, which fails "Cannot find module" into an error list nothing read. Only an
+	// index.js ever loaded. Asserted on what RAN (the commands the factories registered), not on a path list.
+	const logged = [];
+	const globalPiDir = looseOverlay();
+	const { loader } = await load({ globalPiDir, allowGlobalExtensions: true, log: (event, fields) => logged.push({ event, ...fields }) });
+	const commands = extensionCommands(loader);
+	for (const name of LOOSE_COMMANDS) assert.ok(commands.includes(name), `${name} did not load: ${JSON.stringify(commands)}`);
+	for (const name of SKIPPED_COMMANDS) assert.ok(!commands.includes(name), `${name} loaded, though pi's rule skips it`);
+	// Each entry loads as itself, so a load error can name it.
+	const paths = loader.getExtensions().extensions.map((e) => e.path);
+	assert.ok(paths.includes(join(globalPiDir, "extensions", "foo.js")), JSON.stringify(paths));
+	assert.ok(!paths.includes(join(globalPiDir, "extensions")), "the folder itself must not be an extension");
+	assert.deepEqual(logged.filter((line) => line.event === "extension_load_failed"), [], "a clean overlay must log no failure");
+	assert.deepEqual(logged.filter((line) => line.event === "overlay_extensions_layout"), [], "nor a layout line");
+});
+
+test("the overlay's entries are exactly the ones pi's own discovery loads from the same folder (issue #544)", { skip }, async () => {
+	// The behavioural half of the pin: the same folder, once as pi's own ~/.pi/agent/extensions (pi runs
+	// collectAutoExtensionEntries itself) and once as the overlay through the runner's list. pinned-api.test.mjs
+	// holds the textual half, against pi's source.
+	const pi = await import("@earendil-works/pi-coding-agent");
+	const agentDir = tempDir("pi-agent-loose-");
+	looseExtensionsDir(join(agentDir, "extensions"), { broken: true });
+	const workspace = tempDir("pi-ws-loose-");
+	const native = new pi.DefaultResourceLoader({ cwd: workspace, agentDir, settingsManager: pi.SettingsManager.inMemory(), noContextFiles: true, noSkills: true });
+	await native.reload();
+	const rel = (root, list) => list.map((path) => path.slice(root.length + 1)).sort();
+	const nativeLoaded = rel(join(agentDir, "extensions"), native.getExtensions().extensions.map((e) => e.path));
+	const nativeFailed = rel(join(agentDir, "extensions"), native.getExtensions().errors.map((e) => e.path));
+
+	const globalPiDir = looseOverlay({ broken: true });
+	const { loader } = await load({ globalPiDir, allowGlobalExtensions: true, log: () => {} });
+	const overlayRoot = join(globalPiDir, "extensions");
+	const ours = loader.getExtensions();
+	const oursLoaded = rel(overlayRoot, ours.extensions.map((e) => e.path).filter((path) => path.startsWith(`${overlayRoot}/`)));
+	const oursFailed = rel(overlayRoot, ours.errors.map((e) => e.path).filter((path) => path.startsWith(`${overlayRoot}/`)));
+	assert.deepEqual(oursLoaded, nativeLoaded);
+	assert.deepEqual(oursFailed, nativeFailed);
+	// The premise, so equality is not two empty lists.
+	assert.deepEqual(nativeLoaded, ["bar.ts", "bom/src/main.js", "foo.js", "linked.js", "neg-keep.js", "pkg/src/main.js", "sub/index.js"]);
+	assert.deepEqual(nativeFailed, ["broken.js"]);
+	assert.deepEqual(rel(overlayRoot, loaderModule.discoverExtensionEntries(overlayRoot)), ["bar.ts", "bom/src/main.js", "broken.js", "foo.js", "linked.js", "neg-keep.js", "pkg/src/main.js", "sub/index.js"]);
+});
+
+test("a broken overlay extension is logged by name, with no content and no error text, and the rest still load (issue #544)", { skip }, async () => {
+	const logged = [];
+	const globalPiDir = looseOverlay({ broken: true });
+	const { loader } = await load({ globalPiDir, allowGlobalExtensions: true, log: (event, fields) => logged.push({ event, ...fields }) });
+	const failures = logged.filter((line) => line.event === "extension_load_failed");
+	assert.equal(failures.length, 1, JSON.stringify(logged));
+	assert.deepEqual(failures[0].extensions, [{ entry: "broken.js", root: join(globalPiDir, "extensions"), kind: "load" }]);
+	const line = JSON.stringify(failures[0]);
+	assert.ok(!line.includes(BROKEN_EXT_SENTINEL), "the extension's source reached the log");
+	const error = String(loader.getExtensions().errors.find((e) => e.path.endsWith("broken.js"))?.error);
+	assert.ok(error.length > 0 && !line.includes(error.split("\n")[0]), "pi's error text reached the log");
+	// One broken file does not cost the others.
+	assert.ok(extensionCommands(loader).includes(LOOSE_EXT_SENTINEL));
+});
+
+test("an overlay extensions/ with a single index.js still loads it, as itself (issue #544)", { skip }, async () => {
+	// The one layout that worked before. pi's rule takes a folder's own index.js and stops there, so a loose file
+	// beside it stays unloaded, exactly as on the operator's machine.
+	const globalPiDir = fixtureExtensionDir("pi-global-index-", OVERLAY_EXT_SENTINEL);
+	writeFileSync(join(globalPiDir, "extensions", "beside.js"), commandExtension("beside-index"));
+	const { loader } = await load({ globalPiDir, allowGlobalExtensions: true, log: () => {} });
+	const commands = extensionCommands(loader);
+	assert.ok(commands.includes(OVERLAY_EXT_SENTINEL), JSON.stringify(commands));
+	assert.ok(!commands.includes("beside-index"), "a folder with an index loads only the index, as pi does");
+	assert.ok(loader.getExtensions().extensions.some((e) => e.path === join(globalPiDir, "extensions", "index.js")));
+});
+
+test("the recursion guard and the opt-out still hold for loose overlay files (issue #544)", { skip }, async () => {
+	const logged = [];
+	const globalPiDir = looseOverlay();
+	writeFileSync(join(globalPiDir, "extensions", "pi-dispatch.js"), commandExtension("loose-admin"));
+	const { loader } = await load({ globalPiDir, allowGlobalExtensions: true, log: (event, fields) => logged.push({ event, ...fields }) });
+	assert.ok(!extensionCommands(loader).includes("loose-admin"), "an admin-named loose overlay file reached the session");
+	const drops = logged.filter((line) => line.event === "extension_dropped");
+	assert.deepEqual(drops.map((line) => line.extensions), [[{ name: "pi-dispatch.js", root: join(globalPiDir, "extensions"), reason: "admin-name" }]]);
+
+	const { loader: dormant } = await load({ globalPiDir, allowGlobalExtensions: false, log: () => {} });
+	const commands = extensionCommands(dormant);
+	for (const name of [...LOOSE_COMMANDS, "loose-admin"]) assert.ok(!commands.includes(name), `${name} loaded with PI_GLOBAL_ALLOW_EXTENSIONS=0`);
+});
+
+test("discoverExtensionEntries: an absent folder, an unreadable one, a manifest that declares nothing", { skip }, () => {
+	assert.deepEqual(loaderModule.discoverExtensionEntries(join(tmpdir(), "pi-544-absent-xyz")), []);
+	const unreadable = { existsSync: (path) => path === "/x", readdirSync: () => { throw new Error("EACCES"); }, readFileSync: () => { throw new Error("EACCES"); }, statSync: () => { throw new Error("EACCES"); } };
+	assert.deepEqual(loaderModule.discoverExtensionEntries("/x", { fs: unreadable }), []);
+	// A root package.json with no usable `pi.extensions` does not stop the scan (pi falls through to the files).
+	const dir = tempDir("pi-544-manifest-");
+	writeFileSync(join(dir, "package.json"), `${JSON.stringify({ name: "x", pi: { extensions: [1] } })}\n`);
+	writeFileSync(join(dir, "a.js"), commandExtension("a"));
+	assert.deepEqual(loaderModule.discoverExtensionEntries(dir), [join(dir, "a.js")]);
+	// A root manifest that names an entry is the whole answer, as is a root index.ts over index.js.
+	writeFileSync(join(dir, "package.json"), `${JSON.stringify({ name: "x", pi: { extensions: ["a.js", "missing.js"] } })}\n`);
+	writeFileSync(join(dir, "b.js"), commandExtension("b"));
+	assert.deepEqual(loaderModule.discoverExtensionEntries(dir), [join(dir, "a.js")]);
+	const indexed = tempDir("pi-544-index-");
+	writeFileSync(join(indexed, "index.js"), commandExtension("js"));
+	writeFileSync(join(indexed, "index.ts"), commandExtension("ts"));
+	assert.deepEqual(loaderModule.discoverExtensionEntries(indexed), [join(indexed, "index.ts")]);
+	// No ignore file: pi's matcher is never loaded.
+	let made = 0;
+	const plain = tempDir("pi-544-plain-");
+	writeFileSync(join(plain, "c.js"), commandExtension("c"));
+	assert.deepEqual(loaderModule.discoverExtensionEntries(plain, { makeIgnore: () => (made += 1, { add() {}, ignores: () => false }) }), [join(plain, "c.js")]);
+	assert.equal(made, 0);
+});
+
+test("a failed load is reported BEFORE the admin drop: a conflicting admin entry is a conflict, and said first (issue #544)", { skip }, async () => {
+	// pi reports a tool two extensions share as a load error on the later one. Reported after the drop, the
+	// dropped entry would no longer be among the loaded ones and its conflict would read as a failed load.
+	const logged = [];
+	const globalPiDir = tempDir("pi-global-conflict-");
+	mkdirSync(join(globalPiDir, "extensions"), { recursive: true });
+	const toolExtension = `export default function (api) {\n\tapi.registerTool({ name: "shared_tool", label: "Shared", description: "x", parameters: { type: "object", properties: {} }, execute: async () => ({ output: "" }) });\n}\n`;
+	writeFileSync(join(globalPiDir, "extensions", "a.js"), toolExtension);
+	writeFileSync(join(globalPiDir, "extensions", "pi-dispatch.js"), toolExtension);
+	await load({ globalPiDir, allowGlobalExtensions: true, log: (event, fields) => logged.push({ event, ...fields }) });
+	const events = logged.map((line) => line.event).filter((event) => event === "extension_load_failed" || event === "extension_dropped");
+	assert.deepEqual(events, ["extension_load_failed", "extension_dropped"], JSON.stringify(logged));
+	const failed = logged.find((line) => line.event === "extension_load_failed").extensions;
+	assert.deepEqual(failed, [{ entry: "pi-dispatch.js", root: join(globalPiDir, "extensions"), kind: "conflict" }]);
+});
+
+test("a manifest entry naming a DIRECTORY is skipped and logged as manifest-dir; its file siblings load (issue #544)", { skip }, async () => {
+	// pi's own discovery hands such a directory to its module loader; the runner can only pass paths, and pi reads
+	// a directory path as a package root. So it is skipped and said, rather than loaded some other way.
+	const logged = [];
+	const globalPiDir = tempDir("pi-global-mdir-");
+	const ext = join(globalPiDir, "extensions");
+	mkdirSync(join(ext, "mdir", "lib"), { recursive: true });
+	writeFileSync(join(ext, "mdir", "package.json"), `${JSON.stringify({ name: "mdir", pi: { extensions: ["lib", "x.js"] } })}\n`);
+	writeFileSync(join(ext, "mdir", "lib", "index.js"), commandExtension("mdir-lib"));
+	writeFileSync(join(ext, "mdir", "x.js"), commandExtension("mdir-x"));
+	writeFileSync(join(ext, "mdir", "index.js"), commandExtension("mdir-index"));
+	const { loader } = await load({ globalPiDir, allowGlobalExtensions: true, log: (event, fields) => logged.push({ event, ...fields }) });
+	const commands = extensionCommands(loader);
+	assert.ok(commands.includes("mdir-x"), JSON.stringify(commands));
+	assert.ok(!commands.includes("mdir-lib"), "the directory entry loaded");
+	assert.ok(!commands.includes("mdir-index"), "pi's list was not empty, so the index fallback stays closed");
+	assert.deepEqual(logged.filter((line) => line.event === "extension_load_failed"), [
+		{ event: "extension_load_failed", extensions: [{ entry: "mdir/lib", root: ext, kind: "manifest-dir" }] },
+	]);
+	// The same at the folder's own manifest, with no file entry at all: nothing loads, nothing falls back.
+	const root = tempDir("pi-544-rootdir-");
+	mkdirSync(join(root, "lib"), { recursive: true });
+	writeFileSync(join(root, "lib", "index.js"), commandExtension("root-lib"));
+	writeFileSync(join(root, "index.js"), commandExtension("root-index"));
+	writeFileSync(join(root, "package.json"), `${JSON.stringify({ name: "r", pi: { extensions: ["lib"] } })}\n`);
+	const skipped = [];
+	assert.deepEqual(loaderModule.discoverExtensionEntries(root, { skipped }), []);
+	assert.deepEqual(skipped, [{ path: join(root, "lib"), kind: "manifest-dir" }]);
+});
+
+test("a layout that loaded before issue #544 and is unused now is said once, by part (issue #544)", { skip }, async () => {
+	const logged = [];
+	const globalPiDir = looseOverlay();
+	mkdirSync(join(globalPiDir, "extensions", "skills", "s"), { recursive: true });
+	mkdirSync(join(globalPiDir, "extensions", "extensions"), { recursive: true });
+	await load({ globalPiDir, allowGlobalExtensions: true, log: (event, fields) => logged.push({ event, ...fields }) });
+	assert.deepEqual(logged.filter((line) => line.event === "overlay_extensions_layout"), [
+		{ event: "overlay_extensions_layout", root: join(globalPiDir, "extensions"), unused: ["extensions/", "skills/"] },
+	]);
+	// A root manifest: its non-extension fields are what went unused; the subfolders were never read under one.
+	const manifested = tempDir("pi-544-layout-");
+	mkdirSync(join(manifested, "prompts"), { recursive: true });
+	writeFileSync(join(manifested, "package.json"), `${JSON.stringify({ name: "m", pi: { extensions: [], skills: ["s"], themes: ["t"] } })}\n`);
+	assert.deepEqual(loaderModule.legacyOverlayLayout(manifested), ["package.json pi.skills", "package.json pi.themes"]);
+	// Issue #544, round 2: a root manifest whose pi.extensions the package reading expanded and the discovery rule
+	// reads as plain paths. E: a glob that loaded src/a.js and src/b.js now matches no path.
+	const globbed = tempDir("pi-544-glob-");
+	mkdirSync(join(globbed, "src"), { recursive: true });
+	writeFileSync(join(globbed, "src", "a.js"), commandExtension("glob-a"));
+	writeFileSync(join(globbed, "package.json"), `${JSON.stringify({ name: "g", pi: { extensions: ["./src/*.js"] } })}\n`);
+	assert.deepEqual(loaderModule.legacyOverlayLayout(globbed), ["package.json pi.extensions patterns"]);
+	// K: an exclude that kept b.js out is now a path that does not exist, so b.js runs.
+	const excluded = tempDir("pi-544-exclude-");
+	for (const name of ["a.js", "b.js"]) writeFileSync(join(excluded, name), commandExtension(name));
+	writeFileSync(join(excluded, "package.json"), `${JSON.stringify({ name: "k", pi: { extensions: ["a.js", "b.js", "!b.js"] } })}\n`);
+	assert.deepEqual(loaderModule.legacyOverlayLayout(excluded), ["package.json pi.extensions patterns"]);
+	// A `+` or `-` override and a `?` glob are patterns too; a list none of whose paths exists falls through.
+	for (const entries of [["+a.js"], ["-a.js"], ["src/?.js"], ["gone.js"]]) {
+		writeFileSync(join(excluded, "package.json"), `${JSON.stringify({ name: "k", pi: { extensions: entries } })}\n`);
+		assert.deepEqual(loaderModule.legacyOverlayLayout(excluded), ["package.json pi.extensions patterns"], JSON.stringify(entries));
+	}
+	// Plain existing paths, and an empty list, are read the same both ways: nothing to say.
+	for (const entries of [["a.js"], ["a.js", "b.js"], []]) {
+		writeFileSync(join(excluded, "package.json"), `${JSON.stringify({ name: "k", pi: { extensions: entries } })}\n`);
+		assert.deepEqual(loaderModule.legacyOverlayLayout(excluded), [], JSON.stringify(entries));
+	}
+	// A field that lists nothing loaded nothing before either.
+	writeFileSync(join(excluded, "package.json"), `${JSON.stringify({ name: "k", pi: { extensions: ["a.js"], skills: [], prompts: ["p"] } })}\n`);
+	assert.deepEqual(loaderModule.legacyOverlayLayout(excluded), ["package.json pi.prompts"]);
+	// A convention name that is a FILE was never a resource folder, and a convention folder the discovery rule
+	// still loads an extension from (themes/index.js) is in use.
+	const named = tempDir("pi-544-named-");
+	writeFileSync(join(named, "skills"), "a file, not a folder\n");
+	mkdirSync(join(named, "themes"), { recursive: true });
+	writeFileSync(join(named, "themes", "index.js"), commandExtension("themes-index"));
+	mkdirSync(join(named, "prompts"), { recursive: true });
+	assert.deepEqual(loaderModule.legacyOverlayLayout(named), ["prompts/"]);
+	// The loose overlay alone holds none of it, and an absent folder holds nothing.
+	assert.deepEqual(loaderModule.legacyOverlayLayout(join(looseOverlay(), "extensions")), []);
+	assert.deepEqual(loaderModule.legacyOverlayLayout(join(tmpdir(), "pi-544-absent-xyz")), []);
+});
+
+test("no matcher for an ignore file present: the overlay's extensions are WITHHELD and that is logged (issue #544)", { skip }, () => {
+	const logged = [];
+	const log = (event, fields) => logged.push({ event, ...fields });
+	const broken = () => {
+		throw new Error("Cannot find module 'ignore'");
+	};
+	const dir = join(looseOverlay(), "extensions");
+	assert.deepEqual(loaderModule.overlayExtensionEntries(dir, { log, makeIgnore: broken }), { entries: [], skipped: [] });
+	assert.deepEqual(logged, [{ event: "overlay_extensions_withheld", reason: "ignore-matcher-unavailable", root: dir }]);
+	// No ignore file: the matcher is never needed, so the same failure withholds nothing.
+	logged.length = 0;
+	const plain = tempDir("pi-544-noignore-");
+	writeFileSync(join(plain, "c.js"), commandExtension("c"));
+	assert.deepEqual(loaderModule.overlayExtensionEntries(plain, { log, makeIgnore: broken }).entries, [join(plain, "c.js")]);
+	assert.deepEqual(logged, []);
+	// An ignore file with no pattern in it (comments and blank lines only) needs no matcher either.
+	writeFileSync(join(plain, ".gitignore"), "# nothing ignored here\n\n");
+	assert.deepEqual(loaderModule.overlayExtensionEntries(plain, { log, makeIgnore: broken }).entries, [join(plain, "c.js")]);
+	assert.deepEqual(logged, [], "a comment-only ignore file withheld the overlay");
+});
+
+test("an admin package placed as a manifest subfolder of the overlay is dropped, named by its folder (issue #544)", { skip }, async () => {
+	const logged = [];
+	const globalPiDir = tempDir("pi-global-adminpkg-");
+	const ext = join(globalPiDir, "extensions");
+	mkdirSync(join(ext, "pi-dispatch", "src"), { recursive: true });
+	writeFileSync(join(ext, "pi-dispatch", "package.json"), `${JSON.stringify({ name: "x", pi: { extensions: ["src/main.js"] } })}\n`);
+	writeFileSync(join(ext, "pi-dispatch", "src", "main.js"), commandExtension("admin-in-subfolder"));
+	const { loader } = await load({ globalPiDir, allowGlobalExtensions: true, log: (event, fields) => logged.push({ event, ...fields }) });
+	assert.ok(!extensionCommands(loader).includes("admin-in-subfolder"), "an admin package in a manifest subfolder reached the session");
+	assert.deepEqual(logged.filter((line) => line.event === "extension_dropped").map((line) => line.extensions), [
+		[{ name: "pi-dispatch/src/main.js", root: ext, reason: "admin-name" }],
+	]);
+});
+
+test("reportExtensionLoadErrors: relative entry, root, kind; an absent configured root is not a failure", { skip }, () => {
+	const logged = [];
+	const log = (event, fields) => logged.push({ event, ...fields });
+	// Only the real files exist: `builtin:mcp` does not, so it is reported because it is a builtin, not because it exists.
+	const exists = (path) => path.startsWith("/opt/pi-global/") || path.startsWith("/elsewhere/");
+	const base = {
+		extensions: [{ path: "/opt/pi-global/extensions/a.js" }],
+		errors: [
+			{ path: "/job/pi/extensions", error: "Extension path does not exist: /job/pi/extensions" },
+			{ path: "/opt/pi-global/extensions/sub/index.js", error: "Failed to load extension: SECRET" },
+			{ path: "/opt/pi-global/extensions/pkg/src/main.js", error: "Failed to load extension: SECRET" },
+			{ path: "/opt/pi-global/extensions/a.js", error: "Tool \"x\" conflicts with SECRET" },
+			{ path: "/elsewhere/z.js", error: "SECRET" },
+			{ path: "builtin:mcp", error: "Unknown built-in extension: builtin:mcp" },
+		],
+	};
+	const roots = ["/job/pi/extensions", "/opt/pi-global/extensions"];
+	assert.equal(loaderModule.reportExtensionLoadErrors(base, { roots, log, exists }), base, "the result passes through untouched");
+	assert.deepEqual(logged, [
+		{
+			event: "extension_load_failed",
+			extensions: [
+				{ entry: "sub/index.js", root: "/opt/pi-global/extensions", kind: "load" },
+				// The path inside the root, not the file's basename: a manifest entry is named by where it sits.
+				{ entry: "pkg/src/main.js", root: "/opt/pi-global/extensions", kind: "load" },
+				{ entry: "a.js", root: "/opt/pi-global/extensions", kind: "conflict" },
+				{ entry: "z.js", root: null, kind: "load" },
+				{ entry: "builtin:mcp", root: null, kind: "load" },
+			],
+		},
+	]);
+	assert.ok(!JSON.stringify(logged).includes("SECRET"));
+	logged.length = 0;
+	loaderModule.reportExtensionLoadErrors({ extensions: [], errors: [base.errors[0]] }, { roots, log, exists });
+	assert.deepEqual(logged, [], "an ordinary job's absent /job/pi/extensions must log nothing");
 });
 
 test("a staged package CANNOT shadow a repo skill -- the REPO wins, and the attempt stays visible", { skip }, async () => {

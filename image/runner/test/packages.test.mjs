@@ -291,6 +291,21 @@ test("the dropped record is built to be logged: entry name and root, never a pat
 	assert.equal(partitionAdminExtensions([loaded("/elsewhere/pi-dispatch.js")]).dropped[0].root, null);
 });
 
+test("the first folder under the root carries the admin name too -- a manifest subfolder cannot hide it (issue #544)", () => {
+	// extensions/pi-dispatch/package.json declaring src/main.js: the loaded entry's own name is main.js.
+	const roots = ["/opt/pi-global/extensions", "/workspace"];
+	const { kept, dropped } = partitionAdminExtensions([loaded("/opt/pi-global/extensions/pi-dispatch/src/main.js"), loaded("/opt/pi-global/extensions/tools/src/pi-dispatch-notes.js")], { roots });
+	assert.deepEqual(dropped, [
+		{ name: "pi-dispatch/src/main.js", root: "/opt/pi-global/extensions", reason: "admin-name" },
+		{ name: "pi-dispatch-notes.js", root: "/opt/pi-global/extensions", reason: "admin-name" },
+	]);
+	assert.deepEqual(kept, []);
+	// Only the FIRST segment: a deeper folder is not the extension's name, and nor is anything above the root.
+	assert.deepEqual(partitionAdminExtensions([loaded("/opt/pi-global/extensions/tools/pi-dispatch/main.js")], { roots }).dropped, []);
+	assert.deepEqual(partitionAdminExtensions([loaded("/workspace/.pi/extensions/helper.js")], { roots: ["/srv/pi-dispatch/workspace"] }).dropped, []);
+	assert.deepEqual(partitionAdminExtensions([loaded("/srv/pi-dispatch/ws/.pi/extensions/helper.js")], { roots: ["/srv/pi-dispatch/ws"] }).dropped, []);
+});
+
 test("kept extensions come back as the SAME objects, in load order", () => {
 	// Extension resolution is first-path-wins, so the array's ORDER is the trust ordering (repo, then
 	// overlay, then packages, then discovery). A guard that rebuilt or reordered the survivors would

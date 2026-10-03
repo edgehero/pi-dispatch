@@ -160,7 +160,7 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 	// vanish silently -- and the `cmd:` prefix keeps a command named X from colliding with a flow named X
 	// (`:` is outside the skill-name charset, so no real flow can spell the prefixed form). A flow job's
 	// key is byte-identical to before the feature.
-	const id = jobId ?? localJobId({ folder, flow: command !== undefined ? `cmd:${command}` : flow, task, minute });
+	const id = jobId ?? localJobId({ folder, flow: command !== undefined ? `cmd:${command}` : flow, task, minute, provider, model, models });
 	// image/chainDepth/parentJobId land on `data` only when present, so a plain non-chained job's data is
 	// byte-identical. `image` is the container image this job runs in (INT-TRIGGERS-FILE-CONTRACT); absent
 	// resolves the deployment default at job start, never a value frozen here.

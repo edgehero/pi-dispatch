@@ -111,14 +111,32 @@ export function partitionAdminExtensions(extensions = [], { roots = [] } = {}) {
 	const kept = [];
 	const dropped = [];
 	for (const extension of extensions ?? []) {
-		const reason = adminExtensionReason(extension);
+		const path = extension?.path;
+		const root = owningRoot(path, roots);
+		const inRoot = pathUnderRoot(path, root);
+		const ownReason = adminExtensionReason(extension);
+		let reason = ownReason;
+		// The first segment under the root names the extension too (issue #544's review): a manifest
+		// subfolder `extensions/pi-dispatch/package.json` declaring `src/main.js` loads an entry whose own
+		// name is `main.js`, and the folder is what carries the admin name. Only the FIRST segment, for the
+		// reason extensionEntryName gives: ancestors above the root are not the extension.
+		const firstSegment = inRoot.split("/")[0];
+		if (!reason && ADMIN_EXTENSION_RE.test(firstSegment)) reason = "admin-name";
 		if (!reason) {
 			kept.push(extension);
 			continue;
 		}
-		dropped.push({ name: extensionEntryName(extension?.path), root: owningRoot(extension?.path, roots), reason });
+		// Named by its path inside the root when only the folder carried the name, so the line says which folder.
+		dropped.push({ name: ownReason ? extensionEntryName(path) : inRoot, root, reason });
 	}
 	return { kept, dropped };
+}
+
+/** The path inside its root, `/`-separated, or "" when no root holds it. String arithmetic only. */
+function pathUnderRoot(path, root) {
+	if (typeof path !== "string" || typeof root !== "string") return "";
+	const normalized = root.endsWith("/") ? root.slice(0, -1) : root;
+	return path.startsWith(`${normalized}/`) ? path.slice(normalized.length + 1) : "";
 }
 
 /**
