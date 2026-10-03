@@ -249,6 +249,9 @@ is an open issue.
 
 - **A `pi` subprocess** that a package starts inside a job spends outside the runner's meter (issue #500,
   `OQ-011`). Neither the per-job cap nor the windows see it, so a window can undercount such jobs.
+- **A Node older than 18.19 in a job does not start.** To meter `pi` child processes, the runner adds
+  `--import=<child preload>` to `NODE_OPTIONS` for every process in the job (issue #500), and such a Node refuses that
+  flag. The image ships Node 22. An agent that installs an older Node in a job must clear `NODE_OPTIONS` for it.
 - **No project windows yet** (issue #499). You cannot cap a group of repos and folders as one. The key space
   `budget:usd:p:` and the `project:` scope are reserved for it.
 - **Scopes collide across forges** (issue #498). A GitHub `acme/web` and a Forgejo `acme/web` share one repo row

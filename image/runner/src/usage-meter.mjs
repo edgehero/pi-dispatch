@@ -2562,7 +2562,7 @@ export function childLedger({ state, metered = true, meter = null, guard = null 
 //
 // THE ROUTE (DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY). Before it installs its own meter, the runner opens a ledger
 // directory (openChildLedger) and puts three things in its own environment, which every descendant inherits: the
-// directory, its own pid, and a NODE_OPTIONS `--require` of child-preload.cjs. In each Node child the preload decides
+// directory, its own pid, and a NODE_OPTIONS `--import` of child-preload.mjs. In each Node child the preload decides
 // whether the child is a pi session; if so, the child's own meter is started (startChildMeter) on the child's own
 // ModelRuntime class and writes the child's ledger file. The parent folds those files (foldChildLedgers).
 //
@@ -2595,15 +2595,16 @@ export const CHILD_METER_HANDOFF = Symbol.for("pi-dispatch.child-meter");
  * `/workspace` (the operator's tree) or `/job` (read-only). Sets, in `env`:
  *   - CHILD_LEDGER_ENV, the directory;
  *   - RUNNER_PID_ENV, `pid`;
- *   - NODE_OPTIONS, what it held plus ` --require=<preloadPath>` (once: a value that already carries it is left alone).
- *     `--require`, not `--import`: Node older than 18.18 refuses `--import` in NODE_OPTIONS and would not start at all,
- *     and the preload's work is synchronous anyway.
+ *   - NODE_OPTIONS, what it held plus ` --import=<preloadUrl>` (once: a value that already carries it is left alone).
+ *     `--import`, not `--require`: a load hook registered from a `--require` preload breaks every child that then uses
+ *     asynchronous loader hooks (`module.register`, `--loader`). The price is named in DES: a Node older than 18.19
+ *     refuses `--import` in NODE_OPTIONS and does not start.
  * The process that calls this is unaffected: NODE_OPTIONS is read when a Node process starts. Returns `{ dir }`, or
  * `{ error }` (a code, never a path) with both names DELETED from `env` and NODE_OPTIONS untouched, so with no
  * directory no child is pointed anywhere, not even at an inherited one, and every pi child stays unmetered, which the
  * parent's detector then counts. Never throws.
  */
-export function openChildLedger({ env, pid, preloadPath, mkdtemp = mkdtempSync, tmp = tmpdir }) {
+export function openChildLedger({ env, pid, preloadUrl, mkdtemp = mkdtempSync, tmp = tmpdir }) {
 	let dir;
 	try {
 		dir = resolvePath(mkdtemp(join(tmp(), "pi-dispatch-meter-")));
@@ -2616,8 +2617,8 @@ export function openChildLedger({ env, pid, preloadPath, mkdtemp = mkdtempSync, 
 	}
 	env.PI_DISPATCH_CHILD_LEDGER = dir;
 	env.PI_DISPATCH_RUNNER_PID = String(pid);
-	// NODE_OPTIONS splits on whitespace and honours double quotes, so a path with a space is quoted.
-	const flag = /\s/.test(preloadPath) ? `--require="${preloadPath}"` : `--require=${preloadPath}`;
+	// A file URL carries no whitespace (it is percent-encoded), so NODE_OPTIONS splits it as one argument.
+	const flag = `--import=${preloadUrl}`;
 	// env-internal NODE_OPTIONS: Node's own variable, extended here for the runner's descendants, never a deployment key.
 	const existing = typeof env.NODE_OPTIONS === "string" ? env.NODE_OPTIONS.trim() : "";
 	if (!existing.includes(flag)) env.NODE_OPTIONS = existing === "" ? flag : `${existing} ${flag}`;
@@ -2742,16 +2743,17 @@ export function childLedgerName(pid, random = (bytes) => globalThis.crypto.getRa
  *   - `dir`, `name`: the ledger directory and this child's file in it.
  *   - `lazy`: write nothing until the first call is about to go out (the library route: a process that only imports pi
  *     and never calls leaves no file, so a test suite that imports pi hundreds of times cannot flood the directory).
- *     The file is written BEFORE that call is dispatched, never after it.
+ *     The file is born with the pre-dispatch write of that first call.
  *   - `state`: an object kept across calls in one process (the handoff's), so a second class handed over (two copies
  *     of pi in one process) is installed with the same meter and guard and the ledger stays one file.
  *
  * The install is `brake: true` (a hard stop with no policy, so a STOP can be answered) and `isStopped` reads STOP before
  * every call. The ledger is written whole (writeFileAtomic) after the install (unless `lazy`), on every change the meter
- * reports, and once more as `done` when the process exits. FAIL CLOSED ON A WRITE: once a ledger write has failed (a
- * full or unwritable /tmp, a directory the agent removed), the child is unmetered and STOPPED: isStopped answers the
- * token cap for every later call, so no call goes out that the ledger cannot record, and every later write that still
- * succeeds says `metered: false`. With the install failed, the ledger says `metered: false` and carries zeros. Returns
+ * reports, BEFORE every call is dispatched with that call counted in flight (the child's guard, below), and once more
+ * as `done` when the process exits. FAIL CLOSED ON A WRITE: the pre-dispatch write that fails refuses its call, so no
+ * call goes out that the ledger does not already show; and once any write has failed (a full or unwritable /tmp, a
+ * directory the agent removed), the child is unmetered and STOPPED: isStopped answers the token cap for every later
+ * call, and every later write that still succeeds says `metered: false`. With the install failed, the ledger says `metered: false` and carries zeros. Returns
  * the state: `{ ok, metered, meter, guard, handles, write, verify }`, where `verify(runtime)` marks the child unmetered
  * unless that runtime dispatches through an install (a session's runtime, checked at session_start).
  */
@@ -2785,13 +2787,21 @@ export async function startChildMeter({
 		const child = { ok: false, metered: false, failed: false, live: !lazy, meter: null, guard: null, handles: [], classes: new Set([ModelRuntime]), write: () => {}, verify: () => false, installOn: async () => {}, unmetered: () => {} };
 		state.child = child;
 		let done = false;
+		// The call count the ledger must show at least: the meter's own count, or one more while an admitted call is
+		// between its pre-dispatch write and the meter seeing it. The gap is synchronous (admit, dispatch, observe), so
+		// one reservation is the most there can be; a call that was admitted and never observed stays counted, unresolved.
+		let floor = 0;
 		child.write = (ledgerState) => {
 			if (done) return;
 			// A lazy child that never called writes nothing at all, not even at exit.
 			if (!child.live) return;
 			if (ledgerState === "done") done = true;
 			try {
-				writeFileAtomic({ dir, name, text: JSON.stringify(childLedger({ state: ledgerState, metered: child.metered, meter: child.meter, guard: child.guard })), fs: writeFs });
+				const ledger = childLedger({ state: ledgerState, metered: child.metered, meter: child.meter, guard: child.guard });
+				const reserved = child.metered ? Math.max(0, floor - ledger.totals.calls) : 0;
+				ledger.totals.calls += reserved;
+				ledger.totals.unresolved += reserved;
+				writeFileAtomic({ dir, name, text: JSON.stringify(ledger), fs: writeFs });
 			} catch {
 				// The fold has no notion of a stale file, so a write that failed would leave an older, smaller ledger
 				// that still says metered. Instead the child stops (isStopped below) and is unmetered from here on.
@@ -2824,16 +2834,35 @@ export async function startChildMeter({
 		}
 		child.metered = true;
 		child.meter = createUsageMeter({ maxTokens: null, maxCostMicros, allowedModels, onChange: () => child.write("running") });
-		child.guard = createPolicyGuard({ maxCostMicros, allowedModels, env, external: () => readExternal({ dir, name, fs }) });
-		const isStopped = () => {
-			// The first call of a lazy child: its file is written now, before the call goes out.
-			if (!child.live) {
+		const policy = createPolicyGuard({ maxCostMicros, allowedModels, env, external: () => readExternal({ dir, name, fs }) });
+		// THE PRE-DISPATCH WRITE. The guard is the last thing a call passes before it is dispatched (judge), so the child's
+		// guard wraps the policy guard (or stands alone, with no policy): once the policy admits a call, the ledger is
+		// written with that call already counted, in flight (`unresolved`), and a write that fails refuses the call. So
+		// every call that goes out is on disk before it does, at least as a floor; the settle then updates it. One write
+		// per call, on top of the observe and settle writes. A lazy child's file is born here, at its first call.
+		child.guard = {
+			enforces: Object.freeze([...(policy?.enforces ?? [])]),
+			admit(call) {
+				const refused = policy ? policy.admit(call) : null;
+				if (refused !== null && refused !== undefined) return refused;
+				const before = floor;
+				floor = Math.max(floor, child.meter.state.calls + 1);
 				child.live = true;
 				child.write("running");
-			}
-			if (child.failed) return TOKEN_BUDGET;
-			return readStop({ dir, fs });
+				if (!child.failed) return null;
+				floor = before;
+				return TOKEN_BUDGET;
+			},
+			...(policy ? { prepare: (call) => policy.prepare(call) } : {}),
+			bind: (result) => policy?.bind?.(result),
+			unjudged: (count) => policy?.unjudged?.(count),
+			// The refusal counters only. Not policy.snapshot(): the cost guard's snapshot settles a pending admission at its
+			// bound, and the pre-dispatch write runs between an admission and its bind.
+			snapshot: () => ({ ...(policy?.cost ? { costRefused: policy.cost.state.refused } : {}), ...(policy?.model ? { modelRefused: policy.model.snapshot().modelRefused } : {}) }),
+			spend: () => (policy ? policy.spend() : { spentMicros: 0, inflightMicros: 0 }),
 		};
+		// After a failed write, nothing more goes out: the ledger can no longer record it.
+		const isStopped = () => (child.failed ? TOKEN_BUDGET : readStop({ dir, fs }));
 		child.installOn = async (Class, copy) => {
 			const handle = await install({
 				ModelRuntime: Class,

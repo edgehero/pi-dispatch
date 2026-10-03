@@ -307,7 +307,7 @@ test("run-job takes PI_EXIT_AUTH out of its environment right after reading the 
 	// a child can be spawned from the first extension factory on, and the three variables must be in place by then.
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
 	assert.match(src, /\nconst exitKey = readExitKey\(process\.env\);\n(?:\/\/[^\n]*\n)*delete process\.env\.PI_EXIT_AUTH;\n/, "the delete is the next statement after the key read");
-	const ledger = src.indexOf("openChildLedger({ env: process.env, pid: process.pid, preloadPath: fileURLToPath(new URL(\"./src/child-preload.cjs\", import.meta.url)) })");
+	const ledger = src.indexOf("openChildLedger({ env: process.env, pid: process.pid, preloadUrl: new URL(\"./src/child-preload.mjs\", import.meta.url).href })");
 	assert.ok(ledger > 0, "the ledger is opened on the runner's own environment, with the preload beside it");
 	assert.ok(ledger < src.indexOf("await installProcessUsageMeter("), "before the meter installs");
 	assert.ok(ledger < src.indexOf("await buildLoadedResourceLoader("), "before any extension loads");

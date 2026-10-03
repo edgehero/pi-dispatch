@@ -1,5 +1,4 @@
 import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import {
 	createAgentSession,
 	getAgentDir,
@@ -223,11 +222,11 @@ async function main() {
 	// session's first call is metered for the same reason.
 	// The child ledger (issue #500), opened BEFORE the meter installs and before any extension loads, because a child
 	// can be spawned from the first extension factory on. Every descendant inherits the directory, this runner's pid and
-	// a NODE_OPTIONS --require of the child preload, which meters a pi child in the child and reports through a file in
+	// a NODE_OPTIONS --import of the child preload, which meters a pi child in the child and reports through a file in
 	// the directory (openChildLedger). Not removed at exit: the container's filesystem goes with the container, and the
 	// parent's last fold reads the directory at teardown. With no directory the children are not pointed anywhere and a
 	// pi child runs unmetered; said here, by code only (a path never ships in a log).
-	const childLedger = openChildLedger({ env: process.env, pid: process.pid, preloadPath: fileURLToPath(new URL("./src/child-preload.cjs", import.meta.url)) });
+	const childLedger = openChildLedger({ env: process.env, pid: process.pid, preloadUrl: new URL("./src/child-preload.mjs", import.meta.url).href });
 	if (childLedger.error !== undefined) log("child_ledger_unavailable", { reason: childLedger.error });
 
 	const meter = createUsageMeter({

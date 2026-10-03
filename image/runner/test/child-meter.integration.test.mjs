@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { crc32, deflateSync } from "node:zlib";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 // Pure: no static pi import in their module graph, so they load unconditionally and the gate below applies to pi only.
@@ -33,7 +34,7 @@ if (!piIndexUrl && required) {
 }
 const skip = piIndexUrl ? false : `pi not installed (node ${process.version} < 22.19.0); CI runs these`;
 
-const PRELOAD_PATH = fileURLToPath(new URL("../src/child-preload.cjs", import.meta.url));
+const PRELOAD_URL = new URL("../src/child-preload.mjs", import.meta.url).href;
 const PI_ROOT = piIndexUrl ? dirname(dirname(fileURLToPath(piIndexUrl))) : "";
 const entry = (path) => join(PI_ROOT, path);
 
@@ -53,7 +54,7 @@ export default function fakeProvider(pi) {
 		baseUrl: "http://127.0.0.1:1",
 		apiKey: "pi-dispatch-child-fake-key",
 		api,
-		models: [{ id: "m1", name: "m1", api, reasoning: false, input: ["text"], cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 4096 }],
+		models: [{ id: "m1", name: "m1", api, reasoning: false, input: process.env.FAKE_IMAGES ? ["text", "image"] : ["text"], cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 4096 }],
 		streamSimple(model) {
 			appendFileSync(process.env.FAKE_CALLS, "call\\n");
 			const stream = createAssistantMessageEventStream();
@@ -80,7 +81,7 @@ function world({ api = "pi-dispatch-child-fake" } = {}) {
 		TMPDIR: root,
 		PI_CODING_AGENT_DIR: agentDir,
 		PI_OFFLINE: "1",
-		NODE_OPTIONS: `--require=${PRELOAD_PATH}`,
+		NODE_OPTIONS: `--import=${PRELOAD_URL}`,
 		PI_DISPATCH_CHILD_LEDGER: ledger,
 		FAKE_API: api,
 		FAKE_CALLS: calls,
@@ -309,9 +310,9 @@ test("a Node child that runs pi as a library is metered through the preload's lo
 test("the preload on a Node without module.registerHooks does not throw: a library child runs, unmetered (issue #500)", { skip }, async () => {
 	const w = world();
 	// Simulated: a first preload removes registerHooks from node:module before ours reads it.
-	const shim = join(w.root, "no-register-hooks.cjs");
-	writeFileSync(shim, `const builtin = require("node:module");\ndelete builtin.registerHooks;\nbuiltin.syncBuiltinESMExports();\n`);
-	const env = { ...w.env, NODE_OPTIONS: `--require=${shim} --require=${PRELOAD_PATH}` };
+	const shim = join(w.root, "no-register-hooks.mjs");
+	writeFileSync(shim, `import { createRequire, syncBuiltinESMExports } from "node:module";\nconst builtin = createRequire(import.meta.url)("node:module");\ndelete builtin.registerHooks;\nsyncBuiltinESMExports();\n`);
+	const env = { ...w.env, NODE_OPTIONS: `--import=${pathToFileURL(shim).href} --import=${PRELOAD_URL}` };
 	const probe = await run(["--input-type=module", "-e", "import * as m from 'node:module'; process.stdout.write(typeof m.registerHooks)"], { env, cwd: w.root });
 	assert.equal(probe.stdout, "undefined", "the shim must hide registerHooks, or this test proves nothing");
 	const result = await run([libraryScript(w)], { env, cwd: w.root });
@@ -387,24 +388,110 @@ test("a foreign pi copy whose pi-ai has no ./compat is not patched with an impor
 	assert.equal(parsed[0].raw.metered, false);
 });
 
-test("a child whose ledger can no longer be written is stopped: the call after the failed write never reaches the provider (issue #500)", { skip }, async () => {
+test("three children whose ledger dir turns unwritable mid-run: every call that reached the provider is in a ledger, none escapes (issue #500)", { skip }, async () => {
 	const w = world();
-	const drive = rpcDriver(["one", "two", "three"], { between: (sent) => {
-		// After the first answer the directory becomes unwritable (a full or read-only /tmp behaves the same).
-		if (sent === 1) chmodSync(w.ledger, 0o500);
-	} });
-	let result;
-	try {
-		result = await run([entry("dist/bundle/rpc-entry.js"), "--no-session", "-e", w.provider, "--model", "fake/m1"], { env: w.env, cwd: w.root, drive });
-	} finally {
-		chmodSync(w.ledger, 0o700);
+	for (let child = 0; child < 3; child += 1) {
+		// Each child sends one prompt, then the directory becomes unwritable (a full or read-only /tmp behaves the same)
+		// and it sends another. The second call's pre-dispatch write fails, so that call is refused before it goes out.
+		const drive = rpcDriver(["warm", "escape"], { between: () => chmodSync(w.ledger, 0o500) });
+		let result;
+		try {
+			result = await run([entry("dist/bundle/rpc-entry.js"), "--no-session", "-e", w.provider, "--model", "fake/m1"], { env: w.env, cwd: w.root, drive });
+		} finally {
+			chmodSync(w.ledger, 0o700);
+		}
+		assert.equal(result.code, 0, result.stderr);
+		assert.match(result.stdout, new RegExp(STOP_MESSAGES[TOKEN_BUDGET]));
 	}
+	const { parsed, fold } = ledgers(w.ledger);
+	assert.equal(parsed.length, 3);
+	assert.equal(w.callCount(), 3, "only the three warm calls reached the provider");
+	assert.equal(fold.totals.calls, w.callCount(), "and the ledgers count every one of them");
+	assert.equal(fold.totals.total, 777 * 3);
+});
+
+/** A PNG of `size` x `size` grey pixels, built here so the test needs no image file. */
+function png(size) {
+	const chunk = (type, data) => {
+		const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+		const length = Buffer.alloc(4);
+		length.writeUInt32BE(data.length);
+		const crc = Buffer.alloc(4);
+		crc.writeUInt32BE(crc32(body) >>> 0);
+		return Buffer.concat([length, body, crc]);
+	};
+	const header = Buffer.alloc(13);
+	header.writeUInt32BE(size, 0);
+	header.writeUInt32BE(size, 4);
+	header.set([8, 2, 0, 0, 0], 8);
+	const rows = Buffer.alloc(size * (1 + size * 3), 0x80);
+	for (let y = 0; y < size; y += 1) rows[y * (1 + size * 3)] = 0;
+	return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", header), chunk("IDAT", deflateSync(rows)), chunk("IEND", Buffer.alloc(0))]);
+}
+
+test("a metered pi child that reads an image leaves exactly one ledger, metered: its resize worker is not the bundle rule's (issue #500)", { skip }, async () => {
+	const w = world();
+	const image = join(w.root, "shot.png");
+	writeFileSync(image, png(50));
+	const result = await run([entry("dist/bundle/cli.js"), ...printArgs(w), `@${image}`, "describe"], { env: { ...w.env, FAKE_IMAGES: "1" }, cwd: w.root });
 	assert.equal(result.code, 0, result.stderr);
-	// Call two went out and its write failed (the ledger cannot be updated before a call, only when it is seen); call
-	// three was braked. Before this fix all three went out under a ledger that said one call and metered.
-	assert.equal(w.callCount(), 2);
-	assert.match(result.stdout, new RegExp(STOP_MESSAGES[TOKEN_BUDGET]));
-	const { parsed } = ledgers(w.ledger);
-	assert.equal(parsed.length, 1);
-	assert.equal(parsed[0].raw.totals.calls, 1, "the last write that succeeded");
+	assert.equal(w.callCount(), 1);
+	assertMetered(w.ledger);
+});
+
+/** Run a Node child that uses asynchronous loader hooks, with and without the preload: the same output, rc 0. */
+async function sameWithPreload(w, args, { nodeOptions = "" } = {}) {
+	const plain = await run(args, { env: { ...w.env, NODE_OPTIONS: nodeOptions }, cwd: w.root });
+	const preloaded = await run(args, { env: { ...w.env, NODE_OPTIONS: `${nodeOptions} ${w.env.NODE_OPTIONS}`.trim() }, cwd: w.root });
+	assert.equal(plain.code, 0, plain.stderr);
+	assert.equal(preloaded.code, 0, preloaded.stderr);
+	assert.equal(preloaded.stdout, plain.stdout);
+	assert.deepEqual(readdirSync(w.ledger), []);
+	return preloaded.stdout;
+}
+
+/**
+ * An asynchronous loader: answers one virtual specifier, strips the one type annotation of a .ts file, and hands a
+ * `.cts` file back as CommonJS with no source, for Node to load (tsx does exactly that; a synchronous LOAD hook of the
+ * preload's, even one that only passed through, then failed Node's validation and killed `node --import tsx`).
+ */
+const LOADER = `export async function resolve(specifier, context, next) {
+	if (specifier === "virtual:hello") return { url: "virtual:hello", shortCircuit: true };
+	return next(specifier, context);
+}
+export async function load(url, context, next) {
+	if (url === "virtual:hello") return { format: "module", source: "export default 'hello from a loader';", shortCircuit: true };
+	if (url.endsWith(".cts")) {
+		await next(url, { ...context, format: "commonjs" });
+		return { format: "commonjs", source: undefined, shortCircuit: true };
+	}
+	if (url.endsWith(".ts")) {
+		const { readFileSync } = await import("node:fs");
+		const source = readFileSync(new URL(url), "utf8").replace(/: string/g, "");
+		return { format: "module", source, shortCircuit: true };
+	}
+	return next(url, context);
+}
+`;
+
+test("children that use asynchronous loader hooks still run: module.register, --loader, and a tsx-style --import (issue #500)", { skip }, async () => {
+	const w = world();
+	const loader = join(w.root, "loader.mjs");
+	writeFileSync(loader, LOADER);
+	// module.register at run time, then an import through it.
+	const registers = join(w.root, "registers.mjs");
+	writeFileSync(registers, `import { register } from "node:module";\nregister(${JSON.stringify(pathToFileURL(loader).href)});\nconst { default: text } = await import("virtual:hello");\nprocess.stdout.write(text);\n`);
+	assert.equal(await sameWithPreload(w, [registers]), "hello from a loader");
+	// --loader on the command line.
+	const main = join(w.root, "main.mjs");
+	writeFileSync(main, `const { default: text } = await import("virtual:hello");\nprocess.stdout.write(text);\n`);
+	assert.equal(await sameWithPreload(w, ["--no-warnings", "--loader", pathToFileURL(loader).href, main]), "hello from a loader");
+	// tsx's shape: `node --import <a file that calls module.register>` running a .ts file (tsx itself is not a dependency
+	// here; the real tsx was run by hand, see the PR).
+	const tsxLike = join(w.root, "tsx-like.mjs");
+	writeFileSync(tsxLike, `import { register } from "node:module";\nregister(${JSON.stringify(pathToFileURL(loader).href)});\n`);
+	const typed = join(w.root, "typed.ts");
+	writeFileSync(join(w.root, "legacy.cts"), `module.exports = " and cjs ok";\n`);
+	writeFileSync(typed, `const greeting: string = "typed ok";\nconst { default: legacy } = await import("./legacy.cts");\nprocess.stdout.write(greeting + legacy);\n`);
+	assert.equal(await sameWithPreload(w, ["--no-warnings", "--experimental-strip-types", typed], { nodeOptions: `--import=${pathToFileURL(tsxLike).href}` }), "typed ok and cjs ok");
 });

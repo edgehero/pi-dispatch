@@ -17,9 +17,8 @@ import { createJobModelRuntime, jobModelRuntimeOptions } from "../src/model-runt
 import { attachTokenBudget } from "../src/token-budget.mjs";
 import { attachTurnBudget } from "../src/turn-budget.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { createRequire } from "node:module";
-// The child preload is CommonJS (loaded with --require); requiring it runs nothing without a ledger directory.
-const { MODEL_RUNTIME_SUFFIX, patchModelRuntime, PI_ENTRIES, PI_SUBCOMMANDS } = createRequire(import.meta.url)("../src/child-preload.cjs");
+// Importing the child preload runs nothing without a ledger directory.
+import { makeLibraryResolveHook, MODEL_RUNTIME_SUFFIX, PI_ENTRIES, PI_SUBCOMMANDS } from "../src/child-preload.mjs";
 
 /**
  * REQ-UPSTREAM-CONTRACT-TESTS -- assert against the PINNED ARTIFACT, not against HEAD.
@@ -1773,16 +1772,22 @@ test("-ne keeps explicit -e paths, \"--\" ends option parsing, and the subcomman
 	const listed = [...new Set([...help[1].matchAll(/\$\{APP_NAME\} ([a-z]+) /g)].map((match) => match[1]))].sort();
 	assert.deepEqual(listed, ["auth", "config", "install", "list", "mcp", "remove", "uninstall", "update"], "pi's subcommand set changed");
 	// And the preload's own copy of the set is that set (issue #500 part C).
-	assert.deepEqual([...PI_SUBCOMMANDS].sort(), listed, "child-preload.cjs PI_SUBCOMMANDS no longer matches pi's subcommands");
+	assert.deepEqual([...PI_SUBCOMMANDS].sort(), listed, "child-preload.mjs PI_SUBCOMMANDS no longer matches pi's subcommands");
 });
 
-test("the child route's own files: the preload imports no pi module, the child meter imports only the child's own copies, and the library hook's two lines are at the pin (issue #500)", { skip }, () => {
-	// The preload runs in every Node child the job starts. CommonJS, so `--require` loads it on any Node (Node 16 refuses
-	// `--import` in NODE_OPTIONS); it requires only Node built-ins up front, and usage-meter.mjs only in a pi process.
-	const preloadSrc = readFileSync(fileURLToPath(new URL("../src/child-preload.cjs", import.meta.url)), "utf8");
-	assert.deepEqual([...preloadSrc.matchAll(/\brequire\(([^)]*)\)/g)].map((match) => match[1]), ['"node:fs"', '"node:module"', '"node:path"', '"node:url"', "USAGE_METER_PATH"], "child-preload.cjs requires changed: Node built-ins, and usage-meter.mjs by path");
-	assert.doesNotMatch(preloadSrc, /^\s*import\s/m, "the preload is CommonJS: an import statement is a SyntaxError there");
-	assert.doesNotMatch(preloadSrc, /\{[^}]*registerHooks[^}]*\}\s*=\s*require\("node:module"\)/, "registerHooks is read off the module, never destructured at load");
+test("the child route's own files: the preload imports no pi module, the child meter imports only the child's own copies, and the library hook's line is at the pin (issue #500)", { skip }, () => {
+	// The preload runs in every Node child the job starts: Node built-ins only up front (usage-meter.mjs is imported
+	// only in a pi process), and node:module only as a namespace (registerHooks is newer than some Node 22 releases, and
+	// a static named import of a missing export is a SyntaxError that would kill every Node child).
+	const preloadSrc = readFileSync(fileURLToPath(new URL("../src/child-preload.mjs", import.meta.url)), "utf8");
+	assert.deepEqual([...preloadSrc.matchAll(/^import\s[^\n]*?from\s+"([^"]+)";$/gm)].map((match) => match[0]), [
+		'import { existsSync, readFileSync, realpathSync } from "node:fs";',
+		'import * as nodeModule from "node:module";',
+		'import { basename, dirname, join, sep } from "node:path";',
+		'import { fileURLToPath, pathToFileURL } from "node:url";',
+		'import { isMainThread } from "node:worker_threads";',
+	], "child-preload.mjs imports changed: no pi module, and node:module only as a namespace");
+	assert.match(preloadSrc, /registerHooks\(\{ resolve: makeLibraryResolveHook\(/, "a resolve hook only: a load hook breaks `node --import tsx`");
 	// Every pinned session entry ships, including the bundle's cli-runtime.js, which the bin loads and which runs the CLI
 	// on its own.
 	for (const { path } of PI_ENTRIES) assert.ok(existsSync(join(agentPackageDir(), path)), `${path} no longer ships`);
@@ -1793,14 +1798,20 @@ test("the child route's own files: the preload imports no pi module, the child m
 	const meterSrc = readFileSync(fileURLToPath(new URL("../src/child-meter.ts", import.meta.url)), "utf8");
 	assert.deepEqual([...meterSrc.matchAll(/^import\s[^\n]*?from\s+"([^"]+)";$/gm)].map((match) => match[1]), ["@earendil-works/pi-ai", "@earendil-works/pi-ai/providers/all", "@earendil-works/pi-coding-agent"]);
 	assert.deepEqual([...meterSrc.matchAll(/\bimport\(([^)]*\))/g)].map((match) => match[1]), ['new URL("./usage-meter.mjs", import.meta.url)'], "the child meter's one dynamic import is usage-meter.mjs, the fallback when no preload handed it over");
-	// The library hook appends code that names `ModelRuntime` and `builtinProviderCatalog`; both must still be what
-	// model-runtime.js declares, and the file must still sit where the hook looks for it.
+	// The library hook's wrapper hands over the module's `ModelRuntime` export, and the compat copy and catalog its own
+	// pi-ai resolves; the file must still sit where the hook looks for it.
 	const runtimePath = join(agentPackageDir(), "dist", "core", "model-runtime.js");
 	assert.ok(pathToFileURL(runtimePath).href.endsWith(MODEL_RUNTIME_SUFFIX), "model-runtime.js moved -- the library hook watches the old path");
 	const runtimeSrc = readFileSync(runtimePath, "utf8");
 	assert.match(runtimeSrc, /^export class ModelRuntime \{/m, "model-runtime.js no longer declares the class the hook hands over");
-	assert.ok(runtimeSrc.includes('import * as builtinProviderCatalog from "@earendil-works/pi-ai/providers/all";'), "model-runtime.js no longer imports the catalog the hook hands over");
-	assert.match(patchModelRuntime(runtimeSrc), /library\?\.\(\{ ModelRuntime, compat: __piDispatchCompat,/, "the hook would hand over no class at this pin");
+	const runtimeUrl = pathToFileURL(runtimePath).href;
+	// pi's own pi-ai copy, as model-runtime.js resolves it (the nested one; its exports map gives both subpaths).
+	const nestedAi = join(agentPackageDir(), "node_modules", "@earendil-works", "pi-ai");
+	const aiExports = JSON.parse(readFileSync(join(nestedAi, "package.json"), "utf8")).exports;
+	assert.ok(aiExports["./compat"] && aiExports["./providers/*"], "model-runtime.js's pi-ai no longer exports ./compat and ./providers/*");
+	const next = (specifier) => ({ url: specifier === "@earendil-works/pi-ai/compat" ? pathToFileURL(join(nestedAi, "dist", "compat.js")).href : specifier === "@earendil-works/pi-ai/providers/all" ? pathToFileURL(join(nestedAi, "dist", "providers", "all.js")).href : specifier, format: "module" });
+	const wrapped = makeLibraryResolveHook({ packageDir: () => agentPackageDir() })(runtimeUrl, {}, next);
+	assert.match(decodeURIComponent(wrapped.url), /library\?\.\(\{ ModelRuntime: __piDispatchReal\.ModelRuntime, compat: __piDispatchCompat,/, "the hook would hand over no class at this pin: model-runtime.js's pi-ai no longer resolves ./compat and ./providers/all");
 });
 
 test("a child extension reaches its OWN ModelRuntime through ctx.modelRegistry.runtime, and the bundle's is not dist/index.js's (issue #500)", { skip }, () => {

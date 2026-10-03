@@ -1,12 +1,14 @@
 /**
- * The child preload (issue #500; DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY). The runner adds `--require=<this file>` to
+ * The child preload (issue #500; DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY). The runner adds `--import=<this file>` to
  * NODE_OPTIONS (openChildLedger in usage-meter.mjs), so this runs first in EVERY Node process the job starts: npm,
  * the agent's own scripts, and any pi child. It decides whether the process is a pi session and, if so, starts the
  * child's own meter, which reports through a ledger file the parent folds.
  *
- * COMMONJS, LOADED WITH --require. Every Node accepts `--require` in NODE_OPTIONS; Node older than 18.18 refuses
- * `--import` there and would not start at all, so an ESM preload broke a job's legacy Node (measured on 16.20). All of
- * the work below is synchronous anyway.
+ * AN ES MODULE, LOADED WITH --import. A load hook registered from a `--require` preload breaks every Node child that
+ * then uses asynchronous loader hooks (`module.register`, `--loader`: ts-node/esm, tsx, yarn PnP, import-in-the-middle)
+ * with `loadSync is not a function`, measured on 22.19, 22.23 and 23.5; registered from `--import` they coexist. The
+ * price: a Node older than 18.19 refuses `--import` in NODE_OPTIONS and does not start at all (a named residual; an
+ * agent that installs such a Node in a job must drop NODE_OPTIONS for it).
  *
  * TOTAL. It never throws and never waits on anything: a preload that throws kills the Node child it runs in, so every
  * step below is caught, and a failure leaves the child unmetered (which the parent's detector counts) rather than
@@ -25,38 +27,43 @@
  *      dispatches those on args[0], and an `-e` in front turns `pi list` into a chat turn (measured). `--version` and
  *      `--export` exit before any extension loads, so the meter never starts; an exit handler marks such a stub `done`
  *      (zeros) rather than leave it `starting` for good. Every other flag is injected like any run (measured).
- *   2. ANY OTHER Node process, where `module.registerHooks` exists: a load hook. Its fast path is one substring test of
- *      the module URL, so a CommonJS-heavy tool pays for the hook and nothing more. Two things it acts on:
- *      - pi's unbundled `dist/core/model-runtime.js`, in any copy of pi, matched on the URL's PATH (a `?query` or
- *        `#hash` cannot dodge it). A process that loads it runs pi as a library (pi-subagents' background runner does,
- *        measured). The hook appends three lines: an import of the compat copy of pi-ai that module's own package
- *        resolves, an import of usage-meter.mjs, and a call that hands both and the class to the library handler. The
- *        handler starts the meter on that class synchronously, and the ledger is written when the first call is about
- *        to go out (a process that never calls leaves no file). A `model-runtime.js` whose source no longer carries
- *        the two lines the rewrite names, or whose pi-ai has no `./compat` export, is not patched with that import: it
- *        is handed over with no class, and the process records itself unmetered (the floor), never a broken import.
+ *   2. ANY OTHER Node process (or worker thread), where `module.registerHooks` exists: a RESOLVE hook. Its fast path is
+ *      one substring test of the resolved URL. A resolve hook, not a load hook: a load hook, even one that only passes
+ *      through, breaks `node --import tsx` (measured on 22.19 and 23.5: tsx's own load chain then fails validation),
+ *      and a resolve hook coexists with tsx, `module.register` and `--loader`. Two things it acts on:
+ *      - pi's unbundled `dist/core/model-runtime.js`, in any copy of pi, matched on the resolved URL's PATH (a `?query`
+ *        or `#hash` cannot dodge it). A process that loads it runs pi as a library (pi-subagents' background runner
+ *        does, measured). Every import of it resolves instead to a small wrapper module (wrapperSource): the wrapper
+ *        imports the real module (one instance, under a marker query), re-exports all of it, imports the compat copy
+ *        of pi-ai and the provider catalog that module's own package resolves, and usage-meter.mjs, and hands them and
+ *        the class to the library handler before any importer runs. The handler starts the meter on that class, and
+ *        the ledger is written when the first call is about to go out (a process that never calls leaves no file). A
+ *        `model-runtime.js` that no longer declares the class, or whose pi-ai cannot be resolved with `./compat` and
+ *        `./providers/all`, is handed over with no class, and the process records itself unmetered (the floor), never
+ *        a broken import.
  *      - any file under the PINNED pi's `dist/bundle/`. The bundle defines its own ModelRuntime in a hashed chunk the
  *        hook cannot name, and a process that imports the bundle by path (its index exports `main`) runs a full session
- *        no `-e` reached. It cannot be metered, so it says so: one `metered: false` ledger.
+ *        no `-e` reached. It cannot be metered, so it says so: one `metered: false` ledger. Never in a worker thread:
+ *        a metered pi CLI runs its image resize and codemode workers from bundle chunks, and the preload runs again in
+ *        each of them, where argv[1] is still the entry the main thread already metered.
  */
-"use strict";
-
-const { existsSync, readFileSync, realpathSync } = require("node:fs");
-const nodeModule = require("node:module");
-const { basename, dirname, join, sep } = require("node:path");
-const { fileURLToPath, pathToFileURL } = require("node:url");
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import * as nodeModule from "node:module";
+import { basename, dirname, join, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { isMainThread } from "node:worker_threads";
 
 /** usage-meter.mjs CHILD_METER_HANDOFF, spelled again because this file does not load that one up front. A test holds them equal. */
 const HANDOFF = Symbol.for("pi-dispatch.child-meter");
 
 /** The pi subcommands, dispatched on args[0] before any option is parsed (pinned in pinned-api.test.mjs). */
-const PI_SUBCOMMANDS = Object.freeze(["auth", "config", "install", "list", "mcp", "remove", "uninstall", "update"]);
+export const PI_SUBCOMMANDS = Object.freeze(["auth", "config", "install", "list", "mcp", "remove", "uninstall", "update"]);
 
 /** The flags with which pi exits before it loads any extension: the meter never starts, and nothing is spent. */
 const EXITS_BEFORE_EXTENSIONS = Object.freeze(["--version", "-v", "--export"]);
 
 /** The files that run a full pi session, relative to the pi package root, and how each reads its arguments. */
-const PI_ENTRIES = Object.freeze([
+export const PI_ENTRIES = Object.freeze([
 	Object.freeze({ path: "dist/bundle/cli.js", kind: "cli" }),
 	// cli.js only loads this one, where setupCli and main live; run directly it is the same CLI.
 	Object.freeze({ path: "dist/bundle/cli-runtime.js", kind: "cli" }),
@@ -68,17 +75,19 @@ const PI_ENTRIES = Object.freeze([
 const ENTRY_BASENAMES = new Set(PI_ENTRIES.map((entry) => basename(entry.path)));
 
 /** The module the library hook watches for, in any copy of pi-coding-agent. */
-const MODEL_RUNTIME_SUFFIX = "/@earendil-works/pi-coding-agent/dist/core/model-runtime.js";
+export const MODEL_RUNTIME_SUFFIX = "/@earendil-works/pi-coding-agent/dist/core/model-runtime.js";
 /** The hook's fast path: a module whose URL does not contain this is passed through untouched. */
 const PI_DIST_MARK = "/pi-coding-agent/dist/";
 
-/** The two lines of the pinned model-runtime.js the appended code relies on: the class, and the catalog import. */
+/** The line of the pinned model-runtime.js the wrapper relies on: the class it hands over. */
 const MODEL_RUNTIME_CLASS = /^export class ModelRuntime \{/m;
-const MODEL_RUNTIME_CATALOG = 'import * as builtinProviderCatalog from "@earendil-works/pi-ai/providers/all";';
+/** The query the wrapper imports the real model-runtime.js under, so resolving it again is not wrapped again. */
+const REAL_MARK = "pi-dispatch-real=1";
 
-const CHILD_METER_PATH = join(__dirname, "child-meter.ts");
-const USAGE_METER_PATH = join(__dirname, "usage-meter.mjs");
-const USAGE_METER_URL = pathToFileURL(USAGE_METER_PATH).href;
+const HERE = dirname(fileURLToPath(import.meta.url));
+export const CHILD_METER_PATH = join(HERE, "child-meter.ts");
+export const USAGE_METER_PATH = join(HERE, "usage-meter.mjs");
+export const USAGE_METER_URL = pathToFileURL(USAGE_METER_PATH).href;
 
 let packageDirCache;
 /**
@@ -87,7 +96,7 @@ let packageDirCache;
  */
 function defaultPackageDir() {
 	if (packageDirCache !== undefined) return packageDirCache;
-	for (let dir = __dirname; ; dir = dirname(dir)) {
+	for (let dir = HERE; ; dir = dirname(dir)) {
 		const candidate = join(dir, "node_modules", "@earendil-works", "pi-coding-agent");
 		if (existsSync(join(candidate, "package.json"))) return (packageDirCache = realpathSync(candidate));
 		if (dirname(dir) === dir) throw new Error("pi-coding-agent not found");
@@ -99,7 +108,7 @@ function defaultPackageDir() {
  * bundle) is the bundle. One realpath for every Node child; the package root is resolved only when the file's name is
  * an entry's.
  */
-function entryKind(argv1, { packageDir = defaultPackageDir, realpath = realpathSync } = {}) {
+export function entryKind(argv1, { packageDir = defaultPackageDir, realpath = realpathSync } = {}) {
 	if (typeof argv1 !== "string" || argv1 === "") return null;
 	let real;
 	try {
@@ -129,14 +138,14 @@ function entryKind(argv1, { packageDir = defaultPackageDir, realpath = realpathS
  * whose first argument is a subcommand. First, not last and not before the first `--`: everything after `--` is a
  * message, and in front of the spawner's own `-e`s is what loads the meter before them (measured in both CLIs).
  */
-function injectChildMeter(argv, kind, meterPath = CHILD_METER_PATH) {
+export function injectChildMeter(argv, kind, meterPath = CHILD_METER_PATH) {
 	if (kind === "cli" && PI_SUBCOMMANDS.includes(argv[2])) return false;
 	argv.splice(2, 0, "-e", meterPath);
 	return true;
 }
 
 /** Whether pi's own arguments (before any `--`) carry a flag that exits before extensions load. */
-function exitsBeforeExtensions(args) {
+export function exitsBeforeExtensions(args) {
 	const end = args.indexOf("--");
 	return (end === -1 ? args : args.slice(0, end)).some((arg) => EXITS_BEFORE_EXTENSIONS.includes(arg));
 }
@@ -148,57 +157,58 @@ function urlPath(url) {
 }
 
 /**
- * Whether `@earendil-works/pi-ai` as resolved from `url` exports `./compat`, the one import the rewrite adds that is not
- * this repository's own file. False when it cannot be told (no module.findPackageJSON, an unreadable package.json):
- * the rewrite then hands over no class, because an import that fails to link would kill the process.
+ * The wrapper module every import of model-runtime.js resolves to. Absolute URLs only (it is a data: module). The real
+ * module is imported once, under REAL_MARK, and fully evaluated before the wrapper's body hands its class over, which is
+ * before any importer of the wrapper runs. With `compatUrl` or `providersUrl` null the class is not handed over.
  */
-function compatResolvesFrom(url, { findPackageJSON = nodeModule.findPackageJSON, read = (path) => readFileSync(path, "utf8") } = {}) {
-	try {
-		if (typeof findPackageJSON !== "function") return false;
-		const manifest = findPackageJSON("@earendil-works/pi-ai", url);
-		if (typeof manifest !== "string") return false;
-		const exportsMap = JSON.parse(read(manifest))?.exports;
-		return exportsMap !== null && typeof exportsMap === "object" && Object.hasOwn(exportsMap, "./compat");
-	} catch {
-		return false;
-	}
-}
-
-/**
- * The library hook's rewrite of model-runtime.js: the source with three lines appended. ESM hoists the two imports, and
- * the call runs once the module body has defined the class. The compat specifier resolves from model-runtime.js
- * itself, so it is that package's own pi-ai: the copy pi hands its extensions and builds its streams with. With
- * `compat` false, or a source that does not carry the two lines, the class is not handed over.
- */
-function patchModelRuntime(source, { compat = true, usageMeterUrl = USAGE_METER_URL } = {}) {
+export function wrapperSource({ realUrl, compatUrl, providersUrl, usageMeterUrl = USAGE_METER_URL }) {
 	const handoff = 'globalThis[Symbol.for("pi-dispatch.child-meter")]?.library?.';
-	const meter = `import * as __piDispatchUsageMeter from ${JSON.stringify(usageMeterUrl)};`;
-	if (!compat || !MODEL_RUNTIME_CLASS.test(source) || !source.includes(MODEL_RUNTIME_CATALOG)) {
-		return `${source}\n;${meter}\n${handoff}({ ModelRuntime: null, compat: null, providers: null, meter: __piDispatchUsageMeter });\n`;
+	const lines = [
+		`import * as __piDispatchReal from ${JSON.stringify(realUrl)};`,
+		`import * as __piDispatchUsageMeter from ${JSON.stringify(usageMeterUrl)};`,
+		`export * from ${JSON.stringify(realUrl)};`,
+	];
+	if (compatUrl === null || providersUrl === null) {
+		lines.push(`${handoff}({ ModelRuntime: null, compat: null, providers: null, meter: __piDispatchUsageMeter });`);
+	} else {
+		lines.push(`import * as __piDispatchCompat from ${JSON.stringify(compatUrl)};`, `import * as __piDispatchProviders from ${JSON.stringify(providersUrl)};`);
+		lines.push(`${handoff}({ ModelRuntime: __piDispatchReal.ModelRuntime, compat: __piDispatchCompat, providers: __piDispatchProviders, meter: __piDispatchUsageMeter });`);
 	}
-	return `${source}\n;import * as __piDispatchCompat from "@earendil-works/pi-ai/compat";\n${meter}\n${handoff}({ ModelRuntime, compat: __piDispatchCompat, providers: builtinProviderCatalog, meter: __piDispatchUsageMeter });\n`;
+	return `${lines.join("\n")}\n`;
 }
 
 /**
- * The load hook, built over its collaborators so a test can drive it. Every module whose URL does not name a
+ * The resolve hook, built over its collaborators so a test can drive it. Every resolution whose URL does not name a
  * pi-coding-agent dist file passes straight through.
  */
-function makeLibraryLoadHook({ packageDir = defaultPackageDir, onBundle = () => {}, compatResolves = compatResolvesFrom } = {}) {
+export function makeLibraryResolveHook({ packageDir = defaultPackageDir, onBundle = () => {}, readSource = (url) => readFileSync(new URL(url), "utf8") } = {}) {
 	let bundlePrefix;
-	return function libraryLoadHook(url, context, nextLoad) {
-		if (typeof url !== "string" || !url.includes(PI_DIST_MARK)) return nextLoad(url, context);
-		const result = nextLoad(url, context);
+	return function libraryResolveHook(specifier, context, nextResolve) {
+		const result = nextResolve(specifier, context);
+		const url = result?.url;
+		if (typeof url !== "string" || !url.includes(PI_DIST_MARK)) return result;
 		try {
 			const path = urlPath(url);
 			if (path.endsWith(MODEL_RUNTIME_SUFFIX)) {
-				if (result?.format !== "module" || result.source === null || result.source === undefined) return result;
-				const source = typeof result.source === "string" ? result.source : new TextDecoder().decode(result.source);
-				return { ...result, source: patchModelRuntime(source, { compat: compatResolves(url) }) };
+				if (url.includes(REAL_MARK)) return result;
+				const realUrl = `${url}${url.includes("?") ? "&" : "?"}${REAL_MARK}`;
+				let compatUrl = null;
+				let providersUrl = null;
+				try {
+					if (MODEL_RUNTIME_CLASS.test(readSource(path))) {
+						compatUrl = nextResolve("@earendil-works/pi-ai/compat", { ...context, parentURL: path }).url;
+						providersUrl = nextResolve("@earendil-works/pi-ai/providers/all", { ...context, parentURL: path }).url;
+					}
+				} catch {
+					compatUrl = null;
+					providersUrl = null;
+				}
+				return { url: `data:text/javascript,${encodeURIComponent(wrapperSource({ realUrl, compatUrl, providersUrl }))}`, format: "module", shortCircuit: true };
 			}
 			if (bundlePrefix === undefined) bundlePrefix = `${packageDir()}${sep}dist${sep}bundle${sep}`;
 			if (path.startsWith("file:") && fileURLToPath(path).startsWith(bundlePrefix)) onBundle();
 		} catch {
-			// The module as pi shipped it.
+			// Resolved as pi shipped it.
 		}
 		return result;
 	};
@@ -216,10 +226,10 @@ function writeStub(state, meter) {
 }
 
 /**
- * The preload's work, with everything it touches injected so a test can drive it. Synchronous. Returns what it did:
+ * The preload's work, with everything it touches injected so a test can drive it. Returns what it did:
  * "none" (no ledger directory), "subcommand", "entry" (route 1) or "library" (route 2, the hook registered or not).
  */
-function preload({
+export async function preload({
 	env = process.env,
 	argv = process.argv,
 	pid = process.pid,
@@ -227,7 +237,8 @@ function preload({
 	packageDir = defaultPackageDir,
 	realpath = realpathSync,
 	registerHooks = nodeModule.registerHooks,
-	loadMeter = () => require(USAGE_METER_PATH),
+	isMain = isMainThread,
+	loadMeter = () => import(USAGE_METER_URL),
 	onExit = (listener) => process.on("exit", listener),
 } = {}) {
 	// env-internal PI_DISPATCH_CHILD_LEDGER: set by the runner in its own environment and inherited, never by the worker.
@@ -239,8 +250,7 @@ function preload({
 		if (!injectChildMeter(argv, kind)) return "subcommand";
 		const state = (global[HANDOFF] ??= { dir });
 		try {
-			// An ES module loaded with require: usage-meter.mjs has no top-level await. A Node too old for that cannot run pi either.
-			state.meter ??= loadMeter();
+			state.meter ??= await loadMeter();
 			state.name ??= state.meter.childLedgerName(pid);
 			writeStub(state, state.meter);
 			// `--version` and `--export` exit before the meter can start, having spent nothing: their stub ends `done`.
@@ -279,11 +289,12 @@ function preload({
 	};
 	// The bundle loaded by path in a process no `-e` reached: unmeterable, said once, after the module that loaded it.
 	const onBundle = () => {
-		if (state.bundle) return;
+		// Not in a worker thread: a metered pi CLI's own workers (image resize, codemode) run from bundle chunks.
+		if (state.bundle || !isMain) return;
 		state.bundle = true;
-		queueMicrotask(() => {
+		queueMicrotask(async () => {
 			try {
-				const meter = (state.meter ??= loadMeter());
+				const meter = (state.meter ??= await loadMeter());
 				state.name ??= meter.childLedgerName(pid);
 				void meter.startChildMeter({ ModelRuntime: null, compat: null, env, dir, name: state.name, state });
 			} catch {
@@ -293,31 +304,15 @@ function preload({
 	};
 	if (typeof registerHooks !== "function") return "library";
 	try {
-		registerHooks({ load: makeLibraryLoadHook({ packageDir, onBundle }) });
+		registerHooks({ resolve: makeLibraryResolveHook({ packageDir, onBundle }) });
 	} catch {
 		// An older Node: a library-mode child is then seen by the parent's detector only.
 	}
 	return "library";
 }
 
-module.exports = {
-	CHILD_METER_PATH,
-	compatResolvesFrom,
-	entryKind,
-	exitsBeforeExtensions,
-	injectChildMeter,
-	makeLibraryLoadHook,
-	MODEL_RUNTIME_SUFFIX,
-	patchModelRuntime,
-	PI_ENTRIES,
-	PI_SUBCOMMANDS,
-	preload,
-	USAGE_METER_PATH,
-	USAGE_METER_URL,
-};
-
 try {
-	preload();
+	await preload();
 } catch {
 	// Total: nothing here may end the process it runs in.
 }
