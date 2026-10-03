@@ -2108,6 +2108,37 @@ test("writeScopedLimits REFUSES a version-less or newer existing file -- read an
   assert.equal(v3.files.get("sl.json"), v3text, "never re-stamped down");
 });
 
+test("writeScopedLimits refuses to add or change a project:<id> row whose id is not in projects.json (issue #499 part B)", () => {
+  const before = JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 3 }] });
+  const projects = JSON.stringify({ version: 1, projects: [{ id: "shop", name: "Private Name", members: ["github:acme/web"] }] });
+  const fs = memFs({ "sl.json": before, "projects.json": projects });
+  // An id projects.json does not define: refused, the bytes untouched, no project name quoted.
+  const missing = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "projects.json", fs, mutate: (l) => [...l, { scope: "project:tools", day: 2 }] });
+  assert.match(missing.invalid, /project:tools names a project that is not in the projects file/);
+  assert.ok(!missing.invalid.includes("Private Name"));
+  assert.equal(fs.files.get("sl.json"), before);
+  // No projects file at all: no projects, so the row is refused too.
+  const none = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "absent.json", fs, mutate: (l) => [...l, { scope: "project:shop", day: 2 }] });
+  assert.match(none.invalid, /project:shop names a project/);
+  // A projects file that does not load: the row cannot be checked, so it is refused.
+  const broken = memFs({ "sl.json": before, "projects.json": "{broken" });
+  assert.match(writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "projects.json", fs: broken, mutate: (l) => [...l, { scope: "project:shop", day: 2 }] }).invalid, /projects file does not load/);
+  // A defined id is written, and a count-only project row keeps the file at version 1.
+  const ok = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "projects.json", fs, mutate: (l) => [...l, { scope: "project:shop", day: 2, concurrent: 1 }] });
+  assert.equal(ok.ok, true);
+  assert.deepEqual(JSON.parse(fs.files.get("sl.json")), { version: 1, limits: [{ scope: "acme/web", day: 3 }, { scope: "project:shop", day: 2, concurrent: 1 }] });
+  // projects.json then loses the project: the dangling row may still be deleted, and other rows edited...
+  fs.files.set("projects.json", JSON.stringify({ version: 1, projects: [] }));
+  const other = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "projects.json", fs, mutate: (l) => l.map((r, i) => (i === 0 ? { ...r, day: 4 } : r)) });
+  assert.equal(other.ok, true, "an unchanged dangling row is not re-judged");
+  // ...but the dangling row itself cannot be edited into a new state.
+  const edit = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "projects.json", fs, mutate: (l) => l.map((r) => (r.scope === "project:shop" ? { ...r, day: 9 } : r)) });
+  assert.match(edit.invalid, /project:shop names a project/);
+  const del = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "projects.json", fs, mutate: (l) => l.filter((r) => r.scope !== "project:shop") });
+  assert.equal(del.ok, true, "deleting the dangling row is always allowed");
+  assert.deepEqual(JSON.parse(fs.files.get("sl.json")).limits, [{ scope: "acme/web", day: 4 }]);
+});
+
 test("writeScopedLimits validates the RESULT through the shared parser and leaves bytes untouched on reject", () => {
   const before = JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 3 }] });
   const fs = memFs({ "sl.json": before });

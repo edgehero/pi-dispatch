@@ -14,7 +14,7 @@ import { endpointsForModel } from "./model-endpoints.mjs";
 import { splitModelEntry } from "./model-ref.mjs";
 import { effectiveCostCapMicros } from "./money.mjs";
 import { dollarWindowCaps } from "./dollar-budget.mjs";
-import { budgetCapsFor, concurrencyFor, dollarCapsFor, makeInFlight, modelDollarRows, rowScopeFor } from "./scoped-limits.mjs";
+import { concurrencyFor, dollarCapsFor, makeInFlight, modelDollarRows, projectDollarCapsFor, projectRowFor, rowScopeFor, scopedLedgers } from "./scoped-limits.mjs";
 import { projectOf } from "./projects.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
 import { makeWaitState } from "./wait-state.mjs";
@@ -561,25 +561,42 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// GitHub jobs only, a bare `acme/web` row holds every forge's under the key it always had. With no row it is the
 		// job's canonical scope, so the folder mutex is keyed exactly as before.
 		const scope = rowScopeFor(job.data, limits);
-		let held = false;
-		let scopeSlot = null;
+		// THE SCOPE HOLDS, in acquire order (issue #499 part B): the repo or folder slot, then the project slot. Each is
+		// `{ key, fleet }`: the in-process slot under `key` (the row scope) and its fleet claim, or null. ONE drain gives
+		// every hold back, last first, at every exit (a deferral, the setup guard, the finally), the endpoint holds' shape:
+		// a release site that lists slots by hand is the one that forgets the slot added after it was written.
+		const scopeHolds = [];
+		// Drains the holds, so a second call releases nothing: the in-process map's release is not idempotent. The
+		// in-process half goes back synchronously, so a caller that cannot await (the setup guard) still frees every local
+		// slot before it rethrows; the fleet half is release-if-mine and awaited where it can be.
+		const releaseScopeHolds = () => {
+			const taken = scopeHolds.splice(0).reverse();
+			for (const hold of taken) inFlight.release(hold.key);
+			return Promise.all(taken.map((hold) => hold.fleet?.release?.()));
+		};
+		// Give every hold back (scope and host), then defer. Every scope-gate deferral goes through here.
+		const deferScope = async (fields) => {
+			await releaseScopeHolds();
+			// The host slot goes back before we defer: `makeInFlight().release` is not idempotent, so a slot
+			// held across a deferral would be a slot this machine never gets back.
+			if (hostHeld) {
+				hostBound.slots.release(HOST_SLOT_KEY);
+				hostHeld = false;
+			}
+			deps?.log?.(fields.event, { jobId: job.id, kind: job.data?.kind === "local" ? "local" : "forge", delayMs: SCOPE_BUSY_RECHECK_MS, ...fields.extra });
+			await job.moveToDelayed(nowMs + SCOPE_BUSY_RECHECK_MS, token);
+			throw new DelayedError();
+		};
 		if (scope) {
 			const ceiling = concurrencyFor(job.data, limits);
 			if (!inFlight.tryAcquire(scope, ceiling)) {
 				// Optional-chained: makeProcessor gives `deps` no default and bare wirings pass deps: {}.
 				// The scope itself stays out of the log line (no-pii-in-logs -- a local scope is a full
 				// host path); the delayed count and the job id are what an operator needs to see it.
-				deps?.log?.("scope_busy_deferred", { jobId: job.id, kind: job.data?.kind === "local" ? "local" : "forge", delayMs: SCOPE_BUSY_RECHECK_MS });
-				// The host slot goes back before we defer: `makeInFlight().release` is not idempotent, so a slot
-				// held across a deferral would be a slot this machine never gets back.
-				if (hostHeld) {
-					hostBound.slots.release(HOST_SLOT_KEY);
-					hostHeld = false;
-				}
-				await job.moveToDelayed(nowMs + SCOPE_BUSY_RECHECK_MS, token);
-				throw new DelayedError();
+				await deferScope({ event: "scope_busy_deferred" });
 			}
-			held = true;
+			const repoHold = { key: scope, fleet: null };
+			scopeHolds.push(repoHold);
 
 			// THE FLEET-WIDE HALF of a scoped ceiling (issue #57). A `scoped-limits.json` row's day/week/month
 			// caps are already atomic INCRs on shared keys; its `concurrent` was a per-process Map, so it
@@ -596,20 +613,28 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// And an unlimited forge scope never claims either: `concurrencyFor` returns Infinity with no
 			// matching row, so a deployment with no scoped-limits file issues no command at all.
 			if (scopeLease && job.data?.kind !== "local" && Number.isFinite(ceiling)) {
-				scopeSlot = await scopeLease.acquire(job.id, { slots: ceiling, keyArgs: [hash16(scope)] });
-				if (!scopeSlot) {
-					// The local slot goes back BEFORE we defer: `makeInFlight().release` is not idempotent, so a
-					// slot held across a deferral is a slot this host never gets back.
-					inFlight.release(scope);
-					held = false;
-					if (hostHeld) {
-						hostBound.slots.release(HOST_SLOT_KEY);
-						hostHeld = false;
-					}
-					deps?.log?.("scope_busy_deferred", { jobId: job.id, kind: job.data?.kind === "local" ? "local" : "forge", delayMs: SCOPE_BUSY_RECHECK_MS, where: "fleet" });
-					await job.moveToDelayed(nowMs + SCOPE_BUSY_RECHECK_MS, token);
-					throw new DelayedError();
-				}
+				repoHold.fleet = await scopeLease.acquire(job.id, { slots: ceiling, keyArgs: [hash16(scope)] });
+				if (!repoHold.fleet) await deferScope({ event: "scope_busy_deferred", extra: { where: "fleet" } });
+			}
+		}
+
+		// THE PROJECT SLOT (issue #499 part B): a project row's `concurrent` bounds every member of the project together.
+		// Taken AFTER the repo slot, in the same order for every job, so two jobs cannot each hold one and wait on the
+		// other; given back with it, last first, by the one drain above. Keyed by the project ROW's scope
+		// (`project:<id>`): the in-process slot under that string, the fleet lease under `slot:s:<hash16(project:<id>)>`,
+		// which is exactly the key the boot sweeper hashes from the row. A LOCAL member takes the fleet half too, where
+		// its own folder slot does not: a folder path carries no identity across hosts, but a project id does (every
+		// host carries the same projects.json, INT-PROJECTS-FILE-CONTRACT). A deferral, never a refusal, like the repo's.
+		const projectRow = projectRowFor(limits, project);
+		if (projectRow && Number.isSafeInteger(projectRow.concurrent)) {
+			if (!inFlight.tryAcquire(projectRow.scope, projectRow.concurrent)) {
+				await deferScope({ event: "scope_busy_deferred", extra: { ledger: "project" } });
+			}
+			const projectHold = { key: projectRow.scope, fleet: null };
+			scopeHolds.push(projectHold);
+			if (scopeLease) {
+				projectHold.fleet = await scopeLease.acquire(job.id, { slots: projectRow.concurrent, keyArgs: [hash16(projectRow.scope)] });
+				if (!projectHold.fleet) await deferScope({ event: "scope_busy_deferred", extra: { ledger: "project", where: "fleet" } });
 			}
 		}
 
@@ -724,12 +749,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				}
 				if (where !== null) {
 					await releaseEndpointHolds();
-					await scopeSlot?.release?.();
-					scopeSlot = null;
-					if (held) {
-						inFlight.release(scope);
-						held = false;
-					}
+					await releaseScopeHolds();
 					if (hostHeld) {
 						hostBound.slots.release(HOST_SLOT_KEY);
 						hostHeld = false;
@@ -897,19 +917,14 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				cancelPoll.unref?.();
 			}
 		} catch (error) {
-			// Release and CLEAR the flag: this throw never reaches the main finally below, but a shared
-			// scope must never be releasable twice -- a double release frees another holder's slot.
-			if (held) {
-				inFlight.release(scope);
-				held = false;
-			}
+			// Release and DRAIN: this throw never reaches the main finally below, but a shared scope must never be
+			// releasable twice -- a double release frees another holder's slot. Last taken, first given back.
+			void releaseEndpointHolds();
+			void releaseScopeHolds();
 			if (hostHeld) {
 				hostBound.slots.release(HOST_SLOT_KEY);
 				hostHeld = false;
 			}
-			void scopeSlot?.release?.();
-			scopeSlot = null;
-			void releaseEndpointHolds();
 			clearTimeout(timer);
 			clearInterval(cancelPoll);
 			throw error;
@@ -954,10 +969,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// The daily TOKEN cap (issue #25), same overlay > env resolution. Check-AFTER, so it gates the
 				// NEXT job on prior recorded spend; null => the daily token counter is disabled.
 				tokenCap: settings.dailyTokenCap,
-				// This job's scoped budget windows (issue #242), from the SAME limits snapshot the pickup
-				// gate above read -- one read per pickup, so gate and ledger agree for this job's whole
-				// life. Null when no row carries a money window for this scope.
-				scopedCaps: budgetCapsFor(job.data, limits),
+				// This job's scoped job-count ledgers in reserve order (issues #242 and #499 part B): its repo or folder
+				// row's, then its project row's, from the SAME limits snapshot and the SAME pickup project the gate above
+				// read -- one read per pickup, so gate, ledger and record agree for this attempt. Empty when no row carries
+				// a job-count window for this job.
+				scopedLedgers: scopedLedgers(job.data, limits, project),
 				// Issue #501: the deployment's dollar windows in micro-dollars, resolved this job-start under overlay > env
 				// like the caps above, or null when none is set (then nothing is reserved and no dollar key is written).
 				dollarCaps: dollarWindowCaps(settings),
@@ -965,6 +981,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// reserves in, from the SAME limits snapshot. The model rows follow the job's EFFECTIVE list (the trigger's,
 				// else PI_ALLOWED_MODELS); a job with none reserves in every model row (`modelDollarRows` says why).
 				scopedDollars: dollarCapsFor(job.data, limits),
+				// Issue #499 part B: the project row's dollar windows, keyed by the project row's scope, for the pickup project.
+				projectDollars: projectDollarCapsFor(limits, project),
 				modelDollars: modelDollarRows(limits, effectiveJob.models ?? null),
 				// The endpoint gate's snapshot (issue #503): the declared endpoints, the overlay models and this job's
 				// derived set, read once at pickup. Absent on a wiring with no endpoint seam, so a bare processor's
@@ -1208,16 +1226,18 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		} finally {
 			// Release FIRST and never throw (release clamps at zero by construction): a throw here would
 			// mask the job's real error, and a missed release wedges the scope until a worker restart.
-			if (held) inFlight.release(scope);
-			if (hostHeld) hostBound.slots.release(HOST_SLOT_KEY);
+			// The in-process halves go back synchronously inside each drain, before its first await.
 			// AWAITED, not fire-and-forget. Two reasons, and the second is the one that bites: an unawaited
 			// DEL is dropped by `shutdown`'s `process.exit(0)`, stranding the claim for its whole TTL on a
 			// restart -- and the next same-scope job would otherwise race the release, be denied, and sit out a
 			// full re-check interval while the slot it wanted went free behind it. The finally is already inside
-			// an async function, and `release` never throws.
-			await scopeSlot?.release?.();
-			// The endpoint holds, the same way and for the same reasons (issue #503).
-			await releaseEndpointHolds();
+			// an async function, and `release` never throws. Last taken, first given back: the endpoint holds
+			// (issue #503), then the scope holds (project, then repo), then the host slot.
+			const endpointsReleased = releaseEndpointHolds();
+			const scopesReleased = releaseScopeHolds();
+			if (hostHeld) hostBound.slots.release(HOST_SLOT_KEY);
+			await endpointsReleased;
+			await scopesReleased;
 			clearTimeout(timer);
 			clearInterval(cancelPoll);
 			signal.removeEventListener("abort", onAbort);

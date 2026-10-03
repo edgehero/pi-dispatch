@@ -8,6 +8,9 @@ import { buildRecord, RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
 import { makePrepareWorkspace } from "../src/prepare.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
+// The job-count ledger list the processor takes (issue #499 part B), from a `budgetCapsFor`-shaped object.
+const asLedgers = (c) => (c ? [{ scope: c.scope, keyPrefix: scopeKeyPrefix(c.scope), caps: c.caps, reason: "scope-cap" }] : []);
+
 /** A fake redis whose counter we can preset, to force over/under budget. `decrCalls` spies
  *  releaseBudget, so tests assert the slot is (or is not) given back and never double-released.
  *  `tokenSpent` presets the daily TOKEN counter that `checkTokenCap`'s read-only GET consults. */
@@ -511,7 +514,7 @@ test("a config throw that lands AFTER the reserve releases BOTH ledgers and retu
 	const redis = keyedRedis();
 	const { deps: d } = deps({
 		redis,
-		scopedCaps: SCOPED,
+		scopedLedgers: asLedgers(SCOPED),
 		runContainer: async () => {
 			const e = new Error("githubToken set for an unknown forge kind");
 			e.piDispatchConfig = true;
@@ -536,7 +539,7 @@ test("a config throw AFTER a container ran keeps its slot and is NOT declared fr
 	let posted = "";
 	const { deps: d } = deps({
 		redis,
-		scopedCaps: SCOPED,
+		scopedLedgers: asLedgers(SCOPED),
 		collectChain: async () => {
 			const e = new Error("config fault raised after the container ran");
 			e.piDispatchConfig = true;
@@ -584,7 +587,7 @@ test("a config throw from inside a refusal branch cannot double-release the scop
 	const redis = keyedRedis({ [G_DAY]: 10 }); // the global day cap is 10, so the next reserve is over
 	const { deps: d } = deps({
 		redis,
-		scopedCaps: SCOPED,
+		scopedLedgers: asLedgers(SCOPED),
 		comment: async () => {
 			const e = new Error("config fault raised while refusing");
 			e.piDispatchConfig = true;
@@ -1868,7 +1871,7 @@ test("scope-cap: the scoped window refuses PRE-SPEND with the global ledger unto
 	const redis = keyedRedis({ [S_DAY]: 1 }); // the scope already spent its day: 1
 	const logs = [];
 	const comments = [];
-	const { deps: d } = deps({ redis, scopedCaps: SCOPED, log: (e, f) => logs.push({ e, f }), comment: async (_j, t) => comments.push(t) });
+	const { deps: d } = deps({ redis, scopedLedgers: asLedgers(SCOPED), log: (e, f) => logs.push({ e, f }), comment: async (_j, t) => comments.push(t) });
 	const r = await runJob(ghJob, d);
 	assert.equal(r.outcome, "policy");
 	assert.equal(r.reason, "scope-cap");
@@ -1883,7 +1886,7 @@ test("scope-cap: the scoped window refuses PRE-SPEND with the global ledger unto
 
 test("a GLOBAL refusal after a scoped reserve RELEASES the scoped slot -- a storm cannot drain a scope's windows", async () => {
 	const redis = keyedRedis({ [G_DAY]: 10 }); // the global day cap (10) is already exhausted
-	const { deps: d } = deps({ redis, scopedCaps: { scope: "org/repo", caps: { day: 5, week: null, month: null } } });
+	const { deps: d } = deps({ redis, scopedLedgers: asLedgers({ scope: "org/repo", caps: { day: 5, week: null, month: null } }) });
 	const r = await runJob(ghJob, d);
 	assert.equal(r.reason, "over-budget", "the global window is what refused");
 	assert.equal(r.budgetReserved, true, "the global refused-reservation still counts, as ever");
@@ -1895,7 +1898,7 @@ test("container-never-started refunds BOTH ledgers; a container that ran refunds
 	// exit 125: docker spawn fault -> refund both.
 	{
 		const redis = keyedRedis();
-		const { deps: d } = deps({ redis, scopedCaps: SCOPED, runContainer: async () => ({ code: 125, aborted: false }) });
+		const { deps: d } = deps({ redis, scopedLedgers: asLedgers(SCOPED), runContainer: async () => ({ code: 125, aborted: false }) });
 		await assert.rejects(() => runJob(ghJob, d), (e) => e.reason === "container-never-started");
 		assert.equal(redis.store.get(S_DAY), 0, "scoped slot refunded");
 		assert.equal(redis.store.get(G_DAY), 0, "global slot refunded");
@@ -1903,7 +1906,7 @@ test("container-never-started refunds BOTH ledgers; a container that ran refunds
 	// exit 1: the container RAN and spent -> both slots stay spent through the infra retry.
 	{
 		const redis = keyedRedis();
-		const { deps: d } = deps({ redis, scopedCaps: SCOPED, runContainer: async () => ({ code: 1, aborted: false }) });
+		const { deps: d } = deps({ redis, scopedLedgers: asLedgers(SCOPED), runContainer: async () => ({ code: 1, aborted: false }) });
 		await assert.rejects(() => runJob(ghJob, d), (e) => e instanceof InfraRetry && e.reason !== "container-never-started");
 		assert.equal(redis.store.get(S_DAY), 1, "scoped slot kept -- the run spent real money");
 		assert.equal(redis.store.get(G_DAY), 1, "global slot kept");
@@ -1914,14 +1917,14 @@ test("softHoldPct is GLOBAL-only: a scoped window deep inside what would be its 
 	// Scoped day 8/10 spent = 80%, inside a 50% hold band IF the band applied to scoped windows. It must
 	// not: scoped windows are hard caps (DES-SCOPED-LIMITS-AND-FOLDER-MUTEX).
 	const redis = keyedRedis({ [S_DAY]: 8 });
-	const { deps: d } = deps({ redis, softHoldPct: 50, caps: { day: 100, week: null, month: null }, scopedCaps: { scope: "org/repo", caps: { day: 10, week: null, month: null } } });
+	const { deps: d } = deps({ redis, softHoldPct: 50, caps: { day: 100, week: null, month: null }, scopedLedgers: asLedgers({ scope: "org/repo", caps: { day: 10, week: null, month: null } }) });
 	const r = await runJob(ghJob, d);
 	assert.equal(r.outcome, "completed", "the scoped window has no soft-hold band");
 });
 
-test("byte-identity: a run with no scopedCaps creates exactly the pre-#242 key set -- no budget:s: key ever", async () => {
+test("byte-identity: a run with no scopedLedgers creates exactly the pre-#242 key set -- no budget:s: key ever", async () => {
 	const redis = keyedRedis();
-	const { deps: d } = deps({ redis }); // scopedCaps takes its null default
+	const { deps: d } = deps({ redis }); // scopedLedgers takes its empty default
 	const r = await runJob(ghJob, d);
 	assert.equal(r.outcome, "completed");
 	assert.deepEqual([...redis.store.keys()], [G_DAY], "key for key, the store is what it was before #242");
@@ -1935,7 +1938,7 @@ test("a LOCAL scope-cap keeps the folder path out of the comment text too -- the
 	const redis = keyedRedis({ [`${sPrefix}:2026-07-16`]: 1 });
 	const comments = [];
 	const logs = [];
-	const { deps: d } = deps({ redis, scopedCaps: localScoped, comment: async (_j, t) => comments.push(t), log: (e, f) => logs.push({ e, f }) });
+	const { deps: d } = deps({ redis, scopedLedgers: asLedgers(localScoped), comment: async (_j, t) => comments.push(t), log: (e, f) => logs.push({ e, f }) });
 	const localJob = { kind: "local", folder: "/Users/someone/work/site", flow: "tidy", provider: "anthropic", model: "m" };
 	const r = await runJob(localJob, d);
 	assert.equal(r.reason, "scope-cap");
@@ -1951,7 +1954,7 @@ test("issue #498: a day: 1 row on forgejo:acme/web refuses the second Forgejo jo
 	const redis = keyedRedis();
 	const comments = [];
 	// deps() pins `now` (2026-07-16), so every key below is a fixed string.
-	const run = (job) => runJob(job, deps({ redis, scopedCaps: budgetCapsFor(job, limits), comment: async (_j, t) => comments.push(t) }).deps);
+	const run = (job) => runJob(job, deps({ redis, scopedLedgers: asLedgers(budgetCapsFor(job, limits)), comment: async (_j, t) => comments.push(t) }).deps);
 	assert.equal((await run(fj)).outcome, "completed");
 	const refused = await run(fj);
 	assert.equal(refused.reason, "scope-cap");

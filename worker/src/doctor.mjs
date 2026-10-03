@@ -59,7 +59,7 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, allowedModelsFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
-import { canonicalScope, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
+import { canonicalScope, danglingProjectRows, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, isProjectScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
 import { loadProjects } from "./projects.mjs";
 import { parseModelsJson, stripBom, stripJsonComments } from "./models-json.mjs";
 import { isTransientOverlayRead, overlayProviderProblem } from "./model-catalog.mjs";
@@ -3457,8 +3457,9 @@ export async function collectChecks(shellVars, seams) {
 	// shape `render` prints the fix line too, which the old `ok: true` never did.
 	if (scopedLimitFacts.parseError === null && scopedLimitFacts.limits.length > 0 && parseError === null && triggersFilePath !== null) {
 		const folderSet = new Set(folders);
-		// A model row (version 2) names a model, never a folder, so it is never "a folder no trigger runs in".
-		const dead = scopedLimitFacts.limits.map((l) => l.scope).filter((s) => !isModelScope(s) && folderOnly(s) && !folderSet.has(s));
+		// A model row (version 2) names a model, never a folder, so it is never "a folder no trigger runs in"; nor is a
+		// project row (issue #499 part B), which names a project.
+		const dead = scopedLimitFacts.limits.map((l) => l.scope).filter((s) => !isModelScope(s) && !isProjectScope(s) && folderOnly(s) && !folderSet.has(s));
 		if (dead.length > 0) {
 			checks.push({
 				ok: false,
@@ -3469,12 +3470,20 @@ export async function collectChecks(shellVars, seams) {
 		}
 	}
 
+	// Issue #499 part B: a `project:<id>` row whose id is not in projects.json. The worker refuses to start on it
+	// (start.mjs, `checkProjectRows`), so this is a FAILURE naming the row and the id. Skipped when either file does not
+	// load: that is the BOOT_FILES line's, and a zeroed list here would name every project row as dangling.
+	if (scopedLimitFacts.parseError === null && scopedLimitFacts.limits.length > 0) {
+		const projectFacts = readProjectFacts(env, fileExists);
+		if (projectFacts.parseError === null) checks.push(...projectRowChecks(scopedLimitFacts.limits, projectFacts.projects, scopedLimitFacts.path));
+	}
+
 	// Issue #498: a BARE repo scope (`acme/web`) matches that repo on every forge, so with triggers on more than one forge
 	// kind a bare row is one cap (one lease, one count) shared by GitHub's acme/web and Forgejo's, and a bare pause window
 	// pauses both. That may be meant, so this is a WARNING naming the qualified spellings, never a failure: refusing bare
 	// rows would stop existing workers from booting. Guarded like the dead-scope advisory, on readable triggers.
 	if (parseError === null && triggersFilePath !== null && forges.length > 1) {
-		const bareRows = scopedLimitFacts.parseError === null ? scopedLimitFacts.limits.map((l) => l.scope).filter((s) => !isModelScope(s) && scopeFormOf(s) === "bare" && !folderOnly(s)) : [];
+		const bareRows = scopedLimitFacts.parseError === null ? scopedLimitFacts.limits.map((l) => l.scope).filter((s) => !isModelScope(s) && !isProjectScope(s) && scopeFormOf(s) === "bare" && !folderOnly(s)) : [];
 		const bareWindows = pauseWindowFacts.parseError === null ? [...new Set(pauseWindowFacts.windows.map((w) => w.scope).filter((s) => s !== "*" && scopeFormOf(s) === "bare" && !folderOnly(s)))] : [];
 		const named = [...new Set([...bareRows, ...bareWindows])];
 		if (named.length > 0) {
@@ -4312,6 +4321,38 @@ function readScopedLimitFacts(env, fileExists) {
 }
 
 /**
+ * The projects facts (issue #499 part B): the parsed projects when PI_PROJECTS_FILE is set, `[]` when it is unset (no
+ * projects, so every project row dangles), or a parse error when it is set and does not load (the BOOT_FILES line's).
+ */
+function readProjectFacts(env, fileExists) {
+	const path = env.PI_PROJECTS_FILE;
+	if (typeof path !== "string" || path.trim() === "") return { projects: [], parseError: null };
+	try {
+		if (!fileExists(path) || !statSync(path).isFile()) return { projects: [], parseError: "unreadable" };
+		return { projects: loadProjects({ projectsFile: path }, { readFileSync, existsSync: fileExists }), parseError: null };
+	} catch (e) {
+		return { projects: [], parseError: e?.message ?? String(e) };
+	}
+}
+
+/**
+ * A FAILURE per scoped-limits file that holds a `project:<id>` row whose id is not a project in `projects` (issue #499
+ * part B): the worker refuses to start on it, and a live reload that would create one is kept out. Rows are named by
+ * index and their scope (`project:<id>`, an operator id, never a path or a name).
+ */
+export function projectRowChecks(limits, projects, path) {
+	const dangling = danglingProjectRows(limits, projects);
+	if (dangling.length === 0) return [];
+	return [
+		{
+			ok: false,
+			label: `scoped limit(s) ${dangling.map((d) => `#${d.index} (project:${d.id})`).join(", ")} in ${path} name a project that is not in the projects file -- the worker refuses to start`,
+			fix: "add the project to the file PI_PROJECTS_FILE names (set the key if it is unset), or remove the row",
+		},
+	];
+}
+
+/**
  * The pause-windows facts (issue #498): the parsed windows when PI_PAUSE_WINDOWS_FILE is set, else none. A file that
  * does not load is the BOOT_FILES check's line, so here it only silences the advisories that read the windows.
  */
@@ -4370,7 +4411,7 @@ export function overlayDollarProblem(overlay, env) {
  */
 export function scopedDollarRowChecks(limits, maxCostUsd, path) {
 	const checks = [];
-	const label = (r) => `#${r.index} (${r.kind === "model" ? "a model row" : "a repo or folder row"})`;
+	const label = (r) => `#${r.index} (${r.kind === "model" ? "a model row" : r.kind === "project" ? "a project row" : "a repo or folder row"})`;
 	const missing = dollarRowsWithoutCap(limits, maxCostUsd);
 	if (missing.length > 0) {
 		checks.push({

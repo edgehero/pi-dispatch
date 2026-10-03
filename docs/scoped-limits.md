@@ -118,9 +118,9 @@ Version 2 adds dollar caps (issues #501 and #502). Set `"version": 2` to use the
 - A `model:<provider>/<model>` row caps what every job spends on that model, in every scope. It carries only
   the three dollar fields. `day`, `week`, `month` and `concurrent` are refused on it.
 - A version 1 file that uses either is refused, and the error names version 2. A version 1 file without them
-  works as before, with one exception: a row whose scope starts with `project:` or `model:`, in any spelling
-  (`Models:x`, `model :x`), is now refused at load, so the worker will not start. Such a row never matched any
-  job, so fix it or remove it. The panel and the tools write version 1 until a row needs version 2.
+  works as before, with one exception: a row whose scope starts with `model:` in any spelling (`Models:x`,
+  `model :x`) is refused at load, so the worker will not start. Such a row never matched any job, so fix it or
+  remove it. The panel and the tools write version 1 until a row needs version 2.
 - Each job reserves its per-job cost cap (`maxCostUsd`) in every window that applies, together with the
   deployment's dollar windows. If any window has no room, the job is refused (`dollar-cap`) and everything it
   reserved is given back. So a dollar row needs a per-job cap: a job with none is refused `config-refused`.
@@ -132,10 +132,42 @@ Version 2 adds dollar caps (issues #501 and #502). Set `"version": 2` to use the
   is charged what that model cost, from the run's per-model usage. When that split is not known (a folded usage
   ledger, spend on no named model, no ledger, or a cost that is not fully known), the model window keeps at
   least the whole hold. The run record says which under `dollars.modelBasis`.
-- The dollar counters live under `budget:usd:s:<16 hex>` (a scope) and `budget:usd:mdl:<16 hex>` (a model,
-  hashed in lowercase).
+- The dollar counters live under `budget:usd:s:<16 hex>` (a scope or a project) and `budget:usd:mdl:<16 hex>`
+  (a model, hashed in lowercase).
 - A scope must be written exactly. `Model:openai/x`, `models:openai/x` and `model :openai/x` are refused rather
-  than read as a repo name. `project:` scopes are reserved for project windows (issue #499) and are refused too.
+  than read as a repo name, and so are `Project:shop`, `projects:shop` and `project :shop`.
+
+### Project rows
+
+A `project:<id>` row caps every repo and folder of one project as one. The id is a project in
+[`projects.json`](projects.md).
+
+```json
+{
+  "version": 2,
+  "limits": [
+    { "scope": "github:acme/web", "day": 10 },
+    { "scope": "project:shop", "day": 20, "concurrent": 2, "dayUsd": "15" }
+  ]
+}
+```
+
+- `day` / `week` / `month` count every member's jobs together. Over the cap, the job is refused before any
+  spend with reason `project-cap`. These fields and `concurrent` work in a version 1 file too.
+- `concurrent` bounds how many of the project's jobs run at once, across every member and every host. The
+  excess is deferred, like a repo's.
+- `dayUsd` / `weekUsd` / `monthUsd` cap what the project's jobs spend. They need `"version": 2`, like every
+  dollar field. A job that does not fit is refused `dollar-cap`, and the comment says "this project".
+- A job is counted narrowest first: its repo or folder row, then its project's row, then the global caps. A
+  refusal gives back the slots taken before it, so a full project does not use up its repos' counts, and a full
+  global cap uses up neither.
+- The id must be in `projects.json`. A row whose id is not there stops the worker from starting, and doctor
+  fails naming it. A live edit that would create one is kept out (the worker keeps the last good file and logs
+  it). So add a project before its row, and remove a row before its project. If you save both files in the wrong
+  order, the worker applies the waiting file once the other one is right. The panel and the tools refuse to
+  write such a row.
+- The counters live under the same hashed keys as every other row, built from `project:<id>`. Renaming a
+  project starts a new count.
 
 Things to know before you add a model row:
 
@@ -160,10 +192,11 @@ Things to know before you add a model row:
 
 ## How it works
 
-A job's scoped windows reserve **first**, before the global reserve, so a capped repo's refusals never
-consume global slots — and when the *global* window refuses after a scoped reserve, the scoped slot is
-given back, so a storm against a spent global cap cannot drain a scope's week or month. A refund for a
-container that never started (docker fault) releases both ledgers or neither.
+A job's scoped windows reserve **first**: its repo or folder row, then its project row, then the global
+windows. So a capped repo's refusals never consume project or global slots. When a later window refuses, every
+slot taken before it is given back, so a storm against a spent global cap cannot drain a scope's or a project's
+week or month. A refund for a container that never started (docker fault), or for a job refused as
+misconfigured, gives back every slot the job took.
 
 Deferral re-checks on a fixed short interval. There is no per-scope queue: a newer job can take a freed
 scope ahead of an older deferred one, and the only promise is that a deferred job is never dropped and
@@ -189,7 +222,7 @@ Three doors, same as quiet hours:
 
 ## Caveats
 
-- A `scope-cap` refusal is final for that window. No tool resets a counter; the window rolls over on its
+- A `scope-cap` or `project-cap` refusal is final for that window. No tool resets a counter; the window rolls over on its
   own (UTC), and the counters expire from redis like the global ones.
 - A scope deferral is visible only as the queue's delayed count (the panel's status line shows it when
   nonzero). That count also includes cron next-occurrences, retry backoff, quiet-hours deferrals and jobs
@@ -208,10 +241,10 @@ Three doors, same as quiet hours:
 | Piece | Value |
 |---|---|
 | Env var | `PI_SCOPED_LIMITS_FILE` (absolute path; unset = no scoped limits. An EMPTY value is NOT unset: the worker keeps it and refuses to start, so fill the line in or delete it, and doctor fails on it) |
-| File | `{ "version": 1, "limits": [ { scope, day?, week?, month?, concurrent? } ] }`; version 2 adds `dayUsd?`, `weekUsd?`, `monthUsd?` and `model:` rows |
-| Refusal reason | `scope-cap` (pre-spend, never retried); `dollar-cap` for a dollar window |
+| File | `{ "version": 1, "limits": [ { scope, day?, week?, month?, concurrent? } ] }`; version 2 adds `dayUsd?`, `weekUsd?`, `monthUsd?` and `model:` rows; a `project:<id>` row works in both |
+| Refusal reason | `scope-cap` (pre-spend, never retried); `project-cap` for a project row; `dollar-cap` for a dollar window |
 | Deferral | delayed set, fixed re-check, never dropped |
 | Panel key | `m` |
 | Tools | `dispatch_limits`, `dispatch_limit_add`, `dispatch_limit_edit`, `dispatch_limit_delete` |
-| Projects | `PI_PROJECTS_FILE` groups repos and folders into a project, recorded per run. It is wired like this key. See [projects.md](projects.md) |
+| Projects | `PI_PROJECTS_FILE` groups repos and folders into a project, recorded per run and capped by a `project:<id>` row. It is wired like this key. See [projects.md](projects.md) |
 | The folder mutex | always on for local jobs, max 1 per folder, no configuration anywhere |

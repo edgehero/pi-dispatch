@@ -4735,6 +4735,38 @@ test("doctor: the dead-scope advisory flags folder-only shapes not in the canoni
 	assert.ok(!quiet.find((x) => /name a folder no trigger runs in/.test(x.label)), "nothing dead: no line");
 });
 
+test("doctor: a project row whose id is not in projects.json is a FAILURE naming the row; a defined one is never a dead folder (issue #499 part B)", async () => {
+	const dir = tempDir("pi-sl-project-");
+	writeFileSync(join(dir, "triggers.json"), JSON.stringify({ triggers: [{ on: { type: "cron", id: "t1", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/shop-a", flow: "tidy", task: "t" } }] }));
+	const limitsPath = join(dir, "scoped-limits.json");
+	const projectsPath = join(dir, "projects.json");
+	writeFileSync(limitsPath, JSON.stringify({ version: 1, limits: [{ scope: "/srv/shop-a", day: 3 }, { scope: "project:shop", day: 2 }] }));
+	const seams = () => collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true });
+	const dangling = (checks) => checks.find((x) => /name a project that is not in the projects file/.test(x.label));
+	// No projects file: the row dangles, and the worker would refuse to start.
+	const unset = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: join(dir, "triggers.json"), PI_SCOPED_LIMITS_FILE: limitsPath }), seams());
+	const c = dangling(unset);
+	assert.ok(c, "the failure is present");
+	assert.equal(c.ok, false);
+	assert.notEqual(c.warn, true, "a FAILURE, never a warning: the worker refuses to start");
+	assert.match(c.label, /#1 \(project:shop\)/);
+	assert.match(c.label, /the worker refuses to start/);
+	assert.ok(!unset.some((x) => /name a folder no trigger runs in/.test(x.label) && x.label.includes("project:")), "a project row is never a dead folder");
+	// A projects file that defines another id: still dangling, and no project name is quoted.
+	writeFileSync(projectsPath, JSON.stringify({ version: 1, projects: [{ id: "other", name: "Private Name", members: ["/srv/x"] }] }));
+	const other = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: join(dir, "triggers.json"), PI_SCOPED_LIMITS_FILE: limitsPath, PI_PROJECTS_FILE: projectsPath }), seams());
+	assert.ok(dangling(other));
+	assert.ok(!JSON.stringify(other).includes("Private Name"));
+	// Defined: silent.
+	writeFileSync(projectsPath, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["/srv/shop-a"] }] }));
+	const ok = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: join(dir, "triggers.json"), PI_SCOPED_LIMITS_FILE: limitsPath, PI_PROJECTS_FILE: projectsPath }), seams());
+	assert.equal(dangling(ok), undefined);
+	// A projects file that does not load is the BOOT_FILES line's, so this check says nothing more.
+	writeFileSync(projectsPath, "{broken");
+	const broken = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: join(dir, "triggers.json"), PI_SCOPED_LIMITS_FILE: limitsPath, PI_PROJECTS_FILE: projectsPath }), seams());
+	assert.equal(dangling(broken), undefined);
+});
+
 test("doctor: the dead-scope advisory stays SILENT when the triggers facts are unreadable -- zeroed counts make no claims", async () => {
 	const dir = tempDir("pi-sl-noclaim-");
 	const limitsPath = join(dir, "scoped-limits.json");

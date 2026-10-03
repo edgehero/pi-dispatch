@@ -34,6 +34,11 @@
  * the fleet lease) is built from the MATCHED ROW's scope, never from the job's, so a bare row keeps exactly the key
  * it always had and a qualified row counts on its own.
  *
+ * Issue #499 part B adds the project row (`project:<id>`, the id from projects.json). It carries the job-count windows,
+ * `concurrent` and (version 2) the dollar windows, and it caps every member of the project as one: a job reserves in
+ * its repo or folder row, then its project's row, then the global windows (`scopedLedgers`), and its keys are built from
+ * the project ROW's scope like every other row's, so a project needs no keyspace of its own.
+ *
  * Custom: scoped limits validated inline per triggers.mjs/pause-windows.mjs precedent; zod not in deps
  */
 
@@ -45,6 +50,7 @@ import { hash16 } from "./fleet-lease.mjs";
 import { splitModelEntry } from "./model-ref.mjs";
 import { formatMicros, parseUsdMicros } from "./money.mjs";
 import { parseScopeString, qualifiedScopeOf, scopeOf } from "./pause-windows.mjs";
+import { PROJECT_ID_RE, isProjectId } from "./project-id.mjs";
 
 /**
  * The highest schema version this build reads. A file declaring a higher one is refused loudly. The admin writes the
@@ -76,17 +82,40 @@ export const MODEL_SCOPE_PREFIX = "model:";
 
 /** The dollar key prefix of a repo or folder row: `budget:usd:s:<hash16>` (the deployment's is `budget:usd`). */
 export const SCOPE_DOLLAR_KEY_PREFIX = `${DOLLAR_KEY_PREFIX}:s`;
-/** The dollar key prefix of a model row: `budget:usd:mdl:<hash16>`. `budget:usd:p:` stays reserved for #499. */
+/** The dollar key prefix of a model row: `budget:usd:mdl:<hash16>`. */
 export const MODEL_DOLLAR_KEY_PREFIX = `${DOLLAR_KEY_PREFIX}:mdl`;
 
 /** A scope that LOOKS like a model row (any case, `models`, spaces before the colon) but is not the exact prefix form. */
 const MODEL_NEAR_MISS = /^models?\s*:/i;
-/** The reserved project prefix and its near misses (`project:`, `Projects :`). */
-const PROJECT_PREFIX = /^projects?\s*:/i;
+
+/**
+ * The scope prefix of a project row (issue #499 part B): `project:<id>`, the id from projects.json. Readable in BOTH
+ * versions for its job-count fields: every build before this one refuses a `project:` scope loudly (the prefix was
+ * reserved for exactly this), so a version 1 file holding one is refused by an old worker, never read as an inert repo
+ * row. Its dollar fields need version 2, the rule every dollar field follows.
+ */
+export const PROJECT_SCOPE_PREFIX = "project:";
+/** A scope that LOOKS like a project row (any case, `projects`, spaces before the colon). Only the exact form parses. */
+const PROJECT_NEAR_MISS = /^projects?\s*:/i;
 
 /** Is this row scope a per-model row? */
 export function isModelScope(scope) {
 	return typeof scope === "string" && scope.startsWith(MODEL_SCOPE_PREFIX);
+}
+
+/** Is this row scope a project row? */
+export function isProjectScope(scope) {
+	return typeof scope === "string" && scope.startsWith(PROJECT_SCOPE_PREFIX);
+}
+
+/** The row scope of a project: `project:<id>`. Every key of a project row hashes this string. */
+export function projectScope(id) {
+	return `${PROJECT_SCOPE_PREFIX}${id}`;
+}
+
+/** A row that is never a job's own scope: a model row or a project row. `limitFor` and the scope advisories skip them. */
+function isGroupScope(scope) {
+	return isModelScope(scope) || isProjectScope(scope);
 }
 
 function isNonEmptyString(value) {
@@ -177,10 +206,10 @@ export function parseScopedLimits(text, path) {
 function refuseMixedForms(rows, path) {
 	const bare = new Map();
 	rows.forEach((row, index) => {
-		if (!isModelScope(row.scope) && parseScopeString(row.scope).type === "bare") bare.set(row.scope, index);
+		if (!isGroupScope(row.scope) && parseScopeString(row.scope).type === "bare") bare.set(row.scope, index);
 	});
 	rows.forEach((row, index) => {
-		if (isModelScope(row.scope)) return;
+		if (isGroupScope(row.scope)) return;
 		const parsed = parseScopeString(row.scope);
 		if (parsed.type !== "qualified" || !bare.has(parsed.repo)) return;
 		const other = bare.get(parsed.repo);
@@ -236,8 +265,13 @@ function normalizeLimit(row, index, path, version = SCOPED_LIMITS_VERSION) {
 	// mistyped `Model:openai/x`, `models:...` or `model :...` would otherwise parse as a repo scope no job ever has,
 	// a dollar cap that governs nothing while the file reads as capping a model.
 	if (MODEL_NEAR_MISS.test(trimmed)) throw configError(`${at}: a model row's scope is written exactly model:<provider>/<model> (lowercase "model", no space before the colon): ${path}`);
-	// `project:` is reserved for project windows (#499) in every version, so that change needs no version 3.
-	if (PROJECT_PREFIX.test(trimmed)) throw configError(`${at}: a "project:" scope is reserved for project windows (#499) and is not read by this build: ${path}`);
+	// Issue #499 part B: `project:<id>` is a project row. Exactly that form: a near miss (`Project:shop`, `projects:shop`,
+	// `project :shop`) or a malformed id is refused, never read as a repo row no job has, for the model row's reason.
+	if (PROJECT_NEAR_MISS.test(trimmed)) {
+		const id = trimmed.startsWith(PROJECT_SCOPE_PREFIX) ? trimmed.slice(PROJECT_SCOPE_PREFIX.length) : null;
+		if (id === null) throw configError(`${at}: a project row's scope is written exactly project:<id> (lowercase "project", no space before the colon): ${path}`);
+		if (!isProjectId(id)) throw configError(`${at}: a project row's id must match ${PROJECT_ID_RE.source} (the id in projects.json): ${path}`);
+	}
 	if (trimmed === "*") {
 		// "*" as ONE shared counter is redundant with the global caps, so the only useful reading is a
 		// per-scope default -- the OPPOSITE of what "*" means one file over (pause-windows: one rule
@@ -251,11 +285,14 @@ function normalizeLimit(row, index, path, version = SCOPED_LIMITS_VERSION) {
 		throw configError(`${at}: scopes match exactly; a scope containing "*" is refused (no globs): ${path}`);
 	}
 	// Issue #498: `<forge kind>:<repo>` names one forge's repo; an unknown `<word>:` prefix is refused naming the kinds.
-	let form;
-	try {
-		form = parseScopeString(trimmed);
-	} catch (error) {
-		throw configError(`${at}: ${error.message}: ${path}`);
+	// A project row is not a scope string a job carries, so the scope grammar does not apply to it.
+	let form = { type: "project" };
+	if (!isProjectScope(trimmed)) {
+		try {
+			form = parseScopeString(trimmed);
+		} catch (error) {
+			throw configError(`${at}: ${error.message}: ${path}`);
+		}
 	}
 	if (form.type === "qualified" && version < 2) throw configError(`${at}: a forge-qualified scope needs "version": 2 (this file says ${version}), so a build that predates it refuses the file rather than reading an inert repo string: ${path}`);
 	const norm = {
@@ -264,7 +301,7 @@ function normalizeLimit(row, index, path, version = SCOPED_LIMITS_VERSION) {
 		// foreign-platform row (a windows drive path on a POSIX worker) stays verbatim and is inert here;
 		// the doctor's unreferenced-scope advisory names it. Resolving it instead would "work" only by
 		// both sides mangling into the same cwd-prefixed string -- a match by accident, not by contract.
-		scope: form.type === "qualified" ? `${form.kind}:${form.repo}` : isAbsolute(trimmed) ? resolve(trimmed) : trimmed,
+		scope: isProjectScope(trimmed) ? trimmed : form.type === "qualified" ? `${form.kind}:${form.repo}` : isAbsolute(trimmed) ? resolve(trimmed) : trimmed,
 		day: null,
 		week: null,
 		month: null,
@@ -325,8 +362,9 @@ export function loadScopedLimits(config, { readFileSync = fsReadFileSync, exists
  */
 export function limitFor(limits, job) {
 	if (!Array.isArray(limits)) return null;
-	// A model row is never a job's scope: it caps a model wherever it runs (`modelDollarRows`).
-	const find = (scope) => (isNonEmptyString(scope) ? limits.find((l) => l.scope === scope && !isModelScope(l.scope)) ?? null : null);
+	// A model row is never a job's scope: it caps a model wherever it runs (`modelDollarRows`). Nor is a project row: it
+	// applies through the job's project (`projectRowFor`), never because a scope string happens to equal it.
+	const find = (scope) => (isNonEmptyString(scope) ? limits.find((l) => l.scope === scope && !isGroupScope(l.scope)) ?? null : null);
 	if (job?.kind !== "local") {
 		const qualified = find(qualifiedScopeOf(job));
 		if (qualified !== null) return qualified;
@@ -358,6 +396,73 @@ export function budgetCapsFor(job, limits) {
 	return { scope: row.scope, caps: { day: row.day, week: row.week, month: row.month } };
 }
 
+/**
+ * The project row of this project id, or null (no id, or no row for it). A job's project is resolved ONCE at pickup
+ * (`projectOf`, projects.mjs), and every project-row consumer below takes that id, never the job: the gate, the ledgers
+ * and the record then agree for the attempt whatever an operator does to projects.json mid-run.
+ */
+export function projectRowFor(limits, projectId) {
+	if (!Array.isArray(limits) || !isProjectId(projectId)) return null;
+	const scope = projectScope(projectId);
+	return limits.find((l) => l?.scope === scope) ?? null;
+}
+
+/**
+ * The project rows whose id is not a project in `projects` (the parsed projects.json), as `[{ index, id }]` in file
+ * order. Such a row caps nothing (no job can belong to a project that does not exist), so it is a refusal wherever the
+ * two files meet: at boot, on a live reload of either file, and in the admin's write (issue #499 part B).
+ */
+export function danglingProjectRows(limits, projects) {
+	const ids = new Set((Array.isArray(projects) ? projects : []).map((p) => p?.id));
+	const out = [];
+	(Array.isArray(limits) ? limits : []).forEach((row, index) => {
+		if (!isProjectScope(row?.scope)) return;
+		const id = row.scope.slice(PROJECT_SCOPE_PREFIX.length);
+		if (!ids.has(id)) out.push({ index, id });
+	});
+	return out;
+}
+
+/**
+ * Refuse a limits list that names a project `projects` does not have, naming each such row's index and id (ids are
+ * charset-checked, never a path or a name). `path` is the limits file, for the message. Pure: the caller decides
+ * whether that is a boot refusal or a kept last-good copy.
+ */
+export function checkProjectRows(limits, projects, path) {
+	const dangling = danglingProjectRows(limits, projects);
+	if (dangling.length === 0) return;
+	const rows = dangling.map((d) => `index ${d.index} ("${PROJECT_SCOPE_PREFIX}${d.id}")`).join(", ");
+	throw configError(`scoped limit(s) at ${rows} name a project that is not in the projects file (PI_PROJECTS_FILE); add the project there first, or remove the row: ${path}`);
+}
+
+/** The refusal reason of a full repo or folder job-count window. */
+export const SCOPE_CAP_REASON = "scope-cap";
+/** The refusal reason of a full project job-count window (issue #499 part B). */
+export const PROJECT_CAP_REASON = "project-cap";
+
+/**
+ * THE ordered job-count ledgers of one job's scoped rows (issue #499 part B), as `[{ scope, keyPrefix, caps, reason }]`:
+ * its repo or folder row, then its project's row. The processor appends the global ledger last and reserves them in
+ * this order through ONE helper (budget.mjs `reserveLedgers`), and gives them back in reverse (`releaseLedgers`).
+ *
+ * Narrowest first, for the reason the scoped ledger always reserved before the global one: a refusal by a narrow
+ * ledger never consumes a slot in a wider one, so a noisy repo cannot drain its project's day, and a full project
+ * cannot drain the deployment's. A row with no day, week or month (concurrency or dollars only) is no ledger here.
+ *
+ * `projectId` is the id resolved at pickup (`projectOf`), or null. One list instead of one hand-built pair per
+ * call site: every release site in the processor walks this list, so a ledger added here cannot be forgotten there.
+ */
+export function scopedLedgers(job, limits, projectId) {
+	const out = [];
+	const scoped = budgetCapsFor(job, limits);
+	if (scoped) out.push({ scope: scoped.scope, keyPrefix: scopeKeyPrefix(scoped.scope), caps: scoped.caps, reason: SCOPE_CAP_REASON });
+	const row = projectRowFor(limits, projectId);
+	if (row && (row.day !== null || row.week !== null || row.month !== null)) {
+		out.push({ scope: row.scope, keyPrefix: scopeKeyPrefix(row.scope), caps: { day: row.day, week: row.week, month: row.month }, reason: PROJECT_CAP_REASON });
+	}
+	return out;
+}
+
 /** A row's dollar windows as integer micro-dollars `{ day, week, month }`, each null when unset, or null when none is. */
 function usdCaps(row) {
 	const caps = {};
@@ -375,6 +480,18 @@ function usdCaps(row) {
  */
 export function dollarCapsFor(job, limits) {
 	const row = limitFor(limits, job);
+	const caps = row ? usdCaps(row) : null;
+	return caps === null ? null : { scope: row.scope, keyPrefix: scopeDollarKeyPrefix(row.scope), caps };
+}
+
+/**
+ * The project dollar windows this job reserves in (issue #499 part B), or null when its project (resolved at pickup) has
+ * no row or the row has no dollar window. Ledger-shaped like `dollarCapsFor`, with `keyPrefix`
+ * `scopeDollarKeyPrefix("project:<id>")`: the project row's own scope, the rule every row's key follows, so no second
+ * dollar keyspace exists for projects.
+ */
+export function projectDollarCapsFor(limits, projectId) {
+	const row = projectRowFor(limits, projectId);
 	const caps = row ? usdCaps(row) : null;
 	return caps === null ? null : { scope: row.scope, keyPrefix: scopeDollarKeyPrefix(row.scope), caps };
 }
@@ -404,8 +521,13 @@ export function modelDollarRows(limits, models) {
 	return out;
 }
 
+/** A row's kind for the dollar advisories: `model`, `project` (issue #499 part B) or `scope` (a repo or folder). */
+function rowKind(scope) {
+	return isModelScope(scope) ? "model" : isProjectScope(scope) ? "project" : "scope";
+}
+
 /**
- * The rows that carry a dollar window, as `[{ index, kind }]` (`kind` is `scope` or `model`), when the deployment has
+ * The rows that carry a dollar window, as `[{ index, kind }]` (`kind` is `scope`, `project` or `model`), when the deployment has
  * NO per-job cap (`deploymentMaxCostUsd` null or undefined: env and overlay merged by the caller), else `[]` (PR #549's
  * review). Such a row refuses every job it applies to as `config-refused` unless the job's trigger sets its own
  * `run.maxCostUsd`, so the worker and doctor WARN, never refuse: a trigger may legitimately supply the cap. Index and
@@ -415,7 +537,7 @@ export function dollarRowsWithoutCap(limits, deploymentMaxCostUsd) {
 	if (deploymentMaxCostUsd !== null && deploymentMaxCostUsd !== undefined) return [];
 	const out = [];
 	(limits ?? []).forEach((row, index) => {
-		if (USD_LIMIT_FIELDS.some((f) => row?.[f] !== null && row?.[f] !== undefined)) out.push({ index, kind: isModelScope(row.scope) ? "model" : "scope" });
+		if (USD_LIMIT_FIELDS.some((f) => row?.[f] !== null && row?.[f] !== undefined)) out.push({ index, kind: rowKind(row.scope) });
 	});
 	return out;
 }
@@ -433,7 +555,7 @@ export function dollarRowsBelowJobCap(limits, deploymentMaxCostUsd) {
 	(limits ?? []).forEach((row, index) => {
 		for (const [field, window] of [["dayUsd", "day"], ["weekUsd", "week"], ["monthUsd", "month"]]) {
 			if (row?.[field] === null || row?.[field] === undefined) continue;
-			if (parseUsdMicros(row[field], field) < jobCap) out.push({ index, kind: isModelScope(row.scope) ? "model" : "scope", window });
+			if (parseUsdMicros(row[field], field) < jobCap) out.push({ index, kind: rowKind(row.scope), window });
 		}
 	});
 	return out;
@@ -517,6 +639,16 @@ export function modelDollarKeyPrefix(ref) {
 /** The dollar key prefix of one normalized row, scope or model: what the admin reads its counters under. */
 export function dollarKeyPrefixFor(row) {
 	return isModelScope(row?.scope) ? modelDollarKeyPrefix(row.scope.slice(MODEL_SCOPE_PREFIX.length)) : scopeDollarKeyPrefix(row?.scope);
+}
+
+/**
+ * The rows the boot sweeper walks for this host's stale fleet claims (`makeScopeClaimSweeper`): every row as
+ * `{ concurrent, hash }`, the hash of its ROW scope, the string the pickup gate leases under. A project row's
+ * `concurrent` (issue #499 part B) is leased under `hash16("project:<id>")` and swept under the same hash; a row with no
+ * `concurrent` carries a null count, which the sweeper skips.
+ */
+export function scopeClaimRows(limits) {
+	return (Array.isArray(limits) ? limits : []).map((row) => ({ concurrent: row.concurrent, hash: hash16(row.scope) }));
 }
 
 /**

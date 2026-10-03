@@ -4,6 +4,9 @@ import { InfraRetry, runJob } from "../src/processor.mjs";
 import { buildRecord } from "../src/run-history.mjs";
 import { dollarCapsFor, modelDollarRows, parseScopedLimits, scopeKeyPrefix } from "../src/scoped-limits.mjs";
 
+// The job-count ledger list the processor takes (issue #499 part B), from a `budgetCapsFor`-shaped object.
+const asLedgers = (c) => (c ? [{ scope: c.scope, keyPrefix: scopeKeyPrefix(c.scope), caps: c.caps, reason: "scope-cap" }] : []);
+
 // Issues #501 part 5 and #502 part 6 (scoped-limits.json version 2; DES-DOLLAR-RESERVE-AND-SETTLE, the worker half):
 // a job reserves its per-job cap in the deployment's dollar windows, its repo or folder row's, and every model row it
 // may reach, in ONE reservation; a refusal anywhere gives everything back. The deployment and scope windows settle to
@@ -139,7 +142,7 @@ test("a per-model window refuses the SECOND job with dollar-cap, names the model
 
 test("a FULL scope window refuses the job and gives back the deployment reservation it had already taken", async () => {
 	const redis = keyedRedis({ [scopeDay]: 9 * USD });
-	const { deps: d, calls, logs } = deps({ redis, scopedDollars: SCOPE, modelDollars: [], scopedCaps: { scope: "org/repo", caps: { day: 5, week: null, month: null } } });
+	const { deps: d, calls, logs } = deps({ redis, scopedDollars: SCOPE, modelDollars: [], scopedLedgers: asLedgers({ scope: "org/repo", caps: { day: 5, week: null, month: null } }) });
 	const r = await runJob(job, d);
 	assert.equal(r.reason, "dollar-cap");
 	assert.deepEqual(r.dollars, { reservedMicros: 2 * USD, settledMicros: 0, basis: "refunded", modelBasis: null });

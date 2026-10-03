@@ -39,7 +39,7 @@ import { scrubCredentials } from "./redact.mjs";
 import { makeCheckOnceSpent, makeCheckWaitSkew, makeDisarmOnce } from "./triggers-file.mjs";
 import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "./watch-closer.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
-import { dollarRowsWithoutCap, loadScopedLimits } from "./scoped-limits.mjs";
+import { checkProjectRows, dollarRowsWithoutCap, loadScopedLimits, scopeClaimRows } from "./scoped-limits.mjs";
 import { loadProjects, projectOf } from "./projects.mjs";
 import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
@@ -251,14 +251,51 @@ function watchPauseWindowsFile(config, ref, log, atBoot) {
  * last-good property carries its own test). A bad edit keeps `ref.current` untouched and logs
  * `scoped_limits_reload_invalid` -- the pause-windows posture, INT-SCOPED-LIMITS-FILE-CONTRACT.
  */
-export function reloadScopedLimits(config, ref, log, deploymentCap = null) {
+export function reloadScopedLimits(config, ref, log, deploymentCap = null, pair = null) {
 	try {
-		ref.current = loadScopedLimits(config);
+		const next = loadScopedLimits(config);
+		// Issue #499 part B: a `project:<id>` row whose id is not in the live projects list is refused here as at boot,
+		// so this edit is kept out and the last good limits stay. `pair` is null only on a bare test wiring.
+		if (pair) checkPairedRows(next, pair.projects.current, config.scopedLimitsFile, pair, "limits", () => reloadScopedLimits(config, ref, log, deploymentCap, pair));
+		ref.current = next;
 		log("scoped_limits_reloaded", { count: ref.current.length });
 		if (deploymentCap) warnDollarRowsWithoutCap(ref.current, deploymentCap(), log);
+		if (pair) retryPaired(pair, "limits");
 	} catch (err) {
 		log("scoped_limits_reload_invalid", { reason: err?.message });
 	}
+}
+
+/**
+ * The two files a project row joins (issue #499 part B): scoped-limits.json names `project:<id>`, projects.json defines
+ * the id. `{ limits, projects }` are the two live refs; `retry` holds, per side, the reload to run again once the OTHER
+ * side's file changes. A reload of either file that would leave a row naming a missing project keeps its last good copy
+ * and logs, so the two live lists never disagree. And because an operator may save the pair in either order (the row
+ * before the project it names), a side refused ONLY for that reason is reloaded once more right after the other side's
+ * next good reload: without that retry, a correct pair saved in the wrong order would leave the worker on the stale
+ * limits until the next edit, which a log line alone does not fix.
+ */
+export function makeProjectPair(limits, projects) {
+	return { limits, projects, retry: { limits: null, projects: null } };
+}
+
+/** Refuse `limits` against `projects` (`checkProjectRows`), arming `side`'s retry when that is why it was refused. */
+function checkPairedRows(limits, projects, path, pair, side, again) {
+	try {
+		checkProjectRows(limits, projects, path);
+	} catch (error) {
+		pair.retry[side] = again;
+		throw error;
+	}
+}
+
+/** After `side` reloaded well: clear its retry, then run the other side's once if it was waiting on this file. */
+function retryPaired(pair, side) {
+	pair.retry[side] = null;
+	const other = side === "limits" ? "projects" : "limits";
+	const again = pair.retry[other];
+	pair.retry[other] = null;
+	again?.();
 }
 
 /**
@@ -276,7 +313,7 @@ export function warnDollarRowsWithoutCap(limits, deploymentMaxCostUsd, log) {
  * for atomic tmp+rename robustness, filtered to the one basename, debounced. Best-effort; the FSWatcher is
  * unref'd and the returned closer stops the watch with the worker (issue #295).
  */
-function watchScopedLimitsFile(config, ref, log, atBoot, deploymentCap = null) {
+function watchScopedLimitsFile(config, ref, log, atBoot, deploymentCap = null, pair = null) {
 	const path = config.scopedLimitsFile;
 	const dir = dirname(path) || ".";
 	const file = basename(path);
@@ -289,7 +326,7 @@ function watchScopedLimitsFile(config, ref, log, atBoot, deploymentCap = null) {
 			if (handles.closed) return; // see makeWatchCloser: by construction, not by a delivery rule
 			if (changed && changed !== file) return;
 			clearTimeout(handles.timer);
-			handles.timer = setTimeout(() => reloadScopedLimits(config, ref, closer.reloadLog, deploymentCap), WATCH_DEBOUNCE_MS);
+			handles.timer = setTimeout(() => reloadScopedLimits(config, ref, closer.reloadLog, deploymentCap, pair), WATCH_DEBOUNCE_MS);
 		});
 		handles.watcher.unref?.();
 		log("scoped_limits_watching", { path });
@@ -298,7 +335,7 @@ function watchScopedLimitsFile(config, ref, log, atBoot, deploymentCap = null) {
 	}
 	if (changedWhileArming(handles, readFile)) {
 		log("scoped_limits_reread_after_arming", { path });
-		reloadScopedLimits(config, ref, closer.reloadLog, deploymentCap);
+		reloadScopedLimits(config, ref, closer.reloadLog, deploymentCap, pair);
 	}
 	return closer;
 }
@@ -309,10 +346,15 @@ function watchScopedLimitsFile(config, ref, log, atBoot, deploymentCap = null) {
  * so the next pickup resolves against the new membership. A job already past its pickup keeps the id it was given.
  * The reason is the loader's message, which never quotes a project's `name` (projects.mjs).
  */
-export function reloadProjects(config, ref, log) {
+export function reloadProjects(config, ref, log, pair = null) {
 	try {
-		ref.current = loadProjects(config);
+		const next = loadProjects(config);
+		// Issue #499 part B: an edit that drops (or renames) a project a scoped-limits row still names is kept out, and the
+		// last good projects stay: removing the row first is the order that works, said in the message.
+		if (pair) checkPairedRows(pair.limits.current, next, config.projectsFile, pair, "projects", () => reloadProjects(config, ref, log, pair));
+		ref.current = next;
 		log("projects_reloaded", { count: ref.current.length });
+		if (pair) retryPaired(pair, "projects");
 	} catch (err) {
 		log("projects_reload_invalid", { reason: err?.message });
 	}
@@ -323,7 +365,7 @@ export function reloadProjects(config, ref, log) {
  * debounced, the boot read as the arming baseline. The closer joins `extraClosers`, so the watch stops with the worker
  * (DES-WATCHERS-CLOSE-WITH-THE-WORKER).
  */
-function watchProjectsFile(config, ref, log, atBoot) {
+function watchProjectsFile(config, ref, log, atBoot, pair = null) {
 	const path = config.projectsFile;
 	const dir = dirname(path) || ".";
 	const file = basename(path);
@@ -336,7 +378,7 @@ function watchProjectsFile(config, ref, log, atBoot) {
 			if (handles.closed) return;
 			if (changed && changed !== file) return;
 			clearTimeout(handles.timer);
-			handles.timer = setTimeout(() => reloadProjects(config, ref, closer.reloadLog), WATCH_DEBOUNCE_MS);
+			handles.timer = setTimeout(() => reloadProjects(config, ref, closer.reloadLog, pair), WATCH_DEBOUNCE_MS);
 		});
 		handles.watcher.unref?.();
 		log("projects_watching", { path });
@@ -345,7 +387,7 @@ function watchProjectsFile(config, ref, log, atBoot) {
 	}
 	if (changedWhileArming(handles, readFile)) {
 		log("projects_reread_after_arming", { path });
-		reloadProjects(config, ref, closer.reloadLog);
+		reloadProjects(config, ref, closer.reloadLog, pair);
 	}
 	return closer;
 }
@@ -601,6 +643,10 @@ export async function startWorker(
 	// present, a mutable ref for the live reload, [] when unset. The pickup gate reads it once per pickup, beside the
 	// limits snapshot, and the id it resolves there is the one the job's record carries.
 	const projects = { current: loadProjects(config, recording("projects", config.projectsFile)) };
+	// Issue #499 part B: a `project:<id>` row whose id is not a project refuses BOOT, naming the row and the id: it would
+	// read as a cap on a group that no job can belong to. The live reloads of either file hold the same rule (`pair`).
+	checkProjectRows(scopedLimits.current, projects.current, config.scopedLimitsFile);
+	const projectPair = makeProjectPair(scopedLimits, projects);
 
 	// Issue #503: the declared model endpoints, same posture (INT-MODEL-ENDPOINTS-FILE-CONTRACT): a bad file refuses
 	// boot with the operator present, a mutable ref for the live reload, [] when there is no file. Read per pickup
@@ -1033,7 +1079,7 @@ export async function startWorker(
 	// mechanism, so a fault costs one TTL of a stale claim and never a boot.
 	try {
 		if (config.workerNameDeclared)
-			await makeScopeClaimSweeperFn({ redis, workerName: config.workerName, limits: scopedLimits.current.map((r) => ({ concurrent: r.concurrent, hash: hash16(r.scope) })), log })({ reaped });
+			await makeScopeClaimSweeperFn({ redis, workerName: config.workerName, limits: scopeClaimRows(scopedLimits.current), log })({ reaped });
 	} catch (err) {
 		log("scope_claims_sweep_skipped", { reason: scrubCredentials(err?.message) });
 	}
@@ -2042,12 +2088,12 @@ export async function startWorker(
 
 		// Issue #242 live edit: hot-swap the scoped limits on file change, keeping last-good on a bad edit.
 		if (config.scopedLimitsFile) {
-			extraClosers.push(watchScopedLimitsFn(config, scopedLimits, log, atBoot.scopedLimits, deploymentMaxCostUsd));
+			extraClosers.push(watchScopedLimitsFn(config, scopedLimits, log, atBoot.scopedLimits, deploymentMaxCostUsd, projectPair));
 		}
 
 		// Issue #499 live edit: the projects file, keep-last-good on a bad edit.
 		if (config.projectsFile) {
-			extraClosers.push(watchProjectsFn(config, projects, log, atBoot.projects));
+			extraClosers.push(watchProjectsFn(config, projects, log, atBoot.projects, projectPair));
 		}
 
 		// Issue #503 live edit: the model endpoints, keep-last-good on a bad edit.

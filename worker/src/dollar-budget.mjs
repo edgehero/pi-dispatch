@@ -14,10 +14,11 @@
  * Keys, all under `budget:usd`, built by budget.mjs's own key functions so a dollar window and a job-count window
  * share their UTC boundaries (the day, the week from Monday, the month) and their TTLs:
  *   - `budget:usd:YYYY-MM-DD`, `budget:usd:w:<Monday>`, `budget:usd:m:YYYY-MM`: the deployment's windows;
- *   - `budget:usd:p:` is RESERVED for project windows (issue #499) and never written here;
- *   - `budget:usd:s:<hash16>` (a repo or folder) and `budget:usd:mdl:<hash16>` (a model): the scoped and per-model
- *     windows of `scoped-limits.json` version 2, which reach `reserveDollars` as further ledgers with their own
- *     `keyPrefix` (scoped-limits.mjs builds them).
+ *   - `budget:usd:s:<hash16>` (a repo or folder, and a project: the hash of its row scope `project:<id>`) and
+ *     `budget:usd:mdl:<hash16>` (a model): the scoped, project and per-model windows of `scoped-limits.json` version 2,
+ *     which reach `reserveDollars` as further ledgers with their own `keyPrefix` (scoped-limits.mjs builds them).
+ *     `budget:usd:p:` was reserved for project windows and is WITHDRAWN (issue #499 part B): a project row's keys come
+ *     from its row scope like every other row's, one key rule and no second keyspace.
  * None of those sub-namespaces can collide with a day key, whose first segment after the prefix is a 4-digit year.
  *
  * Unlike the job-count ledger, a REFUSED dollar reservation is given back at once (`budget.mjs` keeps a refused
@@ -32,9 +33,6 @@ import { MICROS_PER_USD, optionalUsdMicros } from "./money.mjs";
 
 /** The deployment's dollar ledger prefix. */
 export const DOLLAR_KEY_PREFIX = "budget:usd";
-/** Reserved for project windows (issue #499): no key under it is written by this build. */
-export const PROJECT_DOLLAR_KEY_PREFIX = `${DOLLAR_KEY_PREFIX}:p`;
-
 /** The refusal reason a full dollar window gives, in the record, the log and the result. */
 export const DOLLAR_CAP_REASON = "dollar-cap";
 
@@ -64,12 +62,14 @@ export function dollarWindowCaps(settings) {
 
 /**
  * The ledgers for one job, in reservation order: the deployment's (when it has any window), then its repo or folder
- * row's (`dollarCapsFor`), then each model row it reserves in (`modelDollarRows`). One `reserveDollars` call over all
- * of them, so a refusal in any window gives back every key, the deployment's included.
+ * row's (`dollarCapsFor`), then its project row's (`projectDollarCapsFor`, issue #499 part B), then each model row it
+ * reserves in (`modelDollarRows`). One `reserveDollars` call over all of them, so a refusal in any window gives back
+ * every key, the deployment's included.
  */
-export function dollarLedgers(caps, { scope = null, models = [] } = {}) {
+export function dollarLedgers(caps, { scope = null, project = null, models = [] } = {}) {
 	const out = caps ? [{ keyPrefix: DOLLAR_KEY_PREFIX, caps }] : [];
 	if (scope) out.push({ keyPrefix: scope.keyPrefix, caps: scope.caps });
+	if (project) out.push({ keyPrefix: project.keyPrefix, caps: project.caps });
 	for (const m of models ?? []) out.push({ keyPrefix: m.keyPrefix, caps: m.caps });
 	return out;
 }

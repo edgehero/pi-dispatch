@@ -27,7 +27,10 @@ import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/bu
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 // The scoped-limits validator is shared for the anti-drift reason the pause/subscriptions ones are: the
 // write goes through the exact parser the worker boot-loads, so the sides cannot disagree on the schema.
-import { dollarKeyPrefixFor, isModelScope, parseScopedLimits, scopedLimitsVersionFor, scopeKeyPrefix, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
+import { danglingProjectRows, dollarKeyPrefixFor, isModelScope, isProjectScope, parseScopedLimits, scopedLimitsVersionFor, scopeKeyPrefix, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
+// The projects parser, for the same anti-drift reason: a `project:<id>` row is written only when the id is a project the
+// worker would load (issue #499 part B).
+import { parseProjects } from "@edgehero/pi-dispatch/projects";
 import { removeHeldJob } from "@edgehero/pi-dispatch/cancel-state";
 import { HELD_SET, jobKey } from "@edgehero/pi-dispatch/wait-state";
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
@@ -797,8 +800,13 @@ export function readScopedLimits({ scopedLimitsPath, fs = nodeFs }) {
  * file starts from the empty v1 shape. The result is re-serialized (absent windows omitted, not
  * null-padded — the committed example's shape), re-validated fail-closed, and written tmp + rename.
  * Returns `{ ok }` or `{ invalid }`.
+ *
+ * Issue #499 part B: a `project:<id>` row this write adds or changes must name a project in `projectsPath`
+ * (projects.json; a missing file is no projects), or the write is refused: the worker would refuse to start on it, and
+ * a running worker would keep its last good limits. A row already in the file, unchanged, is not re-judged, so a row
+ * left dangling by a projects.json edit can still be deleted, and other rows edited, while doctor names it.
  */
-export function writeScopedLimits({ scopedLimitsPath, mutate, fs = nodeFs }) {
+export function writeScopedLimits({ scopedLimitsPath, projectsPath = null, mutate, fs = nodeFs }) {
   let current = [];
   let existing = null;
   try {
@@ -819,15 +827,46 @@ export function writeScopedLimits({ scopedLimitsPath, mutate, fs = nodeFs }) {
   // dollar window, is a model row or has a forge-qualified scope, so a file of bare and folder job-count rows stays
   // readable by a worker that predates version 2.
   const text = `${JSON.stringify({ version: scopedLimitsVersionFor(rows), limits: rows }, null, 2)}\n`;
+  let written;
   try {
-    parseScopedLimits(text, scopedLimitsPath); // the loader's own validator -- never write a file it would reject
+    written = parseScopedLimits(text, scopedLimitsPath); // the loader's own validator -- never write a file it would reject
   } catch (e) {
     return { invalid: e?.message ?? String(e) };
   }
+  const dangling = newDanglingProjectRows(current, written, projectsPath, fs);
+  if (dangling) return { invalid: dangling };
   const tmp = `${scopedLimitsPath}.tmp`;
   fs.writeFileSync(tmp, text, { mode: 0o644 });
   fs.renameSync(tmp, scopedLimitsPath);
   return { ok: true };
+}
+
+/**
+ * The refusal for a write whose result adds or changes a `project:<id>` row naming a project that `projectsPath` does
+ * not define, or null (issue #499 part B). Reads projects.json only when such a row is in play. A missing file is no
+ * projects (the worker's unset), and a file that does not parse refuses the write: the row could not be checked.
+ */
+function newDanglingProjectRows(before, after, projectsPath, fs) {
+  const unchanged = new Set(before.map((row) => JSON.stringify(row)));
+  const touched = after.filter((row) => isProjectScope(row.scope) && !unchanged.has(JSON.stringify(row)));
+  if (touched.length === 0) return null;
+  let projects = [];
+  let text = null;
+  try {
+    text = projectsPath ? fs.readFileSync(projectsPath, "utf8") : null;
+  } catch {
+    // Missing or unreadable: no projects, the worker's reading of an unset file. The check below then refuses the row.
+  }
+  if (text !== null) {
+    try {
+      projects = parseProjects(text, projectsPath);
+    } catch (e) {
+      return `the projects file does not load (${e?.message ?? String(e)}), so a project row cannot be checked; fix it first. Nothing was written`;
+    }
+  }
+  const missing = danglingProjectRows(touched, projects).map((d) => touched[d.index].scope);
+  if (missing.length === 0) return null;
+  return `${missing.join(", ")} names a project that is not in the projects file (PI_PROJECTS_FILE); add the project there first. Nothing was written`;
 }
 
 /**

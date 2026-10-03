@@ -2042,7 +2042,7 @@ function limitLines(scopedLimits: any, scopedBudget: any, inner: number, styler:
 
 function limitRow(l: any, used: any, inner: number, styler: any): string {
   // The dot goes amber when any capped window's used count has reached its cap (the next job refuses
-  // scope-cap). Concurrency never drives the dot: per-scope in-flight is worker-process state this
+  // scope-cap, or project-cap on a `project:<id>` row). Concurrency never drives the dot: per-scope in-flight is worker-process state this
   // panel cannot see, and the panel never invents a number -- `≤K at once` is config, stated as such.
   let atCap = false;
   const windows: string[] = [];

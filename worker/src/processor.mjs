@@ -1,10 +1,10 @@
 import { DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, DOCKER_NEVER_STARTED_EXITS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_CONF_WIDENS_JOB, PODMAN_SERVICE_LOCAL, RUNTIME_ADDS_NO_MOUNTS } from "./backends.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { lstatSync } from "node:fs";
-import { checkTokenCap, recordTokenSpend, releaseBudget, reserveBudget } from "./budget.mjs";
+import { checkTokenCap, recordTokenSpend, releaseLedgers, reserveLedgers } from "./budget.mjs";
 import { configError } from "./config.mjs";
 import { unqualifiedScope } from "./pause-windows.mjs";
-import { scopeKeyPrefix } from "./scoped-limits.mjs";
+import { PROJECT_CAP_REASON } from "./scoped-limits.mjs";
 import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
 import { RESERVED_ENV_NAMES } from "./triggers.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
@@ -187,12 +187,13 @@ export async function runJob(job, deps) {
 		caps, // { day, week, month }; week/month null when that window is disabled (REQ-SPEND-CAPS-MULTI-WINDOW)
 		softHoldPct, // int 1-99 or null; the soft-hold band applied to every active window
 		tokenCap = null, // int or null; the daily TOKEN cap (issue #25). Check-AFTER, so it gates the NEXT job on prior spend
-		// { scope, caps: { day, week, month } } | null -- this job's scoped budget windows (issue #242,
-		// INT-SCOPED-LIMITS-FILE-CONTRACT), resolved by the wiring from the same watched-limits snapshot the
-		// pickup gate read. Null when the file is unset or the scope's row is concurrency-only; the default
-		// keeps an unwired processor byte-identical. The folder MUTEX does not live here -- it is the pickup
-		// gate's, pre-everything; this is only the money half.
-		scopedCaps = null,
+		// [{ scope, keyPrefix, caps: { day, week, month }, reason }] -- this job's scoped job-count ledgers in reserve order
+		// (issues #242 and #499 part B, INT-SCOPED-LIMITS-FILE-CONTRACT): its repo or folder row's, then its project row's,
+		// from ONE builder (`scopedLedgers`) over the same watched-limits snapshot and pickup project the gate read. The
+		// global ledger is appended here, last. Empty when no row carries a job-count window; the default keeps an
+		// unwired processor byte-identical. The folder MUTEX and the `concurrent` slots do not live here -- they are the
+		// pickup gate's, pre-everything; this is only the money half.
+		scopedLedgers = [],
 		recordSpend = recordTokenSpend, // injected so the post-container INCRBY is testable/stubbable
 		// (job) => { ok } | { missing: <ref> } | { unavailable: <ref> }. The pre-spend check that the image
 		// this job names is on this host (image-preflight.mjs). Default admits everything, so a wiring that
@@ -319,6 +320,9 @@ export async function runJob(job, deps) {
 		// `[{ ref, keyPrefix, caps }]` from `modelDollarRows` over its effective list (every model row when it has
 		// none). Both default to nothing, so an unwired processor reserves exactly what it did before.
 		scopedDollars = null,
+		// Issue #499 part B: this job's project row's dollar windows, `{ scope, keyPrefix, caps }` from
+		// `projectDollarCapsFor` with the project resolved at pickup, or null. Reserved after the repo or folder row's.
+		projectDollars = null,
 		modelDollars = [],
 		// Issue #503 part 7: the builtin catalog's model object for (provider, id), or null (model-catalog.mjs
 		// `builtinModel`). Read only by the zero-rated check; the default knows no builtin model, so an unwired
@@ -338,10 +342,26 @@ export async function runJob(job, deps) {
 	const wantsForgeToken = isForgeBacked || job.github === true;
 	let token = null;
 	let prepared = null;
-	let reserved = false;
-	let scopedReserved = false;
+	// The job-count reservations still standing, in reserve order (issue #499 part B): what `reserveLedgers` took and
+	// no refund has given back yet. EVERY refund below is `releaseLedgers` over this one list, last first, so no path
+	// can give back one ledger and forget another, and none can give one back twice: a released ledger leaves the list.
+	const held = [];
+	// The global ledger's own entry, so `budgetReserved` (global-only, INT-RUN-HISTORY-FILE-CONTRACT) can ask the list.
+	let globalLedger = null;
+	const globalHeld = () => globalLedger !== null && held.includes(globalLedger);
+	// Give back every held job-count slot, NEVER throwing: a refund that did not land must not replace the caller's
+	// classification with a Redis message. Logged with `at`; returns whether the list is empty afterwards.
+	const refundLedgers = async (at) => {
+		try {
+			await releaseLedgers(redis, held, { now });
+			return true;
+		} catch (releaseError) {
+			log("budget_release_failed", { at, code: releaseError?.code ?? null });
+			return false;
+		}
+	};
 	// Set once `runContainer` has RESOLVED, which is the only moment a container is known to have run. The
-	// config classifier in the catch refunds both ledgers, and its whole justification is that nothing was
+	// config classifier in the catch refunds every job-count ledger, and its whole justification is that nothing was
 	// spent; without a fact to test, that is a claim about where config throws happen to live today rather
 	// than a property of the code. A config-tagged throw raised after a paid run would otherwise refund a slot
 	// the container really spent AND tell the operator publicly that nothing was.
@@ -935,7 +955,7 @@ export async function runJob(job, deps) {
 			// than by matching its stderr, which image-preflight.mjs forbids for good reason. Folding this into
 			// the refusal above would permanently burn a delivery over a twenty-second vault blip, and a webhook
 			// does not redeliver itself. Nothing has spent: `budgetReserved` computes false in the catch below
-			// because `reserved` is still false here.
+			// because no ledger is held yet.
 			log("secret_resolver_unreachable", { kind: job.kind ?? null, name: resolved.unreachable, failure: resolved.failure ?? null, code: resolved.code ?? null, stderrBytes: resolved.stderrBytes ?? 0 });
 			throw new InfraRetry(`secret resolver could not answer for ${resolved.unreachable}`, { reason: "secret-resolver-unreachable", provider: job.provider ?? null, model: job.model ?? null });
 		}
@@ -995,87 +1015,73 @@ export async function runJob(job, deps) {
 			return { outcome: "policy", reason: "daily-token-cap", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 
-		// Per-scope budget windows (issue #242, INT-SCOPED-LIMITS-FILE-CONTRACT): the NARROWER ledger
-		// reserves FIRST, so a noisy scope's refusals never consume a global slot -- the global INCR below
-		// runs only for jobs the scope admitted. Same atomic INCR, same refused-still-counts invariant,
-		// through budget.mjs's keyPrefix seam (dayKey/weekKey/monthKey under budget:s:<hash16>). softHoldPct
-		// is deliberately GLOBAL-ONLY: the band is one operator brake on overall spend, not a per-row knob;
-		// scoped windows are hard caps (DES-SCOPED-LIMITS-AND-FOLDER-MUTEX).
-		if (scopedCaps) {
-			// A redis fault BETWEEN this reserve and the global one below strands the scoped INCR with no
-			// run and no refund -- the pre-existing mid-reserve posture, shared with the global ledger's
-			// own partial-INCR seam; the compensating release below covers REFUSALS, not faults.
-			const scoped = await reserveBudget(redis, { caps: scopedCaps.caps, now, keyPrefix: scopeKeyPrefix(scopedCaps.scope) });
-			scopedReserved = true;
-			if (!scoped.allowed) {
-				const w = scoped.blockedWindow;
-				const win = scoped.windows[w];
-				// A local job's scope is a full host path and its "comment" is not dropped -- the wiring's
-				// local adapter LOGS the text (start.mjs forgeFor fallthrough) -- so the path must never
-				// enter the message; "this folder" is enough beside the jobId the adapter logs. A forge
-				// scope IS the repo the comment posts on, safe to name, and named without a forge prefix (issue #498): the
-				// comment already lives on that forge, so `github:acme/web` reads as `acme/web` there.
-				const scopeLabel = job.kind === "local" ? "this folder" : unqualifiedScope(scopedCaps.scope);
-				await comment(job, `Over the ${w} run cap for ${scopeLabel} (${win.cap}). Not run.`);
-				// The scope rides the log as its 16-hex key, NEVER the raw string: a folder-scoped cap would
-				// put a full host path in the worker log against no-pii-in-logs (the record keeps only
-				// basename(folder) for the same reason). The admin recomputes the key from the configured
-				// scope to join it back.
-				log("over_scope_budget", { scopeKey: scopeKeyPrefix(scopedCaps.scope), window: w, reserved: win.reserved, cap: win.cap, kind: job.kind === "local" ? "local" : "forge" });
-				// budgetReserved false: the GLOBAL slot was never touched (scoped reserves first). The scoped
-				// counter did INCR and keeps it -- its own refused-reservation-still-counts, per ledger.
-				return { outcome: "policy", reason: "scope-cap", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		// The JOB-COUNT ledgers (issues #242 and #499 part B, INT-SCOPED-LIMITS-FILE-CONTRACT), narrowest first: the repo
+		// or folder row, the project row, then the global windows, reserved in that order by ONE helper. A narrow
+		// ledger's refusal never consumes a slot in a wider one -- the global INCR runs only for jobs every scoped ledger
+		// admitted, and a project's only for jobs their repo admitted. Same atomic INCR, same refused-still-counts
+		// invariant per ledger, through budget.mjs's keyPrefix seam (budget:s:<hash16> of the row scope). softHoldPct is
+		// deliberately GLOBAL-ONLY: the band is one operator brake on overall spend, not a per-row knob; scoped windows
+		// are hard caps (DES-SCOPED-LIMITS-AND-FOLDER-MUTEX).
+		//
+		// A redis fault mid-walk strands the INCRs already made with no run and no refund -- the pre-existing
+		// mid-reserve posture; `held` stays exact, so the catch's never-started and config arms give back what landed.
+		globalLedger = { scope: null, keyPrefix: null, caps, softHoldPct, reason: null };
+		const counted = await reserveLedgers(redis, [...(scopedLedgers ?? []), globalLedger], held, { now });
+		if (!counted.allowed) {
+			// Every ledger BEFORE the refusing one gives its slot back, last first: a ledger that did not issue the
+			// refusal gives back. Without this, an exhausted global window drains every arriving scope's and project's own
+			// counters with zero runs to show for it, and a full project drains its members' repo windows. The refusing
+			// ledger keeps its own slot (refused-still-counts, per ledger).
+			await refundLedgers(counted.refusedBy.reason ?? counted.result.reason);
+			const result = counted.result;
+			const w = result.blockedWindow;
+			const win = result.windows[w];
+			if (counted.refusedBy === globalLedger) {
+				if (result.reason === "soft-hold") {
+					await comment(job, `Soft-hold: ${w} spend ${win.reserved}/${win.cap} is inside the ${softHoldPct}% hold band. New starts paused; not run.`);
+					log("soft_hold", { window: w, reserved: win.reserved, cap: win.cap, pct: softHoldPct });
+				} else {
+					await comment(job, `Over the ${w} budget cap (${win.cap}). Not run.`);
+					log("over_budget", { window: w, reserved: win.reserved, cap: win.cap });
+				}
+				// budgetReserved true: the global slot is reserved and kept (a refused reservation still counts). Both
+				// over-budget and soft-hold are POLICY, RETURNED (not retried) -- the agent never ran.
+				return { outcome: "policy", reason: result.reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: true }; // return => not retried
 			}
+			const isProject = counted.refusedBy.reason === PROJECT_CAP_REASON;
+			// A local job's scope is a full host path and its "comment" is not dropped -- the wiring's local adapter LOGS
+			// the text (start.mjs forgeFor fallthrough) -- so the path must never enter the message; "this folder" is enough
+			// beside the jobId the adapter logs. A forge scope IS the repo the comment posts on, safe to name, and named
+			// without a forge prefix (issue #498). A project is "this project": the comment's reader may be an issue
+			// author, and which repos an operator groups is the operator's business, not theirs.
+			const scopeLabel = isProject ? "this project" : job.kind === "local" ? "this folder" : unqualifiedScope(counted.refusedBy.scope);
+			await comment(job, `Over the ${w} run cap for ${scopeLabel} (${win.cap}). Not run.`);
+			// The scope rides the log as its 16-hex key, NEVER the raw string: a folder-scoped cap would put a full host
+			// path in the worker log against no-pii-in-logs. The admin recomputes the key from the configured scope. A
+			// project refusal adds `ledger: "project"`; a repo or folder one keeps the line it always had.
+			log("over_scope_budget", { scopeKey: counted.refusedBy.keyPrefix, ...(isProject ? { ledger: "project" } : {}), window: w, reserved: win.reserved, cap: win.cap, kind: job.kind === "local" ? "local" : "forge" });
+			// budgetReserved false: the GLOBAL slot was never touched (every scoped ledger reserves first).
+			return { outcome: "policy", reason: counted.refusedBy.reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 
-		// GLOBAL budget last-but-before-container. A refusal here spends nothing (no container starts). Reserves across
-		// every active window (day + optional week/month) and the soft-hold band in one atomic pass.
-		const budget = await reserveBudget(redis, { caps, softHoldPct, now });
-		reserved = true;
-		if (!budget.allowed) {
-			// The scoped reserve above committed before this global refusal -- give that slot back. Without
-			// this, an exhausted global window drains every arriving scope's own day/week/month counters
-			// with zero runs to show for it (a storm against a spent global daily cap would empty a repo's
-			// week by noon). The scoped ledger's refused-still-counts covers the SCOPE's own refusal above,
-			// never a refusal it did not issue.
-			if (scopedReserved && scopedCaps) {
-				await releaseBudget(redis, { caps: scopedCaps.caps, now, keyPrefix: scopeKeyPrefix(scopedCaps.scope) });
-				// CLEARED, so the ledger's state and the flag agree. Nothing between here and the return can
-				// throw today (`comment` is non-throwing by construction and `log` is a write), but the catch
-				// below now releases on a whole CLASS of error rather than one reason, and a second release
-				// against this same key would take it to -1: `releaseBudget` is a floorless DECR. The invariant
-				// belongs where the release is, not in the guard of every future reader.
-				scopedReserved = false;
-			}
-			const w = budget.blockedWindow;
-			const win = budget.windows[w];
-			if (budget.reason === "soft-hold") {
-				await comment(job, `Soft-hold: ${w} spend ${win.reserved}/${win.cap} is inside the ${softHoldPct}% hold band. New starts paused; not run.`);
-				log("soft_hold", { window: w, reserved: win.reserved, cap: win.cap, pct: softHoldPct });
-			} else {
-				await comment(job, `Over the ${w} budget cap (${win.cap}). Not run.`);
-				log("over_budget", { window: w, reserved: win.reserved, cap: win.cap });
-			}
-			// budgetReserved true: the slot is reserved above and kept (a refused reservation still counts). Both
-			// over-budget and soft-hold are POLICY, RETURNED (not retried) -- the agent never ran.
-			return { outcome: "policy", reason: budget.reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: true }; // return => not retried
-		}
-
-		// DOLLAR windows (issue #501, part 3), after BOTH job-count reserves and before the container: the last gate
-		// before the spend line (CONST-BUDGET-BEFORE-TOKENS). Every free gate and both job-count ledgers come first, so
+		// DOLLAR windows (issue #501, part 3), after EVERY job-count reserve and before the container: the last gate
+		// before the spend line (CONST-BUDGET-BEFORE-TOKENS). Every free gate and every job-count ledger come first, so
 		// a refusal anywhere above never touches a dollar counter. The amount is the job's per-job cost cap, which the
 		// runner enforces before every call, so it bounds what the run can spend; the worker needs no prices.
 		let containerJob = job;
 		// Every dollar ledger this job reserves in: the deployment's windows, its repo or folder row's, and each model
 		// row it may reach (scoped-limits.json version 2). ONE reservation over all of them, so a refusal in any window
 		// gives back every key, the deployment's included.
-		const ledgers = dollarLedgers(dollarCaps, { scope: scopedDollars, models: modelDollars });
+		const ledgers = dollarLedgers(dollarCaps, { scope: scopedDollars, project: projectDollars, models: modelDollars });
 		const modelPrefixes = new Map((modelDollars ?? []).map((m) => [m.keyPrefix, m.ref]));
+		// The ledgers that settle to the JOB's cost (the deployment's, the repo or folder row's, the project row's), named
+		// rather than derived as "not a model", so a ledger kind added later settles nowhere until it is put on a list.
+		const jobCostPrefixes = new Set([DOLLAR_KEY_PREFIX, scopedDollars?.keyPrefix, projectDollars?.keyPrefix].filter((p) => typeof p === "string"));
 		if (ledgers.length > 0) {
 			// A window needs a per-job cap (the settings invariant, `checkDollarInvariant`; for a scoped or model row, the
 			// same rule), so a job with none here is a defect, a hand-built queue entry, or a dollar row in
 			// scoped-limits.json on a deployment with no `maxCostUsd`: refused as configuration, before anything is
-			// reserved, and the config arm below refunds both job-count slots.
+			// reserved, and the config arm below refunds every job-count slot.
 			if (job.maxCostMicros === null || job.maxCostMicros === undefined) throw configError("a dollar window is set but this job has no per-job cost cap to reserve");
 			// Issue #503 part 7: a job that CANNOT spend reserves nothing. Every model it may call is served by a declared
 			// endpoint and zero-rated, so its container runs under a per-job cap of 0, which the runner's cost guard holds
@@ -1102,21 +1108,10 @@ export async function runJob(job, deps) {
 				}
 				if (!reservation.allowed) {
 					// Refused, and every dollar key it touched given back, best effort per key (the departure from the job-count
-					// rule, see dollar-budget.mjs; a key that could not be is logged and the record says floor). Both job-count
-					// slots go back too: a ledger that did not issue the refusal gives
-					// back, the rule the scoped ledger follows when the global one refuses above.
-					let refunded = true;
-					try {
-						if (scopedReserved && scopedCaps) {
-							await releaseBudget(redis, { caps: scopedCaps.caps, now, keyPrefix: scopeKeyPrefix(scopedCaps.scope) });
-							scopedReserved = false;
-						}
-						await releaseBudget(redis, { caps, now });
-						reserved = false;
-					} catch (releaseError) {
-						refunded = false;
-						log("budget_release_failed", { at: DOLLAR_CAP_REASON, code: releaseError?.code ?? null });
-					}
+					// rule, see dollar-budget.mjs; a key that could not be is logged and the record says floor). Every held
+					// job-count slot goes back too, last first: a ledger that did not issue the refusal gives back, the rule
+					// the count ledgers follow among themselves above.
+					const refunded = await refundLedgers(DOLLAR_CAP_REASON);
 					// The window is named and the amounts are not: the comment's reader may be an issue author, and the
 					// amounts are the operator's, which the log carries. Which ledger refused is named too: the deployment,
 					// the repo (a forge scope IS the repo the comment posts on), "this folder" (a local scope is a host path,
@@ -1126,8 +1121,9 @@ export async function runJob(job, deps) {
 					// Two different states, told apart (PR #549's review): a window whose cap is BELOW one job's cap refuses every
 					// such job until the operator changes a setting, which "no room left" would hide behind a wait that never ends.
 					const capBelowJob = reservation.capMicros < job.maxCostMicros;
-					const refusedBy = reservation.ledger === DOLLAR_KEY_PREFIX ? "deployment" : modelPrefixes.has(reservation.ledger) ? "model" : "scope";
-					const whose = refusedBy === "deployment" ? "this deployment" : refusedBy === "model" ? `the model ${modelPrefixes.get(reservation.ledger)}` : job.kind === "local" ? "this folder" : unqualifiedScope(scopedDollars.scope);
+					// A project window (issue #499 part B) is "this project", for the job-count refusal's reason.
+					const refusedBy = reservation.ledger === DOLLAR_KEY_PREFIX ? "deployment" : modelPrefixes.has(reservation.ledger) ? "model" : reservation.ledger === projectDollars?.keyPrefix ? "project" : "scope";
+					const whose = refusedBy === "deployment" ? "this deployment" : refusedBy === "model" ? `the model ${modelPrefixes.get(reservation.ledger)}` : refusedBy === "project" ? "this project" : job.kind === "local" ? "this folder" : unqualifiedScope(scopedDollars.scope);
 					await comment(
 						job,
 						capBelowJob
@@ -1179,9 +1175,9 @@ export async function runJob(job, deps) {
 			const trusted = !aborted && detached !== true && Number.isSafeInteger(exitLineCode) && exitLineCode === code;
 			const reservedMicros = dollarHold.amountMicros;
 			const { settledMicros, basis } = dollarSettlement({ tokens, usage: usage ?? null, reservedMicros, trusted });
-			// The deployment and the repo or folder windows settle to the job's cost; each model window to its own row of
-			// the usage ledger (`modelDollarSettlement`), never to the job's total.
-			const jobPart = holdPart(dollarHold, (prefix) => !modelPrefixes.has(prefix));
+			// The deployment, the repo or folder and the project windows settle to the job's cost; each model window to its
+			// own row of the usage ledger (`modelDollarSettlement`), never to the job's total.
+			const jobPart = holdPart(dollarHold, (prefix) => jobCostPrefixes.has(prefix));
 			const { applied, of } = await settleDollars(redis, jobPart, settledMicros, { log });
 			let modelBasis = null;
 			for (const part of dollarHold.ledgers ?? []) {
@@ -1331,8 +1327,8 @@ export async function runJob(job, deps) {
 		// this project exists to make legible.
 		//
 		// Refunding is right BECAUSE no container started: identical to `container-never-started`, and the
-		// same both-or-neither pair, under the same `reserved`/`scopedReserved` guards so it still cannot
-		// double-release. The gate above catches the provider case for free, before the mint and the clone;
+		// same all-or-none refund of every held job-count ledger, through the same `releaseLedgers` list, so it still
+		// cannot double-release. The gate above catches the provider case for free, before the mint and the clone;
 		// this is the backstop for every other config throw that can still land here (an unknown forge kind in
 		// `buildContainerEnv`, a prepare-time refusal), which would otherwise keep the same slot silently.
 		// `!containerRan` is the discriminator, and it is what makes the refund and the sentence below TRUE
@@ -1368,26 +1364,13 @@ export async function runJob(job, deps) {
 		}
 
 		if (e?.piDispatchConfig === true && !containerRan) {
-			// GUARDED, and the flags are the record of what actually happened. `releaseBudget` is a loop of
+			// GUARDED, and the `held` list is the record of what actually happened. `releaseLedgers` is a loop of
 			// DECRs over the active windows and can reject part-way (a read-only replica, a dropped
 			// connection), which would otherwise replace this determinate refusal with a Redis message: the
 			// operator would be told their queue is broken when their deployment is misconfigured, and the
 			// escaping error is untagged so it is not retried either. A refund that did not land must not be
 			// reported as one, so `budgetReserved` follows the ledger and not the intent.
-			let refunded = true;
-			try {
-				if (reserved) {
-					await releaseBudget(redis, { caps, now });
-					reserved = false;
-				}
-				if (scopedReserved && scopedCaps) {
-					await releaseBudget(redis, { caps: scopedCaps.caps, now, keyPrefix: scopeKeyPrefix(scopedCaps.scope) });
-					scopedReserved = false;
-				}
-			} catch (releaseError) {
-				refunded = false;
-				log("budget_release_failed", { at: "config-refused", code: releaseError?.code ?? null });
-			}
+			const refunded = await refundLedgers("config-refused");
 			// A FIXED sentence, and NO message in the log either. Two different reasons, both load-bearing:
 			// `credentialFromPiAuth` puts `auth.json`'s location in its refusals and `prepare-local` puts the
 			// operator's folder in its own, which `buildRecord` reduces to a basename precisely because a host
@@ -1411,18 +1394,17 @@ export async function runJob(job, deps) {
 		// A spawn fault (docker daemon down / binary missing) reserved a slot but never started a
 		// container, so nothing was spent -- give the slot back before the retry. Every other throw
 		// here (exit-1 infra, unknown exit) means the container ran and legitimately spent its slot,
-		// so `reason` gates the release to the never-started case only. Guarded on `reserved` and run
-		// once per invocation; a BullMQ retry reserves afresh, so this cannot double-release.
-		// budgetReserved reflects whether a slot stays spent: false when never-started refunds below,
-		// true for a real container that ran and spent (exit-1 infra / unknown exit).
-		if (e instanceof InfraRetry) e.budgetReserved = reserved && !isNeverStartedRetry(e);
+		// so `reason` gates the release to the never-started case only. It releases only what `held` still
+		// lists and run once per invocation; a BullMQ retry reserves afresh, so this cannot double-release.
 		if (isNeverStartedRetry(e)) {
-			// Both-or-neither (issue #242): a never-started container can only follow BOTH reserves (the
-			// scoped one precedes the global one, and the container follows both), so they refund
-			// together -- and a scoped refusal returned above without ever touching the global ledger.
-			if (reserved) await releaseBudget(redis, { caps, now });
-			if (scopedReserved && scopedCaps) await releaseBudget(redis, { caps: scopedCaps.caps, now, keyPrefix: scopeKeyPrefix(scopedCaps.scope) });
+			// All-or-none (issues #242 and #499 part B): a never-started container follows EVERY job-count reserve, so
+			// every held ledger refunds together, last first, through the one helper -- and a scoped or project refusal
+			// returned above with the ledgers before it already given back.
+			await refundLedgers("container-never-started");
 		}
+		// After the refund, so it says what the ledger holds: false when never-started gave the global slot back, true
+		// for a real container that ran and spent (exit-1 infra / unknown exit) or a refund that did not land.
+		if (e instanceof InfraRetry) e.budgetReserved = globalHeld();
 		throw e;
 	} finally {
 		if (prepared) await cleanup(prepared).catch(() => {});
