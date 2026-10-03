@@ -4648,6 +4648,41 @@ test("doctor: a configured scoped-limits file that will not load is a FAILURE na
 	assert.ok(gone.find((x) => /cannot load/.test(x.label) && /does not exist/.test(x.label)));
 });
 
+// ── PI_PROJECTS_FILE, the fourth boot file (issue #499) ─────────────────────────────────────────────────
+
+test("doctor: a scaffolded projects.json with PI_PROJECTS_FILE unset warns; wired, no trap line (#499)", async () => {
+	const cwd = tempDir("pi-projects-scaffold-");
+	writeFileSync(join(cwd, "projects.json"), JSON.stringify({ version: 1, projects: [] }));
+	const { out, text } = capture();
+	const code = await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
+	assert.ok(text().includes(`⚠ ${join(cwd, "projects.json")} exists but PI_PROJECTS_FILE is unset -- the worker ignores it, so projects are OFF`), text());
+	assert.ok(text().includes(`set PI_PROJECTS_FILE=${join(cwd, "projects.json")}`), "the fix names the variable AND the absolute path");
+	assert.equal(code, 0, "warn, never fail");
+	const wired = capture();
+	await runDoctor(imgEnv({ PI_PROJECTS_FILE: join(cwd, "projects.json") }), scaffoldDeps(wired.out, cwd));
+	assert.doesNotMatch(wired.text(), /PI_PROJECTS_FILE/, "a wired deployment with a loadable file gets no line about it");
+});
+
+test("doctor: an EMPTY PI_PROJECTS_FILE and a file that will not load each FAIL as a refused boot (#499)", async () => {
+	const dir = tempDir("pi-projects-bad-");
+	const empty = capture();
+	const code = await runDoctor(imgEnv({ PI_PROJECTS_FILE: "" }), scaffoldDeps(empty.out, dir));
+	assert.match(empty.text(), /✗ PI_PROJECTS_FILE is set to an EMPTY value in this shell, which is not unset: the worker keeps it, tries to load "" and REFUSES TO START/);
+	assert.notEqual(code, 0, "a refused boot fails doctor");
+	const path = join(dir, "projects.json");
+	writeFileSync(path, JSON.stringify({ version: 1, projects: [{ id: "a", name: "Private Name", members: ["github:acme/web"] }, { id: "b", members: ["github:acme/web"] }] }));
+	const checks = await collectChecks(imgEnv({ PI_PROJECTS_FILE: path }), collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true }));
+	const c = checks.find((x) => /PI_PROJECTS_FILE is set in this shell to a file the worker cannot load/.test(x.label));
+	assert.ok(c, "the check is present");
+	assert.equal(c.ok, false);
+	assert.notEqual(c.warn, true, "a boot blocker is a failure, not an advisory");
+	assert.match(c.label, /REFUSES TO START/);
+	assert.match(c.label, /claimed by both "a" and "b"/, "the loader's own words");
+	assert.doesNotMatch(c.label, /Private Name/, "and never a project's name");
+	const gone = await collectChecks(imgEnv({ PI_PROJECTS_FILE: join(dir, "absent.json") }), collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true }));
+	assert.ok(gone.find((x) => /PI_PROJECTS_FILE/.test(x.label) && /does not exist/.test(x.label)));
+});
+
 test("doctor: the dead-scope advisory flags folder-only shapes not in the canonicalized facts; repo shapes stay silent", async () => {
 	const dir = tempDir("pi-sl-adv-");
 	const folder = join(dir, "site");
@@ -7329,7 +7364,7 @@ test("doctor: a line systemd reads differently is named with its shape, once, an
 		const code = await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
 		const lines = text().split("\n").filter((l) => /cannot be read off/.test(l));
 		assert.equal(lines.length, 1, `one line for the file: ${JSON.stringify(hazard)}\n${text()}`);
-		assert.ok(lines[0].startsWith(`⚠ whether PI_PAUSE_WINDOWS_FILE or PI_SCOPED_LIMITS_FILE or PI_MODEL_ENDPOINTS_FILE reaches the service cannot be read off ${join(cwd, ".env")}: line ${line} `), lines[0]);
+		assert.ok(lines[0].startsWith(`⚠ whether PI_PAUSE_WINDOWS_FILE or PI_SCOPED_LIMITS_FILE or PI_PROJECTS_FILE or PI_MODEL_ENDPOINTS_FILE reaches the service cannot be read off ${join(cwd, ".env")}: line ${line} `), lines[0]);
 		assert.match(lines[0], what);
 		assert.match(text(), new RegExp(`on line ${line} of that file, ${fix.source}`), "the fix names the line and what to change");
 		assert.doesNotMatch(text(), /PI_PAUSE_WINDOWS_FILE is set in .* and loads/, "and no reading of a file systemd splits differently");
@@ -7356,7 +7391,7 @@ test("doctor: a .env systemd will not LOAD fails on Linux, naming the line and t
 		writeFileSync(join(cwd, ".env"), Buffer.concat([Buffer.from(`PI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\n`), tail]));
 		const { out, text } = capture();
 		const code = await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
-		assert.match(text(), new RegExp(`✗ whether PI_PAUSE_WINDOWS_FILE or PI_SCOPED_LIMITS_FILE or PI_MODEL_ENDPOINTS_FILE reaches the service cannot be read off .*: ${what.source}`));
+		assert.match(text(), new RegExp(`✗ whether PI_PAUSE_WINDOWS_FILE or PI_SCOPED_LIMITS_FILE or PI_PROJECTS_FILE or PI_MODEL_ENDPOINTS_FILE reaches the service cannot be read off .*: ${what.source}`));
 		assert.match(text(), fix);
 		assert.doesNotMatch(text(), /PI_PAUSE_WINDOWS_FILE is set in .* and loads/);
 		assert.equal(code, 1, "a service that cannot start fails doctor");
@@ -7785,6 +7820,8 @@ const MIXED_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_PROJECTS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for projects cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
@@ -7829,6 +7866,8 @@ const MIXED_PIN = {
 			"⚠ PI_PAUSE_WINDOWS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped pauses cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_PROJECTS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for projects cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
@@ -7883,6 +7922,8 @@ const MIXED_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_PROJECTS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for projects cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
@@ -7936,6 +7977,8 @@ const MIXED_PIN = {
 			"⚠ PI_PAUSE_WINDOWS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped pauses cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_PROJECTS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for projects cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
@@ -9821,6 +9864,8 @@ const DOCKER_CANARY_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_PROJECTS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for projects cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
@@ -9887,6 +9932,8 @@ const DOCKER_CANARY_PIN = {
 			"⚠ PI_PAUSE_WINDOWS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped pauses cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_PROJECTS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for projects cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
@@ -9960,6 +10007,8 @@ const DOCKER_CANARY_PIN = {
 			"⚠ PI_PAUSE_WINDOWS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped pauses cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_PROJECTS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for projects cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
@@ -10038,6 +10087,8 @@ const DOCKER_CANARY_PIN = {
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_PROJECTS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for projects cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",
 			"✓ Durable state: run history /home/op/.pi-dispatch/logs, settings /home/op/.pi-dispatch/settings.json \u2014 both survive a reboot (docs/backup.md)",
@@ -10114,6 +10165,8 @@ const DOCKER_CANARY_PIN = {
 			"⚠ PI_PAUSE_WINDOWS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped pauses cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"⚠ PI_SCOPED_LIMITS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for scoped limits cannot be answered here",
+			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
+			"⚠ PI_PROJECTS_FILE is unset in this shell, and <cwd>/.env could not be read, so whether the service is configured for projects cannot be answered here",
 			"    → make <cwd>/.env a readable regular file, or run doctor from the deployment folder",
 			"✓ Jobs dir <jobs> is this account's and writable",
 			"✓ 0 retained workspace(s) in <jobs>/sandboxes, swept after 24h, re-open one with `pi-dispatch sandbox <jobId>`",

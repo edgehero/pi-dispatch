@@ -1,0 +1,57 @@
+# Projects
+
+A project groups repos and folders under one name. Every run of a member records the project's id, so you can
+see which runs belong together. Caps per project, the cost views and the panel come in later releases.
+
+## Enable it
+
+```sh
+# .env
+PI_PROJECTS_FILE=/absolute/path/to/projects.json
+```
+
+`pi-dispatch init` scaffolds an empty `projects.json`, and `pi-dispatch up` sets the variable to it when `.env`
+gives it no value. Unset means no projects: every run records `"project": null`.
+
+An EMPTY value is NOT unset. The worker keeps the empty value, tries to load it and refuses to start, so fill the
+line in or delete it. Doctor fails on it.
+
+A file that does not load also refuses worker startup. A live edit that does not load keeps the last good file,
+and the worker logs `projects_reload_invalid`.
+
+## The file
+
+```json
+{
+  "version": 1,
+  "projects": [
+    { "id": "shop", "name": "Webshop", "members": ["github:acme/web", "forgejo:acme/platform", "/srv/shop-tools"] }
+  ]
+}
+```
+
+- `id`: lowercase letters, digits and `-`, 1 to 32 characters. This is what a run record carries.
+- `name`: optional display text. It never appears in a run record or a log line.
+- `members`: one or more scopes. Write a repo with its forge (`github:owner/name`), or a folder as an absolute path.
+  A bare `owner/name` is refused, because it would name that repo on every forge.
+
+The file is refused when two projects share an id, when one scope is in two projects (both ids are named), when
+`members` is empty, and when `version` is newer than this build reads.
+
+## What a run records
+
+The worker decides a job's project once, when it picks the job up, and writes that id into the run record as
+`project`. A later edit of the file does not change it. A run outside every project records `null`, and so does
+every run recorded before projects existed. Old records are never moved into a project.
+
+Only a run is grouped. A webhook trigger fires for whichever repo delivers, so the trigger itself belongs to no
+project.
+
+## Reference
+
+| Piece | Value |
+|---|---|
+| Env var | `PI_PROJECTS_FILE` (absolute path; unset = no projects. An EMPTY value is NOT unset: the worker keeps it and refuses to start, so fill the line in or delete it, and doctor fails on it) |
+| File | `{ "version": 1, "projects": [ { id, name?, members } ] }` |
+| Record field | `project`: the id, or `null` |
+| Spec | `INT-PROJECTS-FILE-CONTRACT` |

@@ -1210,7 +1210,7 @@ test("the record's default venue and the registry's come from the one config val
 	// Asserted against the SOURCE so it runs without Valkey. Two defaults read from two places would let the
 	// record name a venue the registry never dispatched to, and nothing else would notice.
 	const src = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
-	assert.match(src, /buildRecord\(\{[^}]*defaultBackend:\s*config\.defaultBackend\s*\}\)/, "recordRun passes the default venue to buildRecord");
+	assert.match(src, /buildRecord\(\{[^}]*defaultBackend:\s*config\.defaultBackend[,\s][^}]*\}\)/, "recordRun passes the default venue to buildRecord");
 	assert.match(src, /defaultName:\s*config\.defaultBackend/, "and the registry is built with the same value");
 });
 
@@ -1378,6 +1378,99 @@ test("scoped limits: an invalid file refuses BOOT fail-loud (configError), with 
 			() => runStart({ env: { PI_SCOPED_LIMITS_FILE: file } }),
 			(e) => e.piDispatchConfig === true && /day must be an integer >= 1/.test(e.message),
 		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// ── projects wiring (issue #499) ─────────────────────────────────────────────────────────────────────
+
+/** `runStart` with a record writer that keeps every record, and the `recordRun` closure the worker was given. */
+async function runStartWithRecords(opts) {
+	const records = [];
+	const out = await runStart({ ...opts, makeRecordWriter: () => (record) => records.push(record) });
+	return { ...out, records, recordRun: out.captured.recordRun };
+}
+
+test("projects: a valid file boot-loads into a top-level closure, arms the watcher, rides worker_started by count, and recordRun stamps the id", { skip }, async () => {
+	const dir = tempDir("pi-projects-");
+	try {
+		const file = join(dir, "projects.json");
+		writeFileSync(file, `${JSON.stringify({ version: 1, projects: [{ id: "shop", name: "Secret Shop Name", members: ["github:acme/web", "/srv/shop-tools"] }] })}\n`);
+		const { captured, logs, recordRun, records } = await runStartWithRecords({ env: { PI_PROJECTS_FILE: file } });
+		assert.equal(typeof captured.projects, "function", "a closure beside scopedLimits, at the TOP level (not in deps)");
+		assert.deepEqual(captured.projects().map((p) => p.id), ["shop"]);
+		assert.ok(logs.some((l) => l.event === "projects_watching" && l.path === file), "the live-edit watcher armed");
+		const started = logs.find((l) => l.event === "worker_started");
+		assert.equal(started.projectsFile, file);
+		assert.equal(started.projects, 1, "the project count, never a name");
+		assert.ok(!JSON.stringify(logs).includes("Secret Shop Name"), "a project's name is in no log line");
+		// The id the pickup gate resolved rides in as `project`, and wins over the live ref.
+		recordRun({ job: { id: "j1", name: "github", data: { kind: "github", repo: "acme/web" } }, result: { outcome: "completed" }, project: null });
+		assert.equal(records.at(-1).project, null, "an explicit pickup-time null is kept, never re-resolved at record time");
+		recordRun({ job: { id: "j2", name: "github", data: { kind: "github", repo: "acme/other" } }, result: { outcome: "completed" }, project: "shop" });
+		assert.equal(records.at(-1).project, "shop", "the pickup-time id is what the record carries");
+		// A record path that ends BEFORE the pickup gate passes no project, and resolves from the live ref.
+		recordRun({ job: { id: "j3", name: "github", data: { kind: "github", repo: "acme/web" } }, result: { outcome: "policy" } });
+		assert.equal(records.at(-1).project, "shop");
+		recordRun({ job: { id: "j4", name: "local", data: { kind: "local", folder: "/srv/shop-tools/" } }, result: { outcome: "policy" } });
+		assert.equal(records.at(-1).project, "shop", "a local job resolves by its resolved folder");
+		recordRun({ job: { id: "j5", name: "gitlab", data: { kind: "gitlab", repo: "acme/web" } }, result: { outcome: "policy" } });
+		assert.equal(records.at(-1).project, null, "another forge's acme/web is not a member");
+		assert.ok(!JSON.stringify(records).includes("Secret Shop Name"), "and no record carries the name");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("projects: unset means [] from the closure, no watcher, null in worker_started, and a null project in every record", { skip }, async () => {
+	const { captured, logs, recordRun, records } = await runStartWithRecords({});
+	assert.deepEqual(captured.projects(), []);
+	assert.ok(!logs.some((l) => l.event === "projects_watching"), "no file, no watcher");
+	const started = logs.find((l) => l.event === "worker_started");
+	assert.equal(started.projectsFile, null);
+	assert.equal(started.projects, 0);
+	recordRun({ job: { id: "j1", name: "github", data: { kind: "github", repo: "acme/web" } }, result: { outcome: "completed" } });
+	assert.equal(records.at(-1).project, null);
+});
+
+test("projects: an invalid file refuses BOOT fail-loud (configError), and an empty value too", { skip }, async () => {
+	const dir = tempDir("pi-projects-");
+	try {
+		const file = join(dir, "projects.json");
+		writeFileSync(file, JSON.stringify({ version: 1, projects: [{ id: "a", members: ["github:acme/web"] }, { id: "b", members: ["github:acme/web"] }] }));
+		await assert.rejects(
+			() => runStart({ env: { PI_PROJECTS_FILE: file } }),
+			(e) => e.piDispatchConfig === true && /claimed by both "a" and "b"/.test(e.message),
+		);
+		await assert.rejects(
+			() => runStart({ env: { PI_PROJECTS_FILE: "" } }),
+			(e) => e.piDispatchConfig === true && /projects file does not exist/.test(e.message),
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("reloadProjects keeps LAST-GOOD on a bad edit and hot-swaps on a good one, naming no project name", { skip }, async () => {
+	const dir = tempDir("pi-projects-");
+	try {
+		const file = join(dir, "projects.json");
+		const config = { projectsFile: file };
+		const good = [{ id: "shop", name: null, members: ["github:acme/web"] }];
+		const ref = { current: good };
+		const logs = [];
+		const log = (event, fields) => logs.push({ event, fields });
+		// An unquoted name, so the JSON parser's own message would quote it.
+		writeFileSync(file, '{ "version": 1, "projects": [ { "id": "x", "name": Private Name } ] }');
+		mod.reloadProjects(config, ref, log);
+		assert.equal(ref.current, good, "the SAME array object: last-good untouched");
+		assert.equal(logs[0].event, "projects_reload_invalid");
+		assert.ok(!JSON.stringify(logs).includes("Private"), "the reason never quotes file text that may be a name");
+		writeFileSync(file, JSON.stringify({ version: 1, projects: [{ id: "web", members: ["forgejo:acme/web"] }] }));
+		mod.reloadProjects(config, ref, log);
+		assert.deepEqual(ref.current.map((p) => p.id), ["web"], "a good edit swaps the ref");
+		assert.deepEqual(logs[1], { event: "projects_reloaded", fields: { count: 1 } });
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
@@ -1565,19 +1658,21 @@ test("the live-edit watchers are CLOSED with the worker that armed them", { skip
 		const triggersPath = join(dir, "triggers.json");
 		const pausePath = join(dir, "pause-windows.json");
 		const limitsPath = join(dir, "scoped-limits.json");
+		const projectsPath = join(dir, "projects.json");
 		writeFileSync(triggersPath, JSON.stringify({ triggers: [] }));
 		writeFileSync(pausePath, JSON.stringify({ windows: [] }));
 		writeFileSync(limitsPath, JSON.stringify({ version: 1, limits: [] }));
+		writeFileSync(projectsPath, JSON.stringify({ version: 1, projects: [] }));
 
 		const { captured, logs } = await runStart({
-			env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath, PI_PAUSE_WINDOWS_FILE: pausePath, PI_SCOPED_LIMITS_FILE: limitsPath },
+			env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath, PI_PAUSE_WINDOWS_FILE: pausePath, PI_SCOPED_LIMITS_FILE: limitsPath, PI_PROJECTS_FILE: projectsPath },
 			makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
 			makeHost: () => fakeHost(),
 		});
 
 		// Armed, or the silence below proves nothing. `PI_PAUSE_WINDOWS_FILE` reaches `startWorker` from no
 		// other test in this repo, so this is also the only place its watcher is exercised at all.
-		for (const event of ["triggers_watching", "pause_windows_watching", "scoped_limits_watching"]) {
+		for (const event of ["triggers_watching", "pause_windows_watching", "scoped_limits_watching", "projects_watching"]) {
 			assert.ok(logs.some((l) => l.event === event), `${event}: the canary must ARM the watch it claims to close`);
 		}
 		// The runtime queue, the registry, one closer per armed watch, and the retention sweep. Not `>=`:
@@ -1586,13 +1681,15 @@ test("the live-edit watchers are CLOSED with the worker that armed them", { skip
 		// wrong. It became 6 with issue #292's periodic sweep, registered on #295's own finding that
 		// UNREF'D IS NOT CLEANED UP: that handle holds an `rmSync`, and the shut-down canary below waits
 		// 600ms, so a leaked DAILY timer would be invisible here and real in production.
-		assert.equal(captured.extraClosers.length, 6, "runtimeQueue + registry + one closer per armed watch + the retention sweep");
+		// 7 since issue #499's projects watch, registered by the same rule.
+		assert.equal(captured.extraClosers.length, 7, "runtimeQueue + registry + one closer per armed watch + the retention sweep");
 
 		// `runStart` has already drained every closer. An operator edit now reaches a worker that is gone.
 		const before = bootLines.length;
 		writeFileSync(triggersPath, `${JSON.stringify({ triggers: [] })}\n`);
 		writeFileSync(pausePath, `${JSON.stringify({ windows: [{ scope: "acme/web", from: "01:00", to: "02:00" }] })}\n`);
 		writeFileSync(limitsPath, `${JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 3 }] })}\n`);
+		writeFileSync(projectsPath, `${JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] })}\n`);
 		await new Promise((resolve) => setTimeout(resolve, 600));
 
 		assert.deepEqual(
@@ -2735,7 +2832,7 @@ test("one debounce, shared: the 150ms literal is written once (issue #386)", asy
 	}
 });
 
-test("all FIVE live-edit watches apply the boot-race rule, not just the one with an end-to-end test (#386, #503)", () => {
+test("all SIX live-edit watches apply the boot-race rule, not just the one with an end-to-end test (#386, #503, #499)", () => {
 	// BY SHAPE, and the limit is the point rather than an apology. The rule itself is pinned behaviourally
 	// above, and the receiver's watch is driven end to end through its read seam. The worker's three are
 	// private functions armed from deep inside `startWorker`, so driving each would mean three full worker
@@ -2753,7 +2850,9 @@ test("all FIVE live-edit watches apply the boot-race rule, not just the one with
 	const armings = Object.entries(sources).map(([name, src]) => [name, (src.match(/handles\.watcher = watch\(/g) ?? []).length]);
 	// Five since issue #503 added the model-endpoints watch, which reads before arming and compares after like the rest
 	// (read again, as the message below asks, and its caller is checked at the end).
-	assert.deepEqual(armings, [["worker/src/start.mjs", 4], ["receiver/src/start.mjs", 1]], "five watches, and if that count moves this test must be read again rather than updated");
+	// Six since issue #499 added the projects watch, read again: it reads before arming and compares after, and its caller
+	// is checked at the end with the scoped-limits one.
+	assert.deepEqual(armings, [["worker/src/start.mjs", 5], ["receiver/src/start.mjs", 1]], "six watches, and if that count moves this test must be read again rather than updated");
 	for (const [name, src] of Object.entries(sources)) {
 		const arms = (src.match(/handles\.watcher = watch\(/g) ?? []).length;
 		assert.equal((src.match(/readBeforeArming\(/g) ?? []).length, arms, `${name}: every watch reads before it arms`);
@@ -2779,7 +2878,8 @@ test("all FIVE live-edit watches apply the boot-race rule, not just the one with
 	const worker = sources["worker/src/start.mjs"];
 	// The scoped-limits watcher is armed through its injectable seam (PR #549's review), which defaults to the real one.
 	assert.match(worker, /watchScopedLimits: watchScopedLimitsFn = watchScopedLimitsFile,/, "the seam defaults to the real watcher");
-	for (const [fn, key] of [["watchTriggersFile", "triggers"], ["watchPauseWindowsFile", "pauseWindows"], ["watchScopedLimitsFn", "scopedLimits"]]) {
+	assert.match(worker, /watchProjects: watchProjectsFn = watchProjectsFile,/, "the projects seam defaults to the real watcher");
+	for (const [fn, key] of [["watchTriggersFile", "triggers"], ["watchPauseWindowsFile", "pauseWindows"], ["watchScopedLimitsFn", "scopedLimits"], ["watchProjectsFn", "projects"]]) {
 		const call = worker.match(new RegExp(`extraClosers\\.push\\(${fn}\\(([^;]*)\\)\\);`));
 		assert.ok(call, `${fn} is armed from startWorker`);
 		assert.match(call[1], new RegExp(`atBoot\\.${key}\\b`), `${fn} is handed the boot baseline of ITS OWN file, not another's`);

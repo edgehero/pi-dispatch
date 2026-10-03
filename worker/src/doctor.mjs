@@ -57,9 +57,10 @@ import { basename, dirname, isAbsolute, join, delimiter, posix, resolve, win32 }
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, allowedModelsFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, allowedModelsFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
+import { loadProjects } from "./projects.mjs";
 import { parseModelsJson, stripBom, stripJsonComments } from "./models-json.mjs";
 import { isTransientOverlayRead, overlayProviderProblem } from "./model-catalog.mjs";
 import { EMPTY_USD_FINGERPRINT, usdFingerprint } from "./dollar-fingerprint.mjs";
@@ -558,7 +559,7 @@ function asText(content, enc) {
  * set is a key the other reads back the same way -- and it is asked for THIS PLATFORM's loader, because
  * the three loaders of this file disagree and a blended reading is wrong for every deployment at once.
  */
-export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_MODEL_ENDPOINTS_FILE"]);
+export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_MODEL_ENDPOINTS_FILE"]);
 
 /**
  * The keys doctor takes from the deployment's `.env` as the SERVICE's values (issue #453, and since issue #471 every key
@@ -697,6 +698,7 @@ export const DOCTOR_SHELL_KEYS = Object.freeze({
 	DOCKER_CONTENT_TRUST: "a docker CLI setting of this shell, named for the --live probes this shell's CLI runs",
 	PI_PAUSE_WINDOWS_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS): the service judged from the file, this shell judged as itself",
 	PI_SCOPED_LIMITS_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS)",
+	PI_PROJECTS_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS), #499",
 	PI_MODEL_ENDPOINTS_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS), #503",
 	[VALKEY_SHARED_KEY]: "read from .env ONLY (#464); a value in this shell is named as ignored",
 });
@@ -988,8 +990,8 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 }
 
 /**
- * The files a worker LOADS at boot, and the one place that knows what each is and how to ask. The third, the model
- * endpoints file (issue #503), defaults to the deployment folder's copy where the other two are off when unset.
+ * The files a worker LOADS at boot, and the one place that knows what each is and how to ask. The model endpoints file
+ * (issue #503) defaults to the deployment folder's copy where the other three are off when unset.
  *
  * `load` calls the worker's own loader (issue #384). Doctor used to carry its own parse for scoped limits
  * and nothing at all for pause windows, so "will the worker start" had two answers and one silence. The
@@ -1026,6 +1028,23 @@ const BOOT_FILES = Object.freeze([
 		emptyCost: "refuses the boot",
 		resolve: scopedLimitsFilePath,
 		load: (path, io) => loadScopedLimits({ scopedLimitsFile: path }, io),
+	}),
+	// Issue #499. Off when unset, like the two above: no projects, and every run records `project: null`. The worker
+	// loads it at boot (start.mjs, `loadProjects`), so a file that does not load and an empty value refuse the start.
+	Object.freeze({
+		key: "PI_PROJECTS_FILE",
+		noun: "projects",
+		scaffold: "projects.json",
+		off: "projects are OFF (every run records no project)",
+		unsetMeans: "the worker groups no run into a project",
+		unit: "project",
+		nothing: "projects",
+		fails: "REFUSES TO START",
+		whenDeleted: "turns projects off",
+		whenEmpty: "turns the worker off",
+		emptyCost: "refuses the boot",
+		resolve: projectsFilePath,
+		load: (path, io) => loadProjects({ projectsFile: path }, io),
 	}),
 	// Issue #503. Not off when unset: the worker then reads the scaffold in the deployment folder, so `defaultsToScaffold`
 	// swaps the "exists but unset" warning for a load of that file. The worker loads it at boot exactly like the two

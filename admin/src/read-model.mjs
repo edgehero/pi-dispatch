@@ -86,6 +86,8 @@ export function resolvePaths(env = process.env) {
     triggersPath: env.PI_TRIGGERS_FILE ?? "./triggers.json",
     pauseWindowsPath: env.PI_PAUSE_WINDOWS_FILE ?? "./pause-windows.json",
     scopedLimitsPath: env.PI_SCOPED_LIMITS_FILE ?? "./scoped-limits.json",
+    // Issue #499: the projects file, with the same cwd default as its siblings (what `init` scaffolds).
+    projectsPath: env.PI_PROJECTS_FILE ?? "./projects.json",
     subscriptionsPath: env.PI_SUBSCRIPTIONS_FILE ?? "./subscriptions.json",
     // The operator's global pi overlay dir (REQ-GLOBAL-PI-OVERLAY), where the staged third-party pi
     // packages live under `packages/`. `|| null` so unset AND empty both read as "no overlay" -- the
@@ -149,11 +151,11 @@ export const DEPLOYMENT_SCAFFOLD_FILES = Object.freeze([".env", "triggers.json",
  * PI_BACKENDS, PI_BACKEND_FLOOR, PI_EGRESS, PI_EGRESS_PROXY, DOCKER_HOST and PI_DISPATCH_RUN_ROOTS stay this process's
  * own on purpose (`OQ-038`, `INT-DEPLOYMENT-POINTER-CONTRACT`), and so do the panel's own settings (PI_DISPATCH_*).
  */
-export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_GRAPH_DIR", "PI_WORKER_NAME", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_GRAPH_DIR", "PI_WORKER_NAME", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 // The dollar settings (issue #501) are among them: `dispatch_set`'s confirm states a dollar key's effective value, and
 // in a pointer deployment the cap the worker runs under lives in the deployment's `.env`, not in pi's environment.
 // Of those, the paths: a relative one in `.env` is relative to the service's working directory, the deployment folder.
-const PANEL_PATH_KEYS = new Set(["PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_GRAPH_DIR", "TMPDIR", "TEMP"]);
+const PANEL_PATH_KEYS = new Set(["PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_GRAPH_DIR", "TMPDIR", "TEMP"]);
 
 /**
  * Issue #471: the environment `resolvePaths` should see, by the rule `doctor` judges the service by

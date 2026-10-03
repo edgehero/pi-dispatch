@@ -40,6 +40,7 @@ import { makeCheckOnceSpent, makeCheckWaitSkew, makeDisarmOnce } from "./trigger
 import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "./watch-closer.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
 import { dollarRowsWithoutCap, loadScopedLimits } from "./scoped-limits.mjs";
+import { loadProjects, projectOf } from "./projects.mjs";
 import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
@@ -303,6 +304,53 @@ function watchScopedLimitsFile(config, ref, log, atBoot, deploymentCap = null) {
 }
 
 /**
+ * The projects reload (issue #499), exported apart from its watcher for `reloadScopedLimits`' reason: last-good is
+ * testable without fs.watch. A bad edit keeps `ref.current` and logs `projects_reload_invalid`; a good one swaps it,
+ * so the next pickup resolves against the new membership. A job already past its pickup keeps the id it was given.
+ * The reason is the loader's message, which never quotes a project's `name` (projects.mjs).
+ */
+export function reloadProjects(config, ref, log) {
+	try {
+		ref.current = loadProjects(config);
+		log("projects_reloaded", { count: ref.current.length });
+	} catch (err) {
+		log("projects_reload_invalid", { reason: err?.message });
+	}
+}
+
+/**
+ * Watch the projects file (issue #499) as the scoped-limits watcher does: the directory, filtered to the one basename,
+ * debounced, the boot read as the arming baseline. The closer joins `extraClosers`, so the watch stops with the worker
+ * (DES-WATCHERS-CLOSE-WITH-THE-WORKER).
+ */
+function watchProjectsFile(config, ref, log, atBoot) {
+	const path = config.projectsFile;
+	const dir = dirname(path) || ".";
+	const file = basename(path);
+	const handles = { watcher: null, timer: null, closed: false };
+	const closer = makeWatchCloser(handles, log);
+	const readFile = () => readFileSync(path, "utf8");
+	readBeforeArming(handles, readFile, atBoot);
+	try {
+		handles.watcher = watch(dir, (_event, changed) => {
+			if (handles.closed) return;
+			if (changed && changed !== file) return;
+			clearTimeout(handles.timer);
+			handles.timer = setTimeout(() => reloadProjects(config, ref, closer.reloadLog), WATCH_DEBOUNCE_MS);
+		});
+		handles.watcher.unref?.();
+		log("projects_watching", { path });
+	} catch (err) {
+		log("projects_watch_unavailable", { reason: err?.message });
+	}
+	if (changedWhileArming(handles, readFile)) {
+		log("projects_reread_after_arming", { path });
+		reloadProjects(config, ref, closer.reloadLog);
+	}
+	return closer;
+}
+
+/**
  * The model-endpoints reload (issue #503), exported apart from its watcher for `reloadScopedLimits`' reason: the
  * last-good property is testable without fs.watch. A bad edit keeps `ref.current` and logs
  * `model_endpoints_reload_invalid`; a good one swaps it, so a `slots` edit applies to the next pickup.
@@ -456,6 +504,8 @@ export async function startWorker(
 		// The scoped-limits watcher, injectable so a test can see what it is armed with (PR #549's review: the cap
 		// thunk the reload warning reads). Production passes nothing and gets the real watcher.
 		watchScopedLimits: watchScopedLimitsFn = watchScopedLimitsFile,
+		// The projects watcher (issue #499), injectable for the same reason: a test sees it armed and closed.
+		watchProjects: watchProjectsFn = watchProjectsFile,
 	} = {},
 ) {
 	const config = loadConfigFn(env);
@@ -528,7 +578,7 @@ export async function startWorker(
 	// this race lives in is between these lines and the arming a thousand lines below -- the endpoint probe,
 	// forge auth, the reaper, Valkey -- not the microseconds around the arming itself, which is what a first
 	// attempt measured. `null` where a file is not configured, which reads as "nothing to compare".
-	const atBoot = { triggers: null, pauseWindows: null, scopedLimits: null, modelEndpoints: null };
+	const atBoot = { triggers: null, pauseWindows: null, scopedLimits: null, projects: null, modelEndpoints: null };
 	const recording = (into, path) => ({
 		readFileSync: (file, enc) => {
 			const text = readFileSync(file, enc);
@@ -546,6 +596,11 @@ export async function startWorker(
 	// Issue #242: same posture for the scoped-limits file -- fail-loud with the operator present, mutable
 	// ref for the live-reload watcher, [] when unset (the folder mutex is code and needs no file).
 	const scopedLimits = { current: loadScopedLimits(config, recording("scopedLimits", config.scopedLimitsFile)) };
+
+	// Issue #499: the projects file, same posture (INT-PROJECTS-FILE-CONTRACT): a bad file refuses boot with the operator
+	// present, a mutable ref for the live reload, [] when unset. The pickup gate reads it once per pickup, beside the
+	// limits snapshot, and the id it resolves there is the one the job's record carries.
+	const projects = { current: loadProjects(config, recording("projects", config.projectsFile)) };
 
 	// Issue #503: the declared model endpoints, same posture (INT-MODEL-ENDPOINTS-FILE-CONTRACT): a bad file refuses
 	// boot with the operator present, a mutable ref for the live reload, [] when there is no file. Read per pickup
@@ -1058,12 +1113,17 @@ export async function startWorker(
 	// would be bytes nothing reads. That is also what keeps a single-host deployment byte-identical, since
 	// no job then issues a single extra Valkey command.
 	const runMirror = config.workerNameDeclared ? makeRunMirrorFn({ redis, retentionDays: config.logRetentionDays, log }) : null;
-	const recordRun = ({ job, result, error, startedAt, endedAt }) => {
+	const recordRun = ({ job, result, error, startedAt, endedAt, project }) => {
+		// The project (issue #499) was resolved at the pickup gate and rides here as `project` (an id or null), so a live
+		// edit of projects.json mid-run cannot make the record disagree with what the job was counted against. A record
+		// path that ends BEFORE the pickup gate (the wait gate's refusals) passes none, and resolves from the live ref
+		// with the same function.
+		const projectId = project !== undefined ? project : projectOf(job?.data ?? {}, projects.current);
 		// The `host` is stamped HERE rather than inside the processor, which is what keeps every one of its
 		// four `recordRun` call sites byte-unchanged and `buildRecord` a pure function of its arguments.
 		// The default venue rides the same way and for the same reason (#277): it is the value the registry
 		// below is built with, so the record resolves a job's venue exactly as dispatch does.
-		const record = buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName, defaultBackend: config.defaultBackend });
+		const record = buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName, defaultBackend: config.defaultBackend, project: projectId });
 		writeRecord(record);
 		// STRICTLY AFTER the file, and deliberately not awaited. After, because a crash between the two must
 		// leave a record with no fleet row rather than a fleet row with no record -- the mirror is a VIEW,
@@ -1649,6 +1709,8 @@ export async function startWorker(
 		// Issue #242: the scoped-limits snapshot the pickup gate and the scoped budget read, once per
 		// pickup, from the live-reloaded ref -- same next-job grain as pauseUntil above.
 		scopedLimits: () => scopedLimits.current,
+		// Issue #499: the projects snapshot, read by the pickup gate once, beside the limits snapshot above.
+		projects: () => projects.current,
 		// Issue #230. The `after` ceiling is read per pickup from config rather than frozen into the
 		// processor, so it is one value with one home; the wait state shares the budget's redis client
 		// because it describes the same delayed jobs that client already reasons about.
@@ -1983,6 +2045,11 @@ export async function startWorker(
 			extraClosers.push(watchScopedLimitsFn(config, scopedLimits, log, atBoot.scopedLimits, deploymentMaxCostUsd));
 		}
 
+		// Issue #499 live edit: the projects file, keep-last-good on a bad edit.
+		if (config.projectsFile) {
+			extraClosers.push(watchProjectsFn(config, projects, log, atBoot.projects));
+		}
+
 		// Issue #503 live edit: the model endpoints, keep-last-good on a bad edit.
 		if (watchModelEndpoints) {
 			extraClosers.push(watchModelEndpointsFile(config, modelEndpoints, log, atBoot.modelEndpoints));
@@ -2042,6 +2109,8 @@ export async function startWorker(
 			softHoldPct: config.softHoldPct, // null when the soft-hold band is disabled
 			scopedLimitsFile: config.scopedLimitsFile, // null = no scoped caps/concurrency (the folder mutex holds regardless)
 			scopedLimits: scopedLimits.current.length, // row count -- money config deserves boot visibility; the watcher logs only changes
+			projectsFile: config.projectsFile, // issue #499: null = no projects
+			projects: projects.current.length, // project count, never a name
 			modelEndpoints: modelEndpoints.current.length, // issue #503: declared model endpoints, each a slot lease at pickup
 			image: config.jobImage,
 			valkey: config.valkeyUrl,

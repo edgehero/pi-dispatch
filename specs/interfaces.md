@@ -4444,7 +4444,8 @@ validator rather than a second copy of it.
     "dollars": { "reservedMicros": <int>, "settledMicros": <int>,                             // issue #501: integer micro-dollars
                  "basis": "metered" | "floor" | "refunded" | "unreserved",
                  "modelBasis": "metered" | "floor" | "refunded" | null } | null,              // modelBasis: how the model windows settled (#502 part 6); null = none held
-    "why":     "<fixed token: the refusal's detail, e.g. overlay-link under model-unknown>" | null }
+    "why":     "<fixed token: the refusal's detail, e.g. overlay-link under model-unknown>" | null,
+    "project": "<project id from projects.json, ^[a-z0-9][a-z0-9-]{0,31}$>" | null }   // issue #499; never the name
   ```
   **`attempt` is the 1-based ATTEMPT NUMBER** (decided in the issue #464 round): `1` for a job's first run, `2` for
   the queue's retry. Every record is written while the job is still processing, where BullMQ's `attemptsMade` counts
@@ -4553,6 +4554,17 @@ validator rather than a second copy of it.
   producer is a literal in `processor.mjs`, so the record stays PII-free by construction. A `why` starting
   `overlay-` names the deployment's overlay `models.json` as the problem, not the job's model, and its forge comment
   says so (`REQ-JOB-STATUS-COMMENTS`).
+
+  **`project` (issue #499) is the id of the job's project (`INT-PROJECTS-FILE-CONTRACT`), and is additive, nullable,
+  an explicit literal, and TAIL position** after `why`, UNCONDITIONAL like `host` and `why`. It is the ID only, never
+  the project's `name`: the name is free text and has no path into the record. ADMISSIBLE because it is
+  operator-authored and charset-checked, never payload, the argument `host` and `backend` make: the record keeps a
+  value only when it matches `^[a-z0-9][a-z0-9-]{0,31}$`, else `null`. It is resolved ONCE, at the pickup gate, from
+  one read of the projects file beside the scoped-limits snapshot, and carried to the record, so an edit of
+  `projects.json` while the job runs cannot make the record disagree with what the job was gated and counted
+  against. A record written BEFORE the pickup gate (the wait gate's refusals) resolves it from the live file with
+  the same function. `null` when no projects file is set, when the job's scope is in no project, and in every record
+  written before issue #499. Records are never re-attributed from current membership: an old record keeps `null`.
 
   **`dollar-cap`** (issue #501) is a pre-spend refusal: a dollar window had no room for the job's per-job cap. It is
   decided after both job-count reserves and before the container, gives back both job-count slots and every
@@ -5664,6 +5676,57 @@ validator rather than a second copy of it.
 
 ---
 
+## INT-PROJECTS-FILE-CONTRACT
+
+**operator → worker (and, from part C of issue #499, the admin extension).** A project is a named group of repos and
+folders. A job whose scope is a member belongs to that project, and its run record carries the project's id.
+
+- **Producer/Consumer**: the operator writes the file by hand (the admin's confirm-gated project tools come with part
+  C of issue #499). The worker reads it at boot, refusing to start on a file that does not load, and holds it in a
+  watched ref: a live edit that loads replaces it (`projects_reloaded`), one that does not keeps the last good copy
+  (`projects_reload_invalid`). The receiver does not read it. Those log events are telemetry, not contract. They name
+  a count or the loader's message, never a project's `name`.
+- **Location**: `PI_PROJECTS_FILE` (unset = no projects: the worker loads `[]` and every record's `project` is
+  `null`). An EMPTY value is NOT an unset one: the key is read with `??`, `loadProjects` runs on the empty path, and
+  the worker refuses to start, the rule `INT-SCOPED-LIMITS-FILE-CONTRACT` records for its own key. `pi-dispatch init`
+  scaffolds an empty `projects.json`, `pi-dispatch up` sets the key to it when the key has no value, and doctor
+  judges it as one of the boot files: it fails on an empty value and on a file the worker cannot load, and warns on a
+  scaffolded file the key does not name. The deployment pointer carries the key (`INT-DEPLOYMENT-POINTER-CONTRACT`).
+- **Shape**: `{ "version": 1, "projects": [ { "id", "name"?, "members" } ] }`. Validated by the shared parser
+  (`parseProjects`, `./projects`), fail loud. Unknown fields are dropped (the operator-file policy).
+  - `version` (required): integer >= 1, and a newer one is refused (`projects file written by a newer pi-dispatch`).
+    Which project a scope belongs to decides which project cap applies to it (part B of issue #499), so this is a
+    money file, and the version rule is the scoped-limits one for that reason.
+  - `id` (required): `^[a-z0-9][a-z0-9-]{0,31}$`. Lowercase and free of `:`, `#` and `/`, so it enters a run record
+    and a Valkey key without escaping. Two projects with one id refuse the file, naming both indexes.
+  - `name` (optional): display text, 1 to 120 characters, no control characters. It appears only in the panel. It
+    NEVER enters a record or a log line, and no refusal quotes it; a file that is not valid JSON is refused without
+    the parser's own message, which quotes file text.
+  - `members` (required, non-empty): scopes in the grammar of `parseScopeString` (issue #498). A forge member is
+    forge-qualified, `<kind>:owner/name`, and stored so. A local member is an absolute folder, stored resolved
+    (the spelling `canonicalScope` gives a local job, so `/srv/shop-tools/` and `/srv/shop-tools` are one member). A
+    BARE `owner/name` is refused: it names that repo on every forge, and this file has no legacy to keep. A relative
+    folder, a drive path on a host where it is not absolute, an unknown `<word>:` prefix and any scope containing
+    `*` are refused, because each would be a member no job's scope can equal. A member listed twice in one project
+    is refused.
+  - **One project per scope**: a scope claimed by two projects refuses the file, naming both ids. A job in two
+    projects would have two project ledgers and an unclear refusal. A weighted split is not offered.
+- **Resolution** (`projectOf(job, projects)`): a forge job is matched by its forge-qualified scope
+  (`qualifiedScopeOf`), never by its bare repo, so a GitHub job and a Forgejo job for `acme/web` can belong to
+  different projects; a local job by its resolved folder. The pickup gate reads the ref ONCE, beside the scoped-limits
+  snapshot, and the id it resolves there rides the job's life to the record (`INT-RUN-HISTORY-FILE-CONTRACT`,
+  `project`), so a live edit mid-run cannot make the record disagree with what the job was gated against. A record
+  written before the pickup gate (the wait gate's refusals) resolves from the live ref with the same function.
+- **Residuals**: records are never re-attributed from current membership, so an old record, and every record
+  written before issue #499, keeps `project: null`. Webhook triggers are not grouped by project: a webhook trigger
+  fires for whichever repo delivers, so only its runs are. The file is per host while counters are shared: hosts of
+  one fleet must carry the same file (a fingerprint comes with part C of issue #499). A symlinked folder and its
+  target are two members, as they are two scopes.
+- **Acceptance**: a job for a member scope records `project: "<id>"`, a non-member records `null`; a file claiming
+  one scope in two projects refuses to load, naming both ids; a bare member, a duplicate id, an empty `members` and
+  a newer `version` refuse to load; with `PI_PROJECTS_FILE` unset every record carries `project: null` and nothing
+  else changes; a live edit that does not load keeps the last good projects and logs `projects_reload_invalid`.
+
 ## INT-MODEL-ENDPOINTS-FILE-CONTRACT
 
 **operator → worker, and worker → egress proxy.** The local or LAN model servers (Ollama, vLLM, llama.cpp,
@@ -6117,19 +6180,21 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 - **Shape**: `{ "version": 1, "deploymentDir": "<abs>", "env": { … } }`. `version` (required):
   integer ≥ 1 — the one field that cannot be retrofitted. `env` is an **allowlisted map**:
   `VALKEY_URL`, `PI_LOGS_DIR`, `PI_SETTINGS_FILE`, `PI_TRIGGERS_FILE`, `PI_PAUSE_WINDOWS_FILE`,
-  `PI_SCOPED_LIMITS_FILE`, `PI_SUBSCRIPTIONS_FILE` (seven; this entry listed six and omitted the
+  `PI_SCOPED_LIMITS_FILE`, `PI_PROJECTS_FILE`, `PI_SUBSCRIPTIONS_FILE` (eight since issue #499 added the
+  projects key; this entry once listed six and omitted the
   scoped-limits key that `POINTER_ENV_ALLOWLIST` has always carried, corrected under issue #357 where the
   overlap with what `up` writes had to be counted exactly); every path value must be **absolute** (a relative value would resolve
   against whichever session happens to read it, i.e. silently wrong — dropped).
-- **What the wizard EMITS is four of those seven**, and the gap is deliberate rather than an oversight:
-  `PI_TRIGGERS_FILE`, `PI_PAUSE_WINDOWS_FILE`, `PI_SCOPED_LIMITS_FILE` and `PI_SUBSCRIPTIONS_FILE`.
+- **What the wizard EMITS is five of those eight**, and the gap is deliberate rather than an oversight:
+  `PI_TRIGGERS_FILE`, `PI_PAUSE_WINDOWS_FILE`, `PI_SCOPED_LIMITS_FILE`, `PI_PROJECTS_FILE` (issue #499) and
+  `PI_SUBSCRIPTIONS_FILE`.
   `PI_LOGS_DIR` and `PI_SETTINGS_FILE` are allowlisted and not written, because the pointer moves only the
   PANEL: pinning those two here would point the panel at a directory the worker's own environment may not
   share, which is the drift this file exists to prevent rather than create. Since issue #357 the other
   half of that pair is `pi-dispatch up` writing both into the deployment's `.env`, which is what the
-  WORKER reads. The two surfaces therefore overlap in exactly two keys (`PI_PAUSE_WINDOWS_FILE`,
-  `PI_SCOPED_LIMITS_FILE`) and agree on both by construction, since each derives the basename from the
-  deployment folder.
+  WORKER reads. The two surfaces therefore overlap in exactly three keys (`PI_PAUSE_WINDOWS_FILE`,
+  `PI_SCOPED_LIMITS_FILE`, and since issue #499 `PI_PROJECTS_FILE`) and agree on all three by construction, since
+  each derives the basename from the deployment folder.
 - **What it may never carry, enforced by the read-side allowlist**: credentials of any kind, and
   capability grants — `PI_DISPATCH_RUN_ROOTS` in this file has **no effect**, because a pointer that
   could widen the AI-run allowlist would be a second, unreviewed door to a capability the panel
@@ -6710,3 +6775,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-10-03 | Issue #500, part C. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_DISPATCH_CHILD_LEDGER` and `PI_DISPATCH_RUNNER_PID` are reserved (`RUNNER_ENV_NAMES`): the runner sets them inside the container for its child processes, `run.secrets` and `PI_FORWARD_ENV` refuse both, and `buildContainerEnv` deletes both after its loops. No mount, flag, capability token or exit code changes, checked; the ledger directory is made under the container's own `/tmp`. `INT-RUNNER-EXIT-CODE-PROTOCOL` and `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked: nothing folds a child's ledger into the exit line yet. **Code evidence**: worker/src/reserved-env.mjs -> RUNNER_ENV_NAMES; worker/src/config.mjs; worker/src/triggers.mjs; worker/src/env-allowlist.mjs -> buildContainerEnv. |
 | 2026-10-03 | Issue #500, part C, the review's fixes. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, wording only: the paragraph on `PI_DISPATCH_CHILD_LEDGER` and `PI_DISPATCH_RUNNER_PID` moved below the `CONTAINER_ENV_NAMES` paragraph it used to precede, so that paragraph's "Both" no longer reads as these two; the runner's `NODE_OPTIONS` addition is a `--require` of the child preload. No name, mount, flag or exit code changes. **Code evidence**: worker/src/reserved-env.mjs -> RUNNER_ENV_NAMES; image/runner/src/usage-meter.mjs -> openChildLedger. |
 | 2026-10-03 | Issue #500, part C, the second review. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, wording only: the runner's `NODE_OPTIONS` addition is an `--import` of the child preload again (the previous row's `--require` is superseded; `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` has why, and the residual that a Node older than 18.19 in a job does not start). No name, mount, flag or exit code changes. **Code evidence**: image/runner/src/usage-meter.mjs -> openChildLedger. |
+| 2026-10-03 | Issue #499, part A (the projects file and the record). **NEW `INT-PROJECTS-FILE-CONTRACT`**: `projects.json` (`PI_PROJECTS_FILE`, unset = no projects, an EMPTY value refuses the boot like its siblings), `{ version: 1, projects: [{ id, name?, members }] }` through the shared parser (`./projects`), a newer version refused, `id` on `^[a-z0-9][a-z0-9-]{0,31}$`, `name` display only and never in a record, a log line or a refusal (an invalid-JSON refusal drops the parser's own message, which quotes file text), members in the `parseScopeString` grammar (qualified forge scopes, absolute folders stored resolved; bare, relative, drive-on-POSIX, unknown-prefix and glob members refused), and refused across the file: a duplicate id, a scope in two projects (both ids named), a member listed twice, an empty `members`. Resolution by `qualifiedScopeOf` (a local job by its resolved folder), once at the pickup gate beside the limits snapshot, carried to the record; a record written before the gate resolves from the live file. Boot load, a watched ref with last good (`projects_reloaded`, `projects_reload_invalid`), the watch closed with the worker. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: a nullable tail field `project` after `why`, the id only, kept only when it matches the id pattern, null with no projects file, for a non-member and in every older record; records are never re-attributed. **`INT-DEPLOYMENT-POINTER-CONTRACT` AMENDED**: the allowlist gains `PI_PROJECTS_FILE` (eight keys), the wizard emits it (five of eight), and the overlap with what `up` writes is three keys. **`INT-SCOPED-LIMITS-FILE-CONTRACT` UNCHANGED, checked**: the `project:` prefix stays reserved and refused in both versions until part B; its keys, gate and deferral are what they were. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: projects ride their own file, not the overlay. **Code evidence**: worker/src/projects.mjs -> parseProjects, loadProjects, projectOf, isProjectId; worker/src/index.mjs -> makeProcessor; worker/src/start.mjs -> recordRun, reloadProjects, watchProjectsFile; worker/src/run-history.mjs -> buildRecord; worker/src/config.mjs -> projectsFilePath; worker/src/doctor.mjs -> BOOT_FILES, ENV_FILE_READABLE_KEYS; worker/src/up.mjs; worker/src/init.mjs -> EMPTY_PROJECTS; admin/src/deployment-pointer.mjs -> POINTER_ENV_ALLOWLIST; admin/src/read-model.mjs -> resolvePaths, PANEL_SERVICE_KEYS; admin/src/setup-wizard.ts; worker/test/projects.test.mjs; worker/test/project-pickup.test.mjs. |

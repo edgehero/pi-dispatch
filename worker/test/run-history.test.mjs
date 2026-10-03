@@ -277,9 +277,9 @@ test("the record carries a host, in tail position, and null when nobody named on
 	const withHost = buildRecord({ ...args, host: "mac-mini-1" });
 	const keys = Object.keys(withHost);
 	// `host` was the tail when it landed; `backend` (#277) took the tail after it, `dollars` (#501) after that, and
-	// `why` after that.
-	assert.equal(keys.at(-4), "host", "tail position when it landed: field order is the contract");
-	assert.equal(keys.length, 28);
+	// `why` after that, and `project` (#499) after that.
+	assert.equal(keys.at(-5), "host", "tail position when it landed: field order is the contract");
+	assert.equal(keys.length, 29);
 	assert.equal(withHost.host, "mac-mini-1");
 
 	// UNCONDITIONAL. `tokens`/`usage`/`session` set the precedent that null-with-the-key-present is this
@@ -302,7 +302,7 @@ test("the record names the RESOLVED venue in tail position, read from the job DA
 	const record = (job, over = {}) => buildRecord({ job, result: { outcome: "completed", exitCode: 0 }, ...at, ...over });
 
 	const unflagged = record(wrap(data), { defaultBackend: "local" });
-	assert.equal(Object.keys(unflagged).at(-3), "backend", "tail position when it landed; `dollars` (#501) and `why` took the tail after it");
+	assert.equal(Object.keys(unflagged).at(-4), "backend", "tail position when it landed; `dollars` (#501), `why` and `project` (#499) took the tail after it");
 	assert.equal(unflagged.backend, "local", "a trigger that names no venue records the default it resolved to, never an absent key");
 	assert.equal(record(wrap({ ...data, backend: "far" }), { defaultBackend: "local" }).backend, "far", "a named venue wins over the default");
 	assert.equal(
@@ -329,11 +329,12 @@ test("a deployment that never names a backend keeps the first twenty-five fields
 		"triggerIndex", "triggerType", "session", "host",
 	]);
 	// Byte-level: everything a pre-#277 reader parsed serialises identically, and the new fields are appended.
-	const { backend, dollars, why, ...before } = rec;
+	const { backend, dollars, why, project, ...before } = rec;
 	assert.equal(backend, "local");
 	assert.equal(dollars, null);
 	assert.equal(why, null);
-	assert.equal(JSON.stringify(rec), `${JSON.stringify(before).slice(0, -1)},"backend":"local","dollars":null,"why":null}`);
+	assert.equal(project, null, "no projects file: the new key is present and null");
+	assert.equal(JSON.stringify(rec), `${JSON.stringify(before).slice(0, -1)},"backend":"local","dollars":null,"why":null,"project":null}`);
 });
 
 test("parseExitTokens REBUILDS: a key the runner never had no reach into the record", () => {
@@ -1499,19 +1500,38 @@ test("the record's dollars (#501) is REBUILT from named fields: four keys, integ
 	assert.equal(rec({ reservedMicros: 1, settledMicros: 1, basis: "floor", modelBasis: "unreserved" }).modelBasis, null);
 	for (const bad of [undefined, null, "x", { reservedMicros: 1.5, settledMicros: 0, basis: "floor" }, { reservedMicros: 1, settledMicros: -1, basis: "floor" }, { reservedMicros: 1, settledMicros: 1, basis: "free" }]) assert.equal(rec(bad), null, JSON.stringify(bad));
 	assert.equal(buildRecord({ job, error: Object.assign(new Error("x"), { dollars: { reservedMicros: 1, settledMicros: 1, basis: "floor" } }) }).dollars.basis, "floor", "read off a throw too");
-	assert.equal(Object.keys(buildRecord({ job, result: { outcome: "completed" } })).at(-2), "dollars", "the tail when it landed; `why` took it after");
+	assert.equal(Object.keys(buildRecord({ job, result: { outcome: "completed" } })).at(-3), "dollars", "the tail when it landed; `why` and `project` took it after");
 });
 
 test("the record carries the refusal's why: a fixed token, in tail position, else null", () => {
 	const job = { id: "gh-1", name: "github", attemptsMade: 0, data: { kind: "github", repo: "acme/web", target: { number: 7 } } };
 	const rec = (result) => buildRecord({ job, result });
 	const refused = rec({ outcome: "policy", reason: "model-unknown", why: "overlay-link", budgetReserved: false });
-	assert.equal(Object.keys(refused).at(-1), "why", "the newest field takes the tail");
+	assert.equal(Object.keys(refused).at(-2), "why", "the tail when it landed; `project` (#499) took it after");
 	assert.deepEqual([refused.reason, refused.why], ["model-unknown", "overlay-link"]);
 	for (const why of ["overlay-not-a-file", "overlay-unreadable", "not-in-catalog", "fallback-unlisted"]) assert.equal(rec({ outcome: "policy", reason: "model-unknown", why }).why, why);
 	// Never a free string: the record stays PII-free by construction.
 	for (const bad of [undefined, null, 7, "", "Overlay", "/Users/rob/models.json", "a b", "x".repeat(65)]) assert.equal(rec({ outcome: "policy", reason: "model-unknown", why: bad }).why, null, JSON.stringify(bad));
 	assert.equal(rec({ outcome: "completed", exitCode: 0 }).why, null, "a run with no refusal detail");
+});
+
+test("the record carries the job's project id in tail position after why, charset-checked, never a name (#499)", () => {
+	const job = { id: "gh-1", name: "github", attemptsMade: 0, data: { kind: "github", repo: "acme/web", target: { number: 7 } } };
+	const rec = (project) => buildRecord({ job, result: { outcome: "completed", exitCode: 0 }, ...(project === undefined ? {} : { project }) });
+	const keys = Object.keys(rec("shop"));
+	assert.deepEqual(keys.slice(-2), ["why", "project"], "the newest field takes the tail, after why");
+	assert.equal(rec("shop").project, "shop");
+	assert.equal(rec("0-a").project, "0-a");
+	assert.equal(rec(undefined).project, null, "no project passed: the key is present and null");
+	assert.deepEqual(Object.keys(rec(undefined)), keys, "the key SET does not depend on a project");
+	// Only an id: a display name, a path, a forge scope or anything off the charset records null.
+	for (const bad of [null, "", "Webshop", "Web Shop", "shop:x", "/srv/shop", "github:acme/web", "x".repeat(33), 7, { id: "shop" }]) {
+		assert.equal(rec(bad).project, null, JSON.stringify(bad));
+	}
+	// buildRecord reads nothing off the job for it: a name riding on job data never reaches the record.
+	const named = buildRecord({ job: { ...job, data: { ...job.data, project: "shop", projectName: "Webshop" } }, result: { outcome: "completed" } });
+	assert.equal(named.project, null);
+	assert.ok(!JSON.stringify(named).includes("Webshop"));
 });
 
 test("parseExitCode: the LAST exit line's own integer code, else null; the sink reports it as exitLineCode (#501, PR #542 round 3)", async () => {

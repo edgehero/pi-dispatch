@@ -390,6 +390,12 @@ test("scoped-limits file is honored verbatim -- no default path, null means no s
 	assert.equal(c.scopedLimitsFile, "/abs/scoped-limits.json");
 });
 
+test("projects file is honored verbatim: no default path, null means no projects, and an empty value is kept (#499)", () => {
+	assert.equal(loadConfig({}).projectsFile, null);
+	assert.equal(loadConfig({ PI_PROJECTS_FILE: "/abs/projects.json" }).projectsFile, "/abs/projects.json");
+	assert.equal(loadConfig({ PI_PROJECTS_FILE: "" }).projectsFile, "", "?? keeps an empty value, so the boot load refuses it");
+});
+
 test("model-endpoints file: null means the deployment folder's model-endpoints.json, and an empty value is kept (#503)", () => {
 	assert.equal(loadConfig({}).modelEndpointsFile, null);
 	assert.equal(loadConfig({ PI_MODEL_ENDPOINTS_FILE: "/abs/eps.json" }).modelEndpointsFile, "/abs/eps.json");

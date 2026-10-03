@@ -5,8 +5,9 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { loadPauseWindows } from "../src/pause-windows.mjs";
 import { loadScopedLimits } from "../src/scoped-limits.mjs";
-import { pauseWindowsFilePath, scopedLimitsFilePath } from "../src/config.mjs";
-import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS } from "../src/init.mjs";
+import { loadProjects } from "../src/projects.mjs";
+import { pauseWindowsFilePath, projectsFilePath, scopedLimitsFilePath } from "../src/config.mjs";
+import { EMPTY_PAUSE_WINDOWS, EMPTY_PROJECTS, EMPTY_SCOPED_LIMITS } from "../src/init.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // FROM THIS FILE, not from the cwd. `npm test -w worker` runs the suite from `worker/`, where a bare
@@ -41,6 +42,7 @@ const repoFile = (rel) => readFileSync(join(REPO, rel), "utf8");
 const PAGES = [
 	{ path: "docs/pause-windows.md", key: "PI_PAUSE_WINDOWS_FILE" },
 	{ path: "docs/scoped-limits.md", key: "PI_SCOPED_LIMITS_FILE" },
+	{ path: "docs/projects.md", key: "PI_PROJECTS_FILE" },
 ];
 
 test("an EMPTY boot key survives the config read, so the page cannot say it reads as unset", () => {
@@ -57,6 +59,11 @@ test("an EMPTY boot key survives the config read, so the page cannot say it read
 	assert.throws(() => loadScopedLimits({ scopedLimitsFile: "" }), /does not exist/, "and the same for the spend file");
 	assert.deepEqual(loadPauseWindows({ pauseWindowsFile: null }), [], "while an ABSENT key really is the feature off");
 	assert.deepEqual(loadScopedLimits({ scopedLimitsFile: null }), []);
+	// Issue #499: the projects file is the third key with this rule.
+	assert.equal(projectsFilePath({ PI_PROJECTS_FILE: "" }), "");
+	assert.equal(projectsFilePath({}), null);
+	assert.throws(() => loadProjects({ projectsFile: "" }), /does not exist/);
+	assert.deepEqual(loadProjects({ projectsFile: null }), []);
 });
 
 test("the loaders accept what init scaffolds, or the pages' advice is wrong", () => {
@@ -70,6 +77,9 @@ test("the loaders accept what init scaffolds, or the pages' advice is wrong", ()
 	writeFileSync(scoped, EMPTY_SCOPED_LIMITS);
 	assert.deepEqual(loadPauseWindows({ pauseWindowsFile: pause }), [], "the scaffold loads to no windows");
 	assert.deepEqual(loadScopedLimits({ scopedLimitsFile: scoped }), [], "and to no limits");
+	const projects = join(dir, "projects.json");
+	writeFileSync(projects, EMPTY_PROJECTS);
+	assert.deepEqual(loadProjects({ projectsFile: projects }), [], "and to no projects");
 });
 
 test("both operator pages say doctor FAILS on an empty value, in the paragraph that describes it", () => {
@@ -124,12 +134,12 @@ test("the three spec entries carry the same two facts", () => {
 		const next = text.indexOf("\n## ", at + 1);
 		return text.slice(at, next === -1 ? undefined : next);
 	};
-	for (const heading of ["INT-PAUSE-WINDOWS-FILE-CONTRACT", "INT-SCOPED-LIMITS-FILE-CONTRACT"]) {
+	for (const heading of ["INT-PAUSE-WINDOWS-FILE-CONTRACT", "INT-SCOPED-LIMITS-FILE-CONTRACT", "INT-PROJECTS-FILE-CONTRACT"]) {
 		const body = entry("specs/interfaces.md", heading);
 		assert.match(body, /EMPTY value is not an unset one|an EMPTY value is NOT an unset one/i, `${heading}: states it`);
 		assert.match(body, /refuses to start/i, `${heading}: and what it costs`);
 	}
-	for (const heading of ["INT-PAUSE-WINDOWS-FILE-CONTRACT", "INT-SCOPED-LIMITS-FILE-CONTRACT"]) {
+	for (const heading of ["INT-PAUSE-WINDOWS-FILE-CONTRACT", "INT-SCOPED-LIMITS-FILE-CONTRACT", "INT-PROJECTS-FILE-CONTRACT"]) {
 		const body = entry("specs/interfaces.md", heading);
 		assert.doesNotMatch(body, /except at boot|the resolver drops an empty|starts with the feature off/i, `${heading}: and nothing takes it back a clause later`);
 	}

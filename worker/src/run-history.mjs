@@ -5,6 +5,7 @@ import { basename, join } from "node:path";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { isForgeKind, targetSeparator } from "./forges.mjs";
 import { MODEL_REF_PATTERN as USAGE_ID_PATTERN } from "./model-ref.mjs";
+import { isProjectId } from "./projects.mjs";
 
 /**
  * Durable per-run history.
@@ -479,7 +480,7 @@ function rebuildUsage(u) {
  * default to `null` when the outcome does not carry them, so the record shape is stable whether or not
  * the source reports those fields.
  */
-export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null }) {
+export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null, project = null }) {
 	const data = job.data ?? {};
 	const kind = data.kind ?? job.name;
 	const source = result ?? error ?? {};
@@ -602,6 +603,12 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// on the same contract. A token of the fixed charset (`WHY_RE`) or null, never a free string, so the record stays
 		// PII-free by construction; null for every reason that carries no detail.
 		why: typeof source.why === "string" && WHY_RE.test(source.why) ? source.why : null,
+		// The job's project (issue #499, INT-PROJECTS-FILE-CONTRACT). Additive, nullable, an explicit literal, TAIL position
+		// after `why` on the same contract. The project's ID only, never its `name`: the id is operator-authored and
+		// charset-checked (`PROJECT_ID_RE`), never payload, the argument `host` and `backend` make, so the record stays
+		// PII-free by construction; the name is free text and has no path here. Passed in, resolved at the pickup gate
+		// (start.mjs `recordRun`), so `buildRecord` stays pure. Anything that is not a well-formed id records null.
+		project: isProjectId(project) ? project : null,
 	};
 }
 
