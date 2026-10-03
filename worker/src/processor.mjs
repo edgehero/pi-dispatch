@@ -96,7 +96,7 @@ export const TERMINAL_COMMENTS = {
 	// Issues #501, #502. The two stops name the policy, never the amount or the model: both are operator
 	// configuration, and the comment's reader may be an issue author who can act on neither.
 	"cost-cap": "Stopped: the next AI call could have taken this run past its cost limit, so it was not made. Partial work may exist. Not retried.",
-	"model-not-allowed": "Stopped: the run tried to call an AI model this trigger does not allow, so the call was not made. Partial work may exist. Not retried.",
+	"model-not-allowed": "Stopped: the run tried to call an AI model this trigger does not allow, or to change an AI request in a way it does not allow, so the call was not made. Partial work may exist. Not retried.",
 	"cost-cap-unenforceable": "Stopped: this run has a cost limit, and the job image could not enforce it before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.",
 	"model-policy-unenforceable": "Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.",
 };
