@@ -1287,6 +1287,14 @@ test("keyless: PI_DISPATCH_KEYLESS is settled after the forward and secrets loop
 	assert.equal("PI_DISPATCH_KEYLESS" in keyed, false);
 });
 
+test("the runner's child-ledger names never reach a container from outside: a secret or a forwarded value is deleted (issue #500)", { skip }, () => {
+	const names = ["PI_DISPATCH_CHILD_LEDGER", "PI_DISPATCH_RUNNER_PID"];
+	const base = mod.buildContainerEnv({ ...secretsBase });
+	for (const name of names) assert.equal(name in base, false, `${name}: the worker never writes it`);
+	const smuggled = mod.buildContainerEnv({ ...secretsBase, hostEnv: { ...HOST, PI_DISPATCH_CHILD_LEDGER: "/workspace/l", PI_DISPATCH_RUNNER_PID: "1" }, forwardEnv: names, secrets: { PI_DISPATCH_CHILD_LEDGER: "/tmp/x", PI_DISPATCH_RUNNER_PID: "2" } });
+	for (const name of names) assert.equal(name in smuggled, false, `${name}: the backstop deletes it after both loops`);
+});
+
 test("PI_EXIT_AUTH names the stdin channel only when run-container hands a key over, and nothing else can set it (issue #545)", { skip }, () => {
 	assert.equal(mod.buildContainerEnv({ ...secretsBase, exitAuth: true }).PI_EXIT_AUTH, "stdin");
 	assert.equal("PI_EXIT_AUTH" in mod.buildContainerEnv({ ...secretsBase }), false, "absent by default, so a runner never blocks on a stdin no one writes");

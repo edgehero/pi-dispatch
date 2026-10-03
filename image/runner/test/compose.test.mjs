@@ -300,3 +300,17 @@ test("run-job refuses an unenforceable cost cap or model list after the meter in
 	assert.match(src, /meterStop: usageMeter\.ok \? meter\.state\.stopReason : null,/, "the exit decision reads the meter's stop by reason");
 	assert.match(src, /tokenAborted: usageMeter\.ok \? false : tokenBudget\.state\.aborted,/, "the flag is the fallback meter's alone");
 });
+
+test("run-job takes PI_EXIT_AUTH out of its environment right after reading the key, and opens the child ledger before the meter and before any extension (issue #500)", () => {
+	// Source-guard tactic. PI_EXIT_AUTH: every descendant inherits the runner's environment, and a nested copy of the
+	// runner (the stock subagent example spawns one) that saw it would drain a stdin that is not its own. The ledger:
+	// a child can be spawned from the first extension factory on, and the three variables must be in place by then.
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	assert.match(src, /\nconst exitKey = readExitKey\(process\.env\);\n(?:\/\/[^\n]*\n)*delete process\.env\.PI_EXIT_AUTH;\n/, "the delete is the next statement after the key read");
+	const ledger = src.indexOf("openChildLedger({ env: process.env, pid: process.pid, preloadUrl: new URL(\"./src/child-preload.mjs\", import.meta.url).href })");
+	assert.ok(ledger > 0, "the ledger is opened on the runner's own environment, with the preload beside it");
+	assert.ok(ledger < src.indexOf("await installProcessUsageMeter("), "before the meter installs");
+	assert.ok(ledger < src.indexOf("await buildLoadedResourceLoader("), "before any extension loads");
+	assert.ok(ledger < src.indexOf("await createAgentSession("), "before the session exists");
+	assert.match(src, /if \(childLedger\.error !== undefined\) log\("child_ledger_unavailable", \{ reason: childLedger\.error \}\);/, "a ledger that could not be opened is said, by code");
+});

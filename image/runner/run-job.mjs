@@ -47,6 +47,7 @@ import {
 	createUsageMeter,
 	installProcessUsageMeter,
 	meterStopHandler,
+	openChildLedger,
 	policyEnforcement,
 	resolvePiAiCompat,
 } from "./src/usage-meter.mjs";
@@ -93,6 +94,11 @@ let liveExitFields = () => ({});
 // the worker wrote it to stdin and closed it, and draining the pipe here is what leaves nothing in it for a tool to
 // read later. Read whatever happens next, so the catch path's line is signed too. No PI_EXIT_AUTH, no read.
 const exitKey = readExitKey(process.env);
+// And at once out of this process's environment (issue #500): every descendant inherits it, and a nested copy of this
+// runner (the stock subagent example spawns one) or any child that reads it as this runner does would drain a stdin
+// that is not its own, or wait on one no one writes.
+// env-internal PI_EXIT_AUTH: written by the worker into the job's closed env map, removed here once read.
+delete process.env.PI_EXIT_AUTH;
 const exitWriter = createExitWriter({
 	key: exitKey.key,
 	// env-internal PI_JOB_ID: set by the worker on the container, so the exit line can name its job.
@@ -214,6 +220,15 @@ async function main() {
 	// an extension factory runs inside the loader's reload(), and a model call it makes there, through a
 	// ModelRuntime of its own or pi-ai's legacy global stream functions, is already metered and judged. The
 	// session's first call is metered for the same reason.
+	// The child ledger (issue #500), opened BEFORE the meter installs and before any extension loads, because a child
+	// can be spawned from the first extension factory on. Every descendant inherits the directory, this runner's pid and
+	// a NODE_OPTIONS --import of the child preload, which meters a pi child in the child and reports through a file in
+	// the directory (openChildLedger). Not removed at exit: the container's filesystem goes with the container, and the
+	// parent's last fold reads the directory at teardown. With no directory the children are not pointed anywhere and a
+	// pi child runs unmetered; said here, by code only (a path never ships in a log).
+	const childLedger = openChildLedger({ env: process.env, pid: process.pid, preloadUrl: new URL("./src/child-preload.mjs", import.meta.url).href });
+	if (childLedger.error !== undefined) log("child_ledger_unavailable", { reason: childLedger.error });
+
 	const meter = createUsageMeter({
 		maxTokens: cfg.maxTokens,
 		maxCostMicros: cfg.maxCostMicros,

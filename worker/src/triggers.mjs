@@ -35,7 +35,7 @@ import { findDuplicateKey } from "./json-duplicates.mjs";
 import { validateModelRef } from "./model-ref.mjs";
 import { parseUsdMicros } from "./money.mjs";
 import { PROVIDER_STEERING_VARS } from "./provider-steering.mjs";
-import { CONTAINER_ENV_NAMES } from "./reserved-env.mjs";
+import { CONTAINER_ENV_NAMES, RUNNER_ENV_NAMES } from "./reserved-env.mjs";
 // The wait grammar's two shared halves (issue #230). `afterInstantMs` is imported rather than restated so
 // the loader and the pickup gate cannot disagree about what a legal instant is: a second spelling here is
 // how a file that loads clean starts holding for an instant nobody wrote. wait-for.mjs is pure and
@@ -234,7 +234,7 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * Every set is IMPORTED, never retyped, which is the rule `sandbox.test.mjs` keeps for the same reason: a
  * forge added to the table later must not need a second edit here to stay covered.
  */
-export const RESERVED_ENV_NAMES = new Set([...MINTED_TOKEN_VARS, ...FORGE_HOST_VARS, ...WORKER_ONLY_SECRET_VARS, ...EGRESS_ENV_VARS, ...CONTAINER_ENV_NAMES, ...PROVIDER_STEERING_VARS]);
+export const RESERVED_ENV_NAMES = new Set([...MINTED_TOKEN_VARS, ...FORGE_HOST_VARS, ...WORKER_ONLY_SECRET_VARS, ...EGRESS_ENV_VARS, ...CONTAINER_ENV_NAMES, ...RUNNER_ENV_NAMES, ...PROVIDER_STEERING_VARS]);
 
 function isNonEmptyString(value) {
 	return typeof value === "string" && value.trim() !== "";
