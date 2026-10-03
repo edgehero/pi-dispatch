@@ -237,7 +237,7 @@ const DJOB = { ...web, provider: "openai", model: "gpt-x", maxCostMicros: 2 * US
 const P_USD = projectDollarCapsFor(LIMITS, "shop");
 const P_USD_DAY = `${P_USD.keyPrefix}:2026-07-16`;
 const D_DAY = "budget:usd:2026-07-16";
-const TOKENS = (cost) => ({ input: 10, output: 5, total: 15, cost, calls: 2, metered: true, unresolved: 0, unpriced: 0, costCapMicros: 2 * USD, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0 });
+const TOKENS = (cost) => ({ input: 10, output: 5, total: 15, cost, calls: 2, metered: true, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costCapMicros: 2 * USD, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0 });
 const ROW = (provider, model, cost) => ({ provider, model, calls: 1, input: 5, output: 2, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 7, cost, unpriced: 0 });
 const MODEL = { ref: "openai/gpt-x", keyPrefix: "budget:usd:mdl:feedfacefeedface", caps: { day: 100 * USD, week: null, month: null } };
 const ranFor = (cost, modelCost) => async () => ({ code: 0, aborted: false, exitLineCode: 0, tokens: TOKENS(cost), usage: { v: 1, piAi: null, truncated: 0, models: [ROW("openai", "gpt-x", modelCost)] } });

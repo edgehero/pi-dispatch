@@ -17,10 +17,13 @@
  *        NODE_OPTIONS: a ledger named after its pid is then not its own (a spawner can write one), whatever it says;
  *      - no ledger names its pid two ticks after it was first seen, if it is still alive then, whether or not it still
  *        looks like a pi process (a title can be changed after the fact);
- *      - it was seen alive and no ledger ever named it, counted at teardown;
+ *      - it was seen alive and no ledger ever named it: counted at teardown, when this parent first saw it
+ *        NO_LEDGER_FINAL_MS or more before;
  *      - its ledger is still `starting` (its meter never installed) after STARTING_CPU_MS of the process's own CPU, or
- *        STARTING_WALL_MS since this parent first saw it; an honest child installs at about 0.3 s of CPU. Un-counted once
- *        it is no longer `starting`. At teardown, a live `starting` ledger seen for two ticks or more is unmetered.
+ *        STARTING_WALL_MS since this parent first saw it; an honest child installs at about 0.3 s of CPU, and was seen
+ *        at 0.67 s under load on arm64. Un-counted once it is no longer `starting`. At teardown, a live `starting`
+ *        ledger is unmetered only when this parent first saw it STARTING_FINAL_MS or more before: an honest job that
+ *        ends while fresh children start must not fail for them.
  *        A `starting` ledger of a DEAD process is done only when it was seen for less than the wall grace, used less
  *        than the CPU grace, and holds zero spend; otherwise it is unmetered. Judged once, when the file is retired.
  *   3. JUDGE. The fold goes to meter.setChildren with `unmetered` and `processes` widened by what the detector found
@@ -54,12 +57,28 @@ import { PI_ENTRIES, RUN_JOB_PATH } from "./child-route.mjs";
 import { COST_CAP, MODEL_NOT_ALLOWED, TOKEN_BUDGET } from "./outcome.mjs";
 import { foldChildLedgers, SPENT_FILE, spentFile, STOP_FILE, stopFile, writeFileAtomic } from "./usage-meter.mjs";
 
-/** How much CPU a process may use with its ledger still `starting`: an honest child installs its meter at about 0.3 s. */
-export const STARTING_CPU_MS = 1_000;
+/**
+ * How much CPU a process may use with its ledger still `starting`. An honest child installs its meter at about 0.3 s of
+ * CPU (five runs) and reached 0.67 s under load on arm64, so 1 s left too little room; 3 s still catches a meterless
+ * child that works (the lab's caught at 2 s and climbing).
+ */
+export const STARTING_CPU_MS = 3_000;
 /** How long, from this parent's first sight, a live ledger may stay `starting`, CPU or not (monotonic). */
 export const STARTING_WALL_MS = 60_000;
+/**
+ * At teardown, how long before it this parent must have first seen a live ledger `starting` for it to count as
+ * unmetered: the M5 grace (OQ-011), from the preload's stub to the meter's install. A child that started in the job's
+ * last seconds has not had the time an honest one needs, and the job's exit must not fail for it.
+ */
+export const STARTING_FINAL_MS = 10_000;
 /** How many ticks a pi process may live with no ledger before it is unmetered. */
 export const NO_LEDGER_TICKS = 2;
+/**
+ * At teardown, how long before it this parent must have first seen a pi process with no ledger for it to count as
+ * unmetered: two ticks. An honest child's preload writes its stub about 13 ms after spawn (M5), so a child seen only
+ * in its first moments, by the final pass or by the last tick, must not fail the job.
+ */
+export const NO_LEDGER_FINAL_MS = 2_000;
 /** The command-line titles pi gives itself (setupCli: `pi`; the rpc entries: `pi-rpc`). */
 export const PI_TITLES = Object.freeze(["pi", "pi-rpc"]);
 /** How much of a command line is read: the markers sit in argv[0] and argv[1]. */
@@ -275,14 +294,16 @@ export function createChildWatch({
 	let peak = 0;
 	/** pid -> the tick it was first seen alive as a pi process. */
 	const seen = new Map();
+	/** pid -> when (monotonic) it was first seen alive as a pi process. */
+	const seenAt = new Map();
 	/** pids seen with no ledger yet, still to be judged. */
 	const pending = new Set();
 	/** pids of pi processes judged unmetered by the detector. */
 	const noLedger = new Set();
 	/** pid -> whether its environment carries this job's ledger directory (null: unreadable). */
 	const environ = new Map();
-	/** ledger name -> `{ first, last, firstTick, cpu }` while it is `starting` and alive: when this parent first and last
-	 *  saw it so (monotonic), the tick of the first sight, and the most CPU its process was seen to have used. */
+	/** ledger name -> `{ first, last, cpu }` while it is `starting` and alive: when this parent first and last
+	 *  saw it so (monotonic), and the most CPU its process was seen to have used. */
 	const starting = new Map();
 	/** ledger names held `starting` past a grace, or dead `starting` judged unmetered. Counted whether tracked or retired. */
 	const stuck = new Set();
@@ -460,6 +481,7 @@ export function createChildWatch({
 		for (const pid of live) {
 			if (!seen.has(pid)) {
 				seen.set(pid, ticks);
+				seenAt.set(pid, now());
 				if (!ledgered.has(pid)) pending.add(pid);
 			}
 			if (needle !== null && !noLedger.has(pid)) {
@@ -473,7 +495,10 @@ export function createChildWatch({
 				continue;
 			}
 			if (final) {
-				unmeteredPid(pid, "no-ledger");
+				// Only one first seen NO_LEDGER_FINAL_MS or more ago: a pid seen just now, or by the last tick in its first
+				// milliseconds, may be an honest child whose preload has not written the stub yet (the `starting` rule's
+				// shape, a time floor rather than a pass count, part F's review).
+				if (now() - seenAt.get(pid) >= NO_LEDGER_FINAL_MS) unmeteredPid(pid, "no-ledger");
 				continue;
 			}
 			// Still alive two ticks on, whether or not it still looks like pi: a title can be changed after the fact.
@@ -489,11 +514,11 @@ export function createChildWatch({
 			if (entry.unmetered || stuck.has(name)) continue;
 			// Dead ones were judged at retirement (the fold above); this one lives.
 			const at = now();
-			const info = starting.get(name) ?? { first: at, last: at, firstTick: ticks, cpu: 0 };
+			const info = starting.get(name) ?? { first: at, last: at, cpu: 0 };
 			info.last = at;
 			if (typeof proc.cpuMs === "function") info.cpu = Math.max(info.cpu, proc.cpuMs(entry.pid) ?? 0);
 			starting.set(name, info);
-			const tooLong = info.cpu > STARTING_CPU_MS || at - info.first > STARTING_WALL_MS || (final && ticks - info.firstTick >= NO_LEDGER_TICKS);
+			const tooLong = info.cpu > STARTING_CPU_MS || at - info.first > STARTING_WALL_MS || (final && at - info.first >= STARTING_FINAL_MS);
 			if (tooLong) {
 				note("starting", entry.pid);
 				stuck.add(name);

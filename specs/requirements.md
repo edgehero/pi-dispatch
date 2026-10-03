@@ -844,7 +844,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   admitted, and a sixth is refused `dollar-cap` before its container starts with its job-count slots and dollars
   given back; given a finished job whose metered cost is complete, then its windows show that cost, not its
   reservation, and an overshoot above the reservation is charged in full; given a job with no exit line, or any of
-  `unresolved`, `unpriced`, `boundExceeded`, `longContext`, `costUnjudged`, `costUnanswered` non-zero or absent,
+  `unresolved`, `unpriced`, `boundExceeded`, `longContext`, `costUnjudged`, `costUnanswered`, `unmeteredChildren`
+  non-zero or absent,
   then it settles at the floor, `basis: "floor"`, charging its reservation or the reported metered cost, whichever is
   larger; given a run that made no provider call (the first call refused by the guard, a command job, an early
   exit), then it settles metered at 0; given a job reserved at 23:59:59 UTC that settles after
@@ -1077,7 +1078,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   a provider (zero usage, `stopReason: "aborted"` so pi's own retry does not fire). The cap remains
   structurally **lagging** either way, and the ultimate backstop stays `REQ-JOB-TIMEOUT-30M`.
   **Child processes (issue #500).** A **`pi` subprocess** has its own copy of pi, so no in-process hook in the
-  runner sees its calls; pi's own SDK example spawns one. Each pi child now meters itself and reports through a
+  runner sees its calls. pi's stock subagent example spawns one; in a job it spawns the runner itself, which now
+  runs as a metered pi CLI and never runs the job again. Each pi child now meters itself and reports through a
   ledger file, and the runner folds those files into the job's totals every second and at teardown: the totals
   include the children, `childTotal` keeps `rootTotal + otherTotal + looseTotal + childTotal` equal to `total`, and
   the token cap, the cost cap and the model list are judged on the job as a whole (the parent's list, whatever a
@@ -1087,7 +1089,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `token_budget`, else `model-not-allowed`); an uncapped job records the floor and runs on. Cooperative accounting,
   not a boundary: the agent holds the provider key and can call the API directly or tamper with the files, and
   the rules make that fail toward a floor or an overcharge (`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` names the
-  residuals). Tracked at `OQ-011`.
+  residuals). The run record keeps `childTotal`, `childProcesses` and `unmeteredChildren` (issue #500 part F), and
+  a dollar window settles a job at the floor unless its `unmeteredChildren` is present and 0. Resolved at `OQ-011`,
+  which keeps the residual.
 - **Traces to**: `OQ-010`, `OQ-011`, `REQ-RUNNER-TURN-BUDGET`, `REQ-UPSTREAM-CONTRACT-TESTS`,
   `CONST-BUDGET-BEFORE-TOKENS`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-RUN-HISTORY-FILE-CONTRACT`,
   `INT-CONFIG-OVERLAY-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-SDK-SESSION-OPTIONS`,
@@ -1116,7 +1120,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   the cap; given two sessions calling at once, then each is judged against the other's bound while it is in
   flight; given `session.compact()` as the call that would pass the cap, then it is refused the same way; given
   a cap of `0`, then a zero-rated model runs and a priced one is refused before its first call; given no cap,
-  then no guard is installed and the exit line carries none of the cost counters. Given a per-job cap below one full-output
+  then no guard is installed and the exit line carries none of the cost counters.
+  **Child clauses (issue #500).** Given a parent and a pi child CLI whose tokens together pass `maxTokens`, then a
+  `STOP` file appears and the child's next call is braked, and the run exits `2` with `token_budget`; given the
+  same under a cost cap, then `cost-cap`; given a pi child spawned with `env: {}` under a cap, on Linux, then
+  `unmetered_child` is logged and the run stops; given an uncapped job with such a child, then it runs on and its
+  record carries `unmeteredChildren` above 0; given any metered exit line, then `rootTotal + otherTotal +
+  looseTotal + childTotal === total`, and the worker keeps all three child keys in the record, byte-identical;
+  given `unmeteredChildren` above 0 or absent under a dollar cap, then the job settles at the floor. Given a per-job cap below one full-output
   call of a job's main model or of a model on its list (the model's output limit at its output rate, plus the
   runner's 8,192-token overhead and a 4,096-byte first request at its dearest input rate, times the runner's
   service-tier multiplier, a lower bound of the runner's own bound), then `pi-dispatch doctor` warns, naming the model, the amount and the cap; with the default
@@ -1146,8 +1157,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   renders `$0 (unrated)`, **never the word "free"**;
   (c) an estimate is **always visibly marked** (`~`/`est.`/`seeded`) and never silently mixes with
   metered numbers — a sum containing one estimated addend is itself marked estimated, with its coverage;
-  (d) a floor (`unpriced`/`unresolved`/fallback-metered/pre-meter records) renders `≥`, and the marker is
-  never dropped by aggregation;
+  (d) a floor (`unpriced`/`unresolved`/fallback-metered/pre-meter records, and since issue #500 part F a run
+  with `unmeteredChildren`, `longContext`, `costUnjudged` or `costUnanswered` above 0) renders `≥`, and the marker
+  is never dropped by aggregation;
   (e) a quota window whose vendor discloses no limit shows **facts only** (peak runs/tokens) — never an
   invented burn-down or "remaining";
   (f) what-if seeding uses the flow's own **measured median** first and the `OQ-002` `$0.5–$5/job` band
@@ -1164,8 +1176,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   each model spent (`REQ-TOKEN-ACCOUNTING-AND-CAPS`) and pricing stays pi-ai's
   (`INT-PRICING-EXPORT-CONTRACT`) — pi-dispatch still owns no rate table.
 - **Scope**: Read-only over the run history and operator declarations; bounded by retention and the
-  92-day scan cap; the residual unmetered `pi`-subprocess spend (`OQ-011`) makes every total a floor and
-  is surfaced, not hidden.
+  92-day scan cap. A `pi` subprocess that cooperates is metered into its run's numbers (issue #500), and one the
+  runner could not meter makes its run a floor, surfaced, not hidden. What no total can see is the residual
+  `OQ-011` keeps: a child that hides from the meter and the detector, a non-pi client, a direct API call.
 - **Traces to**: `REQ-TOKEN-ACCOUNTING-AND-CAPS`, `REQ-ADMIN-VIA-PI-EXTENSION`,
   `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-SUBSCRIPTIONS-FILE-CONTRACT`, `INT-PRICING-EXPORT-CONTRACT`,
   `DES-COST-FOLD-BY-SCAN`, `DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY`,
@@ -1193,7 +1206,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   trigger table that looks exhaustive; given runs recorded under project `shop`, a run with no project and a
   run recorded before projects existed, then `byProject` folds the first under `shop` and the other two under
   `(no project)`, a fold over the id `constructor` keeps its own row, and `dispatch_costs` with `project: shop`
-  scopes every fold arm to the first run.
+  scopes every fold arm to the first run; given a run whose `unmeteredChildren` is above 0, then its dollar and
+  every bucket holding it render `≥`, while a run with metered children only (`childTotal` above 0,
+  `unmeteredChildren` 0) or with no child keys at all is not a floor for that.
 
 ## REQ-TOPOLOGY-GRAPH
 
@@ -1595,9 +1610,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `onPayload`) is DENY BY DEFAULT: it may change only the top-level messages, system prompt and sampling settings,
   and any other change to the request, at any depth, refuses the call before it is sent (a field set to `undefined`
   counts as absent). A listed fallback that answers is logged.
+  A `pi` subprocess is inside the list since issue #500: each pi child judges its own calls by a guard built from
+  the list it inherits, and the runner judges every child's folded usage against the job's own list and stops the
+  job `model-not-allowed` on a call off it. A pi child it finds with no ledger (Linux) stops the job
+  `model-not-allowed` under a model list alone; under a dollar cap the stop is `cost-cap`, else under a token cap
+  `token_budget`.
   Out of scope, named as residuals in `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER`: code that reaches a provider
-  around pi's model runtime, a listed model sent to another `baseUrl` (the egress proxy's job), and a `pi`
-  subprocess.
+  around pi's model runtime, a listed model sent to another `baseUrl` (the egress proxy's job), and a pi child
+  that hides from the child meter and the detector (`OQ-011`).
 - **Why**: An unknown model used to cost a container and a budget slot to discover (the runner asked pi,
   after both reserves, and exited 2). A model choice that is only a preference lets a cheap triage trigger
   chain a child on the deployment's dearest model, and a deployment that must never reach a model had no
@@ -2971,6 +2991,9 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-03 | Issue #500, part F, PR #570's second review. **`REQ-MODEL-POLICY` AMENDED, wording only**: a pi child found with no ledger stops the job `model-not-allowed` only under a model list alone; under a dollar cap the stop is `cost-cap`, else under a token cap `token_budget`. |
+| 2026-10-03 | Issue #500, part F, PR #570's review. **`REQ-MODEL-POLICY` AMENDED**: a `pi` subprocess is no longer out of scope. Each pi child judges its own calls by a guard built from the list it inherits, and the runner judges every child's folded usage against the job's own list and stops `model-not-allowed` on a call off it or on a pi child with no ledger (Linux). What stays out is a pi child that hides from the child meter and the detector (`OQ-011`). |
+| 2026-10-03 | Issue #500, part F (closes #500). **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**: the child processes paragraph corrects 'pi's own SDK example spawns one' (in a job it spawns the runner, which now runs as a metered pi CLI), says the record keeps the three child keys and a dollar window floors unless `unmeteredChildren` is present and 0, and that `OQ-011` is resolved with its residual; new Child clauses in Acceptance (STOP past `maxTokens`, `cost-cap`, an `env: {}` child, an uncapped job, the partition, the worker keeping the keys, the floor). The compaction sentence #510 added (`otherTotal`, fresh session id) is UNCHANGED, checked. **`REQ-COST-ANALYTICS` AMENDED**: rule (d) adds a run with `unmeteredChildren`, `longContext`, `costUnjudged` or `costUnanswered` above 0 to the floors; the Scope's stale claim that pi-subprocess spend is unmetered and makes every total a floor is replaced by what is metered, what floors and what `OQ-011` keeps; an Acceptance clause for the child floor. **`REQ-SPEND-CAPS-MULTI-WINDOW` AMENDED**, Acceptance only: `unmeteredChildren` joins the floor counters. |
 | 2026-10-03 | Issue #499, part C (the operator surfaces). **`REQ-COST-ANALYTICS` AMENDED**: the fold groups spend per project too, keyed by the `project` id each run record carries, with a `(no project)` bucket for runs outside every project and for runs recorded before projects existed (never re-attributed from the projects file as it is now); `dispatch_costs` gains a `project` filter applied at the records level, so every fold arm scopes; the Acceptance gains the clause (a `constructor` id keeps its own row, because the fold is a Map). **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: the model-callable list gains the read `dispatch_projects` and the confirm-gated writes `dispatch_project_add`, `dispatch_project_edit` and `dispatch_project_delete` (the wiring scan holds the list); the Statement says what the panel shows (the `j` projects view with members and spend, the runs filter, the project on a run row and in the drill-in, the member count or missing mark on a `project:<id>` limits row), that the writes refuse while `PI_PROJECTS_FILE` is unset and while a scoped-limits row names a project they would remove, and that a name is escaped and isolated wherever it renders and never logged; the Why says why a project write is confirm-gated (moving a repo out of a capped project widens what it may spend); the Acceptance gains five clauses. **`REQ-SCOPED-LIMITS` UNCHANGED, checked**: enforcement did not move; the panel only reads the rows. Residuals stated in `INT-PROJECTS-FILE-CONTRACT` and `docs/projects.md`: old records fold into `(no project)` and are never re-attributed, one project per scope, webhook triggers are not grouped, the project is per attempt. **Code evidence**: admin/src/costs.mjs -> buildByProject, recordInProject; admin/src/index.ts -> dispatch_projects, dispatch_project_add, dispatch_project_edit, dispatch_project_delete, dispatch_costs; admin/src/dashboard.ts -> projectsView. |
 | 2026-10-03 | Issue #499, part B (project rows). **`REQ-SCOPED-LIMITS` AMENDED**: a Project rows bullet (a `project:<id>` row, version 2 in every field, caps every member of a project as one, with job counts refused `project-cap`, `concurrent` deferring, and dollar windows refused `dollar-cap`; reserve narrowest first, repo or folder row, project row, global, and every refund gives back every ledger still held; a row naming a missing project refuses the start) and the matching Acceptance. UNCHANGED, checked: `REQ-ADMIN-VIA-PI-EXTENSION` (no tool added; `dispatch_limit_add`'s description names project rows and `project-cap`), `REQ-COST-ANALYTICS` (the per-project fold is part C). Code evidence: `worker/src/scoped-limits.mjs`, `worker/src/budget.mjs`, `worker/src/processor.mjs`, `worker/src/index.mjs`, `worker/src/start.mjs`; tests `worker/test/processor-projects.test.mjs`, `scope-mutex.test.mjs`, `start-wiring.test.mjs`. |
 | 2026-10-03 | Issue #500, part E: the parent's fold, STOP and detector. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**, the residual-gap paragraph becomes Child processes: a pi child's ledger is folded into the job's totals every second and at teardown (`childTotal` keeps the four-part split equal to `total`), the token cap, the cost cap and the PARENT's model list are judged on the job as a whole, a stop reaches children through `STOP`, and a pi child with no ledger is unmetered: a floor (`unmeteredChildren`), and under any policy a stop (`cost-cap`, else `token_budget`, else `model-not-allowed`); an uncapped job records the floor only. The old sentence (diagnostic sampling, a fix that needs TLS termination) is withdrawn. The compaction sentence (`otherTotal`, fresh session id) is UNCHANGED, checked. **Code evidence**: image/runner/src/child-watch.mjs -> createChildWatch, linuxProc, isPiProcess; image/runner/run-job.mjs; image/runner/test/child-watch.test.mjs; image/runner/test/child-watch.integration.test.mjs. |

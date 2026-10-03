@@ -488,27 +488,53 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
 
 ## OQ-011 — A package that spawns a `pi` SUBPROCESS is unmetered
 
-- **Status**: **ACCEPTED RISK** — *wants explicit ratification*
-- **Position**: v1 ships with **in-process** token accounting. The process-wide meter
-  (`REQ-TOKEN-ACCOUNTING-AND-CAPS`) covers every session created inside the runner's own Node process,
-  which is the fanout an extension normally produces. It cannot see a **child process**: a staged package
-  that shells out to the `pi` binary gets its own Node process, its own pi-ai module registry, and its own
-  provider calls, none of which pass through anything the runner wrapped. Those tokens are spent, billed,
-  and absent from both the exit line and the daily token counter. This is not hypothetical. pi's own subagent
-  example spawns a child process, so it is the pattern a package author is most likely to copy. In a job that
-  child is not `pi` but a second runner (corrected below, measured 2026-10-03).
-- **Why it is a risk row and not a constraint**: no hook in the runner's own process can close it. A
-  constraint that ships unenforced is worse than an honest open risk — it teaches readers that the
-  constitution is aspirational, which corrodes every other entry in it. The same reasoning that put
-  `OQ-004` here rather than in `constitution.md`.
-- **What detection ships today** (corrected 2026-10-03, issue #500 part E: this bullet described the diagnostic
-  sampler, which the runner no longer uses). The runner's children hook (`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`)
-  folds every pi child's ledger into the job's totals and, on Linux, scans `/proc` for pi processes that report
-  through no ledger. Such a child is counted in `unmeteredChildren` and, under any policy, STOPS the job (`cost-cap`,
-  else `token_budget`, else `model-not-allowed`): detection can now fail a job, by design. The teardown line carries
-  `distinct`, `peak` and `unmetered`. The rest of this row is re-decided in part F.
-- **What would close it**: a container-level egress proxy that **terminates TLS** and accounts provider
-  traffic per container rather than per process. Reading usage off a subprocess needs to read its HTTP, and
+- **Status**: **RESOLVED 2026-10-03 (issue #500)** for the cooperative path: a `pi` child process is metered. What
+  is left is narrower, named below, and stays an accepted risk that *wants explicit ratification*. The heading
+  keeps its old wording so links to it still work; it is no longer true of a pi child that keeps the job's
+  environment.
+- **Decision (issue #500, parts A to F)**: subprocess metering through the child's own pi, not through the
+  network. Each piece is in `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`:
+  - **a preload.** The runner puts `--import=<child-preload.mjs>` in `NODE_OPTIONS` and a job-local ledger
+    directory in `PI_DISPATCH_CHILD_LEDGER`, so every Node child inherits both. In a pi CLI child the preload puts
+    `-e <child meter>` first in its arguments; in a child that runs pi as a library a resolve hook wraps pi's
+    `ModelRuntime` module;
+  - **a child meter.** Inside the child it installs the runner's own meter on the child's own `ModelRuntime`, with
+    the job's model list and cost cap, and writes a ledger file before every call and after it;
+  - **ledgers.** One file per child, written whole by rename, folded by rules that make a deleted, shrunk, forged or
+    unreadable file count as unmetered;
+  - **the parent's fold.** Every second and at teardown the runner folds the ledgers into its own totals (the exit
+    line's `childTotal`, `childProcesses`, `unmeteredChildren`, and the per-model rows), writes `SPENT` and `STOP`,
+    and stops the job on parent plus children past a token cap, a cost cap or the model list;
+  - **the detector.** On Linux it scans `/proc` for pi processes that report through no ledger. Such a child is
+    counted in `unmeteredChildren`: under a dollar cap it stops the job `cost-cap`, else under a token cap
+    `token_budget`, else under a list `model-not-allowed`; an uncapped job records a floor only;
+  - **the nested runner.** pi's stock subagent example spawns the runner itself (M1 below). That child now runs as
+    the pi CLI it was spawned to be, metered, and never runs the job again;
+  - **the worker and the panel** (part F). The worker keeps the three keys in the run record, and a non-zero or
+    absent `unmeteredChildren` settles a dollar window at the floor (`DES-DOLLAR-RESERVE-AND-SETTLE`). The cost
+    views show such a run as a floor (`REQ-COST-ANALYTICS`).
+- **What stays an accepted risk** (each named in `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`): the ledger is
+  cooperative accounting, not a boundary. The agent holds the provider key and shares the runner's uid. These are
+  not counted: a pi CLI child whose spawner scrubs the environment and also leaves no marker in its command line
+  (pi started through `node -e` or a copy of the package, with its title kept from changing); a child that runs pi
+  as a LIBRARY whose spawner clears `NODE_OPTIONS` (its command line never names pi, so clearing the environment
+  alone hides it); a renamed copy of pi; a meterless child that ends before either `starting` grace (under 3 s of
+  CPU and 60 s) and before teardown; a client that is not pi; a direct API call; and a forged small ledger kept
+  rewritten. Children may
+  overshoot a cap by up to a tick of headroom each, charged in full. The detector reads `/proc`, so off Linux there
+  is none. Children do not see the overlay `models.json` (#503).
+- **Why this row was a risk and not a constraint** (kept, and narrowed): no hook in the runner's own process can
+  meter a child. That stays true. The correction below is that a hook in the CHILD can, because the child is the
+  same pinned pi in the same container and inherits an environment the runner controls.
+- **What detection ships** (corrected 2026-10-03, issue #500 part E: this bullet described the diagnostic sampler,
+  which the runner no longer uses). The runner's children hook folds every pi child's ledger into the job's totals
+  and, on Linux, scans `/proc` for pi processes that report through no ledger. Such a child is counted in
+  `unmeteredChildren` and, under any policy, STOPS the job (`cost-cap`, else `token_budget`, else
+  `model-not-allowed`): detection can now fail a job, by design. The teardown line carries `distinct`, `peak` and
+  `unmetered`.
+- **What would close the rest**: a container-level egress proxy that **terminates TLS** and accounts provider
+  traffic per container rather than per process. Issue #500 did not build it: it would count the non-pi client and
+  the direct API call, which the ledger cannot, at the price of provider plaintext in a host process. Reading usage off a subprocess needs to read its HTTP, and
   reading its HTTP needs TLS termination; there is no cheaper version of this for **accounting**. Worth
   adding, because it is the strongest argument for the eventual mechanism and nobody had written it down: a
   header cannot be injected into a `CONNECT` tunnel without terminating it either, so the secrets-injecting
@@ -521,8 +547,9 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   three lines up was being rewritten around it. So the **closes-with-`OQ-004`** coupling is struck.
 - **What the graduation actually changed for this row: nothing, on the accounting axis.** A subprocess `pi`
   spends against the **provider host**, which is on the allowlist by necessity because every job needs it,
-  so the allowlist cannot bound whether it spends, how much, or record that it did. The child-process
-  sampler below is still the only detection and still detects went-wide rather than went-wide-and-spent.
+  so the allowlist cannot bound whether it spends, how much, or record that it did. (Superseded 2026-10-03:
+  this sentence said the child-process sampler was the only detection. Issue #500 replaced it with the child
+  ledgers and the `/proc` detector, above.)
   What it **did** change is the cost of closing this row: with the network and the proxy shipped, the
   terminating variant is a mode change on components that already exist rather than new plumbing. So this
   closes **on top of** `OQ-004`'s mechanism rather than with it.
@@ -534,8 +561,7 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   were never logged.
 - **Measured at the pi 0.99.1 pin (2026-10-03, issue #500, part 1), zero spend.** Docker Desktop 27.4 with the
   worker's isolation flags and a job image built at e07a5d38, a macOS host, and rootless podman 4.9.3 on a lab VM.
-  Every provider call went to a local fake. The decision these feed lands with the rest of #500; until then this
-  row stays as it is.
+  Every provider call went to a local fake. The decision they fed is at the top of this row.
   - **M1, the stock subagent example in a job.** It runs `process.execPath` with `process.argv[1]`, which in a job
     is `runner-node /app/image/runner/run-job.mjs`, with the inherited environment and `stdio: ["ignore", "pipe",
     "pipe"]`. The child is a second runner. It ignores its argv and ran the whole job prompt again through the
@@ -609,18 +635,18 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   - **M10, the egress proxy.** With the job's proxy variables and a provider host that resolves nowhere, the root
     runner, the nested runner, a pi CLI child (pi's own `configureHttpDispatcher`) and pi-subagents' background
     runner all reached the provider through the proxy's CONNECT tunnel.
-- **What bounds it meanwhile**: the job-count caps (`CONST-BUDGET-BEFORE-TOKENS`), `maxTurns` on the root
+- **What bounds the rest**: a token cap, a cost cap or a model list stops a job on any pi process the detector
+  finds unmetered. Beyond that, the job-count caps (`CONST-BUDGET-BEFORE-TOKENS`), `maxTurns` on the root
   session, the 30-minute container timeout (`REQ-JOB-TIMEOUT-30M`), and the provider-side spend limit
   `SECURITY.md` tells every operator to set. Also the four gates in front of a staged package at all: an
   operator declares it, pins it, stages it, and arms it per trigger.
 - **Related risk**: `OQ-004` (egress), **CLOSED 2026-08-25** by issue #202. That does not touch this row's
   facts: a hostname allowlist applied around the traffic accounts for nothing, and the provider does not
-  even become unreachable, because it must be on the list. This row stays **ACCEPTED RISK** and still wants
-  explicit ratification, on the precedent #199 set by leaving `OQ-012`, `OQ-013` and `OQ-015` all wanting
-  it rather than ratifying three rows in passing.
-- **Needs**: maintainer ratification that shipping staged packages with in-process-only metering is
-  acceptable, given that the unmetered path requires an operator to have staged and armed a package that
-  spawns `pi`.
+  even become unreachable, because it must be on the list. The residual of this row still wants explicit
+  ratification, on the precedent #199 set by leaving `OQ-012`, `OQ-013` and `OQ-015` all wanting it rather than
+  ratifying three rows in passing.
+- **Needs**: maintainer ratification of the residual: metering a child is cooperative, so a staged package that
+  sets out to hide a child's spend can, and an operator who stages and arms such a package accepts that.
 
 
 ## OQ-013 — GitLab's approval gate is weaker in kind than GitHub's, and depends on a lookup that can fail
@@ -822,7 +848,8 @@ build does not.
   refuse/report by name; doctor additionally **warns** when a named image's entrypoint does not look like
   the runner. Neither inspects the image's contents. (`doctor --live` reads back what the worker's argv does
   to `PI_JOB_IMAGE`, which is not its contents either; see the #278 bullet below.) Naming a conformance verdict that had not been computed
-  would be worse than reporting none — the same honesty as `OQ-011`'s child-process sampler.
+  would be worse than reporting none. (The comparison this sentence made, to `OQ-011`'s child-process sampler, is
+  gone with that sampler, issue #500.)
 - **AMENDED (issue #227, the container-backend registry): a remote backend takes BOTH load-bearing
   mitigations away, and the row survives only because none is blessed yet.** The first is
   *"the isolation surface is the worker's argv, not the image's"* -- true exactly while the worker builds
@@ -865,7 +892,8 @@ build does not.
   conformance, because an image can assert any label it likes. The only non-lying check is *running* the
   assertions, which costs a container start per distinct image — cacheable per image ID, but a real cost and
   a real complication, and not worth building before anyone runs a second image.
-- **Related risks**: `OQ-004` (unrestricted egress) and `OQ-011` (unmetered `pi` subprocess) — both
+- **Related risks**: `OQ-004` (unrestricted egress) and `OQ-011` (a `pi` subprocess: metered since issue #500 by
+  the runner an image ships, with a residual). Both are
   unchanged by this entry, and both now additionally **per-image**, since an operator's image could ship
   neither the meter nor `PI_OFFLINE`'s in-process re-assertion.
 - **Needs**: maintainer ratification that shipping per-trigger images with presence-only verification is
@@ -1877,3 +1905,5 @@ adversarial passes did.
 | 2026-10-03 | Issue #500, part 1, second review. **`OQ-011` AMENDED, wording only**: M4 says the `pi-rpc` title is read from the code and seen on macOS, not yet read from a Linux `/proc`; the corrected and measured paragraphs are rewrapped. No fact or decision moves. |
 | 2026-10-03 | Issue #500, part D. **`OQ-011` AMENDED**, one note under M1: the nested runner no longer re-runs the job. It runs as the pi CLI, metered into the job runner's ledger directory, and exits 2 when that directory is missing. Status stays ACCEPTED RISK until the rest of #500 re-decides the row. |
 | 2026-10-03 | Issue #500, part E. **`OQ-011` CORRECTED**, its What detection ships today bullet: the diagnostic sampler it described is replaced by the runner's children hook, which folds child ledgers and, on Linux, counts a pi child with no ledger as unmetered and stops a job under any policy, so "can never fail a job" no longer holds. Status UNCHANGED; the row is re-decided in part F. |
+| 2026-10-03 | Issue #500, part F (closes #500). **`OQ-011` RE-DECIDED: RESOLVED** for the cooperative path, with the residual kept as an accepted risk that wants ratification. New Status and Decision bullets (the preload, the child meter, the ledgers, the parent's fold and stops, the `/proc` detector, the nested runner, and the worker and panel of part F); a What stays an accepted risk bullet (a child that hides from both, a renamed copy of pi, a non-pi client, a direct API call, a forged small ledger, overshoot by a tick of headroom, no detector off Linux, the overlay `models.json` for children, #503); the risk-not-constraint bullet narrowed to the runner's own process; What would close it becomes What would close the rest; the graduation bullet's sampler sentence marked superseded; What bounds it, Related risk and Needs rewritten for the residual. The heading keeps its wording so links to it still work. The measurements M1 to M10 and the earlier corrections are UNCHANGED, checked, apart from their header sentence, which now points at the decision. |
+| 2026-10-03 | Issue #500, part F, PR #570's review. **`OQ-011` AMENDED**, its What stays an accepted risk bullet, worded as the DES residuals are: a pi CLI child whose spawner scrubs the environment and leaves no marker in its command line, a library-mode child whose spawner clears `NODE_OPTIONS` (clearing that alone hides it), and a meterless child that ends before either `starting` grace and before teardown. **`OQ-012` AMENDED, wording only**: its comparison to `OQ-011`'s child-process sampler (gone with issue #500) is marked as such, and its related-risk note says a `pi` subprocess is metered since issue #500 with a residual. |

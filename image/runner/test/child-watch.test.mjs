@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CMDLINE_BYTES, createChildWatch, ENVIRON_BYTES, isPiProcess, linuxProc, NO_LEDGER_TICKS, PF_FORKNOEXEC, PRELOAD_FLAG, STARTING_CPU_MS, STARTING_WALL_MS } from "../src/child-watch.mjs";
+import { CMDLINE_BYTES, createChildWatch, ENVIRON_BYTES, isPiProcess, linuxProc, NO_LEDGER_FINAL_MS, NO_LEDGER_TICKS, PF_FORKNOEXEC, PRELOAD_FLAG, STARTING_CPU_MS, STARTING_FINAL_MS, STARTING_WALL_MS } from "../src/child-watch.mjs";
 import { COST_CAP, MODEL_NOT_ALLOWED, TOKEN_BUDGET } from "../src/outcome.mjs";
 import { childLedger, CHILD_LEDGER_MAX_FILES, createCostGuard, createPolicyGuard, createUsageMeter, foldChildLedgers, writeFileAtomic } from "../src/usage-meter.mjs";
 import { dollarSettlement } from "../../../worker/src/dollar-budget.mjs";
+import { parseExitTokens } from "../../../worker/src/run-history.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
@@ -228,6 +229,30 @@ test("SPENT is written only under a dollar cap (issue #500)", () => {
 	assert.equal(existsSync(join(dir, "SPENT")), false);
 });
 
+test("the worker keeps the child keys: a runner's exit line round-trips byte-identically, and an unmetered child floors the settlement (issue #500 part F)", () => {
+	const cap = 1_000_000;
+	const meter = createUsageMeter({ maxTokens: null, maxCostMicros: cap, rootSessionId: "root" });
+	const guard = createPolicyGuard({ maxCostMicros: cap, allowedModels: [{ provider: "fake", model: "m1" }], env: {} });
+	const { dir, hook } = watch({ meter, guard: () => guard });
+	meter.record(usage(120), { sessionId: "root", provider: "fake", modelId: "m1" });
+	writeLedger(dir, 31, ledger({ state: "done", calls: 2, each: 300 }));
+	hook.sample();
+	const line = () => ({ ...meter.snapshot(), ...hook.guardFields(guard.snapshot()) });
+	const tokens = line();
+	assert.deepEqual([tokens.childTotal, tokens.childProcesses, tokens.unmeteredChildren], [600, 1, 0]);
+	const kept = parseExitTokens(JSON.stringify({ event: "exit", tokens }));
+	assert.equal(JSON.stringify(kept), JSON.stringify(tokens), "every key the runner writes is on the worker's closed list, in its order");
+	assert.equal(kept.rootTotal + kept.otherTotal + kept.looseTotal + kept.childTotal, kept.total);
+	const settle = (fields) => dollarSettlement({ tokens: fields, usage: meter.usageSnapshot(), reservedMicros: cap, trusted: true });
+	assert.equal(settle(kept).basis, "metered", "metered children are part of the metered cost");
+	// A pi child that reports through no ledger: counted, and the record that the worker keeps says so.
+	writeLedger(dir, 32, ledger({ metered: false, calls: 0 }));
+	hook.sample();
+	const floored = parseExitTokens(JSON.stringify({ event: "exit", tokens: line() }));
+	assert.equal(floored.unmeteredChildren, 1);
+	assert.equal(settle(floored).basis, "floor");
+});
+
 test("a child's floor counters reach the exit line: a child call that never started floors the job exactly as a parent call would (issue #500)", async () => {
 	const cap = 1_000_000;
 	const failed = { role: "assistant", stopReason: "error", content: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } } };
@@ -245,6 +270,8 @@ test("a child's floor counters reach the exit line: a child call that never star
 		// The parent makes the call itself.
 		const parent = createUsageMeter({ maxTokens: null, maxCostMicros: cap, rootSessionId: "root" });
 		const direct = createCostGuard({ capMicros: cap, bound: () => 1000 });
+		// With its children hook, as in a job: the child keys are on the line at zero, so only the call floors it.
+		watch({ meter: parent, guard: () => direct });
 		await call(parent, direct, message);
 		const own = settle(parent, direct);
 		// A child makes it, and the parent folds its ledger.
@@ -316,17 +343,50 @@ test("an unmetered child's stop: cost-cap under a dollar cap, else token_budget 
 	}
 });
 
+test("at teardown a pi process with no ledger counts only when first seen 2 s or more before (issue #500 part F)", () => {
+	assert.equal(NO_LEDGER_FINAL_MS, 2_000);
+	/** A pi process with no ledger, first seen by a tick `age` ms before teardown (null: first seen by teardown itself). */
+	function endAfter(age) {
+		let clock = 0;
+		const meter = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
+		const proc = fakeProc({ live: [] });
+		const { hook } = watch({ meter, proc, now: () => clock });
+		hook.sample();
+		clock = 10_000;
+		proc.table.live = [58];
+		proc.table.alive.add(58);
+		if (age !== null) hook.sample();
+		clock += age ?? 0;
+		return { torn: hook.teardown(), meter };
+	}
+	// An honest child caught in its first milliseconds, before its preload wrote the stub, looks the same.
+	for (const age of [null, 0, 1_000, 1_999]) {
+		const { torn, meter } = endAfter(age);
+		assert.equal(torn.unmetered, 0, `first seen ${age ?? "at teardown"}`);
+		assert.equal(meter.state.stopReason, null, "the job's exit is its own");
+	}
+	// Seen a tick before teardown and younger than 2 s: not counted. Seen 3 s before: counted, and the capped job stops.
+	const old = endAfter(3_000);
+	assert.equal(old.torn.unmetered, 1);
+	assert.equal(old.meter.state.stopReason, TOKEN_BUDGET);
+	assert.equal(endAfter(2_000).torn.unmetered, 1, "2 s exactly");
+});
+
 test("a pi process seen alive whose ledger never appeared counts at teardown, even when it lived less than two ticks (issue #500)", () => {
+	let clock = 0;
 	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
 	const proc = fakeProc({ live: [50] });
-	const { hook } = watch({ meter, proc });
+	const { hook } = watch({ meter, proc, now: () => clock });
 	hook.sample();
 	proc.table.live = [];
 	proc.table.alive.delete(50);
+	clock = 1_000;
 	hook.sample();
+	clock = 2_000;
 	hook.sample();
 	assert.equal(meter.snapshot().unmeteredChildren, 0, "gone before its two ticks");
-	assert.deepEqual(hook.teardown(), { distinct: 1, peak: 1, unmetered: 1 });
+	clock = 3_000;
+	assert.deepEqual(hook.teardown(), { distinct: 1, peak: 1, unmetered: 1 }, "first seen 3 s before teardown");
 	assert.equal(meter.snapshot().unmeteredChildren, 1);
 });
 
@@ -398,7 +458,7 @@ test("an environment read that filled ENVIRON_BYTES without both entries is unkn
 	assert.equal(reads, 3, "once per process");
 });
 
-test("a live `starting` ledger is stuck past 1 s of its CPU or 60 s since first sight; un-counted once it runs (issue #500)", () => {
+test("a live `starting` ledger is stuck past 3 s of its CPU or 60 s since first sight; un-counted once it runs (issue #500)", () => {
 	let clock = 0;
 	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
 	const proc = fakeProc({ live: [61, 62, 64], cpu: { 61: 0, 62: 0, 64: 0 } });
@@ -411,7 +471,7 @@ test("a live `starting` ledger is stuck past 1 s of its CPU or 60 s since first 
 	proc.table.cpu[62] = STARTING_CPU_MS + 1;
 	clock = STARTING_WALL_MS;
 	hook.sample();
-	assert.equal(meter.snapshot().unmeteredChildren, 1, "pid 62 used more than 1 s of CPU without installing; pid 61 exactly 1 s, and 60 s exactly");
+	assert.equal(meter.snapshot().unmeteredChildren, 1, "pid 62 used more than 3 s of CPU without installing; pid 61 exactly 3 s, and 60 s exactly");
 	clock = STARTING_WALL_MS + 1;
 	hook.sample();
 	assert.equal(meter.snapshot().unmeteredChildren, 3, "past 60 s, CPU or not");
@@ -420,7 +480,7 @@ test("a live `starting` ledger is stuck past 1 s of its CPU or 60 s since first 
 	assert.equal(meter.snapshot().unmeteredChildren, 2, "pid 62 installed after all: judged by its file from here on");
 });
 
-test("a dead process's `starting` ledger is done only when it was seen under 60 s, used under 1 s of CPU and holds no spend; judged once (issue #500)", () => {
+test("a dead process's `starting` ledger is done only when it was seen under 60 s, used under 3 s of CPU and holds no spend; judged once (issue #500)", () => {
 	let clock = 0;
 	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
 	const proc = fakeProc({ live: [80, 81, 82], cpu: { 80: 300, 81: 900, 82: 300 } });
@@ -453,7 +513,7 @@ test("a dead process's `starting` ledger is done only when it was seen under 60 
 	assert.equal(hook.teardown().unmetered, 2);
 });
 
-test("robust2 Q4: a meterless child whose ledger stays `starting` while it makes calls is caught, live, at teardown, or past the CPU grace (issue #500)", () => {
+test("a meterless child whose ledger stays `starting` while it makes calls is caught, live, at teardown, or past the CPU grace (issue #500)", () => {
 	// The lab shape: 31 calls in about 37 s at 720 ms of CPU, its stub never leaving `starting`, alive at teardown.
 	let clock = 0;
 	const meter = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
@@ -466,22 +526,61 @@ test("robust2 Q4: a meterless child whose ledger stays `starting` while it makes
 		hook.sample();
 	}
 	assert.equal(meter.snapshot().unmeteredChildren, 0, "under both graces while it runs");
-	assert.equal(hook.teardown().unmetered, 1, "a live `starting` ledger seen for two ticks is unmetered at teardown");
+	assert.equal(hook.teardown().unmetered, 1, "a live `starting` ledger first seen 36 s before teardown is unmetered at teardown");
 	assert.equal(meter.state.stopReason, TOKEN_BUDGET);
 	assert.equal(logged.filter((line) => line.event === "unmetered_child").length, 1);
-	// The unit shape of the same review (2 s of CPU and climbing): caught live, at the first tick.
+	// The unit shape of the same review, past the CPU grace (4 s of CPU and climbing): caught live, at the first tick.
 	const heavy = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
-	const busy = fakeProc({ live: [92], cpu: { 92: 2000 } });
+	const busy = fakeProc({ live: [92], cpu: { 92: 4000 } });
 	const second = watch({ meter: heavy, proc: busy });
 	writeLedger(second.dir, 92, ledger({ state: "starting", calls: 0 }));
 	second.hook.sample();
 	assert.equal(heavy.snapshot().unmeteredChildren, 1);
-	// An honest child that starts in the job's last tick is not: it is `starting` for less than two ticks.
+	// An honest child that starts in the job's last tick is not: it was first seen less than 10 s before teardown.
 	const late = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
 	const third = watch({ meter: late, proc: fakeProc({ live: [93], cpu: { 93: 100 } }) });
 	third.hook.sample();
 	writeLedger(third.dir, 93, ledger({ state: "starting", calls: 0 }));
 	assert.equal(third.hook.teardown().unmetered, 0);
+});
+
+test("at teardown a live `starting` ledger counts only when first seen 10 s or more before: an honest job ending while children start exits clean (issue #500)", () => {
+	assert.equal(STARTING_FINAL_MS, 10_000, "the M5 grace (OQ-011)");
+	/** A job whose child's stub stays `starting` from first sight until teardown `seenFor` ms later, one tick a second. */
+	function endAfter(seenFor) {
+		let clock = 0;
+		const meter = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
+		const proc = fakeProc({ live: [95], cpu: { 95: 200 } });
+		const { dir, hook } = watch({ meter, proc, now: () => clock });
+		writeLedger(dir, 95, ledger({ state: "starting", calls: 0 }));
+		for (; clock < seenFor; clock += 1000) hook.sample();
+		clock = seenFor;
+		return { torn: hook.teardown(), meter };
+	}
+	// Ten ticks, 9.999 s: an honest child under load can take that long to install its meter.
+	const fresh = endAfter(9_999);
+	assert.equal(fresh.torn.unmetered, 0, "seen for ten ticks but under 10 s");
+	assert.equal(fresh.meter.state.stopReason, null, "the job's exit is its own");
+	const stale = endAfter(10_000);
+	assert.equal(stale.torn.unmetered, 1, "10 s exactly");
+	assert.equal(stale.meter.state.stopReason, TOKEN_BUDGET);
+});
+
+test("the `starting` CPU grace is 3 s: an honest child slow to install under load is not stuck, a busier one is (issue #500)", () => {
+	assert.equal(STARTING_CPU_MS, 3_000);
+	const meter = createUsageMeter({ maxTokens: 1_000_000, rootSessionId: "root" });
+	// An honest child reached 0.67 s under load on arm64; 2 s is past the old 1 s grace and well inside this one.
+	const proc = fakeProc({ live: [96, 97], cpu: { 96: 2_000, 97: 3_001 } });
+	const { dir, hook } = watch({ meter, proc });
+	writeLedger(dir, 96, ledger({ state: "starting", calls: 0 }), "6".repeat(16));
+	writeLedger(dir, 97, ledger({ state: "starting", calls: 0 }), "7".repeat(16));
+	hook.sample();
+	assert.equal(meter.snapshot().unmeteredChildren, 1, "pid 97 only");
+	// Dead, judged once at retirement by the same grace.
+	proc.table.live = [];
+	proc.table.alive.delete(96);
+	hook.sample();
+	assert.equal(meter.snapshot().unmeteredChildren, 1, "pid 96 ended before its meter at 2 s of CPU: done, quietly");
 });
 
 test("off Linux (a proc with no cpuMs), the `starting` grace is 60 s of wall time on a monotonic clock (issue #500)", () => {

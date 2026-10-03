@@ -327,8 +327,9 @@ Read [`SECURITY.md`](SECURITY.md) before you rely on it. It says plainly what is
 - **Network egress is denied by default.** Each job gets its own network behind an allowlist proxy. A
   job the policy cannot serve is refused before it spends. The allowed hosts are yours to list: pi-dispatch
   cannot know what your flows need to reach, so read [`docs/egress.md`](docs/egress.md) first.
-- **Token and cost records cover the whole job**, including subagent sessions. The per job token budget is
-  enforced against that same total.
+- **Token and cost records cover the whole job**, including subagent sessions and `pi` child processes
+  ([`docs/costs.md`](docs/costs.md#pi-child-processes)). The per job token budget is enforced against that same
+  total.
 - **The container runtime is a named backend** that declares what it guarantees.
   [`docs/backends.md`](docs/backends.md) is the contract. `pi-dispatch doctor` prints the declaration.
   `pi-dispatch doctor --live` reads eight of those properties back from short lived real containers on

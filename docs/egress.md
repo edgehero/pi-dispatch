@@ -529,8 +529,9 @@ forge is on the list, because a job that cannot push has nothing to do, and a re
 good place to write a secret to. `SECURITY.md`'s disclosure stands whether or not you turn this on, and the
 credential's scope and expiry remain what actually bound the damage.
 
-It also accounts for nothing. A staged package that spawns a `pi` subprocess spends against the provider
-host, which is on the allowlist by necessity, and a proxy that does not decrypt cannot count tokens
+It also accounts for nothing. A proxy that does not decrypt cannot count tokens, and the provider host is on
+the allowlist by necessity. The runner counts a `pi` child process another way, with a meter inside the child
+([costs](costs.md#pi-child-processes)). A client that is not `pi`, or a direct API call, is counted by neither
 (`OQ-011`).
 
 Plain HTTP to port 80 of a listed host is allowed, because some package mirrors and redirects still use it

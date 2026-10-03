@@ -310,8 +310,16 @@ export function parseExitContext(text) {
  * matters because it is what makes a conformant runner's object round-trip byte-identically through the
  * rebuild below, so the record's bytes do not move for anyone running a real image.
  *
+ * After `unpriced` come the three child keys of issue #500 (`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`), which a
+ * metered runner from part E on writes on every line, zeros with no children: `childTotal` (the children's billed
+ * tokens, the fourth part of root + other + loose + child = total), `childProcesses` (child ledger files plus pi
+ * processes found with none) and `unmeteredChildren` (pi children whose spend the job could not count). The last is a
+ * floor counter (`FLOOR_COUNTERS`), so it is on this list for the same reason as the policy counters below: a dropped
+ * key would read as an honest zero. A worker before issue #500 part F drops all three, and the `total` it keeps
+ * already includes the children.
+ *
  * The last seven are the policy counters of issues #501 and #502, in the order the runner emits them after
- * `unpriced`: `costCapMicros` (the job's cap), `costRefused` (calls the cost guard stopped),
+ * the child keys: `costCapMicros` (the job's cap), `costRefused` (calls the cost guard stopped),
  * `boundExceeded` (calls that cost more than their bound), `longContext` (calls priced past a long-context
  * threshold the catalog does not tier), `costUnjudged` (compat entries found displaced under the cap, so calls
  * may have run unjudged and unmetered), `costUnanswered` (failed calls that never started, charged their metered
@@ -320,7 +328,7 @@ export function parseExitContext(text) {
  * this closed list because a key missing from it is DROPPED, and the dollar settlement reads them to decide
  * whether a metered cost is complete: a dropped counter would read as an honest zero.
  */
-export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "metered", "rootTotal", "otherTotal", "looseTotal", "sessions", "calls", "unresolved", "unpriced", "costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "modelRefused"]);
+export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "metered", "rootTotal", "otherTotal", "looseTotal", "sessions", "calls", "unresolved", "unpriced", "childTotal", "childProcesses", "unmeteredChildren", "costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "modelRefused"]);
 
 /**
  * Rebuild the billed totals from a closed key list rather than passing the container's object through.
@@ -334,7 +342,7 @@ export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "me
  * did not, and the asymmetry was an oversight rather than a decision.
  *
  * A key the runner omitted stays OMITTED rather than becoming null: the fallback shape legitimately
- * carries only five of the nineteen, and a null there would read as "measured zero" for a number nobody
+ * carries only five of the twenty-two, and a null there would read as "measured zero" for a number nobody
  * measured. `typeof === "number"` rather than `Number.isFinite`, deliberately, so this narrows WHICH
  * KEYS survive and never which objects are admitted -- the admission gate above is unchanged.
  */

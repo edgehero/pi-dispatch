@@ -267,8 +267,13 @@ export function meteredMicros(costUsd) {
  * PR #534's review). Each must be PRESENT and 0 for a metered settlement: an ABSENT counter reads as non-zero,
  * because a runner that did not write it did not measure it, and an absent number read as 0 would settle a partial
  * count as a cheap job.
+ *
+ * `unmeteredChildren` (issue #500 part F) counts the job's pi child processes whose spend the runner could not count
+ * (`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`). The same absent-means-floor rule holds for it, so a worker from part F
+ * running an image from before issue #500 part E settles every capped job at the floor: such a runner never writes
+ * the key. That is the `costUnjudged` precedent, an overcharge until the image is rebuilt, never an undercharge.
  */
-export const FLOOR_COUNTERS = Object.freeze(["unresolved", "unpriced", "boundExceeded", "longContext", "costUnjudged", "costUnanswered"]);
+export const FLOOR_COUNTERS = Object.freeze(["unresolved", "unpriced", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "unmeteredChildren"]);
 
 /**
  * How a job's reservation settles, from what the container reported. PURE. Returns `{ settledMicros, basis }`.

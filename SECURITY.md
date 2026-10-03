@@ -616,12 +616,15 @@ Stated openly rather than discovered later:
   that can reach your forge. That is a materially bigger grant than editing a
   prompt. If it is ever wanted, the shape
   is an operator-held allowlist, not a per-repo opt-in, because the repo is the thing that is not trusted.
-- **Token and cost accounting is process-wide, but it is not process-tree-wide.** The recorded totals cover
-  every session inside the job container's Node process, including subagent sessions an extension spawns,
-  and the per-job token budget is enforced against that total. A staged package that spawns a **`pi`
-  subprocess** is outside it: those tokens are spent, billed, and absent from the run record and the daily
-  token counter. `PI_MAX_TURNS` likewise bounds only the root session's turns. The backstops there are the
-  30-minute container timeout, the job-count caps, and your provider-side spend limit — not the meter.
+- **Token and cost accounting covers `pi` child processes that cooperate, and it is not a wall.** The recorded
+  totals cover every session inside the job container's Node process, including subagent sessions an extension
+  spawns, and, since issue #500, every **`pi` child process** that keeps the job's environment: each child meters
+  itself into a ledger the runner folds into the job's totals and caps. A pi child the runner finds with no
+  ledger (on Linux) stops a capped job and makes an uncapped one's record a floor. The agent holds the provider
+  key and runs as the runner's user, so a child that hides from both, a client that is not pi, or a direct API
+  call is still absent from the run record and the daily token counter (`OQ-011`). `PI_MAX_TURNS` likewise bounds
+  only the root session's turns. The backstops there are the 30-minute container timeout, the job-count caps, and
+  your provider-side spend limit, not the meter.
 - **The admin surface is not a network service.** It is a pi extension in your own terminal session plus
   a `settings.json` file — it binds no port. Whoever can run pi with the extension loaded, or write
   `PI_SETTINGS_FILE` (default `~/.pi-dispatch/settings.json`, whose permissions are therefore part of your

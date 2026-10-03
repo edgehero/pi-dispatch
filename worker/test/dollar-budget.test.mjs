@@ -256,14 +256,14 @@ test("the give-back on refusal is best effort PER KEY: a failing DECRBY is logge
 
 // ---- the settlement basis ----
 
-const COMPLETE = { input: 10, output: 5, total: 15, cost: 0.123456, metered: true, unresolved: 0, unpriced: 0, costCapMicros: 2 * USD, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0 };
+const COMPLETE = { input: 10, output: 5, total: 15, cost: 0.123456, metered: true, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costCapMicros: 2 * USD, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0 };
 const LEDGER = { v: 1, piAi: null, truncated: 0, models: [] };
 
 test("metered only when the count is complete: metered, under the cap, every floor counter present and 0, a ledger", () => {
 	assert.deepEqual(dollarSettlement({ trusted: true, tokens: COMPLETE, usage: LEDGER, reservedMicros: 2 * USD }), { settledMicros: 123_456, basis: "metered" });
 	assert.deepEqual(dollarSettlement({ trusted: true, tokens: { ...COMPLETE, cost: 0 }, usage: LEDGER, reservedMicros: 2 * USD }), { settledMicros: 0, basis: "metered" }, "a complete count of $0");
 	assert.deepEqual(dollarSettlement({ trusted: true, tokens: { ...COMPLETE, cost: 2.5 }, usage: LEDGER, reservedMicros: 2 * USD }), { settledMicros: 2_500_000, basis: "metered" }, "an overshoot is returned whole");
-	assert.deepEqual(FLOOR_COUNTERS, ["unresolved", "unpriced", "boundExceeded", "longContext", "costUnjudged", "costUnanswered"]);
+	assert.deepEqual(FLOOR_COUNTERS, ["unresolved", "unpriced", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "unmeteredChildren"]);
 	assert.deepEqual(DOLLAR_BASIS, ["metered", "floor", "refunded", "unreserved"]);
 });
 
@@ -286,6 +286,20 @@ test("a run that made NO provider call (no ledger, calls 0, cost 0, every counte
 	assert.deepEqual(dollarSettlement({ trusted: true, tokens: noCalls, usage: null, reservedMicros: 2 * USD }), floor, "an absent call count is not 0");
 	assert.deepEqual(dollarSettlement({ trusted: true, tokens: { ...none, costUnanswered: 1 }, usage: null, reservedMicros: 2 * USD }), floor, "every floor counter still applies");
 	assert.deepEqual(dollarSettlement({ trusted: true, tokens: { ...none, metered: false }, usage: null, reservedMicros: 2 * USD }), floor, "the fallback meter never");
+});
+
+test("an unmetered pi child floors the settlement, and so does an image that predates the key (issue #500 part F)", () => {
+	const floor = { settledMicros: 2 * USD, basis: "floor" };
+	// Children that were metered are part of the metered cost: complete, metered.
+	const metered = { ...COMPLETE, childTotal: 900, childProcesses: 2, unmeteredChildren: 0 };
+	assert.deepEqual(dollarSettlement({ trusted: true, tokens: metered, usage: LEDGER, reservedMicros: 2 * USD }), { settledMicros: 123_456, basis: "metered" });
+	// One child the runner could not count: its spend is not in `cost`.
+	assert.deepEqual(dollarSettlement({ trusted: true, tokens: { ...metered, unmeteredChildren: 1 }, usage: LEDGER, reservedMicros: 2 * USD }), floor);
+	// A runner from before part E writes none of the three keys: the floor, the costUnjudged precedent.
+	const { childTotal: _t, childProcesses: _p, unmeteredChildren: _u, ...older } = COMPLETE;
+	assert.deepEqual(dollarSettlement({ trusted: true, tokens: older, usage: LEDGER, reservedMicros: 2 * USD }), floor);
+	// Even a run that made no provider call: an unmetered child may have.
+	assert.deepEqual(dollarSettlement({ trusted: true, tokens: { ...COMPLETE, calls: 0, cost: 0, unmeteredChildren: 1 }, usage: null, reservedMicros: 2 * USD }), floor);
 });
 
 test("the floor is AT LEAST the reservation and never less than a reported metered cost", () => {
