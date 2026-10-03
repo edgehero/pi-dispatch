@@ -2965,6 +2965,43 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     as `costCapped` and `listed` (issues #501, #502), and a job carrying either with `brake:false` is refused
     before its first call (`cost-cap-unenforceable`, `model-policy-unenforceable`), because both are enforced
     before a call or not at all.
+- **Child processes (issue #500; seams only, not wired into the runner yet)**: a `pi` child process has its own
+  copy of pi, so its calls reach neither this meter nor its guards (`OQ-011`). The plan is a meter in each child
+  that reports through a file, and a parent that folds those files. The pieces in `usage-meter.mjs`:
+  - **The child's meter.** `createUsageMeter({ onChange })` calls `onChange` when a call is observed and when it
+    settles, so a child killed mid-call leaves `unresolved` behind. `meter.rows()` gives the rows to write: first
+    seen order (a written row never moves into the bucket), at most 128, with any id the worker would refuse
+    folded into one model-less row whose ids are null. `installProcessUsageMeter` takes `compat: { module }` (a
+    compat copy handed over, tag `injected`), `brake: true` (a hard stop with no policy), `isStopped` (a stop read
+    from outside the process) and `children` (the detector hook that replaces the Linux sampler, with teardown
+    fields added to `usage_meter_teardown`). `isStopped` is asked before every call on both halves; an answer
+    that is not a stop reason, or a throw, is a stop as the token cap, because a garbled STOP is still a STOP.
+  - **The cost guard.** `createCostGuard({ external })` refuses when `spent + inflight + external() + bound > cap`,
+    with `external()` read at every admit. An answer that is not a finite number at or above 0, or a throw,
+    refuses the call. Its snapshot adds `spentMicros` and `inflightMicros`, only when `external` is set.
+  - **The ledger file.** One per child, `<pid>.<nonce>.json` (a 16 hex character nonce) in the run's ledger
+    directory, written whole by rename, at most 64 KiB. Fields, all required in every state: `v` (1), `state`
+    (`starting`, `running` or `done`), `metered`, `totals` (`input`, `output`, `total`, `cost`, `calls`,
+    `unresolved`, `unpriced`, `sessions`), `rows` (at most 256, the run record's ten numerics, `provider` and
+    `model` both ids or both null), `spentMicros`, `inflightMicros`, `costRefused`, `modelRefused`. Numbers only:
+    amounts finite and at least 0, counts safe integers. Ids must pass the worker's id rule after lowercasing (a
+    copy, `USAGE_ID_PATTERN`, held to the worker's by a test), because the worker drops the whole usage block for
+    one row it refuses. The rows must partition the totals.
+  - **The fold.** `foldChildLedgers({ dir, fs, prev })` keeps a high-water mark per file. A good file that reached
+    its mark in everything that only grows replaces it (`unresolved` and `inflightMicros` may fall). A file that
+    is malformed in any part, says `metered: false`, shrank in anything (a row included) or vanished counts
+    once as unmetered, keeps the mark it had, and is not read again. A file is opened without following a
+    symlink and without blocking, and must be a regular file, so a FIFO cannot hang the runner.
+  - **The parent's totals.** `meter.setChildren(fold)` makes the snapshot's totals include the children and adds
+    `childTotal`, `childProcesses` and `unmeteredChildren`. `rootTotal`, `otherTotal` and `looseTotal` stay the
+    parent's own, so root + other + loose + child equals total. The token cap is judged on parent plus children.
+    `usageSnapshot()` merges the children's rows before its 8-row cut. Until `setChildren` is called the exit
+    line is exactly as before.
+  - **What the ledger is not.** It is cooperative accounting, not a boundary: the agent holds the provider key
+    and shares the runner's uid, so it can delete or forge a file. The rules make that fail toward a floor or an
+    overcharge. Named residuals, so far: a child whose file is deleted before the parent's first read of it; a
+    forged small file kept rewritten; a provider that reports a negative cost marks its child unmetered (cost
+    must only grow); a flood of ledger files slows the parent's tick (each read is capped at 64 KiB).
 - **Traces to**: `REQ-TOKEN-ACCOUNTING-AND-CAPS`, `REQ-RUNNER-TURN-BUDGET`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-PI-VERSION-PINNED`, `INT-SDK-SESSION-OPTIONS`, `INT-RUNNER-EXIT-CODE-PROTOCOL`,
   `INT-RUN-HISTORY-FILE-CONTRACT`, `OQ-010`, `OQ-011`
@@ -7233,3 +7270,4 @@ a tunnel.
 | 2026-10-03 | Issue #544. **`DES-OPERATOR-GLOBAL-OVERLAY` AMENDED**: the overlay's `extensions/` reaches pi as its entries, listed by pi's own rule for `~/.pi/agent/extensions`, because pi reads a folder path as a package root and a folder of loose files as one extension that fails to import, unreported. Load failures are logged as `extension_load_failed`, names only. The one accepted change: a root `package.json` with a `pi` manifest contributes only its extensions, and such layouts are named once per job (`overlay_extensions_layout`), as is a root `pi.extensions` with glob or exclude entries, which are now read as plain paths. The one difference from pi: a manifest entry naming a directory is skipped and logged as `manifest-dir`. An ignore file with pi's matcher unloadable withholds the overlay (`overlay_extensions_withheld`). The recursion guard also tests the first folder under each root. **`DES-CLI-TRIGGER-FOR-LOCAL` AMENDED**: the local job id hashes the model fields when one is set, so two runs that differ only in the model are both queued, and a run with no model keeps its id. **Code evidence**: image/runner/src/loader.mjs -> discoverExtensionEntries, reportExtensionLoadErrors, buildResourceLoader; worker/src/job-id.mjs -> localJobId; worker/src/queue.mjs -> addLocalJob. |
 | 2026-10-03 | Issue #501 part 6 and the doctor recommendations of #501 and #502. **`DES-HOST-REGISTRY` AMENDED**: a bullet on `fpUsd` (the dollar caps compared, never enforced, through the registry; numbers and counter prefixes only, a row named by the counter it reserves in; the env list through the model-row counters it selects; a dollar counter on the Valkey counting as dollars in use, best effort; doctor computes this host's value from the service's settings with the worker's function rather than reading its own row back), and two Rejected entries: refusing on a disagreement as the cron gate does, and publishing the caps themselves. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**, the residuals: "hosts may disagree on caps" now names `fpUsd` and doctor's warning in place of "a later doctor check". **`DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER` UNCHANGED, checked**: the runner half does not move; doctor's cap-fit line is a lower bound of its `callCostBound` that carries the runner's service-tier multiplier (a test holds it below the runner's bound for every builtin chat model at the pin, and the copied 8,192-token overhead and multiplier equal to the runner's, the multiplier derived from the runner's own bound on every priced api), and doctor's loader comparison runs pi's `ModelConfig.load` and `ModelRuntime` from the pi-coding-agent beside the worker, only when its version is the worker's pinned pi, rather than in the job image, because the two share one lockfile and a probe container needs the egress canary's venue, user and SELinux handling on every run. **Code evidence**: worker/src/dollar-fingerprint.mjs; worker/src/start.mjs -> startWorker; worker/src/doctor.mjs -> fleetDollarChecks, firstCallFloorMicros; worker/src/pi-model-loader.mjs. |
 | 2026-10-03 | The leftovers of the #501 and #502 round's reviews. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: the `model-not-allowed` sentence also names a request change the trigger does not allow, the case of a hook rewrite or routing sampling settings. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` UNCHANGED, checked**: doctor's dead-folder line now says a CLI or local job may still run in a folder no trigger names, wording only. **Code evidence**: worker/src/processor.mjs; worker/src/doctor.mjs; admin/src/read-model.mjs -> mergedDollarProblem. |
+| 2026-10-03 | Issue #500, part B: the meter's seams for child processes, pure and not wired into the runner yet. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, a new Child processes bullet: `onChange` on observe and on settle, `rows()`, `setChildren()` with `childTotal`, `childProcesses` and `unmeteredChildren` (root, other and loose stay the parent's, the four parts sum to total, the token cap on parent plus children), the child rows merged before the 8-row cut, `isStopped` asked before every call on both halves (fail closed), the install options `compat`, `brake` and `children`, the cost guard's `external` (fail closed) with `spentMicros` and `inflightMicros`, the ledger file format, the fold's rules (a high-water mark per file; malformed, `metered: false`, a shrink or a vanished file counts once as unmetered and is never partly trusted; no symlink, no FIFO, 64 KiB, 256 rows; ids held to the worker's rule by a copy and a test), and the first residuals. With no children the exit line and the install and teardown lines are UNCHANGED, checked by test. `DES-DOLLAR-RESERVE-AND-SETTLE`, `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked: nothing emits the new keys yet. **Code evidence**: image/runner/src/usage-meter.mjs; image/runner/test/usage-meter.test.mjs, cost-guard.test.mjs, child-ledger.test.mjs. |

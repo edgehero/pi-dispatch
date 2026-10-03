@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { test } from "node:test";
 import {
 	assertPoliciesEnforceable,
+	CHILD_LEDGER_ROWS,
 	createUsageMeter,
 	defaultHardStopResult,
 	installProcessUsageMeter,
@@ -1449,4 +1450,316 @@ test("assertPoliciesEnforceable: a cap or a list the runner cannot enforce befor
 			);
 		}
 	}
+});
+
+// ---------------------------------------------------------------------------------------------
+// Issue #500: the seams a child meter and the parent's fold use (not wired into run-job.mjs yet)
+// ---------------------------------------------------------------------------------------------
+
+/** A fold as foldChildLedgers returns it, with only what setChildren reads. */
+function childFold({ totals = {}, rows = [], processes = 1, unmetered = 0 } = {}) {
+	return {
+		processes,
+		unmetered,
+		totals: { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0, ...totals },
+		rows,
+	};
+}
+/** A ledger row with the ten numerics, zero unless given. */
+const ledgerRow = (provider, model, fields = {}) => ({ provider, model, calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 0, cost: 0, unpriced: 0, ...fields });
+
+test("onChange fires when a call is observed and again when it settles, for streams and for promises", async () => {
+	const seen = [];
+	const meter = createUsageMeter({ maxTokens: null, onChange: () => seen.push([meter.state.calls, meter.state.unresolved, meter.state.total]) });
+	const stream = new FakeStream();
+	meter.observe(stream, { sessionId: "s", provider: "p", modelId: "m" });
+	assert.deepEqual(seen, [[1, 1, 0]], "on observe: the call is counted, and unresolved, before any answer");
+	stream.end(settledWith(usage({ input: 3, output: 2 })));
+	await flush();
+	assert.deepEqual(seen.at(-1), [1, 0, 5], "on settle: the usage is in");
+	let resolve;
+	meter.observeResult(new Promise((done) => (resolve = done)), {});
+	assert.deepEqual(seen.at(-1), [2, 1, 5]);
+	resolve({ usage: usage({ input: 1 }) });
+	await flush();
+	assert.deepEqual(seen.at(-1), [2, 0, 6]);
+	assert.equal(seen.length, 4, "exactly once per observe and once per settle");
+	meter.setChildren(childFold({ totals: { total: 9, calls: 1 }, rows: [ledgerRow(null, null, { calls: 1, total: 9 })] }));
+	assert.equal(seen.length, 4, "a fold is the parent's own tick, not a change to report");
+});
+
+test("a throwing onChange never reaches the provider call or the settle", async () => {
+	const meter = createUsageMeter({ maxTokens: null, onChange: () => {
+		throw new Error("disk full");
+	} });
+	const stream = streamOf(usage({ input: 4 }));
+	assert.equal(meter.observe(stream, {}), stream);
+	await flush();
+	assert.deepEqual([meter.state.calls, meter.state.unresolved, meter.state.total], [1, 0, 4]);
+});
+
+test("rows(): first-seen order, a model-less row with null ids, copies, and a partition of the settled totals", () => {
+	const meter = createUsageMeter({ maxTokens: null });
+	meter.record(usage({ input: 1, total: 1, cost: 0.1 }), { provider: "p", modelId: "small" });
+	meter.record(usage({ input: 100, total: 100, cost: 2 }), { provider: "p", modelId: "big" });
+	meter.record({ input: 7, totalTokens: 7 }, {}); // no cost at all: unpriced
+	// An id the worker's rule refuses (a space, and an uppercase-only spelling is fine) folds into the model-less row.
+	meter.record(usage({ input: 5, total: 5, cost: 0.5 }), { provider: "p", modelId: "has space" });
+	meter.record(usage({ input: 2, total: 2, cost: 0.2 }), { provider: "OpenAI", modelId: "GPT-X" });
+	const rows = meter.rows();
+	assert.deepEqual(rows.map((row) => [row.provider, row.model]), [["p", "small"], ["p", "big"], ["OpenAI", "GPT-X"], [null, null]], "first seen, not top by total: a written row never moves into the bucket");
+	assert.deepEqual([rows[3].calls, rows[3].total, rows[3].unpriced], [2, 12, 1]);
+	for (const key of ["input", "total", "unpriced"]) assert.equal(rows.reduce((sum, row) => sum + row[key], 0), meter.state[key], key);
+	assert.equal(rows.reduce((sum, row) => sum + row.calls, 0), 5, "one per settled call");
+	rows[0].total = 999;
+	assert.equal(meter.rows()[0].total, 1, "copies: the caller cannot reach live state");
+});
+
+test("rows() keeps at most CHILD_LEDGER_ROWS rows, the overflow folded into the model-less row", () => {
+	const meter = createUsageMeter({ maxTokens: null });
+	for (let i = 0; i < CHILD_LEDGER_ROWS + 10; i += 1) meter.record(usage({ input: 1, total: 1 }), { provider: "p", modelId: `m${i}` });
+	const rows = meter.rows();
+	assert.equal(rows.length, CHILD_LEDGER_ROWS);
+	assert.equal(rows.at(-2).model, `m${CHILD_LEDGER_ROWS - 2}`, "the first CHILD_LEDGER_ROWS - 1 seen stay named");
+	assert.deepEqual([rows.at(-1).provider, rows.at(-1).calls], [null, 11]);
+	assert.equal(rows.reduce((sum, row) => sum + row.total, 0), CHILD_LEDGER_ROWS + 10);
+});
+
+test("with no children the snapshot is exactly the pre-#500 line: the three child keys appear only after setChildren", () => {
+	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
+	meter.record(usage({ input: 10, output: 5, cost: 0.25 }), { sessionId: "root", provider: "p", modelId: "m" });
+	assert.equal(
+		JSON.stringify(meter.snapshot()),
+		'{"input":10,"output":5,"total":15,"cost":0.25,"metered":true,"rootTotal":15,"otherTotal":0,"looseTotal":0,"sessions":1,"calls":0,"unresolved":0,"unpriced":0}',
+	);
+	meter.setChildren(childFold({ processes: 0 }));
+	assert.deepEqual(Object.keys(meter.snapshot()).slice(-3), ["childTotal", "childProcesses", "unmeteredChildren"], "appended after unpriced, in this order");
+	assert.deepEqual(meter.snapshot().childTotal, 0);
+});
+
+test("setChildren: the totals include the children, root/other/loose stay the parent's, and the four parts sum to total", () => {
+	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
+	meter.record(usage({ input: 10, output: 5, cost: 1 }), { sessionId: "root" });
+	meter.record(usage({ input: 4, output: 0, cost: 0.5 }), { sessionId: "sub" });
+	meter.record(usage({ input: 1, output: 0 }));
+	const before = meter.snapshot();
+	meter.setChildren(childFold({
+		processes: 3,
+		unmetered: 1,
+		totals: { input: 100, output: 20, total: 150, cost: 2.5, calls: 4, unresolved: 1, unpriced: 1, sessions: 2 },
+	}));
+	const after = meter.snapshot();
+	assert.deepEqual([after.rootTotal, after.otherTotal, after.looseTotal], [before.rootTotal, before.otherTotal, before.looseTotal], "parent-only");
+	assert.deepEqual(
+		[after.input, after.output, after.total, after.cost, after.calls, after.unresolved, after.unpriced, after.sessions],
+		[before.input + 100, before.output + 20, before.total + 150, before.cost + 2.5, before.calls + 4, before.unresolved + 1, before.unpriced + 1, before.sessions + 2],
+	);
+	assert.deepEqual([after.childTotal, after.childProcesses, after.unmeteredChildren], [150, 3, 1]);
+	assert.equal(after.rootTotal + after.otherTotal + after.looseTotal + after.childTotal, after.total, "root + other + loose + child == total");
+	// Cumulative: a later fold REPLACES the last one, it is never added to it.
+	meter.setChildren(childFold({ processes: 3, unmetered: 1, totals: { total: 160 } }));
+	assert.equal(meter.snapshot().total, before.total + 160);
+});
+
+test("the token cap is judged on parent plus children, on a fold and on a parent record", () => {
+	const stops = [];
+	const meter = createUsageMeter({ maxTokens: 100, onStop: (reason, detail) => stops.push([reason, detail]) });
+	meter.record(usage({ input: 60 }));
+	meter.setChildren(childFold({ totals: { total: 30 } }));
+	assert.equal(meter.state.stopReason, null, "60 + 30 is under 100");
+	meter.record(usage({ input: 20 }));
+	assert.deepEqual(stops, [[TOKEN_BUDGET, 110]], "the parent's record crosses with the children counted");
+
+	const byFold = createUsageMeter({ maxTokens: 100 });
+	byFold.record(usage({ input: 60 }));
+	byFold.setChildren(childFold({ totals: { total: 41 } }));
+	assert.equal(byFold.state.stopReason, TOKEN_BUDGET, "the fold itself crosses");
+});
+
+test("usageSnapshot merges the children's rows before the 8-row cut, and the rows still sum to the total", () => {
+	const meter = createUsageMeter({ maxTokens: null });
+	for (let i = 0; i < 8; i += 1) meter.record(usage({ input: 10 + i, cost: 0.01 }), { provider: "p", modelId: `m${i}` });
+	meter.record(usage({ input: 3 }), {});
+	meter.setChildren(childFold({
+		totals: { total: 1000 + 50 + 5, calls: 3 },
+		rows: [ledgerRow("p", "m0", { calls: 1, total: 1000, input: 1000, cost: 1 }), ledgerRow("c", "child-only", { calls: 1, total: 50, input: 50 }), ledgerRow(null, null, { calls: 1, total: 5, input: 5 })],
+	}));
+	const { models, truncated } = meter.usageSnapshot();
+	assert.deepEqual([models[0].provider, models[0].model, models[0].total, models[0].calls], ["p", "m0", 1010, 2], "a child row lands on the parent's row for its pair, which then ranks first");
+	assert.equal(models[1].model, "child-only", "a child-only pair ranks on its merged total");
+	assert.equal(truncated, 1, "nine named rows: the smallest parent row is cut");
+	const other = models.at(-1);
+	assert.deepEqual([other.provider, other.calls], ["other", 3], "the cut row, the parent's model-less call and the child's model-less row");
+	assert.equal(models.reduce((sum, row) => sum + row.total, 0), meter.snapshot().total);
+	assert.equal(meter.rows()[0].total, 10, "the merge never touches the parent's live row");
+	assert.equal(meter.usageSnapshot().models[0].total, 1010, "a second snapshot does not compound the merge");
+});
+
+test("usageSnapshot is emitted when only the children made calls", () => {
+	const meter = createUsageMeter({ maxTokens: null });
+	assert.equal(meter.usageSnapshot(), null);
+	meter.setChildren(childFold({ totals: { total: 7, calls: 1 }, rows: [ledgerRow("p", "m", { calls: 1, total: 7 })] }));
+	assert.deepEqual(meter.usageSnapshot().models.map((row) => [row.model, row.total]), [["m", 7]]);
+});
+
+test("isStopped is asked before dispatch on every runtime method, and its reason becomes the meter's stop", async () => {
+	const { FakeRuntime, calls } = fakeRuntimeClass();
+	const order = [];
+	let answer = null;
+	const meter = createUsageMeter({ maxTokens: null });
+	const hardStop = makeHardStopStream({ createStream: () => new FakeStream() });
+	const layer = wrapModelRuntime({
+		ModelRuntime: FakeRuntime,
+		meter,
+		hardStop,
+		isStopped: () => {
+			order.push(`asked:${calls.length}`);
+			return answer;
+		},
+	});
+	try {
+		const runtime = new FakeRuntime();
+		runtime.streamSimple(MODEL, [], {});
+		assert.deepEqual(order, ["asked:0"], "asked before the provider was reached");
+		assert.equal(calls.length, 1, "null is go");
+		answer = COST_CAP;
+		for (const method of RUNTIME_STREAM_METHODS) {
+			assert.equal((await runtime[method](MODEL, [], {}).result()).errorMessage, STOP_MESSAGES[COST_CAP], method);
+		}
+		for (const method of RUNTIME_RESULT_METHODS) assert.equal((await runtime[method](MODEL, {}, {})).stopReason, "aborted", method);
+		assert.equal(calls.length, 1, "a stopped call reaches no provider");
+		assert.equal(meter.state.stopReason, COST_CAP);
+	} finally {
+		layer.restore();
+	}
+});
+
+test("isStopped fails closed: a garbled answer or a throw is a token-cap stop; with no brake it is never asked", async () => {
+	for (const answer of [true, "STOP", 1, () => {
+		throw new Error("EIO");
+	}]) {
+		const { FakeRuntime, calls } = fakeRuntimeClass();
+		const meter = createUsageMeter({ maxTokens: null });
+		const layer = wrapModelRuntime({
+			ModelRuntime: FakeRuntime,
+			meter,
+			hardStop: makeHardStopStream({ createStream: () => new FakeStream() }),
+			isStopped: typeof answer === "function" ? answer : () => answer,
+		});
+		try {
+			await new FakeRuntime().streamSimple(MODEL, [], {}).result();
+			assert.equal(calls.length, 0, String(answer));
+			assert.equal(meter.state.stopReason, TOKEN_BUDGET, String(answer));
+		} finally {
+			layer.restore();
+		}
+	}
+	const { FakeRuntime, calls } = fakeRuntimeClass();
+	let asked = 0;
+	const layer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter: createUsageMeter({}), isStopped: () => (asked += 1, COST_CAP) });
+	try {
+		new FakeRuntime().streamSimple(MODEL, [], {});
+		assert.deepEqual([asked, calls.length], [0, 1], "no hard stop to answer with, so no stop to ask about");
+	} finally {
+		layer.restore();
+	}
+});
+
+test("isStopped on the compat half: asked before dispatch, and a stop answers with the hard stop", async () => {
+	const inner = fakeInner();
+	const meter = createUsageMeter({ maxTokens: null });
+	let answer = null;
+	const asked = [];
+	const compat = wrapProviderStreams({
+		inner,
+		fallbackModels: null,
+		meter,
+		hardStop: makeHardStopStream({ createStream: () => new FakeStream() }),
+		isStopped: () => {
+			asked.push(inner.calls.length);
+			return answer;
+		},
+	});
+	compat.streamSimple(MODEL, [], {});
+	assert.deepEqual([asked, inner.calls.length], [[0], 1]);
+	answer = MODEL_NOT_ALLOWED;
+	assert.equal((await compat.stream(MODEL, [], {}).result()).errorMessage, STOP_MESSAGES[MODEL_NOT_ALLOWED]);
+	assert.equal(inner.calls.length, 1);
+	assert.equal(meter.state.stopReason, MODEL_NOT_ALLOWED);
+});
+
+test("install: an injected compat copy skips resolution, and its catalog and version come with it", async () => {
+	const copy = fakeCopy(["anthropic-messages"]);
+	const meter = createUsageMeter({ maxTokens: null });
+	const logged = [];
+	const handle = await installProcessUsageMeter({
+		...installArgs({ copy }),
+		meter,
+		resolve: () => assert.fail("an injected copy is never resolved"),
+		exists: () => assert.fail("nor looked for"),
+		load: async () => assert.fail("nor loaded"),
+		loadExtensionModules: async () => assert.fail("nor checked against the extension modules"),
+		readText: () => assert.fail("nor stamped from disk"),
+		compat: { module: copy.module, fallbackModels: fakeCatalog([]), version: "9.9.9" },
+		log: (event, fields) => logged.push({ event, fields }),
+	});
+	handle.uninstall();
+	assert.equal(handle.tag, "injected");
+	assert.equal(handle.module, copy.module);
+	assert.deepEqual(handle.apis, ["anthropic-messages"]);
+	assert.equal(copy.registry.get("anthropic-messages").sourceId, `${METER_PROVIDER_PREFIX}:anthropic-messages`);
+	assert.deepEqual([logged[0].fields.compat, logged[0].fields.fallback, "fallbackError" in logged[0].fields], ["injected", true, false]);
+	meter.observe(streamOf(usage({ input: 1 })), { provider: "p", modelId: "m" });
+	assert.equal(meter.usageSnapshot().piAi, "9.9.9");
+
+	const bare = await installProcessUsageMeter({ ...installArgs({ copy: fakeCopy(["anthropic-messages"]) }), compat: { module: fakeCopy([]).module }, log: (event, fields) => logged.push({ event, fields }) });
+	bare.uninstall();
+	assert.equal(logged.at(-2).fields.fallbackError, "no-builtin-models", "no catalog handed over is named, as for a copy on disk");
+	const wrong = await installProcessUsageMeter({ ...installArgs({ copy: fakeCopy([]) }), compat: { module: {} }, log: (event, fields) => logged.push({ event, fields }) });
+	wrong.uninstall();
+	assert.deepEqual([wrong.ok, wrong.tag, logged.at(-2).fields.compat, logged.at(-2).fields.compatError], [true, null, false, "injected-not-compat"]);
+});
+
+test("install: brake:true arms the hard stop with no policy, and isStopped then brakes both halves", async () => {
+	const copy = fakeCopy(["anthropic-messages"]);
+	const args = installArgs({ copy });
+	const meter = createUsageMeter({ maxTokens: null });
+	let stop = null;
+	const logged = [];
+	const handle = await installProcessUsageMeter({ ...args, meter, brake: true, isStopped: () => stop, log: (event, fields) => logged.push({ event, fields }) });
+	try {
+		assert.equal(handle.brake, true);
+		assert.deepEqual([logged[0].fields.capped, logged[0].fields.costCapped, logged[0].fields.listed, logged[0].fields.brake], [false, false, false, true]);
+		const runtime = new args.ModelRuntime();
+		stop = TOKEN_BUDGET;
+		assert.equal((await runtime.streamSimple(MODEL, [], {}).result()).stopReason, "aborted");
+		const legacy = copy.registry.get("anthropic-messages");
+		assert.equal((await legacy.streamSimple(MODEL, [], {}).result()).errorMessage, STOP_MESSAGES[TOKEN_BUDGET]);
+		assert.equal(meter.state.calls, 0);
+	} finally {
+		handle.uninstall();
+	}
+	const plain = await installProcessUsageMeter({ ...installArgs({ copy: fakeCopy(["anthropic-messages"]) }) });
+	plain.uninstall();
+	assert.equal(plain.brake, false, "without brake:true or a policy there is still no brake");
+});
+
+test("install: the children hook replaces the sampler, runs on the tick, and adds its teardown fields; a throw is logged once", async () => {
+	const copy = fakeCopy([]);
+	const logged = [];
+	let samples = 0;
+	const hook = {
+		sample: () => {
+			samples += 1;
+			throw Object.assign(new Error("/proc/secret/path"), { code: "EACCES" });
+		},
+		teardown: () => ({ distinct: 2, peak: 1, unmetered: 0 }),
+	};
+	const handle = await installProcessUsageMeter({ ...installArgs({ copy }), rearmMs: 5, platform: "linux", children: hook, log: (event, fields) => logged.push({ event, fields }) });
+	assert.equal(handle.children, hook, "the hook, not the Linux sampler");
+	await new Promise((resolve) => setTimeout(resolve, 40));
+	handle.uninstall();
+	assert.ok(samples >= 2, "sample() runs on every tick, and a throw does not stop the timer");
+	assert.deepEqual(logged.filter((line) => line.event === "usage_meter_children_failed"), [{ event: "usage_meter_children_failed", fields: { reason: "EACCES" } }], "once, by code, never the message");
+	assert.deepEqual(logged.at(-1), { event: "usage_meter_teardown", fields: { rearms: 0, apis: 0, rearmMs: 5, distinct: 2, peak: 1, unmetered: 0 } });
 });
