@@ -238,7 +238,8 @@ the overlay `models.json` is broken, the worker refuses every job (`model-unknow
 permissions on the file or its folder (`overlay-unreadable`): pi in the job then loads none of the file,
 because the runner's existence check, or pi's own read, fails. It also holds when `models.json` is a link
 (`overlay-link`), since the job's read-only mount does not follow links the way your host does: replace the
-link with the file itself. `pi-dispatch doctor` says so. Fix the file, make it
+link with the file itself. The same holds when `models.json` is a named pipe, a socket or a device
+(`overlay-not-a-file`): the worker never opens it. `pi-dispatch doctor` says so. Fix the file, make it
 readable by the account the worker runs as, or remove it: a missing `models.json` is no overlay, and jobs run.
 A read that fails for a moment (a disk error, too many open files) is not a refusal: the job is retried once,
 then failed. pi also drops a provider it cannot put

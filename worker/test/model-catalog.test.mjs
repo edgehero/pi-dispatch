@@ -214,6 +214,17 @@ test("a models.json that is a link of any kind refuses every job; the file itsel
 	assert.deepEqual(checkModelsKnown([{ ...gpt, main: true }], { readOverlay: () => readOverlayModels(folderLink) }), { ok: true }, "the overlay folder is a link");
 });
 
+test("a models.json that is a named pipe, socket or device refuses every job, never opened (issue #556)", () => {
+	const gpt = { provider: "openai", id: "gpt-4o" };
+	const haiku = { provider: "anthropic", id: "claude-haiku-4-5" };
+	const qwen = { provider: "ollama", id: "qwen3:0.6b" };
+	const fifo = { isSymbolicLink: () => false, isFile: () => false, isDirectory: () => false };
+	const readOverlay = () => readOverlayModels(overlayDir(), { lstatSync: () => fifo, readFileSync: () => assert.fail("opened") });
+	for (const refs of [[{ ...gpt, main: true }], [{ ...haiku, main: true }, gpt], [{ ...qwen, main: true }]]) {
+		assert.deepEqual(checkModelsKnown(refs, { readOverlay }), { unknown: { provider: refs[0].provider, id: refs[0].id }, why: "overlay-not-a-file" }, refs[0].provider);
+	}
+});
+
 test("an overlay pi drops, for any reason, refuses every job until it is fixed (issue #539)", () => {
 	// PR #546's review, after its third round: which providers a broken file meant to route cannot be read from
 	// it, so no job runs. pi drops every one of these (pinned against pi in models-json.test.mjs).
