@@ -557,7 +557,7 @@ test("the runner never imports pi-ai directly -- a static import makes the meter
 	// first call goes unmetered. Without the arm() after createAgentSession, an api id an extension
 	// registered in the legacy registry during session construction stays unwrapped until the meter's own
 	// interval catches it.
-	assert.match(runJob, /installProcessUsageMeter\(\{ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard \}\)/, "run-job.mjs must install the process-wide meter on the class it imports and the instance the session uses");
+	assert.match(runJob, /installProcessUsageMeter\(\{ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard, children: childWatch \}\)/, "run-job.mjs must install the process-wide meter on the class it imports and the instance the session uses");
 	assert.ok(runJob.indexOf("createJobModelRuntime({") < runJob.indexOf("installProcessUsageMeter({"), "the meter installs after the runtime exists");
 	assert.ok(runJob.indexOf("installProcessUsageMeter({") < runJob.indexOf("createAgentSession({"), "the meter installs before the session exists");
 	assert.ok(runJob.indexOf("installProcessUsageMeter({") < runJob.indexOf("await buildLoadedResourceLoader({"), "the meter installs before any extension loads (issue #543)");
@@ -1786,8 +1786,12 @@ test("the child route's own files: the preload imports no pi module, the child m
 		'import { basename, dirname, join, sep } from "node:path";',
 		'import { fileURLToPath, pathToFileURL } from "node:url";',
 		'import { isMainThread } from "node:worker_threads";',
-		'import { CHILD_METER_PATH, injectChildMeter, ledgerDirProblem, nestedRunnerKind, PI_SUBCOMMANDS } from "./child-route.mjs";',
+		'import { CHILD_METER_PATH, injectChildMeter, ledgerDirProblem, nestedRunnerKind, PI_ENTRIES, PI_SUBCOMMANDS } from "./child-route.mjs";',
 	], "child-preload.mjs imports changed: no pi module, and node:module only as a namespace");
+	// The parent's children hook (issue #500 part E) runs in the job runner: no static pi import (it resolves pi's package
+	// root by specifier only to name the entry files), and not the preload, which runs on import.
+	const watchSrc = readFileSync(fileURLToPath(new URL("../src/child-watch.mjs", import.meta.url)), "utf8");
+	assert.deepEqual([...watchSrc.matchAll(/^import\s[^\n]*?from\s+"([^"]+)";$/gm)].map((match) => match[1]), ["node:fs", "node:path", "node:url", "./child-route.mjs", "./outcome.mjs", "./usage-meter.mjs"], "child-watch.mjs imports changed");
 	// child-route.mjs is loaded by the preload in every Node child too (issue #500 part D): built-ins only, and its one
 	// dynamic import, pi's dist/cli.js, happens only in a nested runner.
 	const routeSrc = readFileSync(fileURLToPath(new URL("../src/child-route.mjs", import.meta.url)), "utf8");

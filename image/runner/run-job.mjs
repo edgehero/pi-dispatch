@@ -33,6 +33,7 @@ import { createExitWriter, readExitKey, writeAllSync } from "./src/exit-line.mjs
 import { createJobModelRuntime } from "./src/model-runtime.mjs";
 import { countPackageResources, findShadowedSkills, isFlowLoaded, owningRoot } from "./src/packages.mjs";
 import { isNestedRunner, runAsPiCli } from "./src/child-route.mjs";
+import { createChildWatch } from "./src/child-watch.mjs";
 import { openSessionManager } from "./src/session.mjs";
 import { attachTokenBudget } from "./src/token-budget.mjs";
 import { assertExcludeToolsKnown } from "./src/tools.mjs";
@@ -214,11 +215,14 @@ async function main() {
 	// The child ledger (issue #500), opened BEFORE the meter installs and before any extension loads, because a child
 	// can be spawned from the first extension factory on. Every descendant inherits the directory, this runner's pid and
 	// a NODE_OPTIONS --import of the child preload, which meters a pi child in the child and reports through a file in
-	// the directory (openChildLedger). Not removed at exit: the container's filesystem goes with the container, and the
-	// parent's last fold reads the directory at teardown. With no directory the children are not pointed anywhere and a
-	// pi child runs unmetered; said here, by code only (a path never ships in a log).
+	// the directory (openChildLedger). The meter's children hook (child-watch.mjs) folds the files on every tick and at
+	// teardown, and removes the directory after its final fold. With no directory the children are not pointed anywhere
+	// and a pi child runs unmetered, which the hook's detector counts; said here, by code only (a path never ships in a log).
 	const childLedger = openChildLedger({ env: process.env, pid: process.pid, preloadUrl: new URL("./src/child-preload.mjs", import.meta.url).href });
 	if (childLedger.error !== undefined) log("child_ledger_unavailable", { reason: childLedger.error });
+	// Declared before the meter so its onStop can write STOP at once (the hook rewrites it on every tick anyway).
+	let childWatch = null;
+	const stopHandler = meterStopHandler({ onTokenAbort, abort: () => void session?.abort() });
 
 	const meter = createUsageMeter({
 		maxTokens: cfg.maxTokens,
@@ -230,13 +234,21 @@ async function main() {
 		// (meterStopHandler). Same synchronous-abort discipline as attachTokenBudget's
 		// onAbort: abort() flips the AbortController before its first await, so the signal is set the instant we
 		// call it. Awaiting here would let the next turn start under a cap we already know is blown.
-		onStop: meterStopHandler({ onTokenAbort, abort: () => void session?.abort() }),
+		onStop: (reason, detail) => {
+			stopHandler(reason, detail);
+			childWatch?.stopped(reason);
+		},
 	});
 	// The allowed-model list (issue #502) and the per-job cost cap (issue #501): judged BEFORE every provider call by
 	// the one guard both meter halves consult, the list first. Each part is built only when its policy is set, and
 	// with neither there is no guard, so such a job runs exactly as before.
-	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log });
-	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard });
+	// The parent's children hook (issue #500 part E, child-watch.mjs): folds the child ledgers into this meter, writes
+	// SPENT and STOP, judges the stops on the job's whole spend, and detects pi processes that report through no ledger.
+	// Built before the guard, whose `external` is every child's spend and in-flight bound as of the last fold. From here
+	// on the exit line carries childTotal, childProcesses and unmeteredChildren, zeros with no children.
+	childWatch = createChildWatch({ dir: childLedger.dir ?? null, meter, guard: () => policyGuard, log });
+	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log, external: () => childWatch.external() });
+	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard, children: childWatch });
 	if (usageMeter.ok) {
 		meteredExitFields = () => {
 			const usage = meter.usageSnapshot();

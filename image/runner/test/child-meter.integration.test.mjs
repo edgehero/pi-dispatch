@@ -209,13 +209,19 @@ test("a STOP the parent writes brakes the child's NEXT call, in the bundle's rpc
 	assertMetered(w.ledger, { calls: 1 });
 });
 
-test("a pi subcommand gets no injection and leaves no ledger (issue #500)", { skip }, async () => {
+test("a pi subcommand gets no injection, and one ledger `done` with zeros for its pid (issue #500)", { skip }, async () => {
 	const w = world();
 	const result = await run([entry("dist/bundle/cli.js"), "list"], { env: w.env, cwd: w.root });
 	// `pi list` with an injected -e in front runs a chat turn instead (measured); untouched it lists nothing and exits 0.
 	assert.equal(result.code, 0, result.stderr);
 	assert.equal(w.callCount(), 0);
-	assert.deepEqual(readdirSync(w.ledger), []);
+	// The ledger is what tells the parent's detector this `pi` process is accounted for (part E).
+	const { names, parsed, fold } = ledgers(w.ledger);
+	assert.equal(names.length, 1);
+	assert.equal(names[0].split(".")[0], String(result.pid));
+	assert.equal(parsed[0].raw.state, "done");
+	assert.equal(parsed[0].raw.totals.calls, 0);
+	assert.equal(fold.unmetered, 0);
 });
 
 test("an off-list model is refused in the child, with modelRefused 1 in its ledger (issue #500)", { skip }, async () => {

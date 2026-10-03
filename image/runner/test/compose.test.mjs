@@ -287,13 +287,15 @@ test("run-job refuses an unenforceable cost cap or model list after the meter in
 	// The verdict comes from policyEnforcement, whose ok:false and brake rules usage-meter.test.mjs drives.
 	assert.match(src, /assertPoliciesEnforceable\(\{\s*maxCostMicros: cfg\.maxCostMicros,\s*allowedModels: cfg\.allowedModels,\s*\.\.\.policyEnforcement\(usageMeter\),\s*\}\);/, "the fallback bus meter (ok:false) can only see a call after it was paid for");
 	// Issue #501, PR 3 (PR #533's review): the stop handler is the tested one, so a cost stop cannot log token_budget_exceeded.
-	assert.match(src, /onStop: meterStopHandler\(\{ onTokenAbort, abort: \(\) => void session\?\.abort\(\) \}\),/, "the meter's stop goes through meterStopHandler");
+	assert.match(src, /const stopHandler = meterStopHandler\(\{ onTokenAbort, abort: \(\) => void session\?\.abort\(\) \}\);/, "the meter's stop goes through meterStopHandler");
+	// And then, issue #500 part E, to the children: STOP is written the moment the meter stops.
+	assert.match(src, /\t\tonStop: \(reason, detail\) => \{\n\t\t\tstopHandler\(reason, detail\);\n\t\t\tchildWatch\?\.stopped\(reason\);\n\t\t\},\n/, "the stop handler first, then STOP for the children");
 	assert.doesNotMatch(src, /reason === TOKEN_BUDGET/, "no second, untested copy of the token-only rule");
 	// The policy guard (issues #501, #502): built from both policies (null when neither is set, its order and its
 	// snapshot driven in model-guard.test.mjs), handed to the install, and its fields spread only when it exists.
-	assert.match(src, /const policyGuard = createPolicyGuard\(\{ maxCostMicros: cfg\.maxCostMicros, allowedModels: cfg\.allowedModels, log \}\);/);
+	assert.match(src, /const policyGuard = createPolicyGuard\(\{ maxCostMicros: cfg\.maxCostMicros, allowedModels: cfg\.allowedModels, log, external: \(\) => childWatch\.external\(\) \}\);/);
 	assert.ok(src.indexOf("const policyGuard =") < install, "the guard exists before the install that hands it to both halves");
-	assert.match(src, /installProcessUsageMeter\(\{ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard \}\)/);
+	assert.match(src, /installProcessUsageMeter\(\{ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard, children: childWatch \}\)/);
 	assert.match(src, /\{ \.\.\.meter\.snapshot\(\), \.\.\.\(policyGuard \? policyGuard\.snapshot\(\) : \{\}\) \}/, "the policy fields ride the exit line only when a policy is set");
 	assert.doesNotMatch(src, /createCostGuard|createModelGuard/, "no guard built beside the policy guard, which fixes their order");
 	assert.match(src, /maxCostMicros: cfg\.maxCostMicros,\s*allowedModels: cfg\.allowedModels,\s*rootSessionId/, "the meter carries both policies, so the brake is armed for them");
@@ -313,6 +315,19 @@ test("run-job takes PI_EXIT_AUTH out of its environment right after reading the 
 	assert.ok(ledger < src.indexOf("await buildLoadedResourceLoader("), "before any extension loads");
 	assert.ok(ledger < src.indexOf("await createAgentSession("), "before the session exists");
 	assert.match(src, /if \(childLedger\.error !== undefined\) log\("child_ledger_unavailable", \{ reason: childLedger\.error \}\);/, "a ledger that could not be opened is said, by code");
+});
+
+test("run-job hands the meter the children hook on the ledger directory, and the guard's external is the children's spend (issue #500 part E)", () => {
+	// Source-guard tactic: child-watch.test.mjs drives the hook itself. This pins the wiring a run cannot show here.
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	const ledger = src.indexOf("const childLedger = openChildLedger(");
+	const meter = src.indexOf("const meter = createUsageMeter({");
+	const watch = src.indexOf("childWatch = createChildWatch({ dir: childLedger.dir ?? null, meter, guard: () => policyGuard, log });");
+	const guard = src.indexOf("const policyGuard = createPolicyGuard(");
+	const install = src.indexOf("await installProcessUsageMeter(");
+	assert.ok(ledger > 0 && meter > ledger && watch > meter && guard > watch && install > guard, "the ledger, the meter, the hook (which sets the empty fold, so the three keys are on every exit line), the guard, the install");
+	assert.match(src, /\tlet childWatch = null;\n/, "declared before the meter, whose onStop writes STOP through it");
+	assert.equal(src.split("createChildWatch(").length, 2, "one hook");
 });
 
 test("run-job decides nested or not FIRST, and a nested runner never reaches the key read, the SIGTERM handler or main (issue #500 part D)", () => {

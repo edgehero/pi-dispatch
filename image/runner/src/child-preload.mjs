@@ -23,8 +23,10 @@
  *      is the package bin, the bundle's cli-runtime.js it loads, the unbundled dist/cli.js, and the two rpc entries).
  *      The preload writes the `starting` stub ledger, inserts `-e <child-meter.ts>` FIRST in the arguments (so the
  *      meter loads before every other extension and before any `--`, after which arguments are messages), and hands
- *      usage-meter.mjs over on globalThis. A CLI whose first argument is one of pi's subcommands gets nothing: pi
- *      dispatches those on args[0], and an `-e` in front turns `pi list` into a chat turn (measured). `--version` and
+ *      usage-meter.mjs over on globalThis. A CLI whose first argument is one of pi's subcommands gets no `-e`: pi
+ *      dispatches those on args[0], and an `-e` in front turns `pi list` into a chat turn (measured). It gets a ledger
+ *      written `done` with zeros instead, so the parent's detector, which reads only `pi` off its command line once
+ *      setupCli ran, finds a ledger for its pid. `--version` and
  *      `--export` exit before any extension loads, so the meter never starts; an exit handler marks such a stub `done`
  *      (zeros) rather than leave it `starting` for good. Every other flag is injected like any run (measured).
  *      A NESTED RUNNER takes this route too (child-route.mjs nestedRunnerKind: argv[1] is this image's run-job.mjs and
@@ -57,9 +59,9 @@ import * as nodeModule from "node:module";
 import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isMainThread } from "node:worker_threads";
-import { CHILD_METER_PATH, injectChildMeter, ledgerDirProblem, nestedRunnerKind, PI_SUBCOMMANDS } from "./child-route.mjs";
+import { CHILD_METER_PATH, injectChildMeter, ledgerDirProblem, nestedRunnerKind, PI_ENTRIES, PI_SUBCOMMANDS } from "./child-route.mjs";
 
-export { CHILD_METER_PATH, injectChildMeter, PI_SUBCOMMANDS };
+export { CHILD_METER_PATH, injectChildMeter, PI_ENTRIES, PI_SUBCOMMANDS };
 
 /** usage-meter.mjs CHILD_METER_HANDOFF, spelled again because this file does not load that one up front. A test holds them equal. */
 const HANDOFF = Symbol.for("pi-dispatch.child-meter");
@@ -67,16 +69,6 @@ const HANDOFF = Symbol.for("pi-dispatch.child-meter");
 /** The flags with which pi exits before it loads any extension: the meter never starts, and nothing is spent. */
 const EXITS_BEFORE_EXTENSIONS = Object.freeze(["--version", "-v", "--export"]);
 
-/** The files that run a full pi session, relative to the pi package root, and how each reads its arguments. */
-export const PI_ENTRIES = Object.freeze([
-	Object.freeze({ path: "dist/bundle/cli.js", kind: "cli" }),
-	// cli.js only loads this one, where setupCli and main live; run directly it is the same CLI.
-	Object.freeze({ path: "dist/bundle/cli-runtime.js", kind: "cli" }),
-	Object.freeze({ path: "dist/cli.js", kind: "cli" }),
-	// The rpc entries prepend `--mode rpc` themselves, so no subcommand can follow: every argument list is a session.
-	Object.freeze({ path: "dist/bundle/rpc-entry.js", kind: "rpc" }),
-	Object.freeze({ path: "dist/rpc-entry.js", kind: "rpc" }),
-]);
 const ENTRY_BASENAMES = new Set(PI_ENTRIES.map((entry) => basename(entry.path)));
 
 /** The module the library hook watches for, in any copy of pi-coding-agent. */
@@ -212,12 +204,12 @@ export function makeLibraryResolveHook({ packageDir = defaultPackageDir, onBundl
  * (ledgerDirProblem: a link, not a directory, not writable): a nested runner exits 2 on such a directory before its
  * meter starts, and a stub written through a link would stay `starting` for good in whatever the link names.
  */
-function writeStub(state, meter) {
+function writeStub(state, meter, ledgerState = "starting") {
 	if (state.stubbed) return;
 	state.stubbed = true;
 	if (ledgerDirProblem(state.dir) !== null) return;
 	try {
-		meter.writeFileAtomic({ dir: state.dir, name: state.name, text: JSON.stringify(meter.childLedger({ state: "starting" })) });
+		meter.writeFileAtomic({ dir: state.dir, name: state.name, text: JSON.stringify(meter.childLedger({ state: ledgerState })) });
 	} catch {
 		// No stub: the parent's detector sees a pi process with no ledger, which is the unmetered case.
 	}
@@ -246,11 +238,18 @@ export async function preload({
 	const kind = entryKind(argv[1], { packageDir, realpath }) ?? nestedRunnerKind(argv[1], { env, pid, realpath });
 	if (kind !== null) {
 		const quick = exitsBeforeExtensions(argv.slice(2));
-		if (!injectChildMeter(argv, kind)) return "subcommand";
+		const subcommand = !injectChildMeter(argv, kind);
 		const state = (global[HANDOFF] ??= { dir });
 		try {
 			state.meter ??= await loadMeter();
 			state.name ??= state.meter.childLedgerName(pid);
+			// A subcommand loads no extension and calls no model, but it is a pi process: once setupCli has set its title
+			// its command line reads `pi` and nothing more, so the parent's detector cannot tell `pi list` from a session.
+			// Its ledger is written `done` with zeros at once, so the detector finds a ledger for its pid (issue #500 part E).
+			if (subcommand) {
+				writeStub(state, state.meter, "done");
+				return "subcommand";
+			}
 			writeStub(state, state.meter);
 			// `--version` and `--export` exit before the meter can start, having spent nothing: their stub ends `done`.
 			if (quick) {
@@ -265,7 +264,7 @@ export async function preload({
 		} catch {
 			// child-meter.ts imports usage-meter.mjs itself when the handoff is empty.
 		}
-		return "entry";
+		return subcommand ? "subcommand" : "entry";
 	}
 	const state = (global[HANDOFF] ??= { dir });
 	state.library = ({ ModelRuntime, compat, providers, meter }) => {
