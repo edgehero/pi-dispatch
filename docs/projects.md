@@ -54,12 +54,16 @@ is refused when no one is there to answer it.
 
 - The tools write the file `PI_PROJECTS_FILE` names. They check the result with the worker's own loader, and
   replace the file in one rename, so the worker never reads half a file.
-- If `projects.json` is a symlink (to one shared copy, say), the tools write through it: the link stays and the
-  shared copy gets the edit. The file keeps its mode.
+- If `projects.json` is a symlink, the tools refuse to write it. Edit the file it points to, or set
+  `PI_PROJECTS_FILE` to the real path. (A write through the link would never reach the worker's file watcher, so
+  the worker would keep the old projects while the tool said the change was live.)
+- The file keeps its mode, owner and group. If the tool runs as another user and cannot give the new file the old
+  owner, it refuses and writes nothing, so the worker never loses read access to its own file.
 - A file that is there but cannot be read (a permission error, say) refuses the write. Only a missing file starts
   from no projects. The same holds for `scoped-limits.json`.
-- Right before the rename, a write reads `projects.json` and `scoped-limits.json` again. If either changed since it
-  was checked (another session wrote it), nothing is written and the tool says so; try again. Two writes that land
+- Right before the rename, a write reads `projects.json` and `scoped-limits.json` again and compares them with what
+  the change was built from, before you confirmed it. If either changed (another session wrote it, even while your
+  confirm dialog was open), nothing is written and the tool says so; look again and retry. Two writes that land
   in the same instant after that check can still race, because the two files have no lock.
 - An edit cannot change an id. To rename `shop` to `store`: add `store`, point the row at `project:store`, then
   delete `shop`. The row's count starts over under the new id.

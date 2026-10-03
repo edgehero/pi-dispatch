@@ -63,13 +63,23 @@ export function parseProjects(text, path) {
 }
 
 /**
- * Text with the characters that change what a reader SEES written out as `\u{XXXX}`: C0 and DEL (when not already
- * JSON-escaped), C1, the bidi controls and isolates, the zero-width and invisible format characters, the line and
- * paragraph separators, and the tag block. For a message about operator text that reaches a log line or a terminal.
- * The worker's twin of the panel's `escapeInterpreted` for the cases a log can meet; it imports nothing.
+ * The characters `escapeControls` writes out, the SAME set the admin panel's `escapeInterpreted` escapes (PR #569's
+ * second review; `admin/test/projects.test.mjs` compares the two over every code point): the controls (C0, DEL, C1),
+ * every format character (bidi controls and isolates, zero-width and invisible ones, the tag block) but the two joiners
+ * that compose (U+200C, U+200D), the line and paragraph separators, every blank that is not U+0020 but draws one
+ * column (the no-break and fixed-width spaces, U+2800), the Hangul fillers, and the unassigned code points the
+ * terminal draws as nothing (U+2065, U+FFF0-U+FFF8, the special-purpose plane outside its variation selectors).
+ * U+3000 is kept, as the panel keeps it: it draws two columns, an ordinary full-width space.
+ */
+const ESCAPED = /(?![\u200c\u200d\u3000\u{e0100}-\u{e01ef}])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Zs}\u2800\u115f\u1160\u3164\uffa0\u2065\ufff0-\ufff8\u{e0000}-\u{e0fff}]/gu;
+
+/**
+ * Text with the characters that change what a reader SEES written out as `\\u{XXXX}` (`ESCAPED`), U+0020 kept. For a
+ * message about operator text that reaches a log line or a terminal. The worker's twin of the panel's
+ * `escapeInterpreted`; it imports nothing.
  */
 export function escapeControls(text) {
-	return String(text ?? "").replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb\u{e0000}-\u{e007f}]/gu, (ch) => `\\u{${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}}`);
+	return String(text ?? "").replace(ESCAPED, (ch) => (ch === " " ? ch : `\\u{${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}}`));
 }
 
 function parseProjectsText(text, path) {

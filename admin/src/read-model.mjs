@@ -813,7 +813,9 @@ export function readScopedLimits({ scopedLimitsPath, fs = nodeFs }) {
  * edited, while doctor names it; such a write returns `pending`, which says the worker applies it once its LIVE projects
  * define the id (the admin cannot see those, so it claims neither way).
  */
-export function writeScopedLimits({ scopedLimitsPath, projectsPath = null, mutate, fs = nodeFs }) {
+export function writeScopedLimits({ scopedLimitsPath, projectsPath = null, mutate, expect = null, fs = nodeFs }) {
+  const link = symlinkRefusal(fs, scopedLimitsPath, "PI_SCOPED_LIMITS_FILE");
+  if (link) return { invalid: link };
   let current = [];
   // Only a MISSING file starts from the empty v1 shape, the one repair this writer performs (PR #569's review). A file
   // that is there but cannot be read (EACCES, EISDIR, EIO) refuses, as one that does not parse does: starting from
@@ -844,7 +846,7 @@ export function writeScopedLimits({ scopedLimitsPath, projectsPath = null, mutat
   if (judged.refusal) return { invalid: judged.refusal };
   const inputs = [{ path: scopedLimitsPath, text: existing }];
   if (projectsPath !== null && projectsPath !== undefined) inputs.push({ path: projectsPath, text: pairText });
-  const replaced = replaceFile({ path: scopedLimitsPath, text, inputs, fs });
+  const replaced = replaceFile({ path: scopedLimitsPath, text, inputs, expect, envName: "PI_SCOPED_LIMITS_FILE", fs });
   if (replaced.invalid) return replaced;
   return judged.pending ? { ok: true, pending: judged.pending } : { ok: true };
 }
@@ -873,40 +875,53 @@ function unreadableCode(snapshot) {
 }
 
 /**
+ * A refusal when the file at `path` is a SYMBOLIC LINK (PR #569's second review), else null. The admin writes only a
+ * regular file. Writing through a link put the rename in the target's directory under the target's name, where the
+ * worker's watcher (which watches the configured path's directory for its basename) never sees it, so a tool said
+ * "applied live" while the worker kept the old caps; replacing the link instead left the shared copy stale. Refusing
+ * is the one rule that cannot lie. `envName` is the variable an operator points at the real file.
+ */
+function symlinkRefusal(fs, path, envName) {
+  if (typeof fs.lstatSync !== "function") return null;
+  try {
+    if (!fs.lstatSync(path).isSymbolicLink()) return null;
+  } catch {
+    return null; // missing (or unreadable: the read reports that)
+  }
+  return `${path} is a symbolic link, and the admin writes only a regular file; edit the file it points to, or point ${envName} at the real path. Nothing was written`;
+}
+
+/**
  * Replace the file at `path` with `text`, ATOMICALLY, for the two money-file writers (scoped limits and projects).
  *
- *   - THROUGH a symlink, never over it (PR #569's review): `path` is resolved first and the write lands beside the link's
- *     target, so a projects.json linked to one shared copy stays linked and the shared copy gets the edit. Replacing
- *     the link with a regular file left the shared copy stale and this host quietly on its own file.
- *   - The file's MODE is kept (a 0600 file stays 0600); a new file is 0644, as before.
+ *   - A SYMLINK is refused (`symlinkRefusal`), never written through or replaced.
  *   - The tmp file has a name of its own (`<file>.<pid>.<random>.tmp`, created exclusively), so two writers never share
- *     one and one's rename can never take the other's half-written bytes.
- *   - RE-CHECKED right before the rename: every file the write was judged against (`inputs`, each `{ path, text }` as
- *     `fileSnapshot` read it) is read again, and if any changed, nothing is written and the write says so. That turns a
- *     second session's write between this one's read and its rename from a silent lost update into a refusal.
+ *     one and one's rename can never take the other's half-written bytes. A failure to create it is an `{ invalid }`.
+ *   - The file's MODE is kept (a 0600 file stays 0600; a new file is 0644), and so are its OWNER and GROUP (PR #569's
+ *     second review): an admin running as another user than the worker would otherwise leave a file the worker cannot
+ *     read, which it then refuses at its next boot. When the owner cannot be given back (the admin may not chown),
+ *     nothing is written and the write says why.
+ *   - RE-CHECKED right before the rename against `expect`, the files AS THEY WERE when the change was built (the read
+ *     before the operator's confirm; `inputs`, this call's own read, when no earlier read was made). If any changed,
+ *     nothing is written and the write says so. That covers the whole dialog: a second session's write while the
+ *     confirm is open is a refusal, never a silent lost update.
  *
- * The residual, stated: a write that lands between the re-check and the rename (microseconds, two approved confirms in
- * the same instant) is still lost or still pairs badly with the other file. There is no lock across the two files.
- * Returns `{ ok }` or `{ invalid }`.
+ * The residual, stated: a write that lands between the re-check and the rename (microseconds) is still lost or still
+ * pairs badly with the other file. There is no lock across the two files. Returns `{ ok }` or `{ invalid }`.
  */
-function replaceFile({ path, text, inputs, fs }) {
-  let target = path;
-  if (typeof fs.realpathSync === "function") {
-    try {
-      target = fs.realpathSync(path);
-    } catch (e) {
-      if (e?.code !== "ENOENT") return { invalid: `${path} could not be resolved (${typeof e?.code === "string" ? e.code : "error"}); nothing was written` };
-    }
-  }
-  let mode = 0o644;
+function replaceFile({ path, text, inputs, expect = null, envName, fs }) {
+  const link = symlinkRefusal(fs, path, envName);
+  if (link) return { invalid: link };
+  let before = null;
   if (typeof fs.statSync === "function") {
     try {
-      mode = fs.statSync(target).mode & 0o777;
+      before = fs.statSync(path);
     } catch {
-      // A new file: 0644, the mode these writers always gave it.
+      // A new file: 0644, the mode these writers always gave it, owned by whoever writes it.
     }
   }
-  const tmp = `${target}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  const mode = before ? before.mode & 0o777 : 0o644;
+  const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   const drop = () => {
     try {
       fs.unlinkSync?.(tmp);
@@ -914,26 +929,56 @@ function replaceFile({ path, text, inputs, fs }) {
       // nothing to drop
     }
   };
-  fs.writeFileSync(tmp, text, { mode, flag: "wx" });
+  const code = (e) => (typeof e?.code === "string" ? e.code : "error");
+  try {
+    fs.writeFileSync(tmp, text, { mode, flag: "wx" });
+  } catch (e) {
+    drop();
+    return { invalid: `${path} could not be written (${code(e)}: a new file beside it could not be created); nothing was written` };
+  }
   try {
     // `mode` on create is masked by the umask; set it exactly.
     fs.chmodSync?.(tmp, mode);
   } catch {
     // best effort: the file was still created with the umask applied
   }
-  for (const input of inputs) {
+  if (before && typeof fs.chownSync === "function" && typeof fs.statSync === "function") {
+    let now = null;
+    try {
+      now = fs.statSync(tmp);
+    } catch {
+      // judged below as a mismatch
+    }
+    if (!now || now.uid !== before.uid || now.gid !== before.gid) {
+      try {
+        fs.chownSync(tmp, before.uid, before.gid);
+      } catch (e) {
+        drop();
+        return { invalid: `${path} is owned by uid ${before.uid} gid ${before.gid}, and the new file could not be given that owner (${code(e)}), so the worker might not read it; run this as that user. Nothing was written` };
+      }
+    }
+  }
+  for (const input of Array.isArray(expect) ? expect : inputs) {
     if (fileSnapshot(fs, input.path) !== input.text) {
       drop();
-      return { invalid: `${input.path} changed while this write was being prepared, so it was judged against an older copy; nothing was written. Try again` };
+      return { invalid: `${input.path} changed after this change was built from it (another session wrote it); nothing was written. Look again and retry` };
     }
   }
   try {
-    fs.renameSync(tmp, target);
+    fs.renameSync(tmp, path);
   } catch (e) {
     drop();
     throw e;
   }
   return { ok: true };
+}
+
+/**
+ * The files a write is judged against, as `{ path, text }` snapshots (PR #569's second review): a tool reads them
+ * BEFORE its confirm and passes them back as `expect`, so the re-check before the rename covers the dialog.
+ */
+export function writeInputs({ paths, fs = nodeFs }) {
+  return paths.filter((p) => p !== null && p !== undefined).map((p) => ({ path: p, text: fileSnapshot(fs, p) }));
 }
 
 /**
@@ -1029,6 +1074,8 @@ export function readProjects({ projectsPath, fs = nodeFs }) {
  */
 export function planProjectsWrite({ projectsPath, scopedLimitsPath = null, mutate, fs = nodeFs }) {
   if (projectsPath === null || projectsPath === undefined) return { invalid: PROJECTS_UNSET };
+  const link = symlinkRefusal(fs, projectsPath, "PI_PROJECTS_FILE");
+  if (link) return { invalid: link };
   let current = [];
   // Only a MISSING file starts from no projects (PR #569's review): an unreadable one read as missing let an add replace
   // every project with the one added.
@@ -1091,15 +1138,15 @@ export function planProjectsWrite({ projectsPath, scopedLimitsPath = null, mutat
 }
 
 /**
- * Read-modify-write the projects file (issue #499 part C): `planProjectsWrite`, then `replaceFile` (a tmp file of its
- * own, the mode kept, through a symlink, both judged files re-checked before the rename), so the worker's live-reload
- * watcher never reads half a file. Reached only from
+ * Read-modify-write the projects file (issue #499 part C): `planProjectsWrite`, then `replaceFile` (a symlink refused,
+ * a tmp file of its own, the mode and owner kept, both judged files re-checked before the rename against `expect`, the
+ * tool's pre-confirm plan's `inputs`), so the worker's live-reload watcher never reads half a file. Reached only from
  * the confirm-gated `dispatch_project_*` tools. Returns `{ ok, pending? }` or `{ invalid }`.
  */
-export function writeProjects({ projectsPath, scopedLimitsPath = null, mutate, fs = nodeFs }) {
+export function writeProjects({ projectsPath, scopedLimitsPath = null, mutate, expect = null, fs = nodeFs }) {
   const plan = planProjectsWrite({ projectsPath, scopedLimitsPath, mutate, fs });
   if (plan.invalid) return { invalid: plan.invalid };
-  const replaced = replaceFile({ path: projectsPath, text: plan.text, inputs: plan.inputs, fs });
+  const replaced = replaceFile({ path: projectsPath, text: plan.text, inputs: plan.inputs, expect, envName: "PI_PROJECTS_FILE", fs });
   if (replaced.invalid) return replaced;
   return plan.pending ? { ok: true, pending: plan.pending } : { ok: true };
 }

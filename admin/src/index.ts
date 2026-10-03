@@ -85,6 +85,7 @@ import {
   writeTriggers,
   writePauseWindows,
   writeScopedLimits,
+  writeInputs,
   readProjects,
   planProjectsWrite,
   writeProjects,
@@ -962,12 +963,13 @@ function registerTools(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
+      const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
       const l = buildScopedLimit({ ...params, ...dollarFieldsOf(params) });
       const result = await confirmedWrite(
         ctx,
         { title: "Add scoped limit", message: `Add to scoped-limits.json:\n${JSON.stringify(l)}` },
         () => {
-          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (list: any[]) => [...list, l] });
+          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, mutate: (list: any[]) => [...list, l] });
           if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
           return { applied: true, added: l, ...(res.pending ? { pending: res.pending } : {}) };
         },
@@ -986,6 +988,7 @@ function registerTools(pi: ExtensionAPI): void {
     parameters: Type.Object({ index: Type.Integer({ minimum: 0 }) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
+      const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
       const p = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
       const list = Array.isArray((p as any)?.limits) ? (p as any).limits : [];
       const cur = list[params.index];
@@ -994,7 +997,7 @@ function registerTools(pi: ExtensionAPI): void {
         ctx,
         { title: `Delete scoped limit #${params.index + 1}`, message: `Remove scoped limit #${params.index + 1}: ${cur.scope} ${limitSummary(cur)}` },
         () => {
-          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (l: any[]) => l.filter((_, i) => i !== params.index) });
+          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, mutate: (l: any[]) => l.filter((_, i) => i !== params.index) });
           if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
           return { applied: true, deletedIndex: params.index, ...(res.pending ? { pending: res.pending } : {}) };
         },
@@ -1032,6 +1035,7 @@ function registerTools(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(deploymentEnv());
+      const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
       const p = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
       const list = Array.isArray((p as any)?.limits) ? (p as any).limits : [];
       const cur = list[params.index];
@@ -1058,7 +1062,7 @@ function registerTools(pi: ExtensionAPI): void {
         ctx,
         { title: `Edit scoped limit #${params.index + 1}`, message: `scoped limit #${params.index + 1}:\n${JSON.stringify(before)}\n→ ${JSON.stringify(merged)}${scopeChangeNote(before, merged)}` },
         () => {
-          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (l: any[]) => l.map((w, i) => (i === params.index ? merged : w)) });
+          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, mutate: (l: any[]) => l.map((w, i) => (i === params.index ? merged : w)) });
           if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
           return { applied: true, index: params.index, limit: merged, ...(res.pending ? { pending: res.pending } : {}) };
         },
@@ -1124,7 +1128,7 @@ function registerTools(pi: ExtensionAPI): void {
         ctx,
         { title: "Add project", message: `Add to projects.json:\n${JSON.stringify(projectShown(added))}\nRuns of these members record project ${added.id} from their next pickup.` },
         () => {
-          const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate });
+          const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, expect: plan.inputs });
           if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
           return { applied: true, added: projectShown(added), ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
         },
@@ -1167,7 +1171,7 @@ function registerTools(pi: ExtensionAPI): void {
         ctx,
         { title: `Edit project ${cur.id}`, message: `project ${cur.id}:\n${JSON.stringify(projectShown(cur))}\n→ ${JSON.stringify(projectShown(after))}${note}` },
         () => {
-          const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate });
+          const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, expect: plan.inputs });
           if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
           return { applied: true, project: projectShown(after), ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
         },
@@ -1197,7 +1201,7 @@ function registerTools(pi: ExtensionAPI): void {
         ctx,
         { title: `Delete project ${cur.id}`, message: `Remove project ${cur.id} (${cur.members.length} member${cur.members.length === 1 ? "" : "s"}). Its members' runs record no project from their next pickup; records already written keep the id.` },
         () => {
-          const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate });
+          const res: any = writeProjects({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, mutate, expect: plan.inputs });
           if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
           return { applied: true, deleted: cur.id, ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
         },
@@ -2518,6 +2522,7 @@ async function manageLimitsViaDialogs(paths: any, ui: any, notify: Notify): Prom
 
 /** Add a scoped limit: scope, then the four optional bounds (blank = omit). Validated + live. */
 async function addScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Promise<void> {
+  const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
   const scope = await ui.input("scope: a repo \"owner/name\" (every forge), \"<forge>:owner/name\" such as github:acme/web (one forge), or an ABSOLUTE local folder path (exact match, no globs)", "");
   if (scope === undefined || scope.trim() === "") return;
   const day = await ui.input("day — max jobs per UTC day for this scope (blank = no day cap)", "");
@@ -2529,12 +2534,13 @@ async function addScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Pr
   const concurrent = await ui.input("concurrent — max jobs in flight for this scope, extras deferred (blank = no limit)", "");
   if (concurrent === undefined) return;
   const l = buildScopedLimit({ scope, day, week, month, concurrent });
-  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (list: any[]) => [...list, l] });
+  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, mutate: (list: any[]) => [...list, l] });
   notify?.(res.ok ? `scoped limit added (${liveOr(res)}): ${l.scope} ${limitSummary(l)}` : `add rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
 /** Edit a scoped limit: select which, re-prompt each field with its current value — blank keeps it. */
 async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Promise<void> {
+  const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
   const p: any = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
   const list: any[] = Array.isArray(p?.limits) ? p.limits : [];
   if (list.length === 0) { notify?.("no scoped limits to edit", "info"); return; }
@@ -2569,7 +2575,7 @@ async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): P
   });
   const note = scopeChangeNote(buildScopedLimit(cur), merged);
   if (note !== "" && !(await ui.confirm(`Edit scoped limit #${index + 1}`, `${cur.scope} → ${merged.scope}.${note}`))) return;
-  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (l: any[]) => l.map((w, i) => (i === index ? merged : w)) });
+  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, mutate: (l: any[]) => l.map((w, i) => (i === index ? merged : w)) });
   notify?.(res.ok ? `scoped limit #${index + 1} updated (${liveOr(res)}): ${merged.scope} ${limitSummary(merged)}` : `edit rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
@@ -2585,6 +2591,7 @@ export function scopeChangeNote(before: any, after: any): string {
 
 /** Delete a scoped limit: select which, confirm, remove. */
 async function deleteScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Promise<void> {
+  const expect = writeInputs({ paths: [paths.scopedLimitsPath, paths.projectsFile] }); // the files as the change is built from them (PR #569's second review)
   const p: any = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
   const list: any[] = Array.isArray(p?.limits) ? p.limits : [];
   if (list.length === 0) { notify?.("no scoped limits to delete", "info"); return; }
@@ -2595,7 +2602,7 @@ async function deleteScopedLimitViaDialogs(paths: any, ui: any, notify: Notify):
   if (index < 0) return;
   const ok = await ui.confirm("Delete scoped limit", `Remove ${labels[index]}?`);
   if (!ok) return;
-  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, mutate: (l: any[]) => l.filter((_, i) => i !== index) });
+  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, projectsPath: paths.projectsFile, expect, mutate: (l: any[]) => l.filter((_, i) => i !== index) });
   notify?.(res.ok ? `scoped limit #${index + 1} deleted (${liveOr(res)})` : `delete rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 

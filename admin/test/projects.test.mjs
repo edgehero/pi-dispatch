@@ -9,7 +9,7 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { planProjectsWrite, readProjects, writeProjects, writeScopedLimits } from "../src/read-model.mjs";
 import { checkProjectRows, parseScopedLimits } from "@edgehero/pi-dispatch/scoped-limits";
 import { escapeInterpreted } from "../src/panel.mjs";
-import { parseProjects } from "@edgehero/pi-dispatch/projects";
+import { escapeControls, parseProjects } from "@edgehero/pi-dispatch/projects";
 
 /**
  * Issue #499 part C: the admin's projects surfaces. The reader and the writer (`readProjects`, `planProjectsWrite`,
@@ -328,7 +328,7 @@ test("a second session's write between this one's read and its rename is refused
     },
   };
   const a = writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, fs: fsA, mutate: (l) => [...l, { id: "aaa", members: ["/srv/c"] }] });
-  assert.match(a.invalid, /changed while this write was being prepared.*nothing was written/);
+  assert.match(a.invalid, /changed after this change was built from it.*nothing was written/);
   assert.deepEqual(d.read().projects.map((p) => p.id), ["shop", "bbb"], "B's approved write stands");
   assert.ok(!readdirSync(join(d.p, "..")).some((f) => f.endsWith(".tmp")), "A's tmp file is removed");
 });
@@ -346,7 +346,7 @@ test("a second session's write between this one's tmp write and its rename: sepa
       }
     },
   };
-  assert.match(writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, fs: fsA, mutate: (l) => [...l, { id: "aaa", members: ["/srv/c"] }] }).invalid, /changed while/);
+  assert.match(writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, fs: fsA, mutate: (l) => [...l, { id: "aaa", members: ["/srv/c"] }] }).invalid, /changed after this change was built/);
   assert.deepEqual(d.read().projects.map((p) => p.id), ["shop", "bbb"]);
 });
 
@@ -364,30 +364,105 @@ test("across the two files: a project delete judged before a row add lands is re
       return out;
     },
   };
-  assert.match(writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, fs: fsA, mutate: (l) => l.filter((p) => p.id !== "shop") }).invalid, /changed while/);
+  assert.match(writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, fs: fsA, mutate: (l) => l.filter((p) => p.id !== "shop") }).invalid, /changed after this change was built/);
   checkProjectRows(parseScopedLimits(readFileSync(d.sl, "utf8"), d.sl), parseProjects(readFileSync(d.p, "utf8"), d.p), d.sl, d.p);
 });
 
-test("a write goes THROUGH a symlink to the shared copy, and keeps the file's mode", () => {
+test("both writers REFUSE a symlinked file, with a plain message, and touch neither the link nor its target", () => {
   const d = deployment({});
   const target = join(d.p, "..", "shared-projects.json");
   writeFileSync(target, PROJECTS([{ id: "shop", members: ["/srv/a"] }]));
-  chmodSync(target, 0o600);
   symlinkSync(target, d.p);
-  assert.deepEqual(writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, mutate: (l) => [...l, { id: "ops", members: ["/srv/b"] }] }), { ok: true });
-  assert.equal(lstatSync(d.p).isSymbolicLink(), true, "the link stays");
-  assert.deepEqual(JSON.parse(readFileSync(target, "utf8")).projects.map((p) => p.id), ["shop", "ops"], "the shared copy has the edit");
-  assert.equal(statSync(target).mode & 0o777, 0o600, "a private file stays private");
-  // The scoped-limits writer follows the same rule.
+  const before = readFileSync(target, "utf8");
+  const res = writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, mutate: (l) => [...l, { id: "ops", members: ["/srv/b"] }] });
+  assert.match(res.invalid, /is a symbolic link, and the admin writes only a regular file; edit the file it points to, or point PI_PROJECTS_FILE at the real path\. Nothing was written$/);
+  assert.equal(lstatSync(d.p).isSymbolicLink(), true);
+  assert.equal(readFileSync(target, "utf8"), before);
   const slTarget = join(d.p, "..", "shared-limits.json");
   writeFileSync(slTarget, LIMITS([{ scope: "acme/web", day: 1 }]));
-  chmodSync(slTarget, 0o640);
   symlinkSync(slTarget, d.sl);
-  assert.equal(writeScopedLimits({ scopedLimitsPath: d.sl, projectsPath: d.p, mutate: (l) => [...l, { scope: "acme/api", day: 2 }] }).ok, true);
-  assert.equal(lstatSync(d.sl).isSymbolicLink(), true);
-  assert.equal(statSync(slTarget).mode & 0o777, 0o640);
-  assert.equal(parseScopedLimits(readFileSync(slTarget, "utf8"), slTarget).length, 2);
-  assert.ok(!existsSync(`${d.p}.tmp`));
+  const sl = writeScopedLimits({ scopedLimitsPath: d.sl, projectsPath: null, mutate: (l) => [...l, { scope: "acme/api", day: 2 }] });
+  assert.match(sl.invalid, /point PI_SCOPED_LIMITS_FILE at the real path/);
+  assert.equal(parseScopedLimits(readFileSync(slTarget, "utf8"), slTarget).length, 1);
+  // A dangling link is a link too: refused, never replaced by a regular file.
+  const d2 = deployment({});
+  symlinkSync(join(d2.p, "..", "nowhere.json"), d2.p);
+  assert.match(writeProjects({ projectsPath: d2.p, scopedLimitsPath: d2.sl, mutate: (l) => [...l, { id: "a", members: ["/srv/a"] }] }).invalid, /symbolic link/);
+  assert.ok(!readdirSync(join(d.p, "..")).some((f) => f.endsWith(".tmp")));
+});
+
+test("the mode is kept, and so are the owner and group: a file the worker owns stays the worker's", () => {
+  const d = deployment({ projects: [{ id: "shop", members: ["/srv/a"] }] });
+  chmodSync(d.p, 0o640);
+  assert.deepEqual(writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, mutate: (l) => l }), { ok: true });
+  assert.equal(statSync(d.p).mode & 0o777, 0o640);
+  // Another user's file (an injected stat): the tmp file is given that owner before the rename.
+  const chowned = [];
+  const asWorker = (st) => Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: 4242, gid: 4343 });
+  const fsOther = { ...realFs, statSync: (p) => (p === d.p ? asWorker(realFs.statSync(p)) : realFs.statSync(p)), chownSync: (p, uid, gid) => chowned.push([p, uid, gid]) };
+  assert.deepEqual(writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, fs: fsOther, mutate: (l) => l }), { ok: true });
+  assert.equal(chowned.length, 1);
+  assert.match(chowned[0][0], /projects\.json\.\d+\.[0-9a-f]{12}\.tmp$/, "the tmp file, before the rename");
+  assert.deepEqual(chowned[0].slice(1), [4242, 4343]);
+  // When the owner cannot be given back, nothing is written.
+  const before = readFileSync(d.p, "utf8");
+  const fsDenied = { ...fsOther, chownSync: () => { throw Object.assign(new Error("EPERM"), { code: "EPERM" }); } };
+  const res = writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, fs: fsDenied, mutate: (l) => [...l, { id: "ops", members: ["/srv/b"] }] });
+  assert.match(res.invalid, /owned by uid 4242 gid 4343, and the new file could not be given that owner \(EPERM\).*Nothing was written$/);
+  assert.equal(readFileSync(d.p, "utf8"), before);
+  assert.ok(!readdirSync(join(d.p, "..")).some((f) => f.endsWith(".tmp")), "the tmp file is dropped");
+  // The same rule in the scoped-limits writer.
+  writeFileSync(d.sl, LIMITS([{ scope: "acme/web", day: 1 }]));
+  const fsDeniedSl = { ...realFs, statSync: (p) => (p === d.sl ? asWorker(realFs.statSync(p)) : realFs.statSync(p)), chownSync: fsDenied.chownSync };
+  assert.match(writeScopedLimits({ scopedLimitsPath: d.sl, projectsPath: null, fs: fsDeniedSl, mutate: (l) => l }).invalid, /could not be given that owner/);
+});
+
+test("a tmp file that cannot be created is a plain refusal, not a raw fs error", () => {
+  const d = deployment({ projects: [{ id: "shop", members: ["/srv/a"] }] });
+  const fsFull = { ...realFs, writeFileSync: (p, ...rest) => { if (String(p).endsWith(".tmp")) throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" }); return realFs.writeFileSync(p, ...rest); } };
+  assert.match(writeProjects({ projectsPath: d.p, scopedLimitsPath: d.sl, fs: fsFull, mutate: (l) => l }).invalid, /could not be written \(ENOSPC/);
+});
+
+test("the re-check covers the confirm dialog: an edit while another session's dialog is open is refused, never lost", async () => {
+  const d = deployment({ projects: [{ id: "shop", name: "Shop", members: ["/srv/a"] }] });
+  const edit = toolByName("dispatch_project_edit");
+  let b = null;
+  const ctxA = { hasUI: true, ui: { confirm: async () => {
+    b = await edit.execute("b", { id: "shop", members: ["/srv/a", "/srv/b"] }, undefined, undefined, { hasUI: true, ui: { confirm: async () => true } });
+    return true;
+  } } };
+  await assert.rejects(() => edit.execute("a", { id: "shop", name: "Webshop" }, undefined, undefined, ctxA), /changed after this change was built from it/);
+  assert.equal(textOf(b).applied, true);
+  assert.deepEqual(d.read().projects[0], { id: "shop", name: "Shop", members: ["/srv/a", "/srv/b"] }, "B's change stands, A wrote nothing");
+});
+
+test("the scoped-limit writers re-check against the pre-confirm read too", async () => {
+  deployment({ projects: [], limits: [{ scope: "acme/web", day: 1 }] });
+  const sl = process.env.PI_SCOPED_LIMITS_FILE;
+  for (const [name, params] of [["dispatch_limit_edit", { index: 0, day: 5 }], ["dispatch_limit_delete", { index: 0 }], ["dispatch_limit_add", { scope: "acme/api", day: 2 }]]) {
+    writeFileSync(sl, LIMITS([{ scope: "acme/web", day: 1 }]));
+    const ctx = { hasUI: true, ui: { confirm: async () => {
+      writeFileSync(sl, LIMITS([{ scope: "acme/web", day: 1 }, { scope: "acme/other", day: 9 }])); // another session, mid-dialog
+      return true;
+    } } };
+    await assert.rejects(() => toolByName(name).execute("id", params, undefined, undefined, ctx), /changed after this change was built from it/, name);
+    assert.deepEqual(parseScopedLimits(readFileSync(sl, "utf8"), sl).map((l) => l.scope), ["acme/web", "acme/other"], `${name} wrote nothing`);
+  }
+});
+
+test("the worker's escapeControls escapes exactly the panel's escapeInterpreted set, over every code point", () => {
+  const onlyPanel = [];
+  const onlyWorker = [];
+  for (let cp = 0; cp <= 0x10ffff; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue;
+    const ch = String.fromCodePoint(cp);
+    const a = escapeInterpreted(ch) !== ch;
+    const b = escapeControls(ch) !== ch;
+    if (a && !b) onlyPanel.push(cp.toString(16));
+    if (b && !a) onlyWorker.push(cp.toString(16));
+  }
+  assert.deepEqual(onlyPanel, []);
+  assert.deepEqual(onlyWorker, []);
 });
 
 test("members and refusals are escaped in tool results, dispatch_projects and errors", async () => {
