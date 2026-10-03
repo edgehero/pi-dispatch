@@ -8,6 +8,7 @@ import {
 	IMAGE_TOKEN_CEILINGS,
 	SAMPLING_SAFE_KEYS,
 	createCostGuard,
+	createPolicyGuard,
 	createUsageMeter,
 	installProcessUsageMeter,
 	makeHardStopStream,
@@ -827,4 +828,53 @@ test("with no cap there is no guard, so the exit line carries no cost counter at
 	const keys = Object.keys(createUsageMeter({ maxTokens: null }).snapshot());
 	for (const key of ["costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered"]) assert.ok(!keys.includes(key), key);
 	assert.deepEqual(Object.keys(createCostGuard({ capMicros: 0 }).snapshot()), ["costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered"]);
+});
+
+// ── Issue #500: spend in other processes (`external`) ──────────────────────────────────────────────────────
+
+test("external: the guard judges spent + inflight + external() + bound, read at every admit", async () => {
+	let outside = 301;
+	const logged = [];
+	const guard = createCostGuard({ capMicros: 1000, bound: () => 600, external: () => outside, log: (event, fields) => logged.push(fields) });
+	assert.equal(guard.admit(call()), null, "0 + 0 + 301 + 600 <= 1000");
+	const first = new FakeStream();
+	guard.bind(first);
+	first.end(message(0.0001));
+	await flush();
+	assert.equal(guard.admit(call()), COST_CAP, "100 + 0 + 301 + 600 > 1000: the outside spend is what tips it");
+	assert.deepEqual(logged, [{ bound: 600, external: 301, spent: 100, inflight: 0, cap: 1000 }], "numbers only, the outside part named");
+	outside = 0;
+	assert.equal(guard.admit(call()), null, "read again at the next admit, not once");
+});
+
+test("external fails closed: a non-number, NaN, Infinity, a negative or a throw refuses the call", () => {
+	for (const answer of [undefined, null, "5", Number.NaN, Infinity, -1, () => {
+		throw new Error("ENOENT");
+	}]) {
+		const logged = [];
+		const guard = createCostGuard({ capMicros: 1_000_000, bound: () => 1, external: typeof answer === "function" ? answer : () => answer, log: (event, fields) => logged.push(fields) });
+		assert.equal(guard.admit(call()), COST_CAP, String(answer));
+		assert.deepEqual(logged, [{ why: "external", spent: 0, inflight: 0, cap: 1_000_000 }], String(answer));
+	}
+	assert.throws(() => createCostGuard({ capMicros: 1, external: 5 }), /external must be a function/);
+});
+
+test("spend() reports spent and in-flight; the snapshot, and so the exit line, is unchanged with or without external", async () => {
+	const guard = createCostGuard({ capMicros: 10_000, bound: () => 600, external: () => 0 });
+	guard.admit(call());
+	const done = new FakeStream();
+	guard.bind(done);
+	guard.admit(call());
+	guard.bind(new FakeStream());
+	done.end(message(0.000_25));
+	await flush();
+	assert.deepEqual(guard.spend(), { spentMicros: 250, inflightMicros: 600 });
+	const line = '{"costCapMicros":10000,"costRefused":0,"boundExceeded":0,"longContext":0,"costUnjudged":0,"costUnanswered":0}';
+	assert.equal(JSON.stringify(guard.snapshot()), line, "external set: the exit line's cost fields are byte-identical");
+	assert.equal(JSON.stringify(createCostGuard({ capMicros: 10_000, bound: () => 600 }).snapshot()), line);
+	const policy = createPolicyGuard({ maxCostMicros: 1000, external: () => 2000, env: {} });
+	assert.equal(policy.admit({ method: "streamSimple", model: { ...FLAT, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }, args: [{}, {}] }), COST_CAP, "createPolicyGuard hands external to the cost guard");
+	assert.deepEqual(Object.keys(policy.snapshot()), ["costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered"]);
+	assert.deepEqual(policy.spend(), { spentMicros: 0, inflightMicros: 0 });
+	assert.deepEqual(createPolicyGuard({ allowedModels: [{ provider: "p", model: "m" }] }).spend(), { spentMicros: 0, inflightMicros: 0 }, "zeros without a cap");
 });
