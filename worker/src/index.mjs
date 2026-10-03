@@ -517,7 +517,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// catch, and a moveToDelayed rejection here must escape RAW into BullMQ's normal failed-attempt
 		// handling exactly as the pause gate's does (inside the try it would become a permanent failure
 		// plus a failure record for what was a transient blip). The limits snapshot is read ONCE here and
-		// shared with `scopedCaps` below, so the gate and the money ledger cannot disagree mid-job.
+		// shared with `scopedLedgers` below, so the gate and the money ledger cannot disagree mid-job.
 		// tryAcquire is a synchronous check-and-increment -- no await between read and take, so Node's
 		// single thread makes it atomic at any concurrency -- and the local-folder limit is a structural 1
 		// (concurrencyFor) with no file and no off-switch: the scheduler mints a cron trigger's next

@@ -91,6 +91,10 @@ export function resolvePaths(env = process.env) {
     scopedLimitsPath: env.PI_SCOPED_LIMITS_FILE ?? "./scoped-limits.json",
     // Issue #499: the projects file, with the same cwd default as its siblings (what `init` scaffolds).
     projectsPath: env.PI_PROJECTS_FILE ?? "./projects.json",
+    // The projects file AS THE WORKER READS IT, for judging a scoped-limits `project:<id>` row (issue #499 part B): null
+    // when the key is unset, which the worker reads as no projects. Not the panel's cwd default above, which would let
+    // the panel accept a row against a file the worker never loads.
+    projectsFile: env.PI_PROJECTS_FILE ?? null,
     subscriptionsPath: env.PI_SUBSCRIPTIONS_FILE ?? "./subscriptions.json",
     // The operator's global pi overlay dir (REQ-GLOBAL-PI-OVERLAY), where the staged third-party pi
     // packages live under `packages/`. `|| null` so unset AND empty both read as "no overlay" -- the
@@ -799,12 +803,13 @@ export function readScopedLimits({ scopedLimitsPath, fs = nodeFs }) {
  * why this money file refuses where the analytics twin (`writeSubscriptions`) repairs. Only a MISSING
  * file starts from the empty v1 shape. The result is re-serialized (absent windows omitted, not
  * null-padded — the committed example's shape), re-validated fail-closed, and written tmp + rename.
- * Returns `{ ok }` or `{ invalid }`.
+ * Returns `{ ok }` (with `pending` when the worker will not take it live, below) or `{ invalid }`.
  *
- * Issue #499 part B: a `project:<id>` row this write adds or changes must name a project in `projectsPath`
- * (projects.json; a missing file is no projects), or the write is refused: the worker would refuse to start on it, and
- * a running worker would keep its last good limits. A row already in the file, unchanged, is not re-judged, so a row
- * left dangling by a projects.json edit can still be deleted, and other rows edited, while doctor names it.
+ * Issue #499 part B: a `project:<id>` row this write adds or changes must name a project in `projectsPath`, the
+ * projects file as the WORKER reads it (null when PI_PROJECTS_FILE is unset: no projects), or the write is refused: the
+ * worker would refuse to start on it, and a running worker would keep its last good limits. A row already in the file,
+ * unchanged, is not re-judged, so a row left dangling by a projects.json edit can still be deleted, and other rows
+ * edited, while doctor names it; such a write returns `pending`, because the worker takes it only once both files agree.
  */
 export function writeScopedLimits({ scopedLimitsPath, projectsPath = null, mutate, fs = nodeFs }) {
   let current = [];
@@ -833,40 +838,50 @@ export function writeScopedLimits({ scopedLimitsPath, projectsPath = null, mutat
   } catch (e) {
     return { invalid: e?.message ?? String(e) };
   }
-  const dangling = newDanglingProjectRows(current, written, projectsPath, fs);
-  if (dangling) return { invalid: dangling };
+  const judged = judgeProjectRows(current, written, projectsPath, fs);
+  if (judged.refusal) return { invalid: judged.refusal };
   const tmp = `${scopedLimitsPath}.tmp`;
   fs.writeFileSync(tmp, text, { mode: 0o644 });
   fs.renameSync(tmp, scopedLimitsPath);
-  return { ok: true };
+  return judged.pending ? { ok: true, pending: judged.pending } : { ok: true };
 }
 
 /**
- * The refusal for a write whose result adds or changes a `project:<id>` row naming a project that `projectsPath` does
- * not define, or null (issue #499 part B). Reads projects.json only when such a row is in play. A missing file is no
- * projects (the worker's unset), and a file that does not parse refuses the write: the row could not be checked.
+ * Judge a write's `project:<id>` rows against the projects file the worker reads (`projectsPath`, null when
+ * PI_PROJECTS_FILE is unset: no projects, the worker's reading), issue #499 part B. Returns `{ refusal }` when a row the
+ * write adds or changes names a missing project, or the file cannot be read or parsed while such a row is in play;
+ * `{ pending }` when only an UNCHANGED row still dangles (the write is allowed, so that row can be deleted, but the
+ * worker keeps its last good limits until the pair agrees, so the caller must not say "live"); else `{}`.
  */
-function newDanglingProjectRows(before, after, projectsPath, fs) {
+function judgeProjectRows(before, after, projectsPath, fs) {
+  const rows = after.filter((row) => isProjectScope(row.scope));
+  if (rows.length === 0) return {};
   const unchanged = new Set(before.map((row) => JSON.stringify(row)));
-  const touched = after.filter((row) => isProjectScope(row.scope) && !unchanged.has(JSON.stringify(row)));
-  if (touched.length === 0) return null;
+  const touched = rows.filter((row) => !unchanged.has(JSON.stringify(row)));
   let projects = [];
-  let text = null;
-  try {
-    text = projectsPath ? fs.readFileSync(projectsPath, "utf8") : null;
-  } catch {
-    // Missing or unreadable: no projects, the worker's reading of an unset file. The check below then refuses the row.
-  }
-  if (text !== null) {
+  if (projectsPath !== null && projectsPath !== undefined) {
+    let text;
+    try {
+      text = fs.readFileSync(projectsPath, "utf8");
+    } catch (e) {
+      // Set but unreadable (missing included): the worker cannot load it either. Named as unreadable, never as a
+      // missing project, so the operator fixes the file rather than adding a project that is already there.
+      const why = `the projects file ${projectsPath} could not be read (${typeof e?.code === "string" ? e.code : "error"})`;
+      return touched.length > 0 ? { refusal: `${why}, so a project row cannot be checked; fix it first. Nothing was written` } : { pending: `${why}; the worker keeps its last good limits until it can` };
+    }
     try {
       projects = parseProjects(text, projectsPath);
     } catch (e) {
-      return `the projects file does not load (${e?.message ?? String(e)}), so a project row cannot be checked; fix it first. Nothing was written`;
+      const why = `the projects file does not load (${e?.message ?? String(e)})`;
+      return touched.length > 0 ? { refusal: `${why}, so a project row cannot be checked; fix it first. Nothing was written` } : { pending: `${why}; the worker keeps its last good limits until it can` };
     }
   }
-  const missing = danglingProjectRows(touched, projects).map((d) => touched[d.index].scope);
-  if (missing.length === 0) return null;
-  return `${missing.join(", ")} names a project that is not in the projects file (PI_PROJECTS_FILE); add the project there first. Nothing was written`;
+  const missing = danglingProjectRows(rows, projects).map((d) => rows[d.index]);
+  const where = projectsPath ? `the projects file ${projectsPath}` : "the projects file (PI_PROJECTS_FILE is unset, so there are no projects)";
+  const added = missing.filter((row) => touched.includes(row)).map((row) => row.scope);
+  if (added.length > 0) return { refusal: `${added.join(", ")} names a project that is not in ${where}; add the project there first. Nothing was written` };
+  if (missing.length > 0) return { pending: `${missing.map((row) => row.scope).join(", ")} still names a project that is not in ${where}, so the worker keeps its last good limits until both files agree` };
+  return {};
 }
 
 /**

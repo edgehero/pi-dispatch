@@ -504,31 +504,35 @@ test("a qualified row must have a forge repo's shape: each refused shape is name
 
 // ── project rows (issue #499 part B) ─────────────────────────────────────────────────────────────────────
 
-test("a project:<id> row parses in BOTH versions for its job-count fields; its dollar fields need version 2", () => {
-	const v1 = parse([{ scope: " project:shop ", day: 2, week: 5, concurrent: 1 }]);
-	assert.deepEqual(v1, [{ scope: "project:shop", day: 2, week: 5, month: null, concurrent: 1 }]);
-	assert.equal(isProjectScope(v1[0].scope), true);
-	assert.equal(scopedLimitsVersionFor(v1), 1, "a count-only project row keeps the file at version 1");
-	const v2 = parse2([{ scope: "project:shop", dayUsd: "5", monthUsd: "40" }]);
-	assert.deepEqual(v2, [{ scope: "project:shop", day: null, week: null, month: null, concurrent: null, dayUsd: "5.00", weekUsd: null, monthUsd: "40.00" }]);
-	assert.equal(scopedLimitsVersionFor(v2), 2);
-	assert.throws(() => parse([{ scope: "project:shop", dayUsd: "5" }]), /dayUsd needs "version": 2/);
-	assert.throws(() => parse([{ scope: "project:shop", day: 1 }, { scope: "project:shop", week: 1 }]), /duplicate scope "project:shop"/);
-	assert.throws(() => parse([{ scope: "project:shop" }]), /at least one of day, week, month, concurrent/);
+test("a project:<id> row parses in version 2 only, in every field, and stamps version 2 (issue #499 part B)", () => {
+	const v2 = parse2([{ scope: " project:shop ", day: 2, week: 5, concurrent: 1 }]);
+	assert.deepEqual(v2, [{ scope: "project:shop", day: 2, week: 5, month: null, concurrent: 1, dayUsd: null, weekUsd: null, monthUsd: null }]);
+	assert.equal(isProjectScope(v2[0].scope), true);
+	assert.equal(scopedLimitsVersionFor(v2), 2, "a count-only project row needs version 2 too");
+	assert.equal(scopedLimitsVersionFor([{ scope: " project:shop ", concurrent: 1 }]), 2, "as the admin builds it, untrimmed");
+	// The released 2.1.0 reads `project:shop` as an inert repo row, so a version 1 file holding one is refused here and
+	// a version 2 file is refused there as newer.
+	for (const row of [{ scope: "project:shop", day: 2 }, { scope: "project:shop", concurrent: 1 }, { scope: "project:shop", dayUsd: "5" }]) {
+		assert.throws(() => parse([row]), (e) => /index 0/.test(e.message) && /a project row needs "version": 2/.test(e.message), JSON.stringify(row));
+	}
+	const usd = parse2([{ scope: "project:shop", dayUsd: "5", monthUsd: "40" }]);
+	assert.deepEqual(usd, [{ scope: "project:shop", day: null, week: null, month: null, concurrent: null, dayUsd: "5.00", weekUsd: null, monthUsd: "40.00" }]);
+	assert.throws(() => parse2([{ scope: "project:shop", day: 1 }, { scope: "project:shop", week: 1 }]), /duplicate scope "project:shop"/);
+	assert.throws(() => parse2([{ scope: "project:shop" }]), /at least one of day, week, month, concurrent/);
 	assert.equal(projectScope("shop"), "project:shop");
 });
 
 test("a project row is never a job's own scope: limitFor and rowScopeFor ignore it, and it sits beside a bare row", () => {
-	const limits = parse([{ scope: "acme/web", day: 1 }, { scope: "project:shop", day: 2 }]);
+	const limits = parse2([{ scope: "acme/web", day: 1 }, { scope: "project:shop", day: 2 }]);
 	// A forge never puts `:` in a repo name, so no real job has this repo; even a hand-built one never matches the row.
 	assert.equal(limitFor(limits, ghJob("project:shop")), null);
 	assert.equal(rowScopeFor(ghJob("project:shop"), limits), "project:shop", "no row matched: the job's own canonical scope, as before");
 	assert.equal(budgetCapsFor(ghJob("project:shop"), limits), null);
-	assert.equal(concurrencyFor(ghJob("project:shop"), parse([{ scope: "project:shop", concurrent: 1 }])), Infinity);
+	assert.equal(concurrencyFor(ghJob("project:shop"), parse2([{ scope: "project:shop", concurrent: 1 }])), Infinity);
 });
 
 test("scopedLedgers orders the repo or folder row BEFORE the project row, each keyed by its own row scope", () => {
-	const limits = parse([{ scope: "project:shop", day: 2 }, { scope: "acme/web", week: 7 }]);
+	const limits = parse2([{ scope: "project:shop", day: 2 }, { scope: "acme/web", week: 7 }]);
 	const ledgers = scopedLedgers(ghJob("acme/web"), limits, "shop");
 	assert.deepEqual(ledgers, [
 		{ scope: "acme/web", keyPrefix: scopeKeyPrefix("acme/web"), caps: { day: null, week: 7, month: null }, reason: "scope-cap" },
@@ -555,12 +559,12 @@ test("projectDollarCapsFor: the project row's dollar windows under scopeDollarKe
 	assert.equal(caps.keyPrefix, `budget:usd:s:${createHash("sha256").update("project:shop").digest("hex").slice(0, 16)}`);
 	assert.equal(dollarKeyPrefixFor(limits[0]), caps.keyPrefix, "the admin reads the counters under the same prefix");
 	assert.equal(projectDollarCapsFor(limits, null), null);
-	assert.equal(projectDollarCapsFor(parse([{ scope: "project:shop", day: 1 }]), "shop"), null, "no dollar field, no dollar ledger");
+	assert.equal(projectDollarCapsFor(parse2([{ scope: "project:shop", day: 1 }]), "shop"), null, "no dollar field, no dollar ledger");
 	assert.deepEqual(dollarRowsWithoutCap(limits, null), [{ index: 0, kind: "project" }]);
 });
 
 test("a project row whose id is not a project is named by index and id (danglingProjectRows / checkProjectRows)", () => {
-	const limits = parse([{ scope: "acme/web", day: 1 }, { scope: "project:shop", day: 2 }, { scope: "project:gone", week: 1 }]);
+	const limits = parse2([{ scope: "acme/web", day: 1 }, { scope: "project:shop", day: 2 }, { scope: "project:gone", week: 1 }]);
 	const projects = [{ id: "shop", name: "Private Name", members: ["github:acme/web"] }];
 	assert.deepEqual(danglingProjectRows(limits, projects), [{ index: 2, id: "gone" }]);
 	assert.deepEqual(danglingProjectRows(limits, []), [{ index: 1, id: "shop" }, { index: 2, id: "gone" }], "no projects file: every project row dangles");

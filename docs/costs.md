@@ -255,8 +255,6 @@ is an open issue.
 - **Project windows are not attributed in the panel yet** (issue #499). A `project:<id>` row's dollar windows are
   enforced ([scoped limits](scoped-limits.md#project-rows)), but the DOLLAR WINDOWS section cannot yet match its
   records to it, and the per-project cost view comes later.
-- **Scopes collide across forges** (issue #498). A GitHub `acme/web` and a Forgejo `acme/web` share one repo row
-  and one counter.
 - **A forged exit line**, on an image that does not declare `exitAuth`, or a worker and image pair older than
   #545. The job's own tools can write a fake exit line, and a forgery after the real line, with the right code,
   is still read as the last one. The per-job cap bounds what such a run can have spent. With `exitAuth` on both

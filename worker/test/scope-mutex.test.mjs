@@ -1046,7 +1046,7 @@ test("the fleet lease key is slot:s:<hash16 of the ROW scope>:<i>, the hash the 
 const SHOP = [{ id: "shop", members: ["/srv/shop-a", "/srv/shop-b", "github:acme/web"] }];
 
 test("a project concurrent: 1 row defers a second member's job, keyed project:<id>, and an unrelated folder runs", { skip }, async () => {
-	const h = harness({ limits: limitsOf([{ scope: "project:shop", concurrent: 1 }]), extra: { projects: () => SHOP } });
+	const h = harness({ limits: limitsOf2([{ scope: "project:shop", concurrent: 1 }]), extra: { projects: () => SHOP } });
 	const first = h.processor(localJob("p-1", "/srv/shop-a").job, "tok", new AbortController().signal);
 	await h.untilStarted(1);
 	assert.equal(h.inFlight.count("project:shop"), 1, "the project slot is keyed by the project ROW's scope");
@@ -1071,7 +1071,7 @@ test("a project concurrent: 1 row defers a second member's job, keyed project:<i
 });
 
 test("the project slot is taken AFTER the repo slot: a busy repo defers before the project is touched", { skip }, async () => {
-	const h = harness({ limits: limitsOf([{ scope: "acme/web", concurrent: 1 }, { scope: "project:shop", concurrent: 5 }]), extra: { projects: () => SHOP } });
+	const h = harness({ limits: limitsOf2([{ scope: "acme/web", concurrent: 1 }, { scope: "project:shop", concurrent: 5 }]), extra: { projects: () => SHOP } });
 	const first = h.processor(ghJob("g-1", "acme/web").job, "tok", new AbortController().signal);
 	await h.untilStarted(1);
 	assert.equal(h.inFlight.count("project:shop"), 1);
@@ -1084,7 +1084,7 @@ test("the project slot is taken AFTER the repo slot: a busy repo defers before t
 });
 
 test("a project's FLEET lease is slot:s:<hash16(project:<id>)>, taken for a local member too, and a fleet miss gives back every slot", { skip }, async () => {
-	const limits = limitsOf([{ scope: "project:shop", concurrent: 1 }]);
+	const limits = limitsOf2([{ scope: "project:shop", concurrent: 1 }]);
 	const lease = leaseRedis();
 	const scopeLease = (holder) => makeFleetLease({ redis: lease, holderPrefix: holder, keyFor: scopeSlotKey, ttlMs: 60_000, timeoutMs: 50 });
 	const h1 = harness({ limits, extra: { projects: () => SHOP, scopeLease: scopeLease("mini1") } });
@@ -1107,7 +1107,7 @@ test("a project's FLEET lease is slot:s:<hash16(project:<id>)>, taken for a loca
 test("a deferral AFTER the project slot (a busy model endpoint) gives the project slot back, last first", { skip }, async () => {
 	const endpointSlots = makeInFlight();
 	const w = endpointWiring({ endpointSlots, lease: false });
-	const limits = limitsOf([{ scope: "project:shop", concurrent: 2 }]);
+	const limits = limitsOf2([{ scope: "project:shop", concurrent: 2 }]);
 	const h = harness({ limits, getSettings: LOCAL_MODEL, extra: { ...w.extra, projects: () => SHOP } });
 	assert.ok(endpointSlots.tryAcquire(OLLAMA.id, OLLAMA.slots) && OLLAMA.slots === 1, "the one endpoint slot is taken elsewhere");
 	await assert.rejects(() => h.processor(localJob("p-1", "/srv/shop-a").job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
@@ -1118,7 +1118,7 @@ test("a deferral AFTER the project slot (a busy model endpoint) gives the projec
 
 test("a job in no project, or in a project with no row, takes no project slot; the pickup project is read once", { skip }, async () => {
 	let reads = 0;
-	const h = harness({ limits: limitsOf([{ scope: "project:shop", concurrent: 1 }]), extra: { projects: () => (reads++, [{ id: "other", members: ["/srv/x"] }, ...SHOP]) } });
+	const h = harness({ limits: limitsOf2([{ scope: "project:shop", concurrent: 1 }]), extra: { projects: () => (reads++, [{ id: "other", members: ["/srv/x"] }, ...SHOP]) } });
 	const a = h.processor(localJob("x-1", "/srv/x").job, "tok", new AbortController().signal);
 	await h.untilStarted(1);
 	assert.equal(h.inFlight.count("project:other"), 0, "project other has no row");

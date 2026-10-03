@@ -17,7 +17,7 @@ const P_DAY = `${P_PREFIX}:2026-07-16`;
 const dayOf = (scope) => `${scopeKeyPrefix(scope)}:2026-07-16`;
 
 /** A keyed fake: job-count INCR/DECR and dollar INCRBY/DECRBY/settle on one store, every op in order. */
-function keyedRedis(preset = {}, { failDecr = false } = {}) {
+function keyedRedis(preset = {}, { failDecr = false, failDecrOn = null, failIncrOn = null } = {}) {
 	const store = new Map(Object.entries(preset));
 	const ops = [];
 	const at = (k) => store.get(k) ?? 0;
@@ -26,12 +26,13 @@ function keyedRedis(preset = {}, { failDecr = false } = {}) {
 		ops,
 		async incr(k) {
 			ops.push(["incr", k]);
+			if (k === failIncrOn) throw Object.assign(new Error("ECONNRESET"), { code: "ECONNRESET" });
 			store.set(k, at(k) + 1);
 			return at(k);
 		},
 		async decr(k) {
 			ops.push(["decr", k]);
-			if (failDecr) throw Object.assign(new Error("READONLY"), { code: "READONLY" });
+			if (failDecr || k === failDecrOn) throw Object.assign(new Error("READONLY"), { code: "READONLY" });
 			store.set(k, at(k) - 1);
 			return at(k);
 		},
@@ -176,6 +177,43 @@ test("(d) a config-refused job releases all three ledgers; a refund that fails s
 		assert.equal(r.budgetReserved, true, "the record follows the ledger, not the intent");
 		assert.ok(d.logs.some((l) => l.e === "budget_release_failed" && l.f.at === "config-refused"));
 	}
+});
+
+test("budgetReserved is ONE rule, global-only: a refund whose global give-back landed records false even when a narrower one failed", async () => {
+	const P_USD_ = projectDollarCapsFor(LIMITS, "shop");
+	// dollar-cap: the project dollar window is full; the project slot's DECR fails after the global DECR landed.
+	{
+		const redis = keyedRedis({ [`${P_USD_.keyPrefix}:2026-07-16`]: 2 * USD }, { failDecrOn: P_DAY });
+		const d = deps(DJOB, { redis, dollarCaps: { day: 50 * USD, week: null, month: null }, projectDollars: P_USD_ });
+		const r = await runJob(DJOB, d.deps);
+		assert.equal(r.reason, "dollar-cap");
+		assert.equal(redis.store.get(G_DAY), 0, "the global slot was given back");
+		assert.equal(r.budgetReserved, false, "so the record says it is not held");
+		assert.ok(d.logs.some((l) => l.e === "budget_release_failed" && l.f.at === "dollar-cap"), "the stranded project slot is in the log");
+	}
+	// config-refused: the same.
+	{
+		const redis = keyedRedis({}, { failDecrOn: P_DAY });
+		const r = await runJob(web, deps(web, { redis, runContainer: async () => { throw configError("no provider credential"); } }).deps);
+		assert.equal(r.reason, "config-refused");
+		assert.equal(redis.store.get(G_DAY), 0);
+		assert.equal(r.budgetReserved, false);
+	}
+	// never-started: the same rule on the InfraRetry.
+	{
+		const redis = keyedRedis({}, { failDecrOn: P_DAY });
+		await assert.rejects(() => runJob(web, deps(web, { redis, runContainer: async () => ({ code: 125, aborted: false }) }).deps), (e) => e.reason === "container-never-started" && e.budgetReserved === false);
+	}
+});
+
+test("a Valkey fault inside the count reservations gives back every slot that landed before it rethrows", async () => {
+	const redis = keyedRedis({}, { failIncrOn: G_DAY });
+	const d = deps(web, { redis });
+	await assert.rejects(() => runJob(web, d.deps), (e) => e.code === "ECONNRESET");
+	assert.ok(!d.calls.includes("run-container"));
+	assert.equal(redis.store.get(WEB_DAY), 0, "the repo slot went back");
+	assert.equal(redis.store.get(P_DAY), 0, "the project slot went back");
+	assert.deepEqual(redis.ops.filter((o) => o[0] === "decr").map((o) => o[1]), [P_DAY, WEB_DAY], "last first");
 });
 
 // ── dollars: the project tier ────────────────────────────────────────────────────────────────────────────

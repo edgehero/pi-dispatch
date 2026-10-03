@@ -229,6 +229,7 @@ test("resolvePaths reads env with safe defaults and never calls loadConfig", () 
     pauseWindowsPath: "./pause-windows.json",
     scopedLimitsPath: "./scoped-limits.json",
     projectsPath: "./projects.json",
+    projectsFile: null,
     subscriptionsPath: "/subs.json",
   });
 });
@@ -2112,31 +2113,43 @@ test("writeScopedLimits refuses to add or change a project:<id> row whose id is 
   const before = JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 3 }] });
   const projects = JSON.stringify({ version: 1, projects: [{ id: "shop", name: "Private Name", members: ["github:acme/web"] }] });
   const fs = memFs({ "sl.json": before, "projects.json": projects });
-  // An id projects.json does not define: refused, the bytes untouched, no project name quoted.
+  // An id projects.json does not define: refused, the bytes untouched, no project name quoted, the file named.
   const missing = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "projects.json", fs, mutate: (l) => [...l, { scope: "project:tools", day: 2 }] });
-  assert.match(missing.invalid, /project:tools names a project that is not in the projects file/);
+  assert.match(missing.invalid, /project:tools names a project that is not in the projects file projects\.json/);
   assert.ok(!missing.invalid.includes("Private Name"));
   assert.equal(fs.files.get("sl.json"), before);
-  // No projects file at all: no projects, so the row is refused too.
-  const none = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "absent.json", fs, mutate: (l) => [...l, { scope: "project:shop", day: 2 }] });
-  assert.match(none.invalid, /project:shop names a project/);
+  // PI_PROJECTS_FILE unset (projectsPath null): no projects, the worker's reading, whatever a cwd projects.json holds.
+  const unset = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: null, fs, mutate: (l) => [...l, { scope: "project:shop", day: 2 }] });
+  assert.match(unset.invalid, /project:shop names a project that is not in the projects file \(PI_PROJECTS_FILE is unset/);
+  // Set but unreadable: named as unreadable, never as a missing project.
+  const absent = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "absent.json", fs, mutate: (l) => [...l, { scope: "project:shop", day: 2 }] });
+  assert.match(absent.invalid, /the projects file absent\.json could not be read \(ENOENT\)/);
+  assert.doesNotMatch(absent.invalid, /names a project/);
   // A projects file that does not load: the row cannot be checked, so it is refused.
   const broken = memFs({ "sl.json": before, "projects.json": "{broken" });
   assert.match(writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "projects.json", fs: broken, mutate: (l) => [...l, { scope: "project:shop", day: 2 }] }).invalid, /projects file does not load/);
-  // A defined id is written, and a count-only project row keeps the file at version 1.
+  // A defined id is written live, and a project row stamps version 2 (issue #499 part B), counts only or not.
   const ok = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "projects.json", fs, mutate: (l) => [...l, { scope: "project:shop", day: 2, concurrent: 1 }] });
-  assert.equal(ok.ok, true);
-  assert.deepEqual(JSON.parse(fs.files.get("sl.json")), { version: 1, limits: [{ scope: "acme/web", day: 3 }, { scope: "project:shop", day: 2, concurrent: 1 }] });
-  // projects.json then loses the project: the dangling row may still be deleted, and other rows edited...
+  assert.deepEqual(ok, { ok: true });
+  assert.deepEqual(JSON.parse(fs.files.get("sl.json")), { version: 2, limits: [{ scope: "acme/web", day: 3 }, { scope: "project:shop", day: 2, concurrent: 1 }] });
+  // projects.json then loses the project: other rows may still be edited, but the write says it is not live...
   fs.files.set("projects.json", JSON.stringify({ version: 1, projects: [] }));
   const other = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "projects.json", fs, mutate: (l) => l.map((r, i) => (i === 0 ? { ...r, day: 4 } : r)) });
   assert.equal(other.ok, true, "an unchanged dangling row is not re-judged");
-  // ...but the dangling row itself cannot be edited into a new state.
+  assert.match(other.pending, /project:shop still names a project/, "and the worker will keep its last good limits, so not 'live'");
+  // ...the dangling row itself cannot be edited into a new state...
   const edit = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "projects.json", fs, mutate: (l) => l.map((r) => (r.scope === "project:shop" ? { ...r, day: 9 } : r)) });
   assert.match(edit.invalid, /project:shop names a project/);
+  // ...and deleting it is always allowed, and live again.
   const del = writeScopedLimits({ scopedLimitsPath: "sl.json", projectsPath: "projects.json", fs, mutate: (l) => l.filter((r) => r.scope !== "project:shop") });
-  assert.equal(del.ok, true, "deleting the dangling row is always allowed");
+  assert.deepEqual(del, { ok: true }, "deleting the dangling row is always allowed");
   assert.deepEqual(JSON.parse(fs.files.get("sl.json")).limits, [{ scope: "acme/web", day: 4 }]);
+});
+
+test("resolvePaths: projectsFile is the worker's reading of PI_PROJECTS_FILE (null when unset), apart from the panel default", () => {
+  assert.equal(resolvePaths({}).projectsFile, null);
+  assert.equal(resolvePaths({}).projectsPath, "./projects.json");
+  assert.equal(resolvePaths({ PI_PROJECTS_FILE: "/d/projects.json" }).projectsFile, "/d/projects.json");
 });
 
 test("writeScopedLimits validates the RESULT through the shared parser and leaves bytes untouched on reject", () => {

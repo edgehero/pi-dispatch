@@ -346,7 +346,10 @@ export async function runJob(job, deps) {
 	// no refund has given back yet. EVERY refund below is `releaseLedgers` over this one list, last first, so no path
 	// can give back one ledger and forget another, and none can give one back twice: a released ledger leaves the list.
 	const held = [];
-	// The global ledger's own entry, so `budgetReserved` (global-only, INT-RUN-HISTORY-FILE-CONTRACT) can ask the list.
+	// The global ledger's own entry, so `budgetReserved` can ask the list. ONE rule on every path (a count refusal, a
+	// dollar-cap, config-refused, an InfraRetry): `budgetReserved` says whether the GLOBAL slot is still held after any
+	// refund, global-only as INT-RUN-HISTORY-FILE-CONTRACT has it. A scoped or project slot a failed refund left behind
+	// is in the `budget_release_failed` log line, not in this field.
 	let globalLedger = null;
 	const globalHeld = () => globalLedger !== null && held.includes(globalLedger);
 	// Give back every held job-count slot, NEVER throwing: a refund that did not land must not replace the caller's
@@ -1023,10 +1026,19 @@ export async function runJob(job, deps) {
 		// deliberately GLOBAL-ONLY: the band is one operator brake on overall spend, not a per-row knob; scoped windows
 		// are hard caps (DES-SCOPED-LIMITS-AND-FOLDER-MUTEX).
 		//
-		// A redis fault mid-walk strands the INCRs already made with no run and no refund -- the pre-existing
-		// mid-reserve posture; `held` stays exact, so the catch's never-started and config arms give back what landed.
+		// A redis fault mid-walk gives back every reservation that landed (`held` is exact) and rethrows. The INCR that
+		// faulted itself may or may not have landed; that one key keeps the pre-existing mid-reserve posture.
 		globalLedger = { scope: null, keyPrefix: null, caps, softHoldPct, reason: null };
-		const counted = await reserveLedgers(redis, [...(scopedLedgers ?? []), globalLedger], held, { now });
+		let counted;
+		try {
+			counted = await reserveLedgers(redis, [...(scopedLedgers ?? []), globalLedger], held, { now });
+		} catch (error) {
+			// Valkey failed mid-walk. No container can have started, and `held` lists exactly the reservations that
+			// landed, so they go back (last first, never throwing) before the error escapes; otherwise a repo and a
+			// project slot would stay counted for a job that never ran.
+			await refundLedgers("reserve-fault");
+			throw error;
+		}
 		if (!counted.allowed) {
 			// Every ledger BEFORE the refusing one gives its slot back, last first: a ledger that did not issue the
 			// refusal gives back. Without this, an exhausted global window drains every arriving scope's and project's own
@@ -1133,7 +1145,7 @@ export async function runJob(job, deps) {
 					log("over_dollar_budget", { ledger: refusedBy, ...(refusedBy === "deployment" ? {} : { key: reservation.ledger }), ...(refusedBy === "model" ? { model: modelPrefixes.get(reservation.ledger) } : {}), window: reservation.window, reservedMicros: reservation.reservedMicros, capMicros: reservation.capMicros, amountMicros: job.maxCostMicros, ...(capBelowJob ? { capBelowJob: true } : {}), refunded });
 					const stranded = reservation.stranded > 0;
 					const modelBasis = modelPrefixes.size === 0 ? null : stranded ? "floor" : "refunded";
-					return { outcome: "policy", reason: DOLLAR_CAP_REASON, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: !refunded, dollars: stranded ? dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: job.maxCostMicros, basis: "floor", modelBasis }) : dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: 0, basis: "refunded", modelBasis }) }; // return => not retried
+					return { outcome: "policy", reason: DOLLAR_CAP_REASON, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: globalHeld(), dollars: stranded ? dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: job.maxCostMicros, basis: "floor", modelBasis }) : dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: 0, basis: "refunded", modelBasis }) }; // return => not retried
 				}
 				dollarHold = reservation.hold;
 				dollars = dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: job.maxCostMicros, basis: "floor", modelBasis: modelPrefixes.size > 0 ? "floor" : null });
@@ -1386,9 +1398,8 @@ export async function runJob(job, deps) {
 			// shipped adapter never throws; this makes that a property of the arm rather than of the wiring.
 			await comment(job, "Refused: this deployment is misconfigured, so the job could not be started. Ask the operator to run `pi-dispatch doctor`. Not run.").catch(() => {});
 			log("refused_config", { kind: job.kind ?? null, refunded });
-			// budgetReserved reflects the LEDGER: false when the refund landed, true when it did not and the
-			// slot is still out there.
-			return { outcome: "policy", reason: "config-refused", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: !refunded, ...(dollars ? { dollars } : {}) }; // return => not retried
+			// budgetReserved reflects the LEDGER: whether the GLOBAL slot is still held after the refund (`globalHeld`).
+			return { outcome: "policy", reason: "config-refused", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: globalHeld(), ...(dollars ? { dollars } : {}) }; // return => not retried
 		}
 
 		// A spawn fault (docker daemon down / binary missing) reserved a slot but never started a

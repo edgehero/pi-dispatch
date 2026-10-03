@@ -34,8 +34,8 @@
  * the fleet lease) is built from the MATCHED ROW's scope, never from the job's, so a bare row keeps exactly the key
  * it always had and a qualified row counts on its own.
  *
- * Issue #499 part B adds the project row (`project:<id>`, the id from projects.json). It carries the job-count windows,
- * `concurrent` and (version 2) the dollar windows, and it caps every member of the project as one: a job reserves in
+ * Issue #499 part B adds the project row (`project:<id>`, the id from projects.json; version 2). It carries the job-count windows,
+ * `concurrent` and the dollar windows, and it caps every member of the project as one: a job reserves in
  * its repo or folder row, then its project's row, then the global windows (`scopedLedgers`), and its keys are built from
  * the project ROW's scope like every other row's, so a project needs no keyspace of its own.
  *
@@ -89,10 +89,11 @@ export const MODEL_DOLLAR_KEY_PREFIX = `${DOLLAR_KEY_PREFIX}:mdl`;
 const MODEL_NEAR_MISS = /^models?\s*:/i;
 
 /**
- * The scope prefix of a project row (issue #499 part B): `project:<id>`, the id from projects.json. Readable in BOTH
- * versions for its job-count fields: every build before this one refuses a `project:` scope loudly (the prefix was
- * reserved for exactly this), so a version 1 file holding one is refused by an old worker, never read as an inert repo
- * row. Its dollar fields need version 2, the rule every dollar field follows.
+ * The scope prefix of a project row (issue #499 part B): `project:<id>`, the id from projects.json. A project row needs
+ * version 2 in EVERY field, its job counts and `concurrent` included, for the forge-qualified row's reason: the last
+ * released build (2.1.0) reads `project:shop` as a plain repo string no job has, so a version 1 file holding one would
+ * be a cap and a concurrency limit that one build enforces and another silently drops. Version 2 makes that build
+ * refuse the file as newer instead.
  */
 export const PROJECT_SCOPE_PREFIX = "project:";
 /** A scope that LOOKS like a project row (any case, `projects`, spaces before the colon). Only the exact form parses. */
@@ -294,6 +295,7 @@ function normalizeLimit(row, index, path, version = SCOPED_LIMITS_VERSION) {
 			throw configError(`${at}: ${error.message}: ${path}`);
 		}
 	}
+	if (form.type === "project" && version < 2) throw configError(`${at}: a project row needs "version": 2 (this file says ${version}), so a build that predates project rows refuses the file rather than reading an inert repo string: ${path}`);
 	if (form.type === "qualified" && version < 2) throw configError(`${at}: a forge-qualified scope needs "version": 2 (this file says ${version}), so a build that predates it refuses the file rather than reading an inert repo string: ${path}`);
 	const norm = {
 		// An absolute path is stored resolved so a `/srv/site/` row governs `/srv/site` jobs -- the same
@@ -425,14 +427,17 @@ export function danglingProjectRows(limits, projects) {
 
 /**
  * Refuse a limits list that names a project `projects` does not have, naming each such row's index and id (ids are
- * charset-checked, never a path or a name). `path` is the limits file, for the message. Pure: the caller decides
- * whether that is a boot refusal or a kept last-good copy.
+ * charset-checked, never a path or a name) and BOTH files: the row lives in the scoped-limits file (`limitsPath`), the
+ * missing id in the projects file (`projectsPath`, null when PI_PROJECTS_FILE is unset), so an operator reading a
+ * refused projects.json edit looks for the index in the right file. Pure: the caller decides whether that is a boot
+ * refusal or a kept last-good copy.
  */
-export function checkProjectRows(limits, projects, path) {
+export function checkProjectRows(limits, projects, limitsPath, projectsPath = null) {
 	const dangling = danglingProjectRows(limits, projects);
 	if (dangling.length === 0) return;
 	const rows = dangling.map((d) => `index ${d.index} ("${PROJECT_SCOPE_PREFIX}${d.id}")`).join(", ");
-	throw configError(`scoped limit(s) at ${rows} name a project that is not in the projects file (PI_PROJECTS_FILE); add the project there first, or remove the row: ${path}`);
+	const where = projectsPath ? `the projects file ${projectsPath}` : "the projects file (PI_PROJECTS_FILE is unset, so there are no projects)";
+	throw configError(`scoped-limits row(s) at ${rows} in ${limitsPath} name a project that is not in ${where}; add the project there first, or remove the row`);
 }
 
 /** The refusal reason of a full repo or folder job-count window. */
@@ -563,13 +568,14 @@ export function dollarRowsBelowJobCap(limits, deploymentMaxCostUsd) {
 
 /**
  * The lowest file version that expresses `rows` (normalized or as the admin builds them): 2 when any row carries a
- * dollar field, is a model row or has a forge-qualified scope (issue #498), else 1. The admin writes this, so a file
+ * dollar field, is a model row, is a project row (issue #499 part B) or has a forge-qualified scope (issue #498), else 1.
+ * The admin writes this, so a file
  * with bare and folder job-count rows only stays a version 1 file that an older worker still reads.
  */
 export function scopedLimitsVersionFor(rows) {
 	const v2 = (rows ?? []).some((l) => {
 		const scope = typeof l?.scope === "string" ? l.scope.trim() : l?.scope;
-		return isModelScope(scope) || isQualifiedScope(scope) || USD_LIMIT_FIELDS.some((f) => l?.[f] !== null && l?.[f] !== undefined);
+		return isModelScope(scope) || isProjectScope(scope) || isQualifiedScope(scope) || USD_LIMIT_FIELDS.some((f) => l?.[f] !== null && l?.[f] !== undefined);
 	});
 	return v2 ? 2 : 1;
 }

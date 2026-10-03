@@ -153,19 +153,21 @@ A `project:<id>` row caps every repo and folder of one project as one. The id is
 ```
 
 - `day` / `week` / `month` count every member's jobs together. Over the cap, the job is refused before any
-  spend with reason `project-cap`. These fields and `concurrent` work in a version 1 file too.
+  spend with reason `project-cap`. A project row needs `"version": 2`, even with counts only, because the
+  previous release would read it as a repo name and ignore it. The panel and the tools write version 2 for you.
 - `concurrent` bounds how many of the project's jobs run at once, across every member and every host. The
   excess is deferred, like a repo's.
-- `dayUsd` / `weekUsd` / `monthUsd` cap what the project's jobs spend. They need `"version": 2`, like every
-  dollar field. A job that does not fit is refused `dollar-cap`, and the comment says "this project".
+- `dayUsd` / `weekUsd` / `monthUsd` cap what the project's jobs spend. A job that does not fit is refused `dollar-cap`, and the comment says "this project".
 - A job is counted narrowest first: its repo or folder row, then its project's row, then the global caps. A
   refusal gives back the slots taken before it, so a full project does not use up its repos' counts, and a full
   global cap uses up neither.
 - The id must be in `projects.json`. A row whose id is not there stops the worker from starting, and doctor
   fails naming it. A live edit that would create one is kept out (the worker keeps the last good file and logs
-  it). So add a project before its row, and remove a row before its project. If you save both files in the wrong
-  order, the worker applies the waiting file once the other one is right. The panel and the tools refuse to
-  write such a row.
+  it, naming the row and both files). The worker judges the two files together, so you can save them in either
+  order: adding a project with its row, or renaming a project in both files, applies once both are saved. The
+  panel and the tools refuse to write such a row. They check the projects file the worker reads, so with
+  `PI_PROJECTS_FILE` unset there are no projects. If a row already dangles, they still let you delete it, and say
+  the change applies once the worker accepts both files.
 - The counters live under the same hashed keys as every other row, built from `project:<id>`. Renaming a
   project starts a new count.
 
@@ -241,7 +243,7 @@ Three doors, same as quiet hours:
 | Piece | Value |
 |---|---|
 | Env var | `PI_SCOPED_LIMITS_FILE` (absolute path; unset = no scoped limits. An EMPTY value is NOT unset: the worker keeps it and refuses to start, so fill the line in or delete it, and doctor fails on it) |
-| File | `{ "version": 1, "limits": [ { scope, day?, week?, month?, concurrent? } ] }`; version 2 adds `dayUsd?`, `weekUsd?`, `monthUsd?` and `model:` rows; a `project:<id>` row works in both |
+| File | `{ "version": 1, "limits": [ { scope, day?, week?, month?, concurrent? } ] }`; version 2 adds `dayUsd?`, `weekUsd?`, `monthUsd?`, `model:` rows and `project:<id>` rows |
 | Refusal reason | `scope-cap` (pre-spend, never retried); `project-cap` for a project row; `dollar-cap` for a dollar window |
 | Deferral | delayed set, fixed re-check, never dropped |
 | Panel key | `m` |

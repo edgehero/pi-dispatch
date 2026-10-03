@@ -1481,7 +1481,7 @@ test("issue #499 part B: a project row whose id is not in projects.json refuses 
 	try {
 		const limits = join(dir, "scoped-limits.json");
 		const projects = join(dir, "projects.json");
-		writeFileSync(limits, JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 1 }, { scope: "project:shop", day: 2 }] }));
+		writeFileSync(limits, JSON.stringify({ version: 2, limits: [{ scope: "acme/web", day: 1 }, { scope: "project:shop", day: 2 }] }));
 		// No projects file at all: every project row dangles.
 		await assert.rejects(
 			() => runStart({ env: { PI_SCOPED_LIMITS_FILE: limits } }),
@@ -1500,56 +1500,101 @@ test("issue #499 part B: a project row whose id is not in projects.json refuses 
 	}
 });
 
-test("issue #499 part B: a live reload of EITHER file that would leave a dangling project row keeps last-good and logs; the other side's next good reload retries it once", { skip }, async () => {
+test("issue #499 part B: a live reload of EITHER file is judged as a pair: a dangling row keeps last-good, a correct pair applies in either save order", { skip }, async () => {
 	const dir = tempDir("pi-projects-");
 	try {
 		const limitsFile = join(dir, "scoped-limits.json");
 		const projectsFile = join(dir, "projects.json");
 		const config = { scopedLimitsFile: limitsFile, projectsFile };
+		writeFileSync(limitsFile, JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 3 }] }));
+		writeFileSync(projectsFile, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }));
 		const limits = { current: [{ scope: "acme/web", day: 3, week: null, month: null, concurrent: null }] };
 		const projects = { current: [{ id: "shop", name: null, members: ["github:acme/web"] }] };
 		const pair = mod.makeProjectPair(limits, projects);
 		const logs = [];
 		const log = (event, fields) => logs.push({ event, fields });
 
-		// 1. The limits file gains a row for a project not defined yet: kept out, last-good stays.
-		writeFileSync(limitsFile, JSON.stringify({ version: 1, limits: [{ scope: "project:tools", day: 2 }] }));
+		// 1. The limits file gains a row for a project not defined anywhere: kept out, last-good stays, both files named.
+		writeFileSync(limitsFile, JSON.stringify({ version: 2, limits: [{ scope: "project:tools", day: 2 }] }));
 		const lastLimits = limits.current;
 		mod.reloadScopedLimits(config, limits, log, null, pair);
 		assert.equal(limits.current, lastLimits, "the SAME array object: last-good untouched");
 		assert.equal(logs.at(-1).event, "scoped_limits_reload_invalid");
 		assert.match(logs.at(-1).fields.reason, /index 0 \("project:tools"\)/);
+		assert.ok(logs.at(-1).fields.reason.includes(limitsFile) && logs.at(-1).fields.reason.includes(projectsFile), "both files are named");
 
-		// 2. The projects file then defines it: projects reload, and the waiting limits edit is retried once and lands.
+		// 2. The projects file then defines it: the projects reload sees the limits file on disk agree, and takes both.
 		writeFileSync(projectsFile, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }, { id: "tools", members: ["/srv/tools"] }] }));
 		mod.reloadProjects(config, projects, log, pair);
 		assert.deepEqual(projects.current.map((p) => p.id), ["shop", "tools"]);
-		assert.deepEqual(limits.current.map((l) => l.scope), ["project:tools"], "the limits edit saved in the wrong order applied once its project existed");
+		assert.deepEqual(limits.current.map((l) => l.scope), ["project:tools"], "the limits edit saved first applied with its project");
 		assert.deepEqual(logs.slice(-2).map((l) => l.event), ["projects_reloaded", "scoped_limits_reloaded"]);
 
-		// 3. A projects edit that drops a project a row still names: kept out, last-good stays.
+		// 3. A projects edit that drops a project a row still names (on disk too): kept out, last-good stays, and the
+		//    message names the scoped-limits file, where the index is.
 		writeFileSync(projectsFile, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }));
 		const lastProjects = projects.current;
 		mod.reloadProjects(config, projects, log, pair);
 		assert.equal(projects.current, lastProjects);
 		assert.equal(logs.at(-1).event, "projects_reload_invalid");
 		assert.match(logs.at(-1).fields.reason, /project:tools/);
+		assert.ok(logs.at(-1).fields.reason.includes(limitsFile));
 
-		// 4. The row is removed: limits reload, and the waiting projects edit lands too.
+		// 4. The row is removed: the limits reload sees projects.json on disk agree, and takes both.
 		writeFileSync(limitsFile, JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 4 }] }));
 		mod.reloadScopedLimits(config, limits, log, null, pair);
 		assert.deepEqual(limits.current.map((l) => l.scope), ["acme/web"]);
-		assert.deepEqual(projects.current.map((p) => p.id), ["shop"], "the projects edit kept out in step 3 applied once no row named the project");
-		assert.deepEqual(pair.retry, { limits: null, projects: null }, "nothing left waiting");
+		assert.deepEqual(projects.current.map((p) => p.id), ["shop"], "the projects edit kept out in step 3 applied with the row's removal");
 
-		// 5. Any OTHER refusal is not retried: it waits for an edit of its own file.
-		writeFileSync(limitsFile, "{ not json");
+		// 5. With the other file mid-edit (not loading), a side that agrees with the other's LIVE list still applies.
+		writeFileSync(projectsFile, "{ broken");
+		writeFileSync(limitsFile, JSON.stringify({ version: 2, limits: [{ scope: "project:shop", day: 1 }] }));
 		mod.reloadScopedLimits(config, limits, log, null, pair);
-		assert.equal(pair.retry.limits, null);
+		assert.deepEqual(limits.current.map((l) => l.scope), ["project:shop"]);
+		assert.deepEqual(projects.current.map((p) => p.id), ["shop"]);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+for (const order of ["limits first", "projects first"]) {
+	test(`issue #499 part B: renaming a project in both files (shop to store) ends on the new pair, ${order}`, { skip }, async () => {
+		const dir = tempDir("pi-projects-");
+		try {
+			const limitsFile = join(dir, "scoped-limits.json");
+			const projectsFile = join(dir, "projects.json");
+			const config = { scopedLimitsFile: limitsFile, projectsFile };
+			writeFileSync(limitsFile, JSON.stringify({ version: 2, limits: [{ scope: "project:shop", day: 2 }] }));
+			writeFileSync(projectsFile, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }));
+			const limits = { current: [{ scope: "project:shop", day: 2, week: null, month: null, concurrent: null, dayUsd: null, weekUsd: null, monthUsd: null }] };
+			const projects = { current: [{ id: "shop", name: null, members: ["github:acme/web"] }] };
+			const pair = mod.makeProjectPair(limits, projects);
+			const logs = [];
+			const log = (event, fields) => logs.push({ event, fields });
+			const saveLimits = () => {
+				writeFileSync(limitsFile, JSON.stringify({ version: 2, limits: [{ scope: "project:store", day: 2 }] }));
+				mod.reloadScopedLimits(config, limits, log, null, pair);
+			};
+			const saveProjects = () => {
+				writeFileSync(projectsFile, JSON.stringify({ version: 1, projects: [{ id: "store", members: ["github:acme/web"] }] }));
+				mod.reloadProjects(config, projects, log, pair);
+			};
+			if (order === "limits first") {
+				saveLimits();
+				assert.deepEqual(limits.current.map((l) => l.scope), ["project:shop"], "half a rename is kept out");
+				saveProjects();
+			} else {
+				saveProjects();
+				assert.deepEqual(projects.current.map((p) => p.id), ["shop"], "half a rename is kept out");
+				saveLimits();
+			}
+			assert.deepEqual(projects.current.map((p) => p.id), ["store"]);
+			assert.deepEqual(limits.current.map((l) => l.scope), ["project:store"]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+}
 
 test("reloadScopedLimits keeps LAST-GOOD on a bad edit and hot-swaps on a good one", { skip }, async () => {
 	const dir = tempDir("pi-sl-");

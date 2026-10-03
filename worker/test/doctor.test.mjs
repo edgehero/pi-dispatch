@@ -4740,7 +4740,7 @@ test("doctor: a project row whose id is not in projects.json is a FAILURE naming
 	writeFileSync(join(dir, "triggers.json"), JSON.stringify({ triggers: [{ on: { type: "cron", id: "t1", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/shop-a", flow: "tidy", task: "t" } }] }));
 	const limitsPath = join(dir, "scoped-limits.json");
 	const projectsPath = join(dir, "projects.json");
-	writeFileSync(limitsPath, JSON.stringify({ version: 1, limits: [{ scope: "/srv/shop-a", day: 3 }, { scope: "project:shop", day: 2 }] }));
+	writeFileSync(limitsPath, JSON.stringify({ version: 2, limits: [{ scope: "/srv/shop-a", day: 3 }, { scope: "project:shop", day: 2 }] }));
 	const seams = () => collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true });
 	const dangling = (checks) => checks.find((x) => /name a project that is not in the projects file/.test(x.label));
 	// No projects file: the row dangles, and the worker would refuse to start.

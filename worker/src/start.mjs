@@ -39,7 +39,7 @@ import { scrubCredentials } from "./redact.mjs";
 import { makeCheckOnceSpent, makeCheckWaitSkew, makeDisarmOnce } from "./triggers-file.mjs";
 import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "./watch-closer.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
-import { checkProjectRows, dollarRowsWithoutCap, loadScopedLimits, scopeClaimRows } from "./scoped-limits.mjs";
+import { checkProjectRows, danglingProjectRows, dollarRowsWithoutCap, loadScopedLimits, scopeClaimRows } from "./scoped-limits.mjs";
 import { loadProjects, projectOf } from "./projects.mjs";
 import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
@@ -254,13 +254,16 @@ function watchPauseWindowsFile(config, ref, log, atBoot) {
 export function reloadScopedLimits(config, ref, log, deploymentCap = null, pair = null) {
 	try {
 		const next = loadScopedLimits(config);
-		// Issue #499 part B: a `project:<id>` row whose id is not in the live projects list is refused here as at boot,
-		// so this edit is kept out and the last good limits stay. `pair` is null only on a bare test wiring.
-		if (pair) checkPairedRows(next, pair.projects.current, config.scopedLimitsFile, pair, "limits", () => reloadScopedLimits(config, ref, log, deploymentCap, pair));
+		// Issue #499 part B: the new limits are checked against projects.json (`pair`, null only on a bare test wiring);
+		// a row naming a missing project keeps the last good limits, the boot rule held live.
+		const other = pair ? pairWith(config, next, pair, "limits") : null;
 		ref.current = next;
 		log("scoped_limits_reloaded", { count: ref.current.length });
 		if (deploymentCap) warnDollarRowsWithoutCap(ref.current, deploymentCap(), log);
-		if (pair) retryPaired(pair, "limits");
+		if (other) {
+			pair.projects.current = other;
+			log("projects_reloaded", { count: other.length, with: "scoped-limits" });
+		}
 	} catch (err) {
 		log("scoped_limits_reload_invalid", { reason: err?.message });
 	}
@@ -268,34 +271,40 @@ export function reloadScopedLimits(config, ref, log, deploymentCap = null, pair 
 
 /**
  * The two files a project row joins (issue #499 part B): scoped-limits.json names `project:<id>`, projects.json defines
- * the id. `{ limits, projects }` are the two live refs; `retry` holds, per side, the reload to run again once the OTHER
- * side's file changes. A reload of either file that would leave a row naming a missing project keeps its last good copy
- * and logs, so the two live lists never disagree. And because an operator may save the pair in either order (the row
- * before the project it names), a side refused ONLY for that reason is reloaded once more right after the other side's
- * next good reload: without that retry, a correct pair saved in the wrong order would leave the worker on the stale
- * limits until the next edit, which a log line alone does not fix.
+ * the id. `{ limits, projects }` are the two live refs. A reload of either file is judged as a PAIR (`pairWith`), so the
+ * two live lists never disagree and a correct pair applies whatever order its files were saved in.
  */
 export function makeProjectPair(limits, projects) {
-	return { limits, projects, retry: { limits: null, projects: null } };
+	return { limits, projects };
 }
 
-/** Refuse `limits` against `projects` (`checkProjectRows`), arming `side`'s retry when that is why it was refused. */
-function checkPairedRows(limits, projects, path, pair, side, again) {
+/**
+ * Judge one side's new list (`next`, already loaded) against the other side, statelessly (issue #499 part B):
+ *   1. against the other file AS IT IS ON DISK: when that loads and the two agree, both are taken together, and the
+ *      other side's list is returned for the caller to commit too (only when it differs from the live one). This is
+ *      what makes a rename (`shop` to `store` in both files) or a project added with its row apply in EITHER save
+ *      order: the second save sees the first file already on disk.
+ *   2. else against the other side's LIVE list: when they agree, this side alone is taken (null returned). This is the
+ *      path when the other file is mid-edit and does not load.
+ *   3. else a `configError` naming the row, its index and both files, so the caller keeps its last good list.
+ */
+function pairWith(config, next, pair, side) {
+	const limitsSide = side === "limits";
+	let disk = null;
 	try {
-		checkProjectRows(limits, projects, path);
-	} catch (error) {
-		pair.retry[side] = again;
-		throw error;
+		disk = limitsSide ? loadProjects(config) : loadScopedLimits(config);
+	} catch {
+		// The other file does not load right now: its own watcher says so. Judge against its live list alone.
 	}
-}
-
-/** After `side` reloaded well: clear its retry, then run the other side's once if it was waiting on this file. */
-function retryPaired(pair, side) {
-	pair.retry[side] = null;
-	const other = side === "limits" ? "projects" : "limits";
-	const again = pair.retry[other];
-	pair.retry[other] = null;
-	again?.();
+	const agree = (limits, projects) => danglingProjectRows(limits, projects).length === 0;
+	if (disk !== null && (limitsSide ? agree(next, disk) : agree(disk, next))) {
+		const live = limitsSide ? pair.projects.current : pair.limits.current;
+		return JSON.stringify(disk) === JSON.stringify(live) ? null : disk;
+	}
+	const liveOther = limitsSide ? pair.projects.current : pair.limits.current;
+	if (limitsSide) checkProjectRows(next, liveOther, config.scopedLimitsFile, config.projectsFile ?? null);
+	else checkProjectRows(liveOther, next, config.scopedLimitsFile, config.projectsFile ?? null);
+	return null;
 }
 
 /**
@@ -350,11 +359,14 @@ export function reloadProjects(config, ref, log, pair = null) {
 	try {
 		const next = loadProjects(config);
 		// Issue #499 part B: an edit that drops (or renames) a project a scoped-limits row still names is kept out, and the
-		// last good projects stay: removing the row first is the order that works, said in the message.
-		if (pair) checkPairedRows(pair.limits.current, next, config.projectsFile, pair, "projects", () => reloadProjects(config, ref, log, pair));
+		// last good projects stay, unless scoped-limits.json on disk already agrees with it (`pairWith`).
+		const other = pair ? pairWith(config, next, pair, "projects") : null;
 		ref.current = next;
 		log("projects_reloaded", { count: ref.current.length });
-		if (pair) retryPaired(pair, "projects");
+		if (other) {
+			pair.limits.current = other;
+			log("scoped_limits_reloaded", { count: other.length, with: "projects" });
+		}
 	} catch (err) {
 		log("projects_reload_invalid", { reason: err?.message });
 	}
@@ -645,7 +657,7 @@ export async function startWorker(
 	const projects = { current: loadProjects(config, recording("projects", config.projectsFile)) };
 	// Issue #499 part B: a `project:<id>` row whose id is not a project refuses BOOT, naming the row and the id: it would
 	// read as a cap on a group that no job can belong to. The live reloads of either file hold the same rule (`pair`).
-	checkProjectRows(scopedLimits.current, projects.current, config.scopedLimitsFile);
+	checkProjectRows(scopedLimits.current, projects.current, config.scopedLimitsFile, config.projectsFile ?? null);
 	const projectPair = makeProjectPair(scopedLimits, projects);
 
 	// Issue #503: the declared model endpoints, same posture (INT-MODEL-ENDPOINTS-FILE-CONTRACT): a bad file refuses

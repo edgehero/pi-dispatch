@@ -56,17 +56,18 @@ Caps live in [`scoped-limits.json`](scoped-limits.md#project-rows), never in thi
 `project:shop` caps every member of `shop` together:
 
 ```json
-{ "version": 1, "limits": [ { "scope": "project:shop", "day": 20, "concurrent": 2 } ] }
+{ "version": 2, "limits": [ { "scope": "project:shop", "day": 20, "concurrent": 2 } ] }
 ```
 
 - Over its `day`, `week` or `month`, a member's job is refused with reason `project-cap`.
 - Over its `concurrent`, a member's job waits until a slot frees, on any host.
-- Dollar windows (`dayUsd`, `weekUsd`, `monthUsd`) need `"version": 2` and refuse with `dollar-cap`.
+- Dollar windows (`dayUsd`, `weekUsd`, `monthUsd`) refuse with `dollar-cap`.
+- A project row needs `"version": 2` in `scoped-limits.json`, even with counts only. The panel and the tools write it.
 
-The row's id must be a project here. Add the project before its row, and remove the row before you remove the
-project: a row naming a missing project stops the worker from starting, and a live edit of either file that would
-leave one is kept out (the worker logs `scoped_limits_reload_invalid` or `projects_reload_invalid`). Doctor names
-such a row.
+The row's id must be a project here. A row naming a missing project stops the worker from starting, and a live
+edit that would leave one is kept out (the worker logs `scoped_limits_reload_invalid` or `projects_reload_invalid`,
+naming the row and both files). The worker judges the two files together, so a project added with its row, or
+renamed in both files, applies in either save order. Doctor names such a row.
 
 ## Matching rules
 
